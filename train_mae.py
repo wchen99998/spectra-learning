@@ -400,9 +400,8 @@ def train_and_evaluate(
 
     logging.info("Batch Size: %s", config.batch_size)
 
-    use_vicreg = bool(config.get("use_vicreg", True))
-    train_metrics_class = mae_models.get_train_metrics_class(use_vicreg=use_vicreg)
-    train_metrics = mae_models.create_train_metrics(use_vicreg=use_vicreg)
+    train_metrics_class = mae_models.get_train_metrics_class()
+    train_metrics = mae_models.create_train_metrics()
     # Keep a persistent graph/state pair so we don't split/merge every step.
     graphdef, train_state = nnx.split((model, optimizer))
 
@@ -467,7 +466,7 @@ def train_and_evaluate(
                     train_metrics_prefixed["train/learning_rate"] = learning_rate_value
                     writer.write_scalars(step, train_metrics_prefixed)
                     # Reset metrics for next interval
-                    train_metrics = mae_models.create_train_metrics(use_vicreg=use_vicreg)
+                    train_metrics = mae_models.create_train_metrics()
 
                 if eval_loaders and (
                     step == 1

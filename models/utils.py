@@ -82,10 +82,8 @@ def get_model(config: ml_collections.ConfigDict, rngs: nnx.Rngs) -> nnx.Module:
         peak_mlp_hidden_dim=peak_mlp_hidden_dim,
         mz_loss_weight=cast(float, config.get("mz_loss_weight", 1.0)),
         intensity_loss_weight=cast(float, config.get("intensity_loss_weight", 1.0)),
-        repr_loss_weight=cast(float, config.get("repr_loss_weight", 1.0)),
         dtype=cast(jnp.dtype, config.get("dtype", jnp.float32)),
         param_dtype=cast(jnp.dtype, config.get("param_dtype", jnp.float32)),
         recon_loss_weight=cast(float, config.get("recon_loss_weight", 1.0)),
         aux_loss_weight=cast(float, config.get("aux_loss_weight", 1.0)),
-        use_vicreg=cast(bool, config.get("use_vicreg", True)),
     )

@@ -12,12 +12,19 @@ Configuration keys:
 - ``split_seed``: Seed for train/validation split (default ``42``).
 - ``apply_sqrt_l2_intensity``: Apply per-spectrum ``sqrt`` then L2 normalization to intensities
   (default ``False``).
+- ``max_precursor_mz``: Filter out spectra with precursor m/z above this threshold
+  (default ``1000.0``).
 
 MassSpecGym entries use the HDF5 ``fold`` field; only the non-train split is written for evaluation.
+Peaks outside the range ``[20.0, precursor_mz - 17.0]`` are removed when precursor m/z is
+non-zero; otherwise the upper bound is ``1000.0``. The peak list is then compacted and sorted
+before any intensity scaling.
 """
 
 from __future__ import annotations
 
+import argparse
+import importlib.util
 import json
 import logging
 import math
@@ -39,6 +46,10 @@ _DEFAULT_TFRECORD_DIR = Path("data/gems_peaklist_tfrecord")
 _DEFAULT_SPLIT_SEED = 42
 _DEFAULT_NUM_SHARDS = 4
 _NUM_PEAKS = 128
+_DEFAULT_MAX_PRECURSOR_MZ = 1000.0
+_PEAK_MZ_MIN = 20.0
+_PEAK_MZ_MAX = 1000.0
+_PRECURSOR_MZ_WINDOW = 17.0
 
 _METADATA_FILENAME = "metadata.json"
 
@@ -293,6 +304,57 @@ def _apply_sqrt_l2_intensity(example: dict) -> dict:
     return example
 
 
+def _filter_max_precursor_mz(max_precursor_mz: float):
+    max_val = tf.constant(max_precursor_mz, tf.float32)
+
+    def keep(example: dict) -> tf.Tensor:
+        return tf.squeeze(example["precursor_mz"]) <= max_val
+
+    return keep
+
+
+def _filter_peak_mz_range(min_mz: float, max_mz: float, precursor_window: float):
+    min_val = tf.constant(min_mz, tf.float32)
+    max_val = tf.constant(max_mz, tf.float32)
+    window = tf.constant(precursor_window, tf.float32)
+
+    def apply(example: dict) -> dict:
+        mz = example["mz"]
+        precursor_mz = tf.squeeze(example["precursor_mz"])
+        upper = tf.where(precursor_mz > 0.0, precursor_mz - window, max_val)
+        keep = (mz >= min_val) & (mz <= upper)
+        example["mz"] = tf.where(keep, mz, 0.0)
+        example["intensity"] = tf.where(keep, example["intensity"], 0.0)
+        return example
+
+    return apply
+
+
+def _compact_sort_peaks():
+    def apply(example: dict) -> dict:
+        mz = example["mz"]
+        intensity = example["intensity"]
+        keep = mz > 0
+        kept_mz = tf.boolean_mask(mz, keep)
+        kept_intensity = tf.boolean_mask(intensity, keep)
+        sorted_idx = tf.argsort(kept_mz)
+        kept_mz = tf.gather(kept_mz, sorted_idx)
+        kept_intensity = tf.gather(kept_intensity, sorted_idx)
+        pad = _NUM_PEAKS - tf.shape(kept_mz)[0]
+        example["mz"] = tf.pad(kept_mz, [[0, pad]])
+        example["intensity"] = tf.pad(kept_intensity, [[0, pad]])
+        return example
+
+    return apply
+
+
+def _load_config(path: str) -> config_dict.ConfigDict:
+    spec = importlib.util.spec_from_file_location("gems_dataset_config", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.get_config()
+
+
 def _build_dataset(
     filenames: list[str],
     batch_size: int,
@@ -301,10 +363,17 @@ def _build_dataset(
     repeat: bool,
     drop_remainder: bool,
     apply_sqrt_l2_intensity: bool = False,
+    max_precursor_mz: float = _DEFAULT_MAX_PRECURSOR_MZ,
 ) -> tf.data.Dataset:
     """Build tf.data pipeline."""
     ds = tf.data.TFRecordDataset(filenames, compression_type="GZIP", num_parallel_reads=tf.data.AUTOTUNE)
     ds = ds.map(_parse_example, num_parallel_calls=tf.data.AUTOTUNE)
+    ds = ds.filter(_filter_max_precursor_mz(max_precursor_mz))
+    ds = ds.map(
+        _filter_peak_mz_range(_PEAK_MZ_MIN, _PEAK_MZ_MAX, _PRECURSOR_MZ_WINDOW),
+        num_parallel_calls=tf.data.AUTOTUNE,
+    )
+    ds = ds.map(_compact_sort_peaks(), num_parallel_calls=tf.data.AUTOTUNE)
     if apply_sqrt_l2_intensity:
         ds = ds.map(_apply_sqrt_l2_intensity, num_parallel_calls=tf.data.AUTOTUNE)
 
@@ -336,6 +405,7 @@ def create_gems_set_datasets(
     num_shards = int(config.get("num_shards", _DEFAULT_NUM_SHARDS))
     drop_remainder = bool(config.get("drop_remainder", False))
     apply_sqrt_l2_intensity = bool(config.get("apply_sqrt_l2_intensity", False))
+    max_precursor_mz = float(config.get("max_precursor_mz", _DEFAULT_MAX_PRECURSOR_MZ))
 
     metadata = _ensure_processed(output_dir, validation_fraction, split_seed, num_shards)
 
@@ -353,6 +423,7 @@ def create_gems_set_datasets(
         repeat=True,
         drop_remainder=drop_remainder,
         apply_sqrt_l2_intensity=apply_sqrt_l2_intensity,
+        max_precursor_mz=max_precursor_mz,
     )
     val_ds = _build_dataset(
         val_files,
@@ -362,6 +433,7 @@ def create_gems_set_datasets(
         repeat=True,
         drop_remainder=False,
         apply_sqrt_l2_intensity=apply_sqrt_l2_intensity,
+        max_precursor_mz=max_precursor_mz,
     )
 
     val_iters = {"validation": val_ds.as_numpy_iterator()}
@@ -375,6 +447,7 @@ def create_gems_set_datasets(
             repeat=True,
             drop_remainder=True,
             apply_sqrt_l2_intensity=apply_sqrt_l2_intensity,
+            max_precursor_mz=max_precursor_mz,
         )
         val_iters["massspec_test"] = test_ds.as_numpy_iterator()
 
@@ -392,12 +465,12 @@ def create_gems_set_datasets(
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
-    cfg = config_dict.ConfigDict()
-    cfg.tfrecord_dir = "data/gems_peaklist_tfrecord"
-    cfg.batch_size = 32
-    cfg.validation_fraction = 0.05
+    parser = argparse.ArgumentParser(description="Create and inspect GeMS peak list datasets.")
+    parser.add_argument("config", help="Path to a dataset config file (python).")
+    args = parser.parse_args()
 
-    train_iter, val_iters, info = create_gems_set_datasets(cfg, seed=42)
+    cfg = _load_config(args.config)
+    train_iter, val_iters, info = create_gems_set_datasets(cfg, seed=cfg.seed)
 
     print("\nDataset info:")
     for k, v in info.items():

@@ -178,52 +178,6 @@ def intensity_global_log_jitter(
     return jnp.where(valid_mask, out, 0.0)
 
 
-def vicreg_loss(
-    z1: jnp.ndarray,
-    z2: jnp.ndarray,
-    *,
-    sim_coeff: float = 25.0,
-    std_coeff: float = 25.0,
-    cov_coeff: float = 1.0,
-    eps: float = 1e-4,
-    std_target: float = 1.0,
-) -> tuple[jnp.ndarray, dict[str, jnp.ndarray]]:
-    """
-    VICReg loss: invariance + variance + covariance (no negatives).
-    Returns (loss, components).
-    """
-    # invariance
-    inv = jnp.mean(jnp.square(z1 - z2))
-
-    # variance (prevent collapse)
-    def _var_loss(z):
-        std = jnp.sqrt(jnp.var(z, axis=0) + eps)
-        return jnp.mean(nnx.relu(std_target - std))
-
-    var = _var_loss(z1) + _var_loss(z2)
-
-    # covariance (decorrelate dimensions)
-    def _cov_loss(z):
-        bsz, d = z.shape
-        z = z - jnp.mean(z, axis=0)
-        denom = jnp.maximum(1.0, bsz - 1.0)
-        cov = (z.T @ z) / denom
-        cov_sq = jnp.square(cov)
-        offdiag_sq_sum = jnp.sum(cov_sq) - jnp.sum(jnp.diag(cov_sq))
-        return offdiag_sq_sum / d
-
-    cov = _cov_loss(z1) + _cov_loss(z2)
-
-    loss = sim_coeff * inv + std_coeff * var + cov_coeff * cov
-    comps = {
-        "vicreg_invariance": inv,
-        "vicreg_variance": var,
-        "vicreg_covariance": cov,
-        "vicreg_loss": loss,
-    }
-    return loss, comps
-
-
 def _resolve_attention_heads(
     dim: int,
     requested_heads: Optional[int],
@@ -355,7 +309,7 @@ class TransformerStack(nnx.Module):
 
 
 class MAE(nnx.Module):
-    """Representation-first pretrainer: two-view VICReg + optional masked reconstruction."""
+    """Masked autoencoder with metadata prediction."""
 
     def __init__(
         self,
@@ -363,13 +317,13 @@ class MAE(nnx.Module):
         *,
         spectrum_length: int,
         # masking / views
-        mask_ratio: float = 0.4,                  # default: moderate for representation learning
+        mask_ratio: float = 0.4,
         mask_top_k_peaks: int | None = None,
-        min_visible_peaks: int = 12,              # NEW
-        always_keep_top_n: int = 3,               # NEW (helps two-view alignment)
-        mz_window_prob: float = 0.5,              # NEW
-        mz_window_width: tuple[float, float] = (50.0, 200.0),  # NEW
-        intensity_log_jitter: float = 0.0,        # NEW
+        min_visible_peaks: int = 12,
+        always_keep_top_n: int = 3,
+        mz_window_prob: float = 0.5,
+        mz_window_width: tuple[float, float] = (50.0, 200.0),
+        intensity_log_jitter: float = 0.0,
         precursor_mask_prob: float = 0.5,
         rt_mask_prob: float = 0.5,
 
@@ -389,19 +343,10 @@ class MAE(nnx.Module):
         peak_mlp_hidden_dim: int | None = None,
 
         # losses
-        mz_loss_weight: float = 0.0,              # NEW default: don't prioritize m/z recon
+        mz_loss_weight: float = 0.0,
         intensity_loss_weight: float = 1.0,
-        repr_loss_weight: float = 1.0,            # NEW
-        recon_loss_weight: float = 0.1,           # NEW
+        recon_loss_weight: float = 0.1,
         aux_loss_weight: float = 1.0,
-        use_vicreg: bool = True,
-
-        # VICReg hyperparams
-        proj_dim: int = 256,                      # NEW
-        proj_hidden_dim: int = 512,               # NEW
-        vicreg_sim_coeff: float = 25.0,
-        vicreg_std_coeff: float = 25.0,
-        vicreg_cov_coeff: float = 1.0,
 
         dtype: jnp.dtype = jnp.float32,
         param_dtype: jnp.dtype = jnp.float32,
@@ -435,14 +380,8 @@ class MAE(nnx.Module):
 
         self.mz_loss_weight = float(mz_loss_weight)
         self.intensity_loss_weight = float(intensity_loss_weight)
-        self.use_vicreg = bool(use_vicreg)
-        self.repr_loss_weight = float(repr_loss_weight) if self.use_vicreg else 0.0
         self.recon_loss_weight = float(recon_loss_weight)
         self.aux_loss_weight = float(aux_loss_weight)
-
-        self.vicreg_sim_coeff = float(vicreg_sim_coeff)
-        self.vicreg_std_coeff = float(vicreg_std_coeff)
-        self.vicreg_cov_coeff = float(vicreg_cov_coeff)
 
         encoder_heads, decoder_heads = _normalize_heads_config(num_heads)
         encoder_kv_heads, decoder_kv_heads = _normalize_heads_config(num_kv_heads)
@@ -525,13 +464,6 @@ class MAE(nnx.Module):
             rngs=rngs,
         )
 
-        # NEW: projection head for VICReg
-        proj_init = nnx.with_partitioning(nnx.initializers.lecun_normal(), ("hidden", "proj"))
-        self.proj = nnx.Sequential(
-            nnx.Linear(self.encoder_dim, proj_hidden_dim, dtype=dtype, param_dtype=param_dtype, kernel_init=proj_init, rngs=rngs),
-            nnx.swish,
-            nnx.Linear(proj_hidden_dim, proj_dim, dtype=dtype, param_dtype=param_dtype, kernel_init=proj_init, rngs=rngs),
-        )
         meta_pred_init = nnx.with_partitioning(nnx.initializers.lecun_normal(), ("hidden", "aux"))
         self.metadata_pred = nnx.Sequential(
             nnx.Linear(self.encoder_dim, self.encoder_dim, dtype=dtype, param_dtype=param_dtype, kernel_init=meta_pred_init, rngs=rngs),
@@ -850,8 +782,7 @@ class MAE(nnx.Module):
         return_reconstruction: bool = False,
     ) -> dict[str, jnp.ndarray]:
         """
-        If train and use_vicreg: two-view VICReg + optional recon.
-        Else: single-view forward (masking off by default when train=False).
+        Single-view forward (masking off by default when train=False).
         """
         if apply_mask is None:
             apply_mask = train
@@ -861,87 +792,6 @@ class MAE(nnx.Module):
         retention_time = jnp.asarray(batch["rt"], dtype=self.dtype).reshape(-1, 1)
         valid_mask = intensity > 0
 
-        # -------------------------
-        # Representation-first pretraining (two views)
-        # -------------------------
-        if train and self.use_vicreg and (self.repr_loss_weight > 0.0):
-            key = self.mask_rngs()
-            key1, key2 = jax.random.split(key, 2)
-
-            int1, mask1, valid1, precursor_mask1, rt_mask1 = self._sample_view(key1, mz, intensity)
-            int2, mask2, valid2, precursor_mask2, rt_mask2 = self._sample_view(key2, mz, intensity)
-
-            h1, recon1, aux1, m1 = self._forward_view(
-                mz,
-                int1,
-                precursor_mz,
-                retention_time,
-                mask=mask1,
-                valid_mask=valid1,
-                precursor_mask=precursor_mask1,
-                rt_mask=rt_mask1,
-                train=train,
-                return_reconstruction=return_reconstruction,
-            )
-            h2, recon2, aux2, m2 = self._forward_view(
-                mz,
-                int2,
-                precursor_mz,
-                retention_time,
-                mask=mask2,
-                valid_mask=valid2,
-                precursor_mask=precursor_mask2,
-                rt_mask=rt_mask2,
-                train=train,
-                return_reconstruction=False,
-            )
-
-            z1 = self.proj(h1)
-            z2 = self.proj(h2)
-
-            repr_loss, vicreg_parts = vicreg_loss(
-                z1,
-                z2,
-                sim_coeff=self.vicreg_sim_coeff,
-                std_coeff=self.vicreg_std_coeff,
-                cov_coeff=self.vicreg_cov_coeff,
-            )
-
-            recon_loss = 0.5 * (recon1 + recon2)
-            aux_loss = 0.5 * (aux1 + aux2)
-            total = (
-                self.repr_loss_weight * repr_loss
-                + self.recon_loss_weight * recon_loss
-                + self.aux_loss_weight * aux_loss
-            )
-
-            metrics = {
-                "loss": total,
-                "repr_loss": repr_loss,
-                "reconstruction_loss": recon_loss,
-                "metadata_loss": aux_loss,
-                "precursor_mse_masked": 0.5 * (m1["precursor_mse_masked"] + m2["precursor_mse_masked"]),
-                "rt_mse_masked": 0.5 * (m1["rt_mse_masked"] + m2["rt_mse_masked"]),
-                "precursor_mask_ratio": 0.5 * (m1["precursor_mask_ratio"] + m2["precursor_mask_ratio"]),
-                "rt_mask_ratio": 0.5 * (m1["rt_mask_ratio"] + m2["rt_mask_ratio"]),
-                **vicreg_parts,
-                # some view stats
-                "mask_ratio_actual_active_view1": m1["mask_ratio_actual_active"],
-                "mask_ratio_actual_active_view2": m2["mask_ratio_actual_active"],
-                "cosine_similarity_intensity_masked_view1": m1["cosine_similarity_intensity_masked"],
-                "cosine_similarity_intensity_masked_view2": m2["cosine_similarity_intensity_masked"],
-            }
-
-            # pass through recon arrays only if requested (usually for logging)
-            if return_reconstruction and ("reconstruction" in m1):
-                metrics["reconstruction"] = m1["reconstruction"]
-                metrics["decoder_output"] = m1["decoder_output"]
-
-            return metrics
-
-        # -------------------------
-        # Single-view path (eval / debugging / recon-only)
-        # -------------------------
         if apply_mask:
             key = self.mask_rngs()
             intensity_view, mask, valid_mask, precursor_mask, rt_mask = self._sample_view(
@@ -954,7 +804,7 @@ class MAE(nnx.Module):
             precursor_mask = jnp.zeros((batch_size, 1), dtype=jnp.bool_)
             rt_mask = jnp.zeros((batch_size, 1), dtype=jnp.bool_)
 
-        h, recon_loss, aux_loss, m = self._forward_view(
+        _, recon_loss, aux_loss, m = self._forward_view(
             mz,
             intensity_view,
             precursor_mz,
@@ -1015,57 +865,34 @@ def create_train_metrics_class_from_keys(metric_keys):
     return clu_metrics.Collection.create(**stats)
 
 
-def create_train_metrics_class(*, use_vicreg: bool = True):
-    if use_vicreg:
-        metric_keys = sorted(
-            [
-                "loss",
-                "repr_loss",
-                "reconstruction_loss",
-                "metadata_loss",
-                "precursor_mse_masked",
-                "rt_mse_masked",
-                "precursor_mask_ratio",
-                "rt_mask_ratio",
-                "vicreg_loss",
-                "vicreg_invariance",
-                "vicreg_variance",
-                "vicreg_covariance",
-                "mask_ratio_actual_active_view1",
-                "mask_ratio_actual_active_view2",
-                "cosine_similarity_intensity_masked_view1",
-                "cosine_similarity_intensity_masked_view2",
-            ]
-        )
-    else:
-        metric_keys = sorted(
-            [
-                "loss",
-                "reconstruction_loss",
-                "metadata_loss",
-                "precursor_mse_masked",
-                "rt_mse_masked",
-                "precursor_mask_ratio",
-                "rt_mask_ratio",
-                "mask_ratio_actual_active",
-                "cosine_similarity_intensity_masked",
-            ]
-        )
+def create_train_metrics_class():
+    metric_keys = sorted(
+        [
+            "loss",
+            "reconstruction_loss",
+            "metadata_loss",
+            "precursor_mse_masked",
+            "rt_mse_masked",
+            "precursor_mask_ratio",
+            "rt_mask_ratio",
+            "mask_ratio_actual_active",
+            "cosine_similarity_intensity_masked",
+        ]
+    )
     return create_train_metrics_class_from_keys(metric_keys)
 
 
 
 TrainMetrics = create_train_metrics_class()
-TrainMetricsNoVICReg = create_train_metrics_class(use_vicreg=False)
 
 
-def get_train_metrics_class(*, use_vicreg: bool = True):
-    return TrainMetrics if use_vicreg else TrainMetricsNoVICReg
+def get_train_metrics_class():
+    return TrainMetrics
 
 
-def create_train_metrics(*, use_vicreg: bool = True):
+def create_train_metrics():
     """Create CLU-based train metrics collection instance."""
-    return get_train_metrics_class(use_vicreg=use_vicreg).empty()
+    return TrainMetrics.empty()
 
 
 def create_eval_metrics_class():
