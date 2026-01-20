@@ -8,7 +8,6 @@ from typing import Optional, Sequence
 import jax
 import jax.numpy as jnp
 import numpy as np
-import optax
 from clu import metrics as clu_metrics
 from flax import nnx
 
@@ -16,9 +15,6 @@ from networks import transformer
 
 import matplotlib.pyplot as plt  # noqa: E402  pylint: disable=wrong-import-position
 from matplotlib.figure import Figure  # noqa: E402  pylint: disable=wrong-import-position
-
-_MASS_SPEC_MORGAN_FEATURE = "massspec_morgan_top16"
-_MASS_SPEC_LABEL_MASK_FEATURE = "massspec_label_mask"
 
 
 class FourierFrequencies(nnx.Variable):
@@ -398,8 +394,6 @@ class MAE(nnx.Module):
         repr_loss_weight: float = 1.0,            # NEW
         recon_loss_weight: float = 0.1,           # NEW
         aux_loss_weight: float = 1.0,
-        morgan_top_k: int = 16,
-        morgan_loss_weight: float = 0.0,
         use_vicreg: bool = True,
 
         # VICReg hyperparams
@@ -445,8 +439,6 @@ class MAE(nnx.Module):
         self.repr_loss_weight = float(repr_loss_weight) if self.use_vicreg else 0.0
         self.recon_loss_weight = float(recon_loss_weight)
         self.aux_loss_weight = float(aux_loss_weight)
-        self.morgan_top_k = int(morgan_top_k)
-        self.morgan_loss_weight = float(morgan_loss_weight)
 
         self.vicreg_sim_coeff = float(vicreg_sim_coeff)
         self.vicreg_std_coeff = float(vicreg_std_coeff)
@@ -546,12 +538,6 @@ class MAE(nnx.Module):
             nnx.swish,
             nnx.Linear(self.encoder_dim, 2, dtype=dtype, param_dtype=param_dtype, kernel_init=meta_pred_init, rngs=rngs),
         )
-        morgan_pred_init = nnx.with_partitioning(nnx.initializers.lecun_normal(), ("hidden", "aux"))
-        self.morgan_pred = nnx.Sequential(
-            nnx.Linear(self.encoder_dim, self.encoder_dim, dtype=dtype, param_dtype=param_dtype, kernel_init=morgan_pred_init, rngs=rngs),
-            nnx.swish,
-            nnx.Linear(self.encoder_dim, self.morgan_top_k, dtype=dtype, param_dtype=param_dtype, kernel_init=morgan_pred_init, rngs=rngs),
-        )
 
         # always have a mask rng stream available
         self.mask_rngs = rngs["mask"].fork()
@@ -587,7 +573,7 @@ class MAE(nnx.Module):
         return jnp.clip(mz_norm, 0.0, 1.0)
 
     def _normalize_rt(self, rt: jnp.ndarray) -> jnp.ndarray:
-        return jnp.clip(rt, 0.0, 1.0)
+        return rt
 
     def _fourier_encode(self, mz_norm: jnp.ndarray) -> jnp.ndarray:
         freqs = self.fourier_frequencies.value
@@ -634,20 +620,6 @@ class MAE(nnx.Module):
         rn = jnp.linalg.norm(r, axis=-1)
         eps = jnp.asarray(1e-9, dtype=target.dtype)
         return jnp.mean(dot / jnp.maximum(tn * rn, eps))
-
-    def _morgan_loss_and_accuracy(
-        self,
-        h: jnp.ndarray,
-        labels: jnp.ndarray,
-        label_mask: jnp.ndarray,
-    ) -> tuple[jnp.ndarray, jnp.ndarray]:
-        logits = self.morgan_pred(h)
-        per_example = optax.sigmoid_binary_cross_entropy(logits, labels).mean(axis=-1)
-        loss = jnp.mean(per_example * label_mask)
-        pred = logits > 0
-        acc_per_example = jnp.mean(pred == (labels > 0.5), axis=-1)
-        accuracy = jnp.mean(acc_per_example * label_mask)
-        return loss, accuracy
 
     # ----------------------------
     # view sampling
@@ -847,7 +819,7 @@ class MAE(nnx.Module):
         mz, intensity = self._prepare_peaks(batch)
         valid_mask = intensity > 0
         precursor_mz = jnp.asarray(batch["precursor_mz"], dtype=self.dtype)
-        retention_time = jnp.asarray(batch["rt_scaled"], dtype=self.dtype).reshape(-1, 1)
+        retention_time = jnp.asarray(batch["rt"], dtype=self.dtype).reshape(-1, 1)
 
         # no masking
         mask = jnp.zeros_like(valid_mask, dtype=jnp.bool_)
@@ -886,10 +858,8 @@ class MAE(nnx.Module):
 
         mz, intensity = self._prepare_peaks(batch)
         precursor_mz = jnp.asarray(batch["precursor_mz"], dtype=self.dtype)
-        retention_time = jnp.asarray(batch["rt_scaled"], dtype=self.dtype).reshape(-1, 1)
+        retention_time = jnp.asarray(batch["rt"], dtype=self.dtype).reshape(-1, 1)
         valid_mask = intensity > 0
-        morgan_labels = jnp.asarray(batch[_MASS_SPEC_MORGAN_FEATURE], dtype=self.dtype)
-        morgan_label_mask = jnp.asarray(batch[_MASS_SPEC_LABEL_MASK_FEATURE], dtype=self.dtype).reshape(-1)
 
         # -------------------------
         # Representation-first pretraining (two views)
@@ -939,19 +909,10 @@ class MAE(nnx.Module):
 
             recon_loss = 0.5 * (recon1 + recon2)
             aux_loss = 0.5 * (aux1 + aux2)
-            morgan_loss1, morgan_acc1 = self._morgan_loss_and_accuracy(
-                h1, morgan_labels, morgan_label_mask
-            )
-            morgan_loss2, morgan_acc2 = self._morgan_loss_and_accuracy(
-                h2, morgan_labels, morgan_label_mask
-            )
-            morgan_loss = 0.5 * (morgan_loss1 + morgan_loss2)
-            morgan_accuracy = 0.5 * (morgan_acc1 + morgan_acc2)
             total = (
                 self.repr_loss_weight * repr_loss
                 + self.recon_loss_weight * recon_loss
                 + self.aux_loss_weight * aux_loss
-                + self.morgan_loss_weight * morgan_loss
             )
 
             metrics = {
@@ -959,8 +920,6 @@ class MAE(nnx.Module):
                 "repr_loss": repr_loss,
                 "reconstruction_loss": recon_loss,
                 "metadata_loss": aux_loss,
-                "morgan_loss": morgan_loss,
-                "morgan_accuracy": morgan_accuracy,
                 "precursor_mse_masked": 0.5 * (m1["precursor_mse_masked"] + m2["precursor_mse_masked"]),
                 "rt_mse_masked": 0.5 * (m1["rt_mse_masked"] + m2["rt_mse_masked"]),
                 "precursor_mask_ratio": 0.5 * (m1["precursor_mask_ratio"] + m2["precursor_mask_ratio"]),
@@ -1008,19 +967,12 @@ class MAE(nnx.Module):
             return_reconstruction=return_reconstruction,
         )
 
-        morgan_loss, morgan_accuracy = self._morgan_loss_and_accuracy(
-            h, morgan_labels, morgan_label_mask
-        )
-
         total = (
             self.recon_loss_weight * recon_loss
             + self.aux_loss_weight * aux_loss
-            + self.morgan_loss_weight * morgan_loss
         )
         metrics = {
             "loss": total,
-            "morgan_loss": morgan_loss,
-            "morgan_accuracy": morgan_accuracy,
             **m,
         }
         return metrics
@@ -1043,8 +995,6 @@ def create_train_metrics_class_from_keys(metric_keys):
         "loss",
         "reconstruction_loss",
         "metadata_loss",
-        "morgan_loss",
-        "morgan_accuracy",
         "precursor_mse_masked",
         "rt_mse_masked",
         "precursor_mask_ratio",
@@ -1073,8 +1023,6 @@ def create_train_metrics_class(*, use_vicreg: bool = True):
                 "repr_loss",
                 "reconstruction_loss",
                 "metadata_loss",
-                "morgan_loss",
-                "morgan_accuracy",
                 "precursor_mse_masked",
                 "rt_mse_masked",
                 "precursor_mask_ratio",
@@ -1095,8 +1043,6 @@ def create_train_metrics_class(*, use_vicreg: bool = True):
                 "loss",
                 "reconstruction_loss",
                 "metadata_loss",
-                "morgan_loss",
-                "morgan_accuracy",
                 "precursor_mse_masked",
                 "rt_mse_masked",
                 "precursor_mask_ratio",
@@ -1128,8 +1074,6 @@ def create_eval_metrics_class():
             "loss",
             "reconstruction_loss",
             "metadata_loss",
-            "morgan_loss",
-            "morgan_accuracy",
             "precursor_mse_masked",
             "rt_mse_masked",
             "precursor_mask_ratio",

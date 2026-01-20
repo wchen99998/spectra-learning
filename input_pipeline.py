@@ -32,8 +32,6 @@ def create_datasets(
     assert config.batch_size % jax.process_count() == 0
 
     if config.dataset == "gems_a":
-        if "apply_scaling" not in config:
-            config.apply_scaling = True
         train_dataset, eval_dataset, gems_info = (
             input_pipeline_gems_set.create_gems_set_datasets(config, seed)
         )

@@ -10,7 +10,7 @@ from sklearn.linear_model import SGDClassifier
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from sklearn.preprocessing import StandardScaler
 
-from models import vae as vae_models
+from models import mae as mae_models
 
 _MASS_SPEC_MORGAN_FEATURE = "massspec_morgan_top16"
 
@@ -135,7 +135,7 @@ def evaluate_massspec_linear_probe(
     writer.write_scalars(step, scalars)
 
     fig = _plot_metrics_matrix(metrics, bit_labels)
-    image = vae_models.figures_to_image_array(fig)
+    image = mae_models.figures_to_image_array(fig)
     writer.write_images(step, {"massspec_probe/metrics_matrix": image})
 
     logging.info("MassSpecGym linear probe metrics: %s", scalars)

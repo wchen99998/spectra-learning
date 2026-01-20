@@ -16,7 +16,6 @@ from jax.sharding import NamedSharding
 
 from train import build_mesh_and_sharding, get_data_sharding_for_rank
 import input_pipeline
-import massspec_probe
 from models import mae as mae_models
 from utils import (
     checkpoint_utils,
@@ -478,31 +477,20 @@ def train_and_evaluate(
                     model, optimizer = nnx.merge(graphdef, train_state)
                     for eval_key, eval_loader in eval_loaders.items():
                         with report_progress.timed("eval"):
-                            if eval_key == "massspec_test":
-                                massspec_probe.evaluate_massspec_linear_probe(
-                                    model,
-                                    eval_loader,
-                                    writer=writer,
-                                    step=step,
-                                    sample_size=int(config.get("massspec_probe_samples", 20_000)),
-                                    seed=int(config.get("seed", 0)),
-                                    bit_indices=dataset_info.get("massspec_morgan_top_bits"),
-                                )
-                            else:
-                                evaluate(
-                                    model,
-                                    jit_eval_step,
-                                    eval_loader,
-                                    eval_loader_key=eval_key,
-                                    num_eval_steps=config.num_eval_steps,
-                                    writer=writer,
-                                    step=step,
-                                    create_train_metrics_fn=mae_models.create_eval_metrics,
-                                    create_reconstruction_figures_fn=(
-                                        mae_models.create_reconstruction_comparison_figures
-                                    ),
-                                    figures_to_image_array_fn=mae_models.figures_to_image_array,
-                                )
+                            evaluate(
+                                model,
+                                jit_eval_step,
+                                eval_loader,
+                                eval_loader_key=eval_key,
+                                num_eval_steps=config.num_eval_steps,
+                                writer=writer,
+                                step=step,
+                                create_train_metrics_fn=mae_models.create_eval_metrics,
+                                create_reconstruction_figures_fn=(
+                                    mae_models.create_reconstruction_comparison_figures
+                                ),
+                                figures_to_image_array_fn=mae_models.figures_to_image_array,
+                            )
 
                 # Save checkpoint with preemption tolerance
                 with report_progress.timed("checkpoint"):
