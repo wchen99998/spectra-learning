@@ -12,15 +12,6 @@ Configuration keys:
 - ``split_seed``: Seed for train/validation split (default ``42``).
 - ``apply_sqrt_l2_intensity``: Apply per-spectrum ``sqrt`` then L2 normalization to intensities
   (default ``False``).
-- ``pre_keep_top_k``: Keep only the top-K peaks by intensity before any scaling or filtering,
-  truncating the output to length K with peaks sorted by m/z and padding at the end
-  (default ``0`` which keeps all 128 peaks).
-- ``noise_quantile``: Per-spectrum noise estimate from the given quantile of non-zero intensities
-  (default ``0.1``). Used with ``min_snr``.
-- ``min_snr``: Zero-out peaks with intensity below ``min_snr * noise`` within each spectrum
-  (default ``0.0``; no filtering). Applied before any intensity transform.
-- ``keep_top_k``: Keep only the top-K peaks by intensity (others are zeroed; default ``0`` which keeps all).
-  Applied after ``min_snr``.
 
 MassSpecGym entries use the HDF5 ``fold`` field; only the non-train split is written for evaluation.
 """
@@ -302,66 +293,6 @@ def _apply_sqrt_l2_intensity(example: dict) -> dict:
     return example
 
 
-def _apply_min_snr(noise_quantile: float, min_snr: float):
-    q = tf.constant(noise_quantile, tf.float32)
-    snr = tf.constant(min_snr, tf.float32)
-
-    def apply(example: dict) -> dict:
-        intensity = example["intensity"]
-        non_zero = tf.boolean_mask(intensity, intensity > 0)
-        sorted_vals = tf.sort(non_zero)
-        n = tf.shape(sorted_vals)[0]
-        idx = tf.cast(tf.floor(q * tf.cast(n - 1, tf.float32)), tf.int32)
-        noise = sorted_vals[idx]
-        keep = intensity >= (noise * snr)
-        example["intensity"] = tf.where(keep, intensity, 0.0)
-        example["mz"] = tf.where(keep, example["mz"], 0.0)
-        return example
-
-    return apply
-
-
-def _apply_keep_top_k(keep_top_k: int):
-    k = int(keep_top_k)
-
-    def apply(example: dict) -> dict:
-        intensity = example["intensity"]
-        _, idx = tf.math.top_k(intensity, k=k, sorted=False)
-        keep = tf.scatter_nd(idx[:, None], tf.ones((k,), tf.bool), (tf.shape(intensity)[0],))
-        example["intensity"] = tf.where(keep, intensity, 0.0)
-        example["mz"] = tf.where(keep, example["mz"], 0.0)
-        return example
-
-    return apply
-
-
-def _apply_pre_keep_top_k(pre_keep_top_k: int):
-    """Keep top-k peaks by intensity, truncate to length k, sort by m/z with padding at end."""
-    k = int(pre_keep_top_k)
-
-    def apply(example: dict) -> dict:
-        mz = example["mz"]
-        intensity = example["intensity"]
-
-        # Get indices of top-k peaks by intensity
-        _, top_k_idx = tf.math.top_k(intensity, k=k, sorted=False)
-
-        # Gather the top-k peaks
-        top_k_mz = tf.gather(mz, top_k_idx)
-        top_k_intensity = tf.gather(intensity, top_k_idx)
-
-        # Sort by m/z, pushing zero m/z values to the end
-        sort_key = tf.where(top_k_mz > 0, top_k_mz, tf.constant(float("inf"), dtype=tf.float32))
-        sorted_idx = tf.argsort(sort_key)
-
-        example["mz"] = tf.gather(top_k_mz, sorted_idx)
-        example["intensity"] = tf.gather(top_k_intensity, sorted_idx)
-
-        return example
-
-    return apply
-
-
 def _build_dataset(
     filenames: list[str],
     batch_size: int,
@@ -370,22 +301,12 @@ def _build_dataset(
     repeat: bool,
     drop_remainder: bool,
     apply_sqrt_l2_intensity: bool = False,
-    pre_keep_top_k: int = 0,
-    noise_quantile: float = 0.1,
-    min_snr: float = 0.0,
-    keep_top_k: int = 0,
 ) -> tf.data.Dataset:
     """Build tf.data pipeline."""
     ds = tf.data.TFRecordDataset(filenames, compression_type="GZIP", num_parallel_reads=tf.data.AUTOTUNE)
     ds = ds.map(_parse_example, num_parallel_calls=tf.data.AUTOTUNE)
-    if min_snr > 0.0:
-        ds = ds.map(_apply_min_snr(noise_quantile, min_snr), num_parallel_calls=tf.data.AUTOTUNE)
-    if pre_keep_top_k > 0:
-        ds = ds.map(_apply_pre_keep_top_k(pre_keep_top_k), num_parallel_calls=tf.data.AUTOTUNE)
     if apply_sqrt_l2_intensity:
         ds = ds.map(_apply_sqrt_l2_intensity, num_parallel_calls=tf.data.AUTOTUNE)
-    if keep_top_k > 0:
-        ds = ds.map(_apply_keep_top_k(keep_top_k), num_parallel_calls=tf.data.AUTOTUNE)
 
     if shuffle_buffer > 0:
         ds = ds.shuffle(shuffle_buffer, seed=seed, reshuffle_each_iteration=True)
@@ -415,10 +336,6 @@ def create_gems_set_datasets(
     num_shards = int(config.get("num_shards", _DEFAULT_NUM_SHARDS))
     drop_remainder = bool(config.get("drop_remainder", False))
     apply_sqrt_l2_intensity = bool(config.get("apply_sqrt_l2_intensity", False))
-    pre_keep_top_k = int(config.get("pre_keep_top_k", 0))
-    noise_quantile = float(config.get("noise_quantile", 0.1))
-    min_snr = float(config.get("min_snr", 0.0))
-    keep_top_k = int(config.get("keep_top_k", 0))
 
     metadata = _ensure_processed(output_dir, validation_fraction, split_seed, num_shards)
 
@@ -436,10 +353,6 @@ def create_gems_set_datasets(
         repeat=True,
         drop_remainder=drop_remainder,
         apply_sqrt_l2_intensity=apply_sqrt_l2_intensity,
-        pre_keep_top_k=pre_keep_top_k,
-        noise_quantile=noise_quantile,
-        min_snr=min_snr,
-        keep_top_k=keep_top_k,
     )
     val_ds = _build_dataset(
         val_files,
@@ -449,10 +362,6 @@ def create_gems_set_datasets(
         repeat=True,
         drop_remainder=False,
         apply_sqrt_l2_intensity=apply_sqrt_l2_intensity,
-        pre_keep_top_k=pre_keep_top_k,
-        noise_quantile=noise_quantile,
-        min_snr=min_snr,
-        keep_top_k=keep_top_k,
     )
 
     val_iters = {"validation": val_ds.as_numpy_iterator()}
@@ -466,10 +375,6 @@ def create_gems_set_datasets(
             repeat=True,
             drop_remainder=True,
             apply_sqrt_l2_intensity=apply_sqrt_l2_intensity,
-            pre_keep_top_k=pre_keep_top_k,
-            noise_quantile=noise_quantile,
-            min_snr=min_snr,
-            keep_top_k=keep_top_k,
         )
         val_iters["massspec_test"] = test_ds.as_numpy_iterator()
 
@@ -478,7 +383,7 @@ def create_gems_set_datasets(
         "train_size": metadata["train_size"],
         "validation_size": metadata["validation_size"],
         "massspec_test_size": metadata.get("massspec_test_size", 0),
-        "num_peaks": _NUM_PEAKS if pre_keep_top_k == 0 else pre_keep_top_k,
+        "num_peaks": _NUM_PEAKS,
     }
 
     return train_ds.as_numpy_iterator(), val_iters, info
