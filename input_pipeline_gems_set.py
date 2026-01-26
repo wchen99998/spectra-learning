@@ -10,13 +10,11 @@ Configuration keys:
 - ``batch_size``: Batch size (default ``512``).
 - ``shuffle_buffer``: Shuffle buffer size for training (default ``10_000``).
 - ``split_seed``: Seed for train/validation split (default ``42``).
-- ``apply_sqrt_l2_intensity``: Apply per-spectrum ``sqrt`` then L2 normalization to intensities
-  (default ``False``).
 - ``max_precursor_mz``: Filter out spectra with precursor m/z above this threshold
   (default ``1000.0``).
 
 MassSpecGym entries use the HDF5 ``fold`` field; only the non-train split is written for evaluation.
-Peaks outside the range ``[20.0, precursor_mz - 17.0]`` are removed when precursor m/z is
+Peaks outside the range ``[20.0, precursor_mz - 2.5]`` are removed when precursor m/z is
 non-zero; otherwise the upper bound is ``1000.0``. The peak list is then compacted and sorted
 before any intensity scaling.
 """
@@ -49,7 +47,7 @@ _NUM_PEAKS = 128
 _DEFAULT_MAX_PRECURSOR_MZ = 1000.0
 _PEAK_MZ_MIN = 20.0
 _PEAK_MZ_MAX = 1000.0
-_PRECURSOR_MZ_WINDOW = 17.0
+_PRECURSOR_MZ_WINDOW = 2.5
 
 _METADATA_FILENAME = "metadata.json"
 
@@ -297,13 +295,6 @@ def _parse_example(serialized: tf.Tensor) -> dict[str, tf.Tensor]:
     }
 
 
-def _apply_sqrt_l2_intensity(example: dict) -> dict:
-    """Apply sqrt(intensity) then normalize by per-spectrum L2 norm."""
-    weights = tf.sqrt(example["intensity"])
-    example["intensity"] = tf.math.l2_normalize(weights)
-    return example
-
-
 def _filter_max_precursor_mz(max_precursor_mz: float):
     max_val = tf.constant(max_precursor_mz, tf.float32)
 
@@ -337,7 +328,7 @@ def _compact_sort_peaks():
         keep = mz > 0
         kept_mz = tf.boolean_mask(mz, keep)
         kept_intensity = tf.boolean_mask(intensity, keep)
-        sorted_idx = tf.argsort(kept_mz)
+        sorted_idx = tf.argsort(kept_intensity, direction="DESCENDING")
         kept_mz = tf.gather(kept_mz, sorted_idx)
         kept_intensity = tf.gather(kept_intensity, sorted_idx)
         pad = _NUM_PEAKS - tf.shape(kept_mz)[0]
@@ -362,7 +353,6 @@ def _build_dataset(
     seed: Optional[int],
     repeat: bool,
     drop_remainder: bool,
-    apply_sqrt_l2_intensity: bool = False,
     max_precursor_mz: float = _DEFAULT_MAX_PRECURSOR_MZ,
 ) -> tf.data.Dataset:
     """Build tf.data pipeline."""
@@ -374,9 +364,6 @@ def _build_dataset(
         num_parallel_calls=tf.data.AUTOTUNE,
     )
     ds = ds.map(_compact_sort_peaks(), num_parallel_calls=tf.data.AUTOTUNE)
-    if apply_sqrt_l2_intensity:
-        ds = ds.map(_apply_sqrt_l2_intensity, num_parallel_calls=tf.data.AUTOTUNE)
-
     if shuffle_buffer > 0:
         ds = ds.shuffle(shuffle_buffer, seed=seed, reshuffle_each_iteration=True)
 
@@ -404,7 +391,6 @@ def create_gems_set_datasets(
     split_seed = int(config.get("split_seed", _DEFAULT_SPLIT_SEED))
     num_shards = int(config.get("num_shards", _DEFAULT_NUM_SHARDS))
     drop_remainder = bool(config.get("drop_remainder", False))
-    apply_sqrt_l2_intensity = bool(config.get("apply_sqrt_l2_intensity", False))
     max_precursor_mz = float(config.get("max_precursor_mz", _DEFAULT_MAX_PRECURSOR_MZ))
 
     metadata = _ensure_processed(output_dir, validation_fraction, split_seed, num_shards)
@@ -422,7 +408,6 @@ def create_gems_set_datasets(
         seed,
         repeat=True,
         drop_remainder=drop_remainder,
-        apply_sqrt_l2_intensity=apply_sqrt_l2_intensity,
         max_precursor_mz=max_precursor_mz,
     )
     val_ds = _build_dataset(
@@ -432,7 +417,6 @@ def create_gems_set_datasets(
         seed,
         repeat=True,
         drop_remainder=False,
-        apply_sqrt_l2_intensity=apply_sqrt_l2_intensity,
         max_precursor_mz=max_precursor_mz,
     )
 
@@ -446,7 +430,6 @@ def create_gems_set_datasets(
             seed,
             repeat=True,
             drop_remainder=True,
-            apply_sqrt_l2_intensity=apply_sqrt_l2_intensity,
             max_precursor_mz=max_precursor_mz,
         )
         val_iters["massspec_test"] = test_ds.as_numpy_iterator()

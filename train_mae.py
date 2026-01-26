@@ -16,7 +16,7 @@ from jax.sharding import NamedSharding
 
 from train import build_mesh_and_sharding, get_data_sharding_for_rank
 import input_pipeline
-from models import mae as mae_models
+from models import bert as bert_models
 from utils import (
     checkpoint_utils,
     learning_rate,
@@ -113,36 +113,20 @@ def eval_step(
     batch: Mapping[str, jax.Array],
     *,
     metrics_class: type[clu_metrics.Collection],
-) -> tuple[clu_metrics.Collection, jax.Array | None, jax.Array | None]:
-    """Compute the metrics for the given model in inference mode.
-
-    Args:
-        model: NNX model.
-        batch: Input batch.
-        metrics_class: CLU metrics collection type for constructing updates.
-
-    Returns:
-        Updated metrics and optional reconstruction tensor.
-    """
+) -> clu_metrics.Collection:
+    """Compute the metrics for the given model in inference mode."""
     logging.info("eval_step(batch=%s)", batch)
-    
+
     metrics_dict = model(
         batch,
         train=False,
         apply_mask=True,
-        return_reconstruction=True,
     )
-    reconstruction = metrics_dict.pop("reconstruction", None)
-    masked_input = metrics_dict.pop("masked_input", None)
-    metrics_dict.pop("decoder_output", None)
-    metrics_dict.pop("latent_indices", None)
-    metrics_dict.pop("latent_tokens", None)
-    metrics_dict.pop("num_codebooks", None)
     metrics_update = metrics_class.single_from_model_output(
         **metrics_dict,
     )
 
-    return metrics_update, reconstruction, masked_input
+    return metrics_update
 
 
 # Note: Metrics are now handled by CLU metrics in state_utils.create_train_metrics()
@@ -170,8 +154,6 @@ def evaluate(
     step: int = 0,
     *,
     create_train_metrics_fn,
-    create_reconstruction_figures_fn,
-    figures_to_image_array_fn,
 ) -> None:
     """Evaluate the model on the given dataset using sharded execution.
 
@@ -186,8 +168,6 @@ def evaluate(
         writer: Metric writer for logging.
         step: Current training step for logging.
         create_train_metrics_fn: Factory for creating a metrics collection.
-        create_reconstruction_figures_fn: Function to render reconstruction plots.
-        figures_to_image_array_fn: Function to convert figures into image arrays.
     """
     logging.info("Starting evaluation (%s).", eval_loader_key)
 
@@ -198,37 +178,13 @@ def evaluate(
     eval_metrics = create_train_metrics_fn()
     
     with utils.StepTraceContextHelper("eval", 0) as trace_context:
-        # Use `iter` to reset the eval_loader before each evaluation.
-        reconstruction = None
-        masked_input = None
-        batch_raw = None
         for eval_step, batch_raw in enumerate(iter(eval_loader)):
-            eval_metrics_update, reconstruction, masked_input = jit_eval_step(model, batch_raw)
+            eval_metrics_update = jit_eval_step(model, batch_raw)
             eval_metrics = eval_metrics.merge(eval_metrics_update)
 
             if num_eval_steps > 0 and eval_step + 1 == num_eval_steps:
                 break
             trace_context.next_step()
-
-        # Finalize evaluation metrics
-
-        if reconstruction is not None and batch_raw is not None and writer is not None:
-            # Create reconstruction comparison figures
-            figure_list = create_reconstruction_figures_fn(
-                reconstruction,
-                batch_raw,
-                masked_input=masked_input,
-                max_examples=4,
-            )
-            # Convert figures to image array
-            image_array = figures_to_image_array_fn(figure_list)
-            # Write images to the writer
-            image_key = (
-                f"{metrics_prefix}/reconstructions"
-                if metrics_prefix
-                else "reconstructions"
-            )
-            writer.write_images(step, {image_key: image_array})
 
     # Compute and write eval metrics
     eval_metrics_dict = eval_metrics.compute()
@@ -271,7 +227,7 @@ def train_and_evaluate(
 
     rng = utils.get_rng(config.seed)
     logging.info("Using random seed %s.", rng)
-    logging.info("Training MAE.")
+    logging.info("Training BERT.")
     num_transformer_blocks = config.get("num_transformer_blocks", None)
     logging.info(
         "Transformer blocks (encoder, decoder)=%s.",
@@ -329,27 +285,12 @@ def train_and_evaluate(
         jax.random.randint(data_seed, [], minval=0, maxval=np.iinfo(np.int32).max)
     )
     # The input pipeline runs on each process and loads data for local TPUs.
-    train_loader, eval_loaders, dataset_info = input_pipeline.create_datasets(
+    train_loader, eval_loaders, _ = input_pipeline.create_datasets(
         config, data_seed
     )
 
     # Train loader is already an iterator from the input pipeline
     logging.info("Created data loaders.")
-    if config.get("model_type") == "mae" and "num_peaks" in dataset_info:
-        expected_peaks = int(dataset_info["num_peaks"])
-        spectrum_length = config.get("spectrum_length", None)
-        if spectrum_length is None or int(spectrum_length) != expected_peaks:
-            if spectrum_length is not None:
-                logging.warning(
-                    "MAE spectrum_length (%d) != dataset num_peaks (%d); overriding.",
-                    int(spectrum_length),
-                    expected_peaks,
-                )
-            config.spectrum_length = expected_peaks
-        data_shape = config.get("data_shape", None)
-        if isinstance(data_shape, (tuple, list)) and data_shape:
-            if int(data_shape[0]) != expected_peaks:
-                config.data_shape = (expected_peaks, int(data_shape[1]))
     # Initialize sharding
     mesh, replicated_sharding, data_sharding = build_mesh_and_sharding(config)
     jax.set_mesh(mesh)
@@ -400,8 +341,8 @@ def train_and_evaluate(
 
     logging.info("Batch Size: %s", config.batch_size)
 
-    train_metrics_class = mae_models.get_train_metrics_class()
-    train_metrics = mae_models.create_train_metrics()
+    train_metrics_class = bert_models.get_train_metrics_class()
+    train_metrics = bert_models.create_train_metrics()
     # Keep a persistent graph/state pair so we don't split/merge every step.
     graphdef, train_state = nnx.split((model, optimizer))
 
@@ -420,7 +361,7 @@ def train_and_evaluate(
     jit_eval_step = nnx.jit(
         functools.partial(
             eval_step,
-            metrics_class=mae_models.EvalMetrics,
+            metrics_class=bert_models.EvalMetrics,
         )
     )
 
@@ -466,7 +407,7 @@ def train_and_evaluate(
                     train_metrics_prefixed["train/learning_rate"] = learning_rate_value
                     writer.write_scalars(step, train_metrics_prefixed)
                     # Reset metrics for next interval
-                    train_metrics = mae_models.create_train_metrics()
+                    train_metrics = bert_models.create_train_metrics()
 
                 if eval_loaders and (
                     step == 1
@@ -484,11 +425,7 @@ def train_and_evaluate(
                                 num_eval_steps=config.num_eval_steps,
                                 writer=writer,
                                 step=step,
-                                create_train_metrics_fn=mae_models.create_eval_metrics,
-                                create_reconstruction_figures_fn=(
-                                    mae_models.create_reconstruction_comparison_figures
-                                ),
-                                figures_to_image_array_fn=mae_models.figures_to_image_array,
+                                create_train_metrics_fn=bert_models.create_eval_metrics,
                             )
 
                 # Save checkpoint with preemption tolerance

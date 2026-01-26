@@ -10,9 +10,27 @@ from sklearn.linear_model import SGDClassifier
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from sklearn.preprocessing import StandardScaler
 
-from models import mae as mae_models
 
 _MASS_SPEC_MORGAN_FEATURE = "massspec_morgan_top16"
+
+
+def _figures_to_image_array(figures) -> np.ndarray:
+    if isinstance(figures, plt.Figure):
+        figure_list = [figures]
+    else:
+        figure_list = list(figures)
+
+    images = []
+    for fig in figure_list:
+        fig.canvas.draw()
+        buffer = np.asarray(fig.canvas.buffer_rgba(), dtype=np.uint8)
+        image = buffer[..., :3].copy()
+        images.append(image)
+        plt.close(fig)
+
+    if len(images) == 1:
+        return images[0]
+    return np.stack(images, axis=0)
 
 
 def _collect_latent_subset(
@@ -135,7 +153,7 @@ def evaluate_massspec_linear_probe(
     writer.write_scalars(step, scalars)
 
     fig = _plot_metrics_matrix(metrics, bit_labels)
-    image = mae_models.figures_to_image_array(fig)
+    image = _figures_to_image_array(fig)
     writer.write_images(step, {"massspec_probe/metrics_matrix": image})
 
     logging.info("MassSpecGym linear probe metrics: %s", scalars)

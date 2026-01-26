@@ -11,7 +11,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.split_seed = 42
     cfg.num_shards = 4
     cfg.drop_remainder = False
-    cfg.apply_sqrt_l2_intensity = True
     cfg.max_precursor_mz = 1000.0
     cfg.seed = 42
     return cfg
