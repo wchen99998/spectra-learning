@@ -387,7 +387,6 @@ def train_and_evaluate(
             # Steps are in interval [1, num_train_steps], not [0, num_train_steps - 1].
             for step in range(initial_step + 1, num_train_steps + 1):
                 is_last_step = step == num_train_steps
-
                 with jax.profiler.StepTraceAnnotation("train", step_num=step):
                     batch = next(train_iter)
 
