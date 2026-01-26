@@ -8,7 +8,7 @@ def get_config() -> config_dict.ConfigDict:
     # Dataset
     cfg.dataset = "gems_a"
     cfg.tfrecord_dir = "data/gems_peaklist_tfrecord"
-    cfg.batch_size = 8
+    cfg.batch_size = 64
     cfg.validation_fraction = 0.05
     cfg.shuffle_buffer = 10_000
     cfg.split_seed = 42
@@ -20,18 +20,18 @@ def get_config() -> config_dict.ConfigDict:
 
     # Model (BERT)
     cfg.model_type = "bert"
-    cfg.model_dim = 64
-    cfg.num_layers = 2
-    cfg.num_heads = 4
+    cfg.model_dim = 128
+    cfg.num_layers = 16
+    cfg.num_heads = 8
     cfg.num_kv_heads = None
     cfg.attention_mlp_multiple = 4.0
     cfg.num_segments = 2
-    cfg.mask_ratio = 1.0
+    cfg.mask_ratio = 0.3
     cfg.mask_token_id = 3
     cfg.pad_token_id = 0
     cfg.cls_token_id = 1
     cfg.sep_token_id = 2
-    cfg.dtype = jnp.float32
+    cfg.dtype = jnp.bfloat16
     cfg.param_dtype = jnp.float32
 
     # Filled by input_pipeline.create_datasets
@@ -41,10 +41,10 @@ def get_config() -> config_dict.ConfigDict:
     cfg.precursor_offset = 0
 
     # Training (short smoke run)
-    cfg.num_train_steps = 10
+    cfg.num_train_steps = 1_000_000
     cfg.num_epochs = 0
-    cfg.learning_rate = 1e-4
-    cfg.warmup_steps = 1
+    cfg.learning_rate = 3e-4
+    cfg.warmup_steps = 20000
     cfg.learning_rate_schedule = "cosine"
     cfg.min_learning_rate = None
     cfg.b2 = 0.98
@@ -52,15 +52,15 @@ def get_config() -> config_dict.ConfigDict:
     cfg.optimizer = "adamw"
     cfg.clip = 1.0
     cfg.device_prefetch_size = 1
-    cfg.log_loss_every_steps = 1
-    cfg.eval_every_steps = 5
-    cfg.num_eval_steps = 2
+    cfg.log_loss_every_steps = 2000
+    cfg.eval_every_steps = 10000
+    cfg.num_eval_steps = 500
     cfg.checkpoint_dir = ""
-    cfg.checkpoint_every_steps = 10
+    cfg.checkpoint_every_steps = 10000
     cfg.init_seed = 0
 
     # System / logging
-    cfg.enable_wandb = False
+    cfg.enable_wandb = True
     cfg.wandb_project = "md4"
     cfg.start_profiler = False
     cfg.initialize_multihost = False

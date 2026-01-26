@@ -29,9 +29,9 @@ def get_checkpoint_manager(
         and config.checkpoint_dir
         and isinstance(config.checkpoint_dir, str)
     ):
-        checkpoint_dir = epath.Path(config.checkpoint_dir)
+        checkpoint_dir = epath.Path(config.checkpoint_dir).expanduser().resolve()
     else:
-        checkpoint_dir = epath.Path(workdir) / "checkpoints"
+        checkpoint_dir = epath.Path(workdir).expanduser().resolve() / "checkpoints"
 
     # Ensure checkpoint_every_steps is an integer
     checkpoint_every_steps = config.get("checkpoint_every_steps", 10000)
@@ -40,12 +40,11 @@ def get_checkpoint_manager(
 
     return orbax_checkpoint.CheckpointManager(
         checkpoint_dir,
-        orbax_checkpoint.StandardCheckpointer(),
         options=orbax_checkpoint.CheckpointManagerOptions(
             create=create,
-            # max_to_keep=20,
             save_interval_steps=checkpoint_every_steps,
         ),
+        item_names=("model", "optimizer", "step"),
     )
 
 
@@ -87,7 +86,6 @@ def save_nnx_checkpoint(
     model: nnx.Module | None = None,
     optimizer: nnx.Optimizer | None = None,
     state: Any | None = None,
-    **kwargs,
 ) -> None:
     """Save NNX model and optimizer checkpoint.
     
@@ -98,7 +96,6 @@ def save_nnx_checkpoint(
         optimizer: NNX optimizer to save (required if state is None)
         state: Optional combined NNX state (e.g. from nnx.split). If provided,
             the model/optimizer arguments are ignored.
-        **kwargs: Additional items to save (e.g., metrics, rng, etc.)
     """
     model_state = None
     optimizer_state = None
@@ -126,15 +123,14 @@ def save_nnx_checkpoint(
         model_state = nnx.state(model)
         optimizer_state = nnx.state(optimizer)
     
-    # Build checkpoint dict
-    ckpt = {
-        'model': model_state,
-        'optimizer': optimizer_state,
-        'step': step,
-        **kwargs,
-    }
-    
-    checkpoint_manager.save(step, ckpt)
+    checkpoint_manager.save(
+        step,
+        args=orbax_checkpoint.args.Composite(
+            model=orbax_checkpoint.args.StandardSave(model_state),
+            optimizer=orbax_checkpoint.args.StandardSave(optimizer_state),
+            step=orbax_checkpoint.args.JsonSave(step),
+        ),
+    )
 
 
 def restore_nnx_checkpoint(
@@ -169,24 +165,25 @@ def restore_nnx_checkpoint(
     # restore namedtuples and other complex structures used by optax optimizers.
     # Without this, tuples become dicts with string keys, breaking optimizer state.
     target = {
-        'model': nnx.state(model),
-        'optimizer': nnx.state(optimizer),
-        'step': 0,
+        "model": nnx.state(model),
+        "optimizer": nnx.state(optimizer),
     }
-    
-    # Restore checkpoint with target structure
-    ckpt = checkpoint_manager.restore(step, items=target)
-    
-    # Merge model and optimizer with restored state
+
+    restored = checkpoint_manager.restore(
+        step,
+        args=orbax_checkpoint.args.Composite(
+            model=orbax_checkpoint.args.StandardRestore(target["model"]),
+            optimizer=orbax_checkpoint.args.StandardRestore(target["optimizer"]),
+            step=orbax_checkpoint.args.JsonRestore(),
+        ),
+    )
+
     model_graphdef, _ = nnx.split(model)
     optimizer_graphdef, _ = nnx.split(optimizer)
-    
-    model = nnx.merge(model_graphdef, ckpt['model'])
-    optimizer = nnx.merge(optimizer_graphdef, ckpt['optimizer'])
-    
-    # Extract extra data (step and any other saved items)
-    extra_data = {k: v for k, v in ckpt.items() if k not in ['model', 'optimizer']}
-    
-    logging.info(f"Successfully restored checkpoint at step: {ckpt.get('step', step)}")
-    
+    model = nnx.merge(model_graphdef, restored.model)
+    optimizer = nnx.merge(optimizer_graphdef, restored.optimizer)
+    extra_data = {"step": restored.step}
+
+    logging.info(f"Successfully restored checkpoint at step: {restored.step}")
+
     return model, optimizer, extra_data
