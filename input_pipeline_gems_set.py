@@ -12,11 +12,13 @@ Configuration keys:
 - ``split_seed``: Seed for train/validation split (default ``42``).
 - ``max_precursor_mz``: Filter out spectra with precursor m/z above this threshold
   (default ``1000.0``).
+- ``pair_sequence_length``: Fixed length for paired token sequences (default ``256``).
 
 MassSpecGym entries use the HDF5 ``fold`` field; only the non-train split is written for evaluation.
 Peaks outside the range ``[20.0, precursor_mz - 2.5]`` are removed when precursor m/z is
-non-zero; otherwise the upper bound is ``1000.0``. The peak list is then compacted and sorted
-before any intensity scaling.
+non-zero; otherwise the upper bound is ``1000.0``. The peak list is then compacted and sorted.
+Padding is removed and tokens are produced for m/z (bin width 1), precursor m/z (bin width 1),
+and log-binned intensities. Vocabulary also includes special tokens: ``[PAD] [CLS] [SEP] [MASK]``.
 """
 
 from __future__ import annotations
@@ -48,6 +50,11 @@ _DEFAULT_MAX_PRECURSOR_MZ = 1000.0
 _PEAK_MZ_MIN = 20.0
 _PEAK_MZ_MAX = 1000.0
 _PRECURSOR_MZ_WINDOW = 2.5
+_INTENSITY_BINS = 128
+_INTENSITY_EPS = 1e-4
+_SPECIAL_TOKENS = {"[PAD]": 0, "[CLS]": 1, "[SEP]": 2, "[MASK]": 3}
+_NUM_SPECIAL_TOKENS = len(_SPECIAL_TOKENS)
+_DEFAULT_PAIR_SEQUENCE_LENGTH = 256
 
 _METADATA_FILENAME = "metadata.json"
 
@@ -291,7 +298,7 @@ def _parse_example(serialized: tf.Tensor) -> dict[str, tf.Tensor]:
         "mz": parsed["mz"],
         "intensity": parsed["intensity"],
         "rt": parsed["rt"][0],
-        "precursor_mz": parsed["precursor_mz"],
+        "precursor_mz": parsed["precursor_mz"][0],
     }
 
 
@@ -339,6 +346,82 @@ def _compact_sort_peaks():
     return apply
 
 
+def _strip_padding_and_tokenize(max_precursor_mz: float):
+    eps = tf.constant(_INTENSITY_EPS, tf.float32)
+    log_eps = tf.math.log(eps)
+    denom = -log_eps
+    bins = tf.constant(_INTENSITY_BINS - 1, tf.float32)
+    mz_bins = int(_PEAK_MZ_MAX) + 1
+    precursor_bins = int(max_precursor_mz) + 1
+    mz_offset = tf.constant(_NUM_SPECIAL_TOKENS, tf.int32)
+    precursor_offset = tf.constant(_NUM_SPECIAL_TOKENS + mz_bins, tf.int32)
+    intensity_offset = tf.constant(_NUM_SPECIAL_TOKENS + mz_bins + precursor_bins, tf.int32)
+
+    def apply(example: dict) -> dict:
+        mz = example["mz"]
+        intensity = example["intensity"]
+        keep = mz > 0
+        mz = tf.boolean_mask(mz, keep)
+        intensity = tf.boolean_mask(intensity, keep)
+        mz_tokens = tf.cast(tf.floor(mz), tf.int32) + mz_offset
+        precursor_tokens = tf.cast(
+            tf.floor(tf.clip_by_value(example["precursor_mz"], 0.0, max_precursor_mz)),
+            tf.int32,
+        ) + precursor_offset
+        intensity = tf.clip_by_value(intensity, eps, 1.0)
+        s = (tf.math.log(intensity) - log_eps) / denom
+        tokens = tf.floor(s * bins)
+        example["mz"] = mz_tokens
+        example["intensity"] = tf.cast(tokens, tf.int32) + intensity_offset
+        example["precursor_mz"] = precursor_tokens
+        return example
+
+    return apply
+
+
+def _pair_spectra_and_build_input(max_len: int):
+    cls_id = tf.constant(_SPECIAL_TOKENS["[CLS]"], tf.int32)
+    sep_id = tf.constant(_SPECIAL_TOKENS["[SEP]"], tf.int32)
+    pad_id = tf.constant(_SPECIAL_TOKENS["[PAD]"], tf.int32)
+
+    def interleave(mz: tf.Tensor, intensity: tf.Tensor) -> tf.Tensor:
+        pair = tf.stack([mz, intensity], axis=1)
+        return tf.reshape(pair, [-1])
+
+    def build_sequence(mz: tf.Tensor, intensity: tf.Tensor, precursor: tf.Tensor) -> tf.Tensor:
+        peaks = interleave(mz, intensity)
+        return tf.concat([precursor[None], peaks], axis=0)
+
+    def apply(example: dict) -> dict:
+        mz = example["mz"]
+        intensity = example["intensity"]
+        precursor = tf.reshape(example["precursor_mz"], [-1])
+
+        seq1 = build_sequence(mz[0], intensity[0], precursor[0])
+        seq2 = build_sequence(mz[1], intensity[1], precursor[1])
+
+        tokens = tf.concat([cls_id[None], seq1, sep_id[None], seq2], axis=0)
+        seg = tf.concat(
+            [
+                tf.zeros([tf.shape(seq1)[0] + 2], tf.int32),
+                tf.ones([tf.shape(seq2)[0]], tf.int32),
+            ],
+            axis=0,
+        )
+
+        tokens = tokens[:max_len]
+        seg = seg[:max_len]
+        pad_len = max_len - tf.shape(tokens)[0]
+        tokens = tf.pad(tokens, [[0, pad_len]], constant_values=pad_id)
+        seg = tf.pad(seg, [[0, pad_len]], constant_values=0)
+
+        example["token_ids"] = tokens
+        example["segment_ids"] = seg
+        return example
+
+    return apply
+
+
 def _load_config(path: str) -> config_dict.ConfigDict:
     spec = importlib.util.spec_from_file_location("gems_dataset_config", path)
     module = importlib.util.module_from_spec(spec)
@@ -354,6 +437,7 @@ def _build_dataset(
     repeat: bool,
     drop_remainder: bool,
     max_precursor_mz: float = _DEFAULT_MAX_PRECURSOR_MZ,
+    pair_sequence_length: int = _DEFAULT_PAIR_SEQUENCE_LENGTH,
 ) -> tf.data.Dataset:
     """Build tf.data pipeline."""
     ds = tf.data.TFRecordDataset(filenames, compression_type="GZIP", num_parallel_reads=tf.data.AUTOTUNE)
@@ -364,13 +448,21 @@ def _build_dataset(
         num_parallel_calls=tf.data.AUTOTUNE,
     )
     ds = ds.map(_compact_sort_peaks(), num_parallel_calls=tf.data.AUTOTUNE)
+    ds = ds.map(
+        _strip_padding_and_tokenize(max_precursor_mz),
+        num_parallel_calls=tf.data.AUTOTUNE,
+    )
+    if repeat:
+        ds = ds.repeat()
     if shuffle_buffer > 0:
         ds = ds.shuffle(shuffle_buffer, seed=seed, reshuffle_each_iteration=True)
 
-    if repeat:
-        ds = ds.repeat()
-
-    ds = ds.batch(batch_size, drop_remainder=drop_remainder)
+    ds = ds.ragged_batch(2, drop_remainder=True)
+    ds = ds.map(
+        _pair_spectra_and_build_input(pair_sequence_length),
+        num_parallel_calls=tf.data.AUTOTUNE,
+    )
+    ds = ds.ragged_batch(batch_size, drop_remainder=drop_remainder)
     ds = ds.prefetch(tf.data.AUTOTUNE)
     return ds
 
@@ -392,6 +484,7 @@ def create_gems_set_datasets(
     num_shards = int(config.get("num_shards", _DEFAULT_NUM_SHARDS))
     drop_remainder = bool(config.get("drop_remainder", False))
     max_precursor_mz = float(config.get("max_precursor_mz", _DEFAULT_MAX_PRECURSOR_MZ))
+    pair_sequence_length = int(config.get("pair_sequence_length", _DEFAULT_PAIR_SEQUENCE_LENGTH))
 
     metadata = _ensure_processed(output_dir, validation_fraction, split_seed, num_shards)
 
@@ -409,6 +502,7 @@ def create_gems_set_datasets(
         repeat=True,
         drop_remainder=drop_remainder,
         max_precursor_mz=max_precursor_mz,
+        pair_sequence_length=pair_sequence_length,
     )
     val_ds = _build_dataset(
         val_files,
@@ -418,6 +512,7 @@ def create_gems_set_datasets(
         repeat=True,
         drop_remainder=False,
         max_precursor_mz=max_precursor_mz,
+        pair_sequence_length=pair_sequence_length,
     )
 
     val_iters = {"validation": val_ds.as_numpy_iterator()}
@@ -431,15 +526,32 @@ def create_gems_set_datasets(
             repeat=True,
             drop_remainder=True,
             max_precursor_mz=max_precursor_mz,
+            pair_sequence_length=pair_sequence_length,
         )
         val_iters["massspec_test"] = test_ds.as_numpy_iterator()
 
+    mz_bins = int(_PEAK_MZ_MAX) + 1
+    precursor_bins = int(max_precursor_mz) + 1
+    mz_offset = _NUM_SPECIAL_TOKENS
+    precursor_offset = mz_offset + mz_bins
+    intensity_offset = precursor_offset + precursor_bins
+    vocab_size = intensity_offset + _INTENSITY_BINS
     info = {
         "tfrecord_dir": str(output_dir),
         "train_size": metadata["train_size"],
         "validation_size": metadata["validation_size"],
         "massspec_test_size": metadata.get("massspec_test_size", 0),
         "num_peaks": _NUM_PEAKS,
+        "intensity_bins": _INTENSITY_BINS,
+        "intensity_eps": _INTENSITY_EPS,
+        "mz_bins": mz_bins,
+        "mz_offset": mz_offset,
+        "precursor_bins": precursor_bins,
+        "precursor_offset": precursor_offset,
+        "intensity_offset": intensity_offset,
+        "vocab_size": vocab_size,
+        "special_tokens": dict(_SPECIAL_TOKENS),
+        "pair_sequence_length": pair_sequence_length,
     }
 
     return train_ds.as_numpy_iterator(), val_iters, info
@@ -462,7 +574,10 @@ if __name__ == "__main__":
     print("\nSample batch:")
     batch = next(train_iter)
     for k, v in batch.items():
-        print(f"  {k}: shape={v.shape}, dtype={v.dtype}")
+        v_type = type(v)
+        v_shape = getattr(v, "shape", None)
+        v_dtype = getattr(v, "dtype", None)
+        print(f"  {k}: type={v_type}, shape={v_shape}, dtype={v_dtype}")
 
-    print("\nFirst sample m/z (non-zero):", batch["mz"][0][batch["mz"][0] > 0][:10])
-    print("First sample intensity (non-zero):", batch["intensity"][0][batch["intensity"][0] > 0][:10])
+    print("\nFirst sample token_ids:", batch["token_ids"][0][:20])
+    print("First sample segment_ids:", batch["segment_ids"][0][:20])

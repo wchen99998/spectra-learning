@@ -120,6 +120,8 @@ class BERT(nnx.Module):
         *,
         vocab_size: int,
         max_length: int,
+        precursor_bins: int,
+        precursor_offset: int,
         model_dim: int = 256,
         num_layers: int = 6,
         num_heads: int = 8,
@@ -136,6 +138,8 @@ class BERT(nnx.Module):
     ):
         self.vocab_size = int(vocab_size)
         self.max_length = int(max_length)
+        self.precursor_bins = int(precursor_bins)
+        self.precursor_offset = int(precursor_offset)
         self.model_dim = int(model_dim)
         self.num_layers = int(num_layers)
         self.num_heads = int(num_heads)
@@ -208,8 +212,22 @@ class BERT(nnx.Module):
             kernel_init=lm_head_init,
             rngs=rngs,
         )
-
-        self.mask_rngs = rngs["mask"].fork()
+        self.precursor_head = nnx.Linear(
+            in_features=self.model_dim,
+            out_features=2 * self.precursor_bins,
+            dtype=dtype,
+            param_dtype=param_dtype,
+            kernel_init=lm_head_init,
+            rngs=rngs,
+        )
+        self.retention_head = nnx.Linear(
+            in_features=self.model_dim,
+            out_features=2,
+            dtype=dtype,
+            param_dtype=param_dtype,
+            kernel_init=lm_head_init,
+            rngs=rngs,
+        )
 
     def _make_attention_bias(self, allow: jnp.ndarray, *, dtype: jnp.dtype) -> jnp.ndarray:
         neg = jnp.asarray(-1e9, dtype=dtype)
@@ -219,17 +237,10 @@ class BERT(nnx.Module):
 
     def _mask_tokens(
         self,
-        key,
         token_ids: jnp.ndarray,
         attention_mask: jnp.ndarray,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
-        candidate = (
-            attention_mask
-            & (token_ids != self.cls_token_id)
-            & (token_ids != self.sep_token_id)
-        )
-        scores = jax.random.uniform(key, token_ids.shape)
-        mask = (scores < self.mask_ratio) & candidate
+        mask = attention_mask & (token_ids != self.cls_token_id)
         masked_tokens = jnp.where(mask, self.mask_token_id, token_ids)
         return masked_tokens, mask
 
@@ -265,6 +276,36 @@ class BERT(nnx.Module):
         correct = (pred == labels) & mask
         return jnp.sum(correct) / jnp.sum(mask)
 
+    def _precursor_metrics(
+        self,
+        cls_state: jnp.ndarray,
+        precursor_tokens: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        logits = self.precursor_head(cls_state).reshape(
+            cls_state.shape[0], 2, self.precursor_bins
+        )
+        labels = precursor_tokens - self.precursor_offset
+        labels = labels.astype(jnp.int32)
+        per_token = optax.softmax_cross_entropy_with_integer_labels(logits, labels)
+        loss = jnp.mean(per_token)
+        pred = jnp.argmax(logits, axis=-1)
+        acc = jnp.mean((pred == labels).astype(jnp.float32))
+        return loss, acc
+
+    def _retention_metrics(
+        self,
+        cls_state: jnp.ndarray,
+        rt: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        logits = self.retention_head(cls_state)
+        labels = jnp.where(rt[:, 0] < rt[:, 1], 0, 1).astype(jnp.int32)
+        loss = jnp.mean(
+            optax.softmax_cross_entropy_with_integer_labels(logits, labels)
+        )
+        pred = jnp.argmax(logits, axis=-1)
+        acc = jnp.mean((pred == labels).astype(jnp.float32))
+        return loss, acc
+
     def __call__(
         self,
         batch: dict[str, jnp.ndarray],
@@ -280,8 +321,7 @@ class BERT(nnx.Module):
         attention_mask = token_ids != self.pad_token_id
 
         if apply_mask:
-            key = self.mask_rngs()
-            masked_tokens, mask = self._mask_tokens(key, token_ids, attention_mask)
+            masked_tokens, mask = self._mask_tokens(token_ids, attention_mask)
         else:
             masked_tokens = token_ids
             mask = jnp.zeros_like(attention_mask, dtype=jnp.bool_)
@@ -294,11 +334,23 @@ class BERT(nnx.Module):
         mlm_loss = self._masked_cross_entropy(logits, token_ids, mask)
         token_accuracy = self._masked_accuracy(logits, token_ids, mask)
         mask_ratio_actual = jnp.mean(mask.astype(jnp.float32))
+        cls_state = encoded[:, 0, :]
+        precursor_tokens = jnp.asarray(batch["precursor_mz"])
+        rt = jnp.asarray(batch["rt"])
+        precursor_loss, precursor_accuracy = self._precursor_metrics(
+            cls_state, precursor_tokens
+        )
+        retention_loss, retention_accuracy = self._retention_metrics(cls_state, rt)
+        loss = mlm_loss + precursor_loss + retention_loss
 
         return {
-            "loss": mlm_loss,
+            "loss": loss,
             "token_accuracy": token_accuracy,
             "mask_ratio_actual": mask_ratio_actual,
+            "precursor_loss": precursor_loss,
+            "precursor_accuracy": precursor_accuracy,
+            "retention_loss": retention_loss,
+            "retention_accuracy": retention_accuracy,
         }
 
     def encode(self, batch: dict[str, jnp.ndarray], *, train: bool = False) -> jnp.ndarray:
@@ -322,6 +374,10 @@ def _create_metrics_class():
         loss=clu_metrics.Average.from_output("loss"),
         token_accuracy=clu_metrics.Average.from_output("token_accuracy"),
         mask_ratio_actual=clu_metrics.Average.from_output("mask_ratio_actual"),
+        precursor_loss=clu_metrics.Average.from_output("precursor_loss"),
+        precursor_accuracy=clu_metrics.Average.from_output("precursor_accuracy"),
+        retention_loss=clu_metrics.Average.from_output("retention_loss"),
+        retention_accuracy=clu_metrics.Average.from_output("retention_accuracy"),
     )
 
 

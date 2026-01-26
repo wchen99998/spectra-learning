@@ -31,6 +31,10 @@ def prefix_metrics(metrics: Mapping[str, Any], prefix: str) -> dict[str, Any]:
     metrics_dict = dict(metrics)
     return {f"{normalized_prefix}{key}": value for key, value in metrics_dict.items()}
 
+def select_model_batch(batch: Mapping[str, Any]) -> dict[str, Any]:
+    keys = ("token_ids", "segment_ids", "precursor_mz", "rt")
+    return {key: batch[key] for key in keys}
+
 
 def shard_batch_element(
     element,
@@ -55,6 +59,7 @@ def prefetch_sharded_batches(
 ):
     """Prefetch and shard batches to devices in a background thread."""
     def maybe_shard(batch):
+        batch = select_model_batch(batch)
         return jax.tree.map(lambda x: shard_batch_element(x, data_sharding), batch)
 
     if prefetch_size is None or prefetch_size <= 0:
@@ -115,8 +120,6 @@ def eval_step(
     metrics_class: type[clu_metrics.Collection],
 ) -> clu_metrics.Collection:
     """Compute the metrics for the given model in inference mode."""
-    logging.info("eval_step(batch=%s)", batch)
-
     metrics_dict = model(
         batch,
         train=False,
@@ -179,7 +182,8 @@ def evaluate(
     
     with utils.StepTraceContextHelper("eval", 0) as trace_context:
         for eval_step, batch_raw in enumerate(iter(eval_loader)):
-            eval_metrics_update = jit_eval_step(model, batch_raw)
+            batch = select_model_batch(batch_raw)
+            eval_metrics_update = jit_eval_step(model, batch)
             eval_metrics = eval_metrics.merge(eval_metrics_update)
 
             if num_eval_steps > 0 and eval_step + 1 == num_eval_steps:

@@ -36,6 +36,15 @@ def create_datasets(
             input_pipeline_gems_set.create_gems_set_datasets(config, seed)
         )
         info.update(gems_info)
+        config.dataset_info = dict(info)
+        config.vocab_size = info["vocab_size"]
+        config.max_length = info["pair_sequence_length"]
+        config.pad_token_id = info["special_tokens"]["[PAD]"]
+        config.cls_token_id = info["special_tokens"]["[CLS]"]
+        config.sep_token_id = info["special_tokens"]["[SEP]"]
+        config.mask_token_id = info["special_tokens"]["[MASK]"]
+        config.precursor_bins = info["precursor_bins"]
+        config.precursor_offset = info["precursor_offset"]
         return train_dataset, eval_dataset, info
     else:
         raise NotImplementedError(
