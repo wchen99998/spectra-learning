@@ -17,11 +17,12 @@ dependencies = [
     "tensorboard==2.19.0",
     "tqdm>=4.66.4",
     "wandb==0.23.1",
+    "flash-attn>=2.8.3",
 ]
 
 [[tool.uv.index]]
 name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.uv.sources]
