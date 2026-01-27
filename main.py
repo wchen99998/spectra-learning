@@ -1,36 +1,39 @@
-import argparse
-import importlib.util
 from pathlib import Path
 
-
-def _disable_tensorflow_gpu():
-    import tensorflow as tf
-
-    tf.config.set_visible_devices([], "GPU")
-
-
-def _load_config(config_path: str):
-    spec = importlib.util.spec_from_file_location("run_config", config_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.get_config()
+import jax
+import tensorflow as tf
+from absl import app, flags, logging
+from ml_collections import config_flags
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Train/eval entrypoint.")
-    parser.add_argument("--config", required=True, help="Path to config file.")
-    parser.add_argument("--workdir", required=True, help="Output directory.")
-    parser.add_argument("--olddir", default=None, help="Optional checkpoint load dir.")
-    args = parser.parse_args()
+tf.config.set_visible_devices([], "GPU")
 
-    _disable_tensorflow_gpu()
-    from train_mae import train_and_evaluate
+from train_mae import train_and_evaluate
 
-    cfg = _load_config(args.config)
-    workdir = Path(args.workdir).expanduser().resolve()
-    olddir = None if args.olddir is None else Path(args.olddir).expanduser().resolve()
-    train_and_evaluate(cfg, workdir=workdir, olddir=olddir)
+_CONFIG = config_flags.DEFINE_config_file(
+    "config",
+    None,
+    "Path to config file.",
+    lock_config=False,
+)
+_WORKDIR = flags.DEFINE_string("workdir", None, "Output directory.")
+_OLDDIR = flags.DEFINE_string(
+    "olddir",
+    None,
+    "Optional checkpoint load dir.",
+)
+flags.mark_flags_as_required(["config", "workdir"])
+
+
+def main(_: list[str]) -> None:
+    logging.set_verbosity(logging.INFO)
+    config = _CONFIG.value
+
+    workdir = Path(_WORKDIR.value).expanduser().resolve()
+    olddir = None if _OLDDIR.value is None else Path(_OLDDIR.value).expanduser().resolve()
+    train_and_evaluate(config, workdir=workdir, olddir=olddir)
 
 
 if __name__ == "__main__":
-    main()
+    jax.config.config_with_absl()
+    app.run(main)

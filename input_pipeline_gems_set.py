@@ -16,8 +16,9 @@ Configuration keys:
 
 MassSpecGym entries use the HDF5 ``fold`` field; only the non-train split is written for evaluation.
 Peaks outside the range ``[20.0, precursor_mz - 2.5]`` are removed when precursor m/z is
-non-zero; otherwise the upper bound is ``1000.0``. The peak list is then compacted and sorted.
-Padding is removed and tokens are produced for m/z (bin width 1), precursor m/z (bin width 1),
+non-zero; otherwise the upper bound is ``1000.0``. The peak list is then filtered to the top-64
+intensities, compacted, and sorted.
+Padding is removed and tokens are produced for m/z (bin width 1), precursor m/z (bin width 1, shared with m/z),
 and log-binned intensities. Vocabulary also includes special tokens: ``[PAD] [CLS] [SEP] [MASK]``.
 """
 
@@ -33,6 +34,8 @@ from typing import Optional
 
 import numpy as np
 import tensorflow as tf
+
+tf.config.set_visible_devices([], "GPU")
 from huggingface_hub import hf_hub_download
 from ml_collections import config_dict
 from tqdm import tqdm
@@ -45,7 +48,8 @@ _DEFAULT_VALIDATION_FRACTION = 0.05
 _DEFAULT_TFRECORD_DIR = Path("data/gems_peaklist_tfrecord")
 _DEFAULT_SPLIT_SEED = 42
 _DEFAULT_NUM_SHARDS = 4
-_NUM_PEAKS = 128
+_NUM_PEAKS_INPUT = 128
+_NUM_PEAKS_OUTPUT = 64
 _DEFAULT_MAX_PRECURSOR_MZ = 1000.0
 _PEAK_MZ_MIN = 20.0
 _PEAK_MZ_MAX = 1000.0
@@ -288,8 +292,8 @@ def _ensure_processed(
 def _parse_example(serialized: tf.Tensor) -> dict[str, tf.Tensor]:
     """Parse a TFRecord example."""
     features = {
-        "mz": tf.io.FixedLenFeature([_NUM_PEAKS], tf.float32),
-        "intensity": tf.io.FixedLenFeature([_NUM_PEAKS], tf.float32),
+        "mz": tf.io.FixedLenFeature([_NUM_PEAKS_INPUT], tf.float32),
+        "intensity": tf.io.FixedLenFeature([_NUM_PEAKS_INPUT], tf.float32),
         "rt": tf.io.FixedLenFeature([1], tf.float32),
         "precursor_mz": tf.io.FixedLenFeature([1], tf.float32),
     }
@@ -338,9 +342,21 @@ def _compact_sort_peaks():
         sorted_idx = tf.argsort(kept_intensity, direction="DESCENDING")
         kept_mz = tf.gather(kept_mz, sorted_idx)
         kept_intensity = tf.gather(kept_intensity, sorted_idx)
-        pad = _NUM_PEAKS - tf.shape(kept_mz)[0]
+        pad = _NUM_PEAKS_OUTPUT - tf.shape(kept_mz)[0]
         example["mz"] = tf.pad(kept_mz, [[0, pad]])
         example["intensity"] = tf.pad(kept_intensity, [[0, pad]])
+        return example
+
+    return apply
+
+
+def _topk_peaks(num_peaks: int):
+    def apply(example: dict) -> dict:
+        intensity = example["intensity"]
+        mz = example["mz"]
+        values, indices = tf.math.top_k(intensity, k=num_peaks, sorted=True)
+        example["intensity"] = values
+        example["mz"] = tf.gather(mz, indices)
         return example
 
     return apply
@@ -354,8 +370,8 @@ def _strip_padding_and_tokenize(max_precursor_mz: float):
     mz_bins = int(_PEAK_MZ_MAX) + 1
     precursor_bins = int(max_precursor_mz) + 1
     mz_offset = tf.constant(_NUM_SPECIAL_TOKENS, tf.int32)
-    precursor_offset = tf.constant(_NUM_SPECIAL_TOKENS + mz_bins, tf.int32)
-    intensity_offset = tf.constant(_NUM_SPECIAL_TOKENS + mz_bins + precursor_bins, tf.int32)
+    precursor_offset = mz_offset
+    intensity_offset = tf.constant(_NUM_SPECIAL_TOKENS + mz_bins, tf.int32)
 
     def apply(example: dict) -> dict:
         mz = example["mz"]
@@ -422,6 +438,33 @@ def _pair_spectra_and_build_input(max_len: int):
     return apply
 
 
+def _apply_mlm_mask(mask_ratio: float, mask_token_id: int):
+    cls_id = tf.constant(_SPECIAL_TOKENS["[CLS]"], tf.int32)
+    pad_id = tf.constant(_SPECIAL_TOKENS["[PAD]"], tf.int32)
+    mask_token = tf.constant(mask_token_id, tf.int32)
+    mask_ratio_t = tf.constant(mask_ratio, tf.float32)
+
+    def apply(batch: dict) -> dict:
+        token_ids = batch["token_ids"].to_tensor()
+        batch["token_ids"] = token_ids
+        batch["segment_ids"] = batch["segment_ids"].to_tensor()
+        maskable = tf.logical_and(token_ids != cls_id, token_ids != pad_id)
+        seq_len = tf.shape(token_ids)[1]
+        mask_count = tf.cast(mask_ratio_t * tf.cast(seq_len, tf.float32), tf.int32)
+        scores = tf.random.uniform(tf.shape(token_ids), dtype=tf.float32)
+        scores = tf.where(maskable, scores, tf.constant(-1.0, tf.float32))
+        _, mask_idx = tf.math.top_k(scores, k=mask_count, sorted=False)
+        mask = tf.reduce_any(
+            tf.one_hot(mask_idx, seq_len, on_value=True, off_value=False, dtype=tf.bool),
+            axis=1,
+        )
+        batch["masked_token_ids"] = tf.where(mask, mask_token, token_ids)
+        batch["mlm_mask"] = mask
+        return batch
+
+    return apply
+
+
 def _load_config(path: str) -> config_dict.ConfigDict:
     spec = importlib.util.spec_from_file_location("gems_dataset_config", path)
     module = importlib.util.module_from_spec(spec)
@@ -438,6 +481,8 @@ def _build_dataset(
     drop_remainder: bool,
     max_precursor_mz: float = _DEFAULT_MAX_PRECURSOR_MZ,
     pair_sequence_length: int = _DEFAULT_PAIR_SEQUENCE_LENGTH,
+    mask_ratio: float = 0.15,
+    mask_token_id: int = _SPECIAL_TOKENS["[MASK]"],
 ) -> tf.data.Dataset:
     """Build tf.data pipeline."""
     ds = tf.data.TFRecordDataset(filenames, compression_type="GZIP", num_parallel_reads=tf.data.AUTOTUNE)
@@ -447,6 +492,7 @@ def _build_dataset(
         _filter_peak_mz_range(_PEAK_MZ_MIN, _PEAK_MZ_MAX, _PRECURSOR_MZ_WINDOW),
         num_parallel_calls=tf.data.AUTOTUNE,
     )
+    ds = ds.map(_topk_peaks(_NUM_PEAKS_OUTPUT), num_parallel_calls=tf.data.AUTOTUNE)
     ds = ds.map(_compact_sort_peaks(), num_parallel_calls=tf.data.AUTOTUNE)
     ds = ds.map(
         _strip_padding_and_tokenize(max_precursor_mz),
@@ -463,6 +509,10 @@ def _build_dataset(
         num_parallel_calls=tf.data.AUTOTUNE,
     )
     ds = ds.ragged_batch(batch_size, drop_remainder=drop_remainder)
+    ds = ds.map(
+        _apply_mlm_mask(mask_ratio, mask_token_id),
+        num_parallel_calls=tf.data.AUTOTUNE,
+    )
     ds = ds.prefetch(tf.data.AUTOTUNE)
     return ds
 
@@ -485,6 +535,8 @@ def create_gems_set_datasets(
     drop_remainder = bool(config.get("drop_remainder", False))
     max_precursor_mz = float(config.get("max_precursor_mz", _DEFAULT_MAX_PRECURSOR_MZ))
     pair_sequence_length = int(config.get("pair_sequence_length", _DEFAULT_PAIR_SEQUENCE_LENGTH))
+    mask_ratio = float(config.get("mask_ratio", 0.15))
+    mask_token_id = int(config.get("mask_token_id", _SPECIAL_TOKENS["[MASK]"]))
 
     metadata = _ensure_processed(output_dir, validation_fraction, split_seed, num_shards)
 
@@ -503,6 +555,8 @@ def create_gems_set_datasets(
         drop_remainder=drop_remainder,
         max_precursor_mz=max_precursor_mz,
         pair_sequence_length=pair_sequence_length,
+        mask_ratio=mask_ratio,
+        mask_token_id=mask_token_id,
     )
     val_ds = _build_dataset(
         val_files,
@@ -513,6 +567,8 @@ def create_gems_set_datasets(
         drop_remainder=False,
         max_precursor_mz=max_precursor_mz,
         pair_sequence_length=pair_sequence_length,
+        mask_ratio=mask_ratio,
+        mask_token_id=mask_token_id,
     )
 
     val_iters = {"validation": val_ds.as_numpy_iterator()}
@@ -527,21 +583,23 @@ def create_gems_set_datasets(
             drop_remainder=True,
             max_precursor_mz=max_precursor_mz,
             pair_sequence_length=pair_sequence_length,
+            mask_ratio=mask_ratio,
+            mask_token_id=mask_token_id,
         )
         val_iters["massspec_test"] = test_ds.as_numpy_iterator()
 
     mz_bins = int(_PEAK_MZ_MAX) + 1
     precursor_bins = int(max_precursor_mz) + 1
     mz_offset = _NUM_SPECIAL_TOKENS
-    precursor_offset = mz_offset + mz_bins
-    intensity_offset = precursor_offset + precursor_bins
+    precursor_offset = mz_offset
+    intensity_offset = mz_offset + mz_bins
     vocab_size = intensity_offset + _INTENSITY_BINS
     info = {
         "tfrecord_dir": str(output_dir),
         "train_size": metadata["train_size"],
         "validation_size": metadata["validation_size"],
         "massspec_test_size": metadata.get("massspec_test_size", 0),
-        "num_peaks": _NUM_PEAKS,
+        "num_peaks": _NUM_PEAKS_OUTPUT,
         "intensity_bins": _INTENSITY_BINS,
         "intensity_eps": _INTENSITY_EPS,
         "mz_bins": mz_bins,

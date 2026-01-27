@@ -8,7 +8,7 @@ def get_config() -> config_dict.ConfigDict:
     # Dataset
     cfg.dataset = "gems_a"
     cfg.tfrecord_dir = "data/gems_peaklist_tfrecord"
-    cfg.batch_size = 64
+    cfg.batch_size = 256
     cfg.validation_fraction = 0.05
     cfg.shuffle_buffer = 10_000
     cfg.split_seed = 42
@@ -20,9 +20,9 @@ def get_config() -> config_dict.ConfigDict:
 
     # Model (BERT)
     cfg.model_type = "bert"
-    cfg.model_dim = 128
-    cfg.num_layers = 16
-    cfg.num_heads = 8
+    cfg.model_dim = 640
+    cfg.num_layers = 20
+    cfg.num_heads = 10
     cfg.num_kv_heads = None
     cfg.attention_mlp_multiple = 4.0
     cfg.num_segments = 2

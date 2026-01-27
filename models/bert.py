@@ -47,14 +47,11 @@ def _build_transformer_blocks(
                 causal=False,
                 dtype=dtype,
                 param_dtype=param_dtype,
-                norm_type="layernorm",
                 norm_eps=1e-5,
                 mlp_type="swish",
                 multiple_of=4,
                 hidden_dim=hidden_dim,
                 w_init_scale=1.0,
-                use_cross_attention=False,
-                cross_attention_dim=None,
                 use_rotary_embeddings=False,
             )
         )
@@ -86,7 +83,7 @@ class TransformerStack(nnx.Module):
             dtype=dtype,
             param_dtype=param_dtype,
         )
-        self.norm = nnx.LayerNorm(
+        self.norm = nnx.RMSNorm(
             num_features=dim,
             dtype=dtype,
             param_dtype=param_dtype,
@@ -153,6 +150,7 @@ class BERT(nnx.Module):
         self.sep_token_id = int(sep_token_id)
         self.dtype = dtype
         self.param_dtype = param_dtype
+        self.rngs = rngs
 
         embed_init = nnx.with_partitioning(
             nnx.initializers.variance_scaling(1.0, "fan_in", "normal", out_axis=0),
@@ -239,10 +237,18 @@ class BERT(nnx.Module):
         self,
         token_ids: jnp.ndarray,
         attention_mask: jnp.ndarray,
-    ) -> tuple[jnp.ndarray, jnp.ndarray]:
-        mask = attention_mask & (token_ids != self.cls_token_id)
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        maskable = attention_mask & (token_ids != self.cls_token_id)
+        seq_len = token_ids.shape[1]
+        mask_count = int(self.mask_ratio * seq_len)
+        scores = jax.random.uniform(self.rngs.mask(), token_ids.shape, dtype=jnp.float32)
+        scores = jnp.where(maskable, scores, -1.0)
+        _, mask_idx = jax.lax.top_k(scores, mask_count)
+        batch_idx = jnp.arange(token_ids.shape[0])[:, None]
+        mask = jnp.zeros_like(maskable)
+        mask = mask.at[batch_idx, mask_idx].set(True)
         masked_tokens = jnp.where(mask, self.mask_token_id, token_ids)
-        return masked_tokens, mask
+        return masked_tokens, mask, mask_idx
 
     def _embed_inputs(
         self,
@@ -273,8 +279,9 @@ class BERT(nnx.Module):
         mask: jnp.ndarray,
     ) -> jnp.ndarray:
         pred = jnp.argmax(logits, axis=-1)
-        correct = (pred == labels) & mask
-        return jnp.sum(correct) / jnp.sum(mask)
+        correct = (pred == labels).astype(jnp.float32)
+        mask_f = mask.astype(jnp.float32)
+        return jnp.sum(correct * mask_f) / jnp.sum(mask_f)
 
     def _precursor_metrics(
         self,
@@ -321,7 +328,8 @@ class BERT(nnx.Module):
         attention_mask = token_ids != self.pad_token_id
 
         if apply_mask:
-            masked_tokens, mask = self._mask_tokens(token_ids, attention_mask)
+            masked_tokens = jnp.asarray(batch["masked_token_ids"])
+            mask = jnp.asarray(batch["mlm_mask"])
         else:
             masked_tokens = token_ids
             mask = jnp.zeros_like(attention_mask, dtype=jnp.bool_)
@@ -331,8 +339,12 @@ class BERT(nnx.Module):
         encoded = self.encoder(x, train=train, attention_bias=attention_bias)
         logits = self.lm_head(encoded)
 
-        mlm_loss = self._masked_cross_entropy(logits, token_ids, mask)
-        token_accuracy = self._masked_accuracy(logits, token_ids, mask)
+        if apply_mask:
+            mlm_loss = self._masked_cross_entropy(logits, token_ids, mask)
+            token_accuracy = self._masked_accuracy(logits, token_ids, mask)
+        else:
+            mlm_loss = jnp.asarray(0.0, dtype=logits.dtype)
+            token_accuracy = jnp.asarray(0.0, dtype=jnp.float32)
         mask_ratio_actual = jnp.mean(mask.astype(jnp.float32))
         cls_state = encoded[:, 0, :]
         precursor_tokens = jnp.asarray(batch["precursor_mz"])

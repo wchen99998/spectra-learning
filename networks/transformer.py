@@ -32,7 +32,6 @@ class ModelArgs:
     hidden_dim: Optional[int] = None
     multiple_of: int = 32
     norm_eps: float = 1e-5
-    norm_type: str = "rmsnorm"
     w_init_scale: float = 1.0
     depth_scaled_init: bool = False
     mlp_type: str = "swiglu"
@@ -44,13 +43,7 @@ class ModelArgs:
     param_dtype: jnp.dtype = jnp.float32
     rope_theta: float = 10000.0
     use_rotary_embeddings: bool = True
-    use_cross_attention: bool = False
-    cross_attention_layers: Optional[int] = None
-    cross_attention_proj_dim: Optional[int] = None
     input_dim: Optional[int] = None  # Required when embed_input is False
-    cross_attention_input_dim: Optional[int] = (
-        None  # Required when projecting cross attention inputs
-    )
 
 
 def precompute_freqs_cis(dim, end, theta: float = 10000.0, dtype=jnp.float32):
@@ -110,7 +103,6 @@ def repeat_kv(x, n_rep):
 
 
 def _make_norm(
-    norm_type: str,
     rngs: nnx.Rngs,
     *,
     num_features: int,
@@ -118,23 +110,13 @@ def _make_norm(
     param_dtype: jnp.dtype,
     epsilon: float,
 ):
-    norm_key = norm_type.lower()
-    if norm_key == "rmsnorm":
-        return nnx.RMSNorm(
-            num_features=num_features,
-            epsilon=epsilon,
-            dtype=dtype,
-            param_dtype=param_dtype,
-            rngs=rngs,
-        )
-    if norm_key == "layernorm":
-        return nnx.LayerNorm(
-            num_features=num_features,
-            dtype=dtype,
-            param_dtype=param_dtype,
-            rngs=rngs,
-        )
-    raise ValueError(f"Unsupported norm_type: {norm_type}")
+    return nnx.RMSNorm(
+        num_features=num_features,
+        epsilon=epsilon,
+        dtype=dtype,
+        param_dtype=param_dtype,
+        rngs=rngs,
+    )
 
 
 class Attention(nnx.Module):
@@ -166,27 +148,9 @@ class Attention(nnx.Module):
             nnx.initializers.xavier_normal(), ("attn_o", "hidden")
         )
 
-        self.wq = nnx.Linear(
+        self.wqkv = nnx.Linear(
             in_features=self.dim,
-            out_features=self.n_heads * self.head_dim,
-            use_bias=qkv_bias,
-            dtype=dtype,
-            param_dtype=param_dtype,
-            kernel_init=init_qkv,
-            rngs=rngs,
-        )
-        self.wk = nnx.Linear(
-            in_features=self.dim,
-            out_features=self._n_kv_heads * self.head_dim,
-            use_bias=qkv_bias,
-            dtype=dtype,
-            param_dtype=param_dtype,
-            kernel_init=init_qkv,
-            rngs=rngs,
-        )
-        self.wv = nnx.Linear(
-            in_features=self.dim,
-            out_features=self._n_kv_heads * self.head_dim,
+            out_features=(self.n_heads + 2 * self._n_kv_heads) * self.head_dim,
             use_bias=qkv_bias,
             dtype=dtype,
             param_dtype=param_dtype,
@@ -214,9 +178,10 @@ class Attention(nnx.Module):
         del train  # Attention is deterministic in this model.
         bsz, seqlen, _ = x.shape
 
-        xq = self.wq(x)
-        xk = self.wk(x)
-        xv = self.wv(x)
+        qkv = self.wqkv(x)
+        q_size = self.n_heads * self.head_dim
+        kv_size = self._n_kv_heads * self.head_dim
+        xq, xk, xv = jnp.split(qkv, [q_size, q_size + kv_size], axis=-1)
 
         xq = xq.reshape(bsz, seqlen, self.n_heads, self.head_dim)
         xk = xk.reshape(bsz, seqlen, self._n_kv_heads, self.head_dim)
@@ -225,128 +190,17 @@ class Attention(nnx.Module):
         if freqs_cos is not None and freqs_sin is not None:
             xq, xk = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin)
 
-        xk = repeat_kv(xk, self.n_rep)
-        xv = repeat_kv(xv, self.n_rep)
-
-        xq = xq.swapaxes(1, 2)
-        xk = xk.swapaxes(1, 2)
-        xv = xv.swapaxes(1, 2)
-
-        xk_transposed = xk.swapaxes(2, 3)
-        scores = jnp.matmul(
-            xq.astype(jnp.float32), xk_transposed.astype(jnp.float32)
-        ) / math.sqrt(self.head_dim)
-        if self.causal:
-            mask = jnp.full((1, 1, seqlen, seqlen), -jnp.inf, dtype=jnp.float32)
-            mask = jnp.triu(mask, k=1)
-            scores = scores + mask[:, :, :seqlen, :seqlen]
-        if attention_bias is not None:
-            if attention_bias.ndim == 2:
-                attention_bias = attention_bias[:, None, None, :]
-            elif attention_bias.ndim == 3:
-                attention_bias = attention_bias[:, None, :, :]
-            scores = scores + attention_bias.astype(scores.dtype)
-        scores = nnx.softmax(scores, axis=-1).astype(self.dtype)
-        output = jnp.matmul(scores, xv)
-
-        output = output.swapaxes(1, 2).reshape(bsz, seqlen, -1)
+        attention_bias = None
+        output = jax.nn.dot_product_attention(
+            xq,
+            xk,
+            xv,
+            bias=attention_bias,
+            is_causal=self.causal,
+            implementation="cudnn",
+        )
+        output = output.reshape(bsz, seqlen, -1)
         return self.wo(output)
-
-
-class CrossAttention(nnx.Module):
-    def __init__(
-        self,
-        rngs: nnx.Rngs,
-        dim: int,
-        n_heads: int,
-        n_kv_heads: int | None = None,
-        qkv_bias: bool = False,
-        dtype: jnp.dtype = jnp.float32,
-        param_dtype: jnp.dtype = jnp.float32,
-        cross_cond_dim: int | None = None,
-    ):
-        self.dim = dim
-        self.n_heads = n_heads
-        self._n_kv_heads = n_heads if n_kv_heads is None else n_kv_heads
-        assert self.n_heads % self._n_kv_heads == 0
-        self.n_rep = self.n_heads // self._n_kv_heads
-        self.head_dim = self.dim // self.n_heads
-        self.dtype = dtype
-        self.cross_cond_dim = cross_cond_dim if cross_cond_dim is not None else dim
-
-        init_qkv = nnx.with_partitioning(
-            nnx.initializers.xavier_normal(), ("hidden", "attn_qkv")
-        )
-        init_o = nnx.with_partitioning(
-            nnx.initializers.xavier_normal(), ("attn_o", "hidden")
-        )
-
-        self.wq = nnx.Linear(
-            in_features=self.dim,
-            out_features=self.n_heads * self.head_dim,
-            use_bias=qkv_bias,
-            dtype=dtype,
-            param_dtype=param_dtype,
-            kernel_init=init_qkv,
-            rngs=rngs,
-        )
-        self.wk = nnx.Linear(
-            in_features=self.cross_cond_dim,
-            out_features=self._n_kv_heads * self.head_dim,
-            use_bias=qkv_bias,
-            dtype=dtype,
-            param_dtype=param_dtype,
-            kernel_init=init_qkv,
-            rngs=rngs,
-        )
-        self.wv = nnx.Linear(
-            in_features=self.cross_cond_dim,
-            out_features=self._n_kv_heads * self.head_dim,
-            use_bias=qkv_bias,
-            dtype=dtype,
-            param_dtype=param_dtype,
-            kernel_init=init_qkv,
-            rngs=rngs,
-        )
-        self.wo = nnx.Linear(
-            in_features=self.dim,
-            out_features=self.dim,
-            use_bias=False,
-            dtype=dtype,
-            param_dtype=param_dtype,
-            kernel_init=init_o,
-            rngs=rngs,
-        )
-
-    def __call__(self, x, cross_conditioning, train: bool = False):
-        del train
-        bsz, tgt_len, _ = x.shape
-        _, src_len, _ = cross_conditioning.shape
-
-        xq = self.wq(x)
-        xk = self.wk(cross_conditioning)
-        xv = self.wv(cross_conditioning)
-
-        xq = xq.reshape(bsz, tgt_len, self.n_heads, self.head_dim)
-        xk = xk.reshape(bsz, src_len, self._n_kv_heads, self.head_dim)
-        xv = xv.reshape(bsz, src_len, self._n_kv_heads, self.head_dim)
-
-        xk = repeat_kv(xk, self.n_rep)
-        xv = repeat_kv(xv, self.n_rep)
-
-        xq = xq.swapaxes(1, 2)
-        xk = xk.swapaxes(1, 2)
-        xv = xv.swapaxes(1, 2)
-
-        xk_t = xk.swapaxes(2, 3)
-        scores = jnp.matmul(
-            xq.astype(jnp.float32), xk_t.astype(jnp.float32)
-        ) / math.sqrt(self.head_dim)
-        attn = nnx.softmax(scores, axis=-1).astype(self.dtype)
-
-        out = jnp.matmul(attn, xv)
-        out = out.swapaxes(1, 2).reshape(bsz, tgt_len, -1)
-        return self.wo(out)
 
 
 class FeedForward(nnx.Module):
@@ -369,6 +223,7 @@ class FeedForward(nnx.Module):
 
         hidden_dim = hidden_dim or int((4 * dim) * 2 / 3)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+        self.hidden_dim = hidden_dim
         w_init = nnx.initializers.variance_scaling(
             w_init_scale, "fan_in", "truncated_normal"
         )
@@ -377,15 +232,26 @@ class FeedForward(nnx.Module):
 
         self._uses_gating = mlp_type in GATED_MLP_TYPES
 
-        self.w1 = nnx.Linear(
-            in_features=dim,
-            out_features=hidden_dim,
-            use_bias=False,
-            dtype=dtype,
-            param_dtype=param_dtype,
-            kernel_init=init_mlp,
-            rngs=rngs,
-        )
+        if self._uses_gating:
+            self.w12 = nnx.Linear(
+                in_features=dim,
+                out_features=2 * hidden_dim,
+                use_bias=False,
+                dtype=dtype,
+                param_dtype=param_dtype,
+                kernel_init=init_mlp,
+                rngs=rngs,
+            )
+        else:
+            self.w1 = nnx.Linear(
+                in_features=dim,
+                out_features=hidden_dim,
+                use_bias=False,
+                dtype=dtype,
+                param_dtype=param_dtype,
+                kernel_init=init_mlp,
+                rngs=rngs,
+            )
         self.w2 = nnx.Linear(
             in_features=hidden_dim,
             out_features=dim,
@@ -395,27 +261,16 @@ class FeedForward(nnx.Module):
             kernel_init=init_out,
             rngs=rngs,
         )
-        self.w3 = (
-            nnx.Linear(
-                in_features=dim,
-                out_features=hidden_dim,
-                use_bias=False,
-                dtype=dtype,
-                param_dtype=param_dtype,
-                kernel_init=init_mlp,
-                rngs=rngs,
-            )
-            if self._uses_gating
-            else None
-        )
+        self.w3 = None
 
     def __call__(self, x, train: bool = False):
         del train
         act = activation_map[self.mlp_type]
-        hidden = act(self.w1(x))
         if self._uses_gating:
-            assert self.w3 is not None  # For type checkers.
-            hidden = hidden * self.w3(x)
+            w1, w3 = jnp.split(self.w12(x), 2, axis=-1)
+            hidden = act(w1) * w3
+        else:
+            hidden = act(self.w1(x))
         y = self.w2(hidden)
         return y.astype(self.dtype)
 
@@ -431,19 +286,15 @@ class TransformerBlock(nnx.Module):
         causal: bool,
         dtype: jnp.dtype,
         param_dtype: jnp.dtype,
-        norm_type: str,
         norm_eps: float,
         mlp_type: str,
         multiple_of: int,
         hidden_dim: Optional[int],
         w_init_scale: float,
-        use_cross_attention: bool,
-        cross_attention_dim: Optional[int],
         use_rotary_embeddings: bool,
     ):
         self.dim = dim
         self.use_rotary_embeddings = use_rotary_embeddings
-        self.use_cross_attention = use_cross_attention
         self.attention = Attention(
             rngs,
             dim,
@@ -453,18 +304,6 @@ class TransformerBlock(nnx.Module):
             dtype=dtype,
             param_dtype=param_dtype,
         )
-
-        if self.use_cross_attention:
-            cross_dim = cross_attention_dim if cross_attention_dim is not None else dim
-            self.cross_attention = CrossAttention(
-                rngs,
-                dim=dim,
-                n_heads=n_heads,
-                n_kv_heads=n_kv_heads,
-                dtype=dtype,
-                param_dtype=param_dtype,
-                cross_cond_dim=cross_dim,
-            )
 
         self.feed_forward = FeedForward(
             rngs,
@@ -478,7 +317,6 @@ class TransformerBlock(nnx.Module):
         )
 
         self.attention_norm = _make_norm(
-            norm_type,
             rngs,
             num_features=dim,
             dtype=dtype,
@@ -486,22 +324,12 @@ class TransformerBlock(nnx.Module):
             epsilon=norm_eps,
         )
         self.ffn_norm = _make_norm(
-            norm_type,
             rngs,
             num_features=dim,
             dtype=dtype,
             param_dtype=param_dtype,
             epsilon=norm_eps,
         )
-        if self.use_cross_attention:
-            self.cross_norm = _make_norm(
-                norm_type,
-                rngs,
-                num_features=dim,
-                dtype=dtype,
-                param_dtype=param_dtype,
-                epsilon=norm_eps,
-            )
 
     def __call__(
         self,
@@ -509,7 +337,6 @@ class TransformerBlock(nnx.Module):
         freqs_cos=None,
         freqs_sin=None,
         attention_bias=None,
-        cross_conditioning=None,
         train: bool = False,
     ):
         if not self.use_rotary_embeddings:
@@ -528,11 +355,6 @@ class TransformerBlock(nnx.Module):
             attention_bias=attention_bias,
             train=train,
         )
-
-        if self.use_cross_attention and cross_conditioning is not None:
-            h = h + self.cross_attention(
-                self.cross_norm(h), cross_conditioning, train=train
-            )
 
         return h + self.feed_forward(self.ffn_norm(h), train=train)
 
@@ -577,20 +399,7 @@ class Transformer(nnx.Module):
             2.0 / args.n_layers if args.depth_scaled_init else args.w_init_scale
         )
         blocks = []
-        for layer_id in range(args.n_layers):
-            use_cross_attention = False
-            if args.use_cross_attention:
-                if args.cross_attention_layers is None:
-                    use_cross_attention = True
-                elif layer_id < args.cross_attention_layers:
-                    use_cross_attention = True
-            cross_dim = None
-            if use_cross_attention:
-                cross_dim = (
-                    args.cross_attention_proj_dim
-                    if args.cross_attention_proj_dim is not None
-                    else args.dim
-                )
+        for _ in range(args.n_layers):
             blocks.append(
                 TransformerBlock(
                     rngs=rngs,
@@ -600,20 +409,16 @@ class Transformer(nnx.Module):
                     causal=args.causal,
                     dtype=args.dtype,
                     param_dtype=args.param_dtype,
-                    norm_type=args.norm_type,
                     norm_eps=args.norm_eps,
                     mlp_type=args.mlp_type,
                     multiple_of=args.multiple_of,
                     hidden_dim=args.hidden_dim,
                     w_init_scale=w_init_scale,
-                    use_cross_attention=use_cross_attention,
-                    cross_attention_dim=cross_dim,
                     use_rotary_embeddings=args.use_rotary_embeddings,
                 )
             )
         self.blocks = nnx.List(blocks)
         self.output_norm = _make_norm(
-            args.norm_type,
             rngs,
             num_features=args.dim,
             dtype=args.dtype,
@@ -630,40 +435,10 @@ class Transformer(nnx.Module):
             kernel_init=out_init,
             rngs=rngs,
         )
-        
-        # Initialize cross_proj conditionally
-        if args.use_cross_attention:
-            proj_dim = (
-                args.cross_attention_proj_dim
-                if args.cross_attention_proj_dim is not None
-                else args.dim
-            )
-            if args.cross_attention_input_dim is not None:
-                proj_init = nnx.with_partitioning(
-                    nnx.initializers.lecun_normal(), ("cross_attn", "hidden")
-                )
-                self.cross_proj = nnx.Linear(
-                    in_features=args.cross_attention_input_dim,
-                    out_features=proj_dim,
-                    dtype=args.dtype,
-                    param_dtype=args.param_dtype,
-                    kernel_init=proj_init,
-                    rngs=rngs,
-                )
-            elif args.cross_attention_proj_dim is not None and proj_dim != args.dim:
-                raise ValueError(
-                    "ModelArgs.cross_attention_input_dim must be provided when"
-                    " cross_attention_proj_dim is set."
-                )
-            else:
-                self.cross_proj = None
-        else:
-            self.cross_proj = None
 
     def __call__(
         self,
         x,
-        cross_conditioning=None,
         train: bool = False,
         output_channels: Optional[int] = None,
         attention_bias=None,
@@ -690,18 +465,11 @@ class Transformer(nnx.Module):
             freqs_cos = freqs_cos[:seqlen].astype(h.dtype)
             freqs_sin = freqs_sin[:seqlen].astype(h.dtype)
 
-        cross_cond_proj = None
-        if cross_conditioning is not None and args.use_cross_attention:
-            cross_cond_proj = cross_conditioning.astype(args.dtype)
-            if self.cross_proj is not None:
-                cross_cond_proj = self.cross_proj(cross_cond_proj)
-
         for block in self.blocks:
             h = block(
                 h,
                 freqs_cos,
                 freqs_sin,
-                cross_conditioning=cross_cond_proj,
                 attention_bias=attention_bias,
                 train=train,
             )

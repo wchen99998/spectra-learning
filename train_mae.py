@@ -32,7 +32,14 @@ def prefix_metrics(metrics: Mapping[str, Any], prefix: str) -> dict[str, Any]:
     return {f"{normalized_prefix}{key}": value for key, value in metrics_dict.items()}
 
 def select_model_batch(batch: Mapping[str, Any]) -> dict[str, Any]:
-    keys = ("token_ids", "segment_ids", "precursor_mz", "rt")
+    keys = (
+        "token_ids",
+        "segment_ids",
+        "precursor_mz",
+        "rt",
+        "masked_token_ids",
+        "mlm_mask",
+    )
     return {key: batch[key] for key in keys}
 
 
