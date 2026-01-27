@@ -1,6 +1,6 @@
+import collections
 import functools
-import threading
-from queue import Queue
+import itertools
 from collections.abc import Mapping
 from typing import Any
 
@@ -64,7 +64,7 @@ def prefetch_sharded_batches(
     data_sharding: NamedSharding | None,
     prefetch_size: int = 2,
 ):
-    """Prefetch and shard batches to devices in a background thread."""
+    """Prefetch and shard batches to devices using a small device buffer."""
     def maybe_shard(batch):
         batch = select_model_batch(batch)
         return jax.tree.map(lambda x: shard_batch_element(x, data_sharding), batch)
@@ -74,22 +74,16 @@ def prefetch_sharded_batches(
             yield maybe_shard(batch)
         return
 
-    queue: Queue[Any] = Queue(maxsize=prefetch_size)
+    queue: collections.deque[Any] = collections.deque()
 
-    def _worker():
-        try:
-            for batch in iterator:
-                queue.put(maybe_shard(batch))
-        finally:
-            queue.put(None)
+    def enqueue(n):
+        for batch in itertools.islice(iterator, n):
+            queue.append(maybe_shard(batch))
 
-    threading.Thread(target=_worker, daemon=True).start()
-
-    while True:
-        batch = queue.get()
-        if batch is None:
-            break
-        yield batch
+    enqueue(prefetch_size)
+    while queue:
+        yield queue.popleft()
+        enqueue(1)
 
 
 def train_step(
@@ -383,7 +377,6 @@ def train_and_evaluate(
     if jax.process_index() == 0:
         hooks += [
             report_progress,
-            periodic_actions.Profile(num_profile_steps=5, logdir=workdir),
         ]
     # Use the restored step or start from 0
     initial_step = start_step

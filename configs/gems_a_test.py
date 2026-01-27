@@ -51,7 +51,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.weight_decay = 0.01
     cfg.optimizer = "adamw"
     cfg.clip = 0.
-    cfg.device_prefetch_size = 8
+    cfg.device_prefetch_size = 1
     cfg.log_loss_every_steps = 2000
     cfg.eval_every_steps = 10000
     cfg.num_eval_steps = 500
