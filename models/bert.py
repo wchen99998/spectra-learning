@@ -31,6 +31,7 @@ def _build_transformer_blocks(
     num_heads: int,
     num_kv_heads: int | None,
     attention_mlp_multiple: float,
+    use_rotary_embeddings: bool,
     dtype: jnp.dtype,
     param_dtype: jnp.dtype,
 ) -> nnx.List[transformer.TransformerBlock]:
@@ -52,14 +53,14 @@ def _build_transformer_blocks(
                 multiple_of=4,
                 hidden_dim=hidden_dim,
                 w_init_scale=1.0,
-                use_rotary_embeddings=False,
+                use_rotary_embeddings=use_rotary_embeddings,
             )
         )
     return nnx.List(blocks)
 
 
 class TransformerStack(nnx.Module):
-    """Stack of transformer blocks without rotary positional encoding."""
+    """Stack of transformer blocks with rotary positional encoding."""
 
     def __init__(
         self,
@@ -70,21 +71,28 @@ class TransformerStack(nnx.Module):
         num_heads: int,
         num_kv_heads: int | None,
         attention_mlp_multiple: float,
+        rope_theta: float,
         dtype: jnp.dtype,
         param_dtype: jnp.dtype,
     ):
+        heads, kv_heads = _resolve_attention_heads(dim, num_heads, num_kv_heads)
+        self.dim = int(dim)
+        self.num_heads = int(heads)
+        self.rope_theta = float(rope_theta)
+        self.dtype = dtype
         self.blocks = _build_transformer_blocks(
             rngs=rngs,
-            dim=dim,
+            dim=self.dim,
             num_layers=num_layers,
-            num_heads=num_heads,
-            num_kv_heads=num_kv_heads,
+            num_heads=self.num_heads,
+            num_kv_heads=kv_heads,
             attention_mlp_multiple=attention_mlp_multiple,
+            use_rotary_embeddings=True,
             dtype=dtype,
             param_dtype=param_dtype,
         )
         self.norm = nnx.RMSNorm(
-            num_features=dim,
+            num_features=self.dim,
             dtype=dtype,
             param_dtype=param_dtype,
             rngs=rngs,
@@ -97,11 +105,20 @@ class TransformerStack(nnx.Module):
         train: bool,
         attention_bias: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
+        seq_len = x.shape[1]
+        freqs_cos, freqs_sin = transformer.precompute_freqs_cis(
+            self.dim // self.num_heads,
+            seq_len,
+            theta=self.rope_theta,
+            dtype=self.dtype,
+        )
+        freqs_cos = freqs_cos[:seq_len].astype(x.dtype)
+        freqs_sin = freqs_sin[:seq_len].astype(x.dtype)
         for block in self.blocks:
             x = block(
                 x,
-                None,
-                None,
+                freqs_cos,
+                freqs_sin,
                 train=train,
                 attention_bias=attention_bias,
             )
@@ -130,6 +147,7 @@ class BERT(nnx.Module):
         pad_token_id: int = 0,
         cls_token_id: int = 101,
         sep_token_id: int = 102,
+        rope_theta: float = 10000.0,
         dtype: jnp.dtype = jnp.float32,
         param_dtype: jnp.dtype = jnp.float32,
     ):
@@ -148,6 +166,7 @@ class BERT(nnx.Module):
         self.pad_token_id = int(pad_token_id)
         self.cls_token_id = int(cls_token_id)
         self.sep_token_id = int(sep_token_id)
+        self.rope_theta = float(rope_theta)
         self.dtype = dtype
         self.param_dtype = param_dtype
         self.rngs = rngs
@@ -158,14 +177,6 @@ class BERT(nnx.Module):
         )
         self.token_embed = nnx.Embed(
             num_embeddings=self.vocab_size,
-            features=self.model_dim,
-            dtype=dtype,
-            param_dtype=param_dtype,
-            embedding_init=embed_init,
-            rngs=rngs,
-        )
-        self.position_embed = nnx.Embed(
-            num_embeddings=self.max_length,
             features=self.model_dim,
             dtype=dtype,
             param_dtype=param_dtype,
@@ -194,6 +205,7 @@ class BERT(nnx.Module):
             num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
             attention_mlp_multiple=self.attention_mlp_multiple,
+            rope_theta=self.rope_theta,
             dtype=dtype,
             param_dtype=param_dtype,
         )
@@ -255,12 +267,9 @@ class BERT(nnx.Module):
         token_ids: jnp.ndarray,
         segment_ids: jnp.ndarray,
     ) -> jnp.ndarray:
-        seq_len = token_ids.shape[1]
-        positions = jnp.arange(seq_len)[None, :]
         tok = self.token_embed(token_ids)
-        pos = self.position_embed(positions)
         seg = self.segment_embed(segment_ids)
-        return self.embed_norm(tok + pos + seg)
+        return self.embed_norm(tok + seg)
 
     def _masked_cross_entropy(
         self,

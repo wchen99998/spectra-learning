@@ -31,6 +31,7 @@ def get_model(config: ml_collections.ConfigDict, rngs: nnx.Rngs) -> nnx.Module:
         pad_token_id=cast(int, config.get("pad_token_id", 0)),
         cls_token_id=cast(int, config.get("cls_token_id", 1)),
         sep_token_id=cast(int, config.get("sep_token_id", 2)),
+        rope_theta=cast(float, config.get("rope_theta", 10000.0)),
         dtype=cast(jnp.dtype, config.get("dtype", jnp.float32)),
         param_dtype=cast(jnp.dtype, config.get("param_dtype", jnp.float32)),
     )
