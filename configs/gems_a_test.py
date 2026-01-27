@@ -8,22 +8,22 @@ def get_config() -> config_dict.ConfigDict:
     # Dataset
     cfg.dataset = "gems_a"
     cfg.tfrecord_dir = "data/gems_peaklist_tfrecord"
-    cfg.batch_size = 256
+    cfg.batch_size = 128
     cfg.validation_fraction = 0.05
     cfg.shuffle_buffer = 10_000
     cfg.split_seed = 42
     cfg.num_shards = 4
-    cfg.drop_remainder = False
+    cfg.drop_remainder = True
     cfg.max_precursor_mz = 1000.0
     cfg.pair_sequence_length = 256
     cfg.seed = 42
 
     # Model (BERT)
     cfg.model_type = "bert"
-    cfg.model_dim = 640
-    cfg.num_layers = 20
-    cfg.num_heads = 10
-    cfg.num_kv_heads = None
+    cfg.model_dim = 512
+    cfg.num_layers = 16
+    cfg.num_heads = 8
+    cfg.num_kv_heads = 4
     cfg.attention_mlp_multiple = 4.0
     cfg.num_segments = 2
     cfg.mask_ratio = 0.3
@@ -41,17 +41,17 @@ def get_config() -> config_dict.ConfigDict:
     cfg.precursor_offset = 0
 
     # Training (short smoke run)
-    cfg.num_train_steps = 1_000_000
+    cfg.num_train_steps = 200_000
     cfg.num_epochs = 0
     cfg.learning_rate = 3e-4
     cfg.warmup_steps = 20000
     cfg.learning_rate_schedule = "cosine"
     cfg.min_learning_rate = None
-    cfg.b2 = 0.98
+    cfg.b2 = 0.99
     cfg.weight_decay = 0.01
     cfg.optimizer = "adamw"
-    cfg.clip = 1.0
-    cfg.device_prefetch_size = 1
+    cfg.clip = 0.
+    cfg.device_prefetch_size = 8
     cfg.log_loss_every_steps = 2000
     cfg.eval_every_steps = 10000
     cfg.num_eval_steps = 500
@@ -64,14 +64,13 @@ def get_config() -> config_dict.ConfigDict:
     cfg.wandb_project = "md4"
     cfg.start_profiler = False
     cfg.initialize_multihost = False
-    cfg.num_transformer_blocks = None
 
     # Mesh / sharding
     cfg.mesh_config = config_dict.ConfigDict()
-    cfg.mesh_config.mesh_shape = (1, 1)
-    cfg.mesh_config.mesh_axis_names = ("data", "model")
+    cfg.mesh_config.mesh_shape = (1,)
+    cfg.mesh_config.mesh_axis_names = ("data",)
     cfg.logical_axis_rules = [
-        ("batch", None),
+        ("batch", "data"),
         ("hidden", None),
         ("attn_qkv", None),
         ("attn_o", None),

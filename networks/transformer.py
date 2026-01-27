@@ -65,32 +65,31 @@ def reshape_for_broadcast(freqs_cis, x):
     return freqs_cis.reshape(shape)
 
 
-def jax_unstack(x, axis=0):
-    return [
-        jax.lax.index_in_dim(x, i, axis, keepdims=False) for i in range(x.shape[axis])
-    ]
-
-
 def apply_rotary_emb(xq, xk, freqs_cos, freqs_sin):
-    xq_r, xq_i = jax_unstack(xq.reshape(xq.shape[:-1] + (-1, 2)), -1)
-    xk_r, xk_i = jax_unstack(xk.reshape(xk.shape[:-1] + (-1, 2)), -1)
+    """Apply rotary embeddings using complex number multiplication (faster)."""
+    # Reshape to pairs: [..., head_dim] -> [..., head_dim//2, 2]
+    # jax.lax.complex does not accept bfloat16, so rotate in float32.
+    xq_shaped = xq.reshape(xq.shape[:-1] + (-1, 2)).astype(jnp.float32)
+    xk_shaped = xk.reshape(xk.shape[:-1] + (-1, 2)).astype(jnp.float32)
 
-    freqs_cos = reshape_for_broadcast(freqs_cos, xq_r)
-    freqs_sin = reshape_for_broadcast(freqs_sin, xq_r)
+    # View as complex: last dim of size 2 becomes complex
+    xq_complex = jax.lax.complex(xq_shaped[..., 0], xq_shaped[..., 1])
+    xk_complex = jax.lax.complex(xk_shaped[..., 0], xk_shaped[..., 1])
 
-    xq_out_r = xq_r * freqs_cos - xq_i * freqs_sin
-    xq_out_i = xq_r * freqs_sin + xq_i * freqs_cos
-    xk_out_r = xk_r * freqs_cos - xk_i * freqs_sin
-    xk_out_i = xk_r * freqs_sin + xk_i * freqs_cos
+    # Build rotation complex number
+    freqs_cos = reshape_for_broadcast(freqs_cos, xq_complex).astype(jnp.float32)
+    freqs_sin = reshape_for_broadcast(freqs_sin, xq_complex).astype(jnp.float32)
+    freqs_complex = jax.lax.complex(freqs_cos, freqs_sin)
 
-    xq_out = jnp.stack([xq_out_r, xq_out_i], axis=-1).reshape(
-        xq_out_r.shape[:3] + (-1,)
-    )
-    xk_out = jnp.stack([xk_out_r, xk_out_i], axis=-1).reshape(
-        xk_out_r.shape[:3] + (-1,)
-    )
+    # Rotate via complex multiply
+    xq_out = xq_complex * freqs_complex
+    xk_out = xk_complex * freqs_complex
 
-    return xq_out, xk_out
+    # Back to real: stack real and imag, then flatten last two dims
+    xq_out = jnp.stack([xq_out.real, xq_out.imag], axis=-1).reshape(xq.shape)
+    xk_out = jnp.stack([xk_out.real, xk_out.imag], axis=-1).reshape(xk.shape)
+
+    return xq_out.astype(xq.dtype), xk_out.astype(xk.dtype)
 
 
 def repeat_kv(x, n_rep):
@@ -190,12 +189,11 @@ class Attention(nnx.Module):
         if freqs_cos is not None and freqs_sin is not None:
             xq, xk = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin)
 
-        attention_bias = None
         output = jax.nn.dot_product_attention(
             xq,
             xk,
             xv,
-            bias=attention_bias,
+            bias=None, # quick fix
             is_causal=self.causal,
             implementation="cudnn",
         )
