@@ -401,7 +401,8 @@ def train_and_evaluate(
                         graphdef, train_state, batch
                     )
 
-                    train_metrics = train_metrics.merge(train_metrics_update)
+                # Merge metrics outside the trace annotation to avoid sync overhead
+                train_metrics = train_metrics.merge(train_metrics_update)
 
                 # Quick indication that training is happening.
                 logging.log_first_n(logging.INFO, "Finished training step %d.", 5, step)
@@ -439,21 +440,24 @@ def train_and_evaluate(
                             )
 
                 # Save checkpoint with preemption tolerance
-                with report_progress.timed("checkpoint"):
-                    checkpoint_utils.save_nnx_checkpoint(
-                        checkpoint_manager,
-                        step=step,
-                        state=train_state,
-                    )
+                # Only extract state and call save when checkpoint_manager decides to save
+                if checkpoint_manager.should_save(step) or is_last_step:
+                    with report_progress.timed("checkpoint"):
+                        checkpoint_utils.save_nnx_checkpoint(
+                            checkpoint_manager,
+                            step=step,
+                            state=train_state,
+                            force=is_last_step,
+                        )
 
-                # Check for preemption and handle gracefully
-                if checkpoint_manager.reached_preemption(step):
-                    logging.info(
-                        f"Preemption detected at step {step}. Waiting for checkpointing to finish."
-                    )
-                    checkpoint_manager.wait_until_finished()
-                    logging.info("Checkpointing completed. Exiting gracefully.")
-                    return
+                    # Check for preemption only at checkpoint intervals
+                    if checkpoint_manager.reached_preemption(step):
+                        logging.info(
+                            f"Preemption detected at step {step}. Waiting for checkpointing to finish."
+                        )
+                        checkpoint_manager.wait_until_finished()
+                        logging.info("Checkpointing completed. Exiting gracefully.")
+                        return
 
     logging.info("Finishing training at step %d", num_train_steps)
     checkpoint_manager.wait_until_finished()

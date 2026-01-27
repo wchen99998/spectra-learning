@@ -86,6 +86,7 @@ def save_nnx_checkpoint(
     model: nnx.Module | None = None,
     optimizer: nnx.Optimizer | None = None,
     state: Any | None = None,
+    force: bool = False,
 ) -> None:
     """Save NNX model and optimizer checkpoint.
     
@@ -96,6 +97,7 @@ def save_nnx_checkpoint(
         optimizer: NNX optimizer to save (required if state is None)
         state: Optional combined NNX state (e.g. from nnx.split). If provided,
             the model/optimizer arguments are ignored.
+        force: If True, force save even if step doesn't match save interval.
     """
     model_state = None
     optimizer_state = None
@@ -130,6 +132,7 @@ def save_nnx_checkpoint(
             optimizer=orbax_checkpoint.args.StandardSave(optimizer_state),
             step=orbax_checkpoint.args.JsonSave(step),
         ),
+        force=force,
     )
 
 
