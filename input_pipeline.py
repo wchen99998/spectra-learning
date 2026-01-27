@@ -2,7 +2,6 @@
 
 from typing import Any
 
-import jax
 from ml_collections import config_dict
 
 import input_pipeline_gems_set
@@ -29,7 +28,6 @@ def create_datasets(
       loader, and a dictionary of other infos.
     """
     info = {}
-    assert config.batch_size % jax.process_count() == 0
 
     if config.dataset == "gems_a":
         train_dataset, eval_dataset, gems_info = (

@@ -1,39 +1,46 @@
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import logging
 from pathlib import Path
 
-import jax
 import tensorflow as tf
-from absl import app, flags, logging
-from ml_collections import config_flags
+from ml_collections import config_dict
+
+from train_mae import train_and_evaluate
 
 
 tf.config.set_visible_devices([], "GPU")
 
-from train_mae import train_and_evaluate
 
-_CONFIG = config_flags.DEFINE_config_file(
-    "config",
-    None,
-    "Path to config file.",
-    lock_config=False,
-)
-_WORKDIR = flags.DEFINE_string("workdir", None, "Output directory.")
-_OLDDIR = flags.DEFINE_string(
-    "olddir",
-    None,
-    "Optional checkpoint load dir.",
-)
-flags.mark_flags_as_required(["config", "workdir"])
+def _load_config(path: str | Path) -> config_dict.ConfigDict:
+    path = Path(path)
+    spec = importlib.util.spec_from_file_location("experiment_config", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module.get_config()
 
 
-def main(_: list[str]) -> None:
-    logging.set_verbosity(logging.INFO)
-    config = _CONFIG.value
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train MAE/BERT with PyTorch Lightning.")
+    parser.add_argument("--config", required=True, help="Path to a config file (python).")
+    parser.add_argument("--workdir", required=True, help="Output directory.")
+    parser.add_argument("--olddir", default=None, help="Optional checkpoint load directory.")
+    return parser.parse_args()
 
-    workdir = Path(_WORKDIR.value).expanduser().resolve()
-    olddir = None if _OLDDIR.value is None else Path(_OLDDIR.value).expanduser().resolve()
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO)
+    args = _parse_args()
+
+    config = _load_config(args.config)
+    workdir = Path(args.workdir).expanduser().resolve()
+    olddir = None if args.olddir is None else Path(args.olddir).expanduser().resolve()
+
     train_and_evaluate(config, workdir=workdir, olddir=olddir)
 
 
 if __name__ == "__main__":
-    jax.config.config_with_absl()
-    app.run(main)
+    main()

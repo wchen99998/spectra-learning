@@ -1,4 +1,3 @@
-import jax.numpy as jnp
 from ml_collections import config_dict
 
 
@@ -30,9 +29,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pad_token_id = 0
     cfg.cls_token_id = 1
     cfg.sep_token_id = 2
-    cfg.dtype = jnp.float32
-    cfg.param_dtype = jnp.float32
-
     # Filled by input_pipeline.create_datasets
     cfg.vocab_size = 0
     cfg.max_length = 0
@@ -61,13 +57,6 @@ def get_config() -> config_dict.ConfigDict:
     # System / logging
     cfg.enable_wandb = False
     cfg.wandb_project = "md4"
-    cfg.start_profiler = False
-    cfg.initialize_multihost = False
     cfg.num_transformer_blocks = None
-
-    # Mesh / sharding
-    cfg.mesh_config = config_dict.ConfigDict()
-    cfg.mesh_config.mesh_shape = (1, 1)
-    cfg.mesh_config.mesh_axis_names = ("data", "model")
 
     return cfg
