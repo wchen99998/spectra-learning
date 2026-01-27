@@ -35,8 +35,8 @@ def numpy_batch_to_torch(batch: dict[str, Any]) -> dict[str, Any]:
     return {key: _to_torch(value) for key, value in batch.items()}
 
 
-def _identity_collate(batch_list: list[dict[str, Any]]) -> dict[str, Any]:
-    return batch_list[0]
+def _identity_collate(batch: dict[str, Any]) -> dict[str, Any]:
+    return batch
 
 
 def _resolve_train_steps(config: config_dict.ConfigDict, info: dict[str, Any]) -> int:

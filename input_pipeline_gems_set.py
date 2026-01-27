@@ -433,6 +433,8 @@ def _pair_spectra_and_build_input(max_len: int):
 
         example["token_ids"] = tokens
         example["segment_ids"] = seg
+        del example["mz"]
+        del example["intensity"]
         return example
 
     return apply
@@ -445,9 +447,7 @@ def _apply_mlm_mask(mask_ratio: float, mask_token_id: int):
     mask_ratio_t = tf.constant(mask_ratio, tf.float32)
 
     def apply(batch: dict) -> dict:
-        token_ids = batch["token_ids"].to_tensor()
-        batch["token_ids"] = token_ids
-        batch["segment_ids"] = batch["segment_ids"].to_tensor()
+        token_ids = batch["token_ids"]
         maskable = tf.logical_and(token_ids != cls_id, token_ids != pad_id)
         seq_len = tf.shape(token_ids)[1]
         mask_count = tf.cast(mask_ratio_t * tf.cast(seq_len, tf.float32), tf.int32)
@@ -508,7 +508,7 @@ def _build_dataset(
         _pair_spectra_and_build_input(pair_sequence_length),
         num_parallel_calls=tf.data.AUTOTUNE,
     )
-    ds = ds.ragged_batch(batch_size, drop_remainder=drop_remainder)
+    ds = ds.batch(batch_size, drop_remainder=drop_remainder)
     ds = ds.map(
         _apply_mlm_mask(mask_ratio, mask_token_id),
         num_parallel_calls=tf.data.AUTOTUNE,
