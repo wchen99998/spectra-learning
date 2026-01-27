@@ -10,7 +10,7 @@ import lightning as L
 from ml_collections import config_dict
 from torch.utils.data import DataLoader, IterableDataset
 
-import input_pipeline
+import input_pipeline_gems_set
 
 
 def _torch_dtype(array: np.ndarray) -> torch.dtype:
@@ -27,7 +27,10 @@ def _to_torch(value: Any) -> Any:
     if isinstance(value, np.ndarray):
         if value.dtype == object:
             return [[_to_torch(item) for item in row] for row in value.tolist()]
-        return torch.as_tensor(value, dtype=_torch_dtype(value))
+        array = np.ascontiguousarray(value)
+        if not array.flags.writeable:
+            array = array.copy()
+        return torch.tensor(array, dtype=_torch_dtype(array))
     return value
 
 
@@ -59,71 +62,45 @@ def _resolve_eval_steps(
 
 
 class _TfIteratorDataset(IterableDataset):
-    """Rebuilds TF iterators per epoch and yields torch batches."""
+    """Wraps a persistent TF numpy iterator and yields torch batches."""
 
-    def __init__(
-        self,
-        config: config_dict.ConfigDict,
-        *,
-        seed: int,
-        split: str,
-        steps_per_epoch: int,
-    ):
+    def __init__(self, iterator, steps_per_epoch: int):
         super().__init__()
-        self.config = config
-        self.seed = int(seed)
-        self.split = split
+        self._iterator = iterator
         self.steps_per_epoch = int(steps_per_epoch)
-        self._epoch = 0
 
     def __len__(self) -> int:
         return self.steps_per_epoch
 
-    def _make_iterator(self, epoch: int):
-        epoch_seed = self.seed + epoch
-        train_iter, eval_iters, _ = input_pipeline.create_datasets(
-            self.config, epoch_seed
-        )
-        if self.split == "train":
-            return train_iter
-        return eval_iters[self.split]
-
     def __iter__(self):
-        epoch = self._epoch
-        self._epoch += 1
-        iterator = self._make_iterator(epoch)
         for _ in range(self.steps_per_epoch):
-            yield numpy_batch_to_torch(next(iterator))
-
-
-def _init_info(
-    config: config_dict.ConfigDict, seed: int
-) -> tuple[dict[str, Any], list[str]]:
-    _, eval_iters, info = input_pipeline.create_datasets(config, seed)
-    return info, list(eval_iters.keys())
+            yield numpy_batch_to_torch(next(self._iterator))
 
 
 class TfLightningDataModule(L.LightningDataModule):
-    """Minimal DataModule-style wrapper that returns Lightning-ready dataloaders."""
+    """Minimal DataModule wrapping the TF gems_set pipeline with persistent iterators."""
 
     def __init__(self, config: config_dict.ConfigDict, seed: int):
         super().__init__()
         self.config = config
         self.seed = int(seed)
-        self.info, self.eval_splits = _init_info(config, self.seed)
-        self.train_steps = _resolve_train_steps(config, self.info)
+        
+        # Create TF datasets once - they already use repeat() for infinite iteration
+        train_iter, eval_iters, info = input_pipeline_gems_set.create_gems_set_datasets(
+            config, seed
+        )
+        self._train_iter = train_iter
+        self._eval_iters = eval_iters
+        self.info = info
+        self.eval_splits = list(eval_iters.keys())
+        self.train_steps = _resolve_train_steps(config, info)
         self.eval_steps = {
-            split: _resolve_eval_steps(config, self.info, split)
+            split: _resolve_eval_steps(config, info, split)
             for split in self.eval_splits
         }
 
-    def _make_loader(self, split: str, steps: int) -> DataLoader:
-        dataset = _TfIteratorDataset(
-            self.config,
-            seed=self.seed,
-            split=split,
-            steps_per_epoch=steps,
-        )
+    def _make_loader(self, iterator, steps: int) -> DataLoader:
+        dataset = _TfIteratorDataset(iterator, steps)
         return DataLoader(
             dataset,
             batch_size=None,
@@ -132,11 +109,11 @@ class TfLightningDataModule(L.LightningDataModule):
         )
 
     def train_dataloader(self) -> DataLoader:
-        return self._make_loader("train", self.train_steps)
+        return self._make_loader(self._train_iter, self.train_steps)
 
     def val_dataloader(self):
         loaders = [
-            self._make_loader(split, self.eval_steps[split])
+            self._make_loader(self._eval_iters[split], self.eval_steps[split])
             for split in self.eval_splits
         ]
         if len(loaders) == 1:
@@ -147,6 +124,6 @@ class TfLightningDataModule(L.LightningDataModule):
 def create_lightning_dataloaders(
     config: config_dict.ConfigDict, seed: int
 ) -> tuple[DataLoader, Any, dict[str, Any]]:
-    """Convenience helper mirroring input_pipeline.create_datasets."""
+    """Convenience helper mirroring input_pipeline_gems_set.create_gems_set_datasets."""
     module = TfLightningDataModule(config, seed)
     return module.train_dataloader(), module.val_dataloader(), module.info

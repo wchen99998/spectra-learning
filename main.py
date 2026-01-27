@@ -3,7 +3,11 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import logging
+import os
 from pathlib import Path
+
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  # Suppress TF info/warning logs
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"  # Disable oneDNN messages
 
 import tensorflow as tf
 from ml_collections import config_dict

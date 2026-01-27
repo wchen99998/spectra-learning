@@ -13,16 +13,14 @@ dependencies = [
     "rdkit>=2025.3.3",
     "scikit-learn>=1.8.0",
     "torch==2.10.0; sys_platform == 'linux'",
-    "tensorflow==2.19.0",
-    "tensorboard==2.19.0",
+    "tensorflow-cpu==2.19.0; sys_platform == 'linux'",
     "tqdm>=4.66.4",
     "wandb==0.23.1",
-    "flash-attn>=2.8.3",
 ]
 
 [[tool.uv.index]]
 name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu128"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.uv.sources]

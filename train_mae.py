@@ -163,6 +163,7 @@ class MAELightningModule(pl.LightningModule):
 
     def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         del batch_idx
+        batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
         metrics = self.model(batch, train=True, apply_mask=True)
         lr_value = torch.tensor(self._lr_for_step(self.global_step + 1), device=self.device)
         self.log("train/learning_rate", lr_value, on_step=True, prog_bar=True)
@@ -177,6 +178,7 @@ class MAELightningModule(pl.LightningModule):
         dataloader_idx: int = 0,
     ) -> torch.Tensor:
         del batch_idx
+        batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
         split = self.eval_splits[dataloader_idx]
         metrics = self.model(batch, train=False, apply_mask=False)
         for key, value in metrics.items():
@@ -213,6 +215,13 @@ def train_and_evaluate(
 
     datamodule = TfLightningDataModule(config, seed=int(config.seed))
     total_steps = int(config.num_train_steps)
+
+    # Update config with dataset-derived values
+    info = datamodule.info
+    config.vocab_size = info["vocab_size"]
+    config.max_length = info["pair_sequence_length"]
+    config.precursor_bins = info["precursor_bins"]
+    config.precursor_offset = info["precursor_offset"]
 
     logging.info("Training with Lightning for %d steps.", total_steps)
     logging.info("Validation splits: %s", datamodule.eval_splits)
