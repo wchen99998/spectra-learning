@@ -1,4 +1,4 @@
-Use jax, flax nnx, optax, orbax
+Use pytorch and torch lightning
 Do not program defensively, do not have unecessary checks and try catch clause
 Prefer simple code over complicated code
 Always use Context7 MCP when I need library/API documentation, code generation, setup or configuration steps without me having to explicitly ask.

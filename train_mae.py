@@ -6,12 +6,19 @@ from typing import Any
 
 import lightning.pytorch as pl
 import torch
+import torch._inductor.config as inductor_config
+
+torch.set_float32_matmul_precision('medium')
+inductor_config.coordinate_descent_tuning = True
+inductor_config.triton.unique_kernel_names = True
+inductor_config.fx_graph_cache = True
+
 import logging
 from ml_collections import config_dict
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
 
-from input_pipeline_lightning import TfLightningDataModule
+from input_pipeline import TfLightningDataModule
 from models.bert_torch import BERTTorch
 from utils import wandb_writer
 
@@ -147,6 +154,18 @@ class MAELightningModule(pl.LightningModule):
             sep_token_id=int(config.sep_token_id),
         )
 
+        # Compile train/eval forward with CUDA graphs for max throughput
+        self._train_forward = torch.compile(
+            self._train_forward_impl,
+            mode="max-autotune",
+            fullgraph=True,
+        )
+        self._eval_forward = torch.compile(
+            self._eval_forward_impl,
+            mode="max-autotune",
+            fullgraph=True,
+        )
+
     def _lr_for_step(self, step: int) -> float:
         return _learning_rate_at_step(
             step,
@@ -161,10 +180,16 @@ class MAELightningModule(pl.LightningModule):
         step = step_idx + 1
         return self._lr_for_step(step) / self.base_lr
 
+    def _train_forward_impl(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        return self.model(batch, train=True, apply_mask=True)
+
+    def _eval_forward_impl(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        return self.model(batch, train=False, apply_mask=False)
+
     def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         del batch_idx
         batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
-        metrics = self.model(batch, train=True, apply_mask=True)
+        metrics = self._train_forward(batch)
         lr_value = torch.tensor(self._lr_for_step(self.global_step + 1), device=self.device)
         self.log("train/learning_rate", lr_value, on_step=True, prog_bar=True)
         for key, value in metrics.items():
@@ -180,7 +205,7 @@ class MAELightningModule(pl.LightningModule):
         del batch_idx
         batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
         split = self.eval_splits[dataloader_idx]
-        metrics = self.model(batch, train=False, apply_mask=False)
+        metrics = self._eval_forward(batch)
         for key, value in metrics.items():
             self.log(f"{split}/{key}", value, on_step=False, on_epoch=True)
         return metrics["loss"]
@@ -249,6 +274,7 @@ def train_and_evaluate(
         default_root_dir=str(workdir),
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1,
+        precision="bf16-mixed",
         max_steps=total_steps,
         log_every_n_steps=int(config.log_loss_every_steps),
         val_check_interval=int(config.eval_every_steps),
