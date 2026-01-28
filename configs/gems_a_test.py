@@ -19,10 +19,10 @@ def get_config() -> config_dict.ConfigDict:
 
     # Model (BERT)
     cfg.model_type = "bert"
-    cfg.model_dim = 512
-    cfg.num_layers = 16
-    cfg.num_heads = 8
-    cfg.num_kv_heads = 4
+    cfg.model_dim = 768
+    cfg.num_layers = 20
+    cfg.num_heads = 12
+    cfg.num_kv_heads = 6
     cfg.attention_mlp_multiple = 4.0
     cfg.num_segments = 2
     cfg.mask_ratio = 0.3
@@ -37,15 +37,21 @@ def get_config() -> config_dict.ConfigDict:
     cfg.precursor_offset = 0
 
     # Training (short smoke run)
-    cfg.num_train_steps = 200_000
+    cfg.num_train_steps = 1_000_000
     cfg.num_epochs = 0
     cfg.learning_rate = 3e-4
     cfg.warmup_steps = 20000
     cfg.learning_rate_schedule = "cosine"
     cfg.min_learning_rate = None
     cfg.b2 = 0.99
-    cfg.weight_decay = 0.01
+    cfg.weight_decay = 1e-3
     cfg.optimizer = "adamw"
+    cfg.muon_momentum = 0.95
+    cfg.muon_nesterov = True
+    cfg.muon_ns_steps = 5
+    cfg.muon_ns_coefficients = (3.4445, -4.775, 2.0315)
+    cfg.muon_eps = 1e-7
+    cfg.muon_adjust_lr_fn = None
     cfg.clip = 0.
     cfg.device_prefetch_size = 1
     cfg.log_loss_every_steps = 2000

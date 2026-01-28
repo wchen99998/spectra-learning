@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Any
 
 import lightning.pytorch as pl
 import torch
@@ -135,6 +134,7 @@ class MAELightningModule(pl.LightningModule):
         self.warmup_steps = int(config.get("warmup_steps", 0))
         self.schedule_type = str(config.get("learning_rate_schedule", "cosine"))
         self.min_learning_rate = config.get("min_learning_rate", None)
+        self.b2 = float(config.get("b2", 0.999))
 
         self.model = BERTTorch(
             vocab_size=int(config.vocab_size),
@@ -188,6 +188,7 @@ class MAELightningModule(pl.LightningModule):
 
     def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         del batch_idx
+        torch.compiler.cudagraph_mark_step_begin()
         batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
         metrics = self._train_forward(batch)
         lr_value = torch.tensor(self._lr_for_step(self.global_step + 1), device=self.device)
@@ -203,6 +204,7 @@ class MAELightningModule(pl.LightningModule):
         dataloader_idx: int = 0,
     ) -> torch.Tensor:
         del batch_idx
+        torch.compiler.cudagraph_mark_step_begin()
         batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
         split = self.eval_splits[dataloader_idx]
         metrics = self._eval_forward(batch)
@@ -214,7 +216,7 @@ class MAELightningModule(pl.LightningModule):
         optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=self.base_lr,
-            betas=(0.9, float(self.config.b2)),
+            betas=(0.9, self.b2),
             weight_decay=float(self.config.weight_decay),
         )
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=self._lr_lambda)

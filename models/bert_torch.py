@@ -79,7 +79,7 @@ class TransformerStack(nn.Module):
             num_kv_heads=kv_heads,
             attention_mlp_multiple=attention_mlp_multiple,
         )
-        self.norm = transformer_torch.RMSNorm(self.dim, eps=1e-5)
+        self.norm = nn.RMSNorm(self.dim, eps=1e-5)
 
     def forward(
         self,
@@ -338,6 +338,7 @@ def build_lightning_module(
     *,
     learning_rate: float,
     weight_decay: float,
+    b2: float = 0.999,
 ) -> Any:
     """Wrap the model in a LightningModule without importing Lightning at import time."""
     import lightning.pytorch as pl
@@ -348,6 +349,7 @@ def build_lightning_module(
             self.model = model
             self.learning_rate = learning_rate
             self.weight_decay = weight_decay
+            self.b2 = b2
 
         def forward(self, batch: dict[str, torch.Tensor], *, train: bool, apply_mask: bool | None = None):
             return self.model(batch, train=train, apply_mask=apply_mask)
@@ -368,8 +370,8 @@ def build_lightning_module(
             return torch.optim.AdamW(
                 self.model.parameters(),
                 lr=self.learning_rate,
+                betas=(0.9, float(self.b2)),
                 weight_decay=self.weight_decay,
             )
 
     return BERTLightningModule()
-

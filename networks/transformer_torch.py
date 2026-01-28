@@ -51,24 +51,6 @@ def apply_rotary_emb(
     return xq_out, xk_out
 
 
-def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    if n_rep == 1:
-        return x
-    return x.repeat_interleave(n_rep, dim=2)
-
-
-class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-5):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        rms = x.pow(2).mean(dim=-1, keepdim=True)
-        x_norm = x * torch.rsqrt(rms + self.eps)
-        return x_norm * self.weight
-
-
 @dataclass
 class ModelArgs:
     dim: int = 288
@@ -109,7 +91,6 @@ class Attention(nn.Module):
         self.dim = dim
         self.n_heads = n_heads
         self.n_kv_heads = n_heads if n_kv_heads is None else n_kv_heads
-        self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = self.dim // self.n_heads
         self.causal = causal
 
@@ -144,14 +125,17 @@ class Attention(nn.Module):
         if freqs_cos is not None and freqs_sin is not None:
             xq, xk = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin)
 
-        xk = repeat_kv(xk, self.n_rep)
-        xv = repeat_kv(xv, self.n_rep)
-
         q = xq.transpose(1, 2)
         k = xk.transpose(1, 2)
         v = xv.transpose(1, 2)
 
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
+        attn = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            is_causal=self.causal,
+            enable_gqa=self.n_kv_heads != self.n_heads,
+        )
         attn = attn.transpose(1, 2).contiguous().view(bsz, seqlen, self.dim)
         return self.wo(attn)
 
@@ -223,8 +207,8 @@ class TransformerBlock(nn.Module):
             mlp_type=mlp_type,
             w_init_scale=w_init_scale,
         )
-        self.attention_norm = RMSNorm(dim, eps=norm_eps)
-        self.ffn_norm = RMSNorm(dim, eps=norm_eps)
+        self.attention_norm = nn.RMSNorm(dim, eps=norm_eps)
+        self.ffn_norm = nn.RMSNorm(dim, eps=norm_eps)
 
     def forward(
         self,
