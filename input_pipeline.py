@@ -402,9 +402,10 @@ def detokenize_spectrum(
             detokenize_spectrum(row, max_precursor_mz=max_precursor_mz) for row in tokens
         ]
 
-    sep_id = _SPECIAL_TOKENS["[SEP]"]
-    sep_idx = int(np.where(tokens == sep_id)[0][0])
-    content = tokens[1:sep_idx]
+    pad_id = _SPECIAL_TOKENS["[PAD]"]
+    pad_positions = np.where(tokens == pad_id)[0]
+    end = int(pad_positions[0]) if pad_positions.size > 0 else int(tokens.shape[0])
+    content = tokens[1:end]
     precursor_token = content[0]
     peaks = content[1:]
     mz_tokens = peaks[0::2]
@@ -432,8 +433,8 @@ def detokenize_spectrum(
 
 def _build_single_spectrum_input(max_len: int) -> Callable[[dict], dict]:
     cls_id = tf.constant(_SPECIAL_TOKENS["[CLS]"], tf.int32)
-    sep_id = tf.constant(_SPECIAL_TOKENS["[SEP]"], tf.int32)
     pad_id = tf.constant(_SPECIAL_TOKENS["[PAD]"], tf.int32)
+    max_peaks = tf.constant((max_len - 2) // 2, tf.int32)
 
     def interleave(mz: tf.Tensor, intensity: tf.Tensor) -> tf.Tensor:
         pair = tf.stack([mz, intensity], axis=1)
@@ -444,12 +445,12 @@ def _build_single_spectrum_input(max_len: int) -> Callable[[dict], dict]:
         return tf.concat([precursor, peaks], axis=0)
 
     def apply(example: dict) -> dict:
-        mz = example["mz"]
-        intensity = example["intensity"]
+        mz = example["mz"][:max_peaks]
+        intensity = example["intensity"][:max_peaks]
         precursor = tf.reshape(example["precursor_mz"], [1])
         seq = build_sequence(mz, intensity, precursor)
 
-        tokens = tf.concat([cls_id[None], seq, sep_id[None]], axis=0)
+        tokens = tf.concat([cls_id[None], seq], axis=0)
         seg = tf.zeros([tf.shape(tokens)[0]], tf.int32)
 
         tokens = tokens[:max_len]

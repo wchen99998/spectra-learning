@@ -11,6 +11,7 @@ import tensorflow as tf
 from input_pipeline import (
     _DEFAULT_MAX_PRECURSOR_MZ,
     _DEFAULT_NUM_SHARDS,
+    _DEFAULT_PAIR_SEQUENCE_LENGTH,
     _DEFAULT_SPLIT_SEED,
     _DEFAULT_TFRECORD_DIR,
     _DEFAULT_VALIDATION_FRACTION,
@@ -81,9 +82,10 @@ def _build_visual_dataset(
 
 
 def _extract_token_bins(token_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    sep_id = _SPECIAL_TOKENS["[SEP]"]
-    sep_idx = int(np.where(token_ids == sep_id)[0][0])
-    content = token_ids[1:sep_idx]
+    pad_id = _SPECIAL_TOKENS["[PAD]"]
+    pad_positions = np.where(token_ids == pad_id)[0]
+    end = int(pad_positions[0]) if pad_positions.size > 0 else int(token_ids.shape[0])
+    content = token_ids[1:end]
     peaks = content[1:]
     mz_tokens = peaks[0::2]
     intensity_tokens = peaks[1::2]
@@ -126,7 +128,7 @@ def main() -> None:
     split_seed = int(cfg.get("split_seed", _DEFAULT_SPLIT_SEED))
     num_shards = int(cfg.get("num_shards", _DEFAULT_NUM_SHARDS))
     max_precursor_mz = float(cfg.get("max_precursor_mz", _DEFAULT_MAX_PRECURSOR_MZ))
-    max_len = int(cfg.get("pair_sequence_length", 128))
+    max_len = int(cfg.get("pair_sequence_length", _DEFAULT_PAIR_SEQUENCE_LENGTH))
 
     metadata = _ensure_processed(
         output_dir, validation_fraction, split_seed, num_shards

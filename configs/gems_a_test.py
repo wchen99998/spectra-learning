@@ -46,12 +46,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.b2 = 0.98
     cfg.weight_decay = 1e-3
     cfg.optimizer = "adamw"
-    cfg.muon_momentum = 0.95
-    cfg.muon_nesterov = True
-    cfg.muon_ns_steps = 5
-    cfg.muon_ns_coefficients = (3.4445, -4.775, 2.0315)
-    cfg.muon_eps = 1e-7
-    cfg.muon_adjust_lr_fn = None
     cfg.clip = 0.
     cfg.device_prefetch_size = 1
     cfg.log_loss_every_steps = 2000
@@ -63,6 +57,6 @@ def get_config() -> config_dict.ConfigDict:
 
     # System / logging
     cfg.enable_wandb = True
-    cfg.wandb_project = "md4"
+    cfg.wandb_project = "token-mass-spec-pretraining"
 
     return cfg

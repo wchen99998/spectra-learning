@@ -10,6 +10,7 @@ import tensorflow as tf
 from input_pipeline import (
     _DEFAULT_MAX_PRECURSOR_MZ,
     _DEFAULT_NUM_SHARDS,
+    _DEFAULT_PAIR_SEQUENCE_LENGTH,
     _DEFAULT_SPLIT_SEED,
     _DEFAULT_TFRECORD_DIR,
     _DEFAULT_VALIDATION_FRACTION,
@@ -36,10 +37,12 @@ def _load_config(path: str):
 
 def _length_from_peaks(max_len: int):
     max_len_t = tf.constant(max_len, tf.int32)
+    max_peaks = tf.constant((max_len - 2) // 2, tf.int32)
 
     def apply(example: dict) -> tf.Tensor:
         count = tf.reduce_sum(tf.cast(example["mz"] > 0, tf.int32))
-        length = 3 + 2 * count
+        count = tf.minimum(count, max_peaks)
+        length = 2 + 2 * count
         return tf.minimum(length, max_len_t)
 
     return apply
@@ -121,7 +124,7 @@ def main() -> None:
     split_seed = int(cfg.get("split_seed", _DEFAULT_SPLIT_SEED))
     num_shards = int(cfg.get("num_shards", _DEFAULT_NUM_SHARDS))
     max_precursor_mz = float(cfg.get("max_precursor_mz", _DEFAULT_MAX_PRECURSOR_MZ))
-    max_len = int(cfg.get("pair_sequence_length", 256))
+    max_len = int(cfg.get("pair_sequence_length", _DEFAULT_PAIR_SEQUENCE_LENGTH))
 
     metadata = _ensure_processed(
         output_dir, validation_fraction, split_seed, num_shards
