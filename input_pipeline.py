@@ -39,7 +39,7 @@ _INTENSITY_BINS = 128
 _INTENSITY_EPS = 1e-4
 _SPECIAL_TOKENS = {"[PAD]": 0, "[CLS]": 1, "[SEP]": 2, "[MASK]": 3}
 _NUM_SPECIAL_TOKENS = len(_SPECIAL_TOKENS)
-_DEFAULT_PAIR_SEQUENCE_LENGTH = 256
+_DEFAULT_PAIR_SEQUENCE_LENGTH = 128
 
 _METADATA_FILENAME = "metadata.json"
 
@@ -387,7 +387,50 @@ def _strip_padding_and_tokenize(max_precursor_mz: float) -> Callable[[dict], dic
     return apply
 
 
-def _pair_spectra_and_build_input(max_len: int) -> Callable[[dict], dict]:
+def detokenize_spectrum(
+    token_ids: np.ndarray | torch.Tensor,
+    *,
+    max_precursor_mz: float = _DEFAULT_MAX_PRECURSOR_MZ,
+) -> dict[str, Any] | list[dict[str, Any]]:
+    tokens = token_ids
+    if isinstance(tokens, torch.Tensor):
+        tokens = tokens.detach().cpu().numpy()
+    tokens = np.asarray(tokens, dtype=np.int32)
+
+    if tokens.ndim == 2:
+        return [
+            detokenize_spectrum(row, max_precursor_mz=max_precursor_mz) for row in tokens
+        ]
+
+    sep_id = _SPECIAL_TOKENS["[SEP]"]
+    sep_idx = int(np.where(tokens == sep_id)[0][0])
+    content = tokens[1:sep_idx]
+    precursor_token = content[0]
+    peaks = content[1:]
+    mz_tokens = peaks[0::2]
+    intensity_tokens = peaks[1::2]
+
+    mz = (mz_tokens - _NUM_SPECIAL_TOKENS).astype(np.float32)
+    precursor = float(
+        np.clip(precursor_token - _NUM_SPECIAL_TOKENS, 0, max_precursor_mz)
+    )
+
+    bins = _INTENSITY_BINS - 1
+    intensity_offset = _NUM_SPECIAL_TOKENS + int(_PEAK_MZ_MAX) + 1
+    intensity_idx = intensity_tokens - intensity_offset
+    s = intensity_idx.astype(np.float32) / float(bins)
+    log_eps = math.log(_INTENSITY_EPS)
+    denom = -log_eps
+    intensity = np.exp(s * denom + log_eps).astype(np.float32)
+
+    return {
+        "precursor_mz": precursor,
+        "mz": mz,
+        "intensity": intensity,
+    }
+
+
+def _build_single_spectrum_input(max_len: int) -> Callable[[dict], dict]:
     cls_id = tf.constant(_SPECIAL_TOKENS["[CLS]"], tf.int32)
     sep_id = tf.constant(_SPECIAL_TOKENS["[SEP]"], tf.int32)
     pad_id = tf.constant(_SPECIAL_TOKENS["[PAD]"], tf.int32)
@@ -398,24 +441,16 @@ def _pair_spectra_and_build_input(max_len: int) -> Callable[[dict], dict]:
 
     def build_sequence(mz: tf.Tensor, intensity: tf.Tensor, precursor: tf.Tensor) -> tf.Tensor:
         peaks = interleave(mz, intensity)
-        return tf.concat([precursor[None], peaks], axis=0)
+        return tf.concat([precursor, peaks], axis=0)
 
     def apply(example: dict) -> dict:
         mz = example["mz"]
         intensity = example["intensity"]
-        precursor = tf.reshape(example["precursor_mz"], [-1])
+        precursor = tf.reshape(example["precursor_mz"], [1])
+        seq = build_sequence(mz, intensity, precursor)
 
-        seq1 = build_sequence(mz[0], intensity[0], precursor[0])
-        seq2 = build_sequence(mz[1], intensity[1], precursor[1])
-
-        tokens = tf.concat([cls_id[None], seq1, sep_id[None], seq2], axis=0)
-        seg = tf.concat(
-            [
-                tf.zeros([tf.shape(seq1)[0] + 2], tf.int32),
-                tf.ones([tf.shape(seq2)[0]], tf.int32),
-            ],
-            axis=0,
-        )
+        tokens = tf.concat([cls_id[None], seq, sep_id[None]], axis=0)
+        seg = tf.zeros([tf.shape(tokens)[0]], tf.int32)
 
         tokens = tokens[:max_len]
         seg = seg[:max_len]
@@ -492,9 +527,8 @@ def _build_dataset(
     if shuffle_buffer > 0:
         ds = ds.shuffle(shuffle_buffer, seed=seed, reshuffle_each_iteration=False)
 
-    ds = ds.ragged_batch(2, drop_remainder=True)
     ds = ds.map(
-        _pair_spectra_and_build_input(pair_sequence_length),
+        _build_single_spectrum_input(pair_sequence_length),
         num_parallel_calls=tf.data.AUTOTUNE,
     )
     ds = ds.batch(batch_size, drop_remainder=drop_remainder)
@@ -546,14 +580,10 @@ def _compute_info(
     }
 
 
-def _pairs_from_size(size: int) -> int:
-    return int(size) // 2
-
-
-def _steps_from_pairs(pairs: int, batch_size: int, drop_remainder: bool) -> int:
+def _steps_from_size(size: int, batch_size: int, drop_remainder: bool) -> int:
     if drop_remainder:
-        return int(pairs // batch_size)
-    return int(math.ceil(pairs / batch_size))
+        return int(size // batch_size)
+    return int(math.ceil(size / batch_size))
 
 
 def _resolve_train_steps(config: config_dict.ConfigDict, info: dict[str, Any]) -> int:
@@ -566,9 +596,9 @@ def _resolve_eval_steps(
     if config.get("num_eval_steps", 0) > 0:
         return int(config.num_eval_steps)
     size_key = "validation_size" if split == "validation" else "massspec_test_size"
-    pairs = _pairs_from_size(info[size_key])
+    size = int(info[size_key])
     drop_remainder = split == "massspec_test"
-    return _steps_from_pairs(pairs, int(config.batch_size), drop_remainder)
+    return _steps_from_size(size, int(config.batch_size), drop_remainder)
 
 
 def get_num_train_steps(config: config_dict.ConfigDict) -> int:

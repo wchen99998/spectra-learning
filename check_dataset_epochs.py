@@ -6,7 +6,7 @@ from pathlib import Path
 
 import torch
 
-from input_pipeline import TfLightningDataModule, _pairs_from_size
+from input_pipeline import TfLightningDataModule
 
 
 class _DummyTrainer:
@@ -46,11 +46,10 @@ def _batch_checksum(batch: dict[str, torch.Tensor]) -> int:
     )
 
 
-def _expected_pairs(size: int, batch_size: int, drop_remainder: bool) -> int:
-    pairs = _pairs_from_size(size)
+def _expected_samples(size: int, batch_size: int, drop_remainder: bool) -> int:
     if drop_remainder:
-        return (pairs // batch_size) * batch_size
-    return pairs
+        return (size // batch_size) * batch_size
+    return size
 
 
 def main() -> None:
@@ -68,7 +67,7 @@ def main() -> None:
         loader = dm.train_dataloader()
         size = dm.info["train_size"]
         drop_remainder = bool(cfg.get("drop_remainder", False))
-        expected_pairs = _expected_pairs(size, int(cfg.batch_size), drop_remainder)
+        expected_samples = _expected_samples(size, int(cfg.batch_size), drop_remainder)
     else:
         loaders = dm.val_dataloader()
         if not isinstance(loaders, list):
@@ -78,17 +77,17 @@ def main() -> None:
         size_key = "validation_size" if args.split == "validation" else "massspec_test_size"
         size = dm.info[size_key]
         drop_remainder = args.split == "massspec_test"
-        expected_pairs = _expected_pairs(size, int(cfg.batch_size), drop_remainder)
+        expected_samples = _expected_samples(size, int(cfg.batch_size), drop_remainder)
 
     checksums: list[tuple[int, int, int]] = []
     for epoch in range(int(args.epochs)):
         dm.trainer.current_epoch = epoch
         order_hash = 0
         content_hash = 0
-        pairs_seen = 0
+        samples_seen = 0
 
         for batch in loader:
-            remaining = expected_pairs - pairs_seen
+            remaining = expected_samples - samples_seen
             if remaining <= 0:
                 break
             take = min(int(batch["token_ids"].shape[0]), remaining)
@@ -99,19 +98,19 @@ def main() -> None:
                 batch_sum = _batch_checksum(sliced)
             content_hash = (content_hash + batch_sum) & ((1 << 64) - 1)
             order_hash = (order_hash * 1_000_003 + batch_sum) & ((1 << 64) - 1)
-            pairs_seen += take
+            samples_seen += take
 
-        checksums.append((pairs_seen, content_hash, order_hash))
+        checksums.append((samples_seen, content_hash, order_hash))
         print(
-            f"epoch={epoch} pairs={pairs_seen} expected={expected_pairs} "
+            f"epoch={epoch} samples={samples_seen} expected={expected_samples} "
             f"content_hash={content_hash} order_hash={order_hash}"
         )
 
-    first_pairs, first_content, first_order = checksums[0]
-    for epoch, (pairs_seen, content_hash, order_hash) in enumerate(checksums[1:], start=1):
+    first_samples, first_content, first_order = checksums[0]
+    for epoch, (samples_seen, content_hash, order_hash) in enumerate(checksums[1:], start=1):
         print(
             f"compare epoch0 vs epoch{epoch}: "
-            f"pairs_equal={pairs_seen == first_pairs} "
+            f"samples_equal={samples_seen == first_samples} "
             f"content_equal={content_hash == first_content} "
             f"order_equal={order_hash == first_order}"
         )

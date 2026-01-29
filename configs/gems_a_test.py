@@ -14,7 +14,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_shards = 4
     cfg.drop_remainder = True
     cfg.max_precursor_mz = 1000.0
-    cfg.pair_sequence_length = 256
+    cfg.pair_sequence_length = 128
     cfg.seed = 42
 
     # Model (BERT)
