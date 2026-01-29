@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import functools
 import importlib.util
 import json
 import logging
@@ -17,7 +16,7 @@ import tensorflow as tf
 import torch
 from huggingface_hub import hf_hub_download
 from ml_collections import config_dict
-from torch.utils.data import DataLoader, IterableDataset, get_worker_info
+from torch.utils.data import DataLoader, IterableDataset
 from tqdm import tqdm
 
 tf.config.set_visible_devices([], "GPU")
@@ -470,30 +469,12 @@ def _build_dataset(
     pair_sequence_length: int,
     mask_ratio: float,
     mask_token_id: int,
-    shard: tuple[int, int] | None = None,
 ) -> tf.data.Dataset:
-    file_ds = tf.data.Dataset.from_tensor_slices(filenames)
-    if shard is not None:
-        num_workers, worker_id = shard
-        if num_workers > 1:
-            file_ds = file_ds.shard(num_workers, worker_id)
-    if repeat:
-        file_ds = file_ds.repeat()
-    if shuffle_buffer > 0:
-        file_ds = file_ds.shuffle(
-            len(filenames),
-            seed=seed,
-            reshuffle_each_iteration=True,
-        )
-
-    ds = file_ds.interleave(
-        lambda fn: tf.data.TFRecordDataset(fn, compression_type="GZIP"),
-        cycle_length=tf.data.AUTOTUNE,
-        num_parallel_calls=tf.data.AUTOTUNE,
-        deterministic=False,
+    ds = tf.data.TFRecordDataset(
+        filenames,
+        compression_type="GZIP",
+        num_parallel_reads=tf.data.AUTOTUNE,
     )
-    if shuffle_buffer > 0:
-        ds = ds.shuffle(shuffle_buffer, seed=seed, reshuffle_each_iteration=True)
     ds = ds.map(_parse_example, num_parallel_calls=tf.data.AUTOTUNE)
     ds = ds.filter(_filter_max_precursor_mz(max_precursor_mz))
     ds = ds.map(
@@ -506,6 +487,10 @@ def _build_dataset(
         _strip_padding_and_tokenize(max_precursor_mz),
         num_parallel_calls=tf.data.AUTOTUNE,
     )
+    if repeat:
+        ds = ds.repeat()
+    if shuffle_buffer > 0:
+        ds = ds.shuffle(shuffle_buffer, seed=seed, reshuffle_each_iteration=False)
 
     ds = ds.ragged_batch(2, drop_remainder=True)
     ds = ds.map(
@@ -517,6 +502,9 @@ def _build_dataset(
         _apply_mlm_mask(mask_ratio, mask_token_id),
         num_parallel_calls=tf.data.AUTOTUNE,
     )
+    options = tf.data.Options()
+    options.experimental_deterministic = True
+    ds = ds.with_options(options)
     ds = ds.prefetch(tf.data.AUTOTUNE)
     return ds
 
@@ -569,13 +557,7 @@ def _steps_from_pairs(pairs: int, batch_size: int, drop_remainder: bool) -> int:
 
 
 def _resolve_train_steps(config: config_dict.ConfigDict, info: dict[str, Any]) -> int:
-    if config.get("steps_per_epoch", 0) > 0:
-        return int(config.steps_per_epoch)
-    if config.get("num_epochs", 0) > 0 and config.get("num_train_steps", 0) > 0:
-        return int(config.num_train_steps // config.num_epochs)
-    pairs = _pairs_from_size(info["train_size"])
-    drop_remainder = bool(config.get("drop_remainder", False))
-    return _steps_from_pairs(pairs, int(config.batch_size), drop_remainder)
+    return int(config.num_train_steps)
 
 
 def _resolve_eval_steps(
@@ -638,40 +620,42 @@ class _TfIterableDataset(IterableDataset):
     def __init__(
         self,
         *,
-        build_fn: Callable[[int, int, int], tf.data.Dataset],
+        dataset: tf.data.Dataset,
         steps_per_epoch: int,
-        seed: int,
-        epoch_fn: Callable[[], int],
     ) -> None:
         super().__init__()
-        self._build_fn = build_fn
+        self._dataset = dataset
         self.steps_per_epoch = int(steps_per_epoch)
-        self.seed = int(seed)
-        self._epoch_fn = epoch_fn
+        self._resume_from = 0
+        self._num_yielded = 0
 
     def __len__(self) -> int:
         return self.steps_per_epoch
 
     def __iter__(self):
-        worker = get_worker_info()
-        if worker is None:
-            worker_id = 0
-            num_workers = 1
-        else:
-            worker_id = worker.id
-            num_workers = worker.num_workers
+        self._num_yielded = self._resume_from if self._resume_from > 0 else 0
+        resume_from = self._resume_from
+        self._resume_from = 0
+        dataset = self._dataset.skip(resume_from) if resume_from > 0 else self._dataset
+        iterator = dataset.as_numpy_iterator()
+        for batch in iterator:
+            yield numpy_batch_to_torch(batch)
+            self._num_yielded += 1
 
-        start = (worker_id * self.steps_per_epoch) // num_workers
-        end = ((worker_id + 1) * self.steps_per_epoch) // num_workers
-        local_steps = end - start
+    def state_dict(self) -> dict[str, Any]:
+        return {"num_yielded": self._num_yielded}
 
-        epoch = int(self._epoch_fn())
-        worker_seed = self.seed + 10_000 * epoch + worker_id
-        ds = self._build_fn(worker_seed, num_workers, worker_id)
-        iterator = ds.as_numpy_iterator()
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        self._resume_from = int(state_dict["num_yielded"])
+        self._num_yielded = self._resume_from
 
-        for _ in range(local_steps):
-            yield numpy_batch_to_torch(next(iterator))
+
+class _StatefulDataLoader(DataLoader):
+    def state_dict(self) -> dict[str, Any]:
+        return self.dataset.state_dict()
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        self.dataset.load_state_dict(state_dict)
 
 
 class TfLightningDataModule(pl.LightningDataModule):
@@ -739,12 +723,8 @@ class TfLightningDataModule(pl.LightningDataModule):
             for split in self.eval_splits
         }
 
-        self.num_workers = int(config.get("dataloader_num_workers", 0))
         default_pin = torch.cuda.is_available()
         self.pin_memory = bool(config.get("dataloader_pin_memory", default_pin))
-        persistent = bool(config.get("dataloader_persistent_workers", True))
-        self.persistent_workers = self.num_workers > 0 and persistent
-        self.prefetch_factor = int(config.get("dataloader_prefetch_factor", 2))
 
     def state_dict(self) -> dict[str, Any]:
         return {"seed": self.seed}
@@ -752,84 +732,66 @@ class TfLightningDataModule(pl.LightningDataModule):
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         self.seed = int(state_dict["seed"])
 
-    def _build_train_dataset(
-        self, seed: int, num_workers: int = 1, worker_id: int = 0
-    ) -> tf.data.Dataset:
+    def _build_train_dataset(self, seed: int) -> tf.data.Dataset:
         return _build_dataset(
             self.train_files,
             self.batch_size,
             self.shuffle_buffer,
             seed,
-            repeat=False,
+            repeat=True,
             drop_remainder=self.drop_remainder,
             max_precursor_mz=self.max_precursor_mz,
             pair_sequence_length=self.pair_sequence_length,
             mask_ratio=self.mask_ratio,
             mask_token_id=self.mask_token_id,
-            shard=(num_workers, worker_id),
         )
 
-    def _build_eval_dataset(
-        self, split: str, seed: int, num_workers: int = 1, worker_id: int = 0
-    ) -> tf.data.Dataset:
+    def _build_eval_dataset(self, split: str, seed: int) -> tf.data.Dataset:
         files = self.val_files if split == "validation" else self.massspec_test_files
         return _build_dataset(
             files,
             self.batch_size,
             shuffle_buffer=0,
             seed=seed,
-            repeat=False,
+            repeat=True,
             drop_remainder=(split == "massspec_test"),
             max_precursor_mz=self.max_precursor_mz,
             pair_sequence_length=self.pair_sequence_length,
             mask_ratio=self.mask_ratio,
             mask_token_id=self.mask_token_id,
-            shard=(num_workers, worker_id),
         )
 
     def _make_loader(
         self,
         *,
-        build_fn: Callable[[int, int, int], tf.data.Dataset],
+        dataset: tf.data.Dataset,
         steps: int,
-        seed: int,
     ) -> DataLoader:
         dataset = _TfIterableDataset(
-            build_fn=build_fn,
+            dataset=dataset,
             steps_per_epoch=steps,
-            seed=seed,
-            epoch_fn=self._current_epoch,
         )
         loader_kwargs: dict[str, Any] = {
             "dataset": dataset,
             "batch_size": None,
-            "num_workers": self.num_workers,
             "pin_memory": self.pin_memory,
             "collate_fn": _identity_collate,
         }
-        if self.num_workers > 0:
-            loader_kwargs["persistent_workers"] = self.persistent_workers
-            loader_kwargs["prefetch_factor"] = self.prefetch_factor
-        return DataLoader(**loader_kwargs)
-
-    def _current_epoch(self) -> int:
-        return 0 if self.trainer is None else int(self.trainer.current_epoch)
+        return _StatefulDataLoader(**loader_kwargs)
 
     def train_dataloader(self) -> DataLoader:
         base_seed = self.seed
         return self._make_loader(
-            build_fn=self._build_train_dataset,
+            dataset=self._build_train_dataset(base_seed),
             steps=self.train_steps,
-            seed=base_seed,
         )
 
     def val_dataloader(self):
         base_seed = self.seed + 1_000_000
         loaders = [
             self._make_loader(
-                build_fn=functools.partial(self._build_eval_dataset, split),
+                dataset=self._build_eval_dataset(split, base_seed + i * 10_000),
                 steps=self.eval_steps[split],
-                seed=base_seed + i * 10_000,
             )
             for i, split in enumerate(self.eval_splits)
         ]

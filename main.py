@@ -31,7 +31,6 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train MAE/BERT with PyTorch Lightning.")
     parser.add_argument("--config", required=True, help="Path to a config file (python).")
     parser.add_argument("--workdir", required=True, help="Output directory.")
-    parser.add_argument("--olddir", default=None, help="Optional checkpoint load directory.")
     return parser.parse_args()
 
 
@@ -41,9 +40,8 @@ def main() -> None:
 
     config = _load_config(args.config)
     workdir = Path(args.workdir).expanduser().resolve()
-    olddir = None if args.olddir is None else Path(args.olddir).expanduser().resolve()
 
-    train_and_evaluate(config, workdir=workdir, olddir=olddir)
+    train_and_evaluate(config, workdir=workdir)
 
 
 if __name__ == "__main__":

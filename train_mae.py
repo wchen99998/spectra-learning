@@ -233,7 +233,6 @@ class MAELightningModule(pl.LightningModule):
 def train_and_evaluate(
     config: config_dict.ConfigDict,
     workdir: str | Path,
-    olddir: str | Path | None = None,
 ) -> None:
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -251,6 +250,7 @@ def train_and_evaluate(
     config.precursor_offset = info["precursor_offset"]
 
     logging.info("Training with Lightning for %d steps.", total_steps)
+    logging.info("Steps per epoch: %d", datamodule.train_steps)
     logging.info("Validation splits: %s", datamodule.eval_splits)
 
     module = MAELightningModule(
@@ -278,19 +278,16 @@ def train_and_evaluate(
         devices=1,
         precision="bf16-mixed",
         max_steps=total_steps,
+        limit_train_batches=total_steps,
         log_every_n_steps=int(config.log_loss_every_steps),
         val_check_interval=int(config.eval_every_steps),
-        gradient_clip_val=float(config.clip),
+        gradient_clip_val=float(config.clip) if config.get("clip", 0.) > 0. else None,
         gradient_clip_algorithm="norm",
         callbacks=[checkpoint_cb, lr_monitor],
         logger=logger,
     )
 
-    ckpt_path: str | None = None
-    if olddir is not None:
-        ckpt_path = _latest_ckpt_path(Path(olddir))
-    if ckpt_path is None:
-        ckpt_path = _latest_ckpt_path(Path(str(workdir)))
+    ckpt_path = _latest_ckpt_path(Path(str(workdir)))
 
     if ckpt_path is not None:
         logging.info("Resuming from checkpoint: %s", ckpt_path)

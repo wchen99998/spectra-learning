@@ -9,7 +9,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.tfrecord_dir = "data/gems_peaklist_tfrecord"
     cfg.batch_size = 128
     cfg.validation_fraction = 0.05
-    cfg.shuffle_buffer = 10_000
+    cfg.shuffle_buffer = 200_000
     cfg.split_seed = 42
     cfg.num_shards = 4
     cfg.drop_remainder = True
@@ -40,10 +40,10 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_train_steps = 1_000_000
     cfg.num_epochs = 0
     cfg.learning_rate = 3e-4
-    cfg.warmup_steps = 20000
+    cfg.warmup_steps = 50_000
     cfg.learning_rate_schedule = "cosine"
     cfg.min_learning_rate = None
-    cfg.b2 = 0.99
+    cfg.b2 = 0.98
     cfg.weight_decay = 1e-3
     cfg.optimizer = "adamw"
     cfg.muon_momentum = 0.95
