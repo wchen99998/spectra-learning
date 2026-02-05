@@ -1087,7 +1087,7 @@ class TfLightningDataModule(pl.LightningDataModule):
             self.gems_val_files,
             seed=seed,
             shuffle=False,
-            drop_remainder=False,
+            drop_remainder=True,
             include_fingerprint=False,
         )
 
@@ -1096,7 +1096,7 @@ class TfLightningDataModule(pl.LightningDataModule):
             self.gems_test_files,
             seed=seed,
             shuffle=False,
-            drop_remainder=False,
+            drop_remainder=True,
             include_fingerprint=False,
         )
 
@@ -1114,7 +1114,7 @@ class TfLightningDataModule(pl.LightningDataModule):
             self.massspec_val_files,
             seed=seed,
             shuffle=False,
-            drop_remainder=False,
+            drop_remainder=True,
             include_fingerprint=False,
         )
 
@@ -1123,7 +1123,7 @@ class TfLightningDataModule(pl.LightningDataModule):
             self.massspec_test_files,
             seed=seed,
             shuffle=False,
-            drop_remainder=False,
+            drop_remainder=True,
             include_fingerprint=False,
         )
 
