@@ -505,6 +505,15 @@ def _filter_peak_mz_range(
     return apply
 
 
+def _convert_to_neutral_loss() -> Callable[[dict], dict]:
+    def apply(example: dict) -> dict:
+        precursor_mz = tf.squeeze(example["precursor_mz"])
+        example["mz"] = precursor_mz - example["mz"]
+        return example
+
+    return apply
+
+
 def _compact_sort_peaks() -> Callable[[dict], dict]:
     def apply(example: dict) -> dict:
         mz = example["mz"]
@@ -700,6 +709,7 @@ def _build_dataset(
     mask_token_id: int,
     include_fingerprint: bool,
     intensity_scaling: str,
+    mz_representation: str,
 ) -> tf.data.Dataset:
     parse_fn = _parse_example_with_fingerprint if include_fingerprint else _parse_example
     ds = tf.data.TFRecordDataset(
@@ -716,6 +726,8 @@ def _build_dataset(
     )
     ds = ds.map(_topk_peaks(_NUM_PEAKS_OUTPUT), num_parallel_calls=tf.data.AUTOTUNE)
     ds = ds.map(_compact_sort_peaks(), num_parallel_calls=tf.data.AUTOTUNE)
+    if mz_representation == "neutral_loss":
+        ds = ds.map(_convert_to_neutral_loss(), num_parallel_calls=tf.data.AUTOTUNE)
     ds = ds.map(
         _strip_padding_and_tokenize(max_precursor_mz, intensity_scaling),
         num_parallel_calls=tf.data.AUTOTUNE,
@@ -751,6 +763,7 @@ def _compute_info(
     max_precursor_mz: float,
     pair_sequence_length: int,
     intensity_scaling: str,
+    mz_representation: str,
 ) -> dict[str, Any]:
     mz_bins = int(_PEAK_MZ_MAX) + 1
     precursor_bins = int(max_precursor_mz) + 1
@@ -777,6 +790,7 @@ def _compute_info(
         "special_tokens": dict(_SPECIAL_TOKENS),
         "pair_sequence_length": pair_sequence_length,
         "intensity_scaling": intensity_scaling,
+        "mz_representation": mz_representation,
         "fingerprint_bits": _FINGERPRINT_BITS,
     }
 
@@ -946,6 +960,7 @@ class TfLightningDataModule(pl.LightningDataModule):
         self.intensity_scaling = str(
             config.get("intensity_scaling", _DEFAULT_INTENSITY_SCALING)
         )
+        self.mz_representation = str(config.get("mz_representation", "mz"))
         self.mask_ratio = float(config.get("mask_ratio", 0.15))
         self.mask_token_id = int(config.get("mask_token_id", _SPECIAL_TOKENS["[MASK]"]))
 
@@ -983,6 +998,7 @@ class TfLightningDataModule(pl.LightningDataModule):
             max_precursor_mz=self.max_precursor_mz,
             pair_sequence_length=self.pair_sequence_length,
             intensity_scaling=self.intensity_scaling,
+            mz_representation=self.mz_representation,
         )
         self.train_splits = ["gems_train", "massspec_train"]
         self.eval_splits = ["gems_val", "massspec_val"]
@@ -1054,6 +1070,7 @@ class TfLightningDataModule(pl.LightningDataModule):
             mask_token_id=self.mask_token_id,
             include_fingerprint=include_fingerprint,
             intensity_scaling=self.intensity_scaling,
+            mz_representation=self.mz_representation,
         )
 
     def _build_gems_train_dataset(self, seed: int) -> tf.data.Dataset:
@@ -1125,6 +1142,7 @@ class TfLightningDataModule(pl.LightningDataModule):
             mask_token_id=self.mask_token_id,
             include_fingerprint=True,
             intensity_scaling=self.intensity_scaling,
+            mz_representation=self.mz_representation,
         )
 
     def _make_loader(
