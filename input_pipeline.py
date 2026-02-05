@@ -32,6 +32,8 @@ _DEFAULT_NUM_SHARDS = 4
 _NUM_PEAKS_INPUT = 128
 _NUM_PEAKS_OUTPUT = 64
 _DEFAULT_MAX_PRECURSOR_MZ = 1000.0
+_FINGERPRINT_BITS = 1024
+_FINGERPRINT_RADIUS = 2
 _PEAK_MZ_MIN = 20.0
 _PEAK_MZ_MAX = 1000.0
 _PRECURSOR_MZ_WINDOW = 2.5
@@ -76,16 +78,36 @@ def _load_gems_arrays(hdf5_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarr
 
 def _load_massspec_arrays(
     hdf5_path: Path,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     import h5py
 
     with h5py.File(hdf5_path, "r") as f:
         spectra = f["spectrum"][:]
         precursor = np.asarray(f["precursor_mz"], dtype=np.float32)
-        fold = f["fold"].astype("T")[:]
+        fold = f["fold"].asstr()[:]
+        smiles = f["smiles"].asstr()[:]
 
     retention = np.full(len(spectra), 392.3146, dtype=np.float32)
-    return spectra, retention, precursor, fold
+    return spectra, retention, precursor, fold, smiles
+
+
+def _compute_morgan_fingerprints(smiles: np.ndarray) -> np.ndarray:
+    from rdkit import Chem
+    from rdkit.Chem import AllChem
+    from rdkit import DataStructs
+
+    fps = np.zeros((len(smiles), _FINGERPRINT_BITS), dtype=np.int8)
+    for i, s in enumerate(smiles):
+        mol = Chem.MolFromSmiles(str(s))
+        fp = AllChem.GetMorganFingerprintAsBitVect(
+            mol,
+            _FINGERPRINT_RADIUS,
+            nBits=_FINGERPRINT_BITS,
+        )
+        arr = np.zeros((_FINGERPRINT_BITS,), dtype=np.int8)
+        DataStructs.ConvertToNumpyArray(fp, arr)
+        fps[i] = arr
+    return fps
 
 
 def _write_tfrecords(
@@ -128,6 +150,65 @@ def _write_tfrecords(
                     ),
                     "precursor_mz": tf.train.Feature(
                         float_list=tf.train.FloatList(value=[precursor[i]])
+                    ),
+                }
+
+                example = tf.train.Example(
+                    features=tf.train.Features(feature=features)
+                )
+                writer.write(example.SerializeToString())
+
+        files.append(shard_file.name)
+        lengths.append(end - start)
+
+    return files, lengths
+
+
+def _write_tfrecords_with_fingerprint(
+    spectra: np.ndarray,
+    retention: np.ndarray,
+    precursor: np.ndarray,
+    fingerprint: np.ndarray,
+    output_path: Path,
+    num_shards: int,
+    desc: str,
+) -> tuple[list[str], list[int]]:
+    n = len(spectra)
+    num_shards = max(1, min(num_shards, n))
+    shard_size = math.ceil(n / num_shards)
+
+    output_path.mkdir(parents=True, exist_ok=True)
+    files: list[str] = []
+    lengths: list[int] = []
+
+    for shard_id in range(num_shards):
+        start = shard_id * shard_size
+        end = min(start + shard_size, n)
+        if start >= end:
+            break
+
+        shard_file = output_path / f"shard-{shard_id:05d}-of-{num_shards:05d}.tfrecord"
+        options = tf.io.TFRecordOptions(compression_type="GZIP")
+
+        with tf.io.TFRecordWriter(str(shard_file), options=options) as writer:
+            for i in tqdm(range(start, end), desc=f"{desc} [{shard_id + 1}/{num_shards}]"):
+                mz = spectra[i, 0].astype(np.float32)
+                intensity = spectra[i, 1].astype(np.float32)
+                fp = fingerprint[i].astype(np.int64)
+
+                features = {
+                    "mz": tf.train.Feature(float_list=tf.train.FloatList(value=mz)),
+                    "intensity": tf.train.Feature(
+                        float_list=tf.train.FloatList(value=intensity)
+                    ),
+                    "rt": tf.train.Feature(
+                        float_list=tf.train.FloatList(value=[retention[i]])
+                    ),
+                    "precursor_mz": tf.train.Feature(
+                        float_list=tf.train.FloatList(value=[precursor[i]])
+                    ),
+                    "fingerprint": tf.train.Feature(
+                        int64_list=tf.train.Int64List(value=fp)
                     ),
                 }
 
@@ -202,22 +283,44 @@ def _process_massspec(output_dir: Path, num_shards: int) -> dict[str, Any]:
     hdf5_path = _download_hdf5(_GEMS_HF_REPO, _MASSSPEC_HDF5_PATH, output_dir.parent)
 
     logger.info("Loading MassSpecGym data...")
-    spectra, retention, precursor, fold = _load_massspec_arrays(hdf5_path)
+    spectra, retention, precursor, fold, smiles = _load_massspec_arrays(hdf5_path)
+    fingerprints = _compute_morgan_fingerprints(smiles)
 
+    train_mask = fold == "train"
     test_mask = fold != "train"
+    train_size = int(np.count_nonzero(train_mask))
     test_size = int(np.count_nonzero(test_mask))
-    logger.info("MassSpecGym spectra: %d (test=%d)", len(spectra), test_size)
+    logger.info(
+        "MassSpecGym spectra: %d (train=%d, test=%d)",
+        len(spectra),
+        train_size,
+        test_size,
+    )
 
-    test_files, test_lengths = _write_tfrecords(
+    train_files, train_lengths = _write_tfrecords_with_fingerprint(
+        spectra[train_mask],
+        retention[train_mask],
+        precursor[train_mask],
+        fingerprints[train_mask],
+        output_dir / "massspec_train",
+        max(1, num_shards // 2),
+        desc="MassSpec Train",
+    )
+
+    test_files, test_lengths = _write_tfrecords_with_fingerprint(
         spectra[test_mask],
         retention[test_mask],
         precursor[test_mask],
+        fingerprints[test_mask],
         output_dir / "massspec_test",
         max(1, num_shards // 4),
         desc="MassSpec Test",
     )
 
     return {
+        "massspec_train_files": train_files,
+        "massspec_train_lengths": train_lengths,
+        "massspec_train_size": train_size,
         "massspec_test_files": test_files,
         "massspec_test_lengths": test_lengths,
         "massspec_test_size": test_size,
@@ -249,8 +352,20 @@ def _ensure_processed(
             (output_dir / "massspec_test" / fn).exists()
             for fn in massspec_test_files
         )
+        massspec_train_files = metadata.get("massspec_train_files", [])
+        massspec_train_ok = all(
+            (output_dir / "massspec_train" / fn).exists()
+            for fn in massspec_train_files
+        )
 
-        if train_ok and val_ok and massspec_test_files and massspec_test_ok:
+        if (
+            train_ok
+            and val_ok
+            and massspec_test_files
+            and massspec_test_ok
+            and massspec_train_files
+            and massspec_train_ok
+        ):
             logger.info("Found existing TFRecords at %s", output_dir)
             return metadata
 
@@ -293,6 +408,24 @@ def _parse_example(serialized: tf.Tensor) -> dict[str, tf.Tensor]:
         "intensity": parsed["intensity"],
         "rt": parsed["rt"][0],
         "precursor_mz": parsed["precursor_mz"][0],
+    }
+
+
+def _parse_example_with_fingerprint(serialized: tf.Tensor) -> dict[str, tf.Tensor]:
+    features = {
+        "mz": tf.io.FixedLenFeature([_NUM_PEAKS_INPUT], tf.float32),
+        "intensity": tf.io.FixedLenFeature([_NUM_PEAKS_INPUT], tf.float32),
+        "rt": tf.io.FixedLenFeature([1], tf.float32),
+        "precursor_mz": tf.io.FixedLenFeature([1], tf.float32),
+        "fingerprint": tf.io.FixedLenFeature([_FINGERPRINT_BITS], tf.int64),
+    }
+    parsed = tf.io.parse_single_example(serialized, features)
+    return {
+        "mz": parsed["mz"],
+        "intensity": parsed["intensity"],
+        "rt": parsed["rt"][0],
+        "precursor_mz": parsed["precursor_mz"][0],
+        "fingerprint": tf.cast(parsed["fingerprint"], tf.int32),
     }
 
 
@@ -505,13 +638,15 @@ def _build_dataset(
     pair_sequence_length: int,
     mask_ratio: float,
     mask_token_id: int,
+    include_fingerprint: bool,
 ) -> tf.data.Dataset:
+    parse_fn = _parse_example_with_fingerprint if include_fingerprint else _parse_example
     ds = tf.data.TFRecordDataset(
         filenames,
         compression_type="GZIP",
         num_parallel_reads=tf.data.AUTOTUNE,
     )
-    ds = ds.map(_parse_example, num_parallel_calls=tf.data.AUTOTUNE)
+    ds = ds.map(parse_fn, num_parallel_calls=tf.data.AUTOTUNE)
     ds = ds.filter(_filter_max_precursor_mz(max_precursor_mz))
     ds = ds.map(
         _filter_peak_mz_range(_PEAK_MZ_MIN, _PEAK_MZ_MAX, _PRECURSOR_MZ_WINDOW),
@@ -566,6 +701,7 @@ def _compute_info(
         "tfrecord_dir": str(output_dir),
         "train_size": metadata["train_size"],
         "validation_size": metadata["validation_size"],
+        "massspec_train_size": metadata.get("massspec_train_size", 0),
         "massspec_test_size": metadata.get("massspec_test_size", 0),
         "num_peaks": _NUM_PEAKS_OUTPUT,
         "intensity_bins": _INTENSITY_BINS,
@@ -578,6 +714,7 @@ def _compute_info(
         "vocab_size": vocab_size,
         "special_tokens": dict(_SPECIAL_TOKENS),
         "pair_sequence_length": pair_sequence_length,
+        "fingerprint_bits": _FINGERPRINT_BITS,
     }
 
 
@@ -737,6 +874,10 @@ class TfLightningDataModule(pl.LightningDataModule):
             str(self.output_dir / "massspec_test" / fn)
             for fn in self.metadata.get("massspec_test_files", [])
         ]
+        self.massspec_train_files = [
+            str(self.output_dir / "massspec_train" / fn)
+            for fn in self.metadata.get("massspec_train_files", [])
+        ]
 
         self.info = _compute_info(
             self.metadata,
@@ -775,10 +916,19 @@ class TfLightningDataModule(pl.LightningDataModule):
             pair_sequence_length=self.pair_sequence_length,
             mask_ratio=self.mask_ratio,
             mask_token_id=self.mask_token_id,
+            include_fingerprint=False,
         )
 
     def _build_eval_dataset(self, split: str, seed: int) -> tf.data.Dataset:
-        files = self.val_files if split == "validation" else self.massspec_test_files
+        if split == "validation":
+            files = self.val_files
+            include_fingerprint = False
+        elif split == "massspec_test":
+            files = self.massspec_test_files
+            include_fingerprint = True
+        else:
+            files = self.massspec_train_files
+            include_fingerprint = True
         return _build_dataset(
             files,
             self.batch_size,
@@ -790,6 +940,23 @@ class TfLightningDataModule(pl.LightningDataModule):
             pair_sequence_length=self.pair_sequence_length,
             mask_ratio=self.mask_ratio,
             mask_token_id=self.mask_token_id,
+            include_fingerprint=include_fingerprint,
+        )
+
+    def build_massspec_probe_dataset(self, split: str, seed: int) -> tf.data.Dataset:
+        files = self.massspec_train_files if split == "massspec_train" else self.massspec_test_files
+        return _build_dataset(
+            files,
+            self.batch_size,
+            shuffle_buffer=0,
+            seed=seed,
+            repeat=False,
+            drop_remainder=False,
+            max_precursor_mz=self.max_precursor_mz,
+            pair_sequence_length=self.pair_sequence_length,
+            mask_ratio=self.mask_ratio,
+            mask_token_id=self.mask_token_id,
+            include_fingerprint=True,
         )
 
     def _make_loader(

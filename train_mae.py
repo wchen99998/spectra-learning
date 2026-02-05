@@ -17,7 +17,8 @@ from ml_collections import config_dict
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
 
-from input_pipeline import TfLightningDataModule
+from input_pipeline import TfLightningDataModule, numpy_batch_to_torch
+from linear_probe import run_linear_probe
 from models.bert_torch import BERTTorch
 from utils import wandb_writer
 
@@ -135,6 +136,7 @@ class MAELightningModule(pl.LightningModule):
         self.schedule_type = str(config.get("learning_rate_schedule", "cosine"))
         self.min_learning_rate = config.get("min_learning_rate", None)
         self.b2 = float(config.get("b2", 0.999))
+        self.probe_ridge = float(config.get("probe_ridge", 1e-3))
 
         self.model = BERTTorch(
             vocab_size=int(config.vocab_size),
@@ -185,6 +187,58 @@ class MAELightningModule(pl.LightningModule):
 
     def _eval_forward_impl(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         return self.model(batch, train=False, apply_mask=False)
+
+    def _iter_massspec_probe(self, split: str):
+        dm = self.trainer.datamodule
+        seed = int(self.config.seed) + (2_000_000 if split == "massspec_train" else 3_000_000)
+        ds = dm.build_massspec_probe_dataset(split, seed=seed)
+        size_key = "massspec_train_size" if split == "massspec_train" else "massspec_test_size"
+        size = int(dm.info[size_key])
+        seen = 0
+        for batch in ds.as_numpy_iterator():
+            remaining = size - seen
+            if remaining <= 0:
+                break
+            take = min(int(batch["token_ids"].shape[0]), remaining)
+            if take != batch["token_ids"].shape[0]:
+                batch = {key: value[:take] for key, value in batch.items()}
+            seen += take
+            yield numpy_batch_to_torch(batch)
+
+    def _iter_probe_features(self, split: str):
+        device = self.device
+        for batch in self._iter_massspec_probe(split):
+            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+            x = self.model.encode(batch, train=False)
+            y = batch["fingerprint"].to(dtype=torch.float32)
+            yield x, y
+
+    def on_validation_epoch_start(self) -> None:
+        dm = self.trainer.datamodule
+        if int(dm.info.get("massspec_train_size", 0)) == 0:
+            return
+        if int(dm.info.get("massspec_test_size", 0)) == 0:
+            return
+        with torch.no_grad():
+            metrics = run_linear_probe(
+                self._iter_probe_features("massspec_train"),
+                self._iter_probe_features("massspec_test"),
+                ridge=self.probe_ridge,
+            )
+        self.log(
+            "massspec_test/linear_probe_accuracy",
+            metrics["accuracy"],
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+        )
+        self.log(
+            "massspec_test/linear_probe_tanimoto",
+            metrics["tanimoto"],
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+        )
 
     def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         del batch_idx

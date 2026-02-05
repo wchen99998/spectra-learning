@@ -243,8 +243,18 @@ class BERTTorch(nn.Module):
         cls_state: torch.Tensor,
         precursor_tokens: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        logits = self.precursor_head(cls_state).view(cls_state.shape[0], 2, self.precursor_bins)
+        logits_full = self.precursor_head(cls_state)
         labels = (precursor_tokens - self.precursor_offset).to(torch.long)
+        if labels.ndim == 1 or (labels.ndim == 2 and labels.shape[1] == 1):
+            if labels.ndim == 2:
+                labels = labels[:, 0]
+            logits = logits_full[:, : self.precursor_bins]
+            loss = F.cross_entropy(logits, labels)
+            pred = logits.argmax(dim=-1)
+            acc = (pred == labels).to(torch.float32).mean()
+            return loss, acc
+
+        logits = logits_full.view(cls_state.shape[0], 2, self.precursor_bins)
         per_token = F.cross_entropy(
             logits.reshape(-1, self.precursor_bins),
             labels.reshape(-1),
@@ -260,6 +270,10 @@ class BERTTorch(nn.Module):
         cls_state: torch.Tensor,
         rt: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if rt.ndim == 1 or (rt.ndim == 2 and rt.shape[1] == 1):
+            loss = torch.zeros((), dtype=cls_state.dtype, device=cls_state.device)
+            acc = torch.zeros((), dtype=torch.float32, device=cls_state.device)
+            return loss, acc
         logits = self.retention_head(cls_state)
         labels = torch.where(rt[:, 0] < rt[:, 1], 0, 1).to(torch.long)
         loss = F.cross_entropy(logits, labels)
