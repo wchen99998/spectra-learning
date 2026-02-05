@@ -38,7 +38,7 @@ _FINGERPRINT_RADIUS = 2
 _PEAK_MZ_MIN = 20.0
 _PEAK_MZ_MAX = 1000.0
 _PRECURSOR_MZ_WINDOW = 2.5
-_INTENSITY_BINS = 128
+_INTENSITY_BINS = 32
 _INTENSITY_EPS = 1e-4
 _DEFAULT_INTENSITY_SCALING = "log"
 _SPECIAL_TOKENS = {"[PAD]": 0, "[CLS]": 1, "[SEP]": 2, "[MASK]": 3}
@@ -669,15 +669,16 @@ def _apply_mlm_mask(mask_ratio: float, mask_token_id: int) -> Callable[[dict], d
     def apply(batch: dict) -> dict:
         token_ids = batch["token_ids"]
         maskable = tf.logical_and(token_ids != cls_id, token_ids != pad_id)
-        seq_len = tf.shape(token_ids)[1]
-        mask_count = tf.cast(mask_ratio_t * tf.cast(seq_len, tf.float32), tf.int32)
+        maskable_count = tf.reduce_sum(tf.cast(maskable, tf.int32), axis=1)
+        mask_count = tf.cast(
+            mask_ratio_t * tf.cast(maskable_count, tf.float32),
+            tf.int32,
+        )
         scores = tf.random.uniform(tf.shape(token_ids), dtype=tf.float32)
         scores = tf.where(maskable, scores, tf.constant(-1.0, tf.float32))
-        _, mask_idx = tf.math.top_k(scores, k=mask_count, sorted=False)
-        mask = tf.reduce_any(
-            tf.one_hot(mask_idx, seq_len, on_value=True, off_value=False, dtype=tf.bool),
-            axis=1,
-        )
+        order = tf.argsort(scores, direction="DESCENDING")
+        rank = tf.argsort(order, direction="ASCENDING")
+        mask = rank < mask_count[:, None]
         batch["masked_token_ids"] = tf.where(mask, mask_token, token_ids)
         batch["mlm_mask"] = mask
         return batch
@@ -848,6 +849,51 @@ class _TfIterableDataset(IterableDataset):
         dataset = self._dataset.skip(resume_from) if resume_from > 0 else self._dataset
         iterator = dataset.as_numpy_iterator()
         for batch in iterator:
+            yield numpy_batch_to_torch(batch)
+            self._num_yielded += 1
+
+    def state_dict(self) -> dict[str, Any]:
+        return {"num_yielded": self._num_yielded}
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        self._resume_from = int(state_dict["num_yielded"])
+        self._num_yielded = self._resume_from
+
+
+class _RoundRobinTfIterableDataset(IterableDataset):
+    def __init__(
+        self,
+        *,
+        datasets: list[tf.data.Dataset],
+        steps_per_epoch: list[int],
+    ) -> None:
+        super().__init__()
+        self._datasets = datasets
+        self._steps_per_epoch = [int(step) for step in steps_per_epoch]
+        self.steps_per_epoch = int(sum(self._steps_per_epoch))
+        self._resume_from = 0
+        self._num_yielded = 0
+
+    def __len__(self) -> int:
+        return self.steps_per_epoch
+
+    def __iter__(self):
+        self._num_yielded = self._resume_from if self._resume_from > 0 else 0
+        resume_from = self._resume_from
+        self._resume_from = 0
+        iterators = [ds.as_numpy_iterator() for ds in self._datasets]
+        remaining = list(self._steps_per_epoch)
+        num_iters = len(iterators)
+        idx = 0
+        while sum(remaining) > 0:
+            while remaining[idx] == 0:
+                idx = (idx + 1) % num_iters
+            batch = next(iterators[idx])
+            remaining[idx] -= 1
+            idx = (idx + 1) % num_iters
+            if resume_from > 0:
+                resume_from -= 1
+                continue
             yield numpy_batch_to_torch(batch)
             self._num_yielded += 1
 
@@ -1099,23 +1145,38 @@ class TfLightningDataModule(pl.LightningDataModule):
         }
         return _StatefulDataLoader(**loader_kwargs)
 
-    def train_dataloader(self) -> DataLoader:
-        from lightning.pytorch.utilities.combined_loader import CombinedLoader
+    def _make_round_robin_loader(
+        self,
+        *,
+        datasets: list[tf.data.Dataset],
+        steps_per_epoch: list[int],
+    ) -> DataLoader:
+        dataset = _RoundRobinTfIterableDataset(
+            datasets=datasets,
+            steps_per_epoch=steps_per_epoch,
+        )
+        loader_kwargs: dict[str, Any] = {
+            "dataset": dataset,
+            "batch_size": None,
+            "pin_memory": self.pin_memory,
+            "collate_fn": _identity_collate,
+        }
+        return _StatefulDataLoader(**loader_kwargs)
 
+    def train_dataloader(self) -> DataLoader:
         base_seed = self.seed
-        gems_loader = self._make_loader(
-            dataset=self._build_gems_train_dataset(base_seed),
-            steps=self.steps["gems_train"],
+        return self._make_round_robin_loader(
+            datasets=[
+                self._build_gems_train_dataset(base_seed),
+                self._build_massspec_train_dataset(base_seed + 10_000),
+            ],
+            steps_per_epoch=[
+                self.steps["gems_train"],
+                self.steps["massspec_train"],
+            ],
         )
-        massspec_loader = self._make_loader(
-            dataset=self._build_massspec_train_dataset(base_seed + 10_000),
-            steps=self.steps["massspec_train"],
-        )
-        return CombinedLoader([gems_loader, massspec_loader], mode="sequential")
 
     def val_dataloader(self):
-        from lightning.pytorch.utilities.combined_loader import CombinedLoader
-
         base_seed = self.seed + 1_000_000
         gems_loader = self._make_loader(
             dataset=self._build_gems_val_dataset(base_seed),
@@ -1125,11 +1186,9 @@ class TfLightningDataModule(pl.LightningDataModule):
             dataset=self._build_massspec_val_dataset(base_seed + 10_000),
             steps=self.steps["massspec_val"],
         )
-        return CombinedLoader([gems_loader, massspec_loader], mode="sequential")
+        return [gems_loader, massspec_loader]
 
     def test_dataloader(self):
-        from lightning.pytorch.utilities.combined_loader import CombinedLoader
-
         base_seed = self.seed + 2_000_000
         gems_loader = self._make_loader(
             dataset=self._build_gems_test_dataset(base_seed),
@@ -1139,7 +1198,7 @@ class TfLightningDataModule(pl.LightningDataModule):
             dataset=self._build_massspec_test_dataset(base_seed + 10_000),
             steps=self.steps["massspec_test"],
         )
-        return CombinedLoader([gems_loader, massspec_loader], mode="sequential")
+        return [gems_loader, massspec_loader]
 
 
 def create_lightning_dataloaders(

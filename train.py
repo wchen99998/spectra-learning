@@ -311,7 +311,9 @@ def train_and_evaluate(
     pl.seed_everything(int(config.seed), workers=False)
 
     datamodule = TfLightningDataModule(config, seed=int(config.seed))
-    total_steps = int(config.num_train_steps)
+    num_epochs = int(config.num_epochs)
+    steps_per_epoch = datamodule.train_steps
+    total_steps = num_epochs * steps_per_epoch
 
     # Update config with dataset-derived values
     info = datamodule.info
@@ -320,8 +322,9 @@ def train_and_evaluate(
     config.precursor_bins = info["precursor_bins"]
     config.precursor_offset = info["precursor_offset"]
 
-    logging.info("Training with Lightning for %d steps.", total_steps)
-    logging.info("Steps per epoch: %d", datamodule.train_steps)
+    logging.info("Training with Lightning for %d epochs.", num_epochs)
+    logging.info("Steps per epoch: %d", steps_per_epoch)
+    logging.info("Total steps: %d", total_steps)
     logging.info("Validation splits: %s", datamodule.eval_splits)
     logging.info("Test splits: %s", datamodule.test_splits)
 
@@ -352,12 +355,11 @@ def train_and_evaluate(
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1,
         precision="bf16-mixed",
-        max_steps=total_steps,
-        limit_train_batches=total_steps,
-        log_every_n_steps=int(config.log_loss_every_steps),
-        val_check_interval=int(config.eval_every_steps),
+        max_epochs=num_epochs,
+        log_every_n_steps=int(config.log_every_n_steps),
+        val_check_interval=config.val_check_interval,
         gradient_clip_val=float(config.clip) if config.get("clip", 0.) > 0. else None,
-        gradient_clip_algorithm="norm",
+        gradient_clip_algorithm="norm" if config.get("clip", 0.) > 0. else None,
         callbacks=callbacks,
         logger=logger,
         reload_dataloaders_every_n_epochs=0,

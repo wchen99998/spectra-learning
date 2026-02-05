@@ -38,8 +38,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.precursor_offset = 0
 
     # Training
-    cfg.num_train_steps = 1000
-    cfg.num_epochs = 0
+    cfg.num_epochs = 10
     cfg.learning_rate = 1e-4
     cfg.warmup_steps = 100
     cfg.learning_rate_schedule = "cosine"
@@ -49,8 +48,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.optimizer = "adamw"
     cfg.clip = 1.0
     cfg.device_prefetch_size = 8
-    cfg.log_loss_every_steps = 50
-    cfg.eval_every_steps = 200
+    cfg.log_every_n_steps = 50
+    cfg.val_check_interval = 200
     cfg.num_eval_steps = 50
     cfg.checkpoint_dir = ""
     cfg.checkpoint_every_steps = 10_000

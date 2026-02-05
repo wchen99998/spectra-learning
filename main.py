@@ -12,7 +12,7 @@ os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"  # Disable oneDNN messages
 import tensorflow as tf
 from ml_collections import config_dict
 
-from train_mae import train_and_evaluate
+from train import train_and_evaluate
 
 
 tf.config.set_visible_devices([], "GPU")

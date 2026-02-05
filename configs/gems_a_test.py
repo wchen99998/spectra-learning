@@ -7,7 +7,7 @@ def get_config() -> config_dict.ConfigDict:
     # Dataset
     cfg.dataset = "gems_a"
     cfg.tfrecord_dir = "data/gems_peaklist_tfrecord"
-    cfg.batch_size = 128
+    cfg.batch_size = 512
     cfg.validation_fraction = 0.05
     cfg.shuffle_buffer = 200_000
     cfg.tfrecord_buffer_size = 250_000
@@ -39,20 +39,18 @@ def get_config() -> config_dict.ConfigDict:
     cfg.precursor_offset = 0
 
     # Training (short smoke run)
-    cfg.num_train_steps = 1_000_000
-    cfg.num_epochs = 0
+    cfg.num_epochs = 5
     cfg.learning_rate = 3e-4
     cfg.warmup_steps = 50_000
     cfg.learning_rate_schedule = "cosine"
     cfg.min_learning_rate = None
     cfg.b2 = 0.98
-    cfg.weight_decay = 1e-3
+    cfg.weight_decay = 1e-4
     cfg.optimizer = "adamw"
     cfg.clip = 0.
     cfg.device_prefetch_size = 1
-    cfg.log_loss_every_steps = 2000
-    cfg.eval_every_steps = 10000
-    cfg.num_eval_steps = 500
+    cfg.log_every_n_steps = 500
+    cfg.val_check_interval = 0.25
     cfg.checkpoint_dir = ""
     cfg.checkpoint_every_steps = 10000
     cfg.init_seed = 0
