@@ -125,11 +125,13 @@ class MAELightningModule(pl.LightningModule):
         *,
         total_steps: int,
         eval_splits: list[str],
+        test_splits: list[str],
     ) -> None:
         super().__init__()
         self.config = config
         self.total_steps = int(total_steps)
         self.eval_splits = eval_splits
+        self.test_splits = test_splits
 
         self.base_lr = float(config.learning_rate)
         self.warmup_steps = int(config.get("warmup_steps", 0))
@@ -266,6 +268,21 @@ class MAELightningModule(pl.LightningModule):
             self.log(f"{split}/{key}", value, on_step=False, on_epoch=True)
         return metrics["loss"]
 
+    def test_step(
+        self,
+        batch: dict[str, torch.Tensor],
+        batch_idx: int,
+        dataloader_idx: int = 0,
+    ) -> torch.Tensor:
+        del batch_idx
+        torch.compiler.cudagraph_mark_step_begin()
+        batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+        split = self.test_splits[dataloader_idx]
+        metrics = self._eval_forward(batch)
+        for key, value in metrics.items():
+            self.log(f"{split}/{key}", value, on_step=False, on_epoch=True)
+        return metrics["loss"]
+
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
             self.model.parameters(),
@@ -306,11 +323,13 @@ def train_and_evaluate(
     logging.info("Training with Lightning for %d steps.", total_steps)
     logging.info("Steps per epoch: %d", datamodule.train_steps)
     logging.info("Validation splits: %s", datamodule.eval_splits)
+    logging.info("Test splits: %s", datamodule.test_splits)
 
     module = MAELightningModule(
         config,
         total_steps=total_steps,
         eval_splits=datamodule.eval_splits,
+        test_splits=datamodule.test_splits,
     )
 
     checkpoint_dir = Path(str(workdir)) / "checkpoints"
@@ -326,6 +345,8 @@ def train_and_evaluate(
     lr_monitor = LearningRateMonitor(logging_interval="step")
     logger = _build_logger(config, Path(str(workdir)))
 
+    callbacks: list[pl.Callback] = [checkpoint_cb, lr_monitor]
+
     trainer = pl.Trainer(
         default_root_dir=str(workdir),
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
@@ -337,8 +358,9 @@ def train_and_evaluate(
         val_check_interval=int(config.eval_every_steps),
         gradient_clip_val=float(config.clip) if config.get("clip", 0.) > 0. else None,
         gradient_clip_algorithm="norm",
-        callbacks=[checkpoint_cb, lr_monitor],
+        callbacks=callbacks,
         logger=logger,
+        reload_dataloaders_every_n_epochs=0,
     )
 
     ckpt_path = _latest_ckpt_path(Path(str(workdir)))

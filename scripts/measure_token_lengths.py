@@ -13,6 +13,7 @@ from input_pipeline import (
     _DEFAULT_PAIR_SEQUENCE_LENGTH,
     _DEFAULT_SPLIT_SEED,
     _DEFAULT_TFRECORD_DIR,
+    _DEFAULT_TFRECORD_BUFFER_SIZE,
     _DEFAULT_VALIDATION_FRACTION,
     _NUM_PEAKS_OUTPUT,
     _PEAK_MZ_MAX,
@@ -37,12 +38,12 @@ def _load_config(path: str):
 
 def _length_from_peaks(max_len: int):
     max_len_t = tf.constant(max_len, tf.int32)
-    max_peaks = tf.constant((max_len - 2) // 2, tf.int32)
+    max_peaks = tf.constant((max_len - 1) // 2, tf.int32)
 
     def apply(example: dict) -> tf.Tensor:
         count = tf.reduce_sum(tf.cast(example["mz"] > 0, tf.int32))
         count = tf.minimum(count, max_peaks)
-        length = 2 + 2 * count
+        length = 1 + 2 * count
         return tf.minimum(length, max_len_t)
 
     return apply
@@ -54,10 +55,12 @@ def _build_length_dataset(
     max_precursor_mz: float,
     max_len: int,
     batch_size: int,
+    tfrecord_buffer_size: int,
 ) -> tf.data.Dataset:
     ds = tf.data.TFRecordDataset(
         filenames,
         compression_type="GZIP",
+        buffer_size=int(tfrecord_buffer_size),
         num_parallel_reads=tf.data.AUTOTUNE,
     )
     ds = ds.map(_parse_example, num_parallel_calls=tf.data.AUTOTUNE)
@@ -85,8 +88,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--config", required=True, help="Path to dataset config.")
     parser.add_argument(
         "--split",
-        default="train",
-        choices=("train", "validation", "massspec_test"),
+        default="gems_train",
+        choices=(
+            "gems_train",
+            "gems_val",
+            "massspec_train",
+            "massspec_val",
+            "massspec_test",
+        ),
         help="Dataset split to scan.",
     )
     parser.add_argument(
@@ -125,19 +134,32 @@ def main() -> None:
     num_shards = int(cfg.get("num_shards", _DEFAULT_NUM_SHARDS))
     max_precursor_mz = float(cfg.get("max_precursor_mz", _DEFAULT_MAX_PRECURSOR_MZ))
     max_len = int(cfg.get("pair_sequence_length", _DEFAULT_PAIR_SEQUENCE_LENGTH))
+    tfrecord_buffer_size = int(
+        cfg.get("tfrecord_buffer_size", _DEFAULT_TFRECORD_BUFFER_SIZE)
+    )
 
     metadata = _ensure_processed(
         output_dir, validation_fraction, split_seed, num_shards
     )
 
-    if args.split == "train":
+    if args.split == "gems_train":
         filenames = [
             str(output_dir / "train" / fn) for fn in metadata["train_files"]
         ]
-    elif args.split == "validation":
+    elif args.split == "gems_val":
         filenames = [
             str(output_dir / "validation" / fn)
             for fn in metadata["validation_files"]
+        ]
+    elif args.split == "massspec_train":
+        filenames = [
+            str(output_dir / "massspec_train" / fn)
+            for fn in metadata.get("massspec_train_files", [])
+        ]
+    elif args.split == "massspec_val":
+        filenames = [
+            str(output_dir / "massspec_val" / fn)
+            for fn in metadata.get("massspec_val_files", [])
         ]
     else:
         filenames = [
@@ -150,6 +172,7 @@ def main() -> None:
         max_precursor_mz=max_precursor_mz,
         max_len=max_len,
         batch_size=int(args.batch_size),
+        tfrecord_buffer_size=tfrecord_buffer_size,
     )
 
     max_samples = int(args.max_samples)

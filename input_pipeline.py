@@ -27,10 +27,11 @@ _DEFAULT_BATCH_SIZE = 512
 _DEFAULT_SHUFFLE_BUFFER = 10_000
 _DEFAULT_VALIDATION_FRACTION = 0.05
 _DEFAULT_TFRECORD_DIR = Path("data/gems_peaklist_tfrecord")
+_DEFAULT_TFRECORD_BUFFER_SIZE = 250_000
 _DEFAULT_SPLIT_SEED = 42
 _DEFAULT_NUM_SHARDS = 4
 _NUM_PEAKS_INPUT = 128
-_NUM_PEAKS_OUTPUT = 64
+_NUM_PEAKS_OUTPUT = 60
 _DEFAULT_MAX_PRECURSOR_MZ = 1000.0
 _FINGERPRINT_BITS = 1024
 _FINGERPRINT_RADIUS = 2
@@ -39,6 +40,7 @@ _PEAK_MZ_MAX = 1000.0
 _PRECURSOR_MZ_WINDOW = 2.5
 _INTENSITY_BINS = 128
 _INTENSITY_EPS = 1e-4
+_DEFAULT_INTENSITY_SCALING = "log"
 _SPECIAL_TOKENS = {"[PAD]": 0, "[CLS]": 1, "[SEP]": 2, "[MASK]": 3}
 _NUM_SPECIAL_TOKENS = len(_SPECIAL_TOKENS)
 _DEFAULT_PAIR_SEQUENCE_LENGTH = 128
@@ -47,7 +49,8 @@ _METADATA_FILENAME = "metadata.json"
 
 _GEMS_HF_REPO = "roman-bushuiev/GeMS"
 _GEMS_HDF5_PATH = "data/GeMS_A/GeMS_A.hdf5"
-_MASSSPEC_HDF5_PATH = "data/auxiliary/MassSpecGym_MurckoHist_split.hdf5"
+_MASSSPEC_HF_REPO = "roman-bushuiev/MassSpecGym"
+_MASSSPEC_TSV_PATH = "data/MassSpecGym.tsv"
 
 
 # -----------------------------------------------------------------------------
@@ -55,7 +58,7 @@ _MASSSPEC_HDF5_PATH = "data/auxiliary/MassSpecGym_MurckoHist_split.hdf5"
 # -----------------------------------------------------------------------------
 
 
-def _download_hdf5(repo_id: str, filename: str, local_dir: Path) -> Path:
+def _download_hf_file(repo_id: str, filename: str, local_dir: Path) -> Path:
     local_dir.mkdir(parents=True, exist_ok=True)
     path = hf_hub_download(
         repo_id=repo_id,
@@ -76,19 +79,41 @@ def _load_gems_arrays(hdf5_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarr
     return spectra, retention, precursor
 
 
-def _load_massspec_arrays(
-    hdf5_path: Path,
+def _load_massspec_tsv(
+    tsv_path: Path,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    import h5py
+    import csv
 
-    with h5py.File(hdf5_path, "r") as f:
-        spectra = f["spectrum"][:]
-        precursor = np.asarray(f["precursor_mz"], dtype=np.float32)
-        fold = f["fold"].asstr()[:]
-        smiles = f["smiles"].asstr()[:]
+    spectra: list[np.ndarray] = []
+    precursor: list[float] = []
+    fold: list[str] = []
+    smiles: list[str] = []
 
-    retention = np.full(len(spectra), 392.3146, dtype=np.float32)
-    return spectra, retention, precursor, fold, smiles
+    with tsv_path.open() as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        for row in reader:
+            mz = np.fromstring(row["mzs"], sep=",", dtype=np.float32)
+            intensity = np.fromstring(row["intensities"], sep=",", dtype=np.float32)
+            if mz.size > _NUM_PEAKS_INPUT:
+                idx = np.argpartition(intensity, -_NUM_PEAKS_INPUT)[-_NUM_PEAKS_INPUT:]
+                idx = idx[np.argsort(intensity[idx])[::-1]]
+                mz = mz[idx]
+                intensity = intensity[idx]
+            elif mz.size < _NUM_PEAKS_INPUT:
+                pad = _NUM_PEAKS_INPUT - mz.size
+                mz = np.pad(mz, (0, pad))
+                intensity = np.pad(intensity, (0, pad))
+            spectra.append(np.stack([mz, intensity], axis=0))
+            precursor.append(float(row["precursor_mz"]))
+            fold.append(row["fold"])
+            smiles.append(row["smiles"])
+
+    spectra_array = np.stack(spectra, axis=0)
+    retention = np.full(len(spectra_array), 392.3146, dtype=np.float32)
+    precursor_array = np.asarray(precursor, dtype=np.float32)
+    fold_array = np.asarray(fold)
+    smiles_array = np.asarray(smiles)
+    return spectra_array, retention, precursor_array, fold_array, smiles_array
 
 
 def _compute_morgan_fingerprints(smiles: np.ndarray) -> np.ndarray:
@@ -230,7 +255,7 @@ def _process_gems(
     num_shards: int,
 ) -> dict[str, Any]:
     logger.info("Downloading GeMS HDF5...")
-    hdf5_path = _download_hdf5(_GEMS_HF_REPO, _GEMS_HDF5_PATH, output_dir.parent)
+    hdf5_path = _download_hf_file(_GEMS_HF_REPO, _GEMS_HDF5_PATH, output_dir.parent)
 
     logger.info("Loading GeMS data...")
     spectra, retention, precursor = _load_gems_arrays(hdf5_path)
@@ -279,21 +304,24 @@ def _process_gems(
 
 
 def _process_massspec(output_dir: Path, num_shards: int) -> dict[str, Any]:
-    logger.info("Downloading MassSpecGym HDF5...")
-    hdf5_path = _download_hdf5(_GEMS_HF_REPO, _MASSSPEC_HDF5_PATH, output_dir.parent)
+    logger.info("Downloading MassSpecGym TSV...")
+    tsv_path = _download_hf_file(_MASSSPEC_HF_REPO, _MASSSPEC_TSV_PATH, output_dir.parent)
 
     logger.info("Loading MassSpecGym data...")
-    spectra, retention, precursor, fold, smiles = _load_massspec_arrays(hdf5_path)
+    spectra, retention, precursor, fold, smiles = _load_massspec_tsv(tsv_path)
     fingerprints = _compute_morgan_fingerprints(smiles)
 
     train_mask = fold == "train"
-    test_mask = fold != "train"
+    val_mask = fold == "val"
+    test_mask = fold == "test"
     train_size = int(np.count_nonzero(train_mask))
+    val_size = int(np.count_nonzero(val_mask))
     test_size = int(np.count_nonzero(test_mask))
     logger.info(
-        "MassSpecGym spectra: %d (train=%d, test=%d)",
+        "MassSpecGym spectra: %d (train=%d, val=%d, test=%d)",
         len(spectra),
         train_size,
+        val_size,
         test_size,
     )
 
@@ -305,6 +333,16 @@ def _process_massspec(output_dir: Path, num_shards: int) -> dict[str, Any]:
         output_dir / "massspec_train",
         max(1, num_shards // 2),
         desc="MassSpec Train",
+    )
+
+    val_files, val_lengths = _write_tfrecords_with_fingerprint(
+        spectra[val_mask],
+        retention[val_mask],
+        precursor[val_mask],
+        fingerprints[val_mask],
+        output_dir / "massspec_val",
+        max(1, num_shards // 4),
+        desc="MassSpec Val",
     )
 
     test_files, test_lengths = _write_tfrecords_with_fingerprint(
@@ -321,6 +359,9 @@ def _process_massspec(output_dir: Path, num_shards: int) -> dict[str, Any]:
         "massspec_train_files": train_files,
         "massspec_train_lengths": train_lengths,
         "massspec_train_size": train_size,
+        "massspec_val_files": val_files,
+        "massspec_val_lengths": val_lengths,
+        "massspec_val_size": val_size,
         "massspec_test_files": test_files,
         "massspec_test_lengths": test_lengths,
         "massspec_test_size": test_size,
@@ -347,24 +388,31 @@ def _ensure_processed(
             (output_dir / "validation" / fn).exists()
             for fn in metadata.get("validation_files", [])
         )
-        massspec_test_files = metadata.get("massspec_test_files", [])
-        massspec_test_ok = all(
-            (output_dir / "massspec_test" / fn).exists()
-            for fn in massspec_test_files
-        )
         massspec_train_files = metadata.get("massspec_train_files", [])
         massspec_train_ok = all(
             (output_dir / "massspec_train" / fn).exists()
             for fn in massspec_train_files
         )
+        massspec_val_files = metadata.get("massspec_val_files", [])
+        massspec_val_ok = all(
+            (output_dir / "massspec_val" / fn).exists()
+            for fn in massspec_val_files
+        )
+        massspec_test_files = metadata.get("massspec_test_files", [])
+        massspec_test_ok = all(
+            (output_dir / "massspec_test" / fn).exists()
+            for fn in massspec_test_files
+        )
 
         if (
             train_ok
             and val_ok
-            and massspec_test_files
-            and massspec_test_ok
             and massspec_train_files
             and massspec_train_ok
+            and massspec_val_files
+            and massspec_val_ok
+            and massspec_test_files
+            and massspec_test_ok
         ):
             logger.info("Found existing TFRecords at %s", output_dir)
             return metadata
@@ -487,16 +535,27 @@ def _topk_peaks(num_peaks: int) -> Callable[[dict], dict]:
     return apply
 
 
-def _strip_padding_and_tokenize(max_precursor_mz: float) -> Callable[[dict], dict]:
+def _strip_padding_and_tokenize(
+    max_precursor_mz: float,
+    intensity_scaling: str,
+) -> Callable[[dict], dict]:
     eps = tf.constant(_INTENSITY_EPS, tf.float32)
     log_eps = tf.math.log(eps)
     denom = -log_eps
+    linear_denom = tf.constant(1.0, tf.float32) - eps
     bins = tf.constant(_INTENSITY_BINS - 1, tf.float32)
     mz_bins = int(_PEAK_MZ_MAX) + 1
     precursor_bins = int(max_precursor_mz) + 1
     mz_offset = tf.constant(_NUM_SPECIAL_TOKENS, tf.int32)
     precursor_offset = mz_offset
     intensity_offset = tf.constant(_NUM_SPECIAL_TOKENS + mz_bins, tf.int32)
+
+    if intensity_scaling == "linear":
+        def scale(intensity: tf.Tensor) -> tf.Tensor:
+            return (intensity - eps) / linear_denom
+    else:
+        def scale(intensity: tf.Tensor) -> tf.Tensor:
+            return (tf.math.log(intensity) - log_eps) / denom
 
     def apply(example: dict) -> dict:
         mz = example["mz"]
@@ -510,7 +569,7 @@ def _strip_padding_and_tokenize(max_precursor_mz: float) -> Callable[[dict], dic
             tf.int32,
         ) + precursor_offset
         intensity = tf.clip_by_value(intensity, eps, 1.0)
-        s = (tf.math.log(intensity) - log_eps) / denom
+        s = scale(intensity)
         tokens = tf.floor(s * bins)
         example["mz"] = mz_tokens
         example["intensity"] = tf.cast(tokens, tf.int32) + intensity_offset
@@ -524,6 +583,7 @@ def detokenize_spectrum(
     token_ids: np.ndarray | torch.Tensor,
     *,
     max_precursor_mz: float = _DEFAULT_MAX_PRECURSOR_MZ,
+    intensity_scaling: str = _DEFAULT_INTENSITY_SCALING,
 ) -> dict[str, Any] | list[dict[str, Any]]:
     tokens = token_ids
     if isinstance(tokens, torch.Tensor):
@@ -532,33 +592,37 @@ def detokenize_spectrum(
 
     if tokens.ndim == 2:
         return [
-            detokenize_spectrum(row, max_precursor_mz=max_precursor_mz) for row in tokens
+            detokenize_spectrum(
+                row,
+                max_precursor_mz=max_precursor_mz,
+                intensity_scaling=intensity_scaling,
+            )
+            for row in tokens
         ]
 
     pad_id = _SPECIAL_TOKENS["[PAD]"]
     pad_positions = np.where(tokens == pad_id)[0]
     end = int(pad_positions[0]) if pad_positions.size > 0 else int(tokens.shape[0])
     content = tokens[1:end]
-    precursor_token = content[0]
-    peaks = content[1:]
+    peaks = content
     mz_tokens = peaks[0::2]
     intensity_tokens = peaks[1::2]
 
     mz = (mz_tokens - _NUM_SPECIAL_TOKENS).astype(np.float32)
-    precursor = float(
-        np.clip(precursor_token - _NUM_SPECIAL_TOKENS, 0, max_precursor_mz)
-    )
 
     bins = _INTENSITY_BINS - 1
     intensity_offset = _NUM_SPECIAL_TOKENS + int(_PEAK_MZ_MAX) + 1
     intensity_idx = intensity_tokens - intensity_offset
     s = intensity_idx.astype(np.float32) / float(bins)
-    log_eps = math.log(_INTENSITY_EPS)
-    denom = -log_eps
-    intensity = np.exp(s * denom + log_eps).astype(np.float32)
+    if intensity_scaling == "linear":
+        intensity = (s * (1.0 - _INTENSITY_EPS) + _INTENSITY_EPS).astype(np.float32)
+    else:
+        log_eps = math.log(_INTENSITY_EPS)
+        denom = -log_eps
+        intensity = np.exp(s * denom + log_eps).astype(np.float32)
 
     return {
-        "precursor_mz": precursor,
+        "precursor_mz": None,
         "mz": mz,
         "intensity": intensity,
     }
@@ -567,21 +631,16 @@ def detokenize_spectrum(
 def _build_single_spectrum_input(max_len: int) -> Callable[[dict], dict]:
     cls_id = tf.constant(_SPECIAL_TOKENS["[CLS]"], tf.int32)
     pad_id = tf.constant(_SPECIAL_TOKENS["[PAD]"], tf.int32)
-    max_peaks = tf.constant((max_len - 2) // 2, tf.int32)
+    max_peaks = tf.constant((max_len - 1) // 2, tf.int32)
 
     def interleave(mz: tf.Tensor, intensity: tf.Tensor) -> tf.Tensor:
         pair = tf.stack([mz, intensity], axis=1)
         return tf.reshape(pair, [-1])
 
-    def build_sequence(mz: tf.Tensor, intensity: tf.Tensor, precursor: tf.Tensor) -> tf.Tensor:
-        peaks = interleave(mz, intensity)
-        return tf.concat([precursor, peaks], axis=0)
-
     def apply(example: dict) -> dict:
         mz = example["mz"][:max_peaks]
         intensity = example["intensity"][:max_peaks]
-        precursor = tf.reshape(example["precursor_mz"], [1])
-        seq = build_sequence(mz, intensity, precursor)
+        seq = interleave(mz, intensity)
 
         tokens = tf.concat([cls_id[None], seq], axis=0)
         seg = tf.zeros([tf.shape(tokens)[0]], tf.int32)
@@ -631,19 +690,21 @@ def _build_dataset(
     batch_size: int,
     shuffle_buffer: int,
     seed: Optional[int],
-    repeat: bool,
     drop_remainder: bool,
     *,
+    tfrecord_buffer_size: int,
     max_precursor_mz: float,
     pair_sequence_length: int,
     mask_ratio: float,
     mask_token_id: int,
     include_fingerprint: bool,
+    intensity_scaling: str,
 ) -> tf.data.Dataset:
     parse_fn = _parse_example_with_fingerprint if include_fingerprint else _parse_example
     ds = tf.data.TFRecordDataset(
         filenames,
         compression_type="GZIP",
+        buffer_size=int(tfrecord_buffer_size),
         num_parallel_reads=tf.data.AUTOTUNE,
     )
     ds = ds.map(parse_fn, num_parallel_calls=tf.data.AUTOTUNE)
@@ -655,13 +716,11 @@ def _build_dataset(
     ds = ds.map(_topk_peaks(_NUM_PEAKS_OUTPUT), num_parallel_calls=tf.data.AUTOTUNE)
     ds = ds.map(_compact_sort_peaks(), num_parallel_calls=tf.data.AUTOTUNE)
     ds = ds.map(
-        _strip_padding_and_tokenize(max_precursor_mz),
+        _strip_padding_and_tokenize(max_precursor_mz, intensity_scaling),
         num_parallel_calls=tf.data.AUTOTUNE,
     )
-    if repeat:
-        ds = ds.repeat()
     if shuffle_buffer > 0:
-        ds = ds.shuffle(shuffle_buffer, seed=seed, reshuffle_each_iteration=False)
+        ds = ds.shuffle(shuffle_buffer, seed=seed, reshuffle_each_iteration=True)
 
     ds = ds.map(
         _build_single_spectrum_input(pair_sequence_length),
@@ -690,6 +749,7 @@ def _compute_info(
     output_dir: Path,
     max_precursor_mz: float,
     pair_sequence_length: int,
+    intensity_scaling: str,
 ) -> dict[str, Any]:
     mz_bins = int(_PEAK_MZ_MAX) + 1
     precursor_bins = int(max_precursor_mz) + 1
@@ -702,6 +762,7 @@ def _compute_info(
         "train_size": metadata["train_size"],
         "validation_size": metadata["validation_size"],
         "massspec_train_size": metadata.get("massspec_train_size", 0),
+        "massspec_val_size": metadata.get("massspec_val_size", 0),
         "massspec_test_size": metadata.get("massspec_test_size", 0),
         "num_peaks": _NUM_PEAKS_OUTPUT,
         "intensity_bins": _INTENSITY_BINS,
@@ -714,6 +775,7 @@ def _compute_info(
         "vocab_size": vocab_size,
         "special_tokens": dict(_SPECIAL_TOKENS),
         "pair_sequence_length": pair_sequence_length,
+        "intensity_scaling": intensity_scaling,
         "fingerprint_bits": _FINGERPRINT_BITS,
     }
 
@@ -722,27 +784,6 @@ def _steps_from_size(size: int, batch_size: int, drop_remainder: bool) -> int:
     if drop_remainder:
         return int(size // batch_size)
     return int(math.ceil(size / batch_size))
-
-
-def _resolve_train_steps(config: config_dict.ConfigDict, info: dict[str, Any]) -> int:
-    return int(config.num_train_steps)
-
-
-def _resolve_eval_steps(
-    config: config_dict.ConfigDict, info: dict[str, Any], split: str
-) -> int:
-    if config.get("num_eval_steps", 0) > 0:
-        return int(config.num_eval_steps)
-    size_key = "validation_size" if split == "validation" else "massspec_test_size"
-    size = int(info[size_key])
-    drop_remainder = split == "massspec_test"
-    return _steps_from_size(size, int(config.batch_size), drop_remainder)
-
-
-def get_num_train_steps(config: config_dict.ConfigDict) -> int:
-    if config.num_train_steps > 0:
-        return int(config.num_train_steps)
-    raise NotImplementedError()
 
 
 # -----------------------------------------------------------------------------
@@ -844,6 +885,9 @@ class TfLightningDataModule(pl.LightningDataModule):
         )
         self.batch_size = int(config.get("batch_size", _DEFAULT_BATCH_SIZE))
         self.shuffle_buffer = int(config.get("shuffle_buffer", _DEFAULT_SHUFFLE_BUFFER))
+        self.tfrecord_buffer_size = int(
+            config.get("tfrecord_buffer_size", _DEFAULT_TFRECORD_BUFFER_SIZE)
+        )
         self.split_seed = int(config.get("split_seed", _DEFAULT_SPLIT_SEED))
         self.num_shards = int(config.get("num_shards", _DEFAULT_NUM_SHARDS))
         self.drop_remainder = bool(config.get("drop_remainder", False))
@@ -852,6 +896,9 @@ class TfLightningDataModule(pl.LightningDataModule):
         )
         self.pair_sequence_length = int(
             config.get("pair_sequence_length", _DEFAULT_PAIR_SEQUENCE_LENGTH)
+        )
+        self.intensity_scaling = str(
+            config.get("intensity_scaling", _DEFAULT_INTENSITY_SCALING)
         )
         self.mask_ratio = float(config.get("mask_ratio", 0.15))
         self.mask_token_id = int(config.get("mask_token_id", _SPECIAL_TOKENS["[MASK]"]))
@@ -863,20 +910,25 @@ class TfLightningDataModule(pl.LightningDataModule):
             self.num_shards,
         )
 
-        self.train_files = [
+        self.gems_train_files = [
             str(self.output_dir / "train" / fn) for fn in self.metadata["train_files"]
         ]
-        self.val_files = [
+        self.gems_val_files = [
             str(self.output_dir / "validation" / fn)
             for fn in self.metadata["validation_files"]
+        ]
+        self.gems_test_files = list(self.gems_val_files)
+        self.massspec_train_files = [
+            str(self.output_dir / "massspec_train" / fn)
+            for fn in self.metadata.get("massspec_train_files", [])
+        ]
+        self.massspec_val_files = [
+            str(self.output_dir / "massspec_val" / fn)
+            for fn in self.metadata.get("massspec_val_files", [])
         ]
         self.massspec_test_files = [
             str(self.output_dir / "massspec_test" / fn)
             for fn in self.metadata.get("massspec_test_files", [])
-        ]
-        self.massspec_train_files = [
-            str(self.output_dir / "massspec_train" / fn)
-            for fn in self.metadata.get("massspec_train_files", [])
         ]
 
         self.info = _compute_info(
@@ -884,16 +936,45 @@ class TfLightningDataModule(pl.LightningDataModule):
             output_dir=self.output_dir,
             max_precursor_mz=self.max_precursor_mz,
             pair_sequence_length=self.pair_sequence_length,
+            intensity_scaling=self.intensity_scaling,
         )
-        self.eval_splits = ["validation"]
-        if self.info["massspec_test_size"] > 0:
-            self.eval_splits.append("massspec_test")
+        self.train_splits = ["gems_train", "massspec_train"]
+        self.eval_splits = ["gems_val", "massspec_val"]
+        self.test_splits = ["gems_test", "massspec_test"]
 
-        self.train_steps = _resolve_train_steps(config, self.info)
-        self.eval_steps = {
-            split: _resolve_eval_steps(config, self.info, split)
-            for split in self.eval_splits
+        self.steps = {
+            "gems_train": _steps_from_size(
+                int(self.info["train_size"]),
+                self.batch_size,
+                self.drop_remainder,
+            ),
+            "gems_val": _steps_from_size(
+                int(self.info["validation_size"]),
+                self.batch_size,
+                False,
+            ),
+            "gems_test": _steps_from_size(
+                int(self.info["validation_size"]),
+                self.batch_size,
+                False,
+            ),
+            "massspec_train": _steps_from_size(
+                int(self.info.get("massspec_train_size", 0)),
+                self.batch_size,
+                self.drop_remainder,
+            ),
+            "massspec_val": _steps_from_size(
+                int(self.info.get("massspec_val_size", 0)),
+                self.batch_size,
+                False,
+            ),
+            "massspec_test": _steps_from_size(
+                int(self.info.get("massspec_test_size", 0)),
+                self.batch_size,
+                False,
+            ),
         }
+        self.train_steps = self.steps["gems_train"] + self.steps["massspec_train"]
 
         default_pin = torch.cuda.is_available()
         self.pin_memory = bool(config.get("dataloader_pin_memory", default_pin))
@@ -904,43 +985,83 @@ class TfLightningDataModule(pl.LightningDataModule):
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         self.seed = int(state_dict["seed"])
 
-    def _build_train_dataset(self, seed: int) -> tf.data.Dataset:
-        return _build_dataset(
-            self.train_files,
-            self.batch_size,
-            self.shuffle_buffer,
-            seed,
-            repeat=True,
-            drop_remainder=self.drop_remainder,
-            max_precursor_mz=self.max_precursor_mz,
-            pair_sequence_length=self.pair_sequence_length,
-            mask_ratio=self.mask_ratio,
-            mask_token_id=self.mask_token_id,
-            include_fingerprint=False,
-        )
-
-    def _build_eval_dataset(self, split: str, seed: int) -> tf.data.Dataset:
-        if split == "validation":
-            files = self.val_files
-            include_fingerprint = False
-        elif split == "massspec_test":
-            files = self.massspec_test_files
-            include_fingerprint = True
-        else:
-            files = self.massspec_train_files
-            include_fingerprint = True
+    def _build_dataset_for_files(
+        self,
+        files: list[str],
+        *,
+        seed: int,
+        shuffle: bool,
+        drop_remainder: bool,
+        include_fingerprint: bool,
+    ) -> tf.data.Dataset:
+        shuffle_buffer = self.shuffle_buffer if shuffle else 0
         return _build_dataset(
             files,
             self.batch_size,
-            shuffle_buffer=0,
-            seed=seed,
-            repeat=True,
-            drop_remainder=(split == "massspec_test"),
+            shuffle_buffer,
+            seed,
+            drop_remainder=drop_remainder,
+            tfrecord_buffer_size=self.tfrecord_buffer_size,
             max_precursor_mz=self.max_precursor_mz,
             pair_sequence_length=self.pair_sequence_length,
             mask_ratio=self.mask_ratio,
             mask_token_id=self.mask_token_id,
             include_fingerprint=include_fingerprint,
+            intensity_scaling=self.intensity_scaling,
+        )
+
+    def _build_gems_train_dataset(self, seed: int) -> tf.data.Dataset:
+        return self._build_dataset_for_files(
+            self.gems_train_files,
+            seed=seed,
+            shuffle=True,
+            drop_remainder=self.drop_remainder,
+            include_fingerprint=False,
+        )
+
+    def _build_gems_val_dataset(self, seed: int) -> tf.data.Dataset:
+        return self._build_dataset_for_files(
+            self.gems_val_files,
+            seed=seed,
+            shuffle=False,
+            drop_remainder=False,
+            include_fingerprint=False,
+        )
+
+    def _build_gems_test_dataset(self, seed: int) -> tf.data.Dataset:
+        return self._build_dataset_for_files(
+            self.gems_test_files,
+            seed=seed,
+            shuffle=False,
+            drop_remainder=False,
+            include_fingerprint=False,
+        )
+
+    def _build_massspec_train_dataset(self, seed: int) -> tf.data.Dataset:
+        return self._build_dataset_for_files(
+            self.massspec_train_files,
+            seed=seed,
+            shuffle=True,
+            drop_remainder=self.drop_remainder,
+            include_fingerprint=False,
+        )
+
+    def _build_massspec_val_dataset(self, seed: int) -> tf.data.Dataset:
+        return self._build_dataset_for_files(
+            self.massspec_val_files,
+            seed=seed,
+            shuffle=False,
+            drop_remainder=False,
+            include_fingerprint=False,
+        )
+
+    def _build_massspec_test_dataset(self, seed: int) -> tf.data.Dataset:
+        return self._build_dataset_for_files(
+            self.massspec_test_files,
+            seed=seed,
+            shuffle=False,
+            drop_remainder=False,
+            include_fingerprint=False,
         )
 
     def build_massspec_probe_dataset(self, split: str, seed: int) -> tf.data.Dataset:
@@ -950,13 +1071,14 @@ class TfLightningDataModule(pl.LightningDataModule):
             self.batch_size,
             shuffle_buffer=0,
             seed=seed,
-            repeat=False,
             drop_remainder=False,
+            tfrecord_buffer_size=self.tfrecord_buffer_size,
             max_precursor_mz=self.max_precursor_mz,
             pair_sequence_length=self.pair_sequence_length,
             mask_ratio=self.mask_ratio,
             mask_token_id=self.mask_token_id,
             include_fingerprint=True,
+            intensity_scaling=self.intensity_scaling,
         )
 
     def _make_loader(
@@ -978,24 +1100,46 @@ class TfLightningDataModule(pl.LightningDataModule):
         return _StatefulDataLoader(**loader_kwargs)
 
     def train_dataloader(self) -> DataLoader:
+        from lightning.pytorch.utilities.combined_loader import CombinedLoader
+
         base_seed = self.seed
-        return self._make_loader(
-            dataset=self._build_train_dataset(base_seed),
-            steps=self.train_steps,
+        gems_loader = self._make_loader(
+            dataset=self._build_gems_train_dataset(base_seed),
+            steps=self.steps["gems_train"],
         )
+        massspec_loader = self._make_loader(
+            dataset=self._build_massspec_train_dataset(base_seed + 10_000),
+            steps=self.steps["massspec_train"],
+        )
+        return CombinedLoader([gems_loader, massspec_loader], mode="sequential")
 
     def val_dataloader(self):
+        from lightning.pytorch.utilities.combined_loader import CombinedLoader
+
         base_seed = self.seed + 1_000_000
-        loaders = [
-            self._make_loader(
-                dataset=self._build_eval_dataset(split, base_seed + i * 10_000),
-                steps=self.eval_steps[split],
-            )
-            for i, split in enumerate(self.eval_splits)
-        ]
-        if len(loaders) == 1:
-            return loaders[0]
-        return loaders
+        gems_loader = self._make_loader(
+            dataset=self._build_gems_val_dataset(base_seed),
+            steps=self.steps["gems_val"],
+        )
+        massspec_loader = self._make_loader(
+            dataset=self._build_massspec_val_dataset(base_seed + 10_000),
+            steps=self.steps["massspec_val"],
+        )
+        return CombinedLoader([gems_loader, massspec_loader], mode="sequential")
+
+    def test_dataloader(self):
+        from lightning.pytorch.utilities.combined_loader import CombinedLoader
+
+        base_seed = self.seed + 2_000_000
+        gems_loader = self._make_loader(
+            dataset=self._build_gems_test_dataset(base_seed),
+            steps=self.steps["gems_test"],
+        )
+        massspec_loader = self._make_loader(
+            dataset=self._build_massspec_test_dataset(base_seed + 10_000),
+            steps=self.steps["massspec_test"],
+        )
+        return CombinedLoader([gems_loader, massspec_loader], mode="sequential")
 
 
 def create_lightning_dataloaders(
@@ -1017,13 +1161,13 @@ def create_gems_set_datasets(
     seed_value = int(config.seed if seed is None else seed)
     datamodule = TfLightningDataModule(config, seed=seed_value)
 
-    train_ds = datamodule._build_train_dataset(seed_value)
-    val_ds = datamodule._build_eval_dataset("validation", seed_value)
+    train_ds = datamodule._build_gems_train_dataset(seed_value)
 
-    val_iters: dict[str, Any] = {"validation": val_ds.as_numpy_iterator()}
-    if datamodule.massspec_test_files:
-        test_ds = datamodule._build_eval_dataset("massspec_test", seed_value)
-        val_iters["massspec_test"] = test_ds.as_numpy_iterator()
+    val_iters: dict[str, Any] = {
+        "gems_val": datamodule._build_gems_val_dataset(seed_value).as_numpy_iterator(),
+        "massspec_val": datamodule._build_massspec_val_dataset(seed_value).as_numpy_iterator(),
+        "massspec_test": datamodule._build_massspec_test_dataset(seed_value).as_numpy_iterator(),
+    }
 
     return train_ds.as_numpy_iterator(), val_iters, datamodule.info
 

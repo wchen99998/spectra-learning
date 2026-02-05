@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import os
+from pathlib import Path
 from typing import Any, Mapping
 
 import numpy as np
@@ -30,8 +31,24 @@ def build_wandb_init_kwargs(config: Any | None) -> dict[str, Any]:
 
     prefix = _config_get(config, "wandb_run_name_prefix")
     if prefix and "name" not in wandb_kwargs:
-        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M")
-        wandb_kwargs["name"] = f"{str(prefix).strip()}-{timestamp}"
+        counter_path = Path(
+            _config_get(config, "wandb_run_name_counter_path", ".wandb_run_counter")
+        )
+        use_counter = bool(_config_get(config, "wandb_run_name_use_increment", True))
+        if use_counter:
+            if counter_path.exists():
+                current = int(counter_path.read_text().strip())
+            else:
+                current = 0
+            next_idx = current + 1
+            counter_path.parent.mkdir(parents=True, exist_ok=True)
+            counter_path.write_text(str(next_idx))
+            wandb_kwargs["name"] = f"{str(prefix).strip()}-{next_idx:04d}"
+        else:
+            timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
+                "%Y%m%d-%H%M"
+            )
+            wandb_kwargs["name"] = f"{str(prefix).strip()}-{timestamp}"
 
     return wandb_kwargs
 

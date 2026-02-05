@@ -14,6 +14,7 @@ from input_pipeline import (
     _DEFAULT_PAIR_SEQUENCE_LENGTH,
     _DEFAULT_SPLIT_SEED,
     _DEFAULT_TFRECORD_DIR,
+    _DEFAULT_TFRECORD_BUFFER_SIZE,
     _DEFAULT_VALIDATION_FRACTION,
     _INTENSITY_BINS,
     _NUM_PEAKS_OUTPUT,
@@ -54,10 +55,13 @@ def _build_visual_dataset(
     *,
     max_precursor_mz: float,
     max_len: int,
+    tfrecord_buffer_size: int,
+    intensity_scaling: str,
 ) -> tf.data.Dataset:
     ds = tf.data.TFRecordDataset(
         filenames,
         compression_type="GZIP",
+        buffer_size=int(tfrecord_buffer_size),
         num_parallel_reads=tf.data.AUTOTUNE,
     )
     ds = ds.map(_parse_example, num_parallel_calls=tf.data.AUTOTUNE)
@@ -70,7 +74,7 @@ def _build_visual_dataset(
     ds = ds.map(_compact_sort_peaks(), num_parallel_calls=tf.data.AUTOTUNE)
     ds = ds.map(_stash_raw_peaks, num_parallel_calls=tf.data.AUTOTUNE)
     ds = ds.map(
-        _strip_padding_and_tokenize(max_precursor_mz),
+        _strip_padding_and_tokenize(max_precursor_mz, intensity_scaling),
         num_parallel_calls=tf.data.AUTOTUNE,
     )
     ds = ds.map(
@@ -86,7 +90,7 @@ def _extract_token_bins(token_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     pad_positions = np.where(token_ids == pad_id)[0]
     end = int(pad_positions[0]) if pad_positions.size > 0 else int(token_ids.shape[0])
     content = token_ids[1:end]
-    peaks = content[1:]
+    peaks = content
     mz_tokens = peaks[0::2]
     intensity_tokens = peaks[1::2]
 
@@ -101,8 +105,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--config", required=True, help="Path to dataset config.")
     parser.add_argument(
         "--split",
-        default="train",
-        choices=("train", "validation", "massspec_test"),
+        default="gems_train",
+        choices=(
+            "gems_train",
+            "gems_val",
+            "massspec_train",
+            "massspec_val",
+            "massspec_test",
+        ),
         help="Dataset split to sample from.",
     )
     parser.add_argument(
@@ -129,19 +139,33 @@ def main() -> None:
     num_shards = int(cfg.get("num_shards", _DEFAULT_NUM_SHARDS))
     max_precursor_mz = float(cfg.get("max_precursor_mz", _DEFAULT_MAX_PRECURSOR_MZ))
     max_len = int(cfg.get("pair_sequence_length", _DEFAULT_PAIR_SEQUENCE_LENGTH))
+    tfrecord_buffer_size = int(
+        cfg.get("tfrecord_buffer_size", _DEFAULT_TFRECORD_BUFFER_SIZE)
+    )
+    intensity_scaling = str(cfg.get("intensity_scaling", "log"))
 
     metadata = _ensure_processed(
         output_dir, validation_fraction, split_seed, num_shards
     )
 
-    if args.split == "train":
+    if args.split == "gems_train":
         filenames = [
             str(output_dir / "train" / fn) for fn in metadata["train_files"]
         ]
-    elif args.split == "validation":
+    elif args.split == "gems_val":
         filenames = [
             str(output_dir / "validation" / fn)
             for fn in metadata["validation_files"]
+        ]
+    elif args.split == "massspec_train":
+        filenames = [
+            str(output_dir / "massspec_train" / fn)
+            for fn in metadata.get("massspec_train_files", [])
+        ]
+    elif args.split == "massspec_val":
+        filenames = [
+            str(output_dir / "massspec_val" / fn)
+            for fn in metadata.get("massspec_val_files", [])
         ]
     else:
         filenames = [
@@ -153,6 +177,8 @@ def main() -> None:
         filenames,
         max_precursor_mz=max_precursor_mz,
         max_len=max_len,
+        tfrecord_buffer_size=tfrecord_buffer_size,
+        intensity_scaling=intensity_scaling,
     )
     sample = next(ds.as_numpy_iterator())
 
@@ -161,7 +187,11 @@ def main() -> None:
     intensity_raw = sample["intensity_raw"]
     precursor_raw = float(sample["precursor_mz_raw"])
 
-    detok = detokenize_spectrum(token_ids, max_precursor_mz=max_precursor_mz)
+    detok = detokenize_spectrum(
+        token_ids,
+        max_precursor_mz=max_precursor_mz,
+        intensity_scaling=intensity_scaling,
+    )
     mz_bins, intensity_bins = _extract_token_bins(token_ids)
 
     fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True)

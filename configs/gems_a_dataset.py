@@ -9,11 +9,13 @@ def get_config() -> config_dict.ConfigDict:
     cfg.batch_size = 32
     cfg.validation_fraction = 0.05
     cfg.shuffle_buffer = 10_000
+    cfg.tfrecord_buffer_size = 250_000
     cfg.split_seed = 42
     cfg.num_shards = 4
     cfg.drop_remainder = False
     cfg.max_precursor_mz = 1000.0
     cfg.pair_sequence_length = 128
+    cfg.intensity_scaling = "linear"
     cfg.seed = 42
 
     # Model (BERT)

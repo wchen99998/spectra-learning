@@ -29,8 +29,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--config", required=True, help="Path to config file.")
     parser.add_argument(
         "--split",
-        default="train",
-        choices=("train", "validation", "massspec_test"),
+        default="gems_train",
+        choices=(
+            "gems_train",
+            "gems_val",
+            "gems_test",
+            "massspec_train",
+            "massspec_val",
+            "massspec_test",
+        ),
         help="Dataset split to scan.",
     )
     parser.add_argument("--epochs", type=int, default=2, help="Epochs to scan.")
@@ -63,21 +70,39 @@ def main() -> None:
     dm = TfLightningDataModule(cfg, seed=int(cfg.seed))
     dm.trainer = _DummyTrainer()
 
-    if args.split == "train":
-        loader = dm.train_dataloader()
+    if args.split == "gems_train":
+        dataset = dm._build_gems_train_dataset(int(cfg.seed))
+        steps = dm.steps["gems_train"]
         size = dm.info["train_size"]
         drop_remainder = bool(cfg.get("drop_remainder", False))
-        expected_samples = _expected_samples(size, int(cfg.batch_size), drop_remainder)
+    elif args.split == "gems_val":
+        dataset = dm._build_gems_val_dataset(int(cfg.seed))
+        steps = dm.steps["gems_val"]
+        size = dm.info["validation_size"]
+        drop_remainder = False
+    elif args.split == "gems_test":
+        dataset = dm._build_gems_test_dataset(int(cfg.seed))
+        steps = dm.steps["gems_test"]
+        size = dm.info["validation_size"]
+        drop_remainder = False
+    elif args.split == "massspec_train":
+        dataset = dm._build_massspec_train_dataset(int(cfg.seed))
+        steps = dm.steps["massspec_train"]
+        size = dm.info["massspec_train_size"]
+        drop_remainder = bool(cfg.get("drop_remainder", False))
+    elif args.split == "massspec_val":
+        dataset = dm._build_massspec_val_dataset(int(cfg.seed))
+        steps = dm.steps["massspec_val"]
+        size = dm.info["massspec_val_size"]
+        drop_remainder = False
     else:
-        loaders = dm.val_dataloader()
-        if not isinstance(loaders, list):
-            loaders = [loaders]
-        split_to_loader = dict(zip(dm.eval_splits, loaders))
-        loader = split_to_loader[args.split]
-        size_key = "validation_size" if args.split == "validation" else "massspec_test_size"
-        size = dm.info[size_key]
-        drop_remainder = args.split == "massspec_test"
-        expected_samples = _expected_samples(size, int(cfg.batch_size), drop_remainder)
+        dataset = dm._build_massspec_test_dataset(int(cfg.seed))
+        steps = dm.steps["massspec_test"]
+        size = dm.info["massspec_test_size"]
+        drop_remainder = False
+
+    loader = dm._make_loader(dataset=dataset, steps=steps)
+    expected_samples = _expected_samples(size, int(cfg.batch_size), drop_remainder)
 
     checksums: list[tuple[int, int, int]] = []
     for epoch in range(int(args.epochs)):
