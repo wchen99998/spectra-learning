@@ -161,21 +161,13 @@ class MAELightningModule(pl.LightningModule):
         # Compile train/eval forward with CUDA graphs for max throughput
         self._train_forward = torch.compile(
             self._train_forward_impl,
-            mode="max-autotune",
+            mode="max-autotune-no-cudagraphs",
             fullgraph=True,
-            options={
-                "epilogue_fusion": True,
-                "shape_padding": True,
-            },
         )
         self._eval_forward = torch.compile(
             self._eval_forward_impl,
-            mode="max-autotune",
+            mode="max-autotune-no-cudagraphs",
             fullgraph=True,
-            options={
-                "epilogue_fusion": True,
-                "shape_padding": True,
-            },
         )
 
     def _lr_for_step(self, step: int) -> float:
