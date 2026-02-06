@@ -59,19 +59,24 @@ class TransformerStack(nn.Module):
         self,
         *,
         dim: int,
+        max_length: int,
         num_layers: int,
         num_heads: int,
         num_kv_heads: int | None,
         attention_mlp_multiple: float,
         rope_theta: float,
+        cache_rope_frequencies: bool,
         dtype: torch.dtype = torch.float32,
     ):
         super().__init__()
         heads, kv_heads = _resolve_attention_heads(dim, num_heads, num_kv_heads)
         self.dim = int(dim)
+        self.max_length = int(max_length)
         self.num_heads = int(heads)
         self.rope_theta = float(rope_theta)
+        self.cache_rope_frequencies = bool(cache_rope_frequencies)
         self.dtype = dtype
+        self.head_dim = self.dim // self.num_heads
         self.blocks = _build_transformer_blocks(
             dim=self.dim,
             num_layers=num_layers,
@@ -80,6 +85,15 @@ class TransformerStack(nn.Module):
             attention_mlp_multiple=attention_mlp_multiple,
         )
         self.norm = nn.RMSNorm(self.dim, eps=1e-5)
+        if self.cache_rope_frequencies:
+            freqs_cos, freqs_sin = transformer_torch.precompute_freqs_cis(
+                self.head_dim,
+                self.max_length,
+                theta=self.rope_theta,
+                dtype=torch.float32,
+            )
+            self.register_buffer("_freqs_cos_cache", freqs_cos, persistent=False)
+            self.register_buffer("_freqs_sin_cache", freqs_sin, persistent=False)
 
     def forward(
         self,
@@ -90,21 +104,24 @@ class TransformerStack(nn.Module):
     ) -> torch.Tensor:
         del train  # Transformer blocks here are deterministic.
         seq_len = x.shape[1]
-        head_dim = self.dim // self.num_heads
-        freqs_cos, freqs_sin = transformer_torch.precompute_freqs_cis(
-            head_dim,
-            seq_len,
-            theta=self.rope_theta,
-            device=x.device,
-            dtype=self.dtype,
-        )
-        freqs_cos = freqs_cos[:seq_len].to(dtype=x.dtype)
-        freqs_sin = freqs_sin[:seq_len].to(dtype=x.dtype)
+        if self.cache_rope_frequencies:
+            freqs_cos = self._freqs_cos_cache[:seq_len].to(dtype=x.dtype)
+            freqs_sin = self._freqs_sin_cache[:seq_len].to(dtype=x.dtype)
+        else:
+            freqs_cos, freqs_sin = transformer_torch.precompute_freqs_cis(
+                self.head_dim,
+                seq_len,
+                theta=self.rope_theta,
+                device=x.device,
+                dtype=x.dtype,
+            )
+        rotary_cos = freqs_cos[None, :, None, :].repeat_interleave(2, dim=-1)
+        rotary_sin = freqs_sin[None, :, None, :].repeat_interleave(2, dim=-1)
         for block in self.blocks:
             x = block(
                 x,
-                freqs_cos=freqs_cos,
-                freqs_sin=freqs_sin,
+                freqs_cos=rotary_cos,
+                freqs_sin=rotary_sin,
                 attention_bias=attention_bias,
             )
         return self.norm(x)
@@ -132,6 +149,7 @@ class BERTTorch(nn.Module):
         cls_token_id: int = 101,
         sep_token_id: int = 102,
         rope_theta: float = 10000.0,
+        cache_rope_frequencies: bool = True,
         dtype: torch.dtype = torch.float32,
     ):
         super().__init__()
@@ -153,6 +171,17 @@ class BERTTorch(nn.Module):
         self.rope_theta = float(rope_theta)
         self.dtype = dtype
 
+        self.register_buffer(
+            "_pad_token_id_tensor",
+            torch.tensor(self.pad_token_id, dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_precursor_offset_tensor",
+            torch.tensor(self.precursor_offset, dtype=torch.long),
+            persistent=False,
+        )
+
         self.token_embed = nn.Embedding(self.vocab_size, self.model_dim)
         self.segment_embed = nn.Embedding(self.num_segments, self.model_dim)
         self.embed_norm = nn.LayerNorm(self.model_dim)
@@ -163,11 +192,13 @@ class BERTTorch(nn.Module):
 
         self.encoder = TransformerStack(
             dim=self.model_dim,
+            max_length=self.max_length,
             num_layers=self.num_layers,
             num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
             attention_mlp_multiple=self.attention_mlp_multiple,
             rope_theta=self.rope_theta,
+            cache_rope_frequencies=cache_rope_frequencies,
             dtype=dtype,
         )
 
@@ -244,23 +275,10 @@ class BERTTorch(nn.Module):
         precursor_tokens: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         logits_full = self.precursor_head(cls_state)
-        labels = (precursor_tokens - self.precursor_offset).to(torch.long)
-        if labels.ndim == 1 or (labels.ndim == 2 and labels.shape[1] == 1):
-            if labels.ndim == 2:
-                labels = labels[:, 0]
-            logits = logits_full[:, : self.precursor_bins]
-            loss = F.cross_entropy(logits, labels)
-            pred = logits.argmax(dim=-1)
-            acc = (pred == labels).to(torch.float32).mean()
-            return loss, acc
-
-        logits = logits_full.view(cls_state.shape[0], 2, self.precursor_bins)
-        per_token = F.cross_entropy(
-            logits.reshape(-1, self.precursor_bins),
-            labels.reshape(-1),
-            reduction="none",
-        )
-        loss = per_token.mean()
+        labels = (precursor_tokens - self._precursor_offset_tensor).to(torch.long)
+        num_bins = logits_full.shape[-1] // 2
+        logits = logits_full[:, :num_bins]
+        loss = F.cross_entropy(logits, labels)
         pred = logits.argmax(dim=-1)
         acc = (pred == labels).to(torch.float32).mean()
         return loss, acc
@@ -268,17 +286,9 @@ class BERTTorch(nn.Module):
     def _retention_metrics(
         self,
         cls_state: torch.Tensor,
-        rt: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if rt.ndim == 1 or (rt.ndim == 2 and rt.shape[1] == 1):
-            loss = torch.zeros((), dtype=cls_state.dtype, device=cls_state.device)
-            acc = torch.zeros((), dtype=torch.float32, device=cls_state.device)
-            return loss, acc
-        logits = self.retention_head(cls_state)
-        labels = torch.where(rt[:, 0] < rt[:, 1], 0, 1).to(torch.long)
-        loss = F.cross_entropy(logits, labels)
-        pred = logits.argmax(dim=-1)
-        acc = (pred == labels).to(torch.float32).mean()
+        loss = torch.zeros((), dtype=cls_state.dtype, device=cls_state.device)
+        acc = torch.zeros((), dtype=torch.float32, device=cls_state.device)
         return loss, acc
 
     def forward(
@@ -293,7 +303,7 @@ class BERTTorch(nn.Module):
 
         token_ids = batch["token_ids"].to(torch.long)
         segment_ids = batch["segment_ids"].to(torch.long)
-        attention_mask = token_ids != self.pad_token_id
+        attention_mask = token_ids != self._pad_token_id_tensor
 
         if apply_mask:
             masked_tokens = batch["masked_token_ids"].to(torch.long)
@@ -317,9 +327,8 @@ class BERTTorch(nn.Module):
         mask_ratio_actual = mask.to(torch.float32).mean()
         cls_state = encoded[:, 0, :]
         precursor_tokens = batch["precursor_mz"].to(torch.long)
-        rt = batch["rt"]
         precursor_loss, precursor_accuracy = self._precursor_metrics(cls_state, precursor_tokens)
-        retention_loss, retention_accuracy = self._retention_metrics(cls_state, rt)
+        retention_loss, retention_accuracy = self._retention_metrics(cls_state)
         loss = mlm_loss + precursor_loss + retention_loss
 
         return {
@@ -335,7 +344,7 @@ class BERTTorch(nn.Module):
     def encode(self, batch: dict[str, torch.Tensor], *, train: bool = False) -> torch.Tensor:
         token_ids = batch["token_ids"].to(torch.long)
         segment_ids = batch["segment_ids"].to(torch.long)
-        attention_mask = token_ids != self.pad_token_id
+        attention_mask = token_ids != self._pad_token_id_tensor
 
         x = self._embed_inputs(token_ids, segment_ids)
         attention_bias = self._make_attention_bias(attention_mask, dtype=x.dtype)

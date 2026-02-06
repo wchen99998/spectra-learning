@@ -920,10 +920,26 @@ class _RoundRobinTfIterableDataset(IterableDataset):
 
 
 class _StatefulDataLoader(DataLoader):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._resume_from = 0
+        self._num_yielded = 0
+
+    def __iter__(self):
+        state = {"num_yielded": self._resume_from}
+        self.dataset.load_state_dict(state)
+        self._num_yielded = self._resume_from
+        self._resume_from = 0
+        for batch in super().__iter__():
+            self._num_yielded += 1
+            yield batch
+
     def state_dict(self) -> dict[str, Any]:
-        return self.dataset.state_dict()
+        return {"num_yielded": self._num_yielded}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        self._resume_from = int(state_dict["num_yielded"])
+        self._num_yielded = self._resume_from
         self.dataset.load_state_dict(state_dict)
 
 
@@ -1040,6 +1056,11 @@ class TfLightningDataModule(pl.LightningDataModule):
 
         default_pin = torch.cuda.is_available()
         self.pin_memory = bool(config.get("dataloader_pin_memory", default_pin))
+        self.dataloader_num_workers = int(config.get("dataloader_num_workers", 1))
+        self.dataloader_prefetch_factor = int(config.get("dataloader_prefetch_factor", 2))
+        self.dataloader_persistent_workers = bool(
+            config.get("dataloader_persistent_workers", self.dataloader_num_workers > 0)
+        )
 
     def state_dict(self) -> dict[str, Any]:
         return {"seed": self.seed}
@@ -1158,9 +1179,13 @@ class TfLightningDataModule(pl.LightningDataModule):
         loader_kwargs: dict[str, Any] = {
             "dataset": dataset,
             "batch_size": None,
+            "num_workers": self.dataloader_num_workers,
             "pin_memory": self.pin_memory,
             "collate_fn": _identity_collate,
         }
+        if self.dataloader_num_workers > 0:
+            loader_kwargs["persistent_workers"] = self.dataloader_persistent_workers
+            loader_kwargs["prefetch_factor"] = self.dataloader_prefetch_factor
         return _StatefulDataLoader(**loader_kwargs)
 
     def _make_round_robin_loader(
@@ -1176,9 +1201,13 @@ class TfLightningDataModule(pl.LightningDataModule):
         loader_kwargs: dict[str, Any] = {
             "dataset": dataset,
             "batch_size": None,
+            "num_workers": self.dataloader_num_workers,
             "pin_memory": self.pin_memory,
             "collate_fn": _identity_collate,
         }
+        if self.dataloader_num_workers > 0:
+            loader_kwargs["persistent_workers"] = self.dataloader_persistent_workers
+            loader_kwargs["prefetch_factor"] = self.dataloader_prefetch_factor
         return _StatefulDataLoader(**loader_kwargs)
 
     def train_dataloader(self) -> DataLoader:

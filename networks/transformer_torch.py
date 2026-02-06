@@ -40,14 +40,11 @@ def apply_rotary_emb(
     freqs_cos: torch.Tensor,
     freqs_sin: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    cos = freqs_cos[None, :, None, :].repeat_interleave(2, dim=-1)
-    sin = freqs_sin[None, :, None, :].repeat_interleave(2, dim=-1)
-
     q_rot = _rotate_half(xq)
     k_rot = _rotate_half(xk)
 
-    xq_out = (xq * cos) + (q_rot * sin)
-    xk_out = (xk * cos) + (k_rot * sin)
+    xq_out = (xq * freqs_cos) + (q_rot * freqs_sin)
+    xk_out = (xk * freqs_cos) + (k_rot * freqs_sin)
     return xq_out, xk_out
 
 

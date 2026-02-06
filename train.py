@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+from typing import Any
 
 import lightning.pytorch as pl
 import torch
@@ -118,6 +119,75 @@ def _latest_ckpt_path(directory: Path) -> str | None:
     return str(ckpts[-1])
 
 
+class TorchProfilerCallback(pl.Callback):
+    def __init__(
+        self,
+        *,
+        trace_dir: Path,
+        wait_steps: int,
+        warmup_steps: int,
+        active_steps: int,
+        repeat: int,
+        record_shapes: bool,
+        with_stack: bool,
+        profile_memory: bool,
+    ) -> None:
+        super().__init__()
+        self.trace_dir = Path(trace_dir)
+        self.wait_steps = int(wait_steps)
+        self.warmup_steps = int(warmup_steps)
+        self.active_steps = int(active_steps)
+        self.repeat = int(repeat)
+        self.record_shapes = bool(record_shapes)
+        self.with_stack = bool(with_stack)
+        self.profile_memory = bool(profile_memory)
+        self._profiler = None
+        self._trace_idx = 0
+
+    def _on_trace_ready(self, profiler) -> None:
+        trace_path = self.trace_dir / f"trace_{self._trace_idx:03d}.json"
+        profiler.export_chrome_trace(str(trace_path))
+        self._trace_idx += 1
+
+    def on_fit_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        del pl_module
+        self.trace_dir.mkdir(parents=True, exist_ok=True)
+        activities = [torch.profiler.ProfilerActivity.CPU]
+        if trainer.strategy.root_device.type == "cuda":
+            activities.append(torch.profiler.ProfilerActivity.CUDA)
+        schedule = torch.profiler.schedule(
+            wait=self.wait_steps,
+            warmup=self.warmup_steps,
+            active=self.active_steps,
+            repeat=self.repeat,
+        )
+        self._profiler = torch.profiler.profile(
+            activities=activities,
+            schedule=schedule,
+            on_trace_ready=self._on_trace_ready,
+            record_shapes=self.record_shapes,
+            with_stack=self.with_stack,
+            profile_memory=self.profile_memory,
+        )
+        self._profiler.start()
+
+    def on_train_batch_end(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+        outputs: Any,
+        batch: Any,
+        batch_idx: int,
+    ) -> None:
+        del trainer, pl_module, outputs, batch, batch_idx
+        self._profiler.step()
+
+    def on_fit_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        del trainer, pl_module
+        self._profiler.stop()
+        self._profiler = None
+
+
 class MAELightningModule(pl.LightningModule):
     def __init__(
         self,
@@ -139,6 +209,12 @@ class MAELightningModule(pl.LightningModule):
         self.min_learning_rate = config.get("min_learning_rate", None)
         self.b2 = float(config.get("b2", 0.999))
         self.probe_ridge = float(config.get("probe_ridge", 1e-3))
+        self.non_blocking_device_transfer = bool(config.get("non_blocking_device_transfer", True))
+        self.train_log_extra_metrics_on_step = bool(config.get("train_log_extra_metrics_on_step", False))
+        self.train_step_log_interval = int(
+            config.get("train_step_log_interval", config.get("log_every_n_steps", 1))
+        )
+        self.checkpoint_every_steps = int(config.checkpoint_every_steps)
 
         self.model = BERTTorch(
             vocab_size=int(config.vocab_size),
@@ -156,6 +232,7 @@ class MAELightningModule(pl.LightningModule):
             pad_token_id=int(config.pad_token_id),
             cls_token_id=int(config.cls_token_id),
             sep_token_id=int(config.sep_token_id),
+            cache_rope_frequencies=bool(config.get("cache_rope_frequencies", True)),
         )
 
         # Compile train/eval forward with CUDA graphs for max throughput
@@ -209,13 +286,19 @@ class MAELightningModule(pl.LightningModule):
 
     def _iter_probe_features(self, split: str):
         device = self.device
+        non_blocking = self.non_blocking_device_transfer
         for batch in self._iter_massspec_probe(split):
-            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+            batch = {
+                k: v.to(device, non_blocking=non_blocking) if isinstance(v, torch.Tensor) else v
+                for k, v in batch.items()
+            }
             x = self.model.encode(batch, train=False)
             y = batch["fingerprint"].to(dtype=torch.float32)
             yield x, y
 
     def on_validation_epoch_start(self) -> None:
+        if not bool(self.config.get("enable_linear_probe", True)):
+            return
         dm = self.trainer.datamodule
         if int(dm.info.get("massspec_train_size", 0)) == 0:
             return
@@ -245,12 +328,34 @@ class MAELightningModule(pl.LightningModule):
     def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         del batch_idx
         torch.compiler.cudagraph_mark_step_begin()
-        batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+        non_blocking = self.non_blocking_device_transfer
+        batch = {
+            k: v.to(self.device, non_blocking=non_blocking) if isinstance(v, torch.Tensor) else v
+            for k, v in batch.items()
+        }
         metrics = self._train_forward(batch)
-        lr_value = torch.tensor(self._lr_for_step(self.global_step + 1), device=self.device)
-        self.log("train/learning_rate", lr_value, on_step=True, prog_bar=True)
+        step = self.global_step + 1
+        should_log_step = step % self.train_step_log_interval == 0
+        if should_log_step:
+            self.log("train/learning_rate", self._lr_for_step(step), on_step=True, prog_bar=True)
         for key, value in metrics.items():
-            self.log(f"train/{key}", value, on_step=True, prog_bar=(key == "loss"))
+            if key == "loss":
+                # Keep train/loss epoch-only and emit checkpoint monitor only on checkpoint steps.
+                self.log("train/loss", value, on_step=False, on_epoch=True, prog_bar=False)
+                if step % self.checkpoint_every_steps == 0:
+                    self.log(
+                        "train/loss_checkpoint",
+                        value,
+                        on_step=True,
+                        on_epoch=False,
+                        prog_bar=False,
+                        logger=False,
+                    )
+                continue
+            metric_name = f"train/{key}"
+            self.log(metric_name, value, on_step=False, on_epoch=True, prog_bar=False)
+            if should_log_step and self.train_log_extra_metrics_on_step:
+                self.log(f"{metric_name}_step", value, on_step=True, on_epoch=False, prog_bar=False)
         return metrics["loss"]
 
     def validation_step(
@@ -261,7 +366,11 @@ class MAELightningModule(pl.LightningModule):
     ) -> torch.Tensor:
         del batch_idx
         torch.compiler.cudagraph_mark_step_begin()
-        batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+        non_blocking = self.non_blocking_device_transfer
+        batch = {
+            k: v.to(self.device, non_blocking=non_blocking) if isinstance(v, torch.Tensor) else v
+            for k, v in batch.items()
+        }
         split = self.eval_splits[dataloader_idx]
         metrics = self._eval_forward(batch)
         for key, value in metrics.items():
@@ -276,7 +385,11 @@ class MAELightningModule(pl.LightningModule):
     ) -> torch.Tensor:
         del batch_idx
         torch.compiler.cudagraph_mark_step_begin()
-        batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+        non_blocking = self.non_blocking_device_transfer
+        batch = {
+            k: v.to(self.device, non_blocking=non_blocking) if isinstance(v, torch.Tensor) else v
+            for k, v in batch.items()
+        }
         split = self.test_splits[dataloader_idx]
         metrics = self._eval_forward(batch)
         for key, value in metrics.items():
@@ -284,11 +397,20 @@ class MAELightningModule(pl.LightningModule):
         return metrics["loss"]
 
     def configure_optimizers(self):
+        capturable = bool(self.config.get("optimizer_capturable", True))
+        capturable = capturable and self.trainer.strategy.root_device.type == "cuda"
+        fused_cfg = self.config.get("optimizer_fused", None)
+        if fused_cfg is None:
+            fused = None
+        else:
+            fused = bool(fused_cfg) and self.trainer.strategy.root_device.type == "cuda"
         optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=self.base_lr,
             betas=(0.9, self.b2),
             weight_decay=float(self.config.weight_decay),
+            capturable=capturable,
+            fused=fused,
         )
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=self._lr_lambda)
         return {
@@ -342,6 +464,8 @@ def train_and_evaluate(
         dirpath=str(checkpoint_dir),
         filename="step-{step:08d}",
         every_n_train_steps=int(config.checkpoint_every_steps),
+        monitor="train/loss_checkpoint",
+        mode="min",
         save_last=True,
         save_top_k=5,
     )
@@ -349,12 +473,25 @@ def train_and_evaluate(
     logger = _build_logger(config, Path(str(workdir)))
 
     callbacks: list[pl.Callback] = [checkpoint_cb, lr_monitor]
+    if bool(config.get("profile_enabled", False)):
+        callbacks.append(
+            TorchProfilerCallback(
+                trace_dir=workdir / str(config.get("profile_trace_dir", "profiler")),
+                wait_steps=int(config.get("profile_wait_steps", 20)),
+                warmup_steps=int(config.get("profile_warmup_steps", 20)),
+                active_steps=int(config.get("profile_active_steps", 40)),
+                repeat=int(config.get("profile_repeat", 1)),
+                record_shapes=bool(config.get("profile_record_shapes", True)),
+                with_stack=bool(config.get("profile_with_stack", True)),
+                profile_memory=bool(config.get("profile_profile_memory", True)),
+            )
+        )
 
     trainer = pl.Trainer(
         default_root_dir=str(workdir),
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1,
-        precision="bf16-mixed",
+        precision="16-mixed",
         max_epochs=num_epochs,
         log_every_n_steps=int(config.log_every_n_steps),
         val_check_interval=config.val_check_interval,
@@ -363,6 +500,10 @@ def train_and_evaluate(
         callbacks=callbacks,
         logger=logger,
         reload_dataloaders_every_n_epochs=0,
+        limit_train_batches=config.get("limit_train_batches", 1.0),
+        limit_val_batches=config.get("limit_val_batches", 1.0),
+        limit_test_batches=config.get("limit_test_batches", 1.0),
+        num_sanity_val_steps=int(config.get("num_sanity_val_steps", 0)),
     )
 
     ckpt_path = _latest_ckpt_path(Path(str(workdir)))

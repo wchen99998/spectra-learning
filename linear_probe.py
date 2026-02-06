@@ -30,10 +30,10 @@ def run_linear_probe(
     ridge_eye = ridge * torch.eye(xtx.shape[0], device=device, dtype=dtype)
     weights = torch.linalg.solve(xtx + ridge_eye, xty)
 
-    total_bits = 0
-    correct_bits = 0
-    tanimoto_sum = 0.0
-    samples = 0
+    total_bits = torch.zeros((), device=device, dtype=torch.float32)
+    correct_bits = torch.zeros((), device=device, dtype=torch.float32)
+    tanimoto_sum = torch.zeros((), device=device, dtype=torch.float32)
+    samples = torch.zeros((), device=device, dtype=torch.float32)
 
     for x, y in test_iter:
         x = x.to(dtype=torch.float32)
@@ -43,14 +43,14 @@ def run_linear_probe(
         pred = probs >= 0.5
         target = y >= 0.5
 
-        correct_bits += int((pred == target).sum().item())
-        total_bits += int(target.numel())
+        correct_bits += (pred == target).sum().to(torch.float32)
+        total_bits += torch.tensor(target.numel(), device=device, dtype=torch.float32)
 
         intersection = (pred & target).sum(dim=1).to(torch.float32)
         union = (pred | target).sum(dim=1).to(torch.float32)
-        tanimoto_sum += float((intersection / union).sum().item())
-        samples += int(pred.shape[0])
+        tanimoto_sum += (intersection / union).sum()
+        samples += torch.tensor(pred.shape[0], device=device, dtype=torch.float32)
 
-    accuracy = torch.tensor(correct_bits / total_bits, device=device)
-    tanimoto = torch.tensor(tanimoto_sum / samples, device=device)
+    accuracy = correct_bits / total_bits
+    tanimoto = tanimoto_sum / samples
     return {"accuracy": accuracy, "tanimoto": tanimoto}
