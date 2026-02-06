@@ -343,7 +343,7 @@ def train_and_evaluate(
         filename="step-{step:08d}",
         every_n_train_steps=int(config.checkpoint_every_steps),
         save_last=True,
-        save_top_k=-1,
+        save_top_k=5,
     )
     lr_monitor = LearningRateMonitor(logging_interval="step")
     logger = _build_logger(config, Path(str(workdir)))

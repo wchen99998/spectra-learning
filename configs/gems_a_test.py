@@ -52,7 +52,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.device_prefetch_size = 1
     cfg.log_every_n_steps = 500
     cfg.val_check_interval = 0.25
-    cfg.checkpoint_dir = ""
     cfg.checkpoint_every_steps = 10000
     cfg.init_seed = 0
 
