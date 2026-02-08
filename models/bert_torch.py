@@ -92,8 +92,10 @@ class TransformerStack(nn.Module):
                 theta=self.rope_theta,
                 dtype=torch.float32,
             )
-            self.register_buffer("_freqs_cos_cache", freqs_cos, persistent=False)
-            self.register_buffer("_freqs_sin_cache", freqs_sin, persistent=False)
+            rotary_cos = freqs_cos[None, :, None, :].repeat_interleave(2, dim=-1)
+            rotary_sin = freqs_sin[None, :, None, :].repeat_interleave(2, dim=-1)
+            self.register_buffer("_rotary_cos_cache", rotary_cos, persistent=False)
+            self.register_buffer("_rotary_sin_cache", rotary_sin, persistent=False)
 
     def forward(
         self,
@@ -105,8 +107,8 @@ class TransformerStack(nn.Module):
         del train  # Transformer blocks here are deterministic.
         seq_len = x.shape[1]
         if self.cache_rope_frequencies:
-            freqs_cos = self._freqs_cos_cache[:seq_len].to(dtype=x.dtype)
-            freqs_sin = self._freqs_sin_cache[:seq_len].to(dtype=x.dtype)
+            rotary_cos = self._rotary_cos_cache[:, :seq_len].to(dtype=x.dtype)
+            rotary_sin = self._rotary_sin_cache[:, :seq_len].to(dtype=x.dtype)
         else:
             freqs_cos, freqs_sin = transformer_torch.precompute_freqs_cis(
                 self.head_dim,
@@ -115,8 +117,8 @@ class TransformerStack(nn.Module):
                 device=x.device,
                 dtype=x.dtype,
             )
-        rotary_cos = freqs_cos[None, :, None, :].repeat_interleave(2, dim=-1)
-        rotary_sin = freqs_sin[None, :, None, :].repeat_interleave(2, dim=-1)
+            rotary_cos = freqs_cos[None, :, None, :].repeat_interleave(2, dim=-1)
+            rotary_sin = freqs_sin[None, :, None, :].repeat_interleave(2, dim=-1)
         for block in self.blocks:
             x = block(
                 x,
@@ -250,13 +252,11 @@ class BERTTorch(nn.Module):
         labels: torch.Tensor,
         mask: torch.Tensor,
     ) -> torch.Tensor:
-        per_token = F.cross_entropy(
-            logits.reshape(-1, logits.shape[-1]),
-            labels.reshape(-1),
-            reduction="none",
-        ).reshape_as(labels)
-        mask_f = mask.to(per_token.dtype)
-        return (per_token * mask_f).sum() / mask_f.sum()
+        masked_logits = logits[mask]
+        masked_labels = labels[mask]
+        log_probs = F.log_softmax(masked_logits, dim=-1)
+        token_nll = -log_probs.gather(dim=-1, index=masked_labels.unsqueeze(-1)).squeeze(-1)
+        return token_nll.mean()
 
     def _masked_accuracy(
         self,

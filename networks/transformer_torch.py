@@ -26,12 +26,10 @@ def precompute_freqs_cis(
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
-    orig_shape = x.shape
-    x_pairs = x.reshape(*orig_shape[:-1], -1, 2)
-    x1 = x_pairs[..., 0]
-    x2 = x_pairs[..., 1]
-    rotated = torch.stack((-x2, x1), dim=-1)
-    return rotated.reshape(orig_shape)
+    rotated = torch.empty_like(x)
+    rotated[..., ::2] = -x[..., 1::2]
+    rotated[..., 1::2] = x[..., ::2]
+    return rotated
 
 
 def apply_rotary_emb(

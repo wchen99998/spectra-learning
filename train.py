@@ -335,13 +335,14 @@ class MAELightningModule(pl.LightningModule):
         }
         metrics = self._train_forward(batch)
         step = self.global_step + 1
-        should_log_step = step % self.train_step_log_interval == 0
+        should_log_step = step == 1 or step % self.train_step_log_interval == 0
         if should_log_step:
-            self.log("train/learning_rate", self._lr_for_step(step), on_step=True, prog_bar=True)
+            self.log("train/learning_rate", self._lr_for_step(step), on_step=True, on_epoch=False, prog_bar=True)
         for key, value in metrics.items():
             if key == "loss":
-                # Keep train/loss epoch-only and emit checkpoint monitor only on checkpoint steps.
-                self.log("train/loss", value, on_step=False, on_epoch=True, prog_bar=False)
+                if should_log_step:
+                    self.log("train/loss", value, on_step=True, on_epoch=False, prog_bar=True)
+                self.log("train/loss_epoch", value, on_step=False, on_epoch=True, prog_bar=False)
                 if step % self.checkpoint_every_steps == 0:
                     self.log(
                         "train/loss_checkpoint",
