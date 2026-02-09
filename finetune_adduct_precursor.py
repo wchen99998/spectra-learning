@@ -206,8 +206,6 @@ class AdductPrecursorFinetuneModule(pl.LightningModule):
             num_kv_heads=config.get("num_kv_heads", None),
             attention_mlp_multiple=float(config.attention_mlp_multiple),
             num_segments=int(config.num_segments),
-            mask_ratio=float(config.mask_ratio),
-            mask_token_id=int(config.mask_token_id),
             pad_token_id=int(config.pad_token_id),
             cls_token_id=int(config.cls_token_id),
             sep_token_id=int(config.sep_token_id),

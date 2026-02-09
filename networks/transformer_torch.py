@@ -102,9 +102,9 @@ class Attention(nn.Module):
         *,
         freqs_cos: torch.Tensor | None = None,
         freqs_sin: torch.Tensor | None = None,
-        attention_bias: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        del attention_bias  # Kept for API parity with the JAX module.
+        del attention_mask
         bsz, seqlen, _ = x.shape
         qkv = self.wqkv(x)
 
@@ -211,7 +211,7 @@ class TransformerBlock(nn.Module):
         *,
         freqs_cos: torch.Tensor | None,
         freqs_sin: torch.Tensor | None,
-        attention_bias: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if not self.use_rotary_embeddings:
             freqs_cos = None
@@ -221,6 +221,6 @@ class TransformerBlock(nn.Module):
             self.attention_norm(x),
             freqs_cos=freqs_cos,
             freqs_sin=freqs_sin,
-            attention_bias=attention_bias,
+            attention_mask=attention_mask,
         )
         return h + self.feed_forward(self.ffn_norm(h))

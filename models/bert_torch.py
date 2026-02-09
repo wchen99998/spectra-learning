@@ -1,4 +1,4 @@
-"""PyTorch port of the masked language model BERT used in the JAX code."""
+"""PyTorch autoregressive transformer used in pretraining and downstream tasks."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ def _build_transformer_blocks(
                 dim=dim,
                 n_heads=heads,
                 n_kv_heads=kv_heads,
-                causal=False,
+                causal=True,
                 norm_eps=norm_eps,
                 mlp_type="swish",
                 multiple_of=4,
@@ -102,7 +102,7 @@ class TransformerStack(nn.Module):
         x: torch.Tensor,
         *,
         train: bool,
-        attention_bias: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del train  # Transformer blocks here are deterministic.
         seq_len = x.shape[1]
@@ -124,13 +124,13 @@ class TransformerStack(nn.Module):
                 x,
                 freqs_cos=rotary_cos,
                 freqs_sin=rotary_sin,
-                attention_bias=attention_bias,
+                attention_mask=attention_mask,
             )
         return self.norm(x)
 
 
 class BERTTorch(nn.Module):
-    """BERT-style masked language model."""
+    """Transformer model with causal next-token objective."""
 
     def __init__(
         self,
@@ -145,8 +145,6 @@ class BERTTorch(nn.Module):
         num_kv_heads: int | None = None,
         attention_mlp_multiple: float = 4.0,
         num_segments: int = 2,
-        mask_ratio: float = 0.15,
-        mask_token_id: int = 103,
         pad_token_id: int = 0,
         cls_token_id: int = 101,
         sep_token_id: int = 102,
@@ -165,8 +163,6 @@ class BERTTorch(nn.Module):
         self.num_kv_heads = None if num_kv_heads is None else int(num_kv_heads)
         self.attention_mlp_multiple = float(attention_mlp_multiple)
         self.num_segments = int(num_segments)
-        self.mask_ratio = float(mask_ratio)
-        self.mask_token_id = int(mask_token_id)
         self.pad_token_id = int(pad_token_id)
         self.cls_token_id = int(cls_token_id)
         self.sep_token_id = int(sep_token_id)
@@ -215,28 +211,6 @@ class BERTTorch(nn.Module):
         nn.init.zeros_(self.precursor_head.bias)
         nn.init.zeros_(self.retention_head.bias)
 
-    def _make_attention_bias(self, allow: torch.Tensor, *, dtype: torch.dtype) -> torch.Tensor:
-        neg = torch.tensor(-1e9, dtype=dtype, device=allow.device)
-        zero = torch.tensor(0.0, dtype=dtype, device=allow.device)
-        bias = torch.where(allow, zero, neg)
-        return bias[:, None, None, :]
-
-    def _mask_tokens(
-        self,
-        token_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        maskable = attention_mask & (token_ids != self.cls_token_id)
-        seq_len = token_ids.shape[1]
-        mask_count = int(self.mask_ratio * seq_len)
-        scores = torch.rand(token_ids.shape, device=token_ids.device, dtype=torch.float32)
-        scores = torch.where(maskable, scores, torch.full_like(scores, -1.0))
-        _, mask_idx = torch.topk(scores, k=mask_count, dim=1)
-        mask = torch.zeros_like(maskable)
-        mask.scatter_(1, mask_idx, True)
-        masked_tokens = torch.where(mask, torch.full_like(token_ids, self.mask_token_id), token_ids)
-        return masked_tokens, mask, mask_idx
-
     def _embed_inputs(
         self,
         token_ids: torch.Tensor,
@@ -246,28 +220,25 @@ class BERTTorch(nn.Module):
         seg = self.segment_embed(segment_ids)
         return self.embed_norm(tok + seg)
 
-    def _masked_cross_entropy(
+    def _next_token_metrics(
         self,
         logits: torch.Tensor,
-        labels: torch.Tensor,
-        mask: torch.Tensor,
-    ) -> torch.Tensor:
-        masked_logits = logits[mask]
-        masked_labels = labels[mask]
-        log_probs = F.log_softmax(masked_logits, dim=-1)
-        token_nll = -log_probs.gather(dim=-1, index=masked_labels.unsqueeze(-1)).squeeze(-1)
-        return token_nll.mean()
+        token_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        next_logits = logits[:, :-1, :]
+        next_labels = token_ids[:, 1:]
+        valid = next_labels != self._pad_token_id_tensor
+        valid_logits = next_logits[valid]
+        valid_labels = next_labels[valid]
+        token_loss = F.cross_entropy(valid_logits, valid_labels)
+        pred = valid_logits.argmax(dim=-1)
+        token_accuracy = (pred == valid_labels).to(torch.float32).mean()
+        return token_loss, token_accuracy
 
-    def _masked_accuracy(
-        self,
-        logits: torch.Tensor,
-        labels: torch.Tensor,
-        mask: torch.Tensor,
-    ) -> torch.Tensor:
-        pred = logits.argmax(dim=-1)
-        correct = (pred == labels).to(torch.float32)
-        mask_f = mask.to(torch.float32)
-        return (correct * mask_f).sum() / mask_f.sum()
+    def _eos_state(self, encoded: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
+        sep_idx = (token_ids == self.sep_token_id).to(torch.int64).argmax(dim=1)
+        batch_idx = torch.arange(token_ids.shape[0], device=token_ids.device)
+        return encoded[batch_idx, sep_idx, :]
 
     def _precursor_metrics(
         self,
@@ -296,45 +267,25 @@ class BERTTorch(nn.Module):
         batch: dict[str, torch.Tensor],
         *,
         train: bool = True,
-        apply_mask: bool | None = None,
     ) -> dict[str, torch.Tensor]:
-        if apply_mask is None:
-            apply_mask = train
-
+        del train
         token_ids = batch["token_ids"].to(torch.long)
         segment_ids = batch["segment_ids"].to(torch.long)
-        attention_mask = token_ids != self._pad_token_id_tensor
 
-        if apply_mask:
-            masked_tokens = batch["masked_token_ids"].to(torch.long)
-            mask = batch["mlm_mask"].to(torch.bool)
-        else:
-            masked_tokens = token_ids
-            mask = torch.zeros_like(attention_mask, dtype=torch.bool)
-
-        x = self._embed_inputs(masked_tokens, segment_ids)
-        attention_bias = self._make_attention_bias(attention_mask, dtype=x.dtype)
-        encoded = self.encoder(x, train=train, attention_bias=attention_bias)
+        x = self._embed_inputs(token_ids, segment_ids)
+        encoded = self.encoder(x, train=False, attention_mask=None)
         logits = self.lm_head(encoded)
-
-        if apply_mask:
-            mlm_loss = self._masked_cross_entropy(logits, token_ids, mask)
-            token_accuracy = self._masked_accuracy(logits, token_ids, mask)
-        else:
-            mlm_loss = torch.zeros((), dtype=logits.dtype, device=logits.device)
-            token_accuracy = torch.zeros((), dtype=torch.float32, device=logits.device)
-
-        mask_ratio_actual = mask.to(torch.float32).mean()
-        cls_state = encoded[:, 0, :]
+        token_loss, token_accuracy = self._next_token_metrics(logits, token_ids)
+        eos_state = self._eos_state(encoded, token_ids)
         precursor_tokens = batch["precursor_mz"].to(torch.long)
-        precursor_loss, precursor_accuracy = self._precursor_metrics(cls_state, precursor_tokens)
-        retention_loss, retention_accuracy = self._retention_metrics(cls_state)
-        loss = mlm_loss + precursor_loss + retention_loss
+        precursor_loss, precursor_accuracy = self._precursor_metrics(eos_state, precursor_tokens)
+        retention_loss, retention_accuracy = self._retention_metrics(eos_state)
+        loss = token_loss + precursor_loss + retention_loss
 
         return {
             "loss": loss,
+            "token_loss": token_loss,
             "token_accuracy": token_accuracy,
-            "mask_ratio_actual": mask_ratio_actual,
             "precursor_loss": precursor_loss,
             "precursor_accuracy": precursor_accuracy,
             "retention_loss": retention_loss,
@@ -342,17 +293,16 @@ class BERTTorch(nn.Module):
         }
 
     def encode(self, batch: dict[str, torch.Tensor], *, train: bool = False) -> torch.Tensor:
+        del train
         token_ids = batch["token_ids"].to(torch.long)
         segment_ids = batch["segment_ids"].to(torch.long)
-        attention_mask = token_ids != self._pad_token_id_tensor
 
         x = self._embed_inputs(token_ids, segment_ids)
-        attention_bias = self._make_attention_bias(attention_mask, dtype=x.dtype)
-        encoded = self.encoder(x, train=train, attention_bias=attention_bias)
-        return encoded[:, 0, :]
+        encoded = self.encoder(x, train=False, attention_mask=None)
+        return self._eos_state(encoded, token_ids)
 
     def compute_loss(self, batch: dict[str, torch.Tensor], *, train: bool = False):
-        metrics = self(batch, train=train, apply_mask=train)
+        metrics = self(batch, train=train)
         return metrics["loss"], metrics
 
 
@@ -374,18 +324,18 @@ def build_lightning_module(
             self.weight_decay = weight_decay
             self.b2 = b2
 
-        def forward(self, batch: dict[str, torch.Tensor], *, train: bool, apply_mask: bool | None = None):
-            return self.model(batch, train=train, apply_mask=apply_mask)
+        def forward(self, batch: dict[str, torch.Tensor], *, train: bool):
+            return self.model(batch, train=train)
 
         def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
             del batch_idx
-            metrics = self.model(batch, train=True, apply_mask=True)
+            metrics = self.model(batch, train=True)
             self.log_dict({f"train/{k}": v for k, v in metrics.items()}, prog_bar=True)
             return metrics["loss"]
 
         def validation_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
             del batch_idx
-            metrics = self.model(batch, train=False, apply_mask=False)
+            metrics = self.model(batch, train=False)
             self.log_dict({f"val/{k}": v for k, v in metrics.items()}, prog_bar=True)
             return metrics["loss"]
 

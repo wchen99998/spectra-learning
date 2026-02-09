@@ -17,6 +17,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pair_sequence_length = 128
     cfg.intensity_scaling = "linear"
     cfg.mz_representation = "mz"
+    cfg.peak_ordering = "intensity"
     cfg.seed = 42
     cfg.gcp_key_path = "/home/wuhao/md4/key.json"
     cfg.gems_formula_tfrecord_dir = "data/gems_formula_tfrecord"
@@ -40,8 +41,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_kv_heads = None
     cfg.attention_mlp_multiple = 4.0
     cfg.num_segments = 2
-    cfg.mask_ratio = 1.0
-    cfg.mask_token_id = 3
     cfg.pad_token_id = 0
     cfg.cls_token_id = 1
     cfg.sep_token_id = 2
@@ -64,7 +63,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.device_prefetch_size = 8
     cfg.log_every_n_steps = 50
     cfg.train_step_log_interval = 50
-    cfg.val_check_interval = 200
+    cfg.val_check_interval = 200.0
     cfg.num_eval_steps = 50
     cfg.checkpoint_every_steps = 10_000
     cfg.init_seed = 0

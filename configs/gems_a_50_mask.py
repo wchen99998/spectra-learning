@@ -18,6 +18,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pair_sequence_length = 128
     cfg.intensity_scaling = "linear"
     cfg.mz_representation = "neutral_loss"
+    cfg.peak_ordering = "intensity"
     cfg.seed = 42
 
     # Model (BERT)
@@ -28,11 +29,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_kv_heads = 6
     cfg.attention_mlp_multiple = 4.0
     cfg.num_segments = 2
-    cfg.mask_ratio = 0.6
-    cfg.mask_token_id = 3
-    cfg.pair_masking = True
-    cfg.mlm_replacement_strategy = "bert_80_10_10"
-    cfg.peak_ordering = "random"
     cfg.pad_token_id = 0
     cfg.cls_token_id = 1
     cfg.sep_token_id = 2

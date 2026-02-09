@@ -230,8 +230,6 @@ class MAELightningModule(pl.LightningModule):
             num_kv_heads=config.get("num_kv_heads", None),
             attention_mlp_multiple=float(config.attention_mlp_multiple),
             num_segments=int(config.num_segments),
-            mask_ratio=float(config.mask_ratio),
-            mask_token_id=int(config.mask_token_id),
             pad_token_id=int(config.pad_token_id),
             cls_token_id=int(config.cls_token_id),
             sep_token_id=int(config.sep_token_id),
@@ -265,10 +263,10 @@ class MAELightningModule(pl.LightningModule):
         return self._lr_for_step(step) / self.base_lr
 
     def _train_forward_impl(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        return self.model(batch, train=True, apply_mask=True)
+        return self.model(batch, train=True)
 
     def _eval_forward_impl(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        return self.model(batch, train=False, apply_mask=False)
+        return self.model(batch, train=False)
 
     def _iter_massspec_probe(self, split: str):
         dm = self.trainer.datamodule
