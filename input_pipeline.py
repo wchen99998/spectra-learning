@@ -885,16 +885,21 @@ def _convert_to_neutral_loss() -> Callable[[dict], dict]:
     return apply
 
 
-def _compact_sort_peaks() -> Callable[[dict], dict]:
+def _compact_sort_peaks(ordering: str = "intensity") -> Callable[[dict], dict]:
     def apply(example: dict) -> dict:
         mz = example["mz"]
         intensity = example["intensity"]
         keep = mz > 0
         kept_mz = tf.boolean_mask(mz, keep)
         kept_intensity = tf.boolean_mask(intensity, keep)
-        sorted_idx = tf.argsort(kept_intensity, direction="DESCENDING")
-        kept_mz = tf.gather(kept_mz, sorted_idx)
-        kept_intensity = tf.gather(kept_intensity, sorted_idx)
+        if ordering == "random":
+            perm = tf.random.shuffle(tf.range(tf.shape(kept_mz)[0]))
+            kept_mz = tf.gather(kept_mz, perm)
+            kept_intensity = tf.gather(kept_intensity, perm)
+        else:
+            sorted_idx = tf.argsort(kept_intensity, direction="DESCENDING")
+            kept_mz = tf.gather(kept_mz, sorted_idx)
+            kept_intensity = tf.gather(kept_intensity, sorted_idx)
         pad = _NUM_PEAKS_OUTPUT - tf.shape(kept_mz)[0]
         example["mz"] = tf.pad(kept_mz, [[0, pad]])
         example["intensity"] = tf.pad(kept_intensity, [[0, pad]])
@@ -1040,26 +1045,102 @@ def _build_single_spectrum_input(max_len: int) -> Callable[[dict], dict]:
     return apply
 
 
-def _apply_mlm_mask(mask_ratio: float, mask_token_id: int) -> Callable[[dict], dict]:
+def _apply_mlm_mask(
+    mask_ratio: float,
+    mask_token_id: int,
+    *,
+    pair_masking: bool = False,
+    mlm_replacement_strategy: str = "mask_only",
+    vocab_size: int = 0,
+    pair_sequence_length: int = 128,
+) -> Callable[[dict], dict]:
     cls_id = tf.constant(_SPECIAL_TOKENS["[CLS]"], tf.int32)
     pad_id = tf.constant(_SPECIAL_TOKENS["[PAD]"], tf.int32)
     mask_token = tf.constant(mask_token_id, tf.int32)
     mask_ratio_t = tf.constant(mask_ratio, tf.float32)
+    use_80_10_10 = mlm_replacement_strategy == "bert_80_10_10"
+    num_pair_slots = (pair_sequence_length - 1) // 2
+    _remainder = pair_sequence_length - (1 + 2 * num_pair_slots)
 
     def apply(batch: dict) -> dict:
         token_ids = batch["token_ids"]
-        maskable = tf.logical_and(token_ids != cls_id, token_ids != pad_id)
-        maskable_count = tf.reduce_sum(tf.cast(maskable, tf.int32), axis=1)
-        mask_count = tf.cast(
-            mask_ratio_t * tf.cast(maskable_count, tf.float32),
-            tf.int32,
-        )
-        scores = tf.random.uniform(tf.shape(token_ids), dtype=tf.float32)
-        scores = tf.where(maskable, scores, tf.constant(-1.0, tf.float32))
-        order = tf.argsort(scores, direction="DESCENDING")
-        rank = tf.argsort(order, direction="ASCENDING")
-        mask = rank < mask_count[:, None]
-        batch["masked_token_ids"] = tf.where(mask, mask_token, token_ids)
+        B = tf.shape(token_ids)[0]
+
+        if pair_masking:
+            pair_indices = tf.constant(
+                [2 * i + 1 for i in range(num_pair_slots)], dtype=tf.int32
+            )
+            pair_first = tf.gather(token_ids, pair_indices, axis=1)
+            pair_maskable = tf.logical_and(
+                pair_first != cls_id, pair_first != pad_id
+            )
+            pair_maskable_count = tf.reduce_sum(
+                tf.cast(pair_maskable, tf.int32), axis=1
+            )
+            pair_mask_count = tf.cast(
+                mask_ratio_t * tf.cast(pair_maskable_count, tf.float32),
+                tf.int32,
+            )
+            if mask_ratio > 0:
+                pair_mask_count = tf.where(
+                    pair_maskable_count > 0,
+                    tf.maximum(pair_mask_count, tf.ones_like(pair_mask_count)),
+                    pair_mask_count,
+                )
+            scores = tf.random.uniform([B, num_pair_slots])
+            scores = tf.where(pair_maskable, scores, -1.0)
+            order = tf.argsort(scores, direction="DESCENDING")
+            rank = tf.argsort(order, direction="ASCENDING")
+            pair_mask = rank < pair_mask_count[:, None]
+
+            pair_expanded = tf.stack([pair_mask, pair_mask], axis=2)
+            content_mask = tf.reshape(pair_expanded, [B, num_pair_slots * 2])
+            cls_col = tf.zeros([B, 1], dtype=tf.bool)
+            if _remainder > 0:
+                pad_col = tf.zeros([B, _remainder], dtype=tf.bool)
+                mask = tf.concat([cls_col, content_mask, pad_col], axis=1)
+            else:
+                mask = tf.concat([cls_col, content_mask], axis=1)
+        else:
+            maskable = tf.logical_and(token_ids != cls_id, token_ids != pad_id)
+            maskable_count = tf.reduce_sum(tf.cast(maskable, tf.int32), axis=1)
+            mask_count = tf.cast(
+                mask_ratio_t * tf.cast(maskable_count, tf.float32),
+                tf.int32,
+            )
+            scores = tf.random.uniform(tf.shape(token_ids), dtype=tf.float32)
+            scores = tf.where(maskable, scores, tf.constant(-1.0, tf.float32))
+            order = tf.argsort(scores, direction="DESCENDING")
+            rank = tf.argsort(order, direction="ASCENDING")
+            mask = rank < mask_count[:, None]
+
+        if use_80_10_10:
+            if pair_masking:
+                pair_rand = tf.random.uniform([B, num_pair_slots])
+                rand_expanded = tf.stack([pair_rand, pair_rand], axis=2)
+                content_rand = tf.reshape(rand_expanded, [B, num_pair_slots * 2])
+                cls_zeros = tf.zeros([B, 1])
+                if _remainder > 0:
+                    pad_zeros = tf.zeros([B, _remainder])
+                    rand = tf.concat([cls_zeros, content_rand, pad_zeros], axis=1)
+                else:
+                    rand = tf.concat([cls_zeros, content_rand], axis=1)
+            else:
+                rand = tf.random.uniform(tf.shape(token_ids))
+            replace_with_mask = mask & (rand < 0.8)
+            replace_with_random = mask & (rand >= 0.8) & (rand < 0.9)
+            random_tokens = tf.random.uniform(
+                tf.shape(token_ids),
+                minval=_NUM_SPECIAL_TOKENS,
+                maxval=vocab_size,
+                dtype=tf.int32,
+            )
+            masked_ids = tf.where(replace_with_mask, mask_token, token_ids)
+            masked_ids = tf.where(replace_with_random, random_tokens, masked_ids)
+            batch["masked_token_ids"] = masked_ids
+        else:
+            batch["masked_token_ids"] = tf.where(mask, mask_token, token_ids)
+
         batch["mlm_mask"] = mask
         return batch
 
@@ -1081,6 +1162,10 @@ def _build_dataset(
     include_fingerprint: bool,
     intensity_scaling: str,
     mz_representation: str,
+    peak_ordering: str = "intensity",
+    pair_masking: bool = False,
+    mlm_replacement_strategy: str = "mask_only",
+    apply_mlm_mask: bool = True,
 ) -> tf.data.Dataset:
     parse_fn = _parse_example_with_fingerprint if include_fingerprint else _parse_example
     ds = tf.data.TFRecordDataset(
@@ -1096,7 +1181,7 @@ def _build_dataset(
         num_parallel_calls=tf.data.AUTOTUNE,
     )
     ds = ds.map(_topk_peaks(_NUM_PEAKS_OUTPUT), num_parallel_calls=tf.data.AUTOTUNE)
-    ds = ds.map(_compact_sort_peaks(), num_parallel_calls=tf.data.AUTOTUNE)
+    ds = ds.map(_compact_sort_peaks(peak_ordering), num_parallel_calls=tf.data.AUTOTUNE)
     if mz_representation == "neutral_loss":
         ds = ds.map(_convert_to_neutral_loss(), num_parallel_calls=tf.data.AUTOTUNE)
     ds = ds.map(
@@ -1111,10 +1196,20 @@ def _build_dataset(
         num_parallel_calls=tf.data.AUTOTUNE,
     )
     ds = ds.batch(batch_size, drop_remainder=drop_remainder)
-    ds = ds.map(
-        _apply_mlm_mask(mask_ratio, mask_token_id),
-        num_parallel_calls=tf.data.AUTOTUNE,
-    )
+    if apply_mlm_mask:
+        mz_bins = int(_PEAK_MZ_MAX) + 1
+        vocab_size = _NUM_SPECIAL_TOKENS + mz_bins + _INTENSITY_BINS
+        ds = ds.map(
+            _apply_mlm_mask(
+                mask_ratio,
+                mask_token_id,
+                pair_masking=pair_masking,
+                mlm_replacement_strategy=mlm_replacement_strategy,
+                vocab_size=vocab_size,
+                pair_sequence_length=pair_sequence_length,
+            ),
+            num_parallel_calls=tf.data.AUTOTUNE,
+        )
     options = tf.data.Options()
     options.experimental_deterministic = True
     ds = ds.with_options(options)
@@ -1412,6 +1507,12 @@ class TfLightningDataModule(pl.LightningDataModule):
         self.mz_representation = str(config.get("mz_representation", "mz"))
         self.mask_ratio = float(config.get("mask_ratio", 0.15))
         self.mask_token_id = int(config.get("mask_token_id", _SPECIAL_TOKENS["[MASK]"]))
+        self.peak_ordering = str(config.get("peak_ordering", "intensity"))
+        self.probe_peak_ordering = str(config.get("probe_peak_ordering", "intensity"))
+        self.pair_masking = bool(config.get("pair_masking", False))
+        self.mlm_replacement_strategy = str(
+            config.get("mlm_replacement_strategy", "mask_only")
+        )
 
         self.metadata = _ensure_processed(
             self.output_dir,
@@ -1525,6 +1626,9 @@ class TfLightningDataModule(pl.LightningDataModule):
             include_fingerprint=include_fingerprint,
             intensity_scaling=self.intensity_scaling,
             mz_representation=self.mz_representation,
+            peak_ordering=self.peak_ordering,
+            pair_masking=self.pair_masking,
+            mlm_replacement_strategy=self.mlm_replacement_strategy,
         )
 
     def _build_gems_train_dataset(self, seed: int) -> tf.data.Dataset:
@@ -1581,8 +1685,16 @@ class TfLightningDataModule(pl.LightningDataModule):
             include_fingerprint=False,
         )
 
-    def build_massspec_probe_dataset(self, split: str, seed: int) -> tf.data.Dataset:
+    def build_massspec_probe_dataset(
+        self,
+        split: str,
+        seed: int,
+        *,
+        peak_ordering: str | None = None,
+    ) -> tf.data.Dataset:
         files = self.massspec_train_files if split == "massspec_train" else self.massspec_test_files
+        if peak_ordering is None:
+            peak_ordering = self.probe_peak_ordering
         return _build_dataset(
             files,
             self.batch_size,
@@ -1597,6 +1709,10 @@ class TfLightningDataModule(pl.LightningDataModule):
             include_fingerprint=True,
             intensity_scaling=self.intensity_scaling,
             mz_representation=self.mz_representation,
+            peak_ordering=peak_ordering,
+            pair_masking=self.pair_masking,
+            mlm_replacement_strategy=self.mlm_replacement_strategy,
+            apply_mlm_mask=False,
         )
 
     def _make_loader(

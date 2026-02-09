@@ -69,6 +69,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.checkpoint_every_steps = 10_000
     cfg.init_seed = 0
     cfg.enable_linear_probe = True
+    cfg.probe_bits = 1024
+    cfg.probe_fit_bias = True
+    cfg.probe_peak_ordering = "intensity"
     cfg.limit_train_batches = 1.0
     cfg.limit_val_batches = 1.0
     cfg.limit_test_batches = 1.0

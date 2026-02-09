@@ -10,6 +10,8 @@ def run_linear_probe(
     test_iter: Iterable[tuple[torch.Tensor, torch.Tensor]],
     *,
     ridge: float = 1e-3,
+    fit_bias: bool = True,
+    decision_threshold: float = 0.5,
 ) -> dict[str, torch.Tensor]:
     xtx = None
     xty = None
@@ -19,6 +21,9 @@ def run_linear_probe(
     for x, y in train_iter:
         x = x.to(dtype=torch.float32)
         y = y.to(dtype=torch.float32)
+        if fit_bias:
+            ones = torch.ones((x.shape[0], 1), device=x.device, dtype=x.dtype)
+            x = torch.cat([x, ones], dim=1)
         if xtx is None:
             device = x.device
             dtype = x.dtype
@@ -34,23 +39,38 @@ def run_linear_probe(
     correct_bits = torch.zeros((), device=device, dtype=torch.float32)
     tanimoto_sum = torch.zeros((), device=device, dtype=torch.float32)
     samples = torch.zeros((), device=device, dtype=torch.float32)
+    pred_positives = torch.zeros((), device=device, dtype=torch.float32)
+    target_positives = torch.zeros((), device=device, dtype=torch.float32)
+    threshold = torch.logit(torch.tensor(decision_threshold, device=device, dtype=torch.float32))
 
     for x, y in test_iter:
         x = x.to(dtype=torch.float32)
         y = y.to(dtype=torch.float32)
+        if fit_bias:
+            ones = torch.ones((x.shape[0], 1), device=x.device, dtype=x.dtype)
+            x = torch.cat([x, ones], dim=1)
         logits = x @ weights
-        probs = torch.sigmoid(logits)
-        pred = probs >= 0.5
+        pred = logits > threshold
         target = y >= 0.5
 
         correct_bits += (pred == target).sum().to(torch.float32)
         total_bits += torch.tensor(target.numel(), device=device, dtype=torch.float32)
+        pred_positives += pred.sum().to(torch.float32)
+        target_positives += target.sum().to(torch.float32)
 
         intersection = (pred & target).sum(dim=1).to(torch.float32)
         union = (pred | target).sum(dim=1).to(torch.float32)
-        tanimoto_sum += (intersection / union).sum()
+        tanimoto = torch.where(union > 0.0, intersection / union, torch.ones_like(union))
+        tanimoto_sum += tanimoto.sum()
         samples += torch.tensor(pred.shape[0], device=device, dtype=torch.float32)
 
     accuracy = correct_bits / total_bits
     tanimoto = tanimoto_sum / samples
-    return {"accuracy": accuracy, "tanimoto": tanimoto}
+    pred_positive_rate = pred_positives / total_bits
+    target_positive_rate = target_positives / total_bits
+    return {
+        "accuracy": accuracy,
+        "tanimoto": tanimoto,
+        "pred_positive_rate": pred_positive_rate,
+        "target_positive_rate": target_positive_rate,
+    }

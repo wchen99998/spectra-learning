@@ -30,6 +30,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_segments = 2
     cfg.mask_ratio = 0.6
     cfg.mask_token_id = 3
+    cfg.pair_masking = True
+    cfg.mlm_replacement_strategy = "bert_80_10_10"
+    cfg.peak_ordering = "random"
     cfg.pad_token_id = 0
     cfg.cls_token_id = 1
     cfg.sep_token_id = 2
@@ -56,6 +59,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.checkpoint_every_steps = 25000
     cfg.init_seed = 0
     cfg.enable_linear_probe = True
+    cfg.probe_bits = 1024
+    cfg.probe_fit_bias = True
+    cfg.probe_peak_ordering = "intensity"
     cfg.limit_train_batches = 1.0
     cfg.limit_val_batches = 1.0
     cfg.limit_test_batches = 1.0

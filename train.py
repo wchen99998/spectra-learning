@@ -209,6 +209,9 @@ class MAELightningModule(pl.LightningModule):
         self.min_learning_rate = config.get("min_learning_rate", None)
         self.b2 = float(config.get("b2", 0.999))
         self.probe_ridge = float(config.get("probe_ridge", 1e-3))
+        self.probe_bits = int(config.get("probe_bits", config.get("fingerprint_bits", 1024)))
+        self.probe_fit_bias = bool(config.get("probe_fit_bias", True))
+        self.probe_peak_ordering = str(config.get("probe_peak_ordering", "intensity"))
         self.non_blocking_device_transfer = bool(config.get("non_blocking_device_transfer", True))
         self.train_log_extra_metrics_on_step = bool(config.get("train_log_extra_metrics_on_step", False))
         self.train_step_log_interval = int(
@@ -270,7 +273,11 @@ class MAELightningModule(pl.LightningModule):
     def _iter_massspec_probe(self, split: str):
         dm = self.trainer.datamodule
         seed = int(self.config.seed) + (2_000_000 if split == "massspec_train" else 3_000_000)
-        ds = dm.build_massspec_probe_dataset(split, seed=seed)
+        ds = dm.build_massspec_probe_dataset(
+            split,
+            seed=seed,
+            peak_ordering=self.probe_peak_ordering,
+        )
         size_key = "massspec_train_size" if split == "massspec_train" else "massspec_test_size"
         size = int(dm.info[size_key])
         seen = 0
@@ -293,7 +300,7 @@ class MAELightningModule(pl.LightningModule):
                 for k, v in batch.items()
             }
             x = self.model.encode(batch, train=False)
-            y = batch["fingerprint"].to(dtype=torch.float32)
+            y = batch["fingerprint"][:, : self.probe_bits].to(dtype=torch.float32)
             yield x, y
 
     def on_validation_epoch_start(self) -> None:
@@ -309,6 +316,7 @@ class MAELightningModule(pl.LightningModule):
                 self._iter_probe_features("massspec_train"),
                 self._iter_probe_features("massspec_test"),
                 ridge=self.probe_ridge,
+                fit_bias=self.probe_fit_bias,
             )
         self.log(
             "massspec_test/linear_probe_accuracy",
@@ -316,6 +324,20 @@ class MAELightningModule(pl.LightningModule):
             on_step=False,
             on_epoch=True,
             prog_bar=True,
+        )
+        self.log(
+            "massspec_test/linear_probe_pred_positive_rate",
+            metrics["pred_positive_rate"],
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+        )
+        self.log(
+            "massspec_test/linear_probe_target_positive_rate",
+            metrics["target_positive_rate"],
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
         )
         self.log(
             "massspec_test/linear_probe_tanimoto",
@@ -444,6 +466,8 @@ def train_and_evaluate(
     config.max_length = info["pair_sequence_length"]
     config.precursor_bins = info["precursor_bins"]
     config.precursor_offset = info["precursor_offset"]
+    config.fingerprint_bits = int(info["fingerprint_bits"])
+    config.probe_bits = int(config.get("probe_bits", config.fingerprint_bits))
 
     logging.info("Training with Lightning for %d epochs.", num_epochs)
     logging.info("Steps per epoch: %d", steps_per_epoch)
