@@ -28,14 +28,9 @@ _DEFAULT_BATCH_SIZE = 512
 _DEFAULT_SHUFFLE_BUFFER = 10_000
 _DEFAULT_VALIDATION_FRACTION = 0.05
 _DEFAULT_TFRECORD_DIR = Path("data/gems_peaklist_tfrecord")
-_DEFAULT_GEMS_FORMULA_TFRECORD_DIR = Path("data/gems_formula_tfrecord")
-_DEFAULT_GEMS_FORMULA_RAW_CSV_PATH = Path(
-    "data/gems_formula/raw/GeMS_2m_combined_formula_identifications.csv"
-)
 _DEFAULT_TFRECORD_BUFFER_SIZE = 250_000
 _DEFAULT_SPLIT_SEED = 42
 _DEFAULT_NUM_SHARDS = 4
-_DEFAULT_GEMS_FORMULA_NUM_SHARDS = 16
 _NUM_PEAKS_INPUT = 128
 _NUM_PEAKS_OUTPUT = 60
 _DEFAULT_MAX_PRECURSOR_MZ = 1000.0
@@ -44,13 +39,8 @@ _FINGERPRINT_RADIUS = 2
 _PEAK_MZ_MIN = 20.0
 _PEAK_MZ_MAX = 1000.0
 _PRECURSOR_MZ_WINDOW = 2.5
-_INTENSITY_BINS = 32
 _INTENSITY_EPS = 1e-4
 _DEFAULT_INTENSITY_SCALING = "log"
-_SPECIAL_TOKENS = {"[PAD]": 0, "[CLS]": 1, "[SEP]": 2, "[MASK]": 3}
-_NUM_SPECIAL_TOKENS = len(_SPECIAL_TOKENS)
-_DEFAULT_PAIR_SEQUENCE_LENGTH = 128
-
 _METADATA_FILENAME = "metadata.json"
 
 _GEMS_HF_REPO = "roman-bushuiev/GeMS"
@@ -58,13 +48,6 @@ _GEMS_HDF5_PATH = "data/GeMS_A/GeMS_A.hdf5"
 _MASSSPEC_HF_REPO = "roman-bushuiev/MassSpecGym"
 _MASSSPEC_TSV_PATH = "data/MassSpecGym.tsv"
 _MASSSPEC_METADATA_VERSION = 2
-_GEMS_FORMULA_METADATA_VERSION = 1
-_GEMS_FORMULA_GCS_URI = (
-    "gs://main-novogaia-bucket/gems/GeMS_2m_combined_formula_identifications.csv"
-)
-_DEFAULT_GCP_KEY_PATH = Path("/home/wuhao/md4/key.json")
-_DEFAULT_GEMS_FORMULA_COLUMN_NAME = "formula"
-_DEFAULT_GEMS_ADDUCT_COLUMN_NAME = "adduct"
 
 
 # -----------------------------------------------------------------------------
@@ -82,17 +65,6 @@ def _download_hf_file(repo_id: str, filename: str, local_dir: Path) -> Path:
     )
     return Path(path)
 
-
-def _download_gcs_file(gcs_uri: str, local_path: Path, gcp_key_path: Path) -> Path:
-    local_path = local_path.expanduser().resolve()
-    if local_path.exists():
-        return local_path
-    local_path.parent.mkdir(parents=True, exist_ok=True)
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(
-        gcp_key_path.expanduser().resolve()
-    )
-    tf.io.gfile.copy(gcs_uri, str(local_path), overwrite=False)
-    return local_path
 
 
 def _load_gems_arrays(hdf5_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -179,28 +151,6 @@ def _load_massspec_tsv(
         collision_energy_present_array,
     )
 
-
-def _load_gems_formula_csv(
-    csv_path: Path,
-    *,
-    formula_column_name: str,
-    adduct_column_name: str,
-) -> tuple[np.ndarray, np.ndarray]:
-    import csv
-
-    formula: list[str] = []
-    adduct: list[str] = []
-
-    with csv_path.open(newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            formula.append(row[formula_column_name])
-            value = row[adduct_column_name]
-            adduct.append(value if value != "" else "unknown")
-
-    formula_array = np.asarray(formula, dtype=object)
-    adduct_array = np.asarray(adduct, dtype=object)
-    return formula_array, adduct_array
 
 
 def _split_indices(
@@ -387,52 +337,6 @@ def _write_tfrecords_with_fingerprint(
     return files, lengths
 
 
-def _write_formula_tfrecords(
-    formula: np.ndarray,
-    adduct_id: np.ndarray,
-    output_path: Path,
-    num_shards: int,
-    desc: str,
-) -> tuple[list[str], list[int]]:
-    n = len(formula)
-    num_shards = max(1, min(num_shards, n))
-    shard_size = math.ceil(n / num_shards)
-
-    output_path.mkdir(parents=True, exist_ok=True)
-    files: list[str] = []
-    lengths: list[int] = []
-
-    for shard_id in range(num_shards):
-        start = shard_id * shard_size
-        end = min(start + shard_size, n)
-        if start >= end:
-            break
-
-        shard_file = output_path / f"shard-{shard_id:05d}-of-{num_shards:05d}.tfrecord"
-        options = tf.io.TFRecordOptions(compression_type="GZIP")
-
-        with tf.io.TFRecordWriter(str(shard_file), options=options) as writer:
-            for i in tqdm(range(start, end), desc=f"{desc} [{shard_id + 1}/{num_shards}]"):
-                formula_bytes = str(formula[i]).encode("utf-8")
-                adduct = int(adduct_id[i])
-                features = {
-                    "formula": tf.train.Feature(
-                        bytes_list=tf.train.BytesList(value=[formula_bytes])
-                    ),
-                    "adduct_id": tf.train.Feature(
-                        int64_list=tf.train.Int64List(value=[adduct])
-                    ),
-                }
-                example = tf.train.Example(
-                    features=tf.train.Features(feature=features)
-                )
-                writer.write(example.SerializeToString())
-
-        files.append(shard_file.name)
-        lengths.append(end - start)
-
-    return files, lengths
-
 
 def _process_gems(
     output_dir: Path,
@@ -581,86 +485,6 @@ def _process_massspec(output_dir: Path, num_shards: int) -> dict[str, Any]:
     }
 
 
-def _process_gems_formula(
-    output_dir: Path,
-    *,
-    raw_csv_path: Path,
-    gcs_uri: str,
-    gcp_key_path: Path,
-    formula_column_name: str,
-    adduct_column_name: str,
-    split_seed: int,
-    num_shards: int,
-) -> dict[str, Any]:
-    if not raw_csv_path.exists():
-        logger.info("Downloading GeMS formula CSV from GCS...")
-        _download_gcs_file(gcs_uri, raw_csv_path, gcp_key_path)
-
-    logger.info("Loading GeMS formula CSV...")
-    formula, adduct = _load_gems_formula_csv(
-        raw_csv_path,
-        formula_column_name=formula_column_name,
-        adduct_column_name=adduct_column_name,
-    )
-    adduct_id, adduct_vocab = _encode_categorical_ids(adduct)
-
-    train_idx, val_idx, test_idx = _split_indices(
-        len(formula),
-        split_seed,
-        train_fraction=0.90,
-        val_fraction=0.05,
-    )
-    train_size = int(train_idx.size)
-    val_size = int(val_idx.size)
-    test_size = int(test_idx.size)
-    logger.info(
-        "GeMS formula entries: %d (train=%d, val=%d, test=%d)",
-        len(formula),
-        train_size,
-        val_size,
-        test_size,
-    )
-
-    train_files, train_lengths = _write_formula_tfrecords(
-        formula[train_idx],
-        adduct_id[train_idx],
-        output_dir / "train",
-        num_shards,
-        desc="GeMS Formula Train",
-    )
-    val_files, val_lengths = _write_formula_tfrecords(
-        formula[val_idx],
-        adduct_id[val_idx],
-        output_dir / "validation",
-        max(1, num_shards // 4),
-        desc="GeMS Formula Validation",
-    )
-    test_files, test_lengths = _write_formula_tfrecords(
-        formula[test_idx],
-        adduct_id[test_idx],
-        output_dir / "test",
-        max(1, num_shards // 4),
-        desc="GeMS Formula Test",
-    )
-
-    return {
-        "gems_formula_train_files": train_files,
-        "gems_formula_train_lengths": train_lengths,
-        "gems_formula_train_size": train_size,
-        "gems_formula_val_files": val_files,
-        "gems_formula_val_lengths": val_lengths,
-        "gems_formula_val_size": val_size,
-        "gems_formula_test_files": test_files,
-        "gems_formula_test_lengths": test_lengths,
-        "gems_formula_test_size": test_size,
-        "gems_formula_adduct_vocab": adduct_vocab,
-        "gems_formula_adduct_vocab_size": len(adduct_vocab),
-        "gems_formula_metadata_version": _GEMS_FORMULA_METADATA_VERSION,
-        "gems_formula_source_csv": str(raw_csv_path),
-        "gems_formula_formula_column_name": formula_column_name,
-        "gems_formula_adduct_column_name": adduct_column_name,
-    }
-
 
 def _ensure_processed(
     output_dir: Path,
@@ -742,52 +566,6 @@ def _ensure_processed(
     return metadata
 
 
-def _ensure_formula_processed(
-    output_dir: Path,
-    *,
-    raw_csv_path: Path,
-    gcs_uri: str,
-    gcp_key_path: Path,
-    formula_column_name: str,
-    adduct_column_name: str,
-    split_seed: int,
-    num_shards: int,
-) -> dict[str, Any]:
-    metadata_path = output_dir / _METADATA_FILENAME
-    if metadata_path.exists():
-        with open(metadata_path) as f:
-            metadata = json.load(f)
-        train_files = metadata.get("gems_formula_train_files", [])
-        val_files = metadata.get("gems_formula_val_files", [])
-        test_files = metadata.get("gems_formula_test_files", [])
-        train_ok = all((output_dir / "train" / fn).exists() for fn in train_files)
-        val_ok = all((output_dir / "validation" / fn).exists() for fn in val_files)
-        test_ok = all((output_dir / "test" / fn).exists() for fn in test_files)
-        version_ok = (
-            int(metadata.get("gems_formula_metadata_version", 0))
-            == _GEMS_FORMULA_METADATA_VERSION
-        )
-        vocab_ok = "gems_formula_adduct_vocab" in metadata
-        if train_files and val_files and test_files and train_ok and val_ok and test_ok and version_ok and vocab_ok:
-            logger.info("Found existing GeMS formula TFRecords at %s", output_dir)
-            return metadata
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    metadata = _process_gems_formula(
-        output_dir,
-        raw_csv_path=raw_csv_path,
-        gcs_uri=gcs_uri,
-        gcp_key_path=gcp_key_path,
-        formula_column_name=formula_column_name,
-        adduct_column_name=adduct_column_name,
-        split_seed=split_seed,
-        num_shards=num_shards,
-    )
-    with open(metadata_path, "w") as f:
-        json.dump(metadata, f, indent=2)
-    logger.info("Saved formula metadata to %s", metadata_path)
-    return metadata
-
 
 # -----------------------------------------------------------------------------
 # tf.data pipeline
@@ -835,17 +613,6 @@ def _parse_example_with_fingerprint(serialized: tf.Tensor) -> dict[str, tf.Tenso
         "collision_energy_present": tf.cast(parsed["collision_energy_present"][0], tf.int32),
     }
 
-
-def _parse_formula_example(serialized: tf.Tensor) -> dict[str, tf.Tensor]:
-    features = {
-        "formula": tf.io.FixedLenFeature([], tf.string),
-        "adduct_id": tf.io.FixedLenFeature([1], tf.int64),
-    }
-    parsed = tf.io.parse_single_example(serialized, features)
-    return {
-        "formula": parsed["formula"],
-        "adduct_id": tf.cast(parsed["adduct_id"][0], tf.int32),
-    }
 
 
 def _filter_max_precursor_mz(max_precursor_mz: float) -> Callable[[dict], tf.Tensor]:
@@ -922,20 +689,21 @@ def _topk_peaks(num_peaks: int) -> Callable[[dict], dict]:
     return apply
 
 
-def _strip_padding_and_tokenize(
+def _normalize_for_jepa(
     max_precursor_mz: float,
     intensity_scaling: str,
 ) -> Callable[[dict], dict]:
+    """Normalize peak features for continuous JEPA input.
+
+    Produces peak_mz (normalized), peak_intensity (scaled), peak_valid_mask,
+    and normalized precursor_mz.  Replaces the old tokenize + build_input steps.
+    """
     eps = tf.constant(_INTENSITY_EPS, tf.float32)
     log_eps = tf.math.log(eps)
     denom = -log_eps
     linear_denom = tf.constant(1.0, tf.float32) - eps
-    bins = tf.constant(_INTENSITY_BINS - 1, tf.float32)
-    mz_bins = int(_PEAK_MZ_MAX) + 1
-    precursor_bins = int(max_precursor_mz) + 1
-    mz_offset = tf.constant(_NUM_SPECIAL_TOKENS, tf.int32)
-    precursor_offset = mz_offset
-    intensity_offset = tf.constant(_NUM_SPECIAL_TOKENS + mz_bins, tf.int32)
+    peak_mz_max = tf.constant(_PEAK_MZ_MAX, tf.float32)
+    precursor_max = tf.constant(max_precursor_mz, tf.float32)
 
     if intensity_scaling == "linear":
         def scale(intensity: tf.Tensor) -> tf.Tensor:
@@ -947,106 +715,14 @@ def _strip_padding_and_tokenize(
     def apply(example: dict) -> dict:
         mz = example["mz"]
         intensity = example["intensity"]
-        keep = mz > 0
-        mz = tf.boolean_mask(mz, keep)
-        intensity = tf.boolean_mask(intensity, keep)
-        mz_tokens = tf.cast(tf.floor(mz), tf.int32) + mz_offset
-        precursor_tokens = tf.cast(
-            tf.floor(tf.clip_by_value(example["precursor_mz"], 0.0, max_precursor_mz)),
-            tf.int32,
-        ) + precursor_offset
+
+        valid = mz > 0
+        example["peak_valid_mask"] = valid
+        example["peak_mz"] = mz / peak_mz_max
         intensity = tf.clip_by_value(intensity, eps, 1.0)
-        s = scale(intensity)
-        tokens = tf.floor(s * bins)
-        example["mz"] = mz_tokens
-        example["intensity"] = tf.cast(tokens, tf.int32) + intensity_offset
-        example["precursor_mz"] = precursor_tokens
-        return example
+        example["peak_intensity"] = tf.where(valid, scale(intensity), 0.0)
+        example["precursor_mz"] = example["precursor_mz"] / precursor_max
 
-    return apply
-
-
-def detokenize_spectrum(
-    token_ids: np.ndarray | torch.Tensor,
-    *,
-    max_precursor_mz: float = _DEFAULT_MAX_PRECURSOR_MZ,
-    intensity_scaling: str = _DEFAULT_INTENSITY_SCALING,
-) -> dict[str, Any] | list[dict[str, Any]]:
-    tokens = token_ids
-    if isinstance(tokens, torch.Tensor):
-        tokens = tokens.detach().cpu().numpy()
-    tokens = np.asarray(tokens, dtype=np.int32)
-
-    if tokens.ndim == 2:
-        return [
-            detokenize_spectrum(
-                row,
-                max_precursor_mz=max_precursor_mz,
-                intensity_scaling=intensity_scaling,
-            )
-            for row in tokens
-        ]
-
-    pad_id = _SPECIAL_TOKENS["[PAD]"]
-    sep_id = _SPECIAL_TOKENS["[SEP]"]
-    end = int(tokens.shape[0])
-    pad_positions = np.where(tokens == pad_id)[0]
-    if pad_positions.size > 0:
-        end = min(end, int(pad_positions[0]))
-    sep_positions = np.where(tokens == sep_id)[0]
-    if sep_positions.size > 0:
-        end = min(end, int(sep_positions[0]))
-    content = tokens[1:end]
-    peaks = content
-    mz_tokens = peaks[0::2]
-    intensity_tokens = peaks[1::2]
-
-    mz = (mz_tokens - _NUM_SPECIAL_TOKENS).astype(np.float32)
-
-    bins = _INTENSITY_BINS - 1
-    intensity_offset = _NUM_SPECIAL_TOKENS + int(_PEAK_MZ_MAX) + 1
-    intensity_idx = intensity_tokens - intensity_offset
-    s = intensity_idx.astype(np.float32) / float(bins)
-    if intensity_scaling == "linear":
-        intensity = (s * (1.0 - _INTENSITY_EPS) + _INTENSITY_EPS).astype(np.float32)
-    else:
-        log_eps = math.log(_INTENSITY_EPS)
-        denom = -log_eps
-        intensity = np.exp(s * denom + log_eps).astype(np.float32)
-
-    return {
-        "precursor_mz": None,
-        "mz": mz,
-        "intensity": intensity,
-    }
-
-
-def _build_single_spectrum_input(max_len: int) -> Callable[[dict], dict]:
-    cls_id = tf.constant(_SPECIAL_TOKENS["[CLS]"], tf.int32)
-    sep_id = tf.constant(_SPECIAL_TOKENS["[SEP]"], tf.int32)
-    pad_id = tf.constant(_SPECIAL_TOKENS["[PAD]"], tf.int32)
-    max_peaks = tf.constant((max_len - 2) // 2, tf.int32)
-
-    def interleave(mz: tf.Tensor, intensity: tf.Tensor) -> tf.Tensor:
-        pair = tf.stack([mz, intensity], axis=1)
-        return tf.reshape(pair, [-1])
-
-    def apply(example: dict) -> dict:
-        mz = example["mz"][:max_peaks]
-        intensity = example["intensity"][:max_peaks]
-        seq = interleave(mz, intensity)
-
-        tokens = tf.concat([cls_id[None], seq, sep_id[None]], axis=0)
-        seg = tf.zeros([tf.shape(tokens)[0]], tf.int32)
-
-        tokens = tokens[:max_len]
-        seg = seg[:max_len]
-        pad_len = max_len - tf.shape(tokens)[0]
-        tokens = tf.pad(tokens, [[0, pad_len]], constant_values=pad_id)
-        seg = tf.pad(seg, [[0, pad_len]], constant_values=0)
-
-        example["token_ids"] = tokens
-        example["segment_ids"] = seg
         del example["mz"]
         del example["intensity"]
         return example
@@ -1063,7 +739,6 @@ def _build_dataset(
     *,
     tfrecord_buffer_size: int,
     max_precursor_mz: float,
-    pair_sequence_length: int,
     include_fingerprint: bool,
     intensity_scaling: str,
     mz_representation: str,
@@ -1087,40 +762,9 @@ def _build_dataset(
         ds = ds.map(_convert_to_neutral_loss(), num_parallel_calls=tf.data.AUTOTUNE)
     ds = ds.map(_compact_sort_peaks(peak_ordering), num_parallel_calls=tf.data.AUTOTUNE)
     ds = ds.map(
-        _strip_padding_and_tokenize(max_precursor_mz, intensity_scaling),
+        _normalize_for_jepa(max_precursor_mz, intensity_scaling),
         num_parallel_calls=tf.data.AUTOTUNE,
     )
-    if shuffle_buffer > 0:
-        ds = ds.shuffle(shuffle_buffer, seed=seed, reshuffle_each_iteration=True)
-
-    ds = ds.map(
-        _build_single_spectrum_input(pair_sequence_length),
-        num_parallel_calls=tf.data.AUTOTUNE,
-    )
-    ds = ds.batch(batch_size, drop_remainder=drop_remainder)
-    options = tf.data.Options()
-    options.experimental_deterministic = True
-    ds = ds.with_options(options)
-    ds = ds.prefetch(tf.data.AUTOTUNE)
-    return ds
-
-
-def _build_formula_dataset(
-    filenames: list[str],
-    batch_size: int,
-    shuffle_buffer: int,
-    seed: Optional[int],
-    drop_remainder: bool,
-    *,
-    tfrecord_buffer_size: int,
-) -> tf.data.Dataset:
-    ds = tf.data.TFRecordDataset(
-        filenames,
-        compression_type="GZIP",
-        buffer_size=int(tfrecord_buffer_size),
-        num_parallel_reads=tf.data.AUTOTUNE,
-    )
-    ds = ds.map(_parse_formula_example, num_parallel_calls=tf.data.AUTOTUNE)
     if shuffle_buffer > 0:
         ds = ds.shuffle(shuffle_buffer, seed=seed, reshuffle_each_iteration=True)
     ds = ds.batch(batch_size, drop_remainder=drop_remainder)
@@ -1129,6 +773,7 @@ def _build_formula_dataset(
     ds = ds.with_options(options)
     ds = ds.prefetch(tf.data.AUTOTUNE)
     return ds
+
 
 
 # -----------------------------------------------------------------------------
@@ -1141,16 +786,9 @@ def _compute_info(
     *,
     output_dir: Path,
     max_precursor_mz: float,
-    pair_sequence_length: int,
     intensity_scaling: str,
     mz_representation: str,
 ) -> dict[str, Any]:
-    mz_bins = int(_PEAK_MZ_MAX) + 1
-    precursor_bins = int(max_precursor_mz) + 1
-    mz_offset = _NUM_SPECIAL_TOKENS
-    precursor_offset = mz_offset
-    intensity_offset = mz_offset + mz_bins
-    vocab_size = intensity_offset + _INTENSITY_BINS
     massspec_adduct_vocab = metadata.get("massspec_adduct_vocab", {"unknown": 0})
     massspec_instrument_type_vocab = metadata.get(
         "massspec_instrument_type_vocab",
@@ -1169,42 +807,14 @@ def _compute_info(
         "massspec_adduct_vocab_size": len(massspec_adduct_vocab),
         "massspec_instrument_type_vocab_size": len(massspec_instrument_type_vocab),
         "num_peaks": _NUM_PEAKS_OUTPUT,
-        "intensity_bins": _INTENSITY_BINS,
-        "intensity_eps": _INTENSITY_EPS,
-        "mz_bins": mz_bins,
-        "mz_offset": mz_offset,
-        "precursor_bins": precursor_bins,
-        "precursor_offset": precursor_offset,
-        "intensity_offset": intensity_offset,
-        "vocab_size": vocab_size,
-        "special_tokens": dict(_SPECIAL_TOKENS),
-        "pair_sequence_length": pair_sequence_length,
         "intensity_scaling": intensity_scaling,
         "mz_representation": mz_representation,
         "fingerprint_bits": _FINGERPRINT_BITS,
+        "max_precursor_mz": max_precursor_mz,
+        "peak_mz_min": _PEAK_MZ_MIN,
+        "peak_mz_max": _PEAK_MZ_MAX,
     }
 
-
-def _compute_formula_info(
-    metadata: dict[str, Any],
-    *,
-    output_dir: Path,
-) -> dict[str, Any]:
-    adduct_vocab = metadata.get("gems_formula_adduct_vocab", {"unknown": 0})
-    return {
-        "gems_formula_tfrecord_dir": str(output_dir),
-        "gems_formula_train_size": int(metadata["gems_formula_train_size"]),
-        "gems_formula_val_size": int(metadata["gems_formula_val_size"]),
-        "gems_formula_test_size": int(metadata["gems_formula_test_size"]),
-        "gems_formula_adduct_vocab": adduct_vocab,
-        "gems_formula_adduct_vocab_size": int(metadata["gems_formula_adduct_vocab_size"]),
-        "gems_formula_metadata_version": int(metadata["gems_formula_metadata_version"]),
-        "gems_formula_source_csv": str(metadata["gems_formula_source_csv"]),
-        "gems_formula_formula_column_name": str(
-            metadata["gems_formula_formula_column_name"]
-        ),
-        "gems_formula_adduct_column_name": str(metadata["gems_formula_adduct_column_name"]),
-    }
 
 
 def _steps_from_size(size: int, batch_size: int, drop_remainder: bool) -> int:
@@ -1386,9 +996,6 @@ class TfLightningDataModule(pl.LightningDataModule):
         self.max_precursor_mz = float(
             config.get("max_precursor_mz", _DEFAULT_MAX_PRECURSOR_MZ)
         )
-        self.pair_sequence_length = int(
-            config.get("pair_sequence_length", _DEFAULT_PAIR_SEQUENCE_LENGTH)
-        )
         self.intensity_scaling = str(
             config.get("intensity_scaling", _DEFAULT_INTENSITY_SCALING)
         )
@@ -1428,7 +1035,6 @@ class TfLightningDataModule(pl.LightningDataModule):
             self.metadata,
             output_dir=self.output_dir,
             max_precursor_mz=self.max_precursor_mz,
-            pair_sequence_length=self.pair_sequence_length,
             intensity_scaling=self.intensity_scaling,
             mz_representation=self.mz_representation,
         )
@@ -1502,7 +1108,6 @@ class TfLightningDataModule(pl.LightningDataModule):
             drop_remainder=drop_remainder,
             tfrecord_buffer_size=self.tfrecord_buffer_size,
             max_precursor_mz=self.max_precursor_mz,
-            pair_sequence_length=self.pair_sequence_length,
             include_fingerprint=include_fingerprint,
             intensity_scaling=self.intensity_scaling,
             mz_representation=self.mz_representation,
@@ -1581,7 +1186,6 @@ class TfLightningDataModule(pl.LightningDataModule):
             drop_remainder=False,
             tfrecord_buffer_size=self.tfrecord_buffer_size,
             max_precursor_mz=self.max_precursor_mz,
-            pair_sequence_length=self.pair_sequence_length,
             include_fingerprint=True,
             intensity_scaling=self.intensity_scaling,
             mz_representation=self.mz_representation,
@@ -1670,233 +1274,11 @@ class TfLightningDataModule(pl.LightningDataModule):
         return [gems_loader, massspec_loader]
 
 
-class GeMSFormulaLightningDataModule(pl.LightningDataModule):
-    """Lightning DataModule for GeMS formula/adduct records."""
-
-    def __init__(self, config: config_dict.ConfigDict, seed: int) -> None:
-        super().__init__()
-        self.config = config
-        self.seed = int(seed)
-
-        self.output_dir = (
-            Path(
-                config.get(
-                    "gems_formula_tfrecord_dir",
-                    str(_DEFAULT_GEMS_FORMULA_TFRECORD_DIR),
-                )
-            )
-            .expanduser()
-            .resolve()
-        )
-        self.raw_csv_path = (
-            Path(
-                config.get(
-                    "gems_formula_raw_csv_path",
-                    str(_DEFAULT_GEMS_FORMULA_RAW_CSV_PATH),
-                )
-            )
-            .expanduser()
-            .resolve()
-        )
-        self.gcs_uri = str(config.get("gems_formula_gcs_uri", _GEMS_FORMULA_GCS_URI))
-        self.gcp_key_path = (
-            Path(config.get("gcp_key_path", str(_DEFAULT_GCP_KEY_PATH)))
-            .expanduser()
-            .resolve()
-        )
-        self.formula_column_name = str(
-            config.get("gems_formula_column_name", _DEFAULT_GEMS_FORMULA_COLUMN_NAME)
-        )
-        self.adduct_column_name = str(
-            config.get("gems_adduct_column_name", _DEFAULT_GEMS_ADDUCT_COLUMN_NAME)
-        )
-
-        self.batch_size = int(config.get("batch_size", _DEFAULT_BATCH_SIZE))
-        self.shuffle_buffer = int(config.get("shuffle_buffer", _DEFAULT_SHUFFLE_BUFFER))
-        self.tfrecord_buffer_size = int(
-            config.get("tfrecord_buffer_size", _DEFAULT_TFRECORD_BUFFER_SIZE)
-        )
-        self.split_seed = int(config.get("gems_formula_split_seed", _DEFAULT_SPLIT_SEED))
-        self.num_shards = int(
-            config.get("gems_formula_num_shards", _DEFAULT_GEMS_FORMULA_NUM_SHARDS)
-        )
-        self.drop_remainder = bool(
-            config.get(
-                "gems_formula_drop_remainder",
-                config.get("drop_remainder", False),
-            )
-        )
-
-        self.metadata = _ensure_formula_processed(
-            self.output_dir,
-            raw_csv_path=self.raw_csv_path,
-            gcs_uri=self.gcs_uri,
-            gcp_key_path=self.gcp_key_path,
-            formula_column_name=self.formula_column_name,
-            adduct_column_name=self.adduct_column_name,
-            split_seed=self.split_seed,
-            num_shards=self.num_shards,
-        )
-        self.formula_train_files = [
-            str(self.output_dir / "train" / fn)
-            for fn in self.metadata["gems_formula_train_files"]
-        ]
-        self.formula_val_files = [
-            str(self.output_dir / "validation" / fn)
-            for fn in self.metadata["gems_formula_val_files"]
-        ]
-        self.formula_test_files = [
-            str(self.output_dir / "test" / fn)
-            for fn in self.metadata["gems_formula_test_files"]
-        ]
-
-        self.info = _compute_formula_info(self.metadata, output_dir=self.output_dir)
-        self.steps = {
-            "gems_formula_train": _steps_from_size(
-                int(self.info["gems_formula_train_size"]),
-                self.batch_size,
-                self.drop_remainder,
-            ),
-            "gems_formula_val": _steps_from_size(
-                int(self.info["gems_formula_val_size"]),
-                self.batch_size,
-                False,
-            ),
-            "gems_formula_test": _steps_from_size(
-                int(self.info["gems_formula_test_size"]),
-                self.batch_size,
-                False,
-            ),
-        }
-        self.train_steps = self.steps["gems_formula_train"]
-        self.val_steps = self.steps["gems_formula_val"]
-        self.test_steps = self.steps["gems_formula_test"]
-
-        default_pin = torch.cuda.is_available()
-        self.pin_memory = bool(config.get("dataloader_pin_memory", default_pin))
-        self.dataloader_num_workers = int(config.get("dataloader_num_workers", 1))
-        self.dataloader_prefetch_factor = int(
-            config.get("dataloader_prefetch_factor", 2)
-        )
-        self.dataloader_persistent_workers = bool(
-            config.get(
-                "dataloader_persistent_workers",
-                self.dataloader_num_workers > 0,
-            )
-        )
-
-    def state_dict(self) -> dict[str, Any]:
-        return {"seed": self.seed}
-
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        self.seed = int(state_dict["seed"])
-
-    def _build_formula_split_dataset(
-        self,
-        files: list[str],
-        *,
-        seed: int,
-        shuffle: bool,
-        drop_remainder: bool,
-    ) -> tf.data.Dataset:
-        shuffle_buffer = self.shuffle_buffer if shuffle else 0
-        return _build_formula_dataset(
-            files,
-            self.batch_size,
-            shuffle_buffer,
-            seed,
-            drop_remainder,
-            tfrecord_buffer_size=self.tfrecord_buffer_size,
-        )
-
-    def _build_formula_train_dataset(self, seed: int) -> tf.data.Dataset:
-        return self._build_formula_split_dataset(
-            self.formula_train_files,
-            seed=seed,
-            shuffle=True,
-            drop_remainder=self.drop_remainder,
-        )
-
-    def _build_formula_val_dataset(self, seed: int) -> tf.data.Dataset:
-        return self._build_formula_split_dataset(
-            self.formula_val_files,
-            seed=seed,
-            shuffle=False,
-            drop_remainder=False,
-        )
-
-    def _build_formula_test_dataset(self, seed: int) -> tf.data.Dataset:
-        return self._build_formula_split_dataset(
-            self.formula_test_files,
-            seed=seed,
-            shuffle=False,
-            drop_remainder=False,
-        )
-
-    def _make_loader(
-        self,
-        *,
-        dataset: tf.data.Dataset,
-        steps: int,
-    ) -> DataLoader:
-        dataset = _TfIterableDataset(
-            dataset=dataset,
-            steps_per_epoch=steps,
-        )
-        loader_kwargs: dict[str, Any] = {
-            "dataset": dataset,
-            "batch_size": None,
-            "num_workers": self.dataloader_num_workers,
-            "pin_memory": self.pin_memory,
-            "collate_fn": _identity_collate,
-        }
-        if self.dataloader_num_workers > 0:
-            loader_kwargs["persistent_workers"] = self.dataloader_persistent_workers
-            loader_kwargs["prefetch_factor"] = self.dataloader_prefetch_factor
-        return _StatefulDataLoader(**loader_kwargs)
-
-    def train_dataloader(self) -> DataLoader:
-        dataset = self._build_formula_train_dataset(self.seed)
-        return self._make_loader(
-            dataset=dataset,
-            steps=self.steps["gems_formula_train"],
-        )
-
-    def val_dataloader(self) -> DataLoader:
-        seed = self.seed + 1_000_000
-        dataset = self._build_formula_val_dataset(seed)
-        return self._make_loader(
-            dataset=dataset,
-            steps=self.steps["gems_formula_val"],
-        )
-
-    def test_dataloader(self) -> DataLoader:
-        seed = self.seed + 2_000_000
-        dataset = self._build_formula_test_dataset(seed)
-        return self._make_loader(
-            dataset=dataset,
-            steps=self.steps["gems_formula_test"],
-        )
-
-
 def create_lightning_dataloaders(
     config: config_dict.ConfigDict, seed: int
 ) -> tuple[DataLoader, Any, dict[str, Any]]:
     module = TfLightningDataModule(config, seed)
     return module.train_dataloader(), module.val_dataloader(), module.info
-
-
-def create_gems_formula_lightning_dataloaders(
-    config: config_dict.ConfigDict,
-    seed: int,
-) -> tuple[DataLoader, DataLoader, DataLoader, dict[str, Any]]:
-    module = GeMSFormulaLightningDataModule(config, seed)
-    return (
-        module.train_dataloader(),
-        module.val_dataloader(),
-        module.test_dataloader(),
-        module.info,
-    )
 
 
 # -----------------------------------------------------------------------------
@@ -1922,20 +1304,6 @@ def create_gems_set_datasets(
     return train_ds.as_numpy_iterator(), val_iters, datamodule.info
 
 
-def create_gems_formula_set_datasets(
-    config: config_dict.ConfigDict,
-    seed: Optional[int] = None,
-) -> tuple[Any, dict[str, Any], dict[str, Any]]:
-    seed_value = int(config.seed if seed is None else seed)
-    datamodule = GeMSFormulaLightningDataModule(config, seed=seed_value)
-
-    train_ds = datamodule._build_formula_train_dataset(seed_value)
-    val_iters: dict[str, Any] = {
-        "gems_formula_val": datamodule._build_formula_val_dataset(seed_value).as_numpy_iterator(),
-        "gems_formula_test": datamodule._build_formula_test_dataset(seed_value).as_numpy_iterator(),
-    }
-    return train_ds.as_numpy_iterator(), val_iters, datamodule.info
-
 
 def create_datasets(
     config: config_dict.ConfigDict, seed: int
@@ -1946,23 +1314,9 @@ def create_datasets(
         train_dataset, eval_dataset, gems_info = create_gems_set_datasets(config, seed)
         info.update(gems_info)
         config.dataset_info = dict(info)
-        config.vocab_size = info["vocab_size"]
-        config.max_length = info["pair_sequence_length"]
-        config.pad_token_id = info["special_tokens"]["[PAD]"]
-        config.cls_token_id = info["special_tokens"]["[CLS]"]
-        config.sep_token_id = info["special_tokens"]["[SEP]"]
-        config.precursor_bins = info["precursor_bins"]
-        config.precursor_offset = info["precursor_offset"]
+        config.num_peaks = info["num_peaks"]
         return train_dataset, eval_dataset, info
-    if config.dataset == "gems_formula":
-        train_dataset, eval_dataset, formula_info = create_gems_formula_set_datasets(
-            config, seed
-        )
-        info.update(formula_info)
-        config.dataset_info = dict(info)
-        return train_dataset, eval_dataset, info
-
-    raise NotImplementedError("Only gems_a and gems_formula datasets are supported.")
+    raise NotImplementedError("Only gems_a dataset is supported.")
 
 
 def _load_config(path: str) -> config_dict.ConfigDict:
@@ -1983,12 +1337,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     cfg = _load_config(args.config)
-    if cfg.dataset == "gems_formula":
-        train_iter, val_iters, info = create_gems_formula_set_datasets(
-            cfg, seed=int(cfg.seed)
-        )
-    else:
-        train_iter, val_iters, info = create_gems_set_datasets(cfg, seed=int(cfg.seed))
+    train_iter, val_iters, info = create_gems_set_datasets(cfg, seed=int(cfg.seed))
 
     print("\nDataset info:")
     for k, v in info.items():
@@ -2002,8 +1351,8 @@ if __name__ == "__main__":
         v_dtype = getattr(v, "dtype", None)
         print(f"  {k}: type={v_type}, shape={v_shape}, dtype={v_dtype}")
 
-    if "token_ids" in batch:
-        print("\nFirst sample token_ids:", batch["token_ids"][0][:20])
-        print("First sample segment_ids:", batch["segment_ids"][0][:20])
-    if "formula" in batch:
-        print("\nFirst sample formula:", batch["formula"][0])
+    if "peak_mz" in batch:
+        print("\nFirst sample peak_mz:", batch["peak_mz"][0][:10])
+        print("First sample peak_intensity:", batch["peak_intensity"][0][:10])
+        print("First sample peak_valid_mask:", batch["peak_valid_mask"][0][:10])
+

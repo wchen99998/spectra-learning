@@ -4,65 +4,61 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-PyTorch-based deep learning framework for pretraining and fine-tuning BERT-style masked language models on mass spectrometry peak lists and molecular data. Handles spectral data tokenization, training with PyTorch Lightning, and fine-tuning on downstream tasks like precursor m/z and adduct prediction.
+PyTorch-based deep learning framework for pretraining and fine-tuning JEPA (Joint-Embedding Predictive Architecture) models on continuous mass spectrometry peak sets. The pipeline ingests raw peak lists, normalizes them into continuous features, and trains a JEPA model with prediction + BCS (Batched Characteristic Slicing) regularization losses. Fine-tuning supports downstream tasks like fingerprint prediction and adduct classification.
 
 ## Commands
 
-### Training (pretraining BERT)
+### Training (JEPA pretraining)
 ```bash
 python train.py --config configs/gems_a_50_mask.py --workdir experiments/my_run
 ```
 
-### Fine-tuning on Precursor Prediction
-```bash
-python finetune.py \
-    --config configs/gems_a_50_mask_finetune.py \
-    --workdir experiments/ft_run \
-    --model experiments/pretrain_run/checkpoints/last.ckpt
-```
-
-### Fine-tuning Multitask (Adduct + Precursor)
-```bash
-python finetune_adduct_precursor.py \
-    --config configs/gems_a_50_mask_finetune_adduct_precursor.py \
-    --workdir experiments/ft_adduct_run \
-    --model experiments/pretrain_run/checkpoints/last.ckpt
-```
 
 ## Architecture
 
 ### Core Components
 
-- **input_pipeline.py**: Data loading, TFRecord creation/loading, tokenization logic, Lightning DataModule
-- **models/bert_torch.py**: BERT model with token/segment embeddings, TransformerStack encoder, output heads (lm_head, precursor_head, retention_head)
-- **networks/transformer_torch.py**: TransformerBlock, Attention, FeedForward primitives with rotary embeddings
-- **train.py**: Pretraining LightningModule with MLM loss, LR scheduling, profiling callbacks
-- **finetune.py / finetune_adduct_precursor.py**: Fine-tuning pipelines for downstream tasks
+- **input_pipeline.py**: Data loading, TFRecord creation/loading, continuous peak normalization, Lightning DataModule. Emits `peak_mz`, `peak_intensity`, `peak_valid_mask`, `precursor_mz` tensors.
+- **models/model.py**: PeakSetJEPA model (encoder + mask sampler + predictor + losses). Encoder is a non-causal transformer on set-style peak features.
+- **models/losses.py**: BCSLoss (Batched Characteristic Slicing via Epps-Pulley), squared_prediction_loss.
+- **networks/transformer_torch.py**: TransformerBlock, Attention, FeedForward primitives with optional rotary embeddings.
+- **train.py**: JEPA pretraining LightningModule with prediction + BCS regularization losses.
 
-### Tokenization Scheme
+### JEPA Model Structure
 
-- Special tokens: [PAD]=0, [CLS]=1, [SEP]=2, [MASK]=3
-- m/z tokens: floor(mz) + 4 (range [4, 1004] for m/z up to 1000)
-- Intensity tokens: log-scaled binning into 32 bins
-- Precursor m/z: separate binned range with offset
+1. **PeakSetEncoder**: MLP embedder (mz, intensity, precursor -> D) + non-causal Transformer blocks + RMSNorm
+2. **PeakMaskSampler**: Samples fixed-size context/target index sets with valid-peak priority
+3. **PeakSetPredictor**: Embeds target queries, concatenates with context embeddings, applies non-causal self-attention
+4. **Losses**: MSE prediction loss + BCSLoss (Epps-Pulley Gaussianity test on random 1-D slices)
+
+### Batch Contract
+
+Each training batch contains:
+- `peak_mz`: float32 [B, N] - normalized m/z values (/ 1000)
+- `peak_intensity`: float32 [B, N] - scaled intensity values
+- `peak_valid_mask`: bool [B, N] - valid peak mask
+- `precursor_mz`: float32 [B] - normalized precursor m/z
+- Probe metadata when available: `fingerprint`, `adduct_id`, `instrument_type_id`, etc.
 
 ### Configuration System
 
 Uses `ml_collections.ConfigDict`. Configs are Python modules in `configs/` loaded via importlib:
 ```python
+cfg.model_type = "jepa_peak_set"
+cfg.num_peaks = 60
 cfg.model_dim = 768
 cfg.num_layers = 20
 cfg.num_heads = 12
-cfg.mask_ratio = 0.15
+cfg.jepa_target_ratio = 0.4
+cfg.jepa_bcs_num_slices = 256
+cfg.jepa_bcs_lambda = 10.0
 cfg.learning_rate = 3e-4
-cfg.enable_wandb = True
 ```
 
 ### Data Sources
 
 - **GeMS**: `roman-bushuiev/GeMS` (HuggingFace)
 - **MassSpecGym**: `roman-bushuiev/MassSpecGym` (HuggingFace)
-- **GeMS 2M Formula**: Google Cloud Storage (requires `key.json` credentials)
 
 ### WandB Integration
 

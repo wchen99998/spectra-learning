@@ -21,22 +21,22 @@ def get_config() -> config_dict.ConfigDict:
     cfg.peak_ordering = "intensity"
     cfg.seed = 42
 
-    # Model (BERT)
-    cfg.model_type = "bert"
+    # Model (JEPA peak set)
+    cfg.model_type = "jepa_peak_set"
+    cfg.num_peaks = 60
     cfg.model_dim = 768
     cfg.num_layers = 20
     cfg.num_heads = 12
     cfg.num_kv_heads = 6
     cfg.attention_mlp_multiple = 4.0
-    cfg.num_segments = 2
-    cfg.pad_token_id = 0
-    cfg.cls_token_id = 1
-    cfg.sep_token_id = 2
-    # Filled by input_pipeline.create_datasets
-    cfg.vocab_size = 0
-    cfg.max_length = 0
-    cfg.precursor_bins = 0
-    cfg.precursor_offset = 0
+    cfg.feature_mlp_hidden_dim = 128
+    cfg.predictor_num_layers = 4
+    cfg.predictor_num_heads = 12
+    cfg.predictor_num_kv_heads = 6
+    cfg.jepa_target_ratio = 0.4
+    cfg.jepa_pred_weight = 1.0
+    cfg.jepa_bcs_num_slices = 256
+    cfg.jepa_bcs_lambda = 10.0
 
     # Training (short smoke run)
     cfg.num_epochs = 5
@@ -79,7 +79,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataloader_persistent_workers = True
     cfg.dataloader_pin_memory = True
     cfg.train_log_extra_metrics_on_step = False
-    cfg.cache_rope_frequencies = True
 
     # System / logging
     cfg.enable_wandb = True

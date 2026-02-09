@@ -20,7 +20,7 @@ from lightning.pytorch.loggers import CSVLogger
 
 from input_pipeline import TfLightningDataModule, numpy_batch_to_torch
 from linear_probe import run_linear_probe
-from models.bert_torch import BERTTorch
+from models.model import PeakSetJEPA
 from utils import wandb_writer
 
 
@@ -219,21 +219,23 @@ class MAELightningModule(pl.LightningModule):
         )
         self.checkpoint_every_steps = int(config.checkpoint_every_steps)
 
-        self.model = BERTTorch(
-            vocab_size=int(config.vocab_size),
-            max_length=int(config.max_length),
-            precursor_bins=int(config.precursor_bins),
-            precursor_offset=int(config.precursor_offset),
+        self.model = PeakSetJEPA(
+            num_peaks=int(config.num_peaks),
             model_dim=int(config.model_dim),
-            num_layers=int(config.num_layers),
-            num_heads=int(config.num_heads),
-            num_kv_heads=config.get("num_kv_heads", None),
+            encoder_num_layers=int(config.num_layers),
+            encoder_num_heads=int(config.num_heads),
+            encoder_num_kv_heads=config.get("num_kv_heads", None),
+            predictor_num_layers=int(config.get("predictor_num_layers", 4)),
+            predictor_num_heads=int(config.get("predictor_num_heads", config.num_heads)),
+            predictor_num_kv_heads=config.get(
+                "predictor_num_kv_heads", config.get("num_kv_heads", None)
+            ),
             attention_mlp_multiple=float(config.attention_mlp_multiple),
-            num_segments=int(config.num_segments),
-            pad_token_id=int(config.pad_token_id),
-            cls_token_id=int(config.cls_token_id),
-            sep_token_id=int(config.sep_token_id),
-            cache_rope_frequencies=bool(config.get("cache_rope_frequencies", True)),
+            feature_mlp_hidden_dim=int(config.get("feature_mlp_hidden_dim", 128)),
+            target_ratio=float(config.get("jepa_target_ratio", 0.4)),
+            pred_weight=float(config.get("jepa_pred_weight", 1.0)),
+            bcs_num_slices=int(config.get("jepa_bcs_num_slices", 256)),
+            bcs_lambda=float(config.get("jepa_bcs_lambda", 10.0)),
         )
 
         # Compile train/eval forward with CUDA graphs for max throughput
@@ -283,8 +285,8 @@ class MAELightningModule(pl.LightningModule):
             remaining = size - seen
             if remaining <= 0:
                 break
-            take = min(int(batch["token_ids"].shape[0]), remaining)
-            if take != batch["token_ids"].shape[0]:
+            take = min(int(batch["peak_mz"].shape[0]), remaining)
+            if take != batch["peak_mz"].shape[0]:
                 batch = {key: value[:take] for key, value in batch.items()}
             seen += take
             yield numpy_batch_to_torch(batch)
@@ -460,10 +462,7 @@ def train_and_evaluate(
 
     # Update config with dataset-derived values
     info = datamodule.info
-    config.vocab_size = info["vocab_size"]
-    config.max_length = info["pair_sequence_length"]
-    config.precursor_bins = info["precursor_bins"]
-    config.precursor_offset = info["precursor_offset"]
+    config.num_peaks = info["num_peaks"]
     config.fingerprint_bits = int(info["fingerprint_bits"])
     config.probe_bits = int(config.get("probe_bits", config.fingerprint_bits))
 
