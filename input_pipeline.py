@@ -7,7 +7,6 @@ import importlib.util
 import json
 import logging
 import math
-import os
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -151,23 +150,6 @@ def _load_massspec_tsv(
         collision_energy_present_array,
     )
 
-
-
-def _split_indices(
-    n: int,
-    split_seed: int,
-    *,
-    train_fraction: float,
-    val_fraction: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    rng = np.random.default_rng(split_seed)
-    perm = rng.permutation(n)
-    train_size = int(n * train_fraction)
-    val_size = int(n * val_fraction)
-    train_idx = perm[:train_size]
-    val_idx = perm[train_size : train_size + val_size]
-    test_idx = perm[train_size + val_size :]
-    return train_idx, val_idx, test_idx
 
 
 def _compute_morgan_fingerprints(smiles: np.ndarray) -> np.ndarray:
@@ -1274,13 +1256,6 @@ class TfLightningDataModule(pl.LightningDataModule):
         return [gems_loader, massspec_loader]
 
 
-def create_lightning_dataloaders(
-    config: config_dict.ConfigDict, seed: int
-) -> tuple[DataLoader, Any, dict[str, Any]]:
-    module = TfLightningDataModule(config, seed)
-    return module.train_dataloader(), module.val_dataloader(), module.info
-
-
 # -----------------------------------------------------------------------------
 # Legacy-style helpers
 # -----------------------------------------------------------------------------
@@ -1303,20 +1278,6 @@ def create_gems_set_datasets(
 
     return train_ds.as_numpy_iterator(), val_iters, datamodule.info
 
-
-
-def create_datasets(
-    config: config_dict.ConfigDict, seed: int
-) -> tuple[Any, dict[str, Any], dict[str, Any]]:
-    info: dict[str, Any] = {}
-
-    if config.dataset == "gems_a":
-        train_dataset, eval_dataset, gems_info = create_gems_set_datasets(config, seed)
-        info.update(gems_info)
-        config.dataset_info = dict(info)
-        config.num_peaks = info["num_peaks"]
-        return train_dataset, eval_dataset, info
-    raise NotImplementedError("Only gems_a dataset is supported.")
 
 
 def _load_config(path: str) -> config_dict.ConfigDict:

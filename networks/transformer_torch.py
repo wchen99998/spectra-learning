@@ -3,26 +3,10 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 
 import torch
 from torch import nn
 from torch.nn import functional as F
-
-
-def precompute_freqs_cis(
-    dim: int,
-    end: int,
-    *,
-    theta: float = 10000.0,
-    device: torch.device | None = None,
-    dtype: torch.dtype = torch.float32,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    freqs = torch.arange(0, dim, 2, device=device, dtype=torch.float32)
-    freqs = 1.0 / (theta ** (freqs / dim))
-    t = torch.arange(end, device=device, dtype=torch.float32)
-    freqs = torch.outer(t, freqs)
-    return freqs.cos().to(dtype=dtype), freqs.sin().to(dtype=dtype)
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -44,25 +28,6 @@ def apply_rotary_emb(
     xq_out = (xq * freqs_cos) + (q_rot * freqs_sin)
     xk_out = (xk * freqs_cos) + (k_rot * freqs_sin)
     return xq_out, xk_out
-
-
-@dataclass
-class ModelArgs:
-    dim: int = 288
-    n_layers: int = 6
-    n_heads: int = 6
-    n_kv_heads: int | None = None
-    output_channels: int = 1024
-    hidden_dim: int | None = None
-    multiple_of: int = 32
-    norm_eps: float = 1e-5
-    w_init_scale: float = 1.0
-    depth_scaled_init: bool = False
-    mlp_type: str = "swiglu"
-    causal: bool = False
-    rope_theta: float = 10000.0
-    use_rotary_embeddings: bool = True
-    input_dim: int | None = None
 
 
 _ACTIVATIONS: dict[str, nn.Module] = {
