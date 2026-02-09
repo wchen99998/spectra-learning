@@ -11,13 +11,12 @@ from input_pipeline import (
 from models.losses import (
     BCSLoss,
     _epps_pulley,
-    squared_prediction_loss,
 )
-from models.model import PeakMaskSampler, PeakSetJEPA
+from models.model import PeakSetSIGReg
 
 
 def _make_batch(batch_size: int = 4, num_peaks: int = 60) -> dict[str, torch.Tensor]:
-    """Create a synthetic batch matching the JEPA data contract."""
+    """Create a synthetic batch matching the SIGReg peak-set contract."""
     peak_mz = torch.rand(batch_size, num_peaks)
     peak_intensity = torch.rand(batch_size, num_peaks)
     valid_count = num_peaks - 10
@@ -73,54 +72,24 @@ class DataPipelineContractTests(unittest.TestCase):
         self.assertAlmostEqual(float(converted["mz"][0]), 90.0, places=1)
 
 
-class MaskSamplerTests(unittest.TestCase):
-    def test_output_shapes(self):
-        N, N_ctx, N_tgt = 60, 36, 24
-        sampler = PeakMaskSampler(N, N_ctx, N_tgt)
-        mask = torch.ones(4, N, dtype=torch.bool)
-        ctx_idx, tgt_idx, ctx_valid, tgt_valid = sampler(mask)
-        self.assertEqual(ctx_idx.shape, (4, N_ctx))
-        self.assertEqual(tgt_idx.shape, (4, N_tgt))
-        self.assertEqual(ctx_valid.shape, (4, N_ctx))
-        self.assertEqual(tgt_valid.shape, (4, N_tgt))
-
-    def test_no_overlap(self):
-        N, N_ctx, N_tgt = 60, 36, 24
-        sampler = PeakMaskSampler(N, N_ctx, N_tgt)
-        mask = torch.ones(2, N, dtype=torch.bool)
-        ctx_idx, tgt_idx, _, _ = sampler(mask)
-        for b in range(2):
-            ctx_set = set(ctx_idx[b].tolist())
-            tgt_set = set(tgt_idx[b].tolist())
-            self.assertEqual(len(ctx_set & tgt_set), 0)
-
-    def test_valid_peaks_preferred(self):
-        N, N_ctx, N_tgt = 60, 36, 24
-        sampler = PeakMaskSampler(N, N_ctx, N_tgt)
-        mask = torch.zeros(1, N, dtype=torch.bool)
-        mask[0, :40] = True
-        ctx_idx, tgt_idx, ctx_valid, tgt_valid = sampler(mask)
-        self.assertTrue(ctx_valid.all().item())
-        self.assertTrue(tgt_valid[:, :4].all().item())
-
-
-class JEPAForwardTests(unittest.TestCase):
-    def _build_model(self) -> PeakSetJEPA:
-        return PeakSetJEPA(
+class SIGRegForwardTests(unittest.TestCase):
+    def _build_model(self) -> PeakSetSIGReg:
+        return PeakSetSIGReg(
             num_peaks=60,
             model_dim=32,
             encoder_num_layers=1,
             encoder_num_heads=4,
             encoder_num_kv_heads=4,
-            predictor_num_layers=1,
-            predictor_num_heads=4,
-            predictor_num_kv_heads=4,
             attention_mlp_multiple=2.0,
             feature_mlp_hidden_dim=16,
-            target_ratio=0.4,
-            pred_weight=1.0,
+            sigreg_use_projector=True,
+            sigreg_proj_hidden_dim=64,
+            sigreg_proj_output_dim=16,
             bcs_num_slices=32,
-            bcs_lambda=10.0,
+            sigreg_lambda=10.0,
+            sigreg_drop_prob=0.20,
+            sigreg_mz_jitter_std=0.005,
+            sigreg_intensity_jitter_std=0.05,
         )
 
     def test_forward_loss_is_finite(self):
@@ -133,7 +102,7 @@ class JEPAForwardTests(unittest.TestCase):
         model = self._build_model()
         batch = _make_batch()
         metrics = model(batch, train=True)
-        for key in ("loss", "pred_loss", "bcs_loss", "target_valid_fraction"):
+        for key in ("loss", "bcs_loss", "invariance_loss", "valid_fraction"):
             self.assertIn(key, metrics, f"Missing key: {key}")
 
     def test_encode_output_shape(self):
@@ -147,45 +116,107 @@ class JEPAForwardTests(unittest.TestCase):
         batch = _make_batch()
         loss, metrics = model.compute_loss(batch, train=True)
         self.assertTrue(torch.isfinite(loss).item())
-        self.assertIn("pred_loss", metrics)
+        self.assertIn("invariance_loss", metrics)
+
+    def test_backward_populates_encoder_gradients(self):
+        model = self._build_model()
+        batch = _make_batch()
+        loss = model(batch, train=True)["loss"]
+        loss.backward()
+        grads = [p.grad for p in model.encoder.parameters() if p.requires_grad]
+        self.assertTrue(any(g is not None for g in grads))
 
 
-class JEPALossTests(unittest.TestCase):
+class AugmentationTests(unittest.TestCase):
+    def _build_model(self) -> PeakSetSIGReg:
+        return PeakSetSIGReg(
+            num_peaks=60,
+            model_dim=32,
+            encoder_num_layers=1,
+            encoder_num_heads=4,
+            encoder_num_kv_heads=4,
+            attention_mlp_multiple=2.0,
+            feature_mlp_hidden_dim=16,
+            sigreg_use_projector=False,
+            bcs_num_slices=32,
+            sigreg_lambda=10.0,
+            sigreg_drop_prob=0.20,
+            sigreg_mz_jitter_std=0.005,
+            sigreg_intensity_jitter_std=0.05,
+        )
+
+    def test_augment_view_shapes(self):
+        model = self._build_model()
+        batch = _make_batch()
+        mz, intensity, valid = model._augment_view(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            batch["peak_valid_mask"],
+        )
+        self.assertEqual(mz.shape, batch["peak_mz"].shape)
+        self.assertEqual(intensity.shape, batch["peak_intensity"].shape)
+        self.assertEqual(valid.shape, batch["peak_valid_mask"].shape)
+
+    def test_augment_view_value_bounds(self):
+        model = self._build_model()
+        batch = _make_batch()
+        mz, intensity, _ = model._augment_view(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            batch["peak_valid_mask"],
+        )
+        self.assertTrue((mz >= 0.0).all().item())
+        self.assertTrue((mz <= 1.0).all().item())
+        self.assertTrue((intensity >= 0.0).all().item())
+        self.assertTrue((intensity <= 1.0).all().item())
+
+    def test_invalid_positions_are_zeroed(self):
+        model = self._build_model()
+        batch = _make_batch()
+        mz, intensity, valid = model._augment_view(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            batch["peak_valid_mask"],
+        )
+        self.assertTrue((mz[~valid] == 0.0).all().item())
+        self.assertTrue((intensity[~valid] == 0.0).all().item())
+
+
+class SIGRegLossTests(unittest.TestCase):
     def test_epps_pulley_finite(self):
         x = torch.randn(32, 16)
         t = _epps_pulley(x)
         self.assertEqual(t.shape, (16,))
         self.assertTrue(torch.isfinite(t).all().item())
 
-    def test_bcs_loss_finite_and_nonnegative(self):
-        bcs = BCSLoss(num_slices=32, lmbd=10.0)
-        x = torch.randn(32, 16)
-        loss = bcs(x)
-        self.assertTrue(torch.isfinite(loss).item())
-        self.assertGreaterEqual(float(loss), 0.0)
+    def test_bcs_loss_output_structure(self):
+        loss_fn = BCSLoss(num_slices=32, lmbd=10.0)
+        z1 = torch.randn(32, 16)
+        z2 = torch.randn(32, 16)
+        out = loss_fn(z1, z2)
+        for key in ("loss", "bcs_loss", "invariance_loss"):
+            self.assertIn(key, out)
+        self.assertTrue(torch.isfinite(out["loss"]).item())
+        self.assertGreaterEqual(float(out["bcs_loss"]), 0.0)
 
-    def test_bcs_loss_step_increments(self):
-        bcs = BCSLoss(num_slices=32, lmbd=10.0)
-        x = torch.randn(32, 16)
-        self.assertEqual(bcs.step, 0)
-        bcs(x)
-        self.assertEqual(bcs.step, 1)
-        bcs(x)
-        self.assertEqual(bcs.step, 2)
+    def test_bcs_projection_seed_is_reproducible(self):
+        loss_fn = BCSLoss(num_slices=32, lmbd=10.0)
+        proj1 = loss_fn.sample_projection(16, device=torch.device("cpu"), seed=7)
+        proj2 = loss_fn.sample_projection(16, device=torch.device("cpu"), seed=7)
+        proj3 = loss_fn.sample_projection(16, device=torch.device("cpu"), seed=8)
+        self.assertTrue(torch.allclose(proj1, proj2))
+        self.assertFalse(torch.allclose(proj1, proj3))
 
-    def test_squared_prediction_loss_with_mask(self):
-        pred = torch.randn(2, 10, 8)
-        target = torch.randn(2, 10, 8)
-        mask = torch.ones(2, 10, dtype=torch.bool)
-        mask[:, 8:] = False
-        loss = squared_prediction_loss(pred, target, mask)
-        self.assertTrue(torch.isfinite(loss).item())
-
-    def test_squared_prediction_loss_without_mask(self):
-        pred = torch.randn(2, 10, 8)
-        target = torch.randn(2, 10, 8)
-        loss = squared_prediction_loss(pred, target)
-        self.assertTrue(torch.isfinite(loss).item())
+    def test_loss_backpropagates_to_both_branches(self):
+        loss_fn = BCSLoss(num_slices=32, lmbd=10.0)
+        z1 = torch.randn(32, 16, requires_grad=True)
+        z2 = torch.randn(32, 16, requires_grad=True)
+        out = loss_fn(z1, z2)
+        out["loss"].backward()
+        self.assertIsNotNone(z1.grad)
+        self.assertIsNotNone(z2.grad)
+        self.assertGreater(float(z1.grad.abs().sum()), 0.0)
+        self.assertGreater(float(z2.grad.abs().sum()), 0.0)
 
 
 if __name__ == "__main__":

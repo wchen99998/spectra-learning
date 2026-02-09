@@ -1,10 +1,10 @@
-"""Peak-set JEPA model for mass spectrometry pretraining.
+"""Peak-set SIGReg model for mass spectrometry pretraining.
 
 Architecture:
 - PeakSetEncoder: MLP embedder -> non-causal Transformer -> peak embeddings
-- PeakMaskSampler: samples fixed-size context/target index sets
-- PeakSetPredictor: predicts target embeddings from context + target queries
-- PeakSetJEPA: full JEPA container with prediction + BCS regularization losses
+- Two-view spectrum augmentation (drop + jitter)
+- Optional projector on pooled embeddings
+- SIGReg objective: MSE(z1, z2) + lambda * BCS(z1, z2)
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import math
 import torch
 from torch import nn
 
-from models.losses import BCSLoss, squared_prediction_loss
+from models.losses import BCSLoss
 from networks import transformer_torch
 
 
@@ -28,10 +28,10 @@ class PeakFeatureEmbedder(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim, model_dim),
         )
-        for m in self.mlp:
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_normal_(m.weight)
-                nn.init.zeros_(m.bias)
+        for layer in self.mlp:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_normal_(layer.weight)
+                nn.init.zeros_(layer.bias)
 
     def forward(
         self,
@@ -106,110 +106,14 @@ class PeakSetEncoder(nn.Module):
         peak_intensity: torch.Tensor,
         precursor_mz: torch.Tensor,
     ) -> torch.Tensor:
-        """Returns peak embeddings [B, N, D]."""
         x = self.embedder(peak_mz, peak_intensity, precursor_mz)
         for block in self.blocks:
             x = block(x, freqs_cos=None, freqs_sin=None)
         return self.norm(x)
 
 
-class PeakMaskSampler(nn.Module):
-    """Samples fixed-size context and target index sets for JEPA masking.
-
-    Valid peaks are prioritised; invalid (padded) peaks are pushed to the end
-    of the random permutation so they are only selected when there are fewer
-    valid peaks than num_context + num_target.
-    """
-
-    def __init__(self, num_peaks: int, num_context: int, num_target: int):
-        super().__init__()
-        self.num_peaks = num_peaks
-        self.num_context = num_context
-        self.num_target = num_target
-
-    def forward(
-        self,
-        peak_valid_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Returns (ctx_indices, tgt_indices, ctx_valid, tgt_valid).
-
-        All outputs have static shapes suitable for torch.compile.
-        """
-        B, N = peak_valid_mask.shape
-        device = peak_valid_mask.device
-
-        rand = torch.rand(B, N, device=device)
-        rand = rand + (~peak_valid_mask).float() * 2.0
-        perm = rand.argsort(dim=1)
-
-        ctx_indices = perm[:, : self.num_context]
-        tgt_indices = perm[:, self.num_context : self.num_context + self.num_target]
-
-        ctx_valid = torch.gather(peak_valid_mask, 1, ctx_indices)
-        tgt_valid = torch.gather(peak_valid_mask, 1, tgt_indices)
-
-        return ctx_indices, tgt_indices, ctx_valid, tgt_valid
-
-
-class PeakSetPredictor(nn.Module):
-    """Predicts target peak embeddings from context embeddings and target queries.
-
-    Architecture: embed target peak features as query tokens, concatenate with
-    context embeddings, apply non-causal self-attention, extract target outputs.
-    """
-
-    def __init__(
-        self,
-        *,
-        model_dim: int,
-        num_layers: int,
-        num_heads: int,
-        num_kv_heads: int | None = None,
-        attention_mlp_multiple: float = 4.0,
-        feature_mlp_hidden_dim: int = 128,
-    ):
-        super().__init__()
-        self.model_dim = model_dim
-        self.query_embedder = PeakFeatureEmbedder(model_dim, feature_mlp_hidden_dim)
-        self.blocks = _build_non_causal_blocks(
-            dim=model_dim,
-            num_layers=num_layers,
-            num_heads=num_heads,
-            num_kv_heads=num_kv_heads,
-            attention_mlp_multiple=attention_mlp_multiple,
-        )
-        self.norm = nn.RMSNorm(model_dim, eps=1e-5)
-
-    def forward(
-        self,
-        context_embeddings: torch.Tensor,
-        target_mz: torch.Tensor,
-        target_intensity: torch.Tensor,
-        precursor_mz: torch.Tensor,
-    ) -> torch.Tensor:
-        """Returns predicted target embeddings [B, N_tgt, D]."""
-        target_queries = self.query_embedder(
-            target_mz, target_intensity, precursor_mz
-        )
-        N_ctx = context_embeddings.shape[1]
-        x = torch.cat([context_embeddings, target_queries], dim=1)
-
-        for block in self.blocks:
-            x = block(x, freqs_cos=None, freqs_sin=None)
-        x = self.norm(x)
-
-        return x[:, N_ctx:, :]
-
-
-class PeakSetJEPA(nn.Module):
-    """Peak-set JEPA model for mass spectrometry pretraining.
-
-    Components:
-    1. PeakSetEncoder: encodes all peaks into latent embeddings
-    2. PeakMaskSampler: splits peaks into context and target sets
-    3. PeakSetPredictor: predicts target embeddings from context + target queries
-    4. Losses: MSE prediction loss + BCS (Batched Characteristic Slicing) regularizer
-    """
+class PeakSetSIGReg(nn.Module):
+    """Peak-set strict SIGReg model with two-view augmentation."""
 
     def __init__(
         self,
@@ -219,23 +123,25 @@ class PeakSetJEPA(nn.Module):
         encoder_num_layers: int = 20,
         encoder_num_heads: int = 12,
         encoder_num_kv_heads: int | None = None,
-        predictor_num_layers: int = 4,
-        predictor_num_heads: int = 12,
-        predictor_num_kv_heads: int | None = None,
         attention_mlp_multiple: float = 4.0,
         feature_mlp_hidden_dim: int = 128,
-        target_ratio: float = 0.4,
-        pred_weight: float = 1.0,
+        sigreg_use_projector: bool = True,
+        sigreg_proj_hidden_dim: int = 2048,
+        sigreg_proj_output_dim: int = 128,
         bcs_num_slices: int = 256,
-        bcs_lambda: float = 10.0,
+        sigreg_lambda: float = 10.0,
+        sigreg_drop_prob: float = 0.20,
+        sigreg_mz_jitter_std: float = 0.005,
+        sigreg_intensity_jitter_std: float = 0.05,
     ):
         super().__init__()
         self.num_peaks = num_peaks
         self.model_dim = model_dim
-        self.pred_weight = pred_weight
+        self.sigreg_dim = sigreg_proj_output_dim if sigreg_use_projector else model_dim
 
-        num_target = int(num_peaks * target_ratio)
-        num_context = num_peaks - num_target
+        self.sigreg_drop_prob = sigreg_drop_prob
+        self.sigreg_mz_jitter_std = sigreg_mz_jitter_std
+        self.sigreg_intensity_jitter_std = sigreg_intensity_jitter_std
 
         self.encoder = PeakSetEncoder(
             model_dim=model_dim,
@@ -246,33 +152,60 @@ class PeakSetJEPA(nn.Module):
             feature_mlp_hidden_dim=feature_mlp_hidden_dim,
         )
 
-        self.mask_sampler = PeakMaskSampler(num_peaks, num_context, num_target)
+        if sigreg_use_projector:
+            self.projector = nn.Sequential(
+                nn.Linear(model_dim, sigreg_proj_hidden_dim),
+                nn.BatchNorm1d(sigreg_proj_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(sigreg_proj_hidden_dim, sigreg_proj_hidden_dim),
+                nn.BatchNorm1d(sigreg_proj_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(sigreg_proj_hidden_dim, sigreg_proj_output_dim),
+            )
+        else:
+            self.projector = nn.Identity()
 
-        self.predictor = PeakSetPredictor(
-            model_dim=model_dim,
-            num_layers=predictor_num_layers,
-            num_heads=predictor_num_heads,
-            num_kv_heads=predictor_num_kv_heads,
-            attention_mlp_multiple=attention_mlp_multiple,
-            feature_mlp_hidden_dim=feature_mlp_hidden_dim,
-        )
-
-        self.bcs_loss = BCSLoss(num_slices=bcs_num_slices, lmbd=bcs_lambda)
+        self.sigreg_loss = BCSLoss(num_slices=bcs_num_slices, lmbd=sigreg_lambda)
 
     def _masked_mean_pool(
         self,
         embeddings: torch.Tensor,
         valid_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """Masked mean pooling over peaks. Returns [B, D]."""
         mask = valid_mask.unsqueeze(-1).float()
-        return (embeddings * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
+        denom = mask.sum(dim=1).clamp(min=1.0)
+        return (embeddings * mask).sum(dim=1) / denom
+
+    def _augment_view(
+        self,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+        peak_valid_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        drop = (torch.rand_like(peak_mz) < self.sigreg_drop_prob) & peak_valid_mask
+        view_valid = peak_valid_mask & (~drop)
+
+        mz = peak_mz + torch.randn_like(peak_mz) * self.sigreg_mz_jitter_std
+        mz = torch.clamp(mz, min=0.0, max=1.0)
+
+        intensity = peak_intensity + torch.randn_like(peak_intensity) * self.sigreg_intensity_jitter_std
+        intensity = torch.clamp(intensity, min=0.0, max=1.0)
+
+        mz = torch.where(view_valid, mz, torch.zeros_like(mz))
+        intensity = torch.where(view_valid, intensity, torch.zeros_like(intensity))
+
+        max_intensity = intensity.max(dim=1, keepdim=True).values.clamp(min=1e-6)
+        intensity = intensity / max_intensity
+        intensity = torch.where(view_valid, intensity, torch.zeros_like(intensity))
+
+        return mz, intensity, view_valid
 
     def forward(
         self,
         batch: dict[str, torch.Tensor],
         *,
         train: bool = True,
+        bcs_projection: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         del train
         peak_mz = batch["peak_mz"]
@@ -280,44 +213,34 @@ class PeakSetJEPA(nn.Module):
         peak_valid_mask = batch["peak_valid_mask"]
         precursor_mz = batch["precursor_mz"]
 
-        # Full encoder pass
-        all_embeddings = self.encoder(
-            peak_mz, peak_intensity, precursor_mz
+        view1_mz, view1_int, view1_valid = self._augment_view(
+            peak_mz,
+            peak_intensity,
+            peak_valid_mask,
+        )
+        view2_mz, view2_int, view2_valid = self._augment_view(
+            peak_mz,
+            peak_intensity,
+            peak_valid_mask,
         )
 
-        # BCS regularizer on pooled embeddings (static shape [B, D])
-        pooled = self._masked_mean_pool(all_embeddings, peak_valid_mask)
-        bcs_loss = self.bcs_loss(pooled)
+        emb1 = self.encoder(view1_mz, view1_int, precursor_mz)
+        emb2 = self.encoder(view2_mz, view2_int, precursor_mz)
 
-        # Sample context / target masks
-        ctx_idx, tgt_idx, ctx_valid, tgt_valid = self.mask_sampler(peak_valid_mask)
+        pooled1 = self._masked_mean_pool(emb1, view1_valid)
+        pooled2 = self._masked_mean_pool(emb2, view2_valid)
 
-        # Gather context and target embeddings
-        expand_d = ctx_idx.unsqueeze(-1).expand(-1, -1, self.model_dim)
-        ctx_embeddings = torch.gather(all_embeddings, 1, expand_d)
+        z1 = self.projector(pooled1)
+        z2 = self.projector(pooled2)
 
-        expand_t = tgt_idx.unsqueeze(-1).expand(-1, -1, self.model_dim)
-        tgt_embeddings = torch.gather(all_embeddings, 1, expand_t).detach()
-
-        # Gather target peak features for predictor queries
-        tgt_mz = torch.gather(peak_mz, 1, tgt_idx)
-        tgt_intensity = torch.gather(peak_intensity, 1, tgt_idx)
-
-        # Predict target embeddings
-        pred_tgt = self.predictor(
-            ctx_embeddings, tgt_mz, tgt_intensity, precursor_mz
-        )
-
-        # Prediction loss
-        pred_loss = squared_prediction_loss(pred_tgt, tgt_embeddings, tgt_valid)
-
-        loss = self.pred_weight * pred_loss + bcs_loss
+        loss_dict = self.sigreg_loss(z1, z2, proj=bcs_projection)
+        valid_fraction = (view1_valid.float().mean() + view2_valid.float().mean()) / 2.0
 
         return {
-            "loss": loss,
-            "pred_loss": pred_loss,
-            "bcs_loss": bcs_loss,
-            "target_valid_fraction": peak_valid_mask.float().mean(),
+            "loss": loss_dict["loss"],
+            "bcs_loss": loss_dict["bcs_loss"],
+            "invariance_loss": loss_dict["invariance_loss"],
+            "valid_fraction": valid_fraction,
         }
 
     def encode(
@@ -326,7 +249,6 @@ class PeakSetJEPA(nn.Module):
         *,
         train: bool = False,
     ) -> torch.Tensor:
-        """Returns pooled spectrum embedding [B, D] for downstream tasks."""
         del train
         peak_mz = batch["peak_mz"]
         peak_intensity = batch["peak_intensity"]
@@ -344,3 +266,18 @@ class PeakSetJEPA(nn.Module):
     ):
         metrics = self(batch, train=train)
         return metrics["loss"], metrics
+
+    def sample_bcs_projection(
+        self,
+        *,
+        device: torch.device,
+        seed: int | None = None,
+    ) -> torch.Tensor:
+        return self.sigreg_loss.sample_projection(
+            self.sigreg_dim,
+            device=device,
+            seed=seed,
+        )
+
+
+PeakSetJEPA = PeakSetSIGReg

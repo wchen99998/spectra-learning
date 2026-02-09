@@ -33,8 +33,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.gems_formula_num_shards = 16
     cfg.gems_formula_drop_remainder = False
 
-    # Model (JEPA peak set)
-    cfg.model_type = "jepa_peak_set"
+    # Model (strict SIGReg peak set)
+    cfg.model_type = "sigreg_peak_set"
     cfg.num_peaks = 60
     cfg.model_dim = 256
     cfg.num_layers = 6
@@ -42,13 +42,13 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_kv_heads = None
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 128
-    cfg.predictor_num_layers = 2
-    cfg.predictor_num_heads = 8
-    cfg.predictor_num_kv_heads = None
-    cfg.jepa_target_ratio = 0.4
-    cfg.jepa_pred_weight = 1.0
-    cfg.jepa_bcs_num_slices = 256
-    cfg.jepa_bcs_lambda = 10.0
+    cfg.sigreg_use_projector = True
+    cfg.sigreg_proj_hidden_dim = 2048
+    cfg.sigreg_proj_output_dim = 128
+    cfg.sigreg_lambda = 10.0
+    cfg.sigreg_drop_prob = 0.20
+    cfg.sigreg_mz_jitter_std = 0.005
+    cfg.sigreg_intensity_jitter_std = 0.05
 
     # Training
     cfg.num_epochs = 10

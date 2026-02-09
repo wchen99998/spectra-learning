@@ -20,7 +20,7 @@ from lightning.pytorch.loggers import CSVLogger
 
 from input_pipeline import TfLightningDataModule, numpy_batch_to_torch
 from linear_probe import run_linear_probe
-from models.model import PeakSetJEPA
+from models.model import PeakSetSIGReg
 from utils import wandb_writer
 
 
@@ -219,23 +219,24 @@ class MAELightningModule(pl.LightningModule):
         )
         self.checkpoint_every_steps = int(config.checkpoint_every_steps)
 
-        self.model = PeakSetJEPA(
+        self.model = PeakSetSIGReg(
             num_peaks=int(config.num_peaks),
             model_dim=int(config.model_dim),
             encoder_num_layers=int(config.num_layers),
             encoder_num_heads=int(config.num_heads),
             encoder_num_kv_heads=config.get("num_kv_heads", None),
-            predictor_num_layers=int(config.get("predictor_num_layers", 4)),
-            predictor_num_heads=int(config.get("predictor_num_heads", config.num_heads)),
-            predictor_num_kv_heads=config.get(
-                "predictor_num_kv_heads", config.get("num_kv_heads", None)
-            ),
             attention_mlp_multiple=float(config.attention_mlp_multiple),
             feature_mlp_hidden_dim=int(config.get("feature_mlp_hidden_dim", 128)),
-            target_ratio=float(config.get("jepa_target_ratio", 0.4)),
-            pred_weight=float(config.get("jepa_pred_weight", 1.0)),
-            bcs_num_slices=int(config.get("jepa_bcs_num_slices", 256)),
-            bcs_lambda=float(config.get("jepa_bcs_lambda", 10.0)),
+            sigreg_use_projector=bool(config.get("sigreg_use_projector", True)),
+            sigreg_proj_hidden_dim=int(config.get("sigreg_proj_hidden_dim", 2048)),
+            sigreg_proj_output_dim=int(config.get("sigreg_proj_output_dim", 128)),
+            bcs_num_slices=int(config.get("sigreg_num_slices", 256)),
+            sigreg_lambda=float(config.get("sigreg_lambda", 10.0)),
+            sigreg_drop_prob=float(config.get("sigreg_drop_prob", 0.20)),
+            sigreg_mz_jitter_std=float(config.get("sigreg_mz_jitter_std", 0.005)),
+            sigreg_intensity_jitter_std=float(
+                config.get("sigreg_intensity_jitter_std", 0.05)
+            ),
         )
 
         # Compile train/eval forward with CUDA graphs for max throughput
@@ -264,11 +265,22 @@ class MAELightningModule(pl.LightningModule):
         step = step_idx + 1
         return self._lr_for_step(step) / self.base_lr
 
-    def _train_forward_impl(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        return self.model(batch, train=True)
+    def _train_forward_impl(
+        self,
+        batch: dict[str, torch.Tensor],
+        bcs_projection: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        return self.model(batch, train=True, bcs_projection=bcs_projection)
 
-    def _eval_forward_impl(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        return self.model(batch, train=False)
+    def _eval_forward_impl(
+        self,
+        batch: dict[str, torch.Tensor],
+        bcs_projection: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        return self.model(batch, train=False, bcs_projection=bcs_projection)
+
+    def _sample_bcs_projection(self, seed: int) -> torch.Tensor:
+        return self.model.sample_bcs_projection(device=self.device, seed=seed)
 
     def _iter_massspec_probe(self, split: str):
         dm = self.trainer.datamodule
@@ -355,7 +367,8 @@ class MAELightningModule(pl.LightningModule):
             k: v.to(self.device, non_blocking=non_blocking) if isinstance(v, torch.Tensor) else v
             for k, v in batch.items()
         }
-        metrics = self._train_forward(batch)
+        bcs_projection = self._sample_bcs_projection(self.global_step)
+        metrics = self._train_forward(batch, bcs_projection)
         step = self.global_step + 1
         should_log_step = step == 1 or step % self.train_step_log_interval == 0
         if should_log_step:
@@ -387,15 +400,17 @@ class MAELightningModule(pl.LightningModule):
         batch_idx: int,
         dataloader_idx: int = 0,
     ) -> torch.Tensor:
-        del batch_idx
         torch.compiler.cudagraph_mark_step_begin()
         non_blocking = self.non_blocking_device_transfer
         batch = {
             k: v.to(self.device, non_blocking=non_blocking) if isinstance(v, torch.Tensor) else v
             for k, v in batch.items()
         }
+        bcs_projection = self._sample_bcs_projection(
+            10_000_000 + self.global_step + dataloader_idx * 100_000 + batch_idx
+        )
         split = self.eval_splits[dataloader_idx]
-        metrics = self._eval_forward(batch)
+        metrics = self._eval_forward(batch, bcs_projection)
         for key, value in metrics.items():
             self.log(f"{split}/{key}", value, on_step=False, on_epoch=True)
         return metrics["loss"]
@@ -406,15 +421,17 @@ class MAELightningModule(pl.LightningModule):
         batch_idx: int,
         dataloader_idx: int = 0,
     ) -> torch.Tensor:
-        del batch_idx
         torch.compiler.cudagraph_mark_step_begin()
         non_blocking = self.non_blocking_device_transfer
         batch = {
             k: v.to(self.device, non_blocking=non_blocking) if isinstance(v, torch.Tensor) else v
             for k, v in batch.items()
         }
+        bcs_projection = self._sample_bcs_projection(
+            20_000_000 + self.global_step + dataloader_idx * 100_000 + batch_idx
+        )
         split = self.test_splits[dataloader_idx]
-        metrics = self._eval_forward(batch)
+        metrics = self._eval_forward(batch, bcs_projection)
         for key, value in metrics.items():
             self.log(f"{split}/{key}", value, on_step=False, on_epoch=True)
         return metrics["loss"]
