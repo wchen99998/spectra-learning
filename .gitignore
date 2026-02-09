@@ -15,3 +15,5 @@ wandb/
 experiments/
 
 *.png
+
+key.json

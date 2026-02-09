@@ -18,6 +18,19 @@ def get_config() -> config_dict.ConfigDict:
     cfg.intensity_scaling = "linear"
     cfg.mz_representation = "mz"
     cfg.seed = 42
+    cfg.gcp_key_path = "/home/wuhao/md4/key.json"
+    cfg.gems_formula_tfrecord_dir = "data/gems_formula_tfrecord"
+    cfg.gems_formula_raw_csv_path = (
+        "data/gems_formula/raw/GeMS_2m_combined_formula_identifications.csv"
+    )
+    cfg.gems_formula_gcs_uri = (
+        "gs://main-novogaia-bucket/gems/GeMS_2m_combined_formula_identifications.csv"
+    )
+    cfg.gems_formula_column_name = "formula"
+    cfg.gems_adduct_column_name = "adduct"
+    cfg.gems_formula_split_seed = 42
+    cfg.gems_formula_num_shards = 16
+    cfg.gems_formula_drop_remainder = False
 
     # Model (BERT)
     cfg.model_type = "bert"
