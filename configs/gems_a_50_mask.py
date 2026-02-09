@@ -30,12 +30,16 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_kv_heads = 4
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 128
+    cfg.mz_fourier_num_frequencies = 64
+    cfg.mz_fourier_min_freq = 1.0
+    cfg.mz_fourier_max_freq = 50_000.0
+    cfg.mz_fourier_learnable = False
     cfg.sigreg_use_projector = True
     cfg.sigreg_proj_hidden_dim = 2048
     cfg.sigreg_proj_output_dim = 128
     cfg.sigreg_lambda = 10.0
     cfg.sigreg_drop_prob = 0.20
-    cfg.sigreg_mz_jitter_std = 0.1
+    cfg.sigreg_mz_jitter_std = 0.000005
     cfg.sigreg_intensity_jitter_std = 0.05
 
     # Training (short smoke run)

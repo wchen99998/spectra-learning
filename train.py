@@ -227,6 +227,10 @@ class MAELightningModule(pl.LightningModule):
             encoder_num_kv_heads=config.get("num_kv_heads", None),
             attention_mlp_multiple=float(config.attention_mlp_multiple),
             feature_mlp_hidden_dim=int(config.get("feature_mlp_hidden_dim", 128)),
+            mz_fourier_num_frequencies=int(config.get("mz_fourier_num_frequencies", 32)),
+            mz_fourier_min_freq=float(config.get("mz_fourier_min_freq", 1.0)),
+            mz_fourier_max_freq=float(config.get("mz_fourier_max_freq", 100.0)),
+            mz_fourier_learnable=bool(config.get("mz_fourier_learnable", False)),
             sigreg_use_projector=bool(config.get("sigreg_use_projector", True)),
             sigreg_proj_hidden_dim=int(config.get("sigreg_proj_hidden_dim", 2048)),
             sigreg_proj_output_dim=int(config.get("sigreg_proj_output_dim", 128)),
@@ -242,12 +246,12 @@ class MAELightningModule(pl.LightningModule):
         # Compile train/eval forward with CUDA graphs for max throughput
         self._train_forward = torch.compile(
             self._train_forward_impl,
-            mode="max-autotune-no-cudagraphs",
+            mode="max-autotune",
             fullgraph=True,
         )
         self._eval_forward = torch.compile(
             self._eval_forward_impl,
-            mode="max-autotune-no-cudagraphs",
+            mode="max-autotune",
             fullgraph=True,
         )
 
@@ -530,7 +534,7 @@ def train_and_evaluate(
         default_root_dir=str(workdir),
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1,
-        precision="16-mixed",
+        precision="bf16-mixed",
         max_epochs=num_epochs,
         log_every_n_steps=int(config.log_every_n_steps),
         val_check_interval=config.val_check_interval,

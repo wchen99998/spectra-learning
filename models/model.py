@@ -18,13 +18,57 @@ from models.losses import BCSLoss
 from networks import transformer_torch
 
 
+class FourierFeatures(nn.Module):
+    """Log-spaced sinusoidal features for scalar inputs (NeRF-style)."""
+
+    def __init__(
+        self,
+        num_frequencies: int = 32,
+        min_freq: float = 1.0,
+        max_freq: float = 100.0,
+        learnable: bool = False,
+    ):
+        super().__init__()
+        freqs = torch.logspace(
+            math.log10(min_freq),
+            math.log10(max_freq),
+            num_frequencies,
+        )
+        if learnable:
+            self.freqs = nn.Parameter(freqs)
+        else:
+            self.register_buffer("freqs", freqs)
+        self.output_dim = 2 * num_frequencies
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, N] -> [B, N, 2*num_frequencies]
+        projected = x.unsqueeze(-1) * self.freqs * (2.0 * math.pi)
+        return torch.cat([projected.sin(), projected.cos()], dim=-1)
+
+
 class PeakFeatureEmbedder(nn.Module):
     """Embeds raw peak features (mz, intensity, precursor) into model dim."""
 
-    def __init__(self, model_dim: int, hidden_dim: int):
+    def __init__(
+        self,
+        model_dim: int,
+        hidden_dim: int,
+        mz_fourier_num_frequencies: int = 32,
+        mz_fourier_min_freq: float = 1.0,
+        mz_fourier_max_freq: float = 100.0,
+        mz_fourier_learnable: bool = False,
+    ):
         super().__init__()
+        self.mz_fourier = FourierFeatures(
+            num_frequencies=mz_fourier_num_frequencies,
+            min_freq=mz_fourier_min_freq,
+            max_freq=mz_fourier_max_freq,
+            learnable=mz_fourier_learnable,
+        )
+        # input: fourier(mz) + raw_mz + intensity + precursor
+        input_dim = self.mz_fourier.output_dim + 3
         self.mlp = nn.Sequential(
-            nn.Linear(3, hidden_dim),
+            nn.Linear(input_dim, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, model_dim),
         )
@@ -40,7 +84,9 @@ class PeakFeatureEmbedder(nn.Module):
         precursor_mz: torch.Tensor,
     ) -> torch.Tensor:
         precursor = precursor_mz.unsqueeze(1).expand_as(peak_mz)
-        features = torch.stack([peak_mz, peak_intensity, precursor], dim=-1)
+        mz_fourier = self.mz_fourier(peak_mz)
+        scalars = torch.stack([peak_mz, peak_intensity, precursor], dim=-1)
+        features = torch.cat([mz_fourier, scalars], dim=-1)
         return self.mlp(features)
 
 
@@ -87,10 +133,21 @@ class PeakSetEncoder(nn.Module):
         num_kv_heads: int | None = None,
         attention_mlp_multiple: float = 4.0,
         feature_mlp_hidden_dim: int = 128,
+        mz_fourier_num_frequencies: int = 32,
+        mz_fourier_min_freq: float = 1.0,
+        mz_fourier_max_freq: float = 100.0,
+        mz_fourier_learnable: bool = False,
     ):
         super().__init__()
         self.model_dim = model_dim
-        self.embedder = PeakFeatureEmbedder(model_dim, feature_mlp_hidden_dim)
+        self.embedder = PeakFeatureEmbedder(
+            model_dim,
+            feature_mlp_hidden_dim,
+            mz_fourier_num_frequencies=mz_fourier_num_frequencies,
+            mz_fourier_min_freq=mz_fourier_min_freq,
+            mz_fourier_max_freq=mz_fourier_max_freq,
+            mz_fourier_learnable=mz_fourier_learnable,
+        )
         self.blocks = _build_non_causal_blocks(
             dim=model_dim,
             num_layers=num_layers,
@@ -125,6 +182,10 @@ class PeakSetSIGReg(nn.Module):
         encoder_num_kv_heads: int | None = None,
         attention_mlp_multiple: float = 4.0,
         feature_mlp_hidden_dim: int = 128,
+        mz_fourier_num_frequencies: int = 32,
+        mz_fourier_min_freq: float = 1.0,
+        mz_fourier_max_freq: float = 100.0,
+        mz_fourier_learnable: bool = False,
         sigreg_use_projector: bool = True,
         sigreg_proj_hidden_dim: int = 2048,
         sigreg_proj_output_dim: int = 128,
@@ -150,16 +211,20 @@ class PeakSetSIGReg(nn.Module):
             num_kv_heads=encoder_num_kv_heads,
             attention_mlp_multiple=attention_mlp_multiple,
             feature_mlp_hidden_dim=feature_mlp_hidden_dim,
+            mz_fourier_num_frequencies=mz_fourier_num_frequencies,
+            mz_fourier_min_freq=mz_fourier_min_freq,
+            mz_fourier_max_freq=mz_fourier_max_freq,
+            mz_fourier_learnable=mz_fourier_learnable,
         )
 
         if sigreg_use_projector:
             self.projector = nn.Sequential(
                 nn.Linear(model_dim, sigreg_proj_hidden_dim),
-                nn.BatchNorm1d(sigreg_proj_hidden_dim),
-                nn.ReLU(),
+                nn.RMSNorm(sigreg_proj_hidden_dim),
+                nn.SiLU(),
                 nn.Linear(sigreg_proj_hidden_dim, sigreg_proj_hidden_dim),
-                nn.BatchNorm1d(sigreg_proj_hidden_dim),
-                nn.ReLU(),
+                nn.RMSNorm(sigreg_proj_hidden_dim),
+                nn.SiLU(),
                 nn.Linear(sigreg_proj_hidden_dim, sigreg_proj_output_dim),
             )
         else:
@@ -224,17 +289,19 @@ class PeakSetSIGReg(nn.Module):
             peak_valid_mask,
         )
 
-        emb1 = self.encoder(view1_mz, view1_int, precursor_mz)
-        emb2 = self.encoder(view2_mz, view2_int, precursor_mz)
+        # Fuse both views into a single encoder + projector pass [2B, N, ...]
+        fused_mz = torch.cat([view1_mz, view2_mz], dim=0)
+        fused_int = torch.cat([view1_int, view2_int], dim=0)
+        fused_precursor = torch.cat([precursor_mz, precursor_mz], dim=0)
+        fused_valid = torch.cat([view1_valid, view2_valid], dim=0)
 
-        pooled1 = self._masked_mean_pool(emb1, view1_valid)
-        pooled2 = self._masked_mean_pool(emb2, view2_valid)
-
-        z1 = self.projector(pooled1)
-        z2 = self.projector(pooled2)
+        fused_emb = self.encoder(fused_mz, fused_int, fused_precursor)
+        fused_pooled = self._masked_mean_pool(fused_emb, fused_valid)
+        fused_z = self.projector(fused_pooled)
+        z1, z2 = fused_z.chunk(2, dim=0)
 
         loss_dict = self.sigreg_loss(z1, z2, proj=bcs_projection)
-        valid_fraction = (view1_valid.float().mean() + view2_valid.float().mean()) / 2.0
+        valid_fraction = fused_valid.float().mean()
 
         return {
             "loss": loss_dict["loss"],
@@ -256,7 +323,8 @@ class PeakSetSIGReg(nn.Module):
         precursor_mz = batch["precursor_mz"]
 
         embeddings = self.encoder(peak_mz, peak_intensity, precursor_mz)
-        return self._masked_mean_pool(embeddings, peak_valid_mask)
+        pooled = self._masked_mean_pool(embeddings, peak_valid_mask)
+        return self.projector(pooled)
 
     def compute_loss(
         self,
