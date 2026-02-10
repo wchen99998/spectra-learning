@@ -40,7 +40,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_use_projector = True
     cfg.sigreg_proj_hidden_dim = 2048
     cfg.sigreg_proj_output_dim = 128
-    cfg.sigreg_lambda = 1.0
+    cfg.sigreg_num_slices = 512
+    cfg.sigreg_lambda = 0.1
     cfg.sigreg_drop_prob = 0.25
     cfg.sigreg_mz_jitter_std = 0.01
     cfg.sigreg_intensity_jitter_std = 0.1

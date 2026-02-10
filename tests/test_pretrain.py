@@ -104,7 +104,7 @@ class SIGRegForwardTests(unittest.TestCase):
         model = self._build_model()
         batch = _make_batch()
         metrics = model(batch, train=True)
-        for key in ("loss", "bcs_loss", "invariance_loss", "valid_fraction"):
+        for key in ("loss", "bcs_loss", "invariance_loss", "valid_fraction", "representation_variance"):
             self.assertIn(key, metrics, f"Missing key: {key}")
 
     def test_encode_output_shape(self):

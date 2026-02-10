@@ -310,9 +310,6 @@ class MAELightningModule(pl.LightningModule):
         )
         self.non_blocking_device_transfer = bool(config.get("non_blocking_device_transfer", True))
         self.train_log_extra_metrics_on_step = bool(config.get("train_log_extra_metrics_on_step", False))
-        self.train_step_log_interval = int(
-            config.get("train_step_log_interval", config.get("log_every_n_steps", 1))
-        )
         self.checkpoint_every_steps = int(config.checkpoint_every_steps)
         self.eval_msg_finetune_compile = bool(config.get("eval_msg_finetune_compile", True)) and torch.cuda.is_available()
         self.eval_msg_finetune_compile_mode = str(config.get("eval_msg_finetune_compile_mode", "reduce-overhead"))
@@ -535,13 +532,10 @@ class MAELightningModule(pl.LightningModule):
         bcs_projection = self._sample_bcs_projection(self.global_step)
         metrics = self._train_forward(batch, bcs_projection)
         step = self.global_step + 1
-        should_log_step = step == 1 or step % self.train_step_log_interval == 0
-        if should_log_step:
-            self.log("train/learning_rate", self._lr_for_step(step), on_step=True, on_epoch=False, prog_bar=True)
+        self.log("train/learning_rate", self._lr_for_step(step), on_step=True, on_epoch=False, prog_bar=True)
         for key, value in metrics.items():
             if key == "loss":
-                if should_log_step:
-                    self.log("train/loss", value, on_step=True, on_epoch=False, prog_bar=True)
+                self.log("train/loss", value, on_step=True, on_epoch=False, prog_bar=True)
                 self.log("train/loss_epoch", value, on_step=False, on_epoch=True, prog_bar=False)
                 if step % self.checkpoint_every_steps == 0:
                     self.log(
@@ -558,7 +552,7 @@ class MAELightningModule(pl.LightningModule):
                 self.log(metric_name, value, on_step=True, on_epoch=True, prog_bar=False)
                 continue
             self.log(metric_name, value, on_step=False, on_epoch=True, prog_bar=False)
-            if should_log_step and self.train_log_extra_metrics_on_step:
+            if self.train_log_extra_metrics_on_step:
                 self.log(f"{metric_name}_step", value, on_step=True, on_epoch=False, prog_bar=False)
         return metrics["loss"]
 
