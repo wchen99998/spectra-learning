@@ -1,8 +1,10 @@
 import unittest
+import tempfile
 
 import tensorflow as tf
 import torch
 
+from finetune import _load_pretrained_weights
 from input_pipeline import (
     _NUM_PEAKS_OUTPUT,
     _compact_sort_peaks,
@@ -109,7 +111,7 @@ class SIGRegForwardTests(unittest.TestCase):
         model = self._build_model()
         batch = _make_batch(batch_size=3)
         pooled = model.encode(batch, train=False)
-        self.assertEqual(pooled.shape, (3, 32))
+        self.assertEqual(pooled.shape, (3, model.sigreg_dim))
 
     def test_compute_loss_returns_loss_and_metrics(self):
         model = self._build_model()
@@ -182,6 +184,49 @@ class AugmentationTests(unittest.TestCase):
         self.assertTrue((intensity[~valid] == 0.0).all().item())
 
 
+class PMAPoolingTests(unittest.TestCase):
+    def _build_model(self) -> PeakSetSIGReg:
+        return PeakSetSIGReg(
+            num_peaks=60,
+            model_dim=32,
+            encoder_num_layers=1,
+            encoder_num_heads=4,
+            encoder_num_kv_heads=4,
+            attention_mlp_multiple=2.0,
+            feature_mlp_hidden_dim=16,
+            sigreg_use_projector=False,
+            bcs_num_slices=32,
+            sigreg_lambda=10.0,
+            pooling_type="pma",
+            pma_num_heads=4,
+            pma_num_seeds=2,
+        )
+
+    def test_pool_ignores_invalid_positions(self):
+        model = self._build_model()
+        embeddings = torch.randn(3, 8, 32)
+        valid = torch.zeros(3, 8, dtype=torch.bool)
+        valid[:, :5] = True
+
+        pooled_a = model._pool(embeddings, valid)
+        embeddings[:, 5:] = torch.randn(3, 3, 32)
+        pooled_b = model._pool(embeddings, valid)
+        self.assertTrue(torch.allclose(pooled_a, pooled_b, atol=1e-6, rtol=1e-5))
+
+    def test_pool_backward_populates_pma_gradients(self):
+        model = self._build_model()
+        batch = _make_batch()
+        loss = model(batch, train=True)["loss"]
+        loss.backward()
+
+        self.assertIsNotNone(model.pool_query.grad)
+        self.assertGreater(float(model.pool_query.grad.abs().sum()), 0.0)
+
+        grads = [p.grad for p in model.pool_mha.parameters() if p.requires_grad]
+        self.assertTrue(any(g is not None for g in grads))
+        self.assertGreater(sum(float(g.abs().sum()) for g in grads if g is not None), 0.0)
+
+
 class SIGRegLossTests(unittest.TestCase):
     def test_epps_pulley_finite(self):
         x = torch.randn(32, 16)
@@ -217,6 +262,36 @@ class SIGRegLossTests(unittest.TestCase):
         self.assertIsNotNone(z2.grad)
         self.assertGreater(float(z1.grad.abs().sum()), 0.0)
         self.assertGreater(float(z2.grad.abs().sum()), 0.0)
+
+
+class CheckpointCompatibilityTests(unittest.TestCase):
+    def test_load_pretrained_requires_pma_weights(self):
+        model = PeakSetSIGReg(
+            num_peaks=60,
+            model_dim=32,
+            encoder_num_layers=1,
+            encoder_num_heads=4,
+            encoder_num_kv_heads=4,
+            attention_mlp_multiple=2.0,
+            feature_mlp_hidden_dim=16,
+            sigreg_use_projector=False,
+            pooling_type="pma",
+            pma_num_heads=4,
+            pma_num_seeds=1,
+        )
+
+        full_state = model.state_dict()
+        without_pma = {
+            key: value
+            for key, value in full_state.items()
+            if key != "pool_query" and not key.startswith("pool_mha.")
+        }
+        ckpt = {"state_dict": {f"model.{key}": value for key, value in without_pma.items()}}
+
+        with tempfile.NamedTemporaryFile(suffix=".ckpt") as tmp:
+            torch.save(ckpt, tmp.name)
+            with self.assertRaises(ValueError):
+                _load_pretrained_weights(model, tmp.name)
 
 
 if __name__ == "__main__":

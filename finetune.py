@@ -75,6 +75,9 @@ def _build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         mz_fourier_min_freq=float(config.get("mz_fourier_min_freq", 1.0)),
         mz_fourier_max_freq=float(config.get("mz_fourier_max_freq", 100.0)),
         mz_fourier_learnable=bool(config.get("mz_fourier_learnable", False)),
+        pooling_type=str(config.get("pooling_type", "pma")),
+        pma_num_heads=config.get("pma_num_heads", int(config.num_heads)),
+        pma_num_seeds=int(config.get("pma_num_seeds", 1)),
         sigreg_use_projector=bool(config.get("sigreg_use_projector", True)),
         sigreg_proj_hidden_dim=int(config.get("sigreg_proj_hidden_dim", 2048)),
         sigreg_proj_output_dim=int(config.get("sigreg_proj_output_dim", 128)),
@@ -98,9 +101,9 @@ def _load_pretrained_weights(model: PeakSetSIGReg, checkpoint_path: str) -> None
     }
     result = model.load_state_dict(model_state, strict=False)
     if result.missing_keys:
-        logging.warning("Missing keys when loading checkpoint: %s", result.missing_keys)
+        raise ValueError(f"Missing keys when loading checkpoint: {result.missing_keys}")
     if result.unexpected_keys:
-        logging.warning("Unexpected keys when loading checkpoint: %s", result.unexpected_keys)
+        raise ValueError(f"Unexpected keys when loading checkpoint: {result.unexpected_keys}")
 
 
 class FinetuneLightningModule(pl.LightningModule):
@@ -158,13 +161,13 @@ class FinetuneLightningModule(pl.LightningModule):
         if self.freeze_backbone:
             with torch.no_grad():
                 embeddings = self.model.encoder(peak_mz, peak_intensity, precursor_mz)
-                pooled = self.model._masked_mean_pool(embeddings, peak_valid_mask)
+                pooled = self.model._pool(embeddings, peak_valid_mask)
                 if self.feature_source == "projector":
                     return self.model.projector(pooled)
                 return pooled
         else:
             embeddings = self.model.encoder(peak_mz, peak_intensity, precursor_mz)
-            pooled = self.model._masked_mean_pool(embeddings, peak_valid_mask)
+            pooled = self.model._pool(embeddings, peak_valid_mask)
             if self.feature_source == "projector":
                 return self.model.projector(pooled)
             return pooled
@@ -191,7 +194,8 @@ class FinetuneLightningModule(pl.LightningModule):
         del batch_idx
         batch = self._to_device(batch)
         features = self._extract_features(batch)
-        logits = self.head(features)
+        with torch.autocast(device_type=features.device.type, enabled=False):
+            logits = self.head(features.float())
         targets = batch["fingerprint"][:, :self.fingerprint_bits].to(dtype=torch.float32)
         loss = F.binary_cross_entropy_with_logits(logits, targets)
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
@@ -203,7 +207,8 @@ class FinetuneLightningModule(pl.LightningModule):
         del batch_idx
         batch = self._to_device(batch)
         features = self._extract_features(batch)
-        logits = self.head(features)
+        with torch.autocast(device_type=features.device.type, enabled=False):
+            logits = self.head(features.float())
         targets = batch["fingerprint"][:, :self.fingerprint_bits].to(dtype=torch.float32)
         loss = F.binary_cross_entropy_with_logits(logits, targets)
         self.log("val/loss", loss, on_step=False, on_epoch=True, prog_bar=True)
@@ -225,7 +230,8 @@ class FinetuneLightningModule(pl.LightningModule):
         del batch_idx
         batch = self._to_device(batch)
         features = self._extract_features(batch)
-        logits = self.head(features)
+        with torch.autocast(device_type=features.device.type, enabled=False):
+            logits = self.head(features.float())
         targets = batch["fingerprint"][:, :self.fingerprint_bits].to(dtype=torch.float32)
         loss = F.binary_cross_entropy_with_logits(logits, targets)
         self.log("test/loss", loss, on_step=False, on_epoch=True, prog_bar=True)

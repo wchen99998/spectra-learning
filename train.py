@@ -7,8 +7,9 @@ from typing import Any
 import lightning.pytorch as pl
 import torch
 import torch._inductor.config as inductor_config
+import torch.nn.functional as F
 
-torch.set_float32_matmul_precision('medium')
+torch.set_float32_matmul_precision('high')
 inductor_config.coordinate_descent_tuning = True
 inductor_config.triton.unique_kernel_names = True
 inductor_config.fx_graph_cache = True
@@ -19,7 +20,6 @@ from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
 
 from input_pipeline import TfLightningDataModule, numpy_batch_to_torch
-from linear_probe import run_linear_probe
 from models.model import PeakSetSIGReg
 from utils import wandb_writer
 
@@ -119,6 +119,99 @@ def _latest_ckpt_path(directory: Path) -> str | None:
     return str(ckpts[-1])
 
 
+def _build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
+    return PeakSetSIGReg(
+        num_peaks=int(config.num_peaks),
+        model_dim=int(config.model_dim),
+        encoder_num_layers=int(config.num_layers),
+        encoder_num_heads=int(config.num_heads),
+        encoder_num_kv_heads=config.get("num_kv_heads", None),
+        attention_mlp_multiple=float(config.attention_mlp_multiple),
+        feature_mlp_hidden_dim=int(config.get("feature_mlp_hidden_dim", 128)),
+        mz_fourier_num_frequencies=int(config.get("mz_fourier_num_frequencies", 32)),
+        mz_fourier_min_freq=float(config.get("mz_fourier_min_freq", 1.0)),
+        mz_fourier_max_freq=float(config.get("mz_fourier_max_freq", 100.0)),
+        mz_fourier_learnable=bool(config.get("mz_fourier_learnable", False)),
+        pooling_type=str(config.get("pooling_type", "pma")),
+        pma_num_heads=config.get("pma_num_heads", int(config.num_heads)),
+        pma_num_seeds=int(config.get("pma_num_seeds", 1)),
+        sigreg_use_projector=bool(config.get("sigreg_use_projector", True)),
+        sigreg_proj_hidden_dim=int(config.get("sigreg_proj_hidden_dim", 2048)),
+        sigreg_proj_output_dim=int(config.get("sigreg_proj_output_dim", 128)),
+        bcs_num_slices=int(config.get("sigreg_num_slices", 256)),
+        sigreg_lambda=float(config.get("sigreg_lambda", 10.0)),
+        sigreg_drop_prob=float(config.get("sigreg_drop_prob", 0.20)),
+        sigreg_mz_jitter_std=float(config.get("sigreg_mz_jitter_std", 0.005)),
+        sigreg_intensity_jitter_std=float(
+            config.get("sigreg_intensity_jitter_std", 0.05)
+        ),
+    )
+
+
+class _FingerprintMetricAccumulator:
+    def __init__(self, fingerprint_bits: int) -> None:
+        self.fingerprint_bits = int(fingerprint_bits)
+        self.tp = torch.zeros(self.fingerprint_bits, dtype=torch.float32)
+        self.fp = torch.zeros(self.fingerprint_bits, dtype=torch.float32)
+        self.fn = torch.zeros(self.fingerprint_bits, dtype=torch.float32)
+        self.correct_bits = 0.0
+        self.total_bits = 0.0
+        self.tanimoto_sum = 0.0
+        self.cosine_sum = 0.0
+        self.num_samples = 0.0
+        self.pred_positives = 0.0
+        self.target_positives = 0.0
+
+    def update(self, logits: torch.Tensor, targets: torch.Tensor) -> None:
+        probs = torch.sigmoid(logits)
+        pred_bits = probs > 0.5
+        target_bits = targets > 0.5
+
+        intersection = (pred_bits & target_bits).sum(dim=1).to(dtype=torch.float32)
+        union = (pred_bits | target_bits).sum(dim=1).to(dtype=torch.float32)
+        tanimoto = torch.where(union > 0.0, intersection / union, torch.ones_like(union))
+        self.tanimoto_sum += float(tanimoto.sum().cpu())
+
+        cosine = F.cosine_similarity(probs, targets, dim=1)
+        self.cosine_sum += float(cosine.sum().cpu())
+
+        self.correct_bits += float((pred_bits == target_bits).sum().cpu())
+        self.total_bits += float(target_bits.numel())
+        self.num_samples += float(pred_bits.shape[0])
+        self.pred_positives += float(pred_bits.sum().cpu())
+        self.target_positives += float(target_bits.sum().cpu())
+
+        self.tp += (pred_bits & target_bits).sum(dim=0).to(dtype=torch.float32).cpu()
+        self.fp += (pred_bits & ~target_bits).sum(dim=0).to(dtype=torch.float32).cpu()
+        self.fn += (~pred_bits & target_bits).sum(dim=0).to(dtype=torch.float32).cpu()
+
+    def compute(self, device: torch.device | str) -> dict[str, torch.Tensor]:
+        precision_per_bit = self.tp / (self.tp + self.fp).clamp(min=1e-8)
+        recall_per_bit = self.tp / (self.tp + self.fn).clamp(min=1e-8)
+        f1_per_bit = 2 * precision_per_bit * recall_per_bit / (precision_per_bit + recall_per_bit).clamp(min=1e-8)
+
+        has_pred = (self.tp + self.fp) > 0
+        has_target = (self.tp + self.fn) > 0
+        precision_per_bit = torch.where(has_pred, precision_per_bit, torch.zeros_like(precision_per_bit))
+        recall_per_bit = torch.where(has_target, recall_per_bit, torch.zeros_like(recall_per_bit))
+        f1_per_bit = torch.where(has_pred | has_target, f1_per_bit, torch.zeros_like(f1_per_bit))
+
+        metrics = {
+            "tanimoto": self.tanimoto_sum / self.num_samples,
+            "cosine_similarity": self.cosine_sum / self.num_samples,
+            "bit_accuracy": self.correct_bits / self.total_bits,
+            "precision": float(precision_per_bit.mean()),
+            "recall": float(recall_per_bit.mean()),
+            "f1": float(f1_per_bit.mean()),
+            "pred_positive_rate": self.pred_positives / self.total_bits,
+            "target_positive_rate": self.target_positives / self.total_bits,
+        }
+        return {
+            key: torch.tensor(value, dtype=torch.float32, device=device)
+            for key, value in metrics.items()
+        }
+
+
 class TorchProfilerCallback(pl.Callback):
     def __init__(
         self,
@@ -194,63 +287,48 @@ class MAELightningModule(pl.LightningModule):
         config: config_dict.ConfigDict,
         *,
         total_steps: int,
-        eval_splits: list[str],
-        test_splits: list[str],
     ) -> None:
         super().__init__()
         self.config = config
         self.total_steps = int(total_steps)
-        self.eval_splits = eval_splits
-        self.test_splits = test_splits
 
         self.base_lr = float(config.learning_rate)
         self.warmup_steps = int(config.get("warmup_steps", 0))
         self.schedule_type = str(config.get("learning_rate_schedule", "cosine"))
         self.min_learning_rate = config.get("min_learning_rate", None)
         self.b2 = float(config.get("b2", 0.999))
-        self.probe_ridge = float(config.get("probe_ridge", 1e-3))
-        self.probe_bits = int(config.get("probe_bits", config.get("fingerprint_bits", 1024)))
-        self.probe_fit_bias = bool(config.get("probe_fit_bias", True))
-        self.probe_peak_ordering = str(config.get("probe_peak_ordering", "intensity"))
+        self.fingerprint_bits = int(config.get("fingerprint_bits", 1024))
+        self.eval_msg_finetune_num_epochs = int(config.get("eval_msg_finetune_num_epochs", 1))
+        self.eval_msg_finetune_feature_source = str(config.get("eval_msg_finetune_feature_source", "encoder"))
+        self.eval_msg_finetune_trainable_scope = str(config.get("eval_msg_finetune_trainable_scope", "full"))
+        self.eval_msg_finetune_head_hidden_dim = int(config.get("eval_msg_finetune_head_hidden_dim", 512))
+        self.eval_msg_finetune_learning_rate = float(config.get("eval_msg_finetune_learning_rate", 1e-4))
+        self.eval_msg_finetune_weight_decay = float(config.get("eval_msg_finetune_weight_decay", 1e-4))
+        self.eval_msg_finetune_warmup_steps = int(config.get("eval_msg_finetune_warmup_steps", 0))
+        self.eval_msg_finetune_peak_ordering = str(
+            config.get("eval_msg_finetune_peak_ordering", config.get("probe_peak_ordering", "intensity"))
+        )
         self.non_blocking_device_transfer = bool(config.get("non_blocking_device_transfer", True))
         self.train_log_extra_metrics_on_step = bool(config.get("train_log_extra_metrics_on_step", False))
         self.train_step_log_interval = int(
             config.get("train_step_log_interval", config.get("log_every_n_steps", 1))
         )
         self.checkpoint_every_steps = int(config.checkpoint_every_steps)
+        self.eval_msg_finetune_compile = bool(config.get("eval_msg_finetune_compile", True)) and torch.cuda.is_available()
+        self.eval_msg_finetune_compile_mode = str(config.get("eval_msg_finetune_compile_mode", "reduce-overhead"))
+        self.eval_msg_finetune_compile_fullgraph = bool(config.get("eval_msg_finetune_compile_fullgraph", False))
+        self.eval_msg_finetune_compile_dynamic = bool(config.get("eval_msg_finetune_compile_dynamic", True))
+        self._eval_backbone: PeakSetSIGReg | None = None
+        self._eval_head: torch.nn.Module | None = None
+        self._eval_head_init_state: dict[str, torch.Tensor] | None = None
+        self._eval_feature_forward: Any = None
+        self._eval_head_forward: Any = None
 
-        self.model = PeakSetSIGReg(
-            num_peaks=int(config.num_peaks),
-            model_dim=int(config.model_dim),
-            encoder_num_layers=int(config.num_layers),
-            encoder_num_heads=int(config.num_heads),
-            encoder_num_kv_heads=config.get("num_kv_heads", None),
-            attention_mlp_multiple=float(config.attention_mlp_multiple),
-            feature_mlp_hidden_dim=int(config.get("feature_mlp_hidden_dim", 128)),
-            mz_fourier_num_frequencies=int(config.get("mz_fourier_num_frequencies", 32)),
-            mz_fourier_min_freq=float(config.get("mz_fourier_min_freq", 1.0)),
-            mz_fourier_max_freq=float(config.get("mz_fourier_max_freq", 100.0)),
-            mz_fourier_learnable=bool(config.get("mz_fourier_learnable", False)),
-            sigreg_use_projector=bool(config.get("sigreg_use_projector", True)),
-            sigreg_proj_hidden_dim=int(config.get("sigreg_proj_hidden_dim", 2048)),
-            sigreg_proj_output_dim=int(config.get("sigreg_proj_output_dim", 128)),
-            bcs_num_slices=int(config.get("sigreg_num_slices", 256)),
-            sigreg_lambda=float(config.get("sigreg_lambda", 10.0)),
-            sigreg_drop_prob=float(config.get("sigreg_drop_prob", 0.20)),
-            sigreg_mz_jitter_std=float(config.get("sigreg_mz_jitter_std", 0.005)),
-            sigreg_intensity_jitter_std=float(
-                config.get("sigreg_intensity_jitter_std", 0.05)
-            ),
-        )
+        self.model = _build_model_from_config(config)
 
-        # Compile train/eval forward with CUDA graphs for max throughput
+        # Compile train forward with CUDA graphs for max throughput
         self._train_forward = torch.compile(
             self._train_forward_impl,
-            mode="max-autotune",
-            fullgraph=True,
-        )
-        self._eval_forward = torch.compile(
-            self._eval_forward_impl,
             mode="max-autotune",
             fullgraph=True,
         )
@@ -276,23 +354,22 @@ class MAELightningModule(pl.LightningModule):
     ) -> dict[str, torch.Tensor]:
         return self.model(batch, train=True, bcs_projection=bcs_projection)
 
-    def _eval_forward_impl(
-        self,
-        batch: dict[str, torch.Tensor],
-        bcs_projection: torch.Tensor,
-    ) -> dict[str, torch.Tensor]:
-        return self.model(batch, train=False, bcs_projection=bcs_projection)
-
     def _sample_bcs_projection(self, seed: int) -> torch.Tensor:
         return self.model.sample_bcs_projection(device=self.device, seed=seed)
 
-    def _iter_massspec_probe(self, split: str):
+    def _to_device(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        non_blocking = self.non_blocking_device_transfer
+        return {
+            k: v.to(self.device, non_blocking=non_blocking) if isinstance(v, torch.Tensor) else v
+            for k, v in batch.items()
+        }
+
+    def _iter_massspec_probe(self, split: str, *, seed: int):
         dm = self.trainer.datamodule
-        seed = int(self.config.seed) + (2_000_000 if split == "massspec_train" else 3_000_000)
         ds = dm.build_massspec_probe_dataset(
             split,
             seed=seed,
-            peak_ordering=self.probe_peak_ordering,
+            peak_ordering=self.eval_msg_finetune_peak_ordering,
         )
         size_key = "massspec_train_size" if split == "massspec_train" else "massspec_test_size"
         size = int(dm.info[size_key])
@@ -307,70 +384,154 @@ class MAELightningModule(pl.LightningModule):
             seen += take
             yield numpy_batch_to_torch(batch)
 
-    def _iter_probe_features(self, split: str):
-        device = self.device
-        non_blocking = self.non_blocking_device_transfer
-        for batch in self._iter_massspec_probe(split):
-            batch = {
-                k: v.to(device, non_blocking=non_blocking) if isinstance(v, torch.Tensor) else v
-                for k, v in batch.items()
-            }
-            x = self.model.encode(batch, train=False)
-            y = batch["fingerprint"][:, : self.probe_bits].to(dtype=torch.float32)
-            yield x, y
+    def _extract_eval_features(
+        self,
+        model: PeakSetSIGReg,
+        batch: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        embeddings = model.encoder(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            batch["precursor_mz"],
+        )
+        pooled = model._pool(embeddings, batch["peak_valid_mask"])
+        if self.eval_msg_finetune_feature_source == "projector":
+            return model.projector(pooled)
+        return pooled
 
-    def on_validation_epoch_start(self) -> None:
-        if not bool(self.config.get("enable_linear_probe", True)):
+    def _build_eval_head(self, input_dim: int) -> torch.nn.Module:
+        hidden = self.eval_msg_finetune_head_hidden_dim
+        return torch.nn.Sequential(
+            torch.nn.Linear(input_dim, hidden),
+            torch.nn.RMSNorm(hidden),
+            torch.nn.SiLU(),
+            torch.nn.Linear(hidden, self.fingerprint_bits),
+        )
+
+    def _compile_eval_callable(self, fn):
+        if not self.eval_msg_finetune_compile:
+            return fn
+        return torch.compile(
+            fn,
+            mode=self.eval_msg_finetune_compile_mode,
+            fullgraph=self.eval_msg_finetune_compile_fullgraph,
+            dynamic=self.eval_msg_finetune_compile_dynamic,
+        )
+
+    def _eval_feature_forward_impl(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        return self._extract_eval_features(self._eval_backbone, batch)
+
+    def _eval_head_forward_impl(self, features: torch.Tensor) -> torch.Tensor:
+        return self._eval_head(features)
+
+    def _ensure_eval_runtime(self) -> None:
+        if self._eval_backbone is not None:
             return
-        dm = self.trainer.datamodule
-        if int(dm.info.get("massspec_train_size", 0)) == 0:
-            return
-        if int(dm.info.get("massspec_test_size", 0)) == 0:
-            return
+
+        backbone = _build_model_from_config(self.config).to(self.device)
+        if self.eval_msg_finetune_trainable_scope == "head_only":
+            for param in backbone.parameters():
+                param.requires_grad = False
+
+        use_projector = (
+            self.eval_msg_finetune_feature_source == "projector"
+            and bool(self.config.get("sigreg_use_projector", True))
+        )
+        input_dim = int(self.config.get("sigreg_proj_output_dim", 128)) if use_projector else int(self.config.model_dim)
+        head = self._build_eval_head(input_dim).to(self.device)
+
+        object.__setattr__(self, "_eval_backbone", backbone)
+        object.__setattr__(self, "_eval_head", head)
+        self._eval_head_init_state = {
+            key: value.detach().clone()
+            for key, value in head.state_dict().items()
+        }
+        self._eval_feature_forward = self._compile_eval_callable(self._eval_feature_forward_impl)
+        self._eval_head_forward = self._compile_eval_callable(self._eval_head_forward_impl)
+
+    def _run_msg_finetune_eval(self) -> dict[str, torch.Tensor]:
+        self._ensure_eval_runtime()
+        backbone = self._eval_backbone
+        head = self._eval_head
+
+        backbone.load_state_dict(self.model.state_dict())
+        head.load_state_dict(self._eval_head_init_state)
+
+        if self.eval_msg_finetune_trainable_scope == "head_only":
+            for param in backbone.parameters():
+                param.requires_grad = False
+        else:
+            for param in backbone.parameters():
+                param.requires_grad = True
+
+        if self.eval_msg_finetune_trainable_scope == "head_only":
+            parameters = head.parameters()
+        else:
+            parameters = list(backbone.parameters()) + list(head.parameters())
+        optimizer = torch.optim.AdamW(
+            parameters,
+            lr=self.eval_msg_finetune_learning_rate,
+            weight_decay=self.eval_msg_finetune_weight_decay,
+        )
+        steps_per_epoch = int(self.trainer.datamodule.steps["massspec_train"])
+        total_steps = self.eval_msg_finetune_num_epochs * steps_per_epoch
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer,
+            lr_lambda=lambda step_idx: _learning_rate_at_step(
+                step_idx + 1,
+                base_lr=self.eval_msg_finetune_learning_rate,
+                total_steps=total_steps,
+                warmup_steps=self.eval_msg_finetune_warmup_steps,
+                schedule_type="cosine",
+                min_learning_rate=None,
+            ) / self.eval_msg_finetune_learning_rate,
+        )
+
+        for finetune_epoch in range(self.eval_msg_finetune_num_epochs):
+            backbone.train()
+            head.train()
+            seed = int(self.config.seed) + 5_000_000 + self.current_epoch * 1_000 + finetune_epoch
+            for batch in self._iter_massspec_probe("massspec_train", seed=seed):
+                batch = self._to_device(batch)
+                optimizer.zero_grad(set_to_none=True)
+                torch.compiler.cudagraph_mark_step_begin()
+                features = self._eval_feature_forward(batch)
+                logits = self._eval_head_forward(features)
+                targets = batch["fingerprint"][:, : self.fingerprint_bits].to(dtype=torch.float32)
+                loss = F.binary_cross_entropy_with_logits(logits, targets)
+                loss.backward()
+                optimizer.step()
+                scheduler.step()
+
+        accumulator = _FingerprintMetricAccumulator(self.fingerprint_bits)
+        backbone.eval()
+        head.eval()
         with torch.no_grad():
-            metrics = run_linear_probe(
-                self._iter_probe_features("massspec_train"),
-                self._iter_probe_features("massspec_test"),
-                ridge=self.probe_ridge,
-                fit_bias=self.probe_fit_bias,
+            eval_seed = int(self.config.seed) + 6_000_000 + self.current_epoch
+            for batch in self._iter_massspec_probe("massspec_test", seed=eval_seed):
+                batch = self._to_device(batch)
+                torch.compiler.cudagraph_mark_step_begin()
+                features = self._eval_feature_forward(batch)
+                logits = self._eval_head_forward(features)
+                targets = batch["fingerprint"][:, : self.fingerprint_bits].to(dtype=torch.float32)
+                accumulator.update(logits, targets)
+        return accumulator.compute(self.device)
+
+    def on_train_epoch_end(self) -> None:
+        metrics = self._run_msg_finetune_eval()
+        for key, value in metrics.items():
+            self.log(
+                f"msg_eval/{key}",
+                value,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=(key == "tanimoto"),
             )
-        self.log(
-            "massspec_test/linear_probe_accuracy",
-            metrics["accuracy"],
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-        )
-        self.log(
-            "massspec_test/linear_probe_pred_positive_rate",
-            metrics["pred_positive_rate"],
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-        )
-        self.log(
-            "massspec_test/linear_probe_target_positive_rate",
-            metrics["target_positive_rate"],
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-        )
-        self.log(
-            "massspec_test/linear_probe_tanimoto",
-            metrics["tanimoto"],
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-        )
 
     def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         del batch_idx
         torch.compiler.cudagraph_mark_step_begin()
-        non_blocking = self.non_blocking_device_transfer
-        batch = {
-            k: v.to(self.device, non_blocking=non_blocking) if isinstance(v, torch.Tensor) else v
-            for k, v in batch.items()
-        }
+        batch = self._to_device(batch)
         bcs_projection = self._sample_bcs_projection(self.global_step)
         metrics = self._train_forward(batch, bcs_projection)
         step = self.global_step + 1
@@ -393,51 +554,12 @@ class MAELightningModule(pl.LightningModule):
                     )
                 continue
             metric_name = f"train/{key}"
+            if key == "representation_variance":
+                self.log(metric_name, value, on_step=True, on_epoch=True, prog_bar=False)
+                continue
             self.log(metric_name, value, on_step=False, on_epoch=True, prog_bar=False)
             if should_log_step and self.train_log_extra_metrics_on_step:
                 self.log(f"{metric_name}_step", value, on_step=True, on_epoch=False, prog_bar=False)
-        return metrics["loss"]
-
-    def validation_step(
-        self,
-        batch: dict[str, torch.Tensor],
-        batch_idx: int,
-        dataloader_idx: int = 0,
-    ) -> torch.Tensor:
-        torch.compiler.cudagraph_mark_step_begin()
-        non_blocking = self.non_blocking_device_transfer
-        batch = {
-            k: v.to(self.device, non_blocking=non_blocking) if isinstance(v, torch.Tensor) else v
-            for k, v in batch.items()
-        }
-        bcs_projection = self._sample_bcs_projection(
-            10_000_000 + self.global_step + dataloader_idx * 100_000 + batch_idx
-        )
-        split = self.eval_splits[dataloader_idx]
-        metrics = self._eval_forward(batch, bcs_projection)
-        for key, value in metrics.items():
-            self.log(f"{split}/{key}", value, on_step=False, on_epoch=True)
-        return metrics["loss"]
-
-    def test_step(
-        self,
-        batch: dict[str, torch.Tensor],
-        batch_idx: int,
-        dataloader_idx: int = 0,
-    ) -> torch.Tensor:
-        torch.compiler.cudagraph_mark_step_begin()
-        non_blocking = self.non_blocking_device_transfer
-        batch = {
-            k: v.to(self.device, non_blocking=non_blocking) if isinstance(v, torch.Tensor) else v
-            for k, v in batch.items()
-        }
-        bcs_projection = self._sample_bcs_projection(
-            20_000_000 + self.global_step + dataloader_idx * 100_000 + batch_idx
-        )
-        split = self.test_splits[dataloader_idx]
-        metrics = self._eval_forward(batch, bcs_projection)
-        for key, value in metrics.items():
-            self.log(f"{split}/{key}", value, on_step=False, on_epoch=True)
         return metrics["loss"]
 
     def configure_optimizers(self):
@@ -485,19 +607,14 @@ def train_and_evaluate(
     info = datamodule.info
     config.num_peaks = info["num_peaks"]
     config.fingerprint_bits = int(info["fingerprint_bits"])
-    config.probe_bits = int(config.get("probe_bits", config.fingerprint_bits))
 
     logging.info("Training with Lightning for %d epochs.", num_epochs)
     logging.info("Steps per epoch: %d", steps_per_epoch)
     logging.info("Total steps: %d", total_steps)
-    logging.info("Validation splits: %s", datamodule.eval_splits)
-    logging.info("Test splits: %s", datamodule.test_splits)
 
     module = MAELightningModule(
         config,
         total_steps=total_steps,
-        eval_splits=datamodule.eval_splits,
-        test_splits=datamodule.test_splits,
     )
 
     checkpoint_dir = Path(str(workdir)) / "checkpoints"
@@ -534,19 +651,19 @@ def train_and_evaluate(
         default_root_dir=str(workdir),
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1,
-        precision="bf16-mixed",
+        precision="16-mixed",
         max_epochs=num_epochs,
         log_every_n_steps=int(config.log_every_n_steps),
-        val_check_interval=config.val_check_interval,
+        val_check_interval=1.0,
         gradient_clip_val=float(config.clip) if config.get("clip", 0.) > 0. else None,
         gradient_clip_algorithm="norm" if config.get("clip", 0.) > 0. else None,
         callbacks=callbacks,
         logger=logger,
         reload_dataloaders_every_n_epochs=0,
         limit_train_batches=config.get("limit_train_batches", 1.0),
-        limit_val_batches=config.get("limit_val_batches", 1.0),
-        limit_test_batches=config.get("limit_test_batches", 1.0),
-        num_sanity_val_steps=int(config.get("num_sanity_val_steps", 0)),
+        limit_val_batches=0,
+        limit_test_batches=0,
+        num_sanity_val_steps=0,
     )
 
     ckpt_path = _latest_ckpt_path(Path(str(workdir)))

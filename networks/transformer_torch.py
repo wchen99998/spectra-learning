@@ -6,7 +6,10 @@ import math
 
 import torch
 from torch import nn
-from torch.nn import functional as F
+from torch.nn.attention.flex_attention import flex_attention
+
+compiled_flex_attention_cuda = torch.compile(flex_attention)
+compiled_flex_attention_cpu = torch.compile(flex_attention, backend="eager")
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -89,13 +92,15 @@ class Attention(nn.Module):
         k = xk.transpose(1, 2)
         v = xv.transpose(1, 2)
 
-        attn = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            is_causal=self.causal,
-            enable_gqa=self.n_kv_heads != self.n_heads,
-        )
+        if self.n_kv_heads != self.n_heads:
+            rep = self.n_heads // self.n_kv_heads
+            k = k.unsqueeze(2).expand(-1, -1, rep, -1, -1).reshape(bsz, self.n_heads, seqlen, self.head_dim)
+            v = v.unsqueeze(2).expand(-1, -1, rep, -1, -1).reshape(bsz, self.n_heads, seqlen, self.head_dim)
+
+        if q.is_cuda:
+            attn = compiled_flex_attention_cuda(q, k, v)
+        else:
+            attn = compiled_flex_attention_cpu(q, k, v)
         attn = attn.transpose(1, 2).contiguous().view(bsz, seqlen, self.dim)
         return self.wo(attn)
 

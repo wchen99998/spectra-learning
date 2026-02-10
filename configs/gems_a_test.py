@@ -30,6 +30,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_kv_heads = 6
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 128
+    cfg.pooling_type = "pma"
+    cfg.pma_num_heads = cfg.num_heads
+    cfg.pma_num_seeds = 1
     cfg.sigreg_use_projector = True
     cfg.sigreg_proj_hidden_dim = 2048
     cfg.sigreg_proj_output_dim = 128
@@ -79,6 +82,16 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataloader_persistent_workers = True
     cfg.dataloader_pin_memory = True
     cfg.train_log_extra_metrics_on_step = False
+
+    # Epoch-end MSG eval fine-tuning
+    cfg.eval_msg_finetune_num_epochs = 1
+    cfg.eval_msg_finetune_feature_source = "encoder"
+    cfg.eval_msg_finetune_trainable_scope = "full"
+    cfg.eval_msg_finetune_head_hidden_dim = 512
+    cfg.eval_msg_finetune_learning_rate = 1e-4
+    cfg.eval_msg_finetune_weight_decay = 1e-4
+    cfg.eval_msg_finetune_warmup_steps = 500
+    cfg.eval_msg_finetune_peak_ordering = "intensity"
 
     # System / logging
     cfg.enable_wandb = True

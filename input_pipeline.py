@@ -725,13 +725,16 @@ def _build_dataset(
     intensity_scaling: str,
     mz_representation: str,
     peak_ordering: str = "intensity",
+    num_parallel_reads: int | None = None,
 ) -> tf.data.Dataset:
+    if num_parallel_reads is None:
+        num_parallel_reads = tf.data.AUTOTUNE
     parse_fn = _parse_example_with_fingerprint if include_fingerprint else _parse_example
     ds = tf.data.TFRecordDataset(
         filenames,
         compression_type="GZIP",
         buffer_size=int(tfrecord_buffer_size),
-        num_parallel_reads=tf.data.AUTOTUNE,
+        num_parallel_reads=num_parallel_reads,
     )
     ds = ds.map(parse_fn, num_parallel_calls=tf.data.AUTOTUNE)
     ds = ds.filter(_filter_max_precursor_mz(max_precursor_mz))
@@ -1321,4 +1324,3 @@ if __name__ == "__main__":
         print("\nFirst sample peak_mz:", batch["peak_mz"][0][:10])
         print("First sample peak_intensity:", batch["peak_intensity"][0][:10])
         print("First sample peak_valid_mask:", batch["peak_valid_mask"][0][:10])
-

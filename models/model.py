@@ -194,6 +194,9 @@ class PeakSetSIGReg(nn.Module):
         sigreg_drop_prob: float = 0.20,
         sigreg_mz_jitter_std: float = 0.005,
         sigreg_intensity_jitter_std: float = 0.05,
+        pooling_type: str = "pma",
+        pma_num_heads: int | None = None,
+        pma_num_seeds: int = 1,
     ):
         super().__init__()
         self.num_peaks = num_peaks
@@ -203,6 +206,8 @@ class PeakSetSIGReg(nn.Module):
         self.sigreg_drop_prob = sigreg_drop_prob
         self.sigreg_mz_jitter_std = sigreg_mz_jitter_std
         self.sigreg_intensity_jitter_std = sigreg_intensity_jitter_std
+        self.pooling_type = pooling_type
+        self.pma_num_seeds = int(pma_num_seeds)
 
         self.encoder = PeakSetEncoder(
             model_dim=model_dim,
@@ -230,9 +235,18 @@ class PeakSetSIGReg(nn.Module):
         else:
             self.projector = nn.Identity()
 
+        pma_heads = int(encoder_num_heads) if pma_num_heads is None else int(pma_num_heads)
+        self.pool_query = nn.Parameter(torch.empty(self.pma_num_seeds, model_dim))
+        nn.init.xavier_normal_(self.pool_query)
+        self.pool_mha = nn.MultiheadAttention(
+            embed_dim=model_dim,
+            num_heads=pma_heads,
+            batch_first=True,
+        )
+
         self.sigreg_loss = BCSLoss(num_slices=bcs_num_slices, lmbd=sigreg_lambda)
 
-    def _masked_mean_pool(
+    def _mean_pool(
         self,
         embeddings: torch.Tensor,
         valid_mask: torch.Tensor,
@@ -240,6 +254,25 @@ class PeakSetSIGReg(nn.Module):
         mask = valid_mask.unsqueeze(-1).float()
         denom = mask.sum(dim=1).clamp(min=1.0)
         return (embeddings * mask).sum(dim=1) / denom
+
+    def _pool(
+        self,
+        embeddings: torch.Tensor,
+        valid_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.pooling_type == "mean":
+            return self._mean_pool(embeddings, valid_mask)
+        if self.pooling_type == "pma":
+            query = self.pool_query.unsqueeze(0).expand(embeddings.shape[0], -1, -1)
+            pooled, _ = self.pool_mha(
+                query=query,
+                key=embeddings,
+                value=embeddings,
+                key_padding_mask=~valid_mask,
+                need_weights=False,
+            )
+            return pooled.mean(dim=1)
+        raise NotImplementedError(f"Unknown pooling type: {self.pooling_type}")
 
     def _augment_view(
         self,
@@ -296,9 +329,10 @@ class PeakSetSIGReg(nn.Module):
         fused_valid = torch.cat([view1_valid, view2_valid], dim=0)
 
         fused_emb = self.encoder(fused_mz, fused_int, fused_precursor)
-        fused_pooled = self._masked_mean_pool(fused_emb, fused_valid)
+        fused_pooled = self._pool(fused_emb, fused_valid)
         fused_z = self.projector(fused_pooled)
         z1, z2 = fused_z.chunk(2, dim=0)
+        representation_variance = fused_z.var(dim=0, unbiased=False).mean()
 
         loss_dict = self.sigreg_loss(z1, z2, proj=bcs_projection)
         valid_fraction = fused_valid.float().mean()
@@ -308,6 +342,7 @@ class PeakSetSIGReg(nn.Module):
             "bcs_loss": loss_dict["bcs_loss"],
             "invariance_loss": loss_dict["invariance_loss"],
             "valid_fraction": valid_fraction,
+            "representation_variance": representation_variance,
         }
 
     def encode(
@@ -323,7 +358,7 @@ class PeakSetSIGReg(nn.Module):
         precursor_mz = batch["precursor_mz"]
 
         embeddings = self.encoder(peak_mz, peak_intensity, precursor_mz)
-        pooled = self._masked_mean_pool(embeddings, peak_valid_mask)
+        pooled = self._pool(embeddings, peak_valid_mask)
         return self.projector(pooled)
 
     def compute_loss(

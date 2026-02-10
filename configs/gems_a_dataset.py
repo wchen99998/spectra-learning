@@ -42,6 +42,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_kv_heads = None
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 128
+    cfg.pooling_type = "pma"
+    cfg.pma_num_heads = cfg.num_heads
+    cfg.pma_num_seeds = 1
     cfg.sigreg_use_projector = True
     cfg.sigreg_proj_hidden_dim = 2048
     cfg.sigreg_proj_output_dim = 128
