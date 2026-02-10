@@ -1157,7 +1157,12 @@ class TfLightningDataModule(pl.LightningDataModule):
         *,
         peak_ordering: str | None = None,
     ) -> tf.data.Dataset:
-        files = self.massspec_train_files if split == "massspec_train" else self.massspec_test_files
+        if split == "massspec_train":
+            files = self.massspec_train_files
+        elif split == "massspec_val":
+            files = self.massspec_val_files
+        else:
+            files = self.massspec_test_files
         if peak_ordering is None:
             peak_ordering = self.probe_peak_ordering
         return _build_dataset(

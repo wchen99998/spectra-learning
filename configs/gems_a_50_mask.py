@@ -38,9 +38,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_proj_hidden_dim = 2048
     cfg.sigreg_proj_output_dim = 128
     cfg.sigreg_lambda = 10.0
-    cfg.sigreg_drop_prob = 0.20
-    cfg.sigreg_mz_jitter_std = 0.000005
-    cfg.sigreg_intensity_jitter_std = 0.05
+    cfg.sigreg_drop_prob = 0.25
+    cfg.sigreg_mz_jitter_std = 0.001
+    cfg.sigreg_intensity_jitter_std = 0.01
 
     # Training (short smoke run)
     cfg.num_epochs = 5
@@ -48,7 +48,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.warmup_steps = 10_000
     cfg.learning_rate_schedule = "cosine"
     cfg.min_learning_rate = None
-    cfg.b2 = 0.98
+    cfg.b2 = 0.99
     cfg.weight_decay = 1e-4
     cfg.optimizer = "adamw"
     cfg.clip = 0.
