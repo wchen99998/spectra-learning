@@ -10,6 +10,9 @@ import math
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+import os
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+
 import lightning.pytorch as pl
 import numpy as np
 import tensorflow as tf

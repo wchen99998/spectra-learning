@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import logging
 import os
 from pathlib import Path
@@ -10,21 +9,12 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  # Suppress TF info/warning logs
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"  # Disable oneDNN messages
 
 import tensorflow as tf
-from ml_collections import config_dict
 
 from train import train_and_evaluate
+from utils.training import load_config
 
 
 tf.config.set_visible_devices([], "GPU")
-
-
-def _load_config(path: str | Path) -> config_dict.ConfigDict:
-    path = Path(path)
-    spec = importlib.util.spec_from_file_location("experiment_config", path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module.get_config()
 
 
 def _parse_args() -> argparse.Namespace:
@@ -38,7 +28,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
     args = _parse_args()
 
-    config = _load_config(args.config)
+    config = load_config(args.config)
     workdir = Path(args.workdir).expanduser().resolve()
 
     train_and_evaluate(config, workdir=workdir)

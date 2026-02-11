@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import importlib.util
 import json
 import logging
 from pathlib import Path
@@ -24,53 +23,7 @@ from input_pipeline import (
     numpy_batch_to_torch,
 )
 from models.model import PeakSetSIGReg
-
-
-def _load_config(path: str) -> config_dict.ConfigDict:
-    spec = importlib.util.spec_from_file_location("export_embeddings_config", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.get_config()
-
-
-def _build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
-    return PeakSetSIGReg(
-        num_peaks=int(config.num_peaks),
-        model_dim=int(config.model_dim),
-        encoder_num_layers=int(config.num_layers),
-        encoder_num_heads=int(config.num_heads),
-        encoder_num_kv_heads=config.get("num_kv_heads", None),
-        attention_mlp_multiple=float(config.attention_mlp_multiple),
-        feature_mlp_hidden_dim=int(config.get("feature_mlp_hidden_dim", 128)),
-        mz_fourier_num_frequencies=int(config.get("mz_fourier_num_frequencies", 32)),
-        mz_fourier_min_freq=float(config.get("mz_fourier_min_freq", 1.0)),
-        mz_fourier_max_freq=float(config.get("mz_fourier_max_freq", 100.0)),
-        mz_fourier_learnable=bool(config.get("mz_fourier_learnable", False)),
-        pooling_type=str(config.get("pooling_type", "pma")),
-        pma_num_heads=config.get("pma_num_heads", int(config.num_heads)),
-        pma_num_seeds=int(config.get("pma_num_seeds", 1)),
-        sigreg_use_projector=bool(config.get("sigreg_use_projector", True)),
-        sigreg_proj_hidden_dim=int(config.get("sigreg_proj_hidden_dim", 2048)),
-        sigreg_proj_output_dim=int(config.get("sigreg_proj_output_dim", 128)),
-        bcs_num_slices=int(config.get("sigreg_num_slices", 256)),
-        sigreg_lambda=float(config.get("sigreg_lambda", 10.0)),
-        sigreg_drop_prob=float(config.get("sigreg_drop_prob", 0.20)),
-        sigreg_mz_jitter_std=float(config.get("sigreg_mz_jitter_std", 0.005)),
-        sigreg_intensity_jitter_std=float(config.get("sigreg_intensity_jitter_std", 0.05)),
-    )
-
-
-def _load_checkpoint(model: PeakSetSIGReg, checkpoint_path: str) -> None:
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    state_dict = checkpoint["state_dict"] if "state_dict" in checkpoint else checkpoint
-    model_state = {
-        key.removeprefix("model."): value
-        for key, value in state_dict.items()
-        if key.startswith("model.")
-    }
-    if not model_state:
-        model_state = state_dict
-    model.load_state_dict(model_state, strict=True)
+from utils.training import build_model_from_config, load_config, load_pretrained_weights
 
 
 def _inverse_vocab(vocab: dict[str, int]) -> dict[int, str]:
@@ -279,7 +232,7 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    config = _load_config(args.config)
+    config = load_config(args.config)
     if args.batch_size is not None:
         config.batch_size = int(args.batch_size)
 
@@ -287,8 +240,8 @@ def main() -> None:
     config.num_peaks = int(datamodule.info["num_peaks"])
 
     device = torch.device(args.device)
-    model = _build_model_from_config(config)
-    _load_checkpoint(model, args.checkpoint)
+    model = build_model_from_config(config)
+    load_pretrained_weights(model, args.checkpoint)
     model.to(device)
     model.eval()
 

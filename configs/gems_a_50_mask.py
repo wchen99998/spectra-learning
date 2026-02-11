@@ -61,12 +61,12 @@ def get_config() -> config_dict.ConfigDict:
     cfg.device_prefetch_size = 1
     cfg.log_every_n_steps = 500
     cfg.train_step_log_interval = 500
-    cfg.val_check_interval = 0.25
+    cfg.val_check_interval = 1.0
     cfg.checkpoint_every_steps = 25000
     cfg.init_seed = 0
     cfg.probe_peak_ordering = "intensity"
-    cfg.limit_train_batches = 0.5
-    cfg.limit_val_batches = 1.0
+    cfg.limit_train_batches = 0.001
+    cfg.limit_val_batches = 0.03
     cfg.limit_test_batches = 1.0
     cfg.num_sanity_val_steps = 0
     apply_training_defaults(cfg)

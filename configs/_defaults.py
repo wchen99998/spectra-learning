@@ -48,13 +48,13 @@ def apply_final_probe_defaults(cfg: config_dict.ConfigDict) -> None:
 
 
 def apply_tune_defaults(cfg: config_dict.ConfigDict) -> None:
-    """Apply default Ray Tune search space definition.
+    """Apply default tune search space definition.
 
     Each entry is {"param": <config key>, "dist": <distribution>, "args": [...]}.
-    Supported distributions: loguniform, uniform, choice, randint, quniform.
+    Supported distributions: grid, loguniform, uniform, choice, randint, quniform.
     """
     cfg.tune_param_space = [
-        {"param": "learning_rate", "dist": "grid_search", "args": [1e-4, 4e-4]},
-        {"param": "weight_decay", "dist": "grid_search", "args": [1e-5, 1e-4, 1e-3, 1e-2]},
-        {"param": "sigreg_lambda", "dist": "grid_search", "args": [0.05, 0.5, 5.0]},
+        # {"param": "learning_rate", "dist": "grid", "args": [1e-4, 4e-4]},
+        # {"param": "weight_decay", "dist": "grid", "args": [1e-5, 1e-4, 1e-3, 1e-2]},
+        {"param": "sigreg_lambda", "dist": "grid", "args": [0.05, 0.5, 5.0]},
     ]

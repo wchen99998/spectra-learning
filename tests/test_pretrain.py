@@ -4,7 +4,7 @@ import tempfile
 import tensorflow as tf
 import torch
 
-from finetune import _load_pretrained_weights
+from utils.training import load_pretrained_weights
 from input_pipeline import (
     _NUM_PEAKS_OUTPUT,
     _compact_sort_peaks,
@@ -290,8 +290,8 @@ class CheckpointCompatibilityTests(unittest.TestCase):
 
         with tempfile.NamedTemporaryFile(suffix=".ckpt") as tmp:
             torch.save(ckpt, tmp.name)
-            with self.assertRaises(ValueError):
-                _load_pretrained_weights(model, tmp.name)
+            with self.assertRaises(RuntimeError):
+                load_pretrained_weights(model, tmp.name)
 
 
 if __name__ == "__main__":

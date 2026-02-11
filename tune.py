@@ -1,96 +1,170 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
+import itertools
 import json
 import logging
+import math
+import random
 from pathlib import Path
 
-import ray
-from ml_collections import config_dict
-from ray import tune
-from ray.tune import RunConfig
-from ray.air.integrations.wandb import WandbLoggerCallback
-
 from train import train_and_evaluate
+from utils.training import load_config
 
-_TUNE_DIST_REGISTRY: dict[str, callable] = {
-    "loguniform": tune.loguniform,
-    "uniform": tune.uniform,
-    "choice": tune.choice,
-    "randint": tune.randint,
-    "quniform": tune.quniform,
-    "grid_search": tune.grid_search,
+_PARAM_ABBREVS: dict[str, str] = {
+    "learning_rate": "lr",
+    "weight_decay": "wd",
+    "sigreg_lambda": "lam",
 }
 
 
-def _load_config(path: str | Path) -> config_dict.ConfigDict:
-    path = Path(path)
-    spec = importlib.util.spec_from_file_location("experiment_config", path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module.get_config()
+def _sample_value(dist: str, args: list, rng: random.Random) -> object:
+    if dist == "loguniform":
+        low, high = args
+        return math.exp(rng.uniform(math.log(low), math.log(high)))
+    if dist == "uniform":
+        low, high = args
+        return rng.uniform(low, high)
+    if dist == "choice":
+        return rng.choice(args)
+    if dist == "randint":
+        low, high = args
+        return rng.randint(low, high - 1)
+    if dist == "quniform":
+        low, high, q = args
+        return round(rng.uniform(low, high) / q) * q
+    raise ValueError(f"Unknown distribution: {dist!r}")
 
 
-def _build_param_space(cfg: config_dict.ConfigDict) -> dict[str, object]:
-    specs = cfg.get("tune_param_space", [])
-    assert specs, (
-        "cfg.tune_param_space is empty. "
-        "Define tunable parameters in the config file via apply_tune_defaults() "
-        "or set cfg.tune_param_space directly."
-    )
-    space: dict[str, object] = {}
-    for entry in specs:
-        name = entry["param"]
-        dist_name = entry["dist"]
-        args = entry["args"]
-        dist_fn = _TUNE_DIST_REGISTRY[dist_name]
-        # choice/grid_search take a single list; others take unpacked args
-        if dist_name in ("choice", "grid_search"):
-            space[name] = dist_fn(args)
+def generate_trial_configs(
+    param_space: list[dict],
+    num_samples: int,
+    seed: int,
+) -> list[dict[str, object]]:
+    grid_params: list[tuple[str, list]] = []
+    random_params: list[dict] = []
+    for entry in param_space:
+        if entry["dist"] == "grid":
+            grid_params.append((entry["param"], entry["args"]))
         else:
-            space[name] = dist_fn(*args)
-    return space
+            random_params.append(entry)
+
+    # Build grid combinations (Cartesian product)
+    if grid_params:
+        grid_names = [name for name, _ in grid_params]
+        grid_values = [vals for _, vals in grid_params]
+        grid_combos = [dict(zip(grid_names, combo)) for combo in itertools.product(*grid_values)]
+    else:
+        grid_combos = [{}]
+
+    if not random_params:
+        return grid_combos
+
+    rng = random.Random(seed)
+    trials = []
+    for grid_combo in grid_combos:
+        for _ in range(num_samples):
+            trial = dict(grid_combo)
+            for entry in random_params:
+                trial[entry["param"]] = _sample_value(entry["dist"], entry["args"], rng)
+            trials.append(trial)
+    return trials
 
 
-def _trainable(
-    trial_config: dict[str, object],
+def build_trial_run_name(idx: int, trial_config: dict[str, object]) -> str:
+    parts = []
+    for param, value in trial_config.items():
+        abbrev = _PARAM_ABBREVS.get(param, param)
+        if isinstance(value, float):
+            parts.append(f"{abbrev}={value:.2g}")
+        else:
+            parts.append(f"{abbrev}={value}")
+    suffix = "_".join(parts)
+    return f"tune-{idx:03d}-{suffix}"
+
+
+def run_trials(
     *,
-    base_config_path: str,
-    resolved_tfrecord_dir: str,
+    config_path: str,
+    workdir: Path,
+    trial_configs: list[dict[str, object]],
+    metric: str,
+    mode: str,
+    wandb_project: str,
+    overrides: dict[str, object],
+) -> list[dict]:
+    results = []
+    for idx, trial_params in enumerate(trial_configs):
+        trial_dir = workdir / f"trial_{idx:03d}"
+        trial_name = build_trial_run_name(idx, trial_params)
+        logging.info("=== Trial %d/%d: %s ===", idx + 1, len(trial_configs), trial_name)
+
+        cfg = load_config(config_path)
+        for key, value in overrides.items():
+            cfg[key] = value
+        for key, value in trial_params.items():
+            cfg[key] = value
+
+        # Configure WandB for this trial
+        if wandb_project:
+            cfg.enable_wandb = True
+            cfg.wandb_project = wandb_project
+            cfg.wandb_kwargs = {"name": trial_name}
+            cfg.wandb_run_name_prefix = ""
+
+        final_metrics = train_and_evaluate(cfg, workdir=trial_dir)
+        import wandb
+        if wandb.run is not None:
+            wandb.finish()
+        metric_value = final_metrics.get(metric)
+        results.append({
+            "idx": idx,
+            "name": trial_name,
+            "params": trial_params,
+            "metrics": final_metrics,
+            "metric_value": metric_value,
+            "workdir": str(trial_dir),
+        })
+        logging.info("Trial %d metric %s = %s", idx, metric, metric_value)
+    return results
+
+
+def print_summary(
+    results: list[dict],
+    metric: str,
+    mode: str,
 ) -> None:
-    cfg = _load_config(base_config_path)
-    for key, value in trial_config.items():
-        cfg[key] = value
+    valid = [r for r in results if r["metric_value"] is not None]
+    if not valid:
+        logging.warning("No trials returned the metric %r.", metric)
+        return
+    reverse = mode == "max"
+    ranked = sorted(valid, key=lambda r: r["metric_value"], reverse=reverse)
 
-    # Use the pre-resolved absolute path so trials don't re-download data.
-    cfg.tfrecord_dir = resolved_tfrecord_dir
-
-    # Ray handles W&B logging through WandbLoggerCallback.
-    cfg.enable_wandb = False
-
-    trial_dir = Path(tune.get_context().get_trial_dir())
-    final_metrics = train_and_evaluate(cfg, workdir=trial_dir)
-    tune_metrics = {
-        key.replace("/", "_"): float(value)
-        for key, value in final_metrics.items()
-    }
-    tune.report(tune_metrics)
+    print(f"\n{'='*80}")
+    print(f"  Tune results — {len(valid)} trials, metric={metric}, mode={mode}")
+    print(f"{'='*80}")
+    print(f"  {'Rank':<6}{'Trial':<40}{metric:<20}{'Dir'}")
+    print(f"  {'-'*6}{'-'*40}{'-'*20}{'-'*14}")
+    for rank, r in enumerate(ranked, 1):
+        print(f"  {rank:<6}{r['name']:<40}{r['metric_value']:<20.6f}{r['workdir']}")
+    best = ranked[0]
+    print(f"\n  Best: {best['name']}  ({metric} = {best['metric_value']:.6f})")
+    print(f"  Config: {best['params']}")
+    print(f"  Workdir: {best['workdir']}")
+    print(f"{'='*80}\n")
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Ray Tune HPO for pretraining + final attentive probe.")
+    parser = argparse.ArgumentParser(description="Lightweight HPO for pretraining + final attentive probe.")
     parser.add_argument("--config", required=True, help="Path to training config python file.")
-    parser.add_argument("--workdir", required=True, help="Ray results root directory.")
-    parser.add_argument("--num-samples", type=int, default=16, help="Number of trials to sample.")
-    parser.add_argument("--cpus-per-trial", type=float, default=8.0, help="CPU resources per trial.")
-    parser.add_argument("--gpus-per-trial", type=float, default=1.0, help="GPU resources per trial.")
-    parser.add_argument("--max-concurrent-trials", type=int, default=2, help="Max concurrent trials.")
+    parser.add_argument("--workdir", required=True, help="Root directory for trial outputs.")
+    parser.add_argument("--num-samples", type=int, default=16, help="Random samples per grid combination.")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducible sampling.")
     parser.add_argument(
         "--metric",
-        default="final_probe_test_acc_precursor_bin",
-        help="Metric to optimize (Ray-reported key).",
+        default="final_probe/test/acc_precursor_bin",
+        help="Metric key to optimize (from train_and_evaluate).",
     )
     parser.add_argument(
         "--mode",
@@ -101,77 +175,55 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--wandb-project",
         default="",
-        help="W&B project for Ray trial-level logging. Empty disables callback.",
+        help="W&B project for per-trial logging. Empty disables WandB.",
     )
     parser.add_argument(
         "--override-json",
         default="",
         help=(
-            "Optional JSON dict to pin specific parameters to fixed values. "
-            "Example: '{\"final_probe_num_epochs\": 3}'. "
-            "These override the config's tune_param_space distributions."
+            "Optional JSON dict of config overrides applied to every trial. "
+            "Example: '{\"num_epochs\": 1, \"limit_train_batches\": 0.01}'"
         ),
     )
     return parser.parse_args()
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = _parse_args()
 
     workdir = Path(args.workdir).expanduser().resolve()
     workdir.mkdir(parents=True, exist_ok=True)
-    cfg = _load_config(args.config)
 
-    param_space = _build_param_space(cfg)
-    if args.override_json:
-        overrides = json.loads(args.override_json)
-        param_space.update(overrides)
+    config_path = str(Path(args.config).expanduser().resolve())
+    cfg = load_config(config_path)
 
-    callbacks = []
-    wandb_project = args.wandb_project or str(cfg.get("wandb_project", ""))
-    if wandb_project:
-        callbacks.append(WandbLoggerCallback(project=wandb_project, log_config=True))
-
-    # Resolve tfrecord_dir to an absolute path so trials reuse existing data.
-    resolved_tfrecord_dir = str(
-        Path(cfg.get("tfrecord_dir", "data/gems_peaklist_tfrecord")).expanduser().resolve()
+    param_space = cfg.get("tune_param_space", [])
+    assert param_space, (
+        "cfg.tune_param_space is empty. "
+        "Define tunable parameters in the config file via apply_tune_defaults() "
+        "or set cfg.tune_param_space directly."
     )
 
-    ray.init(ignore_reinit_error=True)
-    trainable = tune.with_parameters(
-        _trainable,
-        base_config_path=str(Path(args.config).expanduser().resolve()),
-        resolved_tfrecord_dir=resolved_tfrecord_dir,
-    )
-    trainable = tune.with_resources(
-        trainable,
-        resources={
-            "cpu": float(args.cpus_per_trial),
-            "gpu": float(args.gpus_per_trial),
-        },
-    )
+    overrides = json.loads(args.override_json) if args.override_json else {}
 
-    tuner = tune.Tuner(
-        trainable,
-        param_space=param_space,
-        tune_config=tune.TuneConfig(
-            metric=args.metric,
-            mode=args.mode,
-            num_samples=int(args.num_samples),
-            max_concurrent_trials=int(args.max_concurrent_trials),
-        ),
-        run_config=RunConfig(
-            name="spectra_hpo",
-            storage_path=str(workdir),
-            callbacks=callbacks,
-        ),
+    trial_configs = generate_trial_configs(
+        list(param_space),
+        num_samples=args.num_samples,
+        seed=args.seed,
     )
-    results = tuner.fit()
-    best = results.get_best_result(metric=args.metric, mode=args.mode)
+    logging.info("Generated %d trial configurations.", len(trial_configs))
 
-    print("Best trial metric:", best.metrics[args.metric])
-    print("Best trial config:", best.config)
+    results = run_trials(
+        config_path=config_path,
+        workdir=workdir,
+        trial_configs=trial_configs,
+        metric=args.metric,
+        mode=args.mode,
+        wandb_project=args.wandb_project or str(cfg.get("wandb_project", "")),
+        overrides=overrides,
+    )
+    print_summary(results, metric=args.metric, mode=args.mode)
 
 
 if __name__ == "__main__":

@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import logging
-import math
 from pathlib import Path
 
 import lightning.pytorch as pl
@@ -14,96 +12,11 @@ import torch
 import torch.nn.functional as F
 from ml_collections import config_dict
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
-from lightning.pytorch.loggers import CSVLogger
 
 from input_pipeline import TfLightningDataModule, numpy_batch_to_torch
 from models.model import PeakSetSIGReg
-from utils import wandb_writer
-
-
-def _learning_rate_at_step(
-    step: int,
-    *,
-    base_lr: float,
-    total_steps: int,
-    warmup_steps: int,
-) -> float:
-    if warmup_steps > 0:
-        warmup = min(1.0, step / warmup_steps)
-        effective_step = max(0, step - warmup_steps)
-        effective_total = max(1, total_steps - warmup_steps)
-    else:
-        warmup = 1.0
-        effective_step = step
-        effective_total = max(1, total_steps)
-
-    total = max(1, effective_total)
-    ratio = max(0.0, effective_step / total)
-    mult = 0.5 * (1.0 + math.cos(math.pi * ratio))
-    lr = mult * base_lr
-    min_lr = 0.1 * base_lr
-    return max(min_lr, lr) * warmup
-
-
-def _build_logger(config: config_dict.ConfigDict, workdir: Path) -> pl.loggers.Logger:
-    if config.get("enable_wandb", False):
-        from lightning.pytorch.loggers import WandbLogger
-
-        wandb_kwargs = wandb_writer.build_wandb_init_kwargs(config)
-        logger = WandbLogger(
-            project=config.get("wandb_project", "md4"),
-            save_dir=str(workdir),
-            log_model=False,
-            **wandb_kwargs,
-        )
-        logger.log_hyperparams(wandb_writer.config_to_wandb_dict(config))
-        return logger
-
-    return CSVLogger(save_dir=str(workdir), name="csv_logs")
-
-
-def _build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
-    return PeakSetSIGReg(
-        num_peaks=int(config.num_peaks),
-        model_dim=int(config.model_dim),
-        encoder_num_layers=int(config.num_layers),
-        encoder_num_heads=int(config.num_heads),
-        encoder_num_kv_heads=config.get("num_kv_heads", None),
-        attention_mlp_multiple=float(config.attention_mlp_multiple),
-        feature_mlp_hidden_dim=int(config.get("feature_mlp_hidden_dim", 128)),
-        mz_fourier_num_frequencies=int(config.get("mz_fourier_num_frequencies", 32)),
-        mz_fourier_min_freq=float(config.get("mz_fourier_min_freq", 1.0)),
-        mz_fourier_max_freq=float(config.get("mz_fourier_max_freq", 100.0)),
-        mz_fourier_learnable=bool(config.get("mz_fourier_learnable", False)),
-        pooling_type=str(config.get("pooling_type", "pma")),
-        pma_num_heads=config.get("pma_num_heads", int(config.num_heads)),
-        pma_num_seeds=int(config.get("pma_num_seeds", 1)),
-        sigreg_use_projector=bool(config.get("sigreg_use_projector", True)),
-        sigreg_proj_hidden_dim=int(config.get("sigreg_proj_hidden_dim", 2048)),
-        sigreg_proj_output_dim=int(config.get("sigreg_proj_output_dim", 128)),
-        bcs_num_slices=int(config.get("sigreg_num_slices", 256)),
-        sigreg_lambda=float(config.get("sigreg_lambda", 10.0)),
-        sigreg_drop_prob=float(config.get("sigreg_drop_prob", 0.20)),
-        sigreg_mz_jitter_std=float(config.get("sigreg_mz_jitter_std", 0.005)),
-        sigreg_intensity_jitter_std=float(
-            config.get("sigreg_intensity_jitter_std", 0.05)
-        ),
-    )
-
-
-def _load_pretrained_weights(model: PeakSetSIGReg, checkpoint_path: str) -> None:
-    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    state_dict = ckpt["state_dict"]
-    model_state = {
-        k.removeprefix("model."): v
-        for k, v in state_dict.items()
-        if k.startswith("model.")
-    }
-    result = model.load_state_dict(model_state, strict=False)
-    if result.missing_keys:
-        raise ValueError(f"Missing keys when loading checkpoint: {result.missing_keys}")
-    if result.unexpected_keys:
-        raise ValueError(f"Unexpected keys when loading checkpoint: {result.unexpected_keys}")
+from utils.schedulers import learning_rate_at_step
+from utils.training import build_logger, build_model_from_config, latest_ckpt_path, load_config, load_pretrained_weights
 
 
 class FinetuneLightningModule(pl.LightningModule):
@@ -114,6 +27,7 @@ class FinetuneLightningModule(pl.LightningModule):
         total_steps: int,
     ) -> None:
         super().__init__()
+        self.save_hyperparameters(ignore=["config"])
         self.config = config
         self.total_steps = int(total_steps)
 
@@ -124,11 +38,11 @@ class FinetuneLightningModule(pl.LightningModule):
         self.warmup_steps = int(config.get("warmup_steps", 0))
         self.fingerprint_bits = int(config.fingerprint_bits)
 
-        self.model = _build_model_from_config(config)
+        self.model = build_model_from_config(config)
 
         checkpoint_path = str(config.finetune_checkpoint)
         if checkpoint_path:
-            _load_pretrained_weights(self.model, checkpoint_path)
+            load_pretrained_weights(self.model, checkpoint_path)
 
         if self.freeze_backbone:
             for param in self.model.parameters():
@@ -173,7 +87,7 @@ class FinetuneLightningModule(pl.LightningModule):
             return pooled
 
     def _lr_for_step(self, step: int) -> float:
-        return _learning_rate_at_step(
+        return learning_rate_at_step(
             step,
             base_lr=self.base_lr,
             total_steps=self.total_steps,
@@ -457,16 +371,11 @@ class _FinetuneDataModule(pl.LightningDataModule):
         return self._build_loader("massspec_test", seed=44, shuffle=False)
 
 
-def _load_config(path: str) -> config_dict.ConfigDict:
-    spec = importlib.util.spec_from_file_location("finetune_config", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.get_config()
-
-
 def finetune(
     config: config_dict.ConfigDict,
     workdir: str | Path,
+    *,
+    extra_callbacks: list[pl.Callback] = (),
 ) -> None:
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -502,19 +411,19 @@ def finetune(
         save_top_k=3,
     )
     lr_monitor = LearningRateMonitor(logging_interval="step")
-    logger = _build_logger(config, workdir)
+    logger = build_logger(config, workdir)
 
     trainer = pl.Trainer(
         default_root_dir=str(workdir),
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1,
-        precision="bf16-mixed",
+        precision="16-mixed",
         max_epochs=num_epochs,
         log_every_n_steps=int(config.get("log_every_n_steps", 50)),
         val_check_interval=config.get("val_check_interval", 1.0),
         gradient_clip_val=float(config.clip) if config.get("clip", 0.0) > 0.0 else None,
         gradient_clip_algorithm="norm" if config.get("clip", 0.0) > 0.0 else None,
-        callbacks=[checkpoint_cb, lr_monitor],
+        callbacks=[checkpoint_cb, lr_monitor, *extra_callbacks],
         logger=logger,
         limit_train_batches=config.get("limit_train_batches", 1.0),
         limit_val_batches=config.get("limit_val_batches", 1.0),
@@ -522,7 +431,11 @@ def finetune(
         num_sanity_val_steps=int(config.get("num_sanity_val_steps", 0)),
     )
 
-    trainer.fit(module, datamodule=datamodule)
+    ckpt_path = latest_ckpt_path(workdir)
+    if ckpt_path is not None:
+        logging.info("Resuming from checkpoint: %s", ckpt_path)
+
+    trainer.fit(module, datamodule=datamodule, ckpt_path=ckpt_path)
     trainer.test(module, datamodule=datamodule, ckpt_path="best")
 
 
@@ -535,7 +448,7 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", default="", help="Pretrained checkpoint path (overrides config)")
     args = parser.parse_args()
 
-    cfg = _load_config(args.config)
+    cfg = load_config(args.config)
     if args.checkpoint:
         cfg.finetune_checkpoint = args.checkpoint
 

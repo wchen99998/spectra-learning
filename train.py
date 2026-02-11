@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import math
+import logging
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -9,143 +10,44 @@ import torch
 import torch._inductor.config as inductor_config
 import torch.nn.functional as F
 
+from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
+from ml_collections import config_dict
+
+from input_pipeline import TfLightningDataModule, numpy_batch_to_torch
+from models.model import PeakSetSIGReg
+from utils.schedulers import learning_rate_at_step
+from utils.training import build_logger, build_model_from_config, latest_ckpt_path
+
+
+def _configure_runtime_warning_filters() -> None:
+    warnings.filterwarnings(
+        "ignore",
+        message=r"`isinstance\(treespec, LeafSpec\)` is deprecated.*",
+        module=r"lightning\.pytorch\.utilities\._pytree",
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"The '.*_dataloader' does not have many workers which may be a bottleneck.*",
+        module=r"lightning\.pytorch\.trainer\.connectors\.data_connector",
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Your `IterableDataset` has `__len__` defined.*",
+        module=r"lightning\.pytorch\.utilities\.data",
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Found \d+ module\(s\) in eval mode at the start of training.*",
+        module=r"lightning\.pytorch\.loops\.fit_loop",
+    )
+
+
+_configure_runtime_warning_filters()
+
 torch.set_float32_matmul_precision('high')
 inductor_config.coordinate_descent_tuning = True
 inductor_config.triton.unique_kernel_names = True
 inductor_config.fx_graph_cache = True
-
-import logging
-from ml_collections import config_dict
-from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
-from lightning.pytorch.loggers import CSVLogger
-
-from input_pipeline import TfLightningDataModule, numpy_batch_to_torch
-from models.model import PeakSetSIGReg
-from utils import wandb_writer
-
-
-def _parse_schedule(schedule_type: str) -> tuple[str, dict[str, str]]:
-    parts = schedule_type.split(";")
-    base = parts[0]
-    parsed: dict[str, str] = {}
-    for kv in parts[1:]:
-        if "=" in kv:
-            k, v = kv.split("=", 1)
-            parsed[k.strip()] = v.strip()
-    return base, parsed
-
-
-def _cosine_decay(
-    base_lr: float,
-    step: int,
-    total_steps: int,
-    *,
-    min_lr: float | None,
-) -> float:
-    total_steps = max(1, total_steps)
-    ratio = max(0.0, step / total_steps)
-    mult = 0.5 * (1.0 + math.cos(math.pi * ratio))
-    decayed = mult * base_lr
-    min_lr_value = min_lr if min_lr is not None else 0.1 * base_lr
-    return max(min_lr_value, decayed)
-
-
-def _learning_rate_at_step(
-    step: int,
-    *,
-    base_lr: float,
-    total_steps: int,
-    warmup_steps: int,
-    schedule_type: str,
-    min_learning_rate: float | None,
-) -> float:
-    if warmup_steps > 0:
-        warmup = min(1.0, step / warmup_steps)
-        effective_step = max(0, step - warmup_steps)
-        effective_total = max(1, total_steps - warmup_steps)
-    else:
-        warmup = 1.0
-        effective_step = step
-        effective_total = max(1, total_steps)
-
-    schedule_base, parsed = _parse_schedule(schedule_type)
-
-    if schedule_base == "cosine":
-        lr = _cosine_decay(
-            base_lr,
-            effective_step,
-            effective_total,
-            min_lr=min_learning_rate,
-        )
-    elif schedule_base == "constant":
-        lr = base_lr
-    elif schedule_base == "cyclic_cosine":
-        cycle_length = int(parsed.get("cycle_length", max(1, total_steps // 10)))
-        min_lr = float(parsed.get("min_lr", 0.0))
-        decay_factor = float(parsed.get("decay_factor", 1.0))
-
-        cycle_index = effective_step // cycle_length
-        pos_in_cycle = effective_step % cycle_length
-        peak_lr = base_lr * (decay_factor ** cycle_index)
-        cosine_ratio = pos_in_cycle / cycle_length
-        lr = min_lr + 0.5 * (peak_lr - min_lr) * (1.0 + math.cos(math.pi * cosine_ratio))
-    else:
-        raise NotImplementedError(f"Unknown schedule type: {schedule_base}")
-
-    return lr * warmup
-
-
-def _build_logger(config: config_dict.ConfigDict, workdir: Path) -> pl.loggers.Logger:
-    if config.get("enable_wandb", False):
-        from lightning.pytorch.loggers import WandbLogger
-
-        wandb_kwargs = wandb_writer.build_wandb_init_kwargs(config)
-        logger = WandbLogger(
-            project=config.get("wandb_project", "md4"),
-            save_dir=str(workdir),
-            log_model=False,
-            **wandb_kwargs,
-        )
-        logger.log_hyperparams(wandb_writer.config_to_wandb_dict(config))
-        return logger
-
-    return CSVLogger(save_dir=str(workdir), name="csv_logs")
-
-
-def _latest_ckpt_path(directory: Path) -> str | None:
-    ckpts = sorted(directory.rglob("*.ckpt"), key=lambda p: p.stat().st_mtime)
-    if not ckpts:
-        return None
-    return str(ckpts[-1])
-
-
-def _build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
-    return PeakSetSIGReg(
-        num_peaks=int(config.num_peaks),
-        model_dim=int(config.model_dim),
-        encoder_num_layers=int(config.num_layers),
-        encoder_num_heads=int(config.num_heads),
-        encoder_num_kv_heads=config.get("num_kv_heads", None),
-        attention_mlp_multiple=float(config.attention_mlp_multiple),
-        feature_mlp_hidden_dim=int(config.get("feature_mlp_hidden_dim", 128)),
-        mz_fourier_num_frequencies=int(config.get("mz_fourier_num_frequencies", 32)),
-        mz_fourier_min_freq=float(config.get("mz_fourier_min_freq", 1.0)),
-        mz_fourier_max_freq=float(config.get("mz_fourier_max_freq", 100.0)),
-        mz_fourier_learnable=bool(config.get("mz_fourier_learnable", False)),
-        pooling_type=str(config.get("pooling_type", "pma")),
-        pma_num_heads=config.get("pma_num_heads", int(config.num_heads)),
-        pma_num_seeds=int(config.get("pma_num_seeds", 1)),
-        sigreg_use_projector=bool(config.get("sigreg_use_projector", True)),
-        sigreg_proj_hidden_dim=int(config.get("sigreg_proj_hidden_dim", 2048)),
-        sigreg_proj_output_dim=int(config.get("sigreg_proj_output_dim", 128)),
-        bcs_num_slices=int(config.get("sigreg_num_slices", 256)),
-        sigreg_lambda=float(config.get("sigreg_lambda", 10.0)),
-        sigreg_drop_prob=float(config.get("sigreg_drop_prob", 0.20)),
-        sigreg_mz_jitter_std=float(config.get("sigreg_mz_jitter_std", 0.005)),
-        sigreg_intensity_jitter_std=float(
-            config.get("sigreg_intensity_jitter_std", 0.05)
-        ),
-    )
 
 
 def _iter_massspec_probe(
@@ -335,6 +237,8 @@ def _run_final_attentive_probe(
     use_projector = probe_feature_source == "projector" and bool(config.get("sigreg_use_projector", True))
     input_dim = int(config.get("sigreg_proj_output_dim", 128)) if use_projector else int(config.model_dim)
 
+    probe_device = trainer.strategy.root_device
+    module.to(probe_device)
     probe = _FinalAttentiveProbe(
         input_dim=input_dim,
         hidden_dim=probe_hidden_dim,
@@ -344,17 +248,13 @@ def _run_final_attentive_probe(
             "precursor_bin": num_precursor_bins,
             "instrument": num_instrument_classes,
         },
-    ).to(module.device)
-    optimizer = torch.optim.AdamW(
-        probe.parameters(),
-        lr=probe_lr,
-        weight_decay=probe_weight_decay,
-    )
+    ).to(probe_device)
+    optimizer = torch.optim.AdamW(probe.parameters(), lr=probe_lr, weight_decay=probe_weight_decay)
     steps_per_epoch = int(datamodule.steps["massspec_train"])
     total_steps = num_probe_epochs * steps_per_epoch
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
-        lr_lambda=lambda step_idx: _learning_rate_at_step(
+        lr_lambda=lambda step_idx: learning_rate_at_step(
             step_idx + 1,
             base_lr=probe_lr,
             total_steps=total_steps,
@@ -369,6 +269,13 @@ def _run_final_attentive_probe(
         num_precursor_bins=num_precursor_bins,
         precursor_max_mz=precursor_max_mz,
         loss_weights=loss_weights,
+    )
+
+    logging.info(
+        "Final probe running on device: %s (probe=%s backbone=%s)",
+        probe_device,
+        next(probe.parameters()).device,
+        next(module.model.parameters()).device,
     )
 
     backbone = module.model
@@ -433,6 +340,7 @@ def _run_final_attentive_probe(
             epoch_metrics[f"final_probe/test/{key}"] = val / test_count
 
         log_step = module.global_step + epoch_idx + 1
+        epoch_metrics["final_probe_epoch"] = float(epoch_idx + 1)
         log_trial_metrics(epoch_metrics, step=log_step)
         logging.info(
             "Final probe epoch %d/%d test_acc(adduct=%.4f precursor=%.4f instrument=%.4f)",
@@ -523,6 +431,7 @@ class MAELightningModule(pl.LightningModule):
         total_steps: int,
     ) -> None:
         super().__init__()
+        self.save_hyperparameters(ignore=["config"])
         self.config = config
         self.total_steps = int(total_steps)
 
@@ -535,7 +444,7 @@ class MAELightningModule(pl.LightningModule):
         self.train_log_extra_metrics_on_step = bool(config.get("train_log_extra_metrics_on_step", False))
         self.checkpoint_every_steps = int(config.checkpoint_every_steps)
 
-        self.model = _build_model_from_config(config)
+        self.model = build_model_from_config(config)
 
         # Compile train forward with CUDA graphs for max throughput
         self._train_forward = torch.compile(
@@ -545,7 +454,7 @@ class MAELightningModule(pl.LightningModule):
         )
 
     def _lr_for_step(self, step: int) -> float:
-        return _learning_rate_at_step(
+        return learning_rate_at_step(
             step,
             base_lr=self.base_lr,
             total_steps=self.total_steps,
@@ -661,6 +570,8 @@ class MAELightningModule(pl.LightningModule):
 def train_and_evaluate(
     config: config_dict.ConfigDict,
     workdir: str | Path,
+    *,
+    extra_callbacks: list[pl.Callback] = (),
 ) -> dict[str, float]:
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -671,6 +582,13 @@ def train_and_evaluate(
     num_epochs = int(config.num_epochs)
     steps_per_epoch = datamodule.train_steps
     total_steps = num_epochs * steps_per_epoch
+    limit_train_batches = config.get("limit_train_batches", 1.0)
+    if isinstance(limit_train_batches, int):
+        max_train_batches = min(steps_per_epoch, int(limit_train_batches))
+    else:
+        max_train_batches = int(steps_per_epoch * float(limit_train_batches))
+    configured_log_every_n_steps = int(config.log_every_n_steps)
+    effective_log_every_n_steps = max(1, min(configured_log_every_n_steps, max_train_batches))
 
     # Update config with dataset-derived values
     info = datamodule.info
@@ -680,6 +598,12 @@ def train_and_evaluate(
     logging.info("Training with Lightning for %d epochs.", num_epochs)
     logging.info("Steps per epoch: %d", steps_per_epoch)
     logging.info("Total steps: %d", total_steps)
+    logging.info(
+        "Using log_every_n_steps=%d (configured=%d, effective_train_batches=%d).",
+        effective_log_every_n_steps,
+        configured_log_every_n_steps,
+        max_train_batches,
+    )
 
     module = MAELightningModule(
         config,
@@ -699,9 +623,9 @@ def train_and_evaluate(
         save_top_k=5,
     )
     lr_monitor = LearningRateMonitor(logging_interval="step")
-    logger = _build_logger(config, Path(str(workdir)))
+    logger = build_logger(config, Path(str(workdir)))
 
-    callbacks: list[pl.Callback] = [checkpoint_cb, lr_monitor]
+    callbacks: list[pl.Callback] = [checkpoint_cb, lr_monitor, *extra_callbacks]
     if bool(config.get("profile_enabled", False)):
         callbacks.append(
             TorchProfilerCallback(
@@ -722,20 +646,20 @@ def train_and_evaluate(
         devices=1,
         precision="16-mixed",
         max_epochs=num_epochs,
-        log_every_n_steps=int(config.log_every_n_steps),
+        log_every_n_steps=effective_log_every_n_steps,
         val_check_interval=1.0,
         gradient_clip_val=float(config.clip) if config.get("clip", 0.) > 0. else None,
         gradient_clip_algorithm="norm" if config.get("clip", 0.) > 0. else None,
         callbacks=callbacks,
         logger=logger,
         reload_dataloaders_every_n_epochs=0,
-        limit_train_batches=config.get("limit_train_batches", 1.0),
+        limit_train_batches=limit_train_batches,
         limit_val_batches=config.get("limit_val_batches", 1.0),
         limit_test_batches=0,
         num_sanity_val_steps=int(config.get("num_sanity_val_steps", 0)),
     )
 
-    ckpt_path = _latest_ckpt_path(Path(str(workdir)))
+    ckpt_path = latest_ckpt_path(Path(str(workdir)))
 
     if ckpt_path is not None:
         logging.info("Resuming from checkpoint: %s", ckpt_path)
