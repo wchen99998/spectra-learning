@@ -208,9 +208,9 @@ class PMAPoolingTests(unittest.TestCase):
         valid = torch.zeros(3, 8, dtype=torch.bool)
         valid[:, :5] = True
 
-        pooled_a = model._pool(embeddings, valid)
+        pooled_a = model.pool(embeddings, valid)
         embeddings[:, 5:] = torch.randn(3, 3, 32)
-        pooled_b = model._pool(embeddings, valid)
+        pooled_b = model.pool(embeddings, valid)
         self.assertTrue(torch.allclose(pooled_a, pooled_b, atol=1e-6, rtol=1e-5))
 
     def test_pool_backward_populates_pma_gradients(self):

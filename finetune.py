@@ -161,13 +161,13 @@ class FinetuneLightningModule(pl.LightningModule):
         if self.freeze_backbone:
             with torch.no_grad():
                 embeddings = self.model.encoder(peak_mz, peak_intensity, precursor_mz)
-                pooled = self.model._pool(embeddings, peak_valid_mask)
+                pooled = self.model.pool(embeddings, peak_valid_mask)
                 if self.feature_source == "projector":
                     return self.model.projector(pooled)
                 return pooled
         else:
             embeddings = self.model.encoder(peak_mz, peak_intensity, precursor_mz)
-            pooled = self.model._pool(embeddings, peak_valid_mask)
+            pooled = self.model.pool(embeddings, peak_valid_mask)
             if self.feature_source == "projector":
                 return self.model.projector(pooled)
             return pooled

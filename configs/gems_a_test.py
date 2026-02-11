@@ -1,5 +1,7 @@
 from ml_collections import config_dict
 
+from configs._defaults import apply_final_probe_defaults, apply_training_defaults, apply_tune_defaults
+
 
 def get_config() -> config_dict.ConfigDict:
     cfg = config_dict.ConfigDict()
@@ -57,41 +59,19 @@ def get_config() -> config_dict.ConfigDict:
     cfg.val_check_interval = 0.25
     cfg.checkpoint_every_steps = 10000
     cfg.init_seed = 0
-    cfg.enable_linear_probe = True
-    cfg.probe_bits = 1024
-    cfg.probe_fit_bias = True
     cfg.probe_peak_ordering = "intensity"
     cfg.limit_train_batches = 1.0
     cfg.limit_val_batches = 1.0
     cfg.limit_test_batches = 1.0
     cfg.num_sanity_val_steps = 0
-    cfg.profile_enabled = False
-    cfg.profile_wait_steps = 20
-    cfg.profile_warmup_steps = 20
-    cfg.profile_active_steps = 40
-    cfg.profile_repeat = 1
-    cfg.profile_record_shapes = True
-    cfg.profile_with_stack = True
-    cfg.profile_profile_memory = True
-    cfg.profile_trace_dir = "profiler"
-    cfg.non_blocking_device_transfer = True
-    cfg.optimizer_capturable = True
-    cfg.optimizer_fused = True
-    cfg.dataloader_num_workers = 1
-    cfg.dataloader_prefetch_factor = 2
-    cfg.dataloader_persistent_workers = True
-    cfg.dataloader_pin_memory = True
-    cfg.train_log_extra_metrics_on_step = False
+    apply_training_defaults(cfg)
 
-    # Epoch-end MSG eval fine-tuning
-    cfg.eval_msg_finetune_num_epochs = 1
-    cfg.eval_msg_finetune_feature_source = "encoder"
-    cfg.eval_msg_finetune_trainable_scope = "full"
-    cfg.eval_msg_finetune_head_hidden_dim = 512
-    cfg.eval_msg_finetune_learning_rate = 1e-4
-    cfg.eval_msg_finetune_weight_decay = 1e-4
-    cfg.eval_msg_finetune_warmup_steps = 500
-    cfg.eval_msg_finetune_peak_ordering = "intensity"
+    # Post-fit attentive probe (overrides from shared defaults)
+    apply_final_probe_defaults(cfg)
+    cfg.final_probe_warmup_steps = 500
+
+    # Tune search space
+    apply_tune_defaults(cfg)
 
     # System / logging
     cfg.enable_wandb = True

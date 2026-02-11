@@ -255,7 +255,7 @@ class PeakSetSIGReg(nn.Module):
         denom = mask.sum(dim=1).clamp(min=1.0)
         return (embeddings * mask).sum(dim=1) / denom
 
-    def _pool(
+    def pool(
         self,
         embeddings: torch.Tensor,
         valid_mask: torch.Tensor,
@@ -329,7 +329,7 @@ class PeakSetSIGReg(nn.Module):
         fused_valid = torch.cat([view1_valid, view2_valid], dim=0)
 
         fused_emb = self.encoder(fused_mz, fused_int, fused_precursor)
-        fused_pooled = self._pool(fused_emb, fused_valid)
+        fused_pooled = self.pool(fused_emb, fused_valid)
         fused_z = self.projector(fused_pooled)
         z1, z2 = fused_z.chunk(2, dim=0)
         representation_variance = fused_z.var(dim=0, unbiased=False).mean()
@@ -358,7 +358,7 @@ class PeakSetSIGReg(nn.Module):
         precursor_mz = batch["precursor_mz"]
 
         embeddings = self.encoder(peak_mz, peak_intensity, precursor_mz)
-        pooled = self._pool(embeddings, peak_valid_mask)
+        pooled = self.pool(embeddings, peak_valid_mask)
         return self.projector(pooled)
 
     def compute_loss(

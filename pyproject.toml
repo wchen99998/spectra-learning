@@ -10,6 +10,7 @@ dependencies = [
     "lightning==2.5.5",
     "matplotlib>=3.10.3",
     "ml-collections>=1.1.0",
+    "ray[tune]==2.53.0",
     "rdkit>=2025.3.3",
     "scikit-learn>=1.8.0",
     "torch==2.10.0; sys_platform == 'linux'",
