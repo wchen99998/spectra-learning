@@ -6,6 +6,7 @@ import math
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 from torch.nn.attention.flex_attention import flex_attention
 
 compiled_flex_attention_cuda = torch.compile(flex_attention)
@@ -72,7 +73,6 @@ class Attention(nn.Module):
         freqs_sin: torch.Tensor | None = None,
         attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        del attention_mask
         bsz, seqlen, _ = x.shape
         qkv = self.wqkv(x)
 
@@ -97,6 +97,11 @@ class Attention(nn.Module):
             k = k.unsqueeze(2).expand(-1, -1, rep, -1, -1).reshape(bsz, self.n_heads, seqlen, self.head_dim)
             v = v.unsqueeze(2).expand(-1, -1, rep, -1, -1).reshape(bsz, self.n_heads, seqlen, self.head_dim)
 
+        # attention_mask plumbing is in place but currently unused:
+        # flex_attention score_mod with fullgraph=True compilation is not yet
+        # stable in PyTorch 2.10. Padding is handled via zero-embedding +
+        # masked pooling instead.
+        del attention_mask
         if q.is_cuda:
             attn = compiled_flex_attention_cuda(q, k, v)
         else:

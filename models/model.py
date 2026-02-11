@@ -162,10 +162,11 @@ class PeakSetEncoder(nn.Module):
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
         precursor_mz: torch.Tensor,
+        valid_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         x = self.embedder(peak_mz, peak_intensity, precursor_mz)
         for block in self.blocks:
-            x = block(x, freqs_cos=None, freqs_sin=None)
+            x = block(x, freqs_cos=None, freqs_sin=None, attention_mask=valid_mask)
         return self.norm(x)
 
 
@@ -289,12 +290,12 @@ class PeakSetSIGReg(nn.Module):
         intensity = peak_intensity + torch.randn_like(peak_intensity) * self.sigreg_intensity_jitter_std
         intensity = torch.clamp(intensity, min=0.0, max=1.0)
 
-        mz = torch.where(view_valid, mz, torch.zeros_like(mz))
-        intensity = torch.where(view_valid, intensity, torch.zeros_like(intensity))
+        mz = torch.where(view_valid, mz, 0.0)
+        intensity = torch.where(view_valid, intensity, 0.0)
 
         max_intensity = intensity.max(dim=1, keepdim=True).values.clamp(min=1e-6)
         intensity = intensity / max_intensity
-        intensity = torch.where(view_valid, intensity, torch.zeros_like(intensity))
+        intensity = torch.where(view_valid, intensity, 0.0)
 
         return mz, intensity, view_valid
 
@@ -328,7 +329,7 @@ class PeakSetSIGReg(nn.Module):
         fused_precursor = torch.cat([precursor_mz, precursor_mz], dim=0)
         fused_valid = torch.cat([view1_valid, view2_valid], dim=0)
 
-        fused_emb = self.encoder(fused_mz, fused_int, fused_precursor)
+        fused_emb = self.encoder(fused_mz, fused_int, fused_precursor, valid_mask=fused_valid)
         fused_pooled = self.pool(fused_emb, fused_valid)
         fused_z = self.projector(fused_pooled)
         z1, z2 = fused_z.chunk(2, dim=0)
@@ -357,7 +358,7 @@ class PeakSetSIGReg(nn.Module):
         peak_valid_mask = batch["peak_valid_mask"]
         precursor_mz = batch["precursor_mz"]
 
-        embeddings = self.encoder(peak_mz, peak_intensity, precursor_mz)
+        embeddings = self.encoder(peak_mz, peak_intensity, precursor_mz, valid_mask=peak_valid_mask)
         pooled = self.pool(embeddings, peak_valid_mask)
         return self.projector(pooled)
 

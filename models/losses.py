@@ -21,13 +21,12 @@ def _all_reduce_avg(x: torch.Tensor) -> torch.Tensor:
 
 def _epps_pulley(
     x: torch.Tensor,
-    t_min: float = -3.0,
-    t_max: float = 3.0,
-    n_points: int = 10,
+    t: torch.Tensor,
+    exp_f: torch.Tensor,
 ) -> torch.Tensor:
     x = x.float()
-    t = torch.linspace(t_min, t_max, n_points, device=x.device, dtype=x.dtype)
-    exp_f = torch.exp(-0.5 * t**2)
+    t = t.float()
+    exp_f = exp_f.float()
     x_t = x.unsqueeze(2) * t
     ecf_real = _all_reduce_avg(torch.cos(x_t).mean(0))
     ecf_imag = _all_reduce_avg(torch.sin(x_t).mean(0))
@@ -38,10 +37,20 @@ def _epps_pulley(
 class BCSLoss(nn.Module):
     """BCS (Batched Characteristic Slicing) loss for SIGReg."""
 
-    def __init__(self, num_slices: int = 256, lmbd: float = 10.0):
+    def __init__(
+        self,
+        num_slices: int = 256,
+        lmbd: float = 10.0,
+        t_min: float = -3.0,
+        t_max: float = 3.0,
+        n_points: int = 10,
+    ):
         super().__init__()
         self.num_slices = num_slices
         self.lmbd = lmbd
+        t = torch.linspace(t_min, t_max, n_points)
+        self.register_buffer("ep_t", t)
+        self.register_buffer("ep_exp_f", torch.exp(-0.5 * t**2))
 
     def sample_projection(
         self,
@@ -71,10 +80,12 @@ class BCSLoss(nn.Module):
             proj = self.sample_projection(z1.size(1), device=z1.device)
         proj = proj.to(device=z1.device, dtype=z1.dtype)
 
-        view1 = z1 @ proj
-        view2 = z2 @ proj
+        z_both = torch.cat([z1, z2], dim=0)
+        views = z_both @ proj
+        view1, view2 = views.chunk(2, dim=0)
 
-        bcs = (_epps_pulley(view1).mean() + _epps_pulley(view2).mean()) / 2
+        bcs = (_epps_pulley(view1, self.ep_t, self.ep_exp_f).mean()
+               + _epps_pulley(view2, self.ep_t, self.ep_exp_f).mean()) / 2
         invariance_loss = F.mse_loss(z1, z2).mean()
         loss = invariance_loss + self.lmbd * bcs
         return {

@@ -48,6 +48,8 @@ torch.set_float32_matmul_precision('high')
 inductor_config.coordinate_descent_tuning = True
 inductor_config.triton.unique_kernel_names = True
 inductor_config.fx_graph_cache = True
+inductor_config.epilogue_fusion = True
+inductor_config.shape_padding = True
 
 
 def _iter_massspec_probe(
@@ -100,6 +102,7 @@ def _extract_probe_features(
         batch["peak_mz"],
         batch["peak_intensity"],
         batch["precursor_mz"],
+        valid_mask=batch["peak_valid_mask"],
     )
     if feature_source == "encoder":
         return embeddings, batch["peak_valid_mask"]
@@ -295,11 +298,6 @@ def _run_final_attentive_probe(
         ):
             batch = module._to_device(batch)
             optimizer.zero_grad(set_to_none=True)
-            with torch.no_grad():
-                feature_tokens, feature_mask = _extract_probe_features(
-                    backbone, batch, feature_source=probe_feature_source,
-                )
-            # Re-attach to computation graph through probe
             result = _probe_step(probe, backbone, batch, **step_kwargs)
             result["loss_total"].backward()
             optimizer.step()
@@ -309,8 +307,10 @@ def _run_final_attentive_probe(
             train_count += bs
             for name in _PROBE_TASK_NAMES:
                 key = f"loss_{name}"
-                train_sums[key] = train_sums.get(key, 0.0) + float(result["losses"][name].detach().cpu()) * bs
-            train_sums["loss_total"] = train_sums.get("loss_total", 0.0) + float(result["loss_total"].detach().cpu()) * bs
+                weighted = result["losses"][name].detach() * bs
+                train_sums[key] = train_sums[key] + weighted if key in train_sums else weighted
+            weighted = result["loss_total"].detach() * bs
+            train_sums["loss_total"] = train_sums["loss_total"] + weighted if "loss_total" in train_sums else weighted
 
         # --- Eval ---
         probe.eval()
@@ -328,16 +328,18 @@ def _run_final_attentive_probe(
                 for name in _PROBE_TASK_NAMES:
                     loss_key = f"loss_{name}"
                     acc_key = f"acc_{name}"
-                    test_sums[loss_key] = test_sums.get(loss_key, 0.0) + float(result["losses"][name].cpu()) * bs
-                    correct = float((result["logits"][name].argmax(dim=1) == result["targets"][name]).sum().cpu())
-                    test_sums[acc_key] = test_sums.get(acc_key, 0.0) + correct
-                test_sums["loss_total"] = test_sums.get("loss_total", 0.0) + float(result["loss_total"].cpu()) * bs
+                    weighted_loss = result["losses"][name].detach() * bs
+                    correct = (result["logits"][name].argmax(dim=1) == result["targets"][name]).sum()
+                    test_sums[loss_key] = test_sums[loss_key] + weighted_loss if loss_key in test_sums else weighted_loss
+                    test_sums[acc_key] = test_sums[acc_key] + correct if acc_key in test_sums else correct
+                weighted_total = result["loss_total"].detach() * bs
+                test_sums["loss_total"] = test_sums["loss_total"] + weighted_total if "loss_total" in test_sums else weighted_total
 
         epoch_metrics = {}
         for key, val in train_sums.items():
-            epoch_metrics[f"final_probe/train/{key}"] = val / train_count
+            epoch_metrics[f"final_probe/train/{key}"] = val.item() / train_count
         for key, val in test_sums.items():
-            epoch_metrics[f"final_probe/test/{key}"] = val / test_count
+            epoch_metrics[f"final_probe/test/{key}"] = val.item() / test_count
 
         log_step = module.global_step + epoch_idx + 1
         epoch_metrics["final_probe_epoch"] = float(epoch_idx + 1)
@@ -496,7 +498,8 @@ class MAELightningModule(pl.LightningModule):
         bcs_projection = self._sample_bcs_projection(
             int(self.config.seed) + 7_000_000 + self.current_epoch * 100_000 + batch_idx
         )
-        metrics = self.model(batch, train=False, bcs_projection=bcs_projection)
+        torch.compiler.cudagraph_mark_step_begin()
+        metrics = self._train_forward(batch, bcs_projection)
         batch_size = int(batch["peak_mz"].shape[0])
         for key, value in metrics.items():
             self.log(
@@ -545,7 +548,7 @@ class MAELightningModule(pl.LightningModule):
         capturable = capturable and self.trainer.strategy.root_device.type == "cuda"
         fused_cfg = self.config.get("optimizer_fused", None)
         if fused_cfg is None:
-            fused = None
+            fused = self.trainer.strategy.root_device.type == "cuda"
         else:
             fused = bool(fused_cfg) and self.trainer.strategy.root_device.type == "cuda"
         optimizer = torch.optim.AdamW(
