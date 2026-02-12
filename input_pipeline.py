@@ -19,6 +19,7 @@ import tensorflow as tf
 import torch
 from huggingface_hub import hf_hub_download
 from ml_collections import config_dict
+from models.augmentation import augment_sigreg_batch
 from torch.utils.data import DataLoader, IterableDataset
 from tqdm import tqdm
 
@@ -641,7 +642,9 @@ def _compact_sort_peaks(ordering: str = "intensity") -> Callable[[dict], dict]:
     def apply(example: dict) -> dict:
         mz = example["mz"]
         intensity = example["intensity"]
-        keep = mz > 0
+        # Use intensity presence as validity source so neutral-loss conversion
+        # does not revive padded mz==0 entries into apparent valid peaks.
+        keep = intensity > 0
         kept_mz = tf.boolean_mask(mz, keep)
         kept_intensity = tf.boolean_mask(intensity, keep)
         if ordering == "mz":
@@ -649,7 +652,7 @@ def _compact_sort_peaks(ordering: str = "intensity") -> Callable[[dict], dict]:
             kept_mz = tf.gather(kept_mz, sorted_idx)
             kept_intensity = tf.gather(kept_intensity, sorted_idx)
         elif ordering == "intensity":
-            sorted_idx = tf.argsort(kept_intensity, direction="DESCENDING")
+            sorted_idx = tf.argsort(kept_intensity, direction="DESCENDING", stable=True)
             kept_mz = tf.gather(kept_mz, sorted_idx)
             kept_intensity = tf.gather(kept_intensity, sorted_idx)
         else:
@@ -701,7 +704,8 @@ def _normalize_for_jepa(
         mz = example["mz"]
         intensity = example["intensity"]
 
-        valid = mz > 0
+        # Validity is based on raw (pre-scaled) intensity occupancy.
+        valid = intensity > 0
         example["peak_valid_mask"] = valid
         example["peak_mz"] = mz / peak_mz_max
         intensity = tf.clip_by_value(intensity, eps, 1.0)
@@ -990,6 +994,16 @@ class TfLightningDataModule(pl.LightningDataModule):
         self.mz_representation = str(config.get("mz_representation", "mz"))
         self.peak_ordering = str(config.get("peak_ordering", "intensity"))
         self.probe_peak_ordering = str(config.get("probe_peak_ordering", "intensity"))
+        self.sigreg_contiguous_mask_fraction = float(
+            config.get("sigreg_contiguous_mask_fraction", 0.25)
+        )
+        self.sigreg_contiguous_mask_min_len = int(
+            config.get("sigreg_contiguous_mask_min_len", 1)
+        )
+        self.sigreg_mz_jitter_std = float(config.get("sigreg_mz_jitter_std", 0.005))
+        self.sigreg_intensity_jitter_std = float(
+            config.get("sigreg_intensity_jitter_std", 0.05)
+        )
 
         self.metadata = _ensure_processed(
             self.output_dir,
@@ -1077,6 +1091,23 @@ class TfLightningDataModule(pl.LightningDataModule):
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         self.seed = int(state_dict["seed"])
+
+    def on_before_batch_transfer(
+        self,
+        batch: dict[str, torch.Tensor],
+        dataloader_idx: int,
+    ) -> dict[str, torch.Tensor]:
+        del dataloader_idx
+        augmented = augment_sigreg_batch(
+            batch,
+            contiguous_mask_fraction=self.sigreg_contiguous_mask_fraction,
+            contiguous_mask_min_len=self.sigreg_contiguous_mask_min_len,
+            mz_jitter_std=self.sigreg_mz_jitter_std,
+            intensity_jitter_std=self.sigreg_intensity_jitter_std,
+        )
+        out = dict(batch)
+        out.update(augmented)
+        return out
 
     def _build_dataset_for_files(
         self,

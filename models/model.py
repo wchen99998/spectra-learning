@@ -2,7 +2,7 @@
 
 Architecture:
 - PeakSetEncoder: MLP embedder -> non-causal Transformer -> peak embeddings
-- Two-view spectrum augmentation (drop + jitter)
+- Two-view spectrum augmentation (one masked view + one unmasked jittered view)
 - Optional projector on pooled embeddings
 - SIGReg objective: MSE(z1, z2) + lambda * BCS(z1, z2)
 """
@@ -14,6 +14,11 @@ import math
 import torch
 from torch import nn
 
+from models.augmentation import (
+    augment_masked_view,
+    augment_sigreg_batch,
+    augment_unmasked_view,
+)
 from models.losses import BCSLoss
 from networks import transformer_torch
 
@@ -163,8 +168,13 @@ class PeakSetEncoder(nn.Module):
         peak_intensity: torch.Tensor,
         precursor_mz: torch.Tensor,
         valid_mask: torch.Tensor | None = None,
+        masked_positions: torch.Tensor | None = None,
+        mask_token: torch.Tensor | None = None,
     ) -> torch.Tensor:
         x = self.embedder(peak_mz, peak_intensity, precursor_mz)
+        if masked_positions is not None:
+            token = mask_token.view(1, 1, -1).to(dtype=x.dtype, device=x.device)
+            x = torch.where(masked_positions.unsqueeze(-1), token, x)
         for block in self.blocks:
             x = block(x, freqs_cos=None, freqs_sin=None, attention_mask=valid_mask)
         return self.norm(x)
@@ -192,7 +202,8 @@ class PeakSetSIGReg(nn.Module):
         sigreg_proj_output_dim: int = 128,
         bcs_num_slices: int = 256,
         sigreg_lambda: float = 10.0,
-        sigreg_drop_prob: float = 0.20,
+        sigreg_contiguous_mask_fraction: float = 0.25,
+        sigreg_contiguous_mask_min_len: int = 1,
         sigreg_mz_jitter_std: float = 0.005,
         sigreg_intensity_jitter_std: float = 0.05,
         pooling_type: str = "pma",
@@ -204,7 +215,8 @@ class PeakSetSIGReg(nn.Module):
         self.model_dim = model_dim
         self.sigreg_dim = sigreg_proj_output_dim if sigreg_use_projector else model_dim
 
-        self.sigreg_drop_prob = sigreg_drop_prob
+        self.sigreg_contiguous_mask_fraction = sigreg_contiguous_mask_fraction
+        self.sigreg_contiguous_mask_min_len = int(sigreg_contiguous_mask_min_len)
         self.sigreg_mz_jitter_std = sigreg_mz_jitter_std
         self.sigreg_intensity_jitter_std = sigreg_intensity_jitter_std
         self.pooling_type = pooling_type
@@ -244,6 +256,8 @@ class PeakSetSIGReg(nn.Module):
             num_heads=pma_heads,
             batch_first=True,
         )
+        self.mask_token = nn.Parameter(torch.empty(model_dim))
+        nn.init.normal_(self.mask_token, std=0.02)
 
         self.sigreg_loss = BCSLoss(num_slices=bcs_num_slices, lmbd=sigreg_lambda)
 
@@ -280,24 +294,89 @@ class PeakSetSIGReg(nn.Module):
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
         peak_valid_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        drop = (torch.rand_like(peak_mz) < self.sigreg_drop_prob) & peak_valid_mask
-        view_valid = peak_valid_mask & (~drop)
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        return augment_masked_view(
+            peak_mz,
+            peak_intensity,
+            peak_valid_mask,
+            contiguous_mask_fraction=self.sigreg_contiguous_mask_fraction,
+            contiguous_mask_min_len=self.sigreg_contiguous_mask_min_len,
+            mz_jitter_std=self.sigreg_mz_jitter_std,
+            intensity_jitter_std=self.sigreg_intensity_jitter_std,
+        )
 
-        mz = peak_mz + torch.randn_like(peak_mz) * self.sigreg_mz_jitter_std
-        mz = torch.clamp(mz, min=0.0, max=1.0)
+    def _augment_unmasked_view(
+        self,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+        peak_valid_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return augment_unmasked_view(
+            peak_mz,
+            peak_intensity,
+            peak_valid_mask,
+            mz_jitter_std=self.sigreg_mz_jitter_std,
+            intensity_jitter_std=self.sigreg_intensity_jitter_std,
+        )
 
-        intensity = peak_intensity + torch.randn_like(peak_intensity) * self.sigreg_intensity_jitter_std
-        intensity = torch.clamp(intensity, min=0.0, max=1.0)
+    def augment_batch(
+        self,
+        batch: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        return augment_sigreg_batch(
+            batch,
+            contiguous_mask_fraction=self.sigreg_contiguous_mask_fraction,
+            contiguous_mask_min_len=self.sigreg_contiguous_mask_min_len,
+            mz_jitter_std=self.sigreg_mz_jitter_std,
+            intensity_jitter_std=self.sigreg_intensity_jitter_std,
+        )
 
-        mz = torch.where(view_valid, mz, 0.0)
-        intensity = torch.where(view_valid, intensity, 0.0)
+    def forward_augmented(
+        self,
+        augmented_batch: dict[str, torch.Tensor],
+        *,
+        bcs_projection: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        fused_mz = augmented_batch["fused_mz"]
+        fused_intensity = augmented_batch["fused_intensity"]
+        fused_precursor_mz = augmented_batch["fused_precursor_mz"]
+        fused_valid_mask = augmented_batch["fused_valid_mask"]
+        fused_masked_positions = augmented_batch["fused_masked_positions"]
+        masked_fraction = augmented_batch["view1_masked_fraction"]
+        density_interval_fraction = augmented_batch["view1_density_interval_fraction"]
 
-        max_intensity = intensity.max(dim=1, keepdim=True).values.clamp(min=1e-6)
-        intensity = intensity / max_intensity
-        intensity = torch.where(view_valid, intensity, 0.0)
+        fused_emb = self.encoder(
+            fused_mz,
+            fused_intensity,
+            fused_precursor_mz,
+            valid_mask=fused_valid_mask,
+            masked_positions=fused_masked_positions,
+            mask_token=self.mask_token,
+        )
+        fused_pooled = self.pool(fused_emb, fused_valid_mask)
+        fused_z = self.projector(fused_pooled)
+        z1, z2 = fused_z.chunk(2, dim=0)
+        representation_variance = fused_z.var(dim=0, unbiased=False).mean()
 
-        return mz, intensity, view_valid
+        loss_dict = self.sigreg_loss(z1, z2, proj=bcs_projection)
+        valid_fraction = fused_valid_mask.float().mean()
+
+        return {
+            "loss": loss_dict["loss"],
+            "bcs_loss": loss_dict["bcs_loss"],
+            "invariance_loss": loss_dict["invariance_loss"],
+            "valid_fraction": valid_fraction,
+            "masked_fraction": masked_fraction,
+            "density_interval_fraction": density_interval_fraction,
+            "representation_variance": representation_variance,
+        }
 
     def forward(
         self,
@@ -307,44 +386,8 @@ class PeakSetSIGReg(nn.Module):
         bcs_projection: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         del train
-        peak_mz = batch["peak_mz"]
-        peak_intensity = batch["peak_intensity"]
-        peak_valid_mask = batch["peak_valid_mask"]
-        precursor_mz = batch["precursor_mz"]
-
-        view1_mz, view1_int, view1_valid = self._augment_view(
-            peak_mz,
-            peak_intensity,
-            peak_valid_mask,
-        )
-        view2_mz, view2_int, view2_valid = self._augment_view(
-            peak_mz,
-            peak_intensity,
-            peak_valid_mask,
-        )
-
-        # Fuse both views into a single encoder + projector pass [2B, N, ...]
-        fused_mz = torch.cat([view1_mz, view2_mz], dim=0)
-        fused_int = torch.cat([view1_int, view2_int], dim=0)
-        fused_precursor = torch.cat([precursor_mz, precursor_mz], dim=0)
-        fused_valid = torch.cat([view1_valid, view2_valid], dim=0)
-
-        fused_emb = self.encoder(fused_mz, fused_int, fused_precursor, valid_mask=fused_valid)
-        fused_pooled = self.pool(fused_emb, fused_valid)
-        fused_z = self.projector(fused_pooled)
-        z1, z2 = fused_z.chunk(2, dim=0)
-        representation_variance = fused_z.var(dim=0, unbiased=False).mean()
-
-        loss_dict = self.sigreg_loss(z1, z2, proj=bcs_projection)
-        valid_fraction = fused_valid.float().mean()
-
-        return {
-            "loss": loss_dict["loss"],
-            "bcs_loss": loss_dict["bcs_loss"],
-            "invariance_loss": loss_dict["invariance_loss"],
-            "valid_fraction": valid_fraction,
-            "representation_variance": representation_variance,
-        }
+        augmented_batch = self.augment_batch(batch)
+        return self.forward_augmented(augmented_batch, bcs_projection=bcs_projection)
 
     def encode(
         self,

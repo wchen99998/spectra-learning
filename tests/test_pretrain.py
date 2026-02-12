@@ -9,6 +9,8 @@ from input_pipeline import (
     _NUM_PEAKS_OUTPUT,
     _compact_sort_peaks,
     _convert_to_neutral_loss,
+    _normalize_for_jepa,
+    _topk_peaks,
 )
 from models.losses import (
     BCSLoss,
@@ -64,6 +66,46 @@ class DataPipelineContractTests(unittest.TestCase):
         self.assertEqual(by_mz["mz"].shape[0], _NUM_PEAKS_OUTPUT)
         self.assertEqual(by_intensity["mz"].shape[0], _NUM_PEAKS_OUTPUT)
 
+    def test_compact_sort_orders_by_mz_and_preserves_pairs(self):
+        example = {
+            "mz": tf.constant([50.0, 10.0, 30.0, 0.0], dtype=tf.float32),
+            "intensity": tf.constant([0.2, 0.5, 0.9, 0.0], dtype=tf.float32),
+        }
+        out = _compact_sort_peaks("mz")(dict(example))
+        self.assertTrue(
+            bool(tf.reduce_all(tf.abs(out["mz"][:3] - tf.constant([10.0, 30.0, 50.0], dtype=tf.float32)) < 1e-6).numpy()),
+        )
+        self.assertTrue(
+            bool(tf.reduce_all(tf.abs(out["intensity"][:3] - tf.constant([0.5, 0.9, 0.2], dtype=tf.float32)) < 1e-6).numpy()),
+        )
+
+    def test_compact_sort_orders_by_intensity_and_preserves_pairs(self):
+        example = {
+            "mz": tf.constant([50.0, 10.0, 30.0, 0.0], dtype=tf.float32),
+            "intensity": tf.constant([0.2, 0.5, 0.9, 0.0], dtype=tf.float32),
+        }
+        out = _compact_sort_peaks("intensity")(dict(example))
+        self.assertTrue(
+            bool(tf.reduce_all(tf.abs(out["intensity"][:3] - tf.constant([0.9, 0.5, 0.2], dtype=tf.float32)) < 1e-6).numpy()),
+        )
+        self.assertTrue(
+            bool(tf.reduce_all(tf.abs(out["mz"][:3] - tf.constant([30.0, 10.0, 50.0], dtype=tf.float32)) < 1e-6).numpy()),
+        )
+
+    def test_topk_then_mz_sort_keeps_same_peak_pairs(self):
+        example = {
+            "mz": tf.constant([8.0, 1.0, 5.0, 2.0], dtype=tf.float32),
+            "intensity": tf.constant([0.1, 0.9, 0.8, 0.2], dtype=tf.float32),
+        }
+        topk = _topk_peaks(3)(dict(example))
+        out = _compact_sort_peaks("mz")(topk)
+        self.assertTrue(
+            bool(tf.reduce_all(tf.abs(out["mz"][:3] - tf.constant([1.0, 2.0, 5.0], dtype=tf.float32)) < 1e-6).numpy()),
+        )
+        self.assertTrue(
+            bool(tf.reduce_all(tf.abs(out["intensity"][:3] - tf.constant([0.9, 0.2, 0.8], dtype=tf.float32)) < 1e-6).numpy()),
+        )
+
     def test_neutral_loss_conversion(self):
         original = {
             "mz": tf.constant([10.0, 70.0, 20.0, 0.0], dtype=tf.float32),
@@ -72,6 +114,23 @@ class DataPipelineContractTests(unittest.TestCase):
         }
         converted = _convert_to_neutral_loss()(dict(original))
         self.assertAlmostEqual(float(converted["mz"][0]), 90.0, places=1)
+
+    def test_neutral_loss_padding_is_not_marked_valid(self):
+        example = {
+            "mz": tf.constant([10.0, 0.0, 0.0], dtype=tf.float32),
+            "intensity": tf.constant([0.7, 0.0, 0.0], dtype=tf.float32),
+            "precursor_mz": tf.constant(100.0, dtype=tf.float32),
+        }
+        converted = _convert_to_neutral_loss()(dict(example))
+        compacted = _compact_sort_peaks("mz")(converted)
+        normalized = _normalize_for_jepa(
+            max_precursor_mz=1000.0,
+            intensity_scaling="linear",
+        )(compacted)
+        mask = normalized["peak_valid_mask"].numpy()
+        self.assertTrue(mask[0])
+        self.assertFalse(mask[1])
+        self.assertFalse(mask[2])
 
 
 class SIGRegForwardTests(unittest.TestCase):
@@ -89,7 +148,8 @@ class SIGRegForwardTests(unittest.TestCase):
             sigreg_proj_output_dim=16,
             bcs_num_slices=32,
             sigreg_lambda=10.0,
-            sigreg_drop_prob=0.20,
+            sigreg_contiguous_mask_fraction=0.2,
+            sigreg_contiguous_mask_min_len=1,
             sigreg_mz_jitter_std=0.005,
             sigreg_intensity_jitter_std=0.05,
         )
@@ -104,7 +164,15 @@ class SIGRegForwardTests(unittest.TestCase):
         model = self._build_model()
         batch = _make_batch()
         metrics = model(batch, train=True)
-        for key in ("loss", "bcs_loss", "invariance_loss", "valid_fraction", "representation_variance"):
+        for key in (
+            "loss",
+            "bcs_loss",
+            "invariance_loss",
+            "valid_fraction",
+            "masked_fraction",
+            "density_interval_fraction",
+            "representation_variance",
+        ):
             self.assertIn(key, metrics, f"Missing key: {key}")
 
     def test_encode_output_shape(self):
@@ -142,7 +210,8 @@ class AugmentationTests(unittest.TestCase):
             sigreg_use_projector=False,
             bcs_num_slices=32,
             sigreg_lambda=10.0,
-            sigreg_drop_prob=0.20,
+            sigreg_contiguous_mask_fraction=0.2,
+            sigreg_contiguous_mask_min_len=1,
             sigreg_mz_jitter_std=0.005,
             sigreg_intensity_jitter_std=0.05,
         )
@@ -150,7 +219,7 @@ class AugmentationTests(unittest.TestCase):
     def test_augment_view_shapes(self):
         model = self._build_model()
         batch = _make_batch()
-        mz, intensity, valid = model._augment_view(
+        mz, intensity, valid, masked, masked_fraction, density_interval_fraction = model._augment_view(
             batch["peak_mz"],
             batch["peak_intensity"],
             batch["peak_valid_mask"],
@@ -158,11 +227,14 @@ class AugmentationTests(unittest.TestCase):
         self.assertEqual(mz.shape, batch["peak_mz"].shape)
         self.assertEqual(intensity.shape, batch["peak_intensity"].shape)
         self.assertEqual(valid.shape, batch["peak_valid_mask"].shape)
+        self.assertEqual(masked.shape, batch["peak_valid_mask"].shape)
+        self.assertEqual(masked_fraction.ndim, 0)
+        self.assertEqual(density_interval_fraction.ndim, 0)
 
     def test_augment_view_value_bounds(self):
         model = self._build_model()
         batch = _make_batch()
-        mz, intensity, _ = model._augment_view(
+        mz, intensity, _, _, _, _ = model._augment_view(
             batch["peak_mz"],
             batch["peak_intensity"],
             batch["peak_valid_mask"],
@@ -175,13 +247,124 @@ class AugmentationTests(unittest.TestCase):
     def test_invalid_positions_are_zeroed(self):
         model = self._build_model()
         batch = _make_batch()
-        mz, intensity, valid = model._augment_view(
+        mz, intensity, _, _, _, _ = model._augment_view(
             batch["peak_mz"],
             batch["peak_intensity"],
             batch["peak_valid_mask"],
         )
-        self.assertTrue((mz[~valid] == 0.0).all().item())
-        self.assertTrue((intensity[~valid] == 0.0).all().item())
+        invalid = ~batch["peak_valid_mask"]
+        self.assertTrue((mz[invalid] == 0.0).all().item())
+        self.assertTrue((intensity[invalid] == 0.0).all().item())
+
+    def test_masked_positions_remain_valid(self):
+        model = self._build_model()
+        batch = _make_batch(batch_size=3)
+        _, _, valid, masked, _, _ = model._augment_view(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            batch["peak_valid_mask"],
+        )
+        self.assertTrue((valid[masked]).all().item())
+        self.assertTrue((~batch["peak_valid_mask"][masked]).sum().item() == 0)
+
+    def test_masked_positions_are_zeroed_for_mask_token(self):
+        model = self._build_model()
+        batch = _make_batch(batch_size=3)
+        mz, intensity, _, masked, _, _ = model._augment_view(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            batch["peak_valid_mask"],
+        )
+        self.assertTrue((mz[masked] == 0.0).all().item())
+        self.assertTrue((intensity[masked] == 0.0).all().item())
+
+    def test_mask_is_contiguous_in_mz_sorted_order(self):
+        model = self._build_model()
+        batch = _make_batch(batch_size=3)
+        torch.manual_seed(7)
+        _, _, _, masked, _, _ = model._augment_view(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            batch["peak_valid_mask"],
+        )
+        for row in range(masked.shape[0]):
+            valid_idx = torch.nonzero(batch["peak_valid_mask"][row], as_tuple=False).squeeze(-1)
+            sorted_valid_idx = valid_idx[torch.argsort(batch["peak_mz"][row, valid_idx])]
+            masked_sorted_positions = torch.nonzero(
+                masked[row, sorted_valid_idx], as_tuple=False,
+            ).squeeze(-1)
+            self.assertGreater(int(masked_sorted_positions.numel()), 0)
+            if masked_sorted_positions.numel() > 1:
+                deltas = masked_sorted_positions[1:] - masked_sorted_positions[:-1]
+                self.assertTrue((deltas == 1).all().item())
+
+    def test_encoder_uses_learnable_mask_token(self):
+        model = PeakSetSIGReg(
+            num_peaks=8,
+            model_dim=16,
+            encoder_num_layers=0,
+            encoder_num_heads=4,
+            encoder_num_kv_heads=4,
+            attention_mlp_multiple=2.0,
+            feature_mlp_hidden_dim=16,
+            sigreg_use_projector=False,
+            bcs_num_slices=32,
+            sigreg_lambda=10.0,
+            sigreg_contiguous_mask_fraction=0.2,
+            sigreg_contiguous_mask_min_len=1,
+            sigreg_mz_jitter_std=0.005,
+            sigreg_intensity_jitter_std=0.05,
+        )
+        batch = _make_batch(batch_size=1, num_peaks=8)
+        masked = torch.zeros_like(batch["peak_valid_mask"])
+        masked[:, 0] = True
+        masked[:, 1] = True
+        embeddings = model.encoder(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            batch["precursor_mz"],
+            valid_mask=batch["peak_valid_mask"],
+            masked_positions=masked,
+            mask_token=model.mask_token,
+        )
+        self.assertTrue(torch.allclose(embeddings[:, 0, :], embeddings[:, 1, :], atol=1e-6, rtol=1e-5))
+
+    def test_unmasked_view_has_no_masked_positions(self):
+        model = self._build_model()
+        batch = _make_batch(batch_size=3)
+        _, _, valid, masked = model._augment_unmasked_view(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            batch["peak_valid_mask"],
+        )
+        self.assertTrue(torch.equal(valid, batch["peak_valid_mask"]))
+        self.assertEqual(int(masked.sum().item()), 0)
+
+    def test_unmasked_view_invalid_positions_are_zeroed(self):
+        model = self._build_model()
+        batch = _make_batch(batch_size=3)
+        mz, intensity, _, _ = model._augment_unmasked_view(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            batch["peak_valid_mask"],
+        )
+        invalid = ~batch["peak_valid_mask"]
+        self.assertTrue((mz[invalid] == 0.0).all().item())
+        self.assertTrue((intensity[invalid] == 0.0).all().item())
+
+    def test_forward_masked_fraction_matches_masked_view(self):
+        model = self._build_model()
+        batch = _make_batch(batch_size=3)
+        torch.manual_seed(23)
+        metrics = model(batch, train=True)
+        torch.manual_seed(23)
+        _, _, _, _, masked_fraction, density_interval_fraction = model._augment_view(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            batch["peak_valid_mask"],
+        )
+        self.assertTrue(torch.allclose(metrics["masked_fraction"], masked_fraction))
+        self.assertTrue(torch.allclose(metrics["density_interval_fraction"], density_interval_fraction))
 
 
 class PMAPoolingTests(unittest.TestCase):

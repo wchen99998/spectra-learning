@@ -442,8 +442,6 @@ class MAELightningModule(pl.LightningModule):
         self.schedule_type = str(config.get("learning_rate_schedule", "cosine"))
         self.min_learning_rate = config.get("min_learning_rate", None)
         self.b2 = float(config.get("b2", 0.999))
-        self.non_blocking_device_transfer = bool(config.get("non_blocking_device_transfer", True))
-        self.train_log_extra_metrics_on_step = bool(config.get("train_log_extra_metrics_on_step", False))
         self.checkpoint_every_steps = int(config.checkpoint_every_steps)
 
         self.model = build_model_from_config(config)
@@ -474,17 +472,10 @@ class MAELightningModule(pl.LightningModule):
         batch: dict[str, torch.Tensor],
         bcs_projection: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        return self.model(batch, train=True, bcs_projection=bcs_projection)
+        return self.model.forward_augmented(batch, bcs_projection=bcs_projection)
 
     def _sample_bcs_projection(self, seed: int) -> torch.Tensor:
         return self.model.sample_bcs_projection(device=self.device, seed=seed)
-
-    def _to_device(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        non_blocking = self.non_blocking_device_transfer
-        return {
-            k: v.to(self.device, non_blocking=non_blocking) if isinstance(v, torch.Tensor) else v
-            for k, v in batch.items()
-        }
 
     def validation_step(
         self,
@@ -494,7 +485,6 @@ class MAELightningModule(pl.LightningModule):
     ) -> None:
         if dataloader_idx != 1:
             return
-        batch = self._to_device(batch)
         bcs_projection = self._sample_bcs_projection(
             int(self.config.seed) + 7_000_000 + self.current_epoch * 100_000 + batch_idx
         )
@@ -514,16 +504,14 @@ class MAELightningModule(pl.LightningModule):
 
     def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         del batch_idx
-        torch.compiler.cudagraph_mark_step_begin()
-        batch = self._to_device(batch)
         bcs_projection = self._sample_bcs_projection(self.global_step)
+        torch.compiler.cudagraph_mark_step_begin()
         metrics = self._train_forward(batch, bcs_projection)
         step = self.global_step + 1
         self.log("train/learning_rate", self._lr_for_step(step), on_step=True, on_epoch=False, prog_bar=True)
         for key, value in metrics.items():
             if key == "loss":
                 self.log("train/loss", value, on_step=True, on_epoch=False, prog_bar=True)
-                self.log("train/loss_epoch", value, on_step=False, on_epoch=True, prog_bar=False)
                 if step % self.checkpoint_every_steps == 0:
                     self.log(
                         "train/loss_checkpoint",
@@ -535,12 +523,7 @@ class MAELightningModule(pl.LightningModule):
                     )
                 continue
             metric_name = f"train/{key}"
-            if key == "representation_variance":
-                self.log(metric_name, value, on_step=True, on_epoch=True, prog_bar=False)
-                continue
-            self.log(metric_name, value, on_step=False, on_epoch=True, prog_bar=False)
-            if self.train_log_extra_metrics_on_step:
-                self.log(f"{metric_name}_step", value, on_step=True, on_epoch=False, prog_bar=False)
+            self.log(metric_name, value, on_step=True, on_epoch=False, prog_bar=False)
         return metrics["loss"]
 
     def configure_optimizers(self):
@@ -586,12 +569,8 @@ def train_and_evaluate(
     steps_per_epoch = datamodule.train_steps
     total_steps = num_epochs * steps_per_epoch
     limit_train_batches = config.get("limit_train_batches", 1.0)
-    if isinstance(limit_train_batches, int):
-        max_train_batches = min(steps_per_epoch, int(limit_train_batches))
-    else:
-        max_train_batches = int(steps_per_epoch * float(limit_train_batches))
-    configured_log_every_n_steps = int(config.log_every_n_steps)
-    effective_log_every_n_steps = max(1, min(configured_log_every_n_steps, max_train_batches))
+    configured_log_every_n_steps = int(config.get("log_every_n_steps", 50))
+    configured_val_check_interval = config.get("val_check_interval", 1.0)
 
     # Update config with dataset-derived values
     info = datamodule.info
@@ -602,10 +581,9 @@ def train_and_evaluate(
     logging.info("Steps per epoch: %d", steps_per_epoch)
     logging.info("Total steps: %d", total_steps)
     logging.info(
-        "Using log_every_n_steps=%d (configured=%d, effective_train_batches=%d).",
-        effective_log_every_n_steps,
+        "Trainer cadence: log_every_n_steps=%d, val_check_interval=%s.",
         configured_log_every_n_steps,
-        max_train_batches,
+        configured_val_check_interval,
     )
 
     module = MAELightningModule(
@@ -649,8 +627,8 @@ def train_and_evaluate(
         devices=1,
         precision="16-mixed",
         max_epochs=num_epochs,
-        log_every_n_steps=effective_log_every_n_steps,
-        val_check_interval=1.0,
+        log_every_n_steps=configured_log_every_n_steps,
+        val_check_interval=configured_val_check_interval,
         gradient_clip_val=float(config.clip) if config.get("clip", 0.) > 0. else None,
         gradient_clip_algorithm="norm" if config.get("clip", 0.) > 0. else None,
         callbacks=callbacks,

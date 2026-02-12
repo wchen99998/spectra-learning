@@ -20,7 +20,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pair_sequence_length = 128
     cfg.intensity_scaling = "linear"
     cfg.mz_representation = "neutral_loss"
-    cfg.peak_ordering = "intensity"
+    cfg.peak_ordering = "mz"
     cfg.seed = 42
 
     # Model (strict SIGReg peak set)
@@ -44,14 +44,15 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_proj_output_dim = 128
     cfg.sigreg_num_slices = 512
     cfg.sigreg_lambda = 0.1
-    cfg.sigreg_drop_prob = 0.25
-    cfg.sigreg_mz_jitter_std = 0.01
+    cfg.sigreg_contiguous_mask_fraction = 0.35
+    cfg.sigreg_contiguous_mask_min_len = 1
+    cfg.sigreg_mz_jitter_std = 0.001
     cfg.sigreg_intensity_jitter_std = 0.1
 
     # Training (short smoke run)
     cfg.num_epochs = 5
-    cfg.learning_rate = 2e-4
-    cfg.warmup_steps = 20_000
+    cfg.learning_rate = 1e-4
+    cfg.warmup_steps = 70_000
     cfg.learning_rate_schedule = "cosine"
     cfg.min_learning_rate = None
     cfg.b2 = 0.98
@@ -59,14 +60,13 @@ def get_config() -> config_dict.ConfigDict:
     cfg.optimizer = "adamw"
     cfg.clip = 0.
     cfg.device_prefetch_size = 1
-    cfg.log_every_n_steps = 500
-    cfg.train_step_log_interval = 500
+    cfg.log_every_n_steps = 100
     cfg.val_check_interval = 1.0
     cfg.checkpoint_every_steps = 25000
     cfg.init_seed = 0
-    cfg.probe_peak_ordering = "intensity"
-    cfg.limit_train_batches = 0.001
-    cfg.limit_val_batches = 0.03
+    cfg.probe_peak_ordering = "mz"
+    cfg.limit_train_batches = 1.0
+    cfg.limit_val_batches = 0.1
     cfg.limit_test_batches = 1.0
     cfg.num_sanity_val_steps = 0
     apply_training_defaults(cfg)

@@ -98,15 +98,8 @@ class FinetuneLightningModule(pl.LightningModule):
         step = step_idx + 1
         return self._lr_for_step(step) / self.base_lr
 
-    def _to_device(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        return {
-            k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v
-            for k, v in batch.items()
-        }
-
     def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         del batch_idx
-        batch = self._to_device(batch)
         features = self._extract_features(batch)
         with torch.autocast(device_type=features.device.type, enabled=False):
             logits = self.head(features.float())
@@ -119,7 +112,6 @@ class FinetuneLightningModule(pl.LightningModule):
 
     def validation_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> None:
         del batch_idx
-        batch = self._to_device(batch)
         features = self._extract_features(batch)
         with torch.autocast(device_type=features.device.type, enabled=False):
             logits = self.head(features.float())
@@ -142,7 +134,6 @@ class FinetuneLightningModule(pl.LightningModule):
 
     def test_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> None:
         del batch_idx
-        batch = self._to_device(batch)
         features = self._extract_features(batch)
         with torch.autocast(device_type=features.device.type, enabled=False):
             logits = self.head(features.float())

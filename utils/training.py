@@ -42,7 +42,12 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         sigreg_proj_output_dim=int(config.get("sigreg_proj_output_dim", 128)),
         bcs_num_slices=int(config.get("sigreg_num_slices", 256)),
         sigreg_lambda=float(config.get("sigreg_lambda", 10.0)),
-        sigreg_drop_prob=float(config.get("sigreg_drop_prob", 0.20)),
+        sigreg_contiguous_mask_fraction=float(
+            config.get("sigreg_contiguous_mask_fraction", 0.25)
+        ),
+        sigreg_contiguous_mask_min_len=int(
+            config.get("sigreg_contiguous_mask_min_len", 1)
+        ),
         sigreg_mz_jitter_std=float(config.get("sigreg_mz_jitter_std", 0.005)),
         sigreg_intensity_jitter_std=float(
             config.get("sigreg_intensity_jitter_std", 0.05)

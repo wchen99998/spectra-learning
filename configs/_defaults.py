@@ -26,7 +26,6 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.dataloader_prefetch_factor = 2
     cfg.dataloader_persistent_workers = True
     cfg.dataloader_pin_memory = True
-    cfg.train_log_extra_metrics_on_step = False
 
 
 def apply_final_probe_defaults(cfg: config_dict.ConfigDict) -> None:
@@ -56,5 +55,5 @@ def apply_tune_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.tune_param_space = [
         # {"param": "learning_rate", "dist": "grid", "args": [1e-4, 4e-4]},
         # {"param": "weight_decay", "dist": "grid", "args": [1e-5, 1e-4, 1e-3, 1e-2]},
-        {"param": "sigreg_lambda", "dist": "grid", "args": [0.05, 0.5, 5.0]},
+        {"param": "sigreg_lambda", "dist": "grid", "args": [0.1, 1.0, 5.0, 10.0]},
     ]

@@ -39,7 +39,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_proj_hidden_dim = 2048
     cfg.sigreg_proj_output_dim = 128
     cfg.sigreg_lambda = 10.0
-    cfg.sigreg_drop_prob = 0.20
+    cfg.sigreg_contiguous_mask_fraction = 0.2
+    cfg.sigreg_contiguous_mask_min_len = 1
     cfg.sigreg_mz_jitter_std = 0.005
     cfg.sigreg_intensity_jitter_std = 0.05
 
@@ -55,7 +56,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.clip = 0.
     cfg.device_prefetch_size = 1
     cfg.log_every_n_steps = 500
-    cfg.train_step_log_interval = 500
     cfg.val_check_interval = 0.25
     cfg.checkpoint_every_steps = 10000
     cfg.init_seed = 0

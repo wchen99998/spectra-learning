@@ -15,6 +15,7 @@ _PARAM_ABBREVS: dict[str, str] = {
     "learning_rate": "lr",
     "weight_decay": "wd",
     "sigreg_lambda": "lam",
+    "sigreg_contiguous_mask_fraction": "cmf",
 }
 
 
@@ -104,6 +105,13 @@ def run_trials(
             cfg[key] = value
         for key, value in trial_params.items():
             cfg[key] = value
+        logging.info(
+            "Trial %d/%d trainer cadence: log_every_n_steps=%s, val_check_interval=%s",
+            idx + 1,
+            len(trial_configs),
+            cfg.get("log_every_n_steps", 50),
+            cfg.get("val_check_interval", 1.0),
+        )
 
         # Configure WandB for this trial
         if wandb_project:
@@ -117,6 +125,8 @@ def run_trials(
         if wandb.run is not None:
             wandb.finish()
         metric_value = final_metrics.get(metric)
+        for key in sorted(final_metrics):
+            logging.info("Trial %d/%d %s = %s", idx + 1, len(trial_configs), key, final_metrics[key])
         results.append({
             "idx": idx,
             "name": trial_name,
@@ -125,7 +135,7 @@ def run_trials(
             "metric_value": metric_value,
             "workdir": str(trial_dir),
         })
-        logging.info("Trial %d metric %s = %s", idx, metric, metric_value)
+        logging.info("Trial %d/%d metric %s = %s", idx + 1, len(trial_configs), metric, metric_value)
     return results
 
 
