@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import warnings
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import lightning.pytorch as pl
 import torch
@@ -228,7 +228,7 @@ def _run_final_attentive_probe(
     probe_warmup_steps = int(config.final_probe_warmup_steps)
     probe_hidden_dim = int(config.final_probe_head_hidden_dim)
     probe_feature_source = str(config.final_probe_feature_source)
-    probe_peak_ordering = str(config.final_probe_peak_ordering)
+    probe_peak_ordering = str(config.peak_ordering)
     num_precursor_bins = int(config.final_probe_num_precursor_bins)
     precursor_max_mz = float(config.final_probe_precursor_max_mz)
     num_attention_heads = int(config.final_probe_attention_heads)
@@ -296,7 +296,7 @@ def _run_final_attentive_probe(
         for batch in _iter_massspec_probe(
             datamodule, "massspec_train", seed=train_seed, peak_ordering=probe_peak_ordering,
         ):
-            batch = module._to_device(batch)
+            batch = module._move_batch_to_device(batch, dataloader_idx=0)
             optimizer.zero_grad(set_to_none=True)
             result = _probe_step(probe, backbone, batch, **step_kwargs)
             result["loss_total"].backward()
@@ -321,7 +321,7 @@ def _run_final_attentive_probe(
             for batch in _iter_massspec_probe(
                 datamodule, "massspec_test", seed=test_seed, peak_ordering=probe_peak_ordering,
             ):
-                batch = module._to_device(batch)
+                batch = module._move_batch_to_device(batch, dataloader_idx=0)
                 result = _probe_step(probe, backbone, batch, **step_kwargs)
                 bs = int(result["batch_size"])
                 test_count += bs
@@ -443,6 +443,9 @@ class MAELightningModule(pl.LightningModule):
         self.min_learning_rate = config.get("min_learning_rate", None)
         self.b2 = float(config.get("b2", 0.999))
         self.checkpoint_every_steps = int(config.checkpoint_every_steps)
+        self._prefetch_stream: torch.cuda.Stream | None = None
+        self._prefetched_batch: dict[str, torch.Tensor] | None = None
+        self._prefetch_iter: Iterator | None = None
 
         self.model = build_model_from_config(config)
 
@@ -477,6 +480,74 @@ class MAELightningModule(pl.LightningModule):
     def _sample_bcs_projection(self, seed: int) -> torch.Tensor:
         return self.model.sample_bcs_projection(device=self.device, seed=seed)
 
+    @staticmethod
+    def _record_stream(batch: Any, stream: torch.cuda.Stream) -> None:
+        if isinstance(batch, torch.Tensor):
+            batch.record_stream(stream)
+            return
+        if isinstance(batch, dict):
+            for value in batch.values():
+                MAELightningModule._record_stream(value, stream)
+            return
+        if isinstance(batch, (list, tuple)):
+            for value in batch:
+                MAELightningModule._record_stream(value, stream)
+
+    _TRAIN_BATCH_KEYS = frozenset({
+        "fused_mz", "fused_intensity", "fused_precursor_mz",
+        "fused_valid_mask", "fused_masked_positions",
+        "view1_masked_fraction", "view1_density_interval_fraction",
+    })
+
+    def _move_train_batch_to_device(
+        self,
+        batch: dict[str, torch.Tensor],
+        dataloader_idx: int,
+    ) -> dict[str, torch.Tensor]:
+        batch = {k: v for k, v in batch.items() if k in self._TRAIN_BATCH_KEYS}
+        batch = self._move_batch_to_device(batch, dataloader_idx=dataloader_idx)
+        return batch
+
+    def _move_batch_to_device(
+        self,
+        batch: dict[str, torch.Tensor],
+        dataloader_idx: int,
+    ) -> dict[str, torch.Tensor]:
+        batch = self.trainer.precision_plugin.convert_input(batch)
+        batch = self._on_before_batch_transfer(batch, dataloader_idx=dataloader_idx)
+        return self.trainer.strategy.batch_to_device(batch, dataloader_idx=dataloader_idx)
+
+    def _prefetch_next_train_batch(self, dataloader_iter: Iterator) -> None:
+        try:
+            cpu_batch, _, dataloader_idx = next(dataloader_iter)
+        except StopIteration:
+            self._prefetched_batch = None
+            return
+        if self.device.type == "cuda":
+            assert self._prefetch_stream is not None
+            with torch.cuda.stream(self._prefetch_stream):
+                self._prefetched_batch = self._move_train_batch_to_device(cpu_batch, dataloader_idx)
+            return
+        self._prefetched_batch = self._move_train_batch_to_device(cpu_batch, dataloader_idx)
+
+    def _next_train_batch(self, dataloader_iter: Iterator) -> dict[str, torch.Tensor]:
+        if self.device.type == "cuda" and self._prefetch_stream is None:
+            self._prefetch_stream = torch.cuda.Stream(device=self.device)
+        if self._prefetch_iter is not dataloader_iter:
+            self._prefetch_iter = dataloader_iter
+            self._prefetched_batch = None
+        if self._prefetched_batch is None:
+            self._prefetch_next_train_batch(dataloader_iter)
+        assert self._prefetched_batch is not None
+        if self.device.type == "cuda":
+            assert self._prefetch_stream is not None
+            current_stream = torch.cuda.current_stream(device=self.device)
+            current_stream.wait_stream(self._prefetch_stream)
+            self._record_stream(self._prefetched_batch, current_stream)
+        batch = self._prefetched_batch
+        self._prefetch_next_train_batch(dataloader_iter)
+        return batch
+
     def validation_step(
         self,
         batch: dict[str, torch.Tensor],
@@ -490,7 +561,7 @@ class MAELightningModule(pl.LightningModule):
         )
         torch.compiler.cudagraph_mark_step_begin()
         metrics = self._train_forward(batch, bcs_projection)
-        batch_size = int(batch["peak_mz"].shape[0])
+        batch_size = int(batch["fused_mz"].shape[0]) // 2
         for key, value in metrics.items():
             self.log(
                 f"msg_eval/{key}",
@@ -502,16 +573,31 @@ class MAELightningModule(pl.LightningModule):
                 batch_size=batch_size,
             )
 
-    def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        del batch_idx
+    def training_step(self, dataloader_iter: Iterator) -> torch.Tensor:
+        batch = self._next_train_batch(dataloader_iter)
+        batch_size = int(batch["fused_mz"].shape[0]) // 2
         bcs_projection = self._sample_bcs_projection(self.global_step)
         torch.compiler.cudagraph_mark_step_begin()
         metrics = self._train_forward(batch, bcs_projection)
         step = self.global_step + 1
-        self.log("train/learning_rate", self._lr_for_step(step), on_step=True, on_epoch=False, prog_bar=True)
+        self.log(
+            "train/learning_rate",
+            self._lr_for_step(step),
+            on_step=True,
+            on_epoch=False,
+            prog_bar=True,
+            batch_size=batch_size,
+        )
         for key, value in metrics.items():
             if key == "loss":
-                self.log("train/loss", value, on_step=True, on_epoch=False, prog_bar=True)
+                self.log(
+                    "train/loss",
+                    value,
+                    on_step=True,
+                    on_epoch=False,
+                    prog_bar=True,
+                    batch_size=batch_size,
+                )
                 if step % self.checkpoint_every_steps == 0:
                     self.log(
                         "train/loss_checkpoint",
@@ -520,10 +606,18 @@ class MAELightningModule(pl.LightningModule):
                         on_epoch=False,
                         prog_bar=False,
                         logger=False,
+                        batch_size=batch_size,
                     )
                 continue
             metric_name = f"train/{key}"
-            self.log(metric_name, value, on_step=True, on_epoch=False, prog_bar=False)
+            self.log(
+                metric_name,
+                value,
+                on_step=True,
+                on_epoch=False,
+                prog_bar=False,
+                batch_size=batch_size,
+            )
         return metrics["loss"]
 
     def configure_optimizers(self):
@@ -625,7 +719,7 @@ def train_and_evaluate(
         default_root_dir=str(workdir),
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1,
-        precision="16-mixed",
+        precision="32",
         max_epochs=num_epochs,
         log_every_n_steps=configured_log_every_n_steps,
         val_check_interval=configured_val_check_interval,

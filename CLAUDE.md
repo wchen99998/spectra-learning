@@ -4,79 +4,91 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-PyTorch-based deep learning framework for pretraining and fine-tuning JEPA (Joint-Embedding Predictive Architecture) models on continuous mass spectrometry peak sets. The pipeline ingests raw peak lists, normalizes them into continuous features, and trains a JEPA model with prediction + BCS (Batched Characteristic Slicing) regularization losses. Fine-tuning supports downstream tasks like fingerprint prediction and adduct classification.
+PyTorch-based deep learning framework for pretraining SIGReg (Strict SIGmoid Regularization) models on continuous mass spectrometry peak sets. The pipeline ingests raw peak lists from GeMS and MassSpecGym datasets, normalizes them into continuous features via a tf.data pipeline, and trains a two-view self-supervised model with MSE invariance + BCS (Batched Characteristic Slicing) regularization losses. After pretraining, a final attentive probe evaluates learned representations on adduct classification, precursor bin prediction, and instrument type identification.
 
 ## Commands
 
-### Training (JEPA pretraining)
+### Training
 ```bash
 python train.py --config configs/gems_a_50_mask.py --workdir experiments/my_run
 ```
 
+### Running tests
+```bash
+# All tests
+python -m pytest tests/
+
+# Single test file
+python -m pytest tests/test_pretrain.py
+
+# Single test class or method
+python -m pytest tests/test_pretrain.py::SIGRegForwardTests::test_forward_loss_is_finite
+```
+
+### Data preparation (standalone)
+```bash
+python input_pipeline.py configs/gems_a_dataset.py
+```
 
 ## Architecture
 
-### Core Components
+### Training Flow
 
-- **input_pipeline.py**: Data loading, TFRecord creation/loading, continuous peak normalization, Lightning DataModule. Emits `peak_mz`, `peak_intensity`, `peak_valid_mask`, `precursor_mz` tensors.
-- **models/model.py**: PeakSetJEPA model (encoder + mask sampler + predictor + losses). Encoder is a non-causal transformer on set-style peak features.
-- **models/losses.py**: BCSLoss (Batched Characteristic Slicing via Epps-Pulley), squared_prediction_loss.
-- **networks/transformer_torch.py**: TransformerBlock, Attention, FeedForward primitives with optional rotary embeddings.
-- **train.py**: JEPA pretraining LightningModule with prediction + BCS regularization losses.
+`train.py:MAELightningModule` orchestrates the full pipeline:
+1. Data flows from tf.data TFRecords through `TfLightningDataModule` (round-robin interleaving GeMS + MassSpecGym datasets)
+2. Two-view augmentation happens in the tf.data pipeline (`_augment_sigreg_batch_tf`), producing `fused_*` tensors that stack view1 (masked+jittered) and view2 (unmasked+jittered) along the batch dimension
+3. The compiled forward pass (`torch.compile` with `max-autotune` + CUDA graphs) runs the fused batch through encoder -> PMA pooling -> projector -> BCS+invariance loss
+4. After pretraining completes, `_run_final_attentive_probe` trains a lightweight multi-task probe on frozen encoder features
 
-### JEPA Model Structure
+### Model (PeakSetSIGReg in `models/model.py`)
 
-1. **PeakSetEncoder**: MLP embedder (mz, intensity, precursor -> D) + non-causal Transformer blocks + RMSNorm
-2. **PeakMaskSampler**: Samples fixed-size context/target index sets with valid-peak priority
-3. **PeakSetPredictor**: Embeds target queries, concatenates with context embeddings, applies non-causal self-attention
-4. **Losses**: MSE prediction loss + BCSLoss (Epps-Pulley Gaussianity test on random 1-D slices)
+- **PeakSetEncoder**: FourierFeatures(mz) + MLP embedder -> N non-causal TransformerBlocks -> RMSNorm. Supports learnable mask tokens for masked positions and optional RoPE.
+- **PMA Pooling**: Multihead cross-attention with learned seed queries (`pool_query`) that attend to peak embeddings, producing a fixed-size representation regardless of valid peak count.
+- **Projector**: 3-layer MLP (Linear -> RMSNorm -> SiLU) x2, maps pooled embeddings to lower-dim space for the loss.
+- **BCSLoss** (`models/losses.py`): Projects both views via random slicing directions, tests Gaussianity using Epps-Pulley characteristic function distance. Combined loss = MSE(z1, z2) + lambda * BCS.
+
+### Two-View Augmentation (`models/augmentation.py` + `input_pipeline.py`)
+
+Both PyTorch and TF implementations exist. The TF version runs in the data pipeline for training; PyTorch versions are used in tests and the model's `forward()`.
+- **View 1 (masked)**: Contiguous mz-sorted mask + jitter on unmasked peaks + re-normalization
+- **View 2 (unmasked)**: Jitter only, no masking
 
 ### Batch Contract
 
-Each training batch contains:
-- `peak_mz`: float32 [B, N] - normalized m/z values (/ 1000)
-- `peak_intensity`: float32 [B, N] - scaled intensity values
-- `peak_valid_mask`: bool [B, N] - valid peak mask
-- `precursor_mz`: float32 [B] - normalized precursor m/z
-- Probe metadata when available: `fingerprint`, `adduct_id`, `instrument_type_id`, etc.
+Training batches contain fused (2B stacked) tensors:
+- `fused_mz`, `fused_intensity`: float32 [2B, N]
+- `fused_precursor_mz`: float32 [2B]
+- `fused_valid_mask`, `fused_masked_positions`: bool [2B, N]
+- `view1_masked_fraction`, `view1_density_interval_fraction`: scalar metrics
+
+Raw (pre-augmentation) batches: `peak_mz` [B, N], `peak_intensity` [B, N], `peak_valid_mask` [B, N], `precursor_mz` [B].
 
 ### Configuration System
 
-Uses `ml_collections.ConfigDict`. Configs are Python modules in `configs/` loaded via importlib:
-```python
-cfg.model_type = "jepa_peak_set"
-cfg.num_peaks = 60
-cfg.model_dim = 768
-cfg.num_layers = 20
-cfg.num_heads = 12
-cfg.jepa_target_ratio = 0.4
-cfg.jepa_bcs_num_slices = 256
-cfg.jepa_bcs_lambda = 10.0
-cfg.learning_rate = 3e-4
-```
+`ml_collections.ConfigDict` configs in `configs/`. Shared defaults in `configs/_defaults.py` (`apply_training_defaults`, `apply_final_probe_defaults`, `apply_tune_defaults`). Configs loaded dynamically via importlib. Key config: `configs/gems_a_50_mask.py`.
 
-### Data Sources
+### Data Pipeline (`input_pipeline.py`)
 
-- **GeMS**: `roman-bushuiev/GeMS` (HuggingFace)
-- **MassSpecGym**: `roman-bushuiev/MassSpecGym` (HuggingFace)
+TFRecord-based with auto-download from HuggingFace. Processing chain: parse -> filter precursor mz -> filter peak mz range -> filter min intensity -> topk -> optional neutral loss -> compact sort -> normalize -> batch -> augment. `TfLightningDataModule` wraps tf.data datasets as PyTorch IterableDatasets with stateful resume support.
 
-### WandB Integration
+### Key Aliases
 
-Run counter in `.wandb_run_counter` incremented after each run for unique naming. Enable via `cfg.enable_wandb = True`.
+`PeakSetJEPA = PeakSetSIGReg` (historical alias in `models/model.py:463`)
 
 ## Code Style
 
 - Use PyTorch and PyTorch Lightning exclusively
 - Avoid defensive programming and try-catch clauses
 - Prefer simple code over complicated solutions
+- Always use Context7 MCP for library/API documentation
 - Check `pyproject.toml` for library versions
 - Use local `.venv` environment
 - Python 3.12+ type hints (e.g., `list[str]`, `dict[str, int]`)
+- Package manager: uv
 
 ## Key Dependencies
 
 - PyTorch 2.10.0 (CUDA 13.0)
-- PyTorch Lightning 2.5.5
-- TensorFlow 2.19.0 CPU (for tf.data pipeline)
+- Lightning 2.5.5
+- TensorFlow CPU 2.19.0 (tf.data pipeline only, GPU disabled)
 - ml-collections, rdkit, wandb, huggingface_hub
-- Package manager: uv

@@ -215,7 +215,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--peak_ordering",
         default=None,
-        help="Override peak ordering for probe dataset. Defaults to config.probe_peak_ordering.",
+        help="Override peak ordering for probe dataset. Defaults to config.peak_ordering.",
     )
     parser.add_argument(
         "--device",
@@ -247,7 +247,7 @@ def main() -> None:
 
     seed = int(config.seed) if args.seed is None else int(args.seed)
     peak_ordering = (
-        str(config.get("probe_peak_ordering", "intensity"))
+        str(config.get("peak_ordering", "intensity"))
         if args.peak_ordering is None
         else str(args.peak_ordering)
     )

@@ -39,7 +39,7 @@ def apply_final_probe_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.final_probe_warmup_steps = 100
     cfg.final_probe_feature_source = "encoder"
     cfg.final_probe_head_hidden_dim = 512
-    cfg.final_probe_peak_ordering = "intensity"
+
     cfg.final_probe_num_precursor_bins = 1000
     cfg.final_probe_precursor_max_mz = 1000.0
     cfg.final_probe_attention_heads = cfg.num_heads
@@ -54,6 +54,6 @@ def apply_tune_defaults(cfg: config_dict.ConfigDict) -> None:
     """
     cfg.tune_param_space = [
         # {"param": "learning_rate", "dist": "grid", "args": [1e-4, 4e-4]},
-        # {"param": "weight_decay", "dist": "grid", "args": [1e-5, 1e-4, 1e-3, 1e-2]},
-        {"param": "sigreg_lambda", "dist": "grid", "args": [0.1, 1.0, 5.0, 10.0]},
+        {"param": "weight_decay", "dist": "grid", "args": [1e-4, 1e-3, 1e-2]},
+        {"param": "sigreg_lambda", "dist": "grid", "args": [1.0]},
     ]

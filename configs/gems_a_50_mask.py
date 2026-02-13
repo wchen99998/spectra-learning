@@ -18,10 +18,12 @@ def get_config() -> config_dict.ConfigDict:
     cfg.drop_remainder = True
     cfg.max_precursor_mz = 1000.0
     cfg.pair_sequence_length = 128
+    cfg.min_peak_intensity = 0.001
     cfg.intensity_scaling = "linear"
     cfg.mz_representation = "neutral_loss"
     cfg.peak_ordering = "mz"
     cfg.seed = 42
+
 
     # Model (strict SIGReg peak set)
     cfg.model_type = "sigreg_peak_set"
@@ -30,6 +32,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_layers = 10
     cfg.num_heads = 8
     cfg.num_kv_heads = 4
+    cfg.encoder_use_rope = False
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 128
     cfg.pooling_type = "pma"
@@ -44,10 +47,10 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_proj_output_dim = 128
     cfg.sigreg_num_slices = 512
     cfg.sigreg_lambda = 0.1
-    cfg.sigreg_contiguous_mask_fraction = 0.35
+    cfg.sigreg_contiguous_mask_fraction = 0.25
     cfg.sigreg_contiguous_mask_min_len = 1
-    cfg.sigreg_mz_jitter_std = 0.001
-    cfg.sigreg_intensity_jitter_std = 0.1
+    cfg.sigreg_mz_jitter_std = 0.0001
+    cfg.sigreg_intensity_jitter_std = 0.001
 
     # Training (short smoke run)
     cfg.num_epochs = 5
@@ -64,7 +67,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.val_check_interval = 1.0
     cfg.checkpoint_every_steps = 25000
     cfg.init_seed = 0
-    cfg.probe_peak_ordering = "mz"
+
     cfg.limit_train_batches = 1.0
     cfg.limit_val_batches = 0.1
     cfg.limit_test_batches = 1.0

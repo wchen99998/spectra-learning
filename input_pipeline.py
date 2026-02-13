@@ -19,7 +19,6 @@ import tensorflow as tf
 import torch
 from huggingface_hub import hf_hub_download
 from ml_collections import config_dict
-from models.augmentation import augment_sigreg_batch
 from torch.utils.data import DataLoader, IterableDataset
 from tqdm import tqdm
 
@@ -44,6 +43,7 @@ _PEAK_MZ_MAX = 1000.0
 _PRECURSOR_MZ_WINDOW = 2.5
 _INTENSITY_EPS = 1e-4
 _DEFAULT_INTENSITY_SCALING = "log"
+_DEFAULT_MIN_PEAK_INTENSITY = _INTENSITY_EPS
 _METADATA_FILENAME = "metadata.json"
 
 _GEMS_HF_REPO = "roman-bushuiev/GeMS"
@@ -629,6 +629,18 @@ def _filter_peak_mz_range(
     return apply
 
 
+def _filter_min_peak_intensity(min_peak_intensity: float) -> Callable[[dict], dict]:
+    min_intensity = tf.constant(min_peak_intensity, tf.float32)
+
+    def apply(example: dict) -> dict:
+        keep = example["intensity"] >= min_intensity
+        example["mz"] = tf.where(keep, example["mz"], 0.0)
+        example["intensity"] = tf.where(keep, example["intensity"], 0.0)
+        return example
+
+    return apply
+
+
 def _convert_to_neutral_loss() -> Callable[[dict], dict]:
     def apply(example: dict) -> dict:
         precursor_mz = tf.squeeze(example["precursor_mz"])
@@ -677,44 +689,205 @@ def _topk_peaks(num_peaks: int) -> Callable[[dict], dict]:
     return apply
 
 
-def _normalize_for_jepa(
-    max_precursor_mz: float,
-    intensity_scaling: str,
-) -> Callable[[dict], dict]:
+def _normalize_for_jepa(max_precursor_mz: float) -> Callable[[dict], dict]:
     """Normalize peak features for continuous JEPA input.
 
-    Produces peak_mz (normalized), peak_intensity (scaled), peak_valid_mask,
-    and normalized precursor_mz.  Replaces the old tokenize + build_input steps.
+    Produces peak_mz (normalized), peak_intensity (unchanged), peak_valid_mask,
+    and precursor_mz normalized by the configured max precursor m/z.
     """
-    eps = tf.constant(_INTENSITY_EPS, tf.float32)
-    log_eps = tf.math.log(eps)
-    denom = -log_eps
-    linear_denom = tf.constant(1.0, tf.float32) - eps
     peak_mz_max = tf.constant(_PEAK_MZ_MAX, tf.float32)
     precursor_max = tf.constant(max_precursor_mz, tf.float32)
-
-    if intensity_scaling == "linear":
-        def scale(intensity: tf.Tensor) -> tf.Tensor:
-            return (intensity - eps) / linear_denom
-    else:
-        def scale(intensity: tf.Tensor) -> tf.Tensor:
-            return (tf.math.log(intensity) - log_eps) / denom
 
     def apply(example: dict) -> dict:
         mz = example["mz"]
         intensity = example["intensity"]
 
-        # Validity is based on raw (pre-scaled) intensity occupancy.
+        # Validity is based on intensity occupancy.
         valid = intensity > 0
         example["peak_valid_mask"] = valid
         example["peak_mz"] = mz / peak_mz_max
-        intensity = tf.clip_by_value(intensity, eps, 1.0)
-        example["peak_intensity"] = tf.where(valid, scale(intensity), 0.0)
-        example["precursor_mz"] = example["precursor_mz"] / precursor_max
+        example["peak_intensity"] = tf.where(valid, intensity, 0.0)
+        precursor_mz = tf.clip_by_value(example["precursor_mz"], 0.0, precursor_max)
+        example["precursor_mz"] = precursor_mz / precursor_max
 
-        del example["mz"]
-        del example["intensity"]
+        # del example["mz"]
+        # del example["intensity"]
         return example
+
+    return apply
+
+
+def _augment_masked_view_tf(
+    peak_mz: tf.Tensor,
+    peak_intensity: tf.Tensor,
+    peak_valid_mask: tf.Tensor,
+    *,
+    contiguous_mask_fraction: float,
+    contiguous_mask_min_len: int,
+    mz_jitter_std: float,
+    intensity_jitter_std: float,
+) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
+    batch_size = tf.shape(peak_mz)[0]
+    num_peaks = tf.shape(peak_mz)[1]
+    has_valid = tf.reduce_any(peak_valid_mask, axis=1)
+
+    sort_keys = tf.where(
+        peak_valid_mask,
+        peak_mz,
+        tf.fill(tf.shape(peak_mz), tf.cast(float("inf"), peak_mz.dtype)),
+    )
+    sorted_order = tf.argsort(sort_keys, axis=1, direction="ASCENDING", stable=True)
+    sorted_valid = tf.gather(peak_valid_mask, sorted_order, batch_dims=1)
+    valid_counts = tf.reduce_sum(tf.cast(sorted_valid, tf.int32), axis=1)
+
+    raw_mask_len = tf.cast(
+        tf.floor(tf.cast(valid_counts, tf.float32) * contiguous_mask_fraction),
+        tf.int32,
+    )
+    mask_len = tf.maximum(
+        raw_mask_len,
+        tf.fill(tf.shape(raw_mask_len), tf.cast(contiguous_mask_min_len, tf.int32)),
+    )
+    mask_len = tf.minimum(mask_len, valid_counts)
+    mask_len = tf.where(has_valid, mask_len, tf.zeros_like(mask_len))
+
+    max_start_offset = valid_counts - mask_len + 1
+    sampled_offset = tf.cast(
+        tf.floor(
+            tf.random.uniform([batch_size], dtype=tf.float32)
+            * tf.cast(max_start_offset, tf.float32),
+        ),
+        tf.int32,
+    )
+    sampled_offset = tf.where(has_valid, sampled_offset, tf.zeros_like(sampled_offset))
+    mask_start = sampled_offset
+    mask_end = mask_start + mask_len
+
+    positions = tf.range(num_peaks, dtype=tf.int32)[tf.newaxis, :]
+    masked_sorted = (
+        has_valid[:, tf.newaxis]
+        & (positions >= mask_start[:, tf.newaxis])
+        & (positions < mask_end[:, tf.newaxis])
+        & (positions < valid_counts[:, tf.newaxis])
+    )
+    inverse_order = tf.argsort(sorted_order, axis=1, direction="ASCENDING", stable=True)
+    masked = tf.gather(masked_sorted, inverse_order, batch_dims=1)
+    masked = tf.logical_and(masked, peak_valid_mask)
+
+    jitterable = tf.logical_and(peak_valid_mask, tf.logical_not(masked))
+
+    mz_noise = tf.random.normal(tf.shape(peak_mz), stddev=mz_jitter_std, dtype=peak_mz.dtype)
+    mz = tf.where(jitterable, peak_mz + mz_noise, tf.zeros_like(peak_mz))
+    mz = tf.clip_by_value(mz, 0.0, 1.0)
+
+    intensity_noise = tf.random.normal(
+        tf.shape(peak_intensity),
+        stddev=intensity_jitter_std,
+        dtype=peak_intensity.dtype,
+    )
+    intensity = tf.where(
+        jitterable,
+        peak_intensity + intensity_noise,
+        tf.zeros_like(peak_intensity),
+    )
+    intensity = tf.clip_by_value(intensity, 0.0, 1.0)
+    max_intensity = tf.maximum(
+        tf.reduce_max(intensity, axis=1, keepdims=True),
+        tf.cast(1e-6, peak_intensity.dtype),
+    )
+    intensity = intensity / max_intensity
+    intensity = tf.where(jitterable, intensity, tf.zeros_like(intensity))
+
+    valid_counts_safe = tf.maximum(
+        tf.reduce_sum(tf.cast(peak_valid_mask, tf.float32), axis=1),
+        1.0,
+    )
+    masked_counts = tf.reduce_sum(tf.cast(masked, tf.float32), axis=1)
+    masked_fraction = tf.reduce_mean(masked_counts / valid_counts_safe)
+    density_interval_fraction = tf.reduce_mean(
+        tf.cast(valid_counts, tf.float32) / valid_counts_safe,
+    )
+
+    return (
+        mz,
+        intensity,
+        peak_valid_mask,
+        masked,
+        masked_fraction,
+        density_interval_fraction,
+    )
+
+
+def _augment_unmasked_view_tf(
+    peak_mz: tf.Tensor,
+    peak_intensity: tf.Tensor,
+    peak_valid_mask: tf.Tensor,
+    *,
+    mz_jitter_std: float,
+    intensity_jitter_std: float,
+) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
+    view_valid = peak_valid_mask
+    masked = tf.zeros_like(peak_valid_mask)
+
+    mz_noise = tf.random.normal(tf.shape(peak_mz), stddev=mz_jitter_std, dtype=peak_mz.dtype)
+    mz = tf.where(view_valid, peak_mz + mz_noise, tf.zeros_like(peak_mz))
+    mz = tf.clip_by_value(mz, 0.0, 1.0)
+
+    intensity_noise = tf.random.normal(
+        tf.shape(peak_intensity),
+        stddev=intensity_jitter_std,
+        dtype=peak_intensity.dtype,
+    )
+    intensity = tf.where(
+        view_valid,
+        peak_intensity + intensity_noise,
+        tf.zeros_like(peak_intensity),
+    )
+    intensity = tf.clip_by_value(intensity, 0.0, 1.0)
+    intensity = tf.where(view_valid, intensity, tf.zeros_like(intensity))
+
+    return mz, intensity, view_valid, masked
+
+
+def _augment_sigreg_batch_tf(
+    *,
+    contiguous_mask_fraction: float,
+    contiguous_mask_min_len: int,
+    mz_jitter_std: float,
+    intensity_jitter_std: float,
+) -> Callable[[dict], dict]:
+    def apply(batch: dict) -> dict:
+        peak_mz = batch["peak_mz"]
+        peak_intensity = batch["peak_intensity"]
+        peak_valid_mask = batch["peak_valid_mask"]
+        precursor_mz = batch["precursor_mz"]
+
+        view1_mz, view1_int, view1_valid, view1_masked, view1_masked_fraction, view1_density_interval_fraction = _augment_masked_view_tf(
+            peak_mz,
+            peak_intensity,
+            peak_valid_mask,
+            contiguous_mask_fraction=contiguous_mask_fraction,
+            contiguous_mask_min_len=contiguous_mask_min_len,
+            mz_jitter_std=mz_jitter_std,
+            intensity_jitter_std=intensity_jitter_std,
+        )
+        view2_mz, view2_int, view2_valid, view2_masked = _augment_unmasked_view_tf(
+            peak_mz,
+            peak_intensity,
+            peak_valid_mask,
+            mz_jitter_std=mz_jitter_std,
+            intensity_jitter_std=intensity_jitter_std,
+        )
+
+        out = dict(batch)
+        out["fused_mz"] = tf.concat([view1_mz, view2_mz], axis=0)
+        out["fused_intensity"] = tf.concat([view1_int, view2_int], axis=0)
+        out["fused_precursor_mz"] = tf.concat([precursor_mz, precursor_mz], axis=0)
+        out["fused_valid_mask"] = tf.concat([view1_valid, view2_valid], axis=0)
+        out["fused_masked_positions"] = tf.concat([view1_masked, view2_masked], axis=0)
+        out["view1_masked_fraction"] = view1_masked_fraction
+        out["view1_density_interval_fraction"] = view1_density_interval_fraction
+        return out
 
     return apply
 
@@ -730,7 +903,13 @@ def _build_dataset(
     max_precursor_mz: float,
     include_fingerprint: bool,
     intensity_scaling: str,
+    min_peak_intensity: float,
     mz_representation: str,
+    include_sigreg_augmentation: bool,
+    sigreg_contiguous_mask_fraction: float,
+    sigreg_contiguous_mask_min_len: int,
+    sigreg_mz_jitter_std: float,
+    sigreg_intensity_jitter_std: float,
     peak_ordering: str = "intensity",
     num_parallel_reads: int | None = None,
 ) -> tf.data.Dataset:
@@ -749,17 +928,31 @@ def _build_dataset(
         _filter_peak_mz_range(_PEAK_MZ_MIN, _PEAK_MZ_MAX, _PRECURSOR_MZ_WINDOW),
         num_parallel_calls=tf.data.AUTOTUNE,
     )
+    ds = ds.map(
+        _filter_min_peak_intensity(min_peak_intensity),
+        num_parallel_calls=tf.data.AUTOTUNE,
+    )
     ds = ds.map(_topk_peaks(_NUM_PEAKS_OUTPUT), num_parallel_calls=tf.data.AUTOTUNE)
     if mz_representation == "neutral_loss":
         ds = ds.map(_convert_to_neutral_loss(), num_parallel_calls=tf.data.AUTOTUNE)
     ds = ds.map(_compact_sort_peaks(peak_ordering), num_parallel_calls=tf.data.AUTOTUNE)
     ds = ds.map(
-        _normalize_for_jepa(max_precursor_mz, intensity_scaling),
+        _normalize_for_jepa(max_precursor_mz),
         num_parallel_calls=tf.data.AUTOTUNE,
     )
     if shuffle_buffer > 0:
         ds = ds.shuffle(shuffle_buffer, seed=seed, reshuffle_each_iteration=True)
     ds = ds.batch(batch_size, drop_remainder=drop_remainder)
+    if include_sigreg_augmentation:
+        ds = ds.map(
+            _augment_sigreg_batch_tf(
+                contiguous_mask_fraction=sigreg_contiguous_mask_fraction,
+                contiguous_mask_min_len=sigreg_contiguous_mask_min_len,
+                mz_jitter_std=sigreg_mz_jitter_std,
+                intensity_jitter_std=sigreg_intensity_jitter_std,
+            ),
+            num_parallel_calls=tf.data.AUTOTUNE,
+        )
     options = tf.data.Options()
     options.experimental_deterministic = True
     ds = ds.with_options(options)
@@ -991,9 +1184,11 @@ class TfLightningDataModule(pl.LightningDataModule):
         self.intensity_scaling = str(
             config.get("intensity_scaling", _DEFAULT_INTENSITY_SCALING)
         )
+        self.min_peak_intensity = float(
+            config.get("min_peak_intensity", _DEFAULT_MIN_PEAK_INTENSITY)
+        )
         self.mz_representation = str(config.get("mz_representation", "mz"))
         self.peak_ordering = str(config.get("peak_ordering", "intensity"))
-        self.probe_peak_ordering = str(config.get("probe_peak_ordering", "intensity"))
         self.sigreg_contiguous_mask_fraction = float(
             config.get("sigreg_contiguous_mask_fraction", 0.25)
         )
@@ -1092,23 +1287,6 @@ class TfLightningDataModule(pl.LightningDataModule):
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         self.seed = int(state_dict["seed"])
 
-    def on_before_batch_transfer(
-        self,
-        batch: dict[str, torch.Tensor],
-        dataloader_idx: int,
-    ) -> dict[str, torch.Tensor]:
-        del dataloader_idx
-        augmented = augment_sigreg_batch(
-            batch,
-            contiguous_mask_fraction=self.sigreg_contiguous_mask_fraction,
-            contiguous_mask_min_len=self.sigreg_contiguous_mask_min_len,
-            mz_jitter_std=self.sigreg_mz_jitter_std,
-            intensity_jitter_std=self.sigreg_intensity_jitter_std,
-        )
-        out = dict(batch)
-        out.update(augmented)
-        return out
-
     def _build_dataset_for_files(
         self,
         files: list[str],
@@ -1129,7 +1307,13 @@ class TfLightningDataModule(pl.LightningDataModule):
             max_precursor_mz=self.max_precursor_mz,
             include_fingerprint=include_fingerprint,
             intensity_scaling=self.intensity_scaling,
+            min_peak_intensity=self.min_peak_intensity,
             mz_representation=self.mz_representation,
+            include_sigreg_augmentation=True,
+            sigreg_contiguous_mask_fraction=self.sigreg_contiguous_mask_fraction,
+            sigreg_contiguous_mask_min_len=self.sigreg_contiguous_mask_min_len,
+            sigreg_mz_jitter_std=self.sigreg_mz_jitter_std,
+            sigreg_intensity_jitter_std=self.sigreg_intensity_jitter_std,
             peak_ordering=self.peak_ordering,
         )
 
@@ -1201,7 +1385,7 @@ class TfLightningDataModule(pl.LightningDataModule):
         else:
             files = self.massspec_test_files
         if peak_ordering is None:
-            peak_ordering = self.probe_peak_ordering
+            peak_ordering = self.peak_ordering
         return _build_dataset(
             files,
             self.batch_size,
@@ -1212,7 +1396,13 @@ class TfLightningDataModule(pl.LightningDataModule):
             max_precursor_mz=self.max_precursor_mz,
             include_fingerprint=True,
             intensity_scaling=self.intensity_scaling,
+            min_peak_intensity=self.min_peak_intensity,
             mz_representation=self.mz_representation,
+            include_sigreg_augmentation=False,
+            sigreg_contiguous_mask_fraction=self.sigreg_contiguous_mask_fraction,
+            sigreg_contiguous_mask_min_len=self.sigreg_contiguous_mask_min_len,
+            sigreg_mz_jitter_std=self.sigreg_mz_jitter_std,
+            sigreg_intensity_jitter_std=self.sigreg_intensity_jitter_std,
             peak_ordering=peak_ordering,
         )
 

@@ -72,7 +72,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_eval_steps = 50
     cfg.checkpoint_every_steps = 10_000
     cfg.init_seed = 0
-    cfg.probe_peak_ordering = "intensity"
+
     cfg.limit_train_batches = 1.0
     cfg.limit_val_batches = 1.0
     cfg.limit_test_batches = 1.0

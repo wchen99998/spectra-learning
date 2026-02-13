@@ -102,6 +102,7 @@ def _build_non_causal_blocks(
     num_heads: int,
     num_kv_heads: int | None,
     attention_mlp_multiple: float,
+    use_rope: bool = False,
     norm_eps: float = 1e-5,
 ) -> nn.ModuleList:
     heads = int(num_heads)
@@ -120,14 +121,28 @@ def _build_non_causal_blocks(
                 multiple_of=4,
                 hidden_dim=hidden_dim,
                 w_init_scale=1.0,
-                use_rotary_embeddings=False,
+                use_rotary_embeddings=use_rope,
             )
         )
     return nn.ModuleList(blocks)
 
 
+def _build_rope_frequencies(
+    *,
+    sequence_length: int,
+    inv_freq: torch.Tensor,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    positions = torch.arange(sequence_length, device=inv_freq.device, dtype=inv_freq.dtype)
+    angles = torch.outer(positions, inv_freq)
+    angles = torch.repeat_interleave(angles, repeats=2, dim=-1)
+    freqs_cos = angles.cos().to(dtype=dtype).unsqueeze(0).unsqueeze(2)
+    freqs_sin = angles.sin().to(dtype=dtype).unsqueeze(0).unsqueeze(2)
+    return freqs_cos, freqs_sin
+
+
 class PeakSetEncoder(nn.Module):
-    """Transformer encoder for peak sets (non-causal, no positional encoding)."""
+    """Transformer encoder for peak sets (non-causal, optional RoPE)."""
 
     def __init__(
         self,
@@ -142,9 +157,11 @@ class PeakSetEncoder(nn.Module):
         mz_fourier_min_freq: float = 1.0,
         mz_fourier_max_freq: float = 100.0,
         mz_fourier_learnable: bool = False,
+        use_rope: bool = False,
     ):
         super().__init__()
         self.model_dim = model_dim
+        self.use_rope = bool(use_rope)
         self.embedder = PeakFeatureEmbedder(
             model_dim,
             feature_mlp_hidden_dim,
@@ -153,12 +170,18 @@ class PeakSetEncoder(nn.Module):
             mz_fourier_max_freq=mz_fourier_max_freq,
             mz_fourier_learnable=mz_fourier_learnable,
         )
+        head_dim = model_dim // int(num_heads)
+        inv_freq = 1.0 / (
+            10000.0 ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / float(head_dim))
+        )
+        self.register_buffer("rope_inv_freq", inv_freq, persistent=False)
         self.blocks = _build_non_causal_blocks(
             dim=model_dim,
             num_layers=num_layers,
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             attention_mlp_multiple=attention_mlp_multiple,
+            use_rope=self.use_rope,
         )
         self.norm = nn.RMSNorm(model_dim, eps=1e-5)
 
@@ -175,8 +198,16 @@ class PeakSetEncoder(nn.Module):
         if masked_positions is not None:
             token = mask_token.view(1, 1, -1).to(dtype=x.dtype, device=x.device)
             x = torch.where(masked_positions.unsqueeze(-1), token, x)
+        freqs_cos = None
+        freqs_sin = None
+        if self.use_rope:
+            freqs_cos, freqs_sin = _build_rope_frequencies(
+                sequence_length=x.shape[1],
+                inv_freq=self.rope_inv_freq,
+                dtype=x.dtype,
+            )
         for block in self.blocks:
-            x = block(x, freqs_cos=None, freqs_sin=None, attention_mask=valid_mask)
+            x = block(x, freqs_cos=freqs_cos, freqs_sin=freqs_sin, attention_mask=valid_mask)
         return self.norm(x)
 
 
@@ -197,6 +228,7 @@ class PeakSetSIGReg(nn.Module):
         mz_fourier_min_freq: float = 1.0,
         mz_fourier_max_freq: float = 100.0,
         mz_fourier_learnable: bool = False,
+        encoder_use_rope: bool = False,
         sigreg_use_projector: bool = True,
         sigreg_proj_hidden_dim: int = 2048,
         sigreg_proj_output_dim: int = 128,
@@ -233,6 +265,7 @@ class PeakSetSIGReg(nn.Module):
             mz_fourier_min_freq=mz_fourier_min_freq,
             mz_fourier_max_freq=mz_fourier_max_freq,
             mz_fourier_learnable=mz_fourier_learnable,
+            use_rope=encoder_use_rope,
         )
 
         if sigreg_use_projector:

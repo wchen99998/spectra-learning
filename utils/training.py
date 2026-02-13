@@ -34,6 +34,7 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         mz_fourier_min_freq=float(config.get("mz_fourier_min_freq", 1.0)),
         mz_fourier_max_freq=float(config.get("mz_fourier_max_freq", 100.0)),
         mz_fourier_learnable=bool(config.get("mz_fourier_learnable", False)),
+        encoder_use_rope=bool(config.get("encoder_use_rope", False)),
         pooling_type=str(config.get("pooling_type", "pma")),
         pma_num_heads=config.get("pma_num_heads", int(config.num_heads)),
         pma_num_seeds=int(config.get("pma_num_seeds", 1)),

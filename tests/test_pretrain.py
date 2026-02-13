@@ -9,6 +9,7 @@ from input_pipeline import (
     _NUM_PEAKS_OUTPUT,
     _compact_sort_peaks,
     _convert_to_neutral_loss,
+    _filter_min_peak_intensity,
     _normalize_for_jepa,
     _topk_peaks,
 )
@@ -123,18 +124,52 @@ class DataPipelineContractTests(unittest.TestCase):
         }
         converted = _convert_to_neutral_loss()(dict(example))
         compacted = _compact_sort_peaks("mz")(converted)
-        normalized = _normalize_for_jepa(
-            max_precursor_mz=1000.0,
-            intensity_scaling="linear",
-        )(compacted)
+        normalized = _normalize_for_jepa(1000.0)(compacted)
         mask = normalized["peak_valid_mask"].numpy()
         self.assertTrue(mask[0])
         self.assertFalse(mask[1])
         self.assertFalse(mask[2])
 
+    def test_filter_min_peak_intensity_zeros_peaks_below_threshold(self):
+        example = {
+            "mz": tf.constant([50.0, 75.0, 100.0], dtype=tf.float32),
+            "intensity": tf.constant([0.2, 0.01, 0.5], dtype=tf.float32),
+        }
+        out = _filter_min_peak_intensity(0.1)(dict(example))
+        self.assertTrue(
+            bool(
+                tf.reduce_all(
+                    tf.abs(out["mz"] - tf.constant([50.0, 0.0, 100.0], dtype=tf.float32)) < 1e-6,
+                ).numpy(),
+            ),
+        )
+        self.assertTrue(
+            bool(
+                tf.reduce_all(
+                    tf.abs(out["intensity"] - tf.constant([0.2, 0.0, 0.5], dtype=tf.float32)) < 1e-6,
+                ).numpy(),
+            ),
+        )
+
+    def test_normalize_for_jepa_keeps_intensity_and_uses_fixed_precursor_scale(self):
+        example = {
+            "mz": tf.constant([100.0, 50.0, 0.0], dtype=tf.float32),
+            "intensity": tf.constant([0.6, 0.02, 0.0], dtype=tf.float32),
+            "precursor_mz": tf.constant(1200.0, dtype=tf.float32),
+        }
+        out = _normalize_for_jepa(1000.0)(dict(example))
+        self.assertTrue(
+            bool(
+                tf.reduce_all(
+                    tf.abs(out["peak_intensity"] - tf.constant([0.6, 0.02, 0.0], dtype=tf.float32)) < 1e-6,
+                ).numpy(),
+            ),
+        )
+        self.assertAlmostEqual(float(out["precursor_mz"].numpy()), 1.0, places=6)
+
 
 class SIGRegForwardTests(unittest.TestCase):
-    def _build_model(self) -> PeakSetSIGReg:
+    def _build_model(self, *, encoder_use_rope: bool = False) -> PeakSetSIGReg:
         return PeakSetSIGReg(
             num_peaks=60,
             model_dim=32,
@@ -152,6 +187,7 @@ class SIGRegForwardTests(unittest.TestCase):
             sigreg_contiguous_mask_min_len=1,
             sigreg_mz_jitter_std=0.005,
             sigreg_intensity_jitter_std=0.05,
+            encoder_use_rope=encoder_use_rope,
         )
 
     def test_forward_loss_is_finite(self):
@@ -195,6 +231,30 @@ class SIGRegForwardTests(unittest.TestCase):
         loss.backward()
         grads = [p.grad for p in model.encoder.parameters() if p.requires_grad]
         self.assertTrue(any(g is not None for g in grads))
+
+    def test_encoder_rope_toggle_changes_output(self):
+        batch = _make_batch(batch_size=2)
+
+        torch.manual_seed(1234)
+        model_no_rope = self._build_model(encoder_use_rope=False)
+        torch.manual_seed(1234)
+        model_with_rope = self._build_model(encoder_use_rope=True)
+
+        with torch.no_grad():
+            emb_no_rope = model_no_rope.encoder(
+                batch["peak_mz"],
+                batch["peak_intensity"],
+                batch["precursor_mz"],
+                valid_mask=batch["peak_valid_mask"],
+            )
+            emb_with_rope = model_with_rope.encoder(
+                batch["peak_mz"],
+                batch["peak_intensity"],
+                batch["precursor_mz"],
+                valid_mask=batch["peak_valid_mask"],
+            )
+
+        self.assertFalse(torch.allclose(emb_no_rope, emb_with_rope))
 
 
 class AugmentationTests(unittest.TestCase):
