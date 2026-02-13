@@ -243,13 +243,11 @@ class SIGRegForwardTests(unittest.TestCase):
             emb_no_rope = model_no_rope.encoder(
                 batch["peak_mz"],
                 batch["peak_intensity"],
-                batch["precursor_mz"],
                 valid_mask=batch["peak_valid_mask"],
             )
             emb_with_rope = model_with_rope.encoder(
                 batch["peak_mz"],
                 batch["peak_intensity"],
-                batch["precursor_mz"],
                 valid_mask=batch["peak_valid_mask"],
             )
 
@@ -380,7 +378,6 @@ class AugmentationTests(unittest.TestCase):
         embeddings = model.encoder(
             batch["peak_mz"],
             batch["peak_intensity"],
-            batch["precursor_mz"],
             valid_mask=batch["peak_valid_mask"],
             masked_positions=masked,
             mask_token=model.mask_token,

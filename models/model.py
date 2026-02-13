@@ -21,6 +21,7 @@ from models.augmentation import (
 )
 from models.losses import BCSLoss
 from networks import transformer_torch
+from networks.transformer_torch import create_padding_block_mask
 
 
 class FourierFeatures(nn.Module):
@@ -71,7 +72,7 @@ class PeakFeatureEmbedder(nn.Module):
             learnable=mz_fourier_learnable,
         )
         # input: fourier(mz) + raw_mz + intensity + precursor
-        input_dim = self.mz_fourier.output_dim + 3
+        input_dim = self.mz_fourier.output_dim + 1
         self.mlp = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.SiLU(),
@@ -86,12 +87,9 @@ class PeakFeatureEmbedder(nn.Module):
         self,
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
-        precursor_mz: torch.Tensor,
     ) -> torch.Tensor:
-        precursor = precursor_mz.unsqueeze(1).expand_as(peak_mz)
         mz_fourier = self.mz_fourier(peak_mz)
-        scalars = torch.stack([peak_mz, peak_intensity, precursor], dim=-1)
-        features = torch.cat([mz_fourier, scalars], dim=-1)
+        features = torch.cat([mz_fourier, peak_intensity.unsqueeze(-1)], dim=-1)
         return self.mlp(features)
 
 
@@ -189,12 +187,11 @@ class PeakSetEncoder(nn.Module):
         self,
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
-        precursor_mz: torch.Tensor,
         valid_mask: torch.Tensor | None = None,
         masked_positions: torch.Tensor | None = None,
         mask_token: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        x = self.embedder(peak_mz, peak_intensity, precursor_mz)
+        x = self.embedder(peak_mz, peak_intensity)
         if masked_positions is not None:
             token = mask_token.view(1, 1, -1).to(dtype=x.dtype, device=x.device)
             x = torch.where(masked_positions.unsqueeze(-1), token, x)
@@ -206,8 +203,11 @@ class PeakSetEncoder(nn.Module):
                 inv_freq=self.rope_inv_freq,
                 dtype=x.dtype,
             )
+        block_mask = None
+        if valid_mask is not None:
+            block_mask = create_padding_block_mask(valid_mask)
         for block in self.blocks:
-            x = block(x, freqs_cos=freqs_cos, freqs_sin=freqs_sin, attention_mask=valid_mask)
+            x = block(x, freqs_cos=freqs_cos, freqs_sin=freqs_sin, block_mask=block_mask)
         return self.norm(x)
 
 
@@ -378,7 +378,6 @@ class PeakSetSIGReg(nn.Module):
     ) -> dict[str, torch.Tensor]:
         fused_mz = augmented_batch["fused_mz"]
         fused_intensity = augmented_batch["fused_intensity"]
-        fused_precursor_mz = augmented_batch["fused_precursor_mz"]
         fused_valid_mask = augmented_batch["fused_valid_mask"]
         fused_masked_positions = augmented_batch["fused_masked_positions"]
         masked_fraction = augmented_batch["view1_masked_fraction"]
@@ -386,7 +385,6 @@ class PeakSetSIGReg(nn.Module):
         fused_emb = self.encoder(
             fused_mz,
             fused_intensity,
-            fused_precursor_mz,
             valid_mask=fused_valid_mask,
             masked_positions=fused_masked_positions,
             mask_token=self.mask_token,
@@ -429,9 +427,8 @@ class PeakSetSIGReg(nn.Module):
         peak_mz = batch["peak_mz"]
         peak_intensity = batch["peak_intensity"]
         peak_valid_mask = batch["peak_valid_mask"]
-        precursor_mz = batch["precursor_mz"]
 
-        embeddings = self.encoder(peak_mz, peak_intensity, precursor_mz, valid_mask=peak_valid_mask)
+        embeddings = self.encoder(peak_mz, peak_intensity, valid_mask=peak_valid_mask)
         pooled = self.pool(embeddings, peak_valid_mask)
         return self.projector(pooled)
 

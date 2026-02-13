@@ -6,10 +6,29 @@ import math
 
 import torch
 from torch import nn
-from torch.nn.attention.flex_attention import flex_attention
+from torch.nn.attention.flex_attention import (
+    BlockMask,
+    create_block_mask,
+    flex_attention,
+)
 
-compiled_flex_attention_cuda = torch.compile(flex_attention)
-compiled_flex_attention_cpu = torch.compile(flex_attention, backend="eager")
+
+
+def create_padding_block_mask(valid_mask: torch.Tensor) -> BlockMask:
+    """Create a BlockMask that masks out padding positions in attention.
+
+    Args:
+        valid_mask: [B, N] boolean tensor, True = valid (attend), False = padding.
+
+    Returns:
+        BlockMask suitable for flex_attention's block_mask parameter.
+    """
+    B, N = valid_mask.shape
+
+    def mask_mod(b, h, q_idx, kv_idx):
+        return valid_mask[b, q_idx] & valid_mask[b, kv_idx]
+
+    return create_block_mask(mask_mod, B=B, H=None, Q_LEN=N, KV_LEN=N, device=valid_mask.device)
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -70,7 +89,7 @@ class Attention(nn.Module):
         *,
         freqs_cos: torch.Tensor | None = None,
         freqs_sin: torch.Tensor | None = None,
-        attention_mask: torch.Tensor | None = None,
+        block_mask: BlockMask | None = None,
     ) -> torch.Tensor:
         bsz, seqlen, _ = x.shape
         qkv = self.wqkv(x)
@@ -96,11 +115,7 @@ class Attention(nn.Module):
             k = k.unsqueeze(2).expand(-1, -1, rep, -1, -1).reshape(bsz, self.n_heads, seqlen, self.head_dim)
             v = v.unsqueeze(2).expand(-1, -1, rep, -1, -1).reshape(bsz, self.n_heads, seqlen, self.head_dim)
 
-        del attention_mask
-        if q.is_cuda:
-            attn = compiled_flex_attention_cuda(q, k, v)
-        else:
-            attn = compiled_flex_attention_cpu(q, k, v)
+        attn = flex_attention(q, k, v, block_mask=block_mask)
         attn = attn.transpose(1, 2).contiguous().view(bsz, seqlen, self.dim)
         return self.wo(attn)
 
@@ -181,7 +196,7 @@ class TransformerBlock(nn.Module):
         *,
         freqs_cos: torch.Tensor | None,
         freqs_sin: torch.Tensor | None,
-        attention_mask: torch.Tensor | None = None,
+        block_mask: BlockMask | None = None,
     ) -> torch.Tensor:
         if not self.use_rotary_embeddings:
             freqs_cos = None
@@ -191,6 +206,6 @@ class TransformerBlock(nn.Module):
             self.attention_norm(x),
             freqs_cos=freqs_cos,
             freqs_sin=freqs_sin,
-            attention_mask=attention_mask,
+            block_mask=block_mask,
         )
         return h + self.feed_forward(self.ffn_norm(h))

@@ -791,11 +791,6 @@ def _augment_masked_view_tf(
         tf.zeros_like(peak_intensity),
     )
     intensity = tf.clip_by_value(intensity, 0.0, 1.0)
-    max_intensity = tf.maximum(
-        tf.reduce_max(intensity, axis=1, keepdims=True),
-        tf.cast(1e-6, peak_intensity.dtype),
-    )
-    intensity = intensity / max_intensity
     intensity = tf.where(jitterable, intensity, tf.zeros_like(intensity))
 
     valid_counts_safe = tf.maximum(

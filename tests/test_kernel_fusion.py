@@ -46,44 +46,38 @@ def _make_batch(batch_size: int = B, num_peaks: int = N, device: str = DEVICE) -
 # ---------------------------------------------------------------------------
 
 def test_attention_mask_plumbing():
-    """Verify attention_mask parameter is accepted (plumbing for future use).
+    """Verify block_mask parameter correctly masks out padding positions.
 
-    Currently the mask is unused in the kernel (del attention_mask) because
-    flex_attention score_mod is not yet stable with fullgraph=True. Padding is
-    handled via zero-embedding + masked pooling.
+    Uses create_padding_block_mask to build a BlockMask from a valid_mask tensor
+    and verifies that masked outputs differ from unmasked (padding is excluded).
     """
-    print("Test 1: Attention mask plumbing ... ", end="", flush=True)
+    print("Test 1: Attention block_mask ... ", end="", flush=True)
     if DEVICE != "cuda":
         print("SKIPPED (flex_attention requires CUDA)")
         return
+
+    from networks.transformer_torch import create_padding_block_mask
 
     torch.manual_seed(42)
     attn = Attention(D, n_heads=4).to(DEVICE).eval()
 
     x = torch.randn(2, N, D, device=DEVICE)
-    mask = torch.ones(2, N, dtype=torch.bool, device=DEVICE)
-    mask[:, N // 2:] = False
-
-    @torch.compile
-    def run_attn(x, mask):
-        return attn(x, attention_mask=mask)
-
-    @torch.compile
-    def run_attn_no_mask(x):
-        return attn(x, attention_mask=None)
+    valid_mask = torch.ones(2, N, dtype=torch.bool, device=DEVICE)
+    valid_mask[:, N // 2:] = False
+    block_mask = create_padding_block_mask(valid_mask)
 
     with torch.no_grad():
-        out_masked = run_attn(x, mask)
-        out_no_mask = run_attn_no_mask(x)
+        out_masked = attn(x, block_mask=block_mask)
+        out_no_mask = attn(x, block_mask=None)
 
     # Both should be finite and same shape
     assert out_masked.shape == (2, N, D)
     assert torch.isfinite(out_masked).all(), "Masked output has non-finite values"
     assert torch.isfinite(out_no_mask).all(), "Unmasked output has non-finite values"
 
-    # Currently mask is unused, so outputs should match
-    assert torch.allclose(out_masked, out_no_mask, atol=1e-5), \
-        "Outputs differ but mask is currently unused — unexpected"
+    # Outputs should differ because padding is now masked
+    assert not torch.allclose(out_masked, out_no_mask, atol=1e-5), \
+        "Outputs should differ when block_mask masks out padding"
 
     print("PASSED")
 
@@ -102,7 +96,7 @@ def test_attention_output_shapes():
 
     @torch.compile
     def run(x):
-        return attn(x, attention_mask=None)
+        return attn(x, block_mask=None)
 
     with torch.no_grad():
         out = run(x)
@@ -180,10 +174,10 @@ def test_bcs_forward():
 # ---------------------------------------------------------------------------
 
 def test_encoder_with_mask():
-    """Verify PeakSetEncoder accepts valid_mask and produces correct outputs.
+    """Verify PeakSetEncoder applies valid_mask correctly via BlockMask.
 
-    Note: attention_mask plumbing is in place but currently unused in the
-    attention kernel. This test verifies the interface works and outputs are valid.
+    With block_mask applied, padding positions should not influence valid
+    peak embeddings — outputs should differ from the no-mask case.
     """
     print("Test 6: Encoder with valid_mask ... ", end="", flush=True)
     torch.manual_seed(42)
@@ -208,10 +202,10 @@ def test_encoder_with_mask():
 
     assert out_mask.shape == (B, N, D)
     assert torch.isfinite(out_mask).all(), "Encoder output has non-finite values"
-    # Mask plumbing exists but is currently unused in attention kernel,
-    # so outputs should be identical
-    assert torch.allclose(out_mask, out_none, atol=1e-5), \
-        "Outputs differ unexpectedly — mask should be unused in attention"
+    assert torch.isfinite(out_none).all(), "No-mask output has non-finite values"
+    # Outputs should differ because padding is now properly masked
+    assert not torch.allclose(out_mask, out_none, atol=1e-3), \
+        "Outputs should differ when valid_mask is applied vs not"
 
     print(f"PASSED (shape={out_mask.shape})")
 
@@ -389,26 +383,29 @@ def benchmark_attention():
         print("  SKIPPED (no CUDA)")
         return
 
+    from networks.transformer_torch import create_padding_block_mask
+
     torch.manual_seed(42)
     attn = Attention(768, n_heads=12).to(DEVICE).eval()
     x = torch.randn(64, N, 768, device=DEVICE)
-    mask = torch.ones(64, N, dtype=torch.bool, device=DEVICE)
-    mask[:, 50:] = False
+    valid_mask = torch.ones(64, N, dtype=torch.bool, device=DEVICE)
+    valid_mask[:, 50:] = False
+    block_mask = create_padding_block_mask(valid_mask)
 
     @torch.compile
     def run_no_mask(x):
-        return attn(x, attention_mask=None)
+        return attn(x, block_mask=None)
 
     @torch.compile
-    def run_with_mask(x, mask):
-        return attn(x, attention_mask=mask)
+    def run_with_mask(x, bm):
+        return attn(x, block_mask=bm)
 
     with torch.no_grad():
         # Warmup compilation
         run_no_mask(x)
-        run_with_mask(x, mask)
+        run_with_mask(x, block_mask)
         _benchmark(lambda: run_no_mask(x), label="flex_attn no mask  ")
-        _benchmark(lambda: run_with_mask(x, mask), label="flex_attn with mask")
+        _benchmark(lambda: run_with_mask(x, block_mask), label="flex_attn with mask")
 
 
 def benchmark_bcs_loss():
