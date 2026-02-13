@@ -49,6 +49,9 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         sigreg_contiguous_mask_min_len=int(
             config.get("sigreg_contiguous_mask_min_len", 1)
         ),
+        sigreg_random_mask_prob=float(
+            config.get("sigreg_random_mask_prob", 0.0)
+        ),
         sigreg_mz_jitter_std=float(config.get("sigreg_mz_jitter_std", 0.005)),
         sigreg_intensity_jitter_std=float(
             config.get("sigreg_intensity_jitter_std", 0.05)

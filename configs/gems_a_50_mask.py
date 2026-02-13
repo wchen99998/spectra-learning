@@ -11,7 +11,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.tfrecord_dir = "data/gems_peaklist_tfrecord"
     cfg.batch_size = 512
     cfg.validation_fraction = 0.05
-    cfg.shuffle_buffer = 200_000
+    cfg.shuffle_buffer = 4_000_000
     cfg.tfrecord_buffer_size = 250_000
     cfg.split_seed = 42
     cfg.num_shards = 4
@@ -49,6 +49,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_lambda = 0.1
     cfg.sigreg_contiguous_mask_fraction = 0.25
     cfg.sigreg_contiguous_mask_min_len = 1
+    cfg.sigreg_random_mask_prob = 0.05
     cfg.sigreg_mz_jitter_std = 0.0001
     cfg.sigreg_intensity_jitter_std = 0.001
 

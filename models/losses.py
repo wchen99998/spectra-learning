@@ -86,7 +86,7 @@ class BCSLoss(nn.Module):
 
         bcs = (_epps_pulley(view1, self.ep_t, self.ep_exp_f).mean()
                + _epps_pulley(view2, self.ep_t, self.ep_exp_f).mean()) / 2
-        invariance_loss = F.mse_loss(z1, z2).mean()
+        invariance_loss = F.mse_loss(z1, z2)
         loss = invariance_loss + self.lmbd * bcs
         return {
             "loss": loss,

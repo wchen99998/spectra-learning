@@ -236,6 +236,7 @@ class PeakSetSIGReg(nn.Module):
         sigreg_lambda: float = 10.0,
         sigreg_contiguous_mask_fraction: float = 0.25,
         sigreg_contiguous_mask_min_len: int = 1,
+        sigreg_random_mask_prob: float = 0.0,
         sigreg_mz_jitter_std: float = 0.005,
         sigreg_intensity_jitter_std: float = 0.05,
         pooling_type: str = "pma",
@@ -249,6 +250,7 @@ class PeakSetSIGReg(nn.Module):
 
         self.sigreg_contiguous_mask_fraction = sigreg_contiguous_mask_fraction
         self.sigreg_contiguous_mask_min_len = int(sigreg_contiguous_mask_min_len)
+        self.sigreg_random_mask_prob = sigreg_random_mask_prob
         self.sigreg_mz_jitter_std = sigreg_mz_jitter_std
         self.sigreg_intensity_jitter_std = sigreg_intensity_jitter_std
         self.pooling_type = pooling_type
@@ -340,6 +342,7 @@ class PeakSetSIGReg(nn.Module):
             peak_valid_mask,
             contiguous_mask_fraction=self.sigreg_contiguous_mask_fraction,
             contiguous_mask_min_len=self.sigreg_contiguous_mask_min_len,
+            random_mask_prob=self.sigreg_random_mask_prob,
             mz_jitter_std=self.sigreg_mz_jitter_std,
             intensity_jitter_std=self.sigreg_intensity_jitter_std,
         )
@@ -366,6 +369,7 @@ class PeakSetSIGReg(nn.Module):
             batch,
             contiguous_mask_fraction=self.sigreg_contiguous_mask_fraction,
             contiguous_mask_min_len=self.sigreg_contiguous_mask_min_len,
+            random_mask_prob=self.sigreg_random_mask_prob,
             mz_jitter_std=self.sigreg_mz_jitter_std,
             intensity_jitter_std=self.sigreg_intensity_jitter_std,
         )

@@ -724,6 +724,7 @@ def _augment_masked_view_tf(
     *,
     contiguous_mask_fraction: float,
     contiguous_mask_min_len: int,
+    random_mask_prob: float,
     mz_jitter_std: float,
     intensity_jitter_std: float,
 ) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
@@ -773,6 +774,16 @@ def _augment_masked_view_tf(
     inverse_order = tf.argsort(sorted_order, axis=1, direction="ASCENDING", stable=True)
     masked = tf.gather(masked_sorted, inverse_order, batch_dims=1)
     masked = tf.logical_and(masked, peak_valid_mask)
+
+    # Independent random masking: additionally mask each valid, non-contiguous-masked
+    # peak with probability random_mask_prob. This dramatically increases mask
+    # pattern diversity beyond the contiguous-only scheme.
+    if random_mask_prob > 0.0:
+        random_coins = tf.random.uniform(tf.shape(peak_mz), dtype=tf.float32)
+        random_drop = random_coins < random_mask_prob
+        random_drop = tf.logical_and(random_drop, peak_valid_mask)
+        random_drop = tf.logical_and(random_drop, tf.logical_not(masked))
+        masked = tf.logical_or(masked, random_drop)
 
     jitterable = tf.logical_and(peak_valid_mask, tf.logical_not(masked))
 
@@ -844,6 +855,7 @@ def _augment_sigreg_batch_tf(
     *,
     contiguous_mask_fraction: float,
     contiguous_mask_min_len: int,
+    random_mask_prob: float,
     mz_jitter_std: float,
     intensity_jitter_std: float,
 ) -> Callable[[dict], dict]:
@@ -859,6 +871,7 @@ def _augment_sigreg_batch_tf(
             peak_valid_mask,
             contiguous_mask_fraction=contiguous_mask_fraction,
             contiguous_mask_min_len=contiguous_mask_min_len,
+            random_mask_prob=random_mask_prob,
             mz_jitter_std=mz_jitter_std,
             intensity_jitter_std=intensity_jitter_std,
         )
@@ -898,6 +911,7 @@ def _build_dataset(
     include_sigreg_augmentation: bool,
     sigreg_contiguous_mask_fraction: float,
     sigreg_contiguous_mask_min_len: int,
+    sigreg_random_mask_prob: float,
     sigreg_mz_jitter_std: float,
     sigreg_intensity_jitter_std: float,
     peak_ordering: str = "intensity",
@@ -938,6 +952,7 @@ def _build_dataset(
             _augment_sigreg_batch_tf(
                 contiguous_mask_fraction=sigreg_contiguous_mask_fraction,
                 contiguous_mask_min_len=sigreg_contiguous_mask_min_len,
+                random_mask_prob=sigreg_random_mask_prob,
                 mz_jitter_std=sigreg_mz_jitter_std,
                 intensity_jitter_std=sigreg_intensity_jitter_std,
             ),
@@ -1185,6 +1200,9 @@ class TfLightningDataModule(pl.LightningDataModule):
         self.sigreg_contiguous_mask_min_len = int(
             config.get("sigreg_contiguous_mask_min_len", 1)
         )
+        self.sigreg_random_mask_prob = float(
+            config.get("sigreg_random_mask_prob", 0.05)
+        )
         self.sigreg_mz_jitter_std = float(config.get("sigreg_mz_jitter_std", 0.005))
         self.sigreg_intensity_jitter_std = float(
             config.get("sigreg_intensity_jitter_std", 0.05)
@@ -1302,6 +1320,7 @@ class TfLightningDataModule(pl.LightningDataModule):
             include_sigreg_augmentation=True,
             sigreg_contiguous_mask_fraction=self.sigreg_contiguous_mask_fraction,
             sigreg_contiguous_mask_min_len=self.sigreg_contiguous_mask_min_len,
+            sigreg_random_mask_prob=self.sigreg_random_mask_prob,
             sigreg_mz_jitter_std=self.sigreg_mz_jitter_std,
             sigreg_intensity_jitter_std=self.sigreg_intensity_jitter_std,
             peak_ordering=self.peak_ordering,
@@ -1391,6 +1410,7 @@ class TfLightningDataModule(pl.LightningDataModule):
             include_sigreg_augmentation=False,
             sigreg_contiguous_mask_fraction=self.sigreg_contiguous_mask_fraction,
             sigreg_contiguous_mask_min_len=self.sigreg_contiguous_mask_min_len,
+            sigreg_random_mask_prob=self.sigreg_random_mask_prob,
             sigreg_mz_jitter_std=self.sigreg_mz_jitter_std,
             sigreg_intensity_jitter_std=self.sigreg_intensity_jitter_std,
             peak_ordering=peak_ordering,
@@ -1441,7 +1461,8 @@ class TfLightningDataModule(pl.LightningDataModule):
         return _StatefulDataLoader(**loader_kwargs)
 
     def train_dataloader(self) -> DataLoader:
-        base_seed = self.seed
+        epoch = self.trainer.current_epoch if self.trainer is not None else 0
+        base_seed = self.seed + epoch * 100_000
         return self._make_round_robin_loader(
             datasets=[
                 self._build_gems_train_dataset(base_seed),

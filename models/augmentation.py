@@ -10,6 +10,7 @@ def augment_masked_view(
     *,
     contiguous_mask_fraction: float,
     contiguous_mask_min_len: int,
+    random_mask_prob: float = 0.0,
     mz_jitter_std: float,
     intensity_jitter_std: float,
 ) -> tuple[
@@ -63,6 +64,12 @@ def augment_masked_view(
     masked = torch.zeros_like(peak_valid_mask)
     masked.scatter_(1, sorted_order, masked_sorted)
     masked = masked & peak_valid_mask
+
+    # Independent random masking on top of contiguous mask
+    if random_mask_prob > 0.0:
+        random_drop = torch.rand_like(peak_mz) < random_mask_prob
+        random_drop = random_drop & peak_valid_mask & (~masked)
+        masked = masked | random_drop
 
     view_valid = peak_valid_mask
     jitterable = peak_valid_mask & (~masked)
@@ -131,6 +138,7 @@ def augment_sigreg_batch(
     *,
     contiguous_mask_fraction: float,
     contiguous_mask_min_len: int,
+    random_mask_prob: float = 0.0,
     mz_jitter_std: float,
     intensity_jitter_std: float,
 ) -> dict[str, torch.Tensor]:
@@ -145,6 +153,7 @@ def augment_sigreg_batch(
         peak_valid_mask,
         contiguous_mask_fraction=contiguous_mask_fraction,
         contiguous_mask_min_len=contiguous_mask_min_len,
+        random_mask_prob=random_mask_prob,
         mz_jitter_std=mz_jitter_std,
         intensity_jitter_std=intensity_jitter_std,
     )

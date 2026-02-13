@@ -581,7 +581,9 @@ class MAELightningModule(pl.LightningModule):
     def training_step(self, dataloader_iter: Iterator) -> torch.Tensor:
         batch = self._next_train_batch(dataloader_iter)
         batch_size = int(batch["fused_mz"].shape[0]) // 2
-        bcs_projection = self._sample_bcs_projection(self.global_step)
+        bcs_projection = self._sample_bcs_projection(
+            int(self.config.seed) + 6_000_000 + self.global_step
+        )
         torch.compiler.cudagraph_mark_step_begin()
         metrics = self._train_forward(batch, bcs_projection)
         step = self.global_step + 1
@@ -732,7 +734,7 @@ def train_and_evaluate(
         gradient_clip_algorithm="norm" if config.get("clip", 0.) > 0. else None,
         callbacks=callbacks,
         logger=logger,
-        reload_dataloaders_every_n_epochs=0,
+        reload_dataloaders_every_n_epochs=1,
         limit_train_batches=limit_train_batches,
         limit_val_batches=config.get("limit_val_batches", 1.0),
         limit_test_batches=0,
