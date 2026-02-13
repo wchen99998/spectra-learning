@@ -206,7 +206,6 @@ class SIGRegForwardTests(unittest.TestCase):
             "invariance_loss",
             "valid_fraction",
             "masked_fraction",
-            "density_interval_fraction",
             "representation_variance",
         ):
             self.assertIn(key, metrics, f"Missing key: {key}")
@@ -279,7 +278,7 @@ class AugmentationTests(unittest.TestCase):
     def test_augment_view_shapes(self):
         model = self._build_model()
         batch = _make_batch()
-        mz, intensity, valid, masked, masked_fraction, density_interval_fraction = model._augment_view(
+        mz, intensity, valid, masked, masked_fraction = model._augment_view(
             batch["peak_mz"],
             batch["peak_intensity"],
             batch["peak_valid_mask"],
@@ -289,12 +288,11 @@ class AugmentationTests(unittest.TestCase):
         self.assertEqual(valid.shape, batch["peak_valid_mask"].shape)
         self.assertEqual(masked.shape, batch["peak_valid_mask"].shape)
         self.assertEqual(masked_fraction.ndim, 0)
-        self.assertEqual(density_interval_fraction.ndim, 0)
 
     def test_augment_view_value_bounds(self):
         model = self._build_model()
         batch = _make_batch()
-        mz, intensity, _, _, _, _ = model._augment_view(
+        mz, intensity, _, _, _ = model._augment_view(
             batch["peak_mz"],
             batch["peak_intensity"],
             batch["peak_valid_mask"],
@@ -307,7 +305,7 @@ class AugmentationTests(unittest.TestCase):
     def test_invalid_positions_are_zeroed(self):
         model = self._build_model()
         batch = _make_batch()
-        mz, intensity, _, _, _, _ = model._augment_view(
+        mz, intensity, _, _, _ = model._augment_view(
             batch["peak_mz"],
             batch["peak_intensity"],
             batch["peak_valid_mask"],
@@ -319,7 +317,7 @@ class AugmentationTests(unittest.TestCase):
     def test_masked_positions_remain_valid(self):
         model = self._build_model()
         batch = _make_batch(batch_size=3)
-        _, _, valid, masked, _, _ = model._augment_view(
+        _, _, valid, masked, _ = model._augment_view(
             batch["peak_mz"],
             batch["peak_intensity"],
             batch["peak_valid_mask"],
@@ -330,7 +328,7 @@ class AugmentationTests(unittest.TestCase):
     def test_masked_positions_are_zeroed_for_mask_token(self):
         model = self._build_model()
         batch = _make_batch(batch_size=3)
-        mz, intensity, _, masked, _, _ = model._augment_view(
+        mz, intensity, _, masked, _ = model._augment_view(
             batch["peak_mz"],
             batch["peak_intensity"],
             batch["peak_valid_mask"],
@@ -342,7 +340,7 @@ class AugmentationTests(unittest.TestCase):
         model = self._build_model()
         batch = _make_batch(batch_size=3)
         torch.manual_seed(7)
-        _, _, _, masked, _, _ = model._augment_view(
+        _, _, _, masked, _ = model._augment_view(
             batch["peak_mz"],
             batch["peak_intensity"],
             batch["peak_valid_mask"],
@@ -418,13 +416,12 @@ class AugmentationTests(unittest.TestCase):
         torch.manual_seed(23)
         metrics = model(batch, train=True)
         torch.manual_seed(23)
-        _, _, _, _, masked_fraction, density_interval_fraction = model._augment_view(
+        _, _, _, _, masked_fraction = model._augment_view(
             batch["peak_mz"],
             batch["peak_intensity"],
             batch["peak_valid_mask"],
         )
         self.assertTrue(torch.allclose(metrics["masked_fraction"], masked_fraction))
-        self.assertTrue(torch.allclose(metrics["density_interval_fraction"], density_interval_fraction))
 
 
 class PMAPoolingTests(unittest.TestCase):

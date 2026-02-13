@@ -18,7 +18,6 @@ def augment_masked_view(
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
-    torch.Tensor,
 ]:
     batch_size, num_peaks = peak_mz.shape
     has_valid = peak_valid_mask.any(dim=1)
@@ -34,7 +33,6 @@ def augment_masked_view(
     interval_start = torch.zeros(batch_size, dtype=torch.long, device=peak_mz.device)
     interval_end = torch.clamp(valid_counts - 1, min=0)
     interval_lengths = valid_counts
-    density_interval_lengths = valid_counts
     pos = torch.arange(num_peaks, device=peak_mz.device)
 
     raw_mask_len = torch.floor(
@@ -88,9 +86,6 @@ def augment_masked_view(
     valid_counts = peak_valid_mask.sum(dim=1).clamp(min=1)
     masked_counts = masked.sum(dim=1)
     masked_fraction = (masked_counts.float() / valid_counts.float()).mean()
-    density_interval_fraction = (
-        density_interval_lengths.float() / valid_counts.float()
-    ).mean()
 
     return (
         mz,
@@ -98,7 +93,6 @@ def augment_masked_view(
         view_valid,
         masked,
         masked_fraction,
-        density_interval_fraction,
     )
 
 
@@ -145,7 +139,7 @@ def augment_sigreg_batch(
     peak_valid_mask = batch["peak_valid_mask"]
     precursor_mz = batch["precursor_mz"]
 
-    view1_mz, view1_int, view1_valid, view1_masked, view1_masked_fraction, view1_density_interval_fraction = augment_masked_view(
+    view1_mz, view1_int, view1_valid, view1_masked, view1_masked_fraction = augment_masked_view(
         peak_mz,
         peak_intensity,
         peak_valid_mask,
@@ -169,5 +163,4 @@ def augment_sigreg_batch(
         "fused_valid_mask": torch.cat([view1_valid, view2_valid], dim=0),
         "fused_masked_positions": torch.cat([view1_masked, view2_masked], dim=0),
         "view1_masked_fraction": view1_masked_fraction,
-        "view1_density_interval_fraction": view1_density_interval_fraction,
     }

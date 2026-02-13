@@ -501,7 +501,7 @@ class MAELightningModule(pl.LightningModule):
     _TRAIN_BATCH_KEYS = frozenset({
         "fused_mz", "fused_intensity", "fused_precursor_mz",
         "fused_valid_mask", "fused_masked_positions",
-        "view1_masked_fraction", "view1_density_interval_fraction",
+        "view1_masked_fraction",
     })
 
     def _move_train_batch_to_device(

@@ -726,7 +726,7 @@ def _augment_masked_view_tf(
     contiguous_mask_min_len: int,
     mz_jitter_std: float,
     intensity_jitter_std: float,
-) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
+) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
     batch_size = tf.shape(peak_mz)[0]
     num_peaks = tf.shape(peak_mz)[1]
     has_valid = tf.reduce_any(peak_valid_mask, axis=1)
@@ -804,9 +804,6 @@ def _augment_masked_view_tf(
     )
     masked_counts = tf.reduce_sum(tf.cast(masked, tf.float32), axis=1)
     masked_fraction = tf.reduce_mean(masked_counts / valid_counts_safe)
-    density_interval_fraction = tf.reduce_mean(
-        tf.cast(valid_counts, tf.float32) / valid_counts_safe,
-    )
 
     return (
         mz,
@@ -814,7 +811,6 @@ def _augment_masked_view_tf(
         peak_valid_mask,
         masked,
         masked_fraction,
-        density_interval_fraction,
     )
 
 
@@ -862,7 +858,7 @@ def _augment_sigreg_batch_tf(
         peak_valid_mask = batch["peak_valid_mask"]
         precursor_mz = batch["precursor_mz"]
 
-        view1_mz, view1_int, view1_valid, view1_masked, view1_masked_fraction, view1_density_interval_fraction = _augment_masked_view_tf(
+        view1_mz, view1_int, view1_valid, view1_masked, view1_masked_fraction = _augment_masked_view_tf(
             peak_mz,
             peak_intensity,
             peak_valid_mask,
@@ -886,7 +882,6 @@ def _augment_sigreg_batch_tf(
         out["fused_valid_mask"] = tf.concat([view1_valid, view2_valid], axis=0)
         out["fused_masked_positions"] = tf.concat([view1_masked, view2_masked], axis=0)
         out["view1_masked_fraction"] = view1_masked_fraction
-        out["view1_density_interval_fraction"] = view1_density_interval_fraction
         return out
 
     return apply

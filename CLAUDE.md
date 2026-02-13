@@ -59,7 +59,7 @@ Training batches contain fused (2B stacked) tensors:
 - `fused_mz`, `fused_intensity`: float32 [2B, N]
 - `fused_precursor_mz`: float32 [2B]
 - `fused_valid_mask`, `fused_masked_positions`: bool [2B, N]
-- `view1_masked_fraction`, `view1_density_interval_fraction`: scalar metrics
+- `view1_masked_fraction`: scalar metric
 
 Raw (pre-augmentation) batches: `peak_mz` [B, N], `peak_intensity` [B, N], `peak_valid_mask` [B, N], `precursor_mz` [B].
 

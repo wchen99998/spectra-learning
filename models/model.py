@@ -333,7 +333,6 @@ class PeakSetSIGReg(nn.Module):
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
-        torch.Tensor,
     ]:
         return augment_masked_view(
             peak_mz,
@@ -383,7 +382,6 @@ class PeakSetSIGReg(nn.Module):
         fused_valid_mask = augmented_batch["fused_valid_mask"]
         fused_masked_positions = augmented_batch["fused_masked_positions"]
         masked_fraction = augmented_batch["view1_masked_fraction"]
-        density_interval_fraction = augmented_batch["view1_density_interval_fraction"]
 
         fused_emb = self.encoder(
             fused_mz,
@@ -407,7 +405,6 @@ class PeakSetSIGReg(nn.Module):
             "invariance_loss": loss_dict["invariance_loss"],
             "valid_fraction": valid_fraction,
             "masked_fraction": masked_fraction,
-            "density_interval_fraction": density_interval_fraction,
             "representation_variance": representation_variance,
         }
 
