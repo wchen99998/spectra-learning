@@ -89,7 +89,8 @@ def _precursor_mz_to_bins(
     max_mz: float,
 ) -> torch.Tensor:
     mz = precursor_mz * max_mz
-    return torch.floor(mz).to(torch.long).clamp(min=0, max=num_bins - 1)
+    bin_width = max_mz / float(num_bins)
+    return torch.floor(mz / bin_width).to(torch.long).clamp(min=0, max=num_bins - 1)
 
 
 def _extract_probe_features(
@@ -208,19 +209,24 @@ def _probe_step(
     }
 
 
-def _run_final_attentive_probe(
+def run_attentive_probe(
     *,
     config: config_dict.ConfigDict,
     datamodule: TfLightningDataModule,
-    module: "MAELightningModule",
-    trainer: pl.Trainer,
+    model: PeakSetSIGReg,
+    device: torch.device,
+    loggers: tuple = (),
+    global_step: int = 0,
 ) -> dict[str, float]:
     def log_trial_metrics(metrics: dict[str, float], step: int) -> None:
-        for pl_logger in trainer.loggers:
+        for pl_logger in loggers:
             pl_logger.log_metrics(metrics, step=step)
             experiment = pl_logger.experiment
             if hasattr(experiment, "log"):
                 experiment.log(metrics, step=step)
+
+    def move_batch(batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        return {k: v.to(device) for k, v in batch.items()}
 
     num_probe_epochs = int(config.final_probe_num_epochs)
     probe_lr = float(config.final_probe_learning_rate)
@@ -230,7 +236,7 @@ def _run_final_attentive_probe(
     probe_feature_source = str(config.final_probe_feature_source)
     probe_peak_ordering = str(config.peak_ordering)
     num_precursor_bins = int(config.final_probe_num_precursor_bins)
-    precursor_max_mz = float(config.final_probe_precursor_max_mz)
+    precursor_max_mz = float(config.max_precursor_mz)
     num_attention_heads = int(config.final_probe_attention_heads)
     loss_weight_list = config.get("final_probe_loss_weights", [1.0, 1.0, 1.0])
     loss_weights = dict(zip(_PROBE_TASK_NAMES, loss_weight_list))
@@ -240,8 +246,7 @@ def _run_final_attentive_probe(
     use_projector = probe_feature_source == "projector" and bool(config.get("sigreg_use_projector", True))
     input_dim = int(config.get("sigreg_proj_output_dim", 128)) if use_projector else int(config.model_dim)
 
-    probe_device = trainer.strategy.root_device
-    module.to(probe_device)
+    model.to(device)
     probe = _FinalAttentiveProbe(
         input_dim=input_dim,
         hidden_dim=probe_hidden_dim,
@@ -251,7 +256,7 @@ def _run_final_attentive_probe(
             "precursor_bin": num_precursor_bins,
             "instrument": num_instrument_classes,
         },
-    ).to(probe_device)
+    ).to(device)
     optimizer = torch.optim.AdamW(probe.parameters(), lr=probe_lr, weight_decay=probe_weight_decay)
     steps_per_epoch = int(datamodule.steps["massspec_train"])
     total_steps = num_probe_epochs * steps_per_epoch
@@ -276,12 +281,12 @@ def _run_final_attentive_probe(
 
     logging.info(
         "Final probe running on device: %s (probe=%s backbone=%s)",
-        probe_device,
+        device,
         next(probe.parameters()).device,
-        next(module.model.parameters()).device,
+        next(model.parameters()).device,
     )
 
-    backbone = module.model
+    backbone = model
     backbone.eval()
     for param in backbone.parameters():
         param.requires_grad = False
@@ -296,7 +301,7 @@ def _run_final_attentive_probe(
         for batch in _iter_massspec_probe(
             datamodule, "massspec_train", seed=train_seed, peak_ordering=probe_peak_ordering,
         ):
-            batch = module._move_batch_to_device(batch, dataloader_idx=0)
+            batch = move_batch(batch)
             optimizer.zero_grad(set_to_none=True)
             result = _probe_step(probe, backbone, batch, **step_kwargs)
             result["loss_total"].backward()
@@ -321,7 +326,7 @@ def _run_final_attentive_probe(
             for batch in _iter_massspec_probe(
                 datamodule, "massspec_test", seed=test_seed, peak_ordering=probe_peak_ordering,
             ):
-                batch = module._move_batch_to_device(batch, dataloader_idx=0)
+                batch = move_batch(batch)
                 result = _probe_step(probe, backbone, batch, **step_kwargs)
                 bs = int(result["batch_size"])
                 test_count += bs
@@ -341,7 +346,7 @@ def _run_final_attentive_probe(
         for key, val in test_sums.items():
             epoch_metrics[f"final_probe/test/{key}"] = val.item() / test_count
 
-        log_step = module.global_step + epoch_idx + 1
+        log_step = global_step + epoch_idx + 1
         epoch_metrics["final_probe_epoch"] = float(epoch_idx + 1)
         log_trial_metrics(epoch_metrics, step=log_step)
         logging.info(
@@ -740,11 +745,13 @@ def train_and_evaluate(
         logging.info("Resuming from checkpoint: %s", ckpt_path)
 
     trainer.fit(module, datamodule=datamodule, ckpt_path=ckpt_path)
-    final_probe_metrics = _run_final_attentive_probe(
+    final_probe_metrics = run_attentive_probe(
         config=config,
         datamodule=datamodule,
-        module=module,
-        trainer=trainer,
+        model=module.model,
+        device=trainer.strategy.root_device,
+        loggers=trainer.loggers,
+        global_step=module.global_step,
     )
     for key, value in final_probe_metrics.items():
         logging.info("%s = %.6f", key, value)

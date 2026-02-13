@@ -17,6 +17,16 @@ class PrecursorBinningTests(unittest.TestCase):
         expected = torch.tensor([0, 0, 999, 999, 999, 0], dtype=torch.long)
         self.assertTrue(torch.equal(bins, expected))
 
+    def test_precursor_mz_bins_respect_num_bins(self):
+        precursor_norm = torch.tensor([0.0, 0.25, 0.5, 0.999, 1.0], dtype=torch.float32)
+        bins = _precursor_mz_to_bins(
+            precursor_norm,
+            num_bins=10,
+            max_mz=1000.0,
+        )
+        expected = torch.tensor([0, 2, 5, 9, 9], dtype=torch.long)
+        self.assertTrue(torch.equal(bins, expected))
+
 
 class FinalAttentiveProbeTests(unittest.TestCase):
     def test_output_shapes_match_target_spaces(self):
