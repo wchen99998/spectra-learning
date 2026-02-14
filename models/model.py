@@ -175,6 +175,7 @@ class PeakSetEncoder(nn.Module):
         inv_freq = 1.0 / (
             10000.0 ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / float(head_dim))
         )
+        self.rope_inv_freq: torch.Tensor
         self.register_buffer("rope_inv_freq", inv_freq, persistent=False)
         self.blocks = _build_non_causal_blocks(
             dim=model_dim,

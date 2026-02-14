@@ -22,7 +22,7 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.non_blocking_device_transfer = True
     cfg.optimizer_capturable = True
     cfg.optimizer_fused = True
-    cfg.dataloader_num_workers = 1
+    cfg.dataloader_num_workers = 4
     cfg.dataloader_prefetch_factor = 2
     cfg.dataloader_persistent_workers = True
     cfg.dataloader_pin_memory = True

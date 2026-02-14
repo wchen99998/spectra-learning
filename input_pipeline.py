@@ -1,4 +1,4 @@
-"""Unified TF input pipeline and Lightning DataModule for GeMS_A peak lists."""
+"""Unified TF input pipeline and DataModule for GeMS_A peak lists."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from typing import Any, Callable, Optional
 import os
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
-import lightning.pytorch as pl
 import numpy as np
 import tensorflow as tf
 import torch
@@ -962,7 +961,7 @@ def _build_dataset(
             num_parallel_calls=tf.data.AUTOTUNE,
         )
     options = tf.data.Options()
-    options.experimental_deterministic = True
+    options.deterministic = True
     ds = ds.with_options(options)
     ds = ds.prefetch(tf.data.AUTOTUNE)
     return ds
@@ -1079,54 +1078,16 @@ class _TfIterableDataset(IterableDataset):
         self._num_yielded = self._resume_from if self._resume_from > 0 else 0
         resume_from = self._resume_from
         self._resume_from = 0
-        dataset = self._dataset.skip(resume_from) if resume_from > 0 else self._dataset
+        dataset = self._dataset
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            dataset = dataset.shard(
+                num_shards=worker_info.num_workers, index=worker_info.id,
+            )
+        if resume_from > 0:
+            dataset = dataset.skip(resume_from)
         iterator = dataset.as_numpy_iterator()
         for batch in iterator:
-            yield numpy_batch_to_torch(batch)
-            self._num_yielded += 1
-
-    def state_dict(self) -> dict[str, Any]:
-        return {"num_yielded": self._num_yielded}
-
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        self._resume_from = int(state_dict["num_yielded"])
-        self._num_yielded = self._resume_from
-
-
-class _RoundRobinTfIterableDataset(IterableDataset):
-    def __init__(
-        self,
-        *,
-        datasets: list[tf.data.Dataset],
-        steps_per_epoch: list[int],
-    ) -> None:
-        super().__init__()
-        self._datasets = datasets
-        self._steps_per_epoch = [int(step) for step in steps_per_epoch]
-        self.steps_per_epoch = int(sum(self._steps_per_epoch))
-        self._resume_from = 0
-        self._num_yielded = 0
-
-    def __len__(self) -> int:
-        return self.steps_per_epoch
-
-    def __iter__(self):
-        self._num_yielded = self._resume_from if self._resume_from > 0 else 0
-        resume_from = self._resume_from
-        self._resume_from = 0
-        iterators = [ds.as_numpy_iterator() for ds in self._datasets]
-        remaining = list(self._steps_per_epoch)
-        num_iters = len(iterators)
-        idx = 0
-        while sum(remaining) > 0:
-            while remaining[idx] == 0:
-                idx = (idx + 1) % num_iters
-            batch = next(iterators[idx])
-            remaining[idx] -= 1
-            idx = (idx + 1) % num_iters
-            if resume_from > 0:
-                resume_from -= 1
-                continue
             yield numpy_batch_to_torch(batch)
             self._num_yielded += 1
 
@@ -1162,11 +1123,10 @@ class _StatefulDataLoader(DataLoader):
         self.dataset.load_state_dict(state_dict)
 
 
-class TfLightningDataModule(pl.LightningDataModule):
-    """Lightning DataModule that rebuilds tf.data pipelines each epoch."""
+class TfLightningDataModule:
+    """DataModule that rebuilds tf.data pipelines each epoch."""
 
     def __init__(self, config: config_dict.ConfigDict, seed: int) -> None:
-        super().__init__()
         self.config = config
         self.seed = int(seed)
 
@@ -1282,7 +1242,7 @@ class TfLightningDataModule(pl.LightningDataModule):
                 False,
             ),
         }
-        self.train_steps = self.steps["gems_train"] + self.steps["massspec_train"]
+        self.train_steps = self.steps["gems_train"]
 
         default_pin = torch.cuda.is_available()
         self.pin_memory = bool(config.get("dataloader_pin_memory", default_pin))
@@ -1292,11 +1252,9 @@ class TfLightningDataModule(pl.LightningDataModule):
             config.get("dataloader_persistent_workers", self.dataloader_num_workers > 0)
         )
 
-    def state_dict(self) -> dict[str, Any]:
-        return {"seed": self.seed}
-
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        self.seed = int(state_dict["seed"])
+        self._train_loader: DataLoader | None = None
+        self._val_loader: DataLoader | None = None
+        self._val_loader_built = False
 
     def _build_dataset_for_files(
         self,
@@ -1444,65 +1402,33 @@ class TfLightningDataModule(pl.LightningDataModule):
             loader_kwargs["prefetch_factor"] = self.dataloader_prefetch_factor
         return _StatefulDataLoader(**loader_kwargs)
 
-    def _make_round_robin_loader(
-        self,
-        *,
-        datasets: list[tf.data.Dataset],
-        steps_per_epoch: list[int],
-    ) -> DataLoader:
-        dataset = _RoundRobinTfIterableDataset(
-            datasets=datasets,
-            steps_per_epoch=steps_per_epoch,
-        )
-        loader_kwargs: dict[str, Any] = {
-            "dataset": dataset,
-            "batch_size": None,
-            "num_workers": self.dataloader_num_workers,
-            "pin_memory": self.pin_memory,
-            "collate_fn": _identity_collate,
-        }
-        if self.dataloader_num_workers > 0:
-            loader_kwargs["persistent_workers"] = self.dataloader_persistent_workers
-            loader_kwargs["prefetch_factor"] = self.dataloader_prefetch_factor
-        return _StatefulDataLoader(**loader_kwargs)
+    @property
+    def train_loader(self) -> DataLoader:
+        """GeMS train DataLoader (built once, cached)."""
+        if self._train_loader is None:
+            ds = self._build_gems_train_dataset(self.seed)
+            self._train_loader = self._make_loader(
+                dataset=ds, steps=self.train_steps,
+            )
+        return self._train_loader
 
-    def train_dataloader(self) -> DataLoader:
-        epoch = self.trainer.current_epoch if self.trainer is not None else 0
-        base_seed = self.seed + epoch * 100_000
-        return self._make_round_robin_loader(
-            datasets=[
-                self._build_gems_train_dataset(base_seed),
-                self._build_massspec_train_dataset(base_seed + 10_000),
-            ],
-            steps_per_epoch=[
-                self.steps["gems_train"],
-                self.steps["massspec_train"],
-            ],
-        )
+    @property
+    def val_loader(self) -> DataLoader | None:
+        """MassSpecGym val DataLoader (built once, cached).
 
-    def val_dataloader(self):
-        base_seed = self.seed + 1_000_000
-        gems_loader = self._make_loader(
-            dataset=self._build_gems_val_dataset(base_seed),
-            steps=self.steps["gems_val"],
-        )
-        massspec_loader = self._make_loader(
-            dataset=self._build_massspec_val_dataset(base_seed + 10_000),
-            steps=self.steps["massspec_val"],
-        )
-        return [gems_loader, massspec_loader]
-
-    def test_dataloader(self):
-        base_seed = self.seed + 2_000_000
-        gems_loader = self._make_loader(
-            dataset=self._build_gems_test_dataset(base_seed),
-            steps=self.steps["gems_test"],
-        )
-        massspec_loader = self._make_loader(
-            dataset=self._build_massspec_test_dataset(base_seed + 10_000),
-            steps=self.steps["massspec_test"],
-        )
-        return [gems_loader, massspec_loader]
+        Returns ``None`` if the MassSpecGym val split has no steps.
+        """
+        if not self._val_loader_built:
+            steps = self.steps["massspec_val"]
+            if steps == 0:
+                self._val_loader = None
+            else:
+                self._val_loader = self._make_loader(
+                    dataset=self._build_massspec_val_dataset(self.seed + 10_000),
+                    steps=steps,
+                )
+            self._val_loader_built = True
+        return self._val_loader
 
 
 # -----------------------------------------------------------------------------

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -14,8 +15,9 @@ class _DummyTrainer:
         self.current_epoch = 0
 
 
-def _load_config(path: str) -> object:
+def _load_config(path: str) -> Any:
     spec = importlib.util.spec_from_file_location("experiment_config", path)
+    assert spec is not None
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)

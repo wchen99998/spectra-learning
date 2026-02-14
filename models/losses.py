@@ -7,7 +7,7 @@ BCS (Batched Characteristic Slicing) regularizer mirrors
 from __future__ import annotations
 
 import torch
-import torch.distributed as dist
+import torch.distributed as dist  # type: ignore[attr-defined]
 import torch.distributed.nn.functional as dist_nn
 import torch.nn.functional as F
 from torch import nn

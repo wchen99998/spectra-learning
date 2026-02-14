@@ -4,18 +4,18 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from train import (
-    _FinalAttentiveProbe,
-    _iter_massspec_probe,
-    _precursor_mz_to_bins,
-    _probe_steps_per_epoch,
+from utils.probing import (
+    FinalAttentiveProbe,
+    iter_massspec_probe,
+    precursor_mz_to_bins,
+    probe_steps_per_epoch,
 )
 
 
 class PrecursorBinningTests(unittest.TestCase):
     def test_precursor_mz_bins_are_clamped_to_valid_range(self):
         precursor_norm = torch.tensor([0.0, 0.0002, 0.9999, 1.0, 1.2, -0.1], dtype=torch.float32)
-        bins = _precursor_mz_to_bins(
+        bins = precursor_mz_to_bins(
             precursor_norm,
             num_bins=1000,
             max_mz=1000.0,
@@ -25,7 +25,7 @@ class PrecursorBinningTests(unittest.TestCase):
 
     def test_precursor_mz_bins_respect_num_bins(self):
         precursor_norm = torch.tensor([0.0, 0.25, 0.5, 0.999, 1.0], dtype=torch.float32)
-        bins = _precursor_mz_to_bins(
+        bins = precursor_mz_to_bins(
             precursor_norm,
             num_bins=10,
             max_mz=1000.0,
@@ -36,7 +36,7 @@ class PrecursorBinningTests(unittest.TestCase):
 
 class FinalAttentiveProbeTests(unittest.TestCase):
     def test_output_shapes_match_target_spaces(self):
-        probe = _FinalAttentiveProbe(
+        probe = FinalAttentiveProbe(
             input_dim=32,
             hidden_dim=64,
             num_attention_heads=4,
@@ -52,7 +52,7 @@ class FinalAttentiveProbeTests(unittest.TestCase):
 
     def test_multitask_losses_are_finite(self):
         g = torch.Generator().manual_seed(11)
-        probe = _FinalAttentiveProbe(
+        probe = FinalAttentiveProbe(
             input_dim=24,
             hidden_dim=48,
             num_attention_heads=4,
@@ -122,7 +122,7 @@ class ProbeIterationTests(unittest.TestCase):
             batch_size=4,
         )
         result = list(
-            _iter_massspec_probe(
+            iter_massspec_probe(
                 dm,
                 "massspec_train",
                 seed=123,
@@ -147,7 +147,7 @@ class ProbeIterationTests(unittest.TestCase):
             batch_size=4,
         )
         _ = list(
-            _iter_massspec_probe(
+            iter_massspec_probe(
                 dm,
                 "massspec_test",
                 seed=321,
@@ -159,7 +159,7 @@ class ProbeIterationTests(unittest.TestCase):
 
 
 class ProbeStepCountTests(unittest.TestCase):
-    def test_probe_steps_per_epoch_matches_drop_remainder_policy(self):
+    def testprobe_steps_per_epoch_matches_drop_remainder_policy(self):
         dm = _DummyDataModule(
             batches=[],
             info={
@@ -170,11 +170,11 @@ class ProbeStepCountTests(unittest.TestCase):
             batch_size=4,
         )
         self.assertEqual(
-            _probe_steps_per_epoch(dm, split="massspec_train", drop_remainder=False),
+            probe_steps_per_epoch(dm, split="massspec_train", drop_remainder=False),
             3,
         )
         self.assertEqual(
-            _probe_steps_per_epoch(dm, split="massspec_train", drop_remainder=True),
+            probe_steps_per_epoch(dm, split="massspec_train", drop_remainder=True),
             2,
         )
 

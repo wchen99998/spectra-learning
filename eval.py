@@ -12,7 +12,7 @@ import tensorflow as tf
 import torch
 
 from input_pipeline import TfLightningDataModule
-from train import run_attentive_probe, run_linear_probe
+from utils.probing import run_attentive_probe, run_linear_probe
 from utils.training import (
     build_model_from_config,
     latest_ckpt_path,
@@ -95,7 +95,7 @@ def main() -> None:
         datamodule=datamodule,
         model=model,
         device=device,
-        loggers=loggers,
+        loggers=tuple(loggers),
     )
     for key, value in metrics.items():
         logging.info("%s = %.6f", key, value)
