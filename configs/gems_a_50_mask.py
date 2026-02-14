@@ -40,7 +40,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pma_num_seeds = 32
     cfg.mz_fourier_num_frequencies = 64
     cfg.mz_fourier_min_freq = 1.0
-    cfg.mz_fourier_max_freq = 50_000.0
+    cfg.mz_fourier_max_freq = 5_000.0
     cfg.mz_fourier_learnable = False
     cfg.sigreg_use_projector = True
     cfg.sigreg_proj_hidden_dim = 2048
@@ -55,7 +55,7 @@ def get_config() -> config_dict.ConfigDict:
 
     # Training (short smoke run)
     cfg.num_epochs = 5
-    cfg.learning_rate = 1e-4
+    cfg.learning_rate = 3e-4
     cfg.warmup_steps = 70_000
     cfg.learning_rate_schedule = "cosine"
     cfg.min_learning_rate = None

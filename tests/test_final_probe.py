@@ -1,9 +1,15 @@
 import unittest
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
-from train import _FinalAttentiveProbe, _precursor_mz_to_bins
+from train import (
+    _FinalAttentiveProbe,
+    _iter_massspec_probe,
+    _precursor_mz_to_bins,
+    _probe_steps_per_epoch,
+)
 
 
 class PrecursorBinningTests(unittest.TestCase):
@@ -64,6 +70,113 @@ class FinalAttentiveProbeTests(unittest.TestCase):
             + F.cross_entropy(logits["instrument"], instrument_targets)
         )
         self.assertTrue(torch.isfinite(total_loss).item())
+
+
+class _DummyDataset:
+    def __init__(self, batches):
+        self._batches = batches
+
+    def as_numpy_iterator(self):
+        return iter(self._batches)
+
+
+class _DummyDataModule:
+    def __init__(self, batches, info, batch_size):
+        self._dataset = _DummyDataset(batches)
+        self.info = info
+        self.batch_size = batch_size
+        self.calls = []
+
+    def build_massspec_probe_dataset(
+        self,
+        split: str,
+        seed: int,
+        *,
+        peak_ordering: str | None = None,
+        shuffle: bool = False,
+        drop_remainder: bool = True,
+    ):
+        self.calls.append({
+            "split": split,
+            "seed": seed,
+            "peak_ordering": peak_ordering,
+            "shuffle": shuffle,
+            "drop_remainder": drop_remainder,
+        })
+        return self._dataset
+
+
+class ProbeIterationTests(unittest.TestCase):
+    def test_train_probe_uses_shuffle_and_includes_remainder(self):
+        batches = [
+            {"peak_mz": np.zeros((4, 60), dtype=np.float32)},
+            {"peak_mz": np.ones((4, 60), dtype=np.float32)},
+        ]
+        dm = _DummyDataModule(
+            batches=batches,
+            info={
+                "massspec_train_size": 6,
+                "massspec_val_size": 0,
+                "massspec_test_size": 0,
+            },
+            batch_size=4,
+        )
+        result = list(
+            _iter_massspec_probe(
+                dm,
+                "massspec_train",
+                seed=123,
+                peak_ordering="mz",
+                drop_remainder=False,
+            )
+        )
+        self.assertEqual(dm.calls[0]["shuffle"], True)
+        self.assertEqual(dm.calls[0]["drop_remainder"], False)
+        self.assertEqual(result[0]["peak_mz"].shape[0], 4)
+        self.assertEqual(result[1]["peak_mz"].shape[0], 2)
+
+    def test_eval_probe_does_not_shuffle(self):
+        batches = [{"peak_mz": np.zeros((2, 60), dtype=np.float32)}]
+        dm = _DummyDataModule(
+            batches=batches,
+            info={
+                "massspec_train_size": 0,
+                "massspec_val_size": 0,
+                "massspec_test_size": 2,
+            },
+            batch_size=4,
+        )
+        _ = list(
+            _iter_massspec_probe(
+                dm,
+                "massspec_test",
+                seed=321,
+                peak_ordering="intensity",
+                drop_remainder=False,
+            )
+        )
+        self.assertEqual(dm.calls[0]["shuffle"], False)
+
+
+class ProbeStepCountTests(unittest.TestCase):
+    def test_probe_steps_per_epoch_matches_drop_remainder_policy(self):
+        dm = _DummyDataModule(
+            batches=[],
+            info={
+                "massspec_train_size": 10,
+                "massspec_val_size": 0,
+                "massspec_test_size": 0,
+            },
+            batch_size=4,
+        )
+        self.assertEqual(
+            _probe_steps_per_epoch(dm, split="massspec_train", drop_remainder=False),
+            3,
+        )
+        self.assertEqual(
+            _probe_steps_per_epoch(dm, split="massspec_train", drop_remainder=True),
+            2,
+        )
 
 
 if __name__ == "__main__":

@@ -331,7 +331,11 @@ class _FinetuneDataModule(pl.LightningDataModule):
         self.test_steps = self._base.steps["massspec_test"]
 
     def _build_loader(self, split: str, seed: int, shuffle: bool) -> torch.utils.data.DataLoader:
-        ds = self._base.build_massspec_probe_dataset(split, seed=seed)
+        ds = self._base.build_massspec_probe_dataset(
+            split,
+            seed=seed,
+            shuffle=shuffle,
+        )
         from input_pipeline import _TfIterableDataset, _StatefulDataLoader, _identity_collate
         if split == "massspec_train":
             steps = self.train_steps

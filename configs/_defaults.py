@@ -37,7 +37,7 @@ def apply_final_probe_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.final_probe_learning_rate = 1e-4
     cfg.final_probe_weight_decay = 1e-4
     cfg.final_probe_warmup_steps = 100
-    cfg.final_probe_feature_source = "projector"
+    cfg.final_probe_feature_source = "encoder"
     cfg.final_probe_head_hidden_dim = 512
 
     cfg.final_probe_num_precursor_bins = 1000

@@ -12,7 +12,7 @@ import tensorflow as tf
 import torch
 
 from input_pipeline import TfLightningDataModule
-from train import run_attentive_probe
+from train import run_attentive_probe, run_linear_probe
 from utils.training import (
     build_model_from_config,
     latest_ckpt_path,
@@ -24,10 +24,11 @@ tf.config.set_visible_devices([], "GPU")
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run attentive probe evaluation on a pretrained checkpoint.")
+    parser = argparse.ArgumentParser(description="Run probe evaluation on a pretrained checkpoint.")
     parser.add_argument("--config", required=True, help="Path to a config file (python).")
     parser.add_argument("--workdir", required=True, help="Path to training workdir (used to find checkpoint).")
     parser.add_argument("--checkpoint", default=None, help="Explicit checkpoint path; defaults to latest in workdir.")
+    parser.add_argument("--probe-type", choices=["attentive", "linear"], default="attentive", help="Probe type: attentive (default) or linear.")
     parser.add_argument("--wandb-project", default=None, help="W&B project for logging.")
     return parser.parse_args()
 
@@ -76,7 +77,8 @@ def main() -> None:
 
         loggers.append(CSVLogger(save_dir=str(workdir), name="eval_logs"))
 
-    metrics = run_attentive_probe(
+    run_probe = run_attentive_probe if args.probe_type == "attentive" else run_linear_probe
+    metrics = run_probe(
         config=config,
         datamodule=datamodule,
         model=model,

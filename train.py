@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import logging
 import warnings
 from pathlib import Path
@@ -58,11 +59,14 @@ def _iter_massspec_probe(
     *,
     seed: int,
     peak_ordering: str,
+    drop_remainder: bool,
 ):
     dataset = datamodule.build_massspec_probe_dataset(
         split,
         seed=seed,
         peak_ordering=peak_ordering,
+        shuffle=(split == "massspec_train"),
+        drop_remainder=drop_remainder,
     )
     size_key = {
         "massspec_train": "massspec_train_size",
@@ -80,6 +84,24 @@ def _iter_massspec_probe(
             batch = {key: value[:take] for key, value in batch.items()}
         seen += take
         yield numpy_batch_to_torch(batch)
+
+
+def _probe_steps_per_epoch(
+    datamodule: TfLightningDataModule,
+    *,
+    split: str,
+    drop_remainder: bool,
+) -> int:
+    size_key = {
+        "massspec_train": "massspec_train_size",
+        "massspec_val": "massspec_val_size",
+        "massspec_test": "massspec_test_size",
+    }[split]
+    size = int(datamodule.info[size_key])
+    batch_size = int(datamodule.batch_size)
+    if drop_remainder:
+        return size // batch_size
+    return math.ceil(size / batch_size)
 
 
 def _precursor_mz_to_bins(
@@ -102,7 +124,6 @@ def _extract_probe_features(
     embeddings = backbone.encoder(
         batch["peak_mz"],
         batch["peak_intensity"],
-        batch["precursor_mz"],
         valid_mask=batch["peak_valid_mask"],
     )
     if feature_source == "encoder":
@@ -119,6 +140,30 @@ def _extract_probe_features(
         )
         return feature_tokens, feature_mask
     raise ValueError(f"Unknown feature_source: {feature_source!r}")
+
+
+class _FinalLinearProbe(torch.nn.Module):
+    def __init__(
+        self,
+        *,
+        input_dim: int,
+        head_dims: dict[str, int],
+    ) -> None:
+        super().__init__()
+        self.heads = torch.nn.ModuleDict({
+            name: torch.nn.Linear(input_dim, dim)
+            for name, dim in head_dims.items()
+        })
+
+    def forward(
+        self,
+        feature_tokens: torch.Tensor,
+        feature_mask: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        # Mean-pool over valid tokens.
+        mask = feature_mask.unsqueeze(-1).float()
+        pooled = (feature_tokens * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
+        return {name: head(pooled) for name, head in self.heads.items()}
 
 
 _PROBE_TASK_NAMES = ("adduct", "precursor_bin", "instrument")
@@ -173,7 +218,7 @@ class _FinalAttentiveProbe(torch.nn.Module):
 
 
 def _probe_step(
-    probe: _FinalAttentiveProbe,
+    probe: _FinalAttentiveProbe | _FinalLinearProbe,
     backbone: PeakSetSIGReg,
     batch: dict[str, torch.Tensor],
     *,
@@ -240,6 +285,7 @@ def run_attentive_probe(
     num_attention_heads = int(config.final_probe_attention_heads)
     loss_weight_list = config.get("final_probe_loss_weights", [1.0, 1.0, 1.0])
     loss_weights = dict(zip(_PROBE_TASK_NAMES, loss_weight_list))
+    probe_drop_remainder = False
 
     num_adduct_classes = int(datamodule.info["massspec_adduct_vocab_size"])
     num_instrument_classes = int(datamodule.info["massspec_instrument_type_vocab_size"])
@@ -258,7 +304,11 @@ def run_attentive_probe(
         },
     ).to(device)
     optimizer = torch.optim.AdamW(probe.parameters(), lr=probe_lr, weight_decay=probe_weight_decay)
-    steps_per_epoch = int(datamodule.steps["massspec_train"])
+    steps_per_epoch = _probe_steps_per_epoch(
+        datamodule,
+        split="massspec_train",
+        drop_remainder=probe_drop_remainder,
+    )
     total_steps = num_probe_epochs * steps_per_epoch
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
@@ -299,7 +349,11 @@ def run_attentive_probe(
         train_count = 0
         train_seed = int(config.seed) + 8_000_000 + epoch_idx
         for batch in _iter_massspec_probe(
-            datamodule, "massspec_train", seed=train_seed, peak_ordering=probe_peak_ordering,
+            datamodule,
+            "massspec_train",
+            seed=train_seed,
+            peak_ordering=probe_peak_ordering,
+            drop_remainder=probe_drop_remainder,
         ):
             batch = move_batch(batch)
             optimizer.zero_grad(set_to_none=True)
@@ -324,7 +378,11 @@ def run_attentive_probe(
         test_seed = int(config.seed) + 9_000_000 + epoch_idx
         with torch.no_grad():
             for batch in _iter_massspec_probe(
-                datamodule, "massspec_test", seed=test_seed, peak_ordering=probe_peak_ordering,
+                datamodule,
+                "massspec_test",
+                seed=test_seed,
+                peak_ordering=probe_peak_ordering,
+                drop_remainder=probe_drop_remainder,
             ):
                 batch = move_batch(batch)
                 result = _probe_step(probe, backbone, batch, **step_kwargs)
@@ -356,6 +414,167 @@ def run_attentive_probe(
             epoch_metrics["final_probe/test/acc_adduct"],
             epoch_metrics["final_probe/test/acc_precursor_bin"],
             epoch_metrics["final_probe/test/acc_instrument"],
+        )
+        final_metrics = epoch_metrics
+    return final_metrics
+
+
+def run_linear_probe(
+    *,
+    config: config_dict.ConfigDict,
+    datamodule: TfLightningDataModule,
+    model: PeakSetSIGReg,
+    device: torch.device,
+    loggers: tuple = (),
+    global_step: int = 0,
+) -> dict[str, float]:
+    def log_trial_metrics(metrics: dict[str, float], step: int) -> None:
+        for pl_logger in loggers:
+            pl_logger.log_metrics(metrics, step=step)
+            experiment = pl_logger.experiment
+            if hasattr(experiment, "log"):
+                experiment.log(metrics, step=step)
+
+    def move_batch(batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        return {k: v.to(device) for k, v in batch.items()}
+
+    num_probe_epochs = int(config.final_probe_num_epochs)
+    probe_lr = float(config.final_probe_learning_rate)
+    probe_weight_decay = float(config.final_probe_weight_decay)
+    probe_warmup_steps = int(config.final_probe_warmup_steps)
+    probe_feature_source = str(config.final_probe_feature_source)
+    probe_peak_ordering = str(config.peak_ordering)
+    num_precursor_bins = int(config.final_probe_num_precursor_bins)
+    precursor_max_mz = float(config.max_precursor_mz)
+    loss_weight_list = config.get("final_probe_loss_weights", [1.0, 1.0, 1.0])
+    loss_weights = dict(zip(_PROBE_TASK_NAMES, loss_weight_list))
+    probe_drop_remainder = False
+
+    num_adduct_classes = int(datamodule.info["massspec_adduct_vocab_size"])
+    num_instrument_classes = int(datamodule.info["massspec_instrument_type_vocab_size"])
+    use_projector = probe_feature_source == "projector" and bool(config.get("sigreg_use_projector", True))
+    input_dim = int(config.get("sigreg_proj_output_dim", 128)) if use_projector else int(config.model_dim)
+
+    model.to(device)
+    probe = _FinalLinearProbe(
+        input_dim=input_dim,
+        head_dims={
+            "adduct": num_adduct_classes,
+            "precursor_bin": num_precursor_bins,
+            "instrument": num_instrument_classes,
+        },
+    ).to(device)
+    optimizer = torch.optim.AdamW(probe.parameters(), lr=probe_lr, weight_decay=probe_weight_decay)
+    steps_per_epoch = _probe_steps_per_epoch(
+        datamodule,
+        split="massspec_train",
+        drop_remainder=probe_drop_remainder,
+    )
+    total_steps = num_probe_epochs * steps_per_epoch
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lr_lambda=lambda step_idx: learning_rate_at_step(
+            step_idx + 1,
+            base_lr=probe_lr,
+            total_steps=total_steps,
+            warmup_steps=probe_warmup_steps,
+            schedule_type="cosine",
+            min_learning_rate=None,
+        ) / probe_lr,
+    )
+
+    step_kwargs = dict(
+        feature_source=probe_feature_source,
+        num_precursor_bins=num_precursor_bins,
+        precursor_max_mz=precursor_max_mz,
+        loss_weights=loss_weights,
+    )
+
+    logging.info(
+        "Linear probe running on device: %s (probe=%s backbone=%s)",
+        device,
+        next(probe.parameters()).device,
+        next(model.parameters()).device,
+    )
+
+    backbone = model
+    backbone.eval()
+    for param in backbone.parameters():
+        param.requires_grad = False
+
+    final_metrics: dict[str, float] = {}
+    for epoch_idx in range(num_probe_epochs):
+        # --- Train ---
+        probe.train()
+        train_sums: dict[str, float] = {}
+        train_count = 0
+        train_seed = int(config.seed) + 8_000_000 + epoch_idx
+        for batch in _iter_massspec_probe(
+            datamodule,
+            "massspec_train",
+            seed=train_seed,
+            peak_ordering=probe_peak_ordering,
+            drop_remainder=probe_drop_remainder,
+        ):
+            batch = move_batch(batch)
+            optimizer.zero_grad(set_to_none=True)
+            result = _probe_step(probe, backbone, batch, **step_kwargs)
+            result["loss_total"].backward()
+            optimizer.step()
+            scheduler.step()
+
+            bs = int(result["batch_size"])
+            train_count += bs
+            for name in _PROBE_TASK_NAMES:
+                key = f"loss_{name}"
+                weighted = result["losses"][name].detach() * bs
+                train_sums[key] = train_sums[key] + weighted if key in train_sums else weighted
+            weighted = result["loss_total"].detach() * bs
+            train_sums["loss_total"] = train_sums["loss_total"] + weighted if "loss_total" in train_sums else weighted
+
+        # --- Eval ---
+        probe.eval()
+        test_sums: dict[str, float] = {}
+        test_count = 0
+        test_seed = int(config.seed) + 9_000_000 + epoch_idx
+        with torch.no_grad():
+            for batch in _iter_massspec_probe(
+                datamodule,
+                "massspec_test",
+                seed=test_seed,
+                peak_ordering=probe_peak_ordering,
+                drop_remainder=probe_drop_remainder,
+            ):
+                batch = move_batch(batch)
+                result = _probe_step(probe, backbone, batch, **step_kwargs)
+                bs = int(result["batch_size"])
+                test_count += bs
+                for name in _PROBE_TASK_NAMES:
+                    loss_key = f"loss_{name}"
+                    acc_key = f"acc_{name}"
+                    weighted_loss = result["losses"][name].detach() * bs
+                    correct = (result["logits"][name].argmax(dim=1) == result["targets"][name]).sum()
+                    test_sums[loss_key] = test_sums[loss_key] + weighted_loss if loss_key in test_sums else weighted_loss
+                    test_sums[acc_key] = test_sums[acc_key] + correct if acc_key in test_sums else correct
+                weighted_total = result["loss_total"].detach() * bs
+                test_sums["loss_total"] = test_sums["loss_total"] + weighted_total if "loss_total" in test_sums else weighted_total
+
+        epoch_metrics = {}
+        for key, val in train_sums.items():
+            epoch_metrics[f"linear_probe/train/{key}"] = val.item() / train_count
+        for key, val in test_sums.items():
+            epoch_metrics[f"linear_probe/test/{key}"] = val.item() / test_count
+
+        log_step = global_step + epoch_idx + 1
+        epoch_metrics["linear_probe_epoch"] = float(epoch_idx + 1)
+        log_trial_metrics(epoch_metrics, step=log_step)
+        logging.info(
+            "Linear probe epoch %d/%d test_acc(adduct=%.4f precursor=%.4f instrument=%.4f)",
+            epoch_idx + 1,
+            num_probe_epochs,
+            epoch_metrics["linear_probe/test/acc_adduct"],
+            epoch_metrics["linear_probe/test/acc_precursor_bin"],
+            epoch_metrics["linear_probe/test/acc_instrument"],
         )
         final_metrics = epoch_metrics
     return final_metrics
@@ -726,12 +945,12 @@ def train_and_evaluate(
         default_root_dir=str(workdir),
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1,
-        precision="32",
+        precision="16-mixed",
         max_epochs=num_epochs,
         log_every_n_steps=configured_log_every_n_steps,
         val_check_interval=configured_val_check_interval,
         gradient_clip_val=float(config.clip) if config.get("clip", 0.) > 0. else None,
-        gradient_clip_algorithm="norm" if config.get("clip", 0.) > 0. else None,
+        gradient_clip_algorithm="value" if config.get("clip", 0.) > 0. else None,
         callbacks=callbacks,
         logger=logger,
         reload_dataloaders_every_n_epochs=1,

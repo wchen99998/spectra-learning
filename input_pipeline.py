@@ -1182,7 +1182,7 @@ class TfLightningDataModule(pl.LightningDataModule):
         )
         self.split_seed = int(config.get("split_seed", _DEFAULT_SPLIT_SEED))
         self.num_shards = int(config.get("num_shards", _DEFAULT_NUM_SHARDS))
-        self.drop_remainder = bool(config.get("drop_remainder", False))
+        self.drop_remainder = bool(config.get("drop_remainder", True))
         self.max_precursor_mz = float(
             config.get("max_precursor_mz", _DEFAULT_MAX_PRECURSOR_MZ)
         )
@@ -1386,6 +1386,8 @@ class TfLightningDataModule(pl.LightningDataModule):
         seed: int,
         *,
         peak_ordering: str | None = None,
+        shuffle: bool = False,
+        drop_remainder: bool = True,
     ) -> tf.data.Dataset:
         if split == "massspec_train":
             files = self.massspec_train_files
@@ -1395,12 +1397,13 @@ class TfLightningDataModule(pl.LightningDataModule):
             files = self.massspec_test_files
         if peak_ordering is None:
             peak_ordering = self.peak_ordering
+        shuffle_buffer = self.shuffle_buffer if shuffle else 0
         return _build_dataset(
             files,
             self.batch_size,
-            shuffle_buffer=0,
+            shuffle_buffer=shuffle_buffer,
             seed=seed,
-            drop_remainder=False,
+            drop_remainder=drop_remainder,
             tfrecord_buffer_size=self.tfrecord_buffer_size,
             max_precursor_mz=self.max_precursor_mz,
             include_fingerprint=True,

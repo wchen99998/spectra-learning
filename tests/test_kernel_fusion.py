@@ -192,11 +192,11 @@ def test_encoder_with_mask():
 
     with torch.no_grad():
         out_mask = encoder(
-            batch["peak_mz"], batch["peak_intensity"], batch["precursor_mz"],
+            batch["peak_mz"], batch["peak_intensity"],
             valid_mask=batch["peak_valid_mask"],
         )
         out_none = encoder(
-            batch["peak_mz"], batch["peak_intensity"], batch["precursor_mz"],
+            batch["peak_mz"], batch["peak_intensity"],
             valid_mask=None,
         )
 

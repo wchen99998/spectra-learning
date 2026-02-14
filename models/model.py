@@ -48,8 +48,11 @@ class FourierFeatures(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [B, N] -> [B, N, 2*num_frequencies]
-        projected = x.unsqueeze(-1) * self.freqs * (2.0 * math.pi)
-        return torch.cat([projected.sin(), projected.cos()], dim=-1)
+        # Compute in fp32: high frequencies (up to 50k) produce products ~314k
+        # which overflow fp16 (max 65504) and lose all precision in bf16
+        # (7-bit mantissa → quantization step ~2048 at that magnitude).
+        projected = x.float().unsqueeze(-1) * self.freqs.float() * (2.0 * math.pi)
+        return torch.cat([projected.sin(), projected.cos()], dim=-1).to(x.dtype)
 
 
 class PeakFeatureEmbedder(nn.Module):
@@ -71,8 +74,8 @@ class PeakFeatureEmbedder(nn.Module):
             max_freq=mz_fourier_max_freq,
             learnable=mz_fourier_learnable,
         )
-        # input: fourier(mz) + raw_mz + intensity + precursor
-        input_dim = self.mz_fourier.output_dim + 1
+        # input: fourier(mz) + raw_mz + intensity
+        input_dim = self.mz_fourier.output_dim + 1 + 1
         self.mlp = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.SiLU(),
@@ -89,7 +92,7 @@ class PeakFeatureEmbedder(nn.Module):
         peak_intensity: torch.Tensor,
     ) -> torch.Tensor:
         mz_fourier = self.mz_fourier(peak_mz)
-        features = torch.cat([mz_fourier, peak_intensity.unsqueeze(-1)], dim=-1)
+        features = torch.cat([mz_fourier, peak_mz.unsqueeze(-1), peak_intensity.unsqueeze(-1)], dim=-1)
         return self.mlp(features)
 
 
@@ -291,6 +294,7 @@ class PeakSetSIGReg(nn.Module):
             num_heads=pma_heads,
             batch_first=True,
         )
+        self.pool_norm = nn.RMSNorm(model_dim, eps=1e-5)
         self.mask_token = nn.Parameter(torch.empty(model_dim))
         nn.init.normal_(self.mask_token, std=0.02)
 
@@ -321,7 +325,7 @@ class PeakSetSIGReg(nn.Module):
                 key_padding_mask=~valid_mask,
                 need_weights=False,
             )
-            return pooled.mean(dim=1)
+            return self.pool_norm(pooled.mean(dim=1))
         raise NotImplementedError(f"Unknown pooling type: {self.pooling_type}")
 
     def _augment_view(
@@ -397,6 +401,14 @@ class PeakSetSIGReg(nn.Module):
         fused_z = self.projector(fused_pooled)
         z1, z2 = fused_z.chunk(2, dim=0)
         representation_variance = fused_z.var(dim=0, unbiased=False).mean()
+        encoder_variance = fused_pooled.var(dim=0, unbiased=False).mean()
+
+        # Alignment: mean cosine similarity between paired views (higher = better)
+        z1_norm = nn.functional.normalize(z1, dim=-1)
+        z2_norm = nn.functional.normalize(z2, dim=-1)
+        alignment = (z1_norm * z2_norm).sum(dim=-1).mean()
+        # Uniformity: mean cosine similarity between unpaired samples (lower = better)
+        uniformity = (z1_norm @ z2_norm.T).fill_diagonal_(0).sum() / (z1.shape[0] * (z1.shape[0] - 1))
 
         loss_dict = self.sigreg_loss(z1, z2, proj=bcs_projection)
         valid_fraction = fused_valid_mask.float().mean()
@@ -408,6 +420,9 @@ class PeakSetSIGReg(nn.Module):
             "valid_fraction": valid_fraction,
             "masked_fraction": masked_fraction,
             "representation_variance": representation_variance,
+            "encoder_variance": encoder_variance,
+            "alignment": alignment,
+            "uniformity": uniformity,
         }
 
     def forward(

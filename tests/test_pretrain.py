@@ -467,9 +467,11 @@ class PMAPoolingTests(unittest.TestCase):
 class SIGRegLossTests(unittest.TestCase):
     def test_epps_pulley_finite(self):
         x = torch.randn(32, 16)
-        t = _epps_pulley(x)
-        self.assertEqual(t.shape, (16,))
-        self.assertTrue(torch.isfinite(t).all().item())
+        t = torch.linspace(-3.0, 3.0, 10)
+        exp_f = torch.exp(-0.5 * t**2)
+        result = _epps_pulley(x, t, exp_f)
+        self.assertEqual(result.shape, (16,))
+        self.assertTrue(torch.isfinite(result).all().item())
 
     def test_bcs_loss_output_structure(self):
         loss_fn = BCSLoss(num_slices=32, lmbd=10.0)
