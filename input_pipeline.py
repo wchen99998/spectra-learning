@@ -785,7 +785,10 @@ def _augment_masked_view_tf(
         random_drop = tf.logical_and(random_drop, tf.logical_not(masked))
         masked = tf.logical_or(masked, random_drop)
 
-    jitterable = tf.logical_and(peak_valid_mask, tf.logical_not(masked))
+    view_valid = tf.logical_and(peak_valid_mask, tf.logical_not(masked))
+
+    # jitterable should be view_valid now (since masked are dropped)
+    jitterable = view_valid
 
     mz_noise = tf.random.normal(tf.shape(peak_mz), stddev=mz_jitter_std, dtype=peak_mz.dtype)
     mz = tf.where(jitterable, peak_mz + mz_noise, tf.zeros_like(peak_mz))
@@ -814,7 +817,7 @@ def _augment_masked_view_tf(
     return (
         mz,
         intensity,
-        peak_valid_mask,
+        view_valid,
         masked,
         masked_fraction,
     )

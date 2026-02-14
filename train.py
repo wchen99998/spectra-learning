@@ -120,8 +120,10 @@ def _extract_probe_features(
     batch: dict[str, torch.Tensor],
     *,
     feature_source: str,
+    compiled_encoder: torch.nn.Module | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    embeddings = backbone.encoder(
+    encoder = compiled_encoder if compiled_encoder is not None else backbone.encoder
+    embeddings = encoder(
         batch["peak_mz"],
         batch["peak_intensity"],
         valid_mask=batch["peak_valid_mask"],
@@ -226,9 +228,11 @@ def _probe_step(
     num_precursor_bins: int,
     precursor_max_mz: float,
     loss_weights: dict[str, float],
+    compiled_encoder: torch.nn.Module | None = None,
 ) -> dict[str, torch.Tensor]:
     feature_tokens, feature_mask = _extract_probe_features(
         backbone, batch, feature_source=feature_source,
+        compiled_encoder=compiled_encoder,
     )
     logits = probe(feature_tokens, feature_mask)
     targets = {
@@ -292,7 +296,16 @@ def run_attentive_probe(
     use_projector = probe_feature_source == "projector" and bool(config.get("sigreg_use_projector", True))
     input_dim = int(config.get("sigreg_proj_output_dim", 128)) if use_projector else int(config.model_dim)
 
+    freeze_backbone = bool(config.get("final_probe_freeze_backbone", True))
+
     model.to(device)
+    backbone = model
+    if freeze_backbone:
+        backbone.eval()
+        for param in backbone.parameters():
+            param.requires_grad = False
+    compiled_encoder = torch.compile(backbone.encoder)
+
     probe = _FinalAttentiveProbe(
         input_dim=input_dim,
         hidden_dim=probe_hidden_dim,
@@ -303,7 +316,10 @@ def run_attentive_probe(
             "instrument": num_instrument_classes,
         },
     ).to(device)
-    optimizer = torch.optim.AdamW(probe.parameters(), lr=probe_lr, weight_decay=probe_weight_decay)
+    optim_params = list(probe.parameters())
+    if not freeze_backbone:
+        optim_params += list(backbone.parameters())
+    optimizer = torch.optim.AdamW(optim_params, lr=probe_lr, weight_decay=probe_weight_decay)
     steps_per_epoch = _probe_steps_per_epoch(
         datamodule,
         split="massspec_train",
@@ -330,16 +346,12 @@ def run_attentive_probe(
     )
 
     logging.info(
-        "Final probe running on device: %s (probe=%s backbone=%s)",
+        "Final probe running on device: %s (probe=%s backbone=%s, frozen=%s)",
         device,
         next(probe.parameters()).device,
         next(model.parameters()).device,
+        freeze_backbone,
     )
-
-    backbone = model
-    backbone.eval()
-    for param in backbone.parameters():
-        param.requires_grad = False
 
     final_metrics: dict[str, float] = {}
     for epoch_idx in range(num_probe_epochs):
@@ -357,7 +369,7 @@ def run_attentive_probe(
         ):
             batch = move_batch(batch)
             optimizer.zero_grad(set_to_none=True)
-            result = _probe_step(probe, backbone, batch, **step_kwargs)
+            result = _probe_step(probe, backbone, batch, compiled_encoder=compiled_encoder, **step_kwargs)
             result["loss_total"].backward()
             optimizer.step()
             scheduler.step()
@@ -385,7 +397,7 @@ def run_attentive_probe(
                 drop_remainder=probe_drop_remainder,
             ):
                 batch = move_batch(batch)
-                result = _probe_step(probe, backbone, batch, **step_kwargs)
+                result = _probe_step(probe, backbone, batch, compiled_encoder=compiled_encoder, **step_kwargs)
                 bs = int(result["batch_size"])
                 test_count += bs
                 for name in _PROBE_TASK_NAMES:
@@ -455,7 +467,16 @@ def run_linear_probe(
     use_projector = probe_feature_source == "projector" and bool(config.get("sigreg_use_projector", True))
     input_dim = int(config.get("sigreg_proj_output_dim", 128)) if use_projector else int(config.model_dim)
 
+    freeze_backbone = bool(config.get("final_probe_freeze_backbone", True))
+
     model.to(device)
+    backbone = model
+    if freeze_backbone:
+        backbone.eval()
+        for param in backbone.parameters():
+            param.requires_grad = False
+    compiled_encoder = torch.compile(backbone.encoder)
+
     probe = _FinalLinearProbe(
         input_dim=input_dim,
         head_dims={
@@ -464,7 +485,10 @@ def run_linear_probe(
             "instrument": num_instrument_classes,
         },
     ).to(device)
-    optimizer = torch.optim.AdamW(probe.parameters(), lr=probe_lr, weight_decay=probe_weight_decay)
+    optim_params = list(probe.parameters())
+    if not freeze_backbone:
+        optim_params += list(backbone.parameters())
+    optimizer = torch.optim.AdamW(optim_params, lr=probe_lr, weight_decay=probe_weight_decay)
     steps_per_epoch = _probe_steps_per_epoch(
         datamodule,
         split="massspec_train",
@@ -491,16 +515,12 @@ def run_linear_probe(
     )
 
     logging.info(
-        "Linear probe running on device: %s (probe=%s backbone=%s)",
+        "Linear probe running on device: %s (probe=%s backbone=%s, frozen=%s)",
         device,
         next(probe.parameters()).device,
         next(model.parameters()).device,
+        freeze_backbone,
     )
-
-    backbone = model
-    backbone.eval()
-    for param in backbone.parameters():
-        param.requires_grad = False
 
     final_metrics: dict[str, float] = {}
     for epoch_idx in range(num_probe_epochs):
@@ -518,7 +538,7 @@ def run_linear_probe(
         ):
             batch = move_batch(batch)
             optimizer.zero_grad(set_to_none=True)
-            result = _probe_step(probe, backbone, batch, **step_kwargs)
+            result = _probe_step(probe, backbone, batch, compiled_encoder=compiled_encoder, **step_kwargs)
             result["loss_total"].backward()
             optimizer.step()
             scheduler.step()
@@ -546,7 +566,7 @@ def run_linear_probe(
                 drop_remainder=probe_drop_remainder,
             ):
                 batch = move_batch(batch)
-                result = _probe_step(probe, backbone, batch, **step_kwargs)
+                result = _probe_step(probe, backbone, batch, compiled_encoder=compiled_encoder, **step_kwargs)
                 bs = int(result["batch_size"])
                 test_count += bs
                 for name in _PROBE_TASK_NAMES:
@@ -649,6 +669,20 @@ class TorchProfilerCallback(pl.Callback):
         self._profiler = None
 
 
+def _partition_params_for_muon(
+    model: torch.nn.Module,
+) -> tuple[list[torch.nn.Parameter], list[torch.nn.Parameter]]:
+    """Split parameters into 2D (Muon-eligible) and non-2D (AdamW-only)."""
+    muon_params = []
+    adamw_params = []
+    for param in model.parameters():
+        if param.ndim == 2:
+            muon_params.append(param)
+        else:
+            adamw_params.append(param)
+    return muon_params, adamw_params
+
+
 class MAELightningModule(pl.LightningModule):
     def __init__(
         self,
@@ -657,6 +691,7 @@ class MAELightningModule(pl.LightningModule):
         total_steps: int,
     ) -> None:
         super().__init__()
+        self.automatic_optimization = False
         self.save_hyperparameters(ignore=["config"])
         self.config = config
         self.total_steps = int(total_steps)
@@ -667,6 +702,8 @@ class MAELightningModule(pl.LightningModule):
         self.min_learning_rate = config.get("min_learning_rate", None)
         self.b2 = float(config.get("b2", 0.999))
         self.checkpoint_every_steps = int(config.checkpoint_every_steps)
+        self.clip_value = float(config.get("clip", 0.0))
+        self.optimizer_type = str(config.get("optimizer", "adamw")).lower()
         self._prefetch_stream: torch.cuda.Stream | None = None
         self._prefetched_batch: dict[str, torch.Tensor] | None = None
         self._prefetch_iter: Iterator | None = None
@@ -693,6 +730,12 @@ class MAELightningModule(pl.LightningModule):
     def _lr_lambda(self, step_idx: int) -> float:
         step = step_idx + 1
         return self._lr_for_step(step) / self.base_lr
+
+    def _make_lr_lambda(self, base_lr: float):
+        """Return a lr_lambda closure over a specific base_lr."""
+        def lr_lambda(step_idx: int) -> float:
+            return self._lr_for_step(step_idx + 1) / base_lr
+        return lr_lambda
 
     def _train_forward_impl(
         self,
@@ -797,7 +840,7 @@ class MAELightningModule(pl.LightningModule):
                 batch_size=batch_size,
             )
 
-    def training_step(self, dataloader_iter: Iterator) -> torch.Tensor:
+    def training_step(self, dataloader_iter: Iterator) -> None:
         batch = self._next_train_batch(dataloader_iter)
         batch_size = int(batch["fused_mz"].shape[0]) // 2
         bcs_projection = self._sample_bcs_projection(
@@ -805,6 +848,30 @@ class MAELightningModule(pl.LightningModule):
         )
         torch.compiler.cudagraph_mark_step_begin()
         metrics = self._train_forward(batch, bcs_projection)
+
+        self.manual_backward(metrics["loss"])
+
+        # Lightning returns unwrapped object for single opt, list for multiple.
+        optimizers = self.optimizers()
+        if not isinstance(optimizers, list):
+            optimizers = [optimizers]
+        schedulers = self.lr_schedulers()
+        if not isinstance(schedulers, list):
+            schedulers = [schedulers]
+
+        if self.clip_value > 0 and self.optimizer_type != "muon":
+            for opt in optimizers:
+                self.clip_gradients(
+                    opt,
+                    gradient_clip_val=self.clip_value,
+                    gradient_clip_algorithm="value",
+                )
+        for opt in optimizers:
+            opt.step()
+            opt.zero_grad()
+        for sched in schedulers:
+            sched.step()
+
         step = self.global_step + 1
         self.log(
             "train/learning_rate",
@@ -844,7 +911,6 @@ class MAELightningModule(pl.LightningModule):
                 prog_bar=False,
                 batch_size=batch_size,
             )
-        return metrics["loss"]
 
     def configure_optimizers(self):
         capturable = bool(self.config.get("optimizer_capturable", True))
@@ -854,23 +920,51 @@ class MAELightningModule(pl.LightningModule):
             fused = self.trainer.strategy.root_device.type == "cuda"
         else:
             fused = bool(fused_cfg) and self.trainer.strategy.root_device.type == "cuda"
+        weight_decay = float(self.config.weight_decay)
+
+        if self.optimizer_type == "muon":
+            muon_params, adamw_params = _partition_params_for_muon(self.model)
+            muon_lr = float(self.config.get("muon_lr", None) or self.base_lr)
+            adamw_lr = float(self.config.get("adamw_lr", None) or self.base_lr)
+            muon_wd = float(self.config.get("muon_weight_decay", None) or weight_decay)
+
+            muon_opt = torch.optim.Muon(
+                muon_params,
+                lr=muon_lr,
+                momentum=float(self.config.get("muon_momentum", 0.95)),
+                nesterov=bool(self.config.get("muon_nesterov", True)),
+                ns_steps=int(self.config.get("muon_ns_steps", 5)),
+                weight_decay=muon_wd,
+                adjust_lr_fn=str(self.config.get("muon_adjust_lr_fn", "match_rms_adamw")),
+            )
+            adamw_opt = torch.optim.AdamW(
+                adamw_params,
+                lr=adamw_lr,
+                betas=(0.9, self.b2),
+                weight_decay=weight_decay,
+                capturable=capturable,
+                fused=fused,
+            )
+            muon_sched = torch.optim.lr_scheduler.LambdaLR(
+                muon_opt, lr_lambda=self._make_lr_lambda(muon_lr),
+            )
+            adamw_sched = torch.optim.lr_scheduler.LambdaLR(
+                adamw_opt, lr_lambda=self._make_lr_lambda(adamw_lr),
+            )
+            return [muon_opt, adamw_opt], [muon_sched, adamw_sched]
+
         optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=self.base_lr,
             betas=(0.9, self.b2),
-            weight_decay=float(self.config.weight_decay),
+            weight_decay=weight_decay,
             capturable=capturable,
             fused=fused,
         )
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=self._lr_lambda)
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": "step",
-                "frequency": 1,
-            },
-        }
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer, lr_lambda=self._lr_lambda,
+        )
+        return [optimizer], [scheduler]
 
 
 def train_and_evaluate(
@@ -949,8 +1043,6 @@ def train_and_evaluate(
         max_epochs=num_epochs,
         log_every_n_steps=configured_log_every_n_steps,
         val_check_interval=configured_val_check_interval,
-        gradient_clip_val=float(config.clip) if config.get("clip", 0.) > 0. else None,
-        gradient_clip_algorithm="value" if config.get("clip", 0.) > 0. else None,
         callbacks=callbacks,
         logger=logger,
         reload_dataloaders_every_n_epochs=1,

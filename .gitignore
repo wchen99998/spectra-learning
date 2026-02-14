@@ -17,3 +17,5 @@ experiments/
 *.png
 
 key.json
+
+.serena/

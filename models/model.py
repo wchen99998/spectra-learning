@@ -191,13 +191,8 @@ class PeakSetEncoder(nn.Module):
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
         valid_mask: torch.Tensor | None = None,
-        masked_positions: torch.Tensor | None = None,
-        mask_token: torch.Tensor | None = None,
     ) -> torch.Tensor:
         x = self.embedder(peak_mz, peak_intensity)
-        if masked_positions is not None:
-            token = mask_token.view(1, 1, -1).to(dtype=x.dtype, device=x.device)
-            x = torch.where(masked_positions.unsqueeze(-1), token, x)
         freqs_cos = None
         freqs_sin = None
         if self.use_rope:
@@ -295,6 +290,7 @@ class PeakSetSIGReg(nn.Module):
             batch_first=True,
         )
         self.pool_norm = nn.RMSNorm(model_dim, eps=1e-5)
+        # Kept for backward checkpoint compatibility; no longer used in forward.
         self.mask_token = nn.Parameter(torch.empty(model_dim))
         nn.init.normal_(self.mask_token, std=0.02)
 
@@ -387,15 +383,12 @@ class PeakSetSIGReg(nn.Module):
         fused_mz = augmented_batch["fused_mz"]
         fused_intensity = augmented_batch["fused_intensity"]
         fused_valid_mask = augmented_batch["fused_valid_mask"]
-        fused_masked_positions = augmented_batch["fused_masked_positions"]
         masked_fraction = augmented_batch["view1_masked_fraction"]
 
         fused_emb = self.encoder(
             fused_mz,
             fused_intensity,
             valid_mask=fused_valid_mask,
-            masked_positions=fused_masked_positions,
-            mask_token=self.mask_token,
         )
         fused_pooled = self.pool(fused_emb, fused_valid_mask)
         fused_z = self.projector(fused_pooled)

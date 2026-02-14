@@ -29,7 +29,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--workdir", required=True, help="Path to training workdir (used to find checkpoint).")
     parser.add_argument("--checkpoint", default=None, help="Explicit checkpoint path; defaults to latest in workdir.")
     parser.add_argument("--probe-type", choices=["attentive", "linear"], default="attentive", help="Probe type: attentive (default) or linear.")
+    parser.add_argument(
+        "--probe-feature-source",
+        choices=["encoder", "projector"],
+        default=None,
+        help="Override probe feature source from config.",
+    )
     parser.add_argument("--wandb-project", default=None, help="W&B project for logging.")
+    parser.add_argument("--no-freeze-backbone", action="store_true", help="Fine-tune backbone during probe (default: frozen).")
     return parser.parse_args()
 
 
@@ -52,6 +59,11 @@ def main() -> None:
         raise FileNotFoundError(f"No checkpoint found in {workdir}")
     logging.info("Loading checkpoint: %s", ckpt_path)
     load_pretrained_weights(model, ckpt_path)
+
+    if args.no_freeze_backbone:
+        config.final_probe_freeze_backbone = False
+    if args.probe_feature_source is not None:
+        config.final_probe_feature_source = args.probe_feature_source
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

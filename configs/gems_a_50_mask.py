@@ -51,7 +51,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_contiguous_mask_min_len = 1
     cfg.sigreg_random_mask_prob = 0.05
     cfg.sigreg_mz_jitter_std = 0.0001
-    cfg.sigreg_intensity_jitter_std = 0.001
+    cfg.sigreg_intensity_jitter_std = 0.005
 
     # Training (short smoke run)
     cfg.num_epochs = 5
@@ -61,7 +61,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.min_learning_rate = None
     cfg.b2 = 0.98
     cfg.weight_decay = 1e-4
-    cfg.optimizer = "adamw"
+    cfg.optimizer = "muon"
     cfg.clip = 0.
     cfg.device_prefetch_size = 1
     cfg.log_every_n_steps = 100

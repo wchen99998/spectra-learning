@@ -71,8 +71,8 @@ def augment_masked_view(
         random_drop = random_drop & peak_valid_mask & (~masked)
         masked = masked | random_drop
 
-    view_valid = peak_valid_mask
-    jitterable = peak_valid_mask & (~masked)
+    view_valid = peak_valid_mask & (~masked)
+    jitterable = view_valid
 
     mz = torch.zeros_like(peak_mz)
     mz[jitterable] = peak_mz[jitterable] + (

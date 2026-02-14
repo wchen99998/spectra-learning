@@ -27,6 +27,15 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.dataloader_persistent_workers = True
     cfg.dataloader_pin_memory = True
 
+    # Muon optimizer defaults (only used when cfg.optimizer == "muon")
+    cfg.muon_lr = None              # Falls back to cfg.learning_rate
+    cfg.adamw_lr = None             # Falls back to cfg.learning_rate
+    cfg.muon_momentum = 0.95
+    cfg.muon_nesterov = True
+    cfg.muon_ns_steps = 5
+    cfg.muon_weight_decay = None    # Falls back to cfg.weight_decay
+    cfg.muon_adjust_lr_fn = "match_rms_adamw"
+
 
 def apply_final_probe_defaults(cfg: config_dict.ConfigDict) -> None:
     """Apply shared final attentive probe defaults.
@@ -37,12 +46,13 @@ def apply_final_probe_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.final_probe_learning_rate = 1e-4
     cfg.final_probe_weight_decay = 1e-4
     cfg.final_probe_warmup_steps = 100
-    cfg.final_probe_feature_source = "encoder"
+    cfg.final_probe_feature_source = "projector"
     cfg.final_probe_head_hidden_dim = 512
 
     cfg.final_probe_num_precursor_bins = 1000
     cfg.final_probe_attention_heads = cfg.num_heads
     cfg.final_probe_loss_weights = [1.0, 1.0, 1.0]
+    cfg.final_probe_freeze_backbone = True
 
 
 def apply_tune_defaults(cfg: config_dict.ConfigDict) -> None:
