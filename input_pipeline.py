@@ -163,7 +163,7 @@ def _compute_morgan_fingerprints(smiles: np.ndarray) -> np.ndarray:
     fps = np.zeros((len(smiles), _FINGERPRINT_BITS), dtype=np.int8)
     for i, s in enumerate(smiles):
         mol = Chem.MolFromSmiles(str(s))
-        fp = AllChem.GetMorganFingerprintAsBitVect(
+        fp = AllChem.GetMorganFingerprintAsBitVect(  # type: ignore[attr-defined]
             mol,
             _FINGERPRINT_RADIUS,
             nBits=_FINGERPRINT_BITS,
@@ -214,7 +214,7 @@ def _write_tfrecords(
         shard_file = output_path / f"shard-{shard_id:05d}-of-{num_shards:05d}.tfrecord"
         options = tf.io.TFRecordOptions(compression_type="GZIP")
 
-        with tf.io.TFRecordWriter(str(shard_file), options=options) as writer:
+        with tf.io.TFRecordWriter(str(shard_file), options=options) as writer:  # type: ignore[attr-defined]
             for i in tqdm(range(start, end), desc=f"{desc} [{shard_id + 1}/{num_shards}]"):
                 mz = spectra[i, 0].astype(np.float32)
                 intensity = spectra[i, 1].astype(np.float32)
@@ -273,7 +273,7 @@ def _write_tfrecords_with_fingerprint(
         shard_file = output_path / f"shard-{shard_id:05d}-of-{num_shards:05d}.tfrecord"
         options = tf.io.TFRecordOptions(compression_type="GZIP")
 
-        with tf.io.TFRecordWriter(str(shard_file), options=options) as writer:
+        with tf.io.TFRecordWriter(str(shard_file), options=options) as writer:  # type: ignore[attr-defined]
             for i in tqdm(range(start, end), desc=f"{desc} [{shard_id + 1}/{num_shards}]"):
                 mz = spectra[i, 0].astype(np.float32)
                 intensity = spectra[i, 1].astype(np.float32)
@@ -897,6 +897,140 @@ def _augment_sigreg_batch_tf(
     return apply
 
 
+
+def _fused_parse_and_transform(
+    *,
+    max_precursor_mz: float,
+    min_peak_intensity: float,
+    num_peaks: int,
+    mz_representation: str,
+    peak_ordering: str,
+    include_fingerprint: bool,
+    filter_max_precursor_mz: bool = False,
+) -> Callable[[tf.Tensor], dict[str, tf.Tensor]]:
+    """Return a single tf.function that fuses parse + all per-element transforms.
+
+    Combines: parse → filter_mz_range → filter_min_intensity → topk →
+    optional neutral_loss → compact_sort → normalize into one map call,
+    eliminating 7 separate .map() scheduling boundaries and the .filter() that
+    halved throughput.
+
+    When *filter_max_precursor_mz* is True, samples exceeding *max_precursor_mz*
+    are zeroed out (all peaks invalid) rather than dropped via .filter(), so the
+    dataset cardinality stays fixed.  In practice 0% of samples are affected, so
+    this is off by default.
+    """
+    peak_mz_min = tf.constant(_PEAK_MZ_MIN, tf.float32)
+    peak_mz_max_c = tf.constant(_PEAK_MZ_MAX, tf.float32)
+    precursor_window = tf.constant(_PRECURSOR_MZ_WINDOW, tf.float32)
+    min_int = tf.constant(min_peak_intensity, tf.float32)
+    max_prec = tf.constant(max_precursor_mz, tf.float32)
+    use_neutral_loss = mz_representation == "neutral_loss"
+
+    if include_fingerprint:
+        feature_spec = {
+            "mz": tf.io.FixedLenFeature([_NUM_PEAKS_INPUT], tf.float32),
+            "intensity": tf.io.FixedLenFeature([_NUM_PEAKS_INPUT], tf.float32),
+            "rt": tf.io.FixedLenFeature([1], tf.float32),
+            "precursor_mz": tf.io.FixedLenFeature([1], tf.float32),
+            "fingerprint": tf.io.FixedLenFeature([_FINGERPRINT_BITS], tf.int64),
+            "adduct_id": tf.io.FixedLenFeature([1], tf.int64),
+            "instrument_type_id": tf.io.FixedLenFeature([1], tf.int64),
+            "collision_energy": tf.io.FixedLenFeature([1], tf.float32),
+            "collision_energy_present": tf.io.FixedLenFeature([1], tf.int64),
+        }
+    else:
+        feature_spec = {
+            "mz": tf.io.FixedLenFeature([_NUM_PEAKS_INPUT], tf.float32),
+            "intensity": tf.io.FixedLenFeature([_NUM_PEAKS_INPUT], tf.float32),
+            "rt": tf.io.FixedLenFeature([1], tf.float32),
+            "precursor_mz": tf.io.FixedLenFeature([1], tf.float32),
+        }
+
+    @tf.function
+    def transform(serialized: tf.Tensor) -> dict[str, tf.Tensor]:
+        parsed = tf.io.parse_single_example(serialized, feature_spec)
+
+        mz = parsed["mz"]
+        intensity = parsed["intensity"]
+        rt = parsed["rt"][0]
+        precursor_mz_val = parsed["precursor_mz"][0]
+
+        # ── Filter peak mz range ────────────────────────────────────────────────
+        upper = tf.where(
+            precursor_mz_val > 0.0, precursor_mz_val - precursor_window, peak_mz_max_c,
+        )
+        keep = (mz >= peak_mz_min) & (mz <= upper)
+        mz = tf.where(keep, mz, 0.0)
+        intensity = tf.where(keep, intensity, 0.0)
+
+        # ── Filter min peak intensity ────────────────────────────────────────────
+        keep2 = intensity >= min_int
+        mz = tf.where(keep2, mz, 0.0)
+        intensity = tf.where(keep2, intensity, 0.0)
+
+        # ── Top-k peaks ─────────────────────────────────────────────────────────
+        values, indices = tf.math.top_k(intensity, k=num_peaks, sorted=True)
+        intensity = values
+        mz = tf.gather(mz, indices)
+
+        # ── Optional neutral-loss conversion ─────────────────────────────────────
+        if use_neutral_loss:
+            mz = precursor_mz_val - mz
+
+        # ── Compact sort ─────────────────────────────────────────────────────────
+        keep3 = intensity > 0
+        kept_mz = tf.boolean_mask(mz, keep3)
+        kept_int = tf.boolean_mask(intensity, keep3)
+        if peak_ordering == "mz":
+            sorted_idx = tf.argsort(kept_mz, direction="ASCENDING", stable=True)
+        else:
+            sorted_idx = tf.argsort(kept_int, direction="DESCENDING", stable=True)
+        kept_mz = tf.gather(kept_mz, sorted_idx)
+        kept_int = tf.gather(kept_int, sorted_idx)
+        pad = num_peaks - tf.shape(kept_mz)[0]
+        mz = tf.pad(kept_mz, [[0, pad]])
+        intensity = tf.pad(kept_int, [[0, pad]])
+
+        # ── Normalize ────────────────────────────────────────────────────────────
+        valid = intensity > 0
+        peak_mz_norm = mz / peak_mz_max_c
+        peak_intensity_norm = tf.where(valid, intensity, 0.0)
+        precursor_mz_norm = (
+            tf.clip_by_value(precursor_mz_val, 0.0, max_prec) / max_prec
+        )
+
+        # ── Optional: zero entire sample when precursor exceeds threshold ────────
+        if filter_max_precursor_mz:
+            sample_valid = precursor_mz_val <= max_prec
+            peak_mz_norm = tf.where(sample_valid, peak_mz_norm, tf.zeros_like(peak_mz_norm))
+            peak_intensity_norm = tf.where(
+                sample_valid, peak_intensity_norm, tf.zeros_like(peak_intensity_norm),
+            )
+            valid = tf.where(sample_valid, valid, tf.zeros_like(valid))
+
+        out: dict[str, tf.Tensor] = {
+            "peak_mz": peak_mz_norm,
+            "peak_intensity": peak_intensity_norm,
+            "peak_valid_mask": valid,
+            "precursor_mz": precursor_mz_norm,
+            "rt": rt,
+            "mz": mz,
+            "intensity": intensity,
+        }
+        if include_fingerprint:
+            out["fingerprint"] = tf.cast(parsed["fingerprint"], tf.int32)
+            out["adduct_id"] = tf.cast(parsed["adduct_id"][0], tf.int32)
+            out["instrument_type_id"] = tf.cast(parsed["instrument_type_id"][0], tf.int32)
+            out["collision_energy"] = parsed["collision_energy"][0]
+            out["collision_energy_present"] = tf.cast(
+                parsed["collision_energy_present"][0], tf.int32,
+            )
+        return out
+
+    return transform
+
+
 def _build_dataset(
     filenames: list[str],
     batch_size: int,
@@ -921,31 +1055,22 @@ def _build_dataset(
 ) -> tf.data.Dataset:
     if num_parallel_reads is None:
         num_parallel_reads = tf.data.AUTOTUNE
-    parse_fn = _parse_example_with_fingerprint if include_fingerprint else _parse_example
     ds = tf.data.TFRecordDataset(
         filenames,
         compression_type="GZIP",
         buffer_size=int(tfrecord_buffer_size),
         num_parallel_reads=num_parallel_reads,
     )
-    ds = ds.map(parse_fn, num_parallel_calls=tf.data.AUTOTUNE)
-    ds = ds.filter(_filter_max_precursor_mz(max_precursor_mz))
-    ds = ds.map(
-        _filter_peak_mz_range(_PEAK_MZ_MIN, _PEAK_MZ_MAX, _PRECURSOR_MZ_WINDOW),
-        num_parallel_calls=tf.data.AUTOTUNE,
+    # Single fused map replaces parse + filter + 6 separate maps.
+    fused_fn = _fused_parse_and_transform(
+        max_precursor_mz=max_precursor_mz,
+        min_peak_intensity=min_peak_intensity,
+        num_peaks=_NUM_PEAKS_OUTPUT,
+        mz_representation=mz_representation,
+        peak_ordering=peak_ordering,
+        include_fingerprint=include_fingerprint,
     )
-    ds = ds.map(
-        _filter_min_peak_intensity(min_peak_intensity),
-        num_parallel_calls=tf.data.AUTOTUNE,
-    )
-    ds = ds.map(_topk_peaks(_NUM_PEAKS_OUTPUT), num_parallel_calls=tf.data.AUTOTUNE)
-    if mz_representation == "neutral_loss":
-        ds = ds.map(_convert_to_neutral_loss(), num_parallel_calls=tf.data.AUTOTUNE)
-    ds = ds.map(_compact_sort_peaks(peak_ordering), num_parallel_calls=tf.data.AUTOTUNE)
-    ds = ds.map(
-        _normalize_for_jepa(max_precursor_mz),
-        num_parallel_calls=tf.data.AUTOTUNE,
-    )
+    ds = ds.map(fused_fn, num_parallel_calls=tf.data.AUTOTUNE)
     if shuffle_buffer > 0:
         ds = ds.shuffle(shuffle_buffer, seed=seed, reshuffle_each_iteration=True)
     ds = ds.batch(batch_size, drop_remainder=drop_remainder)
@@ -1031,17 +1156,18 @@ def _torch_dtype(array: np.ndarray) -> torch.dtype:
 
 
 def _to_torch(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        if value.dtype == object:
+            return _to_torch(value.tolist())
+        # Zero-copy when possible: torch.from_numpy shares memory.
+        # The downstream .to(device) creates a new tensor anyway.
+        if not value.flags.c_contiguous or not value.flags.writeable:
+            value = value.copy()
+        return torch.from_numpy(value)
     if isinstance(value, bytes):
         return value.decode("utf-8")
     if isinstance(value, list):
         return [_to_torch(item) for item in value]
-    if isinstance(value, np.ndarray):
-        if value.dtype == object:
-            return _to_torch(value.tolist())
-        array = np.ascontiguousarray(value)
-        if not array.flags.writeable:
-            array = array.copy()
-        return torch.tensor(array, dtype=_torch_dtype(array))
     return value
 
 
@@ -1100,7 +1226,9 @@ class _TfIterableDataset(IterableDataset):
 
 
 class _StatefulDataLoader(DataLoader):
-    def __init__(self, *args, **kwargs):
+    dataset: _TfIterableDataset  # type: ignore[assignment]
+
+    def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self._resume_from = 0
         self._num_yielded = 0

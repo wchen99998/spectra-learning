@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import logging
 import random
+import warnings
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
+
 from tqdm import tqdm
+
+warnings.filterwarnings("ignore", message="Profiler function.*will be ignored")
 from torch.utils.data import DataLoader
 import torch._inductor.config as inductor_config
 
