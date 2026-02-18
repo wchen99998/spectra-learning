@@ -20,7 +20,7 @@ from models.augmentation import (
     augment_unmasked_view,
 )
 from models.losses import BCSLoss
-from networks import transformer_torch
+from networks import set_transformer_torch, transformer_torch
 from networks.transformer_torch import create_padding_block_mask
 
 
@@ -128,6 +128,33 @@ def _build_non_causal_blocks(
     return nn.ModuleList(blocks)
 
 
+def _build_isab_blocks(
+    *,
+    dim: int,
+    num_layers: int,
+    num_heads: int,
+    num_kv_heads: int | None,
+    attention_mlp_multiple: float,
+    num_inducing_points: int = 32,
+    norm_eps: float = 1e-5,
+) -> nn.ModuleList:
+    heads = int(num_heads)
+    kv_heads = heads if num_kv_heads is None else int(num_kv_heads)
+    blocks: list[set_transformer_torch.ISAB] = []
+    for _ in range(num_layers):
+        blocks.append(
+            set_transformer_torch.ISAB(
+                dim=dim,
+                num_inducing_points=num_inducing_points,
+                n_heads=heads,
+                n_kv_heads=kv_heads,
+                attention_mlp_multiple=attention_mlp_multiple,
+                norm_eps=norm_eps,
+            )
+        )
+    return nn.ModuleList(blocks)
+
+
 def _build_rope_frequencies(
     *,
     sequence_length: int,
@@ -160,11 +187,14 @@ class PeakSetEncoder(nn.Module):
         mz_fourier_learnable: bool = False,
         use_rope: bool = False,
         fp16_high_precision_stem: bool = False,
+        encoder_block_type: str = "transformer",
+        isab_num_inducing_points: int = 32,
     ):
         super().__init__()
         self.model_dim = model_dim
         self.use_rope = bool(use_rope)
         self.fp16_high_precision_stem = bool(fp16_high_precision_stem)
+        self.encoder_block_type = encoder_block_type
         self.embedder = PeakFeatureEmbedder(
             model_dim,
             feature_mlp_hidden_dim,
@@ -179,14 +209,24 @@ class PeakSetEncoder(nn.Module):
         )
         self.rope_inv_freq: torch.Tensor
         self.register_buffer("rope_inv_freq", inv_freq, persistent=False)
-        self.blocks = _build_non_causal_blocks(
-            dim=model_dim,
-            num_layers=num_layers,
-            num_heads=num_heads,
-            num_kv_heads=num_kv_heads,
-            attention_mlp_multiple=attention_mlp_multiple,
-            use_rope=self.use_rope,
-        )
+        if self.encoder_block_type == "isab":
+            self.blocks = _build_isab_blocks(
+                dim=model_dim,
+                num_layers=num_layers,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                attention_mlp_multiple=attention_mlp_multiple,
+                num_inducing_points=isab_num_inducing_points,
+            )
+        else:
+            self.blocks = _build_non_causal_blocks(
+                dim=model_dim,
+                num_layers=num_layers,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                attention_mlp_multiple=attention_mlp_multiple,
+                use_rope=self.use_rope,
+            )
         self.norm = nn.RMSNorm(model_dim, eps=1e-5)
 
     def forward(
@@ -196,6 +236,19 @@ class PeakSetEncoder(nn.Module):
         valid_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         device_type = peak_mz.device.type
+
+        if self.encoder_block_type == "isab":
+            x = self.embedder(peak_mz, peak_intensity)
+            kv_block_mask = None
+            q_block_mask = None
+            if valid_mask is not None:
+                m = self.blocks[0].inducing_points.shape[0]
+                kv_block_mask = set_transformer_torch.create_kv_padding_block_mask(valid_mask, q_len=m)
+                q_block_mask = set_transformer_torch.create_q_padding_block_mask(valid_mask, kv_len=m)
+            for block in self.blocks:
+                x = block(x, kv_block_mask=kv_block_mask, q_block_mask=q_block_mask)
+            return self.norm(x)
+
         autocast_dtype = None
         run_high_precision_stem = False
         if self.fp16_high_precision_stem and self.embedder.mlp[0].weight.dtype == torch.float32:
@@ -284,6 +337,8 @@ class PeakSetSIGReg(nn.Module):
         pma_fp16_high_precision: bool = False,
         pma_num_heads: int | None = None,
         pma_num_seeds: int = 1,
+        encoder_block_type: str = "transformer",
+        isab_num_inducing_points: int = 32,
     ):
         super().__init__()
         self.num_peaks = num_peaks
@@ -312,6 +367,8 @@ class PeakSetSIGReg(nn.Module):
             mz_fourier_learnable=mz_fourier_learnable,
             use_rope=encoder_use_rope,
             fp16_high_precision_stem=encoder_fp16_high_precision_stem,
+            encoder_block_type=encoder_block_type,
+            isab_num_inducing_points=isab_num_inducing_points,
         )
 
         if sigreg_use_projector:
@@ -336,9 +393,6 @@ class PeakSetSIGReg(nn.Module):
             batch_first=True,
         )
         self.pool_norm = nn.RMSNorm(model_dim, eps=1e-5)
-        # Kept for backward checkpoint compatibility; no longer used in forward.
-        self.mask_token = nn.Parameter(torch.empty(model_dim))
-        nn.init.normal_(self.mask_token, std=0.02)
 
         self.sigreg_loss = BCSLoss(num_slices=bcs_num_slices, lmbd=sigreg_lambda)
 

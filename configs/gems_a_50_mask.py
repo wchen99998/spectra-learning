@@ -32,6 +32,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_heads = 8
     cfg.num_kv_heads = 4
     cfg.encoder_use_rope = False
+    cfg.encoder_block_type = "transformer"
+    # cfg.isab_num_inducing_points = 32
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 128
     cfg.pooling_type = "pma"
@@ -51,10 +53,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_random_mask_prob = 0.05
     cfg.sigreg_mz_jitter_std = 0.0001
     cfg.sigreg_intensity_jitter_std = 0.005
-    # Fixed-K token normalization before pooling (set enabled=False to turn off)
-    cfg.sigreg_fixed_k_enabled = True
-    cfg.sigreg_fixed_k_tokens = 32
-
     # Training (short smoke run)
     cfg.num_epochs = 5
     cfg.learning_rate = 3e-4

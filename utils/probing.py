@@ -14,9 +14,6 @@ from models.model import PeakSetSIGReg
 from utils.schedulers import learning_rate_at_step
 
 
-PROBE_TASK_NAMES = ("adduct", "precursor_bin", "instrument")
-
-
 def _resolve_precursor_target_mode(config: config_dict.ConfigDict) -> tuple[str, str]:
     mode = str(config.get("final_probe_precursor_target", "categorical")).lower()
     if mode == "categorical":

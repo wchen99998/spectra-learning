@@ -323,7 +323,7 @@ class AugmentationTests(unittest.TestCase):
         self.assertTrue((valid[masked]).all().item())
         self.assertTrue((~batch["peak_valid_mask"][masked]).sum().item() == 0)
 
-    def test_masked_positions_are_zeroed_for_mask_token(self):
+    def test_masked_positions_are_zeroed(self):
         model = self._build_model()
         batch = _make_batch(batch_size=3)
         mz, intensity, _, masked, _ = model._augment_view(

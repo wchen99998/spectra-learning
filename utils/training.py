@@ -37,6 +37,8 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         mz_fourier_max_freq=float(config.get("mz_fourier_max_freq", 100.0)),
         mz_fourier_learnable=bool(config.get("mz_fourier_learnable", False)),
         encoder_use_rope=bool(config.get("encoder_use_rope", False)),
+        encoder_block_type=str(config.get("encoder_block_type", "transformer")),
+        isab_num_inducing_points=int(config.get("isab_num_inducing_points", 32)),
         encoder_fp16_high_precision_stem=bool(
             config.get("encoder_fp16_high_precision_stem", False)
         ),
@@ -62,8 +64,6 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         sigreg_intensity_jitter_std=float(
             config.get("sigreg_intensity_jitter_std", 0.05)
         ),
-        sigreg_fixed_k_enabled=bool(config.get("sigreg_fixed_k_enabled", False)),
-        sigreg_fixed_k_tokens=int(config.get("sigreg_fixed_k_tokens", 32)),
     )
 
 

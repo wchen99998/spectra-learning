@@ -1395,27 +1395,8 @@ class TfLightningDataModule:
 
 
 # -----------------------------------------------------------------------------
-# Legacy-style helpers
+# CLI helpers
 # -----------------------------------------------------------------------------
-
-
-def create_gems_set_datasets(
-    config: config_dict.ConfigDict,
-    seed: Optional[int] = None,
-) -> tuple[Any, dict[str, Any], dict[str, Any]]:
-    seed_value = int(config.seed if seed is None else seed)
-    datamodule = TfLightningDataModule(config, seed=seed_value)
-
-    train_ds = datamodule._build_gems_train_dataset(seed_value)
-
-    val_iters: dict[str, Any] = {
-        "gems_val": datamodule._build_gems_val_dataset(seed_value).as_numpy_iterator(),
-        "massspec_val": datamodule._build_massspec_val_dataset(seed_value).as_numpy_iterator(),
-        "massspec_test": datamodule._build_massspec_test_dataset(seed_value).as_numpy_iterator(),
-    }
-
-    return train_ds.as_numpy_iterator(), val_iters, datamodule.info
-
 
 
 def _load_config(path: str) -> config_dict.ConfigDict:
@@ -1436,7 +1417,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     cfg = _load_config(args.config)
-    train_iter, val_iters, info = create_gems_set_datasets(cfg, seed=int(cfg.seed))
+    datamodule = TfLightningDataModule(cfg, seed=int(cfg.seed))
+    train_iter = datamodule._build_gems_train_dataset(int(cfg.seed)).as_numpy_iterator()
+    info = datamodule.info
 
     print("\nDataset info:")
     for k, v in info.items():
