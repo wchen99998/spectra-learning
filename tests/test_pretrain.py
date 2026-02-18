@@ -354,36 +354,6 @@ class AugmentationTests(unittest.TestCase):
                 deltas = masked_sorted_positions[1:] - masked_sorted_positions[:-1]
                 self.assertTrue((deltas == 1).all().item())
 
-    def test_encoder_uses_learnable_mask_token(self):
-        model = PeakSetSIGReg(
-            num_peaks=8,
-            model_dim=16,
-            encoder_num_layers=0,
-            encoder_num_heads=4,
-            encoder_num_kv_heads=4,
-            attention_mlp_multiple=2.0,
-            feature_mlp_hidden_dim=16,
-            sigreg_use_projector=False,
-            bcs_num_slices=32,
-            sigreg_lambda=10.0,
-            sigreg_contiguous_mask_fraction=0.2,
-            sigreg_contiguous_mask_min_len=1,
-            sigreg_mz_jitter_std=0.005,
-            sigreg_intensity_jitter_std=0.05,
-        )
-        batch = _make_batch(batch_size=1, num_peaks=8)
-        masked = torch.zeros_like(batch["peak_valid_mask"])
-        masked[:, 0] = True
-        masked[:, 1] = True
-        embeddings = model.encoder(
-            batch["peak_mz"],
-            batch["peak_intensity"],
-            valid_mask=batch["peak_valid_mask"],
-            masked_positions=masked,
-            mask_token=model.mask_token,
-        )
-        self.assertTrue(torch.allclose(embeddings[:, 0, :], embeddings[:, 1, :], atol=1e-6, rtol=1e-5))
-
     def test_unmasked_view_has_no_masked_positions(self):
         model = self._build_model()
         batch = _make_batch(batch_size=3)

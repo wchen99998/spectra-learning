@@ -3,7 +3,9 @@ from __future__ import annotations
 import logging
 import random
 import warnings
+from collections import deque
 from collections.abc import Iterator
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -86,37 +88,56 @@ def _move_batch_to_device(
 
 
 class _BatchPrefetcher:
-    """Prefetches batches to GPU using a dedicated CUDA stream."""
+    """Keeps N batches prefetched to GPU using a side CUDA stream.
 
-    def __init__(self, loader: Iterator, device: torch.device) -> None:
+    ``_preload_one()`` kicks off one async H2D copy on a dedicated stream.
+    ``next()`` waits for the next batch-ready event, records stream usage
+    for allocator safety, then immediately refills one slot.
+    """
+
+    def __init__(
+        self,
+        loader: Iterator,
+        device: torch.device,
+        prefetch_size: int = 1,
+    ) -> None:
         self._loader = loader
         self._device = device
+        self._prefetch_size = prefetch_size
         self._stream = torch.cuda.Stream(device=device) if device.type == "cuda" else None
-        self._batch: dict[str, torch.Tensor] | None = None
+        self._ready: deque[tuple[dict[str, torch.Tensor], torch.cuda.Event | None]] = deque()
         self._exhausted = False
-        self._prefetch()
+        for _ in range(self._prefetch_size):
+            self._preload_one()
 
-    def _prefetch(self) -> None:
+    def _preload_one(self) -> None:
+        if self._exhausted:
+            return
         batch = next(self._loader, None)
         if batch is None:
-            self._batch = None
             self._exhausted = True
             return
-        if self._stream is not None:
-            with torch.cuda.stream(self._stream):
-                self._batch = _move_batch_to_device(batch, self._device)
+
+        if self._stream is None:
+            moved = _move_batch_to_device(batch, self._device)
+            ready_event = None
         else:
-            self._batch = _move_batch_to_device(batch, self._device)
+            with torch.cuda.stream(self._stream):
+                moved = _move_batch_to_device(batch, self._device)
+                ready_event = torch.cuda.Event()
+                ready_event.record(self._stream)
+        self._ready.append((moved, ready_event))
 
     def next(self) -> dict[str, torch.Tensor] | None:
-        if self._exhausted:
+        if not self._ready:
             return None
-        if self._stream is not None:
-            current = torch.cuda.current_stream(device=self._device)
-            current.wait_stream(self._stream)
-            _record_stream(self._batch, current)
-        batch = self._batch
-        self._prefetch()
+
+        batch, ready_event = self._ready.popleft()
+        if ready_event is not None:
+            current_stream = torch.cuda.current_stream(device=self._device)
+            current_stream.wait_event(ready_event)
+            _record_stream(batch, current_stream)
+        self._preload_one()
         return batch
 
 
@@ -130,8 +151,14 @@ def _train_step_impl(
     bcs_projection: torch.Tensor,
     optimizers: list[torch.optim.Optimizer],
     schedulers: list[torch.optim.lr_scheduler.LRScheduler],
+    autocast_dtype: torch.dtype | None,
 ) -> dict[str, torch.Tensor]:
-    with torch.autocast("cuda", dtype=torch.bfloat16):
+    device_type = next(model.parameters()).device.type
+    if autocast_dtype is None or device_type != "cuda":
+        autocast_ctx = nullcontext()
+    else:
+        autocast_ctx = torch.autocast(device_type=device_type, dtype=autocast_dtype)
+    with autocast_ctx:
         metrics = model.forward_augmented(batch, bcs_projection=bcs_projection)
     metrics["loss"].backward()
     for opt in optimizers:
@@ -140,6 +167,17 @@ def _train_step_impl(
     for sched in schedulers:
         sched.step()
     return metrics
+
+
+def _resolve_autocast_dtype(config: config_dict.ConfigDict) -> torch.dtype | None:
+    autocast_name = str(config.get("autocast_dtype", "bf16")).lower()
+    if autocast_name in {"bf16", "bfloat16"}:
+        return torch.bfloat16
+    if autocast_name in {"fp16", "float16", "half"}:
+        return torch.float16
+    if autocast_name in {"fp32", "float32", "none"}:
+        return None
+    raise ValueError(f"Unsupported autocast_dtype: {autocast_name}")
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +335,7 @@ def _run_validation(
                 device=device, seed=seed + 7_000_000 + epoch * 100_000 + batch_idx,
             )
             torch.compiler.cudagraph_mark_step_begin()
-            metrics = compiled_forward(batch, bcs_projection)
+            metrics = compiled_forward(batch, bcs_projection=bcs_projection)
             bs = int(batch["fused_mz"].shape[0]) // 2
             count += bs
             for key, value in metrics.items():
@@ -367,20 +405,23 @@ def train_and_evaluate(
         del ckpt
 
     # Compile training step (forward + backward + optimizer + scheduler)
+    autocast_dtype = _resolve_autocast_dtype(config)
     compiled_step = torch.compile(_train_step_impl, mode="max-autotune")
     compiled_forward = torch.compile(
         model.forward_augmented, mode="max-autotune", fullgraph=True,
     )
 
     optimizer_type = str(config.get("optimizer", "adamw")).lower()
+    device_prefetch_size = int(config.get("device_prefetch_size", 1))
 
     train_loader = datamodule.train_loader
     val_loader = datamodule.val_loader
 
     for epoch in range(start_epoch, num_epochs):
-        prefetcher = _BatchPrefetcher(iter(train_loader), device)
+        prefetcher = _BatchPrefetcher(
+            iter(train_loader), device, prefetch_size=device_prefetch_size,
+        )
 
-        batch_idx = 0
         pbar = tqdm(total=steps_per_epoch, desc=f"Epoch {epoch}", unit="step")
         while True:
             batch = prefetcher.next()
@@ -391,7 +432,14 @@ def train_and_evaluate(
                 device=device, seed=seed + 6_000_000 + global_step,
             )
             torch.compiler.cudagraph_mark_step_begin()
-            metrics = compiled_step(model, batch, bcs_projection, optimizers, schedulers)
+            metrics = compiled_step(
+                model,
+                batch,
+                bcs_projection,
+                optimizers,
+                schedulers,
+                autocast_dtype,
+            )
             global_step += 1
 
             loss_val = float(metrics["loss"].detach())
@@ -418,7 +466,6 @@ def train_and_evaluate(
                 )
                 _prune_checkpoints(checkpoint_dir, keep_top_k=5)
 
-            batch_idx += 1
         pbar.close()
 
         # End-of-epoch validation (MassSpecGym val only)

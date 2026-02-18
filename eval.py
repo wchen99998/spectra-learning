@@ -33,7 +33,13 @@ def _parse_args() -> argparse.Namespace:
         "--probe-feature-source",
         choices=["encoder", "projector"],
         default=None,
-        help="Override probe feature source from config.",
+        help="Override probe feature source from config. encoder=pre-pooling token features, projector=post-pooling projected feature.",
+    )
+    parser.add_argument(
+        "--probe-precursor-target",
+        choices=["categorical", "continuous"],
+        default=None,
+        help="Override precursor probe target. categorical=1000-bin classification, continuous=regression on normalized precursor m/z.",
     )
     parser.add_argument("--wandb-project", default=None, help="W&B project for logging.")
     parser.add_argument("--no-freeze-backbone", action="store_true", help="Fine-tune backbone during probe (default: frozen).")
@@ -64,6 +70,8 @@ def main() -> None:
         config.final_probe_freeze_backbone = False
     if args.probe_feature_source is not None:
         config.final_probe_feature_source = args.probe_feature_source
+    if args.probe_precursor_target is not None:
+        config.final_probe_precursor_target = args.probe_precursor_target
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

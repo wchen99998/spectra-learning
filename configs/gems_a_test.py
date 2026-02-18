@@ -17,7 +17,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_shards = 4
     cfg.drop_remainder = True
     cfg.max_precursor_mz = 1000.0
-    cfg.pair_sequence_length = 128
     cfg.intensity_scaling = "linear"
     cfg.mz_representation = "neutral_loss"
     cfg.peak_ordering = "intensity"
@@ -53,13 +52,10 @@ def get_config() -> config_dict.ConfigDict:
     cfg.b2 = 0.98
     cfg.weight_decay = 1e-4
     cfg.optimizer = "adamw"
-    cfg.clip = 0.
     cfg.device_prefetch_size = 1
     cfg.log_every_n_steps = 500
     cfg.val_check_interval = 0.25
     cfg.checkpoint_every_steps = 10000
-    cfg.init_seed = 0
-
     cfg.limit_train_batches = 1.0
     cfg.limit_val_batches = 1.0
     cfg.limit_test_batches = 1.0

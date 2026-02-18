@@ -17,6 +17,15 @@ from utils.schedulers import learning_rate_at_step
 PROBE_TASK_NAMES = ("adduct", "precursor_bin", "instrument")
 
 
+def _resolve_precursor_target_mode(config: config_dict.ConfigDict) -> tuple[str, str]:
+    mode = str(config.get("final_probe_precursor_target", "categorical")).lower()
+    if mode == "categorical":
+        return mode, "precursor_bin"
+    if mode == "continuous":
+        return mode, "precursor_mz"
+    raise ValueError(f"Unknown final_probe_precursor_target: {mode!r}")
+
+
 def iter_massspec_probe(
     datamodule: TfLightningDataModule,
     split: str,
@@ -186,6 +195,8 @@ def _probe_step(
     batch: dict[str, torch.Tensor],
     *,
     feature_source: str,
+    precursor_target_mode: str,
+    precursor_task_name: str,
     num_precursor_bins: int,
     precursor_max_mz: float,
     loss_weights: dict[str, float],
@@ -196,19 +207,30 @@ def _probe_step(
         compiled_encoder=compiled_encoder,
     )
     logits = probe(feature_tokens, feature_mask)
-    targets = {
+    targets: dict[str, torch.Tensor] = {
         "adduct": batch["adduct_id"].to(torch.long),
-        "precursor_bin": precursor_mz_to_bins(
+        "instrument": batch["instrument_type_id"].to(torch.long),
+    }
+    losses: dict[str, torch.Tensor] = {
+        "adduct": F.cross_entropy(logits["adduct"], targets["adduct"]),
+        "instrument": F.cross_entropy(logits["instrument"], targets["instrument"]),
+    }
+    if precursor_target_mode == "categorical":
+        targets[precursor_task_name] = precursor_mz_to_bins(
             batch["precursor_mz"].to(torch.float32),
             num_bins=num_precursor_bins,
             max_mz=precursor_max_mz,
-        ),
-        "instrument": batch["instrument_type_id"].to(torch.long),
-    }
-    losses = {
-        name: F.cross_entropy(logits[name], targets[name])
-        for name in logits
-    }
+        )
+        losses[precursor_task_name] = F.cross_entropy(
+            logits[precursor_task_name],
+            targets[precursor_task_name],
+        )
+    else:
+        targets[precursor_task_name] = batch["precursor_mz"].to(torch.float32)
+        losses[precursor_task_name] = F.mse_loss(
+            logits[precursor_task_name].squeeze(-1),
+            targets[precursor_task_name],
+        )
     loss_total = sum(loss_weights[name] * losses[name] for name in losses)
     return {
         "logits": logits,
@@ -245,11 +267,13 @@ def run_attentive_probe(
     probe_hidden_dim = int(config.final_probe_head_hidden_dim)
     probe_feature_source = str(config.final_probe_feature_source)
     probe_peak_ordering = str(config.peak_ordering)
+    precursor_target_mode, precursor_task_name = _resolve_precursor_target_mode(config)
+    task_names = ("adduct", precursor_task_name, "instrument")
     num_precursor_bins = int(config.final_probe_num_precursor_bins)
     precursor_max_mz = float(config.max_precursor_mz)
     num_attention_heads = int(config.final_probe_attention_heads)
     loss_weight_list = config.get("final_probe_loss_weights", [1.0, 1.0, 1.0])
-    loss_weights = dict(zip(PROBE_TASK_NAMES, loss_weight_list))
+    loss_weights = dict(zip(task_names, loss_weight_list))
     probe_drop_remainder = False
 
     num_adduct_classes = int(datamodule.info["massspec_adduct_vocab_size"])
@@ -267,13 +291,14 @@ def run_attentive_probe(
             param.requires_grad = False
     compiled_encoder = torch.compile(backbone.encoder)
 
+    precursor_head_dim = num_precursor_bins if precursor_target_mode == "categorical" else 1
     probe = FinalAttentiveProbe(
         input_dim=input_dim,
         hidden_dim=probe_hidden_dim,
         num_attention_heads=num_attention_heads,
         head_dims={
             "adduct": num_adduct_classes,
-            "precursor_bin": num_precursor_bins,
+            precursor_task_name: precursor_head_dim,
             "instrument": num_instrument_classes,
         },
     ).to(device)
@@ -301,6 +326,8 @@ def run_attentive_probe(
 
     step_kwargs = dict(
         feature_source=probe_feature_source,
+        precursor_target_mode=precursor_target_mode,
+        precursor_task_name=precursor_task_name,
         num_precursor_bins=num_precursor_bins,
         precursor_max_mz=precursor_max_mz,
         loss_weights=loss_weights,
@@ -337,10 +364,23 @@ def run_attentive_probe(
 
             bs = int(result["batch_size"])
             train_count += bs
-            for name in PROBE_TASK_NAMES:
+            for name in task_names:
                 key = f"loss_{name}"
                 weighted = result["losses"][name].detach() * bs
                 train_sums[key] = train_sums[key] + weighted if key in train_sums else weighted
+            if precursor_target_mode == "continuous":
+                pred = result["logits"][precursor_task_name].detach().squeeze(-1)
+                target = result["targets"][precursor_task_name].detach()
+                abs_sum = (pred - target).abs().sum()
+                sq_sum = torch.square(pred - target).sum()
+                train_sums["mae_precursor_mz"] = (
+                    train_sums["mae_precursor_mz"] + abs_sum
+                    if "mae_precursor_mz" in train_sums else abs_sum
+                )
+                train_sums["mse_precursor_mz"] = (
+                    train_sums["mse_precursor_mz"] + sq_sum
+                    if "mse_precursor_mz" in train_sums else sq_sum
+                )
             weighted = result["loss_total"].detach() * bs
             train_sums["loss_total"] = train_sums["loss_total"] + weighted if "loss_total" in train_sums else weighted
 
@@ -361,13 +401,44 @@ def run_attentive_probe(
                 result = _probe_step(probe, backbone, batch, compiled_encoder=compiled_encoder, **step_kwargs)
                 bs = int(result["batch_size"])
                 test_count += bs
-                for name in PROBE_TASK_NAMES:
+                for name in task_names:
                     loss_key = f"loss_{name}"
-                    acc_key = f"acc_{name}"
                     weighted_loss = result["losses"][name].detach() * bs
-                    correct = (result["logits"][name].argmax(dim=1) == result["targets"][name]).sum()
                     test_sums[loss_key] = test_sums[loss_key] + weighted_loss if loss_key in test_sums else weighted_loss
+                for name in ("adduct", "instrument"):
+                    acc_key = f"acc_{name}"
+                    correct = (result["logits"][name].argmax(dim=1) == result["targets"][name]).sum()
                     test_sums[acc_key] = test_sums[acc_key] + correct if acc_key in test_sums else correct
+                if precursor_target_mode == "categorical":
+                    acc_key = f"acc_{precursor_task_name}"
+                    correct = (
+                        result["logits"][precursor_task_name].argmax(dim=1)
+                        == result["targets"][precursor_task_name]
+                    ).sum()
+                    test_sums[acc_key] = test_sums[acc_key] + correct if acc_key in test_sums else correct
+                else:
+                    pred = result["logits"][precursor_task_name].detach().squeeze(-1)
+                    target = result["targets"][precursor_task_name].detach()
+                    abs_sum = (pred - target).abs().sum()
+                    sq_sum = torch.square(pred - target).sum()
+                    target_sum = target.sum()
+                    target_sq_sum = torch.square(target).sum()
+                    test_sums["mae_precursor_mz"] = (
+                        test_sums["mae_precursor_mz"] + abs_sum
+                        if "mae_precursor_mz" in test_sums else abs_sum
+                    )
+                    test_sums["mse_precursor_mz"] = (
+                        test_sums["mse_precursor_mz"] + sq_sum
+                        if "mse_precursor_mz" in test_sums else sq_sum
+                    )
+                    test_sums["target_sum_precursor_mz"] = (
+                        test_sums["target_sum_precursor_mz"] + target_sum
+                        if "target_sum_precursor_mz" in test_sums else target_sum
+                    )
+                    test_sums["target_sq_sum_precursor_mz"] = (
+                        test_sums["target_sq_sum_precursor_mz"] + target_sq_sum
+                        if "target_sq_sum_precursor_mz" in test_sums else target_sq_sum
+                    )
                 weighted_total = result["loss_total"].detach() * bs
                 test_sums["loss_total"] = test_sums["loss_total"] + weighted_total if "loss_total" in test_sums else weighted_total
 
@@ -376,18 +447,45 @@ def run_attentive_probe(
             epoch_metrics[f"final_probe/train/{key}"] = val.item() / train_count
         for key, val in test_sums.items():
             epoch_metrics[f"final_probe/test/{key}"] = val.item() / test_count
+        if precursor_target_mode == "continuous":
+            train_mse = epoch_metrics["final_probe/train/mse_precursor_mz"]
+            test_mse = epoch_metrics["final_probe/test/mse_precursor_mz"]
+            epoch_metrics["final_probe/train/rmse_precursor_mz"] = math.sqrt(train_mse)
+            epoch_metrics["final_probe/test/rmse_precursor_mz"] = math.sqrt(test_mse)
+            epoch_metrics["final_probe/train/mae_precursor_da"] = (
+                epoch_metrics["final_probe/train/mae_precursor_mz"] * precursor_max_mz
+            )
+            epoch_metrics["final_probe/test/mae_precursor_da"] = (
+                epoch_metrics["final_probe/test/mae_precursor_mz"] * precursor_max_mz
+            )
+            target_sum = test_sums["target_sum_precursor_mz"].item()
+            target_sq_sum = test_sums["target_sq_sum_precursor_mz"].item()
+            sse = test_sums["mse_precursor_mz"].item()
+            sst = target_sq_sum - (target_sum * target_sum) / test_count
+            epoch_metrics["final_probe/test/r2_precursor_mz"] = 1.0 - (sse / sst)
 
         log_step = global_step + epoch_idx + 1
         epoch_metrics["final_probe_epoch"] = float(epoch_idx + 1)
         log_trial_metrics(epoch_metrics, step=log_step)
-        logging.info(
-            "Final probe epoch %d/%d test_acc(adduct=%.4f precursor=%.4f instrument=%.4f)",
-            epoch_idx + 1,
-            num_probe_epochs,
-            epoch_metrics["final_probe/test/acc_adduct"],
-            epoch_metrics["final_probe/test/acc_precursor_bin"],
-            epoch_metrics["final_probe/test/acc_instrument"],
-        )
+        if precursor_target_mode == "categorical":
+            logging.info(
+                "Final probe epoch %d/%d test_acc(adduct=%.4f precursor=%.4f instrument=%.4f)",
+                epoch_idx + 1,
+                num_probe_epochs,
+                epoch_metrics["final_probe/test/acc_adduct"],
+                epoch_metrics[f"final_probe/test/acc_{precursor_task_name}"],
+                epoch_metrics["final_probe/test/acc_instrument"],
+            )
+        else:
+            logging.info(
+                "Final probe epoch %d/%d test_metrics(adduct_acc=%.4f precursor_mae_da=%.2f precursor_r2=%.4f instrument_acc=%.4f)",
+                epoch_idx + 1,
+                num_probe_epochs,
+                epoch_metrics["final_probe/test/acc_adduct"],
+                epoch_metrics["final_probe/test/mae_precursor_da"],
+                epoch_metrics["final_probe/test/r2_precursor_mz"],
+                epoch_metrics["final_probe/test/acc_instrument"],
+            )
         final_metrics = epoch_metrics
     return final_metrics
 
@@ -417,10 +515,12 @@ def run_linear_probe(
     probe_warmup_steps = int(config.final_probe_warmup_steps)
     probe_feature_source = str(config.final_probe_feature_source)
     probe_peak_ordering = str(config.peak_ordering)
+    precursor_target_mode, precursor_task_name = _resolve_precursor_target_mode(config)
+    task_names = ("adduct", precursor_task_name, "instrument")
     num_precursor_bins = int(config.final_probe_num_precursor_bins)
     precursor_max_mz = float(config.max_precursor_mz)
     loss_weight_list = config.get("final_probe_loss_weights", [1.0, 1.0, 1.0])
-    loss_weights = dict(zip(PROBE_TASK_NAMES, loss_weight_list))
+    loss_weights = dict(zip(task_names, loss_weight_list))
     probe_drop_remainder = False
 
     num_adduct_classes = int(datamodule.info["massspec_adduct_vocab_size"])
@@ -438,11 +538,12 @@ def run_linear_probe(
             param.requires_grad = False
     compiled_encoder = torch.compile(backbone.encoder)
 
+    precursor_head_dim = num_precursor_bins if precursor_target_mode == "categorical" else 1
     probe = FinalLinearProbe(
         input_dim=input_dim,
         head_dims={
             "adduct": num_adduct_classes,
-            "precursor_bin": num_precursor_bins,
+            precursor_task_name: precursor_head_dim,
             "instrument": num_instrument_classes,
         },
     ).to(device)
@@ -470,6 +571,8 @@ def run_linear_probe(
 
     step_kwargs = dict(
         feature_source=probe_feature_source,
+        precursor_target_mode=precursor_target_mode,
+        precursor_task_name=precursor_task_name,
         num_precursor_bins=num_precursor_bins,
         precursor_max_mz=precursor_max_mz,
         loss_weights=loss_weights,
@@ -506,10 +609,23 @@ def run_linear_probe(
 
             bs = int(result["batch_size"])
             train_count += bs
-            for name in PROBE_TASK_NAMES:
+            for name in task_names:
                 key = f"loss_{name}"
                 weighted = result["losses"][name].detach() * bs
                 train_sums[key] = train_sums[key] + weighted if key in train_sums else weighted
+            if precursor_target_mode == "continuous":
+                pred = result["logits"][precursor_task_name].detach().squeeze(-1)
+                target = result["targets"][precursor_task_name].detach()
+                abs_sum = (pred - target).abs().sum()
+                sq_sum = torch.square(pred - target).sum()
+                train_sums["mae_precursor_mz"] = (
+                    train_sums["mae_precursor_mz"] + abs_sum
+                    if "mae_precursor_mz" in train_sums else abs_sum
+                )
+                train_sums["mse_precursor_mz"] = (
+                    train_sums["mse_precursor_mz"] + sq_sum
+                    if "mse_precursor_mz" in train_sums else sq_sum
+                )
             weighted = result["loss_total"].detach() * bs
             train_sums["loss_total"] = train_sums["loss_total"] + weighted if "loss_total" in train_sums else weighted
 
@@ -530,13 +646,44 @@ def run_linear_probe(
                 result = _probe_step(probe, backbone, batch, compiled_encoder=compiled_encoder, **step_kwargs)
                 bs = int(result["batch_size"])
                 test_count += bs
-                for name in PROBE_TASK_NAMES:
+                for name in task_names:
                     loss_key = f"loss_{name}"
-                    acc_key = f"acc_{name}"
                     weighted_loss = result["losses"][name].detach() * bs
-                    correct = (result["logits"][name].argmax(dim=1) == result["targets"][name]).sum()
                     test_sums[loss_key] = test_sums[loss_key] + weighted_loss if loss_key in test_sums else weighted_loss
+                for name in ("adduct", "instrument"):
+                    acc_key = f"acc_{name}"
+                    correct = (result["logits"][name].argmax(dim=1) == result["targets"][name]).sum()
                     test_sums[acc_key] = test_sums[acc_key] + correct if acc_key in test_sums else correct
+                if precursor_target_mode == "categorical":
+                    acc_key = f"acc_{precursor_task_name}"
+                    correct = (
+                        result["logits"][precursor_task_name].argmax(dim=1)
+                        == result["targets"][precursor_task_name]
+                    ).sum()
+                    test_sums[acc_key] = test_sums[acc_key] + correct if acc_key in test_sums else correct
+                else:
+                    pred = result["logits"][precursor_task_name].detach().squeeze(-1)
+                    target = result["targets"][precursor_task_name].detach()
+                    abs_sum = (pred - target).abs().sum()
+                    sq_sum = torch.square(pred - target).sum()
+                    target_sum = target.sum()
+                    target_sq_sum = torch.square(target).sum()
+                    test_sums["mae_precursor_mz"] = (
+                        test_sums["mae_precursor_mz"] + abs_sum
+                        if "mae_precursor_mz" in test_sums else abs_sum
+                    )
+                    test_sums["mse_precursor_mz"] = (
+                        test_sums["mse_precursor_mz"] + sq_sum
+                        if "mse_precursor_mz" in test_sums else sq_sum
+                    )
+                    test_sums["target_sum_precursor_mz"] = (
+                        test_sums["target_sum_precursor_mz"] + target_sum
+                        if "target_sum_precursor_mz" in test_sums else target_sum
+                    )
+                    test_sums["target_sq_sum_precursor_mz"] = (
+                        test_sums["target_sq_sum_precursor_mz"] + target_sq_sum
+                        if "target_sq_sum_precursor_mz" in test_sums else target_sq_sum
+                    )
                 weighted_total = result["loss_total"].detach() * bs
                 test_sums["loss_total"] = test_sums["loss_total"] + weighted_total if "loss_total" in test_sums else weighted_total
 
@@ -545,17 +692,44 @@ def run_linear_probe(
             epoch_metrics[f"linear_probe/train/{key}"] = val.item() / train_count
         for key, val in test_sums.items():
             epoch_metrics[f"linear_probe/test/{key}"] = val.item() / test_count
+        if precursor_target_mode == "continuous":
+            train_mse = epoch_metrics["linear_probe/train/mse_precursor_mz"]
+            test_mse = epoch_metrics["linear_probe/test/mse_precursor_mz"]
+            epoch_metrics["linear_probe/train/rmse_precursor_mz"] = math.sqrt(train_mse)
+            epoch_metrics["linear_probe/test/rmse_precursor_mz"] = math.sqrt(test_mse)
+            epoch_metrics["linear_probe/train/mae_precursor_da"] = (
+                epoch_metrics["linear_probe/train/mae_precursor_mz"] * precursor_max_mz
+            )
+            epoch_metrics["linear_probe/test/mae_precursor_da"] = (
+                epoch_metrics["linear_probe/test/mae_precursor_mz"] * precursor_max_mz
+            )
+            target_sum = test_sums["target_sum_precursor_mz"].item()
+            target_sq_sum = test_sums["target_sq_sum_precursor_mz"].item()
+            sse = test_sums["mse_precursor_mz"].item()
+            sst = target_sq_sum - (target_sum * target_sum) / test_count
+            epoch_metrics["linear_probe/test/r2_precursor_mz"] = 1.0 - (sse / sst)
 
         log_step = global_step + epoch_idx + 1
         epoch_metrics["linear_probe_epoch"] = float(epoch_idx + 1)
         log_trial_metrics(epoch_metrics, step=log_step)
-        logging.info(
-            "Linear probe epoch %d/%d test_acc(adduct=%.4f precursor=%.4f instrument=%.4f)",
-            epoch_idx + 1,
-            num_probe_epochs,
-            epoch_metrics["linear_probe/test/acc_adduct"],
-            epoch_metrics["linear_probe/test/acc_precursor_bin"],
-            epoch_metrics["linear_probe/test/acc_instrument"],
-        )
+        if precursor_target_mode == "categorical":
+            logging.info(
+                "Linear probe epoch %d/%d test_acc(adduct=%.4f precursor=%.4f instrument=%.4f)",
+                epoch_idx + 1,
+                num_probe_epochs,
+                epoch_metrics["linear_probe/test/acc_adduct"],
+                epoch_metrics[f"linear_probe/test/acc_{precursor_task_name}"],
+                epoch_metrics["linear_probe/test/acc_instrument"],
+            )
+        else:
+            logging.info(
+                "Linear probe epoch %d/%d test_metrics(adduct_acc=%.4f precursor_mae_da=%.2f precursor_r2=%.4f instrument_acc=%.4f)",
+                epoch_idx + 1,
+                num_probe_epochs,
+                epoch_metrics["linear_probe/test/acc_adduct"],
+                epoch_metrics["linear_probe/test/mae_precursor_da"],
+                epoch_metrics["linear_probe/test/r2_precursor_mz"],
+                epoch_metrics["linear_probe/test/acc_instrument"],
+            )
         final_metrics = epoch_metrics
     return final_metrics

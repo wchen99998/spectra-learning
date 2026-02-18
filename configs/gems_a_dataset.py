@@ -16,7 +16,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_shards = 4
     cfg.drop_remainder = False
     cfg.max_precursor_mz = 1000.0
-    cfg.pair_sequence_length = 128
     cfg.intensity_scaling = "linear"
     cfg.mz_representation = "mz"
     cfg.peak_ordering = "intensity"
@@ -65,14 +64,10 @@ def get_config() -> config_dict.ConfigDict:
     cfg.b2 = 0.98
     cfg.weight_decay = 0.01
     cfg.optimizer = "adamw"
-    cfg.clip = 1.0
     cfg.device_prefetch_size = 8
     cfg.log_every_n_steps = 50
     cfg.val_check_interval = 200.0
-    cfg.num_eval_steps = 50
     cfg.checkpoint_every_steps = 10_000
-    cfg.init_seed = 0
-
     cfg.limit_train_batches = 1.0
     cfg.limit_val_batches = 1.0
     cfg.limit_test_batches = 1.0
@@ -89,6 +84,5 @@ def get_config() -> config_dict.ConfigDict:
     # System / logging
     cfg.enable_wandb = False
     cfg.wandb_project = "md4"
-    cfg.num_transformer_blocks = None
 
     return cfg

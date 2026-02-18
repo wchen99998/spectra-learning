@@ -37,7 +37,11 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         mz_fourier_max_freq=float(config.get("mz_fourier_max_freq", 100.0)),
         mz_fourier_learnable=bool(config.get("mz_fourier_learnable", False)),
         encoder_use_rope=bool(config.get("encoder_use_rope", False)),
+        encoder_fp16_high_precision_stem=bool(
+            config.get("encoder_fp16_high_precision_stem", False)
+        ),
         pooling_type=str(config.get("pooling_type", "pma")),
+        pma_fp16_high_precision=bool(config.get("pma_fp16_high_precision", False)),
         pma_num_heads=config.get("pma_num_heads", int(config.num_heads)),
         pma_num_seeds=int(config.get("pma_num_seeds", 1)),
         sigreg_use_projector=bool(config.get("sigreg_use_projector", True)),
@@ -58,6 +62,8 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         sigreg_intensity_jitter_std=float(
             config.get("sigreg_intensity_jitter_std", 0.05)
         ),
+        sigreg_fixed_k_enabled=bool(config.get("sigreg_fixed_k_enabled", False)),
+        sigreg_fixed_k_tokens=int(config.get("sigreg_fixed_k_tokens", 32)),
     )
 
 
@@ -83,7 +89,12 @@ def load_pretrained_weights(
     checkpoint_path: str,
 ) -> None:
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    state_dict = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
+    if "state_dict" in ckpt:
+        state_dict = ckpt["state_dict"]
+    elif "model" in ckpt:
+        state_dict = ckpt["model"]
+    else:
+        state_dict = ckpt
     model_state = {
         k.removeprefix("model."): v
         for k, v in state_dict.items()
@@ -95,7 +106,15 @@ def load_pretrained_weights(
 
 
 def latest_ckpt_path(directory: Path) -> str | None:
-    ckpts = sorted(directory.rglob("*.ckpt"), key=lambda p: p.stat().st_mtime)
+    checkpoint_dir = directory / "checkpoints"
+    search_root = checkpoint_dir if checkpoint_dir.exists() else directory
+    ckpts = sorted(
+        [
+            *search_root.rglob("*.ckpt"),
+            *search_root.rglob("*.pt"),
+        ],
+        key=lambda p: p.stat().st_mtime,
+    )
     if not ckpts:
         return None
     return str(ckpts[-1])

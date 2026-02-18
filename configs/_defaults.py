@@ -7,22 +7,19 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     Call after model-specific fields (like num_heads) are set.
     Per-experiment configs should override values that differ.
     """
-    # Profiler
-    cfg.profile_enabled = False
-    cfg.profile_wait_steps = 20
-    cfg.profile_warmup_steps = 20
-    cfg.profile_active_steps = 40
-    cfg.profile_repeat = 1
-    cfg.profile_record_shapes = True
-    cfg.profile_with_stack = True
-    cfg.profile_profile_memory = True
-    cfg.profile_trace_dir = "profiler"
-
     # Dataloader
     cfg.non_blocking_device_transfer = True
     cfg.optimizer_capturable = True
     cfg.optimizer_fused = True
-    cfg.dataloader_num_workers = 4
+    cfg.autocast_dtype = "fp32"
+    cfg.encoder_fp16_high_precision_stem = False
+    cfg.pma_fp16_high_precision = False
+    # num_workers=0: TF's internal thread pool handles parallelism; forking
+    # a subprocess duplicates the TF runtime and can deadlock during shuffle
+    # buffer fill.  The batch-first pipeline (batched_parse_and_transform)
+    # already achieves >270 b/s in-process.
+    cfg.device_prefetch_size = 8
+    cfg.dataloader_num_workers = 1
     cfg.dataloader_prefetch_factor = 2
     cfg.dataloader_persistent_workers = True
     cfg.dataloader_pin_memory = True
@@ -50,6 +47,7 @@ def apply_final_probe_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.final_probe_head_hidden_dim = 512
 
     cfg.final_probe_num_precursor_bins = 1000
+    cfg.final_probe_precursor_target = "categorical"
     cfg.final_probe_attention_heads = cfg.num_heads
     cfg.final_probe_loss_weights = [1.0, 1.0, 1.0]
     cfg.final_probe_freeze_backbone = True
@@ -63,6 +61,7 @@ def apply_tune_defaults(cfg: config_dict.ConfigDict) -> None:
     """
     cfg.tune_param_space = [
         # {"param": "learning_rate", "dist": "grid", "args": [1e-4, 4e-4]},
-        {"param": "weight_decay", "dist": "grid", "args": [1e-4, 1e-3, 1e-2]},
+        {"param": "sigreg_contiguous_mask_fraction", "dist": "grid", "args": [0.5, 0.75]},
+        # {"param": "weight_decay", "dist": "grid", "args": [1e-4, 1e-3, 1e-2]},
         {"param": "sigreg_lambda", "dist": "grid", "args": [1.0]},
     ]

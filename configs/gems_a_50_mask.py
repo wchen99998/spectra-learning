@@ -17,7 +17,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_shards = 4
     cfg.drop_remainder = True
     cfg.max_precursor_mz = 1000.0
-    cfg.pair_sequence_length = 128
     cfg.min_peak_intensity = 0.001
     cfg.intensity_scaling = "linear"
     cfg.mz_representation = "neutral_loss"
@@ -52,6 +51,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_random_mask_prob = 0.05
     cfg.sigreg_mz_jitter_std = 0.0001
     cfg.sigreg_intensity_jitter_std = 0.005
+    # Fixed-K token normalization before pooling (set enabled=False to turn off)
+    cfg.sigreg_fixed_k_enabled = True
+    cfg.sigreg_fixed_k_tokens = 32
 
     # Training (short smoke run)
     cfg.num_epochs = 5
@@ -62,18 +64,17 @@ def get_config() -> config_dict.ConfigDict:
     cfg.b2 = 0.98
     cfg.weight_decay = 1e-4
     cfg.optimizer = "muon"
-    cfg.clip = 0.
-    cfg.device_prefetch_size = 1
+    cfg.device_prefetch_size = 8
     cfg.log_every_n_steps = 100
     cfg.val_check_interval = 1.0
     cfg.checkpoint_every_steps = 25000
-    cfg.init_seed = 0
-
     cfg.limit_train_batches = 1.0
     cfg.limit_val_batches = 0.1
     cfg.limit_test_batches = 1.0
     cfg.num_sanity_val_steps = 0
     apply_training_defaults(cfg)
+    cfg.dataloader_num_workers = 1
+    cfg.dataloader_persistent_workers = True
 
     # Post-fit attentive probe (overrides from shared defaults)
     apply_final_probe_defaults(cfg)

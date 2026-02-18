@@ -159,10 +159,12 @@ class PeakSetEncoder(nn.Module):
         mz_fourier_max_freq: float = 100.0,
         mz_fourier_learnable: bool = False,
         use_rope: bool = False,
+        fp16_high_precision_stem: bool = False,
     ):
         super().__init__()
         self.model_dim = model_dim
         self.use_rope = bool(use_rope)
+        self.fp16_high_precision_stem = bool(fp16_high_precision_stem)
         self.embedder = PeakFeatureEmbedder(
             model_dim,
             feature_mlp_hidden_dim,
@@ -193,7 +195,48 @@ class PeakSetEncoder(nn.Module):
         peak_intensity: torch.Tensor,
         valid_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        x = self.embedder(peak_mz, peak_intensity)
+        device_type = peak_mz.device.type
+        autocast_dtype = None
+        run_high_precision_stem = False
+        if self.fp16_high_precision_stem and self.embedder.mlp[0].weight.dtype == torch.float32:
+            if torch.is_autocast_enabled(device_type):
+                autocast_dtype = torch.get_autocast_dtype(device_type)
+            run_high_precision_stem = (
+                peak_mz.dtype == torch.float16
+                or peak_intensity.dtype == torch.float16
+                or autocast_dtype == torch.float16
+            )
+
+        block_mask = None
+        start_block = 0
+        if run_high_precision_stem:
+            with torch.autocast(device_type=device_type, enabled=False):
+                x = self.embedder(peak_mz.float(), peak_intensity.float())
+                stem_freqs_cos = None
+                stem_freqs_sin = None
+                if self.use_rope:
+                    stem_freqs_cos, stem_freqs_sin = _build_rope_frequencies(
+                        sequence_length=x.shape[1],
+                        inv_freq=self.rope_inv_freq,
+                        dtype=torch.float32,
+                    )
+                if valid_mask is not None:
+                    block_mask = create_padding_block_mask(valid_mask)
+                if len(self.blocks) > 0:
+                    x = self.blocks[0](
+                        x,
+                        freqs_cos=stem_freqs_cos,
+                        freqs_sin=stem_freqs_sin,
+                        block_mask=block_mask,
+                    )
+                    start_block = 1
+            target_dtype = autocast_dtype if autocast_dtype is not None else peak_mz.dtype
+            x = x.to(dtype=target_dtype)
+        else:
+            x = self.embedder(peak_mz, peak_intensity)
+            if valid_mask is not None:
+                block_mask = create_padding_block_mask(valid_mask)
+
         freqs_cos = None
         freqs_sin = None
         if self.use_rope:
@@ -202,10 +245,8 @@ class PeakSetEncoder(nn.Module):
                 inv_freq=self.rope_inv_freq,
                 dtype=x.dtype,
             )
-        block_mask = None
-        if valid_mask is not None:
-            block_mask = create_padding_block_mask(valid_mask)
-        for block in self.blocks:
+
+        for block in self.blocks[start_block:]:
             x = block(x, freqs_cos=freqs_cos, freqs_sin=freqs_sin, block_mask=block_mask)
         return self.norm(x)
 
@@ -228,6 +269,7 @@ class PeakSetSIGReg(nn.Module):
         mz_fourier_max_freq: float = 100.0,
         mz_fourier_learnable: bool = False,
         encoder_use_rope: bool = False,
+        encoder_fp16_high_precision_stem: bool = False,
         sigreg_use_projector: bool = True,
         sigreg_proj_hidden_dim: int = 2048,
         sigreg_proj_output_dim: int = 128,
@@ -239,6 +281,7 @@ class PeakSetSIGReg(nn.Module):
         sigreg_mz_jitter_std: float = 0.005,
         sigreg_intensity_jitter_std: float = 0.05,
         pooling_type: str = "pma",
+        pma_fp16_high_precision: bool = False,
         pma_num_heads: int | None = None,
         pma_num_seeds: int = 1,
     ):
@@ -253,6 +296,7 @@ class PeakSetSIGReg(nn.Module):
         self.sigreg_mz_jitter_std = sigreg_mz_jitter_std
         self.sigreg_intensity_jitter_std = sigreg_intensity_jitter_std
         self.pooling_type = pooling_type
+        self.pma_fp16_high_precision = bool(pma_fp16_high_precision)
         self.pma_num_seeds = int(pma_num_seeds)
 
         self.encoder = PeakSetEncoder(
@@ -267,6 +311,7 @@ class PeakSetSIGReg(nn.Module):
             mz_fourier_max_freq=mz_fourier_max_freq,
             mz_fourier_learnable=mz_fourier_learnable,
             use_rope=encoder_use_rope,
+            fp16_high_precision_stem=encoder_fp16_high_precision_stem,
         )
 
         if sigreg_use_projector:
@@ -314,6 +359,28 @@ class PeakSetSIGReg(nn.Module):
         if self.pooling_type == "mean":
             return self._mean_pool(embeddings, valid_mask)
         if self.pooling_type == "pma":
+            device_type = embeddings.device.type
+            autocast_dtype = None
+            run_high_precision_pma = False
+            if self.pma_fp16_high_precision and self.pool_mha.in_proj_weight.dtype == torch.float32:
+                if torch.is_autocast_enabled(device_type):
+                    autocast_dtype = torch.get_autocast_dtype(device_type)
+                run_high_precision_pma = embeddings.dtype == torch.float16 or autocast_dtype == torch.float16
+
+            if run_high_precision_pma:
+                with torch.autocast(device_type=device_type, enabled=False):
+                    query = self.pool_query.float().unsqueeze(0).expand(embeddings.shape[0], -1, -1)
+                    pooled, _ = self.pool_mha(
+                        query=query,
+                        key=embeddings.float(),
+                        value=embeddings.float(),
+                        key_padding_mask=~valid_mask,
+                        need_weights=False,
+                    )
+                    pooled = self.pool_norm(pooled.mean(dim=1))
+                target_dtype = autocast_dtype if autocast_dtype is not None else embeddings.dtype
+                return pooled.to(dtype=target_dtype)
+
             query = self.pool_query.unsqueeze(0).expand(embeddings.shape[0], -1, -1)
             pooled, _ = self.pool_mha(
                 query=query,
@@ -426,7 +493,6 @@ class PeakSetSIGReg(nn.Module):
         train: bool = True,
         bcs_projection: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        del train
         augmented_batch = self.augment_batch(batch)
         return self.forward_augmented(augmented_batch, bcs_projection=bcs_projection)
 
@@ -436,7 +502,6 @@ class PeakSetSIGReg(nn.Module):
         *,
         train: bool = False,
     ) -> torch.Tensor:
-        del train
         peak_mz = batch["peak_mz"]
         peak_intensity = batch["peak_intensity"]
         peak_valid_mask = batch["peak_valid_mask"]
@@ -465,6 +530,3 @@ class PeakSetSIGReg(nn.Module):
             device=device,
             seed=seed,
         )
-
-
-PeakSetJEPA = PeakSetSIGReg
