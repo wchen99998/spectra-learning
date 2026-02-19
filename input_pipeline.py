@@ -41,8 +41,12 @@ _PEAK_MZ_MIN = 20.0
 _PEAK_MZ_MAX = 1000.0
 _PRECURSOR_MZ_WINDOW = 2.5
 _INTENSITY_EPS = 1e-4
-_DEFAULT_INTENSITY_SCALING = "log"
 _DEFAULT_MIN_PEAK_INTENSITY = _INTENSITY_EPS
+_DEFAULT_SIGREG_FILL_INVALID_WITH_NOISE = True
+_DEFAULT_SIGREG_NOISE_MZ_MIN = 0.0
+_DEFAULT_SIGREG_NOISE_MZ_MAX = 1.0
+_DEFAULT_SIGREG_NOISE_INTENSITY_MEAN = 7e-4
+_DEFAULT_SIGREG_NOISE_INTENSITY_STD = 2e-4
 _METADATA_FILENAME = "metadata.json"
 
 _GEMS_HF_REPO = "roman-bushuiev/GeMS"
@@ -700,6 +704,11 @@ def _augment_sigreg_batch_tf(
     random_mask_prob: float,
     mz_jitter_std: float,
     intensity_jitter_std: float,
+    fill_invalid_with_noise: bool = _DEFAULT_SIGREG_FILL_INVALID_WITH_NOISE,
+    noise_mz_min: float = _DEFAULT_SIGREG_NOISE_MZ_MIN,
+    noise_mz_max: float = _DEFAULT_SIGREG_NOISE_MZ_MAX,
+    noise_intensity_mean: float = _DEFAULT_SIGREG_NOISE_INTENSITY_MEAN,
+    noise_intensity_std: float = _DEFAULT_SIGREG_NOISE_INTENSITY_STD,
 ) -> Callable[[dict], dict]:
     def apply(batch: dict) -> dict:
         peak_mz = batch["peak_mz"]
@@ -725,12 +734,50 @@ def _augment_sigreg_batch_tf(
             intensity_jitter_std=intensity_jitter_std,
         )
 
+        if fill_invalid_with_noise:
+            view1_noise_mz = tf.random.uniform(
+                tf.shape(view1_mz),
+                minval=noise_mz_min,
+                maxval=noise_mz_max,
+                dtype=view1_mz.dtype,
+            )
+            view1_noise_intensity = tf.random.truncated_normal(
+                tf.shape(view1_int),
+                mean=noise_intensity_mean,
+                stddev=noise_intensity_std,
+                dtype=view1_int.dtype,
+            )
+            view1_noise_intensity = tf.clip_by_value(view1_noise_intensity, 0.0, 1.0)
+            view1_mz = tf.where(view1_valid, view1_mz, view1_noise_mz)
+            view1_int = tf.where(view1_valid, view1_int, view1_noise_intensity)
+
+            view2_noise_mz = tf.random.uniform(
+                tf.shape(view2_mz),
+                minval=noise_mz_min,
+                maxval=noise_mz_max,
+                dtype=view2_mz.dtype,
+            )
+            view2_noise_intensity = tf.random.truncated_normal(
+                tf.shape(view2_int),
+                mean=noise_intensity_mean,
+                stddev=noise_intensity_std,
+                dtype=view2_int.dtype,
+            )
+            view2_noise_intensity = tf.clip_by_value(view2_noise_intensity, 0.0, 1.0)
+            view2_mz = tf.where(view2_valid, view2_mz, view2_noise_mz)
+            view2_int = tf.where(view2_valid, view2_int, view2_noise_intensity)
+
         out = dict(batch)
         out["fused_mz"] = tf.concat([view1_mz, view2_mz], axis=0)
         out["fused_intensity"] = tf.concat([view1_int, view2_int], axis=0)
         out["fused_precursor_mz"] = tf.concat([precursor_mz, precursor_mz], axis=0)
-        out["fused_valid_mask"] = tf.concat([view1_valid, view2_valid], axis=0)
+        out["fused_original_valid_mask"] = tf.concat([view1_valid, view2_valid], axis=0)
         out["fused_masked_positions"] = tf.concat([view1_masked, view2_masked], axis=0)
+
+        if fill_invalid_with_noise:
+            out["fused_valid_mask"] = tf.ones_like(out["fused_original_valid_mask"])
+        else:
+            out["fused_valid_mask"] = out["fused_original_valid_mask"]
         out["view1_masked_fraction"] = view1_masked_fraction
         return out
 
@@ -876,7 +923,6 @@ def _build_dataset(
     tfrecord_buffer_size: int,
     max_precursor_mz: float,
     include_fingerprint: bool,
-    intensity_scaling: str,
     min_peak_intensity: float,
     mz_representation: str,
     include_sigreg_augmentation: bool,
@@ -885,6 +931,11 @@ def _build_dataset(
     sigreg_random_mask_prob: float,
     sigreg_mz_jitter_std: float,
     sigreg_intensity_jitter_std: float,
+    sigreg_fill_invalid_with_noise: bool = _DEFAULT_SIGREG_FILL_INVALID_WITH_NOISE,
+    sigreg_noise_mz_min: float = _DEFAULT_SIGREG_NOISE_MZ_MIN,
+    sigreg_noise_mz_max: float = _DEFAULT_SIGREG_NOISE_MZ_MAX,
+    sigreg_noise_intensity_mean: float = _DEFAULT_SIGREG_NOISE_INTENSITY_MEAN,
+    sigreg_noise_intensity_std: float = _DEFAULT_SIGREG_NOISE_INTENSITY_STD,
     peak_ordering: str = "intensity",
     num_parallel_reads: int | None = None,
 ) -> tf.data.Dataset:
@@ -919,6 +970,11 @@ def _build_dataset(
                 random_mask_prob=sigreg_random_mask_prob,
                 mz_jitter_std=sigreg_mz_jitter_std,
                 intensity_jitter_std=sigreg_intensity_jitter_std,
+                fill_invalid_with_noise=sigreg_fill_invalid_with_noise,
+                noise_mz_min=sigreg_noise_mz_min,
+                noise_mz_max=sigreg_noise_mz_max,
+                noise_intensity_mean=sigreg_noise_intensity_mean,
+                noise_intensity_std=sigreg_noise_intensity_std,
             ),
             num_parallel_calls=tf.data.AUTOTUNE,
         )
@@ -940,7 +996,6 @@ def _compute_info(
     *,
     output_dir: Path,
     max_precursor_mz: float,
-    intensity_scaling: str,
     mz_representation: str,
 ) -> dict[str, Any]:
     massspec_adduct_vocab = metadata.get("massspec_adduct_vocab", {"unknown": 0})
@@ -961,7 +1016,6 @@ def _compute_info(
         "massspec_adduct_vocab_size": len(massspec_adduct_vocab),
         "massspec_instrument_type_vocab_size": len(massspec_instrument_type_vocab),
         "num_peaks": _NUM_PEAKS_OUTPUT,
-        "intensity_scaling": intensity_scaling,
         "mz_representation": mz_representation,
         "fingerprint_bits": _FINGERPRINT_BITS,
         "max_precursor_mz": max_precursor_mz,
@@ -1110,9 +1164,6 @@ class TfLightningDataModule:
         self.max_precursor_mz = float(
             config.get("max_precursor_mz", _DEFAULT_MAX_PRECURSOR_MZ)
         )
-        self.intensity_scaling = str(
-            config.get("intensity_scaling", _DEFAULT_INTENSITY_SCALING)
-        )
         self.min_peak_intensity = float(
             config.get("min_peak_intensity", _DEFAULT_MIN_PEAK_INTENSITY)
         )
@@ -1130,6 +1181,30 @@ class TfLightningDataModule:
         self.sigreg_mz_jitter_std = float(config.get("sigreg_mz_jitter_std", 0.005))
         self.sigreg_intensity_jitter_std = float(
             config.get("sigreg_intensity_jitter_std", 0.05)
+        )
+        self.sigreg_fill_invalid_with_noise = bool(
+            config.get(
+                "sigreg_fill_invalid_with_noise",
+                _DEFAULT_SIGREG_FILL_INVALID_WITH_NOISE,
+            )
+        )
+        self.sigreg_noise_mz_min = float(
+            config.get("sigreg_noise_mz_min", _DEFAULT_SIGREG_NOISE_MZ_MIN)
+        )
+        self.sigreg_noise_mz_max = float(
+            config.get("sigreg_noise_mz_max", _DEFAULT_SIGREG_NOISE_MZ_MAX)
+        )
+        self.sigreg_noise_intensity_mean = float(
+            config.get(
+                "sigreg_noise_intensity_mean",
+                _DEFAULT_SIGREG_NOISE_INTENSITY_MEAN,
+            )
+        )
+        self.sigreg_noise_intensity_std = float(
+            config.get(
+                "sigreg_noise_intensity_std",
+                _DEFAULT_SIGREG_NOISE_INTENSITY_STD,
+            )
         )
 
         self.metadata = _ensure_processed(
@@ -1164,7 +1239,6 @@ class TfLightningDataModule:
             self.metadata,
             output_dir=self.output_dir,
             max_precursor_mz=self.max_precursor_mz,
-            intensity_scaling=self.intensity_scaling,
             mz_representation=self.mz_representation,
         )
         self.train_splits = ["gems_train", "massspec_train"]
@@ -1236,7 +1310,6 @@ class TfLightningDataModule:
             tfrecord_buffer_size=self.tfrecord_buffer_size,
             max_precursor_mz=self.max_precursor_mz,
             include_fingerprint=include_fingerprint,
-            intensity_scaling=self.intensity_scaling,
             min_peak_intensity=self.min_peak_intensity,
             mz_representation=self.mz_representation,
             include_sigreg_augmentation=True,
@@ -1245,6 +1318,11 @@ class TfLightningDataModule:
             sigreg_random_mask_prob=self.sigreg_random_mask_prob,
             sigreg_mz_jitter_std=self.sigreg_mz_jitter_std,
             sigreg_intensity_jitter_std=self.sigreg_intensity_jitter_std,
+            sigreg_fill_invalid_with_noise=self.sigreg_fill_invalid_with_noise,
+            sigreg_noise_mz_min=self.sigreg_noise_mz_min,
+            sigreg_noise_mz_max=self.sigreg_noise_mz_max,
+            sigreg_noise_intensity_mean=self.sigreg_noise_intensity_mean,
+            sigreg_noise_intensity_std=self.sigreg_noise_intensity_std,
             peak_ordering=self.peak_ordering,
         )
 
@@ -1329,7 +1407,6 @@ class TfLightningDataModule:
             tfrecord_buffer_size=self.tfrecord_buffer_size,
             max_precursor_mz=self.max_precursor_mz,
             include_fingerprint=True,
-            intensity_scaling=self.intensity_scaling,
             min_peak_intensity=self.min_peak_intensity,
             mz_representation=self.mz_representation,
             include_sigreg_augmentation=False,

@@ -53,6 +53,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_random_mask_prob = 0.05
     cfg.sigreg_mz_jitter_std = 0.0001
     cfg.sigreg_intensity_jitter_std = 0.005
+    cfg.sigreg_fill_invalid_with_noise = True
+    cfg.sigreg_noise_intensity_mean = 7e-4
+    cfg.sigreg_noise_intensity_std = 2e-4
     # Training (short smoke run)
     cfg.num_epochs = 5
     cfg.learning_rate = 3e-4

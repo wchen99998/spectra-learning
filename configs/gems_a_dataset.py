@@ -54,6 +54,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_contiguous_mask_min_len = 1
     cfg.sigreg_mz_jitter_std = 0.005
     cfg.sigreg_intensity_jitter_std = 0.05
+    cfg.sigreg_fill_invalid_with_noise = True
+    cfg.sigreg_noise_intensity_mean = 7e-4
+    cfg.sigreg_noise_intensity_std = 2e-4
 
     # Training
     cfg.num_epochs = 10
