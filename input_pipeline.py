@@ -805,7 +805,7 @@ def _batched_parse_and_transform(
     precursor_window = tf.constant(_PRECURSOR_MZ_WINDOW, tf.float32)
     min_int = tf.constant(min_peak_intensity, tf.float32)
     max_prec = tf.constant(max_precursor_mz, tf.float32)
-    use_neutral_loss = mz_representation == "neutral_loss"
+
 
     if include_fingerprint:
         feature_spec: dict[str, tf.io.FixedLenFeature] = {
@@ -855,10 +855,6 @@ def _batched_parse_and_transform(
         values, indices = tf.math.top_k(intensity, k=num_peaks, sorted=True)
         intensity = values
         mz = tf.gather(mz, indices, batch_dims=1)  # [B, num_peaks]
-
-        # ── Optional neutral-loss conversion ─────────────────────────────────────
-        if use_neutral_loss:
-            mz = precursor_mz_val[:, tf.newaxis] - mz
 
         # ── Fixed-size sort (replaces variable-length compact_sort) ──────────────
         # Invalid peaks get +inf sort key so they land at the end.

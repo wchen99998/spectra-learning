@@ -50,7 +50,7 @@ def test_padding_leakage():
     precursor_mz = batch["precursor_mz"]
 
     # --- Run 1: original padding (zeros) ---
-    emb1 = model.encoder(peak_mz, peak_intensity, valid_mask=peak_valid_mask)
+    emb1 = model.encoder(peak_mz, peak_intensity, valid_mask=peak_valid_mask, precursor_mz=precursor_mz)
     pooled1 = model.pool(emb1, peak_valid_mask)
 
     # --- Run 2: randomize ONLY padding positions ---
@@ -59,7 +59,7 @@ def test_padding_leakage():
     peak_mz_rand[:, 30:] = torch.rand_like(peak_mz[:, 30:]) * 1000  # large random mz
     peak_intensity_rand[:, 30:] = torch.rand_like(peak_intensity[:, 30:])  # random intensity
 
-    emb2 = model.encoder(peak_mz_rand, peak_intensity_rand, valid_mask=peak_valid_mask)
+    emb2 = model.encoder(peak_mz_rand, peak_intensity_rand, valid_mask=peak_valid_mask, precursor_mz=precursor_mz)
     pooled2 = model.pool(emb2, peak_valid_mask)
 
     # --- Run 3: set padding to different constant values ---
@@ -68,7 +68,7 @@ def test_padding_leakage():
     peak_mz_const[:, 30:] = 999.0
     peak_intensity_const[:, 30:] = 1.0
 
-    emb3 = model.encoder(peak_mz_const, peak_intensity_const, valid_mask=peak_valid_mask)
+    emb3 = model.encoder(peak_mz_const, peak_intensity_const, valid_mask=peak_valid_mask, precursor_mz=precursor_mz)
     pooled3 = model.pool(emb3, peak_valid_mask)
 
     # --- Measure changes ---
@@ -122,7 +122,8 @@ def test_padding_leakage():
     # Additional: check what the embedder produces for padding (all-zeros input)
     zero_mz = torch.zeros(1, 1)
     zero_int = torch.zeros(1, 1)
-    pad_emb = model.encoder.embedder(zero_mz, zero_int)
+    zero_prec = torch.zeros(1)
+    pad_emb = model.encoder.embedder(zero_mz, zero_int, zero_prec)
     print(f"Embedding of a zero-padding position:")
     print(f"  Norm: {pad_emb.norm():.4f}")
     print(f"  (Non-zero due to Fourier cos(0)=1 and MLP biases)")
@@ -152,6 +153,7 @@ def test_padding_leakage_mean_pool():
     emb1 = model.encoder(
         batch["peak_mz"], batch["peak_intensity"],
         valid_mask=batch["peak_valid_mask"],
+        precursor_mz=batch["precursor_mz"],
     )
     pooled1 = model.pool(emb1, batch["peak_valid_mask"])
 
@@ -164,6 +166,7 @@ def test_padding_leakage_mean_pool():
     emb2 = model.encoder(
         mz2, int2,
         valid_mask=batch["peak_valid_mask"],
+        precursor_mz=batch["precursor_mz"],
     )
     pooled2 = model.pool(emb2, batch["peak_valid_mask"])
 

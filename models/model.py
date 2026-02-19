@@ -74,8 +74,14 @@ class PeakFeatureEmbedder(nn.Module):
             max_freq=mz_fourier_max_freq,
             learnable=mz_fourier_learnable,
         )
-        # input: fourier(mz) + raw_mz + intensity
-        input_dim = self.mz_fourier.output_dim + 1 + 1
+        self.nl_fourier = FourierFeatures(
+            num_frequencies=mz_fourier_num_frequencies,
+            min_freq=mz_fourier_min_freq,
+            max_freq=mz_fourier_max_freq,
+            learnable=mz_fourier_learnable,
+        )
+        # input: fourier(mz) + fourier(nl) + raw_mz + raw_nl + intensity
+        input_dim = self.mz_fourier.output_dim + self.nl_fourier.output_dim + 1 + 1 + 1
         self.mlp = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.SiLU(),
@@ -90,9 +96,18 @@ class PeakFeatureEmbedder(nn.Module):
         self,
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
+        precursor_mz: torch.Tensor,
     ) -> torch.Tensor:
+        neutral_loss = precursor_mz.unsqueeze(-1) - peak_mz
         mz_fourier = self.mz_fourier(peak_mz)
-        features = torch.cat([mz_fourier, peak_mz.unsqueeze(-1), peak_intensity.unsqueeze(-1)], dim=-1)
+        nl_fourier = self.nl_fourier(neutral_loss)
+        features = torch.cat([
+            mz_fourier,
+            nl_fourier,
+            peak_mz.unsqueeze(-1),
+            neutral_loss.unsqueeze(-1),
+            peak_intensity.unsqueeze(-1),
+        ], dim=-1)
         return self.mlp(features)
 
 
@@ -234,11 +249,12 @@ class PeakSetEncoder(nn.Module):
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
         valid_mask: torch.Tensor | None = None,
+        precursor_mz: torch.Tensor | None = None,
     ) -> torch.Tensor:
         device_type = peak_mz.device.type
 
         if self.encoder_block_type == "isab":
-            x = self.embedder(peak_mz, peak_intensity)
+            x = self.embedder(peak_mz, peak_intensity, precursor_mz)
             kv_block_mask = None
             q_block_mask = None
             if valid_mask is not None:
@@ -264,7 +280,7 @@ class PeakSetEncoder(nn.Module):
         start_block = 0
         if run_high_precision_stem:
             with torch.autocast(device_type=device_type, enabled=False):
-                x = self.embedder(peak_mz.float(), peak_intensity.float())
+                x = self.embedder(peak_mz.float(), peak_intensity.float(), precursor_mz.float() if precursor_mz is not None else None)
                 stem_freqs_cos = None
                 stem_freqs_sin = None
                 if self.use_rope:
@@ -286,7 +302,7 @@ class PeakSetEncoder(nn.Module):
             target_dtype = autocast_dtype if autocast_dtype is not None else peak_mz.dtype
             x = x.to(dtype=target_dtype)
         else:
-            x = self.embedder(peak_mz, peak_intensity)
+            x = self.embedder(peak_mz, peak_intensity, precursor_mz)
             if valid_mask is not None:
                 block_mask = create_padding_block_mask(valid_mask)
 
@@ -505,12 +521,14 @@ class PeakSetSIGReg(nn.Module):
         fused_mz = augmented_batch["fused_mz"]
         fused_intensity = augmented_batch["fused_intensity"]
         fused_valid_mask = augmented_batch["fused_valid_mask"]
+        fused_precursor_mz = augmented_batch["fused_precursor_mz"]
         masked_fraction = augmented_batch["view1_masked_fraction"]
 
         fused_emb = self.encoder(
             fused_mz,
             fused_intensity,
             valid_mask=fused_valid_mask,
+            precursor_mz=fused_precursor_mz,
         )
         fused_pooled = self.pool(fused_emb, fused_valid_mask)
         fused_z = self.projector(fused_pooled)
@@ -559,8 +577,9 @@ class PeakSetSIGReg(nn.Module):
         peak_mz = batch["peak_mz"]
         peak_intensity = batch["peak_intensity"]
         peak_valid_mask = batch["peak_valid_mask"]
+        precursor_mz = batch["precursor_mz"]
 
-        embeddings = self.encoder(peak_mz, peak_intensity, valid_mask=peak_valid_mask)
+        embeddings = self.encoder(peak_mz, peak_intensity, valid_mask=peak_valid_mask, precursor_mz=precursor_mz)
         pooled = self.pool(embeddings, peak_valid_mask)
         return self.projector(pooled)
 

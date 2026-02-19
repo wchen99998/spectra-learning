@@ -244,11 +244,13 @@ class SIGRegForwardTests(unittest.TestCase):
                 batch["peak_mz"],
                 batch["peak_intensity"],
                 valid_mask=batch["peak_valid_mask"],
+                precursor_mz=batch["precursor_mz"],
             )
             emb_with_rope = model_with_rope.encoder(
                 batch["peak_mz"],
                 batch["peak_intensity"],
                 valid_mask=batch["peak_valid_mask"],
+                precursor_mz=batch["precursor_mz"],
             )
 
         self.assertFalse(torch.allclose(emb_no_rope, emb_with_rope))

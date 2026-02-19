@@ -194,10 +194,12 @@ def test_encoder_with_mask():
         out_mask = encoder(
             batch["peak_mz"], batch["peak_intensity"],
             valid_mask=batch["peak_valid_mask"],
+            precursor_mz=batch["precursor_mz"],
         )
         out_none = encoder(
             batch["peak_mz"], batch["peak_intensity"],
             valid_mask=None,
+            precursor_mz=batch["precursor_mz"],
         )
 
     assert out_mask.shape == (B, N, D)
