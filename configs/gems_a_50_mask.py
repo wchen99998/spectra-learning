@@ -32,7 +32,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_heads = 8
     cfg.num_kv_heads = 4
     cfg.encoder_use_rope = False
-    cfg.encoder_block_type = "transformer"
+    cfg.encoder_block_type = "isab"
     # cfg.isab_num_inducing_points = 32
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 128
@@ -41,9 +41,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pma_num_seeds = 32
     cfg.mz_fourier_num_frequencies = 64
     cfg.mz_fourier_min_freq = 1.0
-    cfg.mz_fourier_max_freq = 5_000.0
+    cfg.mz_fourier_max_freq = 2_500.0
     cfg.mz_fourier_learnable = False
-    cfg.sigreg_use_projector = True
+    cfg.sigreg_use_projector = False
     cfg.sigreg_proj_hidden_dim = 2048
     cfg.sigreg_proj_output_dim = 128
     cfg.sigreg_num_slices = 512
@@ -52,7 +52,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_contiguous_mask_min_len = 1
     cfg.sigreg_random_mask_prob = 0.05
     cfg.sigreg_mz_jitter_std = 0.0001
-    cfg.sigreg_intensity_jitter_std = 0.005
+    cfg.sigreg_intensity_jitter_std = 0.001
     cfg.sigreg_fill_invalid_with_noise = True
     cfg.sigreg_noise_intensity_mean = 7e-4
     cfg.sigreg_noise_intensity_std = 2e-4

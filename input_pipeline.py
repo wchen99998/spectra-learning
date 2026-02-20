@@ -776,6 +776,24 @@ def _augment_sigreg_batch_tf(
 
         if fill_invalid_with_noise:
             out["fused_valid_mask"] = tf.ones_like(out["fused_original_valid_mask"])
+            # Re-sort by mz after noise fill: random mz values break the
+            # original sort order, so we restore ascending-mz ordering.
+            sort_idx = tf.argsort(
+                out["fused_mz"], axis=1, direction="ASCENDING", stable=True,
+            )
+            out["fused_mz"] = tf.gather(out["fused_mz"], sort_idx, batch_dims=1)
+            out["fused_intensity"] = tf.gather(
+                out["fused_intensity"], sort_idx, batch_dims=1,
+            )
+            out["fused_original_valid_mask"] = tf.gather(
+                out["fused_original_valid_mask"], sort_idx, batch_dims=1,
+            )
+            out["fused_masked_positions"] = tf.gather(
+                out["fused_masked_positions"], sort_idx, batch_dims=1,
+            )
+            out["fused_valid_mask"] = tf.gather(
+                out["fused_valid_mask"], sort_idx, batch_dims=1,
+            )
         else:
             out["fused_valid_mask"] = out["fused_original_valid_mask"]
         out["view1_masked_fraction"] = view1_masked_fraction

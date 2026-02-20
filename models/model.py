@@ -56,7 +56,7 @@ class FourierFeatures(nn.Module):
 
 
 class PeakFeatureEmbedder(nn.Module):
-    """Embeds raw peak features (mz, intensity, precursor) into model dim."""
+    """Embeds raw peak features (mz, intensity) into model dim."""
 
     def __init__(
         self,
@@ -98,9 +98,9 @@ class PeakFeatureEmbedder(nn.Module):
         peak_intensity: torch.Tensor,
         precursor_mz: torch.Tensor,
     ) -> torch.Tensor:
-        neutral_loss = precursor_mz.unsqueeze(-1) - peak_mz
         mz_fourier = self.mz_fourier(peak_mz)
-        nl_fourier = self.nl_fourier(neutral_loss)
+        neutral_loss = torch.zeros_like(peak_mz)
+        nl_fourier = torch.zeros_like(mz_fourier)
         features = torch.cat([
             mz_fourier,
             nl_fourier,
