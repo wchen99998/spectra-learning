@@ -23,7 +23,7 @@ from ml_collections import config_dict
 from input_pipeline import TfLightningDataModule
 from models.model import PeakSetSIGReg
 from utils.probing import run_attentive_probe
-from utils.schedulers import learning_rate_at_step
+from utils.schedulers import CapturableCosineSchedule, learning_rate_at_step
 from utils.training import build_logger, build_model_from_config
 
 torch.set_float32_matmul_precision('high')
@@ -150,7 +150,7 @@ def _train_step_impl(
     batch: dict[str, torch.Tensor],
     bcs_projection: torch.Tensor,
     optimizers: list[torch.optim.Optimizer],
-    schedulers: list[torch.optim.lr_scheduler.LRScheduler],
+    schedulers: list[CapturableCosineSchedule],
     autocast_dtype: torch.dtype | None,
 ) -> dict[str, torch.Tensor]:
     device_type = next(model.parameters()).device.type
@@ -189,10 +189,9 @@ def _build_optimizers(
     model: PeakSetSIGReg,
     total_steps: int,
     device: torch.device,
-) -> tuple[list[torch.optim.Optimizer], list[torch.optim.lr_scheduler.LRScheduler]]:
+) -> tuple[list[torch.optim.Optimizer], list[CapturableCosineSchedule]]:
     base_lr = float(config.learning_rate)
     warmup_steps = int(config.get("warmup_steps", 0))
-    schedule_type = str(config.get("learning_rate_schedule", "cosine"))
     min_learning_rate = config.get("min_learning_rate", None)
     b2 = float(config.get("b2", 0.999))
     weight_decay = float(config.weight_decay)
@@ -202,20 +201,17 @@ def _build_optimizers(
     fused_cfg = config.get("optimizer_fused", None)
     fused = (is_cuda if fused_cfg is None else bool(fused_cfg) and is_cuda)
 
-    def _lr_for_step(step: int) -> float:
-        return learning_rate_at_step(
-            step,
-            base_lr=base_lr,
+    def _make_schedule(
+        optimizer: torch.optim.Optimizer, lr: float,
+    ) -> CapturableCosineSchedule:
+        return CapturableCosineSchedule(
+            optimizer,
+            base_lr=lr,
             total_steps=total_steps,
             warmup_steps=warmup_steps,
-            schedule_type=schedule_type,
-            min_learning_rate=min_learning_rate,
+            min_lr=min_learning_rate,
+            device=device,
         )
-
-    def _make_lr_lambda(lr: float):
-        def lr_lambda(step_idx: int) -> float:
-            return _lr_for_step(step_idx + 1) / lr
-        return lr_lambda
 
     if optimizer_type == "muon":
         muon_params, adamw_params = _partition_params_for_muon(model)
@@ -236,30 +232,32 @@ def _build_optimizers(
             adamw_params,
             lr=torch.tensor(adamw_lr),
             betas=(0.9, b2),
-            weight_decay=weight_decay,
+            weight_decay=0.0,
             capturable=capturable,
             fused=fused,
         )
-        muon_sched = torch.optim.lr_scheduler.LambdaLR(
-            muon_opt, lr_lambda=_make_lr_lambda(muon_lr),
-        )
-        adamw_sched = torch.optim.lr_scheduler.LambdaLR(
-            adamw_opt, lr_lambda=_make_lr_lambda(adamw_lr),
-        )
-        return [muon_opt, adamw_opt], [muon_sched, adamw_sched]
+        return [muon_opt, adamw_opt], [_make_schedule(muon_opt, muon_lr), _make_schedule(adamw_opt, adamw_lr)]
+
+    decay_params: list[torch.nn.Parameter] = []
+    no_decay_params: list[torch.nn.Parameter] = []
+    for param in model.parameters():
+        if param.ndim < 2:
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
 
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        [
+            {"params": decay_params, "weight_decay": weight_decay},
+            {"params": no_decay_params, "weight_decay": 0.0},
+        ],
         lr=torch.tensor(base_lr),
         betas=(0.9, b2),
-        weight_decay=weight_decay,
+        weight_decay=0.0,
         capturable=capturable,
         fused=fused,
     )
-    scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer, lr_lambda=_make_lr_lambda(base_lr),
-    )
-    return [optimizer], [scheduler]
+    return [optimizer], [_make_schedule(optimizer, base_lr)]
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +268,7 @@ def _save_checkpoint(
     path: Path,
     model: PeakSetSIGReg,
     optimizers: list[torch.optim.Optimizer],
-    schedulers: list[torch.optim.lr_scheduler.LRScheduler],
+    schedulers: list[CapturableCosineSchedule],
     global_step: int,
     epoch: int,
     loss: float,

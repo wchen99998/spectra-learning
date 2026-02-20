@@ -338,6 +338,7 @@ class PeakSetSIGReg(nn.Module):
         sigreg_use_projector: bool = True,
         sigreg_proj_hidden_dim: int = 2048,
         sigreg_proj_output_dim: int = 128,
+        sigreg_proj_norm: str = "rmsnorm",
         bcs_num_slices: int = 256,
         sigreg_lambda: float = 10.0,
         sigreg_contiguous_mask_fraction: float = 0.25,
@@ -384,12 +385,25 @@ class PeakSetSIGReg(nn.Module):
         )
 
         if sigreg_use_projector:
+            proj_norm = str(sigreg_proj_norm).lower()
+
+            def _make_norm(dim: int) -> nn.Module:
+                if proj_norm == "rmsnorm":
+                    return nn.RMSNorm(dim, eps=1e-5)
+                if proj_norm == "batchnorm":
+                    return nn.BatchNorm1d(dim, eps=1e-5)
+                if proj_norm == "layernorm":
+                    return nn.LayerNorm(dim, eps=1e-5)
+                if proj_norm in {"none", "identity"}:
+                    return nn.Identity()
+                raise ValueError(f"Unknown sigreg_proj_norm: {sigreg_proj_norm}")
+
             self.projector = nn.Sequential(
                 nn.Linear(model_dim, sigreg_proj_hidden_dim),
-                nn.RMSNorm(sigreg_proj_hidden_dim),
+                _make_norm(sigreg_proj_hidden_dim),
                 nn.SiLU(),
                 nn.Linear(sigreg_proj_hidden_dim, sigreg_proj_hidden_dim),
-                nn.RMSNorm(sigreg_proj_hidden_dim),
+                _make_norm(sigreg_proj_hidden_dim),
                 nn.SiLU(),
                 nn.Linear(sigreg_proj_hidden_dim, sigreg_proj_output_dim),
             )
@@ -422,8 +436,17 @@ class PeakSetSIGReg(nn.Module):
         embeddings: torch.Tensor,
         valid_mask: torch.Tensor,
     ) -> torch.Tensor:
+        pooled, _ = self.pool_with_raw(embeddings, valid_mask)
+        return pooled
+
+    def pool_with_raw(
+        self,
+        embeddings: torch.Tensor,
+        valid_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.pooling_type == "mean":
-            return self._mean_pool(embeddings, valid_mask)
+            pooled = self._mean_pool(embeddings, valid_mask)
+            return pooled, pooled
         if self.pooling_type == "pma":
             device_type = embeddings.device.type
             autocast_dtype = None
@@ -443,9 +466,10 @@ class PeakSetSIGReg(nn.Module):
                         key_padding_mask=~valid_mask,
                         need_weights=False,
                     )
-                    pooled = self.pool_norm(pooled.mean(dim=1))
+                    pooled_raw = pooled.mean(dim=1)
+                    pooled = self.pool_norm(pooled_raw)
                 target_dtype = autocast_dtype if autocast_dtype is not None else embeddings.dtype
-                return pooled.to(dtype=target_dtype)
+                return pooled.to(dtype=target_dtype), pooled_raw.to(dtype=target_dtype)
 
             query = self.pool_query.unsqueeze(0).expand(embeddings.shape[0], -1, -1)
             pooled, _ = self.pool_mha(
@@ -455,7 +479,8 @@ class PeakSetSIGReg(nn.Module):
                 key_padding_mask=~valid_mask,
                 need_weights=False,
             )
-            return self.pool_norm(pooled.mean(dim=1))
+            pooled_raw = pooled.mean(dim=1)
+            return self.pool_norm(pooled_raw), pooled_raw
         raise NotImplementedError(f"Unknown pooling type: {self.pooling_type}")
 
     def _augment_view(
@@ -526,11 +551,16 @@ class PeakSetSIGReg(nn.Module):
             valid_mask=fused_valid_mask,
             precursor_mz=fused_precursor_mz,
         )
-        fused_pooled = self.pool(fused_emb, fused_valid_mask)
+        fused_pooled, fused_pooled_raw = self.pool_with_raw(fused_emb, fused_valid_mask)
         fused_z = self.projector(fused_pooled)
         z1, z2 = fused_z.chunk(2, dim=0)
-        representation_variance = fused_z.var(dim=0, unbiased=False).mean()
-        encoder_variance = fused_pooled.var(dim=0, unbiased=False).mean()
+        representation_variance = fused_z.float().var(dim=0, unbiased=False).mean()
+        encoder_variance = fused_pooled.float().var(dim=0, unbiased=False).mean()
+        encoder_variance_raw = fused_pooled_raw.float().var(dim=0, unbiased=False).mean()
+        encoder_pooled_rms = fused_pooled.float().pow(2).mean(dim=-1).sqrt().mean()
+        encoder_pooled_raw_rms = fused_pooled_raw.float().pow(2).mean(dim=-1).sqrt().mean()
+        pool_norm_weight_abs_mean = self.pool_norm.weight.abs().mean()
+        encoder_norm_weight_abs_mean = self.encoder.norm.weight.abs().mean()
 
         # Alignment: mean cosine similarity between paired views (higher = better)
         z1_norm = nn.functional.normalize(z1, dim=-1)
@@ -550,6 +580,11 @@ class PeakSetSIGReg(nn.Module):
             "masked_fraction": masked_fraction,
             "representation_variance": representation_variance,
             "encoder_variance": encoder_variance,
+            "encoder_variance_raw": encoder_variance_raw,
+            "encoder_pooled_rms": encoder_pooled_rms,
+            "encoder_pooled_raw_rms": encoder_pooled_raw_rms,
+            "pool_norm_weight_abs_mean": pool_norm_weight_abs_mean,
+            "encoder_norm_weight_abs_mean": encoder_norm_weight_abs_mean,
             "alignment": alignment,
             "uniformity": uniformity,
         }

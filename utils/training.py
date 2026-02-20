@@ -49,6 +49,7 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         sigreg_use_projector=bool(config.get("sigreg_use_projector", True)),
         sigreg_proj_hidden_dim=int(config.get("sigreg_proj_hidden_dim", 2048)),
         sigreg_proj_output_dim=int(config.get("sigreg_proj_output_dim", 128)),
+        sigreg_proj_norm=str(config.get("sigreg_proj_norm", "rmsnorm")),
         bcs_num_slices=int(config.get("sigreg_num_slices", 256)),
         sigreg_lambda=float(config.get("sigreg_lambda", 10.0)),
         sigreg_contiguous_mask_fraction=float(

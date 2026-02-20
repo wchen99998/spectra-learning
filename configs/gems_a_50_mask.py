@@ -36,14 +36,14 @@ def get_config() -> config_dict.ConfigDict:
     # cfg.isab_num_inducing_points = 32
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 128
-    cfg.pooling_type = "pma"
+    cfg.pooling_type = "mean"
     cfg.pma_num_heads = cfg.num_heads
     cfg.pma_num_seeds = 32
     cfg.mz_fourier_num_frequencies = 64
     cfg.mz_fourier_min_freq = 1.0
     cfg.mz_fourier_max_freq = 2_500.0
     cfg.mz_fourier_learnable = False
-    cfg.sigreg_use_projector = False
+    cfg.sigreg_use_projector = True
     cfg.sigreg_proj_hidden_dim = 2048
     cfg.sigreg_proj_output_dim = 128
     cfg.sigreg_num_slices = 512
@@ -56,6 +56,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_fill_invalid_with_noise = True
     cfg.sigreg_noise_intensity_mean = 7e-4
     cfg.sigreg_noise_intensity_std = 2e-4
+    cfg.sigreg_proj_norm = "batchnorm"
     # Training (short smoke run)
     cfg.num_epochs = 5
     cfg.learning_rate = 3e-4
