@@ -80,8 +80,8 @@ class PeakFeatureEmbedder(nn.Module):
             max_freq=mz_fourier_max_freq,
             learnable=mz_fourier_learnable,
         )
-        # input: fourier(mz) + fourier(nl) + raw_mz + raw_nl + intensity
-        input_dim = self.mz_fourier.output_dim + self.nl_fourier.output_dim + 1 + 1 + 1
+        # input: fourier(mz) + raw_mz + intensity
+        input_dim = self.mz_fourier.output_dim + 1 + 1
         self.mlp = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.SiLU(),
@@ -99,13 +99,9 @@ class PeakFeatureEmbedder(nn.Module):
         precursor_mz: torch.Tensor,
     ) -> torch.Tensor:
         mz_fourier = self.mz_fourier(peak_mz)
-        neutral_loss = torch.zeros_like(peak_mz)
-        nl_fourier = torch.zeros_like(mz_fourier)
         features = torch.cat([
-            mz_fourier,
-            nl_fourier,
+            mz_fourier, 
             peak_mz.unsqueeze(-1),
-            neutral_loss.unsqueeze(-1),
             peak_intensity.unsqueeze(-1),
         ], dim=-1)
         return self.mlp(features)
