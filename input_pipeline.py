@@ -42,11 +42,6 @@ _PEAK_MZ_MAX = 1000.0
 _PRECURSOR_MZ_WINDOW = 2.5
 _INTENSITY_EPS = 1e-4
 _DEFAULT_MIN_PEAK_INTENSITY = _INTENSITY_EPS
-_DEFAULT_SIGREG_FILL_INVALID_WITH_NOISE = True
-_DEFAULT_SIGREG_NOISE_MZ_MIN = 0.0
-_DEFAULT_SIGREG_NOISE_MZ_MAX = 1.0
-_DEFAULT_SIGREG_NOISE_INTENSITY_MEAN = 7e-4
-_DEFAULT_SIGREG_NOISE_INTENSITY_STD = 2e-4
 _METADATA_FILENAME = "metadata.json"
 
 _GEMS_HF_REPO = "roman-bushuiev/GeMS"
@@ -560,21 +555,22 @@ def _ensure_processed(
 # tf.data pipeline
 # -----------------------------------------------------------------------------
 
-def _augment_masked_view_tf(
+@tf.function
+def _sample_contiguous_and_random_drop_mask_tf(
     peak_mz: tf.Tensor,
-    peak_intensity: tf.Tensor,
     peak_valid_mask: tf.Tensor,
     *,
-    contiguous_mask_fraction: float,
-    contiguous_mask_min_len: int,
-    random_mask_prob: float,
-    mz_jitter_std: float,
-    intensity_jitter_std: float,
-) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
+    contiguous_mask_fraction_min: float,
+    contiguous_mask_fraction_max: float,
+    random_drop_fraction_min: float,
+    random_drop_fraction_max: float,
+) -> tuple[tf.Tensor, tf.Tensor]:
     batch_size = tf.shape(peak_mz)[0]
     num_peaks = tf.shape(peak_mz)[1]
     has_valid = tf.reduce_any(peak_valid_mask, axis=1)
 
+    # Build contiguous interval on the physical m/z axis, independent of current
+    # tensor ordering.
     sort_keys = tf.where(
         peak_valid_mask,
         peak_mz,
@@ -584,18 +580,24 @@ def _augment_masked_view_tf(
     sorted_valid = tf.gather(peak_valid_mask, sorted_order, batch_dims=1)
     valid_counts = tf.reduce_sum(tf.cast(sorted_valid, tf.int32), axis=1)
 
-    raw_mask_len = tf.cast(
-        tf.floor(tf.cast(valid_counts, tf.float32) * contiguous_mask_fraction),
+    contiguous_fraction = tf.random.uniform(
+        [batch_size],
+        minval=tf.cast(contiguous_mask_fraction_min, tf.float32),
+        maxval=tf.cast(contiguous_mask_fraction_max, tf.float32),
+        dtype=tf.float32,
+    )
+    contiguous_len = tf.cast(
+        tf.floor(tf.cast(valid_counts, tf.float32) * contiguous_fraction),
         tf.int32,
     )
-    mask_len = tf.maximum(
-        raw_mask_len,
-        tf.fill(tf.shape(raw_mask_len), tf.cast(contiguous_mask_min_len, tf.int32)),
+    contiguous_len = tf.where(
+        has_valid,
+        tf.maximum(contiguous_len, tf.ones_like(contiguous_len)),
+        tf.zeros_like(contiguous_len),
     )
-    mask_len = tf.minimum(mask_len, valid_counts)
-    mask_len = tf.where(has_valid, mask_len, tf.zeros_like(mask_len))
+    contiguous_len = tf.minimum(contiguous_len, valid_counts)
 
-    max_start_offset = valid_counts - mask_len + 1
+    max_start_offset = valid_counts - contiguous_len + 1
     sampled_offset = tf.cast(
         tf.floor(
             tf.random.uniform([batch_size], dtype=tf.float32)
@@ -605,50 +607,53 @@ def _augment_masked_view_tf(
     )
     sampled_offset = tf.where(has_valid, sampled_offset, tf.zeros_like(sampled_offset))
     mask_start = sampled_offset
-    mask_end = mask_start + mask_len
+    mask_end = mask_start + contiguous_len
 
     positions = tf.range(num_peaks, dtype=tf.int32)[tf.newaxis, :]
-    masked_sorted = (
+    contiguous_mask_sorted = (
         has_valid[:, tf.newaxis]
         & (positions >= mask_start[:, tf.newaxis])
         & (positions < mask_end[:, tf.newaxis])
         & (positions < valid_counts[:, tf.newaxis])
     )
     inverse_order = tf.argsort(sorted_order, axis=1, direction="ASCENDING", stable=True)
-    masked = tf.gather(masked_sorted, inverse_order, batch_dims=1)
+    contiguous_mask = tf.gather(contiguous_mask_sorted, inverse_order, batch_dims=1)
+    contiguous_mask = tf.logical_and(contiguous_mask, peak_valid_mask)
+
+    survivors = tf.logical_and(peak_valid_mask, tf.logical_not(contiguous_mask))
+    survivor_counts = tf.reduce_sum(tf.cast(survivors, tf.int32), axis=1)
+
+    random_drop_fraction = tf.random.uniform(
+        [batch_size],
+        minval=tf.cast(random_drop_fraction_min, tf.float32),
+        maxval=tf.cast(random_drop_fraction_max, tf.float32),
+        dtype=tf.float32,
+    )
+    random_drop_count = tf.cast(
+        tf.floor(tf.cast(survivor_counts, tf.float32) * random_drop_fraction),
+        tf.int32,
+    )
+    random_drop_count = tf.minimum(random_drop_count, survivor_counts)
+
+    random_scores = tf.random.uniform(tf.shape(peak_mz), dtype=tf.float32)
+    random_scores = tf.where(
+        survivors,
+        random_scores,
+        tf.fill(tf.shape(random_scores), tf.cast(float("-inf"), random_scores.dtype)),
+    )
+    random_order = tf.argsort(random_scores, axis=1, direction="DESCENDING", stable=True)
+    random_drop_sorted = positions < random_drop_count[:, tf.newaxis]
+    inverse_random_order = tf.argsort(
+        random_order,
+        axis=1,
+        direction="ASCENDING",
+        stable=True,
+    )
+    random_drop = tf.gather(random_drop_sorted, inverse_random_order, batch_dims=1)
+    random_drop = tf.logical_and(random_drop, survivors)
+
+    masked = tf.logical_or(contiguous_mask, random_drop)
     masked = tf.logical_and(masked, peak_valid_mask)
-
-    # Independent random masking: additionally mask each valid, non-contiguous-masked
-    # peak with probability random_mask_prob. This dramatically increases mask
-    # pattern diversity beyond the contiguous-only scheme.
-    if random_mask_prob > 0.0:
-        random_coins = tf.random.uniform(tf.shape(peak_mz), dtype=tf.float32)
-        random_drop = random_coins < random_mask_prob
-        random_drop = tf.logical_and(random_drop, peak_valid_mask)
-        random_drop = tf.logical_and(random_drop, tf.logical_not(masked))
-        masked = tf.logical_or(masked, random_drop)
-
-    view_valid = tf.logical_and(peak_valid_mask, tf.logical_not(masked))
-
-    # jitterable should be view_valid now (since masked are dropped)
-    jitterable = view_valid
-
-    mz_noise = tf.random.normal(tf.shape(peak_mz), stddev=mz_jitter_std, dtype=peak_mz.dtype)
-    mz = tf.where(jitterable, peak_mz + mz_noise, tf.zeros_like(peak_mz))
-    mz = tf.clip_by_value(mz, 0.0, 1.0)
-
-    intensity_noise = tf.random.normal(
-        tf.shape(peak_intensity),
-        stddev=intensity_jitter_std,
-        dtype=peak_intensity.dtype,
-    )
-    intensity = tf.where(
-        jitterable,
-        peak_intensity + intensity_noise,
-        tf.zeros_like(peak_intensity),
-    )
-    intensity = tf.clip_by_value(intensity, 0.0, 1.0)
-    intensity = tf.where(jitterable, intensity, tf.zeros_like(intensity))
 
     valid_counts_safe = tf.maximum(
         tf.reduce_sum(tf.cast(peak_valid_mask, tf.float32), axis=1),
@@ -656,29 +661,53 @@ def _augment_masked_view_tf(
     )
     masked_counts = tf.reduce_sum(tf.cast(masked, tf.float32), axis=1)
     masked_fraction = tf.reduce_mean(masked_counts / valid_counts_safe)
+    return masked, masked_fraction
 
-    return (
-        mz,
-        intensity,
-        view_valid,
-        masked,
-        masked_fraction,
+
+@tf.function
+def _compact_peaks_after_drop_tf(
+    peak_mz: tf.Tensor,
+    peak_intensity: tf.Tensor,
+    peak_valid_mask: tf.Tensor,
+    masked: tf.Tensor,
+) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
+    view_valid = tf.logical_and(peak_valid_mask, tf.logical_not(masked))
+    num_peaks = tf.shape(peak_mz)[1]
+    positions = tf.range(num_peaks, dtype=tf.int32)[tf.newaxis, :]
+    invalid_positions = positions + num_peaks
+    pack_keys = tf.where(view_valid, positions, invalid_positions)
+    packed_order = tf.argsort(pack_keys, axis=1, direction="ASCENDING", stable=True)
+
+    packed_mz = tf.gather(peak_mz, packed_order, batch_dims=1)
+    packed_intensity = tf.gather(peak_intensity, packed_order, batch_dims=1)
+    packed_valid = tf.gather(view_valid, packed_order, batch_dims=1)
+    packed_masked = tf.gather(masked, packed_order, batch_dims=1)
+
+    packed_mz = tf.where(packed_valid, packed_mz, tf.zeros_like(packed_mz))
+    packed_intensity = tf.where(
+        packed_valid,
+        packed_intensity,
+        tf.zeros_like(packed_intensity),
     )
+    packed_masked = tf.where(
+        packed_valid,
+        tf.zeros_like(packed_masked),
+        packed_masked,
+    )
+    return packed_mz, packed_intensity, packed_valid, packed_masked
 
 
-def _augment_unmasked_view_tf(
+@tf.function
+def _apply_peak_jitter_tf(
     peak_mz: tf.Tensor,
     peak_intensity: tf.Tensor,
     peak_valid_mask: tf.Tensor,
     *,
     mz_jitter_std: float,
     intensity_jitter_std: float,
-) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
-    view_valid = peak_valid_mask
-    masked = tf.zeros_like(peak_valid_mask)
-
+) -> tuple[tf.Tensor, tf.Tensor]:
     mz_noise = tf.random.normal(tf.shape(peak_mz), stddev=mz_jitter_std, dtype=peak_mz.dtype)
-    mz = tf.where(view_valid, peak_mz + mz_noise, tf.zeros_like(peak_mz))
+    mz = tf.where(peak_valid_mask, peak_mz + mz_noise, tf.zeros_like(peak_mz))
     mz = tf.clip_by_value(mz, 0.0, 1.0)
 
     intensity_noise = tf.random.normal(
@@ -687,28 +716,59 @@ def _augment_unmasked_view_tf(
         dtype=peak_intensity.dtype,
     )
     intensity = tf.where(
-        view_valid,
+        peak_valid_mask,
         peak_intensity + intensity_noise,
         tf.zeros_like(peak_intensity),
     )
     intensity = tf.clip_by_value(intensity, 0.0, 1.0)
-    intensity = tf.where(view_valid, intensity, tf.zeros_like(intensity))
+    intensity = tf.where(peak_valid_mask, intensity, tf.zeros_like(intensity))
+    return mz, intensity
 
-    return mz, intensity, view_valid, masked
+
+def _augment_view_tf(
+    peak_mz: tf.Tensor,
+    peak_intensity: tf.Tensor,
+    peak_valid_mask: tf.Tensor,
+    *,
+    contiguous_mask_fraction_min: float,
+    contiguous_mask_fraction_max: float,
+    random_drop_fraction_min: float,
+    random_drop_fraction_max: float,
+    mz_jitter_std: float,
+    intensity_jitter_std: float,
+) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
+    masked, masked_fraction = _sample_contiguous_and_random_drop_mask_tf(
+        peak_mz,
+        peak_valid_mask,
+        contiguous_mask_fraction_min=contiguous_mask_fraction_min,
+        contiguous_mask_fraction_max=contiguous_mask_fraction_max,
+        random_drop_fraction_min=random_drop_fraction_min,
+        random_drop_fraction_max=random_drop_fraction_max,
+    )
+    compact_mz, compact_intensity, compact_valid, compact_masked = _compact_peaks_after_drop_tf(
+        peak_mz,
+        peak_intensity,
+        peak_valid_mask,
+        masked,
+    )
+    view_mz, view_intensity = _apply_peak_jitter_tf(
+        compact_mz,
+        compact_intensity,
+        compact_valid,
+        mz_jitter_std=mz_jitter_std,
+        intensity_jitter_std=intensity_jitter_std,
+    )
+    return view_mz, view_intensity, compact_valid, compact_masked, masked_fraction
 
 
 def _augment_sigreg_batch_tf(
     *,
-    contiguous_mask_fraction: float,
-    contiguous_mask_min_len: int,
-    random_mask_prob: float,
+    contiguous_mask_fraction_min: float,
+    contiguous_mask_fraction_max: float,
+    random_drop_fraction_min: float,
+    random_drop_fraction_max: float,
     mz_jitter_std: float,
     intensity_jitter_std: float,
-    fill_invalid_with_noise: bool = _DEFAULT_SIGREG_FILL_INVALID_WITH_NOISE,
-    noise_mz_min: float = _DEFAULT_SIGREG_NOISE_MZ_MIN,
-    noise_mz_max: float = _DEFAULT_SIGREG_NOISE_MZ_MAX,
-    noise_intensity_mean: float = _DEFAULT_SIGREG_NOISE_INTENSITY_MEAN,
-    noise_intensity_std: float = _DEFAULT_SIGREG_NOISE_INTENSITY_STD,
 ) -> Callable[[dict], dict]:
     def apply(batch: dict) -> dict:
         peak_mz = batch["peak_mz"]
@@ -716,86 +776,35 @@ def _augment_sigreg_batch_tf(
         peak_valid_mask = batch["peak_valid_mask"]
         precursor_mz = batch["precursor_mz"]
 
-        view1_mz, view1_int, view1_valid, view1_masked, view1_masked_fraction = _augment_masked_view_tf(
+        view1_mz, view1_int, view1_valid, view1_masked, view1_masked_fraction = _augment_view_tf(
             peak_mz,
             peak_intensity,
             peak_valid_mask,
-            contiguous_mask_fraction=contiguous_mask_fraction,
-            contiguous_mask_min_len=contiguous_mask_min_len,
-            random_mask_prob=random_mask_prob,
+            contiguous_mask_fraction_min=contiguous_mask_fraction_min,
+            contiguous_mask_fraction_max=contiguous_mask_fraction_max,
+            random_drop_fraction_min=random_drop_fraction_min,
+            random_drop_fraction_max=random_drop_fraction_max,
             mz_jitter_std=mz_jitter_std,
             intensity_jitter_std=intensity_jitter_std,
         )
-        view2_mz, view2_int, view2_valid, view2_masked = _augment_unmasked_view_tf(
+        view2_mz, view2_int, view2_valid, view2_masked, _ = _augment_view_tf(
             peak_mz,
             peak_intensity,
             peak_valid_mask,
+            contiguous_mask_fraction_min=contiguous_mask_fraction_min,
+            contiguous_mask_fraction_max=contiguous_mask_fraction_max,
+            random_drop_fraction_min=random_drop_fraction_min,
+            random_drop_fraction_max=random_drop_fraction_max,
             mz_jitter_std=mz_jitter_std,
             intensity_jitter_std=intensity_jitter_std,
         )
-
-        if fill_invalid_with_noise:
-            view1_noise_mz = tf.random.uniform(
-                tf.shape(view1_mz),
-                minval=noise_mz_min,
-                maxval=noise_mz_max,
-                dtype=view1_mz.dtype,
-            )
-            view1_noise_intensity = tf.random.truncated_normal(
-                tf.shape(view1_int),
-                mean=noise_intensity_mean,
-                stddev=noise_intensity_std,
-                dtype=view1_int.dtype,
-            )
-            view1_noise_intensity = tf.clip_by_value(view1_noise_intensity, 0.0, 1.0)
-            view1_mz = tf.where(view1_valid, view1_mz, view1_noise_mz)
-            view1_int = tf.where(view1_valid, view1_int, view1_noise_intensity)
-
-            view2_noise_mz = tf.random.uniform(
-                tf.shape(view2_mz),
-                minval=noise_mz_min,
-                maxval=noise_mz_max,
-                dtype=view2_mz.dtype,
-            )
-            view2_noise_intensity = tf.random.truncated_normal(
-                tf.shape(view2_int),
-                mean=noise_intensity_mean,
-                stddev=noise_intensity_std,
-                dtype=view2_int.dtype,
-            )
-            view2_noise_intensity = tf.clip_by_value(view2_noise_intensity, 0.0, 1.0)
-            view2_mz = tf.where(view2_valid, view2_mz, view2_noise_mz)
-            view2_int = tf.where(view2_valid, view2_int, view2_noise_intensity)
 
         out = dict(batch)
         out["fused_mz"] = tf.concat([view1_mz, view2_mz], axis=0)
         out["fused_intensity"] = tf.concat([view1_int, view2_int], axis=0)
         out["fused_precursor_mz"] = tf.concat([precursor_mz, precursor_mz], axis=0)
-        out["fused_original_valid_mask"] = tf.concat([view1_valid, view2_valid], axis=0)
+        out["fused_valid_mask"] = tf.concat([view1_valid, view2_valid], axis=0)
         out["fused_masked_positions"] = tf.concat([view1_masked, view2_masked], axis=0)
-
-        if fill_invalid_with_noise:
-            out["fused_valid_mask"] = tf.ones_like(out["fused_original_valid_mask"])
-            # Re-sort by mz after noise fill: random mz values break the
-            # original sort order, so we restore ascending-mz ordering.
-            sort_idx = tf.argsort(
-                out["fused_mz"], axis=1, direction="ASCENDING", stable=True,
-            )
-            out["fused_mz"] = tf.gather(out["fused_mz"], sort_idx, batch_dims=1)
-            out["fused_intensity"] = tf.gather(
-                out["fused_intensity"], sort_idx, batch_dims=1,
-            )
-            out["fused_original_valid_mask"] = tf.gather(
-                out["fused_original_valid_mask"], sort_idx, batch_dims=1,
-            )
-            out["fused_masked_positions"] = tf.gather(
-                out["fused_masked_positions"], sort_idx, batch_dims=1,
-            )
-            out["fused_valid_mask"] = tf.gather(
-                out["fused_valid_mask"], sort_idx, batch_dims=1,
-            )
-        else:
-            out["fused_valid_mask"] = out["fused_original_valid_mask"]
         out["view1_masked_fraction"] = view1_masked_fraction
         return out
 
@@ -940,16 +949,12 @@ def _build_dataset(
     min_peak_intensity: float,
     mz_representation: str,
     include_sigreg_augmentation: bool,
-    sigreg_contiguous_mask_fraction: float,
-    sigreg_contiguous_mask_min_len: int,
-    sigreg_random_mask_prob: float,
+    sigreg_contiguous_mask_fraction_min: float,
+    sigreg_contiguous_mask_fraction_max: float,
+    sigreg_random_drop_fraction_min: float,
+    sigreg_random_drop_fraction_max: float,
     sigreg_mz_jitter_std: float,
     sigreg_intensity_jitter_std: float,
-    sigreg_fill_invalid_with_noise: bool = _DEFAULT_SIGREG_FILL_INVALID_WITH_NOISE,
-    sigreg_noise_mz_min: float = _DEFAULT_SIGREG_NOISE_MZ_MIN,
-    sigreg_noise_mz_max: float = _DEFAULT_SIGREG_NOISE_MZ_MAX,
-    sigreg_noise_intensity_mean: float = _DEFAULT_SIGREG_NOISE_INTENSITY_MEAN,
-    sigreg_noise_intensity_std: float = _DEFAULT_SIGREG_NOISE_INTENSITY_STD,
     peak_ordering: str = "intensity",
     num_parallel_reads: int | None = None,
 ) -> tf.data.Dataset:
@@ -979,16 +984,12 @@ def _build_dataset(
     if include_sigreg_augmentation:
         ds = ds.map(
             _augment_sigreg_batch_tf(
-                contiguous_mask_fraction=sigreg_contiguous_mask_fraction,
-                contiguous_mask_min_len=sigreg_contiguous_mask_min_len,
-                random_mask_prob=sigreg_random_mask_prob,
+                contiguous_mask_fraction_min=sigreg_contiguous_mask_fraction_min,
+                contiguous_mask_fraction_max=sigreg_contiguous_mask_fraction_max,
+                random_drop_fraction_min=sigreg_random_drop_fraction_min,
+                random_drop_fraction_max=sigreg_random_drop_fraction_max,
                 mz_jitter_std=sigreg_mz_jitter_std,
                 intensity_jitter_std=sigreg_intensity_jitter_std,
-                fill_invalid_with_noise=sigreg_fill_invalid_with_noise,
-                noise_mz_min=sigreg_noise_mz_min,
-                noise_mz_max=sigreg_noise_mz_max,
-                noise_intensity_mean=sigreg_noise_intensity_mean,
-                noise_intensity_std=sigreg_noise_intensity_std,
             ),
             num_parallel_calls=tf.data.AUTOTUNE,
         )
@@ -1183,42 +1184,21 @@ class TfLightningDataModule:
         )
         self.mz_representation = str(config.get("mz_representation", "mz"))
         self.peak_ordering = str(config.get("peak_ordering", "intensity"))
-        self.sigreg_contiguous_mask_fraction = float(
-            config.get("sigreg_contiguous_mask_fraction", 0.25)
+        self.sigreg_contiguous_mask_fraction_min = float(
+            config.get("sigreg_contiguous_mask_fraction_min", 0.10)
         )
-        self.sigreg_contiguous_mask_min_len = int(
-            config.get("sigreg_contiguous_mask_min_len", 1)
+        self.sigreg_contiguous_mask_fraction_max = float(
+            config.get("sigreg_contiguous_mask_fraction_max", 0.40)
         )
-        self.sigreg_random_mask_prob = float(
-            config.get("sigreg_random_mask_prob", 0.05)
+        self.sigreg_random_drop_fraction_min = float(
+            config.get("sigreg_random_drop_fraction_min", 0.05)
+        )
+        self.sigreg_random_drop_fraction_max = float(
+            config.get("sigreg_random_drop_fraction_max", 0.15)
         )
         self.sigreg_mz_jitter_std = float(config.get("sigreg_mz_jitter_std", 0.005))
         self.sigreg_intensity_jitter_std = float(
             config.get("sigreg_intensity_jitter_std", 0.05)
-        )
-        self.sigreg_fill_invalid_with_noise = bool(
-            config.get(
-                "sigreg_fill_invalid_with_noise",
-                _DEFAULT_SIGREG_FILL_INVALID_WITH_NOISE,
-            )
-        )
-        self.sigreg_noise_mz_min = float(
-            config.get("sigreg_noise_mz_min", _DEFAULT_SIGREG_NOISE_MZ_MIN)
-        )
-        self.sigreg_noise_mz_max = float(
-            config.get("sigreg_noise_mz_max", _DEFAULT_SIGREG_NOISE_MZ_MAX)
-        )
-        self.sigreg_noise_intensity_mean = float(
-            config.get(
-                "sigreg_noise_intensity_mean",
-                _DEFAULT_SIGREG_NOISE_INTENSITY_MEAN,
-            )
-        )
-        self.sigreg_noise_intensity_std = float(
-            config.get(
-                "sigreg_noise_intensity_std",
-                _DEFAULT_SIGREG_NOISE_INTENSITY_STD,
-            )
         )
 
         self.metadata = _ensure_processed(
@@ -1327,16 +1307,12 @@ class TfLightningDataModule:
             min_peak_intensity=self.min_peak_intensity,
             mz_representation=self.mz_representation,
             include_sigreg_augmentation=True,
-            sigreg_contiguous_mask_fraction=self.sigreg_contiguous_mask_fraction,
-            sigreg_contiguous_mask_min_len=self.sigreg_contiguous_mask_min_len,
-            sigreg_random_mask_prob=self.sigreg_random_mask_prob,
+            sigreg_contiguous_mask_fraction_min=self.sigreg_contiguous_mask_fraction_min,
+            sigreg_contiguous_mask_fraction_max=self.sigreg_contiguous_mask_fraction_max,
+            sigreg_random_drop_fraction_min=self.sigreg_random_drop_fraction_min,
+            sigreg_random_drop_fraction_max=self.sigreg_random_drop_fraction_max,
             sigreg_mz_jitter_std=self.sigreg_mz_jitter_std,
             sigreg_intensity_jitter_std=self.sigreg_intensity_jitter_std,
-            sigreg_fill_invalid_with_noise=self.sigreg_fill_invalid_with_noise,
-            sigreg_noise_mz_min=self.sigreg_noise_mz_min,
-            sigreg_noise_mz_max=self.sigreg_noise_mz_max,
-            sigreg_noise_intensity_mean=self.sigreg_noise_intensity_mean,
-            sigreg_noise_intensity_std=self.sigreg_noise_intensity_std,
             peak_ordering=self.peak_ordering,
         )
 
@@ -1424,9 +1400,10 @@ class TfLightningDataModule:
             min_peak_intensity=self.min_peak_intensity,
             mz_representation=self.mz_representation,
             include_sigreg_augmentation=False,
-            sigreg_contiguous_mask_fraction=self.sigreg_contiguous_mask_fraction,
-            sigreg_contiguous_mask_min_len=self.sigreg_contiguous_mask_min_len,
-            sigreg_random_mask_prob=self.sigreg_random_mask_prob,
+            sigreg_contiguous_mask_fraction_min=self.sigreg_contiguous_mask_fraction_min,
+            sigreg_contiguous_mask_fraction_max=self.sigreg_contiguous_mask_fraction_max,
+            sigreg_random_drop_fraction_min=self.sigreg_random_drop_fraction_min,
+            sigreg_random_drop_fraction_max=self.sigreg_random_drop_fraction_max,
             sigreg_mz_jitter_std=self.sigreg_mz_jitter_std,
             sigreg_intensity_jitter_std=self.sigreg_intensity_jitter_std,
             peak_ordering=peak_ordering,

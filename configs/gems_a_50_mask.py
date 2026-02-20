@@ -51,11 +51,12 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_contiguous_mask_fraction = 0.25
     cfg.sigreg_contiguous_mask_min_len = 1
     cfg.sigreg_random_mask_prob = 0.05
+    cfg.sigreg_contiguous_mask_fraction_min = 0.10
+    cfg.sigreg_contiguous_mask_fraction_max = 0.40
+    cfg.sigreg_random_drop_fraction_min = 0.05
+    cfg.sigreg_random_drop_fraction_max = 0.15
     cfg.sigreg_mz_jitter_std = 0.0001
     cfg.sigreg_intensity_jitter_std = 0.001
-    cfg.sigreg_fill_invalid_with_noise = True
-    cfg.sigreg_noise_intensity_mean = 7e-4
-    cfg.sigreg_noise_intensity_std = 2e-4
     cfg.sigreg_proj_norm = "batchnorm"
     # Training (short smoke run)
     cfg.num_epochs = 5
