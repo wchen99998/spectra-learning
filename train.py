@@ -148,7 +148,6 @@ class _BatchPrefetcher:
 def _train_step_impl(
     model: PeakSetSIGReg,
     batch: dict[str, torch.Tensor],
-    bcs_projection: torch.Tensor,
     optimizers: list[torch.optim.Optimizer],
     schedulers: list[CapturableCosineSchedule],
     autocast_dtype: torch.dtype | None,
@@ -159,7 +158,7 @@ def _train_step_impl(
     else:
         autocast_ctx = torch.autocast(device_type=device_type, dtype=autocast_dtype)
     with autocast_ctx:
-        metrics = model.forward_augmented(batch, bcs_projection=bcs_projection)
+        metrics = model.forward_augmented(batch)
     metrics["loss"].backward()
     for opt in optimizers:
         opt.step()
@@ -329,12 +328,9 @@ def _run_validation(
     with torch.no_grad():
         for batch_idx, batch in enumerate(val_loader):
             batch = _move_batch_to_device(batch, device)
-            bcs_projection = model.sample_bcs_projection(
-                device=device, seed=seed + 7_000_000 + epoch * 100_000 + batch_idx,
-            )
             torch.compiler.cudagraph_mark_step_begin()
-            metrics = compiled_forward(batch, bcs_projection=bcs_projection)
-            bs = int(batch["fused_mz"].shape[0]) // 2
+            metrics = compiled_forward(batch)
+            bs = int(batch["fused_mz"].shape[0]) // model.num_views
             count += bs
             for key, value in metrics.items():
                 val = float(value) * bs
@@ -426,14 +422,10 @@ def train_and_evaluate(
             if batch is None:
                 break
 
-            bcs_projection = model.sample_bcs_projection(
-                device=device, seed=seed + 6_000_000 + global_step,
-            )
             torch.compiler.cudagraph_mark_step_begin()
             metrics = compiled_step(
                 model,
                 batch,
-                bcs_projection,
                 optimizers,
                 schedulers,
                 autocast_dtype,
