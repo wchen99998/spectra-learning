@@ -16,6 +16,7 @@ experiments/
 
 *.png
 
-key.json
+*.json
+*.xml
 
 .serena/
