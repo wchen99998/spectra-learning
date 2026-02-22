@@ -2,9 +2,9 @@
 
 Architecture:
 - PeakSetEncoder: MLP embedder -> non-causal Transformer -> peak embeddings
-- Two-view spectrum augmentation (one masked view + one unmasked jittered view)
+- Multi-crop augmentation (2 global + 6 local views with random peak retention)
 - Optional projector on pooled embeddings
-- SIGReg objective: MSE(z1, z2) + lambda * BCS(z1, z2)
+- LeJEPA loss: centroid invariance + SIGReg Gaussianity regularizer
 """
 
 from __future__ import annotations
@@ -14,12 +14,8 @@ import math
 import torch
 from torch import nn
 
-from models.augmentation import (
-    augment_masked_view,
-    augment_sigreg_batch,
-    augment_unmasked_view,
-)
-from models.losses import BCSLoss
+from models.augmentation import augment_multicrop_batch
+from models.losses import SIGReg
 from networks import set_transformer_torch, transformer_torch
 from networks.transformer_torch import create_padding_block_mask
 
@@ -80,8 +76,8 @@ class PeakFeatureEmbedder(nn.Module):
             max_freq=mz_fourier_max_freq,
             learnable=mz_fourier_learnable,
         )
-        # input: fourier(mz) + raw_mz + intensity
-        input_dim = self.mz_fourier.output_dim + 1 + 1
+        # input: fourier(mz) + raw_mz + intensity + precursor_mz
+        input_dim = self.mz_fourier.output_dim + 1 + 1 + 1
         self.mlp = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.SiLU(),
@@ -100,8 +96,9 @@ class PeakFeatureEmbedder(nn.Module):
     ) -> torch.Tensor:
         mz_fourier = self.mz_fourier(peak_mz)
         features = torch.cat([
-            mz_fourier, 
+            mz_fourier,
             peak_mz.unsqueeze(-1),
+            precursor_mz.unsqueeze(-1).unsqueeze(-1).expand(-1, peak_mz.shape[1], -1),
             peak_intensity.unsqueeze(-1),
         ], dim=-1)
         return self.mlp(features)
@@ -238,6 +235,7 @@ class PeakSetEncoder(nn.Module):
                 attention_mlp_multiple=attention_mlp_multiple,
                 use_rope=self.use_rope,
             )
+        self.final_norm = nn.RMSNorm(model_dim, eps=1e-5)
 
     def forward(
         self,
@@ -258,7 +256,7 @@ class PeakSetEncoder(nn.Module):
                 q_block_mask = set_transformer_torch.create_q_padding_block_mask(valid_mask, kv_len=m)
             for block in self.blocks:
                 x = block(x, kv_block_mask=kv_block_mask, q_block_mask=q_block_mask)
-            return x
+            return self.final_norm(x)
 
         autocast_dtype = None
         run_high_precision_stem = False
@@ -312,11 +310,11 @@ class PeakSetEncoder(nn.Module):
 
         for block in self.blocks[start_block:]:
             x = block(x, freqs_cos=freqs_cos, freqs_sin=freqs_sin, block_mask=block_mask)
-        return x
+        return self.final_norm(x)
 
 
 class PeakSetSIGReg(nn.Module):
-    """Peak-set strict SIGReg model with two-view augmentation."""
+    """Peak-set SIGReg model with multi-crop augmentation (LeJEPA-style)."""
 
     def __init__(
         self,
@@ -338,11 +336,12 @@ class PeakSetSIGReg(nn.Module):
         sigreg_proj_hidden_dim: int = 2048,
         sigreg_proj_output_dim: int = 128,
         sigreg_proj_norm: str = "rmsnorm",
-        bcs_num_slices: int = 256,
-        sigreg_lambda: float = 10.0,
-        sigreg_contiguous_mask_fraction: float = 0.25,
-        sigreg_contiguous_mask_min_len: int = 1,
-        sigreg_random_mask_prob: float = 0.0,
+        sigreg_num_slices: int = 256,
+        sigreg_lambda: float = 0.1,
+        multicrop_num_global_views: int = 2,
+        multicrop_num_local_views: int = 6,
+        multicrop_global_keep_fraction: float = 0.80,
+        multicrop_local_keep_fraction: float = 0.25,
         sigreg_mz_jitter_std: float = 0.005,
         sigreg_intensity_jitter_std: float = 0.05,
         pooling_type: str = "pma",
@@ -357,11 +356,14 @@ class PeakSetSIGReg(nn.Module):
         self.model_dim = model_dim
         self.sigreg_dim = sigreg_proj_output_dim if sigreg_use_projector else model_dim
 
-        self.sigreg_contiguous_mask_fraction = sigreg_contiguous_mask_fraction
-        self.sigreg_contiguous_mask_min_len = int(sigreg_contiguous_mask_min_len)
-        self.sigreg_random_mask_prob = sigreg_random_mask_prob
+        self.multicrop_num_global_views = int(multicrop_num_global_views)
+        self.multicrop_num_local_views = int(multicrop_num_local_views)
+        self.multicrop_global_keep_fraction = float(multicrop_global_keep_fraction)
+        self.multicrop_local_keep_fraction = float(multicrop_local_keep_fraction)
+        self.num_views = self.multicrop_num_global_views + self.multicrop_num_local_views
         self.sigreg_mz_jitter_std = sigreg_mz_jitter_std
         self.sigreg_intensity_jitter_std = sigreg_intensity_jitter_std
+        self.lmbd = float(sigreg_lambda)
         self.pooling_type = pooling_type
         self.pma_fp16_high_precision = bool(pma_fp16_high_precision)
         self.pma_num_seeds = int(pma_num_seeds)
@@ -416,7 +418,7 @@ class PeakSetSIGReg(nn.Module):
         )
         self.pool_norm = nn.RMSNorm(model_dim, eps=1e-5)
 
-        self.sigreg_loss = BCSLoss(num_slices=bcs_num_slices, lmbd=sigreg_lambda)
+        self.sigreg = SIGReg(num_slices=int(sigreg_num_slices))
 
     def _mean_pool(
         self,
@@ -479,52 +481,16 @@ class PeakSetSIGReg(nn.Module):
             return pooled_raw, pooled_raw
         raise NotImplementedError(f"Unknown pooling type: {self.pooling_type}")
 
-    def _augment_view(
-        self,
-        peak_mz: torch.Tensor,
-        peak_intensity: torch.Tensor,
-        peak_valid_mask: torch.Tensor,
-    ) -> tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-    ]:
-        return augment_masked_view(
-            peak_mz,
-            peak_intensity,
-            peak_valid_mask,
-            contiguous_mask_fraction=self.sigreg_contiguous_mask_fraction,
-            contiguous_mask_min_len=self.sigreg_contiguous_mask_min_len,
-            random_mask_prob=self.sigreg_random_mask_prob,
-            mz_jitter_std=self.sigreg_mz_jitter_std,
-            intensity_jitter_std=self.sigreg_intensity_jitter_std,
-        )
-
-    def _augment_unmasked_view(
-        self,
-        peak_mz: torch.Tensor,
-        peak_intensity: torch.Tensor,
-        peak_valid_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        return augment_unmasked_view(
-            peak_mz,
-            peak_intensity,
-            peak_valid_mask,
-            mz_jitter_std=self.sigreg_mz_jitter_std,
-            intensity_jitter_std=self.sigreg_intensity_jitter_std,
-        )
-
     def augment_batch(
         self,
         batch: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
-        return augment_sigreg_batch(
+        return augment_multicrop_batch(
             batch,
-            contiguous_mask_fraction=self.sigreg_contiguous_mask_fraction,
-            contiguous_mask_min_len=self.sigreg_contiguous_mask_min_len,
-            random_mask_prob=self.sigreg_random_mask_prob,
+            num_global_views=self.multicrop_num_global_views,
+            num_local_views=self.multicrop_num_local_views,
+            global_keep_fraction=self.multicrop_global_keep_fraction,
+            local_keep_fraction=self.multicrop_local_keep_fraction,
             mz_jitter_std=self.sigreg_mz_jitter_std,
             intensity_jitter_std=self.sigreg_intensity_jitter_std,
         )
@@ -532,14 +498,11 @@ class PeakSetSIGReg(nn.Module):
     def forward_augmented(
         self,
         augmented_batch: dict[str, torch.Tensor],
-        *,
-        bcs_projection: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         fused_mz = augmented_batch["fused_mz"]
         fused_intensity = augmented_batch["fused_intensity"]
         fused_valid_mask = augmented_batch["fused_valid_mask"]
         fused_precursor_mz = augmented_batch["fused_precursor_mz"]
-        masked_fraction = augmented_batch["view1_masked_fraction"]
 
         fused_emb = self.encoder(
             fused_mz,
@@ -549,7 +512,20 @@ class PeakSetSIGReg(nn.Module):
         )
         fused_pooled, fused_pooled_raw = self.pool_with_raw(fused_emb, fused_valid_mask)
         fused_z = self.projector(fused_pooled)
-        z1, z2 = fused_z.chunk(2, dim=0)
+
+        V = self.num_views
+        proj = fused_z.reshape(V, -1, fused_z.size(-1))  # [V, B, D]
+
+        # LeJEPA centroid invariance
+        centroid = proj.mean(0)  # [B, D]
+        inv_loss = (centroid - proj).square().mean()
+
+        # SIGReg Gaussianity (samples random A internally)
+        sigreg_loss = self.sigreg(proj)
+
+        # Convex combination
+        loss = sigreg_loss * self.lmbd + inv_loss * (1.0 - self.lmbd)
+
         representation_variance = fused_z.float().var(dim=0, unbiased=False).mean()
         encoder_variance = fused_pooled.float().var(dim=0, unbiased=False).mean()
         encoder_variance_raw = fused_pooled_raw.float().var(dim=0, unbiased=False).mean()
@@ -557,22 +533,20 @@ class PeakSetSIGReg(nn.Module):
         encoder_pooled_raw_rms = fused_pooled_raw.float().pow(2).mean(dim=-1).sqrt().mean()
         pool_norm_weight_abs_mean = self.pool_norm.weight.abs().mean()
 
-        # Alignment: mean cosine similarity between paired views (higher = better)
+        # Alignment/uniformity on first two views (globals)
+        z1, z2 = proj[0], proj[1]
         z1_norm = nn.functional.normalize(z1, dim=-1)
         z2_norm = nn.functional.normalize(z2, dim=-1)
         alignment = (z1_norm * z2_norm).sum(dim=-1).mean()
-        # Uniformity: mean cosine similarity between unpaired samples (lower = better)
         uniformity = (z1_norm @ z2_norm.T).fill_diagonal_(0).sum() / (z1.shape[0] * (z1.shape[0] - 1))
 
-        loss_dict = self.sigreg_loss(z1, z2, proj=bcs_projection)
         valid_fraction = fused_valid_mask.float().mean()
 
         return {
-            "loss": loss_dict["loss"],
-            "bcs_loss": loss_dict["bcs_loss"],
-            "invariance_loss": loss_dict["invariance_loss"],
+            "loss": loss,
+            "sigreg_loss": sigreg_loss,
+            "invariance_loss": inv_loss,
             "valid_fraction": valid_fraction,
-            "masked_fraction": masked_fraction,
             "representation_variance": representation_variance,
             "encoder_variance": encoder_variance,
             "encoder_variance_raw": encoder_variance_raw,
@@ -588,10 +562,9 @@ class PeakSetSIGReg(nn.Module):
         batch: dict[str, torch.Tensor],
         *,
         train: bool = True,
-        bcs_projection: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         augmented_batch = self.augment_batch(batch)
-        return self.forward_augmented(augmented_batch, bcs_projection=bcs_projection)
+        return self.forward_augmented(augmented_batch)
 
     def encode(
         self,
@@ -616,15 +589,3 @@ class PeakSetSIGReg(nn.Module):
     ):
         metrics = self(batch, train=train)
         return metrics["loss"], metrics
-
-    def sample_bcs_projection(
-        self,
-        *,
-        device: torch.device,
-        seed: int | None = None,
-    ) -> torch.Tensor:
-        return self.sigreg_loss.sample_projection(
-            self.sigreg_dim,
-            device=device,
-            seed=seed,
-        )

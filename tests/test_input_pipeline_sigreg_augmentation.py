@@ -2,10 +2,10 @@ import unittest
 
 import tensorflow as tf
 
-from input_pipeline import _augment_sigreg_batch_tf
+from input_pipeline import _augment_multicrop_batch_tf
 
 
-class SigregInputAugmentationTests(unittest.TestCase):
+class MulticropInputAugmentationTests(unittest.TestCase):
     def _make_batch(self) -> dict[str, tf.Tensor]:
         peak_mz = tf.constant(
             [
@@ -36,58 +36,86 @@ class SigregInputAugmentationTests(unittest.TestCase):
             "precursor_mz": precursor_mz,
         }
 
-    def test_both_views_are_augmented_and_compacted(self):
+    def test_multicrop_output_shape(self):
         tf.random.set_seed(1234)
         batch = self._make_batch()
-        aug = _augment_sigreg_batch_tf(
-            contiguous_mask_fraction_min=0.30,
-            contiguous_mask_fraction_max=0.30,
-            random_drop_fraction_min=0.10,
-            random_drop_fraction_max=0.10,
+        num_global = 2
+        num_local = 3
+        num_views = num_global + num_local
+        aug = _augment_multicrop_batch_tf(
+            num_global_views=num_global,
+            num_local_views=num_local,
+            global_keep_fraction=0.80,
+            local_keep_fraction=0.25,
             mz_jitter_std=0.0,
             intensity_jitter_std=0.0,
         )
         out = aug(batch)
 
+        B = 2
+        N = 6
+        self.assertEqual(out["fused_mz"].shape, (num_views * B, N))
+        self.assertEqual(out["fused_intensity"].shape, (num_views * B, N))
+        self.assertEqual(out["fused_valid_mask"].shape, (num_views * B, N))
+        self.assertEqual(out["fused_precursor_mz"].shape, (num_views * B,))
+
+    def test_multicrop_no_masked_positions_key(self):
+        batch = self._make_batch()
+        aug = _augment_multicrop_batch_tf(
+            num_global_views=2,
+            num_local_views=2,
+            global_keep_fraction=0.80,
+            local_keep_fraction=0.25,
+            mz_jitter_std=0.0,
+            intensity_jitter_std=0.0,
+        )
+        out = aug(batch)
+        self.assertNotIn("fused_masked_positions", out)
+        self.assertNotIn("view1_masked_fraction", out)
+
+    def test_global_views_keep_more_than_local(self):
+        tf.random.set_seed(42)
+        batch = self._make_batch()
+        num_global = 2
+        num_local = 3
+        aug = _augment_multicrop_batch_tf(
+            num_global_views=num_global,
+            num_local_views=num_local,
+            global_keep_fraction=0.80,
+            local_keep_fraction=0.25,
+            mz_jitter_std=0.0,
+            intensity_jitter_std=0.0,
+        )
+        out = aug(batch)
+
+        B = 2
         fused_valid = out["fused_valid_mask"]
-        b = tf.shape(batch["peak_mz"])[0]
-        original_valid_count = tf.reduce_sum(tf.cast(batch["peak_valid_mask"], tf.int32), axis=1)
-        view1_valid_count = tf.reduce_sum(tf.cast(fused_valid[:b], tf.int32), axis=1)
-        view2_valid_count = tf.reduce_sum(tf.cast(fused_valid[b:], tf.int32), axis=1)
+        global_valid = fused_valid[:num_global * B]
+        local_valid = fused_valid[num_global * B:]
 
-        self.assertTrue(bool(tf.reduce_all(view1_valid_count < original_valid_count).numpy()))
-        self.assertTrue(bool(tf.reduce_all(view2_valid_count < original_valid_count).numpy()))
+        global_avg = tf.reduce_mean(tf.reduce_sum(tf.cast(global_valid, tf.float32), axis=1))
+        local_avg = tf.reduce_mean(tf.reduce_sum(tf.cast(local_valid, tf.float32), axis=1))
 
-        for row in fused_valid.numpy():
+        self.assertGreater(float(global_avg.numpy()), float(local_avg.numpy()))
+
+    def test_compacted_valid_peaks_are_at_front(self):
+        tf.random.set_seed(99)
+        batch = self._make_batch()
+        aug = _augment_multicrop_batch_tf(
+            num_global_views=2,
+            num_local_views=2,
+            global_keep_fraction=0.80,
+            local_keep_fraction=0.25,
+            mz_jitter_std=0.0,
+            intensity_jitter_std=0.0,
+        )
+        out = aug(batch)
+
+        for row in out["fused_valid_mask"].numpy():
             valid_count = int(row.sum())
             self.assertTrue(row[:valid_count].all())
-            self.assertFalse(row[valid_count:].any())
-
-    def test_packed_masked_count_matches_dropped_valid_peaks(self):
-        tf.random.set_seed(5678)
-        batch = self._make_batch()
-        aug = _augment_sigreg_batch_tf(
-            contiguous_mask_fraction_min=0.40,
-            contiguous_mask_fraction_max=0.40,
-            random_drop_fraction_min=0.10,
-            random_drop_fraction_max=0.10,
-            mz_jitter_std=0.0,
-            intensity_jitter_std=0.0,
-        )
-        out = aug(batch)
-
-        b = tf.shape(batch["peak_mz"])[0]
-        original_valid_count = tf.reduce_sum(tf.cast(batch["peak_valid_mask"], tf.int32), axis=1)
-
-        fused_valid = out["fused_valid_mask"]
-        fused_masked = out["fused_masked_positions"]
-        view1_valid_count = tf.reduce_sum(tf.cast(fused_valid[:b], tf.int32), axis=1)
-        view2_valid_count = tf.reduce_sum(tf.cast(fused_valid[b:], tf.int32), axis=1)
-        view1_masked_count = tf.reduce_sum(tf.cast(fused_masked[:b], tf.int32), axis=1)
-        view2_masked_count = tf.reduce_sum(tf.cast(fused_masked[b:], tf.int32), axis=1)
-
-        self.assertTrue(bool(tf.reduce_all(view1_masked_count == (original_valid_count - view1_valid_count)).numpy()))
-        self.assertTrue(bool(tf.reduce_all(view2_masked_count == (original_valid_count - view2_valid_count)).numpy()))
+            if valid_count < len(row):
+                self.assertFalse(row[valid_count:].any())
 
 
 if __name__ == "__main__":

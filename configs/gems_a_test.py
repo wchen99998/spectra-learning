@@ -37,11 +37,13 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_use_projector = True
     cfg.sigreg_proj_hidden_dim = 2048
     cfg.sigreg_proj_output_dim = 128
-    cfg.sigreg_lambda = 10.0
-    cfg.sigreg_contiguous_mask_fraction = 0.2
-    cfg.sigreg_contiguous_mask_min_len = 1
-    cfg.sigreg_mz_jitter_std = 0.005
-    cfg.sigreg_intensity_jitter_std = 0.05
+    cfg.sigreg_lambda = 0.1
+    cfg.multicrop_num_global_views = 2
+    cfg.multicrop_num_local_views = 6
+    cfg.multicrop_global_keep_fraction = 0.80
+    cfg.multicrop_local_keep_fraction = 0.25
+    cfg.sigreg_mz_jitter_std = 0.0001
+    cfg.sigreg_intensity_jitter_std = 0.001
 
     # Training (short smoke run)
     cfg.num_epochs = 5

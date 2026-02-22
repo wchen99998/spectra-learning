@@ -556,112 +556,56 @@ def _ensure_processed(
 # -----------------------------------------------------------------------------
 
 @tf.function
-def _sample_contiguous_and_random_drop_mask_tf(
+def _ensure_nonempty_peakset_tf(
     peak_mz: tf.Tensor,
+    peak_intensity: tf.Tensor,
     peak_valid_mask: tf.Tensor,
-    *,
-    contiguous_mask_fraction_min: float,
-    contiguous_mask_fraction_max: float,
-    random_drop_fraction_min: float,
-    random_drop_fraction_max: float,
-) -> tuple[tf.Tensor, tf.Tensor]:
-    batch_size = tf.shape(peak_mz)[0]
-    num_peaks = tf.shape(peak_mz)[1]
-    has_valid = tf.reduce_any(peak_valid_mask, axis=1)
+) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
+    """Ensure each sample has at least one valid peak (fallback to index 0)."""
+    num_peaks = tf.shape(peak_valid_mask)[1]
+    has_valid = tf.reduce_any(peak_valid_mask, axis=1)  # [B]
+    needs_fallback = tf.logical_not(has_valid)
+    positions = tf.range(num_peaks, dtype=tf.int32)[tf.newaxis, :]
+    fallback = tf.logical_and(needs_fallback[:, tf.newaxis], positions == 0)
+    safe_valid_mask = tf.logical_or(peak_valid_mask, fallback)
+    return peak_mz, peak_intensity, safe_valid_mask
 
-    # Build contiguous interval on the physical m/z axis, independent of current
-    # tensor ordering.
-    sort_keys = tf.where(
+
+@tf.function
+def _random_keep_mask_tf(
+    peak_valid_mask: tf.Tensor,
+    keep_fraction: float,
+) -> tf.Tensor:
+    """Return a boolean *masked* tensor (True = dropped peak) that keeps *keep_fraction* of valid peaks."""
+    batch_size = tf.shape(peak_valid_mask)[0]
+    num_peaks = tf.shape(peak_valid_mask)[1]
+
+    valid_counts = tf.reduce_sum(tf.cast(peak_valid_mask, tf.int32), axis=1)  # [B]
+    keep_counts = tf.cast(
+        tf.round(tf.cast(valid_counts, tf.float32) * keep_fraction),
+        tf.int32,
+    )
+    keep_counts = tf.maximum(keep_counts, 1)
+
+    # Random scores; -inf on invalid positions so they sort last
+    scores = tf.random.uniform([batch_size, num_peaks], dtype=tf.float32)
+    scores = tf.where(
         peak_valid_mask,
-        peak_mz,
-        tf.fill(tf.shape(peak_mz), tf.cast(float("inf"), peak_mz.dtype)),
+        scores,
+        tf.fill([batch_size, num_peaks], tf.cast(float("-inf"), tf.float32)),
     )
-    sorted_order = tf.argsort(sort_keys, axis=1, direction="ASCENDING", stable=True)
-    sorted_valid = tf.gather(peak_valid_mask, sorted_order, batch_dims=1)
-    valid_counts = tf.reduce_sum(tf.cast(sorted_valid, tf.int32), axis=1)
-
-    contiguous_fraction = tf.random.uniform(
-        [batch_size],
-        minval=tf.cast(contiguous_mask_fraction_min, tf.float32),
-        maxval=tf.cast(contiguous_mask_fraction_max, tf.float32),
-        dtype=tf.float32,
-    )
-    contiguous_len = tf.cast(
-        tf.floor(tf.cast(valid_counts, tf.float32) * contiguous_fraction),
-        tf.int32,
-    )
-    contiguous_len = tf.where(
-        has_valid,
-        tf.maximum(contiguous_len, tf.ones_like(contiguous_len)),
-        tf.zeros_like(contiguous_len),
-    )
-    contiguous_len = tf.minimum(contiguous_len, valid_counts)
-
-    max_start_offset = valid_counts - contiguous_len + 1
-    sampled_offset = tf.cast(
-        tf.floor(
-            tf.random.uniform([batch_size], dtype=tf.float32)
-            * tf.cast(max_start_offset, tf.float32),
-        ),
-        tf.int32,
-    )
-    sampled_offset = tf.where(has_valid, sampled_offset, tf.zeros_like(sampled_offset))
-    mask_start = sampled_offset
-    mask_end = mask_start + contiguous_len
+    order = tf.argsort(scores, axis=1, direction="DESCENDING", stable=True)
 
     positions = tf.range(num_peaks, dtype=tf.int32)[tf.newaxis, :]
-    contiguous_mask_sorted = (
-        has_valid[:, tf.newaxis]
-        & (positions >= mask_start[:, tf.newaxis])
-        & (positions < mask_end[:, tf.newaxis])
-        & (positions < valid_counts[:, tf.newaxis])
-    )
-    inverse_order = tf.argsort(sorted_order, axis=1, direction="ASCENDING", stable=True)
-    contiguous_mask = tf.gather(contiguous_mask_sorted, inverse_order, batch_dims=1)
-    contiguous_mask = tf.logical_and(contiguous_mask, peak_valid_mask)
+    keep_sorted = positions < keep_counts[:, tf.newaxis]
 
-    survivors = tf.logical_and(peak_valid_mask, tf.logical_not(contiguous_mask))
-    survivor_counts = tf.reduce_sum(tf.cast(survivors, tf.int32), axis=1)
+    inverse_order = tf.argsort(order, axis=1, direction="ASCENDING", stable=True)
+    keep_mask = tf.gather(keep_sorted, inverse_order, batch_dims=1)
+    keep_mask = tf.logical_and(keep_mask, peak_valid_mask)
 
-    random_drop_fraction = tf.random.uniform(
-        [batch_size],
-        minval=tf.cast(random_drop_fraction_min, tf.float32),
-        maxval=tf.cast(random_drop_fraction_max, tf.float32),
-        dtype=tf.float32,
-    )
-    random_drop_count = tf.cast(
-        tf.floor(tf.cast(survivor_counts, tf.float32) * random_drop_fraction),
-        tf.int32,
-    )
-    random_drop_count = tf.minimum(random_drop_count, survivor_counts)
-
-    random_scores = tf.random.uniform(tf.shape(peak_mz), dtype=tf.float32)
-    random_scores = tf.where(
-        survivors,
-        random_scores,
-        tf.fill(tf.shape(random_scores), tf.cast(float("-inf"), random_scores.dtype)),
-    )
-    random_order = tf.argsort(random_scores, axis=1, direction="DESCENDING", stable=True)
-    random_drop_sorted = positions < random_drop_count[:, tf.newaxis]
-    inverse_random_order = tf.argsort(
-        random_order,
-        axis=1,
-        direction="ASCENDING",
-        stable=True,
-    )
-    random_drop = tf.gather(random_drop_sorted, inverse_random_order, batch_dims=1)
-    random_drop = tf.logical_and(random_drop, survivors)
-
-    masked = tf.logical_or(contiguous_mask, random_drop)
-    masked = tf.logical_and(masked, peak_valid_mask)
-
-    valid_counts_safe = tf.maximum(
-        tf.reduce_sum(tf.cast(peak_valid_mask, tf.float32), axis=1),
-        1.0,
-    )
-    masked_counts = tf.reduce_sum(tf.cast(masked, tf.float32), axis=1)
-    masked_fraction = tf.reduce_mean(masked_counts / valid_counts_safe)
-    return masked, masked_fraction
+    # masked = valid but not kept
+    masked = tf.logical_and(peak_valid_mask, tf.logical_not(keep_mask))
+    return masked
 
 
 @tf.function
@@ -725,27 +669,23 @@ def _apply_peak_jitter_tf(
     return mz, intensity
 
 
-def _augment_view_tf(
+def _augment_multicrop_view_tf(
     peak_mz: tf.Tensor,
     peak_intensity: tf.Tensor,
     peak_valid_mask: tf.Tensor,
     *,
-    contiguous_mask_fraction_min: float,
-    contiguous_mask_fraction_max: float,
-    random_drop_fraction_min: float,
-    random_drop_fraction_max: float,
+    keep_fraction: float,
     mz_jitter_std: float,
     intensity_jitter_std: float,
-) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
-    masked, masked_fraction = _sample_contiguous_and_random_drop_mask_tf(
+) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
+    """Generate a single multicrop view: randomly keep *keep_fraction* of valid peaks, compact, jitter."""
+    peak_mz, peak_intensity, peak_valid_mask = _ensure_nonempty_peakset_tf(
         peak_mz,
+        peak_intensity,
         peak_valid_mask,
-        contiguous_mask_fraction_min=contiguous_mask_fraction_min,
-        contiguous_mask_fraction_max=contiguous_mask_fraction_max,
-        random_drop_fraction_min=random_drop_fraction_min,
-        random_drop_fraction_max=random_drop_fraction_max,
     )
-    compact_mz, compact_intensity, compact_valid, compact_masked = _compact_peaks_after_drop_tf(
+    masked = _random_keep_mask_tf(peak_valid_mask, keep_fraction)
+    compact_mz, compact_intensity, compact_valid, _ = _compact_peaks_after_drop_tf(
         peak_mz,
         peak_intensity,
         peak_valid_mask,
@@ -758,15 +698,15 @@ def _augment_view_tf(
         mz_jitter_std=mz_jitter_std,
         intensity_jitter_std=intensity_jitter_std,
     )
-    return view_mz, view_intensity, compact_valid, compact_masked, masked_fraction
+    return view_mz, view_intensity, compact_valid
 
 
-def _augment_sigreg_batch_tf(
+def _augment_multicrop_batch_tf(
     *,
-    contiguous_mask_fraction_min: float,
-    contiguous_mask_fraction_max: float,
-    random_drop_fraction_min: float,
-    random_drop_fraction_max: float,
+    num_global_views: int,
+    num_local_views: int,
+    global_keep_fraction: float,
+    local_keep_fraction: float,
     mz_jitter_std: float,
     intensity_jitter_std: float,
 ) -> Callable[[dict], dict]:
@@ -776,36 +716,38 @@ def _augment_sigreg_batch_tf(
         peak_valid_mask = batch["peak_valid_mask"]
         precursor_mz = batch["precursor_mz"]
 
-        view1_mz, view1_int, view1_valid, view1_masked, view1_masked_fraction = _augment_view_tf(
-            peak_mz,
-            peak_intensity,
-            peak_valid_mask,
-            contiguous_mask_fraction_min=contiguous_mask_fraction_min,
-            contiguous_mask_fraction_max=contiguous_mask_fraction_max,
-            random_drop_fraction_min=random_drop_fraction_min,
-            random_drop_fraction_max=random_drop_fraction_max,
-            mz_jitter_std=mz_jitter_std,
-            intensity_jitter_std=intensity_jitter_std,
-        )
-        view2_mz, view2_int, view2_valid, view2_masked, _ = _augment_view_tf(
-            peak_mz,
-            peak_intensity,
-            peak_valid_mask,
-            contiguous_mask_fraction_min=contiguous_mask_fraction_min,
-            contiguous_mask_fraction_max=contiguous_mask_fraction_max,
-            random_drop_fraction_min=random_drop_fraction_min,
-            random_drop_fraction_max=random_drop_fraction_max,
-            mz_jitter_std=mz_jitter_std,
-            intensity_jitter_std=intensity_jitter_std,
-        )
+        all_mz = []
+        all_int = []
+        all_valid = []
 
+        for _ in range(num_global_views):
+            mz, intensity, valid = _augment_multicrop_view_tf(
+                peak_mz, peak_intensity, peak_valid_mask,
+                keep_fraction=global_keep_fraction,
+                mz_jitter_std=mz_jitter_std,
+                intensity_jitter_std=intensity_jitter_std,
+            )
+            all_mz.append(mz)
+            all_int.append(intensity)
+            all_valid.append(valid)
+
+        for _ in range(num_local_views):
+            mz, intensity, valid = _augment_multicrop_view_tf(
+                peak_mz, peak_intensity, peak_valid_mask,
+                keep_fraction=local_keep_fraction,
+                mz_jitter_std=mz_jitter_std,
+                intensity_jitter_std=intensity_jitter_std,
+            )
+            all_mz.append(mz)
+            all_int.append(intensity)
+            all_valid.append(valid)
+
+        num_views = num_global_views + num_local_views
         out = dict(batch)
-        out["fused_mz"] = tf.concat([view1_mz, view2_mz], axis=0)
-        out["fused_intensity"] = tf.concat([view1_int, view2_int], axis=0)
-        out["fused_precursor_mz"] = tf.concat([precursor_mz, precursor_mz], axis=0)
-        out["fused_valid_mask"] = tf.concat([view1_valid, view2_valid], axis=0)
-        out["fused_masked_positions"] = tf.concat([view1_masked, view2_masked], axis=0)
-        out["view1_masked_fraction"] = view1_masked_fraction
+        out["fused_mz"] = tf.concat(all_mz, axis=0)
+        out["fused_intensity"] = tf.concat(all_int, axis=0)
+        out["fused_precursor_mz"] = tf.tile(precursor_mz, [num_views])
+        out["fused_valid_mask"] = tf.concat(all_valid, axis=0)
         return out
 
     return apply
@@ -948,13 +890,13 @@ def _build_dataset(
     include_fingerprint: bool,
     min_peak_intensity: float,
     mz_representation: str,
-    include_sigreg_augmentation: bool,
-    sigreg_contiguous_mask_fraction_min: float,
-    sigreg_contiguous_mask_fraction_max: float,
-    sigreg_random_drop_fraction_min: float,
-    sigreg_random_drop_fraction_max: float,
-    sigreg_mz_jitter_std: float,
-    sigreg_intensity_jitter_std: float,
+    augmentation_type: str = "none",
+    multicrop_num_global_views: int = 2,
+    multicrop_num_local_views: int = 6,
+    multicrop_global_keep_fraction: float = 0.80,
+    multicrop_local_keep_fraction: float = 0.25,
+    mz_jitter_std: float = 0.0001,
+    intensity_jitter_std: float = 0.001,
     peak_ordering: str = "intensity",
     num_parallel_reads: int | None = None,
 ) -> tf.data.Dataset:
@@ -981,15 +923,15 @@ def _build_dataset(
         include_fingerprint=include_fingerprint,
     )
     ds = ds.map(batched_fn, num_parallel_calls=tf.data.AUTOTUNE)
-    if include_sigreg_augmentation:
+    if augmentation_type == "multicrop":
         ds = ds.map(
-            _augment_sigreg_batch_tf(
-                contiguous_mask_fraction_min=sigreg_contiguous_mask_fraction_min,
-                contiguous_mask_fraction_max=sigreg_contiguous_mask_fraction_max,
-                random_drop_fraction_min=sigreg_random_drop_fraction_min,
-                random_drop_fraction_max=sigreg_random_drop_fraction_max,
-                mz_jitter_std=sigreg_mz_jitter_std,
-                intensity_jitter_std=sigreg_intensity_jitter_std,
+            _augment_multicrop_batch_tf(
+                num_global_views=multicrop_num_global_views,
+                num_local_views=multicrop_num_local_views,
+                global_keep_fraction=multicrop_global_keep_fraction,
+                local_keep_fraction=multicrop_local_keep_fraction,
+                mz_jitter_std=mz_jitter_std,
+                intensity_jitter_std=intensity_jitter_std,
             ),
             num_parallel_calls=tf.data.AUTOTUNE,
         )
@@ -1184,21 +1126,21 @@ class TfLightningDataModule:
         )
         self.mz_representation = str(config.get("mz_representation", "mz"))
         self.peak_ordering = str(config.get("peak_ordering", "intensity"))
-        self.sigreg_contiguous_mask_fraction_min = float(
-            config.get("sigreg_contiguous_mask_fraction_min", 0.10)
+        self.multicrop_num_global_views = int(
+            config.get("multicrop_num_global_views", 2)
         )
-        self.sigreg_contiguous_mask_fraction_max = float(
-            config.get("sigreg_contiguous_mask_fraction_max", 0.40)
+        self.multicrop_num_local_views = int(
+            config.get("multicrop_num_local_views", 6)
         )
-        self.sigreg_random_drop_fraction_min = float(
-            config.get("sigreg_random_drop_fraction_min", 0.05)
+        self.multicrop_global_keep_fraction = float(
+            config.get("multicrop_global_keep_fraction", 0.80)
         )
-        self.sigreg_random_drop_fraction_max = float(
-            config.get("sigreg_random_drop_fraction_max", 0.15)
+        self.multicrop_local_keep_fraction = float(
+            config.get("multicrop_local_keep_fraction", 0.25)
         )
-        self.sigreg_mz_jitter_std = float(config.get("sigreg_mz_jitter_std", 0.005))
-        self.sigreg_intensity_jitter_std = float(
-            config.get("sigreg_intensity_jitter_std", 0.05)
+        self.mz_jitter_std = float(config.get("sigreg_mz_jitter_std", 0.0001))
+        self.intensity_jitter_std = float(
+            config.get("sigreg_intensity_jitter_std", 0.001)
         )
 
         self.metadata = _ensure_processed(
@@ -1306,13 +1248,13 @@ class TfLightningDataModule:
             include_fingerprint=include_fingerprint,
             min_peak_intensity=self.min_peak_intensity,
             mz_representation=self.mz_representation,
-            include_sigreg_augmentation=True,
-            sigreg_contiguous_mask_fraction_min=self.sigreg_contiguous_mask_fraction_min,
-            sigreg_contiguous_mask_fraction_max=self.sigreg_contiguous_mask_fraction_max,
-            sigreg_random_drop_fraction_min=self.sigreg_random_drop_fraction_min,
-            sigreg_random_drop_fraction_max=self.sigreg_random_drop_fraction_max,
-            sigreg_mz_jitter_std=self.sigreg_mz_jitter_std,
-            sigreg_intensity_jitter_std=self.sigreg_intensity_jitter_std,
+            augmentation_type="multicrop",
+            multicrop_num_global_views=self.multicrop_num_global_views,
+            multicrop_num_local_views=self.multicrop_num_local_views,
+            multicrop_global_keep_fraction=self.multicrop_global_keep_fraction,
+            multicrop_local_keep_fraction=self.multicrop_local_keep_fraction,
+            mz_jitter_std=self.mz_jitter_std,
+            intensity_jitter_std=self.intensity_jitter_std,
             peak_ordering=self.peak_ordering,
         )
 
@@ -1399,13 +1341,7 @@ class TfLightningDataModule:
             include_fingerprint=True,
             min_peak_intensity=self.min_peak_intensity,
             mz_representation=self.mz_representation,
-            include_sigreg_augmentation=False,
-            sigreg_contiguous_mask_fraction_min=self.sigreg_contiguous_mask_fraction_min,
-            sigreg_contiguous_mask_fraction_max=self.sigreg_contiguous_mask_fraction_max,
-            sigreg_random_drop_fraction_min=self.sigreg_random_drop_fraction_min,
-            sigreg_random_drop_fraction_max=self.sigreg_random_drop_fraction_max,
-            sigreg_mz_jitter_std=self.sigreg_mz_jitter_std,
-            sigreg_intensity_jitter_std=self.sigreg_intensity_jitter_std,
+            augmentation_type="none",
             peak_ordering=peak_ordering,
         )
 

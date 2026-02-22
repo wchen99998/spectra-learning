@@ -3,173 +3,113 @@ from __future__ import annotations
 import torch
 
 
-def augment_masked_view(
+def _random_keep_view(
     peak_mz: torch.Tensor,
     peak_intensity: torch.Tensor,
     peak_valid_mask: torch.Tensor,
     *,
-    contiguous_mask_fraction: float,
-    contiguous_mask_min_len: int,
-    random_mask_prob: float = 0.0,
+    keep_fraction: float,
     mz_jitter_std: float,
     intensity_jitter_std: float,
-) -> tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Generate a single multicrop view by randomly keeping *keep_fraction* of valid peaks.
+
+    Returns (view_mz, view_intensity, view_valid_mask) with dropped peaks
+    compacted to the front.
+    """
     batch_size, num_peaks = peak_mz.shape
-    has_valid = peak_valid_mask.any(dim=1)
 
-    sort_keys = torch.where(
-        peak_valid_mask,
-        peak_mz,
-        torch.full_like(peak_mz, float("inf")),
-    )
-    sorted_order = torch.argsort(sort_keys, dim=1)
-    sorted_valid = torch.gather(peak_valid_mask, dim=1, index=sorted_order)
-    valid_counts = sorted_valid.sum(dim=1)
-    interval_start = torch.zeros(batch_size, dtype=torch.long, device=peak_mz.device)
-    interval_end = torch.clamp(valid_counts - 1, min=0)
-    interval_lengths = valid_counts
-    pos = torch.arange(num_peaks, device=peak_mz.device)
+    valid_counts = peak_valid_mask.sum(dim=1)  # [B]
+    keep_counts = (valid_counts.float() * keep_fraction).round().clamp(min=1).long()
 
-    raw_mask_len = torch.floor(
-        interval_lengths.float() * contiguous_mask_fraction
-    ).to(torch.long)
-    mask_len = torch.maximum(
-        raw_mask_len,
-        torch.full_like(raw_mask_len, contiguous_mask_min_len),
-    )
-    mask_len = torch.minimum(mask_len, interval_lengths)
-    mask_len = torch.where(has_valid, mask_len, torch.zeros_like(mask_len))
+    # Random scores; -inf on invalid positions so they sort last
+    scores = torch.rand(batch_size, num_peaks, device=peak_mz.device)
+    scores = torch.where(peak_valid_mask, scores, torch.full_like(scores, float("-inf")))
+    order = scores.argsort(dim=1, descending=True)  # highest scores first
 
-    max_start_offset = interval_lengths - mask_len + 1
-    sampled_offset = torch.floor(
-        torch.rand(batch_size, device=peak_mz.device) * max_start_offset.float(),
-    ).to(torch.long)
-    sampled_offset = torch.where(has_valid, sampled_offset, torch.zeros_like(sampled_offset))
-    mask_start = interval_start + sampled_offset
-    mask_end = mask_start + mask_len
+    # Build keep mask in the *sorted* space, then scatter back
+    positions = torch.arange(num_peaks, device=peak_mz.device).unsqueeze(0)
+    keep_sorted = positions < keep_counts.unsqueeze(1)
+    # Map back to original positions
+    inverse_order = order.argsort(dim=1)
+    keep_mask = keep_sorted.gather(1, inverse_order) & peak_valid_mask
 
-    sorted_positions = pos.view(1, num_peaks)
-    masked_sorted = (
-        has_valid.view(batch_size, 1)
-        & (sorted_positions >= mask_start.view(batch_size, 1))
-        & (sorted_positions < mask_end.view(batch_size, 1))
-        & (sorted_positions < valid_counts.view(batch_size, 1))
-    )
-    masked = torch.zeros_like(peak_valid_mask)
-    masked.scatter_(1, sorted_order, masked_sorted)
-    masked = masked & peak_valid_mask
+    # Compact kept peaks to the front
+    pack_keys = torch.where(keep_mask, positions.expand_as(peak_mz), positions.expand_as(peak_mz) + num_peaks)
+    compact_order = pack_keys.argsort(dim=1, stable=True)
 
-    # Independent random masking on top of contiguous mask
-    if random_mask_prob > 0.0:
-        random_drop = torch.rand_like(peak_mz) < random_mask_prob
-        random_drop = random_drop & peak_valid_mask & (~masked)
-        masked = masked | random_drop
+    compact_mz = peak_mz.gather(1, compact_order)
+    compact_int = peak_intensity.gather(1, compact_order)
+    compact_valid = keep_mask.gather(1, compact_order)
 
-    view_valid = peak_valid_mask & (~masked)
-    jitterable = view_valid
+    # Zero out invalid positions
+    compact_mz = torch.where(compact_valid, compact_mz, torch.zeros_like(compact_mz))
+    compact_int = torch.where(compact_valid, compact_int, torch.zeros_like(compact_int))
 
-    mz = torch.zeros_like(peak_mz)
-    mz[jitterable] = peak_mz[jitterable] + (
-        torch.randn_like(peak_mz[jitterable]) * mz_jitter_std
-    )
-    mz = torch.clamp(mz, min=0.0, max=1.0)
+    # Jitter
+    mz_noise = torch.randn_like(compact_mz) * mz_jitter_std
+    view_mz = torch.where(compact_valid, (compact_mz + mz_noise).clamp(0.0, 1.0), torch.zeros_like(compact_mz))
 
-    intensity = torch.zeros_like(peak_intensity)
-    intensity[jitterable] = peak_intensity[jitterable] + (
-        torch.randn_like(peak_intensity[jitterable]) * intensity_jitter_std
-    )
-    intensity = torch.clamp(intensity, min=0.0, max=1.0)
+    int_noise = torch.randn_like(compact_int) * intensity_jitter_std
+    view_int = torch.where(compact_valid, (compact_int + int_noise).clamp(0.0, 1.0), torch.zeros_like(compact_int))
 
-    max_intensity = intensity.max(dim=1, keepdim=True).values.clamp(min=1e-6)
-    intensity = intensity / max_intensity
-    intensity = torch.where(jitterable, intensity, 0.0)
+    # Re-normalize intensity
+    max_int = view_int.max(dim=1, keepdim=True).values.clamp(min=1e-6)
+    view_int = view_int / max_int
+    view_int = torch.where(compact_valid, view_int, torch.zeros_like(view_int))
 
-    valid_counts = peak_valid_mask.sum(dim=1).clamp(min=1)
-    masked_counts = masked.sum(dim=1)
-    masked_fraction = (masked_counts.float() / valid_counts.float()).mean()
-
-    return (
-        mz,
-        intensity,
-        view_valid,
-        masked,
-        masked_fraction,
-    )
+    return view_mz, view_int, compact_valid
 
 
-def augment_unmasked_view(
-    peak_mz: torch.Tensor,
-    peak_intensity: torch.Tensor,
-    peak_valid_mask: torch.Tensor,
-    *,
-    mz_jitter_std: float,
-    intensity_jitter_std: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    view_valid = peak_valid_mask
-    masked = torch.zeros_like(peak_valid_mask)
-
-    mz = torch.zeros_like(peak_mz)
-    mz[view_valid] = peak_mz[view_valid] + (
-        torch.randn_like(peak_mz[view_valid]) * mz_jitter_std
-    )
-    mz = torch.clamp(mz, min=0.0, max=1.0)
-
-    intensity = torch.zeros_like(peak_intensity)
-    intensity[view_valid] = peak_intensity[view_valid] + (
-        torch.randn_like(peak_intensity[view_valid]) * intensity_jitter_std
-    )
-    intensity = torch.clamp(intensity, min=0.0, max=1.0)
-
-    max_intensity = intensity.max(dim=1, keepdim=True).values.clamp(min=1e-6)
-    intensity = intensity / max_intensity
-    intensity = torch.where(view_valid, intensity, 0.0)
-
-    return mz, intensity, view_valid, masked
-
-
-def augment_sigreg_batch(
+def augment_multicrop_batch(
     batch: dict[str, torch.Tensor],
     *,
-    contiguous_mask_fraction: float,
-    contiguous_mask_min_len: int,
-    random_mask_prob: float = 0.0,
+    num_global_views: int = 2,
+    num_local_views: int = 6,
+    global_keep_fraction: float = 0.80,
+    local_keep_fraction: float = 0.25,
     mz_jitter_std: float,
     intensity_jitter_std: float,
 ) -> dict[str, torch.Tensor]:
+    """Multi-crop augmentation: *num_global_views* globals + *num_local_views* locals.
+
+    Returns fused tensors ``[V*B, N]`` where ``V = num_global_views + num_local_views``.
+    """
     peak_mz = batch["peak_mz"]
     peak_intensity = batch["peak_intensity"]
     peak_valid_mask = batch["peak_valid_mask"]
     precursor_mz = batch["precursor_mz"]
 
-    view1_mz, view1_int, view1_valid, view1_masked, view1_masked_fraction = augment_masked_view(
-        peak_mz,
-        peak_intensity,
-        peak_valid_mask,
-        contiguous_mask_fraction=contiguous_mask_fraction,
-        contiguous_mask_min_len=contiguous_mask_min_len,
-        random_mask_prob=random_mask_prob,
-        mz_jitter_std=mz_jitter_std,
-        intensity_jitter_std=intensity_jitter_std,
-    )
-    view2_mz, view2_int, view2_valid, view2_masked = augment_unmasked_view(
-        peak_mz,
-        peak_intensity,
-        peak_valid_mask,
-        mz_jitter_std=mz_jitter_std,
-        intensity_jitter_std=intensity_jitter_std,
-    )
+    all_mz: list[torch.Tensor] = []
+    all_int: list[torch.Tensor] = []
+    all_valid: list[torch.Tensor] = []
 
+    for _ in range(num_global_views):
+        mz, intensity, valid = _random_keep_view(
+            peak_mz, peak_intensity, peak_valid_mask,
+            keep_fraction=global_keep_fraction,
+            mz_jitter_std=mz_jitter_std,
+            intensity_jitter_std=intensity_jitter_std,
+        )
+        all_mz.append(mz)
+        all_int.append(intensity)
+        all_valid.append(valid)
+
+    for _ in range(num_local_views):
+        mz, intensity, valid = _random_keep_view(
+            peak_mz, peak_intensity, peak_valid_mask,
+            keep_fraction=local_keep_fraction,
+            mz_jitter_std=mz_jitter_std,
+            intensity_jitter_std=intensity_jitter_std,
+        )
+        all_mz.append(mz)
+        all_int.append(intensity)
+        all_valid.append(valid)
+
+    num_views = num_global_views + num_local_views
     return {
-        "fused_mz": torch.cat([view1_mz, view2_mz], dim=0),
-        "fused_intensity": torch.cat([view1_int, view2_int], dim=0),
-        "fused_precursor_mz": torch.cat([precursor_mz, precursor_mz], dim=0),
-        "fused_valid_mask": torch.cat([view1_valid, view2_valid], dim=0),
-        "fused_masked_positions": torch.cat([view1_masked, view2_masked], dim=0),
-        "view1_masked_fraction": view1_masked_fraction,
+        "fused_mz": torch.cat(all_mz, dim=0),
+        "fused_intensity": torch.cat(all_int, dim=0),
+        "fused_precursor_mz": precursor_mz.repeat(num_views),
+        "fused_valid_mask": torch.cat(all_valid, dim=0),
     }

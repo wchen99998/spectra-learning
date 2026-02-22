@@ -15,7 +15,8 @@ _PARAM_ABBREVS: dict[str, str] = {
     "learning_rate": "lr",
     "weight_decay": "wd",
     "sigreg_lambda": "lam",
-    "sigreg_contiguous_mask_fraction": "cmf",
+    "multicrop_global_keep_fraction": "gkf",
+    "multicrop_local_keep_fraction": "lkf",
 }
 
 

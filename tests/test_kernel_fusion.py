@@ -17,7 +17,7 @@ import torch.nn.functional as F
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from models.losses import BCSLoss
+from models.losses import SIGReg
 from models.model import PeakSetEncoder, PeakSetSIGReg
 from networks.transformer_torch import Attention, TransformerBlock
 
@@ -107,66 +107,23 @@ def test_attention_output_shapes():
 
 
 # ---------------------------------------------------------------------------
-# 2. BCS Loss buffer correctness
+# 2. SIGReg Loss correctness
 # ---------------------------------------------------------------------------
 
-def test_bcs_buffer_matches_inline():
-    """Verify registered buffers produce same t/exp_f as inline computation."""
-    print("Test 3: BCS buffer correctness ... ", end="", flush=True)
-    bcs = BCSLoss(num_slices=256, lmbd=10.0).to(DEVICE)
-
-    # Compare to inline computation
-    t_inline = torch.linspace(-3.0, 3.0, 10, device=DEVICE)
-    exp_f_inline = torch.exp(-0.5 * t_inline**2)
-
-    assert torch.allclose(bcs.ep_t, t_inline), "ep_t buffer mismatch"
-    assert torch.allclose(bcs.ep_exp_f, exp_f_inline), "ep_exp_f buffer mismatch"
-
-    print("PASSED")
-
-
-def test_bcs_stacked_matmul_correctness():
-    """Verify stacked matmul gives same result as separate matmuls."""
-    print("Test 4: BCS stacked matmul correctness ... ", end="", flush=True)
+def test_sigreg_forward():
+    """Verify SIGReg forward produces reasonable outputs."""
+    print("Test 3: SIGReg forward pass ... ", end="", flush=True)
     torch.manual_seed(42)
+    sigreg = SIGReg(num_slices=256).to(DEVICE)
 
-    z1 = torch.randn(B, D, device=DEVICE)
-    z2 = torch.randn(B, D, device=DEVICE)
-    proj = torch.randn(D, 256, device=DEVICE)
-    proj = proj / proj.norm(p=2, dim=0)
+    proj = torch.randn(4, B, D, device=DEVICE)  # [V, B, D]
 
-    # Separate matmuls (old approach)
-    view1_sep = z1 @ proj
-    view2_sep = z2 @ proj
+    result = sigreg(proj)
 
-    # Stacked matmul (new approach)
-    z_both = torch.cat([z1, z2], dim=0)
-    views = z_both @ proj
-    view1_stk, view2_stk = views.chunk(2, dim=0)
+    assert result.ndim == 0, f"Expected scalar, got shape {result.shape}"
+    assert torch.isfinite(result), f"Result is not finite: {result}"
 
-    assert torch.allclose(view1_sep, view1_stk, atol=1e-5), "Stacked view1 mismatch"
-    assert torch.allclose(view2_sep, view2_stk, atol=1e-5), "Stacked view2 mismatch"
-
-    print("PASSED")
-
-
-def test_bcs_forward():
-    """Verify full BCS forward produces reasonable outputs."""
-    print("Test 5: BCS forward pass ... ", end="", flush=True)
-    torch.manual_seed(42)
-    bcs = BCSLoss(num_slices=256, lmbd=10.0).to(DEVICE)
-
-    z1 = torch.randn(B, D, device=DEVICE)
-    z2 = z1 + torch.randn(B, D, device=DEVICE) * 0.1  # similar views
-
-    result = bcs(z1, z2)
-
-    assert "loss" in result and "bcs_loss" in result and "invariance_loss" in result
-    assert torch.isfinite(result["loss"]), f"Loss is not finite: {result['loss']}"
-    assert result["bcs_loss"].item() >= 0, f"BCS loss negative: {result['bcs_loss']}"
-    assert result["invariance_loss"].item() >= 0, f"Invariance loss negative: {result['invariance_loss']}"
-
-    print(f"PASSED (loss={result['loss'].item():.4f}, bcs={result['bcs_loss'].item():.4f}, inv={result['invariance_loss'].item():.4f})")
+    print(f"PASSED (statistic={result.item():.4f})")
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +136,7 @@ def test_encoder_with_mask():
     With block_mask applied, padding positions should not influence valid
     peak embeddings — outputs should differ from the no-mask case.
     """
-    print("Test 6: Encoder with valid_mask ... ", end="", flush=True)
+    print("Test 4: Encoder with valid_mask ... ", end="", flush=True)
     torch.manual_seed(42)
     encoder = PeakSetEncoder(
         model_dim=D,
@@ -218,7 +175,7 @@ def test_encoder_with_mask():
 
 def test_full_model_forward():
     """Verify PeakSetSIGReg forward with all optimizations."""
-    print("Test 7: Full model forward ... ", end="", flush=True)
+    print("Test 5: Full model forward ... ", end="", flush=True)
     torch.manual_seed(42)
     model = PeakSetSIGReg(
         num_peaks=N,
@@ -228,7 +185,9 @@ def test_full_model_forward():
         feature_mlp_hidden_dim=64,
         sigreg_proj_hidden_dim=256,
         sigreg_proj_output_dim=64,
-        bcs_num_slices=128,
+        sigreg_num_slices=128,
+        multicrop_num_global_views=2,
+        multicrop_num_local_views=2,
     ).to(DEVICE).eval()
 
     batch = _make_batch()
@@ -237,7 +196,7 @@ def test_full_model_forward():
         result = model(batch, train=True)
 
     assert "loss" in result
-    assert "bcs_loss" in result
+    assert "sigreg_loss" in result
     assert "invariance_loss" in result
     assert "valid_fraction" in result
     assert "representation_variance" in result
@@ -250,7 +209,7 @@ def test_full_model_forward():
 
 def test_full_model_encode():
     """Verify encode() passes valid_mask correctly."""
-    print("Test 8: Model encode path ... ", end="", flush=True)
+    print("Test 6: Model encode path ... ", end="", flush=True)
     torch.manual_seed(42)
     model = PeakSetSIGReg(
         num_peaks=N,
@@ -279,7 +238,7 @@ def test_full_model_encode():
 
 def test_gradient_flow():
     """Verify gradients flow through the full model with masks."""
-    print("Test 9: Gradient flow ... ", end="", flush=True)
+    print("Test 7: Gradient flow ... ", end="", flush=True)
     torch.manual_seed(42)
     model = PeakSetSIGReg(
         num_peaks=N,
@@ -289,7 +248,9 @@ def test_gradient_flow():
         feature_mlp_hidden_dim=64,
         sigreg_proj_hidden_dim=256,
         sigreg_proj_output_dim=64,
-        bcs_num_slices=128,
+        sigreg_num_slices=128,
+        multicrop_num_global_views=2,
+        multicrop_num_local_views=2,
     ).to(DEVICE)
 
     batch = _make_batch()
@@ -315,7 +276,7 @@ def test_gradient_flow():
 
 def test_compile_forward():
     """Verify the forward pass compiles without graph breaks."""
-    print("Test 10: torch.compile compatibility ... ", end="", flush=True)
+    print("Test 8: torch.compile compatibility ... ", end="", flush=True)
     if DEVICE != "cuda":
         print("SKIPPED (no CUDA)")
         return
@@ -329,20 +290,21 @@ def test_compile_forward():
         feature_mlp_hidden_dim=64,
         sigreg_proj_hidden_dim=256,
         sigreg_proj_output_dim=64,
-        bcs_num_slices=128,
+        sigreg_num_slices=128,
+        multicrop_num_global_views=2,
+        multicrop_num_local_views=2,
     ).to(DEVICE).eval()
 
-    def forward_fn(batch, proj):
-        return model(batch, train=True, bcs_projection=proj)
+    def forward_fn(batch):
+        return model(batch, train=True)
 
     compiled_fn = torch.compile(forward_fn, mode="reduce-overhead", fullgraph=True)
 
     batch = _make_batch()
-    proj = model.sample_bcs_projection(device=torch.device(DEVICE), seed=0)
 
     with torch.no_grad():
         # Warmup compilation
-        result = compiled_fn(batch, proj)
+        result = compiled_fn(batch)
 
     assert torch.isfinite(result["loss"]), "Compiled forward produced non-finite loss"
     print(f"PASSED (loss={result['loss'].item():.4f})")
@@ -410,17 +372,15 @@ def benchmark_attention():
         _benchmark(lambda: run_with_mask(x, block_mask), label="flex_attn with mask")
 
 
-def benchmark_bcs_loss():
-    """Benchmark BCS loss with buffer constants and stacked matmul."""
-    print("\n--- BCS Loss Benchmark ---")
+def benchmark_sigreg_loss():
+    """Benchmark SIGReg loss."""
+    print("\n--- SIGReg Loss Benchmark ---")
     torch.manual_seed(42)
-    bcs = BCSLoss(num_slices=256, lmbd=10.0).to(DEVICE)
-    z1 = torch.randn(256, 128, device=DEVICE)
-    z2 = torch.randn(256, 128, device=DEVICE)
-    proj = bcs.sample_projection(128, device=torch.device(DEVICE), seed=0)
+    sigreg = SIGReg(num_slices=256).to(DEVICE)
+    proj = torch.randn(8, 256, 128, device=DEVICE)  # [V, B, D]
 
     with torch.no_grad():
-        _benchmark(lambda: bcs(z1, z2, proj=proj), label="BCS loss (optimized)")
+        _benchmark(lambda: sigreg(proj), label="SIGReg loss")
 
 
 def benchmark_full_model():
@@ -435,22 +395,23 @@ def benchmark_full_model():
         feature_mlp_hidden_dim=64,
         sigreg_proj_hidden_dim=512,
         sigreg_proj_output_dim=128,
-        bcs_num_slices=256,
+        sigreg_num_slices=256,
+        multicrop_num_global_views=2,
+        multicrop_num_local_views=2,
     ).to(DEVICE).eval()
 
     batch = _make_batch(batch_size=64)
-    proj = model.sample_bcs_projection(device=torch.device(DEVICE), seed=0)
 
     with torch.no_grad():
-        _benchmark(lambda: model(batch, bcs_projection=proj), label="Forward (eager)")
+        _benchmark(lambda: model(batch), label="Forward (eager)")
 
     if DEVICE == "cuda":
         compiled_model = torch.compile(model, mode="reduce-overhead")
         with torch.no_grad():
             # Warmup
             for _ in range(3):
-                compiled_model(batch, bcs_projection=proj)
-            _benchmark(lambda: compiled_model(batch, bcs_projection=proj), label="Forward (compiled)")
+                compiled_model(batch)
+            _benchmark(lambda: compiled_model(batch), label="Forward (compiled)")
 
 
 def benchmark_compiled_with_mask():
@@ -469,20 +430,21 @@ def benchmark_compiled_with_mask():
         feature_mlp_hidden_dim=64,
         sigreg_proj_hidden_dim=512,
         sigreg_proj_output_dim=128,
-        bcs_num_slices=256,
+        sigreg_num_slices=256,
+        multicrop_num_global_views=2,
+        multicrop_num_local_views=2,
     ).to(DEVICE).eval()
 
     batch = _make_batch(batch_size=64)
-    proj = model.sample_bcs_projection(device=torch.device(DEVICE), seed=0)
 
     compiled_model = torch.compile(model, mode="reduce-overhead")
 
     with torch.no_grad():
         # Warmup
         for _ in range(3):
-            compiled_model(batch, bcs_projection=proj)
+            compiled_model(batch)
         _benchmark(
-            lambda: compiled_model(batch, bcs_projection=proj),
+            lambda: compiled_model(batch),
             label="Compiled + mask",
         )
 
@@ -509,9 +471,7 @@ def main():
 
     test_attention_mask_plumbing()
     test_attention_output_shapes()
-    test_bcs_buffer_matches_inline()
-    test_bcs_stacked_matmul_correctness()
-    test_bcs_forward()
+    test_sigreg_forward()
     test_encoder_with_mask()
     test_full_model_forward()
     test_full_model_encode()
@@ -527,7 +487,7 @@ def main():
         print("=" * 60)
 
         benchmark_attention()
-        benchmark_bcs_loss()
+        benchmark_sigreg_loss()
         benchmark_full_model()
         benchmark_compiled_with_mask()
 

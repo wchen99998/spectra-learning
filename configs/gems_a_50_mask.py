@@ -9,7 +9,7 @@ def get_config() -> config_dict.ConfigDict:
     # Dataset
     cfg.dataset = "gems_a"
     cfg.tfrecord_dir = "data/gems_peaklist_tfrecord"
-    cfg.batch_size = 512
+    cfg.batch_size = 128
     cfg.validation_fraction = 0.05
     cfg.shuffle_buffer = 1_000_000
     cfg.tfrecord_buffer_size = 250_000
@@ -19,7 +19,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.max_precursor_mz = 1000.0
     cfg.min_peak_intensity = 0.001
     cfg.intensity_scaling = "linear"
-    cfg.mz_representation = "neutral_loss"
+    cfg.mz_representation = "mz"
     cfg.peak_ordering = "mz"
     cfg.seed = 42
 
@@ -32,11 +32,11 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_heads = 8
     cfg.num_kv_heads = 8
     cfg.encoder_use_rope = False
-    cfg.encoder_block_type = "isab"
+    cfg.encoder_block_type = "transformer"
     cfg.isab_num_inducing_points = 16
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 128
-    cfg.pooling_type = "pma"
+    cfg.pooling_type = "mean"
     cfg.pma_num_heads = cfg.num_heads
     cfg.pma_num_seeds = 32
     cfg.mz_fourier_num_frequencies = 32
@@ -45,16 +45,13 @@ def get_config() -> config_dict.ConfigDict:
     cfg.mz_fourier_learnable = False
     cfg.sigreg_use_projector = True
     cfg.sigreg_proj_hidden_dim = 2048
-    cfg.sigreg_proj_output_dim = 128
+    cfg.sigreg_proj_output_dim = 256
     cfg.sigreg_num_slices = 256
     cfg.sigreg_lambda = 0.1
-    cfg.sigreg_contiguous_mask_fraction = 0.25
-    cfg.sigreg_contiguous_mask_min_len = 1
-    cfg.sigreg_random_mask_prob = 0.05
-    cfg.sigreg_contiguous_mask_fraction_min = 0.10
-    cfg.sigreg_contiguous_mask_fraction_max = 0.40
-    cfg.sigreg_random_drop_fraction_min = 0.05
-    cfg.sigreg_random_drop_fraction_max = 0.15
+    cfg.multicrop_num_global_views = 2
+    cfg.multicrop_num_local_views = 4
+    cfg.multicrop_global_keep_fraction = 0.80
+    cfg.multicrop_local_keep_fraction = 0.25
     cfg.sigreg_mz_jitter_std = 0.0001
     cfg.sigreg_intensity_jitter_std = 0.001
     cfg.sigreg_proj_norm = "batchnorm"

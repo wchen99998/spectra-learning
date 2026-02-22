@@ -50,20 +50,19 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         sigreg_proj_hidden_dim=int(config.get("sigreg_proj_hidden_dim", 2048)),
         sigreg_proj_output_dim=int(config.get("sigreg_proj_output_dim", 128)),
         sigreg_proj_norm=str(config.get("sigreg_proj_norm", "rmsnorm")),
-        bcs_num_slices=int(config.get("sigreg_num_slices", 256)),
-        sigreg_lambda=float(config.get("sigreg_lambda", 10.0)),
-        sigreg_contiguous_mask_fraction=float(
-            config.get("sigreg_contiguous_mask_fraction", 0.25)
+        sigreg_num_slices=int(config.get("sigreg_num_slices", 256)),
+        sigreg_lambda=float(config.get("sigreg_lambda", 0.1)),
+        multicrop_num_global_views=int(config.get("multicrop_num_global_views", 2)),
+        multicrop_num_local_views=int(config.get("multicrop_num_local_views", 6)),
+        multicrop_global_keep_fraction=float(
+            config.get("multicrop_global_keep_fraction", 0.80)
         ),
-        sigreg_contiguous_mask_min_len=int(
-            config.get("sigreg_contiguous_mask_min_len", 1)
+        multicrop_local_keep_fraction=float(
+            config.get("multicrop_local_keep_fraction", 0.25)
         ),
-        sigreg_random_mask_prob=float(
-            config.get("sigreg_random_mask_prob", 0.0)
-        ),
-        sigreg_mz_jitter_std=float(config.get("sigreg_mz_jitter_std", 0.005)),
+        sigreg_mz_jitter_std=float(config.get("sigreg_mz_jitter_std", 0.0001)),
         sigreg_intensity_jitter_std=float(
-            config.get("sigreg_intensity_jitter_std", 0.05)
+            config.get("sigreg_intensity_jitter_std", 0.001)
         ),
     )
 

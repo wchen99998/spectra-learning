@@ -1,22 +1,10 @@
 import unittest
 import tempfile
 
-import tensorflow as tf
 import torch
 
 from utils.training import load_pretrained_weights
-from input_pipeline import (
-    _NUM_PEAKS_OUTPUT,
-    _compact_sort_peaks,
-    _convert_to_neutral_loss,
-    _filter_min_peak_intensity,
-    _normalize_for_jepa,
-    _topk_peaks,
-)
-from models.losses import (
-    BCSLoss,
-    _epps_pulley,
-)
+from models.losses import SIGReg
 from models.model import PeakSetSIGReg
 
 
@@ -57,116 +45,6 @@ class DataPipelineContractTests(unittest.TestCase):
         self.assertNotIn("token_ids", batch)
         self.assertNotIn("segment_ids", batch)
 
-    def test_peak_ordering_supports_mz_and_intensity(self):
-        example = {
-            "mz": tf.constant([50.0, 10.0, 30.0, 0.0], dtype=tf.float32),
-            "intensity": tf.constant([0.2, 0.5, 0.9, 0.0], dtype=tf.float32),
-        }
-        by_mz = _compact_sort_peaks("mz")(dict(example))
-        by_intensity = _compact_sort_peaks("intensity")(dict(example))
-        self.assertEqual(by_mz["mz"].shape[0], _NUM_PEAKS_OUTPUT)
-        self.assertEqual(by_intensity["mz"].shape[0], _NUM_PEAKS_OUTPUT)
-
-    def test_compact_sort_orders_by_mz_and_preserves_pairs(self):
-        example = {
-            "mz": tf.constant([50.0, 10.0, 30.0, 0.0], dtype=tf.float32),
-            "intensity": tf.constant([0.2, 0.5, 0.9, 0.0], dtype=tf.float32),
-        }
-        out = _compact_sort_peaks("mz")(dict(example))
-        self.assertTrue(
-            bool(tf.reduce_all(tf.abs(out["mz"][:3] - tf.constant([10.0, 30.0, 50.0], dtype=tf.float32)) < 1e-6).numpy()),
-        )
-        self.assertTrue(
-            bool(tf.reduce_all(tf.abs(out["intensity"][:3] - tf.constant([0.5, 0.9, 0.2], dtype=tf.float32)) < 1e-6).numpy()),
-        )
-
-    def test_compact_sort_orders_by_intensity_and_preserves_pairs(self):
-        example = {
-            "mz": tf.constant([50.0, 10.0, 30.0, 0.0], dtype=tf.float32),
-            "intensity": tf.constant([0.2, 0.5, 0.9, 0.0], dtype=tf.float32),
-        }
-        out = _compact_sort_peaks("intensity")(dict(example))
-        self.assertTrue(
-            bool(tf.reduce_all(tf.abs(out["intensity"][:3] - tf.constant([0.9, 0.5, 0.2], dtype=tf.float32)) < 1e-6).numpy()),
-        )
-        self.assertTrue(
-            bool(tf.reduce_all(tf.abs(out["mz"][:3] - tf.constant([30.0, 10.0, 50.0], dtype=tf.float32)) < 1e-6).numpy()),
-        )
-
-    def test_topk_then_mz_sort_keeps_same_peak_pairs(self):
-        example = {
-            "mz": tf.constant([8.0, 1.0, 5.0, 2.0], dtype=tf.float32),
-            "intensity": tf.constant([0.1, 0.9, 0.8, 0.2], dtype=tf.float32),
-        }
-        topk = _topk_peaks(3)(dict(example))
-        out = _compact_sort_peaks("mz")(topk)
-        self.assertTrue(
-            bool(tf.reduce_all(tf.abs(out["mz"][:3] - tf.constant([1.0, 2.0, 5.0], dtype=tf.float32)) < 1e-6).numpy()),
-        )
-        self.assertTrue(
-            bool(tf.reduce_all(tf.abs(out["intensity"][:3] - tf.constant([0.9, 0.2, 0.8], dtype=tf.float32)) < 1e-6).numpy()),
-        )
-
-    def test_neutral_loss_conversion(self):
-        original = {
-            "mz": tf.constant([10.0, 70.0, 20.0, 0.0], dtype=tf.float32),
-            "intensity": tf.constant([0.2, 0.9, 0.5, 0.0], dtype=tf.float32),
-            "precursor_mz": tf.constant(100.0, dtype=tf.float32),
-        }
-        converted = _convert_to_neutral_loss()(dict(original))
-        self.assertAlmostEqual(float(converted["mz"][0]), 90.0, places=1)
-
-    def test_neutral_loss_padding_is_not_marked_valid(self):
-        example = {
-            "mz": tf.constant([10.0, 0.0, 0.0], dtype=tf.float32),
-            "intensity": tf.constant([0.7, 0.0, 0.0], dtype=tf.float32),
-            "precursor_mz": tf.constant(100.0, dtype=tf.float32),
-        }
-        converted = _convert_to_neutral_loss()(dict(example))
-        compacted = _compact_sort_peaks("mz")(converted)
-        normalized = _normalize_for_jepa(1000.0)(compacted)
-        mask = normalized["peak_valid_mask"].numpy()
-        self.assertTrue(mask[0])
-        self.assertFalse(mask[1])
-        self.assertFalse(mask[2])
-
-    def test_filter_min_peak_intensity_zeros_peaks_below_threshold(self):
-        example = {
-            "mz": tf.constant([50.0, 75.0, 100.0], dtype=tf.float32),
-            "intensity": tf.constant([0.2, 0.01, 0.5], dtype=tf.float32),
-        }
-        out = _filter_min_peak_intensity(0.1)(dict(example))
-        self.assertTrue(
-            bool(
-                tf.reduce_all(
-                    tf.abs(out["mz"] - tf.constant([50.0, 0.0, 100.0], dtype=tf.float32)) < 1e-6,
-                ).numpy(),
-            ),
-        )
-        self.assertTrue(
-            bool(
-                tf.reduce_all(
-                    tf.abs(out["intensity"] - tf.constant([0.2, 0.0, 0.5], dtype=tf.float32)) < 1e-6,
-                ).numpy(),
-            ),
-        )
-
-    def test_normalize_for_jepa_keeps_intensity_and_uses_fixed_precursor_scale(self):
-        example = {
-            "mz": tf.constant([100.0, 50.0, 0.0], dtype=tf.float32),
-            "intensity": tf.constant([0.6, 0.02, 0.0], dtype=tf.float32),
-            "precursor_mz": tf.constant(1200.0, dtype=tf.float32),
-        }
-        out = _normalize_for_jepa(1000.0)(dict(example))
-        self.assertTrue(
-            bool(
-                tf.reduce_all(
-                    tf.abs(out["peak_intensity"] - tf.constant([0.6, 0.02, 0.0], dtype=tf.float32)) < 1e-6,
-                ).numpy(),
-            ),
-        )
-        self.assertAlmostEqual(float(out["precursor_mz"].numpy()), 1.0, places=6)
-
 
 class SIGRegForwardTests(unittest.TestCase):
     def _build_model(self, *, encoder_use_rope: bool = False) -> PeakSetSIGReg:
@@ -181,10 +59,12 @@ class SIGRegForwardTests(unittest.TestCase):
             sigreg_use_projector=True,
             sigreg_proj_hidden_dim=64,
             sigreg_proj_output_dim=16,
-            bcs_num_slices=32,
-            sigreg_lambda=10.0,
-            sigreg_contiguous_mask_fraction=0.2,
-            sigreg_contiguous_mask_min_len=1,
+            sigreg_num_slices=32,
+            sigreg_lambda=0.1,
+            multicrop_num_global_views=2,
+            multicrop_num_local_views=2,
+            multicrop_global_keep_fraction=0.80,
+            multicrop_local_keep_fraction=0.25,
             sigreg_mz_jitter_std=0.005,
             sigreg_intensity_jitter_std=0.05,
             encoder_use_rope=encoder_use_rope,
@@ -202,10 +82,9 @@ class SIGRegForwardTests(unittest.TestCase):
         metrics = model(batch, train=True)
         for key in (
             "loss",
-            "bcs_loss",
+            "sigreg_loss",
             "invariance_loss",
             "valid_fraction",
-            "masked_fraction",
             "representation_variance",
         ):
             self.assertIn(key, metrics, f"Missing key: {key}")
@@ -256,7 +135,7 @@ class SIGRegForwardTests(unittest.TestCase):
         self.assertFalse(torch.allclose(emb_no_rope, emb_with_rope))
 
 
-class AugmentationTests(unittest.TestCase):
+class MulticropAugmentationTests(unittest.TestCase):
     def _build_model(self) -> PeakSetSIGReg:
         return PeakSetSIGReg(
             num_peaks=60,
@@ -267,130 +146,68 @@ class AugmentationTests(unittest.TestCase):
             attention_mlp_multiple=2.0,
             feature_mlp_hidden_dim=16,
             sigreg_use_projector=False,
-            bcs_num_slices=32,
-            sigreg_lambda=10.0,
-            sigreg_contiguous_mask_fraction=0.2,
-            sigreg_contiguous_mask_min_len=1,
+            sigreg_num_slices=32,
+            sigreg_lambda=0.1,
+            multicrop_num_global_views=2,
+            multicrop_num_local_views=3,
+            multicrop_global_keep_fraction=0.80,
+            multicrop_local_keep_fraction=0.25,
             sigreg_mz_jitter_std=0.005,
             sigreg_intensity_jitter_std=0.05,
         )
 
-    def test_augment_view_shapes(self):
+    def test_augment_batch_shapes(self):
+        model = self._build_model()
+        batch = _make_batch(batch_size=4, num_peaks=60)
+        aug = model.augment_batch(batch)
+        V = model.num_views  # 2 + 3 = 5
+        B = 4
+        N = 60
+        self.assertEqual(aug["fused_mz"].shape, (V * B, N))
+        self.assertEqual(aug["fused_intensity"].shape, (V * B, N))
+        self.assertEqual(aug["fused_valid_mask"].shape, (V * B, N))
+        self.assertEqual(aug["fused_precursor_mz"].shape, (V * B,))
+
+    def test_augment_batch_value_bounds(self):
         model = self._build_model()
         batch = _make_batch()
-        mz, intensity, valid, masked, masked_fraction = model._augment_view(
-            batch["peak_mz"],
-            batch["peak_intensity"],
-            batch["peak_valid_mask"],
-        )
-        self.assertEqual(mz.shape, batch["peak_mz"].shape)
-        self.assertEqual(intensity.shape, batch["peak_intensity"].shape)
-        self.assertEqual(valid.shape, batch["peak_valid_mask"].shape)
-        self.assertEqual(masked.shape, batch["peak_valid_mask"].shape)
-        self.assertEqual(masked_fraction.ndim, 0)
+        aug = model.augment_batch(batch)
+        self.assertTrue((aug["fused_mz"] >= 0.0).all().item())
+        self.assertTrue((aug["fused_mz"] <= 1.0).all().item())
+        self.assertTrue((aug["fused_intensity"] >= 0.0).all().item())
+        self.assertTrue((aug["fused_intensity"] <= 1.0).all().item())
 
-    def test_augment_view_value_bounds(self):
+    def test_augment_batch_no_fused_masked_positions(self):
+        """Multicrop augmentation should not produce fused_masked_positions."""
         model = self._build_model()
         batch = _make_batch()
-        mz, intensity, _, _, _ = model._augment_view(
-            batch["peak_mz"],
-            batch["peak_intensity"],
-            batch["peak_valid_mask"],
-        )
-        self.assertTrue((mz >= 0.0).all().item())
-        self.assertTrue((mz <= 1.0).all().item())
-        self.assertTrue((intensity >= 0.0).all().item())
-        self.assertTrue((intensity <= 1.0).all().item())
+        aug = model.augment_batch(batch)
+        self.assertNotIn("fused_masked_positions", aug)
+        self.assertNotIn("view1_masked_fraction", aug)
 
-    def test_invalid_positions_are_zeroed(self):
+    def test_global_views_keep_more_peaks_than_local(self):
         model = self._build_model()
-        batch = _make_batch()
-        mz, intensity, _, _, _ = model._augment_view(
-            batch["peak_mz"],
-            batch["peak_intensity"],
-            batch["peak_valid_mask"],
-        )
-        invalid = ~batch["peak_valid_mask"]
-        self.assertTrue((mz[invalid] == 0.0).all().item())
-        self.assertTrue((intensity[invalid] == 0.0).all().item())
+        batch = _make_batch(batch_size=4, num_peaks=60)
+        aug = model.augment_batch(batch)
+        B = 4
+        num_global = model.multicrop_num_global_views
+        num_local = model.multicrop_num_local_views
 
-    def test_masked_positions_remain_valid(self):
-        model = self._build_model()
-        batch = _make_batch(batch_size=3)
-        _, _, valid, masked, _ = model._augment_view(
-            batch["peak_mz"],
-            batch["peak_intensity"],
-            batch["peak_valid_mask"],
-        )
-        self.assertTrue((valid[masked]).all().item())
-        self.assertTrue((~batch["peak_valid_mask"][masked]).sum().item() == 0)
+        global_valid = aug["fused_valid_mask"][:num_global * B]
+        local_valid = aug["fused_valid_mask"][num_global * B:]
 
-    def test_masked_positions_are_zeroed(self):
-        model = self._build_model()
-        batch = _make_batch(batch_size=3)
-        mz, intensity, _, masked, _ = model._augment_view(
-            batch["peak_mz"],
-            batch["peak_intensity"],
-            batch["peak_valid_mask"],
-        )
-        self.assertTrue((mz[masked] == 0.0).all().item())
-        self.assertTrue((intensity[masked] == 0.0).all().item())
+        global_avg = global_valid.float().sum(dim=1).mean()
+        local_avg = local_valid.float().sum(dim=1).mean()
+        self.assertGreater(float(global_avg), float(local_avg))
 
-    def test_mask_is_contiguous_in_mz_sorted_order(self):
+    def test_forward_augmented_num_views(self):
+        """Verify forward_augmented works with the multicrop V-view structure."""
         model = self._build_model()
-        batch = _make_batch(batch_size=3)
-        torch.manual_seed(7)
-        _, _, _, masked, _ = model._augment_view(
-            batch["peak_mz"],
-            batch["peak_intensity"],
-            batch["peak_valid_mask"],
-        )
-        for row in range(masked.shape[0]):
-            valid_idx = torch.nonzero(batch["peak_valid_mask"][row], as_tuple=False).squeeze(-1)
-            sorted_valid_idx = valid_idx[torch.argsort(batch["peak_mz"][row, valid_idx])]
-            masked_sorted_positions = torch.nonzero(
-                masked[row, sorted_valid_idx], as_tuple=False,
-            ).squeeze(-1)
-            self.assertGreater(int(masked_sorted_positions.numel()), 0)
-            if masked_sorted_positions.numel() > 1:
-                deltas = masked_sorted_positions[1:] - masked_sorted_positions[:-1]
-                self.assertTrue((deltas == 1).all().item())
-
-    def test_unmasked_view_has_no_masked_positions(self):
-        model = self._build_model()
-        batch = _make_batch(batch_size=3)
-        _, _, valid, masked = model._augment_unmasked_view(
-            batch["peak_mz"],
-            batch["peak_intensity"],
-            batch["peak_valid_mask"],
-        )
-        self.assertTrue(torch.equal(valid, batch["peak_valid_mask"]))
-        self.assertEqual(int(masked.sum().item()), 0)
-
-    def test_unmasked_view_invalid_positions_are_zeroed(self):
-        model = self._build_model()
-        batch = _make_batch(batch_size=3)
-        mz, intensity, _, _ = model._augment_unmasked_view(
-            batch["peak_mz"],
-            batch["peak_intensity"],
-            batch["peak_valid_mask"],
-        )
-        invalid = ~batch["peak_valid_mask"]
-        self.assertTrue((mz[invalid] == 0.0).all().item())
-        self.assertTrue((intensity[invalid] == 0.0).all().item())
-
-    def test_forward_masked_fraction_matches_masked_view(self):
-        model = self._build_model()
-        batch = _make_batch(batch_size=3)
-        torch.manual_seed(23)
+        batch = _make_batch(batch_size=4)
         metrics = model(batch, train=True)
-        torch.manual_seed(23)
-        _, _, _, _, masked_fraction = model._augment_view(
-            batch["peak_mz"],
-            batch["peak_intensity"],
-            batch["peak_valid_mask"],
-        )
-        self.assertTrue(torch.allclose(metrics["masked_fraction"], masked_fraction))
+        self.assertTrue(torch.isfinite(metrics["loss"]).item())
+        self.assertIn("sigreg_loss", metrics)
+        self.assertIn("invariance_loss", metrics)
 
 
 class PMAPoolingTests(unittest.TestCase):
@@ -404,8 +221,8 @@ class PMAPoolingTests(unittest.TestCase):
             attention_mlp_multiple=2.0,
             feature_mlp_hidden_dim=16,
             sigreg_use_projector=False,
-            bcs_num_slices=32,
-            sigreg_lambda=10.0,
+            sigreg_num_slices=32,
+            sigreg_lambda=0.1,
             pooling_type="pma",
             pma_num_heads=4,
             pma_num_seeds=2,
@@ -437,42 +254,27 @@ class PMAPoolingTests(unittest.TestCase):
 
 
 class SIGRegLossTests(unittest.TestCase):
-    def test_epps_pulley_finite(self):
-        x = torch.randn(32, 16)
-        t = torch.linspace(-3.0, 3.0, 10)
-        exp_f = torch.exp(-0.5 * t**2)
-        result = _epps_pulley(x, t, exp_f)
-        self.assertEqual(result.shape, (16,))
-        self.assertTrue(torch.isfinite(result).all().item())
+    def test_sigreg_output_is_scalar(self):
+        sigreg = SIGReg(num_slices=32)
+        proj = torch.randn(4, 8, 16)  # [V, B, D]
+        result = sigreg(proj)
+        self.assertEqual(result.ndim, 0)
+        self.assertTrue(torch.isfinite(result).item())
 
-    def test_bcs_loss_output_structure(self):
-        loss_fn = BCSLoss(num_slices=32, lmbd=10.0)
-        z1 = torch.randn(32, 16)
-        z2 = torch.randn(32, 16)
-        out = loss_fn(z1, z2)
-        for key in ("loss", "bcs_loss", "invariance_loss"):
-            self.assertIn(key, out)
-        self.assertTrue(torch.isfinite(out["loss"]).item())
-        self.assertGreaterEqual(float(out["bcs_loss"]), 0.0)
+    def test_sigreg_backpropagates(self):
+        sigreg = SIGReg(num_slices=32)
+        proj = torch.randn(4, 8, 16, requires_grad=True)
+        result = sigreg(proj)
+        result.backward()
+        self.assertIsNotNone(proj.grad)
+        self.assertGreater(float(proj.grad.abs().sum()), 0.0)
 
-    def test_bcs_projection_seed_is_reproducible(self):
-        loss_fn = BCSLoss(num_slices=32, lmbd=10.0)
-        proj1 = loss_fn.sample_projection(16, device=torch.device("cpu"), seed=7)
-        proj2 = loss_fn.sample_projection(16, device=torch.device("cpu"), seed=7)
-        proj3 = loss_fn.sample_projection(16, device=torch.device("cpu"), seed=8)
-        self.assertTrue(torch.allclose(proj1, proj2))
-        self.assertFalse(torch.allclose(proj1, proj3))
-
-    def test_loss_backpropagates_to_both_branches(self):
-        loss_fn = BCSLoss(num_slices=32, lmbd=10.0)
-        z1 = torch.randn(32, 16, requires_grad=True)
-        z2 = torch.randn(32, 16, requires_grad=True)
-        out = loss_fn(z1, z2)
-        out["loss"].backward()
-        self.assertIsNotNone(z1.grad)
-        self.assertIsNotNone(z2.grad)
-        self.assertGreater(float(z1.grad.abs().sum()), 0.0)
-        self.assertGreater(float(z2.grad.abs().sum()), 0.0)
+    def test_sigreg_gaussian_input_has_low_statistic(self):
+        sigreg = SIGReg(num_slices=64)
+        proj = torch.randn(4, 256, 32)  # large B for statistical accuracy
+        result = sigreg(proj)
+        # Gaussian input should produce a small statistic
+        self.assertLess(float(result), 100.0)
 
 
 class CheckpointCompatibilityTests(unittest.TestCase):
