@@ -238,7 +238,6 @@ class PeakSetEncoder(nn.Module):
                 attention_mlp_multiple=attention_mlp_multiple,
                 use_rope=self.use_rope,
             )
-        self.norm = nn.RMSNorm(model_dim, eps=1e-5)
 
     def forward(
         self,
@@ -259,7 +258,7 @@ class PeakSetEncoder(nn.Module):
                 q_block_mask = set_transformer_torch.create_q_padding_block_mask(valid_mask, kv_len=m)
             for block in self.blocks:
                 x = block(x, kv_block_mask=kv_block_mask, q_block_mask=q_block_mask)
-            return self.norm(x)
+            return x
 
         autocast_dtype = None
         run_high_precision_stem = False
@@ -313,7 +312,7 @@ class PeakSetEncoder(nn.Module):
 
         for block in self.blocks[start_block:]:
             x = block(x, freqs_cos=freqs_cos, freqs_sin=freqs_sin, block_mask=block_mask)
-        return self.norm(x)
+        return x
 
 
 class PeakSetSIGReg(nn.Module):
@@ -402,9 +401,6 @@ class PeakSetSIGReg(nn.Module):
                 nn.Linear(model_dim, sigreg_proj_hidden_dim),
                 _make_norm(sigreg_proj_hidden_dim),
                 nn.SiLU(),
-                nn.Linear(sigreg_proj_hidden_dim, sigreg_proj_hidden_dim),
-                _make_norm(sigreg_proj_hidden_dim),
-                nn.SiLU(),
                 nn.Linear(sigreg_proj_hidden_dim, sigreg_proj_output_dim),
             )
         else:
@@ -479,8 +475,8 @@ class PeakSetSIGReg(nn.Module):
                 key_padding_mask=~valid_mask,
                 need_weights=False,
             )
-            pooled_raw = pooled.mean(dim=1)
-            return self.pool_norm(pooled_raw), pooled_raw
+            pooled_raw = pooled.sum(dim=1)
+            return pooled_raw, pooled_raw
         raise NotImplementedError(f"Unknown pooling type: {self.pooling_type}")
 
     def _augment_view(
@@ -560,7 +556,6 @@ class PeakSetSIGReg(nn.Module):
         encoder_pooled_rms = fused_pooled.float().pow(2).mean(dim=-1).sqrt().mean()
         encoder_pooled_raw_rms = fused_pooled_raw.float().pow(2).mean(dim=-1).sqrt().mean()
         pool_norm_weight_abs_mean = self.pool_norm.weight.abs().mean()
-        encoder_norm_weight_abs_mean = self.encoder.norm.weight.abs().mean()
 
         # Alignment: mean cosine similarity between paired views (higher = better)
         z1_norm = nn.functional.normalize(z1, dim=-1)
@@ -584,7 +579,6 @@ class PeakSetSIGReg(nn.Module):
             "encoder_pooled_rms": encoder_pooled_rms,
             "encoder_pooled_raw_rms": encoder_pooled_raw_rms,
             "pool_norm_weight_abs_mean": pool_norm_weight_abs_mean,
-            "encoder_norm_weight_abs_mean": encoder_norm_weight_abs_mean,
             "alignment": alignment,
             "uniformity": uniformity,
         }
