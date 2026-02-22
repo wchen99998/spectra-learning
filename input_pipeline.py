@@ -48,7 +48,7 @@ _GEMS_HF_REPO = "roman-bushuiev/GeMS"
 _GEMS_HDF5_PATH = "data/GeMS_A/GeMS_A.hdf5"
 _MASSSPEC_HF_REPO = "roman-bushuiev/MassSpecGym"
 _MASSSPEC_TSV_PATH = "data/MassSpecGym.tsv"
-_MASSSPEC_METADATA_VERSION = 2
+_MASSSPEC_METADATA_VERSION = 3
 
 
 # -----------------------------------------------------------------------------
@@ -247,6 +247,7 @@ def _write_tfrecords_with_fingerprint(
     retention: np.ndarray,
     precursor: np.ndarray,
     fingerprint: np.ndarray,
+    smiles: np.ndarray,
     adduct_id: np.ndarray,
     instrument_type_id: np.ndarray,
     collision_energy: np.ndarray,
@@ -295,6 +296,9 @@ def _write_tfrecords_with_fingerprint(
                     ),
                     "fingerprint": tf.train.Feature(
                         int64_list=tf.train.Int64List(value=fp)
+                    ),
+                    "smiles": tf.train.Feature(
+                        bytes_list=tf.train.BytesList(value=[str(smiles[i]).encode("utf-8")])
                     ),
                     "adduct_id": tf.train.Feature(
                         int64_list=tf.train.Int64List(value=[adduct])
@@ -416,6 +420,7 @@ def _process_massspec(output_dir: Path, num_shards: int) -> dict[str, Any]:
         retention[train_mask],
         precursor[train_mask],
         fingerprints[train_mask],
+        smiles[train_mask],
         adduct_id[train_mask],
         instrument_type_id[train_mask],
         collision_energy[train_mask],
@@ -430,6 +435,7 @@ def _process_massspec(output_dir: Path, num_shards: int) -> dict[str, Any]:
         retention[val_mask],
         precursor[val_mask],
         fingerprints[val_mask],
+        smiles[val_mask],
         adduct_id[val_mask],
         instrument_type_id[val_mask],
         collision_energy[val_mask],
@@ -444,6 +450,7 @@ def _process_massspec(output_dir: Path, num_shards: int) -> dict[str, Any]:
         retention[test_mask],
         precursor[test_mask],
         fingerprints[test_mask],
+        smiles[test_mask],
         adduct_id[test_mask],
         instrument_type_id[test_mask],
         collision_energy[test_mask],
@@ -777,12 +784,13 @@ def _batched_parse_and_transform(
 
 
     if include_fingerprint:
-        feature_spec: dict[str, tf.io.FixedLenFeature] = {
+        feature_spec: dict[str, tf.io.FixedLenFeature | tf.io.FixedLenSequenceFeature] = {
             "mz": tf.io.FixedLenFeature([_NUM_PEAKS_INPUT], tf.float32),
             "intensity": tf.io.FixedLenFeature([_NUM_PEAKS_INPUT], tf.float32),
             "rt": tf.io.FixedLenFeature([1], tf.float32),
             "precursor_mz": tf.io.FixedLenFeature([1], tf.float32),
             "fingerprint": tf.io.FixedLenFeature([_FINGERPRINT_BITS], tf.int64),
+            "smiles": tf.io.FixedLenFeature([], tf.string),
             "adduct_id": tf.io.FixedLenFeature([1], tf.int64),
             "instrument_type_id": tf.io.FixedLenFeature([1], tf.int64),
             "collision_energy": tf.io.FixedLenFeature([1], tf.float32),
@@ -865,6 +873,7 @@ def _batched_parse_and_transform(
         }
         if include_fingerprint:
             out["fingerprint"] = tf.cast(parsed["fingerprint"], tf.int32)
+            out["smiles"] = parsed["smiles"]
             out["adduct_id"] = tf.cast(parsed["adduct_id"][:, 0], tf.int32)
             out["instrument_type_id"] = tf.cast(
                 parsed["instrument_type_id"][:, 0], tf.int32,

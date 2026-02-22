@@ -19,7 +19,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import csv
+import hashlib
 import json
 import logging
 import sys
@@ -32,10 +32,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch._inductor.config as inductor_config
+import torch.nn.functional as F
 from sklearn.linear_model import LogisticRegression, Ridge
+from sklearn.metrics import r2_score, roc_auc_score
 from sklearn.model_selection import KFold, cross_val_score
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import normalize as l2_normalize
+from torch.utils.data import DataLoader, TensorDataset
 from tqdm.auto import tqdm
 import umap
 
@@ -54,12 +57,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from input_pipeline import (
     TfLightningDataModule,
-    _MASSSPEC_HF_REPO,
-    _MASSSPEC_TSV_PATH,
-    _download_hf_file,
     numpy_batch_to_torch,
 )
 from models.model import PeakSetSIGReg
+from utils.probing import FinalAttentiveProbe, FinalLinearProbe
+from utils.schedulers import learning_rate_at_step
 from utils.training import (
     build_model_from_config,
     load_config,
@@ -97,6 +99,14 @@ PROBE_SIZE = 50_000
 N_PAIRS = 500_000
 K_VALUES = [1, 5, 10, 20, 50]
 
+NEURAL_PROBE_EPOCHS = 10
+NEURAL_PROBE_LR = 1e-4
+NEURAL_PROBE_WEIGHT_DECAY = 1e-4
+NEURAL_PROBE_WARMUP_STEPS = 50
+NEURAL_PROBE_BATCH_SIZE = 256
+NEURAL_PROBE_HIDDEN_DIM = 256
+NEURAL_PROBE_ATTENTION_HEADS = 8
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -110,6 +120,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", default=None, help="Override checkpoint path (default: latest in --dir).")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=RANDOM_SEED)
+    parser.add_argument(
+        "--probe-type",
+        choices=["sklearn", "neural-linear", "neural-attentive", "all"],
+        default="sklearn",
+        help="Probe type: sklearn (Ridge/LogReg CV), neural-linear, neural-attentive, or all.",
+    )
     return parser.parse_args()
 
 
@@ -149,21 +165,6 @@ def _load_model_and_data(
     return config, datamodule, backbone, ckpt_path
 
 
-def _read_smiles(config) -> list[str]:
-    max_precursor_mz = float(config.get("max_precursor_mz", 1000.0))
-    tfrecord_dir = Path(config.get("tfrecord_dir", "data/gems_peaklist_tfrecord")).expanduser().resolve()
-    tsv_path = _download_hf_file(_MASSSPEC_HF_REPO, _MASSSPEC_TSV_PATH, tfrecord_dir.parent)
-
-    smiles_train: list[str] = []
-    with Path(tsv_path).open() as f:
-        reader = csv.DictReader(f, delimiter="\t")
-        for row in reader:
-            if row["fold"] == "train" and float(row["precursor_mz"]) <= max_precursor_mz:
-                smiles_train.append(row["smiles"])
-    log.info("SMILES for massspec_train: %s", f"{len(smiles_train):,}")
-    return smiles_train
-
-
 def _encode_batch_impl(
     model: PeakSetSIGReg,
     peak_mz: torch.Tensor,
@@ -199,12 +200,17 @@ def _extract_embeddings(
 
     embed_list: list[torch.Tensor] = []
     fp_list: list[np.ndarray] = []
+    smiles_list: list[str] = []
     meta: dict[str, list[torch.Tensor]] = {
         "adduct": [],
         "instrument": [],
         "precursor_mz": [],
         "n_valid_peaks": [],
     }
+    raw_peak_mz_list: list[torch.Tensor] = []
+    raw_peak_intensity_list: list[torch.Tensor] = []
+    raw_peak_valid_mask_list: list[torch.Tensor] = []
+    raw_precursor_mz_list: list[torch.Tensor] = []
 
     log.info("Extracting embeddings (torch.compile + autocast)...")
     with torch.no_grad():
@@ -230,17 +236,29 @@ def _extract_embeddings(
 
             embed_list.append(pooled.cpu().float())
             fp_list.append(batch["fingerprint"].numpy())
+            smiles_list.extend(batch["smiles"])
             meta["adduct"].append(batch["adduct_id"].to(torch.long))
             meta["instrument"].append(batch["instrument_type_id"].to(torch.long))
             meta["precursor_mz"].append(batch["precursor_mz"].to(torch.float32))
             meta["n_valid_peaks"].append(batch["peak_valid_mask"].sum(dim=1).to(torch.long))
 
+            raw_peak_mz_list.append(batch["peak_mz"])
+            raw_peak_intensity_list.append(batch["peak_intensity"])
+            raw_peak_valid_mask_list.append(batch["peak_valid_mask"])
+            raw_precursor_mz_list.append(batch["precursor_mz"])
+
     all_embeds = torch.cat(embed_list, dim=0).numpy()
     all_fps_morgan = np.concatenate(fp_list, axis=0)
     all_meta = {k: torch.cat(v).numpy() for k, v in meta.items()}
+    raw_peaks = {
+        "peak_mz": torch.cat(raw_peak_mz_list, dim=0),
+        "peak_intensity": torch.cat(raw_peak_intensity_list, dim=0),
+        "peak_valid_mask": torch.cat(raw_peak_valid_mask_list, dim=0),
+        "precursor_mz": torch.cat(raw_precursor_mz_list, dim=0),
+    }
 
-    log.info("Embeddings: %s, Morgan FPs: %s", all_embeds.shape, all_fps_morgan.shape)
-    return all_embeds, all_fps_morgan, all_meta
+    log.info("Embeddings: %s, Morgan FPs: %s, SMILES: %d", all_embeds.shape, all_fps_morgan.shape, len(smiles_list))
+    return all_embeds, all_fps_morgan, all_meta, smiles_list, raw_peaks
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +305,46 @@ def _compute_rdkit_features(all_smiles: list[str]):
         "num_heavy_atoms": num_heavy_atoms,
         "logp": logp,
     }
+    return maccs_fps, fg_counts, mol_props, valid_mol_mask
+
+
+def _compute_rdkit_features_cached(
+    all_smiles: list[str],
+    cache_dir: Path,
+) -> tuple[np.ndarray, dict[str, np.ndarray], dict[str, np.ndarray], np.ndarray]:
+    """Compute RDKit features with on-disk caching (keyed by SMILES hash)."""
+    smiles_hash = hashlib.sha256("\n".join(all_smiles).encode()).hexdigest()[:16]
+    cache_path = cache_dir / f"rdkit_features_{smiles_hash}.npz"
+
+    if cache_path.exists():
+        log.info("Loading cached RDKit features from %s", cache_path)
+        data = np.load(cache_path)
+        maccs_fps = data["maccs_fps"]
+        valid_mol_mask = data["valid_mol_mask"]
+        mol_props = {
+            k: data[k]
+            for k in ("mol_weight", "num_rings", "num_aromatic_rings",
+                       "num_heavy_atoms", "logp")
+        }
+        fg_counts = {
+            k.removeprefix("fg_"): data[k]
+            for k in data.files
+            if k.startswith("fg_")
+        }
+        log.info("Loaded cached features for %d samples", len(maccs_fps))
+        return maccs_fps, fg_counts, mol_props, valid_mol_mask
+
+    maccs_fps, fg_counts, mol_props, valid_mol_mask = _compute_rdkit_features(all_smiles)
+
+    save_dict: dict[str, np.ndarray] = {
+        "maccs_fps": maccs_fps,
+        "valid_mol_mask": valid_mol_mask,
+    }
+    save_dict.update(mol_props)
+    for name, arr in fg_counts.items():
+        save_dict[f"fg_{name}"] = arr
+    np.savez_compressed(cache_path, **save_dict)
+    log.info("Cached RDKit features to %s", cache_path)
     return maccs_fps, fg_counts, mol_props, valid_mol_mask
 
 
@@ -557,6 +615,251 @@ def _linear_probes(
 
 
 # ---------------------------------------------------------------------------
+# 6b. Neural probes (attentive / linear) on token-level encoder features
+# ---------------------------------------------------------------------------
+
+
+def _encode_tokens_impl(
+    model: PeakSetSIGReg,
+    peak_mz: torch.Tensor,
+    peak_intensity: torch.Tensor,
+    peak_valid_mask: torch.Tensor,
+    precursor_mz: torch.Tensor,
+) -> torch.Tensor:
+    return model.encoder(
+        peak_mz, peak_intensity,
+        valid_mask=peak_valid_mask, precursor_mz=precursor_mz,
+    )
+
+
+def _build_substructure_targets(
+    mol_props: dict[str, np.ndarray],
+    fg_counts: dict[str, np.ndarray],
+    indices: np.ndarray,
+) -> tuple[dict[str, torch.Tensor], list[str], list[str]]:
+    targets: dict[str, torch.Tensor] = {}
+    regression_tasks: list[str] = []
+    for key in ("mol_weight", "logp", "num_heavy_atoms", "num_rings"):
+        targets[key] = torch.from_numpy(mol_props[key][indices].astype(np.float32))
+        regression_tasks.append(key)
+
+    classification_tasks: list[str] = []
+    for name in FG_SMARTS:
+        y = (fg_counts[name][indices] > 0).astype(np.float32)
+        pos_frac = float(y.mean())
+        if pos_frac < 0.01 or pos_frac > 0.99:
+            continue
+        targets[f"fg_{name}"] = torch.from_numpy(y)
+        classification_tasks.append(f"fg_{name}")
+
+    return targets, regression_tasks, classification_tasks
+
+
+def _neural_probes(
+    backbone: PeakSetSIGReg,
+    raw_peaks: dict[str, torch.Tensor],
+    mol_props: dict[str, np.ndarray],
+    fg_counts: dict[str, np.ndarray],
+    valid_mol_mask: np.ndarray,
+    device: torch.device,
+    seed: int,
+    probe_class: type[FinalAttentiveProbe] | type[FinalLinearProbe] = FinalAttentiveProbe,
+) -> dict:
+    rng = np.random.RandomState(seed)
+    valid_idx = np.where(valid_mol_mask)[0]
+    probe_size = min(PROBE_SIZE, len(valid_idx))
+    probe_idx = rng.choice(valid_idx, size=probe_size, replace=False)
+
+    targets, regression_tasks, classification_tasks = _build_substructure_targets(
+        mol_props, fg_counts, probe_idx,
+    )
+    all_task_names = regression_tasks + classification_tasks
+    log.info(
+        "Neural probe tasks: %d regression, %d classification",
+        len(regression_tasks), len(classification_tasks),
+    )
+
+    # Standardize regression targets (zero-mean, unit-variance).
+    reg_means: dict[str, float] = {}
+    reg_stds: dict[str, float] = {}
+    for key in regression_tasks:
+        m = float(targets[key].mean())
+        s = float(targets[key].std())
+        s = max(s, 1e-8)
+        reg_means[key] = m
+        reg_stds[key] = s
+        targets[key] = (targets[key] - m) / s
+
+    # 80/20 train/test split.
+    n_train = int(0.8 * probe_size)
+    shuffled = rng.permutation(probe_size)
+    train_sel = shuffled[:n_train]
+    test_sel = shuffled[n_train:]
+
+    # Slice raw peaks to probe subset.
+    probe_peak_mz = raw_peaks["peak_mz"][probe_idx]
+    probe_peak_intensity = raw_peaks["peak_intensity"][probe_idx]
+    probe_peak_valid_mask = raw_peaks["peak_valid_mask"][probe_idx]
+    probe_precursor_mz = raw_peaks["precursor_mz"][probe_idx]
+
+    target_matrix = torch.stack([targets[name] for name in all_task_names], dim=1)
+
+    def _make_dataset(sel: np.ndarray) -> TensorDataset:
+        idx = torch.from_numpy(sel.astype(np.int64))
+        return TensorDataset(
+            probe_peak_mz[idx],
+            probe_peak_intensity[idx],
+            probe_peak_valid_mask[idx],
+            probe_precursor_mz[idx],
+            target_matrix[idx],
+        )
+
+    train_ds = _make_dataset(train_sel)
+    test_ds = _make_dataset(test_sel)
+
+    train_loader = DataLoader(
+        train_ds, batch_size=NEURAL_PROBE_BATCH_SIZE, shuffle=True, drop_last=True,
+    )
+    test_loader = DataLoader(
+        test_ds, batch_size=NEURAL_PROBE_BATCH_SIZE, shuffle=False, drop_last=False,
+    )
+
+    # Build probe.
+    input_dim = int(backbone.encoder.model_dim)
+    head_dims = {name: 1 for name in all_task_names}
+
+    if probe_class is FinalAttentiveProbe:
+        probe = FinalAttentiveProbe(
+            input_dim=input_dim,
+            hidden_dim=NEURAL_PROBE_HIDDEN_DIM,
+            num_attention_heads=NEURAL_PROBE_ATTENTION_HEADS,
+            head_dims=head_dims,
+        ).to(device)
+        probe_label = "attentive"
+    else:
+        probe = FinalLinearProbe(input_dim=input_dim, head_dims=head_dims).to(device)
+        probe_label = "linear"
+
+    optimizer = torch.optim.AdamW(
+        probe.parameters(), lr=NEURAL_PROBE_LR, weight_decay=NEURAL_PROBE_WEIGHT_DECAY,
+    )
+    total_steps = NEURAL_PROBE_EPOCHS * len(train_loader)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lr_lambda=lambda step_idx: learning_rate_at_step(
+            step_idx + 1,
+            base_lr=NEURAL_PROBE_LR,
+            total_steps=total_steps,
+            warmup_steps=NEURAL_PROBE_WARMUP_STEPS,
+            schedule_type="cosine",
+            min_learning_rate=None,
+        ) / NEURAL_PROBE_LR,
+    )
+
+    compiled_encoder = torch.compile(_encode_tokens_impl, mode="max-autotune", fullgraph=True)
+    autocast_dtype = torch.bfloat16 if device.type == "cuda" else None
+
+    log.info("Training %s probe for %d epochs (%d steps)...", probe_label, NEURAL_PROBE_EPOCHS, total_steps)
+
+    for epoch in range(NEURAL_PROBE_EPOCHS):
+        probe.train()
+        epoch_loss = 0.0
+        epoch_count = 0
+        for peak_mz_b, peak_int_b, mask_b, prec_b, targets_b in train_loader:
+            peak_mz_b = peak_mz_b.to(device, non_blocking=True)
+            peak_int_b = peak_int_b.to(device, non_blocking=True)
+            mask_b = mask_b.to(device, non_blocking=True)
+            prec_b = prec_b.to(device, non_blocking=True)
+            targets_b = targets_b.to(device, non_blocking=True)
+
+            with torch.no_grad():
+                torch.compiler.cudagraph_mark_step_begin()
+                if autocast_dtype is not None:
+                    with torch.autocast(device_type="cuda", dtype=autocast_dtype):
+                        tokens = compiled_encoder(backbone, peak_mz_b, peak_int_b, mask_b, prec_b)
+                else:
+                    tokens = compiled_encoder(backbone, peak_mz_b, peak_int_b, mask_b, prec_b)
+
+            logits = probe(tokens.float(), mask_b)
+
+            loss = torch.tensor(0.0, device=device)
+            for i, name in enumerate(all_task_names):
+                y = targets_b[:, i]
+                pred = logits[name].squeeze(-1)
+                if name in regression_tasks:
+                    loss = loss + F.mse_loss(pred, y)
+                else:
+                    loss = loss + F.binary_cross_entropy_with_logits(pred, y)
+
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+
+            epoch_loss += loss.item() * peak_mz_b.shape[0]
+            epoch_count += peak_mz_b.shape[0]
+
+        log.info(
+            "  %s probe epoch %d/%d train_loss=%.4f",
+            probe_label, epoch + 1, NEURAL_PROBE_EPOCHS, epoch_loss / epoch_count,
+        )
+
+    # Evaluate on test set.
+    probe.eval()
+    all_preds: dict[str, list[np.ndarray]] = {name: [] for name in all_task_names}
+    all_targets: dict[str, list[np.ndarray]] = {name: [] for name in all_task_names}
+
+    with torch.no_grad():
+        for peak_mz_b, peak_int_b, mask_b, prec_b, targets_b in test_loader:
+            peak_mz_b = peak_mz_b.to(device, non_blocking=True)
+            peak_int_b = peak_int_b.to(device, non_blocking=True)
+            mask_b = mask_b.to(device, non_blocking=True)
+            prec_b = prec_b.to(device, non_blocking=True)
+            targets_b = targets_b.to(device, non_blocking=True)
+
+            torch.compiler.cudagraph_mark_step_begin()
+            if autocast_dtype is not None:
+                with torch.autocast(device_type="cuda", dtype=autocast_dtype):
+                    tokens = compiled_encoder(backbone, peak_mz_b, peak_int_b, mask_b, prec_b)
+            else:
+                tokens = compiled_encoder(backbone, peak_mz_b, peak_int_b, mask_b, prec_b)
+
+            logits = probe(tokens.float(), mask_b)
+
+            for i, name in enumerate(all_task_names):
+                pred = logits[name].squeeze(-1).cpu().numpy()
+                y = targets_b[:, i].cpu().numpy()
+                all_preds[name].append(pred)
+                all_targets[name].append(y)
+
+    # Compute metrics.
+    results: dict[str, dict] = {}
+
+    for name in regression_tasks:
+        preds = np.concatenate(all_preds[name])
+        tgts = np.concatenate(all_targets[name])
+        # Un-standardize for R² on original scale.
+        preds_orig = preds * reg_stds[name] + reg_means[name]
+        tgts_orig = tgts * reg_stds[name] + reg_means[name]
+        r2 = float(r2_score(tgts_orig, preds_orig))
+        log.info("  %s probe Ridge %s: R^2 = %.4f", probe_label, name, r2)
+        results[f"ridge_{name}"] = {"r2": r2}
+
+    fg_results: dict[str, dict] = {}
+    for name in classification_tasks:
+        preds = np.concatenate(all_preds[name])
+        tgts = np.concatenate(all_targets[name])
+        auc = float(roc_auc_score(tgts, preds))
+        short_name = name.removeprefix("fg_")
+        prevalence = float(tgts.mean())
+        log.info("  %s probe %s: AUC=%.4f (prevalence=%.3f)", probe_label, short_name, auc, prevalence)
+        fg_results[short_name] = {"auc": auc, "prevalence": prevalence}
+    results["functional_groups"] = fg_results
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # 7. MACCS key enrichment in embedding neighborhoods
 # ---------------------------------------------------------------------------
 
@@ -649,17 +952,16 @@ def main() -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    # 1. Load model & extract embeddings
+    # 1. Load model & extract embeddings (SMILES come directly from TFRecords)
     config, datamodule, backbone, ckpt_path = _load_model_and_data(
         args.config, args.dir, args.checkpoint, device, seed,
     )
-    all_smiles = _read_smiles(config)
-    all_embeds, all_fps_morgan, all_meta = _extract_embeddings(config, datamodule, backbone, device, seed)
-    all_smiles = all_smiles[:len(all_embeds)]
+    all_embeds, all_fps_morgan, all_meta, all_smiles, raw_peaks = _extract_embeddings(config, datamodule, backbone, device, seed)
     assert len(all_smiles) == len(all_embeds), f"Mismatch: {len(all_smiles)} vs {len(all_embeds)}"
 
-    # 2. Compute RDKit features
-    maccs_fps, fg_counts, mol_props, valid_mol_mask = _compute_rdkit_features(all_smiles)
+    # 2. Compute RDKit features (cached in tfrecord_dir so it's shared across runs)
+    tfrecord_dir = Path(config.get("tfrecord_dir", "data/gems_peaklist_tfrecord")).expanduser().resolve()
+    maccs_fps, fg_counts, mol_props, valid_mol_mask = _compute_rdkit_features_cached(all_smiles, tfrecord_dir)
 
     # 3. Tanimoto analysis
     tanimoto_results = _tanimoto_analysis(all_embeds, all_fps_morgan, valid_mol_mask, outdir, seed)
@@ -671,8 +973,21 @@ def main() -> None:
     # 5. UMAP
     _umap_analysis(all_embeds, all_meta, mol_props, fg_counts, valid_mol_mask, outdir, seed)
 
-    # 6. Linear probes
-    probe_results = _linear_probes(all_embeds, mol_props, fg_counts, valid_mol_mask, seed)
+    # 6. Probes
+    probe_type = args.probe_type
+    probe_results: dict[str, dict] = {}
+    if probe_type in ("sklearn", "all"):
+        probe_results["sklearn"] = _linear_probes(all_embeds, mol_props, fg_counts, valid_mol_mask, seed)
+    if probe_type in ("neural-attentive", "all"):
+        probe_results["neural_attentive"] = _neural_probes(
+            backbone, raw_peaks, mol_props, fg_counts, valid_mol_mask, device, seed,
+            probe_class=FinalAttentiveProbe,
+        )
+    if probe_type in ("neural-linear", "all"):
+        probe_results["neural_linear"] = _neural_probes(
+            backbone, raw_peaks, mol_props, fg_counts, valid_mol_mask, device, seed,
+            probe_class=FinalLinearProbe,
+        )
 
     # 7. MACCS enrichment
     maccs_results = _maccs_enrichment(maccs_fps, knn_out["knn_embed_idx"], knn_out["sub_idx"], outdir)
@@ -687,7 +1002,7 @@ def main() -> None:
         "embedding_dim": int(all_embeds.shape[1]),
         "tanimoto": tanimoto_results,
         "knn": knn_results,
-        "linear_probes": probe_results,
+        "probes": probe_results,
         "maccs_enrichment": maccs_results,
     }
     summary_path = outdir / "results.json"
@@ -705,10 +1020,14 @@ def main() -> None:
     print(f"\nkNN Retrieval (embedding vs FP oracle):")
     for k_str, v in knn_results.items():
         print(f"  {k_str}: embed={v['embed_knn_tanimoto']:.4f}  fp={v['fp_knn_tanimoto']:.4f}  rand={v['random_baseline']:.4f}")
-    print(f"\nLinear Probes (Ridge R^2):")
-    for key in ["ridge_mol_weight", "ridge_logp", "ridge_num_heavy_atoms", "ridge_num_rings"]:
-        r = probe_results[key]
-        print(f"  {key}: {r['r2_mean']:.4f} +/- {r['r2_std']:.4f}")
+    for label, results in probe_results.items():
+        print(f"\nProbes [{label}] (Ridge R^2):")
+        for key in ["ridge_mol_weight", "ridge_logp", "ridge_num_heavy_atoms", "ridge_num_rings"]:
+            r = results[key]
+            if "r2_mean" in r:
+                print(f"  {key}: {r['r2_mean']:.4f} +/- {r['r2_std']:.4f}")
+            else:
+                print(f"  {key}: {r['r2']:.4f}")
     print(f"\nMACCS enrichment: mean_lift={maccs_results['mean_lift']:.3f}  median={maccs_results['median_lift']:.3f}")
     print(f"\nOutputs saved to: {outdir}")
     print("=" * 70)
