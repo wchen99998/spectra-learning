@@ -68,6 +68,7 @@ class Attention(nn.Module):
         *,
         n_kv_heads: int | None = None,
         causal: bool = False,
+        qk_norm: bool = False,
     ):
         super().__init__()
         self.dim = dim
@@ -75,10 +76,15 @@ class Attention(nn.Module):
         self.n_kv_heads = n_heads if n_kv_heads is None else n_kv_heads
         self.head_dim = self.dim // self.n_heads
         self.causal = causal
+        self.qk_norm = qk_norm
 
         out_features = (self.n_heads + 2 * self.n_kv_heads) * self.head_dim
         self.wqkv = nn.Linear(self.dim, out_features, bias=False)
         self.wo = nn.Linear(self.dim, self.dim, bias=False)
+
+        if qk_norm:
+            self.q_norm = nn.RMSNorm(self.head_dim, eps=1e-5)
+            self.k_norm = nn.RMSNorm(self.head_dim, eps=1e-5)
 
         nn.init.xavier_normal_(self.wqkv.weight)
         nn.init.xavier_normal_(self.wo.weight)
@@ -102,6 +108,10 @@ class Attention(nn.Module):
         xq = xq.view(bsz, seqlen, self.n_heads, self.head_dim)
         xk = xk.view(bsz, seqlen, self.n_kv_heads, self.head_dim)
         xv = xv.view(bsz, seqlen, self.n_kv_heads, self.head_dim)
+
+        if self.qk_norm:
+            xq = self.q_norm(xq)
+            xk = self.k_norm(xk)
 
         if freqs_cos is not None and freqs_sin is not None:
             xq, xk = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin)
@@ -176,10 +186,13 @@ class TransformerBlock(nn.Module):
         hidden_dim: int | None,
         w_init_scale: float,
         use_rotary_embeddings: bool,
+        qk_norm: bool = False,
+        post_norm: bool = False,
     ):
         super().__init__()
         self.use_rotary_embeddings = use_rotary_embeddings
-        self.attention = Attention(dim, n_heads, n_kv_heads=n_kv_heads, causal=causal)
+        self.post_norm = post_norm
+        self.attention = Attention(dim, n_heads, n_kv_heads=n_kv_heads, causal=causal, qk_norm=qk_norm)
         self.feed_forward = FeedForward(
             dim,
             multiple_of=multiple_of,
@@ -189,6 +202,9 @@ class TransformerBlock(nn.Module):
         )
         self.attention_norm = nn.RMSNorm(dim, eps=norm_eps)
         self.ffn_norm = nn.RMSNorm(dim, eps=norm_eps)
+        if post_norm:
+            self.post_attn_norm = nn.RMSNorm(dim, eps=norm_eps)
+            self.post_ffn_norm = nn.RMSNorm(dim, eps=norm_eps)
 
     def forward(
         self,
@@ -208,4 +224,9 @@ class TransformerBlock(nn.Module):
             freqs_sin=freqs_sin,
             block_mask=block_mask,
         )
-        return h + self.feed_forward(self.ffn_norm(h))
+        if self.post_norm:
+            h = self.post_attn_norm(h)
+        out = h + self.feed_forward(self.ffn_norm(h))
+        if self.post_norm:
+            out = self.post_ffn_norm(out)
+        return out

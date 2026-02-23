@@ -112,6 +112,8 @@ def _build_non_causal_blocks(
     attention_mlp_multiple: float,
     use_rope: bool = False,
     norm_eps: float = 1e-5,
+    qk_norm: bool = False,
+    post_norm: bool = False,
 ) -> nn.ModuleList:
     heads = int(num_heads)
     kv_heads = heads if num_kv_heads is None else int(num_kv_heads)
@@ -130,6 +132,8 @@ def _build_non_causal_blocks(
                 hidden_dim=hidden_dim,
                 w_init_scale=1.0,
                 use_rotary_embeddings=use_rope,
+                qk_norm=qk_norm,
+                post_norm=post_norm,
             )
         )
     return nn.ModuleList(blocks)
@@ -196,6 +200,8 @@ class PeakSetEncoder(nn.Module):
         fp16_high_precision_stem: bool = False,
         encoder_block_type: str = "transformer",
         isab_num_inducing_points: int = 32,
+        qk_norm: bool = False,
+        post_norm: bool = False,
     ):
         super().__init__()
         self.model_dim = model_dim
@@ -233,6 +239,8 @@ class PeakSetEncoder(nn.Module):
                 num_kv_heads=num_kv_heads,
                 attention_mlp_multiple=attention_mlp_multiple,
                 use_rope=self.use_rope,
+                qk_norm=qk_norm,
+                post_norm=post_norm,
             )
         self.final_norm = nn.RMSNorm(model_dim, eps=1e-5)
 
@@ -349,6 +357,8 @@ class PeakSetSIGReg(nn.Module):
         pma_num_seeds: int = 1,
         encoder_block_type: str = "transformer",
         isab_num_inducing_points: int = 32,
+        encoder_qk_norm: bool = False,
+        encoder_post_norm: bool = False,
     ):
         super().__init__()
         self.num_peaks = num_peaks
@@ -382,6 +392,8 @@ class PeakSetSIGReg(nn.Module):
             fp16_high_precision_stem=encoder_fp16_high_precision_stem,
             encoder_block_type=encoder_block_type,
             isab_num_inducing_points=isab_num_inducing_points,
+            qk_norm=encoder_qk_norm,
+            post_norm=encoder_post_norm,
         )
 
         if sigreg_use_projector:
@@ -476,8 +488,9 @@ class PeakSetSIGReg(nn.Module):
                 key_padding_mask=~valid_mask,
                 need_weights=False,
             )
-            pooled_raw = pooled.sum(dim=1)
-            return pooled_raw, pooled_raw
+            pooled_raw = pooled.mean(dim=1)
+            pooled = self.pool_norm(pooled_raw)
+            return pooled, pooled_raw
         raise NotImplementedError(f"Unknown pooling type: {self.pooling_type}")
 
     def forward_augmented(

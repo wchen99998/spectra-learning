@@ -33,6 +33,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_kv_heads = 8
     cfg.encoder_use_rope = False
     cfg.encoder_block_type = "transformer"
+    cfg.encoder_qk_norm = True
+    cfg.encoder_post_norm = True
     cfg.isab_num_inducing_points = 16
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 128

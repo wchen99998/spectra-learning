@@ -20,3 +20,5 @@ experiments/
 *.xml
 
 .serena/
+
+results/

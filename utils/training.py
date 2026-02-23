@@ -64,6 +64,8 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         sigreg_intensity_jitter_std=float(
             config.get("sigreg_intensity_jitter_std", 0.001)
         ),
+        encoder_qk_norm=bool(config.get("encoder_qk_norm", False)),
+        encoder_post_norm=bool(config.get("encoder_post_norm", False)),
     )
 
 

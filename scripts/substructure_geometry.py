@@ -33,10 +33,11 @@ import numpy as np
 import torch
 import torch._inductor.config as inductor_config
 import torch.nn.functional as F
+from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.metrics import r2_score, roc_auc_score
 from sklearn.model_selection import KFold, cross_val_score
-from sklearn.neighbors import NearestNeighbors
+from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor, NearestNeighbors
 from sklearn.preprocessing import normalize as l2_normalize
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm.auto import tqdm
@@ -122,9 +123,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=RANDOM_SEED)
     parser.add_argument(
         "--probe-type",
-        choices=["sklearn", "neural-linear", "neural-attentive", "all"],
+        choices=["sklearn", "knn", "hgb", "neural-linear", "neural-attentive", "all"],
         default="sklearn",
-        help="Probe type: sklearn (Ridge/LogReg CV), neural-linear, neural-attentive, or all.",
+        help="Probe type: sklearn (Ridge/LogReg), knn, hgb (HistGradientBoosting), neural-linear, neural-attentive, or all.",
     )
     return parser.parse_args()
 
@@ -615,6 +616,116 @@ def _linear_probes(
 
 
 # ---------------------------------------------------------------------------
+# 6a-ii. KNN probes
+# ---------------------------------------------------------------------------
+
+KNN_PROBE_K = 10
+
+
+def _knn_probes(
+    all_embeds: np.ndarray,
+    mol_props: dict[str, np.ndarray],
+    fg_counts: dict[str, np.ndarray],
+    valid_mol_mask: np.ndarray,
+    seed: int,
+) -> dict:
+    rng = np.random.RandomState(seed)
+    valid_idx = np.where(valid_mol_mask)[0]
+    probe_size = min(PROBE_SIZE, valid_idx.shape[0])
+    probe_idx = rng.choice(valid_idx, size=probe_size, replace=False)
+    X_probe = all_embeds[probe_idx]
+
+    cv = KFold(n_splits=5, shuffle=True, random_state=seed)
+    results: dict[str, dict] = {}
+
+    regression_targets = [
+        ("mol_weight", "Molecular Weight"),
+        ("logp", "LogP"),
+        ("num_heavy_atoms", "Num Heavy Atoms"),
+        ("num_rings", "Num Rings"),
+    ]
+    for key, label in regression_targets:
+        y = mol_props[key][probe_idx].astype(float)
+        reg = KNeighborsRegressor(n_neighbors=KNN_PROBE_K, metric="cosine", n_jobs=-1)
+        scores = cross_val_score(reg, X_probe, y, cv=cv, scoring="r2", n_jobs=-1)
+        r2_mean, r2_std = float(scores.mean()), float(scores.std())
+        log.info("KNN-%d %s: R^2 = %.4f +/- %.4f", KNN_PROBE_K, label, r2_mean, r2_std)
+        results[f"ridge_{key}"] = {"r2_mean": r2_mean, "r2_std": r2_std}
+
+    fg_names = list(FG_SMARTS.keys())
+    fg_results: dict[str, dict] = {}
+    for name in fg_names:
+        y = (fg_counts[name][probe_idx] > 0).astype(int)
+        pos_frac = float(y.mean())
+        if pos_frac < 0.01 or pos_frac > 0.99:
+            log.info("  %s: skipped (prevalence=%.3f)", name, pos_frac)
+            fg_results[name] = {"skipped": True, "prevalence": pos_frac}
+            continue
+        clf = KNeighborsClassifier(n_neighbors=KNN_PROBE_K, metric="cosine", n_jobs=-1)
+        scores = cross_val_score(clf, X_probe, y, cv=cv, scoring="roc_auc", n_jobs=-1)
+        auc_mean, auc_std = float(scores.mean()), float(scores.std())
+        log.info("  %s: AUC=%.4f +/- %.4f (prevalence=%.3f)", name, auc_mean, auc_std, pos_frac)
+        fg_results[name] = {"auc_mean": auc_mean, "auc_std": auc_std, "prevalence": pos_frac}
+    results["functional_groups"] = fg_results
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# 6a-iii. HistGradientBoosting probes
+# ---------------------------------------------------------------------------
+
+
+def _hgb_probes(
+    all_embeds: np.ndarray,
+    mol_props: dict[str, np.ndarray],
+    fg_counts: dict[str, np.ndarray],
+    valid_mol_mask: np.ndarray,
+    seed: int,
+) -> dict:
+    rng = np.random.RandomState(seed)
+    valid_idx = np.where(valid_mol_mask)[0]
+    probe_size = min(PROBE_SIZE, valid_idx.shape[0])
+    probe_idx = rng.choice(valid_idx, size=probe_size, replace=False)
+    X_probe = all_embeds[probe_idx]
+
+    cv = KFold(n_splits=5, shuffle=True, random_state=seed)
+    results: dict[str, dict] = {}
+
+    regression_targets = [
+        ("mol_weight", "Molecular Weight"),
+        ("logp", "LogP"),
+        ("num_heavy_atoms", "Num Heavy Atoms"),
+        ("num_rings", "Num Rings"),
+    ]
+    for key, label in regression_targets:
+        y = mol_props[key][probe_idx].astype(float)
+        reg = HistGradientBoostingRegressor(max_iter=200, max_depth=6, random_state=seed)
+        scores = cross_val_score(reg, X_probe, y, cv=cv, scoring="r2", n_jobs=-1)
+        r2_mean, r2_std = float(scores.mean()), float(scores.std())
+        log.info("HGB %s: R^2 = %.4f +/- %.4f", label, r2_mean, r2_std)
+        results[f"ridge_{key}"] = {"r2_mean": r2_mean, "r2_std": r2_std}
+
+    fg_names = list(FG_SMARTS.keys())
+    fg_results: dict[str, dict] = {}
+    for name in fg_names:
+        y = (fg_counts[name][probe_idx] > 0).astype(int)
+        pos_frac = float(y.mean())
+        if pos_frac < 0.01 or pos_frac > 0.99:
+            log.info("  %s: skipped (prevalence=%.3f)", name, pos_frac)
+            fg_results[name] = {"skipped": True, "prevalence": pos_frac}
+            continue
+        clf = HistGradientBoostingClassifier(max_iter=200, max_depth=6, random_state=seed)
+        scores = cross_val_score(clf, X_probe, y, cv=cv, scoring="roc_auc", n_jobs=-1)
+        auc_mean, auc_std = float(scores.mean()), float(scores.std())
+        log.info("  %s: AUC=%.4f +/- %.4f (prevalence=%.3f)", name, auc_mean, auc_std, pos_frac)
+        fg_results[name] = {"auc_mean": auc_mean, "auc_std": auc_std, "prevalence": pos_frac}
+    results["functional_groups"] = fg_results
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # 6b. Neural probes (attentive / linear) on token-level encoder features
 # ---------------------------------------------------------------------------
 
@@ -978,6 +1089,10 @@ def main() -> None:
     probe_results: dict[str, dict] = {}
     if probe_type in ("sklearn", "all"):
         probe_results["sklearn"] = _linear_probes(all_embeds, mol_props, fg_counts, valid_mol_mask, seed)
+    if probe_type in ("knn", "all"):
+        probe_results["knn"] = _knn_probes(all_embeds, mol_props, fg_counts, valid_mol_mask, seed)
+    if probe_type in ("hgb", "all"):
+        probe_results["hgb"] = _hgb_probes(all_embeds, mol_props, fg_counts, valid_mol_mask, seed)
     if probe_type in ("neural-attentive", "all"):
         probe_results["neural_attentive"] = _neural_probes(
             backbone, raw_peaks, mol_props, fg_counts, valid_mol_mask, device, seed,

@@ -13,6 +13,8 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.optimizer_fused = True
     cfg.autocast_dtype = "fp32"
     cfg.encoder_fp16_high_precision_stem = False
+    cfg.encoder_qk_norm = False
+    cfg.encoder_post_norm = False
     cfg.pma_fp16_high_precision = False
     # num_workers=0: TF's internal thread pool handles parallelism; forking
     # a subprocess duplicates the TF runtime and can deadlock during shuffle
