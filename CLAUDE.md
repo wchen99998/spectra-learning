@@ -47,9 +47,9 @@ python input_pipeline.py configs/gems_a_dataset.py
 - **Projector**: 3-layer MLP (Linear -> RMSNorm -> SiLU) x2, maps pooled embeddings to lower-dim space for the loss.
 - **BCSLoss** (`models/losses.py`): Projects both views via random slicing directions, tests Gaussianity using Epps-Pulley characteristic function distance. Combined loss = MSE(z1, z2) + lambda * BCS.
 
-### Two-View Augmentation (`models/augmentation.py` + `input_pipeline.py`)
+### Two-View Augmentation (`input_pipeline.py`)
 
-Both PyTorch and TF implementations exist. The TF version runs in the data pipeline for training; PyTorch versions are used in tests and the model's `forward()`.
+The TF implementation in `input_pipeline.py` runs augmentation in the data pipeline for training.
 - **View 1 (masked)**: Contiguous mz-sorted mask + jitter on unmasked peaks + re-normalization
 - **View 2 (unmasked)**: Jitter only, no masking
 

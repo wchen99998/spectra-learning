@@ -14,7 +14,6 @@ import math
 import torch
 from torch import nn
 
-from models.augmentation import augment_multicrop_batch
 from models.losses import SIGReg
 from networks import set_transformer_torch, transformer_torch
 from networks.transformer_torch import create_padding_block_mask
@@ -481,20 +480,6 @@ class PeakSetSIGReg(nn.Module):
             return pooled_raw, pooled_raw
         raise NotImplementedError(f"Unknown pooling type: {self.pooling_type}")
 
-    def augment_batch(
-        self,
-        batch: dict[str, torch.Tensor],
-    ) -> dict[str, torch.Tensor]:
-        return augment_multicrop_batch(
-            batch,
-            num_global_views=self.multicrop_num_global_views,
-            num_local_views=self.multicrop_num_local_views,
-            global_keep_fraction=self.multicrop_global_keep_fraction,
-            local_keep_fraction=self.multicrop_local_keep_fraction,
-            mz_jitter_std=self.sigreg_mz_jitter_std,
-            intensity_jitter_std=self.sigreg_intensity_jitter_std,
-        )
-
     def forward_augmented(
         self,
         augmented_batch: dict[str, torch.Tensor],
@@ -557,15 +542,6 @@ class PeakSetSIGReg(nn.Module):
             "uniformity": uniformity,
         }
 
-    def forward(
-        self,
-        batch: dict[str, torch.Tensor],
-        *,
-        train: bool = True,
-    ) -> dict[str, torch.Tensor]:
-        augmented_batch = self.augment_batch(batch)
-        return self.forward_augmented(augmented_batch)
-
     def encode(
         self,
         batch: dict[str, torch.Tensor],
@@ -581,11 +557,3 @@ class PeakSetSIGReg(nn.Module):
         pooled = self.pool(embeddings, peak_valid_mask)
         return self.projector(pooled)
 
-    def compute_loss(
-        self,
-        batch: dict[str, torch.Tensor],
-        *,
-        train: bool = False,
-    ):
-        metrics = self(batch, train=train)
-        return metrics["loss"], metrics
