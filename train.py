@@ -431,12 +431,11 @@ def train_and_evaluate(
                 autocast_dtype,
             )
             global_step += 1
-
-            loss_val = float(metrics["loss"].detach())
-            pbar.set_postfix(loss=f"{loss_val:.4f}", step=global_step)
             pbar.update(1)
 
             if global_step % log_every_n_steps == 0:
+                loss_val = float(metrics["loss"].detach())
+                pbar.set_postfix(loss=f"{loss_val:.4f}", step=global_step)
                 log_metrics = {f"train/{k}": float(v.detach()) for k, v in metrics.items()}
                 if optimizer_type == "muon":
                     for opt, label in zip(optimizers, ("muon", "adamw")):
