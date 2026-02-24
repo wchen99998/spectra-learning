@@ -176,6 +176,8 @@ class PeakSetEncoder(nn.Module):
         rope_mz_precision: float = 0.1,
         rope_complement_heads: int | None = None,
         rope_modulo_2pi: bool = True,
+        num_peaks: int = 60,
+        masked_token_position_mode: str = "index",
         fp16_high_precision_stem: bool = False,
         encoder_block_type: str = "transformer",
         isab_num_inducing_points: int = 32,
@@ -191,6 +193,16 @@ class PeakSetEncoder(nn.Module):
         self.rope_mz_max = float(rope_mz_max)
         self.rope_mz_precision = float(rope_mz_precision)
         self.rope_modulo_2pi = bool(rope_modulo_2pi)
+        self.num_peaks = int(num_peaks)
+        self.masked_token_position_mode = str(masked_token_position_mode).lower()
+        if self.masked_token_position_mode not in {"mz", "index"}:
+            raise ValueError(
+                f"Unknown masked_token_position_mode: {self.masked_token_position_mode!r}"
+            )
+        self.masked_index_embedding = None
+        if self.masked_token_position_mode == "index":
+            self.masked_index_embedding = nn.Embedding(self.num_peaks, model_dim)
+            nn.init.normal_(self.masked_index_embedding.weight, std=0.02)
         heads = int(num_heads)
         complement_heads = heads // 2 if rope_complement_heads is None else int(rope_complement_heads)
         complement_heads = max(0, min(complement_heads, heads))
@@ -233,11 +245,36 @@ class PeakSetEncoder(nn.Module):
         peak_intensity: torch.Tensor,
         valid_mask: torch.Tensor | None = None,
         precursor_mz: torch.Tensor | None = None,
+        masked_positions: torch.Tensor | None = None,
+        mask_token: torch.Tensor | None = None,
     ) -> torch.Tensor:
         device_type = peak_mz.device.type
+        index_positions_da = None
+        if masked_positions is not None and self.masked_token_position_mode == "index":
+            index_positions_da = torch.arange(
+                peak_mz.shape[1], device=peak_mz.device, dtype=torch.float32
+            ).unsqueeze(0).expand(peak_mz.shape[0], -1)
+
+        def _apply_mask_token(x_in: torch.Tensor) -> torch.Tensor:
+            if masked_positions is None or mask_token is None:
+                return x_in
+            token = mask_token.view(1, 1, -1).to(dtype=x_in.dtype, device=x_in.device)
+            x_out = torch.where(masked_positions.unsqueeze(-1), token, x_in)
+            if self.masked_index_embedding is not None:
+                index_ids = torch.arange(
+                    x_in.shape[1], device=x_in.device, dtype=torch.long
+                ).unsqueeze(0).expand(x_in.shape[0], -1)
+                index_embed = self.masked_index_embedding(index_ids).to(dtype=x_in.dtype)
+                x_out = x_out + torch.where(
+                    masked_positions.unsqueeze(-1),
+                    index_embed,
+                    torch.zeros_like(index_embed),
+                )
+            return x_out
 
         if self.encoder_block_type == "isab":
             x = self.embedder(peak_mz, peak_intensity, precursor_mz)
+            x = _apply_mask_token(x)
             kv_block_mask = None
             q_block_mask = None
             if valid_mask is not None:
@@ -264,6 +301,13 @@ class PeakSetEncoder(nn.Module):
             mz_da = peak_mz.float() * self.rope_mz_max
             prec_da = precursor_mz.float().reshape(-1) * self.rope_mz_max
             neutral_loss_da = torch.clamp(prec_da.unsqueeze(1) - mz_da, min=0.0)
+            if masked_positions is not None and index_positions_da is not None:
+                mz_da = torch.where(masked_positions, index_positions_da, mz_da)
+                neutral_loss_da = torch.where(
+                    masked_positions,
+                    index_positions_da,
+                    neutral_loss_da,
+                )
             omega = self.rope_omega
             if omega.device != peak_mz.device:
                 omega = omega.to(device=peak_mz.device)
@@ -297,6 +341,7 @@ class PeakSetEncoder(nn.Module):
         if run_high_precision_stem:
             with torch.autocast(device_type=device_type, enabled=False):
                 x = self.embedder(peak_mz.float(), peak_intensity.float(), precursor_mz.float())
+                x = _apply_mask_token(x)
                 stem_freqs_cos, stem_freqs_sin, stem_freqs_cos_q, stem_freqs_sin_q = _compute_rope(torch.float32)
                 if len(self.blocks) > 0:
                     x = self.blocks[0](
@@ -313,6 +358,7 @@ class PeakSetEncoder(nn.Module):
             x = x.to(dtype=target_dtype)
         else:
             x = self.embedder(peak_mz, peak_intensity, precursor_mz)
+            x = _apply_mask_token(x)
         freqs_cos, freqs_sin, freqs_cos_q, freqs_sin_q = _compute_rope(x.dtype)
 
         for block in self.blocks[start_block:]:
@@ -346,6 +392,9 @@ class PeakSetSIGReg(nn.Module):
         rope_mz_precision: float = 0.1,
         rope_complement_heads: int | None = None,
         rope_modulo_2pi: bool = True,
+        use_masked_token_input: bool = False,
+        masked_token_position_mode: str = "index",
+        masked_token_loss_weight: float = 0.0,
         encoder_fp16_high_precision_stem: bool = False,
         sigreg_use_projector: bool = True,
         sigreg_proj_hidden_dim: int = 2048,
@@ -384,6 +433,8 @@ class PeakSetSIGReg(nn.Module):
         self.pooling_type = pooling_type
         self.pma_fp16_high_precision = bool(pma_fp16_high_precision)
         self.pma_num_seeds = int(pma_num_seeds)
+        self.use_masked_token_input = bool(use_masked_token_input)
+        self.masked_token_loss_weight = float(masked_token_loss_weight)
 
         self.encoder = PeakSetEncoder(
             model_dim=model_dim,
@@ -397,6 +448,8 @@ class PeakSetSIGReg(nn.Module):
             rope_mz_precision=rope_mz_precision,
             rope_complement_heads=rope_complement_heads,
             rope_modulo_2pi=rope_modulo_2pi,
+            num_peaks=num_peaks,
+            masked_token_position_mode=masked_token_position_mode,
             fp16_high_precision_stem=encoder_fp16_high_precision_stem,
             encoder_block_type=encoder_block_type,
             isab_num_inducing_points=isab_num_inducing_points,
@@ -436,6 +489,8 @@ class PeakSetSIGReg(nn.Module):
             batch_first=True,
         )
         self.pool_norm = nn.RMSNorm(model_dim, eps=1e-5)
+        self.mask_token = nn.Parameter(torch.empty(model_dim))
+        nn.init.normal_(self.mask_token, std=0.02)
 
         self.sigreg = SIGReg(num_slices=int(sigreg_num_slices))
 
@@ -509,12 +564,22 @@ class PeakSetSIGReg(nn.Module):
         fused_intensity = augmented_batch["fused_intensity"]
         fused_valid_mask = augmented_batch["fused_valid_mask"]
         fused_precursor_mz = augmented_batch["fused_precursor_mz"]
+        fused_masked_positions = augmented_batch.get("fused_masked_positions")
+        if fused_masked_positions is not None:
+            fused_masked_positions = fused_masked_positions & fused_valid_mask
+        encoder_masked_positions = None
+        encoder_mask_token = None
+        if self.use_masked_token_input and fused_masked_positions is not None:
+            encoder_masked_positions = fused_masked_positions
+            encoder_mask_token = self.mask_token
 
         fused_emb = self.encoder(
             fused_mz,
             fused_intensity,
             valid_mask=fused_valid_mask,
             precursor_mz=fused_precursor_mz,
+            masked_positions=encoder_masked_positions,
+            mask_token=encoder_mask_token,
         )
         fused_pooled, fused_pooled_raw = self.pool_with_raw(fused_emb, fused_valid_mask)
         fused_z = self.projector(fused_pooled)
@@ -531,6 +596,28 @@ class PeakSetSIGReg(nn.Module):
 
         # Convex combination
         loss = sigreg_loss * self.lmbd + inv_loss * (1.0 - self.lmbd)
+        masked_latent_loss = torch.zeros((), dtype=loss.dtype, device=loss.device)
+        masked_fraction = torch.zeros((), dtype=loss.dtype, device=loss.device)
+        if fused_masked_positions is not None:
+            masked_fraction = fused_masked_positions.float().mean()
+        if (
+            self.masked_token_loss_weight > 0.0
+            and fused_masked_positions is not None
+            and torch.any(fused_masked_positions)
+        ):
+            with torch.no_grad():
+                target_emb = self.encoder(
+                    fused_mz,
+                    fused_intensity,
+                    valid_mask=fused_valid_mask,
+                    precursor_mz=fused_precursor_mz,
+                    masked_positions=None,
+                    mask_token=None,
+                )
+            per_token = (fused_emb - target_emb).square().mean(dim=-1)
+            mask = fused_masked_positions.float()
+            masked_latent_loss = (per_token * mask).sum() / mask.sum()
+            loss = loss + self.masked_token_loss_weight * masked_latent_loss
 
         representation_variance = fused_z.float().var(dim=0, unbiased=False).mean()
         encoder_variance = fused_pooled.float().var(dim=0, unbiased=False).mean()
@@ -552,7 +639,9 @@ class PeakSetSIGReg(nn.Module):
             "loss": loss,
             "sigreg_loss": sigreg_loss,
             "invariance_loss": inv_loss,
+            "masked_latent_loss": masked_latent_loss,
             "valid_fraction": valid_fraction,
+            "masked_fraction": masked_fraction,
             "representation_variance": representation_variance,
             "encoder_variance": encoder_variance,
             "encoder_variance_raw": encoder_variance_raw,
