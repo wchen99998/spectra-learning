@@ -674,7 +674,6 @@ def _augment_multicrop_view_tf(
             mz_jitter_std=mz_jitter_std,
             intensity_jitter_std=intensity_jitter_std,
         )
-        view_intensity = tf.where(masked, tf.zeros_like(view_intensity), view_intensity)
         return view_mz, view_intensity, view_valid, masked
 
     view_valid = tf.logical_and(peak_valid_mask, tf.logical_not(masked))

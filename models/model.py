@@ -16,7 +16,10 @@ from torch import nn
 
 from models.losses import SIGReg
 from networks import set_transformer_torch, transformer_torch
-from networks.transformer_torch import create_padding_block_mask
+from networks.transformer_torch import (
+    create_masked_context_block_mask,
+    create_padding_block_mask,
+)
 
 
 class PeakFeatureEmbedder(nn.Module):
@@ -178,6 +181,7 @@ class PeakSetEncoder(nn.Module):
         rope_modulo_2pi: bool = True,
         num_peaks: int = 60,
         masked_token_position_mode: str = "index",
+        masked_token_attention_mode: str = "bidirectional",
         fp16_high_precision_stem: bool = False,
         encoder_block_type: str = "transformer",
         isab_num_inducing_points: int = 32,
@@ -198,6 +202,11 @@ class PeakSetEncoder(nn.Module):
         if self.masked_token_position_mode not in {"mz", "index"}:
             raise ValueError(
                 f"Unknown masked_token_position_mode: {self.masked_token_position_mode!r}"
+            )
+        self.masked_token_attention_mode = str(masked_token_attention_mode).lower()
+        if self.masked_token_attention_mode not in {"bidirectional", "masked_query_to_unmasked_kv"}:
+            raise ValueError(
+                f"Unknown masked_token_attention_mode: {self.masked_token_attention_mode!r}"
             )
         self.masked_index_embedding = None
         if self.masked_token_position_mode == "index":
@@ -251,9 +260,14 @@ class PeakSetEncoder(nn.Module):
         device_type = peak_mz.device.type
         index_positions_da = None
         if masked_positions is not None and self.masked_token_position_mode == "index":
-            index_positions_da = torch.arange(
-                peak_mz.shape[1], device=peak_mz.device, dtype=torch.float32
-            ).unsqueeze(0).expand(peak_mz.shape[0], -1)
+            base_positions = torch.linspace(
+                0.0,
+                self.rope_mz_max,
+                steps=peak_mz.shape[1],
+                device=peak_mz.device,
+                dtype=torch.float32,
+            )
+            index_positions_da = base_positions.unsqueeze(0).expand(peak_mz.shape[0], -1)
 
         def _apply_mask_token(x_in: torch.Tensor) -> torch.Tensor:
             if masked_positions is None or mask_token is None:
@@ -287,7 +301,13 @@ class PeakSetEncoder(nn.Module):
 
         block_mask = None
         if valid_mask is not None:
-            block_mask = create_padding_block_mask(valid_mask)
+            if (
+                masked_positions is not None
+                and self.masked_token_attention_mode == "masked_query_to_unmasked_kv"
+            ):
+                block_mask = create_masked_context_block_mask(valid_mask, masked_positions)
+            else:
+                block_mask = create_padding_block_mask(valid_mask)
 
         def _compute_rope(dtype: torch.dtype) -> tuple[
             torch.Tensor | None,
@@ -394,7 +414,9 @@ class PeakSetSIGReg(nn.Module):
         rope_modulo_2pi: bool = True,
         use_masked_token_input: bool = False,
         masked_token_position_mode: str = "index",
+        masked_token_attention_mode: str = "bidirectional",
         masked_token_loss_weight: float = 0.0,
+        masked_latent_predictor_hidden_dim: int = 0,
         encoder_fp16_high_precision_stem: bool = False,
         sigreg_use_projector: bool = True,
         sigreg_proj_hidden_dim: int = 2048,
@@ -435,6 +457,7 @@ class PeakSetSIGReg(nn.Module):
         self.pma_num_seeds = int(pma_num_seeds)
         self.use_masked_token_input = bool(use_masked_token_input)
         self.masked_token_loss_weight = float(masked_token_loss_weight)
+        self.masked_latent_predictor_hidden_dim = int(masked_latent_predictor_hidden_dim)
 
         self.encoder = PeakSetEncoder(
             model_dim=model_dim,
@@ -450,6 +473,7 @@ class PeakSetSIGReg(nn.Module):
             rope_modulo_2pi=rope_modulo_2pi,
             num_peaks=num_peaks,
             masked_token_position_mode=masked_token_position_mode,
+            masked_token_attention_mode=masked_token_attention_mode,
             fp16_high_precision_stem=encoder_fp16_high_precision_stem,
             encoder_block_type=encoder_block_type,
             isab_num_inducing_points=isab_num_inducing_points,
@@ -491,6 +515,16 @@ class PeakSetSIGReg(nn.Module):
         self.pool_norm = nn.RMSNorm(model_dim, eps=1e-5)
         self.mask_token = nn.Parameter(torch.empty(model_dim))
         nn.init.normal_(self.mask_token, std=0.02)
+        predictor_hidden_dim = (
+            model_dim
+            if self.masked_latent_predictor_hidden_dim <= 0
+            else self.masked_latent_predictor_hidden_dim
+        )
+        self.masked_latent_predictor = nn.Sequential(
+            nn.Linear(model_dim, predictor_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(predictor_hidden_dim, model_dim),
+        )
 
         self.sigreg = SIGReg(num_slices=int(sigreg_num_slices))
 
@@ -572,10 +606,13 @@ class PeakSetSIGReg(nn.Module):
         if self.use_masked_token_input and fused_masked_positions is not None:
             encoder_masked_positions = fused_masked_positions
             encoder_mask_token = self.mask_token
+        student_intensity = fused_intensity
+        if encoder_masked_positions is not None:
+            student_intensity = fused_intensity.masked_fill(encoder_masked_positions, 0.0)
 
         fused_emb = self.encoder(
             fused_mz,
-            fused_intensity,
+            student_intensity,
             valid_mask=fused_valid_mask,
             precursor_mz=fused_precursor_mz,
             masked_positions=encoder_masked_positions,
@@ -614,7 +651,8 @@ class PeakSetSIGReg(nn.Module):
                     masked_positions=None,
                     mask_token=None,
                 )
-            per_token = (fused_emb - target_emb).square().mean(dim=-1)
+            predicted_emb = self.masked_latent_predictor(fused_emb)
+            per_token = (predicted_emb - target_emb).square().mean(dim=-1)
             mask = fused_masked_positions.float()
             masked_latent_loss = (per_token * mask).sum() / mask.sum()
             loss = loss + self.masked_token_loss_weight * masked_latent_loss

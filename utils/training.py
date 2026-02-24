@@ -39,7 +39,13 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         rope_modulo_2pi=bool(config.get("rope_modulo_2pi", True)),
         use_masked_token_input=bool(config.get("use_masked_token_input", False)),
         masked_token_position_mode=str(config.get("masked_token_position_mode", "index")),
+        masked_token_attention_mode=str(
+            config.get("masked_token_attention_mode", "bidirectional")
+        ),
         masked_token_loss_weight=float(config.get("masked_token_loss_weight", 0.0)),
+        masked_latent_predictor_hidden_dim=int(
+            config.get("masked_latent_predictor_hidden_dim", 0)
+        ),
         encoder_block_type=str(config.get("encoder_block_type", "transformer")),
         isab_num_inducing_points=int(config.get("isab_num_inducing_points", 32)),
         encoder_fp16_high_precision_stem=bool(

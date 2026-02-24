@@ -8,6 +8,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.multicrop_keep_masked_tokens = True
     cfg.use_masked_token_input = True
     cfg.masked_token_position_mode = "index"
+    cfg.masked_token_attention_mode = "masked_query_to_unmasked_kv"
     cfg.masked_token_loss_weight = 1.0
     cfg.wandb_run_name_prefix = "jepa_masked_latent_index"
     return cfg

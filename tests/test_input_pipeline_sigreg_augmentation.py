@@ -93,6 +93,20 @@ class MulticropInputAugmentationTests(unittest.TestCase):
         self.assertEqual(out["fused_masked_positions"].shape, out["fused_valid_mask"].shape)
         self.assertGreaterEqual(float(tf.reduce_sum(tf.cast(out["fused_masked_positions"], tf.float32))), 1.0)
 
+        fused_masked = out["fused_masked_positions"].numpy()
+        fused_intensity = out["fused_intensity"].numpy()
+        peak_intensity = batch["peak_intensity"].numpy()
+        batch_size = peak_intensity.shape[0]
+        for row_idx, row_masked in enumerate(fused_masked):
+            base_idx = row_idx % batch_size
+            if row_masked.any():
+                np.testing.assert_allclose(
+                    fused_intensity[row_idx][row_masked],
+                    peak_intensity[base_idx][row_masked],
+                    rtol=0.0,
+                    atol=0.0,
+                )
+
     def test_global_views_keep_more_than_local(self):
         tf.random.set_seed(42)
         batch = self._make_batch()

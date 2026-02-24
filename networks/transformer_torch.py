@@ -31,6 +31,39 @@ def create_padding_block_mask(valid_mask: torch.Tensor) -> BlockMask:
     return create_block_mask(mask_mod, B=B, H=None, Q_LEN=N, KV_LEN=N, device=valid_mask.device)
 
 
+def build_masked_attention_allow_matrix(
+    valid_mask: torch.Tensor,
+    masked_positions: torch.Tensor,
+) -> torch.Tensor:
+    """Return [B, Q, K] attention allow matrix for masked-token context isolation.
+
+    Rules:
+    - Any query/key touching padding is blocked.
+    - Unmasked queries cannot attend to masked keys.
+    - Masked queries may attend to both masked and unmasked valid keys.
+    """
+    q_valid = valid_mask.unsqueeze(2)
+    kv_valid = valid_mask.unsqueeze(1)
+    q_masked = masked_positions.unsqueeze(2)
+    kv_masked = masked_positions.unsqueeze(1)
+    unmasked_query_to_masked_key = torch.logical_and(~q_masked, kv_masked)
+    return q_valid & kv_valid & (~unmasked_query_to_masked_key)
+
+
+def create_masked_context_block_mask(
+    valid_mask: torch.Tensor,
+    masked_positions: torch.Tensor,
+) -> BlockMask:
+    """Create BlockMask for masked-token context isolation attention pattern."""
+    B, N = valid_mask.shape
+    allow = build_masked_attention_allow_matrix(valid_mask, masked_positions)
+
+    def mask_mod(b, h, q_idx, kv_idx):
+        return allow[b, q_idx, kv_idx]
+
+    return create_block_mask(mask_mod, B=B, H=None, Q_LEN=N, KV_LEN=N, device=valid_mask.device)
+
+
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     rotated = torch.empty_like(x)
     rotated[..., ::2] = -x[..., 1::2]
