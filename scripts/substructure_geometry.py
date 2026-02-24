@@ -111,8 +111,8 @@ NEURAL_PROBE_ATTENTION_HEADS = 8
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--config", required=True, help="Path to config .py file.")
-    parser.add_argument("--dir", required=True, help="Experiment directory containing trial_*/checkpoints/.")
+    parser.add_argument("--config", default=None, help="Path to config .py file (required unless --external-embed).")
+    parser.add_argument("--dir", default=None, help="Experiment directory containing trial_*/checkpoints/ (required unless --external-embed).")
     parser.add_argument(
         "--workdir",
         default="results/substructure_geometry",
@@ -127,7 +127,13 @@ def _parse_args() -> argparse.Namespace:
         default="sklearn",
         help="Probe type: sklearn (Ridge/LogReg), knn, hgb (HistGradientBoosting), neural-linear, neural-attentive, or all.",
     )
-    return parser.parse_args()
+    parser.add_argument("--external-embed", default=None, help="Path to HDF5 file with pre-computed embeddings (bypasses model loading).")
+    parser.add_argument("--embed-key", default="DreaMS_embedding", help="HDF5 dataset key for embeddings (default: DreaMS_embedding).")
+    parser.add_argument("--fold", default="train", help="Which fold to filter to in the HDF5 file (default: train).")
+    args = parser.parse_args()
+    if args.external_embed is None and (args.config is None or args.dir is None):
+        parser.error("--config and --dir are required unless --external-embed is provided.")
+    return args
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +266,60 @@ def _extract_embeddings(
 
     log.info("Embeddings: %s, Morgan FPs: %s, SMILES: %d", all_embeds.shape, all_fps_morgan.shape, len(smiles_list))
     return all_embeds, all_fps_morgan, all_meta, smiles_list, raw_peaks
+
+
+def _resolve_hdf5_key(f, desired: str) -> str:
+    """Find an HDF5 key case-insensitively."""
+    keys_lower = {k.lower(): k for k in f.keys()}
+    actual = keys_lower.get(desired.lower())
+    assert actual is not None, f"Key {desired!r} not found in HDF5 (available: {list(f.keys())})"
+    return actual
+
+
+def _load_external_embeddings(
+    hdf5_path: str,
+    embed_key: str,
+    fold: str,
+) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray], list[str]]:
+    """Load pre-computed embeddings from an HDF5 file (e.g. DreaMS).
+
+    Returns (embeddings, morgan_fps, meta_dict, smiles_list).
+    """
+    import h5py
+
+    log.info("Loading external embeddings from %s (key=%s, fold=%s)", hdf5_path, embed_key, fold)
+    with h5py.File(hdf5_path, "r") as f:
+        fold_key = _resolve_hdf5_key(f, "fold")
+        smiles_key = _resolve_hdf5_key(f, "smiles")
+        pmz_key = _resolve_hdf5_key(f, "precursor_mz")
+        embed_actual = _resolve_hdf5_key(f, embed_key)
+
+        folds = np.asarray(f[fold_key]).astype(str)
+        fold_mask = folds == fold
+        n_total = len(folds)
+        n_selected = int(fold_mask.sum())
+        log.info("Fold filter: %d / %d spectra match fold=%r", n_selected, n_total, fold)
+
+        indices = np.where(fold_mask)[0]
+        embeddings = np.asarray(f[embed_actual][indices])
+        smiles_raw = np.asarray(f[smiles_key][indices])
+        precursor_mz = np.asarray(f[pmz_key][indices]).astype(np.float32)
+
+    smiles_list = [s.decode("utf-8") if isinstance(s, bytes) else str(s) for s in smiles_raw]
+    log.info("Embeddings: %s, SMILES: %d", embeddings.shape, len(smiles_list))
+
+    # Compute Morgan fingerprints from SMILES.
+    from input_pipeline import _compute_morgan_fingerprints
+    morgan_fps = _compute_morgan_fingerprints(np.array(smiles_list))
+
+    all_meta = {
+        "precursor_mz": precursor_mz,
+        "adduct": np.zeros(n_selected, dtype=np.int64),
+        "instrument": np.zeros(n_selected, dtype=np.int64),
+        "n_valid_peaks": np.zeros(n_selected, dtype=np.int64),
+    }
+
+    return embeddings, morgan_fps, all_meta, smiles_list
 
 
 # ---------------------------------------------------------------------------
@@ -1063,16 +1123,27 @@ def main() -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    # 1. Load model & extract embeddings (SMILES come directly from TFRecords)
-    config, datamodule, backbone, ckpt_path = _load_model_and_data(
-        args.config, args.dir, args.checkpoint, device, seed,
-    )
-    all_embeds, all_fps_morgan, all_meta, all_smiles, raw_peaks = _extract_embeddings(config, datamodule, backbone, device, seed)
+    # 1. Load embeddings: either from external HDF5 or from model+TFRecords
+    if args.external_embed:
+        all_embeds, all_fps_morgan, all_meta, all_smiles = _load_external_embeddings(
+            args.external_embed, args.embed_key, args.fold,
+        )
+        backbone = None
+        raw_peaks = None
+        ckpt_path = args.external_embed
+    else:
+        config, datamodule, backbone, ckpt_path = _load_model_and_data(
+            args.config, args.dir, args.checkpoint, device, seed,
+        )
+        all_embeds, all_fps_morgan, all_meta, all_smiles, raw_peaks = _extract_embeddings(config, datamodule, backbone, device, seed)
     assert len(all_smiles) == len(all_embeds), f"Mismatch: {len(all_smiles)} vs {len(all_embeds)}"
 
-    # 2. Compute RDKit features (cached in tfrecord_dir so it's shared across runs)
-    tfrecord_dir = Path(config.get("tfrecord_dir", "data/gems_peaklist_tfrecord")).expanduser().resolve()
-    maccs_fps, fg_counts, mol_props, valid_mol_mask = _compute_rdkit_features_cached(all_smiles, tfrecord_dir)
+    # 2. Compute RDKit features (cached on disk)
+    if args.external_embed:
+        cache_dir = outdir
+    else:
+        cache_dir = Path(config.get("tfrecord_dir", "data/gems_peaklist_tfrecord")).expanduser().resolve()
+    maccs_fps, fg_counts, mol_props, valid_mol_mask = _compute_rdkit_features_cached(all_smiles, cache_dir)
 
     # 3. Tanimoto analysis
     tanimoto_results = _tanimoto_analysis(all_embeds, all_fps_morgan, valid_mol_mask, outdir, seed)
@@ -1093,25 +1164,27 @@ def main() -> None:
         probe_results["knn"] = _knn_probes(all_embeds, mol_props, fg_counts, valid_mol_mask, seed)
     if probe_type in ("hgb", "all"):
         probe_results["hgb"] = _hgb_probes(all_embeds, mol_props, fg_counts, valid_mol_mask, seed)
-    if probe_type in ("neural-attentive", "all"):
-        probe_results["neural_attentive"] = _neural_probes(
-            backbone, raw_peaks, mol_props, fg_counts, valid_mol_mask, device, seed,
-            probe_class=FinalAttentiveProbe,
-        )
-    if probe_type in ("neural-linear", "all"):
-        probe_results["neural_linear"] = _neural_probes(
-            backbone, raw_peaks, mol_props, fg_counts, valid_mol_mask, device, seed,
-            probe_class=FinalLinearProbe,
-        )
+    neural_requested = probe_type in ("neural-attentive", "neural-linear", "all")
+    if neural_requested and backbone is None:
+        log.warning("Skipping neural probes: not available with --external-embed (no backbone model).")
+    else:
+        if probe_type in ("neural-attentive", "all"):
+            probe_results["neural_attentive"] = _neural_probes(
+                backbone, raw_peaks, mol_props, fg_counts, valid_mol_mask, device, seed,
+                probe_class=FinalAttentiveProbe,
+            )
+        if probe_type in ("neural-linear", "all"):
+            probe_results["neural_linear"] = _neural_probes(
+                backbone, raw_peaks, mol_props, fg_counts, valid_mol_mask, device, seed,
+                probe_class=FinalLinearProbe,
+            )
 
     # 7. MACCS enrichment
     maccs_results = _maccs_enrichment(maccs_fps, knn_out["knn_embed_idx"], knn_out["sub_idx"], outdir)
 
     # Write summary JSON
-    summary = {
+    summary: dict = {
         "checkpoint": ckpt_path,
-        "config": args.config,
-        "experiment_dir": args.dir,
         "seed": seed,
         "n_embeddings": int(all_embeds.shape[0]),
         "embedding_dim": int(all_embeds.shape[1]),
@@ -1120,6 +1193,13 @@ def main() -> None:
         "probes": probe_results,
         "maccs_enrichment": maccs_results,
     }
+    if args.external_embed:
+        summary["external_embed"] = args.external_embed
+        summary["embed_key"] = args.embed_key
+        summary["fold"] = args.fold
+    else:
+        summary["config"] = args.config
+        summary["experiment_dir"] = args.dir
     summary_path = outdir / "results.json"
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)

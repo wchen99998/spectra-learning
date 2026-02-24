@@ -148,7 +148,8 @@ def _encode_split(
             embeddings = model.encoder(
                 batch["peak_mz"],
                 batch["peak_intensity"],
-                batch["precursor_mz"],
+                valid_mask=batch["peak_valid_mask"],
+                precursor_mz=batch["precursor_mz"],
             )
             pooled_encoder = model.pool(embeddings, batch["peak_valid_mask"])
             pooled_projector = model.projector(pooled_encoder)

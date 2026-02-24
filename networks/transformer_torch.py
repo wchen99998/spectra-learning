@@ -43,12 +43,36 @@ def apply_rotary_emb(
     xk: torch.Tensor,
     freqs_cos: torch.Tensor,
     freqs_sin: torch.Tensor,
+    *,
+    freqs_cos_q: torch.Tensor | None = None,
+    freqs_sin_q: torch.Tensor | None = None,
+    q_rope_head_split: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     q_rot = _rotate_half(xq)
     k_rot = _rotate_half(xk)
 
-    xq_out = (xq * freqs_cos) + (q_rot * freqs_sin)
     xk_out = (xk * freqs_cos) + (k_rot * freqs_sin)
+
+    if freqs_cos_q is None or freqs_sin_q is None or q_rope_head_split is None:
+        xq_out = (xq * freqs_cos) + (q_rot * freqs_sin)
+        return xq_out, xk_out
+
+    split = int(q_rope_head_split)
+    q_heads = xq.shape[2]
+    if split <= 0:
+        xq_out = (xq * freqs_cos_q) + (q_rot * freqs_sin_q)
+        return xq_out, xk_out
+    if split >= q_heads:
+        xq_out = (xq * freqs_cos) + (q_rot * freqs_sin)
+        return xq_out, xk_out
+
+    xq_mass = xq[:, :, :split, :]
+    xq_comp = xq[:, :, split:, :]
+    q_rot_mass = q_rot[:, :, :split, :]
+    q_rot_comp = q_rot[:, :, split:, :]
+    xq_mass_out = (xq_mass * freqs_cos) + (q_rot_mass * freqs_sin)
+    xq_comp_out = (xq_comp * freqs_cos_q) + (q_rot_comp * freqs_sin_q)
+    xq_out = torch.cat([xq_mass_out, xq_comp_out], dim=2)
     return xq_out, xk_out
 
 
@@ -95,6 +119,9 @@ class Attention(nn.Module):
         *,
         freqs_cos: torch.Tensor | None = None,
         freqs_sin: torch.Tensor | None = None,
+        freqs_cos_q: torch.Tensor | None = None,
+        freqs_sin_q: torch.Tensor | None = None,
+        q_rope_head_split: int | None = None,
         block_mask: BlockMask | None = None,
     ) -> torch.Tensor:
         bsz, seqlen, _ = x.shape
@@ -114,7 +141,15 @@ class Attention(nn.Module):
             xk = self.k_norm(xk)
 
         if freqs_cos is not None and freqs_sin is not None:
-            xq, xk = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin)
+            xq, xk = apply_rotary_emb(
+                xq,
+                xk,
+                freqs_cos,
+                freqs_sin,
+                freqs_cos_q=freqs_cos_q,
+                freqs_sin_q=freqs_sin_q,
+                q_rope_head_split=q_rope_head_split,
+            )
 
         q = xq.transpose(1, 2)
         k = xk.transpose(1, 2)
@@ -212,16 +247,25 @@ class TransformerBlock(nn.Module):
         *,
         freqs_cos: torch.Tensor | None,
         freqs_sin: torch.Tensor | None,
+        freqs_cos_q: torch.Tensor | None = None,
+        freqs_sin_q: torch.Tensor | None = None,
+        q_rope_head_split: int | None = None,
         block_mask: BlockMask | None = None,
     ) -> torch.Tensor:
         if not self.use_rotary_embeddings:
             freqs_cos = None
             freqs_sin = None
+            freqs_cos_q = None
+            freqs_sin_q = None
+            q_rope_head_split = None
 
         h = x + self.attention(
             self.attention_norm(x),
             freqs_cos=freqs_cos,
             freqs_sin=freqs_sin,
+            freqs_cos_q=freqs_cos_q,
+            freqs_sin_q=freqs_sin_q,
+            q_rope_head_split=q_rope_head_split,
             block_mask=block_mask,
         )
         if self.post_norm:

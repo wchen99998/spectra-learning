@@ -1,5 +1,6 @@
 import unittest
 import tempfile
+import math
 
 import torch
 
@@ -146,6 +147,88 @@ class SIGRegForwardTests(unittest.TestCase):
             )
 
         self.assertFalse(torch.allclose(emb_no_rope, emb_with_rope))
+
+
+class MassAwareRoPETests(unittest.TestCase):
+    def _build_encoder_model(
+        self,
+        *,
+        rope_mz_precision: float = 0.1,
+        rope_complement_heads: int | None = None,
+        encoder_num_kv_heads: int = 4,
+    ) -> PeakSetSIGReg:
+        return PeakSetSIGReg(
+            num_peaks=60,
+            model_dim=32,
+            encoder_num_layers=1,
+            encoder_num_heads=4,
+            encoder_num_kv_heads=encoder_num_kv_heads,
+            attention_mlp_multiple=2.0,
+            feature_mlp_hidden_dim=16,
+            encoder_use_rope=True,
+            rope_mz_max=1000.0,
+            rope_mz_precision=rope_mz_precision,
+            rope_complement_heads=rope_complement_heads,
+            rope_modulo_2pi=True,
+            sigreg_use_projector=False,
+            pooling_type="mean",
+        )
+
+    def test_mass_rope_precision_0p1_omega_range(self):
+        model = self._build_encoder_model(rope_mz_precision=0.1)
+        omega = model.encoder.rope_omega
+        expected_max = (2.0 * math.pi) / 0.2
+        expected_min = (2.0 * math.pi) / 1000.0
+        self.assertTrue(torch.isclose(omega[0], torch.tensor(expected_max), rtol=1e-5, atol=1e-6))
+        self.assertTrue(torch.isclose(omega[-1], torch.tensor(expected_min), rtol=1e-5, atol=1e-6))
+
+    def test_mass_rope_precision_0p01_omega_range(self):
+        model = self._build_encoder_model(rope_mz_precision=0.01)
+        omega = model.encoder.rope_omega
+        expected_max = (2.0 * math.pi) / 0.02
+        expected_min = (2.0 * math.pi) / 1000.0
+        self.assertTrue(torch.isclose(omega[0], torch.tensor(expected_max), rtol=1e-5, atol=1e-6))
+        self.assertTrue(torch.isclose(omega[-1], torch.tensor(expected_min), rtol=1e-5, atol=1e-6))
+
+    def test_complement_head_split_changes_output(self):
+        batch = _make_batch(batch_size=2)
+
+        torch.manual_seed(2026)
+        model_all_mass = self._build_encoder_model(rope_complement_heads=0)
+        torch.manual_seed(2026)
+        model_split = self._build_encoder_model(rope_complement_heads=2)
+
+        with torch.no_grad():
+            emb_all_mass = model_all_mass.encoder(
+                batch["peak_mz"],
+                batch["peak_intensity"],
+                valid_mask=batch["peak_valid_mask"],
+                precursor_mz=batch["precursor_mz"],
+            )
+            emb_split = model_split.encoder(
+                batch["peak_mz"],
+                batch["peak_intensity"],
+                valid_mask=batch["peak_valid_mask"],
+                precursor_mz=batch["precursor_mz"],
+            )
+
+        self.assertFalse(torch.allclose(emb_all_mass, emb_split))
+
+    def test_rope_with_gqa_and_complement_heads_is_finite(self):
+        model = self._build_encoder_model(
+            rope_mz_precision=0.1,
+            rope_complement_heads=2,
+            encoder_num_kv_heads=2,
+        )
+        batch = _make_batch(batch_size=3)
+        with torch.no_grad():
+            emb = model.encoder(
+                batch["peak_mz"],
+                batch["peak_intensity"],
+                valid_mask=batch["peak_valid_mask"],
+                precursor_mz=batch["precursor_mz"],
+            )
+        self.assertTrue(torch.isfinite(emb).all())
 
 
 class PMAPoolingTests(unittest.TestCase):

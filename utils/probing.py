@@ -97,6 +97,7 @@ def _extract_probe_features(
         batch["peak_mz"],
         batch["peak_intensity"],
         valid_mask=batch["peak_valid_mask"],
+        precursor_mz=batch["precursor_mz"],
     )
     if feature_source == "encoder":
         return embeddings, batch["peak_valid_mask"]
@@ -254,8 +255,8 @@ def run_attentive_probe(
             if hasattr(experiment, "log"):
                 experiment.log(metrics, step=step)
 
-    def move_batch(batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        return {k: v.to(device) for k, v in batch.items()}
+    def move_batch(batch: dict[str, Any]) -> dict[str, Any]:
+        return {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
     num_probe_epochs = int(config.final_probe_num_epochs)
     probe_lr = float(config.final_probe_learning_rate)
@@ -503,8 +504,8 @@ def run_linear_probe(
             if hasattr(experiment, "log"):
                 experiment.log(metrics, step=step)
 
-    def move_batch(batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        return {k: v.to(device) for k, v in batch.items()}
+    def move_batch(batch: dict[str, Any]) -> dict[str, Any]:
+        return {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
     num_probe_epochs = int(config.final_probe_num_epochs)
     probe_lr = float(config.final_probe_learning_rate)

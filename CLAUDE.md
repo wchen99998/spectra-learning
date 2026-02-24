@@ -42,7 +42,7 @@ python input_pipeline.py configs/gems_a_dataset.py
 
 ### Model (PeakSetSIGReg in `models/model.py`)
 
-- **PeakSetEncoder**: FourierFeatures(mz) + MLP embedder -> N non-causal TransformerBlocks -> RMSNorm. Supports learnable mask tokens for masked positions and optional RoPE.
+- **PeakSetEncoder**: raw scalar peak features (`mz`, `neutral_loss`, `intensity`, `log1p(intensity)`) -> MLP embedder -> N non-causal TransformerBlocks -> RMSNorm. Uses mass-aware RoPE in transformer mode, including optional complement-head split (query neutral-loss vs key mass coordinates).
 - **PMA Pooling**: Multihead cross-attention with learned seed queries (`pool_query`) that attend to peak embeddings, producing a fixed-size representation regardless of valid peak count.
 - **Projector**: 3-layer MLP (Linear -> RMSNorm -> SiLU) x2, maps pooled embeddings to lower-dim space for the loss.
 - **BCSLoss** (`models/losses.py`): Projects both views via random slicing directions, tests Gaussianity using Epps-Pulley characteristic function distance. Combined loss = MSE(z1, z2) + lambda * BCS.
@@ -85,6 +85,11 @@ TFRecord-based with auto-download from HuggingFace. Processing chain: parse -> f
 - Use local `.venv` environment
 - Python 3.12+ type hints (e.g., `list[str]`, `dict[str, int]`)
 - Package manager: uv
+
+## Notebook Notes
+
+- Legacy notebooks that reference `FourierFeatures` are historical analyses from before the mass-aware RoPE migration.
+- Current evaluation notebook for the active architecture is `notebooks/mass_aware_rope_evaluation.ipynb` (executed copy saved via nbconvert as `notebooks/mass_aware_rope_evaluation.executed.ipynb`).
 
 ## Key Dependencies
 

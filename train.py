@@ -454,7 +454,7 @@ def train_and_evaluate(
                     model, optimizers, schedulers,
                     global_step, epoch, float(metrics["loss"]),
                 )
-                _prune_checkpoints(checkpoint_dir, keep_top_k=5)
+                _prune_checkpoints(checkpoint_dir, keep_top_k=15)
 
         pbar.close()
 

@@ -41,6 +41,11 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_layers = 6
     cfg.num_heads = 8
     cfg.num_kv_heads = None
+    cfg.encoder_use_rope = True
+    cfg.rope_mz_max = 1000.0
+    cfg.rope_mz_precision = 0.1
+    cfg.rope_complement_heads = cfg.num_heads // 2
+    cfg.rope_modulo_2pi = True
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 128
     cfg.pooling_type = "pma"

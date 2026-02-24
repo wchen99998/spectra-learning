@@ -19,64 +19,16 @@ from networks import set_transformer_torch, transformer_torch
 from networks.transformer_torch import create_padding_block_mask
 
 
-class FourierFeatures(nn.Module):
-    """Log-spaced sinusoidal features for scalar inputs (NeRF-style)."""
-
-    def __init__(
-        self,
-        num_frequencies: int = 32,
-        min_freq: float = 1.0,
-        max_freq: float = 100.0,
-        learnable: bool = False,
-    ):
-        super().__init__()
-        freqs = torch.logspace(
-            math.log10(min_freq),
-            math.log10(max_freq),
-            num_frequencies,
-        )
-        if learnable:
-            self.freqs = nn.Parameter(freqs)
-        else:
-            self.register_buffer("freqs", freqs)
-        self.output_dim = 2 * num_frequencies
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [B, N] -> [B, N, 2*num_frequencies]
-        # Compute in fp32: high frequencies (up to 50k) produce products ~314k
-        # which overflow fp16 (max 65504) and lose all precision in bf16
-        # (7-bit mantissa → quantization step ~2048 at that magnitude).
-        projected = x.float().unsqueeze(-1) * self.freqs.float() * (2.0 * math.pi)
-        return torch.cat([projected.sin(), projected.cos()], dim=-1).to(x.dtype)
-
-
 class PeakFeatureEmbedder(nn.Module):
-    """Embeds raw peak features (mz, intensity) into model dim."""
+    """Embeds raw peak features into model dim."""
 
     def __init__(
         self,
         model_dim: int,
         hidden_dim: int,
-        mz_fourier_num_frequencies: int = 32,
-        mz_fourier_min_freq: float = 1.0,
-        mz_fourier_max_freq: float = 100.0,
-        mz_fourier_learnable: bool = False,
     ):
         super().__init__()
-        self.mz_fourier = FourierFeatures(
-            num_frequencies=mz_fourier_num_frequencies,
-            min_freq=mz_fourier_min_freq,
-            max_freq=mz_fourier_max_freq,
-            learnable=mz_fourier_learnable,
-        )
-        self.nl_fourier = FourierFeatures(
-            num_frequencies=mz_fourier_num_frequencies,
-            min_freq=mz_fourier_min_freq,
-            max_freq=mz_fourier_max_freq,
-            learnable=mz_fourier_learnable,
-        )
-        # input: fourier(mz) + raw_mz + intensity + precursor_mz
-        input_dim = self.mz_fourier.output_dim + 1 + 1 + 1
+        input_dim = 4
         self.mlp = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.SiLU(),
@@ -93,13 +45,18 @@ class PeakFeatureEmbedder(nn.Module):
         peak_intensity: torch.Tensor,
         precursor_mz: torch.Tensor,
     ) -> torch.Tensor:
-        mz_fourier = self.mz_fourier(peak_mz)
-        features = torch.cat([
-            mz_fourier,
-            peak_mz.unsqueeze(-1),
-            precursor_mz.unsqueeze(-1).unsqueeze(-1).expand(-1, peak_mz.shape[1], -1),
-            peak_intensity.unsqueeze(-1),
-        ], dim=-1)
+        prec = precursor_mz.reshape(-1, 1)
+        neutral_loss = torch.clamp(prec - peak_mz, min=0.0)
+        log_intensity = torch.log1p(peak_intensity)
+        features = torch.cat(
+            [
+                peak_mz.unsqueeze(-1),
+                neutral_loss.unsqueeze(-1),
+                peak_intensity.unsqueeze(-1),
+                log_intensity.unsqueeze(-1),
+            ],
+            dim=-1,
+        )
         return self.mlp(features)
 
 
@@ -166,17 +123,39 @@ def _build_isab_blocks(
     return nn.ModuleList(blocks)
 
 
-def _build_rope_frequencies(
+def _build_mass_rope_omega(
     *,
-    sequence_length: int,
-    inv_freq: torch.Tensor,
-    dtype: torch.dtype,
+    head_dim: int,
+    mz_max: float,
+    mz_precision: float,
+    device: torch.device,
+) -> torch.Tensor:
+    half_dim = head_dim // 2
+    lambda_min = 2.0 * float(mz_precision)
+    lambda_max = float(mz_max)
+    lambdas = torch.logspace(
+        math.log10(lambda_min),
+        math.log10(lambda_max),
+        steps=half_dim,
+        device=device,
+        dtype=torch.float32,
+    )
+    return (2.0 * math.pi) / lambdas
+
+
+def _build_rope_freqs_from_positions(
+    *,
+    positions_da: torch.Tensor,
+    omega: torch.Tensor,
+    out_dtype: torch.dtype,
+    modulo_2pi: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    positions = torch.arange(sequence_length, device=inv_freq.device, dtype=inv_freq.dtype)
-    angles = torch.outer(positions, inv_freq)
+    angles = positions_da.float().unsqueeze(-1) * omega.view(1, 1, -1)
+    if modulo_2pi:
+        angles = torch.remainder(angles, 2.0 * math.pi)
     angles = torch.repeat_interleave(angles, repeats=2, dim=-1)
-    freqs_cos = angles.cos().to(dtype=dtype).unsqueeze(0).unsqueeze(2)
-    freqs_sin = angles.sin().to(dtype=dtype).unsqueeze(0).unsqueeze(2)
+    freqs_cos = angles.cos().to(dtype=out_dtype).unsqueeze(2)
+    freqs_sin = angles.sin().to(dtype=out_dtype).unsqueeze(2)
     return freqs_cos, freqs_sin
 
 
@@ -192,11 +171,11 @@ class PeakSetEncoder(nn.Module):
         num_kv_heads: int | None = None,
         attention_mlp_multiple: float = 4.0,
         feature_mlp_hidden_dim: int = 128,
-        mz_fourier_num_frequencies: int = 32,
-        mz_fourier_min_freq: float = 1.0,
-        mz_fourier_max_freq: float = 100.0,
-        mz_fourier_learnable: bool = False,
         use_rope: bool = False,
+        rope_mz_max: float = 1000.0,
+        rope_mz_precision: float = 0.1,
+        rope_complement_heads: int | None = None,
+        rope_modulo_2pi: bool = True,
         fp16_high_precision_stem: bool = False,
         encoder_block_type: str = "transformer",
         isab_num_inducing_points: int = 32,
@@ -208,21 +187,25 @@ class PeakSetEncoder(nn.Module):
         self.use_rope = bool(use_rope)
         self.fp16_high_precision_stem = bool(fp16_high_precision_stem)
         self.encoder_block_type = encoder_block_type
-        self.embedder = PeakFeatureEmbedder(
-            model_dim,
-            feature_mlp_hidden_dim,
-            mz_fourier_num_frequencies=mz_fourier_num_frequencies,
-            mz_fourier_min_freq=mz_fourier_min_freq,
-            mz_fourier_max_freq=mz_fourier_max_freq,
-            mz_fourier_learnable=mz_fourier_learnable,
+        self.embedder = PeakFeatureEmbedder(model_dim, feature_mlp_hidden_dim)
+        self.rope_mz_max = float(rope_mz_max)
+        self.rope_mz_precision = float(rope_mz_precision)
+        self.rope_modulo_2pi = bool(rope_modulo_2pi)
+        heads = int(num_heads)
+        complement_heads = heads // 2 if rope_complement_heads is None else int(rope_complement_heads)
+        complement_heads = max(0, min(complement_heads, heads))
+        self.rope_mass_heads = heads - complement_heads
+        head_dim = model_dim // heads
+        omega = _build_mass_rope_omega(
+            head_dim=head_dim,
+            mz_max=self.rope_mz_max,
+            mz_precision=self.rope_mz_precision,
+            device=torch.device("cpu"),
         )
-        head_dim = model_dim // int(num_heads)
-        inv_freq = 1.0 / (
-            10000.0 ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / float(head_dim))
-        )
-        self.rope_inv_freq: torch.Tensor
-        self.register_buffer("rope_inv_freq", inv_freq, persistent=False)
+        self.register_buffer("rope_omega", omega, persistent=False)
         if self.encoder_block_type == "isab":
+            if self.use_rope:
+                raise ValueError("mass-aware RoPE is not implemented for encoder_block_type='isab'")
             self.blocks = _build_isab_blocks(
                 dim=model_dim,
                 num_layers=num_layers,
@@ -265,6 +248,40 @@ class PeakSetEncoder(nn.Module):
                 x = block(x, kv_block_mask=kv_block_mask, q_block_mask=q_block_mask)
             return self.final_norm(x)
 
+        block_mask = None
+        if valid_mask is not None:
+            block_mask = create_padding_block_mask(valid_mask)
+
+        def _compute_rope(dtype: torch.dtype) -> tuple[
+            torch.Tensor | None,
+            torch.Tensor | None,
+            torch.Tensor | None,
+            torch.Tensor | None,
+        ]:
+            if not self.use_rope:
+                return None, None, None, None
+
+            mz_da = peak_mz.float() * self.rope_mz_max
+            prec_da = precursor_mz.float().reshape(-1) * self.rope_mz_max
+            neutral_loss_da = torch.clamp(prec_da.unsqueeze(1) - mz_da, min=0.0)
+            omega = self.rope_omega
+            if omega.device != peak_mz.device:
+                omega = omega.to(device=peak_mz.device)
+
+            freqs_cos, freqs_sin = _build_rope_freqs_from_positions(
+                positions_da=mz_da,
+                omega=omega,
+                out_dtype=dtype,
+                modulo_2pi=self.rope_modulo_2pi,
+            )
+            freqs_cos_q, freqs_sin_q = _build_rope_freqs_from_positions(
+                positions_da=neutral_loss_da,
+                omega=omega,
+                out_dtype=dtype,
+                modulo_2pi=self.rope_modulo_2pi,
+            )
+            return freqs_cos, freqs_sin, freqs_cos_q, freqs_sin_q
+
         autocast_dtype = None
         run_high_precision_stem = False
         if self.fp16_high_precision_stem and self.embedder.mlp[0].weight.dtype == torch.float32:
@@ -276,26 +293,19 @@ class PeakSetEncoder(nn.Module):
                 or autocast_dtype == torch.float16
             )
 
-        block_mask = None
         start_block = 0
         if run_high_precision_stem:
             with torch.autocast(device_type=device_type, enabled=False):
-                x = self.embedder(peak_mz.float(), peak_intensity.float(), precursor_mz.float() if precursor_mz is not None else None)
-                stem_freqs_cos = None
-                stem_freqs_sin = None
-                if self.use_rope:
-                    stem_freqs_cos, stem_freqs_sin = _build_rope_frequencies(
-                        sequence_length=x.shape[1],
-                        inv_freq=self.rope_inv_freq,
-                        dtype=torch.float32,
-                    )
-                if valid_mask is not None:
-                    block_mask = create_padding_block_mask(valid_mask)
+                x = self.embedder(peak_mz.float(), peak_intensity.float(), precursor_mz.float())
+                stem_freqs_cos, stem_freqs_sin, stem_freqs_cos_q, stem_freqs_sin_q = _compute_rope(torch.float32)
                 if len(self.blocks) > 0:
                     x = self.blocks[0](
                         x,
                         freqs_cos=stem_freqs_cos,
                         freqs_sin=stem_freqs_sin,
+                        freqs_cos_q=stem_freqs_cos_q,
+                        freqs_sin_q=stem_freqs_sin_q,
+                        q_rope_head_split=self.rope_mass_heads,
                         block_mask=block_mask,
                     )
                     start_block = 1
@@ -303,20 +313,18 @@ class PeakSetEncoder(nn.Module):
             x = x.to(dtype=target_dtype)
         else:
             x = self.embedder(peak_mz, peak_intensity, precursor_mz)
-            if valid_mask is not None:
-                block_mask = create_padding_block_mask(valid_mask)
-
-        freqs_cos = None
-        freqs_sin = None
-        if self.use_rope:
-            freqs_cos, freqs_sin = _build_rope_frequencies(
-                sequence_length=x.shape[1],
-                inv_freq=self.rope_inv_freq,
-                dtype=x.dtype,
-            )
+        freqs_cos, freqs_sin, freqs_cos_q, freqs_sin_q = _compute_rope(x.dtype)
 
         for block in self.blocks[start_block:]:
-            x = block(x, freqs_cos=freqs_cos, freqs_sin=freqs_sin, block_mask=block_mask)
+            x = block(
+                x,
+                freqs_cos=freqs_cos,
+                freqs_sin=freqs_sin,
+                freqs_cos_q=freqs_cos_q,
+                freqs_sin_q=freqs_sin_q,
+                q_rope_head_split=self.rope_mass_heads,
+                block_mask=block_mask,
+            )
         return self.final_norm(x)
 
 
@@ -333,11 +341,11 @@ class PeakSetSIGReg(nn.Module):
         encoder_num_kv_heads: int | None = None,
         attention_mlp_multiple: float = 4.0,
         feature_mlp_hidden_dim: int = 128,
-        mz_fourier_num_frequencies: int = 32,
-        mz_fourier_min_freq: float = 1.0,
-        mz_fourier_max_freq: float = 100.0,
-        mz_fourier_learnable: bool = False,
         encoder_use_rope: bool = False,
+        rope_mz_max: float = 1000.0,
+        rope_mz_precision: float = 0.1,
+        rope_complement_heads: int | None = None,
+        rope_modulo_2pi: bool = True,
         encoder_fp16_high_precision_stem: bool = False,
         sigreg_use_projector: bool = True,
         sigreg_proj_hidden_dim: int = 2048,
@@ -384,11 +392,11 @@ class PeakSetSIGReg(nn.Module):
             num_kv_heads=encoder_num_kv_heads,
             attention_mlp_multiple=attention_mlp_multiple,
             feature_mlp_hidden_dim=feature_mlp_hidden_dim,
-            mz_fourier_num_frequencies=mz_fourier_num_frequencies,
-            mz_fourier_min_freq=mz_fourier_min_freq,
-            mz_fourier_max_freq=mz_fourier_max_freq,
-            mz_fourier_learnable=mz_fourier_learnable,
             use_rope=encoder_use_rope,
+            rope_mz_max=rope_mz_max,
+            rope_mz_precision=rope_mz_precision,
+            rope_complement_heads=rope_complement_heads,
+            rope_modulo_2pi=rope_modulo_2pi,
             fp16_high_precision_stem=encoder_fp16_high_precision_stem,
             encoder_block_type=encoder_block_type,
             isab_num_inducing_points=isab_num_inducing_points,
@@ -569,4 +577,3 @@ class PeakSetSIGReg(nn.Module):
         embeddings = self.encoder(peak_mz, peak_intensity, valid_mask=peak_valid_mask, precursor_mz=precursor_mz)
         pooled = self.pool(embeddings, peak_valid_mask)
         return self.projector(pooled)
-

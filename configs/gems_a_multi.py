@@ -31,7 +31,11 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_layers = 10
     cfg.num_heads = 8
     cfg.num_kv_heads = 8
-    cfg.encoder_use_rope = False
+    cfg.encoder_use_rope = True
+    cfg.rope_mz_max = 1000.0
+    cfg.rope_mz_precision = 0.1
+    cfg.rope_complement_heads = cfg.num_heads // 2
+    cfg.rope_modulo_2pi = True
     cfg.encoder_block_type = "transformer"
     cfg.encoder_qk_norm = True
     cfg.encoder_post_norm = True
@@ -41,10 +45,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pooling_type = "pma"
     cfg.pma_num_heads = cfg.num_heads
     cfg.pma_num_seeds = 32
-    cfg.mz_fourier_num_frequencies = 32
-    cfg.mz_fourier_min_freq = 1.0
-    cfg.mz_fourier_max_freq = 2_500.0
-    cfg.mz_fourier_learnable = False
     cfg.sigreg_use_projector = True
     cfg.sigreg_proj_hidden_dim = 2048
     cfg.sigreg_proj_output_dim = 256
