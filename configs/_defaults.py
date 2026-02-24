@@ -16,6 +16,10 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.encoder_qk_norm = False
     cfg.encoder_post_norm = False
     cfg.pma_fp16_high_precision = False
+    cfg.multicrop_keep_masked_tokens = False
+    cfg.use_masked_token_input = False
+    cfg.masked_token_position_mode = "index"
+    cfg.masked_token_loss_weight = 0.0
     # num_workers=0: TF's internal thread pool handles parallelism; forking
     # a subprocess duplicates the TF runtime and can deadlock during shuffle
     # buffer fill.  The batch-first pipeline (batched_parse_and_transform)
