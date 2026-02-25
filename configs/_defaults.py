@@ -22,6 +22,7 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.masked_token_attention_mode = "bidirectional"
     cfg.masked_token_loss_weight = 0.0
     cfg.masked_latent_predictor_hidden_dim = 0
+    cfg.grad_clip_norm = None
     # num_workers=0: TF's internal thread pool handles parallelism; forking
     # a subprocess duplicates the TF runtime and can deadlock during shuffle
     # buffer fill.  The batch-first pipeline (batched_parse_and_transform)

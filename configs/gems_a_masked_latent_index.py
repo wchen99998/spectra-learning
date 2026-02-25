@@ -10,5 +10,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_token_position_mode = "index"
     cfg.masked_token_attention_mode = "masked_query_to_unmasked_kv"
     cfg.masked_token_loss_weight = 1.0
+    cfg.masked_latent_normalize = True
+    cfg.grad_clip_norm = 1.0
+    cfg.dataloader_num_workers = 0
+    cfg.dataloader_persistent_workers = False
     cfg.wandb_run_name_prefix = "jepa_masked_latent_index"
     return cfg

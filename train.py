@@ -151,6 +151,7 @@ def _train_step_impl(
     optimizers: list[torch.optim.Optimizer],
     schedulers: list[CapturableCosineSchedule],
     autocast_dtype: torch.dtype | None,
+    grad_clip_norm: float | None,
 ) -> dict[str, torch.Tensor]:
     device_type = next(model.parameters()).device.type
     if autocast_dtype is None or device_type != "cuda":
@@ -160,6 +161,8 @@ def _train_step_impl(
     with autocast_ctx:
         metrics = model.forward_augmented(batch)
     metrics["loss"].backward()
+    if grad_clip_norm is not None and grad_clip_norm > 0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
     for opt in optimizers:
         opt.step()
         opt.zero_grad(set_to_none=True)
@@ -401,12 +404,13 @@ def train_and_evaluate(
     # Compile training step (forward + backward + optimizer + scheduler)
     autocast_dtype = _resolve_autocast_dtype(config)
     compiled_step = torch.compile(_train_step_impl, mode="max-autotune")
-    compiled_forward = torch.compile(
-        model.forward_augmented, mode="max-autotune", fullgraph=True,
-    )
+    compiled_forward = model.forward_augmented
 
     optimizer_type = str(config.get("optimizer", "adamw")).lower()
     device_prefetch_size = int(config.get("device_prefetch_size", 1))
+    grad_clip_norm = config.get("grad_clip_norm", None)
+    if grad_clip_norm is not None:
+        grad_clip_norm = float(grad_clip_norm)
 
     train_loader = datamodule.train_loader
     val_loader = datamodule.val_loader
@@ -429,6 +433,7 @@ def train_and_evaluate(
                 optimizers,
                 schedulers,
                 autocast_dtype,
+                grad_clip_norm,
             )
             global_step += 1
             pbar.update(1)

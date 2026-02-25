@@ -599,15 +599,17 @@ class PeakSetSIGReg(nn.Module):
         fused_valid_mask = augmented_batch["fused_valid_mask"]
         fused_precursor_mz = augmented_batch["fused_precursor_mz"]
         fused_masked_positions = augmented_batch.get("fused_masked_positions")
-        if fused_masked_positions is not None:
+        if fused_masked_positions is None:
+            fused_masked_positions = torch.zeros_like(fused_valid_mask)
+        else:
             fused_masked_positions = fused_masked_positions & fused_valid_mask
         encoder_masked_positions = None
         encoder_mask_token = None
-        if self.use_masked_token_input and fused_masked_positions is not None:
+        if self.use_masked_token_input:
             encoder_masked_positions = fused_masked_positions
             encoder_mask_token = self.mask_token
         student_intensity = fused_intensity
-        if encoder_masked_positions is not None:
+        if self.use_masked_token_input:
             student_intensity = fused_intensity.masked_fill(encoder_masked_positions, 0.0)
 
         fused_emb = self.encoder(
@@ -634,14 +636,8 @@ class PeakSetSIGReg(nn.Module):
         # Convex combination
         loss = sigreg_loss * self.lmbd + inv_loss * (1.0 - self.lmbd)
         masked_latent_loss = torch.zeros((), dtype=loss.dtype, device=loss.device)
-        masked_fraction = torch.zeros((), dtype=loss.dtype, device=loss.device)
-        if fused_masked_positions is not None:
-            masked_fraction = fused_masked_positions.float().mean()
-        if (
-            self.masked_token_loss_weight > 0.0
-            and fused_masked_positions is not None
-            and torch.any(fused_masked_positions)
-        ):
+        masked_fraction = fused_masked_positions.float().mean()
+        if self.masked_token_loss_weight > 0.0:
             with torch.no_grad():
                 target_emb = self.encoder(
                     fused_mz,
@@ -654,7 +650,7 @@ class PeakSetSIGReg(nn.Module):
             predicted_emb = self.masked_latent_predictor(fused_emb)
             per_token = (predicted_emb - target_emb).square().mean(dim=-1)
             mask = fused_masked_positions.float()
-            masked_latent_loss = (per_token * mask).sum() / mask.sum()
+            masked_latent_loss = (per_token * mask).sum() / mask.sum().clamp_min(1.0)
             loss = loss + self.masked_token_loss_weight * masked_latent_loss
 
         representation_variance = fused_z.float().var(dim=0, unbiased=False).mean()
