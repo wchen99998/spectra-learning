@@ -31,7 +31,7 @@ class PeakFeatureEmbedder(nn.Module):
         hidden_dim: int,
     ):
         super().__init__()
-        input_dim = 4
+        input_dim = 3
         self.mlp = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.SiLU(),
@@ -49,12 +49,12 @@ class PeakFeatureEmbedder(nn.Module):
         precursor_mz: torch.Tensor,
     ) -> torch.Tensor:
         prec = precursor_mz.reshape(-1, 1)
-        neutral_loss = torch.clamp(prec - peak_mz, min=0.0)
+        # neutral_loss = torch.clamp(prec - peak_mz, min=0.0)
         log_intensity = torch.log1p(peak_intensity)
         features = torch.cat(
             [
                 peak_mz.unsqueeze(-1),
-                neutral_loss.unsqueeze(-1),
+                # neutral_loss.unsqueeze(-1),
                 peak_intensity.unsqueeze(-1),
                 log_intensity.unsqueeze(-1),
             ],
