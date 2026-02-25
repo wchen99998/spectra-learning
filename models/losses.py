@@ -1,6 +1,6 @@
 """SIGReg losses for peak-set pretraining.
 
-LeJEPA-style SIGReg: Epps-Pulley Gaussianity statistic with random slicing
+SIGReg: Epps-Pulley Gaussianity statistic with random slicing
 directions sampled inside forward().
 """
 
@@ -11,7 +11,7 @@ from torch import nn
 
 
 class SIGReg(nn.Module):
-    """Epps-Pulley Gaussianity regularizer (LeJEPA-style).
+    """Epps-Pulley Gaussianity regularizer.
 
     Takes a single tensor ``proj [V, B, D]`` (all views stacked) and computes
     the characteristic-function distance from a standard Gaussian.  Random

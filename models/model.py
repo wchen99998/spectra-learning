@@ -4,7 +4,7 @@ Architecture:
 - PeakSetEncoder: MLP embedder -> non-causal Transformer -> peak embeddings
 - Multi-crop augmentation (2 global + 6 local views with random peak retention)
 - Optional projector on pooled embeddings
-- LeJEPA loss: centroid invariance + SIGReg Gaussianity regularizer
+- Objective: SIGReg Gaussianity regularizer + optional masked latent prediction
 """
 
 from __future__ import annotations
@@ -395,7 +395,7 @@ class PeakSetEncoder(nn.Module):
 
 
 class PeakSetSIGReg(nn.Module):
-    """Peak-set SIGReg model with multi-crop augmentation (LeJEPA-style)."""
+    """Peak-set SIGReg model with multi-crop augmentation."""
 
     def __init__(
         self,
@@ -451,7 +451,6 @@ class PeakSetSIGReg(nn.Module):
         self.num_views = self.multicrop_num_global_views + self.multicrop_num_local_views
         self.sigreg_mz_jitter_std = sigreg_mz_jitter_std
         self.sigreg_intensity_jitter_std = sigreg_intensity_jitter_std
-        self.lmbd = float(sigreg_lambda)
         self.pooling_type = pooling_type
         self.pma_fp16_high_precision = bool(pma_fp16_high_precision)
         self.pma_num_seeds = int(pma_num_seeds)
@@ -626,15 +625,9 @@ class PeakSetSIGReg(nn.Module):
         V = self.num_views
         proj = fused_z.reshape(V, -1, fused_z.size(-1))  # [V, B, D]
 
-        # LeJEPA centroid invariance
-        centroid = proj.mean(0)  # [B, D]
-        inv_loss = (centroid - proj).square().mean()
-
-        # SIGReg Gaussianity (samples random A internally)
+        # SIGReg Gaussianity (samples random A internally).
         sigreg_loss = self.sigreg(proj)
-
-        # Convex combination
-        loss = sigreg_loss * self.lmbd + inv_loss * (1.0 - self.lmbd)
+        loss = sigreg_loss
         masked_latent_loss = torch.zeros((), dtype=loss.dtype, device=loss.device)
         masked_fraction = fused_masked_positions.float().mean()
         if self.masked_token_loss_weight > 0.0:
@@ -672,7 +665,6 @@ class PeakSetSIGReg(nn.Module):
         return {
             "loss": loss,
             "sigreg_loss": sigreg_loss,
-            "invariance_loss": inv_loss,
             "masked_latent_loss": masked_latent_loss,
             "valid_fraction": valid_fraction,
             "masked_fraction": masked_fraction,
