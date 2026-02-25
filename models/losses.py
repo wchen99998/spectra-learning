@@ -13,7 +13,7 @@ from torch import nn
 class SIGReg(nn.Module):
     """Epps-Pulley Gaussianity regularizer.
 
-    Takes a single tensor ``proj [V, B, D]`` (all views stacked) and computes
+    Takes a single tensor ``proj [..., D]`` and computes
     the characteristic-function distance from a standard Gaussian.  Random
     projection directions are sampled *inside* ``forward()`` — no
     pre-computed projection needed.
@@ -36,16 +36,17 @@ class SIGReg(nn.Module):
 
         Parameters
         ----------
-        proj : Tensor [V, B, D]
-            Projected embeddings for all views.
+        proj : Tensor [..., D]
+            Projected embeddings with feature dimension in the last axis.
 
         Returns
         -------
         Scalar — mean statistic across slicing directions.
         """
-        A = torch.randn(proj.size(-1), self.num_slices, device=proj.device, dtype=proj.dtype)
+        flat = proj.reshape(-1, proj.size(-1))
+        A = torch.randn(flat.size(-1), self.num_slices, device=flat.device, dtype=flat.dtype)
         A = A.div_(A.norm(p=2, dim=0))
-        x_t = (proj @ A).unsqueeze(-1) * self.t  # [V, B, num_slices, knots]
-        err = (x_t.cos().mean(-3) - self.phi).square() + x_t.sin().mean(-3).square()
-        statistic = (err @ self.weights) * proj.size(-2)
+        x_t = (flat @ A).unsqueeze(-1) * self.t  # [N, num_slices, knots]
+        err = (x_t.cos().mean(0) - self.phi).square() + x_t.sin().mean(0).square()
+        statistic = (err @ self.weights) * flat.size(0)
         return statistic.mean()
