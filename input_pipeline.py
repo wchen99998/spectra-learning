@@ -756,7 +756,6 @@ def _batched_parse_and_transform(
     max_precursor_mz: float,
     min_peak_intensity: float,
     num_peaks: int,
-    mz_representation: str,
     peak_ordering: str,
     include_fingerprint: bool,
 ) -> Callable[[tf.Tensor], dict[str, tf.Tensor]]:
@@ -888,7 +887,6 @@ def _build_dataset(
     max_precursor_mz: float,
     include_fingerprint: bool,
     min_peak_intensity: float,
-    mz_representation: str,
     augmentation_type: str = "none",
     multicrop_num_global_views: int = 2,
     multicrop_num_local_views: int = 6,
@@ -918,7 +916,6 @@ def _build_dataset(
         max_precursor_mz=max_precursor_mz,
         min_peak_intensity=min_peak_intensity,
         num_peaks=_NUM_PEAKS_OUTPUT,
-        mz_representation=mz_representation,
         peak_ordering=peak_ordering,
         include_fingerprint=include_fingerprint,
     )
@@ -954,7 +951,6 @@ def _compute_info(
     *,
     output_dir: Path,
     max_precursor_mz: float,
-    mz_representation: str,
 ) -> dict[str, Any]:
     massspec_adduct_vocab = metadata.get("massspec_adduct_vocab", {"unknown": 0})
     massspec_instrument_type_vocab = metadata.get(
@@ -974,7 +970,6 @@ def _compute_info(
         "massspec_adduct_vocab_size": len(massspec_adduct_vocab),
         "massspec_instrument_type_vocab_size": len(massspec_instrument_type_vocab),
         "num_peaks": _NUM_PEAKS_OUTPUT,
-        "mz_representation": mz_representation,
         "fingerprint_bits": _FINGERPRINT_BITS,
         "max_precursor_mz": max_precursor_mz,
         "peak_mz_min": _PEAK_MZ_MIN,
@@ -1125,7 +1120,6 @@ class TfLightningDataModule:
         self.min_peak_intensity = float(
             config.get("min_peak_intensity", _DEFAULT_MIN_PEAK_INTENSITY)
         )
-        self.mz_representation = str(config.get("mz_representation", "mz"))
         self.peak_ordering = str(config.get("peak_ordering", "intensity"))
         self.multicrop_num_global_views = int(
             config.get("multicrop_num_global_views", 2)
@@ -1182,7 +1176,6 @@ class TfLightningDataModule:
             self.metadata,
             output_dir=self.output_dir,
             max_precursor_mz=self.max_precursor_mz,
-            mz_representation=self.mz_representation,
         )
         self.train_splits = ["gems_train", "massspec_train"]
         self.eval_splits = ["gems_val", "massspec_val"]
@@ -1254,7 +1247,6 @@ class TfLightningDataModule:
             max_precursor_mz=self.max_precursor_mz,
             include_fingerprint=include_fingerprint,
             min_peak_intensity=self.min_peak_intensity,
-            mz_representation=self.mz_representation,
             augmentation_type="multicrop",
             multicrop_num_global_views=self.multicrop_num_global_views,
             multicrop_num_local_views=self.multicrop_num_local_views,
@@ -1348,7 +1340,6 @@ class TfLightningDataModule:
             max_precursor_mz=self.max_precursor_mz,
             include_fingerprint=True,
             min_peak_intensity=self.min_peak_intensity,
-            mz_representation=self.mz_representation,
             augmentation_type="none",
             peak_ordering=peak_ordering,
         )

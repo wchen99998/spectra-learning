@@ -82,7 +82,6 @@ def _build_massspec_probe_dataset_serial(
         max_precursor_mz=datamodule.max_precursor_mz,
         include_fingerprint=True,
         min_peak_intensity=datamodule.min_peak_intensity,
-        mz_representation=datamodule.mz_representation,
         augmentation_type="none",
         peak_ordering=peak_ordering,
         num_parallel_reads=1,

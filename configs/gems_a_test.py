@@ -17,8 +17,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_shards = 4
     cfg.drop_remainder = True
     cfg.max_precursor_mz = 1000.0
-    cfg.intensity_scaling = "linear"
-    cfg.mz_representation = "neutral_loss"
     cfg.peak_ordering = "intensity"
     cfg.seed = 42
 

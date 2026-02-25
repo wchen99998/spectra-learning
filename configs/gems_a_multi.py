@@ -19,8 +19,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.drop_remainder = True
     cfg.max_precursor_mz = 1000.0
     cfg.min_peak_intensity = 0.001
-    cfg.intensity_scaling = "linear"
-    cfg.mz_representation = "mz"
     cfg.peak_ordering = "mz"
     cfg.seed = 42
 

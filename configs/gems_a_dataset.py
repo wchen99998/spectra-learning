@@ -16,8 +16,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_shards = 4
     cfg.drop_remainder = False
     cfg.max_precursor_mz = 1000.0
-    cfg.intensity_scaling = "linear"
-    cfg.mz_representation = "mz"
     cfg.peak_ordering = "intensity"
     cfg.seed = 42
     cfg.gcp_key_path = "/home/wuhao/md4/key.json"
