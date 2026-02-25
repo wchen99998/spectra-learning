@@ -626,11 +626,11 @@ class PeakSetSIGReg(nn.Module):
         fused_intensity = augmented_batch["fused_intensity"]
         fused_valid_mask = augmented_batch["fused_valid_mask"]
         fused_precursor_mz = augmented_batch["fused_precursor_mz"]
-        fused_masked_positions = augmented_batch.get("fused_masked_positions")
-        if fused_masked_positions is None:
-            fused_masked_positions = torch.zeros_like(fused_valid_mask)
-        else:
-            fused_masked_positions = fused_masked_positions & fused_valid_mask
+        # Data pipeline contract:
+        # - View 0 is the global full-spectrum view.
+        # - Views 1..V-1 are local masked views.
+        # - fused_masked_positions is always present.
+        fused_masked_positions = augmented_batch["fused_masked_positions"] & fused_valid_mask
 
         V = self.num_views
         target_global_view_idx = 0
@@ -652,13 +652,10 @@ class PeakSetSIGReg(nn.Module):
             masked_positions=encoder_masked_positions,
             mask_token=encoder_mask_token,
         )
-        fused_pooled, fused_pooled_raw = self.pool_with_raw(fused_emb, fused_valid_mask)
-        fused_z = self.projector(fused_pooled)
 
         B = fused_emb.shape[0] // V
         N = fused_emb.shape[1]
         D = fused_emb.shape[2]
-        proj = fused_z.reshape(V, B, fused_z.size(-1))  # [V, B, D]
         token_emb = fused_emb.reshape(V, B, N, D)  # [V, B, N, D]
         token_valid = fused_valid_mask.reshape(V, B, N)
         token_masked = effective_masked_positions.reshape(V, B, N)
@@ -676,31 +673,29 @@ class PeakSetSIGReg(nn.Module):
                 )
         else:
             global_token_emb = token_emb[target_global_view_idx].detach()  # [B, N, D]
-        local_global_l1_loss = torch.zeros((), dtype=fused_emb.dtype, device=fused_emb.device)
-        if V > 1:
-            latent_mask_token = self.latent_mask_token.view(1, 1, -1).to(
-                dtype=fused_emb.dtype,
-                device=fused_emb.device,
+        latent_mask_token = self.latent_mask_token.view(1, 1, -1).to(
+            dtype=fused_emb.dtype,
+            device=fused_emb.device,
+        )
+        l1_num = torch.zeros((), dtype=fused_emb.dtype, device=fused_emb.device)
+        l1_den = torch.zeros((), dtype=fused_emb.dtype, device=fused_emb.device)
+        for local_view_idx in range(target_global_view_idx + 1, V):
+            local_token_emb = token_emb[local_view_idx]  # [B, N, D]
+            local_valid = token_valid[local_view_idx]  # [B, N]
+            local_mask = token_masked[local_view_idx]  # [B, N]
+            # Re-mask local latents at masked slots before prediction so the
+            # predictor must infer masked content from surrounding context.
+            local_token_emb_remasked = torch.where(
+                local_mask.unsqueeze(-1),
+                latent_mask_token,
+                local_token_emb,
             )
-            l1_num = torch.zeros_like(local_global_l1_loss)
-            l1_den = torch.zeros_like(local_global_l1_loss)
-            for local_view_idx in range(target_global_view_idx + 1, V):
-                local_token_emb = token_emb[local_view_idx]  # [B, N, D]
-                local_valid = token_valid[local_view_idx]  # [B, N]
-                local_mask = token_masked[local_view_idx]  # [B, N]
-                # Re-mask local latents at masked slots before prediction so the
-                # predictor must infer masked content from surrounding context.
-                local_token_emb_remasked = torch.where(
-                    local_mask.unsqueeze(-1),
-                    latent_mask_token,
-                    local_token_emb,
-                )
-                local_token_pred = self.masked_latent_predictor(local_token_emb_remasked)
-                per_token_l1 = (local_token_pred - global_token_emb).abs().mean(dim=-1)  # [B, N]
-                local_valid_float = local_valid.float()
-                l1_num = l1_num + (per_token_l1 * local_valid_float).sum()
-                l1_den = l1_den + local_valid_float.sum()
-            local_global_l1_loss = l1_num / l1_den.clamp_min(1.0)
+            local_token_pred = self.masked_latent_predictor(local_token_emb_remasked)
+            per_token_l1 = (local_token_pred - global_token_emb).abs().mean(dim=-1)  # [B, N]
+            local_valid_float = local_valid.float()
+            l1_num = l1_num + (per_token_l1 * local_valid_float).sum()
+            l1_den = l1_den + local_valid_float.sum()
+        local_global_l1_loss = l1_num / l1_den.clamp_min(1.0)
 
         token_sigreg_loss = self.sigreg(fused_emb[fused_valid_mask])
         loss = (
@@ -708,24 +703,9 @@ class PeakSetSIGReg(nn.Module):
             + self.sigreg_lambda * token_sigreg_loss
         )
         # Report masking rate on local views only; global target view is full-spectrum.
-        if V > 1:
-            masked_fraction = token_masked[target_global_view_idx + 1:].float().mean()
-        else:
-            masked_fraction = torch.zeros((), dtype=fused_emb.dtype, device=fused_emb.device)
+        masked_fraction = token_masked[target_global_view_idx + 1:].float().mean()
 
-        representation_variance = fused_z.float().var(dim=0, unbiased=False).mean()
-        encoder_variance = fused_pooled.float().var(dim=0, unbiased=False).mean()
-        encoder_variance_raw = fused_pooled_raw.float().var(dim=0, unbiased=False).mean()
-        encoder_pooled_rms = fused_pooled.float().pow(2).mean(dim=-1).sqrt().mean()
-        encoder_pooled_raw_rms = fused_pooled_raw.float().pow(2).mean(dim=-1).sqrt().mean()
         pool_norm_weight_abs_mean = self.pool_norm.weight.abs().mean()
-
-        # Alignment/uniformity on the first two views (global target + first local).
-        z1, z2 = proj[0], proj[1]
-        z1_norm = nn.functional.normalize(z1, dim=-1)
-        z2_norm = nn.functional.normalize(z2, dim=-1)
-        alignment = (z1_norm * z2_norm).sum(dim=-1).mean()
-        uniformity = (z1_norm @ z2_norm.T).fill_diagonal_(0).sum() / (z1.shape[0] * (z1.shape[0] - 1))
 
         valid_fraction = fused_valid_mask.float().mean()
 
@@ -736,14 +716,7 @@ class PeakSetSIGReg(nn.Module):
             "local_global_l1_loss": local_global_l1_loss,
             "valid_fraction": valid_fraction,
             "masked_fraction": masked_fraction,
-            "representation_variance": representation_variance,
-            "encoder_variance": encoder_variance,
-            "encoder_variance_raw": encoder_variance_raw,
-            "encoder_pooled_rms": encoder_pooled_rms,
-            "encoder_pooled_raw_rms": encoder_pooled_raw_rms,
             "pool_norm_weight_abs_mean": pool_norm_weight_abs_mean,
-            "alignment": alignment,
-            "uniformity": uniformity,
         }
 
     def encode(

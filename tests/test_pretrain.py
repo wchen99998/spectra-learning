@@ -44,6 +44,7 @@ def _make_fused_batch(
         "fused_intensity": intensity,
         "fused_valid_mask": valid,
         "fused_precursor_mz": torch.rand(VB),
+        "fused_masked_positions": torch.zeros(VB, num_peaks, dtype=torch.bool),
     }
 
 
