@@ -50,16 +50,16 @@ python input_pipeline.py configs/gems_a_dataset.py
 ### Two-View Augmentation (`input_pipeline.py`)
 
 The TF implementation in `input_pipeline.py` runs augmentation in the data pipeline for training.
-- **View 1 (masked)**: Contiguous mz-sorted mask + jitter on unmasked peaks + re-normalization
-- **View 2 (unmasked)**: Jitter only, no masking
+- **Global view**: Full-spectrum (no masking), jitter on valid peaks
+- **Local views**: Local masking + jitter with original valid/padding layout preserved
 
 ### Batch Contract
 
-Training batches contain fused (2B stacked) tensors:
-- `fused_mz`, `fused_intensity`: float32 [2B, N]
-- `fused_precursor_mz`: float32 [2B]
-- `fused_valid_mask`, `fused_masked_positions`: bool [2B, N]
-- `view1_masked_fraction`: scalar metric
+Training batches contain fused stacked tensors:
+- `fused_mz`, `fused_intensity`: float32 [V*B, N]
+- `fused_precursor_mz`: float32 [V*B]
+- `fused_valid_mask`, `fused_masked_positions`, `fused_padding_mask`: bool [V*B, N]
+- `peak_padding_mask`: bool [B, N]
 
 Raw (pre-augmentation) batches: `peak_mz` [B, N], `peak_intensity` [B, N], `peak_valid_mask` [B, N], `precursor_mz` [B].
 

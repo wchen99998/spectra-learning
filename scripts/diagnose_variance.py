@@ -49,9 +49,7 @@ def build_model(cfg) -> PeakSetSIGReg:
         sigreg_proj_norm=cfg.sigreg_proj_norm,
         sigreg_num_slices=cfg.sigreg_num_slices,
         sigreg_lambda=cfg.sigreg_lambda,
-        multicrop_num_global_views=cfg.multicrop_num_global_views,
         multicrop_num_local_views=cfg.multicrop_num_local_views,
-        multicrop_global_keep_fraction=cfg.multicrop_global_keep_fraction,
         multicrop_local_keep_fraction=cfg.multicrop_local_keep_fraction,
         sigreg_mz_jitter_std=cfg.sigreg_mz_jitter_std,
         sigreg_intensity_jitter_std=cfg.sigreg_intensity_jitter_std,
@@ -67,7 +65,7 @@ def build_model(cfg) -> PeakSetSIGReg:
 def make_synthetic_batch(cfg, batch_size: int = 32, device: str = "cpu") -> dict[str, torch.Tensor]:
     """Create a realistic synthetic batch for probing activations."""
     N = cfg.num_peaks
-    V = cfg.multicrop_num_global_views + cfg.multicrop_num_local_views
+    V = 1 + cfg.multicrop_num_local_views
     total_B = V * batch_size
 
     # Realistic mz values (0-1000 range, normalized)

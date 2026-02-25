@@ -2,7 +2,7 @@
 
 Architecture:
 - PeakSetEncoder: MLP embedder -> non-causal Transformer -> peak embeddings
-- Multi-crop augmentation (2 global + 6 local views with random peak retention)
+- Multi-crop augmentation (1 full-spectrum global + K local masked views)
 - Optional projector on pooled embeddings
 - Objective: SIGReg Gaussianity regularizer + optional masked latent prediction
 """
@@ -424,9 +424,7 @@ class PeakSetSIGReg(nn.Module):
         sigreg_proj_norm: str = "rmsnorm",
         sigreg_num_slices: int = 256,
         sigreg_lambda: float = 0.1,
-        multicrop_num_global_views: int = 1,
         multicrop_num_local_views: int = 6,
-        multicrop_global_keep_fraction: float = 0.80,
         multicrop_local_keep_fraction: float = 0.25,
         sigreg_mz_jitter_std: float = 0.005,
         sigreg_intensity_jitter_std: float = 0.05,
@@ -444,11 +442,10 @@ class PeakSetSIGReg(nn.Module):
         self.model_dim = model_dim
         self.sigreg_dim = sigreg_proj_output_dim if sigreg_use_projector else model_dim
 
-        self.multicrop_num_global_views = int(multicrop_num_global_views)
         self.multicrop_num_local_views = int(multicrop_num_local_views)
-        self.multicrop_global_keep_fraction = float(multicrop_global_keep_fraction)
         self.multicrop_local_keep_fraction = float(multicrop_local_keep_fraction)
-        self.num_views = self.multicrop_num_global_views + self.multicrop_num_local_views
+        # One global full-spectrum view + K local masked views.
+        self.num_views = 1 + self.multicrop_num_local_views
         self.sigreg_mz_jitter_std = sigreg_mz_jitter_std
         self.sigreg_intensity_jitter_std = sigreg_intensity_jitter_std
         self.sigreg_lambda = float(sigreg_lambda)
@@ -605,7 +602,16 @@ class PeakSetSIGReg(nn.Module):
             fused_masked_positions = torch.zeros_like(fused_valid_mask)
         else:
             fused_masked_positions = fused_masked_positions & fused_valid_mask
-        encoder_masked_positions = fused_masked_positions
+
+        V = self.num_views
+        target_global_view_idx = 0
+
+        # Global target view is always full-spectrum context. Only non-global views
+        # use masked positions for encoder masking and latent remasking.
+        effective_masked_positions = fused_masked_positions.reshape(V, -1, fused_masked_positions.shape[1]).clone()
+        effective_masked_positions[target_global_view_idx] = False
+        effective_masked_positions = effective_masked_positions.reshape_as(fused_masked_positions)
+        encoder_masked_positions = effective_masked_positions
         encoder_mask_token = self.mask_token
         student_intensity = fused_intensity.masked_fill(encoder_masked_positions, 0.0)
 
@@ -620,28 +626,30 @@ class PeakSetSIGReg(nn.Module):
         fused_pooled, fused_pooled_raw = self.pool_with_raw(fused_emb, fused_valid_mask)
         fused_z = self.projector(fused_pooled)
 
-        V = self.num_views
         B = fused_emb.shape[0] // V
         N = fused_emb.shape[1]
         D = fused_emb.shape[2]
         proj = fused_z.reshape(V, B, fused_z.size(-1))  # [V, B, D]
         token_emb = fused_emb.reshape(V, B, N, D)  # [V, B, N, D]
         token_valid = fused_valid_mask.reshape(V, B, N)
-        token_masked = fused_masked_positions.reshape(V, B, N)
+        token_masked = effective_masked_positions.reshape(V, B, N)
 
-        global_token_emb = token_emb[0]  # [B, N, D]
+        # Stop-grad target branch: local predictors regress to a fixed global latent.
+        global_token_emb = token_emb[target_global_view_idx].detach()  # [B, N, D]
         local_global_l1_loss = torch.zeros((), dtype=fused_emb.dtype, device=fused_emb.device)
-        if self.multicrop_num_local_views > 0:
+        if V > 1:
             latent_mask_token = self.latent_mask_token.view(1, 1, -1).to(
                 dtype=fused_emb.dtype,
                 device=fused_emb.device,
             )
             l1_num = torch.zeros_like(local_global_l1_loss)
             l1_den = torch.zeros_like(local_global_l1_loss)
-            for local_view_idx in range(self.multicrop_num_global_views, V):
+            for local_view_idx in range(target_global_view_idx + 1, V):
                 local_token_emb = token_emb[local_view_idx]  # [B, N, D]
                 local_valid = token_valid[local_view_idx]  # [B, N]
                 local_mask = token_masked[local_view_idx]  # [B, N]
+                # Re-mask local latents at masked slots before prediction so the
+                # predictor must infer masked content from surrounding context.
                 local_token_emb_remasked = torch.where(
                     local_mask.unsqueeze(-1),
                     latent_mask_token,
@@ -659,7 +667,11 @@ class PeakSetSIGReg(nn.Module):
             self.masked_token_loss_weight * local_global_l1_loss
             + self.sigreg_lambda * token_sigreg_loss
         )
-        masked_fraction = fused_masked_positions.float().mean()
+        # Report masking rate on local views only; global target view is full-spectrum.
+        if V > 1:
+            masked_fraction = token_masked[target_global_view_idx + 1:].float().mean()
+        else:
+            masked_fraction = torch.zeros((), dtype=fused_emb.dtype, device=fused_emb.device)
 
         representation_variance = fused_z.float().var(dim=0, unbiased=False).mean()
         encoder_variance = fused_pooled.float().var(dim=0, unbiased=False).mean()
@@ -668,7 +680,7 @@ class PeakSetSIGReg(nn.Module):
         encoder_pooled_raw_rms = fused_pooled_raw.float().pow(2).mean(dim=-1).sqrt().mean()
         pool_norm_weight_abs_mean = self.pool_norm.weight.abs().mean()
 
-        # Alignment/uniformity on first two views (globals)
+        # Alignment/uniformity on the first two views (global target + first local).
         z1, z2 = proj[0], proj[1]
         z1_norm = nn.functional.normalize(z1, dim=-1)
         z2_norm = nn.functional.normalize(z2, dim=-1)

@@ -61,11 +61,7 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         sigreg_proj_norm=str(config.get("sigreg_proj_norm", "rmsnorm")),
         sigreg_num_slices=int(config.get("sigreg_num_slices", 256)),
         sigreg_lambda=float(config.get("sigreg_lambda", 0.1)),
-        multicrop_num_global_views=int(config.get("multicrop_num_global_views", 1)),
         multicrop_num_local_views=int(config.get("multicrop_num_local_views", 6)),
-        multicrop_global_keep_fraction=float(
-            config.get("multicrop_global_keep_fraction", 0.80)
-        ),
         multicrop_local_keep_fraction=float(
             config.get("multicrop_local_keep_fraction", 0.25)
         ),

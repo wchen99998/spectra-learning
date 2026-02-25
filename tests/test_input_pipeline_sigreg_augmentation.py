@@ -40,11 +40,9 @@ class MulticropInputAugmentationTests(unittest.TestCase):
     def test_multicrop_output_shape(self):
         tf.random.set_seed(1234)
         batch = self._make_batch()
-        num_global = 2
         num_local = 3
-        num_views = num_global + num_local
+        num_views = 1 + num_local
         aug = _augment_multicrop_batch_tf(
-            num_global_views=num_global,
             num_local_views=num_local,
             local_keep_fraction=0.25,
             mz_jitter_std=0.0,
@@ -65,7 +63,6 @@ class MulticropInputAugmentationTests(unittest.TestCase):
     def test_multicrop_always_outputs_mask_and_padding_keys(self):
         batch = self._make_batch()
         aug = _augment_multicrop_batch_tf(
-            num_global_views=2,
             num_local_views=2,
             local_keep_fraction=0.25,
             mz_jitter_std=0.0,
@@ -75,13 +72,11 @@ class MulticropInputAugmentationTests(unittest.TestCase):
         self.assertIn("fused_masked_positions", out)
         self.assertIn("fused_padding_mask", out)
         self.assertIn("peak_padding_mask", out)
-        self.assertIn("view1_masked_fraction", out)
 
     def test_masked_positions_subset_of_valid_and_preserve_values(self):
         tf.random.set_seed(7)
         batch = self._make_batch()
         aug = _augment_multicrop_batch_tf(
-            num_global_views=2,
             num_local_views=2,
             local_keep_fraction=0.25,
             mz_jitter_std=0.0,
@@ -90,7 +85,6 @@ class MulticropInputAugmentationTests(unittest.TestCase):
         out = aug(batch)
 
         self.assertIn("fused_masked_positions", out)
-        self.assertIn("view1_masked_fraction", out)
         self.assertEqual(out["fused_masked_positions"].shape, out["fused_valid_mask"].shape)
         self.assertGreaterEqual(float(tf.reduce_sum(tf.cast(out["fused_masked_positions"], tf.float32))), 1.0)
         self.assertTrue(
@@ -121,10 +115,8 @@ class MulticropInputAugmentationTests(unittest.TestCase):
     def test_global_views_mask_less_than_local(self):
         tf.random.set_seed(42)
         batch = self._make_batch()
-        num_global = 2
         num_local = 3
         aug = _augment_multicrop_batch_tf(
-            num_global_views=num_global,
             num_local_views=num_local,
             local_keep_fraction=0.25,
             mz_jitter_std=0.0,
@@ -134,8 +126,8 @@ class MulticropInputAugmentationTests(unittest.TestCase):
 
         B = 2
         fused_masked = out["fused_masked_positions"]
-        global_masked = fused_masked[:num_global * B]
-        local_masked = fused_masked[num_global * B:]
+        global_masked = fused_masked[:B]
+        local_masked = fused_masked[B:]
         global_avg = tf.reduce_mean(tf.reduce_sum(tf.cast(global_masked, tf.float32), axis=1))
         local_avg = tf.reduce_mean(tf.reduce_sum(tf.cast(local_masked, tf.float32), axis=1))
         self.assertEqual(float(global_avg.numpy()), 0.0)
@@ -145,8 +137,7 @@ class MulticropInputAugmentationTests(unittest.TestCase):
         tf.random.set_seed(202)
         batch = self._make_batch()
         aug = _augment_multicrop_batch_tf(
-            num_global_views=4,
-            num_local_views=4,
+            num_local_views=7,
             local_keep_fraction=0.50,
             mz_jitter_std=0.0,
             intensity_jitter_std=0.0,

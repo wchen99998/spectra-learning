@@ -186,8 +186,7 @@ def test_full_model_forward():
         sigreg_proj_hidden_dim=256,
         sigreg_proj_output_dim=64,
         sigreg_num_slices=128,
-        multicrop_num_global_views=2,
-        multicrop_num_local_views=2,
+        multicrop_num_local_views=3,
     ).to(DEVICE).eval()
 
     batch = _make_batch()
@@ -250,8 +249,7 @@ def test_gradient_flow():
         sigreg_proj_hidden_dim=256,
         sigreg_proj_output_dim=64,
         sigreg_num_slices=128,
-        multicrop_num_global_views=2,
-        multicrop_num_local_views=2,
+        multicrop_num_local_views=3,
     ).to(DEVICE)
 
     batch = _make_batch()
@@ -292,8 +290,7 @@ def test_compile_forward():
         sigreg_proj_hidden_dim=256,
         sigreg_proj_output_dim=64,
         sigreg_num_slices=128,
-        multicrop_num_global_views=2,
-        multicrop_num_local_views=2,
+        multicrop_num_local_views=3,
     ).to(DEVICE).eval()
 
     def forward_fn(batch):
@@ -397,8 +394,7 @@ def benchmark_full_model():
         sigreg_proj_hidden_dim=512,
         sigreg_proj_output_dim=128,
         sigreg_num_slices=256,
-        multicrop_num_global_views=2,
-        multicrop_num_local_views=2,
+        multicrop_num_local_views=3,
     ).to(DEVICE).eval()
 
     batch = _make_batch(batch_size=64)
@@ -432,8 +428,7 @@ def benchmark_compiled_with_mask():
         sigreg_proj_hidden_dim=512,
         sigreg_proj_output_dim=128,
         sigreg_num_slices=256,
-        multicrop_num_global_views=2,
-        multicrop_num_local_views=2,
+        multicrop_num_local_views=3,
     ).to(DEVICE).eval()
 
     batch = _make_batch(batch_size=64)

@@ -676,7 +676,6 @@ def _augment_multicrop_view_tf(
 
 def _augment_multicrop_batch_tf(
     *,
-    num_global_views: int,
     num_local_views: int,
     local_keep_fraction: float,
     mz_jitter_std: float,
@@ -693,17 +692,17 @@ def _augment_multicrop_batch_tf(
         all_valid = []
         all_masked = []
 
-        for _ in range(num_global_views):
-            mz, intensity, valid, masked = _augment_multicrop_view_tf(
-                peak_mz, peak_intensity, peak_valid_mask,
-                keep_fraction=1.0,
-                mz_jitter_std=mz_jitter_std,
-                intensity_jitter_std=intensity_jitter_std,
-            )
-            all_mz.append(mz)
-            all_int.append(intensity)
-            all_valid.append(valid)
-            all_masked.append(masked)
+        # Single global view: full spectrum (no masking).
+        mz, intensity, valid, masked = _augment_multicrop_view_tf(
+            peak_mz, peak_intensity, peak_valid_mask,
+            keep_fraction=1.0,
+            mz_jitter_std=mz_jitter_std,
+            intensity_jitter_std=intensity_jitter_std,
+        )
+        all_mz.append(mz)
+        all_int.append(intensity)
+        all_valid.append(valid)
+        all_masked.append(masked)
 
         for _ in range(num_local_views):
             mz, intensity, valid, masked = _augment_multicrop_view_tf(
@@ -717,7 +716,7 @@ def _augment_multicrop_batch_tf(
             all_valid.append(valid)
             all_masked.append(masked)
 
-        num_views = num_global_views + num_local_views
+        num_views = 1 + num_local_views
         out = dict(batch)
         out["fused_mz"] = tf.concat(all_mz, axis=0)
         out["fused_intensity"] = tf.concat(all_int, axis=0)
@@ -726,9 +725,6 @@ def _augment_multicrop_batch_tf(
         out["fused_masked_positions"] = tf.concat(all_masked, axis=0)
         out["fused_padding_mask"] = tf.logical_not(out["fused_valid_mask"])
         out["peak_padding_mask"] = tf.logical_not(peak_valid_mask)
-        out["view1_masked_fraction"] = tf.reduce_mean(
-            tf.cast(all_masked[0], tf.float32)
-        )
         return out
 
     return apply
@@ -872,7 +868,6 @@ def _build_dataset(
     include_fingerprint: bool,
     min_peak_intensity: float,
     augmentation_type: str = "none",
-    multicrop_num_global_views: int = 1,
     multicrop_num_local_views: int = 6,
     multicrop_local_keep_fraction: float = 0.25,
     mz_jitter_std: float = 0.0001,
@@ -905,7 +900,6 @@ def _build_dataset(
     if augmentation_type == "multicrop":
         ds = ds.map(
             _augment_multicrop_batch_tf(
-                num_global_views=multicrop_num_global_views,
                 num_local_views=multicrop_num_local_views,
                 local_keep_fraction=multicrop_local_keep_fraction,
                 mz_jitter_std=mz_jitter_std,
@@ -1101,9 +1095,6 @@ class TfLightningDataModule:
             config.get("min_peak_intensity", _DEFAULT_MIN_PEAK_INTENSITY)
         )
         self.peak_ordering = str(config.get("peak_ordering", "intensity"))
-        self.multicrop_num_global_views = int(
-            config.get("multicrop_num_global_views", 1)
-        )
         self.multicrop_num_local_views = int(
             config.get("multicrop_num_local_views", 6)
         )
@@ -1219,7 +1210,6 @@ class TfLightningDataModule:
             include_fingerprint=include_fingerprint,
             min_peak_intensity=self.min_peak_intensity,
             augmentation_type="multicrop",
-            multicrop_num_global_views=self.multicrop_num_global_views,
             multicrop_num_local_views=self.multicrop_num_local_views,
             multicrop_local_keep_fraction=self.multicrop_local_keep_fraction,
             mz_jitter_std=self.mz_jitter_std,

@@ -18,7 +18,6 @@ def _build_model(
         encoder_use_rope=True,
         sigreg_use_projector=False,
         pooling_type="mean",
-        multicrop_num_global_views=2,
         multicrop_num_local_views=0,
         use_masked_token_input=True,
         masked_token_position_mode=position_mode,
@@ -138,7 +137,6 @@ def test_forward_augmented_reports_local_global_l1_loss():
         encoder_use_rope=True,
         sigreg_use_projector=False,
         pooling_type="mean",
-        multicrop_num_global_views=1,
         multicrop_num_local_views=1,
         use_masked_token_input=True,
         masked_token_position_mode="index",
@@ -202,7 +200,6 @@ def test_local_global_l1_uses_all_valid_tokens():
         encoder_use_rope=True,
         sigreg_use_projector=False,
         pooling_type="mean",
-        multicrop_num_global_views=1,
         multicrop_num_local_views=1,
         use_masked_token_input=True,
         masked_token_position_mode="index",
@@ -252,7 +249,7 @@ def test_local_global_l1_uses_all_valid_tokens():
 
     fused_masked_positions = fused_masked_positions & fused_valid_mask
     fused_masked_positions = fused_masked_positions.reshape(model.num_views, -1, fused_masked_positions.shape[1])
-    fused_masked_positions[: model.multicrop_num_global_views] = False
+    fused_masked_positions[0] = False
     fused_masked_positions = fused_masked_positions.reshape_as(fused_valid_mask)
     student_intensity = fused_intensity.masked_fill(fused_masked_positions, 0.0)
     fused_emb = model.encoder(
@@ -307,7 +304,6 @@ def test_global_view_masked_positions_are_ignored_for_context():
         encoder_use_rope=True,
         sigreg_use_projector=False,
         pooling_type="mean",
-        multicrop_num_global_views=1,
         multicrop_num_local_views=1,
         use_masked_token_input=True,
         masked_token_position_mode="index",

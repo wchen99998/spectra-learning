@@ -41,7 +41,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_proj_hidden_dim = 2048
     cfg.sigreg_proj_output_dim = 128
     cfg.sigreg_lambda = 0.1
-    cfg.multicrop_num_global_views = 1
     cfg.multicrop_num_local_views = 7
     cfg.multicrop_local_keep_fraction = 0.25
     cfg.sigreg_mz_jitter_std = 0.0001
