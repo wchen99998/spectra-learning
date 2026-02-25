@@ -206,6 +206,65 @@ class SIGRegForwardTests(unittest.TestCase):
 
         self.assertFalse(torch.allclose(emb_no_rope, emb_with_rope))
 
+    def test_ema_teacher_is_frozen_and_kept_in_eval(self):
+        model = PeakSetSIGReg(
+            num_peaks=60,
+            model_dim=32,
+            encoder_num_layers=1,
+            encoder_num_heads=4,
+            encoder_num_kv_heads=4,
+            attention_mlp_multiple=2.0,
+            feature_mlp_hidden_dim=16,
+            multicrop_num_local_views=1,
+            use_ema_teacher_target=True,
+        )
+        self.assertIsNotNone(model.teacher_encoder)
+        self.assertTrue(all(not p.requires_grad for p in model.teacher_encoder.parameters()))
+        model.train()
+        self.assertFalse(model.teacher_encoder.training)
+
+    def test_ema_teacher_update_matches_decay_formula(self):
+        model = PeakSetSIGReg(
+            num_peaks=60,
+            model_dim=32,
+            encoder_num_layers=1,
+            encoder_num_heads=4,
+            encoder_num_kv_heads=4,
+            attention_mlp_multiple=2.0,
+            feature_mlp_hidden_dim=16,
+            multicrop_num_local_views=1,
+            use_ema_teacher_target=True,
+            teacher_ema_decay=0.5,
+        )
+        student_param = next(model.encoder.parameters())
+        teacher_param = next(model.teacher_encoder.parameters())
+        with torch.no_grad():
+            teacher_before = teacher_param.clone()
+            student_param.add_(1.0)
+            expected = teacher_before * 0.5 + student_param * 0.5
+        model.update_teacher()
+        self.assertTrue(torch.allclose(teacher_param, expected))
+
+    def test_teacher_branch_has_no_gradients(self):
+        model = PeakSetSIGReg(
+            num_peaks=60,
+            model_dim=32,
+            encoder_num_layers=1,
+            encoder_num_heads=4,
+            encoder_num_kv_heads=4,
+            attention_mlp_multiple=2.0,
+            feature_mlp_hidden_dim=16,
+            sigreg_lambda=0.0,
+            masked_token_loss_weight=1.0,
+            multicrop_num_local_views=1,
+            use_ema_teacher_target=True,
+        )
+        batch = _make_fused_batch(num_views=model.num_views)
+        loss = model.forward_augmented(batch)["loss"]
+        loss.backward()
+        self.assertTrue(any(p.grad is not None for p in model.encoder.parameters() if p.requires_grad))
+        self.assertTrue(all(p.grad is None for p in model.teacher_encoder.parameters()))
+
 
 class MassAwareRoPETests(unittest.TestCase):
     def _build_encoder_model(

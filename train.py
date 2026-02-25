@@ -41,6 +41,8 @@ def _partition_params_for_muon(
     muon_params = []
     adamw_params = []
     for param in model.parameters():
+        if not param.requires_grad:
+            continue
         if param.ndim == 2:
             muon_params.append(param)
         else:
@@ -242,6 +244,8 @@ def _build_optimizers(
     decay_params: list[torch.nn.Parameter] = []
     no_decay_params: list[torch.nn.Parameter] = []
     for param in model.parameters():
+        if not param.requires_grad:
+            continue
         if param.ndim < 2:
             no_decay_params.append(param)
         else:
@@ -434,6 +438,7 @@ def train_and_evaluate(
                 autocast_dtype,
                 grad_clip_norm,
             )
+            model.update_teacher()
             global_step += 1
             pbar.update(1)
 
