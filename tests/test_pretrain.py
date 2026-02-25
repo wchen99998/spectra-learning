@@ -418,6 +418,17 @@ class SIGRegLossTests(unittest.TestCase):
         result_flat = sigreg(proj.reshape(-1, proj.size(-1)))
         self.assertTrue(torch.allclose(result_shaped, result_flat))
 
+    def test_sigreg_masked_matches_filtered_tokens(self):
+        sigreg = SIGReg(num_slices=32)
+        proj = torch.randn(2, 3, 5, 16)
+        valid = torch.rand(2, 3, 5) > 0.3
+        valid.view(-1)[0] = True
+        torch.manual_seed(2026)
+        result_masked = sigreg(proj, valid_mask=valid)
+        torch.manual_seed(2026)
+        result_filtered = sigreg(proj[valid])
+        self.assertTrue(torch.allclose(result_masked, result_filtered))
+
     def test_sigreg_backpropagates(self):
         sigreg = SIGReg(num_slices=32)
         proj = torch.randn(4, 8, 16, requires_grad=True)

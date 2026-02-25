@@ -697,7 +697,7 @@ class PeakSetSIGReg(nn.Module):
             l1_den = l1_den + local_valid_float.sum()
         local_global_l1_loss = l1_num / l1_den.clamp_min(1.0)
 
-        token_sigreg_loss = self.sigreg(fused_emb[fused_valid_mask])
+        token_sigreg_loss = self.sigreg(fused_emb, valid_mask=fused_valid_mask)
         loss = (
             self.masked_token_loss_weight * local_global_l1_loss
             + self.sigreg_lambda * token_sigreg_loss
