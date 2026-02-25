@@ -49,9 +49,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_proj_output_dim = 256
     cfg.sigreg_num_slices = 256
     cfg.sigreg_lambda = 0.1
-    cfg.multicrop_num_global_views = 2
+    cfg.multicrop_num_global_views = 1
     cfg.multicrop_num_local_views = 4
-    cfg.multicrop_global_keep_fraction = 0.75
     cfg.multicrop_local_keep_fraction = 0.25
     cfg.sigreg_mz_jitter_std = 0.0001
     cfg.sigreg_intensity_jitter_std = 0.001

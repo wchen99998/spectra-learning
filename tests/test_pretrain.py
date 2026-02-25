@@ -104,7 +104,8 @@ class SIGRegForwardTests(unittest.TestCase):
         for key in (
             "loss",
             "sigreg_loss",
-            "invariance_loss",
+            "token_sigreg_loss",
+            "local_global_l1_loss",
             "valid_fraction",
             "representation_variance",
         ):
@@ -123,6 +124,66 @@ class SIGRegForwardTests(unittest.TestCase):
         loss.backward()
         grads = [p.grad for p in model.encoder.parameters() if p.requires_grad]
         self.assertTrue(any(g is not None for g in grads))
+
+    def test_local_global_loss_stops_grad_on_global_target_branch(self):
+        model = PeakSetSIGReg(
+            num_peaks=6,
+            model_dim=32,
+            encoder_num_layers=2,
+            encoder_num_heads=4,
+            feature_mlp_hidden_dim=32,
+            encoder_use_rope=True,
+            sigreg_use_projector=False,
+            pooling_type="mean",
+            sigreg_lambda=0.0,
+            multicrop_num_global_views=1,
+            multicrop_num_local_views=1,
+            use_masked_token_input=True,
+            masked_token_position_mode="index",
+            masked_token_loss_weight=1.0,
+        )
+        fused_mz = torch.tensor(
+            [
+                [0.10, 0.20, 0.30, 0.40, 0.50, 0.60],
+                [0.12, 0.22, 0.32, 0.42, 0.52, 0.62],
+                [0.11, 0.21, 0.31, 0.41, 0.51, 0.61],
+                [0.13, 0.23, 0.33, 0.43, 0.53, 0.63],
+            ],
+            dtype=torch.float32,
+        )
+        fused_intensity = torch.tensor(
+            [
+                [0.9, 0.8, 0.7, 0.6, 0.5, 0.4],
+                [0.8, 0.7, 0.6, 0.5, 0.4, 0.3],
+                [0.7, 0.6, 0.5, 0.4, 0.3, 0.2],
+                [0.6, 0.5, 0.4, 0.3, 0.2, 0.1],
+            ],
+            dtype=torch.float32,
+            requires_grad=True,
+        )
+        fused_valid_mask = torch.ones_like(fused_mz, dtype=torch.bool)
+        fused_masked_positions = torch.tensor(
+            [
+                [False, False, False, False, False, False],
+                [False, False, False, False, False, False],
+                [False, True, False, False, False, False],
+                [False, False, False, True, False, False],
+            ]
+        )
+        fused_precursor_mz = torch.tensor([0.95, 0.95, 0.95, 0.95], dtype=torch.float32)
+
+        loss = model.forward_augmented(
+            {
+                "fused_mz": fused_mz,
+                "fused_intensity": fused_intensity,
+                "fused_valid_mask": fused_valid_mask,
+                "fused_masked_positions": fused_masked_positions,
+                "fused_precursor_mz": fused_precursor_mz,
+            }
+        )["loss"]
+        loss.backward()
+        global_branch_grad = fused_intensity.grad[:2].abs().sum()
+        self.assertEqual(float(global_branch_grad), 0.0)
 
     def test_encoder_rope_toggle_changes_output(self):
         batch = _make_batch(batch_size=2)
@@ -244,6 +305,7 @@ class PMAPoolingTests(unittest.TestCase):
             sigreg_use_projector=False,
             sigreg_num_slices=32,
             sigreg_lambda=0.1,
+            masked_token_loss_weight=1.0,
             pooling_type="pma",
             pma_num_heads=4,
             pma_num_seeds=2,
@@ -260,18 +322,19 @@ class PMAPoolingTests(unittest.TestCase):
         pooled_b = model.pool(embeddings, valid)
         self.assertTrue(torch.allclose(pooled_a, pooled_b, atol=1e-6, rtol=1e-5))
 
-    def test_pool_backward_populates_pma_gradients(self):
+    def test_pool_parameters_are_not_in_loss_path(self):
         model = self._build_model()
         batch = _make_fused_batch(num_views=model.num_views)
         loss = model.forward_augmented(batch)["loss"]
         loss.backward()
 
-        self.assertIsNotNone(model.pool_query.grad)
-        self.assertGreater(float(model.pool_query.grad.abs().sum()), 0.0)
+        self.assertIsNone(model.pool_query.grad)
+        mha_grads = [p.grad for p in model.pool_mha.parameters() if p.requires_grad]
+        self.assertTrue(all(g is None for g in mha_grads))
 
-        grads = [p.grad for p in model.pool_mha.parameters() if p.requires_grad]
-        self.assertTrue(any(g is not None for g in grads))
-        self.assertGreater(sum(float(g.abs().sum()) for g in grads if g is not None), 0.0)
+        predictor_grads = [p.grad for p in model.masked_latent_predictor.parameters() if p.requires_grad]
+        self.assertTrue(any(g is not None for g in predictor_grads))
+        self.assertGreater(sum(float(g.abs().sum()) for g in predictor_grads if g is not None), 0.0)
 
 
 class SIGRegLossTests(unittest.TestCase):

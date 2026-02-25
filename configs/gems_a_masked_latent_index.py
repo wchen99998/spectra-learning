@@ -5,7 +5,7 @@ from configs.gems_a_multi import get_config as get_base_config
 
 def get_config() -> config_dict.ConfigDict:
     cfg = get_base_config()
-    cfg.multicrop_keep_masked_tokens = True
+    cfg.multicrop_num_global_views = 1
     cfg.use_masked_token_input = True
     cfg.masked_token_position_mode = "index"
     cfg.masked_token_attention_mode = "masked_query_to_unmasked_kv"

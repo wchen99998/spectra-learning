@@ -16,7 +16,6 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.encoder_qk_norm = False
     cfg.encoder_post_norm = False
     cfg.pma_fp16_high_precision = False
-    cfg.multicrop_keep_masked_tokens = False
     cfg.use_masked_token_input = False
     cfg.masked_token_position_mode = "index"
     cfg.masked_token_attention_mode = "bidirectional"

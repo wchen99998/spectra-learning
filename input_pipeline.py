@@ -651,13 +651,11 @@ def _augment_multicrop_view_tf(
     keep_fraction: float,
     mz_jitter_std: float,
     intensity_jitter_std: float,
-    keep_masked_tokens: bool = False,
 ) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
     """Generate a single multicrop view.
 
-    Dropped peaks keep their original slot indices (no compaction).
-    If keep_masked_tokens is True, dropped peaks stay valid as masked tokens.
-    Otherwise dropped peaks become invalid holes in the view.
+    The view keeps the original valid/padding layout and applies jitter to
+    valid peaks only. Masking is represented separately via `masked`.
     """
     peak_mz, peak_intensity, peak_valid_mask = _ensure_nonempty_peakset_tf(
         peak_mz,
@@ -665,18 +663,7 @@ def _augment_multicrop_view_tf(
         peak_valid_mask,
     )
     masked = _random_keep_mask_tf(peak_valid_mask, keep_fraction)
-    if keep_masked_tokens:
-        view_valid = peak_valid_mask
-        view_mz, view_intensity = _apply_peak_jitter_tf(
-            peak_mz,
-            peak_intensity,
-            view_valid,
-            mz_jitter_std=mz_jitter_std,
-            intensity_jitter_std=intensity_jitter_std,
-        )
-        return view_mz, view_intensity, view_valid, masked
-
-    view_valid = tf.logical_and(peak_valid_mask, tf.logical_not(masked))
+    view_valid = peak_valid_mask
     view_mz, view_intensity = _apply_peak_jitter_tf(
         peak_mz,
         peak_intensity,
@@ -691,11 +678,9 @@ def _augment_multicrop_batch_tf(
     *,
     num_global_views: int,
     num_local_views: int,
-    global_keep_fraction: float,
     local_keep_fraction: float,
     mz_jitter_std: float,
     intensity_jitter_std: float,
-    keep_masked_tokens: bool = False,
 ) -> Callable[[dict], dict]:
     def apply(batch: dict) -> dict:
         peak_mz = batch["peak_mz"]
@@ -711,10 +696,9 @@ def _augment_multicrop_batch_tf(
         for _ in range(num_global_views):
             mz, intensity, valid, masked = _augment_multicrop_view_tf(
                 peak_mz, peak_intensity, peak_valid_mask,
-                keep_fraction=global_keep_fraction,
+                keep_fraction=1.0,
                 mz_jitter_std=mz_jitter_std,
                 intensity_jitter_std=intensity_jitter_std,
-                keep_masked_tokens=keep_masked_tokens,
             )
             all_mz.append(mz)
             all_int.append(intensity)
@@ -727,7 +711,6 @@ def _augment_multicrop_batch_tf(
                 keep_fraction=local_keep_fraction,
                 mz_jitter_std=mz_jitter_std,
                 intensity_jitter_std=intensity_jitter_std,
-                keep_masked_tokens=keep_masked_tokens,
             )
             all_mz.append(mz)
             all_int.append(intensity)
@@ -740,11 +723,12 @@ def _augment_multicrop_batch_tf(
         out["fused_intensity"] = tf.concat(all_int, axis=0)
         out["fused_precursor_mz"] = tf.tile(precursor_mz, [num_views])
         out["fused_valid_mask"] = tf.concat(all_valid, axis=0)
-        if keep_masked_tokens:
-            out["fused_masked_positions"] = tf.concat(all_masked, axis=0)
-            out["view1_masked_fraction"] = tf.reduce_mean(
-                tf.cast(all_masked[0], tf.float32)
-            )
+        out["fused_masked_positions"] = tf.concat(all_masked, axis=0)
+        out["fused_padding_mask"] = tf.logical_not(out["fused_valid_mask"])
+        out["peak_padding_mask"] = tf.logical_not(peak_valid_mask)
+        out["view1_masked_fraction"] = tf.reduce_mean(
+            tf.cast(all_masked[0], tf.float32)
+        )
         return out
 
     return apply
@@ -888,13 +872,11 @@ def _build_dataset(
     include_fingerprint: bool,
     min_peak_intensity: float,
     augmentation_type: str = "none",
-    multicrop_num_global_views: int = 2,
+    multicrop_num_global_views: int = 1,
     multicrop_num_local_views: int = 6,
-    multicrop_global_keep_fraction: float = 0.80,
     multicrop_local_keep_fraction: float = 0.25,
     mz_jitter_std: float = 0.0001,
     intensity_jitter_std: float = 0.001,
-    keep_masked_tokens: bool = False,
     peak_ordering: str = "intensity",
     num_parallel_reads: int | None = None,
 ) -> tf.data.Dataset:
@@ -925,11 +907,9 @@ def _build_dataset(
             _augment_multicrop_batch_tf(
                 num_global_views=multicrop_num_global_views,
                 num_local_views=multicrop_num_local_views,
-                global_keep_fraction=multicrop_global_keep_fraction,
                 local_keep_fraction=multicrop_local_keep_fraction,
                 mz_jitter_std=mz_jitter_std,
                 intensity_jitter_std=intensity_jitter_std,
-                keep_masked_tokens=keep_masked_tokens,
             ),
             num_parallel_calls=tf.data.AUTOTUNE,
         )
@@ -1122,22 +1102,13 @@ class TfLightningDataModule:
         )
         self.peak_ordering = str(config.get("peak_ordering", "intensity"))
         self.multicrop_num_global_views = int(
-            config.get("multicrop_num_global_views", 2)
+            config.get("multicrop_num_global_views", 1)
         )
         self.multicrop_num_local_views = int(
             config.get("multicrop_num_local_views", 6)
         )
-        self.multicrop_global_keep_fraction = float(
-            config.get("multicrop_global_keep_fraction", 0.80)
-        )
         self.multicrop_local_keep_fraction = float(
             config.get("multicrop_local_keep_fraction", 0.25)
-        )
-        self.multicrop_keep_masked_tokens = bool(
-            config.get(
-                "multicrop_keep_masked_tokens",
-                config.get("use_masked_token_input", False),
-            )
         )
         self.mz_jitter_std = float(config.get("sigreg_mz_jitter_std", 0.0001))
         self.intensity_jitter_std = float(
@@ -1250,11 +1221,9 @@ class TfLightningDataModule:
             augmentation_type="multicrop",
             multicrop_num_global_views=self.multicrop_num_global_views,
             multicrop_num_local_views=self.multicrop_num_local_views,
-            multicrop_global_keep_fraction=self.multicrop_global_keep_fraction,
             multicrop_local_keep_fraction=self.multicrop_local_keep_fraction,
             mz_jitter_std=self.mz_jitter_std,
             intensity_jitter_std=self.intensity_jitter_std,
-            keep_masked_tokens=self.multicrop_keep_masked_tokens,
             peak_ordering=self.peak_ordering,
         )
 

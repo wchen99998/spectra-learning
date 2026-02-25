@@ -197,7 +197,8 @@ def test_full_model_forward():
 
     assert "loss" in result
     assert "sigreg_loss" in result
-    assert "invariance_loss" in result
+    assert "token_sigreg_loss" in result
+    assert "local_global_l1_loss" in result
     assert "valid_fraction" in result
     assert "representation_variance" in result
 

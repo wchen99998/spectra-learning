@@ -46,7 +46,6 @@ class MulticropInputAugmentationTests(unittest.TestCase):
         aug = _augment_multicrop_batch_tf(
             num_global_views=num_global,
             num_local_views=num_local,
-            global_keep_fraction=0.80,
             local_keep_fraction=0.25,
             mz_jitter_std=0.0,
             intensity_jitter_std=0.0,
@@ -58,33 +57,35 @@ class MulticropInputAugmentationTests(unittest.TestCase):
         self.assertEqual(out["fused_mz"].shape, (num_views * B, N))
         self.assertEqual(out["fused_intensity"].shape, (num_views * B, N))
         self.assertEqual(out["fused_valid_mask"].shape, (num_views * B, N))
+        self.assertEqual(out["fused_masked_positions"].shape, (num_views * B, N))
+        self.assertEqual(out["fused_padding_mask"].shape, (num_views * B, N))
+        self.assertEqual(out["peak_padding_mask"].shape, (B, N))
         self.assertEqual(out["fused_precursor_mz"].shape, (num_views * B,))
 
-    def test_multicrop_no_masked_positions_key(self):
+    def test_multicrop_always_outputs_mask_and_padding_keys(self):
         batch = self._make_batch()
         aug = _augment_multicrop_batch_tf(
             num_global_views=2,
             num_local_views=2,
-            global_keep_fraction=0.80,
             local_keep_fraction=0.25,
             mz_jitter_std=0.0,
             intensity_jitter_std=0.0,
         )
         out = aug(batch)
-        self.assertNotIn("fused_masked_positions", out)
-        self.assertNotIn("view1_masked_fraction", out)
+        self.assertIn("fused_masked_positions", out)
+        self.assertIn("fused_padding_mask", out)
+        self.assertIn("peak_padding_mask", out)
+        self.assertIn("view1_masked_fraction", out)
 
-    def test_multicrop_with_masked_tokens_outputs_mask_keys(self):
+    def test_masked_positions_subset_of_valid_and_preserve_values(self):
         tf.random.set_seed(7)
         batch = self._make_batch()
         aug = _augment_multicrop_batch_tf(
             num_global_views=2,
             num_local_views=2,
-            global_keep_fraction=0.8,
             local_keep_fraction=0.25,
             mz_jitter_std=0.0,
             intensity_jitter_std=0.0,
-            keep_masked_tokens=True,
         )
         out = aug(batch)
 
@@ -92,6 +93,16 @@ class MulticropInputAugmentationTests(unittest.TestCase):
         self.assertIn("view1_masked_fraction", out)
         self.assertEqual(out["fused_masked_positions"].shape, out["fused_valid_mask"].shape)
         self.assertGreaterEqual(float(tf.reduce_sum(tf.cast(out["fused_masked_positions"], tf.float32))), 1.0)
+        self.assertTrue(
+            bool(
+                tf.reduce_all(
+                    tf.logical_or(
+                        tf.logical_not(out["fused_masked_positions"]),
+                        out["fused_valid_mask"],
+                    )
+                )
+            )
+        )
 
         fused_masked = out["fused_masked_positions"].numpy()
         fused_intensity = out["fused_intensity"].numpy()
@@ -107,7 +118,7 @@ class MulticropInputAugmentationTests(unittest.TestCase):
                     atol=0.0,
                 )
 
-    def test_global_views_keep_more_than_local(self):
+    def test_global_views_mask_less_than_local(self):
         tf.random.set_seed(42)
         batch = self._make_batch()
         num_global = 2
@@ -115,7 +126,6 @@ class MulticropInputAugmentationTests(unittest.TestCase):
         aug = _augment_multicrop_batch_tf(
             num_global_views=num_global,
             num_local_views=num_local,
-            global_keep_fraction=0.80,
             local_keep_fraction=0.25,
             mz_jitter_std=0.0,
             intensity_jitter_std=0.0,
@@ -123,22 +133,20 @@ class MulticropInputAugmentationTests(unittest.TestCase):
         out = aug(batch)
 
         B = 2
-        fused_valid = out["fused_valid_mask"]
-        global_valid = fused_valid[:num_global * B]
-        local_valid = fused_valid[num_global * B:]
+        fused_masked = out["fused_masked_positions"]
+        global_masked = fused_masked[:num_global * B]
+        local_masked = fused_masked[num_global * B:]
+        global_avg = tf.reduce_mean(tf.reduce_sum(tf.cast(global_masked, tf.float32), axis=1))
+        local_avg = tf.reduce_mean(tf.reduce_sum(tf.cast(local_masked, tf.float32), axis=1))
+        self.assertEqual(float(global_avg.numpy()), 0.0)
+        self.assertLess(float(global_avg.numpy()), float(local_avg.numpy()))
 
-        global_avg = tf.reduce_mean(tf.reduce_sum(tf.cast(global_valid, tf.float32), axis=1))
-        local_avg = tf.reduce_mean(tf.reduce_sum(tf.cast(local_valid, tf.float32), axis=1))
-
-        self.assertGreater(float(global_avg.numpy()), float(local_avg.numpy()))
-
-    def test_dropped_peaks_preserve_original_slots(self):
+    def test_valid_and_padding_layout_are_identical_across_views(self):
         tf.random.set_seed(202)
         batch = self._make_batch()
         aug = _augment_multicrop_batch_tf(
             num_global_views=4,
             num_local_views=4,
-            global_keep_fraction=0.50,
             local_keep_fraction=0.50,
             mz_jitter_std=0.0,
             intensity_jitter_std=0.0,
@@ -147,14 +155,16 @@ class MulticropInputAugmentationTests(unittest.TestCase):
 
         fused_mz = out["fused_mz"].numpy()
         fused_valid = out["fused_valid_mask"].numpy()
+        fused_padding = out["fused_padding_mask"].numpy()
         peak_mz = batch["peak_mz"].numpy()
         peak_valid = batch["peak_valid_mask"].numpy()
         batch_size = peak_mz.shape[0]
 
         for row_idx, row_valid in enumerate(fused_valid):
             base_idx = row_idx % batch_size
-            self.assertFalse(row_valid[~peak_valid[base_idx]].any())
-            expected_mz = np.where(row_valid, peak_mz[base_idx], 0.0)
+            np.testing.assert_array_equal(row_valid, peak_valid[base_idx])
+            np.testing.assert_array_equal(fused_padding[row_idx], ~peak_valid[base_idx])
+            expected_mz = np.where(peak_valid[base_idx], peak_mz[base_idx], 0.0)
             np.testing.assert_allclose(fused_mz[row_idx], expected_mz, rtol=0.0, atol=0.0)
 
 

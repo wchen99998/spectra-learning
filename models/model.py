@@ -424,7 +424,7 @@ class PeakSetSIGReg(nn.Module):
         sigreg_proj_norm: str = "rmsnorm",
         sigreg_num_slices: int = 256,
         sigreg_lambda: float = 0.1,
-        multicrop_num_global_views: int = 2,
+        multicrop_num_global_views: int = 1,
         multicrop_num_local_views: int = 6,
         multicrop_global_keep_fraction: float = 0.80,
         multicrop_local_keep_fraction: float = 0.25,
@@ -451,6 +451,7 @@ class PeakSetSIGReg(nn.Module):
         self.num_views = self.multicrop_num_global_views + self.multicrop_num_local_views
         self.sigreg_mz_jitter_std = sigreg_mz_jitter_std
         self.sigreg_intensity_jitter_std = sigreg_intensity_jitter_std
+        self.sigreg_lambda = float(sigreg_lambda)
         self.pooling_type = pooling_type
         self.pma_fp16_high_precision = bool(pma_fp16_high_precision)
         self.pma_num_seeds = int(pma_num_seeds)
@@ -514,6 +515,8 @@ class PeakSetSIGReg(nn.Module):
         self.pool_norm = nn.RMSNorm(model_dim, eps=1e-5)
         self.mask_token = nn.Parameter(torch.empty(model_dim))
         nn.init.normal_(self.mask_token, std=0.02)
+        self.latent_mask_token = nn.Parameter(torch.empty(model_dim))
+        nn.init.normal_(self.latent_mask_token, std=0.02)
         predictor_hidden_dim = (
             model_dim
             if self.masked_latent_predictor_hidden_dim <= 0
@@ -602,14 +605,9 @@ class PeakSetSIGReg(nn.Module):
             fused_masked_positions = torch.zeros_like(fused_valid_mask)
         else:
             fused_masked_positions = fused_masked_positions & fused_valid_mask
-        encoder_masked_positions = None
-        encoder_mask_token = None
-        if self.use_masked_token_input:
-            encoder_masked_positions = fused_masked_positions
-            encoder_mask_token = self.mask_token
-        student_intensity = fused_intensity
-        if self.use_masked_token_input:
-            student_intensity = fused_intensity.masked_fill(encoder_masked_positions, 0.0)
+        encoder_masked_positions = fused_masked_positions
+        encoder_mask_token = self.mask_token
+        student_intensity = fused_intensity.masked_fill(encoder_masked_positions, 0.0)
 
         fused_emb = self.encoder(
             fused_mz,
@@ -623,28 +621,45 @@ class PeakSetSIGReg(nn.Module):
         fused_z = self.projector(fused_pooled)
 
         V = self.num_views
-        proj = fused_z.reshape(V, -1, fused_z.size(-1))  # [V, B, D]
+        B = fused_emb.shape[0] // V
+        N = fused_emb.shape[1]
+        D = fused_emb.shape[2]
+        proj = fused_z.reshape(V, B, fused_z.size(-1))  # [V, B, D]
+        token_emb = fused_emb.reshape(V, B, N, D)  # [V, B, N, D]
+        token_valid = fused_valid_mask.reshape(V, B, N)
+        token_masked = fused_masked_positions.reshape(V, B, N)
 
-        # SIGReg Gaussianity (samples random A internally).
-        sigreg_loss = self.sigreg(proj)
-        loss = sigreg_loss
-        masked_latent_loss = torch.zeros((), dtype=loss.dtype, device=loss.device)
-        masked_fraction = fused_masked_positions.float().mean()
-        if self.masked_token_loss_weight > 0.0:
-            with torch.no_grad():
-                target_emb = self.encoder(
-                    fused_mz,
-                    fused_intensity,
-                    valid_mask=fused_valid_mask,
-                    precursor_mz=fused_precursor_mz,
-                    masked_positions=None,
-                    mask_token=None,
+        global_token_emb = token_emb[0]  # [B, N, D]
+        local_global_l1_loss = torch.zeros((), dtype=fused_emb.dtype, device=fused_emb.device)
+        if self.multicrop_num_local_views > 0:
+            latent_mask_token = self.latent_mask_token.view(1, 1, -1).to(
+                dtype=fused_emb.dtype,
+                device=fused_emb.device,
+            )
+            l1_num = torch.zeros_like(local_global_l1_loss)
+            l1_den = torch.zeros_like(local_global_l1_loss)
+            for local_view_idx in range(self.multicrop_num_global_views, V):
+                local_token_emb = token_emb[local_view_idx]  # [B, N, D]
+                local_valid = token_valid[local_view_idx]  # [B, N]
+                local_mask = token_masked[local_view_idx]  # [B, N]
+                local_token_emb_remasked = torch.where(
+                    local_mask.unsqueeze(-1),
+                    latent_mask_token,
+                    local_token_emb,
                 )
-            predicted_emb = self.masked_latent_predictor(fused_emb)
-            per_token = (predicted_emb - target_emb).square().mean(dim=-1)
-            mask = fused_masked_positions.float()
-            masked_latent_loss = (per_token * mask).sum() / mask.sum().clamp_min(1.0)
-            loss = loss + self.masked_token_loss_weight * masked_latent_loss
+                local_token_pred = self.masked_latent_predictor(local_token_emb_remasked)
+                per_token_l1 = (local_token_pred - global_token_emb).abs().mean(dim=-1)  # [B, N]
+                local_valid_float = local_valid.float()
+                l1_num = l1_num + (per_token_l1 * local_valid_float).sum()
+                l1_den = l1_den + local_valid_float.sum()
+            local_global_l1_loss = l1_num / l1_den.clamp_min(1.0)
+
+        token_sigreg_loss = self.sigreg(fused_emb[fused_valid_mask])
+        loss = (
+            self.masked_token_loss_weight * local_global_l1_loss
+            + self.sigreg_lambda * token_sigreg_loss
+        )
+        masked_fraction = fused_masked_positions.float().mean()
 
         representation_variance = fused_z.float().var(dim=0, unbiased=False).mean()
         encoder_variance = fused_pooled.float().var(dim=0, unbiased=False).mean()
@@ -664,8 +679,9 @@ class PeakSetSIGReg(nn.Module):
 
         return {
             "loss": loss,
-            "sigreg_loss": sigreg_loss,
-            "masked_latent_loss": masked_latent_loss,
+            "sigreg_loss": token_sigreg_loss,
+            "token_sigreg_loss": token_sigreg_loss,
+            "local_global_l1_loss": local_global_l1_loss,
             "valid_fraction": valid_fraction,
             "masked_fraction": masked_fraction,
             "representation_variance": representation_variance,
