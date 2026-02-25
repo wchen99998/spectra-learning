@@ -31,9 +31,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--probe-type", choices=["attentive", "linear"], default="attentive", help="Probe type: attentive (default) or linear.")
     parser.add_argument(
         "--probe-feature-source",
-        choices=["encoder", "projector"],
+        choices=["encoder"],
         default=None,
-        help="Override probe feature source from config. encoder=pre-pooling token features, projector=post-pooling projected feature.",
+        help="Override probe feature source from config. encoder=token-level encoder features.",
     )
     parser.add_argument(
         "--probe-precursor-target",

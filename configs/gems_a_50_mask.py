@@ -42,16 +42,12 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pooling_type = "mean"
     cfg.pma_num_heads = cfg.num_heads
     cfg.pma_num_seeds = 32
-    cfg.sigreg_use_projector = True
-    cfg.sigreg_proj_hidden_dim = 2048
-    cfg.sigreg_proj_output_dim = 256
     cfg.sigreg_num_slices = 256
     cfg.sigreg_lambda = 0.1
     cfg.multicrop_num_local_views = 5
     cfg.multicrop_local_keep_fraction = 0.25
     cfg.sigreg_mz_jitter_std = 0.0001
     cfg.sigreg_intensity_jitter_std = 0.001
-    cfg.sigreg_proj_norm = "batchnorm"
     # Training (short smoke run)
     cfg.num_epochs = 5
     cfg.learning_rate = 3e-4

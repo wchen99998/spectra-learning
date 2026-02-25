@@ -34,7 +34,6 @@ def _batch_to_table(
     batch: dict[str, torch.Tensor],
     *,
     encoder_embedding: torch.Tensor,
-    projector_embedding: torch.Tensor,
     adduct_vocab: dict[int, str],
     instrument_type_vocab: dict[int, str],
 ) -> pa.Table:
@@ -51,9 +50,6 @@ def _batch_to_table(
     )
     columns["encoder_embedding"] = pa.array(
         encoder_embedding.detach().cpu().to(torch.float32).tolist()
-    )
-    columns["projector_embedding"] = pa.array(
-        projector_embedding.detach().cpu().to(torch.float32).tolist()
     )
     return pa.table(columns)
 
@@ -151,12 +147,10 @@ def _encode_split(
                 precursor_mz=batch["precursor_mz"],
             )
             pooled_encoder = model.pool(embeddings, batch["peak_valid_mask"])
-            pooled_projector = model.projector(pooled_encoder)
 
         table = _batch_to_table(
             batch,
             encoder_embedding=pooled_encoder,
-            projector_embedding=pooled_projector,
             adduct_vocab=adduct_vocab,
             instrument_type_vocab=instrument_type_vocab,
         )
@@ -190,7 +184,7 @@ def _encode_split(
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Encode MassSpec spectra with SIGReg encoder/projector and export parquet."
+        description="Encode MassSpec spectra with SIGReg encoder and export parquet."
     )
     parser.add_argument("--config", required=True, help="Path to config file.")
     parser.add_argument("--checkpoint", required=True, help="Path to model checkpoint.")

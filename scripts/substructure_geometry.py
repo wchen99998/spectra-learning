@@ -127,6 +127,10 @@ def _parse_args() -> argparse.Namespace:
         default="sklearn",
         help="Probe type: sklearn (Ridge/LogReg), knn, hgb (HistGradientBoosting), neural-linear, neural-attentive, or all.",
     )
+    parser.add_argument(
+        "--pool", choices=["pma", "mean"], default="pma",
+        help="Pooling method for model embeddings: pma (learned PMA) or mean (mean over valid tokens).",
+    )
     parser.add_argument("--external-embed", default=None, help="Path to HDF5 file with pre-computed embeddings (bypasses model loading).")
     parser.add_argument("--embed-key", default="DreaMS_embedding", help="HDF5 dataset key for embeddings (default: DreaMS_embedding).")
     parser.add_argument("--fold", default="train", help="Which fold to filter to in the HDF5 file (default: train).")
@@ -161,7 +165,19 @@ def _load_model_and_data(
         ckpt_path = latest_ckpt_path(Path(checkpoint_dir))
     assert ckpt_path is not None, f"No checkpoint found in {checkpoint_dir}"
     log.info("Loading checkpoint: %s", ckpt_path)
-    load_pretrained_weights(backbone, ckpt_path)
+    try:
+        load_pretrained_weights(backbone, ckpt_path)
+    except RuntimeError as e:
+        if "Missing key" in str(e) or "Unexpected key" in str(e):
+            log.warning("Strict load failed, retrying with strict=False (teacher_encoder key mismatch)")
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+            state_dict = ckpt.get("state_dict", ckpt.get("model", ckpt))
+            model_state = {k.removeprefix("model."): v for k, v in state_dict.items() if k.startswith("model.")}
+            if not model_state:
+                model_state = state_dict
+            backbone.load_state_dict(model_state, strict=False)
+        else:
+            raise
 
     backbone = backbone.to(device)
     backbone.eval()
@@ -186,12 +202,29 @@ def _encode_batch_impl(
     return model.pool(embeddings, peak_valid_mask)
 
 
+def _encode_batch_mean_pool_impl(
+    model: PeakSetSIGReg,
+    peak_mz: torch.Tensor,
+    peak_intensity: torch.Tensor,
+    peak_valid_mask: torch.Tensor,
+    precursor_mz: torch.Tensor,
+) -> torch.Tensor:
+    embeddings = model.encoder(
+        peak_mz, peak_intensity,
+        valid_mask=peak_valid_mask, precursor_mz=precursor_mz,
+    )
+    # Mean pool over valid (non-padding) tokens.
+    mask = peak_valid_mask.unsqueeze(-1).float()  # [B, N, 1]
+    return (embeddings * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
+
+
 def _extract_embeddings(
     config,
     datamodule: TfLightningDataModule,
     backbone: PeakSetSIGReg,
     device: torch.device,
     seed: int,
+    pool: str = "pma",
 ):
     probe_peak_ordering = str(config.peak_ordering)
     dataset = datamodule.build_massspec_probe_dataset(
@@ -203,7 +236,9 @@ def _extract_embeddings(
     )
 
     autocast_dtype = torch.bfloat16 if device.type == "cuda" else None
-    compiled_encode = torch.compile(_encode_batch_impl, mode="max-autotune", fullgraph=True)
+    encode_fn = _encode_batch_mean_pool_impl if pool == "mean" else _encode_batch_impl
+    compiled_encode = torch.compile(encode_fn, mode="max-autotune", fullgraph=True)
+    log.info("Pooling method: %s", pool)
 
     embed_list: list[torch.Tensor] = []
     fp_list: list[np.ndarray] = []
@@ -1135,7 +1170,7 @@ def main() -> None:
         config, datamodule, backbone, ckpt_path = _load_model_and_data(
             args.config, args.dir, args.checkpoint, device, seed,
         )
-        all_embeds, all_fps_morgan, all_meta, all_smiles, raw_peaks = _extract_embeddings(config, datamodule, backbone, device, seed)
+        all_embeds, all_fps_morgan, all_meta, all_smiles, raw_peaks = _extract_embeddings(config, datamodule, backbone, device, seed, pool=args.pool)
     assert len(all_smiles) == len(all_embeds), f"Mismatch: {len(all_smiles)} vs {len(all_embeds)}"
 
     # 2. Compute RDKit features (cached on disk)
@@ -1200,6 +1235,7 @@ def main() -> None:
     else:
         summary["config"] = args.config
         summary["experiment_dir"] = args.dir
+        summary["pool"] = args.pool
     summary_path = outdir / "results.json"
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)

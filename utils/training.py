@@ -43,8 +43,8 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
             config.get("masked_token_attention_mode", "bidirectional")
         ),
         masked_token_loss_weight=float(config.get("masked_token_loss_weight", 0.0)),
-        masked_latent_predictor_hidden_dim=int(
-            config.get("masked_latent_predictor_hidden_dim", 0)
+        masked_latent_predictor_num_layers=int(
+            config.get("masked_latent_predictor_num_layers", 2)
         ),
         encoder_block_type=str(config.get("encoder_block_type", "transformer")),
         isab_num_inducing_points=int(config.get("isab_num_inducing_points", 32)),
@@ -55,10 +55,6 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         pma_fp16_high_precision=bool(config.get("pma_fp16_high_precision", False)),
         pma_num_heads=config.get("pma_num_heads", int(config.num_heads)),
         pma_num_seeds=int(config.get("pma_num_seeds", 1)),
-        sigreg_use_projector=bool(config.get("sigreg_use_projector", True)),
-        sigreg_proj_hidden_dim=int(config.get("sigreg_proj_hidden_dim", 2048)),
-        sigreg_proj_output_dim=int(config.get("sigreg_proj_output_dim", 128)),
-        sigreg_proj_norm=str(config.get("sigreg_proj_norm", "rmsnorm")),
         sigreg_num_slices=int(config.get("sigreg_num_slices", 256)),
         sigreg_lambda=float(config.get("sigreg_lambda", 0.1)),
         multicrop_num_local_views=int(config.get("multicrop_num_local_views", 6)),

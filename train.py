@@ -169,6 +169,7 @@ def _train_step_impl(
         opt.zero_grad(set_to_none=True)
     for sched in schedulers:
         sched.step()
+    model.update_teacher()
     return metrics
 
 
@@ -334,7 +335,6 @@ def _run_validation(
     with torch.no_grad():
         for batch_idx, batch in enumerate(val_loader):
             batch = _move_batch_to_device(batch, device)
-            torch.compiler.cudagraph_mark_step_begin()
             metrics = compiled_forward(batch)
             bs = int(batch["fused_mz"].shape[0]) // model.num_views
             count += bs
@@ -406,7 +406,7 @@ def train_and_evaluate(
 
     # Compile training step (forward + backward + optimizer + scheduler)
     autocast_dtype = _resolve_autocast_dtype(config)
-    compiled_step = torch.compile(_train_step_impl, mode="max-autotune")
+    compiled_step = torch.compile(_train_step_impl, mode="max-autotune-no-cudagraphs")
     compiled_forward = model.forward_augmented
 
     optimizer_type = str(config.get("optimizer", "adamw")).lower()
@@ -429,7 +429,6 @@ def train_and_evaluate(
             if batch is None:
                 break
 
-            torch.compiler.cudagraph_mark_step_begin()
             metrics = compiled_step(
                 model,
                 batch,
@@ -438,7 +437,6 @@ def train_and_evaluate(
                 autocast_dtype,
                 grad_clip_norm,
             )
-            model.update_teacher()
             global_step += 1
             pbar.update(1)
 

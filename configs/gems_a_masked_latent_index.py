@@ -13,5 +13,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.use_ema_teacher_target = True
     cfg.teacher_ema_decay = 0.996
     cfg.grad_clip_norm = 1.0
+    cfg.masked_latent_predictor_num_layers = 3
     cfg.wandb_run_name_prefix = "jepa_masked_latent_index"
     return cfg

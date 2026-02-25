@@ -20,7 +20,7 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.masked_token_position_mode = "index"
     cfg.masked_token_attention_mode = "bidirectional"
     cfg.masked_token_loss_weight = 0.0
-    cfg.masked_latent_predictor_hidden_dim = 0
+    cfg.masked_latent_predictor_num_layers = 2
     cfg.use_ema_teacher_target = False
     cfg.teacher_ema_decay = 0.996
     cfg.grad_clip_norm = None
@@ -53,7 +53,7 @@ def apply_final_probe_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.final_probe_learning_rate = 1e-4
     cfg.final_probe_weight_decay = 1e-4
     cfg.final_probe_warmup_steps = 100
-    cfg.final_probe_feature_source = "projector"
+    cfg.final_probe_feature_source = "encoder"
     cfg.final_probe_head_hidden_dim = 512
 
     cfg.final_probe_num_precursor_bins = 1000
@@ -73,5 +73,5 @@ def apply_tune_defaults(cfg: config_dict.ConfigDict) -> None:
         # {"param": "learning_rate", "dist": "grid", "args": [1e-4, 4e-4]},
         # {"param": "sigreg_contiguous_mask_fraction", "dist": "grid", "args": [0.2,]},
         # {"param": "weight_decay", "dist": "grid", "args": [1e-4, 1e-3, 1e-2]},
-        {"param": "sigreg_lambda", "dist": "grid", "args": [0.02]},
+        {"param": "sigreg_lambda", "dist": "grid", "args": [0.01, 0.02, 0.2]},
     ]

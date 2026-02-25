@@ -16,7 +16,6 @@ def _build_model(
         encoder_num_heads=4,
         feature_mlp_hidden_dim=32,
         encoder_use_rope=True,
-        sigreg_use_projector=False,
         pooling_type="mean",
         multicrop_num_local_views=0,
         use_masked_token_input=True,
@@ -135,7 +134,6 @@ def test_forward_augmented_reports_local_global_l1_loss():
         encoder_num_heads=4,
         feature_mlp_hidden_dim=32,
         encoder_use_rope=True,
-        sigreg_use_projector=False,
         pooling_type="mean",
         multicrop_num_local_views=1,
         use_masked_token_input=True,
@@ -198,7 +196,6 @@ def test_local_global_l1_uses_all_valid_tokens():
         encoder_num_heads=4,
         feature_mlp_hidden_dim=32,
         encoder_use_rope=True,
-        sigreg_use_projector=False,
         pooling_type="mean",
         multicrop_num_local_views=1,
         use_masked_token_input=True,
@@ -251,14 +248,12 @@ def test_local_global_l1_uses_all_valid_tokens():
     fused_masked_positions = fused_masked_positions.reshape(model.num_views, -1, fused_masked_positions.shape[1])
     fused_masked_positions[0] = False
     fused_masked_positions = fused_masked_positions.reshape_as(fused_valid_mask)
-    student_intensity = fused_intensity.masked_fill(fused_masked_positions, 0.0)
+    encoder_visible_mask = fused_valid_mask & (~fused_masked_positions)
     fused_emb = model.encoder(
         fused_mz,
-        student_intensity,
-        valid_mask=fused_valid_mask,
+        fused_intensity,
+        valid_mask=encoder_visible_mask,
         precursor_mz=fused_precursor_mz,
-        masked_positions=fused_masked_positions,
-        mask_token=model.mask_token,
     )
     V = model.num_views
     B = fused_emb.shape[0] // V
@@ -280,7 +275,15 @@ def test_local_global_l1_uses_all_valid_tokens():
         latent_mask_token,
         local_token_emb,
     )
-    local_token_pred = model.masked_latent_predictor(local_token_emb_remasked)
+    token_mz = fused_mz.reshape(V, B, N)
+    token_precursor_mz = fused_precursor_mz.reshape(V, B)
+    local_token_pred = model.predict_masked_latents(
+        local_token_emb_remasked,
+        local_valid,
+        token_mz[1],
+        token_precursor_mz[1],
+        local_masked,
+    )
     per_token_l1 = (local_token_pred - global_token_emb).abs().mean(dim=-1)
     all_valid_loss = (per_token_l1 * local_valid.float()).sum() / local_valid.float().sum()
     masked_only_loss = (
@@ -302,7 +305,6 @@ def test_global_view_masked_positions_are_ignored_for_context():
         encoder_num_heads=4,
         feature_mlp_hidden_dim=32,
         encoder_use_rope=True,
-        sigreg_use_projector=False,
         pooling_type="mean",
         multicrop_num_local_views=1,
         use_masked_token_input=True,

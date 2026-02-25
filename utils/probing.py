@@ -101,17 +101,6 @@ def _extract_probe_features(
     )
     if feature_source == "encoder":
         return embeddings, batch["peak_valid_mask"]
-    if feature_source == "projector":
-        pooled = backbone.pool(embeddings, batch["peak_valid_mask"])
-        projected = backbone.projector(pooled)
-        feature_tokens = projected.unsqueeze(1)
-        feature_mask = torch.ones(
-            projected.shape[0],
-            1,
-            dtype=torch.bool,
-            device=projected.device,
-        )
-        return feature_tokens, feature_mask
     raise ValueError(f"Unknown feature_source: {feature_source!r}")
 
 
@@ -276,8 +265,7 @@ def run_attentive_probe(
 
     num_adduct_classes = int(datamodule.info["massspec_adduct_vocab_size"])
     num_instrument_classes = int(datamodule.info["massspec_instrument_type_vocab_size"])
-    use_projector = probe_feature_source == "projector" and bool(config.get("sigreg_use_projector", True))
-    input_dim = int(config.get("sigreg_proj_output_dim", 128)) if use_projector else int(config.model_dim)
+    input_dim = int(config.model_dim)
 
     freeze_backbone = bool(config.get("final_probe_freeze_backbone", True))
 
@@ -523,8 +511,7 @@ def run_linear_probe(
 
     num_adduct_classes = int(datamodule.info["massspec_adduct_vocab_size"])
     num_instrument_classes = int(datamodule.info["massspec_instrument_type_vocab_size"])
-    use_projector = probe_feature_source == "projector" and bool(config.get("sigreg_use_projector", True))
-    input_dim = int(config.get("sigreg_proj_output_dim", 128)) if use_projector else int(config.model_dim)
+    input_dim = int(config.model_dim)
 
     freeze_backbone = bool(config.get("final_probe_freeze_backbone", True))
 

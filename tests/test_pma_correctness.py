@@ -5,7 +5,7 @@ Concerns:
 2. Padding isolation: randomize padding embeddings, PMA output unchanged
 3. All-padding row: does nn.MHA produce NaN?
 4. Gradient flow: do pool_query and pool_mha get gradients?
-5. Full pipeline: encoder (with block_mask) → PMA → projector
+5. Full pipeline: encoder (with block_mask) → PMA
 """
 
 import torch
@@ -20,7 +20,6 @@ def _build_model(**overrides):
         encoder_num_layers=2,
         encoder_num_heads=4,
         feature_mlp_hidden_dim=32,
-        sigreg_use_projector=False,
         pooling_type="pma",
         pma_num_seeds=1,
     )
@@ -163,7 +162,7 @@ def test_pma_gradient_flow():
     """Gradients must flow through PMA to pool_query and pool_mha parameters."""
     print("Test 5: PMA gradient flow ... ", end="", flush=True)
     torch.manual_seed(42)
-    model = _build_model(sigreg_use_projector=True, sigreg_proj_hidden_dim=64, sigreg_proj_output_dim=32)
+    model = _build_model()
 
     B, N, D = 4, 60, 64
     embeddings = torch.randn(B, N, D, requires_grad=True)
@@ -171,8 +170,7 @@ def test_pma_gradient_flow():
     valid_mask[:, :30] = True
 
     pooled = model.pool(embeddings, valid_mask)
-    projected = model.projector(pooled)
-    loss = projected.sum()
+    loss = pooled.sum()
     loss.backward()
 
     assert model.pool_query.grad is not None, "pool_query has no gradient"

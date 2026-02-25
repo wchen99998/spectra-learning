@@ -183,8 +183,6 @@ def test_full_model_forward():
         encoder_num_layers=2,
         encoder_num_heads=4,
         feature_mlp_hidden_dim=64,
-        sigreg_proj_hidden_dim=256,
-        sigreg_proj_output_dim=64,
         sigreg_num_slices=128,
         multicrop_num_local_views=3,
     ).to(DEVICE).eval()
@@ -217,8 +215,6 @@ def test_full_model_encode():
         encoder_num_layers=2,
         encoder_num_heads=4,
         feature_mlp_hidden_dim=64,
-        sigreg_proj_hidden_dim=256,
-        sigreg_proj_output_dim=64,
     ).to(DEVICE).eval()
 
     batch = _make_batch()
@@ -226,7 +222,7 @@ def test_full_model_encode():
     with torch.no_grad():
         z = model.encode(batch, train=False)
 
-    assert z.shape == (B, 64), f"Unexpected encode shape: {z.shape}"
+    assert z.shape == (B, D), f"Unexpected encode shape: {z.shape}"
     assert torch.isfinite(z).all(), "Encoded output has non-finite values"
 
     print(f"PASSED (shape={z.shape})")
@@ -246,8 +242,6 @@ def test_gradient_flow():
         encoder_num_layers=2,
         encoder_num_heads=4,
         feature_mlp_hidden_dim=64,
-        sigreg_proj_hidden_dim=256,
-        sigreg_proj_output_dim=64,
         sigreg_num_slices=128,
         multicrop_num_local_views=3,
     ).to(DEVICE)
@@ -287,8 +281,6 @@ def test_compile_forward():
         encoder_num_layers=2,
         encoder_num_heads=4,
         feature_mlp_hidden_dim=64,
-        sigreg_proj_hidden_dim=256,
-        sigreg_proj_output_dim=64,
         sigreg_num_slices=128,
         multicrop_num_local_views=3,
     ).to(DEVICE).eval()
@@ -391,8 +383,6 @@ def benchmark_full_model():
         encoder_num_layers=4,
         encoder_num_heads=4,
         feature_mlp_hidden_dim=64,
-        sigreg_proj_hidden_dim=512,
-        sigreg_proj_output_dim=128,
         sigreg_num_slices=256,
         multicrop_num_local_views=3,
     ).to(DEVICE).eval()
@@ -425,8 +415,6 @@ def benchmark_compiled_with_mask():
         encoder_num_layers=4,
         encoder_num_heads=4,
         feature_mlp_hidden_dim=64,
-        sigreg_proj_hidden_dim=512,
-        sigreg_proj_output_dim=128,
         sigreg_num_slices=256,
         multicrop_num_local_views=3,
     ).to(DEVICE).eval()

@@ -78,9 +78,6 @@ class SIGRegForwardTests(unittest.TestCase):
             encoder_num_kv_heads=4,
             attention_mlp_multiple=2.0,
             feature_mlp_hidden_dim=16,
-            sigreg_use_projector=True,
-            sigreg_proj_hidden_dim=64,
-            sigreg_proj_output_dim=16,
             sigreg_num_slices=32,
             sigreg_lambda=0.1,
             multicrop_num_local_views=3,
@@ -106,7 +103,7 @@ class SIGRegForwardTests(unittest.TestCase):
             "token_sigreg_loss",
             "local_global_l1_loss",
             "valid_fraction",
-            "representation_variance",
+            "masked_fraction",
         ):
             self.assertIn(key, metrics, f"Missing key: {key}")
 
@@ -114,7 +111,7 @@ class SIGRegForwardTests(unittest.TestCase):
         model = self._build_model()
         batch = _make_batch(batch_size=3)
         pooled = model.encode(batch, train=False)
-        self.assertEqual(pooled.shape, (3, model.sigreg_dim))
+        self.assertEqual(pooled.shape, (3, model.model_dim))
 
     def test_backward_populates_encoder_gradients(self):
         model = self._build_model()
@@ -132,7 +129,6 @@ class SIGRegForwardTests(unittest.TestCase):
             encoder_num_heads=4,
             feature_mlp_hidden_dim=32,
             encoder_use_rope=True,
-            sigreg_use_projector=False,
             pooling_type="mean",
             sigreg_lambda=0.0,
             multicrop_num_local_views=1,
@@ -240,6 +236,8 @@ class SIGRegForwardTests(unittest.TestCase):
         student_param = next(model.encoder.parameters())
         teacher_param = next(model.teacher_encoder.parameters())
         with torch.no_grad():
+            # AveragedModel semantics: first update copies student -> teacher.
+            model.update_teacher()
             teacher_before = teacher_param.clone()
             student_param.add_(1.0)
             expected = teacher_before * 0.5 + student_param * 0.5
@@ -288,7 +286,6 @@ class MassAwareRoPETests(unittest.TestCase):
             rope_mz_precision=rope_mz_precision,
             rope_complement_heads=rope_complement_heads,
             rope_modulo_2pi=True,
-            sigreg_use_projector=False,
             pooling_type="mean",
         )
 
@@ -359,7 +356,6 @@ class PMAPoolingTests(unittest.TestCase):
             encoder_num_kv_heads=4,
             attention_mlp_multiple=2.0,
             feature_mlp_hidden_dim=16,
-            sigreg_use_projector=False,
             sigreg_num_slices=32,
             sigreg_lambda=0.1,
             masked_token_loss_weight=1.0,
@@ -389,7 +385,8 @@ class PMAPoolingTests(unittest.TestCase):
         mha_grads = [p.grad for p in model.pool_mha.parameters() if p.requires_grad]
         self.assertTrue(all(g is None for g in mha_grads))
 
-        predictor_grads = [p.grad for p in model.masked_latent_predictor.parameters() if p.requires_grad]
+        predictor_params = list(model.masked_latent_predictor.parameters()) + list(model.masked_latent_predictor_norm.parameters())
+        predictor_grads = [p.grad for p in predictor_params if p.requires_grad]
         self.assertTrue(any(g is not None for g in predictor_grads))
         self.assertGreater(sum(float(g.abs().sum()) for g in predictor_grads if g is not None), 0.0)
 
@@ -455,7 +452,6 @@ class CheckpointCompatibilityTests(unittest.TestCase):
             encoder_num_kv_heads=4,
             attention_mlp_multiple=2.0,
             feature_mlp_hidden_dim=16,
-            sigreg_use_projector=False,
             pooling_type="pma",
             pma_num_heads=4,
             pma_num_seeds=1,

@@ -43,10 +43,6 @@ def build_model(cfg) -> PeakSetSIGReg:
         rope_complement_heads=getattr(cfg, "rope_complement_heads", None),
         rope_modulo_2pi=getattr(cfg, "rope_modulo_2pi", True),
         encoder_fp16_high_precision_stem=getattr(cfg, "encoder_fp16_high_precision_stem", False),
-        sigreg_use_projector=cfg.sigreg_use_projector,
-        sigreg_proj_hidden_dim=cfg.sigreg_proj_hidden_dim,
-        sigreg_proj_output_dim=cfg.sigreg_proj_output_dim,
-        sigreg_proj_norm=cfg.sigreg_proj_norm,
         sigreg_num_slices=cfg.sigreg_num_slices,
         sigreg_lambda=cfg.sigreg_lambda,
         multicrop_num_local_views=cfg.multicrop_num_local_views,
@@ -134,10 +130,6 @@ def diagnose_encoder(model: PeakSetSIGReg, batch: dict[str, torch.Tensor]):
     pooled, pooled_raw = model.pool_with_raw(final_out, valid_mask)
     _report_1d("pool_raw", pooled_raw)
     _report_1d("pool_normed", pooled)
-
-    # Projector
-    proj = model.projector(pooled)
-    _report_1d("projector_out", proj)
 
 
 def _report(name: str, x: torch.Tensor, valid_mask: torch.Tensor):

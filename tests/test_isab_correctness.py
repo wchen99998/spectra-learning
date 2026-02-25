@@ -19,7 +19,6 @@ def _build_isab_model(**overrides):
         encoder_num_layers=2,
         encoder_num_heads=4,
         feature_mlp_hidden_dim=32,
-        sigreg_use_projector=False,
         pooling_type="pma",
         pma_num_seeds=1,
         encoder_block_type="isab",
