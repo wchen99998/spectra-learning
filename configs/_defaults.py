@@ -4,8 +4,8 @@ from ml_collections import config_dict
 def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     """Apply shared training infrastructure defaults.
 
-    Call after model-specific fields (like num_heads) are set.
-    Per-experiment configs should override values that differ.
+    Call this first in each get_config().
+    Per-experiment configs should override values that differ afterward.
     """
     # Dataloader
     cfg.non_blocking_device_transfer = True

@@ -5,6 +5,7 @@ from configs._defaults import apply_final_probe_defaults, apply_training_default
 
 def get_config() -> config_dict.ConfigDict:
     cfg = config_dict.ConfigDict()
+    apply_training_defaults(cfg)
 
     # Dataset
     cfg.dataset = "gems_a"
@@ -68,7 +69,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.limit_val_batches = 0.1
     cfg.limit_test_batches = 1.0
     cfg.num_sanity_val_steps = 0
-    apply_training_defaults(cfg)
     cfg.dataloader_num_workers = 1
     cfg.dataloader_persistent_workers = True
 

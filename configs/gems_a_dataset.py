@@ -5,6 +5,8 @@ from configs._defaults import apply_final_probe_defaults, apply_training_default
 
 def get_config() -> config_dict.ConfigDict:
     cfg = config_dict.ConfigDict()
+    apply_training_defaults(cfg)
+
     # Dataset
     cfg.dataset = "gems_a"
     cfg.tfrecord_dir = "data/gems_peaklist_tfrecord"
@@ -75,7 +77,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.limit_val_batches = 1.0
     cfg.limit_test_batches = 1.0
     cfg.num_sanity_val_steps = 0
-    apply_training_defaults(cfg)
 
     # Post-fit attentive probe (overrides from shared defaults)
     apply_final_probe_defaults(cfg)
