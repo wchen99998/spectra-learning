@@ -9,6 +9,7 @@ Architecture:
 
 from __future__ import annotations
 
+import copy
 import math
 
 import torch
@@ -426,6 +427,8 @@ class PeakSetSIGReg(nn.Module):
         sigreg_lambda: float = 0.1,
         multicrop_num_local_views: int = 6,
         multicrop_local_keep_fraction: float = 0.25,
+        use_ema_teacher_target: bool = False,
+        teacher_ema_decay: float = 0.996,
         sigreg_mz_jitter_std: float = 0.005,
         sigreg_intensity_jitter_std: float = 0.05,
         pooling_type: str = "pma",
@@ -446,6 +449,8 @@ class PeakSetSIGReg(nn.Module):
         self.multicrop_local_keep_fraction = float(multicrop_local_keep_fraction)
         # One global full-spectrum view + K local masked views.
         self.num_views = 1 + self.multicrop_num_local_views
+        self.use_ema_teacher_target = bool(use_ema_teacher_target)
+        self.teacher_ema_decay = float(teacher_ema_decay)
         self.sigreg_mz_jitter_std = sigreg_mz_jitter_std
         self.sigreg_intensity_jitter_std = sigreg_intensity_jitter_std
         self.sigreg_lambda = float(sigreg_lambda)
@@ -477,6 +482,12 @@ class PeakSetSIGReg(nn.Module):
             qk_norm=encoder_qk_norm,
             post_norm=encoder_post_norm,
         )
+        if self.use_ema_teacher_target:
+            self.teacher_encoder: PeakSetEncoder | None = copy.deepcopy(self.encoder)
+            self.teacher_encoder.requires_grad_(False)
+            self.teacher_encoder.eval()
+        else:
+            self.teacher_encoder = None
 
         if sigreg_use_projector:
             proj_norm = str(sigreg_proj_norm).lower()
@@ -526,6 +537,24 @@ class PeakSetSIGReg(nn.Module):
         )
 
         self.sigreg = SIGReg(num_slices=int(sigreg_num_slices))
+
+    def train(self, mode: bool = True) -> "PeakSetSIGReg":
+        super().train(mode)
+        if self.teacher_encoder is not None:
+            # Teacher is an EMA target network and should stay in eval mode.
+            self.teacher_encoder.eval()
+        return self
+
+    @torch.no_grad()
+    def update_teacher(self) -> None:
+        if self.teacher_encoder is None:
+            return
+        decay = self.teacher_ema_decay
+        one_minus_decay = 1.0 - decay
+        for teacher_param, student_param in zip(self.teacher_encoder.parameters(), self.encoder.parameters()):
+            teacher_param.mul_(decay).add_(student_param.detach(), alpha=one_minus_decay)
+        for teacher_buffer, student_buffer in zip(self.teacher_encoder.buffers(), self.encoder.buffers()):
+            teacher_buffer.copy_(student_buffer.detach())
 
     def _mean_pool(
         self,
@@ -634,8 +663,19 @@ class PeakSetSIGReg(nn.Module):
         token_valid = fused_valid_mask.reshape(V, B, N)
         token_masked = effective_masked_positions.reshape(V, B, N)
 
-        # Stop-grad target branch: local predictors regress to a fixed global latent.
-        global_token_emb = token_emb[target_global_view_idx].detach()  # [B, N, D]
+        # Local predictors regress to a fixed global latent target.
+        # When EMA teacher is enabled, the target comes from teacher(global view).
+        if self.teacher_encoder is not None:
+            global_slice = slice(0, B)
+            with torch.no_grad():
+                global_token_emb = self.teacher_encoder(
+                    fused_mz[global_slice],
+                    fused_intensity[global_slice],
+                    valid_mask=fused_valid_mask[global_slice],
+                    precursor_mz=fused_precursor_mz[global_slice],
+                )
+        else:
+            global_token_emb = token_emb[target_global_view_idx].detach()  # [B, N, D]
         local_global_l1_loss = torch.zeros((), dtype=fused_emb.dtype, device=fused_emb.device)
         if V > 1:
             latent_mask_token = self.latent_mask_token.view(1, 1, -1).to(
