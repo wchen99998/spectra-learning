@@ -138,6 +138,32 @@ class SIGRegForwardTests(unittest.TestCase):
         expected = metrics["jepa_term"] + metrics["vicreg_term"]
         self.assertTrue(torch.allclose(metrics["loss"], expected))
 
+    def test_forward_projector_toggle_paths(self):
+        model_no_projector = self._build_model(
+            use_projector_for_losses=False,
+            sigreg_projector_dim=12,
+            sigreg_projector_hidden_dim=16,
+            masked_token_loss_weight=1.0,
+            representation_regularizer="sigreg",
+        )
+        batch = _make_fused_batch(num_views=model_no_projector.num_views)
+        metrics_no_projector = model_no_projector.forward_augmented(batch)
+
+        model_with_projector = self._build_model(
+            use_projector_for_losses=True,
+            sigreg_projector_dim=12,
+            sigreg_projector_hidden_dim=16,
+            masked_token_loss_weight=1.0,
+            representation_regularizer="sigreg",
+        )
+        metrics_with_projector = model_with_projector.forward_augmented(batch)
+
+        for metrics in (metrics_no_projector, metrics_with_projector):
+            self.assertTrue(torch.isfinite(metrics["loss"]).item())
+            self.assertIn("local_global_loss", metrics)
+            self.assertIn("regularizer_loss", metrics)
+            self.assertIn("regularizer_term", metrics)
+
     def test_encode_output_shape(self):
         model = self._build_model()
         batch = _make_batch(batch_size=3)

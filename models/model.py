@@ -315,6 +315,7 @@ class PeakSetSIGReg(nn.Module):
         rope_modulo_2pi: bool = True,
         masked_token_loss_weight: float = 0.0,
         masked_token_loss_type: str = "l1",
+        use_projector_for_losses: bool = False,
         representation_regularizer: str = "sigreg",
         masked_latent_predictor_num_layers: int = 2,
         sigreg_num_slices: int = 256,
@@ -387,6 +388,7 @@ class PeakSetSIGReg(nn.Module):
         self.pma_num_seeds = int(pma_num_seeds)
         self.masked_token_loss_weight = float(masked_token_loss_weight)
         self.masked_token_loss_type = str(masked_token_loss_type).lower()
+        self.use_projector_for_losses = bool(use_projector_for_losses)
         self.representation_regularizer = str(representation_regularizer).lower()
         self.masked_latent_predictor_num_layers = int(masked_latent_predictor_num_layers)
         self.vicreg_beta = float(vicreg_beta)
@@ -637,6 +639,10 @@ class PeakSetSIGReg(nn.Module):
         else:
             # global_token_emb = token_emb[target_global_view_idx].detach()  # [B, N, D]
             global_token_emb = token_emb[target_global_view_idx]  # [B, N, D] Do not detach when not using EMA teacher, to allow gradient flow from predictor to encoder.
+        if self.use_projector_for_losses:
+            global_token_target = self.sigreg_projector(global_token_emb)
+        else:
+            global_token_target = global_token_emb
         latent_mask_token = self.latent_mask_token.view(1, 1, -1).to(
             dtype=fused_emb.dtype,
             device=fused_emb.device,
@@ -660,10 +666,14 @@ class PeakSetSIGReg(nn.Module):
                 token_mz[local_view_idx],
                 local_mask,
             )
+            if self.use_projector_for_losses:
+                local_token_pred_for_loss = self.sigreg_projector(local_token_pred)
+            else:
+                local_token_pred_for_loss = local_token_pred
             if self.masked_token_loss_type == "l1":
-                per_token_reg = (local_token_pred - global_token_emb).abs().mean(dim=-1)  # [B, N]
+                per_token_reg = (local_token_pred_for_loss - global_token_target).abs().mean(dim=-1)  # [B, N]
             elif self.masked_token_loss_type == "l2":
-                per_token_reg = (local_token_pred - global_token_emb).square().mean(dim=-1)  # [B, N]
+                per_token_reg = (local_token_pred_for_loss - global_token_target).square().mean(dim=-1)  # [B, N]
             else:
                 raise ValueError(
                     f"Unsupported masked_token_loss_type: {self.masked_token_loss_type}. "
@@ -684,11 +694,14 @@ class PeakSetSIGReg(nn.Module):
         local_visible_mask_by_view = encoder_visible_mask.reshape(V, B, N)[target_global_view_idx + 1:]
         local_emb = local_emb_by_view.reshape(-1, N, D)  # [B*(V-1), N, D]
         local_visible_mask = local_visible_mask_by_view.reshape(-1, N)
-        local_projected_emb = self.sigreg_projector(local_emb)  # [B*(V-1), N, D_sigreg]
+        if self.use_projector_for_losses:
+            local_regularizer_emb = self.sigreg_projector(local_emb)
+        else:
+            local_regularizer_emb = local_emb
         local_projected_pooled_emb = self._mean_pool(
-            local_projected_emb,
+            local_regularizer_emb,
             local_visible_mask,
-        )  # [B*(V-1), D_sigreg]
+        )  # [B*(V-1), D_reg]
 
         if self.representation_regularizer == "sigreg":
             if self.sigreg_lambda > 0:
@@ -700,7 +713,9 @@ class PeakSetSIGReg(nn.Module):
             vicreg_loss = fused_emb.new_tensor(0.0)
             vicreg_term = fused_emb.new_tensor(0.0)
         elif self.representation_regularizer == "vicreg":
-            local_projected_pooled_by_view = local_projected_pooled_emb.reshape(V - 1, B, self.sigreg_dim)
+            local_projected_pooled_by_view = local_projected_pooled_emb.reshape(
+                V - 1, B, local_projected_pooled_emb.shape[-1],
+            )
             vicreg_loss = self.vicreg(
                 local_projected_pooled_by_view[0],
                 local_projected_pooled_by_view[1],

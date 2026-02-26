@@ -17,6 +17,7 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.pma_fp16_high_precision = False
     cfg.masked_token_loss_weight = 0.0
     cfg.masked_token_loss_type = "l1"
+    cfg.use_projector_for_losses = False
     cfg.representation_regularizer = "sigreg"
     cfg.masked_latent_predictor_num_layers = 2
     cfg.sigreg_lambda_warmup_steps = 0
