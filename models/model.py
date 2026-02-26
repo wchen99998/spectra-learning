@@ -635,7 +635,8 @@ class PeakSetSIGReg(nn.Module):
                     valid_mask=fused_valid_mask[global_slice],
                 )
         else:
-            global_token_emb = token_emb[target_global_view_idx].detach()  # [B, N, D]
+            # global_token_emb = token_emb[target_global_view_idx].detach()  # [B, N, D]
+            global_token_emb = token_emb[target_global_view_idx]  # [B, N, D] Do not detach when not using EMA teacher, to allow gradient flow from predictor to encoder.
         latent_mask_token = self.latent_mask_token.view(1, 1, -1).to(
             dtype=fused_emb.dtype,
             device=fused_emb.device,
