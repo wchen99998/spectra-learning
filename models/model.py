@@ -182,6 +182,7 @@ class PeakSetEncoder(nn.Module):
         num_peaks: int = 60,
         masked_token_position_mode: str = "index",
         masked_token_attention_mode: str = "bidirectional",
+        masked_token_use_rope: bool = True,
         fp16_high_precision_stem: bool = False,
         encoder_block_type: str = "transformer",
         isab_num_inducing_points: int = 32,
@@ -198,6 +199,7 @@ class PeakSetEncoder(nn.Module):
         self.rope_mz_precision = float(rope_mz_precision)
         self.rope_modulo_2pi = bool(rope_modulo_2pi)
         self.num_peaks = int(num_peaks)
+        self.masked_token_use_rope = bool(masked_token_use_rope)
         self.masked_token_position_mode = str(masked_token_position_mode).lower()
         if self.masked_token_position_mode not in {"mz", "index"}:
             raise ValueError(
@@ -259,15 +261,15 @@ class PeakSetEncoder(nn.Module):
     ) -> torch.Tensor:
         device_type = peak_mz.device.type
         index_positions_da = None
+        mask_rank = None
         if masked_positions is not None and self.masked_token_position_mode == "index":
-            base_positions = torch.linspace(
-                0.0,
-                self.rope_mz_max,
-                steps=peak_mz.shape[1],
-                device=peak_mz.device,
-                dtype=torch.float32,
-            )
-            index_positions_da = base_positions.unsqueeze(0).expand(peak_mz.shape[0], -1)
+            mask_rank = masked_positions.long().cumsum(dim=1) - 1  # [B, N], 0-based rank among masked tokens
+            if self.masked_token_use_rope:
+                step = self.rope_mz_max / max(peak_mz.shape[1] - 1, 1)
+                index_positions_da = mask_rank.float() * step
+            else:
+                # Position 0 → cos(0)=1, sin(0)=0 → identity rotation (no RoPE).
+                index_positions_da = torch.zeros_like(peak_mz)
 
         def _apply_mask_token(x_in: torch.Tensor) -> torch.Tensor:
             if masked_positions is None or mask_token is None:
@@ -275,9 +277,7 @@ class PeakSetEncoder(nn.Module):
             token = mask_token.view(1, 1, -1).to(dtype=x_in.dtype, device=x_in.device)
             x_out = torch.where(masked_positions.unsqueeze(-1), token, x_in)
             if self.masked_index_embedding is not None:
-                index_ids = torch.arange(
-                    x_in.shape[1], device=x_in.device, dtype=torch.long
-                ).unsqueeze(0).expand(x_in.shape[0], -1)
+                index_ids = mask_rank.clamp(min=0)  # [B, N], 0-based mask token rank
                 index_embed = self.masked_index_embedding(index_ids).to(dtype=x_in.dtype)
                 x_out = x_out + torch.where(
                     masked_positions.unsqueeze(-1),
@@ -415,6 +415,7 @@ class PeakSetSIGReg(nn.Module):
         use_masked_token_input: bool = False,
         masked_token_position_mode: str = "index",
         masked_token_attention_mode: str = "bidirectional",
+        masked_token_use_rope: bool = True,
         masked_token_loss_weight: float = 0.0,
         masked_latent_predictor_num_layers: int = 2,
         encoder_fp16_high_precision_stem: bool = False,
@@ -471,6 +472,7 @@ class PeakSetSIGReg(nn.Module):
             num_peaks=num_peaks,
             masked_token_position_mode=masked_token_position_mode,
             masked_token_attention_mode=masked_token_attention_mode,
+            masked_token_use_rope=masked_token_use_rope,
             fp16_high_precision_stem=encoder_fp16_high_precision_stem,
             encoder_block_type=encoder_block_type,
             isab_num_inducing_points=isab_num_inducing_points,
@@ -535,14 +537,12 @@ class PeakSetSIGReg(nn.Module):
             prec_da = local_precursor_mz.float().reshape(-1) * self.encoder.rope_mz_max
             neutral_loss_da = torch.clamp(prec_da.unsqueeze(1) - mz_da, min=0.0)
             if self.encoder.masked_token_position_mode == "index":
-                base_positions = torch.linspace(
-                    0.0,
-                    self.encoder.rope_mz_max,
-                    steps=local_mz.shape[1],
-                    device=local_mz.device,
-                    dtype=torch.float32,
-                )
-                index_positions_da = base_positions.unsqueeze(0).expand(local_mz.shape[0], -1)
+                if self.encoder.masked_token_use_rope:
+                    mask_rank = local_masked_positions.long().cumsum(dim=1) - 1
+                    step = self.encoder.rope_mz_max / max(local_mz.shape[1] - 1, 1)
+                    index_positions_da = mask_rank.float() * step
+                else:
+                    index_positions_da = torch.zeros_like(local_mz)
                 mz_da = torch.where(local_masked_positions, index_positions_da, mz_da)
                 neutral_loss_da = torch.where(local_masked_positions, index_positions_da, neutral_loss_da)
             omega = self.encoder.rope_omega

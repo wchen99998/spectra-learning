@@ -9,6 +9,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.use_masked_token_input = True
     cfg.rope_complement_heads = 0
     cfg.masked_token_position_mode = "index"
+    cfg.masked_token_use_rope = False
     cfg.masked_token_attention_mode = "masked_query_to_unmasked_kv"
     cfg.masked_token_loss_weight = 1.0
     cfg.use_ema_teacher_target = True

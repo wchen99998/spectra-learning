@@ -19,6 +19,7 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.use_masked_token_input = False
     cfg.masked_token_position_mode = "index"
     cfg.masked_token_attention_mode = "bidirectional"
+    cfg.masked_token_use_rope = True
     cfg.masked_token_loss_weight = 0.0
     cfg.masked_latent_predictor_num_layers = 2
     cfg.use_ema_teacher_target = False
