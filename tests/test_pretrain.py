@@ -5,7 +5,7 @@ import math
 import torch
 
 from utils.training import load_pretrained_weights
-from models.losses import SIGReg
+from models.losses import SIGReg, VICRegLoss
 from models.model import PeakSetSIGReg
 
 
@@ -496,6 +496,65 @@ class SIGRegLossTests(unittest.TestCase):
         result = sigreg(proj)
         # Gaussian input should produce a small statistic
         self.assertLess(float(result), 100.0)
+
+
+class VICRegLossTests(unittest.TestCase):
+    def test_vicreg_output_is_scalar(self):
+        vicreg = VICRegLoss()
+        proj_a = torch.randn(4, 8, 16)
+        proj_b = torch.randn(4, 8, 16)
+        result = vicreg(proj_a, proj_b)
+        self.assertEqual(result.ndim, 0)
+        self.assertTrue(torch.isfinite(result).item())
+
+    def test_vicreg_accepts_any_leading_shape(self):
+        vicreg = VICRegLoss()
+        proj_a = torch.randn(2, 3, 5, 16)
+        proj_b = torch.randn(2, 3, 5, 16)
+        result = vicreg(proj_a, proj_b)
+        self.assertEqual(result.ndim, 0)
+        self.assertTrue(torch.isfinite(result).item())
+
+    def test_vicreg_matches_flattened_input(self):
+        vicreg = VICRegLoss()
+        proj_a = torch.randn(2, 3, 5, 16)
+        proj_b = torch.randn(2, 3, 5, 16)
+        result_shaped = vicreg(proj_a, proj_b)
+        result_flat = vicreg(
+            proj_a.reshape(-1, proj_a.size(-1)),
+            proj_b.reshape(-1, proj_b.size(-1)),
+        )
+        self.assertTrue(torch.allclose(result_shaped, result_flat))
+
+    def test_vicreg_masked_matches_filtered_tokens(self):
+        vicreg = VICRegLoss()
+        proj_a = torch.randn(2, 3, 5, 16)
+        proj_b = torch.randn(2, 3, 5, 16)
+        valid = torch.rand(2, 3, 5) > 0.3
+        valid.view(-1)[0] = True
+        result_masked = vicreg(proj_a, proj_b, valid_mask=valid)
+        result_filtered = vicreg(proj_a[valid], proj_b[valid])
+        self.assertTrue(torch.allclose(result_masked, result_filtered))
+
+    def test_vicreg_backpropagates(self):
+        vicreg = VICRegLoss()
+        proj_a = torch.randn(4, 8, 16, requires_grad=True)
+        proj_b = torch.randn(4, 8, 16, requires_grad=True)
+        result = vicreg(proj_a, proj_b)
+        result.backward()
+        self.assertIsNotNone(proj_a.grad)
+        self.assertIsNotNone(proj_b.grad)
+        self.assertGreater(float(proj_a.grad.abs().sum()), 0.0)
+        self.assertGreater(float(proj_b.grad.abs().sum()), 0.0)
+
+    def test_vicreg_penalizes_mismatch_between_views(self):
+        vicreg = VICRegLoss()
+        proj_a = torch.randn(4, 256, 32)
+        proj_b_same = proj_a.clone()
+        proj_b_random = torch.randn(4, 256, 32)
+        loss_same = vicreg(proj_a, proj_b_same)
+        loss_random = vicreg(proj_a, proj_b_random)
+        self.assertGreater(float(loss_random), float(loss_same))
 
 
 class CheckpointCompatibilityTests(unittest.TestCase):

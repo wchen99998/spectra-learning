@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 from pathlib import Path
+from typing import Any
 
 import lightning.pytorch as pl
 import lightning.pytorch.loggers
@@ -62,6 +64,95 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         encoder_qk_norm=bool(config.get("encoder_qk_norm", False)),
         encoder_post_norm=bool(config.get("encoder_post_norm", False)),
     )
+
+
+def collect_model_param_summary(model: torch.nn.Module) -> dict[str, Any]:
+    by_module: dict[str, dict[str, int]] = {}
+    total_params = 0
+    trainable_params = 0
+    total_tensors = 0
+    trainable_tensors = 0
+
+    for name, param in model.named_parameters():
+        numel = int(param.numel())
+        is_trainable = bool(param.requires_grad)
+        module_name = name.split(".", 1)[0]
+
+        module_summary = by_module.setdefault(
+            module_name,
+            {
+                "total_params": 0,
+                "trainable_params": 0,
+                "non_trainable_params": 0,
+                "total_tensors": 0,
+                "trainable_tensors": 0,
+                "non_trainable_tensors": 0,
+            },
+        )
+
+        total_params += numel
+        total_tensors += 1
+        module_summary["total_params"] += numel
+        module_summary["total_tensors"] += 1
+
+        if is_trainable:
+            trainable_params += numel
+            trainable_tensors += 1
+            module_summary["trainable_params"] += numel
+            module_summary["trainable_tensors"] += 1
+        else:
+            module_summary["non_trainable_params"] += numel
+            module_summary["non_trainable_tensors"] += 1
+
+    return {
+        "total_params": total_params,
+        "trainable_params": trainable_params,
+        "non_trainable_params": total_params - trainable_params,
+        "total_tensors": total_tensors,
+        "trainable_tensors": trainable_tensors,
+        "non_trainable_tensors": total_tensors - trainable_tensors,
+        "by_module": by_module,
+    }
+
+
+def log_model_param_summary(summary: dict[str, Any]) -> None:
+    logging.info(
+        "Model parameters: total=%s trainable=%s non_trainable=%s",
+        f"{summary['total_params']:,}",
+        f"{summary['trainable_params']:,}",
+        f"{summary['non_trainable_params']:,}",
+    )
+    logging.info(
+        "Model parameter tensors: total=%s trainable=%s non_trainable=%s",
+        f"{summary['total_tensors']:,}",
+        f"{summary['trainable_tensors']:,}",
+        f"{summary['non_trainable_tensors']:,}",
+    )
+    for module_name in sorted(summary["by_module"]):
+        module_summary = summary["by_module"][module_name]
+        logging.info(
+            "Model parameters [%s]: total=%s trainable=%s non_trainable=%s",
+            module_name,
+            f"{module_summary['total_params']:,}",
+            f"{module_summary['trainable_params']:,}",
+            f"{module_summary['non_trainable_params']:,}",
+        )
+
+
+def model_param_summary_to_metrics(summary: dict[str, Any]) -> dict[str, float]:
+    metrics: dict[str, float] = {
+        "model/params_total": float(summary["total_params"]),
+        "model/params_trainable": float(summary["trainable_params"]),
+        "model/params_non_trainable": float(summary["non_trainable_params"]),
+        "model/param_tensors_total": float(summary["total_tensors"]),
+        "model/param_tensors_trainable": float(summary["trainable_tensors"]),
+        "model/param_tensors_non_trainable": float(summary["non_trainable_tensors"]),
+    }
+    for module_name, module_summary in summary["by_module"].items():
+        metrics[f"model/params_total/{module_name}"] = float(module_summary["total_params"])
+        metrics[f"model/params_trainable/{module_name}"] = float(module_summary["trainable_params"])
+        metrics[f"model/params_non_trainable/{module_name}"] = float(module_summary["non_trainable_params"])
+    return metrics
 
 
 def build_logger(config: config_dict.ConfigDict, workdir: Path) -> pl.loggers.Logger:

@@ -23,10 +23,16 @@ from ml_collections import config_dict
 from input_pipeline import TfLightningDataModule
 from models.model import PeakSetSIGReg
 from utils.probing import run_attentive_probe
-from utils.schedulers import CapturableCosineSchedule, learning_rate_at_step
-from utils.training import build_logger, build_model_from_config
+from utils.schedulers import CapturableCosineSchedule
+from utils.training import (
+    build_logger,
+    build_model_from_config,
+    collect_model_param_summary,
+    log_model_param_summary,
+    model_param_summary_to_metrics,
+)
 
-torch.set_float32_matmul_precision('high')
+torch.set_float32_matmul_precision('medium')
 inductor_config.coordinate_descent_tuning = True
 inductor_config.triton.unique_kernel_names = True
 inductor_config.fx_graph_cache = True
@@ -379,6 +385,9 @@ def train_and_evaluate(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_model_from_config(config)
+    model_param_summary = collect_model_param_summary(model)
+    log_model_param_summary(model_param_summary)
+    model_param_metrics = model_param_summary_to_metrics(model_param_summary)
     model.to(device)
     model.train()
 
@@ -405,9 +414,11 @@ def train_and_evaluate(
         start_epoch = ckpt["epoch"]
         del ckpt
 
+    logger.log_metrics(model_param_metrics, step=global_step)
+
     # Compile training step (forward + backward + optimizer + scheduler)
     autocast_dtype = _resolve_autocast_dtype(config)
-    compiled_step = torch.compile(_train_step_impl, mode="max-autotune-no-cudagraphs")
+    compiled_step = torch.compile(_train_step_impl, mode="max-autotune-no-cudagraphs", fullgraph=True)
     compiled_forward = model.forward_augmented
 
     optimizer_type = str(config.get("optimizer", "adamw")).lower()
@@ -492,4 +503,4 @@ def train_and_evaluate(
     )
     for key, value in final_probe_metrics.items():
         logging.info("%s = %.6f", key, value)
-    return final_probe_metrics
+    return {**final_probe_metrics, **model_param_metrics}

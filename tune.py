@@ -124,6 +124,18 @@ def run_trials(
         import wandb
         if wandb.run is not None:
             wandb.finish()
+        param_total = final_metrics.get("model/params_total")
+        param_trainable = final_metrics.get("model/params_trainable")
+        param_non_trainable = final_metrics.get("model/params_non_trainable")
+        if param_total is not None:
+            logging.info(
+                "Trial %d/%d model params: total=%d trainable=%d non_trainable=%d",
+                idx + 1,
+                len(trial_configs),
+                int(param_total),
+                int(param_trainable),
+                int(param_non_trainable),
+            )
         metric_value = final_metrics.get(metric)
         for key in sorted(final_metrics):
             logging.info("Trial %d/%d %s = %s", idx + 1, len(trial_configs), key, final_metrics[key])
