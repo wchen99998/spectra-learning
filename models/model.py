@@ -637,8 +637,8 @@ class PeakSetSIGReg(nn.Module):
                     valid_mask=fused_valid_mask[global_slice],
                 )
         else:
-            # global_token_emb = token_emb[target_global_view_idx].detach()  # [B, N, D]
-            global_token_emb = token_emb[target_global_view_idx]  # [B, N, D] Do not detach when not using EMA teacher, to allow gradient flow from predictor to encoder.
+            global_token_emb = token_emb[target_global_view_idx].detach()  # [B, N, D]
+            # global_token_emb = token_emb[target_global_view_idx]  # [B, N, D] Do not detach when not using EMA teacher, to allow gradient flow from predictor to encoder.
         if self.use_projector_for_losses:
             global_token_target = self.sigreg_projector(global_token_emb)
         else:
