@@ -16,6 +16,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.use_projector_for_losses = True
 
     cfg.masked_token_loss_type = "l2"
+    cfg.autocast_dtype = "bf16"
     cfg.learning_rate = 1e-4
     cfg.representation_regularizer = "vicreg"
     cfg.model_dim = 512
