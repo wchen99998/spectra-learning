@@ -9,7 +9,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_token_loss_weight = 1.0
     cfg.use_ema_teacher_target = True
     cfg.teacher_ema_decay = 0.996
-    cfg.grad_clip_norm = 1.0
+    cfg.grad_clip_norm = 0.
     cfg.masked_latent_predictor_num_layers = 4
     cfg.multicrop_local_keep_fraction = 0.5
     cfg.sigreg_projector_dim = 128

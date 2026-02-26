@@ -314,6 +314,7 @@ class PeakSetSIGReg(nn.Module):
         rope_mz_precision: float = 0.1,
         rope_modulo_2pi: bool = True,
         masked_token_loss_weight: float = 0.0,
+        masked_token_loss_type: str = "l1",
         masked_latent_predictor_num_layers: int = 2,
         sigreg_num_slices: int = 256,
         sigreg_projector_dim: int | None = None,
@@ -380,6 +381,7 @@ class PeakSetSIGReg(nn.Module):
         self.pma_fp16_high_precision = bool(pma_fp16_high_precision)
         self.pma_num_seeds = int(pma_num_seeds)
         self.masked_token_loss_weight = float(masked_token_loss_weight)
+        self.masked_token_loss_type = str(masked_token_loss_type).lower()
         self.masked_latent_predictor_num_layers = int(masked_latent_predictor_num_layers)
 
         self.encoder = PeakSetEncoder(
@@ -621,8 +623,8 @@ class PeakSetSIGReg(nn.Module):
             dtype=fused_emb.dtype,
             device=fused_emb.device,
         )
-        l1_num = torch.zeros((), dtype=fused_emb.dtype, device=fused_emb.device)
-        l1_den = torch.zeros((), dtype=fused_emb.dtype, device=fused_emb.device)
+        reg_num = torch.zeros((), dtype=fused_emb.dtype, device=fused_emb.device)
+        reg_den = torch.zeros((), dtype=fused_emb.dtype, device=fused_emb.device)
         for local_view_idx in range(target_global_view_idx + 1, V):
             local_token_emb = token_emb[local_view_idx]  # [B, N, D]
             local_valid = token_valid[local_view_idx]  # [B, N]
@@ -640,18 +642,26 @@ class PeakSetSIGReg(nn.Module):
                 token_mz[local_view_idx],
                 local_mask,
             )
-            per_token_l1 = (local_token_pred - global_token_emb).abs().mean(dim=-1)  # [B, N]
+            if self.masked_token_loss_type == "l1":
+                per_token_reg = (local_token_pred - global_token_emb).abs().mean(dim=-1)  # [B, N]
+            elif self.masked_token_loss_type == "l2":
+                per_token_reg = (local_token_pred - global_token_emb).square().mean(dim=-1)  # [B, N]
+            else:
+                raise ValueError(
+                    f"Unsupported masked_token_loss_type: {self.masked_token_loss_type}. "
+                    "Expected one of: 'l1', 'l2'."
+                )
             local_mask_float = local_mask.float()
-            l1_num = l1_num + (per_token_l1 * local_mask_float).sum()
-            l1_den = l1_den + local_mask_float.sum()
-        local_global_l1_loss = l1_num / l1_den.clamp_min(1.0)
+            reg_num = reg_num + (per_token_reg * local_mask_float).sum()
+            reg_den = reg_den + local_mask_float.sum()
+        local_global_loss = reg_num / reg_den.clamp_min(1.0)
 
         if self.sigreg_lambda_warmup_steps > 0:
             sigreg_lambda_current = self.sigreg_lambda_current.to(dtype=fused_emb.dtype)
         else:
             sigreg_lambda_current = fused_emb.new_tensor(self.sigreg_lambda)
 
-        jepa_term = self.masked_token_loss_weight * local_global_l1_loss
+        jepa_term = self.masked_token_loss_weight * local_global_loss
         if self.sigreg_lambda > 0:
             local_emb = fused_emb[B:]  # [B*(V-1), N, D], skip global view
             local_visible_mask = encoder_visible_mask[B:]
@@ -687,7 +697,8 @@ class PeakSetSIGReg(nn.Module):
             "loss": loss,
             "sigreg_loss": token_sigreg_loss,
             "token_sigreg_loss": token_sigreg_loss,
-            "local_global_l1_loss": local_global_l1_loss,
+            "local_global_loss": local_global_loss,
+            "local_global_l1_loss": local_global_loss,
             "sigreg_term": sigreg_term,
             "jepa_term": jepa_term,
             "target_sigreg_term_over_jepa_term": target_sigreg_term_over_jepa_term,

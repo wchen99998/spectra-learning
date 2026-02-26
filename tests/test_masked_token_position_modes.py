@@ -211,6 +211,98 @@ def test_local_global_l1_uses_masked_tokens_only():
 
 
 @torch.no_grad()
+def test_local_global_l2_uses_masked_tokens_only():
+    model = _build_model(num_local_views=1)
+    model.sigreg_lambda = 0.0
+    model.masked_token_loss_type = "l2"
+
+    fused_mz = torch.tensor(
+        [
+            [0.10, 0.20, 0.30, 0.40, 0.50, 0.60],
+            [0.11, 0.19, 0.29, 0.41, 0.49, 0.59],
+            [0.15, 0.25, 0.35, 0.45, 0.55, 0.65],
+            [0.14, 0.24, 0.34, 0.44, 0.54, 0.64],
+        ],
+        dtype=torch.float32,
+    )
+    fused_intensity = torch.tensor(
+        [
+            [0.8, 0.7, 0.6, 0.5, 0.4, 0.3],
+            [0.8, 0.6, 0.5, 0.4, 0.4, 0.2],
+            [0.9, 0.8, 0.7, 0.6, 0.5, 0.4],
+            [0.9, 0.7, 0.6, 0.5, 0.5, 0.3],
+        ],
+        dtype=torch.float32,
+    )
+    fused_valid_mask = torch.ones_like(fused_mz, dtype=torch.bool)
+    fused_masked_positions = torch.tensor(
+        [
+            [False, False, False, True, False, False],
+            [False, True, False, False, False, False],
+            [False, False, False, True, False, False],
+            [False, False, True, False, False, False],
+        ]
+    )
+
+    metrics = model.forward_augmented(
+        {
+            "fused_mz": fused_mz,
+            "fused_intensity": fused_intensity,
+            "fused_valid_mask": fused_valid_mask,
+            "fused_masked_positions": fused_masked_positions,
+        }
+    )
+
+    fused_masked_positions = fused_masked_positions & fused_valid_mask
+    fused_masked_positions = fused_masked_positions.reshape(model.num_views, -1, fused_masked_positions.shape[1])
+    fused_masked_positions[0] = False
+    fused_masked_positions = fused_masked_positions.reshape_as(fused_valid_mask)
+    encoder_visible_mask = fused_valid_mask & (~fused_masked_positions)
+    fused_emb = model.encoder(
+        fused_mz,
+        fused_intensity,
+        valid_mask=encoder_visible_mask,
+    )
+    V = model.num_views
+    B = fused_emb.shape[0] // V
+    N = fused_emb.shape[1]
+    D = fused_emb.shape[2]
+    token_emb = fused_emb.reshape(V, B, N, D)
+    token_valid = fused_valid_mask.reshape(V, B, N)
+    token_masked = fused_masked_positions.reshape(V, B, N)
+    global_token_emb = token_emb[0]
+    local_token_emb = token_emb[1]
+    local_valid = token_valid[1]
+    local_masked = token_masked[1]
+    latent_mask_token = model.latent_mask_token.view(1, 1, -1).to(
+        dtype=fused_emb.dtype,
+        device=fused_emb.device,
+    )
+    local_token_emb_remasked = torch.where(
+        local_masked.unsqueeze(-1),
+        latent_mask_token,
+        local_token_emb,
+    )
+    token_mz = fused_mz.reshape(V, B, N)
+    local_token_pred = model.predict_masked_latents(
+        local_token_emb_remasked,
+        local_valid,
+        token_mz[1],
+        local_masked,
+    )
+    per_token_l2 = (local_token_pred - global_token_emb).square().mean(dim=-1)
+    all_valid_loss = (per_token_l2 * local_valid.float()).sum() / local_valid.float().sum()
+    masked_only_loss = (
+        (per_token_l2 * local_masked.float()).sum()
+        / local_masked.float().sum().clamp_min(1.0)
+    )
+
+    assert torch.allclose(metrics["local_global_loss"], masked_only_loss)
+    assert torch.allclose(metrics["local_global_l1_loss"], masked_only_loss)
+    assert float((metrics["local_global_loss"] - all_valid_loss).abs()) > 1e-6
+
+
+@torch.no_grad()
 def test_global_view_masked_positions_are_ignored_for_context():
     model = _build_model(num_local_views=1)
     model.sigreg_lambda = 0.0

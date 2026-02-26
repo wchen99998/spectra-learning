@@ -39,6 +39,7 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         rope_mz_precision=float(config.get("rope_mz_precision", 0.1)),
         rope_modulo_2pi=bool(config.get("rope_modulo_2pi", True)),
         masked_token_loss_weight=float(config.get("masked_token_loss_weight", 0.0)),
+        masked_token_loss_type=str(config.get("masked_token_loss_type", "l1")),
         masked_latent_predictor_num_layers=int(
             config.get("masked_latent_predictor_num_layers", 2)
         ),
