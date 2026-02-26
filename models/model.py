@@ -278,6 +278,24 @@ class PeakSetEncoder(nn.Module):
         return self.final_norm(x)
 
 
+class SIGRegProjector(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        output_dim: int,
+    ):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, output_dim),
+        )
+
+    def forward(self, token_embeddings: torch.Tensor) -> torch.Tensor:
+        return self.mlp(token_embeddings)
+
+
 class PeakSetSIGReg(nn.Module):
     """Peak-set SIGReg model with multi-crop augmentation."""
 
@@ -298,6 +316,8 @@ class PeakSetSIGReg(nn.Module):
         masked_token_loss_weight: float = 0.0,
         masked_latent_predictor_num_layers: int = 2,
         sigreg_num_slices: int = 256,
+        sigreg_projector_dim: int | None = None,
+        sigreg_projector_hidden_dim: int | None = None,
         sigreg_lambda: float = 0.1,
         sigreg_lambda_warmup_steps: int = 0,
         multicrop_num_local_views: int = 6,
@@ -318,7 +338,10 @@ class PeakSetSIGReg(nn.Module):
         super().__init__()
         self.num_peaks = num_peaks
         self.model_dim = model_dim
-        self.sigreg_dim = model_dim
+        self.sigreg_dim = model_dim if sigreg_projector_dim is None else int(sigreg_projector_dim)
+        self.sigreg_projector_hidden_dim = (
+            model_dim if sigreg_projector_hidden_dim is None else int(sigreg_projector_hidden_dim)
+        )
 
         self.multicrop_num_local_views = int(multicrop_num_local_views)
         self.multicrop_local_keep_fraction = float(multicrop_local_keep_fraction)
@@ -410,6 +433,11 @@ class PeakSetSIGReg(nn.Module):
         )
         self.masked_latent_predictor_norm = nn.RMSNorm(model_dim, eps=1e-5)
 
+        self.sigreg_projector = SIGRegProjector(
+            input_dim=model_dim,
+            hidden_dim=self.sigreg_projector_hidden_dim,
+            output_dim=self.sigreg_dim,
+        )
         self.sigreg = SIGReg(num_slices=int(sigreg_num_slices))
 
     @torch.no_grad()
@@ -623,17 +651,22 @@ class PeakSetSIGReg(nn.Module):
         else:
             sigreg_lambda_current = fused_emb.new_tensor(self.sigreg_lambda)
 
+        jepa_term = self.masked_token_loss_weight * local_global_l1_loss
         if self.sigreg_lambda > 0:
-            local_emb = fused_emb[B:]  # skip global view
+            local_emb = fused_emb[B:]  # [B*(V-1), N, D], skip global view
             local_visible_mask = encoder_visible_mask[B:]
-            token_sigreg_loss = self.sigreg(local_emb, valid_mask=local_visible_mask)
-            loss = (
-                self.masked_token_loss_weight * local_global_l1_loss
-                + sigreg_lambda_current * token_sigreg_loss
-            )
+            local_projected_emb = self.sigreg_projector(local_emb)  # [B*(V-1), N, D_sigreg]
+            local_projected_pooled_emb = self._mean_pool(
+                local_projected_emb,
+                local_visible_mask,
+            )  # [B*(V-1), D_sigreg]
+            token_sigreg_loss = self.sigreg(local_projected_pooled_emb)
+            sigreg_term = sigreg_lambda_current * token_sigreg_loss
         else:
             token_sigreg_loss = fused_emb.new_tensor(0.0)
-            loss = self.masked_token_loss_weight * local_global_l1_loss
+            sigreg_term = fused_emb.new_tensor(0.0)
+        loss = jepa_term + sigreg_term
+        target_sigreg_term_over_jepa_term = sigreg_term / jepa_term
         # Report masking rate on valid local peaks only; global target view is
         # full-spectrum and excluded from this metric.
         local_valid = token_valid[target_global_view_idx + 1:]
@@ -655,6 +688,9 @@ class PeakSetSIGReg(nn.Module):
             "sigreg_loss": token_sigreg_loss,
             "token_sigreg_loss": token_sigreg_loss,
             "local_global_l1_loss": local_global_l1_loss,
+            "sigreg_term": sigreg_term,
+            "jepa_term": jepa_term,
+            "target_sigreg_term_over_jepa_term": target_sigreg_term_over_jepa_term,
             "valid_fraction": valid_fraction,
             "masked_fraction": masked_fraction,
             "sigreg_lambda_current": sigreg_lambda_current,

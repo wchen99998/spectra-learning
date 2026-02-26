@@ -12,6 +12,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.grad_clip_norm = 1.0
     cfg.masked_latent_predictor_num_layers = 4
     cfg.multicrop_local_keep_fraction = 0.5
+    cfg.sigreg_projector_dim = 128
 
     cfg.model_dim = 512
     cfg.num_layers = 14
