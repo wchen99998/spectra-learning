@@ -378,6 +378,9 @@ class PMAPoolingTests(unittest.TestCase):
     def test_pool_parameters_are_not_in_loss_path(self):
         model = self._build_model()
         batch = _make_fused_batch(num_views=model.num_views)
+        # L1 loss is masked-slots-only, so ensure local views contain masked slots.
+        bsz = batch["fused_mz"].shape[0] // model.num_views
+        batch["fused_masked_positions"][bsz:, 0] = True
         loss = model.forward_augmented(batch)["loss"]
         loss.backward()
 

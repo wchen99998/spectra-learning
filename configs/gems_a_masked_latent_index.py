@@ -5,6 +5,7 @@ from configs.gems_a_multi import get_config as get_base_config
 
 def get_config() -> config_dict.ConfigDict:
     cfg = get_base_config()
+    cfg.batch_size = 256
     cfg.use_masked_token_input = True
     cfg.rope_complement_heads = 0
     cfg.masked_token_position_mode = "index"
@@ -13,6 +14,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.use_ema_teacher_target = True
     cfg.teacher_ema_decay = 0.996
     cfg.grad_clip_norm = 1.0
-    cfg.masked_latent_predictor_num_layers = 3
+    cfg.masked_latent_predictor_num_layers = 4
+    cfg.multicrop_local_keep_fraction = 0.5
     cfg.wandb_run_name_prefix = "jepa_masked_latent_index"
     return cfg

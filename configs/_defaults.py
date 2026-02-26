@@ -73,5 +73,5 @@ def apply_tune_defaults(cfg: config_dict.ConfigDict) -> None:
         # {"param": "learning_rate", "dist": "grid", "args": [1e-4, 4e-4]},
         # {"param": "sigreg_contiguous_mask_fraction", "dist": "grid", "args": [0.2,]},
         # {"param": "weight_decay", "dist": "grid", "args": [1e-4, 1e-3, 1e-2]},
-        {"param": "sigreg_lambda", "dist": "grid", "args": [0.01, 0.02, 0.2]},
+        {"param": "sigreg_lambda", "dist": "grid", "args": [0.0001]},
     ]

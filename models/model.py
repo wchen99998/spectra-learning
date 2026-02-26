@@ -727,16 +727,22 @@ class PeakSetSIGReg(nn.Module):
                 local_mask,
             )
             per_token_l1 = (local_token_pred - global_token_emb).abs().mean(dim=-1)  # [B, N]
-            local_valid_float = local_valid.float()
-            l1_num = l1_num + (per_token_l1 * local_valid_float).sum()
-            l1_den = l1_den + local_valid_float.sum()
+            local_mask_float = local_mask.float()
+            l1_num = l1_num + (per_token_l1 * local_mask_float).sum()
+            l1_den = l1_den + local_mask_float.sum()
         local_global_l1_loss = l1_num / l1_den.clamp_min(1.0)
 
-        token_sigreg_loss = self.sigreg(fused_emb, valid_mask=encoder_visible_mask)
-        loss = (
-            self.masked_token_loss_weight * local_global_l1_loss
-            + self.sigreg_lambda * token_sigreg_loss
-        )
+        if self.sigreg_lambda > 0:
+            local_emb = fused_emb[B:]  # skip global view
+            local_visible_mask = encoder_visible_mask[B:]
+            token_sigreg_loss = self.sigreg(local_emb, valid_mask=local_visible_mask)
+            loss = (
+                self.masked_token_loss_weight * local_global_l1_loss
+                + self.sigreg_lambda * token_sigreg_loss
+            )
+        else:
+            token_sigreg_loss = fused_emb.new_tensor(0.0)
+            loss = self.masked_token_loss_weight * local_global_l1_loss
         # Report masking rate on valid local peaks only; global target view is
         # full-spectrum and excluded from this metric.
         local_valid = token_valid[target_global_view_idx + 1:]
@@ -747,6 +753,12 @@ class PeakSetSIGReg(nn.Module):
 
         pool_norm_weight_abs_mean = self.pool_norm.weight.abs().mean()
 
+        # --- Collapse monitoring (detached, no grad) ---
+        with torch.no_grad():
+            collapse_metrics = self._collapse_metrics(
+                fused_emb, encoder_visible_mask, B, V, target_global_view_idx,
+            )
+
         return {
             "loss": loss,
             "sigreg_loss": token_sigreg_loss,
@@ -755,6 +767,46 @@ class PeakSetSIGReg(nn.Module):
             "valid_fraction": valid_fraction,
             "masked_fraction": masked_fraction,
             "pool_norm_weight_abs_mean": pool_norm_weight_abs_mean,
+            **collapse_metrics,
+        }
+
+    @torch.no_grad()
+    def _collapse_metrics(
+        self,
+        fused_emb: torch.Tensor,
+        visible_mask: torch.Tensor,
+        B: int,
+        V: int,
+        target_global_view_idx: int,
+    ) -> dict[str, torch.Tensor]:
+        """Compute per-view collapse indicators (detached, no grad).
+
+        Returns metrics for global and local views:
+        - ``*_emb_std``: mean per-dimension std over valid tokens (low = dimensional collapse)
+        - ``*_emb_norm``: mean L2 norm of valid token embeddings
+        """
+        emb = fused_emb.float()  # [V*B, N, D]
+        mask = visible_mask  # [V*B, N]
+
+        def _stats(x: torch.Tensor, m: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            flat = x.reshape(-1, x.shape[-1])  # [S*N, D]
+            w = m.reshape(-1).float()  # [S*N]
+            n = w.sum().clamp_min(1.0)
+            w_col = w.unsqueeze(-1)  # [S*N, 1]
+            mean = (flat * w_col).sum(0) / n  # [D]
+            var = ((flat - mean).square() * w_col).sum(0) / n  # [D]
+            per_dim_std = var.sqrt().mean()
+            mean_norm = (flat.norm(dim=-1) * w).sum() / n
+            return per_dim_std, mean_norm
+
+        global_std, global_norm = _stats(emb[:B], mask[:B])
+        local_std, local_norm = _stats(emb[B:], mask[B:])
+
+        return {
+            "global_emb_std": global_std,
+            "local_emb_std": local_std,
+            "global_emb_norm": global_norm,
+            "local_emb_norm": local_norm,
         }
 
     def encode(

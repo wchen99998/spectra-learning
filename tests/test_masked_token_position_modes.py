@@ -187,7 +187,7 @@ def test_forward_augmented_reports_local_global_l1_loss():
 
 
 @torch.no_grad()
-def test_local_global_l1_uses_all_valid_tokens():
+def test_local_global_l1_uses_masked_tokens_only():
     torch.manual_seed(0)
     model = PeakSetSIGReg(
         num_peaks=6,
@@ -291,8 +291,8 @@ def test_local_global_l1_uses_all_valid_tokens():
         / local_masked.float().sum().clamp_min(1.0)
     )
 
-    assert torch.allclose(metrics["local_global_l1_loss"], all_valid_loss)
-    assert float((metrics["local_global_l1_loss"] - masked_only_loss).abs()) > 1e-6
+    assert torch.allclose(metrics["local_global_l1_loss"], masked_only_loss)
+    assert float((metrics["local_global_l1_loss"] - all_valid_loss).abs()) > 1e-6
 
 
 @torch.no_grad()
