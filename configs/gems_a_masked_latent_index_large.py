@@ -12,6 +12,12 @@ def get_config() -> config_dict.ConfigDict:
     cfg.grad_clip_norm = 1.0
     cfg.masked_latent_predictor_num_layers = 4
     cfg.multicrop_local_keep_fraction = 0.5
-    cfg.sigreg_lambda_warmup_steps = 50_000
+
+    cfg.model_dim = 512
+    cfg.num_layers = 14
+    cfg.num_heads = 16
+    cfg.num_kv_heads = 8
+
+
     cfg.wandb_run_name_prefix = "jepa_masked_latent_index"
     return cfg

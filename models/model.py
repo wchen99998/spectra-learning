@@ -174,7 +174,6 @@ class PeakSetEncoder(nn.Module):
         rope_mz_precision: float = 0.1,
         rope_modulo_2pi: bool = True,
         num_peaks: int = 60,
-        fp16_high_precision_stem: bool = False,
         encoder_block_type: str = "transformer",
         isab_num_inducing_points: int = 32,
         qk_norm: bool = False,
@@ -183,7 +182,6 @@ class PeakSetEncoder(nn.Module):
         super().__init__()
         self.model_dim = model_dim
         self.use_rope = bool(use_rope)
-        self.fp16_high_precision_stem = bool(fp16_high_precision_stem)
         self.encoder_block_type = encoder_block_type
         self.embedder = PeakFeatureEmbedder(model_dim, feature_mlp_hidden_dim)
         self.rope_mz_max = float(rope_mz_max)
@@ -231,8 +229,6 @@ class PeakSetEncoder(nn.Module):
         peak_intensity: torch.Tensor,
         valid_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        device_type = peak_mz.device.type
-
         if self.encoder_block_type == "isab":
             x = self.embedder(peak_mz, peak_intensity)
             kv_block_mask = None
@@ -269,37 +265,10 @@ class PeakSetEncoder(nn.Module):
             )
             return freqs_cos, freqs_sin
 
-        autocast_dtype = None
-        run_high_precision_stem = False
-        if self.fp16_high_precision_stem and self.embedder.mlp[0].weight.dtype == torch.float32:
-            if torch.is_autocast_enabled(device_type):
-                autocast_dtype = torch.get_autocast_dtype(device_type)
-            run_high_precision_stem = (
-                peak_mz.dtype == torch.float16
-                or peak_intensity.dtype == torch.float16
-                or autocast_dtype == torch.float16
-            )
-
-        start_block = 0
-        if run_high_precision_stem:
-            with torch.autocast(device_type=device_type, enabled=False):
-                x = self.embedder(peak_mz.float(), peak_intensity.float())
-                stem_freqs_cos, stem_freqs_sin = _compute_rope(torch.float32)
-                if len(self.blocks) > 0:
-                    x = self.blocks[0](
-                        x,
-                        freqs_cos=stem_freqs_cos,
-                        freqs_sin=stem_freqs_sin,
-                        block_mask=block_mask,
-                    )
-                    start_block = 1
-            target_dtype = autocast_dtype if autocast_dtype is not None else peak_mz.dtype
-            x = x.to(dtype=target_dtype)
-        else:
-            x = self.embedder(peak_mz, peak_intensity)
+        x = self.embedder(peak_mz, peak_intensity)
         freqs_cos, freqs_sin = _compute_rope(x.dtype)
 
-        for block in self.blocks[start_block:]:
+        for block in self.blocks:
             x = block(
                 x,
                 freqs_cos=freqs_cos,
@@ -328,9 +297,9 @@ class PeakSetSIGReg(nn.Module):
         rope_modulo_2pi: bool = True,
         masked_token_loss_weight: float = 0.0,
         masked_latent_predictor_num_layers: int = 2,
-        encoder_fp16_high_precision_stem: bool = False,
         sigreg_num_slices: int = 256,
         sigreg_lambda: float = 0.1,
+        sigreg_lambda_warmup_steps: int = 0,
         multicrop_num_local_views: int = 6,
         multicrop_local_keep_fraction: float = 0.25,
         use_ema_teacher_target: bool = False,
@@ -360,6 +329,30 @@ class PeakSetSIGReg(nn.Module):
         self.sigreg_mz_jitter_std = sigreg_mz_jitter_std
         self.sigreg_intensity_jitter_std = sigreg_intensity_jitter_std
         self.sigreg_lambda = float(sigreg_lambda)
+        self.sigreg_lambda_warmup_steps = int(sigreg_lambda_warmup_steps)
+        self.register_buffer(
+            "sigreg_lambda_target",
+            torch.tensor(self.sigreg_lambda, dtype=torch.float32),
+        )
+        self.register_buffer(
+            "sigreg_lambda_current",
+            torch.tensor(
+                self.sigreg_lambda if self.sigreg_lambda_warmup_steps <= 0 else 0.0,
+                dtype=torch.float32,
+            ),
+        )
+        self.register_buffer(
+            "sigreg_lambda_step",
+            torch.zeros((), dtype=torch.int64),
+        )
+        self.register_buffer(
+            "sigreg_lambda_warmup_steps_tensor",
+            torch.tensor(
+                max(self.sigreg_lambda_warmup_steps, 1),
+                dtype=torch.float32,
+            ),
+            persistent=False,
+        )
         self.pooling_type = pooling_type
         self.pma_fp16_high_precision = bool(pma_fp16_high_precision)
         self.pma_num_seeds = int(pma_num_seeds)
@@ -378,7 +371,6 @@ class PeakSetSIGReg(nn.Module):
             rope_mz_precision=rope_mz_precision,
             rope_modulo_2pi=rope_modulo_2pi,
             num_peaks=num_peaks,
-            fp16_high_precision_stem=encoder_fp16_high_precision_stem,
             encoder_block_type=encoder_block_type,
             isab_num_inducing_points=isab_num_inducing_points,
             qk_norm=encoder_qk_norm,
@@ -419,6 +411,16 @@ class PeakSetSIGReg(nn.Module):
         self.masked_latent_predictor_norm = nn.RMSNorm(model_dim, eps=1e-5)
 
         self.sigreg = SIGReg(num_slices=int(sigreg_num_slices))
+
+    @torch.no_grad()
+    def advance_sigreg_lambda_schedule(self) -> None:
+        if self.sigreg_lambda_warmup_steps <= 0:
+            self.sigreg_lambda_current.copy_(self.sigreg_lambda_target)
+            return
+        step = self.sigreg_lambda_step.to(dtype=self.sigreg_lambda_current.dtype)
+        ratio = torch.clamp(step / self.sigreg_lambda_warmup_steps_tensor, min=0.0, max=1.0)
+        self.sigreg_lambda_current.copy_(self.sigreg_lambda_target * ratio)
+        self.sigreg_lambda_step.add_(1)
 
     def predict_masked_latents(
         self,
@@ -616,13 +618,18 @@ class PeakSetSIGReg(nn.Module):
             l1_den = l1_den + local_mask_float.sum()
         local_global_l1_loss = l1_num / l1_den.clamp_min(1.0)
 
+        if self.sigreg_lambda_warmup_steps > 0:
+            sigreg_lambda_current = self.sigreg_lambda_current.to(dtype=fused_emb.dtype)
+        else:
+            sigreg_lambda_current = fused_emb.new_tensor(self.sigreg_lambda)
+
         if self.sigreg_lambda > 0:
             local_emb = fused_emb[B:]  # skip global view
             local_visible_mask = encoder_visible_mask[B:]
             token_sigreg_loss = self.sigreg(local_emb, valid_mask=local_visible_mask)
             loss = (
                 self.masked_token_loss_weight * local_global_l1_loss
-                + self.sigreg_lambda * token_sigreg_loss
+                + sigreg_lambda_current * token_sigreg_loss
             )
         else:
             token_sigreg_loss = fused_emb.new_tensor(0.0)
@@ -650,6 +657,7 @@ class PeakSetSIGReg(nn.Module):
             "local_global_l1_loss": local_global_l1_loss,
             "valid_fraction": valid_fraction,
             "masked_fraction": masked_fraction,
+            "sigreg_lambda_current": sigreg_lambda_current,
             "pool_norm_weight_abs_mean": pool_norm_weight_abs_mean,
             **collapse_metrics,
         }

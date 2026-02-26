@@ -42,15 +42,13 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         ),
         encoder_block_type=str(config.get("encoder_block_type", "transformer")),
         isab_num_inducing_points=int(config.get("isab_num_inducing_points", 32)),
-        encoder_fp16_high_precision_stem=bool(
-            config.get("encoder_fp16_high_precision_stem", False)
-        ),
         pooling_type=str(config.get("pooling_type", "pma")),
         pma_fp16_high_precision=bool(config.get("pma_fp16_high_precision", False)),
         pma_num_heads=config.get("pma_num_heads", int(config.num_heads)),
         pma_num_seeds=int(config.get("pma_num_seeds", 1)),
         sigreg_num_slices=int(config.get("sigreg_num_slices", 256)),
         sigreg_lambda=float(config.get("sigreg_lambda", 0.1)),
+        sigreg_lambda_warmup_steps=int(config.get("sigreg_lambda_warmup_steps", 0)),
         multicrop_num_local_views=int(config.get("multicrop_num_local_views", 6)),
         multicrop_local_keep_fraction=float(
             config.get("multicrop_local_keep_fraction", 0.25)

@@ -103,6 +103,7 @@ class SIGRegForwardTests(unittest.TestCase):
             "local_global_l1_loss",
             "valid_fraction",
             "masked_fraction",
+            "sigreg_lambda_current",
         ):
             self.assertIn(key, metrics, f"Missing key: {key}")
 
@@ -308,6 +309,94 @@ class MassAwareRoPETests(unittest.TestCase):
                 valid_mask=batch["peak_valid_mask"],
             )
         self.assertTrue(torch.isfinite(emb).all())
+
+
+class SIGRegLambdaScheduleTests(unittest.TestCase):
+    def _build_model(
+        self,
+        *,
+        sigreg_lambda: float = 0.2,
+        sigreg_lambda_warmup_steps: int = 4,
+        masked_token_loss_weight: float = 0.0,
+    ) -> PeakSetSIGReg:
+        return PeakSetSIGReg(
+            num_peaks=60,
+            model_dim=32,
+            encoder_num_layers=1,
+            encoder_num_heads=4,
+            encoder_num_kv_heads=4,
+            attention_mlp_multiple=2.0,
+            feature_mlp_hidden_dim=16,
+            sigreg_num_slices=32,
+            sigreg_lambda=sigreg_lambda,
+            sigreg_lambda_warmup_steps=sigreg_lambda_warmup_steps,
+            multicrop_num_local_views=1,
+            masked_token_loss_weight=masked_token_loss_weight,
+        )
+
+    def test_schedule_disabled_is_constant(self):
+        model = self._build_model(sigreg_lambda=0.2, sigreg_lambda_warmup_steps=0)
+        values = []
+        for _ in range(3):
+            model.advance_sigreg_lambda_schedule()
+            values.append(float(model.sigreg_lambda_current))
+        for value in values:
+            self.assertAlmostEqual(value, 0.2, places=6)
+
+    def test_schedule_linear_progression(self):
+        model = self._build_model(sigreg_lambda=0.2, sigreg_lambda_warmup_steps=4)
+        values = []
+        for _ in range(6):
+            model.advance_sigreg_lambda_schedule()
+            values.append(float(model.sigreg_lambda_current))
+        expected = [0.0, 0.05, 0.1, 0.15, 0.2, 0.2]
+        for actual, target in zip(values, expected):
+            self.assertAlmostEqual(actual, target, places=6)
+
+    def test_forward_reports_current_lambda_metric(self):
+        model = self._build_model(sigreg_lambda=0.2, sigreg_lambda_warmup_steps=4)
+        batch = _make_fused_batch(num_views=model.num_views)
+        model.advance_sigreg_lambda_schedule()
+        metrics = model.forward_augmented(batch)
+        self.assertIn("sigreg_lambda_current", metrics)
+        self.assertTrue(torch.isfinite(metrics["sigreg_lambda_current"]).item())
+        self.assertTrue(
+            torch.allclose(
+                metrics["sigreg_lambda_current"],
+                model.sigreg_lambda_current.to(dtype=metrics["sigreg_lambda_current"].dtype),
+            )
+        )
+
+    def test_loss_uses_scheduled_lambda(self):
+        model = self._build_model(
+            sigreg_lambda=0.2,
+            sigreg_lambda_warmup_steps=4,
+            masked_token_loss_weight=0.0,
+        )
+        batch = _make_fused_batch(num_views=model.num_views)
+
+        model.advance_sigreg_lambda_schedule()
+        early = model.forward_augmented(batch)
+        self.assertAlmostEqual(float(early["sigreg_lambda_current"]), 0.0, places=7)
+        self.assertAlmostEqual(float(early["loss"].detach()), 0.0, places=7)
+
+        for _ in range(5):
+            model.advance_sigreg_lambda_schedule()
+        late = model.forward_augmented(batch)
+        expected = late["sigreg_lambda_current"] * late["token_sigreg_loss"]
+        self.assertTrue(torch.allclose(late["loss"], expected))
+        self.assertGreater(float(late["loss"].detach()), float(early["loss"].detach()))
+
+    def test_schedule_state_dict_roundtrip(self):
+        model = self._build_model(sigreg_lambda=0.2, sigreg_lambda_warmup_steps=4)
+        for _ in range(3):
+            model.advance_sigreg_lambda_schedule()
+        state = model.state_dict()
+
+        restored = self._build_model(sigreg_lambda=0.2, sigreg_lambda_warmup_steps=4)
+        restored.load_state_dict(state)
+        self.assertTrue(torch.equal(restored.sigreg_lambda_step, model.sigreg_lambda_step))
+        self.assertTrue(torch.equal(restored.sigreg_lambda_current, model.sigreg_lambda_current))
 
 
 class PMAPoolingTests(unittest.TestCase):

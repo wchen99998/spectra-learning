@@ -41,7 +41,6 @@ def build_model(cfg) -> PeakSetSIGReg:
         rope_mz_max=getattr(cfg, "rope_mz_max", 1000.0),
         rope_mz_precision=getattr(cfg, "rope_mz_precision", 0.1),
         rope_modulo_2pi=getattr(cfg, "rope_modulo_2pi", True),
-        encoder_fp16_high_precision_stem=getattr(cfg, "encoder_fp16_high_precision_stem", False),
         sigreg_num_slices=cfg.sigreg_num_slices,
         sigreg_lambda=cfg.sigreg_lambda,
         multicrop_num_local_views=cfg.multicrop_num_local_views,

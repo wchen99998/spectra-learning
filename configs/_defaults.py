@@ -12,12 +12,12 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.optimizer_capturable = True
     cfg.optimizer_fused = True
     cfg.autocast_dtype = "fp32"
-    cfg.encoder_fp16_high_precision_stem = False
     cfg.encoder_qk_norm = False
     cfg.encoder_post_norm = False
     cfg.pma_fp16_high_precision = False
     cfg.masked_token_loss_weight = 0.0
     cfg.masked_latent_predictor_num_layers = 2
+    cfg.sigreg_lambda_warmup_steps = 0
     cfg.use_ema_teacher_target = False
     cfg.teacher_ema_decay = 0.996
     cfg.grad_clip_norm = None
@@ -70,5 +70,5 @@ def apply_tune_defaults(cfg: config_dict.ConfigDict) -> None:
         # {"param": "learning_rate", "dist": "grid", "args": [1e-4, 4e-4]},
         # {"param": "sigreg_contiguous_mask_fraction", "dist": "grid", "args": [0.2,]},
         # {"param": "weight_decay", "dist": "grid", "args": [1e-4, 1e-3, 1e-2]},
-        {"param": "sigreg_lambda", "dist": "grid", "args": [0.0001]},
+        {"param": "sigreg_lambda", "dist": "grid", "args": [0.00001]},
     ]

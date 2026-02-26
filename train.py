@@ -154,6 +154,7 @@ def _train_step_impl(
     autocast_dtype: torch.dtype | None,
     grad_clip_norm: float | None,
 ) -> dict[str, torch.Tensor]:
+    model.advance_sigreg_lambda_schedule()
     device_type = next(model.parameters()).device.type
     if autocast_dtype is None or device_type != "cuda":
         autocast_ctx = nullcontext()
