@@ -40,6 +40,7 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         rope_modulo_2pi=bool(config.get("rope_modulo_2pi", True)),
         masked_token_loss_weight=float(config.get("masked_token_loss_weight", 0.0)),
         masked_token_loss_type=str(config.get("masked_token_loss_type", "l1")),
+        representation_regularizer=str(config.get("representation_regularizer", "sigreg")),
         masked_latent_predictor_num_layers=int(
             config.get("masked_latent_predictor_num_layers", 2)
         ),
@@ -54,6 +55,10 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         sigreg_projector_hidden_dim=config.get("sigreg_projector_hidden_dim", None),
         sigreg_lambda=float(config.get("sigreg_lambda", 0.1)),
         sigreg_lambda_warmup_steps=int(config.get("sigreg_lambda_warmup_steps", 0)),
+        vicreg_beta=float(config.get("vicreg_beta", 1e-3)),
+        vicreg_sim_coeff=float(config.get("vicreg_sim_coeff", 0.0)),
+        vicreg_std_coeff=float(config.get("vicreg_std_coeff", 25.0)),
+        vicreg_cov_coeff=float(config.get("vicreg_cov_coeff", 1.0)),
         multicrop_num_local_views=int(config.get("multicrop_num_local_views", 6)),
         multicrop_local_keep_fraction=float(
             config.get("multicrop_local_keep_fraction", 0.25)

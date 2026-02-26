@@ -14,6 +14,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.multicrop_local_keep_fraction = 0.5
     cfg.sigreg_projector_dim = 128
 
+    cfg.representation_regularizer = "vicreg"
     cfg.model_dim = 512
     cfg.num_layers = 14
     cfg.num_heads = 16

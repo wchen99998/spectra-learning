@@ -68,23 +68,25 @@ class DataPipelineContractTests(unittest.TestCase):
 
 
 class SIGRegForwardTests(unittest.TestCase):
-    def _build_model(self, *, encoder_use_rope: bool = False) -> PeakSetSIGReg:
-        return PeakSetSIGReg(
-            num_peaks=60,
-            model_dim=32,
-            encoder_num_layers=1,
-            encoder_num_heads=4,
-            encoder_num_kv_heads=4,
-            attention_mlp_multiple=2.0,
-            feature_mlp_hidden_dim=16,
-            sigreg_num_slices=32,
-            sigreg_lambda=0.1,
-            multicrop_num_local_views=3,
-            multicrop_local_keep_fraction=0.25,
-            sigreg_mz_jitter_std=0.005,
-            sigreg_intensity_jitter_std=0.05,
-            encoder_use_rope=encoder_use_rope,
-        )
+    def _build_model(self, *, encoder_use_rope: bool = False, **kwargs) -> PeakSetSIGReg:
+        model_kwargs = {
+            "num_peaks": 60,
+            "model_dim": 32,
+            "encoder_num_layers": 1,
+            "encoder_num_heads": 4,
+            "encoder_num_kv_heads": 4,
+            "attention_mlp_multiple": 2.0,
+            "feature_mlp_hidden_dim": 16,
+            "sigreg_num_slices": 32,
+            "sigreg_lambda": 0.1,
+            "multicrop_num_local_views": 3,
+            "multicrop_local_keep_fraction": 0.25,
+            "sigreg_mz_jitter_std": 0.005,
+            "sigreg_intensity_jitter_std": 0.05,
+            "encoder_use_rope": encoder_use_rope,
+        }
+        model_kwargs.update(kwargs)
+        return PeakSetSIGReg(**model_kwargs)
 
     def test_forward_loss_is_finite(self):
         model = self._build_model()
@@ -106,6 +108,35 @@ class SIGRegForwardTests(unittest.TestCase):
             "sigreg_lambda_current",
         ):
             self.assertIn(key, metrics, f"Missing key: {key}")
+
+    def test_forward_vicreg_contains_expected_keys(self):
+        model = self._build_model(
+            representation_regularizer="vicreg",
+            sigreg_lambda=0.0,
+            vicreg_beta=1e-3,
+            vicreg_sim_coeff=0.0,
+            vicreg_std_coeff=25.0,
+            vicreg_cov_coeff=1.0,
+            masked_token_loss_weight=1.0,
+            multicrop_num_local_views=3,
+        )
+        batch = _make_fused_batch(num_views=model.num_views)
+        metrics = model.forward_augmented(batch)
+        for key in (
+            "loss",
+            "vicreg_loss",
+            "vicreg_term",
+            "regularizer_loss",
+            "regularizer_term",
+            "jepa_term",
+            "target_regularizer_term_over_jepa_term",
+            "target_vicreg_term_over_jepa_term",
+        ):
+            self.assertIn(key, metrics, f"Missing key: {key}")
+        self.assertAlmostEqual(float(metrics["sigreg_loss"]), 0.0, places=7)
+        self.assertAlmostEqual(float(metrics["token_sigreg_loss"]), 0.0, places=7)
+        expected = metrics["jepa_term"] + metrics["vicreg_term"]
+        self.assertTrue(torch.allclose(metrics["loss"], expected))
 
     def test_encode_output_shape(self):
         model = self._build_model()

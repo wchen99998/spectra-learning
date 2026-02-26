@@ -17,8 +17,13 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.pma_fp16_high_precision = False
     cfg.masked_token_loss_weight = 0.0
     cfg.masked_token_loss_type = "l1"
+    cfg.representation_regularizer = "sigreg"
     cfg.masked_latent_predictor_num_layers = 2
     cfg.sigreg_lambda_warmup_steps = 0
+    cfg.vicreg_beta = 1e-3
+    cfg.vicreg_sim_coeff = 0.0
+    cfg.vicreg_std_coeff = 25.0
+    cfg.vicreg_cov_coeff = 1.0
     cfg.use_ema_teacher_target = False
     cfg.teacher_ema_decay = 0.996
     cfg.grad_clip_norm = None
