@@ -22,6 +22,7 @@ import argparse
 import hashlib
 import json
 import logging
+import subprocess
 import sys
 from pathlib import Path
 
@@ -39,6 +40,7 @@ from sklearn.metrics import r2_score, roc_auc_score
 from sklearn.model_selection import KFold, cross_val_score
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor, NearestNeighbors
 from sklearn.preprocessing import normalize as l2_normalize
+from scipy.stats import spearmanr
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm.auto import tqdm
 import umap
@@ -71,6 +73,22 @@ from utils.training import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def _git_info() -> dict[str, str]:
+    """Capture current git branch and commit hash."""
+    info: dict[str, str] = {}
+    try:
+        info["git_branch"] = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], text=True, stderr=subprocess.DEVNULL,
+        ).strip()
+        info["git_commit"] = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+    return info
+
 
 # Functional groups via SMARTS
 FG_SMARTS: dict[str, str] = {
@@ -474,7 +492,9 @@ def _tanimoto_analysis(
     tanimoto = intersection / np.maximum(union, 1e-8)
 
     corr = float(np.corrcoef(cos_sims, tanimoto)[0, 1])
+    spearman_rho = float(spearmanr(cos_sims, tanimoto).statistic)
     log.info("Pearson(cosine_sim, tanimoto) = %.4f", corr)
+    log.info("Spearman(cosine_sim, tanimoto) = %.4f", spearman_rho)
 
     bins = np.linspace(0, 1, 21)
     bin_idx = np.digitize(tanimoto, bins) - 1
@@ -485,7 +505,7 @@ def _tanimoto_analysis(
     axes[0].hist2d(tanimoto, cos_sims, bins=100, cmap="viridis", cmin=1)
     axes[0].set_xlabel("Tanimoto similarity (Morgan FP)")
     axes[0].set_ylabel("Cosine similarity (embeddings)")
-    axes[0].set_title(f"Embedding vs Molecular Similarity\nPearson r = {corr:.4f}")
+    axes[0].set_title(f"Embedding vs Molecular Similarity\nPearson r = {corr:.4f}  Spearman ρ = {spearman_rho:.4f}")
     plt.colorbar(axes[0].collections[0], ax=axes[0], label="count")
 
     axes[1].bar(bin_centers, bin_means, width=0.04, alpha=0.7)
@@ -505,6 +525,7 @@ def _tanimoto_analysis(
 
     return {
         "pearson_cosine_tanimoto": corr,
+        "spearman_cosine_tanimoto": spearman_rho,
         "cosine_sim_mean": float(cos_sims.mean()),
         "cosine_sim_std": float(cos_sims.std()),
         "tanimoto_mean": float(tanimoto.mean()),
@@ -551,7 +572,7 @@ def _knn_analysis(
     random_tanimoto = float((rand_inter / np.maximum(rand_union, 1e-8)).mean())
 
     results: dict[str, dict[str, float]] = {}
-    header = f"{'k':>5s}  {'embed_kNN_tanimoto':>20s}  {'fp_kNN_tanimoto':>20s}  {'random_baseline':>16s}"
+    header = f"{'k':>5s}  {'embed_kNN_tanimoto':>20s}  {'fp_kNN_tanimoto':>20s}  {'random_baseline':>16s}  {'nbr_overlap':>12s}"
     log.info("kNN retrieval results:\n%s", header)
 
     for k in K_VALUES:
@@ -566,11 +587,17 @@ def _knn_analysis(
         union_fp = query_fps_exp.sum(axis=2) + nn_fps_fp.sum(axis=2) - inter_fp
         tan_fp = float((inter_fp / np.maximum(union_fp, 1e-8)).mean())
 
-        log.info("%5d  %20.4f  %20.4f  %16.4f", k, tan_emb, tan_fp, random_tanimoto)
+        # Neighborhood overlap: fraction of embed kNN also in FP kNN
+        embed_sets = [set(row) for row in knn_embed_idx[:, :k]]
+        fp_sets = [set(row) for row in knn_fp_idx[:, :k]]
+        overlap = float(np.mean([len(e & f) / k for e, f in zip(embed_sets, fp_sets)]))
+
+        log.info("%5d  %20.4f  %20.4f  %16.4f  %12.4f", k, tan_emb, tan_fp, random_tanimoto, overlap)
         results[f"k{k}"] = {
             "embed_knn_tanimoto": tan_emb,
             "fp_knn_tanimoto": tan_fp,
             "random_baseline": random_tanimoto,
+            "neighborhood_overlap": overlap,
         }
 
     return {"knn": results, "knn_embed_idx": knn_embed_idx, "sub_idx": sub_idx}
@@ -1218,6 +1245,7 @@ def main() -> None:
     summary: dict = {
         "checkpoint": ckpt_path,
         "seed": seed,
+        **_git_info(),
         "n_embeddings": int(all_embeds.shape[0]),
         "embedding_dim": int(all_embeds.shape[1]),
         "tanimoto": tanimoto_results,
@@ -1243,11 +1271,15 @@ def main() -> None:
     print("SUMMARY")
     print("=" * 70)
     print(f"Checkpoint: {ckpt_path}")
+    git = _git_info()
+    if git:
+        print(f"Git: {git.get('git_branch', '?')} @ {git.get('git_commit', '?')[:10]}")
     print(f"Embeddings: {all_embeds.shape}")
     print(f"\nPearson(cosine, tanimoto): {tanimoto_results['pearson_cosine_tanimoto']:.4f}")
-    print(f"\nkNN Retrieval (embedding vs FP oracle):")
+    print(f"Spearman(cosine, tanimoto): {tanimoto_results['spearman_cosine_tanimoto']:.4f}")
+    print(f"\nkNN Retrieval (embedding vs FP oracle | nbr_overlap):")
     for k_str, v in knn_results.items():
-        print(f"  {k_str}: embed={v['embed_knn_tanimoto']:.4f}  fp={v['fp_knn_tanimoto']:.4f}  rand={v['random_baseline']:.4f}")
+        print(f"  {k_str}: embed={v['embed_knn_tanimoto']:.4f}  fp={v['fp_knn_tanimoto']:.4f}  rand={v['random_baseline']:.4f}  overlap={v['neighborhood_overlap']:.4f}")
     for label, results in probe_results.items():
         print(f"\nProbes [{label}] (Ridge R^2):")
         for key in ["ridge_mol_weight", "ridge_logp", "ridge_num_heavy_atoms", "ridge_num_rings"]:
