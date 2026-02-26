@@ -58,7 +58,6 @@ class MulticropInputAugmentationTests(unittest.TestCase):
         self.assertEqual(out["fused_masked_positions"].shape, (num_views * B, N))
         self.assertEqual(out["fused_padding_mask"].shape, (num_views * B, N))
         self.assertEqual(out["peak_padding_mask"].shape, (B, N))
-        self.assertEqual(out["fused_precursor_mz"].shape, (num_views * B,))
 
     def test_multicrop_always_outputs_mask_and_padding_keys(self):
         batch = self._make_batch()

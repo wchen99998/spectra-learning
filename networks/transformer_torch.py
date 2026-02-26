@@ -31,39 +31,6 @@ def create_padding_block_mask(valid_mask: torch.Tensor) -> BlockMask:
     return create_block_mask(mask_mod, B=B, H=None, Q_LEN=N, KV_LEN=N, device=valid_mask.device)
 
 
-def build_masked_attention_allow_matrix(
-    valid_mask: torch.Tensor,
-    masked_positions: torch.Tensor,
-) -> torch.Tensor:
-    """Return [B, Q, K] attention allow matrix for masked-token context isolation.
-
-    Rules:
-    - Any query/key touching padding is blocked.
-    - Unmasked queries cannot attend to masked keys.
-    - Masked queries may attend to both masked and unmasked valid keys.
-    """
-    q_valid = valid_mask.unsqueeze(2)
-    kv_valid = valid_mask.unsqueeze(1)
-    q_masked = masked_positions.unsqueeze(2)
-    kv_masked = masked_positions.unsqueeze(1)
-    unmasked_query_to_masked_key = torch.logical_and(~q_masked, kv_masked)
-    return q_valid & kv_valid & (~unmasked_query_to_masked_key)
-
-
-def create_masked_context_block_mask(
-    valid_mask: torch.Tensor,
-    masked_positions: torch.Tensor,
-) -> BlockMask:
-    """Create BlockMask for masked-token context isolation attention pattern."""
-    B, N = valid_mask.shape
-    allow = build_masked_attention_allow_matrix(valid_mask, masked_positions)
-
-    def mask_mod(b, h, q_idx, kv_idx):
-        return allow[b, q_idx, kv_idx]
-
-    return create_block_mask(mask_mod, B=B, H=None, Q_LEN=N, KV_LEN=N, device=valid_mask.device)
-
-
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     rotated = torch.empty_like(x)
     rotated[..., ::2] = -x[..., 1::2]
@@ -76,36 +43,12 @@ def apply_rotary_emb(
     xk: torch.Tensor,
     freqs_cos: torch.Tensor,
     freqs_sin: torch.Tensor,
-    *,
-    freqs_cos_q: torch.Tensor | None = None,
-    freqs_sin_q: torch.Tensor | None = None,
-    q_rope_head_split: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     q_rot = _rotate_half(xq)
     k_rot = _rotate_half(xk)
 
+    xq_out = (xq * freqs_cos) + (q_rot * freqs_sin)
     xk_out = (xk * freqs_cos) + (k_rot * freqs_sin)
-
-    if freqs_cos_q is None or freqs_sin_q is None or q_rope_head_split is None:
-        xq_out = (xq * freqs_cos) + (q_rot * freqs_sin)
-        return xq_out, xk_out
-
-    split = int(q_rope_head_split)
-    q_heads = xq.shape[2]
-    if split <= 0:
-        xq_out = (xq * freqs_cos_q) + (q_rot * freqs_sin_q)
-        return xq_out, xk_out
-    if split >= q_heads:
-        xq_out = (xq * freqs_cos) + (q_rot * freqs_sin)
-        return xq_out, xk_out
-
-    xq_mass = xq[:, :, :split, :]
-    xq_comp = xq[:, :, split:, :]
-    q_rot_mass = q_rot[:, :, :split, :]
-    q_rot_comp = q_rot[:, :, split:, :]
-    xq_mass_out = (xq_mass * freqs_cos) + (q_rot_mass * freqs_sin)
-    xq_comp_out = (xq_comp * freqs_cos_q) + (q_rot_comp * freqs_sin_q)
-    xq_out = torch.cat([xq_mass_out, xq_comp_out], dim=2)
     return xq_out, xk_out
 
 
@@ -152,9 +95,6 @@ class Attention(nn.Module):
         *,
         freqs_cos: torch.Tensor | None = None,
         freqs_sin: torch.Tensor | None = None,
-        freqs_cos_q: torch.Tensor | None = None,
-        freqs_sin_q: torch.Tensor | None = None,
-        q_rope_head_split: int | None = None,
         block_mask: BlockMask | None = None,
     ) -> torch.Tensor:
         bsz, seqlen, _ = x.shape
@@ -179,9 +119,6 @@ class Attention(nn.Module):
                 xk,
                 freqs_cos,
                 freqs_sin,
-                freqs_cos_q=freqs_cos_q,
-                freqs_sin_q=freqs_sin_q,
-                q_rope_head_split=q_rope_head_split,
             )
 
         q = xq.transpose(1, 2)
@@ -280,25 +217,16 @@ class TransformerBlock(nn.Module):
         *,
         freqs_cos: torch.Tensor | None,
         freqs_sin: torch.Tensor | None,
-        freqs_cos_q: torch.Tensor | None = None,
-        freqs_sin_q: torch.Tensor | None = None,
-        q_rope_head_split: int | None = None,
         block_mask: BlockMask | None = None,
     ) -> torch.Tensor:
         if not self.use_rotary_embeddings:
             freqs_cos = None
             freqs_sin = None
-            freqs_cos_q = None
-            freqs_sin_q = None
-            q_rope_head_split = None
 
         h = x + self.attention(
             self.attention_norm(x),
             freqs_cos=freqs_cos,
             freqs_sin=freqs_sin,
-            freqs_cos_q=freqs_cos_q,
-            freqs_sin_q=freqs_sin_q,
-            q_rope_head_split=q_rope_head_split,
             block_mask=block_mask,
         )
         if self.post_norm:

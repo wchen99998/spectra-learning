@@ -144,7 +144,6 @@ def _encode_split(
                 batch["peak_mz"],
                 batch["peak_intensity"],
                 valid_mask=batch["peak_valid_mask"],
-                precursor_mz=batch["precursor_mz"],
             )
             pooled_encoder = model.pool(embeddings, batch["peak_valid_mask"])
 

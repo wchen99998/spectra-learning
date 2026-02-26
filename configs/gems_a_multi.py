@@ -33,7 +33,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_use_rope = True
     cfg.rope_mz_max = 1000.0
     cfg.rope_mz_precision = 0.1
-    cfg.rope_complement_heads = cfg.num_heads // 2
     cfg.rope_modulo_2pi = True
     cfg.encoder_block_type = "transformer"
     cfg.encoder_qk_norm = True

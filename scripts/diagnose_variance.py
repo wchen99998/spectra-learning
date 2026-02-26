@@ -40,7 +40,6 @@ def build_model(cfg) -> PeakSetSIGReg:
         encoder_use_rope=cfg.encoder_use_rope,
         rope_mz_max=getattr(cfg, "rope_mz_max", 1000.0),
         rope_mz_precision=getattr(cfg, "rope_mz_precision", 0.1),
-        rope_complement_heads=getattr(cfg, "rope_complement_heads", None),
         rope_modulo_2pi=getattr(cfg, "rope_modulo_2pi", True),
         encoder_fp16_high_precision_stem=getattr(cfg, "encoder_fp16_high_precision_stem", False),
         sigreg_num_slices=cfg.sigreg_num_slices,
@@ -67,15 +66,12 @@ def make_synthetic_batch(cfg, batch_size: int = 32, device: str = "cpu") -> dict
     # Realistic mz values (0-1000 range, normalized)
     peak_mz = torch.rand(total_B, N, device=device).sort(dim=-1).values
     peak_intensity = torch.rand(total_B, N, device=device)
-    precursor_mz = torch.rand(total_B, device=device)
-
     # ~80% valid peaks
     valid_mask = torch.rand(total_B, N, device=device) < 0.8
 
     return {
         "fused_mz": peak_mz,
         "fused_intensity": peak_intensity,
-        "fused_precursor_mz": precursor_mz,
         "fused_valid_mask": valid_mask,
         "fused_masked_positions": torch.zeros(total_B, N, device=device, dtype=torch.bool),
     }
@@ -89,10 +85,9 @@ def diagnose_encoder(model: PeakSetSIGReg, batch: dict[str, torch.Tensor]):
     mz = batch["fused_mz"]
     intensity = batch["fused_intensity"]
     valid_mask = batch["fused_valid_mask"]
-    precursor_mz = batch["fused_precursor_mz"]
 
     # Step 1: Embedder output
-    x = encoder.embedder(mz, intensity, precursor_mz)
+    x = encoder.embedder(mz, intensity)
     _report("embedder_out", x, valid_mask)
 
     # Step 2: Per-block activations

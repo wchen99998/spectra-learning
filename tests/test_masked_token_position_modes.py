@@ -4,9 +4,9 @@ from models.model import PeakSetSIGReg
 
 
 def _build_model(
-    position_mode: str,
     *,
-    attention_mode: str = "bidirectional",
+    num_local_views: int = 0,
+    predictor_layers: int = 2,
 ) -> PeakSetSIGReg:
     torch.manual_seed(0)
     model = PeakSetSIGReg(
@@ -17,130 +17,66 @@ def _build_model(
         feature_mlp_hidden_dim=32,
         encoder_use_rope=True,
         pooling_type="mean",
-        multicrop_num_local_views=0,
-        use_masked_token_input=True,
-        masked_token_position_mode=position_mode,
-        masked_token_attention_mode=attention_mode,
+        multicrop_num_local_views=num_local_views,
+        masked_token_loss_weight=1.0,
+        masked_latent_predictor_num_layers=predictor_layers,
     )
     model.eval()
     return model
 
 
 @torch.no_grad()
-def test_masked_mz_position_mode_depends_on_masked_mz():
-    model = _build_model("mz")
-    peak_mz = torch.tensor([[0.10, 0.20, 0.30, 0.40, 0.50, 0.60]])
-    peak_intensity = torch.tensor([[0.8, 0.7, 0.6, 0.5, 0.4, 0.3]])
-    valid_mask = torch.ones_like(peak_mz, dtype=torch.bool)
-    precursor_mz = torch.tensor([0.9])
-    masked_positions = torch.tensor([[False, False, False, True, False, False]])
+def test_predictor_masked_rope_ignores_masked_mz():
+    model = _build_model(predictor_layers=0)
+    local_token_emb = torch.randn(1, 6, model.model_dim)
+    local_valid = torch.ones(1, 6, dtype=torch.bool)
+    local_masked = torch.tensor([[False, False, True, False, False, False]])
+    local_mz = torch.tensor([[0.10, 0.20, 0.30, 0.40, 0.50, 0.60]])
+    local_mz_alt = local_mz.clone()
+    local_mz_alt[:, 2] = 0.95
 
-    peak_mz_alt = peak_mz.clone()
-    peak_mz_alt[:, 3] = 0.95
+    out_1 = model.predict_masked_latents(local_token_emb, local_valid, local_mz, local_masked)
+    out_2 = model.predict_masked_latents(local_token_emb, local_valid, local_mz_alt, local_masked)
 
-    out_1 = model.encoder(
-        peak_mz,
-        peak_intensity,
-        valid_mask=valid_mask,
-        precursor_mz=precursor_mz,
-        masked_positions=masked_positions,
-        mask_token=model.mask_token,
-    )
-    out_2 = model.encoder(
-        peak_mz_alt,
-        peak_intensity,
-        valid_mask=valid_mask,
-        precursor_mz=precursor_mz,
-        masked_positions=masked_positions,
-        mask_token=model.mask_token,
-    )
-
-    masked_diff = (out_1[:, 3, :] - out_2[:, 3, :]).abs().mean()
-    assert float(masked_diff) > 1e-3
+    diff = (out_1 - out_2).abs().mean()
+    assert float(diff) < 1e-6
 
 
 @torch.no_grad()
-def test_masked_index_position_mode_ignores_masked_mz():
-    model = _build_model("index")
-    peak_mz = torch.tensor([[0.10, 0.20, 0.30, 0.40, 0.50, 0.60]])
-    peak_intensity = torch.tensor([[0.8, 0.7, 0.6, 0.5, 0.4, 0.3]])
-    valid_mask = torch.ones_like(peak_mz, dtype=torch.bool)
-    precursor_mz = torch.tensor([0.9])
-    masked_positions = torch.tensor([[False, False, False, True, False, False]])
+def test_predictor_unmasked_mz_changes_output():
+    model = _build_model(predictor_layers=2)
+    local_token_emb = torch.randn(1, 6, model.model_dim)
+    local_valid = torch.ones(1, 6, dtype=torch.bool)
+    local_masked = torch.tensor([[False, False, True, False, False, False]])
+    local_mz = torch.tensor([[0.10, 0.20, 0.30, 0.40, 0.50, 0.60]])
+    local_mz_alt = local_mz.clone()
+    local_mz_alt[:, 1] = 0.95
 
-    peak_mz_alt = peak_mz.clone()
-    peak_mz_alt[:, 3] = 0.95
+    out_1 = model.predict_masked_latents(local_token_emb, local_valid, local_mz, local_masked)
+    out_2 = model.predict_masked_latents(local_token_emb, local_valid, local_mz_alt, local_masked)
 
-    out_1 = model.encoder(
-        peak_mz,
-        peak_intensity,
-        valid_mask=valid_mask,
-        precursor_mz=precursor_mz,
-        masked_positions=masked_positions,
-        mask_token=model.mask_token,
-    )
-    out_2 = model.encoder(
-        peak_mz_alt,
-        peak_intensity,
-        valid_mask=valid_mask,
-        precursor_mz=precursor_mz,
-        masked_positions=masked_positions,
-        mask_token=model.mask_token,
-    )
-
-    masked_diff = (out_1[:, 3, :] - out_2[:, 3, :]).abs().mean()
-    assert float(masked_diff) < 1e-6
+    diff = (out_1 - out_2).abs().mean()
+    assert float(diff) > 1e-3
 
 
 @torch.no_grad()
-def test_masked_query_to_unmasked_kv_blocks_mask_token_leakage():
-    peak_mz = torch.tensor([[0.10, 0.20, 0.30, 0.40, 0.50, 0.60]])
-    peak_intensity = torch.tensor([[0.8, 0.7, 0.6, 0.5, 0.4, 0.3]])
-    valid_mask = torch.ones_like(peak_mz, dtype=torch.bool)
-    precursor_mz = torch.tensor([0.9])
-    masked_positions = torch.tensor([[False, False, False, True, False, False]])
+def test_mask_rank_embedding_distinguishes_masked_tokens():
+    model = _build_model(predictor_layers=0)
+    local_token_emb = torch.randn(1, 6, model.model_dim)
+    local_valid = torch.ones(1, 6, dtype=torch.bool)
+    local_masked = torch.tensor([[False, True, False, True, False, False]])
+    local_mz = torch.tensor([[0.10, 0.20, 0.30, 0.40, 0.50, 0.60]])
 
-    model = _build_model("index", attention_mode="masked_query_to_unmasked_kv")
-    out_1 = model.encoder(
-        peak_mz,
-        peak_intensity,
-        valid_mask=valid_mask,
-        precursor_mz=precursor_mz,
-        masked_positions=masked_positions,
-        mask_token=model.mask_token,
-    )
-    model.mask_token.data.add_(5.0)
-    out_2 = model.encoder(
-        peak_mz,
-        peak_intensity,
-        valid_mask=valid_mask,
-        precursor_mz=precursor_mz,
-        masked_positions=masked_positions,
-        mask_token=model.mask_token,
-    )
+    out = model.predict_masked_latents(local_token_emb, local_valid, local_mz, local_masked)
 
-    unmasked_positions = ~masked_positions
-    unmasked_diff = (out_1[unmasked_positions] - out_2[unmasked_positions]).abs().mean()
-    assert float(unmasked_diff) < 1e-6
+    masked_vec_1 = out[:, 1, :]
+    masked_vec_2 = out[:, 3, :]
+    assert not torch.allclose(masked_vec_1, masked_vec_2)
 
 
 @torch.no_grad()
 def test_forward_augmented_reports_local_global_l1_loss():
-    torch.manual_seed(0)
-    model = PeakSetSIGReg(
-        num_peaks=6,
-        model_dim=32,
-        encoder_num_layers=2,
-        encoder_num_heads=4,
-        feature_mlp_hidden_dim=32,
-        encoder_use_rope=True,
-        pooling_type="mean",
-        multicrop_num_local_views=1,
-        use_masked_token_input=True,
-        masked_token_position_mode="index",
-        masked_token_loss_weight=1.0,
-    )
-    model.eval()
+    model = _build_model(num_local_views=1)
 
     fused_mz = torch.tensor(
         [
@@ -169,7 +105,6 @@ def test_forward_augmented_reports_local_global_l1_loss():
             [False, False, True, False, False, False],
         ]
     )
-    fused_precursor_mz = torch.tensor([0.9, 0.9, 0.95, 0.95], dtype=torch.float32)
 
     metrics = model.forward_augmented(
         {
@@ -177,7 +112,6 @@ def test_forward_augmented_reports_local_global_l1_loss():
             "fused_intensity": fused_intensity,
             "fused_valid_mask": fused_valid_mask,
             "fused_masked_positions": fused_masked_positions,
-            "fused_precursor_mz": fused_precursor_mz,
         }
     )
     assert "local_global_l1_loss" in metrics
@@ -188,22 +122,8 @@ def test_forward_augmented_reports_local_global_l1_loss():
 
 @torch.no_grad()
 def test_local_global_l1_uses_masked_tokens_only():
-    torch.manual_seed(0)
-    model = PeakSetSIGReg(
-        num_peaks=6,
-        model_dim=32,
-        encoder_num_layers=2,
-        encoder_num_heads=4,
-        feature_mlp_hidden_dim=32,
-        encoder_use_rope=True,
-        pooling_type="mean",
-        multicrop_num_local_views=1,
-        use_masked_token_input=True,
-        masked_token_position_mode="index",
-        masked_token_loss_weight=1.0,
-        sigreg_lambda=0.0,
-    )
-    model.eval()
+    model = _build_model(num_local_views=1)
+    model.sigreg_lambda = 0.0
 
     fused_mz = torch.tensor(
         [
@@ -232,7 +152,6 @@ def test_local_global_l1_uses_masked_tokens_only():
             [False, False, True, False, False, False],
         ]
     )
-    fused_precursor_mz = torch.tensor([0.9, 0.9, 0.95, 0.95], dtype=torch.float32)
 
     metrics = model.forward_augmented(
         {
@@ -240,7 +159,6 @@ def test_local_global_l1_uses_masked_tokens_only():
             "fused_intensity": fused_intensity,
             "fused_valid_mask": fused_valid_mask,
             "fused_masked_positions": fused_masked_positions,
-            "fused_precursor_mz": fused_precursor_mz,
         }
     )
 
@@ -253,7 +171,6 @@ def test_local_global_l1_uses_masked_tokens_only():
         fused_mz,
         fused_intensity,
         valid_mask=encoder_visible_mask,
-        precursor_mz=fused_precursor_mz,
     )
     V = model.num_views
     B = fused_emb.shape[0] // V
@@ -276,12 +193,10 @@ def test_local_global_l1_uses_masked_tokens_only():
         local_token_emb,
     )
     token_mz = fused_mz.reshape(V, B, N)
-    token_precursor_mz = fused_precursor_mz.reshape(V, B)
     local_token_pred = model.predict_masked_latents(
         local_token_emb_remasked,
         local_valid,
         token_mz[1],
-        token_precursor_mz[1],
         local_masked,
     )
     per_token_l1 = (local_token_pred - global_token_emb).abs().mean(dim=-1)
@@ -297,22 +212,8 @@ def test_local_global_l1_uses_masked_tokens_only():
 
 @torch.no_grad()
 def test_global_view_masked_positions_are_ignored_for_context():
-    torch.manual_seed(0)
-    model = PeakSetSIGReg(
-        num_peaks=6,
-        model_dim=32,
-        encoder_num_layers=2,
-        encoder_num_heads=4,
-        feature_mlp_hidden_dim=32,
-        encoder_use_rope=True,
-        pooling_type="mean",
-        multicrop_num_local_views=1,
-        use_masked_token_input=True,
-        masked_token_position_mode="index",
-        masked_token_loss_weight=1.0,
-        sigreg_lambda=0.0,
-    )
-    model.eval()
+    model = _build_model(num_local_views=1)
+    model.sigreg_lambda = 0.0
 
     fused_mz = torch.tensor(
         [
@@ -329,18 +230,17 @@ def test_global_view_masked_positions_are_ignored_for_context():
         dtype=torch.float32,
     )
     fused_valid_mask = torch.ones_like(fused_mz, dtype=torch.bool)
-    fused_precursor_mz = torch.tensor([0.9, 0.95], dtype=torch.float32)
 
     masked_a = torch.tensor(
         [
-            [False, True, False, True, False, False],  # global row masks (should be ignored)
-            [False, False, True, False, False, False],  # local row mask (used)
+            [False, True, False, True, False, False],
+            [False, False, True, False, False, False],
         ]
     )
     masked_b = torch.tensor(
         [
-            [False, False, False, False, False, False],  # global row differs only here
-            [False, False, True, False, False, False],   # local row identical
+            [False, False, False, False, False, False],
+            [False, False, True, False, False, False],
         ]
     )
 
@@ -350,7 +250,6 @@ def test_global_view_masked_positions_are_ignored_for_context():
             "fused_intensity": fused_intensity,
             "fused_valid_mask": fused_valid_mask,
             "fused_masked_positions": masked_a,
-            "fused_precursor_mz": fused_precursor_mz,
         }
     )
     metrics_b = model.forward_augmented(
@@ -359,7 +258,6 @@ def test_global_view_masked_positions_are_ignored_for_context():
             "fused_intensity": fused_intensity,
             "fused_valid_mask": fused_valid_mask,
             "fused_masked_positions": masked_b,
-            "fused_precursor_mz": fused_precursor_mz,
         }
     )
 

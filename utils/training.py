@@ -35,14 +35,7 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         encoder_use_rope=bool(config.get("encoder_use_rope", False)),
         rope_mz_max=float(config.get("rope_mz_max", 1000.0)),
         rope_mz_precision=float(config.get("rope_mz_precision", 0.1)),
-        rope_complement_heads=config.get("rope_complement_heads", None),
         rope_modulo_2pi=bool(config.get("rope_modulo_2pi", True)),
-        use_masked_token_input=bool(config.get("use_masked_token_input", False)),
-        masked_token_position_mode=str(config.get("masked_token_position_mode", "index")),
-        masked_token_attention_mode=str(
-            config.get("masked_token_attention_mode", "bidirectional")
-        ),
-        masked_token_use_rope=bool(config.get("masked_token_use_rope", True)),
         masked_token_loss_weight=float(config.get("masked_token_loss_weight", 0.0)),
         masked_latent_predictor_num_layers=int(
             config.get("masked_latent_predictor_num_layers", 2)

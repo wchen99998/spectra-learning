@@ -42,7 +42,7 @@ python input_pipeline.py configs/gems_a_dataset.py
 
 ### Model (PeakSetSIGReg in `models/model.py`)
 
-- **PeakSetEncoder**: raw scalar peak features (`mz`, `neutral_loss`, `intensity`, `log1p(intensity)`) -> MLP embedder -> N non-causal TransformerBlocks -> RMSNorm. Uses mass-aware RoPE in transformer mode, including optional complement-head split (query neutral-loss vs key mass coordinates).
+- **PeakSetEncoder**: raw scalar peak features (`mz`, `intensity`, `log1p(intensity)`) -> MLP embedder -> N non-causal TransformerBlocks -> RMSNorm. Uses mass-aware RoPE on m/z only.
 - **PMA Pooling**: Multihead cross-attention with learned seed queries (`pool_query`) that attend to peak embeddings, producing a fixed-size representation regardless of valid peak count.
 - **Projector**: 3-layer MLP (Linear -> RMSNorm -> SiLU) x2, maps pooled embeddings to lower-dim space for the loss.
 - **BCSLoss** (`models/losses.py`): Projects both views via random slicing directions, tests Gaussianity using Epps-Pulley characteristic function distance. Combined loss = MSE(z1, z2) + lambda * BCS.
@@ -57,7 +57,6 @@ The TF implementation in `input_pipeline.py` runs augmentation in the data pipel
 
 Training batches contain fused stacked tensors:
 - `fused_mz`, `fused_intensity`: float32 [V*B, N]
-- `fused_precursor_mz`: float32 [V*B]
 - `fused_valid_mask`, `fused_masked_positions`, `fused_padding_mask`: bool [V*B, N]
 - `peak_padding_mask`: bool [B, N]
 

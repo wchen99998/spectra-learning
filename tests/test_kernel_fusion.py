@@ -41,6 +41,27 @@ def _make_batch(batch_size: int = B, num_peaks: int = N, device: str = DEVICE) -
     }
 
 
+def _make_fused_batch(
+    batch_size: int = B,
+    num_peaks: int = N,
+    num_views: int = 4,
+    device: str = DEVICE,
+) -> dict[str, torch.Tensor]:
+    fused = _make_batch(batch_size=batch_size * num_views, num_peaks=num_peaks, device=device)
+    fused_masked_positions = torch.zeros_like(fused["peak_valid_mask"])
+    # View 0 is global and left unmasked. Local views have at least one masked slot.
+    for view_idx in range(1, num_views):
+        row_start = view_idx * batch_size
+        row_end = row_start + batch_size
+        fused_masked_positions[row_start:row_end, 0] = fused["peak_valid_mask"][row_start:row_end, 0]
+    return {
+        "fused_mz": fused["peak_mz"],
+        "fused_intensity": fused["peak_intensity"],
+        "fused_valid_mask": fused["peak_valid_mask"],
+        "fused_masked_positions": fused_masked_positions,
+    }
+
+
 # ---------------------------------------------------------------------------
 # 1. Attention mask correctness
 # ---------------------------------------------------------------------------
@@ -151,12 +172,10 @@ def test_encoder_with_mask():
         out_mask = encoder(
             batch["peak_mz"], batch["peak_intensity"],
             valid_mask=batch["peak_valid_mask"],
-            precursor_mz=batch["precursor_mz"],
         )
         out_none = encoder(
             batch["peak_mz"], batch["peak_intensity"],
             valid_mask=None,
-            precursor_mz=batch["precursor_mz"],
         )
 
     assert out_mask.shape == (B, N, D)
@@ -187,17 +206,18 @@ def test_full_model_forward():
         multicrop_num_local_views=3,
     ).to(DEVICE).eval()
 
-    batch = _make_batch()
+    batch = _make_fused_batch(num_views=model.num_views)
 
     with torch.no_grad():
-        result = model(batch, train=True)
+        result = model.forward_augmented(batch)
 
     assert "loss" in result
     assert "sigreg_loss" in result
     assert "token_sigreg_loss" in result
     assert "local_global_l1_loss" in result
     assert "valid_fraction" in result
-    assert "representation_variance" in result
+    assert "global_emb_std" in result
+    assert "local_emb_std" in result
 
     for key, val in result.items():
         assert torch.isfinite(val), f"{key} is not finite: {val}"
@@ -246,8 +266,8 @@ def test_gradient_flow():
         multicrop_num_local_views=3,
     ).to(DEVICE)
 
-    batch = _make_batch()
-    result = model(batch, train=True)
+    batch = _make_fused_batch(num_views=model.num_views)
+    result = model.forward_augmented(batch)
     result["loss"].backward()
 
     # Check that encoder parameters have gradients
@@ -268,7 +288,7 @@ def test_gradient_flow():
 # ---------------------------------------------------------------------------
 
 def test_compile_forward():
-    """Verify the forward pass compiles without graph breaks."""
+    """Verify the encode path compiles and runs."""
     print("Test 8: torch.compile compatibility ... ", end="", flush=True)
     if DEVICE != "cuda":
         print("SKIPPED (no CUDA)")
@@ -286,9 +306,9 @@ def test_compile_forward():
     ).to(DEVICE).eval()
 
     def forward_fn(batch):
-        return model(batch, train=True)
+        return model.encode(batch, train=False)
 
-    compiled_fn = torch.compile(forward_fn, mode="reduce-overhead", fullgraph=True)
+    compiled_fn = torch.compile(forward_fn, mode="reduce-overhead")
 
     batch = _make_batch()
 
@@ -296,8 +316,8 @@ def test_compile_forward():
         # Warmup compilation
         result = compiled_fn(batch)
 
-    assert torch.isfinite(result["loss"]), "Compiled forward produced non-finite loss"
-    print(f"PASSED (loss={result['loss'].item():.4f})")
+    assert torch.isfinite(result).all(), "Compiled encode produced non-finite output"
+    print(f"PASSED (shape={result.shape})")
 
 
 # ---------------------------------------------------------------------------

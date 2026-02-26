@@ -43,7 +43,6 @@ def _make_fused_batch(
         "fused_mz": mz,
         "fused_intensity": intensity,
         "fused_valid_mask": valid,
-        "fused_precursor_mz": torch.rand(VB),
         "fused_masked_positions": torch.zeros(VB, num_peaks, dtype=torch.bool),
     }
 
@@ -132,8 +131,6 @@ class SIGRegForwardTests(unittest.TestCase):
             pooling_type="mean",
             sigreg_lambda=0.0,
             multicrop_num_local_views=1,
-            use_masked_token_input=True,
-            masked_token_position_mode="index",
             masked_token_loss_weight=1.0,
         )
         fused_mz = torch.tensor(
@@ -164,15 +161,12 @@ class SIGRegForwardTests(unittest.TestCase):
                 [False, False, False, True, False, False],
             ]
         )
-        fused_precursor_mz = torch.tensor([0.95, 0.95, 0.95, 0.95], dtype=torch.float32)
-
         loss = model.forward_augmented(
             {
                 "fused_mz": fused_mz,
                 "fused_intensity": fused_intensity,
                 "fused_valid_mask": fused_valid_mask,
                 "fused_masked_positions": fused_masked_positions,
-                "fused_precursor_mz": fused_precursor_mz,
             }
         )["loss"]
         loss.backward()
@@ -192,13 +186,11 @@ class SIGRegForwardTests(unittest.TestCase):
                 batch["peak_mz"],
                 batch["peak_intensity"],
                 valid_mask=batch["peak_valid_mask"],
-                precursor_mz=batch["precursor_mz"],
             )
             emb_with_rope = model_with_rope.encoder(
                 batch["peak_mz"],
                 batch["peak_intensity"],
                 valid_mask=batch["peak_valid_mask"],
-                precursor_mz=batch["precursor_mz"],
             )
 
         self.assertFalse(torch.allclose(emb_no_rope, emb_with_rope))
@@ -270,7 +262,6 @@ class MassAwareRoPETests(unittest.TestCase):
         self,
         *,
         rope_mz_precision: float = 0.1,
-        rope_complement_heads: int | None = None,
         encoder_num_kv_heads: int = 4,
     ) -> PeakSetSIGReg:
         return PeakSetSIGReg(
@@ -284,7 +275,6 @@ class MassAwareRoPETests(unittest.TestCase):
             encoder_use_rope=True,
             rope_mz_max=1000.0,
             rope_mz_precision=rope_mz_precision,
-            rope_complement_heads=rope_complement_heads,
             rope_modulo_2pi=True,
             pooling_type="mean",
         )
@@ -305,34 +295,9 @@ class MassAwareRoPETests(unittest.TestCase):
         self.assertTrue(torch.isclose(omega[0], torch.tensor(expected_max), rtol=1e-5, atol=1e-6))
         self.assertTrue(torch.isclose(omega[-1], torch.tensor(expected_min), rtol=1e-5, atol=1e-6))
 
-    def test_complement_head_split_changes_output(self):
-        batch = _make_batch(batch_size=2)
-
-        torch.manual_seed(2026)
-        model_all_mass = self._build_encoder_model(rope_complement_heads=0)
-        torch.manual_seed(2026)
-        model_split = self._build_encoder_model(rope_complement_heads=2)
-
-        with torch.no_grad():
-            emb_all_mass = model_all_mass.encoder(
-                batch["peak_mz"],
-                batch["peak_intensity"],
-                valid_mask=batch["peak_valid_mask"],
-                precursor_mz=batch["precursor_mz"],
-            )
-            emb_split = model_split.encoder(
-                batch["peak_mz"],
-                batch["peak_intensity"],
-                valid_mask=batch["peak_valid_mask"],
-                precursor_mz=batch["precursor_mz"],
-            )
-
-        self.assertFalse(torch.allclose(emb_all_mass, emb_split))
-
-    def test_rope_with_gqa_and_complement_heads_is_finite(self):
+    def test_rope_with_gqa_is_finite(self):
         model = self._build_encoder_model(
             rope_mz_precision=0.1,
-            rope_complement_heads=2,
             encoder_num_kv_heads=2,
         )
         batch = _make_batch(batch_size=3)
@@ -341,7 +306,6 @@ class MassAwareRoPETests(unittest.TestCase):
                 batch["peak_mz"],
                 batch["peak_intensity"],
                 valid_mask=batch["peak_valid_mask"],
-                precursor_mz=batch["precursor_mz"],
             )
         self.assertTrue(torch.isfinite(emb).all())
 

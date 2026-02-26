@@ -55,7 +55,7 @@ def _partition_params_for_muon(
 # ---------------------------------------------------------------------------
 
 _TRAIN_BATCH_KEYS = frozenset({
-    "fused_mz", "fused_intensity", "fused_precursor_mz",
+    "fused_mz", "fused_intensity",
     "fused_valid_mask", "fused_masked_positions",
 })
 

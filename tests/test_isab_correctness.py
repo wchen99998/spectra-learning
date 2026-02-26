@@ -44,7 +44,7 @@ def test_isab_shape_sanity():
         "precursor_mz": torch.rand(B) * 500 + 100,
     }
 
-    enc_out = model.encoder(batch["peak_mz"], batch["peak_intensity"], batch["peak_valid_mask"], precursor_mz=batch["precursor_mz"])
+    enc_out = model.encoder(batch["peak_mz"], batch["peak_intensity"], batch["peak_valid_mask"])
     assert enc_out.shape == (B, N, 64), f"Wrong encoder shape: {enc_out.shape}"
     assert torch.isfinite(enc_out).all(), "Non-finite encoder output"
 
@@ -99,15 +99,14 @@ def test_isab_permutation_equivariance():
     peak_intensity = torch.rand(B, N)
     valid_mask = torch.ones(B, N, dtype=torch.bool)
 
-    precursor_mz = torch.rand(B) * 500 + 100
-    out1 = model.encoder(peak_mz, peak_intensity, valid_mask, precursor_mz=precursor_mz)
+    out1 = model.encoder(peak_mz, peak_intensity, valid_mask)
 
     perm = torch.randperm(N)
     peak_mz_perm = peak_mz[:, perm]
     peak_intensity_perm = peak_intensity[:, perm]
     valid_mask_perm = valid_mask[:, perm]
 
-    out2 = model.encoder(peak_mz_perm, peak_intensity_perm, valid_mask_perm, precursor_mz=precursor_mz)
+    out2 = model.encoder(peak_mz_perm, peak_intensity_perm, valid_mask_perm)
 
     max_diff = (out1[:, perm] - out2).abs().max().item()
     assert max_diff < 1e-4, f"Not equivariant: max_diff={max_diff}"
@@ -127,8 +126,7 @@ def test_isab_all_padding_finite():
     peak_intensity = torch.rand(B, N)
     valid_mask = torch.zeros(B, N, dtype=torch.bool)
 
-    precursor_mz = torch.rand(B) * 500 + 100
-    out = model.encoder(peak_mz, peak_intensity, valid_mask, precursor_mz=precursor_mz)
+    out = model.encoder(peak_mz, peak_intensity, valid_mask)
     assert torch.isfinite(out).all(), f"Non-finite outputs with all-padding: nan={torch.isnan(out).any()}, inf={torch.isinf(out).any()}"
     print("PASSED")
 

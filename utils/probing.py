@@ -97,7 +97,6 @@ def _extract_probe_features(
         batch["peak_mz"],
         batch["peak_intensity"],
         valid_mask=batch["peak_valid_mask"],
-        precursor_mz=batch["precursor_mz"],
     )
     if feature_source == "encoder":
         return embeddings, batch["peak_valid_mask"]

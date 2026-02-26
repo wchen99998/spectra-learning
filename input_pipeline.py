@@ -685,7 +685,6 @@ def _augment_multicrop_batch_tf(
         peak_mz = batch["peak_mz"]
         peak_intensity = batch["peak_intensity"]
         peak_valid_mask = batch["peak_valid_mask"]
-        precursor_mz = batch["precursor_mz"]
 
         all_mz = []
         all_int = []
@@ -720,7 +719,6 @@ def _augment_multicrop_batch_tf(
         out = dict(batch)
         out["fused_mz"] = tf.concat(all_mz, axis=0)
         out["fused_intensity"] = tf.concat(all_int, axis=0)
-        out["fused_precursor_mz"] = tf.tile(precursor_mz, [num_views])
         out["fused_valid_mask"] = tf.concat(all_valid, axis=0)
         out["fused_masked_positions"] = tf.concat(all_masked, axis=0)
         out["fused_padding_mask"] = tf.logical_not(out["fused_valid_mask"])

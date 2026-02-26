@@ -197,7 +197,7 @@ def _encode_batch_impl(
 ) -> torch.Tensor:
     embeddings = model.encoder(
         peak_mz, peak_intensity,
-        valid_mask=peak_valid_mask, precursor_mz=precursor_mz,
+        valid_mask=peak_valid_mask,
     )
     return model.pool(embeddings, peak_valid_mask)
 
@@ -211,7 +211,7 @@ def _encode_batch_mean_pool_impl(
 ) -> torch.Tensor:
     embeddings = model.encoder(
         peak_mz, peak_intensity,
-        valid_mask=peak_valid_mask, precursor_mz=precursor_mz,
+        valid_mask=peak_valid_mask,
     )
     # Mean pool over valid (non-padding) tokens.
     mask = peak_valid_mask.unsqueeze(-1).float()  # [B, N, 1]
@@ -830,11 +830,10 @@ def _encode_tokens_impl(
     peak_mz: torch.Tensor,
     peak_intensity: torch.Tensor,
     peak_valid_mask: torch.Tensor,
-    precursor_mz: torch.Tensor,
 ) -> torch.Tensor:
     return model.encoder(
         peak_mz, peak_intensity,
-        valid_mask=peak_valid_mask, precursor_mz=precursor_mz,
+        valid_mask=peak_valid_mask,
     )
 
 
@@ -971,20 +970,19 @@ def _neural_probes(
         probe.train()
         epoch_loss = 0.0
         epoch_count = 0
-        for peak_mz_b, peak_int_b, mask_b, prec_b, targets_b in train_loader:
+        for peak_mz_b, peak_int_b, mask_b, _, targets_b in train_loader:
             peak_mz_b = peak_mz_b.to(device, non_blocking=True)
             peak_int_b = peak_int_b.to(device, non_blocking=True)
             mask_b = mask_b.to(device, non_blocking=True)
-            prec_b = prec_b.to(device, non_blocking=True)
             targets_b = targets_b.to(device, non_blocking=True)
 
             with torch.no_grad():
                 torch.compiler.cudagraph_mark_step_begin()
                 if autocast_dtype is not None:
                     with torch.autocast(device_type="cuda", dtype=autocast_dtype):
-                        tokens = compiled_encoder(backbone, peak_mz_b, peak_int_b, mask_b, prec_b)
+                        tokens = compiled_encoder(backbone, peak_mz_b, peak_int_b, mask_b)
                 else:
-                    tokens = compiled_encoder(backbone, peak_mz_b, peak_int_b, mask_b, prec_b)
+                    tokens = compiled_encoder(backbone, peak_mz_b, peak_int_b, mask_b)
 
             logits = probe(tokens.float(), mask_b)
 
@@ -1016,19 +1014,18 @@ def _neural_probes(
     all_targets: dict[str, list[np.ndarray]] = {name: [] for name in all_task_names}
 
     with torch.no_grad():
-        for peak_mz_b, peak_int_b, mask_b, prec_b, targets_b in test_loader:
+        for peak_mz_b, peak_int_b, mask_b, _, targets_b in test_loader:
             peak_mz_b = peak_mz_b.to(device, non_blocking=True)
             peak_int_b = peak_int_b.to(device, non_blocking=True)
             mask_b = mask_b.to(device, non_blocking=True)
-            prec_b = prec_b.to(device, non_blocking=True)
             targets_b = targets_b.to(device, non_blocking=True)
 
             torch.compiler.cudagraph_mark_step_begin()
             if autocast_dtype is not None:
                 with torch.autocast(device_type="cuda", dtype=autocast_dtype):
-                    tokens = compiled_encoder(backbone, peak_mz_b, peak_int_b, mask_b, prec_b)
+                    tokens = compiled_encoder(backbone, peak_mz_b, peak_int_b, mask_b)
             else:
-                tokens = compiled_encoder(backbone, peak_mz_b, peak_int_b, mask_b, prec_b)
+                tokens = compiled_encoder(backbone, peak_mz_b, peak_int_b, mask_b)
 
             logits = probe(tokens.float(), mask_b)
 
