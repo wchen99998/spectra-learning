@@ -437,11 +437,23 @@ class PeakSetSIGReg(nn.Module):
         nn.init.normal_(self.latent_mask_token, std=0.02)
         self.predictor_mask_rank_embedding = nn.Embedding(self.num_peaks, self.sigreg_dim)
         nn.init.normal_(self.predictor_mask_rank_embedding.weight, std=0.02)
+        predictor_max_heads = min(int(encoder_num_heads), self.sigreg_dim // 16)
+        self.predictor_num_heads = max(1, predictor_max_heads)
+        while self.sigreg_dim % self.predictor_num_heads != 0:
+            self.predictor_num_heads -= 1
+        predictor_head_dim = self.sigreg_dim // self.predictor_num_heads
+        predictor_omega = _build_mass_rope_omega(
+            head_dim=predictor_head_dim,
+            mz_max=self.encoder.rope_mz_max,
+            mz_precision=self.encoder.rope_mz_precision,
+            device=torch.device("cpu"),
+        )
+        self.register_buffer("predictor_rope_omega", predictor_omega, persistent=False)
         self.masked_latent_predictor = _build_non_causal_blocks(
             dim=self.sigreg_dim,
             num_layers=self.masked_latent_predictor_num_layers,
-            num_heads=encoder_num_heads,
-            num_kv_heads=encoder_num_kv_heads,
+            num_heads=self.predictor_num_heads,
+            num_kv_heads=None,
             attention_mlp_multiple=attention_mlp_multiple,
             use_rope=encoder_use_rope,
             qk_norm=encoder_qk_norm,
@@ -486,7 +498,7 @@ class PeakSetSIGReg(nn.Module):
         if self.encoder.use_rope:
             mz_da = local_mz.float() * self.encoder.rope_mz_max
             mz_da = torch.where(local_masked_positions, torch.zeros_like(mz_da), mz_da)
-            omega = self.encoder.rope_omega
+            omega = self.predictor_rope_omega
             if omega.device != local_mz.device:
                 omega = omega.to(device=local_mz.device)
             freqs_cos, freqs_sin = _build_rope_freqs_from_positions(
