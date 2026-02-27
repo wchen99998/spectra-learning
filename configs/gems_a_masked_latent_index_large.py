@@ -13,7 +13,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_latent_predictor_num_layers = 4
     cfg.multicrop_local_keep_fraction = 0.5
     cfg.sigreg_projector_dim = 128
-    cfg.use_projector_for_losses = True
 
     cfg.masked_token_loss_type = "l2"
     cfg.num_epochs = 20
