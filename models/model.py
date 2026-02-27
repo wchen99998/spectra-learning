@@ -647,41 +647,51 @@ class PeakSetSIGReg(nn.Module):
             dtype=fused_emb.dtype,
             device=fused_emb.device,
         )
-        reg_num = torch.zeros((), dtype=fused_emb.dtype, device=fused_emb.device)
-        reg_den = torch.zeros((), dtype=fused_emb.dtype, device=fused_emb.device)
-        for local_view_idx in range(target_global_view_idx + 1, V):
-            local_token_emb = token_emb[local_view_idx]  # [B, N, D]
-            local_valid = token_valid[local_view_idx]  # [B, N]
-            local_mask = token_masked[local_view_idx]  # [B, N]
-            # Re-mask local latents at masked slots before prediction so the
-            # predictor must infer masked content from surrounding context.
-            local_token_emb_remasked = torch.where(
-                local_mask.unsqueeze(-1),
-                latent_mask_token,
-                local_token_emb,
+        L = V - 1  # number of local views
+        # Batch all local views for a single predictor pass instead of
+        # iterating per-view, doubling the effective batch size for GEMMs
+        # and halving the number of kernel launches.
+        all_local_emb = token_emb[target_global_view_idx + 1:]     # [L, B, N, D]
+        all_local_valid = token_valid[target_global_view_idx + 1:]  # [L, B, N]
+        all_local_mask = token_masked[target_global_view_idx + 1:]  # [L, B, N]
+        all_local_mz = token_mz[target_global_view_idx + 1:]       # [L, B, N]
+        all_local_emb_flat = all_local_emb.reshape(L * B, N, D)
+        all_local_valid_flat = all_local_valid.reshape(L * B, N)
+        all_local_mask_flat = all_local_mask.reshape(L * B, N)
+        all_local_mz_flat = all_local_mz.reshape(L * B, N)
+
+        # Re-mask local latents at masked slots before prediction so the
+        # predictor must infer masked content from surrounding context.
+        all_local_remasked = torch.where(
+            all_local_mask_flat.unsqueeze(-1),
+            latent_mask_token,
+            all_local_emb_flat,
+        )
+        all_local_pred = self.predict_masked_latents(
+            all_local_remasked,
+            all_local_valid_flat,
+            all_local_mz_flat,
+            all_local_mask_flat,
+        )
+        if self.use_projector_for_losses:
+            all_local_pred_for_loss = self.sigreg_projector(all_local_pred)
+        else:
+            all_local_pred_for_loss = all_local_pred
+        # Compute per-token regression loss across all local views at once.
+        # Reshape to [L, B, N, D_loss] for broadcasting against [B, N, D_loss].
+        all_local_pred_views = all_local_pred_for_loss.reshape(L, B, N, -1)
+        if self.masked_token_loss_type == "l1":
+            per_token_reg = (all_local_pred_views - global_token_target.unsqueeze(0)).abs().mean(dim=-1)  # [L, B, N]
+        elif self.masked_token_loss_type == "l2":
+            per_token_reg = (all_local_pred_views - global_token_target.unsqueeze(0)).square().mean(dim=-1)  # [L, B, N]
+        else:
+            raise ValueError(
+                f"Unsupported masked_token_loss_type: {self.masked_token_loss_type}. "
+                "Expected one of: 'l1', 'l2'."
             )
-            local_token_pred = self.predict_masked_latents(
-                local_token_emb_remasked,
-                local_valid,
-                token_mz[local_view_idx],
-                local_mask,
-            )
-            if self.use_projector_for_losses:
-                local_token_pred_for_loss = self.sigreg_projector(local_token_pred)
-            else:
-                local_token_pred_for_loss = local_token_pred
-            if self.masked_token_loss_type == "l1":
-                per_token_reg = (local_token_pred_for_loss - global_token_target).abs().mean(dim=-1)  # [B, N]
-            elif self.masked_token_loss_type == "l2":
-                per_token_reg = (local_token_pred_for_loss - global_token_target).square().mean(dim=-1)  # [B, N]
-            else:
-                raise ValueError(
-                    f"Unsupported masked_token_loss_type: {self.masked_token_loss_type}. "
-                    "Expected one of: 'l1', 'l2'."
-                )
-            local_mask_float = local_mask.float()
-            reg_num = reg_num + (per_token_reg * local_mask_float).sum()
-            reg_den = reg_den + local_mask_float.sum()
+        all_local_mask_float = all_local_mask.float()  # [L, B, N]
+        reg_num = (per_token_reg * all_local_mask_float).sum()
+        reg_den = all_local_mask_float.sum()
         local_global_loss = reg_num / reg_den.clamp_min(1.0)
 
         if self.sigreg_lambda_warmup_steps > 0:
@@ -690,29 +700,36 @@ class PeakSetSIGReg(nn.Module):
             sigreg_lambda_current = fused_emb.new_tensor(self.sigreg_lambda)
 
         jepa_term = self.masked_token_loss_weight * local_global_loss
-        local_emb_by_view = token_emb[target_global_view_idx + 1:]  # [V-1, B, N, D]
-        local_visible_mask_by_view = encoder_visible_mask.reshape(V, B, N)[target_global_view_idx + 1:]
-        local_emb = local_emb_by_view.reshape(-1, N, D)  # [B*(V-1), N, D]
-        local_visible_mask = local_visible_mask_by_view.reshape(-1, N)
-        if self.use_projector_for_losses:
-            local_regularizer_emb = self.sigreg_projector(local_emb)
-        else:
-            local_regularizer_emb = local_emb
-        local_projected_pooled_emb = self._mean_pool(
-            local_regularizer_emb,
-            local_visible_mask,
-        )  # [B*(V-1), D_reg]
 
-        if self.representation_regularizer == "sigreg":
-            if self.sigreg_lambda > 0:
-                token_sigreg_loss = self.sigreg(local_projected_pooled_emb)
-                sigreg_term = sigreg_lambda_current * token_sigreg_loss
+        # Only compute projector + pool + regularizer when actually needed.
+        if self.representation_regularizer == "sigreg" and self.sigreg_lambda > 0:
+            local_emb_by_view = token_emb[target_global_view_idx + 1:]  # [V-1, B, N, D]
+            local_visible_mask_by_view = encoder_visible_mask.reshape(V, B, N)[target_global_view_idx + 1:]
+            local_emb = local_emb_by_view.reshape(-1, N, D)
+            local_visible_mask = local_visible_mask_by_view.reshape(-1, N)
+            if self.use_projector_for_losses:
+                local_regularizer_emb = self.sigreg_projector(local_emb)
             else:
-                token_sigreg_loss = fused_emb.new_tensor(0.0)
-                sigreg_term = fused_emb.new_tensor(0.0)
+                local_regularizer_emb = local_emb
+            local_projected_pooled_emb = self._mean_pool(
+                local_regularizer_emb, local_visible_mask,
+            )
+            token_sigreg_loss = self.sigreg(local_projected_pooled_emb)
+            sigreg_term = sigreg_lambda_current * token_sigreg_loss
             vicreg_loss = fused_emb.new_tensor(0.0)
             vicreg_term = fused_emb.new_tensor(0.0)
         elif self.representation_regularizer == "vicreg":
+            local_emb_by_view = token_emb[target_global_view_idx + 1:]  # [V-1, B, N, D]
+            local_visible_mask_by_view = encoder_visible_mask.reshape(V, B, N)[target_global_view_idx + 1:]
+            local_emb = local_emb_by_view.reshape(-1, N, D)
+            local_visible_mask = local_visible_mask_by_view.reshape(-1, N)
+            if self.use_projector_for_losses:
+                local_regularizer_emb = self.sigreg_projector(local_emb)
+            else:
+                local_regularizer_emb = local_emb
+            local_projected_pooled_emb = self._mean_pool(
+                local_regularizer_emb, local_visible_mask,
+            )
             local_projected_pooled_by_view = local_projected_pooled_emb.reshape(
                 V - 1, B, local_projected_pooled_emb.shape[-1],
             )
@@ -723,16 +740,12 @@ class PeakSetSIGReg(nn.Module):
             vicreg_term = fused_emb.new_tensor(self.vicreg_beta) * vicreg_loss
             token_sigreg_loss = fused_emb.new_tensor(0.0)
             sigreg_term = fused_emb.new_tensor(0.0)
-        elif self.representation_regularizer == "none":
+        else:
+            # "none" or sigreg with lambda=0: skip projector + pool entirely.
             token_sigreg_loss = fused_emb.new_tensor(0.0)
             sigreg_term = fused_emb.new_tensor(0.0)
             vicreg_loss = fused_emb.new_tensor(0.0)
             vicreg_term = fused_emb.new_tensor(0.0)
-        else:
-            raise ValueError(
-                f"Unsupported representation_regularizer: {self.representation_regularizer}. "
-                "Expected one of: 'sigreg', 'vicreg', 'none'."
-            )
 
         regularizer_term = sigreg_term + vicreg_term
         loss = jepa_term + regularizer_term
