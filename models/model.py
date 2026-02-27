@@ -723,10 +723,15 @@ class PeakSetSIGReg(nn.Module):
             vicreg_term = fused_emb.new_tensor(self.vicreg_beta) * vicreg_loss
             token_sigreg_loss = fused_emb.new_tensor(0.0)
             sigreg_term = fused_emb.new_tensor(0.0)
+        elif self.representation_regularizer == "none":
+            token_sigreg_loss = fused_emb.new_tensor(0.0)
+            sigreg_term = fused_emb.new_tensor(0.0)
+            vicreg_loss = fused_emb.new_tensor(0.0)
+            vicreg_term = fused_emb.new_tensor(0.0)
         else:
             raise ValueError(
                 f"Unsupported representation_regularizer: {self.representation_regularizer}. "
-                "Expected one of: 'sigreg', 'vicreg'."
+                "Expected one of: 'sigreg', 'vicreg', 'none'."
             )
 
         regularizer_term = sigreg_term + vicreg_term

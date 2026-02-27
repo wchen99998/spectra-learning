@@ -13,7 +13,6 @@ from torch.nn.attention.flex_attention import (
 )
 
 
-
 def create_padding_block_mask(valid_mask: torch.Tensor) -> BlockMask:
     """Create a BlockMask that masks out padding positions in attention.
 

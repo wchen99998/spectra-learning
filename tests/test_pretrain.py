@@ -164,6 +164,24 @@ class SIGRegForwardTests(unittest.TestCase):
             self.assertIn("regularizer_loss", metrics)
             self.assertIn("regularizer_term", metrics)
 
+    def test_forward_without_anticollapse_regularizer(self):
+        model = self._build_model(
+            representation_regularizer=None,
+            masked_token_loss_weight=1.0,
+            sigreg_lambda=0.1,
+            vicreg_beta=1e-3,
+        )
+        batch = _make_fused_batch(num_views=model.num_views)
+        metrics = model.forward_augmented(batch)
+        self.assertAlmostEqual(float(metrics["sigreg_loss"]), 0.0, places=7)
+        self.assertAlmostEqual(float(metrics["token_sigreg_loss"]), 0.0, places=7)
+        self.assertAlmostEqual(float(metrics["vicreg_loss"]), 0.0, places=7)
+        self.assertAlmostEqual(float(metrics["sigreg_term"]), 0.0, places=7)
+        self.assertAlmostEqual(float(metrics["vicreg_term"]), 0.0, places=7)
+        self.assertAlmostEqual(float(metrics["regularizer_term"]), 0.0, places=7)
+        self.assertAlmostEqual(float(metrics["regularizer_loss"]), 0.0, places=7)
+        self.assertTrue(torch.allclose(metrics["loss"], metrics["jepa_term"]))
+
     def test_encode_output_shape(self):
         model = self._build_model()
         batch = _make_batch(batch_size=3)
