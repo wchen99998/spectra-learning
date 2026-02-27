@@ -7,7 +7,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg = get_base_config()
     cfg.batch_size = 128
     cfg.masked_token_loss_weight = 1.0
-    cfg.use_ema_teacher_target = False
+    cfg.use_ema_teacher_target = True
     cfg.teacher_ema_decay = 0.99925
     cfg.grad_clip_norm = 1.0
     cfg.masked_latent_predictor_num_layers = 4
