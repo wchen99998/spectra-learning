@@ -174,6 +174,46 @@ class SIGRegForwardTests(unittest.TestCase):
         self.assertAlmostEqual(float(metrics["regularizer_loss"]), 0.0, places=7)
         self.assertTrue(torch.allclose(metrics["loss"], metrics["jepa_term"]))
 
+    def test_regularizer_feature_source_modes_sigreg(self):
+        modes = (
+            "projector_output",
+            "projector_pooled_output",
+            "encoder_output",
+            "encoder_pooled_output",
+        )
+        for mode in modes:
+            model = self._build_model(
+                representation_regularizer="sigreg",
+                regularizer_feature_source=mode,
+                sigreg_lambda=0.1,
+                masked_token_loss_weight=1.0,
+            )
+            batch = _make_fused_batch(num_views=model.num_views)
+            metrics = model.forward_augmented(batch)
+            self.assertTrue(torch.isfinite(metrics["loss"]).item(), mode)
+            self.assertTrue(torch.isfinite(metrics["sigreg_loss"]).item(), mode)
+
+    def test_regularizer_feature_source_modes_vicreg(self):
+        modes = (
+            "projector_output",
+            "projector_pooled_output",
+            "encoder_output",
+            "encoder_pooled_output",
+        )
+        for mode in modes:
+            model = self._build_model(
+                representation_regularizer="vicreg",
+                regularizer_feature_source=mode,
+                sigreg_lambda=0.0,
+                vicreg_beta=1e-3,
+                masked_token_loss_weight=1.0,
+                multicrop_num_local_views=3,
+            )
+            batch = _make_fused_batch(num_views=model.num_views)
+            metrics = model.forward_augmented(batch)
+            self.assertTrue(torch.isfinite(metrics["loss"]).item(), mode)
+            self.assertTrue(torch.isfinite(metrics["vicreg_loss"]).item(), mode)
+
     def test_encode_output_shape(self):
         model = self._build_model()
         batch = _make_batch(batch_size=3)

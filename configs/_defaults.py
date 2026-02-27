@@ -18,6 +18,7 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.masked_token_loss_weight = 0.0
     cfg.masked_token_loss_type = "l1"
     cfg.representation_regularizer = "sigreg"
+    cfg.regularizer_feature_source = "projector_pooled_output"
     cfg.masked_latent_predictor_num_layers = 2
     cfg.sigreg_lambda_warmup_steps = 0
     cfg.vicreg_beta = 1e-3
@@ -76,5 +77,5 @@ def apply_tune_defaults(cfg: config_dict.ConfigDict) -> None:
         # {"param": "learning_rate", "dist": "grid", "args": [1e-4, 4e-4]},
         # {"param": "sigreg_contiguous_mask_fraction", "dist": "grid", "args": [0.2,]},
         # {"param": "weight_decay", "dist": "grid", "args": [1e-4, 1e-3, 1e-2]},
-        {"param": "sigreg_lambda", "dist": "grid", "args": [0.02]},
+        {"param": "sigreg_lambda", "dist": "grid", "args": [3e-6]},
     ]

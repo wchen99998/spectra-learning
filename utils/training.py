@@ -41,6 +41,9 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         masked_token_loss_weight=float(config.get("masked_token_loss_weight", 0.0)),
         masked_token_loss_type=str(config.get("masked_token_loss_type", "l1")),
         representation_regularizer=str(config.get("representation_regularizer", "sigreg")),
+        regularizer_feature_source=str(
+            config.get("regularizer_feature_source", "projector_pooled_output")
+        ),
         masked_latent_predictor_num_layers=int(
             config.get("masked_latent_predictor_num_layers", 2)
         ),

@@ -316,6 +316,7 @@ class PeakSetSIGReg(nn.Module):
         masked_token_loss_weight: float = 0.0,
         masked_token_loss_type: str = "l1",
         representation_regularizer: str = "sigreg",
+        regularizer_feature_source: str = "projector_pooled_output",
         masked_latent_predictor_num_layers: int = 2,
         sigreg_num_slices: int = 256,
         sigreg_projector_dim: int | None = None,
@@ -388,6 +389,17 @@ class PeakSetSIGReg(nn.Module):
         self.masked_token_loss_weight = float(masked_token_loss_weight)
         self.masked_token_loss_type = str(masked_token_loss_type).lower()
         self.representation_regularizer = str(representation_regularizer).lower()
+        self.regularizer_feature_source = str(regularizer_feature_source).lower()
+        assert self.regularizer_feature_source in {
+            "projector_output",
+            "projector_pooled_output",
+            "encoder_output",
+            "encoder_pooled_output",
+        }, (
+            "regularizer_feature_source must be one of: "
+            "'projector_output', 'projector_pooled_output', "
+            "'encoder_output', 'encoder_pooled_output'."
+        )
         self.masked_latent_predictor_num_layers = int(masked_latent_predictor_num_layers)
         self.vicreg_beta = float(vicreg_beta)
         if self.representation_regularizer == "vicreg":
@@ -547,6 +559,36 @@ class PeakSetSIGReg(nn.Module):
         denom = mask.sum(dim=1).clamp(min=1.0)
         return (embeddings * mask).sum(dim=1) / denom
 
+    def _build_regularizer_inputs(
+        self,
+        *,
+        token_emb: torch.Tensor,
+        token_proj: torch.Tensor,
+        local_visible_mask_by_view: torch.Tensor,
+        target_global_view_idx: int,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        local_encoder = token_emb[target_global_view_idx + 1:]     # [V-1, B, N, D]
+        local_projector = token_proj[target_global_view_idx + 1:]  # [V-1, B, N, Dp]
+
+        if self.regularizer_feature_source == "projector_output":
+            return local_projector, local_visible_mask_by_view
+        if self.regularizer_feature_source == "encoder_output":
+            return local_encoder, local_visible_mask_by_view
+
+        B = local_visible_mask_by_view.shape[1]
+        N = local_visible_mask_by_view.shape[2]
+        if self.regularizer_feature_source == "projector_pooled_output":
+            local_flat = local_projector.reshape(-1, N, local_projector.shape[-1])
+            visible_flat = local_visible_mask_by_view.reshape(-1, N)
+            pooled = self._mean_pool(local_flat, visible_flat).reshape(local_projector.shape[0], B, -1)
+            return pooled, None
+        if self.regularizer_feature_source == "encoder_pooled_output":
+            local_flat = local_encoder.reshape(-1, N, local_encoder.shape[-1])
+            visible_flat = local_visible_mask_by_view.reshape(-1, N)
+            pooled = self._mean_pool(local_flat, visible_flat).reshape(local_encoder.shape[0], B, -1)
+            return pooled, None
+        raise NotImplementedError(f"Unknown regularizer_feature_source: {self.regularizer_feature_source}")
+
     def pool(
         self,
         embeddings: torch.Tensor,
@@ -632,6 +674,7 @@ class PeakSetSIGReg(nn.Module):
 
         B = fused_emb.shape[0] // V
         N = fused_emb.shape[1]
+        token_emb = fused_emb.reshape(V, B, N, fused_emb.shape[2])
         token_proj = self.sigreg_projector(fused_emb).reshape(V, B, N, self.sigreg_dim)
         token_valid = fused_valid_mask.reshape(V, B, N)
         token_masked = effective_masked_positions.reshape(V, B, N)
@@ -706,32 +749,45 @@ class PeakSetSIGReg(nn.Module):
 
         # Only compute pool + regularizer when actually needed.
         if self.representation_regularizer == "sigreg" and self.sigreg_lambda > 0:
-            local_emb_by_view = token_proj[target_global_view_idx + 1:]  # [V-1, B, N, Dp]
             local_visible_mask_by_view = encoder_visible_mask.reshape(V, B, N)[target_global_view_idx + 1:]
-            local_emb = local_emb_by_view.reshape(-1, N, local_emb_by_view.shape[-1])
-            local_visible_mask = local_visible_mask_by_view.reshape(-1, N)
-            local_projected_pooled_emb = self._mean_pool(
-                local_emb, local_visible_mask,
+            regularizer_emb_by_view, regularizer_valid_by_view = self._build_regularizer_inputs(
+                token_emb=token_emb,
+                token_proj=token_proj,
+                local_visible_mask_by_view=local_visible_mask_by_view,
+                target_global_view_idx=target_global_view_idx,
             )
-            token_sigreg_loss = self.sigreg(local_projected_pooled_emb)
+            if regularizer_valid_by_view is None:
+                token_sigreg_loss = self.sigreg(
+                    regularizer_emb_by_view.reshape(-1, regularizer_emb_by_view.shape[-1]),
+                )
+            else:
+                token_sigreg_loss = self.sigreg(
+                    regularizer_emb_by_view.reshape(-1, N, regularizer_emb_by_view.shape[-1]),
+                    valid_mask=regularizer_valid_by_view.reshape(-1, N),
+                )
             sigreg_term = sigreg_lambda_current * token_sigreg_loss
             vicreg_loss = fused_emb.new_tensor(0.0)
             vicreg_term = fused_emb.new_tensor(0.0)
         elif self.representation_regularizer == "vicreg":
-            local_emb_by_view = token_proj[target_global_view_idx + 1:]  # [V-1, B, N, Dp]
             local_visible_mask_by_view = encoder_visible_mask.reshape(V, B, N)[target_global_view_idx + 1:]
-            local_emb = local_emb_by_view.reshape(-1, N, local_emb_by_view.shape[-1])
-            local_visible_mask = local_visible_mask_by_view.reshape(-1, N)
-            local_projected_pooled_emb = self._mean_pool(
-                local_emb, local_visible_mask,
+            regularizer_emb_by_view, regularizer_valid_by_view = self._build_regularizer_inputs(
+                token_emb=token_emb,
+                token_proj=token_proj,
+                local_visible_mask_by_view=local_visible_mask_by_view,
+                target_global_view_idx=target_global_view_idx,
             )
-            local_projected_pooled_by_view = local_projected_pooled_emb.reshape(
-                V - 1, B, local_projected_pooled_emb.shape[-1],
-            )
-            vicreg_loss = self.vicreg(
-                local_projected_pooled_by_view[0],
-                local_projected_pooled_by_view[1],
-            )
+            if regularizer_valid_by_view is None:
+                vicreg_loss = self.vicreg(
+                    regularizer_emb_by_view[0],
+                    regularizer_emb_by_view[1],
+                )
+            else:
+                pair_valid_mask = regularizer_valid_by_view[0] & regularizer_valid_by_view[1]
+                vicreg_loss = self.vicreg(
+                    regularizer_emb_by_view[0],
+                    regularizer_emb_by_view[1],
+                    valid_mask=pair_valid_mask,
+                )
             vicreg_term = fused_emb.new_tensor(self.vicreg_beta) * vicreg_loss
             token_sigreg_loss = fused_emb.new_tensor(0.0)
             sigreg_term = fused_emb.new_tensor(0.0)
