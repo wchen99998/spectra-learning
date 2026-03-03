@@ -328,6 +328,8 @@ class PeakSetSIGReg(nn.Module):
         multicrop_local_keep_fraction: float = 0.25,
         use_ema_teacher_target: bool = False,
         teacher_ema_decay: float = 0.996,
+        teacher_ema_decay_start: float = 0.0,
+        teacher_ema_decay_warmup_steps: int = 0,
         sigreg_mz_jitter_std: float = 0.005,
         sigreg_intensity_jitter_std: float = 0.05,
         pooling_type: str = "pma",
@@ -351,6 +353,8 @@ class PeakSetSIGReg(nn.Module):
         self.num_views = 1 + self.multicrop_num_local_views
         self.use_ema_teacher_target = bool(use_ema_teacher_target)
         self.teacher_ema_decay = float(teacher_ema_decay)
+        self.teacher_ema_decay_start = float(teacher_ema_decay_start)
+        self.teacher_ema_decay_warmup_steps = int(teacher_ema_decay_warmup_steps)
         self.sigreg_mz_jitter_std = sigreg_mz_jitter_std
         self.sigreg_intensity_jitter_std = sigreg_intensity_jitter_std
         self.sigreg_lambda = float(sigreg_lambda)
@@ -374,6 +378,39 @@ class PeakSetSIGReg(nn.Module):
             "sigreg_lambda_warmup_steps_tensor",
             torch.tensor(
                 max(self.sigreg_lambda_warmup_steps, 1),
+                dtype=torch.float32,
+            ),
+            persistent=False,
+        )
+        self.register_buffer(
+            "teacher_ema_decay_start_tensor",
+            torch.tensor(self.teacher_ema_decay_start, dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "teacher_ema_decay_target",
+            torch.tensor(self.teacher_ema_decay, dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "teacher_ema_decay_current",
+            torch.tensor(
+                self.teacher_ema_decay
+                if self.teacher_ema_decay_warmup_steps <= 0
+                else self.teacher_ema_decay_start,
+                dtype=torch.float32,
+            ),
+            persistent=False,
+        )
+        self.register_buffer(
+            "teacher_ema_decay_step",
+            torch.zeros((), dtype=torch.int64),
+            persistent=False,
+        )
+        self.register_buffer(
+            "teacher_ema_decay_warmup_steps_tensor",
+            torch.tensor(
+                max(self.teacher_ema_decay_warmup_steps, 1),
                 dtype=torch.float32,
             ),
             persistent=False,
@@ -481,6 +518,17 @@ class PeakSetSIGReg(nn.Module):
         self.sigreg_lambda_current.copy_(self.sigreg_lambda_target * ratio)
         self.sigreg_lambda_step.add_(1)
 
+    @torch.no_grad()
+    def advance_teacher_ema_decay_schedule(self) -> None:
+        if self.teacher_ema_decay_warmup_steps <= 0:
+            self.teacher_ema_decay_current.copy_(self.teacher_ema_decay_target)
+            return
+        step = self.teacher_ema_decay_step.to(dtype=self.teacher_ema_decay_current.dtype)
+        ratio = torch.clamp(step / self.teacher_ema_decay_warmup_steps_tensor, min=0.0, max=1.0)
+        delta = self.teacher_ema_decay_target - self.teacher_ema_decay_start_tensor
+        self.teacher_ema_decay_current.copy_(self.teacher_ema_decay_start_tensor + delta * ratio)
+        self.teacher_ema_decay_step.add_(1)
+
     def predict_masked_latents(
         self,
         local_token_emb_remasked: torch.Tensor,
@@ -534,6 +582,8 @@ class PeakSetSIGReg(nn.Module):
     def update_teacher(self) -> None:
         if self.teacher_encoder is None:
             return
+        self.advance_teacher_ema_decay_schedule()
+        self.teacher_encoder.multi_avg_fn = get_ema_multi_avg_fn(float(self.teacher_ema_decay_current))
         self.teacher_encoder.update_parameters(self.encoder)
 
     def _mean_pool(

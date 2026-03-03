@@ -308,6 +308,29 @@ class SIGRegForwardTests(unittest.TestCase):
         model.update_teacher()
         self.assertTrue(torch.allclose(teacher_param, expected))
 
+    def test_ema_teacher_decay_warmup_schedule(self):
+        model = PeakSetSIGReg(
+            num_peaks=60,
+            model_dim=32,
+            encoder_num_layers=1,
+            encoder_num_heads=4,
+            encoder_num_kv_heads=4,
+            attention_mlp_multiple=2.0,
+            feature_mlp_hidden_dim=16,
+            multicrop_num_local_views=1,
+            use_ema_teacher_target=True,
+            teacher_ema_decay=0.8,
+            teacher_ema_decay_start=0.4,
+            teacher_ema_decay_warmup_steps=4,
+        )
+        values = []
+        for _ in range(6):
+            model.advance_teacher_ema_decay_schedule()
+            values.append(float(model.teacher_ema_decay_current))
+        expected = [0.4, 0.5, 0.6, 0.7, 0.8, 0.8]
+        for actual, target in zip(values, expected):
+            self.assertAlmostEqual(actual, target, places=6)
+
     def test_teacher_branch_has_no_gradients(self):
         model = PeakSetSIGReg(
             num_peaks=60,

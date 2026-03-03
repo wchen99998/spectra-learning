@@ -63,6 +63,8 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         ),
         use_ema_teacher_target=bool(config.get("use_ema_teacher_target", False)),
         teacher_ema_decay=float(config.get("teacher_ema_decay", 0.996)),
+        teacher_ema_decay_start=float(config.get("teacher_ema_decay_start", 0.0)),
+        teacher_ema_decay_warmup_steps=int(config.get("teacher_ema_decay_warmup_steps", 0)),
         sigreg_mz_jitter_std=float(config.get("sigreg_mz_jitter_std", 0.0001)),
         sigreg_intensity_jitter_std=float(
             config.get("sigreg_intensity_jitter_std", 0.001)

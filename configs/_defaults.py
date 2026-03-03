@@ -26,6 +26,8 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.vicreg_cov_coeff = 1.0
     cfg.use_ema_teacher_target = False
     cfg.teacher_ema_decay = 0.996
+    cfg.teacher_ema_decay_start = 0.0
+    cfg.teacher_ema_decay_warmup_steps = 0
     cfg.grad_clip_norm = None
     # num_workers=0: TF's internal thread pool handles parallelism; forking
     # a subprocess duplicates the TF runtime and can deadlock during shuffle

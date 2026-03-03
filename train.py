@@ -40,20 +40,58 @@ inductor_config.epilogue_fusion = True
 inductor_config.shape_padding = True
 
 
-def _partition_params_for_muon(
+_WD_MODULE_TOKENS = (
+    "attention.",
+    "feed_forward.",
+    "cross_attn.",
+    "pool_mha.",
+)
+
+
+def _is_weight_decay_target(
+    param_name: str,
+    param: torch.nn.Parameter,
+) -> bool:
+    if param.ndim < 2:
+        return False
+    if not param_name.endswith("weight"):
+        return False
+    return any(token in param_name for token in _WD_MODULE_TOKENS)
+
+
+def _partition_params_for_adamw(
     model: torch.nn.Module,
 ) -> tuple[list[torch.nn.Parameter], list[torch.nn.Parameter]]:
-    """Split parameters into 2D (Muon-eligible) and non-2D (AdamW-only)."""
-    muon_params = []
+    decay_params = []
+    no_decay_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if _is_weight_decay_target(name, param):
+            decay_params.append(param)
+        else:
+            no_decay_params.append(param)
+    return decay_params, no_decay_params
+
+
+def _partition_params_for_muon(
+    model: torch.nn.Module,
+) -> tuple[list[torch.nn.Parameter], list[torch.nn.Parameter], list[torch.nn.Parameter]]:
+    """Split parameters into Muon-eligible and AdamW-only, with explicit no-decay."""
+    muon_decay_params = []
+    muon_no_decay_params = []
     adamw_params = []
-    for param in model.parameters():
+    for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
         if param.ndim == 2:
-            muon_params.append(param)
+            if _is_weight_decay_target(name, param):
+                muon_decay_params.append(param)
+            else:
+                muon_no_decay_params.append(param)
         else:
             adamw_params.append(param)
-    return muon_params, adamw_params
+    return muon_decay_params, muon_no_decay_params, adamw_params
 
 
 # ---------------------------------------------------------------------------
@@ -232,18 +270,23 @@ def _build_optimizers(
         )
 
     if optimizer_type == "muon":
-        muon_params, adamw_params = _partition_params_for_muon(model)
+        muon_decay_params, muon_no_decay_params, adamw_params = _partition_params_for_muon(model)
         muon_lr = float(config.get("muon_lr", None) or base_lr)
         adamw_lr = float(config.get("adamw_lr", None) or base_lr)
         muon_wd = float(config.get("muon_weight_decay", None) or weight_decay)
+        muon_param_groups: list[dict[str, Any]] = []
+        if muon_decay_params:
+            muon_param_groups.append({"params": muon_decay_params, "weight_decay": muon_wd})
+        if muon_no_decay_params:
+            muon_param_groups.append({"params": muon_no_decay_params, "weight_decay": 0.0})
 
         muon_opt = torch.optim.Muon(
-            muon_params,
+            muon_param_groups,
             lr=torch.tensor(muon_lr),
             momentum=float(config.get("muon_momentum", 0.95)),
             nesterov=bool(config.get("muon_nesterov", True)),
             ns_steps=int(config.get("muon_ns_steps", 5)),
-            weight_decay=muon_wd,
+            weight_decay=0.0,
             adjust_lr_fn=str(config.get("muon_adjust_lr_fn", "match_rms_adamw")),
         )
         adamw_opt = torch.optim.AdamW(
@@ -256,15 +299,7 @@ def _build_optimizers(
         )
         return [muon_opt, adamw_opt], [_make_schedule(muon_opt, muon_lr), _make_schedule(adamw_opt, adamw_lr)]
 
-    decay_params: list[torch.nn.Parameter] = []
-    no_decay_params: list[torch.nn.Parameter] = []
-    for param in model.parameters():
-        if not param.requires_grad:
-            continue
-        if param.ndim < 2:
-            no_decay_params.append(param)
-        else:
-            decay_params.append(param)
+    decay_params, no_decay_params = _partition_params_for_adamw(model)
 
     optimizer = torch.optim.AdamW(
         [
