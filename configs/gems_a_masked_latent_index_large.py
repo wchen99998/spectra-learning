@@ -13,13 +13,14 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_latent_predictor_num_layers = 4
     cfg.multicrop_local_keep_fraction = 0.5
 
+    cfg.encoder_qk_norm = False
     cfg.masked_token_loss_type = "l2"
     cfg.norm_type = "layernorm"
     cfg.normalize_jepa_targets = True
     cfg.num_epochs = 5
     cfg.autocast_dtype = "bf16"
     cfg.learning_rate = 1e-4
-    cfg.representation_regularizer = "none"
+    cfg.representation_regularizer = "vicreg"
     cfg.sigreg_lambda_warmup_steps = 150_000
     cfg.model_dim = 512
     cfg.num_layers = 14

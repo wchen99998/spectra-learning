@@ -33,6 +33,7 @@ from utils.training import (
 )
 
 torch.set_float32_matmul_precision('medium')
+torch._dynamo.config.capture_scalar_outputs = True
 inductor_config.coordinate_descent_tuning = True
 inductor_config.triton.unique_kernel_names = True
 inductor_config.fx_graph_cache = True
@@ -214,7 +215,6 @@ def _train_step_impl(
         opt.zero_grad(set_to_none=True)
     for sched in schedulers:
         sched.step()
-    model.update_teacher()
     return metrics
 
 
@@ -492,6 +492,7 @@ def train_and_evaluate(
                 autocast_dtype,
                 grad_clip_norm,
             )
+            model.update_teacher()
             global_step += 1
             pbar.update(1)
 
