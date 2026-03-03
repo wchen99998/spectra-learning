@@ -28,7 +28,7 @@ def _build_model(
 @torch.no_grad()
 def test_predictor_masked_rope_ignores_masked_mz():
     model = _build_model(predictor_layers=0)
-    local_token_emb = torch.randn(1, 6, model.sigreg_dim)
+    local_token_emb = torch.randn(1, 6, model.model_dim)
     local_valid = torch.ones(1, 6, dtype=torch.bool)
     local_masked = torch.tensor([[False, False, True, False, False, False]])
     local_mz = torch.tensor([[0.10, 0.20, 0.30, 0.40, 0.50, 0.60]])
@@ -45,7 +45,7 @@ def test_predictor_masked_rope_ignores_masked_mz():
 @torch.no_grad()
 def test_predictor_unmasked_mz_changes_output():
     model = _build_model(predictor_layers=2)
-    local_token_emb = torch.randn(1, 6, model.sigreg_dim)
+    local_token_emb = torch.randn(1, 6, model.model_dim)
     local_valid = torch.ones(1, 6, dtype=torch.bool)
     local_masked = torch.tensor([[False, False, True, False, False, False]])
     local_mz = torch.tensor([[0.10, 0.20, 0.30, 0.40, 0.50, 0.60]])
@@ -62,7 +62,7 @@ def test_predictor_unmasked_mz_changes_output():
 @torch.no_grad()
 def test_mask_rank_embedding_distinguishes_masked_tokens():
     model = _build_model(predictor_layers=0)
-    local_token_emb = torch.randn(1, 6, model.sigreg_dim)
+    local_token_emb = torch.randn(1, 6, model.model_dim)
     local_valid = torch.ones(1, 6, dtype=torch.bool)
     local_masked = torch.tensor([[False, True, False, True, False, False]])
     local_mz = torch.tensor([[0.10, 0.20, 0.30, 0.40, 0.50, 0.60]])
@@ -175,21 +175,21 @@ def test_local_global_l1_uses_masked_tokens_only():
     V = model.num_views
     B = fused_emb.shape[0] // V
     N = fused_emb.shape[1]
-    token_proj = model.sigreg_projector(fused_emb).reshape(V, B, N, model.sigreg_dim)
+    token_emb = fused_emb.reshape(V, B, N, fused_emb.shape[2])
     token_valid = fused_valid_mask.reshape(V, B, N)
     token_masked = fused_masked_positions.reshape(V, B, N)
-    global_token_proj = token_proj[0]
-    local_token_proj = token_proj[1]
+    global_token_emb = token_emb[0]
+    local_token_emb = token_emb[1]
     local_valid = token_valid[1]
     local_masked = token_masked[1]
     latent_mask_token = model.latent_mask_token.view(1, 1, -1).to(
-        dtype=token_proj.dtype,
-        device=token_proj.device,
+        dtype=fused_emb.dtype,
+        device=fused_emb.device,
     )
     local_token_emb_remasked = torch.where(
         local_masked.unsqueeze(-1),
         latent_mask_token,
-        local_token_proj,
+        local_token_emb,
     )
     token_mz = fused_mz.reshape(V, B, N)
     local_token_pred = model.predict_masked_latents(
@@ -198,7 +198,7 @@ def test_local_global_l1_uses_masked_tokens_only():
         token_mz[1],
         local_masked,
     )
-    per_token_l1 = (local_token_pred - global_token_proj).abs().mean(dim=-1)
+    per_token_l1 = (local_token_pred - global_token_emb).abs().mean(dim=-1)
     all_valid_loss = (per_token_l1 * local_valid.float()).sum() / local_valid.float().sum()
     masked_only_loss = (
         (per_token_l1 * local_masked.float()).sum()
@@ -265,21 +265,21 @@ def test_local_global_l2_uses_masked_tokens_only():
     V = model.num_views
     B = fused_emb.shape[0] // V
     N = fused_emb.shape[1]
-    token_proj = model.sigreg_projector(fused_emb).reshape(V, B, N, model.sigreg_dim)
+    token_emb = fused_emb.reshape(V, B, N, fused_emb.shape[2])
     token_valid = fused_valid_mask.reshape(V, B, N)
     token_masked = fused_masked_positions.reshape(V, B, N)
-    global_token_proj = token_proj[0]
-    local_token_proj = token_proj[1]
+    global_token_emb = token_emb[0]
+    local_token_emb = token_emb[1]
     local_valid = token_valid[1]
     local_masked = token_masked[1]
     latent_mask_token = model.latent_mask_token.view(1, 1, -1).to(
-        dtype=token_proj.dtype,
-        device=token_proj.device,
+        dtype=fused_emb.dtype,
+        device=fused_emb.device,
     )
     local_token_emb_remasked = torch.where(
         local_masked.unsqueeze(-1),
         latent_mask_token,
-        local_token_proj,
+        local_token_emb,
     )
     token_mz = fused_mz.reshape(V, B, N)
     local_token_pred = model.predict_masked_latents(
@@ -288,7 +288,7 @@ def test_local_global_l2_uses_masked_tokens_only():
         token_mz[1],
         local_masked,
     )
-    per_token_l2 = (local_token_pred - global_token_proj).square().mean(dim=-1)
+    per_token_l2 = (local_token_pred - global_token_emb).square().mean(dim=-1)
     all_valid_loss = (per_token_l2 * local_valid.float()).sum() / local_valid.float().sum()
     masked_only_loss = (
         (per_token_l2 * local_masked.float()).sum()

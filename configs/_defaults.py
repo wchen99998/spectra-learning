@@ -18,7 +18,6 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.masked_token_loss_weight = 0.0
     cfg.masked_token_loss_type = "l1"
     cfg.representation_regularizer = "sigreg"
-    cfg.regularizer_feature_source = "projector_pooled_output"
     cfg.masked_latent_predictor_num_layers = 2
     cfg.sigreg_lambda_warmup_steps = 0
     cfg.vicreg_beta = 1e-3

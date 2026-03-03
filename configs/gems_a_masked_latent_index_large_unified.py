@@ -12,14 +12,12 @@ def get_config() -> config_dict.ConfigDict:
     cfg.grad_clip_norm = 0.
     cfg.masked_latent_predictor_num_layers = 4
     cfg.multicrop_local_keep_fraction = 0.5
-    cfg.sigreg_projector_dim = 128
 
     cfg.masked_token_loss_type = "l2"
     cfg.num_epochs = 50
     cfg.autocast_dtype = "bf16"
     cfg.learning_rate = 3e-4
     cfg.representation_regularizer = "sigreg"
-    cfg.regularizer_feature_source = "encoder_output"
     cfg.model_dim = 512
     cfg.num_layers = 14
     cfg.num_heads = 16

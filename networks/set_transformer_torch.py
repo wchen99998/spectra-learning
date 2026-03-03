@@ -9,6 +9,15 @@ from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex
 from networks.transformer_torch import FeedForward
 
 
+def _build_norm(dim: int, eps: float, norm_type: str) -> nn.Module:
+    kind = str(norm_type).lower()
+    if kind == "rmsnorm":
+        return nn.RMSNorm(dim, eps=eps)
+    if kind == "layernorm":
+        return nn.LayerNorm(dim, eps=eps)
+    raise ValueError(f"Unsupported norm_type: {norm_type}")
+
+
 def create_kv_padding_block_mask(valid_kv_mask: torch.Tensor, q_len: int) -> BlockMask:
     """Block mask that masks out invalid KV positions."""
     B, KV = valid_kv_mask.shape
@@ -85,6 +94,7 @@ class MAB(nn.Module):
         n_kv_heads: int | None = None,
         attention_mlp_multiple: float = 4.0,
         norm_eps: float = 1e-5,
+        norm_type: str = "rmsnorm",
     ):
         super().__init__()
         self.cross_attn = CrossAttention(dim, n_heads, n_kv_heads=n_kv_heads)
@@ -95,9 +105,9 @@ class MAB(nn.Module):
             mlp_type="swish",
             w_init_scale=1.0,
         )
-        self.q_norm = nn.RMSNorm(dim, eps=norm_eps)
-        self.kv_norm = nn.RMSNorm(dim, eps=norm_eps)
-        self.ffn_norm = nn.RMSNorm(dim, eps=norm_eps)
+        self.q_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
+        self.kv_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
+        self.ffn_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
 
     def forward(
         self, x: torch.Tensor, y: torch.Tensor, *, block_mask: BlockMask | None = None
@@ -118,12 +128,27 @@ class ISAB(nn.Module):
         n_kv_heads: int | None = None,
         attention_mlp_multiple: float = 4.0,
         norm_eps: float = 1e-5,
+        norm_type: str = "rmsnorm",
     ):
         super().__init__()
         self.inducing_points = nn.Parameter(torch.empty(num_inducing_points, dim))
         nn.init.xavier_normal_(self.inducing_points)
-        self.mab1 = MAB(dim, n_heads, n_kv_heads=n_kv_heads, attention_mlp_multiple=attention_mlp_multiple, norm_eps=norm_eps)
-        self.mab2 = MAB(dim, n_heads, n_kv_heads=n_kv_heads, attention_mlp_multiple=attention_mlp_multiple, norm_eps=norm_eps)
+        self.mab1 = MAB(
+            dim,
+            n_heads,
+            n_kv_heads=n_kv_heads,
+            attention_mlp_multiple=attention_mlp_multiple,
+            norm_eps=norm_eps,
+            norm_type=norm_type,
+        )
+        self.mab2 = MAB(
+            dim,
+            n_heads,
+            n_kv_heads=n_kv_heads,
+            attention_mlp_multiple=attention_mlp_multiple,
+            norm_eps=norm_eps,
+            norm_type=norm_type,
+        )
 
     def forward(
         self,

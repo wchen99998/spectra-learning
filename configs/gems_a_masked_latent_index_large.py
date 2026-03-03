@@ -12,9 +12,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.grad_clip_norm = 1.0
     cfg.masked_latent_predictor_num_layers = 4
     cfg.multicrop_local_keep_fraction = 0.5
-    cfg.sigreg_projector_dim = 128
 
     cfg.masked_token_loss_type = "l2"
+    cfg.norm_type = "layernorm"
     cfg.num_epochs = 20
     cfg.autocast_dtype = "bf16"
     cfg.learning_rate = 1e-4
@@ -24,6 +24,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_layers = 14
     cfg.num_heads = 16
     cfg.num_kv_heads = 16
+
+    cfg.warmup_steps = 300_000
+    cfg.optimizer = "adamw"
 
     cfg.sigreg_lambda_warmup_steps = 50_000
     cfg.wandb_run_name_prefix = "jepa_masked_latent_index"

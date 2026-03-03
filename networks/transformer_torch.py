@@ -59,6 +59,15 @@ _ACTIVATIONS: dict[str, nn.Module] = {
 }
 
 
+def _build_norm(dim: int, eps: float, norm_type: str) -> nn.Module:
+    kind = str(norm_type).lower()
+    if kind == "rmsnorm":
+        return nn.RMSNorm(dim, eps=eps)
+    if kind == "layernorm":
+        return nn.LayerNorm(dim, eps=eps)
+    raise ValueError(f"Unsupported norm_type: {norm_type}")
+
+
 class Attention(nn.Module):
     def __init__(
         self,
@@ -68,6 +77,7 @@ class Attention(nn.Module):
         n_kv_heads: int | None = None,
         causal: bool = False,
         qk_norm: bool = False,
+        norm_type: str = "rmsnorm",
     ):
         super().__init__()
         self.dim = dim
@@ -82,8 +92,8 @@ class Attention(nn.Module):
         self.wo = nn.Linear(self.dim, self.dim, bias=False)
 
         if qk_norm:
-            self.q_norm = nn.RMSNorm(self.head_dim, eps=1e-5)
-            self.k_norm = nn.RMSNorm(self.head_dim, eps=1e-5)
+            self.q_norm = _build_norm(self.head_dim, eps=1e-5, norm_type=norm_type)
+            self.k_norm = _build_norm(self.head_dim, eps=1e-5, norm_type=norm_type)
 
         nn.init.xavier_normal_(self.wqkv.weight)
         nn.init.xavier_normal_(self.wo.weight)
@@ -192,11 +202,19 @@ class TransformerBlock(nn.Module):
         use_rotary_embeddings: bool,
         qk_norm: bool = False,
         post_norm: bool = False,
+        norm_type: str = "rmsnorm",
     ):
         super().__init__()
         self.use_rotary_embeddings = use_rotary_embeddings
         self.post_norm = post_norm
-        self.attention = Attention(dim, n_heads, n_kv_heads=n_kv_heads, causal=causal, qk_norm=qk_norm)
+        self.attention = Attention(
+            dim,
+            n_heads,
+            n_kv_heads=n_kv_heads,
+            causal=causal,
+            qk_norm=qk_norm,
+            norm_type=norm_type,
+        )
         self.feed_forward = FeedForward(
             dim,
             multiple_of=multiple_of,
@@ -204,11 +222,11 @@ class TransformerBlock(nn.Module):
             mlp_type=mlp_type,
             w_init_scale=w_init_scale,
         )
-        self.attention_norm = nn.RMSNorm(dim, eps=norm_eps)
-        self.ffn_norm = nn.RMSNorm(dim, eps=norm_eps)
+        self.attention_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
+        self.ffn_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
         if post_norm:
-            self.post_attn_norm = nn.RMSNorm(dim, eps=norm_eps)
-            self.post_ffn_norm = nn.RMSNorm(dim, eps=norm_eps)
+            self.post_attn_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
+            self.post_ffn_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
 
     def forward(
         self,

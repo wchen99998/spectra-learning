@@ -191,6 +191,13 @@ def _resolve_autocast_dtype(config: config_dict.ConfigDict) -> torch.dtype | Non
     raise ValueError(f"Unsupported autocast_dtype: {autocast_name}")
 
 
+def _resolve_norm_type(config: config_dict.ConfigDict) -> str:
+    norm_type = str(config.get("norm_type", "rmsnorm")).lower()
+    if norm_type not in {"rmsnorm", "layernorm"}:
+        raise ValueError(f"Unsupported norm_type: {norm_type}")
+    return norm_type
+
+
 # ---------------------------------------------------------------------------
 # Optimizer / scheduler construction
 # ---------------------------------------------------------------------------
@@ -326,7 +333,6 @@ def _prune_checkpoints(checkpoint_dir: Path, keep_top_k: int = 5) -> None:
 
 def _run_validation(
     model: PeakSetSIGReg,
-    compiled_forward,
     val_loader: DataLoader | None,
     device: torch.device,
     seed: int,
@@ -342,7 +348,7 @@ def _run_validation(
     with torch.no_grad():
         for batch_idx, batch in enumerate(val_loader):
             batch = _move_batch_to_device(batch, device)
-            metrics = compiled_forward(batch)
+            metrics = model.forward_augmented(batch)
             bs = int(batch["fused_mz"].shape[0]) // model.num_views
             count += bs
             for key, value in metrics.items():
@@ -382,6 +388,8 @@ def train_and_evaluate(
     logging.info("Training for %d epochs.", num_epochs)
     logging.info("Steps per epoch: %d", steps_per_epoch)
     logging.info("Total steps: %d", total_steps)
+    config.norm_type = _resolve_norm_type(config)
+    logging.info("Norm type: %s", config.norm_type)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_model_from_config(config)
@@ -419,7 +427,7 @@ def train_and_evaluate(
     # Compile training step (forward + backward + optimizer + scheduler)
     autocast_dtype = _resolve_autocast_dtype(config)
     compiled_step = torch.compile(_train_step_impl, mode="max-autotune-no-cudagraphs", fullgraph=False)
-    compiled_forward = torch.compile(model.forward_augmented, mode="reduce-overhead", fullgraph=False)
+
 
     optimizer_type = str(config.get("optimizer", "adamw")).lower()
     device_prefetch_size = int(config.get("device_prefetch_size", 1))
@@ -478,7 +486,7 @@ def train_and_evaluate(
 
         # End-of-epoch validation (MassSpecGym val only)
         val_metrics = _run_validation(
-            model, compiled_forward, val_loader, device, seed, epoch,
+            model, val_loader, device, seed, epoch,
         )
         if val_metrics:
             logger.log_metrics(val_metrics, step=global_step)

@@ -21,6 +21,15 @@ from networks.transformer_torch import (
 )
 
 
+def _build_norm(dim: int, eps: float, norm_type: str) -> nn.Module:
+    kind = str(norm_type).lower()
+    if kind == "rmsnorm":
+        return nn.RMSNorm(dim, eps=eps)
+    if kind == "layernorm":
+        return nn.LayerNorm(dim, eps=eps)
+    raise ValueError(f"Unsupported norm_type: {norm_type}")
+
+
 class PeakFeatureEmbedder(nn.Module):
     """Embeds raw peak features into model dim."""
 
@@ -69,6 +78,7 @@ def _build_non_causal_blocks(
     norm_eps: float = 1e-5,
     qk_norm: bool = False,
     post_norm: bool = False,
+    norm_type: str = "rmsnorm",
 ) -> nn.ModuleList:
     heads = int(num_heads)
     kv_heads = heads if num_kv_heads is None else int(num_kv_heads)
@@ -89,6 +99,7 @@ def _build_non_causal_blocks(
                 use_rotary_embeddings=use_rope,
                 qk_norm=qk_norm,
                 post_norm=post_norm,
+                norm_type=norm_type,
             )
         )
     return nn.ModuleList(blocks)
@@ -103,6 +114,7 @@ def _build_isab_blocks(
     attention_mlp_multiple: float,
     num_inducing_points: int = 32,
     norm_eps: float = 1e-5,
+    norm_type: str = "rmsnorm",
 ) -> nn.ModuleList:
     heads = int(num_heads)
     kv_heads = heads if num_kv_heads is None else int(num_kv_heads)
@@ -116,6 +128,7 @@ def _build_isab_blocks(
                 n_kv_heads=kv_heads,
                 attention_mlp_multiple=attention_mlp_multiple,
                 norm_eps=norm_eps,
+                norm_type=norm_type,
             )
         )
     return nn.ModuleList(blocks)
@@ -178,11 +191,13 @@ class PeakSetEncoder(nn.Module):
         isab_num_inducing_points: int = 32,
         qk_norm: bool = False,
         post_norm: bool = False,
+        norm_type: str = "rmsnorm",
     ):
         super().__init__()
         self.model_dim = model_dim
         self.use_rope = bool(use_rope)
         self.encoder_block_type = encoder_block_type
+        self.norm_type = str(norm_type).lower()
         self.embedder = PeakFeatureEmbedder(model_dim, feature_mlp_hidden_dim)
         self.rope_mz_max = float(rope_mz_max)
         self.rope_mz_precision = float(rope_mz_precision)
@@ -209,6 +224,7 @@ class PeakSetEncoder(nn.Module):
                 num_kv_heads=num_kv_heads,
                 attention_mlp_multiple=attention_mlp_multiple,
                 num_inducing_points=isab_num_inducing_points,
+                norm_type=self.norm_type,
             )
         else:
             self.blocks = _build_non_causal_blocks(
@@ -220,8 +236,10 @@ class PeakSetEncoder(nn.Module):
                 use_rope=self.use_rope,
                 qk_norm=qk_norm,
                 post_norm=post_norm,
+                norm_type=self.norm_type,
             )
-        self.final_norm = nn.RMSNorm(model_dim, eps=1e-5)
+        self.final_norm = _build_norm(model_dim, eps=1e-5, norm_type=self.norm_type)
+        self.output_layer_norm = nn.LayerNorm(model_dim, eps=1e-5)
 
     def forward(
         self,
@@ -239,7 +257,7 @@ class PeakSetEncoder(nn.Module):
                 q_block_mask = set_transformer_torch.create_q_padding_block_mask(valid_mask, kv_len=m)
             for block in self.blocks:
                 x = block(x, kv_block_mask=kv_block_mask, q_block_mask=q_block_mask)
-            return self.final_norm(x)
+            return self.output_layer_norm(self.final_norm(x))
 
         block_mask = None
         if valid_mask is not None:
@@ -275,25 +293,7 @@ class PeakSetEncoder(nn.Module):
                 freqs_sin=freqs_sin,
                 block_mask=block_mask,
             )
-        return self.final_norm(x)
-
-
-class SIGRegProjector(nn.Module):
-    def __init__(
-        self,
-        input_dim: int,
-        hidden_dim: int,
-        output_dim: int,
-    ):
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, output_dim),
-        )
-
-    def forward(self, token_embeddings: torch.Tensor) -> torch.Tensor:
-        return self.mlp(token_embeddings)
+        return self.output_layer_norm(self.final_norm(x))
 
 
 class PeakSetSIGReg(nn.Module):
@@ -316,11 +316,8 @@ class PeakSetSIGReg(nn.Module):
         masked_token_loss_weight: float = 0.0,
         masked_token_loss_type: str = "l1",
         representation_regularizer: str = "sigreg",
-        regularizer_feature_source: str = "projector_pooled_output",
         masked_latent_predictor_num_layers: int = 2,
         sigreg_num_slices: int = 256,
-        sigreg_projector_dim: int | None = None,
-        sigreg_projector_hidden_dim: int | None = None,
         sigreg_lambda: float = 0.1,
         sigreg_lambda_warmup_steps: int = 0,
         vicreg_beta: float = 1e-3,
@@ -341,14 +338,12 @@ class PeakSetSIGReg(nn.Module):
         isab_num_inducing_points: int = 32,
         encoder_qk_norm: bool = False,
         encoder_post_norm: bool = False,
+        normalize_jepa_targets: bool = False,
+        norm_type: str = "rmsnorm",
     ):
         super().__init__()
         self.num_peaks = num_peaks
         self.model_dim = model_dim
-        self.sigreg_dim = model_dim if sigreg_projector_dim is None else int(sigreg_projector_dim)
-        self.sigreg_projector_hidden_dim = (
-            model_dim if sigreg_projector_hidden_dim is None else int(sigreg_projector_hidden_dim)
-        )
 
         self.multicrop_num_local_views = int(multicrop_num_local_views)
         self.multicrop_local_keep_fraction = float(multicrop_local_keep_fraction)
@@ -388,18 +383,9 @@ class PeakSetSIGReg(nn.Module):
         self.pma_num_seeds = int(pma_num_seeds)
         self.masked_token_loss_weight = float(masked_token_loss_weight)
         self.masked_token_loss_type = str(masked_token_loss_type).lower()
+        self.normalize_jepa_targets = bool(normalize_jepa_targets)
         self.representation_regularizer = str(representation_regularizer).lower()
-        self.regularizer_feature_source = str(regularizer_feature_source).lower()
-        assert self.regularizer_feature_source in {
-            "projector_output",
-            "projector_pooled_output",
-            "encoder_output",
-            "encoder_pooled_output",
-        }, (
-            "regularizer_feature_source must be one of: "
-            "'projector_output', 'projector_pooled_output', "
-            "'encoder_output', 'encoder_pooled_output'."
-        )
+        self.norm_type = str(norm_type).lower()
         self.masked_latent_predictor_num_layers = int(masked_latent_predictor_num_layers)
         self.vicreg_beta = float(vicreg_beta)
         if self.representation_regularizer == "vicreg":
@@ -424,6 +410,7 @@ class PeakSetSIGReg(nn.Module):
             isab_num_inducing_points=isab_num_inducing_points,
             qk_norm=encoder_qk_norm,
             post_norm=encoder_post_norm,
+            norm_type=self.norm_type,
         )
         if self.use_ema_teacher_target:
             self.teacher_encoder: AveragedModel | None = AveragedModel(
@@ -444,16 +431,16 @@ class PeakSetSIGReg(nn.Module):
             num_heads=pma_heads,
             batch_first=True,
         )
-        self.pool_norm = nn.RMSNorm(model_dim, eps=1e-5)
-        self.latent_mask_token = nn.Parameter(torch.empty(self.sigreg_dim))
+        self.pool_norm = _build_norm(model_dim, eps=1e-5, norm_type=self.norm_type)
+        self.latent_mask_token = nn.Parameter(torch.empty(self.model_dim))
         nn.init.normal_(self.latent_mask_token, std=0.02)
-        self.predictor_mask_rank_embedding = nn.Embedding(self.num_peaks, self.sigreg_dim)
+        self.predictor_mask_rank_embedding = nn.Embedding(self.num_peaks, self.model_dim)
         nn.init.normal_(self.predictor_mask_rank_embedding.weight, std=0.02)
-        predictor_max_heads = min(int(encoder_num_heads), self.sigreg_dim // 16)
+        predictor_max_heads = min(int(encoder_num_heads), self.model_dim // 16)
         self.predictor_num_heads = max(1, predictor_max_heads)
-        while self.sigreg_dim % self.predictor_num_heads != 0:
+        while self.model_dim % self.predictor_num_heads != 0:
             self.predictor_num_heads -= 1
-        predictor_head_dim = self.sigreg_dim // self.predictor_num_heads
+        predictor_head_dim = self.model_dim // self.predictor_num_heads
         predictor_omega = _build_mass_rope_omega(
             head_dim=predictor_head_dim,
             mz_max=self.encoder.rope_mz_max,
@@ -462,7 +449,7 @@ class PeakSetSIGReg(nn.Module):
         )
         self.register_buffer("predictor_rope_omega", predictor_omega, persistent=False)
         self.masked_latent_predictor = _build_non_causal_blocks(
-            dim=self.sigreg_dim,
+            dim=self.model_dim,
             num_layers=self.masked_latent_predictor_num_layers,
             num_heads=self.predictor_num_heads,
             num_kv_heads=None,
@@ -470,14 +457,13 @@ class PeakSetSIGReg(nn.Module):
             use_rope=encoder_use_rope,
             qk_norm=encoder_qk_norm,
             post_norm=encoder_post_norm,
+            norm_type=self.norm_type,
         )
-        self.masked_latent_predictor_norm = nn.RMSNorm(self.sigreg_dim, eps=1e-5)
+        self.masked_latent_predictor_norm = _build_norm(
+            self.model_dim, eps=1e-5, norm_type=self.norm_type
+        )
+        self.predictor_output_layer_norm = nn.LayerNorm(self.model_dim, eps=1e-5)
 
-        self.sigreg_projector = SIGRegProjector(
-            input_dim=model_dim,
-            hidden_dim=self.sigreg_projector_hidden_dim,
-            output_dim=self.sigreg_dim,
-        )
         self.sigreg = SIGReg(num_slices=int(sigreg_num_slices))
         self.vicreg = VICRegLoss(
             sim_coeff=float(vicreg_sim_coeff),
@@ -535,7 +521,7 @@ class PeakSetSIGReg(nn.Module):
                 freqs_sin=freqs_sin,
                 block_mask=predictor_block_mask,
             )
-        return self.masked_latent_predictor_norm(x)
+        return self.predictor_output_layer_norm(self.masked_latent_predictor_norm(x))
 
     def train(self, mode: bool = True) -> "PeakSetSIGReg":
         super().train(mode)
@@ -558,36 +544,6 @@ class PeakSetSIGReg(nn.Module):
         mask = valid_mask.unsqueeze(-1).float()
         denom = mask.sum(dim=1).clamp(min=1.0)
         return (embeddings * mask).sum(dim=1) / denom
-
-    def _build_regularizer_inputs(
-        self,
-        *,
-        token_emb: torch.Tensor,
-        token_proj: torch.Tensor,
-        local_visible_mask_by_view: torch.Tensor,
-        target_global_view_idx: int,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        local_encoder = token_emb[target_global_view_idx + 1:]     # [V-1, B, N, D]
-        local_projector = token_proj[target_global_view_idx + 1:]  # [V-1, B, N, Dp]
-
-        if self.regularizer_feature_source == "projector_output":
-            return local_projector, local_visible_mask_by_view
-        if self.regularizer_feature_source == "encoder_output":
-            return local_encoder, local_visible_mask_by_view
-
-        B = local_visible_mask_by_view.shape[1]
-        N = local_visible_mask_by_view.shape[2]
-        if self.regularizer_feature_source == "projector_pooled_output":
-            local_flat = local_projector.reshape(-1, N, local_projector.shape[-1])
-            visible_flat = local_visible_mask_by_view.reshape(-1, N)
-            pooled = self._mean_pool(local_flat, visible_flat).reshape(local_projector.shape[0], B, -1)
-            return pooled, None
-        if self.regularizer_feature_source == "encoder_pooled_output":
-            local_flat = local_encoder.reshape(-1, N, local_encoder.shape[-1])
-            visible_flat = local_visible_mask_by_view.reshape(-1, N)
-            pooled = self._mean_pool(local_flat, visible_flat).reshape(local_encoder.shape[0], B, -1)
-            return pooled, None
-        raise NotImplementedError(f"Unknown regularizer_feature_source: {self.regularizer_feature_source}")
 
     def pool(
         self,
@@ -675,7 +631,6 @@ class PeakSetSIGReg(nn.Module):
         B = fused_emb.shape[0] // V
         N = fused_emb.shape[1]
         token_emb = fused_emb.reshape(V, B, N, fused_emb.shape[2])
-        token_proj = self.sigreg_projector(fused_emb).reshape(V, B, N, self.sigreg_dim)
         token_valid = fused_valid_mask.reshape(V, B, N)
         token_masked = effective_masked_positions.reshape(V, B, N)
         token_mz = fused_mz.reshape(V, B, N)
@@ -685,27 +640,26 @@ class PeakSetSIGReg(nn.Module):
         if self.teacher_encoder is not None:
             global_slice = slice(0, B)
             with torch.no_grad():
-                global_token_emb = self.teacher_encoder(
+                global_token_target = self.teacher_encoder(
                     fused_mz[global_slice],
                     fused_intensity[global_slice],
                     valid_mask=fused_valid_mask[global_slice],
-                )
-                global_token_target = self.sigreg_projector(global_token_emb)
+                ).detach()
         else:
-            global_token_target = token_proj[target_global_view_idx].detach()
+            global_token_target = token_emb[target_global_view_idx].detach()
         latent_mask_token = self.latent_mask_token.view(1, 1, -1).to(
-            dtype=token_proj.dtype,
-            device=token_proj.device,
+            dtype=fused_emb.dtype,
+            device=fused_emb.device,
         )
         L = V - 1  # number of local views
         # Batch all local views for a single predictor pass instead of
         # iterating per-view, doubling the effective batch size for GEMMs
         # and halving the number of kernel launches.
-        all_local_proj = token_proj[target_global_view_idx + 1:]   # [L, B, N, Dp]
+        all_local_emb = token_emb[target_global_view_idx + 1:]    # [L, B, N, D]
         all_local_valid = token_valid[target_global_view_idx + 1:]  # [L, B, N]
         all_local_mask = token_masked[target_global_view_idx + 1:]  # [L, B, N]
         all_local_mz = token_mz[target_global_view_idx + 1:]       # [L, B, N]
-        all_local_proj_flat = all_local_proj.reshape(L * B, N, -1)
+        all_local_emb_flat = all_local_emb.reshape(L * B, N, -1)
         all_local_valid_flat = all_local_valid.reshape(L * B, N)
         all_local_mask_flat = all_local_mask.reshape(L * B, N)
         all_local_mz_flat = all_local_mz.reshape(L * B, N)
@@ -715,7 +669,7 @@ class PeakSetSIGReg(nn.Module):
         all_local_remasked = torch.where(
             all_local_mask_flat.unsqueeze(-1),
             latent_mask_token,
-            all_local_proj_flat,
+            all_local_emb_flat,
         )
         all_local_pred = self.predict_masked_latents(
             all_local_remasked,
@@ -726,10 +680,15 @@ class PeakSetSIGReg(nn.Module):
         # Compute per-token regression loss across all local views at once.
         # Reshape to [L, B, N, D_loss] for broadcasting against [B, N, D_loss].
         all_local_pred_views = all_local_pred.reshape(L, B, N, -1)
+        loss_pred = all_local_pred_views
+        loss_target = global_token_target.unsqueeze(0)
+        if self.normalize_jepa_targets:
+            loss_pred = torch.nn.functional.normalize(loss_pred, dim=-1)
+            loss_target = torch.nn.functional.normalize(loss_target, dim=-1)
         if self.masked_token_loss_type == "l1":
-            per_token_reg = (all_local_pred_views - global_token_target.unsqueeze(0)).abs().mean(dim=-1)  # [L, B, N]
+            per_token_reg = (loss_pred - loss_target).abs().mean(dim=-1)  # [L, B, N]
         elif self.masked_token_loss_type == "l2":
-            per_token_reg = (all_local_pred_views - global_token_target.unsqueeze(0)).square().mean(dim=-1)  # [L, B, N]
+            per_token_reg = (loss_pred - loss_target).square().mean(dim=-1)  # [L, B, N]
         else:
             raise ValueError(
                 f"Unsupported masked_token_loss_type: {self.masked_token_loss_type}. "
@@ -750,44 +709,23 @@ class PeakSetSIGReg(nn.Module):
         # Only compute pool + regularizer when actually needed.
         if self.representation_regularizer == "sigreg" and self.sigreg_lambda > 0:
             local_visible_mask_by_view = encoder_visible_mask.reshape(V, B, N)[target_global_view_idx + 1:]
-            regularizer_emb_by_view, regularizer_valid_by_view = self._build_regularizer_inputs(
-                token_emb=token_emb,
-                token_proj=token_proj,
-                local_visible_mask_by_view=local_visible_mask_by_view,
-                target_global_view_idx=target_global_view_idx,
+            local_emb_by_view = token_emb[target_global_view_idx + 1:]  # [L, B, N, D]
+            token_sigreg_loss = self.sigreg(
+                local_emb_by_view.reshape(-1, N, local_emb_by_view.shape[-1]),
+                valid_mask=local_visible_mask_by_view.reshape(-1, N),
             )
-            if regularizer_valid_by_view is None:
-                token_sigreg_loss = self.sigreg(
-                    regularizer_emb_by_view.reshape(-1, regularizer_emb_by_view.shape[-1]),
-                )
-            else:
-                token_sigreg_loss = self.sigreg(
-                    regularizer_emb_by_view.reshape(-1, N, regularizer_emb_by_view.shape[-1]),
-                    valid_mask=regularizer_valid_by_view.reshape(-1, N),
-                )
             sigreg_term = sigreg_lambda_current * token_sigreg_loss
             vicreg_loss = fused_emb.new_tensor(0.0)
             vicreg_term = fused_emb.new_tensor(0.0)
         elif self.representation_regularizer == "vicreg":
             local_visible_mask_by_view = encoder_visible_mask.reshape(V, B, N)[target_global_view_idx + 1:]
-            regularizer_emb_by_view, regularizer_valid_by_view = self._build_regularizer_inputs(
-                token_emb=token_emb,
-                token_proj=token_proj,
-                local_visible_mask_by_view=local_visible_mask_by_view,
-                target_global_view_idx=target_global_view_idx,
+            local_emb_by_view = token_emb[target_global_view_idx + 1:]  # [L, B, N, D]
+            pair_valid_mask = local_visible_mask_by_view[0] & local_visible_mask_by_view[1]
+            vicreg_loss = self.vicreg(
+                local_emb_by_view[0],
+                local_emb_by_view[1],
+                valid_mask=pair_valid_mask,
             )
-            if regularizer_valid_by_view is None:
-                vicreg_loss = self.vicreg(
-                    regularizer_emb_by_view[0],
-                    regularizer_emb_by_view[1],
-                )
-            else:
-                pair_valid_mask = regularizer_valid_by_view[0] & regularizer_valid_by_view[1]
-                vicreg_loss = self.vicreg(
-                    regularizer_emb_by_view[0],
-                    regularizer_emb_by_view[1],
-                    valid_mask=pair_valid_mask,
-                )
             vicreg_term = fused_emb.new_tensor(self.vicreg_beta) * vicreg_loss
             token_sigreg_loss = fused_emb.new_tensor(0.0)
             sigreg_term = fused_emb.new_tensor(0.0)

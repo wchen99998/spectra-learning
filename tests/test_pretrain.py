@@ -138,19 +138,16 @@ class SIGRegForwardTests(unittest.TestCase):
         expected = metrics["jepa_term"] + metrics["vicreg_term"]
         self.assertTrue(torch.allclose(metrics["loss"], expected))
 
-    def test_forward_uses_projected_local_and_global_paths(self):
+    def test_forward_uses_local_and_global_paths(self):
         model = self._build_model(
-            sigreg_projector_dim=12,
-            sigreg_projector_hidden_dim=16,
             masked_token_loss_weight=1.0,
             representation_regularizer="sigreg",
         )
         batch = _make_fused_batch(num_views=model.num_views)
         metrics = model.forward_augmented(batch)
 
-        self.assertEqual(model.sigreg_dim, 12)
-        self.assertEqual(model.latent_mask_token.shape[0], model.sigreg_dim)
-        self.assertEqual(model.masked_latent_predictor_norm.normalized_shape[0], model.sigreg_dim)
+        self.assertEqual(model.latent_mask_token.shape[0], model.model_dim)
+        self.assertEqual(model.masked_latent_predictor_norm.normalized_shape[0], model.model_dim)
         self.assertTrue(torch.isfinite(metrics["loss"]).item())
         self.assertIn("local_global_loss", metrics)
         self.assertIn("regularizer_loss", metrics)
@@ -173,46 +170,6 @@ class SIGRegForwardTests(unittest.TestCase):
         self.assertAlmostEqual(float(metrics["regularizer_term"]), 0.0, places=7)
         self.assertAlmostEqual(float(metrics["regularizer_loss"]), 0.0, places=7)
         self.assertTrue(torch.allclose(metrics["loss"], metrics["jepa_term"]))
-
-    def test_regularizer_feature_source_modes_sigreg(self):
-        modes = (
-            "projector_output",
-            "projector_pooled_output",
-            "encoder_output",
-            "encoder_pooled_output",
-        )
-        for mode in modes:
-            model = self._build_model(
-                representation_regularizer="sigreg",
-                regularizer_feature_source=mode,
-                sigreg_lambda=0.1,
-                masked_token_loss_weight=1.0,
-            )
-            batch = _make_fused_batch(num_views=model.num_views)
-            metrics = model.forward_augmented(batch)
-            self.assertTrue(torch.isfinite(metrics["loss"]).item(), mode)
-            self.assertTrue(torch.isfinite(metrics["sigreg_loss"]).item(), mode)
-
-    def test_regularizer_feature_source_modes_vicreg(self):
-        modes = (
-            "projector_output",
-            "projector_pooled_output",
-            "encoder_output",
-            "encoder_pooled_output",
-        )
-        for mode in modes:
-            model = self._build_model(
-                representation_regularizer="vicreg",
-                regularizer_feature_source=mode,
-                sigreg_lambda=0.0,
-                vicreg_beta=1e-3,
-                masked_token_loss_weight=1.0,
-                multicrop_num_local_views=3,
-            )
-            batch = _make_fused_batch(num_views=model.num_views)
-            metrics = model.forward_augmented(batch)
-            self.assertTrue(torch.isfinite(metrics["loss"]).item(), mode)
-            self.assertTrue(torch.isfinite(metrics["vicreg_loss"]).item(), mode)
 
     def test_encode_output_shape(self):
         model = self._build_model()
@@ -303,28 +260,12 @@ class SIGRegForwardTests(unittest.TestCase):
 
         self.assertFalse(torch.allclose(emb_no_rope, emb_with_rope))
 
-    def test_predictor_rope_supports_projector_dim_different_from_model_dim(self):
-        model = self._build_model(
-            encoder_use_rope=True,
-            model_dim=32,
-            encoder_num_heads=4,
-            sigreg_projector_dim=16,
-            sigreg_projector_hidden_dim=16,
-            masked_token_loss_weight=1.0,
-            multicrop_num_local_views=1,
-        )
-        batch = _make_fused_batch(num_views=model.num_views)
-        metrics = model.forward_augmented(batch)
-        self.assertTrue(torch.isfinite(metrics["loss"]).item())
-
     def test_predictor_head_dim_is_compile_safe_when_possible(self):
         model = self._build_model(
             model_dim=512,
             encoder_num_heads=16,
-            sigreg_projector_dim=128,
         )
-        self.assertEqual(model.predictor_num_heads, 8)
-        self.assertGreaterEqual(model.sigreg_dim // model.predictor_num_heads, 16)
+        self.assertGreaterEqual(model.model_dim // model.predictor_num_heads, 16)
 
     def test_ema_teacher_is_frozen_and_kept_in_eval(self):
         model = PeakSetSIGReg(

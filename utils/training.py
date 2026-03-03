@@ -41,9 +41,6 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         masked_token_loss_weight=float(config.get("masked_token_loss_weight", 0.0)),
         masked_token_loss_type=str(config.get("masked_token_loss_type", "l1")),
         representation_regularizer=str(config.get("representation_regularizer", "sigreg")),
-        regularizer_feature_source=str(
-            config.get("regularizer_feature_source", "projector_pooled_output")
-        ),
         masked_latent_predictor_num_layers=int(
             config.get("masked_latent_predictor_num_layers", 2)
         ),
@@ -54,8 +51,6 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         pma_num_heads=config.get("pma_num_heads", int(config.num_heads)),
         pma_num_seeds=int(config.get("pma_num_seeds", 1)),
         sigreg_num_slices=int(config.get("sigreg_num_slices", 256)),
-        sigreg_projector_dim=config.get("sigreg_projector_dim", None),
-        sigreg_projector_hidden_dim=config.get("sigreg_projector_hidden_dim", None),
         sigreg_lambda=float(config.get("sigreg_lambda", 0.1)),
         sigreg_lambda_warmup_steps=int(config.get("sigreg_lambda_warmup_steps", 0)),
         vicreg_beta=float(config.get("vicreg_beta", 1e-3)),
@@ -74,6 +69,8 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         ),
         encoder_qk_norm=bool(config.get("encoder_qk_norm", False)),
         encoder_post_norm=bool(config.get("encoder_post_norm", False)),
+        normalize_jepa_targets=bool(config.get("normalize_jepa_targets", False)),
+        norm_type=str(config.get("norm_type", "rmsnorm")),
     )
 
 
