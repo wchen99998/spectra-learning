@@ -71,7 +71,7 @@ class SIGReg(nn.Module):
             cos_mean = (x_t.cos() * weight_view).sum(0) / sample_count
             sin_mean = (x_t.sin() * weight_view).sum(0) / sample_count
         err = (cos_mean - self.phi).square() + sin_mean.square()
-        statistic = (err @ self.weights) * sample_count
+        statistic = (err @ self.weights) 
         return statistic.mean()
 
 

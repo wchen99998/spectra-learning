@@ -138,6 +138,58 @@ class SIGRegForwardTests(unittest.TestCase):
         expected = metrics["jepa_term"] + metrics["vicreg_term"]
         self.assertTrue(torch.allclose(metrics["loss"], expected))
 
+    def test_forward_gco_contains_expected_keys(self):
+        model = self._build_model(
+            representation_regularizer="gco",
+            sigreg_lambda=0.0,
+            masked_token_loss_weight=1.0,
+            gco_std_target=10.0,
+            gco_alpha=0.0,
+            gco_eta=1e-2,
+            multicrop_num_local_views=3,
+        )
+        batch = _make_fused_batch(num_views=model.num_views)
+        metrics = model.forward_augmented(batch)
+        for key in (
+            "gco_lambda",
+            "gco_log_lambda",
+            "gco_c_ema",
+            "gco_constraint",
+            "gco_std_penalty",
+        ):
+            self.assertIn(key, metrics, f"Missing key: {key}")
+        self.assertGreater(float(metrics["gco_std_penalty"].detach()), 0.0)
+        self.assertTrue(
+            torch.allclose(
+                metrics["sigreg_term"],
+                metrics["gco_lambda"] * metrics["token_sigreg_loss"],
+            )
+        )
+
+    def test_gco_lambda_updates_only_in_train_mode(self):
+        model = self._build_model(
+            representation_regularizer="gco",
+            sigreg_lambda=0.0,
+            masked_token_loss_weight=1.0,
+            gco_std_target=10.0,
+            gco_alpha=0.0,
+            gco_eta=1e-2,
+            multicrop_num_local_views=3,
+        )
+        batch = _make_fused_batch(num_views=model.num_views)
+
+        model.train()
+        before_train = float(model.gco_log_lambda)
+        model.forward_augmented(batch)
+        after_train = float(model.gco_log_lambda)
+        self.assertGreater(after_train, before_train)
+
+        model.eval()
+        before_eval = float(model.gco_log_lambda)
+        model.forward_augmented(batch)
+        after_eval = float(model.gco_log_lambda)
+        self.assertAlmostEqual(after_eval, before_eval, places=7)
+
     def test_forward_uses_local_and_global_paths(self):
         model = self._build_model(
             masked_token_loss_weight=1.0,

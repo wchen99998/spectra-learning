@@ -3,7 +3,7 @@
 Architecture:
 - PeakSetEncoder: MLP embedder -> non-causal Transformer -> peak embeddings
 - Multi-crop augmentation (1 full-spectrum global + K local masked views)
-- Objective: selectable regularizer (SIGReg or VICReg) + optional masked latent prediction
+- Objective: selectable regularizer (SIGReg, VICReg, or GECO-weighted SIGReg) + optional masked latent prediction
 """
 
 from __future__ import annotations
@@ -320,6 +320,12 @@ class PeakSetSIGReg(nn.Module):
         sigreg_num_slices: int = 256,
         sigreg_lambda: float = 0.1,
         sigreg_lambda_warmup_steps: int = 0,
+        gco_std_target: float = 0.8,
+        gco_alpha: float = 0.99,
+        gco_eta: float = 1e-3,
+        gco_log_lambda_init: float = -8.0,
+        gco_log_lambda_min: float = -12.0,
+        gco_log_lambda_max: float = 2.0,
         vicreg_beta: float = 1e-3,
         vicreg_sim_coeff: float = 0.0,
         vicreg_std_coeff: float = 25.0,
@@ -359,6 +365,11 @@ class PeakSetSIGReg(nn.Module):
         self.sigreg_intensity_jitter_std = sigreg_intensity_jitter_std
         self.sigreg_lambda = float(sigreg_lambda)
         self.sigreg_lambda_warmup_steps = int(sigreg_lambda_warmup_steps)
+        self.std_target = float(gco_std_target)
+        self.gco_alpha = float(gco_alpha)
+        self.gco_eta = float(gco_eta)
+        self.gco_log_lambda_min = float(gco_log_lambda_min)
+        self.gco_log_lambda_max = float(gco_log_lambda_max)
         self.register_buffer(
             "sigreg_lambda_target",
             torch.tensor(self.sigreg_lambda, dtype=torch.float32),
@@ -381,6 +392,14 @@ class PeakSetSIGReg(nn.Module):
                 dtype=torch.float32,
             ),
             persistent=False,
+        )
+        self.register_buffer(
+            "gco_log_lambda",
+            torch.tensor(float(gco_log_lambda_init), dtype=torch.float32),
+        )
+        self.register_buffer(
+            "gco_c_ema",
+            torch.tensor(0.0, dtype=torch.float32),
         )
         self.register_buffer(
             "teacher_ema_decay_start_tensor",
@@ -429,6 +448,11 @@ class PeakSetSIGReg(nn.Module):
             assert self.multicrop_num_local_views >= 2, (
                 "representation_regularizer='vicreg' requires at least two local views "
                 "(multicrop_num_local_views >= 2)."
+            )
+        if self.representation_regularizer == "gco":
+            assert self.multicrop_num_local_views >= 1, (
+                "representation_regularizer='gco' requires at least one local view "
+                "(multicrop_num_local_views >= 1)."
             )
 
         self.encoder = PeakSetEncoder(
@@ -510,6 +534,8 @@ class PeakSetSIGReg(nn.Module):
 
     @torch.no_grad()
     def advance_sigreg_lambda_schedule(self) -> None:
+        if self.representation_regularizer != "sigreg":
+            return
         if self.sigreg_lambda_warmup_steps <= 0:
             self.sigreg_lambda_current.copy_(self.sigreg_lambda_target)
             return
@@ -735,6 +761,8 @@ class PeakSetSIGReg(nn.Module):
         if self.normalize_jepa_targets:
             loss_pred = torch.nn.functional.normalize(loss_pred, dim=-1)
             loss_target = torch.nn.functional.normalize(loss_target, dim=-1)
+            # bounded in [0, 4], no 1/D shrink
+            per_token_reg = 2.0 - 2.0 * (loss_pred * loss_target).sum(dim=-1)
         if self.masked_token_loss_type == "l1":
             per_token_reg = (loss_pred - loss_target).abs().mean(dim=-1)  # [L, B, N]
         elif self.masked_token_loss_type == "l2":
@@ -755,11 +783,24 @@ class PeakSetSIGReg(nn.Module):
             sigreg_lambda_current = fused_emb.new_tensor(self.sigreg_lambda)
 
         jepa_term = self.masked_token_loss_weight * local_global_loss
+        local_visible_mask_by_view = encoder_visible_mask.reshape(V, B, N)[target_global_view_idx + 1:]
+        local_emb_by_view = token_emb[target_global_view_idx + 1:]  # [L, B, N, D]
 
-        # Only compute pool + regularizer when actually needed.
+        # --- Collapse monitoring (detached, no grad) ---
+        with torch.no_grad():
+            collapse_metrics = self._collapse_metrics(
+                fused_emb, encoder_visible_mask, B, V, target_global_view_idx,
+            )
+            local_to_global_emb_std_ratio = (
+                collapse_metrics["local_emb_std"] / collapse_metrics["global_emb_std"]
+            )
+            gco_constraint = self.std_target - collapse_metrics["local_emb_std"].float()
+
+        gco_std_penalty = torch.relu(gco_constraint).to(dtype=fused_emb.dtype)
+        gco_lambda = self.gco_log_lambda.exp().to(dtype=fused_emb.dtype)
+
+        # Regularizer path (SIGReg, VICReg, or GECO-weighted SIGReg).
         if self.representation_regularizer == "sigreg" and self.sigreg_lambda > 0:
-            local_visible_mask_by_view = encoder_visible_mask.reshape(V, B, N)[target_global_view_idx + 1:]
-            local_emb_by_view = token_emb[target_global_view_idx + 1:]  # [L, B, N, D]
             token_sigreg_loss = self.sigreg(
                 local_emb_by_view.reshape(-1, N, local_emb_by_view.shape[-1]),
                 valid_mask=local_visible_mask_by_view.reshape(-1, N),
@@ -768,8 +809,6 @@ class PeakSetSIGReg(nn.Module):
             vicreg_loss = fused_emb.new_tensor(0.0)
             vicreg_term = fused_emb.new_tensor(0.0)
         elif self.representation_regularizer == "vicreg":
-            local_visible_mask_by_view = encoder_visible_mask.reshape(V, B, N)[target_global_view_idx + 1:]
-            local_emb_by_view = token_emb[target_global_view_idx + 1:]  # [L, B, N, D]
             pair_valid_mask = local_visible_mask_by_view[0] & local_visible_mask_by_view[1]
             vicreg_loss = self.vicreg(
                 local_emb_by_view[0],
@@ -779,8 +818,23 @@ class PeakSetSIGReg(nn.Module):
             vicreg_term = fused_emb.new_tensor(self.vicreg_beta) * vicreg_loss
             token_sigreg_loss = fused_emb.new_tensor(0.0)
             sigreg_term = fused_emb.new_tensor(0.0)
+        elif self.representation_regularizer == "gco":
+            with torch.no_grad():
+                if self.training:
+                    self.gco_c_ema.mul_(self.gco_alpha).add_((1.0 - self.gco_alpha) * gco_constraint)
+                    self.gco_log_lambda.add_(self.gco_eta * self.gco_c_ema)
+                    self.gco_log_lambda.clamp_(self.gco_log_lambda_min, self.gco_log_lambda_max)
+                gco_lambda = self.gco_log_lambda.exp().to(dtype=fused_emb.dtype)
+            token_sigreg_loss = self.sigreg(
+                local_emb_by_view.reshape(-1, N, local_emb_by_view.shape[-1]),
+                valid_mask=local_visible_mask_by_view.reshape(-1, N),
+            )
+            sigreg_lambda_current = gco_lambda
+            sigreg_term = gco_lambda * token_sigreg_loss
+            vicreg_loss = fused_emb.new_tensor(0.0)
+            vicreg_term = fused_emb.new_tensor(0.0)
         else:
-            # "none" or sigreg with lambda=0: skip the regularizer path entirely.
+            # "none" or sigreg with lambda=0: skip regularization.
             token_sigreg_loss = fused_emb.new_tensor(0.0)
             sigreg_term = fused_emb.new_tensor(0.0)
             vicreg_loss = fused_emb.new_tensor(0.0)
@@ -801,15 +855,6 @@ class PeakSetSIGReg(nn.Module):
 
         pool_norm_weight_abs_mean = self.pool_norm.weight.abs().mean()
 
-        # --- Collapse monitoring (detached, no grad) ---
-        with torch.no_grad():
-            collapse_metrics = self._collapse_metrics(
-                fused_emb, encoder_visible_mask, B, V, target_global_view_idx,
-            )
-            local_to_global_emb_std_ratio = (
-                collapse_metrics["local_emb_std"] / collapse_metrics["global_emb_std"]
-            )
-
         return {
             "loss": loss,
             "sigreg_loss": token_sigreg_loss,
@@ -828,6 +873,11 @@ class PeakSetSIGReg(nn.Module):
             "valid_fraction": valid_fraction,
             "masked_fraction": masked_fraction,
             "sigreg_lambda_current": sigreg_lambda_current,
+            "gco_lambda": gco_lambda,
+            "gco_log_lambda": self.gco_log_lambda.to(dtype=fused_emb.dtype),
+            "gco_c_ema": self.gco_c_ema.to(dtype=fused_emb.dtype),
+            "gco_constraint": gco_constraint.to(dtype=fused_emb.dtype),
+            "gco_std_penalty": gco_std_penalty,
             "pool_norm_weight_abs_mean": pool_norm_weight_abs_mean,
             "local_to_global_emb_std_ratio": local_to_global_emb_std_ratio,
             **collapse_metrics,
