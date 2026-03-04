@@ -562,6 +562,15 @@ def _ensure_processed(
 # tf.data pipeline
 # -----------------------------------------------------------------------------
 
+def _normalize_keep_fraction_range(
+    keep_fraction: float | tuple[float, float] | list[float],
+) -> tuple[float, float]:
+    if isinstance(keep_fraction, (tuple, list)):
+        return float(keep_fraction[0]), float(keep_fraction[1])
+    value = float(keep_fraction)
+    return value, value
+
+
 @tf.function
 def _ensure_nonempty_peakset_tf(
     peak_mz: tf.Tensor,
@@ -581,12 +590,13 @@ def _ensure_nonempty_peakset_tf(
 @tf.function
 def _random_keep_mask_tf(
     peak_valid_mask: tf.Tensor,
-    keep_fraction: float,
+    keep_fraction: tf.Tensor,
 ) -> tf.Tensor:
-    """Return a boolean *masked* tensor (True = dropped peak) that keeps *keep_fraction* of valid peaks."""
+    """Return a boolean *masked* tensor (True = dropped peak)."""
     batch_size = tf.shape(peak_valid_mask)[0]
     num_peaks = tf.shape(peak_valid_mask)[1]
 
+    keep_fraction = tf.cast(keep_fraction, tf.float32)
     valid_counts = tf.reduce_sum(tf.cast(peak_valid_mask, tf.int32), axis=1)  # [B]
     keep_counts = tf.cast(
         tf.round(tf.cast(valid_counts, tf.float32) * keep_fraction),
@@ -648,7 +658,7 @@ def _augment_multicrop_view_tf(
     peak_intensity: tf.Tensor,
     peak_valid_mask: tf.Tensor,
     *,
-    keep_fraction: float,
+    keep_fraction: tf.Tensor,
     mz_jitter_std: float,
     intensity_jitter_std: float,
 ) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
@@ -677,14 +687,17 @@ def _augment_multicrop_view_tf(
 def _augment_multicrop_batch_tf(
     *,
     num_local_views: int,
-    local_keep_fraction: float,
+    local_keep_fraction: float | tuple[float, float],
     mz_jitter_std: float,
     intensity_jitter_std: float,
 ) -> Callable[[dict], dict]:
+    local_keep_min, local_keep_max = _normalize_keep_fraction_range(local_keep_fraction)
+
     def apply(batch: dict) -> dict:
         peak_mz = batch["peak_mz"]
         peak_intensity = batch["peak_intensity"]
         peak_valid_mask = batch["peak_valid_mask"]
+        batch_size = tf.shape(peak_valid_mask)[0]
 
         all_mz = []
         all_int = []
@@ -694,7 +707,7 @@ def _augment_multicrop_batch_tf(
         # Single global view: full spectrum (no masking).
         mz, intensity, valid, masked = _augment_multicrop_view_tf(
             peak_mz, peak_intensity, peak_valid_mask,
-            keep_fraction=1.0,
+            keep_fraction=tf.ones([batch_size], dtype=tf.float32),
             mz_jitter_std=mz_jitter_std,
             intensity_jitter_std=intensity_jitter_std,
         )
@@ -704,9 +717,21 @@ def _augment_multicrop_batch_tf(
         all_masked.append(masked)
 
         for _ in range(num_local_views):
+            if local_keep_min == local_keep_max:
+                local_keep = tf.fill(
+                    [batch_size],
+                    tf.constant(local_keep_min, dtype=tf.float32),
+                )
+            else:
+                local_keep = tf.random.uniform(
+                    [batch_size],
+                    minval=local_keep_min,
+                    maxval=local_keep_max,
+                    dtype=tf.float32,
+                )
             mz, intensity, valid, masked = _augment_multicrop_view_tf(
                 peak_mz, peak_intensity, peak_valid_mask,
-                keep_fraction=local_keep_fraction,
+                keep_fraction=local_keep,
                 mz_jitter_std=mz_jitter_std,
                 intensity_jitter_std=intensity_jitter_std,
             )
@@ -715,7 +740,6 @@ def _augment_multicrop_batch_tf(
             all_valid.append(valid)
             all_masked.append(masked)
 
-        num_views = 1 + num_local_views
         out = dict(batch)
         out["fused_mz"] = tf.concat(all_mz, axis=0)
         out["fused_intensity"] = tf.concat(all_int, axis=0)
@@ -867,7 +891,7 @@ def _build_dataset(
     min_peak_intensity: float,
     augmentation_type: str = "none",
     multicrop_num_local_views: int = 6,
-    multicrop_local_keep_fraction: float = 0.25,
+    multicrop_local_keep_fraction: float | tuple[float, float] = 0.25,
     mz_jitter_std: float = 0.0001,
     intensity_jitter_std: float = 0.001,
     peak_ordering: str = "intensity",
@@ -1096,7 +1120,7 @@ class TfLightningDataModule:
         self.multicrop_num_local_views = int(
             config.get("multicrop_num_local_views", 6)
         )
-        self.multicrop_local_keep_fraction = float(
+        self.multicrop_local_keep_fraction = _normalize_keep_fraction_range(
             config.get("multicrop_local_keep_fraction", 0.25)
         )
         self.mz_jitter_std = float(config.get("sigreg_mz_jitter_std", 0.0001))

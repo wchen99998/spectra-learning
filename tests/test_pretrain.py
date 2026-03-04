@@ -138,9 +138,9 @@ class SIGRegForwardTests(unittest.TestCase):
         expected = metrics["jepa_term"] + metrics["vicreg_term"]
         self.assertTrue(torch.allclose(metrics["loss"], expected))
 
-    def test_forward_gco_contains_expected_keys(self):
+    def test_forward_gco_sigreg_contains_expected_keys(self):
         model = self._build_model(
-            representation_regularizer="gco",
+            representation_regularizer="gco-sigreg",
             sigreg_lambda=0.0,
             masked_token_loss_weight=1.0,
             gco_std_target=10.0,
@@ -166,9 +166,9 @@ class SIGRegForwardTests(unittest.TestCase):
             )
         )
 
-    def test_gco_lambda_updates_only_in_train_mode(self):
+    def test_forward_gco_vicreg_contains_expected_keys(self):
         model = self._build_model(
-            representation_regularizer="gco",
+            representation_regularizer="gco-vicreg",
             sigreg_lambda=0.0,
             masked_token_loss_weight=1.0,
             gco_std_target=10.0,
@@ -177,18 +177,194 @@ class SIGRegForwardTests(unittest.TestCase):
             multicrop_num_local_views=3,
         )
         batch = _make_fused_batch(num_views=model.num_views)
+        metrics = model.forward_augmented(batch)
+        for key in (
+            "gco_lambda",
+            "gco_log_lambda",
+            "gco_c_ema",
+            "gco_constraint",
+            "gco_std_penalty",
+            "vicreg_loss",
+            "vicreg_term",
+        ):
+            self.assertIn(key, metrics, f"Missing key: {key}")
+        self.assertGreater(float(metrics["gco_std_penalty"].detach()), 0.0)
+        self.assertTrue(
+            torch.allclose(
+                metrics["vicreg_term"],
+                metrics["gco_lambda"] * metrics["vicreg_loss"],
+            )
+        )
+        self.assertAlmostEqual(float(metrics["sigreg_loss"]), 0.0, places=7)
+        self.assertAlmostEqual(float(metrics["token_sigreg_loss"]), 0.0, places=7)
 
-        model.train()
-        before_train = float(model.gco_log_lambda)
-        model.forward_augmented(batch)
-        after_train = float(model.gco_log_lambda)
-        self.assertGreater(after_train, before_train)
+    def test_gco_lambda_updates_only_in_train_mode(self):
+        for regularizer in ("gco-sigreg", "gco-vicreg"):
+            with self.subTest(representation_regularizer=regularizer):
+                model = self._build_model(
+                    representation_regularizer=regularizer,
+                    sigreg_lambda=0.0,
+                    masked_token_loss_weight=1.0,
+                    gco_std_target=10.0,
+                    gco_alpha=0.0,
+                    gco_eta=1e-2,
+                    multicrop_num_local_views=3,
+                )
+                batch = _make_fused_batch(num_views=model.num_views)
 
-        model.eval()
-        before_eval = float(model.gco_log_lambda)
+                model.train()
+                before_train = float(model.gco_log_lambda)
+                model.forward_augmented(batch)
+                after_train = float(model.gco_log_lambda)
+                self.assertGreater(after_train, before_train)
+
+                model.eval()
+                before_eval = float(model.gco_log_lambda)
+                model.forward_augmented(batch)
+                after_eval = float(model.gco_log_lambda)
+                self.assertAlmostEqual(after_eval, before_eval, places=7)
+
+    def test_sigreg_regularizer_uses_predictor_outputs_and_padding_mask(self):
+        model = self._build_model(
+            representation_regularizer="sigreg",
+            sigreg_lambda=0.1,
+            masked_token_loss_weight=0.0,
+            multicrop_num_local_views=3,
+        )
+
+        class CaptureSIGReg(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.proj = None
+                self.valid_mask = None
+
+            def forward(self, proj, valid_mask=None):
+                self.proj = proj.detach().clone()
+                self.valid_mask = None if valid_mask is None else valid_mask.detach().clone()
+                return proj.new_tensor(0.5)
+
+        capture = CaptureSIGReg()
+        model.sigreg = capture
+
+        def fake_predict_masked_latents(
+            local_token_emb_remasked: torch.Tensor,
+            local_valid_mask: torch.Tensor,
+            local_mz: torch.Tensor,
+            local_masked_positions: torch.Tensor,
+        ) -> torch.Tensor:
+            return torch.full_like(local_token_emb_remasked, 3.5)
+
+        model.predict_masked_latents = fake_predict_masked_latents
+
+        batch = _make_fused_batch(num_views=model.num_views)
+        batch_size = batch["fused_mz"].shape[0] // model.num_views
+        batch["fused_masked_positions"][batch_size:, 1] = True
         model.forward_augmented(batch)
-        after_eval = float(model.gco_log_lambda)
-        self.assertAlmostEqual(after_eval, before_eval, places=7)
+
+        expected_valid = (
+            batch["fused_valid_mask"]
+            .reshape(model.num_views, batch_size, -1)[1:]
+            .reshape(-1, batch["fused_valid_mask"].shape[1])
+        )
+        self.assertIsNotNone(capture.proj)
+        self.assertIsNotNone(capture.valid_mask)
+        self.assertTrue(torch.equal(capture.valid_mask, expected_valid))
+        self.assertTrue(torch.allclose(capture.proj, torch.full_like(capture.proj, 3.5)))
+
+    def test_vicreg_regularizer_uses_predictor_outputs_and_padding_mask(self):
+        model = self._build_model(
+            representation_regularizer="vicreg",
+            sigreg_lambda=0.0,
+            masked_token_loss_weight=0.0,
+            multicrop_num_local_views=3,
+        )
+
+        class CaptureVICReg(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.proj_a = None
+                self.proj_b = None
+                self.valid_mask = None
+
+            def forward(self, proj_a, proj_b, valid_mask=None):
+                self.proj_a = proj_a.detach().clone()
+                self.proj_b = proj_b.detach().clone()
+                self.valid_mask = None if valid_mask is None else valid_mask.detach().clone()
+                return proj_a.new_tensor(0.7)
+
+        capture = CaptureVICReg()
+        model.vicreg = capture
+
+        def fake_predict_masked_latents(
+            local_token_emb_remasked: torch.Tensor,
+            local_valid_mask: torch.Tensor,
+            local_mz: torch.Tensor,
+            local_masked_positions: torch.Tensor,
+        ) -> torch.Tensor:
+            return torch.full_like(local_token_emb_remasked, 4.25)
+
+        model.predict_masked_latents = fake_predict_masked_latents
+
+        batch = _make_fused_batch(num_views=model.num_views)
+        batch_size = batch["fused_mz"].shape[0] // model.num_views
+        batch["fused_masked_positions"][batch_size:, 1] = True
+        model.forward_augmented(batch)
+
+        expected_valid_by_view = batch["fused_valid_mask"].reshape(model.num_views, batch_size, -1)[1:]
+        expected_pair_valid = expected_valid_by_view[0] & expected_valid_by_view[1]
+        self.assertIsNotNone(capture.proj_a)
+        self.assertIsNotNone(capture.proj_b)
+        self.assertIsNotNone(capture.valid_mask)
+        self.assertTrue(torch.equal(capture.valid_mask, expected_pair_valid))
+        self.assertTrue(torch.allclose(capture.proj_a, torch.full_like(capture.proj_a, 4.25)))
+        self.assertTrue(torch.allclose(capture.proj_b, torch.full_like(capture.proj_b, 4.25)))
+
+    def test_gco_constraint_uses_predictor_std(self):
+        model = self._build_model(
+            representation_regularizer="gco-sigreg",
+            sigreg_lambda=0.0,
+            masked_token_loss_weight=0.0,
+            gco_std_target=1.0,
+            gco_alpha=0.0,
+            gco_eta=0.0,
+            multicrop_num_local_views=3,
+        )
+
+        def fake_predict_masked_latents(
+            local_token_emb_remasked: torch.Tensor,
+            local_valid_mask: torch.Tensor,
+            local_mz: torch.Tensor,
+            local_masked_positions: torch.Tensor,
+        ) -> torch.Tensor:
+            return torch.zeros_like(local_token_emb_remasked)
+
+        def fake_collapse_metrics(
+            fused_emb: torch.Tensor,
+            visible_mask: torch.Tensor,
+            B: int,
+            V: int,
+            target_global_view_idx: int,
+        ) -> dict[str, torch.Tensor]:
+            return {
+                "global_emb_std": fused_emb.new_tensor(2.0),
+                "local_emb_std": fused_emb.new_tensor(10.0),
+                "global_emb_norm": fused_emb.new_tensor(0.0),
+                "local_emb_norm": fused_emb.new_tensor(0.0),
+            }
+
+        class ZeroSIGReg(torch.nn.Module):
+            def forward(self, proj, valid_mask=None):
+                return proj.new_tensor(0.0)
+
+        model.predict_masked_latents = fake_predict_masked_latents
+        model._collapse_metrics = fake_collapse_metrics
+        model.sigreg = ZeroSIGReg()
+
+        batch = _make_fused_batch(num_views=model.num_views)
+        metrics = model.forward_augmented(batch)
+        self.assertAlmostEqual(float(metrics["local_emb_std"]), 10.0, places=6)
+        self.assertGreater(float(metrics["gco_constraint"]), 0.9)
+        self.assertGreater(float(metrics["gco_std_penalty"]), 0.9)
 
     def test_forward_uses_local_and_global_paths(self):
         model = self._build_model(

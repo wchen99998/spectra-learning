@@ -62,9 +62,7 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         vicreg_std_coeff=float(config.get("vicreg_std_coeff", 25.0)),
         vicreg_cov_coeff=float(config.get("vicreg_cov_coeff", 1.0)),
         multicrop_num_local_views=int(config.get("multicrop_num_local_views", 6)),
-        multicrop_local_keep_fraction=float(
-            config.get("multicrop_local_keep_fraction", 0.25)
-        ),
+        multicrop_local_keep_fraction=config.get("multicrop_local_keep_fraction", 0.25),
         use_ema_teacher_target=bool(config.get("use_ema_teacher_target", False)),
         teacher_ema_decay=float(config.get("teacher_ema_decay", 0.996)),
         teacher_ema_decay_start=float(config.get("teacher_ema_decay_start", 0.0)),
