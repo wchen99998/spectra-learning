@@ -44,6 +44,8 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.dataloader_prefetch_factor = 2
     cfg.dataloader_persistent_workers = True
     cfg.dataloader_pin_memory = True
+    cfg.msg_linear_probe_every_n_steps = 0
+    cfg.msg_linear_probe_cache_dir = None
 
     # Muon optimizer defaults (only used when cfg.optimizer == "muon")
     cfg.muon_lr = None              # Falls back to cfg.learning_rate

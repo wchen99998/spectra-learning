@@ -700,17 +700,17 @@ class PeakSetSIGReg(nn.Module):
         if self.normalize_jepa_targets:
             loss_pred = torch.nn.functional.normalize(loss_pred, dim=-1)
             loss_target = torch.nn.functional.normalize(loss_target, dim=-1)
-            # bounded in [0, 4], no 1/D shrink
+
+        if self.masked_token_loss_type == "cosine":
             per_token_reg = 2.0 - 2.0 * (loss_pred * loss_target).sum(dim=-1)
-        if self.masked_token_loss_type == "l1":
-            per_token_reg = (loss_pred - loss_target).abs().mean(dim=-1)  # [L, B, N]
         elif self.masked_token_loss_type == "l2":
-            per_token_reg = (loss_pred - loss_target).square().mean(dim=-1)  # [L, B, N]
+            per_token_reg = (loss_pred - loss_target).square().mean(dim=-1)
+        elif self.masked_token_loss_type == "l2_sum":
+            per_token_reg = (loss_pred - loss_target).square().sum(dim=-1)  # == cosine distance for unit vectors
+        elif self.masked_token_loss_type == "l1":
+            per_token_reg = (loss_pred - loss_target).abs().mean(dim=-1)
         else:
-            raise ValueError(
-                f"Unsupported masked_token_loss_type: {self.masked_token_loss_type}. "
-                "Expected one of: 'l1', 'l2'."
-            )
+            raise ValueError(...)
         all_local_mask_float = all_local_mask.float()  # [L, B, N]
         reg_num = (per_token_reg * all_local_mask_float).sum()
         reg_den = all_local_mask_float.sum()

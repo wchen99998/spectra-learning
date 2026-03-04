@@ -14,24 +14,29 @@ def get_config() -> config_dict.ConfigDict:
     cfg.teacher_ema_decay_warmup_steps = 100_000
     cfg.grad_clip_norm = 1.0
     cfg.masked_latent_predictor_num_layers = 4
-    cfg.multicrop_local_keep_fraction = 0.5
+    cfg.multicrop_local_keep_fraction = 0.25
 
     cfg.encoder_qk_norm = False
-    cfg.masked_token_loss_type = "l2"
+    cfg.masked_token_loss_type = "cosine"
     cfg.norm_type = "layernorm"
     cfg.normalize_jepa_targets = True
     cfg.num_epochs = 5
     cfg.autocast_dtype = "bf16"
-    cfg.learning_rate = 1e-4
+    cfg.learning_rate = 3e-4
     cfg.representation_regularizer = "gco"
-    cfg.gco_std_target = 0.6
+    cfg.gco_std_target = 1.0
+    cfg.gco_log_lambda_min = -5.0
     cfg.sigreg_lambda_warmup_steps = 0
     cfg.model_dim = 512
     cfg.num_layers = 14
     cfg.num_heads = 16
-    cfg.num_kv_heads = 8
+    cfg.num_kv_heads = 16
 
-    cfg.warmup_steps = 100_000
+    cfg.msg_linear_probe_every_n_steps = 50_000
+    cfg.sigreg_mz_jitter_std = 0.005
+    cfg.sigreg_intensity_jitter_std = 0.05
+
+    cfg.warmup_steps = 10_000
     cfg.optimizer = "muon"
 
     cfg.sigreg_lambda_warmup_steps = 50_000

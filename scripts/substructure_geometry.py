@@ -37,7 +37,7 @@ import torch.nn.functional as F
 from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.metrics import r2_score, roc_auc_score
-from sklearn.model_selection import KFold, cross_val_score
+from sklearn.model_selection import KFold, StratifiedKFold, cross_val_score
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor, NearestNeighbors
 from sklearn.preprocessing import normalize as l2_normalize
 from scipy.stats import spearmanr
@@ -46,7 +46,7 @@ from tqdm.auto import tqdm
 import umap
 
 from rdkit import Chem
-from rdkit.Chem import Descriptors, MACCSkeys, rdMolDescriptors
+from rdkit.Chem import MACCSkeys, rdMolDescriptors
 from rdkit import DataStructs
 
 torch.set_float32_matmul_precision("high")
@@ -71,6 +71,7 @@ from utils.training import (
     load_pretrained_weights,
     latest_ckpt_path,
 )
+from utils.msg_linear_probe import FG_SMARTS, compute_probe_targets_for_smiles
 
 log = logging.getLogger(__name__)
 
@@ -89,25 +90,6 @@ def _git_info() -> dict[str, str]:
         pass
     return info
 
-
-# Functional groups via SMARTS
-FG_SMARTS: dict[str, str] = {
-    "hydroxyl": "[OX2H]",
-    "carboxyl": "[CX3](=O)[OX2H1]",
-    "amine": "[NX3;H2,H1;!$(NC=O)]",
-    "amide": "[NX3][CX3](=[OX1])",
-    "ester": "[#6][CX3](=O)[OX2H0][#6]",
-    "ketone": "[#6][CX3](=O)[#6]",
-    "aldehyde": "[CX3H1](=O)[#6]",
-    "aromatic_ring": "c1ccccc1",
-    "nitro": "[$([NX3](=O)=O),$([NX3+](=O)[O-])]",
-    "sulfonyl": "[#16X4](=[OX1])(=[OX1])",
-    "phosphate": "[PX4](=[OX1])([OX2])",
-    "halide": "[F,Cl,Br,I]",
-    "ether": "[OD2]([#6])[#6]",
-    "thiol": "[#16X2H]",
-    "nitrile": "[NX1]#[CX2]",
-}
 
 RANDOM_SEED = 42
 UMAP_MAX_SAMPLES = 30_000
@@ -146,8 +128,13 @@ def _parse_args() -> argparse.Namespace:
         help="Probe type: sklearn (Ridge/LogReg), knn, hgb (HistGradientBoosting), neural-linear, neural-attentive, or all.",
     )
     parser.add_argument(
-        "--pool", choices=["pma", "mean"], default="pma",
+        "--pool", choices=["pma", "mean"], default="mean",
         help="Pooling method for model embeddings: pma (learned PMA) or mean (mean over valid tokens).",
+    )
+    parser.add_argument(
+        "--no-graph",
+        action="store_true",
+        help="Disable graph/figure generation (including UMAP) to speed up evaluation.",
     )
     parser.add_argument("--external-embed", default=None, help="Path to HDF5 file with pre-computed embeddings (bypasses model loading).")
     parser.add_argument("--embed-key", default="DreaMS_embedding", help="HDF5 dataset key for embeddings (default: DreaMS_embedding).")
@@ -383,42 +370,21 @@ def _load_external_embeddings(
 def _compute_rdkit_features(all_smiles: list[str]):
     n = len(all_smiles)
     maccs_fps = np.zeros((n, 167), dtype=np.int8)
-    fg_patterns = {name: Chem.MolFromSmarts(sma) for name, sma in FG_SMARTS.items()}
-    fg_counts = {name: np.zeros(n, dtype=np.int16) for name in FG_SMARTS}
-
-    mol_weight = np.zeros(n, dtype=np.float32)
-    num_rings = np.zeros(n, dtype=np.int16)
-    num_aromatic_rings = np.zeros(n, dtype=np.int16)
-    num_heavy_atoms = np.zeros(n, dtype=np.int16)
-    logp = np.zeros(n, dtype=np.float32)
-    valid_mol_mask = np.ones(n, dtype=bool)
+    mol_props, fg_counts, valid_mol_mask = compute_probe_targets_for_smiles(all_smiles)
+    mol_props["num_aromatic_rings"] = np.zeros(n, dtype=np.int16)
 
     for i, smi in enumerate(tqdm(all_smiles, desc="Computing RDKit features")):
         mol = Chem.MolFromSmiles(smi)
         if mol is None:
-            valid_mol_mask[i] = False
             continue
         maccs = MACCSkeys.GenMACCSKeys(mol)
         arr = np.zeros(167, dtype=np.int8)
         DataStructs.ConvertToNumpyArray(maccs, arr)
         maccs_fps[i] = arr
-        for name, pat in fg_patterns.items():
-            fg_counts[name][i] = len(mol.GetSubstructMatches(pat))
-        mol_weight[i] = Descriptors.ExactMolWt(mol)
-        num_rings[i] = rdMolDescriptors.CalcNumRings(mol)
-        num_aromatic_rings[i] = rdMolDescriptors.CalcNumAromaticRings(mol)
-        num_heavy_atoms[i] = mol.GetNumHeavyAtoms()
-        logp[i] = Descriptors.MolLogP(mol)
+        mol_props["num_aromatic_rings"][i] = rdMolDescriptors.CalcNumAromaticRings(mol)
 
     log.info("Valid molecules: %s / %s", f"{valid_mol_mask.sum():,}", f"{n:,}")
 
-    mol_props = {
-        "mol_weight": mol_weight,
-        "num_rings": num_rings,
-        "num_aromatic_rings": num_aromatic_rings,
-        "num_heavy_atoms": num_heavy_atoms,
-        "logp": logp,
-    }
     return maccs_fps, fg_counts, mol_props, valid_mol_mask
 
 
@@ -473,6 +439,7 @@ def _tanimoto_analysis(
     valid_mol_mask: np.ndarray,
     outdir: Path,
     seed: int,
+    plot: bool = True,
 ) -> dict:
     rng = np.random.RandomState(seed)
     valid_idx = np.where(valid_mol_mask)[0]
@@ -499,29 +466,31 @@ def _tanimoto_analysis(
     bins = np.linspace(0, 1, 21)
     bin_idx = np.digitize(tanimoto, bins) - 1
     bin_centers = (bins[:-1] + bins[1:]) / 2
+    bin_idx = np.clip(bin_idx, 0, len(bin_centers) - 1)
     bin_means = [cos_sims[bin_idx == i].mean() if (bin_idx == i).any() else np.nan for i in range(len(bin_centers))]
 
-    fig, axes = plt.subplots(1, 3, figsize=(20, 5))
-    axes[0].hist2d(tanimoto, cos_sims, bins=100, cmap="viridis", cmin=1)
-    axes[0].set_xlabel("Tanimoto similarity (Morgan FP)")
-    axes[0].set_ylabel("Cosine similarity (embeddings)")
-    axes[0].set_title(f"Embedding vs Molecular Similarity\nPearson r = {corr:.4f}  Spearman ρ = {spearman_rho:.4f}")
-    plt.colorbar(axes[0].collections[0], ax=axes[0], label="count")
+    if plot:
+        fig, axes = plt.subplots(1, 3, figsize=(20, 5))
+        axes[0].hist2d(tanimoto, cos_sims, bins=100, cmap="viridis", cmin=1)
+        axes[0].set_xlabel("Tanimoto similarity (Morgan FP)")
+        axes[0].set_ylabel("Cosine similarity (embeddings)")
+        axes[0].set_title(f"Embedding vs Molecular Similarity\nPearson r = {corr:.4f}  Spearman ρ = {spearman_rho:.4f}")
+        plt.colorbar(axes[0].collections[0], ax=axes[0], label="count")
 
-    axes[1].bar(bin_centers, bin_means, width=0.04, alpha=0.7)
-    axes[1].set_xlabel("Tanimoto similarity bin")
-    axes[1].set_ylabel("Mean cosine similarity")
-    axes[1].set_title("Mean Embedding Similarity by Tanimoto Bin")
+        axes[1].bar(bin_centers, bin_means, width=0.04, alpha=0.7)
+        axes[1].set_xlabel("Tanimoto similarity bin")
+        axes[1].set_ylabel("Mean cosine similarity")
+        axes[1].set_title("Mean Embedding Similarity by Tanimoto Bin")
 
-    axes[2].hist(tanimoto, bins=100, density=True, alpha=0.7, edgecolor="none")
-    axes[2].set_xlabel("Tanimoto similarity")
-    axes[2].set_ylabel("density")
-    axes[2].set_title("Tanimoto Similarity Distribution")
+        axes[2].hist(tanimoto, bins=100, density=True, alpha=0.7, edgecolor="none")
+        axes[2].set_xlabel("Tanimoto similarity")
+        axes[2].set_ylabel("density")
+        axes[2].set_title("Tanimoto Similarity Distribution")
 
-    plt.tight_layout()
-    fig.savefig(outdir / "tanimoto_vs_cosine.png", dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    log.info("Saved tanimoto_vs_cosine.png")
+        plt.tight_layout()
+        fig.savefig(outdir / "tanimoto_vs_cosine.png", dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        log.info("Saved tanimoto_vs_cosine.png")
 
     return {
         "pearson_cosine_tanimoto": corr,
@@ -700,6 +669,7 @@ def _linear_probes(
     X_probe = all_embeds[probe_idx]
 
     cv = KFold(n_splits=5, shuffle=True, random_state=seed)
+    cv_cls = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
     results: dict[str, dict] = {}
 
     # Ridge regression targets
@@ -728,7 +698,7 @@ def _linear_probes(
             fg_results[name] = {"skipped": True, "prevalence": pos_frac}
             continue
         clf = LogisticRegression(max_iter=500, C=1.0, solver="lbfgs", n_jobs=-1)
-        scores = cross_val_score(clf, X_probe, y, cv=cv, scoring="roc_auc", n_jobs=-1)
+        scores = cross_val_score(clf, X_probe, y, cv=cv_cls, scoring="roc_auc", n_jobs=-1)
         auc_mean, auc_std = float(scores.mean()), float(scores.std())
         log.info("  %s: AUC=%.4f +/- %.4f (prevalence=%.3f)", name, auc_mean, auc_std, pos_frac)
         fg_results[name] = {"auc_mean": auc_mean, "auc_std": auc_std, "prevalence": pos_frac}
@@ -758,6 +728,7 @@ def _knn_probes(
     X_probe = all_embeds[probe_idx]
 
     cv = KFold(n_splits=5, shuffle=True, random_state=seed)
+    cv_cls = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
     results: dict[str, dict] = {}
 
     regression_targets = [
@@ -784,7 +755,7 @@ def _knn_probes(
             fg_results[name] = {"skipped": True, "prevalence": pos_frac}
             continue
         clf = KNeighborsClassifier(n_neighbors=KNN_PROBE_K, metric="cosine", n_jobs=-1)
-        scores = cross_val_score(clf, X_probe, y, cv=cv, scoring="roc_auc", n_jobs=-1)
+        scores = cross_val_score(clf, X_probe, y, cv=cv_cls, scoring="roc_auc", n_jobs=-1)
         auc_mean, auc_std = float(scores.mean()), float(scores.std())
         log.info("  %s: AUC=%.4f +/- %.4f (prevalence=%.3f)", name, auc_mean, auc_std, pos_frac)
         fg_results[name] = {"auc_mean": auc_mean, "auc_std": auc_std, "prevalence": pos_frac}
@@ -812,6 +783,7 @@ def _hgb_probes(
     X_probe = all_embeds[probe_idx]
 
     cv = KFold(n_splits=5, shuffle=True, random_state=seed)
+    cv_cls = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
     results: dict[str, dict] = {}
 
     regression_targets = [
@@ -838,7 +810,7 @@ def _hgb_probes(
             fg_results[name] = {"skipped": True, "prevalence": pos_frac}
             continue
         clf = HistGradientBoostingClassifier(max_iter=200, max_depth=6, random_state=seed)
-        scores = cross_val_score(clf, X_probe, y, cv=cv, scoring="roc_auc", n_jobs=-1)
+        scores = cross_val_score(clf, X_probe, y, cv=cv_cls, scoring="roc_auc", n_jobs=-1)
         auc_mean, auc_std = float(scores.mean()), float(scores.std())
         log.info("  %s: AUC=%.4f +/- %.4f (prevalence=%.3f)", name, auc_mean, auc_std, pos_frac)
         fg_results[name] = {"auc_mean": auc_mean, "auc_std": auc_std, "prevalence": pos_frac}
@@ -911,17 +883,6 @@ def _neural_probes(
         len(regression_tasks), len(classification_tasks),
     )
 
-    # Standardize regression targets (zero-mean, unit-variance).
-    reg_means: dict[str, float] = {}
-    reg_stds: dict[str, float] = {}
-    for key in regression_tasks:
-        m = float(targets[key].mean())
-        s = float(targets[key].std())
-        s = max(s, 1e-8)
-        reg_means[key] = m
-        reg_stds[key] = s
-        targets[key] = (targets[key] - m) / s
-
     # 80/20 train/test split.
     n_train = int(0.8 * probe_size)
     shuffled = rng.permutation(probe_size)
@@ -935,6 +896,21 @@ def _neural_probes(
     probe_precursor_mz = raw_peaks["precursor_mz"][probe_idx]
 
     target_matrix = torch.stack([targets[name] for name in all_task_names], dim=1)
+
+    # Standardize regression targets using train split statistics only.
+    reg_means: dict[str, float] = {}
+    reg_stds: dict[str, float] = {}
+    train_sel_t = torch.from_numpy(train_sel.astype(np.int64))
+    for i, name in enumerate(all_task_names):
+        if name not in regression_tasks:
+            continue
+        train_col = target_matrix[train_sel_t, i]
+        m = float(train_col.mean())
+        s = float(train_col.std())
+        s = max(s, 1e-8)
+        reg_means[name] = m
+        reg_stds[name] = s
+        target_matrix[:, i] = (target_matrix[:, i] - m) / s
 
     def _make_dataset(sel: np.ndarray) -> TensorDataset:
         idx = torch.from_numpy(sel.astype(np.int64))
@@ -1100,6 +1076,7 @@ def _maccs_enrichment(
     sub_idx: np.ndarray,
     outdir: Path,
     k: int = 10,
+    plot: bool = True,
 ) -> dict:
     sub_maccs = maccs_fps[sub_idx]
     global_prev = sub_maccs.mean(axis=0)
@@ -1132,27 +1109,27 @@ def _maccs_enrichment(
     log.info("Mean lift=%.3f  Median=%.3f  >1.5: %d/%d  >2.0: %d/%d",
              mean_lift, median_lift, lift_gt_1_5, len(lifts), lift_gt_2_0, len(lifts))
 
-    # Plot
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    axes[0].bar(range(len(lifts)), sorted(lifts, reverse=True), edgecolor="none", alpha=0.7)
-    axes[0].axhline(1.0, color="red", linestyle="--", alpha=0.7, label="no enrichment")
-    axes[0].set_xlabel("MACCS key (sorted by lift)")
-    axes[0].set_ylabel("lift (observed / expected)")
-    axes[0].set_title(f"MACCS Key Enrichment in Embedding k={k} NN")
-    axes[0].legend()
+    if plot:
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        axes[0].bar(range(len(lifts)), sorted(lifts, reverse=True), edgecolor="none", alpha=0.7)
+        axes[0].axhline(1.0, color="red", linestyle="--", alpha=0.7, label="no enrichment")
+        axes[0].set_xlabel("MACCS key (sorted by lift)")
+        axes[0].set_ylabel("lift (observed / expected)")
+        axes[0].set_title(f"MACCS Key Enrichment in Embedding k={k} NN")
+        axes[0].legend()
 
-    axes[1].hist(lifts, bins=30, edgecolor="none", alpha=0.7)
-    axes[1].axvline(1.0, color="red", linestyle="--", alpha=0.7, label="no enrichment")
-    axes[1].axvline(median_lift, color="blue", linestyle="--", alpha=0.7, label=f"median={median_lift:.2f}")
-    axes[1].set_xlabel("lift")
-    axes[1].set_ylabel("count")
-    axes[1].set_title("Distribution of MACCS Key Lifts")
-    axes[1].legend()
+        axes[1].hist(lifts, bins=30, edgecolor="none", alpha=0.7)
+        axes[1].axvline(1.0, color="red", linestyle="--", alpha=0.7, label="no enrichment")
+        axes[1].axvline(median_lift, color="blue", linestyle="--", alpha=0.7, label=f"median={median_lift:.2f}")
+        axes[1].set_xlabel("lift")
+        axes[1].set_ylabel("count")
+        axes[1].set_title("Distribution of MACCS Key Lifts")
+        axes[1].legend()
 
-    plt.tight_layout()
-    fig.savefig(outdir / "maccs_enrichment.png", dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    log.info("Saved maccs_enrichment.png")
+        plt.tight_layout()
+        fig.savefig(outdir / "maccs_enrichment.png", dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        log.info("Saved maccs_enrichment.png")
 
     return {
         "mean_lift": mean_lift,
@@ -1205,14 +1182,19 @@ def main() -> None:
     maccs_fps, fg_counts, mol_props, valid_mol_mask = _compute_rdkit_features_cached(all_smiles, cache_dir)
 
     # 3. Tanimoto analysis
-    tanimoto_results = _tanimoto_analysis(all_embeds, all_fps_morgan, valid_mol_mask, outdir, seed)
+    tanimoto_results = _tanimoto_analysis(
+        all_embeds, all_fps_morgan, valid_mol_mask, outdir, seed, plot=not args.no_graph,
+    )
 
     # 4. kNN analysis
     knn_out = _knn_analysis(all_embeds, all_fps_morgan, valid_mol_mask, seed)
     knn_results = knn_out["knn"]
 
     # 5. UMAP
-    _umap_analysis(all_embeds, all_meta, mol_props, fg_counts, valid_mol_mask, outdir, seed)
+    if args.no_graph:
+        log.info("Skipping UMAP and figure generation (--no-graph enabled).")
+    else:
+        _umap_analysis(all_embeds, all_meta, mol_props, fg_counts, valid_mol_mask, outdir, seed)
 
     # 6. Probes
     probe_type = args.probe_type
@@ -1239,12 +1221,15 @@ def main() -> None:
             )
 
     # 7. MACCS enrichment
-    maccs_results = _maccs_enrichment(maccs_fps, knn_out["knn_embed_idx"], knn_out["sub_idx"], outdir)
+    maccs_results = _maccs_enrichment(
+        maccs_fps, knn_out["knn_embed_idx"], knn_out["sub_idx"], outdir, plot=not args.no_graph,
+    )
 
     # Write summary JSON
     summary: dict = {
         "checkpoint": ckpt_path,
         "seed": seed,
+        "no_graph": bool(args.no_graph),
         **_git_info(),
         "n_embeddings": int(all_embeds.shape[0]),
         "embedding_dim": int(all_embeds.shape[1]),
