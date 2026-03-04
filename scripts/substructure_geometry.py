@@ -13,7 +13,7 @@ Analyses:
 Usage:
     python scripts/substructure_geometry.py \
         --config configs/gems_a_50_mask.py \
-        --dir experiments/TEST_ISAB_LATEST_MULTIVIEWS \
+        --dir experiments/TEST_LATEST_MULTIVIEWS \
         --workdir results/substructure_geometry
 """
 from __future__ import annotations

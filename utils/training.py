@@ -44,8 +44,6 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         masked_latent_predictor_num_layers=int(
             config.get("masked_latent_predictor_num_layers", 2)
         ),
-        encoder_block_type=str(config.get("encoder_block_type", "transformer")),
-        isab_num_inducing_points=int(config.get("isab_num_inducing_points", 32)),
         pooling_type=str(config.get("pooling_type", "pma")),
         pma_fp16_high_precision=bool(config.get("pma_fp16_high_precision", False)),
         pma_num_heads=config.get("pma_num_heads", int(config.num_heads)),

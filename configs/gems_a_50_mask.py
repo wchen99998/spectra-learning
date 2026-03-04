@@ -34,8 +34,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.rope_mz_max = 1000.0
     cfg.rope_mz_precision = 0.1
     cfg.rope_modulo_2pi = True
-    cfg.encoder_block_type = "transformer"
-    cfg.isab_num_inducing_points = 16
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 128
     cfg.pooling_type = "mean"

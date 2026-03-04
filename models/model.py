@@ -15,7 +15,7 @@ from torch import nn
 from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 
 from models.losses import SIGReg, VICRegLoss
-from networks import set_transformer_torch, transformer_torch
+from networks import transformer_torch
 from networks.transformer_torch import (
     create_padding_block_mask,
 )
@@ -105,35 +105,6 @@ def _build_non_causal_blocks(
     return nn.ModuleList(blocks)
 
 
-def _build_isab_blocks(
-    *,
-    dim: int,
-    num_layers: int,
-    num_heads: int,
-    num_kv_heads: int | None,
-    attention_mlp_multiple: float,
-    num_inducing_points: int = 32,
-    norm_eps: float = 1e-5,
-    norm_type: str = "rmsnorm",
-) -> nn.ModuleList:
-    heads = int(num_heads)
-    kv_heads = heads if num_kv_heads is None else int(num_kv_heads)
-    blocks: list[set_transformer_torch.ISAB] = []
-    for _ in range(num_layers):
-        blocks.append(
-            set_transformer_torch.ISAB(
-                dim=dim,
-                num_inducing_points=num_inducing_points,
-                n_heads=heads,
-                n_kv_heads=kv_heads,
-                attention_mlp_multiple=attention_mlp_multiple,
-                norm_eps=norm_eps,
-                norm_type=norm_type,
-            )
-        )
-    return nn.ModuleList(blocks)
-
-
 def _build_mass_rope_omega(
     *,
     head_dim: int,
@@ -187,8 +158,6 @@ class PeakSetEncoder(nn.Module):
         rope_mz_precision: float = 0.1,
         rope_modulo_2pi: bool = True,
         num_peaks: int = 60,
-        encoder_block_type: str = "transformer",
-        isab_num_inducing_points: int = 32,
         qk_norm: bool = False,
         post_norm: bool = False,
         norm_type: str = "rmsnorm",
@@ -196,7 +165,6 @@ class PeakSetEncoder(nn.Module):
         super().__init__()
         self.model_dim = model_dim
         self.use_rope = bool(use_rope)
-        self.encoder_block_type = encoder_block_type
         self.norm_type = str(norm_type).lower()
         self.embedder = PeakFeatureEmbedder(model_dim, feature_mlp_hidden_dim)
         self.rope_mz_max = float(rope_mz_max)
@@ -214,30 +182,17 @@ class PeakSetEncoder(nn.Module):
             device=torch.device("cpu"),
         )
         self.register_buffer("rope_omega", omega, persistent=False)
-        if self.encoder_block_type == "isab":
-            if self.use_rope:
-                raise ValueError("mass-aware RoPE is not implemented for encoder_block_type='isab'")
-            self.blocks = _build_isab_blocks(
-                dim=model_dim,
-                num_layers=num_layers,
-                num_heads=num_heads,
-                num_kv_heads=num_kv_heads,
-                attention_mlp_multiple=attention_mlp_multiple,
-                num_inducing_points=isab_num_inducing_points,
-                norm_type=self.norm_type,
-            )
-        else:
-            self.blocks = _build_non_causal_blocks(
-                dim=model_dim,
-                num_layers=num_layers,
-                num_heads=num_heads,
-                num_kv_heads=num_kv_heads,
-                attention_mlp_multiple=attention_mlp_multiple,
-                use_rope=self.use_rope,
-                qk_norm=qk_norm,
-                post_norm=post_norm,
-                norm_type=self.norm_type,
-            )
+        self.blocks = _build_non_causal_blocks(
+            dim=model_dim,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            attention_mlp_multiple=attention_mlp_multiple,
+            use_rope=self.use_rope,
+            qk_norm=qk_norm,
+            post_norm=post_norm,
+            norm_type=self.norm_type,
+        )
         self.final_norm = _build_norm(model_dim, eps=1e-5, norm_type=self.norm_type)
         self.output_layer_norm = nn.LayerNorm(model_dim, eps=1e-5)
 
@@ -247,18 +202,6 @@ class PeakSetEncoder(nn.Module):
         peak_intensity: torch.Tensor,
         valid_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.encoder_block_type == "isab":
-            x = self.embedder(peak_mz, peak_intensity)
-            kv_block_mask = None
-            q_block_mask = None
-            if valid_mask is not None:
-                m = self.blocks[0].inducing_points.shape[0]
-                kv_block_mask = set_transformer_torch.create_kv_padding_block_mask(valid_mask, q_len=m)
-                q_block_mask = set_transformer_torch.create_q_padding_block_mask(valid_mask, kv_len=m)
-            for block in self.blocks:
-                x = block(x, kv_block_mask=kv_block_mask, q_block_mask=q_block_mask)
-            return self.output_layer_norm(self.final_norm(x))
-
         block_mask = None
         if valid_mask is not None:
             block_mask = create_padding_block_mask(valid_mask)
@@ -342,8 +285,6 @@ class PeakSetSIGReg(nn.Module):
         pma_fp16_high_precision: bool = False,
         pma_num_heads: int | None = None,
         pma_num_seeds: int = 1,
-        encoder_block_type: str = "transformer",
-        isab_num_inducing_points: int = 32,
         encoder_qk_norm: bool = False,
         encoder_post_norm: bool = False,
         normalize_jepa_targets: bool = False,
@@ -467,8 +408,6 @@ class PeakSetSIGReg(nn.Module):
             rope_mz_precision=rope_mz_precision,
             rope_modulo_2pi=rope_modulo_2pi,
             num_peaks=num_peaks,
-            encoder_block_type=encoder_block_type,
-            isab_num_inducing_points=isab_num_inducing_points,
             qk_norm=encoder_qk_norm,
             post_norm=encoder_post_norm,
             norm_type=self.norm_type,

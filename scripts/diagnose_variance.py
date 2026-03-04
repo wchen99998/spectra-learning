@@ -3,7 +3,7 @@
 Usage:
     python scripts/diagnose_variance.py \
         --config configs/gems_a_multi.py \
-        --workdir experiments/TEST_ISAB_LATEST_MULTIVIEWS_5_mha_pma
+        --workdir experiments/TEST_LATEST_MULTIVIEWS_5_mha_pma
 """
 
 from __future__ import annotations
@@ -51,8 +51,6 @@ def build_model(cfg) -> PeakSetSIGReg:
         pma_fp16_high_precision=getattr(cfg, "pma_fp16_high_precision", False),
         pma_num_heads=getattr(cfg, "pma_num_heads", None),
         pma_num_seeds=cfg.pma_num_seeds,
-        encoder_block_type=cfg.encoder_block_type,
-        isab_num_inducing_points=getattr(cfg, "isab_num_inducing_points", 32),
     )
 
 
