@@ -34,7 +34,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.rope_mz_precision = 0.1
     cfg.rope_modulo_2pi = True
     cfg.encoder_qk_norm = False
-    cfg.encoder_post_norm = True
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 128
     cfg.pooling_type = "pma"

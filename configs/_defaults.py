@@ -13,7 +13,6 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.optimizer_fused = True
     cfg.autocast_dtype = "fp32"
     cfg.encoder_qk_norm = False
-    cfg.encoder_post_norm = False
     cfg.pma_fp16_high_precision = False
     cfg.masked_token_loss_weight = 0.0
     cfg.masked_token_loss_type = "l1"

@@ -168,7 +168,6 @@ class PeakSetEncoder(nn.Module):
         rope_modulo_2pi: bool = True,
         num_peaks: int = 60,
         qk_norm: bool = False,
-        post_norm: bool = False,
         norm_type: str = "rmsnorm",
     ):
         super().__init__()
@@ -199,11 +198,9 @@ class PeakSetEncoder(nn.Module):
             attention_mlp_multiple=attention_mlp_multiple,
             use_rope=self.use_rope,
             qk_norm=qk_norm,
-            post_norm=post_norm,
+            post_norm=False,
             norm_type=self.norm_type,
         )
-        self.final_norm = _build_norm(model_dim, eps=1e-5, norm_type=self.norm_type)
-        self.output_layer_norm = nn.LayerNorm(model_dim, eps=1e-5)
 
     def forward(
         self,
@@ -245,7 +242,7 @@ class PeakSetEncoder(nn.Module):
                 freqs_sin=freqs_sin,
                 block_mask=block_mask,
             )
-        return self.output_layer_norm(self.final_norm(x))
+        return x
 
 
 class PeakSetSIGReg(nn.Module):
@@ -295,7 +292,6 @@ class PeakSetSIGReg(nn.Module):
         pma_num_heads: int | None = None,
         pma_num_seeds: int = 1,
         encoder_qk_norm: bool = False,
-        encoder_post_norm: bool = False,
         normalize_jepa_targets: bool = False,
         norm_type: str = "rmsnorm",
     ):
@@ -422,7 +418,6 @@ class PeakSetSIGReg(nn.Module):
             rope_modulo_2pi=rope_modulo_2pi,
             num_peaks=num_peaks,
             qk_norm=encoder_qk_norm,
-            post_norm=encoder_post_norm,
             norm_type=self.norm_type,
         )
         if self.use_ema_teacher_target:
@@ -469,13 +464,9 @@ class PeakSetSIGReg(nn.Module):
             attention_mlp_multiple=attention_mlp_multiple,
             use_rope=encoder_use_rope,
             qk_norm=encoder_qk_norm,
-            post_norm=encoder_post_norm,
+            post_norm=False,
             norm_type=self.norm_type,
         )
-        self.masked_latent_predictor_norm = _build_norm(
-            self.model_dim, eps=1e-5, norm_type=self.norm_type
-        )
-        self.predictor_output_layer_norm = nn.LayerNorm(self.model_dim, eps=1e-5)
 
         self.sigreg = SIGReg(num_slices=int(sigreg_num_slices))
         self.vicreg = VICRegLoss(
@@ -547,7 +538,7 @@ class PeakSetSIGReg(nn.Module):
                 freqs_sin=freqs_sin,
                 block_mask=predictor_block_mask,
             )
-        return self.predictor_output_layer_norm(self.masked_latent_predictor_norm(x))
+        return x
 
     def train(self, mode: bool = True) -> "PeakSetSIGReg":
         super().train(mode)
@@ -820,9 +811,10 @@ class PeakSetSIGReg(nn.Module):
 
         regularizer_term = sigreg_term + vicreg_term
         loss = jepa_term + regularizer_term
-        target_regularizer_term_over_jepa_term = regularizer_term / jepa_term
-        target_sigreg_term_over_jepa_term = sigreg_term / jepa_term
-        target_vicreg_term_over_jepa_term = vicreg_term / jepa_term
+        safe_jepa = jepa_term.clamp_min(1e-8)
+        target_regularizer_term_over_jepa_term = regularizer_term / safe_jepa
+        target_sigreg_term_over_jepa_term = sigreg_term / safe_jepa
+        target_vicreg_term_over_jepa_term = vicreg_term / safe_jepa
         # Report masking rate on valid local peaks only; global target view is
         # full-spectrum and excluded from this metric.
         local_valid = token_valid[target_global_view_idx + 1:]

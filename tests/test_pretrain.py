@@ -375,7 +375,6 @@ class SIGRegForwardTests(unittest.TestCase):
         metrics = model.forward_augmented(batch)
 
         self.assertEqual(model.latent_mask_token.shape[0], model.model_dim)
-        self.assertEqual(model.masked_latent_predictor_norm.normalized_shape[0], model.model_dim)
         self.assertTrue(torch.isfinite(metrics["loss"]).item())
         self.assertIn("local_global_loss", metrics)
         self.assertIn("regularizer_loss", metrics)
@@ -763,7 +762,7 @@ class PMAPoolingTests(unittest.TestCase):
         mha_grads = [p.grad for p in model.pool_mha.parameters() if p.requires_grad]
         self.assertTrue(all(g is None for g in mha_grads))
 
-        predictor_params = list(model.masked_latent_predictor.parameters()) + list(model.masked_latent_predictor_norm.parameters())
+        predictor_params = list(model.masked_latent_predictor.parameters())
         predictor_grads = [p.grad for p in predictor_params if p.requires_grad]
         self.assertTrue(any(g is not None for g in predictor_grads))
         self.assertGreater(sum(float(g.abs().sum()) for g in predictor_grads if g is not None), 0.0)

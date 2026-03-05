@@ -363,37 +363,6 @@ def _prune_checkpoints(checkpoint_dir: Path, keep_top_k: int = 5) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Validation
-# ---------------------------------------------------------------------------
-
-def _run_validation(
-    model: PeakSetSIGReg,
-    val_loader: DataLoader | None,
-    device: torch.device,
-    seed: int,
-    epoch: int,
-) -> dict[str, float]:
-    """Run validation on MassSpecGym val split, returns averaged metrics."""
-    model.eval()
-    if val_loader is None:
-        model.train()
-        return {}
-    sums: dict[str, float] = {}
-    count = 0
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(val_loader):
-            batch = _move_batch_to_device(batch, device)
-            metrics = model.forward_augmented(batch)
-            bs = int(batch["fused_mz"].shape[0]) // model.num_views
-            count += bs
-            for key, value in metrics.items():
-                val = float(value) * bs
-                sums[key] = sums.get(key, 0.0) + val
-    model.train()
-    return {f"msg_eval/{k}": v / count for k, v in sums.items()} if count > 0 else {}
-
-
-# ---------------------------------------------------------------------------
 # Main training loop
 # ---------------------------------------------------------------------------
 
@@ -478,7 +447,6 @@ def train_and_evaluate(
         grad_clip_norm = float(grad_clip_norm)
 
     train_loader = datamodule.train_loader
-    val_loader = datamodule.val_loader
     last_msg_probe_metrics: dict[str, float] = {}
 
     for epoch in range(start_epoch, num_epochs):
@@ -550,15 +518,6 @@ def train_and_evaluate(
                 )
 
         pbar.close()
-
-        # End-of-epoch validation (MassSpecGym val only)
-        val_metrics = _run_validation(
-            model, val_loader, device, seed, epoch,
-        )
-        if val_metrics:
-            logger.log_metrics(val_metrics, step=global_step)
-            val_loss = val_metrics.get("msg_eval/loss", float("nan"))
-            logging.info("epoch=%d val_loss=%.4f", epoch, val_loss)
 
     # Save final checkpoint
     _save_checkpoint(

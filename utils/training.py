@@ -72,7 +72,6 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
             config.get("sigreg_intensity_jitter_std", 0.001)
         ),
         encoder_qk_norm=bool(config.get("encoder_qk_norm", False)),
-        encoder_post_norm=bool(config.get("encoder_post_norm", False)),
         normalize_jepa_targets=bool(config.get("normalize_jepa_targets", False)),
         norm_type=str(config.get("norm_type", "rmsnorm")),
     )

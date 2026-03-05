@@ -31,10 +31,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_kv_heads = 8
     cfg.encoder_use_rope = True
     cfg.rope_mz_max = 1000.0
-    cfg.rope_mz_precision = 0.1
+    cfg.rope_mz_precision = 0.01
     cfg.rope_modulo_2pi = True
     cfg.encoder_qk_norm = False
-    cfg.encoder_post_norm = True
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 128
     cfg.pooling_type = "pma"
@@ -56,8 +55,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.learning_rate_schedule = "cosine"
     cfg.min_learning_rate = None
     cfg.b2 = 0.98
-    cfg.weight_decay = 1e-4
-    cfg.optimizer = "muon"
+    cfg.weight_decay = 1e-2
+    cfg.optimizer = "adamw"
     cfg.device_prefetch_size = 8
     cfg.log_every_n_steps = 100
     cfg.val_check_interval = 1.0
@@ -70,17 +69,17 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataloader_persistent_workers = True
 
     cfg.masked_token_loss_weight = 1.0
-    cfg.masked_token_loss_type = "cosine"
+    cfg.masked_token_loss_type = "l2_sum"
     cfg.use_ema_teacher_target = True
-    cfg.teacher_ema_decay = 0.996
+    cfg.teacher_ema_decay = 0.999
     cfg.teacher_ema_decay_start = 0.98
-    cfg.teacher_ema_decay_warmup_steps = 100_000
+    cfg.teacher_ema_decay_warmup_steps = 20_000
     cfg.grad_clip_norm = 1.0
-    cfg.masked_latent_predictor_num_layers = 4
+    cfg.masked_latent_predictor_num_layers = 1
     cfg.autocast_dtype = "bf16"
-    cfg.representation_regularizer = "gco-vicreg"
-    cfg.gco_std_target = 0.5
-    cfg.gco_log_lambda_min = -7.0
+    cfg.representation_regularizer = "none"
+    cfg.gco_std_target = 0.2
+    cfg.gco_log_lambda_min = -12.0
     cfg.sigreg_lambda_warmup_steps = 50_000
     cfg.msg_linear_probe_every_n_steps = 50_000
 
