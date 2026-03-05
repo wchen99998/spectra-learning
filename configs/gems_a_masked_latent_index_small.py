@@ -50,13 +50,13 @@ def get_config() -> config_dict.ConfigDict:
 
     # Training
     cfg.num_epochs = 20
-    cfg.learning_rate = 3e-4
+    cfg.learning_rate = 6e-4
     cfg.warmup_steps = 5_000
     cfg.learning_rate_schedule = "cosine"
     cfg.min_learning_rate = None
     cfg.b2 = 0.98
     cfg.weight_decay = 1e-2
-    cfg.optimizer = "adamw"
+    cfg.optimizer = "muon"
     cfg.device_prefetch_size = 8
     cfg.log_every_n_steps = 100
     cfg.val_check_interval = 1.0
@@ -69,7 +69,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataloader_persistent_workers = True
 
     cfg.masked_token_loss_weight = 1.0
-    cfg.masked_token_loss_type = "l2_sum"
+    cfg.masked_token_loss_type = "cosine"
     cfg.use_ema_teacher_target = True
     cfg.teacher_ema_decay = 0.999
     cfg.teacher_ema_decay_start = 0.98
@@ -77,9 +77,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.grad_clip_norm = 1.0
     cfg.masked_latent_predictor_num_layers = 1
     cfg.autocast_dtype = "bf16"
-    cfg.representation_regularizer = "none"
-    cfg.gco_std_target = 0.2
-    cfg.gco_log_lambda_min = -12.0
+    cfg.representation_regularizer = "gco-sigreg"
+    cfg.gco_std_target = 0.6
+    cfg.gco_log_lambda_min = -5.0
     cfg.sigreg_lambda_warmup_steps = 50_000
     cfg.msg_linear_probe_every_n_steps = 50_000
 
