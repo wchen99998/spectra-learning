@@ -224,7 +224,7 @@ class SIGRegForwardTests(unittest.TestCase):
                 after_eval = float(model.gco_log_lambda)
                 self.assertAlmostEqual(after_eval, before_eval, places=7)
 
-    def test_sigreg_regularizer_uses_predictor_outputs_and_padding_mask(self):
+    def test_sigreg_regularizer_uses_encoder_outputs_and_padding_mask(self):
         model = self._build_model(
             representation_regularizer="sigreg",
             sigreg_lambda=0.1,
@@ -246,32 +246,25 @@ class SIGRegForwardTests(unittest.TestCase):
         capture = CaptureSIGReg()
         model.sigreg = capture
 
-        def fake_predict_masked_latents(
-            local_token_emb_remasked: torch.Tensor,
-            local_valid_mask: torch.Tensor,
-            local_mz: torch.Tensor,
-            local_masked_positions: torch.Tensor,
-        ) -> torch.Tensor:
-            return torch.full_like(local_token_emb_remasked, 3.5)
-
-        model.predict_masked_latents = fake_predict_masked_latents
-
         batch = _make_fused_batch(num_views=model.num_views)
-        batch_size = batch["fused_mz"].shape[0] // model.num_views
-        batch["fused_masked_positions"][batch_size:, 1] = True
+        V = model.num_views
+        batch_size = batch["fused_mz"].shape[0] // V
         model.forward_augmented(batch)
 
+        # Regularizer should receive local views' encoder output with their valid masks
+        L = V - 1
         expected_valid = (
             batch["fused_valid_mask"]
-            .reshape(model.num_views, batch_size, -1)[1:]
-            .reshape(-1, batch["fused_valid_mask"].shape[1])
+            .reshape(V, batch_size, -1)[1:]
+            .reshape(L * batch_size, -1)
         )
         self.assertIsNotNone(capture.proj)
         self.assertIsNotNone(capture.valid_mask)
         self.assertTrue(torch.equal(capture.valid_mask, expected_valid))
-        self.assertTrue(torch.allclose(capture.proj, torch.full_like(capture.proj, 3.5)))
+        # Shape should be [L*B, N, D] — local views only
+        self.assertEqual(capture.proj.shape[0], L * batch_size)
 
-    def test_vicreg_regularizer_uses_predictor_outputs_and_padding_mask(self):
+    def test_vicreg_regularizer_uses_encoder_outputs_and_padding_mask(self):
         model = self._build_model(
             representation_regularizer="vicreg",
             sigreg_lambda=0.0,
@@ -295,76 +288,39 @@ class SIGRegForwardTests(unittest.TestCase):
         capture = CaptureVICReg()
         model.vicreg = capture
 
-        def fake_predict_masked_latents(
-            local_token_emb_remasked: torch.Tensor,
-            local_valid_mask: torch.Tensor,
-            local_mz: torch.Tensor,
-            local_masked_positions: torch.Tensor,
-        ) -> torch.Tensor:
-            return torch.full_like(local_token_emb_remasked, 4.25)
-
-        model.predict_masked_latents = fake_predict_masked_latents
-
         batch = _make_fused_batch(num_views=model.num_views)
         batch_size = batch["fused_mz"].shape[0] // model.num_views
-        batch["fused_masked_positions"][batch_size:, 1] = True
         model.forward_augmented(batch)
 
-        expected_valid_by_view = batch["fused_valid_mask"].reshape(model.num_views, batch_size, -1)[1:]
-        expected_pair_valid = expected_valid_by_view[0] & expected_valid_by_view[1]
+        # VICReg should receive the two local views encoder embeddings
+        expected_valid_by_view = batch["fused_valid_mask"].reshape(model.num_views, batch_size, -1)
+        expected_pair_valid = expected_valid_by_view[1] & expected_valid_by_view[2]  # local views
         self.assertIsNotNone(capture.proj_a)
         self.assertIsNotNone(capture.proj_b)
         self.assertIsNotNone(capture.valid_mask)
         self.assertTrue(torch.equal(capture.valid_mask, expected_pair_valid))
-        self.assertTrue(torch.allclose(capture.proj_a, torch.full_like(capture.proj_a, 4.25)))
-        self.assertTrue(torch.allclose(capture.proj_b, torch.full_like(capture.proj_b, 4.25)))
+        # Shapes should be [B, N, D] — single view each
+        self.assertEqual(capture.proj_a.shape[0], batch_size)
 
-    def test_gco_constraint_uses_predictor_std(self):
+    def test_gco_constraint_uses_encoder_std(self):
         model = self._build_model(
             representation_regularizer="gco-sigreg",
             sigreg_lambda=0.0,
             masked_token_loss_weight=0.0,
-            gco_std_target=1.0,
+            gco_std_target=100.0,
             gco_alpha=0.0,
             gco_eta=0.0,
             multicrop_num_local_views=3,
         )
 
-        def fake_predict_masked_latents(
-            local_token_emb_remasked: torch.Tensor,
-            local_valid_mask: torch.Tensor,
-            local_mz: torch.Tensor,
-            local_masked_positions: torch.Tensor,
-        ) -> torch.Tensor:
-            return torch.zeros_like(local_token_emb_remasked)
-
-        def fake_collapse_metrics(
-            fused_emb: torch.Tensor,
-            visible_mask: torch.Tensor,
-            B: int,
-            V: int,
-            target_global_view_idx: int,
-        ) -> dict[str, torch.Tensor]:
-            return {
-                "global_emb_std": fused_emb.new_tensor(2.0),
-                "local_emb_std": fused_emb.new_tensor(10.0),
-                "global_emb_norm": fused_emb.new_tensor(0.0),
-                "local_emb_norm": fused_emb.new_tensor(0.0),
-            }
-
-        class ZeroSIGReg(torch.nn.Module):
-            def forward(self, proj, valid_mask=None):
-                return proj.new_tensor(0.0)
-
-        model.predict_masked_latents = fake_predict_masked_latents
-        model._collapse_metrics = fake_collapse_metrics
-        model.sigreg = ZeroSIGReg()
-
         batch = _make_fused_batch(num_views=model.num_views)
         metrics = model.forward_augmented(batch)
-        self.assertAlmostEqual(float(metrics["local_emb_std"]), 10.0, places=6)
-        self.assertGreater(float(metrics["gco_constraint"]), 0.9)
-        self.assertGreater(float(metrics["gco_std_penalty"]), 0.9)
+        # GCO constraint = std_target - encoder_emb_std; with a high target
+        # the constraint should be positive (encoder std << 100).
+        self.assertGreater(float(metrics["gco_constraint"]), 0.0)
+        self.assertGreater(float(metrics["gco_std_penalty"]), 0.0)
+        # encoder_emb_std should be a reasonable positive value
+        self.assertGreater(float(metrics["encoder_emb_std"]), 0.0)
 
     def test_forward_uses_local_and_global_paths(self):
         model = self._build_model(

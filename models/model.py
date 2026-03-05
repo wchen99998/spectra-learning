@@ -726,12 +726,14 @@ class PeakSetSIGReg(nn.Module):
             sigreg_lambda_current = fused_emb.new_tensor(self.sigreg_lambda)
 
         jepa_term = self.masked_token_loss_weight * local_global_loss
-        # Apply representation regularizers in predictor space and mask only
-        # true padding tokens, not masked-token positions.
-        regularizer_emb_by_view = all_local_pred_views
-        regularizer_emb_flat = all_local_pred
-        regularizer_valid_by_view = all_local_valid
-        regularizer_valid_flat = all_local_valid_flat
+        # Apply representation regularizers on encoder token embeddings
+        # from local views only, masking only true padding tokens.
+        local_emb = token_emb[1:]                          # [L, B, N, D]
+        local_valid = token_valid[1:]                       # [L, B, N]
+        regularizer_emb_flat = local_emb.reshape(L * B, N, -1)
+        regularizer_valid_flat = local_valid.reshape(L * B, N)
+        regularizer_emb_by_view = local_emb
+        regularizer_valid_by_view = local_valid
 
         # --- Collapse monitoring (detached, no grad) ---
         with torch.no_grad():
@@ -749,8 +751,8 @@ class PeakSetSIGReg(nn.Module):
             regularizer_var = (
                 (regularizer_flat - regularizer_mean).square() * regularizer_weights_col
             ).sum(0) / regularizer_count
-            predictor_local_emb_std = torch.sqrt(regularizer_var + 1e-6).mean()
-            gco_constraint = self.std_target - predictor_local_emb_std.float()
+            encoder_emb_std = torch.sqrt(regularizer_var + 1e-6).mean()
+            gco_constraint = self.std_target - encoder_emb_std.float()
 
         gco_std_penalty = torch.relu(gco_constraint).to(dtype=fused_emb.dtype)
         gco_lambda = self.gco_log_lambda.exp().to(dtype=fused_emb.dtype)
@@ -848,7 +850,7 @@ class PeakSetSIGReg(nn.Module):
             "gco_c_ema": self.gco_c_ema.to(dtype=fused_emb.dtype),
             "gco_constraint": gco_constraint.to(dtype=fused_emb.dtype),
             "gco_std_penalty": gco_std_penalty,
-            "predictor_local_emb_std": predictor_local_emb_std.to(dtype=fused_emb.dtype),
+            "encoder_emb_std": encoder_emb_std.to(dtype=fused_emb.dtype),
             "pool_norm_weight_abs_mean": pool_norm_weight_abs_mean,
             "local_to_global_emb_std_ratio": local_to_global_emb_std_ratio,
             **collapse_metrics,
