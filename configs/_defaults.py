@@ -43,6 +43,8 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.dataloader_prefetch_factor = 2
     cfg.dataloader_persistent_workers = True
     cfg.dataloader_pin_memory = True
+    cfg.gems_tfrecord_repo_id = None
+    cfg.gems_tfrecord_revision = "main"
     cfg.msg_probe_every_n_steps = 0
     cfg.msg_probe_cache_dir = None
     cfg.msg_probe_num_epochs = 5

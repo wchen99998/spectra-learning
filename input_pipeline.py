@@ -1,9 +1,7 @@
-"""Unified TF input pipeline and DataModule for GeMS_A peak lists."""
+"""TF input pipeline and DataModule for GeMS + MassSpecGym peak lists."""
 
 from __future__ import annotations
 
-import argparse
-import importlib.util
 import json
 import logging
 import math
@@ -16,10 +14,11 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 import numpy as np
 import tensorflow as tf
 import torch
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, snapshot_download
 from ml_collections import config_dict
 from torch.utils.data import DataLoader, IterableDataset
 from tqdm import tqdm
+from utils.gems_tfrecords import load_gems_metadata, validate_gems_artifact
 
 tf.config.set_visible_devices([], "GPU")
 
@@ -27,11 +26,9 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_BATCH_SIZE = 512
 _DEFAULT_SHUFFLE_BUFFER = 10_000
-_DEFAULT_VALIDATION_FRACTION = 0.05
 _DEFAULT_TFRECORD_DIR = Path("data/gems_peaklist_tfrecord")
 _DEFAULT_TFRECORD_BUFFER_SIZE = 250_000
-_DEFAULT_SPLIT_SEED = 42
-_DEFAULT_NUM_SHARDS = 4
+_DEFAULT_MASSSPEC_NUM_SHARDS = 4
 _NUM_PEAKS_INPUT = 128
 _NUM_PEAKS_OUTPUT = 60
 _DEFAULT_MAX_PRECURSOR_MZ = 1000.0
@@ -44,8 +41,6 @@ _INTENSITY_EPS = 1e-4
 _DEFAULT_MIN_PEAK_INTENSITY = _INTENSITY_EPS
 _METADATA_FILENAME = "metadata.json"
 
-_GEMS_HF_REPO = "roman-bushuiev/GeMS"
-_GEMS_HDF5_PATH = "data/GeMS_A/GeMS_A.hdf5"
 _MASSSPEC_HF_REPO = "roman-bushuiev/MassSpecGym"
 _MASSSPEC_TSV_PATH = "data/MassSpecGym.tsv"
 _MASSSPEC_METADATA_VERSION = 3
@@ -65,17 +60,6 @@ def _download_hf_file(repo_id: str, filename: str, local_dir: Path) -> Path:
         local_dir=str(local_dir),
     )
     return Path(path)
-
-
-
-def _load_gems_arrays(hdf5_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    import h5py
-
-    with h5py.File(hdf5_path, "r") as f:
-        spectra = f["spectrum"][:]
-        retention = np.asarray(f["RT"], dtype=np.float32)
-        precursor = np.asarray(f["precursor_mz"], dtype=np.float32)
-    return spectra, retention, precursor
 
 
 def _load_massspec_tsv(
@@ -153,7 +137,6 @@ def _load_massspec_tsv(
     )
 
 
-
 def _compute_morgan_fingerprints(smiles: np.ndarray) -> np.ndarray:
     from rdkit import Chem
     from rdkit.Chem import AllChem
@@ -186,60 +169,6 @@ def _encode_categorical_ids(values: np.ndarray) -> tuple[np.ndarray, dict[str, i
     vocab = {category: i for i, category in enumerate(categories)}
     ids = np.asarray([vocab[str(v)] for v in normalized], dtype=np.int32)
     return ids, vocab
-
-
-def _write_tfrecords(
-    spectra: np.ndarray,
-    retention: np.ndarray,
-    precursor: np.ndarray,
-    output_path: Path,
-    num_shards: int,
-    desc: str,
-) -> tuple[list[str], list[int]]:
-    n = len(spectra)
-    num_shards = max(1, min(num_shards, n))
-    shard_size = math.ceil(n / num_shards)
-
-    output_path.mkdir(parents=True, exist_ok=True)
-    files: list[str] = []
-    lengths: list[int] = []
-
-    for shard_id in range(num_shards):
-        start = shard_id * shard_size
-        end = min(start + shard_size, n)
-        if start >= end:
-            break
-
-        shard_file = output_path / f"shard-{shard_id:05d}-of-{num_shards:05d}.tfrecord"
-        options = tf.io.TFRecordOptions(compression_type="GZIP")
-
-        with tf.io.TFRecordWriter(str(shard_file), options=options) as writer:  # type: ignore[attr-defined]
-            for i in tqdm(range(start, end), desc=f"{desc} [{shard_id + 1}/{num_shards}]"):
-                mz = spectra[i, 0].astype(np.float32)
-                intensity = spectra[i, 1].astype(np.float32)
-
-                features = {
-                    "mz": tf.train.Feature(float_list=tf.train.FloatList(value=mz)),
-                    "intensity": tf.train.Feature(
-                        float_list=tf.train.FloatList(value=intensity)
-                    ),
-                    "rt": tf.train.Feature(
-                        float_list=tf.train.FloatList(value=[retention[i]])
-                    ),
-                    "precursor_mz": tf.train.Feature(
-                        float_list=tf.train.FloatList(value=[precursor[i]])
-                    ),
-                }
-
-                example = tf.train.Example(
-                    features=tf.train.Features(feature=features)
-                )
-                writer.write(example.SerializeToString())
-
-        files.append(shard_file.name)
-        lengths.append(end - start)
-
-    return files, lengths
 
 
 def _write_tfrecords_with_fingerprint(
@@ -326,62 +255,12 @@ def _write_tfrecords_with_fingerprint(
 
 
 
-def _process_gems(
+def _process_massspec(
     output_dir: Path,
-    validation_fraction: float,
-    split_seed: int,
     num_shards: int,
+    *,
+    max_precursor_mz: float,
 ) -> dict[str, Any]:
-    logger.info("Downloading GeMS HDF5...")
-    hdf5_path = _download_hf_file(_GEMS_HF_REPO, _GEMS_HDF5_PATH, output_dir.parent)
-
-    logger.info("Loading GeMS data...")
-    spectra, retention, precursor = _load_gems_arrays(hdf5_path)
-
-    mask = np.isfinite(retention) & (retention > 0.0)
-    spectra = spectra[mask]
-    retention = retention[mask]
-    precursor = precursor[mask]
-
-    n = len(spectra)
-    logger.info("Valid GeMS spectra: %d", n)
-
-    rng = np.random.default_rng(split_seed)
-    perm = rng.permutation(n)
-    train_size = int(n * (1.0 - validation_fraction))
-
-    train_idx = perm[:train_size]
-    val_idx = perm[train_size:]
-
-    train_files, train_lengths = _write_tfrecords(
-        spectra[train_idx],
-        retention[train_idx],
-        precursor[train_idx],
-        output_dir / "train",
-        num_shards,
-        desc="Train",
-    )
-
-    val_files, val_lengths = _write_tfrecords(
-        spectra[val_idx],
-        retention[val_idx],
-        precursor[val_idx],
-        output_dir / "validation",
-        max(1, num_shards // 4),
-        desc="Validation",
-    )
-
-    return {
-        "train_files": train_files,
-        "train_lengths": train_lengths,
-        "validation_files": val_files,
-        "validation_lengths": val_lengths,
-        "train_size": int(train_size),
-        "validation_size": int(n - train_size),
-    }
-
-
-def _process_massspec(output_dir: Path, num_shards: int) -> dict[str, Any]:
     logger.info("Downloading MassSpecGym TSV...")
     tsv_path = _download_hf_file(_MASSSPEC_HF_REPO, _MASSSPEC_TSV_PATH, output_dir.parent)
 
@@ -400,6 +279,18 @@ def _process_massspec(output_dir: Path, num_shards: int) -> dict[str, Any]:
     fingerprints = _compute_morgan_fingerprints(smiles)
     adduct_id, adduct_vocab = _encode_categorical_ids(adduct)
     instrument_type_id, instrument_type_vocab = _encode_categorical_ids(instrument_type)
+
+    keep = np.isfinite(precursor) & (precursor <= float(max_precursor_mz))
+    spectra = spectra[keep]
+    retention = retention[keep]
+    precursor = precursor[keep]
+    fold = fold[keep]
+    smiles = smiles[keep]
+    fingerprints = fingerprints[keep]
+    adduct_id = adduct_id[keep]
+    instrument_type_id = instrument_type_id[keep]
+    collision_energy = collision_energy[keep]
+    collision_energy_present = collision_energy_present[keep]
 
     train_mask = fold == "train"
     val_mask = fold == "val"
@@ -425,7 +316,7 @@ def _process_massspec(output_dir: Path, num_shards: int) -> dict[str, Any]:
         instrument_type_id[train_mask],
         collision_energy[train_mask],
         collision_energy_present[train_mask],
-        output_dir / "massspec_train",
+        output_dir / "train",
         max(1, num_shards // 2),
         desc="MassSpec Train",
     )
@@ -440,7 +331,7 @@ def _process_massspec(output_dir: Path, num_shards: int) -> dict[str, Any]:
         instrument_type_id[val_mask],
         collision_energy[val_mask],
         collision_energy_present[val_mask],
-        output_dir / "massspec_val",
+        output_dir / "val",
         max(1, num_shards // 4),
         desc="MassSpec Val",
     )
@@ -455,105 +346,90 @@ def _process_massspec(output_dir: Path, num_shards: int) -> dict[str, Any]:
         instrument_type_id[test_mask],
         collision_energy[test_mask],
         collision_energy_present[test_mask],
-        output_dir / "massspec_test",
+        output_dir / "test",
         max(1, num_shards // 4),
         desc="MassSpec Test",
     )
 
     return {
-        "massspec_train_files": train_files,
-        "massspec_train_lengths": train_lengths,
-        "massspec_train_size": train_size,
-        "massspec_val_files": val_files,
-        "massspec_val_lengths": val_lengths,
-        "massspec_val_size": val_size,
-        "massspec_test_files": test_files,
-        "massspec_test_lengths": test_lengths,
-        "massspec_test_size": test_size,
-        "massspec_metadata_version": _MASSSPEC_METADATA_VERSION,
-        "massspec_adduct_vocab": adduct_vocab,
-        "massspec_instrument_type_vocab": instrument_type_vocab,
+        "metadata_version": _MASSSPEC_METADATA_VERSION,
+        "train_files": train_files,
+        "train_lengths": train_lengths,
+        "train_size": train_size,
+        "val_files": val_files,
+        "val_lengths": val_lengths,
+        "val_size": val_size,
+        "test_files": test_files,
+        "test_lengths": test_lengths,
+        "test_size": test_size,
+        "adduct_vocab": adduct_vocab,
+        "instrument_type_vocab": instrument_type_vocab,
+        "max_precursor_mz": float(max_precursor_mz),
     }
 
 
+def _load_json(path: Path) -> dict[str, Any]:
+    with path.open() as f:
+        return json.load(f)
 
-def _ensure_processed(
+
+def _ensure_gems_downloaded(
+    *,
     output_dir: Path,
-    validation_fraction: float,
-    split_seed: int,
+    repo_id: str,
+    revision: str,
+) -> dict[str, Any]:
+    logger.info("Downloading GeMS TFRecords from %s@%s", repo_id, revision)
+    snapshot_download(
+        repo_id=repo_id,
+        repo_type="dataset",
+        revision=revision,
+        local_dir=output_dir,
+        allow_patterns=[_METADATA_FILENAME, "train/*", "validation/*"],
+    )
+    metadata = load_gems_metadata(output_dir)
+    validate_gems_artifact(output_dir, metadata)
+    return metadata
+
+
+def _ensure_massspec_prepared(
+    output_dir: Path,
     num_shards: int,
+    *,
+    max_precursor_mz: float,
 ) -> dict[str, Any]:
     metadata_path = output_dir / _METADATA_FILENAME
 
     if metadata_path.exists():
-        with open(metadata_path) as f:
-            metadata = json.load(f)
-
+        metadata = _load_json(metadata_path)
+        version_ok = int(metadata.get("metadata_version", 0)) == _MASSSPEC_METADATA_VERSION
+        precursor_ok = float(metadata.get("max_precursor_mz", float("inf"))) == float(max_precursor_mz)
         train_ok = all(
             (output_dir / "train" / fn).exists()
             for fn in metadata.get("train_files", [])
         )
         val_ok = all(
-            (output_dir / "validation" / fn).exists()
-            for fn in metadata.get("validation_files", [])
+            (output_dir / "val" / fn).exists()
+            for fn in metadata.get("val_files", [])
         )
-        massspec_train_files = metadata.get("massspec_train_files", [])
-        massspec_train_ok = all(
-            (output_dir / "massspec_train" / fn).exists()
-            for fn in massspec_train_files
+        test_ok = all(
+            (output_dir / "test" / fn).exists()
+            for fn in metadata.get("test_files", [])
         )
-        massspec_val_files = metadata.get("massspec_val_files", [])
-        massspec_val_ok = all(
-            (output_dir / "massspec_val" / fn).exists()
-            for fn in massspec_val_files
-        )
-        massspec_test_files = metadata.get("massspec_test_files", [])
-        massspec_test_ok = all(
-            (output_dir / "massspec_test" / fn).exists()
-            for fn in massspec_test_files
-        )
-        massspec_version_ok = (
-            int(metadata.get("massspec_metadata_version", 0))
-            == _MASSSPEC_METADATA_VERSION
-        )
-        massspec_vocab_ok = (
-            "massspec_adduct_vocab" in metadata
-            and "massspec_instrument_type_vocab" in metadata
-        )
-
-        if (
-            train_ok
-            and val_ok
-            and massspec_train_files
-            and massspec_train_ok
-            and massspec_val_files
-            and massspec_val_ok
-            and massspec_test_files
-            and massspec_test_ok
-            and massspec_version_ok
-            and massspec_vocab_ok
-        ):
-            logger.info("Found existing TFRecords at %s", output_dir)
-            return metadata
-
-        if train_ok and val_ok:
-            logger.info("Updating MassSpecGym TFRecords at %s", output_dir)
-            massspec_info = _process_massspec(output_dir, num_shards)
-            metadata.update(massspec_info)
-            with open(metadata_path, "w") as f:
-                json.dump(metadata, f, indent=2)
+        vocab_ok = "adduct_vocab" in metadata and "instrument_type_vocab" in metadata
+        if version_ok and precursor_ok and train_ok and val_ok and test_ok and vocab_ok:
+            logger.info("Found existing MassSpecGym TFRecords at %s", output_dir)
             return metadata
 
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    metadata = _process_gems(output_dir, validation_fraction, split_seed, num_shards)
-    massspec_info = _process_massspec(output_dir, num_shards)
-    metadata.update(massspec_info)
-
-    with open(metadata_path, "w") as f:
+    metadata = _process_massspec(
+        output_dir,
+        num_shards,
+        max_precursor_mz=max_precursor_mz,
+    )
+    with metadata_path.open("w") as f:
         json.dump(metadata, f, indent=2)
-
-    logger.info("Saved metadata to %s", metadata_path)
+    logger.info("Saved MassSpecGym metadata to %s", metadata_path)
     return metadata
 
 
@@ -943,24 +819,25 @@ def _build_dataset(
 
 
 def _compute_info(
-    metadata: dict[str, Any],
+    gems_metadata: dict[str, Any],
+    massspec_metadata: dict[str, Any],
     *,
     output_dir: Path,
     max_precursor_mz: float,
 ) -> dict[str, Any]:
-    massspec_adduct_vocab = metadata.get("massspec_adduct_vocab", {"unknown": 0})
-    massspec_instrument_type_vocab = metadata.get(
-        "massspec_instrument_type_vocab",
+    massspec_adduct_vocab = massspec_metadata.get("adduct_vocab", {"unknown": 0})
+    massspec_instrument_type_vocab = massspec_metadata.get(
+        "instrument_type_vocab",
         {"unknown": 0},
     )
     return {
         "tfrecord_dir": str(output_dir),
-        "train_size": metadata["train_size"],
-        "validation_size": metadata["validation_size"],
-        "massspec_train_size": metadata.get("massspec_train_size", 0),
-        "massspec_val_size": metadata.get("massspec_val_size", 0),
-        "massspec_test_size": metadata.get("massspec_test_size", 0),
-        "massspec_metadata_version": int(metadata.get("massspec_metadata_version", 0)),
+        "train_size": gems_metadata["train_size"],
+        "validation_size": gems_metadata["validation_size"],
+        "massspec_train_size": massspec_metadata.get("train_size", 0),
+        "massspec_val_size": massspec_metadata.get("val_size", 0),
+        "massspec_test_size": massspec_metadata.get("test_size", 0),
+        "massspec_metadata_version": int(massspec_metadata.get("metadata_version", 0)),
         "massspec_adduct_vocab": massspec_adduct_vocab,
         "massspec_instrument_type_vocab": massspec_instrument_type_vocab,
         "massspec_adduct_vocab_size": len(massspec_adduct_vocab),
@@ -1099,16 +976,19 @@ class TfLightningDataModule:
             .expanduser()
             .resolve()
         )
-        self.validation_fraction = float(
-            config.get("validation_fraction", _DEFAULT_VALIDATION_FRACTION)
-        )
+        self.gems_dir = self.output_dir / "gems"
+        self.massspec_dir = self.output_dir / "massspec"
+        self.gems_tfrecord_repo_id = str(
+            config.get("gems_tfrecord_repo_id", "")
+        ).strip()
+        if not self.gems_tfrecord_repo_id:
+            raise ValueError("GeMS configs must set gems_tfrecord_repo_id")
+        self.gems_tfrecord_revision = str(config.get("gems_tfrecord_revision", "main"))
         self.batch_size = int(config.get("batch_size", _DEFAULT_BATCH_SIZE))
         self.shuffle_buffer = int(config.get("shuffle_buffer", _DEFAULT_SHUFFLE_BUFFER))
         self.tfrecord_buffer_size = int(
             config.get("tfrecord_buffer_size", _DEFAULT_TFRECORD_BUFFER_SIZE)
         )
-        self.split_seed = int(config.get("split_seed", _DEFAULT_SPLIT_SEED))
-        self.num_shards = int(config.get("num_shards", _DEFAULT_NUM_SHARDS))
         self.drop_remainder = bool(config.get("drop_remainder", True))
         self.max_precursor_mz = float(
             config.get("max_precursor_mz", _DEFAULT_MAX_PRECURSOR_MZ)
@@ -1128,36 +1008,42 @@ class TfLightningDataModule:
             config.get("sigreg_intensity_jitter_std", 0.001)
         )
 
-        self.metadata = _ensure_processed(
-            self.output_dir,
-            self.validation_fraction,
-            self.split_seed,
-            self.num_shards,
+        self.gems_metadata = _ensure_gems_downloaded(
+            output_dir=self.gems_dir,
+            repo_id=self.gems_tfrecord_repo_id,
+            revision=self.gems_tfrecord_revision,
+        )
+        self.massspec_metadata = _ensure_massspec_prepared(
+            self.massspec_dir,
+            _DEFAULT_MASSSPEC_NUM_SHARDS,
+            max_precursor_mz=self.max_precursor_mz,
         )
 
         self.gems_train_files = [
-            str(self.output_dir / "train" / fn) for fn in self.metadata["train_files"]
+            str(self.gems_dir / "train" / fn)
+            for fn in self.gems_metadata["train_files"]
         ]
         self.gems_val_files = [
-            str(self.output_dir / "validation" / fn)
-            for fn in self.metadata["validation_files"]
+            str(self.gems_dir / "validation" / fn)
+            for fn in self.gems_metadata["validation_files"]
         ]
         self.gems_test_files = list(self.gems_val_files)
         self.massspec_train_files = [
-            str(self.output_dir / "massspec_train" / fn)
-            for fn in self.metadata.get("massspec_train_files", [])
+            str(self.massspec_dir / "train" / fn)
+            for fn in self.massspec_metadata.get("train_files", [])
         ]
         self.massspec_val_files = [
-            str(self.output_dir / "massspec_val" / fn)
-            for fn in self.metadata.get("massspec_val_files", [])
+            str(self.massspec_dir / "val" / fn)
+            for fn in self.massspec_metadata.get("val_files", [])
         ]
         self.massspec_test_files = [
-            str(self.output_dir / "massspec_test" / fn)
-            for fn in self.metadata.get("massspec_test_files", [])
+            str(self.massspec_dir / "test" / fn)
+            for fn in self.massspec_metadata.get("test_files", [])
         ]
 
         self.info = _compute_info(
-            self.metadata,
+            self.gems_metadata,
+            self.massspec_metadata,
             output_dir=self.output_dir,
             max_precursor_mz=self.max_precursor_mz,
         )
@@ -1376,48 +1262,3 @@ class TfLightningDataModule:
                 )
             self._val_loader_built = True
         return self._val_loader
-
-
-# -----------------------------------------------------------------------------
-# CLI helpers
-# -----------------------------------------------------------------------------
-
-
-def _load_config(path: str) -> config_dict.ConfigDict:
-    spec = importlib.util.spec_from_file_location("gems_dataset_config", path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module.get_config()
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-
-    parser = argparse.ArgumentParser(
-        description="Create and inspect GeMS peak list datasets."
-    )
-    parser.add_argument("config", help="Path to a dataset config file (python).")
-    args = parser.parse_args()
-
-    cfg = _load_config(args.config)
-    datamodule = TfLightningDataModule(cfg, seed=int(cfg.seed))
-    train_iter = datamodule._build_gems_train_dataset(int(cfg.seed)).as_numpy_iterator()
-    info = datamodule.info
-
-    print("\nDataset info:")
-    for k, v in info.items():
-        print(f"  {k}: {v}")
-
-    print("\nSample batch:")
-    batch = next(train_iter)
-    for k, v in batch.items():
-        v_type = type(v)
-        v_shape = getattr(v, "shape", None)
-        v_dtype = getattr(v, "dtype", None)
-        print(f"  {k}: type={v_type}, shape={v_shape}, dtype={v_dtype}")
-
-    if "peak_mz" in batch:
-        print("\nFirst sample peak_mz:", batch["peak_mz"][0][:10])
-        print("First sample peak_intensity:", batch["peak_intensity"][0][:10])
-        print("First sample peak_valid_mask:", batch["peak_valid_mask"][0][:10])

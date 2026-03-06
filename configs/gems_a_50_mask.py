@@ -10,12 +10,10 @@ def get_config() -> config_dict.ConfigDict:
     # Dataset
     cfg.dataset = "gems_a"
     cfg.tfrecord_dir = "data/gems_peaklist_tfrecord"
+    cfg.gems_tfrecord_repo_id = "cjim8889/gems-a-tfrecords"
     cfg.batch_size = 128
-    cfg.validation_fraction = 0.05
     cfg.shuffle_buffer = 1_000_000
     cfg.tfrecord_buffer_size = 250_000
-    cfg.split_seed = 42
-    cfg.num_shards = 4
     cfg.drop_remainder = True
     cfg.max_precursor_mz = 1000.0
     cfg.min_peak_intensity = 0.001
