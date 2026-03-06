@@ -15,6 +15,7 @@ from ml_collections import config_dict
 from rdkit import DataStructs
 from rdkit import Chem
 from rdkit.Chem import AllChem
+from utils.massspec_probe_targets import FG_SMARTS, REGRESSION_TARGET_KEYS, build_probe_targets_for_rows
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ _METADATA_FILENAME = "metadata.json"
 
 MASSSPEC_HF_REPO = "roman-bushuiev/MassSpecGym"
 MASSSPEC_TSV_PATH = "data/MassSpecGym.tsv"
-MASSSPEC_METADATA_VERSION = 1
+MASSSPEC_METADATA_VERSION = 2
 
 
 def _download_hf_file(repo_id: str, filename: str, local_dir: Path) -> Path:
@@ -169,6 +170,9 @@ def _write_tfrecords_with_fingerprint(
     instrument_type_id: np.ndarray,
     collision_energy: np.ndarray,
     collision_energy_present: np.ndarray,
+    probe_mol_props: dict[str, np.ndarray],
+    probe_fg_binary: dict[str, np.ndarray],
+    probe_valid_mol: np.ndarray,
     output_path: Path,
     num_shards: int,
     desc: str,
@@ -195,6 +199,21 @@ def _write_tfrecords_with_fingerprint(
                 mz = spectra[i, 0].astype(np.float32)
                 intensity = spectra[i, 1].astype(np.float32)
                 fp = fingerprint[i].astype(np.int64)
+                probe_features = {
+                    f"probe_{name}": tf.train.Feature(
+                        float_list=tf.train.FloatList(value=[float(probe_mol_props[name][i])])
+                    )
+                    for name in REGRESSION_TARGET_KEYS
+                }
+                probe_features.update({
+                    f"probe_fg_{name}": tf.train.Feature(
+                        int64_list=tf.train.Int64List(value=[int(probe_fg_binary[name][i])])
+                    )
+                    for name in FG_SMARTS
+                })
+                probe_features["probe_valid_mol"] = tf.train.Feature(
+                    int64_list=tf.train.Int64List(value=[int(probe_valid_mol[i])])
+                )
                 example = tf.train.Example(
                     features=tf.train.Features(
                         feature={
@@ -234,6 +253,7 @@ def _write_tfrecords_with_fingerprint(
                                     value=[int(collision_energy_present[i])]
                                 )
                             ),
+                            **probe_features,
                         }
                     )
                 )
@@ -281,6 +301,7 @@ def _process_massspec_probe_data(
     instrument_type_id = instrument_type_id[keep]
     collision_energy = collision_energy[keep]
     collision_energy_present = collision_energy_present[keep]
+    probe_mol_props, probe_fg_binary, probe_valid_mol = build_probe_targets_for_rows(smiles)
 
     train_mask = fold == "train"
     val_mask = fold == "val"
@@ -296,6 +317,9 @@ def _process_massspec_probe_data(
         instrument_type_id[train_mask],
         collision_energy[train_mask],
         collision_energy_present[train_mask],
+        {name: values[train_mask] for name, values in probe_mol_props.items()},
+        {name: values[train_mask] for name, values in probe_fg_binary.items()},
+        probe_valid_mol[train_mask],
         output_dir / "train",
         max(1, num_shards // 2),
         desc="MassSpec Train",
@@ -310,6 +334,9 @@ def _process_massspec_probe_data(
         instrument_type_id[val_mask],
         collision_energy[val_mask],
         collision_energy_present[val_mask],
+        {name: values[val_mask] for name, values in probe_mol_props.items()},
+        {name: values[val_mask] for name, values in probe_fg_binary.items()},
+        probe_valid_mol[val_mask],
         output_dir / "val",
         max(1, num_shards // 4),
         desc="MassSpec Val",
@@ -324,6 +351,9 @@ def _process_massspec_probe_data(
         instrument_type_id[test_mask],
         collision_energy[test_mask],
         collision_energy_present[test_mask],
+        {name: values[test_mask] for name, values in probe_mol_props.items()},
+        {name: values[test_mask] for name, values in probe_fg_binary.items()},
+        probe_valid_mol[test_mask],
         output_dir / "test",
         max(1, num_shards // 4),
         desc="MassSpec Test",
@@ -424,7 +454,12 @@ def _parse_probe_batch(
         "instrument_type_id": tf.io.FixedLenFeature([1], tf.int64),
         "collision_energy": tf.io.FixedLenFeature([1], tf.float32),
         "collision_energy_present": tf.io.FixedLenFeature([1], tf.int64),
+        "probe_valid_mol": tf.io.FixedLenFeature([1], tf.int64),
     }
+    for name in REGRESSION_TARGET_KEYS:
+        feature_spec[f"probe_{name}"] = tf.io.FixedLenFeature([1], tf.float32)
+    for name in FG_SMARTS:
+        feature_spec[f"probe_fg_{name}"] = tf.io.FixedLenFeature([1], tf.int64)
 
     @tf.function
     def transform(serialized_batch: tf.Tensor) -> dict[str, tf.Tensor]:
@@ -473,7 +508,7 @@ def _parse_probe_batch(
         mz = tf.where(valid, mz, 0.0)
         intensity = tf.where(valid, intensity, 0.0)
 
-        return {
+        batch = {
             "peak_mz": mz / peak_mz_max,
             "peak_intensity": tf.where(valid, intensity, 0.0),
             "peak_valid_mask": valid,
@@ -490,7 +525,13 @@ def _parse_probe_batch(
                 parsed["collision_energy_present"][:, 0],
                 tf.int32,
             ),
+            "probe_valid_mol": tf.cast(parsed["probe_valid_mol"][:, 0], tf.bool),
         }
+        for name in REGRESSION_TARGET_KEYS:
+            batch[f"probe_{name}"] = parsed[f"probe_{name}"][:, 0]
+        for name in FG_SMARTS:
+            batch[f"probe_fg_{name}"] = tf.cast(parsed[f"probe_fg_{name}"][:, 0], tf.int32)
+        return batch
 
     return transform
 

@@ -105,8 +105,39 @@ class SIGRegForwardTests(unittest.TestCase):
             "valid_fraction",
             "masked_fraction",
             "sigreg_lambda_current",
+            "global_emb_var_floor",
+            "local_emb_var_floor",
+            "global_emb_cov_offdiag_abs_mean",
+            "local_emb_cov_offdiag_abs_mean",
+            "global_emb_corr_offdiag_abs_mean",
+            "local_emb_corr_offdiag_abs_mean",
         ):
             self.assertIn(key, metrics, f"Missing key: {key}")
+
+    def test_collapse_metrics_capture_variance_floor_and_correlation(self):
+        model = self._build_model()
+        fused_emb = torch.tensor(
+            [
+                [[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]],
+                [[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]],
+            ]
+        )
+        visible_mask = torch.ones(2, 3, dtype=torch.bool)
+
+        metrics = model._collapse_metrics(
+            fused_emb,
+            visible_mask,
+            B=1,
+            V=2,
+            target_global_view_idx=0,
+        )
+
+        self.assertAlmostEqual(float(metrics["global_emb_var_floor"]), 0.0, places=7)
+        self.assertAlmostEqual(float(metrics["global_emb_cov_offdiag_abs_mean"]), 0.0, places=7)
+        self.assertAlmostEqual(float(metrics["global_emb_corr_offdiag_abs_mean"]), 0.0, places=7)
+        self.assertGreater(float(metrics["local_emb_var_floor"]), 0.0)
+        self.assertGreater(float(metrics["local_emb_cov_offdiag_abs_mean"]), 0.0)
+        self.assertAlmostEqual(float(metrics["local_emb_corr_offdiag_abs_mean"]), 1.0, places=6)
 
     def test_forward_vicreg_contains_expected_keys(self):
         model = self._build_model(
@@ -142,7 +173,8 @@ class SIGRegForwardTests(unittest.TestCase):
             representation_regularizer="gco-sigreg",
             sigreg_lambda=0.0,
             masked_token_loss_weight=1.0,
-            gco_std_target=10.0,
+            gco_var_floor_target=10.0,
+            gco_corr_target=1.0,
             gco_alpha=0.0,
             gco_eta=1e-2,
             multicrop_num_local_views=3,
@@ -154,10 +186,12 @@ class SIGRegForwardTests(unittest.TestCase):
             "gco_log_lambda",
             "gco_c_ema",
             "gco_constraint",
-            "gco_std_penalty",
+            "gco_var_floor_constraint",
+            "gco_corr_constraint",
+            "gco_constraint_penalty",
         ):
             self.assertIn(key, metrics, f"Missing key: {key}")
-        self.assertGreater(float(metrics["gco_std_penalty"].detach()), 0.0)
+        self.assertGreater(float(metrics["gco_constraint_penalty"].detach()), 0.0)
         self.assertTrue(
             torch.allclose(
                 metrics["sigreg_term"],
@@ -170,7 +204,8 @@ class SIGRegForwardTests(unittest.TestCase):
             representation_regularizer="gco-vicreg",
             sigreg_lambda=0.0,
             masked_token_loss_weight=1.0,
-            gco_std_target=10.0,
+            gco_var_floor_target=10.0,
+            gco_corr_target=1.0,
             gco_alpha=0.0,
             gco_eta=1e-2,
             multicrop_num_local_views=3,
@@ -182,12 +217,14 @@ class SIGRegForwardTests(unittest.TestCase):
             "gco_log_lambda",
             "gco_c_ema",
             "gco_constraint",
-            "gco_std_penalty",
+            "gco_var_floor_constraint",
+            "gco_corr_constraint",
+            "gco_constraint_penalty",
             "vicreg_loss",
             "vicreg_term",
         ):
             self.assertIn(key, metrics, f"Missing key: {key}")
-        self.assertGreater(float(metrics["gco_std_penalty"].detach()), 0.0)
+        self.assertGreater(float(metrics["gco_constraint_penalty"].detach()), 0.0)
         self.assertTrue(
             torch.allclose(
                 metrics["vicreg_term"],
@@ -204,7 +241,8 @@ class SIGRegForwardTests(unittest.TestCase):
                     representation_regularizer=regularizer,
                     sigreg_lambda=0.0,
                     masked_token_loss_weight=1.0,
-                    gco_std_target=10.0,
+                    gco_var_floor_target=10.0,
+                    gco_corr_target=1.0,
                     gco_alpha=0.0,
                     gco_eta=1e-2,
                     multicrop_num_local_views=3,
@@ -301,12 +339,13 @@ class SIGRegForwardTests(unittest.TestCase):
         # Shapes should be [B, N, D] — single view each
         self.assertEqual(capture.proj_a.shape[0], batch_size)
 
-    def test_gco_constraint_uses_encoder_std(self):
+    def test_gco_constraint_uses_variance_floor_and_correlation(self):
         model = self._build_model(
             representation_regularizer="gco-sigreg",
             sigreg_lambda=0.0,
             masked_token_loss_weight=0.0,
-            gco_std_target=100.0,
+            gco_var_floor_target=100.0,
+            gco_corr_target=0.0,
             gco_alpha=0.0,
             gco_eta=0.0,
             multicrop_num_local_views=3,
@@ -314,12 +353,19 @@ class SIGRegForwardTests(unittest.TestCase):
 
         batch = _make_fused_batch(num_views=model.num_views)
         metrics = model.forward_augmented(batch)
-        # GCO constraint = std_target - encoder_emb_std; with a high target
-        # the constraint should be positive (encoder std << 100).
+        expected_constraint = torch.maximum(
+            metrics["gco_var_floor_constraint"],
+            metrics["gco_corr_constraint"],
+        )
+        expected_penalty = torch.relu(expected_constraint)
+
+        self.assertTrue(torch.allclose(metrics["gco_constraint"], expected_constraint))
+        self.assertTrue(torch.allclose(metrics["gco_constraint_penalty"], expected_penalty))
         self.assertGreater(float(metrics["gco_constraint"]), 0.0)
-        self.assertGreater(float(metrics["gco_std_penalty"]), 0.0)
-        # encoder_emb_std should be a reasonable positive value
+        self.assertGreater(float(metrics["gco_constraint_penalty"]), 0.0)
         self.assertGreater(float(metrics["encoder_emb_std"]), 0.0)
+        self.assertGreater(float(metrics["encoder_emb_var_floor"]), 0.0)
+        self.assertTrue(torch.isfinite(metrics["encoder_emb_corr_offdiag_abs_mean"]).item())
 
     def test_forward_uses_local_and_global_paths(self):
         model = self._build_model(

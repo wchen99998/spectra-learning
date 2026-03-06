@@ -19,7 +19,8 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.representation_regularizer = "sigreg"
     cfg.masked_latent_predictor_num_layers = 2
     cfg.sigreg_lambda_warmup_steps = 0
-    cfg.gco_std_target = 0.8
+    cfg.gco_var_floor_target = 1e-3
+    cfg.gco_corr_target = 0.6
     cfg.gco_alpha = 0.99
     cfg.gco_eta = 1e-3
     cfg.gco_log_lambda_init = -8.0

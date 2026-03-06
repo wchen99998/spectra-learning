@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import logging
 import math
 from dataclasses import dataclass
@@ -10,60 +9,19 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from ml_collections import config_dict
-from rdkit import Chem
-from rdkit.Chem import Descriptors, rdMolDescriptors
 from sklearn.metrics import r2_score, roc_auc_score
 
 from input_pipeline import TfLightningDataModule
 from models.model import PeakSetSIGReg
-from utils.massspec_probe_data import (
-    MassSpecProbeData,
-    download_massspec_tsv,
-    numpy_batch_to_torch,
-)
+from utils.massspec_probe_data import MassSpecProbeData, numpy_batch_to_torch
+from utils.massspec_probe_targets import FG_SMARTS, REGRESSION_TARGET_KEYS, compute_probe_targets_for_smiles
 from utils.schedulers import learning_rate_at_step
 
 
 log = logging.getLogger(__name__)
 
-FG_SMARTS: dict[str, str] = {
-    "hydroxyl": "[OX2H]",
-    "carboxyl": "[CX3](=O)[OX2H1]",
-    "amine": "[NX3;H2,H1;!$(NC=O)]",
-    "amide": "[NX3][CX3](=[OX1])",
-    "ester": "[#6][CX3](=O)[OX2H0][#6]",
-    "ketone": "[#6][CX3](=O)[#6]",
-    "aldehyde": "[CX3H1](=O)[#6]",
-    "aromatic_ring": "c1ccccc1",
-    "nitro": "[$([NX3](=O)=O),$([NX3+](=O)[O-])]",
-    "sulfonyl": "[#16X4](=[OX1])(=[OX1])",
-    "phosphate": "[PX4](=[OX1])([OX2])",
-    "halide": "[F,Cl,Br,I]",
-    "ether": "[OD2]([#6])[#6]",
-    "thiol": "[#16X2H]",
-    "nitrile": "[NX1]#[CX2]",
-}
-
-REGRESSION_TARGET_KEYS = (
-    "mol_weight",
-    "logp",
-    "num_heavy_atoms",
-    "num_rings",
-)
-
-_CACHE_VERSION = 1
-_CACHE_FILENAME = f"MassSpecGym_probe_targets_v{_CACHE_VERSION}.npz"
 _MSG_PROBE_SELF_ATTENTION_BLOCKS = 3
 _MSG_PROBE_MLP_RATIO = 4
-
-
-@dataclass(slots=True)
-class MsgProbeTargets:
-    smiles: np.ndarray
-    mol_props: dict[str, np.ndarray]
-    fg_counts: dict[str, np.ndarray]
-    valid_mol_mask: np.ndarray
-    index_by_smiles: dict[str, int]
 
 
 @dataclass(slots=True)
@@ -72,6 +30,12 @@ class MsgProbeTaskSpec:
     classification_tasks: tuple[str, ...]
     regression_means: dict[str, float]
     regression_stds: dict[str, float]
+
+
+@dataclass(slots=True)
+class MsgProbeSplitTargets:
+    regression: dict[str, np.ndarray]
+    classification: dict[str, np.ndarray]
 
 
 class MsgProbeSelfAttentionBlock(torch.nn.Module):
@@ -237,147 +201,6 @@ def probe_steps_per_epoch(
     return math.ceil(size / batch_size)
 
 
-def compute_probe_targets_for_smiles(
-    smiles: list[str],
-) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], np.ndarray]:
-    n = len(smiles)
-    patterns = {name: Chem.MolFromSmarts(smarts) for name, smarts in FG_SMARTS.items()}
-    fg_counts = {name: np.zeros(n, dtype=np.int16) for name in FG_SMARTS}
-    valid_mol_mask = np.ones(n, dtype=bool)
-
-    mol_props = {
-        "mol_weight": np.zeros(n, dtype=np.float32),
-        "logp": np.zeros(n, dtype=np.float32),
-        "num_heavy_atoms": np.zeros(n, dtype=np.int16),
-        "num_rings": np.zeros(n, dtype=np.int16),
-    }
-
-    for i, smi in enumerate(smiles):
-        mol = Chem.MolFromSmiles(smi)
-        if mol is None:
-            valid_mol_mask[i] = False
-            continue
-        for name, pattern in patterns.items():
-            fg_counts[name][i] = len(mol.GetSubstructMatches(pattern))
-        mol_props["mol_weight"][i] = Descriptors.ExactMolWt(mol)
-        mol_props["logp"][i] = Descriptors.MolLogP(mol)
-        mol_props["num_heavy_atoms"][i] = mol.GetNumHeavyAtoms()
-        mol_props["num_rings"][i] = rdMolDescriptors.CalcNumRings(mol)
-
-    return mol_props, fg_counts, valid_mol_mask
-
-
-def _load_unique_smiles_from_tsv(tsv_path: Path) -> list[str]:
-    unique: list[str] = []
-    seen: set[str] = set()
-    with tsv_path.open() as f:
-        reader = csv.DictReader(f, delimiter="\t")
-        for row in reader:
-            smiles = row["smiles"]
-            if smiles in seen:
-                continue
-            seen.add(smiles)
-            unique.append(smiles)
-    return unique
-
-
-def _pack_targets(
-    *,
-    smiles: np.ndarray,
-    mol_props: dict[str, np.ndarray],
-    fg_counts: dict[str, np.ndarray],
-    valid_mol_mask: np.ndarray,
-) -> MsgProbeTargets:
-    index_by_smiles = {s: i for i, s in enumerate(smiles.tolist())}
-    return MsgProbeTargets(
-        smiles=smiles,
-        mol_props=mol_props,
-        fg_counts=fg_counts,
-        valid_mol_mask=valid_mol_mask,
-        index_by_smiles=index_by_smiles,
-    )
-
-
-def _load_targets_from_npz(data: np.lib.npyio.NpzFile) -> MsgProbeTargets:
-    smiles = data["smiles"]
-    mol_props = {key: data[key] for key in REGRESSION_TARGET_KEYS}
-    fg_counts = {name: data[f"fg_{name}"] for name in FG_SMARTS}
-    valid_mol_mask = data["valid_mol_mask"]
-    return _pack_targets(
-        smiles=smiles,
-        mol_props=mol_props,
-        fg_counts=fg_counts,
-        valid_mol_mask=valid_mol_mask,
-    )
-
-
-def load_or_build_msg_probe_targets(
-    *,
-    tsv_path: Path,
-    cache_dir: Path,
-) -> MsgProbeTargets:
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = cache_dir / _CACHE_FILENAME
-    tsv_stat = tsv_path.stat()
-
-    if cache_path.exists():
-        data = np.load(cache_path)
-        cache_version = int(data["cache_version"])
-        tsv_size = int(data["tsv_size"])
-        tsv_mtime_ns = int(data["tsv_mtime_ns"])
-        if (
-            cache_version == _CACHE_VERSION
-            and tsv_size == int(tsv_stat.st_size)
-            and tsv_mtime_ns == int(tsv_stat.st_mtime_ns)
-        ):
-            log.info("Loading MSG probe target cache from %s", cache_path)
-            return _load_targets_from_npz(data)
-
-    log.info("Building MSG probe target cache from %s", tsv_path)
-    unique_smiles = _load_unique_smiles_from_tsv(tsv_path)
-    mol_props, fg_counts, valid_mol_mask = compute_probe_targets_for_smiles(unique_smiles)
-    smiles = np.asarray(unique_smiles, dtype=np.str_)
-
-    save_dict: dict[str, np.ndarray] = {
-        "cache_version": np.asarray(_CACHE_VERSION, dtype=np.int64),
-        "tsv_size": np.asarray(int(tsv_stat.st_size), dtype=np.int64),
-        "tsv_mtime_ns": np.asarray(int(tsv_stat.st_mtime_ns), dtype=np.int64),
-        "smiles": smiles,
-        "valid_mol_mask": valid_mol_mask,
-    }
-    for key, values in mol_props.items():
-        save_dict[key] = values
-    for name, values in fg_counts.items():
-        save_dict[f"fg_{name}"] = values
-    np.savez_compressed(cache_path, **save_dict)
-    log.info("Wrote MSG probe target cache to %s", cache_path)
-
-    return _pack_targets(
-        smiles=smiles,
-        mol_props=mol_props,
-        fg_counts=fg_counts,
-        valid_mol_mask=valid_mol_mask,
-    )
-
-
-def _resolve_tsv_and_cache_dir(
-    config: config_dict.ConfigDict,
-    cache_dir_override: str | Path | None,
-) -> tuple[Path, Path]:
-    massspec_cache_dir = (
-        Path(config.get("tfrecord_dir", "data/gems_peaklist_tfrecord"))
-        .expanduser()
-        .resolve()
-        / "massspec_probe"
-    )
-    tsv_path = download_massspec_tsv(massspec_cache_dir)
-    if cache_dir_override is None:
-        cache_dir = tsv_path.parent
-    else:
-        cache_dir = Path(cache_dir_override).expanduser().resolve()
-    return tsv_path, cache_dir
-
-
 def _extract_probe_features(
     backbone: PeakSetSIGReg,
     batch: dict[str, torch.Tensor],
@@ -395,15 +218,15 @@ def _extract_probe_features(
     raise ValueError(f"Unknown msg_probe_feature_source: {feature_source!r}")
 
 
-def _collect_split_target_indices(
+def _collect_split_targets(
     *,
     probe_data: MassSpecProbeData,
     split: str,
     peak_ordering: str,
     seed: int,
-    targets: MsgProbeTargets,
-) -> np.ndarray:
-    batches: list[np.ndarray] = []
+) -> MsgProbeSplitTargets:
+    regression = {name: [] for name in REGRESSION_TARGET_KEYS}
+    classification = {name: [] for name in FG_SMARTS}
     for batch in iter_massspec_probe(
         probe_data=probe_data,
         split=split,
@@ -411,32 +234,43 @@ def _collect_split_target_indices(
         peak_ordering=peak_ordering,
         drop_remainder=False,
     ):
-        idx = np.asarray([targets.index_by_smiles[s] for s in batch["smiles"]], dtype=np.int64)
-        batches.append(idx)
-    return np.concatenate(batches, axis=0)
+        valid_mask = batch["probe_valid_mol"].detach().cpu().numpy().astype(bool, copy=False)
+        if not valid_mask.any():
+            continue
+        for name in REGRESSION_TARGET_KEYS:
+            regression[name].append(batch[f"probe_{name}"][valid_mask].detach().cpu().numpy())
+        for name in FG_SMARTS:
+            classification[name].append(batch[f"probe_fg_{name}"][valid_mask].detach().cpu().numpy())
+
+    return MsgProbeSplitTargets(
+        regression={
+            name: np.concatenate(chunks, axis=0) if chunks else np.empty((0,), dtype=np.float32)
+            for name, chunks in regression.items()
+        },
+        classification={
+            name: np.concatenate(chunks, axis=0) if chunks else np.empty((0,), dtype=np.int32)
+            for name, chunks in classification.items()
+        },
+    )
 
 
 def _build_task_spec(
     *,
-    targets: MsgProbeTargets,
-    train_idx: np.ndarray,
-    test_idx: np.ndarray,
+    train_targets: MsgProbeSplitTargets,
+    test_targets: MsgProbeSplitTargets,
 ) -> MsgProbeTaskSpec:
     regression_means: dict[str, float] = {}
     regression_stds: dict[str, float] = {}
 
-    train_valid_idx = train_idx[targets.valid_mol_mask[train_idx]]
-    test_valid_idx = test_idx[targets.valid_mol_mask[test_idx]]
-
     for name in REGRESSION_TARGET_KEYS:
-        values = targets.mol_props[name][train_valid_idx].astype(np.float32)
+        values = train_targets.regression[name].astype(np.float32)
         regression_means[name] = float(values.mean())
         regression_stds[name] = float(np.clip(values.std(), 1e-8, None))
 
     classification_tasks: list[str] = []
     for name in FG_SMARTS:
-        y_train = (targets.fg_counts[name][train_valid_idx] > 0).astype(np.int32)
-        y_test = (targets.fg_counts[name][test_valid_idx] > 0).astype(np.int32)
+        y_train = train_targets.classification[name].astype(np.int32)
+        y_test = test_targets.classification[name].astype(np.int32)
         train_prevalence = float(y_train.mean())
         test_prevalence = float(y_test.mean())
         if train_prevalence < 0.01 or train_prevalence > 0.99:
@@ -458,7 +292,6 @@ def _probe_step(
     backbone: PeakSetSIGReg,
     batch: dict[str, torch.Tensor],
     *,
-    targets: MsgProbeTargets,
     task_spec: MsgProbeTaskSpec,
     feature_source: str,
     device: torch.device,
@@ -468,8 +301,7 @@ def _probe_step(
         batch,
         feature_source=feature_source,
     )
-    batch_idx = np.asarray([targets.index_by_smiles[s] for s in batch["smiles"]], dtype=np.int64)
-    valid_mask = torch.from_numpy(targets.valid_mol_mask[batch_idx]).to(device=device, dtype=torch.bool)
+    valid_mask = batch["probe_valid_mol"].to(device=device, dtype=torch.bool)
     if not bool(valid_mask.any()):
         return None
 
@@ -477,13 +309,12 @@ def _probe_step(
     feature_mask = feature_mask[valid_mask]
     logits = probe(feature_tokens, feature_mask)
 
-    active_idx = batch_idx[valid_mask.detach().cpu().numpy()]
     losses: dict[str, torch.Tensor] = {}
     predictions: dict[str, torch.Tensor] = {}
     task_targets: dict[str, torch.Tensor] = {}
 
     for name in task_spec.regression_tasks:
-        target = torch.from_numpy(targets.mol_props[name][active_idx].astype(np.float32)).to(device)
+        target = batch[f"probe_{name}"][valid_mask].to(dtype=torch.float32)
         mean = task_spec.regression_means[name]
         std = task_spec.regression_stds[name]
         normalized_target = (target - mean) / std
@@ -493,7 +324,7 @@ def _probe_step(
         task_targets[name] = target
 
     for name in task_spec.classification_tasks:
-        target = torch.from_numpy((targets.fg_counts[name][active_idx] > 0).astype(np.float32)).to(device)
+        target = batch[f"probe_fg_{name}"][valid_mask].to(dtype=torch.float32)
         pred = logits[name].squeeze(-1)
         losses[name] = F.binary_cross_entropy_with_logits(pred, target)
         predictions[name] = torch.sigmoid(pred.detach())
@@ -582,7 +413,7 @@ def run_msg_probe(
     device: torch.device,
     cache_dir_override: str | Path | None = None,
 ) -> dict[str, float]:
-    del datamodule
+    del datamodule, cache_dir_override
     num_probe_epochs = int(config.get("msg_probe_num_epochs", 5))
     probe_lr = float(config.get("msg_probe_learning_rate", 1e-3))
     probe_weight_decay = float(config.get("msg_probe_weight_decay", 1e-2))
@@ -592,26 +423,21 @@ def run_msg_probe(
     peak_ordering = str(config.get("peak_ordering", "intensity"))
     probe_data = MassSpecProbeData.from_config(config)
 
-    tsv_path, cache_dir = _resolve_tsv_and_cache_dir(config, cache_dir_override)
-    targets = load_or_build_msg_probe_targets(tsv_path=tsv_path, cache_dir=cache_dir)
-
     train_seed_base = int(config.seed) + 1_100_000
     test_seed_base = int(config.seed) + 1_200_000
-    train_idx = _collect_split_target_indices(
+    train_targets = _collect_split_targets(
         probe_data=probe_data,
         split="massspec_train",
         peak_ordering=peak_ordering,
         seed=train_seed_base,
-        targets=targets,
     )
-    test_idx = _collect_split_target_indices(
+    test_targets = _collect_split_targets(
         probe_data=probe_data,
         split="massspec_test",
         peak_ordering=peak_ordering,
         seed=test_seed_base,
-        targets=targets,
     )
-    task_spec = _build_task_spec(targets=targets, train_idx=train_idx, test_idx=test_idx)
+    task_spec = _build_task_spec(train_targets=train_targets, test_targets=test_targets)
     task_names = task_spec.regression_tasks + task_spec.classification_tasks
 
     was_training = model.training
@@ -662,7 +488,6 @@ def run_msg_probe(
                 probe,
                 model,
                 batch,
-                targets=targets,
                 task_spec=task_spec,
                 feature_source=feature_source,
                 device=device,
@@ -690,7 +515,6 @@ def run_msg_probe(
                     probe,
                     model,
                     batch,
-                    targets=targets,
                     task_spec=task_spec,
                     feature_source=feature_source,
                     device=device,

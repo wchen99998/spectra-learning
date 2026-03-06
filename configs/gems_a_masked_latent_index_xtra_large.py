@@ -73,7 +73,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_latent_predictor_num_layers = 2
     cfg.autocast_dtype = "bf16"
     cfg.representation_regularizer = "gco-sigreg"
-    cfg.gco_std_target = 0.9
+    cfg.gco_var_floor_target = 1e-3
+    cfg.gco_corr_target = 0.6
     cfg.gco_log_lambda_min = -7.0
     cfg.sigreg_lambda_warmup_steps = 0
     cfg.msg_probe_every_n_steps = 100_000

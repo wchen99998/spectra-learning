@@ -245,10 +245,34 @@ class MassSpecPreprocessTests(unittest.TestCase):
                     max_precursor_mz=1000.0,
                 )
 
+            record_path = tmp_path / "massspec_probe" / "train" / metadata["train_files"][0]
+            dataset = tf.data.TFRecordDataset(
+                [str(record_path)],
+                compression_type="GZIP",
+            )
+            example = next(dataset.as_numpy_iterator())
+            parsed = tf.io.parse_single_example(
+                example,
+                {
+                    "probe_mol_weight": tf.io.FixedLenFeature([1], tf.float32),
+                    "probe_logp": tf.io.FixedLenFeature([1], tf.float32),
+                    "probe_num_heavy_atoms": tf.io.FixedLenFeature([1], tf.float32),
+                    "probe_num_rings": tf.io.FixedLenFeature([1], tf.float32),
+                    "probe_fg_hydroxyl": tf.io.FixedLenFeature([1], tf.int64),
+                    "probe_valid_mol": tf.io.FixedLenFeature([1], tf.int64),
+                },
+            )
+
         self.assertEqual(metadata["train_size"], 1)
         self.assertEqual(metadata["val_size"], 1)
         self.assertEqual(metadata["test_size"], 1)
         self.assertEqual(metadata["max_precursor_mz"], 1000.0)
+        self.assertEqual(parsed["probe_mol_weight"].shape[0], 1)
+        self.assertEqual(parsed["probe_logp"].shape[0], 1)
+        self.assertEqual(parsed["probe_num_heavy_atoms"].shape[0], 1)
+        self.assertEqual(parsed["probe_num_rings"].shape[0], 1)
+        self.assertEqual(parsed["probe_fg_hydroxyl"].shape[0], 1)
+        self.assertEqual(parsed["probe_valid_mol"].shape[0], 1)
 
     def test_build_gems_tfrecord_artifact_supports_parallel_shard_writes(self):
         with tempfile.TemporaryDirectory() as tmp:

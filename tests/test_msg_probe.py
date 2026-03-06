@@ -1,6 +1,4 @@
-import tempfile
 import unittest
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -8,11 +6,11 @@ import torch
 from utils.msg_probe import (
     FG_SMARTS,
     MsgAttentiveProbe,
-    MsgProbeTargets,
+    MsgProbeSplitTargets,
     _build_task_spec,
+    _collect_split_targets,
     _probe_step,
     iter_massspec_probe,
-    load_or_build_msg_probe_targets,
     probe_steps_per_epoch,
     should_run_msg_probe,
 )
@@ -69,55 +67,6 @@ class _DummyDataModule:
         return self._dataset
 
 
-def _write_fake_msg_tsv(path: Path) -> None:
-    header = [
-        "mzs",
-        "intensities",
-        "precursor_mz",
-        "fold",
-        "smiles",
-        "adduct",
-        "instrument_type",
-        "collision_energy",
-    ]
-    rows = [
-        ["100,200", "1,0.5", "250.1", "train", "CCO", "[M+H]+", "Orbitrap", "10"],
-        ["110,210", "1,0.2", "270.2", "train", "CCN", "[M+H]+", "Orbitrap", "20"],
-        ["120,220", "1,0.8", "290.3", "test", "CCO", "[M+Na]+", "QTOF", "30"],
-    ]
-    with path.open("w") as f:
-        f.write("\t".join(header) + "\n")
-        for row in rows:
-            f.write("\t".join(row) + "\n")
-
-
-class MsgProbeCacheTests(unittest.TestCase):
-    def test_cache_builds_and_reuses(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            tsv_path = tmp_path / "MassSpecGym.tsv"
-            cache_dir = tmp_path / "cache"
-            _write_fake_msg_tsv(tsv_path)
-
-            first = load_or_build_msg_probe_targets(
-                tsv_path=tsv_path,
-                cache_dir=cache_dir,
-            )
-            cache_files = list(cache_dir.glob("MassSpecGym_probe_targets_v*.npz"))
-            self.assertEqual(len(cache_files), 1)
-
-            second = load_or_build_msg_probe_targets(
-                tsv_path=tsv_path,
-                cache_dir=cache_dir,
-            )
-            self.assertEqual(first.index_by_smiles, second.index_by_smiles)
-            self.assertTrue(np.array_equal(first.valid_mol_mask, second.valid_mol_mask))
-            for key in first.mol_props:
-                self.assertTrue(np.array_equal(first.mol_props[key], second.mol_props[key]))
-            for name in FG_SMARTS:
-                self.assertTrue(np.array_equal(first.fg_counts[name], second.fg_counts[name]))
-
-
 class MsgAttentiveProbeTests(unittest.TestCase):
     def test_output_shapes_match_task_heads(self):
         probe = MsgAttentiveProbe(
@@ -155,26 +104,34 @@ class MsgAttentiveProbeTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(logits["mol_weight"]).all().item())
         self.assertTrue(torch.isfinite(logits["hydroxyl"]).all().item())
 
+
+class MsgProbeStepTests(unittest.TestCase):
     def test_probe_step_filters_invalid_targets_and_losses_are_finite(self):
-        probe_targets = MsgProbeTargets(
-            smiles=np.asarray(["s0", "s1", "s2", "s3"], dtype=np.str_),
-            mol_props={
-                "mol_weight": np.asarray([10.0, 12.0, 14.0, 16.0], dtype=np.float32),
-                "logp": np.asarray([1.0, 1.5, 2.0, 2.5], dtype=np.float32),
-                "num_heavy_atoms": np.asarray([2.0, 3.0, 4.0, 5.0], dtype=np.float32),
-                "num_rings": np.asarray([0.0, 1.0, 1.0, 2.0], dtype=np.float32),
-            },
-            fg_counts={
-                name: np.asarray([0, 1, 0, 1], dtype=np.int16)
-                for name in FG_SMARTS
-            },
-            valid_mol_mask=np.asarray([True, False, True, True]),
-            index_by_smiles={f"s{i}": i for i in range(4)},
-        )
         task_spec = _build_task_spec(
-            targets=probe_targets,
-            train_idx=np.asarray([0, 2, 3], dtype=np.int64),
-            test_idx=np.asarray([0, 2, 3], dtype=np.int64),
+            train_targets=MsgProbeSplitTargets(
+                regression={
+                    "mol_weight": np.asarray([10.0, 14.0, 16.0], dtype=np.float32),
+                    "logp": np.asarray([1.0, 2.0, 2.5], dtype=np.float32),
+                    "num_heavy_atoms": np.asarray([2.0, 4.0, 5.0], dtype=np.float32),
+                    "num_rings": np.asarray([0.0, 1.0, 2.0], dtype=np.float32),
+                },
+                classification={
+                    name: np.asarray([0, 1, 0], dtype=np.int32)
+                    for name in FG_SMARTS
+                },
+            ),
+            test_targets=MsgProbeSplitTargets(
+                regression={
+                    "mol_weight": np.asarray([10.0, 14.0, 16.0], dtype=np.float32),
+                    "logp": np.asarray([1.0, 2.0, 2.5], dtype=np.float32),
+                    "num_heavy_atoms": np.asarray([2.0, 4.0, 5.0], dtype=np.float32),
+                    "num_rings": np.asarray([0.0, 1.0, 2.0], dtype=np.float32),
+                },
+                classification={
+                    name: np.asarray([0, 1, 0], dtype=np.int32)
+                    for name in FG_SMARTS
+                },
+            ),
         )
         probe = MsgAttentiveProbe(
             input_dim=2,
@@ -192,13 +149,19 @@ class MsgAttentiveProbeTests(unittest.TestCase):
                 dtype=torch.float32,
             ),
             "peak_valid_mask": torch.ones(3, 3, dtype=torch.bool),
-            "smiles": np.asarray(["s0", "s1", "s3"], dtype=np.str_),
+            "probe_valid_mol": torch.tensor([True, False, True], dtype=torch.bool),
+            "probe_mol_weight": torch.tensor([10.0, 12.0, 16.0], dtype=torch.float32),
+            "probe_logp": torch.tensor([1.0, 1.5, 2.5], dtype=torch.float32),
+            "probe_num_heavy_atoms": torch.tensor([2.0, 3.0, 5.0], dtype=torch.float32),
+            "probe_num_rings": torch.tensor([0.0, 1.0, 2.0], dtype=torch.float32),
         }
+        for name in FG_SMARTS:
+            batch[f"probe_fg_{name}"] = torch.tensor([0, 1, 1], dtype=torch.int32)
+
         result = _probe_step(
             probe,
             _DummyBackbone(),
             batch,
-            targets=probe_targets,
             task_spec=task_spec,
             feature_source="encoder",
             device=torch.device("cpu"),
@@ -211,30 +174,84 @@ class MsgAttentiveProbeTests(unittest.TestCase):
 
 class MsgProbeTaskSpecTests(unittest.TestCase):
     def test_fg_tasks_follow_prevalence_filter(self):
-        fg_counts = {name: np.zeros(8, dtype=np.int16) for name in FG_SMARTS}
-        fg_counts["hydroxyl"] = np.asarray([0, 1, 0, 1, 0, 1, 0, 1], dtype=np.int16)
-        fg_counts["amine"] = np.asarray([0, 0, 0, 0, 0, 0, 0, 0], dtype=np.int16)
-        targets = MsgProbeTargets(
-            smiles=np.asarray([f"s{i}" for i in range(8)], dtype=np.str_),
-            mol_props={
-                "mol_weight": np.linspace(10.0, 17.0, 8, dtype=np.float32),
-                "logp": np.linspace(1.0, 4.5, 8, dtype=np.float32),
-                "num_heavy_atoms": np.linspace(2.0, 9.0, 8, dtype=np.float32),
-                "num_rings": np.linspace(0.0, 3.5, 8, dtype=np.float32),
-            },
-            fg_counts=fg_counts,
-            valid_mol_mask=np.ones(8, dtype=bool),
-            index_by_smiles={f"s{i}": i for i in range(8)},
-        )
+        train_fg = {name: np.zeros(4, dtype=np.int32) for name in FG_SMARTS}
+        test_fg = {name: np.zeros(4, dtype=np.int32) for name in FG_SMARTS}
+        train_fg["hydroxyl"] = np.asarray([0, 1, 0, 1], dtype=np.int32)
+        test_fg["hydroxyl"] = np.asarray([1, 0, 1, 0], dtype=np.int32)
+        train_fg["amine"] = np.asarray([0, 0, 0, 0], dtype=np.int32)
+        test_fg["amine"] = np.asarray([0, 1, 0, 1], dtype=np.int32)
 
         task_spec = _build_task_spec(
-            targets=targets,
-            train_idx=np.asarray([0, 1, 2, 3], dtype=np.int64),
-            test_idx=np.asarray([4, 5, 6, 7], dtype=np.int64),
+            train_targets=MsgProbeSplitTargets(
+                regression={
+                    "mol_weight": np.linspace(10.0, 13.0, 4, dtype=np.float32),
+                    "logp": np.linspace(1.0, 2.5, 4, dtype=np.float32),
+                    "num_heavy_atoms": np.linspace(2.0, 5.0, 4, dtype=np.float32),
+                    "num_rings": np.linspace(0.0, 1.5, 4, dtype=np.float32),
+                },
+                classification=train_fg,
+            ),
+            test_targets=MsgProbeSplitTargets(
+                regression={
+                    "mol_weight": np.linspace(14.0, 17.0, 4, dtype=np.float32),
+                    "logp": np.linspace(3.0, 4.5, 4, dtype=np.float32),
+                    "num_heavy_atoms": np.linspace(6.0, 9.0, 4, dtype=np.float32),
+                    "num_rings": np.linspace(2.0, 3.5, 4, dtype=np.float32),
+                },
+                classification=test_fg,
+            ),
         )
 
         self.assertEqual(task_spec.regression_tasks, ("mol_weight", "logp", "num_heavy_atoms", "num_rings"))
         self.assertEqual(task_spec.classification_tasks, ("hydroxyl",))
+
+
+class MsgProbeCollectionTests(unittest.TestCase):
+    def test_collect_split_targets_uses_batch_targets_directly(self):
+        dm = _DummyDataModule(
+            batches=[
+                {
+                    "peak_mz": np.zeros((2, 60), dtype=np.float32),
+                    "probe_valid_mol": np.asarray([1, 0], dtype=np.int32),
+                    "probe_mol_weight": np.asarray([10.0, 20.0], dtype=np.float32),
+                    "probe_logp": np.asarray([1.0, 2.0], dtype=np.float32),
+                    "probe_num_heavy_atoms": np.asarray([2.0, 3.0], dtype=np.float32),
+                    "probe_num_rings": np.asarray([0.0, 1.0], dtype=np.float32),
+                    **{
+                        f"probe_fg_{name}": np.asarray([0, 1], dtype=np.int32)
+                        for name in FG_SMARTS
+                    },
+                },
+                {
+                    "peak_mz": np.zeros((2, 60), dtype=np.float32),
+                    "probe_valid_mol": np.asarray([1, 1], dtype=np.int32),
+                    "probe_mol_weight": np.asarray([30.0, 40.0], dtype=np.float32),
+                    "probe_logp": np.asarray([3.0, 4.0], dtype=np.float32),
+                    "probe_num_heavy_atoms": np.asarray([4.0, 5.0], dtype=np.float32),
+                    "probe_num_rings": np.asarray([2.0, 3.0], dtype=np.float32),
+                    **{
+                        f"probe_fg_{name}": np.asarray([1, 0], dtype=np.int32)
+                        for name in FG_SMARTS
+                    },
+                },
+            ],
+            info={
+                "massspec_train_size": 0,
+                "massspec_val_size": 0,
+                "massspec_test_size": 4,
+            },
+            batch_size=2,
+        )
+
+        targets = _collect_split_targets(
+            probe_data=dm,
+            split="massspec_test",
+            peak_ordering="intensity",
+            seed=0,
+        )
+
+        self.assertTrue(np.array_equal(targets.regression["mol_weight"], np.asarray([10.0, 30.0, 40.0], dtype=np.float32)))
+        self.assertTrue(np.array_equal(targets.classification["hydroxyl"], np.asarray([0, 1, 0], dtype=np.int32)))
 
 
 class ProbeIterationTests(unittest.TestCase):

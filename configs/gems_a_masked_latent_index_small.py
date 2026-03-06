@@ -9,8 +9,8 @@ def get_config() -> config_dict.ConfigDict:
 
     # Dataset
     cfg.dataset = "gems_a"
-    cfg.tfrecord_dir = "data/gems_peaklist_tfrecord"
-    cfg.gems_tfrecord_repo_id = "cjim8889/gems-a-tfrecords"
+    cfg.tfrecord_dir = "data/gems_peaklist_tfrecord_alpha"
+    cfg.gems_tfrecord_repo_id = "cjim8889/gems-a10-tfrecords"
     cfg.batch_size = 256
     cfg.shuffle_buffer = 1_000_000
     cfg.tfrecord_buffer_size = 250_000
@@ -22,7 +22,7 @@ def get_config() -> config_dict.ConfigDict:
 
     # Model
     cfg.model_type = "sigreg_peak_set"
-    cfg.num_peaks = 60
+    cfg.num_peaks = 64
     cfg.model_dim = 256
     cfg.num_layers = 10
     cfg.num_heads = 8
@@ -37,15 +37,15 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_num_slices = 256
     cfg.sigreg_lambda = 0.1
     cfg.multicrop_num_local_views = 2
-    cfg.multicrop_local_keep_fraction = (0.1, 0.5)
+    cfg.multicrop_local_keep_fraction = (0.25, 0.5)
     cfg.sigreg_mz_jitter_std = 0.005
     cfg.sigreg_intensity_jitter_std = 0.05
     cfg.norm_type = "layernorm"
-    cfg.normalize_jepa_targets = True
+    cfg.normalize_jepa_targets = False
 
     # Training
-    cfg.num_epochs = 20
-    cfg.learning_rate = 6e-4
+    cfg.num_epochs = 100
+    cfg.learning_rate = 3e-4
     cfg.warmup_steps = 5_000
     cfg.learning_rate_schedule = "cosine"
     cfg.min_learning_rate = None
@@ -64,17 +64,19 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataloader_persistent_workers = True
 
     cfg.masked_token_loss_weight = 1.0
-    cfg.masked_token_loss_type = "cosine"
-    cfg.use_ema_teacher_target = True
+    cfg.masked_token_loss_type = "l2_sum"
+    cfg.use_ema_teacher_target = False
     cfg.teacher_ema_decay = 0.999
     cfg.teacher_ema_decay_start = 0.98
     cfg.teacher_ema_decay_warmup_steps = 100_000
     cfg.grad_clip_norm = 1.0
     cfg.masked_latent_predictor_num_layers = 1
+    cfg.predictor_num_heads = 4
     cfg.autocast_dtype = "bf16"
     cfg.representation_regularizer = "gco-sigreg"
-    cfg.gco_std_target = 0.6
-    cfg.gco_log_lambda_min = -5.0
+    cfg.gco_var_floor_target = 1.5
+    cfg.gco_corr_target = 0.60
+    cfg.gco_log_lambda_min = -2.0
     cfg.sigreg_lambda_warmup_steps = 50_000
     cfg.msg_probe_every_n_steps = 50_000
 

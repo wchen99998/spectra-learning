@@ -138,6 +138,36 @@ def _build_rope_freqs_from_positions(
     return freqs_cos, freqs_sin
 
 
+def _masked_embedding_stats(
+    emb: torch.Tensor,
+    valid_mask: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    flat = emb.float().reshape(-1, emb.shape[-1])
+    weights = valid_mask.reshape(-1).float()
+    count = weights.sum().clamp_min(1.0)
+    weights_col = weights.unsqueeze(-1)
+    mean = (flat * weights_col).sum(0) / count
+    centered = flat - mean
+    weighted_centered = centered * weights_col
+    cov = centered.transpose(0, 1) @ weighted_centered / count
+    var = cov.diagonal()
+    var_scale = var.clamp_min(1e-12)
+    corr = cov / torch.sqrt(var_scale.unsqueeze(0) * var_scale.unsqueeze(1))
+    offdiag_den = cov.shape[0] * (cov.shape[0] - 1)
+    return {
+        "emb_std": torch.sqrt(var + 1e-6).mean(),
+        "emb_norm": (flat.norm(dim=-1) * weights).sum() / count,
+        "emb_var_mean": var.mean(),
+        "emb_var_floor": var.amin(),
+        "emb_cov_offdiag_abs_mean": (
+            cov.abs().sum() - cov.diagonal().abs().sum()
+        ) / offdiag_den,
+        "emb_corr_offdiag_abs_mean": (
+            corr.abs().sum() - corr.diagonal().abs().sum()
+        ) / offdiag_den,
+    }
+
+
 class PeakSetEncoder(nn.Module):
     """Transformer encoder for peak sets (non-causal, optional RoPE)."""
 
@@ -246,7 +276,8 @@ class PeakSetSIGReg(nn.Module):
         sigreg_num_slices: int = 256,
         sigreg_lambda: float = 0.1,
         sigreg_lambda_warmup_steps: int = 0,
-        gco_std_target: float = 0.8,
+        gco_var_floor_target: float = 1e-3,
+        gco_corr_target: float = 0.6,
         gco_alpha: float = 0.99,
         gco_eta: float = 1e-3,
         gco_log_lambda_init: float = -8.0,
@@ -290,7 +321,8 @@ class PeakSetSIGReg(nn.Module):
         self.sigreg_intensity_jitter_std = sigreg_intensity_jitter_std
         self.sigreg_lambda = float(sigreg_lambda)
         self.sigreg_lambda_warmup_steps = int(sigreg_lambda_warmup_steps)
-        self.std_target = float(gco_std_target)
+        self.gco_var_floor_target = float(gco_var_floor_target)
+        self.gco_corr_target = float(gco_corr_target)
         self.gco_alpha = float(gco_alpha)
         self.gco_eta = float(gco_eta)
         self.gco_log_lambda_min = float(gco_log_lambda_min)
@@ -700,18 +732,27 @@ class PeakSetSIGReg(nn.Module):
             local_to_global_emb_std_ratio = (
                 collapse_metrics["local_emb_std"] / collapse_metrics["global_emb_std"]
             )
-            regularizer_flat = regularizer_emb_flat.float().reshape(-1, regularizer_emb_flat.shape[-1])
-            regularizer_weights = regularizer_valid_flat.reshape(-1).float()
-            regularizer_count = regularizer_weights.sum().clamp_min(1.0)
-            regularizer_weights_col = regularizer_weights.unsqueeze(-1)
-            regularizer_mean = (regularizer_flat * regularizer_weights_col).sum(0) / regularizer_count
-            regularizer_var = (
-                (regularizer_flat - regularizer_mean).square() * regularizer_weights_col
-            ).sum(0) / regularizer_count
-            encoder_emb_std = torch.sqrt(regularizer_var + 1e-6).mean()
-            gco_constraint = self.std_target - encoder_emb_std.float()
+            regularizer_stats = _masked_embedding_stats(
+                regularizer_emb_flat,
+                regularizer_valid_flat,
+            )
+            encoder_emb_std = regularizer_stats["emb_std"]
+            encoder_emb_var_mean = regularizer_stats["emb_var_mean"]
+            encoder_emb_var_floor = regularizer_stats["emb_var_floor"]
+            encoder_emb_cov_offdiag_abs_mean = regularizer_stats["emb_cov_offdiag_abs_mean"]
+            encoder_emb_corr_offdiag_abs_mean = regularizer_stats["emb_corr_offdiag_abs_mean"]
+            gco_var_floor_constraint = (
+                self.gco_var_floor_target - encoder_emb_var_floor.float()
+            )
+            gco_corr_constraint = (
+                encoder_emb_corr_offdiag_abs_mean.float() - self.gco_corr_target
+            )
+            gco_constraint = torch.maximum(
+                gco_var_floor_constraint,
+                gco_corr_constraint,
+            )
 
-        gco_std_penalty = torch.relu(gco_constraint).to(dtype=fused_emb.dtype)
+        gco_constraint_penalty = torch.relu(gco_constraint).to(dtype=fused_emb.dtype)
         gco_lambda = self.gco_log_lambda.exp().to(dtype=fused_emb.dtype)
 
         if self.representation_regularizer in ("gco-sigreg", "gco-vicreg"):
@@ -806,8 +847,14 @@ class PeakSetSIGReg(nn.Module):
             "gco_log_lambda": self.gco_log_lambda.to(dtype=fused_emb.dtype),
             "gco_c_ema": self.gco_c_ema.to(dtype=fused_emb.dtype),
             "gco_constraint": gco_constraint.to(dtype=fused_emb.dtype),
-            "gco_std_penalty": gco_std_penalty,
+            "gco_var_floor_constraint": gco_var_floor_constraint.to(dtype=fused_emb.dtype),
+            "gco_corr_constraint": gco_corr_constraint.to(dtype=fused_emb.dtype),
+            "gco_constraint_penalty": gco_constraint_penalty,
             "encoder_emb_std": encoder_emb_std.to(dtype=fused_emb.dtype),
+            "encoder_emb_var_mean": encoder_emb_var_mean.to(dtype=fused_emb.dtype),
+            "encoder_emb_var_floor": encoder_emb_var_floor.to(dtype=fused_emb.dtype),
+            "encoder_emb_cov_offdiag_abs_mean": encoder_emb_cov_offdiag_abs_mean.to(dtype=fused_emb.dtype),
+            "encoder_emb_corr_offdiag_abs_mean": encoder_emb_corr_offdiag_abs_mean.to(dtype=fused_emb.dtype),
             "pool_norm_weight_abs_mean": pool_norm_weight_abs_mean,
             "local_to_global_emb_std_ratio": local_to_global_emb_std_ratio,
             **collapse_metrics,
@@ -826,30 +873,34 @@ class PeakSetSIGReg(nn.Module):
 
         Returns metrics for global and local views:
         - ``*_emb_std``: mean per-dimension std over valid tokens (low = dimensional collapse)
+        - ``*_emb_var_floor``: minimum per-dimension variance over valid tokens
+        - ``*_emb_cov_offdiag_abs_mean``: mean absolute off-diagonal covariance
+        - ``*_emb_corr_offdiag_abs_mean``: mean absolute off-diagonal correlation
         - ``*_emb_norm``: mean L2 norm of valid token embeddings
         """
-        emb = fused_emb.float()  # [V*B, N, D]
-        mask = visible_mask  # [V*B, N]
+        emb = fused_emb.float().reshape(V, B, fused_emb.shape[1], fused_emb.shape[2])  # [V, B, N, D]
+        mask = visible_mask.reshape(V, B, visible_mask.shape[1])  # [V, B, N]
 
-        def _stats(x: torch.Tensor, m: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            flat = x.reshape(-1, x.shape[-1])  # [S*N, D]
-            w = m.reshape(-1).float()  # [S*N]
-            n = w.sum().clamp_min(1.0)
-            w_col = w.unsqueeze(-1)  # [S*N, 1]
-            mean = (flat * w_col).sum(0) / n  # [D]
-            var = ((flat - mean).square() * w_col).sum(0) / n  # [D]
-            per_dim_std = var.sqrt().mean()
-            mean_norm = (flat.norm(dim=-1) * w).sum() / n
-            return per_dim_std, mean_norm
-
-        global_std, global_norm = _stats(emb[:B], mask[:B])
-        local_std, local_norm = _stats(emb[B:], mask[B:])
+        global_emb = emb[target_global_view_idx]
+        global_mask = mask[target_global_view_idx]
+        local_emb = torch.cat((emb[:target_global_view_idx], emb[target_global_view_idx + 1:]), dim=0)
+        local_mask = torch.cat((mask[:target_global_view_idx], mask[target_global_view_idx + 1:]), dim=0)
+        global_stats = _masked_embedding_stats(global_emb, global_mask)
+        local_stats = _masked_embedding_stats(local_emb, local_mask)
 
         return {
-            "global_emb_std": global_std,
-            "local_emb_std": local_std,
-            "global_emb_norm": global_norm,
-            "local_emb_norm": local_norm,
+            "global_emb_std": global_stats["emb_std"],
+            "local_emb_std": local_stats["emb_std"],
+            "global_emb_norm": global_stats["emb_norm"],
+            "local_emb_norm": local_stats["emb_norm"],
+            "global_emb_var_mean": global_stats["emb_var_mean"],
+            "local_emb_var_mean": local_stats["emb_var_mean"],
+            "global_emb_var_floor": global_stats["emb_var_floor"],
+            "local_emb_var_floor": local_stats["emb_var_floor"],
+            "global_emb_cov_offdiag_abs_mean": global_stats["emb_cov_offdiag_abs_mean"],
+            "local_emb_cov_offdiag_abs_mean": local_stats["emb_cov_offdiag_abs_mean"],
+            "global_emb_corr_offdiag_abs_mean": global_stats["emb_corr_offdiag_abs_mean"],
+            "local_emb_corr_offdiag_abs_mean": local_stats["emb_corr_offdiag_abs_mean"],
         }
 
     def encode(

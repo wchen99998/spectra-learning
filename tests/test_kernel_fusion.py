@@ -218,6 +218,12 @@ def test_full_model_forward():
     assert "valid_fraction" in result
     assert "global_emb_std" in result
     assert "local_emb_std" in result
+    assert "global_emb_var_floor" in result
+    assert "local_emb_var_floor" in result
+    assert "global_emb_cov_offdiag_abs_mean" in result
+    assert "local_emb_cov_offdiag_abs_mean" in result
+    assert "global_emb_corr_offdiag_abs_mean" in result
+    assert "local_emb_corr_offdiag_abs_mean" in result
 
     for key, val in result.items():
         assert torch.isfinite(val), f"{key} is not finite: {val}"
