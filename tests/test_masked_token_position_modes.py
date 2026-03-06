@@ -7,6 +7,7 @@ def _build_model(
     *,
     num_local_views: int = 0,
     predictor_layers: int = 2,
+    encoder_use_rope: bool = True,
 ) -> PeakSetSIGReg:
     torch.manual_seed(0)
     model = PeakSetSIGReg(
@@ -15,7 +16,7 @@ def _build_model(
         encoder_num_layers=2,
         encoder_num_heads=4,
         feature_mlp_hidden_dim=32,
-        encoder_use_rope=True,
+        encoder_use_rope=encoder_use_rope,
         pooling_type="mean",
         multicrop_num_local_views=num_local_views,
         masked_token_loss_weight=1.0,
@@ -26,52 +27,41 @@ def _build_model(
 
 
 @torch.no_grad()
-def test_predictor_masked_rope_ignores_masked_mz():
+def test_predictor_zero_layers_is_identity():
     model = _build_model(predictor_layers=0)
     local_token_emb = torch.randn(1, 6, model.model_dim)
     local_valid = torch.ones(1, 6, dtype=torch.bool)
-    local_masked = torch.tensor([[False, False, True, False, False, False]])
-    local_mz = torch.tensor([[0.10, 0.20, 0.30, 0.40, 0.50, 0.60]])
-    local_mz_alt = local_mz.clone()
-    local_mz_alt[:, 2] = 0.95
 
-    out_1 = model.predict_masked_latents(local_token_emb, local_valid, local_mz, local_masked)
-    out_2 = model.predict_masked_latents(local_token_emb, local_valid, local_mz_alt, local_masked)
+    out = model.predict_masked_latents(local_token_emb, local_valid)
 
-    diff = (out_1 - out_2).abs().mean()
-    assert float(diff) < 1e-6
+    assert torch.allclose(out, local_token_emb)
 
 
 @torch.no_grad()
-def test_predictor_unmasked_mz_changes_output():
-    model = _build_model(predictor_layers=2)
-    local_token_emb = torch.randn(1, 6, model.model_dim)
+def test_predictor_rope_toggle_changes_output():
+    torch.manual_seed(0)
+    model_no_rope = _build_model(predictor_layers=2, encoder_use_rope=False)
+    torch.manual_seed(0)
+    model_with_rope = _build_model(predictor_layers=2, encoder_use_rope=True)
+    local_token_emb = torch.randn(1, 6, model_with_rope.model_dim)
     local_valid = torch.ones(1, 6, dtype=torch.bool)
-    local_masked = torch.tensor([[False, False, True, False, False, False]])
-    local_mz = torch.tensor([[0.10, 0.20, 0.30, 0.40, 0.50, 0.60]])
-    local_mz_alt = local_mz.clone()
-    local_mz_alt[:, 1] = 0.95
 
-    out_1 = model.predict_masked_latents(local_token_emb, local_valid, local_mz, local_masked)
-    out_2 = model.predict_masked_latents(local_token_emb, local_valid, local_mz_alt, local_masked)
+    out_1 = model_no_rope.predict_masked_latents(local_token_emb, local_valid)
+    out_2 = model_with_rope.predict_masked_latents(local_token_emb, local_valid)
 
     diff = (out_1 - out_2).abs().mean()
     assert float(diff) > 1e-3
 
 
 @torch.no_grad()
-def test_mask_rank_embedding_distinguishes_masked_tokens():
-    model = _build_model(predictor_layers=0)
+def test_predictor_outputs_finite():
+    model = _build_model(predictor_layers=2)
     local_token_emb = torch.randn(1, 6, model.model_dim)
     local_valid = torch.ones(1, 6, dtype=torch.bool)
-    local_masked = torch.tensor([[False, True, False, True, False, False]])
-    local_mz = torch.tensor([[0.10, 0.20, 0.30, 0.40, 0.50, 0.60]])
 
-    out = model.predict_masked_latents(local_token_emb, local_valid, local_mz, local_masked)
+    out = model.predict_masked_latents(local_token_emb, local_valid)
 
-    masked_vec_1 = out[:, 1, :]
-    masked_vec_2 = out[:, 3, :]
-    assert not torch.allclose(masked_vec_1, masked_vec_2)
+    assert torch.isfinite(out).all()
 
 
 @torch.no_grad()
@@ -191,12 +181,9 @@ def test_local_global_l1_uses_masked_tokens_only():
         latent_mask_token,
         local_token_emb,
     )
-    token_mz = fused_mz.reshape(V, B, N)
     local_token_pred = model.predict_masked_latents(
         local_token_emb_remasked,
         local_valid,
-        token_mz[1],
-        local_masked,
     )
     per_token_l1 = (local_token_pred - global_token_emb).abs().mean(dim=-1)
     all_valid_loss = (per_token_l1 * local_valid.float()).sum() / local_valid.float().sum()
@@ -281,12 +268,9 @@ def test_local_global_l2_uses_masked_tokens_only():
         latent_mask_token,
         local_token_emb,
     )
-    token_mz = fused_mz.reshape(V, B, N)
     local_token_pred = model.predict_masked_latents(
         local_token_emb_remasked,
         local_valid,
-        token_mz[1],
-        local_masked,
     )
     per_token_l2 = (local_token_pred - global_token_emb).square().mean(dim=-1)
     all_valid_loss = (per_token_l2 * local_valid.float()).sum() / local_valid.float().sum()

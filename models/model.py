@@ -114,36 +114,24 @@ def _build_non_causal_blocks(
     return nn.ModuleList(blocks)
 
 
-def _build_mass_rope_omega(
+def _build_standard_rope_inv_freq(
     *,
     head_dim: int,
-    mz_max: float,
-    mz_precision: float,
+    base: float,
     device: torch.device,
 ) -> torch.Tensor:
     half_dim = head_dim // 2
-    lambda_min = 2.0 * float(mz_precision)
-    lambda_max = float(mz_max)
-    lambdas = torch.logspace(
-        math.log10(lambda_min),
-        math.log10(lambda_max),
-        steps=half_dim,
-        device=device,
-        dtype=torch.float32,
-    )
-    return (2.0 * math.pi) / lambdas
+    freq_idx = torch.arange(half_dim, device=device, dtype=torch.float32)
+    return 1.0 / (float(base) ** (freq_idx / half_dim))
 
 
 def _build_rope_freqs_from_positions(
     *,
-    positions_da: torch.Tensor,
-    omega: torch.Tensor,
+    positions: torch.Tensor,
+    inv_freq: torch.Tensor,
     out_dtype: torch.dtype,
-    modulo_2pi: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    angles = positions_da.float().unsqueeze(-1) * omega.view(1, 1, -1)
-    if modulo_2pi:
-        angles = torch.remainder(angles, 2.0 * math.pi)
+    angles = positions.float().unsqueeze(-1) * inv_freq.view(1, 1, -1)
     angles = torch.repeat_interleave(angles, repeats=2, dim=-1)
     freqs_cos = angles.cos().to(dtype=out_dtype).unsqueeze(2)
     freqs_sin = angles.sin().to(dtype=out_dtype).unsqueeze(2)
@@ -163,10 +151,6 @@ class PeakSetEncoder(nn.Module):
         attention_mlp_multiple: float = 4.0,
         feature_mlp_hidden_dim: int = 128,
         use_rope: bool = False,
-        rope_mz_max: float = 1000.0,
-        rope_mz_precision: float = 0.1,
-        rope_modulo_2pi: bool = True,
-        num_peaks: int = 60,
         qk_norm: bool = False,
         norm_type: str = "rmsnorm",
     ):
@@ -175,21 +159,14 @@ class PeakSetEncoder(nn.Module):
         self.use_rope = bool(use_rope)
         self.norm_type = str(norm_type).lower()
         self.embedder = PeakFeatureEmbedder(model_dim, feature_mlp_hidden_dim)
-        self.rope_mz_max = float(rope_mz_max)
-        self.rope_mz_precision = float(rope_mz_precision)
-        self.rope_modulo_2pi = bool(rope_modulo_2pi)
-        self.num_peaks = int(num_peaks)
-        self.mask_rank_embedding = nn.Embedding(self.num_peaks, model_dim)
-        nn.init.normal_(self.mask_rank_embedding.weight, std=0.02)
         heads = int(num_heads)
         head_dim = model_dim // heads
-        omega = _build_mass_rope_omega(
+        inv_freq = _build_standard_rope_inv_freq(
             head_dim=head_dim,
-            mz_max=self.rope_mz_max,
-            mz_precision=self.rope_mz_precision,
+            base=10000.0,
             device=torch.device("cpu"),
         )
-        self.register_buffer("rope_omega", omega, persistent=False)
+        self.register_buffer("rope_inv_freq", inv_freq, persistent=False)
         self.blocks = _build_non_causal_blocks(
             dim=model_dim,
             num_layers=num_layers,
@@ -219,16 +196,19 @@ class PeakSetEncoder(nn.Module):
             if not self.use_rope:
                 return None, None
 
-            mz_da = peak_mz.float() * self.rope_mz_max
-            omega = self.rope_omega
-            if omega.device != peak_mz.device:
-                omega = omega.to(device=peak_mz.device)
+            positions = torch.arange(
+                peak_mz.shape[1],
+                device=peak_mz.device,
+                dtype=torch.float32,
+            ).unsqueeze(0)
+            inv_freq = self.rope_inv_freq
+            if inv_freq.device != peak_mz.device:
+                inv_freq = inv_freq.to(device=peak_mz.device)
 
             freqs_cos, freqs_sin = _build_rope_freqs_from_positions(
-                positions_da=mz_da,
-                omega=omega,
+                positions=positions,
+                inv_freq=inv_freq,
                 out_dtype=dtype,
-                modulo_2pi=self.rope_modulo_2pi,
             )
             return freqs_cos, freqs_sin
 
@@ -259,9 +239,6 @@ class PeakSetSIGReg(nn.Module):
         attention_mlp_multiple: float = 4.0,
         feature_mlp_hidden_dim: int = 128,
         encoder_use_rope: bool = False,
-        rope_mz_max: float = 1000.0,
-        rope_mz_precision: float = 0.1,
-        rope_modulo_2pi: bool = True,
         masked_token_loss_weight: float = 0.0,
         masked_token_loss_type: str = "l1",
         representation_regularizer: str = "sigreg",
@@ -413,10 +390,6 @@ class PeakSetSIGReg(nn.Module):
             attention_mlp_multiple=attention_mlp_multiple,
             feature_mlp_hidden_dim=feature_mlp_hidden_dim,
             use_rope=encoder_use_rope,
-            rope_mz_max=rope_mz_max,
-            rope_mz_precision=rope_mz_precision,
-            rope_modulo_2pi=rope_modulo_2pi,
-            num_peaks=num_peaks,
             qk_norm=encoder_qk_norm,
             norm_type=self.norm_type,
         )
@@ -442,20 +415,17 @@ class PeakSetSIGReg(nn.Module):
         self.pool_norm = _build_norm(model_dim, eps=1e-5, norm_type=self.norm_type)
         self.latent_mask_token = nn.Parameter(torch.empty(self.model_dim))
         nn.init.normal_(self.latent_mask_token, std=0.02)
-        self.predictor_mask_rank_embedding = nn.Embedding(self.num_peaks, self.model_dim)
-        nn.init.normal_(self.predictor_mask_rank_embedding.weight, std=0.02)
         predictor_max_heads = min(int(encoder_num_heads), self.model_dim // 16)
         self.predictor_num_heads = max(1, predictor_max_heads)
         while self.model_dim % self.predictor_num_heads != 0:
             self.predictor_num_heads -= 1
         predictor_head_dim = self.model_dim // self.predictor_num_heads
-        predictor_omega = _build_mass_rope_omega(
+        predictor_inv_freq = _build_standard_rope_inv_freq(
             head_dim=predictor_head_dim,
-            mz_max=self.encoder.rope_mz_max,
-            mz_precision=self.encoder.rope_mz_precision,
+            base=10000.0,
             device=torch.device("cpu"),
         )
-        self.register_buffer("predictor_rope_omega", predictor_omega, persistent=False)
+        self.register_buffer("predictor_rope_inv_freq", predictor_inv_freq, persistent=False)
         self.masked_latent_predictor = _build_non_causal_blocks(
             dim=self.model_dim,
             num_layers=self.masked_latent_predictor_num_layers,
@@ -502,8 +472,6 @@ class PeakSetSIGReg(nn.Module):
         self,
         local_token_emb_remasked: torch.Tensor,
         local_valid_mask: torch.Tensor,
-        local_mz: torch.Tensor,
-        local_masked_positions: torch.Tensor,
     ) -> torch.Tensor:
         # Predictor is a lightweight non-causal transformer stack over token
         # latents, using the local valid-mask to block out padding tokens.
@@ -511,26 +479,20 @@ class PeakSetSIGReg(nn.Module):
         freqs_cos = None
         freqs_sin = None
         if self.encoder.use_rope:
-            mz_da = local_mz.float() * self.encoder.rope_mz_max
-            mz_da = torch.where(local_masked_positions, torch.zeros_like(mz_da), mz_da)
-            omega = self.predictor_rope_omega
-            if omega.device != local_mz.device:
-                omega = omega.to(device=local_mz.device)
+            positions = torch.arange(
+                local_token_emb_remasked.shape[1],
+                device=local_token_emb_remasked.device,
+                dtype=torch.float32,
+            ).unsqueeze(0)
+            inv_freq = self.predictor_rope_inv_freq
+            if inv_freq.device != local_token_emb_remasked.device:
+                inv_freq = inv_freq.to(device=local_token_emb_remasked.device)
             freqs_cos, freqs_sin = _build_rope_freqs_from_positions(
-                positions_da=mz_da,
-                omega=omega,
+                positions=positions,
+                inv_freq=inv_freq,
                 out_dtype=local_token_emb_remasked.dtype,
-                modulo_2pi=self.encoder.rope_modulo_2pi,
             )
-        mask_rank = local_masked_positions.long().cumsum(dim=1) - 1
-        rank_embed = self.predictor_mask_rank_embedding(mask_rank.clamp(min=0)).to(
-            dtype=local_token_emb_remasked.dtype
-        )
-        x = local_token_emb_remasked + torch.where(
-            local_masked_positions.unsqueeze(-1),
-            rank_embed,
-            torch.zeros_like(rank_embed),
-        )
+        x = local_token_emb_remasked
         for block in self.masked_latent_predictor:
             x = block(
                 x,
@@ -652,7 +614,6 @@ class PeakSetSIGReg(nn.Module):
         token_emb = fused_emb.reshape(V, B, N, fused_emb.shape[2])
         token_valid = fused_valid_mask.reshape(V, B, N)
         token_masked = effective_masked_positions.reshape(V, B, N)
-        token_mz = fused_mz.reshape(V, B, N)
 
         # Local predictors regress to a fixed global latent target.
         # When EMA teacher is enabled, the target comes from teacher(global view).
@@ -677,11 +638,9 @@ class PeakSetSIGReg(nn.Module):
         all_local_emb = token_emb[target_global_view_idx + 1:]    # [L, B, N, D]
         all_local_valid = token_valid[target_global_view_idx + 1:]  # [L, B, N]
         all_local_mask = token_masked[target_global_view_idx + 1:]  # [L, B, N]
-        all_local_mz = token_mz[target_global_view_idx + 1:]       # [L, B, N]
         all_local_emb_flat = all_local_emb.reshape(L * B, N, -1)
         all_local_valid_flat = all_local_valid.reshape(L * B, N)
         all_local_mask_flat = all_local_mask.reshape(L * B, N)
-        all_local_mz_flat = all_local_mz.reshape(L * B, N)
 
         # Re-mask local latents at masked slots before prediction so the
         # predictor must infer masked content from surrounding context.
@@ -693,8 +652,6 @@ class PeakSetSIGReg(nn.Module):
         all_local_pred = self.predict_masked_latents(
             all_local_remasked,
             all_local_valid_flat,
-            all_local_mz_flat,
-            all_local_mask_flat,
         )
         # Compute per-token regression loss across all local views at once.
         # Reshape to [L, B, N, D_loss] for broadcasting against [B, N, D_loss].

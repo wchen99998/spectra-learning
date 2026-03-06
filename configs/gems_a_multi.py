@@ -31,9 +31,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_heads = 8
     cfg.num_kv_heads = 8
     cfg.encoder_use_rope = True
-    cfg.rope_mz_max = 1000.0
-    cfg.rope_mz_precision = 0.1
-    cfg.rope_modulo_2pi = True
     cfg.encoder_qk_norm = True
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 128

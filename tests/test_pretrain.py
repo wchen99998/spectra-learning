@@ -1,6 +1,5 @@
 import unittest
 import tempfile
-import math
 
 import torch
 
@@ -535,11 +534,10 @@ class SIGRegForwardTests(unittest.TestCase):
         self.assertTrue(all(p.grad is None for p in model.teacher_encoder.parameters()))
 
 
-class MassAwareRoPETests(unittest.TestCase):
+class StandardRoPETests(unittest.TestCase):
     def _build_encoder_model(
         self,
         *,
-        rope_mz_precision: float = 0.1,
         encoder_num_kv_heads: int = 4,
     ) -> PeakSetSIGReg:
         return PeakSetSIGReg(
@@ -551,31 +549,27 @@ class MassAwareRoPETests(unittest.TestCase):
             attention_mlp_multiple=2.0,
             feature_mlp_hidden_dim=16,
             encoder_use_rope=True,
-            rope_mz_max=1000.0,
-            rope_mz_precision=rope_mz_precision,
-            rope_modulo_2pi=True,
             pooling_type="mean",
         )
 
-    def test_mass_rope_precision_0p1_omega_range(self):
-        model = self._build_encoder_model(rope_mz_precision=0.1)
-        omega = model.encoder.rope_omega
-        expected_max = (2.0 * math.pi) / 0.2
-        expected_min = (2.0 * math.pi) / 1000.0
-        self.assertTrue(torch.isclose(omega[0], torch.tensor(expected_max), rtol=1e-5, atol=1e-6))
-        self.assertTrue(torch.isclose(omega[-1], torch.tensor(expected_min), rtol=1e-5, atol=1e-6))
+    def test_standard_rope_inv_freq_range(self):
+        model = self._build_encoder_model()
+        inv_freq = model.encoder.rope_inv_freq
+        half_dim = model.model_dim // model.encoder.blocks[0].attention.n_heads // 2
+        expected_first = torch.tensor(1.0)
+        expected_last = torch.tensor(10000.0 ** (-(half_dim - 1) / half_dim))
+        self.assertTrue(torch.isclose(inv_freq[0], expected_first, rtol=1e-6, atol=1e-7))
+        self.assertTrue(torch.isclose(inv_freq[-1], expected_last, rtol=1e-6, atol=1e-7))
 
-    def test_mass_rope_precision_0p01_omega_range(self):
-        model = self._build_encoder_model(rope_mz_precision=0.01)
-        omega = model.encoder.rope_omega
-        expected_max = (2.0 * math.pi) / 0.02
-        expected_min = (2.0 * math.pi) / 1000.0
-        self.assertTrue(torch.isclose(omega[0], torch.tensor(expected_max), rtol=1e-5, atol=1e-6))
-        self.assertTrue(torch.isclose(omega[-1], torch.tensor(expected_min), rtol=1e-5, atol=1e-6))
+    def test_predictor_standard_rope_inv_freq_shape(self):
+        model = self._build_encoder_model()
+        inv_freq = model.predictor_rope_inv_freq
+        expected_half_dim = (model.model_dim // model.predictor_num_heads) // 2
+        self.assertEqual(inv_freq.shape, (expected_half_dim,))
+        self.assertTrue(torch.isclose(inv_freq[0], torch.tensor(1.0), rtol=1e-6, atol=1e-7))
 
     def test_rope_with_gqa_is_finite(self):
         model = self._build_encoder_model(
-            rope_mz_precision=0.1,
             encoder_num_kv_heads=2,
         )
         batch = _make_batch(batch_size=3)
