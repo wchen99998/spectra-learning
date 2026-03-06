@@ -61,6 +61,7 @@ from input_pipeline import (
     numpy_batch_to_torch,
 )
 from models.model import PeakSetSIGReg
+from utils.massspec_probe_data import MassSpecProbeData
 from utils.training import (
     build_model_from_config,
     load_config,
@@ -146,8 +147,8 @@ def _load_model_and_data(
 ):
     config = load_config(config_path)
     datamodule = TfLightningDataModule(config, seed=int(config.seed))
+    massspec_data = MassSpecProbeData.from_config(config)
     config.num_peaks = datamodule.info["num_peaks"]
-    config.fingerprint_bits = int(datamodule.info["fingerprint_bits"])
 
     backbone = build_model_from_config(config)
 
@@ -177,7 +178,7 @@ def _load_model_and_data(
         p.requires_grad = False
 
     log.info("Model on %s, params=%s", device, f"{sum(p.numel() for p in backbone.parameters()):,}")
-    return config, datamodule, backbone, ckpt_path
+    return config, datamodule, massspec_data, backbone, ckpt_path
 
 
 def _encode_batch_impl(
@@ -212,14 +213,14 @@ def _encode_batch_mean_pool_impl(
 
 def _extract_embeddings(
     config,
-    datamodule: TfLightningDataModule,
+    massspec_data: MassSpecProbeData,
     backbone: PeakSetSIGReg,
     device: torch.device,
     seed: int,
     pool: str = "pma",
 ):
     probe_peak_ordering = str(config.peak_ordering)
-    dataset = datamodule.build_massspec_probe_dataset(
+    dataset = massspec_data.build_dataset(
         "massspec_train",
         seed=seed,
         peak_ordering=probe_peak_ordering,
@@ -909,10 +910,10 @@ def main() -> None:
         raw_peaks = None
         ckpt_path = args.external_embed
     else:
-        config, datamodule, backbone, ckpt_path = _load_model_and_data(
+        config, datamodule, massspec_data, backbone, ckpt_path = _load_model_and_data(
             args.config, args.dir, args.checkpoint, device, seed,
         )
-        all_embeds, all_fps_morgan, all_meta, all_smiles, raw_peaks = _extract_embeddings(config, datamodule, backbone, device, seed, pool=args.pool)
+        all_embeds, all_fps_morgan, all_meta, all_smiles, raw_peaks = _extract_embeddings(config, massspec_data, backbone, device, seed, pool=args.pool)
     assert len(all_smiles) == len(all_embeds), f"Mismatch: {len(all_smiles)} vs {len(all_embeds)}"
 
     # 2. Compute RDKit features (cached on disk)

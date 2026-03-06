@@ -10,6 +10,7 @@ import tensorflow as tf
 from ml_collections import config_dict
 
 import input_pipeline
+import utils.massspec_probe_data as massspec_probe_data
 from scripts.prepare_gems_tfrecords import main as prepare_gems_main
 from utils.gems_tfrecords import (
     CANONICAL_NUM_SHARDS,
@@ -178,28 +179,15 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 )
                 return str(local_dir)
 
-            massspec_metadata = {
-                "metadata_version": 3,
-                "train_files": [],
-                "val_files": [],
-                "test_files": [],
-                "train_size": 0,
-                "val_size": 0,
-                "test_size": 0,
-                "adduct_vocab": {"unknown": 0},
-                "instrument_type_vocab": {"unknown": 0},
-            }
-
             with (
                 mock.patch.object(input_pipeline, "snapshot_download", side_effect=fake_snapshot_download) as download_mock,
-                mock.patch.object(input_pipeline, "_ensure_massspec_prepared", return_value=massspec_metadata),
             ):
                 datamodule = input_pipeline.TfLightningDataModule(cfg, seed=42)
                 batch = next(datamodule._build_gems_train_dataset(42).as_numpy_iterator())
 
             self.assertEqual(datamodule.info["train_size"], 2)
             self.assertEqual(datamodule.info["validation_size"], 1)
-            self.assertEqual(datamodule.info["massspec_train_size"], 0)
+            self.assertNotIn("massspec_train_size", datamodule.info)
             self.assertTrue(all(Path(path).exists() for path in datamodule.gems_train_files))
             self.assertIn("fused_mz", batch)
             self.assertIn("fused_masked_positions", batch)
@@ -217,7 +205,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
 
 
 class MassSpecPreprocessTests(unittest.TestCase):
-    def test_process_massspec_filters_large_precursor(self):
+    def test_process_massspec_probe_filters_large_precursor(self):
         spectra = np.zeros((4, 2, 128), dtype=np.float32)
         precursor = np.asarray([500.0, 1200.0, 750.0, 900.0], dtype=np.float32)
         retention = np.ones(4, dtype=np.float32)
@@ -234,9 +222,9 @@ class MassSpecPreprocessTests(unittest.TestCase):
             fake_tsv.write_text("unused\n")
 
             with (
-                mock.patch.object(input_pipeline, "_download_hf_file", return_value=fake_tsv),
+                mock.patch.object(massspec_probe_data, "_download_hf_file", return_value=fake_tsv),
                 mock.patch.object(
-                    input_pipeline,
+                    massspec_probe_data,
                     "_load_massspec_tsv",
                     return_value=(
                         spectra,
@@ -251,8 +239,8 @@ class MassSpecPreprocessTests(unittest.TestCase):
                     ),
                 ),
             ):
-                metadata = input_pipeline._process_massspec(
-                    tmp_path / "massspec",
+                metadata = massspec_probe_data._process_massspec_probe_data(
+                    tmp_path / "massspec_probe",
                     4,
                     max_precursor_mz=1000.0,
                 )

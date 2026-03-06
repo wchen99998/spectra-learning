@@ -50,7 +50,7 @@ class _DummyDataModule:
         self.batch_size = batch_size
         self.calls = []
 
-    def build_massspec_probe_dataset(
+    def build_dataset(
         self,
         split: str,
         seed: int,

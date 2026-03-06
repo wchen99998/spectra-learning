@@ -14,14 +14,13 @@ from rdkit import Chem
 from rdkit.Chem import Descriptors, rdMolDescriptors
 from sklearn.metrics import r2_score, roc_auc_score
 
-from input_pipeline import (
-    TfLightningDataModule,
-    _MASSSPEC_HF_REPO,
-    _MASSSPEC_TSV_PATH,
-    _download_hf_file,
+from input_pipeline import TfLightningDataModule
+from models.model import PeakSetSIGReg
+from utils.massspec_probe_data import (
+    MassSpecProbeData,
+    download_massspec_tsv,
     numpy_batch_to_torch,
 )
-from models.model import PeakSetSIGReg
 from utils.schedulers import learning_rate_at_step
 
 
@@ -188,14 +187,14 @@ def should_run_msg_probe(global_step: int, every_n_steps: int) -> bool:
 
 
 def iter_massspec_probe(
-    datamodule: TfLightningDataModule,
+    probe_data: MassSpecProbeData,
     split: str,
     *,
     seed: int,
     peak_ordering: str,
     drop_remainder: bool,
 ):
-    dataset = datamodule.build_massspec_probe_dataset(
+    dataset = probe_data.build_dataset(
         split,
         seed=seed,
         peak_ordering=peak_ordering,
@@ -207,7 +206,7 @@ def iter_massspec_probe(
         "massspec_val": "massspec_val_size",
         "massspec_test": "massspec_test_size",
     }[split]
-    size = int(datamodule.info[size_key])
+    size = int(probe_data.info[size_key])
     seen = 0
     for batch in dataset.as_numpy_iterator():
         remaining = size - seen
@@ -221,7 +220,7 @@ def iter_massspec_probe(
 
 
 def probe_steps_per_epoch(
-    datamodule: TfLightningDataModule,
+    probe_data: MassSpecProbeData,
     *,
     split: str,
     drop_remainder: bool,
@@ -231,8 +230,8 @@ def probe_steps_per_epoch(
         "massspec_val": "massspec_val_size",
         "massspec_test": "massspec_test_size",
     }[split]
-    size = int(datamodule.info[size_key])
-    batch_size = int(datamodule.batch_size)
+    size = int(probe_data.info[size_key])
+    batch_size = int(probe_data.batch_size)
     if drop_remainder:
         return size // batch_size
     return math.ceil(size / batch_size)
@@ -365,17 +364,13 @@ def _resolve_tsv_and_cache_dir(
     config: config_dict.ConfigDict,
     cache_dir_override: str | Path | None,
 ) -> tuple[Path, Path]:
-    tfrecord_parent = (
+    massspec_cache_dir = (
         Path(config.get("tfrecord_dir", "data/gems_peaklist_tfrecord"))
         .expanduser()
         .resolve()
-        .parent
+        / "massspec_probe"
     )
-    tsv_path = _download_hf_file(
-        repo_id=_MASSSPEC_HF_REPO,
-        filename=_MASSSPEC_TSV_PATH,
-        local_dir=tfrecord_parent,
-    )
+    tsv_path = download_massspec_tsv(massspec_cache_dir)
     if cache_dir_override is None:
         cache_dir = tsv_path.parent
     else:
@@ -402,7 +397,7 @@ def _extract_probe_features(
 
 def _collect_split_target_indices(
     *,
-    datamodule: TfLightningDataModule,
+    probe_data: MassSpecProbeData,
     split: str,
     peak_ordering: str,
     seed: int,
@@ -410,7 +405,7 @@ def _collect_split_target_indices(
 ) -> np.ndarray:
     batches: list[np.ndarray] = []
     for batch in iter_massspec_probe(
-        datamodule=datamodule,
+        probe_data=probe_data,
         split=split,
         seed=seed,
         peak_ordering=peak_ordering,
@@ -587,6 +582,7 @@ def run_msg_probe(
     device: torch.device,
     cache_dir_override: str | Path | None = None,
 ) -> dict[str, float]:
+    del datamodule
     num_probe_epochs = int(config.get("msg_probe_num_epochs", 5))
     probe_lr = float(config.get("msg_probe_learning_rate", 1e-3))
     probe_weight_decay = float(config.get("msg_probe_weight_decay", 1e-2))
@@ -594,6 +590,7 @@ def run_msg_probe(
     probe_hidden_dim = int(config.get("msg_probe_hidden_dim", 512))
     feature_source = str(config.get("msg_probe_feature_source", "encoder"))
     peak_ordering = str(config.get("peak_ordering", "intensity"))
+    probe_data = MassSpecProbeData.from_config(config)
 
     tsv_path, cache_dir = _resolve_tsv_and_cache_dir(config, cache_dir_override)
     targets = load_or_build_msg_probe_targets(tsv_path=tsv_path, cache_dir=cache_dir)
@@ -601,14 +598,14 @@ def run_msg_probe(
     train_seed_base = int(config.seed) + 1_100_000
     test_seed_base = int(config.seed) + 1_200_000
     train_idx = _collect_split_target_indices(
-        datamodule=datamodule,
+        probe_data=probe_data,
         split="massspec_train",
         peak_ordering=peak_ordering,
         seed=train_seed_base,
         targets=targets,
     )
     test_idx = _collect_split_target_indices(
-        datamodule=datamodule,
+        probe_data=probe_data,
         split="massspec_test",
         peak_ordering=peak_ordering,
         seed=test_seed_base,
@@ -627,7 +624,7 @@ def run_msg_probe(
     ).to(device)
     optimizer = torch.optim.AdamW(probe.parameters(), lr=probe_lr, weight_decay=probe_weight_decay)
     steps_per_epoch = probe_steps_per_epoch(
-        datamodule,
+        probe_data,
         split="massspec_train",
         drop_remainder=False,
     )
@@ -653,7 +650,7 @@ def run_msg_probe(
         train_state = _new_epoch_state(task_spec)
         train_seed = train_seed_base + epoch_idx
         for batch in iter_massspec_probe(
-            datamodule,
+            probe_data,
             "massspec_train",
             seed=train_seed,
             peak_ordering=peak_ordering,
@@ -682,7 +679,7 @@ def run_msg_probe(
         test_seed = test_seed_base + epoch_idx
         with torch.no_grad():
             for batch in iter_massspec_probe(
-                datamodule,
+                probe_data,
                 "massspec_test",
                 seed=test_seed,
                 peak_ordering=peak_ordering,

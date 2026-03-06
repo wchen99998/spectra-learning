@@ -387,7 +387,6 @@ def train_and_evaluate(
 
     info = datamodule.info
     config.num_peaks = info["num_peaks"]
-    config.fingerprint_bits = int(info["fingerprint_bits"])
 
     logging.info("Training for %d epochs.", num_epochs)
     logging.info("Steps per epoch: %d", steps_per_epoch)

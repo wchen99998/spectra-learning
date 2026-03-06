@@ -1,0 +1,626 @@
+from __future__ import annotations
+
+import csv
+import json
+import logging
+import math
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import tensorflow as tf
+from huggingface_hub import hf_hub_download
+from ml_collections import config_dict
+from rdkit import DataStructs
+from rdkit import Chem
+from rdkit.Chem import AllChem
+
+logger = logging.getLogger(__name__)
+
+tf.config.set_visible_devices([], "GPU")
+
+_DEFAULT_BATCH_SIZE = 512
+_DEFAULT_SHUFFLE_BUFFER = 10_000
+_DEFAULT_TFRECORD_DIR = Path("data/gems_peaklist_tfrecord")
+_DEFAULT_TFRECORD_BUFFER_SIZE = 250_000
+_DEFAULT_MASSSPEC_NUM_SHARDS = 4
+_DEFAULT_MAX_PRECURSOR_MZ = 1000.0
+_DEFAULT_MIN_PEAK_INTENSITY = 1e-4
+_NUM_PEAKS_INPUT = 128
+_NUM_PEAKS_OUTPUT = 60
+_FINGERPRINT_BITS = 1024
+_FINGERPRINT_RADIUS = 2
+_PEAK_MZ_MIN = 20.0
+_PEAK_MZ_MAX = 1000.0
+_PRECURSOR_MZ_WINDOW = 2.5
+_METADATA_FILENAME = "metadata.json"
+
+MASSSPEC_HF_REPO = "roman-bushuiev/MassSpecGym"
+MASSSPEC_TSV_PATH = "data/MassSpecGym.tsv"
+MASSSPEC_METADATA_VERSION = 1
+
+
+def _download_hf_file(repo_id: str, filename: str, local_dir: Path) -> Path:
+    local_dir.mkdir(parents=True, exist_ok=True)
+    path = hf_hub_download(
+        repo_id=repo_id,
+        filename=filename,
+        repo_type="dataset",
+        local_dir=str(local_dir),
+    )
+    return Path(path)
+
+
+def download_massspec_tsv(cache_dir: Path) -> Path:
+    return _download_hf_file(MASSSPEC_HF_REPO, MASSSPEC_TSV_PATH, cache_dir)
+
+
+def _load_massspec_tsv(
+    tsv_path: Path,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
+    spectra: list[np.ndarray] = []
+    precursor: list[float] = []
+    fold: list[str] = []
+    smiles: list[str] = []
+    adduct: list[str] = []
+    instrument_type: list[str] = []
+    collision_energy: list[float] = []
+    collision_energy_present: list[int] = []
+
+    with tsv_path.open() as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        for row in reader:
+            mz = np.fromstring(row["mzs"], sep=",", dtype=np.float32)
+            intensity = np.fromstring(row["intensities"], sep=",", dtype=np.float32)
+            if mz.size > _NUM_PEAKS_INPUT:
+                idx = np.argpartition(intensity, -_NUM_PEAKS_INPUT)[-_NUM_PEAKS_INPUT:]
+                idx = idx[np.argsort(intensity[idx])[::-1]]
+                mz = mz[idx]
+                intensity = intensity[idx]
+            elif mz.size < _NUM_PEAKS_INPUT:
+                pad = _NUM_PEAKS_INPUT - mz.size
+                mz = np.pad(mz, (0, pad))
+                intensity = np.pad(intensity, (0, pad))
+            spectra.append(np.stack([mz, intensity], axis=0))
+            precursor.append(float(row["precursor_mz"]))
+            fold.append(row["fold"])
+            smiles.append(row["smiles"])
+            adduct.append(row["adduct"] if row["adduct"] else "unknown")
+            instrument_type.append(
+                row["instrument_type"] if row["instrument_type"] else "unknown"
+            )
+            if row["collision_energy"] == "":
+                collision_energy.append(0.0)
+                collision_energy_present.append(0)
+            else:
+                collision_energy.append(float(row["collision_energy"]))
+                collision_energy_present.append(1)
+
+    spectra_array = np.stack(spectra, axis=0)
+    retention = np.full(len(spectra_array), 392.3146, dtype=np.float32)
+    precursor_array = np.asarray(precursor, dtype=np.float32)
+    fold_array = np.asarray(fold)
+    smiles_array = np.asarray(smiles)
+    adduct_array = np.asarray(adduct)
+    instrument_type_array = np.asarray(instrument_type)
+    collision_energy_array = np.asarray(collision_energy, dtype=np.float32)
+    collision_energy_present_array = np.asarray(collision_energy_present, dtype=np.int32)
+    return (
+        spectra_array,
+        retention,
+        precursor_array,
+        fold_array,
+        smiles_array,
+        adduct_array,
+        instrument_type_array,
+        collision_energy_array,
+        collision_energy_present_array,
+    )
+
+
+def _compute_morgan_fingerprints(smiles: np.ndarray) -> np.ndarray:
+    fps = np.zeros((len(smiles), _FINGERPRINT_BITS), dtype=np.int8)
+    for i, s in enumerate(smiles):
+        mol = Chem.MolFromSmiles(str(s))
+        fp = AllChem.GetMorganFingerprintAsBitVect(  # type: ignore[attr-defined]
+            mol,
+            _FINGERPRINT_RADIUS,
+            nBits=_FINGERPRINT_BITS,
+        )
+        arr = np.zeros((_FINGERPRINT_BITS,), dtype=np.int8)
+        DataStructs.ConvertToNumpyArray(fp, arr)
+        fps[i] = arr
+    return fps
+
+
+def _encode_categorical_ids(values: np.ndarray) -> tuple[np.ndarray, dict[str, int]]:
+    normalized = np.asarray(
+        [str(v) if str(v) != "" else "unknown" for v in values],
+        dtype=object,
+    )
+    categories = sorted(set(normalized.tolist()))
+    if "unknown" in categories:
+        categories = ["unknown"] + [c for c in categories if c != "unknown"]
+    else:
+        categories = ["unknown"] + categories
+    vocab = {category: i for i, category in enumerate(categories)}
+    ids = np.asarray([vocab[str(v)] for v in normalized], dtype=np.int32)
+    return ids, vocab
+
+
+def _write_tfrecords_with_fingerprint(
+    spectra: np.ndarray,
+    retention: np.ndarray,
+    precursor: np.ndarray,
+    fingerprint: np.ndarray,
+    smiles: np.ndarray,
+    adduct_id: np.ndarray,
+    instrument_type_id: np.ndarray,
+    collision_energy: np.ndarray,
+    collision_energy_present: np.ndarray,
+    output_path: Path,
+    num_shards: int,
+    desc: str,
+) -> tuple[list[str], list[int]]:
+    n = len(spectra)
+    num_shards = max(1, min(num_shards, n))
+    shard_size = math.ceil(n / num_shards)
+
+    output_path.mkdir(parents=True, exist_ok=True)
+    files: list[str] = []
+    lengths: list[int] = []
+
+    for shard_id in range(num_shards):
+        start = shard_id * shard_size
+        end = min(start + shard_size, n)
+        if start >= end:
+            break
+
+        shard_file = output_path / f"shard-{shard_id:05d}-of-{num_shards:05d}.tfrecord"
+        options = tf.io.TFRecordOptions(compression_type="GZIP")
+
+        with tf.io.TFRecordWriter(str(shard_file), options=options) as writer:  # type: ignore[attr-defined]
+            for i in range(start, end):
+                mz = spectra[i, 0].astype(np.float32)
+                intensity = spectra[i, 1].astype(np.float32)
+                fp = fingerprint[i].astype(np.int64)
+                example = tf.train.Example(
+                    features=tf.train.Features(
+                        feature={
+                            "mz": tf.train.Feature(float_list=tf.train.FloatList(value=mz)),
+                            "intensity": tf.train.Feature(
+                                float_list=tf.train.FloatList(value=intensity)
+                            ),
+                            "rt": tf.train.Feature(
+                                float_list=tf.train.FloatList(value=[retention[i]])
+                            ),
+                            "precursor_mz": tf.train.Feature(
+                                float_list=tf.train.FloatList(value=[precursor[i]])
+                            ),
+                            "fingerprint": tf.train.Feature(
+                                int64_list=tf.train.Int64List(value=fp)
+                            ),
+                            "smiles": tf.train.Feature(
+                                bytes_list=tf.train.BytesList(
+                                    value=[str(smiles[i]).encode("utf-8")]
+                                )
+                            ),
+                            "adduct_id": tf.train.Feature(
+                                int64_list=tf.train.Int64List(value=[int(adduct_id[i])])
+                            ),
+                            "instrument_type_id": tf.train.Feature(
+                                int64_list=tf.train.Int64List(
+                                    value=[int(instrument_type_id[i])]
+                                )
+                            ),
+                            "collision_energy": tf.train.Feature(
+                                float_list=tf.train.FloatList(
+                                    value=[float(collision_energy[i])]
+                                )
+                            ),
+                            "collision_energy_present": tf.train.Feature(
+                                int64_list=tf.train.Int64List(
+                                    value=[int(collision_energy_present[i])]
+                                )
+                            ),
+                        }
+                    )
+                )
+                writer.write(example.SerializeToString())
+
+        files.append(shard_file.name)
+        lengths.append(end - start)
+
+    return files, lengths
+
+
+def _process_massspec_probe_data(
+    output_dir: Path,
+    num_shards: int,
+    *,
+    max_precursor_mz: float,
+) -> dict[str, Any]:
+    logger.info("Downloading MassSpecGym TSV...")
+    tsv_path = download_massspec_tsv(output_dir)
+
+    logger.info("Loading MassSpecGym data...")
+    (
+        spectra,
+        retention,
+        precursor,
+        fold,
+        smiles,
+        adduct,
+        instrument_type,
+        collision_energy,
+        collision_energy_present,
+    ) = _load_massspec_tsv(tsv_path)
+    fingerprints = _compute_morgan_fingerprints(smiles)
+    adduct_id, adduct_vocab = _encode_categorical_ids(adduct)
+    instrument_type_id, instrument_type_vocab = _encode_categorical_ids(instrument_type)
+
+    keep = np.isfinite(precursor) & (precursor <= float(max_precursor_mz))
+    spectra = spectra[keep]
+    retention = retention[keep]
+    precursor = precursor[keep]
+    fold = fold[keep]
+    smiles = smiles[keep]
+    fingerprints = fingerprints[keep]
+    adduct_id = adduct_id[keep]
+    instrument_type_id = instrument_type_id[keep]
+    collision_energy = collision_energy[keep]
+    collision_energy_present = collision_energy_present[keep]
+
+    train_mask = fold == "train"
+    val_mask = fold == "val"
+    test_mask = fold == "test"
+
+    train_files, train_lengths = _write_tfrecords_with_fingerprint(
+        spectra[train_mask],
+        retention[train_mask],
+        precursor[train_mask],
+        fingerprints[train_mask],
+        smiles[train_mask],
+        adduct_id[train_mask],
+        instrument_type_id[train_mask],
+        collision_energy[train_mask],
+        collision_energy_present[train_mask],
+        output_dir / "train",
+        max(1, num_shards // 2),
+        desc="MassSpec Train",
+    )
+    val_files, val_lengths = _write_tfrecords_with_fingerprint(
+        spectra[val_mask],
+        retention[val_mask],
+        precursor[val_mask],
+        fingerprints[val_mask],
+        smiles[val_mask],
+        adduct_id[val_mask],
+        instrument_type_id[val_mask],
+        collision_energy[val_mask],
+        collision_energy_present[val_mask],
+        output_dir / "val",
+        max(1, num_shards // 4),
+        desc="MassSpec Val",
+    )
+    test_files, test_lengths = _write_tfrecords_with_fingerprint(
+        spectra[test_mask],
+        retention[test_mask],
+        precursor[test_mask],
+        fingerprints[test_mask],
+        smiles[test_mask],
+        adduct_id[test_mask],
+        instrument_type_id[test_mask],
+        collision_energy[test_mask],
+        collision_energy_present[test_mask],
+        output_dir / "test",
+        max(1, num_shards // 4),
+        desc="MassSpec Test",
+    )
+
+    return {
+        "metadata_version": MASSSPEC_METADATA_VERSION,
+        "train_files": train_files,
+        "train_lengths": train_lengths,
+        "train_size": int(np.count_nonzero(train_mask)),
+        "val_files": val_files,
+        "val_lengths": val_lengths,
+        "val_size": int(np.count_nonzero(val_mask)),
+        "test_files": test_files,
+        "test_lengths": test_lengths,
+        "test_size": int(np.count_nonzero(test_mask)),
+        "adduct_vocab": adduct_vocab,
+        "instrument_type_vocab": instrument_type_vocab,
+        "max_precursor_mz": float(max_precursor_mz),
+    }
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    with path.open() as f:
+        return json.load(f)
+
+
+def ensure_massspec_probe_prepared(
+    output_dir: Path,
+    *,
+    max_precursor_mz: float,
+    num_shards: int = _DEFAULT_MASSSPEC_NUM_SHARDS,
+) -> dict[str, Any]:
+    metadata_path = output_dir / _METADATA_FILENAME
+    if metadata_path.exists():
+        metadata = _load_json(metadata_path)
+        version_ok = int(metadata.get("metadata_version", 0)) == MASSSPEC_METADATA_VERSION
+        precursor_ok = float(metadata.get("max_precursor_mz", float("inf"))) == float(max_precursor_mz)
+        train_ok = all((output_dir / "train" / fn).exists() for fn in metadata.get("train_files", []))
+        val_ok = all((output_dir / "val" / fn).exists() for fn in metadata.get("val_files", []))
+        test_ok = all((output_dir / "test" / fn).exists() for fn in metadata.get("test_files", []))
+        vocab_ok = "adduct_vocab" in metadata and "instrument_type_vocab" in metadata
+        if version_ok and precursor_ok and train_ok and val_ok and test_ok and vocab_ok:
+            logger.info("Found existing MassSpec probe TFRecords at %s", output_dir)
+            return metadata
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    metadata = _process_massspec_probe_data(
+        output_dir,
+        num_shards,
+        max_precursor_mz=max_precursor_mz,
+    )
+    with metadata_path.open("w") as f:
+        json.dump(metadata, f, indent=2)
+    logger.info("Saved MassSpec probe metadata to %s", metadata_path)
+    return metadata
+
+
+def _to_torch(value: Any) -> Any:
+    import torch
+
+    if isinstance(value, np.ndarray):
+        if value.dtype == object:
+            return _to_torch(value.tolist())
+        if not value.flags.c_contiguous or not value.flags.writeable:
+            value = value.copy()
+        return torch.from_numpy(value)
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    if isinstance(value, list):
+        return [_to_torch(item) for item in value]
+    return value
+
+
+def numpy_batch_to_torch(batch: dict[str, Any]) -> dict[str, Any]:
+    return {key: _to_torch(value) for key, value in batch.items()}
+
+
+def _parse_probe_batch(
+    *,
+    max_precursor_mz: float,
+    min_peak_intensity: float,
+    peak_ordering: str,
+):
+    peak_mz_min = tf.constant(_PEAK_MZ_MIN, tf.float32)
+    peak_mz_max = tf.constant(_PEAK_MZ_MAX, tf.float32)
+    precursor_window = tf.constant(_PRECURSOR_MZ_WINDOW, tf.float32)
+    min_int = tf.constant(min_peak_intensity, tf.float32)
+    max_prec = tf.constant(max_precursor_mz, tf.float32)
+    feature_spec = {
+        "mz": tf.io.FixedLenFeature([_NUM_PEAKS_INPUT], tf.float32),
+        "intensity": tf.io.FixedLenFeature([_NUM_PEAKS_INPUT], tf.float32),
+        "rt": tf.io.FixedLenFeature([1], tf.float32),
+        "precursor_mz": tf.io.FixedLenFeature([1], tf.float32),
+        "fingerprint": tf.io.FixedLenFeature([_FINGERPRINT_BITS], tf.int64),
+        "smiles": tf.io.FixedLenFeature([], tf.string),
+        "adduct_id": tf.io.FixedLenFeature([1], tf.int64),
+        "instrument_type_id": tf.io.FixedLenFeature([1], tf.int64),
+        "collision_energy": tf.io.FixedLenFeature([1], tf.float32),
+        "collision_energy_present": tf.io.FixedLenFeature([1], tf.int64),
+    }
+
+    @tf.function
+    def transform(serialized_batch: tf.Tensor) -> dict[str, tf.Tensor]:
+        parsed = tf.io.parse_example(serialized_batch, feature_spec)
+        mz = parsed["mz"]
+        intensity = parsed["intensity"]
+        rt = parsed["rt"][:, 0]
+        precursor_mz_val = parsed["precursor_mz"][:, 0]
+
+        upper = tf.where(
+            precursor_mz_val > 0.0,
+            precursor_mz_val - precursor_window,
+            peak_mz_max,
+        )
+        keep = (mz >= peak_mz_min) & (mz <= upper[:, tf.newaxis])
+        mz = tf.where(keep, mz, 0.0)
+        intensity = tf.where(keep, intensity, 0.0)
+
+        keep2 = intensity >= min_int
+        mz = tf.where(keep2, mz, 0.0)
+        intensity = tf.where(keep2, intensity, 0.0)
+
+        values, indices = tf.math.top_k(intensity, k=_NUM_PEAKS_OUTPUT, sorted=True)
+        intensity = values
+        mz = tf.gather(mz, indices, batch_dims=1)
+
+        valid = intensity > 0
+        if peak_ordering == "mz":
+            sort_key = tf.where(valid, mz, tf.fill(tf.shape(mz), float("inf")))
+            sorted_idx = tf.argsort(sort_key, axis=1, direction="ASCENDING", stable=True)
+        else:
+            sort_key = tf.where(
+                valid,
+                intensity,
+                tf.fill(tf.shape(intensity), float("-inf")),
+            )
+            sorted_idx = tf.argsort(
+                sort_key,
+                axis=1,
+                direction="DESCENDING",
+                stable=True,
+            )
+        mz = tf.gather(mz, sorted_idx, batch_dims=1)
+        intensity = tf.gather(intensity, sorted_idx, batch_dims=1)
+        valid = tf.gather(valid, sorted_idx, batch_dims=1)
+        mz = tf.where(valid, mz, 0.0)
+        intensity = tf.where(valid, intensity, 0.0)
+
+        return {
+            "peak_mz": mz / peak_mz_max,
+            "peak_intensity": tf.where(valid, intensity, 0.0),
+            "peak_valid_mask": valid,
+            "precursor_mz": tf.clip_by_value(precursor_mz_val, 0.0, max_prec) / max_prec,
+            "rt": rt,
+            "mz": mz,
+            "intensity": intensity,
+            "fingerprint": tf.cast(parsed["fingerprint"], tf.int32),
+            "smiles": parsed["smiles"],
+            "adduct_id": tf.cast(parsed["adduct_id"][:, 0], tf.int32),
+            "instrument_type_id": tf.cast(parsed["instrument_type_id"][:, 0], tf.int32),
+            "collision_energy": parsed["collision_energy"][:, 0],
+            "collision_energy_present": tf.cast(
+                parsed["collision_energy_present"][:, 0],
+                tf.int32,
+            ),
+        }
+
+    return transform
+
+
+def _build_probe_dataset(
+    filenames: list[str],
+    *,
+    batch_size: int,
+    shuffle_buffer: int,
+    seed: int,
+    drop_remainder: bool,
+    tfrecord_buffer_size: int,
+    max_precursor_mz: float,
+    min_peak_intensity: float,
+    peak_ordering: str,
+    num_parallel_reads: int | None = None,
+) -> tf.data.Dataset:
+    if num_parallel_reads is None:
+        num_parallel_reads = tf.data.AUTOTUNE
+    ds = tf.data.TFRecordDataset(
+        filenames,
+        compression_type="GZIP",
+        buffer_size=int(tfrecord_buffer_size),
+        num_parallel_reads=num_parallel_reads,
+    )
+    if shuffle_buffer > 0:
+        ds = ds.shuffle(shuffle_buffer, seed=seed, reshuffle_each_iteration=True)
+    ds = ds.batch(batch_size, drop_remainder=drop_remainder)
+    ds = ds.map(
+        _parse_probe_batch(
+            max_precursor_mz=max_precursor_mz,
+            min_peak_intensity=min_peak_intensity,
+            peak_ordering=peak_ordering,
+        ),
+        num_parallel_calls=tf.data.AUTOTUNE,
+    )
+    options = tf.data.Options()
+    options.deterministic = True
+    ds = ds.with_options(options)
+    ds = ds.prefetch(tf.data.AUTOTUNE)
+    return ds
+
+
+@dataclass(slots=True)
+class MassSpecProbeData:
+    info: dict[str, Any]
+    train_files: list[str]
+    val_files: list[str]
+    test_files: list[str]
+    batch_size: int
+    shuffle_buffer: int
+    tfrecord_buffer_size: int
+    max_precursor_mz: float
+    min_peak_intensity: float
+    peak_ordering: str
+
+    @classmethod
+    def from_config(cls, config: config_dict.ConfigDict) -> "MassSpecProbeData":
+        output_dir = (
+            Path(config.get("tfrecord_dir", str(_DEFAULT_TFRECORD_DIR)))
+            .expanduser()
+            .resolve()
+            / "massspec_probe"
+        )
+        max_precursor_mz = float(
+            config.get("max_precursor_mz", _DEFAULT_MAX_PRECURSOR_MZ)
+        )
+        metadata = ensure_massspec_probe_prepared(
+            output_dir,
+            max_precursor_mz=max_precursor_mz,
+        )
+        info = {
+            "massspec_train_size": int(metadata.get("train_size", 0)),
+            "massspec_val_size": int(metadata.get("val_size", 0)),
+            "massspec_test_size": int(metadata.get("test_size", 0)),
+            "massspec_metadata_version": int(metadata.get("metadata_version", 0)),
+            "massspec_adduct_vocab": metadata.get("adduct_vocab", {"unknown": 0}),
+            "massspec_instrument_type_vocab": metadata.get(
+                "instrument_type_vocab",
+                {"unknown": 0},
+            ),
+            "massspec_adduct_vocab_size": len(metadata.get("adduct_vocab", {"unknown": 0})),
+            "massspec_instrument_type_vocab_size": len(
+                metadata.get("instrument_type_vocab", {"unknown": 0})
+            ),
+            "fingerprint_bits": _FINGERPRINT_BITS,
+        }
+        return cls(
+            info=info,
+            train_files=[str(output_dir / "train" / fn) for fn in metadata.get("train_files", [])],
+            val_files=[str(output_dir / "val" / fn) for fn in metadata.get("val_files", [])],
+            test_files=[str(output_dir / "test" / fn) for fn in metadata.get("test_files", [])],
+            batch_size=int(config.get("batch_size", _DEFAULT_BATCH_SIZE)),
+            shuffle_buffer=int(config.get("shuffle_buffer", _DEFAULT_SHUFFLE_BUFFER)),
+            tfrecord_buffer_size=int(
+                config.get("tfrecord_buffer_size", _DEFAULT_TFRECORD_BUFFER_SIZE)
+            ),
+            max_precursor_mz=max_precursor_mz,
+            min_peak_intensity=float(
+                config.get("min_peak_intensity", _DEFAULT_MIN_PEAK_INTENSITY)
+            ),
+            peak_ordering=str(config.get("peak_ordering", "intensity")),
+        )
+
+    def build_dataset(
+        self,
+        split: str,
+        *,
+        seed: int,
+        peak_ordering: str | None = None,
+        shuffle: bool = False,
+        drop_remainder: bool = True,
+        num_parallel_reads: int | None = None,
+    ) -> tf.data.Dataset:
+        files = {
+            "massspec_train": self.train_files,
+            "massspec_val": self.val_files,
+            "massspec_test": self.test_files,
+        }[split]
+        if peak_ordering is None:
+            peak_ordering = self.peak_ordering
+        return _build_probe_dataset(
+            files,
+            batch_size=self.batch_size,
+            shuffle_buffer=self.shuffle_buffer if shuffle else 0,
+            seed=seed,
+            drop_remainder=drop_remainder,
+            tfrecord_buffer_size=self.tfrecord_buffer_size,
+            max_precursor_mz=self.max_precursor_mz,
+            min_peak_intensity=self.min_peak_intensity,
+            peak_ordering=peak_ordering,
+            num_parallel_reads=num_parallel_reads,
+        )

@@ -16,13 +16,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from input_pipeline import (
     TfLightningDataModule,
-    _MASSSPEC_HF_REPO,
-    _MASSSPEC_TSV_PATH,
-    _build_dataset,
-    _download_hf_file,
     numpy_batch_to_torch,
 )
 from models.model import PeakSetSIGReg
+from utils.massspec_probe_data import MassSpecProbeData, download_massspec_tsv
 from utils.training import build_model_from_config, load_config, load_pretrained_weights
 
 
@@ -55,31 +52,18 @@ def _batch_to_table(
 
 
 def _build_massspec_probe_dataset_serial(
-    datamodule: TfLightningDataModule,
+    massspec_data: MassSpecProbeData,
     split: str,
     *,
     seed: int,
     peak_ordering: str,
 ):
-    if split == "massspec_train":
-        files = datamodule.massspec_train_files
-    elif split == "massspec_val":
-        files = datamodule.massspec_val_files
-    else:
-        files = datamodule.massspec_test_files
-
-    return _build_dataset(
-        files,
-        datamodule.batch_size,
-        shuffle_buffer=0,
+    return massspec_data.build_dataset(
+        split,
         seed=seed,
-        drop_remainder=False,
-        tfrecord_buffer_size=datamodule.tfrecord_buffer_size,
-        max_precursor_mz=datamodule.max_precursor_mz,
-        include_fingerprint=True,
-        min_peak_intensity=datamodule.min_peak_intensity,
-        augmentation_type="none",
         peak_ordering=peak_ordering,
+        shuffle=False,
+        drop_remainder=False,
         num_parallel_reads=1,
     )
 
@@ -94,10 +78,11 @@ def _iter_split_smiles(
         "massspec_test": "test",
     }[split]
     max_precursor_mz = float(config.get("max_precursor_mz", 1000.0))
-    tsv_path = _download_hf_file(
-        _MASSSPEC_HF_REPO,
-        _MASSSPEC_TSV_PATH,
-        Path(config.get("tfrecord_dir", "data/gems_peaklist_tfrecord")).expanduser().resolve().parent,
+    tsv_path = download_massspec_tsv(
+        Path(config.get("tfrecord_dir", "data/gems_peaklist_tfrecord"))
+        .expanduser()
+        .resolve()
+        / "massspec_probe",
     )
     with Path(tsv_path).open() as f:
         reader = csv.DictReader(f, delimiter="\t")
@@ -111,7 +96,7 @@ def _encode_split(
     split: str,
     model: PeakSetSIGReg,
     config: config_dict.ConfigDict,
-    datamodule: TfLightningDataModule,
+    massspec_data: MassSpecProbeData,
     output_path: Path,
     seed: int,
     peak_ordering: str,
@@ -121,14 +106,14 @@ def _encode_split(
     checkpoint_path: str,
 ) -> int:
     dataset = _build_massspec_probe_dataset_serial(
-        datamodule,
+        massspec_data,
         split,
         seed=seed,
         peak_ordering=peak_ordering,
     )
     smiles_iter = _iter_split_smiles(config, split)
-    adduct_vocab = _inverse_vocab(datamodule.info["massspec_adduct_vocab"])
-    instrument_type_vocab = _inverse_vocab(datamodule.info["massspec_instrument_type_vocab"])
+    adduct_vocab = _inverse_vocab(massspec_data.info["massspec_adduct_vocab"])
+    instrument_type_vocab = _inverse_vocab(massspec_data.info["massspec_instrument_type_vocab"])
 
     writer: pq.ParquetWriter | None = None
     total_rows = 0
@@ -164,9 +149,9 @@ def _encode_split(
                 "split": split,
                 "peak_ordering": peak_ordering,
                 "seed": str(seed),
-                "massspec_adduct_vocab": json.dumps(datamodule.info["massspec_adduct_vocab"]),
+                "massspec_adduct_vocab": json.dumps(massspec_data.info["massspec_adduct_vocab"]),
                 "massspec_instrument_type_vocab": json.dumps(
-                    datamodule.info["massspec_instrument_type_vocab"]
+                    massspec_data.info["massspec_instrument_type_vocab"]
                 ),
             }
             schema = table.schema.with_metadata(
@@ -231,6 +216,7 @@ def main() -> None:
         config.batch_size = int(args.batch_size)
 
     datamodule = TfLightningDataModule(config, seed=int(config.seed))
+    massspec_data = MassSpecProbeData.from_config(config)
     config.num_peaks = int(datamodule.info["num_peaks"])
 
     device = torch.device(args.device)
@@ -260,7 +246,7 @@ def main() -> None:
             split=split,
             model=model,
             config=config,
-            datamodule=datamodule,
+            massspec_data=massspec_data,
             output_path=output_path,
             seed=seed,
             peak_ordering=peak_ordering,
