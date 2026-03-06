@@ -1,6 +1,6 @@
 from ml_collections import config_dict
 
-from configs._defaults import apply_final_probe_defaults, apply_training_defaults, apply_tune_defaults
+from configs._defaults import apply_training_defaults, apply_tune_defaults
 
 
 def get_config() -> config_dict.ConfigDict:
@@ -62,11 +62,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_sanity_val_steps = 0
     cfg.dataloader_num_workers = 1
     cfg.dataloader_persistent_workers = True
-
-    # Post-fit attentive probe (overrides from shared defaults)
-    apply_final_probe_defaults(cfg)
-    cfg.final_probe_num_epochs = 5
-    cfg.final_probe_warmup_steps = 50
 
     # Tune search space
     apply_tune_defaults(cfg)

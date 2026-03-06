@@ -33,7 +33,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch._inductor.config as inductor_config
-import torch.nn.functional as F
 from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.metrics import r2_score, roc_auc_score
@@ -41,7 +40,6 @@ from sklearn.model_selection import KFold, StratifiedKFold, cross_val_score
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor, NearestNeighbors
 from sklearn.preprocessing import normalize as l2_normalize
 from scipy.stats import spearmanr
-from torch.utils.data import DataLoader, TensorDataset
 from tqdm.auto import tqdm
 import umap
 
@@ -63,15 +61,13 @@ from input_pipeline import (
     numpy_batch_to_torch,
 )
 from models.model import PeakSetSIGReg
-from utils.probing import FinalAttentiveProbe, FinalLinearProbe
-from utils.schedulers import learning_rate_at_step
 from utils.training import (
     build_model_from_config,
     load_config,
     load_pretrained_weights,
     latest_ckpt_path,
 )
-from utils.msg_linear_probe import FG_SMARTS, compute_probe_targets_for_smiles
+from utils.msg_probe import FG_SMARTS, compute_probe_targets_for_smiles
 
 log = logging.getLogger(__name__)
 
@@ -100,15 +96,6 @@ PROBE_SIZE = 50_000
 N_PAIRS = 500_000
 K_VALUES = [1, 5, 10, 20, 50]
 
-NEURAL_PROBE_EPOCHS = 10
-NEURAL_PROBE_LR = 1e-4
-NEURAL_PROBE_WEIGHT_DECAY = 1e-4
-NEURAL_PROBE_WARMUP_STEPS = 50
-NEURAL_PROBE_BATCH_SIZE = 256
-NEURAL_PROBE_HIDDEN_DIM = 256
-NEURAL_PROBE_ATTENTION_HEADS = 8
-
-
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", default=None, help="Path to config .py file (required unless --external-embed).")
@@ -123,9 +110,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=RANDOM_SEED)
     parser.add_argument(
         "--probe-type",
-        choices=["sklearn", "knn", "hgb", "neural-linear", "neural-attentive", "all"],
+        choices=["sklearn", "knn", "hgb", "all"],
         default="sklearn",
-        help="Probe type: sklearn (Ridge/LogReg), knn, hgb (HistGradientBoosting), neural-linear, neural-attentive, or all.",
+        help="Probe type: sklearn (Ridge/LogReg), knn, hgb (HistGradientBoosting), or all.",
     )
     parser.add_argument(
         "--pool", choices=["pma", "mean"], default="mean",
@@ -820,252 +807,6 @@ def _hgb_probes(
 
 
 # ---------------------------------------------------------------------------
-# 6b. Neural probes (attentive / linear) on token-level encoder features
-# ---------------------------------------------------------------------------
-
-
-def _encode_tokens_impl(
-    model: PeakSetSIGReg,
-    peak_mz: torch.Tensor,
-    peak_intensity: torch.Tensor,
-    peak_valid_mask: torch.Tensor,
-) -> torch.Tensor:
-    return model.encoder(
-        peak_mz, peak_intensity,
-        valid_mask=peak_valid_mask,
-    )
-
-
-def _build_substructure_targets(
-    mol_props: dict[str, np.ndarray],
-    fg_counts: dict[str, np.ndarray],
-    indices: np.ndarray,
-) -> tuple[dict[str, torch.Tensor], list[str], list[str]]:
-    targets: dict[str, torch.Tensor] = {}
-    regression_tasks: list[str] = []
-    for key in ("mol_weight", "logp", "num_heavy_atoms", "num_rings"):
-        targets[key] = torch.from_numpy(mol_props[key][indices].astype(np.float32))
-        regression_tasks.append(key)
-
-    classification_tasks: list[str] = []
-    for name in FG_SMARTS:
-        y = (fg_counts[name][indices] > 0).astype(np.float32)
-        pos_frac = float(y.mean())
-        if pos_frac < 0.01 or pos_frac > 0.99:
-            continue
-        targets[f"fg_{name}"] = torch.from_numpy(y)
-        classification_tasks.append(f"fg_{name}")
-
-    return targets, regression_tasks, classification_tasks
-
-
-def _neural_probes(
-    backbone: PeakSetSIGReg,
-    raw_peaks: dict[str, torch.Tensor],
-    mol_props: dict[str, np.ndarray],
-    fg_counts: dict[str, np.ndarray],
-    valid_mol_mask: np.ndarray,
-    device: torch.device,
-    seed: int,
-    probe_class: type[FinalAttentiveProbe] | type[FinalLinearProbe] = FinalAttentiveProbe,
-) -> dict:
-    rng = np.random.RandomState(seed)
-    valid_idx = np.where(valid_mol_mask)[0]
-    probe_size = min(PROBE_SIZE, len(valid_idx))
-    probe_idx = rng.choice(valid_idx, size=probe_size, replace=False)
-
-    targets, regression_tasks, classification_tasks = _build_substructure_targets(
-        mol_props, fg_counts, probe_idx,
-    )
-    all_task_names = regression_tasks + classification_tasks
-    log.info(
-        "Neural probe tasks: %d regression, %d classification",
-        len(regression_tasks), len(classification_tasks),
-    )
-
-    # 80/20 train/test split.
-    n_train = int(0.8 * probe_size)
-    shuffled = rng.permutation(probe_size)
-    train_sel = shuffled[:n_train]
-    test_sel = shuffled[n_train:]
-
-    # Slice raw peaks to probe subset.
-    probe_peak_mz = raw_peaks["peak_mz"][probe_idx]
-    probe_peak_intensity = raw_peaks["peak_intensity"][probe_idx]
-    probe_peak_valid_mask = raw_peaks["peak_valid_mask"][probe_idx]
-    probe_precursor_mz = raw_peaks["precursor_mz"][probe_idx]
-
-    target_matrix = torch.stack([targets[name] for name in all_task_names], dim=1)
-
-    # Standardize regression targets using train split statistics only.
-    reg_means: dict[str, float] = {}
-    reg_stds: dict[str, float] = {}
-    train_sel_t = torch.from_numpy(train_sel.astype(np.int64))
-    for i, name in enumerate(all_task_names):
-        if name not in regression_tasks:
-            continue
-        train_col = target_matrix[train_sel_t, i]
-        m = float(train_col.mean())
-        s = float(train_col.std())
-        s = max(s, 1e-8)
-        reg_means[name] = m
-        reg_stds[name] = s
-        target_matrix[:, i] = (target_matrix[:, i] - m) / s
-
-    def _make_dataset(sel: np.ndarray) -> TensorDataset:
-        idx = torch.from_numpy(sel.astype(np.int64))
-        return TensorDataset(
-            probe_peak_mz[idx],
-            probe_peak_intensity[idx],
-            probe_peak_valid_mask[idx],
-            probe_precursor_mz[idx],
-            target_matrix[idx],
-        )
-
-    train_ds = _make_dataset(train_sel)
-    test_ds = _make_dataset(test_sel)
-
-    train_loader = DataLoader(
-        train_ds, batch_size=NEURAL_PROBE_BATCH_SIZE, shuffle=True, drop_last=True,
-    )
-    test_loader = DataLoader(
-        test_ds, batch_size=NEURAL_PROBE_BATCH_SIZE, shuffle=False, drop_last=False,
-    )
-
-    # Build probe.
-    input_dim = int(backbone.encoder.model_dim)
-    head_dims = {name: 1 for name in all_task_names}
-
-    if probe_class is FinalAttentiveProbe:
-        probe = FinalAttentiveProbe(
-            input_dim=input_dim,
-            hidden_dim=NEURAL_PROBE_HIDDEN_DIM,
-            num_attention_heads=NEURAL_PROBE_ATTENTION_HEADS,
-            head_dims=head_dims,
-        ).to(device)
-        probe_label = "attentive"
-    else:
-        probe = FinalLinearProbe(input_dim=input_dim, head_dims=head_dims).to(device)
-        probe_label = "linear"
-
-    optimizer = torch.optim.AdamW(
-        probe.parameters(), lr=NEURAL_PROBE_LR, weight_decay=NEURAL_PROBE_WEIGHT_DECAY,
-    )
-    total_steps = NEURAL_PROBE_EPOCHS * len(train_loader)
-    scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer,
-        lr_lambda=lambda step_idx: learning_rate_at_step(
-            step_idx + 1,
-            base_lr=NEURAL_PROBE_LR,
-            total_steps=total_steps,
-            warmup_steps=NEURAL_PROBE_WARMUP_STEPS,
-            schedule_type="cosine",
-            min_learning_rate=None,
-        ) / NEURAL_PROBE_LR,
-    )
-
-    compiled_encoder = torch.compile(_encode_tokens_impl, mode="max-autotune", fullgraph=True)
-    autocast_dtype = torch.bfloat16 if device.type == "cuda" else None
-
-    log.info("Training %s probe for %d epochs (%d steps)...", probe_label, NEURAL_PROBE_EPOCHS, total_steps)
-
-    for epoch in range(NEURAL_PROBE_EPOCHS):
-        probe.train()
-        epoch_loss = 0.0
-        epoch_count = 0
-        for peak_mz_b, peak_int_b, mask_b, _, targets_b in train_loader:
-            peak_mz_b = peak_mz_b.to(device, non_blocking=True)
-            peak_int_b = peak_int_b.to(device, non_blocking=True)
-            mask_b = mask_b.to(device, non_blocking=True)
-            targets_b = targets_b.to(device, non_blocking=True)
-
-            with torch.no_grad():
-                torch.compiler.cudagraph_mark_step_begin()
-                if autocast_dtype is not None:
-                    with torch.autocast(device_type="cuda", dtype=autocast_dtype):
-                        tokens = compiled_encoder(backbone, peak_mz_b, peak_int_b, mask_b)
-                else:
-                    tokens = compiled_encoder(backbone, peak_mz_b, peak_int_b, mask_b)
-
-            logits = probe(tokens.float(), mask_b)
-
-            loss = torch.tensor(0.0, device=device)
-            for i, name in enumerate(all_task_names):
-                y = targets_b[:, i]
-                pred = logits[name].squeeze(-1)
-                if name in regression_tasks:
-                    loss = loss + F.mse_loss(pred, y)
-                else:
-                    loss = loss + F.binary_cross_entropy_with_logits(pred, y)
-
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
-            scheduler.step()
-
-            epoch_loss += loss.item() * peak_mz_b.shape[0]
-            epoch_count += peak_mz_b.shape[0]
-
-        log.info(
-            "  %s probe epoch %d/%d train_loss=%.4f",
-            probe_label, epoch + 1, NEURAL_PROBE_EPOCHS, epoch_loss / epoch_count,
-        )
-
-    # Evaluate on test set.
-    probe.eval()
-    all_preds: dict[str, list[np.ndarray]] = {name: [] for name in all_task_names}
-    all_targets: dict[str, list[np.ndarray]] = {name: [] for name in all_task_names}
-
-    with torch.no_grad():
-        for peak_mz_b, peak_int_b, mask_b, _, targets_b in test_loader:
-            peak_mz_b = peak_mz_b.to(device, non_blocking=True)
-            peak_int_b = peak_int_b.to(device, non_blocking=True)
-            mask_b = mask_b.to(device, non_blocking=True)
-            targets_b = targets_b.to(device, non_blocking=True)
-
-            torch.compiler.cudagraph_mark_step_begin()
-            if autocast_dtype is not None:
-                with torch.autocast(device_type="cuda", dtype=autocast_dtype):
-                    tokens = compiled_encoder(backbone, peak_mz_b, peak_int_b, mask_b)
-            else:
-                tokens = compiled_encoder(backbone, peak_mz_b, peak_int_b, mask_b)
-
-            logits = probe(tokens.float(), mask_b)
-
-            for i, name in enumerate(all_task_names):
-                pred = logits[name].squeeze(-1).cpu().numpy()
-                y = targets_b[:, i].cpu().numpy()
-                all_preds[name].append(pred)
-                all_targets[name].append(y)
-
-    # Compute metrics.
-    results: dict[str, dict] = {}
-
-    for name in regression_tasks:
-        preds = np.concatenate(all_preds[name])
-        tgts = np.concatenate(all_targets[name])
-        # Un-standardize for R² on original scale.
-        preds_orig = preds * reg_stds[name] + reg_means[name]
-        tgts_orig = tgts * reg_stds[name] + reg_means[name]
-        r2 = float(r2_score(tgts_orig, preds_orig))
-        log.info("  %s probe Ridge %s: R^2 = %.4f", probe_label, name, r2)
-        results[f"ridge_{name}"] = {"r2": r2}
-
-    fg_results: dict[str, dict] = {}
-    for name in classification_tasks:
-        preds = np.concatenate(all_preds[name])
-        tgts = np.concatenate(all_targets[name])
-        auc = float(roc_auc_score(tgts, preds))
-        short_name = name.removeprefix("fg_")
-        prevalence = float(tgts.mean())
-        log.info("  %s probe %s: AUC=%.4f (prevalence=%.3f)", probe_label, short_name, auc, prevalence)
-        fg_results[short_name] = {"auc": auc, "prevalence": prevalence}
-    results["functional_groups"] = fg_results
-
-    return results
-
-
-# ---------------------------------------------------------------------------
 # 7. MACCS key enrichment in embedding neighborhoods
 # ---------------------------------------------------------------------------
 
@@ -1205,20 +946,6 @@ def main() -> None:
         probe_results["knn"] = _knn_probes(all_embeds, mol_props, fg_counts, valid_mol_mask, seed)
     if probe_type in ("hgb", "all"):
         probe_results["hgb"] = _hgb_probes(all_embeds, mol_props, fg_counts, valid_mol_mask, seed)
-    neural_requested = probe_type in ("neural-attentive", "neural-linear", "all")
-    if neural_requested and backbone is None:
-        log.warning("Skipping neural probes: not available with --external-embed (no backbone model).")
-    else:
-        if probe_type in ("neural-attentive", "all"):
-            probe_results["neural_attentive"] = _neural_probes(
-                backbone, raw_peaks, mol_props, fg_counts, valid_mol_mask, device, seed,
-                probe_class=FinalAttentiveProbe,
-            )
-        if probe_type in ("neural-linear", "all"):
-            probe_results["neural_linear"] = _neural_probes(
-                backbone, raw_peaks, mol_props, fg_counts, valid_mol_mask, device, seed,
-                probe_class=FinalLinearProbe,
-            )
 
     # 7. MACCS enrichment
     maccs_results = _maccs_enrichment(

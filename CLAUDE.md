@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-PyTorch-based deep learning framework for pretraining SIGReg (Strict SIGmoid Regularization) models on continuous mass spectrometry peak sets. The pipeline ingests raw peak lists from GeMS and MassSpecGym datasets, normalizes them into continuous features via a tf.data pipeline, and trains a two-view self-supervised model with MSE invariance + BCS (Batched Characteristic Slicing) regularization losses. After pretraining, a final attentive probe evaluates learned representations on adduct classification, precursor bin prediction, and instrument type identification.
+PyTorch-based deep learning framework for pretraining SIGReg (Strict SIGmoid Regularization) models on continuous mass spectrometry peak sets. The pipeline ingests raw peak lists from GeMS and MassSpecGym datasets, normalizes them into continuous features via a tf.data pipeline, and trains a two-view self-supervised model with MSE invariance + BCS (Batched Characteristic Slicing) regularization losses. During training, a periodic MSG attentive probe evaluates learned representations on molecular property regression and functional-group classification.
 
 ## Commands
 
@@ -38,7 +38,7 @@ python input_pipeline.py configs/gems_a_dataset.py
 1. Data flows from tf.data TFRecords through `TfLightningDataModule` (round-robin interleaving GeMS + MassSpecGym datasets)
 2. Two-view augmentation happens in the tf.data pipeline (`_augment_sigreg_batch_tf`), producing `fused_*` tensors that stack view1 (masked+jittered) and view2 (unmasked+jittered) along the batch dimension
 3. The compiled forward pass (`torch.compile` with `max-autotune` + CUDA graphs) runs the fused batch through encoder -> PMA pooling -> projector -> BCS+invariance loss
-4. After pretraining completes, `_run_final_attentive_probe` trains a lightweight multi-task probe on frozen encoder features
+4. During training, `run_msg_probe` trains a lightweight multi-task attentive probe on frozen encoder token features
 
 ### Model (PeakSetSIGReg in `models/model.py`)
 
@@ -64,7 +64,7 @@ Raw (pre-augmentation) batches: `peak_mz` [B, N], `peak_intensity` [B, N], `peak
 
 ### Configuration System
 
-`ml_collections.ConfigDict` configs in `configs/`. Shared defaults in `configs/_defaults.py` (`apply_training_defaults`, `apply_final_probe_defaults`, `apply_tune_defaults`). Configs loaded dynamically via importlib. Key config: `configs/gems_a_50_mask.py`.
+`ml_collections.ConfigDict` configs in `configs/`. Shared defaults in `configs/_defaults.py` (`apply_training_defaults`, `apply_tune_defaults`). Configs loaded dynamically via importlib. Key config: `configs/gems_a_50_mask.py`.
 
 ### Data Pipeline (`input_pipeline.py`)
 

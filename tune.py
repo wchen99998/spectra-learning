@@ -178,14 +178,14 @@ def print_summary(
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Lightweight HPO for pretraining + final attentive probe.")
+    parser = argparse.ArgumentParser(description="Lightweight HPO for pretraining + periodic MSG probe.")
     parser.add_argument("--config", required=True, help="Path to training config python file.")
     parser.add_argument("--workdir", required=True, help="Root directory for trial outputs.")
     parser.add_argument("--num-samples", type=int, default=16, help="Random samples per grid combination.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducible sampling.")
     parser.add_argument(
         "--metric",
-        default="final_probe/test/acc_precursor_bin",
+        default="msg_probe/test/auc_fg_mean",
         help="Metric key to optimize (from train_and_evaluate).",
     )
     parser.add_argument(

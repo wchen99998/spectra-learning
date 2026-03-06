@@ -1,6 +1,6 @@
 from ml_collections import config_dict
 
-from configs._defaults import apply_final_probe_defaults, apply_training_defaults, apply_tune_defaults
+from configs._defaults import apply_training_defaults, apply_tune_defaults
 
 
 def get_config() -> config_dict.ConfigDict:
@@ -78,12 +78,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.gco_std_target = 1.0
     cfg.gco_log_lambda_min = -5.0
     cfg.sigreg_lambda_warmup_steps = 50_000
-    cfg.msg_linear_probe_every_n_steps = 50_000
-
-    # Post-fit attentive probe
-    apply_final_probe_defaults(cfg)
-    cfg.final_probe_num_epochs = 5
-    cfg.final_probe_warmup_steps = 50
+    cfg.msg_probe_every_n_steps = 50_000
 
     # Tune search space
     apply_tune_defaults(cfg)

@@ -22,7 +22,7 @@ from ml_collections import config_dict
 
 from input_pipeline import TfLightningDataModule
 from models.model import PeakSetSIGReg
-from utils.msg_linear_probe import run_msg_linear_probe, should_run_msg_linear_probe
+from utils.msg_probe import run_msg_probe, should_run_msg_probe
 from utils.schedulers import CapturableCosineSchedule
 from utils.training import (
     build_logger,
@@ -435,13 +435,8 @@ def train_and_evaluate(
 
     optimizer_type = str(config.get("optimizer", "adamw")).lower()
     device_prefetch_size = int(config.get("device_prefetch_size", 1))
-    msg_linear_probe_every_n_steps = int(config.get("msg_linear_probe_every_n_steps", 0))
-    msg_linear_probe_cache_dir = config.get("msg_linear_probe_cache_dir", None)
-    msg_linear_probe_ridge_alpha = float(config.get("msg_linear_probe_ridge_alpha", 10.0))
-    msg_linear_probe_ridge_solver = str(config.get("msg_linear_probe_ridge_solver", "svd"))
-    msg_linear_probe_logreg_max_iter = int(config.get("msg_linear_probe_logreg_max_iter", 2000))
-    msg_linear_probe_logreg_solver = str(config.get("msg_linear_probe_logreg_solver", "lbfgs"))
-    msg_linear_probe_logreg_c = float(config.get("msg_linear_probe_logreg_c", 1.0))
+    msg_probe_every_n_steps = int(config.get("msg_probe_every_n_steps", 0))
+    msg_probe_cache_dir = config.get("msg_probe_cache_dir", None)
     grad_clip_norm = config.get("grad_clip_norm", None)
     if grad_clip_norm is not None:
         grad_clip_norm = float(grad_clip_norm)
@@ -494,27 +489,22 @@ def train_and_evaluate(
                 )
                 _prune_checkpoints(checkpoint_dir, keep_top_k=15)
 
-            if should_run_msg_linear_probe(global_step, msg_linear_probe_every_n_steps):
-                probe_metrics = run_msg_linear_probe(
+            if should_run_msg_probe(global_step, msg_probe_every_n_steps):
+                probe_metrics = run_msg_probe(
                     config=config,
                     datamodule=datamodule,
                     model=model,
                     device=device,
-                    cache_dir_override=msg_linear_probe_cache_dir,
-                    ridge_alpha=msg_linear_probe_ridge_alpha,
-                    ridge_solver=msg_linear_probe_ridge_solver,
-                    logreg_max_iter=msg_linear_probe_logreg_max_iter,
-                    logreg_solver=msg_linear_probe_logreg_solver,
-                    logreg_c=msg_linear_probe_logreg_c,
+                    cache_dir_override=msg_probe_cache_dir,
                 )
                 logger.log_metrics(probe_metrics, step=global_step)
                 last_msg_probe_metrics = probe_metrics
                 logging.info(
                     "step=%d msg_probe(test_r2_mol_weight=%.4f test_auc_fg_mean=%.4f fg_tasks=%d)",
                     global_step,
-                    probe_metrics["msg_linear_probe/test/r2_mol_weight"],
-                    probe_metrics["msg_linear_probe/test/auc_fg_mean"],
-                    int(probe_metrics["msg_linear_probe/num_fg_tasks"]),
+                    probe_metrics["msg_probe/test/r2_mol_weight"],
+                    probe_metrics["msg_probe/test/auc_fg_mean"],
+                    int(probe_metrics["msg_probe/num_fg_tasks"]),
                 )
 
         pbar.close()

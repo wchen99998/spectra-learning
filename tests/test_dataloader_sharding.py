@@ -21,7 +21,10 @@ def _make_counting_dataset(n: int) -> tf.data.Dataset:
 class DataLoaderShardingTests(unittest.TestCase):
     def _collect_indices(self, num_workers: int, n: int = 20) -> list[int]:
         ds = _make_counting_dataset(n)
-        iterable = _TfIterableDataset(dataset=ds, steps_per_epoch=n)
+        iterable = _TfIterableDataset(
+            dataset_builder=lambda: ds,
+            steps_per_epoch=n,
+        )
         loader = DataLoader(
             iterable,
             batch_size=None,

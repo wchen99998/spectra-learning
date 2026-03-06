@@ -43,8 +43,14 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.dataloader_prefetch_factor = 2
     cfg.dataloader_persistent_workers = True
     cfg.dataloader_pin_memory = True
-    cfg.msg_linear_probe_every_n_steps = 0
-    cfg.msg_linear_probe_cache_dir = None
+    cfg.msg_probe_every_n_steps = 0
+    cfg.msg_probe_cache_dir = None
+    cfg.msg_probe_num_epochs = 5
+    cfg.msg_probe_learning_rate = 1e-3
+    cfg.msg_probe_weight_decay = 1e-2
+    cfg.msg_probe_warmup_steps = 100
+    cfg.msg_probe_hidden_dim = 512
+    cfg.msg_probe_feature_source = "encoder"
 
     # Muon optimizer defaults (only used when cfg.optimizer == "muon")
     cfg.muon_lr = None              # Falls back to cfg.learning_rate
@@ -54,26 +60,6 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.muon_ns_steps = 5
     cfg.muon_weight_decay = None    # Falls back to cfg.weight_decay
     cfg.muon_adjust_lr_fn = "match_rms_adamw"
-
-
-def apply_final_probe_defaults(cfg: config_dict.ConfigDict) -> None:
-    """Apply shared final attentive probe defaults.
-
-    Call after num_heads is set. Override per-experiment values afterward.
-    """
-    cfg.final_probe_num_epochs = 5
-    cfg.final_probe_learning_rate = 1e-4
-    cfg.final_probe_weight_decay = 1e-4
-    cfg.final_probe_warmup_steps = 100
-    cfg.final_probe_feature_source = "encoder"
-    cfg.final_probe_head_hidden_dim = 512
-
-    cfg.final_probe_num_precursor_bins = 1000
-    cfg.final_probe_precursor_target = "categorical"
-    cfg.final_probe_attention_heads = cfg.num_heads
-    cfg.final_probe_loss_weights = [1.0, 1.0, 1.0]
-    cfg.final_probe_freeze_backbone = True
-
 
 def apply_tune_defaults(cfg: config_dict.ConfigDict) -> None:
     """Apply default tune search space definition.
