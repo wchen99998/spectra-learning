@@ -1,4 +1,4 @@
-"""PyTorch implementation of the transformer blocks used by the MAE BERT model."""
+"""PyTorch implementation of the transformer blocks used by peak-set models."""
 
 from __future__ import annotations
 
@@ -13,21 +13,21 @@ from torch.nn.attention.flex_attention import (
 )
 
 
-def create_padding_block_mask(valid_mask: torch.Tensor) -> BlockMask:
-    """Create a BlockMask that masks out padding positions in attention.
+def create_visible_block_mask(visible_mask: torch.Tensor) -> BlockMask:
+    """Create a BlockMask from a boolean visibility mask.
 
     Args:
-        valid_mask: [B, N] boolean tensor, True = valid (attend), False = padding.
+        visible_mask: [B, N] boolean tensor, True = visible, False = hidden.
 
     Returns:
         BlockMask suitable for flex_attention's block_mask parameter.
     """
-    B, N = valid_mask.shape
+    B, N = visible_mask.shape
 
     def mask_mod(b, h, q_idx, kv_idx):
-        return valid_mask[b, q_idx] & valid_mask[b, kv_idx]
+        return visible_mask[b, q_idx] & visible_mask[b, kv_idx]
 
-    return create_block_mask(mask_mod, B=B, H=None, Q_LEN=N, KV_LEN=N, device=valid_mask.device)
+    return create_block_mask(mask_mod, B=B, H=None, Q_LEN=N, KV_LEN=N, device=visible_mask.device)
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:

@@ -46,8 +46,10 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pma_num_heads = cfg.num_heads
     cfg.pma_num_seeds = 1
     cfg.sigreg_lambda = 0.1
-    cfg.multicrop_num_local_views = 7
-    cfg.multicrop_local_keep_fraction = 0.25
+    cfg.jepa_num_target_blocks = 7
+    cfg.jepa_context_fraction = 0.25
+    cfg.jepa_target_fraction = 0.10714285714285714
+    cfg.jepa_block_min_len = 1
     cfg.sigreg_mz_jitter_std = 0.0001
     cfg.sigreg_intensity_jitter_std = 0.001
 

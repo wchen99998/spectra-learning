@@ -4,6 +4,7 @@ import logging
 import math
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import torch
@@ -20,8 +21,8 @@ from utils.schedulers import learning_rate_at_step
 
 log = logging.getLogger(__name__)
 
-_MSG_PROBE_SELF_ATTENTION_BLOCKS = 3
-_MSG_PROBE_MLP_RATIO = 4
+_DEFAULT_MSG_PROBE_NUM_ATTENTION_BLOCKS = 3
+_DEFAULT_MSG_PROBE_MLP_RATIO = 4
 
 
 @dataclass(slots=True)
@@ -98,6 +99,8 @@ class MsgAttentiveProbe(torch.nn.Module):
         input_dim: int,
         hidden_dim: int,
         num_attention_heads: int,
+        num_attention_blocks: int = _DEFAULT_MSG_PROBE_NUM_ATTENTION_BLOCKS,
+        mlp_ratio: int = _DEFAULT_MSG_PROBE_MLP_RATIO,
         task_names: tuple[str, ...],
     ) -> None:
         super().__init__()
@@ -105,9 +108,9 @@ class MsgAttentiveProbe(torch.nn.Module):
             MsgProbeSelfAttentionBlock(
                 input_dim=input_dim,
                 num_attention_heads=num_attention_heads,
-                mlp_ratio=_MSG_PROBE_MLP_RATIO,
+                mlp_ratio=mlp_ratio,
             )
-            for _ in range(_MSG_PROBE_SELF_ATTENTION_BLOCKS)
+            for _ in range(num_attention_blocks)
         ])
         self.query = torch.nn.Parameter(torch.empty(1, input_dim))
         torch.nn.init.xavier_normal_(self.query)
@@ -157,6 +160,7 @@ def iter_massspec_probe(
     seed: int,
     peak_ordering: str,
     drop_remainder: bool,
+    max_samples: int | None = None,
 ):
     dataset = probe_data.build_dataset(
         split,
@@ -171,6 +175,8 @@ def iter_massspec_probe(
         "massspec_test": "massspec_test_size",
     }[split]
     size = int(probe_data.info[size_key])
+    if max_samples is not None:
+        size = min(size, int(max_samples))
     seen = 0
     for batch in dataset.as_numpy_iterator():
         remaining = size - seen
@@ -188,6 +194,7 @@ def probe_steps_per_epoch(
     *,
     split: str,
     drop_remainder: bool,
+    max_samples: int | None = None,
 ) -> int:
     size_key = {
         "massspec_train": "massspec_train_size",
@@ -195,6 +202,8 @@ def probe_steps_per_epoch(
         "massspec_test": "massspec_test_size",
     }[split]
     size = int(probe_data.info[size_key])
+    if max_samples is not None:
+        size = min(size, int(max_samples))
     batch_size = int(probe_data.batch_size)
     if drop_remainder:
         return size // batch_size
@@ -218,12 +227,52 @@ def _extract_probe_features(
     raise ValueError(f"Unknown msg_probe_feature_source: {feature_source!r}")
 
 
+def _encode_probe_features_impl(
+    backbone: PeakSetSIGReg,
+    peak_mz: torch.Tensor,
+    peak_intensity: torch.Tensor,
+    peak_valid_mask: torch.Tensor,
+) -> torch.Tensor:
+    return backbone.encoder(
+        peak_mz,
+        peak_intensity,
+        valid_mask=peak_valid_mask,
+    )
+
+
+def _build_probe_feature_extractor(
+    backbone: PeakSetSIGReg,
+    *,
+    feature_source: str,
+) -> Callable[[dict[str, torch.Tensor]], tuple[torch.Tensor, torch.Tensor]]:
+    if feature_source != "encoder":
+        raise ValueError(f"Unknown msg_probe_feature_source: {feature_source!r}")
+    compiled_encoder = torch.compile(
+        _encode_probe_features_impl,
+        mode="max-autotune",
+        fullgraph=False,
+    )
+
+    def extract(batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        with torch.no_grad():
+            embeddings = compiled_encoder(
+                backbone,
+                batch["peak_mz"],
+                batch["peak_intensity"],
+                batch["peak_valid_mask"],
+            )
+        return embeddings, batch["peak_valid_mask"]
+
+    return extract
+
+
 def _collect_split_targets(
     *,
     probe_data: MassSpecProbeData,
     split: str,
     peak_ordering: str,
     seed: int,
+    max_samples: int | None = None,
 ) -> MsgProbeSplitTargets:
     regression = {name: [] for name in REGRESSION_TARGET_KEYS}
     classification = {name: [] for name in FG_SMARTS}
@@ -233,6 +282,7 @@ def _collect_split_targets(
         seed=seed,
         peak_ordering=peak_ordering,
         drop_remainder=False,
+        max_samples=max_samples,
     ):
         valid_mask = batch["probe_valid_mol"].detach().cpu().numpy().astype(bool, copy=False)
         if not valid_mask.any():
@@ -295,12 +345,16 @@ def _probe_step(
     task_spec: MsgProbeTaskSpec,
     feature_source: str,
     device: torch.device,
+    feature_extractor: Callable[[dict[str, torch.Tensor]], tuple[torch.Tensor, torch.Tensor]] | None = None,
 ) -> dict[str, object] | None:
-    feature_tokens, feature_mask = _extract_probe_features(
-        backbone,
-        batch,
-        feature_source=feature_source,
-    )
+    if feature_extractor is None:
+        feature_tokens, feature_mask = _extract_probe_features(
+            backbone,
+            batch,
+            feature_source=feature_source,
+        )
+    else:
+        feature_tokens, feature_mask = feature_extractor(batch)
     valid_mask = batch["probe_valid_mol"].to(device=device, dtype=torch.bool)
     if not bool(valid_mask.any()):
         return None
@@ -419,9 +473,31 @@ def run_msg_probe(
     probe_weight_decay = float(config.get("msg_probe_weight_decay", 1e-2))
     probe_warmup_steps = int(config.get("msg_probe_warmup_steps", 100))
     probe_hidden_dim = int(config.get("msg_probe_hidden_dim", 512))
+    probe_num_attention_heads = config.get("msg_probe_num_attention_heads", None)
+    if probe_num_attention_heads is None:
+        probe_num_attention_heads = int(config.num_heads)
+    else:
+        probe_num_attention_heads = int(probe_num_attention_heads)
+    probe_num_attention_blocks = int(
+        config.get(
+            "msg_probe_num_attention_blocks",
+            _DEFAULT_MSG_PROBE_NUM_ATTENTION_BLOCKS,
+        )
+    )
+    probe_mlp_ratio = int(config.get("msg_probe_mlp_ratio", _DEFAULT_MSG_PROBE_MLP_RATIO))
+    max_train_samples = config.get("msg_probe_max_train_samples", None)
+    if max_train_samples is not None:
+        max_train_samples = int(max_train_samples)
+    max_test_samples = config.get("msg_probe_max_test_samples", None)
+    if max_test_samples is not None:
+        max_test_samples = int(max_test_samples)
     feature_source = str(config.get("msg_probe_feature_source", "encoder"))
     peak_ordering = str(config.get("peak_ordering", "intensity"))
     probe_data = MassSpecProbeData.from_config(config)
+    feature_extractor = _build_probe_feature_extractor(
+        model,
+        feature_source=feature_source,
+    )
 
     train_seed_base = int(config.seed) + 1_100_000
     test_seed_base = int(config.seed) + 1_200_000
@@ -430,12 +506,14 @@ def run_msg_probe(
         split="massspec_train",
         peak_ordering=peak_ordering,
         seed=train_seed_base,
+        max_samples=max_train_samples,
     )
     test_targets = _collect_split_targets(
         probe_data=probe_data,
         split="massspec_test",
         peak_ordering=peak_ordering,
         seed=test_seed_base,
+        max_samples=max_test_samples,
     )
     task_spec = _build_task_spec(train_targets=train_targets, test_targets=test_targets)
     task_names = task_spec.regression_tasks + task_spec.classification_tasks
@@ -445,14 +523,21 @@ def run_msg_probe(
     probe = MsgAttentiveProbe(
         input_dim=int(config.model_dim),
         hidden_dim=probe_hidden_dim,
-        num_attention_heads=int(config.num_heads),
+        num_attention_heads=probe_num_attention_heads,
+        num_attention_blocks=probe_num_attention_blocks,
+        mlp_ratio=probe_mlp_ratio,
         task_names=task_names,
     ).to(device)
-    optimizer = torch.optim.AdamW(probe.parameters(), lr=probe_lr, weight_decay=probe_weight_decay)
+    optimizer = torch.optim.AdamW(
+        probe.parameters(),
+        lr=probe_lr,
+        weight_decay=probe_weight_decay,
+    )
     steps_per_epoch = probe_steps_per_epoch(
         probe_data,
         split="massspec_train",
         drop_remainder=False,
+        max_samples=max_train_samples,
     )
     total_steps = num_probe_epochs * steps_per_epoch
     scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -481,6 +566,7 @@ def run_msg_probe(
             seed=train_seed,
             peak_ordering=peak_ordering,
             drop_remainder=False,
+            max_samples=max_train_samples,
         ):
             batch = move_batch(batch)
             optimizer.zero_grad(set_to_none=True)
@@ -491,6 +577,7 @@ def run_msg_probe(
                 task_spec=task_spec,
                 feature_source=feature_source,
                 device=device,
+                feature_extractor=feature_extractor,
             )
             if result is None:
                 continue
@@ -509,6 +596,7 @@ def run_msg_probe(
                 seed=test_seed,
                 peak_ordering=peak_ordering,
                 drop_remainder=False,
+                max_samples=max_test_samples,
             ):
                 batch = move_batch(batch)
                 result = _probe_step(
@@ -518,6 +606,7 @@ def run_msg_probe(
                     task_spec=task_spec,
                     feature_source=feature_source,
                     device=device,
+                    feature_extractor=feature_extractor,
                 )
                 if result is None:
                     continue

@@ -36,8 +36,10 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pma_num_seeds = 32
     cfg.sigreg_num_slices = 256
     cfg.sigreg_lambda = 0.1
-    cfg.multicrop_num_local_views = 2
-    cfg.multicrop_local_keep_fraction = (0.25, 0.5)
+    cfg.jepa_num_target_blocks = 2
+    cfg.jepa_context_fraction = 0.375
+    cfg.jepa_target_fraction = 0.3125
+    cfg.jepa_block_min_len = 1
     cfg.sigreg_mz_jitter_std = 0.005
     cfg.sigreg_intensity_jitter_std = 0.05
     cfg.norm_type = "layernorm"
@@ -50,7 +52,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.learning_rate_schedule = "cosine"
     cfg.min_learning_rate = None
     cfg.b2 = 0.98
-    cfg.weight_decay = 1e-2
+    cfg.weight_decay = 1e-5
     cfg.optimizer = "muon"
     cfg.device_prefetch_size = 8
     cfg.log_every_n_steps = 100
@@ -64,7 +66,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataloader_persistent_workers = True
 
     cfg.masked_token_loss_weight = 1.0
-    cfg.masked_token_loss_type = "l2_sum"
+    cfg.masked_token_loss_type = "l2"
     cfg.use_ema_teacher_target = False
     cfg.teacher_ema_decay = 0.999
     cfg.teacher_ema_decay_start = 0.98
@@ -74,7 +76,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.predictor_num_heads = 4
     cfg.autocast_dtype = "bf16"
     cfg.representation_regularizer = "gco-sigreg"
-    cfg.gco_var_floor_target = 1.5
+    cfg.gco_var_floor_target = 1.
     cfg.gco_corr_target = 0.60
     cfg.gco_log_lambda_min = -2.0
     cfg.sigreg_lambda_warmup_steps = 50_000

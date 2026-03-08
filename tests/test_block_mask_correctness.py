@@ -1,4 +1,4 @@
-"""Thorough correctness tests for create_padding_block_mask + flex_attention.
+"""Thorough correctness tests for create_visible_block_mask + flex_attention.
 
 Concerns to verify:
 1. BLOCK_SIZE=128 vs seq_len=60: OOB index access in mask_mod?
@@ -12,7 +12,7 @@ Concerns to verify:
 import torch
 import torch.nn.functional as F
 
-from networks.transformer_torch import create_padding_block_mask, Attention, flex_attention
+from networks.transformer_torch import create_visible_block_mask, Attention, flex_attention
 
 
 def _naive_masked_attention(q, k, v, valid_mask):
@@ -52,7 +52,7 @@ def test_block_mask_creation_no_oob():
     for seq_len in [1, 10, 30, 60, 127, 128, 129, 256]:
         valid_mask = torch.ones(4, seq_len, dtype=torch.bool)
         valid_mask[:, seq_len // 2:] = False
-        bm = create_padding_block_mask(valid_mask)
+        bm = create_visible_block_mask(valid_mask)
         assert bm is not None, f"Failed for seq_len={seq_len}"
     print("PASSED")
 
@@ -78,7 +78,7 @@ def test_flex_attention_vs_naive_reference():
     for i, vl in enumerate(valid_lengths):
         valid_mask[i, :vl] = True
 
-    block_mask = create_padding_block_mask(valid_mask)
+    block_mask = create_visible_block_mask(valid_mask)
 
     out_flex = flex_attention(q, k, v, block_mask=block_mask)
     out_naive = _naive_masked_attention(q, k, v, valid_mask)
@@ -108,7 +108,7 @@ def test_padding_positions_dont_attend():
 
     valid_mask = torch.zeros(B, N, dtype=torch.bool)
     valid_mask[:, :30] = True
-    block_mask = create_padding_block_mask(valid_mask)
+    block_mask = create_visible_block_mask(valid_mask)
 
     out1 = flex_attention(q, k, v, block_mask=block_mask)
 
@@ -148,7 +148,7 @@ def test_mask_polarity():
     # Only first 8 positions are valid
     valid_mask = torch.zeros(B, N, dtype=torch.bool)
     valid_mask[:, :8] = True
-    block_mask = create_padding_block_mask(valid_mask)
+    block_mask = create_visible_block_mask(valid_mask)
 
     out = flex_attention(q, k, v, block_mask=block_mask)
 
@@ -175,7 +175,7 @@ def test_all_valid():
     v = torch.randn(B, H, N, D)
 
     valid_mask = torch.ones(B, N, dtype=torch.bool)
-    block_mask = create_padding_block_mask(valid_mask)
+    block_mask = create_visible_block_mask(valid_mask)
 
     out_masked = flex_attention(q, k, v, block_mask=block_mask)
     out_unmasked = flex_attention(q, k, v)
@@ -198,7 +198,7 @@ def test_single_valid_position():
 
     valid_mask = torch.zeros(B, N, dtype=torch.bool)
     valid_mask[:, 0] = True  # only first position valid
-    block_mask = create_padding_block_mask(valid_mask)
+    block_mask = create_visible_block_mask(valid_mask)
 
     out = flex_attention(q, k, v, block_mask=block_mask)
 
@@ -228,7 +228,7 @@ def test_variable_lengths_per_batch():
     for i, vl in enumerate(valid_lengths):
         valid_mask[i, :vl] = True
 
-    block_mask = create_padding_block_mask(valid_mask)
+    block_mask = create_visible_block_mask(valid_mask)
     out_flex = flex_attention(q, k, v, block_mask=block_mask)
     out_naive = _naive_masked_attention(q, k, v, valid_mask)
 
@@ -263,7 +263,7 @@ def test_fused_2b_batch():
     valid_mask[:B_per_view, :40] = True
     valid_mask[B_per_view:, :50] = True
 
-    block_mask = create_padding_block_mask(valid_mask)
+    block_mask = create_visible_block_mask(valid_mask)
     out_flex = flex_attention(q, k, v, block_mask=block_mask)
     out_naive = _naive_masked_attention(q, k, v, valid_mask)
 
@@ -293,7 +293,7 @@ def test_through_attention_module():
     x = torch.randn(B, N, D)
     valid_mask = torch.zeros(B, N, dtype=torch.bool)
     valid_mask[:, :30] = True
-    block_mask = create_padding_block_mask(valid_mask)
+    block_mask = create_visible_block_mask(valid_mask)
 
     out1 = attn(x, block_mask=block_mask)
 

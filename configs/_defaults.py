@@ -30,6 +30,10 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.vicreg_sim_coeff = 0.0
     cfg.vicreg_std_coeff = 25.0
     cfg.vicreg_cov_coeff = 1.0
+    cfg.jepa_num_target_blocks = 2
+    cfg.jepa_context_fraction = 0.5
+    cfg.jepa_target_fraction = 0.25
+    cfg.jepa_block_min_len = 1
     cfg.use_ema_teacher_target = False
     cfg.teacher_ema_decay = 0.996
     cfg.teacher_ema_decay_start = 0.0
@@ -53,6 +57,11 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.msg_probe_weight_decay = 1e-2
     cfg.msg_probe_warmup_steps = 100
     cfg.msg_probe_hidden_dim = 512
+    cfg.msg_probe_num_attention_heads = None
+    cfg.msg_probe_num_attention_blocks = 3
+    cfg.msg_probe_mlp_ratio = 4
+    cfg.msg_probe_max_train_samples = None
+    cfg.msg_probe_max_test_samples = None
     cfg.msg_probe_feature_source = "encoder"
 
     # Muon optimizer defaults (only used when cfg.optimizer == "muon")
@@ -72,7 +81,7 @@ def apply_tune_defaults(cfg: config_dict.ConfigDict) -> None:
     """
     cfg.tune_param_space = [
         # {"param": "learning_rate", "dist": "grid", "args": [1e-4, 4e-4]},
-        # {"param": "sigreg_contiguous_mask_fraction", "dist": "grid", "args": [0.2,]},
+        # {"param": "jepa_target_fraction", "dist": "grid", "args": [0.125, 0.25]},
         # {"param": "weight_decay", "dist": "grid", "args": [1e-4, 1e-3, 1e-2]},
         {"param": "sigreg_lambda", "dist": "grid", "args": [0.02]},
     ]

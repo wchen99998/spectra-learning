@@ -3,7 +3,7 @@
 Usage:
     python scripts/diagnose_variance.py \
         --config configs/gems_a_multi.py \
-        --workdir experiments/TEST_LATEST_MULTIVIEWS_5_mha_pma
+        --workdir experiments/TEST_LATEST_BLOCK_JEPA
 """
 
 from __future__ import annotations
@@ -40,8 +40,10 @@ def build_model(cfg) -> PeakSetSIGReg:
         encoder_use_rope=cfg.encoder_use_rope,
         sigreg_num_slices=cfg.sigreg_num_slices,
         sigreg_lambda=cfg.sigreg_lambda,
-        multicrop_num_local_views=cfg.multicrop_num_local_views,
-        multicrop_local_keep_fraction=cfg.multicrop_local_keep_fraction,
+        jepa_num_target_blocks=cfg.jepa_num_target_blocks,
+        jepa_context_fraction=cfg.jepa_context_fraction,
+        jepa_target_fraction=cfg.jepa_target_fraction,
+        jepa_block_min_len=cfg.jepa_block_min_len,
         sigreg_mz_jitter_std=cfg.sigreg_mz_jitter_std,
         sigreg_intensity_jitter_std=cfg.sigreg_intensity_jitter_std,
         pooling_type=cfg.pooling_type,
@@ -52,22 +54,28 @@ def build_model(cfg) -> PeakSetSIGReg:
 
 
 def make_synthetic_batch(cfg, batch_size: int = 32, device: str = "cpu") -> dict[str, torch.Tensor]:
-    """Create a realistic synthetic batch for probing activations."""
+    """Create a synthetic block-masked JEPA batch for probing activations."""
     N = cfg.num_peaks
-    V = 1 + cfg.multicrop_num_local_views
-    total_B = V * batch_size
-
-    # Realistic mz values (0-1000 range, normalized)
-    peak_mz = torch.rand(total_B, N, device=device).sort(dim=-1).values
-    peak_intensity = torch.rand(total_B, N, device=device)
-    # ~80% valid peaks
-    valid_mask = torch.rand(total_B, N, device=device) < 0.8
+    K = cfg.jepa_num_target_blocks
+    peak_mz = torch.rand(batch_size, N, device=device).sort(dim=-1).values
+    peak_intensity = torch.rand(batch_size, N, device=device)
+    valid_mask = torch.rand(batch_size, N, device=device) < 0.8
+    context_len = max(1, round(N * float(cfg.jepa_context_fraction)))
+    target_len = max(1, round(N * float(cfg.jepa_target_fraction)))
+    context_mask = torch.zeros(batch_size, N, device=device, dtype=torch.bool)
+    context_mask[:, :context_len] = valid_mask[:, :context_len]
+    target_masks = torch.zeros(batch_size, K, N, device=device, dtype=torch.bool)
+    for target_idx in range(K):
+        start = context_len + (target_idx * target_len)
+        end = min(start + target_len, N)
+        target_masks[:, target_idx, start:end] = valid_mask[:, start:end]
 
     return {
-        "fused_mz": peak_mz,
-        "fused_intensity": peak_intensity,
-        "fused_valid_mask": valid_mask,
-        "fused_masked_positions": torch.zeros(total_B, N, device=device, dtype=torch.bool),
+        "peak_mz": peak_mz,
+        "peak_intensity": peak_intensity,
+        "peak_valid_mask": valid_mask,
+        "context_mask": context_mask,
+        "target_masks": target_masks,
     }
 
 
@@ -76,47 +84,44 @@ def diagnose_encoder(model: PeakSetSIGReg, batch: dict[str, torch.Tensor]):
     """Hook into each transformer block and measure residual stream statistics."""
     encoder = model.encoder
 
-    mz = batch["fused_mz"]
-    intensity = batch["fused_intensity"]
-    valid_mask = batch["fused_valid_mask"]
+    mz = batch["peak_mz"]
+    intensity = batch["peak_intensity"]
+    valid_mask = batch["peak_valid_mask"]
+    visible_mask = batch["context_mask"]
 
     # Step 1: Embedder output
     x = encoder.embedder(mz, intensity)
-    _report("embedder_out", x, valid_mask)
+    _report("embedder_out", x, visible_mask)
 
     # Step 2: Per-block activations
     block_mask = None
-    if valid_mask is not None:
-        from networks.transformer_torch import create_padding_block_mask
-        block_mask = create_padding_block_mask(valid_mask)
+    if visible_mask is not None:
+        from networks.transformer_torch import create_visible_block_mask
+        block_mask = create_visible_block_mask(visible_mask)
 
     for i, block in enumerate(encoder.blocks):
         # Pre-norm values (what the attention/FFN sees)
         attn_normed = block.attention_norm(x)
-        _report(f"block_{i:02d}/attn_pre_norm", attn_normed, valid_mask)
+        _report(f"block_{i:02d}/attn_pre_norm", attn_normed, visible_mask)
 
         # Attention output (residual contribution)
         attn_out = block.attention(attn_normed, freqs_cos=None, freqs_sin=None, block_mask=block_mask)
-        _report(f"block_{i:02d}/attn_out", attn_out, valid_mask)
+        _report(f"block_{i:02d}/attn_out", attn_out, visible_mask)
 
         h = x + attn_out
-        _report(f"block_{i:02d}/post_attn_residual", h, valid_mask)
+        _report(f"block_{i:02d}/post_attn_residual", h, visible_mask)
 
         ffn_normed = block.ffn_norm(h)
-        _report(f"block_{i:02d}/ffn_pre_norm", ffn_normed, valid_mask)
+        _report(f"block_{i:02d}/ffn_pre_norm", ffn_normed, visible_mask)
 
         ffn_out = block.feed_forward(ffn_normed)
-        _report(f"block_{i:02d}/ffn_out", ffn_out, valid_mask)
+        _report(f"block_{i:02d}/ffn_out", ffn_out, visible_mask)
 
         x = h + ffn_out
-        _report(f"block_{i:02d}/post_ffn_residual", x, valid_mask)
-
-    # Final norm
-    final_out = encoder.final_norm(x)
-    _report("final_norm_out", final_out, valid_mask)
+        _report(f"block_{i:02d}/post_ffn_residual", x, visible_mask)
 
     # Pooling
-    pooled, pooled_raw = model.pool_with_raw(final_out, valid_mask)
+    pooled, pooled_raw = model.pool_with_raw(x, visible_mask)
     _report_1d("pool_raw", pooled_raw)
     _report_1d("pool_normed", pooled)
 
@@ -159,8 +164,6 @@ def diagnose_norm_weights(model: PeakSetSIGReg):
         ffn_w = block.ffn_norm.weight
         print(f"  block_{i:02d}/attn_norm  mean={attn_w.mean():.4f}  std={attn_w.std():.4f}  min={attn_w.min():.4f}  max={attn_w.max():.4f}")
         print(f"  block_{i:02d}/ffn_norm   mean={ffn_w.mean():.4f}  std={ffn_w.std():.4f}  min={ffn_w.min():.4f}  max={ffn_w.max():.4f}")
-    final_w = encoder.final_norm.weight
-    print(f"  final_norm            mean={final_w.mean():.4f}  std={final_w.std():.4f}  min={final_w.min():.4f}  max={final_w.max():.4f}")
     pool_w = model.pool_norm.weight
     print(f"  pool_norm             mean={pool_w.mean():.4f}  std={pool_w.std():.4f}  min={pool_w.min():.4f}  max={pool_w.max():.4f}")
 

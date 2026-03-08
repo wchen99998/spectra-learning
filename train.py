@@ -100,8 +100,11 @@ def _partition_params_for_muon(
 # ---------------------------------------------------------------------------
 
 _TRAIN_BATCH_KEYS = frozenset({
-    "fused_mz", "fused_intensity",
-    "fused_valid_mask", "fused_masked_positions",
+    "peak_mz",
+    "peak_intensity",
+    "peak_valid_mask",
+    "context_mask",
+    "target_masks",
 })
 
 

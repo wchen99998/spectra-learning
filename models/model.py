@@ -2,8 +2,8 @@
 
 Architecture:
 - PeakSetEncoder: MLP embedder -> non-causal Transformer -> peak embeddings
-- Multi-crop augmentation (1 full-spectrum global + K local masked views)
-- Objective: selectable regularizer (SIGReg, VICReg, GECO-weighted SIGReg, or GECO-weighted VICReg) + optional masked latent prediction
+- Block-masked JEPA branches: one context block + K disjoint target blocks
+- Objective: selectable regularizer (SIGReg or GECO-weighted SIGReg) + masked latent prediction
 """
 
 from __future__ import annotations
@@ -17,17 +17,8 @@ from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 from models.losses import SIGReg, VICRegLoss
 from networks import transformer_torch
 from networks.transformer_torch import (
-    create_padding_block_mask,
+    create_visible_block_mask,
 )
-
-
-def _normalize_keep_fraction_range(
-    keep_fraction: float | tuple[float, float] | list[float],
-) -> tuple[float, float]:
-    if isinstance(keep_fraction, (tuple, list)):
-        return float(keep_fraction[0]), float(keep_fraction[1])
-    value = float(keep_fraction)
-    return value, value
 
 
 def _build_norm(dim: int, eps: float, norm_type: str) -> nn.Module:
@@ -214,10 +205,16 @@ class PeakSetEncoder(nn.Module):
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
         valid_mask: torch.Tensor | None = None,
+        visible_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         block_mask = None
-        if valid_mask is not None:
-            block_mask = create_padding_block_mask(valid_mask)
+        attention_visible_mask = visible_mask
+        if attention_visible_mask is None:
+            attention_visible_mask = valid_mask
+        elif valid_mask is not None:
+            attention_visible_mask = attention_visible_mask & valid_mask
+        if attention_visible_mask is not None:
+            block_mask = create_visible_block_mask(attention_visible_mask)
 
         def _compute_rope(dtype: torch.dtype) -> tuple[
             torch.Tensor | None,
@@ -256,7 +253,7 @@ class PeakSetEncoder(nn.Module):
 
 
 class PeakSetSIGReg(nn.Module):
-    """Peak-set model with multi-crop augmentation and selectable regularizer."""
+    """Peak-set model with block-masked JEPA branches and selectable regularizer."""
 
     def __init__(
         self,
@@ -287,8 +284,10 @@ class PeakSetSIGReg(nn.Module):
         vicreg_sim_coeff: float = 0.0,
         vicreg_std_coeff: float = 25.0,
         vicreg_cov_coeff: float = 1.0,
-        multicrop_num_local_views: int = 6,
-        multicrop_local_keep_fraction: float | tuple[float, float] = 0.25,
+        jepa_num_target_blocks: int = 2,
+        jepa_context_fraction: float = 0.5,
+        jepa_target_fraction: float = 0.25,
+        jepa_block_min_len: int = 1,
         use_ema_teacher_target: bool = False,
         teacher_ema_decay: float = 0.996,
         teacher_ema_decay_start: float = 0.0,
@@ -307,12 +306,10 @@ class PeakSetSIGReg(nn.Module):
         self.num_peaks = num_peaks
         self.model_dim = model_dim
 
-        self.multicrop_num_local_views = int(multicrop_num_local_views)
-        self.multicrop_local_keep_fraction = _normalize_keep_fraction_range(
-            multicrop_local_keep_fraction
-        )
-        # One global full-spectrum view + K local masked views.
-        self.num_views = 1 + self.multicrop_num_local_views
+        self.jepa_num_target_blocks = int(jepa_num_target_blocks)
+        self.jepa_context_fraction = float(jepa_context_fraction)
+        self.jepa_target_fraction = float(jepa_target_fraction)
+        self.jepa_block_min_len = int(jepa_block_min_len)
         self.use_ema_teacher_target = bool(use_ema_teacher_target)
         self.teacher_ema_decay = float(teacher_ema_decay)
         self.teacher_ema_decay_start = float(teacher_ema_decay_start)
@@ -403,15 +400,11 @@ class PeakSetSIGReg(nn.Module):
         self.norm_type = str(norm_type).lower()
         self.masked_latent_predictor_num_layers = int(masked_latent_predictor_num_layers)
         self.vicreg_beta = float(vicreg_beta)
+        if self.jepa_num_target_blocks < 1:
+            raise ValueError("jepa_num_target_blocks must be >= 1")
         if self.representation_regularizer in ("vicreg", "gco-vicreg"):
-            assert self.multicrop_num_local_views >= 2, (
-                "representation_regularizer in {'vicreg', 'gco-vicreg'} requires at least two local views "
-                "(multicrop_num_local_views >= 2)."
-            )
-        if self.representation_regularizer in ("gco-sigreg", "gco-vicreg"):
-            assert self.multicrop_num_local_views >= 1, (
-                "representation_regularizer in {'gco-sigreg', 'gco-vicreg'} requires at least one local view "
-                "(multicrop_num_local_views >= 1)."
+            raise ValueError(
+                "Block-masked JEPA only supports {'sigreg', 'gco-sigreg', 'none'} regularizers"
             )
 
         self.encoder = PeakSetEncoder(
@@ -502,29 +495,27 @@ class PeakSetSIGReg(nn.Module):
 
     def predict_masked_latents(
         self,
-        local_token_emb_remasked: torch.Tensor,
-        local_valid_mask: torch.Tensor,
+        predictor_input: torch.Tensor,
+        visible_mask: torch.Tensor,
     ) -> torch.Tensor:
-        # Predictor is a lightweight non-causal transformer stack over token
-        # latents, using the local valid-mask to block out padding tokens.
-        predictor_block_mask = create_padding_block_mask(local_valid_mask)
+        predictor_block_mask = create_visible_block_mask(visible_mask)
         freqs_cos = None
         freqs_sin = None
         if self.encoder.use_rope:
             positions = torch.arange(
-                local_token_emb_remasked.shape[1],
-                device=local_token_emb_remasked.device,
+                predictor_input.shape[1],
+                device=predictor_input.device,
                 dtype=torch.float32,
             ).unsqueeze(0)
             inv_freq = self.predictor_rope_inv_freq
-            if inv_freq.device != local_token_emb_remasked.device:
-                inv_freq = inv_freq.to(device=local_token_emb_remasked.device)
+            if inv_freq.device != predictor_input.device:
+                inv_freq = inv_freq.to(device=predictor_input.device)
             freqs_cos, freqs_sin = _build_rope_freqs_from_positions(
                 positions=positions,
                 inv_freq=inv_freq,
-                out_dtype=local_token_emb_remasked.dtype,
+                out_dtype=predictor_input.dtype,
             )
-        x = local_token_emb_remasked
+        x = predictor_input
         for block in self.masked_latent_predictor:
             x = block(
                 x,
@@ -615,81 +606,73 @@ class PeakSetSIGReg(nn.Module):
         self,
         augmented_batch: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
-        fused_mz = augmented_batch["fused_mz"]
-        fused_intensity = augmented_batch["fused_intensity"]
-        fused_valid_mask = augmented_batch["fused_valid_mask"]
-        # Data pipeline contract:
-        # - View 0 is the global full-spectrum view.
-        # - Views 1..V-1 are local masked views.
-        # - fused_masked_positions is always present.
-        fused_masked_positions = augmented_batch["fused_masked_positions"] & fused_valid_mask
+        peak_mz = augmented_batch["peak_mz"]
+        peak_intensity = augmented_batch["peak_intensity"]
+        peak_valid_mask = augmented_batch["peak_valid_mask"]
+        context_mask = augmented_batch["context_mask"] & peak_valid_mask
+        target_masks = augmented_batch["target_masks"] & peak_valid_mask.unsqueeze(1)
 
-        V = self.num_views
-        target_global_view_idx = 0
+        B, N = peak_mz.shape
+        K = self.jepa_num_target_blocks
 
-        # Global target view is always full-spectrum context. Only non-global views
-        # use masked positions for encoder masking and latent remasking.
-        effective_masked_positions = fused_masked_positions.reshape(V, -1, fused_masked_positions.shape[1]).clone()
-        effective_masked_positions[target_global_view_idx] = False
-        effective_masked_positions = effective_masked_positions.reshape_as(fused_masked_positions)
-        encoder_masked_positions = effective_masked_positions
-        encoder_visible_mask = fused_valid_mask & (~encoder_masked_positions)
-
-        fused_emb = self.encoder(
-            fused_mz,
-            fused_intensity,
-            valid_mask=encoder_visible_mask,
+        context_emb = self.encoder(
+            peak_mz,
+            peak_intensity,
+            valid_mask=peak_valid_mask,
+            visible_mask=context_mask,
         )
 
-        B = fused_emb.shape[0] // V
-        N = fused_emb.shape[1]
-        token_emb = fused_emb.reshape(V, B, N, fused_emb.shape[2])
-        token_valid = fused_valid_mask.reshape(V, B, N)
-        token_masked = effective_masked_positions.reshape(V, B, N)
+        peak_mz_targets = peak_mz.unsqueeze(1).expand(-1, K, -1).reshape(B * K, N)
+        peak_intensity_targets = peak_intensity.unsqueeze(1).expand(-1, K, -1).reshape(B * K, N)
+        peak_valid_targets = peak_valid_mask.unsqueeze(1).expand(-1, K, -1).reshape(B * K, N)
+        target_masks_flat = target_masks.reshape(B * K, N)
+        target_emb_flat = self.encoder(
+            peak_mz_targets,
+            peak_intensity_targets,
+            valid_mask=peak_valid_targets,
+            visible_mask=target_masks_flat,
+        )
+        target_emb = target_emb_flat.reshape(B, K, N, -1).permute(1, 0, 2, 3)
+        target_masks_by_view = target_masks.permute(1, 0, 2)
 
-        # Local predictors regress to a fixed global latent target.
-        # When EMA teacher is enabled, the target comes from teacher(global view).
         if self.teacher_encoder is not None:
-            global_slice = slice(0, B)
             with torch.no_grad():
-                global_token_target = self.teacher_encoder(
-                    fused_mz[global_slice],
-                    fused_intensity[global_slice],
-                    valid_mask=fused_valid_mask[global_slice],
+                target_token_target_flat = self.teacher_encoder(
+                    peak_mz_targets,
+                    peak_intensity_targets,
+                    valid_mask=peak_valid_targets,
+                    visible_mask=target_masks_flat,
                 ).detach()
+            target_token_target = target_token_target_flat.reshape(B, K, N, -1).permute(1, 0, 2, 3)
         else:
-            global_token_target = token_emb[target_global_view_idx].detach()
-        latent_mask_token = self.latent_mask_token.view(1, 1, -1).to(
-            dtype=fused_emb.dtype,
-            device=fused_emb.device,
-        )
-        L = V - 1  # number of local views
-        # Batch all local views for a single predictor pass instead of
-        # iterating per-view, doubling the effective batch size for GEMMs
-        # and halving the number of kernel launches.
-        all_local_emb = token_emb[target_global_view_idx + 1:]    # [L, B, N, D]
-        all_local_valid = token_valid[target_global_view_idx + 1:]  # [L, B, N]
-        all_local_mask = token_masked[target_global_view_idx + 1:]  # [L, B, N]
-        all_local_emb_flat = all_local_emb.reshape(L * B, N, -1)
-        all_local_valid_flat = all_local_valid.reshape(L * B, N)
-        all_local_mask_flat = all_local_mask.reshape(L * B, N)
+            target_token_target = target_emb.detach()
 
-        # Re-mask local latents at masked slots before prediction so the
-        # predictor must infer masked content from surrounding context.
-        all_local_remasked = torch.where(
-            all_local_mask_flat.unsqueeze(-1),
+        predictor_context_mask = context_mask.unsqueeze(0)
+        predictor_union_mask = predictor_context_mask | target_masks_by_view
+        context_emb_by_view = context_emb.unsqueeze(0).expand(K, -1, -1, -1)
+        predictor_input = torch.zeros_like(context_emb_by_view)
+        predictor_input = torch.where(
+            predictor_context_mask.unsqueeze(-1),
+            context_emb_by_view,
+            predictor_input,
+        )
+        latent_mask_token = self.latent_mask_token.view(1, 1, 1, -1).to(
+            dtype=context_emb.dtype,
+            device=context_emb.device,
+        )
+        predictor_input = torch.where(
+            target_masks_by_view.unsqueeze(-1),
             latent_mask_token,
-            all_local_emb_flat,
+            predictor_input,
         )
-        all_local_pred = self.predict_masked_latents(
-            all_local_remasked,
-            all_local_valid_flat,
+        predictor_output_flat = self.predict_masked_latents(
+            predictor_input.reshape(B * K, N, -1),
+            predictor_union_mask.reshape(B * K, N),
         )
-        # Compute per-token regression loss across all local views at once.
-        # Reshape to [L, B, N, D_loss] for broadcasting against [B, N, D_loss].
-        all_local_pred_views = all_local_pred.reshape(L, B, N, -1)
-        loss_pred = all_local_pred_views
-        loss_target = global_token_target.unsqueeze(0)
+        predictor_output = predictor_output_flat.reshape(K, B, N, -1)
+
+        loss_pred = predictor_output
+        loss_target = target_token_target
         if self.normalize_jepa_targets:
             loss_pred = torch.nn.functional.normalize(loss_pred, dim=-1)
             loss_target = torch.nn.functional.normalize(loss_target, dim=-1)
@@ -699,35 +682,38 @@ class PeakSetSIGReg(nn.Module):
         elif self.masked_token_loss_type == "l2":
             per_token_reg = (loss_pred - loss_target).square().mean(dim=-1)
         elif self.masked_token_loss_type == "l2_sum":
-            per_token_reg = (loss_pred - loss_target).square().sum(dim=-1)  # == cosine distance for unit vectors
+            per_token_reg = (loss_pred - loss_target).square().sum(dim=-1)
         elif self.masked_token_loss_type == "l1":
             per_token_reg = (loss_pred - loss_target).abs().mean(dim=-1)
         else:
-            raise ValueError(...)
-        all_local_mask_float = all_local_mask.float()  # [L, B, N]
-        reg_num = (per_token_reg * all_local_mask_float).sum()
-        reg_den = all_local_mask_float.sum()
-        local_global_loss = reg_num / reg_den.clamp_min(1.0)
+            raise ValueError(f"Unsupported masked_token_loss_type: {self.masked_token_loss_type}")
+        target_mask_float = target_masks_by_view.float()
+        reg_num = (per_token_reg * target_mask_float).sum()
+        reg_den = target_mask_float.sum().clamp_min(1.0)
+        local_global_loss = reg_num / reg_den
 
         if self.sigreg_lambda_warmup_steps > 0:
-            sigreg_lambda_current = self.sigreg_lambda_current.to(dtype=fused_emb.dtype)
+            sigreg_lambda_current = self.sigreg_lambda_current.to(dtype=context_emb.dtype)
         else:
-            sigreg_lambda_current = fused_emb.new_tensor(self.sigreg_lambda)
+            sigreg_lambda_current = context_emb.new_tensor(self.sigreg_lambda)
 
         jepa_term = self.masked_token_loss_weight * local_global_loss
-        # Apply representation regularizers on encoder token embeddings
-        # from local views only, masking only true padding tokens.
-        local_emb = token_emb[1:]                          # [L, B, N, D]
-        local_valid = token_valid[1:]                       # [L, B, N]
-        regularizer_emb_flat = local_emb.reshape(L * B, N, -1)
-        regularizer_valid_flat = local_valid.reshape(L * B, N)
-        regularizer_emb_by_view = local_emb
-        regularizer_valid_by_view = local_valid
 
-        # --- Collapse monitoring (detached, no grad) ---
+        branch_emb = torch.cat([context_emb.unsqueeze(0), target_emb], dim=0)
+        branch_visible = torch.cat([context_mask.unsqueeze(0), target_masks_by_view], dim=0)
+        V = branch_emb.shape[0]
+        fused_emb = branch_emb.reshape(V * B, N, -1)
+        fused_visible = branch_visible.reshape(V * B, N)
+        regularizer_emb_flat = fused_emb
+        regularizer_valid_flat = fused_visible
+
         with torch.no_grad():
             collapse_metrics = self._collapse_metrics(
-                fused_emb, encoder_visible_mask, B, V, target_global_view_idx,
+                fused_emb,
+                fused_visible,
+                B,
+                V,
+                0,
             )
             local_to_global_emb_std_ratio = (
                 collapse_metrics["local_emb_std"] / collapse_metrics["global_emb_std"]
@@ -752,36 +738,25 @@ class PeakSetSIGReg(nn.Module):
                 gco_corr_constraint,
             )
 
-        gco_constraint_penalty = torch.relu(gco_constraint).to(dtype=fused_emb.dtype)
-        gco_lambda = self.gco_log_lambda.exp().to(dtype=fused_emb.dtype)
+        gco_constraint_penalty = torch.relu(gco_constraint).to(dtype=context_emb.dtype)
+        gco_lambda = self.gco_log_lambda.exp().to(dtype=context_emb.dtype)
 
-        if self.representation_regularizer in ("gco-sigreg", "gco-vicreg"):
+        if self.representation_regularizer == "gco-sigreg":
             with torch.no_grad():
                 if self.training:
                     self.gco_c_ema.mul_(self.gco_alpha).add_((1.0 - self.gco_alpha) * gco_constraint)
                     self.gco_log_lambda.add_(self.gco_eta * self.gco_c_ema)
                     self.gco_log_lambda.clamp_(self.gco_log_lambda_min, self.gco_log_lambda_max)
-                gco_lambda = self.gco_log_lambda.exp().to(dtype=fused_emb.dtype)
+                gco_lambda = self.gco_log_lambda.exp().to(dtype=context_emb.dtype)
 
-        # Regularizer path (SIGReg, VICReg, GECO-weighted SIGReg, or GECO-weighted VICReg).
         if self.representation_regularizer == "sigreg" and self.sigreg_lambda > 0:
             token_sigreg_loss = self.sigreg(
                 regularizer_emb_flat,
                 valid_mask=regularizer_valid_flat,
             )
             sigreg_term = sigreg_lambda_current * token_sigreg_loss
-            vicreg_loss = fused_emb.new_tensor(0.0)
-            vicreg_term = fused_emb.new_tensor(0.0)
-        elif self.representation_regularizer == "vicreg":
-            pair_valid_mask = regularizer_valid_by_view[0] & regularizer_valid_by_view[1]
-            vicreg_loss = self.vicreg(
-                regularizer_emb_by_view[0],
-                regularizer_emb_by_view[1],
-                valid_mask=pair_valid_mask,
-            )
-            vicreg_term = fused_emb.new_tensor(self.vicreg_beta) * vicreg_loss
-            token_sigreg_loss = fused_emb.new_tensor(0.0)
-            sigreg_term = fused_emb.new_tensor(0.0)
+            vicreg_loss = context_emb.new_tensor(0.0)
+            vicreg_term = context_emb.new_tensor(0.0)
         elif self.representation_regularizer == "gco-sigreg":
             token_sigreg_loss = self.sigreg(
                 regularizer_emb_flat,
@@ -789,25 +764,13 @@ class PeakSetSIGReg(nn.Module):
             )
             sigreg_lambda_current = gco_lambda
             sigreg_term = gco_lambda * token_sigreg_loss
-            vicreg_loss = fused_emb.new_tensor(0.0)
-            vicreg_term = fused_emb.new_tensor(0.0)
-        elif self.representation_regularizer == "gco-vicreg":
-            pair_valid_mask = regularizer_valid_by_view[0] & regularizer_valid_by_view[1]
-            vicreg_loss = self.vicreg(
-                regularizer_emb_by_view[0],
-                regularizer_emb_by_view[1],
-                valid_mask=pair_valid_mask,
-            )
-            sigreg_lambda_current = gco_lambda
-            vicreg_term = gco_lambda * vicreg_loss
-            token_sigreg_loss = fused_emb.new_tensor(0.0)
-            sigreg_term = fused_emb.new_tensor(0.0)
+            vicreg_loss = context_emb.new_tensor(0.0)
+            vicreg_term = context_emb.new_tensor(0.0)
         else:
-            # "none" or sigreg with lambda=0: skip regularization.
-            token_sigreg_loss = fused_emb.new_tensor(0.0)
-            sigreg_term = fused_emb.new_tensor(0.0)
-            vicreg_loss = fused_emb.new_tensor(0.0)
-            vicreg_term = fused_emb.new_tensor(0.0)
+            token_sigreg_loss = context_emb.new_tensor(0.0)
+            sigreg_term = context_emb.new_tensor(0.0)
+            vicreg_loss = context_emb.new_tensor(0.0)
+            vicreg_term = context_emb.new_tensor(0.0)
 
         regularizer_term = sigreg_term + vicreg_term
         loss = jepa_term + regularizer_term
@@ -815,13 +778,10 @@ class PeakSetSIGReg(nn.Module):
         target_regularizer_term_over_jepa_term = regularizer_term / safe_jepa
         target_sigreg_term_over_jepa_term = sigreg_term / safe_jepa
         target_vicreg_term_over_jepa_term = vicreg_term / safe_jepa
-        # Report masking rate on valid local peaks only; global target view is
-        # full-spectrum and excluded from this metric.
-        local_valid = token_valid[target_global_view_idx + 1:]
-        local_masked = token_masked[target_global_view_idx + 1:]
-        local_valid_count = local_valid.float().sum().clamp_min(1.0)
-        masked_fraction = local_masked.float().sum() / local_valid_count
-        valid_fraction = (local_valid & (~local_masked)).float().sum() / local_valid_count
+        valid_peak_count = peak_valid_mask.float().sum().clamp_min(1.0)
+        masked_fraction = target_masks.float().sum() / valid_peak_count
+        context_fraction = context_mask.float().sum() / valid_peak_count
+        valid_fraction = context_fraction
 
         pool_norm_weight_abs_mean = self.pool_norm.weight.abs().mean()
 
@@ -841,20 +801,21 @@ class PeakSetSIGReg(nn.Module):
             "target_sigreg_term_over_jepa_term": target_sigreg_term_over_jepa_term,
             "target_vicreg_term_over_jepa_term": target_vicreg_term_over_jepa_term,
             "valid_fraction": valid_fraction,
+            "context_fraction": context_fraction,
             "masked_fraction": masked_fraction,
             "sigreg_lambda_current": sigreg_lambda_current,
             "gco_lambda": gco_lambda,
-            "gco_log_lambda": self.gco_log_lambda.to(dtype=fused_emb.dtype),
-            "gco_c_ema": self.gco_c_ema.to(dtype=fused_emb.dtype),
-            "gco_constraint": gco_constraint.to(dtype=fused_emb.dtype),
-            "gco_var_floor_constraint": gco_var_floor_constraint.to(dtype=fused_emb.dtype),
-            "gco_corr_constraint": gco_corr_constraint.to(dtype=fused_emb.dtype),
+            "gco_log_lambda": self.gco_log_lambda.to(dtype=context_emb.dtype),
+            "gco_c_ema": self.gco_c_ema.to(dtype=context_emb.dtype),
+            "gco_constraint": gco_constraint.to(dtype=context_emb.dtype),
+            "gco_var_floor_constraint": gco_var_floor_constraint.to(dtype=context_emb.dtype),
+            "gco_corr_constraint": gco_corr_constraint.to(dtype=context_emb.dtype),
             "gco_constraint_penalty": gco_constraint_penalty,
-            "encoder_emb_std": encoder_emb_std.to(dtype=fused_emb.dtype),
-            "encoder_emb_var_mean": encoder_emb_var_mean.to(dtype=fused_emb.dtype),
-            "encoder_emb_var_floor": encoder_emb_var_floor.to(dtype=fused_emb.dtype),
-            "encoder_emb_cov_offdiag_abs_mean": encoder_emb_cov_offdiag_abs_mean.to(dtype=fused_emb.dtype),
-            "encoder_emb_corr_offdiag_abs_mean": encoder_emb_corr_offdiag_abs_mean.to(dtype=fused_emb.dtype),
+            "encoder_emb_std": encoder_emb_std.to(dtype=context_emb.dtype),
+            "encoder_emb_var_mean": encoder_emb_var_mean.to(dtype=context_emb.dtype),
+            "encoder_emb_var_floor": encoder_emb_var_floor.to(dtype=context_emb.dtype),
+            "encoder_emb_cov_offdiag_abs_mean": encoder_emb_cov_offdiag_abs_mean.to(dtype=context_emb.dtype),
+            "encoder_emb_corr_offdiag_abs_mean": encoder_emb_corr_offdiag_abs_mean.to(dtype=context_emb.dtype),
             "pool_norm_weight_abs_mean": pool_norm_weight_abs_mean,
             "local_to_global_emb_std_ratio": local_to_global_emb_std_ratio,
             **collapse_metrics,

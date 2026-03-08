@@ -104,6 +104,18 @@ class MsgAttentiveProbeTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(logits["mol_weight"]).all().item())
         self.assertTrue(torch.isfinite(logits["hydroxyl"]).all().item())
 
+    def test_custom_attention_block_count_is_used(self):
+        probe = MsgAttentiveProbe(
+            input_dim=16,
+            hidden_dim=32,
+            num_attention_heads=4,
+            num_attention_blocks=5,
+            mlp_ratio=2,
+            task_names=("mol_weight",),
+        )
+        self.assertEqual(len(probe.blocks), 5)
+        self.assertEqual(probe.blocks[0].mlp[0].out_features, 32)
+
 
 class MsgProbeStepTests(unittest.TestCase):
     def test_probe_step_filters_invalid_targets_and_losses_are_finite(self):
@@ -305,6 +317,33 @@ class ProbeIterationTests(unittest.TestCase):
         )
         self.assertEqual(dm.calls[0]["shuffle"], False)
 
+    def test_probe_iteration_respects_max_samples(self):
+        batches = [
+            {"peak_mz": np.zeros((4, 60), dtype=np.float32)},
+            {"peak_mz": np.ones((4, 60), dtype=np.float32)},
+        ]
+        dm = _DummyDataModule(
+            batches=batches,
+            info={
+                "massspec_train_size": 8,
+                "massspec_val_size": 0,
+                "massspec_test_size": 0,
+            },
+            batch_size=4,
+        )
+        result = list(
+            iter_massspec_probe(
+                dm,
+                "massspec_train",
+                seed=123,
+                peak_ordering="mz",
+                drop_remainder=False,
+                max_samples=5,
+            )
+        )
+        self.assertEqual(result[0]["peak_mz"].shape[0], 4)
+        self.assertEqual(result[1]["peak_mz"].shape[0], 1)
+
 
 class ProbeStepCountTests(unittest.TestCase):
     def test_probe_steps_per_epoch_matches_drop_remainder_policy(self):
@@ -323,6 +362,15 @@ class ProbeStepCountTests(unittest.TestCase):
         )
         self.assertEqual(
             probe_steps_per_epoch(dm, split="massspec_train", drop_remainder=True),
+            2,
+        )
+        self.assertEqual(
+            probe_steps_per_epoch(
+                dm,
+                split="massspec_train",
+                drop_remainder=False,
+                max_samples=5,
+            ),
             2,
         )
 

@@ -157,8 +157,10 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
         cfg.max_precursor_mz = 1000.0
         cfg.min_peak_intensity = 0.0
         cfg.peak_ordering = "mz"
-        cfg.multicrop_num_local_views = 1
-        cfg.multicrop_local_keep_fraction = 0.5
+        cfg.jepa_num_target_blocks = 1
+        cfg.jepa_context_fraction = 0.5
+        cfg.jepa_target_fraction = 0.5
+        cfg.jepa_block_min_len = 1
         cfg.sigreg_mz_jitter_std = 0.0
         cfg.sigreg_intensity_jitter_std = 0.0
         return cfg
@@ -189,8 +191,9 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             self.assertEqual(datamodule.info["validation_size"], 1)
             self.assertNotIn("massspec_train_size", datamodule.info)
             self.assertTrue(all(Path(path).exists() for path in datamodule.gems_train_files))
-            self.assertIn("fused_mz", batch)
-            self.assertIn("fused_masked_positions", batch)
+            self.assertIn("peak_mz", batch)
+            self.assertIn("context_mask", batch)
+            self.assertIn("target_masks", batch)
             _, kwargs = download_mock.call_args
             self.assertEqual(kwargs["repo_id"], "cjim8889/gems-a-tfrecords")
             self.assertEqual(kwargs["revision"], "unit-test")
