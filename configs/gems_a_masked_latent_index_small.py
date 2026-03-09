@@ -37,8 +37,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_num_slices = 256
     cfg.sigreg_lambda = 0.1
     cfg.jepa_num_target_blocks = 2
-    cfg.jepa_context_fraction = 0.375
-    cfg.jepa_target_fraction = 0.3125
+    cfg.jepa_context_fraction = 0.3
+    cfg.jepa_target_fraction = 0.25
     cfg.jepa_block_min_len = 1
     cfg.sigreg_mz_jitter_std = 0.005
     cfg.sigreg_intensity_jitter_std = 0.05
@@ -49,7 +49,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_epochs = 100
     cfg.learning_rate = 3e-4
     cfg.warmup_steps = 5_000
-    cfg.learning_rate_schedule = "cosine"
+    cfg.learning_rate_schedule = "l2_sum"
     cfg.min_learning_rate = None
     cfg.b2 = 0.98
     cfg.weight_decay = 1e-5
@@ -72,7 +72,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.teacher_ema_decay_start = 0.98
     cfg.teacher_ema_decay_warmup_steps = 100_000
     cfg.grad_clip_norm = 1.0
-    cfg.masked_latent_predictor_num_layers = 1
+    cfg.masked_latent_predictor_num_layers = 2
     cfg.predictor_num_heads = 4
     cfg.autocast_dtype = "bf16"
     cfg.representation_regularizer = "gco-sigreg"
