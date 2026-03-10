@@ -274,17 +274,15 @@ def _batched_parse_and_transform(
         sorted_idx = tf.argsort(sort_key, axis=1, direction=direction, stable=True)
         mz = tf.gather(mz, sorted_idx, batch_dims=1)
         intensity = tf.gather(intensity, sorted_idx, batch_dims=1)
-        valid_sorted = tf.gather(valid, sorted_idx, batch_dims=1)
-        mz = tf.where(valid_sorted, mz, 0.0)
-        intensity = tf.where(valid_sorted, intensity, 0.0)
-
-        valid_final = intensity > 0
+        valid = tf.gather(valid, sorted_idx, batch_dims=1)
+        mz = tf.where(valid, mz, 0.0)
+        intensity = tf.where(valid, intensity, 0.0)
         precursor_mz_norm = tf.clip_by_value(precursor_mz_val, 0.0, max_prec) / max_prec
 
         return {
             "peak_mz": mz / peak_mz_max_c,
-            "peak_intensity": tf.where(valid_final, intensity, 0.0),
-            "peak_valid_mask": valid_final,
+            "peak_intensity": intensity,
+            "peak_valid_mask": valid,
             "precursor_mz": precursor_mz_norm,
             "rt": rt,
             "mz": mz,
