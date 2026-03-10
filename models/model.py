@@ -517,12 +517,9 @@ class PeakSetSIGReg(nn.Module):
             visible_mask=context_mask,
         )
 
-        def _expand_for_targets(t: torch.Tensor) -> torch.Tensor:
-            return t.unsqueeze(1).expand(-1, K, -1).reshape(B * K, N)
-
-        peak_mz_targets = _expand_for_targets(peak_mz)
-        peak_intensity_targets = _expand_for_targets(peak_intensity)
-        peak_valid_targets = _expand_for_targets(peak_valid_mask)
+        peak_mz_targets = peak_mz.repeat_interleave(K, dim=0)
+        peak_intensity_targets = peak_intensity.repeat_interleave(K, dim=0)
+        peak_valid_targets = peak_valid_mask.repeat_interleave(K, dim=0)
         target_masks_flat = target_masks.reshape(B * K, N)
         target_emb_flat = self.encoder(
             peak_mz_targets,
