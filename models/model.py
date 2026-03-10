@@ -57,26 +57,24 @@ def _build_non_causal_blocks(
     heads = int(num_heads)
     kv_heads = heads if num_kv_heads is None else int(num_kv_heads)
     hidden_dim = int(math.ceil(dim * attention_mlp_multiple))
-    blocks: list[transformer_torch.TransformerBlock] = []
-    for _ in range(num_layers):
-        blocks.append(
-            transformer_torch.TransformerBlock(
-                dim=dim,
-                n_heads=heads,
-                n_kv_heads=kv_heads,
-                causal=False,
-                norm_eps=norm_eps,
-                mlp_type="swish",
-                multiple_of=4,
-                hidden_dim=hidden_dim,
-                w_init_scale=1.0,
-                use_rotary_embeddings=use_rope,
-                qk_norm=qk_norm,
-                post_norm=post_norm,
-                norm_type=norm_type,
-            )
-        )
-    return nn.ModuleList(blocks)
+    block_kwargs = dict(
+        dim=dim,
+        n_heads=heads,
+        n_kv_heads=kv_heads,
+        causal=False,
+        norm_eps=norm_eps,
+        mlp_type="swish",
+        multiple_of=4,
+        hidden_dim=hidden_dim,
+        w_init_scale=1.0,
+        use_rotary_embeddings=use_rope,
+        qk_norm=qk_norm,
+        post_norm=post_norm,
+        norm_type=norm_type,
+    )
+    return nn.ModuleList(
+        [transformer_torch.TransformerBlock(**block_kwargs) for _ in range(num_layers)]
+    )
 
 
 def _build_standard_rope_inv_freq(
