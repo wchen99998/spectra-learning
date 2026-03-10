@@ -7,7 +7,7 @@ import tensorflow as tf
 import torch
 from torch.utils.data import DataLoader
 
-from input_pipeline import _TfIterableDataset, numpy_batch_to_torch, _identity_collate
+from input_pipeline import _TfIterableDataset, numpy_batch_to_torch
 
 
 def _make_counting_dataset(n: int) -> tf.data.Dataset:
@@ -29,7 +29,7 @@ class DataLoaderShardingTests(unittest.TestCase):
             iterable,
             batch_size=None,
             num_workers=num_workers,
-            collate_fn=_identity_collate,
+            collate_fn=lambda b: b,
         )
         indices = []
         for batch in loader:

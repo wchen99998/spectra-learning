@@ -374,12 +374,6 @@ def _build_dataset(
     return ds
 
 
-def _steps_from_size(size: int, batch_size: int, drop_remainder: bool) -> int:
-    if drop_remainder:
-        return int(size // batch_size)
-    return int(math.ceil(size / batch_size))
-
-
 def _to_torch(value: Any) -> Any:
     if isinstance(value, np.ndarray):
         if value.dtype == object:
@@ -396,10 +390,6 @@ def _to_torch(value: Any) -> Any:
 
 def numpy_batch_to_torch(batch: dict[str, Any]) -> dict[str, Any]:
     return {key: _to_torch(value) for key, value in batch.items()}
-
-
-def _identity_collate(batch: dict[str, Any]) -> dict[str, Any]:
-    return batch
 
 
 class _TfIterableDataset(IterableDataset):
@@ -510,11 +500,11 @@ class TfLightningDataModule:
             "peak_mz_max": _PEAK_MZ_MAX,
         }
 
-        self.train_steps = _steps_from_size(
-            int(self.info["train_size"]),
-            self.batch_size,
-            self.drop_remainder,
-        )
+        train_size = int(self.info["train_size"])
+        if self.drop_remainder:
+            self.train_steps = train_size // self.batch_size
+        else:
+            self.train_steps = math.ceil(train_size / self.batch_size)
 
         default_pin = torch.cuda.is_available()
         self.pin_memory = bool(config.get("dataloader_pin_memory", default_pin))
@@ -588,7 +578,7 @@ class TfLightningDataModule:
             "batch_size": None,
             "num_workers": self.dataloader_num_workers,
             "pin_memory": self.pin_memory,
-            "collate_fn": _identity_collate,
+            "collate_fn": lambda b: b,
         }
         if self.dataloader_num_workers > 0:
             loader_kwargs["persistent_workers"] = self.dataloader_persistent_workers
