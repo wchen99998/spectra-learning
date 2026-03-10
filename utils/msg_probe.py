@@ -55,6 +55,11 @@ class MsgLinearProbe(torch.nn.Module):
         return {name: head(pooled) for name, head in self.heads.items()}
 
 
+def _split_size(probe_data: MassSpecProbeData, split: str) -> int:
+    key = f"{split}_size"
+    return int(probe_data.info[key])
+
+
 def iter_massspec_probe(
     probe_data: MassSpecProbeData,
     split: str,
@@ -71,12 +76,7 @@ def iter_massspec_probe(
         shuffle=(split == "massspec_train"),
         drop_remainder=drop_remainder,
     )
-    size_key = {
-        "massspec_train": "massspec_train_size",
-        "massspec_val": "massspec_val_size",
-        "massspec_test": "massspec_test_size",
-    }[split]
-    size = int(probe_data.info[size_key])
+    size = _split_size(probe_data, split)
     if max_samples is not None:
         size = min(size, int(max_samples))
     seen = 0
@@ -98,12 +98,7 @@ def probe_steps_per_epoch(
     drop_remainder: bool,
     max_samples: int | None = None,
 ) -> int:
-    size_key = {
-        "massspec_train": "massspec_train_size",
-        "massspec_val": "massspec_val_size",
-        "massspec_test": "massspec_test_size",
-    }[split]
-    size = int(probe_data.info[size_key])
+    size = _split_size(probe_data, split)
     if max_samples is not None:
         size = min(size, int(max_samples))
     batch_size = int(probe_data.batch_size)
