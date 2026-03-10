@@ -132,16 +132,8 @@ class Attention(nn.Module):
 
         if self.n_kv_heads != self.n_heads:
             rep = self.n_heads // self.n_kv_heads
-            k = (
-                k.unsqueeze(2)
-                .expand(-1, -1, rep, -1, -1)
-                .reshape(bsz, self.n_heads, seqlen, self.head_dim)
-            )
-            v = (
-                v.unsqueeze(2)
-                .expand(-1, -1, rep, -1, -1)
-                .reshape(bsz, self.n_heads, seqlen, self.head_dim)
-            )
+            k = k.repeat_interleave(rep, dim=1)
+            v = v.repeat_interleave(rep, dim=1)
 
         attn = flex_attention(q, k, v, block_mask=block_mask)
         attn = attn.transpose(1, 2).contiguous().view(bsz, seqlen, self.dim)
