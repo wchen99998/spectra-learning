@@ -12,8 +12,7 @@ import numpy as np
 import tensorflow as tf
 from huggingface_hub import hf_hub_download
 from ml_collections import config_dict
-from rdkit import DataStructs
-from rdkit import Chem
+from rdkit import Chem, DataStructs
 from rdkit.Chem import AllChem
 from input_pipeline import _prepend_precursor_token_tf
 from utils.massspec_probe_targets import (
@@ -799,22 +798,17 @@ class MassSpecProbeData:
                 max_precursor_mz=max_precursor_mz,
             )
 
+        adduct_vocab = metadata.get("adduct_vocab", {"unknown": 0})
+        instrument_type_vocab = metadata.get("instrument_type_vocab", {"unknown": 0})
         info = {
             "massspec_train_size": int(metadata.get("train_size", 0)),
             "massspec_val_size": int(metadata.get("val_size", 0)),
             "massspec_test_size": int(metadata.get("test_size", 0)),
             "massspec_metadata_version": int(metadata.get("metadata_version", 0)),
-            "massspec_adduct_vocab": metadata.get("adduct_vocab", {"unknown": 0}),
-            "massspec_instrument_type_vocab": metadata.get(
-                "instrument_type_vocab",
-                {"unknown": 0},
-            ),
-            "massspec_adduct_vocab_size": len(
-                metadata.get("adduct_vocab", {"unknown": 0})
-            ),
-            "massspec_instrument_type_vocab_size": len(
-                metadata.get("instrument_type_vocab", {"unknown": 0})
-            ),
+            "massspec_adduct_vocab": adduct_vocab,
+            "massspec_instrument_type_vocab": instrument_type_vocab,
+            "massspec_adduct_vocab_size": len(adduct_vocab),
+            "massspec_instrument_type_vocab_size": len(instrument_type_vocab),
             "fingerprint_bits": _FINGERPRINT_BITS,
         }
         return cls(
