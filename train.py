@@ -73,10 +73,6 @@ def _partition_params_for_muon(
     return muon_decay_params, muon_no_decay_params, adamw_params
 
 
-# ---------------------------------------------------------------------------
-# CUDA stream prefetch helpers
-# ---------------------------------------------------------------------------
-
 _TRAIN_BATCH_KEYS = frozenset(
     {
         "peak_mz",
@@ -167,11 +163,6 @@ class _BatchPrefetcher:
         return batch
 
 
-# ---------------------------------------------------------------------------
-# Compiled training step
-# ---------------------------------------------------------------------------
-
-
 def _train_step_impl(
     model: PeakSetSIGReg,
     batch: dict[str, torch.Tensor],
@@ -197,11 +188,6 @@ def _train_step_impl(
     for sched in schedulers:
         sched.step()
     return metrics
-
-
-# ---------------------------------------------------------------------------
-# Optimizer / scheduler construction
-# ---------------------------------------------------------------------------
 
 
 def _build_optimizers(
@@ -297,11 +283,6 @@ def _build_optimizers(
     return [optimizer], [_make_schedule(optimizer, base_lr)]
 
 
-# ---------------------------------------------------------------------------
-# Checkpointing
-# ---------------------------------------------------------------------------
-
-
 def _save_checkpoint(
     path: Path,
     model: PeakSetSIGReg,
@@ -339,11 +320,6 @@ def _prune_checkpoints(checkpoint_dir: Path, keep_top_k: int = 5) -> None:
     for p in pts:
         if p not in keep:
             p.unlink()
-
-
-# ---------------------------------------------------------------------------
-# Main training loop
-# ---------------------------------------------------------------------------
 
 
 def train_and_evaluate(

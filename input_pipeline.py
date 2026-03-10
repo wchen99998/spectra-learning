@@ -37,11 +37,6 @@ _DEFAULT_MIN_PEAK_INTENSITY = _INTENSITY_EPS
 _METADATA_FILENAME = "metadata.json"
 
 
-# -----------------------------------------------------------------------------
-# tf.data pipeline
-# -----------------------------------------------------------------------------
-
-
 def _sample_block_masks_tf(
     peak_valid_mask: tf.Tensor,
     *,
@@ -403,20 +398,10 @@ def _build_dataset(
     return ds
 
 
-# -----------------------------------------------------------------------------
-# Info and step resolution
-# -----------------------------------------------------------------------------
-
-
 def _steps_from_size(size: int, batch_size: int, drop_remainder: bool) -> int:
     if drop_remainder:
         return int(size // batch_size)
     return int(math.ceil(size / batch_size))
-
-
-# -----------------------------------------------------------------------------
-# NumPy -> torch conversion
-# -----------------------------------------------------------------------------
 
 
 def _to_torch(value: Any) -> Any:
@@ -441,11 +426,6 @@ def numpy_batch_to_torch(batch: dict[str, Any]) -> dict[str, Any]:
 
 def _identity_collate(batch: dict[str, Any]) -> dict[str, Any]:
     return batch
-
-
-# -----------------------------------------------------------------------------
-# Lightning DataModule and IterableDataset
-# -----------------------------------------------------------------------------
 
 
 class _TfIterableDataset(IterableDataset):
