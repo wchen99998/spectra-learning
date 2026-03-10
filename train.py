@@ -386,9 +386,8 @@ def train_and_evaluate(
     else:
         msg_probe_every_n_steps = int(_msg_probe_raw)
     msg_probe_cache_dir = config.get("msg_probe_cache_dir", None)
-    grad_clip_norm = config.get("grad_clip_norm", None)
-    if grad_clip_norm is not None:
-        grad_clip_norm = float(grad_clip_norm)
+    _gcn = config.get("grad_clip_norm", None)
+    grad_clip_norm = float(_gcn) if _gcn is not None else None
 
     train_loader = datamodule.train_loader
     last_msg_probe_metrics: dict[str, float] = {}
