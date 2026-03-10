@@ -5,8 +5,6 @@ from torch import nn
 
 
 class SIGReg(nn.Module):
-    """Epps-Pulley Gaussianity regularizer via random slicing directions."""
-
     def __init__(self, knots: int = 17, num_slices: int = 256):
         super().__init__()
         self.num_slices = num_slices
