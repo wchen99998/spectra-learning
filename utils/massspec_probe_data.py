@@ -681,17 +681,15 @@ class MassSpecProbeData:
             "massspec_instrument_type_vocab_size": len(instrument_type_vocab),
             "fingerprint_bits": _FINGERPRINT_BITS,
         }
+        split_files = {
+            s: [str(output_dir / s / fn) for fn in metadata.get(f"{s}_files", [])]
+            for s in ("train", "val", "test")
+        }
         return cls(
             info=info,
-            train_files=[
-                str(output_dir / "train" / fn) for fn in metadata.get("train_files", [])
-            ],
-            val_files=[
-                str(output_dir / "val" / fn) for fn in metadata.get("val_files", [])
-            ],
-            test_files=[
-                str(output_dir / "test" / fn) for fn in metadata.get("test_files", [])
-            ],
+            train_files=split_files["train"],
+            val_files=split_files["val"],
+            test_files=split_files["test"],
             batch_size=int(config.get("batch_size", _DEFAULT_BATCH_SIZE)),
             shuffle_buffer=int(config.get("shuffle_buffer", _DEFAULT_SHUFFLE_BUFFER)),
             tfrecord_buffer_size=int(
