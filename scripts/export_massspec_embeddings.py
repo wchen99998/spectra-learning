@@ -125,12 +125,22 @@ def _encode_split(
         }
 
         with torch.no_grad():
+            peak_mz = batch["peak_mz"]
+            peak_intensity = batch["peak_intensity"]
+            peak_valid_mask = batch["peak_valid_mask"]
+            if model.use_precursor_token:
+                expanded = PeakSetSIGReg.prepend_precursor_token(
+                    peak_mz, peak_intensity, peak_valid_mask,
+                    batch["precursor_mz"],
+                )
+                peak_mz = expanded["peak_mz"]
+                peak_intensity = expanded["peak_intensity"]
+                peak_valid_mask = expanded["peak_valid_mask"]
             embeddings = model.encoder(
-                batch["peak_mz"],
-                batch["peak_intensity"],
-                valid_mask=batch["peak_valid_mask"],
+                peak_mz, peak_intensity,
+                valid_mask=peak_valid_mask,
             )
-            pooled_encoder = model.pool(embeddings, batch["peak_valid_mask"])
+            pooled_encoder = model.pool(embeddings, peak_valid_mask)
 
         table = _batch_to_table(
             batch,

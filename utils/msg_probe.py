@@ -216,14 +216,24 @@ def _extract_probe_features(
     *,
     feature_source: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    peak_mz = batch["peak_mz"]
+    peak_intensity = batch["peak_intensity"]
+    peak_valid_mask = batch["peak_valid_mask"]
+    if backbone.use_precursor_token:
+        expanded = PeakSetSIGReg.prepend_precursor_token(
+            peak_mz, peak_intensity, peak_valid_mask,
+            batch["precursor_mz"],
+        )
+        peak_mz = expanded["peak_mz"]
+        peak_intensity = expanded["peak_intensity"]
+        peak_valid_mask = expanded["peak_valid_mask"]
     with torch.no_grad():
         embeddings = backbone.encoder(
-            batch["peak_mz"],
-            batch["peak_intensity"],
-            valid_mask=batch["peak_valid_mask"],
+            peak_mz, peak_intensity,
+            valid_mask=peak_valid_mask,
         )
     if feature_source == "encoder":
-        return embeddings, batch["peak_valid_mask"]
+        return embeddings, peak_valid_mask
     raise ValueError(f"Unknown msg_probe_feature_source: {feature_source!r}")
 
 
@@ -232,7 +242,15 @@ def _encode_probe_features_impl(
     peak_mz: torch.Tensor,
     peak_intensity: torch.Tensor,
     peak_valid_mask: torch.Tensor,
+    precursor_mz: torch.Tensor | None,
 ) -> torch.Tensor:
+    if backbone.use_precursor_token and precursor_mz is not None:
+        expanded = PeakSetSIGReg.prepend_precursor_token(
+            peak_mz, peak_intensity, peak_valid_mask, precursor_mz,
+        )
+        peak_mz = expanded["peak_mz"]
+        peak_intensity = expanded["peak_intensity"]
+        peak_valid_mask = expanded["peak_valid_mask"]
     return backbone.encoder(
         peak_mz,
         peak_intensity,
@@ -252,16 +270,27 @@ def _build_probe_feature_extractor(
         mode="max-autotune",
         fullgraph=False,
     )
+    _use_precursor = backbone.use_precursor_token
 
     def extract(batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        peak_mz = batch["peak_mz"]
+        peak_intensity = batch["peak_intensity"]
+        peak_valid_mask = batch["peak_valid_mask"]
+        precursor_mz = batch.get("precursor_mz") if _use_precursor else None
         with torch.no_grad():
             embeddings = compiled_encoder(
                 backbone,
-                batch["peak_mz"],
-                batch["peak_intensity"],
-                batch["peak_valid_mask"],
+                peak_mz,
+                peak_intensity,
+                peak_valid_mask,
+                precursor_mz,
             )
-        return embeddings, batch["peak_valid_mask"]
+        if _use_precursor and precursor_mz is not None:
+            # Return expanded valid mask (N+1) to match embedding length
+            B = peak_valid_mask.shape[0]
+            pre_valid = torch.ones(B, 1, device=peak_valid_mask.device, dtype=torch.bool)
+            peak_valid_mask = torch.cat([pre_valid, peak_valid_mask], dim=1)
+        return embeddings, peak_valid_mask
 
     return extract
 

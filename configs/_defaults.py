@@ -33,6 +33,7 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.jepa_context_fraction = 0.5
     cfg.jepa_target_fraction = 0.25
     cfg.jepa_block_min_len = 1
+    cfg.use_precursor_token = False
     cfg.use_ema_teacher_target = False
     cfg.teacher_ema_decay = 0.996
     cfg.teacher_ema_decay_start = 0.0

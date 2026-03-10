@@ -188,6 +188,13 @@ def _encode_batch_impl(
     peak_valid_mask: torch.Tensor,
     precursor_mz: torch.Tensor,
 ) -> torch.Tensor:
+    if model.use_precursor_token:
+        expanded = PeakSetSIGReg.prepend_precursor_token(
+            peak_mz, peak_intensity, peak_valid_mask, precursor_mz,
+        )
+        peak_mz = expanded["peak_mz"]
+        peak_intensity = expanded["peak_intensity"]
+        peak_valid_mask = expanded["peak_valid_mask"]
     embeddings = model.encoder(
         peak_mz, peak_intensity,
         valid_mask=peak_valid_mask,
@@ -202,6 +209,13 @@ def _encode_batch_mean_pool_impl(
     peak_valid_mask: torch.Tensor,
     precursor_mz: torch.Tensor,
 ) -> torch.Tensor:
+    if model.use_precursor_token:
+        expanded = PeakSetSIGReg.prepend_precursor_token(
+            peak_mz, peak_intensity, peak_valid_mask, precursor_mz,
+        )
+        peak_mz = expanded["peak_mz"]
+        peak_intensity = expanded["peak_intensity"]
+        peak_valid_mask = expanded["peak_valid_mask"]
     embeddings = model.encoder(
         peak_mz, peak_intensity,
         valid_mask=peak_valid_mask,

@@ -38,6 +38,7 @@ from utils.massspec_probe_targets import (
     REGRESSION_TARGET_KEYS,
     compute_probe_targets_for_smiles,
 )
+from models.model import PeakSetSIGReg
 from utils.training import (
     build_model_from_config,
     load_config,
@@ -360,6 +361,7 @@ def extract_our_embeddings(
     peak_mz = preprocessed["peak_mz"]
     peak_intensity = preprocessed["peak_intensity"]
     peak_valid_mask = preprocessed["peak_valid_mask"]
+    precursor_mz_np = preprocessed.get("precursor_mz")
     n = peak_mz.shape[0]
     model_dim = config.model_dim
 
@@ -371,6 +373,15 @@ def extract_our_embeddings(
         batch_mz = torch.from_numpy(peak_mz[start:end]).to(device)
         batch_int = torch.from_numpy(peak_intensity[start:end]).to(device)
         batch_mask = torch.from_numpy(peak_valid_mask[start:end]).to(device)
+
+        if model.use_precursor_token and precursor_mz_np is not None:
+            batch_pmz = torch.from_numpy(precursor_mz_np[start:end]).to(device)
+            expanded = PeakSetSIGReg.prepend_precursor_token(
+                batch_mz, batch_int, batch_mask, batch_pmz,
+            )
+            batch_mz = expanded["peak_mz"]
+            batch_int = expanded["peak_intensity"]
+            batch_mask = expanded["peak_valid_mask"]
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             token_emb = encoder(batch_mz, batch_int, valid_mask=batch_mask)

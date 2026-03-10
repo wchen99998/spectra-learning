@@ -105,6 +105,7 @@ _TRAIN_BATCH_KEYS = frozenset({
     "peak_valid_mask",
     "context_mask",
     "target_masks",
+    "precursor_mz",
 })
 
 

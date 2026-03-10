@@ -31,6 +31,7 @@ class _DummyBackbone(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.encoder = _DummyEncoder()
+        self.use_precursor_token = False
 
 
 class _DummyDataset:

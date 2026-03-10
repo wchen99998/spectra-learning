@@ -55,7 +55,7 @@ class PeakFeatureEmbedder(nn.Module):
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
     ) -> torch.Tensor:
-        log_intensity = torch.log1p(peak_intensity)
+        log_intensity = torch.log1p(peak_intensity.clamp(min=0.0))
         features = torch.cat(
             [
                 peak_mz.unsqueeze(-1),
@@ -300,10 +300,12 @@ class PeakSetSIGReg(nn.Module):
         encoder_qk_norm: bool = False,
         normalize_jepa_targets: bool = False,
         norm_type: str = "rmsnorm",
+        use_precursor_token: bool = False,
     ):
         super().__init__()
         self.num_peaks = num_peaks
         self.model_dim = model_dim
+        self.use_precursor_token = bool(use_precursor_token)
 
         self.jepa_num_target_blocks = int(jepa_num_target_blocks)
         self.jepa_context_fraction = float(jepa_context_fraction)
@@ -577,6 +579,60 @@ class PeakSetSIGReg(nn.Module):
             return pooled, pooled_raw
         raise NotImplementedError(f"Unknown pooling type: {self.pooling_type}")
 
+    @staticmethod
+    def prepend_precursor_token(
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+        peak_valid_mask: torch.Tensor,
+        precursor_mz: torch.Tensor,
+        context_mask: torch.Tensor | None = None,
+        target_masks: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Prepend a precursor token at position 0.
+
+        The precursor token uses intensity=-1 as a sentinel so the model can
+        distinguish it from real peaks.  It is always valid, always in context,
+        and never a JEPA target.
+
+        Args:
+            peak_mz: [B, N]
+            peak_intensity: [B, N]
+            peak_valid_mask: [B, N]
+            precursor_mz: [B]
+            context_mask: optional [B, N]
+            target_masks: optional [B, K, N]
+
+        Returns:
+            Dict with all tensors expanded to N+1 in the sequence dimension.
+        """
+        B, N = peak_mz.shape
+        device = peak_mz.device
+        dtype = peak_mz.dtype
+
+        # Precursor token values: mz=precursor_mz, intensity=-1, valid=True
+        pre_mz = precursor_mz.unsqueeze(1)  # [B, 1]
+        pre_int = torch.full((B, 1), -1.0, device=device, dtype=dtype)
+        pre_valid = torch.ones(B, 1, device=device, dtype=torch.bool)
+
+        result: dict[str, torch.Tensor] = {
+            "peak_mz": torch.cat([pre_mz, peak_mz], dim=1),
+            "peak_intensity": torch.cat([pre_int, peak_intensity], dim=1),
+            "peak_valid_mask": torch.cat([pre_valid, peak_valid_mask], dim=1),
+        }
+
+        if context_mask is not None:
+            # Precursor is always in context
+            pre_ctx = torch.ones(B, 1, device=device, dtype=torch.bool)
+            result["context_mask"] = torch.cat([pre_ctx, context_mask], dim=1)
+
+        if target_masks is not None:
+            # Precursor is never a target
+            K = target_masks.shape[1]
+            pre_tgt = torch.zeros(B, K, 1, device=device, dtype=torch.bool)
+            result["target_masks"] = torch.cat([pre_tgt, target_masks], dim=2)
+
+        return result
+
     def forward_augmented(
         self,
         augmented_batch: dict[str, torch.Tensor],
@@ -586,6 +642,21 @@ class PeakSetSIGReg(nn.Module):
         peak_valid_mask = augmented_batch["peak_valid_mask"]
         context_mask = augmented_batch["context_mask"] & peak_valid_mask
         target_masks = augmented_batch["target_masks"] & peak_valid_mask.unsqueeze(1)
+
+        if self.use_precursor_token:
+            expanded = self.prepend_precursor_token(
+                peak_mz,
+                peak_intensity,
+                peak_valid_mask,
+                augmented_batch["precursor_mz"],
+                context_mask=context_mask,
+                target_masks=target_masks,
+            )
+            peak_mz = expanded["peak_mz"]
+            peak_intensity = expanded["peak_intensity"]
+            peak_valid_mask = expanded["peak_valid_mask"]
+            context_mask = expanded["context_mask"]
+            target_masks = expanded["target_masks"]
 
         B, N = peak_mz.shape
         K = self.jepa_num_target_blocks
@@ -848,6 +919,17 @@ class PeakSetSIGReg(nn.Module):
         peak_mz = batch["peak_mz"]
         peak_intensity = batch["peak_intensity"]
         peak_valid_mask = batch["peak_valid_mask"]
+
+        if self.use_precursor_token:
+            expanded = self.prepend_precursor_token(
+                peak_mz,
+                peak_intensity,
+                peak_valid_mask,
+                batch["precursor_mz"],
+            )
+            peak_mz = expanded["peak_mz"]
+            peak_intensity = expanded["peak_intensity"]
+            peak_valid_mask = expanded["peak_valid_mask"]
 
         embeddings = self.encoder(peak_mz, peak_intensity, valid_mask=peak_valid_mask)
         pooled = self.pool(embeddings, peak_valid_mask)

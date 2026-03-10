@@ -81,6 +81,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.gco_log_lambda_min = -2.0
     cfg.sigreg_lambda_warmup_steps = 50_000
     cfg.msg_probe_every_n_steps = 50_000
+    cfg.use_precursor_token = True
 
     # Tune search space
     apply_tune_defaults(cfg)
