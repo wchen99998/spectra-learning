@@ -290,11 +290,7 @@ def _encode_categorical_ids(values: np.ndarray) -> tuple[np.ndarray, dict[str, i
         [str(v) if str(v) != "" else "unknown" for v in values],
         dtype=object,
     )
-    categories = sorted(set(normalized.tolist()))
-    if "unknown" in categories:
-        categories = ["unknown"] + [c for c in categories if c != "unknown"]
-    else:
-        categories = ["unknown"] + categories
+    categories = ["unknown"] + sorted(set(normalized.tolist()) - {"unknown"})
     vocab = {category: i for i, category in enumerate(categories)}
     ids = np.asarray([vocab[str(v)] for v in normalized], dtype=np.int32)
     return ids, vocab
