@@ -265,11 +265,6 @@ def _build_probe_feature_extractor(
 ) -> Callable[[dict[str, torch.Tensor]], tuple[torch.Tensor, torch.Tensor]]:
     if feature_source != "encoder":
         raise ValueError(f"Unknown msg_probe_feature_source: {feature_source!r}")
-    compiled_encoder = torch.compile(
-        _encode_probe_features_impl,
-        mode="default",
-        fullgraph=False,
-    )
     _use_precursor = backbone.use_precursor_token
 
     def extract(batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -278,7 +273,7 @@ def _build_probe_feature_extractor(
         peak_valid_mask = batch["peak_valid_mask"]
         precursor_mz = batch.get("precursor_mz") if _use_precursor else None
         with torch.no_grad():
-            embeddings = compiled_encoder(
+            embeddings = _encode_probe_features_impl(
                 backbone,
                 peak_mz,
                 peak_intensity,
