@@ -363,7 +363,6 @@ def train_and_evaluate(
 
     logger = build_logger(config, workdir)
 
-    # Resume from checkpoint
     start_epoch = 0
     global_step = 0
     _pts = sorted(checkpoint_dir.glob("*.pt"), key=lambda p: p.stat().st_mtime)
@@ -382,7 +381,6 @@ def train_and_evaluate(
 
     logger.log_metrics(model_param_metrics, step=global_step)
 
-    # Compile training step (forward + backward + optimizer + scheduler)
     _ac_name = str(config.get("autocast_dtype", "bf16")).lower()
     if _ac_name in {"bf16", "bfloat16"}:
         autocast_dtype = torch.bfloat16
@@ -398,8 +396,6 @@ def train_and_evaluate(
     device_prefetch_size = int(config.get("device_prefetch_size", 1))
     _msg_probe_raw = float(config.get("msg_probe_every_n_steps", 0))
     if 0 < _msg_probe_raw <= 1:
-        # For fractional epochs, compute relative to total_steps so the probe
-        # still fires during the shortened run.
         reference_steps = total_steps if num_epochs < 1 else steps_per_epoch
         msg_probe_every_n_steps = max(1, int(_msg_probe_raw * reference_steps))
     else:
@@ -492,7 +488,6 @@ def train_and_evaluate(
 
         pbar.close()
 
-    # Save final checkpoint
     _save_checkpoint(
         checkpoint_dir / "last.pt",
         model,

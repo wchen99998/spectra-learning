@@ -140,14 +140,12 @@ def _augment_block_jepa_batch_tf(
         peak_mz = batch["peak_mz"]
         peak_intensity = batch["peak_intensity"]
         peak_valid_mask = batch["peak_valid_mask"]
-        # Ensure each sample has at least one valid peak (fallback to index 0)
         num_peaks = tf.shape(peak_valid_mask)[1]
         has_valid = tf.reduce_any(peak_valid_mask, axis=1)
         needs_fallback = tf.logical_not(has_valid)
         positions = tf.range(num_peaks, dtype=tf.int32)[tf.newaxis, :]
         fallback = tf.logical_and(needs_fallback[:, tf.newaxis], positions == 0)
         peak_valid_mask = tf.logical_or(peak_valid_mask, fallback)
-        # Jitter m/z and intensity for valid peaks
         mz_noise = tf.random.normal(
             tf.shape(peak_mz), stddev=mz_jitter_std, dtype=peak_mz.dtype
         )
@@ -193,14 +191,14 @@ def _augment_block_jepa_batch_tf(
 
 def _prepend_precursor_token_tf(batch: dict) -> dict:
     """Prepend a precursor token (intensity=-1 sentinel) at position 0."""
-    peak_mz = batch["peak_mz"]  # [B, N]
-    peak_intensity = batch["peak_intensity"]  # [B, N]
-    peak_valid_mask = batch["peak_valid_mask"]  # [B, N]
-    precursor_mz = batch["precursor_mz"]  # [B]
+    peak_mz = batch["peak_mz"]
+    peak_intensity = batch["peak_intensity"]
+    peak_valid_mask = batch["peak_valid_mask"]
+    precursor_mz = batch["precursor_mz"]
     B = tf.shape(peak_mz)[0]
 
-    pre_mz = tf.expand_dims(precursor_mz, 1)  # [B, 1]
-    pre_int = tf.fill([B, 1], -1.0)  # sentinel
+    pre_mz = tf.expand_dims(precursor_mz, 1)
+    pre_int = tf.fill([B, 1], -1.0)
     pre_valid = tf.ones([B, 1], dtype=tf.bool)
 
     out = dict(batch)
@@ -220,7 +218,7 @@ def _prepend_precursor_token_tf(batch: dict) -> dict:
             axis=2,
         )
 
-    del out["precursor_mz"]  # consumed into peak_mz[:, 0]
+    del out["precursor_mz"]
     return out
 
 
@@ -248,33 +246,27 @@ def _batched_parse_and_transform(
     def transform(serialized_batch: tf.Tensor) -> dict[str, tf.Tensor]:
         parsed = tf.io.parse_example(serialized_batch, feature_spec)
 
-        mz = parsed["mz"]  # [B, 128]
-        intensity = parsed["intensity"]  # [B, 128]
-        rt = parsed["rt"][:, 0]  # [B]
-        precursor_mz_val = parsed["precursor_mz"][:, 0]  # [B]
+        mz = parsed["mz"]
+        intensity = parsed["intensity"]
+        rt = parsed["rt"][:, 0]
+        precursor_mz_val = parsed["precursor_mz"][:, 0]
 
-        # ── Filter peak mz range (vectorized) ───────────────────────────────────
         keep = (mz >= peak_mz_min) & (mz <= peak_mz_max_c)
         mz = tf.where(keep, mz, 0.0)
         intensity = tf.where(keep, intensity, 0.0)
 
-        # ── Filter min peak intensity (vectorized) ──────────────────────────────
         keep2 = intensity >= min_int
         mz = tf.where(keep2, mz, 0.0)
         intensity = tf.where(keep2, intensity, 0.0)
 
-        # ── Top-k peaks (vectorized on last dim) ────────────────────────────────
         values, indices = tf.math.top_k(intensity, k=num_peaks, sorted=True)
         intensity = values
-        mz = tf.gather(mz, indices, batch_dims=1)  # [B, num_peaks]
+        mz = tf.gather(mz, indices, batch_dims=1)
 
-        # ── Renormalize intensity so max valid peak = 1.0 ─────────────────────
         max_intensity = tf.reduce_max(intensity, axis=1, keepdims=True)
         max_intensity = tf.maximum(max_intensity, 1e-8)
         intensity = intensity / max_intensity
 
-        # ── Fixed-size sort (replaces variable-length compact_sort) ──────────────
-        # Invalid peaks get +inf sort key so they land at the end.
         valid = intensity > 0
         if peak_ordering == "mz":
             sort_key = tf.where(
@@ -306,7 +298,6 @@ def _batched_parse_and_transform(
         mz = tf.where(valid_sorted, mz, 0.0)
         intensity = tf.where(valid_sorted, intensity, 0.0)
 
-        # ── Normalize ────────────────────────────────────────────────────────────
         valid_final = intensity > 0
         precursor_mz_norm = tf.clip_by_value(precursor_mz_val, 0.0, max_prec) / max_prec
 
@@ -353,9 +344,6 @@ def _build_dataset(
         buffer_size=int(tfrecord_buffer_size),
         num_parallel_reads=num_parallel_reads,
     )
-    # Shuffle raw serialized bytes (lightweight), then batch, then batch-parse.
-    # tf.io.parse_example + vectorized ops on [B, ...] is ~3x faster than
-    # per-element parse_single_example + variable-length boolean_mask.
     if shuffle_buffer > 0:
         ds = ds.shuffle(shuffle_buffer, seed=seed, reshuffle_each_iteration=True)
     ds = ds.batch(batch_size, drop_remainder=drop_remainder)
@@ -397,8 +385,6 @@ def _to_torch(value: Any) -> Any:
     if isinstance(value, np.ndarray):
         if value.dtype == object:
             return _to_torch(value.tolist())
-        # Zero-copy when possible: torch.from_numpy shares memory.
-        # The downstream .to(device) creates a new tensor anyway.
         if not value.flags.c_contiguous or not value.flags.writeable:
             value = value.copy()
         return torch.from_numpy(value)

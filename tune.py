@@ -50,7 +50,6 @@ def generate_trial_configs(
         else:
             random_params.append(entry)
 
-    # Build grid combinations (Cartesian product)
     if grid_params:
         grid_names = [name for name, _ in grid_params]
         grid_values = [vals for _, vals in grid_params]
@@ -115,7 +114,6 @@ def run_trials(
             cfg.get("val_check_interval", 1.0),
         )
 
-        # Configure WandB for this trial
         if wandb_project:
             cfg.enable_wandb = True
             cfg.wandb_project = wandb_project

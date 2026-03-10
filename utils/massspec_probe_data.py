@@ -43,13 +43,13 @@ _METADATA_FILENAME = "metadata.json"
 
 def _prepend_precursor_token_probe_tf(batch: dict) -> dict:
     """Prepend a precursor token (intensity=-1 sentinel) at position 0 for probe pipeline."""
-    peak_mz = batch["peak_mz"]  # [B, N]
-    peak_intensity = batch["peak_intensity"]  # [B, N]
-    peak_valid_mask = batch["peak_valid_mask"]  # [B, N]
-    precursor_mz = batch["precursor_mz"]  # [B]
+    peak_mz = batch["peak_mz"]
+    peak_intensity = batch["peak_intensity"]
+    peak_valid_mask = batch["peak_valid_mask"]
+    precursor_mz = batch["precursor_mz"]
     B = tf.shape(peak_mz)[0]
 
-    pre_mz = tf.expand_dims(precursor_mz, 1)  # [B, 1]
+    pre_mz = tf.expand_dims(precursor_mz, 1)
     pre_int = tf.fill([B, 1], -1.0)  # sentinel
     pre_valid = tf.ones([B, 1], dtype=tf.bool)
 
@@ -191,10 +191,10 @@ def _load_nist20_hdf5(
     from rdkit.Chem.inchi import MolToInchi, InchiToInchiKey
 
     with h5py.File(str(hdf5_path), "r") as f:
-        raw_spectra = f["spectrum"][:]  # [N, 2, 128] float64
-        raw_precursor = f["precursor_mz"][:]  # [N] float
-        raw_smiles = f["smiles"][:].astype(str)  # [N] str
-        raw_adduct = f["adduct"][:].astype(str)  # [N] str
+        raw_spectra = f["spectrum"][:]
+        raw_precursor = f["precursor_mz"][:]
+        raw_smiles = f["smiles"][:].astype(str)
+        raw_adduct = f["adduct"][:].astype(str)
 
     # Filter invalid SMILES and compute InChIKey connectivity layer
     valid_indices: list[int] = []
@@ -238,7 +238,7 @@ def _load_nist20_hdf5(
             fold_list.append("test")
 
     n_valid = len(idx)
-    spectra = raw_spectra[idx].astype(np.float32)  # [N_valid, 2, 128]
+    spectra = raw_spectra[idx].astype(np.float32)
     precursor = raw_precursor[idx].astype(np.float32)
     smiles_arr = raw_smiles[idx]
     adduct_arr = raw_adduct[idx]

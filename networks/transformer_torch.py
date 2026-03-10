@@ -125,8 +125,6 @@ class Attention(nn.Module):
                 freqs_sin,
             )
 
-        # Keep SDPA inputs in one compute dtype (LayerNorm under autocast can
-        # promote q/k to fp32 while v stays bf16/fp16).
         xq = xq.to(dtype=xv.dtype)
         xk = xk.to(dtype=xv.dtype)
 

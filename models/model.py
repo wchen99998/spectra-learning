@@ -518,7 +518,6 @@ class PeakSetSIGReg(nn.Module):
     def train(self, mode: bool = True) -> "PeakSetSIGReg":
         super().train(mode)
         if self.teacher_encoder is not None:
-            # Teacher is an EMA target network and should stay in eval mode.
             self.teacher_encoder.eval()
         return self
 
@@ -585,8 +584,7 @@ class PeakSetSIGReg(nn.Module):
         device = peak_mz.device
         dtype = peak_mz.dtype
 
-        # Precursor token values: mz=precursor_mz, intensity=-1, valid=True
-        pre_mz = precursor_mz.unsqueeze(1)  # [B, 1]
+        pre_mz = precursor_mz.unsqueeze(1)
         pre_int = torch.full((B, 1), -1.0, device=device, dtype=dtype)
         pre_valid = torch.ones(B, 1, device=device, dtype=torch.bool)
 

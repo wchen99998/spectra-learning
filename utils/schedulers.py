@@ -105,8 +105,6 @@ class CapturableCosineSchedule:
             device=device,
         )
 
-    # -- compilable step --------------------------------------------------
-
     def step(self) -> None:
         import torch
 
@@ -132,8 +130,6 @@ class CapturableCosineSchedule:
         # Write to every param group (in-place, no CPU round-trip).
         for group in self.optimizer.param_groups:
             group["lr"].copy_(lr)
-
-    # -- checkpoint support -----------------------------------------------
 
     def state_dict(self) -> dict[str, object]:
         return {"_step": self._step.item()}
