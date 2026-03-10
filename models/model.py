@@ -699,24 +699,12 @@ class PeakSetSIGReg(nn.Module):
             local_to_global_emb_std_ratio = (
                 collapse_metrics["local_emb_std"] / collapse_metrics["global_emb_std"]
             )
-            regularizer_stats = _masked_embedding_stats(
-                fused_emb,
-                fused_visible,
-            )
-            encoder_emb_std = regularizer_stats["emb_std"]
-            encoder_emb_var_mean = regularizer_stats["emb_var_mean"]
-            encoder_emb_var_floor = regularizer_stats["emb_var_floor"]
-            encoder_emb_cov_offdiag_abs_mean = regularizer_stats[
-                "emb_cov_offdiag_abs_mean"
-            ]
-            encoder_emb_corr_offdiag_abs_mean = regularizer_stats[
-                "emb_corr_offdiag_abs_mean"
-            ]
+            reg_stats = _masked_embedding_stats(fused_emb, fused_visible)
             gco_var_floor_constraint = (
-                self.gco_var_floor_target - encoder_emb_var_floor.float()
+                self.gco_var_floor_target - reg_stats["emb_var_floor"].float()
             )
             gco_corr_constraint = (
-                encoder_emb_corr_offdiag_abs_mean.float() - self.gco_corr_target
+                reg_stats["emb_corr_offdiag_abs_mean"].float() - self.gco_corr_target
             )
             gco_constraint = torch.maximum(
                 gco_var_floor_constraint,
@@ -783,15 +771,10 @@ class PeakSetSIGReg(nn.Module):
             ),
             "gco_corr_constraint": gco_corr_constraint.to(dtype=context_emb.dtype),
             "gco_constraint_penalty": gco_constraint_penalty,
-            "encoder_emb_std": encoder_emb_std.to(dtype=context_emb.dtype),
-            "encoder_emb_var_mean": encoder_emb_var_mean.to(dtype=context_emb.dtype),
-            "encoder_emb_var_floor": encoder_emb_var_floor.to(dtype=context_emb.dtype),
-            "encoder_emb_cov_offdiag_abs_mean": encoder_emb_cov_offdiag_abs_mean.to(
-                dtype=context_emb.dtype
-            ),
-            "encoder_emb_corr_offdiag_abs_mean": encoder_emb_corr_offdiag_abs_mean.to(
-                dtype=context_emb.dtype
-            ),
+            **{
+                f"encoder_{k}": v.to(dtype=context_emb.dtype)
+                for k, v in reg_stats.items()
+            },
             "pool_norm_weight_abs_mean": pool_norm_weight_abs_mean,
             "local_to_global_emb_std_ratio": local_to_global_emb_std_ratio,
             **collapse_metrics,
