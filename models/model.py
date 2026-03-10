@@ -418,18 +418,17 @@ class PeakSetSIGReg(nn.Module):
 
     def predict_masked_latents(
         self,
-        predictor_input: torch.Tensor,
+        x: torch.Tensor,
         visible_mask: torch.Tensor,
     ) -> torch.Tensor:
         predictor_block_mask = create_visible_block_mask(visible_mask)
         freqs_cos, freqs_sin = _compute_rope_freqs(
             self.encoder.use_rope,
-            predictor_input.shape[1],
+            x.shape[1],
             self.predictor_rope_inv_freq,
-            predictor_input.device,
-            predictor_input.dtype,
+            x.device,
+            x.dtype,
         )
-        x = predictor_input
         for block in self.masked_latent_predictor:
             x = block(
                 x,
