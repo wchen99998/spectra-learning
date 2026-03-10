@@ -457,77 +457,40 @@ def _process_massspec_probe_data(
         smiles
     )
 
-    train_mask = fold == "train"
-    val_mask = fold == "val"
-    test_mask = fold == "test"
-
-    train_files, train_lengths = _write_tfrecords_with_fingerprint(
-        spectra[train_mask],
-        retention[train_mask],
-        precursor[train_mask],
-        fingerprints[train_mask],
-        smiles[train_mask],
-        adduct_id[train_mask],
-        instrument_type_id[train_mask],
-        collision_energy[train_mask],
-        collision_energy_present[train_mask],
-        {name: values[train_mask] for name, values in probe_mol_props.items()},
-        {name: values[train_mask] for name, values in probe_fg_binary.items()},
-        probe_valid_mol[train_mask],
-        output_dir / "train",
-        max(1, num_shards // 2),
-        desc="MassSpec Train",
-    )
-    val_files, val_lengths = _write_tfrecords_with_fingerprint(
-        spectra[val_mask],
-        retention[val_mask],
-        precursor[val_mask],
-        fingerprints[val_mask],
-        smiles[val_mask],
-        adduct_id[val_mask],
-        instrument_type_id[val_mask],
-        collision_energy[val_mask],
-        collision_energy_present[val_mask],
-        {name: values[val_mask] for name, values in probe_mol_props.items()},
-        {name: values[val_mask] for name, values in probe_fg_binary.items()},
-        probe_valid_mol[val_mask],
-        output_dir / "val",
-        max(1, num_shards // 4),
-        desc="MassSpec Val",
-    )
-    test_files, test_lengths = _write_tfrecords_with_fingerprint(
-        spectra[test_mask],
-        retention[test_mask],
-        precursor[test_mask],
-        fingerprints[test_mask],
-        smiles[test_mask],
-        adduct_id[test_mask],
-        instrument_type_id[test_mask],
-        collision_energy[test_mask],
-        collision_energy_present[test_mask],
-        {name: values[test_mask] for name, values in probe_mol_props.items()},
-        {name: values[test_mask] for name, values in probe_fg_binary.items()},
-        probe_valid_mol[test_mask],
-        output_dir / "test",
-        max(1, num_shards // 4),
-        desc="MassSpec Test",
-    )
-
-    return {
+    splits = [
+        ("train", num_shards // 2),
+        ("val", num_shards // 4),
+        ("test", num_shards // 4),
+    ]
+    result: dict[str, Any] = {
         "metadata_version": MASSSPEC_METADATA_VERSION,
-        "train_files": train_files,
-        "train_lengths": train_lengths,
-        "train_size": int(np.count_nonzero(train_mask)),
-        "val_files": val_files,
-        "val_lengths": val_lengths,
-        "val_size": int(np.count_nonzero(val_mask)),
-        "test_files": test_files,
-        "test_lengths": test_lengths,
-        "test_size": int(np.count_nonzero(test_mask)),
         "adduct_vocab": adduct_vocab,
         "instrument_type_vocab": instrument_type_vocab,
         "max_precursor_mz": float(max_precursor_mz),
     }
+    for split_name, split_shards in splits:
+        mask = fold == split_name
+        files, lengths = _write_tfrecords_with_fingerprint(
+            spectra[mask],
+            retention[mask],
+            precursor[mask],
+            fingerprints[mask],
+            smiles[mask],
+            adduct_id[mask],
+            instrument_type_id[mask],
+            collision_energy[mask],
+            collision_energy_present[mask],
+            {k: v[mask] for k, v in probe_mol_props.items()},
+            {k: v[mask] for k, v in probe_fg_binary.items()},
+            probe_valid_mol[mask],
+            output_dir / split_name,
+            max(1, split_shards),
+            desc=f"MassSpec {split_name.capitalize()}",
+        )
+        result[f"{split_name}_files"] = files
+        result[f"{split_name}_lengths"] = lengths
+        result[f"{split_name}_size"] = int(np.count_nonzero(mask))
+    return result
 
 
 def _process_nist20_probe_data(
@@ -569,77 +532,40 @@ def _process_nist20_probe_data(
         smiles
     )
 
-    train_mask = fold == "train"
-    val_mask = fold == "val"
-    test_mask = fold == "test"
-
-    train_files, train_lengths = _write_tfrecords_with_fingerprint(
-        spectra[train_mask],
-        retention[train_mask],
-        precursor[train_mask],
-        fingerprints[train_mask],
-        smiles[train_mask],
-        adduct_id[train_mask],
-        instrument_type_id[train_mask],
-        collision_energy[train_mask],
-        collision_energy_present[train_mask],
-        {name: values[train_mask] for name, values in probe_mol_props.items()},
-        {name: values[train_mask] for name, values in probe_fg_binary.items()},
-        probe_valid_mol[train_mask],
-        output_dir / "train",
-        max(1, num_shards // 2),
-        desc="NIST20 Train",
-    )
-    val_files, val_lengths = _write_tfrecords_with_fingerprint(
-        spectra[val_mask],
-        retention[val_mask],
-        precursor[val_mask],
-        fingerprints[val_mask],
-        smiles[val_mask],
-        adduct_id[val_mask],
-        instrument_type_id[val_mask],
-        collision_energy[val_mask],
-        collision_energy_present[val_mask],
-        {name: values[val_mask] for name, values in probe_mol_props.items()},
-        {name: values[val_mask] for name, values in probe_fg_binary.items()},
-        probe_valid_mol[val_mask],
-        output_dir / "val",
-        max(1, num_shards // 4),
-        desc="NIST20 Val",
-    )
-    test_files, test_lengths = _write_tfrecords_with_fingerprint(
-        spectra[test_mask],
-        retention[test_mask],
-        precursor[test_mask],
-        fingerprints[test_mask],
-        smiles[test_mask],
-        adduct_id[test_mask],
-        instrument_type_id[test_mask],
-        collision_energy[test_mask],
-        collision_energy_present[test_mask],
-        {name: values[test_mask] for name, values in probe_mol_props.items()},
-        {name: values[test_mask] for name, values in probe_fg_binary.items()},
-        probe_valid_mol[test_mask],
-        output_dir / "test",
-        max(1, num_shards // 4),
-        desc="NIST20 Test",
-    )
-
-    return {
+    splits = [
+        ("train", num_shards // 2),
+        ("val", num_shards // 4),
+        ("test", num_shards // 4),
+    ]
+    result: dict[str, Any] = {
         "metadata_version": NIST20_METADATA_VERSION,
-        "train_files": train_files,
-        "train_lengths": train_lengths,
-        "train_size": int(np.count_nonzero(train_mask)),
-        "val_files": val_files,
-        "val_lengths": val_lengths,
-        "val_size": int(np.count_nonzero(val_mask)),
-        "test_files": test_files,
-        "test_lengths": test_lengths,
-        "test_size": int(np.count_nonzero(test_mask)),
         "adduct_vocab": adduct_vocab,
         "instrument_type_vocab": instrument_type_vocab,
         "max_precursor_mz": float(max_precursor_mz),
     }
+    for split_name, split_shards in splits:
+        mask = fold == split_name
+        files, lengths = _write_tfrecords_with_fingerprint(
+            spectra[mask],
+            retention[mask],
+            precursor[mask],
+            fingerprints[mask],
+            smiles[mask],
+            adduct_id[mask],
+            instrument_type_id[mask],
+            collision_energy[mask],
+            collision_energy_present[mask],
+            {k: v[mask] for k, v in probe_mol_props.items()},
+            {k: v[mask] for k, v in probe_fg_binary.items()},
+            probe_valid_mol[mask],
+            output_dir / split_name,
+            max(1, split_shards),
+            desc=f"NIST20 {split_name.capitalize()}",
+        )
+        result[f"{split_name}_files"] = files
+        result[f"{split_name}_lengths"] = lengths
+        result[f"{split_name}_size"] = int(np.count_nonzero(mask))
+    return result
 
 
 def _load_json(path: Path) -> dict[str, Any]:
