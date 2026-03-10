@@ -98,9 +98,7 @@ def _compute_rope_freqs(
     if not use_rope:
         return None, None
     positions = torch.arange(seq_len, device=device, dtype=torch.float32).unsqueeze(0)
-    if inv_freq.device != device:
-        inv_freq = inv_freq.to(device=device)
-    angles = positions.unsqueeze(-1) * inv_freq.view(1, 1, -1)
+    angles = positions.unsqueeze(-1) * inv_freq.to(device=device).view(1, 1, -1)
     angles = torch.repeat_interleave(angles, repeats=2, dim=-1)
     return angles.cos().to(dtype=dtype).unsqueeze(2), angles.sin().to(
         dtype=dtype
