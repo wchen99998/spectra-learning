@@ -28,8 +28,7 @@ from utils.training import (
     build_logger,
     build_model_from_config,
     collect_model_param_summary,
-    log_model_param_summary,
-    model_param_summary_to_metrics,
+    log_and_build_param_metrics,
 )
 
 torch.set_float32_matmul_precision("medium")
@@ -398,8 +397,7 @@ def train_and_evaluate(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_model_from_config(config)
     model_param_summary = collect_model_param_summary(model)
-    log_model_param_summary(model_param_summary)
-    model_param_metrics = model_param_summary_to_metrics(model_param_summary)
+    model_param_metrics = log_and_build_param_metrics(model_param_summary)
     model.to(device)
     model.train()
 

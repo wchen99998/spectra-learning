@@ -129,7 +129,7 @@ def collect_model_param_summary(model: torch.nn.Module) -> dict[str, Any]:
     }
 
 
-def log_model_param_summary(summary: dict[str, Any]) -> None:
+def log_and_build_param_metrics(summary: dict[str, Any]) -> dict[str, float]:
     logging.info(
         "Model parameters: total=%s trainable=%s non_trainable=%s",
         f"{summary['total_params']:,}",
@@ -142,6 +142,14 @@ def log_model_param_summary(summary: dict[str, Any]) -> None:
         f"{summary['trainable_tensors']:,}",
         f"{summary['non_trainable_tensors']:,}",
     )
+    metrics: dict[str, float] = {
+        "model/params_total": float(summary["total_params"]),
+        "model/params_trainable": float(summary["trainable_params"]),
+        "model/params_non_trainable": float(summary["non_trainable_params"]),
+        "model/param_tensors_total": float(summary["total_tensors"]),
+        "model/param_tensors_trainable": float(summary["trainable_tensors"]),
+        "model/param_tensors_non_trainable": float(summary["non_trainable_tensors"]),
+    }
     for module_name in sorted(summary["by_module"]):
         module_summary = summary["by_module"][module_name]
         logging.info(
@@ -151,18 +159,6 @@ def log_model_param_summary(summary: dict[str, Any]) -> None:
             f"{module_summary['trainable_params']:,}",
             f"{module_summary['non_trainable_params']:,}",
         )
-
-
-def model_param_summary_to_metrics(summary: dict[str, Any]) -> dict[str, float]:
-    metrics: dict[str, float] = {
-        "model/params_total": float(summary["total_params"]),
-        "model/params_trainable": float(summary["trainable_params"]),
-        "model/params_non_trainable": float(summary["non_trainable_params"]),
-        "model/param_tensors_total": float(summary["total_tensors"]),
-        "model/param_tensors_trainable": float(summary["trainable_tensors"]),
-        "model/param_tensors_non_trainable": float(summary["non_trainable_tensors"]),
-    }
-    for module_name, module_summary in summary["by_module"].items():
         metrics[f"model/params_total/{module_name}"] = float(
             module_summary["total_params"]
         )
