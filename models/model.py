@@ -102,19 +102,6 @@ def _build_standard_rope_inv_freq(
     return 1.0 / (float(base) ** (freq_idx / half_dim))
 
 
-def _build_rope_freqs_from_positions(
-    *,
-    positions: torch.Tensor,
-    inv_freq: torch.Tensor,
-    out_dtype: torch.dtype,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    angles = positions.float().unsqueeze(-1) * inv_freq.view(1, 1, -1)
-    angles = torch.repeat_interleave(angles, repeats=2, dim=-1)
-    freqs_cos = angles.cos().to(dtype=out_dtype).unsqueeze(2)
-    freqs_sin = angles.sin().to(dtype=out_dtype).unsqueeze(2)
-    return freqs_cos, freqs_sin
-
-
 def _compute_rope_freqs(
     use_rope: bool,
     seq_len: int,
@@ -127,9 +114,11 @@ def _compute_rope_freqs(
     positions = torch.arange(seq_len, device=device, dtype=torch.float32).unsqueeze(0)
     if inv_freq.device != device:
         inv_freq = inv_freq.to(device=device)
-    return _build_rope_freqs_from_positions(
-        positions=positions, inv_freq=inv_freq, out_dtype=dtype
-    )
+    angles = positions.unsqueeze(-1) * inv_freq.view(1, 1, -1)
+    angles = torch.repeat_interleave(angles, repeats=2, dim=-1)
+    return angles.cos().to(dtype=dtype).unsqueeze(2), angles.sin().to(
+        dtype=dtype
+    ).unsqueeze(2)
 
 
 def _masked_embedding_stats(
