@@ -38,12 +38,7 @@ def compute_probe_targets_for_smiles(
     fg_counts = {name: np.zeros(n, dtype=np.int16) for name in FG_SMARTS}
     valid_mol_mask = np.ones(n, dtype=bool)
 
-    mol_props = {
-        "mol_weight": np.zeros(n, dtype=np.float32),
-        "logp": np.zeros(n, dtype=np.float32),
-        "num_heavy_atoms": np.zeros(n, dtype=np.float32),
-        "num_rings": np.zeros(n, dtype=np.float32),
-    }
+    mol_props = {name: np.zeros(n, dtype=np.float32) for name in REGRESSION_TARGET_KEYS}
 
     for i, smi in enumerate(smiles):
         mol = Chem.MolFromSmiles(smi)
