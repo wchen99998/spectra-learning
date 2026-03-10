@@ -400,16 +400,13 @@ class _TfIterableDataset(IterableDataset):
         self._dataset: tf.data.Dataset | None = None
         self.steps_per_epoch = int(steps_per_epoch)
 
-    def _get_dataset(self) -> tf.data.Dataset:
-        if self._dataset is None:
-            self._dataset = self._dataset_builder()
-        return self._dataset
-
     def __len__(self) -> int:
         return self.steps_per_epoch
 
     def __iter__(self):
-        dataset = self._get_dataset()
+        if self._dataset is None:
+            self._dataset = self._dataset_builder()
+        dataset = self._dataset
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is not None:
             dataset = dataset.shard(
