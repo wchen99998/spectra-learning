@@ -264,29 +264,14 @@ def _batched_parse_and_transform(
 
         valid = intensity > 0
         if peak_ordering == "mz":
-            sort_key = tf.where(
-                valid,
-                mz,
-                tf.fill(tf.shape(mz), float("inf")),
-            )
-            sorted_idx = tf.argsort(
-                sort_key,
-                axis=1,
-                direction="ASCENDING",
-                stable=True,
-            )
+            sort_key = tf.where(valid, mz, tf.fill(tf.shape(mz), float("inf")))
+            direction = "ASCENDING"
         else:
             sort_key = tf.where(
-                valid,
-                intensity,
-                tf.fill(tf.shape(intensity), float("-inf")),
+                valid, intensity, tf.fill(tf.shape(intensity), float("-inf"))
             )
-            sorted_idx = tf.argsort(
-                sort_key,
-                axis=1,
-                direction="DESCENDING",
-                stable=True,
-            )
+            direction = "DESCENDING"
+        sorted_idx = tf.argsort(sort_key, axis=1, direction=direction, stable=True)
         mz = tf.gather(mz, sorted_idx, batch_dims=1)
         intensity = tf.gather(intensity, sorted_idx, batch_dims=1)
         valid_sorted = tf.gather(valid, sorted_idx, batch_dims=1)
