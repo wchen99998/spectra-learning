@@ -115,8 +115,7 @@ def _masked_embedding_stats(
     weights_col = weights.unsqueeze(-1)
     mean = (flat * weights_col).sum(0) / count
     centered = flat - mean
-    weighted_centered = centered * weights_col
-    cov = centered.transpose(0, 1) @ weighted_centered / count
+    cov = centered.transpose(0, 1) @ (centered * weights_col) / count
     var = cov.diagonal()
     var_scale = var.clamp_min(1e-12)
     corr = cov / torch.sqrt(var_scale.unsqueeze(0) * var_scale.unsqueeze(1))
