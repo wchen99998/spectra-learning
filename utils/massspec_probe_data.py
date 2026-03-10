@@ -78,19 +78,7 @@ def _ensure_nist20_hdf5(data_dir: Path) -> Path:
     return _download_hf_file(NIST20_HF_REPO, NIST20_HF_FILENAME, data_dir)
 
 
-def _load_massspec_tsv(
-    tsv_path: Path,
-) -> tuple[
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-]:
+def _load_massspec_tsv(tsv_path: Path) -> dict[str, np.ndarray]:
     spectra: list[np.ndarray] = []
     precursor: list[float] = []
     fold: list[str] = []
@@ -130,42 +118,22 @@ def _load_massspec_tsv(
                 collision_energy_present.append(1)
 
     spectra_array = np.stack(spectra, axis=0)
-    retention = np.full(len(spectra_array), 392.3146, dtype=np.float32)
-    precursor_array = np.asarray(precursor, dtype=np.float32)
-    fold_array = np.asarray(fold)
-    smiles_array = np.asarray(smiles)
-    adduct_array = np.asarray(adduct)
-    instrument_type_array = np.asarray(instrument_type)
-    collision_energy_array = np.asarray(collision_energy, dtype=np.float32)
-    collision_energy_present_array = np.asarray(
-        collision_energy_present, dtype=np.int32
-    )
-    return (
-        spectra_array,
-        retention,
-        precursor_array,
-        fold_array,
-        smiles_array,
-        adduct_array,
-        instrument_type_array,
-        collision_energy_array,
-        collision_energy_present_array,
-    )
+    return {
+        "spectra": spectra_array,
+        "retention": np.full(len(spectra_array), 392.3146, dtype=np.float32),
+        "precursor": np.asarray(precursor, dtype=np.float32),
+        "fold": np.asarray(fold),
+        "smiles": np.asarray(smiles),
+        "adduct": np.asarray(adduct),
+        "instrument_type": np.asarray(instrument_type),
+        "collision_energy": np.asarray(collision_energy, dtype=np.float32),
+        "collision_energy_present": np.asarray(
+            collision_energy_present, dtype=np.int32
+        ),
+    }
 
 
-def _load_nist20_hdf5(
-    hdf5_path: Path,
-) -> tuple[
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-]:
+def _load_nist20_hdf5(hdf5_path: Path) -> dict[str, np.ndarray]:
     import h5py
     from rdkit.Chem.inchi import MolToInchi, InchiToInchiKey
 
@@ -232,17 +200,17 @@ def _load_nist20_hdf5(
         n_keys,
     )
 
-    return (
-        spectra,
-        retention,
-        precursor,
-        fold_arr,
-        smiles_arr,
-        adduct_arr,
-        instrument_type_arr,
-        collision_energy_arr,
-        collision_energy_present_arr,
-    )
+    return {
+        "spectra": spectra,
+        "retention": retention,
+        "precursor": precursor,
+        "fold": fold_arr,
+        "smiles": smiles_arr,
+        "adduct": adduct_arr,
+        "instrument_type": instrument_type_arr,
+        "collision_energy": collision_energy_arr,
+        "collision_energy_present": collision_energy_present_arr,
+    }
 
 
 def _compute_morgan_fingerprints(smiles: np.ndarray) -> np.ndarray:
@@ -436,27 +404,8 @@ def _process_massspec_probe_data(
     tsv_path = download_massspec_tsv(output_dir)
 
     logger.info("Loading MassSpecGym data...")
-    (
-        spectra,
-        retention,
-        precursor,
-        fold,
-        smiles,
-        adduct,
-        instrument_type,
-        collision_energy,
-        collision_energy_present,
-    ) = _load_massspec_tsv(tsv_path)
     return _filter_encode_and_write(
-        spectra=spectra,
-        retention=retention,
-        precursor=precursor,
-        fold=fold,
-        smiles=smiles,
-        adduct=adduct,
-        instrument_type=instrument_type,
-        collision_energy=collision_energy,
-        collision_energy_present=collision_energy_present,
+        **_load_massspec_tsv(tsv_path),
         output_dir=output_dir,
         num_shards=num_shards,
         max_precursor_mz=max_precursor_mz,
@@ -474,27 +423,8 @@ def _process_nist20_probe_data(
 ) -> dict[str, Any]:
     hdf5_path = _ensure_nist20_hdf5(data_dir)
     logger.info("Loading NIST20+MoNA HDF5 from %s ...", hdf5_path)
-    (
-        spectra,
-        retention,
-        precursor,
-        fold,
-        smiles,
-        adduct,
-        instrument_type,
-        collision_energy,
-        collision_energy_present,
-    ) = _load_nist20_hdf5(hdf5_path)
     return _filter_encode_and_write(
-        spectra=spectra,
-        retention=retention,
-        precursor=precursor,
-        fold=fold,
-        smiles=smiles,
-        adduct=adduct,
-        instrument_type=instrument_type,
-        collision_energy=collision_energy,
-        collision_energy_present=collision_energy_present,
+        **_load_nist20_hdf5(hdf5_path),
         output_dir=output_dir,
         num_shards=num_shards,
         max_precursor_mz=max_precursor_mz,

@@ -244,17 +244,17 @@ class MassSpecPreprocessTests(unittest.TestCase):
                 mock.patch.object(
                     massspec_probe_data,
                     "_load_massspec_tsv",
-                    return_value=(
-                        spectra,
-                        retention,
-                        precursor,
-                        fold,
-                        smiles,
-                        adduct,
-                        instrument,
-                        collision_energy,
-                        collision_energy_present,
-                    ),
+                    return_value={
+                        "spectra": spectra,
+                        "retention": retention,
+                        "precursor": precursor,
+                        "fold": fold,
+                        "smiles": smiles,
+                        "adduct": adduct,
+                        "instrument_type": instrument,
+                        "collision_energy": collision_energy,
+                        "collision_energy_present": collision_energy_present,
+                    },
                 ),
             ):
                 metadata = massspec_probe_data._process_massspec_probe_data(
