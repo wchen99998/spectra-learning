@@ -83,11 +83,6 @@ _TRAIN_BATCH_KEYS = frozenset(
 )
 
 
-def _record_stream(batch: dict[str, torch.Tensor], stream: torch.cuda.Stream) -> None:
-    for value in batch.values():
-        value.record_stream(stream)
-
-
 def _move_batch_to_device(
     batch: dict[str, torch.Tensor],
     device: torch.device,
@@ -147,7 +142,8 @@ class _BatchPrefetcher:
         if ready_event is not None:
             current_stream = torch.cuda.current_stream(device=self._device)
             current_stream.wait_event(ready_event)
-            _record_stream(batch, current_stream)
+            for v in batch.values():
+                v.record_stream(current_stream)
         self._preload_one()
         return batch
 
