@@ -115,6 +115,23 @@ def _build_rope_freqs_from_positions(
     return freqs_cos, freqs_sin
 
 
+def _compute_rope_freqs(
+    use_rope: bool,
+    seq_len: int,
+    inv_freq: torch.Tensor,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    if not use_rope:
+        return None, None
+    positions = torch.arange(seq_len, device=device, dtype=torch.float32).unsqueeze(0)
+    if inv_freq.device != device:
+        inv_freq = inv_freq.to(device=device)
+    return _build_rope_freqs_from_positions(
+        positions=positions, inv_freq=inv_freq, out_dtype=dtype
+    )
+
+
 def _masked_embedding_stats(
     emb: torch.Tensor,
     valid_mask: torch.Tensor,
@@ -200,33 +217,10 @@ class PeakSetEncoder(nn.Module):
         if attention_visible_mask is not None:
             block_mask = create_visible_block_mask(attention_visible_mask)
 
-        def _compute_rope(
-            dtype: torch.dtype,
-        ) -> tuple[
-            torch.Tensor | None,
-            torch.Tensor | None,
-        ]:
-            if not self.use_rope:
-                return None, None
-
-            positions = torch.arange(
-                peak_mz.shape[1],
-                device=peak_mz.device,
-                dtype=torch.float32,
-            ).unsqueeze(0)
-            inv_freq = self.rope_inv_freq
-            if inv_freq.device != peak_mz.device:
-                inv_freq = inv_freq.to(device=peak_mz.device)
-
-            freqs_cos, freqs_sin = _build_rope_freqs_from_positions(
-                positions=positions,
-                inv_freq=inv_freq,
-                out_dtype=dtype,
-            )
-            return freqs_cos, freqs_sin
-
         x = self.embedder(peak_mz, peak_intensity)
-        freqs_cos, freqs_sin = _compute_rope(x.dtype)
+        freqs_cos, freqs_sin = _compute_rope_freqs(
+            self.use_rope, peak_mz.shape[1], self.rope_inv_freq, peak_mz.device, x.dtype
+        )
 
         for block in self.blocks:
             x = block(
@@ -489,22 +483,13 @@ class PeakSetSIGReg(nn.Module):
         visible_mask: torch.Tensor,
     ) -> torch.Tensor:
         predictor_block_mask = create_visible_block_mask(visible_mask)
-        freqs_cos = None
-        freqs_sin = None
-        if self.encoder.use_rope:
-            positions = torch.arange(
-                predictor_input.shape[1],
-                device=predictor_input.device,
-                dtype=torch.float32,
-            ).unsqueeze(0)
-            inv_freq = self.predictor_rope_inv_freq
-            if inv_freq.device != predictor_input.device:
-                inv_freq = inv_freq.to(device=predictor_input.device)
-            freqs_cos, freqs_sin = _build_rope_freqs_from_positions(
-                positions=positions,
-                inv_freq=inv_freq,
-                out_dtype=predictor_input.dtype,
-            )
+        freqs_cos, freqs_sin = _compute_rope_freqs(
+            self.encoder.use_rope,
+            predictor_input.shape[1],
+            self.predictor_rope_inv_freq,
+            predictor_input.device,
+            predictor_input.dtype,
+        )
         x = predictor_input
         for block in self.masked_latent_predictor:
             x = block(
