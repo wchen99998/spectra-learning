@@ -268,68 +268,42 @@ class PeakSetSIGReg(nn.Module):
         self.gco_eta = float(gco_eta)
         self.gco_log_lambda_min = float(gco_log_lambda_min)
         self.gco_log_lambda_max = float(gco_log_lambda_max)
-        self.register_buffer(
-            "sigreg_lambda_target",
-            torch.tensor(self.sigreg_lambda, dtype=torch.float32),
-        )
-        self.register_buffer(
-            "sigreg_lambda_current",
-            torch.tensor(
-                self.sigreg_lambda if self.sigreg_lambda_warmup_steps <= 0 else 0.0,
-                dtype=torch.float32,
-            ),
-        )
-        self.register_buffer(
-            "sigreg_lambda_step",
-            torch.zeros((), dtype=torch.int64),
-        )
-        self.register_buffer(
+
+        def _f32(v: float) -> torch.Tensor:
+            return torch.tensor(v, dtype=torch.float32)
+
+        _reg = self.register_buffer
+        _sr_init = self.sigreg_lambda if self.sigreg_lambda_warmup_steps <= 0 else 0.0
+        _reg("sigreg_lambda_target", _f32(self.sigreg_lambda))
+        _reg("sigreg_lambda_current", _f32(_sr_init))
+        _reg("sigreg_lambda_step", torch.zeros((), dtype=torch.int64))
+        _reg(
             "sigreg_lambda_warmup_steps_tensor",
-            torch.tensor(
-                max(self.sigreg_lambda_warmup_steps, 1),
-                dtype=torch.float32,
-            ),
+            _f32(max(self.sigreg_lambda_warmup_steps, 1)),
             persistent=False,
         )
-        self.register_buffer(
-            "gco_log_lambda",
-            torch.tensor(float(gco_log_lambda_init), dtype=torch.float32),
-        )
-        self.register_buffer(
-            "gco_c_ema",
-            torch.tensor(0.0, dtype=torch.float32),
-        )
-        self.register_buffer(
+        _reg("gco_log_lambda", _f32(float(gco_log_lambda_init)))
+        _reg("gco_c_ema", _f32(0.0))
+        _reg(
             "teacher_ema_decay_start_tensor",
-            torch.tensor(self.teacher_ema_decay_start, dtype=torch.float32),
+            _f32(self.teacher_ema_decay_start),
             persistent=False,
         )
-        self.register_buffer(
-            "teacher_ema_decay_target",
-            torch.tensor(self.teacher_ema_decay, dtype=torch.float32),
-            persistent=False,
+        _reg("teacher_ema_decay_target", _f32(self.teacher_ema_decay), persistent=False)
+        _ema_init = (
+            self.teacher_ema_decay
+            if self.teacher_ema_decay_warmup_steps <= 0
+            else self.teacher_ema_decay_start
         )
-        self.register_buffer(
-            "teacher_ema_decay_current",
-            torch.tensor(
-                self.teacher_ema_decay
-                if self.teacher_ema_decay_warmup_steps <= 0
-                else self.teacher_ema_decay_start,
-                dtype=torch.float32,
-            ),
-            persistent=False,
-        )
-        self.register_buffer(
+        _reg("teacher_ema_decay_current", _f32(_ema_init), persistent=False)
+        _reg(
             "teacher_ema_decay_step",
             torch.zeros((), dtype=torch.int64),
             persistent=False,
         )
-        self.register_buffer(
+        _reg(
             "teacher_ema_decay_warmup_steps_tensor",
-            torch.tensor(
-                max(self.teacher_ema_decay_warmup_steps, 1),
-                dtype=torch.float32,
-            ),
+            _f32(max(self.teacher_ema_decay_warmup_steps, 1)),
             persistent=False,
         )
         self.pooling_type = pooling_type
