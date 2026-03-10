@@ -448,15 +448,6 @@ class PeakSetSIGReg(nn.Module):
         )
         self.teacher_encoder.update_parameters(self.encoder)
 
-    def _mean_pool(
-        self,
-        embeddings: torch.Tensor,
-        valid_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        mask = valid_mask.unsqueeze(-1).float()
-        denom = mask.sum(dim=1).clamp(min=1.0)
-        return (embeddings * mask).sum(dim=1) / denom
-
     def pool(
         self,
         embeddings: torch.Tensor,
@@ -471,7 +462,8 @@ class PeakSetSIGReg(nn.Module):
         valid_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.pooling_type == "mean":
-            pooled = self._mean_pool(embeddings, valid_mask)
+            mask = valid_mask.unsqueeze(-1).float()
+            pooled = (embeddings * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
             return pooled, pooled
         if self.pooling_type == "pma":
             query = self.pool_query.unsqueeze(0).expand(embeddings.shape[0], -1, -1)
