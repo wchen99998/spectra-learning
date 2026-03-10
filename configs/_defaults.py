@@ -24,7 +24,7 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.gco_eta = 1e-3
     cfg.gco_log_lambda_init = -8.0
     cfg.gco_log_lambda_min = -12.0
-    cfg.gco_log_lambda_max = 2.0
+    cfg.gco_log_lambda_max = 6.0
     cfg.vicreg_beta = 1e-3
     cfg.vicreg_sim_coeff = 0.0
     cfg.vicreg_std_coeff = 25.0
