@@ -725,13 +725,7 @@ class PeakSetSIGReg(nn.Module):
         regularizer_valid_flat = fused_visible
 
         with torch.no_grad():
-            collapse_metrics = self._collapse_metrics(
-                fused_emb,
-                fused_visible,
-                B,
-                V,
-                0,
-            )
+            collapse_metrics = self._collapse_metrics(fused_emb, fused_visible, B, V)
             local_to_global_emb_std_ratio = (
                 collapse_metrics["local_emb_std"] / collapse_metrics["global_emb_std"]
             )
@@ -807,7 +801,6 @@ class PeakSetSIGReg(nn.Module):
             "sigreg_term": sigreg_term,
             "jepa_term": jepa_term,
             "target_sigreg_term_over_jepa_term": target_sigreg_term_over_jepa_term,
-            "valid_fraction": context_fraction,
             "context_fraction": context_fraction,
             "masked_fraction": masked_fraction,
             "sigreg_lambda_current": sigreg_lambda_current,
@@ -841,27 +834,12 @@ class PeakSetSIGReg(nn.Module):
         visible_mask: torch.Tensor,
         B: int,
         V: int,
-        target_global_view_idx: int,
     ) -> dict[str, torch.Tensor]:
         """Compute per-view collapse indicators (detached, no grad)."""
-        emb = fused_emb.float().reshape(
-            V, B, fused_emb.shape[1], fused_emb.shape[2]
-        )  # [V, B, N, D]
-        mask = visible_mask.reshape(V, B, visible_mask.shape[1])  # [V, B, N]
-
-        global_emb = emb[target_global_view_idx]
-        global_mask = mask[target_global_view_idx]
-        local_emb = torch.cat(
-            (emb[:target_global_view_idx], emb[target_global_view_idx + 1 :]), dim=0
-        )
-        local_mask = torch.cat(
-            (mask[:target_global_view_idx], mask[target_global_view_idx + 1 :]), dim=0
-        )
+        emb = fused_emb.float().reshape(V, B, fused_emb.shape[1], fused_emb.shape[2])
+        mask = visible_mask.reshape(V, B, visible_mask.shape[1])
         result: dict[str, torch.Tensor] = {}
-        for prefix, e, m in [
-            ("global", global_emb, global_mask),
-            ("local", local_emb, local_mask),
-        ]:
+        for prefix, e, m in [("global", emb[0], mask[0]), ("local", emb[1:], mask[1:])]:
             for k, v in _masked_embedding_stats(e, m).items():
                 result[f"{prefix}_{k}"] = v
         return result

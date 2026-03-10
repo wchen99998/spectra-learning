@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 import os
 
@@ -317,7 +317,7 @@ def _build_dataset(
     filenames: list[str],
     batch_size: int,
     shuffle_buffer: int,
-    seed: Optional[int],
+    seed: int | None,
     drop_remainder: bool,
     *,
     tfrecord_buffer_size: int,

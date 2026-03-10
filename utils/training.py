@@ -5,14 +5,14 @@ import logging
 from pathlib import Path
 from typing import Any
 
-import lightning.pytorch as pl
-import torch
-from lightning.pytorch.loggers import CSVLogger
-from ml_collections import config_dict
-
 import datetime
 import os
-from typing import Mapping
+
+import lightning.pytorch as pl
+import torch
+from collections.abc import Mapping
+from lightning.pytorch.loggers import CSVLogger
+from ml_collections import config_dict
 
 import numpy as np
 
