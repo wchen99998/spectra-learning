@@ -12,14 +12,9 @@ def learning_rate_at_step(
     schedule_type: str = "cosine",
     min_learning_rate: float | None = None,
 ) -> float:
-    if warmup_steps > 0:
-        warmup = min(1.0, step / warmup_steps)
-        effective_step = max(0, step - warmup_steps)
-        effective_total = max(1, total_steps - warmup_steps)
-    else:
-        warmup = 1.0
-        effective_step = step
-        effective_total = max(1, total_steps)
+    warmup = min(1.0, step / warmup_steps) if warmup_steps > 0 else 1.0
+    effective_step = max(0, step - warmup_steps)
+    effective_total = max(1, total_steps - warmup_steps)
 
     parts = schedule_type.split(";")
     schedule_base = parts[0]
