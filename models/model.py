@@ -688,11 +688,7 @@ class PeakSetSIGReg(nn.Module):
             sigreg_term = context_emb.new_tensor(0.0)
 
         loss = jepa_term + sigreg_term
-        safe_jepa = jepa_term.clamp_min(1e-8)
-        target_sigreg_term_over_jepa_term = sigreg_term / safe_jepa
         valid_peak_count = peak_valid_mask.float().sum().clamp_min(1.0)
-        masked_fraction = target_masks.float().sum() / valid_peak_count
-        context_fraction = context_mask.float().sum() / valid_peak_count
 
         _dt = context_emb.dtype
         return {
