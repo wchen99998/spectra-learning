@@ -15,6 +15,7 @@ from ml_collections import config_dict
 from rdkit import DataStructs
 from rdkit import Chem
 from rdkit.Chem import AllChem
+from input_pipeline import numpy_batch_to_torch
 from utils.massspec_probe_targets import (
     FG_SMARTS,
     REGRESSION_TARGET_KEYS,
@@ -729,26 +730,6 @@ def ensure_nist20_probe_prepared(
         json.dump(metadata, f, indent=2)
     logger.info("Saved NIST20 probe metadata to %s", metadata_path)
     return metadata
-
-
-def _to_torch(value: Any) -> Any:
-    import torch
-
-    if isinstance(value, np.ndarray):
-        if value.dtype == object:
-            return _to_torch(value.tolist())
-        if not value.flags.c_contiguous or not value.flags.writeable:
-            value = value.copy()
-        return torch.from_numpy(value)
-    if isinstance(value, bytes):
-        return value.decode("utf-8")
-    if isinstance(value, list):
-        return [_to_torch(item) for item in value]
-    return value
-
-
-def numpy_batch_to_torch(batch: dict[str, Any]) -> dict[str, Any]:
-    return {key: _to_torch(value) for key, value in batch.items()}
 
 
 def _parse_probe_batch(
