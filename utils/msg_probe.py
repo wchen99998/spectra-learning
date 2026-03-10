@@ -12,9 +12,8 @@ import torch.nn.functional as F
 from ml_collections import config_dict
 from sklearn.metrics import r2_score, roc_auc_score
 
-from input_pipeline import TfLightningDataModule
+from input_pipeline import TfLightningDataModule, numpy_batch_to_torch
 from models.model import PeakSetSIGReg
-from input_pipeline import numpy_batch_to_torch
 from utils.massspec_probe_data import MassSpecProbeData
 from utils.massspec_probe_targets import FG_SMARTS, REGRESSION_TARGET_KEYS
 from utils.schedulers import learning_rate_at_step
@@ -319,12 +318,10 @@ def run_msg_probe(
     probe_lr = float(config.get("msg_probe_learning_rate", 1e-3))
     probe_weight_decay = float(config.get("msg_probe_weight_decay", 1e-2))
     probe_warmup_steps = int(config.get("msg_probe_warmup_steps", 100))
-    max_train_samples = config.get("msg_probe_max_train_samples", None)
-    if max_train_samples is not None:
-        max_train_samples = int(max_train_samples)
-    max_test_samples = config.get("msg_probe_max_test_samples", None)
-    if max_test_samples is not None:
-        max_test_samples = int(max_test_samples)
+    _mts = config.get("msg_probe_max_train_samples", None)
+    max_train_samples = int(_mts) if _mts is not None else None
+    _mte = config.get("msg_probe_max_test_samples", None)
+    max_test_samples = int(_mte) if _mte is not None else None
     peak_ordering = str(config.get("peak_ordering", "intensity"))
     probe_data = MassSpecProbeData.from_config(config)
 
