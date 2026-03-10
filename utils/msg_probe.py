@@ -117,25 +117,6 @@ def probe_steps_per_epoch(
     return math.ceil(size / batch_size)
 
 
-def _build_probe_feature_extractor(
-    backbone: PeakSetSIGReg,
-) -> Callable[[dict[str, torch.Tensor]], torch.Tensor]:
-    def extract(batch: dict[str, torch.Tensor]) -> torch.Tensor:
-        peak_mz = batch["peak_mz"]
-        peak_intensity = batch["peak_intensity"]
-        peak_valid_mask = batch["peak_valid_mask"]
-        with torch.no_grad():
-            embeddings = backbone.encoder(
-                peak_mz,
-                peak_intensity,
-                valid_mask=peak_valid_mask,
-            )
-            pooled = backbone.pool(embeddings, peak_valid_mask)
-        return pooled
-
-    return extract
-
-
 def _collect_split_targets(
     *,
     probe_data: MassSpecProbeData,
@@ -350,7 +331,15 @@ def run_msg_probe(
         max_test_samples = int(max_test_samples)
     peak_ordering = str(config.get("peak_ordering", "intensity"))
     probe_data = MassSpecProbeData.from_config(config)
-    feature_extractor = _build_probe_feature_extractor(model)
+
+    @torch.no_grad()
+    def feature_extractor(batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        embeddings = model.encoder(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            valid_mask=batch["peak_valid_mask"],
+        )
+        return model.pool(embeddings, batch["peak_valid_mask"])
 
     train_seed_base = int(config.seed) + 1_100_000
     test_seed_base = int(config.seed) + 1_200_000
