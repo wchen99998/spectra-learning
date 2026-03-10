@@ -31,7 +31,6 @@ _NUM_PEAKS_OUTPUT = 60
 _DEFAULT_MAX_PRECURSOR_MZ = 1000.0
 _PEAK_MZ_MIN = 20.0
 _PEAK_MZ_MAX = 1000.0
-_PRECURSOR_MZ_WINDOW = 2.5
 _INTENSITY_EPS = 1e-4
 _DEFAULT_MIN_PEAK_INTENSITY = _INTENSITY_EPS
 _METADATA_FILENAME = "metadata.json"
@@ -254,7 +253,6 @@ def _batched_parse_and_transform(
     """
     peak_mz_min = tf.constant(_PEAK_MZ_MIN, tf.float32)
     peak_mz_max_c = tf.constant(_PEAK_MZ_MAX, tf.float32)
-    precursor_window = tf.constant(_PRECURSOR_MZ_WINDOW, tf.float32)
     min_int = tf.constant(min_peak_intensity, tf.float32)
     max_prec = tf.constant(max_precursor_mz, tf.float32)
 
@@ -276,12 +274,7 @@ def _batched_parse_and_transform(
         precursor_mz_val = parsed["precursor_mz"][:, 0]  # [B]
 
         # ── Filter peak mz range (vectorized) ───────────────────────────────────
-        upper = tf.where(
-            precursor_mz_val > 0.0,
-            precursor_mz_val - precursor_window,
-            peak_mz_max_c,
-        )  # [B]
-        keep = (mz >= peak_mz_min) & (mz <= upper[:, tf.newaxis])
+        keep = (mz >= peak_mz_min) & (mz <= peak_mz_max_c)
         mz = tf.where(keep, mz, 0.0)
         intensity = tf.where(keep, intensity, 0.0)
 
@@ -294,6 +287,11 @@ def _batched_parse_and_transform(
         values, indices = tf.math.top_k(intensity, k=num_peaks, sorted=True)
         intensity = values
         mz = tf.gather(mz, indices, batch_dims=1)  # [B, num_peaks]
+
+        # ── Renormalize intensity so max valid peak = 1.0 ─────────────────────
+        max_intensity = tf.reduce_max(intensity, axis=1, keepdims=True)
+        max_intensity = tf.maximum(max_intensity, 1e-8)
+        intensity = intensity / max_intensity
 
         # ── Fixed-size sort (replaces variable-length compact_sort) ──────────────
         # Invalid peaks get +inf sort key so they land at the end.
@@ -347,7 +345,7 @@ def _build_dataset(
     tfrecord_buffer_size: int,
     max_precursor_mz: float,
     min_peak_intensity: float,
-    augmentation_type: str = "block_jepa",
+    augment: bool = True,
     jepa_num_target_blocks: int = 2,
     jepa_context_fraction: float = 0.5,
     jepa_target_fraction: float = 0.25,
@@ -378,7 +376,7 @@ def _build_dataset(
         peak_ordering=peak_ordering,
     )
     ds = ds.map(batched_fn, num_parallel_calls=tf.data.AUTOTUNE)
-    if augmentation_type == "block_jepa":
+    if augment:
         ds = ds.map(
             _augment_block_jepa_batch_tf(
                 num_target_blocks=jepa_num_target_blocks,
@@ -390,8 +388,6 @@ def _build_dataset(
             ),
             num_parallel_calls=tf.data.AUTOTUNE,
         )
-    elif augmentation_type != "none":
-        raise ValueError(f"Unsupported augmentation_type: {augmentation_type}")
     options = tf.data.Options()
     options.deterministic = True
     ds = ds.with_options(options)
@@ -645,7 +641,7 @@ class TfLightningDataModule:
             tfrecord_buffer_size=self.tfrecord_buffer_size,
             max_precursor_mz=self.max_precursor_mz,
             min_peak_intensity=self.min_peak_intensity,
-            augmentation_type="block_jepa",
+            augment=True,
             jepa_num_target_blocks=self.jepa_num_target_blocks,
             jepa_context_fraction=self.jepa_context_fraction,
             jepa_target_fraction=self.jepa_target_fraction,

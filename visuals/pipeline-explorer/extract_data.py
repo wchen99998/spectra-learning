@@ -32,7 +32,7 @@ raw_ds = _build_dataset(
     tfrecord_buffer_size=8 * 1024 * 1024,
     max_precursor_mz=cfg.max_precursor_mz,
     min_peak_intensity=cfg.min_peak_intensity,
-    augmentation_type="none",
+    augment=False,
     peak_ordering=cfg.peak_ordering,
 )
 
@@ -51,7 +51,7 @@ aug_ds = _build_dataset(
     tfrecord_buffer_size=8 * 1024 * 1024,
     max_precursor_mz=cfg.max_precursor_mz,
     min_peak_intensity=cfg.min_peak_intensity,
-    augmentation_type="block_jepa",
+    augment=True,
     jepa_num_target_blocks=cfg.jepa_num_target_blocks,
     jepa_context_fraction=cfg.jepa_context_fraction,
     jepa_target_fraction=cfg.jepa_target_fraction,
