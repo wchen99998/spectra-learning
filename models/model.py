@@ -38,15 +38,7 @@ class PeakFeatureEmbedder(nn.Module):
         peak_intensity: torch.Tensor,
     ) -> torch.Tensor:
         log_intensity = torch.log1p(peak_intensity.clamp(min=0.0))
-        features = torch.cat(
-            [
-                peak_mz.unsqueeze(-1),
-                peak_intensity.unsqueeze(-1),
-                log_intensity.unsqueeze(-1),
-            ],
-            dim=-1,
-        )
-        return self.mlp(features)
+        return self.mlp(torch.stack([peak_mz, peak_intensity, log_intensity], dim=-1))
 
 
 def _build_non_causal_blocks(
