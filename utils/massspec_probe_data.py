@@ -568,9 +568,29 @@ def _process_nist20_probe_data(
     return result
 
 
-def _load_json(path: Path) -> dict[str, Any]:
-    with path.open() as f:
-        return json.load(f)
+def _probe_metadata_valid(
+    output_dir: Path,
+    expected_version: int,
+    max_precursor_mz: float,
+) -> dict[str, Any] | None:
+    metadata_path = output_dir / _METADATA_FILENAME
+    if not metadata_path.exists():
+        return None
+    with metadata_path.open() as f:
+        metadata = json.load(f)
+    if int(metadata.get("metadata_version", 0)) != expected_version:
+        return None
+    if float(metadata.get("max_precursor_mz", float("inf"))) != float(max_precursor_mz):
+        return None
+    for split in ("train", "val", "test"):
+        if not all(
+            (output_dir / split / fn).exists()
+            for fn in metadata.get(f"{split}_files", [])
+        ):
+            return None
+    if "adduct_vocab" not in metadata or "instrument_type_vocab" not in metadata:
+        return None
+    return metadata
 
 
 def ensure_massspec_probe_prepared(
@@ -579,39 +599,19 @@ def ensure_massspec_probe_prepared(
     max_precursor_mz: float,
     num_shards: int = _DEFAULT_MASSSPEC_NUM_SHARDS,
 ) -> dict[str, Any]:
-    metadata_path = output_dir / _METADATA_FILENAME
-    if metadata_path.exists():
-        metadata = _load_json(metadata_path)
-        version_ok = (
-            int(metadata.get("metadata_version", 0)) == MASSSPEC_METADATA_VERSION
-        )
-        precursor_ok = float(metadata.get("max_precursor_mz", float("inf"))) == float(
-            max_precursor_mz
-        )
-        train_ok = all(
-            (output_dir / "train" / fn).exists()
-            for fn in metadata.get("train_files", [])
-        )
-        val_ok = all(
-            (output_dir / "val" / fn).exists() for fn in metadata.get("val_files", [])
-        )
-        test_ok = all(
-            (output_dir / "test" / fn).exists() for fn in metadata.get("test_files", [])
-        )
-        vocab_ok = "adduct_vocab" in metadata and "instrument_type_vocab" in metadata
-        if version_ok and precursor_ok and train_ok and val_ok and test_ok and vocab_ok:
-            logger.info("Found existing MassSpec probe TFRecords at %s", output_dir)
-            return metadata
-
+    cached = _probe_metadata_valid(
+        output_dir, MASSSPEC_METADATA_VERSION, max_precursor_mz
+    )
+    if cached is not None:
+        logger.info("Found existing MassSpec probe TFRecords at %s", output_dir)
+        return cached
     output_dir.mkdir(parents=True, exist_ok=True)
     metadata = _process_massspec_probe_data(
-        output_dir,
-        num_shards,
-        max_precursor_mz=max_precursor_mz,
+        output_dir, num_shards, max_precursor_mz=max_precursor_mz
     )
-    with metadata_path.open("w") as f:
+    with (output_dir / _METADATA_FILENAME).open("w") as f:
         json.dump(metadata, f, indent=2)
-    logger.info("Saved MassSpec probe metadata to %s", metadata_path)
+    logger.info("Saved MassSpec probe metadata to %s", output_dir / _METADATA_FILENAME)
     return metadata
 
 
@@ -622,38 +622,19 @@ def ensure_nist20_probe_prepared(
     data_dir: Path,
     num_shards: int = _DEFAULT_MASSSPEC_NUM_SHARDS,
 ) -> dict[str, Any]:
-    metadata_path = output_dir / _METADATA_FILENAME
-    if metadata_path.exists():
-        metadata = _load_json(metadata_path)
-        version_ok = int(metadata.get("metadata_version", 0)) == NIST20_METADATA_VERSION
-        precursor_ok = float(metadata.get("max_precursor_mz", float("inf"))) == float(
-            max_precursor_mz
-        )
-        train_ok = all(
-            (output_dir / "train" / fn).exists()
-            for fn in metadata.get("train_files", [])
-        )
-        val_ok = all(
-            (output_dir / "val" / fn).exists() for fn in metadata.get("val_files", [])
-        )
-        test_ok = all(
-            (output_dir / "test" / fn).exists() for fn in metadata.get("test_files", [])
-        )
-        vocab_ok = "adduct_vocab" in metadata and "instrument_type_vocab" in metadata
-        if version_ok and precursor_ok and train_ok and val_ok and test_ok and vocab_ok:
-            logger.info("Found existing NIST20 probe TFRecords at %s", output_dir)
-            return metadata
-
+    cached = _probe_metadata_valid(
+        output_dir, NIST20_METADATA_VERSION, max_precursor_mz
+    )
+    if cached is not None:
+        logger.info("Found existing NIST20 probe TFRecords at %s", output_dir)
+        return cached
     output_dir.mkdir(parents=True, exist_ok=True)
     metadata = _process_nist20_probe_data(
-        output_dir,
-        num_shards,
-        max_precursor_mz=max_precursor_mz,
-        data_dir=data_dir,
+        output_dir, num_shards, max_precursor_mz=max_precursor_mz, data_dir=data_dir
     )
-    with metadata_path.open("w") as f:
+    with (output_dir / _METADATA_FILENAME).open("w") as f:
         json.dump(metadata, f, indent=2)
-    logger.info("Saved NIST20 probe metadata to %s", metadata_path)
+    logger.info("Saved NIST20 probe metadata to %s", output_dir / _METADATA_FILENAME)
     return metadata
 
 
