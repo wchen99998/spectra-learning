@@ -28,6 +28,36 @@ def _make_batch(batch_size: int = 4, num_peaks: int = 6, num_targets: int = 2, i
     return batch
 
 
+def _make_pipeline_prepended_batch(
+    batch_size: int = 4,
+    num_peaks: int = 6,
+    num_targets: int = 2,
+) -> dict[str, torch.Tensor]:
+    """Create a batch that mimics what the TF pipeline produces when use_precursor_token=True.
+
+    The precursor token is already at position 0, and `precursor_mz` is absent.
+    Total sequence length is num_peaks + 1.
+    """
+    N = num_peaks + 1  # includes prepended precursor token
+    peak_mz = torch.rand(batch_size, N)
+    peak_intensity = torch.rand(batch_size, N)
+    peak_intensity[:, 0] = -1.0  # sentinel
+    peak_valid_mask = torch.ones(batch_size, N, dtype=torch.bool)
+    context_mask = torch.zeros(batch_size, N, dtype=torch.bool)
+    context_mask[:, 0] = True  # precursor always in context
+    context_mask[:, 1:3] = True
+    target_masks = torch.zeros(batch_size, num_targets, N, dtype=torch.bool)
+    for target_idx in range(num_targets):
+        target_masks[:, target_idx, 3 + target_idx] = True
+    return {
+        "peak_mz": peak_mz,
+        "peak_intensity": peak_intensity,
+        "peak_valid_mask": peak_valid_mask,
+        "context_mask": context_mask,
+        "target_masks": target_masks,
+    }
+
+
 class DataPipelineContractTests(unittest.TestCase):
     def test_batch_has_required_keys(self):
         batch = _make_batch()
@@ -189,33 +219,43 @@ class PrecursorTokenTests(unittest.TestCase):
         model_kwargs.update(kwargs)
         return PeakSetSIGReg(**model_kwargs)
 
-    def test_forward_loss_is_finite_with_precursor(self):
+    def test_forward_with_pipeline_prepended_batch(self):
+        """forward_augmented works with pipeline-prepended batch (N+1 tensors, no precursor_mz key)."""
         model = self._build_model()
-        batch = _make_batch(num_targets=model.jepa_num_target_blocks, include_precursor=True)
+        batch = _make_pipeline_prepended_batch(
+            num_peaks=6, num_targets=model.jepa_num_target_blocks,
+        )
+        self.assertNotIn("precursor_mz", batch)
         metrics = model.forward_augmented(batch)
         self.assertTrue(torch.isfinite(metrics["loss"]).item())
 
-    def test_encode_output_shape_with_precursor(self):
+    def test_encode_with_prepended_batch(self):
+        """encode() works with a batch where precursor is already prepended."""
         model = self._build_model()
+        N = 7  # 6 peaks + 1 precursor
         batch = {
-            "peak_mz": torch.rand(3, 6),
-            "peak_intensity": torch.rand(3, 6),
-            "peak_valid_mask": torch.ones(3, 6, dtype=torch.bool),
-            "precursor_mz": torch.rand(3) * 500 + 100,
+            "peak_mz": torch.rand(3, N),
+            "peak_intensity": torch.rand(3, N),
+            "peak_valid_mask": torch.ones(3, N, dtype=torch.bool),
         }
+        batch["peak_intensity"][:, 0] = -1.0
         pooled = model.encode(batch, train=False)
         self.assertEqual(pooled.shape, (3, model.model_dim))
 
     def test_no_nan_from_sentinel_intensity(self):
         """intensity=-1 must not produce NaN via log1p clamp."""
         model = self._build_model()
-        batch = _make_batch(num_targets=model.jepa_num_target_blocks, include_precursor=True)
+        batch = _make_pipeline_prepended_batch(
+            num_peaks=6, num_targets=model.jepa_num_target_blocks,
+        )
         metrics = model.forward_augmented(batch)
         self.assertFalse(torch.isnan(metrics["loss"]).item())
 
     def test_gradients_through_precursor_token(self):
         model = self._build_model()
-        batch = _make_batch(num_targets=model.jepa_num_target_blocks, include_precursor=True)
+        batch = _make_pipeline_prepended_batch(
+            num_peaks=6, num_targets=model.jepa_num_target_blocks,
+        )
         loss = model.forward_augmented(batch)["loss"]
         loss.backward()
         grads = [p.grad for p in model.encoder.parameters() if p.requires_grad]
@@ -245,6 +285,70 @@ class PrecursorTokenTests(unittest.TestCase):
         self.assertFalse(result["target_masks"][:, :, 0].any())
         # Precursor intensity sentinel
         self.assertTrue((result["peak_intensity"][:, 0] == -1.0).all())
+
+
+class TfPrependPrecursorTokenTests(unittest.TestCase):
+    """Test the TF-side _prepend_precursor_token_tf function."""
+
+    def test_shapes_and_values(self):
+        import tensorflow as tf
+        from input_pipeline import _prepend_precursor_token_tf
+
+        B, N, K = 4, 8, 2
+        batch = {
+            "peak_mz": tf.random.uniform([B, N]),
+            "peak_intensity": tf.random.uniform([B, N]),
+            "peak_valid_mask": tf.ones([B, N], dtype=tf.bool),
+            "precursor_mz": tf.random.uniform([B]),
+            "context_mask": tf.ones([B, N], dtype=tf.bool),
+            "target_masks": tf.zeros([B, K, N], dtype=tf.bool),
+            "rt": tf.zeros([B]),
+        }
+        out = _prepend_precursor_token_tf(batch)
+
+        # precursor_mz should be removed
+        self.assertNotIn("precursor_mz", out)
+        # rt should be preserved
+        self.assertIn("rt", out)
+
+        # Shapes: N+1 in sequence dim
+        self.assertEqual(out["peak_mz"].shape, (B, N + 1))
+        self.assertEqual(out["peak_intensity"].shape, (B, N + 1))
+        self.assertEqual(out["peak_valid_mask"].shape, (B, N + 1))
+        self.assertEqual(out["context_mask"].shape, (B, N + 1))
+        self.assertEqual(out["target_masks"].shape, (B, K, N + 1))
+
+        # Sentinel intensity at position 0
+        self.assertTrue((out["peak_intensity"][:, 0].numpy() == -1.0).all())
+        # Valid at position 0
+        self.assertTrue(out["peak_valid_mask"][:, 0].numpy().all())
+        # Context at position 0
+        self.assertTrue(out["context_mask"][:, 0].numpy().all())
+        # Not a target at position 0
+        self.assertFalse(out["target_masks"][:, :, 0].numpy().any())
+        # Precursor mz at position 0
+        self.assertTrue(
+            (out["peak_mz"][:, 0].numpy() == batch["precursor_mz"].numpy()).all()
+        )
+
+    def test_without_masks(self):
+        """Works on raw (pre-augmentation) batches without context_mask/target_masks."""
+        import tensorflow as tf
+        from input_pipeline import _prepend_precursor_token_tf
+
+        B, N = 3, 5
+        batch = {
+            "peak_mz": tf.random.uniform([B, N]),
+            "peak_intensity": tf.random.uniform([B, N]),
+            "peak_valid_mask": tf.ones([B, N], dtype=tf.bool),
+            "precursor_mz": tf.random.uniform([B]),
+        }
+        out = _prepend_precursor_token_tf(batch)
+
+        self.assertNotIn("precursor_mz", out)
+        self.assertEqual(out["peak_mz"].shape, (B, N + 1))
+        self.assertNotIn("context_mask", out)
+        self.assertNotIn("target_masks", out)
 
 
 if __name__ == "__main__":

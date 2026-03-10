@@ -237,6 +237,42 @@ def _augment_block_jepa_batch_tf(
     return apply
 
 
+def _prepend_precursor_token_tf(batch: dict) -> dict:
+    """Prepend a precursor token at position 0 in the TF pipeline.
+
+    The precursor token uses intensity=-1 as a sentinel so the model can
+    distinguish it from real peaks.  It is always valid, always in context,
+    and never a JEPA target.  After prepending, ``precursor_mz`` is removed
+    from the batch so the model skips its own GPU-side prepend.
+    """
+    peak_mz = batch["peak_mz"]                # [B, N]
+    peak_intensity = batch["peak_intensity"]   # [B, N]
+    peak_valid_mask = batch["peak_valid_mask"] # [B, N]
+    precursor_mz = batch["precursor_mz"]       # [B]
+    B = tf.shape(peak_mz)[0]
+
+    pre_mz = tf.expand_dims(precursor_mz, 1)          # [B, 1]
+    pre_int = tf.fill([B, 1], -1.0)                    # sentinel
+    pre_valid = tf.ones([B, 1], dtype=tf.bool)
+
+    out = dict(batch)
+    out["peak_mz"] = tf.concat([pre_mz, peak_mz], axis=1)
+    out["peak_intensity"] = tf.concat([pre_int, peak_intensity], axis=1)
+    out["peak_valid_mask"] = tf.concat([pre_valid, peak_valid_mask], axis=1)
+
+    if "context_mask" in batch:
+        out["context_mask"] = tf.concat(
+            [tf.ones([B, 1], dtype=tf.bool), batch["context_mask"]], axis=1,
+        )
+    if "target_masks" in batch:
+        K = tf.shape(batch["target_masks"])[1]
+        out["target_masks"] = tf.concat(
+            [tf.zeros([B, K, 1], dtype=tf.bool), batch["target_masks"]], axis=2,
+        )
+
+    del out["precursor_mz"]  # consumed into peak_mz[:, 0]
+    return out
+
 
 def _batched_parse_and_transform(
     *,
@@ -354,6 +390,8 @@ def _build_dataset(
     intensity_jitter_std: float = 0.001,
     peak_ordering: str = "intensity",
     num_parallel_reads: int | None = None,
+    use_precursor_token: bool = False,
+    num_peaks: int = _NUM_PEAKS_OUTPUT,
 ) -> tf.data.Dataset:
     if num_parallel_reads is None:
         num_parallel_reads = tf.data.AUTOTUNE
@@ -372,7 +410,7 @@ def _build_dataset(
     batched_fn = _batched_parse_and_transform(
         max_precursor_mz=max_precursor_mz,
         min_peak_intensity=min_peak_intensity,
-        num_peaks=_NUM_PEAKS_OUTPUT,
+        num_peaks=num_peaks,
         peak_ordering=peak_ordering,
     )
     ds = ds.map(batched_fn, num_parallel_calls=tf.data.AUTOTUNE)
@@ -388,6 +426,8 @@ def _build_dataset(
             ),
             num_parallel_calls=tf.data.AUTOTUNE,
         )
+    if use_precursor_token:
+        ds = ds.map(_prepend_precursor_token_tf, num_parallel_calls=tf.data.AUTOTUNE)
     options = tf.data.Options()
     options.deterministic = True
     ds = ds.with_options(options)
@@ -406,12 +446,14 @@ def _compute_info(
     *,
     output_dir: Path,
     max_precursor_mz: float,
+    num_peaks: int = _NUM_PEAKS_OUTPUT,
+    use_precursor_token: bool = False,
 ) -> dict[str, Any]:
     return {
         "tfrecord_dir": str(output_dir),
         "train_size": gems_metadata["train_size"],
         "validation_size": gems_metadata["validation_size"],
-        "num_peaks": _NUM_PEAKS_OUTPUT,
+        "num_peaks": num_peaks + (1 if use_precursor_token else 0),
         "max_precursor_mz": max_precursor_mz,
         "peak_mz_min": _PEAK_MZ_MIN,
         "peak_mz_max": _PEAK_MZ_MAX,
@@ -572,6 +614,8 @@ class TfLightningDataModule:
         self.intensity_jitter_std = float(
             config.get("sigreg_intensity_jitter_std", 0.001)
         )
+        self.use_precursor_token = bool(config.get("use_precursor_token", False))
+        self.num_peaks_output = int(config.get("num_peaks", _NUM_PEAKS_OUTPUT))
 
         self.gems_metadata = _ensure_gems_downloaded(
             output_dir=self.gems_dir,
@@ -593,6 +637,8 @@ class TfLightningDataModule:
             self.gems_metadata,
             output_dir=self.output_dir,
             max_precursor_mz=self.max_precursor_mz,
+            num_peaks=self.num_peaks_output,
+            use_precursor_token=self.use_precursor_token,
         )
 
         self.steps = {
@@ -649,6 +695,8 @@ class TfLightningDataModule:
             mz_jitter_std=self.mz_jitter_std,
             intensity_jitter_std=self.intensity_jitter_std,
             peak_ordering=self.peak_ordering,
+            use_precursor_token=self.use_precursor_token,
+            num_peaks=self.num_peaks_output,
         )
 
     def _build_gems_train_dataset(self, seed: int) -> tf.data.Dataset:

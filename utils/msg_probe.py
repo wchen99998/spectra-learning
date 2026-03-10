@@ -267,7 +267,7 @@ def _build_probe_feature_extractor(
         raise ValueError(f"Unknown msg_probe_feature_source: {feature_source!r}")
     compiled_encoder = torch.compile(
         _encode_probe_features_impl,
-        mode="max-autotune",
+        mode="default",
         fullgraph=False,
     )
     _use_precursor = backbone.use_precursor_token

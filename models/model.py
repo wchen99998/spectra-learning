@@ -643,21 +643,6 @@ class PeakSetSIGReg(nn.Module):
         context_mask = augmented_batch["context_mask"] & peak_valid_mask
         target_masks = augmented_batch["target_masks"] & peak_valid_mask.unsqueeze(1)
 
-        if self.use_precursor_token:
-            expanded = self.prepend_precursor_token(
-                peak_mz,
-                peak_intensity,
-                peak_valid_mask,
-                augmented_batch["precursor_mz"],
-                context_mask=context_mask,
-                target_masks=target_masks,
-            )
-            peak_mz = expanded["peak_mz"]
-            peak_intensity = expanded["peak_intensity"]
-            peak_valid_mask = expanded["peak_valid_mask"]
-            context_mask = expanded["context_mask"]
-            target_masks = expanded["target_masks"]
-
         B, N = peak_mz.shape
         K = self.jepa_num_target_blocks
 
@@ -919,17 +904,6 @@ class PeakSetSIGReg(nn.Module):
         peak_mz = batch["peak_mz"]
         peak_intensity = batch["peak_intensity"]
         peak_valid_mask = batch["peak_valid_mask"]
-
-        if self.use_precursor_token:
-            expanded = self.prepend_precursor_token(
-                peak_mz,
-                peak_intensity,
-                peak_valid_mask,
-                batch["precursor_mz"],
-            )
-            peak_mz = expanded["peak_mz"]
-            peak_intensity = expanded["peak_intensity"]
-            peak_valid_mask = expanded["peak_valid_mask"]
 
         embeddings = self.encoder(peak_mz, peak_intensity, valid_mask=peak_valid_mask)
         pooled = self.pool(embeddings, peak_valid_mask)

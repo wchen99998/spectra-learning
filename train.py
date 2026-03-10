@@ -435,7 +435,7 @@ def train_and_evaluate(
 
     # Compile training step (forward + backward + optimizer + scheduler)
     autocast_dtype = _resolve_autocast_dtype(config)
-    compiled_step = torch.compile(_train_step_impl, mode="max-autotune-no-cudagraphs", fullgraph=False)
+    compiled_step = torch.compile(_train_step_impl, mode="default", fullgraph=False)
 
 
     optimizer_type = str(config.get("optimizer", "adamw")).lower()
