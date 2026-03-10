@@ -227,11 +227,8 @@ def validate_gems_artifact(artifact_dir: Path, metadata: dict[str, Any]) -> None
         raise ValueError(
             f"Expected GeMS metadata version {GEMS_METADATA_VERSION}, got {version}"
         )
-    for name in metadata["train_files"]:
-        path = artifact_dir / "train" / name
-        if not path.exists():
-            raise FileNotFoundError(path)
-    for name in metadata["validation_files"]:
-        path = artifact_dir / "validation" / name
-        if not path.exists():
-            raise FileNotFoundError(path)
+    for split, key in [("train", "train_files"), ("validation", "validation_files")]:
+        for name in metadata[key]:
+            path = artifact_dir / split / name
+            if not path.exists():
+                raise FileNotFoundError(path)
