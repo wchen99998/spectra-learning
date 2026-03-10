@@ -500,8 +500,6 @@ class TfLightningDataModule:
             str(self.gems_dir / "validation" / fn)
             for fn in self.gems_metadata["validation_files"]
         ]
-        self.gems_test_files = list(self.gems_val_files)
-
         self.info = {
             "tfrecord_dir": str(self.output_dir),
             "train_size": self.gems_metadata["train_size"],
@@ -512,24 +510,11 @@ class TfLightningDataModule:
             "peak_mz_max": _PEAK_MZ_MAX,
         }
 
-        self.steps = {
-            "gems_train": _steps_from_size(
-                int(self.info["train_size"]),
-                self.batch_size,
-                self.drop_remainder,
-            ),
-            "gems_val": _steps_from_size(
-                int(self.info["validation_size"]),
-                self.batch_size,
-                False,
-            ),
-            "gems_test": _steps_from_size(
-                int(self.info["validation_size"]),
-                self.batch_size,
-                False,
-            ),
-        }
-        self.train_steps = self.steps["gems_train"]
+        self.train_steps = _steps_from_size(
+            int(self.info["train_size"]),
+            self.batch_size,
+            self.drop_remainder,
+        )
 
         default_pin = torch.cuda.is_available()
         self.pin_memory = bool(config.get("dataloader_pin_memory", default_pin))
@@ -583,14 +568,6 @@ class TfLightningDataModule:
     def _build_gems_val_dataset(self, seed: int) -> tf.data.Dataset:
         return self._build_dataset_for_files(
             self.gems_val_files,
-            seed=seed,
-            shuffle=False,
-            drop_remainder=True,
-        )
-
-    def _build_gems_test_dataset(self, seed: int) -> tf.data.Dataset:
-        return self._build_dataset_for_files(
-            self.gems_test_files,
             seed=seed,
             shuffle=False,
             drop_remainder=True,
