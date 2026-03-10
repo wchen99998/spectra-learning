@@ -348,13 +348,6 @@ def _save_checkpoint(
     )
 
 
-def _latest_checkpoint(checkpoint_dir: Path) -> Path | None:
-    pts = sorted(checkpoint_dir.glob("*.pt"), key=lambda p: p.stat().st_mtime)
-    if not pts:
-        return None
-    return pts[-1]
-
-
 def _prune_checkpoints(checkpoint_dir: Path, keep_top_k: int = 5) -> None:
     """Keep the last checkpoint and the top-k by lowest loss."""
     pts = sorted(checkpoint_dir.glob("step-*.pt"), key=lambda p: p.stat().st_mtime)
@@ -427,7 +420,8 @@ def train_and_evaluate(
     # Resume from checkpoint
     start_epoch = 0
     global_step = 0
-    ckpt_path = _latest_checkpoint(checkpoint_dir)
+    _pts = sorted(checkpoint_dir.glob("*.pt"), key=lambda p: p.stat().st_mtime)
+    ckpt_path = _pts[-1] if _pts else None
     if ckpt_path is not None:
         logging.info("Resuming from checkpoint: %s", ckpt_path)
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
