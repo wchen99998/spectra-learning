@@ -484,10 +484,6 @@ class TfLightningDataModule:
             str(self.gems_dir / "train" / fn)
             for fn in self.gems_metadata["train_files"]
         ]
-        self.gems_val_files = [
-            str(self.gems_dir / "validation" / fn)
-            for fn in self.gems_metadata["validation_files"]
-        ]
         self.info = {
             "tfrecord_dir": str(self.output_dir),
             "train_size": self.gems_metadata["train_size"],
