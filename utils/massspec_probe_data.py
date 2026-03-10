@@ -106,16 +106,11 @@ def _load_massspec_tsv(tsv_path: Path) -> dict[str, np.ndarray]:
             precursor.append(float(row["precursor_mz"]))
             fold.append(row["fold"])
             smiles.append(row["smiles"])
-            adduct.append(row["adduct"] if row["adduct"] else "unknown")
-            instrument_type.append(
-                row["instrument_type"] if row["instrument_type"] else "unknown"
-            )
-            if row["collision_energy"] == "":
-                collision_energy.append(0.0)
-                collision_energy_present.append(0)
-            else:
-                collision_energy.append(float(row["collision_energy"]))
-                collision_energy_present.append(1)
+            adduct.append(row["adduct"] or "unknown")
+            instrument_type.append(row["instrument_type"] or "unknown")
+            ce = row["collision_energy"]
+            collision_energy.append(float(ce) if ce else 0.0)
+            collision_energy_present.append(1 if ce else 0)
 
     spectra_array = np.stack(spectra, axis=0)
     return {
