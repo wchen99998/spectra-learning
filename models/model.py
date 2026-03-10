@@ -266,20 +266,14 @@ class PeakSetSIGReg(nn.Module):
         use_precursor_token: bool = False,
     ):
         super().__init__()
-        self.num_peaks = num_peaks
         self.model_dim = model_dim
         self.use_precursor_token = bool(use_precursor_token)
 
         self.jepa_num_target_blocks = int(jepa_num_target_blocks)
-        self.jepa_context_fraction = float(jepa_context_fraction)
-        self.jepa_target_fraction = float(jepa_target_fraction)
-        self.jepa_block_min_len = int(jepa_block_min_len)
         self.use_ema_teacher_target = bool(use_ema_teacher_target)
         self.teacher_ema_decay = float(teacher_ema_decay)
         self.teacher_ema_decay_start = float(teacher_ema_decay_start)
         self.teacher_ema_decay_warmup_steps = int(teacher_ema_decay_warmup_steps)
-        self.sigreg_mz_jitter_std = sigreg_mz_jitter_std
-        self.sigreg_intensity_jitter_std = sigreg_intensity_jitter_std
         self.sigreg_lambda = float(sigreg_lambda)
         self.sigreg_lambda_warmup_steps = int(sigreg_lambda_warmup_steps)
         self.gco_var_floor_target = float(gco_var_floor_target)
