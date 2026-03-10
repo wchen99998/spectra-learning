@@ -77,17 +77,6 @@ def _build_non_causal_blocks(
     )
 
 
-def _build_standard_rope_inv_freq(
-    *,
-    head_dim: int,
-    base: float,
-    device: torch.device,
-) -> torch.Tensor:
-    half_dim = head_dim // 2
-    freq_idx = torch.arange(half_dim, device=device, dtype=torch.float32)
-    return 1.0 / (float(base) ** (freq_idx / half_dim))
-
-
 def _compute_rope_freqs(
     use_rope: bool,
     seq_len: int,
@@ -152,12 +141,12 @@ class PeakSetEncoder(nn.Module):
         self.embedder = PeakFeatureEmbedder(model_dim, feature_mlp_hidden_dim)
         heads = int(num_heads)
         head_dim = model_dim // heads
-        inv_freq = _build_standard_rope_inv_freq(
-            head_dim=head_dim,
-            base=10000.0,
-            device=torch.device("cpu"),
+        _h = head_dim // 2
+        self.register_buffer(
+            "rope_inv_freq",
+            1.0 / (10000.0 ** (torch.arange(_h, dtype=torch.float32) / _h)),
+            persistent=False,
         )
-        self.register_buffer("rope_inv_freq", inv_freq, persistent=False)
         self.blocks = _build_non_causal_blocks(
             dim=model_dim,
             num_layers=num_layers,
@@ -354,13 +343,11 @@ class PeakSetSIGReg(nn.Module):
         while self.model_dim % pred_heads != 0:
             pred_heads -= 1
         predictor_head_dim = self.model_dim // pred_heads
-        predictor_inv_freq = _build_standard_rope_inv_freq(
-            head_dim=predictor_head_dim,
-            base=10000.0,
-            device=torch.device("cpu"),
-        )
+        _ph = predictor_head_dim // 2
         self.register_buffer(
-            "predictor_rope_inv_freq", predictor_inv_freq, persistent=False
+            "predictor_rope_inv_freq",
+            1.0 / (10000.0 ** (torch.arange(_ph, dtype=torch.float32) / _ph)),
+            persistent=False,
         )
         self.masked_latent_predictor = _build_non_causal_blocks(
             dim=self.model_dim,
