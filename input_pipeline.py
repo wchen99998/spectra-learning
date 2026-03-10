@@ -165,9 +165,6 @@ def _augment_block_jepa_batch_tf(
             0.0,
             1.0,
         )
-        peak_intensity = tf.where(
-            peak_valid_mask, peak_intensity, tf.zeros_like(peak_intensity)
-        )
         context_mask, target_masks = _sample_block_masks_tf(
             peak_valid_mask,
             num_target_blocks=num_target_blocks,
