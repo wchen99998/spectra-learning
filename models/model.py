@@ -253,9 +253,8 @@ class PeakSetSIGReg(nn.Module):
         self.use_precursor_token = bool(use_precursor_token)
 
         self.jepa_num_target_blocks = int(jepa_num_target_blocks)
-        self.use_ema_teacher_target = bool(use_ema_teacher_target)
-        self.teacher_ema_decay = float(teacher_ema_decay)
-        self.teacher_ema_decay_start = float(teacher_ema_decay_start)
+        _teacher_ema_decay = float(teacher_ema_decay)
+        _teacher_ema_decay_start = float(teacher_ema_decay_start)
         self.teacher_ema_decay_warmup_steps = int(teacher_ema_decay_warmup_steps)
         self.sigreg_lambda = float(sigreg_lambda)
         self.sigreg_lambda_warmup_steps = int(sigreg_lambda_warmup_steps)
@@ -283,14 +282,14 @@ class PeakSetSIGReg(nn.Module):
         _reg("gco_c_ema", _f32(0.0))
         _reg(
             "teacher_ema_decay_start_tensor",
-            _f32(self.teacher_ema_decay_start),
+            _f32(_teacher_ema_decay_start),
             persistent=False,
         )
-        _reg("teacher_ema_decay_target", _f32(self.teacher_ema_decay), persistent=False)
+        _reg("teacher_ema_decay_target", _f32(_teacher_ema_decay), persistent=False)
         _ema_init = (
-            self.teacher_ema_decay
+            _teacher_ema_decay
             if self.teacher_ema_decay_warmup_steps <= 0
-            else self.teacher_ema_decay_start
+            else _teacher_ema_decay_start
         )
         _reg("teacher_ema_decay_current", _f32(_ema_init), persistent=False)
         _reg(
@@ -331,10 +330,10 @@ class PeakSetSIGReg(nn.Module):
             qk_norm=encoder_qk_norm,
             norm_type=self.norm_type,
         )
-        if self.use_ema_teacher_target:
+        if use_ema_teacher_target:
             self.teacher_encoder: AveragedModel | None = AveragedModel(
                 self.encoder,
-                multi_avg_fn=get_ema_multi_avg_fn(self.teacher_ema_decay),
+                multi_avg_fn=get_ema_multi_avg_fn(_teacher_ema_decay),
                 use_buffers=True,
             )
             self.teacher_encoder.requires_grad_(False)
