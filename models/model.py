@@ -312,9 +312,7 @@ class PeakSetSIGReg(nn.Module):
         if self.representation_regularizer == "gco":
             self.representation_regularizer = "gco-sigreg"
         self.norm_type = str(norm_type).lower()
-        self.masked_latent_predictor_num_layers = int(
-            masked_latent_predictor_num_layers
-        )
+        _predictor_num_layers = int(masked_latent_predictor_num_layers)
         if self.jepa_num_target_blocks < 1:
             raise ValueError("jepa_num_target_blocks must be >= 1")
         if self.representation_regularizer not in ("sigreg", "gco-sigreg", "none", ""):
@@ -372,7 +370,7 @@ class PeakSetSIGReg(nn.Module):
         )
         self.masked_latent_predictor = _build_non_causal_blocks(
             dim=self.model_dim,
-            num_layers=self.masked_latent_predictor_num_layers,
+            num_layers=_predictor_num_layers,
             num_heads=self.predictor_num_heads,
             num_kv_heads=None,
             attention_mlp_multiple=attention_mlp_multiple,
