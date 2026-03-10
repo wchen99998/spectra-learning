@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import random
 import warnings
 from collections import deque
@@ -383,16 +384,17 @@ def train_and_evaluate(
     random.seed(seed)
 
     datamodule = TfLightningDataModule(config, seed=seed)
-    num_epochs = int(config.num_epochs)
+    num_epochs = float(config.num_epochs)
     steps_per_epoch = datamodule.train_steps
-    total_steps = num_epochs * steps_per_epoch
+    total_steps = max(1, int(num_epochs * steps_per_epoch))
+    loop_epochs = max(1, math.ceil(num_epochs))
     log_every_n_steps = int(config.get("log_every_n_steps", 50))
     checkpoint_every_steps = int(config.checkpoint_every_steps)
 
     info = datamodule.info
     config.num_peaks = info["num_peaks"]
 
-    logging.info("Training for %d epochs.", num_epochs)
+    logging.info("Training for %s epochs (%d steps).", num_epochs, total_steps)
     logging.info("Steps per epoch: %d", steps_per_epoch)
     logging.info("Total steps: %d", total_steps)
     config.norm_type = _resolve_norm_type(config)
@@ -440,7 +442,10 @@ def train_and_evaluate(
     device_prefetch_size = int(config.get("device_prefetch_size", 1))
     _msg_probe_raw = float(config.get("msg_probe_every_n_steps", 0))
     if 0 < _msg_probe_raw <= 1:
-        msg_probe_every_n_steps = max(1, int(_msg_probe_raw * steps_per_epoch))
+        # For fractional epochs, compute relative to total_steps so the probe
+        # still fires during the shortened run.
+        reference_steps = total_steps if num_epochs < 1 else steps_per_epoch
+        msg_probe_every_n_steps = max(1, int(_msg_probe_raw * reference_steps))
     else:
         msg_probe_every_n_steps = int(_msg_probe_raw)
     msg_probe_cache_dir = config.get("msg_probe_cache_dir", None)
@@ -451,13 +456,15 @@ def train_and_evaluate(
     train_loader = datamodule.train_loader
     last_msg_probe_metrics: dict[str, float] = {}
 
-    for epoch in range(start_epoch, num_epochs):
+    for epoch in range(start_epoch, loop_epochs):
         prefetcher = _BatchPrefetcher(
             iter(train_loader), device, prefetch_size=device_prefetch_size,
         )
-
-        pbar = tqdm(total=steps_per_epoch, desc=f"Epoch {epoch}", unit="step")
+        epoch_steps = min(steps_per_epoch, total_steps - global_step)
+        pbar = tqdm(total=epoch_steps, desc=f"Epoch {epoch}", unit="step")
         while True:
+            if global_step >= total_steps:
+                break
             batch = prefetcher.next()
             if batch is None:
                 break
@@ -520,6 +527,14 @@ def train_and_evaluate(
     _save_checkpoint(
         checkpoint_dir / "last.pt",
         model, optimizers, schedulers,
-        global_step, num_epochs, float("nan"),
+        global_step, loop_epochs, float("nan"),
     )
+
+    if last_msg_probe_metrics:
+        logging.info("=== Final MSG Probe Results ===")
+        for k, v in sorted(last_msg_probe_metrics.items()):
+            logging.info("  %s: %.6f", k, v)
+    else:
+        logging.info("No MSG probe results were collected during training.")
+
     return {**last_msg_probe_metrics, **model_param_metrics}
