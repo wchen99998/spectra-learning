@@ -257,10 +257,10 @@ class MassSpecPreprocessTests(unittest.TestCase):
                     },
                 ),
             ):
-                metadata = massspec_probe_data._process_massspec_probe_data(
+                metadata = massspec_probe_data.ensure_massspec_probe_prepared(
                     tmp_path / "massspec_probe",
-                    4,
                     max_precursor_mz=1000.0,
+                    num_shards=4,
                 )
 
             record_path = (

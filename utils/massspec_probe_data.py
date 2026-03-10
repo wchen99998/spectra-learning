@@ -394,45 +394,6 @@ def _filter_encode_and_write(
     return result
 
 
-def _process_massspec_probe_data(
-    output_dir: Path,
-    num_shards: int,
-    *,
-    max_precursor_mz: float,
-) -> dict[str, Any]:
-    logger.info("Downloading MassSpecGym TSV...")
-    tsv_path = download_massspec_tsv(output_dir)
-
-    logger.info("Loading MassSpecGym data...")
-    return _filter_encode_and_write(
-        **_load_massspec_tsv(tsv_path),
-        output_dir=output_dir,
-        num_shards=num_shards,
-        max_precursor_mz=max_precursor_mz,
-        metadata_version=MASSSPEC_METADATA_VERSION,
-        desc_prefix="MassSpec",
-    )
-
-
-def _process_nist20_probe_data(
-    output_dir: Path,
-    num_shards: int,
-    *,
-    max_precursor_mz: float,
-    data_dir: Path,
-) -> dict[str, Any]:
-    hdf5_path = _ensure_nist20_hdf5(data_dir)
-    logger.info("Loading NIST20+MoNA HDF5 from %s ...", hdf5_path)
-    return _filter_encode_and_write(
-        **_load_nist20_hdf5(hdf5_path),
-        output_dir=output_dir,
-        num_shards=num_shards,
-        max_precursor_mz=max_precursor_mz,
-        metadata_version=NIST20_METADATA_VERSION,
-        desc_prefix="NIST20",
-    )
-
-
 def _probe_metadata_valid(
     output_dir: Path,
     expected_version: int,
@@ -471,8 +432,16 @@ def ensure_massspec_probe_prepared(
         logger.info("Found existing MassSpec probe TFRecords at %s", output_dir)
         return cached
     output_dir.mkdir(parents=True, exist_ok=True)
-    metadata = _process_massspec_probe_data(
-        output_dir, num_shards, max_precursor_mz=max_precursor_mz
+    logger.info("Downloading MassSpecGym TSV...")
+    tsv_path = download_massspec_tsv(output_dir)
+    logger.info("Loading MassSpecGym data...")
+    metadata = _filter_encode_and_write(
+        **_load_massspec_tsv(tsv_path),
+        output_dir=output_dir,
+        num_shards=num_shards,
+        max_precursor_mz=max_precursor_mz,
+        metadata_version=MASSSPEC_METADATA_VERSION,
+        desc_prefix="MassSpec",
     )
     with (output_dir / _METADATA_FILENAME).open("w") as f:
         json.dump(metadata, f, indent=2)
@@ -494,8 +463,15 @@ def ensure_nist20_probe_prepared(
         logger.info("Found existing NIST20 probe TFRecords at %s", output_dir)
         return cached
     output_dir.mkdir(parents=True, exist_ok=True)
-    metadata = _process_nist20_probe_data(
-        output_dir, num_shards, max_precursor_mz=max_precursor_mz, data_dir=data_dir
+    hdf5_path = _ensure_nist20_hdf5(data_dir)
+    logger.info("Loading NIST20+MoNA HDF5 from %s ...", hdf5_path)
+    metadata = _filter_encode_and_write(
+        **_load_nist20_hdf5(hdf5_path),
+        output_dir=output_dir,
+        num_shards=num_shards,
+        max_precursor_mz=max_precursor_mz,
+        metadata_version=NIST20_METADATA_VERSION,
+        desc_prefix="NIST20",
     )
     with (output_dir / _METADATA_FILENAME).open("w") as f:
         json.dump(metadata, f, indent=2)
