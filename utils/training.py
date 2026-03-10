@@ -199,12 +199,7 @@ def load_pretrained_weights(
     checkpoint_path: str,
 ) -> None:
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    if "state_dict" in ckpt:
-        state_dict = ckpt["state_dict"]
-    elif "model" in ckpt:
-        state_dict = ckpt["model"]
-    else:
-        state_dict = ckpt
+    state_dict = ckpt.get("state_dict") or ckpt.get("model") or ckpt
     model_state = {
         k.removeprefix("model."): v
         for k, v in state_dict.items()
