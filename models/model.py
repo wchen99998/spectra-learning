@@ -703,19 +703,15 @@ class PeakSetSIGReg(nn.Module):
                     )
                 gco_lambda = self.gco_log_lambda.exp().to(dtype=context_emb.dtype)
 
-        if self.representation_regularizer == "sigreg" and self.sigreg_lambda > 0:
-            token_sigreg_loss = self.sigreg(
-                fused_emb,
-                valid_mask=fused_visible,
-            )
+        use_sigreg = (
+            self.representation_regularizer == "sigreg" and self.sigreg_lambda > 0
+        )
+        use_gco = self.representation_regularizer == "gco-sigreg"
+        if use_sigreg or use_gco:
+            token_sigreg_loss = self.sigreg(fused_emb, valid_mask=fused_visible)
+            if use_gco:
+                sigreg_lambda_current = gco_lambda
             sigreg_term = sigreg_lambda_current * token_sigreg_loss
-        elif self.representation_regularizer == "gco-sigreg":
-            token_sigreg_loss = self.sigreg(
-                fused_emb,
-                valid_mask=fused_visible,
-            )
-            sigreg_lambda_current = gco_lambda
-            sigreg_term = gco_lambda * token_sigreg_loss
         else:
             token_sigreg_loss = context_emb.new_tensor(0.0)
             sigreg_term = context_emb.new_tensor(0.0)
