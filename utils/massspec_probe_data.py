@@ -388,27 +388,23 @@ def _write_tfrecords_with_fingerprint(
     return files, lengths
 
 
-def _process_massspec_probe_data(
+def _filter_encode_and_write(
+    *,
+    spectra: np.ndarray,
+    retention: np.ndarray,
+    precursor: np.ndarray,
+    fold: np.ndarray,
+    smiles: np.ndarray,
+    adduct: np.ndarray,
+    instrument_type: np.ndarray,
+    collision_energy: np.ndarray,
+    collision_energy_present: np.ndarray,
     output_dir: Path,
     num_shards: int,
-    *,
     max_precursor_mz: float,
+    metadata_version: int,
+    desc_prefix: str,
 ) -> dict[str, Any]:
-    logger.info("Downloading MassSpecGym TSV...")
-    tsv_path = download_massspec_tsv(output_dir)
-
-    logger.info("Loading MassSpecGym data...")
-    (
-        spectra,
-        retention,
-        precursor,
-        fold,
-        smiles,
-        adduct,
-        instrument_type,
-        collision_energy,
-        collision_energy_present,
-    ) = _load_massspec_tsv(tsv_path)
     fingerprints = _compute_morgan_fingerprints(smiles)
     adduct_id, adduct_vocab = _encode_categorical_ids(adduct)
     instrument_type_id, instrument_type_vocab = _encode_categorical_ids(instrument_type)
@@ -434,7 +430,7 @@ def _process_massspec_probe_data(
         ("test", num_shards // 4),
     ]
     result: dict[str, Any] = {
-        "metadata_version": MASSSPEC_METADATA_VERSION,
+        "metadata_version": metadata_version,
         "adduct_vocab": adduct_vocab,
         "instrument_type_vocab": instrument_type_vocab,
         "max_precursor_mz": float(max_precursor_mz),
@@ -456,12 +452,51 @@ def _process_massspec_probe_data(
             probe_valid_mol[mask],
             output_dir / split_name,
             max(1, split_shards),
-            desc=f"MassSpec {split_name.capitalize()}",
+            desc=f"{desc_prefix} {split_name.capitalize()}",
         )
         result[f"{split_name}_files"] = files
         result[f"{split_name}_lengths"] = lengths
         result[f"{split_name}_size"] = int(np.count_nonzero(mask))
     return result
+
+
+def _process_massspec_probe_data(
+    output_dir: Path,
+    num_shards: int,
+    *,
+    max_precursor_mz: float,
+) -> dict[str, Any]:
+    logger.info("Downloading MassSpecGym TSV...")
+    tsv_path = download_massspec_tsv(output_dir)
+
+    logger.info("Loading MassSpecGym data...")
+    (
+        spectra,
+        retention,
+        precursor,
+        fold,
+        smiles,
+        adduct,
+        instrument_type,
+        collision_energy,
+        collision_energy_present,
+    ) = _load_massspec_tsv(tsv_path)
+    return _filter_encode_and_write(
+        spectra=spectra,
+        retention=retention,
+        precursor=precursor,
+        fold=fold,
+        smiles=smiles,
+        adduct=adduct,
+        instrument_type=instrument_type,
+        collision_energy=collision_energy,
+        collision_energy_present=collision_energy_present,
+        output_dir=output_dir,
+        num_shards=num_shards,
+        max_precursor_mz=max_precursor_mz,
+        metadata_version=MASSSPEC_METADATA_VERSION,
+        desc_prefix="MassSpec",
+    )
 
 
 def _process_nist20_probe_data(
@@ -484,59 +519,22 @@ def _process_nist20_probe_data(
         collision_energy,
         collision_energy_present,
     ) = _load_nist20_hdf5(hdf5_path)
-    fingerprints = _compute_morgan_fingerprints(smiles)
-    adduct_id, adduct_vocab = _encode_categorical_ids(adduct)
-    instrument_type_id, instrument_type_vocab = _encode_categorical_ids(instrument_type)
-
-    keep = np.isfinite(precursor) & (precursor <= float(max_precursor_mz))
-    spectra = spectra[keep]
-    retention = retention[keep]
-    precursor = precursor[keep]
-    fold = fold[keep]
-    smiles = smiles[keep]
-    fingerprints = fingerprints[keep]
-    adduct_id = adduct_id[keep]
-    instrument_type_id = instrument_type_id[keep]
-    collision_energy = collision_energy[keep]
-    collision_energy_present = collision_energy_present[keep]
-    probe_mol_props, probe_fg_binary, probe_valid_mol = build_probe_targets_for_rows(
-        smiles
+    return _filter_encode_and_write(
+        spectra=spectra,
+        retention=retention,
+        precursor=precursor,
+        fold=fold,
+        smiles=smiles,
+        adduct=adduct,
+        instrument_type=instrument_type,
+        collision_energy=collision_energy,
+        collision_energy_present=collision_energy_present,
+        output_dir=output_dir,
+        num_shards=num_shards,
+        max_precursor_mz=max_precursor_mz,
+        metadata_version=NIST20_METADATA_VERSION,
+        desc_prefix="NIST20",
     )
-
-    splits = [
-        ("train", num_shards // 2),
-        ("val", num_shards // 4),
-        ("test", num_shards // 4),
-    ]
-    result: dict[str, Any] = {
-        "metadata_version": NIST20_METADATA_VERSION,
-        "adduct_vocab": adduct_vocab,
-        "instrument_type_vocab": instrument_type_vocab,
-        "max_precursor_mz": float(max_precursor_mz),
-    }
-    for split_name, split_shards in splits:
-        mask = fold == split_name
-        files, lengths = _write_tfrecords_with_fingerprint(
-            spectra[mask],
-            retention[mask],
-            precursor[mask],
-            fingerprints[mask],
-            smiles[mask],
-            adduct_id[mask],
-            instrument_type_id[mask],
-            collision_energy[mask],
-            collision_energy_present[mask],
-            {k: v[mask] for k, v in probe_mol_props.items()},
-            {k: v[mask] for k, v in probe_fg_binary.items()},
-            probe_valid_mol[mask],
-            output_dir / split_name,
-            max(1, split_shards),
-            desc=f"NIST20 {split_name.capitalize()}",
-        )
-        result[f"{split_name}_files"] = files
-        result[f"{split_name}_lengths"] = lengths
-        result[f"{split_name}_size"] = int(np.count_nonzero(mask))
-    return result
 
 
 def _probe_metadata_valid(
