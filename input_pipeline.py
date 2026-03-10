@@ -43,22 +43,6 @@ _METADATA_FILENAME = "metadata.json"
 
 
 @tf.function
-def _ensure_nonempty_peakset_tf(
-    peak_mz: tf.Tensor,
-    peak_intensity: tf.Tensor,
-    peak_valid_mask: tf.Tensor,
-) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
-    """Ensure each sample has at least one valid peak (fallback to index 0)."""
-    num_peaks = tf.shape(peak_valid_mask)[1]
-    has_valid = tf.reduce_any(peak_valid_mask, axis=1)  # [B]
-    needs_fallback = tf.logical_not(has_valid)
-    positions = tf.range(num_peaks, dtype=tf.int32)[tf.newaxis, :]
-    fallback = tf.logical_and(needs_fallback[:, tf.newaxis], positions == 0)
-    safe_valid_mask = tf.logical_or(peak_valid_mask, fallback)
-    return peak_mz, peak_intensity, safe_valid_mask
-
-
-@tf.function
 def _apply_peak_jitter_tf(
     peak_mz: tf.Tensor,
     peak_intensity: tf.Tensor,
@@ -191,11 +175,13 @@ def _augment_block_jepa_batch_tf(
         peak_mz = batch["peak_mz"]
         peak_intensity = batch["peak_intensity"]
         peak_valid_mask = batch["peak_valid_mask"]
-        peak_mz, peak_intensity, peak_valid_mask = _ensure_nonempty_peakset_tf(
-            peak_mz,
-            peak_intensity,
-            peak_valid_mask,
-        )
+        # Ensure each sample has at least one valid peak (fallback to index 0)
+        num_peaks = tf.shape(peak_valid_mask)[1]
+        has_valid = tf.reduce_any(peak_valid_mask, axis=1)
+        needs_fallback = tf.logical_not(has_valid)
+        positions = tf.range(num_peaks, dtype=tf.int32)[tf.newaxis, :]
+        fallback = tf.logical_and(needs_fallback[:, tf.newaxis], positions == 0)
+        peak_valid_mask = tf.logical_or(peak_valid_mask, fallback)
         peak_mz, peak_intensity = _apply_peak_jitter_tf(
             peak_mz,
             peak_intensity,
