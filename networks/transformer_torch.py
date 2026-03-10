@@ -37,10 +37,9 @@ def apply_rotary_emb(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     q_rot = _rotate_half(xq)
     k_rot = _rotate_half(xk)
-
-    xq_out = (xq * freqs_cos) + (q_rot * freqs_sin)
-    xk_out = (xk * freqs_cos) + (k_rot * freqs_sin)
-    return xq_out, xk_out
+    return (xq * freqs_cos) + (q_rot * freqs_sin), (xk * freqs_cos) + (
+        k_rot * freqs_sin
+    )
 
 
 _ACTIVATIONS: dict[str, nn.Module] = {
