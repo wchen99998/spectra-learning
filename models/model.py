@@ -693,8 +693,6 @@ class PeakSetSIGReg(nn.Module):
         V = branch_emb.shape[0]
         fused_emb = branch_emb.reshape(V * B, N, -1)
         fused_visible = branch_visible.reshape(V * B, N)
-        regularizer_emb_flat = fused_emb
-        regularizer_valid_flat = fused_visible
 
         with torch.no_grad():
             collapse_metrics = self._collapse_metrics(fused_emb, fused_visible, B, V)
@@ -702,8 +700,8 @@ class PeakSetSIGReg(nn.Module):
                 collapse_metrics["local_emb_std"] / collapse_metrics["global_emb_std"]
             )
             regularizer_stats = _masked_embedding_stats(
-                regularizer_emb_flat,
-                regularizer_valid_flat,
+                fused_emb,
+                fused_visible,
             )
             encoder_emb_std = regularizer_stats["emb_std"]
             encoder_emb_var_mean = regularizer_stats["emb_var_mean"]
@@ -742,14 +740,14 @@ class PeakSetSIGReg(nn.Module):
 
         if self.representation_regularizer == "sigreg" and self.sigreg_lambda > 0:
             token_sigreg_loss = self.sigreg(
-                regularizer_emb_flat,
-                valid_mask=regularizer_valid_flat,
+                fused_emb,
+                valid_mask=fused_visible,
             )
             sigreg_term = sigreg_lambda_current * token_sigreg_loss
         elif self.representation_regularizer == "gco-sigreg":
             token_sigreg_loss = self.sigreg(
-                regularizer_emb_flat,
-                valid_mask=regularizer_valid_flat,
+                fused_emb,
+                valid_mask=fused_visible,
             )
             sigreg_lambda_current = gco_lambda
             sigreg_term = gco_lambda * token_sigreg_loss
