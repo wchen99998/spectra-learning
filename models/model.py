@@ -895,25 +895,14 @@ class PeakSetSIGReg(nn.Module):
         local_mask = torch.cat(
             (mask[:target_global_view_idx], mask[target_global_view_idx + 1 :]), dim=0
         )
-        global_stats = _masked_embedding_stats(global_emb, global_mask)
-        local_stats = _masked_embedding_stats(local_emb, local_mask)
-
-        return {
-            "global_emb_std": global_stats["emb_std"],
-            "local_emb_std": local_stats["emb_std"],
-            "global_emb_norm": global_stats["emb_norm"],
-            "local_emb_norm": local_stats["emb_norm"],
-            "global_emb_var_mean": global_stats["emb_var_mean"],
-            "local_emb_var_mean": local_stats["emb_var_mean"],
-            "global_emb_var_floor": global_stats["emb_var_floor"],
-            "local_emb_var_floor": local_stats["emb_var_floor"],
-            "global_emb_cov_offdiag_abs_mean": global_stats["emb_cov_offdiag_abs_mean"],
-            "local_emb_cov_offdiag_abs_mean": local_stats["emb_cov_offdiag_abs_mean"],
-            "global_emb_corr_offdiag_abs_mean": global_stats[
-                "emb_corr_offdiag_abs_mean"
-            ],
-            "local_emb_corr_offdiag_abs_mean": local_stats["emb_corr_offdiag_abs_mean"],
-        }
+        result: dict[str, torch.Tensor] = {}
+        for prefix, e, m in [
+            ("global", global_emb, global_mask),
+            ("local", local_emb, local_mask),
+        ]:
+            for k, v in _masked_embedding_stats(e, m).items():
+                result[f"{prefix}_{k}"] = v
+        return result
 
     def encode(
         self,
