@@ -505,13 +505,9 @@ def _parse_probe_batch(
         rt = parsed["rt"][:, 0]
         precursor_mz_val = parsed["precursor_mz"][:, 0]
 
-        keep = (mz >= peak_mz_min) & (mz <= peak_mz_max)
+        keep = (mz >= peak_mz_min) & (mz <= peak_mz_max) & (intensity >= min_int)
         mz = tf.where(keep, mz, 0.0)
         intensity = tf.where(keep, intensity, 0.0)
-
-        keep2 = intensity >= min_int
-        mz = tf.where(keep2, mz, 0.0)
-        intensity = tf.where(keep2, intensity, 0.0)
 
         values, indices = tf.math.top_k(intensity, k=_NUM_PEAKS_OUTPUT, sorted=True)
         intensity = values
