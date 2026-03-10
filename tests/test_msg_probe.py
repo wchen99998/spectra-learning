@@ -5,7 +5,7 @@ import torch
 
 from utils.msg_probe import (
     FG_SMARTS,
-    MsgAttentiveProbe,
+    MsgLinearProbe,
     MsgProbeSplitTargets,
     _build_task_spec,
     _collect_split_targets,
@@ -14,24 +14,6 @@ from utils.msg_probe import (
     probe_steps_per_epoch,
     should_run_msg_probe,
 )
-
-
-class _DummyEncoder(torch.nn.Module):
-    def forward(
-        self,
-        peak_mz: torch.Tensor,
-        peak_intensity: torch.Tensor,
-        *,
-        valid_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        return torch.stack((peak_mz, peak_intensity), dim=-1)
-
-
-class _DummyBackbone(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.encoder = _DummyEncoder()
-        self.use_precursor_token = False
 
 
 class _DummyDataset:
@@ -68,54 +50,29 @@ class _DummyDataModule:
         return self._dataset
 
 
-class MsgAttentiveProbeTests(unittest.TestCase):
+class MsgLinearProbeTests(unittest.TestCase):
     def test_output_shapes_match_task_heads(self):
-        probe = MsgAttentiveProbe(
+        probe = MsgLinearProbe(
             input_dim=32,
-            hidden_dim=64,
-            num_attention_heads=4,
             task_names=("mol_weight", "hydroxyl", "amine"),
         )
-        features = torch.randn(7, 60, 32)
-        feature_mask = torch.ones(7, 60, dtype=torch.bool)
-        logits = probe(features, feature_mask)
+        pooled = torch.randn(7, 32)
+        logits = probe(pooled)
 
         self.assertEqual(logits["mol_weight"].shape, (7, 1))
         self.assertEqual(logits["hydroxyl"].shape, (7, 1))
         self.assertEqual(logits["amine"].shape, (7, 1))
 
-    def test_all_padded_rows_produce_finite_outputs(self):
-        probe = MsgAttentiveProbe(
+    def test_finite_outputs(self):
+        probe = MsgLinearProbe(
             input_dim=16,
-            hidden_dim=32,
-            num_attention_heads=4,
             task_names=("mol_weight", "hydroxyl"),
         )
-        features = torch.randn(3, 5, 16)
-        feature_mask = torch.tensor(
-            [
-                [False, False, False, False, False],
-                [True, True, False, False, False],
-                [False, False, False, False, False],
-            ],
-            dtype=torch.bool,
-        )
-        logits = probe(features, feature_mask)
+        pooled = torch.randn(3, 16)
+        logits = probe(pooled)
 
         self.assertTrue(torch.isfinite(logits["mol_weight"]).all().item())
         self.assertTrue(torch.isfinite(logits["hydroxyl"]).all().item())
-
-    def test_custom_attention_block_count_is_used(self):
-        probe = MsgAttentiveProbe(
-            input_dim=16,
-            hidden_dim=32,
-            num_attention_heads=4,
-            num_attention_blocks=5,
-            mlp_ratio=2,
-            task_names=("mol_weight",),
-        )
-        self.assertEqual(len(probe.blocks), 5)
-        self.assertEqual(probe.blocks[0].mlp[0].out_features, 32)
 
 
 class MsgProbeStepTests(unittest.TestCase):
@@ -146,22 +103,12 @@ class MsgProbeStepTests(unittest.TestCase):
                 },
             ),
         )
-        probe = MsgAttentiveProbe(
-            input_dim=2,
-            hidden_dim=8,
-            num_attention_heads=1,
+        input_dim = 8
+        probe = MsgLinearProbe(
+            input_dim=input_dim,
             task_names=task_spec.regression_tasks + task_spec.classification_tasks,
         )
         batch = {
-            "peak_mz": torch.tensor(
-                [[0.1, 0.2, 0.3], [0.5, 0.6, 0.7], [0.2, 0.4, 0.6]],
-                dtype=torch.float32,
-            ),
-            "peak_intensity": torch.tensor(
-                [[1.0, 0.9, 0.8], [0.7, 0.6, 0.5], [0.4, 0.3, 0.2]],
-                dtype=torch.float32,
-            ),
-            "peak_valid_mask": torch.ones(3, 3, dtype=torch.bool),
             "probe_valid_mol": torch.tensor([True, False, True], dtype=torch.bool),
             "probe_mol_weight": torch.tensor([10.0, 12.0, 16.0], dtype=torch.float32),
             "probe_logp": torch.tensor([1.0, 1.5, 2.5], dtype=torch.float32),
@@ -171,13 +118,16 @@ class MsgProbeStepTests(unittest.TestCase):
         for name in FG_SMARTS:
             batch[f"probe_fg_{name}"] = torch.tensor([0, 1, 1], dtype=torch.int32)
 
+        def dummy_extractor(b):
+            n = b["probe_valid_mol"].shape[0]
+            return torch.randn(n, input_dim)
+
         result = _probe_step(
             probe,
-            _DummyBackbone(),
             batch,
             task_spec=task_spec,
-            feature_source="encoder",
             device=torch.device("cpu"),
+            feature_extractor=dummy_extractor,
         )
 
         self.assertIsNotNone(result)

@@ -56,13 +56,9 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.msg_probe_learning_rate = 1e-3
     cfg.msg_probe_weight_decay = 1e-2
     cfg.msg_probe_warmup_steps = 100
-    cfg.msg_probe_hidden_dim = 512
-    cfg.msg_probe_num_attention_heads = None
-    cfg.msg_probe_num_attention_blocks = 3
-    cfg.msg_probe_mlp_ratio = 4
     cfg.msg_probe_max_train_samples = None
     cfg.msg_probe_max_test_samples = None
-    cfg.msg_probe_feature_source = "encoder"
+    cfg.probe_dataset = "massspec"  # "massspec" or "nist20"
 
     # Muon optimizer defaults (only used when cfg.optimizer == "muon")
     cfg.muon_lr = None              # Falls back to cfg.learning_rate

@@ -15,15 +15,11 @@ from sklearn.metrics import r2_score, roc_auc_score
 from input_pipeline import TfLightningDataModule
 from models.model import PeakSetSIGReg
 from utils.massspec_probe_data import MassSpecProbeData, numpy_batch_to_torch
-from utils.massspec_probe_targets import FG_SMARTS, REGRESSION_TARGET_KEYS, compute_probe_targets_for_smiles
+from utils.massspec_probe_targets import FG_SMARTS, REGRESSION_TARGET_KEYS
 from utils.schedulers import learning_rate_at_step
 
 
 log = logging.getLogger(__name__)
-
-_DEFAULT_MSG_PROBE_NUM_ATTENTION_BLOCKS = 3
-_DEFAULT_MSG_PROBE_MLP_RATIO = 4
-
 
 @dataclass(slots=True)
 class MsgProbeTaskSpec:
@@ -39,114 +35,24 @@ class MsgProbeSplitTargets:
     classification: dict[str, np.ndarray]
 
 
-class MsgProbeSelfAttentionBlock(torch.nn.Module):
+class MsgLinearProbe(torch.nn.Module):
     def __init__(
         self,
         *,
         input_dim: int,
-        num_attention_heads: int,
-        mlp_ratio: int,
-    ) -> None:
-        super().__init__()
-        self.attn_norm = torch.nn.RMSNorm(input_dim)
-        self.attn = torch.nn.MultiheadAttention(
-            embed_dim=input_dim,
-            num_heads=num_attention_heads,
-            batch_first=True,
-        )
-        mlp_hidden_dim = mlp_ratio * input_dim
-        self.mlp_norm = torch.nn.RMSNorm(input_dim)
-        self.mlp = torch.nn.Sequential(
-            torch.nn.Linear(input_dim, mlp_hidden_dim),
-            torch.nn.SiLU(),
-            torch.nn.Linear(mlp_hidden_dim, input_dim),
-        )
-
-    def forward(
-        self,
-        feature_tokens: torch.Tensor,
-        feature_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        attn_input = self.attn_norm(feature_tokens)
-        attended, _ = self.attn(
-            query=attn_input,
-            key=attn_input,
-            value=attn_input,
-            key_padding_mask=~feature_mask,
-            need_weights=False,
-        )
-        feature_tokens = feature_tokens + attended
-        feature_tokens = feature_tokens + self.mlp(self.mlp_norm(feature_tokens))
-        return feature_tokens
-
-
-def _prepare_attention_inputs(
-    feature_tokens: torch.Tensor,
-    feature_mask: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    safe_tokens = feature_tokens * feature_mask.unsqueeze(-1)
-    safe_mask = feature_mask.clone()
-    empty_rows = ~safe_mask.any(dim=1)
-    if empty_rows.any():
-        safe_mask[empty_rows, 0] = True
-    return safe_tokens, safe_mask
-
-
-class MsgAttentiveProbe(torch.nn.Module):
-    def __init__(
-        self,
-        *,
-        input_dim: int,
-        hidden_dim: int,
-        num_attention_heads: int,
-        num_attention_blocks: int = _DEFAULT_MSG_PROBE_NUM_ATTENTION_BLOCKS,
-        mlp_ratio: int = _DEFAULT_MSG_PROBE_MLP_RATIO,
         task_names: tuple[str, ...],
     ) -> None:
         super().__init__()
-        self.blocks = torch.nn.ModuleList([
-            MsgProbeSelfAttentionBlock(
-                input_dim=input_dim,
-                num_attention_heads=num_attention_heads,
-                mlp_ratio=mlp_ratio,
-            )
-            for _ in range(num_attention_blocks)
-        ])
-        self.query = torch.nn.Parameter(torch.empty(1, input_dim))
-        torch.nn.init.xavier_normal_(self.query)
-        self.readout = torch.nn.MultiheadAttention(
-            embed_dim=input_dim,
-            num_heads=num_attention_heads,
-            batch_first=True,
-        )
-        self.trunk = torch.nn.Sequential(
-            torch.nn.Linear(input_dim, hidden_dim),
-            torch.nn.RMSNorm(hidden_dim),
-            torch.nn.SiLU(),
-        )
         self.heads = torch.nn.ModuleDict({
-            name: torch.nn.Linear(hidden_dim, 1)
+            name: torch.nn.Linear(input_dim, 1)
             for name in task_names
         })
 
     def forward(
         self,
-        feature_tokens: torch.Tensor,
-        feature_mask: torch.Tensor,
+        pooled: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        token_states, safe_mask = _prepare_attention_inputs(feature_tokens, feature_mask)
-        for block in self.blocks:
-            token_states = block(token_states, safe_mask)
-        query = self.query.unsqueeze(0).expand(token_states.shape[0], -1, -1)
-        pooled, _ = self.readout(
-            query=query,
-            key=token_states,
-            value=token_states,
-            key_padding_mask=~safe_mask,
-            need_weights=False,
-        )
-        state = self.trunk(pooled[:, 0, :])
-        return {name: head(state) for name, head in self.heads.items()}
+        return {name: head(pooled) for name, head in self.heads.items()}
 
 
 def should_run_msg_probe(global_step: int, every_n_steps: int) -> bool:
@@ -210,82 +116,19 @@ def probe_steps_per_epoch(
     return math.ceil(size / batch_size)
 
 
-def _extract_probe_features(
-    backbone: PeakSetSIGReg,
-    batch: dict[str, torch.Tensor],
-    *,
-    feature_source: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    peak_mz = batch["peak_mz"]
-    peak_intensity = batch["peak_intensity"]
-    peak_valid_mask = batch["peak_valid_mask"]
-    if backbone.use_precursor_token:
-        expanded = PeakSetSIGReg.prepend_precursor_token(
-            peak_mz, peak_intensity, peak_valid_mask,
-            batch["precursor_mz"],
-        )
-        peak_mz = expanded["peak_mz"]
-        peak_intensity = expanded["peak_intensity"]
-        peak_valid_mask = expanded["peak_valid_mask"]
-    with torch.no_grad():
-        embeddings = backbone.encoder(
-            peak_mz, peak_intensity,
-            valid_mask=peak_valid_mask,
-        )
-    if feature_source == "encoder":
-        return embeddings, peak_valid_mask
-    raise ValueError(f"Unknown msg_probe_feature_source: {feature_source!r}")
-
-
-def _encode_probe_features_impl(
-    backbone: PeakSetSIGReg,
-    peak_mz: torch.Tensor,
-    peak_intensity: torch.Tensor,
-    peak_valid_mask: torch.Tensor,
-    precursor_mz: torch.Tensor | None,
-) -> torch.Tensor:
-    if backbone.use_precursor_token and precursor_mz is not None:
-        expanded = PeakSetSIGReg.prepend_precursor_token(
-            peak_mz, peak_intensity, peak_valid_mask, precursor_mz,
-        )
-        peak_mz = expanded["peak_mz"]
-        peak_intensity = expanded["peak_intensity"]
-        peak_valid_mask = expanded["peak_valid_mask"]
-    return backbone.encoder(
-        peak_mz,
-        peak_intensity,
-        valid_mask=peak_valid_mask,
-    )
-
-
 def _build_probe_feature_extractor(
     backbone: PeakSetSIGReg,
-    *,
-    feature_source: str,
-) -> Callable[[dict[str, torch.Tensor]], tuple[torch.Tensor, torch.Tensor]]:
-    if feature_source != "encoder":
-        raise ValueError(f"Unknown msg_probe_feature_source: {feature_source!r}")
-    _use_precursor = backbone.use_precursor_token
-
-    def extract(batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+) -> Callable[[dict[str, torch.Tensor]], torch.Tensor]:
+    def extract(batch: dict[str, torch.Tensor]) -> torch.Tensor:
         peak_mz = batch["peak_mz"]
         peak_intensity = batch["peak_intensity"]
         peak_valid_mask = batch["peak_valid_mask"]
-        precursor_mz = batch.get("precursor_mz") if _use_precursor else None
         with torch.no_grad():
-            embeddings = _encode_probe_features_impl(
-                backbone,
-                peak_mz,
-                peak_intensity,
-                peak_valid_mask,
-                precursor_mz,
+            embeddings = backbone.encoder(
+                peak_mz, peak_intensity, valid_mask=peak_valid_mask,
             )
-        if _use_precursor and precursor_mz is not None:
-            # Return expanded valid mask (N+1) to match embedding length
-            B = peak_valid_mask.shape[0]
-            pre_valid = torch.ones(B, 1, device=peak_valid_mask.device, dtype=torch.bool)
-            peak_valid_mask = torch.cat([pre_valid, peak_valid_mask], dim=1)
-        return embeddings, peak_valid_mask
+            pooled = backbone.pool(embeddings, peak_valid_mask)
+        return pooled
 
     return extract
 
@@ -362,30 +205,20 @@ def _build_task_spec(
 
 
 def _probe_step(
-    probe: MsgAttentiveProbe,
-    backbone: PeakSetSIGReg,
+    probe: MsgLinearProbe,
     batch: dict[str, torch.Tensor],
     *,
     task_spec: MsgProbeTaskSpec,
-    feature_source: str,
     device: torch.device,
-    feature_extractor: Callable[[dict[str, torch.Tensor]], tuple[torch.Tensor, torch.Tensor]] | None = None,
+    feature_extractor: Callable[[dict[str, torch.Tensor]], torch.Tensor],
 ) -> dict[str, object] | None:
-    if feature_extractor is None:
-        feature_tokens, feature_mask = _extract_probe_features(
-            backbone,
-            batch,
-            feature_source=feature_source,
-        )
-    else:
-        feature_tokens, feature_mask = feature_extractor(batch)
+    pooled = feature_extractor(batch)
     valid_mask = batch["probe_valid_mol"].to(device=device, dtype=torch.bool)
     if not bool(valid_mask.any()):
         return None
 
-    feature_tokens = feature_tokens[valid_mask]
-    feature_mask = feature_mask[valid_mask]
-    logits = probe(feature_tokens, feature_mask)
+    pooled = pooled[valid_mask]
+    logits = probe(pooled)
 
     losses: dict[str, torch.Tensor] = {}
     predictions: dict[str, torch.Tensor] = {}
@@ -414,7 +247,7 @@ def _probe_step(
         "losses": losses,
         "predictions": predictions,
         "targets": task_targets,
-        "batch_size": int(feature_tokens.shape[0]),
+        "batch_size": int(pooled.shape[0]),
     }
 
 
@@ -496,32 +329,15 @@ def run_msg_probe(
     probe_lr = float(config.get("msg_probe_learning_rate", 1e-3))
     probe_weight_decay = float(config.get("msg_probe_weight_decay", 1e-2))
     probe_warmup_steps = int(config.get("msg_probe_warmup_steps", 100))
-    probe_hidden_dim = int(config.get("msg_probe_hidden_dim", 512))
-    probe_num_attention_heads = config.get("msg_probe_num_attention_heads", None)
-    if probe_num_attention_heads is None:
-        probe_num_attention_heads = int(config.num_heads)
-    else:
-        probe_num_attention_heads = int(probe_num_attention_heads)
-    probe_num_attention_blocks = int(
-        config.get(
-            "msg_probe_num_attention_blocks",
-            _DEFAULT_MSG_PROBE_NUM_ATTENTION_BLOCKS,
-        )
-    )
-    probe_mlp_ratio = int(config.get("msg_probe_mlp_ratio", _DEFAULT_MSG_PROBE_MLP_RATIO))
     max_train_samples = config.get("msg_probe_max_train_samples", None)
     if max_train_samples is not None:
         max_train_samples = int(max_train_samples)
     max_test_samples = config.get("msg_probe_max_test_samples", None)
     if max_test_samples is not None:
         max_test_samples = int(max_test_samples)
-    feature_source = str(config.get("msg_probe_feature_source", "encoder"))
     peak_ordering = str(config.get("peak_ordering", "intensity"))
     probe_data = MassSpecProbeData.from_config(config)
-    feature_extractor = _build_probe_feature_extractor(
-        model,
-        feature_source=feature_source,
-    )
+    feature_extractor = _build_probe_feature_extractor(model)
 
     train_seed_base = int(config.seed) + 1_100_000
     test_seed_base = int(config.seed) + 1_200_000
@@ -544,12 +360,8 @@ def run_msg_probe(
 
     was_training = model.training
     model.eval()
-    probe = MsgAttentiveProbe(
+    probe = MsgLinearProbe(
         input_dim=int(config.model_dim),
-        hidden_dim=probe_hidden_dim,
-        num_attention_heads=probe_num_attention_heads,
-        num_attention_blocks=probe_num_attention_blocks,
-        mlp_ratio=probe_mlp_ratio,
         task_names=task_names,
     ).to(device)
     optimizer = torch.optim.AdamW(
@@ -596,10 +408,8 @@ def run_msg_probe(
             optimizer.zero_grad(set_to_none=True)
             result = _probe_step(
                 probe,
-                model,
                 batch,
                 task_spec=task_spec,
-                feature_source=feature_source,
                 device=device,
                 feature_extractor=feature_extractor,
             )
@@ -625,10 +435,8 @@ def run_msg_probe(
                 batch = move_batch(batch)
                 result = _probe_step(
                     probe,
-                    model,
                     batch,
                     task_spec=task_spec,
-                    feature_source=feature_source,
                     device=device,
                     feature_extractor=feature_extractor,
                 )

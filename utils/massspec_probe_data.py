@@ -34,12 +34,43 @@ _FINGERPRINT_BITS = 1024
 _FINGERPRINT_RADIUS = 2
 _PEAK_MZ_MIN = 20.0
 _PEAK_MZ_MAX = 1000.0
-_PRECURSOR_MZ_WINDOW = 2.5
 _METADATA_FILENAME = "metadata.json"
+
+
+def _prepend_precursor_token_probe_tf(batch: dict) -> dict:
+    """Prepend a precursor token at position 0 in the probe TF pipeline.
+
+    Mirrors ``input_pipeline._prepend_precursor_token_tf`` but without
+    ``context_mask``/``target_masks`` handling (probe batches don't have these).
+    """
+    peak_mz = batch["peak_mz"]                # [B, N]
+    peak_intensity = batch["peak_intensity"]   # [B, N]
+    peak_valid_mask = batch["peak_valid_mask"] # [B, N]
+    precursor_mz = batch["precursor_mz"]       # [B]
+    B = tf.shape(peak_mz)[0]
+
+    pre_mz = tf.expand_dims(precursor_mz, 1)          # [B, 1]
+    pre_int = tf.fill([B, 1], -1.0)                    # sentinel
+    pre_valid = tf.ones([B, 1], dtype=tf.bool)
+
+    out = dict(batch)
+    out["peak_mz"] = tf.concat([pre_mz, peak_mz], axis=1)
+    out["peak_intensity"] = tf.concat([pre_int, peak_intensity], axis=1)
+    out["peak_valid_mask"] = tf.concat([pre_valid, peak_valid_mask], axis=1)
+
+    del out["precursor_mz"]
+    return out
 
 MASSSPEC_HF_REPO = "roman-bushuiev/MassSpecGym"
 MASSSPEC_TSV_PATH = "data/MassSpecGym.tsv"
 MASSSPEC_METADATA_VERSION = 2
+
+NIST20_METADATA_VERSION = 1
+NIST20_HF_REPO = "roman-bushuiev/GeMS"
+NIST20_HF_FILENAME = "data/DreaMS_Atlas/nist20_mona_clean_merged_spectra_dreams_hidden_nist20.hdf5"
+_NIST20_SPLIT_SEED = 42
+_NIST20_TRAIN_FRAC = 0.70
+_NIST20_VAL_FRAC = 0.15
 
 
 def _download_hf_file(repo_id: str, filename: str, local_dir: Path) -> Path:
@@ -55,6 +86,14 @@ def _download_hf_file(repo_id: str, filename: str, local_dir: Path) -> Path:
 
 def download_massspec_tsv(cache_dir: Path) -> Path:
     return _download_hf_file(MASSSPEC_HF_REPO, MASSSPEC_TSV_PATH, cache_dir)
+
+
+def _ensure_nist20_hdf5(data_dir: Path) -> Path:
+    local_path = data_dir / NIST20_HF_FILENAME
+    if local_path.exists():
+        return local_path
+    logger.info("NIST20 HDF5 not found locally, downloading from HuggingFace...")
+    return _download_hf_file(NIST20_HF_REPO, NIST20_HF_FILENAME, data_dir)
 
 
 def _load_massspec_tsv(
@@ -127,6 +166,100 @@ def _load_massspec_tsv(
         instrument_type_array,
         collision_energy_array,
         collision_energy_present_array,
+    )
+
+
+def _load_nist20_hdf5(
+    hdf5_path: Path,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
+    import h5py
+    from rdkit.Chem.inchi import MolToInchi, InchiToInchiKey
+
+    with h5py.File(str(hdf5_path), "r") as f:
+        raw_spectra = f["spectrum"][:]  # [N, 2, 128] float64
+        raw_precursor = f["precursor_mz"][:]  # [N] float
+        raw_smiles = f["smiles"][:].astype(str)  # [N] str
+        raw_adduct = f["adduct"][:].astype(str)  # [N] str
+
+    # Filter invalid SMILES and compute InChIKey connectivity layer
+    valid_indices: list[int] = []
+    inchikey_14: list[str] = []
+    for i, smi in enumerate(raw_smiles):
+        mol = Chem.MolFromSmiles(smi)
+        if mol is None:
+            continue
+        inchi = MolToInchi(mol)
+        if inchi is None:
+            continue
+        ik = InchiToInchiKey(inchi)
+        if ik is None:
+            continue
+        valid_indices.append(i)
+        inchikey_14.append(ik[:14])
+
+    idx = np.asarray(valid_indices)
+    inchikey_14_arr = np.asarray(inchikey_14)
+    logger.info("NIST20 HDF5: %d / %d spectra have valid SMILES", len(idx), len(raw_smiles))
+
+    # InChIKey-based train/val/test split
+    unique_keys = sorted(set(inchikey_14_arr.tolist()))
+    rng = np.random.RandomState(_NIST20_SPLIT_SEED)
+    rng.shuffle(unique_keys)
+    n_keys = len(unique_keys)
+    n_train = int(n_keys * _NIST20_TRAIN_FRAC)
+    n_val = int(n_keys * _NIST20_VAL_FRAC)
+    train_keys = set(unique_keys[:n_train])
+    val_keys = set(unique_keys[n_train : n_train + n_val])
+
+    fold_list: list[str] = []
+    for ik in inchikey_14_arr:
+        if ik in train_keys:
+            fold_list.append("train")
+        elif ik in val_keys:
+            fold_list.append("val")
+        else:
+            fold_list.append("test")
+
+    n_valid = len(idx)
+    spectra = raw_spectra[idx].astype(np.float32)  # [N_valid, 2, 128]
+    precursor = raw_precursor[idx].astype(np.float32)
+    smiles_arr = raw_smiles[idx]
+    adduct_arr = raw_adduct[idx]
+
+    retention = np.zeros(n_valid, dtype=np.float32)
+    fold_arr = np.asarray(fold_list)
+    instrument_type_arr = np.full(n_valid, "unknown", dtype=object)
+    collision_energy_arr = np.zeros(n_valid, dtype=np.float32)
+    collision_energy_present_arr = np.zeros(n_valid, dtype=np.int32)
+
+    logger.info(
+        "NIST20 split: %d train, %d val, %d test across %d unique molecules",
+        np.count_nonzero(fold_arr == "train"),
+        np.count_nonzero(fold_arr == "val"),
+        np.count_nonzero(fold_arr == "test"),
+        n_keys,
+    )
+
+    return (
+        spectra,
+        retention,
+        precursor,
+        fold_arr,
+        smiles_arr,
+        adduct_arr,
+        instrument_type_arr,
+        collision_energy_arr,
+        collision_energy_present_arr,
     )
 
 
@@ -376,6 +509,116 @@ def _process_massspec_probe_data(
     }
 
 
+def _process_nist20_probe_data(
+    output_dir: Path,
+    num_shards: int,
+    *,
+    max_precursor_mz: float,
+    data_dir: Path,
+) -> dict[str, Any]:
+    hdf5_path = _ensure_nist20_hdf5(data_dir)
+    logger.info("Loading NIST20+MoNA HDF5 from %s ...", hdf5_path)
+    (
+        spectra,
+        retention,
+        precursor,
+        fold,
+        smiles,
+        adduct,
+        instrument_type,
+        collision_energy,
+        collision_energy_present,
+    ) = _load_nist20_hdf5(hdf5_path)
+    fingerprints = _compute_morgan_fingerprints(smiles)
+    adduct_id, adduct_vocab = _encode_categorical_ids(adduct)
+    instrument_type_id, instrument_type_vocab = _encode_categorical_ids(instrument_type)
+
+    keep = np.isfinite(precursor) & (precursor <= float(max_precursor_mz))
+    spectra = spectra[keep]
+    retention = retention[keep]
+    precursor = precursor[keep]
+    fold = fold[keep]
+    smiles = smiles[keep]
+    fingerprints = fingerprints[keep]
+    adduct_id = adduct_id[keep]
+    instrument_type_id = instrument_type_id[keep]
+    collision_energy = collision_energy[keep]
+    collision_energy_present = collision_energy_present[keep]
+    probe_mol_props, probe_fg_binary, probe_valid_mol = build_probe_targets_for_rows(smiles)
+
+    train_mask = fold == "train"
+    val_mask = fold == "val"
+    test_mask = fold == "test"
+
+    train_files, train_lengths = _write_tfrecords_with_fingerprint(
+        spectra[train_mask],
+        retention[train_mask],
+        precursor[train_mask],
+        fingerprints[train_mask],
+        smiles[train_mask],
+        adduct_id[train_mask],
+        instrument_type_id[train_mask],
+        collision_energy[train_mask],
+        collision_energy_present[train_mask],
+        {name: values[train_mask] for name, values in probe_mol_props.items()},
+        {name: values[train_mask] for name, values in probe_fg_binary.items()},
+        probe_valid_mol[train_mask],
+        output_dir / "train",
+        max(1, num_shards // 2),
+        desc="NIST20 Train",
+    )
+    val_files, val_lengths = _write_tfrecords_with_fingerprint(
+        spectra[val_mask],
+        retention[val_mask],
+        precursor[val_mask],
+        fingerprints[val_mask],
+        smiles[val_mask],
+        adduct_id[val_mask],
+        instrument_type_id[val_mask],
+        collision_energy[val_mask],
+        collision_energy_present[val_mask],
+        {name: values[val_mask] for name, values in probe_mol_props.items()},
+        {name: values[val_mask] for name, values in probe_fg_binary.items()},
+        probe_valid_mol[val_mask],
+        output_dir / "val",
+        max(1, num_shards // 4),
+        desc="NIST20 Val",
+    )
+    test_files, test_lengths = _write_tfrecords_with_fingerprint(
+        spectra[test_mask],
+        retention[test_mask],
+        precursor[test_mask],
+        fingerprints[test_mask],
+        smiles[test_mask],
+        adduct_id[test_mask],
+        instrument_type_id[test_mask],
+        collision_energy[test_mask],
+        collision_energy_present[test_mask],
+        {name: values[test_mask] for name, values in probe_mol_props.items()},
+        {name: values[test_mask] for name, values in probe_fg_binary.items()},
+        probe_valid_mol[test_mask],
+        output_dir / "test",
+        max(1, num_shards // 4),
+        desc="NIST20 Test",
+    )
+
+    return {
+        "metadata_version": NIST20_METADATA_VERSION,
+        "train_files": train_files,
+        "train_lengths": train_lengths,
+        "train_size": int(np.count_nonzero(train_mask)),
+        "val_files": val_files,
+        "val_lengths": val_lengths,
+        "val_size": int(np.count_nonzero(val_mask)),
+        "test_files": test_files,
+        "test_lengths": test_lengths,
+        "test_size": int(np.count_nonzero(test_mask)),
+        "adduct_vocab": adduct_vocab,
+        "instrument_type_vocab": instrument_type_vocab,
+        "max_precursor_mz": float(max_precursor_mz),
+    }
+
+
 def _load_json(path: Path) -> dict[str, Any]:
     with path.open() as f:
         return json.load(f)
@@ -412,6 +655,39 @@ def ensure_massspec_probe_prepared(
     return metadata
 
 
+def ensure_nist20_probe_prepared(
+    output_dir: Path,
+    *,
+    max_precursor_mz: float,
+    data_dir: Path,
+    num_shards: int = _DEFAULT_MASSSPEC_NUM_SHARDS,
+) -> dict[str, Any]:
+    metadata_path = output_dir / _METADATA_FILENAME
+    if metadata_path.exists():
+        metadata = _load_json(metadata_path)
+        version_ok = int(metadata.get("metadata_version", 0)) == NIST20_METADATA_VERSION
+        precursor_ok = float(metadata.get("max_precursor_mz", float("inf"))) == float(max_precursor_mz)
+        train_ok = all((output_dir / "train" / fn).exists() for fn in metadata.get("train_files", []))
+        val_ok = all((output_dir / "val" / fn).exists() for fn in metadata.get("val_files", []))
+        test_ok = all((output_dir / "test" / fn).exists() for fn in metadata.get("test_files", []))
+        vocab_ok = "adduct_vocab" in metadata and "instrument_type_vocab" in metadata
+        if version_ok and precursor_ok and train_ok and val_ok and test_ok and vocab_ok:
+            logger.info("Found existing NIST20 probe TFRecords at %s", output_dir)
+            return metadata
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    metadata = _process_nist20_probe_data(
+        output_dir,
+        num_shards,
+        max_precursor_mz=max_precursor_mz,
+        data_dir=data_dir,
+    )
+    with metadata_path.open("w") as f:
+        json.dump(metadata, f, indent=2)
+    logger.info("Saved NIST20 probe metadata to %s", metadata_path)
+    return metadata
+
+
 def _to_torch(value: Any) -> Any:
     import torch
 
@@ -440,7 +716,6 @@ def _parse_probe_batch(
 ):
     peak_mz_min = tf.constant(_PEAK_MZ_MIN, tf.float32)
     peak_mz_max = tf.constant(_PEAK_MZ_MAX, tf.float32)
-    precursor_window = tf.constant(_PRECURSOR_MZ_WINDOW, tf.float32)
     min_int = tf.constant(min_peak_intensity, tf.float32)
     max_prec = tf.constant(max_precursor_mz, tf.float32)
     feature_spec = {
@@ -469,12 +744,7 @@ def _parse_probe_batch(
         rt = parsed["rt"][:, 0]
         precursor_mz_val = parsed["precursor_mz"][:, 0]
 
-        upper = tf.where(
-            precursor_mz_val > 0.0,
-            precursor_mz_val - precursor_window,
-            peak_mz_max,
-        )
-        keep = (mz >= peak_mz_min) & (mz <= upper[:, tf.newaxis])
+        keep = (mz >= peak_mz_min) & (mz <= peak_mz_max)
         mz = tf.where(keep, mz, 0.0)
         intensity = tf.where(keep, intensity, 0.0)
 
@@ -485,6 +755,10 @@ def _parse_probe_batch(
         values, indices = tf.math.top_k(intensity, k=_NUM_PEAKS_OUTPUT, sorted=True)
         intensity = values
         mz = tf.gather(mz, indices, batch_dims=1)
+
+        max_intensity = tf.reduce_max(intensity, axis=1, keepdims=True)
+        max_intensity = tf.maximum(max_intensity, 1e-8)
+        intensity = intensity / max_intensity
 
         valid = intensity > 0
         if peak_ordering == "mz":
@@ -547,6 +821,7 @@ def _build_probe_dataset(
     max_precursor_mz: float,
     min_peak_intensity: float,
     peak_ordering: str,
+    use_precursor_token: bool = False,
     num_parallel_reads: int | None = None,
 ) -> tf.data.Dataset:
     if num_parallel_reads is None:
@@ -568,6 +843,8 @@ def _build_probe_dataset(
         ),
         num_parallel_calls=tf.data.AUTOTUNE,
     )
+    if use_precursor_token:
+        ds = ds.map(_prepend_precursor_token_probe_tf, num_parallel_calls=tf.data.AUTOTUNE)
     options = tf.data.Options()
     options.deterministic = True
     ds = ds.with_options(options)
@@ -587,22 +864,34 @@ class MassSpecProbeData:
     max_precursor_mz: float
     min_peak_intensity: float
     peak_ordering: str
+    use_precursor_token: bool
 
     @classmethod
     def from_config(cls, config: config_dict.ConfigDict) -> "MassSpecProbeData":
-        output_dir = (
+        probe_dataset = str(config.get("probe_dataset", "massspec"))
+        tfrecord_base = (
             Path(config.get("tfrecord_dir", str(_DEFAULT_TFRECORD_DIR)))
             .expanduser()
             .resolve()
-            / "massspec_probe"
         )
         max_precursor_mz = float(
             config.get("max_precursor_mz", _DEFAULT_MAX_PRECURSOR_MZ)
         )
-        metadata = ensure_massspec_probe_prepared(
-            output_dir,
-            max_precursor_mz=max_precursor_mz,
-        )
+
+        if probe_dataset == "nist20":
+            output_dir = tfrecord_base / "nist20_probe"
+            metadata = ensure_nist20_probe_prepared(
+                output_dir,
+                max_precursor_mz=max_precursor_mz,
+                data_dir=tfrecord_base,
+            )
+        else:
+            output_dir = tfrecord_base / "massspec_probe"
+            metadata = ensure_massspec_probe_prepared(
+                output_dir,
+                max_precursor_mz=max_precursor_mz,
+            )
+
         info = {
             "massspec_train_size": int(metadata.get("train_size", 0)),
             "massspec_val_size": int(metadata.get("val_size", 0)),
@@ -634,6 +923,7 @@ class MassSpecProbeData:
                 config.get("min_peak_intensity", _DEFAULT_MIN_PEAK_INTENSITY)
             ),
             peak_ordering=str(config.get("peak_ordering", "intensity")),
+            use_precursor_token=bool(config.get("use_precursor_token", False)),
         )
 
     def build_dataset(
@@ -663,5 +953,6 @@ class MassSpecProbeData:
             max_precursor_mz=self.max_precursor_mz,
             min_peak_intensity=self.min_peak_intensity,
             peak_ordering=peak_ordering,
+            use_precursor_token=self.use_precursor_token,
             num_parallel_reads=num_parallel_reads,
         )
