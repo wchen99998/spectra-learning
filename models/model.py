@@ -150,9 +150,8 @@ class PeakSetEncoder(nn.Module):
         norm_type: str = "rmsnorm",
     ):
         super().__init__()
-        self.model_dim = model_dim
         self.use_rope = bool(use_rope)
-        self.norm_type = str(norm_type).lower()
+        norm_type = str(norm_type).lower()
         self.embedder = PeakFeatureEmbedder(model_dim, feature_mlp_hidden_dim)
         heads = int(num_heads)
         head_dim = model_dim // heads
@@ -171,7 +170,7 @@ class PeakSetEncoder(nn.Module):
             use_rope=self.use_rope,
             qk_norm=qk_norm,
             post_norm=False,
-            norm_type=self.norm_type,
+            norm_type=norm_type,
         )
 
     def forward(
