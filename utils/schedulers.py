@@ -3,32 +3,6 @@ from __future__ import annotations
 import math
 
 
-def parse_schedule(schedule_type: str) -> tuple[str, dict[str, str]]:
-    parts = schedule_type.split(";")
-    base = parts[0]
-    parsed: dict[str, str] = {}
-    for kv in parts[1:]:
-        if "=" in kv:
-            k, v = kv.split("=", 1)
-            parsed[k.strip()] = v.strip()
-    return base, parsed
-
-
-def cosine_decay(
-    base_lr: float,
-    step: int,
-    total_steps: int,
-    *,
-    min_lr: float | None,
-) -> float:
-    total_steps = max(1, total_steps)
-    ratio = max(0.0, step / total_steps)
-    mult = 0.5 * (1.0 + math.cos(math.pi * ratio))
-    decayed = mult * base_lr
-    min_lr_value = min_lr if min_lr is not None else 0.1 * base_lr
-    return max(min_lr_value, decayed)
-
-
 def learning_rate_at_step(
     step: int,
     *,
@@ -47,15 +21,22 @@ def learning_rate_at_step(
         effective_step = step
         effective_total = max(1, total_steps)
 
-    schedule_base, parsed = parse_schedule(schedule_type)
+    # Parse schedule string (e.g. "cosine" or "cyclic_cosine;cycle_length=500")
+    parts = schedule_type.split(";")
+    schedule_base = parts[0]
+    parsed: dict[str, str] = {}
+    for kv in parts[1:]:
+        if "=" in kv:
+            k, v = kv.split("=", 1)
+            parsed[k.strip()] = v.strip()
 
     if schedule_base == "cosine":
-        lr = cosine_decay(
-            base_lr,
-            effective_step,
-            effective_total,
-            min_lr=min_learning_rate,
+        ratio = max(0.0, effective_step / max(1, effective_total))
+        mult = 0.5 * (1.0 + math.cos(math.pi * ratio))
+        min_lr_val = (
+            min_learning_rate if min_learning_rate is not None else 0.1 * base_lr
         )
+        lr = max(min_lr_val, mult * base_lr)
     elif schedule_base == "constant":
         lr = base_lr
     elif schedule_base == "cyclic_cosine":
