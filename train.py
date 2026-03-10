@@ -553,3 +553,25 @@ def train_and_evaluate(
         logging.info("No MSG probe results were collected during training.")
 
     return {**last_msg_probe_metrics, **model_param_metrics}
+
+
+if __name__ == "__main__":
+    import argparse
+    import os
+
+    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+    os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+    import tensorflow as tf
+
+    tf.config.set_visible_devices([], "GPU")
+
+    logging.basicConfig(level=logging.INFO)
+    parser = argparse.ArgumentParser(description="Train peak-set SIGReg model.")
+    parser.add_argument("--config", required=True, help="Path to config file.")
+    parser.add_argument("--workdir", required=True, help="Output directory.")
+    args = parser.parse_args()
+    from utils.training import load_config
+
+    train_and_evaluate(
+        load_config(args.config), workdir=Path(args.workdir).expanduser().resolve()
+    )
