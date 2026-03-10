@@ -48,7 +48,7 @@ def get_config() -> config_dict.ConfigDict:
     # Training
     cfg.num_epochs = 100
     cfg.learning_rate = 3e-4
-    cfg.warmup_steps = 5_000
+    cfg.warmup_steps = 10_000
     cfg.learning_rate_schedule = "l2_sum"
     cfg.min_learning_rate = None
     cfg.b2 = 0.98
@@ -75,12 +75,12 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_latent_predictor_num_layers = 2
     cfg.predictor_num_heads = 4
     cfg.autocast_dtype = "bf16"
-    cfg.representation_regularizer = "gco-sigreg"
+    cfg.representation_regularizer = "sigreg"
     cfg.gco_var_floor_target = 1.
     cfg.gco_corr_target = 0.60
     cfg.gco_log_lambda_min = -2.0
     cfg.sigreg_lambda_warmup_steps = 50_000
-    cfg.msg_probe_every_n_steps = 1.
+    cfg.msg_probe_every_n_steps = 0.5
     cfg.use_precursor_token = True
 
     # Tune search space
@@ -88,7 +88,7 @@ def get_config() -> config_dict.ConfigDict:
 
     # System / logging
     cfg.enable_wandb = True
-    cfg.wandb_project = "token-mass-spec-pretraining"
+    cfg.wandb_project = "jepa-pretraining"
     cfg.wandb_run_name_prefix = "jepa_masked_latent_index"
 
     return cfg

@@ -1,8 +1,10 @@
 import unittest
 
 import numpy as np
+import tensorflow as tf
 import torch
 
+from utils.massspec_probe_data import _prepend_precursor_token_probe_tf
 from utils.msg_probe import (
     FG_SMARTS,
     MsgLinearProbe,
@@ -331,6 +333,46 @@ class MsgProbeIntervalTests(unittest.TestCase):
         self.assertFalse(should_run_msg_probe(global_step=10, every_n_steps=0))
         self.assertFalse(should_run_msg_probe(global_step=9, every_n_steps=5))
         self.assertTrue(should_run_msg_probe(global_step=10, every_n_steps=5))
+
+
+class ProbePrecursorTokenTfTests(unittest.TestCase):
+    def test_prepend_shapes_and_values(self):
+        B, N = 3, 5
+        batch = {
+            "peak_mz": tf.constant(np.random.rand(B, N).astype(np.float32)),
+            "peak_intensity": tf.constant(np.random.rand(B, N).astype(np.float32)),
+            "peak_valid_mask": tf.constant(np.ones((B, N), dtype=bool)),
+            "precursor_mz": tf.constant([0.1, 0.2, 0.3], dtype=tf.float32),
+            "fingerprint": tf.constant(np.zeros((B, 4), dtype=np.int32)),
+            "probe_valid_mol": tf.constant([True, False, True]),
+        }
+
+        out = _prepend_precursor_token_probe_tf(batch)
+
+        # Shapes are [B, N+1]
+        self.assertEqual(out["peak_mz"].shape, (B, N + 1))
+        self.assertEqual(out["peak_intensity"].shape, (B, N + 1))
+        self.assertEqual(out["peak_valid_mask"].shape, (B, N + 1))
+
+        # precursor_mz key is removed
+        self.assertNotIn("precursor_mz", out)
+
+        # Position 0 has sentinel intensity=-1 and valid=True
+        np.testing.assert_array_equal(out["peak_intensity"][:, 0].numpy(), [-1.0, -1.0, -1.0])
+        np.testing.assert_array_equal(out["peak_valid_mask"][:, 0].numpy(), [True, True, True])
+
+        # Position 0 mz equals original precursor_mz
+        np.testing.assert_allclose(out["peak_mz"][:, 0].numpy(), [0.1, 0.2, 0.3])
+
+        # Original peaks shifted to positions 1..N
+        np.testing.assert_array_equal(
+            out["peak_mz"][:, 1:].numpy(), batch["peak_mz"].numpy(),
+        )
+
+        # Passthrough keys preserved
+        self.assertIn("fingerprint", out)
+        self.assertIn("probe_valid_mol", out)
+        np.testing.assert_array_equal(out["fingerprint"].numpy(), batch["fingerprint"].numpy())
 
 
 if __name__ == "__main__":
