@@ -118,28 +118,22 @@ def collect_and_log_param_metrics(model: torch.nn.Module) -> dict[str, float]:
     return metrics
 
 
-def _config_get(config: Any, key: str, default: Any = None) -> Any:
-    if isinstance(config, Mapping):
-        return config.get(key, default)
-    return getattr(config, key, default)
-
-
 def _build_wandb_init_kwargs(config: Any | None) -> dict[str, Any]:
     if config is None:
         return {}
-    wandb_kwargs = dict(_config_get(config, "wandb_kwargs", {}) or {})
+    wandb_kwargs = dict(config.get("wandb_kwargs", {}) or {})
     resume_id = os.environ.get("WANDB_RESUME_ID")
     if resume_id:
         wandb_kwargs.setdefault("id", resume_id)
         wandb_kwargs.setdefault("resume", "must")
         wandb_kwargs.pop("name", None)
         return wandb_kwargs
-    prefix = _config_get(config, "wandb_run_name_prefix")
+    prefix = config.get("wandb_run_name_prefix")
     if prefix and "name" not in wandb_kwargs:
         counter_path = Path(
-            _config_get(config, "wandb_run_name_counter_path", ".wandb_run_counter")
+            config.get("wandb_run_name_counter_path", ".wandb_run_counter")
         )
-        use_counter = bool(_config_get(config, "wandb_run_name_use_increment", True))
+        use_counter = bool(config.get("wandb_run_name_use_increment", True))
         if use_counter:
             current = (
                 int(counter_path.read_text().strip()) if counter_path.exists() else 0
