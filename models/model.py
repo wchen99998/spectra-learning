@@ -779,10 +779,9 @@ class PeakSetSIGReg(nn.Module):
         *,
         train: bool = False,
     ) -> torch.Tensor:
-        peak_mz = batch["peak_mz"]
-        peak_intensity = batch["peak_intensity"]
-        peak_valid_mask = batch["peak_valid_mask"]
-
-        embeddings = self.encoder(peak_mz, peak_intensity, valid_mask=peak_valid_mask)
-        pooled = self.pool(embeddings, peak_valid_mask)
-        return pooled
+        mz, intensity, valid = (
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            batch["peak_valid_mask"],
+        )
+        return self.pool(self.encoder(mz, intensity, valid_mask=valid), valid)
