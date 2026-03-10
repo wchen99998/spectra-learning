@@ -827,15 +827,10 @@ class PeakSetSIGReg(nn.Module):
 
         return {
             "loss": loss,
-            "sigreg_loss": token_sigreg_loss,
             "token_sigreg_loss": token_sigreg_loss,
             "local_global_loss": local_global_loss,
-            "local_global_l1_loss": local_global_loss,
-            "regularizer_loss": token_sigreg_loss,
-            "regularizer_term": sigreg_term,
             "sigreg_term": sigreg_term,
             "jepa_term": jepa_term,
-            "target_regularizer_term_over_jepa_term": target_sigreg_term_over_jepa_term,
             "target_sigreg_term_over_jepa_term": target_sigreg_term_over_jepa_term,
             "valid_fraction": valid_fraction,
             "context_fraction": context_fraction,

@@ -105,9 +105,8 @@ class BlockJEPATests(unittest.TestCase):
         metrics = model.forward_augmented(batch)
         for key in (
             "loss",
-            "sigreg_loss",
             "token_sigreg_loss",
-            "local_global_l1_loss",
+            "local_global_loss",
             "context_fraction",
             "masked_fraction",
             "sigreg_lambda_current",
@@ -161,8 +160,8 @@ class BlockJEPATests(unittest.TestCase):
         )
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
         metrics = model.forward_augmented(batch)
-        self.assertAlmostEqual(float(metrics["sigreg_loss"]), 0.0, places=7)
-        self.assertAlmostEqual(float(metrics["regularizer_term"]), 0.0, places=7)
+        self.assertAlmostEqual(float(metrics["token_sigreg_loss"]), 0.0, places=7)
+        self.assertAlmostEqual(float(metrics["sigreg_term"]), 0.0, places=7)
         self.assertTrue(torch.allclose(metrics["loss"], metrics["jepa_term"]))
 
     def test_encode_output_shape(self):

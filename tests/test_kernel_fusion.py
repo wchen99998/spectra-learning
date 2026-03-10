@@ -107,8 +107,8 @@ def test_full_model_forward():
         result = model.forward_augmented(batch)
 
     assert "loss" in result
-    assert "sigreg_loss" in result
-    assert "local_global_l1_loss" in result
+    assert "token_sigreg_loss" in result
+    assert "local_global_loss" in result
     assert "context_fraction" in result
     assert "masked_fraction" in result
     for value in result.values():

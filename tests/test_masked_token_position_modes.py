@@ -103,10 +103,10 @@ def test_forward_augmented_reports_loss_metrics():
     model = _build_model()
     metrics = model.forward_augmented(_make_batch())
 
-    assert "local_global_l1_loss" in metrics
+    assert "local_global_loss" in metrics
     assert "context_fraction" in metrics
     assert "masked_fraction" in metrics
-    assert torch.isfinite(metrics["local_global_l1_loss"])
+    assert torch.isfinite(metrics["local_global_loss"])
     assert float(metrics["masked_fraction"]) > 0.0
 
 
@@ -171,7 +171,7 @@ def test_local_global_loss_uses_target_tokens_only():
         / target_masks_by_view.float().sum().clamp_min(1.0)
     )
 
-    assert torch.allclose(metrics["local_global_l1_loss"], masked_only_loss)
+    assert torch.allclose(metrics["local_global_loss"], masked_only_loss)
 
 
 @torch.no_grad()
@@ -193,5 +193,5 @@ def test_positions_outside_union_do_not_change_loss():
     metrics_a = model.forward_augmented(batch_a)
     metrics_b = model.forward_augmented(batch_b)
 
-    assert torch.allclose(metrics_a["local_global_l1_loss"], metrics_b["local_global_l1_loss"], atol=1e-6, rtol=1e-6)
+    assert torch.allclose(metrics_a["local_global_loss"], metrics_b["local_global_loss"], atol=1e-6, rtol=1e-6)
     assert torch.allclose(metrics_a["loss"], metrics_b["loss"], atol=1e-6, rtol=1e-6)
