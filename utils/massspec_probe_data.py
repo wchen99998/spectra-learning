@@ -222,13 +222,10 @@ def _compute_morgan_fingerprints(smiles: np.ndarray) -> np.ndarray:
 
 
 def _encode_categorical_ids(values: np.ndarray) -> tuple[np.ndarray, dict[str, int]]:
-    normalized = np.asarray(
-        [str(v) if str(v) != "" else "unknown" for v in values],
-        dtype=object,
-    )
+    normalized = np.asarray([str(v) or "unknown" for v in values], dtype=object)
     categories = ["unknown"] + sorted(set(normalized.tolist()) - {"unknown"})
     vocab = {category: i for i, category in enumerate(categories)}
-    ids = np.asarray([vocab[str(v)] for v in normalized], dtype=np.int32)
+    ids = np.asarray([vocab[v] for v in normalized], dtype=np.int32)
     return ids, vocab
 
 
