@@ -413,8 +413,6 @@ class _TfIterableDataset(IterableDataset):
         self._dataset_builder = dataset_builder
         self._dataset: tf.data.Dataset | None = None
         self.steps_per_epoch = int(steps_per_epoch)
-        self._resume_from = 0
-        self._num_yielded = 0
 
     def _get_dataset(self) -> tf.data.Dataset:
         if self._dataset is None:
@@ -425,9 +423,6 @@ class _TfIterableDataset(IterableDataset):
         return self.steps_per_epoch
 
     def __iter__(self):
-        self._num_yielded = self._resume_from if self._resume_from > 0 else 0
-        resume_from = self._resume_from
-        self._resume_from = 0
         dataset = self._get_dataset()
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is not None:
@@ -435,45 +430,8 @@ class _TfIterableDataset(IterableDataset):
                 num_shards=worker_info.num_workers,
                 index=worker_info.id,
             )
-        if resume_from > 0:
-            dataset = dataset.skip(resume_from)
-        iterator = dataset.as_numpy_iterator()
-        for batch in iterator:
+        for batch in dataset.as_numpy_iterator():
             yield numpy_batch_to_torch(batch)
-            self._num_yielded += 1
-
-    def state_dict(self) -> dict[str, Any]:
-        return {"num_yielded": self._num_yielded}
-
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        self._resume_from = int(state_dict["num_yielded"])
-        self._num_yielded = self._resume_from
-
-
-class _StatefulDataLoader(DataLoader):
-    dataset: _TfIterableDataset  # type: ignore[assignment]
-
-    def __init__(self, *args: Any, **kwargs: Any):
-        super().__init__(*args, **kwargs)
-        self._resume_from = 0
-        self._num_yielded = 0
-
-    def __iter__(self):
-        state = {"num_yielded": self._resume_from}
-        self.dataset.load_state_dict(state)
-        self._num_yielded = self._resume_from
-        self._resume_from = 0
-        for batch in super().__iter__():
-            self._num_yielded += 1
-            yield batch
-
-    def state_dict(self) -> dict[str, Any]:
-        return {"num_yielded": self._num_yielded}
-
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        self._resume_from = int(state_dict["num_yielded"])
-        self._num_yielded = self._resume_from
-        self.dataset.load_state_dict(state_dict)
 
 
 class TfLightningDataModule:
@@ -658,7 +616,7 @@ class TfLightningDataModule:
         if self.dataloader_num_workers > 0:
             loader_kwargs["persistent_workers"] = self.dataloader_persistent_workers
             loader_kwargs["prefetch_factor"] = self.dataloader_prefetch_factor
-        return _StatefulDataLoader(**loader_kwargs)
+        return DataLoader(**loader_kwargs)
 
     @property
     def train_loader(self) -> DataLoader:
