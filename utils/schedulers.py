@@ -21,7 +21,6 @@ def learning_rate_at_step(
         effective_step = step
         effective_total = max(1, total_steps)
 
-    # Parse schedule string (e.g. "cosine" or "cyclic_cosine;cycle_length=500")
     parts = schedule_type.split(";")
     schedule_base = parts[0]
     parsed: dict[str, str] = {}
@@ -58,8 +57,6 @@ def learning_rate_at_step(
 
 
 class CapturableCosineSchedule:
-    """Warmup + cosine-decay LR schedule using only CUDA tensor ops (compilable)."""
-
     def __init__(
         self,
         optimizer: "torch.optim.Optimizer",
@@ -73,9 +70,7 @@ class CapturableCosineSchedule:
         import torch
 
         self.optimizer = optimizer
-        # Mutable step counter — lives on *device* so .add_ is a GPU op.
         self._step = torch.zeros((), dtype=torch.int64, device=device)
-        # Pre-computed constants (all on device).
         self._base_lr = torch.tensor(base_lr, dtype=torch.float64, device=device)
         self._warmup_steps = torch.tensor(
             max(warmup_steps, 1),
@@ -111,7 +106,6 @@ class CapturableCosineSchedule:
         self._step.add_(1)
         step_f = self._step.to(torch.float64)
 
-        # Warmup multiplier: clamp(step / warmup_steps, max=1)
         if self._has_warmup:
             warmup = torch.clamp(step_f / self._warmup_steps, max=1.0)
             effective_step = torch.clamp(
@@ -122,12 +116,10 @@ class CapturableCosineSchedule:
             warmup = torch.ones((), dtype=torch.float64, device=self._step.device)
             effective_step = step_f
 
-        # Cosine decay
         ratio = torch.clamp(effective_step / self._effective_total, min=0.0)
         mult = 0.5 * (1.0 + torch.cos(self._pi * ratio))
         lr = torch.max(self._min_lr, mult * self._base_lr) * warmup
 
-        # Write to every param group (in-place, no CPU round-trip).
         for group in self.optimizer.param_groups:
             group["lr"].copy_(lr)
 
