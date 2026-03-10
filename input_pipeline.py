@@ -452,25 +452,6 @@ def _build_dataset(
 # -----------------------------------------------------------------------------
 
 
-def _compute_info(
-    gems_metadata: dict[str, Any],
-    *,
-    output_dir: Path,
-    max_precursor_mz: float,
-    num_peaks: int = _NUM_PEAKS_OUTPUT,
-    use_precursor_token: bool = False,
-) -> dict[str, Any]:
-    return {
-        "tfrecord_dir": str(output_dir),
-        "train_size": gems_metadata["train_size"],
-        "validation_size": gems_metadata["validation_size"],
-        "num_peaks": num_peaks + (1 if use_precursor_token else 0),
-        "max_precursor_mz": max_precursor_mz,
-        "peak_mz_min": _PEAK_MZ_MIN,
-        "peak_mz_max": _PEAK_MZ_MAX,
-    }
-
-
 def _steps_from_size(size: int, batch_size: int, drop_remainder: bool) -> int:
     if drop_remainder:
         return int(size // batch_size)
@@ -644,13 +625,15 @@ class TfLightningDataModule:
         ]
         self.gems_test_files = list(self.gems_val_files)
 
-        self.info = _compute_info(
-            self.gems_metadata,
-            output_dir=self.output_dir,
-            max_precursor_mz=self.max_precursor_mz,
-            num_peaks=self.num_peaks_output,
-            use_precursor_token=self.use_precursor_token,
-        )
+        self.info = {
+            "tfrecord_dir": str(self.output_dir),
+            "train_size": self.gems_metadata["train_size"],
+            "validation_size": self.gems_metadata["validation_size"],
+            "num_peaks": self.num_peaks_output + (1 if self.use_precursor_token else 0),
+            "max_precursor_mz": self.max_precursor_mz,
+            "peak_mz_min": _PEAK_MZ_MIN,
+            "peak_mz_max": _PEAK_MZ_MAX,
+        }
 
         self.steps = {
             "gems_train": _steps_from_size(
