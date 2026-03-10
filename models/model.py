@@ -355,11 +355,10 @@ class PeakSetSIGReg(nn.Module):
         self.pool_norm = _build_norm(model_dim, eps=1e-5, norm_type=self.norm_type)
         self.latent_mask_token = nn.Parameter(torch.empty(self.model_dim))
         nn.init.normal_(self.latent_mask_token, std=0.02)
-        predictor_max_heads = min(int(encoder_num_heads), self.model_dim // 16)
-        self.predictor_num_heads = max(1, predictor_max_heads)
-        while self.model_dim % self.predictor_num_heads != 0:
-            self.predictor_num_heads -= 1
-        predictor_head_dim = self.model_dim // self.predictor_num_heads
+        pred_heads = max(1, min(int(encoder_num_heads), self.model_dim // 16))
+        while self.model_dim % pred_heads != 0:
+            pred_heads -= 1
+        predictor_head_dim = self.model_dim // pred_heads
         predictor_inv_freq = _build_standard_rope_inv_freq(
             head_dim=predictor_head_dim,
             base=10000.0,
@@ -371,7 +370,7 @@ class PeakSetSIGReg(nn.Module):
         self.masked_latent_predictor = _build_non_causal_blocks(
             dim=self.model_dim,
             num_layers=_predictor_num_layers,
-            num_heads=self.predictor_num_heads,
+            num_heads=pred_heads,
             num_kv_heads=None,
             attention_mlp_multiple=attention_mlp_multiple,
             use_rope=encoder_use_rope,
