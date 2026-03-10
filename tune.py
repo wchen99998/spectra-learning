@@ -106,14 +106,6 @@ def run_trials(
             cfg[key] = value
         for key, value in trial_params.items():
             cfg[key] = value
-        logging.info(
-            "Trial %d/%d trainer cadence: log_every_n_steps=%s, val_check_interval=%s",
-            idx + 1,
-            len(trial_configs),
-            cfg.get("log_every_n_steps", 50),
-            cfg.get("val_check_interval", 1.0),
-        )
-
         if wandb_project:
             cfg.enable_wandb = True
             cfg.wandb_project = wandb_project
@@ -125,18 +117,6 @@ def run_trials(
 
         if wandb.run is not None:
             wandb.finish()
-        param_total = final_metrics.get("model/params_total")
-        param_trainable = final_metrics.get("model/params_trainable")
-        param_non_trainable = final_metrics.get("model/params_non_trainable")
-        if param_total is not None:
-            logging.info(
-                "Trial %d/%d model params: total=%d trainable=%d non_trainable=%d",
-                idx + 1,
-                len(trial_configs),
-                int(param_total),
-                int(param_trainable),
-                int(param_non_trainable),
-            )
         metric_value = final_metrics.get(metric)
         for key in sorted(final_metrics):
             logging.info(
@@ -155,13 +135,6 @@ def run_trials(
                 "metric_value": metric_value,
                 "workdir": str(trial_dir),
             }
-        )
-        logging.info(
-            "Trial %d/%d metric %s = %s",
-            idx + 1,
-            len(trial_configs),
-            metric,
-            metric_value,
         )
     return results
 
