@@ -76,7 +76,6 @@ class Attention(nn.Module):
         self.n_heads = n_heads
         self.n_kv_heads = n_heads if n_kv_heads is None else n_kv_heads
         self.head_dim = self.dim // self.n_heads
-        self.causal = causal
         self.qk_norm = qk_norm
 
         out_features = (self.n_heads + 2 * self.n_kv_heads) * self.head_dim
@@ -150,12 +149,9 @@ class FeedForward(nn.Module):
         w_init_scale: float = 1.0,
     ):
         super().__init__()
-        self.dim = dim
-        self.mlp_type = mlp_type
 
         hidden_dim = hidden_dim or int((4 * dim) * 2 / 3)
         hidden_dim = multiple_of * math.ceil(hidden_dim / multiple_of)
-        self.hidden_dim = hidden_dim
 
         self.activation = _ACTIVATIONS[mlp_type]
         self.uses_gating = mlp_type in {"swiglu", "geglu", "glu"}
