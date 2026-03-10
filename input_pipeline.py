@@ -1,5 +1,3 @@
-"""TF input pipeline and DataModule for GeMS peak lists."""
-
 from __future__ import annotations
 
 import logging

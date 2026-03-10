@@ -1,5 +1,3 @@
-"""Loss modules for peak-set pretraining."""
-
 from __future__ import annotations
 
 import torch

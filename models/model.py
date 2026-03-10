@@ -1,5 +1,3 @@
-"""Peak-set representation-regularized model for mass spectrometry pretraining."""
-
 from __future__ import annotations
 
 import math

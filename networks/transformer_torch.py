@@ -1,5 +1,3 @@
-"""PyTorch implementation of the transformer blocks used by peak-set models."""
-
 from __future__ import annotations
 
 import math
