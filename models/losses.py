@@ -31,11 +31,6 @@ class SIGReg(nn.Module):
         if valid_mask is None:
             cos_mean = x_t.cos().mean(0)
             sin_mean = x_t.sin().mean(0)
-            sample_count = torch.tensor(
-                float(flat.size(0)),
-                device=flat.device,
-                dtype=flat.dtype,
-            )
         else:
             weights = valid_mask.reshape(-1).to(dtype=flat.dtype, device=flat.device)
             sample_count = weights.sum().clamp_min(1.0)
