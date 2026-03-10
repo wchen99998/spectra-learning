@@ -207,14 +207,11 @@ def _load_nist20_hdf5(
     train_keys = set(unique_keys[:n_train])
     val_keys = set(unique_keys[n_train : n_train + n_val])
 
-    fold_list: list[str] = []
-    for ik in inchikey_14_arr:
-        if ik in train_keys:
-            fold_list.append("train")
-        elif ik in val_keys:
-            fold_list.append("val")
-        else:
-            fold_list.append("test")
+    fold_arr = np.where(
+        np.isin(inchikey_14_arr, list(train_keys)),
+        "train",
+        np.where(np.isin(inchikey_14_arr, list(val_keys)), "val", "test"),
+    )
 
     n_valid = len(idx)
     spectra = raw_spectra[idx].astype(np.float32)
@@ -223,7 +220,6 @@ def _load_nist20_hdf5(
     adduct_arr = raw_adduct[idx]
 
     retention = np.zeros(n_valid, dtype=np.float32)
-    fold_arr = np.asarray(fold_list)
     instrument_type_arr = np.full(n_valid, "unknown", dtype=object)
     collision_energy_arr = np.zeros(n_valid, dtype=np.float32)
     collision_energy_present_arr = np.zeros(n_valid, dtype=np.int32)
