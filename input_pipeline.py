@@ -541,14 +541,6 @@ class TfLightningDataModule:
             num_peaks=self.num_peaks_output,
         )
 
-    def _build_gems_train_dataset(self, seed: int) -> tf.data.Dataset:
-        return self._build_dataset_for_files(
-            self.gems_train_files,
-            seed=seed,
-            shuffle=True,
-            drop_remainder=self.drop_remainder,
-        )
-
     def _make_loader(
         self,
         *,
@@ -576,7 +568,12 @@ class TfLightningDataModule:
         """GeMS train DataLoader (built once, cached)."""
         if self._train_loader is None:
             self._train_loader = self._make_loader(
-                dataset_builder=lambda: self._build_gems_train_dataset(self.seed),
+                dataset_builder=lambda: self._build_dataset_for_files(
+                    self.gems_train_files,
+                    seed=self.seed,
+                    shuffle=True,
+                    drop_remainder=self.drop_remainder,
+                ),
                 steps=self.train_steps,
             )
         return self._train_loader

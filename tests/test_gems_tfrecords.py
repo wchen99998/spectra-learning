@@ -182,15 +182,28 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 return str(local_dir)
 
             with (
-                mock.patch.object(input_pipeline, "snapshot_download", side_effect=fake_snapshot_download) as download_mock,
+                mock.patch.object(
+                    input_pipeline,
+                    "snapshot_download",
+                    side_effect=fake_snapshot_download,
+                ) as download_mock,
             ):
                 datamodule = input_pipeline.TfLightningDataModule(cfg, seed=42)
-                batch = next(datamodule._build_gems_train_dataset(42).as_numpy_iterator())
+                batch = next(
+                    datamodule._build_dataset_for_files(
+                        datamodule.gems_train_files,
+                        seed=42,
+                        shuffle=True,
+                        drop_remainder=datamodule.drop_remainder,
+                    ).as_numpy_iterator()
+                )
 
             self.assertEqual(datamodule.info["train_size"], 2)
             self.assertEqual(datamodule.info["validation_size"], 1)
             self.assertNotIn("massspec_train_size", datamodule.info)
-            self.assertTrue(all(Path(path).exists() for path in datamodule.gems_train_files))
+            self.assertTrue(
+                all(Path(path).exists() for path in datamodule.gems_train_files)
+            )
             self.assertIn("peak_mz", batch)
             self.assertIn("context_mask", batch)
             self.assertIn("target_masks", batch)
@@ -225,7 +238,9 @@ class MassSpecPreprocessTests(unittest.TestCase):
             fake_tsv.write_text("unused\n")
 
             with (
-                mock.patch.object(massspec_probe_data, "_download_hf_file", return_value=fake_tsv),
+                mock.patch.object(
+                    massspec_probe_data, "_download_hf_file", return_value=fake_tsv
+                ),
                 mock.patch.object(
                     massspec_probe_data,
                     "_load_massspec_tsv",
@@ -248,7 +263,9 @@ class MassSpecPreprocessTests(unittest.TestCase):
                     max_precursor_mz=1000.0,
                 )
 
-            record_path = tmp_path / "massspec_probe" / "train" / metadata["train_files"][0]
+            record_path = (
+                tmp_path / "massspec_probe" / "train" / metadata["train_files"][0]
+            )
             dataset = tf.data.TFRecordDataset(
                 [str(record_path)],
                 compression_type="GZIP",
