@@ -180,14 +180,13 @@ class PeakSetEncoder(nn.Module):
         valid_mask: torch.Tensor | None = None,
         visible_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        block_mask = None
-        attention_visible_mask = visible_mask
-        if attention_visible_mask is None:
-            attention_visible_mask = valid_mask
-        elif valid_mask is not None:
-            attention_visible_mask = attention_visible_mask & valid_mask
-        if attention_visible_mask is not None:
-            block_mask = create_visible_block_mask(attention_visible_mask)
+        if visible_mask is not None and valid_mask is not None:
+            attn_mask = visible_mask & valid_mask
+        else:
+            attn_mask = visible_mask if visible_mask is not None else valid_mask
+        block_mask = (
+            create_visible_block_mask(attn_mask) if attn_mask is not None else None
+        )
 
         x = self.embedder(peak_mz, peak_intensity)
         freqs_cos, freqs_sin = _compute_rope_freqs(
