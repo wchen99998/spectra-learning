@@ -352,10 +352,9 @@ def train_and_evaluate(
     start_epoch = 0
     global_step = 0
     _pts = sorted(checkpoint_dir.glob("*.pt"), key=lambda p: p.stat().st_mtime)
-    ckpt_path = _pts[-1] if _pts else None
-    if ckpt_path is not None:
-        logging.info("Resuming from checkpoint: %s", ckpt_path)
-        ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
+    if _pts:
+        logging.info("Resuming from checkpoint: %s", _pts[-1])
+        ckpt = torch.load(_pts[-1], map_location=device, weights_only=True)
         model.load_state_dict(ckpt["model"])
         for opt, state in zip(optimizers, ckpt["optimizers"]):
             opt.load_state_dict(state)
