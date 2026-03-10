@@ -694,32 +694,27 @@ class PeakSetSIGReg(nn.Module):
         masked_fraction = target_masks.float().sum() / valid_peak_count
         context_fraction = context_mask.float().sum() / valid_peak_count
 
-        pool_norm_weight_abs_mean = self.pool_norm.weight.abs().mean()
-
+        _dt = context_emb.dtype
         return {
             "loss": loss,
             "token_sigreg_loss": token_sigreg_loss,
             "local_global_loss": local_global_loss,
             "sigreg_term": sigreg_term,
             "jepa_term": jepa_term,
-            "target_sigreg_term_over_jepa_term": target_sigreg_term_over_jepa_term,
-            "context_fraction": context_fraction,
-            "masked_fraction": masked_fraction,
+            "target_sigreg_term_over_jepa_term": sigreg_term
+            / jepa_term.clamp_min(1e-8),
+            "context_fraction": context_mask.float().sum() / valid_peak_count,
+            "masked_fraction": target_masks.float().sum() / valid_peak_count,
             "sigreg_lambda_current": sigreg_lambda_current,
             "gco_lambda": gco_lambda,
-            "gco_log_lambda": self.gco_log_lambda.to(dtype=context_emb.dtype),
-            "gco_c_ema": self.gco_c_ema.to(dtype=context_emb.dtype),
-            "gco_constraint": gco_constraint.to(dtype=context_emb.dtype),
-            "gco_var_floor_constraint": gco_var_floor_constraint.to(
-                dtype=context_emb.dtype
-            ),
-            "gco_corr_constraint": gco_corr_constraint.to(dtype=context_emb.dtype),
+            "gco_log_lambda": self.gco_log_lambda.to(dtype=_dt),
+            "gco_c_ema": self.gco_c_ema.to(dtype=_dt),
+            "gco_constraint": gco_constraint.to(dtype=_dt),
+            "gco_var_floor_constraint": gco_var_floor_constraint.to(dtype=_dt),
+            "gco_corr_constraint": gco_corr_constraint.to(dtype=_dt),
             "gco_constraint_penalty": gco_constraint_penalty,
-            **{
-                f"encoder_{k}": v.to(dtype=context_emb.dtype)
-                for k, v in reg_stats.items()
-            },
-            "pool_norm_weight_abs_mean": pool_norm_weight_abs_mean,
+            **{f"encoder_{k}": v.to(dtype=_dt) for k, v in reg_stats.items()},
+            "pool_norm_weight_abs_mean": self.pool_norm.weight.abs().mean(),
             "local_to_global_emb_std_ratio": local_to_global_emb_std_ratio,
             **collapse_metrics,
         }
