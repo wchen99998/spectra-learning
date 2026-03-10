@@ -553,14 +553,6 @@ class TfLightningDataModule:
             drop_remainder=self.drop_remainder,
         )
 
-    def _build_gems_val_dataset(self, seed: int) -> tf.data.Dataset:
-        return self._build_dataset_for_files(
-            self.gems_val_files,
-            seed=seed,
-            shuffle=False,
-            drop_remainder=True,
-        )
-
     def _make_loader(
         self,
         *,
