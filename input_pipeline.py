@@ -37,25 +37,6 @@ _DEFAULT_MIN_PEAK_INTENSITY = _INTENSITY_EPS
 _METADATA_FILENAME = "metadata.json"
 
 
-def _ensure_gems_downloaded(
-    *,
-    output_dir: Path,
-    repo_id: str,
-    revision: str,
-) -> dict[str, Any]:
-    logger.info("Downloading GeMS TFRecords from %s@%s", repo_id, revision)
-    snapshot_download(
-        repo_id=repo_id,
-        repo_type="dataset",
-        revision=revision,
-        local_dir=output_dir,
-        allow_patterns=[_METADATA_FILENAME, "train/*", "validation/*"],
-    )
-    metadata = load_gems_metadata(output_dir)
-    validate_gems_artifact(output_dir, metadata)
-    return metadata
-
-
 # -----------------------------------------------------------------------------
 # tf.data pipeline
 # -----------------------------------------------------------------------------
@@ -609,11 +590,20 @@ class TfLightningDataModule:
         self.use_precursor_token = bool(config.get("use_precursor_token", False))
         self.num_peaks_output = int(config.get("num_peaks", _NUM_PEAKS_OUTPUT))
 
-        self.gems_metadata = _ensure_gems_downloaded(
-            output_dir=self.gems_dir,
-            repo_id=self.gems_tfrecord_repo_id,
-            revision=self.gems_tfrecord_revision,
+        logger.info(
+            "Downloading GeMS TFRecords from %s@%s",
+            self.gems_tfrecord_repo_id,
+            self.gems_tfrecord_revision,
         )
+        snapshot_download(
+            repo_id=self.gems_tfrecord_repo_id,
+            repo_type="dataset",
+            revision=self.gems_tfrecord_revision,
+            local_dir=self.gems_dir,
+            allow_patterns=[_METADATA_FILENAME, "train/*", "validation/*"],
+        )
+        self.gems_metadata = load_gems_metadata(self.gems_dir)
+        validate_gems_artifact(self.gems_dir, self.gems_metadata)
 
         self.gems_train_files = [
             str(self.gems_dir / "train" / fn)
