@@ -54,7 +54,9 @@ def generate_trial_configs(
     if grid_params:
         grid_names = [name for name, _ in grid_params]
         grid_values = [vals for _, vals in grid_params]
-        grid_combos = [dict(zip(grid_names, combo)) for combo in itertools.product(*grid_values)]
+        grid_combos = [
+            dict(zip(grid_names, combo)) for combo in itertools.product(*grid_values)
+        ]
     else:
         grid_combos = [{}]
 
@@ -122,6 +124,7 @@ def run_trials(
 
         final_metrics = train_and_evaluate(cfg, workdir=trial_dir)
         import wandb
+
         if wandb.run is not None:
             wandb.finish()
         param_total = final_metrics.get("model/params_total")
@@ -138,16 +141,30 @@ def run_trials(
             )
         metric_value = final_metrics.get(metric)
         for key in sorted(final_metrics):
-            logging.info("Trial %d/%d %s = %s", idx + 1, len(trial_configs), key, final_metrics[key])
-        results.append({
-            "idx": idx,
-            "name": trial_name,
-            "params": trial_params,
-            "metrics": final_metrics,
-            "metric_value": metric_value,
-            "workdir": str(trial_dir),
-        })
-        logging.info("Trial %d/%d metric %s = %s", idx + 1, len(trial_configs), metric, metric_value)
+            logging.info(
+                "Trial %d/%d %s = %s",
+                idx + 1,
+                len(trial_configs),
+                key,
+                final_metrics[key],
+            )
+        results.append(
+            {
+                "idx": idx,
+                "name": trial_name,
+                "params": trial_params,
+                "metrics": final_metrics,
+                "metric_value": metric_value,
+                "workdir": str(trial_dir),
+            }
+        )
+        logging.info(
+            "Trial %d/%d metric %s = %s",
+            idx + 1,
+            len(trial_configs),
+            metric,
+            metric_value,
+        )
     return results
 
 
@@ -163,26 +180,39 @@ def print_summary(
     reverse = mode == "max"
     ranked = sorted(valid, key=lambda r: r["metric_value"], reverse=reverse)
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"  Tune results — {len(valid)} trials, metric={metric}, mode={mode}")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     print(f"  {'Rank':<6}{'Trial':<40}{metric:<20}{'Dir'}")
-    print(f"  {'-'*6}{'-'*40}{'-'*20}{'-'*14}")
+    print(f"  {'-' * 6}{'-' * 40}{'-' * 20}{'-' * 14}")
     for rank, r in enumerate(ranked, 1):
         print(f"  {rank:<6}{r['name']:<40}{r['metric_value']:<20.6f}{r['workdir']}")
     best = ranked[0]
     print(f"\n  Best: {best['name']}  ({metric} = {best['metric_value']:.6f})")
     print(f"  Config: {best['params']}")
     print(f"  Workdir: {best['workdir']}")
-    print(f"{'='*80}\n")
+    print(f"{'=' * 80}\n")
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Lightweight HPO for pretraining + periodic MSG probe.")
-    parser.add_argument("--config", required=True, help="Path to training config python file.")
-    parser.add_argument("--workdir", required=True, help="Root directory for trial outputs.")
-    parser.add_argument("--num-samples", type=int, default=16, help="Random samples per grid combination.")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducible sampling.")
+    parser = argparse.ArgumentParser(
+        description="Lightweight HPO for pretraining + periodic MSG probe."
+    )
+    parser.add_argument(
+        "--config", required=True, help="Path to training config python file."
+    )
+    parser.add_argument(
+        "--workdir", required=True, help="Root directory for trial outputs."
+    )
+    parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=16,
+        help="Random samples per grid combination.",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42, help="Random seed for reproducible sampling."
+    )
     parser.add_argument(
         "--metric",
         default="msg_probe/test/auc_fg_mean",
@@ -204,14 +234,16 @@ def _parse_args() -> argparse.Namespace:
         default="",
         help=(
             "Optional JSON dict of config overrides applied to every trial. "
-            "Example: '{\"num_epochs\": 1, \"limit_train_batches\": 0.01}'"
+            'Example: \'{"num_epochs": 1, "limit_train_batches": 0.01}\''
         ),
     )
     return parser.parse_args()
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
     args = _parse_args()
 
     workdir = Path(args.workdir).expanduser().resolve()

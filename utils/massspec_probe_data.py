@@ -15,7 +15,11 @@ from ml_collections import config_dict
 from rdkit import DataStructs
 from rdkit import Chem
 from rdkit.Chem import AllChem
-from utils.massspec_probe_targets import FG_SMARTS, REGRESSION_TARGET_KEYS, build_probe_targets_for_rows
+from utils.massspec_probe_targets import (
+    FG_SMARTS,
+    REGRESSION_TARGET_KEYS,
+    build_probe_targets_for_rows,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,14 +47,14 @@ def _prepend_precursor_token_probe_tf(batch: dict) -> dict:
     Mirrors ``input_pipeline._prepend_precursor_token_tf`` but without
     ``context_mask``/``target_masks`` handling (probe batches don't have these).
     """
-    peak_mz = batch["peak_mz"]                # [B, N]
-    peak_intensity = batch["peak_intensity"]   # [B, N]
-    peak_valid_mask = batch["peak_valid_mask"] # [B, N]
-    precursor_mz = batch["precursor_mz"]       # [B]
+    peak_mz = batch["peak_mz"]  # [B, N]
+    peak_intensity = batch["peak_intensity"]  # [B, N]
+    peak_valid_mask = batch["peak_valid_mask"]  # [B, N]
+    precursor_mz = batch["precursor_mz"]  # [B]
     B = tf.shape(peak_mz)[0]
 
-    pre_mz = tf.expand_dims(precursor_mz, 1)          # [B, 1]
-    pre_int = tf.fill([B, 1], -1.0)                    # sentinel
+    pre_mz = tf.expand_dims(precursor_mz, 1)  # [B, 1]
+    pre_int = tf.fill([B, 1], -1.0)  # sentinel
     pre_valid = tf.ones([B, 1], dtype=tf.bool)
 
     out = dict(batch)
@@ -61,13 +65,16 @@ def _prepend_precursor_token_probe_tf(batch: dict) -> dict:
     del out["precursor_mz"]
     return out
 
+
 MASSSPEC_HF_REPO = "roman-bushuiev/MassSpecGym"
 MASSSPEC_TSV_PATH = "data/MassSpecGym.tsv"
 MASSSPEC_METADATA_VERSION = 2
 
 NIST20_METADATA_VERSION = 1
 NIST20_HF_REPO = "roman-bushuiev/GeMS"
-NIST20_HF_FILENAME = "data/DreaMS_Atlas/nist20_mona_clean_merged_spectra_dreams_hidden_nist20.hdf5"
+NIST20_HF_FILENAME = (
+    "data/DreaMS_Atlas/nist20_mona_clean_merged_spectra_dreams_hidden_nist20.hdf5"
+)
 _NIST20_SPLIT_SEED = 42
 _NIST20_TRAIN_FRAC = 0.70
 _NIST20_VAL_FRAC = 0.15
@@ -155,7 +162,9 @@ def _load_massspec_tsv(
     adduct_array = np.asarray(adduct)
     instrument_type_array = np.asarray(instrument_type)
     collision_energy_array = np.asarray(collision_energy, dtype=np.float32)
-    collision_energy_present_array = np.asarray(collision_energy_present, dtype=np.int32)
+    collision_energy_present_array = np.asarray(
+        collision_energy_present, dtype=np.int32
+    )
     return (
         spectra_array,
         retention,
@@ -209,7 +218,9 @@ def _load_nist20_hdf5(
 
     idx = np.asarray(valid_indices)
     inchikey_14_arr = np.asarray(inchikey_14)
-    logger.info("NIST20 HDF5: %d / %d spectra have valid SMILES", len(idx), len(raw_smiles))
+    logger.info(
+        "NIST20 HDF5: %d / %d spectra have valid SMILES", len(idx), len(raw_smiles)
+    )
 
     # InChIKey-based train/val/test split
     unique_keys = sorted(set(inchikey_14_arr.tolist()))
@@ -334,23 +345,31 @@ def _write_tfrecords_with_fingerprint(
                 fp = fingerprint[i].astype(np.int64)
                 probe_features = {
                     f"probe_{name}": tf.train.Feature(
-                        float_list=tf.train.FloatList(value=[float(probe_mol_props[name][i])])
+                        float_list=tf.train.FloatList(
+                            value=[float(probe_mol_props[name][i])]
+                        )
                     )
                     for name in REGRESSION_TARGET_KEYS
                 }
-                probe_features.update({
-                    f"probe_fg_{name}": tf.train.Feature(
-                        int64_list=tf.train.Int64List(value=[int(probe_fg_binary[name][i])])
-                    )
-                    for name in FG_SMARTS
-                })
+                probe_features.update(
+                    {
+                        f"probe_fg_{name}": tf.train.Feature(
+                            int64_list=tf.train.Int64List(
+                                value=[int(probe_fg_binary[name][i])]
+                            )
+                        )
+                        for name in FG_SMARTS
+                    }
+                )
                 probe_features["probe_valid_mol"] = tf.train.Feature(
                     int64_list=tf.train.Int64List(value=[int(probe_valid_mol[i])])
                 )
                 example = tf.train.Example(
                     features=tf.train.Features(
                         feature={
-                            "mz": tf.train.Feature(float_list=tf.train.FloatList(value=mz)),
+                            "mz": tf.train.Feature(
+                                float_list=tf.train.FloatList(value=mz)
+                            ),
                             "intensity": tf.train.Feature(
                                 float_list=tf.train.FloatList(value=intensity)
                             ),
@@ -434,7 +453,9 @@ def _process_massspec_probe_data(
     instrument_type_id = instrument_type_id[keep]
     collision_energy = collision_energy[keep]
     collision_energy_present = collision_energy_present[keep]
-    probe_mol_props, probe_fg_binary, probe_valid_mol = build_probe_targets_for_rows(smiles)
+    probe_mol_props, probe_fg_binary, probe_valid_mol = build_probe_targets_for_rows(
+        smiles
+    )
 
     train_mask = fold == "train"
     val_mask = fold == "val"
@@ -544,7 +565,9 @@ def _process_nist20_probe_data(
     instrument_type_id = instrument_type_id[keep]
     collision_energy = collision_energy[keep]
     collision_energy_present = collision_energy_present[keep]
-    probe_mol_props, probe_fg_binary, probe_valid_mol = build_probe_targets_for_rows(smiles)
+    probe_mol_props, probe_fg_binary, probe_valid_mol = build_probe_targets_for_rows(
+        smiles
+    )
 
     train_mask = fold == "train"
     val_mask = fold == "val"
@@ -633,11 +656,22 @@ def ensure_massspec_probe_prepared(
     metadata_path = output_dir / _METADATA_FILENAME
     if metadata_path.exists():
         metadata = _load_json(metadata_path)
-        version_ok = int(metadata.get("metadata_version", 0)) == MASSSPEC_METADATA_VERSION
-        precursor_ok = float(metadata.get("max_precursor_mz", float("inf"))) == float(max_precursor_mz)
-        train_ok = all((output_dir / "train" / fn).exists() for fn in metadata.get("train_files", []))
-        val_ok = all((output_dir / "val" / fn).exists() for fn in metadata.get("val_files", []))
-        test_ok = all((output_dir / "test" / fn).exists() for fn in metadata.get("test_files", []))
+        version_ok = (
+            int(metadata.get("metadata_version", 0)) == MASSSPEC_METADATA_VERSION
+        )
+        precursor_ok = float(metadata.get("max_precursor_mz", float("inf"))) == float(
+            max_precursor_mz
+        )
+        train_ok = all(
+            (output_dir / "train" / fn).exists()
+            for fn in metadata.get("train_files", [])
+        )
+        val_ok = all(
+            (output_dir / "val" / fn).exists() for fn in metadata.get("val_files", [])
+        )
+        test_ok = all(
+            (output_dir / "test" / fn).exists() for fn in metadata.get("test_files", [])
+        )
         vocab_ok = "adduct_vocab" in metadata and "instrument_type_vocab" in metadata
         if version_ok and precursor_ok and train_ok and val_ok and test_ok and vocab_ok:
             logger.info("Found existing MassSpec probe TFRecords at %s", output_dir)
@@ -666,10 +700,19 @@ def ensure_nist20_probe_prepared(
     if metadata_path.exists():
         metadata = _load_json(metadata_path)
         version_ok = int(metadata.get("metadata_version", 0)) == NIST20_METADATA_VERSION
-        precursor_ok = float(metadata.get("max_precursor_mz", float("inf"))) == float(max_precursor_mz)
-        train_ok = all((output_dir / "train" / fn).exists() for fn in metadata.get("train_files", []))
-        val_ok = all((output_dir / "val" / fn).exists() for fn in metadata.get("val_files", []))
-        test_ok = all((output_dir / "test" / fn).exists() for fn in metadata.get("test_files", []))
+        precursor_ok = float(metadata.get("max_precursor_mz", float("inf"))) == float(
+            max_precursor_mz
+        )
+        train_ok = all(
+            (output_dir / "train" / fn).exists()
+            for fn in metadata.get("train_files", [])
+        )
+        val_ok = all(
+            (output_dir / "val" / fn).exists() for fn in metadata.get("val_files", [])
+        )
+        test_ok = all(
+            (output_dir / "test" / fn).exists() for fn in metadata.get("test_files", [])
+        )
         vocab_ok = "adduct_vocab" in metadata and "instrument_type_vocab" in metadata
         if version_ok and precursor_ok and train_ok and val_ok and test_ok and vocab_ok:
             logger.info("Found existing NIST20 probe TFRecords at %s", output_dir)
@@ -763,7 +806,9 @@ def _parse_probe_batch(
         valid = intensity > 0
         if peak_ordering == "mz":
             sort_key = tf.where(valid, mz, tf.fill(tf.shape(mz), float("inf")))
-            sorted_idx = tf.argsort(sort_key, axis=1, direction="ASCENDING", stable=True)
+            sorted_idx = tf.argsort(
+                sort_key, axis=1, direction="ASCENDING", stable=True
+            )
         else:
             sort_key = tf.where(
                 valid,
@@ -786,7 +831,8 @@ def _parse_probe_batch(
             "peak_mz": mz / peak_mz_max,
             "peak_intensity": tf.where(valid, intensity, 0.0),
             "peak_valid_mask": valid,
-            "precursor_mz": tf.clip_by_value(precursor_mz_val, 0.0, max_prec) / max_prec,
+            "precursor_mz": tf.clip_by_value(precursor_mz_val, 0.0, max_prec)
+            / max_prec,
             "rt": rt,
             "mz": mz,
             "intensity": intensity,
@@ -804,7 +850,9 @@ def _parse_probe_batch(
         for name in REGRESSION_TARGET_KEYS:
             batch[f"probe_{name}"] = parsed[f"probe_{name}"][:, 0]
         for name in FG_SMARTS:
-            batch[f"probe_fg_{name}"] = tf.cast(parsed[f"probe_fg_{name}"][:, 0], tf.int32)
+            batch[f"probe_fg_{name}"] = tf.cast(
+                parsed[f"probe_fg_{name}"][:, 0], tf.int32
+            )
         return batch
 
     return transform
@@ -844,7 +892,9 @@ def _build_probe_dataset(
         num_parallel_calls=tf.data.AUTOTUNE,
     )
     if use_precursor_token:
-        ds = ds.map(_prepend_precursor_token_probe_tf, num_parallel_calls=tf.data.AUTOTUNE)
+        ds = ds.map(
+            _prepend_precursor_token_probe_tf, num_parallel_calls=tf.data.AUTOTUNE
+        )
     options = tf.data.Options()
     options.deterministic = True
     ds = ds.with_options(options)
@@ -902,7 +952,9 @@ class MassSpecProbeData:
                 "instrument_type_vocab",
                 {"unknown": 0},
             ),
-            "massspec_adduct_vocab_size": len(metadata.get("adduct_vocab", {"unknown": 0})),
+            "massspec_adduct_vocab_size": len(
+                metadata.get("adduct_vocab", {"unknown": 0})
+            ),
             "massspec_instrument_type_vocab_size": len(
                 metadata.get("instrument_type_vocab", {"unknown": 0})
             ),
@@ -910,9 +962,15 @@ class MassSpecProbeData:
         }
         return cls(
             info=info,
-            train_files=[str(output_dir / "train" / fn) for fn in metadata.get("train_files", [])],
-            val_files=[str(output_dir / "val" / fn) for fn in metadata.get("val_files", [])],
-            test_files=[str(output_dir / "test" / fn) for fn in metadata.get("test_files", [])],
+            train_files=[
+                str(output_dir / "train" / fn) for fn in metadata.get("train_files", [])
+            ],
+            val_files=[
+                str(output_dir / "val" / fn) for fn in metadata.get("val_files", [])
+            ],
+            test_files=[
+                str(output_dir / "test" / fn) for fn in metadata.get("test_files", [])
+            ],
             batch_size=int(config.get("batch_size", _DEFAULT_BATCH_SIZE)),
             shuffle_buffer=int(config.get("shuffle_buffer", _DEFAULT_SHUFFLE_BUFFER)),
             tfrecord_buffer_size=int(

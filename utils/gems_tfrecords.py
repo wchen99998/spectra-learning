@@ -23,6 +23,7 @@ CANONICAL_NUM_SHARDS = 4
 CANONICAL_MAX_PRECURSOR_MZ = 1000.0
 _NUM_PEAKS_INPUT = 128
 
+
 def load_gems_arrays(hdf5_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     import h5py
 

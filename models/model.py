@@ -150,12 +150,10 @@ def _masked_embedding_stats(
         "emb_norm": (flat.norm(dim=-1) * weights).sum() / count,
         "emb_var_mean": var.mean(),
         "emb_var_floor": var.amin(),
-        "emb_cov_offdiag_abs_mean": (
-            cov.abs().sum() - cov.diagonal().abs().sum()
-        ) / offdiag_den,
-        "emb_corr_offdiag_abs_mean": (
-            corr.abs().sum() - corr.diagonal().abs().sum()
-        ) / offdiag_den,
+        "emb_cov_offdiag_abs_mean": (cov.abs().sum() - cov.diagonal().abs().sum())
+        / offdiag_den,
+        "emb_corr_offdiag_abs_mean": (corr.abs().sum() - corr.diagonal().abs().sum())
+        / offdiag_den,
     }
 
 
@@ -216,7 +214,9 @@ class PeakSetEncoder(nn.Module):
         if attention_visible_mask is not None:
             block_mask = create_visible_block_mask(attention_visible_mask)
 
-        def _compute_rope(dtype: torch.dtype) -> tuple[
+        def _compute_rope(
+            dtype: torch.dtype,
+        ) -> tuple[
             torch.Tensor | None,
             torch.Tensor | None,
         ]:
@@ -398,7 +398,9 @@ class PeakSetSIGReg(nn.Module):
         if self.representation_regularizer == "gco":
             self.representation_regularizer = "gco-sigreg"
         self.norm_type = str(norm_type).lower()
-        self.masked_latent_predictor_num_layers = int(masked_latent_predictor_num_layers)
+        self.masked_latent_predictor_num_layers = int(
+            masked_latent_predictor_num_layers
+        )
         self.vicreg_beta = float(vicreg_beta)
         if self.jepa_num_target_blocks < 1:
             raise ValueError("jepa_num_target_blocks must be >= 1")
@@ -429,7 +431,9 @@ class PeakSetSIGReg(nn.Module):
         else:
             self.teacher_encoder = None
 
-        pma_heads = int(encoder_num_heads) if pma_num_heads is None else int(pma_num_heads)
+        pma_heads = (
+            int(encoder_num_heads) if pma_num_heads is None else int(pma_num_heads)
+        )
         self.pool_query = nn.Parameter(torch.empty(self.pma_num_seeds, model_dim))
         nn.init.xavier_normal_(self.pool_query)
         self.pool_mha = nn.MultiheadAttention(
@@ -450,7 +454,9 @@ class PeakSetSIGReg(nn.Module):
             base=10000.0,
             device=torch.device("cpu"),
         )
-        self.register_buffer("predictor_rope_inv_freq", predictor_inv_freq, persistent=False)
+        self.register_buffer(
+            "predictor_rope_inv_freq", predictor_inv_freq, persistent=False
+        )
         self.masked_latent_predictor = _build_non_causal_blocks(
             dim=self.model_dim,
             num_layers=self.masked_latent_predictor_num_layers,
@@ -478,7 +484,9 @@ class PeakSetSIGReg(nn.Module):
             self.sigreg_lambda_current.copy_(self.sigreg_lambda_target)
             return
         step = self.sigreg_lambda_step.to(dtype=self.sigreg_lambda_current.dtype)
-        ratio = torch.clamp(step / self.sigreg_lambda_warmup_steps_tensor, min=0.0, max=1.0)
+        ratio = torch.clamp(
+            step / self.sigreg_lambda_warmup_steps_tensor, min=0.0, max=1.0
+        )
         self.sigreg_lambda_current.copy_(self.sigreg_lambda_target * ratio)
         self.sigreg_lambda_step.add_(1)
 
@@ -487,10 +495,16 @@ class PeakSetSIGReg(nn.Module):
         if self.teacher_ema_decay_warmup_steps <= 0:
             self.teacher_ema_decay_current.copy_(self.teacher_ema_decay_target)
             return
-        step = self.teacher_ema_decay_step.to(dtype=self.teacher_ema_decay_current.dtype)
-        ratio = torch.clamp(step / self.teacher_ema_decay_warmup_steps_tensor, min=0.0, max=1.0)
+        step = self.teacher_ema_decay_step.to(
+            dtype=self.teacher_ema_decay_current.dtype
+        )
+        ratio = torch.clamp(
+            step / self.teacher_ema_decay_warmup_steps_tensor, min=0.0, max=1.0
+        )
         delta = self.teacher_ema_decay_target - self.teacher_ema_decay_start_tensor
-        self.teacher_ema_decay_current.copy_(self.teacher_ema_decay_start_tensor + delta * ratio)
+        self.teacher_ema_decay_current.copy_(
+            self.teacher_ema_decay_start_tensor + delta * ratio
+        )
         self.teacher_ema_decay_step.add_(1)
 
     def predict_masked_latents(
@@ -537,7 +551,9 @@ class PeakSetSIGReg(nn.Module):
         if self.teacher_encoder is None:
             return
         self.advance_teacher_ema_decay_schedule()
-        self.teacher_encoder.multi_avg_fn = get_ema_multi_avg_fn(float(self.teacher_ema_decay_current))
+        self.teacher_encoder.multi_avg_fn = get_ema_multi_avg_fn(
+            float(self.teacher_ema_decay_current)
+        )
         self.teacher_encoder.update_parameters(self.encoder)
 
     def _mean_pool(
@@ -654,8 +670,12 @@ class PeakSetSIGReg(nn.Module):
         )
 
         peak_mz_targets = peak_mz.unsqueeze(1).expand(-1, K, -1).reshape(B * K, N)
-        peak_intensity_targets = peak_intensity.unsqueeze(1).expand(-1, K, -1).reshape(B * K, N)
-        peak_valid_targets = peak_valid_mask.unsqueeze(1).expand(-1, K, -1).reshape(B * K, N)
+        peak_intensity_targets = (
+            peak_intensity.unsqueeze(1).expand(-1, K, -1).reshape(B * K, N)
+        )
+        peak_valid_targets = (
+            peak_valid_mask.unsqueeze(1).expand(-1, K, -1).reshape(B * K, N)
+        )
         target_masks_flat = target_masks.reshape(B * K, N)
         target_emb_flat = self.encoder(
             peak_mz_targets,
@@ -674,7 +694,9 @@ class PeakSetSIGReg(nn.Module):
                     valid_mask=peak_valid_targets,
                     visible_mask=target_masks_flat,
                 ).detach()
-            target_token_target = target_token_target_flat.reshape(B, K, N, -1).permute(1, 0, 2, 3)
+            target_token_target = target_token_target_flat.reshape(B, K, N, -1).permute(
+                1, 0, 2, 3
+            )
         else:
             target_token_target = target_emb.detach()
 
@@ -717,21 +739,27 @@ class PeakSetSIGReg(nn.Module):
         elif self.masked_token_loss_type == "l1":
             per_token_reg = (loss_pred - loss_target).abs().mean(dim=-1)
         else:
-            raise ValueError(f"Unsupported masked_token_loss_type: {self.masked_token_loss_type}")
+            raise ValueError(
+                f"Unsupported masked_token_loss_type: {self.masked_token_loss_type}"
+            )
         target_mask_float = target_masks_by_view.float()
         reg_num = (per_token_reg * target_mask_float).sum()
         reg_den = target_mask_float.sum().clamp_min(1.0)
         local_global_loss = reg_num / reg_den
 
         if self.sigreg_lambda_warmup_steps > 0:
-            sigreg_lambda_current = self.sigreg_lambda_current.to(dtype=context_emb.dtype)
+            sigreg_lambda_current = self.sigreg_lambda_current.to(
+                dtype=context_emb.dtype
+            )
         else:
             sigreg_lambda_current = context_emb.new_tensor(self.sigreg_lambda)
 
         jepa_term = self.masked_token_loss_weight * local_global_loss
 
         branch_emb = torch.cat([context_emb.unsqueeze(0), target_emb], dim=0)
-        branch_visible = torch.cat([context_mask.unsqueeze(0), target_masks_by_view], dim=0)
+        branch_visible = torch.cat(
+            [context_mask.unsqueeze(0), target_masks_by_view], dim=0
+        )
         V = branch_emb.shape[0]
         fused_emb = branch_emb.reshape(V * B, N, -1)
         fused_visible = branch_visible.reshape(V * B, N)
@@ -756,8 +784,12 @@ class PeakSetSIGReg(nn.Module):
             encoder_emb_std = regularizer_stats["emb_std"]
             encoder_emb_var_mean = regularizer_stats["emb_var_mean"]
             encoder_emb_var_floor = regularizer_stats["emb_var_floor"]
-            encoder_emb_cov_offdiag_abs_mean = regularizer_stats["emb_cov_offdiag_abs_mean"]
-            encoder_emb_corr_offdiag_abs_mean = regularizer_stats["emb_corr_offdiag_abs_mean"]
+            encoder_emb_cov_offdiag_abs_mean = regularizer_stats[
+                "emb_cov_offdiag_abs_mean"
+            ]
+            encoder_emb_corr_offdiag_abs_mean = regularizer_stats[
+                "emb_corr_offdiag_abs_mean"
+            ]
             gco_var_floor_constraint = (
                 self.gco_var_floor_target - encoder_emb_var_floor.float()
             )
@@ -775,9 +807,13 @@ class PeakSetSIGReg(nn.Module):
         if self.representation_regularizer == "gco-sigreg":
             with torch.no_grad():
                 if self.training:
-                    self.gco_c_ema.mul_(self.gco_alpha).add_((1.0 - self.gco_alpha) * gco_constraint)
+                    self.gco_c_ema.mul_(self.gco_alpha).add_(
+                        (1.0 - self.gco_alpha) * gco_constraint
+                    )
                     self.gco_log_lambda.add_(self.gco_eta * self.gco_c_ema)
-                    self.gco_log_lambda.clamp_(self.gco_log_lambda_min, self.gco_log_lambda_max)
+                    self.gco_log_lambda.clamp_(
+                        self.gco_log_lambda_min, self.gco_log_lambda_max
+                    )
                 gco_lambda = self.gco_log_lambda.exp().to(dtype=context_emb.dtype)
 
         if self.representation_regularizer == "sigreg" and self.sigreg_lambda > 0:
@@ -839,14 +875,20 @@ class PeakSetSIGReg(nn.Module):
             "gco_log_lambda": self.gco_log_lambda.to(dtype=context_emb.dtype),
             "gco_c_ema": self.gco_c_ema.to(dtype=context_emb.dtype),
             "gco_constraint": gco_constraint.to(dtype=context_emb.dtype),
-            "gco_var_floor_constraint": gco_var_floor_constraint.to(dtype=context_emb.dtype),
+            "gco_var_floor_constraint": gco_var_floor_constraint.to(
+                dtype=context_emb.dtype
+            ),
             "gco_corr_constraint": gco_corr_constraint.to(dtype=context_emb.dtype),
             "gco_constraint_penalty": gco_constraint_penalty,
             "encoder_emb_std": encoder_emb_std.to(dtype=context_emb.dtype),
             "encoder_emb_var_mean": encoder_emb_var_mean.to(dtype=context_emb.dtype),
             "encoder_emb_var_floor": encoder_emb_var_floor.to(dtype=context_emb.dtype),
-            "encoder_emb_cov_offdiag_abs_mean": encoder_emb_cov_offdiag_abs_mean.to(dtype=context_emb.dtype),
-            "encoder_emb_corr_offdiag_abs_mean": encoder_emb_corr_offdiag_abs_mean.to(dtype=context_emb.dtype),
+            "encoder_emb_cov_offdiag_abs_mean": encoder_emb_cov_offdiag_abs_mean.to(
+                dtype=context_emb.dtype
+            ),
+            "encoder_emb_corr_offdiag_abs_mean": encoder_emb_corr_offdiag_abs_mean.to(
+                dtype=context_emb.dtype
+            ),
             "pool_norm_weight_abs_mean": pool_norm_weight_abs_mean,
             "local_to_global_emb_std_ratio": local_to_global_emb_std_ratio,
             **collapse_metrics,
@@ -870,13 +912,19 @@ class PeakSetSIGReg(nn.Module):
         - ``*_emb_corr_offdiag_abs_mean``: mean absolute off-diagonal correlation
         - ``*_emb_norm``: mean L2 norm of valid token embeddings
         """
-        emb = fused_emb.float().reshape(V, B, fused_emb.shape[1], fused_emb.shape[2])  # [V, B, N, D]
+        emb = fused_emb.float().reshape(
+            V, B, fused_emb.shape[1], fused_emb.shape[2]
+        )  # [V, B, N, D]
         mask = visible_mask.reshape(V, B, visible_mask.shape[1])  # [V, B, N]
 
         global_emb = emb[target_global_view_idx]
         global_mask = mask[target_global_view_idx]
-        local_emb = torch.cat((emb[:target_global_view_idx], emb[target_global_view_idx + 1:]), dim=0)
-        local_mask = torch.cat((mask[:target_global_view_idx], mask[target_global_view_idx + 1:]), dim=0)
+        local_emb = torch.cat(
+            (emb[:target_global_view_idx], emb[target_global_view_idx + 1 :]), dim=0
+        )
+        local_mask = torch.cat(
+            (mask[:target_global_view_idx], mask[target_global_view_idx + 1 :]), dim=0
+        )
         global_stats = _masked_embedding_stats(global_emb, global_mask)
         local_stats = _masked_embedding_stats(local_emb, local_mask)
 
@@ -891,7 +939,9 @@ class PeakSetSIGReg(nn.Module):
             "local_emb_var_floor": local_stats["emb_var_floor"],
             "global_emb_cov_offdiag_abs_mean": global_stats["emb_cov_offdiag_abs_mean"],
             "local_emb_cov_offdiag_abs_mean": local_stats["emb_cov_offdiag_abs_mean"],
-            "global_emb_corr_offdiag_abs_mean": global_stats["emb_corr_offdiag_abs_mean"],
+            "global_emb_corr_offdiag_abs_mean": global_stats[
+                "emb_corr_offdiag_abs_mean"
+            ],
             "local_emb_corr_offdiag_abs_mean": local_stats["emb_corr_offdiag_abs_mean"],
         }
 

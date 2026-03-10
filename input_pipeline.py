@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import os
+
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
 import numpy as np
@@ -55,10 +56,10 @@ def _ensure_gems_downloaded(
     return metadata
 
 
-
 # -----------------------------------------------------------------------------
 # tf.data pipeline
 # -----------------------------------------------------------------------------
+
 
 @tf.function
 def _ensure_nonempty_peakset_tf(
@@ -85,7 +86,9 @@ def _apply_peak_jitter_tf(
     mz_jitter_std: float,
     intensity_jitter_std: float,
 ) -> tuple[tf.Tensor, tf.Tensor]:
-    mz_noise = tf.random.normal(tf.shape(peak_mz), stddev=mz_jitter_std, dtype=peak_mz.dtype)
+    mz_noise = tf.random.normal(
+        tf.shape(peak_mz), stddev=mz_jitter_std, dtype=peak_mz.dtype
+    )
     mz = tf.where(peak_valid_mask, peak_mz + mz_noise, tf.zeros_like(peak_mz))
     mz = tf.clip_by_value(mz, 0.0, 1.0)
 
@@ -245,14 +248,14 @@ def _prepend_precursor_token_tf(batch: dict) -> dict:
     and never a JEPA target.  After prepending, ``precursor_mz`` is removed
     from the batch so the model skips its own GPU-side prepend.
     """
-    peak_mz = batch["peak_mz"]                # [B, N]
-    peak_intensity = batch["peak_intensity"]   # [B, N]
-    peak_valid_mask = batch["peak_valid_mask"] # [B, N]
-    precursor_mz = batch["precursor_mz"]       # [B]
+    peak_mz = batch["peak_mz"]  # [B, N]
+    peak_intensity = batch["peak_intensity"]  # [B, N]
+    peak_valid_mask = batch["peak_valid_mask"]  # [B, N]
+    precursor_mz = batch["precursor_mz"]  # [B]
     B = tf.shape(peak_mz)[0]
 
-    pre_mz = tf.expand_dims(precursor_mz, 1)          # [B, 1]
-    pre_int = tf.fill([B, 1], -1.0)                    # sentinel
+    pre_mz = tf.expand_dims(precursor_mz, 1)  # [B, 1]
+    pre_int = tf.fill([B, 1], -1.0)  # sentinel
     pre_valid = tf.ones([B, 1], dtype=tf.bool)
 
     out = dict(batch)
@@ -262,12 +265,14 @@ def _prepend_precursor_token_tf(batch: dict) -> dict:
 
     if "context_mask" in batch:
         out["context_mask"] = tf.concat(
-            [tf.ones([B, 1], dtype=tf.bool), batch["context_mask"]], axis=1,
+            [tf.ones([B, 1], dtype=tf.bool), batch["context_mask"]],
+            axis=1,
         )
     if "target_masks" in batch:
         K = tf.shape(batch["target_masks"])[1]
         out["target_masks"] = tf.concat(
-            [tf.zeros([B, K, 1], dtype=tf.bool), batch["target_masks"]], axis=2,
+            [tf.zeros([B, K, 1], dtype=tf.bool), batch["target_masks"]],
+            axis=2,
         )
 
     del out["precursor_mz"]  # consumed into peak_mz[:, 0]
@@ -292,7 +297,6 @@ def _batched_parse_and_transform(
     min_int = tf.constant(min_peak_intensity, tf.float32)
     max_prec = tf.constant(max_precursor_mz, tf.float32)
 
-
     feature_spec = {
         "mz": tf.io.FixedLenFeature([_NUM_PEAKS_INPUT], tf.float32),
         "intensity": tf.io.FixedLenFeature([_NUM_PEAKS_INPUT], tf.float32),
@@ -304,9 +308,9 @@ def _batched_parse_and_transform(
     def transform(serialized_batch: tf.Tensor) -> dict[str, tf.Tensor]:
         parsed = tf.io.parse_example(serialized_batch, feature_spec)
 
-        mz = parsed["mz"]                          # [B, 128]
-        intensity = parsed["intensity"]             # [B, 128]
-        rt = parsed["rt"][:, 0]                     # [B]
+        mz = parsed["mz"]  # [B, 128]
+        intensity = parsed["intensity"]  # [B, 128]
+        rt = parsed["rt"][:, 0]  # [B]
         precursor_mz_val = parsed["precursor_mz"][:, 0]  # [B]
 
         # ── Filter peak mz range (vectorized) ───────────────────────────────────
@@ -334,17 +338,27 @@ def _batched_parse_and_transform(
         valid = intensity > 0
         if peak_ordering == "mz":
             sort_key = tf.where(
-                valid, mz, tf.fill(tf.shape(mz), float("inf")),
+                valid,
+                mz,
+                tf.fill(tf.shape(mz), float("inf")),
             )
             sorted_idx = tf.argsort(
-                sort_key, axis=1, direction="ASCENDING", stable=True,
+                sort_key,
+                axis=1,
+                direction="ASCENDING",
+                stable=True,
             )
         else:
             sort_key = tf.where(
-                valid, intensity, tf.fill(tf.shape(intensity), float("-inf")),
+                valid,
+                intensity,
+                tf.fill(tf.shape(intensity), float("-inf")),
             )
             sorted_idx = tf.argsort(
-                sort_key, axis=1, direction="DESCENDING", stable=True,
+                sort_key,
+                axis=1,
+                direction="DESCENDING",
+                stable=True,
             )
         mz = tf.gather(mz, sorted_idx, batch_dims=1)
         intensity = tf.gather(intensity, sorted_idx, batch_dims=1)
@@ -354,9 +368,7 @@ def _batched_parse_and_transform(
 
         # ── Normalize ────────────────────────────────────────────────────────────
         valid_final = intensity > 0
-        precursor_mz_norm = (
-            tf.clip_by_value(precursor_mz_val, 0.0, max_prec) / max_prec
-        )
+        precursor_mz_norm = tf.clip_by_value(precursor_mz_val, 0.0, max_prec) / max_prec
 
         return {
             "peak_mz": mz / peak_mz_max_c,
@@ -435,7 +447,6 @@ def _build_dataset(
     return ds
 
 
-
 # -----------------------------------------------------------------------------
 # Info and step resolution
 # -----------------------------------------------------------------------------
@@ -458,7 +469,6 @@ def _compute_info(
         "peak_mz_min": _PEAK_MZ_MIN,
         "peak_mz_max": _PEAK_MZ_MAX,
     }
-
 
 
 def _steps_from_size(size: int, batch_size: int, drop_remainder: bool) -> int:
@@ -531,7 +541,8 @@ class _TfIterableDataset(IterableDataset):
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is not None:
             dataset = dataset.shard(
-                num_shards=worker_info.num_workers, index=worker_info.id,
+                num_shards=worker_info.num_workers,
+                index=worker_info.id,
             )
         if resume_from > 0:
             dataset = dataset.skip(resume_from)
@@ -663,7 +674,9 @@ class TfLightningDataModule:
         default_pin = torch.cuda.is_available()
         self.pin_memory = bool(config.get("dataloader_pin_memory", default_pin))
         self.dataloader_num_workers = int(config.get("dataloader_num_workers", 1))
-        self.dataloader_prefetch_factor = int(config.get("dataloader_prefetch_factor", 2))
+        self.dataloader_prefetch_factor = int(
+            config.get("dataloader_prefetch_factor", 2)
+        )
         self.dataloader_persistent_workers = bool(
             config.get("dataloader_persistent_workers", self.dataloader_num_workers > 0)
         )

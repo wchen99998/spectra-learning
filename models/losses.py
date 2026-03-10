@@ -53,7 +53,9 @@ class SIGReg(nn.Module):
         Scalar — mean statistic across slicing directions.
         """
         flat = proj.reshape(-1, proj.size(-1))
-        A = torch.randn(flat.size(-1), self.num_slices, device=flat.device, dtype=flat.dtype)
+        A = torch.randn(
+            flat.size(-1), self.num_slices, device=flat.device, dtype=flat.dtype
+        )
         A = A.div_(A.norm(p=2, dim=0))
         x_t = (flat @ A).unsqueeze(-1) * self.t  # [N, num_slices, knots]
         if valid_mask is None:
@@ -71,7 +73,7 @@ class SIGReg(nn.Module):
             cos_mean = (x_t.cos() * weight_view).sum(0) / sample_count
             sin_mean = (x_t.sin() * weight_view).sum(0) / sample_count
         err = (cos_mean - self.phi).square() + sin_mean.square()
-        statistic = (err @ self.weights) 
+        statistic = err @ self.weights
         return statistic.mean()
 
 
@@ -120,16 +122,14 @@ class VICRegLoss(nn.Module):
         std_a = torch.sqrt(a_centered.var(dim=0, unbiased=False) + self.eps)
         std_b = torch.sqrt(b_centered.var(dim=0, unbiased=False) + self.eps)
         std_loss = 0.5 * (
-            F.relu(self.gamma - std_a).mean()
-            + F.relu(self.gamma - std_b).mean()
+            F.relu(self.gamma - std_a).mean() + F.relu(self.gamma - std_b).mean()
         )
 
         cov_a = (a_centered.T @ a_centered) / a_centered.size(0)
         cov_b = (b_centered.T @ b_centered) / b_centered.size(0)
-        cov_loss = (
-            self._off_diagonal(cov_a).pow(2).sum() / cov_a.size(0)
-            + self._off_diagonal(cov_b).pow(2).sum() / cov_b.size(0)
-        )
+        cov_loss = self._off_diagonal(cov_a).pow(2).sum() / cov_a.size(
+            0
+        ) + self._off_diagonal(cov_b).pow(2).sum() / cov_b.size(0)
 
         return (
             self.sim_coeff * repr_loss

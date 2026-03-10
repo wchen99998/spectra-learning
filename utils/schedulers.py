@@ -65,9 +65,11 @@ def learning_rate_at_step(
 
         cycle_index = effective_step // cycle_length
         pos_in_cycle = effective_step % cycle_length
-        peak_lr = base_lr * (decay_factor ** cycle_index)
+        peak_lr = base_lr * (decay_factor**cycle_index)
         cosine_ratio = pos_in_cycle / cycle_length
-        lr = min_lr + 0.5 * (peak_lr - min_lr) * (1.0 + math.cos(math.pi * cosine_ratio))
+        lr = min_lr + 0.5 * (peak_lr - min_lr) * (
+            1.0 + math.cos(math.pi * cosine_ratio)
+        )
     else:
         raise NotImplementedError(f"Unknown schedule type: {schedule_base}")
 
@@ -102,20 +104,31 @@ class CapturableCosineSchedule:
         # Pre-computed constants (all on device).
         self._base_lr = torch.tensor(base_lr, dtype=torch.float64, device=device)
         self._warmup_steps = torch.tensor(
-            max(warmup_steps, 1), dtype=torch.float64, device=device,
+            max(warmup_steps, 1),
+            dtype=torch.float64,
+            device=device,
         )
         self._has_warmup = warmup_steps > 0
-        eff_total = max(1, total_steps - warmup_steps) if warmup_steps > 0 else max(1, total_steps)
+        eff_total = (
+            max(1, total_steps - warmup_steps)
+            if warmup_steps > 0
+            else max(1, total_steps)
+        )
         self._effective_total = torch.tensor(
-            eff_total, dtype=torch.float64, device=device,
+            eff_total,
+            dtype=torch.float64,
+            device=device,
         )
         self._min_lr = torch.tensor(
             min_lr if min_lr is not None else 0.1 * base_lr,
-            dtype=torch.float64, device=device,
+            dtype=torch.float64,
+            device=device,
         )
         self._pi = torch.tensor(math.pi, dtype=torch.float64, device=device)
         self._warmup_steps_int = torch.tensor(
-            warmup_steps, dtype=torch.int64, device=device,
+            warmup_steps,
+            dtype=torch.int64,
+            device=device,
         )
 
     # -- compilable step --------------------------------------------------
@@ -130,7 +143,8 @@ class CapturableCosineSchedule:
         if self._has_warmup:
             warmup = torch.clamp(step_f / self._warmup_steps, max=1.0)
             effective_step = torch.clamp(
-                step_f - self._warmup_steps, min=0.0,
+                step_f - self._warmup_steps,
+                min=0.0,
             )
         else:
             warmup = torch.ones((), dtype=torch.float64, device=self._step.device)

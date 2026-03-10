@@ -27,7 +27,9 @@ def create_visible_block_mask(visible_mask: torch.Tensor) -> BlockMask:
     def mask_mod(b, h, q_idx, kv_idx):
         return visible_mask[b, q_idx] & visible_mask[b, kv_idx]
 
-    return create_block_mask(mask_mod, B=B, H=None, Q_LEN=N, KV_LEN=N, device=visible_mask.device)
+    return create_block_mask(
+        mask_mod, B=B, H=None, Q_LEN=N, KV_LEN=N, device=visible_mask.device
+    )
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -141,8 +143,16 @@ class Attention(nn.Module):
 
         if self.n_kv_heads != self.n_heads:
             rep = self.n_heads // self.n_kv_heads
-            k = k.unsqueeze(2).expand(-1, -1, rep, -1, -1).reshape(bsz, self.n_heads, seqlen, self.head_dim)
-            v = v.unsqueeze(2).expand(-1, -1, rep, -1, -1).reshape(bsz, self.n_heads, seqlen, self.head_dim)
+            k = (
+                k.unsqueeze(2)
+                .expand(-1, -1, rep, -1, -1)
+                .reshape(bsz, self.n_heads, seqlen, self.head_dim)
+            )
+            v = (
+                v.unsqueeze(2)
+                .expand(-1, -1, rep, -1, -1)
+                .reshape(bsz, self.n_heads, seqlen, self.head_dim)
+            )
 
         attn = flex_attention(q, k, v, block_mask=block_mask)
         attn = attn.transpose(1, 2).contiguous().view(bsz, seqlen, self.dim)

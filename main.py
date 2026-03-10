@@ -18,8 +18,12 @@ tf.config.set_visible_devices([], "GPU")
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train MAE/BERT with PyTorch Lightning.")
-    parser.add_argument("--config", required=True, help="Path to a config file (python).")
+    parser = argparse.ArgumentParser(
+        description="Train MAE/BERT with PyTorch Lightning."
+    )
+    parser.add_argument(
+        "--config", required=True, help="Path to a config file (python)."
+    )
     parser.add_argument("--workdir", required=True, help="Output directory.")
     return parser.parse_args()
 

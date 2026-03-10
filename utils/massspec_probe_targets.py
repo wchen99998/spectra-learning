@@ -76,7 +76,9 @@ def build_probe_targets_for_rows(
             unique_smiles.append(smi)
         row_indices[row_idx] = target_idx
 
-    mol_props_unique, fg_counts_unique, valid_unique = compute_probe_targets_for_smiles(unique_smiles)
+    mol_props_unique, fg_counts_unique, valid_unique = compute_probe_targets_for_smiles(
+        unique_smiles
+    )
     mol_props = {
         name: values[row_indices].astype(np.float32, copy=False)
         for name, values in mol_props_unique.items()

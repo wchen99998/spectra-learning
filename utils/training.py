@@ -37,7 +37,9 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         encoder_use_rope=bool(config.get("encoder_use_rope", False)),
         masked_token_loss_weight=float(config.get("masked_token_loss_weight", 0.0)),
         masked_token_loss_type=str(config.get("masked_token_loss_type", "l1")),
-        representation_regularizer=str(config.get("representation_regularizer", "sigreg")),
+        representation_regularizer=str(
+            config.get("representation_regularizer", "sigreg")
+        ),
         masked_latent_predictor_num_layers=int(
             config.get("masked_latent_predictor_num_layers", 2)
         ),
@@ -65,7 +67,9 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         use_ema_teacher_target=bool(config.get("use_ema_teacher_target", False)),
         teacher_ema_decay=float(config.get("teacher_ema_decay", 0.996)),
         teacher_ema_decay_start=float(config.get("teacher_ema_decay_start", 0.0)),
-        teacher_ema_decay_warmup_steps=int(config.get("teacher_ema_decay_warmup_steps", 0)),
+        teacher_ema_decay_warmup_steps=int(
+            config.get("teacher_ema_decay_warmup_steps", 0)
+        ),
         sigreg_mz_jitter_std=float(config.get("sigreg_mz_jitter_std", 0.0001)),
         sigreg_intensity_jitter_std=float(
             config.get("sigreg_intensity_jitter_std", 0.001)
@@ -160,9 +164,15 @@ def model_param_summary_to_metrics(summary: dict[str, Any]) -> dict[str, float]:
         "model/param_tensors_non_trainable": float(summary["non_trainable_tensors"]),
     }
     for module_name, module_summary in summary["by_module"].items():
-        metrics[f"model/params_total/{module_name}"] = float(module_summary["total_params"])
-        metrics[f"model/params_trainable/{module_name}"] = float(module_summary["trainable_params"])
-        metrics[f"model/params_non_trainable/{module_name}"] = float(module_summary["non_trainable_params"])
+        metrics[f"model/params_total/{module_name}"] = float(
+            module_summary["total_params"]
+        )
+        metrics[f"model/params_trainable/{module_name}"] = float(
+            module_summary["trainable_params"]
+        )
+        metrics[f"model/params_non_trainable/{module_name}"] = float(
+            module_summary["non_trainable_params"]
+        )
     return metrics
 
 

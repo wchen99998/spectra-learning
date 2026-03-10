@@ -33,7 +33,7 @@ from utils.training import (
     model_param_summary_to_metrics,
 )
 
-torch.set_float32_matmul_precision('medium')
+torch.set_float32_matmul_precision("medium")
 torch._dynamo.config.capture_scalar_outputs = True
 inductor_config.coordinate_descent_tuning = True
 inductor_config.triton.unique_kernel_names = True
@@ -78,7 +78,9 @@ def _partition_params_for_adamw(
 
 def _partition_params_for_muon(
     model: torch.nn.Module,
-) -> tuple[list[torch.nn.Parameter], list[torch.nn.Parameter], list[torch.nn.Parameter]]:
+) -> tuple[
+    list[torch.nn.Parameter], list[torch.nn.Parameter], list[torch.nn.Parameter]
+]:
     """Split parameters into Muon-eligible and AdamW-only, with explicit no-decay."""
     muon_decay_params = []
     muon_no_decay_params = []
@@ -100,14 +102,16 @@ def _partition_params_for_muon(
 # CUDA stream prefetch helpers
 # ---------------------------------------------------------------------------
 
-_TRAIN_BATCH_KEYS = frozenset({
-    "peak_mz",
-    "peak_intensity",
-    "peak_valid_mask",
-    "context_mask",
-    "target_masks",
-    "precursor_mz",
-})
+_TRAIN_BATCH_KEYS = frozenset(
+    {
+        "peak_mz",
+        "peak_intensity",
+        "peak_valid_mask",
+        "context_mask",
+        "target_masks",
+        "precursor_mz",
+    }
+)
 
 
 def _record_stream(obj: Any, stream: torch.cuda.Stream) -> None:
@@ -155,8 +159,12 @@ class _BatchPrefetcher:
         self._loader = loader
         self._device = device
         self._prefetch_size = prefetch_size
-        self._stream = torch.cuda.Stream(device=device) if device.type == "cuda" else None
-        self._ready: deque[tuple[dict[str, torch.Tensor], torch.cuda.Event | None]] = deque()
+        self._stream = (
+            torch.cuda.Stream(device=device) if device.type == "cuda" else None
+        )
+        self._ready: deque[tuple[dict[str, torch.Tensor], torch.cuda.Event | None]] = (
+            deque()
+        )
         self._exhausted = False
         for _ in range(self._prefetch_size):
             self._preload_one()
@@ -195,6 +203,7 @@ class _BatchPrefetcher:
 # ---------------------------------------------------------------------------
 # Compiled training step
 # ---------------------------------------------------------------------------
+
 
 def _train_step_impl(
     model: PeakSetSIGReg,
@@ -245,6 +254,7 @@ def _resolve_norm_type(config: config_dict.ConfigDict) -> str:
 # Optimizer / scheduler construction
 # ---------------------------------------------------------------------------
 
+
 def _build_optimizers(
     config: config_dict.ConfigDict,
     model: PeakSetSIGReg,
@@ -260,10 +270,11 @@ def _build_optimizers(
     is_cuda = device.type == "cuda"
     capturable = bool(config.get("optimizer_capturable", True)) and is_cuda
     fused_cfg = config.get("optimizer_fused", None)
-    fused = (is_cuda if fused_cfg is None else bool(fused_cfg) and is_cuda)
+    fused = is_cuda if fused_cfg is None else bool(fused_cfg) and is_cuda
 
     def _make_schedule(
-        optimizer: torch.optim.Optimizer, lr: float,
+        optimizer: torch.optim.Optimizer,
+        lr: float,
     ) -> CapturableCosineSchedule:
         return CapturableCosineSchedule(
             optimizer,
@@ -275,15 +286,21 @@ def _build_optimizers(
         )
 
     if optimizer_type == "muon":
-        muon_decay_params, muon_no_decay_params, adamw_params = _partition_params_for_muon(model)
+        muon_decay_params, muon_no_decay_params, adamw_params = (
+            _partition_params_for_muon(model)
+        )
         muon_lr = float(config.get("muon_lr", None) or base_lr)
         adamw_lr = float(config.get("adamw_lr", None) or base_lr)
         muon_wd = float(config.get("muon_weight_decay", None) or weight_decay)
         muon_param_groups: list[dict[str, Any]] = []
         if muon_decay_params:
-            muon_param_groups.append({"params": muon_decay_params, "weight_decay": muon_wd})
+            muon_param_groups.append(
+                {"params": muon_decay_params, "weight_decay": muon_wd}
+            )
         if muon_no_decay_params:
-            muon_param_groups.append({"params": muon_no_decay_params, "weight_decay": 0.0})
+            muon_param_groups.append(
+                {"params": muon_no_decay_params, "weight_decay": 0.0}
+            )
 
         muon_opt = torch.optim.Muon(
             muon_param_groups,
@@ -302,7 +319,10 @@ def _build_optimizers(
             capturable=capturable,
             fused=fused,
         )
-        return [muon_opt, adamw_opt], [_make_schedule(muon_opt, muon_lr), _make_schedule(adamw_opt, adamw_lr)]
+        return [muon_opt, adamw_opt], [
+            _make_schedule(muon_opt, muon_lr),
+            _make_schedule(adamw_opt, adamw_lr),
+        ]
 
     decay_params, no_decay_params = _partition_params_for_adamw(model)
 
@@ -324,6 +344,7 @@ def _build_optimizers(
 # Checkpointing
 # ---------------------------------------------------------------------------
 
+
 def _save_checkpoint(
     path: Path,
     model: PeakSetSIGReg,
@@ -333,14 +354,17 @@ def _save_checkpoint(
     epoch: int,
     loss: float,
 ) -> None:
-    torch.save({
-        "model": model.state_dict(),
-        "optimizers": [opt.state_dict() for opt in optimizers],
-        "schedulers": [sched.state_dict() for sched in schedulers],
-        "global_step": global_step,
-        "epoch": epoch,
-        "loss": loss,
-    }, path)
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "optimizers": [opt.state_dict() for opt in optimizers],
+            "schedulers": [sched.state_dict() for sched in schedulers],
+            "global_step": global_step,
+            "epoch": epoch,
+            "loss": loss,
+        },
+        path,
+    )
 
 
 def _latest_checkpoint(checkpoint_dir: Path) -> Path | None:
@@ -370,6 +394,7 @@ def _prune_checkpoints(checkpoint_dir: Path, keep_top_k: int = 5) -> None:
 # ---------------------------------------------------------------------------
 # Main training loop
 # ---------------------------------------------------------------------------
+
 
 def train_and_evaluate(
     config: config_dict.ConfigDict,
@@ -437,7 +462,6 @@ def train_and_evaluate(
     autocast_dtype = _resolve_autocast_dtype(config)
     compiled_step = torch.compile(_train_step_impl, mode="default", fullgraph=False)
 
-
     optimizer_type = str(config.get("optimizer", "adamw")).lower()
     device_prefetch_size = int(config.get("device_prefetch_size", 1))
     _msg_probe_raw = float(config.get("msg_probe_every_n_steps", 0))
@@ -458,7 +482,9 @@ def train_and_evaluate(
 
     for epoch in range(start_epoch, loop_epochs):
         prefetcher = _BatchPrefetcher(
-            iter(train_loader), device, prefetch_size=device_prefetch_size,
+            iter(train_loader),
+            device,
+            prefetch_size=device_prefetch_size,
         )
         epoch_steps = min(steps_per_epoch, total_steps - global_step)
         pbar = tqdm(total=epoch_steps, desc=f"Epoch {epoch}", unit="step")
@@ -484,12 +510,16 @@ def train_and_evaluate(
             if global_step % log_every_n_steps == 0:
                 loss_val = float(metrics["loss"].detach())
                 pbar.set_postfix(loss=f"{loss_val:.4f}", step=global_step)
-                log_metrics = {f"train/{k}": float(v.detach()) for k, v in metrics.items()}
+                log_metrics = {
+                    f"train/{k}": float(v.detach()) for k, v in metrics.items()
+                }
                 if optimizer_type == "muon":
                     for opt, label in zip(optimizers, ("muon", "adamw")):
                         log_metrics[f"train/lr_{label}"] = opt.param_groups[0]["lr"]
                 else:
-                    log_metrics["train/learning_rate"] = optimizers[0].param_groups[0]["lr"]
+                    log_metrics["train/learning_rate"] = optimizers[0].param_groups[0][
+                        "lr"
+                    ]
                 log_metrics["epoch"] = epoch
                 log_metrics["global_step"] = global_step
                 logger.log_metrics(log_metrics, step=global_step)
@@ -498,8 +528,12 @@ def train_and_evaluate(
                 ckpt_name = f"step-{global_step:08d}.pt"
                 _save_checkpoint(
                     checkpoint_dir / ckpt_name,
-                    model, optimizers, schedulers,
-                    global_step, epoch, float(metrics["loss"]),
+                    model,
+                    optimizers,
+                    schedulers,
+                    global_step,
+                    epoch,
+                    float(metrics["loss"]),
                 )
                 _prune_checkpoints(checkpoint_dir, keep_top_k=15)
 
@@ -526,8 +560,12 @@ def train_and_evaluate(
     # Save final checkpoint
     _save_checkpoint(
         checkpoint_dir / "last.pt",
-        model, optimizers, schedulers,
-        global_step, loop_epochs, float("nan"),
+        model,
+        optimizers,
+        schedulers,
+        global_step,
+        loop_epochs,
+        float("nan"),
     )
 
     if last_msg_probe_metrics:

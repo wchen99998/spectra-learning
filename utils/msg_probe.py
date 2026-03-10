@@ -21,6 +21,7 @@ from utils.schedulers import learning_rate_at_step
 
 log = logging.getLogger(__name__)
 
+
 @dataclass(slots=True)
 class MsgProbeTaskSpec:
     regression_tasks: tuple[str, ...]
@@ -43,10 +44,9 @@ class MsgLinearProbe(torch.nn.Module):
         task_names: tuple[str, ...],
     ) -> None:
         super().__init__()
-        self.heads = torch.nn.ModuleDict({
-            name: torch.nn.Linear(input_dim, 1)
-            for name in task_names
-        })
+        self.heads = torch.nn.ModuleDict(
+            {name: torch.nn.Linear(input_dim, 1) for name in task_names}
+        )
 
     def forward(
         self,
@@ -125,7 +125,9 @@ def _build_probe_feature_extractor(
         peak_valid_mask = batch["peak_valid_mask"]
         with torch.no_grad():
             embeddings = backbone.encoder(
-                peak_mz, peak_intensity, valid_mask=peak_valid_mask,
+                peak_mz,
+                peak_intensity,
+                valid_mask=peak_valid_mask,
             )
             pooled = backbone.pool(embeddings, peak_valid_mask)
         return pooled
@@ -151,21 +153,31 @@ def _collect_split_targets(
         drop_remainder=False,
         max_samples=max_samples,
     ):
-        valid_mask = batch["probe_valid_mol"].detach().cpu().numpy().astype(bool, copy=False)
+        valid_mask = (
+            batch["probe_valid_mol"].detach().cpu().numpy().astype(bool, copy=False)
+        )
         if not valid_mask.any():
             continue
         for name in REGRESSION_TARGET_KEYS:
-            regression[name].append(batch[f"probe_{name}"][valid_mask].detach().cpu().numpy())
+            regression[name].append(
+                batch[f"probe_{name}"][valid_mask].detach().cpu().numpy()
+            )
         for name in FG_SMARTS:
-            classification[name].append(batch[f"probe_fg_{name}"][valid_mask].detach().cpu().numpy())
+            classification[name].append(
+                batch[f"probe_fg_{name}"][valid_mask].detach().cpu().numpy()
+            )
 
     return MsgProbeSplitTargets(
         regression={
-            name: np.concatenate(chunks, axis=0) if chunks else np.empty((0,), dtype=np.float32)
+            name: np.concatenate(chunks, axis=0)
+            if chunks
+            else np.empty((0,), dtype=np.float32)
             for name, chunks in regression.items()
         },
         classification={
-            name: np.concatenate(chunks, axis=0) if chunks else np.empty((0,), dtype=np.int32)
+            name: np.concatenate(chunks, axis=0)
+            if chunks
+            else np.empty((0,), dtype=np.int32)
             for name, chunks in classification.items()
         },
     )
@@ -378,18 +390,24 @@ def run_msg_probe(
     total_steps = num_probe_epochs * steps_per_epoch
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
-        lr_lambda=lambda step_idx: learning_rate_at_step(
-            step_idx + 1,
-            base_lr=probe_lr,
-            total_steps=total_steps,
-            warmup_steps=probe_warmup_steps,
-            schedule_type="cosine",
-            min_learning_rate=None,
-        ) / probe_lr,
+        lr_lambda=lambda step_idx: (
+            learning_rate_at_step(
+                step_idx + 1,
+                base_lr=probe_lr,
+                total_steps=total_steps,
+                warmup_steps=probe_warmup_steps,
+                schedule_type="cosine",
+                min_learning_rate=None,
+            )
+            / probe_lr
+        ),
     )
 
     def move_batch(batch: dict[str, object]) -> dict[str, object]:
-        return {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+        return {
+            k: v.to(device) if isinstance(v, torch.Tensor) else v
+            for k, v in batch.items()
+        }
 
     final_metrics: dict[str, float] = {}
     for epoch_idx in range(num_probe_epochs):
@@ -445,8 +463,12 @@ def run_msg_probe(
                 _update_epoch_state(test_state, result, task_spec)
 
         epoch_metrics = {
-            **_score_epoch_state(prefix="msg_probe/train", epoch_state=train_state, task_spec=task_spec),
-            **_score_epoch_state(prefix="msg_probe/test", epoch_state=test_state, task_spec=task_spec),
+            **_score_epoch_state(
+                prefix="msg_probe/train", epoch_state=train_state, task_spec=task_spec
+            ),
+            **_score_epoch_state(
+                prefix="msg_probe/test", epoch_state=test_state, task_spec=task_spec
+            ),
             "msg_probe/num_fg_tasks": float(len(task_spec.classification_tasks)),
             "msg_probe_epoch": float(epoch_idx + 1),
         }
