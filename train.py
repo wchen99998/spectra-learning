@@ -231,24 +231,6 @@ def _train_step_impl(
     return metrics
 
 
-def _resolve_autocast_dtype(config: config_dict.ConfigDict) -> torch.dtype | None:
-    autocast_name = str(config.get("autocast_dtype", "bf16")).lower()
-    if autocast_name in {"bf16", "bfloat16"}:
-        return torch.bfloat16
-    if autocast_name in {"fp16", "float16", "half"}:
-        return torch.float16
-    if autocast_name in {"fp32", "float32", "none"}:
-        return None
-    raise ValueError(f"Unsupported autocast_dtype: {autocast_name}")
-
-
-def _resolve_norm_type(config: config_dict.ConfigDict) -> str:
-    norm_type = str(config.get("norm_type", "rmsnorm")).lower()
-    if norm_type not in {"rmsnorm", "layernorm"}:
-        raise ValueError(f"Unsupported norm_type: {norm_type}")
-    return norm_type
-
-
 # ---------------------------------------------------------------------------
 # Optimizer / scheduler construction
 # ---------------------------------------------------------------------------
@@ -421,7 +403,10 @@ def train_and_evaluate(
     logging.info("Training for %s epochs (%d steps).", num_epochs, total_steps)
     logging.info("Steps per epoch: %d", steps_per_epoch)
     logging.info("Total steps: %d", total_steps)
-    config.norm_type = _resolve_norm_type(config)
+    _norm = str(config.get("norm_type", "rmsnorm")).lower()
+    if _norm not in {"rmsnorm", "layernorm"}:
+        raise ValueError(f"Unsupported norm_type: {_norm}")
+    config.norm_type = _norm
     logging.info("Norm type: %s", config.norm_type)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -458,7 +443,15 @@ def train_and_evaluate(
     logger.log_metrics(model_param_metrics, step=global_step)
 
     # Compile training step (forward + backward + optimizer + scheduler)
-    autocast_dtype = _resolve_autocast_dtype(config)
+    _ac_name = str(config.get("autocast_dtype", "bf16")).lower()
+    if _ac_name in {"bf16", "bfloat16"}:
+        autocast_dtype = torch.bfloat16
+    elif _ac_name in {"fp16", "float16", "half"}:
+        autocast_dtype = torch.float16
+    elif _ac_name in {"fp32", "float32", "none"}:
+        autocast_dtype = None
+    else:
+        raise ValueError(f"Unsupported autocast_dtype: {_ac_name}")
     compiled_step = torch.compile(_train_step_impl, mode="default", fullgraph=False)
 
     optimizer_type = str(config.get("optimizer", "adamw")).lower()
