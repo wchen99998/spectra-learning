@@ -42,36 +42,6 @@ _METADATA_FILENAME = "metadata.json"
 # -----------------------------------------------------------------------------
 
 
-@tf.function
-def _apply_peak_jitter_tf(
-    peak_mz: tf.Tensor,
-    peak_intensity: tf.Tensor,
-    peak_valid_mask: tf.Tensor,
-    *,
-    mz_jitter_std: float,
-    intensity_jitter_std: float,
-) -> tuple[tf.Tensor, tf.Tensor]:
-    mz_noise = tf.random.normal(
-        tf.shape(peak_mz), stddev=mz_jitter_std, dtype=peak_mz.dtype
-    )
-    mz = tf.where(peak_valid_mask, peak_mz + mz_noise, tf.zeros_like(peak_mz))
-    mz = tf.clip_by_value(mz, 0.0, 1.0)
-
-    intensity_noise = tf.random.normal(
-        tf.shape(peak_intensity),
-        stddev=intensity_jitter_std,
-        dtype=peak_intensity.dtype,
-    )
-    intensity = tf.where(
-        peak_valid_mask,
-        peak_intensity + intensity_noise,
-        tf.zeros_like(peak_intensity),
-    )
-    intensity = tf.clip_by_value(intensity, 0.0, 1.0)
-    intensity = tf.where(peak_valid_mask, intensity, tf.zeros_like(intensity))
-    return mz, intensity
-
-
 def _sample_block_masks_tf(
     peak_valid_mask: tf.Tensor,
     *,
@@ -182,12 +152,31 @@ def _augment_block_jepa_batch_tf(
         positions = tf.range(num_peaks, dtype=tf.int32)[tf.newaxis, :]
         fallback = tf.logical_and(needs_fallback[:, tf.newaxis], positions == 0)
         peak_valid_mask = tf.logical_or(peak_valid_mask, fallback)
-        peak_mz, peak_intensity = _apply_peak_jitter_tf(
-            peak_mz,
-            peak_intensity,
-            peak_valid_mask,
-            mz_jitter_std=mz_jitter_std,
-            intensity_jitter_std=intensity_jitter_std,
+        # Jitter m/z and intensity for valid peaks
+        mz_noise = tf.random.normal(
+            tf.shape(peak_mz), stddev=mz_jitter_std, dtype=peak_mz.dtype
+        )
+        peak_mz = tf.clip_by_value(
+            tf.where(peak_valid_mask, peak_mz + mz_noise, tf.zeros_like(peak_mz)),
+            0.0,
+            1.0,
+        )
+        int_noise = tf.random.normal(
+            tf.shape(peak_intensity),
+            stddev=intensity_jitter_std,
+            dtype=peak_intensity.dtype,
+        )
+        peak_intensity = tf.clip_by_value(
+            tf.where(
+                peak_valid_mask,
+                peak_intensity + int_noise,
+                tf.zeros_like(peak_intensity),
+            ),
+            0.0,
+            1.0,
+        )
+        peak_intensity = tf.where(
+            peak_valid_mask, peak_intensity, tf.zeros_like(peak_intensity)
         )
         context_mask, target_masks = _sample_block_masks_tf(
             peak_valid_mask,
