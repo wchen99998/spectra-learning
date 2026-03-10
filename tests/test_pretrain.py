@@ -184,7 +184,7 @@ class BlockJEPATests(unittest.TestCase):
         self.assertTrue(any(g is not None for g in grads))
 
     def test_vicreg_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "only supports"):
+        with self.assertRaisesRegex(ValueError, "Unsupported regularizer"):
             self._build_model(representation_regularizer="vicreg")
 
     def test_load_pretrained_weights_roundtrip(self):

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import torch
 from torch import nn
-from torch.nn import functional as F
 
 
 class SIGReg(nn.Module):
@@ -75,64 +74,3 @@ class SIGReg(nn.Module):
         err = (cos_mean - self.phi).square() + sin_mean.square()
         statistic = err @ self.weights
         return statistic.mean()
-
-
-class VICRegLoss(nn.Module):
-    """Variance-Invariance-Covariance regularization loss."""
-
-    def __init__(
-        self,
-        sim_coeff: float = 25.0,
-        std_coeff: float = 25.0,
-        cov_coeff: float = 1.0,
-        gamma: float = 1.0,
-        eps: float = 1e-4,
-    ):
-        super().__init__()
-        self.sim_coeff = sim_coeff
-        self.std_coeff = std_coeff
-        self.cov_coeff = cov_coeff
-        self.gamma = gamma
-        self.eps = eps
-
-    @staticmethod
-    def _off_diagonal(matrix: torch.Tensor) -> torch.Tensor:
-        dim = matrix.size(0)
-        return matrix.flatten()[:-1].view(dim - 1, dim + 1)[:, 1:].flatten()
-
-    def forward(
-        self,
-        proj_a: torch.Tensor,
-        proj_b: torch.Tensor,
-        valid_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        a = proj_a.reshape(-1, proj_a.size(-1))
-        b = proj_b.reshape(-1, proj_b.size(-1))
-
-        if valid_mask is not None:
-            keep = valid_mask.reshape(-1)
-            a = a[keep]
-            b = b[keep]
-
-        repr_loss = F.mse_loss(a, b)
-
-        a_centered = a - a.mean(dim=0, keepdim=True)
-        b_centered = b - b.mean(dim=0, keepdim=True)
-
-        std_a = torch.sqrt(a_centered.var(dim=0, unbiased=False) + self.eps)
-        std_b = torch.sqrt(b_centered.var(dim=0, unbiased=False) + self.eps)
-        std_loss = 0.5 * (
-            F.relu(self.gamma - std_a).mean() + F.relu(self.gamma - std_b).mean()
-        )
-
-        cov_a = (a_centered.T @ a_centered) / a_centered.size(0)
-        cov_b = (b_centered.T @ b_centered) / b_centered.size(0)
-        cov_loss = self._off_diagonal(cov_a).pow(2).sum() / cov_a.size(
-            0
-        ) + self._off_diagonal(cov_b).pow(2).sum() / cov_b.size(0)
-
-        return (
-            self.sim_coeff * repr_loss
-            + self.std_coeff * std_loss
-            + self.cov_coeff * cov_loss
-        )

@@ -14,7 +14,7 @@ import torch
 from torch import nn
 from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 
-from models.losses import SIGReg, VICRegLoss
+from models.losses import SIGReg
 from networks import transformer_torch
 from networks.transformer_torch import (
     _build_norm,
@@ -272,10 +272,6 @@ class PeakSetSIGReg(nn.Module):
         gco_log_lambda_init: float = -8.0,
         gco_log_lambda_min: float = -12.0,
         gco_log_lambda_max: float = 2.0,
-        vicreg_beta: float = 1e-3,
-        vicreg_sim_coeff: float = 0.0,
-        vicreg_std_coeff: float = 25.0,
-        vicreg_cov_coeff: float = 1.0,
         jepa_num_target_blocks: int = 2,
         jepa_context_fraction: float = 0.5,
         jepa_target_fraction: float = 0.25,
@@ -393,12 +389,11 @@ class PeakSetSIGReg(nn.Module):
         self.masked_latent_predictor_num_layers = int(
             masked_latent_predictor_num_layers
         )
-        self.vicreg_beta = float(vicreg_beta)
         if self.jepa_num_target_blocks < 1:
             raise ValueError("jepa_num_target_blocks must be >= 1")
-        if self.representation_regularizer in ("vicreg", "gco-vicreg"):
+        if self.representation_regularizer not in ("sigreg", "gco-sigreg", "none", ""):
             raise ValueError(
-                "Block-masked JEPA only supports {'sigreg', 'gco-sigreg', 'none'} regularizers"
+                f"Unsupported regularizer: {self.representation_regularizer!r}"
             )
 
         self.encoder = PeakSetEncoder(
@@ -462,11 +457,6 @@ class PeakSetSIGReg(nn.Module):
         )
 
         self.sigreg = SIGReg(num_slices=int(sigreg_num_slices))
-        self.vicreg = VICRegLoss(
-            sim_coeff=float(vicreg_sim_coeff),
-            std_coeff=float(vicreg_std_coeff),
-            cov_coeff=float(vicreg_cov_coeff),
-        )
 
     @torch.no_grad()
     def advance_sigreg_lambda_schedule(self) -> None:
@@ -814,8 +804,6 @@ class PeakSetSIGReg(nn.Module):
                 valid_mask=regularizer_valid_flat,
             )
             sigreg_term = sigreg_lambda_current * token_sigreg_loss
-            vicreg_loss = context_emb.new_tensor(0.0)
-            vicreg_term = context_emb.new_tensor(0.0)
         elif self.representation_regularizer == "gco-sigreg":
             token_sigreg_loss = self.sigreg(
                 regularizer_emb_flat,
@@ -823,20 +811,13 @@ class PeakSetSIGReg(nn.Module):
             )
             sigreg_lambda_current = gco_lambda
             sigreg_term = gco_lambda * token_sigreg_loss
-            vicreg_loss = context_emb.new_tensor(0.0)
-            vicreg_term = context_emb.new_tensor(0.0)
         else:
             token_sigreg_loss = context_emb.new_tensor(0.0)
             sigreg_term = context_emb.new_tensor(0.0)
-            vicreg_loss = context_emb.new_tensor(0.0)
-            vicreg_term = context_emb.new_tensor(0.0)
 
-        regularizer_term = sigreg_term + vicreg_term
-        loss = jepa_term + regularizer_term
+        loss = jepa_term + sigreg_term
         safe_jepa = jepa_term.clamp_min(1e-8)
-        target_regularizer_term_over_jepa_term = regularizer_term / safe_jepa
         target_sigreg_term_over_jepa_term = sigreg_term / safe_jepa
-        target_vicreg_term_over_jepa_term = vicreg_term / safe_jepa
         valid_peak_count = peak_valid_mask.float().sum().clamp_min(1.0)
         masked_fraction = target_masks.float().sum() / valid_peak_count
         context_fraction = context_mask.float().sum() / valid_peak_count
@@ -850,15 +831,12 @@ class PeakSetSIGReg(nn.Module):
             "token_sigreg_loss": token_sigreg_loss,
             "local_global_loss": local_global_loss,
             "local_global_l1_loss": local_global_loss,
-            "regularizer_loss": token_sigreg_loss + vicreg_loss,
-            "regularizer_term": regularizer_term,
+            "regularizer_loss": token_sigreg_loss,
+            "regularizer_term": sigreg_term,
             "sigreg_term": sigreg_term,
-            "vicreg_loss": vicreg_loss,
-            "vicreg_term": vicreg_term,
             "jepa_term": jepa_term,
-            "target_regularizer_term_over_jepa_term": target_regularizer_term_over_jepa_term,
+            "target_regularizer_term_over_jepa_term": target_sigreg_term_over_jepa_term,
             "target_sigreg_term_over_jepa_term": target_sigreg_term_over_jepa_term,
-            "target_vicreg_term_over_jepa_term": target_vicreg_term_over_jepa_term,
             "valid_fraction": valid_fraction,
             "context_fraction": context_fraction,
             "masked_fraction": masked_fraction,
