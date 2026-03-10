@@ -220,6 +220,4 @@ def latest_ckpt_path(directory: Path) -> str | None:
         ],
         key=lambda p: p.stat().st_mtime,
     )
-    if not ckpts:
-        return None
-    return str(ckpts[-1])
+    return str(ckpts[-1]) if ckpts else None
