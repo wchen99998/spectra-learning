@@ -166,15 +166,10 @@ def _build_task_spec(
 
     classification_tasks: list[str] = []
     for name in FG_SMARTS:
-        y_train = train_targets.classification[name].astype(np.int32)
-        y_test = test_targets.classification[name].astype(np.int32)
-        train_prevalence = float(y_train.mean())
-        test_prevalence = float(y_test.mean())
-        if train_prevalence < 0.01 or train_prevalence > 0.99:
-            continue
-        if test_prevalence == 0.0 or test_prevalence == 1.0:
-            continue
-        classification_tasks.append(name)
+        tp = float(train_targets.classification[name].mean())
+        ep = float(test_targets.classification[name].mean())
+        if 0.01 <= tp <= 0.99 and 0.0 < ep < 1.0:
+            classification_tasks.append(name)
 
     return MsgProbeTaskSpec(
         regression_tasks=REGRESSION_TARGET_KEYS,
