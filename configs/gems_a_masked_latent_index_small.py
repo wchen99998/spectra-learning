@@ -46,7 +46,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.normalize_jepa_targets = False
 
     # Training
-    cfg.num_epochs = 100
+    cfg.num_epochs = 0.15
     cfg.learning_rate = 3e-4
     cfg.warmup_steps = 5_000
     cfg.learning_rate_schedule = "l2_sum"
