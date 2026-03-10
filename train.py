@@ -342,12 +342,6 @@ def train_and_evaluate(
     logging.info("Training for %s epochs (%d steps).", num_epochs, total_steps)
     logging.info("Steps per epoch: %d", steps_per_epoch)
     logging.info("Total steps: %d", total_steps)
-    _norm = str(config.get("norm_type", "rmsnorm")).lower()
-    if _norm not in {"rmsnorm", "layernorm"}:
-        raise ValueError(f"Unsupported norm_type: {_norm}")
-    config.norm_type = _norm
-    logging.info("Norm type: %s", config.norm_type)
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_model_from_config(config)
     model_param_metrics = collect_and_log_param_metrics(model)
