@@ -40,23 +40,15 @@ inductor_config.epilogue_fusion = True
 inductor_config.shape_padding = True
 
 
-_WD_MODULE_TOKENS = (
-    "attention.",
-    "feed_forward.",
-    "cross_attn.",
-    "pool_mha.",
-)
+_WD_MODULE_TOKENS = ("attention.", "feed_forward.", "cross_attn.", "pool_mha.")
 
 
-def _is_weight_decay_target(
-    param_name: str,
-    param: torch.nn.Parameter,
-) -> bool:
-    if param.ndim < 2:
-        return False
-    if not param_name.endswith("weight"):
-        return False
-    return any(token in param_name for token in _WD_MODULE_TOKENS)
+def _is_weight_decay_target(name: str, param: torch.nn.Parameter) -> bool:
+    return (
+        param.ndim >= 2
+        and name.endswith("weight")
+        and any(t in name for t in _WD_MODULE_TOKENS)
+    )
 
 
 def _partition_params_for_muon(
