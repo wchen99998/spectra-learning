@@ -92,15 +92,13 @@ def _move_batch_to_device(
     batch: dict[str, torch.Tensor],
     device: torch.device,
 ) -> dict[str, torch.Tensor]:
-    out = {}
-    for k, v in batch.items():
-        if k not in _TRAIN_BATCH_KEYS:
-            continue
-        if isinstance(v, torch.Tensor):
-            out[k] = v.to(device, non_blocking=True)
-        else:
-            out[k] = torch.as_tensor(v, device=device)
-    return out
+    return {
+        k: v.to(device, non_blocking=True)
+        if isinstance(v, torch.Tensor)
+        else torch.as_tensor(v, device=device)
+        for k, v in batch.items()
+        if k in _TRAIN_BATCH_KEYS
+    }
 
 
 class _BatchPrefetcher:
