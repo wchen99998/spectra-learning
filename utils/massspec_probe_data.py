@@ -275,6 +275,18 @@ def _encode_categorical_ids(values: np.ndarray) -> tuple[np.ndarray, dict[str, i
     return ids, vocab
 
 
+def _float_feat(v) -> tf.train.Feature:
+    return tf.train.Feature(float_list=tf.train.FloatList(value=v))
+
+
+def _int64_feat(v) -> tf.train.Feature:
+    return tf.train.Feature(int64_list=tf.train.Int64List(value=v))
+
+
+def _bytes_feat(v) -> tf.train.Feature:
+    return tf.train.Feature(bytes_list=tf.train.BytesList(value=v))
+
+
 def _write_tfrecords_with_fingerprint(
     spectra: np.ndarray,
     retention: np.ndarray,
@@ -314,72 +326,30 @@ def _write_tfrecords_with_fingerprint(
                 mz = spectra[i, 0].astype(np.float32)
                 intensity = spectra[i, 1].astype(np.float32)
                 fp = fingerprint[i].astype(np.int64)
-                probe_features = {
-                    f"probe_{name}": tf.train.Feature(
-                        float_list=tf.train.FloatList(
-                            value=[float(probe_mol_props[name][i])]
-                        )
-                    )
-                    for name in REGRESSION_TARGET_KEYS
+                feat = {
+                    "mz": _float_feat(mz),
+                    "intensity": _float_feat(intensity),
+                    "rt": _float_feat([retention[i]]),
+                    "precursor_mz": _float_feat([precursor[i]]),
+                    "fingerprint": _int64_feat(fp),
+                    "smiles": _bytes_feat([str(smiles[i]).encode("utf-8")]),
+                    "adduct_id": _int64_feat([int(adduct_id[i])]),
+                    "instrument_type_id": _int64_feat([int(instrument_type_id[i])]),
+                    "collision_energy": _float_feat([float(collision_energy[i])]),
+                    "collision_energy_present": _int64_feat(
+                        [int(collision_energy_present[i])]
+                    ),
+                    "probe_valid_mol": _int64_feat([int(probe_valid_mol[i])]),
                 }
-                probe_features.update(
-                    {
-                        f"probe_fg_{name}": tf.train.Feature(
-                            int64_list=tf.train.Int64List(
-                                value=[int(probe_fg_binary[name][i])]
-                            )
-                        )
-                        for name in FG_SMARTS
-                    }
-                )
-                probe_features["probe_valid_mol"] = tf.train.Feature(
-                    int64_list=tf.train.Int64List(value=[int(probe_valid_mol[i])])
-                )
-                example = tf.train.Example(
-                    features=tf.train.Features(
-                        feature={
-                            "mz": tf.train.Feature(
-                                float_list=tf.train.FloatList(value=mz)
-                            ),
-                            "intensity": tf.train.Feature(
-                                float_list=tf.train.FloatList(value=intensity)
-                            ),
-                            "rt": tf.train.Feature(
-                                float_list=tf.train.FloatList(value=[retention[i]])
-                            ),
-                            "precursor_mz": tf.train.Feature(
-                                float_list=tf.train.FloatList(value=[precursor[i]])
-                            ),
-                            "fingerprint": tf.train.Feature(
-                                int64_list=tf.train.Int64List(value=fp)
-                            ),
-                            "smiles": tf.train.Feature(
-                                bytes_list=tf.train.BytesList(
-                                    value=[str(smiles[i]).encode("utf-8")]
-                                )
-                            ),
-                            "adduct_id": tf.train.Feature(
-                                int64_list=tf.train.Int64List(value=[int(adduct_id[i])])
-                            ),
-                            "instrument_type_id": tf.train.Feature(
-                                int64_list=tf.train.Int64List(
-                                    value=[int(instrument_type_id[i])]
-                                )
-                            ),
-                            "collision_energy": tf.train.Feature(
-                                float_list=tf.train.FloatList(
-                                    value=[float(collision_energy[i])]
-                                )
-                            ),
-                            "collision_energy_present": tf.train.Feature(
-                                int64_list=tf.train.Int64List(
-                                    value=[int(collision_energy_present[i])]
-                                )
-                            ),
-                            **probe_features,
-                        }
+                for name in REGRESSION_TARGET_KEYS:
+                    feat[f"probe_{name}"] = _float_feat(
+                        [float(probe_mol_props[name][i])]
                     )
-                )
+                for name in FG_SMARTS:
+                    feat[f"probe_fg_{name}"] = _int64_feat(
+                        [int(probe_fg_binary[name][i])]
+                    )
+                example = tf.train.Example(features=tf.train.Features(feature=feat))
                 writer.write(example.SerializeToString())
 
         files.append(shard_file.name)
