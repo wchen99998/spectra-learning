@@ -187,7 +187,6 @@ def _augment_block_jepa_batch_tf(
 
 
 def _prepend_precursor_token_tf(batch: dict) -> dict:
-    """Prepend a precursor token (intensity=-1 sentinel) at position 0."""
     peak_mz = batch["peak_mz"]
     peak_intensity = batch["peak_intensity"]
     peak_valid_mask = batch["peak_valid_mask"]
@@ -226,7 +225,6 @@ def _batched_parse_and_transform(
     num_peaks: int,
     peak_ordering: str,
 ) -> Callable[[tf.Tensor], dict[str, tf.Tensor]]:
-    """Return a tf.function that batch-parses and transforms serialized examples."""
     peak_mz_min = tf.constant(_PEAK_MZ_MIN, tf.float32)
     peak_mz_max_c = tf.constant(_PEAK_MZ_MAX, tf.float32)
     min_int = tf.constant(min_peak_intensity, tf.float32)
@@ -423,8 +421,6 @@ class _TfIterableDataset(IterableDataset):
 
 
 class TfLightningDataModule:
-    """DataModule that rebuilds tf.data pipelines each epoch."""
-
     def __init__(self, config: config_dict.ConfigDict, seed: int) -> None:
         self.config = config
         self.seed = int(seed)
@@ -565,7 +561,6 @@ class TfLightningDataModule:
 
     @property
     def train_loader(self) -> DataLoader:
-        """GeMS train DataLoader (built once, cached)."""
         if self._train_loader is None:
             self._train_loader = self._make_loader(
                 dataset_builder=lambda: self._build_dataset_for_files(

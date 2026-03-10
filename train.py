@@ -55,7 +55,6 @@ def _partition_params_for_muon(
 ) -> tuple[
     list[torch.nn.Parameter], list[torch.nn.Parameter], list[torch.nn.Parameter]
 ]:
-    """Split parameters into Muon-eligible and AdamW-only, with explicit no-decay."""
     muon_decay_params = []
     muon_no_decay_params = []
     adamw_params = []
@@ -105,8 +104,6 @@ def _move_batch_to_device(
 
 
 class _BatchPrefetcher:
-    """Keeps N batches prefetched to GPU using a side CUDA stream."""
-
     def __init__(
         self,
         loader: Iterator,
@@ -300,7 +297,6 @@ def _save_checkpoint(
 
 
 def _prune_checkpoints(checkpoint_dir: Path, keep_top_k: int = 5) -> None:
-    """Keep the last checkpoint and the top-k by lowest loss."""
     pts = sorted(checkpoint_dir.glob("step-*.pt"), key=lambda p: p.stat().st_mtime)
     if len(pts) <= keep_top_k:
         return
@@ -310,7 +306,7 @@ def _prune_checkpoints(checkpoint_dir: Path, keep_top_k: int = 5) -> None:
         losses.append((ckpt.get("loss", float("inf")), p))
     losses.sort(key=lambda x: x[0])
     keep = {p for _, p in losses[:keep_top_k]}
-    keep.add(pts[-1])  # always keep latest
+    keep.add(pts[-1])
     for p in pts:
         if p not in keep:
             p.unlink()

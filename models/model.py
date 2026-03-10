@@ -15,8 +15,6 @@ from networks.transformer_torch import (
 
 
 class PeakFeatureEmbedder(nn.Module):
-    """Embeds raw peak features into model dim."""
-
     def __init__(
         self,
         model_dim: int,
@@ -148,8 +146,6 @@ def _masked_embedding_stats(
 
 
 class PeakSetEncoder(nn.Module):
-    """Transformer encoder for peak sets (non-causal, optional RoPE)."""
-
     def __init__(
         self,
         *,
@@ -220,8 +216,6 @@ class PeakSetEncoder(nn.Module):
 
 
 class PeakSetSIGReg(nn.Module):
-    """Peak-set model with block-masked JEPA branches and selectable regularizer."""
-
     def __init__(
         self,
         *,
@@ -545,7 +539,6 @@ class PeakSetSIGReg(nn.Module):
         context_mask: torch.Tensor | None = None,
         target_masks: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Prepend a precursor token (intensity=-1 sentinel) at position 0."""
         B, N = peak_mz.shape
         device = peak_mz.device
         dtype = peak_mz.dtype
@@ -561,12 +554,10 @@ class PeakSetSIGReg(nn.Module):
         }
 
         if context_mask is not None:
-            # Precursor is always in context
             pre_ctx = torch.ones(B, 1, device=device, dtype=torch.bool)
             result["context_mask"] = torch.cat([pre_ctx, context_mask], dim=1)
 
         if target_masks is not None:
-            # Precursor is never a target
             K = target_masks.shape[1]
             pre_tgt = torch.zeros(B, K, 1, device=device, dtype=torch.bool)
             result["target_masks"] = torch.cat([pre_tgt, target_masks], dim=2)
@@ -782,7 +773,6 @@ class PeakSetSIGReg(nn.Module):
         B: int,
         V: int,
     ) -> dict[str, torch.Tensor]:
-        """Compute per-view collapse indicators (detached, no grad)."""
         emb = fused_emb.float().reshape(V, B, fused_emb.shape[1], fused_emb.shape[2])
         mask = visible_mask.reshape(V, B, visible_mask.shape[1])
         result: dict[str, torch.Tensor] = {}
