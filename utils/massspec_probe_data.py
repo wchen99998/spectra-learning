@@ -217,9 +217,7 @@ def _compute_morgan_fingerprints(smiles: np.ndarray) -> np.ndarray:
             _FINGERPRINT_RADIUS,
             nBits=_FINGERPRINT_BITS,
         )
-        arr = np.zeros((_FINGERPRINT_BITS,), dtype=np.int8)
-        DataStructs.ConvertToNumpyArray(fp, arr)
-        fps[i] = arr
+        DataStructs.ConvertToNumpyArray(fp, fps[i])
     return fps
 
 
