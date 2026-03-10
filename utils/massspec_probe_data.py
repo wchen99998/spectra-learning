@@ -15,7 +15,6 @@ from ml_collections import config_dict
 from rdkit import DataStructs
 from rdkit import Chem
 from rdkit.Chem import AllChem
-from input_pipeline import numpy_batch_to_torch
 from utils.massspec_probe_targets import (
     FG_SMARTS,
     REGRESSION_TARGET_KEYS,

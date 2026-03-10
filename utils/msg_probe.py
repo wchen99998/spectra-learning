@@ -14,7 +14,8 @@ from sklearn.metrics import r2_score, roc_auc_score
 
 from input_pipeline import TfLightningDataModule
 from models.model import PeakSetSIGReg
-from utils.massspec_probe_data import MassSpecProbeData, numpy_batch_to_torch
+from input_pipeline import numpy_batch_to_torch
+from utils.massspec_probe_data import MassSpecProbeData
 from utils.massspec_probe_targets import FG_SMARTS, REGRESSION_TARGET_KEYS
 from utils.schedulers import learning_rate_at_step
 

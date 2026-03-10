@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 
 import lightning.pytorch as pl
-import lightning.pytorch.loggers
 import torch
 from lightning.pytorch.loggers import CSVLogger
 from ml_collections import config_dict

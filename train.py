@@ -16,7 +16,6 @@ import torch
 from tqdm import tqdm
 
 warnings.filterwarnings("ignore", message="Profiler function.*will be ignored")
-from torch.utils.data import DataLoader
 import torch._inductor.config as inductor_config
 
 from ml_collections import config_dict
