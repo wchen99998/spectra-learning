@@ -93,40 +93,37 @@ def write_peaklist_tfrecords(
                 )
             )
 
-    if num_workers == 1:
-        results = []
-        for shard_id, shard_spectra, shard_retention, shard_precursor in jobs:
-            results.append(
-                _write_shard(
-                    str(output_path),
-                    shard_id=shard_id,
-                    num_shards=num_shards,
-                    spectra=shard_spectra,
-                    retention=shard_retention,
-                    precursor=shard_precursor,
-                )
-            )
-        return [name for name, _ in results], [length for _, length in results]
+    _path_str = str(output_path)
 
-    worker_count = min(num_workers, len(jobs))
-    ctx = mp.get_context("spawn")
-    with ProcessPoolExecutor(
-        max_workers=worker_count,
-        mp_context=ctx,
-    ) as pool:
-        futures = [
-            pool.submit(
-                _write_shard,
-                str(output_path),
-                shard_id=shard_id,
-                num_shards=num_shards,
-                spectra=shard_spectra,
-                retention=shard_retention,
-                precursor=shard_precursor,
-            )
-            for shard_id, shard_spectra, shard_retention, shard_precursor in jobs
-        ]
-        results = [future.result() for future in tqdm(futures, desc=f"{desc} shards")]
+    def _call(sid, sp, rt, pc):
+        return _write_shard(
+            _path_str,
+            shard_id=sid,
+            num_shards=num_shards,
+            spectra=sp,
+            retention=rt,
+            precursor=pc,
+        )
+
+    if num_workers == 1:
+        results = [_call(*job) for job in jobs]
+    else:
+        worker_count = min(num_workers, len(jobs))
+        ctx = mp.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=worker_count, mp_context=ctx) as pool:
+            futures = [
+                pool.submit(
+                    _write_shard,
+                    _path_str,
+                    shard_id=sid,
+                    num_shards=num_shards,
+                    spectra=sp,
+                    retention=rt,
+                    precursor=pc,
+                )
+                for sid, sp, rt, pc in jobs
+            ]
+            results = [f.result() for f in tqdm(futures, desc=f"{desc} shards")]
     return [name for name, _ in results], [length for _, length in results]
 
 
