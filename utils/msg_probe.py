@@ -139,19 +139,15 @@ def _collect_split_targets(
                 batch[f"probe_fg_{name}"][valid_mask].detach().cpu().numpy()
             )
 
+    def _cat(d: dict, dt):
+        return {
+            n: np.concatenate(c, axis=0) if c else np.empty((0,), dtype=dt)
+            for n, c in d.items()
+        }
+
     return MsgProbeSplitTargets(
-        regression={
-            name: np.concatenate(chunks, axis=0)
-            if chunks
-            else np.empty((0,), dtype=np.float32)
-            for name, chunks in regression.items()
-        },
-        classification={
-            name: np.concatenate(chunks, axis=0)
-            if chunks
-            else np.empty((0,), dtype=np.int32)
-            for name, chunks in classification.items()
-        },
+        regression=_cat(regression, np.float32),
+        classification=_cat(classification, np.int32),
     )
 
 
