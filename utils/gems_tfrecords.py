@@ -47,26 +47,18 @@ def _write_shard(
     shard_file = output_path / f"shard-{shard_id:05d}-of-{num_shards:05d}.tfrecord"
     options = tf.io.TFRecordOptions(compression_type="GZIP")
 
+    def _float_feat(v):
+        return tf.train.Feature(float_list=tf.train.FloatList(value=v))
+
     with tf.io.TFRecordWriter(str(shard_file), options=options) as writer:  # type: ignore[attr-defined]
         for i in range(len(spectra)):
-            mz = spectra[i, 0].astype(np.float32)
-            intensity = spectra[i, 1].astype(np.float32)
-            example = tf.train.Example(
-                features=tf.train.Features(
-                    feature={
-                        "mz": tf.train.Feature(float_list=tf.train.FloatList(value=mz)),
-                        "intensity": tf.train.Feature(
-                            float_list=tf.train.FloatList(value=intensity)
-                        ),
-                        "rt": tf.train.Feature(
-                            float_list=tf.train.FloatList(value=[retention[i]])
-                        ),
-                        "precursor_mz": tf.train.Feature(
-                            float_list=tf.train.FloatList(value=[precursor[i]])
-                        ),
-                    }
-                )
-            )
+            feat = {
+                "mz": _float_feat(spectra[i, 0].astype(np.float32)),
+                "intensity": _float_feat(spectra[i, 1].astype(np.float32)),
+                "rt": _float_feat([retention[i]]),
+                "precursor_mz": _float_feat([precursor[i]]),
+            }
+            example = tf.train.Example(features=tf.train.Features(feature=feat))
             writer.write(example.SerializeToString())
 
     return shard_file.name, len(spectra)
