@@ -821,7 +821,6 @@ class PeakSetSIGReg(nn.Module):
         valid_peak_count = peak_valid_mask.float().sum().clamp_min(1.0)
         masked_fraction = target_masks.float().sum() / valid_peak_count
         context_fraction = context_mask.float().sum() / valid_peak_count
-        valid_fraction = context_fraction
 
         pool_norm_weight_abs_mean = self.pool_norm.weight.abs().mean()
 
@@ -832,7 +831,7 @@ class PeakSetSIGReg(nn.Module):
             "sigreg_term": sigreg_term,
             "jepa_term": jepa_term,
             "target_sigreg_term_over_jepa_term": target_sigreg_term_over_jepa_term,
-            "valid_fraction": valid_fraction,
+            "valid_fraction": context_fraction,
             "context_fraction": context_fraction,
             "masked_fraction": masked_fraction,
             "sigreg_lambda_current": sigreg_lambda_current,
