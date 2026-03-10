@@ -94,11 +94,6 @@ class CapturableCosineSchedule:
             device=device,
         )
         self._pi = torch.tensor(math.pi, dtype=torch.float64, device=device)
-        self._warmup_steps_int = torch.tensor(
-            warmup_steps,
-            dtype=torch.int64,
-            device=device,
-        )
 
     def step(self) -> None:
         import torch
