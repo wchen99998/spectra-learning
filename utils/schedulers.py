@@ -78,11 +78,7 @@ class CapturableCosineSchedule:
             device=device,
         )
         self._has_warmup = warmup_steps > 0
-        eff_total = (
-            max(1, total_steps - warmup_steps)
-            if warmup_steps > 0
-            else max(1, total_steps)
-        )
+        eff_total = max(1, total_steps - warmup_steps)
         self._effective_total = torch.tensor(
             eff_total,
             dtype=torch.float64,
