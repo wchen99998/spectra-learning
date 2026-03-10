@@ -56,10 +56,6 @@ class MsgLinearProbe(torch.nn.Module):
         return {name: head(pooled) for name, head in self.heads.items()}
 
 
-def should_run_msg_probe(global_step: int, every_n_steps: int) -> bool:
-    return every_n_steps > 0 and global_step % every_n_steps == 0
-
-
 def iter_massspec_probe(
     probe_data: MassSpecProbeData,
     split: str,

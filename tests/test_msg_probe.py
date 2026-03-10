@@ -14,7 +14,6 @@ from utils.msg_probe import (
     _probe_step,
     iter_massspec_probe,
     probe_steps_per_epoch,
-    should_run_msg_probe,
 )
 
 
@@ -42,13 +41,15 @@ class _DummyDataModule:
         shuffle: bool = False,
         drop_remainder: bool = True,
     ):
-        self.calls.append({
-            "split": split,
-            "seed": seed,
-            "peak_ordering": peak_ordering,
-            "shuffle": shuffle,
-            "drop_remainder": drop_remainder,
-        })
+        self.calls.append(
+            {
+                "split": split,
+                "seed": seed,
+                "peak_ordering": peak_ordering,
+                "shuffle": shuffle,
+                "drop_remainder": drop_remainder,
+            }
+        )
         return self._dataset
 
 
@@ -88,8 +89,7 @@ class MsgProbeStepTests(unittest.TestCase):
                     "num_rings": np.asarray([0.0, 1.0, 2.0], dtype=np.float32),
                 },
                 classification={
-                    name: np.asarray([0, 1, 0], dtype=np.int32)
-                    for name in FG_SMARTS
+                    name: np.asarray([0, 1, 0], dtype=np.int32) for name in FG_SMARTS
                 },
             ),
             test_targets=MsgProbeSplitTargets(
@@ -100,8 +100,7 @@ class MsgProbeStepTests(unittest.TestCase):
                     "num_rings": np.asarray([0.0, 1.0, 2.0], dtype=np.float32),
                 },
                 classification={
-                    name: np.asarray([0, 1, 0], dtype=np.int32)
-                    for name in FG_SMARTS
+                    name: np.asarray([0, 1, 0], dtype=np.int32) for name in FG_SMARTS
                 },
             ),
         )
@@ -167,7 +166,10 @@ class MsgProbeTaskSpecTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(task_spec.regression_tasks, ("mol_weight", "logp", "num_heavy_atoms", "num_rings"))
+        self.assertEqual(
+            task_spec.regression_tasks,
+            ("mol_weight", "logp", "num_heavy_atoms", "num_rings"),
+        )
         self.assertEqual(task_spec.classification_tasks, ("hydroxyl",))
 
 
@@ -215,8 +217,18 @@ class MsgProbeCollectionTests(unittest.TestCase):
             seed=0,
         )
 
-        self.assertTrue(np.array_equal(targets.regression["mol_weight"], np.asarray([10.0, 30.0, 40.0], dtype=np.float32)))
-        self.assertTrue(np.array_equal(targets.classification["hydroxyl"], np.asarray([0, 1, 0], dtype=np.int32)))
+        self.assertTrue(
+            np.array_equal(
+                targets.regression["mol_weight"],
+                np.asarray([10.0, 30.0, 40.0], dtype=np.float32),
+            )
+        )
+        self.assertTrue(
+            np.array_equal(
+                targets.classification["hydroxyl"],
+                np.asarray([0, 1, 0], dtype=np.int32),
+            )
+        )
 
 
 class ProbeIterationTests(unittest.TestCase):
@@ -328,13 +340,6 @@ class ProbeStepCountTests(unittest.TestCase):
         )
 
 
-class MsgProbeIntervalTests(unittest.TestCase):
-    def test_interval_trigger_logic(self):
-        self.assertFalse(should_run_msg_probe(global_step=10, every_n_steps=0))
-        self.assertFalse(should_run_msg_probe(global_step=9, every_n_steps=5))
-        self.assertTrue(should_run_msg_probe(global_step=10, every_n_steps=5))
-
-
 class ProbePrecursorTokenTfTests(unittest.TestCase):
     def test_prepend_shapes_and_values(self):
         B, N = 3, 5
@@ -358,21 +363,28 @@ class ProbePrecursorTokenTfTests(unittest.TestCase):
         self.assertNotIn("precursor_mz", out)
 
         # Position 0 has sentinel intensity=-1 and valid=True
-        np.testing.assert_array_equal(out["peak_intensity"][:, 0].numpy(), [-1.0, -1.0, -1.0])
-        np.testing.assert_array_equal(out["peak_valid_mask"][:, 0].numpy(), [True, True, True])
+        np.testing.assert_array_equal(
+            out["peak_intensity"][:, 0].numpy(), [-1.0, -1.0, -1.0]
+        )
+        np.testing.assert_array_equal(
+            out["peak_valid_mask"][:, 0].numpy(), [True, True, True]
+        )
 
         # Position 0 mz equals original precursor_mz
         np.testing.assert_allclose(out["peak_mz"][:, 0].numpy(), [0.1, 0.2, 0.3])
 
         # Original peaks shifted to positions 1..N
         np.testing.assert_array_equal(
-            out["peak_mz"][:, 1:].numpy(), batch["peak_mz"].numpy(),
+            out["peak_mz"][:, 1:].numpy(),
+            batch["peak_mz"].numpy(),
         )
 
         # Passthrough keys preserved
         self.assertIn("fingerprint", out)
         self.assertIn("probe_valid_mol", out)
-        np.testing.assert_array_equal(out["fingerprint"].numpy(), batch["fingerprint"].numpy())
+        np.testing.assert_array_equal(
+            out["fingerprint"].numpy(), batch["fingerprint"].numpy()
+        )
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ from ml_collections import config_dict
 
 from input_pipeline import TfLightningDataModule
 from models.model import PeakSetSIGReg
-from utils.msg_probe import run_msg_probe, should_run_msg_probe
+from utils.msg_probe import run_msg_probe
 from utils.schedulers import CapturableCosineSchedule
 from utils.training import (
     build_logger,
@@ -506,7 +506,10 @@ def train_and_evaluate(
                 )
                 _prune_checkpoints(checkpoint_dir, keep_top_k=15)
 
-            if should_run_msg_probe(global_step, msg_probe_every_n_steps):
+            if (
+                msg_probe_every_n_steps > 0
+                and global_step % msg_probe_every_n_steps == 0
+            ):
                 probe_metrics = run_msg_probe(
                     config=config,
                     datamodule=datamodule,
