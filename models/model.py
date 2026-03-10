@@ -17,17 +17,9 @@ from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 from models.losses import SIGReg, VICRegLoss
 from networks import transformer_torch
 from networks.transformer_torch import (
+    _build_norm,
     create_visible_block_mask,
 )
-
-
-def _build_norm(dim: int, eps: float, norm_type: str) -> nn.Module:
-    kind = str(norm_type).lower()
-    if kind == "rmsnorm":
-        return nn.RMSNorm(dim, eps=eps)
-    if kind == "layernorm":
-        return nn.LayerNorm(dim, eps=eps)
-    raise ValueError(f"Unsupported norm_type: {norm_type}")
 
 
 class PeakFeatureEmbedder(nn.Module):
