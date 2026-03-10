@@ -60,21 +60,6 @@ def _is_weight_decay_target(
     return any(token in param_name for token in _WD_MODULE_TOKENS)
 
 
-def _partition_params_for_adamw(
-    model: torch.nn.Module,
-) -> tuple[list[torch.nn.Parameter], list[torch.nn.Parameter]]:
-    decay_params = []
-    no_decay_params = []
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
-        if _is_weight_decay_target(name, param):
-            decay_params.append(param)
-        else:
-            no_decay_params.append(param)
-    return decay_params, no_decay_params
-
-
 def _partition_params_for_muon(
     model: torch.nn.Module,
 ) -> tuple[
@@ -305,7 +290,15 @@ def _build_optimizers(
             _make_schedule(adamw_opt, adamw_lr),
         ]
 
-    decay_params, no_decay_params = _partition_params_for_adamw(model)
+    decay_params: list[torch.nn.Parameter] = []
+    no_decay_params: list[torch.nn.Parameter] = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if _is_weight_decay_target(name, param):
+            decay_params.append(param)
+        else:
+            no_decay_params.append(param)
 
     optimizer = torch.optim.AdamW(
         [
