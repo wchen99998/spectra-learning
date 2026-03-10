@@ -295,7 +295,6 @@ class PeakSetSIGReg(nn.Module):
         sigreg_mz_jitter_std: float = 0.005,
         sigreg_intensity_jitter_std: float = 0.05,
         pooling_type: str = "pma",
-        pma_fp16_high_precision: bool = False,
         pma_num_heads: int | None = None,
         pma_num_seeds: int = 1,
         encoder_qk_norm: bool = False,
@@ -389,7 +388,6 @@ class PeakSetSIGReg(nn.Module):
             persistent=False,
         )
         self.pooling_type = pooling_type
-        self.pma_fp16_high_precision = bool(pma_fp16_high_precision)
         self.pma_num_seeds = int(pma_num_seeds)
         self.masked_token_loss_weight = float(masked_token_loss_weight)
         self.masked_token_loss_type = str(masked_token_loss_type).lower()
@@ -566,29 +564,6 @@ class PeakSetSIGReg(nn.Module):
             pooled = self._mean_pool(embeddings, valid_mask)
             return pooled, pooled
         if self.pooling_type == "pma":
-            device_type = embeddings.device.type
-            autocast_dtype = None
-            run_high_precision_pma = False
-            if self.pma_fp16_high_precision and self.pool_mha.in_proj_weight.dtype == torch.float32:
-                if torch.is_autocast_enabled(device_type):
-                    autocast_dtype = torch.get_autocast_dtype(device_type)
-                run_high_precision_pma = embeddings.dtype == torch.float16 or autocast_dtype == torch.float16
-
-            if run_high_precision_pma:
-                with torch.autocast(device_type=device_type, enabled=False):
-                    query = self.pool_query.float().unsqueeze(0).expand(embeddings.shape[0], -1, -1)
-                    pooled, _ = self.pool_mha(
-                        query=query,
-                        key=embeddings.float(),
-                        value=embeddings.float(),
-                        key_padding_mask=~valid_mask,
-                        need_weights=False,
-                    )
-                    pooled_raw = pooled.mean(dim=1)
-                    pooled = self.pool_norm(pooled_raw)
-                target_dtype = autocast_dtype if autocast_dtype is not None else embeddings.dtype
-                return pooled.to(dtype=target_dtype), pooled_raw.to(dtype=target_dtype)
-
             query = self.pool_query.unsqueeze(0).expand(embeddings.shape[0], -1, -1)
             pooled, _ = self.pool_mha(
                 query=query,

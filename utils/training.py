@@ -42,7 +42,6 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
             config.get("masked_latent_predictor_num_layers", 2)
         ),
         pooling_type=str(config.get("pooling_type", "pma")),
-        pma_fp16_high_precision=bool(config.get("pma_fp16_high_precision", False)),
         pma_num_heads=config.get("pma_num_heads", int(config.num_heads)),
         pma_num_seeds=int(config.get("pma_num_seeds", 1)),
         sigreg_num_slices=int(config.get("sigreg_num_slices", 256)),

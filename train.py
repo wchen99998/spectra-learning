@@ -437,7 +437,11 @@ def train_and_evaluate(
 
     optimizer_type = str(config.get("optimizer", "adamw")).lower()
     device_prefetch_size = int(config.get("device_prefetch_size", 1))
-    msg_probe_every_n_steps = int(config.get("msg_probe_every_n_steps", 0))
+    _msg_probe_raw = float(config.get("msg_probe_every_n_steps", 0))
+    if 0 < _msg_probe_raw <= 1:
+        msg_probe_every_n_steps = max(1, int(_msg_probe_raw * steps_per_epoch))
+    else:
+        msg_probe_every_n_steps = int(_msg_probe_raw)
     msg_probe_cache_dir = config.get("msg_probe_cache_dir", None)
     grad_clip_norm = config.get("grad_clip_norm", None)
     if grad_clip_norm is not None:

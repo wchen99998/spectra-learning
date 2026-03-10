@@ -47,7 +47,6 @@ def build_model(cfg) -> PeakSetSIGReg:
         sigreg_mz_jitter_std=cfg.sigreg_mz_jitter_std,
         sigreg_intensity_jitter_std=cfg.sigreg_intensity_jitter_std,
         pooling_type=cfg.pooling_type,
-        pma_fp16_high_precision=getattr(cfg, "pma_fp16_high_precision", False),
         pma_num_heads=getattr(cfg, "pma_num_heads", None),
         pma_num_seeds=cfg.pma_num_seeds,
     )
