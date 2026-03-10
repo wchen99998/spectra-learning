@@ -4,7 +4,7 @@ import numpy as np
 import tensorflow as tf
 import torch
 
-from utils.massspec_probe_data import _prepend_precursor_token_probe_tf
+from input_pipeline import _prepend_precursor_token_tf
 from utils.msg_probe import (
     FG_SMARTS,
     MsgLinearProbe,
@@ -352,7 +352,7 @@ class ProbePrecursorTokenTfTests(unittest.TestCase):
             "probe_valid_mol": tf.constant([True, False, True]),
         }
 
-        out = _prepend_precursor_token_probe_tf(batch)
+        out = _prepend_precursor_token_tf(batch)
 
         # Shapes are [B, N+1]
         self.assertEqual(out["peak_mz"].shape, (B, N + 1))

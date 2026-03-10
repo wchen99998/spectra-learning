@@ -15,6 +15,7 @@ from ml_collections import config_dict
 from rdkit import DataStructs
 from rdkit import Chem
 from rdkit.Chem import AllChem
+from input_pipeline import _prepend_precursor_token_tf
 from utils.massspec_probe_targets import (
     FG_SMARTS,
     REGRESSION_TARGET_KEYS,
@@ -39,27 +40,6 @@ _FINGERPRINT_RADIUS = 2
 _PEAK_MZ_MIN = 20.0
 _PEAK_MZ_MAX = 1000.0
 _METADATA_FILENAME = "metadata.json"
-
-
-def _prepend_precursor_token_probe_tf(batch: dict) -> dict:
-    """Prepend a precursor token (intensity=-1 sentinel) at position 0 for probe pipeline."""
-    peak_mz = batch["peak_mz"]
-    peak_intensity = batch["peak_intensity"]
-    peak_valid_mask = batch["peak_valid_mask"]
-    precursor_mz = batch["precursor_mz"]
-    B = tf.shape(peak_mz)[0]
-
-    pre_mz = tf.expand_dims(precursor_mz, 1)
-    pre_int = tf.fill([B, 1], -1.0)  # sentinel
-    pre_valid = tf.ones([B, 1], dtype=tf.bool)
-
-    out = dict(batch)
-    out["peak_mz"] = tf.concat([pre_mz, peak_mz], axis=1)
-    out["peak_intensity"] = tf.concat([pre_int, peak_intensity], axis=1)
-    out["peak_valid_mask"] = tf.concat([pre_valid, peak_valid_mask], axis=1)
-
-    del out["precursor_mz"]
-    return out
 
 
 MASSSPEC_HF_REPO = "roman-bushuiev/MassSpecGym"
@@ -771,9 +751,7 @@ def _build_probe_dataset(
         num_parallel_calls=tf.data.AUTOTUNE,
     )
     if use_precursor_token:
-        ds = ds.map(
-            _prepend_precursor_token_probe_tf, num_parallel_calls=tf.data.AUTOTUNE
-        )
+        ds = ds.map(_prepend_precursor_token_tf, num_parallel_calls=tf.data.AUTOTUNE)
     options = tf.data.Options()
     options.deterministic = True
     ds = ds.with_options(options)
