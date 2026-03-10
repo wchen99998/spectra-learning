@@ -575,12 +575,7 @@ class PeakSetSIGReg(nn.Module):
         predictor_context_mask = context_mask.unsqueeze(0)
         predictor_union_mask = predictor_context_mask | target_masks_by_view
         context_emb_by_view = context_emb.unsqueeze(0).expand(K, -1, -1, -1)
-        predictor_input = torch.zeros_like(context_emb_by_view)
-        predictor_input = torch.where(
-            predictor_context_mask.unsqueeze(-1),
-            context_emb_by_view,
-            predictor_input,
-        )
+        predictor_input = context_emb_by_view * predictor_context_mask.unsqueeze(-1)
         latent_mask_token = self.latent_mask_token.view(1, 1, 1, -1).to(
             dtype=context_emb.dtype,
             device=context_emb.device,
