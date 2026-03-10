@@ -22,7 +22,7 @@ def get_config() -> config_dict.ConfigDict:
 
     # Model
     cfg.model_type = "sigreg_peak_set"
-    cfg.num_peaks = 64
+    cfg.num_peaks = 63
     cfg.model_dim = 256
     cfg.num_layers = 10
     cfg.num_heads = 8
