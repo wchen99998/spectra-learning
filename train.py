@@ -89,17 +89,9 @@ _TRAIN_BATCH_KEYS = frozenset(
 )
 
 
-def _record_stream(obj: Any, stream: torch.cuda.Stream) -> None:
-    if isinstance(obj, torch.Tensor):
-        obj.record_stream(stream)
-        return
-    if isinstance(obj, dict):
-        for value in obj.values():
-            _record_stream(value, stream)
-        return
-    if isinstance(obj, (list, tuple)):
-        for value in obj:
-            _record_stream(value, stream)
+def _record_stream(batch: dict[str, torch.Tensor], stream: torch.cuda.Stream) -> None:
+    for value in batch.values():
+        value.record_stream(stream)
 
 
 def _move_batch_to_device(
