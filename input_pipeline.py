@@ -192,13 +192,7 @@ def _augment_block_jepa_batch_tf(
 
 
 def _prepend_precursor_token_tf(batch: dict) -> dict:
-    """Prepend a precursor token at position 0 in the TF pipeline.
-
-    The precursor token uses intensity=-1 as a sentinel so the model can
-    distinguish it from real peaks.  It is always valid, always in context,
-    and never a JEPA target.  After prepending, ``precursor_mz`` is removed
-    from the batch so the model skips its own GPU-side prepend.
-    """
+    """Prepend a precursor token (intensity=-1 sentinel) at position 0."""
     peak_mz = batch["peak_mz"]  # [B, N]
     peak_intensity = batch["peak_intensity"]  # [B, N]
     peak_valid_mask = batch["peak_valid_mask"]  # [B, N]
@@ -237,12 +231,7 @@ def _batched_parse_and_transform(
     num_peaks: int,
     peak_ordering: str,
 ) -> Callable[[tf.Tensor], dict[str, tf.Tensor]]:
-    """Return a tf.function that operates on a **batch** of serialized examples.
-
-    Uses ``tf.io.parse_example`` (batch parse) and fully-vectorized ops on
-    ``[B, num_peaks]`` tensors, avoiding per-element ``boolean_mask`` which
-    creates variable-length intermediates that TF cannot parallelise.
-    """
+    """Return a tf.function that batch-parses and transforms serialized examples."""
     peak_mz_min = tf.constant(_PEAK_MZ_MIN, tf.float32)
     peak_mz_max_c = tf.constant(_PEAK_MZ_MAX, tf.float32)
     min_int = tf.constant(min_peak_intensity, tf.float32)

@@ -14,14 +14,7 @@ from torch.nn.attention.flex_attention import (
 
 
 def create_visible_block_mask(visible_mask: torch.Tensor) -> BlockMask:
-    """Create a BlockMask from a boolean visibility mask.
-
-    Args:
-        visible_mask: [B, N] boolean tensor, True = visible, False = hidden.
-
-    Returns:
-        BlockMask suitable for flex_attention's block_mask parameter.
-    """
+    """Create a BlockMask from a [B, N] boolean visibility mask."""
     B, N = visible_mask.shape
 
     def mask_mod(b, h, q_idx, kv_idx):

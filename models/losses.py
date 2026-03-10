@@ -1,8 +1,4 @@
-"""Loss modules for peak-set pretraining.
-
-SIGReg: Epps-Pulley Gaussianity statistic with random slicing
-directions sampled inside forward().
-"""
+"""Loss modules for peak-set pretraining."""
 
 from __future__ import annotations
 
@@ -11,13 +7,7 @@ from torch import nn
 
 
 class SIGReg(nn.Module):
-    """Epps-Pulley Gaussianity regularizer.
-
-    Takes a single tensor ``proj [..., D]`` and computes
-    the characteristic-function distance from a standard Gaussian.  Random
-    projection directions are sampled *inside* ``forward()`` — no
-    pre-computed projection needed.
-    """
+    """Epps-Pulley Gaussianity regularizer via random slicing directions."""
 
     def __init__(self, knots: int = 17, num_slices: int = 256):
         super().__init__()
@@ -36,21 +26,6 @@ class SIGReg(nn.Module):
         proj: torch.Tensor,
         valid_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Compute the Epps-Pulley statistic.
-
-        Parameters
-        ----------
-        proj : Tensor [..., D]
-            Projected embeddings with feature dimension in the last axis.
-        valid_mask : Tensor [...], optional
-            Boolean mask aligned with ``proj`` leading dimensions.
-            When provided, statistics are computed over valid positions only
-            without changing tensor shape.
-
-        Returns
-        -------
-        Scalar — mean statistic across slicing directions.
-        """
         flat = proj.reshape(-1, proj.size(-1))
         A = torch.randn(
             flat.size(-1), self.num_slices, device=flat.device, dtype=flat.dtype

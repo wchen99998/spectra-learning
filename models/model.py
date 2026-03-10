@@ -1,10 +1,4 @@
-"""Peak-set representation-regularized model for mass spectrometry pretraining.
-
-Architecture:
-- PeakSetEncoder: MLP embedder -> non-causal Transformer -> peak embeddings
-- Block-masked JEPA branches: one context block + K disjoint target blocks
-- Objective: selectable regularizer (SIGReg or GECO-weighted SIGReg) + masked latent prediction
-"""
+"""Peak-set representation-regularized model for mass spectrometry pretraining."""
 
 from __future__ import annotations
 
@@ -586,23 +580,7 @@ class PeakSetSIGReg(nn.Module):
         context_mask: torch.Tensor | None = None,
         target_masks: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Prepend a precursor token at position 0.
-
-        The precursor token uses intensity=-1 as a sentinel so the model can
-        distinguish it from real peaks.  It is always valid, always in context,
-        and never a JEPA target.
-
-        Args:
-            peak_mz: [B, N]
-            peak_intensity: [B, N]
-            peak_valid_mask: [B, N]
-            precursor_mz: [B]
-            context_mask: optional [B, N]
-            target_masks: optional [B, K, N]
-
-        Returns:
-            Dict with all tensors expanded to N+1 in the sequence dimension.
-        """
+        """Prepend a precursor token (intensity=-1 sentinel) at position 0."""
         B, N = peak_mz.shape
         device = peak_mz.device
         dtype = peak_mz.dtype
@@ -867,15 +845,7 @@ class PeakSetSIGReg(nn.Module):
         V: int,
         target_global_view_idx: int,
     ) -> dict[str, torch.Tensor]:
-        """Compute per-view collapse indicators (detached, no grad).
-
-        Returns metrics for global and local views:
-        - ``*_emb_std``: mean per-dimension std over valid tokens (low = dimensional collapse)
-        - ``*_emb_var_floor``: minimum per-dimension variance over valid tokens
-        - ``*_emb_cov_offdiag_abs_mean``: mean absolute off-diagonal covariance
-        - ``*_emb_corr_offdiag_abs_mean``: mean absolute off-diagonal correlation
-        - ``*_emb_norm``: mean L2 norm of valid token embeddings
-        """
+        """Compute per-view collapse indicators (detached, no grad)."""
         emb = fused_emb.float().reshape(
             V, B, fused_emb.shape[1], fused_emb.shape[2]
         )  # [V, B, N, D]

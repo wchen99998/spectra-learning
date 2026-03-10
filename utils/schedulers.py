@@ -58,14 +58,7 @@ def learning_rate_at_step(
 
 
 class CapturableCosineSchedule:
-    """Warmup + cosine-decay LR schedule using only CUDA tensor ops.
-
-    Unlike ``LambdaLR``, every operation in ``step()`` is a pure tensor op,
-    so the entire optimizer-step + schedule-step can live inside a single
-    ``torch.compile`` CUDA-graph region with no graph breaks.
-
-    Supports ``state_dict()`` / ``load_state_dict()`` for checkpoint resume.
-    """
+    """Warmup + cosine-decay LR schedule using only CUDA tensor ops (compilable)."""
 
     def __init__(
         self,

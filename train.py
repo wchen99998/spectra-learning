@@ -106,12 +106,7 @@ def _move_batch_to_device(
 
 
 class _BatchPrefetcher:
-    """Keeps N batches prefetched to GPU using a side CUDA stream.
-
-    ``_preload_one()`` kicks off one async H2D copy on a dedicated stream.
-    ``next()`` waits for the next batch-ready event, records stream usage
-    for allocator safety, then immediately refills one slot.
-    """
+    """Keeps N batches prefetched to GPU using a side CUDA stream."""
 
     def __init__(
         self,

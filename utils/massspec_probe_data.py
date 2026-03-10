@@ -42,11 +42,7 @@ _METADATA_FILENAME = "metadata.json"
 
 
 def _prepend_precursor_token_probe_tf(batch: dict) -> dict:
-    """Prepend a precursor token at position 0 in the probe TF pipeline.
-
-    Mirrors ``input_pipeline._prepend_precursor_token_tf`` but without
-    ``context_mask``/``target_masks`` handling (probe batches don't have these).
-    """
+    """Prepend a precursor token (intensity=-1 sentinel) at position 0 for probe pipeline."""
     peak_mz = batch["peak_mz"]  # [B, N]
     peak_intensity = batch["peak_intensity"]  # [B, N]
     peak_valid_mask = batch["peak_valid_mask"]  # [B, N]
