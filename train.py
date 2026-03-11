@@ -331,7 +331,7 @@ def train_and_evaluate(
         autocast_dtype = None
     else:
         raise ValueError(f"Unsupported autocast_dtype: {_ac_name}")
-    compiled_step = torch.compile(_train_step_impl, mode="default", fullgraph=False)
+    compiled_step = torch.compile(_train_step_impl, mode="max-autotune", fullgraph=False)
     optimizer_type = str(config.get("optimizer", "adamw")).lower()
     device_prefetch_size = int(config.get("device_prefetch_size", 1))
     _msg_probe_raw = float(config.get("msg_probe_every_n_steps", 0))

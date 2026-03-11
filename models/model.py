@@ -469,9 +469,7 @@ class PeakSetSIGReg(nn.Module):
                 visible_mask=target_masks.reshape(B * K, N),
             )
             .reshape(B, K, N, -1)
-            .permute(1, 0, 2, 3)
         )
-        target_masks_by_view = target_masks.permute(1, 0, 2)
         if self.teacher_encoder is not None:
             with torch.no_grad():
                 target_token_target = (
@@ -482,24 +480,23 @@ class PeakSetSIGReg(nn.Module):
                         visible_mask=target_masks.reshape(B * K, N),
                     )
                     .reshape(B, K, N, -1)
-                    .permute(1, 0, 2, 3)
                     .detach()
                 )
         else:
             target_token_target = target_emb.detach()
 
-        ctx_mask_v = context_mask.unsqueeze(0)
-        context_emb_by_view = context_emb.unsqueeze(0).expand(K, -1, -1, -1)
+        ctx_mask_v = context_mask.unsqueeze(1)
+        context_emb_by_view = context_emb.unsqueeze(1).expand(-1, K, -1, -1)
         predictor_input = context_emb_by_view * ctx_mask_v.unsqueeze(-1)
         predictor_input = torch.where(
-            target_masks_by_view.unsqueeze(-1),
+            target_masks.unsqueeze(-1),
             self.latent_mask_token.view(1, 1, 1, -1).to(context_emb),
             predictor_input,
         )
         predictor_output = self.predict_masked_latents(
             predictor_input.reshape(B * K, N, -1),
-            (ctx_mask_v | target_masks_by_view).reshape(B * K, N),
-        ).reshape(K, B, N, -1)
+            (ctx_mask_v | target_masks).reshape(B * K, N),
+        ).reshape(B, K, N, -1)
         if self.masked_token_loss_type == "l2":
             per_token_reg = (
                 (predictor_output - target_token_target).square().mean(dim=-1)
@@ -510,7 +507,7 @@ class PeakSetSIGReg(nn.Module):
             raise ValueError(
                 f"Unsupported masked_token_loss_type: {self.masked_token_loss_type}"
             )
-        target_mask_float = target_masks_by_view.float()
+        target_mask_float = target_masks.float()
         reg_num = (per_token_reg * target_mask_float).sum()
         reg_den = target_mask_float.sum().clamp_min(1.0)
         local_global_loss = reg_num / reg_den
@@ -520,20 +517,20 @@ class PeakSetSIGReg(nn.Module):
             else context_emb.new_tensor(self.sigreg_lambda)
         )
         jepa_term = self.masked_token_loss_weight * local_global_loss
-        branch_emb = torch.cat([context_emb.unsqueeze(0), target_emb], dim=0)
+        branch_emb = torch.cat([context_emb.unsqueeze(1), target_emb], dim=1)
         branch_visible = torch.cat(
-            [context_mask.unsqueeze(0), target_masks_by_view], dim=0
+            [context_mask.unsqueeze(1), target_masks], dim=1
         )
-        V = branch_emb.shape[0]
+        V = branch_emb.shape[1]
         fused_emb = branch_emb.reshape(V * B, N, -1)
         fused_visible = branch_visible.reshape(V * B, N)
         with torch.no_grad():
-            emb_f = fused_emb.float().reshape(V, B, N, -1)
-            mask_f = fused_visible.reshape(V, B, N)
+            emb_f = fused_emb.float().reshape(B, V, N, -1)
+            mask_f = fused_visible.reshape(B, V, N)
             collapse_metrics: dict[str, torch.Tensor] = {}
             for prefix, e, m in [
-                ("global", emb_f[0], mask_f[0]),
-                ("local", emb_f[1:], mask_f[1:]),
+                ("global", emb_f[:, 0], mask_f[:, 0]),
+                ("local", emb_f[:, 1:], mask_f[:, 1:]),
             ]:
                 for k, v in _masked_embedding_stats(e, m).items():
                     collapse_metrics[f"{prefix}_{k}"] = v

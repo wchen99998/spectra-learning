@@ -152,10 +152,10 @@ class BlockJEPATests(unittest.TestCase):
 
         expected_visible = torch.cat(
             [
-                batch["context_mask"].unsqueeze(0),
-                batch["target_masks"].permute(1, 0, 2),
+                batch["context_mask"].unsqueeze(1),
+                batch["target_masks"],
             ],
-            dim=0,
+            dim=1,
         ).reshape((1 + K) * B, -1)
         self.assertIsNotNone(capture.proj)
         self.assertIsNotNone(capture.valid_mask)
