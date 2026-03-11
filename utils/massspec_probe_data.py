@@ -42,7 +42,7 @@ MASSSPEC_HF_REPO = "roman-bushuiev/MassSpecGym"
 MASSSPEC_TSV_PATH = "data/MassSpecGym.tsv"
 MASSSPEC_METADATA_VERSION = 2
 
-NIST20_METADATA_VERSION = 1
+NIST20_METADATA_VERSION = 2
 NIST20_HF_REPO = "roman-bushuiev/GeMS"
 NIST20_HF_FILENAME = (
     "data/DreaMS_Atlas/nist20_mona_clean_merged_spectra_dreams_hidden_nist20.hdf5"
@@ -101,6 +101,7 @@ def _load_massspec_tsv(tsv_path: Path) -> dict[str, np.ndarray]:
         "collision_energy_present": np.asarray(
             collision_energy_present, dtype=np.int32
         ),
+        "dreams_embedding": None,
     }
 
 
@@ -113,6 +114,11 @@ def _load_nist20_hdf5(hdf5_path: Path) -> dict[str, np.ndarray]:
         raw_precursor = f["precursor_mz"][:]
         raw_smiles = f["smiles"][:].astype(str)
         raw_adduct = f["adduct"][:].astype(str)
+        raw_dreams = (
+            f["DreaMS_embedding"][:].astype(np.float32)
+            if "DreaMS_embedding" in f
+            else None
+        )
     valid_indices, inchikey_14 = [], []
     for i, smi in enumerate(raw_smiles):
         mol = Chem.MolFromSmiles(smi)
@@ -156,6 +162,7 @@ def _load_nist20_hdf5(hdf5_path: Path) -> dict[str, np.ndarray]:
         "instrument_type": np.full(n_valid, "unknown", dtype=object),
         "collision_energy": np.zeros(n_valid, dtype=np.float32),
         "collision_energy_present": np.zeros(n_valid, dtype=np.int32),
+        "dreams_embedding": raw_dreams[idx] if raw_dreams is not None else None,
     }
 
 
@@ -206,6 +213,7 @@ def _write_tfrecords_with_fingerprint(
     probe_valid_mol: np.ndarray,
     output_path: Path,
     num_shards: int,
+    dreams_embedding: np.ndarray | None = None,
 ) -> tuple[list[str], list[int]]:
     n = len(spectra)
     num_shards = max(1, min(num_shards, n))
@@ -234,6 +242,8 @@ def _write_tfrecords_with_fingerprint(
                     ),
                     "probe_valid_mol": _int64_feat([int(probe_valid_mol[i])]),
                 }
+                if dreams_embedding is not None:
+                    feat["dreams_embedding"] = _float_feat(dreams_embedding[i])
                 for name in REGRESSION_TARGET_KEYS:
                     feat[f"probe_{name}"] = _float_feat(
                         [float(probe_mol_props[name][i])]
@@ -260,6 +270,7 @@ def _filter_encode_and_write(
     instrument_type: np.ndarray,
     collision_energy: np.ndarray,
     collision_energy_present: np.ndarray,
+    dreams_embedding: np.ndarray | None = None,
     output_dir: Path,
     num_shards: int,
     max_precursor_mz: float,
@@ -279,6 +290,8 @@ def _filter_encode_and_write(
     instrument_type_id = instrument_type_id[keep]
     collision_energy = collision_energy[keep]
     collision_energy_present = collision_energy_present[keep]
+    if dreams_embedding is not None:
+        dreams_embedding = dreams_embedding[keep]
     probe_mol_props, probe_fg_binary, probe_valid_mol = build_probe_targets_for_rows(
         smiles
     )
@@ -287,6 +300,7 @@ def _filter_encode_and_write(
         "adduct_vocab": adduct_vocab,
         "instrument_type_vocab": instrument_type_vocab,
         "max_precursor_mz": float(max_precursor_mz),
+        "dreams_dim": int(dreams_embedding.shape[1]) if dreams_embedding is not None else 0,
     }
     s2, s4 = num_shards // 2, num_shards // 4
     for split_name, split_shards in [("train", s2), ("val", s4), ("test", s4)]:
@@ -306,6 +320,7 @@ def _filter_encode_and_write(
             probe_valid_mol[mask],
             output_dir / split_name,
             max(1, split_shards),
+            dreams_embedding=dreams_embedding[mask] if dreams_embedding is not None else None,
         )
         result[f"{split_name}_files"] = files
         result[f"{split_name}_lengths"] = lengths
@@ -404,6 +419,7 @@ def _parse_probe_batch(
     min_peak_intensity: float,
     peak_ordering: str,
     num_peaks: int = _NUM_PEAKS_OUTPUT,
+    dreams_dim: int = 0,
 ):
     peak_mz_min = tf.constant(_PEAK_MZ_MIN, tf.float32)
     peak_mz_max = tf.constant(_PEAK_MZ_MAX, tf.float32)
@@ -426,6 +442,10 @@ def _parse_probe_batch(
         feature_spec[f"probe_{name}"] = tf.io.FixedLenFeature([1], tf.float32)
     for name in FG_SMARTS:
         feature_spec[f"probe_fg_{name}"] = tf.io.FixedLenFeature([1], tf.int64)
+    if dreams_dim > 0:
+        feature_spec["dreams_embedding"] = tf.io.FixedLenFeature(
+            [dreams_dim], tf.float32
+        )
 
     @tf.function
     def transform(serialized_batch: tf.Tensor) -> dict[str, tf.Tensor]:
@@ -482,6 +502,8 @@ def _parse_probe_batch(
             batch[f"probe_fg_{name}"] = tf.cast(
                 parsed[f"probe_fg_{name}"][:, 0], tf.int32
             )
+        if dreams_dim > 0:
+            batch["dreams_embedding"] = parsed["dreams_embedding"]
         return batch
 
     return transform
@@ -500,6 +522,7 @@ def _build_probe_dataset(
     peak_ordering: str,
     num_peaks: int = _NUM_PEAKS_OUTPUT,
     use_precursor_token: bool = False,
+    dreams_dim: int = 0,
     num_parallel_reads: int = tf.data.AUTOTUNE,
 ) -> tf.data.Dataset:
     ds = tf.data.TFRecordDataset(
@@ -517,6 +540,7 @@ def _build_probe_dataset(
             min_peak_intensity=min_peak_intensity,
             peak_ordering=peak_ordering,
             num_peaks=num_peaks,
+            dreams_dim=dreams_dim,
         ),
         num_parallel_calls=tf.data.AUTOTUNE,
     )
@@ -541,6 +565,7 @@ class MassSpecProbeData(NamedTuple):
     peak_ordering: str
     num_peaks: int
     use_precursor_token: bool
+    dreams_dim: int
 
     @classmethod
     def from_config(cls, config: config_dict.ConfigDict) -> "MassSpecProbeData":
@@ -599,6 +624,7 @@ class MassSpecProbeData(NamedTuple):
             peak_ordering=str(config.get("peak_ordering", "intensity")),
             num_peaks=int(config.get("num_peaks", _NUM_PEAKS_OUTPUT)),
             use_precursor_token=bool(config.get("use_precursor_token", False)),
+            dreams_dim=int(metadata.get("dreams_dim", 0)),
         )
 
     def build_dataset(
@@ -628,5 +654,6 @@ class MassSpecProbeData(NamedTuple):
             peak_ordering=peak_ordering or self.peak_ordering,
             num_peaks=self.num_peaks,
             use_precursor_token=self.use_precursor_token,
+            dreams_dim=self.dreams_dim,
             num_parallel_reads=num_parallel_reads,
         )
