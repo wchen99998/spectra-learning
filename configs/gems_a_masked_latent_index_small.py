@@ -42,13 +42,12 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_mz_jitter_std = 0.005
     cfg.sigreg_intensity_jitter_std = 0.05
     cfg.norm_type = "layernorm"
-    cfg.normalize_jepa_targets = False
 
     # Training
     cfg.num_epochs = 100
     cfg.learning_rate = 3e-4
     cfg.warmup_steps = 0
-    cfg.learning_rate_schedule = "l2"
+    cfg.learning_rate_schedule = "cosine"
     cfg.min_learning_rate = None
     cfg.b2 = 0.98
     cfg.weight_decay = 1e-5
@@ -65,7 +64,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataloader_persistent_workers = True
 
     cfg.masked_token_loss_weight = 1.0
-    cfg.masked_token_loss_type = "l2"
+    cfg.masked_token_loss_type = "l2_sum"
+    cfg.normalize_jepa_targets = True
     cfg.use_ema_teacher_target = True
     cfg.teacher_ema_decay = 0.9999
     cfg.teacher_ema_decay_start = 0.995

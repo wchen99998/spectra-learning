@@ -1,6 +1,7 @@
 import math
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 
@@ -160,6 +161,7 @@ class PeakSetSIGReg(nn.Module):
         encoder_use_rope: bool = False,
         masked_token_loss_weight: float = 0.0,
         masked_token_loss_type: str = "l1",
+        normalize_jepa_targets: bool = False,
         representation_regularizer: str = "sigreg",
         masked_latent_predictor_num_layers: int = 2,
         sigreg_num_slices: int = 256,
@@ -263,6 +265,7 @@ class PeakSetSIGReg(nn.Module):
         _reg("teacher_ema_update_step", torch.zeros((), dtype=torch.int64))
         self.masked_token_loss_weight = float(masked_token_loss_weight)
         self.masked_token_loss_type = str(masked_token_loss_type).lower()
+        self.normalize_jepa_targets = bool(normalize_jepa_targets)
         self.norm_type = str(norm_type).lower()
         if self.jepa_num_target_blocks < 1:
             raise ValueError("jepa_num_target_blocks must be >= 1")
@@ -465,12 +468,21 @@ class PeakSetSIGReg(nn.Module):
             predictor_input.reshape(B * K, N, -1),
             (ctx_mask_v | target_masks).reshape(B * K, N),
         ).reshape(B, K, N, -1)
+        loss_pred = predictor_output
+        loss_target = target_token_target
+        if self.normalize_jepa_targets:
+            loss_pred = F.normalize(loss_pred, dim=-1)
+            loss_target = F.normalize(loss_target, dim=-1)
         if self.masked_token_loss_type == "l2":
             per_token_reg = (
-                (predictor_output - target_token_target).square().mean(dim=-1)
+                (loss_pred - loss_target).square().mean(dim=-1)
+            )
+        elif self.masked_token_loss_type == "l2_sum":
+            per_token_reg = (
+                (loss_pred - loss_target).square().sum(dim=-1)
             )
         elif self.masked_token_loss_type == "l1":
-            per_token_reg = (predictor_output - target_token_target).abs().mean(dim=-1)
+            per_token_reg = (loss_pred - loss_target).abs().mean(dim=-1)
         else:
             raise ValueError(
                 f"Unsupported masked_token_loss_type: {self.masked_token_loss_type}"
