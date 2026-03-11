@@ -26,7 +26,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.model_type = "sigreg_peak_set"
     cfg.num_peaks = 63
     cfg.model_dim = 256
-    cfg.num_layers = 10
+    cfg.num_layers = 12
     cfg.num_heads = 8
     cfg.num_kv_heads = 8
     cfg.encoder_use_rope = True
@@ -69,15 +69,17 @@ def get_config() -> config_dict.ConfigDict:
 
     cfg.masked_token_loss_weight = 1.0
     cfg.masked_token_loss_type = "l2"
-    cfg.use_ema_teacher_target = False
-    cfg.teacher_ema_decay = 0.999
-    cfg.teacher_ema_decay_start = 0.98
-    cfg.teacher_ema_decay_warmup_steps = 100_000
+    cfg.use_ema_teacher_target = True
+    cfg.teacher_ema_decay = 0.9999
+    cfg.teacher_ema_decay_start = 0.995
+    cfg.teacher_ema_decay_warmup_steps = 1_000_000
+    cfg.teacher_ema_update_every = 10
     cfg.grad_clip_norm = 1.0
-    cfg.masked_latent_predictor_num_layers = 2
+    cfg.masked_latent_predictor_num_layers = 4
     cfg.predictor_num_heads = 8
     cfg.autocast_dtype = "bf16"
-    cfg.representation_regularizer = "gco-sigreg"
+    cfg.compile_mode = "reduce-overhead"
+    cfg.representation_regularizer = "none"
     cfg.gco_constraints = [
         {"metric": "local_emb_var_floor", "target": 0.6, "bound": "lower"},
     ]

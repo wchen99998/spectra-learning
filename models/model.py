@@ -179,6 +179,7 @@ class PeakSetSIGReg(nn.Module):
         teacher_ema_decay: float = 0.996,
         teacher_ema_decay_start: float = 0.0,
         teacher_ema_decay_warmup_steps: int = 0,
+        teacher_ema_update_every: int = 1,
         pooling_type: str = "pma",
         pma_num_heads: int | None = None,
         pma_num_seeds: int = 1,
@@ -230,6 +231,7 @@ class PeakSetSIGReg(nn.Module):
             torch.tensor(max(self.sigreg_lambda_warmup_steps, 1), dtype=_f),
             persistent=False,
         )
+        self.teacher_ema_update_every = int(teacher_ema_update_every)
         # EMA teacher buffers
         teacher_ema_decay_start = float(teacher_ema_decay_start)
         teacher_ema_decay = float(teacher_ema_decay)
@@ -264,6 +266,7 @@ class PeakSetSIGReg(nn.Module):
             torch.tensor(max(teacher_ema_decay_warmup_steps, 1), dtype=_f),
             persistent=False,
         )
+        _reg("teacher_ema_update_step", torch.zeros((), dtype=torch.int64))
         self.pooling_type = pooling_type
         self.pma_num_seeds = int(pma_num_seeds)
         self.masked_token_loss_weight = float(masked_token_loss_weight)
@@ -334,6 +337,10 @@ class PeakSetSIGReg(nn.Module):
     @torch.no_grad()
     def update_teacher(self) -> None:
         if self.teacher_encoder is None:
+            return
+        step = int(self.teacher_ema_update_step.item())
+        self.teacher_ema_update_step.add_(1)
+        if step % self.teacher_ema_update_every != 0:
             return
         self.advance_teacher_ema_decay_schedule()
         self.teacher_encoder.multi_avg_fn = get_ema_multi_avg_fn(

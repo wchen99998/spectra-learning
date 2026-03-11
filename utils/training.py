@@ -61,6 +61,7 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         teacher_ema_decay_warmup_steps=int(
             config.get("teacher_ema_decay_warmup_steps", 0)
         ),
+        teacher_ema_update_every=int(config.get("teacher_ema_update_every", 1)),
         encoder_qk_norm=bool(config.get("encoder_qk_norm", False)),
         norm_type=str(config.get("norm_type", "rmsnorm")),
         use_precursor_token=bool(config.get("use_precursor_token", False)),

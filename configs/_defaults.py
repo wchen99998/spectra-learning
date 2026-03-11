@@ -12,6 +12,7 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.optimizer_capturable = True
     cfg.optimizer_fused = True
     cfg.autocast_dtype = "fp32"
+    cfg.compile_mode = "max-autotune"
     cfg.encoder_qk_norm = False
     cfg.masked_token_loss_weight = 0.0
     cfg.masked_token_loss_type = "l1"
@@ -38,6 +39,7 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.teacher_ema_decay = 0.996
     cfg.teacher_ema_decay_start = 0.0
     cfg.teacher_ema_decay_warmup_steps = 0
+    cfg.teacher_ema_update_every = 1
     cfg.grad_clip_norm = None
     # num_workers=0: TF's internal thread pool handles parallelism; forking
     # a subprocess duplicates the TF runtime and can deadlock during shuffle
