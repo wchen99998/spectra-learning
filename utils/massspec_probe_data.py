@@ -403,6 +403,7 @@ def _parse_probe_batch(
     max_precursor_mz: float,
     min_peak_intensity: float,
     peak_ordering: str,
+    num_peaks: int = _NUM_PEAKS_OUTPUT,
 ):
     peak_mz_min = tf.constant(_PEAK_MZ_MIN, tf.float32)
     peak_mz_max = tf.constant(_PEAK_MZ_MAX, tf.float32)
@@ -435,7 +436,7 @@ def _parse_probe_batch(
         keep = (mz >= peak_mz_min) & (mz <= peak_mz_max) & (intensity >= min_int)
         mz = tf.where(keep, mz, 0.0)
         intensity = tf.where(keep, intensity, 0.0)
-        intensity, indices = tf.math.top_k(intensity, k=_NUM_PEAKS_OUTPUT, sorted=True)
+        intensity, indices = tf.math.top_k(intensity, k=num_peaks, sorted=True)
         mz = tf.gather(mz, indices, batch_dims=1)
         max_intensity = tf.reduce_max(intensity, axis=1, keepdims=True)
         max_intensity = tf.maximum(max_intensity, 1e-8)
@@ -497,6 +498,7 @@ def _build_probe_dataset(
     max_precursor_mz: float,
     min_peak_intensity: float,
     peak_ordering: str,
+    num_peaks: int = _NUM_PEAKS_OUTPUT,
     use_precursor_token: bool = False,
     num_parallel_reads: int = tf.data.AUTOTUNE,
 ) -> tf.data.Dataset:
@@ -514,6 +516,7 @@ def _build_probe_dataset(
             max_precursor_mz=max_precursor_mz,
             min_peak_intensity=min_peak_intensity,
             peak_ordering=peak_ordering,
+            num_peaks=num_peaks,
         ),
         num_parallel_calls=tf.data.AUTOTUNE,
     )
@@ -536,6 +539,7 @@ class MassSpecProbeData(NamedTuple):
     max_precursor_mz: float
     min_peak_intensity: float
     peak_ordering: str
+    num_peaks: int
     use_precursor_token: bool
 
     @classmethod
@@ -593,6 +597,7 @@ class MassSpecProbeData(NamedTuple):
                 config.get("min_peak_intensity", _DEFAULT_MIN_PEAK_INTENSITY)
             ),
             peak_ordering=str(config.get("peak_ordering", "intensity")),
+            num_peaks=int(config.get("num_peaks", _NUM_PEAKS_OUTPUT)),
             use_precursor_token=bool(config.get("use_precursor_token", False)),
         )
 
@@ -621,6 +626,7 @@ class MassSpecProbeData(NamedTuple):
             max_precursor_mz=self.max_precursor_mz,
             min_peak_intensity=self.min_peak_intensity,
             peak_ordering=peak_ordering or self.peak_ordering,
+            num_peaks=self.num_peaks,
             use_precursor_token=self.use_precursor_token,
             num_parallel_reads=num_parallel_reads,
         )

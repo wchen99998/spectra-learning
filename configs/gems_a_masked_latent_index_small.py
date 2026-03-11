@@ -82,6 +82,7 @@ def get_config() -> config_dict.ConfigDict:
         {"metric": "local_emb_var_floor", "target": 0.6, "bound": "lower"},
     ]
     cfg.gco_log_lambda_max = math.log(1000.0)
+    cfg.gco_log_lambda_init = math.log(10.0)
     cfg.sigreg_lambda_warmup_steps = 50_000
     cfg.msg_probe_every_n_steps = 0.5
     cfg.use_precursor_token = True

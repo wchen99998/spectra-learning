@@ -344,6 +344,7 @@ def train_and_evaluate(
     grad_clip_norm = float(_gcn) if _gcn is not None else None
     train_loader = datamodule.train_loader
     last_msg_probe_metrics: dict[str, float] = {}
+    _wandb_run = getattr(logger, "experiment", None)
     for epoch in range(start_epoch, loop_epochs):
         prefetcher = _BatchPrefetcher(
             iter(train_loader),
@@ -395,12 +396,41 @@ def train_and_evaluate(
                 msg_probe_every_n_steps > 0
                 and global_step % msg_probe_every_n_steps == 0
             ):
+                _probe_epoch_log: list[dict[str, float]] = []
                 probe_metrics = run_msg_probe(
                     config=config,
                     model=model,
                     device=device,
+                    on_epoch_end=_probe_epoch_log.append,
                 )
                 logger.log_metrics(probe_metrics, step=global_step)
+                if _wandb_run is not None and _probe_epoch_log:
+                    import wandb
+
+                    _epochs = [
+                        int(m["msg_probe_epoch"]) for m in _probe_epoch_log
+                    ]
+                    _curve_keys = [
+                        ("loss", "msg_probe/train/loss_total", "msg_probe/test/loss_total"),
+                        ("r2_mean", "msg_probe/train/r2_mean", "msg_probe/test/r2_mean"),
+                        ("auc_fg_mean", "msg_probe/train/auc_fg_mean", "msg_probe/test/auc_fg_mean"),
+                    ]
+                    for label, train_key, test_key in _curve_keys:
+                        _wandb_run.log(
+                            {
+                                f"msg_probe_curve/{label}": wandb.plot.line_series(
+                                    xs=_epochs,
+                                    ys=[
+                                        [m[train_key] for m in _probe_epoch_log],
+                                        [m[test_key] for m in _probe_epoch_log],
+                                    ],
+                                    keys=["train", "test"],
+                                    title=f"MSG Probe {label} (step {global_step})",
+                                    xname="probe_epoch",
+                                ),
+                            },
+                            step=global_step,
+                        )
                 last_msg_probe_metrics = probe_metrics
                 logging.info(
                     "step=%d msg_probe(test_r2_mol_weight=%.4f test_auc_fg_mean=%.4f fg_tasks=%d)",

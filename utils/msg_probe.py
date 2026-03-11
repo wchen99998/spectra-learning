@@ -260,6 +260,7 @@ def run_msg_probe(
     config: config_dict.ConfigDict,
     model: PeakSetSIGReg,
     device: torch.device,
+    on_epoch_end: Callable[[dict[str, float]], None] | None = None,
 ) -> dict[str, float]:
     num_probe_epochs = int(config.get("msg_probe_num_epochs", 5))
     probe_lr = float(config.get("msg_probe_learning_rate", 1e-3))
@@ -334,6 +335,8 @@ def run_msg_probe(
             for k, v in batch.items()
         }
 
+    compiled_probe_step = torch.compile(_probe_step)
+
     final_metrics: dict[str, float] = {}
     for epoch_idx in range(num_probe_epochs):
         probe.train()
@@ -348,7 +351,7 @@ def run_msg_probe(
         ):
             batch = move_batch(batch)
             optimizer.zero_grad(set_to_none=True)
-            result = _probe_step(
+            result = compiled_probe_step(
                 probe,
                 batch,
                 task_spec=task_spec,
@@ -373,7 +376,7 @@ def run_msg_probe(
                 max_samples=max_test_samples,
             ):
                 batch = move_batch(batch)
-                result = _probe_step(
+                result = compiled_probe_step(
                     probe,
                     batch,
                     task_spec=task_spec,
@@ -401,6 +404,8 @@ def run_msg_probe(
             final_metrics["msg_probe/test/auc_fg_mean"],
             int(final_metrics["msg_probe/num_fg_tasks"]),
         )
+        if on_epoch_end is not None:
+            on_epoch_end(final_metrics)
     if was_training:
         model.train()
     return final_metrics
