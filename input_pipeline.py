@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import logging
 import math
 from pathlib import Path
@@ -46,14 +44,12 @@ def _sample_block_masks_tf(
     num_blocks = 1 + num_targets
     min_len = int(block_min_len)
     num_peaks = peak_valid_mask.shape[1]
-    context_fraction_value = float(context_fraction)
-    target_fraction_value = float(target_fraction)
 
     def sample_one(row_valid: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
         valid_count = tf.reduce_sum(tf.cast(row_valid, tf.int32))
         desired_context = tf.maximum(
             tf.cast(
-                tf.round(tf.cast(valid_count, tf.float32) * context_fraction_value),
+                tf.round(tf.cast(valid_count, tf.float32) * float(context_fraction)),
                 tf.int32,
             ),
             min_len,
@@ -68,7 +64,7 @@ def _sample_block_masks_tf(
             target_budget = tf.maximum(valid_count - context_len, 0)
             desired_target = tf.maximum(
                 tf.cast(
-                    tf.round(tf.cast(valid_count, tf.float32) * target_fraction_value),
+                    tf.round(tf.cast(valid_count, tf.float32) * float(target_fraction)),
                     tf.int32,
                 ),
                 min_len,
@@ -138,10 +134,9 @@ def _augment_block_jepa_batch_tf(
         peak_intensity = batch["peak_intensity"]
         peak_valid_mask = batch["peak_valid_mask"]
         num_peaks = tf.shape(peak_valid_mask)[1]
-        has_valid = tf.reduce_any(peak_valid_mask, axis=1)
-        needs_fallback = tf.logical_not(has_valid)
+        no_valid = ~tf.reduce_any(peak_valid_mask, axis=1)
         positions = tf.range(num_peaks, dtype=tf.int32)[tf.newaxis, :]
-        fallback = tf.logical_and(needs_fallback[:, tf.newaxis], positions == 0)
+        fallback = tf.logical_and(no_valid[:, tf.newaxis], positions == 0)
         peak_valid_mask = tf.logical_or(peak_valid_mask, fallback)
         mz_noise = tf.random.normal(
             tf.shape(peak_mz), stddev=mz_jitter_std, dtype=peak_mz.dtype
@@ -189,16 +184,12 @@ def _prepend_precursor_token_tf(batch: dict) -> dict:
     peak_valid_mask = batch["peak_valid_mask"]
     precursor_mz = batch["precursor_mz"]
     B = tf.shape(peak_mz)[0]
-
-    pre_mz = tf.expand_dims(precursor_mz, 1)
-    pre_int = tf.fill([B, 1], -1.0)
-    pre_valid = tf.ones([B, 1], dtype=tf.bool)
-
     out = dict(batch)
-    out["peak_mz"] = tf.concat([pre_mz, peak_mz], axis=1)
-    out["peak_intensity"] = tf.concat([pre_int, peak_intensity], axis=1)
-    out["peak_valid_mask"] = tf.concat([pre_valid, peak_valid_mask], axis=1)
-
+    out["peak_mz"] = tf.concat([tf.expand_dims(precursor_mz, 1), peak_mz], axis=1)
+    out["peak_intensity"] = tf.concat([tf.fill([B, 1], -1.0), peak_intensity], axis=1)
+    out["peak_valid_mask"] = tf.concat(
+        [tf.ones([B, 1], dtype=tf.bool), peak_valid_mask], axis=1
+    )
     if "context_mask" in batch:
         out["context_mask"] = tf.concat(
             [tf.ones([B, 1], dtype=tf.bool), batch["context_mask"]],
@@ -210,7 +201,6 @@ def _prepend_precursor_token_tf(batch: dict) -> dict:
             [tf.zeros([B, K, 1], dtype=tf.bool), batch["target_masks"]],
             axis=2,
         )
-
     del out["precursor_mz"]
     return out
 
@@ -226,7 +216,6 @@ def _batched_parse_and_transform(
     peak_mz_max_c = tf.constant(_PEAK_MZ_MAX, tf.float32)
     min_int = tf.constant(min_peak_intensity, tf.float32)
     max_prec = tf.constant(max_precursor_mz, tf.float32)
-
     feature_spec = {
         "mz": tf.io.FixedLenFeature([_NUM_PEAKS_INPUT], tf.float32),
         "intensity": tf.io.FixedLenFeature([_NUM_PEAKS_INPUT], tf.float32),
@@ -237,24 +226,17 @@ def _batched_parse_and_transform(
     @tf.function
     def transform(serialized_batch: tf.Tensor) -> dict[str, tf.Tensor]:
         parsed = tf.io.parse_example(serialized_batch, feature_spec)
-
         mz = parsed["mz"]
         intensity = parsed["intensity"]
-        rt = parsed["rt"][:, 0]
         precursor_mz_val = parsed["precursor_mz"][:, 0]
-
         keep = (mz >= peak_mz_min) & (mz <= peak_mz_max_c) & (intensity >= min_int)
         mz = tf.where(keep, mz, 0.0)
         intensity = tf.where(keep, intensity, 0.0)
-
-        values, indices = tf.math.top_k(intensity, k=num_peaks, sorted=True)
-        intensity = values
+        intensity, indices = tf.math.top_k(intensity, k=num_peaks, sorted=True)
         mz = tf.gather(mz, indices, batch_dims=1)
-
         max_intensity = tf.reduce_max(intensity, axis=1, keepdims=True)
         max_intensity = tf.maximum(max_intensity, 1e-8)
         intensity = intensity / max_intensity
-
         valid = intensity > 0
         if peak_ordering == "mz":
             sort_key = tf.where(valid, mz, tf.fill(tf.shape(mz), float("inf")))
@@ -270,14 +252,13 @@ def _batched_parse_and_transform(
         valid = tf.gather(valid, sorted_idx, batch_dims=1)
         mz = tf.where(valid, mz, 0.0)
         intensity = tf.where(valid, intensity, 0.0)
-        precursor_mz_norm = tf.clip_by_value(precursor_mz_val, 0.0, max_prec) / max_prec
-
         return {
             "peak_mz": mz / peak_mz_max_c,
             "peak_intensity": intensity,
             "peak_valid_mask": valid,
-            "precursor_mz": precursor_mz_norm,
-            "rt": rt,
+            "precursor_mz": tf.clip_by_value(precursor_mz_val, 0.0, max_prec)
+            / max_prec,
+            "rt": parsed["rt"][:, 0],
             "mz": mz,
             "intensity": intensity,
         }
@@ -303,12 +284,10 @@ def _build_dataset(
     mz_jitter_std: float = 0.0001,
     intensity_jitter_std: float = 0.001,
     peak_ordering: str = "intensity",
-    num_parallel_reads: int | None = None,
+    num_parallel_reads: int = tf.data.AUTOTUNE,
     use_precursor_token: bool = False,
     num_peaks: int = _NUM_PEAKS_OUTPUT,
 ) -> tf.data.Dataset:
-    if num_parallel_reads is None:
-        num_parallel_reads = tf.data.AUTOTUNE
     ds = tf.data.TFRecordDataset(
         filenames,
         compression_type="GZIP",
@@ -342,8 +321,7 @@ def _build_dataset(
     options = tf.data.Options()
     options.deterministic = True
     ds = ds.with_options(options)
-    ds = ds.prefetch(tf.data.AUTOTUNE)
-    return ds
+    return ds.prefetch(tf.data.AUTOTUNE)
 
 
 def _to_torch(value: Any) -> Any:
@@ -397,7 +375,6 @@ class TfLightningDataModule:
     def __init__(self, config: config_dict.ConfigDict, seed: int) -> None:
         self.config = config
         self.seed = int(seed)
-
         self.output_dir = (
             Path(config.get("tfrecord_dir", str(_DEFAULT_TFRECORD_DIR)))
             .expanduser()
@@ -433,7 +410,6 @@ class TfLightningDataModule:
         )
         self.use_precursor_token = bool(config.get("use_precursor_token", False))
         self.num_peaks_output = int(config.get("num_peaks", _NUM_PEAKS_OUTPUT))
-
         logger.info(
             "Downloading GeMS TFRecords from %s@%s",
             self.gems_tfrecord_repo_id,
@@ -448,7 +424,6 @@ class TfLightningDataModule:
         )
         self.gems_metadata = load_gems_metadata(self.gems_dir)
         validate_gems_artifact(self.gems_dir, self.gems_metadata)
-
         self.gems_train_files = [
             str(self.gems_dir / "train" / fn)
             for fn in self.gems_metadata["train_files"]
@@ -462,13 +437,11 @@ class TfLightningDataModule:
             "peak_mz_min": _PEAK_MZ_MIN,
             "peak_mz_max": _PEAK_MZ_MAX,
         }
-
         train_size = int(self.info["train_size"])
         if self.drop_remainder:
             self.train_steps = train_size // self.batch_size
         else:
             self.train_steps = math.ceil(train_size / self.batch_size)
-
         default_pin = torch.cuda.is_available()
         self.pin_memory = bool(config.get("dataloader_pin_memory", default_pin))
         self.dataloader_num_workers = int(config.get("dataloader_num_workers", 1))
@@ -488,11 +461,10 @@ class TfLightningDataModule:
         shuffle: bool,
         drop_remainder: bool,
     ) -> tf.data.Dataset:
-        shuffle_buffer = self.shuffle_buffer if shuffle else 0
         return _build_dataset(
             files,
             self.batch_size,
-            shuffle_buffer,
+            self.shuffle_buffer if shuffle else 0,
             seed,
             drop_remainder=drop_remainder,
             tfrecord_buffer_size=self.tfrecord_buffer_size,
@@ -516,12 +488,11 @@ class TfLightningDataModule:
         dataset_builder: Callable[[], tf.data.Dataset],
         steps: int,
     ) -> DataLoader:
-        dataset = _TfIterableDataset(
-            dataset_builder=dataset_builder,
-            steps_per_epoch=steps,
-        )
         loader_kwargs: dict[str, Any] = {
-            "dataset": dataset,
+            "dataset": _TfIterableDataset(
+                dataset_builder=dataset_builder,
+                steps_per_epoch=steps,
+            ),
             "batch_size": None,
             "num_workers": self.dataloader_num_workers,
             "pin_memory": self.pin_memory,

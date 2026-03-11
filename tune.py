@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import itertools
 import json
@@ -20,21 +18,19 @@ _PARAM_ABBREVS: dict[str, str] = {
 
 
 def _sample_value(dist: str, args: list, rng: random.Random) -> object:
-    if dist == "loguniform":
-        low, high = args
-        return math.exp(rng.uniform(math.log(low), math.log(high)))
-    if dist == "uniform":
-        low, high = args
-        return rng.uniform(low, high)
-    if dist == "choice":
-        return rng.choice(args)
-    if dist == "randint":
-        low, high = args
-        return rng.randint(low, high - 1)
-    if dist == "quniform":
-        low, high, q = args
-        return round(rng.uniform(low, high) / q) * q
-    raise ValueError(f"Unknown distribution: {dist!r}")
+    match dist:
+        case "loguniform":
+            return math.exp(rng.uniform(math.log(args[0]), math.log(args[1])))
+        case "uniform":
+            return rng.uniform(args[0], args[1])
+        case "choice":
+            return rng.choice(args)
+        case "randint":
+            return rng.randint(args[0], args[1] - 1)
+        case "quniform":
+            return round(rng.uniform(args[0], args[1]) / args[2]) * args[2]
+        case _:
+            raise ValueError(f"Unknown distribution: {dist!r}")
 
 
 def generate_trial_configs(
@@ -42,26 +38,19 @@ def generate_trial_configs(
     num_samples: int,
     seed: int,
 ) -> list[dict[str, object]]:
-    grid_params: list[tuple[str, list]] = []
-    random_params: list[dict] = []
+    grid_params, random_params = [], []
     for entry in param_space:
         if entry["dist"] == "grid":
             grid_params.append((entry["param"], entry["args"]))
         else:
             random_params.append(entry)
-
     if grid_params:
-        grid_names = [name for name, _ in grid_params]
-        grid_values = [vals for _, vals in grid_params]
-        grid_combos = [
-            dict(zip(grid_names, combo)) for combo in itertools.product(*grid_values)
-        ]
+        names, values = zip(*grid_params)
+        grid_combos = [dict(zip(names, combo)) for combo in itertools.product(*values)]
     else:
         grid_combos = [{}]
-
     if not random_params:
         return grid_combos
-
     rng = random.Random(seed)
     trials = []
     for grid_combo in grid_combos:
@@ -74,15 +63,13 @@ def generate_trial_configs(
 
 
 def build_trial_run_name(idx: int, trial_config: dict[str, object]) -> str:
-    parts = []
-    for param, value in trial_config.items():
-        abbrev = _PARAM_ABBREVS.get(param, param)
-        if isinstance(value, float):
-            parts.append(f"{abbrev}={value:.2g}")
-        else:
-            parts.append(f"{abbrev}={value}")
-    suffix = "_".join(parts)
-    return f"tune-{idx:03d}-{suffix}"
+    parts = [
+        f"{_PARAM_ABBREVS.get(p, p)}={v:.2g}"
+        if isinstance(v, float)
+        else f"{_PARAM_ABBREVS.get(p, p)}={v}"
+        for p, v in trial_config.items()
+    ]
+    return f"tune-{idx:03d}-{'_'.join(parts)}"
 
 
 def run_trials(
@@ -100,24 +87,19 @@ def run_trials(
         trial_dir = workdir / f"trial_{idx:03d}"
         trial_name = build_trial_run_name(idx, trial_params)
         logging.info("=== Trial %d/%d: %s ===", idx + 1, len(trial_configs), trial_name)
-
         cfg = load_config(config_path)
-        for key, value in overrides.items():
-            cfg[key] = value
-        for key, value in trial_params.items():
-            cfg[key] = value
+        cfg.update(overrides)
+        cfg.update(trial_params)
         if wandb_project:
             cfg.enable_wandb = True
             cfg.wandb_project = wandb_project
             cfg.wandb_kwargs = {"name": trial_name}
             cfg.wandb_run_name_prefix = ""
-
         final_metrics = train_and_evaluate(cfg, workdir=trial_dir)
         import wandb
 
         if wandb.run is not None:
             wandb.finish()
-        metric_value = final_metrics.get(metric)
         for key in sorted(final_metrics):
             logging.info(
                 "Trial %d/%d %s = %s",
@@ -132,7 +114,7 @@ def run_trials(
                 "name": trial_name,
                 "params": trial_params,
                 "metrics": final_metrics,
-                "metric_value": metric_value,
+                "metric_value": final_metrics.get(metric),
                 "workdir": str(trial_dir),
             }
         )
@@ -148,9 +130,7 @@ def print_summary(
     if not valid:
         logging.warning("No trials returned the metric %r.", metric)
         return
-    reverse = mode == "max"
-    ranked = sorted(valid, key=lambda r: r["metric_value"], reverse=reverse)
-
+    ranked = sorted(valid, key=lambda r: r["metric_value"], reverse=mode == "max")
     print(f"\n{'=' * 80}")
     print(f"  Tune results — {len(valid)} trials, metric={metric}, mode={mode}")
     print(f"{'=' * 80}")
@@ -165,7 +145,10 @@ def print_summary(
     print(f"{'=' * 80}\n")
 
 
-def _parse_args() -> argparse.Namespace:
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
     parser = argparse.ArgumentParser(
         description="Lightweight HPO for pretraining + periodic MSG probe."
     )
@@ -208,37 +191,23 @@ def _parse_args() -> argparse.Namespace:
             'Example: \'{"num_epochs": 1, "limit_train_batches": 0.01}\''
         ),
     )
-    return parser.parse_args()
-
-
-def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
-    )
-    args = _parse_args()
-
+    args = parser.parse_args()
     workdir = Path(args.workdir).expanduser().resolve()
     workdir.mkdir(parents=True, exist_ok=True)
-
     config_path = str(Path(args.config).expanduser().resolve())
     cfg = load_config(config_path)
-
     param_space = cfg.get("tune_param_space", [])
     assert param_space, (
         "cfg.tune_param_space is empty. "
         "Define tunable parameters in the config file via apply_tune_defaults() "
         "or set cfg.tune_param_space directly."
     )
-
-    overrides = json.loads(args.override_json) if args.override_json else {}
-
     trial_configs = generate_trial_configs(
         list(param_space),
         num_samples=args.num_samples,
         seed=args.seed,
     )
     logging.info("Generated %d trial configurations.", len(trial_configs))
-
     results = run_trials(
         config_path=config_path,
         workdir=workdir,
@@ -246,7 +215,7 @@ def main() -> None:
         metric=args.metric,
         mode=args.mode,
         wandb_project=args.wandb_project or str(cfg.get("wandb_project", "")),
-        overrides=overrides,
+        overrides=json.loads(args.override_json) if args.override_json else {},
     )
     print_summary(results, metric=args.metric, mode=args.mode)
 

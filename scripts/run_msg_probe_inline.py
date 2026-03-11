@@ -90,7 +90,6 @@ def main() -> None:
     print(f"Model on {device}, params={sum(p.numel() for p in model.parameters()):,}")
     metrics = run_msg_probe(
         config=cfg,
-        datamodule=None,
         model=model,
         device=device,
     )

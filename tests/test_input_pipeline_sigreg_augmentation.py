@@ -73,8 +73,13 @@ class BlockJEPAInputAugmentationTests(unittest.TestCase):
         target_masks = out["target_masks"].numpy()
         valid_mask = out["peak_valid_mask"].numpy()
 
-        np.testing.assert_array_equal(context_mask <= valid_mask, np.ones_like(valid_mask, dtype=bool))
-        np.testing.assert_array_equal(target_masks <= valid_mask[:, None, :], np.ones_like(target_masks, dtype=bool))
+        np.testing.assert_array_equal(
+            context_mask <= valid_mask, np.ones_like(valid_mask, dtype=bool)
+        )
+        np.testing.assert_array_equal(
+            target_masks <= valid_mask[:, None, :],
+            np.ones_like(target_masks, dtype=bool),
+        )
 
     def test_context_and_target_blocks_are_disjoint_and_contiguous(self):
         tf.random.set_seed(42)
@@ -97,13 +102,19 @@ class BlockJEPAInputAugmentationTests(unittest.TestCase):
             used = context_mask[row_idx].copy()
             context_positions = np.flatnonzero(context_mask[row_idx])
             if context_positions.size > 1:
-                np.testing.assert_array_equal(np.diff(context_positions), np.ones(context_positions.size - 1, dtype=int))
+                np.testing.assert_array_equal(
+                    np.diff(context_positions),
+                    np.ones(context_positions.size - 1, dtype=int),
+                )
             for target_idx in range(target_masks.shape[1]):
                 block = target_masks[row_idx, target_idx]
                 self.assertFalse(np.any(block & used))
                 block_positions = np.flatnonzero(block)
                 if block_positions.size > 1:
-                    np.testing.assert_array_equal(np.diff(block_positions), np.ones(block_positions.size - 1, dtype=int))
+                    np.testing.assert_array_equal(
+                        np.diff(block_positions),
+                        np.ones(block_positions.size - 1, dtype=int),
+                    )
                 used = used | block
             self.assertTrue(np.all(used <= valid_mask[row_idx]))
 
@@ -120,7 +131,9 @@ class BlockJEPAInputAugmentationTests(unittest.TestCase):
         )
         out = aug(batch)
 
-        np.testing.assert_allclose(out["peak_mz"].numpy(), batch["peak_mz"].numpy(), rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(
+            out["peak_mz"].numpy(), batch["peak_mz"].numpy(), rtol=0.0, atol=0.0
+        )
         np.testing.assert_allclose(
             out["peak_intensity"].numpy(),
             batch["peak_intensity"].numpy(),

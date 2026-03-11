@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem import Descriptors, rdMolDescriptors
@@ -37,12 +35,9 @@ def compute_probe_targets_for_smiles(
     patterns = {name: Chem.MolFromSmarts(smarts) for name, smarts in FG_SMARTS.items()}
     fg_counts = {name: np.zeros(n, dtype=np.int16) for name in FG_SMARTS}
     valid_mol_mask = np.ones(n, dtype=bool)
-
     mol_props = {name: np.zeros(n, dtype=np.float32) for name in REGRESSION_TARGET_KEYS}
-
     for i, smi in enumerate(smiles):
-        mol = Chem.MolFromSmiles(smi)
-        if mol is None:
+        if (mol := Chem.MolFromSmiles(smi)) is None:
             valid_mol_mask[i] = False
             continue
         for name, pattern in patterns.items():
@@ -51,17 +46,14 @@ def compute_probe_targets_for_smiles(
         mol_props["logp"][i] = Descriptors.MolLogP(mol)
         mol_props["num_heavy_atoms"][i] = float(mol.GetNumHeavyAtoms())
         mol_props["num_rings"][i] = float(rdMolDescriptors.CalcNumRings(mol))
-
     return mol_props, fg_counts, valid_mol_mask
 
 
 def build_probe_targets_for_rows(
     smiles: np.ndarray,
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], np.ndarray]:
-    unique_smiles: list[str] = []
-    index_by_smiles: dict[str, int] = {}
+    unique_smiles, index_by_smiles = [], {}
     row_indices = np.empty(len(smiles), dtype=np.int64)
-
     for row_idx, smi in enumerate(smiles.tolist()):
         smi = str(smi)
         target_idx = index_by_smiles.get(smi)
@@ -70,17 +62,9 @@ def build_probe_targets_for_rows(
             index_by_smiles[smi] = target_idx
             unique_smiles.append(smi)
         row_indices[row_idx] = target_idx
-
-    mol_props_unique, fg_counts_unique, valid_unique = compute_probe_targets_for_smiles(
-        unique_smiles
+    mp, fg, valid = compute_probe_targets_for_smiles(unique_smiles)
+    return (
+        {n: v[row_indices].astype(np.float32, copy=False) for n, v in mp.items()},
+        {n: (v[row_indices] > 0).astype(np.int32, copy=False) for n, v in fg.items()},
+        valid[row_indices],
     )
-    mol_props = {
-        name: values[row_indices].astype(np.float32, copy=False)
-        for name, values in mol_props_unique.items()
-    }
-    fg_binary = {
-        name: (values[row_indices] > 0).astype(np.int32, copy=False)
-        for name, values in fg_counts_unique.items()
-    }
-    valid_mol_mask = valid_unique[row_indices]
-    return mol_props, fg_binary, valid_mol_mask

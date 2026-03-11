@@ -111,7 +111,9 @@ def make_spectrum(raw_batch, aug_batch, sample_idx):
 spectra = []
 for batch_idx in range(NUM_BATCHES):
     for sample_idx in range(BATCH_SIZE):
-        spectra.append(make_spectrum(raw_batches[batch_idx], aug_batches[batch_idx], sample_idx))
+        spectra.append(
+            make_spectrum(raw_batches[batch_idx], aug_batches[batch_idx], sample_idx)
+        )
 print(f"Extracted {len(spectra)} spectra")
 
 output = {

@@ -27,7 +27,10 @@ import h5py
 import numpy as np
 import torch
 from sklearn.decomposition import PCA
-from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
+from sklearn.ensemble import (
+    HistGradientBoostingClassifier,
+    HistGradientBoostingRegressor,
+)
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.metrics import r2_score, roc_auc_score
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
@@ -81,7 +84,9 @@ def load_dreams_data(hdf5_path: str) -> dict[str, np.ndarray | list[str]]:
         dreams_embedding = f["DreaMS_embedding"][:].astype(np.float32)
         spectrum = f["spectrum"][:]  # [N, 2, 128]
         precursor_mz = f["precursor_mz"][:].astype(np.float64)
-        smiles = [s.decode("utf-8") if isinstance(s, bytes) else s for s in f["smiles"][:]]
+        smiles = [
+            s.decode("utf-8") if isinstance(s, bytes) else s for s in f["smiles"][:]
+        ]
         fold = [s.decode("utf-8") if isinstance(s, bytes) else s for s in f["FOLD"][:]]
         identifiers = [
             s.decode("utf-8") if isinstance(s, bytes) else s for s in f["IDENTIFIER"][:]
@@ -130,7 +135,9 @@ def load_dreams_atlas_hdf5(hdf5_path: str) -> dict[str, np.ndarray | list[str]]:
         ids_raw = f["id"][:]
 
     smiles_all = [s.decode("utf-8") if isinstance(s, bytes) else s for s in smiles_raw]
-    identifiers_all = [s.decode("utf-8") if isinstance(s, bytes) else s for s in ids_raw]
+    identifiers_all = [
+        s.decode("utf-8") if isinstance(s, bytes) else s for s in ids_raw
+    ]
     n_total = len(smiles_all)
     log.info("Loaded %d spectra in %.1fs", n_total, time.time() - t0)
 
@@ -150,8 +157,12 @@ def load_dreams_atlas_hdf5(hdf5_path: str) -> dict[str, np.ndarray | list[str]]:
         inchikey_conn_valid.append(ik)
 
     valid_indices = np.array(valid_indices)
-    log.info("Valid SMILES: %d / %d (%.1f%%)", len(valid_indices), n_total,
-             100 * len(valid_indices) / n_total)
+    log.info(
+        "Valid SMILES: %d / %d (%.1f%%)",
+        len(valid_indices),
+        n_total,
+        100 * len(valid_indices) / n_total,
+    )
 
     # Subset arrays to valid only
     dreams_embedding = dreams_embedding[valid_indices]
@@ -182,10 +193,14 @@ def load_dreams_atlas_hdf5(hdf5_path: str) -> dict[str, np.ndarray | list[str]]:
             fold.append("test")
 
     from collections import Counter
+
     counts = Counter(fold)
     log.info(
         "InChIKey splits (%d unique keys): train=%d, val=%d, test=%d",
-        n_keys, counts["train"], counts["val"], counts["test"],
+        n_keys,
+        counts["train"],
+        counts["val"],
+        counts["test"],
     )
 
     return {
@@ -250,7 +265,9 @@ def load_mona_pkl_data(pkl_path: str) -> dict[str, np.ndarray | list[str]]:
         "precursor_mz": precursor_mz,
         "smiles": smiles,
         "fold": fold.tolist(),
-        "identifiers": df["ID"].tolist() if "ID" in df.columns else [f"MoNA_{i}" for i in range(n)],
+        "identifiers": df["ID"].tolist()
+        if "ID" in df.columns
+        else [f"MoNA_{i}" for i in range(n)],
     }
 
 
@@ -317,7 +334,10 @@ def preprocess_dreams_spectra(
 
     # 5. Normalize
     peak_mz_out = mz / peak_mz_max
-    prec_mz_out = np.clip(precursor_mz, 0.0, max_precursor_mz).astype(np.float32) / max_precursor_mz
+    prec_mz_out = (
+        np.clip(precursor_mz, 0.0, max_precursor_mz).astype(np.float32)
+        / max_precursor_mz
+    )
 
     log.info(
         "Preprocessed spectra: valid peaks per spectrum min=%d, median=%d, max=%d",
@@ -377,7 +397,10 @@ def extract_our_embeddings(
         if model.use_precursor_token and precursor_mz_np is not None:
             batch_pmz = torch.from_numpy(precursor_mz_np[start:end]).to(device)
             expanded = PeakSetSIGReg.prepend_precursor_token(
-                batch_mz, batch_int, batch_mask, batch_pmz,
+                batch_mz,
+                batch_int,
+                batch_mask,
+                batch_pmz,
             )
             batch_mz = expanded["peak_mz"]
             batch_int = expanded["peak_intensity"]
@@ -426,7 +449,9 @@ def compute_targets_cached(
         valid_mol_mask = data["valid_mol_mask"]
         return mol_props, fg_counts, valid_mol_mask
 
-    log.info("Computing probe targets for %d SMILES (this may take a while)...", len(smiles))
+    log.info(
+        "Computing probe targets for %d SMILES (this may take a while)...", len(smiles)
+    )
     t0 = time.time()
     mol_props, fg_counts, valid_mol_mask = compute_probe_targets_for_smiles(smiles)
     log.info("Computed targets in %.1fs", time.time() - t0)
@@ -518,7 +543,13 @@ def ridge_probe(
     model.fit(x_train, y_train)
     test_r2 = r2_score(y_test, model.predict(x_test))
 
-    log.info("  %s: best_alpha=%.2f, val_R²=%.4f, test_R²=%.4f", target_name, best_alpha, best_val_r2, test_r2)
+    log.info(
+        "  %s: best_alpha=%.2f, val_R²=%.4f, test_R²=%.4f",
+        target_name,
+        best_alpha,
+        best_val_r2,
+        test_r2,
+    )
     return {"best_alpha": best_alpha, "val_r2": best_val_r2, "test_r2": test_r2}
 
 
@@ -550,7 +581,13 @@ def logistic_probe(
     proba = model.predict_proba(x_test)[:, 1]
     test_auc = roc_auc_score(y_test, proba)
 
-    log.info("  %s: best_C=%.2f, val_AUC=%.4f, test_AUC=%.4f", target_name, best_c, best_val_auc, test_auc)
+    log.info(
+        "  %s: best_C=%.2f, val_AUC=%.4f, test_AUC=%.4f",
+        target_name,
+        best_c,
+        best_val_auc,
+        test_auc,
+    )
     return {"best_C": best_c, "val_auc": best_val_auc, "test_auc": test_auc}
 
 
@@ -584,7 +621,12 @@ def run_linear_probes(
         if _FG_PREVALENCE_MIN <= train_prev <= _FG_PREVALENCE_MAX:
             qualifying_fgs.append(name)
 
-    log.info("  Qualifying FGs (%d / %d): %s", len(qualifying_fgs), len(FG_SMARTS), qualifying_fgs)
+    log.info(
+        "  Qualifying FGs (%d / %d): %s",
+        len(qualifying_fgs),
+        len(FG_SMARTS),
+        qualifying_fgs,
+    )
     for name in qualifying_fgs:
         y = (fg_counts[name] > 0).astype(np.int32)
         results["classification"][name] = logistic_probe(
@@ -625,10 +667,20 @@ def hgb_regression_probe(
             m.fit(x_train, y_train)
             val_r2 = r2_score(y_val, m.predict(x_val))
             if val_r2 > best_r2:
-                best_r2, best_params, best_model = val_r2, {"lr": lr, "max_depth": md}, m
+                best_r2, best_params, best_model = (
+                    val_r2,
+                    {"lr": lr, "max_depth": md},
+                    m,
+                )
     test_r2 = r2_score(y_test, best_model.predict(x_test))
-    log.info("  %s: lr=%.2f, depth=%s, val_R²=%.4f, test_R²=%.4f",
-             name, best_params["lr"], best_params["max_depth"], best_r2, test_r2)
+    log.info(
+        "  %s: lr=%.2f, depth=%s, val_R²=%.4f, test_R²=%.4f",
+        name,
+        best_params["lr"],
+        best_params["max_depth"],
+        best_r2,
+        test_r2,
+    )
     return {"best_params": best_params, "val_r2": best_r2, "test_r2": test_r2}
 
 
@@ -661,12 +713,28 @@ def hgb_classification_probe(
             else:
                 val_auc = float("nan")
             if val_auc > best_auc:
-                best_auc, best_params, best_model = val_auc, {"lr": lr, "max_depth": md}, m
+                best_auc, best_params, best_model = (
+                    val_auc,
+                    {"lr": lr, "max_depth": md},
+                    m,
+                )
     proba = best_model.predict_proba(x_test)
-    test_auc = roc_auc_score(y_test, proba[:, 1]) if proba.shape[1] == 2 else float("nan")
-    log.info("  %s: lr=%.2f, depth=%s, val_AUC=%.4f, test_AUC=%.4f",
-             name, best_params["lr"], best_params["max_depth"], best_auc, test_auc)
-    return {"best_params": {k: str(v) for k, v in best_params.items()}, "val_auc": best_auc, "test_auc": test_auc}
+    test_auc = (
+        roc_auc_score(y_test, proba[:, 1]) if proba.shape[1] == 2 else float("nan")
+    )
+    log.info(
+        "  %s: lr=%.2f, depth=%s, val_AUC=%.4f, test_AUC=%.4f",
+        name,
+        best_params["lr"],
+        best_params["max_depth"],
+        best_auc,
+        test_auc,
+    )
+    return {
+        "best_params": {k: str(v) for k, v in best_params.items()},
+        "val_auc": best_auc,
+        "test_auc": test_auc,
+    }
 
 
 def run_hgb_probes(
@@ -793,13 +861,19 @@ def run_tanimoto_correlation(
     )
 
     # Tanimoto similarities
-    tan_sims = np.array([
-        DataStructs.TanimotoSimilarity(fps[a], fps[b]) for a, b in zip(pairs_a, pairs_b)
-    ], dtype=np.float32)
+    tan_sims = np.array(
+        [
+            DataStructs.TanimotoSimilarity(fps[a], fps[b])
+            for a, b in zip(pairs_a, pairs_b)
+        ],
+        dtype=np.float32,
+    )
 
     pearson_r = float(stats.pearsonr(cos_sims, tan_sims)[0])
     spearman_r = float(stats.spearmanr(cos_sims, tan_sims)[0])
-    log.info("  Tanimoto correlation: Pearson=%.4f, Spearman=%.4f", pearson_r, spearman_r)
+    log.info(
+        "  Tanimoto correlation: Pearson=%.4f, Spearman=%.4f", pearson_r, spearman_r
+    )
     return {"pearson": pearson_r, "spearman": spearman_r}
 
 
@@ -823,7 +897,12 @@ def format_results_table(all_results: dict, mode: str) -> str:
             for target in REGRESSION_TARGET_KEYS:
                 row = f"  {target:<28}"
                 for cfg in configs:
-                    r = all_results[cfg].get("linear_probes", {}).get("regression", {}).get(target, {})
+                    r = (
+                        all_results[cfg]
+                        .get("linear_probes", {})
+                        .get("regression", {})
+                        .get(target, {})
+                    )
                     val = r.get("test_r2", float("nan"))
                     row += f"  {val:>20.4f}"
                 lines.append(row)
@@ -832,11 +911,21 @@ def format_results_table(all_results: dict, mode: str) -> str:
             lines.append("\nCLASSIFICATION (Logistic, test AUC)")
             all_fgs: set[str] = set()
             for cfg in configs:
-                all_fgs |= set(all_results[cfg].get("linear_probes", {}).get("classification", {}).keys())
+                all_fgs |= set(
+                    all_results[cfg]
+                    .get("linear_probes", {})
+                    .get("classification", {})
+                    .keys()
+                )
             for fg in sorted(all_fgs):
                 row = f"  {fg:<28}"
                 for cfg in configs:
-                    r = all_results[cfg].get("linear_probes", {}).get("classification", {}).get(fg, {})
+                    r = (
+                        all_results[cfg]
+                        .get("linear_probes", {})
+                        .get("classification", {})
+                        .get(fg, {})
+                    )
                     val = r.get("test_auc", float("nan"))
                     row += f"  {val:>20.4f}"
                 lines.append(row)
@@ -847,7 +936,12 @@ def format_results_table(all_results: dict, mode: str) -> str:
             for target in REGRESSION_TARGET_KEYS:
                 row = f"  {target:<28}"
                 for cfg in configs:
-                    r = all_results[cfg].get("hgb_probes", {}).get("regression", {}).get(target, {})
+                    r = (
+                        all_results[cfg]
+                        .get("hgb_probes", {})
+                        .get("regression", {})
+                        .get(target, {})
+                    )
                     val = r.get("test_r2", float("nan"))
                     row += f"  {val:>20.4f}"
                 lines.append(row)
@@ -856,11 +950,21 @@ def format_results_table(all_results: dict, mode: str) -> str:
             lines.append("\nCLASSIFICATION (HGB, test AUC)")
             all_fgs_hgb: set[str] = set()
             for cfg in configs:
-                all_fgs_hgb |= set(all_results[cfg].get("hgb_probes", {}).get("classification", {}).keys())
+                all_fgs_hgb |= set(
+                    all_results[cfg]
+                    .get("hgb_probes", {})
+                    .get("classification", {})
+                    .keys()
+                )
             for fg in sorted(all_fgs_hgb):
                 row = f"  {fg:<28}"
                 for cfg in configs:
-                    r = all_results[cfg].get("hgb_probes", {}).get("classification", {}).get(fg, {})
+                    r = (
+                        all_results[cfg]
+                        .get("hgb_probes", {})
+                        .get("classification", {})
+                        .get(fg, {})
+                    )
                     val = r.get("test_auc", float("nan"))
                     row += f"  {val:>20.4f}"
                 lines.append(row)
@@ -871,7 +975,12 @@ def format_results_table(all_results: dict, mode: str) -> str:
             for target in REGRESSION_TARGET_KEYS:
                 row = f"  {target:<28}"
                 for cfg in configs:
-                    r = all_results[cfg].get("knn", {}).get("regression", {}).get(target, {})
+                    r = (
+                        all_results[cfg]
+                        .get("knn", {})
+                        .get("regression", {})
+                        .get(target, {})
+                    )
                     val = r.get("test_r2", float("nan"))
                     row += f"  {val:>20.4f}"
                 lines.append(row)
@@ -894,10 +1003,16 @@ def format_results_table(all_results: dict, mode: str) -> str:
         if "linear_probes" in all_results[cfg]:
             lines.append("\nREGRESSION (Ridge, test R²)")
             for target in REGRESSION_TARGET_KEYS:
-                r = all_results[cfg]["linear_probes"].get("regression", {}).get(target, {})
+                r = (
+                    all_results[cfg]["linear_probes"]
+                    .get("regression", {})
+                    .get(target, {})
+                )
                 lines.append(f"  {target:<28} {r.get('test_r2', float('nan')):>10.4f}")
             lines.append("\nCLASSIFICATION (Logistic, test AUC)")
-            for fg, r in all_results[cfg]["linear_probes"].get("classification", {}).items():
+            for fg, r in (
+                all_results[cfg]["linear_probes"].get("classification", {}).items()
+            ):
                 lines.append(f"  {fg:<28} {r.get('test_auc', float('nan')):>10.4f}")
 
         if "hgb_probes" in all_results[cfg]:
@@ -906,7 +1021,9 @@ def format_results_table(all_results: dict, mode: str) -> str:
                 r = all_results[cfg]["hgb_probes"].get("regression", {}).get(target, {})
                 lines.append(f"  {target:<28} {r.get('test_r2', float('nan')):>10.4f}")
             lines.append("\nCLASSIFICATION (HGB, test AUC)")
-            for fg, r in all_results[cfg]["hgb_probes"].get("classification", {}).items():
+            for fg, r in (
+                all_results[cfg]["hgb_probes"].get("classification", {}).items()
+            ):
                 lines.append(f"  {fg:<28} {r.get('test_auc', float('nan')):>10.4f}")
 
         if "knn" in all_results[cfg]:
@@ -918,8 +1035,12 @@ def format_results_table(all_results: dict, mode: str) -> str:
         if "tanimoto" in all_results[cfg]:
             lines.append("\nTANIMOTO CORRELATION")
             t = all_results[cfg]["tanimoto"]
-            lines.append(f"  pearson                      {t.get('pearson', float('nan')):>10.4f}")
-            lines.append(f"  spearman                     {t.get('spearman', float('nan')):>10.4f}")
+            lines.append(
+                f"  pearson                      {t.get('pearson', float('nan')):>10.4f}"
+            )
+            lines.append(
+                f"  spearman                     {t.get('spearman', float('nan')):>10.4f}"
+            )
 
     return "\n".join(lines)
 
@@ -981,7 +1102,12 @@ def validate_preprocessing(
                     int_close,
                 )
 
-    log.info("Preprocessing validation: %d matched, %d mismatched out of %d checked", matched, mismatches, n_check)
+    log.info(
+        "Preprocessing validation: %d matched, %d mismatched out of %d checked",
+        matched,
+        mismatches,
+        n_check,
+    )
     if mismatches > matched * 0.1:
         log.warning("High mismatch rate! Check preprocessing logic.")
 
@@ -1014,7 +1140,9 @@ def run_benchmark(args: argparse.Namespace) -> dict:
         validate_preprocessing(preprocessed, args.config, data["smiles"])
 
     # Step 4: Compute targets
-    mol_props, fg_counts, valid_mol_mask = compute_targets_cached(data["smiles"], workdir)
+    mol_props, fg_counts, valid_mol_mask = compute_targets_cached(
+        data["smiles"], workdir
+    )
 
     # Step 5: Build splits
     train_idx, val_idx, test_idx = build_split_indices(data["fold"], valid_mol_mask)
@@ -1048,7 +1176,9 @@ def run_benchmark(args: argparse.Namespace) -> dict:
 
     if need_dreams:
         if data["dreams_embedding"] is None:
-            log.warning("No DreaMS embeddings in this data source; skipping 'dreams' mode")
+            log.warning(
+                "No DreaMS embeddings in this data source; skipping 'dreams' mode"
+            )
         else:
             embedding_sources["dreams_native"] = data["dreams_embedding"]
 
@@ -1069,17 +1199,43 @@ def run_benchmark(args: argparse.Namespace) -> dict:
 
         if args.probe in ("linear", "both"):
             source_results["linear_probes"] = run_linear_probes(
-                x_train, x_val, x_test, train_idx, val_idx, test_idx, mol_props, fg_counts, source_name
+                x_train,
+                x_val,
+                x_test,
+                train_idx,
+                val_idx,
+                test_idx,
+                mol_props,
+                fg_counts,
+                source_name,
             )
         if args.probe in ("hgb", "both"):
             source_results["hgb_probes"] = run_hgb_probes(
-                x_train, x_val, x_test, train_idx, val_idx, test_idx, mol_props, fg_counts, qualifying_fgs, source_name
+                x_train,
+                x_val,
+                x_test,
+                train_idx,
+                val_idx,
+                test_idx,
+                mol_props,
+                fg_counts,
+                qualifying_fgs,
+                source_name,
             )
 
         source_results["knn"] = run_knn_probes(
-            x_train, x_test, train_idx, test_idx, mol_props, fg_counts, qualifying_fgs, source_name
+            x_train,
+            x_test,
+            train_idx,
+            test_idx,
+            mol_props,
+            fg_counts,
+            qualifying_fgs,
+            source_name,
         )
-        source_results["tanimoto"] = run_tanimoto_correlation(emb, data["smiles"], test_idx, source_name)
+        source_results["tanimoto"] = run_tanimoto_correlation(
+            emb, data["smiles"], test_idx, source_name
+        )
 
         all_results[source_name] = source_results
 
@@ -1089,7 +1245,9 @@ def run_benchmark(args: argparse.Namespace) -> dict:
         for source_name, emb in embedding_sources.items():
             pca_name = f"{source_name.replace('_native', '')}_pca{matched_dim}"
             log.info("=" * 60)
-            log.info("Evaluating: %s (PCA %d → %d)", pca_name, emb.shape[1], matched_dim)
+            log.info(
+                "Evaluating: %s (PCA %d → %d)", pca_name, emb.shape[1], matched_dim
+            )
             x_train, x_val, x_test = prepare_embeddings(
                 emb, train_idx, val_idx, test_idx, pca_dim=matched_dim
             )
@@ -1097,17 +1255,43 @@ def run_benchmark(args: argparse.Namespace) -> dict:
 
             if args.probe in ("linear", "both"):
                 pca_results["linear_probes"] = run_linear_probes(
-                    x_train, x_val, x_test, train_idx, val_idx, test_idx, mol_props, fg_counts, pca_name
+                    x_train,
+                    x_val,
+                    x_test,
+                    train_idx,
+                    val_idx,
+                    test_idx,
+                    mol_props,
+                    fg_counts,
+                    pca_name,
                 )
             if args.probe in ("hgb", "both"):
                 pca_results["hgb_probes"] = run_hgb_probes(
-                    x_train, x_val, x_test, train_idx, val_idx, test_idx, mol_props, fg_counts, qualifying_fgs, pca_name
+                    x_train,
+                    x_val,
+                    x_test,
+                    train_idx,
+                    val_idx,
+                    test_idx,
+                    mol_props,
+                    fg_counts,
+                    qualifying_fgs,
+                    pca_name,
                 )
 
             pca_results["knn"] = run_knn_probes(
-                x_train, x_test, train_idx, test_idx, mol_props, fg_counts, qualifying_fgs, pca_name
+                x_train,
+                x_test,
+                train_idx,
+                test_idx,
+                mol_props,
+                fg_counts,
+                qualifying_fgs,
+                pca_name,
             )
-            pca_results["tanimoto"] = run_tanimoto_correlation(emb, data["smiles"], test_idx, pca_name)
+            pca_results["tanimoto"] = run_tanimoto_correlation(
+                emb, data["smiles"], test_idx, pca_name
+            )
 
             all_results[pca_name] = pca_results
 
@@ -1205,7 +1389,9 @@ def main():
         if args.dir is None:
             parser.error("--dir is required for mode 'ours' or 'compare'")
     if args.pkl and args.mode in ("dreams", "compare"):
-        parser.error("--mode dreams/compare requires --dreams-hdf5 (no DreaMS embeddings in pickle data)")
+        parser.error(
+            "--mode dreams/compare requires --dreams-hdf5 (no DreaMS embeddings in pickle data)"
+        )
 
     run_benchmark(args)
 

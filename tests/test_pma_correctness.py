@@ -15,7 +15,6 @@ from models.model import PeakSetSIGReg
 
 def _build_model(**overrides):
     defaults = dict(
-        num_peaks=60,
         model_dim=64,
         encoder_num_layers=2,
         encoder_num_heads=4,
@@ -66,7 +65,7 @@ def test_pma_polarity_empirical():
 
     B, N, D = 4, 60, 64
     embeddings = torch.zeros(B, N, D)
-    embeddings[:, :30, :] = 1.0   # valid positions: value 1
+    embeddings[:, :30, :] = 1.0  # valid positions: value 1
     embeddings[:, 30:, :] = 999.0  # padding positions: value 999
 
     valid_mask = torch.zeros(B, N, dtype=torch.bool)
@@ -119,7 +118,9 @@ def test_pma_all_padding_row():
         # Check if valid rows are at least ok
         assert torch.isfinite(pooled[0]).all(), "Valid row 0 has NaN/Inf"
         assert torch.isfinite(pooled[1]).all(), "Valid row 1 has NaN/Inf"
-        print("  (Valid rows are finite, all-padding rows have NaN — expected edge case)")
+        print(
+            "  (Valid rows are finite, all-padding rows have NaN — expected edge case)"
+        )
     else:
         print("PASSED (all outputs finite)")
 
@@ -176,7 +177,9 @@ def test_pma_gradient_flow():
     assert model.pool_query.grad is not None, "pool_query has no gradient"
     assert model.pool_query.grad.abs().sum() > 0, "pool_query gradient is zero"
 
-    mha_grads = [(n, p.grad) for n, p in model.pool_mha.named_parameters() if p.grad is not None]
+    mha_grads = [
+        (n, p.grad) for n, p in model.pool_mha.named_parameters() if p.grad is not None
+    ]
     assert len(mha_grads) > 0, "No MHA parameters have gradients"
     for name, grad in mha_grads:
         assert grad.abs().sum() > 0, f"MHA param {name} has zero gradient"
@@ -184,7 +187,9 @@ def test_pma_gradient_flow():
     assert embeddings.grad is not None, "Input embeddings have no gradient"
     # Gradient should be zero at padding positions
     pad_grad_norm = embeddings.grad[:, 30:, :].abs().sum().item()
-    assert pad_grad_norm < 1e-5, f"Padding positions have non-zero gradient: {pad_grad_norm}"
+    assert pad_grad_norm < 1e-5, (
+        f"Padding positions have non-zero gradient: {pad_grad_norm}"
+    )
 
     print("PASSED")
 

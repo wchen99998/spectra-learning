@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import math
 
 import torch
@@ -42,14 +40,6 @@ def apply_rotary_emb(
     )
 
 
-_ACTIVATIONS: dict[str, nn.Module] = {
-    "swiglu": nn.SiLU(),
-    "geglu": nn.GELU(),
-    "glu": nn.Sigmoid(),
-    "swish": nn.SiLU(),
-}
-
-
 def _build_norm(dim: int, eps: float, norm_type: str) -> nn.Module:
     kind = str(norm_type).lower()
     if kind == "rmsnorm":
@@ -66,7 +56,6 @@ class Attention(nn.Module):
         n_heads: int,
         *,
         n_kv_heads: int | None = None,
-        causal: bool = False,
         qk_norm: bool = False,
         norm_type: str = "rmsnorm",
     ):
@@ -142,38 +131,21 @@ class FeedForward(nn.Module):
         self,
         dim: int,
         *,
-        multiple_of: int,
         hidden_dim: int | None = None,
-        mlp_type: str = "swiglu",
-        w_init_scale: float = 1.0,
     ):
         super().__init__()
 
         hidden_dim = hidden_dim or int((4 * dim) * 2 / 3)
-        hidden_dim = multiple_of * math.ceil(hidden_dim / multiple_of)
+        hidden_dim = 4 * math.ceil(hidden_dim / 4)
 
-        self.activation = _ACTIVATIONS[mlp_type]
-        self.uses_gating = mlp_type in {"swiglu", "geglu", "glu"}
-
-        if self.uses_gating:
-            self.w12 = nn.Linear(dim, 2 * hidden_dim, bias=False)
-        else:
-            self.w1 = nn.Linear(dim, hidden_dim, bias=False)
+        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
 
-        nn.init.trunc_normal_(self.w2.weight, std=w_init_scale / math.sqrt(dim))
-        if self.uses_gating:
-            nn.init.trunc_normal_(self.w12.weight, std=w_init_scale / math.sqrt(dim))
-        else:
-            nn.init.trunc_normal_(self.w1.weight, std=w_init_scale / math.sqrt(dim))
+        for w in (self.w1, self.w2):
+            nn.init.trunc_normal_(w.weight, std=1.0 / math.sqrt(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.uses_gating:
-            w1, w3 = self.w12(x).chunk(2, dim=-1)
-            hidden = self.activation(w1) * w3
-        else:
-            hidden = self.activation(self.w1(x))
-        return self.w2(hidden)
+        return self.w2(torch.nn.functional.silu(self.w1(x)))
 
 
 class TransformerBlock(nn.Module):
@@ -183,40 +155,25 @@ class TransformerBlock(nn.Module):
         dim: int,
         n_heads: int,
         n_kv_heads: int | None,
-        causal: bool,
         norm_eps: float,
-        mlp_type: str,
-        multiple_of: int,
         hidden_dim: int | None,
-        w_init_scale: float,
-        use_rotary_embeddings: bool,
         qk_norm: bool = False,
-        post_norm: bool = False,
         norm_type: str = "rmsnorm",
     ):
         super().__init__()
-        self.use_rotary_embeddings = use_rotary_embeddings
-        self.post_norm = post_norm
         self.attention = Attention(
             dim,
             n_heads,
             n_kv_heads=n_kv_heads,
-            causal=causal,
             qk_norm=qk_norm,
             norm_type=norm_type,
         )
         self.feed_forward = FeedForward(
             dim,
-            multiple_of=multiple_of,
             hidden_dim=hidden_dim,
-            mlp_type=mlp_type,
-            w_init_scale=w_init_scale,
         )
         self.attention_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
         self.ffn_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
-        if post_norm:
-            self.post_attn_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
-            self.post_ffn_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
 
     def forward(
         self,
@@ -226,19 +183,10 @@ class TransformerBlock(nn.Module):
         freqs_sin: torch.Tensor | None,
         block_mask: BlockMask | None = None,
     ) -> torch.Tensor:
-        if not self.use_rotary_embeddings:
-            freqs_cos = None
-            freqs_sin = None
-
         h = x + self.attention(
             self.attention_norm(x),
             freqs_cos=freqs_cos,
             freqs_sin=freqs_sin,
             block_mask=block_mask,
         )
-        if self.post_norm:
-            h = self.post_attn_norm(h)
-        out = h + self.feed_forward(self.ffn_norm(h))
-        if self.post_norm:
-            out = self.post_ffn_norm(out)
-        return out
+        return h + self.feed_forward(self.ffn_norm(h))

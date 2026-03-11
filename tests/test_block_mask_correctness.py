@@ -12,7 +12,11 @@ Concerns to verify:
 import torch
 import torch.nn.functional as F
 
-from networks.transformer_torch import create_visible_block_mask, Attention, flex_attention
+from networks.transformer_torch import (
+    create_visible_block_mask,
+    Attention,
+    flex_attention,
+)
 
 
 def _naive_masked_attention(q, k, v, valid_mask):
@@ -25,7 +29,7 @@ def _naive_masked_attention(q, k, v, valid_mask):
         [B, H, N, D]
     """
     B, H, N, D = q.shape
-    scale = D ** -0.5
+    scale = D**-0.5
     scores = torch.matmul(q, k.transpose(-2, -1)) * scale  # [B, H, N, N]
 
     # Build 2D mask: position (i,j) is valid only if both i and j are valid
@@ -34,7 +38,7 @@ def _naive_masked_attention(q, k, v, valid_mask):
     col_mask = valid_mask.unsqueeze(-2)  # [B, 1, N]
     attn_mask = (row_mask & col_mask).unsqueeze(1)  # [B, 1, N, N]
 
-    scores = scores.masked_fill(~attn_mask, float('-inf'))
+    scores = scores.masked_fill(~attn_mask, float("-inf"))
     weights = torch.softmax(scores, dim=-1)
     # NaN from all-masked rows -> replace with 0
     weights = weights.nan_to_num(0.0)
@@ -51,7 +55,7 @@ def test_block_mask_creation_no_oob():
     print("Test 1: BlockMask creation (no OOB) ... ", end="", flush=True)
     for seq_len in [1, 10, 30, 60, 127, 128, 129, 256]:
         valid_mask = torch.ones(4, seq_len, dtype=torch.bool)
-        valid_mask[:, seq_len // 2:] = False
+        valid_mask[:, seq_len // 2 :] = False
         bm = create_visible_block_mask(valid_mask)
         assert bm is not None, f"Failed for seq_len={seq_len}"
     print("PASSED")
@@ -89,9 +93,7 @@ def test_flex_attention_vs_naive_reference():
         flex_valid = out_flex[i, :, :vl, :]
         naive_valid = out_naive[i, :, :vl, :]
         max_diff = (flex_valid - naive_valid).abs().max().item()
-        assert max_diff < 1e-5, (
-            f"Batch {i}: valid_len={vl}, max_diff={max_diff}"
-        )
+        assert max_diff < 1e-5, f"Batch {i}: valid_len={vl}, max_diff={max_diff}"
     print("PASSED")
 
 
@@ -142,7 +144,7 @@ def test_mask_polarity():
     k = torch.randn(B, H, N, D)
     # Make v have clearly different values in first vs second half
     v = torch.zeros(B, H, N, D)
-    v[:, :, :8, :] = 1.0   # valid positions have value 1
+    v[:, :, :8, :] = 1.0  # valid positions have value 1
     v[:, :, 8:, :] = 100.0  # padding positions have value 100
 
     # Only first 8 positions are valid
@@ -304,7 +306,9 @@ def test_through_attention_module():
 
     # Valid position outputs should be identical
     max_diff = (out1[:, :30, :] - out2[:, :30, :]).abs().max().item()
-    assert max_diff < 1e-5, f"Padding leaked through Attention module: max_diff={max_diff}"
+    assert max_diff < 1e-5, (
+        f"Padding leaked through Attention module: max_diff={max_diff}"
+    )
     print("PASSED")
 
 

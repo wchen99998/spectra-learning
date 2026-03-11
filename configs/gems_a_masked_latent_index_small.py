@@ -76,7 +76,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.predictor_num_heads = 4
     cfg.autocast_dtype = "bf16"
     cfg.representation_regularizer = "sigreg"
-    cfg.gco_var_floor_target = 1.
+    cfg.gco_var_floor_target = 1.0
     cfg.gco_corr_target = 0.60
     cfg.gco_log_lambda_min = -2.0
     cfg.sigreg_lambda_warmup_steps = 50_000

@@ -25,7 +25,9 @@ def _download_source(url: str, work_dir: Path) -> Path:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build and upload canonical GeMS TFRecords.")
+    parser = argparse.ArgumentParser(
+        description="Build and upload canonical GeMS TFRecords."
+    )
     source_group = parser.add_mutually_exclusive_group(required=True)
     source_group.add_argument("--source-hdf5-path", type=Path)
     source_group.add_argument("--source-url")

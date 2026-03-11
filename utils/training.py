@@ -1,20 +1,16 @@
-from __future__ import annotations
-
+import datetime
 import importlib.util
 import logging
+import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-import datetime
-import os
-
 import lightning.pytorch as pl
+import numpy as np
 import torch
-from collections.abc import Mapping
 from lightning.pytorch.loggers import CSVLogger
 from ml_collections import config_dict
-
-import numpy as np
 
 from models.model import PeakSetSIGReg
 
@@ -31,7 +27,6 @@ def load_config(path: str | Path) -> config_dict.ConfigDict:
 
 def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
     return PeakSetSIGReg(
-        num_peaks=int(config.num_peaks),
         model_dim=int(config.model_dim),
         encoder_num_layers=int(config.num_layers),
         encoder_num_heads=int(config.num_heads),
@@ -41,9 +36,6 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         encoder_use_rope=bool(config.get("encoder_use_rope", False)),
         masked_token_loss_weight=float(config.get("masked_token_loss_weight", 0.0)),
         masked_token_loss_type=str(config.get("masked_token_loss_type", "l1")),
-        representation_regularizer=str(
-            config.get("representation_regularizer", "sigreg")
-        ),
         masked_latent_predictor_num_layers=int(
             config.get("masked_latent_predictor_num_layers", 2)
         ),
@@ -53,29 +45,8 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         sigreg_num_slices=int(config.get("sigreg_num_slices", 256)),
         sigreg_lambda=float(config.get("sigreg_lambda", 0.1)),
         sigreg_lambda_warmup_steps=int(config.get("sigreg_lambda_warmup_steps", 0)),
-        gco_var_floor_target=float(config.get("gco_var_floor_target", 1e-3)),
-        gco_corr_target=float(config.get("gco_corr_target", 0.6)),
-        gco_alpha=float(config.get("gco_alpha", 0.99)),
-        gco_eta=float(config.get("gco_eta", 1e-3)),
-        gco_log_lambda_init=float(config.get("gco_log_lambda_init", -8.0)),
-        gco_log_lambda_min=float(config.get("gco_log_lambda_min", -12.0)),
-        gco_log_lambda_max=float(config.get("gco_log_lambda_max", 2.0)),
         jepa_num_target_blocks=int(config.get("jepa_num_target_blocks", 2)),
-        jepa_context_fraction=float(config.get("jepa_context_fraction", 0.5)),
-        jepa_target_fraction=float(config.get("jepa_target_fraction", 0.25)),
-        jepa_block_min_len=int(config.get("jepa_block_min_len", 1)),
-        use_ema_teacher_target=bool(config.get("use_ema_teacher_target", False)),
-        teacher_ema_decay=float(config.get("teacher_ema_decay", 0.996)),
-        teacher_ema_decay_start=float(config.get("teacher_ema_decay_start", 0.0)),
-        teacher_ema_decay_warmup_steps=int(
-            config.get("teacher_ema_decay_warmup_steps", 0)
-        ),
-        sigreg_mz_jitter_std=float(config.get("sigreg_mz_jitter_std", 0.0001)),
-        sigreg_intensity_jitter_std=float(
-            config.get("sigreg_intensity_jitter_std", 0.001)
-        ),
         encoder_qk_norm=bool(config.get("encoder_qk_norm", False)),
-        normalize_jepa_targets=bool(config.get("normalize_jepa_targets", False)),
         norm_type=str(config.get("norm_type", "rmsnorm")),
         use_precursor_token=bool(config.get("use_precursor_token", False)),
     )
@@ -93,17 +64,16 @@ def collect_and_log_param_metrics(model: torch.nn.Module) -> dict[str, float]:
         if param.requires_grad:
             trainable += numel
             counts[1] += numel
-    non_trainable = total - trainable
     logging.info(
         "Model parameters: total=%s trainable=%s non_trainable=%s",
         f"{total:,}",
         f"{trainable:,}",
-        f"{non_trainable:,}",
+        f"{total - trainable:,}",
     )
     metrics: dict[str, float] = {
         "model/params_total": float(total),
         "model/params_trainable": float(trainable),
-        "model/params_non_trainable": float(non_trainable),
+        "model/params_non_trainable": float(total - trainable),
     }
     for module_name in sorted(by_module):
         mod_total, mod_train = by_module[module_name]
@@ -122,8 +92,7 @@ def _build_wandb_init_kwargs(config: Any | None) -> dict[str, Any]:
     if config is None:
         return {}
     wandb_kwargs = dict(config.get("wandb_kwargs", {}) or {})
-    resume_id = os.environ.get("WANDB_RESUME_ID")
-    if resume_id:
+    if resume_id := os.environ.get("WANDB_RESUME_ID"):
         wandb_kwargs.setdefault("id", resume_id)
         wandb_kwargs.setdefault("resume", "must")
         wandb_kwargs.pop("name", None)
@@ -133,20 +102,17 @@ def _build_wandb_init_kwargs(config: Any | None) -> dict[str, Any]:
         counter_path = Path(
             config.get("wandb_run_name_counter_path", ".wandb_run_counter")
         )
-        use_counter = bool(config.get("wandb_run_name_use_increment", True))
-        if use_counter:
-            current = (
+        if bool(config.get("wandb_run_name_use_increment", True)):
+            idx = (
                 int(counter_path.read_text().strip()) if counter_path.exists() else 0
-            )
-            next_idx = current + 1
+            ) + 1
             counter_path.parent.mkdir(parents=True, exist_ok=True)
-            counter_path.write_text(str(next_idx))
-            wandb_kwargs["name"] = f"{str(prefix).strip()}-{next_idx:04d}"
+            counter_path.write_text(str(idx))
+            wandb_kwargs["name"] = f"{str(prefix).strip()}-{idx:04d}"
         else:
-            timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
-                "%Y%m%d-%H%M"
+            wandb_kwargs["name"] = (
+                f"{str(prefix).strip()}-{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d-%H%M')}"
             )
-            wandb_kwargs["name"] = f"{str(prefix).strip()}-{timestamp}"
     return wandb_kwargs
 
 
@@ -169,9 +135,8 @@ def _to_serialisable_config(value: Any) -> Any:
 def _config_to_wandb_dict(config: Any | None) -> dict[str, Any]:
     if config is None:
         return {}
-    to_dict = getattr(config, "to_dict", None)
-    if callable(to_dict):
-        return dict(_to_serialisable_config(to_dict()))
+    if callable(getattr(config, "to_dict", None)):
+        return dict(_to_serialisable_config(config.to_dict()))
     if isinstance(config, Mapping):
         return dict(_to_serialisable_config(config))
     return dict(_to_serialisable_config(vars(config)))
@@ -190,7 +155,6 @@ def build_logger(config: config_dict.ConfigDict, workdir: Path) -> pl.loggers.Lo
         )
         logger.log_hyperparams(_config_to_wandb_dict(config))
         return logger
-
     return CSVLogger(save_dir=str(workdir), name="csv_logs")
 
 
@@ -199,25 +163,18 @@ def load_pretrained_weights(
     checkpoint_path: str,
 ) -> None:
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    state_dict = ckpt.get("state_dict") or ckpt.get("model") or ckpt
-    model_state = {
-        k.removeprefix("model."): v
-        for k, v in state_dict.items()
-        if k.startswith("model.")
+    sd = ckpt.get("state_dict") or ckpt.get("model") or ckpt
+    prefixed = {
+        k.removeprefix("model."): v for k, v in sd.items() if k.startswith("model.")
     }
-    if not model_state:
-        model_state = state_dict
-    model.load_state_dict(model_state, strict=True)
+    model.load_state_dict(prefixed or sd, strict=True)
 
 
 def latest_ckpt_path(directory: Path) -> str | None:
     checkpoint_dir = directory / "checkpoints"
-    search_root = checkpoint_dir if checkpoint_dir.exists() else directory
+    root = checkpoint_dir if checkpoint_dir.exists() else directory
     ckpts = sorted(
-        [
-            *search_root.rglob("*.ckpt"),
-            *search_root.rglob("*.pt"),
-        ],
+        [*root.rglob("*.ckpt"), *root.rglob("*.pt")],
         key=lambda p: p.stat().st_mtime,
     )
     return str(ckpts[-1]) if ckpts else None

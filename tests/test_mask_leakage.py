@@ -32,7 +32,6 @@ def test_padding_leakage():
     """Core test: randomize padding positions and check embedding stability."""
     torch.manual_seed(42)
     model = PeakSetSIGReg(
-        num_peaks=60,
         model_dim=64,
         encoder_num_layers=4,
         encoder_num_heads=4,
@@ -55,7 +54,9 @@ def test_padding_leakage():
     peak_mz_rand = peak_mz.clone()
     peak_intensity_rand = peak_intensity.clone()
     peak_mz_rand[:, 30:] = torch.rand_like(peak_mz[:, 30:]) * 1000  # large random mz
-    peak_intensity_rand[:, 30:] = torch.rand_like(peak_intensity[:, 30:])  # random intensity
+    peak_intensity_rand[:, 30:] = torch.rand_like(
+        peak_intensity[:, 30:]
+    )  # random intensity
 
     emb2 = model.encoder(peak_mz_rand, peak_intensity_rand, valid_mask=peak_valid_mask)
     pooled2 = model.pool(emb2, peak_valid_mask)
@@ -66,7 +67,9 @@ def test_padding_leakage():
     peak_mz_const[:, 30:] = 999.0
     peak_intensity_const[:, 30:] = 1.0
 
-    emb3 = model.encoder(peak_mz_const, peak_intensity_const, valid_mask=peak_valid_mask)
+    emb3 = model.encoder(
+        peak_mz_const, peak_intensity_const, valid_mask=peak_valid_mask
+    )
     pooled3 = model.pool(emb3, peak_valid_mask)
 
     # --- Measure changes ---
@@ -120,14 +123,16 @@ def test_padding_leakage():
     # Additional: check what the embedder produces for padding (all-zeros input)
     zero_mz = torch.zeros(1, 1)
     zero_int = torch.zeros(1, 1)
-    pad_emb = model.encoder.embedder(zero_mz, zero_int)
+    log_int = torch.log1p(zero_int.clamp(min=0.0))
+    pad_emb = model.encoder.embedder(torch.stack([zero_mz, zero_int, log_int], dim=-1))
     print(f"Embedding of a zero-padding position:")
     print(f"  Norm: {pad_emb.norm():.4f}")
     print(f"  (Non-zero due to Fourier cos(0)=1 and MLP biases)")
 
     # After fix: padding should be fully masked, no leakage
-    assert cos_sim_12.mean() > 0.9999, \
+    assert cos_sim_12.mean() > 0.9999, (
         f"Padding still leaking: cosine_sim={cos_sim_12.mean():.6f}"
+    )
 
 
 @torch.no_grad()
@@ -135,7 +140,6 @@ def test_padding_leakage_mean_pool():
     """Same test but with mean pooling (to check if it's just PMA)."""
     torch.manual_seed(42)
     model = PeakSetSIGReg(
-        num_peaks=60,
         model_dim=64,
         encoder_num_layers=4,
         encoder_num_heads=4,
@@ -147,7 +151,8 @@ def test_padding_leakage_mean_pool():
     batch = _make_batch(batch_size=8, num_peaks=60, valid_count=30)
 
     emb1 = model.encoder(
-        batch["peak_mz"], batch["peak_intensity"],
+        batch["peak_mz"],
+        batch["peak_intensity"],
         valid_mask=batch["peak_valid_mask"],
     )
     pooled1 = model.pool(emb1, batch["peak_valid_mask"])
@@ -159,7 +164,8 @@ def test_padding_leakage_mean_pool():
     int2[:, 30:] = torch.rand_like(int2[:, 30:])
 
     emb2 = model.encoder(
-        mz2, int2,
+        mz2,
+        int2,
         valid_mask=batch["peak_valid_mask"],
     )
     pooled2 = model.pool(emb2, batch["peak_valid_mask"])

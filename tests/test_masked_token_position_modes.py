@@ -11,7 +11,6 @@ def _build_model(
 ) -> PeakSetSIGReg:
     torch.manual_seed(0)
     model = PeakSetSIGReg(
-        num_peaks=6,
         model_dim=32,
         encoder_num_layers=2,
         encoder_num_heads=4,
@@ -19,8 +18,6 @@ def _build_model(
         encoder_use_rope=encoder_use_rope,
         pooling_type="mean",
         jepa_num_target_blocks=num_target_blocks,
-        jepa_context_fraction=0.25,
-        jepa_target_fraction=0.25,
         masked_token_loss_weight=1.0,
         masked_latent_predictor_num_layers=predictor_layers,
     )
@@ -133,8 +130,12 @@ def test_local_global_loss_uses_target_tokens_only():
     )
     B, K, N = target_masks.shape
     peak_mz_targets = peak_mz.unsqueeze(1).expand(-1, K, -1).reshape(B * K, N)
-    peak_intensity_targets = peak_intensity.unsqueeze(1).expand(-1, K, -1).reshape(B * K, N)
-    peak_valid_targets = peak_valid_mask.unsqueeze(1).expand(-1, K, -1).reshape(B * K, N)
+    peak_intensity_targets = (
+        peak_intensity.unsqueeze(1).expand(-1, K, -1).reshape(B * K, N)
+    )
+    peak_valid_targets = (
+        peak_valid_mask.unsqueeze(1).expand(-1, K, -1).reshape(B * K, N)
+    )
     target_masks_flat = target_masks.reshape(B * K, N)
     target_emb_flat = model.encoder(
         peak_mz_targets,
@@ -167,9 +168,8 @@ def test_local_global_loss_uses_target_tokens_only():
 
     per_token_l1 = (predictor_output - target_emb.detach()).abs().mean(dim=-1)
     masked_only_loss = (
-        (per_token_l1 * target_masks_by_view.float()).sum()
-        / target_masks_by_view.float().sum().clamp_min(1.0)
-    )
+        per_token_l1 * target_masks_by_view.float()
+    ).sum() / target_masks_by_view.float().sum().clamp_min(1.0)
 
     assert torch.allclose(metrics["local_global_loss"], masked_only_loss)
 
@@ -179,10 +179,7 @@ def test_positions_outside_union_do_not_change_loss():
     model = _build_model(num_target_blocks=2)
     model.sigreg_lambda = 0.0
     batch_a = _make_batch()
-    batch_b = {
-        key: value.clone()
-        for key, value in batch_a.items()
-    }
+    batch_b = {key: value.clone() for key, value in batch_a.items()}
 
     ignored = ~(batch_a["context_mask"] | batch_a["target_masks"].any(dim=1))
     batch_b["peak_intensity"] = batch_b["peak_intensity"].clone()
@@ -193,5 +190,10 @@ def test_positions_outside_union_do_not_change_loss():
     metrics_a = model.forward_augmented(batch_a)
     metrics_b = model.forward_augmented(batch_b)
 
-    assert torch.allclose(metrics_a["local_global_loss"], metrics_b["local_global_loss"], atol=1e-6, rtol=1e-6)
+    assert torch.allclose(
+        metrics_a["local_global_loss"],
+        metrics_b["local_global_loss"],
+        atol=1e-6,
+        rtol=1e-6,
+    )
     assert torch.allclose(metrics_a["loss"], metrics_b["loss"], atol=1e-6, rtol=1e-6)

@@ -9,46 +9,13 @@ def learning_rate_at_step(
     base_lr: float,
     total_steps: int,
     warmup_steps: int,
-    schedule_type: str = "cosine",
     min_learning_rate: float | None = None,
 ) -> float:
     warmup = min(1.0, step / warmup_steps) if warmup_steps > 0 else 1.0
-    effective_step = max(0, step - warmup_steps)
-    effective_total = max(1, total_steps - warmup_steps)
-
-    parts = schedule_type.split(";")
-    schedule_base = parts[0]
-    parsed: dict[str, str] = {}
-    for kv in parts[1:]:
-        if "=" in kv:
-            k, v = kv.split("=", 1)
-            parsed[k.strip()] = v.strip()
-
-    if schedule_base == "cosine":
-        ratio = max(0.0, effective_step / max(1, effective_total))
-        mult = 0.5 * (1.0 + math.cos(math.pi * ratio))
-        min_lr_val = (
-            min_learning_rate if min_learning_rate is not None else 0.1 * base_lr
-        )
-        lr = max(min_lr_val, mult * base_lr)
-    elif schedule_base == "constant":
-        lr = base_lr
-    elif schedule_base == "cyclic_cosine":
-        cycle_length = int(parsed.get("cycle_length", max(1, total_steps // 10)))
-        min_lr = float(parsed.get("min_lr", 0.0))
-        decay_factor = float(parsed.get("decay_factor", 1.0))
-
-        cycle_index = effective_step // cycle_length
-        pos_in_cycle = effective_step % cycle_length
-        peak_lr = base_lr * (decay_factor**cycle_index)
-        cosine_ratio = pos_in_cycle / cycle_length
-        lr = min_lr + 0.5 * (peak_lr - min_lr) * (
-            1.0 + math.cos(math.pi * cosine_ratio)
-        )
-    else:
-        raise NotImplementedError(f"Unknown schedule type: {schedule_base}")
-
-    return lr * warmup
+    ratio = max(0.0, max(0, step - warmup_steps) / max(1, total_steps - warmup_steps))
+    mult = 0.5 * (1.0 + math.cos(math.pi * ratio))
+    min_lr = min_learning_rate if min_learning_rate is not None else 0.1 * base_lr
+    return max(min_lr, mult * base_lr) * warmup
 
 
 class CapturableCosineSchedule:
@@ -73,9 +40,8 @@ class CapturableCosineSchedule:
             device=device,
         )
         self._has_warmup = warmup_steps > 0
-        eff_total = max(1, total_steps - warmup_steps)
         self._effective_total = torch.tensor(
-            eff_total,
+            max(1, total_steps - warmup_steps),
             dtype=torch.float64,
             device=device,
         )
@@ -91,7 +57,6 @@ class CapturableCosineSchedule:
 
         self._step.add_(1)
         step_f = self._step.to(torch.float64)
-
         if self._has_warmup:
             warmup = torch.clamp(step_f / self._warmup_steps, max=1.0)
             effective_step = torch.clamp(
@@ -101,11 +66,9 @@ class CapturableCosineSchedule:
         else:
             warmup = torch.ones((), dtype=torch.float64, device=self._step.device)
             effective_step = step_f
-
         ratio = torch.clamp(effective_step / self._effective_total, min=0.0)
         mult = 0.5 * (1.0 + torch.cos(self._pi * ratio))
         lr = torch.max(self._min_lr, mult * self._base_lr) * warmup
-
         for group in self.optimizer.param_groups:
             group["lr"].copy_(lr)
 

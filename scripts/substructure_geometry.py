@@ -16,6 +16,7 @@ Usage:
         --dir experiments/TEST_LATEST_MULTIVIEWS \
         --workdir results/substructure_geometry
 """
+
 from __future__ import annotations
 
 import argparse
@@ -33,11 +34,18 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch._inductor.config as inductor_config
-from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
+from sklearn.ensemble import (
+    HistGradientBoostingClassifier,
+    HistGradientBoostingRegressor,
+)
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.metrics import r2_score, roc_auc_score
 from sklearn.model_selection import KFold, StratifiedKFold, cross_val_score
-from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor, NearestNeighbors
+from sklearn.neighbors import (
+    KNeighborsClassifier,
+    KNeighborsRegressor,
+    NearestNeighbors,
+)
 from sklearn.preprocessing import normalize as l2_normalize
 from scipy.stats import spearmanr
 from tqdm.auto import tqdm
@@ -78,10 +86,14 @@ def _git_info() -> dict[str, str]:
     info: dict[str, str] = {}
     try:
         info["git_branch"] = subprocess.check_output(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"], text=True, stderr=subprocess.DEVNULL,
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
         ).strip()
         info["git_commit"] = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL,
+            ["git", "rev-parse", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
         ).strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
@@ -97,17 +109,34 @@ PROBE_SIZE = 50_000
 N_PAIRS = 500_000
 K_VALUES = [1, 5, 10, 20, 50]
 
+
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--config", default=None, help="Path to config .py file (required unless --external-embed).")
-    parser.add_argument("--dir", default=None, help="Experiment directory containing trial_*/checkpoints/ (required unless --external-embed).")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="Path to config .py file (required unless --external-embed).",
+    )
+    parser.add_argument(
+        "--dir",
+        default=None,
+        help="Experiment directory containing trial_*/checkpoints/ (required unless --external-embed).",
+    )
     parser.add_argument(
         "--workdir",
         default="results/substructure_geometry",
         help="Output directory for figures and results (default: results/substructure_geometry).",
     )
-    parser.add_argument("--checkpoint", default=None, help="Override checkpoint path (default: latest in --dir).")
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--checkpoint",
+        default=None,
+        help="Override checkpoint path (default: latest in --dir).",
+    )
+    parser.add_argument(
+        "--device", default="cuda" if torch.cuda.is_available() else "cpu"
+    )
     parser.add_argument("--seed", type=int, default=RANDOM_SEED)
     parser.add_argument(
         "--probe-type",
@@ -116,7 +145,9 @@ def _parse_args() -> argparse.Namespace:
         help="Probe type: sklearn (Ridge/LogReg), knn, hgb (HistGradientBoosting), or all.",
     )
     parser.add_argument(
-        "--pool", choices=["pma", "mean"], default="mean",
+        "--pool",
+        choices=["pma", "mean"],
+        default="mean",
         help="Pooling method for model embeddings: pma (learned PMA) or mean (mean over valid tokens).",
     )
     parser.add_argument(
@@ -124,12 +155,26 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable graph/figure generation (including UMAP) to speed up evaluation.",
     )
-    parser.add_argument("--external-embed", default=None, help="Path to HDF5 file with pre-computed embeddings (bypasses model loading).")
-    parser.add_argument("--embed-key", default="DreaMS_embedding", help="HDF5 dataset key for embeddings (default: DreaMS_embedding).")
-    parser.add_argument("--fold", default="train", help="Which fold to filter to in the HDF5 file (default: train).")
+    parser.add_argument(
+        "--external-embed",
+        default=None,
+        help="Path to HDF5 file with pre-computed embeddings (bypasses model loading).",
+    )
+    parser.add_argument(
+        "--embed-key",
+        default="DreaMS_embedding",
+        help="HDF5 dataset key for embeddings (default: DreaMS_embedding).",
+    )
+    parser.add_argument(
+        "--fold",
+        default="train",
+        help="Which fold to filter to in the HDF5 file (default: train).",
+    )
     args = parser.parse_args()
     if args.external_embed is None and (args.config is None or args.dir is None):
-        parser.error("--config and --dir are required unless --external-embed is provided.")
+        parser.error(
+            "--config and --dir are required unless --external-embed is provided."
+        )
     return args
 
 
@@ -162,10 +207,16 @@ def _load_model_and_data(
         load_pretrained_weights(backbone, ckpt_path)
     except RuntimeError as e:
         if "Missing key" in str(e) or "Unexpected key" in str(e):
-            log.warning("Strict load failed, retrying with strict=False (teacher_encoder key mismatch)")
+            log.warning(
+                "Strict load failed, retrying with strict=False (teacher_encoder key mismatch)"
+            )
             ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
             state_dict = ckpt.get("state_dict", ckpt.get("model", ckpt))
-            model_state = {k.removeprefix("model."): v for k, v in state_dict.items() if k.startswith("model.")}
+            model_state = {
+                k.removeprefix("model."): v
+                for k, v in state_dict.items()
+                if k.startswith("model.")
+            }
             if not model_state:
                 model_state = state_dict
             backbone.load_state_dict(model_state, strict=False)
@@ -177,7 +228,11 @@ def _load_model_and_data(
     for p in backbone.parameters():
         p.requires_grad = False
 
-    log.info("Model on %s, params=%s", device, f"{sum(p.numel() for p in backbone.parameters()):,}")
+    log.info(
+        "Model on %s, params=%s",
+        device,
+        f"{sum(p.numel() for p in backbone.parameters()):,}",
+    )
     return config, datamodule, massspec_data, backbone, ckpt_path
 
 
@@ -190,13 +245,17 @@ def _encode_batch_impl(
 ) -> torch.Tensor:
     if model.use_precursor_token:
         expanded = PeakSetSIGReg.prepend_precursor_token(
-            peak_mz, peak_intensity, peak_valid_mask, precursor_mz,
+            peak_mz,
+            peak_intensity,
+            peak_valid_mask,
+            precursor_mz,
         )
         peak_mz = expanded["peak_mz"]
         peak_intensity = expanded["peak_intensity"]
         peak_valid_mask = expanded["peak_valid_mask"]
     embeddings = model.encoder(
-        peak_mz, peak_intensity,
+        peak_mz,
+        peak_intensity,
         valid_mask=peak_valid_mask,
     )
     return model.pool(embeddings, peak_valid_mask)
@@ -211,13 +270,17 @@ def _encode_batch_mean_pool_impl(
 ) -> torch.Tensor:
     if model.use_precursor_token:
         expanded = PeakSetSIGReg.prepend_precursor_token(
-            peak_mz, peak_intensity, peak_valid_mask, precursor_mz,
+            peak_mz,
+            peak_intensity,
+            peak_valid_mask,
+            precursor_mz,
         )
         peak_mz = expanded["peak_mz"]
         peak_intensity = expanded["peak_intensity"]
         peak_valid_mask = expanded["peak_valid_mask"]
     embeddings = model.encoder(
-        peak_mz, peak_intensity,
+        peak_mz,
+        peak_intensity,
         valid_mask=peak_valid_mask,
     )
     # Mean pool over valid (non-padding) tokens.
@@ -263,7 +326,9 @@ def _extract_embeddings(
 
     log.info("Extracting embeddings (torch.compile + autocast)...")
     with torch.no_grad():
-        for numpy_batch in tqdm(dataset.as_numpy_iterator(), desc="Extracting embeddings"):
+        for numpy_batch in tqdm(
+            dataset.as_numpy_iterator(), desc="Extracting embeddings"
+        ):
             batch = numpy_batch_to_torch(numpy_batch)
             peak_mz = batch["peak_mz"].to(device, non_blocking=True)
             peak_intensity = batch["peak_intensity"].to(device, non_blocking=True)
@@ -274,13 +339,19 @@ def _extract_embeddings(
             if autocast_dtype is not None:
                 with torch.autocast(device_type="cuda", dtype=autocast_dtype):
                     pooled = compiled_encode(
-                        backbone, peak_mz, peak_intensity,
-                        peak_valid_mask, precursor_mz,
+                        backbone,
+                        peak_mz,
+                        peak_intensity,
+                        peak_valid_mask,
+                        precursor_mz,
                     )
             else:
                 pooled = compiled_encode(
-                    backbone, peak_mz, peak_intensity,
-                    peak_valid_mask, precursor_mz,
+                    backbone,
+                    peak_mz,
+                    peak_intensity,
+                    peak_valid_mask,
+                    precursor_mz,
                 )
 
             embed_list.append(pooled.cpu().float())
@@ -289,7 +360,9 @@ def _extract_embeddings(
             meta["adduct"].append(batch["adduct_id"].to(torch.long))
             meta["instrument"].append(batch["instrument_type_id"].to(torch.long))
             meta["precursor_mz"].append(batch["precursor_mz"].to(torch.float32))
-            meta["n_valid_peaks"].append(batch["peak_valid_mask"].sum(dim=1).to(torch.long))
+            meta["n_valid_peaks"].append(
+                batch["peak_valid_mask"].sum(dim=1).to(torch.long)
+            )
 
             raw_peak_mz_list.append(batch["peak_mz"])
             raw_peak_intensity_list.append(batch["peak_intensity"])
@@ -306,7 +379,12 @@ def _extract_embeddings(
         "precursor_mz": torch.cat(raw_precursor_mz_list, dim=0),
     }
 
-    log.info("Embeddings: %s, Morgan FPs: %s, SMILES: %d", all_embeds.shape, all_fps_morgan.shape, len(smiles_list))
+    log.info(
+        "Embeddings: %s, Morgan FPs: %s, SMILES: %d",
+        all_embeds.shape,
+        all_fps_morgan.shape,
+        len(smiles_list),
+    )
     return all_embeds, all_fps_morgan, all_meta, smiles_list, raw_peaks
 
 
@@ -314,7 +392,9 @@ def _resolve_hdf5_key(f, desired: str) -> str:
     """Find an HDF5 key case-insensitively."""
     keys_lower = {k.lower(): k for k in f.keys()}
     actual = keys_lower.get(desired.lower())
-    assert actual is not None, f"Key {desired!r} not found in HDF5 (available: {list(f.keys())})"
+    assert actual is not None, (
+        f"Key {desired!r} not found in HDF5 (available: {list(f.keys())})"
+    )
     return actual
 
 
@@ -329,7 +409,12 @@ def _load_external_embeddings(
     """
     import h5py
 
-    log.info("Loading external embeddings from %s (key=%s, fold=%s)", hdf5_path, embed_key, fold)
+    log.info(
+        "Loading external embeddings from %s (key=%s, fold=%s)",
+        hdf5_path,
+        embed_key,
+        fold,
+    )
     with h5py.File(hdf5_path, "r") as f:
         fold_key = _resolve_hdf5_key(f, "fold")
         smiles_key = _resolve_hdf5_key(f, "smiles")
@@ -340,18 +425,23 @@ def _load_external_embeddings(
         fold_mask = folds == fold
         n_total = len(folds)
         n_selected = int(fold_mask.sum())
-        log.info("Fold filter: %d / %d spectra match fold=%r", n_selected, n_total, fold)
+        log.info(
+            "Fold filter: %d / %d spectra match fold=%r", n_selected, n_total, fold
+        )
 
         indices = np.where(fold_mask)[0]
         embeddings = np.asarray(f[embed_actual][indices])
         smiles_raw = np.asarray(f[smiles_key][indices])
         precursor_mz = np.asarray(f[pmz_key][indices]).astype(np.float32)
 
-    smiles_list = [s.decode("utf-8") if isinstance(s, bytes) else str(s) for s in smiles_raw]
+    smiles_list = [
+        s.decode("utf-8") if isinstance(s, bytes) else str(s) for s in smiles_raw
+    ]
     log.info("Embeddings: %s, SMILES: %d", embeddings.shape, len(smiles_list))
 
     # Compute Morgan fingerprints from SMILES.
     from input_pipeline import _compute_morgan_fingerprints
+
     morgan_fps = _compute_morgan_fingerprints(np.array(smiles_list))
 
     all_meta = {
@@ -405,18 +495,23 @@ def _compute_rdkit_features_cached(
         valid_mol_mask = data["valid_mol_mask"]
         mol_props = {
             k: data[k]
-            for k in ("mol_weight", "num_rings", "num_aromatic_rings",
-                       "num_heavy_atoms", "logp")
+            for k in (
+                "mol_weight",
+                "num_rings",
+                "num_aromatic_rings",
+                "num_heavy_atoms",
+                "logp",
+            )
         }
         fg_counts = {
-            k.removeprefix("fg_"): data[k]
-            for k in data.files
-            if k.startswith("fg_")
+            k.removeprefix("fg_"): data[k] for k in data.files if k.startswith("fg_")
         }
         log.info("Loaded cached features for %d samples", len(maccs_fps))
         return maccs_fps, fg_counts, mol_props, valid_mol_mask
 
-    maccs_fps, fg_counts, mol_props, valid_mol_mask = _compute_rdkit_features(all_smiles)
+    maccs_fps, fg_counts, mol_props, valid_mol_mask = _compute_rdkit_features(
+        all_smiles
+    )
 
     save_dict: dict[str, np.ndarray] = {
         "maccs_fps": maccs_fps,
@@ -469,14 +564,19 @@ def _tanimoto_analysis(
     bin_idx = np.digitize(tanimoto, bins) - 1
     bin_centers = (bins[:-1] + bins[1:]) / 2
     bin_idx = np.clip(bin_idx, 0, len(bin_centers) - 1)
-    bin_means = [cos_sims[bin_idx == i].mean() if (bin_idx == i).any() else np.nan for i in range(len(bin_centers))]
+    bin_means = [
+        cos_sims[bin_idx == i].mean() if (bin_idx == i).any() else np.nan
+        for i in range(len(bin_centers))
+    ]
 
     if plot:
         fig, axes = plt.subplots(1, 3, figsize=(20, 5))
         axes[0].hist2d(tanimoto, cos_sims, bins=100, cmap="viridis", cmin=1)
         axes[0].set_xlabel("Tanimoto similarity (Morgan FP)")
         axes[0].set_ylabel("Cosine similarity (embeddings)")
-        axes[0].set_title(f"Embedding vs Molecular Similarity\nPearson r = {corr:.4f}  Spearman ρ = {spearman_rho:.4f}")
+        axes[0].set_title(
+            f"Embedding vs Molecular Similarity\nPearson r = {corr:.4f}  Spearman ρ = {spearman_rho:.4f}"
+        )
         plt.colorbar(axes[0].collections[0], ax=axes[0], label="count")
 
         axes[1].bar(bin_centers, bin_means, width=0.04, alpha=0.7)
@@ -524,12 +624,16 @@ def _knn_analysis(
     sub_embeds = all_embeds[sub_idx]
     sub_fps = all_fps_morgan[sub_idx].astype(np.float32)
 
-    knn_embed = NearestNeighbors(n_neighbors=max(K_VALUES) + 1, metric="cosine", algorithm="brute", n_jobs=-1)
+    knn_embed = NearestNeighbors(
+        n_neighbors=max(K_VALUES) + 1, metric="cosine", algorithm="brute", n_jobs=-1
+    )
     knn_embed.fit(sub_embeds)
     _, knn_embed_idx = knn_embed.kneighbors(sub_embeds)
     knn_embed_idx = knn_embed_idx[:, 1:]
 
-    knn_fp = NearestNeighbors(n_neighbors=max(K_VALUES) + 1, metric="jaccard", algorithm="brute", n_jobs=-1)
+    knn_fp = NearestNeighbors(
+        n_neighbors=max(K_VALUES) + 1, metric="jaccard", algorithm="brute", n_jobs=-1
+    )
     knn_fp.fit(sub_fps)
     _, knn_fp_idx = knn_fp.kneighbors(sub_fps)
     knn_fp_idx = knn_fp_idx[:, 1:]
@@ -539,7 +643,11 @@ def _knn_analysis(
     rand_b = rng.choice(subsample_size, size=10000)
     rand_mask = rand_a != rand_b
     rand_inter = (sub_fps[rand_a[rand_mask]] * sub_fps[rand_b[rand_mask]]).sum(axis=1)
-    rand_union = sub_fps[rand_a[rand_mask]].sum(axis=1) + sub_fps[rand_b[rand_mask]].sum(axis=1) - rand_inter
+    rand_union = (
+        sub_fps[rand_a[rand_mask]].sum(axis=1)
+        + sub_fps[rand_b[rand_mask]].sum(axis=1)
+        - rand_inter
+    )
     random_tanimoto = float((rand_inter / np.maximum(rand_union, 1e-8)).mean())
 
     results: dict[str, dict[str, float]] = {}
@@ -563,7 +671,14 @@ def _knn_analysis(
         fp_sets = [set(row) for row in knn_fp_idx[:, :k]]
         overlap = float(np.mean([len(e & f) / k for e, f in zip(embed_sets, fp_sets)]))
 
-        log.info("%5d  %20.4f  %20.4f  %16.4f  %12.4f", k, tan_emb, tan_fp, random_tanimoto, overlap)
+        log.info(
+            "%5d  %20.4f  %20.4f  %16.4f  %12.4f",
+            k,
+            tan_emb,
+            tan_fp,
+            random_tanimoto,
+            overlap,
+        )
         results[f"k{k}"] = {
             "embed_knn_tanimoto": tan_emb,
             "fp_knn_tanimoto": tan_fp,
@@ -611,12 +726,24 @@ def _umap_analysis(
         ("Molecular Weight", mol_props["mol_weight"][umap_idx], "viridis"),
         ("LogP", mol_props["logp"][umap_idx], "coolwarm"),
         ("Num Rings", mol_props["num_rings"][umap_idx].astype(float), "turbo"),
-        ("Num Aromatic Rings", mol_props["num_aromatic_rings"][umap_idx].astype(float), "turbo"),
+        (
+            "Num Aromatic Rings",
+            mol_props["num_aromatic_rings"][umap_idx].astype(float),
+            "turbo",
+        ),
         ("Heavy Atoms", mol_props["num_heavy_atoms"][umap_idx].astype(float), "plasma"),
         ("Precursor m/z", all_meta["precursor_mz"][umap_idx], "inferno"),
     ]
     for ax, (title, values, cmap) in zip(axes.flat, props):
-        sc = ax.scatter(coords[:, 0], coords[:, 1], c=values, cmap=cmap, s=1.5, alpha=0.4, rasterized=True)
+        sc = ax.scatter(
+            coords[:, 0],
+            coords[:, 1],
+            c=values,
+            cmap=cmap,
+            s=1.5,
+            alpha=0.4,
+            rasterized=True,
+        )
         ax.set_title(title)
         ax.set_xlabel("UMAP1")
         ax.set_ylabel("UMAP2")
@@ -638,8 +765,15 @@ def _umap_analysis(
         has_fg = (fg_counts[name][umap_idx] > 0).astype(float)
         prevalence = has_fg.mean()
         axes_flat[i].scatter(
-            coords[:, 0], coords[:, 1],
-            c=has_fg, cmap="RdYlBu_r", s=1.5, alpha=0.4, rasterized=True, vmin=0, vmax=1,
+            coords[:, 0],
+            coords[:, 1],
+            c=has_fg,
+            cmap="RdYlBu_r",
+            s=1.5,
+            alpha=0.4,
+            rasterized=True,
+            vmin=0,
+            vmax=1,
         )
         axes_flat[i].set_title(f"{name} ({prevalence:.1%})")
         axes_flat[i].set_aspect("equal")
@@ -700,10 +834,22 @@ def _linear_probes(
             fg_results[name] = {"skipped": True, "prevalence": pos_frac}
             continue
         clf = LogisticRegression(max_iter=500, C=1.0, solver="lbfgs", n_jobs=-1)
-        scores = cross_val_score(clf, X_probe, y, cv=cv_cls, scoring="roc_auc", n_jobs=-1)
+        scores = cross_val_score(
+            clf, X_probe, y, cv=cv_cls, scoring="roc_auc", n_jobs=-1
+        )
         auc_mean, auc_std = float(scores.mean()), float(scores.std())
-        log.info("  %s: AUC=%.4f +/- %.4f (prevalence=%.3f)", name, auc_mean, auc_std, pos_frac)
-        fg_results[name] = {"auc_mean": auc_mean, "auc_std": auc_std, "prevalence": pos_frac}
+        log.info(
+            "  %s: AUC=%.4f +/- %.4f (prevalence=%.3f)",
+            name,
+            auc_mean,
+            auc_std,
+            pos_frac,
+        )
+        fg_results[name] = {
+            "auc_mean": auc_mean,
+            "auc_std": auc_std,
+            "prevalence": pos_frac,
+        }
     results["functional_groups"] = fg_results
 
     return results
@@ -757,10 +903,22 @@ def _knn_probes(
             fg_results[name] = {"skipped": True, "prevalence": pos_frac}
             continue
         clf = KNeighborsClassifier(n_neighbors=KNN_PROBE_K, metric="cosine", n_jobs=-1)
-        scores = cross_val_score(clf, X_probe, y, cv=cv_cls, scoring="roc_auc", n_jobs=-1)
+        scores = cross_val_score(
+            clf, X_probe, y, cv=cv_cls, scoring="roc_auc", n_jobs=-1
+        )
         auc_mean, auc_std = float(scores.mean()), float(scores.std())
-        log.info("  %s: AUC=%.4f +/- %.4f (prevalence=%.3f)", name, auc_mean, auc_std, pos_frac)
-        fg_results[name] = {"auc_mean": auc_mean, "auc_std": auc_std, "prevalence": pos_frac}
+        log.info(
+            "  %s: AUC=%.4f +/- %.4f (prevalence=%.3f)",
+            name,
+            auc_mean,
+            auc_std,
+            pos_frac,
+        )
+        fg_results[name] = {
+            "auc_mean": auc_mean,
+            "auc_std": auc_std,
+            "prevalence": pos_frac,
+        }
     results["functional_groups"] = fg_results
 
     return results
@@ -796,7 +954,9 @@ def _hgb_probes(
     ]
     for key, label in regression_targets:
         y = mol_props[key][probe_idx].astype(float)
-        reg = HistGradientBoostingRegressor(max_iter=200, max_depth=6, random_state=seed)
+        reg = HistGradientBoostingRegressor(
+            max_iter=200, max_depth=6, random_state=seed
+        )
         scores = cross_val_score(reg, X_probe, y, cv=cv, scoring="r2", n_jobs=-1)
         r2_mean, r2_std = float(scores.mean()), float(scores.std())
         log.info("HGB %s: R^2 = %.4f +/- %.4f", label, r2_mean, r2_std)
@@ -811,11 +971,25 @@ def _hgb_probes(
             log.info("  %s: skipped (prevalence=%.3f)", name, pos_frac)
             fg_results[name] = {"skipped": True, "prevalence": pos_frac}
             continue
-        clf = HistGradientBoostingClassifier(max_iter=200, max_depth=6, random_state=seed)
-        scores = cross_val_score(clf, X_probe, y, cv=cv_cls, scoring="roc_auc", n_jobs=-1)
+        clf = HistGradientBoostingClassifier(
+            max_iter=200, max_depth=6, random_state=seed
+        )
+        scores = cross_val_score(
+            clf, X_probe, y, cv=cv_cls, scoring="roc_auc", n_jobs=-1
+        )
         auc_mean, auc_std = float(scores.mean()), float(scores.std())
-        log.info("  %s: AUC=%.4f +/- %.4f (prevalence=%.3f)", name, auc_mean, auc_std, pos_frac)
-        fg_results[name] = {"auc_mean": auc_mean, "auc_std": auc_std, "prevalence": pos_frac}
+        log.info(
+            "  %s: AUC=%.4f +/- %.4f (prevalence=%.3f)",
+            name,
+            auc_mean,
+            auc_std,
+            pos_frac,
+        )
+        fg_results[name] = {
+            "auc_mean": auc_mean,
+            "auc_std": auc_std,
+            "prevalence": pos_frac,
+        }
     results["functional_groups"] = fg_results
 
     return results
@@ -856,27 +1030,48 @@ def _maccs_enrichment(
 
     log.info("MACCS enrichment (top 10 by lift):")
     for bit, obs, exp, lift in enrichment[:10]:
-        log.info("  bit=%3d  observed=%.4f  expected=%.4f  lift=%.2fx", bit, obs, exp, lift)
+        log.info(
+            "  bit=%3d  observed=%.4f  expected=%.4f  lift=%.2fx", bit, obs, exp, lift
+        )
 
     mean_lift = float(np.mean(lifts))
     median_lift = float(np.median(lifts))
     lift_gt_1_5 = sum(1 for l in lifts if l > 1.5)
     lift_gt_2_0 = sum(1 for l in lifts if l > 2.0)
-    log.info("Mean lift=%.3f  Median=%.3f  >1.5: %d/%d  >2.0: %d/%d",
-             mean_lift, median_lift, lift_gt_1_5, len(lifts), lift_gt_2_0, len(lifts))
+    log.info(
+        "Mean lift=%.3f  Median=%.3f  >1.5: %d/%d  >2.0: %d/%d",
+        mean_lift,
+        median_lift,
+        lift_gt_1_5,
+        len(lifts),
+        lift_gt_2_0,
+        len(lifts),
+    )
 
     if plot:
         fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-        axes[0].bar(range(len(lifts)), sorted(lifts, reverse=True), edgecolor="none", alpha=0.7)
-        axes[0].axhline(1.0, color="red", linestyle="--", alpha=0.7, label="no enrichment")
+        axes[0].bar(
+            range(len(lifts)), sorted(lifts, reverse=True), edgecolor="none", alpha=0.7
+        )
+        axes[0].axhline(
+            1.0, color="red", linestyle="--", alpha=0.7, label="no enrichment"
+        )
         axes[0].set_xlabel("MACCS key (sorted by lift)")
         axes[0].set_ylabel("lift (observed / expected)")
         axes[0].set_title(f"MACCS Key Enrichment in Embedding k={k} NN")
         axes[0].legend()
 
         axes[1].hist(lifts, bins=30, edgecolor="none", alpha=0.7)
-        axes[1].axvline(1.0, color="red", linestyle="--", alpha=0.7, label="no enrichment")
-        axes[1].axvline(median_lift, color="blue", linestyle="--", alpha=0.7, label=f"median={median_lift:.2f}")
+        axes[1].axvline(
+            1.0, color="red", linestyle="--", alpha=0.7, label="no enrichment"
+        )
+        axes[1].axvline(
+            median_lift,
+            color="blue",
+            linestyle="--",
+            alpha=0.7,
+            label=f"median={median_lift:.2f}",
+        )
         axes[1].set_xlabel("lift")
         axes[1].set_ylabel("count")
         axes[1].set_title("Distribution of MACCS Key Lifts")
@@ -918,28 +1113,51 @@ def main() -> None:
     # 1. Load embeddings: either from external HDF5 or from model+TFRecords
     if args.external_embed:
         all_embeds, all_fps_morgan, all_meta, all_smiles = _load_external_embeddings(
-            args.external_embed, args.embed_key, args.fold,
+            args.external_embed,
+            args.embed_key,
+            args.fold,
         )
         backbone = None
         raw_peaks = None
         ckpt_path = args.external_embed
     else:
         config, datamodule, massspec_data, backbone, ckpt_path = _load_model_and_data(
-            args.config, args.dir, args.checkpoint, device, seed,
+            args.config,
+            args.dir,
+            args.checkpoint,
+            device,
+            seed,
         )
-        all_embeds, all_fps_morgan, all_meta, all_smiles, raw_peaks = _extract_embeddings(config, massspec_data, backbone, device, seed, pool=args.pool)
-    assert len(all_smiles) == len(all_embeds), f"Mismatch: {len(all_smiles)} vs {len(all_embeds)}"
+        all_embeds, all_fps_morgan, all_meta, all_smiles, raw_peaks = (
+            _extract_embeddings(
+                config, massspec_data, backbone, device, seed, pool=args.pool
+            )
+        )
+    assert len(all_smiles) == len(all_embeds), (
+        f"Mismatch: {len(all_smiles)} vs {len(all_embeds)}"
+    )
 
     # 2. Compute RDKit features (cached on disk)
     if args.external_embed:
         cache_dir = outdir
     else:
-        cache_dir = Path(config.get("tfrecord_dir", "data/gems_peaklist_tfrecord")).expanduser().resolve()
-    maccs_fps, fg_counts, mol_props, valid_mol_mask = _compute_rdkit_features_cached(all_smiles, cache_dir)
+        cache_dir = (
+            Path(config.get("tfrecord_dir", "data/gems_peaklist_tfrecord"))
+            .expanduser()
+            .resolve()
+        )
+    maccs_fps, fg_counts, mol_props, valid_mol_mask = _compute_rdkit_features_cached(
+        all_smiles, cache_dir
+    )
 
     # 3. Tanimoto analysis
     tanimoto_results = _tanimoto_analysis(
-        all_embeds, all_fps_morgan, valid_mol_mask, outdir, seed, plot=not args.no_graph,
+        all_embeds,
+        all_fps_morgan,
+        valid_mol_mask,
+        outdir,
+        seed,
+        plot=not args.no_graph,
     )
 
     # 4. kNN analysis
@@ -950,21 +1168,33 @@ def main() -> None:
     if args.no_graph:
         log.info("Skipping UMAP and figure generation (--no-graph enabled).")
     else:
-        _umap_analysis(all_embeds, all_meta, mol_props, fg_counts, valid_mol_mask, outdir, seed)
+        _umap_analysis(
+            all_embeds, all_meta, mol_props, fg_counts, valid_mol_mask, outdir, seed
+        )
 
     # 6. Probes
     probe_type = args.probe_type
     probe_results: dict[str, dict] = {}
     if probe_type in ("sklearn", "all"):
-        probe_results["sklearn"] = _linear_probes(all_embeds, mol_props, fg_counts, valid_mol_mask, seed)
+        probe_results["sklearn"] = _linear_probes(
+            all_embeds, mol_props, fg_counts, valid_mol_mask, seed
+        )
     if probe_type in ("knn", "all"):
-        probe_results["knn"] = _knn_probes(all_embeds, mol_props, fg_counts, valid_mol_mask, seed)
+        probe_results["knn"] = _knn_probes(
+            all_embeds, mol_props, fg_counts, valid_mol_mask, seed
+        )
     if probe_type in ("hgb", "all"):
-        probe_results["hgb"] = _hgb_probes(all_embeds, mol_props, fg_counts, valid_mol_mask, seed)
+        probe_results["hgb"] = _hgb_probes(
+            all_embeds, mol_props, fg_counts, valid_mol_mask, seed
+        )
 
     # 7. MACCS enrichment
     maccs_results = _maccs_enrichment(
-        maccs_fps, knn_out["knn_embed_idx"], knn_out["sub_idx"], outdir, plot=not args.no_graph,
+        maccs_fps,
+        knn_out["knn_embed_idx"],
+        knn_out["sub_idx"],
+        outdir,
+        plot=not args.no_graph,
     )
 
     # Write summary JSON
@@ -1002,26 +1232,42 @@ def main() -> None:
     if git:
         print(f"Git: {git.get('git_branch', '?')} @ {git.get('git_commit', '?')[:10]}")
     print(f"Embeddings: {all_embeds.shape}")
-    print(f"\nPearson(cosine, tanimoto): {tanimoto_results['pearson_cosine_tanimoto']:.4f}")
-    print(f"Spearman(cosine, tanimoto): {tanimoto_results['spearman_cosine_tanimoto']:.4f}")
+    print(
+        f"\nPearson(cosine, tanimoto): {tanimoto_results['pearson_cosine_tanimoto']:.4f}"
+    )
+    print(
+        f"Spearman(cosine, tanimoto): {tanimoto_results['spearman_cosine_tanimoto']:.4f}"
+    )
     print(f"\nkNN Retrieval (embedding vs FP oracle | nbr_overlap):")
     for k_str, v in knn_results.items():
-        print(f"  {k_str}: embed={v['embed_knn_tanimoto']:.4f}  fp={v['fp_knn_tanimoto']:.4f}  rand={v['random_baseline']:.4f}  overlap={v['neighborhood_overlap']:.4f}")
+        print(
+            f"  {k_str}: embed={v['embed_knn_tanimoto']:.4f}  fp={v['fp_knn_tanimoto']:.4f}  rand={v['random_baseline']:.4f}  overlap={v['neighborhood_overlap']:.4f}"
+        )
     for label, results in probe_results.items():
         print(f"\nProbes [{label}] (Ridge R^2):")
-        for key in ["ridge_mol_weight", "ridge_logp", "ridge_num_heavy_atoms", "ridge_num_rings"]:
+        for key in [
+            "ridge_mol_weight",
+            "ridge_logp",
+            "ridge_num_heavy_atoms",
+            "ridge_num_rings",
+        ]:
             r = results[key]
             if "r2_mean" in r:
                 print(f"  {key}: {r['r2_mean']:.4f} +/- {r['r2_std']:.4f}")
             else:
                 print(f"  {key}: {r['r2']:.4f}")
-    print(f"\nMACCS enrichment: mean_lift={maccs_results['mean_lift']:.3f}  median={maccs_results['median_lift']:.3f}")
+    print(
+        f"\nMACCS enrichment: mean_lift={maccs_results['mean_lift']:.3f}  median={maccs_results['median_lift']:.3f}"
+    )
     print(f"\nOutputs saved to: {outdir}")
     print("=" * 70)
 
 
 if __name__ == "__main__":
     import warnings
+
     warnings.filterwarnings("ignore")
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
     main()

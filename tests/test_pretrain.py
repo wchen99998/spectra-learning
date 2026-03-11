@@ -7,7 +7,12 @@ from models.model import PeakSetSIGReg
 from utils.training import load_pretrained_weights
 
 
-def _make_batch(batch_size: int = 4, num_peaks: int = 6, num_targets: int = 2, include_precursor: bool = False) -> dict[str, torch.Tensor]:
+def _make_batch(
+    batch_size: int = 4,
+    num_peaks: int = 6,
+    num_targets: int = 2,
+    include_precursor: bool = False,
+) -> dict[str, torch.Tensor]:
     peak_mz = torch.rand(batch_size, num_peaks)
     peak_intensity = torch.rand(batch_size, num_peaks)
     peak_valid_mask = torch.ones(batch_size, num_peaks, dtype=torch.bool)
@@ -61,7 +66,13 @@ def _make_pipeline_prepended_batch(
 class DataPipelineContractTests(unittest.TestCase):
     def test_batch_has_required_keys(self):
         batch = _make_batch()
-        for key in ("peak_mz", "peak_intensity", "peak_valid_mask", "context_mask", "target_masks"):
+        for key in (
+            "peak_mz",
+            "peak_intensity",
+            "peak_valid_mask",
+            "context_mask",
+            "target_masks",
+        ):
             self.assertIn(key, batch)
 
     def test_batch_shapes(self):
@@ -76,7 +87,6 @@ class DataPipelineContractTests(unittest.TestCase):
 class BlockJEPATests(unittest.TestCase):
     def _build_model(self, **kwargs) -> PeakSetSIGReg:
         model_kwargs = {
-            "num_peaks": 6,
             "model_dim": 32,
             "encoder_num_layers": 1,
             "encoder_num_heads": 4,
@@ -86,9 +96,6 @@ class BlockJEPATests(unittest.TestCase):
             "sigreg_num_slices": 32,
             "sigreg_lambda": 0.1,
             "jepa_num_target_blocks": 2,
-            "jepa_context_fraction": 0.25,
-            "jepa_target_fraction": 0.25,
-            "jepa_block_min_len": 1,
         }
         model_kwargs.update(kwargs)
         return PeakSetSIGReg(**model_kwargs)
@@ -120,7 +127,7 @@ class BlockJEPATests(unittest.TestCase):
             self.assertIn(key, metrics, f"Missing key: {key}")
 
     def test_sigreg_regularizer_uses_all_visible_branches(self):
-        model = self._build_model(representation_regularizer="sigreg", sigreg_lambda=0.1)
+        model = self._build_model(sigreg_lambda=0.1)
 
         class CaptureSIGReg(torch.nn.Module):
             def __init__(self):
@@ -130,7 +137,9 @@ class BlockJEPATests(unittest.TestCase):
 
             def forward(self, proj, valid_mask=None):
                 self.proj = proj.detach().clone()
-                self.valid_mask = None if valid_mask is None else valid_mask.detach().clone()
+                self.valid_mask = (
+                    None if valid_mask is None else valid_mask.detach().clone()
+                )
                 return proj.new_tensor(0.5)
 
         capture = CaptureSIGReg()
@@ -154,9 +163,8 @@ class BlockJEPATests(unittest.TestCase):
 
     def test_forward_without_regularizer(self):
         model = self._build_model(
-            representation_regularizer=None,
             masked_token_loss_weight=1.0,
-            sigreg_lambda=0.1,
+            sigreg_lambda=0.0,
         )
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
         metrics = model.forward_augmented(batch)
@@ -171,7 +179,7 @@ class BlockJEPATests(unittest.TestCase):
             "peak_intensity": torch.rand(3, 6),
             "peak_valid_mask": torch.ones(3, 6, dtype=torch.bool),
         }
-        pooled = model.encode(batch, train=False)
+        pooled = model.encode(batch)
         self.assertEqual(pooled.shape, (3, model.model_dim))
 
     def test_backward_populates_encoder_gradients(self):
@@ -182,15 +190,18 @@ class BlockJEPATests(unittest.TestCase):
         grads = [p.grad for p in model.encoder.parameters() if p.requires_grad]
         self.assertTrue(any(g is not None for g in grads))
 
-    def test_vicreg_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "Unsupported regularizer"):
-            self._build_model(representation_regularizer="vicreg")
-
     def test_load_pretrained_weights_roundtrip(self):
         model = self._build_model()
         with tempfile.TemporaryDirectory() as tmpdir:
             path = f"{tmpdir}/ckpt.pt"
-            torch.save({"state_dict": {f"model.{k}": v for k, v in model.state_dict().items()}}, path)
+            torch.save(
+                {
+                    "state_dict": {
+                        f"model.{k}": v for k, v in model.state_dict().items()
+                    }
+                },
+                path,
+            )
             loaded = self._build_model()
             load_pretrained_weights(loaded, path)
             for key, value in model.state_dict().items():
@@ -200,7 +211,6 @@ class BlockJEPATests(unittest.TestCase):
 class PrecursorTokenTests(unittest.TestCase):
     def _build_model(self, **kwargs) -> PeakSetSIGReg:
         model_kwargs = {
-            "num_peaks": 6,
             "model_dim": 32,
             "encoder_num_layers": 1,
             "encoder_num_heads": 4,
@@ -210,9 +220,6 @@ class PrecursorTokenTests(unittest.TestCase):
             "sigreg_num_slices": 32,
             "sigreg_lambda": 0.1,
             "jepa_num_target_blocks": 2,
-            "jepa_context_fraction": 0.25,
-            "jepa_target_fraction": 0.25,
-            "jepa_block_min_len": 1,
             "use_precursor_token": True,
         }
         model_kwargs.update(kwargs)
@@ -222,7 +229,8 @@ class PrecursorTokenTests(unittest.TestCase):
         """forward_augmented works with pipeline-prepended batch (N+1 tensors, no precursor_mz key)."""
         model = self._build_model()
         batch = _make_pipeline_prepended_batch(
-            num_peaks=6, num_targets=model.jepa_num_target_blocks,
+            num_peaks=6,
+            num_targets=model.jepa_num_target_blocks,
         )
         self.assertNotIn("precursor_mz", batch)
         metrics = model.forward_augmented(batch)
@@ -238,14 +246,15 @@ class PrecursorTokenTests(unittest.TestCase):
             "peak_valid_mask": torch.ones(3, N, dtype=torch.bool),
         }
         batch["peak_intensity"][:, 0] = -1.0
-        pooled = model.encode(batch, train=False)
+        pooled = model.encode(batch)
         self.assertEqual(pooled.shape, (3, model.model_dim))
 
     def test_no_nan_from_sentinel_intensity(self):
         """intensity=-1 must not produce NaN via log1p clamp."""
         model = self._build_model()
         batch = _make_pipeline_prepended_batch(
-            num_peaks=6, num_targets=model.jepa_num_target_blocks,
+            num_peaks=6,
+            num_targets=model.jepa_num_target_blocks,
         )
         metrics = model.forward_augmented(batch)
         self.assertFalse(torch.isnan(metrics["loss"]).item())
@@ -253,7 +262,8 @@ class PrecursorTokenTests(unittest.TestCase):
     def test_gradients_through_precursor_token(self):
         model = self._build_model()
         batch = _make_pipeline_prepended_batch(
-            num_peaks=6, num_targets=model.jepa_num_target_blocks,
+            num_peaks=6,
+            num_targets=model.jepa_num_target_blocks,
         )
         loss = model.forward_augmented(batch)["loss"]
         loss.backward()
@@ -270,8 +280,12 @@ class PrecursorTokenTests(unittest.TestCase):
         target_masks = torch.zeros(B, K, N, dtype=torch.bool)
 
         result = PeakSetSIGReg.prepend_precursor_token(
-            peak_mz, peak_intensity, peak_valid_mask, precursor_mz,
-            context_mask=context_mask, target_masks=target_masks,
+            peak_mz,
+            peak_intensity,
+            peak_valid_mask,
+            precursor_mz,
+            context_mask=context_mask,
+            target_masks=target_masks,
         )
         self.assertEqual(result["peak_mz"].shape, (B, N + 1))
         self.assertEqual(result["peak_intensity"].shape, (B, N + 1))

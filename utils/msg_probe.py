@@ -1,10 +1,6 @@
-from __future__ import annotations
-
 import logging
 import math
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Callable
+from typing import Callable, NamedTuple
 
 import numpy as np
 import torch
@@ -12,7 +8,7 @@ import torch.nn.functional as F
 from ml_collections import config_dict
 from sklearn.metrics import r2_score, roc_auc_score
 
-from input_pipeline import TfLightningDataModule, numpy_batch_to_torch
+from input_pipeline import numpy_batch_to_torch
 from models.model import PeakSetSIGReg
 from utils.massspec_probe_data import MassSpecProbeData
 from utils.massspec_probe_targets import FG_SMARTS, REGRESSION_TARGET_KEYS
@@ -22,16 +18,14 @@ from utils.schedulers import learning_rate_at_step
 log = logging.getLogger(__name__)
 
 
-@dataclass(slots=True)
-class MsgProbeTaskSpec:
+class MsgProbeTaskSpec(NamedTuple):
     regression_tasks: tuple[str, ...]
     classification_tasks: tuple[str, ...]
     regression_means: dict[str, float]
     regression_stds: dict[str, float]
 
 
-@dataclass(slots=True)
-class MsgProbeSplitTargets:
+class MsgProbeSplitTargets(NamedTuple):
     regression: dict[str, np.ndarray]
     classification: dict[str, np.ndarray]
 
@@ -55,11 +49,6 @@ class MsgLinearProbe(torch.nn.Module):
         return {name: head(pooled) for name, head in self.heads.items()}
 
 
-def _split_size(probe_data: MassSpecProbeData, split: str) -> int:
-    key = f"{split}_size"
-    return int(probe_data.info[key])
-
-
 def iter_massspec_probe(
     probe_data: MassSpecProbeData,
     split: str,
@@ -76,15 +65,14 @@ def iter_massspec_probe(
         shuffle=(split == "massspec_train"),
         drop_remainder=drop_remainder,
     )
-    size = _split_size(probe_data, split)
+    size = int(probe_data.info[f"{split}_size"])
     if max_samples is not None:
         size = min(size, int(max_samples))
     seen = 0
     for batch in dataset.as_numpy_iterator():
-        remaining = size - seen
-        if remaining <= 0:
+        if seen >= size:
             break
-        take = min(int(batch["peak_mz"].shape[0]), remaining)
+        take = min(int(batch["peak_mz"].shape[0]), size - seen)
         if take != batch["peak_mz"].shape[0]:
             batch = {key: value[:take] for key, value in batch.items()}
         seen += take
@@ -98,13 +86,11 @@ def probe_steps_per_epoch(
     drop_remainder: bool,
     max_samples: int | None = None,
 ) -> int:
-    size = _split_size(probe_data, split)
+    size = int(probe_data.info[f"{split}_size"])
     if max_samples is not None:
         size = min(size, int(max_samples))
     batch_size = int(probe_data.batch_size)
-    if drop_remainder:
-        return size // batch_size
-    return math.ceil(size / batch_size)
+    return size // batch_size if drop_remainder else math.ceil(size / batch_size)
 
 
 def _collect_split_targets(
@@ -139,10 +125,9 @@ def _collect_split_targets(
                 batch[f"probe_fg_{name}"][valid_mask].detach().cpu().numpy()
             )
 
-    def _cat(d: dict, dt):
+    def _cat(d, dt):
         return {
-            n: np.concatenate(c, axis=0) if c else np.empty((0,), dtype=dt)
-            for n, c in d.items()
+            n: np.concatenate(c) if c else np.empty(0, dtype=dt) for n, c in d.items()
         }
 
     return MsgProbeSplitTargets(
@@ -156,21 +141,17 @@ def _build_task_spec(
     train_targets: MsgProbeSplitTargets,
     test_targets: MsgProbeSplitTargets,
 ) -> MsgProbeTaskSpec:
-    regression_means: dict[str, float] = {}
-    regression_stds: dict[str, float] = {}
-
+    regression_means, regression_stds = {}, {}
     for name in REGRESSION_TARGET_KEYS:
         values = train_targets.regression[name].astype(np.float32)
         regression_means[name] = float(values.mean())
         regression_stds[name] = float(np.clip(values.std(), 1e-8, None))
-
     classification_tasks: list[str] = []
     for name in FG_SMARTS:
         tp = float(train_targets.classification[name].mean())
         ep = float(test_targets.classification[name].mean())
         if 0.01 <= tp <= 0.99 and 0.0 < ep < 1.0:
             classification_tasks.append(name)
-
     return MsgProbeTaskSpec(
         regression_tasks=REGRESSION_TARGET_KEYS,
         classification_tasks=tuple(classification_tasks),
@@ -191,34 +172,24 @@ def _probe_step(
     valid_mask = batch["probe_valid_mol"].to(device=device, dtype=torch.bool)
     if not bool(valid_mask.any()):
         return None
-
     pooled = pooled[valid_mask]
     logits = probe(pooled)
-
-    losses: dict[str, torch.Tensor] = {}
-    predictions: dict[str, torch.Tensor] = {}
-    task_targets: dict[str, torch.Tensor] = {}
-
+    losses, predictions, task_targets = {}, {}, {}
     for name in task_spec.regression_tasks:
         target = batch[f"probe_{name}"][valid_mask].to(dtype=torch.float32)
-        mean = task_spec.regression_means[name]
-        std = task_spec.regression_stds[name]
-        normalized_target = (target - mean) / std
+        mean, std = task_spec.regression_means[name], task_spec.regression_stds[name]
         pred = logits[name].squeeze(-1)
-        losses[name] = F.mse_loss(pred, normalized_target)
+        losses[name] = F.mse_loss(pred, (target - mean) / std)
         predictions[name] = pred.detach() * std + mean
         task_targets[name] = target
-
     for name in task_spec.classification_tasks:
         target = batch[f"probe_fg_{name}"][valid_mask].to(dtype=torch.float32)
         pred = logits[name].squeeze(-1)
         losses[name] = F.binary_cross_entropy_with_logits(pred, target)
         predictions[name] = torch.sigmoid(pred.detach())
         task_targets[name] = target
-
-    loss_total = torch.stack(list(losses.values())).mean()
     return {
-        "loss_total": loss_total,
+        "loss_total": torch.stack(list(losses.values())).mean(),
         "losses": losses,
         "predictions": predictions,
         "targets": task_targets,
@@ -245,8 +216,7 @@ def _update_epoch_state(
     batch_size = int(result["batch_size"])
     epoch_state["count"] += batch_size
     epoch_state["loss_total"] += float(result["loss_total"].detach()) * batch_size
-    losses = epoch_state["losses"]
-    predictions = epoch_state["predictions"]
+    losses, predictions = epoch_state["losses"], epoch_state["predictions"]
     targets = epoch_state["targets"]
     for name in task_spec.regression_tasks + task_spec.classification_tasks:
         losses[name] += float(result["losses"][name].detach()) * batch_size
@@ -265,27 +235,21 @@ def _score_epoch_state(
         f"{prefix}/samples": float(count),
         f"{prefix}/loss_total": float(epoch_state["loss_total"]) / count,
     }
-
-    regression_r2_values: list[float] = []
-    classification_auc_values: list[float] = []
-    losses = epoch_state["losses"]
-    predictions = epoch_state["predictions"]
+    regression_r2_values, classification_auc_values = [], []
+    losses, predictions = epoch_state["losses"], epoch_state["predictions"]
     targets = epoch_state["targets"]
-
     for name in task_spec.regression_tasks:
         pred = np.concatenate(predictions[name], axis=0)
         target = np.concatenate(targets[name], axis=0)
         metrics[f"{prefix}/loss_{name}"] = float(losses[name]) / count
         metrics[f"{prefix}/r2_{name}"] = float(r2_score(target, pred))
         regression_r2_values.append(metrics[f"{prefix}/r2_{name}"])
-
     for name in task_spec.classification_tasks:
         pred = np.concatenate(predictions[name], axis=0)
         target = np.concatenate(targets[name], axis=0)
         metrics[f"{prefix}/loss_fg_{name}"] = float(losses[name]) / count
         metrics[f"{prefix}/auc_fg_{name}"] = float(roc_auc_score(target, pred))
         classification_auc_values.append(metrics[f"{prefix}/auc_fg_{name}"])
-
     metrics[f"{prefix}/r2_mean"] = float(np.mean(regression_r2_values))
     metrics[f"{prefix}/auc_fg_mean"] = float(np.mean(classification_auc_values))
     return metrics
@@ -294,12 +258,9 @@ def _score_epoch_state(
 def run_msg_probe(
     *,
     config: config_dict.ConfigDict,
-    datamodule: TfLightningDataModule,
     model: PeakSetSIGReg,
     device: torch.device,
-    cache_dir_override: str | Path | None = None,
 ) -> dict[str, float]:
-    del datamodule, cache_dir_override
     num_probe_epochs = int(config.get("msg_probe_num_epochs", 5))
     probe_lr = float(config.get("msg_probe_learning_rate", 1e-3))
     probe_weight_decay = float(config.get("msg_probe_weight_decay", 1e-2))
@@ -337,13 +298,11 @@ def run_msg_probe(
         max_samples=max_test_samples,
     )
     task_spec = _build_task_spec(train_targets=train_targets, test_targets=test_targets)
-    task_names = task_spec.regression_tasks + task_spec.classification_tasks
-
     was_training = model.training
     model.eval()
     probe = MsgLinearProbe(
         input_dim=int(config.model_dim),
-        task_names=task_names,
+        task_names=task_spec.regression_tasks + task_spec.classification_tasks,
     ).to(device)
     optimizer = torch.optim.AdamW(
         probe.parameters(),
@@ -356,17 +315,14 @@ def run_msg_probe(
         drop_remainder=False,
         max_samples=max_train_samples,
     )
-    total_steps = num_probe_epochs * steps_per_epoch
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
         lr_lambda=lambda step_idx: (
             learning_rate_at_step(
                 step_idx + 1,
                 base_lr=probe_lr,
-                total_steps=total_steps,
+                total_steps=num_probe_epochs * steps_per_epoch,
                 warmup_steps=probe_warmup_steps,
-                schedule_type="cosine",
-                min_learning_rate=None,
             )
             / probe_lr
         ),
@@ -382,11 +338,10 @@ def run_msg_probe(
     for epoch_idx in range(num_probe_epochs):
         probe.train()
         train_state = _new_epoch_state(task_spec)
-        train_seed = train_seed_base + epoch_idx
         for batch in iter_massspec_probe(
             probe_data,
             "massspec_train",
-            seed=train_seed,
+            seed=train_seed_base + epoch_idx,
             peak_ordering=peak_ordering,
             drop_remainder=False,
             max_samples=max_train_samples,
@@ -406,15 +361,13 @@ def run_msg_probe(
             optimizer.step()
             scheduler.step()
             _update_epoch_state(train_state, result, task_spec)
-
         probe.eval()
         test_state = _new_epoch_state(task_spec)
-        test_seed = test_seed_base + epoch_idx
         with torch.no_grad():
             for batch in iter_massspec_probe(
                 probe_data,
                 "massspec_test",
-                seed=test_seed,
+                seed=test_seed_base + epoch_idx,
                 peak_ordering=peak_ordering,
                 drop_remainder=False,
                 max_samples=max_test_samples,
@@ -430,8 +383,7 @@ def run_msg_probe(
                 if result is None:
                     continue
                 _update_epoch_state(test_state, result, task_spec)
-
-        epoch_metrics = {
+        final_metrics = {
             **_score_epoch_state(
                 prefix="msg_probe/train", epoch_state=train_state, task_spec=task_spec
             ),
@@ -445,12 +397,10 @@ def run_msg_probe(
             "MSG probe epoch %d/%d test_r2_mean=%.4f test_auc_fg_mean=%.4f fg_tasks=%d",
             epoch_idx + 1,
             num_probe_epochs,
-            epoch_metrics["msg_probe/test/r2_mean"],
-            epoch_metrics["msg_probe/test/auc_fg_mean"],
-            int(epoch_metrics["msg_probe/num_fg_tasks"]),
+            final_metrics["msg_probe/test/r2_mean"],
+            final_metrics["msg_probe/test/auc_fg_mean"],
+            int(final_metrics["msg_probe/num_fg_tasks"]),
         )
-        final_metrics = epoch_metrics
-
     if was_training:
         model.train()
     return final_metrics

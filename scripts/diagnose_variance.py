@@ -52,7 +52,9 @@ def build_model(cfg) -> PeakSetSIGReg:
     )
 
 
-def make_synthetic_batch(cfg, batch_size: int = 32, device: str = "cpu") -> dict[str, torch.Tensor]:
+def make_synthetic_batch(
+    cfg, batch_size: int = 32, device: str = "cpu"
+) -> dict[str, torch.Tensor]:
     """Create a synthetic block-masked JEPA batch for probing activations."""
     N = cfg.num_peaks
     K = cfg.jepa_num_target_blocks
@@ -96,6 +98,7 @@ def diagnose_encoder(model: PeakSetSIGReg, batch: dict[str, torch.Tensor]):
     block_mask = None
     if visible_mask is not None:
         from networks.transformer_torch import create_visible_block_mask
+
         block_mask = create_visible_block_mask(visible_mask)
 
     for i, block in enumerate(encoder.blocks):
@@ -104,7 +107,9 @@ def diagnose_encoder(model: PeakSetSIGReg, batch: dict[str, torch.Tensor]):
         _report(f"block_{i:02d}/attn_pre_norm", attn_normed, visible_mask)
 
         # Attention output (residual contribution)
-        attn_out = block.attention(attn_normed, freqs_cos=None, freqs_sin=None, block_mask=block_mask)
+        attn_out = block.attention(
+            attn_normed, freqs_cos=None, freqs_sin=None, block_mask=block_mask
+        )
         _report(f"block_{i:02d}/attn_out", attn_out, visible_mask)
 
         h = x + attn_out
@@ -140,7 +145,9 @@ def _report(name: str, x: torch.Tensor, valid_mask: torch.Tensor):
     abs_max = valid_vals.abs().max().item()
     mean_abs = valid_vals.abs().mean().item()
 
-    print(f"  {name:40s}  RMS={rms_valid:10.4f}  Var={mean_var:10.4f}  AbsMax={abs_max:10.4f}  MeanAbs={mean_abs:10.4f}")
+    print(
+        f"  {name:40s}  RMS={rms_valid:10.4f}  Var={mean_var:10.4f}  AbsMax={abs_max:10.4f}  MeanAbs={mean_abs:10.4f}"
+    )
 
 
 def _report_1d(name: str, x: torch.Tensor):
@@ -150,7 +157,9 @@ def _report_1d(name: str, x: torch.Tensor):
     var = xf.var(dim=0).mean().item()
     abs_max = xf.abs().max().item()
     mean_abs = xf.abs().mean().item()
-    print(f"  {name:40s}  RMS={rms:10.4f}  Var={var:10.4f}  AbsMax={abs_max:10.4f}  MeanAbs={mean_abs:10.4f}")
+    print(
+        f"  {name:40s}  RMS={rms:10.4f}  Var={var:10.4f}  AbsMax={abs_max:10.4f}  MeanAbs={mean_abs:10.4f}"
+    )
 
 
 @torch.no_grad()
@@ -161,10 +170,16 @@ def diagnose_norm_weights(model: PeakSetSIGReg):
     for i, block in enumerate(encoder.blocks):
         attn_w = block.attention_norm.weight
         ffn_w = block.ffn_norm.weight
-        print(f"  block_{i:02d}/attn_norm  mean={attn_w.mean():.4f}  std={attn_w.std():.4f}  min={attn_w.min():.4f}  max={attn_w.max():.4f}")
-        print(f"  block_{i:02d}/ffn_norm   mean={ffn_w.mean():.4f}  std={ffn_w.std():.4f}  min={ffn_w.min():.4f}  max={ffn_w.max():.4f}")
+        print(
+            f"  block_{i:02d}/attn_norm  mean={attn_w.mean():.4f}  std={attn_w.std():.4f}  min={attn_w.min():.4f}  max={attn_w.max():.4f}"
+        )
+        print(
+            f"  block_{i:02d}/ffn_norm   mean={ffn_w.mean():.4f}  std={ffn_w.std():.4f}  min={ffn_w.min():.4f}  max={ffn_w.max():.4f}"
+        )
     pool_w = model.pool_norm.weight
-    print(f"  pool_norm             mean={pool_w.mean():.4f}  std={pool_w.std():.4f}  min={pool_w.min():.4f}  max={pool_w.max():.4f}")
+    print(
+        f"  pool_norm             mean={pool_w.mean():.4f}  std={pool_w.std():.4f}  min={pool_w.min():.4f}  max={pool_w.max():.4f}"
+    )
 
 
 @torch.no_grad()
@@ -174,14 +189,16 @@ def diagnose_attention_weights(model: PeakSetSIGReg):
     for i, block in enumerate(model.encoder.blocks):
         wqkv_norm = block.attention.wqkv.weight.norm().item()
         wo_norm = block.attention.wo.weight.norm().item()
-        if hasattr(block.feed_forward, 'w12'):
+        if hasattr(block.feed_forward, "w12"):
             w12_norm = block.feed_forward.w12.weight.norm().item()
             w_label = f"w12={w12_norm:.4f}"
         else:
             w1_norm = block.feed_forward.w1.weight.norm().item()
             w_label = f"w1={w1_norm:.4f}"
         w2_norm = block.feed_forward.w2.weight.norm().item()
-        print(f"  block_{i:02d}  wqkv={wqkv_norm:.4f}  wo={wo_norm:.4f}  {w_label}  w2={w2_norm:.4f}")
+        print(
+            f"  block_{i:02d}  wqkv={wqkv_norm:.4f}  wo={wo_norm:.4f}  {w_label}  w2={w2_norm:.4f}"
+        )
 
 
 def main():
@@ -203,7 +220,9 @@ def main():
     model.eval()
     model.to(args.device)
 
-    print(f"\n=== Activation diagnosis (batch_size={args.batch_size}, device={args.device}) ===")
+    print(
+        f"\n=== Activation diagnosis (batch_size={args.batch_size}, device={args.device}) ==="
+    )
     batch = make_synthetic_batch(cfg, batch_size=args.batch_size, device=args.device)
     diagnose_encoder(model, batch)
 

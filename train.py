@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import logging
 import math
 import random
@@ -39,36 +37,15 @@ inductor_config.epilogue_fusion = True
 inductor_config.shape_padding = True
 
 
-_WD_MODULE_TOKENS = ("attention.", "feed_forward.", "cross_attn.", "pool_mha.")
-
-
 def _is_weight_decay_target(name: str, param: torch.nn.Parameter) -> bool:
     return (
         param.ndim >= 2
         and name.endswith("weight")
-        and any(t in name for t in _WD_MODULE_TOKENS)
+        and any(
+            t in name
+            for t in ("attention.", "feed_forward.", "cross_attn.", "pool_mha.")
+        )
     )
-
-
-def _partition_params_for_muon(
-    model: torch.nn.Module,
-) -> tuple[
-    list[torch.nn.Parameter], list[torch.nn.Parameter], list[torch.nn.Parameter]
-]:
-    muon_decay_params = []
-    muon_no_decay_params = []
-    adamw_params = []
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
-        if param.ndim == 2:
-            if _is_weight_decay_target(name, param):
-                muon_decay_params.append(param)
-            else:
-                muon_no_decay_params.append(param)
-        else:
-            adamw_params.append(param)
-    return muon_decay_params, muon_no_decay_params, adamw_params
 
 
 _TRAIN_BATCH_KEYS = frozenset(
@@ -105,25 +82,20 @@ class _BatchPrefetcher:
     ) -> None:
         self._loader = loader
         self._device = device
-        self._prefetch_size = prefetch_size
         self._stream = (
             torch.cuda.Stream(device=device) if device.type == "cuda" else None
         )
-        self._ready: deque[tuple[dict[str, torch.Tensor], torch.cuda.Event | None]] = (
-            deque()
-        )
+        self._ready: deque = deque()
         self._exhausted = False
-        for _ in range(self._prefetch_size):
+        for _ in range(prefetch_size):
             self._preload_one()
 
     def _preload_one(self) -> None:
         if self._exhausted:
             return
-        batch = next(self._loader, None)
-        if batch is None:
+        if (batch := next(self._loader, None)) is None:
             self._exhausted = True
             return
-
         if self._stream is None:
             moved = _move_batch_to_device(batch, self._device)
             ready_event = None
@@ -137,7 +109,6 @@ class _BatchPrefetcher:
     def next(self) -> dict[str, torch.Tensor] | None:
         if not self._ready:
             return None
-
         batch, ready_event = self._ready.popleft()
         if ready_event is not None:
             current_stream = torch.cuda.current_stream(device=self._device)
@@ -206,9 +177,17 @@ def _build_optimizers(
         )
 
     if optimizer_type == "muon":
-        muon_decay_params, muon_no_decay_params, adamw_params = (
-            _partition_params_for_muon(model)
-        )
+        muon_decay_params, muon_no_decay_params, adamw_params = [], [], []
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            if param.ndim == 2:
+                if _is_weight_decay_target(name, param):
+                    muon_decay_params.append(param)
+                else:
+                    muon_no_decay_params.append(param)
+            else:
+                adamw_params.append(param)
         muon_lr = float(config.get("muon_lr", None) or base_lr)
         adamw_lr = float(config.get("adamw_lr", None) or base_lr)
         muon_wd = float(config.get("muon_weight_decay", None) or weight_decay)
@@ -221,7 +200,6 @@ def _build_optimizers(
             muon_param_groups.append(
                 {"params": muon_no_decay_params, "weight_decay": 0.0}
             )
-
         muon_opt = torch.optim.Muon(
             muon_param_groups,
             lr=torch.tensor(muon_lr),
@@ -243,9 +221,7 @@ def _build_optimizers(
             _make_schedule(muon_opt, muon_lr),
             _make_schedule(adamw_opt, adamw_lr),
         ]
-
-    decay_params: list[torch.nn.Parameter] = []
-    no_decay_params: list[torch.nn.Parameter] = []
+    decay_params, no_decay_params = [], []
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
@@ -253,7 +229,6 @@ def _build_optimizers(
             decay_params.append(param)
         else:
             no_decay_params.append(param)
-
     optimizer = torch.optim.AdamW(
         [
             {"params": decay_params, "weight_decay": weight_decay},
@@ -312,12 +287,10 @@ def train_and_evaluate(
 ) -> dict[str, float]:
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
-
     seed = int(config.seed)
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
-
     datamodule = TfLightningDataModule(config, seed=seed)
     num_epochs = float(config.num_epochs)
     steps_per_epoch = datamodule.train_steps
@@ -325,43 +298,30 @@ def train_and_evaluate(
     loop_epochs = max(1, math.ceil(num_epochs))
     log_every_n_steps = int(config.get("log_every_n_steps", 50))
     checkpoint_every_steps = int(config.checkpoint_every_steps)
-
-    info = datamodule.info
-    config.num_peaks = info["num_peaks"]
-
+    config.num_peaks = datamodule.info["num_peaks"]
     logging.info("Training for %s epochs (%d steps).", num_epochs, total_steps)
     logging.info("Steps per epoch: %d", steps_per_epoch)
     logging.info("Total steps: %d", total_steps)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_model_from_config(config)
     model_param_metrics = collect_and_log_param_metrics(model)
-    model.to(device)
-    model.train()
-
+    model.to(device).train()
     optimizers, schedulers = _build_optimizers(config, model, total_steps, device)
-
     checkpoint_dir = workdir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
     logger = build_logger(config, workdir)
-
-    start_epoch = 0
-    global_step = 0
-    _pts = sorted(checkpoint_dir.glob("*.pt"), key=lambda p: p.stat().st_mtime)
-    if _pts:
+    start_epoch, global_step = 0, 0
+    if _pts := sorted(checkpoint_dir.glob("*.pt"), key=lambda p: p.stat().st_mtime):
         logging.info("Resuming from checkpoint: %s", _pts[-1])
         ckpt = torch.load(_pts[-1], map_location=device, weights_only=True)
         model.load_state_dict(ckpt["model"])
-        for opt, state in zip(optimizers, ckpt["optimizers"]):
-            opt.load_state_dict(state)
-        for sched, state in zip(schedulers, ckpt["schedulers"]):
-            sched.load_state_dict(state)
+        for objs, key in [(optimizers, "optimizers"), (schedulers, "schedulers")]:
+            for obj, state in zip(objs, ckpt[key]):
+                obj.load_state_dict(state)
         global_step = ckpt["global_step"]
         start_epoch = ckpt["epoch"]
         del ckpt
-
     logger.log_metrics(model_param_metrics, step=global_step)
-
     _ac_name = str(config.get("autocast_dtype", "bf16")).lower()
     if _ac_name in {"bf16", "bfloat16"}:
         autocast_dtype = torch.bfloat16
@@ -372,7 +332,6 @@ def train_and_evaluate(
     else:
         raise ValueError(f"Unsupported autocast_dtype: {_ac_name}")
     compiled_step = torch.compile(_train_step_impl, mode="default", fullgraph=False)
-
     optimizer_type = str(config.get("optimizer", "adamw")).lower()
     device_prefetch_size = int(config.get("device_prefetch_size", 1))
     _msg_probe_raw = float(config.get("msg_probe_every_n_steps", 0))
@@ -381,13 +340,10 @@ def train_and_evaluate(
         msg_probe_every_n_steps = max(1, int(_msg_probe_raw * reference_steps))
     else:
         msg_probe_every_n_steps = int(_msg_probe_raw)
-    msg_probe_cache_dir = config.get("msg_probe_cache_dir", None)
     _gcn = config.get("grad_clip_norm", None)
     grad_clip_norm = float(_gcn) if _gcn is not None else None
-
     train_loader = datamodule.train_loader
     last_msg_probe_metrics: dict[str, float] = {}
-
     for epoch in range(start_epoch, loop_epochs):
         prefetcher = _BatchPrefetcher(
             iter(train_loader),
@@ -396,13 +352,7 @@ def train_and_evaluate(
         )
         epoch_steps = min(steps_per_epoch, total_steps - global_step)
         pbar = tqdm(total=epoch_steps, desc=f"Epoch {epoch}", unit="step")
-        while True:
-            if global_step >= total_steps:
-                break
-            batch = prefetcher.next()
-            if batch is None:
-                break
-
+        while global_step < total_steps and (batch := prefetcher.next()) is not None:
             metrics = compiled_step(
                 model,
                 batch,
@@ -411,10 +361,8 @@ def train_and_evaluate(
                 autocast_dtype,
                 grad_clip_norm,
             )
-            model.update_teacher()
             global_step += 1
             pbar.update(1)
-
             if global_step % log_every_n_steps == 0:
                 loss_val = float(metrics["loss"].detach())
                 pbar.set_postfix(loss=f"{loss_val:.4f}", step=global_step)
@@ -431,11 +379,9 @@ def train_and_evaluate(
                 log_metrics["epoch"] = epoch
                 log_metrics["global_step"] = global_step
                 logger.log_metrics(log_metrics, step=global_step)
-
             if global_step % checkpoint_every_steps == 0:
-                ckpt_name = f"step-{global_step:08d}.pt"
                 _save_checkpoint(
-                    checkpoint_dir / ckpt_name,
+                    checkpoint_dir / f"step-{global_step:08d}.pt",
                     model,
                     optimizers,
                     schedulers,
@@ -444,17 +390,14 @@ def train_and_evaluate(
                     float(metrics["loss"]),
                 )
                 _prune_checkpoints(checkpoint_dir, keep_top_k=15)
-
             if (
                 msg_probe_every_n_steps > 0
                 and global_step % msg_probe_every_n_steps == 0
             ):
                 probe_metrics = run_msg_probe(
                     config=config,
-                    datamodule=datamodule,
                     model=model,
                     device=device,
-                    cache_dir_override=msg_probe_cache_dir,
                 )
                 logger.log_metrics(probe_metrics, step=global_step)
                 last_msg_probe_metrics = probe_metrics
@@ -465,9 +408,7 @@ def train_and_evaluate(
                     probe_metrics["msg_probe/test/auc_fg_mean"],
                     int(probe_metrics["msg_probe/num_fg_tasks"]),
                 )
-
         pbar.close()
-
     _save_checkpoint(
         checkpoint_dir / "last.pt",
         model,
@@ -477,14 +418,12 @@ def train_and_evaluate(
         loop_epochs,
         float("nan"),
     )
-
     if last_msg_probe_metrics:
         logging.info("=== Final MSG Probe Results ===")
         for k, v in sorted(last_msg_probe_metrics.items()):
             logging.info("  %s: %.6f", k, v)
     else:
         logging.info("No MSG probe results were collected during training.")
-
     return {**last_msg_probe_metrics, **model_param_metrics}
 
 
@@ -497,7 +436,6 @@ if __name__ == "__main__":
     import tensorflow as tf
 
     tf.config.set_visible_devices([], "GPU")
-
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(description="Train peak-set SIGReg model.")
     parser.add_argument("--config", required=True, help="Path to config file.")

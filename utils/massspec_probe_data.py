@@ -1,12 +1,9 @@
-from __future__ import annotations
-
 import csv
 import json
 import logging
 import math
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 import tensorflow as tf
@@ -66,31 +63,12 @@ def _download_hf_file(repo_id: str, filename: str, local_dir: Path) -> Path:
     return Path(path)
 
 
-def download_massspec_tsv(cache_dir: Path) -> Path:
-    return _download_hf_file(MASSSPEC_HF_REPO, MASSSPEC_TSV_PATH, cache_dir)
-
-
-def _ensure_nist20_hdf5(data_dir: Path) -> Path:
-    local_path = data_dir / NIST20_HF_FILENAME
-    if local_path.exists():
-        return local_path
-    logger.info("NIST20 HDF5 not found locally, downloading from HuggingFace...")
-    return _download_hf_file(NIST20_HF_REPO, NIST20_HF_FILENAME, data_dir)
-
-
 def _load_massspec_tsv(tsv_path: Path) -> dict[str, np.ndarray]:
-    spectra: list[np.ndarray] = []
-    precursor: list[float] = []
-    fold: list[str] = []
-    smiles: list[str] = []
-    adduct: list[str] = []
-    instrument_type: list[str] = []
-    collision_energy: list[float] = []
-    collision_energy_present: list[int] = []
-
+    spectra, precursor, fold, smiles = [], [], [], []
+    adduct, instrument_type = [], []
+    collision_energy, collision_energy_present = [], []
     with tsv_path.open() as f:
-        reader = csv.DictReader(f, delimiter="\t")
-        for row in reader:
+        for row in csv.DictReader(f, delimiter="\t"):
             mz = np.fromstring(row["mzs"], sep=",", dtype=np.float32)
             intensity = np.fromstring(row["intensities"], sep=",", dtype=np.float32)
             if mz.size > _NUM_PEAKS_INPUT:
@@ -111,11 +89,9 @@ def _load_massspec_tsv(tsv_path: Path) -> dict[str, np.ndarray]:
             ce = row["collision_energy"]
             collision_energy.append(float(ce) if ce else 0.0)
             collision_energy_present.append(1 if ce else 0)
-
-    spectra_array = np.stack(spectra, axis=0)
     return {
-        "spectra": spectra_array,
-        "retention": np.full(len(spectra_array), 392.3146, dtype=np.float32),
+        "spectra": np.stack(spectra, axis=0),
+        "retention": np.full(len(spectra), 392.3146, dtype=np.float32),
         "precursor": np.asarray(precursor, dtype=np.float32),
         "fold": np.asarray(fold),
         "smiles": np.asarray(smiles),
@@ -137,30 +113,18 @@ def _load_nist20_hdf5(hdf5_path: Path) -> dict[str, np.ndarray]:
         raw_precursor = f["precursor_mz"][:]
         raw_smiles = f["smiles"][:].astype(str)
         raw_adduct = f["adduct"][:].astype(str)
-
-    # Filter invalid SMILES and compute InChIKey connectivity layer
-    valid_indices: list[int] = []
-    inchikey_14: list[str] = []
+    valid_indices, inchikey_14 = [], []
     for i, smi in enumerate(raw_smiles):
         mol = Chem.MolFromSmiles(smi)
-        if mol is None:
-            continue
-        inchi = MolToInchi(mol)
-        if inchi is None:
-            continue
-        ik = InchiToInchiKey(inchi)
-        if ik is None:
+        if mol is None or (ik := InchiToInchiKey(MolToInchi(mol))) is None:
             continue
         valid_indices.append(i)
         inchikey_14.append(ik[:14])
-
     idx = np.asarray(valid_indices)
     inchikey_14_arr = np.asarray(inchikey_14)
     logger.info(
         "NIST20 HDF5: %d / %d spectra have valid SMILES", len(idx), len(raw_smiles)
     )
-
-    # InChIKey-based train/val/test split
     unique_keys = sorted(set(inchikey_14_arr.tolist()))
     rng = np.random.RandomState(_NIST20_SPLIT_SEED)
     rng.shuffle(unique_keys)
@@ -169,24 +133,12 @@ def _load_nist20_hdf5(hdf5_path: Path) -> dict[str, np.ndarray]:
     n_val = int(n_keys * _NIST20_VAL_FRAC)
     train_keys = set(unique_keys[:n_train])
     val_keys = set(unique_keys[n_train : n_train + n_val])
-
     fold_arr = np.where(
         np.isin(inchikey_14_arr, list(train_keys)),
         "train",
         np.where(np.isin(inchikey_14_arr, list(val_keys)), "val", "test"),
     )
-
     n_valid = len(idx)
-    spectra = raw_spectra[idx].astype(np.float32)
-    precursor = raw_precursor[idx].astype(np.float32)
-    smiles_arr = raw_smiles[idx]
-    adduct_arr = raw_adduct[idx]
-
-    retention = np.zeros(n_valid, dtype=np.float32)
-    instrument_type_arr = np.full(n_valid, "unknown", dtype=object)
-    collision_energy_arr = np.zeros(n_valid, dtype=np.float32)
-    collision_energy_present_arr = np.zeros(n_valid, dtype=np.int32)
-
     logger.info(
         "NIST20 split: %d train, %d val, %d test across %d unique molecules",
         np.count_nonzero(fold_arr == "train"),
@@ -194,17 +146,16 @@ def _load_nist20_hdf5(hdf5_path: Path) -> dict[str, np.ndarray]:
         np.count_nonzero(fold_arr == "test"),
         n_keys,
     )
-
     return {
-        "spectra": spectra,
-        "retention": retention,
-        "precursor": precursor,
+        "spectra": raw_spectra[idx].astype(np.float32),
+        "retention": np.zeros(n_valid, dtype=np.float32),
+        "precursor": raw_precursor[idx].astype(np.float32),
         "fold": fold_arr,
-        "smiles": smiles_arr,
-        "adduct": adduct_arr,
-        "instrument_type": instrument_type_arr,
-        "collision_energy": collision_energy_arr,
-        "collision_energy_present": collision_energy_present_arr,
+        "smiles": raw_smiles[idx],
+        "adduct": raw_adduct[idx],
+        "instrument_type": np.full(n_valid, "unknown", dtype=object),
+        "collision_energy": np.zeros(n_valid, dtype=np.float32),
+        "collision_energy_present": np.zeros(n_valid, dtype=np.int32),
     }
 
 
@@ -225,8 +176,7 @@ def _encode_categorical_ids(values: np.ndarray) -> tuple[np.ndarray, dict[str, i
     normalized = np.asarray([str(v) or "unknown" for v in values], dtype=object)
     categories = ["unknown"] + sorted(set(normalized.tolist()) - {"unknown"})
     vocab = {category: i for i, category in enumerate(categories)}
-    ids = np.asarray([vocab[v] for v in normalized], dtype=np.int32)
-    return ids, vocab
+    return np.asarray([vocab[v] for v in normalized], dtype=np.int32), vocab
 
 
 def _float_feat(v) -> tf.train.Feature:
@@ -256,36 +206,25 @@ def _write_tfrecords_with_fingerprint(
     probe_valid_mol: np.ndarray,
     output_path: Path,
     num_shards: int,
-    desc: str,
 ) -> tuple[list[str], list[int]]:
     n = len(spectra)
     num_shards = max(1, min(num_shards, n))
     shard_size = math.ceil(n / num_shards)
-
     output_path.mkdir(parents=True, exist_ok=True)
-    files: list[str] = []
-    lengths: list[int] = []
-
+    files, lengths = [], []
     for shard_id in range(num_shards):
-        start = shard_id * shard_size
-        end = min(start + shard_size, n)
-        if start >= end:
+        if (start := shard_id * shard_size) >= (end := min(start + shard_size, n)):
             break
-
         shard_file = output_path / f"shard-{shard_id:05d}-of-{num_shards:05d}.tfrecord"
         options = tf.io.TFRecordOptions(compression_type="GZIP")
-
         with tf.io.TFRecordWriter(str(shard_file), options=options) as writer:  # type: ignore[attr-defined]
             for i in range(start, end):
-                mz = spectra[i, 0].astype(np.float32)
-                intensity = spectra[i, 1].astype(np.float32)
-                fp = fingerprint[i].astype(np.int64)
                 feat = {
-                    "mz": _float_feat(mz),
-                    "intensity": _float_feat(intensity),
+                    "mz": _float_feat(spectra[i, 0].astype(np.float32)),
+                    "intensity": _float_feat(spectra[i, 1].astype(np.float32)),
                     "rt": _float_feat([retention[i]]),
                     "precursor_mz": _float_feat([precursor[i]]),
-                    "fingerprint": _int64_feat(fp),
+                    "fingerprint": _int64_feat(fingerprint[i].astype(np.int64)),
                     "smiles": _bytes_feat([str(smiles[i]).encode("utf-8")]),
                     "adduct_id": _int64_feat([int(adduct_id[i])]),
                     "instrument_type_id": _int64_feat([int(instrument_type_id[i])]),
@@ -305,10 +244,8 @@ def _write_tfrecords_with_fingerprint(
                     )
                 example = tf.train.Example(features=tf.train.Features(feature=feat))
                 writer.write(example.SerializeToString())
-
         files.append(shard_file.name)
         lengths.append(end - start)
-
     return files, lengths
 
 
@@ -327,12 +264,10 @@ def _filter_encode_and_write(
     num_shards: int,
     max_precursor_mz: float,
     metadata_version: int,
-    desc_prefix: str,
 ) -> dict[str, Any]:
     fingerprints = _compute_morgan_fingerprints(smiles)
     adduct_id, adduct_vocab = _encode_categorical_ids(adduct)
     instrument_type_id, instrument_type_vocab = _encode_categorical_ids(instrument_type)
-
     keep = np.isfinite(precursor) & (precursor <= float(max_precursor_mz))
     spectra = spectra[keep]
     retention = retention[keep]
@@ -347,19 +282,14 @@ def _filter_encode_and_write(
     probe_mol_props, probe_fg_binary, probe_valid_mol = build_probe_targets_for_rows(
         smiles
     )
-
-    splits = [
-        ("train", num_shards // 2),
-        ("val", num_shards // 4),
-        ("test", num_shards // 4),
-    ]
     result: dict[str, Any] = {
         "metadata_version": metadata_version,
         "adduct_vocab": adduct_vocab,
         "instrument_type_vocab": instrument_type_vocab,
         "max_precursor_mz": float(max_precursor_mz),
     }
-    for split_name, split_shards in splits:
+    s2, s4 = num_shards // 2, num_shards // 4
+    for split_name, split_shards in [("train", s2), ("val", s4), ("test", s4)]:
         mask = fold == split_name
         files, lengths = _write_tfrecords_with_fingerprint(
             spectra[mask],
@@ -376,7 +306,6 @@ def _filter_encode_and_write(
             probe_valid_mol[mask],
             output_dir / split_name,
             max(1, split_shards),
-            desc=f"{desc_prefix} {split_name.capitalize()}",
         )
         result[f"{split_name}_files"] = files
         result[f"{split_name}_lengths"] = lengths
@@ -389,10 +318,9 @@ def _probe_metadata_valid(
     expected_version: int,
     max_precursor_mz: float,
 ) -> dict[str, Any] | None:
-    metadata_path = output_dir / _METADATA_FILENAME
-    if not metadata_path.exists():
+    if not (output_dir / _METADATA_FILENAME).exists():
         return None
-    with metadata_path.open() as f:
+    with (output_dir / _METADATA_FILENAME).open() as f:
         metadata = json.load(f)
     if int(metadata.get("metadata_version", 0)) != expected_version:
         return None
@@ -423,7 +351,7 @@ def ensure_massspec_probe_prepared(
         return cached
     output_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Downloading MassSpecGym TSV...")
-    tsv_path = download_massspec_tsv(output_dir)
+    tsv_path = _download_hf_file(MASSSPEC_HF_REPO, MASSSPEC_TSV_PATH, output_dir)
     logger.info("Loading MassSpecGym data...")
     metadata = _filter_encode_and_write(
         **_load_massspec_tsv(tsv_path),
@@ -431,7 +359,6 @@ def ensure_massspec_probe_prepared(
         num_shards=num_shards,
         max_precursor_mz=max_precursor_mz,
         metadata_version=MASSSPEC_METADATA_VERSION,
-        desc_prefix="MassSpec",
     )
     with (output_dir / _METADATA_FILENAME).open("w") as f:
         json.dump(metadata, f, indent=2)
@@ -453,7 +380,10 @@ def ensure_nist20_probe_prepared(
         logger.info("Found existing NIST20 probe TFRecords at %s", output_dir)
         return cached
     output_dir.mkdir(parents=True, exist_ok=True)
-    hdf5_path = _ensure_nist20_hdf5(data_dir)
+    hdf5_path = data_dir / NIST20_HF_FILENAME
+    if not hdf5_path.exists():
+        logger.info("NIST20 HDF5 not found locally, downloading from HuggingFace...")
+        hdf5_path = _download_hf_file(NIST20_HF_REPO, NIST20_HF_FILENAME, data_dir)
     logger.info("Loading NIST20+MoNA HDF5 from %s ...", hdf5_path)
     metadata = _filter_encode_and_write(
         **_load_nist20_hdf5(hdf5_path),
@@ -461,7 +391,6 @@ def ensure_nist20_probe_prepared(
         num_shards=num_shards,
         max_precursor_mz=max_precursor_mz,
         metadata_version=NIST20_METADATA_VERSION,
-        desc_prefix="NIST20",
     )
     with (output_dir / _METADATA_FILENAME).open("w") as f:
         json.dump(metadata, f, indent=2)
@@ -502,21 +431,15 @@ def _parse_probe_batch(
         parsed = tf.io.parse_example(serialized_batch, feature_spec)
         mz = parsed["mz"]
         intensity = parsed["intensity"]
-        rt = parsed["rt"][:, 0]
         precursor_mz_val = parsed["precursor_mz"][:, 0]
-
         keep = (mz >= peak_mz_min) & (mz <= peak_mz_max) & (intensity >= min_int)
         mz = tf.where(keep, mz, 0.0)
         intensity = tf.where(keep, intensity, 0.0)
-
-        values, indices = tf.math.top_k(intensity, k=_NUM_PEAKS_OUTPUT, sorted=True)
-        intensity = values
+        intensity, indices = tf.math.top_k(intensity, k=_NUM_PEAKS_OUTPUT, sorted=True)
         mz = tf.gather(mz, indices, batch_dims=1)
-
         max_intensity = tf.reduce_max(intensity, axis=1, keepdims=True)
         max_intensity = tf.maximum(max_intensity, 1e-8)
         intensity = intensity / max_intensity
-
         valid = intensity > 0
         if peak_ordering == "mz":
             sort_key = tf.where(valid, mz, tf.fill(tf.shape(mz), float("inf")))
@@ -532,14 +455,13 @@ def _parse_probe_batch(
         valid = tf.gather(valid, sorted_idx, batch_dims=1)
         mz = tf.where(valid, mz, 0.0)
         intensity = tf.where(valid, intensity, 0.0)
-
         batch = {
             "peak_mz": mz / peak_mz_max,
-            "peak_intensity": tf.where(valid, intensity, 0.0),
+            "peak_intensity": intensity,
             "peak_valid_mask": valid,
             "precursor_mz": tf.clip_by_value(precursor_mz_val, 0.0, max_prec)
             / max_prec,
-            "rt": rt,
+            "rt": parsed["rt"][:, 0],
             "mz": mz,
             "intensity": intensity,
             "fingerprint": tf.cast(parsed["fingerprint"], tf.int32),
@@ -576,10 +498,8 @@ def _build_probe_dataset(
     min_peak_intensity: float,
     peak_ordering: str,
     use_precursor_token: bool = False,
-    num_parallel_reads: int | None = None,
+    num_parallel_reads: int = tf.data.AUTOTUNE,
 ) -> tf.data.Dataset:
-    if num_parallel_reads is None:
-        num_parallel_reads = tf.data.AUTOTUNE
     ds = tf.data.TFRecordDataset(
         filenames,
         compression_type="GZIP",
@@ -602,12 +522,10 @@ def _build_probe_dataset(
     options = tf.data.Options()
     options.deterministic = True
     ds = ds.with_options(options)
-    ds = ds.prefetch(tf.data.AUTOTUNE)
-    return ds
+    return ds.prefetch(tf.data.AUTOTUNE)
 
 
-@dataclass(slots=True)
-class MassSpecProbeData:
+class MassSpecProbeData(NamedTuple):
     info: dict[str, Any]
     train_files: list[str]
     val_files: list[str]
@@ -622,7 +540,6 @@ class MassSpecProbeData:
 
     @classmethod
     def from_config(cls, config: config_dict.ConfigDict) -> "MassSpecProbeData":
-        probe_dataset = str(config.get("probe_dataset", "massspec"))
         tfrecord_base = (
             Path(config.get("tfrecord_dir", str(_DEFAULT_TFRECORD_DIR)))
             .expanduser()
@@ -631,8 +548,7 @@ class MassSpecProbeData:
         max_precursor_mz = float(
             config.get("max_precursor_mz", _DEFAULT_MAX_PRECURSOR_MZ)
         )
-
-        if probe_dataset == "nist20":
+        if str(config.get("probe_dataset", "massspec")) == "nist20":
             output_dir = tfrecord_base / "nist20_probe"
             metadata = ensure_nist20_probe_prepared(
                 output_dir,
@@ -645,7 +561,6 @@ class MassSpecProbeData:
                 output_dir,
                 max_precursor_mz=max_precursor_mz,
             )
-
         adduct_vocab = metadata.get("adduct_vocab", {"unknown": 0})
         instrument_type_vocab = metadata.get("instrument_type_vocab", {"unknown": 0})
         info = {
@@ -689,15 +604,13 @@ class MassSpecProbeData:
         peak_ordering: str | None = None,
         shuffle: bool = False,
         drop_remainder: bool = True,
-        num_parallel_reads: int | None = None,
+        num_parallel_reads: int = tf.data.AUTOTUNE,
     ) -> tf.data.Dataset:
         files = {
             "massspec_train": self.train_files,
             "massspec_val": self.val_files,
             "massspec_test": self.test_files,
         }[split]
-        if peak_ordering is None:
-            peak_ordering = self.peak_ordering
         return _build_probe_dataset(
             files,
             batch_size=self.batch_size,
@@ -707,7 +620,7 @@ class MassSpecProbeData:
             tfrecord_buffer_size=self.tfrecord_buffer_size,
             max_precursor_mz=self.max_precursor_mz,
             min_peak_intensity=self.min_peak_intensity,
-            peak_ordering=peak_ordering,
+            peak_ordering=peak_ordering or self.peak_ordering,
             use_precursor_token=self.use_precursor_token,
             num_parallel_reads=num_parallel_reads,
         )

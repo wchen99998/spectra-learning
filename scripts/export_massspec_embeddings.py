@@ -113,7 +113,9 @@ def _encode_split(
     )
     smiles_iter = _iter_split_smiles(config, split)
     adduct_vocab = _inverse_vocab(massspec_data.info["massspec_adduct_vocab"])
-    instrument_type_vocab = _inverse_vocab(massspec_data.info["massspec_instrument_type_vocab"])
+    instrument_type_vocab = _inverse_vocab(
+        massspec_data.info["massspec_instrument_type_vocab"]
+    )
 
     writer: pq.ParquetWriter | None = None
     total_rows = 0
@@ -130,14 +132,17 @@ def _encode_split(
             peak_valid_mask = batch["peak_valid_mask"]
             if model.use_precursor_token:
                 expanded = PeakSetSIGReg.prepend_precursor_token(
-                    peak_mz, peak_intensity, peak_valid_mask,
+                    peak_mz,
+                    peak_intensity,
+                    peak_valid_mask,
                     batch["precursor_mz"],
                 )
                 peak_mz = expanded["peak_mz"]
                 peak_intensity = expanded["peak_intensity"]
                 peak_valid_mask = expanded["peak_valid_mask"]
             embeddings = model.encoder(
-                peak_mz, peak_intensity,
+                peak_mz,
+                peak_intensity,
                 valid_mask=peak_valid_mask,
             )
             pooled_encoder = model.pool(embeddings, peak_valid_mask)
@@ -159,15 +164,22 @@ def _encode_split(
                 "split": split,
                 "peak_ordering": peak_ordering,
                 "seed": str(seed),
-                "massspec_adduct_vocab": json.dumps(massspec_data.info["massspec_adduct_vocab"]),
+                "massspec_adduct_vocab": json.dumps(
+                    massspec_data.info["massspec_adduct_vocab"]
+                ),
                 "massspec_instrument_type_vocab": json.dumps(
                     massspec_data.info["massspec_instrument_type_vocab"]
                 ),
             }
             schema = table.schema.with_metadata(
-                {key.encode("utf-8"): value.encode("utf-8") for key, value in schema_metadata.items()}
+                {
+                    key.encode("utf-8"): value.encode("utf-8")
+                    for key, value in schema_metadata.items()
+                }
             )
-            writer = pq.ParquetWriter(output_path, schema=schema, compression=compression)
+            writer = pq.ParquetWriter(
+                output_path, schema=schema, compression=compression
+            )
         writer.write_table(table.cast(writer.schema))
         total_rows += table.num_rows
 
@@ -182,7 +194,9 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--config", required=True, help="Path to config file.")
     parser.add_argument("--checkpoint", required=True, help="Path to model checkpoint.")
-    parser.add_argument("--output_dir", required=True, help="Directory for parquet outputs.")
+    parser.add_argument(
+        "--output_dir", required=True, help="Directory for parquet outputs."
+    )
     parser.add_argument(
         "--split",
         default="all",

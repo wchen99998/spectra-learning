@@ -61,13 +61,14 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.probe_dataset = "massspec"  # "massspec" or "nist20"
 
     # Muon optimizer defaults (only used when cfg.optimizer == "muon")
-    cfg.muon_lr = None              # Falls back to cfg.learning_rate
-    cfg.adamw_lr = None             # Falls back to cfg.learning_rate
+    cfg.muon_lr = None  # Falls back to cfg.learning_rate
+    cfg.adamw_lr = None  # Falls back to cfg.learning_rate
     cfg.muon_momentum = 0.95
     cfg.muon_nesterov = True
     cfg.muon_ns_steps = 5
-    cfg.muon_weight_decay = None    # Falls back to cfg.weight_decay
+    cfg.muon_weight_decay = None  # Falls back to cfg.weight_decay
     cfg.muon_adjust_lr_fn = "match_rms_adamw"
+
 
 def apply_tune_defaults(cfg: config_dict.ConfigDict) -> None:
     """Apply default tune search space definition.
@@ -79,5 +80,5 @@ def apply_tune_defaults(cfg: config_dict.ConfigDict) -> None:
         # {"param": "learning_rate", "dist": "grid", "args": [1e-4, 4e-4]},
         # {"param": "jepa_target_fraction", "dist": "grid", "args": [0.125, 0.25]},
         # {"param": "weight_decay", "dist": "grid", "args": [1e-4, 1e-3, 1e-2]},
-        {"param": "sigreg_lambda", "dist": "grid", "args": [10.]},
+        {"param": "sigreg_lambda", "dist": "grid", "args": [10.0]},
     ]

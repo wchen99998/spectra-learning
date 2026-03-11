@@ -10,13 +10,17 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 B, N, D = 16, 60, 128
 
 
-def _make_batch(batch_size: int = B, num_peaks: int = N, num_targets: int = 3, device: str = DEVICE) -> dict[str, torch.Tensor]:
+def _make_batch(
+    batch_size: int = B, num_peaks: int = N, num_targets: int = 3, device: str = DEVICE
+) -> dict[str, torch.Tensor]:
     peak_valid_mask = torch.ones(batch_size, num_peaks, dtype=torch.bool, device=device)
     peak_mz = torch.rand(batch_size, num_peaks, device=device)
     peak_intensity = torch.rand(batch_size, num_peaks, device=device)
     context_mask = torch.zeros(batch_size, num_peaks, dtype=torch.bool, device=device)
     context_mask[:, :12] = True
-    target_masks = torch.zeros(batch_size, num_targets, num_peaks, dtype=torch.bool, device=device)
+    target_masks = torch.zeros(
+        batch_size, num_targets, num_peaks, dtype=torch.bool, device=device
+    )
     for target_idx in range(num_targets):
         target_masks[:, target_idx, 12 + target_idx] = True
     return {
@@ -36,7 +40,7 @@ def test_attention_mask_plumbing():
     attn = Attention(D, n_heads=4).to(DEVICE).eval()
     x = torch.randn(2, N, D, device=DEVICE)
     visible_mask = torch.ones(2, N, dtype=torch.bool, device=DEVICE)
-    visible_mask[:, N // 2:] = False
+    visible_mask[:, N // 2 :] = False
     block_mask = create_visible_block_mask(visible_mask)
 
     with torch.no_grad():
@@ -60,12 +64,16 @@ def test_sigreg_forward():
 
 def test_encoder_with_visible_mask():
     torch.manual_seed(42)
-    encoder = PeakSetEncoder(
-        model_dim=D,
-        num_layers=2,
-        num_heads=4,
-        feature_mlp_hidden_dim=64,
-    ).to(DEVICE).eval()
+    encoder = (
+        PeakSetEncoder(
+            model_dim=D,
+            num_layers=2,
+            num_heads=4,
+            feature_mlp_hidden_dim=64,
+        )
+        .to(DEVICE)
+        .eval()
+    )
     batch = _make_batch()
 
     with torch.no_grad():
@@ -89,18 +97,18 @@ def test_encoder_with_visible_mask():
 
 def test_full_model_forward():
     torch.manual_seed(42)
-    model = PeakSetSIGReg(
-        num_peaks=N,
-        model_dim=D,
-        encoder_num_layers=2,
-        encoder_num_heads=4,
-        feature_mlp_hidden_dim=64,
-        sigreg_num_slices=128,
-        jepa_num_target_blocks=3,
-        jepa_context_fraction=0.2,
-        jepa_target_fraction=0.1,
-        jepa_block_min_len=1,
-    ).to(DEVICE).eval()
+    model = (
+        PeakSetSIGReg(
+            model_dim=D,
+            encoder_num_layers=2,
+            encoder_num_heads=4,
+            feature_mlp_hidden_dim=64,
+            sigreg_num_slices=128,
+            jepa_num_target_blocks=3,
+        )
+        .to(DEVICE)
+        .eval()
+    )
     batch = _make_batch(num_targets=model.jepa_num_target_blocks)
 
     with torch.no_grad():
@@ -113,4 +121,3 @@ def test_full_model_forward():
     assert "masked_fraction" in result
     for value in result.values():
         assert torch.isfinite(value)
-

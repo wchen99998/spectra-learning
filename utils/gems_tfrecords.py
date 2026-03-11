@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import multiprocessing as mp
 import json
 import logging
@@ -60,7 +58,6 @@ def _write_shard(
             }
             example = tf.train.Example(features=tf.train.Features(feature=feat))
             writer.write(example.SerializeToString())
-
     return shard_file.name, len(spectra)
 
 
@@ -77,22 +74,12 @@ def write_peaklist_tfrecords(
     n = len(spectra)
     num_shards = max(1, min(num_shards, n))
     shard_size = math.ceil(n / num_shards)
-
     output_path.mkdir(parents=True, exist_ok=True)
-    jobs: list[tuple[int, np.ndarray, np.ndarray, np.ndarray]] = []
-    for shard_id in range(num_shards):
-        start = shard_id * shard_size
-        end = min(start + shard_size, n)
-        if start < end:
-            jobs.append(
-                (
-                    shard_id,
-                    spectra[start:end],
-                    retention[start:end],
-                    precursor[start:end],
-                )
-            )
-
+    jobs = [
+        (sid, spectra[s:e], retention[s:e], precursor[s:e])
+        for sid in range(num_shards)
+        if (s := sid * shard_size) < (e := min((sid + 1) * shard_size, n))
+    ]
     _path_str = str(output_path)
 
     def _call(sid, sp, rt, pc):
@@ -138,7 +125,6 @@ def build_gems_tfrecord_artifact(
 ) -> dict[str, Any]:
     log.info("Loading GeMS data from %s", hdf5_path)
     spectra, retention, precursor = load_gems_arrays(hdf5_path)
-
     mask = (
         np.isfinite(retention)
         & (retention > 0.0)
@@ -148,16 +134,12 @@ def build_gems_tfrecord_artifact(
     spectra = spectra[mask]
     retention = retention[mask]
     precursor = precursor[mask]
-
     n = len(spectra)
     log.info("Valid GeMS spectra: %d", n)
-
-    rng = np.random.default_rng(CANONICAL_SPLIT_SEED)
-    perm = rng.permutation(n)
+    perm = np.random.default_rng(CANONICAL_SPLIT_SEED).permutation(n)
     train_size = int(n * (1.0 - CANONICAL_VALIDATION_FRACTION))
     train_idx = perm[:train_size]
     val_idx = perm[train_size:]
-
     output_dir.mkdir(parents=True, exist_ok=True)
     train_files, train_lengths = write_peaklist_tfrecords(
         spectra[train_idx],
@@ -177,7 +159,6 @@ def build_gems_tfrecord_artifact(
         desc="Validation",
         num_workers=_resolve_num_workers(num_workers),
     )
-
     metadata = {
         "gems_metadata_version": GEMS_METADATA_VERSION,
         "num_peaks_input": _NUM_PEAKS_INPUT,
@@ -211,10 +192,9 @@ def load_gems_metadata(artifact_dir: Path) -> dict[str, Any]:
 
 
 def validate_gems_artifact(artifact_dir: Path, metadata: dict[str, Any]) -> None:
-    version = int(metadata["gems_metadata_version"])
-    if version != GEMS_METADATA_VERSION:
+    if int(metadata["gems_metadata_version"]) != GEMS_METADATA_VERSION:
         raise ValueError(
-            f"Expected GeMS metadata version {GEMS_METADATA_VERSION}, got {version}"
+            f"Expected GeMS metadata version {GEMS_METADATA_VERSION}, got {metadata['gems_metadata_version']}"
         )
     for split, key in [("train", "train_files"), ("validation", "validation_files")]:
         for name in metadata[key]:
