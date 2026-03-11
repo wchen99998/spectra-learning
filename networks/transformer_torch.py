@@ -8,11 +8,6 @@ from torch.nn.attention.flex_attention import (
     flex_attention,
 )
 
-try:
-    from kernels.fused_rope import fused_apply_rotary_emb as _fused_rope
-except ImportError:
-    _fused_rope = None
-
 
 def create_visible_block_mask(visible_mask: torch.Tensor) -> BlockMask:
     B, N = visible_mask.shape
@@ -38,8 +33,6 @@ def apply_rotary_emb(
     freqs_cos: torch.Tensor,
     freqs_sin: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if _fused_rope is not None and xq.is_cuda:
-        return _fused_rope(xq, xk, freqs_cos, freqs_sin)
     q_rot = _rotate_half(xq)
     k_rot = _rotate_half(xk)
     return (xq * freqs_cos) + (q_rot * freqs_sin), (xk * freqs_cos) + (

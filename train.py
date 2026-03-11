@@ -26,10 +26,7 @@ from utils.training import (
     build_logger,
     build_model_from_config,
     collect_and_log_param_metrics,
-    patch_muon_batched_step,
 )
-
-patch_muon_batched_step()
 
 torch.set_float32_matmul_precision("medium")
 torch._dynamo.config.capture_scalar_outputs = True
