@@ -39,7 +39,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_context_fraction = 0.3
     cfg.jepa_target_fraction = 0.25
     cfg.jepa_block_min_len = 1
-    cfg.sigreg_mz_jitter_std = 0.005
+    cfg.sigreg_mz_jitter_std = 0.001
     cfg.sigreg_intensity_jitter_std = 0.05
     cfg.norm_type = "layernorm"
 
@@ -64,8 +64,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataloader_persistent_workers = True
 
     cfg.masked_token_loss_weight = 1.0
-    cfg.masked_token_loss_type = "l2_sum"
-    cfg.normalize_jepa_targets = True
+    cfg.masked_token_loss_type = "l2"
+    cfg.normalize_jepa_targets = False
     cfg.use_ema_teacher_target = True
     cfg.teacher_ema_decay = 0.9999
     cfg.teacher_ema_decay_start = 0.995
