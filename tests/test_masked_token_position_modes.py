@@ -16,7 +16,6 @@ def _build_model(
         encoder_num_heads=4,
         feature_mlp_hidden_dim=32,
         encoder_use_rope=encoder_use_rope,
-        pooling_type="mean",
         jepa_num_target_blocks=num_target_blocks,
         masked_token_loss_weight=1.0,
         masked_latent_predictor_num_layers=predictor_layers,

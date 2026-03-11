@@ -46,9 +46,6 @@ def build_model(cfg) -> PeakSetSIGReg:
         jepa_block_min_len=cfg.jepa_block_min_len,
         sigreg_mz_jitter_std=cfg.sigreg_mz_jitter_std,
         sigreg_intensity_jitter_std=cfg.sigreg_intensity_jitter_std,
-        pooling_type=cfg.pooling_type,
-        pma_num_heads=getattr(cfg, "pma_num_heads", None),
-        pma_num_seeds=cfg.pma_num_seeds,
     )
 
 
@@ -124,10 +121,9 @@ def diagnose_encoder(model: PeakSetSIGReg, batch: dict[str, torch.Tensor]):
         x = h + ffn_out
         _report(f"block_{i:02d}/post_ffn_residual", x, visible_mask)
 
-    # Pooling
-    pooled, pooled_raw = model.pool_with_raw(x, visible_mask)
-    _report_1d("pool_raw", pooled_raw)
-    _report_1d("pool_normed", pooled)
+    # Pooling (mean)
+    pooled = model.pool(x, visible_mask)
+    _report_1d("pool_mean", pooled)
 
 
 def _report(name: str, x: torch.Tensor, valid_mask: torch.Tensor):
@@ -176,10 +172,6 @@ def diagnose_norm_weights(model: PeakSetSIGReg):
         print(
             f"  block_{i:02d}/ffn_norm   mean={ffn_w.mean():.4f}  std={ffn_w.std():.4f}  min={ffn_w.min():.4f}  max={ffn_w.max():.4f}"
         )
-    pool_w = model.pool_norm.weight
-    print(
-        f"  pool_norm             mean={pool_w.mean():.4f}  std={pool_w.std():.4f}  min={pool_w.min():.4f}  max={pool_w.max():.4f}"
-    )
 
 
 @torch.no_grad()

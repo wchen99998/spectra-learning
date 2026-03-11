@@ -30,14 +30,64 @@ class MsgProbeSplitTargets(NamedTuple):
     classification: dict[str, np.ndarray]
 
 
+class MsgProbePooler(torch.nn.Module):
+    def __init__(
+        self,
+        *,
+        model_dim: int,
+        pooling_type: str = "mean",
+        pma_num_heads: int = 8,
+        pma_num_seeds: int = 1,
+        norm_type: str = "rmsnorm",
+    ) -> None:
+        super().__init__()
+        self.pooling_type = pooling_type
+        if pooling_type == "pma":
+            self.pool_query = torch.nn.Parameter(
+                torch.empty(pma_num_seeds, model_dim)
+            )
+            torch.nn.init.xavier_normal_(self.pool_query)
+            self.pool_mha = torch.nn.MultiheadAttention(
+                embed_dim=model_dim,
+                num_heads=pma_num_heads,
+                batch_first=True,
+            )
+            kind = str(norm_type).lower()
+            if kind == "rmsnorm":
+                self.pool_norm = torch.nn.RMSNorm(model_dim, eps=1e-5)
+            else:
+                self.pool_norm = torch.nn.LayerNorm(model_dim, eps=1e-5)
+
+    def forward(
+        self,
+        embeddings: torch.Tensor,
+        valid_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.pooling_type == "pma":
+            pooled, _ = self.pool_mha(
+                query=self.pool_query.unsqueeze(0).expand(
+                    embeddings.shape[0], -1, -1
+                ),
+                key=embeddings,
+                value=embeddings,
+                key_padding_mask=~valid_mask,
+                need_weights=False,
+            )
+            return self.pool_norm(pooled.mean(dim=1))
+        mask = valid_mask.unsqueeze(-1).float()
+        return (embeddings * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
+
+
 class MsgLinearProbe(torch.nn.Module):
     def __init__(
         self,
         *,
         input_dim: int,
         task_names: tuple[str, ...],
+        pooler: MsgProbePooler,
     ) -> None:
         super().__init__()
+        self.pooler = pooler
         self.heads = torch.nn.ModuleDict(
             {name: torch.nn.Linear(input_dim, 1) for name in task_names}
         )
@@ -166,12 +216,15 @@ def _probe_step(
     *,
     task_spec: MsgProbeTaskSpec,
     device: torch.device,
-    feature_extractor: Callable[[dict[str, torch.Tensor]], torch.Tensor],
+    feature_extractor: Callable[
+        [dict[str, torch.Tensor]], tuple[torch.Tensor, torch.Tensor]
+    ],
 ) -> dict[str, object] | None:
-    pooled = feature_extractor(batch)
+    token_emb, peak_valid_mask = feature_extractor(batch)
     valid_mask = batch["probe_valid_mol"].to(device=device, dtype=torch.bool)
     if not bool(valid_mask.any()):
         return None
+    pooled = probe.pooler(token_emb, peak_valid_mask)
     pooled = pooled[valid_mask]
     logits = probe(pooled)
     losses, predictions, task_targets = {}, {}, {}
@@ -270,17 +323,23 @@ def run_msg_probe(
     max_train_samples = int(_mts) if _mts is not None else None
     _mte = config.get("msg_probe_max_test_samples", None)
     max_test_samples = int(_mte) if _mte is not None else None
+    probe_pooling_type = str(config.get("msg_probe_pooling_type", "mean"))
+    probe_pma_num_heads = int(config.get("msg_probe_pma_num_heads", config.num_heads))
+    probe_pma_num_seeds = int(config.get("msg_probe_pma_num_seeds", 1))
+    norm_type = str(config.get("norm_type", "rmsnorm"))
     peak_ordering = str(config.get("peak_ordering", "intensity"))
     probe_data = MassSpecProbeData.from_config(config)
 
     @torch.no_grad()
-    def feature_extractor(batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    def feature_extractor(
+        batch: dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         embeddings = model.encoder(
             batch["peak_mz"],
             batch["peak_intensity"],
             valid_mask=batch["peak_valid_mask"],
         )
-        return model.pool(embeddings, batch["peak_valid_mask"])
+        return embeddings, batch["peak_valid_mask"]
 
     train_seed_base = int(config.seed) + 1_100_000
     test_seed_base = int(config.seed) + 1_200_000
@@ -301,9 +360,17 @@ def run_msg_probe(
     task_spec = _build_task_spec(train_targets=train_targets, test_targets=test_targets)
     was_training = model.training
     model.eval()
+    pooler = MsgProbePooler(
+        model_dim=int(config.model_dim),
+        pooling_type=probe_pooling_type,
+        pma_num_heads=probe_pma_num_heads,
+        pma_num_seeds=probe_pma_num_seeds,
+        norm_type=norm_type,
+    )
     probe = MsgLinearProbe(
         input_dim=int(config.model_dim),
         task_names=task_spec.regression_tasks + task_spec.classification_tasks,
+        pooler=pooler,
     ).to(device)
     optimizer = torch.optim.AdamW(
         probe.parameters(),

@@ -6,10 +6,7 @@ from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 
 from models.losses import SIGReg
 from networks import transformer_torch
-from networks.transformer_torch import (
-    _build_norm,
-    create_visible_block_mask,
-)
+from networks.transformer_torch import create_visible_block_mask
 
 
 def _build_non_causal_blocks(
@@ -180,9 +177,6 @@ class PeakSetSIGReg(nn.Module):
         teacher_ema_decay_start: float = 0.0,
         teacher_ema_decay_warmup_steps: int = 0,
         teacher_ema_update_every: int = 1,
-        pooling_type: str = "pma",
-        pma_num_heads: int | None = None,
-        pma_num_seeds: int = 1,
         encoder_qk_norm: bool = False,
         norm_type: str = "rmsnorm",
         use_precursor_token: bool = False,
@@ -267,8 +261,6 @@ class PeakSetSIGReg(nn.Module):
             persistent=False,
         )
         _reg("teacher_ema_update_step", torch.zeros((), dtype=torch.int64))
-        self.pooling_type = pooling_type
-        self.pma_num_seeds = int(pma_num_seeds)
         self.masked_token_loss_weight = float(masked_token_loss_weight)
         self.masked_token_loss_type = str(masked_token_loss_type).lower()
         self.norm_type = str(norm_type).lower()
@@ -296,16 +288,6 @@ class PeakSetSIGReg(nn.Module):
             self.teacher_encoder.eval()
         else:
             self.teacher_encoder = None
-        self.pool_query = nn.Parameter(torch.empty(self.pma_num_seeds, model_dim))
-        nn.init.xavier_normal_(self.pool_query)
-        self.pool_mha = nn.MultiheadAttention(
-            embed_dim=model_dim,
-            num_heads=int(encoder_num_heads)
-            if pma_num_heads is None
-            else int(pma_num_heads),
-            batch_first=True,
-        )
-        self.pool_norm = _build_norm(model_dim, eps=1e-5, norm_type=self.norm_type)
         self.latent_mask_token = nn.Parameter(torch.empty(self.model_dim))
         nn.init.normal_(self.latent_mask_token, std=0.02)
         pred_heads = max(1, min(int(encoder_num_heads), self.model_dim // 16))
@@ -400,29 +382,8 @@ class PeakSetSIGReg(nn.Module):
         embeddings: torch.Tensor,
         valid_mask: torch.Tensor,
     ) -> torch.Tensor:
-        return self.pool_with_raw(embeddings, valid_mask)[0]
-
-    def pool_with_raw(
-        self,
-        embeddings: torch.Tensor,
-        valid_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.pooling_type == "mean":
-            mask = valid_mask.unsqueeze(-1).float()
-            pooled = (embeddings * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
-            return pooled, pooled
-        if self.pooling_type == "pma":
-            pooled, _ = self.pool_mha(
-                query=self.pool_query.unsqueeze(0).expand(embeddings.shape[0], -1, -1),
-                key=embeddings,
-                value=embeddings,
-                key_padding_mask=~valid_mask,
-                need_weights=False,
-            )
-            pooled_raw = pooled.mean(dim=1)
-            pooled = self.pool_norm(pooled_raw)
-            return pooled, pooled_raw
-        raise NotImplementedError(f"Unknown pooling type: {self.pooling_type}")
+        mask = valid_mask.unsqueeze(-1).float()
+        return (embeddings * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
 
     @staticmethod
     def prepend_precursor_token(
@@ -596,7 +557,6 @@ class PeakSetSIGReg(nn.Module):
             "gco_c_ema": self.gco_c_ema.to(dtype=context_emb.dtype),
             "gco_constraint": gco_constraint.to(dtype=context_emb.dtype),
             **{f"encoder_{k}": v.to(context_emb.dtype) for k, v in reg_stats.items()},
-            "pool_norm_weight_abs_mean": self.pool_norm.weight.abs().mean(),
             "local_to_global_emb_std_ratio": collapse_metrics["local_emb_std"]
             / collapse_metrics["global_emb_std"],
             **collapse_metrics,

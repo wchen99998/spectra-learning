@@ -43,7 +43,7 @@ def _is_weight_decay_target(name: str, param: torch.nn.Parameter) -> bool:
         and name.endswith("weight")
         and any(
             t in name
-            for t in ("attention.", "feed_forward.", "cross_attn.", "pool_mha.")
+            for t in ("attention.", "feed_forward.", "cross_attn.")
         )
     )
 

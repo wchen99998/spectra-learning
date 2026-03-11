@@ -8,6 +8,7 @@ from input_pipeline import _prepend_precursor_token_tf
 from utils.msg_probe import (
     FG_SMARTS,
     MsgLinearProbe,
+    MsgProbePooler,
     MsgProbeSplitTargets,
     _build_task_spec,
     _collect_split_targets,
@@ -55,9 +56,11 @@ class _DummyDataModule:
 
 class MsgLinearProbeTests(unittest.TestCase):
     def test_output_shapes_match_task_heads(self):
+        pooler = MsgProbePooler(model_dim=32)
         probe = MsgLinearProbe(
             input_dim=32,
             task_names=("mol_weight", "hydroxyl", "amine"),
+            pooler=pooler,
         )
         pooled = torch.randn(7, 32)
         logits = probe(pooled)
@@ -67,9 +70,11 @@ class MsgLinearProbeTests(unittest.TestCase):
         self.assertEqual(logits["amine"].shape, (7, 1))
 
     def test_finite_outputs(self):
+        pooler = MsgProbePooler(model_dim=16)
         probe = MsgLinearProbe(
             input_dim=16,
             task_names=("mol_weight", "hydroxyl"),
+            pooler=pooler,
         )
         pooled = torch.randn(3, 16)
         logits = probe(pooled)
@@ -105,9 +110,12 @@ class MsgProbeStepTests(unittest.TestCase):
             ),
         )
         input_dim = 8
+        num_peaks = 4
+        pooler = MsgProbePooler(model_dim=input_dim)
         probe = MsgLinearProbe(
             input_dim=input_dim,
             task_names=task_spec.regression_tasks + task_spec.classification_tasks,
+            pooler=pooler,
         )
         batch = {
             "probe_valid_mol": torch.tensor([True, False, True], dtype=torch.bool),
@@ -121,7 +129,9 @@ class MsgProbeStepTests(unittest.TestCase):
 
         def dummy_extractor(b):
             n = b["probe_valid_mol"].shape[0]
-            return torch.randn(n, input_dim)
+            token_emb = torch.randn(n, num_peaks, input_dim)
+            valid_mask = torch.ones(n, num_peaks, dtype=torch.bool)
+            return token_emb, valid_mask
 
         result = _probe_step(
             probe,

@@ -18,13 +18,13 @@ def get_config() -> config_dict.ConfigDict:
     cfg.tfrecord_buffer_size = 250_000
     cfg.drop_remainder = True
     cfg.max_precursor_mz = 1000.0
-    cfg.min_peak_intensity = 0.001
+    cfg.min_peak_intensity = 0.0001
     cfg.peak_ordering = "mz"
     cfg.seed = 42
 
     # Model
     cfg.model_type = "sigreg_peak_set"
-    cfg.num_peaks = 63
+    cfg.num_peaks = 64
     cfg.model_dim = 256
     cfg.num_layers = 12
     cfg.num_heads = 8
@@ -33,9 +33,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_qk_norm = False
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 128
-    cfg.pooling_type = "pma"
-    cfg.pma_num_heads = cfg.num_heads
-    cfg.pma_num_seeds = 32
     cfg.sigreg_num_slices = 256
     cfg.sigreg_lambda = 0.1
     cfg.jepa_num_target_blocks = 2
@@ -50,7 +47,7 @@ def get_config() -> config_dict.ConfigDict:
     # Training
     cfg.num_epochs = 100
     cfg.learning_rate = 3e-4
-    cfg.warmup_steps = 10_000
+    cfg.warmup_steps = 0
     cfg.learning_rate_schedule = "l2"
     cfg.min_learning_rate = None
     cfg.b2 = 0.98
@@ -86,8 +83,11 @@ def get_config() -> config_dict.ConfigDict:
     cfg.gco_log_lambda_max = math.log(1000.0)
     cfg.gco_log_lambda_init = math.log(10.0)
     cfg.sigreg_lambda_warmup_steps = 50_000
-    cfg.msg_probe_every_n_steps = 0.5
-    cfg.use_precursor_token = True
+    cfg.msg_probe_every_n_steps = 0.25
+    cfg.msg_probe_pooling_type = "pma"
+    cfg.msg_probe_pma_num_heads = cfg.num_heads
+    cfg.msg_probe_pma_num_seeds = 32
+    cfg.use_precursor_token = False
 
     # Tune search space
     apply_tune_defaults(cfg)

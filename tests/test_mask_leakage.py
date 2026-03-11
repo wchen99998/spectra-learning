@@ -36,8 +36,6 @@ def test_padding_leakage():
         encoder_num_layers=4,
         encoder_num_heads=4,
         feature_mlp_hidden_dim=32,
-        pooling_type="pma",
-        pma_num_seeds=1,
     )
     model.eval()
 
@@ -144,7 +142,6 @@ def test_padding_leakage_mean_pool():
         encoder_num_layers=4,
         encoder_num_heads=4,
         feature_mlp_hidden_dim=32,
-        pooling_type="mean",
     )
     model.eval()
 
