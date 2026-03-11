@@ -356,7 +356,9 @@ class PeakSetSIGReg(nn.Module):
             .permute(1, 0, 2, 3)
         )
         target_masks_by_view = target_masks.permute(1, 0, 2)
-        target_token_target = target_emb.detach()
+        # target_token_target = target_emb.detach()
+        target_token_target = target_emb
+
         ctx_mask_v = context_mask.unsqueeze(0)
         context_emb_by_view = context_emb.unsqueeze(0).expand(K, -1, -1, -1)
         predictor_input = context_emb_by_view * ctx_mask_v.unsqueeze(-1)

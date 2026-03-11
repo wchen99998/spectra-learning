@@ -49,7 +49,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_epochs = 100
     cfg.learning_rate = 3e-4
     cfg.warmup_steps = 10_000
-    cfg.learning_rate_schedule = "l2_sum"
+    cfg.learning_rate_schedule = "l2"
     cfg.min_learning_rate = None
     cfg.b2 = 0.98
     cfg.weight_decay = 1e-5
@@ -73,7 +73,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.teacher_ema_decay_warmup_steps = 100_000
     cfg.grad_clip_norm = 1.0
     cfg.masked_latent_predictor_num_layers = 2
-    cfg.predictor_num_heads = 4
+    cfg.predictor_num_heads = 8
     cfg.autocast_dtype = "bf16"
     cfg.representation_regularizer = "sigreg"
     cfg.gco_var_floor_target = 1.0
