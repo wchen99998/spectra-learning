@@ -412,7 +412,6 @@ def train_and_evaluate(
                         int(m["msg_probe_epoch"]) for m in _probe_epoch_log
                     ]
                     _curve_keys = [
-                        ("loss", "msg_probe/train/loss_total", "msg_probe/test/loss_total"),
                         ("r2_mean", "msg_probe/train/r2_mean", "msg_probe/test/r2_mean"),
                         ("auc_fg_mean", "msg_probe/train/auc_fg_mean", "msg_probe/test/auc_fg_mean"),
                     ]

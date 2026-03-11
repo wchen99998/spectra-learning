@@ -273,8 +273,6 @@ def _new_epoch_state(task_spec: MsgProbeTaskSpec) -> dict[str, object]:
     task_names = task_spec.regression_tasks + task_spec.classification_tasks
     return {
         "count": 0,
-        "loss_total": 0.0,
-        "losses": {name: 0.0 for name in task_names},
         "predictions": {name: [] for name in task_names},
         "targets": {name: [] for name in task_names},
     }
@@ -287,11 +285,9 @@ def _update_epoch_state(
 ) -> None:
     batch_size = int(result["batch_size"])
     epoch_state["count"] += batch_size
-    epoch_state["loss_total"] += float(result["loss_total"].detach()) * batch_size
-    losses, predictions = epoch_state["losses"], epoch_state["predictions"]
+    predictions = epoch_state["predictions"]
     targets = epoch_state["targets"]
     for name in task_spec.regression_tasks + task_spec.classification_tasks:
-        losses[name] += float(result["losses"][name].detach()) * batch_size
         predictions[name].append(result["predictions"][name].detach().cpu().numpy())
         targets[name].append(result["targets"][name].detach().cpu().numpy())
 
@@ -305,21 +301,18 @@ def _score_epoch_state(
     count = int(epoch_state["count"])
     metrics: dict[str, float] = {
         f"{prefix}/samples": float(count),
-        f"{prefix}/loss_total": float(epoch_state["loss_total"]) / count,
     }
     regression_r2_values, classification_auc_values = [], []
-    losses, predictions = epoch_state["losses"], epoch_state["predictions"]
+    predictions = epoch_state["predictions"]
     targets = epoch_state["targets"]
     for name in task_spec.regression_tasks:
         pred = np.concatenate(predictions[name], axis=0)
         target = np.concatenate(targets[name], axis=0)
-        metrics[f"{prefix}/loss_{name}"] = float(losses[name]) / count
         metrics[f"{prefix}/r2_{name}"] = float(r2_score(target, pred))
         regression_r2_values.append(metrics[f"{prefix}/r2_{name}"])
     for name in task_spec.classification_tasks:
         pred = np.concatenate(predictions[name], axis=0)
         target = np.concatenate(targets[name], axis=0)
-        metrics[f"{prefix}/loss_fg_{name}"] = float(losses[name]) / count
         metrics[f"{prefix}/auc_fg_{name}"] = float(roc_auc_score(target, pred))
         classification_auc_values.append(metrics[f"{prefix}/auc_fg_{name}"])
     metrics[f"{prefix}/r2_mean"] = float(np.mean(regression_r2_values))
