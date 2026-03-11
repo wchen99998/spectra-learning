@@ -361,6 +361,7 @@ def train_and_evaluate(
                 autocast_dtype,
                 grad_clip_norm,
             )
+            model.update_teacher()
             global_step += 1
             pbar.update(1)
             if global_step % log_every_n_steps == 0:
