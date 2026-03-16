@@ -13,3 +13,12 @@ wheels/
 data/
 wandb/
 experiments/
+
+*.png
+
+*.json
+*.xml
+
+.serena/
+
+results/
