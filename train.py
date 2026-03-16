@@ -35,6 +35,7 @@ inductor_config.triton.unique_kernel_names = True
 inductor_config.fx_graph_cache = True
 inductor_config.epilogue_fusion = True
 inductor_config.shape_padding = True
+inductor_config.aggressive_fusion = True
 
 
 def _is_weight_decay_target(name: str, param: torch.nn.Parameter) -> bool:
@@ -119,31 +120,68 @@ class _BatchPrefetcher:
         return batch
 
 
-def _train_step_impl(
-    model: PeakSetSIGReg,
-    batch: dict[str, torch.Tensor],
-    optimizers: list[torch.optim.Optimizer],
-    schedulers: list[CapturableCosineSchedule],
-    autocast_dtype: torch.dtype | None,
-    grad_clip_norm: float | None,
-) -> dict[str, torch.Tensor]:
-    model.advance_sigreg_lambda_schedule()
-    device_type = next(model.parameters()).device.type
-    if autocast_dtype is None or device_type != "cuda":
-        autocast_ctx = nullcontext()
-    else:
-        autocast_ctx = torch.autocast(device_type=device_type, dtype=autocast_dtype)
-    with autocast_ctx:
-        metrics = model.forward_augmented(batch)
-    metrics["loss"].backward()
-    if grad_clip_norm is not None and grad_clip_norm > 0:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
-    for opt in optimizers:
-        opt.step()
-        opt.zero_grad(set_to_none=True)
-    for sched in schedulers:
-        sched.step()
-    return metrics
+def _get_compiled_forward(model: PeakSetSIGReg, compile_mode: str):
+    compiled = getattr(model, "_compiled_forward_augmented", None)
+    if compiled is None:
+        compiled = torch.compile(
+            model.forward_augmented,
+            mode=compile_mode,
+            dynamic=False,
+        )
+        model._compiled_forward_augmented = compiled
+    return compiled
+
+
+class _CUDAGraphRunner:
+    """Explicit CUDA graph capture with static input buffers for training."""
+
+    def __init__(self, compile_kwargs=None):
+        self.graph = None
+        self.static_inputs: dict[str, torch.Tensor] | None = None
+        self.static_output = None
+        self.compiled_fn = None
+        self.compile_kwargs = compile_kwargs or {}
+
+    def _warmup_and_capture(self, fn, batch):
+        if self.compiled_fn is None:
+            self.compiled_fn = torch.compile(fn, **self.compile_kwargs)
+        self.static_inputs = {k: v.clone() for k, v in batch.items()}
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(3):
+                self.compiled_fn(self.static_inputs)
+        torch.cuda.current_stream().wait_stream(s)
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph):
+            self.static_output = self.compiled_fn(self.static_inputs)
+
+    def run(self, fn, batch):
+        if self.graph is None:
+            self._warmup_and_capture(fn, batch)
+        else:
+            for k, v in batch.items():
+                self.static_inputs[k].copy_(v)
+        self.graph.replay()
+        return self.static_output
+
+
+def _get_teacher_runner(model: PeakSetSIGReg) -> _CUDAGraphRunner:
+    runner = getattr(model, "_teacher_graph_runner", None)
+    if runner is None:
+        runner = _CUDAGraphRunner(
+            compile_kwargs={"mode": "max-autotune-no-cudagraphs", "dynamic": False}
+        )
+        model._teacher_graph_runner = runner
+    return runner
+
+
+def _get_trainable_params(model: PeakSetSIGReg) -> list[torch.nn.Parameter]:
+    params = getattr(model, "_trainable_params", None)
+    if params is None:
+        params = [p for p in model.parameters() if p.requires_grad]
+        model._trainable_params = params
+    return params
 
 
 def _build_optimizers(
@@ -177,6 +215,8 @@ def _build_optimizers(
         )
 
     if optimizer_type == "muon":
+        from optimizers import MuonAdamW
+
         muon_decay_params, muon_no_decay_params, adamw_params = [], [], []
         for name, param in model.named_parameters():
             if not param.requires_grad:
@@ -191,36 +231,43 @@ def _build_optimizers(
         muon_lr = float(config.get("muon_lr", None) or base_lr)
         adamw_lr = float(config.get("adamw_lr", None) or base_lr)
         muon_wd = float(config.get("muon_weight_decay", None) or weight_decay)
-        muon_param_groups: list[dict[str, Any]] = []
+        muon_momentum = float(config.get("muon_momentum", 0.95))
+        muon_nesterov = bool(config.get("muon_nesterov", True))
+        muon_adjust_lr_fn = str(config.get("muon_adjust_lr_fn", "match_rms_adamw"))
+        param_groups = []
         if muon_decay_params:
-            muon_param_groups.append(
-                {"params": muon_decay_params, "weight_decay": muon_wd}
-            )
+            param_groups.append({
+                "params": muon_decay_params,
+                "name": "attn_2d",
+                "optimizer": "muon",
+                "lr": muon_lr,
+                "momentum": muon_momentum,
+                "weight_decay": muon_wd,
+                "nesterov": muon_nesterov,
+                "adjust_lr_fn": muon_adjust_lr_fn,
+            })
         if muon_no_decay_params:
-            muon_param_groups.append(
-                {"params": muon_no_decay_params, "weight_decay": 0.0}
-            )
-        muon_opt = torch.optim.Muon(
-            muon_param_groups,
-            lr=torch.tensor(muon_lr),
-            momentum=float(config.get("muon_momentum", 0.95)),
-            nesterov=bool(config.get("muon_nesterov", True)),
-            ns_steps=int(config.get("muon_ns_steps", 5)),
-            weight_decay=0.0,
-            adjust_lr_fn=str(config.get("muon_adjust_lr_fn", "match_rms_adamw")),
-        )
-        adamw_opt = torch.optim.AdamW(
-            adamw_params,
-            lr=torch.tensor(adamw_lr),
-            betas=(0.9, b2),
-            weight_decay=0.0,
-            capturable=capturable,
-            fused=fused,
-        )
-        return [muon_opt, adamw_opt], [
-            _make_schedule(muon_opt, muon_lr),
-            _make_schedule(adamw_opt, adamw_lr),
-        ]
+            param_groups.append({
+                "params": muon_no_decay_params,
+                "name": "ffn_2d",
+                "optimizer": "muon",
+                "lr": muon_lr,
+                "momentum": muon_momentum,
+                "weight_decay": 0.0,
+                "nesterov": muon_nesterov,
+                "adjust_lr_fn": muon_adjust_lr_fn,
+            })
+        if adamw_params:
+            param_groups.append({
+                "params": adamw_params,
+                "name": "non_2d",
+                "optimizer": "adamw",
+                "lr": adamw_lr,
+                "weight_decay": 0.0,
+                "betas": (0.9, b2),
+            })
+        optimizer = MuonAdamW(param_groups)
+        return [optimizer], [_make_schedule(optimizer, base_lr)]
     decay_params, no_decay_params = [], []
     for name, param in model.named_parameters():
         if not param.requires_grad:
@@ -305,7 +352,7 @@ def train_and_evaluate(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_model_from_config(config)
     model_param_metrics = collect_and_log_param_metrics(model)
-    model.to(device).train()
+    model.to(dtype=torch.bfloat16, device=device).train()
     optimizers, schedulers = _build_optimizers(config, model, total_steps, device)
     checkpoint_dir = workdir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -332,7 +379,10 @@ def train_and_evaluate(
     else:
         raise ValueError(f"Unsupported autocast_dtype: {_ac_name}")
     _compile_mode = str(config.get("compile_mode", "max-autotune"))
-    compiled_step = torch.compile(_train_step_impl, mode=_compile_mode, fullgraph=False)
+    if autocast_dtype is not None and device.type == "cuda":
+        autocast_ctx = torch.autocast(device_type="cuda", dtype=autocast_dtype)
+    else:
+        autocast_ctx = nullcontext()
     optimizer_type = str(config.get("optimizer", "adamw")).lower()
     device_prefetch_size = int(config.get("device_prefetch_size", 1))
     _msg_probe_raw = float(config.get("msg_probe_every_n_steps", 0))
@@ -355,14 +405,31 @@ def train_and_evaluate(
         epoch_steps = min(steps_per_epoch, total_steps - global_step)
         pbar = tqdm(total=epoch_steps, desc=f"Epoch {epoch}", unit="step")
         while global_step < total_steps and (batch := prefetcher.next()) is not None:
-            metrics = compiled_step(
-                model,
-                batch,
-                optimizers,
-                schedulers,
-                autocast_dtype,
-                grad_clip_norm,
-            )
+            model.advance_sigreg_lambda_schedule()
+            # Teacher targets (explicit CUDA graph with static buffers)
+            if model.teacher_encoder is not None:
+                runner = _get_teacher_runner(model)
+                with autocast_ctx:
+                    teacher_targets = runner.run(model.compute_teacher_targets, batch)
+            else:
+                teacher_targets = None
+            # Student forward (compiled, separate from backward)
+            torch.compiler.cudagraph_mark_step_begin()
+            with autocast_ctx:
+                metrics = _get_compiled_forward(model, _compile_mode)(
+                    batch, teacher_targets
+                )
+            # Backward + optimizer (not compiled)
+            metrics["loss"].backward()
+            if grad_clip_norm is not None and grad_clip_norm > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    _get_trainable_params(model), max_norm=grad_clip_norm
+                )
+            for opt in optimizers:
+                opt.step()
+                opt.zero_grad(set_to_none=True)
+            for sched in schedulers:
+                sched.step()
             model.update_teacher()
             global_step += 1
             pbar.update(1)
@@ -372,13 +439,9 @@ def train_and_evaluate(
                 log_metrics = {
                     f"train/{k}": float(v.detach()) for k, v in metrics.items()
                 }
-                if optimizer_type == "muon":
-                    for opt, label in zip(optimizers, ("muon", "adamw")):
-                        log_metrics[f"train/lr_{label}"] = opt.param_groups[0]["lr"]
-                else:
-                    log_metrics["train/learning_rate"] = optimizers[0].param_groups[0][
-                        "lr"
-                    ]
+                log_metrics["train/learning_rate"] = float(
+                    optimizers[0].param_groups[0]["lr"]
+                )
                 log_metrics["epoch"] = epoch
                 log_metrics["global_step"] = global_step
                 logger.log_metrics(log_metrics, step=global_step)

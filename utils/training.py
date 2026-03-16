@@ -63,6 +63,9 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         encoder_qk_norm=bool(config.get("encoder_qk_norm", False)),
         norm_type=str(config.get("norm_type", "rmsnorm")),
         use_precursor_token=bool(config.get("use_precursor_token", False)),
+        num_peaks=int(config.get("num_peaks", 64)),
+        jepa_context_fraction=float(config.get("jepa_context_fraction", 0.3)),
+        jepa_target_fraction=float(config.get("jepa_target_fraction", 0.25)),
     )
 
 

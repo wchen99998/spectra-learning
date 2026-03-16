@@ -75,7 +75,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_latent_predictor_num_layers = 4
     cfg.predictor_num_heads = 8
     cfg.autocast_dtype = "bf16"
-    cfg.compile_mode = "reduce-overhead"
+    cfg.compile_mode = "max-autotune"
     cfg.representation_regularizer = "none"
     cfg.gco_constraints = [
         {"metric": "local_emb_var_floor", "target": 0.6, "bound": "lower"},
