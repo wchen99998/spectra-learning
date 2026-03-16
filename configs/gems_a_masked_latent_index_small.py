@@ -25,7 +25,7 @@ def get_config() -> config_dict.ConfigDict:
     # Model
     cfg.model_type = "sigreg_peak_set"
     cfg.num_peaks = 64
-    cfg.model_dim = 256
+    cfg.model_dim = 512
     cfg.num_layers = 12
     cfg.num_heads = 8
     cfg.num_kv_heads = 8
@@ -45,8 +45,8 @@ def get_config() -> config_dict.ConfigDict:
 
     # Training
     cfg.num_epochs = 100
-    cfg.learning_rate = 3e-4
-    cfg.warmup_steps = 0
+    cfg.learning_rate = 1e-4
+    cfg.warmup_steps = 10_000
     cfg.learning_rate_schedule = "cosine"
     cfg.min_learning_rate = None
     cfg.b2 = 0.98
@@ -67,9 +67,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_token_loss_type = "l2"
     cfg.normalize_jepa_targets = False
     cfg.use_ema_teacher_target = True
-    cfg.teacher_ema_decay = 0.9999
-    cfg.teacher_ema_decay_start = 0.995
-    cfg.teacher_ema_decay_warmup_steps = 1_000_000
+    cfg.teacher_ema_decay = 1.
+    cfg.teacher_ema_decay_start = 0.996
+    cfg.teacher_ema_decay_warmup_steps = 400_000
     cfg.teacher_ema_update_every = 10
     cfg.grad_clip_norm = 1.0
     cfg.masked_latent_predictor_num_layers = 4
