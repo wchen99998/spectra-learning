@@ -62,7 +62,7 @@ def _fused_muon_momentum_nesterov_kernel(
     grad = tl.load(grad_ptr + offsets, mask=mask, other=0).to(tl.float32)
     buf = tl.load(momentum_ptr + offsets, mask=mask, other=0).to(tl.float32)
     buf = momentum * buf + (1 - momentum) * grad
-    update = grad + momentum * buf if nesterov else buf
+    update = (1 - momentum) * grad + momentum * buf if nesterov else buf
 
     tl.store(momentum_ptr + offsets, buf.to(tl.bfloat16), mask=mask)
     tl.store(grad_ptr + offsets, update.to(tl.bfloat16), mask=mask)
