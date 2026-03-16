@@ -350,7 +350,7 @@ def run_msg_probe(
             batch["peak_mz"],
             batch["peak_intensity"],
             valid_mask=batch["peak_valid_mask"],
-        )
+        ).float()
         return embeddings, batch["peak_valid_mask"]
 
     train_seed_base = int(config.seed) + 1_100_000
