@@ -441,20 +441,16 @@ class PeakSetSIGReg(nn.Module):
             )
             .reshape(B, K, N, -1)
         )
-        if self.teacher_encoder is not None:
-            with torch.no_grad():
-                target_token_target = (
-                    self.teacher_encoder(
-                        peak_mz.repeat_interleave(K, dim=0),
-                        peak_intensity.repeat_interleave(K, dim=0),
-                        valid_mask=peak_valid_mask.repeat_interleave(K, dim=0),
-                        visible_mask=target_masks.reshape(B * K, N),
-                    )
-                    .reshape(B, K, N, -1)
-                    .detach()
-                )
-        else:
-            target_token_target = target_emb.detach()
+        # Teacher sees full valid spectrum; loss mask selects target positions per block
+        teacher = self.teacher_encoder if self.teacher_encoder is not None else self.encoder
+        with torch.no_grad():
+            teacher_full = teacher(
+                peak_mz,
+                peak_intensity,
+                valid_mask=peak_valid_mask,
+                visible_mask=peak_valid_mask,
+            ).detach()
+        target_token_target = teacher_full.unsqueeze(1).expand(-1, K, -1, -1)
 
         ctx_mask_v = context_mask.unsqueeze(1)
         context_emb_by_view = context_emb.unsqueeze(1).expand(-1, K, -1, -1)
