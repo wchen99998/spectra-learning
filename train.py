@@ -352,7 +352,7 @@ def train_and_evaluate(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_model_from_config(config)
     model_param_metrics = collect_and_log_param_metrics(model)
-    model.to(dtype=torch.bfloat16, device=device).train()
+    model.to(device).train()
     optimizers, schedulers = _build_optimizers(config, model, total_steps, device)
     checkpoint_dir = workdir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
