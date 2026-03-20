@@ -108,8 +108,11 @@ def _masked_attn_bwd_kernel(
     p = tl.exp(s - lse[:, None])
     p = tl.where(attn_mask, p, 0.0)
     dv = tl.dot(tl.trans(p.to(do.dtype)), do)
-    dp = tl.dot(do, tl.trans(v))
-    di = tl.sum(do * o, axis=1)
+    do_f32 = do.to(tl.float32)
+    o_f32 = o.to(tl.float32)
+    v_f32 = v.to(tl.float32)
+    dp = tl.dot(do_f32, tl.trans(v_f32))
+    di = tl.sum(do_f32 * o_f32, axis=1)
     ds = p * (dp - di[:, None]) * sm_scale
     ds = tl.where(attn_mask, ds, 0.0)
     dq = tl.dot(ds.to(k.dtype), k)
@@ -480,7 +483,7 @@ class PeakSetSIGReg(nn.Module):
         teacher_ema_decay: float = 0.996, teacher_ema_decay_start: float = 0.0,
         teacher_ema_decay_warmup_steps: int = 0, teacher_ema_update_every: int = 1,
         encoder_qk_norm: bool = False, norm_type: str = "rmsnorm",
-        use_precursor_token: bool = False,
+        use_precursor_token: bool = False, dir_rad_beta: float = 1.0,
         num_peaks: int = 64, jepa_context_fraction: float = 0.3,
         jepa_target_fraction: float = 0.25,
     ):
@@ -533,6 +536,7 @@ class PeakSetSIGReg(nn.Module):
         _reg("teacher_ema_update_step", torch.zeros((), dtype=torch.int64))
         self.masked_token_loss_weight = float(masked_token_loss_weight)
         self.masked_token_loss_type = str(masked_token_loss_type).lower()
+        self.dir_rad_beta = float(dir_rad_beta)
         self.normalize_jepa_targets = bool(normalize_jepa_targets)
         self.norm_type = str(norm_type).lower()
         if self.jepa_num_target_blocks < 1:
@@ -723,7 +727,7 @@ class PeakSetSIGReg(nn.Module):
         context_emb = self._encoder_forward(
             peak_mz, peak_intensity,
             valid_mask=peak_valid_mask, visible_mask=context_mask,
-            pack_n=self._context_pack_n, prefix_pack=True, pad_to=self._context_pad_to,
+            pack_n=self._context_pack_n, prefix_pack=False, pad_to=self._context_pad_to,
         )
 
         # Target embeddings (only needed for SIGReg/GCO regularizer)
@@ -780,6 +784,14 @@ class PeakSetSIGReg(nn.Module):
             per_token_reg = (loss_pred - loss_target).square().sum(dim=-1)
         elif self.masked_token_loss_type == "l1":
             per_token_reg = (loss_pred - loss_target).abs().mean(dim=-1)
+        elif self.masked_token_loss_type == "dir_rad":
+            pred_u = F.normalize(predictor_output, dim=-1)
+            tgt_u = F.normalize(target_token_target, dim=-1)
+            dir_loss = (pred_u - tgt_u).square().mean(dim=-1)
+            pred_r = torch.log(predictor_output.norm(dim=-1).clamp_min(1e-6))
+            tgt_r = torch.log(target_token_target.norm(dim=-1).clamp_min(1e-6))
+            rad_loss = F.smooth_l1_loss(pred_r, tgt_r, reduction="none")
+            per_token_reg = dir_loss + self.dir_rad_beta * rad_loss
         else:
             raise ValueError(f"Unsupported masked_token_loss_type: {self.masked_token_loss_type}")
         target_mask_float = target_masks.float()

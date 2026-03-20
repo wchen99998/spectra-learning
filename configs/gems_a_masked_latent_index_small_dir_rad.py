@@ -45,12 +45,12 @@ def get_config() -> config_dict.ConfigDict:
 
     # Training
     cfg.num_epochs = 100
-    cfg.learning_rate = 3e-4
+    cfg.learning_rate = 1e-4
     cfg.warmup_steps = 10_000
     cfg.learning_rate_schedule = "cosine"
     cfg.min_learning_rate = None
     cfg.b2 = 0.98
-    cfg.weight_decay = 1e-4
+    cfg.weight_decay = 1e-5
     cfg.optimizer = "muon"
     cfg.device_prefetch_size = 8
     cfg.log_every_n_steps = 100
@@ -64,12 +64,13 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataloader_persistent_workers = True
 
     cfg.masked_token_loss_weight = 1.0
-    cfg.masked_token_loss_type = "l2"
+    cfg.masked_token_loss_type = "dir_rad"
+    cfg.dir_rad_beta = 0.05
     cfg.normalize_jepa_targets = False
     cfg.use_ema_teacher_target = True
-    cfg.teacher_ema_decay = 0.99
+    cfg.teacher_ema_decay = 1.
     cfg.teacher_ema_decay_start = 0.996
-    cfg.teacher_ema_decay_warmup_steps = 0
+    cfg.teacher_ema_decay_warmup_steps = 400_000
     cfg.teacher_ema_update_every = 10
     cfg.grad_clip_norm = 1.0
     cfg.masked_latent_predictor_num_layers = 4
@@ -95,6 +96,6 @@ def get_config() -> config_dict.ConfigDict:
     # System / logging
     cfg.enable_wandb = True
     cfg.wandb_project = "jepa-pretraining"
-    cfg.wandb_run_name_prefix = "jepa_masked_latent_index"
+    cfg.wandb_run_name_prefix = "jepa_masked_latent_index_dir_rad"
 
     return cfg

@@ -16,6 +16,7 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.encoder_qk_norm = False
     cfg.masked_token_loss_weight = 0.0
     cfg.masked_token_loss_type = "l1"
+    cfg.dir_rad_beta = 1.0
     cfg.representation_regularizer = "sigreg"
     cfg.masked_latent_predictor_num_layers = 2
     cfg.sigreg_lambda_warmup_steps = 0
@@ -55,11 +56,15 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     # cfg.msg_probe_every_n_steps = 0
     cfg.msg_probe_cache_dir = None
     cfg.msg_probe_num_epochs = 10
-    cfg.msg_probe_learning_rate = 4e-4
+    cfg.msg_probe_learning_rate = 1e-3
     cfg.msg_probe_weight_decay = 1e-4
     cfg.msg_probe_warmup_steps = 0
     cfg.msg_probe_max_train_samples = None
     cfg.msg_probe_max_test_samples = None
+    cfg.msg_probe_type = "linear"  # "linear" or "mlp"
+    cfg.msg_probe_mlp_hidden_dim = None  # defaults to model_dim in run_msg_probe
+    cfg.msg_probe_mlp_num_layers = 2
+    cfg.msg_probe_mlp_activation = "silu"
     cfg.probe_dataset = "nist20"  # "massspec" or "nist20"
 
     # Muon optimizer defaults (only used when cfg.optimizer == "muon")

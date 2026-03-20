@@ -99,6 +99,48 @@ class MsgLinearProbe(torch.nn.Module):
         return {name: head(pooled) for name, head in self.heads.items()}
 
 
+_ACTIVATIONS: dict[str, type[torch.nn.Module]] = {
+    "silu": torch.nn.SiLU,
+    "sigmoid": torch.nn.Sigmoid,
+    "relu": torch.nn.ReLU,
+    "gelu": torch.nn.GELU,
+    "tanh": torch.nn.Tanh,
+}
+
+
+class MsgMLPProbe(torch.nn.Module):
+    def __init__(
+        self,
+        *,
+        input_dim: int,
+        hidden_dim: int,
+        num_layers: int,
+        task_names: tuple[str, ...],
+        pooler: MsgProbePooler,
+        activation: str = "silu",
+    ) -> None:
+        super().__init__()
+        self.pooler = pooler
+        act_cls = _ACTIVATIONS[activation]
+        layers: list[torch.nn.Module] = []
+        in_dim = input_dim
+        for _ in range(num_layers):
+            layers.append(torch.nn.Linear(in_dim, hidden_dim))
+            layers.append(act_cls())
+            in_dim = hidden_dim
+        self.trunk = torch.nn.Sequential(*layers)
+        self.heads = torch.nn.ModuleDict(
+            {name: torch.nn.Linear(hidden_dim, 1) for name in task_names}
+        )
+
+    def forward(
+        self,
+        pooled: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        h = self.trunk(pooled)
+        return {name: head(h) for name, head in self.heads.items()}
+
+
 class DreamsLinearProbe(torch.nn.Module):
     def __init__(
         self,
@@ -230,7 +272,7 @@ def _build_task_spec(
 
 
 def _probe_step(
-    probe: MsgLinearProbe,
+    probe: MsgLinearProbe | MsgMLPProbe,
     batch: dict[str, torch.Tensor],
     *,
     task_spec: MsgProbeTaskSpec,
@@ -379,11 +421,27 @@ def run_msg_probe(
         pma_num_seeds=probe_pma_num_seeds,
         norm_type=norm_type,
     )
-    probe = MsgLinearProbe(
-        input_dim=int(config.model_dim),
-        task_names=task_spec.regression_tasks + task_spec.classification_tasks,
-        pooler=pooler,
-    ).to(device)
+    probe_type = str(config.get("msg_probe_type", "linear"))
+    task_names = task_spec.regression_tasks + task_spec.classification_tasks
+    if probe_type == "mlp":
+        _mlp_hid = config.get("msg_probe_mlp_hidden_dim", None)
+        mlp_hidden = int(_mlp_hid if _mlp_hid is not None else config.model_dim)
+        mlp_layers = int(config.get("msg_probe_mlp_num_layers", 2))
+        mlp_activation = str(config.get("msg_probe_mlp_activation", "silu"))
+        probe = MsgMLPProbe(
+            input_dim=int(config.model_dim),
+            hidden_dim=mlp_hidden,
+            num_layers=mlp_layers,
+            task_names=task_names,
+            pooler=pooler,
+            activation=mlp_activation,
+        ).to(device)
+    else:
+        probe = MsgLinearProbe(
+            input_dim=int(config.model_dim),
+            task_names=task_names,
+            pooler=pooler,
+        ).to(device)
     optimizer = torch.optim.AdamW(
         probe.parameters(),
         lr=probe_lr,

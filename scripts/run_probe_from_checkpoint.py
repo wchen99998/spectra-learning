@@ -19,6 +19,7 @@ def main() -> None:
     # Override probe pooling
     cfg.msg_probe_pma_num_seeds = 64
     cfg.msg_probe_pma_num_heads = 8
+    # cfg.probe_dataset = "massspec"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -41,7 +42,7 @@ def main() -> None:
         masked_latent_predictor_num_layers=cfg.masked_latent_predictor_num_layers,
     )
 
-    ckpt_path = "experiments/TEST_MASKEDJEPA_small_sigreg_nist20_correct_bounded/trial_000/checkpoints/step-00525000.pt"
+    ckpt_path = "experiments/TEST_FAST_CORRECT_2/trial_000/checkpoints/step-01475000.pt"
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     state = {
         k: v for k, v in ckpt["model"].items()
@@ -59,10 +60,18 @@ def main() -> None:
     print(f"Probe: PMA seeds={cfg.msg_probe_pma_num_seeds}, heads={cfg.msg_probe_pma_num_heads}")
     print(f"Probe epochs: {cfg.msg_probe_num_epochs}")
 
-    metrics = run_msg_probe(config=cfg, model=model, device=device)
+    # --- Linear probe ---
+    cfg.msg_probe_type = "linear"
+    print("\n=== Linear Probe ===")
+    linear_metrics = run_msg_probe(config=cfg, model=model, device=device)
+    for k, v in sorted(linear_metrics.items()):
+        print(f"  {k}: {v:.4f}")
 
-    print("\n=== MSG Probe Results ===")
-    for k, v in sorted(metrics.items()):
+    # --- MLP probe ---
+    cfg.msg_probe_type = "mlp"
+    print("\n=== MLP Probe ===")
+    mlp_metrics = run_msg_probe(config=cfg, model=model, device=device)
+    for k, v in sorted(mlp_metrics.items()):
         print(f"  {k}: {v:.4f}")
 
 
