@@ -285,6 +285,100 @@ class FeedForward(nn.Module):
         return self.w2(F.silu(self.w1(x)))
 
 
+class CrossAttention(nn.Module):
+    """Cross-attention: Q from target queries, KV from context embeddings."""
+
+    def __init__(self, dim: int, n_heads: int, *, n_kv_heads: int | None = None,
+                 qk_norm: bool = False, norm_type: str = "rmsnorm"):
+        super().__init__()
+        self.dim = dim
+        self.n_heads = n_heads
+        self.n_kv_heads = n_heads if n_kv_heads is None else n_kv_heads
+        self.head_dim = self.dim // self.n_heads
+        self.wq = nn.Linear(self.dim, self.n_heads * self.head_dim, bias=False)
+        self.wkv = nn.Linear(self.dim, 2 * self.n_kv_heads * self.head_dim, bias=False)
+        self.wo = nn.Linear(self.dim, self.dim, bias=False)
+        self.qk_norm = qk_norm
+        if qk_norm:
+            self.q_norm = _build_norm(self.head_dim, eps=1e-5, norm_type=norm_type)
+            self.k_norm = _build_norm(self.head_dim, eps=1e-5, norm_type=norm_type)
+        nn.init.xavier_normal_(self.wq.weight)
+        nn.init.xavier_normal_(self.wkv.weight)
+        nn.init.xavier_normal_(self.wo.weight)
+
+    def forward(self, x: torch.Tensor, context: torch.Tensor, *,
+                freqs_cos: torch.Tensor | None = None,
+                freqs_sin: torch.Tensor | None = None,
+                context_mask: torch.Tensor | None = None) -> torch.Tensor:
+        bsz, tgt_len, _ = x.shape
+        ctx_len = context.shape[1]
+        xq = self.wq(x).view(bsz, tgt_len, self.n_heads, self.head_dim)
+        kv = self.wkv(context)
+        xk, xv = kv.split(
+            [self.n_kv_heads * self.head_dim, self.n_kv_heads * self.head_dim], dim=-1)
+        xk = xk.view(bsz, ctx_len, self.n_kv_heads, self.head_dim)
+        xv = xv.view(bsz, ctx_len, self.n_kv_heads, self.head_dim)
+        # RoPE on Q only (target positions); no RoPE on K
+        if freqs_cos is not None and freqs_sin is not None:
+            q_rot = _rotate_half(xq)
+            xq = (xq * freqs_cos) + (q_rot * freqs_sin)
+        if self.qk_norm:
+            xq = self.q_norm(xq)
+            xk = self.k_norm(xk)
+        q = xq.transpose(1, 2)  # [B, H, T, D]
+        k = xk.transpose(1, 2)  # [B, H, S, D]
+        v = xv.transpose(1, 2)
+        attn_mask = None
+        if context_mask is not None:
+            # context_mask: [B, S] -> [B, 1, 1, S]
+            attn_mask = context_mask[:, None, None, :].to(dtype=q.dtype)
+            attn_mask = attn_mask.masked_fill(attn_mask == 0, float("-inf")).masked_fill(attn_mask == 1, 0.0)
+        attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        attn = attn.transpose(1, 2).contiguous().view(bsz, tgt_len, self.dim)
+        return self.wo(attn)
+
+
+class TemporalDecoderBlock(nn.Module):
+    """Decoder block: self-attention + cross-attention + FFN."""
+
+    def __init__(self, *, dim: int, n_heads: int, n_kv_heads: int | None,
+                 norm_eps: float, hidden_dim: int | None,
+                 qk_norm: bool = False, norm_type: str = "rmsnorm"):
+        super().__init__()
+        self.attention = Attention(dim, n_heads, n_kv_heads=n_kv_heads,
+                                   qk_norm=qk_norm, norm_type=norm_type)
+        self.cross_attn = CrossAttention(dim, n_heads, n_kv_heads=n_kv_heads,
+                                          qk_norm=qk_norm, norm_type=norm_type)
+        self.feed_forward = FeedForward(dim, hidden_dim=hidden_dim)
+        self.attention_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
+        self.cross_attn_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
+        self.ffn_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
+
+    def forward(self, x: torch.Tensor, context: torch.Tensor, *,
+                freqs_cos: torch.Tensor | None,
+                freqs_sin: torch.Tensor | None,
+                context_mask: torch.Tensor | None = None) -> torch.Tensor:
+        h = x + self.attention(self.attention_norm(x), freqs_cos=freqs_cos,
+                               freqs_sin=freqs_sin)
+        h = h + self.cross_attn(self.cross_attn_norm(h), context,
+                                freqs_cos=freqs_cos, freqs_sin=freqs_sin,
+                                context_mask=context_mask)
+        return h + self.feed_forward(self.ffn_norm(h))
+
+
+def _build_temporal_decoder_blocks(*, dim: int, num_layers: int, num_heads: int,
+                                    num_kv_heads: int | None, attention_mlp_multiple: float,
+                                    norm_eps: float = 1e-5, qk_norm: bool = False,
+                                    norm_type: str = "rmsnorm") -> nn.ModuleList:
+    block_kwargs = dict(
+        dim=dim, n_heads=int(num_heads),
+        n_kv_heads=int(num_heads) if num_kv_heads is None else int(num_kv_heads),
+        norm_eps=norm_eps, hidden_dim=int(math.ceil(dim * attention_mlp_multiple)),
+        qk_norm=qk_norm, norm_type=norm_type,
+    )
+    return nn.ModuleList([TemporalDecoderBlock(**block_kwargs) for _ in range(num_layers)])
+
+
 class TransformerBlock(nn.Module):
     def __init__(self, *, dim: int, n_heads: int, n_kv_heads: int | None,
                  norm_eps: float, hidden_dim: int | None,
@@ -486,6 +580,7 @@ class PeakSetSIGReg(nn.Module):
         use_precursor_token: bool = False, dir_rad_beta: float = 1.0,
         num_peaks: int = 64, jepa_context_fraction: float = 0.3,
         jepa_target_fraction: float = 0.25,
+        temporal_predictor_num_layers: int = 0,
     ):
         super().__init__()
         self.model_dim = model_dim
@@ -597,6 +692,24 @@ class PeakSetSIGReg(nn.Module):
             qk_norm=encoder_qk_norm, norm_type=self.norm_type,
         )
         self.sigreg = SIGReg(num_slices=int(sigreg_num_slices))
+
+        # Temporal predictor (cross-attention decoder for next-spectrum prediction)
+        self.temporal_predictor_num_layers = int(temporal_predictor_num_layers)
+        if self.temporal_predictor_num_layers > 0:
+            self.temporal_predictor = _build_temporal_decoder_blocks(
+                dim=model_dim, num_layers=self.temporal_predictor_num_layers,
+                num_heads=pred_heads, num_kv_heads=None,
+                attention_mlp_multiple=attention_mlp_multiple,
+                qk_norm=encoder_qk_norm, norm_type=self.norm_type,
+            )
+            self.temporal_rt_proj = nn.Sequential(
+                nn.Linear(1, model_dim), nn.SiLU(), nn.Linear(model_dim, model_dim),
+            )
+            self.temporal_target_tokens = nn.Parameter(torch.empty(N, model_dim))
+            nn.init.trunc_normal_(self.temporal_target_tokens, std=0.02)
+            tp_rope_cos, tp_rope_sin = _precompute_rope_freqs(N, predictor_inv_freq)
+            self.register_buffer("temporal_predictor_rope_cos", tp_rope_cos, persistent=False)
+            self.register_buffer("temporal_predictor_rope_sin", tp_rope_sin, persistent=False)
 
     def train(self, mode: bool = True) -> "PeakSetSIGReg":
         super().train(mode)
@@ -873,6 +986,97 @@ class PeakSetSIGReg(nn.Module):
             for i, key in enumerate(self.gco_constraint_keys):
                 metrics[f"gco_constraint_{key}"] = constraint_vals[i].to(dtype=context_emb.dtype)
         return metrics
+
+    @torch.no_grad()
+    def compute_temporal_teacher_targets(
+        self, batch: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        """Compute token-level teacher targets for the target spectrum."""
+        teacher_fwd = self._teacher_encoder_forward or self._encoder_forward
+        return teacher_fwd(
+            batch["target_peak_mz"],
+            batch["target_peak_intensity"],
+            valid_mask=batch["target_peak_valid_mask"],
+            visible_mask=batch["target_peak_valid_mask"],
+            pack_n=self._teacher_pack_n, prefix_pack=True, pad_to=self._teacher_pad_to,
+        )
+
+    def forward_temporal(
+        self,
+        batch: dict[str, torch.Tensor],
+        teacher_targets: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Temporal prediction: predict target spectrum tokens from context spectrum."""
+        context_mz = batch["context_peak_mz"]
+        context_int = batch["context_peak_intensity"]
+        context_valid = batch["context_peak_valid_mask"]
+        target_mz = batch["target_peak_mz"]
+        target_int = batch["target_peak_intensity"]
+        target_valid = batch["target_peak_valid_mask"]
+        context_rt = batch["context_rt"]
+        target_rt = batch["target_rt"]
+        B = context_mz.shape[0]
+
+        # 1. Encode context spectrum (student encoder, full sequence)
+        context_emb = self._encoder_forward(
+            context_mz, context_int,
+            valid_mask=context_valid, visible_mask=context_valid,
+            pack_n=self._teacher_pack_n, prefix_pack=True, pad_to=self._teacher_pad_to,
+        )  # [B, N, D]
+
+        # 2. RT conditioning
+        delta_rt = (target_rt - context_rt).unsqueeze(-1)  # [B, 1]
+        rt_emb = self.temporal_rt_proj(delta_rt)  # [B, D]
+
+        # 3. Initialize target queries
+        queries = self.temporal_target_tokens.unsqueeze(0).expand(B, -1, -1) + rt_emb.unsqueeze(1)
+
+        # 4. Run through temporal decoder blocks
+        N_tgt = queries.shape[1]
+        freqs_cos = self.temporal_predictor_rope_cos.to(dtype=queries.dtype)[:, :N_tgt]
+        freqs_sin = self.temporal_predictor_rope_sin.to(dtype=queries.dtype)[:, :N_tgt]
+        for block in self.temporal_predictor:
+            queries = block(queries, context_emb,
+                            freqs_cos=freqs_cos, freqs_sin=freqs_sin,
+                            context_mask=context_valid)
+        predicted_target = queries  # [B, N, D]
+
+        # 5. Teacher target
+        if teacher_targets is not None:
+            target_emb = teacher_targets
+        else:
+            teacher_fwd = self._teacher_encoder_forward or self._encoder_forward
+            with torch.no_grad():
+                target_emb = teacher_fwd(
+                    target_mz, target_int,
+                    valid_mask=target_valid, visible_mask=target_valid,
+                    pack_n=self._teacher_pack_n, prefix_pack=True,
+                    pad_to=self._teacher_pad_to,
+                ).detach()
+
+        # 6. Per-token loss over valid target positions
+        if self.masked_token_loss_type == "l2":
+            per_token = (predicted_target - target_emb).square().mean(dim=-1)
+        elif self.masked_token_loss_type == "l1":
+            per_token = (predicted_target - target_emb).abs().mean(dim=-1)
+        elif self.masked_token_loss_type == "dir_rad":
+            pred_u = F.normalize(predicted_target, dim=-1)
+            tgt_u = F.normalize(target_emb, dim=-1)
+            dir_loss = (pred_u - tgt_u).square().mean(dim=-1)
+            pred_r = torch.log(predicted_target.norm(dim=-1).clamp_min(1e-6))
+            tgt_r = torch.log(target_emb.norm(dim=-1).clamp_min(1e-6))
+            rad_loss = F.smooth_l1_loss(pred_r, tgt_r, reduction="none")
+            per_token = dir_loss + self.dir_rad_beta * rad_loss
+        else:
+            per_token = (predicted_target - target_emb).square().mean(dim=-1)
+
+        target_mask_float = target_valid.float()
+        loss = (per_token * target_mask_float).sum() / target_mask_float.sum().clamp_min(1.0)
+
+        return {
+            "loss": loss,
+            "temporal_pred_loss": loss.detach(),
+        }
 
     def encode(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         mz, intensity, valid = (

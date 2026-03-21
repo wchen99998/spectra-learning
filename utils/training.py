@@ -67,6 +67,9 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         num_peaks=int(config.get("num_peaks", 64)),
         jepa_context_fraction=float(config.get("jepa_context_fraction", 0.3)),
         jepa_target_fraction=float(config.get("jepa_target_fraction", 0.25)),
+        temporal_predictor_num_layers=int(
+            config.get("temporal_predictor_num_layers", 0)
+        ),
     )
 
 
