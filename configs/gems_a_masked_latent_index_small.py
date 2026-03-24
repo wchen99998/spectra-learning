@@ -38,6 +38,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_num_target_blocks = 2
     cfg.jepa_context_fraction = 0.3
     cfg.jepa_target_fraction = 0.25
+    cfg.jepa_projector_num_layers = 1
+    cfg.jepa_projector_dim = 128
     cfg.jepa_block_min_len = 1
     cfg.sigreg_mz_jitter_std = 0.001
     cfg.sigreg_intensity_jitter_std = 0.05
@@ -50,7 +52,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.learning_rate_schedule = "cosine"
     cfg.min_learning_rate = None
     cfg.b2 = 0.98
-    cfg.weight_decay = 1e-4
+    cfg.weight_decay = 1e-2
     cfg.optimizer = "muon"
     cfg.device_prefetch_size = 8
     cfg.log_every_n_steps = 100
@@ -67,7 +69,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_token_loss_type = "l2"
     cfg.normalize_jepa_targets = False
     cfg.use_ema_teacher_target = True
-    cfg.teacher_ema_decay = 0.99
+    cfg.teacher_ema_decay = 0.999
     cfg.teacher_ema_decay_start = 0.996
     cfg.teacher_ema_decay_warmup_steps = 0
     cfg.teacher_ema_update_every = 10
@@ -84,6 +86,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.gco_log_lambda_init = math.log(10.0)
     cfg.sigreg_lambda_warmup_steps = 50_000
     cfg.msg_probe_every_n_steps = 0.25
+    cfg.msg_probe_type = "mlp"
     cfg.msg_probe_pooling_type = "pma"
     cfg.msg_probe_pma_num_heads = cfg.num_heads
     cfg.msg_probe_pma_num_seeds = 32

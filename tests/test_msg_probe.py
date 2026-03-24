@@ -5,6 +5,7 @@ import tensorflow as tf
 import torch
 
 from input_pipeline import _prepend_precursor_token_tf
+from models.model import PeakSetSIGReg
 from utils.msg_probe import (
     FG_SMARTS,
     MsgLinearProbe,
@@ -13,6 +14,7 @@ from utils.msg_probe import (
     _build_task_spec,
     _collect_split_targets,
     _probe_step,
+    extract_msg_probe_features,
     iter_massspec_probe,
     probe_steps_per_epoch,
 )
@@ -144,6 +146,36 @@ class MsgProbeStepTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["batch_size"], 2)
         self.assertTrue(torch.isfinite(result["loss_total"]).item())
+
+    def test_extract_msg_probe_features_uses_encoder_not_projector(self):
+        model = PeakSetSIGReg(
+            model_dim=32,
+            encoder_num_layers=1,
+            encoder_num_heads=4,
+            encoder_num_kv_heads=4,
+            attention_mlp_multiple=2.0,
+            feature_mlp_hidden_dim=16,
+            sigreg_num_slices=32,
+            jepa_projector_num_layers=2,
+            jepa_projector_dim=20,
+            num_peaks=6,
+        )
+
+        class ForbiddenProjector(torch.nn.Module):
+            def forward(self, x):
+                raise AssertionError("msg_probe should not call jepa_projector")
+
+        model.jepa_projector = ForbiddenProjector()
+        batch = {
+            "peak_mz": torch.rand(3, 6),
+            "peak_intensity": torch.rand(3, 6),
+            "peak_valid_mask": torch.ones(3, 6, dtype=torch.bool),
+        }
+
+        token_emb, valid_mask = extract_msg_probe_features(model, batch)
+
+        self.assertEqual(token_emb.shape, (3, 6, 32))
+        self.assertTrue(torch.equal(valid_mask, batch["peak_valid_mask"]))
 
 
 class MsgProbeTaskSpecTests(unittest.TestCase):

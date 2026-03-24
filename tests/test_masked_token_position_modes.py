@@ -71,27 +71,95 @@ def _make_batch() -> dict[str, torch.Tensor]:
 def test_predictor_zero_layers_is_identity():
     model = _build_model(predictor_layers=0)
     predictor_input = torch.randn(2, 6, model.model_dim)
-    visible_mask = torch.ones(2, 6, dtype=torch.bool)
+    context = torch.randn(2, 6, model.model_dim)
+    target_mask = torch.ones(2, 6, dtype=torch.bool)
+    context_mask = torch.ones(2, 6, dtype=torch.bool)
 
-    out = model.predict_masked_latents(predictor_input, visible_mask)
+    out = model.predict_masked_latents(
+        predictor_input,
+        context,
+        target_mask=target_mask,
+        context_mask=context_mask,
+    )
 
     assert torch.allclose(out, predictor_input)
 
 
 @torch.no_grad()
-def test_predictor_rope_toggle_changes_output():
+def test_predictor_rope_is_independent_of_encoder_rope_toggle():
     torch.manual_seed(0)
     model_no_rope = _build_model(predictor_layers=2, encoder_use_rope=False)
     torch.manual_seed(0)
     model_with_rope = _build_model(predictor_layers=2, encoder_use_rope=True)
     predictor_input = torch.randn(1, 6, model_with_rope.model_dim)
-    visible_mask = torch.ones(1, 6, dtype=torch.bool)
+    context = torch.randn(1, 6, model_with_rope.model_dim)
+    target_mask = torch.ones(1, 6, dtype=torch.bool)
+    context_mask = torch.ones(1, 6, dtype=torch.bool)
 
-    out_1 = model_no_rope.predict_masked_latents(predictor_input, visible_mask)
-    out_2 = model_with_rope.predict_masked_latents(predictor_input, visible_mask)
+    out_1 = model_no_rope.predict_masked_latents(
+        predictor_input,
+        context,
+        target_mask=target_mask,
+        context_mask=context_mask,
+    )
+    out_2 = model_with_rope.predict_masked_latents(
+        predictor_input,
+        context,
+        target_mask=target_mask,
+        context_mask=context_mask,
+    )
 
-    diff = (out_1 - out_2).abs().mean()
-    assert float(diff) > 1e-3
+    assert torch.allclose(out_1, out_2, atol=1e-6, rtol=1e-6)
+
+
+@torch.no_grad()
+def test_packed_predictor_matches_dense_without_encoder_rope():
+    torch.manual_seed(0)
+    model = PeakSetSIGReg(
+        model_dim=32,
+        encoder_num_layers=2,
+        encoder_num_heads=4,
+        feature_mlp_hidden_dim=32,
+        encoder_use_rope=False,
+        jepa_num_target_blocks=2,
+        masked_token_loss_weight=1.0,
+        masked_latent_predictor_num_layers=2,
+        num_peaks=6,
+        jepa_target_fraction=0.25,
+    )
+    model.eval()
+    predictor_input = torch.randn(2, 6, model.model_dim)
+    context = torch.randn(2, 6, model.model_dim)
+    target_mask = torch.tensor(
+        [
+            [False, False, True, True, False, False],
+            [False, True, False, False, True, False],
+        ]
+    )
+    context_mask = torch.tensor(
+        [
+            [True, True, False, False, False, False],
+            [True, False, True, False, False, False],
+        ]
+    )
+
+    out_dense = model.predict_masked_latents(
+        predictor_input,
+        context,
+        target_mask=target_mask,
+        context_mask=context_mask,
+        pack_n=0,
+    )
+    out_packed = model.predict_masked_latents(
+        predictor_input,
+        context,
+        target_mask=target_mask,
+        context_mask=context_mask,
+        pack_n=model._predictor_pack_n,
+    )
+
+    assert model._predictor_pack_n == 2
+    assert torch.allclose(out_dense, out_packed, atol=1e-6, rtol=1e-6)
 
 
 @torch.no_grad()
@@ -141,25 +209,21 @@ def test_local_global_loss_uses_full_view_teacher_targets():
     target_token_target = teacher_full.unsqueeze(1).expand(-1, K, -1, -1)
     target_token_target_by_view = target_token_target.permute(1, 0, 2, 3)
 
-    predictor_union_mask = context_mask.unsqueeze(0) | target_masks_by_view
-    predictor_input = torch.zeros_like(context_emb.unsqueeze(0).expand(K, -1, -1, -1))
-    predictor_input = torch.where(
-        context_mask.unsqueeze(0).unsqueeze(-1),
-        context_emb.unsqueeze(0).expand(K, -1, -1, -1),
-        predictor_input,
-    )
+    predictor_queries = torch.zeros_like(context_emb.unsqueeze(0).expand(K, -1, -1, -1))
     latent_mask_token = model.latent_mask_token.view(1, 1, 1, -1).to(
         dtype=context_emb.dtype,
         device=context_emb.device,
     )
-    predictor_input = torch.where(
+    predictor_queries = torch.where(
         target_masks_by_view.unsqueeze(-1),
         latent_mask_token,
-        predictor_input,
+        predictor_queries,
     )
     predictor_output = model.predict_masked_latents(
-        predictor_input.reshape(B * K, N, -1),
-        predictor_union_mask.reshape(B * K, N),
+        predictor_queries.reshape(B * K, N, -1),
+        context_emb.unsqueeze(0).expand(K, -1, -1, -1).reshape(B * K, N, -1),
+        target_mask=target_masks_by_view.reshape(B * K, N),
+        context_mask=context_mask.unsqueeze(0).expand(K, -1, -1).reshape(B * K, N),
     ).reshape(K, B, N, -1)
 
     per_token_l1 = (predictor_output - target_token_target_by_view).abs().mean(dim=-1)

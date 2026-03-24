@@ -350,16 +350,43 @@ def _score_epoch_state(
     for name in task_spec.regression_tasks:
         pred = np.concatenate(predictions[name], axis=0)
         target = np.concatenate(targets[name], axis=0)
-        metrics[f"{prefix}/r2_{name}"] = float(r2_score(target, pred))
+        finite = np.isfinite(pred)
+        if finite.all():
+            metrics[f"{prefix}/r2_{name}"] = float(r2_score(target, pred))
+        elif finite.any():
+            metrics[f"{prefix}/r2_{name}"] = float(r2_score(target[finite], pred[finite]))
+        else:
+            metrics[f"{prefix}/r2_{name}"] = float("nan")
         regression_r2_values.append(metrics[f"{prefix}/r2_{name}"])
     for name in task_spec.classification_tasks:
         pred = np.concatenate(predictions[name], axis=0)
         target = np.concatenate(targets[name], axis=0)
-        metrics[f"{prefix}/auc_fg_{name}"] = float(roc_auc_score(target, pred))
+        finite = np.isfinite(pred)
+        if finite.all():
+            metrics[f"{prefix}/auc_fg_{name}"] = float(roc_auc_score(target, pred))
+        elif finite.any():
+            metrics[f"{prefix}/auc_fg_{name}"] = float(
+                roc_auc_score(target[finite], pred[finite])
+            )
+        else:
+            metrics[f"{prefix}/auc_fg_{name}"] = float("nan")
         classification_auc_values.append(metrics[f"{prefix}/auc_fg_{name}"])
     metrics[f"{prefix}/r2_mean"] = float(np.mean(regression_r2_values))
     metrics[f"{prefix}/auc_fg_mean"] = float(np.mean(classification_auc_values))
     return metrics
+
+
+@torch.no_grad()
+def extract_msg_probe_features(
+    model: PeakSetSIGReg,
+    batch: dict[str, torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    embeddings = model.encoder(
+        batch["peak_mz"],
+        batch["peak_intensity"],
+        valid_mask=batch["peak_valid_mask"],
+    ).float().detach()
+    return embeddings, batch["peak_valid_mask"]
 
 
 def run_msg_probe(
@@ -388,12 +415,7 @@ def run_msg_probe(
     def feature_extractor(
         batch: dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        embeddings = model.encoder(
-            batch["peak_mz"],
-            batch["peak_intensity"],
-            valid_mask=batch["peak_valid_mask"],
-        ).float()
-        return embeddings, batch["peak_valid_mask"]
+        return extract_msg_probe_features(model, batch)
 
     train_seed_base = int(config.seed) + 1_100_000
     test_seed_base = int(config.seed) + 1_200_000

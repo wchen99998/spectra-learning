@@ -26,6 +26,7 @@ from utils.training import (
     build_logger,
     build_model_from_config,
     collect_and_log_param_metrics,
+    collect_runtime_norm_metrics,
 )
 
 torch.set_float32_matmul_precision("medium")
@@ -425,9 +426,13 @@ def train_and_evaluate(
                 torch.nn.utils.clip_grad_norm_(
                     _get_trainable_params(model), max_norm=grad_clip_norm
                 )
+            runtime_norm_metrics = (
+                collect_runtime_norm_metrics(model)
+                if (global_step + 1) % log_every_n_steps == 0
+                else None
+            )
             for opt in optimizers:
                 opt.step()
-                opt.zero_grad(set_to_none=True)
             for sched in schedulers:
                 sched.step()
             model.update_teacher()
@@ -442,9 +447,15 @@ def train_and_evaluate(
                 log_metrics["train/learning_rate"] = float(
                     optimizers[0].param_groups[0]["lr"]
                 )
+                if runtime_norm_metrics is not None:
+                    log_metrics.update(
+                        {f"train/{k}": v for k, v in runtime_norm_metrics.items()}
+                    )
                 log_metrics["epoch"] = epoch
                 log_metrics["global_step"] = global_step
                 logger.log_metrics(log_metrics, step=global_step)
+            for opt in optimizers:
+                opt.zero_grad(set_to_none=True)
             if global_step % checkpoint_every_steps == 0:
                 _save_checkpoint(
                     checkpoint_dir / f"step-{global_step:08d}.pt",

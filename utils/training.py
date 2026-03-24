@@ -67,6 +67,8 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         num_peaks=int(config.get("num_peaks", 64)),
         jepa_context_fraction=float(config.get("jepa_context_fraction", 0.3)),
         jepa_target_fraction=float(config.get("jepa_target_fraction", 0.25)),
+        jepa_projector_num_layers=int(config.get("jepa_projector_num_layers", 0)),
+        jepa_projector_dim=config.get("jepa_projector_dim", None),
         temporal_predictor_num_layers=int(
             config.get("temporal_predictor_num_layers", 0)
         ),
@@ -106,6 +108,44 @@ def collect_and_log_param_metrics(model: torch.nn.Module) -> dict[str, float]:
         )
         metrics[f"model/params_total/{module_name}"] = float(mod_total)
         metrics[f"model/params_trainable/{module_name}"] = float(mod_train)
+    return metrics
+
+
+def collect_runtime_norm_metrics(model: torch.nn.Module) -> dict[str, float]:
+    param_sumsq_by_module: dict[str, float] = {}
+    grad_sumsq_by_module: dict[str, float] = {}
+    total_param_sumsq = 0.0
+    total_grad_sumsq = 0.0
+    has_grads = False
+    for name, param in model.named_parameters():
+        module_name = name.split(".", 1)[0]
+        param_sumsq = float(param.detach().float().square().sum().item())
+        total_param_sumsq += param_sumsq
+        param_sumsq_by_module[module_name] = (
+            param_sumsq_by_module.get(module_name, 0.0) + param_sumsq
+        )
+        if param.grad is None:
+            continue
+        grad_sumsq = float(param.grad.detach().float().square().sum().item())
+        total_grad_sumsq += grad_sumsq
+        grad_sumsq_by_module[module_name] = (
+            grad_sumsq_by_module.get(module_name, 0.0) + grad_sumsq
+        )
+        has_grads = True
+
+    metrics = {
+        "param_norm/total": total_param_sumsq**0.5,
+    }
+    for module_name in sorted(param_sumsq_by_module):
+        metrics[f"param_norm/{module_name}"] = (
+            param_sumsq_by_module[module_name] ** 0.5
+        )
+    if has_grads:
+        metrics["grad_norm/total"] = total_grad_sumsq**0.5
+        for module_name in sorted(grad_sumsq_by_module):
+            metrics[f"grad_norm/{module_name}"] = (
+                grad_sumsq_by_module[module_name] ** 0.5
+            )
     return metrics
 
 

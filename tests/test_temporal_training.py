@@ -2,8 +2,10 @@
 
 import torch
 import pytest
+from ml_collections import ConfigDict
 
 from models.model import PeakSetSIGReg
+from train_temporal import _build_temporal_optimizers
 
 
 def _small_model(**overrides) -> PeakSetSIGReg:
@@ -51,6 +53,13 @@ class TestForwardTemporal:
         metrics = model.forward_temporal(batch)
         assert torch.isfinite(metrics["loss"])
         assert "temporal_pred_loss" in metrics
+        for key in (
+            "context_encoder_output_norm",
+            "teacher_encoder_output_norm",
+            "predictor_output_norm",
+        ):
+            assert key in metrics
+            assert torch.isfinite(metrics[key])
 
     def test_backward(self):
         model = _small_model()
@@ -114,6 +123,20 @@ class TestForwardTemporal:
             metrics = model.forward_temporal(batch)
             assert torch.isfinite(metrics["loss"]), f"Non-finite loss for {loss_type}"
 
+    def test_teacher_ema_updates_after_module_to(self):
+        model = _small_model(use_ema_teacher_target=True, teacher_ema_decay=0.5)
+        model = model.to(dtype=torch.float64)
+
+        teacher_before = next(model.teacher_encoder.module.parameters()).detach().clone()
+        with torch.no_grad():
+            for param in model.encoder.parameters():
+                param.add_(1.0)
+
+        model.update_teacher()
+        teacher_after = next(model.teacher_encoder.module.parameters()).detach().clone()
+
+        assert not torch.equal(teacher_before, teacher_after)
+
 
 class TestCheckpointPartialLoad:
     def test_partial_load_allows_temporal_keys_missing(self):
@@ -148,6 +171,42 @@ class TestCheckpointPartialLoad:
                 assert torch.equal(param.data, pretrained_param), (
                     f"Encoder param {name} doesn't match after load"
                 )
+
+
+class TestTemporalOptimizer:
+    def test_encoder_uses_finetune_lr(self):
+        model = _small_model()
+        for name, param in model.named_parameters():
+            if not (
+                name.startswith("encoder.")
+                or name.startswith("temporal_predictor.")
+                or name.startswith("temporal_rt_proj.")
+                or name.startswith("temporal_target_tokens")
+            ):
+                param.requires_grad_(False)
+
+        config = ConfigDict(
+            {
+                "learning_rate": 3e-4,
+                "encoder_finetune_lr": 3e-5,
+                "warmup_steps": 0,
+                "min_learning_rate": None,
+                "b2": 0.999,
+                "weight_decay": 1e-4,
+                "optimizer_capturable": False,
+                "optimizer_fused": False,
+            }
+        )
+
+        optimizers, _ = _build_temporal_optimizers(
+            config,
+            model,
+            total_steps=10,
+            device=torch.device("cpu"),
+        )
+
+        lrs = sorted({float(group["lr"]) for group in optimizers[0].param_groups})
+        assert lrs == pytest.approx([3e-5, 3e-4])
 
 
 class TestRTConditioningSensitivity:
