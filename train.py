@@ -133,50 +133,6 @@ def _get_compiled_forward(model: PeakSetSIGReg, compile_mode: str):
     return compiled
 
 
-class _CUDAGraphRunner:
-    """Explicit CUDA graph capture with static input buffers for training."""
-
-    def __init__(self, compile_kwargs=None):
-        self.graph = None
-        self.static_inputs: dict[str, torch.Tensor] | None = None
-        self.static_output = None
-        self.compiled_fn = None
-        self.compile_kwargs = compile_kwargs or {}
-
-    def _warmup_and_capture(self, fn, batch):
-        if self.compiled_fn is None:
-            self.compiled_fn = torch.compile(fn, **self.compile_kwargs)
-        self.static_inputs = {k: v.clone() for k, v in batch.items()}
-        s = torch.cuda.Stream()
-        s.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(s):
-            for _ in range(3):
-                self.compiled_fn(self.static_inputs)
-        torch.cuda.current_stream().wait_stream(s)
-        self.graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self.graph):
-            self.static_output = self.compiled_fn(self.static_inputs)
-
-    def run(self, fn, batch):
-        if self.graph is None:
-            self._warmup_and_capture(fn, batch)
-        else:
-            for k, v in batch.items():
-                self.static_inputs[k].copy_(v)
-        self.graph.replay()
-        return self.static_output
-
-
-def _get_teacher_runner(model: PeakSetSIGReg) -> _CUDAGraphRunner:
-    runner = getattr(model, "_teacher_graph_runner", None)
-    if runner is None:
-        runner = _CUDAGraphRunner(
-            compile_kwargs={"mode": "max-autotune-no-cudagraphs", "dynamic": False}
-        )
-        model._teacher_graph_runner = runner
-    return runner
-
-
 def _get_trainable_params(model: PeakSetSIGReg) -> list[torch.nn.Parameter]:
     params = getattr(model, "_trainable_params", None)
     if params is None:
@@ -406,20 +362,10 @@ def train_and_evaluate(
         epoch_steps = min(steps_per_epoch, total_steps - global_step)
         pbar = tqdm(total=epoch_steps, desc=f"Epoch {epoch}", unit="step")
         while global_step < total_steps and (batch := prefetcher.next()) is not None:
-            model.advance_sigreg_lambda_schedule()
-            # Teacher targets (explicit CUDA graph with static buffers)
-            if model.teacher_encoder is not None:
-                runner = _get_teacher_runner(model)
-                with autocast_ctx:
-                    teacher_targets = runner.run(model.compute_teacher_targets, batch)
-            else:
-                teacher_targets = None
-            # Student forward (compiled, separate from backward)
+            # Forward (compiled, separate from backward)
             torch.compiler.cudagraph_mark_step_begin()
             with autocast_ctx:
-                metrics = _get_compiled_forward(model, _compile_mode)(
-                    batch, teacher_targets
-                )
+                metrics = _get_compiled_forward(model, _compile_mode)(batch)
             # Backward + optimizer (not compiled)
             metrics["loss"].backward()
             if grad_clip_norm is not None and grad_clip_norm > 0:
@@ -435,7 +381,6 @@ def train_and_evaluate(
                 opt.step()
             for sched in schedulers:
                 sched.step()
-            model.update_teacher()
             global_step += 1
             pbar.update(1)
             if global_step % log_every_n_steps == 0:

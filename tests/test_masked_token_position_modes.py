@@ -198,14 +198,13 @@ def test_local_global_loss_uses_full_view_teacher_targets():
     )
     B, K, N = target_masks.shape
 
-    # Teacher sees full valid spectrum (no masking)
-    teacher = model.teacher_encoder if model.teacher_encoder is not None else model.encoder
-    teacher_full = teacher(
+    # Full encoder sees all valid peaks (shared encoder, no stop_grad in training)
+    teacher_full = model.encoder(
         peak_mz,
         peak_intensity,
         valid_mask=peak_valid_mask,
         visible_mask=peak_valid_mask,
-    ).detach()
+    ).detach()  # detach for this test's manual comparison only
     target_token_target = teacher_full.unsqueeze(1).expand(-1, K, -1, -1)
     target_token_target_by_view = target_token_target.permute(1, 0, 2, 3)
 
@@ -226,9 +225,9 @@ def test_local_global_loss_uses_full_view_teacher_targets():
         context_mask=context_mask.unsqueeze(0).expand(K, -1, -1).reshape(B * K, N),
     ).reshape(K, B, N, -1)
 
-    per_token_l1 = (predictor_output - target_token_target_by_view).abs().mean(dim=-1)
+    per_token_mse = (predictor_output - target_token_target_by_view).square().mean(dim=-1)
     masked_only_loss = (
-        per_token_l1 * target_masks_by_view.float()
+        per_token_mse * target_masks_by_view.float()
     ).sum() / target_masks_by_view.float().sum().clamp_min(1.0)
 
     assert torch.allclose(metrics["local_global_loss"], masked_only_loss)

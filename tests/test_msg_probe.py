@@ -147,7 +147,7 @@ class MsgProbeStepTests(unittest.TestCase):
         self.assertEqual(result["batch_size"], 2)
         self.assertTrue(torch.isfinite(result["loss_total"]).item())
 
-    def test_extract_msg_probe_features_uses_encoder_not_projector(self):
+    def test_extract_msg_probe_features_uses_encoder(self):
         model = PeakSetSIGReg(
             model_dim=32,
             encoder_num_layers=1,
@@ -156,16 +156,8 @@ class MsgProbeStepTests(unittest.TestCase):
             attention_mlp_multiple=2.0,
             feature_mlp_hidden_dim=16,
             sigreg_num_slices=32,
-            jepa_projector_num_layers=2,
-            jepa_projector_dim=20,
             num_peaks=6,
         )
-
-        class ForbiddenProjector(torch.nn.Module):
-            def forward(self, x):
-                raise AssertionError("msg_probe should not call jepa_projector")
-
-        model.jepa_projector = ForbiddenProjector()
         batch = {
             "peak_mz": torch.rand(3, 6),
             "peak_intensity": torch.rand(3, 6),

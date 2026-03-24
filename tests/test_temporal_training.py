@@ -18,13 +18,11 @@ def _small_model(**overrides) -> PeakSetSIGReg:
         feature_mlp_hidden_dim=32,
         encoder_use_rope=True,
         masked_token_loss_weight=1.0,
-        masked_token_loss_type="l2",
         representation_regularizer="none",
         masked_latent_predictor_num_layers=1,
         jepa_num_target_blocks=1,
         num_peaks=8,
         temporal_predictor_num_layers=2,
-        use_ema_teacher_target=False,
     )
     kwargs.update(overrides)
     return PeakSetSIGReg(**kwargs)
@@ -55,11 +53,18 @@ class TestForwardTemporal:
         assert "temporal_pred_loss" in metrics
         for key in (
             "context_encoder_output_norm",
-            "teacher_encoder_output_norm",
+            "target_encoder_output_norm",
             "predictor_output_norm",
         ):
             assert key in metrics
             assert torch.isfinite(metrics[key])
+
+    def test_finite_loss_with_postnorm(self):
+        model = _small_model(norm_type="rmsnorm", norm_position="postnorm")
+        model.eval()
+        batch = _temporal_batch()
+        metrics = model.forward_temporal(batch)
+        assert torch.isfinite(metrics["loss"])
 
     def test_backward(self):
         model = _small_model()
@@ -96,15 +101,6 @@ class TestForwardTemporal:
         assert model.temporal_target_tokens.grad is not None
         assert model.temporal_target_tokens.grad.abs().sum() > 0
 
-    def test_with_ema_teacher(self):
-        model = _small_model(use_ema_teacher_target=True, teacher_ema_decay=0.99)
-        model.eval()
-        batch = _temporal_batch()
-        # Pre-compute teacher targets
-        teacher_targets = model.compute_temporal_teacher_targets(batch)
-        metrics = model.forward_temporal(batch, teacher_targets=teacher_targets)
-        assert torch.isfinite(metrics["loss"])
-
     def test_partial_valid_mask(self):
         """Loss should be computed only over valid target tokens."""
         model = _small_model()
@@ -115,27 +111,7 @@ class TestForwardTemporal:
         metrics = model.forward_temporal(batch)
         assert torch.isfinite(metrics["loss"])
 
-    def test_different_loss_types(self):
-        for loss_type in ("l1", "l2", "dir_rad"):
-            model = _small_model(masked_token_loss_type=loss_type)
-            model.eval()
-            batch = _temporal_batch()
-            metrics = model.forward_temporal(batch)
-            assert torch.isfinite(metrics["loss"]), f"Non-finite loss for {loss_type}"
 
-    def test_teacher_ema_updates_after_module_to(self):
-        model = _small_model(use_ema_teacher_target=True, teacher_ema_decay=0.5)
-        model = model.to(dtype=torch.float64)
-
-        teacher_before = next(model.teacher_encoder.module.parameters()).detach().clone()
-        with torch.no_grad():
-            for param in model.encoder.parameters():
-                param.add_(1.0)
-
-        model.update_teacher()
-        teacher_after = next(model.teacher_encoder.module.parameters()).detach().clone()
-
-        assert not torch.equal(teacher_before, teacher_after)
 
 
 class TestCheckpointPartialLoad:

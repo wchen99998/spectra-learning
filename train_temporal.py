@@ -36,6 +36,7 @@ from utils.training import (
     build_logger,
     build_model_from_config,
     collect_and_log_param_metrics,
+    collect_runtime_norm_metrics,
 )
 
 torch.set_float32_matmul_precision("medium")
@@ -57,6 +58,14 @@ def _is_weight_decay_target(name: str, param: torch.nn.Parameter) -> bool:
             for t in ("attention.", "feed_forward.", "cross_attn.")
         )
     )
+
+
+_TEMPORAL_PARAM_PREFIXES = (
+    "temporal_predictor.",
+    "temporal_rt_proj.",
+    "temporal_target_tokens",
+)
+_TEMPORAL_TRAINABLE_PREFIXES = ("encoder.", *_TEMPORAL_PARAM_PREFIXES)
 
 
 _TEMPORAL_BATCH_KEYS = frozenset(
@@ -134,48 +143,16 @@ class _BatchPrefetcher:
         return batch
 
 
-class _CUDAGraphRunner:
-    """Explicit CUDA graph capture with static input buffers for training."""
-
-    def __init__(self, compile_kwargs=None):
-        self.graph = None
-        self.static_inputs: dict[str, torch.Tensor] | None = None
-        self.static_output = None
-        self.compiled_fn = None
-        self.compile_kwargs = compile_kwargs or {}
-
-    def _warmup_and_capture(self, fn, batch):
-        if self.compiled_fn is None:
-            self.compiled_fn = torch.compile(fn, **self.compile_kwargs)
-        self.static_inputs = {k: v.clone() for k, v in batch.items()}
-        s = torch.cuda.Stream()
-        s.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(s):
-            for _ in range(3):
-                self.compiled_fn(self.static_inputs)
-        torch.cuda.current_stream().wait_stream(s)
-        self.graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self.graph):
-            self.static_output = self.compiled_fn(self.static_inputs)
-
-    def run(self, fn, batch):
-        if self.graph is None:
-            self._warmup_and_capture(fn, batch)
-        else:
-            for k, v in batch.items():
-                self.static_inputs[k].copy_(v)
-        self.graph.replay()
-        return self.static_output
-
-
-def _get_teacher_runner(model: PeakSetSIGReg) -> _CUDAGraphRunner:
-    runner = getattr(model, "_temporal_teacher_graph_runner", None)
-    if runner is None:
-        runner = _CUDAGraphRunner(
-            compile_kwargs={"mode": "max-autotune-no-cudagraphs", "dynamic": False}
+def _get_compiled_temporal_forward(model: PeakSetSIGReg, compile_mode: str):
+    compiled = getattr(model, "_compiled_forward_temporal", None)
+    if compiled is None:
+        compiled = torch.compile(
+            model.forward_temporal,
+            mode=compile_mode,
+            dynamic=False,
         )
-        model._temporal_teacher_graph_runner = runner
-    return runner
+        model._compiled_forward_temporal = compiled
+    return compiled
 
 
 def _save_checkpoint(
@@ -222,9 +199,12 @@ def _build_temporal_optimizers(
     total_steps: int,
     device: torch.device,
 ) -> tuple[list[torch.optim.Optimizer], list[CapturableCosineSchedule]]:
-    """Build optimizer with differential LR for encoder vs temporal predictor."""
+    """Build optimizer with differential LR for encoder finetuning."""
     base_lr = float(config.learning_rate)
-    encoder_lr = float(config.get("encoder_finetune_lr", None) or base_lr)
+    encoder_lr_cfg = config.get("encoder_finetune_lr", None)
+    encoder_lr = (
+        base_lr if encoder_lr_cfg is None else float(encoder_lr_cfg)
+    )
     warmup_steps = int(config.get("warmup_steps", 0))
     min_learning_rate = config.get("min_learning_rate", None)
     b2 = float(config.get("b2", 0.999))
@@ -234,36 +214,56 @@ def _build_temporal_optimizers(
     fused_cfg = config.get("optimizer_fused", None)
     fused = is_cuda if fused_cfg is None else bool(fused_cfg) and is_cuda
 
-    # Separate encoder params from temporal predictor params
     encoder_decay, encoder_no_decay = [], []
     temporal_decay, temporal_no_decay = [], []
-
-    temporal_prefixes = ("temporal_predictor.", "temporal_rt_proj.", "temporal_target_tokens")
-
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        is_temporal = any(name.startswith(p) for p in temporal_prefixes)
+        is_encoder = name.startswith("encoder.")
         if _is_weight_decay_target(name, param):
-            if is_temporal:
-                temporal_decay.append(param)
-            else:
+            if is_encoder:
                 encoder_decay.append(param)
-        else:
-            if is_temporal:
-                temporal_no_decay.append(param)
             else:
+                temporal_decay.append(param)
+        else:
+            if is_encoder:
                 encoder_no_decay.append(param)
+            else:
+                temporal_no_decay.append(param)
 
     param_groups = []
     if encoder_decay:
-        param_groups.append({"params": encoder_decay, "lr": torch.tensor(encoder_lr), "weight_decay": weight_decay})
+        param_groups.append(
+            {
+                "params": encoder_decay,
+                "lr": torch.tensor(encoder_lr),
+                "weight_decay": weight_decay,
+            }
+        )
     if encoder_no_decay:
-        param_groups.append({"params": encoder_no_decay, "lr": torch.tensor(encoder_lr), "weight_decay": 0.0})
+        param_groups.append(
+            {
+                "params": encoder_no_decay,
+                "lr": torch.tensor(encoder_lr),
+                "weight_decay": 0.0,
+            }
+        )
     if temporal_decay:
-        param_groups.append({"params": temporal_decay, "lr": torch.tensor(base_lr), "weight_decay": weight_decay})
+        param_groups.append(
+            {
+                "params": temporal_decay,
+                "lr": torch.tensor(base_lr),
+                "weight_decay": weight_decay,
+            }
+        )
     if temporal_no_decay:
-        param_groups.append({"params": temporal_no_decay, "lr": torch.tensor(base_lr), "weight_decay": 0.0})
+        param_groups.append(
+            {
+                "params": temporal_no_decay,
+                "lr": torch.tensor(base_lr),
+                "weight_decay": 0.0,
+            }
+        )
 
     optimizer = torch.optim.AdamW(
         param_groups,
@@ -309,7 +309,8 @@ def _load_pretrained_checkpoint(
         logging.warning("Unexpected keys in checkpoint (ignored): %s", unexpected)
     logging.info(
         "Loaded pretrained checkpoint: %d keys loaded, %d temporal keys initialized fresh",
-        len(sd) - len(unexpected), len(missing),
+        len(sd) - len(unexpected),
+        len(missing),
     )
 
 
@@ -347,9 +348,18 @@ def train_temporal(
     else:
         logging.warning("No pretrained checkpoint provided — training from scratch.")
 
-    model_param_metrics = collect_and_log_param_metrics(model)
     model.to(device).train()
 
+    # Finetune the encoder together with the temporal decoder, while keeping
+    # unrelated spatial-only heads frozen.
+    for name, param in model.named_parameters():
+        if param.requires_grad and not any(
+            name.startswith(prefix)
+            for prefix in _TEMPORAL_TRAINABLE_PREFIXES
+        ):
+            param.requires_grad_(False)
+
+    model_param_metrics = collect_and_log_param_metrics(model)
     optimizers, schedulers = _build_temporal_optimizers(config, model, total_steps, device)
 
     checkpoint_dir = workdir / "checkpoints"
@@ -389,8 +399,6 @@ def train_temporal(
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     train_loader = datamodule.train_loader
 
-    # Compile forward_temporal
-    compiled_forward = None
     last_msg_probe_metrics: dict[str, float] = {}
     _wandb_run = getattr(logger, "experiment", None)
 
@@ -404,37 +412,30 @@ def train_temporal(
         pbar = tqdm(total=epoch_steps, desc=f"Epoch {epoch}", unit="step")
 
         while global_step < total_steps and (batch := prefetcher.next()) is not None:
-            # Teacher targets (CUDA graph)
-            if model.teacher_encoder is not None:
-                runner = _get_teacher_runner(model)
+            # Forward
+            if device.type == "cuda":
+                torch.compiler.cudagraph_mark_step_begin()
                 with autocast_ctx:
-                    teacher_targets = runner.run(
-                        model.compute_temporal_teacher_targets, batch
+                    metrics = _get_compiled_temporal_forward(model, _compile_mode)(
+                        batch
                     )
             else:
-                teacher_targets = None
-
-            # Forward
-            torch.compiler.cudagraph_mark_step_begin()
-            with autocast_ctx:
-                if compiled_forward is None:
-                    compiled_forward = torch.compile(
-                        model.forward_temporal,
-                        mode=_compile_mode,
-                        dynamic=False,
-                    )
-                metrics = compiled_forward(batch, teacher_targets)
+                with autocast_ctx:
+                    metrics = model.forward_temporal(batch)
 
             # Backward
             metrics["loss"].backward()
             if grad_clip_norm is not None and grad_clip_norm > 0:
                 torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=grad_clip_norm)
+            runtime_norm_metrics = (
+                collect_runtime_norm_metrics(model)
+                if (global_step + 1) % log_every_n_steps == 0
+                else None
+            )
             for opt in optimizers:
                 opt.step()
-                opt.zero_grad(set_to_none=True)
             for sched in schedulers:
                 sched.step()
-            model.update_teacher()
             global_step += 1
             pbar.update(1)
 
@@ -447,9 +448,15 @@ def train_temporal(
                 log_metrics["train/learning_rate"] = float(
                     optimizers[0].param_groups[0]["lr"]
                 )
+                if runtime_norm_metrics is not None:
+                    log_metrics.update(
+                        {f"train/{k}": v for k, v in runtime_norm_metrics.items()}
+                    )
                 log_metrics["epoch"] = epoch
                 log_metrics["global_step"] = global_step
                 logger.log_metrics(log_metrics, step=global_step)
+            for opt in optimizers:
+                opt.zero_grad(set_to_none=True)
 
             if global_step % checkpoint_every_steps == 0:
                 _save_checkpoint(

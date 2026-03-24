@@ -3,191 +3,79 @@ import math
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
-
-import triton
-import triton.language as tl
+from torch.nn.attention.flex_attention import (
+    BlockMask,
+    create_block_mask,
+    flex_attention,
+)
 
 from models.losses import SIGReg
 
 
-# ---------------------------------------------------------------------------
-# Triton fused masked attention (replaces flex_attention + BlockMask)
-# ---------------------------------------------------------------------------
+def create_visible_block_mask(visible_mask: torch.Tensor) -> BlockMask:
+    batch_size, seq_len = visible_mask.shape
 
-@triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=2, num_stages=2),
-        triton.Config({}, num_warps=4, num_stages=2),
-        triton.Config({}, num_warps=4, num_stages=3),
-        triton.Config({}, num_warps=8, num_stages=2),
-    ],
-    key=["BLOCK_N", "D"],
-)
-@triton.jit
-def _masked_attn_fwd_kernel(
-    Q_ptr, K_ptr, V_ptr, Mask_ptr, O_ptr, LSE_ptr,
-    stride_b, stride_n, stride_h, stride_d,
-    v_stride_b, v_stride_n, v_stride_h, v_stride_d,
-    stride_mb, sm_scale, actual_N,
-    BLOCK_N: tl.constexpr, D: tl.constexpr, H: tl.constexpr,
-):
-    off_bh = tl.program_id(0)
-    b = off_bh // H
-    h = off_bh % H
-    base = b * stride_b + h * stride_h
-    mask_base = b * stride_mb
-    offs_n = tl.arange(0, BLOCK_N)
-    offs_d = tl.arange(0, D)
-    valid_n = offs_n < actual_N
-    nd_idx = offs_n[:, None] * stride_n + offs_d[None, :] * stride_d
-    q = tl.load(Q_ptr + base + nd_idx, mask=valid_n[:, None], other=0.0)
-    k = tl.load(K_ptr + base + nd_idx, mask=valid_n[:, None], other=0.0)
-    v_base = b * v_stride_b + h * v_stride_h
-    v_nd_idx = offs_n[:, None] * v_stride_n + offs_d[None, :] * v_stride_d
-    v = tl.load(V_ptr + v_base + v_nd_idx, mask=valid_n[:, None], other=0.0)
-    mask = tl.load(Mask_ptr + mask_base + offs_n, mask=valid_n, other=False)
-    s = tl.dot(q, tl.trans(k)) * sm_scale
-    attn_mask = mask[:, None] & mask[None, :]
-    s = tl.where(attn_mask, s, float("-inf"))
-    row_max = tl.max(s, axis=1)
-    row_max = tl.maximum(row_max, float("-1e20"))
-    s = s - row_max[:, None]
-    p = tl.exp(s)
-    p = tl.where(attn_mask, p, 0.0)
-    row_sum = tl.sum(p, axis=1)
-    row_sum = tl.maximum(row_sum, 1e-6)
-    p = p / row_sum[:, None]
-    o = tl.dot(p.to(v.dtype), v)
-    tl.store(O_ptr + base + nd_idx, o, mask=valid_n[:, None])
-    lse_val = row_max + tl.log(row_sum)
-    tl.store(LSE_ptr + off_bh * BLOCK_N + offs_n, lse_val)
+    def mask_mod(batch_idx, _head_idx, q_idx, kv_idx):
+        return visible_mask[batch_idx, q_idx] & visible_mask[batch_idx, kv_idx]
+
+    return create_block_mask(
+        mask_mod,
+        B=batch_size,
+        H=None,
+        Q_LEN=seq_len,
+        KV_LEN=seq_len,
+        device=visible_mask.device,
+    )
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=2, num_stages=2),
-        triton.Config({}, num_warps=4, num_stages=2),
-        triton.Config({}, num_warps=4, num_stages=3),
-        triton.Config({}, num_warps=8, num_stages=2),
-    ],
-    key=["BLOCK_N", "D"],
-)
-@triton.jit
-def _masked_attn_bwd_kernel(
-    Q_ptr, K_ptr, V_ptr, Mask_ptr, O_ptr, LSE_ptr, DO_ptr,
-    DQ_ptr, DK_ptr, DV_ptr,
-    stride_b, stride_n, stride_h, stride_d,
-    v_stride_b, v_stride_n, v_stride_h, v_stride_d,
-    do_stride_b, do_stride_n, do_stride_h, do_stride_d,
-    stride_mb, sm_scale, actual_N,
-    BLOCK_N: tl.constexpr, D: tl.constexpr, H: tl.constexpr,
-):
-    off_bh = tl.program_id(0)
-    b = off_bh // H
-    h = off_bh % H
-    base = b * stride_b + h * stride_h
-    mask_base = b * stride_mb
-    offs_n = tl.arange(0, BLOCK_N)
-    offs_d = tl.arange(0, D)
-    valid_n = offs_n < actual_N
-    nd_idx = offs_n[:, None] * stride_n + offs_d[None, :] * stride_d
-    q = tl.load(Q_ptr + base + nd_idx, mask=valid_n[:, None], other=0.0)
-    k = tl.load(K_ptr + base + nd_idx, mask=valid_n[:, None], other=0.0)
-    v_base = b * v_stride_b + h * v_stride_h
-    v_nd_idx = offs_n[:, None] * v_stride_n + offs_d[None, :] * v_stride_d
-    v = tl.load(V_ptr + v_base + v_nd_idx, mask=valid_n[:, None], other=0.0)
-    o = tl.load(O_ptr + base + nd_idx, mask=valid_n[:, None], other=0.0)
-    do_base = b * do_stride_b + h * do_stride_h
-    do_nd_idx = offs_n[:, None] * do_stride_n + offs_d[None, :] * do_stride_d
-    do = tl.load(DO_ptr + do_base + do_nd_idx, mask=valid_n[:, None], other=0.0)
-    mask = tl.load(Mask_ptr + mask_base + offs_n, mask=valid_n, other=False)
-    lse = tl.load(LSE_ptr + off_bh * BLOCK_N + offs_n)
-    s = tl.dot(q, tl.trans(k)) * sm_scale
-    attn_mask = mask[:, None] & mask[None, :]
-    p = tl.exp(s - lse[:, None])
-    p = tl.where(attn_mask, p, 0.0)
-    dv = tl.dot(tl.trans(p.to(do.dtype)), do)
-    do_f32 = do.to(tl.float32)
-    o_f32 = o.to(tl.float32)
-    v_f32 = v.to(tl.float32)
-    dp = tl.dot(do_f32, tl.trans(v_f32))
-    di = tl.sum(do_f32 * o_f32, axis=1)
-    ds = p * (dp - di[:, None]) * sm_scale
-    ds = tl.where(attn_mask, ds, 0.0)
-    dq = tl.dot(ds.to(k.dtype), k)
-    dk = tl.dot(tl.trans(ds.to(q.dtype)), q)
-    tl.store(DQ_ptr + base + nd_idx, dq, mask=valid_n[:, None])
-    tl.store(DK_ptr + base + nd_idx, dk, mask=valid_n[:, None])
-    tl.store(DV_ptr + base + nd_idx, dv, mask=valid_n[:, None])
+def create_cross_block_mask(
+    context_mask: torch.Tensor,
+    target_len: int,
+) -> BlockMask:
+    batch_size, context_len = context_mask.shape
+
+    def mask_mod(batch_idx, _head_idx, _q_idx, kv_idx):
+        return context_mask[batch_idx, kv_idx]
+
+    return create_block_mask(
+        mask_mod,
+        B=batch_size,
+        H=None,
+        Q_LEN=target_len,
+        KV_LEN=context_len,
+        device=context_mask.device,
+    )
 
 
-class _MaskedAttentionFunc(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, xq, xk, xv, vis_mask, block_n):
-        B, N, H, D = xq.shape
-        BLOCK_N = block_n if block_n > 0 else (1 << max(1, (N - 1).bit_length()))
-        sm_scale = 1.0 / math.sqrt(D)
-        o = torch.empty_like(xq)
-        lse = torch.empty(B * H, BLOCK_N, device=xq.device, dtype=torch.float32)
-        s_b, s_n, s_h, s_d = xq.stride()
-        vs_b, vs_n, vs_h, vs_d = xv.stride()
-        m_stride_b = vis_mask.stride(0)
-        _masked_attn_fwd_kernel[(B * H,)](
-            xq, xk, xv, vis_mask, o, lse,
-            s_b, s_n, s_h, s_d, vs_b, vs_n, vs_h, vs_d,
-            m_stride_b, sm_scale, N,
-            BLOCK_N=BLOCK_N, D=D, H=H,
-        )
-        ctx.save_for_backward(xq, xk, xv, vis_mask, o, lse)
-        ctx.sm_scale = sm_scale
-        ctx.shape = (B, N, H, D)
-        ctx.block_n = BLOCK_N
-        return o
-
-    @staticmethod
-    def backward(ctx, do):
-        xq, xk, xv, vis_mask, o, lse = ctx.saved_tensors
-        B, N, H, D = ctx.shape
-        BLOCK_N = ctx.block_n
-        dq = torch.empty_like(xq)
-        dk = torch.empty_like(xk)
-        dv = torch.empty(B, N, H, D, device=xq.device, dtype=xq.dtype)
-        s_b, s_n, s_h, s_d = xq.stride()
-        vs_b, vs_n, vs_h, vs_d = xv.stride()
-        do_s_b, do_s_n, do_s_h, do_s_d = do.stride()
-        m_stride_b = vis_mask.stride(0)
-        _masked_attn_bwd_kernel[(B * H,)](
-            xq, xk, xv, vis_mask, o, lse, do,
-            dq, dk, dv,
-            s_b, s_n, s_h, s_d, vs_b, vs_n, vs_h, vs_d,
-            do_s_b, do_s_n, do_s_h, do_s_d,
-            m_stride_b, ctx.sm_scale, N,
-            BLOCK_N=BLOCK_N, D=D, H=H,
-        )
-        return dq, dk, dv, None, None
-
-
-def _masked_attention_fallback(xq, xk, xv, vis_mask):
-    """CPU/fallback implementation of masked attention."""
-    B, N, H, D = xq.shape
-    sm_scale = 1.0 / math.sqrt(D)
-    q = xq.transpose(1, 2)  # [B, H, N, D]
-    k = xk.transpose(1, 2)
-    v = xv.transpose(1, 2)
-    attn_weights = (q @ k.transpose(-2, -1)) * sm_scale  # [B, H, N, N]
-    attn_mask = vis_mask[:, None, :, None] & vis_mask[:, None, None, :]  # [B, 1, N, N]
-    attn_weights = attn_weights.masked_fill(~attn_mask, float("-inf"))
-    attn_weights = F.softmax(attn_weights, dim=-1)
-    attn_weights = attn_weights.nan_to_num(0.0)
-    out = (attn_weights @ v).transpose(1, 2)  # [B, N, H, D]
-    return out
+def _repeat_kv_for_gqa(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    num_heads: int,
+    num_kv_heads: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if num_kv_heads == num_heads:
+        return k, v
+    repeat_factor = num_heads // num_kv_heads
+    return (
+        k.repeat_interleave(repeat_factor, dim=1),
+        v.repeat_interleave(repeat_factor, dim=1),
+    )
 
 
 def masked_attention(xq, xk, xv, vis_mask, block_n=0):
-    if xq.device.type != "cuda":
-        return _masked_attention_fallback(xq, xk, xv, vis_mask)
-    return _MaskedAttentionFunc.apply(xq, xk, xv, vis_mask, block_n)
+    """Masked self-attention using flex_attention.
+
+    Args:
+        xq, xk, xv: [B, N, H, D] in (batch, seq, head, dim) layout
+        vis_mask: [B, N] bool — True for visible positions
+        block_n: unused (kept for API compat)
+    """
+    q = xq.transpose(1, 2)  # [B, H, N, D]
+    k = xk.transpose(1, 2)
+    v = xv.transpose(1, 2)
+    block_mask = create_visible_block_mask(vis_mask)
+    out = flex_attention(q, k, v, block_mask=block_mask)
+    return out.transpose(1, 2)  # [B, N, H, D]
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +105,13 @@ def _build_norm(dim: int, eps: float, norm_type: str) -> nn.Module:
     if kind == "layernorm":
         return nn.LayerNorm(dim, eps=eps)
     raise ValueError(f"Unsupported norm_type: {norm_type}")
+
+
+def _normalize_norm_position(norm_position: str) -> str:
+    kind = str(norm_position).lower()
+    if kind not in ("prenorm", "postnorm"):
+        raise ValueError(f"Unsupported norm_position: {norm_position}")
+    return kind
 
 
 def _precompute_rope_freqs(
@@ -257,17 +152,20 @@ class Attention(nn.Module):
         xq = xq.view(bsz, seqlen, self.n_heads, self.head_dim)
         xk = xk.view(bsz, seqlen, self.n_kv_heads, self.head_dim)
         xv = xv.view(bsz, seqlen, self.n_kv_heads, self.head_dim)
+        if self.qk_norm:
+            xq = self.q_norm(xq)
+            xk = self.k_norm(xk)
         if freqs_cos is not None and freqs_sin is not None:
             xq, xk = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin)
-        if vis_mask is not None:
-            attn = masked_attention(xq, xk, xv, vis_mask, block_n=pad_to)
-            attn = attn.reshape(bsz, seqlen, self.dim)
-        else:
-            q = xq.transpose(1, 2)
-            k = xk.transpose(1, 2)
-            v = xv.transpose(1, 2)
-            attn = F.scaled_dot_product_attention(q, k, v)
-            attn = attn.transpose(1, 2).contiguous().view(bsz, seqlen, self.dim)
+        xq = xq.to(dtype=xv.dtype)
+        xk = xk.to(dtype=xv.dtype)
+        q = xq.transpose(1, 2)
+        k = xk.transpose(1, 2)
+        v = xv.transpose(1, 2)
+        k, v = _repeat_kv_for_gqa(k, v, self.n_heads, self.n_kv_heads)
+        block_mask = create_visible_block_mask(vis_mask) if vis_mask is not None else None
+        attn = flex_attention(q, k, v, block_mask=block_mask)
+        attn = attn.transpose(1, 2).contiguous().view(bsz, seqlen, self.dim)
         return self.wo(attn)
 
 
@@ -325,15 +223,18 @@ class CrossAttention(nn.Module):
         if self.qk_norm:
             xq = self.q_norm(xq)
             xk = self.k_norm(xk)
+        xq = xq.to(dtype=xv.dtype)
+        xk = xk.to(dtype=xv.dtype)
         q = xq.transpose(1, 2)  # [B, H, T, D]
         k = xk.transpose(1, 2)  # [B, H, S, D]
         v = xv.transpose(1, 2)
-        attn_mask = None
-        if context_mask is not None:
-            # context_mask: [B, S] -> [B, 1, 1, S]
-            attn_mask = context_mask[:, None, None, :].to(dtype=q.dtype)
-            attn_mask = attn_mask.masked_fill(attn_mask == 0, float("-inf")).masked_fill(attn_mask == 1, 0.0)
-        attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        k, v = _repeat_kv_for_gqa(k, v, self.n_heads, self.n_kv_heads)
+        block_mask = (
+            create_cross_block_mask(context_mask, tgt_len)
+            if context_mask is not None
+            else None
+        )
+        attn = flex_attention(q, k, v, block_mask=block_mask)
         attn = attn.transpose(1, 2).contiguous().view(bsz, tgt_len, self.dim)
         return self.wo(attn)
 
@@ -343,8 +244,10 @@ class TemporalDecoderBlock(nn.Module):
 
     def __init__(self, *, dim: int, n_heads: int, n_kv_heads: int | None,
                  norm_eps: float, hidden_dim: int | None,
-                 qk_norm: bool = False, norm_type: str = "rmsnorm"):
+                 qk_norm: bool = False, norm_type: str = "rmsnorm",
+                 norm_position: str = "prenorm"):
         super().__init__()
+        self.norm_position = _normalize_norm_position(norm_position)
         self.attention = Attention(dim, n_heads, n_kv_heads=n_kv_heads,
                                    qk_norm=qk_norm, norm_type=norm_type)
         self.cross_attn = CrossAttention(dim, n_heads, n_kv_heads=n_kv_heads,
@@ -357,9 +260,31 @@ class TemporalDecoderBlock(nn.Module):
     def forward(self, x: torch.Tensor, context: torch.Tensor, *,
                 freqs_cos: torch.Tensor | None,
                 freqs_sin: torch.Tensor | None,
-                context_mask: torch.Tensor | None = None) -> torch.Tensor:
+                context_mask: torch.Tensor | None = None,
+                vis_mask: torch.Tensor | None = None,
+                pad_to: int = 0) -> torch.Tensor:
+        if self.norm_position == "postnorm":
+            h = self.attention_norm(
+                x + self.attention(
+                    x,
+                    freqs_cos=freqs_cos,
+                    freqs_sin=freqs_sin,
+                    vis_mask=vis_mask,
+                    pad_to=pad_to,
+                )
+            )
+            h = self.cross_attn_norm(
+                h + self.cross_attn(
+                    h,
+                    context,
+                    freqs_cos=freqs_cos,
+                    freqs_sin=freqs_sin,
+                    context_mask=context_mask,
+                )
+            )
+            return self.ffn_norm(h + self.feed_forward(h))
         h = x + self.attention(self.attention_norm(x), freqs_cos=freqs_cos,
-                               freqs_sin=freqs_sin)
+                               freqs_sin=freqs_sin, vis_mask=vis_mask, pad_to=pad_to)
         h = h + self.cross_attn(self.cross_attn_norm(h), context,
                                 freqs_cos=freqs_cos, freqs_sin=freqs_sin,
                                 context_mask=context_mask)
@@ -369,12 +294,13 @@ class TemporalDecoderBlock(nn.Module):
 def _build_temporal_decoder_blocks(*, dim: int, num_layers: int, num_heads: int,
                                     num_kv_heads: int | None, attention_mlp_multiple: float,
                                     norm_eps: float = 1e-5, qk_norm: bool = False,
-                                    norm_type: str = "rmsnorm") -> nn.ModuleList:
+                                    norm_type: str = "rmsnorm",
+                                    norm_position: str = "prenorm") -> nn.ModuleList:
     block_kwargs = dict(
         dim=dim, n_heads=int(num_heads),
         n_kv_heads=int(num_heads) if num_kv_heads is None else int(num_kv_heads),
         norm_eps=norm_eps, hidden_dim=int(math.ceil(dim * attention_mlp_multiple)),
-        qk_norm=qk_norm, norm_type=norm_type,
+        qk_norm=qk_norm, norm_type=norm_type, norm_position=norm_position,
     )
     return nn.ModuleList([TemporalDecoderBlock(**block_kwargs) for _ in range(num_layers)])
 
@@ -382,8 +308,10 @@ def _build_temporal_decoder_blocks(*, dim: int, num_layers: int, num_heads: int,
 class TransformerBlock(nn.Module):
     def __init__(self, *, dim: int, n_heads: int, n_kv_heads: int | None,
                  norm_eps: float, hidden_dim: int | None,
-                 qk_norm: bool = False, norm_type: str = "rmsnorm"):
+                 qk_norm: bool = False, norm_type: str = "rmsnorm",
+                 norm_position: str = "prenorm"):
         super().__init__()
+        self.norm_position = _normalize_norm_position(norm_position)
         self.attention = Attention(dim, n_heads, n_kv_heads=n_kv_heads,
                                    qk_norm=qk_norm, norm_type=norm_type)
         self.feed_forward = FeedForward(dim, hidden_dim=hidden_dim)
@@ -393,6 +321,17 @@ class TransformerBlock(nn.Module):
     def forward(self, x: torch.Tensor, *, freqs_cos: torch.Tensor | None,
                 freqs_sin: torch.Tensor | None,
                 vis_mask: torch.Tensor | None = None, pad_to: int = 0) -> torch.Tensor:
+        if self.norm_position == "postnorm":
+            h = self.attention_norm(
+                x + self.attention(
+                    x,
+                    freqs_cos=freqs_cos,
+                    freqs_sin=freqs_sin,
+                    vis_mask=vis_mask,
+                    pad_to=pad_to,
+                )
+            )
+            return self.ffn_norm(h + self.feed_forward(h))
         h = x + self.attention(self.attention_norm(x), freqs_cos=freqs_cos,
                                freqs_sin=freqs_sin, vis_mask=vis_mask, pad_to=pad_to)
         return h + self.feed_forward(self.ffn_norm(h))
@@ -401,12 +340,13 @@ class TransformerBlock(nn.Module):
 def _build_non_causal_blocks(*, dim: int, num_layers: int, num_heads: int,
                               num_kv_heads: int | None, attention_mlp_multiple: float,
                               norm_eps: float = 1e-5, qk_norm: bool = False,
-                              norm_type: str = "rmsnorm") -> nn.ModuleList:
+                              norm_type: str = "rmsnorm",
+                              norm_position: str = "prenorm") -> nn.ModuleList:
     block_kwargs = dict(
         dim=dim, n_heads=int(num_heads),
         n_kv_heads=int(num_heads) if num_kv_heads is None else int(num_kv_heads),
         norm_eps=norm_eps, hidden_dim=int(math.ceil(dim * attention_mlp_multiple)),
-        qk_norm=qk_norm, norm_type=norm_type,
+        qk_norm=qk_norm, norm_type=norm_type, norm_position=norm_position,
     )
     return nn.ModuleList([TransformerBlock(**block_kwargs) for _ in range(num_layers)])
 
@@ -450,6 +390,16 @@ def _masked_embedding_stats(
     }
 
 
+def _masked_mean_token_norm(
+    emb: torch.Tensor,
+    valid_mask: torch.Tensor,
+) -> torch.Tensor:
+    norms = emb.float().norm(dim=-1)
+    weights = valid_mask.float()
+    count = weights.sum().clamp_min(1.0)
+    return (norms * weights).sum() / count
+
+
 # ---------------------------------------------------------------------------
 # PeakSetEncoder with sparse packing + precomputed RoPE
 # ---------------------------------------------------------------------------
@@ -458,10 +408,12 @@ class PeakSetEncoder(nn.Module):
     def __init__(self, *, model_dim: int, num_layers: int, num_heads: int,
                  num_kv_heads: int | None = None, attention_mlp_multiple: float = 4.0,
                  feature_mlp_hidden_dim: int = 128, use_rope: bool = False,
-                 qk_norm: bool = False, norm_type: str = "rmsnorm", seq_len: int = 64):
+                 qk_norm: bool = False, norm_type: str = "rmsnorm",
+                 norm_position: str = "prenorm", seq_len: int = 64):
         super().__init__()
         self.use_rope = bool(use_rope)
         norm_type = str(norm_type).lower()
+        norm_position = _normalize_norm_position(norm_position)
         self.embedder = nn.Sequential(
             nn.Linear(3, feature_mlp_hidden_dim), nn.SiLU(),
             nn.Linear(feature_mlp_hidden_dim, model_dim),
@@ -486,7 +438,7 @@ class PeakSetEncoder(nn.Module):
         self.blocks = _build_non_causal_blocks(
             dim=model_dim, num_layers=num_layers, num_heads=num_heads,
             num_kv_heads=num_kv_heads, attention_mlp_multiple=attention_mlp_multiple,
-            qk_norm=qk_norm, norm_type=norm_type,
+            qk_norm=qk_norm, norm_type=norm_type, norm_position=norm_position,
         )
 
     def forward(self, peak_mz: torch.Tensor, peak_intensity: torch.Tensor,
@@ -566,18 +518,13 @@ class PeakSetSIGReg(nn.Module):
         encoder_num_heads: int = 12, encoder_num_kv_heads: int | None = None,
         attention_mlp_multiple: float = 4.0, feature_mlp_hidden_dim: int = 128,
         encoder_use_rope: bool = False, masked_token_loss_weight: float = 0.0,
-        masked_token_loss_type: str = "l1", normalize_jepa_targets: bool = False,
         representation_regularizer: str = "sigreg",
         masked_latent_predictor_num_layers: int = 2, sigreg_num_slices: int = 256,
-        sigreg_lambda: float = 0.1, sigreg_lambda_warmup_steps: int = 0,
-        gco_constraints: list[dict] = (), gco_alpha: float = 0.99,
-        gco_eta: float = 1e-3, gco_log_lambda_init: float = -8.0,
-        gco_log_lambda_min: float = -12.0, gco_log_lambda_max: float = 2.0,
-        jepa_num_target_blocks: int = 2, use_ema_teacher_target: bool = False,
-        teacher_ema_decay: float = 0.996, teacher_ema_decay_start: float = 0.0,
-        teacher_ema_decay_warmup_steps: int = 0, teacher_ema_update_every: int = 1,
+        sigreg_lambda: float = 0.1,
+        jepa_num_target_blocks: int = 2,
         encoder_qk_norm: bool = False, norm_type: str = "rmsnorm",
-        use_precursor_token: bool = False, dir_rad_beta: float = 1.0,
+        norm_position: str = "prenorm",
+        use_precursor_token: bool = False,
         num_peaks: int = 64, jepa_context_fraction: float = 0.3,
         jepa_target_fraction: float = 0.25,
         temporal_predictor_num_layers: int = 0,
@@ -587,65 +534,24 @@ class PeakSetSIGReg(nn.Module):
         self.use_precursor_token = bool(use_precursor_token)
         self.jepa_num_target_blocks = int(jepa_num_target_blocks)
         self.sigreg_lambda = float(sigreg_lambda)
-        self.sigreg_lambda_warmup_steps = int(sigreg_lambda_warmup_steps)
         self.representation_regularizer = str(representation_regularizer).lower()
-        if self.representation_regularizer == "gco":
-            self.representation_regularizer = "gco-sigreg"
-        if self.representation_regularizer not in ("sigreg", "gco-sigreg", "none", ""):
+        if self.representation_regularizer not in ("sigreg", "none", ""):
             raise ValueError(f"Unsupported regularizer: {self.representation_regularizer!r}")
-        self.gco_alpha = float(gco_alpha)
-        self.gco_eta = float(gco_eta)
-        self.gco_log_lambda_min = float(gco_log_lambda_min)
-        self.gco_log_lambda_max = float(gco_log_lambda_max)
-        self.gco_constraint_keys: list[str] = []
-        self.gco_constraint_signs: list[float] = []
-        gco_targets: list[float] = []
-        for c in gco_constraints:
-            self.gco_constraint_keys.append(c["metric"])
-            self.gco_constraint_signs.append(-1.0 if c["bound"] == "lower" else 1.0)
-            gco_targets.append(float(c["target"]))
-        _f = torch.float32
-        _reg = self.register_buffer
-        _reg("gco_constraint_targets",
-             torch.tensor(gco_targets, dtype=_f) if gco_targets else torch.empty(0, dtype=_f))
-        _reg("gco_log_lambda", torch.tensor(float(gco_log_lambda_init), dtype=_f))
-        _reg("gco_c_ema", torch.tensor(0.0, dtype=_f))
-        _sr_init = self.sigreg_lambda if self.sigreg_lambda_warmup_steps <= 0 else 0.0
-        _reg("sigreg_lambda_target", torch.tensor(self.sigreg_lambda, dtype=_f))
-        _reg("sigreg_lambda_current", torch.tensor(_sr_init, dtype=_f))
-        _reg("sigreg_lambda_step", torch.zeros((), dtype=torch.int64))
-        _reg("sigreg_lambda_warmup_steps_tensor",
-             torch.tensor(max(self.sigreg_lambda_warmup_steps, 1), dtype=_f), persistent=False)
-        self.teacher_ema_update_every = int(teacher_ema_update_every)
-        teacher_ema_decay_start = float(teacher_ema_decay_start)
-        teacher_ema_decay = float(teacher_ema_decay)
-        teacher_ema_decay_warmup_steps = int(teacher_ema_decay_warmup_steps)
-        _reg("teacher_ema_decay_start_tensor", torch.tensor(teacher_ema_decay_start, dtype=_f), persistent=False)
-        _reg("teacher_ema_decay_target", torch.tensor(teacher_ema_decay, dtype=_f), persistent=False)
-        _reg("teacher_ema_decay_current", torch.tensor(
-            teacher_ema_decay if teacher_ema_decay_warmup_steps <= 0 else teacher_ema_decay_start, dtype=_f),
-            persistent=False)
-        _reg("teacher_ema_decay_step", torch.zeros((), dtype=torch.int64), persistent=False)
-        _reg("teacher_ema_decay_warmup_steps_tensor",
-             torch.tensor(max(teacher_ema_decay_warmup_steps, 1), dtype=_f), persistent=False)
-        _reg("teacher_ema_update_step", torch.zeros((), dtype=torch.int64))
         self.masked_token_loss_weight = float(masked_token_loss_weight)
-        self.masked_token_loss_type = str(masked_token_loss_type).lower()
-        self.dir_rad_beta = float(dir_rad_beta)
-        self.normalize_jepa_targets = bool(normalize_jepa_targets)
         self.norm_type = str(norm_type).lower()
+        self.norm_position = _normalize_norm_position(norm_position)
         if self.jepa_num_target_blocks < 1:
             raise ValueError("jepa_num_target_blocks must be >= 1")
 
         # Packing parameters (computed from config)
         N = int(num_peaks)
-        self._context_pack_n = max(1, int(math.floor(N * jepa_context_fraction)))
-        self._target_pack_n = max(1, int(math.floor(N * jepa_target_fraction)))
-        self._predictor_pack_n = self._context_pack_n + self._target_pack_n
-        self._teacher_pack_n = N
+        self._context_pack_n = max(1, int(math.ceil(N * jepa_context_fraction)))
+        self._target_pack_n = max(1, int(math.ceil(N * jepa_target_fraction)))
+        self._predictor_pack_n = self._target_pack_n
+        self._full_pack_n = N
         self._context_pad_to = 1 << max(1, math.ceil(math.log2(max(1, self._context_pack_n))))
         self._predictor_pad_to = 1 << max(1, math.ceil(math.log2(max(1, self._predictor_pack_n))))
-        self._teacher_pad_to = 1 << max(1, math.ceil(math.log2(N)))
+        self._full_pad_to = 1 << max(1, math.ceil(math.log2(N)))
 
         self.encoder = PeakSetEncoder(
             model_dim=model_dim, num_layers=encoder_num_layers,
@@ -653,27 +559,9 @@ class PeakSetSIGReg(nn.Module):
             attention_mlp_multiple=attention_mlp_multiple,
             feature_mlp_hidden_dim=feature_mlp_hidden_dim,
             use_rope=encoder_use_rope, qk_norm=encoder_qk_norm,
-            norm_type=self.norm_type, seq_len=N,
+            norm_type=self.norm_type, norm_position=self.norm_position, seq_len=N,
         )
-        if bool(use_ema_teacher_target):
-            self.teacher_encoder: AveragedModel | None = AveragedModel(
-                self.encoder, multi_avg_fn=get_ema_multi_avg_fn(teacher_ema_decay),
-                use_buffers=True,
-            )
-            self.teacher_encoder.requires_grad_(False)
-            self.teacher_encoder.eval()
-            teacher_module = self.teacher_encoder.module
-            self._teacher_ema_dst = [t.detach() for t in teacher_module.parameters()]
-            self._teacher_ema_dst.extend(t.detach() for t in teacher_module.buffers())
-            self._teacher_ema_src = [t.detach() for t in self.encoder.parameters()]
-            self._teacher_ema_src.extend(t.detach() for t in self.encoder.buffers())
-        else:
-            self.teacher_encoder = None
-            self._teacher_ema_dst = None
-            self._teacher_ema_src = None
         self._encoder_forward = self.encoder.forward
-        self._teacher_encoder_forward = (
-            self.teacher_encoder.forward if self.teacher_encoder is not None else None)
         self.latent_mask_token = nn.Parameter(torch.empty(self.model_dim))
         nn.init.normal_(self.latent_mask_token, std=0.02)
         pred_heads = max(1, min(int(encoder_num_heads), self.model_dim // 16))
@@ -685,11 +573,12 @@ class PeakSetSIGReg(nn.Module):
         pred_rope_cos, pred_rope_sin = _precompute_rope_freqs(N, predictor_inv_freq)
         self.register_buffer("predictor_rope_cos", pred_rope_cos, persistent=False)
         self.register_buffer("predictor_rope_sin", pred_rope_sin, persistent=False)
-        self.masked_latent_predictor = _build_non_causal_blocks(
+        self.masked_latent_predictor = _build_temporal_decoder_blocks(
             dim=self.model_dim, num_layers=int(masked_latent_predictor_num_layers),
             num_heads=pred_heads, num_kv_heads=None,
             attention_mlp_multiple=attention_mlp_multiple,
             qk_norm=encoder_qk_norm, norm_type=self.norm_type,
+            norm_position=self.norm_position,
         )
         self.sigreg = SIGReg(num_slices=int(sigreg_num_slices))
 
@@ -701,6 +590,7 @@ class PeakSetSIGReg(nn.Module):
                 num_heads=pred_heads, num_kv_heads=None,
                 attention_mlp_multiple=attention_mlp_multiple,
                 qk_norm=encoder_qk_norm, norm_type=self.norm_type,
+                norm_position=self.norm_position,
             )
             self.temporal_rt_proj = nn.Sequential(
                 nn.Linear(1, model_dim), nn.SiLU(), nn.Linear(model_dim, model_dim),
@@ -711,76 +601,66 @@ class PeakSetSIGReg(nn.Module):
             self.register_buffer("temporal_predictor_rope_cos", tp_rope_cos, persistent=False)
             self.register_buffer("temporal_predictor_rope_sin", tp_rope_sin, persistent=False)
 
-    def train(self, mode: bool = True) -> "PeakSetSIGReg":
-        super().train(mode)
-        if self.teacher_encoder is not None:
-            self.teacher_encoder.eval()
-        return self
+    def _apply(self, fn):
+        result = super()._apply(fn)
+        self._encoder_forward = self.encoder.forward
+        return result
 
-    @torch.no_grad()
-    def update_teacher(self) -> None:
-        if self.teacher_encoder is None:
-            return
-        step = int(self.teacher_ema_update_step.item())
-        self.teacher_ema_update_step.add_(1)
-        if step % self.teacher_ema_update_every != 0:
-            return
-        self.advance_teacher_ema_decay_schedule()
-        if int(self.teacher_encoder.n_averaged.item()) == 0:
-            for dst, src in zip(self._teacher_ema_dst, self._teacher_ema_src, strict=True):
-                dst.copy_(src)
-        else:
-            torch._foreach_lerp_(
-                self._teacher_ema_dst, self._teacher_ema_src,
-                1.0 - float(self.teacher_ema_decay_current),
-            )
-        self.teacher_encoder.n_averaged.add_(1)
-
-    @torch.no_grad()
-    def advance_teacher_ema_decay_schedule(self) -> None:
-        step = self.teacher_ema_decay_step.to(dtype=self.teacher_ema_decay_current.dtype)
-        ratio = torch.clamp(step / self.teacher_ema_decay_warmup_steps_tensor, max=1.0)
-        delta = self.teacher_ema_decay_target - self.teacher_ema_decay_start_tensor
-        self.teacher_ema_decay_current.copy_(self.teacher_ema_decay_start_tensor + delta * ratio)
-        self.teacher_ema_decay_step.add_(1)
-
-    @torch.no_grad()
-    def advance_sigreg_lambda_schedule(self) -> None:
-        if self.representation_regularizer != "sigreg":
-            return
-        if self.sigreg_lambda_warmup_steps <= 0:
-            return
-        step = self.sigreg_lambda_step.to(dtype=self.sigreg_lambda_current.dtype)
-        ratio = torch.clamp(step / self.sigreg_lambda_warmup_steps_tensor, max=1.0)
-        self.sigreg_lambda_current.copy_(self.sigreg_lambda_target * ratio)
-        self.sigreg_lambda_step.add_(1)
-
-    def predict_masked_latents(self, x: torch.Tensor, visible_mask: torch.Tensor,
-                                pack_n: int = 0) -> torch.Tensor:
+    def predict_masked_latents(
+        self,
+        x: torch.Tensor,
+        context: torch.Tensor,
+        *,
+        target_mask: torch.Tensor,
+        context_mask: torch.Tensor,
+        pack_n: int = 0,
+    ) -> torch.Tensor:
         BK, N, D = x.shape
+        if len(self.masked_latent_predictor) == 0:
+            return x * target_mask.unsqueeze(-1).to(dtype=x.dtype)
         if pack_n > 0:
             PACK_N = min(pack_n, N)
-            sort_idx = visible_mask.to(dtype=torch.int8).argsort(dim=1, descending=True, stable=True)
+            sort_idx = target_mask.to(dtype=torch.int8).argsort(dim=1, descending=True, stable=True)
             pack_idx = sort_idx[:, :PACK_N]
             packed_x = x.gather(1, pack_idx.unsqueeze(-1).expand(-1, -1, D))
-            packed_vis = visible_mask.gather(1, pack_idx)
+            packed_target = target_mask.gather(1, pack_idx)
+            context_pack_n = min(self._context_pack_n, context.shape[1])
+            context_sort_idx = context_mask.to(dtype=torch.int8).argsort(dim=1, descending=True, stable=True)
+            context_idx = context_sort_idx[:, :context_pack_n]
+            packed_context = context.gather(1, context_idx.unsqueeze(-1).expand(-1, -1, D))
+            packed_context_mask = context_mask.gather(1, context_idx)
             rc = self.predictor_rope_cos.to(dtype=x.dtype)[0, :N, 0, :]  # [N, head_dim]
             rs = self.predictor_rope_sin.to(dtype=x.dtype)[0, :N, 0, :]
             freqs_cos = rc[pack_idx].unsqueeze(2)
             freqs_sin = rs[pack_idx].unsqueeze(2)
             pad_to = self._predictor_pad_to
             for block in self.masked_latent_predictor:
-                packed_x = block(packed_x, freqs_cos=freqs_cos, freqs_sin=freqs_sin,
-                                 vis_mask=packed_vis, pad_to=pad_to)
+                packed_x = block(
+                    packed_x,
+                    packed_context,
+                    freqs_cos=freqs_cos,
+                    freqs_sin=freqs_sin,
+                    vis_mask=packed_target,
+                    pad_to=pad_to,
+                    context_mask=packed_context_mask,
+                )
+            packed_x = packed_x * packed_target.unsqueeze(-1).to(dtype=packed_x.dtype)
             idx_expand = pack_idx.unsqueeze(-1).expand(-1, -1, D)
             return torch.zeros(BK, N, D, device=packed_x.device, dtype=packed_x.dtype).scatter(
                 1, idx_expand, packed_x)
         # Full sequence path
         freqs_cos, freqs_sin = _compute_rope_freqs(
-            self.encoder.use_rope, N, self.predictor_rope_inv_freq, x.device, x.dtype)
+            True, N, self.predictor_rope_inv_freq, x.device, x.dtype)
         for block in self.masked_latent_predictor:
-            x = block(x, freqs_cos=freqs_cos, freqs_sin=freqs_sin, vis_mask=visible_mask)
-        return x
+            x = block(
+                x,
+                context,
+                freqs_cos=freqs_cos,
+                freqs_sin=freqs_sin,
+                vis_mask=target_mask,
+                context_mask=context_mask,
+            )
+        return x * target_mask.unsqueeze(-1).to(dtype=x.dtype)
 
     def pool(self, embeddings: torch.Tensor, valid_mask: torch.Tensor) -> torch.Tensor:
         mask = valid_mask.unsqueeze(-1).float()
@@ -810,23 +690,8 @@ class PeakSetSIGReg(nn.Module):
             result["target_masks"] = torch.cat([pre_tgt, target_masks], dim=2)
         return result
 
-    @torch.no_grad()
-    def compute_teacher_targets(self, augmented_batch: dict[str, torch.Tensor]) -> torch.Tensor:
-        peak_mz = augmented_batch["peak_mz"]
-        peak_intensity = augmented_batch["peak_intensity"]
-        peak_valid_mask = augmented_batch["peak_valid_mask"]
-        K = self.jepa_num_target_blocks
-        teacher_fwd = self._teacher_encoder_forward or self._encoder_forward
-        teacher_full = teacher_fwd(
-            peak_mz, peak_intensity,
-            valid_mask=peak_valid_mask, visible_mask=peak_valid_mask,
-            pack_n=self._teacher_pack_n, prefix_pack=True, pad_to=self._teacher_pad_to,
-        )
-        return teacher_full.unsqueeze(1).expand(-1, K, -1, -1)
-
     def forward_augmented(
         self, augmented_batch: dict[str, torch.Tensor],
-        teacher_targets: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         peak_mz = augmented_batch["peak_mz"]
         peak_intensity = augmented_batch["peak_intensity"]
@@ -836,135 +701,89 @@ class PeakSetSIGReg(nn.Module):
         B, N = peak_mz.shape
         K = self.jepa_num_target_blocks
 
-        # Student encoder: context view with sparse packing
+        # Context encoder: context view with sparse packing
         context_emb = self._encoder_forward(
             peak_mz, peak_intensity,
             valid_mask=peak_valid_mask, visible_mask=context_mask,
             pack_n=self._context_pack_n, prefix_pack=False, pad_to=self._context_pad_to,
         )
 
-        # Target embeddings (only needed for SIGReg/GCO regularizer)
-        use_sigreg = self.representation_regularizer == "sigreg" and self.sigreg_lambda > 0
-        use_gco = self.representation_regularizer == "gco-sigreg"
-        _fast_path = self.representation_regularizer in ("none", "") and not use_sigreg and not use_gco
-        if not _fast_path:
-            target_emb = self._encoder_forward(
-                peak_mz.repeat_interleave(K, dim=0),
-                peak_intensity.repeat_interleave(K, dim=0),
-                valid_mask=peak_valid_mask.repeat_interleave(K, dim=0),
-                visible_mask=target_masks.reshape(B * K, N),
-            ).reshape(B, K, N, -1)
-        else:
-            target_emb = None
-
-        # Teacher targets
-        if teacher_targets is not None:
-            target_token_target = teacher_targets
-        else:
-            teacher_fwd = self._teacher_encoder_forward or self._encoder_forward
-            with torch.no_grad():
-                teacher_full = teacher_fwd(
-                    peak_mz, peak_intensity,
-                    valid_mask=peak_valid_mask, visible_mask=peak_valid_mask,
-                    pack_n=self._teacher_pack_n, prefix_pack=True, pad_to=self._teacher_pad_to,
-                ).detach()
-            target_token_target = teacher_full.unsqueeze(1).expand(-1, K, -1, -1)
+        # Full encoder: all valid peaks (shared encoder, gradients flow)
+        full_emb = self._encoder_forward(
+            peak_mz, peak_intensity,
+            valid_mask=peak_valid_mask, visible_mask=peak_valid_mask,
+            pack_n=self._full_pack_n, prefix_pack=True, pad_to=self._full_pad_to,
+        )
+        target_token_target = full_emb.unsqueeze(1).expand(-1, K, -1, -1)
 
         # Predictor
         ctx_mask_v = context_mask.unsqueeze(1)
         context_emb_by_view = context_emb.unsqueeze(1).expand(-1, K, -1, -1)
-        predictor_input = context_emb_by_view * ctx_mask_v.unsqueeze(-1)
-        predictor_input = torch.where(
+        predictor_queries = torch.zeros_like(context_emb_by_view)
+        predictor_queries = torch.where(
             target_masks.unsqueeze(-1),
             self.latent_mask_token.view(1, 1, 1, -1).to(context_emb),
-            predictor_input,
+            predictor_queries,
         )
         predictor_output = self.predict_masked_latents(
-            predictor_input.reshape(B * K, N, -1),
-            (ctx_mask_v | target_masks).reshape(B * K, N),
+            predictor_queries.reshape(B * K, N, -1),
+            context_emb_by_view.reshape(B * K, N, -1),
+            target_mask=target_masks.reshape(B * K, N),
+            context_mask=ctx_mask_v.expand(-1, K, -1).reshape(B * K, N),
             pack_n=self._predictor_pack_n,
         ).reshape(B, K, N, -1)
 
-        # Loss computation
-        loss_pred = predictor_output
-        loss_target = target_token_target
-        if self.normalize_jepa_targets:
-            loss_pred = F.normalize(loss_pred, dim=-1)
-            loss_target = F.normalize(loss_target, dim=-1)
-        if self.masked_token_loss_type == "l2":
-            per_token_reg = (loss_pred - loss_target).square().mean(dim=-1)
-        elif self.masked_token_loss_type == "l2_sum":
-            per_token_reg = (loss_pred - loss_target).square().sum(dim=-1)
-        elif self.masked_token_loss_type == "l1":
-            per_token_reg = (loss_pred - loss_target).abs().mean(dim=-1)
-        elif self.masked_token_loss_type == "dir_rad":
-            pred_u = F.normalize(predictor_output, dim=-1)
-            tgt_u = F.normalize(target_token_target, dim=-1)
-            dir_loss = (pred_u - tgt_u).square().mean(dim=-1)
-            pred_r = torch.log(predictor_output.norm(dim=-1).clamp_min(1e-6))
-            tgt_r = torch.log(target_token_target.norm(dim=-1).clamp_min(1e-6))
-            rad_loss = F.smooth_l1_loss(pred_r, tgt_r, reduction="none")
-            per_token_reg = dir_loss + self.dir_rad_beta * rad_loss
-        else:
-            raise ValueError(f"Unsupported masked_token_loss_type: {self.masked_token_loss_type}")
-        target_mask_float = target_masks.float()
-        reg_num = (per_token_reg * target_mask_float).sum()
-        reg_den = target_mask_float.sum().clamp_min(1.0)
-        local_global_loss = reg_num / reg_den
-        sigreg_lambda_current = (
-            self.sigreg_lambda_current.to(dtype=context_emb.dtype)
-            if self.sigreg_lambda_warmup_steps > 0
-            else context_emb.new_tensor(self.sigreg_lambda))
+        # MSE loss between predictor output and encoder targets
+        target_mask_flat = target_masks.reshape(B * K, N)
+        loss_pred = predictor_output.reshape(B * K, N, -1)
+        loss_target = target_token_target.reshape(B * K, N, -1)
+        per_token_mse = (loss_pred - loss_target).square().mean(dim=-1)
+        target_mask_float = target_mask_flat.float()
+        local_global_loss = (per_token_mse * target_mask_float).sum() / target_mask_float.sum().clamp_min(1.0)
         jepa_term = self.masked_token_loss_weight * local_global_loss
+        with torch.no_grad():
+            activation_norm_metrics = {
+                "context_encoder_output_norm": _masked_mean_token_norm(
+                    context_emb, context_mask
+                ).to(dtype=context_emb.dtype),
+                "full_encoder_output_norm": _masked_mean_token_norm(
+                    full_emb, peak_valid_mask
+                ).to(dtype=context_emb.dtype),
+                "predictor_output_norm": _masked_mean_token_norm(
+                    predictor_output.reshape(B * K, N, -1), target_mask_flat
+                ).to(dtype=context_emb.dtype),
+            }
 
-        # Fast path: no regularizer → skip expensive SIGReg/GCO metrics
-        if _fast_path:
-            loss = jepa_term
-            return {"loss": loss, "local_global_loss": local_global_loss, "jepa_term": jepa_term}
+        # Regularizer: plain sigreg_lambda * sigreg_loss
+        use_sigreg = self.representation_regularizer == "sigreg" and self.sigreg_lambda > 0
 
-        # Full path with SIGReg/GCO
-        branch_emb = torch.cat([context_emb.unsqueeze(1), target_emb], dim=1)
-        branch_visible = torch.cat([context_mask.unsqueeze(1), target_masks], dim=1)
-        V = branch_emb.shape[1]
+        if not use_sigreg:
+            return {
+                "loss": jepa_term,
+                "local_global_loss": local_global_loss,
+                "jepa_term": jepa_term,
+                **activation_norm_metrics,
+            }
+
+        # SIGReg on encoder outputs: context + full (2 views)
+        branch_emb = torch.stack([context_emb, full_emb], dim=1)  # [B, 2, N, D]
+        branch_visible = torch.stack([context_mask, peak_valid_mask], dim=1)  # [B, 2, N]
+        V = 2
         fused_emb = branch_emb.reshape(V * B, N, -1)
         fused_visible = branch_visible.reshape(V * B, N)
+        token_sigreg_loss = self.sigreg(fused_emb, valid_mask=fused_visible)
+        sigreg_term = self.sigreg_lambda * token_sigreg_loss
         with torch.no_grad():
             emb_f = fused_emb.float().reshape(B, V, N, -1)
             mask_f = fused_visible.reshape(B, V, N)
             collapse_metrics: dict[str, torch.Tensor] = {}
-            for prefix, e, m in [("global", emb_f[:, 0], mask_f[:, 0]),
-                                  ("local", emb_f[:, 1:], mask_f[:, 1:])]:
+            for prefix, e, m in [("context", emb_f[:, 0], mask_f[:, 0]),
+                                  ("full", emb_f[:, 1], mask_f[:, 1])]:
                 for k, v in _masked_embedding_stats(e, m).items():
                     collapse_metrics[f"{prefix}_{k}"] = v
             reg_stats = _masked_embedding_stats(fused_emb, fused_visible)
-            all_stats = {**reg_stats, **collapse_metrics}
-            if self.gco_constraint_keys:
-                constraint_vals = torch.stack([
-                    sign * (all_stats[key].float() - self.gco_constraint_targets[i])
-                    for i, (key, sign) in enumerate(
-                        zip(self.gco_constraint_keys, self.gco_constraint_signs))])
-                gco_constraint = constraint_vals.amax(dim=0)
-            else:
-                gco_constraint = torch.tensor(0.0, device=fused_emb.device)
-                constraint_vals = None
-        gco_lambda = self.gco_log_lambda.exp().to(dtype=context_emb.dtype)
-        if self.representation_regularizer == "gco-sigreg":
-            with torch.no_grad():
-                if self.training:
-                    self.gco_c_ema.mul_(self.gco_alpha).add_((1.0 - self.gco_alpha) * gco_constraint)
-                    self.gco_log_lambda.add_(self.gco_eta * self.gco_c_ema)
-                    self.gco_log_lambda.clamp_(self.gco_log_lambda_min, self.gco_log_lambda_max)
-                gco_lambda = self.gco_log_lambda.exp().to(dtype=context_emb.dtype)
-        if use_sigreg or use_gco:
-            token_sigreg_loss = self.sigreg(fused_emb, valid_mask=fused_visible)
-            if use_gco:
-                sigreg_lambda_current = gco_lambda
-            sigreg_term = sigreg_lambda_current * token_sigreg_loss
-        else:
-            token_sigreg_loss = context_emb.new_tensor(0.0)
-            sigreg_term = context_emb.new_tensor(0.0)
         valid_peak_count = peak_valid_mask.float().sum().clamp_min(1.0)
-        metrics = {
+        return {
             "loss": jepa_term + sigreg_term,
             "token_sigreg_loss": token_sigreg_loss,
             "local_global_loss": local_global_loss,
@@ -972,39 +791,14 @@ class PeakSetSIGReg(nn.Module):
             "target_sigreg_term_over_jepa_term": sigreg_term / jepa_term.clamp_min(1e-8),
             "context_fraction": context_mask.float().sum() / valid_peak_count,
             "masked_fraction": target_masks.float().sum() / valid_peak_count,
-            "sigreg_lambda_current": sigreg_lambda_current,
-            "gco_lambda": gco_lambda,
-            "gco_log_lambda": self.gco_log_lambda.to(dtype=context_emb.dtype),
-            "gco_c_ema": self.gco_c_ema.to(dtype=context_emb.dtype),
-            "gco_constraint": gco_constraint.to(dtype=context_emb.dtype),
+            **activation_norm_metrics,
             **{f"encoder_{k}": v.to(context_emb.dtype) for k, v in reg_stats.items()},
-            "local_to_global_emb_std_ratio": collapse_metrics["local_emb_std"]
-            / collapse_metrics["global_emb_std"],
             **collapse_metrics,
         }
-        if constraint_vals is not None:
-            for i, key in enumerate(self.gco_constraint_keys):
-                metrics[f"gco_constraint_{key}"] = constraint_vals[i].to(dtype=context_emb.dtype)
-        return metrics
-
-    @torch.no_grad()
-    def compute_temporal_teacher_targets(
-        self, batch: dict[str, torch.Tensor],
-    ) -> torch.Tensor:
-        """Compute token-level teacher targets for the target spectrum."""
-        teacher_fwd = self._teacher_encoder_forward or self._encoder_forward
-        return teacher_fwd(
-            batch["target_peak_mz"],
-            batch["target_peak_intensity"],
-            valid_mask=batch["target_peak_valid_mask"],
-            visible_mask=batch["target_peak_valid_mask"],
-            pack_n=self._teacher_pack_n, prefix_pack=True, pad_to=self._teacher_pad_to,
-        )
 
     def forward_temporal(
         self,
         batch: dict[str, torch.Tensor],
-        teacher_targets: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Temporal prediction: predict target spectrum tokens from context spectrum."""
         context_mz = batch["context_peak_mz"]
@@ -1017,65 +811,70 @@ class PeakSetSIGReg(nn.Module):
         target_rt = batch["target_rt"]
         B = context_mz.shape[0]
 
-        # 1. Encode context spectrum (student encoder, full sequence)
+        # 1. Encode context spectrum (shared encoder, full sequence)
         context_emb = self._encoder_forward(
             context_mz, context_int,
             valid_mask=context_valid, visible_mask=context_valid,
-            pack_n=self._teacher_pack_n, prefix_pack=True, pad_to=self._teacher_pad_to,
+            pack_n=self._full_pack_n, prefix_pack=True, pad_to=self._full_pad_to,
         )  # [B, N, D]
 
-        # 2. RT conditioning
-        delta_rt = (target_rt - context_rt).unsqueeze(-1)  # [B, 1]
-        rt_emb = self.temporal_rt_proj(delta_rt)  # [B, D]
+        # Run decoder in fp32: the pretrained encoder produces ~22K-norm
+        # embeddings.  Cross-attention injects these into the decoder via
+        # residuals, so all subsequent self-attention / FFN operates on
+        # high-norm activations.  bf16 backward eventually overflows.
+        context_emb = context_emb.float()
 
-        # 3. Initialize target queries
-        queries = self.temporal_target_tokens.unsqueeze(0).expand(B, -1, -1) + rt_emb.unsqueeze(1)
+        # 2. RT conditioning (normalize to minutes for numerical stability)
+        delta_rt = ((target_rt - context_rt) / 60.0).unsqueeze(-1)  # [B, 1]
+        with torch.autocast(device_type=context_emb.device.type, enabled=False):
+            rt_emb = self.temporal_rt_proj(delta_rt.float())  # [B, D]
 
-        # 4. Run through temporal decoder blocks
-        N_tgt = queries.shape[1]
-        freqs_cos = self.temporal_predictor_rope_cos.to(dtype=queries.dtype)[:, :N_tgt]
-        freqs_sin = self.temporal_predictor_rope_sin.to(dtype=queries.dtype)[:, :N_tgt]
-        for block in self.temporal_predictor:
-            queries = block(queries, context_emb,
-                            freqs_cos=freqs_cos, freqs_sin=freqs_sin,
-                            context_mask=context_valid)
-        predicted_target = queries  # [B, N, D]
+            # 3. Initialize target queries
+            queries = self.temporal_target_tokens.float().unsqueeze(0).expand(B, -1, -1) + rt_emb.unsqueeze(1)
 
-        # 5. Teacher target
-        if teacher_targets is not None:
-            target_emb = teacher_targets
-        else:
-            teacher_fwd = self._teacher_encoder_forward or self._encoder_forward
-            with torch.no_grad():
-                target_emb = teacher_fwd(
-                    target_mz, target_int,
-                    valid_mask=target_valid, visible_mask=target_valid,
-                    pack_n=self._teacher_pack_n, prefix_pack=True,
-                    pad_to=self._teacher_pad_to,
-                ).detach()
+            # 4. Run through temporal decoder blocks
+            N_tgt = queries.shape[1]
+            freqs_cos = self.temporal_predictor_rope_cos.float()[:, :N_tgt]
+            freqs_sin = self.temporal_predictor_rope_sin.float()[:, :N_tgt]
+            for block in self.temporal_predictor:
+                queries = block(queries, context_emb,
+                                freqs_cos=freqs_cos, freqs_sin=freqs_sin,
+                                context_mask=context_valid)
+            predicted_target = queries  # [B, N, D]
 
-        # 6. Per-token loss over valid target positions
-        if self.masked_token_loss_type == "l2":
-            per_token = (predicted_target - target_emb).square().mean(dim=-1)
-        elif self.masked_token_loss_type == "l1":
-            per_token = (predicted_target - target_emb).abs().mean(dim=-1)
-        elif self.masked_token_loss_type == "dir_rad":
-            pred_u = F.normalize(predicted_target, dim=-1)
-            tgt_u = F.normalize(target_emb, dim=-1)
-            dir_loss = (pred_u - tgt_u).square().mean(dim=-1)
-            pred_r = torch.log(predicted_target.norm(dim=-1).clamp_min(1e-6))
-            tgt_r = torch.log(target_emb.norm(dim=-1).clamp_min(1e-6))
-            rad_loss = F.smooth_l1_loss(pred_r, tgt_r, reduction="none")
-            per_token = dir_loss + self.dir_rad_beta * rad_loss
-        else:
-            per_token = (predicted_target - target_emb).square().mean(dim=-1)
+        # 5. Target encoding (shared encoder, gradients flow)
+        target_emb = self._encoder_forward(
+            target_mz, target_int,
+            valid_mask=target_valid, visible_mask=target_valid,
+            pack_n=self._full_pack_n, prefix_pack=True, pad_to=self._full_pad_to,
+        ).float()
+        target_emb = target_emb.nan_to_num(0.0)
 
-        target_mask_float = target_valid.float()
-        loss = (per_token * target_mask_float).sum() / target_mask_float.sum().clamp_min(1.0)
+        # 6. MSE loss over valid target positions
+        predicted_target = predicted_target.nan_to_num(0.0)
+        per_token = (predicted_target - target_emb).square().mean(dim=-1)
+
+        sample_has_context = context_valid.any(dim=-1, keepdim=True)  # [B, 1]
+        effective_mask = target_valid & sample_has_context
+        mask_float = effective_mask.float()
+        loss = (per_token * mask_float).sum() / mask_float.sum().clamp_min(1.0)
+        with torch.no_grad():
+            temporal_norm_metrics = {
+                "context_encoder_output_norm": _masked_mean_token_norm(
+                    context_emb, context_valid
+                ).to(dtype=predicted_target.dtype),
+                "target_encoder_output_norm": _masked_mean_token_norm(
+                    target_emb, target_valid
+                ).to(dtype=predicted_target.dtype),
+                "predictor_output_norm": _masked_mean_token_norm(
+                    predicted_target, effective_mask
+                ).to(dtype=predicted_target.dtype),
+            }
 
         return {
             "loss": loss,
             "temporal_pred_loss": loss.detach(),
+            **temporal_norm_metrics,
         }
 
     def encode(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:

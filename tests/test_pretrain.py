@@ -3,7 +3,6 @@ import unittest
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from models.model import PeakSetSIGReg
 from utils.training import build_model_from_config
@@ -101,8 +100,6 @@ class BlockJEPATests(unittest.TestCase):
             "sigreg_num_slices": 32,
             "sigreg_lambda": 0.1,
             "jepa_num_target_blocks": 2,
-            "jepa_projector_num_layers": 0,
-            "jepa_projector_dim": None,
         }
         model_kwargs.update(kwargs)
         return PeakSetSIGReg(**model_kwargs)
@@ -112,6 +109,16 @@ class BlockJEPATests(unittest.TestCase):
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
         metrics = model.forward_augmented(batch)
         self.assertTrue(torch.isfinite(metrics["loss"]).item())
+
+    def test_forward_loss_is_finite_for_prenorm_and_postnorm(self):
+        batch = _make_batch(num_targets=2)
+        for norm_position in ("prenorm", "postnorm"):
+            model = self._build_model(
+                norm_type="rmsnorm",
+                norm_position=norm_position,
+            )
+            metrics = model.forward_augmented(batch)
+            self.assertTrue(torch.isfinite(metrics["loss"]).item())
 
     def test_forward_contains_expected_keys(self):
         model = self._build_model()
@@ -123,17 +130,17 @@ class BlockJEPATests(unittest.TestCase):
             "local_global_loss",
             "context_fraction",
             "masked_fraction",
-            "sigreg_lambda_current",
-            "global_emb_var_floor",
-            "local_emb_var_floor",
-            "global_emb_cov_offdiag_abs_mean",
-            "local_emb_cov_offdiag_abs_mean",
-            "global_emb_corr_offdiag_abs_mean",
-            "local_emb_corr_offdiag_abs_mean",
+            "sigreg_term",
+            "context_emb_var_floor",
+            "full_emb_var_floor",
+            "context_emb_cov_offdiag_abs_mean",
+            "full_emb_cov_offdiag_abs_mean",
+            "context_emb_corr_offdiag_abs_mean",
+            "full_emb_corr_offdiag_abs_mean",
         ):
             self.assertIn(key, metrics, f"Missing key: {key}")
 
-    def test_sigreg_regularizer_uses_all_visible_branches(self):
+    def test_sigreg_regularizer_uses_context_and_full_views(self):
         model = self._build_model(sigreg_lambda=0.1)
 
         class CaptureSIGReg(torch.nn.Module):
@@ -153,17 +160,17 @@ class BlockJEPATests(unittest.TestCase):
         model.sigreg = capture
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
         B = batch["peak_mz"].shape[0]
-        K = batch["target_masks"].shape[1]
 
         model.forward_augmented(batch)
 
-        expected_visible = torch.cat(
+        # 2 views: context + full
+        expected_visible = torch.stack(
             [
-                batch["context_mask"].unsqueeze(1),
-                batch["target_masks"],
+                batch["context_mask"],
+                batch["peak_valid_mask"],
             ],
             dim=1,
-        ).reshape((1 + K) * B, -1)
+        ).reshape(2 * B, -1)
         self.assertIsNotNone(capture.proj)
         self.assertIsNotNone(capture.valid_mask)
         self.assertTrue(torch.equal(capture.valid_mask, expected_visible))
@@ -175,12 +182,12 @@ class BlockJEPATests(unittest.TestCase):
         )
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
         metrics = model.forward_augmented(batch)
-        self.assertAlmostEqual(float(metrics["token_sigreg_loss"]), 0.0, places=7)
-        self.assertAlmostEqual(float(metrics["sigreg_term"]), 0.0, places=7)
+        # No sigreg keys when lambda=0 (fast path)
+        self.assertNotIn("token_sigreg_loss", metrics)
         self.assertTrue(torch.allclose(metrics["loss"], metrics["jepa_term"]))
         for key in (
             "context_encoder_output_norm",
-            "teacher_encoder_output_norm",
+            "full_encoder_output_norm",
             "predictor_output_norm",
         ):
             self.assertIn(key, metrics)
@@ -204,240 +211,6 @@ class BlockJEPATests(unittest.TestCase):
         grads = [p.grad for p in model.encoder.parameters() if p.requires_grad]
         self.assertTrue(any(g is not None for g in grads))
 
-    def test_projector_teacher_path_runs_under_no_grad(self):
-        model = self._build_model(jepa_projector_num_layers=1)
-
-        class CaptureProjector(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.grad_enabled: list[bool] = []
-
-            def forward(self, x):
-                self.grad_enabled.append(torch.is_grad_enabled())
-                return x
-
-        capture = CaptureProjector()
-        model.jepa_projector = capture
-        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-        model.forward_augmented(batch)
-        self.assertEqual(capture.grad_enabled, [True, False])
-
-    def test_projector_receives_gradients(self):
-        model = self._build_model(jepa_projector_num_layers=2, jepa_projector_dim=24)
-        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-        loss = model.forward_augmented(batch)["loss"]
-        loss.backward()
-        grads = [p.grad for p in model.jepa_projector.parameters() if p.requires_grad]
-        self.assertTrue(any(g is not None for g in grads))
-
-    def test_projector_supports_custom_output_dim(self):
-        model = self._build_model(jepa_projector_num_layers=2, jepa_projector_dim=24)
-        last_linear = [m for m in model.jepa_projector.modules() if isinstance(m, torch.nn.Linear)][-1]
-        self.assertEqual(last_linear.out_features, 24)
-        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-        metrics = model.forward_augmented(batch)
-        self.assertTrue(torch.isfinite(metrics["loss"]).item())
-
-    def test_projector_uses_packed_masked_tokens(self):
-        model = self._build_model(jepa_projector_num_layers=1, num_peaks=64)
-
-        class CaptureProjector(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.shapes: list[tuple[int, ...]] = []
-
-            def forward(self, x):
-                self.shapes.append(tuple(x.shape))
-                return x
-
-        capture = CaptureProjector()
-        model.jepa_projector = capture
-        batch = _make_batch(num_peaks=64, num_targets=model.jepa_num_target_blocks)
-
-        model.forward_augmented(batch)
-
-        expected_shape = (
-            batch["peak_mz"].shape[0] * model.jepa_num_target_blocks,
-            min(model._target_pack_n, batch["peak_mz"].shape[1]),
-            model.model_dim,
-        )
-        self.assertEqual(capture.shapes, [expected_shape, expected_shape])
-
-    @torch.no_grad()
-    def test_packed_projector_matches_dense_loss(self):
-        model = self._build_model(
-            num_peaks=12,
-            jepa_projector_num_layers=2,
-            masked_token_loss_type="l2",
-            normalize_jepa_targets=True,
-            sigreg_lambda=0.0,
-        )
-        batch = _make_batch(num_peaks=12, num_targets=model.jepa_num_target_blocks)
-        metrics = model.forward_augmented(batch)
-
-        peak_mz = batch["peak_mz"]
-        peak_intensity = batch["peak_intensity"]
-        peak_valid_mask = batch["peak_valid_mask"]
-        context_mask = batch["context_mask"] & peak_valid_mask
-        target_masks = batch["target_masks"] & peak_valid_mask.unsqueeze(1)
-        B, K, N = target_masks.shape
-        target_mask_flat = target_masks.reshape(B * K, N)
-
-        context_emb = model._encoder_forward(
-            peak_mz,
-            peak_intensity,
-            valid_mask=peak_valid_mask,
-            visible_mask=context_mask,
-            pack_n=model._context_pack_n,
-            prefix_pack=False,
-            pad_to=model._context_pad_to,
-        )
-        teacher = model._teacher_encoder_forward or model._encoder_forward
-        teacher_full = teacher(
-            peak_mz,
-            peak_intensity,
-            valid_mask=peak_valid_mask,
-            visible_mask=peak_valid_mask,
-            pack_n=model._teacher_pack_n,
-            prefix_pack=True,
-            pad_to=model._teacher_pad_to,
-        ).detach()
-        target_token_target = teacher_full.unsqueeze(1).expand(-1, K, -1, -1)
-
-        ctx_mask_v = context_mask.unsqueeze(1)
-        predictor_queries = torch.zeros_like(context_emb.unsqueeze(1).expand(-1, K, -1, -1))
-        predictor_queries = torch.where(
-            target_masks.unsqueeze(-1),
-            model.latent_mask_token.view(1, 1, 1, -1).to(context_emb),
-            predictor_queries,
-        )
-        predictor_output = model.predict_masked_latents(
-            predictor_queries.reshape(B * K, N, -1),
-            context_emb.unsqueeze(1).expand(-1, K, -1, -1).reshape(B * K, N, -1),
-            target_mask=target_masks.reshape(B * K, N),
-            context_mask=ctx_mask_v.expand(-1, K, -1).reshape(B * K, N),
-            pack_n=model._predictor_pack_n,
-        )
-
-        dense_pred = model.jepa_projector(predictor_output)
-        dense_target = model.jepa_projector(target_token_target.reshape(B * K, N, -1))
-        dense_pred = F.layer_norm(dense_pred, (dense_pred.shape[-1],))
-        dense_target = F.layer_norm(dense_target, (dense_target.shape[-1],))
-        dense_pred = F.normalize(dense_pred, dim=-1)
-        dense_target = F.normalize(dense_target, dim=-1)
-        per_token_reg = (dense_pred - dense_target).square().mean(dim=-1)
-        manual_loss = (
-            per_token_reg * target_mask_flat.float()
-        ).sum() / target_mask_flat.float().sum().clamp_min(1.0)
-
-        self.assertTrue(torch.allclose(metrics["local_global_loss"], manual_loss, atol=1e-6, rtol=1e-6))
-
-    @torch.no_grad()
-    def test_target_pack_capacity_does_not_truncate_two_token_targets(self):
-        model = self._build_model(
-            num_peaks=6,
-            jepa_projector_num_layers=2,
-            masked_token_loss_type="l2",
-            normalize_jepa_targets=True,
-            sigreg_lambda=0.0,
-            jepa_projector_dim=24,
-        )
-        batch = _make_batch(num_peaks=6, num_targets=model.jepa_num_target_blocks)
-        batch["target_masks"] = torch.tensor(
-            [
-                [
-                    [False, False, True, True, False, False],
-                    [False, False, False, False, True, True],
-                ],
-                [
-                    [False, True, True, False, False, False],
-                    [False, False, False, True, True, False],
-                ],
-                [
-                    [False, False, True, True, False, False],
-                    [False, False, False, False, True, True],
-                ],
-                [
-                    [False, True, True, False, False, False],
-                    [False, False, False, True, True, False],
-                ],
-            ],
-            dtype=torch.bool,
-        )
-
-        metrics = model.forward_augmented(batch)
-        self.assertEqual(model._target_pack_n, 2)
-        peak_mz = batch["peak_mz"]
-        peak_intensity = batch["peak_intensity"]
-        peak_valid_mask = batch["peak_valid_mask"]
-        context_mask = batch["context_mask"] & peak_valid_mask
-        target_masks = batch["target_masks"] & peak_valid_mask.unsqueeze(1)
-        B, K, N = target_masks.shape
-        target_mask_flat = target_masks.reshape(B * K, N)
-
-        context_emb = model._encoder_forward(
-            peak_mz,
-            peak_intensity,
-            valid_mask=peak_valid_mask,
-            visible_mask=context_mask,
-            pack_n=model._context_pack_n,
-            prefix_pack=False,
-            pad_to=model._context_pad_to,
-        )
-        teacher = model._teacher_encoder_forward or model._encoder_forward
-        teacher_full = teacher(
-            peak_mz,
-            peak_intensity,
-            valid_mask=peak_valid_mask,
-            visible_mask=peak_valid_mask,
-            pack_n=model._teacher_pack_n,
-            prefix_pack=True,
-            pad_to=model._teacher_pad_to,
-        ).detach()
-        target_token_target = teacher_full.unsqueeze(1).expand(-1, K, -1, -1)
-
-        ctx_mask_v = context_mask.unsqueeze(1)
-        predictor_queries = torch.zeros_like(context_emb.unsqueeze(1).expand(-1, K, -1, -1))
-        predictor_queries = torch.where(
-            target_masks.unsqueeze(-1),
-            model.latent_mask_token.view(1, 1, 1, -1).to(context_emb),
-            predictor_queries,
-        )
-        predictor_output = model.predict_masked_latents(
-            predictor_queries.reshape(B * K, N, -1),
-            context_emb.unsqueeze(1).expand(-1, K, -1, -1).reshape(B * K, N, -1),
-            target_mask=target_mask_flat,
-            context_mask=ctx_mask_v.expand(-1, K, -1).reshape(B * K, N),
-            pack_n=model._predictor_pack_n,
-        )
-
-        dense_pred = model.jepa_projector(predictor_output)
-        dense_target = model.jepa_projector(target_token_target.reshape(B * K, N, -1))
-        dense_pred = F.layer_norm(dense_pred, (dense_pred.shape[-1],))
-        dense_target = F.layer_norm(dense_target, (dense_target.shape[-1],))
-        dense_pred = F.normalize(dense_pred, dim=-1)
-        dense_target = F.normalize(dense_target, dim=-1)
-        per_token_reg = (dense_pred - dense_target).square().mean(dim=-1)
-        manual_loss = (
-            per_token_reg * target_mask_flat.float()
-        ).sum() / target_mask_flat.float().sum().clamp_min(1.0)
-
-        self.assertTrue(torch.allclose(metrics["local_global_loss"], manual_loss, atol=1e-6, rtol=1e-6))
-
-    def test_projector_space_outputs_are_layer_normed(self):
-        model = self._build_model(
-            jepa_projector_num_layers=2,
-            jepa_projector_dim=24,
-            masked_token_loss_type="l2",
-            normalize_jepa_targets=False,
-            sigreg_lambda=0.0,
-        )
-        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-        metrics = model.forward_augmented(batch)
-        expected_norm = 24**0.5
-        self.assertAlmostEqual(float(metrics["projected_pred_norm"]), expected_norm, places=3)
-        self.assertAlmostEqual(float(metrics["projected_target_norm"]), expected_norm, places=3)
-
     def test_load_pretrained_weights_roundtrip(self):
         model = self._build_model()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -455,7 +228,7 @@ class BlockJEPATests(unittest.TestCase):
             for key, value in model.state_dict().items():
                 self.assertTrue(torch.equal(value, loaded.state_dict()[key]), key)
 
-    def test_build_model_from_config_wires_projector_dim(self):
+    def test_build_model_from_config_wires_norm_position(self):
         cfg = config_dict.ConfigDict(
             {
                 "model_dim": 32,
@@ -467,15 +240,14 @@ class BlockJEPATests(unittest.TestCase):
                 "sigreg_num_slices": 32,
                 "sigreg_lambda": 0.1,
                 "jepa_num_target_blocks": 2,
-                "jepa_projector_num_layers": 2,
-                "jepa_projector_dim": 20,
+                "norm_position": "postnorm",
             }
         )
         model = build_model_from_config(cfg)
-        self.assertEqual(model.jepa_projector_dim, 20)
+        self.assertEqual(model.norm_position, "postnorm")
 
-    def test_collect_runtime_norm_metrics_reports_encoder_and_projector(self):
-        model = self._build_model(jepa_projector_num_layers=2, jepa_projector_dim=24)
+    def test_collect_runtime_norm_metrics_reports_encoder(self):
+        model = self._build_model()
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
         loss = model.forward_augmented(batch)["loss"]
         loss.backward()
@@ -483,10 +255,8 @@ class BlockJEPATests(unittest.TestCase):
         for key in (
             "param_norm/total",
             "param_norm/encoder",
-            "param_norm/jepa_projector",
             "grad_norm/total",
             "grad_norm/encoder",
-            "grad_norm/jepa_projector",
         ):
             self.assertIn(key, metrics)
             self.assertTrue(np.isfinite(metrics[key]))

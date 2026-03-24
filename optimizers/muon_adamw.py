@@ -782,8 +782,16 @@ class MuonAdamW:
             if not params_with_grad:
                 continue
 
-            torch._foreach_lerp_(bufs, grads, 1 - momentum)
-            updates = torch._foreach_lerp(grads, bufs, momentum) if nesterov else bufs
+            momentum_grads = [
+                grad if grad.dtype == buf.dtype else grad.to(dtype=buf.dtype)
+                for grad, buf in zip(grads, bufs, strict=True)
+            ]
+            torch._foreach_lerp_(bufs, momentum_grads, 1 - momentum)
+            updates = (
+                torch._foreach_lerp(momentum_grads, bufs, momentum)
+                if nesterov
+                else bufs
+            )
 
             for param, update in zip(params_with_grad, updates):
                 updates_by_shape.setdefault(param.shape, []).append((param, update))

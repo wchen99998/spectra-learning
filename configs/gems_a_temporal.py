@@ -35,7 +35,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_lambda = 0.1
     cfg.sigreg_mz_jitter_std = 0.001
     cfg.sigreg_intensity_jitter_std = 0.05
-    cfg.norm_type = "layernorm"
+    cfg.norm_type = "rmsnorm"
 
     # Training
     cfg.num_epochs = 100
@@ -62,13 +62,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataloader_pin_memory = True
 
     cfg.masked_token_loss_weight = 1.0
-    cfg.masked_token_loss_type = "l2"
-    cfg.normalize_jepa_targets = False
-    cfg.use_ema_teacher_target = True
-    cfg.teacher_ema_decay = 0.99
-    cfg.teacher_ema_decay_start = 0.996
-    cfg.teacher_ema_decay_warmup_steps = 0
-    cfg.teacher_ema_update_every = 10
     cfg.grad_clip_norm = 1.0
     cfg.masked_latent_predictor_num_layers = 4
     cfg.predictor_num_heads = 8

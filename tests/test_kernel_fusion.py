@@ -56,10 +56,66 @@ def test_attention_mask_plumbing():
 def test_sigreg_forward():
     torch.manual_seed(42)
     sigreg = SIGReg(num_slices=256).to(DEVICE)
-    proj = torch.randn(4, B, D, device=DEVICE)
+    proj = torch.randn(B, 4, D, device=DEVICE)
     result = sigreg(proj)
     assert result.ndim == 0
     assert torch.isfinite(result)
+
+
+def test_sigreg_matches_per_token_manual_formula():
+    sigreg = SIGReg(num_slices=1).to(DEVICE)
+    proj = torch.tensor(
+        [
+            [[0.0], [1.0], [2.0]],
+            [[0.5], [1.5], [2.5]],
+            [[1.0], [2.0], [3.0]],
+            [[1.5], [2.5], [3.5]],
+        ],
+        device=DEVICE,
+    )
+    valid_mask = torch.tensor(
+        [
+            [True, True, False],
+            [True, True, True],
+            [True, False, True],
+            [False, False, True],
+        ],
+        device=DEVICE,
+    )
+
+    with torch.no_grad():
+        result = sigreg(proj, valid_mask=valid_mask)
+        expected_terms = []
+        for token_idx in range(proj.shape[1]):
+            samples = proj[valid_mask[:, token_idx], token_idx, 0]
+            if samples.numel() == 0:
+                continue
+            x_t = samples.unsqueeze(-1) * sigreg.t
+            cos_mean = x_t.cos().mean(0)
+            sin_mean = x_t.sin().mean(0)
+            err = (cos_mean - sigreg.phi).square() + sin_mean.square()
+            expected_terms.append((err @ sigreg.weights) * samples.numel())
+        expected = torch.stack(expected_terms).mean()
+
+    assert torch.allclose(result, expected, atol=1e-6, rtol=1e-6)
+
+
+def test_sigreg_scales_with_batch_size():
+    sigreg = SIGReg(num_slices=1).to(DEVICE)
+    proj = torch.tensor(
+        [
+            [[0.0], [1.0], [2.0]],
+            [[0.5], [1.5], [2.5]],
+            [[1.0], [2.0], [3.0]],
+        ],
+        device=DEVICE,
+    )
+
+    with torch.no_grad():
+        base = sigreg(proj)
+        doubled = sigreg(torch.cat([proj, proj], dim=0))
+
+    assert torch.allclose(doubled, base * 2.0, atol=1e-6, rtol=1e-6)
 
 
 def test_encoder_with_visible_mask():

@@ -35,8 +35,6 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         feature_mlp_hidden_dim=int(config.get("feature_mlp_hidden_dim", 128)),
         encoder_use_rope=bool(config.get("encoder_use_rope", False)),
         masked_token_loss_weight=float(config.get("masked_token_loss_weight", 0.0)),
-        masked_token_loss_type=str(config.get("masked_token_loss_type", "l1")),
-        normalize_jepa_targets=bool(config.get("normalize_jepa_targets", False)),
         representation_regularizer=str(
             config.get("representation_regularizer", "sigreg")
         ),
@@ -45,30 +43,14 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         ),
         sigreg_num_slices=int(config.get("sigreg_num_slices", 256)),
         sigreg_lambda=float(config.get("sigreg_lambda", 0.1)),
-        sigreg_lambda_warmup_steps=int(config.get("sigreg_lambda_warmup_steps", 0)),
-        gco_constraints=list(config.get("gco_constraints", ())),
-        gco_alpha=float(config.get("gco_alpha", 0.99)),
-        gco_eta=float(config.get("gco_eta", 1e-3)),
-        gco_log_lambda_init=float(config.get("gco_log_lambda_init", -8.0)),
-        gco_log_lambda_min=float(config.get("gco_log_lambda_min", -12.0)),
-        gco_log_lambda_max=float(config.get("gco_log_lambda_max", 2.0)),
         jepa_num_target_blocks=int(config.get("jepa_num_target_blocks", 2)),
-        use_ema_teacher_target=bool(config.get("use_ema_teacher_target", False)),
-        teacher_ema_decay=float(config.get("teacher_ema_decay", 0.996)),
-        teacher_ema_decay_start=float(config.get("teacher_ema_decay_start", 0.0)),
-        teacher_ema_decay_warmup_steps=int(
-            config.get("teacher_ema_decay_warmup_steps", 0)
-        ),
-        teacher_ema_update_every=int(config.get("teacher_ema_update_every", 1)),
         encoder_qk_norm=bool(config.get("encoder_qk_norm", False)),
         norm_type=str(config.get("norm_type", "rmsnorm")),
+        norm_position=str(config.get("norm_position", "prenorm")),
         use_precursor_token=bool(config.get("use_precursor_token", False)),
-        dir_rad_beta=float(config.get("dir_rad_beta", 1.0)),
         num_peaks=int(config.get("num_peaks", 64)),
         jepa_context_fraction=float(config.get("jepa_context_fraction", 0.3)),
         jepa_target_fraction=float(config.get("jepa_target_fraction", 0.25)),
-        jepa_projector_num_layers=int(config.get("jepa_projector_num_layers", 0)),
-        jepa_projector_dim=config.get("jepa_projector_dim", None),
         temporal_predictor_num_layers=int(
             config.get("temporal_predictor_num_layers", 0)
         ),

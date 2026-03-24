@@ -30,20 +30,18 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_heads = 8
     cfg.num_kv_heads = 8
     cfg.encoder_use_rope = True
-    cfg.encoder_qk_norm = False
+    cfg.encoder_qk_norm = True
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 128
-    cfg.sigreg_num_slices = 256
+    cfg.sigreg_num_slices = 1024
     cfg.sigreg_lambda = 0.1
     cfg.jepa_num_target_blocks = 2
     cfg.jepa_context_fraction = 0.3
     cfg.jepa_target_fraction = 0.25
-    cfg.jepa_projector_num_layers = 1
-    cfg.jepa_projector_dim = 128
     cfg.jepa_block_min_len = 1
     cfg.sigreg_mz_jitter_std = 0.001
     cfg.sigreg_intensity_jitter_std = 0.05
-    cfg.norm_type = "layernorm"
+    cfg.norm_type = "rmsnorm"
 
     # Training
     cfg.num_epochs = 100
@@ -66,25 +64,12 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataloader_persistent_workers = True
 
     cfg.masked_token_loss_weight = 1.0
-    cfg.masked_token_loss_type = "l2"
-    cfg.normalize_jepa_targets = False
-    cfg.use_ema_teacher_target = True
-    cfg.teacher_ema_decay = 0.999
-    cfg.teacher_ema_decay_start = 0.996
-    cfg.teacher_ema_decay_warmup_steps = 0
-    cfg.teacher_ema_update_every = 10
     cfg.grad_clip_norm = 1.0
-    cfg.masked_latent_predictor_num_layers = 4
+    cfg.masked_latent_predictor_num_layers = 2
     cfg.predictor_num_heads = 8
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "max-autotune"
-    cfg.representation_regularizer = "none"
-    cfg.gco_constraints = [
-        {"metric": "local_emb_var_floor", "target": 0.6, "bound": "lower"},
-    ]
-    cfg.gco_log_lambda_max = math.log(1000.0)
-    cfg.gco_log_lambda_init = math.log(10.0)
-    cfg.sigreg_lambda_warmup_steps = 50_000
+    cfg.representation_regularizer = "sigreg"
     cfg.msg_probe_every_n_steps = 0.25
     cfg.msg_probe_type = "mlp"
     cfg.msg_probe_pooling_type = "pma"

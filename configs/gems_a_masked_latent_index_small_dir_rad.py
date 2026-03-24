@@ -41,7 +41,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_block_min_len = 1
     cfg.sigreg_mz_jitter_std = 0.001
     cfg.sigreg_intensity_jitter_std = 0.05
-    cfg.norm_type = "layernorm"
+    cfg.norm_type = "rmsnorm"
 
     # Training
     cfg.num_epochs = 100
@@ -64,26 +64,12 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataloader_persistent_workers = True
 
     cfg.masked_token_loss_weight = 1.0
-    cfg.masked_token_loss_type = "dir_rad"
-    cfg.dir_rad_beta = 0.05
-    cfg.normalize_jepa_targets = False
-    cfg.use_ema_teacher_target = True
-    cfg.teacher_ema_decay = 1.
-    cfg.teacher_ema_decay_start = 0.996
-    cfg.teacher_ema_decay_warmup_steps = 400_000
-    cfg.teacher_ema_update_every = 10
     cfg.grad_clip_norm = 1.0
     cfg.masked_latent_predictor_num_layers = 4
     cfg.predictor_num_heads = 8
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "max-autotune"
     cfg.representation_regularizer = "none"
-    cfg.gco_constraints = [
-        {"metric": "local_emb_var_floor", "target": 0.6, "bound": "lower"},
-    ]
-    cfg.gco_log_lambda_max = math.log(1000.0)
-    cfg.gco_log_lambda_init = math.log(10.0)
-    cfg.sigreg_lambda_warmup_steps = 50_000
     cfg.msg_probe_every_n_steps = 0.25
     cfg.msg_probe_pooling_type = "pma"
     cfg.msg_probe_pma_num_heads = cfg.num_heads
