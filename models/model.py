@@ -98,7 +98,7 @@ def apply_rotary_emb(
     return (xq * freqs_cos) + (q_rot * freqs_sin), (xk * freqs_cos) + (k_rot * freqs_sin)
 
 
-def _build_norm(dim: int, eps: float, norm_type: str) -> nn.Module:
+def _build_norm(dim: int, eps: float | None, norm_type: str) -> nn.Module:
     kind = str(norm_type).lower()
     if kind == "rmsnorm":
         return nn.RMSNorm(dim, eps=eps)
@@ -136,8 +136,8 @@ class Attention(nn.Module):
         self.wqkv = nn.Linear(self.dim, out_features, bias=False)
         self.wo = nn.Linear(self.dim, self.dim, bias=False)
         if qk_norm:
-            self.q_norm = _build_norm(self.head_dim, eps=1e-5, norm_type=norm_type)
-            self.k_norm = _build_norm(self.head_dim, eps=1e-5, norm_type=norm_type)
+            self.q_norm = _build_norm(self.head_dim, eps=None, norm_type=norm_type)
+            self.k_norm = _build_norm(self.head_dim, eps=None, norm_type=norm_type)
         nn.init.xavier_normal_(self.wqkv.weight)
         nn.init.xavier_normal_(self.wo.weight)
 
@@ -176,8 +176,8 @@ class FeedForward(nn.Module):
         hidden_dim = 4 * math.ceil(hidden_dim / 4)
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
-        for w in (self.w1, self.w2):
-            nn.init.trunc_normal_(w.weight, std=1.0 / math.sqrt(dim))
+        nn.init.trunc_normal_(self.w1.weight, std=1.0 / math.sqrt(dim))
+        nn.init.trunc_normal_(self.w2.weight, std=1.0 / math.sqrt(hidden_dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w2(F.silu(self.w1(x)))
@@ -198,8 +198,8 @@ class CrossAttention(nn.Module):
         self.wo = nn.Linear(self.dim, self.dim, bias=False)
         self.qk_norm = qk_norm
         if qk_norm:
-            self.q_norm = _build_norm(self.head_dim, eps=1e-5, norm_type=norm_type)
-            self.k_norm = _build_norm(self.head_dim, eps=1e-5, norm_type=norm_type)
+            self.q_norm = _build_norm(self.head_dim, eps=None, norm_type=norm_type)
+            self.k_norm = _build_norm(self.head_dim, eps=None, norm_type=norm_type)
         nn.init.xavier_normal_(self.wq.weight)
         nn.init.xavier_normal_(self.wkv.weight)
         nn.init.xavier_normal_(self.wo.weight)
@@ -253,9 +253,9 @@ class TemporalDecoderBlock(nn.Module):
         self.cross_attn = CrossAttention(dim, n_heads, n_kv_heads=n_kv_heads,
                                           qk_norm=qk_norm, norm_type=norm_type)
         self.feed_forward = FeedForward(dim, hidden_dim=hidden_dim)
-        self.attention_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
-        self.cross_attn_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
-        self.ffn_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
+        self.attention_norm = _build_norm(dim, eps=None, norm_type=norm_type)
+        self.cross_attn_norm = _build_norm(dim, eps=None, norm_type=norm_type)
+        self.ffn_norm = _build_norm(dim, eps=None, norm_type=norm_type)
 
     def forward(self, x: torch.Tensor, context: torch.Tensor, *,
                 freqs_cos: torch.Tensor | None,
@@ -291,6 +291,26 @@ class TemporalDecoderBlock(nn.Module):
         return h + self.feed_forward(self.ffn_norm(h))
 
 
+def _apply_depth_scaled_init(blocks: nn.ModuleList, num_layers: int) -> None:
+    """Scale residual output projections by 1/sqrt(2*num_layers) (GPT-2 style).
+
+    In pre-norm transformers each residual addition contributes ~unit variance,
+    so after 2*L sub-layers the activation norm grows by sqrt(2*L).  Scaling
+    the output projections (wo in attention, w2 in FFN) keeps the total
+    variance growth O(1) regardless of depth.
+    """
+    if num_layers <= 0:
+        return
+    scale = 1.0 / math.sqrt(2.0 * num_layers)
+    for block in blocks:
+        if hasattr(block, "attention"):
+            block.attention.wo.weight.data.mul_(scale)
+        if hasattr(block, "cross_attn"):
+            block.cross_attn.wo.weight.data.mul_(scale)
+        if hasattr(block, "feed_forward"):
+            block.feed_forward.w2.weight.data.mul_(scale)
+
+
 def _build_temporal_decoder_blocks(*, dim: int, num_layers: int, num_heads: int,
                                     num_kv_heads: int | None, attention_mlp_multiple: float,
                                     norm_eps: float = 1e-5, qk_norm: bool = False,
@@ -302,7 +322,9 @@ def _build_temporal_decoder_blocks(*, dim: int, num_layers: int, num_heads: int,
         norm_eps=norm_eps, hidden_dim=int(math.ceil(dim * attention_mlp_multiple)),
         qk_norm=qk_norm, norm_type=norm_type, norm_position=norm_position,
     )
-    return nn.ModuleList([TemporalDecoderBlock(**block_kwargs) for _ in range(num_layers)])
+    blocks = nn.ModuleList([TemporalDecoderBlock(**block_kwargs) for _ in range(num_layers)])
+    _apply_depth_scaled_init(blocks, num_layers)
+    return blocks
 
 
 class TransformerBlock(nn.Module):
@@ -315,8 +337,8 @@ class TransformerBlock(nn.Module):
         self.attention = Attention(dim, n_heads, n_kv_heads=n_kv_heads,
                                    qk_norm=qk_norm, norm_type=norm_type)
         self.feed_forward = FeedForward(dim, hidden_dim=hidden_dim)
-        self.attention_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
-        self.ffn_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
+        self.attention_norm = _build_norm(dim, eps=None, norm_type=norm_type)
+        self.ffn_norm = _build_norm(dim, eps=None, norm_type=norm_type)
 
     def forward(self, x: torch.Tensor, *, freqs_cos: torch.Tensor | None,
                 freqs_sin: torch.Tensor | None,
@@ -348,7 +370,9 @@ def _build_non_causal_blocks(*, dim: int, num_layers: int, num_heads: int,
         norm_eps=norm_eps, hidden_dim=int(math.ceil(dim * attention_mlp_multiple)),
         qk_norm=qk_norm, norm_type=norm_type, norm_position=norm_position,
     )
-    return nn.ModuleList([TransformerBlock(**block_kwargs) for _ in range(num_layers)])
+    blocks = nn.ModuleList([TransformerBlock(**block_kwargs) for _ in range(num_layers)])
+    _apply_depth_scaled_init(blocks, num_layers)
+    return blocks
 
 
 # ---------------------------------------------------------------------------
@@ -440,6 +464,7 @@ class PeakSetEncoder(nn.Module):
             num_kv_heads=num_kv_heads, attention_mlp_multiple=attention_mlp_multiple,
             qk_norm=qk_norm, norm_type=norm_type, norm_position=norm_position,
         )
+        self.final_norm = _build_norm(model_dim, eps=None, norm_type=norm_type)
 
     def forward(self, peak_mz: torch.Tensor, peak_intensity: torch.Tensor,
                 valid_mask: torch.Tensor | None = None,
@@ -470,6 +495,7 @@ class PeakSetEncoder(nn.Module):
                 for block in self.blocks:
                     x = block(x, freqs_cos=freqs_cos, freqs_sin=freqs_sin,
                               vis_mask=vis, pad_to=pad_to)
+                x = self.final_norm(x)
                 return F.pad(x, (0, 0, 0, N - PACK_N))
             else:
                 sort_idx = vis.to(dtype=torch.int8).argsort(dim=1, descending=True, stable=True)
@@ -490,6 +516,7 @@ class PeakSetEncoder(nn.Module):
                 for block in self.blocks:
                     x = block(x, freqs_cos=freqs_cos, freqs_sin=freqs_sin,
                               vis_mask=vis, pad_to=pad_to)
+                x = self.final_norm(x)
                 idx_expand = pack_idx.unsqueeze(-1).expand(-1, -1, D)
                 return torch.zeros(B, N, D, device=x.device, dtype=x.dtype).scatter(1, idx_expand, x)
 
@@ -505,7 +532,7 @@ class PeakSetEncoder(nn.Module):
                 self.use_rope, peak_mz.shape[1], self.rope_inv_freq, peak_mz.device, x.dtype)
         for block in self.blocks:
             x = block(x, freqs_cos=freqs_cos, freqs_sin=freqs_sin, vis_mask=vis)
-        return x
+        return self.final_norm(x)
 
 
 # ---------------------------------------------------------------------------
@@ -580,6 +607,7 @@ class PeakSetSIGReg(nn.Module):
             qk_norm=encoder_qk_norm, norm_type=self.norm_type,
             norm_position=self.norm_position,
         )
+        self.predictor_final_norm = _build_norm(self.model_dim, eps=None, norm_type=self.norm_type)
         self.sigreg = SIGReg(num_slices=int(sigreg_num_slices))
 
         # Temporal predictor (cross-attention decoder for next-spectrum prediction)
@@ -592,9 +620,13 @@ class PeakSetSIGReg(nn.Module):
                 qk_norm=encoder_qk_norm, norm_type=self.norm_type,
                 norm_position=self.norm_position,
             )
+            self.temporal_final_norm = _build_norm(model_dim, eps=None, norm_type=self.norm_type)
             self.temporal_rt_proj = nn.Sequential(
                 nn.Linear(1, model_dim), nn.SiLU(), nn.Linear(model_dim, model_dim),
             )
+            # Init: second linear small so rt_emb starts near zero
+            nn.init.trunc_normal_(self.temporal_rt_proj[2].weight, std=1.0 / math.sqrt(model_dim))
+            nn.init.zeros_(self.temporal_rt_proj[2].bias)
             self.temporal_target_tokens = nn.Parameter(torch.empty(N, model_dim))
             nn.init.trunc_normal_(self.temporal_target_tokens, std=0.02)
             tp_rope_cos, tp_rope_sin = _precompute_rope_freqs(N, predictor_inv_freq)
@@ -644,6 +676,7 @@ class PeakSetSIGReg(nn.Module):
                     pad_to=pad_to,
                     context_mask=packed_context_mask,
                 )
+            packed_x = self.predictor_final_norm(packed_x)
             packed_x = packed_x * packed_target.unsqueeze(-1).to(dtype=packed_x.dtype)
             idx_expand = pack_idx.unsqueeze(-1).expand(-1, -1, D)
             return torch.zeros(BK, N, D, device=packed_x.device, dtype=packed_x.dtype).scatter(
@@ -660,6 +693,7 @@ class PeakSetSIGReg(nn.Module):
                 vis_mask=target_mask,
                 context_mask=context_mask,
             )
+        x = self.predictor_final_norm(x)
         return x * target_mask.unsqueeze(-1).to(dtype=x.dtype)
 
     def pool(self, embeddings: torch.Tensor, valid_mask: torch.Tensor) -> torch.Tensor:
@@ -818,10 +852,6 @@ class PeakSetSIGReg(nn.Module):
             pack_n=self._full_pack_n, prefix_pack=True, pad_to=self._full_pad_to,
         )  # [B, N, D]
 
-        # Run decoder in fp32: the pretrained encoder produces ~22K-norm
-        # embeddings.  Cross-attention injects these into the decoder via
-        # residuals, so all subsequent self-attention / FFN operates on
-        # high-norm activations.  bf16 backward eventually overflows.
         context_emb = context_emb.float()
 
         # 2. RT conditioning (normalize to minutes for numerical stability)
@@ -840,7 +870,7 @@ class PeakSetSIGReg(nn.Module):
                 queries = block(queries, context_emb,
                                 freqs_cos=freqs_cos, freqs_sin=freqs_sin,
                                 context_mask=context_valid)
-            predicted_target = queries  # [B, N, D]
+            predicted_target = self.temporal_final_norm(queries)  # [B, N, D]
 
         # 5. Target encoding (shared encoder, gradients flow)
         target_emb = self._encoder_forward(

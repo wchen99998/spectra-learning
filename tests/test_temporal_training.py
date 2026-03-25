@@ -126,7 +126,7 @@ class TestCheckpointPartialLoad:
         missing, unexpected = full.load_state_dict(sd, strict=False)
 
         # Only temporal keys should be missing
-        allowed_prefixes = ("temporal_predictor.", "temporal_rt_proj.", "temporal_target_tokens")
+        allowed_prefixes = ("temporal_predictor.", "temporal_final_norm.", "temporal_rt_proj.", "temporal_target_tokens")
         for key in missing:
             assert any(key.startswith(p) for p in allowed_prefixes), (
                 f"Unexpected missing key: {key}"
