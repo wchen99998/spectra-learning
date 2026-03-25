@@ -30,7 +30,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_heads = 8
     cfg.num_kv_heads = 8
     cfg.encoder_use_rope = True
-    cfg.encoder_qk_norm = True
+    cfg.encoder_qk_norm = False
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 128
     cfg.sigreg_num_slices = 1024
@@ -50,7 +50,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.learning_rate_schedule = "cosine"
     cfg.min_learning_rate = None
     cfg.b2 = 0.98
-    cfg.weight_decay = 1e-2
+    cfg.weight_decay = 1e-4
     cfg.optimizer = "muon"
     cfg.device_prefetch_size = 8
     cfg.log_every_n_steps = 100
@@ -67,10 +67,10 @@ def get_config() -> config_dict.ConfigDict:
     cfg.grad_clip_norm = 1.0
     cfg.masked_latent_predictor_num_layers = 2
     cfg.predictor_num_heads = 8
-    cfg.autocast_dtype = "bf16"
+    cfg.autocast_dtype = "fp32"
     cfg.compile_mode = "max-autotune"
     cfg.representation_regularizer = "sigreg"
-    cfg.msg_probe_every_n_steps = 0.25
+    cfg.msg_probe_every_n_steps = 0.5
     cfg.msg_probe_type = "mlp"
     cfg.msg_probe_pooling_type = "pma"
     cfg.msg_probe_pma_num_heads = cfg.num_heads
