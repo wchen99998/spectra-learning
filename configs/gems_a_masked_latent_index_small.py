@@ -32,7 +32,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_use_rope = True
     cfg.encoder_qk_norm = False
     cfg.attention_mlp_multiple = 4.0
-    cfg.feature_mlp_hidden_dim = 128
+    cfg.feature_mlp_hidden_dim = 1024
     cfg.sigreg_num_slices = 256
     cfg.sigreg_lambda = 0.1
     cfg.jepa_num_target_blocks = 2
@@ -46,11 +46,11 @@ def get_config() -> config_dict.ConfigDict:
     # Training
     cfg.num_epochs = 100
     cfg.learning_rate = 1e-4
-    cfg.warmup_steps = 10_000
+    cfg.warmup_steps = 0
     cfg.learning_rate_schedule = "cosine"
     cfg.min_learning_rate = None
     cfg.b2 = 0.98
-    cfg.weight_decay = 1e-5
+    cfg.weight_decay = 1e-4
     cfg.optimizer = "muon"
     cfg.device_prefetch_size = 8
     cfg.log_every_n_steps = 100
@@ -67,10 +67,10 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_token_loss_type = "l2"
     cfg.normalize_jepa_targets = False
     cfg.use_ema_teacher_target = True
-    cfg.teacher_ema_decay = 1.
-    cfg.teacher_ema_decay_start = 0.996
-    cfg.teacher_ema_decay_warmup_steps = 400_000
-    cfg.teacher_ema_update_every = 10
+    cfg.teacher_ema_decay = 0.999
+    cfg.teacher_ema_decay_start = 0.999
+    cfg.teacher_ema_decay_warmup_steps = 0
+    cfg.teacher_ema_update_every = 2
     cfg.grad_clip_norm = 1.0
     cfg.masked_latent_predictor_num_layers = 4
     cfg.predictor_num_heads = 8
@@ -94,7 +94,7 @@ def get_config() -> config_dict.ConfigDict:
 
     # System / logging
     cfg.enable_wandb = True
-    cfg.wandb_project = "jepa-pretraining"
+    cfg.wandb_project = "jepa-debugging"
     cfg.wandb_run_name_prefix = "jepa_masked_latent_index"
 
     return cfg

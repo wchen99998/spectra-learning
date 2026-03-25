@@ -41,10 +41,7 @@ def _is_weight_decay_target(name: str, param: torch.nn.Parameter) -> bool:
     return (
         param.ndim >= 2
         and name.endswith("weight")
-        and any(
-            t in name
-            for t in ("attention.", "feed_forward.", "cross_attn.")
-        )
+        and any(t in name for t in ("attention.", "feed_forward.", "cross_attn."))
     )
 
 
@@ -221,25 +218,33 @@ def _build_optimizers(
             _make_schedule(muon_opt, muon_lr),
             _make_schedule(adamw_opt, adamw_lr),
         ]
-    decay_params, no_decay_params = [], []
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
-        if _is_weight_decay_target(name, param):
-            decay_params.append(param)
-        else:
-            no_decay_params.append(param)
     optimizer = torch.optim.AdamW(
-        [
-            {"params": decay_params, "weight_decay": weight_decay},
-            {"params": no_decay_params, "weight_decay": 0.0},
-        ],
+        model.parameters(),
         lr=torch.tensor(base_lr),
         betas=(0.9, b2),
-        weight_decay=0.0,
+        weight_decay=weight_decay,
         capturable=capturable,
         fused=fused,
     )
+    # decay_params, no_decay_params = [], []
+    # for name, param in model.named_parameters():
+    #     if not param.requires_grad:
+    #         continue
+    #     if _is_weight_decay_target(name, param):
+    #         decay_params.append(param)
+    #     else:
+    #         no_decay_params.append(param)
+    # optimizer = torch.optim.AdamW(
+    #     [
+    #         {"params": decay_params, "weight_decay": weight_decay},
+    #         {"params": no_decay_params, "weight_decay": 0.0},
+    #     ],
+    #     lr=torch.tensor(base_lr),
+    #     betas=(0.9, b2),
+    #     weight_decay=0.0,
+    #     capturable=capturable,
+    #     fused=fused,
+    # )
     return [optimizer], [_make_schedule(optimizer, base_lr)]
 
 
@@ -408,12 +413,18 @@ def train_and_evaluate(
                 if _wandb_run is not None and _probe_epoch_log:
                     import wandb
 
-                    _epochs = [
-                        int(m["msg_probe_epoch"]) for m in _probe_epoch_log
-                    ]
+                    _epochs = [int(m["msg_probe_epoch"]) for m in _probe_epoch_log]
                     _curve_keys = [
-                        ("r2_mean", "msg_probe/train/r2_mean", "msg_probe/test/r2_mean"),
-                        ("auc_fg_mean", "msg_probe/train/auc_fg_mean", "msg_probe/test/auc_fg_mean"),
+                        (
+                            "r2_mean",
+                            "msg_probe/train/r2_mean",
+                            "msg_probe/test/r2_mean",
+                        ),
+                        (
+                            "auc_fg_mean",
+                            "msg_probe/train/auc_fg_mean",
+                            "msg_probe/test/auc_fg_mean",
+                        ),
                     ]
                     for label, train_key, test_key in _curve_keys:
                         _wandb_run.log(

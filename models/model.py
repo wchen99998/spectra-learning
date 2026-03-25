@@ -7,7 +7,25 @@ from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 
 from models.losses import SIGReg
 from networks import transformer_torch
-from networks.transformer_torch import create_visible_block_mask
+from networks.transformer_torch import _build_norm, create_visible_block_mask
+
+
+def _apply_depth_scaled_init(blocks: nn.ModuleList, num_layers: int) -> None:
+    """Scale residual output projections by 1/sqrt(2*num_layers) (GPT-2 style).
+
+    In pre-norm transformers each residual addition contributes ~unit variance,
+    so after 2*L sub-layers the activation norm grows by sqrt(2*L).  Scaling
+    the output projections (wo in attention, w2 in FFN) keeps the total
+    variance growth O(1) regardless of depth.
+    """
+    if num_layers <= 0:
+        return
+    scale = 1.0 / math.sqrt(2.0 * num_layers)
+    for block in blocks:
+        if hasattr(block, "attention"):
+            block.attention.wo.weight.data.mul_(scale)
+        if hasattr(block, "feed_forward"):
+            block.feed_forward.w2.weight.data.mul_(scale)
 
 
 def _build_non_causal_blocks(
@@ -30,9 +48,11 @@ def _build_non_causal_blocks(
         qk_norm=qk_norm,
         norm_type=norm_type,
     )
-    return nn.ModuleList(
+    blocks = nn.ModuleList(
         [transformer_torch.TransformerBlock(**block_kwargs) for _ in range(num_layers)]
     )
+    _apply_depth_scaled_init(blocks, num_layers)
+    return blocks
 
 
 def _compute_rope_freqs(
@@ -118,6 +138,7 @@ class PeakSetEncoder(nn.Module):
             qk_norm=qk_norm,
             norm_type=norm_type,
         )
+        self.final_norm = _build_norm(model_dim, eps=None, norm_type=norm_type)
 
     def forward(
         self,
@@ -145,7 +166,7 @@ class PeakSetEncoder(nn.Module):
                 freqs_sin=freqs_sin,
                 block_mask=block_mask,
             )
-        return x
+        return self.final_norm(x)
 
 
 class PeakSetSIGReg(nn.Module):
@@ -311,6 +332,7 @@ class PeakSetSIGReg(nn.Module):
             qk_norm=encoder_qk_norm,
             norm_type=self.norm_type,
         )
+        self.predictor_final_norm = _build_norm(self.model_dim, eps=None, norm_type=self.norm_type)
         self.sigreg = SIGReg(num_slices=int(sigreg_num_slices))
 
     def train(self, mode: bool = True) -> "PeakSetSIGReg":
@@ -378,7 +400,7 @@ class PeakSetSIGReg(nn.Module):
                 freqs_sin=freqs_sin,
                 block_mask=predictor_block_mask,
             )
-        return x
+        return self.predictor_final_norm(x)
 
     def pool(
         self,

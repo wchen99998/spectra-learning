@@ -40,12 +40,12 @@ def apply_rotary_emb(
     )
 
 
-def _build_norm(dim: int, eps: float, norm_type: str) -> nn.Module:
+def _build_norm(dim: int, eps: float | None, norm_type: str) -> nn.Module:
     kind = str(norm_type).lower()
     if kind == "rmsnorm":
         return nn.RMSNorm(dim, eps=eps)
     if kind == "layernorm":
-        return nn.LayerNorm(dim, eps=eps)
+        return nn.LayerNorm(dim, eps=1e-5)
     raise ValueError(f"Unsupported norm_type: {norm_type}")
 
 
@@ -71,8 +71,8 @@ class Attention(nn.Module):
         self.wo = nn.Linear(self.dim, self.dim, bias=False)
 
         if qk_norm:
-            self.q_norm = _build_norm(self.head_dim, eps=1e-5, norm_type=norm_type)
-            self.k_norm = _build_norm(self.head_dim, eps=1e-5, norm_type=norm_type)
+            self.q_norm = _build_norm(self.head_dim, eps=None, norm_type=norm_type)
+            self.k_norm = _build_norm(self.head_dim, eps=None, norm_type=norm_type)
 
         nn.init.xavier_normal_(self.wqkv.weight)
         nn.init.xavier_normal_(self.wo.weight)
@@ -141,8 +141,8 @@ class FeedForward(nn.Module):
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
 
-        for w in (self.w1, self.w2):
-            nn.init.trunc_normal_(w.weight, std=1.0 / math.sqrt(dim))
+        nn.init.trunc_normal_(self.w1.weight, std=1.0 / math.sqrt(dim))
+        nn.init.trunc_normal_(self.w2.weight, std=1.0 / math.sqrt(hidden_dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w2(torch.nn.functional.silu(self.w1(x)))
@@ -172,8 +172,8 @@ class TransformerBlock(nn.Module):
             dim,
             hidden_dim=hidden_dim,
         )
-        self.attention_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
-        self.ffn_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
+        self.attention_norm = _build_norm(dim, eps=None, norm_type=norm_type)
+        self.ffn_norm = _build_norm(dim, eps=None, norm_type=norm_type)
 
     def forward(
         self,
