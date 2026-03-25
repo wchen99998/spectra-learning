@@ -64,7 +64,7 @@ Raw (pre-augmentation) batches: `peak_mz` [B, N], `peak_intensity` [B, N], `peak
 
 ### Configuration System
 
-`ml_collections.ConfigDict` configs in `configs/`. Shared defaults in `configs/_defaults.py` (`apply_training_defaults`, `apply_tune_defaults`). Configs loaded dynamically via importlib. Key config: `configs/gems_a_50_mask.py`.
+`ml_collections.ConfigDict` configs in `configs/`. Each config file is self-contained and loaded dynamically via importlib. Key config: `configs/gems_a_50_mask.py`.
 
 ### Data Pipeline (`input_pipeline.py`)
 

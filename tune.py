@@ -199,7 +199,7 @@ def main() -> None:
     param_space = cfg.get("tune_param_space", [])
     assert param_space, (
         "cfg.tune_param_space is empty. "
-        "Define tunable parameters in the config file via apply_tune_defaults() "
+        "Define tunable parameters directly in the config file via `tune_param_space` "
         "or set cfg.tune_param_space directly."
     )
     trial_configs = generate_trial_configs(

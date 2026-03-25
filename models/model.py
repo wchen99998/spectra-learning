@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 
+from models.peak_features import PeakFeatureEmbedder
 from models.losses import SIGReg
 from networks import transformer_torch
 from networks.transformer_torch import _build_norm, _rotate_half, create_visible_block_mask
@@ -220,6 +221,13 @@ class PeakSetEncoder(nn.Module):
         num_kv_heads: int | None = None,
         attention_mlp_multiple: float = 4.0,
         feature_mlp_hidden_dim: int = 128,
+        fourier_strategy: str = "lin_float_int",
+        fourier_x_min: float = 1e-4,
+        fourier_x_max: float = 1000.0,
+        fourier_funcs: str = "sin",
+        fourier_num_freqs: int = 512,
+        fourier_sigma: float = 10.0,
+        fourier_trainable: bool = True,
         use_rope: bool = False,
         qk_norm: bool = False,
         norm_type: str = "rmsnorm",
@@ -227,15 +235,17 @@ class PeakSetEncoder(nn.Module):
         super().__init__()
         self.use_rope = bool(use_rope)
         norm_type = str(norm_type).lower()
-        self.embedder = nn.Sequential(
-            nn.Linear(3, feature_mlp_hidden_dim),
-            nn.SiLU(),
-            nn.Linear(feature_mlp_hidden_dim, model_dim),
+        self.embedder = PeakFeatureEmbedder(
+            model_dim=model_dim,
+            hidden_dim=feature_mlp_hidden_dim,
+            fourier_strategy=fourier_strategy,
+            fourier_x_min=fourier_x_min,
+            fourier_x_max=fourier_x_max,
+            fourier_funcs=fourier_funcs,
+            fourier_num_freqs=fourier_num_freqs,
+            fourier_sigma=fourier_sigma,
+            fourier_trainable=fourier_trainable,
         )
-        for layer in self.embedder:
-            if isinstance(layer, nn.Linear):
-                nn.init.xavier_normal_(layer.weight)
-                nn.init.zeros_(layer.bias)
         _h = model_dim // int(num_heads) // 2
         self.register_buffer(
             "rope_inv_freq",
@@ -267,8 +277,7 @@ class PeakSetEncoder(nn.Module):
         block_mask = (
             create_visible_block_mask(attn_mask) if attn_mask is not None else None
         )
-        log_intensity = torch.log1p(peak_intensity.clamp(min=0.0))
-        x = self.embedder(torch.stack([peak_mz, peak_intensity, log_intensity], dim=-1))
+        x = self.embedder(peak_mz, peak_intensity)
         freqs_cos, freqs_sin = _compute_rope_freqs(
             self.use_rope, peak_mz.shape[1], self.rope_inv_freq, peak_mz.device, x.dtype
         )
@@ -292,6 +301,13 @@ class PeakSetSIGReg(nn.Module):
         encoder_num_kv_heads: int | None = None,
         attention_mlp_multiple: float = 4.0,
         feature_mlp_hidden_dim: int = 128,
+        encoder_fourier_strategy: str = "lin_float_int",
+        encoder_fourier_x_min: float = 1e-4,
+        encoder_fourier_x_max: float = 1000.0,
+        encoder_fourier_funcs: str = "sin",
+        encoder_fourier_num_freqs: int = 512,
+        encoder_fourier_sigma: float = 10.0,
+        encoder_fourier_trainable: bool = True,
         encoder_use_rope: bool = False,
         masked_token_loss_weight: float = 0.0,
         masked_token_loss_type: str = "l1",
@@ -412,6 +428,13 @@ class PeakSetSIGReg(nn.Module):
             num_kv_heads=encoder_num_kv_heads,
             attention_mlp_multiple=attention_mlp_multiple,
             feature_mlp_hidden_dim=feature_mlp_hidden_dim,
+            fourier_strategy=encoder_fourier_strategy,
+            fourier_x_min=encoder_fourier_x_min,
+            fourier_x_max=encoder_fourier_x_max,
+            fourier_funcs=encoder_fourier_funcs,
+            fourier_num_freqs=encoder_fourier_num_freqs,
+            fourier_sigma=encoder_fourier_sigma,
+            fourier_trainable=encoder_fourier_trainable,
             use_rope=encoder_use_rope,
             qk_norm=encoder_qk_norm,
             norm_type=self.norm_type,

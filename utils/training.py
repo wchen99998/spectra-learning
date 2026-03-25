@@ -33,6 +33,17 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         encoder_num_kv_heads=config.get("num_kv_heads", None),
         attention_mlp_multiple=float(config.attention_mlp_multiple),
         feature_mlp_hidden_dim=int(config.get("feature_mlp_hidden_dim", 128)),
+        encoder_fourier_strategy=str(
+            config.get("encoder_fourier_strategy", "lin_float_int")
+        ),
+        encoder_fourier_x_min=float(config.get("encoder_fourier_x_min", 1e-4)),
+        encoder_fourier_x_max=float(config.get("encoder_fourier_x_max", 1000.0)),
+        encoder_fourier_funcs=str(config.get("encoder_fourier_funcs", "sin")),
+        encoder_fourier_num_freqs=int(config.get("encoder_fourier_num_freqs", 512)),
+        encoder_fourier_sigma=float(config.get("encoder_fourier_sigma", 10.0)),
+        encoder_fourier_trainable=bool(
+            config.get("encoder_fourier_trainable", True)
+        ),
         encoder_use_rope=bool(config.get("encoder_use_rope", False)),
         masked_token_loss_weight=float(config.get("masked_token_loss_weight", 0.0)),
         masked_token_loss_type=str(config.get("masked_token_loss_type", "l1")),

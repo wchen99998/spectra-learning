@@ -35,6 +35,13 @@ def make_config() -> config_dict.ConfigDict:
     cfg.num_kv_heads = 8
     cfg.encoder_use_rope = True
     cfg.encoder_qk_norm = False
+    cfg.encoder_fourier_strategy = "lin_float_int"
+    cfg.encoder_fourier_x_min = 1e-4
+    cfg.encoder_fourier_x_max = 1000.0
+    cfg.encoder_fourier_funcs = "sin"
+    cfg.encoder_fourier_num_freqs = 512
+    cfg.encoder_fourier_sigma = 10.0
+    cfg.encoder_fourier_trainable = True
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 128
     cfg.sigreg_num_slices = 256
@@ -70,6 +77,13 @@ def main() -> None:
         encoder_num_kv_heads=cfg.num_kv_heads,
         attention_mlp_multiple=cfg.attention_mlp_multiple,
         feature_mlp_hidden_dim=cfg.feature_mlp_hidden_dim,
+        encoder_fourier_strategy=cfg.encoder_fourier_strategy,
+        encoder_fourier_x_min=cfg.encoder_fourier_x_min,
+        encoder_fourier_x_max=cfg.encoder_fourier_x_max,
+        encoder_fourier_funcs=cfg.encoder_fourier_funcs,
+        encoder_fourier_num_freqs=cfg.encoder_fourier_num_freqs,
+        encoder_fourier_sigma=cfg.encoder_fourier_sigma,
+        encoder_fourier_trainable=cfg.encoder_fourier_trainable,
         encoder_use_rope=cfg.encoder_use_rope,
         encoder_qk_norm=cfg.encoder_qk_norm,
         representation_regularizer=cfg.representation_regularizer,

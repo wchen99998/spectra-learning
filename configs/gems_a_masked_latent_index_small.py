@@ -2,12 +2,9 @@ import math
 
 from ml_collections import config_dict
 
-from configs._defaults import apply_training_defaults, apply_tune_defaults
-
 
 def get_config() -> config_dict.ConfigDict:
     cfg = config_dict.ConfigDict()
-    apply_training_defaults(cfg)
 
     # Dataset
     cfg.dataset = "gems_a"
@@ -31,6 +28,13 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_kv_heads = 8
     cfg.encoder_use_rope = True
     cfg.encoder_qk_norm = False
+    cfg.encoder_fourier_strategy = "lin_float_int"
+    cfg.encoder_fourier_x_min = 1e-4
+    cfg.encoder_fourier_x_max = 1000.0
+    cfg.encoder_fourier_funcs = "sin"
+    cfg.encoder_fourier_num_freqs = 512
+    cfg.encoder_fourier_sigma = 10.0
+    cfg.encoder_fourier_trainable = True
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 1024
     cfg.sigreg_num_slices = 256
@@ -53,6 +57,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.weight_decay = 1e-4
     cfg.optimizer = "muon"
     cfg.device_prefetch_size = 8
+    cfg.non_blocking_device_transfer = True
+    cfg.optimizer_capturable = True
+    cfg.optimizer_fused = True
     cfg.log_every_n_steps = 100
     cfg.val_check_interval = 1.0
     cfg.checkpoint_every_steps = 25_000
@@ -61,7 +68,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.limit_test_batches = 1.0
     cfg.num_sanity_val_steps = 0
     cfg.dataloader_num_workers = 1
+    cfg.dataloader_prefetch_factor = 2
     cfg.dataloader_persistent_workers = True
+    cfg.dataloader_pin_memory = True
 
     cfg.masked_token_loss_weight = 1.0
     cfg.masked_token_loss_type = "l2"
@@ -77,20 +86,48 @@ def get_config() -> config_dict.ConfigDict:
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "reduce-overhead"
     cfg.representation_regularizer = "none"
+    cfg.gco_alpha = 0.99
+    cfg.gco_eta = 1e-3
+    cfg.gco_log_lambda_min = -12.0
     cfg.gco_constraints = [
         {"metric": "local_emb_var_floor", "target": 0.6, "bound": "lower"},
     ]
     cfg.gco_log_lambda_max = math.log(1000.0)
     cfg.gco_log_lambda_init = math.log(10.0)
+    cfg.gco_var_floor_target = 1e-3
+    cfg.gco_corr_target = 0.6
+    cfg.vicreg_beta = 1e-3
+    cfg.vicreg_sim_coeff = 0.0
+    cfg.vicreg_std_coeff = 25.0
+    cfg.vicreg_cov_coeff = 1.0
     cfg.sigreg_lambda_warmup_steps = 50_000
     cfg.msg_probe_every_n_steps = 0.25
+    cfg.msg_probe_cache_dir = None
     cfg.msg_probe_pooling_type = "pma"
     cfg.msg_probe_pma_num_heads = cfg.num_heads
     cfg.msg_probe_pma_num_seeds = 32
+    cfg.msg_probe_num_epochs = 10
+    cfg.msg_probe_learning_rate = 4e-4
+    cfg.msg_probe_weight_decay = 1e-4
+    cfg.msg_probe_warmup_steps = 0
+    cfg.msg_probe_max_train_samples = None
+    cfg.msg_probe_max_test_samples = None
+    cfg.probe_dataset = "nist20"
     cfg.use_precursor_token = False
+    cfg.temporal_predictor_num_layers = 0
+    cfg.encoder_finetune_lr = None
+    cfg.muon_lr = None
+    cfg.adamw_lr = None
+    cfg.muon_momentum = 0.95
+    cfg.muon_nesterov = True
+    cfg.muon_ns_steps = 5
+    cfg.muon_weight_decay = None
+    cfg.muon_adjust_lr_fn = "match_rms_adamw"
 
     # Tune search space
-    apply_tune_defaults(cfg)
+    cfg.tune_param_space = [
+        {"param": "sigreg_lambda", "dist": "grid", "args": [100.0]},
+    ]
 
     # System / logging
     cfg.enable_wandb = True
