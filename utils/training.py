@@ -63,6 +63,10 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         encoder_qk_norm=bool(config.get("encoder_qk_norm", False)),
         norm_type=str(config.get("norm_type", "rmsnorm")),
         use_precursor_token=bool(config.get("use_precursor_token", False)),
+        num_peaks=int(config.get("num_peaks", 64)),
+        temporal_predictor_num_layers=int(
+            config.get("temporal_predictor_num_layers", 0)
+        ),
     )
 
 

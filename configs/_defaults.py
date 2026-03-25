@@ -62,6 +62,10 @@ def apply_training_defaults(cfg: config_dict.ConfigDict) -> None:
     cfg.msg_probe_max_test_samples = None
     cfg.probe_dataset = "nist20"  # "massspec" or "nist20"
 
+    # Temporal predictor defaults
+    cfg.temporal_predictor_num_layers = 0
+    cfg.encoder_finetune_lr = None  # falls back to learning_rate if None
+
     # Muon optimizer defaults (only used when cfg.optimizer == "muon")
     cfg.muon_lr = None  # Falls back to cfg.learning_rate
     cfg.adamw_lr = None  # Falls back to cfg.learning_rate
