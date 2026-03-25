@@ -81,7 +81,7 @@ class BlockJEPAInputAugmentationTests(unittest.TestCase):
             np.ones_like(target_masks, dtype=bool),
         )
 
-    def test_context_and_target_blocks_are_disjoint_and_contiguous(self):
+    def test_context_and_target_blocks_are_contiguous_and_disjoint_from_context(self):
         tf.random.set_seed(42)
         batch = self._make_batch()
         aug = _augment_block_jepa_batch_tf(
@@ -99,7 +99,6 @@ class BlockJEPAInputAugmentationTests(unittest.TestCase):
         valid_mask = out["peak_valid_mask"].numpy()
 
         for row_idx in range(valid_mask.shape[0]):
-            used = context_mask[row_idx].copy()
             context_positions = np.flatnonzero(context_mask[row_idx])
             if context_positions.size > 1:
                 np.testing.assert_array_equal(
@@ -108,15 +107,38 @@ class BlockJEPAInputAugmentationTests(unittest.TestCase):
                 )
             for target_idx in range(target_masks.shape[1]):
                 block = target_masks[row_idx, target_idx]
-                self.assertFalse(np.any(block & used))
+                self.assertFalse(np.any(block & context_mask[row_idx]))
                 block_positions = np.flatnonzero(block)
                 if block_positions.size > 1:
                     np.testing.assert_array_equal(
                         np.diff(block_positions),
                         np.ones(block_positions.size - 1, dtype=int),
                     )
-                used = used | block
-            self.assertTrue(np.all(used <= valid_mask[row_idx]))
+            self.assertTrue(
+                np.all(
+                    (context_mask[row_idx] | target_masks[row_idx].any(axis=0))
+                    <= valid_mask[row_idx]
+                )
+            )
+
+    def test_target_blocks_can_overlap(self):
+        tf.random.set_seed(7)
+        batch = self._make_batch()
+        aug = _augment_block_jepa_batch_tf(
+            num_target_blocks=3,
+            context_fraction=0.25,
+            target_fraction=0.50,
+            block_min_len=1,
+            mz_jitter_std=0.0,
+            intensity_jitter_std=0.0,
+        )
+        out = aug(batch)
+
+        target_masks = out["target_masks"].numpy()
+        overlap_count = (
+            target_masks.sum(axis=1) > 1
+        ).sum()
+        self.assertGreater(overlap_count, 0)
 
     def test_zero_jitter_preserves_peak_values(self):
         tf.random.set_seed(202)

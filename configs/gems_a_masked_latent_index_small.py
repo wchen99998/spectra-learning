@@ -36,8 +36,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_num_slices = 256
     cfg.sigreg_lambda = 0.1
     cfg.jepa_num_target_blocks = 2
-    cfg.jepa_context_fraction = 0.3
-    cfg.jepa_target_fraction = 0.25
+    cfg.jepa_context_fraction = 0.5
+    cfg.jepa_target_fraction = 0.1
     cfg.jepa_block_min_len = 1
     cfg.sigreg_mz_jitter_std = 0.001
     cfg.sigreg_intensity_jitter_std = 0.05

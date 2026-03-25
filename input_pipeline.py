@@ -41,7 +41,6 @@ def _sample_block_masks_tf(
     block_min_len: int,
 ) -> tuple[tf.Tensor, tf.Tensor]:
     num_targets = int(num_target_blocks)
-    num_blocks = 1 + num_targets
     min_len = int(block_min_len)
     num_peaks = peak_valid_mask.shape[1]
 
@@ -61,7 +60,7 @@ def _sample_block_masks_tf(
             )
             max_context_len = tf.maximum(valid_count - reserve_for_targets, 1)
             context_len = tf.minimum(desired_context, max_context_len)
-            target_budget = tf.maximum(valid_count - context_len, 0)
+            available_for_targets = tf.maximum(valid_count - context_len, 0)
             desired_target = tf.maximum(
                 tf.cast(
                     tf.round(tf.cast(valid_count, tf.float32) * float(target_fraction)),
@@ -69,46 +68,47 @@ def _sample_block_masks_tf(
                 ),
                 min_len,
             )
-            target_len = tf.minimum(desired_target, target_budget // num_targets)
-            target_lengths = tf.fill([num_targets], target_len)
+            target_len = tf.minimum(desired_target, available_for_targets)
         else:
             context_len = tf.minimum(desired_context, valid_count)
-            target_lengths = tf.zeros([0], dtype=tf.int32)
-        lengths = tf.concat([tf.reshape(context_len, [1]), target_lengths], axis=0)
-        perm = tf.random.shuffle(tf.range(num_blocks, dtype=tf.int32))
-        shuffled_lengths = tf.gather(lengths, perm)
-        total_len = tf.reduce_sum(shuffled_lengths)
-        gap_budget = valid_count - total_len
-        gap_choices = tf.random.uniform(
-            [gap_budget],
+            target_len = tf.constant(0, dtype=tf.int32)
+        context_start = tf.random.uniform(
+            [],
             minval=0,
-            maxval=num_blocks + 1,
+            maxval=valid_count - context_len + 1,
             dtype=tf.int32,
         )
-        gaps = tf.math.bincount(
-            gap_choices,
-            minlength=num_blocks + 1,
-            maxlength=num_blocks + 1,
+        positions = tf.range(tf.shape(row_valid)[0], dtype=tf.int32)
+        context_mask = tf.logical_and(
+            positions >= context_start,
+            positions < context_start + context_len,
+        )
+        context_mask = tf.logical_and(context_mask, row_valid)
+        if num_targets == 0:
+            return context_mask, tf.zeros([0, tf.shape(row_valid)[0]], dtype=tf.bool)
+
+        available_for_targets = valid_count - context_len
+        target_starts = tf.random.uniform(
+            [num_targets],
+            minval=0,
+            maxval=available_for_targets - target_len + 1,
             dtype=tf.int32,
         )
-        if num_blocks == 1:
-            starts = gaps[:1]
-        else:
-            starts = tf.concat(
-                [
-                    gaps[:1],
-                    gaps[:1] + tf.cumsum(shuffled_lengths[:-1] + gaps[1:num_blocks]),
-                ],
-                axis=0,
-            )
-        positions = tf.range(tf.shape(row_valid)[0], dtype=tf.int32)[tf.newaxis, :]
-        block_masks = tf.logical_and(
-            positions >= starts[:, tf.newaxis],
-            positions < (starts + shuffled_lengths)[:, tf.newaxis],
+        compressed_positions = tf.where(
+            positions < context_start,
+            positions,
+            positions - context_len,
         )
-        block_masks = tf.logical_and(block_masks, row_valid[tf.newaxis, :])
-        ordered_masks = tf.gather(block_masks, tf.argsort(perm))
-        return ordered_masks[0], ordered_masks[1:]
+        valid_target_positions = tf.logical_and(row_valid, ~context_mask)
+        target_masks = tf.logical_and(
+            compressed_positions[tf.newaxis, :] >= target_starts[:, tf.newaxis],
+            compressed_positions[tf.newaxis, :]
+            < (target_starts + target_len)[:, tf.newaxis],
+        )
+        target_masks = tf.logical_and(
+            target_masks, valid_target_positions[tf.newaxis, :]
+        )
+        return context_mask, target_masks
 
     return tf.map_fn(
         sample_one,

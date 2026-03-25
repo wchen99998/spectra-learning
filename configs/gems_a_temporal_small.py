@@ -30,6 +30,8 @@ def get_config():
     cfg.encoder_finetune_lr = 3e-5
     cfg.pretrained_checkpoint = None  # set via CLI
 
+    cfg.msg_probe_every_n_steps = 25000
+    cfg.num_train_steps = 1_000_000
     # ── Logging ──
     cfg.wandb_run_name_prefix = "jepa_temporal_small"
 

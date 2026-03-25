@@ -1,8 +1,8 @@
 """Native PyTorch temporal pipeline for experiment-grouped .npz data.
 
-Loads per-experiment .npz files and samples spectrum pairs for temporal JEPA.
-Each sample is (context_frame, target_frame) — two spectra from the same
-LC-MS experiment, context earlier in RT than target.
+Loads per-experiment .npz files and samples consecutive spectrum pairs for
+next-frame prediction. Each sample is (frame, next_frame) from the same
+LC-MS experiment.
 
 All data is pre-loaded and pre-processed at init time into flat contiguous
 numpy arrays.  DataLoader workers share this memory via fork COW, so
@@ -18,7 +18,7 @@ import numpy as np
 import torch
 from huggingface_hub import snapshot_download
 from ml_collections import config_dict
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, RandomSampler
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,7 @@ _PEAK_MZ_MAX = 1000.0
 _DEFAULT_MIN_PEAK_INTENSITY = 1e-4
 _DEFAULT_MAX_PRECURSOR_MZ = 1000.0
 _NUM_PEAKS_OUTPUT = 60
+_SECONDS_PER_MINUTE = 60.0
 
 
 def _preprocess_chunk(
@@ -128,7 +129,7 @@ def _load_and_preprocess_all(
         mz: (total, num_peaks) float32 — preprocessed, normalized
         intensity: (total, num_peaks) float32 — preprocessed, normalized
         valid: (total, num_peaks) bool
-        rt: (total,) float32
+        rt: (total,) float32 in minutes
         precursor_mz: (total,) float32 — normalized
         offsets: (num_experiments,) int64
         lengths: (num_experiments,) int64
@@ -154,7 +155,7 @@ def _load_and_preprocess_all(
     raw_int = np.concatenate(raw_int_parts)
     del raw_mz_parts, raw_int_parts
 
-    rt = np.concatenate(rt_parts).astype(np.float32)
+    rt = (np.concatenate(rt_parts).astype(np.float32) / _SECONDS_PER_MINUTE)
     precursor_raw = np.concatenate(prec_parts).astype(np.float32)
     del rt_parts, prec_parts
 
@@ -209,15 +210,15 @@ def _load_and_preprocess_all(
 
 
 class FramePairDataset(Dataset):
-    """Map-style dataset that yields spectrum pairs for temporal JEPA.
+    """Map-style dataset that yields consecutive spectrum pairs.
 
     All data is pre-loaded and pre-processed at init time into flat
     contiguous numpy arrays.  ``__getitem__`` is pure array indexing —
     no file I/O.  DataLoader workers share the arrays via fork COW.
 
-    Each sample randomly picks two distinct spectra from the same experiment
-    (context = earlier RT, target = later RT).  Experiments with fewer than
-    2 spectra are filtered out.
+    Each sample randomly picks one spectrum from an experiment together with
+    its immediate successor in RT order. Experiments with fewer than 2 spectra
+    are filtered out.
     """
 
     def __init__(
@@ -267,27 +268,24 @@ class FramePairDataset(Dataset):
         offset = self._offsets[idx]
         length = self._lengths[idx]
 
-        # Randomly sample two distinct spectra (sorted → context < target in RT)
-        pair = np.random.choice(length, size=2, replace=False)
-        pair.sort()
-
-        i0 = offset + pair[0]
-        i1 = offset + pair[1]
+        start = np.random.randint(length - 1)
+        i0 = offset + start
+        i1 = i0 + 1
 
         # .copy() is required: without it torch.from_numpy returns a tensor
         # backed by the shared pre-loaded array, which is unsafe with
         # pin_memory and would cause COW page faults across workers.
         return {
-            "context_peak_mz": torch.from_numpy(self._mz[i0].copy()),
-            "context_peak_intensity": torch.from_numpy(self._intensity[i0].copy()),
-            "context_peak_valid_mask": torch.from_numpy(self._valid[i0].copy()),
-            "context_rt": torch.tensor(self._rt[i0]),
-            "context_precursor_mz": torch.tensor(self._precursor_mz[i0]),
-            "target_peak_mz": torch.from_numpy(self._mz[i1].copy()),
-            "target_peak_intensity": torch.from_numpy(self._intensity[i1].copy()),
-            "target_peak_valid_mask": torch.from_numpy(self._valid[i1].copy()),
-            "target_rt": torch.tensor(self._rt[i1]),
-            "target_precursor_mz": torch.tensor(self._precursor_mz[i1]),
+            "frame_peak_mz": torch.from_numpy(self._mz[i0].copy()),
+            "frame_peak_intensity": torch.from_numpy(self._intensity[i0].copy()),
+            "frame_peak_valid_mask": torch.from_numpy(self._valid[i0].copy()),
+            "frame_rt": torch.tensor(self._rt[i0]),
+            "frame_precursor_mz": torch.tensor(self._precursor_mz[i0]),
+            "next_frame_peak_mz": torch.from_numpy(self._mz[i1].copy()),
+            "next_frame_peak_intensity": torch.from_numpy(self._intensity[i1].copy()),
+            "next_frame_peak_valid_mask": torch.from_numpy(self._valid[i1].copy()),
+            "next_frame_rt": torch.tensor(self._rt[i1]),
+            "next_frame_precursor_mz": torch.tensor(self._precursor_mz[i1]),
         }
 
 
@@ -350,7 +348,11 @@ class TemporalLightningDataModule:
         val_total = self.manifest["validation"]["total_spectra"]
 
         train_usable = sum(1 for f in self.train_files if f["num_spectra"] >= 2)
-        self.train_steps = train_usable // self.batch_size
+        configured_train_steps = int(config.get("num_train_steps", 0))
+        if configured_train_steps > 0:
+            self.train_steps = configured_train_steps
+        else:
+            self.train_steps = int(float(config.get("num_epochs", 1.0)) * max(1, train_usable // self.batch_size))
 
         self.info = {
             "data_dir": str(data_dir),
@@ -360,6 +362,8 @@ class TemporalLightningDataModule:
             "train_usable_experiments": train_usable,
             "validation_experiments": len(self.val_files),
             "num_peaks": self.num_peaks,
+            "num_train_steps": self.train_steps,
+            "rt_unit": "minutes",
             "max_precursor_mz": self.max_precursor_mz,
             "peak_mz_min": _PEAK_MZ_MIN,
             "peak_mz_max": _PEAK_MZ_MAX,
@@ -423,11 +427,18 @@ class TemporalLightningDataModule:
         kwargs: dict = dict(
             dataset=dataset,
             batch_size=self.batch_size,
-            shuffle=shuffle,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             drop_last=True,
         )
+        if shuffle:
+            kwargs["sampler"] = RandomSampler(
+                dataset,
+                replacement=True,
+                num_samples=self.batch_size * self.train_steps,
+            )
+        else:
+            kwargs["shuffle"] = False
         if self.num_workers > 0:
             kwargs["prefetch_factor"] = self.prefetch_factor
             kwargs["persistent_workers"] = self.persistent_workers

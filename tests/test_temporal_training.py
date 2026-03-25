@@ -1,4 +1,4 @@
-"""Tests for temporal finetuning (cross-attention next-spectrum prediction)."""
+"""Tests for temporal finetuning (frame -> next-frame prediction)."""
 
 import torch
 import pytest
@@ -30,16 +30,16 @@ def _small_model(**overrides) -> PeakSetSIGReg:
 
 def _temporal_batch(batch_size: int = 4, num_peaks: int = 8) -> dict[str, torch.Tensor]:
     return {
-        "context_peak_mz": torch.rand(batch_size, num_peaks),
-        "context_peak_intensity": torch.rand(batch_size, num_peaks),
-        "context_peak_valid_mask": torch.ones(batch_size, num_peaks, dtype=torch.bool),
-        "context_rt": torch.rand(batch_size) * 100,
-        "context_precursor_mz": torch.rand(batch_size),
-        "target_peak_mz": torch.rand(batch_size, num_peaks),
-        "target_peak_intensity": torch.rand(batch_size, num_peaks),
-        "target_peak_valid_mask": torch.ones(batch_size, num_peaks, dtype=torch.bool),
-        "target_rt": torch.rand(batch_size) * 100 + 100,  # target always later
-        "target_precursor_mz": torch.rand(batch_size),
+        "frame_peak_mz": torch.rand(batch_size, num_peaks),
+        "frame_peak_intensity": torch.rand(batch_size, num_peaks),
+        "frame_peak_valid_mask": torch.ones(batch_size, num_peaks, dtype=torch.bool),
+        "frame_rt": torch.rand(batch_size) * 10,
+        "frame_precursor_mz": torch.rand(batch_size),
+        "next_frame_peak_mz": torch.rand(batch_size, num_peaks),
+        "next_frame_peak_intensity": torch.rand(batch_size, num_peaks),
+        "next_frame_peak_valid_mask": torch.ones(batch_size, num_peaks, dtype=torch.bool),
+        "next_frame_rt": torch.rand(batch_size) * 10 + 10,
+        "next_frame_precursor_mz": torch.rand(batch_size),
     }
 
 
@@ -50,7 +50,7 @@ class TestForwardTemporal:
         batch = _temporal_batch()
         metrics = model.forward_temporal(batch)
         assert torch.isfinite(metrics["loss"])
-        assert "temporal_pred_loss" in metrics
+        assert "next_frame_pred_loss" in metrics
 
     def test_backward(self):
         model = _small_model()
@@ -83,26 +83,24 @@ class TestForwardTemporal:
         ]
         assert any(rt_grads), "No gradients flowed to RT projection"
 
-        # Check gradients flow to target tokens
-        assert model.temporal_target_tokens.grad is not None
-        assert model.temporal_target_tokens.grad.abs().sum() > 0
+        # Check gradients flow to temporal query tokens
+        assert model.temporal_query_tokens.grad is not None
+        assert model.temporal_query_tokens.grad.abs().sum() > 0
 
     def test_with_ema_teacher(self):
         model = _small_model(use_ema_teacher_target=True, teacher_ema_decay=0.99)
         model.eval()
         batch = _temporal_batch()
-        # Pre-compute teacher targets
-        teacher_targets = model.compute_temporal_teacher_targets(batch)
-        metrics = model.forward_temporal(batch, teacher_targets=teacher_targets)
+        teacher_embeddings = model.compute_next_frame_teacher_embeddings(batch)
+        metrics = model.forward_temporal(batch, teacher_embeddings=teacher_embeddings)
         assert torch.isfinite(metrics["loss"])
 
     def test_partial_valid_mask(self):
-        """Loss should be computed only over valid target tokens."""
+        """Loss should be computed only over valid next-frame tokens."""
         model = _small_model()
         model.eval()
         batch = _temporal_batch()
-        # Make half the target tokens invalid
-        batch["target_peak_valid_mask"][:, 4:] = False
+        batch["next_frame_peak_valid_mask"][:, 4:] = False
         metrics = model.forward_temporal(batch)
         assert torch.isfinite(metrics["loss"])
 
@@ -127,7 +125,7 @@ class TestCheckpointPartialLoad:
         missing, unexpected = full.load_state_dict(sd, strict=False)
 
         # Only temporal keys should be missing
-        allowed_prefixes = ("temporal_predictor.", "temporal_rt_proj.", "temporal_target_tokens")
+        allowed_prefixes = ("temporal_predictor.", "temporal_rt_proj.", "temporal_query_tokens")
         for key in missing:
             assert any(key.startswith(p) for p in allowed_prefixes), (
                 f"Unexpected missing key: {key}"
@@ -158,8 +156,7 @@ class TestRTConditioningSensitivity:
 
         batch1 = _temporal_batch()
         batch2 = {k: v.clone() for k, v in batch1.items()}
-        # Same context/target spectra, different delta_rt
-        batch2["target_rt"] = batch1["target_rt"] + 500.0
+        batch2["next_frame_rt"] = batch1["next_frame_rt"] + 5.0
 
         with torch.no_grad():
             metrics1 = model.forward_temporal(batch1)

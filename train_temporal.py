@@ -1,7 +1,7 @@
-"""Temporal finetuning loop for next-spectrum prediction.
+"""Temporal finetuning loop for next-frame prediction.
 
 Loads a pretrained spatial JEPA checkpoint and finetunes with temporal
-cross-attention prediction objective.
+next-frame prediction objective.
 
 Usage:
     python train_temporal.py \
@@ -58,16 +58,16 @@ def _is_weight_decay_target(name: str, param: torch.nn.Parameter) -> bool:
 
 _TEMPORAL_BATCH_KEYS = frozenset(
     {
-        "context_peak_mz",
-        "context_peak_intensity",
-        "context_peak_valid_mask",
-        "context_rt",
-        "context_precursor_mz",
-        "target_peak_mz",
-        "target_peak_intensity",
-        "target_peak_valid_mask",
-        "target_rt",
-        "target_precursor_mz",
+        "frame_peak_mz",
+        "frame_peak_intensity",
+        "frame_peak_valid_mask",
+        "frame_rt",
+        "frame_precursor_mz",
+        "next_frame_peak_mz",
+        "next_frame_peak_intensity",
+        "next_frame_peak_valid_mask",
+        "next_frame_rt",
+        "next_frame_precursor_mz",
     }
 )
 
@@ -238,7 +238,7 @@ def _build_temporal_optimizers(
     temporal_prefixes = (
         "temporal_predictor.",
         "temporal_rt_proj.",
-        "temporal_target_tokens",
+        "temporal_query_tokens",
     )
 
     for name, param in model.named_parameters():
@@ -327,7 +327,7 @@ def _load_pretrained_checkpoint(
     allowed_prefixes = (
         "temporal_predictor.",
         "temporal_rt_proj.",
-        "temporal_target_tokens",
+        "temporal_query_tokens",
     )
     bad_missing = [
         k for k in missing if not any(k.startswith(p) for p in allowed_prefixes)
@@ -358,18 +358,12 @@ def train_temporal(
     random.seed(seed)
 
     datamodule = TemporalLightningDataModule(config, seed=seed)
-    num_epochs = float(config.num_epochs)
-    steps_per_epoch = datamodule.train_steps
-    total_steps = max(1, int(num_epochs * steps_per_epoch))
-    loop_epochs = max(1, math.ceil(num_epochs))
+    total_steps = max(1, int(datamodule.train_steps))
     log_every_n_steps = int(config.get("log_every_n_steps", 50))
     checkpoint_every_steps = int(config.checkpoint_every_steps)
     config.num_peaks = datamodule.info["num_peaks"]
 
-    logging.info(
-        "Temporal finetuning for %s epochs (%d steps).", num_epochs, total_steps
-    )
-    logging.info("Steps per epoch: %d", steps_per_epoch)
+    logging.info("Temporal finetuning for %d steps.", total_steps)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_model_from_config(config)
@@ -417,8 +411,7 @@ def train_temporal(
 
     _msg_probe_raw = float(config.get("msg_probe_every_n_steps", 0))
     if 0 < _msg_probe_raw <= 1:
-        reference_steps = total_steps if num_epochs < 1 else steps_per_epoch
-        msg_probe_every_n_steps = max(1, int(_msg_probe_raw * reference_steps))
+        msg_probe_every_n_steps = max(1, int(_msg_probe_raw * total_steps))
     else:
         msg_probe_every_n_steps = int(_msg_probe_raw)
 
@@ -429,97 +422,93 @@ def train_temporal(
     compiled_forward = None
     last_msg_probe_metrics: dict[str, float] = {}
     _wandb_run = getattr(logger, "experiment", None)
+    prefetcher = _BatchPrefetcher(
+        iter(train_loader),
+        device,
+        prefetch_size=device_prefetch_size,
+    )
+    pbar = tqdm(total=total_steps, desc="Temporal train", unit="step")
 
-    for epoch in range(loop_epochs):
-        prefetcher = _BatchPrefetcher(
-            iter(train_loader),
-            device,
-            prefetch_size=device_prefetch_size,
-        )
-        epoch_steps = min(steps_per_epoch, total_steps - global_step)
-        pbar = tqdm(total=epoch_steps, desc=f"Epoch {epoch}", unit="step")
-
-        while global_step < total_steps and (batch := prefetcher.next()) is not None:
-            # Teacher targets (CUDA graph)
-            if model.teacher_encoder is not None:
-                runner = _get_teacher_runner(model)
-                with autocast_ctx:
-                    teacher_targets = runner.run(
-                        model.compute_temporal_teacher_targets, batch
-                    )
-            else:
-                teacher_targets = None
-
-            # Forward
-            torch.compiler.cudagraph_mark_step_begin()
+    while global_step < total_steps and (batch := prefetcher.next()) is not None:
+        # Teacher embeddings (CUDA graph)
+        if model.teacher_encoder is not None:
+            runner = _get_teacher_runner(model)
             with autocast_ctx:
-                if compiled_forward is None:
-                    compiled_forward = torch.compile(
-                        model.forward_temporal,
-                        mode=_compile_mode,
-                        dynamic=False,
-                    )
-                metrics = compiled_forward(batch, teacher_targets)
-
-            # Backward
-            metrics["loss"].backward()
-            if grad_clip_norm is not None and grad_clip_norm > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    trainable_params, max_norm=grad_clip_norm
+                teacher_embeddings = runner.run(
+                    model.compute_next_frame_teacher_embeddings, batch
                 )
-            for opt in optimizers:
-                opt.step()
-                opt.zero_grad(set_to_none=True)
-            for sched in schedulers:
-                sched.step()
-            model.update_teacher()
-            global_step += 1
-            pbar.update(1)
+        else:
+            teacher_embeddings = None
 
-            if global_step % log_every_n_steps == 0:
-                loss_val = float(metrics["loss"].detach())
-                pbar.set_postfix(loss=f"{loss_val:.4f}", step=global_step)
-                log_metrics = {
-                    f"train/{k}": float(v.detach()) for k, v in metrics.items()
-                }
-                log_metrics["train/learning_rate"] = float(
-                    optimizers[0].param_groups[0]["lr"]
+        # Forward
+        torch.compiler.cudagraph_mark_step_begin()
+        with autocast_ctx:
+            if compiled_forward is None:
+                compiled_forward = torch.compile(
+                    model.forward_temporal,
+                    mode=_compile_mode,
+                    dynamic=False,
                 )
-                log_metrics["epoch"] = epoch
-                log_metrics["global_step"] = global_step
-                logger.log_metrics(log_metrics, step=global_step)
+            metrics = compiled_forward(batch, teacher_embeddings)
 
-            if global_step % checkpoint_every_steps == 0:
-                _save_checkpoint(
-                    checkpoint_dir / f"step-{global_step:08d}.pt",
-                    model,
-                    optimizers,
-                    schedulers,
-                    global_step,
-                    epoch,
-                    float(metrics["loss"]),
-                )
-                _prune_checkpoints(checkpoint_dir, keep_top_k=15)
+        # Backward
+        metrics["loss"].backward()
+        if grad_clip_norm is not None and grad_clip_norm > 0:
+            torch.nn.utils.clip_grad_norm_(
+                trainable_params, max_norm=grad_clip_norm
+            )
+        for opt in optimizers:
+            opt.step()
+            opt.zero_grad(set_to_none=True)
+        for sched in schedulers:
+            sched.step()
+        model.update_teacher()
+        global_step += 1
+        pbar.update(1)
 
-            if (
-                msg_probe_every_n_steps > 0
-                and global_step % msg_probe_every_n_steps == 0
-            ):
-                probe_metrics = run_msg_probe(
-                    config=config,
-                    model=model,
-                    device=device,
-                )
-                logger.log_metrics(probe_metrics, step=global_step)
-                last_msg_probe_metrics = probe_metrics
-                logging.info(
-                    "step=%d msg_probe(test_r2_mol_weight=%.4f test_auc_fg_mean=%.4f)",
-                    global_step,
-                    probe_metrics["msg_probe/test/r2_mol_weight"],
-                    probe_metrics["msg_probe/test/auc_fg_mean"],
-                )
+        if global_step % log_every_n_steps == 0:
+            loss_val = float(metrics["loss"].detach())
+            pbar.set_postfix(loss=f"{loss_val:.4f}", step=global_step)
+            log_metrics = {
+                f"train/{k}": float(v.detach()) for k, v in metrics.items()
+            }
+            log_metrics["train/learning_rate"] = float(
+                optimizers[0].param_groups[0]["lr"]
+            )
+            log_metrics["global_step"] = global_step
+            logger.log_metrics(log_metrics, step=global_step)
 
-        pbar.close()
+        if global_step % checkpoint_every_steps == 0:
+            _save_checkpoint(
+                checkpoint_dir / f"step-{global_step:08d}.pt",
+                model,
+                optimizers,
+                schedulers,
+                global_step,
+                0,
+                float(metrics["loss"]),
+            )
+            _prune_checkpoints(checkpoint_dir, keep_top_k=15)
+
+        if (
+            msg_probe_every_n_steps > 0
+            and global_step % msg_probe_every_n_steps == 0
+        ):
+            probe_metrics = run_msg_probe(
+                config=config,
+                model=model,
+                device=device,
+            )
+            logger.log_metrics(probe_metrics, step=global_step)
+            last_msg_probe_metrics = probe_metrics
+            logging.info(
+                "step=%d msg_probe(test_r2_mol_weight=%.4f test_auc_fg_mean=%.4f)",
+                global_step,
+                probe_metrics["msg_probe/test/r2_mol_weight"],
+                probe_metrics["msg_probe/test/auc_fg_mean"],
+            )
+
+    pbar.close()
 
     _save_checkpoint(
         checkpoint_dir / "last.pt",
@@ -527,7 +516,7 @@ def train_temporal(
         optimizers,
         schedulers,
         global_step,
-        loop_epochs,
+        0,
         float("nan"),
     )
     return {**last_msg_probe_metrics, **model_param_metrics}

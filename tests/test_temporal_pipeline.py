@@ -1,4 +1,4 @@
-"""Tests for the temporal experiment-grouped pipeline (next-frame prediction)."""
+"""Tests for the temporal experiment-grouped pipeline (frame -> next frame)."""
 
 import json
 from pathlib import Path
@@ -172,6 +172,27 @@ class TestLoadAndPreprocess:
         for i in range(len(offsets) - 1):
             assert offsets[i] + lengths[i] == offsets[i + 1]
 
+    def test_rt_scaled_to_minutes(self, synthetic_data_dir: Path):
+        manifest_path = synthetic_data_dir / "manifest.json"
+        with manifest_path.open() as f:
+            manifest = json.load(f)
+        usable = [f for f in manifest["train"]["files"] if f["num_spectra"] >= 2]
+        _, _, _, rt, _, offsets, lengths = _load_and_preprocess_all(
+            usable,
+            synthetic_data_dir / "train",
+            num_peaks=60,
+            min_peak_intensity=1e-4,
+            peak_ordering="mz",
+            peak_mz_max=1000.0,
+            max_precursor_mz=1000.0,
+            preprocess_workers=1,
+        )
+        first_file = usable[0]["filename"]
+        raw = np.load(synthetic_data_dir / "train" / first_file)["rt"].astype(np.float32)
+        offset = int(offsets[0])
+        length = int(lengths[0])
+        assert np.allclose(rt[offset : offset + length], raw / 60.0)
+
 
 class TestFramePairDataset:
     def test_getitem_shapes(self, synthetic_data_dir: Path):
@@ -185,7 +206,7 @@ class TestFramePairDataset:
         )
         item = ds[0]
         N = 60
-        for prefix in ("context", "target"):
+        for prefix in ("frame", "next_frame"):
             assert item[f"{prefix}_peak_mz"].shape == (N,)
             assert item[f"{prefix}_peak_intensity"].shape == (N,)
             assert item[f"{prefix}_peak_valid_mask"].shape == (N,)
@@ -204,8 +225,8 @@ class TestFramePairDataset:
         # We added one single-spectrum experiment, so len should be one less
         assert len(ds) == len(all_files) - 1
 
-    def test_context_target_are_different(self, synthetic_data_dir: Path):
-        """Context and target should generally differ (distinct spectra)."""
+    def test_frame_and_next_frame_are_different(self, synthetic_data_dir: Path):
+        """Current and next frame should generally differ."""
         manifest_path = synthetic_data_dir / "manifest.json"
         with manifest_path.open() as f:
             manifest = json.load(f)
@@ -217,13 +238,13 @@ class TestFramePairDataset:
         any_different = False
         for idx in range(min(10, len(ds))):
             item = ds[idx]
-            if not torch.equal(item["context_peak_mz"], item["target_peak_mz"]):
+            if not torch.equal(item["frame_peak_mz"], item["next_frame_peak_mz"]):
                 any_different = True
                 break
-        assert any_different, "Context and target should differ for most pairs"
+        assert any_different, "Frame and next frame should differ for most pairs"
 
-    def test_target_rt_ge_context_rt(self, synthetic_data_dir: Path):
-        """Target RT should be >= context RT (two distinct spectra, RT-sorted)."""
+    def test_next_frame_is_consecutive(self, synthetic_data_dir: Path):
+        """Returned pair should be adjacent in RT order within the experiment."""
         manifest_path = synthetic_data_dir / "manifest.json"
         with manifest_path.open() as f:
             manifest = json.load(f)
@@ -233,7 +254,13 @@ class TestFramePairDataset:
         )
         for idx in range(min(20, len(ds))):
             item = ds[idx]
-            assert item["target_rt"] >= item["context_rt"]
+            offset = int(ds._offsets[idx])
+            length = int(ds._lengths[idx])
+            rt_values = ds._rt[offset : offset + length]
+            frame_pos = int(np.searchsorted(rt_values, float(item["frame_rt"])))
+            next_frame_pos = int(np.searchsorted(rt_values, float(item["next_frame_rt"])))
+            assert next_frame_pos == frame_pos + 1
+            assert item["next_frame_rt"] >= item["frame_rt"]
 
     def test_two_spectrum_experiment(self, tmp_path: Path):
         """Edge case: experiment with exactly 2 spectra should always work."""
@@ -247,10 +274,9 @@ class TestFramePairDataset:
             num_peaks=60,
         )
         assert len(ds) == 1
-        # Should not raise — only one possible pair
         for _ in range(20):
             item = ds[0]
-            assert item["target_rt"] >= item["context_rt"]
+            assert item["next_frame_rt"] >= item["frame_rt"]
 
     def test_mz_values_in_range(self, synthetic_data_dir: Path):
         manifest_path = synthetic_data_dir / "manifest.json"
@@ -262,7 +288,7 @@ class TestFramePairDataset:
             num_peaks=60,
         )
         item = ds[0]
-        for prefix in ("context", "target"):
+        for prefix in ("frame", "next_frame"):
             valid = item[f"{prefix}_peak_valid_mask"]
             mz = item[f"{prefix}_peak_mz"]
             assert mz[valid].min() >= 0.0
@@ -278,7 +304,7 @@ class TestFramePairDataset:
         )
         for idx in range(min(10, len(ds))):
             item = ds[idx]
-            for prefix in ("context", "target"):
+            for prefix in ("frame", "next_frame"):
                 assert 0.0 <= item[f"{prefix}_precursor_mz"] <= 1.0
 
 
@@ -295,7 +321,7 @@ class TestCollation:
         loader = torch.utils.data.DataLoader(ds, batch_size=4, shuffle=False)
         batch = next(iter(loader))
         N = 60
-        for prefix in ("context", "target"):
+        for prefix in ("frame", "next_frame"):
             assert batch[f"{prefix}_peak_mz"].shape == (4, N)
             assert batch[f"{prefix}_peak_intensity"].shape == (4, N)
             assert batch[f"{prefix}_peak_valid_mask"].shape == (4, N)
@@ -317,19 +343,24 @@ class TestTemporalLightningDataModule:
         assert dm.info["train_experiments"] == 11  # includes single-spectrum
         assert dm.info["train_usable_experiments"] == 10  # excludes single-spectrum
         assert dm.info["validation_experiments"] == 3
+        assert dm.info["num_train_steps"] == 5
+        assert dm.info["rt_unit"] == "minutes"
 
     def test_train_loader_batch_shapes(self, synthetic_data_dir: Path):
         cfg = config_dict.ConfigDict()
         cfg.temporal_data_dir = str(synthetic_data_dir)
         cfg.batch_size = 3
+        cfg.num_train_steps = 7
         cfg.num_peaks = 60
         cfg.peak_ordering = "mz"
         cfg.dataloader_num_workers = 0
         cfg.dataloader_pin_memory = False
 
         dm = TemporalLightningDataModule(cfg, seed=42)
-        batch = next(iter(dm.train_loader))
-        for prefix in ("context", "target"):
+        loader = dm.train_loader
+        batch = next(iter(loader))
+        assert len(loader) == 7
+        for prefix in ("frame", "next_frame"):
             assert batch[f"{prefix}_peak_mz"].shape == (3, 60)
             assert batch[f"{prefix}_rt"].shape == (3,)
 
@@ -337,6 +368,7 @@ class TestTemporalLightningDataModule:
         cfg = config_dict.ConfigDict()
         cfg.temporal_data_dir = str(synthetic_data_dir)
         cfg.batch_size = 2
+        cfg.num_train_steps = 5
         cfg.num_peaks = 60
         cfg.peak_ordering = "mz"
         cfg.dataloader_num_workers = 0
@@ -344,5 +376,5 @@ class TestTemporalLightningDataModule:
 
         dm = TemporalLightningDataModule(cfg, seed=42)
         batch = next(iter(dm.val_loader))
-        for prefix in ("context", "target"):
+        for prefix in ("frame", "next_frame"):
             assert batch[f"{prefix}_peak_mz"].shape == (2, 60)

@@ -98,7 +98,7 @@ def _masked_embedding_stats(
 
 
 class CrossAttention(nn.Module):
-    """Cross-attention: Q from target queries, KV from context embeddings."""
+    """Cross-attention: Q from prediction queries, KV from source embeddings."""
 
     def __init__(self, dim: int, n_heads: int, *, n_kv_heads: int | None = None,
                  qk_norm: bool = False, norm_type: str = "rmsnorm"):
@@ -118,19 +118,19 @@ class CrossAttention(nn.Module):
         nn.init.xavier_normal_(self.wkv.weight)
         nn.init.xavier_normal_(self.wo.weight)
 
-    def forward(self, x: torch.Tensor, context: torch.Tensor, *,
+    def forward(self, x: torch.Tensor, memory: torch.Tensor, *,
                 freqs_cos: torch.Tensor | None = None,
                 freqs_sin: torch.Tensor | None = None,
-                context_mask: torch.Tensor | None = None) -> torch.Tensor:
+                memory_mask: torch.Tensor | None = None) -> torch.Tensor:
         bsz, tgt_len, _ = x.shape
-        ctx_len = context.shape[1]
+        mem_len = memory.shape[1]
         xq = self.wq(x).view(bsz, tgt_len, self.n_heads, self.head_dim)
-        kv = self.wkv(context)
+        kv = self.wkv(memory)
         xk, xv = kv.split(
             [self.n_kv_heads * self.head_dim, self.n_kv_heads * self.head_dim], dim=-1)
-        xk = xk.view(bsz, ctx_len, self.n_kv_heads, self.head_dim)
-        xv = xv.view(bsz, ctx_len, self.n_kv_heads, self.head_dim)
-        # RoPE on Q only (target positions); no RoPE on K
+        xk = xk.view(bsz, mem_len, self.n_kv_heads, self.head_dim)
+        xv = xv.view(bsz, mem_len, self.n_kv_heads, self.head_dim)
+        # RoPE on Q only (prediction positions); no RoPE on K
         if freqs_cos is not None and freqs_sin is not None:
             q_rot = _rotate_half(xq)
             xq = (xq * freqs_cos) + (q_rot * freqs_sin)
@@ -141,9 +141,9 @@ class CrossAttention(nn.Module):
         k = xk.transpose(1, 2)  # [B, H, S, D]
         v = xv.transpose(1, 2)
         attn_mask = None
-        if context_mask is not None:
-            # context_mask: [B, S] -> [B, 1, 1, S]
-            attn_mask = context_mask[:, None, None, :].to(dtype=q.dtype)
+        if memory_mask is not None:
+            # memory_mask: [B, S] -> [B, 1, 1, S]
+            attn_mask = memory_mask[:, None, None, :].to(dtype=q.dtype)
             attn_mask = attn_mask.masked_fill(attn_mask == 0, float("-inf")).masked_fill(attn_mask == 1, 0.0)
         attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         attn = attn.transpose(1, 2).contiguous().view(bsz, tgt_len, self.dim)
@@ -168,15 +168,15 @@ class TemporalDecoderBlock(nn.Module):
         self.cross_attn_norm = _build_norm(dim, eps=None, norm_type=norm_type)
         self.ffn_norm = _build_norm(dim, eps=None, norm_type=norm_type)
 
-    def forward(self, x: torch.Tensor, context: torch.Tensor, *,
+    def forward(self, x: torch.Tensor, memory: torch.Tensor, *,
                 freqs_cos: torch.Tensor | None,
                 freqs_sin: torch.Tensor | None,
-                context_mask: torch.Tensor | None = None) -> torch.Tensor:
+                memory_mask: torch.Tensor | None = None) -> torch.Tensor:
         h = x + self.attention(self.attention_norm(x), freqs_cos=freqs_cos,
                                freqs_sin=freqs_sin)
-        h = h + self.cross_attn(self.cross_attn_norm(h), context,
+        h = h + self.cross_attn(self.cross_attn_norm(h), memory,
                                 freqs_cos=freqs_cos, freqs_sin=freqs_sin,
-                                context_mask=context_mask)
+                                memory_mask=memory_mask)
         return h + self.feed_forward(self.ffn_norm(h))
 
 
@@ -450,7 +450,7 @@ class PeakSetSIGReg(nn.Module):
         self.predictor_final_norm = _build_norm(self.model_dim, eps=None, norm_type=self.norm_type)
         self.sigreg = SIGReg(num_slices=int(sigreg_num_slices))
 
-        # Temporal predictor (cross-attention decoder for next-spectrum prediction)
+        # Temporal predictor for frame -> next-frame prediction.
         N = int(num_peaks)
         self.temporal_predictor_num_layers = int(temporal_predictor_num_layers)
         if self.temporal_predictor_num_layers > 0:
@@ -467,8 +467,8 @@ class PeakSetSIGReg(nn.Module):
                 if isinstance(layer, nn.Linear):
                     nn.init.xavier_normal_(layer.weight)
                     nn.init.zeros_(layer.bias)
-            self.temporal_target_tokens = nn.Parameter(torch.empty(N, model_dim))
-            nn.init.trunc_normal_(self.temporal_target_tokens, std=0.02)
+            self.temporal_query_tokens = nn.Parameter(torch.empty(N, model_dim))
+            nn.init.trunc_normal_(self.temporal_query_tokens, std=0.02)
 
     def train(self, mode: bool = True) -> "PeakSetSIGReg":
         super().train(mode)
@@ -734,83 +734,82 @@ class PeakSetSIGReg(nn.Module):
         return metrics
 
     @torch.no_grad()
-    def compute_temporal_teacher_targets(
+    def compute_next_frame_teacher_embeddings(
         self, batch: dict[str, torch.Tensor],
     ) -> torch.Tensor:
-        """Compute token-level teacher targets for the target spectrum."""
+        """Compute teacher embeddings for the next frame."""
         teacher = self.teacher_encoder if self.teacher_encoder is not None else self.encoder
         return teacher(
-            batch["target_peak_mz"],
-            batch["target_peak_intensity"],
-            valid_mask=batch["target_peak_valid_mask"],
-            visible_mask=batch["target_peak_valid_mask"],
+            batch["next_frame_peak_mz"],
+            batch["next_frame_peak_intensity"],
+            valid_mask=batch["next_frame_peak_valid_mask"],
+            visible_mask=batch["next_frame_peak_valid_mask"],
         )
 
     def forward_temporal(
         self,
         batch: dict[str, torch.Tensor],
-        teacher_targets: torch.Tensor | None = None,
+        teacher_embeddings: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Temporal prediction: predict target spectrum tokens from context spectrum."""
-        context_mz = batch["context_peak_mz"]
-        context_int = batch["context_peak_intensity"]
-        context_valid = batch["context_peak_valid_mask"]
-        target_mz = batch["target_peak_mz"]
-        target_int = batch["target_peak_intensity"]
-        target_valid = batch["target_peak_valid_mask"]
-        context_rt = batch["context_rt"]
-        target_rt = batch["target_rt"]
-        B = context_mz.shape[0]
+        """Predict next-frame token embeddings from the full current frame."""
+        frame_mz = batch["frame_peak_mz"]
+        frame_int = batch["frame_peak_intensity"]
+        frame_valid = batch["frame_peak_valid_mask"]
+        next_frame_mz = batch["next_frame_peak_mz"]
+        next_frame_int = batch["next_frame_peak_intensity"]
+        next_frame_valid = batch["next_frame_peak_valid_mask"]
+        frame_rt = batch["frame_rt"]
+        next_frame_rt = batch["next_frame_rt"]
+        B = frame_mz.shape[0]
 
-        # 1. Encode context spectrum (student encoder, full sequence)
-        context_emb = self.encoder(
-            context_mz, context_int,
-            valid_mask=context_valid, visible_mask=context_valid,
+        frame_emb = self.encoder(
+            frame_mz,
+            frame_int,
+            valid_mask=frame_valid,
+            visible_mask=frame_valid,
         )  # [B, N, D]
 
-        # 2. RT conditioning
-        delta_rt = (target_rt - context_rt).unsqueeze(-1)  # [B, 1]
+        delta_rt = (next_frame_rt - frame_rt).unsqueeze(-1)  # [B, 1] in minutes
         rt_emb = self.temporal_rt_proj(delta_rt)  # [B, D]
 
-        # 3. Initialize target queries
-        queries = self.temporal_target_tokens.unsqueeze(0).expand(B, -1, -1) + rt_emb.unsqueeze(1)
+        queries = self.temporal_query_tokens.unsqueeze(0).expand(B, -1, -1)
+        queries = queries + rt_emb.unsqueeze(1)
 
-        # 4. Run through temporal decoder blocks
         N_tgt = queries.shape[1]
         freqs_cos, freqs_sin = _compute_rope_freqs(
             True, N_tgt, self.predictor_rope_inv_freq, queries.device, queries.dtype
         )
         for block in self.temporal_predictor:
-            queries = block(queries, context_emb,
+            queries = block(queries, frame_emb,
                             freqs_cos=freqs_cos, freqs_sin=freqs_sin,
-                            context_mask=context_valid)
-        predicted_target = queries  # [B, N, D]
+                            memory_mask=frame_valid)
+        predicted_next_frame = queries  # [B, N, D]
 
-        # 5. Teacher target
-        if teacher_targets is not None:
-            target_emb = teacher_targets
+        if teacher_embeddings is not None:
+            next_frame_emb = teacher_embeddings
         else:
             teacher = self.teacher_encoder if self.teacher_encoder is not None else self.encoder
             with torch.no_grad():
-                target_emb = teacher(
-                    target_mz, target_int,
-                    valid_mask=target_valid, visible_mask=target_valid,
+                next_frame_emb = teacher(
+                    next_frame_mz,
+                    next_frame_int,
+                    valid_mask=next_frame_valid,
+                    visible_mask=next_frame_valid,
                 ).detach()
 
-        # 6. Per-token loss over valid target positions
         if self.masked_token_loss_type == "l2":
-            per_token = (predicted_target - target_emb).square().mean(dim=-1)
+            per_token = (predicted_next_frame - next_frame_emb).square().mean(dim=-1)
         elif self.masked_token_loss_type == "l1":
-            per_token = (predicted_target - target_emb).abs().mean(dim=-1)
+            per_token = (predicted_next_frame - next_frame_emb).abs().mean(dim=-1)
         else:
-            per_token = (predicted_target - target_emb).square().mean(dim=-1)
+            per_token = (predicted_next_frame - next_frame_emb).square().mean(dim=-1)
 
-        target_mask_float = target_valid.float()
-        loss = (per_token * target_mask_float).sum() / target_mask_float.sum().clamp_min(1.0)
+        next_frame_mask = next_frame_valid.float()
+        loss = (per_token * next_frame_mask).sum() / next_frame_mask.sum().clamp_min(1.0)
 
         return {
             "loss": loss,
-            "temporal_pred_loss": loss.detach(),
+            "next_frame_pred_loss": loss.detach(),
         }
 
     def encode(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
