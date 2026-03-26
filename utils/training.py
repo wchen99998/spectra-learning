@@ -1,4 +1,3 @@
-import datetime
 import importlib.util
 import logging
 import os
@@ -125,20 +124,7 @@ def _build_wandb_init_kwargs(config: Any | None) -> dict[str, Any]:
         return wandb_kwargs
     prefix = config.get("wandb_run_name_prefix")
     if prefix and "name" not in wandb_kwargs:
-        counter_path = Path(
-            config.get("wandb_run_name_counter_path", ".wandb_run_counter")
-        )
-        if bool(config.get("wandb_run_name_use_increment", True)):
-            idx = (
-                int(counter_path.read_text().strip()) if counter_path.exists() else 0
-            ) + 1
-            counter_path.parent.mkdir(parents=True, exist_ok=True)
-            counter_path.write_text(str(idx))
-            wandb_kwargs["name"] = f"{str(prefix).strip()}-{idx:04d}"
-        else:
-            wandb_kwargs["name"] = (
-                f"{str(prefix).strip()}-{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d-%H%M')}"
-            )
+        wandb_kwargs["name"] = str(prefix).strip()
     return wandb_kwargs
 
 
