@@ -274,6 +274,7 @@ class PeakSetEncoder(nn.Module):
         use_rope: bool = False,
         qk_norm: bool = False,
         norm_type: str = "rmsnorm",
+        apply_final_norm: bool = True,
     ):
         super().__init__()
         self.use_rope = bool(use_rope)
@@ -304,7 +305,11 @@ class PeakSetEncoder(nn.Module):
             qk_norm=qk_norm,
             norm_type=norm_type,
         )
-        self.final_norm = _build_norm(model_dim, eps=None, norm_type=norm_type)
+        self.final_norm = (
+            _build_norm(model_dim, eps=None, norm_type=norm_type)
+            if apply_final_norm
+            else nn.Identity()
+        )
 
     def forward(
         self,
@@ -403,6 +408,8 @@ class PeakSetSIGReg(nn.Module):
         teacher_ema_update_every: int = 1,
         encoder_qk_norm: bool = False,
         norm_type: str = "rmsnorm",
+        encoder_apply_final_norm: bool = True,
+        predictor_apply_final_norm: bool = True,
         use_precursor_token: bool = False,
         num_peaks: int = 64,
         temporal_predictor_num_layers: int = 0,
@@ -501,6 +508,7 @@ class PeakSetSIGReg(nn.Module):
             use_rope=encoder_use_rope,
             qk_norm=encoder_qk_norm,
             norm_type=self.norm_type,
+            apply_final_norm=encoder_apply_final_norm,
         )
         # EMA teacher encoder
         if bool(use_ema_teacher_target):
@@ -533,7 +541,11 @@ class PeakSetSIGReg(nn.Module):
             qk_norm=encoder_qk_norm,
             norm_type=self.norm_type,
         )
-        self.predictor_final_norm = _build_norm(self.model_dim, eps=None, norm_type=self.norm_type)
+        self.predictor_final_norm = (
+            _build_norm(self.model_dim, eps=None, norm_type=self.norm_type)
+            if predictor_apply_final_norm
+            else nn.Identity()
+        )
         self.sigreg = SIGReg(num_slices=int(sigreg_num_slices))
 
         # Temporal predictor for frame -> next-frame prediction.

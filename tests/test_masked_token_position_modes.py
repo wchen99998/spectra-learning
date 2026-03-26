@@ -1,6 +1,6 @@
 import torch
 
-from models.model import PeakSetSIGReg
+from models.model import PeakSetEncoder, PeakSetSIGReg
 
 
 def _build_model(
@@ -9,6 +9,8 @@ def _build_model(
     predictor_layers: int = 2,
     encoder_use_rope: bool = True,
     predictor_use_rope: bool | None = None,
+    encoder_apply_final_norm: bool = True,
+    predictor_apply_final_norm: bool = True,
 ) -> PeakSetSIGReg:
     torch.manual_seed(0)
     model = PeakSetSIGReg(
@@ -18,6 +20,8 @@ def _build_model(
         feature_mlp_hidden_dim=32,
         encoder_use_rope=encoder_use_rope,
         predictor_use_rope=predictor_use_rope,
+        encoder_apply_final_norm=encoder_apply_final_norm,
+        predictor_apply_final_norm=predictor_apply_final_norm,
         jepa_num_target_blocks=num_target_blocks,
         masked_token_loss_weight=1.0,
         masked_latent_predictor_num_layers=predictor_layers,
@@ -99,6 +103,73 @@ def test_predictor_rope_toggle_changes_output():
 
     out_1 = model_no_rope.predict_masked_latents(predictor_input, visible_mask)
     out_2 = model_with_rope.predict_masked_latents(predictor_input, visible_mask)
+
+    diff = (out_1 - out_2).abs().mean()
+    assert float(diff) > 1e-3
+
+
+@torch.no_grad()
+def test_encoder_final_norm_toggle_changes_output():
+    torch.manual_seed(0)
+    encoder_with_final_norm = PeakSetEncoder(
+        model_dim=32,
+        num_layers=2,
+        num_heads=4,
+        feature_mlp_hidden_dim=32,
+        use_rope=False,
+        norm_type="layernorm",
+        apply_final_norm=True,
+    ).eval()
+    torch.manual_seed(0)
+    encoder_without_final_norm = PeakSetEncoder(
+        model_dim=32,
+        num_layers=2,
+        num_heads=4,
+        feature_mlp_hidden_dim=32,
+        use_rope=False,
+        norm_type="layernorm",
+        apply_final_norm=False,
+    ).eval()
+    peak_mz = torch.rand(2, 6)
+    peak_intensity = torch.rand(2, 6)
+    valid_mask = torch.ones(2, 6, dtype=torch.bool)
+
+    out_1 = encoder_with_final_norm(
+        peak_mz,
+        peak_intensity,
+        valid_mask=valid_mask,
+        visible_mask=valid_mask,
+    )
+    out_2 = encoder_without_final_norm(
+        peak_mz,
+        peak_intensity,
+        valid_mask=valid_mask,
+        visible_mask=valid_mask,
+    )
+
+    diff = (out_1 - out_2).abs().mean()
+    assert float(diff) > 1e-3
+
+
+@torch.no_grad()
+def test_predictor_final_norm_toggle_changes_output():
+    model_with_final_norm = _build_model(
+        predictor_layers=2,
+        predictor_use_rope=False,
+        predictor_apply_final_norm=True,
+    )
+    model_without_final_norm = _build_model(
+        predictor_layers=2,
+        predictor_use_rope=False,
+        predictor_apply_final_norm=False,
+    )
+    predictor_input = torch.randn(1, 6, model_with_final_norm.model_dim)
+    visible_mask = torch.ones(1, 6, dtype=torch.bool)
+
+    out_1 = model_with_final_norm.predict_masked_latents(predictor_input, visible_mask)
+    out_2 = model_without_final_norm.predict_masked_latents(
+        predictor_input, visible_mask
+    )
 
     diff = (out_1 - out_2).abs().mean()
     assert float(diff) > 1e-3
