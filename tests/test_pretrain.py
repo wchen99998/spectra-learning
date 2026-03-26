@@ -1,9 +1,11 @@
 import tempfile
 import unittest
+import math
 
 import torch
 
 from models.model import PeakSetSIGReg
+from train import _is_weight_decay_target
 from utils.training import load_pretrained_weights
 
 
@@ -206,6 +208,48 @@ class BlockJEPATests(unittest.TestCase):
             load_pretrained_weights(loaded, path)
             for key, value in model.state_dict().items():
                 self.assertTrue(torch.equal(value, loaded.state_dict()[key]), key)
+
+    def test_teacher_ema_warmup_uses_cosine_schedule(self):
+        model = self._build_model(
+            use_ema_teacher_target=True,
+            teacher_ema_decay_start=0.9,
+            teacher_ema_decay=0.99,
+            teacher_ema_decay_warmup_steps=4,
+        )
+        expected = []
+        for step in range(5):
+            ratio = min(step / 4.0, 1.0)
+            cosine_ratio = 0.5 * (1.0 - math.cos(math.pi * ratio))
+            expected.append(0.9 + 0.09 * cosine_ratio)
+
+        actual = []
+        for _ in range(5):
+            model.advance_teacher_ema_decay_schedule()
+            actual.append(float(model.teacher_ema_decay_current))
+
+        for got, want in zip(actual, expected, strict=True):
+            self.assertAlmostEqual(got, want, places=6)
+
+    def test_weight_decay_targets_all_2d_weights(self):
+        model = self._build_model()
+        self.assertTrue(
+            _is_weight_decay_target(
+                "encoder.embedder.output_proj.weight",
+                model.encoder.embedder.output_proj.weight,
+            )
+        )
+        self.assertTrue(
+            _is_weight_decay_target(
+                "encoder.embedder.fourier_ffn.0.weight",
+                model.encoder.embedder.fourier_ffn[0].weight,
+            )
+        )
+        self.assertFalse(
+            _is_weight_decay_target(
+                "encoder.embedder.mz_fourier.b",
+                model.encoder.embedder.mz_fourier.b,
+            )
+        )
 
 
 class PrecursorTokenTests(unittest.TestCase):

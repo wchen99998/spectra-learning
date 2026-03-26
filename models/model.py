@@ -594,9 +594,10 @@ class PeakSetSIGReg(nn.Module):
         ratio = torch.clamp(
             step / self.teacher_ema_decay_warmup_steps_tensor, max=1.0
         )
+        cosine_ratio = 0.5 * (1.0 - torch.cos(torch.pi * ratio))
         delta = self.teacher_ema_decay_target - self.teacher_ema_decay_start_tensor
         self.teacher_ema_decay_current.copy_(
-            self.teacher_ema_decay_start_tensor + delta * ratio
+            self.teacher_ema_decay_start_tensor + delta * cosine_ratio
         )
         self.teacher_ema_decay_step.add_(1)
 

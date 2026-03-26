@@ -38,11 +38,7 @@ inductor_config.shape_padding = True
 
 
 def _is_weight_decay_target(name: str, param: torch.nn.Parameter) -> bool:
-    return (
-        param.ndim >= 2
-        and name.endswith("weight")
-        and any(t in name for t in ("attention.", "feed_forward.", "cross_attn."))
-    )
+    return param.ndim == 2 and name.endswith("weight")
 
 
 _TRAIN_BATCH_KEYS = frozenset(
@@ -384,6 +380,10 @@ def train_and_evaluate(
                     log_metrics["train/learning_rate"] = optimizers[0].param_groups[0][
                         "lr"
                     ]
+                if model.teacher_encoder is not None:
+                    log_metrics["train/teacher_ema_decay"] = float(
+                        model.teacher_ema_decay_current
+                    )
                 log_metrics["epoch"] = epoch
                 log_metrics["global_step"] = global_step
                 logger.log_metrics(log_metrics, step=global_step)
