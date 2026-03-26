@@ -1,5 +1,3 @@
-import math
-
 from ml_collections import config_dict
 
 
@@ -86,20 +84,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "reduce-overhead"
     cfg.representation_regularizer = "none"
-    cfg.gco_alpha = 0.99
-    cfg.gco_eta = 1e-3
-    cfg.gco_log_lambda_min = -12.0
-    cfg.gco_constraints = [
-        {"metric": "local_emb_var_floor", "target": 0.6, "bound": "lower"},
-    ]
-    cfg.gco_log_lambda_max = math.log(1000.0)
-    cfg.gco_log_lambda_init = math.log(10.0)
-    cfg.gco_var_floor_target = 1e-3
-    cfg.gco_corr_target = 0.6
-    cfg.vicreg_beta = 1e-3
-    cfg.vicreg_sim_coeff = 0.0
-    cfg.vicreg_std_coeff = 25.0
-    cfg.vicreg_cov_coeff = 1.0
     cfg.sigreg_lambda_warmup_steps = 50_000
     cfg.msg_probe_every_n_steps = 0.25
     cfg.msg_probe_cache_dir = None

@@ -317,12 +317,6 @@ class PeakSetSIGReg(nn.Module):
         sigreg_num_slices: int = 256,
         sigreg_lambda: float = 0.1,
         sigreg_lambda_warmup_steps: int = 0,
-        gco_constraints: list[dict] = (),
-        gco_alpha: float = 0.99,
-        gco_eta: float = 1e-3,
-        gco_log_lambda_init: float = -8.0,
-        gco_log_lambda_min: float = -12.0,
-        gco_log_lambda_max: float = 2.0,
         jepa_num_target_blocks: int = 2,
         use_ema_teacher_target: bool = False,
         teacher_ema_decay: float = 0.996,
@@ -342,34 +336,12 @@ class PeakSetSIGReg(nn.Module):
         self.sigreg_lambda = float(sigreg_lambda)
         self.sigreg_lambda_warmup_steps = int(sigreg_lambda_warmup_steps)
         self.representation_regularizer = str(representation_regularizer).lower()
-        if self.representation_regularizer == "gco":
-            self.representation_regularizer = "gco-sigreg"
-        if self.representation_regularizer not in ("sigreg", "gco-sigreg", "none", ""):
+        if self.representation_regularizer not in ("sigreg", "none", ""):
             raise ValueError(
                 f"Unsupported regularizer: {self.representation_regularizer!r}"
             )
-        self.gco_alpha = float(gco_alpha)
-        self.gco_eta = float(gco_eta)
-        self.gco_log_lambda_min = float(gco_log_lambda_min)
-        self.gco_log_lambda_max = float(gco_log_lambda_max)
-        # Configurable GCO constraints
-        self.gco_constraint_keys: list[str] = []
-        self.gco_constraint_signs: list[float] = []
-        gco_targets: list[float] = []
-        for c in gco_constraints:
-            self.gco_constraint_keys.append(c["metric"])
-            self.gco_constraint_signs.append(
-                -1.0 if c["bound"] == "lower" else 1.0
-            )
-            gco_targets.append(float(c["target"]))
         _f = torch.float32
         _reg = self.register_buffer
-        _reg(
-            "gco_constraint_targets",
-            torch.tensor(gco_targets, dtype=_f) if gco_targets else torch.empty(0, dtype=_f),
-        )
-        _reg("gco_log_lambda", torch.tensor(float(gco_log_lambda_init), dtype=_f))
-        _reg("gco_c_ema", torch.tensor(0.0, dtype=_f))
         _sr_init = self.sigreg_lambda if self.sigreg_lambda_warmup_steps <= 0 else 0.0
         _reg("sigreg_lambda_target", torch.tensor(self.sigreg_lambda, dtype=_f))
         _reg("sigreg_lambda_current", torch.tensor(_sr_init, dtype=_f))
@@ -529,8 +501,6 @@ class PeakSetSIGReg(nn.Module):
 
     @torch.no_grad()
     def advance_sigreg_lambda_schedule(self) -> None:
-        if self.representation_regularizer != "sigreg":
-            return
         if self.sigreg_lambda_warmup_steps <= 0:
             return
         step = self.sigreg_lambda_step.to(dtype=self.sigreg_lambda_current.dtype)
@@ -691,39 +661,9 @@ class PeakSetSIGReg(nn.Module):
                 for k, v in _masked_embedding_stats(e, m).items():
                     collapse_metrics[f"{prefix}_{k}"] = v
             reg_stats = _masked_embedding_stats(fused_emb, fused_visible)
-            # Configurable GCO constraints — look up from both reg_stats and collapse_metrics
-            all_stats = {**reg_stats, **collapse_metrics}
-            if self.gco_constraint_keys:
-                constraint_vals = torch.stack([
-                    sign * (all_stats[key].float() - self.gco_constraint_targets[i])
-                    for i, (key, sign) in enumerate(
-                        zip(self.gco_constraint_keys, self.gco_constraint_signs)
-                    )
-                ])
-                gco_constraint = constraint_vals.amax(dim=0)
-            else:
-                gco_constraint = torch.tensor(0.0, device=fused_emb.device)
-                constraint_vals = None
-        gco_lambda = self.gco_log_lambda.exp().to(dtype=context_emb.dtype)
-        if self.representation_regularizer == "gco-sigreg":
-            with torch.no_grad():
-                if self.training:
-                    self.gco_c_ema.mul_(self.gco_alpha).add_(
-                        (1.0 - self.gco_alpha) * gco_constraint
-                    )
-                    self.gco_log_lambda.add_(self.gco_eta * self.gco_c_ema)
-                    self.gco_log_lambda.clamp_(
-                        self.gco_log_lambda_min, self.gco_log_lambda_max
-                    )
-                gco_lambda = self.gco_log_lambda.exp().to(dtype=context_emb.dtype)
-        use_sigreg = (
-            self.representation_regularizer == "sigreg" and self.sigreg_lambda > 0
-        )
-        use_gco = self.representation_regularizer == "gco-sigreg"
-        if use_sigreg or use_gco:
+        use_sigreg = self.representation_regularizer == "sigreg" and self.sigreg_lambda > 0
+        if use_sigreg:
             token_sigreg_loss = self.sigreg(fused_emb, valid_mask=fused_visible)
-            if use_gco:
-                sigreg_lambda_current = gco_lambda
             sigreg_term = sigreg_lambda_current * token_sigreg_loss
         else:
             token_sigreg_loss = context_emb.new_tensor(0.0)
@@ -740,20 +680,11 @@ class PeakSetSIGReg(nn.Module):
             "context_fraction": context_mask.float().sum() / valid_peak_count,
             "masked_fraction": target_masks.float().sum() / valid_peak_count,
             "sigreg_lambda_current": sigreg_lambda_current,
-            "gco_lambda": gco_lambda,
-            "gco_log_lambda": self.gco_log_lambda.to(dtype=context_emb.dtype),
-            "gco_c_ema": self.gco_c_ema.to(dtype=context_emb.dtype),
-            "gco_constraint": gco_constraint.to(dtype=context_emb.dtype),
             **{f"encoder_{k}": v.to(context_emb.dtype) for k, v in reg_stats.items()},
             "local_to_global_emb_std_ratio": collapse_metrics["local_emb_std"]
             / collapse_metrics["global_emb_std"],
             **collapse_metrics,
         }
-        if constraint_vals is not None:
-            for i, key in enumerate(self.gco_constraint_keys):
-                metrics[f"gco_constraint_{key}"] = constraint_vals[i].to(
-                    dtype=context_emb.dtype
-                )
         return metrics
 
     @torch.no_grad()

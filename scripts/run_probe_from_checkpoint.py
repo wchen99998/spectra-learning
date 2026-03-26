@@ -52,7 +52,7 @@ def main() -> None:
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     state = {
         k: v for k, v in ckpt["model"].items()
-        if not k.startswith("teacher_encoder") and k != "gco_constraint_targets"
+        if not k.startswith("teacher_encoder")
     }
     model.load_state_dict(state, strict=False)
     model.to(device)
