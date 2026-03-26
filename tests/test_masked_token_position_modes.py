@@ -162,23 +162,17 @@ def test_local_global_loss_uses_target_tokens_only():
         peak_intensity,
         valid_mask=peak_valid_mask,
         visible_mask=context_mask,
+        pack_n=model._context_pack_n,
     )
     B, K, N = target_masks.shape
-    peak_mz_targets = peak_mz.unsqueeze(1).expand(-1, K, -1).reshape(B * K, N)
-    peak_intensity_targets = (
-        peak_intensity.unsqueeze(1).expand(-1, K, -1).reshape(B * K, N)
+    teacher_target = model.encoder(
+        peak_mz,
+        peak_intensity,
+        valid_mask=peak_valid_mask,
+        visible_mask=peak_valid_mask,
+        pack_n=model._full_pack_n,
+        prefix_pack=True,
     )
-    peak_valid_targets = (
-        peak_valid_mask.unsqueeze(1).expand(-1, K, -1).reshape(B * K, N)
-    )
-    target_masks_flat = target_masks.reshape(B * K, N)
-    target_emb_flat = model.encoder(
-        peak_mz_targets,
-        peak_intensity_targets,
-        valid_mask=peak_valid_targets,
-        visible_mask=target_masks_flat,
-    )
-    target_emb = target_emb_flat.reshape(B, K, N, -1).permute(1, 0, 2, 3)
 
     predictor_union_mask = context_mask.unsqueeze(0) | target_masks_by_view
     predictor_input = torch.zeros_like(context_emb.unsqueeze(0).expand(K, -1, -1, -1))
@@ -199,9 +193,13 @@ def test_local_global_loss_uses_target_tokens_only():
     predictor_output = model.predict_masked_latents(
         predictor_input.reshape(B * K, N, -1),
         predictor_union_mask.reshape(B * K, N),
+        pack_n=model._predictor_pack_n,
     ).reshape(K, B, N, -1)
 
-    per_token_l1 = (predictor_output - target_emb.detach()).abs().mean(dim=-1)
+    per_token_l1 = (
+        predictor_output
+        - teacher_target.unsqueeze(0).expand(K, -1, -1, -1).detach()
+    ).abs().mean(dim=-1)
     masked_only_loss = (
         per_token_l1 * target_masks_by_view.float()
     ).sum() / target_masks_by_view.float().sum().clamp_min(1.0)
@@ -222,8 +220,16 @@ def test_positions_outside_union_do_not_change_loss():
     batch_b["peak_mz"] = batch_b["peak_mz"].clone()
     batch_b["peak_mz"][ignored] = batch_b["peak_mz"][ignored] + 0.2
 
-    metrics_a = model.forward_augmented(batch_a)
-    metrics_b = model.forward_augmented(batch_b)
+    teacher_targets = model.encoder(
+        batch_a["peak_mz"],
+        batch_a["peak_intensity"],
+        valid_mask=batch_a["peak_valid_mask"],
+        visible_mask=batch_a["peak_valid_mask"],
+        pack_n=model._full_pack_n,
+        prefix_pack=True,
+    ).unsqueeze(1).expand(-1, model.jepa_num_target_blocks, -1, -1)
+    metrics_a = model.forward_augmented(batch_a, teacher_targets=teacher_targets)
+    metrics_b = model.forward_augmented(batch_b, teacher_targets=teacher_targets)
 
     assert torch.allclose(
         metrics_a["local_global_loss"],

@@ -59,6 +59,8 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         sigreg_lambda=float(config.get("sigreg_lambda", 0.1)),
         sigreg_lambda_warmup_steps=int(config.get("sigreg_lambda_warmup_steps", 0)),
         jepa_num_target_blocks=int(config.get("jepa_num_target_blocks", 2)),
+        jepa_context_fraction=float(config.get("jepa_context_fraction", 0.5)),
+        jepa_target_fraction=float(config.get("jepa_target_fraction", 0.25)),
         use_ema_teacher_target=bool(config.get("use_ema_teacher_target", False)),
         teacher_ema_decay=float(config.get("teacher_ema_decay", 0.996)),
         teacher_ema_decay_start=float(config.get("teacher_ema_decay_start", 0.0)),

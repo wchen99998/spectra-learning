@@ -98,6 +98,49 @@ def _masked_embedding_stats(
     }
 
 
+def _merge_visible_mask(
+    valid_mask: torch.Tensor | None,
+    visible_mask: torch.Tensor | None,
+) -> torch.Tensor | None:
+    if visible_mask is not None and valid_mask is not None:
+        return visible_mask & valid_mask
+    return visible_mask if visible_mask is not None else valid_mask
+
+
+def _pack_indices(visible_mask: torch.Tensor, pack_n: int) -> torch.Tensor:
+    sort_idx = visible_mask.to(dtype=torch.int8).argsort(
+        dim=1,
+        descending=True,
+        stable=True,
+    )
+    return sort_idx[:, :pack_n]
+
+
+def _gather_packed_tokens(x: torch.Tensor, pack_idx: torch.Tensor) -> torch.Tensor:
+    return x.gather(1, pack_idx.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
+
+
+def _scatter_packed_tokens(
+    packed_x: torch.Tensor,
+    pack_idx: torch.Tensor,
+    seq_len: int,
+) -> torch.Tensor:
+    out = packed_x.new_zeros(packed_x.shape[0], seq_len, packed_x.shape[-1])
+    return out.scatter(1, pack_idx.unsqueeze(-1).expand_as(packed_x), packed_x)
+
+
+def _gather_rope_positions(
+    freqs_cos: torch.Tensor | None,
+    freqs_sin: torch.Tensor | None,
+    pack_idx: torch.Tensor,
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    if freqs_cos is None or freqs_sin is None:
+        return None, None
+    rope_cos = freqs_cos[0, :, 0, :][pack_idx].unsqueeze(2)
+    rope_sin = freqs_sin[0, :, 0, :][pack_idx].unsqueeze(2)
+    return rope_cos, rope_sin
+
+
 class CrossAttention(nn.Module):
     """Cross-attention: Q from prediction queries, KV from source embeddings."""
 
@@ -269,18 +312,50 @@ class PeakSetEncoder(nn.Module):
         peak_intensity: torch.Tensor,
         valid_mask: torch.Tensor | None = None,
         visible_mask: torch.Tensor | None = None,
+        pack_n: int = 0,
+        prefix_pack: bool = False,
     ) -> torch.Tensor:
-        if visible_mask is not None and valid_mask is not None:
-            attn_mask = visible_mask & valid_mask
-        else:
-            attn_mask = visible_mask if visible_mask is not None else valid_mask
-        block_mask = (
-            create_visible_block_mask(attn_mask) if attn_mask is not None else None
-        )
+        attn_mask = _merge_visible_mask(valid_mask, visible_mask)
         x = self.embedder(peak_mz, peak_intensity)
+        seq_len = peak_mz.shape[1]
         freqs_cos, freqs_sin = _compute_rope_freqs(
-            self.use_rope, peak_mz.shape[1], self.rope_inv_freq, peak_mz.device, x.dtype
+            self.use_rope, seq_len, self.rope_inv_freq, peak_mz.device, x.dtype
         )
+        if attn_mask is not None and pack_n > 0:
+            pack_n = min(int(pack_n), seq_len)
+            if prefix_pack:
+                packed_x = x[:, :pack_n]
+                packed_mask = attn_mask[:, :pack_n]
+                if freqs_cos is not None and freqs_sin is not None:
+                    freqs_cos = freqs_cos[:, :pack_n]
+                    freqs_sin = freqs_sin[:, :pack_n]
+            else:
+                pack_idx = _pack_indices(attn_mask, pack_n)
+                packed_x = _gather_packed_tokens(x, pack_idx)
+                packed_mask = attn_mask.gather(1, pack_idx)
+                freqs_cos, freqs_sin = _gather_rope_positions(
+                    freqs_cos,
+                    freqs_sin,
+                    pack_idx,
+                )
+            block_mask = create_visible_block_mask(packed_mask)
+            for block in self.blocks:
+                packed_x = block(
+                    packed_x,
+                    freqs_cos=freqs_cos,
+                    freqs_sin=freqs_sin,
+                    block_mask=block_mask,
+                )
+            packed_x = self.final_norm(packed_x)
+            packed_x = torch.where(
+                packed_mask.unsqueeze(-1),
+                packed_x,
+                torch.zeros_like(packed_x),
+            )
+            if prefix_pack:
+                return F.pad(packed_x, (0, 0, 0, seq_len - pack_n))
+            return _scatter_packed_tokens(packed_x, pack_idx, seq_len)
+        block_mask = create_visible_block_mask(attn_mask) if attn_mask is not None else None
         for block in self.blocks:
             x = block(
                 x,
@@ -319,6 +394,8 @@ class PeakSetSIGReg(nn.Module):
         sigreg_lambda: float = 0.1,
         sigreg_lambda_warmup_steps: int = 0,
         jepa_num_target_blocks: int = 2,
+        jepa_context_fraction: float = 0.5,
+        jepa_target_fraction: float = 0.25,
         use_ema_teacher_target: bool = False,
         teacher_ema_decay: float = 0.996,
         teacher_ema_decay_start: float = 0.0,
@@ -402,6 +479,11 @@ class PeakSetSIGReg(nn.Module):
         self.predictor_use_rope = bool(predictor_use_rope)
         if self.jepa_num_target_blocks < 1:
             raise ValueError("jepa_num_target_blocks must be >= 1")
+        N = int(num_peaks)
+        self._context_pack_n = max(1, int(math.ceil(N * float(jepa_context_fraction))))
+        target_pack_n = max(1, int(math.ceil(N * float(jepa_target_fraction))))
+        self._predictor_pack_n = min(N, self._context_pack_n + target_pack_n)
+        self._full_pack_n = N
         self.encoder = PeakSetEncoder(
             model_dim=model_dim,
             num_layers=encoder_num_layers,
@@ -455,7 +537,6 @@ class PeakSetSIGReg(nn.Module):
         self.sigreg = SIGReg(num_slices=int(sigreg_num_slices))
 
         # Temporal predictor for frame -> next-frame prediction.
-        N = int(num_peaks)
         if self.temporal_predictor_num_layers > 0:
             self.temporal_predictor = _build_temporal_decoder_blocks(
                 dim=model_dim, num_layers=self.temporal_predictor_num_layers,
@@ -520,8 +601,10 @@ class PeakSetSIGReg(nn.Module):
         self,
         x: torch.Tensor,
         visible_mask: torch.Tensor,
+        pack_n: int = 0,
     ) -> torch.Tensor:
-        predictor_block_mask = create_visible_block_mask(visible_mask)
+        if len(self.masked_latent_predictor) == 0:
+            return x
         freqs_cos, freqs_sin = _compute_rope_freqs(
             self.predictor_use_rope,
             x.shape[1],
@@ -529,6 +612,28 @@ class PeakSetSIGReg(nn.Module):
             x.device,
             x.dtype,
         )
+        if pack_n > 0:
+            seq_len = x.shape[1]
+            pack_idx = _pack_indices(visible_mask, min(int(pack_n), seq_len))
+            packed_x = _gather_packed_tokens(x, pack_idx)
+            packed_mask = visible_mask.gather(1, pack_idx)
+            freqs_cos, freqs_sin = _gather_rope_positions(freqs_cos, freqs_sin, pack_idx)
+            predictor_block_mask = create_visible_block_mask(packed_mask)
+            for block in self.masked_latent_predictor:
+                packed_x = block(
+                    packed_x,
+                    freqs_cos=freqs_cos,
+                    freqs_sin=freqs_sin,
+                    block_mask=predictor_block_mask,
+                )
+            packed_x = self.predictor_final_norm(packed_x)
+            packed_x = torch.where(
+                packed_mask.unsqueeze(-1),
+                packed_x,
+                torch.zeros_like(packed_x),
+            )
+            return _scatter_packed_tokens(packed_x, pack_idx, seq_len)
+        predictor_block_mask = create_visible_block_mask(visible_mask)
         for block in self.masked_latent_predictor:
             x = block(
                 x,
@@ -576,6 +681,7 @@ class PeakSetSIGReg(nn.Module):
     def forward_augmented(
         self,
         augmented_batch: dict[str, torch.Tensor],
+        teacher_targets: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         peak_mz = augmented_batch["peak_mz"]
         peak_intensity = augmented_batch["peak_intensity"]
@@ -589,6 +695,7 @@ class PeakSetSIGReg(nn.Module):
             peak_intensity,
             valid_mask=peak_valid_mask,
             visible_mask=context_mask,
+            pack_n=self._context_pack_n,
         )
         target_emb = (
             self.encoder(
@@ -600,15 +707,20 @@ class PeakSetSIGReg(nn.Module):
             .reshape(B, K, N, -1)
         )
         # Teacher sees full valid spectrum; loss mask selects target positions per block
-        teacher = self.teacher_encoder if self.teacher_encoder is not None else self.encoder
-        with torch.no_grad():
-            teacher_full = teacher(
-                peak_mz,
-                peak_intensity,
-                valid_mask=peak_valid_mask,
-                visible_mask=peak_valid_mask,
-            ).detach()
-        target_token_target = teacher_full.unsqueeze(1).expand(-1, K, -1, -1)
+        if teacher_targets is not None:
+            target_token_target = teacher_targets
+        else:
+            teacher = self.teacher_encoder if self.teacher_encoder is not None else self.encoder
+            with torch.no_grad():
+                teacher_full = teacher(
+                    peak_mz,
+                    peak_intensity,
+                    valid_mask=peak_valid_mask,
+                    visible_mask=peak_valid_mask,
+                    pack_n=self._full_pack_n,
+                    prefix_pack=True,
+                ).detach()
+            target_token_target = teacher_full.unsqueeze(1).expand(-1, K, -1, -1)
 
         ctx_mask_v = context_mask.unsqueeze(1)
         context_emb_by_view = context_emb.unsqueeze(1).expand(-1, K, -1, -1)
@@ -621,6 +733,7 @@ class PeakSetSIGReg(nn.Module):
         predictor_output = self.predict_masked_latents(
             predictor_input.reshape(B * K, N, -1),
             (ctx_mask_v | target_masks).reshape(B * K, N),
+            pack_n=self._predictor_pack_n,
         ).reshape(B, K, N, -1)
         loss_pred = predictor_output
         loss_target = target_token_target
@@ -706,6 +819,8 @@ class PeakSetSIGReg(nn.Module):
             batch["next_frame_peak_intensity"],
             valid_mask=batch["next_frame_peak_valid_mask"],
             visible_mask=batch["next_frame_peak_valid_mask"],
+            pack_n=self._full_pack_n,
+            prefix_pack=True,
         )
 
     def forward_temporal(
@@ -729,6 +844,8 @@ class PeakSetSIGReg(nn.Module):
             frame_int,
             valid_mask=frame_valid,
             visible_mask=frame_valid,
+            pack_n=self._full_pack_n,
+            prefix_pack=True,
         )  # [B, N, D]
 
         delta_rt = (next_frame_rt - frame_rt).unsqueeze(-1)  # [B, 1] in minutes
@@ -761,6 +878,8 @@ class PeakSetSIGReg(nn.Module):
                     next_frame_int,
                     valid_mask=next_frame_valid,
                     visible_mask=next_frame_valid,
+                    pack_n=self._full_pack_n,
+                    prefix_pack=True,
                 ).detach()
 
         if self.masked_token_loss_type == "l2":
@@ -784,4 +903,14 @@ class PeakSetSIGReg(nn.Module):
             batch["peak_intensity"],
             batch["peak_valid_mask"],
         )
-        return self.pool(self.encoder(mz, intensity, valid_mask=valid), valid)
+        return self.pool(
+            self.encoder(
+                mz,
+                intensity,
+                valid_mask=valid,
+                visible_mask=valid,
+                pack_n=self._full_pack_n,
+                prefix_pack=True,
+            ),
+            valid,
+        )
