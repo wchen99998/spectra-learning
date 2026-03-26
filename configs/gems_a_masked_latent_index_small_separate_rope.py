@@ -75,9 +75,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_token_loss_type = "l2"
     cfg.normalize_jepa_targets = False
     cfg.use_ema_teacher_target = True
-    cfg.teacher_ema_decay = 0.99925
-    cfg.teacher_ema_decay_start = 0.99925
-    cfg.teacher_ema_decay_warmup_steps = 0
+    cfg.teacher_ema_decay = 0.999
+    cfg.teacher_ema_decay_start = 0.99
+    cfg.teacher_ema_decay_warmup_steps = 100_000
     cfg.teacher_ema_update_every = 2
     cfg.grad_clip_norm = 1.0
     cfg.masked_latent_predictor_num_layers = 4
