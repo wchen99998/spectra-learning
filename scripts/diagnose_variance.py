@@ -45,6 +45,7 @@ def build_model(cfg) -> PeakSetSIGReg:
         encoder_fourier_sigma=cfg.encoder_fourier_sigma,
         encoder_fourier_trainable=cfg.encoder_fourier_trainable,
         encoder_use_rope=cfg.encoder_use_rope,
+        predictor_use_rope=getattr(cfg, "predictor_use_rope", None),
         sigreg_num_slices=cfg.sigreg_num_slices,
         sigreg_lambda=cfg.sigreg_lambda,
         jepa_num_target_blocks=cfg.jepa_num_target_blocks,

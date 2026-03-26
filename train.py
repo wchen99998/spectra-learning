@@ -28,7 +28,7 @@ from utils.training import (
     collect_and_log_param_metrics,
 )
 
-torch.set_float32_matmul_precision("medium")
+torch.set_float32_matmul_precision("high")
 torch._dynamo.config.capture_scalar_outputs = True
 inductor_config.coordinate_descent_tuning = True
 inductor_config.triton.unique_kernel_names = True

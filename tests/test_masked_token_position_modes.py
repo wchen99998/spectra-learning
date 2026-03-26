@@ -8,6 +8,7 @@ def _build_model(
     num_target_blocks: int = 2,
     predictor_layers: int = 2,
     encoder_use_rope: bool = True,
+    predictor_use_rope: bool | None = None,
 ) -> PeakSetSIGReg:
     torch.manual_seed(0)
     model = PeakSetSIGReg(
@@ -16,6 +17,7 @@ def _build_model(
         encoder_num_heads=4,
         feature_mlp_hidden_dim=32,
         encoder_use_rope=encoder_use_rope,
+        predictor_use_rope=predictor_use_rope,
         jepa_num_target_blocks=num_target_blocks,
         masked_token_loss_weight=1.0,
         masked_latent_predictor_num_layers=predictor_layers,
@@ -81,9 +83,17 @@ def test_predictor_zero_layers_is_identity():
 @torch.no_grad()
 def test_predictor_rope_toggle_changes_output():
     torch.manual_seed(0)
-    model_no_rope = _build_model(predictor_layers=2, encoder_use_rope=False)
+    model_no_rope = _build_model(
+        predictor_layers=2,
+        encoder_use_rope=False,
+        predictor_use_rope=False,
+    )
     torch.manual_seed(0)
-    model_with_rope = _build_model(predictor_layers=2, encoder_use_rope=True)
+    model_with_rope = _build_model(
+        predictor_layers=2,
+        encoder_use_rope=False,
+        predictor_use_rope=True,
+    )
     predictor_input = torch.randn(1, 6, model_with_rope.model_dim)
     visible_mask = torch.ones(1, 6, dtype=torch.bool)
 
@@ -92,6 +102,32 @@ def test_predictor_rope_toggle_changes_output():
 
     diff = (out_1 - out_2).abs().mean()
     assert float(diff) > 1e-3
+
+
+@torch.no_grad()
+def test_predictor_rope_is_independent_from_encoder_rope():
+    torch.manual_seed(0)
+    model_encoder_no_rope = _build_model(
+        predictor_layers=2,
+        encoder_use_rope=False,
+        predictor_use_rope=False,
+    )
+    torch.manual_seed(0)
+    model_encoder_with_rope = _build_model(
+        predictor_layers=2,
+        encoder_use_rope=True,
+        predictor_use_rope=False,
+    )
+    predictor_input = torch.randn(1, 6, model_encoder_no_rope.model_dim)
+    visible_mask = torch.ones(1, 6, dtype=torch.bool)
+
+    out_1 = model_encoder_no_rope.predict_masked_latents(predictor_input, visible_mask)
+    out_2 = model_encoder_with_rope.predict_masked_latents(
+        predictor_input,
+        visible_mask,
+    )
+
+    assert torch.allclose(out_1, out_2)
 
 
 @torch.no_grad()

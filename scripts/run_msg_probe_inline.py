@@ -34,6 +34,7 @@ def make_config() -> config_dict.ConfigDict:
     cfg.num_layers = 10
     cfg.num_kv_heads = 8
     cfg.encoder_use_rope = True
+    cfg.predictor_use_rope = True
     cfg.encoder_qk_norm = False
     cfg.encoder_fourier_strategy = "lin_float_int"
     cfg.encoder_fourier_x_min = 1e-4
@@ -85,6 +86,7 @@ def main() -> None:
         encoder_fourier_sigma=cfg.encoder_fourier_sigma,
         encoder_fourier_trainable=cfg.encoder_fourier_trainable,
         encoder_use_rope=cfg.encoder_use_rope,
+        predictor_use_rope=cfg.predictor_use_rope,
         encoder_qk_norm=cfg.encoder_qk_norm,
         representation_regularizer=cfg.representation_regularizer,
         sigreg_num_slices=cfg.sigreg_num_slices,

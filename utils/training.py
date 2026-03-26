@@ -45,6 +45,7 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
             config.get("encoder_fourier_trainable", True)
         ),
         encoder_use_rope=bool(config.get("encoder_use_rope", False)),
+        predictor_use_rope=config.get("predictor_use_rope", None),
         masked_token_loss_weight=float(config.get("masked_token_loss_weight", 0.0)),
         masked_token_loss_type=str(config.get("masked_token_loss_type", "l1")),
         normalize_jepa_targets=bool(config.get("normalize_jepa_targets", False)),

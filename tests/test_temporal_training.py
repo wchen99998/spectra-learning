@@ -112,6 +112,27 @@ class TestForwardTemporal:
             metrics = model.forward_temporal(batch)
             assert torch.isfinite(metrics["loss"]), f"Non-finite loss for {loss_type}"
 
+    def test_temporal_predictor_rope_toggle_changes_output(self):
+        torch.manual_seed(0)
+        model_no_rope = _small_model(
+            encoder_use_rope=False,
+            predictor_use_rope=False,
+        )
+        torch.manual_seed(0)
+        model_with_rope = _small_model(
+            encoder_use_rope=False,
+            predictor_use_rope=True,
+        )
+        model_no_rope.eval()
+        model_with_rope.eval()
+        batch = _temporal_batch(batch_size=2, num_peaks=8)
+
+        with torch.no_grad():
+            loss_no_rope = model_no_rope.forward_temporal(batch)["loss"]
+            loss_with_rope = model_with_rope.forward_temporal(batch)["loss"]
+
+        assert not torch.allclose(loss_no_rope, loss_with_rope, atol=1e-6)
+
 
 class TestCheckpointPartialLoad:
     def test_partial_load_allows_temporal_keys_missing(self):

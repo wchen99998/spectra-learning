@@ -309,6 +309,7 @@ class PeakSetSIGReg(nn.Module):
         encoder_fourier_sigma: float = 10.0,
         encoder_fourier_trainable: bool = True,
         encoder_use_rope: bool = False,
+        predictor_use_rope: bool | None = None,
         masked_token_loss_weight: float = 0.0,
         masked_token_loss_type: str = "l1",
         normalize_jepa_targets: bool = False,
@@ -391,6 +392,14 @@ class PeakSetSIGReg(nn.Module):
         self.masked_token_loss_type = str(masked_token_loss_type).lower()
         self.normalize_jepa_targets = bool(normalize_jepa_targets)
         self.norm_type = str(norm_type).lower()
+        self.temporal_predictor_num_layers = int(temporal_predictor_num_layers)
+        if predictor_use_rope is None:
+            predictor_use_rope = (
+                True
+                if self.temporal_predictor_num_layers > 0
+                else encoder_use_rope
+            )
+        self.predictor_use_rope = bool(predictor_use_rope)
         if self.jepa_num_target_blocks < 1:
             raise ValueError("jepa_num_target_blocks must be >= 1")
         self.encoder = PeakSetEncoder(
@@ -447,7 +456,6 @@ class PeakSetSIGReg(nn.Module):
 
         # Temporal predictor for frame -> next-frame prediction.
         N = int(num_peaks)
-        self.temporal_predictor_num_layers = int(temporal_predictor_num_layers)
         if self.temporal_predictor_num_layers > 0:
             self.temporal_predictor = _build_temporal_decoder_blocks(
                 dim=model_dim, num_layers=self.temporal_predictor_num_layers,
@@ -515,7 +523,7 @@ class PeakSetSIGReg(nn.Module):
     ) -> torch.Tensor:
         predictor_block_mask = create_visible_block_mask(visible_mask)
         freqs_cos, freqs_sin = _compute_rope_freqs(
-            self.encoder.use_rope,
+            self.predictor_use_rope,
             x.shape[1],
             self.predictor_rope_inv_freq,
             x.device,
@@ -731,7 +739,11 @@ class PeakSetSIGReg(nn.Module):
 
         N_tgt = queries.shape[1]
         freqs_cos, freqs_sin = _compute_rope_freqs(
-            True, N_tgt, self.predictor_rope_inv_freq, queries.device, queries.dtype
+            self.predictor_use_rope,
+            N_tgt,
+            self.predictor_rope_inv_freq,
+            queries.device,
+            queries.dtype,
         )
         for block in self.temporal_predictor:
             queries = block(queries, frame_emb,
