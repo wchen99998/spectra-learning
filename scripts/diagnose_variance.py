@@ -102,11 +102,11 @@ def diagnose_encoder(model: PeakSetSIGReg, batch: dict[str, torch.Tensor]):
     _report("embedder_out", x, visible_mask)
 
     # Step 2: Per-block activations
-    block_mask = None
+    attn_mask = None
     if visible_mask is not None:
-        from networks.transformer_torch import create_visible_block_mask
+        from networks.transformer_torch import create_visible_attention_mask
 
-        block_mask = create_visible_block_mask(visible_mask)
+        attn_mask = create_visible_attention_mask(visible_mask)
 
     for i, block in enumerate(encoder.blocks):
         # Pre-norm values (what the attention/FFN sees)
@@ -114,7 +114,7 @@ def diagnose_encoder(model: PeakSetSIGReg, batch: dict[str, torch.Tensor]):
         _report(f"block_{i:02d}/attn_pre_norm", attn_normed, visible_mask)
 
         # Attention output (residual contribution)
-        attn_out = block.attention(attn_normed, block_mask=block_mask)
+        attn_out = block.attention(attn_normed, attn_mask=attn_mask)
         _report(f"block_{i:02d}/attn_out", attn_out, visible_mask)
 
         h = x + attn_out

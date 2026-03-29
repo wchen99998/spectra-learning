@@ -8,7 +8,7 @@ from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 from models.peak_features import PeakFeatureEmbedder
 from models.losses import SIGReg
 from networks import transformer_torch
-from networks.transformer_torch import _build_norm, create_visible_block_mask
+from networks.transformer_torch import _build_norm, create_visible_attention_mask
 
 
 def _apply_depth_scaled_init(blocks: nn.ModuleList, num_layers: int) -> None:
@@ -332,11 +332,11 @@ class PeakSetEncoder(nn.Module):
                 packed_x = _gather_packed_tokens(x, pack_idx)
                 packed_mask = attn_mask.gather(1, pack_idx)
             packed_x, packed_mask = self._append_special_tokens(packed_x, packed_mask)
-            block_mask = create_visible_block_mask(packed_mask)
+            attn_mask = create_visible_attention_mask(packed_mask)
             for block in self.blocks:
                 packed_x = block(
                     packed_x,
-                    block_mask=block_mask,
+                    attn_mask=attn_mask,
                 )
             packed_x = self.final_norm(packed_x)
             cls_x = packed_x[:, peak_pack_n]
@@ -356,11 +356,13 @@ class PeakSetEncoder(nn.Module):
                 return output, cls_x
             return output
         x, attn_mask = self._append_special_tokens(x, attn_mask)
-        block_mask = create_visible_block_mask(attn_mask) if attn_mask is not None else None
+        attn_mask = (
+            create_visible_attention_mask(attn_mask) if attn_mask is not None else None
+        )
         for block in self.blocks:
             x = block(
                 x,
-                block_mask=block_mask,
+                attn_mask=attn_mask,
             )
         x = self.final_norm(x)
         peak_x = x[:, :seq_len]
@@ -663,11 +665,11 @@ class PeakSetSIGReg(nn.Module):
                 packed_x,
                 packed_mask,
             )
-            predictor_block_mask = create_visible_block_mask(packed_mask)
+            predictor_attn_mask = create_visible_attention_mask(packed_mask)
             for block in self.masked_latent_predictor:
                 packed_x = block(
                     packed_x,
-                    block_mask=predictor_block_mask,
+                    attn_mask=predictor_attn_mask,
                 )
             packed_x = self.predictor_final_norm(packed_x)
             packed_x = packed_x[:, : pack_idx.shape[1]]
@@ -679,11 +681,11 @@ class PeakSetSIGReg(nn.Module):
             )
             return _scatter_packed_tokens(packed_x, pack_idx, seq_len)
         x, visible_mask = self._append_predictor_register_tokens(x, visible_mask)
-        predictor_block_mask = create_visible_block_mask(visible_mask)
+        predictor_attn_mask = create_visible_attention_mask(visible_mask)
         for block in self.masked_latent_predictor:
             x = block(
                 x,
-                block_mask=predictor_block_mask,
+                attn_mask=predictor_attn_mask,
             )
         x = self.predictor_final_norm(x)
         if self.predictor_num_register_tokens > 0:

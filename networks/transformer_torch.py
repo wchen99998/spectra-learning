@@ -1,23 +1,14 @@
 import math
 
 import torch
+import torch.nn.functional as F
 from torch import nn
-from torch.nn.attention.flex_attention import (
-    BlockMask,
-    create_block_mask,
-    flex_attention,
-)
 
 
-def create_visible_block_mask(visible_mask: torch.Tensor) -> BlockMask:
-    B, N = visible_mask.shape
-
-    def mask_mod(b, h, q_idx, kv_idx):
-        return visible_mask[b, q_idx] & visible_mask[b, kv_idx]
-
-    return create_block_mask(
-        mask_mod, B=B, H=None, Q_LEN=N, KV_LEN=N, device=visible_mask.device
-    )
+def create_visible_attention_mask(visible_mask: torch.Tensor) -> torch.Tensor:
+    # We mask keys only. Hidden query rows are dropped or ignored by callers,
+    # and allowing them to attend to visible keys avoids empty-row SDPA masks.
+    return visible_mask[:, None, None, :]
 
 
 def _build_norm(dim: int, eps: float | None, norm_type: str) -> nn.Module:
@@ -61,7 +52,7 @@ class Attention(nn.Module):
         self,
         x: torch.Tensor,
         *,
-        block_mask: BlockMask | None = None,
+        attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         bsz, seqlen, _ = x.shape
         qkv = self.wqkv(x)
@@ -91,7 +82,7 @@ class Attention(nn.Module):
             k = k.repeat_interleave(rep, dim=1)
             v = v.repeat_interleave(rep, dim=1)
 
-        attn = flex_attention(q, k, v, block_mask=block_mask)
+        attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         attn = attn.transpose(1, 2).contiguous().view(bsz, seqlen, self.dim)
         return self.wo(attn)
 
@@ -149,10 +140,10 @@ class TransformerBlock(nn.Module):
         self,
         x: torch.Tensor,
         *,
-        block_mask: BlockMask | None = None,
+        attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         h = x + self.attention(
             self.attention_norm(x),
-            block_mask=block_mask,
+            attn_mask=attn_mask,
         )
         return h + self.feed_forward(self.ffn_norm(h))

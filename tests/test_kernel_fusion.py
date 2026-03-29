@@ -4,7 +4,7 @@ import torch
 
 from models.losses import SIGReg
 from models.model import PeakSetEncoder, PeakSetSIGReg
-from networks.transformer_torch import Attention, create_visible_block_mask
+from networks.transformer_torch import Attention, create_visible_attention_mask
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 B, N, D = 16, 60, 128
@@ -41,11 +41,11 @@ def test_attention_mask_plumbing():
     x = torch.randn(2, N, D, device=DEVICE)
     visible_mask = torch.ones(2, N, dtype=torch.bool, device=DEVICE)
     visible_mask[:, N // 2 :] = False
-    block_mask = create_visible_block_mask(visible_mask)
+    attn_mask = create_visible_attention_mask(visible_mask)
 
     with torch.no_grad():
-        out_masked = attn(x, block_mask=block_mask)
-        out_no_mask = attn(x, block_mask=None)
+        out_masked = attn(x, attn_mask=attn_mask)
+        out_no_mask = attn(x, attn_mask=None)
 
     assert out_masked.shape == (2, N, D)
     assert torch.isfinite(out_masked).all()
