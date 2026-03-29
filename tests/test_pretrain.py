@@ -184,6 +184,26 @@ class BlockJEPATests(unittest.TestCase):
         pooled = model.encode(batch)
         self.assertEqual(pooled.shape, (3, model.model_dim))
 
+    def test_encode_returns_cls_token_state(self):
+        model = self._build_model(encoder_num_register_tokens=2)
+        batch = {
+            "peak_mz": torch.rand(3, 6),
+            "peak_intensity": torch.rand(3, 6),
+            "peak_valid_mask": torch.ones(3, 6, dtype=torch.bool),
+        }
+        peak_emb, cls_emb = model.encoder(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            valid_mask=batch["peak_valid_mask"],
+            visible_mask=batch["peak_valid_mask"],
+            pack_n=model._full_pack_n,
+            prefix_pack=True,
+            return_cls_token=True,
+        )
+        pooled = model.encode(batch)
+        self.assertEqual(peak_emb.shape, (3, 7, model.model_dim))
+        self.assertTrue(torch.allclose(pooled, cls_emb))
+
     def test_backward_populates_encoder_gradients(self):
         model = self._build_model()
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
@@ -217,7 +237,13 @@ class BlockJEPATests(unittest.TestCase):
                 f"model.{k}": v
                 for k, v in model.state_dict().items()
                 if not k.endswith(
-                    ("position_embedding.weight", "predictor_position_embedding.weight")
+                    (
+                        "position_embedding.weight",
+                        "predictor_position_embedding.weight",
+                        "cls_token",
+                        "register_tokens",
+                        "predictor_register_tokens",
+                    )
                 )
             }
             torch.save({"state_dict": old_state}, path)
@@ -280,6 +306,7 @@ class PrecursorTokenTests(unittest.TestCase):
             "sigreg_lambda": 0.1,
             "jepa_num_target_blocks": 2,
             "use_precursor_token": True,
+            "num_peaks": 6,
         }
         model_kwargs.update(kwargs)
         return PeakSetSIGReg(**model_kwargs)

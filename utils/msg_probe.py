@@ -9,7 +9,7 @@ from ml_collections import config_dict
 from sklearn.metrics import r2_score, roc_auc_score
 
 from input_pipeline import numpy_batch_to_torch
-from models.model import PeakSetSIGReg
+from models.model import PeakSetEncoder, PeakSetSIGReg
 from utils.massspec_probe_data import MassSpecProbeData
 from utils.massspec_probe_targets import FG_SMARTS, REGRESSION_TARGET_KEYS
 from utils.schedulers import learning_rate_at_step
@@ -351,6 +351,7 @@ def run_msg_probe(
             batch["peak_intensity"],
             valid_mask=batch["peak_valid_mask"],
         )
+        embeddings, _ = PeakSetEncoder.split_peak_and_cls(embeddings)
         return embeddings, batch["peak_valid_mask"]
 
     train_seed_base = int(config.seed) + 1_100_000

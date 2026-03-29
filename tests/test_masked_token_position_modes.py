@@ -7,8 +7,10 @@ def _build_model(
     *,
     num_target_blocks: int = 2,
     predictor_layers: int = 2,
+    predictor_num_register_tokens: int = 0,
     encoder_apply_final_norm: bool = True,
     predictor_apply_final_norm: bool = True,
+    jepa_target_normalization: str = "none",
 ) -> PeakSetSIGReg:
     torch.manual_seed(0)
     model = PeakSetSIGReg(
@@ -19,9 +21,11 @@ def _build_model(
         feature_mlp_hidden_dim=32,
         encoder_apply_final_norm=encoder_apply_final_norm,
         predictor_apply_final_norm=predictor_apply_final_norm,
+        predictor_num_register_tokens=predictor_num_register_tokens,
         jepa_num_target_blocks=num_target_blocks,
         masked_token_loss_weight=1.0,
         masked_latent_predictor_num_layers=predictor_layers,
+        jepa_target_normalization=jepa_target_normalization,
     )
     model.eval()
     return model
@@ -100,6 +104,49 @@ def test_predictor_absolute_positions_change_output():
 
 
 @torch.no_grad()
+def test_predictor_register_tokens_do_not_get_position_embeddings():
+    torch.manual_seed(0)
+    model_without_pos = _build_model(
+        predictor_layers=2,
+        predictor_num_register_tokens=2,
+    )
+    torch.manual_seed(0)
+    model_with_pos = _build_model(
+        predictor_layers=2,
+        predictor_num_register_tokens=2,
+    )
+    with torch.no_grad():
+        model_without_pos.predictor_position_embedding.weight.zero_()
+    predictor_input = torch.randn(1, 6, model_with_pos.model_dim)
+    visible_mask = torch.ones(1, 6, dtype=torch.bool)
+
+    x_without_pos = model_without_pos._add_predictor_positions(predictor_input)
+    x_without_pos, _ = model_without_pos._append_predictor_register_tokens(
+        x_without_pos,
+        visible_mask,
+    )
+    x_with_pos = model_with_pos._add_predictor_positions(predictor_input)
+    x_with_pos, _ = model_with_pos._append_predictor_register_tokens(
+        x_with_pos,
+        visible_mask,
+    )
+
+    reg_count = model_with_pos.predictor_num_register_tokens
+    torch.testing.assert_close(
+        x_without_pos[:, -reg_count:],
+        x_with_pos[:, -reg_count:],
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    assert not torch.allclose(
+        x_without_pos[:, :-reg_count],
+        x_with_pos[:, :-reg_count],
+        atol=1e-6,
+        rtol=1e-6,
+    )
+
+
+@torch.no_grad()
 def test_encoder_final_norm_toggle_changes_output():
     torch.manual_seed(0)
     encoder_with_final_norm = PeakSetEncoder(
@@ -137,6 +184,8 @@ def test_encoder_final_norm_toggle_changes_output():
         valid_mask=valid_mask,
         visible_mask=valid_mask,
     )
+    out_1, _ = PeakSetEncoder.split_peak_and_cls(out_1)
+    out_2, _ = PeakSetEncoder.split_peak_and_cls(out_2)
 
     diff = (out_1 - out_2).abs().mean()
     assert float(diff) > 1e-3
@@ -214,13 +263,14 @@ def test_local_global_loss_uses_target_tokens_only():
     target_masks = batch["target_masks"] & peak_valid_mask.unsqueeze(1)
     target_masks_by_view = target_masks.permute(1, 0, 2)
 
-    context_emb = model.encoder(
+    context_encoded = model.encoder(
         peak_mz,
         peak_intensity,
         valid_mask=peak_valid_mask,
         visible_mask=context_mask,
         pack_n=model._context_pack_n,
     )
+    context_emb, _ = PeakSetEncoder.split_peak_and_cls(context_encoded)
     B, K, N = target_masks.shape
     teacher_target = model.encoder(
         peak_mz,
@@ -230,6 +280,7 @@ def test_local_global_loss_uses_target_tokens_only():
         pack_n=model._full_pack_n,
         prefix_pack=True,
     )
+    teacher_target, _ = PeakSetEncoder.split_peak_and_cls(teacher_target)
 
     predictor_union_mask = context_mask.unsqueeze(0) | target_masks_by_view
     predictor_input = torch.zeros_like(context_emb.unsqueeze(0).expand(K, -1, -1, -1))
@@ -265,6 +316,80 @@ def test_local_global_loss_uses_target_tokens_only():
 
 
 @torch.no_grad()
+def test_local_global_loss_can_zscore_teacher_targets():
+    model = _build_model(
+        num_target_blocks=2,
+        jepa_target_normalization="zscore",
+    )
+    model.sigreg_lambda = 0.0
+    batch = _make_batch()
+
+    metrics = model.forward_augmented(batch)
+
+    peak_mz = batch["peak_mz"]
+    peak_intensity = batch["peak_intensity"]
+    peak_valid_mask = batch["peak_valid_mask"]
+    context_mask = batch["context_mask"] & peak_valid_mask
+    target_masks = batch["target_masks"] & peak_valid_mask.unsqueeze(1)
+    target_masks_by_view = target_masks.permute(1, 0, 2)
+
+    context_encoded = model.encoder(
+        peak_mz,
+        peak_intensity,
+        valid_mask=peak_valid_mask,
+        visible_mask=context_mask,
+        pack_n=model._context_pack_n,
+    )
+    context_emb, _ = PeakSetEncoder.split_peak_and_cls(context_encoded)
+    B, K, N = target_masks.shape
+    teacher_target = model.encoder(
+        peak_mz,
+        peak_intensity,
+        valid_mask=peak_valid_mask,
+        visible_mask=peak_valid_mask,
+        pack_n=model._full_pack_n,
+        prefix_pack=True,
+    )
+    teacher_target, _ = PeakSetEncoder.split_peak_and_cls(teacher_target)
+    teacher_target = teacher_target.unsqueeze(1).expand(-1, K, -1, -1)
+    teacher_target = (teacher_target - teacher_target.mean(dim=-1, keepdim=True)) / (
+        teacher_target.std(dim=-1, keepdim=True, unbiased=False).clamp_min(1e-6)
+    )
+
+    predictor_union_mask = context_mask.unsqueeze(0) | target_masks_by_view
+    predictor_input = torch.zeros_like(context_emb.unsqueeze(0).expand(K, -1, -1, -1))
+    predictor_input = torch.where(
+        context_mask.unsqueeze(0).unsqueeze(-1),
+        context_emb.unsqueeze(0).expand(K, -1, -1, -1),
+        predictor_input,
+    )
+    latent_mask_token = model.latent_mask_token.view(1, 1, 1, -1).to(
+        dtype=context_emb.dtype,
+        device=context_emb.device,
+    )
+    predictor_input = torch.where(
+        target_masks_by_view.unsqueeze(-1),
+        latent_mask_token,
+        predictor_input,
+    )
+    predictor_output = model.predict_masked_latents(
+        predictor_input.reshape(B * K, N, -1),
+        predictor_union_mask.reshape(B * K, N),
+        pack_n=model._predictor_pack_n,
+    ).reshape(K, B, N, -1)
+
+    per_token_l1 = (
+        predictor_output
+        - teacher_target.permute(1, 0, 2, 3).detach()
+    ).abs().mean(dim=-1)
+    masked_only_loss = (
+        per_token_l1 * target_masks_by_view.float()
+    ).sum() / target_masks_by_view.float().sum().clamp_min(1.0)
+
+    assert torch.allclose(metrics["local_global_loss"], masked_only_loss)
+
+
+@torch.no_grad()
 def test_positions_outside_union_do_not_change_loss():
     model = _build_model(num_target_blocks=2)
     model.sigreg_lambda = 0.0
@@ -277,14 +402,21 @@ def test_positions_outside_union_do_not_change_loss():
     batch_b["peak_mz"] = batch_b["peak_mz"].clone()
     batch_b["peak_mz"][ignored] = batch_b["peak_mz"][ignored] + 0.2
 
-    teacher_targets = model.encoder(
+    teacher_encoded = model.encoder(
         batch_a["peak_mz"],
         batch_a["peak_intensity"],
         valid_mask=batch_a["peak_valid_mask"],
         visible_mask=batch_a["peak_valid_mask"],
         pack_n=model._full_pack_n,
         prefix_pack=True,
-    ).unsqueeze(1).expand(-1, model.jepa_num_target_blocks, -1, -1)
+    )
+    teacher_targets, _ = PeakSetEncoder.split_peak_and_cls(teacher_encoded)
+    teacher_targets = teacher_targets.unsqueeze(1).expand(
+        -1,
+        model.jepa_num_target_blocks,
+        -1,
+        -1,
+    )
     metrics_a = model.forward_augmented(batch_a, teacher_targets=teacher_targets)
     metrics_b = model.forward_augmented(batch_b, teacher_targets=teacher_targets)
 

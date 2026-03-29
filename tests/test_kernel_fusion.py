@@ -89,7 +89,8 @@ def test_encoder_with_visible_mask():
             valid_mask=batch["peak_valid_mask"],
         )
 
-    assert out_mask.shape == (B, N, D)
+    assert out_mask.shape == (B, N + 1, D)
+    assert out_none.shape == (B, N + 1, D)
     assert torch.isfinite(out_mask).all()
     assert torch.isfinite(out_none).all()
     assert not torch.allclose(out_mask, out_none, atol=1e-3)

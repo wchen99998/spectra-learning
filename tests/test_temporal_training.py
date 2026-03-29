@@ -82,9 +82,9 @@ class TestForwardTemporal:
         ]
         assert any(rt_grads), "No gradients flowed to RT projection"
 
-        # Check gradients flow to temporal query tokens
-        assert model.temporal_query_tokens.grad is not None
-        assert model.temporal_query_tokens.grad.abs().sum() > 0
+        # Check gradients flow to the shared temporal query token
+        assert model.temporal_query_token.grad is not None
+        assert model.temporal_query_token.grad.abs().sum() > 0
 
     def test_with_ema_teacher(self):
         model = _small_model(use_ema_teacher_target=True, teacher_ema_decay=0.99)
@@ -141,7 +141,7 @@ class TestCheckpointPartialLoad:
         missing, unexpected = full.load_state_dict(sd, strict=False)
 
         # Only temporal keys should be missing
-        allowed_prefixes = ("temporal_predictor.", "temporal_rt_proj.", "temporal_query_tokens")
+        allowed_prefixes = ("temporal_predictor.", "temporal_rt_proj.", "temporal_query_token")
         for key in missing:
             assert any(key.startswith(p) for p in allowed_prefixes), (
                 f"Unexpected missing key: {key}"

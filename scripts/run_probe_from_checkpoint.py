@@ -44,6 +44,7 @@ def main() -> None:
         use_precursor_token=cfg.use_precursor_token,
         masked_token_loss_weight=cfg.masked_token_loss_weight,
         masked_token_loss_type=cfg.masked_token_loss_type,
+        jepa_target_normalization=cfg.get("jepa_target_normalization", "none"),
         masked_latent_predictor_num_layers=cfg.masked_latent_predictor_num_layers,
     )
 

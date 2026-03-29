@@ -46,6 +46,9 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         masked_token_loss_weight=float(config.get("masked_token_loss_weight", 0.0)),
         masked_token_loss_type=str(config.get("masked_token_loss_type", "l1")),
         normalize_jepa_targets=bool(config.get("normalize_jepa_targets", False)),
+        jepa_target_normalization=str(
+            config.get("jepa_target_normalization", "none")
+        ),
         representation_regularizer=str(
             config.get("representation_regularizer", "sigreg")
         ),
@@ -73,6 +76,12 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         ),
         use_precursor_token=bool(config.get("use_precursor_token", False)),
         num_peaks=int(config.get("num_peaks", 64)),
+        encoder_num_register_tokens=int(
+            config.get("encoder_num_register_tokens", 0)
+        ),
+        predictor_num_register_tokens=int(
+            config.get("predictor_num_register_tokens", 0)
+        ),
         temporal_predictor_num_layers=int(
             config.get("temporal_predictor_num_layers", 0)
         ),
@@ -185,8 +194,15 @@ def load_pretrained_weights(
     allowed_missing_suffixes = (
         "position_embedding.weight",
         "predictor_position_embedding.weight",
+        "cls_token",
+        "register_tokens",
+        "predictor_register_tokens",
+        "temporal_query_token",
     )
-    unexpected = [key for key in unexpected]
+    unexpected = [
+        key for key in unexpected
+        if not key.endswith("temporal_query_tokens")
+    ]
     missing = [
         key for key in missing
         if not key.endswith(allowed_missing_suffixes)

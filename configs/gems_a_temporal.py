@@ -24,6 +24,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_layers = 12
     cfg.num_heads = 8
     cfg.num_kv_heads = 8
+    cfg.encoder_num_register_tokens = 0
+    cfg.predictor_num_register_tokens = 0
     cfg.encoder_qk_norm = False
     cfg.encoder_fourier_strategy = "lin_float_int"
     cfg.encoder_fourier_x_min = 1e-4
@@ -70,6 +72,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_token_loss_weight = 1.0
     cfg.masked_token_loss_type = "l2"
     cfg.normalize_jepa_targets = False
+    cfg.jepa_target_normalization = "none"
     cfg.use_ema_teacher_target = True
     cfg.teacher_ema_decay = 0.99
     cfg.teacher_ema_decay_start = 0.996

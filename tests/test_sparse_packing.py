@@ -21,6 +21,10 @@ def _place_visible_tokens(
     return peak_mz, peak_intensity
 
 
+def _split_peak_and_cls(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    return PeakSetEncoder.split_peak_and_cls(x)
+
+
 @torch.no_grad()
 def test_encoder_sparse_pack_matches_full_on_visible_tokens():
     torch.manual_seed(0)
@@ -70,6 +74,8 @@ def test_encoder_sparse_pack_matches_full_on_visible_tokens():
         visible_mask=visible_mask,
         pack_n=4,
     )
+    out_full, cls_full = _split_peak_and_cls(out_full)
+    out_packed, cls_packed = _split_peak_and_cls(out_packed)
 
     visible = visible_mask & valid_mask
     torch.testing.assert_close(
@@ -79,6 +85,7 @@ def test_encoder_sparse_pack_matches_full_on_visible_tokens():
         atol=1e-6,
     )
     _assert_zero_at_mask(out_packed, ~visible)
+    torch.testing.assert_close(cls_packed, cls_full, rtol=1e-6, atol=1e-6)
 
 
 @torch.no_grad()
@@ -113,6 +120,8 @@ def test_encoder_prefix_pack_matches_full_on_valid_prefix():
         pack_n=8,
         prefix_pack=True,
     )
+    out_full, cls_full = _split_peak_and_cls(out_full)
+    out_packed, cls_packed = _split_peak_and_cls(out_packed)
 
     torch.testing.assert_close(
         out_packed.masked_select(valid_mask.unsqueeze(-1).expand_as(out_packed)),
@@ -121,6 +130,60 @@ def test_encoder_prefix_pack_matches_full_on_valid_prefix():
         atol=1e-6,
     )
     _assert_zero_at_mask(out_packed, ~valid_mask)
+    torch.testing.assert_close(cls_packed, cls_full, rtol=1e-6, atol=1e-6)
+
+
+@torch.no_grad()
+def test_encoder_sparse_pack_matches_full_with_register_tokens():
+    torch.manual_seed(3)
+    encoder = PeakSetEncoder(
+        model_dim=32,
+        num_layers=2,
+        num_heads=4,
+        num_peaks=8,
+        num_register_tokens=2,
+        feature_mlp_hidden_dim=16,
+    ).eval()
+    peak_mz = torch.rand(2, 8)
+    peak_intensity = torch.rand(2, 8)
+    valid_mask = torch.tensor(
+        [
+            [True, True, True, True, True, False, False, False],
+            [True, True, True, False, True, False, False, False],
+        ]
+    )
+    visible_mask = torch.tensor(
+        [
+            [False, True, True, True, False, False, False, False],
+            [True, False, True, False, True, False, False, False],
+        ]
+    )
+
+    out_full = encoder(
+        peak_mz,
+        peak_intensity,
+        valid_mask=valid_mask,
+        visible_mask=visible_mask,
+    )
+    out_packed = encoder(
+        peak_mz,
+        peak_intensity,
+        valid_mask=valid_mask,
+        visible_mask=visible_mask,
+        pack_n=4,
+    )
+    out_full, cls_full = _split_peak_and_cls(out_full)
+    out_packed, cls_packed = _split_peak_and_cls(out_packed)
+
+    visible = visible_mask & valid_mask
+    torch.testing.assert_close(
+        out_packed.masked_select(visible.unsqueeze(-1).expand_as(out_packed)),
+        out_full.masked_select(visible.unsqueeze(-1).expand_as(out_full)),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    _assert_zero_at_mask(out_packed, ~visible)
+    torch.testing.assert_close(cls_packed, cls_full, rtol=1e-6, atol=1e-6)
 
 
 @torch.no_grad()
@@ -243,6 +306,8 @@ def test_encoder_sparse_pack_absolute_positions_use_original_positions():
         visible_mask=visible_mask,
         pack_n=3,
     )
+    out_without_pos, _ = _split_peak_and_cls(out_without_pos)
+    out_with_pos, _ = _split_peak_and_cls(out_with_pos)
 
     packed_row0_without_pos = out_without_pos[0, visible_mask[0]]
     packed_row1_without_pos = out_without_pos[1, visible_mask[1]]

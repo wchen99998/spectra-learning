@@ -408,6 +408,7 @@ def extract_our_embeddings(
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             token_emb = encoder(batch_mz, batch_int, valid_mask=batch_mask)
+        token_emb = token_emb[:, :-1]
 
         # Mean pool over valid tokens
         mask_f = batch_mask.unsqueeze(-1).float()
