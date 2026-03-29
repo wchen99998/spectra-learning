@@ -7,8 +7,6 @@ def _build_model(
     *,
     num_target_blocks: int = 2,
     predictor_layers: int = 2,
-    encoder_use_rope: bool = True,
-    predictor_use_rope: bool | None = None,
     encoder_apply_final_norm: bool = True,
     predictor_apply_final_norm: bool = True,
 ) -> PeakSetSIGReg:
@@ -17,9 +15,8 @@ def _build_model(
         model_dim=32,
         encoder_num_layers=2,
         encoder_num_heads=4,
+        num_peaks=6,
         feature_mlp_hidden_dim=32,
-        encoder_use_rope=encoder_use_rope,
-        predictor_use_rope=predictor_use_rope,
         encoder_apply_final_norm=encoder_apply_final_norm,
         predictor_apply_final_norm=predictor_apply_final_norm,
         jepa_num_target_blocks=num_target_blocks,
@@ -85,24 +82,18 @@ def test_predictor_zero_layers_is_identity():
 
 
 @torch.no_grad()
-def test_predictor_rope_toggle_changes_output():
+def test_predictor_absolute_positions_change_output():
     torch.manual_seed(0)
-    model_no_rope = _build_model(
-        predictor_layers=2,
-        encoder_use_rope=False,
-        predictor_use_rope=False,
-    )
+    model_without_pos = _build_model(predictor_layers=2)
     torch.manual_seed(0)
-    model_with_rope = _build_model(
-        predictor_layers=2,
-        encoder_use_rope=False,
-        predictor_use_rope=True,
-    )
-    predictor_input = torch.randn(1, 6, model_with_rope.model_dim)
+    model_with_pos = _build_model(predictor_layers=2)
+    with torch.no_grad():
+        model_without_pos.predictor_position_embedding.weight.zero_()
+    predictor_input = torch.randn(1, 6, model_with_pos.model_dim)
     visible_mask = torch.ones(1, 6, dtype=torch.bool)
 
-    out_1 = model_no_rope.predict_masked_latents(predictor_input, visible_mask)
-    out_2 = model_with_rope.predict_masked_latents(predictor_input, visible_mask)
+    out_1 = model_without_pos.predict_masked_latents(predictor_input, visible_mask)
+    out_2 = model_with_pos.predict_masked_latents(predictor_input, visible_mask)
 
     diff = (out_1 - out_2).abs().mean()
     assert float(diff) > 1e-3
@@ -115,8 +106,8 @@ def test_encoder_final_norm_toggle_changes_output():
         model_dim=32,
         num_layers=2,
         num_heads=4,
+        num_peaks=6,
         feature_mlp_hidden_dim=32,
-        use_rope=False,
         norm_type="layernorm",
         apply_final_norm=True,
     ).eval()
@@ -125,8 +116,8 @@ def test_encoder_final_norm_toggle_changes_output():
         model_dim=32,
         num_layers=2,
         num_heads=4,
+        num_peaks=6,
         feature_mlp_hidden_dim=32,
-        use_rope=False,
         norm_type="layernorm",
         apply_final_norm=False,
     ).eval()
@@ -155,12 +146,10 @@ def test_encoder_final_norm_toggle_changes_output():
 def test_predictor_final_norm_toggle_changes_output():
     model_with_final_norm = _build_model(
         predictor_layers=2,
-        predictor_use_rope=False,
         predictor_apply_final_norm=True,
     )
     model_without_final_norm = _build_model(
         predictor_layers=2,
-        predictor_use_rope=False,
         predictor_apply_final_norm=False,
     )
     predictor_input = torch.randn(1, 6, model_with_final_norm.model_dim)
@@ -176,24 +165,21 @@ def test_predictor_final_norm_toggle_changes_output():
 
 
 @torch.no_grad()
-def test_predictor_rope_is_independent_from_encoder_rope():
+def test_predictor_output_is_independent_from_encoder_positions():
     torch.manual_seed(0)
-    model_encoder_no_rope = _build_model(
-        predictor_layers=2,
-        encoder_use_rope=False,
-        predictor_use_rope=False,
-    )
+    model_without_encoder_pos = _build_model(predictor_layers=2)
     torch.manual_seed(0)
-    model_encoder_with_rope = _build_model(
-        predictor_layers=2,
-        encoder_use_rope=True,
-        predictor_use_rope=False,
-    )
-    predictor_input = torch.randn(1, 6, model_encoder_no_rope.model_dim)
+    model_with_encoder_pos = _build_model(predictor_layers=2)
+    with torch.no_grad():
+        model_without_encoder_pos.encoder.position_embedding.weight.zero_()
+    predictor_input = torch.randn(1, 6, model_without_encoder_pos.model_dim)
     visible_mask = torch.ones(1, 6, dtype=torch.bool)
 
-    out_1 = model_encoder_no_rope.predict_masked_latents(predictor_input, visible_mask)
-    out_2 = model_encoder_with_rope.predict_masked_latents(
+    out_1 = model_without_encoder_pos.predict_masked_latents(
+        predictor_input,
+        visible_mask,
+    )
+    out_2 = model_with_encoder_pos.predict_masked_latents(
         predictor_input,
         visible_mask,
     )

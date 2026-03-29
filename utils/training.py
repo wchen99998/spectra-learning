@@ -43,8 +43,6 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         encoder_fourier_trainable=bool(
             config.get("encoder_fourier_trainable", True)
         ),
-        encoder_use_rope=bool(config.get("encoder_use_rope", False)),
-        predictor_use_rope=config.get("predictor_use_rope", None),
         masked_token_loss_weight=float(config.get("masked_token_loss_weight", 0.0)),
         masked_token_loss_type=str(config.get("masked_token_loss_type", "l1")),
         normalize_jepa_targets=bool(config.get("normalize_jepa_targets", False)),
@@ -183,7 +181,21 @@ def load_pretrained_weights(
     prefixed = {
         k.removeprefix("model."): v for k, v in sd.items() if k.startswith("model.")
     }
-    model.load_state_dict(prefixed or sd, strict=True)
+    missing, unexpected = model.load_state_dict(prefixed or sd, strict=False)
+    allowed_missing_suffixes = (
+        "position_embedding.weight",
+        "predictor_position_embedding.weight",
+    )
+    unexpected = [key for key in unexpected]
+    missing = [
+        key for key in missing
+        if not key.endswith(allowed_missing_suffixes)
+    ]
+    if missing or unexpected:
+        raise RuntimeError(
+            "Checkpoint load mismatch: "
+            f"missing={missing}, unexpected={unexpected}"
+        )
 
 
 def latest_ckpt_path(directory: Path) -> str | None:

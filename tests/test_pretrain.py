@@ -209,6 +209,21 @@ class BlockJEPATests(unittest.TestCase):
             for key, value in model.state_dict().items():
                 self.assertTrue(torch.equal(value, loaded.state_dict()[key]), key)
 
+    def test_load_pretrained_weights_allows_missing_position_embeddings(self):
+        model = self._build_model()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/ckpt.pt"
+            old_state = {
+                f"model.{k}": v
+                for k, v in model.state_dict().items()
+                if not k.endswith(
+                    ("position_embedding.weight", "predictor_position_embedding.weight")
+                )
+            }
+            torch.save({"state_dict": old_state}, path)
+            loaded = self._build_model()
+            load_pretrained_weights(loaded, path)
+
     def test_teacher_ema_warmup_uses_cosine_schedule(self):
         model = self._build_model(
             use_ema_teacher_target=True,

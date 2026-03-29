@@ -8,7 +8,7 @@ from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 from models.peak_features import PeakFeatureEmbedder
 from models.losses import SIGReg
 from networks import transformer_torch
-from networks.transformer_torch import _build_norm, _rotate_half, create_visible_block_mask
+from networks.transformer_torch import _build_norm, create_visible_block_mask
 
 
 def _apply_depth_scaled_init(blocks: nn.ModuleList, num_layers: int) -> None:
@@ -54,23 +54,6 @@ def _build_non_causal_blocks(
     )
     _apply_depth_scaled_init(blocks, num_layers)
     return blocks
-
-
-def _compute_rope_freqs(
-    use_rope: bool,
-    seq_len: int,
-    inv_freq: torch.Tensor,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-    if not use_rope:
-        return None, None
-    positions = torch.arange(seq_len, device=device, dtype=torch.float32).unsqueeze(0)
-    angles = positions.unsqueeze(-1) * inv_freq.to(device=device).view(1, 1, -1)
-    angles = torch.repeat_interleave(angles, repeats=2, dim=-1)
-    return angles.cos().to(dtype=dtype).unsqueeze(2), angles.sin().to(
-        dtype=dtype
-    ).unsqueeze(2)
 
 
 def _masked_embedding_stats(
@@ -129,18 +112,6 @@ def _scatter_packed_tokens(
     return out.scatter(1, pack_idx.unsqueeze(-1).expand_as(packed_x), packed_x)
 
 
-def _gather_rope_positions(
-    freqs_cos: torch.Tensor | None,
-    freqs_sin: torch.Tensor | None,
-    pack_idx: torch.Tensor,
-) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-    if freqs_cos is None or freqs_sin is None:
-        return None, None
-    rope_cos = freqs_cos[0, :, 0, :][pack_idx].unsqueeze(2)
-    rope_sin = freqs_sin[0, :, 0, :][pack_idx].unsqueeze(2)
-    return rope_cos, rope_sin
-
-
 class CrossAttention(nn.Module):
     """Cross-attention: Q from prediction queries, KV from source embeddings."""
 
@@ -163,8 +134,6 @@ class CrossAttention(nn.Module):
         nn.init.xavier_normal_(self.wo.weight)
 
     def forward(self, x: torch.Tensor, memory: torch.Tensor, *,
-                freqs_cos: torch.Tensor | None = None,
-                freqs_sin: torch.Tensor | None = None,
                 memory_mask: torch.Tensor | None = None) -> torch.Tensor:
         bsz, tgt_len, _ = x.shape
         mem_len = memory.shape[1]
@@ -174,10 +143,6 @@ class CrossAttention(nn.Module):
             [self.n_kv_heads * self.head_dim, self.n_kv_heads * self.head_dim], dim=-1)
         xk = xk.view(bsz, mem_len, self.n_kv_heads, self.head_dim)
         xv = xv.view(bsz, mem_len, self.n_kv_heads, self.head_dim)
-        # RoPE on Q only (prediction positions); no RoPE on K
-        if freqs_cos is not None and freqs_sin is not None:
-            q_rot = _rotate_half(xq)
-            xq = (xq * freqs_cos) + (q_rot * freqs_sin)
         if self.qk_norm:
             xq = self.q_norm(xq)
             xk = self.k_norm(xk)
@@ -213,13 +178,9 @@ class TemporalDecoderBlock(nn.Module):
         self.ffn_norm = _build_norm(dim, eps=None, norm_type=norm_type)
 
     def forward(self, x: torch.Tensor, memory: torch.Tensor, *,
-                freqs_cos: torch.Tensor | None,
-                freqs_sin: torch.Tensor | None,
                 memory_mask: torch.Tensor | None = None) -> torch.Tensor:
-        h = x + self.attention(self.attention_norm(x), freqs_cos=freqs_cos,
-                               freqs_sin=freqs_sin)
+        h = x + self.attention(self.attention_norm(x))
         h = h + self.cross_attn(self.cross_attn_norm(h), memory,
-                                freqs_cos=freqs_cos, freqs_sin=freqs_sin,
                                 memory_mask=memory_mask)
         return h + self.feed_forward(self.ffn_norm(h))
 
@@ -271,13 +232,12 @@ class PeakSetEncoder(nn.Module):
         fourier_num_freqs: int = 512,
         fourier_sigma: float = 10.0,
         fourier_trainable: bool = True,
-        use_rope: bool = False,
         qk_norm: bool = False,
         norm_type: str = "rmsnorm",
         apply_final_norm: bool = True,
+        num_peaks: int = 64,
     ):
         super().__init__()
-        self.use_rope = bool(use_rope)
         norm_type = str(norm_type).lower()
         self.embedder = PeakFeatureEmbedder(
             model_dim=model_dim,
@@ -290,12 +250,8 @@ class PeakSetEncoder(nn.Module):
             fourier_sigma=fourier_sigma,
             fourier_trainable=fourier_trainable,
         )
-        _h = model_dim // int(num_heads) // 2
-        self.register_buffer(
-            "rope_inv_freq",
-            1.0 / (10000.0 ** (torch.arange(_h, dtype=torch.float32) / _h)),
-            persistent=False,
-        )
+        self.position_embedding = nn.Embedding(int(num_peaks), model_dim)
+        nn.init.trunc_normal_(self.position_embedding.weight, std=0.02)
         self.blocks = _build_non_causal_blocks(
             dim=model_dim,
             num_layers=num_layers,
@@ -322,33 +278,23 @@ class PeakSetEncoder(nn.Module):
     ) -> torch.Tensor:
         attn_mask = _merge_visible_mask(valid_mask, visible_mask)
         x = self.embedder(peak_mz, peak_intensity)
+        x = x + self.position_embedding(
+            torch.arange(peak_mz.shape[1], device=x.device)
+        ).unsqueeze(0).to(dtype=x.dtype)
         seq_len = peak_mz.shape[1]
-        freqs_cos, freqs_sin = _compute_rope_freqs(
-            self.use_rope, seq_len, self.rope_inv_freq, peak_mz.device, x.dtype
-        )
         if attn_mask is not None and pack_n > 0:
             pack_n = min(int(pack_n), seq_len)
             if prefix_pack:
                 packed_x = x[:, :pack_n]
                 packed_mask = attn_mask[:, :pack_n]
-                if freqs_cos is not None and freqs_sin is not None:
-                    freqs_cos = freqs_cos[:, :pack_n]
-                    freqs_sin = freqs_sin[:, :pack_n]
             else:
                 pack_idx = _pack_indices(attn_mask, pack_n)
                 packed_x = _gather_packed_tokens(x, pack_idx)
                 packed_mask = attn_mask.gather(1, pack_idx)
-                freqs_cos, freqs_sin = _gather_rope_positions(
-                    freqs_cos,
-                    freqs_sin,
-                    pack_idx,
-                )
             block_mask = create_visible_block_mask(packed_mask)
             for block in self.blocks:
                 packed_x = block(
                     packed_x,
-                    freqs_cos=freqs_cos,
-                    freqs_sin=freqs_sin,
                     block_mask=block_mask,
                 )
             packed_x = self.final_norm(packed_x)
@@ -364,8 +310,6 @@ class PeakSetEncoder(nn.Module):
         for block in self.blocks:
             x = block(
                 x,
-                freqs_cos=freqs_cos,
-                freqs_sin=freqs_sin,
                 block_mask=block_mask,
             )
         return self.final_norm(x)
@@ -388,8 +332,6 @@ class PeakSetSIGReg(nn.Module):
         encoder_fourier_num_freqs: int = 512,
         encoder_fourier_sigma: float = 10.0,
         encoder_fourier_trainable: bool = True,
-        encoder_use_rope: bool = False,
-        predictor_use_rope: bool | None = None,
         masked_token_loss_weight: float = 0.0,
         masked_token_loss_type: str = "l1",
         normalize_jepa_targets: bool = False,
@@ -477,13 +419,6 @@ class PeakSetSIGReg(nn.Module):
         self.normalize_jepa_targets = bool(normalize_jepa_targets)
         self.norm_type = str(norm_type).lower()
         self.temporal_predictor_num_layers = int(temporal_predictor_num_layers)
-        if predictor_use_rope is None:
-            predictor_use_rope = (
-                True
-                if self.temporal_predictor_num_layers > 0
-                else encoder_use_rope
-            )
-        self.predictor_use_rope = bool(predictor_use_rope)
         if self.jepa_num_target_blocks < 1:
             raise ValueError("jepa_num_target_blocks must be >= 1")
         N = int(num_peaks)
@@ -505,10 +440,10 @@ class PeakSetSIGReg(nn.Module):
             fourier_num_freqs=encoder_fourier_num_freqs,
             fourier_sigma=encoder_fourier_sigma,
             fourier_trainable=encoder_fourier_trainable,
-            use_rope=encoder_use_rope,
             qk_norm=encoder_qk_norm,
             norm_type=self.norm_type,
             apply_final_norm=encoder_apply_final_norm,
+            num_peaks=N,
         )
         # EMA teacher encoder
         if bool(use_ema_teacher_target):
@@ -526,12 +461,8 @@ class PeakSetSIGReg(nn.Module):
         pred_heads = max(1, min(int(encoder_num_heads), self.model_dim // 16))
         while self.model_dim % pred_heads != 0:
             pred_heads -= 1
-        _ph = self.model_dim // pred_heads // 2
-        self.register_buffer(
-            "predictor_rope_inv_freq",
-            1.0 / (10000.0 ** (torch.arange(_ph, dtype=torch.float32) / _ph)),
-            persistent=False,
-        )
+        self.predictor_position_embedding = nn.Embedding(N, self.model_dim)
+        nn.init.trunc_normal_(self.predictor_position_embedding.weight, std=0.02)
         self.masked_latent_predictor = _build_non_causal_blocks(
             dim=self.model_dim,
             num_layers=int(masked_latent_predictor_num_layers),
@@ -618,25 +549,18 @@ class PeakSetSIGReg(nn.Module):
     ) -> torch.Tensor:
         if len(self.masked_latent_predictor) == 0:
             return x
-        freqs_cos, freqs_sin = _compute_rope_freqs(
-            self.predictor_use_rope,
-            x.shape[1],
-            self.predictor_rope_inv_freq,
-            x.device,
-            x.dtype,
-        )
+        x = x + self.predictor_position_embedding(
+            torch.arange(x.shape[1], device=x.device)
+        ).unsqueeze(0).to(dtype=x.dtype)
         if pack_n > 0:
             seq_len = x.shape[1]
             pack_idx = _pack_indices(visible_mask, min(int(pack_n), seq_len))
             packed_x = _gather_packed_tokens(x, pack_idx)
             packed_mask = visible_mask.gather(1, pack_idx)
-            freqs_cos, freqs_sin = _gather_rope_positions(freqs_cos, freqs_sin, pack_idx)
             predictor_block_mask = create_visible_block_mask(packed_mask)
             for block in self.masked_latent_predictor:
                 packed_x = block(
                     packed_x,
-                    freqs_cos=freqs_cos,
-                    freqs_sin=freqs_sin,
                     block_mask=predictor_block_mask,
                 )
             packed_x = self.predictor_final_norm(packed_x)
@@ -650,8 +574,6 @@ class PeakSetSIGReg(nn.Module):
         for block in self.masked_latent_predictor:
             x = block(
                 x,
-                freqs_cos=freqs_cos,
-                freqs_sin=freqs_sin,
                 block_mask=predictor_block_mask,
             )
         return self.predictor_final_norm(x)
@@ -866,19 +788,12 @@ class PeakSetSIGReg(nn.Module):
 
         queries = self.temporal_query_tokens.unsqueeze(0).expand(B, -1, -1)
         queries = queries + rt_emb.unsqueeze(1)
+        queries = queries + self.predictor_position_embedding(
+            torch.arange(queries.shape[1], device=queries.device)
+        ).unsqueeze(0).to(dtype=queries.dtype)
 
-        N_tgt = queries.shape[1]
-        freqs_cos, freqs_sin = _compute_rope_freqs(
-            self.predictor_use_rope,
-            N_tgt,
-            self.predictor_rope_inv_freq,
-            queries.device,
-            queries.dtype,
-        )
         for block in self.temporal_predictor:
-            queries = block(queries, frame_emb,
-                            freqs_cos=freqs_cos, freqs_sin=freqs_sin,
-                            memory_mask=frame_valid)
+            queries = block(queries, frame_emb, memory_mask=frame_valid)
         predicted_next_frame = queries  # [B, N, D]
 
         if teacher_embeddings is not None:

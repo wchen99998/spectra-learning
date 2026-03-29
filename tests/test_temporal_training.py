@@ -14,7 +14,6 @@ def _small_model(**overrides) -> PeakSetSIGReg:
         encoder_num_kv_heads=4,
         attention_mlp_multiple=2.0,
         feature_mlp_hidden_dim=32,
-        encoder_use_rope=True,
         masked_token_loss_weight=1.0,
         masked_token_loss_type="l2",
         representation_regularizer="none",
@@ -112,26 +111,22 @@ class TestForwardTemporal:
             metrics = model.forward_temporal(batch)
             assert torch.isfinite(metrics["loss"]), f"Non-finite loss for {loss_type}"
 
-    def test_temporal_predictor_rope_toggle_changes_output(self):
+    def test_temporal_predictor_absolute_positions_change_output(self):
         torch.manual_seed(0)
-        model_no_rope = _small_model(
-            encoder_use_rope=False,
-            predictor_use_rope=False,
-        )
+        model_without_pos = _small_model()
         torch.manual_seed(0)
-        model_with_rope = _small_model(
-            encoder_use_rope=False,
-            predictor_use_rope=True,
-        )
-        model_no_rope.eval()
-        model_with_rope.eval()
+        model_with_pos = _small_model()
+        with torch.no_grad():
+            model_without_pos.predictor_position_embedding.weight.zero_()
+        model_without_pos.eval()
+        model_with_pos.eval()
         batch = _temporal_batch(batch_size=2, num_peaks=8)
 
         with torch.no_grad():
-            loss_no_rope = model_no_rope.forward_temporal(batch)["loss"]
-            loss_with_rope = model_with_rope.forward_temporal(batch)["loss"]
+            loss_without_pos = model_without_pos.forward_temporal(batch)["loss"]
+            loss_with_pos = model_with_pos.forward_temporal(batch)["loss"]
 
-        assert not torch.allclose(loss_no_rope, loss_with_rope, atol=1e-6)
+        assert not torch.allclose(loss_without_pos, loss_with_pos, atol=1e-6)
 
 
 class TestCheckpointPartialLoad:

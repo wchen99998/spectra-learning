@@ -36,8 +36,6 @@ def main() -> None:
         encoder_fourier_num_freqs=cfg.encoder_fourier_num_freqs,
         encoder_fourier_sigma=cfg.encoder_fourier_sigma,
         encoder_fourier_trainable=cfg.encoder_fourier_trainable,
-        encoder_use_rope=cfg.encoder_use_rope,
-        predictor_use_rope=cfg.get("predictor_use_rope", None),
         encoder_qk_norm=cfg.encoder_qk_norm,
         representation_regularizer=cfg.representation_regularizer,
         sigreg_num_slices=cfg.sigreg_num_slices,

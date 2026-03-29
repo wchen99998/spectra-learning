@@ -28,8 +28,8 @@ def test_encoder_sparse_pack_matches_full_on_visible_tokens():
         model_dim=32,
         num_layers=2,
         num_heads=4,
+        num_peaks=8,
         feature_mlp_hidden_dim=16,
-        use_rope=True,
     ).eval()
     peak_mz = torch.tensor(
         [
@@ -88,8 +88,8 @@ def test_encoder_prefix_pack_matches_full_on_valid_prefix():
         model_dim=32,
         num_layers=2,
         num_heads=4,
+        num_peaks=8,
         feature_mlp_hidden_dim=16,
-        use_rope=True,
     ).eval()
     peak_mz = torch.rand(2, 8)
     peak_intensity = torch.rand(2, 8)
@@ -131,8 +131,6 @@ def test_forward_augmented_sparse_pack_matches_full_model_loss():
         encoder_num_layers=2,
         encoder_num_heads=4,
         feature_mlp_hidden_dim=16,
-        encoder_use_rope=True,
-        predictor_use_rope=True,
         masked_token_loss_weight=1.0,
         representation_regularizer="none",
         jepa_num_target_blocks=2,
@@ -202,7 +200,7 @@ def test_forward_augmented_sparse_pack_matches_full_model_loss():
 
 
 @torch.no_grad()
-def test_encoder_sparse_pack_rope_uses_original_positions():
+def test_encoder_sparse_pack_absolute_positions_use_original_positions():
     visible_mask = torch.tensor(
         [
             [True, True, False, False, True, False, False, False],
@@ -213,30 +211,32 @@ def test_encoder_sparse_pack_rope_uses_original_positions():
     peak_mz, peak_intensity = _place_visible_tokens(base_tokens, visible_mask)
 
     torch.manual_seed(7)
-    encoder_no_rope = PeakSetEncoder(
+    encoder_without_pos = PeakSetEncoder(
         model_dim=32,
         num_layers=2,
         num_heads=4,
+        num_peaks=8,
         feature_mlp_hidden_dim=16,
-        use_rope=False,
     ).eval()
     torch.manual_seed(7)
-    encoder_with_rope = PeakSetEncoder(
+    encoder_with_pos = PeakSetEncoder(
         model_dim=32,
         num_layers=2,
         num_heads=4,
+        num_peaks=8,
         feature_mlp_hidden_dim=16,
-        use_rope=True,
     ).eval()
+    with torch.no_grad():
+        encoder_without_pos.position_embedding.weight.zero_()
 
-    out_no_rope = encoder_no_rope(
+    out_without_pos = encoder_without_pos(
         peak_mz,
         peak_intensity,
         valid_mask=visible_mask,
         visible_mask=visible_mask,
         pack_n=3,
     )
-    out_with_rope = encoder_with_rope(
+    out_with_pos = encoder_with_pos(
         peak_mz,
         peak_intensity,
         valid_mask=visible_mask,
@@ -244,27 +244,27 @@ def test_encoder_sparse_pack_rope_uses_original_positions():
         pack_n=3,
     )
 
-    packed_row0_no_rope = out_no_rope[0, visible_mask[0]]
-    packed_row1_no_rope = out_no_rope[1, visible_mask[1]]
-    packed_row0_with_rope = out_with_rope[0, visible_mask[0]]
-    packed_row1_with_rope = out_with_rope[1, visible_mask[1]]
+    packed_row0_without_pos = out_without_pos[0, visible_mask[0]]
+    packed_row1_without_pos = out_without_pos[1, visible_mask[1]]
+    packed_row0_with_pos = out_with_pos[0, visible_mask[0]]
+    packed_row1_with_pos = out_with_pos[1, visible_mask[1]]
 
     torch.testing.assert_close(
-        packed_row0_no_rope,
-        packed_row1_no_rope,
+        packed_row0_without_pos,
+        packed_row1_without_pos,
         rtol=1e-6,
         atol=1e-6,
     )
     assert not torch.allclose(
-        packed_row0_with_rope,
-        packed_row1_with_rope,
+        packed_row0_with_pos,
+        packed_row1_with_pos,
         atol=1e-4,
         rtol=1e-4,
     )
 
 
 @torch.no_grad()
-def test_predictor_sparse_pack_rope_uses_original_positions():
+def test_predictor_sparse_pack_absolute_positions_use_original_positions():
     visible_mask = torch.tensor(
         [
             [True, True, False, False, True, False],
@@ -278,47 +278,49 @@ def test_predictor_sparse_pack_rope_uses_original_positions():
         x[row_idx, pos] = base.unsqueeze(-1) * torch.linspace(1.0, 2.0, steps=32)
 
     torch.manual_seed(11)
-    model_no_rope = PeakSetSIGReg(
+    model_without_pos = PeakSetSIGReg(
         model_dim=32,
         encoder_num_layers=2,
         encoder_num_heads=4,
         feature_mlp_hidden_dim=16,
-        encoder_use_rope=False,
-        predictor_use_rope=False,
         representation_regularizer="none",
         masked_latent_predictor_num_layers=2,
         num_peaks=6,
     ).eval()
     torch.manual_seed(11)
-    model_with_rope = PeakSetSIGReg(
+    model_with_pos = PeakSetSIGReg(
         model_dim=32,
         encoder_num_layers=2,
         encoder_num_heads=4,
         feature_mlp_hidden_dim=16,
-        encoder_use_rope=False,
-        predictor_use_rope=True,
         representation_regularizer="none",
         masked_latent_predictor_num_layers=2,
         num_peaks=6,
     ).eval()
+    with torch.no_grad():
+        model_without_pos.predictor_position_embedding.weight.zero_()
 
-    out_no_rope = model_no_rope.predict_masked_latents(x, visible_mask, pack_n=3)
-    out_with_rope = model_with_rope.predict_masked_latents(x, visible_mask, pack_n=3)
+    out_without_pos = model_without_pos.predict_masked_latents(
+        x,
+        visible_mask,
+        pack_n=3,
+    )
+    out_with_pos = model_with_pos.predict_masked_latents(x, visible_mask, pack_n=3)
 
-    packed_row0_no_rope = out_no_rope[0, visible_mask[0]]
-    packed_row1_no_rope = out_no_rope[1, visible_mask[1]]
-    packed_row0_with_rope = out_with_rope[0, visible_mask[0]]
-    packed_row1_with_rope = out_with_rope[1, visible_mask[1]]
+    packed_row0_without_pos = out_without_pos[0, visible_mask[0]]
+    packed_row1_without_pos = out_without_pos[1, visible_mask[1]]
+    packed_row0_with_pos = out_with_pos[0, visible_mask[0]]
+    packed_row1_with_pos = out_with_pos[1, visible_mask[1]]
 
     torch.testing.assert_close(
-        packed_row0_no_rope,
-        packed_row1_no_rope,
+        packed_row0_without_pos,
+        packed_row1_without_pos,
         rtol=1e-6,
         atol=1e-6,
     )
     assert not torch.allclose(
-        packed_row0_with_rope,
-        packed_row1_with_rope,
+        packed_row0_with_pos,
+        packed_row1_with_pos,
         atol=1e-4,
         rtol=1e-4,
     )

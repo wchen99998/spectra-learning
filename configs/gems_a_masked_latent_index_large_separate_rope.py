@@ -24,8 +24,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_layers = 12
     cfg.num_heads = 12
     cfg.num_kv_heads = 12
-    cfg.encoder_use_rope = False
-    cfg.predictor_use_rope = True
     cfg.encoder_qk_norm = False
     cfg.encoder_fourier_strategy = "lin_float_int"
     cfg.encoder_fourier_x_min = 1e-4

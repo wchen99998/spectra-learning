@@ -20,26 +20,6 @@ def create_visible_block_mask(visible_mask: torch.Tensor) -> BlockMask:
     )
 
 
-def _rotate_half(x: torch.Tensor) -> torch.Tensor:
-    rotated = torch.empty_like(x)
-    rotated[..., ::2] = -x[..., 1::2]
-    rotated[..., 1::2] = x[..., ::2]
-    return rotated
-
-
-def apply_rotary_emb(
-    xq: torch.Tensor,
-    xk: torch.Tensor,
-    freqs_cos: torch.Tensor,
-    freqs_sin: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    q_rot = _rotate_half(xq)
-    k_rot = _rotate_half(xk)
-    return (xq * freqs_cos) + (q_rot * freqs_sin), (xk * freqs_cos) + (
-        k_rot * freqs_sin
-    )
-
-
 def _build_norm(dim: int, eps: float | None, norm_type: str) -> nn.Module:
     kind = str(norm_type).lower()
     if kind == "rmsnorm":
@@ -81,8 +61,6 @@ class Attention(nn.Module):
         self,
         x: torch.Tensor,
         *,
-        freqs_cos: torch.Tensor | None = None,
-        freqs_sin: torch.Tensor | None = None,
         block_mask: BlockMask | None = None,
     ) -> torch.Tensor:
         bsz, seqlen, _ = x.shape
@@ -100,14 +78,6 @@ class Attention(nn.Module):
         if self.qk_norm:
             xq = self.q_norm(xq)
             xk = self.k_norm(xk)
-
-        if freqs_cos is not None and freqs_sin is not None:
-            xq, xk = apply_rotary_emb(
-                xq,
-                xk,
-                freqs_cos,
-                freqs_sin,
-            )
 
         xq = xq.to(dtype=xv.dtype)
         xk = xk.to(dtype=xv.dtype)
@@ -179,14 +149,10 @@ class TransformerBlock(nn.Module):
         self,
         x: torch.Tensor,
         *,
-        freqs_cos: torch.Tensor | None,
-        freqs_sin: torch.Tensor | None,
         block_mask: BlockMask | None = None,
     ) -> torch.Tensor:
         h = x + self.attention(
             self.attention_norm(x),
-            freqs_cos=freqs_cos,
-            freqs_sin=freqs_sin,
             block_mask=block_mask,
         )
         return h + self.feed_forward(self.ffn_norm(h))

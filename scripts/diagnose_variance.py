@@ -44,8 +44,6 @@ def build_model(cfg) -> PeakSetSIGReg:
         encoder_fourier_num_freqs=cfg.encoder_fourier_num_freqs,
         encoder_fourier_sigma=cfg.encoder_fourier_sigma,
         encoder_fourier_trainable=cfg.encoder_fourier_trainable,
-        encoder_use_rope=cfg.encoder_use_rope,
-        predictor_use_rope=getattr(cfg, "predictor_use_rope", None),
         sigreg_num_slices=cfg.sigreg_num_slices,
         sigreg_lambda=cfg.sigreg_lambda,
         jepa_num_target_blocks=cfg.jepa_num_target_blocks,
@@ -97,6 +95,9 @@ def diagnose_encoder(model: PeakSetSIGReg, batch: dict[str, torch.Tensor]):
 
     # Step 1: Embedder output
     x = encoder.embedder(mz, intensity)
+    x = x + encoder.position_embedding(
+        torch.arange(x.shape[1], device=x.device)
+    ).unsqueeze(0).to(dtype=x.dtype)
     _report("embedder_out", x, visible_mask)
 
     # Step 2: Per-block activations
@@ -112,9 +113,7 @@ def diagnose_encoder(model: PeakSetSIGReg, batch: dict[str, torch.Tensor]):
         _report(f"block_{i:02d}/attn_pre_norm", attn_normed, visible_mask)
 
         # Attention output (residual contribution)
-        attn_out = block.attention(
-            attn_normed, freqs_cos=None, freqs_sin=None, block_mask=block_mask
-        )
+        attn_out = block.attention(attn_normed, block_mask=block_mask)
         _report(f"block_{i:02d}/attn_out", attn_out, visible_mask)
 
         h = x + attn_out
