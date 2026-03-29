@@ -390,7 +390,6 @@ class PeakSetSIGReg(nn.Module):
         encoder_fourier_trainable: bool = True,
         masked_token_loss_weight: float = 0.0,
         masked_token_loss_type: str = "l1",
-        normalize_jepa_targets: bool = False,
         jepa_target_normalization: str = "none",
         representation_regularizer: str = "sigreg",
         masked_latent_predictor_num_layers: int = 2,
@@ -475,7 +474,6 @@ class PeakSetSIGReg(nn.Module):
         _reg("teacher_ema_update_step", torch.zeros((), dtype=torch.int64))
         self.masked_token_loss_weight = float(masked_token_loss_weight)
         self.masked_token_loss_type = str(masked_token_loss_type).lower()
-        self.normalize_jepa_targets = bool(normalize_jepa_targets)
         self.jepa_target_normalization = str(jepa_target_normalization).lower()
         if self.jepa_target_normalization not in ("none", "zscore"):
             raise ValueError(
@@ -789,9 +787,6 @@ class PeakSetSIGReg(nn.Module):
         ).reshape(B, K, N, -1)
         loss_pred = predictor_output
         loss_target = target_token_target
-        if self.normalize_jepa_targets:
-            loss_pred = F.normalize(loss_pred, dim=-1)
-            loss_target = F.normalize(loss_target, dim=-1)
         loss_target = self._apply_jepa_target_normalization(loss_target)
         if self.masked_token_loss_type == "l2":
             per_token_reg = (

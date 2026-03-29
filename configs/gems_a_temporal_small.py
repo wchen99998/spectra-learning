@@ -84,7 +84,6 @@ def get_config() -> config_dict.ConfigDict:
 
     cfg.masked_token_loss_weight = 1.0
     cfg.masked_token_loss_type = "l2"
-    cfg.normalize_jepa_targets = False
     cfg.jepa_target_normalization = "none"
     cfg.use_ema_teacher_target = True
     cfg.teacher_ema_decay = 0.999

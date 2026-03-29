@@ -48,10 +48,10 @@ def get_config() -> config_dict.ConfigDict:
 
     # Training
     cfg.num_epochs = 100
-    cfg.learning_rate = 1e-4
-    cfg.warmup_steps = 0
+    cfg.learning_rate = 2e-4
+    cfg.warmup_steps = 10000
     cfg.learning_rate_schedule = "cosine"
-    cfg.min_learning_rate = None
+    cfg.min_learning_rate = 3e-5
     cfg.b2 = 0.98
     cfg.weight_decay = 1e-4
     cfg.optimizer = "muon"
@@ -73,13 +73,12 @@ def get_config() -> config_dict.ConfigDict:
 
     cfg.masked_token_loss_weight = 1.0
     cfg.masked_token_loss_type = "l2"
-    cfg.normalize_jepa_targets = False
-    cfg.jepa_target_normalization = "none"
+    cfg.jepa_target_normalization = "zscore"
     cfg.use_ema_teacher_target = True
-    cfg.teacher_ema_decay = 0.999
-    cfg.teacher_ema_decay_start = 0.99
-    cfg.teacher_ema_decay_warmup_steps = 100_000
-    cfg.teacher_ema_update_every = 2
+    cfg.teacher_ema_decay = 0.9985
+    cfg.teacher_ema_decay_start = 0.9985
+    cfg.teacher_ema_decay_warmup_steps = 0
+    cfg.teacher_ema_update_every = 1
     cfg.grad_clip_norm = 1.0
     cfg.masked_latent_predictor_num_layers = 4
     cfg.predictor_num_heads = 8
