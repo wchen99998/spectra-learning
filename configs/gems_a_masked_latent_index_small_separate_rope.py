@@ -28,7 +28,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.predictor_num_register_tokens = 4
     cfg.encoder_apply_final_norm = False
     cfg.predictor_apply_final_norm = False
-    cfg.encoder_qk_norm = True
+    cfg.encoder_qk_norm = False
     cfg.encoder_fourier_strategy = "lin_float_int"
     cfg.encoder_fourier_x_min = 1e-4
     cfg.encoder_fourier_x_max = 1000.0
@@ -44,14 +44,14 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_context_fraction = 0.3
     cfg.jepa_target_fraction = 0.2
     cfg.jepa_block_min_len = 1
-    cfg.sigreg_mz_jitter_std = 0.001
-    cfg.sigreg_intensity_jitter_std = 0.05
-    cfg.norm_type = "rmsnorm"
+    cfg.sigreg_mz_jitter_std = 0.0002
+    cfg.sigreg_intensity_jitter_std = 0.001
+    cfg.norm_type = "layernorm"
 
     # Training
-    cfg.num_epochs = 100
+    cfg.num_epochs = 20
     cfg.learning_rate = 3e-4
-    cfg.warmup_steps = 10000
+    cfg.warmup_steps = 0
     cfg.learning_rate_schedule = "cosine"
     cfg.min_learning_rate = 3e-5
     cfg.b2 = 0.98
@@ -80,8 +80,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.use_ema_teacher_target = True
     cfg.teacher_ema_decay = 0.9985
     cfg.teacher_ema_decay_start = 0.99
-    cfg.teacher_ema_decay_warmup_steps = 500_000
-    cfg.teacher_ema_update_every = 1
+    cfg.teacher_ema_decay_warmup_steps = 100_000
+    cfg.teacher_ema_update_every = 2
     cfg.grad_clip_norm = 1.0
     cfg.masked_latent_predictor_num_layers = 6
     cfg.predictor_num_heads = 8
@@ -96,7 +96,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_pma_num_seeds = 64
     cfg.msg_probe_num_epochs = 10
     cfg.msg_probe_learning_rate = 3e-4
-    cfg.msg_probe_weight_decay = 1e-2
+    cfg.msg_probe_weight_decay = 1e-4
     cfg.msg_probe_warmup_steps = 0
     cfg.msg_probe_max_train_samples = None
     cfg.msg_probe_max_test_samples = None
