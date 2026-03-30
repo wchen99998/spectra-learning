@@ -515,6 +515,7 @@ class PeakSetSIGReg(nn.Module):
         jepa_target_layers: list[int] | tuple[int, ...] | None = None,
         representation_regularizer: str = "sigreg",
         masked_latent_predictor_num_layers: int = 2,
+        masked_latent_predictor_num_heads: int = 8,
         sigreg_num_slices: int = 256,
         sigreg_lambda: float = 0.1,
         sigreg_lambda_warmup_steps: int = 0,
@@ -535,9 +536,11 @@ class PeakSetSIGReg(nn.Module):
         temporal_predictor_num_layers: int = 0,
         encoder_num_register_tokens: int = 0,
         predictor_num_register_tokens: int = 0,
+        predictor_dim: int | None = None,
     ):
         super().__init__()
         self.model_dim = model_dim
+        self.predictor_dim = predictor_dim if predictor_dim is not None else model_dim
         self.encoder_num_layers = int(encoder_num_layers)
         self.use_precursor_token = bool(use_precursor_token)
         self.jepa_num_target_blocks = int(jepa_num_target_blocks)
@@ -656,9 +659,15 @@ class PeakSetSIGReg(nn.Module):
             self.teacher_encoder = None
         self.latent_mask_token = nn.Parameter(torch.empty(self.model_dim))
         nn.init.normal_(self.latent_mask_token, std=0.02)
-        pred_heads = max(1, min(int(encoder_num_heads), self.model_dim // 16))
-        while self.model_dim % pred_heads != 0:
-            pred_heads -= 1
+
+        if self.predictor_dim != self.model_dim:
+            self.encoder_to_predictor_proj = nn.Linear(
+                self.model_dim, self.predictor_dim, bias=False,
+            )
+            nn.init.xavier_normal_(self.encoder_to_predictor_proj.weight)
+        else:
+            self.encoder_to_predictor_proj = nn.Identity()
+
         self.predictor_position_embedding = _build_frozen_position_embedding(
             N,
             self.model_dim,
@@ -671,20 +680,20 @@ class PeakSetSIGReg(nn.Module):
         else:
             self.predictor_register_tokens = None
         self.masked_latent_predictor = _build_non_causal_blocks(
-            dim=self.model_dim,
+            dim=self.predictor_dim,
             num_layers=int(masked_latent_predictor_num_layers),
-            num_heads=pred_heads,
+            num_heads=int(masked_latent_predictor_num_heads),
             num_kv_heads=None,
             attention_mlp_multiple=attention_mlp_multiple,
             qk_norm=encoder_qk_norm,
             norm_type=self.norm_type,
         )
         self.predictor_final_norm = (
-            _build_norm(self.model_dim, eps=None, norm_type=self.norm_type)
+            _build_norm(self.predictor_dim, eps=None, norm_type=self.norm_type)
             if predictor_apply_final_norm
             else nn.Identity()
         )
-        self.masked_latent_readout = nn.Linear(self.model_dim, self.jepa_target_dim)
+        self.masked_latent_readout = nn.Linear(self.predictor_dim, self.jepa_target_dim)
         nn.init.xavier_normal_(self.masked_latent_readout.weight)
         nn.init.zeros_(self.masked_latent_readout.bias)
         self.sigreg = SIGReg(num_slices=int(sigreg_num_slices))
@@ -693,7 +702,7 @@ class PeakSetSIGReg(nn.Module):
         if self.temporal_predictor_num_layers > 0:
             self.temporal_predictor = _build_temporal_decoder_blocks(
                 dim=model_dim, num_layers=self.temporal_predictor_num_layers,
-                num_heads=pred_heads, num_kv_heads=None,
+                num_heads=int(masked_latent_predictor_num_heads), num_kv_heads=None,
                 attention_mlp_multiple=attention_mlp_multiple,
                 qk_norm=encoder_qk_norm, norm_type=self.norm_type,
             )
@@ -803,6 +812,7 @@ class PeakSetSIGReg(nn.Module):
                 packed_x,
                 packed_mask,
             )
+            packed_x = self.encoder_to_predictor_proj(packed_x)
             predictor_attn_mask = create_visible_attention_mask(packed_mask)
             for block in self.masked_latent_predictor:
                 packed_x = block(
@@ -819,6 +829,7 @@ class PeakSetSIGReg(nn.Module):
             )
             return _scatter_packed_tokens(packed_x, pack_idx, seq_len)
         x, visible_mask = self._append_predictor_register_tokens(x, visible_mask)
+        x = self.encoder_to_predictor_proj(x)
         predictor_attn_mask = create_visible_attention_mask(visible_mask)
         for block in self.masked_latent_predictor:
             x = block(

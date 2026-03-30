@@ -65,6 +65,9 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         masked_latent_predictor_num_layers=int(
             config.get("masked_latent_predictor_num_layers", 2)
         ),
+        masked_latent_predictor_num_heads=int(
+            config.get("masked_latent_predictor_num_heads", 8)
+        ),
         sigreg_num_slices=int(config.get("sigreg_num_slices", 256)),
         sigreg_lambda=float(config.get("sigreg_lambda", 0.1)),
         sigreg_lambda_warmup_steps=int(config.get("sigreg_lambda_warmup_steps", 0)),
@@ -95,6 +98,7 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         temporal_predictor_num_layers=int(
             config.get("temporal_predictor_num_layers", 0)
         ),
+        predictor_dim=config.get("predictor_dim", None),
     )
 
 
