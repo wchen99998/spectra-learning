@@ -49,6 +49,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.predictor_apply_final_norm = True
     cfg.masked_latent_predictor_num_layers = 10
     cfg.masked_latent_predictor_num_heads = 16
+    cfg.predictor_dropout = 0.0
     cfg.temporal_predictor_num_layers = 0
     cfg.predictor_dim = 384
 

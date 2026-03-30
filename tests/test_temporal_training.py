@@ -178,6 +178,18 @@ class TestForwardTemporal:
 
         assert not torch.allclose(loss_without_pos, loss_with_pos, atol=1e-6)
 
+    def test_temporal_predictor_dropout_changes_training_output(self):
+        model = _small_model(predictor_dropout=0.5)
+        model.train()
+        batch = _temporal_batch(batch_size=2, num_peaks=8)
+
+        torch.manual_seed(0)
+        loss_1 = model.forward_temporal(batch)["loss"]
+        torch.manual_seed(1)
+        loss_2 = model.forward_temporal(batch)["loss"]
+
+        assert not torch.allclose(loss_1, loss_2, atol=1e-6)
+
 
 class TestCheckpointPartialLoad:
     def test_partial_load_allows_temporal_keys_missing(self):

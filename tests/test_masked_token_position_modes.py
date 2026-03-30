@@ -8,6 +8,7 @@ def _build_model(
     num_target_blocks: int = 2,
     predictor_layers: int = 2,
     predictor_num_register_tokens: int = 0,
+    predictor_dropout: float = 0.0,
     encoder_apply_final_norm: bool = True,
     predictor_apply_final_norm: bool = True,
     jepa_target_normalization: str = "none",
@@ -23,6 +24,7 @@ def _build_model(
         encoder_apply_final_norm=encoder_apply_final_norm,
         predictor_apply_final_norm=predictor_apply_final_norm,
         predictor_num_register_tokens=predictor_num_register_tokens,
+        predictor_dropout=predictor_dropout,
         jepa_num_target_blocks=num_target_blocks,
         masked_token_loss_weight=1.0,
         masked_latent_predictor_num_layers=predictor_layers,
@@ -103,6 +105,29 @@ def test_predictor_absolute_positions_change_output():
 
     diff = (out_1 - out_2).abs().mean()
     assert float(diff) > 1e-3
+
+
+def test_zero_predictor_dropout_uses_identity():
+    model = _build_model(predictor_dropout=0.0)
+
+    assert isinstance(model.predictor_dropout, torch.nn.Identity)
+
+
+def test_predictor_dropout_changes_training_output():
+    model = _build_model(
+        predictor_layers=2,
+        predictor_dropout=0.5,
+    )
+    model.train()
+    predictor_input = torch.randn(1, 6, model.model_dim)
+    visible_mask = torch.ones(1, 6, dtype=torch.bool)
+
+    torch.manual_seed(0)
+    out_1 = model.predict_masked_latents(predictor_input, visible_mask)
+    torch.manual_seed(1)
+    out_2 = model.predict_masked_latents(predictor_input, visible_mask)
+
+    assert not torch.allclose(out_1, out_2)
 
 
 @torch.no_grad()

@@ -73,6 +73,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_target_normalization = "none"
     cfg.grad_clip_norm = 1.0
     cfg.masked_latent_predictor_num_layers = 4
+    cfg.predictor_dropout = 0.0
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "reduce-overhead"
     cfg.representation_regularizer = "none"

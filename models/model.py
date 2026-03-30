@@ -399,6 +399,7 @@ class PeakSetSIGReg(nn.Module):
         representation_regularizer: str = "sigreg",
         masked_latent_predictor_num_layers: int = 2,
         masked_latent_predictor_num_heads: int = 8,
+        predictor_dropout: float = 0.0,
         sigreg_num_slices: int = 256,
         sigreg_lambda: float = 0.1,
         jepa_num_target_blocks: int = 2,
@@ -449,6 +450,11 @@ class PeakSetSIGReg(nn.Module):
         self.norm_type = str(norm_type).lower()
         self.temporal_predictor_num_layers = int(temporal_predictor_num_layers)
         self.predictor_num_register_tokens = int(predictor_num_register_tokens)
+        self.predictor_dropout = (
+            nn.Identity()
+            if float(predictor_dropout) == 0.0
+            else nn.Dropout(float(predictor_dropout))
+        )
         if self.jepa_num_target_blocks < 1:
             raise ValueError("jepa_num_target_blocks must be >= 1")
         N = int(num_peaks) + int(self.use_precursor_token)
@@ -578,6 +584,7 @@ class PeakSetSIGReg(nn.Module):
         x = self._add_predictor_positions(x)
         x, visible_mask = self._append_predictor_register_tokens(x, visible_mask)
         x = self.encoder_to_predictor_proj(x)
+        x = self.predictor_dropout(x)
         predictor_attn_mask = create_visible_attention_mask(visible_mask)
         for block in self.masked_latent_predictor:
             x = block(
@@ -860,6 +867,7 @@ class PeakSetSIGReg(nn.Module):
         queries = queries + rt_emb.unsqueeze(1)
         queries = self._add_predictor_positions(queries)
         queries, _ = self._append_predictor_register_tokens(queries, None)
+        queries = self.predictor_dropout(queries)
 
         for block in self.temporal_predictor:
             queries = block(queries, frame_emb, memory_mask=frame_valid)

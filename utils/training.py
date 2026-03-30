@@ -69,6 +69,7 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         masked_latent_predictor_num_heads=int(
             config.get("masked_latent_predictor_num_heads", 8)
         ),
+        predictor_dropout=float(config.get("predictor_dropout", 0.0)),
         sigreg_num_slices=int(config.get("sigreg_num_slices", 256)),
         sigreg_lambda=float(config.get("sigreg_lambda", 0.1)),
         jepa_num_target_blocks=int(config.get("jepa_num_target_blocks", 2)),
