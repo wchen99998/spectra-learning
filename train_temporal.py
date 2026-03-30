@@ -234,30 +234,90 @@ def _build_temporal_optimizers(
     fused_cfg = config.get("optimizer_fused", None)
     fused = is_cuda if fused_cfg is None else bool(fused_cfg) and is_cuda
 
-    # Separate encoder params from temporal predictor params
-    encoder_decay, encoder_no_decay = [], []
-    temporal_decay, temporal_no_decay = [], []
-
     temporal_prefixes = (
         "temporal_predictor.",
         "temporal_rt_proj.",
         "temporal_query_token",
     )
+    optimizer_type = str(config.get("optimizer", "adamw")).lower()
+
+    def _make_schedule(
+        optimizer: torch.optim.Optimizer,
+        lr: float,
+    ) -> CapturableCosineSchedule:
+        return CapturableCosineSchedule(
+            optimizer,
+            base_lr=lr,
+            total_steps=total_steps,
+            warmup_steps=warmup_steps,
+            min_lr=min_learning_rate,
+            device=device,
+        )
+
+    if optimizer_type == "muon":
+        encoder_matrix, encoder_scalar = [], []
+        temporal_matrix, temporal_scalar = [], []
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            is_temporal = any(name.startswith(p) for p in temporal_prefixes)
+            if param.ndim >= 2:
+                (temporal_matrix if is_temporal else encoder_matrix).append(param)
+            else:
+                (temporal_scalar if is_temporal else encoder_scalar).append(param)
+
+        muon_lr = float(config.get("muon_lr", None) or base_lr)
+        encoder_muon_lr = float(config.get("encoder_muon_lr", None) or encoder_lr)
+        adamw_lr = float(config.get("adamw_lr", None) or base_lr)
+        encoder_adamw_lr = float(config.get("encoder_adamw_lr", None) or encoder_lr)
+        muon_kwargs = dict(
+            momentum=float(config.get("muon_momentum", 0.95)),
+            nesterov=bool(config.get("muon_nesterov", True)),
+            ns_steps=int(config.get("muon_ns_steps", 5)),
+            weight_decay=float(config.get("muon_weight_decay", None) or weight_decay),
+            adjust_lr_fn=str(config.get("muon_adjust_lr_fn", "match_rms_adamw")),
+        )
+
+        optimizers: list[torch.optim.Optimizer] = []
+        schedulers: list[CapturableCosineSchedule] = []
+        muon_adamw_specs: list[tuple[list, str, float]] = [
+            (encoder_matrix, "muon", encoder_muon_lr),
+            (temporal_matrix, "muon", muon_lr),
+            (encoder_scalar, "adamw", encoder_adamw_lr),
+            (temporal_scalar, "adamw", adamw_lr),
+        ]
+        for params, opt_type, lr in muon_adamw_specs:
+            if not params:
+                continue
+            if opt_type == "muon":
+                opt = torch.optim.Muon(
+                    params, lr=torch.tensor(lr), **muon_kwargs
+                )
+            else:
+                opt = torch.optim.AdamW(
+                    params,
+                    lr=torch.tensor(lr),
+                    betas=(0.9, b2),
+                    weight_decay=0.0,
+                    capturable=capturable,
+                    fused=fused,
+                )
+            optimizers.append(opt)
+            schedulers.append(_make_schedule(opt, lr))
+        return optimizers, schedulers
+
+    # AdamW path
+    encoder_decay, encoder_no_decay = [], []
+    temporal_decay, temporal_no_decay = [], []
 
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
         is_temporal = any(name.startswith(p) for p in temporal_prefixes)
         if _is_weight_decay_target(name, param):
-            if is_temporal:
-                temporal_decay.append(param)
-            else:
-                encoder_decay.append(param)
+            (temporal_decay if is_temporal else encoder_decay).append(param)
         else:
-            if is_temporal:
-                temporal_no_decay.append(param)
-            else:
-                encoder_no_decay.append(param)
+            (temporal_no_decay if is_temporal else encoder_no_decay).append(param)
 
     def _build_param_groups(
         decay_params: list[torch.nn.Parameter],
@@ -303,16 +363,8 @@ def _build_temporal_optimizers(
             capturable=capturable,
             fused=fused,
         )
-        scheduler = CapturableCosineSchedule(
-            optimizer,
-            base_lr=lr,
-            total_steps=total_steps,
-            warmup_steps=warmup_steps,
-            min_lr=min_learning_rate,
-            device=device,
-        )
         optimizers.append(optimizer)
-        schedulers.append(scheduler)
+        schedulers.append(_make_schedule(optimizer, lr))
     return optimizers, schedulers
 
 
@@ -430,6 +482,7 @@ def train_temporal(
     device_prefetch_size = int(config.get("device_prefetch_size", 1))
     _gcn = config.get("grad_clip_norm", None)
     grad_clip_norm = float(_gcn) if _gcn is not None else None
+    optimizer_type = str(config.get("optimizer", "adamw")).lower()
 
     _msg_probe_raw = float(config.get("msg_probe_every_n_steps", 0))
     if 0 < _msg_probe_raw <= 1:
@@ -494,7 +547,16 @@ def train_temporal(
             log_metrics = {
                 f"train/{k}": float(v.detach()) for k, v in metrics.items()
             }
-            if len(optimizers) == 2:
+            if optimizer_type == "muon":
+                _muon_labels = (
+                    "encoder_muon", "temporal_muon",
+                    "encoder_adamw", "temporal_adamw",
+                )
+                for opt, label in zip(optimizers, _muon_labels):
+                    log_metrics[f"train/lr_{label}"] = float(
+                        opt.param_groups[0]["lr"]
+                    )
+            elif len(optimizers) == 2:
                 log_metrics["train/encoder_learning_rate"] = float(
                     optimizers[0].param_groups[0]["lr"]
                 )

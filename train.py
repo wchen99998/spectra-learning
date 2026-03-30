@@ -170,36 +170,23 @@ def _build_optimizers(
         )
 
     if optimizer_type == "muon":
-        muon_decay_params, muon_no_decay_params, adamw_params = [], [], []
+        muon_params, adamw_params = [], []
         for name, param in model.named_parameters():
             if not param.requires_grad:
                 continue
-            if param.ndim == 2:
-                if _is_weight_decay_target(name, param):
-                    muon_decay_params.append(param)
-                else:
-                    muon_no_decay_params.append(param)
+            if param.ndim >= 2:
+                muon_params.append(param)
             else:
                 adamw_params.append(param)
         muon_lr = float(config.get("muon_lr", None) or base_lr)
         adamw_lr = float(config.get("adamw_lr", None) or base_lr)
-        muon_wd = float(config.get("muon_weight_decay", None) or weight_decay)
-        muon_param_groups: list[dict[str, Any]] = []
-        if muon_decay_params:
-            muon_param_groups.append(
-                {"params": muon_decay_params, "weight_decay": muon_wd}
-            )
-        if muon_no_decay_params:
-            muon_param_groups.append(
-                {"params": muon_no_decay_params, "weight_decay": 0.0}
-            )
         muon_opt = torch.optim.Muon(
-            muon_param_groups,
+            muon_params,
             lr=torch.tensor(muon_lr),
             momentum=float(config.get("muon_momentum", 0.95)),
             nesterov=bool(config.get("muon_nesterov", True)),
             ns_steps=int(config.get("muon_ns_steps", 5)),
-            weight_decay=0.0,
+            weight_decay=float(config.get("muon_weight_decay", None) or weight_decay),
             adjust_lr_fn=str(config.get("muon_adjust_lr_fn", "match_rms_adamw")),
         )
         adamw_opt = torch.optim.AdamW(
