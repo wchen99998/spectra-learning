@@ -25,11 +25,21 @@ def load_config(path: str | Path) -> config_dict.ConfigDict:
 
 
 def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
+    encoder_num_layers = int(
+        config.get("encoder_num_layers", config.get("num_layers"))
+    )
+    encoder_num_heads = int(
+        config.get("encoder_num_heads", config.get("num_heads"))
+    )
+    encoder_num_kv_heads = config.get(
+        "encoder_num_kv_heads",
+        config.get("num_kv_heads", None),
+    )
     return PeakSetSIGReg(
         model_dim=int(config.model_dim),
-        encoder_num_layers=int(config.num_layers),
-        encoder_num_heads=int(config.num_heads),
-        encoder_num_kv_heads=config.get("num_kv_heads", None),
+        encoder_num_layers=encoder_num_layers,
+        encoder_num_heads=encoder_num_heads,
+        encoder_num_kv_heads=encoder_num_kv_heads,
         attention_mlp_multiple=float(config.attention_mlp_multiple),
         feature_mlp_hidden_dim=int(config.get("feature_mlp_hidden_dim", 128)),
         encoder_fourier_strategy=str(
@@ -211,7 +221,7 @@ def load_pretrained_weights(
     allowed_missing_prefixes = ("masked_latent_readout.",)
     unexpected = [
         key for key in unexpected
-        if not key.endswith("temporal_query_tokens")
+        if not key.endswith("temporal_query_token")
     ]
     missing = [
         key for key in missing

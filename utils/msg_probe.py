@@ -336,7 +336,12 @@ def run_msg_probe(
     _mte = config.get("msg_probe_max_test_samples", None)
     max_test_samples = int(_mte) if _mte is not None else None
     probe_pooling_type = str(config.get("msg_probe_pooling_type", "mean"))
-    probe_pma_num_heads = int(config.get("msg_probe_pma_num_heads", config.num_heads))
+    probe_pma_num_heads = int(
+        config.get(
+            "msg_probe_pma_num_heads",
+            config.get("encoder_num_heads", config.get("num_heads")),
+        )
+    )
     probe_pma_num_seeds = int(config.get("msg_probe_pma_num_seeds", 1))
     norm_type = str(config.get("norm_type", "rmsnorm"))
     peak_ordering = str(config.get("peak_ordering", "intensity"))

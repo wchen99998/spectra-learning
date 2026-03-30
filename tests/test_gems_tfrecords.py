@@ -162,8 +162,8 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
         cfg.jepa_context_fraction = 0.5
         cfg.jepa_target_fraction = 0.5
         cfg.jepa_block_min_len = 1
-        cfg.sigreg_mz_jitter_std = 0.0
-        cfg.sigreg_intensity_jitter_std = 0.0
+        cfg.augmentation_mz_jitter_std = 0.0
+        cfg.augmentation_intensity_jitter_std = 0.0
         return cfg
 
     def test_datamodule_downloads_gems_artifact_and_builds_train_dataset(self):

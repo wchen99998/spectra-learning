@@ -221,7 +221,10 @@ def _build_temporal_optimizers(
 ) -> tuple[list[torch.optim.Optimizer], list[CapturableCosineSchedule]]:
     """Build optimizer with differential LR for encoder vs temporal predictor."""
     base_lr = float(config.learning_rate)
-    encoder_lr = float(config.get("encoder_finetune_lr", None) or base_lr)
+    encoder_lr = float(
+        config.get("encoder_learning_rate", config.get("encoder_finetune_lr", None))
+        or base_lr
+    )
     warmup_steps = int(config.get("warmup_steps", 0))
     min_learning_rate = config.get("min_learning_rate", None)
     b2 = float(config.get("b2", 0.999))
@@ -238,7 +241,7 @@ def _build_temporal_optimizers(
     temporal_prefixes = (
         "temporal_predictor.",
         "temporal_rt_proj.",
-        "temporal_query_tokens",
+        "temporal_query_token",
     )
 
     for name, param in model.named_parameters():
@@ -256,58 +259,61 @@ def _build_temporal_optimizers(
             else:
                 encoder_no_decay.append(param)
 
-    param_groups = []
-    if encoder_decay:
-        param_groups.append(
-            {
-                "params": encoder_decay,
-                "lr": torch.tensor(encoder_lr),
-                "weight_decay": weight_decay,
-            }
-        )
-    if encoder_no_decay:
-        param_groups.append(
-            {
-                "params": encoder_no_decay,
-                "lr": torch.tensor(encoder_lr),
-                "weight_decay": 0.0,
-            }
-        )
-    if temporal_decay:
-        param_groups.append(
-            {
-                "params": temporal_decay,
-                "lr": torch.tensor(base_lr),
-                "weight_decay": weight_decay,
-            }
-        )
-    if temporal_no_decay:
-        param_groups.append(
-            {
-                "params": temporal_no_decay,
-                "lr": torch.tensor(base_lr),
-                "weight_decay": 0.0,
-            }
-        )
+    def _build_param_groups(
+        decay_params: list[torch.nn.Parameter],
+        no_decay_params: list[torch.nn.Parameter],
+    ) -> list[dict[str, Any]]:
+        param_groups: list[dict[str, Any]] = []
+        if decay_params:
+            param_groups.append(
+                {
+                    "params": decay_params,
+                    "weight_decay": weight_decay,
+                }
+            )
+        if no_decay_params:
+            param_groups.append(
+                {
+                    "params": no_decay_params,
+                    "weight_decay": 0.0,
+                }
+            )
+        return param_groups
 
-    optimizer = torch.optim.AdamW(
-        param_groups,
-        lr=torch.tensor(base_lr),
-        betas=(0.9, b2),
-        weight_decay=0.0,
-        capturable=capturable,
-        fused=fused,
-    )
-
-    scheduler = CapturableCosineSchedule(
-        optimizer,
-        base_lr=base_lr,
-        total_steps=total_steps,
-        warmup_steps=warmup_steps,
-        min_lr=min_learning_rate,
-        device=device,
-    )
-    return [optimizer], [scheduler]
+    optimizers: list[torch.optim.Optimizer] = []
+    schedulers: list[CapturableCosineSchedule] = []
+    optimizer_specs = [
+        (
+            _build_param_groups(encoder_decay, encoder_no_decay),
+            encoder_lr,
+        ),
+        (
+            _build_param_groups(temporal_decay, temporal_no_decay),
+            base_lr,
+        ),
+    ]
+    for param_groups, lr in optimizer_specs:
+        if not param_groups:
+            continue
+        optimizer = torch.optim.AdamW(
+            param_groups,
+            lr=torch.tensor(lr),
+            betas=(0.9, b2),
+            weight_decay=0.0,
+            capturable=capturable,
+            fused=fused,
+        )
+        scheduler = CapturableCosineSchedule(
+            optimizer,
+            base_lr=lr,
+            total_steps=total_steps,
+            warmup_steps=warmup_steps,
+            min_lr=min_learning_rate,
+            device=device,
+        )
+        optimizers.append(optimizer)
+        schedulers.append(scheduler)
+    return optimizers, schedulers
 
 
 def _load_pretrained_checkpoint(
@@ -488,9 +494,17 @@ def train_temporal(
             log_metrics = {
                 f"train/{k}": float(v.detach()) for k, v in metrics.items()
             }
-            log_metrics["train/learning_rate"] = float(
-                optimizers[0].param_groups[0]["lr"]
-            )
+            if len(optimizers) == 2:
+                log_metrics["train/encoder_learning_rate"] = float(
+                    optimizers[0].param_groups[0]["lr"]
+                )
+                log_metrics["train/temporal_learning_rate"] = float(
+                    optimizers[1].param_groups[0]["lr"]
+                )
+            else:
+                log_metrics["train/learning_rate"] = float(
+                    optimizers[0].param_groups[0]["lr"]
+                )
             log_metrics["global_step"] = global_step
             logger.log_metrics(log_metrics, step=global_step)
 

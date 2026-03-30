@@ -404,9 +404,17 @@ class TfLightningDataModule:
         self.jepa_context_fraction = float(config.get("jepa_context_fraction", 0.5))
         self.jepa_target_fraction = float(config.get("jepa_target_fraction", 0.25))
         self.jepa_block_min_len = int(config.get("jepa_block_min_len", 1))
-        self.mz_jitter_std = float(config.get("sigreg_mz_jitter_std", 0.0001))
+        self.mz_jitter_std = float(
+            config.get(
+                "augmentation_mz_jitter_std",
+                config.get("sigreg_mz_jitter_std", 0.0001),
+            )
+        )
         self.intensity_jitter_std = float(
-            config.get("sigreg_intensity_jitter_std", 0.001)
+            config.get(
+                "augmentation_intensity_jitter_std",
+                config.get("sigreg_intensity_jitter_std", 0.001),
+            )
         )
         self.use_precursor_token = bool(config.get("use_precursor_token", False))
         self.num_peaks_output = int(config.get("num_peaks", _NUM_PEAKS_OUTPUT))

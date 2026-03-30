@@ -188,7 +188,7 @@ def main() -> None:
         default="",
         help=(
             "Optional JSON dict of config overrides applied to every trial. "
-            'Example: \'{"num_epochs": 1, "limit_train_batches": 0.01}\''
+            'Example: \'{"num_epochs": 1, "checkpoint_every_steps": 1000}\''
         ),
     )
     args = parser.parse_args()
