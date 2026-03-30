@@ -279,7 +279,6 @@ def test_multilayer_targets_widen_teacher_and_predictor_outputs():
         peak_intensity,
         valid_mask=peak_valid_mask,
         visible_mask=context_mask,
-        pack_n=model._context_pack_n,
     )
     context_emb, _ = PeakSetEncoder.split_peak_and_cls(context_encoded)
     predictor_input = torch.zeros_like(context_emb.unsqueeze(1).expand(-1, K, -1, -1))
@@ -296,13 +295,11 @@ def test_multilayer_targets_widen_teacher_and_predictor_outputs():
     predictor_output = model.predict_masked_targets(
         predictor_input.reshape(B * K, N, -1),
         (context_mask.unsqueeze(1) | target_masks).reshape(B * K, N),
-        pack_n=model._predictor_pack_n,
     )
     assert predictor_output.shape == (B * K, N, 2 * model.model_dim)
     peak_output = model.predict_peak_values(
         predictor_input.reshape(B * K, N, -1),
         (context_mask.unsqueeze(1) | target_masks).reshape(B * K, N),
-        pack_n=model._predictor_pack_n,
     )
     assert peak_output.shape == (B * K, N, 2)
 
@@ -330,7 +327,6 @@ def test_local_global_loss_uses_target_tokens_only():
         peak_intensity,
         valid_mask=peak_valid_mask,
         visible_mask=context_mask,
-        pack_n=model._context_pack_n,
     )
     context_emb, _ = PeakSetEncoder.split_peak_and_cls(context_encoded)
     B, K, N = target_masks.shape
@@ -339,8 +335,6 @@ def test_local_global_loss_uses_target_tokens_only():
         peak_intensity,
         valid_mask=peak_valid_mask,
         visible_mask=peak_valid_mask,
-        pack_n=model._full_pack_n,
-        prefix_pack=True,
     )
     teacher_target, _ = PeakSetEncoder.split_peak_and_cls(teacher_target)
 
@@ -363,7 +357,6 @@ def test_local_global_loss_uses_target_tokens_only():
     predictor_output = model.predict_masked_targets(
         predictor_input.reshape(B * K, N, -1),
         predictor_union_mask.reshape(B * K, N),
-        pack_n=model._predictor_pack_n,
     ).reshape(K, B, N, -1)
 
     per_token_l1 = (
@@ -400,7 +393,6 @@ def test_local_global_loss_can_zscore_teacher_targets():
         peak_intensity,
         valid_mask=peak_valid_mask,
         visible_mask=context_mask,
-        pack_n=model._context_pack_n,
     )
     context_emb, _ = PeakSetEncoder.split_peak_and_cls(context_encoded)
     B, K, N = target_masks.shape
@@ -409,8 +401,6 @@ def test_local_global_loss_can_zscore_teacher_targets():
         peak_intensity,
         valid_mask=peak_valid_mask,
         visible_mask=peak_valid_mask,
-        pack_n=model._full_pack_n,
-        prefix_pack=True,
     )
     teacher_target, _ = PeakSetEncoder.split_peak_and_cls(teacher_target)
     teacher_target = teacher_target.unsqueeze(1).expand(-1, K, -1, -1)
@@ -437,7 +427,6 @@ def test_local_global_loss_can_zscore_teacher_targets():
     predictor_output = model.predict_masked_targets(
         predictor_input.reshape(B * K, N, -1),
         predictor_union_mask.reshape(B * K, N),
-        pack_n=model._predictor_pack_n,
     ).reshape(K, B, N, -1)
 
     per_token_l1 = (

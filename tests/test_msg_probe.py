@@ -5,11 +5,13 @@ import tensorflow as tf
 import torch
 
 from input_pipeline import _prepend_precursor_token_tf
+from models.model import PeakSetSIGReg
 from utils.msg_probe import (
     FG_SMARTS,
     MsgLinearProbe,
     MsgProbePooler,
     MsgProbeSplitTargets,
+    _extract_probe_features,
     _build_task_spec,
     _collect_split_targets,
     _probe_step,
@@ -144,6 +146,69 @@ class MsgProbeStepTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["batch_size"], 2)
         self.assertTrue(torch.isfinite(result["loss_total"]).item())
+
+
+class ProbeFeatureExtractionTests(unittest.TestCase):
+    def _build_model(self, **kwargs) -> PeakSetSIGReg:
+        model_kwargs = {
+            "model_dim": 32,
+            "encoder_num_layers": 1,
+            "encoder_num_heads": 4,
+            "encoder_num_kv_heads": 4,
+            "attention_mlp_multiple": 2.0,
+            "feature_mlp_hidden_dim": 16,
+            "encoder_num_register_tokens": 3,
+        }
+        model_kwargs.update(kwargs)
+        return PeakSetSIGReg(**model_kwargs)
+
+    def test_pma_features_include_cls_and_exclude_registers(self):
+        model = self._build_model()
+        batch = {
+            "peak_mz": torch.rand(2, 5),
+            "peak_intensity": torch.rand(2, 5),
+            "peak_valid_mask": torch.tensor(
+                [[True, True, True, False, False], [True, True, False, False, False]],
+                dtype=torch.bool,
+            ),
+        }
+
+        embeddings, valid_mask = _extract_probe_features(
+            model,
+            batch,
+            pooling_type="pma",
+        )
+        encoder_output = model.encoder(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            valid_mask=batch["peak_valid_mask"],
+        )
+
+        self.assertTrue(torch.allclose(embeddings, encoder_output))
+        self.assertEqual(embeddings.shape, (2, 6, model.model_dim))
+        self.assertEqual(valid_mask.shape, (2, 6))
+        self.assertTrue(torch.equal(valid_mask[:, :-1], batch["peak_valid_mask"]))
+        self.assertTrue(torch.equal(valid_mask[:, -1], torch.ones(2, dtype=torch.bool)))
+
+    def test_mean_features_exclude_cls(self):
+        model = self._build_model()
+        batch = {
+            "peak_mz": torch.rand(2, 5),
+            "peak_intensity": torch.rand(2, 5),
+            "peak_valid_mask": torch.tensor(
+                [[True, True, True, False, False], [True, True, False, False, False]],
+                dtype=torch.bool,
+            ),
+        }
+
+        embeddings, valid_mask = _extract_probe_features(
+            model,
+            batch,
+            pooling_type="mean",
+        )
+
+        self.assertEqual(embeddings.shape, (2, 5, model.model_dim))
+        self.assertTrue(torch.equal(valid_mask, batch["peak_valid_mask"]))
 
 
 class MsgProbeTaskSpecTests(unittest.TestCase):

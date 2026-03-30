@@ -198,8 +198,6 @@ class BlockJEPATests(unittest.TestCase):
             batch["peak_intensity"],
             valid_mask=batch["peak_valid_mask"],
             visible_mask=batch["peak_valid_mask"],
-            pack_n=model._full_pack_n,
-            prefix_pack=True,
             return_cls_token=True,
         )
         pooled = model.encode(batch)

@@ -320,6 +320,30 @@ def _score_epoch_state(
     return metrics
 
 
+@torch.no_grad()
+def _extract_probe_features(
+    model: PeakSetSIGReg,
+    batch: dict[str, torch.Tensor],
+    *,
+    pooling_type: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    embeddings = model.encoder(
+        batch["peak_mz"],
+        batch["peak_intensity"],
+        valid_mask=batch["peak_valid_mask"],
+    )
+    if pooling_type == "pma":
+        cls_mask = torch.ones(
+            batch["peak_valid_mask"].shape[0],
+            1,
+            device=batch["peak_valid_mask"].device,
+            dtype=torch.bool,
+        )
+        return embeddings, torch.cat([batch["peak_valid_mask"], cls_mask], dim=1)
+    embeddings, _ = PeakSetEncoder.split_peak_and_cls(embeddings)
+    return embeddings, batch["peak_valid_mask"]
+
+
 def run_msg_probe(
     *,
     config: config_dict.ConfigDict,
@@ -347,17 +371,14 @@ def run_msg_probe(
     peak_ordering = str(config.get("peak_ordering", "intensity"))
     probe_data = MassSpecProbeData.from_config(config)
 
-    @torch.no_grad()
     def feature_extractor(
         batch: dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        embeddings = model.encoder(
-            batch["peak_mz"],
-            batch["peak_intensity"],
-            valid_mask=batch["peak_valid_mask"],
+        return _extract_probe_features(
+            model,
+            batch,
+            pooling_type=probe_pooling_type,
         )
-        embeddings, _ = PeakSetEncoder.split_peak_and_cls(embeddings)
-        return embeddings, batch["peak_valid_mask"]
 
     train_seed_base = int(config.seed) + 1_100_000
     test_seed_base = int(config.seed) + 1_200_000
