@@ -8,7 +8,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataset = "gems_a"
     cfg.tfrecord_dir = "data/gems_peaklist_tfrecord_alpha"
     cfg.gems_tfrecord_repo_id = "cjim8889/gems-a10-tfrecords"
-    cfg.batch_size = 256
+    cfg.batch_size = 512
     cfg.shuffle_buffer = 1_000_000
     cfg.tfrecord_buffer_size = 250_000
     cfg.drop_remainder = True
@@ -28,7 +28,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.predictor_num_register_tokens = 4
     cfg.encoder_apply_final_norm = False
     cfg.predictor_apply_final_norm = False
-    cfg.encoder_qk_norm = False
+    cfg.encoder_qk_norm = True
     cfg.encoder_fourier_strategy = "lin_float_int"
     cfg.encoder_fourier_x_min = 1e-4
     cfg.encoder_fourier_x_max = 1000.0
@@ -41,21 +41,21 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_num_slices = 256
     cfg.sigreg_lambda = 0.1
     cfg.jepa_num_target_blocks = 2
-    cfg.jepa_context_fraction = 0.5
-    cfg.jepa_target_fraction = 0.1
+    cfg.jepa_context_fraction = 0.3
+    cfg.jepa_target_fraction = 0.2
     cfg.jepa_block_min_len = 1
     cfg.sigreg_mz_jitter_std = 0.001
     cfg.sigreg_intensity_jitter_std = 0.05
-    cfg.norm_type = "layernorm"
+    cfg.norm_type = "rmsnorm"
 
     # Training
     cfg.num_epochs = 100
-    cfg.learning_rate = 2e-4
+    cfg.learning_rate = 3e-4
     cfg.warmup_steps = 10000
     cfg.learning_rate_schedule = "cosine"
     cfg.min_learning_rate = 3e-5
     cfg.b2 = 0.98
-    cfg.weight_decay = 1e-4
+    cfg.weight_decay = 0.05
     cfg.optimizer = "muon"
     cfg.device_prefetch_size = 8
     cfg.non_blocking_device_transfer = True
@@ -75,21 +75,21 @@ def get_config() -> config_dict.ConfigDict:
 
     cfg.masked_token_loss_weight = 1.0
     cfg.masked_token_loss_type = "l2"
-    cfg.jepa_target_normalization = "zscore"
+    cfg.jepa_target_normalization = "none"
     cfg.jepa_target_layers = [1, 4, 8, 12]
     cfg.use_ema_teacher_target = True
     cfg.teacher_ema_decay = 0.9985
-    cfg.teacher_ema_decay_start = 0.9985
-    cfg.teacher_ema_decay_warmup_steps = 0
+    cfg.teacher_ema_decay_start = 0.99
+    cfg.teacher_ema_decay_warmup_steps = 500_000
     cfg.teacher_ema_update_every = 1
     cfg.grad_clip_norm = 1.0
-    cfg.masked_latent_predictor_num_layers = 4
+    cfg.masked_latent_predictor_num_layers = 6
     cfg.predictor_num_heads = 8
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "reduce-overhead"
     cfg.representation_regularizer = "none"
     cfg.sigreg_lambda_warmup_steps = 50_000
-    cfg.msg_probe_every_n_steps = 0.25
+    cfg.msg_probe_every_n_steps = 0.2
     cfg.msg_probe_cache_dir = None
     cfg.msg_probe_pooling_type = "pma"
     cfg.msg_probe_pma_num_heads = cfg.num_heads

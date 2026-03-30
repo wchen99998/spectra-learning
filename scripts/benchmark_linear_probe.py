@@ -61,8 +61,7 @@ log = logging.getLogger(__name__)
 _NUM_PEAKS_OUTPUT = 60
 _PEAK_MZ_MIN = 20.0
 _PEAK_MZ_MAX = 1000.0
-_PRECURSOR_MZ_WINDOW = 2.5
-_MIN_PEAK_INTENSITY = 0.001
+_MIN_PEAK_INTENSITY = 1e-4
 _MAX_PRECURSOR_MZ = 1000.0
 _TEST_FRACTION = 0.15  # For datasets without a dedicated test split
 
@@ -281,7 +280,6 @@ def preprocess_dreams_spectra(
     num_peaks: int = _NUM_PEAKS_OUTPUT,
     peak_mz_min: float = _PEAK_MZ_MIN,
     peak_mz_max: float = _PEAK_MZ_MAX,
-    precursor_window: float = _PRECURSOR_MZ_WINDOW,
     min_intensity: float = _MIN_PEAK_INTENSITY,
     max_precursor_mz: float = _MAX_PRECURSOR_MZ,
 ) -> dict[str, np.ndarray]:
@@ -294,13 +292,8 @@ def preprocess_dreams_spectra(
     mz = spectrum[:, 0, :].astype(np.float32)  # [N, 128]
     intensity = spectrum[:, 1, :].astype(np.float32)  # [N, 128]
 
-    # 1. Filter by mz range: keep peaks where mz >= 20.0 and mz <= min(precursor_mz - 2.5, 1000.0)
-    upper = np.where(
-        precursor_mz > 0.0,
-        precursor_mz - precursor_window,
-        peak_mz_max,
-    ).astype(np.float32)  # [N]
-    keep = (mz >= peak_mz_min) & (mz <= upper[:, np.newaxis])
+    # 1. Filter by mz range
+    keep = (mz >= peak_mz_min) & (mz <= peak_mz_max)
     mz = np.where(keep, mz, 0.0)
     intensity = np.where(keep, intensity, 0.0)
 
@@ -333,6 +326,8 @@ def preprocess_dreams_spectra(
     intensity = np.where(valid, intensity, 0.0)
 
     # 5. Normalize
+    max_intensity = np.maximum(intensity.max(axis=1, keepdims=True), 1e-8)
+    intensity = intensity / max_intensity
     peak_mz_out = mz / peak_mz_max
     prec_mz_out = (
         np.clip(precursor_mz, 0.0, max_precursor_mz).astype(np.float32)

@@ -11,6 +11,7 @@ from ml_collections import config_dict
 
 import input_pipeline
 import utils.massspec_probe_data as massspec_probe_data
+from scripts.benchmark_linear_probe import preprocess_dreams_spectra
 from scripts.prepare_gems_tfrecords import main as prepare_gems_main
 from utils.gems_tfrecords import (
     CANONICAL_NUM_SHARDS,
@@ -293,6 +294,61 @@ class MassSpecPreprocessTests(unittest.TestCase):
         self.assertEqual(parsed["probe_num_rings"].shape[0], 1)
         self.assertEqual(parsed["probe_fg_hydroxyl"].shape[0], 1)
         self.assertEqual(parsed["probe_valid_mol"].shape[0], 1)
+
+    def test_benchmark_preprocess_matches_input_pipeline_without_precursor_window(self):
+        spectrum = np.zeros((1, 2, 128), dtype=np.float32)
+        spectrum[0, 0, :4] = [99.0, 100.5, 101.5, 1020.0]
+        spectrum[0, 1, :4] = [0.8, 5e-4, 0.7, 0.9]
+        precursor_mz = np.asarray([101.0], dtype=np.float32)
+
+        mz = spectrum[0, 0].tolist()
+        intensity = spectrum[0, 1].tolist()
+        example = tf.train.Example(
+            features=tf.train.Features(
+                feature={
+                    "mz": tf.train.Feature(
+                        float_list=tf.train.FloatList(value=mz)
+                    ),
+                    "intensity": tf.train.Feature(
+                        float_list=tf.train.FloatList(value=intensity)
+                    ),
+                    "rt": tf.train.Feature(
+                        float_list=tf.train.FloatList(value=[0.0])
+                    ),
+                    "precursor_mz": tf.train.Feature(
+                        float_list=tf.train.FloatList(value=[101.0])
+                    ),
+                }
+            )
+        )
+        transform = input_pipeline._batched_parse_and_transform(
+            max_precursor_mz=1000.0,
+            min_peak_intensity=1e-4,
+            num_peaks=60,
+            peak_ordering="mz",
+        )
+        tf_batch = transform(tf.constant([example.SerializeToString()]))
+        benchmark = preprocess_dreams_spectra(
+            spectrum,
+            precursor_mz,
+            num_peaks=60,
+            min_intensity=1e-4,
+        )
+
+        np.testing.assert_allclose(
+            benchmark["peak_mz"], tf_batch["peak_mz"].numpy(), atol=1e-6
+        )
+        np.testing.assert_allclose(
+            benchmark["peak_intensity"],
+            tf_batch["peak_intensity"].numpy(),
+            atol=1e-6,
+        )
+        np.testing.assert_array_equal(
+            benchmark["peak_valid_mask"], tf_batch["peak_valid_mask"].numpy()
+        )
+        np.testing.assert_allclose(
+            benchmark["precursor_mz"], tf_batch["precursor_mz"].numpy(), atol=1e-6
+        )
 
     def test_build_gems_tfrecord_artifact_supports_parallel_shard_writes(self):
         with tempfile.TemporaryDirectory() as tmp:
