@@ -250,6 +250,19 @@ class BlockJEPATests(unittest.TestCase):
             loaded = self._build_model()
             load_pretrained_weights(loaded, path)
 
+    def test_load_pretrained_weights_allows_missing_masked_latent_readout(self):
+        model = self._build_model(jepa_target_layers=[1])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/ckpt.pt"
+            old_state = {
+                f"model.{k}": v
+                for k, v in model.state_dict().items()
+                if not k.startswith("masked_latent_readout.")
+            }
+            torch.save({"state_dict": old_state}, path)
+            loaded = self._build_model(jepa_target_layers=[1])
+            load_pretrained_weights(loaded, path)
+
     def test_teacher_ema_warmup_uses_cosine_schedule(self):
         model = self._build_model(
             use_ema_teacher_target=True,

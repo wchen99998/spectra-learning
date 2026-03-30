@@ -322,15 +322,31 @@ def _load_pretrained_checkpoint(
         k.removeprefix("model."): v for k, v in sd.items() if k.startswith("model.")
     }
     sd = prefixed or sd
+    for key in tuple(sd):
+        if key.startswith("masked_latent_readout.") or key.endswith(
+            (
+                "position_embedding.weight",
+                "predictor_position_embedding.weight",
+            )
+        ):
+            sd.pop(key)
     missing, unexpected = model.load_state_dict(sd, strict=False)
     # Validate only temporal keys are missing
     allowed_prefixes = (
         "temporal_predictor.",
         "temporal_rt_proj.",
-        "temporal_query_tokens",
+        "temporal_query_token",
+        "masked_latent_readout.",
+    )
+    allowed_suffixes = (
+        "encoder.position_embedding.weight",
+        "predictor_position_embedding.weight",
     )
     bad_missing = [
-        k for k in missing if not any(k.startswith(p) for p in allowed_prefixes)
+        k
+        for k in missing
+        if not any(k.startswith(p) for p in allowed_prefixes)
+        and not k.endswith(allowed_suffixes)
     ]
     if bad_missing:
         raise RuntimeError(

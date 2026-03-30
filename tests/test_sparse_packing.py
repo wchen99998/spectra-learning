@@ -197,6 +197,7 @@ def test_forward_augmented_sparse_pack_matches_full_model_loss():
         masked_token_loss_weight=1.0,
         representation_regularizer="none",
         jepa_num_target_blocks=2,
+        jepa_target_layers=[1, 2],
         num_peaks=8,
         jepa_context_fraction=0.5,
         jepa_target_fraction=0.25,

@@ -1,7 +1,8 @@
 """Tests for temporal finetuning (frame -> next-frame prediction)."""
 
+import tempfile
+
 import torch
-import pytest
 
 from models.model import PeakSetSIGReg
 
@@ -161,6 +162,27 @@ class TestCheckpointPartialLoad:
                 pretrained_param = sd[name]
                 assert torch.equal(param.data, pretrained_param), (
                     f"Encoder param {name} doesn't match after load"
+                )
+
+    def test_temporal_checkpoint_loader_ignores_masked_latent_readout_mismatch(self):
+        from train_temporal import _load_pretrained_checkpoint
+
+        pretrained = _small_model(
+            temporal_predictor_num_layers=0,
+            jepa_target_layers=[1, 2],
+        )
+        full = _small_model()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/spatial.ckpt"
+            torch.save({"model": pretrained.state_dict()}, path)
+            _load_pretrained_checkpoint(full, path)
+
+        for name, param in full.named_parameters():
+            if name.startswith("encoder."):
+                pretrained_param = pretrained.state_dict()[name]
+                assert torch.equal(param.data, pretrained_param), (
+                    f"Encoder param {name} doesn't match after temporal checkpoint load"
                 )
 
 

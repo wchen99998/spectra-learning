@@ -48,6 +48,7 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         jepa_target_normalization=str(
             config.get("jepa_target_normalization", "none")
         ),
+        jepa_target_layers=config.get("jepa_target_layers", None),
         representation_regularizer=str(
             config.get("representation_regularizer", "sigreg")
         ),
@@ -189,7 +190,16 @@ def load_pretrained_weights(
     prefixed = {
         k.removeprefix("model."): v for k, v in sd.items() if k.startswith("model.")
     }
-    missing, unexpected = model.load_state_dict(prefixed or sd, strict=False)
+    sd = prefixed or sd
+    for key in tuple(sd):
+        if key.endswith(
+            (
+                "position_embedding.weight",
+                "predictor_position_embedding.weight",
+            )
+        ):
+            sd.pop(key)
+    missing, unexpected = model.load_state_dict(sd, strict=False)
     allowed_missing_suffixes = (
         "position_embedding.weight",
         "predictor_position_embedding.weight",
@@ -198,6 +208,7 @@ def load_pretrained_weights(
         "predictor_register_tokens",
         "temporal_query_token",
     )
+    allowed_missing_prefixes = ("masked_latent_readout.",)
     unexpected = [
         key for key in unexpected
         if not key.endswith("temporal_query_tokens")
@@ -205,6 +216,7 @@ def load_pretrained_weights(
     missing = [
         key for key in missing
         if not key.endswith(allowed_missing_suffixes)
+        and not any(key.startswith(prefix) for prefix in allowed_missing_prefixes)
     ]
     if missing or unexpected:
         raise RuntimeError(
