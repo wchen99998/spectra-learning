@@ -44,6 +44,17 @@ def _temporal_batch(batch_size: int = 4, num_peaks: int = 8) -> dict[str, torch.
 
 
 class TestForwardTemporal:
+    def test_requires_temporal_predictor(self):
+        model = _small_model(temporal_predictor_num_layers=0)
+        batch = _temporal_batch()
+
+        try:
+            model.forward_temporal(batch)
+        except ValueError as exc:
+            assert "temporal_predictor_num_layers > 0" in str(exc)
+        else:
+            raise AssertionError("forward_temporal should require temporal layers")
+
     def test_finite_loss(self):
         model = _small_model()
         model.eval()
@@ -94,6 +105,39 @@ class TestForwardTemporal:
         teacher_embeddings = model.compute_next_frame_teacher_embeddings(batch)
         metrics = model.forward_temporal(batch, teacher_embeddings=teacher_embeddings)
         assert torch.isfinite(metrics["loss"])
+
+    def test_teacher_embeddings_use_next_frame_precursor_when_enabled(self):
+        model = _small_model(use_precursor_token=True)
+        model.eval()
+        batch_a = _temporal_batch()
+        batch_b = {k: v.clone() for k, v in batch_a.items()}
+        batch_a["next_frame_precursor_mz"].fill_(0.1)
+        batch_b["next_frame_precursor_mz"].fill_(0.9)
+
+        emb_a = model.compute_next_frame_teacher_embeddings(batch_a)
+        emb_b = model.compute_next_frame_teacher_embeddings(batch_b)
+
+        assert not torch.allclose(emb_a, emb_b, atol=1e-6)
+
+    def test_forward_temporal_uses_frame_precursor_when_enabled(self):
+        model = _small_model(use_precursor_token=True)
+        model.eval()
+        batch_a = _temporal_batch()
+        batch_b = {k: v.clone() for k, v in batch_a.items()}
+        batch_a["frame_precursor_mz"].fill_(0.1)
+        batch_b["frame_precursor_mz"].fill_(0.9)
+        teacher_embeddings = model.compute_next_frame_teacher_embeddings(batch_a)
+
+        loss_a = model.forward_temporal(
+            batch_a,
+            teacher_embeddings=teacher_embeddings,
+        )["loss"]
+        loss_b = model.forward_temporal(
+            batch_b,
+            teacher_embeddings=teacher_embeddings,
+        )["loss"]
+
+        assert not torch.allclose(loss_a, loss_b, atol=1e-6)
 
     def test_partial_valid_mask(self):
         """Loss should be computed only over valid next-frame tokens."""

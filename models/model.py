@@ -905,6 +905,28 @@ class PeakSetSIGReg(nn.Module):
             result["target_masks"] = torch.cat([pre_tgt, target_masks], dim=2)
         return result
 
+    def _get_temporal_frame_inputs(
+        self,
+        batch: dict[str, torch.Tensor],
+        prefix: str,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        peak_mz = batch[f"{prefix}_peak_mz"]
+        peak_intensity = batch[f"{prefix}_peak_intensity"]
+        peak_valid_mask = batch[f"{prefix}_peak_valid_mask"]
+        if not self.use_precursor_token:
+            return peak_mz, peak_intensity, peak_valid_mask
+        with_precursor = self.prepend_precursor_token(
+            peak_mz,
+            peak_intensity,
+            peak_valid_mask,
+            batch[f"{prefix}_precursor_mz"],
+        )
+        return (
+            with_precursor["peak_mz"],
+            with_precursor["peak_intensity"],
+            with_precursor["peak_valid_mask"],
+        )
+
     def forward_augmented(
         self,
         augmented_batch: dict[str, torch.Tensor],
@@ -1034,11 +1056,15 @@ class PeakSetSIGReg(nn.Module):
     ) -> torch.Tensor:
         """Compute teacher embeddings for the next frame."""
         teacher = self._teacher_encoder_module()
+        next_frame_mz, next_frame_int, next_frame_valid = self._get_temporal_frame_inputs(
+            batch,
+            "next_frame",
+        )
         teacher_embeddings = teacher(
-            batch["next_frame_peak_mz"],
-            batch["next_frame_peak_intensity"],
-            valid_mask=batch["next_frame_peak_valid_mask"],
-            visible_mask=batch["next_frame_peak_valid_mask"],
+            next_frame_mz,
+            next_frame_int,
+            valid_mask=next_frame_valid,
+            visible_mask=next_frame_valid,
             pack_n=self._full_pack_n,
             prefix_pack=True,
         )
@@ -1051,12 +1077,18 @@ class PeakSetSIGReg(nn.Module):
         teacher_embeddings: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Predict next-frame token embeddings from the full current frame."""
-        frame_mz = batch["frame_peak_mz"]
-        frame_int = batch["frame_peak_intensity"]
-        frame_valid = batch["frame_peak_valid_mask"]
-        next_frame_mz = batch["next_frame_peak_mz"]
-        next_frame_int = batch["next_frame_peak_intensity"]
-        next_frame_valid = batch["next_frame_peak_valid_mask"]
+        if self.temporal_predictor_num_layers <= 0:
+            raise ValueError(
+                "forward_temporal requires temporal_predictor_num_layers > 0"
+            )
+        frame_mz, frame_int, frame_valid = self._get_temporal_frame_inputs(
+            batch,
+            "frame",
+        )
+        next_frame_mz, next_frame_int, next_frame_valid = self._get_temporal_frame_inputs(
+            batch,
+            "next_frame",
+        )
         frame_rt = batch["frame_rt"]
         next_frame_rt = batch["next_frame_rt"]
         B = frame_mz.shape[0]
