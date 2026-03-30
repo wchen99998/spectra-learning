@@ -54,6 +54,7 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
             config.get("encoder_fourier_trainable", True)
         ),
         masked_token_loss_weight=float(config.get("masked_token_loss_weight", 0.0)),
+        mae_loss_weight=float(config.get("mae_loss_weight", 1.0)),
         masked_token_loss_type=str(config.get("masked_token_loss_type", "l1")),
         jepa_target_normalization=str(
             config.get("jepa_target_normalization", "none")
@@ -70,17 +71,9 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         ),
         sigreg_num_slices=int(config.get("sigreg_num_slices", 256)),
         sigreg_lambda=float(config.get("sigreg_lambda", 0.1)),
-        sigreg_lambda_warmup_steps=int(config.get("sigreg_lambda_warmup_steps", 0)),
         jepa_num_target_blocks=int(config.get("jepa_num_target_blocks", 2)),
         jepa_context_fraction=float(config.get("jepa_context_fraction", 0.5)),
         jepa_target_fraction=float(config.get("jepa_target_fraction", 0.25)),
-        use_ema_teacher_target=bool(config.get("use_ema_teacher_target", False)),
-        teacher_ema_decay=float(config.get("teacher_ema_decay", 0.996)),
-        teacher_ema_decay_start=float(config.get("teacher_ema_decay_start", 0.0)),
-        teacher_ema_decay_warmup_steps=int(
-            config.get("teacher_ema_decay_warmup_steps", 0)
-        ),
-        teacher_ema_update_every=int(config.get("teacher_ema_update_every", 1)),
         encoder_qk_norm=bool(config.get("encoder_qk_norm", False)),
         norm_type=str(config.get("norm_type", "rmsnorm")),
         encoder_apply_final_norm=bool(config.get("encoder_apply_final_norm", True)),
@@ -206,7 +199,9 @@ def load_pretrained_weights(
     }
     sd = prefixed or sd
     for key in tuple(sd):
-        if key.endswith(
+        if key.startswith(
+            ("teacher_encoder.", "teacher_ema_", "sigreg_lambda_")
+        ) or key.endswith(
             (
                 "position_embedding.weight",
                 "predictor_position_embedding.weight",
@@ -222,10 +217,11 @@ def load_pretrained_weights(
         "predictor_register_tokens",
         "temporal_query_token",
     )
-    allowed_missing_prefixes = ("masked_latent_readout.",)
+    allowed_missing_prefixes = ("masked_latent_readout.", "masked_peak_readout.")
     unexpected = [
         key for key in unexpected
         if not key.endswith("temporal_query_token")
+        and not key.startswith(("teacher_encoder.", "teacher_ema_", "sigreg_lambda_"))
     ]
     missing = [
         key for key in missing

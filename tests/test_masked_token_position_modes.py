@@ -244,9 +244,12 @@ def test_forward_augmented_reports_loss_metrics():
     metrics = model.forward_augmented(_make_batch())
 
     assert "local_global_loss" in metrics
+    assert "peak_recon_loss" in metrics
+    assert "peak_recon_term" in metrics
     assert "context_fraction" in metrics
     assert "masked_fraction" in metrics
     assert torch.isfinite(metrics["local_global_loss"])
+    assert torch.isfinite(metrics["peak_recon_loss"])
     assert float(metrics["masked_fraction"]) > 0.0
 
 
@@ -264,12 +267,12 @@ def test_multilayer_targets_widen_teacher_and_predictor_outputs():
     target_masks = batch["target_masks"] & peak_valid_mask.unsqueeze(1)
     B, K, N = target_masks.shape
 
-    teacher_targets = model._compute_jepa_teacher_targets(
+    target_latents = model._compute_jepa_online_targets(
         peak_mz,
         peak_intensity,
         peak_valid_mask,
     )
-    assert teacher_targets.shape == (B, N, 2 * model.model_dim)
+    assert target_latents.shape == (B, N, 2 * model.model_dim)
 
     context_encoded = model.encoder(
         peak_mz,
@@ -296,6 +299,12 @@ def test_multilayer_targets_widen_teacher_and_predictor_outputs():
         pack_n=model._predictor_pack_n,
     )
     assert predictor_output.shape == (B * K, N, 2 * model.model_dim)
+    peak_output = model.predict_peak_values(
+        predictor_input.reshape(B * K, N, -1),
+        (context_mask.unsqueeze(1) | target_masks).reshape(B * K, N),
+        pack_n=model._predictor_pack_n,
+    )
+    assert peak_output.shape == (B * K, N, 2)
 
     metrics = model.forward_augmented(batch)
     assert torch.isfinite(metrics["loss"])
@@ -481,7 +490,7 @@ def test_positions_outside_union_do_not_change_loss():
     batch_b["peak_mz"] = batch_b["peak_mz"].clone()
     batch_b["peak_mz"][ignored] = batch_b["peak_mz"][ignored] + 0.2
 
-    teacher_targets = model._compute_jepa_teacher_targets(
+    target_latents = model._compute_jepa_online_targets(
         batch_a["peak_mz"],
         batch_a["peak_intensity"],
         batch_a["peak_valid_mask"],
@@ -491,12 +500,18 @@ def test_positions_outside_union_do_not_change_loss():
         -1,
         -1,
     )
-    metrics_a = model.forward_augmented(batch_a, teacher_targets=teacher_targets)
-    metrics_b = model.forward_augmented(batch_b, teacher_targets=teacher_targets)
+    metrics_a = model.forward_augmented(batch_a, target_latents=target_latents)
+    metrics_b = model.forward_augmented(batch_b, target_latents=target_latents)
 
     assert torch.allclose(
         metrics_a["local_global_loss"],
         metrics_b["local_global_loss"],
+        atol=1e-6,
+        rtol=1e-6,
+    )
+    assert torch.allclose(
+        metrics_a["peak_recon_loss"],
+        metrics_b["peak_recon_loss"],
         atol=1e-6,
         rtol=1e-6,
     )

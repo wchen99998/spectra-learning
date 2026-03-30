@@ -120,7 +120,6 @@ def _train_step_impl(
     autocast_dtype: torch.dtype | None,
     grad_clip_norm: float | None,
 ) -> dict[str, torch.Tensor]:
-    model.advance_sigreg_lambda_schedule()
     device_type = next(model.parameters()).device.type
     if autocast_dtype is None or device_type != "cuda":
         autocast_ctx = nullcontext()
@@ -351,7 +350,6 @@ def train_and_evaluate(
                 autocast_dtype,
                 grad_clip_norm,
             )
-            model.update_teacher()
             global_step += 1
             pbar.update(1)
             if global_step % log_every_n_steps == 0:
@@ -367,10 +365,6 @@ def train_and_evaluate(
                     log_metrics["train/learning_rate"] = optimizers[0].param_groups[0][
                         "lr"
                     ]
-                if model.teacher_encoder is not None:
-                    log_metrics["train/teacher_ema_decay"] = float(
-                        model.teacher_ema_decay_current
-                    )
                 log_metrics["epoch"] = epoch
                 log_metrics["global_step"] = global_step
                 logger.log_metrics(log_metrics, step=global_step)

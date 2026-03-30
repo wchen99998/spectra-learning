@@ -1,6 +1,5 @@
 import tempfile
 import unittest
-import math
 
 import torch
 
@@ -116,6 +115,8 @@ class BlockJEPATests(unittest.TestCase):
             "loss",
             "token_sigreg_loss",
             "local_global_loss",
+            "peak_recon_loss",
+            "peak_recon_term",
             "context_fraction",
             "masked_fraction",
             "sigreg_lambda_current",
@@ -166,6 +167,7 @@ class BlockJEPATests(unittest.TestCase):
     def test_forward_without_regularizer(self):
         model = self._build_model(
             masked_token_loss_weight=1.0,
+            mae_loss_weight=0.0,
             sigreg_lambda=0.0,
         )
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
@@ -263,26 +265,28 @@ class BlockJEPATests(unittest.TestCase):
             loaded = self._build_model(jepa_target_layers=[1])
             load_pretrained_weights(loaded, path)
 
-    def test_teacher_ema_warmup_uses_cosine_schedule(self):
-        model = self._build_model(
-            use_ema_teacher_target=True,
-            teacher_ema_decay_start=0.9,
-            teacher_ema_decay=0.99,
-            teacher_ema_decay_warmup_steps=4,
+    def test_load_pretrained_weights_allows_missing_masked_peak_readout(self):
+        model = self._build_model()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/ckpt.pt"
+            old_state = {
+                f"model.{k}": v
+                for k, v in model.state_dict().items()
+                if not k.startswith("masked_peak_readout.")
+            }
+            torch.save({"state_dict": old_state}, path)
+            loaded = self._build_model()
+            load_pretrained_weights(loaded, path)
+
+    def test_online_targets_require_grad(self):
+        model = self._build_model()
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+        targets = model._compute_jepa_online_targets(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            batch["peak_valid_mask"],
         )
-        expected = []
-        for step in range(5):
-            ratio = min(step / 4.0, 1.0)
-            cosine_ratio = 0.5 * (1.0 - math.cos(math.pi * ratio))
-            expected.append(0.9 + 0.09 * cosine_ratio)
-
-        actual = []
-        for _ in range(5):
-            model.advance_teacher_ema_decay_schedule()
-            actual.append(float(model.teacher_ema_decay_current))
-
-        for got, want in zip(actual, expected, strict=True):
-            self.assertAlmostEqual(got, want, places=6)
+        self.assertTrue(targets.requires_grad)
 
     def test_weight_decay_targets_all_2d_weights(self):
         model = self._build_model()

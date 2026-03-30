@@ -3,7 +3,6 @@ import math
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 
 from models.peak_features import PeakFeatureEmbedder
 from models.losses import SIGReg
@@ -510,6 +509,7 @@ class PeakSetSIGReg(nn.Module):
         encoder_fourier_sigma: float = 10.0,
         encoder_fourier_trainable: bool = True,
         masked_token_loss_weight: float = 0.0,
+        mae_loss_weight: float = 1.0,
         masked_token_loss_type: str = "l1",
         jepa_target_normalization: str = "none",
         jepa_target_layers: list[int] | tuple[int, ...] | None = None,
@@ -518,15 +518,9 @@ class PeakSetSIGReg(nn.Module):
         masked_latent_predictor_num_heads: int = 8,
         sigreg_num_slices: int = 256,
         sigreg_lambda: float = 0.1,
-        sigreg_lambda_warmup_steps: int = 0,
         jepa_num_target_blocks: int = 2,
         jepa_context_fraction: float = 0.5,
         jepa_target_fraction: float = 0.25,
-        use_ema_teacher_target: bool = False,
-        teacher_ema_decay: float = 0.996,
-        teacher_ema_decay_start: float = 0.0,
-        teacher_ema_decay_warmup_steps: int = 0,
-        teacher_ema_update_every: int = 1,
         encoder_qk_norm: bool = False,
         norm_type: str = "rmsnorm",
         encoder_apply_final_norm: bool = True,
@@ -556,60 +550,13 @@ class PeakSetSIGReg(nn.Module):
         self.num_jepa_target_layers = len(self.jepa_target_layers)
         self.jepa_target_dim = self.num_jepa_target_layers * self.model_dim
         self.sigreg_lambda = float(sigreg_lambda)
-        self.sigreg_lambda_warmup_steps = int(sigreg_lambda_warmup_steps)
         self.representation_regularizer = str(representation_regularizer).lower()
         if self.representation_regularizer not in ("sigreg", "none", ""):
             raise ValueError(
                 f"Unsupported regularizer: {self.representation_regularizer!r}"
             )
-        _f = torch.float32
-        _reg = self.register_buffer
-        _sr_init = self.sigreg_lambda if self.sigreg_lambda_warmup_steps <= 0 else 0.0
-        _reg("sigreg_lambda_target", torch.tensor(self.sigreg_lambda, dtype=_f))
-        _reg("sigreg_lambda_current", torch.tensor(_sr_init, dtype=_f))
-        _reg("sigreg_lambda_step", torch.zeros((), dtype=torch.int64))
-        _reg(
-            "sigreg_lambda_warmup_steps_tensor",
-            torch.tensor(max(self.sigreg_lambda_warmup_steps, 1), dtype=_f),
-            persistent=False,
-        )
-        self.teacher_ema_update_every = int(teacher_ema_update_every)
-        # EMA teacher buffers
-        teacher_ema_decay_start = float(teacher_ema_decay_start)
-        teacher_ema_decay = float(teacher_ema_decay)
-        teacher_ema_decay_warmup_steps = int(teacher_ema_decay_warmup_steps)
-        _reg(
-            "teacher_ema_decay_start_tensor",
-            torch.tensor(teacher_ema_decay_start, dtype=_f),
-            persistent=False,
-        )
-        _reg(
-            "teacher_ema_decay_target",
-            torch.tensor(teacher_ema_decay, dtype=_f),
-            persistent=False,
-        )
-        _reg(
-            "teacher_ema_decay_current",
-            torch.tensor(
-                teacher_ema_decay
-                if teacher_ema_decay_warmup_steps <= 0
-                else teacher_ema_decay_start,
-                dtype=_f,
-            ),
-            persistent=False,
-        )
-        _reg(
-            "teacher_ema_decay_step",
-            torch.zeros((), dtype=torch.int64),
-            persistent=False,
-        )
-        _reg(
-            "teacher_ema_decay_warmup_steps_tensor",
-            torch.tensor(max(teacher_ema_decay_warmup_steps, 1), dtype=_f),
-            persistent=False,
-        )
-        _reg("teacher_ema_update_step", torch.zeros((), dtype=torch.int64))
         self.masked_token_loss_weight = float(masked_token_loss_weight)
+        self.mae_loss_weight = float(mae_loss_weight)
         self.masked_token_loss_type = str(masked_token_loss_type).lower()
         self.jepa_target_normalization = str(jepa_target_normalization).lower()
         if self.jepa_target_normalization not in ("none", "zscore"):
@@ -646,17 +593,6 @@ class PeakSetSIGReg(nn.Module):
             num_peaks=N,
             num_register_tokens=encoder_num_register_tokens,
         )
-        # EMA teacher encoder
-        if bool(use_ema_teacher_target):
-            self.teacher_encoder: AveragedModel | None = AveragedModel(
-                self.encoder,
-                multi_avg_fn=get_ema_multi_avg_fn(teacher_ema_decay),
-                use_buffers=True,
-            )
-            self.teacher_encoder.requires_grad_(False)
-            self.teacher_encoder.eval()
-        else:
-            self.teacher_encoder = None
         self.latent_mask_token = nn.Parameter(torch.empty(self.model_dim))
         nn.init.normal_(self.latent_mask_token, std=0.02)
 
@@ -696,6 +632,9 @@ class PeakSetSIGReg(nn.Module):
         self.masked_latent_readout = nn.Linear(self.predictor_dim, self.jepa_target_dim)
         nn.init.xavier_normal_(self.masked_latent_readout.weight)
         nn.init.zeros_(self.masked_latent_readout.bias)
+        self.masked_peak_readout = nn.Linear(self.predictor_dim, 2)
+        nn.init.xavier_normal_(self.masked_peak_readout.weight)
+        nn.init.zeros_(self.masked_peak_readout.bias)
         self.sigreg = SIGReg(num_slices=int(sigreg_num_slices))
 
         # Temporal predictor for frame -> next-frame prediction.
@@ -715,50 +654,6 @@ class PeakSetSIGReg(nn.Module):
                     nn.init.zeros_(layer.bias)
             self.temporal_query_token = nn.Parameter(torch.empty(model_dim))
             nn.init.trunc_normal_(self.temporal_query_token, std=0.02)
-
-    def train(self, mode: bool = True) -> "PeakSetSIGReg":
-        super().train(mode)
-        if self.teacher_encoder is not None:
-            self.teacher_encoder.eval()
-        return self
-
-    @torch.no_grad()
-    def update_teacher(self) -> None:
-        if self.teacher_encoder is None:
-            return
-        step = int(self.teacher_ema_update_step.item())
-        self.teacher_ema_update_step.add_(1)
-        if step % self.teacher_ema_update_every != 0:
-            return
-        self.advance_teacher_ema_decay_schedule()
-        self.teacher_encoder.multi_avg_fn = get_ema_multi_avg_fn(
-            float(self.teacher_ema_decay_current)
-        )
-        self.teacher_encoder.update_parameters(self.encoder)
-
-    @torch.no_grad()
-    def advance_teacher_ema_decay_schedule(self) -> None:
-        step = self.teacher_ema_decay_step.to(
-            dtype=self.teacher_ema_decay_current.dtype
-        )
-        ratio = torch.clamp(
-            step / self.teacher_ema_decay_warmup_steps_tensor, max=1.0
-        )
-        cosine_ratio = 0.5 * (1.0 - torch.cos(torch.pi * ratio))
-        delta = self.teacher_ema_decay_target - self.teacher_ema_decay_start_tensor
-        self.teacher_ema_decay_current.copy_(
-            self.teacher_ema_decay_start_tensor + delta * cosine_ratio
-        )
-        self.teacher_ema_decay_step.add_(1)
-
-    @torch.no_grad()
-    def advance_sigreg_lambda_schedule(self) -> None:
-        if self.sigreg_lambda_warmup_steps <= 0:
-            return
-        step = self.sigreg_lambda_step.to(dtype=self.sigreg_lambda_current.dtype)
-        ratio = torch.clamp(step / self.sigreg_lambda_warmup_steps_tensor, max=1.0)
-        self.sigreg_lambda_current.copy_(self.sigreg_lambda_target * ratio)
-        self.sigreg_lambda_step.add_(1)
 
     def _apply_jepa_target_normalization(self, x: torch.Tensor) -> torch.Tensor:
         if self.jepa_target_normalization == "none":
@@ -855,20 +750,27 @@ class PeakSetSIGReg(nn.Module):
             )
         )
 
-    def _teacher_encoder_module(self) -> PeakSetEncoder:
-        if self.teacher_encoder is None:
-            return self.encoder
-        return self.teacher_encoder.module
+    def predict_peak_values(
+        self,
+        x: torch.Tensor,
+        visible_mask: torch.Tensor,
+        pack_n: int = 0,
+    ) -> torch.Tensor:
+        return self.masked_peak_readout(
+            self.predict_masked_latents(
+                x,
+                visible_mask,
+                pack_n=pack_n,
+            )
+        )
 
-    @torch.no_grad()
-    def _compute_jepa_teacher_targets(
+    def _compute_jepa_online_targets(
         self,
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
         peak_valid_mask: torch.Tensor,
     ) -> torch.Tensor:
-        teacher = self._teacher_encoder_module()
-        teacher_peak_outputs = teacher.forward_peak_block_outputs(
+        target_peak_outputs = self.encoder.forward_peak_block_outputs(
             peak_mz,
             peak_intensity,
             valid_mask=peak_valid_mask,
@@ -877,7 +779,7 @@ class PeakSetSIGReg(nn.Module):
             prefix_pack=True,
             block_indices=self.jepa_target_layers,
         )
-        return torch.cat(teacher_peak_outputs, dim=-1)
+        return torch.cat(target_peak_outputs, dim=-1)
 
     def pool(
         self,
@@ -941,7 +843,7 @@ class PeakSetSIGReg(nn.Module):
     def forward_augmented(
         self,
         augmented_batch: dict[str, torch.Tensor],
-        teacher_targets: torch.Tensor | None = None,
+        target_latents: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         peak_mz = augmented_batch["peak_mz"]
         peak_intensity = augmented_batch["peak_intensity"]
@@ -966,16 +868,15 @@ class PeakSetSIGReg(nn.Module):
             )
         target_emb, _ = self.encoder.split_peak_and_cls(target_encoded)
         target_emb = target_emb.reshape(B, K, N, -1)
-        # Teacher sees full valid spectrum; loss mask selects target positions per block
-        if teacher_targets is not None:
-            target_token_target = teacher_targets
+        if target_latents is not None:
+            target_token_target = target_latents
         else:
-            teacher_targets_full = self._compute_jepa_teacher_targets(
+            target_latents_full = self._compute_jepa_online_targets(
                 peak_mz,
                 peak_intensity,
                 peak_valid_mask,
             )
-            target_token_target = teacher_targets_full.unsqueeze(1).expand(-1, K, -1, -1)
+            target_token_target = target_latents_full.unsqueeze(1).expand(-1, K, -1, -1)
 
         ctx_mask_v = context_mask.unsqueeze(1)
         context_emb_by_view = context_emb.unsqueeze(1).expand(-1, K, -1, -1)
@@ -985,38 +886,39 @@ class PeakSetSIGReg(nn.Module):
             self.latent_mask_token.view(1, 1, 1, -1).to(context_emb),
             predictor_input,
         )
-        predictor_output = self.predict_masked_targets(
+        predictor_latents = self.predict_masked_latents(
             predictor_input.reshape(B * K, N, -1),
             (ctx_mask_v | target_masks).reshape(B * K, N),
             pack_n=self._predictor_pack_n,
         ).reshape(B, K, N, -1)
-        loss_pred = predictor_output
-        loss_target = target_token_target
-        loss_target = self._apply_jepa_target_normalization(loss_target)
+        latent_pred = self.masked_latent_readout(predictor_latents)
+        peak_value_pred = self.masked_peak_readout(predictor_latents)
+        latent_target = self._apply_jepa_target_normalization(target_token_target)
         if self.masked_token_loss_type == "l2":
-            per_token_reg = (
-                (loss_pred - loss_target).square().mean(dim=-1)
-            )
+            per_token_jepa = (latent_pred - latent_target).square().mean(dim=-1)
         elif self.masked_token_loss_type == "l2_sum":
-            per_token_reg = (
-                (loss_pred - loss_target).square().sum(dim=-1)
-            )
+            per_token_jepa = (latent_pred - latent_target).square().sum(dim=-1)
         elif self.masked_token_loss_type == "l1":
-            per_token_reg = (loss_pred - loss_target).abs().mean(dim=-1)
+            per_token_jepa = (latent_pred - latent_target).abs().mean(dim=-1)
         else:
             raise ValueError(
                 f"Unsupported masked_token_loss_type: {self.masked_token_loss_type}"
             )
         target_mask_float = target_masks.float()
-        reg_num = (per_token_reg * target_mask_float).sum()
+        reg_num = (per_token_jepa * target_mask_float).sum()
         reg_den = target_mask_float.sum().clamp_min(1.0)
         local_global_loss = reg_num / reg_den
-        sigreg_lambda_current = (
-            self.sigreg_lambda_current.to(dtype=context_emb.dtype)
-            if self.sigreg_lambda_warmup_steps > 0
-            else context_emb.new_tensor(self.sigreg_lambda)
+        peak_value_target = torch.stack([peak_mz, peak_intensity], dim=-1)
+        peak_value_target = peak_value_target.unsqueeze(1).expand(-1, K, -1, -1)
+        per_token_peak_recon = (
+            (peak_value_pred - peak_value_target).square().mean(dim=-1)
         )
+        peak_recon_loss = (
+            (per_token_peak_recon * target_mask_float).sum() / reg_den
+        )
+        sigreg_lambda_current = context_emb.new_tensor(self.sigreg_lambda)
         jepa_term = self.masked_token_loss_weight * local_global_loss
+        peak_recon_term = self.mae_loss_weight * peak_recon_loss
         branch_emb = torch.cat([context_emb.unsqueeze(1), target_emb], dim=1)
         branch_visible = torch.cat(
             [context_mask.unsqueeze(1), target_masks], dim=1
@@ -1044,11 +946,13 @@ class PeakSetSIGReg(nn.Module):
             sigreg_term = context_emb.new_tensor(0.0)
         valid_peak_count = peak_valid_mask.float().sum().clamp_min(1.0)
         metrics = {
-            "loss": jepa_term + sigreg_term,
+            "loss": jepa_term + peak_recon_term + sigreg_term,
             "token_sigreg_loss": token_sigreg_loss,
             "local_global_loss": local_global_loss,
+            "peak_recon_loss": peak_recon_loss,
             "sigreg_term": sigreg_term,
             "jepa_term": jepa_term,
+            "peak_recon_term": peak_recon_term,
             "target_sigreg_term_over_jepa_term": sigreg_term
             / jepa_term.clamp_min(1e-8),
             "context_fraction": context_mask.float().sum() / valid_peak_count,
@@ -1061,17 +965,15 @@ class PeakSetSIGReg(nn.Module):
         }
         return metrics
 
-    @torch.no_grad()
-    def compute_next_frame_teacher_embeddings(
+    def compute_next_frame_target_embeddings(
         self, batch: dict[str, torch.Tensor],
     ) -> torch.Tensor:
-        """Compute teacher embeddings for the next frame."""
-        teacher = self._teacher_encoder_module()
+        """Compute online target embeddings for the next frame."""
         next_frame_mz, next_frame_int, next_frame_valid = self._get_temporal_frame_inputs(
             batch,
             "next_frame",
         )
-        teacher_embeddings = teacher(
+        target_embeddings = self.encoder(
             next_frame_mz,
             next_frame_int,
             valid_mask=next_frame_valid,
@@ -1079,13 +981,13 @@ class PeakSetSIGReg(nn.Module):
             pack_n=self._full_pack_n,
             prefix_pack=True,
         )
-        teacher_embeddings, _ = self.encoder.split_peak_and_cls(teacher_embeddings)
-        return teacher_embeddings
+        target_embeddings, _ = self.encoder.split_peak_and_cls(target_embeddings)
+        return target_embeddings
 
     def forward_temporal(
         self,
         batch: dict[str, torch.Tensor],
-        teacher_embeddings: torch.Tensor | None = None,
+        target_embeddings: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Predict next-frame token embeddings from the full current frame."""
         if self.temporal_predictor_num_layers <= 0:
@@ -1130,20 +1032,10 @@ class PeakSetSIGReg(nn.Module):
             queries = queries[:, :-self.predictor_num_register_tokens]
         predicted_next_frame = queries  # [B, N, D]
 
-        if teacher_embeddings is not None:
-            next_frame_emb = teacher_embeddings
+        if target_embeddings is not None:
+            next_frame_emb = target_embeddings
         else:
-            teacher = self._teacher_encoder_module()
-            with torch.no_grad():
-                next_frame_emb = teacher(
-                    next_frame_mz,
-                    next_frame_int,
-                    valid_mask=next_frame_valid,
-                    visible_mask=next_frame_valid,
-                    pack_n=self._full_pack_n,
-                    prefix_pack=True,
-                ).detach()
-                next_frame_emb, _ = self.encoder.split_peak_and_cls(next_frame_emb)
+            next_frame_emb = self.compute_next_frame_target_embeddings(batch)
 
         if self.masked_token_loss_type == "l2":
             per_token = (predicted_next_frame - next_frame_emb).square().mean(dim=-1)

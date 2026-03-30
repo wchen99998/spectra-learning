@@ -62,6 +62,31 @@ def test_sigreg_forward():
     assert torch.isfinite(result)
 
 
+def test_sigreg_is_per_token_position():
+    sigreg = SIGReg(num_slices=128)
+    proj_a = torch.tensor(
+        [
+            [[2.0, 0.0], [-2.0, 0.0]],
+            [[2.0, 0.0], [-2.0, 0.0]],
+        ],
+        dtype=torch.float32,
+    )
+    proj_b = torch.tensor(
+        [
+            [[2.0, 0.0], [2.0, 0.0]],
+            [[-2.0, 0.0], [-2.0, 0.0]],
+        ],
+        dtype=torch.float32,
+    )
+
+    torch.manual_seed(0)
+    loss_a = sigreg(proj_a)
+    torch.manual_seed(0)
+    loss_b = sigreg(proj_b)
+
+    assert not torch.allclose(loss_a, loss_b, atol=1e-6)
+
+
 def test_encoder_with_visible_mask():
     torch.manual_seed(42)
     encoder = (

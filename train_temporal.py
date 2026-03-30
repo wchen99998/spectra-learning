@@ -131,50 +131,6 @@ class _BatchPrefetcher:
         return batch
 
 
-class _CUDAGraphRunner:
-    """Explicit CUDA graph capture with static input buffers for training."""
-
-    def __init__(self, compile_kwargs=None):
-        self.graph = None
-        self.static_inputs: dict[str, torch.Tensor] | None = None
-        self.static_output = None
-        self.compiled_fn = None
-        self.compile_kwargs = compile_kwargs or {}
-
-    def _warmup_and_capture(self, fn, batch):
-        if self.compiled_fn is None:
-            self.compiled_fn = torch.compile(fn, **self.compile_kwargs)
-        self.static_inputs = {k: v.clone() for k, v in batch.items()}
-        s = torch.cuda.Stream()
-        s.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(s):
-            for _ in range(3):
-                self.compiled_fn(self.static_inputs)
-        torch.cuda.current_stream().wait_stream(s)
-        self.graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self.graph):
-            self.static_output = self.compiled_fn(self.static_inputs)
-
-    def run(self, fn, batch):
-        if self.graph is None:
-            self._warmup_and_capture(fn, batch)
-        else:
-            for k, v in batch.items():
-                self.static_inputs[k].copy_(v)
-        self.graph.replay()
-        return self.static_output
-
-
-def _get_teacher_runner(model: PeakSetSIGReg) -> _CUDAGraphRunner:
-    runner = getattr(model, "_temporal_teacher_graph_runner", None)
-    if runner is None:
-        runner = _CUDAGraphRunner(
-            compile_kwargs={"mode": "max-autotune-no-cudagraphs", "dynamic": False}
-        )
-        model._temporal_teacher_graph_runner = runner
-    return runner
-
-
 def _save_checkpoint(
     path: Path,
     model: PeakSetSIGReg,
@@ -381,7 +337,14 @@ def _load_pretrained_checkpoint(
     }
     sd = prefixed or sd
     for key in tuple(sd):
-        if key.startswith("masked_latent_readout.") or key.endswith(
+        if key.startswith(
+            (
+                "masked_latent_readout.",
+                "teacher_encoder.",
+                "teacher_ema_",
+                "sigreg_lambda_",
+            )
+        ) or key.endswith(
             (
                 "position_embedding.weight",
                 "predictor_position_embedding.weight",
@@ -395,6 +358,7 @@ def _load_pretrained_checkpoint(
         "temporal_rt_proj.",
         "temporal_query_token",
         "masked_latent_readout.",
+        "masked_peak_readout.",
     )
     allowed_suffixes = (
         "encoder.position_embedding.weight",
@@ -505,16 +469,6 @@ def train_temporal(
     pbar = tqdm(total=total_steps, desc="Temporal train", unit="step")
 
     while global_step < total_steps and (batch := prefetcher.next()) is not None:
-        # Teacher embeddings (CUDA graph)
-        if model.teacher_encoder is not None:
-            runner = _get_teacher_runner(model)
-            with autocast_ctx:
-                teacher_embeddings = runner.run(
-                    model.compute_next_frame_teacher_embeddings, batch
-                )
-        else:
-            teacher_embeddings = None
-
         # Forward
         torch.compiler.cudagraph_mark_step_begin()
         with autocast_ctx:
@@ -524,7 +478,7 @@ def train_temporal(
                     mode=_compile_mode,
                     dynamic=False,
                 )
-            metrics = compiled_forward(batch, teacher_embeddings)
+            metrics = compiled_forward(batch)
 
         # Backward
         metrics["loss"].backward()
@@ -537,7 +491,6 @@ def train_temporal(
             opt.zero_grad(set_to_none=True)
         for sched in schedulers:
             sched.step()
-        model.update_teacher()
         global_step += 1
         pbar.update(1)
 

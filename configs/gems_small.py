@@ -54,12 +54,12 @@ def get_config() -> config_dict.ConfigDict:
 
     # Training
     cfg.num_epochs = 20
-    cfg.learning_rate = 3e-3
+    cfg.learning_rate = 1e-3
     cfg.warmup_steps = 50_000
     cfg.min_learning_rate = 3e-5
-    cfg.b2 = 0.98
+    cfg.b2 = 0.95
     cfg.weight_decay = 1e-2
-    cfg.optimizer = "adamw"
+    cfg.optimizer = "muon"
     cfg.device_prefetch_size = 8
     cfg.optimizer_capturable = True
     cfg.optimizer_fused = True
@@ -70,20 +70,15 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataloader_persistent_workers = True
     cfg.dataloader_pin_memory = True
 
-    cfg.masked_token_loss_weight = 1.0
+    cfg.masked_token_loss_weight = 0.2
+    cfg.mae_loss_weight = 1.0
     cfg.masked_token_loss_type = "l2"
     cfg.jepa_target_normalization = "none"
     cfg.jepa_target_layers = [1, 4, 8, 12]
-    cfg.use_ema_teacher_target = True
-    cfg.teacher_ema_decay = 0.9995
-    cfg.teacher_ema_decay_start = 0.9995
-    cfg.teacher_ema_decay_warmup_steps = 0
-    cfg.teacher_ema_update_every = 2
     cfg.grad_clip_norm = 1.0
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "reduce-overhead"
-    cfg.representation_regularizer = "none"
-    cfg.sigreg_lambda_warmup_steps = 50_000
+    cfg.representation_regularizer = "sigreg"
     cfg.msg_probe_every_n_steps = 0.2
     cfg.msg_probe_pooling_type = "pma"
     cfg.msg_probe_pma_num_heads = cfg.encoder_num_heads

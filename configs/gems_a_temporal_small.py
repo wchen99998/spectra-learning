@@ -68,19 +68,14 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataloader_pin_memory = True
 
     cfg.masked_token_loss_weight = 1.0
+    cfg.mae_loss_weight = 1.0
     cfg.masked_token_loss_type = "l2"
     cfg.jepa_target_normalization = "none"
-    cfg.use_ema_teacher_target = True
-    cfg.teacher_ema_decay = 0.999
-    cfg.teacher_ema_decay_start = 0.999
-    cfg.teacher_ema_decay_warmup_steps = 0
-    cfg.teacher_ema_update_every = 2
     cfg.grad_clip_norm = 1.0
     cfg.masked_latent_predictor_num_layers = 4
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "reduce-overhead"
     cfg.representation_regularizer = "none"
-    cfg.sigreg_lambda_warmup_steps = 50_000
     cfg.msg_probe_every_n_steps = 25000
     cfg.msg_probe_pooling_type = "pma"
     cfg.msg_probe_pma_num_heads = cfg.encoder_num_heads
