@@ -21,7 +21,6 @@ from ml_collections import config_dict
 from input_pipeline import TfLightningDataModule
 from models.model import PeakSetSIGReg
 from utils.msg_probe import run_msg_probe
-from utils.schedulers import CapturableCosineSchedule
 from utils.training import (
     build_logger,
     build_model_from_config,
@@ -111,7 +110,7 @@ def _train_step_impl(
     model: PeakSetSIGReg,
     batch: dict[str, torch.Tensor],
     optimizers: list[torch.optim.Optimizer],
-    schedulers: list[CapturableCosineSchedule],
+    schedulers: list[torch.optim.lr_scheduler.LRScheduler],
     autocast_dtype: torch.dtype | None,
     grad_clip_norm: float | None,
 ) -> dict[str, torch.Tensor]:
@@ -134,12 +133,33 @@ def _train_step_impl(
     return metrics
 
 
+def _make_cosine_schedule(
+    optimizer: torch.optim.Optimizer,
+    total_steps: int,
+    warmup_steps: int,
+    min_lr: float | None,
+) -> torch.optim.lr_scheduler.LRScheduler:
+    base_lr = float(optimizer.param_groups[0]["lr"])
+    eta_min = float(min_lr) if min_lr is not None else 0.1 * base_lr
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=max(1, total_steps - warmup_steps), eta_min=eta_min
+    )
+    if warmup_steps > 0:
+        warmup = torch.optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=1e-8, end_factor=1.0, total_iters=warmup_steps
+        )
+        return torch.optim.lr_scheduler.SequentialLR(
+            optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps]
+        )
+    return cosine
+
+
 def _build_optimizers(
     config: config_dict.ConfigDict,
     model: PeakSetSIGReg,
     total_steps: int,
     device: torch.device,
-) -> tuple[list[torch.optim.Optimizer], list[CapturableCosineSchedule]]:
+) -> tuple[list[torch.optim.Optimizer], list[torch.optim.lr_scheduler.LRScheduler]]:
     base_lr = float(config.learning_rate)
     warmup_steps = int(config.get("warmup_steps", 0))
     min_learning_rate = config.get("min_learning_rate", None)
@@ -151,52 +171,50 @@ def _build_optimizers(
     fused_cfg = config.get("optimizer_fused", None)
     fused = is_cuda if fused_cfg is None else bool(fused_cfg) and is_cuda
 
-    def _make_schedule(
-        optimizer: torch.optim.Optimizer,
-        lr: float,
-    ) -> CapturableCosineSchedule:
-        return CapturableCosineSchedule(
-            optimizer,
-            base_lr=lr,
-            total_steps=total_steps,
-            warmup_steps=warmup_steps,
-            min_lr=min_learning_rate,
-            device=device,
-        )
-
     if optimizer_type == "muon":
+        from gram_newton_schulz import Muon as GNSMuon
+
         muon_lr = float(config.get("muon_lr", None) or base_lr)
         adamw_lr = float(config.get("adamw_lr", None) or base_lr)
         muon_momentum = float(config.get("muon_momentum", 0.95))
         muon_wd = float(config.get("muon_weight_decay", None) or weight_decay)
 
-        weight_params = []
-        scalar_params = []
-        for name, param in model.named_parameters():
+        muon_params = []
+        adamw_params: list[dict] = [{"params": [], "weight_decay": 0.0}]
+        adamw_wd_params: list[torch.nn.Parameter] = []
+        for param in model.parameters():
             if not param.requires_grad:
                 continue
-            if param.ndim == 2:
-                weight_params.append(param)
+            if param.ndim >= 2 and param.stride()[0] % 8 == 0:
+                muon_params.append(param)
+            elif param.ndim >= 2:
+                adamw_wd_params.append(param)
             else:
-                scalar_params.append(param)
+                adamw_params[0]["params"].append(param)
+        if adamw_wd_params:
+            adamw_params.append({"params": adamw_wd_params, "weight_decay": weight_decay})
 
-        muon_opt = torch.optim.Muon(
-            weight_params,
+        adamw_opt = torch.optim.AdamW(
+            adamw_params,
+            lr=torch.tensor(adamw_lr),
+            betas=(0.9, b2),
+            capturable=capturable,
+            fused=fused,
+        )
+        muon_opt = GNSMuon(
+            muon_params,
             lr=muon_lr,
             weight_decay=muon_wd,
             momentum=muon_momentum,
             nesterov=bool(config.get("muon_nesterov", True)),
-            adjust_lr_fn="match_rms_adamw",
-        )
-        adamw_opt = torch.optim.AdamW(
-            scalar_params,
-            lr=adamw_lr,
-            betas=(0.9, b2),
-            weight_decay=0.0,
+            adjust_lr="rms_norm",
+            ns_coefficients_preset="YOU_COEFFICIENTS",
+            ns_use_kernels=is_cuda,
+            scalar_optimizer=adamw_opt,
         )
         return (
-            [muon_opt, adamw_opt],
-            [_make_schedule(muon_opt, muon_lr), _make_schedule(adamw_opt, adamw_lr)],
+            [muon_opt],
+            [_make_cosine_schedule(muon_opt, total_steps, warmup_steps, min_learning_rate)],
         )
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -206,14 +224,14 @@ def _build_optimizers(
         capturable=capturable,
         fused=fused,
     )
-    return [optimizer], [_make_schedule(optimizer, base_lr)]
+    return [optimizer], [_make_cosine_schedule(optimizer, total_steps, warmup_steps, min_learning_rate)]
 
 
 def _save_checkpoint(
     path: Path,
     model: PeakSetSIGReg,
     optimizers: list[torch.optim.Optimizer],
-    schedulers: list[CapturableCosineSchedule],
+    schedulers: list[torch.optim.lr_scheduler.LRScheduler],
     global_step: int,
     epoch: int,
     loss: float,

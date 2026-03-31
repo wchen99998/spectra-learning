@@ -696,6 +696,7 @@ class PeakSetSIGReg(nn.Module):
         return self
 
     @torch.no_grad()
+    @torch.no_grad()
     def update_teacher(self) -> None:
         if self.teacher_encoder is None:
             return
@@ -704,10 +705,10 @@ class PeakSetSIGReg(nn.Module):
         if step % self.teacher_ema_update_every != 0:
             return
         self.advance_teacher_ema_decay_schedule()
-        self.teacher_encoder.multi_avg_fn = get_ema_multi_avg_fn(
-            float(self.teacher_ema_decay_current)
-        )
-        self.teacher_encoder.update_parameters(self.encoder)
+        decay = float(self.teacher_ema_decay_current)
+        teacher_params = list(self.teacher_encoder.module.parameters())
+        student_params = list(self.encoder.parameters())
+        torch._foreach_lerp_(teacher_params, student_params, 1.0 - decay)
 
     @torch.no_grad()
     def advance_teacher_ema_decay_schedule(self) -> None:
@@ -908,14 +909,6 @@ class PeakSetSIGReg(nn.Module):
             pack_n=self._context_pack_n,
         )
         context_emb, _ = self.encoder.split_peak_and_cls(context_encoded)
-        target_encoded = self.encoder(
-                peak_mz.repeat_interleave(K, dim=0),
-                peak_intensity.repeat_interleave(K, dim=0),
-                valid_mask=peak_valid_mask.repeat_interleave(K, dim=0),
-                visible_mask=target_masks.reshape(B * K, N),
-            )
-        target_emb, _ = self.encoder.split_peak_and_cls(target_encoded)
-        target_emb = target_emb.reshape(B, K, N, -1)
         # Teacher sees full valid spectrum; loss mask selects target positions per block
         if teacher_targets is not None:
             target_token_target = teacher_targets
@@ -962,24 +955,11 @@ class PeakSetSIGReg(nn.Module):
         reg_den = target_mask_float.sum().clamp_min(1.0)
         local_global_loss = reg_num / reg_den
         loss = self.masked_token_loss_weight * local_global_loss
-        branch_emb = torch.cat([context_emb.unsqueeze(1), target_emb], dim=1)
-        branch_visible = torch.cat(
-            [context_mask.unsqueeze(1), target_masks], dim=1
-        )
-        V = branch_emb.shape[1]
-        fused_emb = branch_emb.reshape(V * B, N, -1)
-        fused_visible = branch_visible.reshape(V * B, N)
         with torch.no_grad():
-            emb_f = fused_emb.float().reshape(B, V, N, -1)
-            mask_f = fused_visible.reshape(B, V, N)
             collapse_metrics: dict[str, torch.Tensor] = {}
-            for prefix, e, m in [
-                ("global", emb_f[:, 0], mask_f[:, 0]),
-                ("local", emb_f[:, 1:], mask_f[:, 1:]),
-            ]:
-                for k, v in _masked_embedding_stats(e, m).items():
-                    collapse_metrics[f"{prefix}_{k}"] = v
-            reg_stats = _masked_embedding_stats(fused_emb, fused_visible)
+            for k, v in _masked_embedding_stats(context_emb, context_mask).items():
+                collapse_metrics[f"global_{k}"] = v
+            reg_stats = _masked_embedding_stats(context_emb, context_mask)
         valid_peak_count = peak_valid_mask.float().sum().clamp_min(1.0)
         metrics = {
             "loss": loss,
@@ -987,8 +967,6 @@ class PeakSetSIGReg(nn.Module):
             "context_fraction": context_mask.float().sum() / valid_peak_count,
             "masked_fraction": target_masks.float().sum() / valid_peak_count,
             **{f"encoder_{k}": v.to(context_emb.dtype) for k, v in reg_stats.items()},
-            "local_to_global_emb_std_ratio": collapse_metrics["local_emb_std"]
-            / collapse_metrics["global_emb_std"],
             **collapse_metrics,
         }
         return metrics
