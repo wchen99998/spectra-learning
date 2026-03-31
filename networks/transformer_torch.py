@@ -37,15 +37,18 @@ class Attention(nn.Module):
         self.head_dim = self.dim // self.n_heads
         self.qk_norm = qk_norm
 
-        out_features = (self.n_heads + 2 * self.n_kv_heads) * self.head_dim
-        self.wqkv = nn.Linear(self.dim, out_features, bias=False)
+        self.wq = nn.Linear(self.dim, self.n_heads * self.head_dim, bias=False)
+        self.wk = nn.Linear(self.dim, self.n_kv_heads * self.head_dim, bias=False)
+        self.wv = nn.Linear(self.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(self.dim, self.dim, bias=False)
 
         if qk_norm:
             self.q_norm = _build_norm(self.head_dim, eps=None, norm_type=norm_type)
             self.k_norm = _build_norm(self.head_dim, eps=None, norm_type=norm_type)
 
-        nn.init.xavier_normal_(self.wqkv.weight)
+        nn.init.xavier_normal_(self.wq.weight)
+        nn.init.xavier_normal_(self.wk.weight)
+        nn.init.xavier_normal_(self.wv.weight)
         nn.init.xavier_normal_(self.wo.weight)
 
     def forward(
@@ -55,16 +58,10 @@ class Attention(nn.Module):
         attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         bsz, seqlen, _ = x.shape
-        qkv = self.wqkv(x)
 
-        q_size = self.n_heads * self.head_dim
-        kv_size = self.n_kv_heads * self.head_dim
-
-        xq, xk, xv = torch.split(qkv, [q_size, kv_size, kv_size], dim=-1)
-
-        xq = xq.view(bsz, seqlen, self.n_heads, self.head_dim)
-        xk = xk.view(bsz, seqlen, self.n_kv_heads, self.head_dim)
-        xv = xv.view(bsz, seqlen, self.n_kv_heads, self.head_dim)
+        xq = self.wq(x).view(bsz, seqlen, self.n_heads, self.head_dim)
+        xk = self.wk(x).view(bsz, seqlen, self.n_kv_heads, self.head_dim)
+        xv = self.wv(x).view(bsz, seqlen, self.n_kv_heads, self.head_dim)
 
         if self.qk_norm:
             xq = self.q_norm(xq)

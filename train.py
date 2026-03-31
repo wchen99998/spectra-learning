@@ -36,11 +36,6 @@ inductor_config.fx_graph_cache = True
 inductor_config.epilogue_fusion = True
 inductor_config.shape_padding = True
 
-
-def _is_weight_decay_target(name: str, param: torch.nn.Parameter) -> bool:
-    return param.ndim == 2 and name.endswith("weight")
-
-
 _TRAIN_BATCH_KEYS = frozenset(
     {
         "peak_mz",
@@ -125,6 +120,7 @@ def _train_step_impl(
         autocast_ctx = nullcontext()
     else:
         autocast_ctx = torch.autocast(device_type=device_type, dtype=autocast_dtype)
+    torch.compiler.cudagraph_mark_step_begin()
     with autocast_ctx:
         metrics = model.forward_augmented(batch)
     metrics["loss"].backward()
@@ -169,72 +165,39 @@ def _build_optimizers(
         )
 
     if optimizer_type == "muon":
-        from gram_newton_schulz import Muon as GNSMuon, YOU_COEFFICIENTS
-
         muon_lr = float(config.get("muon_lr", None) or base_lr)
         adamw_lr = float(config.get("adamw_lr", None) or base_lr)
         muon_momentum = float(config.get("muon_momentum", 0.95))
         muon_wd = float(config.get("muon_weight_decay", None) or weight_decay)
 
-        qkv_params = []
-        regular_2d_params = []
+        weight_params = []
         scalar_params = []
         for name, param in model.named_parameters():
             if not param.requires_grad:
                 continue
-            if "wqkv.weight" in name:
-                qkv_params.append(param)
-            elif param.ndim >= 2:
-                regular_2d_params.append(param)
+            if param.ndim == 2:
+                weight_params.append(param)
             else:
                 scalar_params.append(param)
 
-        scalar_optimizer = torch.optim.AdamW(
+        muon_opt = torch.optim.Muon(
+            weight_params,
+            lr=muon_lr,
+            weight_decay=muon_wd,
+            momentum=muon_momentum,
+            nesterov=bool(config.get("muon_nesterov", True)),
+            adjust_lr_fn="match_rms_adamw",
+        )
+        adamw_opt = torch.optim.AdamW(
             scalar_params,
             lr=adamw_lr,
             betas=(0.9, b2),
             weight_decay=0.0,
         )
-
-        def qkv_split_fn(param: torch.Tensor) -> list[torch.Tensor]:
-            """Split Wqkv [3*dim, dim] into [Wq, Wk, Wv]."""
-            hidden_dim = param.size(1)
-            return list(param.split(hidden_dim, dim=0))
-
-        def qkv_recombine_fn(splits: list[torch.Tensor]) -> torch.Tensor:
-            return torch.cat(splits, dim=0)
-
-        muon_param_groups = [
-            {
-                "params": qkv_params,
-                "param_split_fn": qkv_split_fn,
-                "param_recombine_fn": qkv_recombine_fn,
-                "lr": muon_lr,
-                "weight_decay": muon_wd,
-                "momentum": muon_momentum,
-            },
-            {
-                "params": regular_2d_params,
-                "lr": muon_lr,
-                "weight_decay": muon_wd,
-                "momentum": muon_momentum,
-            },
-        ]
-
-        muon_opt = GNSMuon(
-            params=muon_param_groups,
-            scalar_optimizer=scalar_optimizer,
-            lr=muon_lr,
-            weight_decay=muon_wd,
-            momentum=muon_momentum,
-            nesterov=bool(config.get("muon_nesterov", True)),
-            adjust_lr="rms_norm",
-            ns_algorithm="gram_newton_schulz",
-            ns_use_kernels=True,
-            ns_coefficients=YOU_COEFFICIENTS,
-            gram_newton_schulz_num_restarts=1,
+        return (
+            [muon_opt, adamw_opt],
+            [_make_schedule(muon_opt, muon_lr), _make_schedule(adamw_opt, adamw_lr)],
         )
-        return [muon_opt], [_make_schedule(muon_opt, muon_lr)]
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=torch.tensor(base_lr),

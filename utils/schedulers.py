@@ -69,8 +69,12 @@ class CapturableCosineSchedule:
         ratio = torch.clamp(effective_step / self._effective_total, min=0.0)
         mult = 0.5 * (1.0 + torch.cos(self._pi * ratio))
         lr = torch.max(self._min_lr, mult * self._base_lr) * warmup
+        lr_val = lr.item()
         for group in self.optimizer.param_groups:
-            group["lr"].copy_(lr)
+            if hasattr(group["lr"], "copy_"):
+                group["lr"].copy_(lr)
+            else:
+                group["lr"] = lr_val
 
     def state_dict(self) -> dict[str, object]:
         return {"_step": self._step.item()}

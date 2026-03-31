@@ -187,7 +187,9 @@ def diagnose_attention_weights(model: PeakSetSIGReg):
     """Report attention and FFN weight norms per layer."""
     print("\n=== Weight norms per layer ===")
     for i, block in enumerate(model.encoder.blocks):
-        wqkv_norm = block.attention.wqkv.weight.norm().item()
+        wq_norm = block.attention.wq.weight.norm().item()
+        wk_norm = block.attention.wk.weight.norm().item()
+        wv_norm = block.attention.wv.weight.norm().item()
         wo_norm = block.attention.wo.weight.norm().item()
         if hasattr(block.feed_forward, "w12"):
             w12_norm = block.feed_forward.w12.weight.norm().item()
@@ -197,7 +199,7 @@ def diagnose_attention_weights(model: PeakSetSIGReg):
             w_label = f"w1={w1_norm:.4f}"
         w2_norm = block.feed_forward.w2.weight.norm().item()
         print(
-            f"  block_{i:02d}  wqkv={wqkv_norm:.4f}  wo={wo_norm:.4f}  {w_label}  w2={w2_norm:.4f}"
+            f"  block_{i:02d}  wq={wq_norm:.4f}  wk={wk_norm:.4f}  wv={wv_norm:.4f}  wo={wo_norm:.4f}  {w_label}  w2={w2_norm:.4f}"
         )
 
 
