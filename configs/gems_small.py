@@ -7,7 +7,7 @@ def get_config() -> config_dict.ConfigDict:
     # Dataset
     cfg.tfrecord_dir = "data/gems_peaklist_tfrecord_alpha"
     cfg.gems_tfrecord_repo_id = "cjim8889/gems-a10-tfrecords"
-    cfg.batch_size = 512
+    cfg.batch_size = 256
     cfg.shuffle_buffer = 1_000_000
     cfg.tfrecord_buffer_size = 250_000
     cfg.drop_remainder = True
@@ -23,7 +23,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_num_heads = 12
     cfg.encoder_num_kv_heads = 12
     cfg.encoder_num_register_tokens = 4
-    cfg.encoder_apply_final_norm = True
+    cfg.encoder_apply_final_norm = False
     cfg.encoder_qk_norm = False
     cfg.encoder_fourier_strategy = "lin_float_int"
     cfg.encoder_fourier_x_min = 1e-4
@@ -37,7 +37,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_num_slices = 256
     cfg.sigreg_lambda = 0.1
     cfg.jepa_num_target_blocks = 2
-    cfg.jepa_context_fraction = 0.3
+    cfg.jepa_context_fraction = 0.35
     cfg.jepa_target_fraction = 0.2
     cfg.jepa_block_min_len = 1
     cfg.augmentation_mz_jitter_std = 0.0002
@@ -46,7 +46,7 @@ def get_config() -> config_dict.ConfigDict:
 
     # Predictor
     cfg.predictor_num_register_tokens = 4
-    cfg.predictor_apply_final_norm = True
+    cfg.predictor_apply_final_norm = False
     cfg.masked_latent_predictor_num_layers = 10
     cfg.masked_latent_predictor_num_heads = 16
     cfg.temporal_predictor_num_layers = 0
@@ -54,12 +54,12 @@ def get_config() -> config_dict.ConfigDict:
 
     # Training
     cfg.num_epochs = 20
-    cfg.learning_rate = 3e-3
-    cfg.warmup_steps = 50_000
+    cfg.learning_rate = 5e-4
+    cfg.warmup_steps = 20_000
     cfg.min_learning_rate = 3e-5
-    cfg.b2 = 0.98
-    cfg.weight_decay = 1e-2
-    cfg.optimizer = "adamw"
+    cfg.b2 = 0.95
+    cfg.weight_decay = 0.05
+    cfg.optimizer = "muon"
     cfg.device_prefetch_size = 8
     cfg.optimizer_capturable = True
     cfg.optimizer_fused = True
@@ -75,9 +75,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_target_normalization = "none"
     cfg.jepa_target_layers = [1, 4, 8, 12]
     cfg.use_ema_teacher_target = True
-    cfg.teacher_ema_decay = 0.9995
-    cfg.teacher_ema_decay_start = 0.9995
-    cfg.teacher_ema_decay_warmup_steps = 0
+    cfg.teacher_ema_decay = 0.999
+    cfg.teacher_ema_decay_start = 0.99
+    cfg.teacher_ema_decay_warmup_steps = 100_000
     cfg.teacher_ema_update_every = 2
     cfg.grad_clip_norm = 1.0
     cfg.autocast_dtype = "bf16"
@@ -90,7 +90,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_pma_num_seeds = 64
     cfg.msg_probe_num_epochs = 20
     cfg.msg_probe_learning_rate = 3e-4
-    cfg.msg_probe_weight_decay = 1e-4
+    cfg.msg_probe_weight_decay = 0.02
     cfg.msg_probe_warmup_steps = 0
     cfg.msg_probe_max_train_samples = None
     cfg.msg_probe_max_test_samples = None
