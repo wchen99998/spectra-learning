@@ -1,4 +1,5 @@
 import math
+from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
@@ -135,6 +136,55 @@ def _scatter_packed_tokens(
 ) -> torch.Tensor:
     out = packed_x.new_zeros(packed_x.shape[0], seq_len, packed_x.shape[-1])
     return out.scatter(1, pack_idx.unsqueeze(-1).expand_as(packed_x), packed_x)
+
+
+@dataclass
+class PackContext:
+    """Holds the state needed to unpack a packed sequence back to its original length."""
+
+    pack_idx: torch.Tensor | None  # [B, pack_n] index map; None when prefix_pack
+    seq_len: int  # original sequence length before packing
+    pack_n: int  # number of packed tokens (excluding appended special tokens)
+
+
+def pack_sequence(
+    x: torch.Tensor,
+    mask: torch.Tensor,
+    pack_n: int,
+    prefix_pack: bool = False,
+) -> tuple[PackContext, torch.Tensor, torch.Tensor]:
+    """Pack visible tokens into a dense sequence of length pack_n.
+
+    Returns (ctx, packed_x, packed_mask) where ctx stores everything needed
+    to later call ``unpack_sequence``.
+    """
+    seq_len = x.shape[1]
+    pack_n = min(int(pack_n), seq_len)
+    if prefix_pack:
+        ctx = PackContext(pack_idx=None, seq_len=seq_len, pack_n=pack_n)
+        return ctx, x[:, :pack_n], mask[:, :pack_n]
+    pack_idx = _pack_indices(mask, pack_n)
+    ctx = PackContext(pack_idx=pack_idx, seq_len=seq_len, pack_n=pack_n)
+    return ctx, _gather_packed_tokens(x, pack_idx), mask.gather(1, pack_idx)
+
+
+def unpack_sequence(
+    ctx: PackContext,
+    packed_x: torch.Tensor,
+    packed_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Unpack a packed sequence back to the original sequence length.
+
+    ``packed_x`` may include trailing special/register tokens appended after
+    packing — only the first ``ctx.pack_n`` positions are unpacked.  Invalid
+    positions (where ``packed_mask`` is False) are zeroed.
+    """
+    peak_x = packed_x[:, : ctx.pack_n]
+    peak_mask = packed_mask[:, : ctx.pack_n]
+    peak_x = torch.where(peak_mask.unsqueeze(-1), peak_x, torch.zeros_like(peak_x))
+    if ctx.pack_idx is None:  # prefix_pack
+        return F.pad(peak_x, (0, 0, 0, ctx.seq_len - ctx.pack_n))
+    return _scatter_packed_tokens(peak_x, ctx.pack_idx, ctx.seq_len)
 
 
 class CrossAttention(nn.Module):
@@ -334,27 +384,6 @@ class PeakSetEncoder(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return x[:, :-1], x[:, -1]
 
-    def _restore_packed_peak_tokens(
-        self,
-        packed_x: torch.Tensor,
-        packed_mask: torch.Tensor,
-        *,
-        seq_len: int,
-        peak_pack_n: int,
-        prefix_pack: bool,
-        pack_idx: torch.Tensor | None,
-    ) -> torch.Tensor:
-        peak_x = packed_x[:, :peak_pack_n]
-        peak_mask = packed_mask[:, :peak_pack_n]
-        peak_x = torch.where(
-            peak_mask.unsqueeze(-1),
-            peak_x,
-            torch.zeros_like(peak_x),
-        )
-        if prefix_pack:
-            return F.pad(peak_x, (0, 0, 0, seq_len - peak_pack_n))
-        return _scatter_packed_tokens(peak_x, pack_idx, seq_len)
-
     def forward_peak_block_outputs(
         self,
         peak_mz: torch.Tensor,
@@ -375,42 +404,21 @@ class PeakSetEncoder(nn.Module):
         selected = set(block_indices)
         selected_peak_outputs: dict[int, torch.Tensor] = {}
         if attn_mask is not None and pack_n > 0:
-            peak_pack_n = min(int(pack_n), seq_len)
-            if prefix_pack:
-                packed_x = x[:, :peak_pack_n]
-                packed_mask = attn_mask[:, :peak_pack_n]
-                pack_idx = None
-            else:
-                pack_idx = _pack_indices(attn_mask, peak_pack_n)
-                packed_x = _gather_packed_tokens(x, pack_idx)
-                packed_mask = attn_mask.gather(1, pack_idx)
+            pack_ctx, packed_x, packed_mask = pack_sequence(
+                x, attn_mask, pack_n, prefix_pack,
+            )
             packed_x, packed_mask = self._append_special_tokens(packed_x, packed_mask)
             attn_mask = create_visible_attention_mask(packed_mask)
             for block_idx, block in enumerate(self.blocks, start=1):
-                packed_x = block(
-                    packed_x,
-                    attn_mask=attn_mask,
-                )
+                packed_x = block(packed_x, attn_mask=attn_mask)
                 if block_idx in selected and block_idx != self.num_layers:
-                    selected_peak_outputs[block_idx] = self._restore_packed_peak_tokens(
-                        packed_x,
-                        packed_mask,
-                        seq_len=seq_len,
-                        peak_pack_n=peak_pack_n,
-                        prefix_pack=prefix_pack,
-                        pack_idx=pack_idx,
+                    selected_peak_outputs[block_idx] = unpack_sequence(
+                        pack_ctx, packed_x, packed_mask,
                     )
             packed_x = self.final_norm(packed_x)
             if self.num_layers in selected:
-                selected_peak_outputs[self.num_layers] = (
-                    self._restore_packed_peak_tokens(
-                        packed_x,
-                        packed_mask,
-                        seq_len=seq_len,
-                        peak_pack_n=peak_pack_n,
-                        prefix_pack=prefix_pack,
-                        pack_idx=pack_idx,
-                    )
+                selected_peak_outputs[self.num_layers] = unpack_sequence(
+                    pack_ctx, packed_x, packed_mask,
                 )
             return [selected_peak_outputs[idx] for idx in block_indices]
         x, attn_mask = self._append_special_tokens(x, attn_mask)
@@ -446,32 +454,16 @@ class PeakSetEncoder(nn.Module):
         ).unsqueeze(0).to(dtype=x.dtype)
         seq_len = peak_mz.shape[1]
         if attn_mask is not None and pack_n > 0:
-            peak_pack_n = min(int(pack_n), seq_len)
-            if prefix_pack:
-                packed_x = x[:, :peak_pack_n]
-                packed_mask = attn_mask[:, :peak_pack_n]
-                pack_idx = None
-            else:
-                pack_idx = _pack_indices(attn_mask, peak_pack_n)
-                packed_x = _gather_packed_tokens(x, pack_idx)
-                packed_mask = attn_mask.gather(1, pack_idx)
+            pack_ctx, packed_x, packed_mask = pack_sequence(
+                x, attn_mask, pack_n, prefix_pack,
+            )
             packed_x, packed_mask = self._append_special_tokens(packed_x, packed_mask)
             attn_mask = create_visible_attention_mask(packed_mask)
             for block in self.blocks:
-                packed_x = block(
-                packed_x,
-                attn_mask=attn_mask,
-            )
+                packed_x = block(packed_x, attn_mask=attn_mask)
             packed_x = self.final_norm(packed_x)
-            cls_x = packed_x[:, peak_pack_n]
-            peak_x = self._restore_packed_peak_tokens(
-                packed_x,
-                packed_mask,
-                seq_len=seq_len,
-                peak_pack_n=peak_pack_n,
-                prefix_pack=prefix_pack,
-                pack_idx=pack_idx,
-            )
+            cls_x = packed_x[:, pack_ctx.pack_n]
+            peak_x = unpack_sequence(pack_ctx, packed_x, packed_mask)
             output = torch.cat([peak_x, cls_x.unsqueeze(1)], dim=1)
             if return_cls_token:
                 return output, cls_x
@@ -808,30 +800,16 @@ class PeakSetSIGReg(nn.Module):
             return x
         x = self._add_predictor_positions(x)
         if pack_n > 0:
-            seq_len = x.shape[1]
-            pack_idx = _pack_indices(visible_mask, min(int(pack_n), seq_len))
-            packed_x = _gather_packed_tokens(x, pack_idx)
-            packed_mask = visible_mask.gather(1, pack_idx)
+            pack_ctx, packed_x, packed_mask = pack_sequence(x, visible_mask, pack_n)
             packed_x, packed_mask = self._append_predictor_register_tokens(
-                packed_x,
-                packed_mask,
+                packed_x, packed_mask,
             )
             packed_x = self.encoder_to_predictor_proj(packed_x)
             predictor_attn_mask = create_visible_attention_mask(packed_mask)
             for block in self.masked_latent_predictor:
-                packed_x = block(
-                    packed_x,
-                    attn_mask=predictor_attn_mask,
-                )
+                packed_x = block(packed_x, attn_mask=predictor_attn_mask)
             packed_x = self.predictor_final_norm(packed_x)
-            packed_x = packed_x[:, : pack_idx.shape[1]]
-            packed_mask = packed_mask[:, : pack_idx.shape[1]]
-            packed_x = torch.where(
-                packed_mask.unsqueeze(-1),
-                packed_x,
-                torch.zeros_like(packed_x),
-            )
-            return _scatter_packed_tokens(packed_x, pack_idx, seq_len)
+            return unpack_sequence(pack_ctx, packed_x, packed_mask)
         x, visible_mask = self._append_predictor_register_tokens(x, visible_mask)
         x = self.encoder_to_predictor_proj(x)
         predictor_attn_mask = create_visible_attention_mask(visible_mask)
