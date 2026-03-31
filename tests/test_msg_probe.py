@@ -82,6 +82,40 @@ class MsgLinearProbeTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(logits["mol_weight"]).all().item())
         self.assertTrue(torch.isfinite(logits["hydroxyl"]).all().item())
 
+    def test_hidden_probe_head_builds_mlp(self):
+        pooler = MsgProbePooler(model_dim=16)
+        probe = MsgLinearProbe(
+            input_dim=16,
+            task_names=("mol_weight",),
+            pooler=pooler,
+            hidden_dim=32,
+            num_layers=3,
+        )
+        pooled = torch.randn(5, 16)
+        logits = probe(pooled)
+
+        self.assertEqual(logits["mol_weight"].shape, (5, 1))
+        self.assertIsInstance(probe.heads["mol_weight"], torch.nn.Sequential)
+
+    def test_hidden_probe_head_with_dropout(self):
+        pooler = MsgProbePooler(model_dim=16)
+        probe = MsgLinearProbe(
+            input_dim=16,
+            task_names=("mol_weight",),
+            pooler=pooler,
+            hidden_dim=32,
+            num_layers=3,
+            dropout=0.3,
+        )
+        pooled = torch.randn(5, 16)
+        logits = probe(pooled)
+
+        self.assertEqual(logits["mol_weight"].shape, (5, 1))
+        head = probe.heads["mol_weight"]
+        dropout_layers = [m for m in head.modules() if isinstance(m, torch.nn.Dropout)]
+        self.assertEqual(len(dropout_layers), 2)
+        self.assertEqual(dropout_layers[0].p, 0.3)
+
 
 class MsgProbeStepTests(unittest.TestCase):
     def test_probe_step_filters_invalid_targets_and_losses_are_finite(self):

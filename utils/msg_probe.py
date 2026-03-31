@@ -85,12 +85,42 @@ class MsgLinearProbe(torch.nn.Module):
         input_dim: int,
         task_names: tuple[str, ...],
         pooler: MsgProbePooler,
+        hidden_dim: int = 0,
+        num_layers: int = 1,
+        dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self.pooler = pooler
-        self.heads = torch.nn.ModuleDict(
-            {name: torch.nn.Linear(input_dim, 1) for name in task_names}
-        )
+        self.heads = torch.nn.ModuleDict({
+            name: self._build_head(
+                input_dim=input_dim,
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                dropout=dropout,
+            )
+            for name in task_names
+        })
+
+    @staticmethod
+    def _build_head(
+        *,
+        input_dim: int,
+        hidden_dim: int,
+        num_layers: int,
+        dropout: float = 0.0,
+    ) -> torch.nn.Module:
+        if hidden_dim <= 0 or num_layers <= 1:
+            return torch.nn.Linear(input_dim, 1)
+        layers: list[torch.nn.Module] = []
+        in_dim = input_dim
+        for _ in range(num_layers - 1):
+            layers.append(torch.nn.Linear(in_dim, hidden_dim))
+            layers.append(torch.nn.GELU())
+            if dropout > 0:
+                layers.append(torch.nn.Dropout(dropout))
+            in_dim = hidden_dim
+        layers.append(torch.nn.Linear(in_dim, 1))
+        return torch.nn.Sequential(*layers)
 
     def forward(
         self,
@@ -343,6 +373,8 @@ def run_msg_probe(
         )
     )
     probe_pma_num_seeds = int(config.get("msg_probe_pma_num_seeds", 1))
+    probe_hidden_dim = int(config.get("msg_probe_hidden_dim", 0))
+    probe_num_layers = int(config.get("msg_probe_num_layers", 1))
     norm_type = str(config.get("norm_type", "rmsnorm"))
     peak_ordering = str(config.get("peak_ordering", "intensity"))
     probe_data = MassSpecProbeData.from_config(config)
@@ -385,10 +417,14 @@ def run_msg_probe(
         pma_num_seeds=probe_pma_num_seeds,
         norm_type=norm_type,
     )
+    probe_dropout = float(config.get("msg_probe_dropout", 0.0))
     probe = MsgLinearProbe(
         input_dim=int(config.model_dim),
         task_names=task_spec.regression_tasks + task_spec.classification_tasks,
         pooler=pooler,
+        hidden_dim=probe_hidden_dim,
+        num_layers=probe_num_layers,
+        dropout=probe_dropout,
     ).to(device)
     optimizer = torch.optim.AdamW(
         probe.parameters(),
