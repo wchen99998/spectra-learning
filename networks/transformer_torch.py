@@ -120,6 +120,7 @@ class TransformerBlock(nn.Module):
         hidden_dim: int | None,
         qk_norm: bool = False,
         norm_type: str = "rmsnorm",
+        dropout: float = 0.0,
     ):
         super().__init__()
         self.attention = Attention(
@@ -135,6 +136,7 @@ class TransformerBlock(nn.Module):
         )
         self.attention_norm = _build_norm(dim, eps=None, norm_type=norm_type)
         self.ffn_norm = _build_norm(dim, eps=None, norm_type=norm_type)
+        self.drop = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
 
     def forward(
         self,
@@ -142,8 +144,8 @@ class TransformerBlock(nn.Module):
         *,
         attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        h = x + self.attention(
+        h = x + self.drop(self.attention(
             self.attention_norm(x),
             attn_mask=attn_mask,
-        )
-        return h + self.feed_forward(self.ffn_norm(h))
+        ))
+        return h + self.drop(self.feed_forward(self.ffn_norm(h)))

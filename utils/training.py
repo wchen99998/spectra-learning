@@ -99,6 +99,7 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
             config.get("temporal_predictor_num_layers", 0)
         ),
         predictor_dim=config.get("predictor_dim", None),
+        predictor_dropout=float(config.get("predictor_dropout", 0.0)),
     )
 
 

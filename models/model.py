@@ -39,6 +39,7 @@ def _build_non_causal_blocks(
     norm_eps: float = 1e-5,
     qk_norm: bool = False,
     norm_type: str = "rmsnorm",
+    dropout: float = 0.0,
 ) -> nn.ModuleList:
     block_kwargs = dict(
         dim=dim,
@@ -48,6 +49,7 @@ def _build_non_causal_blocks(
         hidden_dim=int(math.ceil(dim * attention_mlp_multiple)),
         qk_norm=qk_norm,
         norm_type=norm_type,
+        dropout=dropout,
     )
     blocks = nn.ModuleList(
         [transformer_torch.TransformerBlock(**block_kwargs) for _ in range(num_layers)]
@@ -537,6 +539,7 @@ class PeakSetSIGReg(nn.Module):
         encoder_num_register_tokens: int = 0,
         predictor_num_register_tokens: int = 0,
         predictor_dim: int | None = None,
+        predictor_dropout: float = 0.0,
     ):
         super().__init__()
         self.model_dim = model_dim
@@ -687,6 +690,7 @@ class PeakSetSIGReg(nn.Module):
             attention_mlp_multiple=attention_mlp_multiple,
             qk_norm=encoder_qk_norm,
             norm_type=self.norm_type,
+            dropout=predictor_dropout,
         )
         self.predictor_final_norm = (
             _build_norm(self.predictor_dim, eps=None, norm_type=self.norm_type)
