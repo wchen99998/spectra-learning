@@ -304,7 +304,6 @@ def test_multilayer_targets_widen_teacher_and_predictor_outputs():
 @torch.no_grad()
 def test_local_global_loss_uses_target_tokens_only():
     model = _build_model(num_target_blocks=2)
-    model.sigreg_lambda = 0.0
     batch = _make_batch()
 
     metrics = model.forward_augmented(batch)
@@ -374,7 +373,6 @@ def test_local_global_loss_can_zscore_teacher_targets():
         num_target_blocks=2,
         jepa_target_normalization="zscore",
     )
-    model.sigreg_lambda = 0.0
     batch = _make_batch()
 
     metrics = model.forward_augmented(batch)
@@ -471,7 +469,6 @@ def test_multilayer_zscore_normalizes_each_target_slice_independently():
 @torch.no_grad()
 def test_positions_outside_union_do_not_change_loss():
     model = _build_model(num_target_blocks=2)
-    model.sigreg_lambda = 0.0
     batch_a = _make_batch()
     batch_b = {key: value.clone() for key, value in batch_a.items()}
 

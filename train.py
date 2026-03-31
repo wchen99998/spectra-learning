@@ -120,7 +120,6 @@ def _train_step_impl(
     autocast_dtype: torch.dtype | None,
     grad_clip_norm: float | None,
 ) -> dict[str, torch.Tensor]:
-    model.advance_sigreg_lambda_schedule()
     device_type = next(model.parameters()).device.type
     if autocast_dtype is None or device_type != "cuda":
         autocast_ctx = nullcontext()
@@ -171,7 +170,7 @@ def _build_optimizers(
 
     if optimizer_type == "muon":
         muon_params, adamw_params = [], []
-        for name, param in model.named_parameters():
+        for _, param in model.named_parameters():
             if not param.requires_grad:
                 continue
             if param.ndim >= 2:
@@ -320,7 +319,7 @@ def train_and_evaluate(
     else:
         raise ValueError(f"Unsupported autocast_dtype: {_ac_name}")
     _compile_mode = str(config.get("compile_mode", "max-autotune"))
-    compiled_step = torch.compile(_train_step_impl, mode=_compile_mode, fullgraph=False)
+    model.forward_augmented = torch.compile(model.forward_augmented, mode=_compile_mode, fullgraph=False)
     optimizer_type = str(config.get("optimizer", "adamw")).lower()
     device_prefetch_size = int(config.get("device_prefetch_size", 1))
     _msg_probe_raw = float(config.get("msg_probe_every_n_steps", 0))
@@ -343,7 +342,7 @@ def train_and_evaluate(
         epoch_steps = min(steps_per_epoch, total_steps - global_step)
         pbar = tqdm(total=epoch_steps, desc=f"Epoch {epoch}", unit="step")
         while global_step < total_steps and (batch := prefetcher.next()) is not None:
-            metrics = compiled_step(
+            metrics = _train_step_impl(
                 model,
                 batch,
                 optimizers,

@@ -195,7 +195,6 @@ def test_forward_augmented_sparse_pack_matches_full_model_loss():
         encoder_num_heads=4,
         feature_mlp_hidden_dim=16,
         masked_token_loss_weight=1.0,
-        representation_regularizer="none",
         jepa_num_target_blocks=2,
         jepa_target_layers=[1, 2],
         num_peaks=8,
@@ -349,7 +348,6 @@ def test_predictor_sparse_pack_absolute_positions_use_original_positions():
         encoder_num_layers=2,
         encoder_num_heads=4,
         feature_mlp_hidden_dim=16,
-        representation_regularizer="none",
         masked_latent_predictor_num_layers=2,
         num_peaks=6,
     ).eval()
@@ -359,7 +357,6 @@ def test_predictor_sparse_pack_absolute_positions_use_original_positions():
         encoder_num_layers=2,
         encoder_num_heads=4,
         feature_mlp_hidden_dim=16,
-        representation_regularizer="none",
         masked_latent_predictor_num_layers=2,
         num_peaks=6,
     ).eval()
@@ -627,7 +624,7 @@ def test_predict_masked_latents_pack_matches_non_contiguous():
     model = PeakSetSIGReg(
         model_dim=32, encoder_num_layers=2, encoder_num_heads=4,
         feature_mlp_hidden_dim=16, masked_latent_predictor_num_layers=2,
-        representation_regularizer="none", num_peaks=8,
+        num_peaks=8,
     ).eval()
     visible_mask = torch.tensor([
         [True, False, True, False, True, True, False, False],
@@ -653,7 +650,7 @@ def test_predict_masked_latents_pack_matches_with_register_tokens():
     model = PeakSetSIGReg(
         model_dim=32, encoder_num_layers=2, encoder_num_heads=4,
         feature_mlp_hidden_dim=16, masked_latent_predictor_num_layers=2,
-        representation_regularizer="none", num_peaks=8,
+        num_peaks=8,
         predictor_num_register_tokens=2,
     ).eval()
     visible_mask = torch.tensor([
@@ -681,7 +678,7 @@ def test_predict_masked_latents_pack_matches_with_predictor_dim():
         model_dim=32, encoder_num_layers=2, encoder_num_heads=4,
         feature_mlp_hidden_dim=16, masked_latent_predictor_num_layers=2,
         masked_latent_predictor_num_heads=4,
-        representation_regularizer="none", num_peaks=8,
+        num_peaks=8,
         predictor_dim=16,
     ).eval()
     visible_mask = torch.tensor([
@@ -713,7 +710,6 @@ def test_forward_augmented_non_contiguous_context_and_targets():
     model = PeakSetSIGReg(
         model_dim=32, encoder_num_layers=2, encoder_num_heads=4,
         feature_mlp_hidden_dim=16, masked_token_loss_weight=1.0,
-        representation_regularizer="none",
         jepa_num_target_blocks=2, jepa_target_layers=[1, 2],
         num_peaks=10, jepa_context_fraction=0.5, jepa_target_fraction=0.3,
     ).eval()

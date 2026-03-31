@@ -17,7 +17,6 @@ def _small_model(**overrides) -> PeakSetSIGReg:
         feature_mlp_hidden_dim=32,
         masked_token_loss_weight=1.0,
         masked_token_loss_type="l2",
-        representation_regularizer="none",
         masked_latent_predictor_num_layers=1,
         jepa_num_target_blocks=1,
         num_peaks=8,

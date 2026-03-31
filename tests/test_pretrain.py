@@ -95,8 +95,6 @@ class BlockJEPATests(unittest.TestCase):
             "encoder_num_kv_heads": 4,
             "attention_mlp_multiple": 2.0,
             "feature_mlp_hidden_dim": 16,
-            "sigreg_num_slices": 32,
-            "sigreg_lambda": 0.1,
             "jepa_num_target_blocks": 2,
         }
         model_kwargs.update(kwargs)
@@ -114,11 +112,9 @@ class BlockJEPATests(unittest.TestCase):
         metrics = model.forward_augmented(batch)
         for key in (
             "loss",
-            "token_sigreg_loss",
             "local_global_loss",
             "context_fraction",
             "masked_fraction",
-            "sigreg_lambda_current",
             "global_emb_var_floor",
             "local_emb_var_floor",
             "global_emb_cov_offdiag_abs_mean",
@@ -127,52 +123,6 @@ class BlockJEPATests(unittest.TestCase):
             "local_emb_corr_offdiag_abs_mean",
         ):
             self.assertIn(key, metrics, f"Missing key: {key}")
-
-    def test_sigreg_regularizer_uses_all_visible_branches(self):
-        model = self._build_model(sigreg_lambda=0.1)
-
-        class CaptureSIGReg(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.proj = None
-                self.valid_mask = None
-
-            def forward(self, proj, valid_mask=None):
-                self.proj = proj.detach().clone()
-                self.valid_mask = (
-                    None if valid_mask is None else valid_mask.detach().clone()
-                )
-                return proj.new_tensor(0.5)
-
-        capture = CaptureSIGReg()
-        model.sigreg = capture
-        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-        B = batch["peak_mz"].shape[0]
-        K = batch["target_masks"].shape[1]
-
-        model.forward_augmented(batch)
-
-        expected_visible = torch.cat(
-            [
-                batch["context_mask"].unsqueeze(1),
-                batch["target_masks"],
-            ],
-            dim=1,
-        ).reshape((1 + K) * B, -1)
-        self.assertIsNotNone(capture.proj)
-        self.assertIsNotNone(capture.valid_mask)
-        self.assertTrue(torch.equal(capture.valid_mask, expected_visible))
-
-    def test_forward_without_regularizer(self):
-        model = self._build_model(
-            masked_token_loss_weight=1.0,
-            sigreg_lambda=0.0,
-        )
-        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-        metrics = model.forward_augmented(batch)
-        self.assertAlmostEqual(float(metrics["token_sigreg_loss"]), 0.0, places=7)
-        self.assertAlmostEqual(float(metrics["sigreg_term"]), 0.0, places=7)
-        self.assertTrue(torch.allclose(metrics["loss"], metrics["jepa_term"]))
 
     def test_encode_output_shape(self):
         model = self._build_model()
@@ -315,8 +265,6 @@ class PrecursorTokenTests(unittest.TestCase):
             "encoder_num_kv_heads": 4,
             "attention_mlp_multiple": 2.0,
             "feature_mlp_hidden_dim": 16,
-            "sigreg_num_slices": 32,
-            "sigreg_lambda": 0.1,
             "jepa_num_target_blocks": 2,
             "use_precursor_token": True,
             "num_peaks": 6,

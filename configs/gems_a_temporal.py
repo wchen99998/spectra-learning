@@ -33,7 +33,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 128
     cfg.sigreg_num_slices = 256
-    cfg.sigreg_lambda = 0.1
     cfg.norm_type = "layernorm"
 
     # Training
@@ -88,7 +87,6 @@ def get_config() -> config_dict.ConfigDict:
 
     # Tune search space
     cfg.tune_param_space = [
-        {"param": "sigreg_lambda", "dist": "grid", "args": [100.0]},
     ]
 
     # System / logging

@@ -42,7 +42,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 1024
     cfg.sigreg_num_slices = 256
-    cfg.sigreg_lambda = 0.1
     cfg.jepa_num_target_blocks = 2
     cfg.jepa_context_fraction = 0.5
     cfg.jepa_target_fraction = 0.1
@@ -80,7 +79,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "reduce-overhead"
     cfg.representation_regularizer = "none"
-    cfg.sigreg_lambda_warmup_steps = 50_000
     cfg.msg_probe_every_n_steps = 25000
     cfg.msg_probe_pooling_type = "pma"
     cfg.msg_probe_pma_num_heads = cfg.encoder_num_heads
@@ -102,7 +100,6 @@ def get_config() -> config_dict.ConfigDict:
 
     # Tune search space
     cfg.tune_param_space = [
-        {"param": "sigreg_lambda", "dist": "grid", "args": [100.0]},
     ]
 
     # Logging

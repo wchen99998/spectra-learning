@@ -7,7 +7,6 @@ from torch import nn
 from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 
 from models.peak_features import PeakFeatureEmbedder
-from models.losses import SIGReg
 from networks import transformer_torch
 from networks.transformer_torch import _build_norm, create_visible_attention_mask
 
@@ -507,12 +506,8 @@ class PeakSetSIGReg(nn.Module):
         masked_token_loss_type: str = "l1",
         jepa_target_normalization: str = "none",
         jepa_target_layers: list[int] | tuple[int, ...] | None = None,
-        representation_regularizer: str = "sigreg",
         masked_latent_predictor_num_layers: int = 2,
         masked_latent_predictor_num_heads: int = 8,
-        sigreg_num_slices: int = 256,
-        sigreg_lambda: float = 0.1,
-        sigreg_lambda_warmup_steps: int = 0,
         jepa_num_target_blocks: int = 2,
         jepa_context_fraction: float = 0.5,
         jepa_target_fraction: float = 0.25,
@@ -550,24 +545,8 @@ class PeakSetSIGReg(nn.Module):
             raise ValueError("jepa_target_layers must be within encoder depth")
         self.num_jepa_target_layers = len(self.jepa_target_layers)
         self.jepa_target_dim = self.num_jepa_target_layers * self.model_dim
-        self.sigreg_lambda = float(sigreg_lambda)
-        self.sigreg_lambda_warmup_steps = int(sigreg_lambda_warmup_steps)
-        self.representation_regularizer = str(representation_regularizer).lower()
-        if self.representation_regularizer not in ("sigreg", "none", ""):
-            raise ValueError(
-                f"Unsupported regularizer: {self.representation_regularizer!r}"
-            )
         _f = torch.float32
         _reg = self.register_buffer
-        _sr_init = self.sigreg_lambda if self.sigreg_lambda_warmup_steps <= 0 else 0.0
-        _reg("sigreg_lambda_target", torch.tensor(self.sigreg_lambda, dtype=_f))
-        _reg("sigreg_lambda_current", torch.tensor(_sr_init, dtype=_f))
-        _reg("sigreg_lambda_step", torch.zeros((), dtype=torch.int64))
-        _reg(
-            "sigreg_lambda_warmup_steps_tensor",
-            torch.tensor(max(self.sigreg_lambda_warmup_steps, 1), dtype=_f),
-            persistent=False,
-        )
         self.teacher_ema_update_every = int(teacher_ema_update_every)
         # EMA teacher buffers
         teacher_ema_decay_start = float(teacher_ema_decay_start)
@@ -692,8 +671,6 @@ class PeakSetSIGReg(nn.Module):
         self.masked_latent_readout = nn.Linear(self.predictor_dim, self.jepa_target_dim)
         nn.init.xavier_normal_(self.masked_latent_readout.weight)
         nn.init.zeros_(self.masked_latent_readout.bias)
-        self.sigreg = SIGReg(num_slices=int(sigreg_num_slices))
-
         # Temporal predictor for frame -> next-frame prediction.
         if self.temporal_predictor_num_layers > 0:
             self.temporal_predictor = _build_temporal_decoder_blocks(
@@ -746,15 +723,6 @@ class PeakSetSIGReg(nn.Module):
             self.teacher_ema_decay_start_tensor + delta * cosine_ratio
         )
         self.teacher_ema_decay_step.add_(1)
-
-    @torch.no_grad()
-    def advance_sigreg_lambda_schedule(self) -> None:
-        if self.sigreg_lambda_warmup_steps <= 0:
-            return
-        step = self.sigreg_lambda_step.to(dtype=self.sigreg_lambda_current.dtype)
-        ratio = torch.clamp(step / self.sigreg_lambda_warmup_steps_tensor, max=1.0)
-        self.sigreg_lambda_current.copy_(self.sigreg_lambda_target * ratio)
-        self.sigreg_lambda_step.add_(1)
 
     def _apply_jepa_target_normalization(self, x: torch.Tensor) -> torch.Tensor:
         if self.jepa_target_normalization == "none":
@@ -993,12 +961,7 @@ class PeakSetSIGReg(nn.Module):
         reg_num = (per_token_reg * target_mask_float).sum()
         reg_den = target_mask_float.sum().clamp_min(1.0)
         local_global_loss = reg_num / reg_den
-        sigreg_lambda_current = (
-            self.sigreg_lambda_current.to(dtype=context_emb.dtype)
-            if self.sigreg_lambda_warmup_steps > 0
-            else context_emb.new_tensor(self.sigreg_lambda)
-        )
-        jepa_term = self.masked_token_loss_weight * local_global_loss
+        loss = self.masked_token_loss_weight * local_global_loss
         branch_emb = torch.cat([context_emb.unsqueeze(1), target_emb], dim=1)
         branch_visible = torch.cat(
             [context_mask.unsqueeze(1), target_masks], dim=1
@@ -1017,25 +980,12 @@ class PeakSetSIGReg(nn.Module):
                 for k, v in _masked_embedding_stats(e, m).items():
                     collapse_metrics[f"{prefix}_{k}"] = v
             reg_stats = _masked_embedding_stats(fused_emb, fused_visible)
-        use_sigreg = self.representation_regularizer == "sigreg" and self.sigreg_lambda > 0
-        if use_sigreg:
-            token_sigreg_loss = self.sigreg(fused_emb, valid_mask=fused_visible)
-            sigreg_term = sigreg_lambda_current * token_sigreg_loss
-        else:
-            token_sigreg_loss = context_emb.new_tensor(0.0)
-            sigreg_term = context_emb.new_tensor(0.0)
         valid_peak_count = peak_valid_mask.float().sum().clamp_min(1.0)
         metrics = {
-            "loss": jepa_term + sigreg_term,
-            "token_sigreg_loss": token_sigreg_loss,
+            "loss": loss,
             "local_global_loss": local_global_loss,
-            "sigreg_term": sigreg_term,
-            "jepa_term": jepa_term,
-            "target_sigreg_term_over_jepa_term": sigreg_term
-            / jepa_term.clamp_min(1e-8),
             "context_fraction": context_mask.float().sum() / valid_peak_count,
             "masked_fraction": target_masks.float().sum() / valid_peak_count,
-            "sigreg_lambda_current": sigreg_lambda_current,
             **{f"encoder_{k}": v.to(context_emb.dtype) for k, v in reg_stats.items()},
             "local_to_global_emb_std_ratio": collapse_metrics["local_emb_std"]
             / collapse_metrics["global_emb_std"],

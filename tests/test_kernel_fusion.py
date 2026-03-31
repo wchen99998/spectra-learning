@@ -104,7 +104,6 @@ def test_full_model_forward():
             encoder_num_layers=2,
             encoder_num_heads=4,
             feature_mlp_hidden_dim=64,
-            sigreg_num_slices=128,
             jepa_num_target_blocks=3,
         )
         .to(DEVICE)
@@ -116,7 +115,6 @@ def test_full_model_forward():
         result = model.forward_augmented(batch)
 
     assert "loss" in result
-    assert "token_sigreg_loss" in result
     assert "local_global_loss" in result
     assert "context_fraction" in result
     assert "masked_fraction" in result
