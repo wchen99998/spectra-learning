@@ -89,10 +89,10 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_pma_num_seeds = 64
     cfg.msg_probe_num_epochs = 11
     cfg.msg_probe_learning_rate = 3e-4
-    cfg.msg_probe_weight_decay = 0.02
+    cfg.msg_probe_weight_decay = 0.0
     cfg.msg_probe_warmup_steps = 0
-    cfg.msg_probe_hidden_dim = 0
-    cfg.msg_probe_num_layers = 1
+    cfg.msg_probe_hidden_dim = 1024
+    cfg.msg_probe_num_layers = 2
     cfg.msg_probe_dropout = 0.0
     cfg.msg_probe_max_train_samples = None
     cfg.msg_probe_max_test_samples = None

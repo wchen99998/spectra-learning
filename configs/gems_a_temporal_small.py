@@ -83,10 +83,13 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_pooling_type = "pma"
     cfg.msg_probe_pma_num_heads = cfg.encoder_num_heads
     cfg.msg_probe_pma_num_seeds = 32
-    cfg.msg_probe_num_epochs = 10
-    cfg.msg_probe_learning_rate = 4e-4
-    cfg.msg_probe_weight_decay = 1e-4
+    cfg.msg_probe_num_epochs = 11
+    cfg.msg_probe_learning_rate = 3e-4
+    cfg.msg_probe_weight_decay = 0.0
     cfg.msg_probe_warmup_steps = 0
+    cfg.msg_probe_hidden_dim = 1024
+    cfg.msg_probe_num_layers = 2
+    cfg.msg_probe_dropout = 0.0
     cfg.msg_probe_max_train_samples = None
     cfg.msg_probe_max_test_samples = None
     cfg.probe_dataset = "nist20"
