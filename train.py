@@ -426,8 +426,9 @@ def train_and_evaluate(
                         )
                 last_msg_probe_metrics = probe_metrics
                 logging.info(
-                    "step=%d msg_probe(test_r2_mol_weight=%.4f test_auc_fg_mean=%.4f fg_tasks=%d)",
+                    "step=%d msg_probe best_epoch=%d (test_r2_mol_weight=%.4f test_auc_fg_mean=%.4f fg_tasks=%d)",
                     global_step,
+                    int(probe_metrics["msg_probe_epoch"]),
                     probe_metrics["msg_probe/test/r2_mol_weight"],
                     probe_metrics["msg_probe/test/auc_fg_mean"],
                     int(probe_metrics["msg_probe/num_fg_tasks"]),

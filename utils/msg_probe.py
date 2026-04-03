@@ -78,6 +78,34 @@ class MsgProbePooler(torch.nn.Module):
         return (embeddings * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
 
 
+PROBE_ACTIVATIONS: dict[str, type[torch.nn.Module]] = {
+    "gelu": torch.nn.GELU,
+    "silu": torch.nn.SiLU,
+    "relu": torch.nn.ReLU,
+    "tanh": torch.nn.Tanh,
+}
+
+PROBE_INIT_METHODS = ("default", "xavier_uniform", "xavier_normal", "kaiming_normal", "orthogonal")
+
+
+def _apply_probe_init(module: torch.nn.Module, method: str) -> None:
+    if method == "default":
+        return
+    for m in module.modules():
+        if not isinstance(m, torch.nn.Linear):
+            continue
+        if method == "xavier_uniform":
+            torch.nn.init.xavier_uniform_(m.weight)
+        elif method == "xavier_normal":
+            torch.nn.init.xavier_normal_(m.weight)
+        elif method == "kaiming_normal":
+            torch.nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+        elif method == "orthogonal":
+            torch.nn.init.orthogonal_(m.weight)
+        if m.bias is not None:
+            torch.nn.init.zeros_(m.bias)
+
+
 class MsgLinearProbe(torch.nn.Module):
     def __init__(
         self,
@@ -88,6 +116,8 @@ class MsgLinearProbe(torch.nn.Module):
         hidden_dim: int = 0,
         num_layers: int = 1,
         dropout: float = 0.0,
+        activation: str = "gelu",
+        init_method: str = "default",
     ) -> None:
         super().__init__()
         self.pooler = pooler
@@ -97,6 +127,8 @@ class MsgLinearProbe(torch.nn.Module):
                 hidden_dim=hidden_dim,
                 num_layers=num_layers,
                 dropout=dropout,
+                activation=activation,
+                init_method=init_method,
             )
             for name in task_names
         })
@@ -108,19 +140,26 @@ class MsgLinearProbe(torch.nn.Module):
         hidden_dim: int,
         num_layers: int,
         dropout: float = 0.0,
+        activation: str = "gelu",
+        init_method: str = "default",
     ) -> torch.nn.Module:
         if hidden_dim <= 0 or num_layers <= 1:
-            return torch.nn.Linear(input_dim, 1)
+            head = torch.nn.Linear(input_dim, 1)
+            _apply_probe_init(head, init_method)
+            return head
+        act_cls = PROBE_ACTIVATIONS.get(activation, torch.nn.GELU)
         layers: list[torch.nn.Module] = []
         in_dim = input_dim
         for _ in range(num_layers - 1):
             layers.append(torch.nn.Linear(in_dim, hidden_dim))
-            layers.append(torch.nn.GELU())
+            layers.append(act_cls())
             if dropout > 0:
                 layers.append(torch.nn.Dropout(dropout))
             in_dim = hidden_dim
         layers.append(torch.nn.Linear(in_dim, 1))
-        return torch.nn.Sequential(*layers)
+        head = torch.nn.Sequential(*layers)
+        _apply_probe_init(head, init_method)
+        return head
 
     def forward(
         self,
@@ -418,6 +457,8 @@ def run_msg_probe(
         norm_type=norm_type,
     )
     probe_dropout = float(config.get("msg_probe_dropout", 0.0))
+    probe_activation = str(config.get("msg_probe_activation", "gelu"))
+    probe_init = str(config.get("msg_probe_init", "default"))
     probe = MsgLinearProbe(
         input_dim=int(config.model_dim),
         task_names=task_spec.regression_tasks + task_spec.classification_tasks,
@@ -425,6 +466,8 @@ def run_msg_probe(
         hidden_dim=probe_hidden_dim,
         num_layers=probe_num_layers,
         dropout=probe_dropout,
+        activation=probe_activation,
+        init_method=probe_init,
     ).to(device)
     optimizer = torch.optim.AdamW(
         probe.parameters(),
@@ -457,8 +500,12 @@ def run_msg_probe(
         }
 
     compiled_probe_step = torch.compile(_probe_step)
+    probe_select_metric = str(
+        config.get("msg_probe_select_metric", "msg_probe/test/auc_fg_mean")
+    )
 
-    final_metrics: dict[str, float] = {}
+    best_metrics: dict[str, float] = {}
+    best_metric_value = -float("inf")
     for epoch_idx in range(num_probe_epochs):
         probe.train()
         train_state = _new_epoch_state(task_spec)
@@ -507,7 +554,7 @@ def run_msg_probe(
                 if result is None:
                     continue
                 _update_epoch_state(test_state, result, task_spec)
-        final_metrics = {
+        epoch_metrics = {
             **_score_epoch_state(
                 prefix="msg_probe/train", epoch_state=train_state, task_spec=task_spec
             ),
@@ -517,19 +564,30 @@ def run_msg_probe(
             "msg_probe/num_fg_tasks": float(len(task_spec.classification_tasks)),
             "msg_probe_epoch": float(epoch_idx + 1),
         }
+        current_value = epoch_metrics.get(probe_select_metric, -float("inf"))
+        if current_value > best_metric_value:
+            best_metric_value = current_value
+            best_metrics = dict(epoch_metrics)
         log.info(
             "MSG probe epoch %d/%d test_r2_mean=%.4f test_auc_fg_mean=%.4f fg_tasks=%d",
             epoch_idx + 1,
             num_probe_epochs,
-            final_metrics["msg_probe/test/r2_mean"],
-            final_metrics["msg_probe/test/auc_fg_mean"],
-            int(final_metrics["msg_probe/num_fg_tasks"]),
+            epoch_metrics["msg_probe/test/r2_mean"],
+            epoch_metrics["msg_probe/test/auc_fg_mean"],
+            int(epoch_metrics["msg_probe/num_fg_tasks"]),
         )
         if on_epoch_end is not None:
-            on_epoch_end(final_metrics)
+            on_epoch_end(epoch_metrics)
+    if best_metrics:
+        log.info(
+            "MSG probe best epoch %d: test_r2_mean=%.4f test_auc_fg_mean=%.4f",
+            int(best_metrics["msg_probe_epoch"]),
+            best_metrics["msg_probe/test/r2_mean"],
+            best_metrics["msg_probe/test/auc_fg_mean"],
+        )
     if was_training:
         model.train()
-    return final_metrics
+    return best_metrics
 
 
 def _dreams_probe_step(

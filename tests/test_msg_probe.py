@@ -116,6 +116,23 @@ class MsgLinearProbeTests(unittest.TestCase):
         self.assertEqual(len(dropout_layers), 2)
         self.assertEqual(dropout_layers[0].p, 0.3)
 
+    def test_activation_and_init_options(self):
+        for act in ("gelu", "silu", "relu", "tanh"):
+            for init in ("default", "xavier_uniform", "xavier_normal", "kaiming_normal", "orthogonal"):
+                pooler = MsgProbePooler(model_dim=16)
+                probe = MsgLinearProbe(
+                    input_dim=16,
+                    task_names=("mol_weight",),
+                    pooler=pooler,
+                    hidden_dim=32,
+                    num_layers=2,
+                    activation=act,
+                    init_method=init,
+                )
+                logits = probe(torch.randn(3, 16))
+                self.assertEqual(logits["mol_weight"].shape, (3, 1))
+                self.assertTrue(torch.isfinite(logits["mol_weight"]).all().item())
+
 
 class MsgProbeStepTests(unittest.TestCase):
     def test_probe_step_filters_invalid_targets_and_losses_are_finite(self):
