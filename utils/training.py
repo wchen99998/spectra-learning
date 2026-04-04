@@ -153,6 +153,11 @@ def auto_run_name(config: Any) -> str:
     else:
         param_str = f"{total_params / 1_000_000:.0f}M"
 
+    wd = float(config.get("weight_decay", 0))
+    min_lr = config.get("min_learning_rate", None)
+    ema_decay = float(config.get("teacher_ema_decay", 0))
+    warmup = int(config.get("warmup_steps", 0))
+
     parts = [
         param_str,
         f"d{dim}",
@@ -162,9 +167,15 @@ def auto_run_name(config: Any) -> str:
         f"bs{bs}",
         opt,
         f"lr{lr:.0e}",
+        f"wd{wd:.0e}",
+        f"ema{ema_decay:.4g}",
         f"ep{epochs}",
     ]
 
+    if min_lr is not None:
+        parts.append(f"minlr{float(min_lr):.0e}")
+    if warmup > 0:
+        parts.append(f"wu{warmup // 1000}k")
     if config.get("use_precursor_token", False):
         parts.append("prec")
     norm = str(config.get("norm_type", "")).lower()

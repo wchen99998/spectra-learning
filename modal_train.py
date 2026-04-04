@@ -1,8 +1,12 @@
 """Train on Modal with persistent storage for data and checkpoints.
 
 Usage:
+    # Single run
     modal run modal_train.py
-    modal run modal_train.py --config configs/gems_small.py --run-name my_experiment
+    modal run modal_train.py --config configs/gems_small.py --gpu H100
+
+    # Parallel sweep (launches all experiments concurrently)
+    modal run modal_train.py --sweep sweep_optim
 
 Setup:
     1. modal setup
@@ -10,6 +14,7 @@ Setup:
     3. modal run modal_train.py
 """
 
+import json
 from pathlib import Path
 
 import modal
@@ -77,16 +82,58 @@ app = modal.App("spectra-training", image=image)
 
 
 # ---------------------------------------------------------------------------
+# Sweep definitions
+# ---------------------------------------------------------------------------
+SWEEPS: dict[str, list[dict]] = {
+    # Optimizer sweep: downstream probe perf degrades during training.
+    # Hypotheses: LR too aggressive, WD too low, EMA teacher tracks student
+    # too closely (collapse), min_lr floor keeps perturbing late.
+    "sweep_optim": [
+        # 0) baseline — current settings (ema=0.995, update_every=2)
+        {},
+        # 1) lower peak LR — less aggressive updates preserve representations
+        {"learning_rate": 2e-4},
+        # 2) higher weight decay — stronger regularization against collapse
+        {"weight_decay": 0.1},
+        # 3) slower EMA teacher — teacher lags more, provides stabler targets
+        {"teacher_ema_decay": 0.999, "teacher_ema_decay_start": 0.996},
+        # 4) much slower EMA + update every step — maximally stable teacher
+        {
+            "teacher_ema_decay": 0.9996,
+            "teacher_ema_decay_start": 0.999,
+            "teacher_ema_update_every": 1,
+        },
+        # 5) lower LR floor + more warmup — less perturbation early and late
+        {"min_learning_rate": 1e-5, "warmup_steps": 40_000},
+        # 6) lower LR + higher WD — combined conservative regularization
+        {"learning_rate": 2e-4, "weight_decay": 0.1},
+        # 7) full stability: slow EMA + lower LR + lower floor + more warmup
+        {
+            "learning_rate": 2e-4,
+            "teacher_ema_decay": 0.9996,
+            "teacher_ema_decay_start": 0.999,
+            "teacher_ema_update_every": 1,
+            "min_learning_rate": 1e-5,
+            "warmup_steps": 40_000,
+        },
+    ],
+}
+
+
+# ---------------------------------------------------------------------------
 # Training function
 # ---------------------------------------------------------------------------
 @app.function(
     image=image,
     volumes={volume_path: volume},
     gpu=DEFAULT_GPU,
-    timeout=24 * HOURS,
+    timeout=3 * HOURS,
     secrets=[modal.Secret.from_name("wandb-secret", required_keys=["WANDB_API_KEY"])],
 )
-def train(config_path: str = "configs/gems_small.py", run_name: str = "default"):
+def train(
+    config_path: str = "configs/gems_small.py",
+    overrides_json: str = "{}",
+):
     import logging
     import os
     import sys
@@ -100,9 +147,13 @@ def train(config_path: str = "configs/gems_small.py", run_name: str = "default")
     logging.basicConfig(level=logging.INFO)
 
     from train import train_and_evaluate
-    from utils.training import load_config
+    from utils.training import auto_run_name, load_config
 
     config = load_config(config_path)
+
+    # Apply experiment overrides
+    overrides = json.loads(overrides_json)
+    config.update(overrides)
 
     # Point data at the persistent volume
     config.tfrecord_dir = str(volume_path / "data" / "gems_peaklist_tfrecord_alpha")
@@ -113,8 +164,13 @@ def train(config_path: str = "configs/gems_small.py", run_name: str = "default")
     if sm_major < 9:
         config.muon_ns_use_kernels = False
 
+    run_name = auto_run_name(config)
     workdir = volume_path / "experiments" / run_name
     workdir.mkdir(parents=True, exist_ok=True)
+
+    logging.info("Run: %s", run_name)
+    if overrides:
+        logging.info("Overrides: %s", overrides)
 
     results = train_and_evaluate(config, workdir=workdir)
 
@@ -129,7 +185,20 @@ def train(config_path: str = "configs/gems_small.py", run_name: str = "default")
 @app.local_entrypoint()
 def main(
     config: str = "configs/gems_small.py",
-    run_name: str = "default",
-    gpu: str = DEFAULT_GPU,
+    sweep: str = "",
+    overrides: str = "{}",
 ):
-    train.with_options(gpu=gpu).remote(config_path=config, run_name=run_name)
+    if sweep:
+        experiments = SWEEPS[sweep]
+        print(f"Launching {len(experiments)} experiments in parallel ({sweep}):")
+        for i, exp in enumerate(experiments):
+            print(f"  [{i}] {exp or '(baseline)'}")
+        handles = []
+        for exp in experiments:
+            merged = {**json.loads(overrides), **exp}
+            handles.append(train.spawn(config_path=config, overrides_json=json.dumps(merged)))
+        for i, handle in enumerate(handles):
+            result = handle.get()
+            print(f"[{i}] done: {result}")
+    else:
+        train.remote(config_path=config, overrides_json=overrides)
