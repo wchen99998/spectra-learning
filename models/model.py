@@ -696,19 +696,22 @@ class PeakSetSIGReg(nn.Module):
         return self
 
     @torch.no_grad()
-    @torch.no_grad()
     def update_teacher(self) -> None:
         if self.teacher_encoder is None:
             return
-        step = int(self.teacher_ema_update_step.item())
+        # CPU shadow counter avoids GPU→CPU sync from .item()
+        if not hasattr(self, "_teacher_step_cpu"):
+            self._teacher_step_cpu = int(self.teacher_ema_update_step.item())
+        step = self._teacher_step_cpu
+        self._teacher_step_cpu += 1
         self.teacher_ema_update_step.add_(1)
         if step % self.teacher_ema_update_every != 0:
             return
         self.advance_teacher_ema_decay_schedule()
-        decay = float(self.teacher_ema_decay_current)
         teacher_params = list(self.teacher_encoder.module.parameters())
         student_params = list(self.encoder.parameters())
-        torch._foreach_lerp_(teacher_params, student_params, 1.0 - decay)
+        # Pass tensor directly — _foreach_lerp_ accepts scalar tensors, no float() sync needed
+        torch._foreach_lerp_(teacher_params, student_params, 1.0 - self.teacher_ema_decay_current)
 
     @torch.no_grad()
     def advance_teacher_ema_decay_schedule(self) -> None:
@@ -818,17 +821,22 @@ class PeakSetSIGReg(nn.Module):
         peak_intensity: torch.Tensor,
         peak_valid_mask: torch.Tensor,
     ) -> torch.Tensor:
-        teacher = self._teacher_encoder_module()
-        teacher_peak_outputs = teacher.forward_peak_block_outputs(
-            peak_mz,
-            peak_intensity,
-            valid_mask=peak_valid_mask,
-            visible_mask=peak_valid_mask,
-            pack_n=self._full_pack_n,
-            prefix_pack=True,
-            block_indices=self.jepa_target_layers,
-        )
-        return torch.cat(teacher_peak_outputs, dim=-1)
+        # Autocast with the same dtype as the caller (inherits from outer
+        # autocast context when called inside forward_augmented; falls back
+        # to bf16 when called standalone, e.g. from evaluation code).
+        amp_dtype = torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled("cuda") else torch.bfloat16
+        with torch.autocast("cuda", dtype=amp_dtype):
+            teacher = self._teacher_encoder_module()
+            teacher_peak_outputs = teacher.forward_peak_block_outputs(
+                peak_mz,
+                peak_intensity,
+                valid_mask=peak_valid_mask,
+                visible_mask=peak_valid_mask,
+                pack_n=self._full_pack_n,
+                prefix_pack=True,
+                block_indices=self.jepa_target_layers,
+            )
+            return torch.cat(teacher_peak_outputs, dim=-1)
 
     def pool(
         self,

@@ -209,7 +209,7 @@ def _build_optimizers(
             nesterov=bool(config.get("muon_nesterov", True)),
             adjust_lr="rms_norm",
             ns_coefficients_preset="YOU_COEFFICIENTS",
-            ns_use_kernels=is_cuda,
+            ns_use_kernels=bool(config.get("muon_ns_use_kernels", is_cuda)),
             scalar_optimizer=adamw_opt,
         )
         return (

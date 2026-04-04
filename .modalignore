@@ -1,0 +1,27 @@
+# Ignore everything
+**
+
+# Source files at root
+!train.py
+!train_temporal.py
+!input_pipeline.py
+!input_pipeline_temporal.py
+
+# Package directories (need to un-ignore dir, then contents)
+!configs
+!configs/**
+!models
+!models/**
+!networks
+!networks/**
+!utils
+!utils/**
+!kernels
+!kernels/**
+!optimizers
+!optimizers/**
+
+# Re-ignore pycache and compiled files everywhere
+**/__pycache__
+**/*.pyc
+**/*.pyo

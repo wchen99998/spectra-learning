@@ -9,13 +9,6 @@ from pathlib import Path
 from train import train_and_evaluate
 from utils.training import load_config
 
-_PARAM_ABBREVS: dict[str, str] = {
-    "learning_rate": "lr",
-    "weight_decay": "wd",
-    "sigreg_lambda": "lam",
-    "multicrop_local_keep_fraction": "lkf",
-}
-
 
 def _sample_value(dist: str, args: list, rng: random.Random) -> object:
     match dist:
@@ -62,16 +55,6 @@ def generate_trial_configs(
     return trials
 
 
-def build_trial_run_name(idx: int, trial_config: dict[str, object]) -> str:
-    parts = [
-        f"{_PARAM_ABBREVS.get(p, p)}={v:.2g}"
-        if isinstance(v, float)
-        else f"{_PARAM_ABBREVS.get(p, p)}={v}"
-        for p, v in trial_config.items()
-    ]
-    return f"tune-{idx:03d}-{'_'.join(parts)}"
-
-
 def run_trials(
     *,
     config_path: str,
@@ -82,19 +65,19 @@ def run_trials(
     wandb_project: str,
     overrides: dict[str, object],
 ) -> list[dict]:
+    from utils.training import auto_run_name
+
     results = []
     for idx, trial_params in enumerate(trial_configs):
         trial_dir = workdir / f"trial_{idx:03d}"
-        trial_name = build_trial_run_name(idx, trial_params)
-        logging.info("=== Trial %d/%d: %s ===", idx + 1, len(trial_configs), trial_name)
         cfg = load_config(config_path)
         cfg.update(overrides)
         cfg.update(trial_params)
+        trial_name = auto_run_name(cfg)
+        logging.info("=== Trial %d/%d: %s ===", idx + 1, len(trial_configs), trial_name)
         if wandb_project:
             cfg.enable_wandb = True
             cfg.wandb_project = wandb_project
-            cfg.wandb_kwargs = {"name": trial_name}
-            cfg.wandb_run_name_prefix = ""
         final_metrics = train_and_evaluate(cfg, workdir=trial_dir)
         import wandb
 

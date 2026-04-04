@@ -133,6 +133,50 @@ def collect_and_log_param_metrics(model: torch.nn.Module) -> dict[str, float]:
     return metrics
 
 
+def auto_run_name(config: Any) -> str:
+    """Generate a descriptive run name from key config hyperparameters."""
+    dim = int(config.get("model_dim", 0))
+    layers = int(config.get("encoder_num_layers", 0))
+    heads = int(config.get("encoder_num_heads", 0))
+    pred_layers = int(config.get("masked_latent_predictor_num_layers", 0))
+    bs = int(config.get("batch_size", 0))
+    opt = str(config.get("optimizer", "adamw")).lower()
+    lr = float(config.get("learning_rate", 0))
+    epochs = config.get("num_epochs", "?")
+
+    # Estimate total params (build model transiently if needed)
+    model = build_model_from_config(config)
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    del model
+    if total_params >= 1_000_000_000:
+        param_str = f"{total_params / 1_000_000_000:.1f}B"
+    else:
+        param_str = f"{total_params / 1_000_000:.0f}M"
+
+    parts = [
+        param_str,
+        f"d{dim}",
+        f"L{layers}",
+        f"h{heads}",
+        f"pred{pred_layers}",
+        f"bs{bs}",
+        opt,
+        f"lr{lr:.0e}",
+        f"ep{epochs}",
+    ]
+
+    if config.get("use_precursor_token", False):
+        parts.append("prec")
+    norm = str(config.get("norm_type", "")).lower()
+    if norm and norm != "rmsnorm":
+        parts.append(norm)
+    target_layers = config.get("jepa_target_layers", None)
+    if target_layers:
+        parts.append(f"tgt{'_'.join(str(x) for x in target_layers)}")
+
+    return "_".join(parts)
+
+
 def _build_wandb_init_kwargs(config: Any | None) -> dict[str, Any]:
     if config is None:
         return {}
@@ -142,9 +186,8 @@ def _build_wandb_init_kwargs(config: Any | None) -> dict[str, Any]:
         wandb_kwargs.setdefault("resume", "must")
         wandb_kwargs.pop("name", None)
         return wandb_kwargs
-    prefix = config.get("wandb_run_name_prefix")
-    if prefix and "name" not in wandb_kwargs:
-        wandb_kwargs["name"] = str(prefix).strip()
+    if "name" not in wandb_kwargs:
+        wandb_kwargs["name"] = auto_run_name(config)
     return wandb_kwargs
 
 
