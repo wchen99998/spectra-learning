@@ -124,6 +124,25 @@ class BlockJEPATests(unittest.TestCase):
         ):
             self.assertIn(key, metrics, f"Missing key: {key}")
 
+    def test_sigreg_on_encoder_output_contributes_to_loss(self):
+        model = self._build_model(
+            masked_token_loss_weight=1.0,
+            representation_regularizer="sigreg",
+            sigreg_lambda=0.02,
+        )
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+        metrics = model.forward_augmented(batch)
+        self.assertIn("sigreg_term", metrics)
+        self.assertIn("token_sigreg_loss", metrics)
+        self.assertGreater(float(metrics["token_sigreg_loss"]), 0.0)
+        self.assertGreater(float(metrics["sigreg_term"]), 0.0)
+        self.assertTrue(
+            torch.allclose(
+                metrics["loss"],
+                metrics["jepa_term"] + metrics["sigreg_term"],
+            )
+        )
+
     def test_encode_output_shape(self):
         model = self._build_model()
         batch = {

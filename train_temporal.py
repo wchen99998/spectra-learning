@@ -395,6 +395,7 @@ def _load_pretrained_checkpoint(
         "temporal_rt_proj.",
         "temporal_query_token",
         "masked_latent_readout.",
+        "sigreg.",
     )
     allowed_suffixes = (
         "encoder.position_embedding.weight",
@@ -410,6 +411,17 @@ def _load_pretrained_checkpoint(
         raise RuntimeError(
             f"Unexpected missing keys in pretrained checkpoint: {bad_missing}"
         )
+    unexpected = [
+        key
+        for key in unexpected
+        if not key.endswith(
+            (
+                "sigreg_lambda_target",
+                "sigreg_lambda_current",
+                "sigreg_lambda_step",
+            )
+        )
+    ]
     if unexpected:
         logging.warning("Unexpected keys in checkpoint (ignored): %s", unexpected)
     logging.info(
@@ -594,9 +606,10 @@ def train_temporal(
             logger.log_metrics(probe_metrics, step=global_step)
             last_msg_probe_metrics = probe_metrics
             logging.info(
-                "step=%d msg_probe(test_r2_mol_weight=%.4f test_auc_fg_mean=%.4f)",
+                "step=%d msg_probe(test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_fg_mean=%.4f)",
                 global_step,
-                probe_metrics["msg_probe/test/r2_mol_weight"],
+                probe_metrics["msg_probe/test/r2_mean_wo_num_rings"],
+                probe_metrics["msg_probe/test/mae_num_rings"],
                 probe_metrics["msg_probe/test/auc_fg_mean"],
             )
 

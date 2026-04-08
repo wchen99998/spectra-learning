@@ -21,6 +21,7 @@ log = logging.getLogger(__name__)
 class MsgProbeTaskSpec(NamedTuple):
     regression_tasks: tuple[str, ...]
     classification_tasks: tuple[str, ...]
+    num_rings_classes: tuple[int, ...]
     regression_means: dict[str, float]
     regression_stds: dict[str, float]
 
@@ -78,6 +79,12 @@ class MsgProbePooler(torch.nn.Module):
         return (embeddings * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
 
 
+_NUM_RINGS_TASK = "num_rings"
+_REGRESSION_PROBE_TASKS = tuple(
+    name for name in REGRESSION_TARGET_KEYS if name != _NUM_RINGS_TASK
+)
+
+
 PROBE_ACTIVATIONS: dict[str, type[torch.nn.Module]] = {
     "gelu": torch.nn.GELU,
     "silu": torch.nn.SiLU,
@@ -113,6 +120,7 @@ class MsgLinearProbe(torch.nn.Module):
         input_dim: int,
         task_names: tuple[str, ...],
         pooler: MsgProbePooler,
+        task_output_dims: dict[str, int] | None = None,
         hidden_dim: int = 0,
         num_layers: int = 1,
         dropout: float = 0.0,
@@ -124,6 +132,7 @@ class MsgLinearProbe(torch.nn.Module):
         self.heads = torch.nn.ModuleDict({
             name: self._build_head(
                 input_dim=input_dim,
+                output_dim=1 if task_output_dims is None else task_output_dims.get(name, 1),
                 hidden_dim=hidden_dim,
                 num_layers=num_layers,
                 dropout=dropout,
@@ -137,6 +146,7 @@ class MsgLinearProbe(torch.nn.Module):
     def _build_head(
         *,
         input_dim: int,
+        output_dim: int,
         hidden_dim: int,
         num_layers: int,
         dropout: float = 0.0,
@@ -144,7 +154,7 @@ class MsgLinearProbe(torch.nn.Module):
         init_method: str = "default",
     ) -> torch.nn.Module:
         if hidden_dim <= 0 or num_layers <= 1:
-            head = torch.nn.Linear(input_dim, 1)
+            head = torch.nn.Linear(input_dim, output_dim)
             _apply_probe_init(head, init_method)
             return head
         act_cls = PROBE_ACTIVATIONS.get(activation, torch.nn.GELU)
@@ -156,7 +166,7 @@ class MsgLinearProbe(torch.nn.Module):
             if dropout > 0:
                 layers.append(torch.nn.Dropout(dropout))
             in_dim = hidden_dim
-        layers.append(torch.nn.Linear(in_dim, 1))
+        layers.append(torch.nn.Linear(in_dim, output_dim))
         head = torch.nn.Sequential(*layers)
         _apply_probe_init(head, init_method)
         return head
@@ -174,10 +184,17 @@ class DreamsLinearProbe(torch.nn.Module):
         *,
         input_dim: int,
         task_names: tuple[str, ...],
+        task_output_dims: dict[str, int] | None = None,
     ) -> None:
         super().__init__()
         self.heads = torch.nn.ModuleDict(
-            {name: torch.nn.Linear(input_dim, 1) for name in task_names}
+            {
+                name: torch.nn.Linear(
+                    input_dim,
+                    1 if task_output_dims is None else task_output_dims.get(name, 1),
+                )
+                for name in task_names
+            }
         )
 
     def forward(
@@ -185,6 +202,18 @@ class DreamsLinearProbe(torch.nn.Module):
         x: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         return {name: head(x) for name, head in self.heads.items()}
+
+def _probe_task_names(task_spec: MsgProbeTaskSpec) -> tuple[str, ...]:
+    task_names = task_spec.regression_tasks + task_spec.classification_tasks
+    if task_spec.num_rings_classes:
+        task_names += (_NUM_RINGS_TASK,)
+    return task_names
+
+
+def _probe_task_output_dims(task_spec: MsgProbeTaskSpec) -> dict[str, int]:
+    if not task_spec.num_rings_classes:
+        return {}
+    return {_NUM_RINGS_TASK: len(task_spec.num_rings_classes)}
 
 
 def iter_massspec_probe(
@@ -280,7 +309,7 @@ def _build_task_spec(
     test_targets: MsgProbeSplitTargets,
 ) -> MsgProbeTaskSpec:
     regression_means, regression_stds = {}, {}
-    for name in REGRESSION_TARGET_KEYS:
+    for name in _REGRESSION_PROBE_TASKS:
         values = train_targets.regression[name].astype(np.float32)
         regression_means[name] = float(values.mean())
         regression_stds[name] = float(np.clip(values.std(), 1e-8, None))
@@ -290,9 +319,13 @@ def _build_task_spec(
         ep = float(test_targets.classification[name].mean())
         if 0.01 <= tp <= 0.99 and 0.0 < ep < 1.0:
             classification_tasks.append(name)
+    num_rings_classes = tuple(
+        sorted(np.unique(train_targets.regression[_NUM_RINGS_TASK].astype(np.int32)).tolist())
+    )
     return MsgProbeTaskSpec(
-        regression_tasks=REGRESSION_TARGET_KEYS,
+        regression_tasks=_REGRESSION_PROBE_TASKS,
         classification_tasks=tuple(classification_tasks),
+        num_rings_classes=num_rings_classes,
         regression_means=regression_means,
         regression_stds=regression_stds,
     )
@@ -329,6 +362,20 @@ def _probe_step(
         losses[name] = F.binary_cross_entropy_with_logits(pred, target)
         predictions[name] = torch.sigmoid(pred.detach())
         task_targets[name] = target
+    if task_spec.num_rings_classes:
+        target = batch["probe_num_rings"][valid_mask].to(dtype=torch.long)
+        class_values = torch.tensor(
+            task_spec.num_rings_classes,
+            device=device,
+            dtype=torch.long,
+        )
+        target_idx = torch.searchsorted(class_values, target)
+        pred = logits[_NUM_RINGS_TASK]
+        losses[_NUM_RINGS_TASK] = F.cross_entropy(pred, target_idx)
+        predictions[_NUM_RINGS_TASK] = class_values[pred.detach().argmax(dim=-1)].to(
+            dtype=torch.float32
+        )
+        task_targets[_NUM_RINGS_TASK] = target.to(dtype=torch.float32)
     return {
         "loss_total": torch.stack(list(losses.values())).mean(),
         "losses": losses,
@@ -339,7 +386,7 @@ def _probe_step(
 
 
 def _new_epoch_state(task_spec: MsgProbeTaskSpec) -> dict[str, object]:
-    task_names = task_spec.regression_tasks + task_spec.classification_tasks
+    task_names = _probe_task_names(task_spec)
     return {
         "count": 0,
         "predictions": {name: [] for name in task_names},
@@ -356,9 +403,24 @@ def _update_epoch_state(
     epoch_state["count"] += batch_size
     predictions = epoch_state["predictions"]
     targets = epoch_state["targets"]
-    for name in task_spec.regression_tasks + task_spec.classification_tasks:
+    for name in _probe_task_names(task_spec):
         predictions[name].append(result["predictions"][name].detach().cpu().numpy())
         targets[name].append(result["targets"][name].detach().cpu().numpy())
+
+
+def resolve_msg_probe_select_metric(
+    config: config_dict.ConfigDict,
+) -> str:
+    return str(
+        config.get(
+            "msg_probe_select_metric",
+            config.get("msg_probe_tune_metric", "msg_probe/test/auc_fg_mean"),
+        )
+    )
+
+
+def msg_probe_metric_higher_is_better(metric_key: str) -> bool:
+    return "/mae_" not in metric_key
 
 
 def _score_epoch_state(
@@ -371,20 +433,34 @@ def _score_epoch_state(
     metrics: dict[str, float] = {
         f"{prefix}/samples": float(count),
     }
-    regression_r2_values, classification_auc_values = [], []
+    regression_r2_values, regression_mae_values = [], []
+    classification_auc_values = []
     predictions = epoch_state["predictions"]
     targets = epoch_state["targets"]
     for name in task_spec.regression_tasks:
         pred = np.concatenate(predictions[name], axis=0)
         target = np.concatenate(targets[name], axis=0)
         metrics[f"{prefix}/r2_{name}"] = float(r2_score(target, pred))
+        metrics[f"{prefix}/mae_{name}"] = float(np.mean(np.abs(target - pred)))
         regression_r2_values.append(metrics[f"{prefix}/r2_{name}"])
+        regression_mae_values.append(metrics[f"{prefix}/mae_{name}"])
     for name in task_spec.classification_tasks:
         pred = np.concatenate(predictions[name], axis=0)
         target = np.concatenate(targets[name], axis=0)
         metrics[f"{prefix}/auc_fg_{name}"] = float(roc_auc_score(target, pred))
         classification_auc_values.append(metrics[f"{prefix}/auc_fg_{name}"])
+    if task_spec.num_rings_classes:
+        pred = np.concatenate(predictions[_NUM_RINGS_TASK], axis=0)
+        target = np.concatenate(targets[_NUM_RINGS_TASK], axis=0)
+        metrics[f"{prefix}/mae_num_rings"] = float(np.mean(np.abs(target - pred)))
+        metrics[f"{prefix}/acc_num_rings_exact"] = float(np.mean(pred == target))
+        metrics[f"{prefix}/acc_num_rings_within_1"] = float(
+            np.mean(np.abs(pred - target) <= 1.0)
+        )
     metrics[f"{prefix}/r2_mean"] = float(np.mean(regression_r2_values))
+    metrics[f"{prefix}/mae_mean"] = float(np.mean(regression_mae_values))
+    metrics[f"{prefix}/r2_mean_wo_num_rings"] = metrics[f"{prefix}/r2_mean"]
+    metrics[f"{prefix}/mae_mean_wo_num_rings"] = metrics[f"{prefix}/mae_mean"]
     metrics[f"{prefix}/auc_fg_mean"] = float(np.mean(classification_auc_values))
     return metrics
 
@@ -461,8 +537,9 @@ def run_msg_probe(
     probe_init = str(config.get("msg_probe_init", "default"))
     probe = MsgLinearProbe(
         input_dim=int(config.model_dim),
-        task_names=task_spec.regression_tasks + task_spec.classification_tasks,
+        task_names=_probe_task_names(task_spec),
         pooler=pooler,
+        task_output_dims=_probe_task_output_dims(task_spec),
         hidden_dim=probe_hidden_dim,
         num_layers=probe_num_layers,
         dropout=probe_dropout,
@@ -500,12 +577,11 @@ def run_msg_probe(
         }
 
     compiled_probe_step = torch.compile(_probe_step)
-    probe_select_metric = str(
-        config.get("msg_probe_select_metric", "msg_probe/test/auc_fg_mean")
-    )
+    probe_select_metric = resolve_msg_probe_select_metric(config)
+    higher_is_better = msg_probe_metric_higher_is_better(probe_select_metric)
 
     best_metrics: dict[str, float] = {}
-    best_metric_value = -float("inf")
+    best_metric_value = -float("inf") if higher_is_better else float("inf")
     for epoch_idx in range(num_probe_epochs):
         probe.train()
         train_state = _new_epoch_state(task_spec)
@@ -564,15 +640,21 @@ def run_msg_probe(
             "msg_probe/num_fg_tasks": float(len(task_spec.classification_tasks)),
             "msg_probe_epoch": float(epoch_idx + 1),
         }
-        current_value = epoch_metrics.get(probe_select_metric, -float("inf"))
-        if current_value > best_metric_value:
+        current_value = float(epoch_metrics[probe_select_metric])
+        is_better = (
+            current_value > best_metric_value
+            if higher_is_better
+            else current_value < best_metric_value
+        )
+        if is_better:
             best_metric_value = current_value
             best_metrics = dict(epoch_metrics)
         log.info(
-            "MSG probe epoch %d/%d test_r2_mean=%.4f test_auc_fg_mean=%.4f fg_tasks=%d",
+            "MSG probe epoch %d/%d test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_fg_mean=%.4f fg_tasks=%d",
             epoch_idx + 1,
             num_probe_epochs,
-            epoch_metrics["msg_probe/test/r2_mean"],
+            epoch_metrics["msg_probe/test/r2_mean_wo_num_rings"],
+            epoch_metrics["msg_probe/test/mae_num_rings"],
             epoch_metrics["msg_probe/test/auc_fg_mean"],
             int(epoch_metrics["msg_probe/num_fg_tasks"]),
         )
@@ -580,9 +662,12 @@ def run_msg_probe(
             on_epoch_end(epoch_metrics)
     if best_metrics:
         log.info(
-            "MSG probe best epoch %d: test_r2_mean=%.4f test_auc_fg_mean=%.4f",
+            "MSG probe best epoch %d: %s=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_fg_mean=%.4f",
             int(best_metrics["msg_probe_epoch"]),
-            best_metrics["msg_probe/test/r2_mean"],
+            probe_select_metric,
+            best_metrics[probe_select_metric],
+            best_metrics["msg_probe/test/r2_mean_wo_num_rings"],
+            best_metrics["msg_probe/test/mae_num_rings"],
             best_metrics["msg_probe/test/auc_fg_mean"],
         )
     if was_training:
@@ -668,7 +753,8 @@ def run_dreams_probe(
 
     probe = DreamsLinearProbe(
         input_dim=dreams_dim,
-        task_names=task_spec.regression_tasks + task_spec.classification_tasks,
+        task_names=_probe_task_names(task_spec),
+        task_output_dims=_probe_task_output_dims(task_spec),
     ).to(device)
     optimizer = torch.optim.AdamW(
         probe.parameters(),

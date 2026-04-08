@@ -12,9 +12,16 @@ from utils.msg_probe import (
     MsgProbeSplitTargets,
     _build_task_spec,
     _collect_split_targets,
+    _new_epoch_state,
     _probe_step,
+    _probe_task_names,
+    _probe_task_output_dims,
+    _score_epoch_state,
+    _update_epoch_state,
+    msg_probe_metric_higher_is_better,
     iter_massspec_probe,
     probe_steps_per_epoch,
+    resolve_msg_probe_select_metric,
 )
 
 
@@ -68,6 +75,20 @@ class MsgLinearProbeTests(unittest.TestCase):
         self.assertEqual(logits["mol_weight"].shape, (7, 1))
         self.assertEqual(logits["hydroxyl"].shape, (7, 1))
         self.assertEqual(logits["amine"].shape, (7, 1))
+
+    def test_output_shapes_match_multiclass_head(self):
+        pooler = MsgProbePooler(model_dim=32)
+        probe = MsgLinearProbe(
+            input_dim=32,
+            task_names=("mol_weight", "num_rings"),
+            task_output_dims={"num_rings": 4},
+            pooler=pooler,
+        )
+        pooled = torch.randn(7, 32)
+        logits = probe(pooled)
+
+        self.assertEqual(logits["mol_weight"].shape, (7, 1))
+        self.assertEqual(logits["num_rings"].shape, (7, 4))
 
     def test_finite_outputs(self):
         pooler = MsgProbePooler(model_dim=16)
@@ -165,7 +186,8 @@ class MsgProbeStepTests(unittest.TestCase):
         pooler = MsgProbePooler(model_dim=input_dim)
         probe = MsgLinearProbe(
             input_dim=input_dim,
-            task_names=task_spec.regression_tasks + task_spec.classification_tasks,
+            task_names=_probe_task_names(task_spec),
+            task_output_dims=_probe_task_output_dims(task_spec),
             pooler=pooler,
         )
         batch = {
@@ -195,6 +217,7 @@ class MsgProbeStepTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["batch_size"], 2)
         self.assertTrue(torch.isfinite(result["loss_total"]).item())
+        self.assertEqual(result["predictions"]["num_rings"].shape, (2,))
 
 
 class MsgProbeTaskSpecTests(unittest.TestCase):
@@ -212,7 +235,7 @@ class MsgProbeTaskSpecTests(unittest.TestCase):
                     "mol_weight": np.linspace(10.0, 13.0, 4, dtype=np.float32),
                     "logp": np.linspace(1.0, 2.5, 4, dtype=np.float32),
                     "num_heavy_atoms": np.linspace(2.0, 5.0, 4, dtype=np.float32),
-                    "num_rings": np.linspace(0.0, 1.5, 4, dtype=np.float32),
+                    "num_rings": np.asarray([0.0, 1.0, 2.0, 3.0], dtype=np.float32),
                 },
                 classification=train_fg,
             ),
@@ -221,7 +244,7 @@ class MsgProbeTaskSpecTests(unittest.TestCase):
                     "mol_weight": np.linspace(14.0, 17.0, 4, dtype=np.float32),
                     "logp": np.linspace(3.0, 4.5, 4, dtype=np.float32),
                     "num_heavy_atoms": np.linspace(6.0, 9.0, 4, dtype=np.float32),
-                    "num_rings": np.linspace(2.0, 3.5, 4, dtype=np.float32),
+                    "num_rings": np.asarray([2.0, 3.0, 4.0, 5.0], dtype=np.float32),
                 },
                 classification=test_fg,
             ),
@@ -229,9 +252,82 @@ class MsgProbeTaskSpecTests(unittest.TestCase):
 
         self.assertEqual(
             task_spec.regression_tasks,
-            ("mol_weight", "logp", "num_heavy_atoms", "num_rings"),
+            ("mol_weight", "logp", "num_heavy_atoms"),
         )
         self.assertEqual(task_spec.classification_tasks, ("hydroxyl",))
+        self.assertEqual(task_spec.num_rings_classes, (0, 1, 2, 3))
+
+
+class MsgProbeMetricTests(unittest.TestCase):
+    def test_score_epoch_state_reports_num_rings_as_classification_metrics(self):
+        train_fg = {name: np.zeros(3, dtype=np.int32) for name in FG_SMARTS}
+        test_fg = {name: np.zeros(3, dtype=np.int32) for name in FG_SMARTS}
+        train_fg["hydroxyl"] = np.asarray([0, 1, 0], dtype=np.int32)
+        test_fg["hydroxyl"] = np.asarray([1, 0, 1], dtype=np.int32)
+        task_spec = _build_task_spec(
+            train_targets=MsgProbeSplitTargets(
+                regression={
+                    "mol_weight": np.asarray([10.0, 20.0, 30.0], dtype=np.float32),
+                    "logp": np.asarray([1.0, 2.0, 3.0], dtype=np.float32),
+                    "num_heavy_atoms": np.asarray([2.0, 4.0, 6.0], dtype=np.float32),
+                    "num_rings": np.asarray([0.0, 1.0, 2.0], dtype=np.float32),
+                },
+                classification=train_fg,
+            ),
+            test_targets=MsgProbeSplitTargets(
+                regression={
+                    "mol_weight": np.asarray([12.0, 18.0, 29.0], dtype=np.float32),
+                    "logp": np.asarray([1.5, 2.5, 3.5], dtype=np.float32),
+                    "num_heavy_atoms": np.asarray([3.0, 5.0, 7.0], dtype=np.float32),
+                    "num_rings": np.asarray([0.0, 1.0, 2.0], dtype=np.float32),
+                },
+                classification=test_fg,
+            ),
+        )
+        epoch_state = _new_epoch_state(task_spec)
+        result = {
+            "batch_size": 3,
+            "predictions": {
+                "mol_weight": torch.tensor([10.0, 19.0, 29.0]),
+                "logp": torch.tensor([1.0, 2.0, 4.0]),
+                "num_heavy_atoms": torch.tensor([2.0, 5.0, 6.0]),
+                "hydroxyl": torch.tensor([0.1, 0.9, 0.2]),
+                "num_rings": torch.tensor([0.0, 2.0, 2.0]),
+            },
+            "targets": {
+                "mol_weight": torch.tensor([10.0, 20.0, 30.0]),
+                "logp": torch.tensor([1.0, 2.0, 3.0]),
+                "num_heavy_atoms": torch.tensor([2.0, 4.0, 6.0]),
+                "hydroxyl": torch.tensor([0.0, 1.0, 0.0]),
+                "num_rings": torch.tensor([0.0, 1.0, 2.0]),
+            },
+        }
+        _update_epoch_state(epoch_state, result, task_spec)
+        metrics = _score_epoch_state(
+            prefix="msg_probe/test",
+            epoch_state=epoch_state,
+            task_spec=task_spec,
+        )
+
+        self.assertNotIn("msg_probe/test/r2_num_rings", metrics)
+        self.assertEqual(metrics["msg_probe/test/acc_num_rings_exact"], 2 / 3)
+        self.assertEqual(metrics["msg_probe/test/acc_num_rings_within_1"], 1.0)
+        self.assertAlmostEqual(metrics["msg_probe/test/mae_num_rings"], 1 / 3)
+        self.assertEqual(
+            metrics["msg_probe/test/r2_mean"],
+            metrics["msg_probe/test/r2_mean_wo_num_rings"],
+        )
+
+    def test_select_metric_uses_tune_metric_fallback(self):
+        cfg = {
+            "msg_probe_tune_metric": "msg_probe/test/mae_num_rings",
+        }
+        self.assertEqual(
+            resolve_msg_probe_select_metric(cfg),
+            "msg_probe/test/mae_num_rings",
+        )
+        self.assertFalse(msg_probe_metric_higher_is_better("msg_probe/test/mae_num_rings"))
+        self.assertTrue(msg_probe_metric_higher_is_better("msg_probe/test/auc_fg_mean"))
 
 
 class MsgProbeCollectionTests(unittest.TestCase):

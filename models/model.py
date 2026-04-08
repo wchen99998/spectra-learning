@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 
+from models.losses import SIGReg
 from models.peak_features import PeakFeatureEmbedder
 from networks import transformer_torch
 from networks.transformer_torch import _build_norm, create_visible_attention_mask
@@ -506,8 +507,11 @@ class PeakSetSIGReg(nn.Module):
         masked_token_loss_type: str = "l1",
         jepa_target_normalization: str = "none",
         jepa_target_layers: list[int] | tuple[int, ...] | None = None,
+        representation_regularizer: str = "none",
         masked_latent_predictor_num_layers: int = 2,
         masked_latent_predictor_num_heads: int = 8,
+        sigreg_num_slices: int = 256,
+        sigreg_lambda: float = 0.02,
         jepa_num_target_blocks: int = 2,
         jepa_context_fraction: float = 0.5,
         jepa_target_fraction: float = 0.25,
@@ -545,6 +549,12 @@ class PeakSetSIGReg(nn.Module):
             raise ValueError("jepa_target_layers must be within encoder depth")
         self.num_jepa_target_layers = len(self.jepa_target_layers)
         self.jepa_target_dim = self.num_jepa_target_layers * self.model_dim
+        self.representation_regularizer = str(representation_regularizer).lower()
+        if self.representation_regularizer not in ("none", "", "sigreg"):
+            raise ValueError(
+                f"Unsupported regularizer: {self.representation_regularizer!r}"
+            )
+        self.sigreg_lambda = float(sigreg_lambda)
         _f = torch.float32
         _reg = self.register_buffer
         self.teacher_ema_update_every = int(teacher_ema_update_every)
@@ -671,6 +681,7 @@ class PeakSetSIGReg(nn.Module):
         self.masked_latent_readout = nn.Linear(self.predictor_dim, self.jepa_target_dim)
         nn.init.xavier_normal_(self.masked_latent_readout.weight)
         nn.init.zeros_(self.masked_latent_readout.bias)
+        self.sigreg = SIGReg(num_slices=int(sigreg_num_slices))
         # Temporal predictor for frame -> next-frame prediction.
         if self.temporal_predictor_num_layers > 0:
             self.temporal_predictor = _build_temporal_decoder_blocks(
@@ -962,7 +973,19 @@ class PeakSetSIGReg(nn.Module):
         reg_num = (per_token_reg * target_mask_float).sum()
         reg_den = target_mask_float.sum().clamp_min(1.0)
         local_global_loss = reg_num / reg_den
-        loss = self.masked_token_loss_weight * local_global_loss
+        jepa_term = self.masked_token_loss_weight * local_global_loss
+        use_sigreg = self.representation_regularizer == "sigreg" and self.sigreg_lambda > 0
+        if use_sigreg:
+            sigreg_lambda_current = context_emb.new_tensor(self.sigreg_lambda)
+            token_sigreg_loss = self.sigreg(context_emb.float(), valid_mask=context_mask)
+            sigreg_term = sigreg_lambda_current * token_sigreg_loss.to(
+                dtype=context_emb.dtype
+            )
+        else:
+            sigreg_lambda_current = context_emb.new_tensor(0.0)
+            token_sigreg_loss = context_emb.new_tensor(0.0)
+            sigreg_term = context_emb.new_tensor(0.0)
+        loss = jepa_term + sigreg_term
         with torch.no_grad():
             collapse_metrics: dict[str, torch.Tensor] = {}
             for k, v in _masked_embedding_stats(context_emb, context_mask).items():
@@ -972,6 +995,17 @@ class PeakSetSIGReg(nn.Module):
         metrics = {
             "loss": loss,
             "local_global_loss": local_global_loss,
+            "jepa_term": jepa_term,
+            "regularizer_loss": token_sigreg_loss.to(dtype=context_emb.dtype),
+            "sigreg_loss": token_sigreg_loss.to(dtype=context_emb.dtype),
+            "token_sigreg_loss": token_sigreg_loss.to(dtype=context_emb.dtype),
+            "regularizer_term": sigreg_term,
+            "sigreg_term": sigreg_term,
+            "sigreg_lambda_current": sigreg_lambda_current,
+            "target_regularizer_term_over_jepa_term": sigreg_term
+            / jepa_term.clamp_min(1e-8),
+            "target_sigreg_term_over_jepa_term": sigreg_term
+            / jepa_term.clamp_min(1e-8),
             "context_fraction": context_mask.float().sum() / valid_peak_count,
             "masked_fraction": target_masks.float().sum() / valid_peak_count,
             **{f"encoder_{k}": v.to(context_emb.dtype) for k, v in reg_stats.items()},

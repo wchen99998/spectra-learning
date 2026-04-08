@@ -11,7 +11,7 @@ from huggingface_hub import hf_hub_download
 from ml_collections import config_dict
 from rdkit import Chem, DataStructs
 from rdkit.Chem import AllChem
-from input_pipeline import _prepend_precursor_token_tf
+from input_pipeline import _prepend_precursor_token_tf, apply_peak_transforms_tf
 from utils.massspec_probe_targets import (
     FG_SMARTS,
     REGRESSION_TARGET_KEYS,
@@ -42,7 +42,7 @@ MASSSPEC_HF_REPO = "roman-bushuiev/MassSpecGym"
 MASSSPEC_TSV_PATH = "data/MassSpecGym.tsv"
 MASSSPEC_METADATA_VERSION = 2
 
-NIST20_METADATA_VERSION = 2
+NIST20_METADATA_VERSION = 3
 NIST20_HF_REPO = "roman-bushuiev/GeMS"
 NIST20_HF_FILENAME = (
     "data/DreaMS_Atlas/nist20_mona_clean_merged_spectra_dreams_hidden_nist20.hdf5"
@@ -50,6 +50,12 @@ NIST20_HF_FILENAME = (
 _NIST20_SPLIT_SEED = 42
 _NIST20_TRAIN_FRAC = 0.70
 _NIST20_VAL_FRAC = 0.15
+
+MONA_A_METADATA_VERSION = 1
+MONA_A_HF_REPO = "roman-bushuiev/GeMS"
+MONA_A_HF_FILENAME = (
+    "data/auxiliary/MoNA_A_Murcko_split_neighbours_[M+H]+_0.05Da.pkl"
+)
 
 
 def _download_hf_file(repo_id: str, filename: str, local_dir: Path) -> Path:
@@ -61,6 +67,13 @@ def _download_hf_file(repo_id: str, filename: str, local_dir: Path) -> Path:
         local_dir=str(local_dir),
     )
     return Path(path)
+
+
+def _normalize_spectra_intensity(spectra: np.ndarray) -> np.ndarray:
+    """Per-spectrum max-normalize intensities (row 1) to [0, 1] in-place."""
+    max_int = spectra[:, 1].max(axis=1, keepdims=True)  # (N, 1)
+    np.divide(spectra[:, 1], np.maximum(max_int, 1e-8), out=spectra[:, 1])
+    return spectra
 
 
 def _load_massspec_tsv(tsv_path: Path) -> dict[str, np.ndarray]:
@@ -90,7 +103,7 @@ def _load_massspec_tsv(tsv_path: Path) -> dict[str, np.ndarray]:
             collision_energy.append(float(ce) if ce else 0.0)
             collision_energy_present.append(1 if ce else 0)
     return {
-        "spectra": np.stack(spectra, axis=0),
+        "spectra": _normalize_spectra_intensity(np.stack(spectra, axis=0)),
         "retention": np.full(len(spectra), 392.3146, dtype=np.float32),
         "precursor": np.asarray(precursor, dtype=np.float32),
         "fold": np.asarray(fold),
@@ -153,7 +166,7 @@ def _load_nist20_hdf5(hdf5_path: Path) -> dict[str, np.ndarray]:
         n_keys,
     )
     return {
-        "spectra": raw_spectra[idx].astype(np.float32),
+        "spectra": _normalize_spectra_intensity(raw_spectra[idx].astype(np.float32)),
         "retention": np.zeros(n_valid, dtype=np.float32),
         "precursor": raw_precursor[idx].astype(np.float32),
         "fold": fold_arr,
@@ -163,6 +176,68 @@ def _load_nist20_hdf5(hdf5_path: Path) -> dict[str, np.ndarray]:
         "collision_energy": np.zeros(n_valid, dtype=np.float32),
         "collision_energy_present": np.zeros(n_valid, dtype=np.int32),
         "dreams_embedding": raw_dreams[idx] if raw_dreams is not None else None,
+    }
+
+
+def _load_mona_a_pkl(pkl_path: Path) -> dict[str, np.ndarray]:
+    import pickle
+    import pandas as pd
+
+    class _SafeUnpickler(pickle.Unpickler):
+        def find_class(self, module, name):
+            try:
+                return super().find_class(module, name)
+            except (ImportError, AttributeError):
+                class Stub:
+                    def __init__(self, *a, **kw):
+                        pass
+                    def __setstate__(self, state):
+                        self.__dict__.update(
+                            state if isinstance(state, dict) else {"_state": state}
+                        )
+                Stub.__name__ = name
+                return Stub
+
+    with open(pkl_path, "rb") as f:
+        raw = _SafeUnpickler(f).load()
+    df = pd.DataFrame.__new__(pd.DataFrame)
+    df.__dict__.update(raw.__dict__)
+
+    n = len(df)
+    spectra = _normalize_spectra_intensity(
+        np.stack(df["PARSED PEAKS"].to_numpy()).astype(np.float32)
+    )  # (N, 2, 128)
+    precursor = df["PRECURSOR M/Z"].to_numpy().astype(np.float32)
+    smiles = df["SMILES"].to_numpy().astype(str)
+    adduct = df["PRECURSOR TYPE"].fillna("unknown").to_numpy().astype(str)
+    instrument_type = df["INSTRUMENT TYPE"].fillna("unknown").to_numpy().astype(str)
+
+    ce_raw = df["COLLISION ENERGY"].to_numpy()
+    collision_energy = np.zeros(n, dtype=np.float32)
+    collision_energy_present = np.zeros(n, dtype=np.int32)
+    for i, ce in enumerate(ce_raw):
+        ce_str = str(ce).strip() if ce is not None else ""
+        if ce_str and ce_str.lower() not in ("nan", "none", ""):
+            try:
+                collision_energy[i] = float(ce_str.split()[0])
+                collision_energy_present[i] = 1
+            except (ValueError, IndexError):
+                pass
+
+    # Murcko split: val=True -> test, val=False -> train
+    fold = np.where(df["val"].to_numpy(), "test", "train")
+
+    return {
+        "spectra": spectra,
+        "retention": np.zeros(n, dtype=np.float32),
+        "precursor": precursor,
+        "fold": fold,
+        "smiles": smiles,
+        "adduct": adduct,
+        "instrument_type": instrument_type,
+        "collision_energy": collision_energy,
+        "collision_energy_present": collision_energy_present,
+        "dreams_embedding": None,
     }
 
 
@@ -413,6 +488,36 @@ def ensure_nist20_probe_prepared(
     return metadata
 
 
+def ensure_mona_a_probe_prepared(
+    output_dir: Path,
+    *,
+    max_precursor_mz: float,
+    data_dir: Path,
+    num_shards: int = _DEFAULT_MASSSPEC_NUM_SHARDS,
+) -> dict[str, Any]:
+    cached = _probe_metadata_valid(output_dir, MONA_A_METADATA_VERSION, max_precursor_mz)
+    if cached is not None:
+        logger.info("Found existing MoNA-A probe TFRecords at %s", output_dir)
+        return cached
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pkl_path = data_dir / MONA_A_HF_FILENAME
+    if not pkl_path.exists():
+        logger.info("MoNA-A pkl not found locally, downloading from HuggingFace...")
+        pkl_path = _download_hf_file(MONA_A_HF_REPO, MONA_A_HF_FILENAME, data_dir)
+    logger.info("Loading MoNA-A pkl from %s ...", pkl_path)
+    metadata = _filter_encode_and_write(
+        **_load_mona_a_pkl(pkl_path),
+        output_dir=output_dir,
+        num_shards=num_shards,
+        max_precursor_mz=max_precursor_mz,
+        metadata_version=MONA_A_METADATA_VERSION,
+    )
+    with (output_dir / _METADATA_FILENAME).open("w") as f:
+        json.dump(metadata, f, indent=2)
+    logger.info("Saved MoNA-A probe metadata to %s", output_dir / _METADATA_FILENAME)
+    return metadata
+
+
 def _parse_probe_batch(
     *,
     max_precursor_mz: float,
@@ -450,52 +555,27 @@ def _parse_probe_batch(
     @tf.function
     def transform(serialized_batch: tf.Tensor) -> dict[str, tf.Tensor]:
         parsed = tf.io.parse_example(serialized_batch, feature_spec)
-        mz = parsed["mz"]
-        intensity = parsed["intensity"]
-        precursor_mz_val = parsed["precursor_mz"][:, 0]
-        keep = (mz >= peak_mz_min) & (mz <= peak_mz_max) & (intensity >= min_int)
-        mz = tf.where(keep, mz, 0.0)
-        intensity = tf.where(keep, intensity, 0.0)
-        intensity, indices = tf.math.top_k(intensity, k=num_peaks, sorted=True)
-        mz = tf.gather(mz, indices, batch_dims=1)
-        max_intensity = tf.reduce_max(intensity, axis=1, keepdims=True)
-        max_intensity = tf.maximum(max_intensity, 1e-8)
-        intensity = intensity / max_intensity
-        valid = intensity > 0
-        if peak_ordering == "mz":
-            sort_key = tf.where(valid, mz, tf.fill(tf.shape(mz), float("inf")))
-            direction = "ASCENDING"
-        else:
-            sort_key = tf.where(
-                valid, intensity, tf.fill(tf.shape(intensity), float("-inf"))
-            )
-            direction = "DESCENDING"
-        sorted_idx = tf.argsort(sort_key, axis=1, direction=direction, stable=True)
-        mz = tf.gather(mz, sorted_idx, batch_dims=1)
-        intensity = tf.gather(intensity, sorted_idx, batch_dims=1)
-        valid = tf.gather(valid, sorted_idx, batch_dims=1)
-        mz = tf.where(valid, mz, 0.0)
-        intensity = tf.where(valid, intensity, 0.0)
-        batch = {
-            "peak_mz": mz / peak_mz_max,
-            "peak_intensity": intensity,
-            "peak_valid_mask": valid,
-            "precursor_mz": tf.clip_by_value(precursor_mz_val, 0.0, max_prec)
-            / max_prec,
-            "rt": parsed["rt"][:, 0],
-            "mz": mz,
-            "intensity": intensity,
-            "fingerprint": tf.cast(parsed["fingerprint"], tf.int32),
-            "smiles": parsed["smiles"],
-            "adduct_id": tf.cast(parsed["adduct_id"][:, 0], tf.int32),
-            "instrument_type_id": tf.cast(parsed["instrument_type_id"][:, 0], tf.int32),
-            "collision_energy": parsed["collision_energy"][:, 0],
-            "collision_energy_present": tf.cast(
-                parsed["collision_energy_present"][:, 0],
-                tf.int32,
-            ),
-            "probe_valid_mol": tf.cast(parsed["probe_valid_mol"][:, 0], tf.bool),
-        }
+        batch = apply_peak_transforms_tf(
+            parsed["mz"],
+            parsed["intensity"],
+            parsed["precursor_mz"][:, 0],
+            peak_mz_min=peak_mz_min,
+            peak_mz_max=peak_mz_max,
+            min_int=min_int,
+            max_prec=max_prec,
+            num_peaks=num_peaks,
+            peak_ordering=peak_ordering,
+        )
+        batch["rt"] = parsed["rt"][:, 0]
+        batch["fingerprint"] = tf.cast(parsed["fingerprint"], tf.int32)
+        batch["smiles"] = parsed["smiles"]
+        batch["adduct_id"] = tf.cast(parsed["adduct_id"][:, 0], tf.int32)
+        batch["instrument_type_id"] = tf.cast(parsed["instrument_type_id"][:, 0], tf.int32)
+        batch["collision_energy"] = parsed["collision_energy"][:, 0]
+        batch["collision_energy_present"] = tf.cast(
+            parsed["collision_energy_present"][:, 0], tf.int32
+        )
+        batch["probe_valid_mol"] = tf.cast(parsed["probe_valid_mol"][:, 0], tf.bool)
         for name in REGRESSION_TARGET_KEYS:
             batch[f"probe_{name}"] = parsed[f"probe_{name}"][:, 0]
         for name in FG_SMARTS:
@@ -577,9 +657,17 @@ class MassSpecProbeData(NamedTuple):
         max_precursor_mz = float(
             config.get("max_precursor_mz", _DEFAULT_MAX_PRECURSOR_MZ)
         )
-        if str(config.get("probe_dataset", "massspec")) == "nist20":
+        probe_dataset = str(config.get("probe_dataset", "massspec"))
+        if probe_dataset == "nist20":
             output_dir = tfrecord_base / "nist20_probe"
             metadata = ensure_nist20_probe_prepared(
+                output_dir,
+                max_precursor_mz=max_precursor_mz,
+                data_dir=tfrecord_base,
+            )
+        elif probe_dataset == "mona_a":
+            output_dir = tfrecord_base / "mona_a_probe"
+            metadata = ensure_mona_a_probe_prepared(
                 output_dir,
                 max_precursor_mz=max_precursor_mz,
                 data_dir=tfrecord_base,

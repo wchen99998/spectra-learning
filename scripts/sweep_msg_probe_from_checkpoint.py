@@ -49,6 +49,9 @@ from utils.msg_probe import (
     MsgProbePooler,
     MsgProbeSplitTargets,
     _build_task_spec,
+    _probe_task_names,
+    _probe_task_output_dims,
+    msg_probe_metric_higher_is_better,
     _new_epoch_state,
     _probe_step,
     _score_epoch_state,
@@ -347,8 +350,9 @@ def run_cached_msg_probe(
     )
     probe = MsgLinearProbe(
         input_dim=int(train_cache["token_embeddings"].shape[-1]),
-        task_names=task_spec.regression_tasks + task_spec.classification_tasks,
+        task_names=_probe_task_names(task_spec),
         pooler=pooler,
+        task_output_dims=_probe_task_output_dims(task_spec),
         hidden_dim=int(config.get("msg_probe_hidden_dim", 0)),
         num_layers=int(config.get("msg_probe_num_layers", 1)),
         dropout=float(config.get("msg_probe_dropout", 0.0)),
@@ -456,7 +460,9 @@ def _select_best_epoch(
 ) -> dict[str, float]:
     if not curve:
         raise ValueError("Probe curve is empty")
-    return max(curve, key=lambda metrics: float(metrics[metric_key]))
+    if msg_probe_metric_higher_is_better(metric_key):
+        return max(curve, key=lambda metrics: float(metrics[metric_key]))
+    return min(curve, key=lambda metrics: float(metrics[metric_key]))
 
 
 def _evaluate_trial(
@@ -506,11 +512,9 @@ def _evaluate_trial(
 def _serialise_trial_rows(
     trials: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    ranked_trials = _rank_trials(trials)
     rows: list[dict[str, Any]] = []
-    for rank, trial in enumerate(
-        sorted(trials, key=lambda item: item["best_metric_value"], reverse=True),
-        start=1,
-    ):
+    for rank, trial in enumerate(ranked_trials, start=1):
         row = {
             "rank": rank,
             "name": trial["name"],
@@ -541,8 +545,19 @@ def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True))
 
 
+def _rank_trials(trials: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not trials:
+        return []
+    metric_key = str(trials[0]["metric_key"])
+    return sorted(
+        trials,
+        key=lambda item: item["best_metric_value"],
+        reverse=msg_probe_metric_higher_is_better(metric_key),
+    )
+
+
 def _plot_trial_ranking(path: Path, trials: list[dict[str, Any]]) -> None:
-    ranked = sorted(trials, key=lambda item: item["best_metric_value"], reverse=True)
+    ranked = _rank_trials(trials)
     xs = np.arange(1, len(ranked) + 1)
     ys = np.asarray([trial["best_metric_value"] for trial in ranked], dtype=np.float32)
     labels = [trial["name"] for trial in ranked]
@@ -942,14 +957,18 @@ def _plot_epoch_curves(
     top_n: int = 8,
 ) -> None:
     """Train/test AUC + R2 curves for the top-N trials (2x2 subplots)."""
-    ranked = sorted(trials, key=lambda t: t["best_metric_value"], reverse=True)[:top_n]
+    ranked = _rank_trials(trials)[:top_n]
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     metrics = [
         ("msg_probe/test/auc_fg_mean", "msg_probe/train/auc_fg_mean", "AUC (fg_mean)"),
-        ("msg_probe/test/r2_mean", "msg_probe/train/r2_mean", "R² (mean)"),
+        (
+            "msg_probe/test/r2_mean_wo_num_rings",
+            "msg_probe/train/r2_mean_wo_num_rings",
+            "R² (mean, no num_rings)",
+        ),
         ("msg_probe/test/r2_mol_weight", "msg_probe/train/r2_mol_weight", "R² (mol_weight)"),
-        ("msg_probe/test/r2_logp", "msg_probe/train/r2_logp", "R² (logp)"),
+        ("msg_probe/test/mae_num_rings", "msg_probe/train/mae_num_rings", "MAE (num_rings)"),
     ]
     cmap = plt.get_cmap("tab10")
 
@@ -1013,7 +1032,7 @@ def _write_bayesian_summary(
     trials: list[dict[str, Any]],
     default_trial: dict[str, Any],
 ) -> None:
-    ranked = sorted(trials, key=lambda t: t["best_metric_value"], reverse=True)
+    ranked = _rank_trials(trials)
     best = ranked[0]
     best_ep_data = best["curve"][best["best_epoch"] - 1]
 
@@ -1244,13 +1263,17 @@ def main() -> None:
             trial_results.append(trial)
             X_obs.append(_encode_point(dims, overrides))
             y_obs.append(trial["best_metric_value"])
-            current_best = max(y_obs)
+            current_best = (
+                max(y_obs)
+                if msg_probe_metric_higher_is_better(metric_key)
+                else min(y_obs)
+            )
             log.info(
                 "Bayesian call %d/%d: %.4f (running best %.4f)",
                 call_idx + 1, n_calls, trial["best_metric_value"], current_best,
             )
 
-        ranked_trials = sorted(trial_results, key=lambda t: t["best_metric_value"], reverse=True)
+        ranked_trials = _rank_trials(trial_results)
         best_trial = ranked_trials[0]
 
         # Save results
