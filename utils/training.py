@@ -59,12 +59,17 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
             config.get("jepa_target_normalization", "none")
         ),
         jepa_target_layers=config.get("jepa_target_layers", None),
+        representation_regularizer=str(
+            config.get("representation_regularizer", "none")
+        ),
         masked_latent_predictor_num_layers=int(
             config.get("masked_latent_predictor_num_layers", 2)
         ),
         masked_latent_predictor_num_heads=int(
             config.get("masked_latent_predictor_num_heads", 8)
         ),
+        sigreg_num_slices=int(config.get("sigreg_num_slices", 256)),
+        sigreg_lambda=float(config.get("sigreg_lambda", 0.02)),
         jepa_num_target_blocks=int(config.get("jepa_num_target_blocks", 2)),
         jepa_context_fraction=float(config.get("jepa_context_fraction", 0.5)),
         jepa_target_fraction=float(config.get("jepa_target_fraction", 0.25)),
@@ -184,6 +189,13 @@ def auto_run_name(config: Any) -> str:
     target_layers = config.get("jepa_target_layers", None)
     if target_layers:
         parts.append(f"tgt{'_'.join(str(x) for x in target_layers)}")
+    regularizer = str(config.get("representation_regularizer", "none")).lower()
+    if regularizer and regularizer != "none":
+        parts.append(regularizer)
+        parts.append(f"lam{float(config.get('sigreg_lambda', 0.0)):.0e}")
+    run_name_suffix = str(config.get("run_name_suffix", "")).strip()
+    if run_name_suffix:
+        parts.append(run_name_suffix)
 
     return "_".join(parts)
 
@@ -192,7 +204,10 @@ def _build_wandb_init_kwargs(config: Any | None) -> dict[str, Any]:
     if config is None:
         return {}
     wandb_kwargs = dict(config.get("wandb_kwargs", {}) or {})
-    if resume_id := os.environ.get("WANDB_RESUME_ID"):
+    resume_id = str(config.get("wandb_resume_id", "") or "")
+    if not resume_id:
+        resume_id = os.environ.get("WANDB_RESUME_ID", "")
+    if resume_id:
         wandb_kwargs.setdefault("id", resume_id)
         wandb_kwargs.setdefault("resume", "must")
         wandb_kwargs.pop("name", None)
@@ -271,10 +286,17 @@ def load_pretrained_weights(
         "predictor_register_tokens",
         "temporal_query_token",
     )
-    allowed_missing_prefixes = ("masked_latent_readout.",)
+    allowed_missing_prefixes = ("masked_latent_readout.", "sigreg.")
     unexpected = [
         key for key in unexpected
-        if not key.endswith("temporal_query_token")
+        if not key.endswith(
+            (
+                "temporal_query_token",
+                "sigreg_lambda_target",
+                "sigreg_lambda_current",
+                "sigreg_lambda_step",
+            )
+        )
     ]
     missing = [
         key for key in missing

@@ -154,6 +154,10 @@ def _make_cosine_schedule(
     return cosine
 
 
+def _is_weight_decay_target(name: str, param: torch.nn.Parameter) -> bool:
+    return param.ndim >= 2 and name.endswith("weight")
+
+
 def _build_optimizers(
     config: config_dict.ConfigDict,
     model: PeakSetSIGReg,
@@ -182,17 +186,19 @@ def _build_optimizers(
         muon_params = []
         adamw_params: list[dict] = [{"params": [], "weight_decay": 0.0}]
         adamw_wd_params: list[torch.nn.Parameter] = []
-        for param in model.parameters():
+        for name, param in model.named_parameters():
             if not param.requires_grad:
                 continue
-            if param.ndim >= 2 and param.stride()[0] % 8 == 0:
+            if _is_weight_decay_target(name, param) and param.stride()[0] % 8 == 0:
                 muon_params.append(param)
-            elif param.ndim >= 2:
+            elif _is_weight_decay_target(name, param):
                 adamw_wd_params.append(param)
             else:
                 adamw_params[0]["params"].append(param)
         if adamw_wd_params:
-            adamw_params.append({"params": adamw_wd_params, "weight_decay": weight_decay})
+            adamw_params.append(
+                {"params": adamw_wd_params, "weight_decay": weight_decay}
+            )
 
         adamw_opt = torch.optim.AdamW(
             adamw_params,
@@ -216,11 +222,22 @@ def _build_optimizers(
             [muon_opt],
             [_make_cosine_schedule(muon_opt, total_steps, warmup_steps, min_learning_rate)],
         )
+    decay_params = []
+    no_decay_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if _is_weight_decay_target(name, param):
+            decay_params.append(param)
+        else:
+            no_decay_params.append(param)
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        [
+            {"params": no_decay_params, "weight_decay": 0.0},
+            {"params": decay_params, "weight_decay": weight_decay},
+        ],
         lr=torch.tensor(base_lr),
         betas=(0.9, b2),
-        weight_decay=weight_decay,
         capturable=capturable,
         fused=fused,
     )
@@ -235,15 +252,27 @@ def _save_checkpoint(
     global_step: int,
     epoch: int,
     loss: float,
+    wandb_run_id: str | None = None,
 ) -> None:
+    optimizer_states = []
+    for opt in optimizers:
+        state = opt.state_dict()
+        scalar_optimizer = getattr(opt, "scalar_optimizer", None)
+        if scalar_optimizer is not None:
+            state = {
+                "state_dict": state,
+                "scalar_optimizer_state": scalar_optimizer.state_dict(),
+            }
+        optimizer_states.append(state)
     torch.save(
         {
             "model": model.state_dict(),
-            "optimizers": [opt.state_dict() for opt in optimizers],
+            "optimizers": optimizer_states,
             "schedulers": [sched.state_dict() for sched in schedulers],
             "global_step": global_step,
             "epoch": epoch,
             "loss": loss,
+            "wandb_run_id": wandb_run_id,
         },
         path,
     )
@@ -263,6 +292,26 @@ def _prune_checkpoints(checkpoint_dir: Path, keep_top_k: int = 5) -> None:
     for p in pts:
         if p not in keep:
             p.unlink()
+
+
+def _load_resume_model_state(
+    model: PeakSetSIGReg,
+    state_dict: dict[str, torch.Tensor],
+) -> None:
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    allowed_missing = ("sigreg.t", "sigreg.phi", "sigreg.weights")
+    allowed_unexpected = (
+        "sigreg_lambda_target",
+        "sigreg_lambda_current",
+        "sigreg_lambda_step",
+    )
+    missing = [key for key in missing if key not in allowed_missing]
+    unexpected = [key for key in unexpected if key not in allowed_unexpected]
+    if missing or unexpected:
+        raise RuntimeError(
+            "Checkpoint load mismatch: "
+            f"missing={missing}, unexpected={unexpected}"
+        )
 
 
 def train_and_evaluate(
@@ -293,17 +342,46 @@ def train_and_evaluate(
     optimizers, schedulers = _build_optimizers(config, model, total_steps, device)
     checkpoint_dir = workdir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    logger = build_logger(config, workdir)
     start_epoch, global_step = 0, 0
+    resume_steps_into_epoch = 0
+    ckpt = None
     if _pts := sorted(checkpoint_dir.glob("*.pt"), key=lambda p: p.stat().st_mtime):
         logging.info("Resuming from checkpoint: %s", _pts[-1])
         ckpt = torch.load(_pts[-1], map_location=device, weights_only=True)
-        model.load_state_dict(ckpt["model"])
-        for objs, key in [(optimizers, "optimizers"), (schedulers, "schedulers")]:
-            for obj, state in zip(objs, ckpt[key]):
+        resume_wandb_id = ckpt.get("wandb_run_id")
+        if resume_wandb_id:
+            config.wandb_resume_id = resume_wandb_id
+    logger = build_logger(config, workdir)
+    if ckpt is not None:
+        _load_resume_model_state(model, ckpt["model"])
+        for obj, state in zip(optimizers, ckpt["optimizers"]):
+            if isinstance(state, dict) and "state_dict" in state:
+                obj.load_state_dict(state["state_dict"])
+                scalar_optimizer = getattr(obj, "scalar_optimizer", None)
+                scalar_state = state.get("scalar_optimizer_state")
+                if scalar_optimizer is not None and scalar_state is not None:
+                    scalar_optimizer.load_state_dict(scalar_state)
+                elif scalar_optimizer is not None:
+                    logging.warning(
+                        "Checkpoint is missing nested scalar optimizer state for %s; "
+                        "resumed Muon scalar parameters will use fresh AdamW state.",
+                        type(obj).__name__,
+                    )
+            else:
                 obj.load_state_dict(state)
-        global_step = ckpt["global_step"]
-        start_epoch = ckpt["epoch"]
+                if getattr(obj, "scalar_optimizer", None) is not None:
+                    logging.warning(
+                        "Checkpoint uses legacy optimizer format for %s; resumed Muon "
+                        "scalar parameters will use fresh AdamW state.",
+                        type(obj).__name__,
+                    )
+        for obj, state in zip(schedulers, ckpt["schedulers"]):
+            obj.load_state_dict(state)
+        global_step = int(ckpt["global_step"])
+        start_epoch = int(ckpt["epoch"])
+        resume_steps_into_epoch = global_step - start_epoch * steps_per_epoch
+        start_epoch += resume_steps_into_epoch // steps_per_epoch
+        resume_steps_into_epoch %= steps_per_epoch
         del ckpt
     logger.log_metrics(model_param_metrics, step=global_step)
     _ac_name = str(config.get("autocast_dtype", "bf16")).lower()
@@ -327,16 +405,23 @@ def train_and_evaluate(
         msg_probe_every_n_steps = int(_msg_probe_raw)
     _gcn = config.get("grad_clip_norm", None)
     grad_clip_norm = float(_gcn) if _gcn is not None else None
-    train_loader = datamodule.train_loader
     last_msg_probe_metrics: dict[str, float] = {}
     _wandb_run = getattr(logger, "experiment", None)
     for epoch in range(start_epoch, loop_epochs):
+        train_loader = datamodule.train_loader_for_epoch(epoch)
         prefetcher = _BatchPrefetcher(
             iter(train_loader),
             device,
             prefetch_size=device_prefetch_size,
         )
-        epoch_steps = min(steps_per_epoch, total_steps - global_step)
+        epoch_resume_offset = resume_steps_into_epoch if epoch == start_epoch else 0
+        for _ in range(epoch_resume_offset):
+            if prefetcher.next() is None:
+                break
+        epoch_steps = min(
+            steps_per_epoch - epoch_resume_offset,
+            total_steps - global_step,
+        )
         pbar = tqdm(total=epoch_steps, desc=f"Epoch {epoch}", unit="step")
         while global_step < total_steps and (batch := prefetcher.next()) is not None:
             metrics = _train_step_impl(
@@ -376,8 +461,9 @@ def train_and_evaluate(
                     optimizers,
                     schedulers,
                     global_step,
-                    epoch,
+                    global_step // steps_per_epoch,
                     float(metrics["loss"]),
+                    getattr(_wandb_run, "id", None),
                 )
                 _prune_checkpoints(checkpoint_dir, keep_top_k=15)
             if (
@@ -398,14 +484,19 @@ def train_and_evaluate(
                     _epochs = [int(m["msg_probe_epoch"]) for m in _probe_epoch_log]
                     _curve_keys = [
                         (
-                            "r2_mean",
-                            "msg_probe/train/r2_mean",
-                            "msg_probe/test/r2_mean",
+                            "r2_mean_wo_num_rings",
+                            "msg_probe/train/r2_mean_wo_num_rings",
+                            "msg_probe/test/r2_mean_wo_num_rings",
                         ),
                         (
                             "auc_fg_mean",
                             "msg_probe/train/auc_fg_mean",
                             "msg_probe/test/auc_fg_mean",
+                        ),
+                        (
+                            "mae_num_rings",
+                            "msg_probe/train/mae_num_rings",
+                            "msg_probe/test/mae_num_rings",
                         ),
                     ]
                     for label, train_key, test_key in _curve_keys:
@@ -426,10 +517,11 @@ def train_and_evaluate(
                         )
                 last_msg_probe_metrics = probe_metrics
                 logging.info(
-                    "step=%d msg_probe best_epoch=%d (test_r2_mol_weight=%.4f test_auc_fg_mean=%.4f fg_tasks=%d)",
+                    "step=%d msg_probe best_epoch=%d (test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_fg_mean=%.4f fg_tasks=%d)",
                     global_step,
                     int(probe_metrics["msg_probe_epoch"]),
-                    probe_metrics["msg_probe/test/r2_mol_weight"],
+                    probe_metrics["msg_probe/test/r2_mean_wo_num_rings"],
+                    probe_metrics["msg_probe/test/mae_num_rings"],
                     probe_metrics["msg_probe/test/auc_fg_mean"],
                     int(probe_metrics["msg_probe/num_fg_tasks"]),
                 )
@@ -440,8 +532,9 @@ def train_and_evaluate(
         optimizers,
         schedulers,
         global_step,
-        loop_epochs,
+        global_step // steps_per_epoch,
         float("nan"),
+        getattr(_wandb_run, "id", None),
     )
     if last_msg_probe_metrics:
         logging.info("=== Final MSG Probe Results ===")

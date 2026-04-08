@@ -205,6 +205,70 @@ def _prepend_precursor_token_tf(batch: dict) -> dict:
     return out
 
 
+def apply_peak_transforms_tf(
+    mz: tf.Tensor,
+    intensity: tf.Tensor,
+    precursor_mz: tf.Tensor,
+    *,
+    peak_mz_min: tf.Tensor,
+    peak_mz_max: tf.Tensor,
+    min_int: tf.Tensor,
+    max_prec: tf.Tensor,
+    num_peaks: int,
+    peak_ordering: str,
+) -> dict[str, tf.Tensor]:
+    """Shared peak filtering, top-k selection, normalisation and ordering.
+
+    Called inside @tf.function bodies from both the GeMS training pipeline and
+    the probe dataset pipeline so both produce identical peak representations.
+
+    Args:
+        mz: raw m/z values [B, N_in], zero-padded.
+        intensity: raw intensities [B, N_in], max-normalised to [0,1], zero-padded.
+        precursor_mz: precursor m/z [B].
+        peak_mz_min / peak_mz_max: tf.constant scalars for m/z range filter.
+        min_int: tf.constant scalar for minimum intensity filter.
+        max_prec: tf.constant scalar for precursor m/z clipping.
+        num_peaks: number of peaks to keep (top-k).
+        peak_ordering: ``"mz"`` (ascending) or ``"intensity"`` (descending).
+
+    Returns:
+        Dict with ``peak_mz``, ``peak_intensity``, ``peak_valid_mask``,
+        ``precursor_mz``, ``mz``, ``intensity``.
+    """
+    keep = (mz >= peak_mz_min) & (mz <= peak_mz_max) & (intensity >= min_int)
+    mz = tf.where(keep, mz, 0.0)
+    intensity = tf.where(keep, intensity, 0.0)
+    intensity, indices = tf.math.top_k(intensity, k=num_peaks, sorted=True)
+    mz = tf.gather(mz, indices, batch_dims=1)
+    max_intensity = tf.reduce_max(intensity, axis=1, keepdims=True)
+    max_intensity = tf.maximum(max_intensity, 1e-8)
+    intensity = intensity / max_intensity
+    valid = intensity > 0
+    if peak_ordering == "mz":
+        sort_key = tf.where(valid, mz, tf.fill(tf.shape(mz), float("inf")))
+        direction = "ASCENDING"
+    else:
+        sort_key = tf.where(
+            valid, intensity, tf.fill(tf.shape(intensity), float("-inf"))
+        )
+        direction = "DESCENDING"
+    sorted_idx = tf.argsort(sort_key, axis=1, direction=direction, stable=True)
+    mz = tf.gather(mz, sorted_idx, batch_dims=1)
+    intensity = tf.gather(intensity, sorted_idx, batch_dims=1)
+    valid = tf.gather(valid, sorted_idx, batch_dims=1)
+    mz = tf.where(valid, mz, 0.0)
+    intensity = tf.where(valid, intensity, 0.0)
+    return {
+        "peak_mz": mz / peak_mz_max,
+        "peak_intensity": intensity,
+        "peak_valid_mask": valid,
+        "precursor_mz": tf.clip_by_value(precursor_mz, 0.0, max_prec) / max_prec,
+        "mz": mz,
+        "intensity": intensity,
+    }
+
+
 def _batched_parse_and_transform(
     *,
     max_precursor_mz: float,
@@ -213,7 +277,7 @@ def _batched_parse_and_transform(
     peak_ordering: str,
 ) -> Callable[[tf.Tensor], dict[str, tf.Tensor]]:
     peak_mz_min = tf.constant(_PEAK_MZ_MIN, tf.float32)
-    peak_mz_max_c = tf.constant(_PEAK_MZ_MAX, tf.float32)
+    peak_mz_max = tf.constant(_PEAK_MZ_MAX, tf.float32)
     min_int = tf.constant(min_peak_intensity, tf.float32)
     max_prec = tf.constant(max_precursor_mz, tf.float32)
     feature_spec = {
@@ -226,42 +290,19 @@ def _batched_parse_and_transform(
     @tf.function
     def transform(serialized_batch: tf.Tensor) -> dict[str, tf.Tensor]:
         parsed = tf.io.parse_example(serialized_batch, feature_spec)
-        mz = parsed["mz"]
-        intensity = parsed["intensity"]
-        precursor_mz_val = parsed["precursor_mz"][:, 0]
-        keep = (mz >= peak_mz_min) & (mz <= peak_mz_max_c) & (intensity >= min_int)
-        mz = tf.where(keep, mz, 0.0)
-        intensity = tf.where(keep, intensity, 0.0)
-        intensity, indices = tf.math.top_k(intensity, k=num_peaks, sorted=True)
-        mz = tf.gather(mz, indices, batch_dims=1)
-        max_intensity = tf.reduce_max(intensity, axis=1, keepdims=True)
-        max_intensity = tf.maximum(max_intensity, 1e-8)
-        intensity = intensity / max_intensity
-        valid = intensity > 0
-        if peak_ordering == "mz":
-            sort_key = tf.where(valid, mz, tf.fill(tf.shape(mz), float("inf")))
-            direction = "ASCENDING"
-        else:
-            sort_key = tf.where(
-                valid, intensity, tf.fill(tf.shape(intensity), float("-inf"))
-            )
-            direction = "DESCENDING"
-        sorted_idx = tf.argsort(sort_key, axis=1, direction=direction, stable=True)
-        mz = tf.gather(mz, sorted_idx, batch_dims=1)
-        intensity = tf.gather(intensity, sorted_idx, batch_dims=1)
-        valid = tf.gather(valid, sorted_idx, batch_dims=1)
-        mz = tf.where(valid, mz, 0.0)
-        intensity = tf.where(valid, intensity, 0.0)
-        return {
-            "peak_mz": mz / peak_mz_max_c,
-            "peak_intensity": intensity,
-            "peak_valid_mask": valid,
-            "precursor_mz": tf.clip_by_value(precursor_mz_val, 0.0, max_prec)
-            / max_prec,
-            "rt": parsed["rt"][:, 0],
-            "mz": mz,
-            "intensity": intensity,
-        }
+        out = apply_peak_transforms_tf(
+            parsed["mz"],
+            parsed["intensity"],
+            parsed["precursor_mz"][:, 0],
+            peak_mz_min=peak_mz_min,
+            peak_mz_max=peak_mz_max,
+            min_int=min_int,
+            max_prec=max_prec,
+            num_peaks=num_peaks,
+            peak_ordering=peak_ordering,
+        )
+        out["rt"] = parsed["rt"][:, 0]
+        return out
 
     return transform
 
@@ -514,13 +555,16 @@ class TfLightningDataModule:
     @property
     def train_loader(self) -> DataLoader:
         if self._train_loader is None:
-            self._train_loader = self._make_loader(
-                dataset_builder=lambda: self._build_dataset_for_files(
-                    self.gems_train_files,
-                    seed=self.seed,
-                    shuffle=True,
-                    drop_remainder=self.drop_remainder,
-                ),
-                steps=self.train_steps,
-            )
+            self._train_loader = self.train_loader_for_epoch(0)
         return self._train_loader
+
+    def train_loader_for_epoch(self, epoch: int) -> DataLoader:
+        return self._make_loader(
+            dataset_builder=lambda: self._build_dataset_for_files(
+                self.gems_train_files,
+                seed=self.seed + int(epoch),
+                shuffle=True,
+                drop_remainder=self.drop_remainder,
+            ),
+            steps=self.train_steps,
+        )
