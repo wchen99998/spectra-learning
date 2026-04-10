@@ -1,4 +1,5 @@
 import math
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import torch
@@ -562,6 +563,7 @@ class PeakSetSIGReg(nn.Module):
         teacher_ema_decay_start = float(teacher_ema_decay_start)
         teacher_ema_decay = float(teacher_ema_decay)
         teacher_ema_decay_warmup_steps = int(teacher_ema_decay_warmup_steps)
+        self.teacher_ema_decay_warmup_steps = teacher_ema_decay_warmup_steps
         _reg(
             "teacher_ema_decay_start_tensor",
             torch.tensor(teacher_ema_decay_start, dtype=_f),
@@ -580,12 +582,10 @@ class PeakSetSIGReg(nn.Module):
                 else teacher_ema_decay_start,
                 dtype=_f,
             ),
-            persistent=False,
         )
         _reg(
             "teacher_ema_decay_step",
             torch.zeros((), dtype=torch.int64),
-            persistent=False,
         )
         _reg(
             "teacher_ema_decay_warmup_steps_tensor",
@@ -716,9 +716,9 @@ class PeakSetSIGReg(nn.Module):
         step = self._teacher_step_cpu
         self._teacher_step_cpu += 1
         self.teacher_ema_update_step.add_(1)
+        self.advance_teacher_ema_decay_schedule()
         if step % self.teacher_ema_update_every != 0:
             return
-        self.advance_teacher_ema_decay_schedule()
         teacher_params = list(self.teacher_encoder.module.parameters())
         student_params = list(self.encoder.parameters())
         # Pass tensor directly — _foreach_lerp_ accepts scalar tensors, no float() sync needed
@@ -726,6 +726,10 @@ class PeakSetSIGReg(nn.Module):
 
     @torch.no_grad()
     def advance_teacher_ema_decay_schedule(self) -> None:
+        if self.teacher_ema_decay_warmup_steps <= 0:
+            self.teacher_ema_decay_current.copy_(self.teacher_ema_decay_target)
+            self.teacher_ema_decay_step.add_(1)
+            return
         step = self.teacher_ema_decay_step.to(
             dtype=self.teacher_ema_decay_current.dtype
         )
@@ -825,7 +829,6 @@ class PeakSetSIGReg(nn.Module):
             return self.encoder
         return self.teacher_encoder.module
 
-    @torch.no_grad()
     def _compute_jepa_teacher_targets(
         self,
         peak_mz: torch.Tensor,
@@ -836,7 +839,8 @@ class PeakSetSIGReg(nn.Module):
         # autocast context when called inside forward_augmented; falls back
         # to bf16 when called standalone, e.g. from evaluation code).
         amp_dtype = torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled("cuda") else torch.bfloat16
-        with torch.autocast("cuda", dtype=amp_dtype):
+        grad_context = torch.no_grad() if self.teacher_encoder is not None else nullcontext()
+        with grad_context, torch.autocast("cuda", dtype=amp_dtype):
             teacher = self._teacher_encoder_module()
             teacher_peak_outputs = teacher.forward_peak_block_outputs(
                 peak_mz,

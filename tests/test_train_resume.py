@@ -79,6 +79,55 @@ def test_load_resume_model_state_allows_sigreg_checkpoint_compatibility():
     _load_resume_model_state(restored, resume_state)
 
 
+def test_save_checkpoint_persists_teacher_ema_schedule_state():
+    model = _small_model(
+        use_ema_teacher_target=True,
+        teacher_ema_decay_start=0.9,
+        teacher_ema_decay=0.99,
+        teacher_ema_decay_warmup_steps=8,
+        teacher_ema_update_every=2,
+    )
+    for _ in range(5):
+        model.update_teacher()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = f"{tmpdir}/resume.pt"
+        _save_checkpoint(
+            path=path,
+            model=model,
+            optimizers=[],
+            schedulers=[],
+            global_step=5,
+            epoch=0,
+            loss=0.0,
+            wandb_run_id=None,
+        )
+        ckpt = torch.load(path, map_location="cpu", weights_only=True)
+
+    restored = _small_model(
+        use_ema_teacher_target=True,
+        teacher_ema_decay_start=0.9,
+        teacher_ema_decay=0.99,
+        teacher_ema_decay_warmup_steps=8,
+        teacher_ema_update_every=2,
+    )
+    _load_resume_model_state(restored, ckpt["model"])
+
+    assert torch.equal(restored.teacher_ema_decay_current, model.teacher_ema_decay_current)
+    assert torch.equal(restored.teacher_ema_decay_step, model.teacher_ema_decay_step)
+    assert torch.equal(restored.teacher_ema_update_step, model.teacher_ema_update_step)
+
+
+def test_load_resume_model_state_allows_legacy_ema_checkpoint_without_schedule_state():
+    model = _small_model(use_ema_teacher_target=True)
+    resume_state = model.state_dict()
+    resume_state.pop("teacher_ema_decay_current")
+    resume_state.pop("teacher_ema_decay_step")
+
+    restored = _small_model(use_ema_teacher_target=True)
+    _load_resume_model_state(restored, resume_state)
+
+
 def test_build_wandb_init_kwargs_prefers_config_resume_id(monkeypatch):
     monkeypatch.delenv("WANDB_RESUME_ID", raising=False)
     cfg = config_dict.ConfigDict()

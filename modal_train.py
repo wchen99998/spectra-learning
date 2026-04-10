@@ -9,6 +9,11 @@ Usage:
     modal run modal_train.py --sweep sweep_optim
     modal run modal_train.py --sweep sweep_optim_refine
     modal run modal_train.py --sweep sweep_sigreg_compare
+    modal run modal_train.py --sweep sweep_10m_sigreg_ema_ablation
+    modal run modal_train.py --sweep sweep_10m_noema_sigreg_log_lambda
+    modal run modal_train.py --sweep sweep_10m_noema_sigreg_high_lambda
+    modal run modal_train.py --sweep sweep_10m_ema_stopgrad
+    modal run modal_train.py --sweep sweep_10m_ema_stopgrad_warmup_update
 
 Setup:
     1. modal setup
@@ -25,6 +30,7 @@ MINUTES = 60
 HOURS = 60 * MINUTES
 DEFAULT_GPU = "H100"
 PROJECT_ROOT = "/root/spectra-learning"
+MAX_SWEEP_CONCURRENCY = 10
 
 # ---------------------------------------------------------------------------
 # Persistent volume — data + experiments survive across runs
@@ -97,6 +103,151 @@ BEST_SWEEP_OPTIM = {
     "representation_regularizer": "none",
     "sigreg_lambda": 0.02,
 }
+
+TEN_M_BACKBONE = {
+    "model_dim": 256,
+    "encoder_num_layers": 8,
+    "encoder_num_heads": 8,
+    "encoder_num_kv_heads": 8,
+    "feature_mlp_hidden_dim": 512,
+    "predictor_dim": 128,
+    "masked_latent_predictor_num_layers": 4,
+    "masked_latent_predictor_num_heads": 8,
+    "jepa_target_layers": [1, 3, 5, 8],
+    "msg_probe_pma_num_heads": 8,
+}
+
+TEN_M_BEST_SWEEP_OPTIM = {
+    **BEST_SWEEP_OPTIM,
+    **TEN_M_BACKBONE,
+}
+
+NOEMA_SIGREG_LOG_LAMBDAS = [10.0 ** exp for exp in (-4.0, -3.5, -3.0, -2.5, -2.0, -1.5, -1.0)]
+NOEMA_SIGREG_HIGH_LAMBDAS = [
+    ("2e-02", 0.02),
+    ("2e-01", 0.2),
+    ("2e00", 2.0),
+    ("1e01", 10.0),
+    ("5e01", 50.0),
+]
+SIGREG_SAMPLE_SCALE_TAG = "sigcfscale"
+EMA_STOPGRAD_SWEEP_TAG = "emastop"
+EMA_STOPGRAD_RECIPES = [
+    (
+        "d995-s990-w500k-u2",
+        {
+            "teacher_ema_decay": 0.995,
+            "teacher_ema_decay_start": 0.99,
+            "teacher_ema_decay_warmup_steps": 500_000,
+            "teacher_ema_update_every": 2,
+        },
+    ),
+    (
+        "d999-s996-w100k-u1",
+        {
+            "teacher_ema_decay": 0.999,
+            "teacher_ema_decay_start": 0.996,
+            "teacher_ema_decay_warmup_steps": 100_000,
+            "teacher_ema_update_every": 1,
+        },
+    ),
+    (
+        "d999-s996-w100k-u2",
+        {
+            "teacher_ema_decay": 0.999,
+            "teacher_ema_decay_start": 0.996,
+            "teacher_ema_decay_warmup_steps": 100_000,
+            "teacher_ema_update_every": 2,
+        },
+    ),
+    (
+        "d999-s999-w0-u1",
+        {
+            "teacher_ema_decay": 0.999,
+            "teacher_ema_decay_start": 0.999,
+            "teacher_ema_decay_warmup_steps": 0,
+            "teacher_ema_update_every": 1,
+        },
+    ),
+    (
+        "d9996-s999-w500k-u1",
+        {
+            "teacher_ema_decay": 0.9996,
+            "teacher_ema_decay_start": 0.999,
+            "teacher_ema_decay_warmup_steps": 500_000,
+            "teacher_ema_update_every": 1,
+        },
+    ),
+    (
+        "d9996-s999-w100k-u1",
+        {
+            "teacher_ema_decay": 0.9996,
+            "teacher_ema_decay_start": 0.999,
+            "teacher_ema_decay_warmup_steps": 100_000,
+            "teacher_ema_update_every": 1,
+        },
+    ),
+    (
+        "d9996-s999-w500k-u2",
+        {
+            "teacher_ema_decay": 0.9996,
+            "teacher_ema_decay_start": 0.999,
+            "teacher_ema_decay_warmup_steps": 500_000,
+            "teacher_ema_update_every": 2,
+        },
+    ),
+    (
+        "d9996-s9996-w0-u1",
+        {
+            "teacher_ema_decay": 0.9996,
+            "teacher_ema_decay_start": 0.9996,
+            "teacher_ema_decay_warmup_steps": 0,
+            "teacher_ema_update_every": 1,
+        },
+    ),
+    (
+        "d9998-s999-w100k-u1",
+        {
+            "teacher_ema_decay": 0.9998,
+            "teacher_ema_decay_start": 0.999,
+            "teacher_ema_decay_warmup_steps": 100_000,
+            "teacher_ema_update_every": 1,
+        },
+    ),
+    (
+        "d9998-s999-w100k-u2",
+        {
+            "teacher_ema_decay": 0.9998,
+            "teacher_ema_decay_start": 0.999,
+            "teacher_ema_decay_warmup_steps": 100_000,
+            "teacher_ema_update_every": 2,
+        },
+    ),
+    (
+        "d9998-s9998-w0-u1",
+        {
+            "teacher_ema_decay": 0.9998,
+            "teacher_ema_decay_start": 0.9998,
+            "teacher_ema_decay_warmup_steps": 0,
+            "teacher_ema_update_every": 1,
+        },
+    ),
+    (
+        "d9999-s9996-w100k-u1",
+        {
+            "teacher_ema_decay": 0.9999,
+            "teacher_ema_decay_start": 0.9996,
+            "teacher_ema_decay_warmup_steps": 100_000,
+            "teacher_ema_update_every": 1,
+        },
+    ),
+]
+EMA_STOPGRAD_FIXED = {
+    "teacher_ema_decay": 0.999,
+    "teacher_ema_decay_start": 0.996,
+}
+EMA_STOPGRAD_WARMUP_STEPS = [5_000, 15_000]
+EMA_STOPGRAD_UPDATE_EVERY_VALUES = [1, 2, 5, 10, 20]
 
 
 SWEEPS: dict[str, list[dict]] = {
@@ -187,6 +338,120 @@ SWEEPS: dict[str, list[dict]] = {
             "run_name_suffix": "sigcmp-sigreg",
         },
     ],
+    # Controlled 10M-scale ablation.
+    #
+    # Backbone: 256d / 8L / 8H with 128d predictor and 4 predictor layers.
+    # This is ~10.5M trainable params without an EMA teacher.
+    #
+    # Runs:
+    #   1) EMA on,  SIGREG off  -> current JEPA baseline at this scale
+    #   2) EMA on,  SIGREG on   -> does SIGREG help even when EMA is present?
+    #   3) EMA off, SIGREG off  -> collapse-prone same-backbone control
+    #   4) EMA off, SIGREG on   -> can SIGREG replace teacher EMA as stabilizer?
+    "sweep_10m_sigreg_ema_ablation": [
+        {
+            **TEN_M_BEST_SWEEP_OPTIM,
+            "use_ema_teacher_target": True,
+            "representation_regularizer": "none",
+            "run_name_suffix": "10m-ema-none",
+        },
+        {
+            **TEN_M_BEST_SWEEP_OPTIM,
+            "use_ema_teacher_target": True,
+            "representation_regularizer": "sigreg",
+            "run_name_suffix": "10m-ema-sigreg",
+        },
+        {
+            **TEN_M_BEST_SWEEP_OPTIM,
+            "use_ema_teacher_target": False,
+            "representation_regularizer": "none",
+            "run_name_suffix": "10m-noema-none",
+        },
+        {
+            **TEN_M_BEST_SWEEP_OPTIM,
+            "use_ema_teacher_target": False,
+            "representation_regularizer": "sigreg",
+            "run_name_suffix": "10m-noema-sigreg",
+        },
+    ],
+    # Follow-up sweep from the 10M ablation:
+    # keep the best EMA baseline as anchor, then sweep no-EMA + SIGREG with
+    # target/student gradients enabled through the same backbone.
+    "sweep_10m_noema_sigreg_log_lambda": [
+        {
+            **TEN_M_BEST_SWEEP_OPTIM,
+            "use_ema_teacher_target": True,
+            "representation_regularizer": "none",
+            "run_name_suffix": f"10m-ema-none-anchor-{SIGREG_SAMPLE_SCALE_TAG}",
+        },
+        *[
+            {
+                **TEN_M_BEST_SWEEP_OPTIM,
+                "use_ema_teacher_target": False,
+                "representation_regularizer": "sigreg",
+                "sigreg_lambda": sigreg_lambda,
+                "run_name_suffix": (
+                    f"10m-noema-sigreg-gradtgt-lam{sigreg_lambda:.0e}-"
+                    f"{SIGREG_SAMPLE_SCALE_TAG}"
+                ),
+            }
+            for sigreg_lambda in NOEMA_SIGREG_LOG_LAMBDAS
+        ],
+    ],
+    # Follow-up on the failed low-lambda no-EMA sweep:
+    # keep the EMA baseline anchor and test much stronger SIGREG weights.
+    "sweep_10m_noema_sigreg_high_lambda": [
+        {
+            **TEN_M_BEST_SWEEP_OPTIM,
+            "use_ema_teacher_target": True,
+            "representation_regularizer": "none",
+            "run_name_suffix": f"10m-ema-none-anchor-hi-{SIGREG_SAMPLE_SCALE_TAG}",
+        },
+        *[
+            {
+                **TEN_M_BEST_SWEEP_OPTIM,
+                "use_ema_teacher_target": False,
+                "representation_regularizer": "sigreg",
+                "sigreg_lambda": sigreg_lambda,
+                "run_name_suffix": (
+                    f"10m-noema-sigreg-gradtgt-hi-lam{label}-"
+                    f"{SIGREG_SAMPLE_SCALE_TAG}"
+                ),
+            }
+            for label, sigreg_lambda in NOEMA_SIGREG_HIGH_LAMBDAS
+        ],
+    ],
+    # Follow-up after the SIGREG sweep underperformed:
+    # keep SIGREG off, keep stopgrad on via EMA teacher targets, and sweep the
+    # EMA recipe itself at the 10M backbone scale.
+    "sweep_10m_ema_stopgrad": [
+        {
+            **TEN_M_BEST_SWEEP_OPTIM,
+            "use_ema_teacher_target": True,
+            "representation_regularizer": "none",
+            "run_name_suffix": f"10m-{EMA_STOPGRAD_SWEEP_TAG}-{label}",
+            **ema_overrides,
+        }
+        for label, ema_overrides in EMA_STOPGRAD_RECIPES
+    ],
+    # Refine around the best same-step EMA recipe:
+    # fix decay/start and sweep only warmup and update cadence.
+    "sweep_10m_ema_stopgrad_warmup_update": [
+        {
+            **TEN_M_BEST_SWEEP_OPTIM,
+            **EMA_STOPGRAD_FIXED,
+            "use_ema_teacher_target": True,
+            "representation_regularizer": "none",
+            "teacher_ema_decay_warmup_steps": warmup_steps,
+            "teacher_ema_update_every": update_every,
+            "run_name_suffix": (
+                f"10m-{EMA_STOPGRAD_SWEEP_TAG}-d999-s996-"
+                f"w{warmup_steps // 1000}k-u{update_every}"
+            ),
+        }
+        for warmup_steps in EMA_STOPGRAD_WARMUP_STEPS
+        for update_every in EMA_STOPGRAD_UPDATE_EVERY_VALUES
+    ],
 }
 
 
@@ -254,13 +519,16 @@ def prepare_data(
 @app.function(
     image=image,
     volumes={volume_path: volume},
+    cpu=8.0,
+    memory=32768,  # 32 GiB
     gpu=DEFAULT_GPU,
-    timeout=3 * HOURS,
+    timeout=5 * HOURS,
     secrets=[modal.Secret.from_name("wandb-secret", required_keys=["WANDB_API_KEY"])],
 )
 def train(
     config_path: str = "configs/gems_small.py",
     overrides_json: str = "{}",
+    workdir_tag: str = "",
 ):
     import logging
     import os
@@ -293,10 +561,14 @@ def train(
         config.muon_ns_use_kernels = False
 
     run_name = auto_run_name(config)
-    workdir = volume_path / "experiments" / run_name
+    workdir_root = volume_path / "experiments"
+    if workdir_tag:
+        workdir_root = workdir_root / workdir_tag
+    workdir = workdir_root / run_name
     workdir.mkdir(parents=True, exist_ok=True)
 
     logging.info("Run: %s", run_name)
+    logging.info("Workdir: %s", workdir)
     if overrides:
         logging.info("Overrides: %s", overrides)
 
@@ -315,6 +587,7 @@ def main(
     config: str = "configs/gems_small.py",
     sweep: str = "",
     overrides: str = "{}",
+    workdir_tag: str = "",
 ):
     if sweep:
         experiments = SWEEPS[sweep]
@@ -327,18 +600,37 @@ def main(
         for payload in dict.fromkeys(prepare_payloads):
             prepare_data.remote(config_path=config, overrides_json=payload)
         print("Data ready.\n")
-        print(f"Launching {len(experiments)} experiments in parallel ({sweep}):")
+        print(
+            f"Launching {len(experiments)} experiments "
+            f"with up to {MAX_SWEEP_CONCURRENCY} concurrent runs ({sweep}):"
+        )
         for i, exp in enumerate(experiments):
             print(f"  [{i}] {exp or '(baseline)'}")
-        handles = []
-        for exp in experiments:
-            merged = {**json.loads(overrides), **exp}
-            handles.append(train.spawn(config_path=config, overrides_json=json.dumps(merged)))
-        for i, handle in enumerate(handles):
-            result = handle.get()
-            print(f"[{i}] done: {result}")
+        for batch_start in range(0, len(experiments), MAX_SWEEP_CONCURRENCY):
+            batch = experiments[batch_start: batch_start + MAX_SWEEP_CONCURRENCY]
+            print(
+                f"Starting batch {batch_start // MAX_SWEEP_CONCURRENCY + 1}: "
+                f"experiments {batch_start}-{batch_start + len(batch) - 1}"
+            )
+            handles = []
+            for exp in batch:
+                merged = {**base_overrides, **exp}
+                handles.append(
+                    train.spawn(
+                        config_path=config,
+                        overrides_json=json.dumps(merged),
+                        workdir_tag=workdir_tag,
+                    )
+                )
+            for offset, handle in enumerate(handles):
+                result = handle.get()
+                print(f"[{batch_start + offset}] done: {result}")
     else:
         print("Preparing data on volume...")
         prepare_data.remote(config_path=config, overrides_json=overrides)
         print("Data ready.\n")
-        train.remote(config_path=config, overrides_json=overrides)
+        train.remote(
+            config_path=config,
+            overrides_json=overrides,
+            workdir_tag=workdir_tag,
+        )

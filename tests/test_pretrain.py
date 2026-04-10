@@ -143,6 +143,29 @@ class BlockJEPATests(unittest.TestCase):
             )
         )
 
+    def test_teacher_targets_require_grad_without_ema(self):
+        model = self._build_model(masked_token_loss_weight=1.0)
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+        teacher_targets = model._compute_jepa_teacher_targets(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            batch["peak_valid_mask"],
+        )
+        self.assertTrue(teacher_targets.requires_grad)
+
+    def test_teacher_targets_are_detached_with_ema(self):
+        model = self._build_model(
+            masked_token_loss_weight=1.0,
+            use_ema_teacher_target=True,
+        )
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+        teacher_targets = model._compute_jepa_teacher_targets(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            batch["peak_valid_mask"],
+        )
+        self.assertFalse(teacher_targets.requires_grad)
+
     def test_encode_output_shape(self):
         model = self._build_model()
         batch = {
@@ -252,6 +275,42 @@ class BlockJEPATests(unittest.TestCase):
 
         for got, want in zip(actual, expected, strict=True):
             self.assertAlmostEqual(got, want, places=6)
+
+    def test_teacher_ema_zero_warmup_stays_at_target_decay(self):
+        model = self._build_model(
+            use_ema_teacher_target=True,
+            teacher_ema_decay_start=0.9,
+            teacher_ema_decay=0.99,
+            teacher_ema_decay_warmup_steps=0,
+        )
+        self.assertAlmostEqual(float(model.teacher_ema_decay_current), 0.99, places=6)
+        model.update_teacher()
+        self.assertAlmostEqual(float(model.teacher_ema_decay_current), 0.99, places=6)
+
+    def test_teacher_ema_schedule_advances_per_train_step_not_update_cadence(self):
+        shared_kwargs = dict(
+            use_ema_teacher_target=True,
+            teacher_ema_decay_start=0.9,
+            teacher_ema_decay=0.99,
+            teacher_ema_decay_warmup_steps=4,
+        )
+        model_u1 = self._build_model(
+            **shared_kwargs,
+            teacher_ema_update_every=1,
+        )
+        model_u2 = self._build_model(
+            **shared_kwargs,
+            teacher_ema_update_every=2,
+        )
+
+        for _ in range(5):
+            model_u1.update_teacher()
+            model_u2.update_teacher()
+            self.assertAlmostEqual(
+                float(model_u1.teacher_ema_decay_current),
+                float(model_u2.teacher_ema_decay_current),
+                places=6,
+            )
 
     def test_weight_decay_targets_all_2d_weights(self):
         model = self._build_model()

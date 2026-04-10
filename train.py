@@ -299,7 +299,13 @@ def _load_resume_model_state(
     state_dict: dict[str, torch.Tensor],
 ) -> None:
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    allowed_missing = ("sigreg.t", "sigreg.phi", "sigreg.weights")
+    allowed_missing = (
+        "sigreg.t",
+        "sigreg.phi",
+        "sigreg.weights",
+        "teacher_ema_decay_current",
+        "teacher_ema_decay_step",
+    )
     allowed_unexpected = (
         "sigreg_lambda_target",
         "sigreg_lambda_current",
@@ -408,6 +414,7 @@ def train_and_evaluate(
     last_msg_probe_metrics: dict[str, float] = {}
     _wandb_run = getattr(logger, "experiment", None)
     for epoch in range(start_epoch, loop_epochs):
+        logging.info("Starting epoch %d at global_step=%d", epoch, global_step)
         train_loader = datamodule.train_loader_for_epoch(epoch)
         prefetcher = _BatchPrefetcher(
             iter(train_loader),
@@ -526,6 +533,9 @@ def train_and_evaluate(
                     int(probe_metrics["msg_probe/num_fg_tasks"]),
                 )
         pbar.close()
+        logging.info("Finished epoch %d at global_step=%d", epoch, global_step)
+        del prefetcher
+        del train_loader
     _save_checkpoint(
         checkpoint_dir / "last.pt",
         model,

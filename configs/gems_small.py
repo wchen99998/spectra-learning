@@ -6,7 +6,7 @@ def get_config() -> config_dict.ConfigDict:
 
     # Dataset
     cfg.tfrecord_dir = "data/gems_peaklist_tfrecord_alpha"
-    cfg.gems_tfrecord_repo_id = "cjim8889/gems-a10-tfrecords"
+    cfg.gems_native_repo_id = "cjim8889/gems-a10-native"
     cfg.batch_size = 256
     cfg.shuffle_buffer = 1_000_000
     cfg.tfrecord_buffer_size = 250_000

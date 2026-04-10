@@ -285,6 +285,8 @@ def load_pretrained_weights(
         "register_tokens",
         "predictor_register_tokens",
         "temporal_query_token",
+        "teacher_ema_decay_current",
+        "teacher_ema_decay_step",
     )
     allowed_missing_prefixes = ("masked_latent_readout.", "sigreg.")
     unexpected = [
