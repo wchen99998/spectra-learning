@@ -4,7 +4,13 @@ import torch
 from ml_collections import config_dict
 
 from models.model import PeakSetSIGReg
-from train import _is_weight_decay_target, _load_resume_model_state, _save_checkpoint
+from train import (
+    _build_optimizers,
+    _is_weight_decay_target,
+    _load_optimizer_states,
+    _load_resume_model_state,
+    _save_checkpoint,
+)
 from utils.training import _build_wandb_init_kwargs
 
 
@@ -25,6 +31,28 @@ def _small_model(**overrides) -> PeakSetSIGReg:
     )
     kwargs.update(overrides)
     return PeakSetSIGReg(**kwargs)
+
+
+def _small_train_config(**overrides) -> config_dict.ConfigDict:
+    cfg = config_dict.ConfigDict()
+    cfg.learning_rate = 5e-4
+    cfg.warmup_steps = 0
+    cfg.min_learning_rate = 3e-5
+    cfg.b2 = 0.95
+    cfg.weight_decay = 0.05
+    cfg.optimizer = "muon"
+    cfg.optimizer_capturable = False
+    cfg.optimizer_fused = False
+    cfg.muon_lr = None
+    cfg.adamw_lr = None
+    cfg.muon_momentum = 0.95
+    cfg.muon_nesterov = True
+    cfg.muon_ns_steps = 5
+    cfg.muon_weight_decay = None
+    cfg.muon_adjust_lr_fn = "match_rms_adamw"
+    for key, value in overrides.items():
+        cfg[key] = value
+    return cfg
 
 
 def test_save_checkpoint_persists_nested_scalar_optimizer_state():
@@ -77,6 +105,75 @@ def test_load_resume_model_state_allows_sigreg_checkpoint_compatibility():
 
     restored = _small_model(representation_regularizer="sigreg", sigreg_lambda=0.02)
     _load_resume_model_state(restored, resume_state)
+
+
+def test_build_optimizers_uses_torch_muon_and_adamw():
+    model = _small_model()
+    config = _small_train_config()
+
+    optimizers, schedulers = _build_optimizers(
+        config,
+        model,
+        total_steps=16,
+        device=torch.device("cpu"),
+    )
+
+    assert len(optimizers) == 2
+    assert len(schedulers) == 2
+    assert isinstance(optimizers[0], torch.optim.Muon)
+    assert isinstance(optimizers[1], torch.optim.AdamW)
+
+    muon_params = {
+        id(param)
+        for group in optimizers[0].param_groups
+        for param in group["params"]
+    }
+    adamw_params = {
+        id(param)
+        for group in optimizers[1].param_groups
+        for param in group["params"]
+    }
+    all_trainable = {id(param) for param in model.parameters() if param.requires_grad}
+
+    assert muon_params.isdisjoint(adamw_params)
+    assert muon_params | adamw_params == all_trainable
+    assert all(param.ndim == 2 for group in optimizers[0].param_groups for param in group["params"])
+
+
+def test_load_optimizer_states_restores_legacy_nested_muon_format():
+    model = _small_model()
+    config = _small_train_config()
+    optimizers, _ = _build_optimizers(
+        config,
+        model,
+        total_steps=16,
+        device=torch.device("cpu"),
+    )
+    for param in model.parameters():
+        if param.requires_grad:
+            param.grad = torch.ones_like(param)
+    for opt in optimizers:
+        opt.step()
+        opt.zero_grad(set_to_none=True)
+
+    legacy_state = [
+        {
+            "state_dict": optimizers[0].state_dict(),
+            "scalar_optimizer_state": optimizers[1].state_dict(),
+        }
+    ]
+
+    restored_model = _small_model()
+    restored_optimizers, _ = _build_optimizers(
+        config,
+        restored_model,
+        total_steps=16,
+        device=torch.device("cpu"),
+    )
+    _load_optimizer_states(restored_optimizers, legacy_state)
+
+    assert len(restored_optimizers[0].state) == len(optimizers[0].state)
+    assert len(restored_optimizers[1].state) == len(optimizers[1].state)
 
 
 def test_build_wandb_init_kwargs_prefers_config_resume_id(monkeypatch):

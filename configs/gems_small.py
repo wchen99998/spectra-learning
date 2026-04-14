@@ -17,14 +17,14 @@ def get_config() -> config_dict.ConfigDict:
     cfg.seed = 66
 
     # Model
-    cfg.num_peaks = 64
+    cfg.num_peaks = 128
     cfg.model_dim = 768
     cfg.encoder_num_layers = 12
     cfg.encoder_num_heads = 12
     cfg.encoder_num_kv_heads = 12
     cfg.encoder_num_register_tokens = 4
-    cfg.encoder_apply_final_norm = False
-    cfg.encoder_qk_norm = False
+    cfg.encoder_apply_final_norm = True
+    cfg.encoder_qk_norm = True
     cfg.encoder_fourier_strategy = "lin_float_int"
     cfg.encoder_fourier_x_min = 1e-4
     cfg.encoder_fourier_x_max = 1000.0
@@ -37,16 +37,20 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_num_slices = 256
     cfg.sigreg_lambda = 0.02
     cfg.jepa_num_target_blocks = 2
-    cfg.jepa_context_fraction = 0.35
-    cfg.jepa_target_fraction = 0.2
+    cfg.jepa_context_fraction = 0.5
+    cfg.jepa_target_fraction = 0.25
     cfg.jepa_block_min_len = 1
     cfg.augmentation_mz_jitter_std = 0.0002
     cfg.augmentation_intensity_jitter_std = 0.001
     cfg.norm_type = "layernorm"
+    # BSP
+    cfg.jepa_mask_strategy = "ragged_blocks"
+    cfg.jepa_mask_lengths = (4,6,8,16,20)
+    cfg.jepa_mask_round_from = 3
 
     # Predictor
     cfg.predictor_num_register_tokens = 4
-    cfg.predictor_apply_final_norm = False
+    cfg.predictor_apply_final_norm = True
     cfg.masked_latent_predictor_num_layers = 10
     cfg.masked_latent_predictor_num_heads = 16
     cfg.temporal_predictor_num_layers = 0
@@ -54,7 +58,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.predictor_dropout = 0.1
 
     # Training
-    cfg.num_epochs = 20
+    cfg.num_epochs = 40
     cfg.learning_rate = 5e-4
     cfg.warmup_steps = 20_000
     cfg.min_learning_rate = 3e-5
@@ -73,8 +77,8 @@ def get_config() -> config_dict.ConfigDict:
 
     cfg.masked_token_loss_weight = 1.0
     cfg.masked_token_loss_type = "l2"
-    cfg.jepa_target_normalization = "none"
-    cfg.jepa_target_layers = [1, 4, 8, 12]
+    cfg.jepa_target_normalization = "zscore"
+    cfg.jepa_target_layers = [12]
     cfg.use_ema_teacher_target = True
     cfg.teacher_ema_decay = 0.995
     cfg.teacher_ema_decay_start = 0.99
@@ -83,7 +87,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.grad_clip_norm = 1.0
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "reduce-overhead"
-    cfg.representation_regularizer = "none"
+    cfg.representation_regularizer = "sigreg"
     cfg.msg_probe_every_n_steps = 0.2
     cfg.msg_probe_pooling_type = "pma"
     cfg.msg_probe_pma_num_heads = cfg.encoder_num_heads
@@ -132,6 +136,6 @@ def get_config() -> config_dict.ConfigDict:
     # System / logging
     cfg.enable_wandb = True
     cfg.wandb_project = "jepa-debugging"
-    cfg.wandb_run_name_prefix = "jepa_masked_latent_index"
+    cfg.wandb_run_name_prefix = "jepa_masked_latent_index_BSP"
 
     return cfg

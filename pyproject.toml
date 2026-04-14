@@ -14,7 +14,8 @@ dependencies = [
     "rdkit>=2025.3.3",
     "scikit-learn>=1.8.0",
     "torch==2.11.0; sys_platform == 'linux'",
-    "tensorflow-cpu==2.19.0; sys_platform == 'linux'",
+    "tensorflow-cpu==2.19.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "tensorflow==2.19.0; sys_platform == 'linux' and platform_machine == 'aarch64'",
     "tqdm>=4.66.4",
     "wandb==0.23.1",
     "gram-newton-schulz",
@@ -22,12 +23,12 @@ dependencies = [
 ]
 
 [[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
 explicit = true
 
 no-build-isolation-package = ["gram-newton-schulz"]
 
 [tool.uv.sources]
-torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'linux'" }]
+torch = [{ index = "pytorch-cu126", marker = "sys_platform == 'linux'" }]
 gram-newton-schulz = { git = "https://github.com/Dao-AILab/gram-newton-schulz" }

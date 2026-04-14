@@ -176,20 +176,26 @@ def _build_optimizers(
     fused = is_cuda if fused_cfg is None else bool(fused_cfg) and is_cuda
 
     if optimizer_type == "muon":
-        from gram_newton_schulz import Muon as GNSMuon
-
         muon_lr = float(config.get("muon_lr", None) or base_lr)
         adamw_lr = float(config.get("adamw_lr", None) or base_lr)
         muon_momentum = float(config.get("muon_momentum", 0.95))
         muon_wd = float(config.get("muon_weight_decay", None) or weight_decay)
+        muon_ns_steps = int(config.get("muon_ns_steps", 5))
+        raw_muon_adjust_lr_fn = config.get("muon_adjust_lr_fn", "match_rms_adamw")
+        if raw_muon_adjust_lr_fn is None:
+            muon_adjust_lr_fn = None
+        elif raw_muon_adjust_lr_fn == "rms_norm":
+            muon_adjust_lr_fn = "match_rms_adamw"
+        else:
+            muon_adjust_lr_fn = str(raw_muon_adjust_lr_fn)
 
-        muon_params = []
+        muon_params: list[torch.nn.Parameter] = []
         adamw_params: list[dict] = [{"params": [], "weight_decay": 0.0}]
         adamw_wd_params: list[torch.nn.Parameter] = []
         for name, param in model.named_parameters():
             if not param.requires_grad:
                 continue
-            if _is_weight_decay_target(name, param) and param.stride()[0] % 8 == 0:
+            if _is_weight_decay_target(name, param) and param.ndim == 2:
                 muon_params.append(param)
             elif _is_weight_decay_target(name, param):
                 adamw_wd_params.append(param)
@@ -200,28 +206,39 @@ def _build_optimizers(
                 {"params": adamw_wd_params, "weight_decay": weight_decay}
             )
 
-        adamw_opt = torch.optim.AdamW(
-            adamw_params,
-            lr=torch.tensor(adamw_lr),
-            betas=(0.9, b2),
-            capturable=capturable,
-            fused=fused,
-        )
-        muon_opt = GNSMuon(
-            muon_params,
-            lr=muon_lr,
-            weight_decay=muon_wd,
-            momentum=muon_momentum,
-            nesterov=bool(config.get("muon_nesterov", True)),
-            adjust_lr="rms_norm",
-            ns_coefficients_preset="YOU_COEFFICIENTS",
-            ns_use_kernels=bool(config.get("muon_ns_use_kernels", is_cuda)),
-            scalar_optimizer=adamw_opt,
-        )
-        return (
-            [muon_opt],
-            [_make_cosine_schedule(muon_opt, total_steps, warmup_steps, min_learning_rate)],
-        )
+        optimizers: list[torch.optim.Optimizer] = []
+        schedulers: list[torch.optim.lr_scheduler.LRScheduler] = []
+        if muon_params:
+            muon_opt = torch.optim.Muon(
+                muon_params,
+                lr=torch.tensor(muon_lr),
+                weight_decay=muon_wd,
+                momentum=muon_momentum,
+                nesterov=bool(config.get("muon_nesterov", True)),
+                ns_steps=muon_ns_steps,
+                adjust_lr_fn=muon_adjust_lr_fn,
+            )
+            optimizers.append(muon_opt)
+            schedulers.append(
+                _make_cosine_schedule(
+                    muon_opt, total_steps, warmup_steps, min_learning_rate
+                )
+            )
+        if any(group["params"] for group in adamw_params):
+            adamw_opt = torch.optim.AdamW(
+                adamw_params,
+                lr=torch.tensor(adamw_lr),
+                betas=(0.9, b2),
+                capturable=capturable,
+                fused=fused,
+            )
+            optimizers.append(adamw_opt)
+            schedulers.append(
+                _make_cosine_schedule(
+                    adamw_opt, total_steps, warmup_steps, min_learning_rate
+                )
+            )
+        return optimizers, schedulers
     decay_params = []
     no_decay_params = []
     for name, param in model.named_parameters():
@@ -276,6 +293,29 @@ def _save_checkpoint(
         },
         path,
     )
+
+
+def _load_optimizer_states(
+    optimizers: list[torch.optim.Optimizer],
+    optimizer_states: list[dict[str, Any]],
+) -> None:
+    if not optimizer_states:
+        return
+
+    if (
+        len(optimizer_states) == 1
+        and isinstance(optimizer_states[0], dict)
+        and "state_dict" in optimizer_states[0]
+    ):
+        optimizers[0].load_state_dict(optimizer_states[0]["state_dict"])
+        if len(optimizers) > 1:
+            scalar_state = optimizer_states[0].get("scalar_optimizer_state")
+            if scalar_state is not None:
+                optimizers[1].load_state_dict(scalar_state)
+        return
+
+    for obj, state in zip(optimizers, optimizer_states):
+        obj.load_state_dict(state)
 
 
 def _prune_checkpoints(checkpoint_dir: Path, keep_top_k: int = 5) -> None:
@@ -354,27 +394,7 @@ def train_and_evaluate(
     logger = build_logger(config, workdir)
     if ckpt is not None:
         _load_resume_model_state(model, ckpt["model"])
-        for obj, state in zip(optimizers, ckpt["optimizers"]):
-            if isinstance(state, dict) and "state_dict" in state:
-                obj.load_state_dict(state["state_dict"])
-                scalar_optimizer = getattr(obj, "scalar_optimizer", None)
-                scalar_state = state.get("scalar_optimizer_state")
-                if scalar_optimizer is not None and scalar_state is not None:
-                    scalar_optimizer.load_state_dict(scalar_state)
-                elif scalar_optimizer is not None:
-                    logging.warning(
-                        "Checkpoint is missing nested scalar optimizer state for %s; "
-                        "resumed Muon scalar parameters will use fresh AdamW state.",
-                        type(obj).__name__,
-                    )
-            else:
-                obj.load_state_dict(state)
-                if getattr(obj, "scalar_optimizer", None) is not None:
-                    logging.warning(
-                        "Checkpoint uses legacy optimizer format for %s; resumed Muon "
-                        "scalar parameters will use fresh AdamW state.",
-                        type(obj).__name__,
-                    )
+        _load_optimizer_states(optimizers, ckpt["optimizers"])
         for obj, state in zip(schedulers, ckpt["schedulers"]):
             obj.load_state_dict(state)
         global_step = int(ckpt["global_step"])
@@ -442,11 +462,19 @@ def train_and_evaluate(
                     f"train/{k}": float(v.detach()) for k, v in metrics.items()
                 }
                 if optimizer_type == "muon":
-                    log_metrics["train/lr_muon"] = optimizers[0].param_groups[0]["lr"]
+                    for opt in optimizers:
+                        if isinstance(opt, torch.optim.Muon):
+                            log_metrics["train/lr_muon"] = float(
+                                opt.param_groups[0]["lr"]
+                            )
+                        elif isinstance(opt, torch.optim.AdamW):
+                            log_metrics["train/lr_adamw"] = float(
+                                opt.param_groups[0]["lr"]
+                            )
                 else:
-                    log_metrics["train/learning_rate"] = optimizers[0].param_groups[0][
-                        "lr"
-                    ]
+                    log_metrics["train/learning_rate"] = float(
+                        optimizers[0].param_groups[0]["lr"]
+                    )
                 if model.teacher_encoder is not None:
                     log_metrics["train/teacher_ema_decay"] = float(
                         model.teacher_ema_decay_current

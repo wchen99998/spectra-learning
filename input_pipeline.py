@@ -30,6 +30,68 @@ _PEAK_MZ_MIN = 20.0
 _PEAK_MZ_MAX = 1000.0
 _DEFAULT_MIN_PEAK_INTENSITY = 1e-4
 _METADATA_FILENAME = "metadata.json"
+_DEFAULT_JEPA_MASK_STRATEGY = "contiguous"
+_DEFAULT_JEPA_MASK_LENGTHS = (1, 2, 4, 8, 16)
+
+
+def _sample_ragged_block_mask_1d_tf(
+    active_positions: tf.Tensor,
+    *,
+    masked_fraction: tf.Tensor,
+    lengths: tuple[int, ...],
+    round_from: int,
+) -> tf.Tensor:
+    def sample_mask() -> tf.Tensor:
+        active_count = tf.reduce_sum(tf.cast(active_positions, tf.int32))
+        compressed_positions = tf.cumsum(
+            tf.cast(active_positions, tf.int32), exclusive=True
+        )
+        bs = tf.random.uniform([len(lengths)], dtype=tf.float32)
+        bs_norm = bs / tf.reduce_sum(bs)
+        masks_by_length = []
+        for length_idx, length in enumerate(lengths):
+            max_elem = tf.cast(
+                tf.math.ceil(
+                    masked_fraction
+                    * tf.cast(active_count, tf.float32)
+                    / tf.cast(length, tf.float32)
+                ),
+                tf.int32,
+            )
+            coeff_float = bs_norm[length_idx] * tf.cast(max_elem, tf.float32)
+            if length_idx < round_from:
+                coeff = tf.cast(tf.math.ceil(coeff_float), tf.int32)
+            else:
+                coeff = tf.cast(tf.round(coeff_float), tf.int32)
+
+            def write_blocks() -> tf.Tensor:
+                starts = tf.random.uniform(
+                    [coeff],
+                    minval=1 - length,
+                    maxval=active_count,
+                    dtype=tf.int32,
+                )
+                starts = tf.maximum(starts, 0)
+                block_mask = tf.logical_and(
+                    compressed_positions[tf.newaxis, :] >= starts[:, tf.newaxis],
+                    compressed_positions[tf.newaxis, :]
+                    < starts[:, tf.newaxis] + length,
+                )
+                block_mask = tf.logical_and(
+                    block_mask, active_positions[tf.newaxis, :]
+                )
+                return tf.reduce_any(block_mask, axis=0)
+
+            masks_by_length.append(
+                tf.cond(coeff > 0, write_blocks, lambda: tf.zeros_like(active_positions))
+            )
+        return tf.reduce_any(tf.stack(masks_by_length, axis=0), axis=0)
+
+    return tf.cond(
+        tf.reduce_any(active_positions),
+        sample_mask,
+        lambda: tf.zeros_like(active_positions),
+    )
 
 
 def _sample_block_masks_tf(
@@ -39,10 +101,16 @@ def _sample_block_masks_tf(
     context_fraction: float,
     target_fraction: float,
     block_min_len: int,
+    mask_strategy: str = _DEFAULT_JEPA_MASK_STRATEGY,
+    mask_lengths: tuple[int, ...] = _DEFAULT_JEPA_MASK_LENGTHS,
+    mask_round_from: int = len(_DEFAULT_JEPA_MASK_LENGTHS),
 ) -> tuple[tf.Tensor, tf.Tensor]:
     num_targets = int(num_target_blocks)
     min_len = int(block_min_len)
     num_peaks = peak_valid_mask.shape[1]
+    strategy = str(mask_strategy).lower()
+    if strategy not in {"contiguous", "ragged_blocks"}:
+        raise ValueError(f"Unsupported JEPA mask strategy: {mask_strategy!r}")
 
     def sample_one(row_valid: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
         valid_count = tf.reduce_sum(tf.cast(row_valid, tf.int32))
@@ -72,42 +140,74 @@ def _sample_block_masks_tf(
         else:
             context_len = tf.minimum(desired_context, valid_count)
             target_len = tf.constant(0, dtype=tf.int32)
-        context_start = tf.random.uniform(
-            [],
-            minval=0,
-            maxval=valid_count - context_len + 1,
-            dtype=tf.int32,
-        )
         positions = tf.range(tf.shape(row_valid)[0], dtype=tf.int32)
-        context_mask = tf.logical_and(
-            positions >= context_start,
-            positions < context_start + context_len,
-        )
-        context_mask = tf.logical_and(context_mask, row_valid)
+        if strategy == "contiguous":
+            context_start = tf.random.uniform(
+                [],
+                minval=0,
+                maxval=valid_count - context_len + 1,
+                dtype=tf.int32,
+            )
+            context_mask = tf.logical_and(
+                positions >= context_start,
+                positions < context_start + context_len,
+            )
+            context_mask = tf.logical_and(context_mask, row_valid)
+        else:
+            context_mask = _sample_ragged_block_mask_1d_tf(
+                row_valid,
+                masked_fraction=tf.cast(context_len, tf.float32)
+                / tf.cast(valid_count, tf.float32),
+                lengths=mask_lengths,
+                round_from=mask_round_from,
+            )
         if num_targets == 0:
             return context_mask, tf.zeros([0, tf.shape(row_valid)[0]], dtype=tf.bool)
 
-        available_for_targets = valid_count - context_len
-        target_starts = tf.random.uniform(
-            [num_targets],
-            minval=0,
-            maxval=available_for_targets - target_len + 1,
-            dtype=tf.int32,
-        )
-        compressed_positions = tf.where(
-            positions < context_start,
-            positions,
-            positions - context_len,
-        )
         valid_target_positions = tf.logical_and(row_valid, ~context_mask)
-        target_masks = tf.logical_and(
-            compressed_positions[tf.newaxis, :] >= target_starts[:, tf.newaxis],
-            compressed_positions[tf.newaxis, :]
-            < (target_starts + target_len)[:, tf.newaxis],
-        )
-        target_masks = tf.logical_and(
-            target_masks, valid_target_positions[tf.newaxis, :]
-        )
+        if strategy == "contiguous":
+            available_for_targets = valid_count - context_len
+            target_starts = tf.random.uniform(
+                [num_targets],
+                minval=0,
+                maxval=available_for_targets - target_len + 1,
+                dtype=tf.int32,
+            )
+            compressed_positions = tf.where(
+                positions < context_start,
+                positions,
+                positions - context_len,
+            )
+            target_masks = tf.logical_and(
+                compressed_positions[tf.newaxis, :] >= target_starts[:, tf.newaxis],
+                compressed_positions[tf.newaxis, :]
+                < (target_starts + target_len)[:, tf.newaxis],
+            )
+            target_masks = tf.logical_and(
+                target_masks, valid_target_positions[tf.newaxis, :]
+            )
+        else:
+            available_for_targets = tf.reduce_sum(
+                tf.cast(valid_target_positions, tf.int32)
+            )
+            target_fraction_on_available = tf.where(
+                available_for_targets > 0,
+                tf.cast(target_len, tf.float32)
+                / tf.cast(available_for_targets, tf.float32),
+                0.0,
+            )
+            target_masks = tf.map_fn(
+                lambda _: _sample_ragged_block_mask_1d_tf(
+                    valid_target_positions,
+                    masked_fraction=target_fraction_on_available,
+                    lengths=mask_lengths,
+                    round_from=mask_round_from,
+                ),
+                tf.range(num_targets),
+                fn_output_signature=tf.TensorSpec(
+                    shape=(num_peaks,), dtype=tf.bool
+                ),
+            )
         return context_mask, target_masks
 
     return tf.map_fn(
@@ -126,6 +226,9 @@ def _augment_block_jepa_batch_tf(
     context_fraction: float,
     target_fraction: float,
     block_min_len: int,
+    mask_strategy: str,
+    mask_lengths: tuple[int, ...],
+    mask_round_from: int,
     mz_jitter_std: float,
     intensity_jitter_std: float,
 ) -> Callable[[dict], dict]:
@@ -166,6 +269,9 @@ def _augment_block_jepa_batch_tf(
             context_fraction=context_fraction,
             target_fraction=target_fraction,
             block_min_len=block_min_len,
+            mask_strategy=mask_strategy,
+            mask_lengths=mask_lengths,
+            mask_round_from=mask_round_from,
         )
         out = dict(batch)
         out["peak_mz"] = peak_mz
@@ -322,6 +428,9 @@ def _build_dataset(
     jepa_context_fraction: float = 0.5,
     jepa_target_fraction: float = 0.25,
     jepa_block_min_len: int = 1,
+    jepa_mask_strategy: str = _DEFAULT_JEPA_MASK_STRATEGY,
+    jepa_mask_lengths: tuple[int, ...] = _DEFAULT_JEPA_MASK_LENGTHS,
+    jepa_mask_round_from: int = len(_DEFAULT_JEPA_MASK_LENGTHS),
     mz_jitter_std: float = 0.0001,
     intensity_jitter_std: float = 0.001,
     peak_ordering: str = "intensity",
@@ -352,6 +461,9 @@ def _build_dataset(
                 context_fraction=jepa_context_fraction,
                 target_fraction=jepa_target_fraction,
                 block_min_len=jepa_block_min_len,
+                mask_strategy=jepa_mask_strategy,
+                mask_lengths=jepa_mask_lengths,
+                mask_round_from=jepa_mask_round_from,
                 mz_jitter_std=mz_jitter_std,
                 intensity_jitter_std=intensity_jitter_std,
             ),
@@ -445,6 +557,16 @@ class TfLightningDataModule:
         self.jepa_context_fraction = float(config.get("jepa_context_fraction", 0.5))
         self.jepa_target_fraction = float(config.get("jepa_target_fraction", 0.25))
         self.jepa_block_min_len = int(config.get("jepa_block_min_len", 1))
+        self.jepa_mask_strategy = str(
+            config.get("jepa_mask_strategy", _DEFAULT_JEPA_MASK_STRATEGY)
+        ).lower()
+        self.jepa_mask_lengths = tuple(
+            int(length)
+            for length in config.get("jepa_mask_lengths", _DEFAULT_JEPA_MASK_LENGTHS)
+        )
+        self.jepa_mask_round_from = int(
+            config.get("jepa_mask_round_from", len(self.jepa_mask_lengths))
+        )
         self.mz_jitter_std = float(
             config.get(
                 "augmentation_mz_jitter_std",
@@ -524,6 +646,9 @@ class TfLightningDataModule:
             jepa_context_fraction=self.jepa_context_fraction,
             jepa_target_fraction=self.jepa_target_fraction,
             jepa_block_min_len=self.jepa_block_min_len,
+            jepa_mask_strategy=self.jepa_mask_strategy,
+            jepa_mask_lengths=self.jepa_mask_lengths,
+            jepa_mask_round_from=self.jepa_mask_round_from,
             mz_jitter_std=self.mz_jitter_std,
             intensity_jitter_std=self.intensity_jitter_std,
             peak_ordering=self.peak_ordering,
