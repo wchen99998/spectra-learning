@@ -1,3 +1,4 @@
+import json
 import sys
 import tempfile
 import unittest
@@ -285,6 +286,39 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             self.assertIn("peak_mz", batch)
             download_mock.assert_not_called()
 
+    def test_datamodule_replaces_legacy_gems_cache_with_native_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_hdf5 = tmp_path / "GeMS_A.hdf5"
+            _write_fake_gems_hdf5(source_hdf5)
+            cfg = self._make_config(tmp_path)
+
+            artifact_dir = Path(cfg.tfrecord_dir) / "gems"
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            (artifact_dir / "metadata.json").write_text(
+                json.dumps({"gems_metadata_version": 1})
+            )
+
+            def fake_snapshot_download(*, local_dir, **kwargs):
+                self._build_native_artifact(
+                    source_hdf5=source_hdf5,
+                    output_dir=Path(local_dir),
+                    cfg=cfg,
+                )
+                return str(local_dir)
+
+            with mock.patch.object(
+                input_pipeline,
+                "snapshot_download",
+                side_effect=fake_snapshot_download,
+            ) as download_mock:
+                datamodule = input_pipeline.TfLightningDataModule(cfg, seed=42)
+                batch = next(iter(datamodule.train_loader_for_epoch(0)))
+
+            self.assertEqual(datamodule.info["train_size"], 2)
+            self.assertIn("peak_mz", batch)
+            download_mock.assert_called_once()
+
     def test_native_loader_respects_persistent_workers_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -349,6 +383,68 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             self.assertIn("peak_mz", batch1)
             self.assertIn("context_mask", batch1)
             self.assertEqual(tuple(batch1["peak_mz"].shape), (1, 64))
+
+    def test_train_loader_shuffles_without_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cfg = self._make_config(tmp_path)
+            cfg.batch_size = 1
+            cfg.dataloader_num_workers = 0
+
+            artifact_dir = Path(cfg.tfrecord_dir) / "gems"
+            train_entries = _write_fake_native_shards(
+                artifact_dir / "train",
+                [5, 4],
+                num_peaks=int(cfg.num_peaks),
+            )
+            val_entries = _write_fake_native_shards(
+                artifact_dir / "validation",
+                [3],
+                num_peaks=int(cfg.num_peaks),
+            )
+            metadata = {
+                "gems_native_metadata_version": GEMS_NATIVE_METADATA_VERSION,
+                "num_peaks_input": 128,
+                "num_peaks": int(cfg.num_peaks),
+                "peak_ordering": str(cfg.peak_ordering),
+                "min_peak_intensity": float(cfg.min_peak_intensity),
+                "max_precursor_mz": float(cfg.max_precursor_mz),
+                "train_shards": [Path(entry["dir"]).name for entry in train_entries],
+                "train_lengths": [int(entry["length"]) for entry in train_entries],
+                "validation_shards": [
+                    Path(entry["dir"]).name for entry in val_entries
+                ],
+                "validation_lengths": [int(entry["length"]) for entry in val_entries],
+                "train_size": 9,
+                "validation_size": 3,
+                "validation_fraction": 0.25,
+                "split_seed": 42,
+                "num_shards": len(train_entries),
+                "source_hdf5_path": "unit-test",
+                "source_url": None,
+            }
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            (artifact_dir / "metadata.json").write_text(json.dumps(metadata))
+
+            datamodule = input_pipeline.TfLightningDataModule(cfg, seed=42)
+            train_dataset = datamodule._get_dataset("train")
+            expected_ids = sorted(
+                float(train_dataset[idx]["precursor_mz"])
+                for idx in range(len(train_dataset))
+            )
+            epoch0_ids = [
+                float(batch["precursor_mz"][0])
+                for batch in datamodule.train_loader_for_epoch(0)
+            ]
+            epoch1_ids = [
+                float(batch["precursor_mz"][0])
+                for batch in datamodule.train_loader_for_epoch(1)
+            ]
+
+        self.assertEqual(sorted(epoch0_ids), expected_ids)
+        self.assertEqual(sorted(epoch1_ids), expected_ids)
+        self.assertEqual(len(set(epoch0_ids)), len(expected_ids))
+        self.assertEqual(len(set(epoch1_ids)), len(expected_ids))
 
     def test_memmap_loader_multi_worker_covers_each_sample_once(self):
         with tempfile.TemporaryDirectory() as tmp:

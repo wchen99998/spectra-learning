@@ -1,6 +1,7 @@
-import os
 import logging
 import math
+import os
+import shutil
 from pathlib import Path
 from typing import Any, Callable
 
@@ -11,7 +12,7 @@ import tensorflow as tf
 import torch
 from huggingface_hub import snapshot_download
 from ml_collections import config_dict
-from torch.utils.data import DataLoader, Dataset, IterableDataset, RandomSampler
+from torch.utils.data import DataLoader, Dataset, IterableDataset
 from utils.gems_native import (
     load_gems_native_metadata,
     validate_gems_native_artifact,
@@ -733,7 +734,13 @@ class TfLightningDataModule:
         self.num_peaks_output = int(config.get("num_peaks", _NUM_PEAKS_OUTPUT))
 
         metadata_path = self.gems_dir / _METADATA_FILENAME
-        if not metadata_path.exists():
+        should_download = True
+        if metadata_path.exists():
+            existing_metadata = load_gems_native_metadata(self.gems_dir)
+            should_download = "gems_native_metadata_version" not in existing_metadata
+            if should_download:
+                shutil.rmtree(self.gems_dir)
+        if should_download:
             logger.info(
                 "Downloading GeMS native artifact from %s@%s",
                 self.gems_native_repo_id,
@@ -796,9 +803,6 @@ class TfLightningDataModule:
             self.train_steps = train_size // self.batch_size
         else:
             self.train_steps = math.ceil(train_size / self.batch_size)
-        self.train_num_samples = (
-            self.train_steps * self.batch_size if self.drop_remainder else train_size
-        )
         default_pin = torch.cuda.is_available()
         self.pin_memory = bool(config.get("dataloader_pin_memory", default_pin))
         self.dataloader_num_workers = int(config.get("dataloader_num_workers", 1))
@@ -830,7 +834,6 @@ class TfLightningDataModule:
         shuffle: bool,
         seed: int,
         drop_last: bool,
-        num_samples: int | None = None,
     ) -> DataLoader:
         generator = torch.Generator()
         generator.manual_seed(int(seed))
@@ -852,15 +855,7 @@ class TfLightningDataModule:
             ),
             "generator": generator,
         }
-        if shuffle:
-            loader_kwargs["sampler"] = RandomSampler(
-                dataset,
-                replacement=True,
-                num_samples=int(num_samples or len(dataset)),
-                generator=generator,
-            )
-        else:
-            loader_kwargs["shuffle"] = False
+        loader_kwargs["shuffle"] = bool(shuffle)
         if self.dataloader_num_workers > 0:
             loader_kwargs["persistent_workers"] = self.dataloader_persistent_workers
             loader_kwargs["prefetch_factor"] = self.dataloader_prefetch_factor
@@ -891,5 +886,4 @@ class TfLightningDataModule:
             shuffle=True,
             seed=self.seed + int(epoch),
             drop_last=self.drop_remainder,
-            num_samples=self.train_num_samples,
         )
