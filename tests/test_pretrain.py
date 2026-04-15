@@ -166,6 +166,65 @@ class BlockJEPATests(unittest.TestCase):
         )
         self.assertFalse(teacher_targets.requires_grad)
 
+    def test_per_block_teacher_targets_match_looped_teacher_forwards(self):
+        model = self._build_model(
+            masked_token_loss_weight=1.0,
+            use_ema_teacher_target=True,
+            jepa_teacher_targets_per_block=True,
+            jepa_target_layers=[1],
+        )
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+
+        batched_targets = model._compute_jepa_teacher_targets_per_block(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            batch["peak_valid_mask"],
+            batch["context_mask"],
+            batch["target_masks"],
+        )
+
+        teacher = model._teacher_encoder_module()
+        expected_targets = []
+        for target_idx in range(model.jepa_num_target_blocks):
+            teacher_visible = batch["context_mask"] | batch["target_masks"][:, target_idx]
+            target_layers = teacher.forward_peak_block_outputs(
+                batch["peak_mz"],
+                batch["peak_intensity"],
+                valid_mask=batch["peak_valid_mask"],
+                visible_mask=teacher_visible,
+                pack_n=model._predictor_pack_n,
+                prefix_pack=False,
+                block_indices=model.jepa_target_layers,
+            )
+            expected_targets.append(torch.cat(target_layers, dim=-1))
+        expected_targets = torch.stack(expected_targets, dim=1)
+
+        torch.testing.assert_close(batched_targets, expected_targets)
+
+    def test_forward_augmented_uses_per_block_teacher_targets_when_enabled(self):
+        model = self._build_model(
+            masked_token_loss_weight=1.0,
+            use_ema_teacher_target=True,
+            jepa_teacher_targets_per_block=True,
+        )
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+        teacher_targets = model._compute_jepa_teacher_targets_per_block(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            batch["peak_valid_mask"],
+            batch["context_mask"],
+            batch["target_masks"],
+        )
+
+        expected = model.forward_augmented(batch, teacher_targets=teacher_targets)
+        actual = model.forward_augmented(batch)
+
+        for key in ("loss", "local_global_loss", "jepa_term"):
+            self.assertTrue(
+                torch.allclose(actual[key], expected[key], atol=1e-6, rtol=1e-6),
+                key,
+            )
+
     def test_encode_output_shape(self):
         model = self._build_model()
         batch = {

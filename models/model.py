@@ -508,6 +508,7 @@ class PeakSetSIGReg(nn.Module):
         masked_token_loss_type: str = "l1",
         jepa_target_normalization: str = "none",
         jepa_target_layers: list[int] | tuple[int, ...] | None = None,
+        jepa_teacher_targets_per_block: bool = False,
         representation_regularizer: str = "none",
         masked_latent_predictor_num_layers: int = 2,
         masked_latent_predictor_num_heads: int = 8,
@@ -596,6 +597,7 @@ class PeakSetSIGReg(nn.Module):
         self.masked_token_loss_weight = float(masked_token_loss_weight)
         self.masked_token_loss_type = str(masked_token_loss_type).lower()
         self.jepa_target_normalization = str(jepa_target_normalization).lower()
+        self.jepa_teacher_targets_per_block = bool(jepa_teacher_targets_per_block)
         if self.jepa_target_normalization not in ("none", "zscore"):
             raise ValueError(
                 "jepa_target_normalization must be one of ('none', 'zscore')"
@@ -834,7 +836,14 @@ class PeakSetSIGReg(nn.Module):
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
         peak_valid_mask: torch.Tensor,
+        visible_mask: torch.Tensor | None = None,
+        pack_n: int | None = None,
+        prefix_pack: bool = True,
     ) -> torch.Tensor:
+        if visible_mask is None:
+            visible_mask = peak_valid_mask
+        if pack_n is None:
+            pack_n = self._full_pack_n
         # Autocast with the same dtype as the caller (inherits from outer
         # autocast context when called inside forward_augmented; falls back
         # to bf16 when called standalone, e.g. from evaluation code).
@@ -846,12 +855,32 @@ class PeakSetSIGReg(nn.Module):
                 peak_mz,
                 peak_intensity,
                 valid_mask=peak_valid_mask,
-                visible_mask=peak_valid_mask,
-                pack_n=self._full_pack_n,
-                prefix_pack=True,
+                visible_mask=visible_mask,
+                pack_n=pack_n,
+                prefix_pack=prefix_pack,
                 block_indices=self.jepa_target_layers,
             )
             return torch.cat(teacher_peak_outputs, dim=-1)
+
+    def _compute_jepa_teacher_targets_per_block(
+        self,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+        peak_valid_mask: torch.Tensor,
+        context_mask: torch.Tensor,
+        target_masks: torch.Tensor,
+    ) -> torch.Tensor:
+        B, K, N = target_masks.shape
+        teacher_visible = context_mask.unsqueeze(1) | target_masks
+        flat_teacher_targets = self._compute_jepa_teacher_targets(
+            peak_mz.repeat_interleave(K, dim=0),
+            peak_intensity.repeat_interleave(K, dim=0),
+            peak_valid_mask.repeat_interleave(K, dim=0),
+            visible_mask=teacher_visible.reshape(B * K, N),
+            pack_n=self._predictor_pack_n,
+            prefix_pack=False,
+        )
+        return flat_teacher_targets.reshape(B, K, N, -1)
 
     def pool(
         self,
@@ -935,6 +964,14 @@ class PeakSetSIGReg(nn.Module):
         # Teacher sees full valid spectrum; loss mask selects target positions per block
         if teacher_targets is not None:
             target_token_target = teacher_targets
+        elif self.jepa_teacher_targets_per_block:
+            target_token_target = self._compute_jepa_teacher_targets_per_block(
+                peak_mz,
+                peak_intensity,
+                peak_valid_mask,
+                context_mask,
+                target_masks,
+            )
         else:
             teacher_targets_full = self._compute_jepa_teacher_targets(
                 peak_mz,

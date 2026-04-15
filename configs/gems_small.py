@@ -18,10 +18,10 @@ def get_config() -> config_dict.ConfigDict:
 
     # Model
     cfg.num_peaks = 64
-    cfg.model_dim = 768
-    cfg.encoder_num_layers = 12
-    cfg.encoder_num_heads = 12
-    cfg.encoder_num_kv_heads = 12
+    cfg.model_dim = 256
+    cfg.encoder_num_layers = 8
+    cfg.encoder_num_heads = 8
+    cfg.encoder_num_kv_heads = 8
     cfg.encoder_num_register_tokens = 4
     cfg.encoder_apply_final_norm = False
     cfg.encoder_qk_norm = False
@@ -33,7 +33,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_fourier_sigma = 10.0
     cfg.encoder_fourier_trainable = True
     cfg.attention_mlp_multiple = 4.0
-    cfg.feature_mlp_hidden_dim = 1024
+    cfg.feature_mlp_hidden_dim = 512
     cfg.sigreg_num_slices = 256
     cfg.sigreg_lambda = 0.02
     cfg.jepa_num_target_blocks = 2
@@ -47,19 +47,19 @@ def get_config() -> config_dict.ConfigDict:
     # Predictor
     cfg.predictor_num_register_tokens = 4
     cfg.predictor_apply_final_norm = False
-    cfg.masked_latent_predictor_num_layers = 10
-    cfg.masked_latent_predictor_num_heads = 16
+    cfg.masked_latent_predictor_num_layers = 4
+    cfg.masked_latent_predictor_num_heads = 8
     cfg.temporal_predictor_num_layers = 0
-    cfg.predictor_dim = 384
+    cfg.predictor_dim = 128
     cfg.predictor_dropout = 0.1
 
     # Training
     cfg.num_epochs = 20
-    cfg.learning_rate = 5e-4
+    cfg.learning_rate = 2e-4
     cfg.warmup_steps = 20_000
     cfg.min_learning_rate = 3e-5
     cfg.b2 = 0.95
-    cfg.weight_decay = 0.05
+    cfg.weight_decay = 0.1
     cfg.optimizer = "muon"
     cfg.device_prefetch_size = 8
     cfg.optimizer_capturable = True
@@ -73,13 +73,14 @@ def get_config() -> config_dict.ConfigDict:
 
     cfg.masked_token_loss_weight = 1.0
     cfg.masked_token_loss_type = "l2"
-    cfg.jepa_target_normalization = "none"
-    cfg.jepa_target_layers = [1, 4, 8, 12]
+    cfg.jepa_target_normalization = "zscore"
+    cfg.jepa_target_layers = [1, 3, 5, 8]
+    cfg.jepa_teacher_targets_per_block = False
     cfg.use_ema_teacher_target = True
-    cfg.teacher_ema_decay = 0.995
-    cfg.teacher_ema_decay_start = 0.99
-    cfg.teacher_ema_decay_warmup_steps = 500_000
-    cfg.teacher_ema_update_every = 2
+    cfg.teacher_ema_decay = 0.999
+    cfg.teacher_ema_decay_start = 0.996
+    cfg.teacher_ema_decay_warmup_steps = 5_000
+    cfg.teacher_ema_update_every = 5
     cfg.grad_clip_norm = 1.0
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "reduce-overhead"
