@@ -462,6 +462,8 @@ def ensure_nist20_probe_prepared(
     max_precursor_mz: float,
     data_dir: Path,
     num_shards: int = _DEFAULT_MASSSPEC_NUM_SHARDS,
+    hdf5_repo_id: str = NIST20_HF_REPO,
+    hdf5_filename: str = NIST20_HF_FILENAME,
 ) -> dict[str, Any]:
     cached = _probe_metadata_valid(
         output_dir, NIST20_METADATA_VERSION, max_precursor_mz
@@ -470,10 +472,14 @@ def ensure_nist20_probe_prepared(
         logger.info("Found existing NIST20 probe TFRecords at %s", output_dir)
         return cached
     output_dir.mkdir(parents=True, exist_ok=True)
-    hdf5_path = data_dir / NIST20_HF_FILENAME
+    hdf5_path = data_dir / hdf5_filename
     if not hdf5_path.exists():
-        logger.info("NIST20 HDF5 not found locally, downloading from HuggingFace...")
-        hdf5_path = _download_hf_file(NIST20_HF_REPO, NIST20_HF_FILENAME, data_dir)
+        logger.info(
+            "NIST20 HDF5 not found locally, downloading %s from %s ...",
+            hdf5_filename,
+            hdf5_repo_id,
+        )
+        hdf5_path = _download_hf_file(hdf5_repo_id, hdf5_filename, data_dir)
     logger.info("Loading NIST20+MoNA HDF5 from %s ...", hdf5_path)
     metadata = _filter_encode_and_write(
         **_load_nist20_hdf5(hdf5_path),
@@ -664,6 +670,12 @@ class MassSpecProbeData(NamedTuple):
                 output_dir,
                 max_precursor_mz=max_precursor_mz,
                 data_dir=tfrecord_base,
+                hdf5_repo_id=str(
+                    config.get("nist20_hdf5_repo_id", NIST20_HF_REPO)
+                ),
+                hdf5_filename=str(
+                    config.get("nist20_hdf5_filename", NIST20_HF_FILENAME)
+                ),
             )
         elif probe_dataset == "mona_a":
             output_dir = tfrecord_base / "mona_a_probe"
