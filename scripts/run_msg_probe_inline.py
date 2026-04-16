@@ -19,10 +19,9 @@ def make_config() -> config_dict.ConfigDict:
     cfg.seed = 42
 
     # Data
-    cfg.tfrecord_dir = "data/gems_peaklist_tfrecord_alpha"
+    cfg.artifact_dir = "data/gems_artifacts_alpha"
     cfg.batch_size = 256
     cfg.shuffle_buffer = 10_000
-    cfg.tfrecord_buffer_size = 250_000
     cfg.max_precursor_mz = 1000.0
     cfg.min_peak_intensity = 0.001
     cfg.peak_ordering = "mz"

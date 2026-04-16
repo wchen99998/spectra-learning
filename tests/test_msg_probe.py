@@ -1,10 +1,9 @@
 import unittest
 
 import numpy as np
-import tensorflow as tf
 import torch
 
-from input_pipeline import _prepend_precursor_token_tf
+from input_pipeline import _prepend_precursor_token_torch
 from utils.msg_probe import (
     MsgLinearProbe,
     MsgProbeSplitTargets,
@@ -31,6 +30,9 @@ def _maccs(rows: list[list[int]]) -> np.ndarray:
 class _DummyDataset:
     def __init__(self, batches):
         self._batches = batches
+
+    def __iter__(self):
+        return iter(self._batches)
 
     def as_numpy_iterator(self):
         return iter(self._batches)
@@ -533,20 +535,20 @@ class ProbeStepCountTests(unittest.TestCase):
         )
 
 
-class ProbePrecursorTokenTfTests(unittest.TestCase):
+class ProbePrecursorTokenTests(unittest.TestCase):
     def test_prepend_shapes_and_values(self):
         B, N = 3, 5
         batch = {
-            "peak_mz": tf.constant(np.random.rand(B, N).astype(np.float32)),
-            "peak_intensity": tf.constant(np.random.rand(B, N).astype(np.float32)),
-            "peak_valid_mask": tf.constant(np.ones((B, N), dtype=bool)),
-            "precursor_mz": tf.constant([0.1, 0.2, 0.3], dtype=tf.float32),
-            "fingerprint": tf.constant(np.zeros((B, 4), dtype=np.int32)),
-            "probe_valid_mol": tf.constant([True, False, True]),
-            "probe_maccs": tf.constant(np.zeros((B, 4), dtype=np.int32)),
+            "peak_mz": torch.tensor(np.random.rand(B, N).astype(np.float32)),
+            "peak_intensity": torch.tensor(np.random.rand(B, N).astype(np.float32)),
+            "peak_valid_mask": torch.tensor(np.ones((B, N), dtype=bool)),
+            "precursor_mz": torch.tensor([0.1, 0.2, 0.3], dtype=torch.float32),
+            "fingerprint": torch.tensor(np.zeros((B, 4), dtype=np.int32)),
+            "probe_valid_mol": torch.tensor([True, False, True]),
+            "probe_maccs": torch.tensor(np.zeros((B, 4), dtype=np.int32)),
         }
 
-        out = _prepend_precursor_token_tf(batch)
+        out = _prepend_precursor_token_torch(batch)
 
         self.assertEqual(out["peak_mz"].shape, (B, N + 1))
         self.assertEqual(out["peak_intensity"].shape, (B, N + 1))

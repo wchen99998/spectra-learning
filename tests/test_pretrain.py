@@ -636,24 +636,23 @@ class PrecursorTokenTests(unittest.TestCase):
         self.assertTrue((result["peak_intensity"][:, 0] == -1.0).all())
 
 
-class TfPrependPrecursorTokenTests(unittest.TestCase):
-    """Test the TF-side _prepend_precursor_token_tf function."""
+class PrependPrecursorTokenTests(unittest.TestCase):
+    """Test the torch-side _prepend_precursor_token_torch function."""
 
     def test_shapes_and_values(self):
-        import tensorflow as tf
-        from input_pipeline import _prepend_precursor_token_tf
+        from input_pipeline import _prepend_precursor_token_torch
 
         B, N, K = 4, 8, 2
         batch = {
-            "peak_mz": tf.random.uniform([B, N]),
-            "peak_intensity": tf.random.uniform([B, N]),
-            "peak_valid_mask": tf.ones([B, N], dtype=tf.bool),
-            "precursor_mz": tf.random.uniform([B]),
-            "context_mask": tf.ones([B, N], dtype=tf.bool),
-            "target_masks": tf.zeros([B, K, N], dtype=tf.bool),
-            "rt": tf.zeros([B]),
+            "peak_mz": torch.rand(B, N),
+            "peak_intensity": torch.rand(B, N),
+            "peak_valid_mask": torch.ones(B, N, dtype=torch.bool),
+            "precursor_mz": torch.rand(B),
+            "context_mask": torch.ones(B, N, dtype=torch.bool),
+            "target_masks": torch.zeros(B, K, N, dtype=torch.bool),
+            "rt": torch.zeros(B),
         }
-        out = _prepend_precursor_token_tf(batch)
+        out = _prepend_precursor_token_torch(batch)
 
         # precursor_mz should be removed
         self.assertNotIn("precursor_mz", out)
@@ -682,17 +681,16 @@ class TfPrependPrecursorTokenTests(unittest.TestCase):
 
     def test_without_masks(self):
         """Works on raw (pre-augmentation) batches without context_mask/target_masks."""
-        import tensorflow as tf
-        from input_pipeline import _prepend_precursor_token_tf
+        from input_pipeline import _prepend_precursor_token_torch
 
         B, N = 3, 5
         batch = {
-            "peak_mz": tf.random.uniform([B, N]),
-            "peak_intensity": tf.random.uniform([B, N]),
-            "peak_valid_mask": tf.ones([B, N], dtype=tf.bool),
-            "precursor_mz": tf.random.uniform([B]),
+            "peak_mz": torch.rand(B, N),
+            "peak_intensity": torch.rand(B, N),
+            "peak_valid_mask": torch.ones(B, N, dtype=torch.bool),
+            "precursor_mz": torch.rand(B),
         }
-        out = _prepend_precursor_token_tf(batch)
+        out = _prepend_precursor_token_torch(batch)
 
         self.assertNotIn("precursor_mz", out)
         self.assertEqual(out["peak_mz"].shape, (B, N + 1))

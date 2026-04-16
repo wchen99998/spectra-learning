@@ -14,17 +14,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
-os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
-
 import numpy as np
 import torch
 
-import tensorflow as tf
-
-tf.config.set_visible_devices([], "GPU")
-
-from input_pipeline import TfLightningDataModule
+from input_pipeline import GemsNativeDataModule
 from train import _BatchPrefetcher, _train_step_impl
 from utils.training import build_model_from_config, load_config
 
@@ -299,7 +292,7 @@ def main():
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
-    datamodule = TfLightningDataModule(config, seed=seed)
+    datamodule = GemsNativeDataModule(config, seed=seed)
     config.num_peaks = datamodule.info["num_peaks"]
     steps_per_epoch = datamodule.train_steps
     total_steps = max(1, int(float(config.num_epochs) * steps_per_epoch))

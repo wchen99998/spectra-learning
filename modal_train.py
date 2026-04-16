@@ -14,6 +14,11 @@ Usage:
     modal run modal_train.py --sweep sweep_10m_noema_sigreg_high_lambda
     modal run modal_train.py --sweep sweep_10m_ema_stopgrad
     modal run modal_train.py --sweep sweep_10m_ema_stopgrad_warmup_update
+    modal run modal_train.py --sweep sweep_10m_ema_masking
+    modal run modal_train.py --sweep sweep_10m_ema_teacher_targets_per_block
+    modal run modal_train.py --sweep sweep_10m_ema_deep_supervision
+    modal run modal_train.py --sweep sweep_10m_ema_batch_size_flops_matched
+    modal run modal_train.py --config configs/gems_small.py --sweep sweep_gems_small_peak_filtering
 
 Setup:
     1. modal setup
@@ -49,7 +54,6 @@ base_image = (
         index_url="https://download.pytorch.org/whl/cu130",
     )
     .uv_pip_install(
-        "tensorflow-cpu==2.19.0",
         "lightning==2.5.5",
         "ml-collections>=1.1.0",
         "rdkit>=2025.3.3",
@@ -64,12 +68,6 @@ base_image = (
     )
     .run_commands(
         "pip install --no-build-isolation gram-newton-schulz@git+https://github.com/Dao-AILab/gram-newton-schulz"
-    )
-    .env(
-        {
-            "TF_CPP_MIN_LOG_LEVEL": "3",
-            "TF_ENABLE_ONEDNN_OPTS": "0",
-        }
     )
 )
 
@@ -248,6 +246,179 @@ EMA_STOPGRAD_FIXED = {
 }
 EMA_STOPGRAD_WARMUP_STEPS = [5_000, 15_000]
 EMA_STOPGRAD_UPDATE_EVERY_VALUES = [1, 2, 5, 10, 20]
+EMA_STOPGRAD_BEST_SAME_STEP = {
+    **EMA_STOPGRAD_FIXED,
+    "teacher_ema_decay_warmup_steps": 5_000,
+    "teacher_ema_update_every": 5,
+}
+JEPA_MASKING_SWEEP_TAG = "emask"
+JEPA_TEACHER_TARGETS_SWEEP_TAG = "emasktgt"
+JEPA_DEEP_SUPERVISION_SWEEP_TAG = "emadsup"
+BATCH_SIZE_SWEEP_TAG = "bsflops"
+PEAK_FILTER_SWEEP_TAG = "peakfilt"
+JEPA_MASKING_RECIPES = [
+    (
+        "b2-c35-t20",
+        {
+            "jepa_num_target_blocks": 2,
+            "jepa_context_fraction": 0.35,
+            "jepa_target_fraction": 0.20,
+        },
+    ),
+    (
+        "b2-c25-t20",
+        {
+            "jepa_num_target_blocks": 2,
+            "jepa_context_fraction": 0.25,
+            "jepa_target_fraction": 0.20,
+        },
+    ),
+    (
+        "b2-c45-t20",
+        {
+            "jepa_num_target_blocks": 2,
+            "jepa_context_fraction": 0.45,
+            "jepa_target_fraction": 0.20,
+        },
+    ),
+    (
+        "b2-c50-t20",
+        {
+            "jepa_num_target_blocks": 2,
+            "jepa_context_fraction": 0.50,
+            "jepa_target_fraction": 0.20,
+        },
+    ),
+    (
+        "b2-c35-t10",
+        {
+            "jepa_num_target_blocks": 2,
+            "jepa_context_fraction": 0.35,
+            "jepa_target_fraction": 0.10,
+        },
+    ),
+    (
+        "b2-c35-t15",
+        {
+            "jepa_num_target_blocks": 2,
+            "jepa_context_fraction": 0.35,
+            "jepa_target_fraction": 0.15,
+        },
+    ),
+    (
+        "b2-c35-t25",
+        {
+            "jepa_num_target_blocks": 2,
+            "jepa_context_fraction": 0.35,
+            "jepa_target_fraction": 0.25,
+        },
+    ),
+    (
+        "b2-c35-t30",
+        {
+            "jepa_num_target_blocks": 2,
+            "jepa_context_fraction": 0.35,
+            "jepa_target_fraction": 0.30,
+        },
+    ),
+    (
+        "b1-c35-t20",
+        {
+            "jepa_num_target_blocks": 1,
+            "jepa_context_fraction": 0.35,
+            "jepa_target_fraction": 0.20,
+        },
+    ),
+    (
+        "b4-c35-t20",
+        {
+            "jepa_num_target_blocks": 4,
+            "jepa_context_fraction": 0.35,
+            "jepa_target_fraction": 0.20,
+        },
+    ),
+]
+JEPA_TEACHER_TARGETS_RECIPES = [
+    (
+        "full",
+        {
+            "jepa_teacher_targets_per_block": False,
+        },
+    ),
+    (
+        "perblk",
+        {
+            "jepa_teacher_targets_per_block": True,
+        },
+    ),
+]
+JEPA_DEEP_SUPERVISION_RECIPES = [
+    (
+        "spread4-z",
+        {
+            "jepa_target_layers": [1, 3, 5, 8],
+            "jepa_target_normalization": "zscore",
+        },
+    ),
+    (
+        "spread4-none",
+        {
+            "jepa_target_layers": [1, 3, 5, 8],
+            "jepa_target_normalization": "none",
+        },
+    ),
+    (
+        "deep2-z",
+        {
+            "jepa_target_layers": [5, 8],
+            "jepa_target_normalization": "zscore",
+        },
+    ),
+    (
+        "deep2-none",
+        {
+            "jepa_target_layers": [5, 8],
+            "jepa_target_normalization": "none",
+        },
+    ),
+]
+BATCH_SIZE_FLOPS_MATCHED_RECIPES = [
+    (
+        "bs256",
+        {
+            "batch_size": 256,
+        },
+    ),
+    (
+        "bs2048",
+        {
+            "batch_size": 2048,
+        },
+    ),
+]
+PEAK_FILTER_RECIPES = [
+    (
+        "base",
+        {
+            "peak_drop_min_intensity": 1e-4,
+            "precursor_peak_exclusion_window_da": 0.0,
+        },
+    ),
+    (
+        "mindrop1e3",
+        {
+            "peak_drop_min_intensity": 1e-3,
+            "precursor_peak_exclusion_window_da": 0.0,
+        },
+    ),
+    (
+        "mindrop1e3-pre5",
+        {
+            "peak_drop_min_intensity": 1e-3,
+            "precursor_peak_exclusion_window_da": 5.0,
+        },
+    ),
+]
 
 
 SWEEPS: dict[str, list[dict]] = {
@@ -452,6 +623,85 @@ SWEEPS: dict[str, list[dict]] = {
         for warmup_steps in EMA_STOPGRAD_WARMUP_STEPS
         for update_every in EMA_STOPGRAD_UPDATE_EVERY_VALUES
     ],
+    # Fix the winning same-step EMA recipe and sweep only the JEPA masking
+    # pattern around the current GeMS default.
+    "sweep_10m_ema_masking": [
+        {
+            **TEN_M_BEST_SWEEP_OPTIM,
+            **EMA_STOPGRAD_BEST_SAME_STEP,
+            "use_ema_teacher_target": True,
+            "representation_regularizer": "none",
+            "run_name_suffix": f"10m-{JEPA_MASKING_SWEEP_TAG}-{label}",
+            **masking_overrides,
+        }
+        for label, masking_overrides in JEPA_MASKING_RECIPES
+    ],
+    # Fix the best EMA + masking recipe and ablate per-block teacher targets.
+    "sweep_10m_ema_teacher_targets_per_block": [
+        {
+            **TEN_M_BEST_SWEEP_OPTIM,
+            **EMA_STOPGRAD_BEST_SAME_STEP,
+            "use_ema_teacher_target": True,
+            "representation_regularizer": "none",
+            "jepa_num_target_blocks": 2,
+            "jepa_context_fraction": 0.35,
+            "jepa_target_fraction": 0.20,
+            "run_name_suffix": f"10m-{JEPA_TEACHER_TARGETS_SWEEP_TAG}-{label}",
+            **teacher_target_overrides,
+        }
+        for label, teacher_target_overrides in JEPA_TEACHER_TARGETS_RECIPES
+    ],
+    # Fix the current best recipe (EMA + masking + per-block teacher targets)
+    # and ablate the "bootleg deep supervision" target stack.
+    #
+    # This is a clean 2x2:
+    #   - layer stack: current spread 4-layer targets [1,3,5,8] vs deeper 2-layer targets [5,8]
+    #   - target normalization: per-layer zscore vs no normalization
+    "sweep_10m_ema_deep_supervision": [
+        {
+            **TEN_M_BEST_SWEEP_OPTIM,
+            **EMA_STOPGRAD_BEST_SAME_STEP,
+            "use_ema_teacher_target": True,
+            "representation_regularizer": "none",
+            "jepa_num_target_blocks": 2,
+            "jepa_context_fraction": 0.35,
+            "jepa_target_fraction": 0.20,
+            "jepa_teacher_targets_per_block": True,
+            "run_name_suffix": f"10m-{JEPA_DEEP_SUPERVISION_SWEEP_TAG}-{label}",
+            **deep_supervision_overrides,
+        }
+        for label, deep_supervision_overrides in JEPA_DEEP_SUPERVISION_RECIPES
+    ],
+    # Compute-matched batch-size A/B.
+    #
+    # For a fixed model and dataset, keeping num_epochs fixed means each run
+    # sees roughly the same total number of samples, so total training FLOPs
+    # stay roughly matched across batch sizes. Keep probe batch size fixed so
+    # online probe metrics remain directly comparable across runs.
+    "sweep_10m_ema_batch_size_flops_matched": [
+        {
+            **TEN_M_BEST_SWEEP_OPTIM,
+            **EMA_STOPGRAD_BEST_SAME_STEP,
+            "use_ema_teacher_target": True,
+            "representation_regularizer": "none",
+            "jepa_num_target_blocks": 2,
+            "jepa_context_fraction": 0.35,
+            "jepa_target_fraction": 0.20,
+            "jepa_teacher_targets_per_block": True,
+            "msg_probe_batch_size": 256,
+            "run_name_suffix": f"10m-{BATCH_SIZE_SWEEP_TAG}-{label}",
+            **batch_size_overrides,
+        }
+        for label, batch_size_overrides in BATCH_SIZE_FLOPS_MATCHED_RECIPES
+    ],
+    "sweep_gems_small_peak_filtering": [
+        {
+            "msg_probe_batch_size": 256,
+            "run_name_suffix": f"{PEAK_FILTER_SWEEP_TAG}-{label}",
+            **peak_filter_overrides,
+        }
+        for label, peak_filter_overrides in PEAK_FILTER_RECIPES
+    ],
 }
 
 
@@ -476,22 +726,19 @@ def prepare_data(
     os.chdir(PROJECT_ROOT)
     sys.path.insert(0, PROJECT_ROOT)
 
-    import tensorflow as tf
-
-    tf.config.set_visible_devices([], "GPU")
     logging.basicConfig(level=logging.INFO)
 
     from utils.training import load_config
 
     config = load_config(config_path)
     config.update(json.loads(overrides_json))
-    config.tfrecord_dir = str(volume_path / "data" / "gems_peaklist_tfrecord_alpha")
+    config.artifact_dir = str(volume_path / "data" / "gems_artifacts_alpha")
 
-    # 1) Download training data (GeMS TFRecords)
+    # 1) Download training data (GeMS native shards)
     logging.info("Preparing training data...")
-    from input_pipeline import TfLightningDataModule
+    from input_pipeline import GemsNativeDataModule
 
-    datamodule = TfLightningDataModule(config, seed=int(config.seed))
+    datamodule = GemsNativeDataModule(config, seed=int(config.seed))
     logging.info(
         "Training data ready: %d train steps, %d peaks",
         datamodule.train_steps,
@@ -537,9 +784,6 @@ def train(
     os.chdir(PROJECT_ROOT)
     sys.path.insert(0, PROJECT_ROOT)
 
-    import tensorflow as tf
-
-    tf.config.set_visible_devices([], "GPU")
     logging.basicConfig(level=logging.INFO)
 
     from train import train_and_evaluate
@@ -552,7 +796,7 @@ def train(
     config.update(overrides)
 
     # Point data at the persistent volume
-    config.tfrecord_dir = str(volume_path / "data" / "gems_peaklist_tfrecord_alpha")
+    config.artifact_dir = str(volume_path / "data" / "gems_artifacts_alpha")
 
     # Muon NS kernels require SM90+ (H100/B200); disable on older GPUs
     import torch

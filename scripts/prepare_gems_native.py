@@ -34,9 +34,6 @@ def main() -> None:
     parser.add_argument("--hf-repo-id", required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--hf-revision", default="main")
-    parser.add_argument("--num-peaks", type=int, default=64)
-    parser.add_argument("--min-peak-intensity", type=float, default=1e-4)
-    parser.add_argument("--peak-ordering", default="mz")
     parser.add_argument("--max-precursor-mz", type=float, default=1000.0)
     parser.add_argument("--num-shards", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -59,9 +56,6 @@ def main() -> None:
     build_gems_native_artifact(
         hdf5_path=hdf5_path,
         output_dir=artifact_dir,
-        num_peaks=args.num_peaks,
-        min_peak_intensity=args.min_peak_intensity,
-        peak_ordering=args.peak_ordering,
         max_precursor_mz=args.max_precursor_mz,
         num_shards=args.num_shards,
         num_workers=None if args.num_workers <= 0 else args.num_workers,

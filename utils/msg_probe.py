@@ -118,14 +118,16 @@ def iter_massspec_probe(
     if max_samples is not None:
         size = min(size, int(max_samples))
     seen = 0
-    for batch in dataset.as_numpy_iterator():
+    for batch in dataset:
         if seen >= size:
             break
+        if not isinstance(batch["peak_mz"], torch.Tensor):
+            batch = numpy_batch_to_torch(batch)
         take = min(int(batch["peak_mz"].shape[0]), size - seen)
         if take != batch["peak_mz"].shape[0]:
             batch = {key: value[:take] for key, value in batch.items()}
         seen += take
-        yield numpy_batch_to_torch(batch)
+        yield batch
 
 
 def probe_steps_per_epoch(

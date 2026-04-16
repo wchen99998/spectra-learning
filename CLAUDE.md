@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-PyTorch-based deep learning framework for pretraining SIGReg (Strict SIGmoid Regularization) models on continuous mass spectrometry peak sets. The pipeline ingests raw peak lists from GeMS and MassSpecGym datasets, normalizes them into continuous features via a tf.data pipeline, and trains a two-view self-supervised model with MSE invariance + BCS (Batched Characteristic Slicing) regularization losses. During training, a periodic MSG attentive probe evaluates learned representations on molecular property regression and functional-group classification.
+PyTorch-based deep learning framework for pretraining SIGReg models on continuous mass spectrometry peak sets. The pipeline ingests raw peak lists from GeMS and MassSpecGym datasets, preprocesses them into native shard artifacts, and trains a masked latent prediction model with JEPA-style teacher targets plus SIGReg regularization. During training, a periodic MSG linear probe evaluates learned representations on molecular property regression and MACCS fingerprint prediction.
 
 ## Commands
 
@@ -34,33 +34,36 @@ python input_pipeline.py configs/gems_a_dataset.py
 
 ### Training Flow
 
-`train.py:MAELightningModule` orchestrates the full pipeline:
-1. Data flows from tf.data TFRecords through `TfLightningDataModule` (round-robin interleaving GeMS + MassSpecGym datasets)
-2. Two-view augmentation happens in the tf.data pipeline (`_augment_sigreg_batch_tf`), producing `fused_*` tensors that stack view1 (masked+jittered) and view2 (unmasked+jittered) along the batch dimension
-3. The compiled forward pass (`torch.compile` with `max-autotune` + CUDA graphs) runs the fused batch through encoder -> PMA pooling -> projector -> BCS+invariance loss
-4. During training, `run_msg_probe` trains a lightweight multi-task attentive probe on frozen encoder token features
+`train.py:train_and_evaluate` orchestrates the full pipeline:
+1. Data flows from `GemsNativeDataModule`, which loads native GeMS shard artifacts and applies peak preprocessing on the fly.
+2. The training collator produces masked-context JEPA batches with `peak_*`, `context_mask`, and `target_masks`.
+3. The compiled forward pass (`torch.compile` with `reduce-overhead` + CUDA graphs) runs the batch through encoder -> masked latent predictor -> JEPA losses.
+4. During training, `run_msg_probe` trains fixed linear probes on frozen `mean + cls` readouts.
 
 ### Model (PeakSetSIGReg in `models/model.py`)
 
 - **PeakSetEncoder**: raw scalar peak features (`mz`, `intensity`, `log1p(intensity)`) -> MLP embedder -> N non-causal TransformerBlocks -> RMSNorm. Uses mass-aware RoPE on m/z only.
-- **PMA Pooling**: Multihead cross-attention with learned seed queries (`pool_query`) that attend to peak embeddings, producing a fixed-size representation regardless of valid peak count.
-- **Projector**: 3-layer MLP (Linear -> RMSNorm -> SiLU) x2, maps pooled embeddings to lower-dim space for the loss.
-- **BCSLoss** (`models/losses.py`): Projects both views via random slicing directions, tests Gaussianity using Epps-Pulley characteristic function distance. Combined loss = MSE(z1, z2) + lambda * BCS.
+- **Encoder**: raw scalar peak features (`mz`, `intensity`) -> Fourier/MLP embedder -> non-causal Transformer blocks.
+- **Teacher / Predictor**: EMA teacher encoder provides masked-token targets; predictor maps visible context tokens to target-space latents.
+- **SIGReg**: optional regularizer on learned representations.
 
-### Two-View Augmentation (`input_pipeline.py`)
+### Masked Training Batch (`input_pipeline.py`)
 
-The TF implementation in `input_pipeline.py` runs augmentation in the data pipeline for training.
-- **Global view**: Full-spectrum (no masking), jitter on valid peaks
-- **Local views**: Local masking + jitter with original valid/padding layout preserved
+`input_pipeline.py` applies runtime preprocessing to raw 128-peak spectra:
+- precursor m/z filtering
+- minimum intensity filtering
+- optional precursor-window exclusion
+- top-k selection to `num_peaks`
+- final ordering and normalization
+- block mask sampling for context and targets
 
 ### Batch Contract
 
-Training batches contain fused stacked tensors:
-- `fused_mz`, `fused_intensity`: float32 [V*B, N]
-- `fused_valid_mask`, `fused_masked_positions`, `fused_padding_mask`: bool [V*B, N]
-- `peak_padding_mask`: bool [B, N]
-
-Raw (pre-augmentation) batches: `peak_mz` [B, N], `peak_intensity` [B, N], `peak_valid_mask` [B, N], `precursor_mz` [B].
+Training batches contain:
+- `peak_mz`, `peak_intensity`: float32 [B, N]
+- `peak_valid_mask`, `context_mask`: bool [B, N]
+- `target_masks`: bool [B, K, N]
+- `precursor_mz`: float32 [B]
 
 ### Configuration System
 
@@ -68,7 +71,7 @@ Raw (pre-augmentation) batches: `peak_mz` [B, N], `peak_intensity` [B, N], `peak
 
 ### Data Pipeline (`input_pipeline.py`)
 
-TFRecord-based with auto-download from HuggingFace. Processing chain: parse -> filter precursor mz -> filter peak mz range -> filter min intensity -> topk -> optional neutral loss -> compact sort -> normalize -> batch -> augment. `TfLightningDataModule` wraps tf.data datasets as PyTorch IterableDatasets with stateful resume support.
+Native-shard based with auto-download from HuggingFace. `GemsNativeDataModule` memmaps raw peak spectra, preprocesses peaks in the PyTorch collator, and builds DataLoaders directly.
 
 ### Key Aliases
 
@@ -94,5 +97,4 @@ TFRecord-based with auto-download from HuggingFace. Processing chain: parse -> f
 
 - PyTorch 2.10.0 (CUDA 13.0)
 - Lightning 2.5.5
-- TensorFlow CPU 2.19.0 (tf.data pipeline only, GPU disabled)
 - ml-collections, rdkit, wandb, huggingface_hub

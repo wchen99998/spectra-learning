@@ -18,18 +18,11 @@ from pathlib import Path
 # Ensure project root is on sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
-os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
-
 import numpy as np
 import torch
 import torch.profiler
 
-import tensorflow as tf
-
-tf.config.set_visible_devices([], "GPU")
-
-from input_pipeline import TfLightningDataModule
+from input_pipeline import GemsNativeDataModule
 from train import _BatchPrefetcher, _build_optimizers, _train_step_impl
 from utils.training import build_model_from_config, load_config
 
@@ -65,7 +58,7 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log.info("Device: %s", device)
 
-    datamodule = TfLightningDataModule(config, seed=seed)
+    datamodule = GemsNativeDataModule(config, seed=seed)
     config.num_peaks = datamodule.info["num_peaks"]
     steps_per_epoch = datamodule.train_steps
     total_steps = max(1, int(float(config.num_epochs) * steps_per_epoch))

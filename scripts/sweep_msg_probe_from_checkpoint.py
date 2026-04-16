@@ -39,7 +39,6 @@ import numpy as np
 import torch
 from ml_collections import config_dict
 
-from input_pipeline import numpy_batch_to_torch
 from models.model import PeakSetEncoder
 from utils.massspec_probe_data import MassSpecProbeData
 from utils.msg_probe import (
@@ -70,6 +69,9 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 log = logging.getLogger("sweep_msg_probe_from_checkpoint")
+
+TEST_AUC_MACCS_MEAN_KEY = "msg_probe/test/auc_maccs_mean"
+TEST_RECALL_MACCS_MEAN_KEY = "msg_probe/test/recall_maccs_mean"
 
 
 def _clone_config(config: config_dict.ConfigDict) -> config_dict.ConfigDict:
@@ -152,14 +154,14 @@ def _iter_probe_batches(
     if max_samples is not None:
         size = min(size, int(max_samples))
     seen = 0
-    for batch in dataset.as_numpy_iterator():
+    for batch in dataset:
         if seen >= size:
             break
         take = min(int(batch["peak_mz"].shape[0]), size - seen)
         if take != batch["peak_mz"].shape[0]:
             batch = {key: value[:take] for key, value in batch.items()}
         seen += take
-        yield numpy_batch_to_torch(batch)
+        yield batch
 
 
 def _allocate_split_cache(
@@ -440,6 +442,22 @@ def _select_best_epoch(
     return min(curve, key=lambda metrics: float(metrics[metric_key]))
 
 
+def _summarise_maccs_metrics(
+    best_metrics: dict[str, float],
+    final_metrics: dict[str, float],
+) -> dict[str, float]:
+    return {
+        "best_test_auc_maccs_mean": float(best_metrics[TEST_AUC_MACCS_MEAN_KEY]),
+        "best_test_recall_maccs_mean": float(
+            best_metrics[TEST_RECALL_MACCS_MEAN_KEY]
+        ),
+        "final_test_auc_maccs_mean": float(final_metrics[TEST_AUC_MACCS_MEAN_KEY]),
+        "final_test_recall_maccs_mean": float(
+            final_metrics[TEST_RECALL_MACCS_MEAN_KEY]
+        ),
+    }
+
+
 def _evaluate_trial(
     *,
     base_config: config_dict.ConfigDict,
@@ -473,11 +491,14 @@ def _evaluate_trial(
         "curve": run["curve"],
     }
     log.info(
-        "%s best %s=%.4f at epoch %d (final %.4f, %.1fs)",
+        "%s best %s=%.4f at epoch %d "
+        "(best_auc_maccs_mean=%.4f best_recall_maccs_mean=%.4f final %.4f, %.1fs)",
         trial_name,
         metric_key,
         result["best_metric_value"],
         result["best_epoch"],
+        float(best_metrics[TEST_AUC_MACCS_MEAN_KEY]),
+        float(best_metrics[TEST_RECALL_MACCS_MEAN_KEY]),
         float(run["final_metrics"][metric_key]),
         result["elapsed_seconds"],
     )
@@ -500,6 +521,7 @@ def _serialise_trial_rows(
             "elapsed_seconds": trial["elapsed_seconds"],
             "params_json": json.dumps(trial["params"], sort_keys=True),
         }
+        row.update(_summarise_maccs_metrics(trial["best_metrics"], trial["final_metrics"]))
         for key, value in trial["params"].items():
             row[key] = value
         rows.append(row)
@@ -561,8 +583,9 @@ def _parse_online_probe_curve(workdir: Path) -> list[dict[str, float]]:
     pattern = re.compile(
         r"step=(?P<step>\d+) msg_probe best_epoch=\d+ "
         r"\(test_r2_mean_wo_num_rings=(?P<r2>[0-9.]+) "
-        r"test_mae_num_rings=[0-9.]+ "
-        r"test_auc_maccs_mean=(?P<auc>[0-9.]+)"
+        r"test_mae_num_rings=(?P<mae>[0-9.]+) "
+        r"test_auc_maccs_mean=(?P<auc>[0-9.]+) "
+        r"test_recall_maccs_mean=(?P<recall>[0-9.]+)"
     )
     rows: list[dict[str, float]] = []
     for line in log_path.read_text().splitlines():
@@ -573,6 +596,8 @@ def _parse_online_probe_curve(workdir: Path) -> list[dict[str, float]]:
             {
                 "checkpoint_step": float(match.group("step")),
                 "online_test_auc_maccs_mean": float(match.group("auc")),
+                "online_test_mae_num_rings": float(match.group("mae")),
+                "online_test_recall_maccs_mean": float(match.group("recall")),
                 "online_test_r2_mean_wo_num_rings": float(match.group("r2")),
             }
         )
@@ -587,8 +612,9 @@ def _plot_checkpoint_curve(
 ) -> None:
     plt.figure(figsize=(11, 5))
     if online_rows:
+        online_metric_key = f"online_test_{metric_key.split('/')[-1]}"
         steps = [row["checkpoint_step"] for row in online_rows]
-        values = [row["online_test_auc_maccs_mean"] for row in online_rows]
+        values = [row[online_metric_key] for row in online_rows]
         plt.plot(steps, values, marker="o", label="online final probe")
     by_setting: dict[str, list[dict[str, Any]]] = {}
     for row in checkpoint_rows:
@@ -620,7 +646,8 @@ def _write_summary(
     checkpoint_rows: list[dict[str, Any]],
     online_rows: list[dict[str, float]],
 ) -> None:
-    best = max(ranked_trials, key=lambda item: item["best_metric_value"])
+    ranked = _rank_trials(ranked_trials)
+    best = ranked[0]
     default = next(trial for trial in ranked_trials if trial["name"] == "default")
     lines = [
         "# MSG Probe Sweep",
@@ -632,25 +659,27 @@ def _write_summary(
         "## Fixed Checkpoint",
         "",
         f"- Default best: {default['best_metric_value']:.4f} at epoch {default['best_epoch']}",
+        f"- Default best test_auc_maccs_mean: {float(default['best_metrics'][TEST_AUC_MACCS_MEAN_KEY]):.4f}",
+        f"- Default best test_recall_maccs_mean: {float(default['best_metrics'][TEST_RECALL_MACCS_MEAN_KEY]):.4f}",
         f"- Best tuned: {best['best_metric_value']:.4f} at epoch {best['best_epoch']}",
+        f"- Best tuned test_auc_maccs_mean: {float(best['best_metrics'][TEST_AUC_MACCS_MEAN_KEY]):.4f}",
+        f"- Best tuned test_recall_maccs_mean: {float(best['best_metrics'][TEST_RECALL_MACCS_MEAN_KEY]):.4f}",
         f"- Improvement: {best['best_metric_value'] - default['best_metric_value']:+.4f}",
         f"- Best params: `{json.dumps(best['params'], sort_keys=True)}`",
         "",
         "## Top Trials",
         "",
-        "| Rank | Trial | Best metric | Best epoch | Final metric |",
-        "| --- | --- | ---: | ---: | ---: |",
+        "| Rank | Trial | Best metric | Best epoch | Best auc | Best recall | Final metric |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
-    sorted_trials = sorted(
-        ranked_trials,
-        key=lambda item: item["best_metric_value"],
-        reverse=True,
-    )
-    for rank, trial in enumerate(sorted_trials[:10], start=1):
+    for rank, trial in enumerate(ranked[:10], start=1):
         lines.append(
             "| "
             f"{rank} | {trial['name']} | {trial['best_metric_value']:.4f} | "
-            f"{trial['best_epoch']} | {float(trial['final_metrics'][metric_key]):.4f} |"
+            f"{trial['best_epoch']} | "
+            f"{float(trial['best_metrics'][TEST_AUC_MACCS_MEAN_KEY]):.4f} | "
+            f"{float(trial['best_metrics'][TEST_RECALL_MACCS_MEAN_KEY]):.4f} | "
+            f"{float(trial['final_metrics'][metric_key]):.4f} |"
         )
     if checkpoint_rows:
         lines.extend(
@@ -658,8 +687,8 @@ def _write_summary(
                 "",
                 "## Checkpoint Sweep",
                 "",
-                "| Step | Setting | Best metric | Best epoch |",
-                "| ---: | --- | ---: | ---: |",
+                "| Step | Setting | Best metric | Best epoch | Best auc | Best recall |",
+                "| ---: | --- | ---: | ---: | ---: | ---: |",
             ]
         )
         for row in sorted(
@@ -668,7 +697,9 @@ def _write_summary(
         ):
             lines.append(
                 f"| {row['checkpoint_step']} | {row['setting']} | "
-                f"{row['best_metric_value']:.4f} | {row['best_epoch']} |"
+                f"{row['best_metric_value']:.4f} | {row['best_epoch']} | "
+                f"{row['best_test_auc_maccs_mean']:.4f} | "
+                f"{row['best_test_recall_maccs_mean']:.4f} |"
             )
     if online_rows:
         lines.extend(
@@ -1287,11 +1318,7 @@ def main() -> None:
                     trial_name=_trial_name(idx, overrides),
                 )
             )
-        ranked_trials = sorted(
-            trial_results,
-            key=lambda item: item["best_metric_value"],
-            reverse=True,
-        )
+        ranked_trials = _rank_trials(trial_results)
         best_trial = ranked_trials[0]
 
         trial_rows = _serialise_trial_rows(trial_results)
@@ -1339,6 +1366,9 @@ def main() -> None:
                         "best_epoch": trial["best_epoch"],
                         "final_metric_value": float(
                             trial["final_metrics"][metric_key]
+                        ),
+                        **_summarise_maccs_metrics(
+                            trial["best_metrics"], trial["final_metrics"]
                         ),
                     }
                 )

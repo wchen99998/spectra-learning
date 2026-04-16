@@ -1050,21 +1050,19 @@ def validate_preprocessing(
     smiles_from_hdf5: list[str],
     n_check: int = 100,
 ) -> None:
-    """Validate NumPy preprocessing against TF pipeline by loading TFRecord data."""
-    from utils.massspec_probe_data import MassSpecProbeData, numpy_batch_to_torch
+    """Validate NumPy preprocessing against the native probe loader."""
+    from utils.massspec_probe_data import MassSpecProbeData
 
-    log.info("Validating preprocessing against TFRecord pipeline...")
+    log.info("Validating preprocessing against native probe loader...")
     config = load_config(config_path)
     probe_data = MassSpecProbeData.from_config(config)
     ds = probe_data.build_dataset("val")
 
-    # Collect a few batches from TFRecord
     tf_mz_list = []
     tf_int_list = []
     tf_smiles_list = []
     count = 0
     for batch in ds:
-        batch = numpy_batch_to_torch(batch)
         tf_mz_list.append(batch["peak_mz"].numpy())
         tf_int_list.append(batch["peak_intensity"].numpy())
         tf_smiles_list.extend(batch["smiles"])
@@ -1370,7 +1368,7 @@ def main():
     parser.add_argument(
         "--validate-preprocessing",
         action="store_true",
-        help="Validate NumPy preprocessing against TFRecord pipeline",
+        help="Validate NumPy preprocessing against the native probe loader",
     )
     args = parser.parse_args()
 

@@ -15,8 +15,7 @@ from ml_collections import config_dict
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from input_pipeline import (
-    TfLightningDataModule,
-    numpy_batch_to_torch,
+    GemsNativeDataModule,
 )
 from models.model import PeakSetSIGReg
 from utils.massspec_probe_data import MassSpecProbeData, download_massspec_tsv
@@ -79,7 +78,7 @@ def _iter_split_smiles(
     }[split]
     max_precursor_mz = float(config.get("max_precursor_mz", 1000.0))
     tsv_path = download_massspec_tsv(
-        Path(config.get("tfrecord_dir", "data/gems_peaklist_tfrecord"))
+        Path(config.get("artifact_dir", "data/gems_artifacts"))
         .expanduser()
         .resolve()
         / "massspec_probe",
@@ -119,8 +118,7 @@ def _encode_split(
 
     writer: pq.ParquetWriter | None = None
     total_rows = 0
-    for numpy_batch in dataset.as_numpy_iterator():
-        batch = numpy_batch_to_torch(numpy_batch)
+    for batch in dataset:
         batch = {
             key: value.to(device) if isinstance(value, torch.Tensor) else value
             for key, value in batch.items()
@@ -130,16 +128,6 @@ def _encode_split(
             peak_mz = batch["peak_mz"]
             peak_intensity = batch["peak_intensity"]
             peak_valid_mask = batch["peak_valid_mask"]
-            if model.use_precursor_token:
-                expanded = PeakSetSIGReg.prepend_precursor_token(
-                    peak_mz,
-                    peak_intensity,
-                    peak_valid_mask,
-                    batch["precursor_mz"],
-                )
-                peak_mz = expanded["peak_mz"]
-                peak_intensity = expanded["peak_intensity"]
-                peak_valid_mask = expanded["peak_valid_mask"]
             embeddings = model.encoder(
                 peak_mz,
                 peak_intensity,
@@ -239,7 +227,7 @@ def main() -> None:
     if args.batch_size is not None:
         config.batch_size = int(args.batch_size)
 
-    datamodule = TfLightningDataModule(config, seed=int(config.seed))
+    datamodule = GemsNativeDataModule(config, seed=int(config.seed))
     massspec_data = MassSpecProbeData.from_config(config)
     config.num_peaks = int(datamodule.info["num_peaks"])
 

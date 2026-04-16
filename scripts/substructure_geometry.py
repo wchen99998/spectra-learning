@@ -65,11 +65,10 @@ inductor_config.shape_padding = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from input_pipeline import (
-    TfLightningDataModule,
-    numpy_batch_to_torch,
+    GemsNativeDataModule,
 )
 from models.model import PeakSetSIGReg
-from utils.massspec_probe_data import MassSpecProbeData
+from utils.massspec_probe_data import MassSpecProbeData, _compute_morgan_fingerprints
 from utils.training import (
     build_model_from_config,
     load_config,
@@ -191,7 +190,7 @@ def _load_model_and_data(
     seed: int,
 ):
     config = load_config(config_path)
-    datamodule = TfLightningDataModule(config, seed=int(config.seed))
+    datamodule = GemsNativeDataModule(config, seed=int(config.seed))
     massspec_data = MassSpecProbeData.from_config(config)
     config.num_peaks = datamodule.info["num_peaks"]
 
@@ -243,16 +242,6 @@ def _encode_batch_impl(
     peak_valid_mask: torch.Tensor,
     precursor_mz: torch.Tensor,
 ) -> torch.Tensor:
-    if model.use_precursor_token:
-        expanded = PeakSetSIGReg.prepend_precursor_token(
-            peak_mz,
-            peak_intensity,
-            peak_valid_mask,
-            precursor_mz,
-        )
-        peak_mz = expanded["peak_mz"]
-        peak_intensity = expanded["peak_intensity"]
-        peak_valid_mask = expanded["peak_valid_mask"]
     embeddings = model.encoder(
         peak_mz,
         peak_intensity,
@@ -268,16 +257,6 @@ def _encode_batch_mean_pool_impl(
     peak_valid_mask: torch.Tensor,
     precursor_mz: torch.Tensor,
 ) -> torch.Tensor:
-    if model.use_precursor_token:
-        expanded = PeakSetSIGReg.prepend_precursor_token(
-            peak_mz,
-            peak_intensity,
-            peak_valid_mask,
-            precursor_mz,
-        )
-        peak_mz = expanded["peak_mz"]
-        peak_intensity = expanded["peak_intensity"]
-        peak_valid_mask = expanded["peak_valid_mask"]
     embeddings = model.encoder(
         peak_mz,
         peak_intensity,
@@ -326,10 +305,7 @@ def _extract_embeddings(
 
     log.info("Extracting embeddings (torch.compile + autocast)...")
     with torch.no_grad():
-        for numpy_batch in tqdm(
-            dataset.as_numpy_iterator(), desc="Extracting embeddings"
-        ):
-            batch = numpy_batch_to_torch(numpy_batch)
+        for batch in tqdm(dataset, desc="Extracting embeddings"):
             peak_mz = batch["peak_mz"].to(device, non_blocking=True)
             peak_intensity = batch["peak_intensity"].to(device, non_blocking=True)
             peak_valid_mask = batch["peak_valid_mask"].to(device, non_blocking=True)
@@ -438,9 +414,6 @@ def _load_external_embeddings(
         s.decode("utf-8") if isinstance(s, bytes) else str(s) for s in smiles_raw
     ]
     log.info("Embeddings: %s, SMILES: %d", embeddings.shape, len(smiles_list))
-
-    # Compute Morgan fingerprints from SMILES.
-    from input_pipeline import _compute_morgan_fingerprints
 
     morgan_fps = _compute_morgan_fingerprints(np.array(smiles_list))
 
@@ -1110,7 +1083,7 @@ def main() -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    # 1. Load embeddings: either from external HDF5 or from model+TFRecords
+    # 1. Load embeddings: either from external HDF5 or from model + native loaders
     if args.external_embed:
         all_embeds, all_fps_morgan, all_meta, all_smiles = _load_external_embeddings(
             args.external_embed,
@@ -1142,7 +1115,7 @@ def main() -> None:
         cache_dir = outdir
     else:
         cache_dir = (
-            Path(config.get("tfrecord_dir", "data/gems_peaklist_tfrecord"))
+            Path(config.get("artifact_dir", "data/gems_artifacts"))
             .expanduser()
             .resolve()
         )

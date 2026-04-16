@@ -18,7 +18,7 @@ import torch._inductor.config as inductor_config
 
 from ml_collections import config_dict
 
-from input_pipeline import TfLightningDataModule
+from input_pipeline import GemsNativeDataModule
 from models.model import PeakSetSIGReg
 from utils.msg_probe import run_msg_probe
 from utils.training import (
@@ -330,7 +330,7 @@ def train_and_evaluate(
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
-    datamodule = TfLightningDataModule(config, seed=seed)
+    datamodule = GemsNativeDataModule(config, seed=seed)
     num_epochs = float(config.num_epochs)
     steps_per_epoch = datamodule.train_steps
     total_steps = max(1, int(num_epochs * steps_per_epoch))
@@ -563,13 +563,7 @@ def train_and_evaluate(
 
 if __name__ == "__main__":
     import argparse
-    import os
 
-    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
-    os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
-    import tensorflow as tf
-
-    tf.config.set_visible_devices([], "GPU")
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(description="Train peak-set SIGReg model.")
     parser.add_argument("--config", required=True, help="Path to config file.")

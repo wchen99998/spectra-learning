@@ -7,7 +7,6 @@ from unittest import mock
 
 import h5py
 import numpy as np
-import tensorflow as tf
 from ml_collections import config_dict
 from torch.utils.data import DataLoader
 
@@ -19,9 +18,10 @@ from utils.gems_native import (
     GEMS_NATIVE_METADATA_VERSION,
     build_gems_native_artifact,
 )
-from utils.gems_tfrecords import (
+from utils.gems_data import (
     CANONICAL_NUM_SHARDS,
 )
+from utils.spectra_preprocessing import preprocess_peak_batch_numpy
 
 
 def _write_fake_gems_hdf5(path: Path) -> None:
@@ -49,16 +49,12 @@ def _write_fake_native_shards(root: Path, lengths: list[int], num_peaks: int = 4
     for shard_idx, length in enumerate(lengths):
         shard_dir = root / f"shard-{shard_idx:05d}"
         shard_dir.mkdir(parents=True, exist_ok=True)
-        peak_mz = np.zeros((length, num_peaks), dtype=np.float32)
-        peak_intensity = np.zeros((length, num_peaks), dtype=np.float32)
-        peak_valid_mask = np.ones((length, num_peaks), dtype=bool)
-        precursor_mz = np.arange(start, start + length, dtype=np.float32)
-        peak_mz[:, 0] = precursor_mz + 1000.0
-        peak_intensity[:, 0] = 1.0
-        np.save(shard_dir / "peak_mz.npy", peak_mz)
-        np.save(shard_dir / "peak_intensity.npy", peak_intensity)
-        np.save(shard_dir / "peak_valid_mask.npy", peak_valid_mask)
-        np.save(shard_dir / "precursor_mz.npy", precursor_mz)
+        spectra = np.zeros((length, 2, 128), dtype=np.float32)
+        precursor_mz_raw = np.arange(start, start + length, dtype=np.float32)
+        spectra[:, 0, 0] = precursor_mz_raw + 1000.0
+        spectra[:, 1, 0] = 1.0
+        np.save(shard_dir / "spectra.npy", spectra)
+        np.save(shard_dir / "precursor_mz_raw.npy", precursor_mz_raw)
         entries.append({"dir": str(shard_dir), "length": int(length)})
         start += length
     return entries
@@ -92,15 +88,11 @@ class GeMSNativeArtifactTests(unittest.TestCase):
                 self.assertTrue((artifact_dir / "validation" / name).exists())
 
             shard_dir = artifact_dir / "train" / metadata["train_shards"][0]
-            peak_mz = np.load(shard_dir / "peak_mz.npy")
-            peak_intensity = np.load(shard_dir / "peak_intensity.npy")
-            peak_valid_mask = np.load(shard_dir / "peak_valid_mask.npy")
-            precursor_mz = np.load(shard_dir / "precursor_mz.npy")
+            spectra = np.load(shard_dir / "spectra.npy")
+            precursor_mz_raw = np.load(shard_dir / "precursor_mz_raw.npy")
 
-            self.assertEqual(tuple(peak_mz.shape), (1, 64))
-            self.assertEqual(peak_intensity.shape, peak_mz.shape)
-            self.assertEqual(peak_valid_mask.shape, peak_mz.shape)
-            self.assertEqual(tuple(precursor_mz.shape), (1,))
+            self.assertEqual(tuple(spectra.shape), (1, 2, 128))
+            self.assertEqual(tuple(precursor_mz_raw.shape), (1,))
 
     def test_build_gems_native_artifact_filters_large_precursor(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -141,8 +133,6 @@ class GeMSNativeArtifactTests(unittest.TestCase):
                         str(tmp_path / "work"),
                         "--hf-revision",
                         "main",
-                        "--num-peaks",
-                        "64",
                         "--num-workers",
                         "1",
                     ],
@@ -187,23 +177,22 @@ class GeMSNativeArtifactTests(unittest.TestCase):
 class GeMSRuntimeDownloadTests(unittest.TestCase):
     def _make_config(self, tmp_path: Path) -> config_dict.ConfigDict:
         cfg = config_dict.ConfigDict()
-        cfg.tfrecord_dir = str(tmp_path / "cache")
+        cfg.artifact_dir = str(tmp_path / "cache")
         cfg.gems_native_repo_id = "cjim8889/gems-a-native"
         cfg.gems_native_revision = "unit-test"
         cfg.batch_size = 2
         cfg.shuffle_buffer = 4
-        cfg.tfrecord_buffer_size = 1024
         cfg.drop_remainder = False
         cfg.max_precursor_mz = 1000.0
         cfg.min_peak_intensity = 1e-4
+        cfg.peak_drop_min_intensity = 1e-4
+        cfg.precursor_peak_exclusion_window_da = 0.0
         cfg.peak_ordering = "mz"
         cfg.num_peaks = 64
         cfg.jepa_num_target_blocks = 1
         cfg.jepa_context_fraction = 0.5
         cfg.jepa_target_fraction = 0.5
         cfg.jepa_block_min_len = 1
-        cfg.augmentation_mz_jitter_std = 0.0
-        cfg.augmentation_intensity_jitter_std = 0.0
         return cfg
 
     def _build_native_artifact(
@@ -216,9 +205,6 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
         build_gems_native_artifact(
             hdf5_path=source_hdf5,
             output_dir=output_dir,
-            num_peaks=int(cfg.num_peaks),
-            min_peak_intensity=float(cfg.min_peak_intensity),
-            peak_ordering=str(cfg.peak_ordering),
             max_precursor_mz=float(cfg.max_precursor_mz),
             num_workers=1,
             source_path=str(source_hdf5),
@@ -246,7 +232,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                     side_effect=fake_snapshot_download,
                 ) as download_mock,
             ):
-                datamodule = input_pipeline.TfLightningDataModule(cfg, seed=42)
+                datamodule = input_pipeline.GemsNativeDataModule(cfg, seed=42)
                 batch = next(iter(datamodule.train_loader_for_epoch(0)))
 
             self.assertEqual(datamodule.info["train_size"], 2)
@@ -272,7 +258,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             _write_fake_gems_hdf5(source_hdf5)
             cfg = self._make_config(tmp_path)
 
-            artifact_dir = Path(cfg.tfrecord_dir) / "gems"
+            artifact_dir = Path(cfg.artifact_dir) / "gems"
             self._build_native_artifact(
                 source_hdf5=source_hdf5,
                 output_dir=artifact_dir,
@@ -280,7 +266,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             )
 
             with mock.patch.object(input_pipeline, "snapshot_download") as download_mock:
-                datamodule = input_pipeline.TfLightningDataModule(cfg, seed=42)
+                datamodule = input_pipeline.GemsNativeDataModule(cfg, seed=42)
                 batch = next(iter(datamodule.train_loader_for_epoch(0)))
 
             self.assertIn("peak_mz", batch)
@@ -293,7 +279,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             _write_fake_gems_hdf5(source_hdf5)
             cfg = self._make_config(tmp_path)
 
-            artifact_dir = Path(cfg.tfrecord_dir) / "gems"
+            artifact_dir = Path(cfg.artifact_dir) / "gems"
             artifact_dir.mkdir(parents=True, exist_ok=True)
             (artifact_dir / "metadata.json").write_text(
                 json.dumps({"gems_metadata_version": 1})
@@ -312,12 +298,39 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 "snapshot_download",
                 side_effect=fake_snapshot_download,
             ) as download_mock:
-                datamodule = input_pipeline.TfLightningDataModule(cfg, seed=42)
+                datamodule = input_pipeline.GemsNativeDataModule(cfg, seed=42)
                 batch = next(iter(datamodule.train_loader_for_epoch(0)))
 
             self.assertEqual(datamodule.info["train_size"], 2)
             self.assertIn("peak_mz", batch)
             download_mock.assert_called_once()
+
+    def test_datamodule_reuses_same_raw_artifact_for_peak_filter_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_hdf5 = tmp_path / "GeMS_A.hdf5"
+            _write_fake_gems_hdf5(source_hdf5)
+            cfg = self._make_config(tmp_path)
+            cfg.peak_drop_min_intensity = 1e-3
+            cfg.precursor_peak_exclusion_window_da = 5.0
+
+            def fake_snapshot_download(*, local_dir, **kwargs):
+                self._build_native_artifact(
+                    source_hdf5=source_hdf5,
+                    output_dir=Path(local_dir),
+                    cfg=cfg,
+                )
+                return str(local_dir)
+
+            with mock.patch.object(
+                input_pipeline,
+                "snapshot_download",
+                side_effect=fake_snapshot_download,
+            ):
+                datamodule = input_pipeline.GemsNativeDataModule(cfg, seed=42)
+
+            self.assertNotIn("gems_variants", str(datamodule.gems_dir))
+            self.assertEqual(datamodule.gems_dir, Path(cfg.artifact_dir) / "gems")
 
     def test_native_loader_respects_persistent_workers_config(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -342,7 +355,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 "snapshot_download",
                 side_effect=fake_snapshot_download,
             ):
-                datamodule = input_pipeline.TfLightningDataModule(cfg, seed=42)
+                datamodule = input_pipeline.GemsNativeDataModule(cfg, seed=42)
                 loader = datamodule.train_loader_for_epoch(0)
 
             self.assertEqual(loader.num_workers, 1)
@@ -372,7 +385,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 "snapshot_download",
                 side_effect=fake_snapshot_download,
             ):
-                datamodule = input_pipeline.TfLightningDataModule(cfg, seed=42)
+                datamodule = input_pipeline.GemsNativeDataModule(cfg, seed=42)
                 loader0 = datamodule.train_loader_for_epoch(0)
                 epoch0_batches = list(loader0)
                 del loader0
@@ -391,7 +404,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             cfg.batch_size = 1
             cfg.dataloader_num_workers = 0
 
-            artifact_dir = Path(cfg.tfrecord_dir) / "gems"
+            artifact_dir = Path(cfg.artifact_dir) / "gems"
             train_entries = _write_fake_native_shards(
                 artifact_dir / "train",
                 [5, 4],
@@ -405,9 +418,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             metadata = {
                 "gems_native_metadata_version": GEMS_NATIVE_METADATA_VERSION,
                 "num_peaks_input": 128,
-                "num_peaks": int(cfg.num_peaks),
-                "peak_ordering": str(cfg.peak_ordering),
-                "min_peak_intensity": float(cfg.min_peak_intensity),
+                "artifact_format": "raw_peaklist_v1",
                 "max_precursor_mz": float(cfg.max_precursor_mz),
                 "train_shards": [Path(entry["dir"]).name for entry in train_entries],
                 "train_lengths": [int(entry["length"]) for entry in train_entries],
@@ -426,18 +437,18 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             artifact_dir.mkdir(parents=True, exist_ok=True)
             (artifact_dir / "metadata.json").write_text(json.dumps(metadata))
 
-            datamodule = input_pipeline.TfLightningDataModule(cfg, seed=42)
+            datamodule = input_pipeline.GemsNativeDataModule(cfg, seed=42)
             train_dataset = datamodule._get_dataset("train")
             expected_ids = sorted(
-                float(train_dataset[idx]["precursor_mz"])
+                float(train_dataset[idx]["precursor_mz_raw"])
                 for idx in range(len(train_dataset))
             )
             epoch0_ids = [
-                float(batch["precursor_mz"][0])
+                round(float(batch["precursor_mz"][0]) * 1000.0, 6)
                 for batch in datamodule.train_loader_for_epoch(0)
             ]
             epoch1_ids = [
-                float(batch["precursor_mz"][0])
+                round(float(batch["precursor_mz"][0]) * 1000.0, 6)
                 for batch in datamodule.train_loader_for_epoch(1)
             ]
 
@@ -464,15 +475,19 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                     context_fraction=0.5,
                     target_fraction=0.5,
                     block_min_len=1,
-                    mz_jitter_std=0.0,
-                    intensity_jitter_std=0.0,
                     use_precursor_token=False,
+                    num_peaks=4,
+                    max_precursor_mz=1000.0,
+                    min_peak_intensity=1e-4,
+                    peak_drop_min_intensity=1e-4,
+                    peak_ordering="mz",
+                    precursor_peak_exclusion_window_da=0.0,
                 ),
             )
 
             ids = []
             for batch in loader:
-                ids.extend(int(v) for v in batch["precursor_mz"].tolist())
+                ids.extend(int(round(float(v) * 1000.0)) for v in batch["precursor_mz"].tolist())
 
         self.assertEqual(ids, list(range(9)))
 
@@ -494,18 +509,22 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                     context_fraction=0.5,
                     target_fraction=0.5,
                     block_min_len=1,
-                    mz_jitter_std=0.0,
-                    intensity_jitter_std=0.0,
                     use_precursor_token=False,
+                    num_peaks=4,
+                    max_precursor_mz=1000.0,
+                    min_peak_intensity=1e-4,
+                    peak_drop_min_intensity=1e-4,
+                    peak_ordering="mz",
+                    precursor_peak_exclusion_window_da=0.0,
                 ),
             )
 
             first_pass = []
             second_pass = []
             for batch in loader:
-                first_pass.extend(int(v) for v in batch["precursor_mz"].tolist())
+                first_pass.extend(int(round(float(v) * 1000.0)) for v in batch["precursor_mz"].tolist())
             for batch in loader:
-                second_pass.extend(int(v) for v in batch["precursor_mz"].tolist())
+                second_pass.extend(int(round(float(v) * 1000.0)) for v in batch["precursor_mz"].tolist())
 
         self.assertEqual(first_pass, list(range(9)))
         self.assertEqual(second_pass, list(range(9)))
@@ -515,18 +534,17 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             cfg = self._make_config(Path(tmp))
             cfg.gems_native_repo_id = ""
             with self.assertRaisesRegex(ValueError, "gems_native_repo_id"):
-                input_pipeline.TfLightningDataModule(cfg, seed=42)
+                input_pipeline.GemsNativeDataModule(cfg, seed=42)
 
 
 class MassSpecPreprocessTests(unittest.TestCase):
     def test_probe_data_uses_dedicated_msg_probe_batch_size(self):
         cfg = config_dict.ConfigDict()
-        cfg.tfrecord_dir = "/tmp/probe-cache"
+        cfg.artifact_dir = "/tmp/probe-cache"
         cfg.probe_dataset = "massspec"
         cfg.batch_size = 2048
         cfg.msg_probe_batch_size = 256
         cfg.shuffle_buffer = 4
-        cfg.tfrecord_buffer_size = 1024
         cfg.max_precursor_mz = 1000.0
         cfg.min_peak_intensity = 1e-4
         cfg.peak_ordering = "mz"
@@ -539,9 +557,12 @@ class MassSpecPreprocessTests(unittest.TestCase):
             "metadata_version": massspec_probe_data.MASSSPEC_METADATA_VERSION,
             "adduct_vocab": {"unknown": 0},
             "instrument_type_vocab": {"unknown": 0},
-            "train_files": ["train-00000.tfrecord"],
-            "val_files": ["val-00000.tfrecord"],
-            "test_files": ["test-00000.tfrecord"],
+            "train_files": ["shard-00000-of-00001"],
+            "train_lengths": [8],
+            "val_files": ["shard-00000-of-00001"],
+            "val_lengths": [4],
+            "test_files": ["shard-00000-of-00001"],
+            "test_lengths": [2],
             "dreams_dim": 0,
         }
 
@@ -557,7 +578,6 @@ class MassSpecPreprocessTests(unittest.TestCase):
     def test_process_massspec_probe_filters_large_precursor(self):
         spectra = np.zeros((4, 2, 128), dtype=np.float32)
         precursor = np.asarray([500.0, 1200.0, 750.0, 900.0], dtype=np.float32)
-        retention = np.ones(4, dtype=np.float32)
         fold = np.asarray(["train", "train", "val", "test"], dtype=object)
         smiles = np.asarray(["CCO", "CCC", "CCN", "CCCl"], dtype=object)
         adduct = np.asarray(["[M+H]+"] * 4, dtype=object)
@@ -579,7 +599,6 @@ class MassSpecPreprocessTests(unittest.TestCase):
                     "_load_massspec_tsv",
                     return_value={
                         "spectra": spectra,
-                        "retention": retention,
                         "precursor": precursor,
                         "fold": fold,
                         "smiles": smiles,
@@ -595,38 +614,27 @@ class MassSpecPreprocessTests(unittest.TestCase):
                     max_precursor_mz=1000.0,
                     num_shards=4,
                 )
-
-            record_path = (
+            shard_dir = (
                 tmp_path / "massspec_probe" / "train" / metadata["train_files"][0]
             )
-            dataset = tf.data.TFRecordDataset(
-                [str(record_path)],
-                compression_type="GZIP",
-            )
-            example = next(dataset.as_numpy_iterator())
-            parsed = tf.io.parse_single_example(
-                example,
-                {
-                    "probe_mol_weight": tf.io.FixedLenFeature([1], tf.float32),
-                    "probe_logp": tf.io.FixedLenFeature([1], tf.float32),
-                    "probe_num_heavy_atoms": tf.io.FixedLenFeature([1], tf.float32),
-                    "probe_num_rings": tf.io.FixedLenFeature([1], tf.float32),
-                    "probe_maccs": tf.io.FixedLenFeature([166], tf.int64),
-                    "probe_valid_mol": tf.io.FixedLenFeature([1], tf.int64),
-                },
-            )
+            probe_mol_weight = np.load(shard_dir / "probe_mol_weight.npy")
+            probe_logp = np.load(shard_dir / "probe_logp.npy")
+            probe_num_heavy_atoms = np.load(shard_dir / "probe_num_heavy_atoms.npy")
+            probe_num_rings = np.load(shard_dir / "probe_num_rings.npy")
+            probe_maccs = np.load(shard_dir / "probe_maccs.npy")
+            probe_valid_mol = np.load(shard_dir / "probe_valid_mol.npy")
 
         self.assertEqual(metadata["train_size"], 1)
         self.assertEqual(metadata["val_size"], 1)
         self.assertEqual(metadata["test_size"], 1)
         self.assertEqual(metadata["max_precursor_mz"], 1000.0)
         self.assertEqual(metadata["probe_maccs_bits"], 166)
-        self.assertEqual(parsed["probe_mol_weight"].shape[0], 1)
-        self.assertEqual(parsed["probe_logp"].shape[0], 1)
-        self.assertEqual(parsed["probe_num_heavy_atoms"].shape[0], 1)
-        self.assertEqual(parsed["probe_num_rings"].shape[0], 1)
-        self.assertEqual(parsed["probe_maccs"].shape[0], 166)
-        self.assertEqual(parsed["probe_valid_mol"].shape[0], 1)
+        self.assertEqual(probe_mol_weight.shape, (1,))
+        self.assertEqual(probe_logp.shape, (1,))
+        self.assertEqual(probe_num_heavy_atoms.shape, (1,))
+        self.assertEqual(probe_num_rings.shape, (1,))
+        self.assertEqual(probe_maccs.shape, (1, 166))
+        self.assertEqual(probe_valid_mol.shape, (1,))
 
     def test_benchmark_preprocess_matches_input_pipeline_without_precursor_window(self):
         spectrum = np.zeros((1, 2, 128), dtype=np.float32)
@@ -634,33 +642,14 @@ class MassSpecPreprocessTests(unittest.TestCase):
         spectrum[0, 1, :4] = [0.8, 5e-4, 0.7, 0.9]
         precursor_mz = np.asarray([101.0], dtype=np.float32)
 
-        mz = spectrum[0, 0].tolist()
-        intensity = spectrum[0, 1].tolist()
-        example = tf.train.Example(
-            features=tf.train.Features(
-                feature={
-                    "mz": tf.train.Feature(
-                        float_list=tf.train.FloatList(value=mz)
-                    ),
-                    "intensity": tf.train.Feature(
-                        float_list=tf.train.FloatList(value=intensity)
-                    ),
-                    "rt": tf.train.Feature(
-                        float_list=tf.train.FloatList(value=[0.0])
-                    ),
-                    "precursor_mz": tf.train.Feature(
-                        float_list=tf.train.FloatList(value=[101.0])
-                    ),
-                }
-            )
-        )
-        transform = input_pipeline._batched_parse_and_transform(
+        native = preprocess_peak_batch_numpy(
+            spectrum,
+            precursor_mz,
             max_precursor_mz=1000.0,
-            min_peak_intensity=1e-4,
             num_peaks=60,
+            peak_drop_min_intensity=1e-4,
             peak_ordering="mz",
         )
-        tf_batch = transform(tf.constant([example.SerializeToString()]))
         benchmark = preprocess_dreams_spectra(
             spectrum,
             precursor_mz,
@@ -669,18 +658,16 @@ class MassSpecPreprocessTests(unittest.TestCase):
         )
 
         np.testing.assert_allclose(
-            benchmark["peak_mz"], tf_batch["peak_mz"].numpy(), atol=1e-6
+            benchmark["peak_mz"], native["peak_mz"], atol=1e-6
         )
         np.testing.assert_allclose(
             benchmark["peak_intensity"],
-            tf_batch["peak_intensity"].numpy(),
+            native["peak_intensity"],
             atol=1e-6,
         )
-        np.testing.assert_array_equal(
-            benchmark["peak_valid_mask"], tf_batch["peak_valid_mask"].numpy()
-        )
+        np.testing.assert_array_equal(benchmark["peak_valid_mask"], native["peak_valid_mask"])
         np.testing.assert_allclose(
-            benchmark["precursor_mz"], tf_batch["precursor_mz"].numpy(), atol=1e-6
+            benchmark["precursor_mz"], native["precursor_mz"], atol=1e-6
         )
 
 if __name__ == "__main__":

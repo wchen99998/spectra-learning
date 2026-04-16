@@ -51,8 +51,6 @@ def build_model(cfg) -> PeakSetSIGReg:
         jepa_context_fraction=cfg.jepa_context_fraction,
         jepa_target_fraction=cfg.jepa_target_fraction,
         jepa_block_min_len=cfg.jepa_block_min_len,
-        sigreg_mz_jitter_std=cfg.sigreg_mz_jitter_std,
-        sigreg_intensity_jitter_std=cfg.sigreg_intensity_jitter_std,
     )
 
 

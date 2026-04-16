@@ -58,8 +58,6 @@ def get_bench_config() -> config_dict.ConfigDict:
     cfg.teacher_ema_decay_warmup_steps = 500_000
     cfg.teacher_ema_update_every = 1
     cfg.use_precursor_token = False
-    cfg.augmentation_mz_jitter_std = 0.0002
-    cfg.augmentation_intensity_jitter_std = 0.001
     cfg.optimizer = "muon"
     cfg.learning_rate = 5e-4
     cfg.weight_decay = 0.05

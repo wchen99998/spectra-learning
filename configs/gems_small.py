@@ -5,14 +5,15 @@ def get_config() -> config_dict.ConfigDict:
     cfg = config_dict.ConfigDict()
 
     # Dataset
-    cfg.tfrecord_dir = "data/gems_peaklist_tfrecord_alpha"
+    cfg.artifact_dir = "data/gems_artifacts_alpha"
     cfg.gems_native_repo_id = "cjim8889/gems-a10-native"
     cfg.batch_size = 256
     cfg.shuffle_buffer = 1_000_000
-    cfg.tfrecord_buffer_size = 250_000
     cfg.drop_remainder = True
     cfg.max_precursor_mz = 1000.0
     cfg.min_peak_intensity = 0.0001
+    cfg.peak_drop_min_intensity = 0.0001
+    cfg.precursor_peak_exclusion_window_da = 0.0
     cfg.peak_ordering = "mz"
     cfg.seed = 66
 
@@ -40,8 +41,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_context_fraction = 0.35
     cfg.jepa_target_fraction = 0.2
     cfg.jepa_block_min_len = 1
-    cfg.augmentation_mz_jitter_std = 0.0002
-    cfg.augmentation_intensity_jitter_std = 0.001
     cfg.norm_type = "layernorm"
 
     # Predictor
@@ -88,7 +87,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.representation_regularizer = "none"
     cfg.msg_probe_every_n_steps = 0.2
     cfg.msg_probe_num_epochs = 20
-    cfg.msg_probe_learning_rate = 3e-4
+    cfg.msg_probe_learning_rate = 1e-3
     cfg.msg_probe_weight_decay = 0.0
     cfg.msg_probe_warmup_steps = 0
     cfg.msg_probe_max_train_samples = None
