@@ -709,7 +709,12 @@ class MassSpecProbeData(NamedTuple):
             train_files=split_files["train"],
             val_files=split_files["val"],
             test_files=split_files["test"],
-            batch_size=int(config.get("batch_size", _DEFAULT_BATCH_SIZE)),
+            batch_size=int(
+                config.get(
+                    "msg_probe_batch_size",
+                    config.get("batch_size", _DEFAULT_BATCH_SIZE),
+                )
+            ),
             shuffle_buffer=int(config.get("shuffle_buffer", _DEFAULT_SHUFFLE_BUFFER)),
             tfrecord_buffer_size=int(
                 config.get("tfrecord_buffer_size", _DEFAULT_TFRECORD_BUFFER_SIZE)

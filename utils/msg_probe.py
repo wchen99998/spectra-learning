@@ -80,32 +80,6 @@ class MsgLinearProbe(torch.nn.Module):
         return {name: head(probe_inputs) for name, head in self.heads.items()}
 
 
-class DreamsLinearProbe(torch.nn.Module):
-    def __init__(
-        self,
-        *,
-        input_dim: int,
-        task_names: tuple[str, ...],
-        task_output_dims: dict[str, int] | None = None,
-    ) -> None:
-        super().__init__()
-        self.heads = torch.nn.ModuleDict(
-            {
-                name: torch.nn.Linear(
-                    input_dim,
-                    1 if task_output_dims is None else task_output_dims.get(name, 1),
-                )
-                for name in task_names
-            }
-        )
-
-    def forward(
-        self,
-        x: torch.Tensor,
-    ) -> dict[str, torch.Tensor]:
-        return {name: head(x) for name, head in self.heads.items()}
-
-
 def _probe_task_names(task_spec: MsgProbeTaskSpec) -> tuple[str, ...]:
     task_names = task_spec.regression_tasks
     if task_spec.num_rings_classes:
@@ -572,42 +546,6 @@ def run_msg_probe(
     return best_metrics
 
 
-def _dreams_probe_step(
-    probe: DreamsLinearProbe,
-    batch: dict[str, torch.Tensor],
-    *,
-    task_spec: MsgProbeTaskSpec,
-    device: torch.device,
-) -> dict[str, object] | None:
-    dreams_emb = batch["dreams_embedding"].to(device=device, dtype=torch.float32)
-    valid_mask = batch["probe_valid_mol"].to(device=device, dtype=torch.bool)
-    if not bool(valid_mask.any()):
-        return None
-    pooled = dreams_emb[valid_mask]
-    logits = probe(pooled)
-    losses, predictions, task_targets = {}, {}, {}
-    for name in task_spec.regression_tasks:
-        target = batch[f"probe_{name}"][valid_mask].to(dtype=torch.float32)
-        mean, std = task_spec.regression_means[name], task_spec.regression_stds[name]
-        pred = logits[name].squeeze(-1)
-        losses[name] = F.mse_loss(pred, (target - mean) / std)
-        predictions[name] = pred.detach() * std + mean
-        task_targets[name] = target
-    if task_spec.maccs_bits > 0:
-        target = batch["probe_maccs"][valid_mask].to(dtype=torch.float32)
-        pred = logits[_MACCS_TASK]
-        losses[_MACCS_TASK] = F.binary_cross_entropy_with_logits(pred, target)
-        predictions[_MACCS_TASK] = torch.sigmoid(pred.detach())
-        task_targets[_MACCS_TASK] = target
-    return {
-        "loss_total": torch.stack(list(losses.values())).mean(),
-        "losses": losses,
-        "predictions": predictions,
-        "targets": task_targets,
-        "batch_size": int(pooled.shape[0]),
-    }
-
-
 def run_dreams_probe(
     *,
     config: config_dict.ConfigDict,
@@ -648,7 +586,7 @@ def run_dreams_probe(
     )
     task_spec = _build_task_spec(train_targets=train_targets, test_targets=test_targets)
 
-    probe = DreamsLinearProbe(
+    probe = MsgLinearProbe(
         input_dim=dreams_dim,
         task_names=_probe_task_names(task_spec),
         task_output_dims=_probe_task_output_dims(task_spec),
@@ -677,15 +615,26 @@ def run_dreams_probe(
         ),
     )
 
+    def feature_extractor(
+        batch: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        return batch["dreams_embedding"].to(device=device, dtype=torch.float32)
+
     def move_batch(batch: dict[str, object]) -> dict[str, object]:
         return {
             k: v.to(device) if isinstance(v, torch.Tensor) else v
             for k, v in batch.items()
         }
 
-    compiled_dreams_probe_step = torch.compile(_dreams_probe_step)
+    compiled_probe_step = torch.compile(_probe_step)
+    probe_select_metric = resolve_msg_probe_select_metric(config).replace(
+        "msg_probe/",
+        "dreams_probe/",
+    )
+    higher_is_better = msg_probe_metric_higher_is_better(probe_select_metric)
 
-    final_metrics: dict[str, float] = {}
+    best_metrics: dict[str, float] = {}
+    best_metric_value = -float("inf") if higher_is_better else float("inf")
     for epoch_idx in range(num_probe_epochs):
         probe.train()
         train_state = _new_epoch_state(task_spec)
@@ -699,11 +648,12 @@ def run_dreams_probe(
         ):
             batch = move_batch(batch)
             optimizer.zero_grad(set_to_none=True)
-            result = compiled_dreams_probe_step(
+            result = compiled_probe_step(
                 probe,
                 batch,
                 task_spec=task_spec,
                 device=device,
+                feature_extractor=feature_extractor,
             )
             if result is None:
                 continue
@@ -723,16 +673,17 @@ def run_dreams_probe(
                 max_samples=max_test_samples,
             ):
                 batch = move_batch(batch)
-                result = compiled_dreams_probe_step(
+                result = compiled_probe_step(
                     probe,
                     batch,
                     task_spec=task_spec,
                     device=device,
+                    feature_extractor=feature_extractor,
                 )
                 if result is None:
                     continue
                 _update_epoch_state(test_state, result, task_spec)
-        final_metrics = {
+        epoch_metrics = {
             **_score_epoch_state(
                 prefix="dreams_probe/train", epoch_state=train_state, task_spec=task_spec
             ),
@@ -742,15 +693,36 @@ def run_dreams_probe(
             "dreams_probe/num_maccs_bits": float(task_spec.maccs_bits),
             "dreams_probe_epoch": float(epoch_idx + 1),
         }
+        current_value = float(epoch_metrics[probe_select_metric])
+        is_better = (
+            current_value > best_metric_value
+            if higher_is_better
+            else current_value < best_metric_value
+        )
+        if is_better:
+            best_metric_value = current_value
+            best_metrics = dict(epoch_metrics)
         log.info(
-            "DreaMS probe epoch %d/%d test_r2_mean=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f maccs_bits=%d",
+            "DreaMS probe epoch %d/%d test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f maccs_bits=%d",
             epoch_idx + 1,
             num_probe_epochs,
-            final_metrics["dreams_probe/test/r2_mean"],
-            final_metrics["dreams_probe/test/auc_maccs_mean"],
-            final_metrics["dreams_probe/test/recall_maccs_mean"],
-            int(final_metrics["dreams_probe/num_maccs_bits"]),
+            epoch_metrics["dreams_probe/test/r2_mean_wo_num_rings"],
+            epoch_metrics["dreams_probe/test/mae_num_rings"],
+            epoch_metrics["dreams_probe/test/auc_maccs_mean"],
+            epoch_metrics["dreams_probe/test/recall_maccs_mean"],
+            int(epoch_metrics["dreams_probe/num_maccs_bits"]),
         )
         if on_epoch_end is not None:
-            on_epoch_end(final_metrics)
-    return final_metrics
+            on_epoch_end(epoch_metrics)
+    if best_metrics:
+        log.info(
+            "DreaMS probe best epoch %d: %s=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f",
+            int(best_metrics["dreams_probe_epoch"]),
+            probe_select_metric,
+            best_metrics[probe_select_metric],
+            best_metrics["dreams_probe/test/r2_mean_wo_num_rings"],
+            best_metrics["dreams_probe/test/mae_num_rings"],
+            best_metrics["dreams_probe/test/auc_maccs_mean"],
+            best_metrics["dreams_probe/test/recall_maccs_mean"],
+        )
+    return best_metrics

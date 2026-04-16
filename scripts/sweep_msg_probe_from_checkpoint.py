@@ -338,7 +338,7 @@ def run_cached_msg_probe(
     probe_lr = float(config.get("msg_probe_learning_rate", 1e-3))
     probe_weight_decay = float(config.get("msg_probe_weight_decay", 1e-2))
     probe_warmup_steps = int(config.get("msg_probe_warmup_steps", 0))
-    batch_size = int(config.batch_size)
+    batch_size = int(config.get("msg_probe_batch_size", config.get("batch_size", 512)))
     train_size = int(train_cache["probe_valid_mol"].shape[0])
     steps_per_epoch = math.ceil(train_size / batch_size)
     optimizer = torch.optim.AdamW(

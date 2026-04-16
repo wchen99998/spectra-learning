@@ -519,6 +519,41 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
 
 
 class MassSpecPreprocessTests(unittest.TestCase):
+    def test_probe_data_uses_dedicated_msg_probe_batch_size(self):
+        cfg = config_dict.ConfigDict()
+        cfg.tfrecord_dir = "/tmp/probe-cache"
+        cfg.probe_dataset = "massspec"
+        cfg.batch_size = 2048
+        cfg.msg_probe_batch_size = 256
+        cfg.shuffle_buffer = 4
+        cfg.tfrecord_buffer_size = 1024
+        cfg.max_precursor_mz = 1000.0
+        cfg.min_peak_intensity = 1e-4
+        cfg.peak_ordering = "mz"
+        cfg.num_peaks = 60
+
+        metadata = {
+            "train_size": 8,
+            "val_size": 4,
+            "test_size": 2,
+            "metadata_version": massspec_probe_data.MASSSPEC_METADATA_VERSION,
+            "adduct_vocab": {"unknown": 0},
+            "instrument_type_vocab": {"unknown": 0},
+            "train_files": ["train-00000.tfrecord"],
+            "val_files": ["val-00000.tfrecord"],
+            "test_files": ["test-00000.tfrecord"],
+            "dreams_dim": 0,
+        }
+
+        with mock.patch.object(
+            massspec_probe_data,
+            "ensure_massspec_probe_prepared",
+            return_value=metadata,
+        ):
+            probe_data = massspec_probe_data.MassSpecProbeData.from_config(cfg)
+
+        self.assertEqual(probe_data.batch_size, 256)
+
     def test_process_massspec_probe_filters_large_precursor(self):
         spectra = np.zeros((4, 2, 128), dtype=np.float32)
         precursor = np.asarray([500.0, 1200.0, 750.0, 900.0], dtype=np.float32)
