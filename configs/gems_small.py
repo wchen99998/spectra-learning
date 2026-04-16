@@ -46,8 +46,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.vicreg_variance_target = 1.0
     cfg.vicreg_eps = 1e-4
     cfg.jepa_num_target_blocks = 2
-    cfg.jepa_context_fraction = 0.35
-    cfg.jepa_target_fraction = 0.2
+    cfg.jepa_context_fraction = 0.45
+    cfg.jepa_target_fraction = 0.25
     cfg.jepa_block_min_len = 1
     cfg.jepa_mask_strategy = "ragged"
     cfg.jepa_mask_lengths = (1, 2, 4, 8, 12)
@@ -133,4 +133,3 @@ def get_config() -> config_dict.ConfigDict:
     cfg.wandb_run_name_prefix = "jepa_masked_latent_index"
 
     return cfg
-

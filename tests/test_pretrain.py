@@ -115,6 +115,29 @@ class FourierFeatureTests(unittest.TestCase):
             places=6,
         )
 
+    def test_peak_embedder_raw_branch_restores_clamped_log_intensity(self):
+        embedder = PeakFeatureEmbedder(
+            model_dim=32,
+            hidden_dim=16,
+            fourier_strategy="lin_float_int",
+            fourier_x_min=1e-4,
+            fourier_x_max=1000.0,
+            fourier_num_freqs=8,
+        )
+        captured: dict[str, torch.Tensor] = {}
+
+        def capture_raw_input(_module, args):
+            captured["raw_input"] = args[0].detach().clone()
+
+        handle = embedder.raw_ffn.register_forward_pre_hook(capture_raw_input)
+        peak_mz = torch.tensor([[0.25]], dtype=torch.float32)
+        peak_intensity = torch.tensor([[-1.0]], dtype=torch.float32)
+        embedder(peak_mz, peak_intensity)
+        handle.remove()
+
+        expected = torch.tensor([[[0.25, -1.0, 0.0]]], dtype=torch.float32)
+        self.assertTrue(torch.allclose(captured["raw_input"], expected))
+
 
 class BlockJEPATests(unittest.TestCase):
     def _build_model(self, **kwargs) -> PeakSetSIGReg:

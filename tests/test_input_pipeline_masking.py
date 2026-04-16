@@ -3,6 +3,41 @@ import torch
 import input_pipeline
 
 
+def test_sample_ragged_block_mask_uses_full_block_length() -> None:
+    active_positions = torch.tensor(
+        [True, True, True, True, True, False],
+        dtype=torch.bool,
+    )
+
+    torch.manual_seed(4)
+    mask = input_pipeline._sample_ragged_block_mask_1d_torch(
+        active_positions,
+        masked_fraction=3.0 / 5.0,
+        lengths=(3,),
+        round_from=1,
+    )
+
+    assert int(mask.sum().item()) == 3
+    assert not (mask & ~active_positions).any()
+
+
+def test_sample_ragged_block_mask_caps_length_to_active_support() -> None:
+    active_positions = torch.tensor(
+        [True, False, True, True, False],
+        dtype=torch.bool,
+    )
+
+    torch.manual_seed(4)
+    mask = input_pipeline._sample_ragged_block_mask_1d_torch(
+        active_positions,
+        masked_fraction=1.0,
+        lengths=(5,),
+        round_from=1,
+    )
+
+    assert torch.equal(mask, active_positions)
+
+
 def test_sample_block_masks_ragged_blocks_alias_matches_ragged() -> None:
     peak_valid_mask = torch.tensor(
         [

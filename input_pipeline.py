@@ -165,8 +165,9 @@ def _sample_ragged_block_mask_1d_torch(
     bs = bs / bs.sum()
     masks_by_length: list[torch.Tensor] = []
     for length_idx, length in enumerate(lengths):
+        block_len = int(length)
         max_elem = int(
-            math.ceil(float(masked_fraction) * float(active_count) / float(length))
+            math.ceil(float(masked_fraction) * float(active_count) / float(block_len))
         )
         coeff_float = float(bs[length_idx].item()) * float(max_elem)
         if length_idx < round_from:
@@ -176,16 +177,17 @@ def _sample_ragged_block_mask_1d_torch(
         if coeff == 0:
             masks_by_length.append(torch.zeros_like(active_positions))
             continue
+        effective_len = min(block_len, active_count)
+        max_start = active_count - effective_len
         starts = torch.randint(
-            1 - int(length),
-            active_count,
+            0,
+            max_start + 1,
             (coeff,),
             device=active_positions.device,
         )
-        starts = starts.clamp_min_(0)
         block_mask = (compressed_positions.unsqueeze(0) >= starts.unsqueeze(1)) & (
             compressed_positions.unsqueeze(0)
-            < (starts + int(length)).unsqueeze(1)
+            < (starts + effective_len).unsqueeze(1)
         )
         block_mask &= active_positions.unsqueeze(0)
         masks_by_length.append(block_mask.any(dim=0))

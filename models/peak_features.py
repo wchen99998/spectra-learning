@@ -98,7 +98,7 @@ class PeakFeatureEmbedder(nn.Module):
             nn.Linear(hidden_dim, fourier_dim),
         )
         self.raw_ffn = nn.Sequential(
-            nn.Linear(2, hidden_dim),
+            nn.Linear(3, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, raw_dim),
         )
@@ -118,6 +118,7 @@ class PeakFeatureEmbedder(nn.Module):
     def forward(self, peak_mz: torch.Tensor, peak_intensity: torch.Tensor) -> torch.Tensor:
         mz = peak_mz.unsqueeze(-1)
         intensity = peak_intensity.unsqueeze(-1)
+        log_intensity = torch.log1p(peak_intensity.clamp(min=0.0)).unsqueeze(-1)
         fourier = self.fourier_ffn(self.mz_fourier(self._prepare_fourier_mz(peak_mz)))
-        raw = self.raw_ffn(torch.cat([mz, intensity], dim=-1))
+        raw = self.raw_ffn(torch.cat([mz, intensity, log_intensity], dim=-1))
         return self.output_proj(torch.cat([fourier, raw], dim=-1))

@@ -1,6 +1,7 @@
 import logging
 import math
 import random
+import time
 import warnings
 from collections import deque
 from collections.abc import Iterator
@@ -403,6 +404,17 @@ def train_and_evaluate(
     model.forward_augmented = torch.compile(model.forward_augmented, mode=_compile_mode, fullgraph=False)
     optimizer_type = str(config.get("optimizer", "adamw")).lower()
     device_prefetch_size = int(config.get("device_prefetch_size", 1))
+    max_duration_hours = config.get("max_duration_hours", None)
+    deadline = (
+        None
+        if max_duration_hours is None
+        else time.perf_counter() + float(max_duration_hours) * 3600.0
+    )
+    if deadline is not None:
+        logging.info(
+            "Training wall-clock budget: %.2f hours",
+            float(max_duration_hours),
+        )
     _msg_probe_raw = float(config.get("msg_probe_every_n_steps", 0))
     if 0 < _msg_probe_raw <= 1:
         reference_steps = total_steps if num_epochs < 1 else steps_per_epoch
@@ -413,6 +425,7 @@ def train_and_evaluate(
     grad_clip_norm = float(_gcn) if _gcn is not None else None
     last_msg_probe_metrics: dict[str, float] = {}
     _wandb_run = getattr(logger, "experiment", None)
+    stopped_for_time_limit = False
     for epoch in range(start_epoch, loop_epochs):
         logging.info("Starting epoch %d at global_step=%d", epoch, global_step)
         train_loader = datamodule.train_loader_for_epoch(epoch)
@@ -431,6 +444,14 @@ def train_and_evaluate(
         )
         pbar = tqdm(total=epoch_steps, desc=f"Epoch {epoch}", unit="step")
         while global_step < total_steps and (batch := prefetcher.next()) is not None:
+            if deadline is not None and time.perf_counter() >= deadline:
+                logging.info(
+                    "Reached max_duration_hours=%.2f at global_step=%d; stopping early.",
+                    float(max_duration_hours),
+                    global_step,
+                )
+                stopped_for_time_limit = True
+                break
             metrics = _train_step_impl(
                 model,
                 batch,
@@ -542,6 +563,8 @@ def train_and_evaluate(
         logging.info("Finished epoch %d at global_step=%d", epoch, global_step)
         del prefetcher
         del train_loader
+        if stopped_for_time_limit:
+            break
     _save_checkpoint(
         checkpoint_dir / "last.pt",
         model,
@@ -558,7 +581,12 @@ def train_and_evaluate(
             logging.info("  %s: %.6f", k, v)
     else:
         logging.info("No MSG probe results were collected during training.")
-    return {**last_msg_probe_metrics, **model_param_metrics}
+    return {
+        **last_msg_probe_metrics,
+        **model_param_metrics,
+        "run/stopped_for_time_limit": float(stopped_for_time_limit),
+        "run/final_global_step": float(global_step),
+    }
 
 
 if __name__ == "__main__":
