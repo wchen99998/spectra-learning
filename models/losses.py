@@ -27,6 +27,7 @@ class SIGReg(nn.Module):
         A = A.div_(A.norm(p=2, dim=0))
         x_t = (flat @ A).unsqueeze(-1) * self.t  # [N, num_slices, knots]
         if valid_mask is None:
+            sample_count = flat.new_tensor(float(flat.size(0)))
             cos_mean = x_t.cos().mean(0)
             sin_mean = x_t.sin().mean(0)
         else:
@@ -37,4 +38,4 @@ class SIGReg(nn.Module):
             sin_mean = (x_t.sin() * weight_view).sum(0) / sample_count
         err = (cos_mean - self.phi).square() + sin_mean.square()
         statistic = err @ self.weights
-        return statistic.mean()
+        return (statistic * sample_count).mean()
