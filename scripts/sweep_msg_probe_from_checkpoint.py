@@ -43,7 +43,6 @@ from input_pipeline import numpy_batch_to_torch
 from models.model import PeakSetEncoder
 from utils.massspec_probe_data import MassSpecProbeData
 from utils.msg_probe import (
-    FG_SMARTS,
     REGRESSION_TARGET_KEYS,
     MsgLinearProbe,
     MsgProbeSplitTargets,
@@ -166,15 +165,15 @@ def _iter_probe_batches(
 def _allocate_split_cache(
     size: int,
     input_dim: int,
+    maccs_bits: int,
 ) -> dict[str, torch.Tensor]:
     cache: dict[str, torch.Tensor] = {
         "probe_inputs": torch.empty((size, input_dim), dtype=torch.float16),
         "probe_valid_mol": torch.empty(size, dtype=torch.bool),
+        "probe_maccs": torch.empty((size, maccs_bits), dtype=torch.int32),
     }
     for name in REGRESSION_TARGET_KEYS:
         cache[f"probe_{name}"] = torch.empty(size, dtype=torch.float32)
-    for name in FG_SMARTS:
-        cache[f"probe_fg_{name}"] = torch.empty(size, dtype=torch.int32)
     return cache
 
 
@@ -220,15 +219,15 @@ def _extract_split_cache(
                 cache = _allocate_split_cache(
                     size=size,
                     input_dim=int(probe_inputs.shape[1]),
+                    maccs_bits=int(batch["probe_maccs"].shape[1]),
                 )
             take = int(probe_inputs.shape[0])
             sl = slice(offset, offset + take)
             cache["probe_inputs"][sl] = probe_inputs.cpu().to(torch.float16)
             cache["probe_valid_mol"][sl] = batch["probe_valid_mol"].to(torch.bool).cpu()
+            cache["probe_maccs"][sl] = batch["probe_maccs"].to(torch.int32).cpu()
             for name in REGRESSION_TARGET_KEYS:
                 cache[f"probe_{name}"][sl] = batch[f"probe_{name}"].to(torch.float32).cpu()
-            for name in FG_SMARTS:
-                cache[f"probe_fg_{name}"][sl] = batch[f"probe_fg_{name}"].to(torch.int32).cpu()
             offset += take
     assert cache is not None
     log.info(
@@ -284,11 +283,8 @@ def _build_split_targets_from_cache(
         name: cache[f"probe_{name}"].numpy()[valid].astype(np.float32, copy=False)
         for name in REGRESSION_TARGET_KEYS
     }
-    classification = {
-        name: cache[f"probe_fg_{name}"].numpy()[valid].astype(np.int32, copy=False)
-        for name in FG_SMARTS
-    }
-    return MsgProbeSplitTargets(regression=regression, classification=classification)
+    maccs = cache["probe_maccs"].numpy()[valid].astype(np.int32, copy=False)
+    return MsgProbeSplitTargets(regression=regression, maccs=maccs)
 
 
 def _iter_cached_batches(
@@ -426,7 +422,7 @@ def run_cached_msg_probe(
                 epoch_state=test_state,
                 task_spec=task_spec,
             ),
-            "msg_probe/num_fg_tasks": float(len(task_spec.classification_tasks)),
+            "msg_probe/num_maccs_bits": float(task_spec.maccs_bits),
             "msg_probe_epoch": float(epoch_idx + 1),
         }
         curve.append(dict(final_metrics))
@@ -563,8 +559,10 @@ def _parse_online_probe_curve(workdir: Path) -> list[dict[str, float]]:
     if log_path is None:
         return []
     pattern = re.compile(
-        r"step=(?P<step>\d+) msg_probe\(test_r2_mol_weight=(?P<r2>[0-9.]+) "
-        r"test_auc_fg_mean=(?P<auc>[0-9.]+)"
+        r"step=(?P<step>\d+) msg_probe best_epoch=\d+ "
+        r"\(test_r2_mean_wo_num_rings=(?P<r2>[0-9.]+) "
+        r"test_mae_num_rings=[0-9.]+ "
+        r"test_auc_maccs_mean=(?P<auc>[0-9.]+)"
     )
     rows: list[dict[str, float]] = []
     for line in log_path.read_text().splitlines():
@@ -574,8 +572,8 @@ def _parse_online_probe_curve(workdir: Path) -> list[dict[str, float]]:
         rows.append(
             {
                 "checkpoint_step": float(match.group("step")),
-                "online_test_auc_fg_mean": float(match.group("auc")),
-                "online_test_r2_mol_weight": float(match.group("r2")),
+                "online_test_auc_maccs_mean": float(match.group("auc")),
+                "online_test_r2_mean_wo_num_rings": float(match.group("r2")),
             }
         )
     return rows
@@ -590,7 +588,7 @@ def _plot_checkpoint_curve(
     plt.figure(figsize=(11, 5))
     if online_rows:
         steps = [row["checkpoint_step"] for row in online_rows]
-        values = [row["online_test_auc_fg_mean"] for row in online_rows]
+        values = [row["online_test_auc_maccs_mean"] for row in online_rows]
         plt.plot(steps, values, marker="o", label="online final probe")
     by_setting: dict[str, list[dict[str, Any]]] = {}
     for row in checkpoint_rows:
@@ -935,7 +933,7 @@ def _plot_epoch_curves(
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     metrics = [
-        ("msg_probe/test/auc_fg_mean", "msg_probe/train/auc_fg_mean", "AUC (fg_mean)"),
+        ("msg_probe/test/auc_maccs_mean", "msg_probe/train/auc_maccs_mean", "AUC (MACCS mean)"),
         (
             "msg_probe/test/r2_mean_wo_num_rings",
             "msg_probe/train/r2_mean_wo_num_rings",
@@ -1145,7 +1143,7 @@ def main() -> None:
     if args.config_override_json:
         config.update(json.loads(args.config_override_json))
     metric_key = args.metric or str(
-        config.get("msg_probe_tune_metric", "msg_probe/test/auc_fg_mean")
+        config.get("msg_probe_tune_metric", "msg_probe/test/auc_maccs_mean")
     )
     fixed_checkpoint = (
         Path(args.checkpoint).expanduser().resolve()

@@ -152,7 +152,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--metric",
-        default="msg_probe/test/auc_fg_mean",
+        default="msg_probe/test/auc_maccs_mean",
         help="Metric key to optimize (from train_and_evaluate).",
     )
     parser.add_argument(

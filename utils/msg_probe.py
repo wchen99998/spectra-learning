@@ -11,7 +11,11 @@ from sklearn.metrics import r2_score, roc_auc_score
 from input_pipeline import numpy_batch_to_torch
 from models.model import PeakSetEncoder, PeakSetSIGReg
 from utils.massspec_probe_data import MassSpecProbeData
-from utils.massspec_probe_targets import FG_SMARTS, REGRESSION_TARGET_KEYS
+from utils.massspec_probe_targets import (
+    FG_SMARTS,
+    MACCS_FINGERPRINT_BITS,
+    REGRESSION_TARGET_KEYS,
+)
 from utils.schedulers import learning_rate_at_step
 
 
@@ -20,15 +24,15 @@ log = logging.getLogger(__name__)
 
 class MsgProbeTaskSpec(NamedTuple):
     regression_tasks: tuple[str, ...]
-    classification_tasks: tuple[str, ...]
     num_rings_classes: tuple[int, ...]
+    maccs_bits: int
     regression_means: dict[str, float]
     regression_stds: dict[str, float]
 
 
 class MsgProbeSplitTargets(NamedTuple):
     regression: dict[str, np.ndarray]
-    classification: dict[str, np.ndarray]
+    maccs: np.ndarray
 
 
 def build_msg_probe_inputs(
@@ -44,6 +48,7 @@ def build_msg_probe_inputs(
 
 
 _NUM_RINGS_TASK = "num_rings"
+_MACCS_TASK = "maccs"
 _REGRESSION_PROBE_TASKS = tuple(
     name for name in REGRESSION_TARGET_KEYS if name != _NUM_RINGS_TASK
 )
@@ -102,16 +107,21 @@ class DreamsLinearProbe(torch.nn.Module):
 
 
 def _probe_task_names(task_spec: MsgProbeTaskSpec) -> tuple[str, ...]:
-    task_names = task_spec.regression_tasks + task_spec.classification_tasks
+    task_names = task_spec.regression_tasks
     if task_spec.num_rings_classes:
         task_names += (_NUM_RINGS_TASK,)
+    if task_spec.maccs_bits > 0:
+        task_names += (_MACCS_TASK,)
     return task_names
 
 
 def _probe_task_output_dims(task_spec: MsgProbeTaskSpec) -> dict[str, int]:
-    if not task_spec.num_rings_classes:
-        return {}
-    return {_NUM_RINGS_TASK: len(task_spec.num_rings_classes)}
+    output_dims: dict[str, int] = {}
+    if task_spec.num_rings_classes:
+        output_dims[_NUM_RINGS_TASK] = len(task_spec.num_rings_classes)
+    if task_spec.maccs_bits > 0:
+        output_dims[_MACCS_TASK] = task_spec.maccs_bits
+    return output_dims
 
 
 def iter_massspec_probe(
@@ -167,7 +177,7 @@ def _collect_split_targets(
     max_samples: int | None = None,
 ) -> MsgProbeSplitTargets:
     regression = {name: [] for name in REGRESSION_TARGET_KEYS}
-    classification = {name: [] for name in FG_SMARTS}
+    maccs = []
     for batch in iter_massspec_probe(
         probe_data=probe_data,
         split=split,
@@ -185,10 +195,7 @@ def _collect_split_targets(
             regression[name].append(
                 batch[f"probe_{name}"][valid_mask].detach().cpu().numpy()
             )
-        for name in FG_SMARTS:
-            classification[name].append(
-                batch[f"probe_fg_{name}"][valid_mask].detach().cpu().numpy()
-            )
+        maccs.append(batch["probe_maccs"][valid_mask].detach().cpu().numpy())
 
     def _cat(d, dt):
         return {
@@ -197,7 +204,11 @@ def _collect_split_targets(
 
     return MsgProbeSplitTargets(
         regression=_cat(regression, np.float32),
-        classification=_cat(classification, np.int32),
+        maccs=(
+            np.concatenate(maccs, axis=0)
+            if maccs
+            else np.empty((0, MACCS_FINGERPRINT_BITS), dtype=np.int32)
+        ),
     )
 
 
@@ -211,19 +222,13 @@ def _build_task_spec(
         values = train_targets.regression[name].astype(np.float32)
         regression_means[name] = float(values.mean())
         regression_stds[name] = float(np.clip(values.std(), 1e-8, None))
-    classification_tasks: list[str] = []
-    for name in FG_SMARTS:
-        tp = float(train_targets.classification[name].mean())
-        ep = float(test_targets.classification[name].mean())
-        if 0.01 <= tp <= 0.99 and 0.0 < ep < 1.0:
-            classification_tasks.append(name)
     num_rings_classes = tuple(
         sorted(np.unique(train_targets.regression[_NUM_RINGS_TASK].astype(np.int32)).tolist())
     )
     return MsgProbeTaskSpec(
         regression_tasks=_REGRESSION_PROBE_TASKS,
-        classification_tasks=tuple(classification_tasks),
         num_rings_classes=num_rings_classes,
+        maccs_bits=int(train_targets.maccs.shape[1]),
         regression_means=regression_means,
         regression_stds=regression_stds,
     )
@@ -251,12 +256,6 @@ def _probe_step(
         losses[name] = F.mse_loss(pred, (target - mean) / std)
         predictions[name] = pred.detach() * std + mean
         task_targets[name] = target
-    for name in task_spec.classification_tasks:
-        target = batch[f"probe_fg_{name}"][valid_mask].to(dtype=torch.float32)
-        pred = logits[name].squeeze(-1)
-        losses[name] = F.binary_cross_entropy_with_logits(pred, target)
-        predictions[name] = torch.sigmoid(pred.detach())
-        task_targets[name] = target
     if task_spec.num_rings_classes:
         target = batch["probe_num_rings"][valid_mask].to(dtype=torch.long)
         class_values = torch.tensor(
@@ -271,6 +270,12 @@ def _probe_step(
             dtype=torch.float32
         )
         task_targets[_NUM_RINGS_TASK] = target.to(dtype=torch.float32)
+    if task_spec.maccs_bits > 0:
+        target = batch["probe_maccs"][valid_mask].to(dtype=torch.float32)
+        pred = logits[_MACCS_TASK]
+        losses[_MACCS_TASK] = F.binary_cross_entropy_with_logits(pred, target)
+        predictions[_MACCS_TASK] = torch.sigmoid(pred.detach())
+        task_targets[_MACCS_TASK] = target
     return {
         "loss_total": torch.stack(list(losses.values())).mean(),
         "losses": losses,
@@ -309,7 +314,7 @@ def resolve_msg_probe_select_metric(
     return str(
         config.get(
             "msg_probe_select_metric",
-            config.get("msg_probe_tune_metric", "msg_probe/test/auc_fg_mean"),
+            config.get("msg_probe_tune_metric", "msg_probe/test/auc_maccs_mean"),
         )
     )
 
@@ -329,7 +334,6 @@ def _score_epoch_state(
         f"{prefix}/samples": float(count),
     }
     regression_r2_values, regression_mae_values = [], []
-    classification_auc_values = []
     predictions = epoch_state["predictions"]
     targets = epoch_state["targets"]
     for name in task_spec.regression_tasks:
@@ -339,11 +343,6 @@ def _score_epoch_state(
         metrics[f"{prefix}/mae_{name}"] = float(np.mean(np.abs(target - pred)))
         regression_r2_values.append(metrics[f"{prefix}/r2_{name}"])
         regression_mae_values.append(metrics[f"{prefix}/mae_{name}"])
-    for name in task_spec.classification_tasks:
-        pred = np.concatenate(predictions[name], axis=0)
-        target = np.concatenate(targets[name], axis=0)
-        metrics[f"{prefix}/auc_fg_{name}"] = float(roc_auc_score(target, pred))
-        classification_auc_values.append(metrics[f"{prefix}/auc_fg_{name}"])
     if task_spec.num_rings_classes:
         pred = np.concatenate(predictions[_NUM_RINGS_TASK], axis=0)
         target = np.concatenate(targets[_NUM_RINGS_TASK], axis=0)
@@ -352,11 +351,35 @@ def _score_epoch_state(
         metrics[f"{prefix}/acc_num_rings_within_1"] = float(
             np.mean(np.abs(pred - target) <= 1.0)
         )
+    if task_spec.maccs_bits > 0:
+        pred = np.concatenate(predictions[_MACCS_TASK], axis=0)
+        target = np.concatenate(targets[_MACCS_TASK], axis=0)
+        auc_values = []
+        recall_values = []
+        for bit_idx in range(task_spec.maccs_bits):
+            bit_target = target[:, bit_idx]
+            if np.unique(bit_target).size < 2:
+                if np.count_nonzero(bit_target) > 0:
+                    bit_pred = pred[:, bit_idx] >= 0.5
+                    recall_values.append(
+                        float(bit_pred[bit_target == 1].mean())
+                    )
+                continue
+            bit_pred = pred[:, bit_idx] >= 0.5
+            auc_values.append(float(roc_auc_score(bit_target, pred[:, bit_idx])))
+            recall_values.append(float(bit_pred[bit_target == 1].mean()))
+        metrics[f"{prefix}/num_maccs_auc_bits"] = float(len(auc_values))
+        metrics[f"{prefix}/num_maccs_recall_bits"] = float(len(recall_values))
+        metrics[f"{prefix}/auc_maccs_mean"] = (
+            float(np.mean(auc_values)) if auc_values else float("nan")
+        )
+        metrics[f"{prefix}/recall_maccs_mean"] = (
+            float(np.mean(recall_values)) if recall_values else float("nan")
+        )
     metrics[f"{prefix}/r2_mean"] = float(np.mean(regression_r2_values))
     metrics[f"{prefix}/mae_mean"] = float(np.mean(regression_mae_values))
     metrics[f"{prefix}/r2_mean_wo_num_rings"] = metrics[f"{prefix}/r2_mean"]
     metrics[f"{prefix}/mae_mean_wo_num_rings"] = metrics[f"{prefix}/mae_mean"]
-    metrics[f"{prefix}/auc_fg_mean"] = float(np.mean(classification_auc_values))
     return metrics
 
 
@@ -509,7 +532,7 @@ def run_msg_probe(
             **_score_epoch_state(
                 prefix="msg_probe/test", epoch_state=test_state, task_spec=task_spec
             ),
-            "msg_probe/num_fg_tasks": float(len(task_spec.classification_tasks)),
+            "msg_probe/num_maccs_bits": float(task_spec.maccs_bits),
             "msg_probe_epoch": float(epoch_idx + 1),
         }
         current_value = float(epoch_metrics[probe_select_metric])
@@ -522,25 +545,27 @@ def run_msg_probe(
             best_metric_value = current_value
             best_metrics = dict(epoch_metrics)
         log.info(
-            "MSG probe epoch %d/%d test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_fg_mean=%.4f fg_tasks=%d",
+            "MSG probe epoch %d/%d test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f maccs_bits=%d",
             epoch_idx + 1,
             num_probe_epochs,
             epoch_metrics["msg_probe/test/r2_mean_wo_num_rings"],
             epoch_metrics["msg_probe/test/mae_num_rings"],
-            epoch_metrics["msg_probe/test/auc_fg_mean"],
-            int(epoch_metrics["msg_probe/num_fg_tasks"]),
+            epoch_metrics["msg_probe/test/auc_maccs_mean"],
+            epoch_metrics["msg_probe/test/recall_maccs_mean"],
+            int(epoch_metrics["msg_probe/num_maccs_bits"]),
         )
         if on_epoch_end is not None:
             on_epoch_end(epoch_metrics)
     if best_metrics:
         log.info(
-            "MSG probe best epoch %d: %s=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_fg_mean=%.4f",
+            "MSG probe best epoch %d: %s=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f",
             int(best_metrics["msg_probe_epoch"]),
             probe_select_metric,
             best_metrics[probe_select_metric],
             best_metrics["msg_probe/test/r2_mean_wo_num_rings"],
             best_metrics["msg_probe/test/mae_num_rings"],
-            best_metrics["msg_probe/test/auc_fg_mean"],
+            best_metrics["msg_probe/test/auc_maccs_mean"],
+            best_metrics["msg_probe/test/recall_maccs_mean"],
         )
     if was_training:
         model.train()
@@ -568,12 +593,12 @@ def _dreams_probe_step(
         losses[name] = F.mse_loss(pred, (target - mean) / std)
         predictions[name] = pred.detach() * std + mean
         task_targets[name] = target
-    for name in task_spec.classification_tasks:
-        target = batch[f"probe_fg_{name}"][valid_mask].to(dtype=torch.float32)
-        pred = logits[name].squeeze(-1)
-        losses[name] = F.binary_cross_entropy_with_logits(pred, target)
-        predictions[name] = torch.sigmoid(pred.detach())
-        task_targets[name] = target
+    if task_spec.maccs_bits > 0:
+        target = batch["probe_maccs"][valid_mask].to(dtype=torch.float32)
+        pred = logits[_MACCS_TASK]
+        losses[_MACCS_TASK] = F.binary_cross_entropy_with_logits(pred, target)
+        predictions[_MACCS_TASK] = torch.sigmoid(pred.detach())
+        task_targets[_MACCS_TASK] = target
     return {
         "loss_total": torch.stack(list(losses.values())).mean(),
         "losses": losses,
@@ -714,16 +739,17 @@ def run_dreams_probe(
             **_score_epoch_state(
                 prefix="dreams_probe/test", epoch_state=test_state, task_spec=task_spec
             ),
-            "dreams_probe/num_fg_tasks": float(len(task_spec.classification_tasks)),
+            "dreams_probe/num_maccs_bits": float(task_spec.maccs_bits),
             "dreams_probe_epoch": float(epoch_idx + 1),
         }
         log.info(
-            "DreaMS probe epoch %d/%d test_r2_mean=%.4f test_auc_fg_mean=%.4f fg_tasks=%d",
+            "DreaMS probe epoch %d/%d test_r2_mean=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f maccs_bits=%d",
             epoch_idx + 1,
             num_probe_epochs,
             final_metrics["dreams_probe/test/r2_mean"],
-            final_metrics["dreams_probe/test/auc_fg_mean"],
-            int(final_metrics["dreams_probe/num_fg_tasks"]),
+            final_metrics["dreams_probe/test/auc_maccs_mean"],
+            final_metrics["dreams_probe/test/recall_maccs_mean"],
+            int(final_metrics["dreams_probe/num_maccs_bits"]),
         )
         if on_epoch_end is not None:
             on_epoch_end(final_metrics)

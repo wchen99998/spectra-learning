@@ -496,9 +496,14 @@ def train_and_evaluate(
                             "msg_probe/test/r2_mean_wo_num_rings",
                         ),
                         (
-                            "auc_fg_mean",
-                            "msg_probe/train/auc_fg_mean",
-                            "msg_probe/test/auc_fg_mean",
+                            "auc_maccs_mean",
+                            "msg_probe/train/auc_maccs_mean",
+                            "msg_probe/test/auc_maccs_mean",
+                        ),
+                        (
+                            "recall_maccs_mean",
+                            "msg_probe/train/recall_maccs_mean",
+                            "msg_probe/test/recall_maccs_mean",
                         ),
                         (
                             "mae_num_rings",
@@ -524,13 +529,14 @@ def train_and_evaluate(
                         )
                 last_msg_probe_metrics = probe_metrics
                 logging.info(
-                    "step=%d msg_probe best_epoch=%d (test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_fg_mean=%.4f fg_tasks=%d)",
+                    "step=%d msg_probe best_epoch=%d (test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f maccs_bits=%d)",
                     global_step,
                     int(probe_metrics["msg_probe_epoch"]),
                     probe_metrics["msg_probe/test/r2_mean_wo_num_rings"],
                     probe_metrics["msg_probe/test/mae_num_rings"],
-                    probe_metrics["msg_probe/test/auc_fg_mean"],
-                    int(probe_metrics["msg_probe/num_fg_tasks"]),
+                    probe_metrics["msg_probe/test/auc_maccs_mean"],
+                    probe_metrics["msg_probe/test/recall_maccs_mean"],
+                    int(probe_metrics["msg_probe/num_maccs_bits"]),
                 )
         pbar.close()
         logging.info("Finished epoch %d at global_step=%d", epoch, global_step)

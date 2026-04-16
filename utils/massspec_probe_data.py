@@ -13,8 +13,9 @@ from rdkit import Chem, DataStructs
 from rdkit.Chem import AllChem
 from input_pipeline import _prepend_precursor_token_tf, apply_peak_transforms_tf
 from utils.massspec_probe_targets import (
-    FG_SMARTS,
+    MACCS_FINGERPRINT_BITS,
     REGRESSION_TARGET_KEYS,
+    build_maccs_targets_for_rows,
     build_probe_targets_for_rows,
 )
 
@@ -40,9 +41,9 @@ _METADATA_FILENAME = "metadata.json"
 
 MASSSPEC_HF_REPO = "roman-bushuiev/MassSpecGym"
 MASSSPEC_TSV_PATH = "data/MassSpecGym.tsv"
-MASSSPEC_METADATA_VERSION = 2
+MASSSPEC_METADATA_VERSION = 3
 
-NIST20_METADATA_VERSION = 3
+NIST20_METADATA_VERSION = 4
 NIST20_HF_REPO = "roman-bushuiev/GeMS"
 NIST20_HF_FILENAME = (
     "data/DreaMS_Atlas/nist20_mona_clean_merged_spectra_dreams_hidden_nist20.hdf5"
@@ -51,7 +52,7 @@ _NIST20_SPLIT_SEED = 42
 _NIST20_TRAIN_FRAC = 0.70
 _NIST20_VAL_FRAC = 0.15
 
-MONA_A_METADATA_VERSION = 1
+MONA_A_METADATA_VERSION = 2
 MONA_A_HF_REPO = "roman-bushuiev/GeMS"
 MONA_A_HF_FILENAME = (
     "data/auxiliary/MoNA_A_Murcko_split_neighbours_[M+H]+_0.05Da.pkl"
@@ -284,7 +285,7 @@ def _write_tfrecords_with_fingerprint(
     collision_energy: np.ndarray,
     collision_energy_present: np.ndarray,
     probe_mol_props: dict[str, np.ndarray],
-    probe_fg_binary: dict[str, np.ndarray],
+    probe_maccs: np.ndarray,
     probe_valid_mol: np.ndarray,
     output_path: Path,
     num_shards: int,
@@ -316,16 +317,13 @@ def _write_tfrecords_with_fingerprint(
                         [int(collision_energy_present[i])]
                     ),
                     "probe_valid_mol": _int64_feat([int(probe_valid_mol[i])]),
+                    "probe_maccs": _int64_feat(probe_maccs[i].astype(np.int64)),
                 }
                 if dreams_embedding is not None:
                     feat["dreams_embedding"] = _float_feat(dreams_embedding[i])
                 for name in REGRESSION_TARGET_KEYS:
                     feat[f"probe_{name}"] = _float_feat(
                         [float(probe_mol_props[name][i])]
-                    )
-                for name in FG_SMARTS:
-                    feat[f"probe_fg_{name}"] = _int64_feat(
-                        [int(probe_fg_binary[name][i])]
                     )
                 example = tf.train.Example(features=tf.train.Features(feature=feat))
                 writer.write(example.SerializeToString())
@@ -367,15 +365,16 @@ def _filter_encode_and_write(
     collision_energy_present = collision_energy_present[keep]
     if dreams_embedding is not None:
         dreams_embedding = dreams_embedding[keep]
-    probe_mol_props, probe_fg_binary, probe_valid_mol = build_probe_targets_for_rows(
-        smiles
-    )
+    probe_mol_props, _, probe_valid_mol = build_probe_targets_for_rows(smiles)
+    probe_maccs, probe_maccs_valid = build_maccs_targets_for_rows(smiles)
+    probe_valid_mol &= probe_maccs_valid
     result: dict[str, Any] = {
         "metadata_version": metadata_version,
         "adduct_vocab": adduct_vocab,
         "instrument_type_vocab": instrument_type_vocab,
         "max_precursor_mz": float(max_precursor_mz),
         "dreams_dim": int(dreams_embedding.shape[1]) if dreams_embedding is not None else 0,
+        "probe_maccs_bits": MACCS_FINGERPRINT_BITS,
     }
     s2, s4 = num_shards // 2, num_shards // 4
     for split_name, split_shards in [("train", s2), ("val", s4), ("test", s4)]:
@@ -391,7 +390,7 @@ def _filter_encode_and_write(
             collision_energy[mask],
             collision_energy_present[mask],
             {k: v[mask] for k, v in probe_mol_props.items()},
-            {k: v[mask] for k, v in probe_fg_binary.items()},
+            probe_maccs[mask],
             probe_valid_mol[mask],
             output_dir / split_name,
             max(1, split_shards),
@@ -423,6 +422,8 @@ def _probe_metadata_valid(
         ):
             return None
     if "adduct_vocab" not in metadata or "instrument_type_vocab" not in metadata:
+        return None
+    if int(metadata.get("probe_maccs_bits", 0)) != MACCS_FINGERPRINT_BITS:
         return None
     return metadata
 
@@ -548,11 +549,10 @@ def _parse_probe_batch(
         "collision_energy": tf.io.FixedLenFeature([1], tf.float32),
         "collision_energy_present": tf.io.FixedLenFeature([1], tf.int64),
         "probe_valid_mol": tf.io.FixedLenFeature([1], tf.int64),
+        "probe_maccs": tf.io.FixedLenFeature([MACCS_FINGERPRINT_BITS], tf.int64),
     }
     for name in REGRESSION_TARGET_KEYS:
         feature_spec[f"probe_{name}"] = tf.io.FixedLenFeature([1], tf.float32)
-    for name in FG_SMARTS:
-        feature_spec[f"probe_fg_{name}"] = tf.io.FixedLenFeature([1], tf.int64)
     if dreams_dim > 0:
         feature_spec["dreams_embedding"] = tf.io.FixedLenFeature(
             [dreams_dim], tf.float32
@@ -582,12 +582,9 @@ def _parse_probe_batch(
             parsed["collision_energy_present"][:, 0], tf.int32
         )
         batch["probe_valid_mol"] = tf.cast(parsed["probe_valid_mol"][:, 0], tf.bool)
+        batch["probe_maccs"] = tf.cast(parsed["probe_maccs"], tf.int32)
         for name in REGRESSION_TARGET_KEYS:
             batch[f"probe_{name}"] = parsed[f"probe_{name}"][:, 0]
-        for name in FG_SMARTS:
-            batch[f"probe_fg_{name}"] = tf.cast(
-                parsed[f"probe_fg_{name}"][:, 0], tf.int32
-            )
         if dreams_dim > 0:
             batch["dreams_embedding"] = parsed["dreams_embedding"]
         return batch

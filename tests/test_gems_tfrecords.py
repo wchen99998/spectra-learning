@@ -576,7 +576,7 @@ class MassSpecPreprocessTests(unittest.TestCase):
                     "probe_logp": tf.io.FixedLenFeature([1], tf.float32),
                     "probe_num_heavy_atoms": tf.io.FixedLenFeature([1], tf.float32),
                     "probe_num_rings": tf.io.FixedLenFeature([1], tf.float32),
-                    "probe_fg_hydroxyl": tf.io.FixedLenFeature([1], tf.int64),
+                    "probe_maccs": tf.io.FixedLenFeature([166], tf.int64),
                     "probe_valid_mol": tf.io.FixedLenFeature([1], tf.int64),
                 },
             )
@@ -585,11 +585,12 @@ class MassSpecPreprocessTests(unittest.TestCase):
         self.assertEqual(metadata["val_size"], 1)
         self.assertEqual(metadata["test_size"], 1)
         self.assertEqual(metadata["max_precursor_mz"], 1000.0)
+        self.assertEqual(metadata["probe_maccs_bits"], 166)
         self.assertEqual(parsed["probe_mol_weight"].shape[0], 1)
         self.assertEqual(parsed["probe_logp"].shape[0], 1)
         self.assertEqual(parsed["probe_num_heavy_atoms"].shape[0], 1)
         self.assertEqual(parsed["probe_num_rings"].shape[0], 1)
-        self.assertEqual(parsed["probe_fg_hydroxyl"].shape[0], 1)
+        self.assertEqual(parsed["probe_maccs"].shape[0], 166)
         self.assertEqual(parsed["probe_valid_mol"].shape[0], 1)
 
     def test_benchmark_preprocess_matches_input_pipeline_without_precursor_window(self):

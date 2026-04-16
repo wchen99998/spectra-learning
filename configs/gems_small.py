@@ -94,7 +94,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_max_train_samples = None
     cfg.msg_probe_max_test_samples = None
     cfg.probe_dataset = "nist20"
-    cfg.msg_probe_tune_metric = "msg_probe/test/auc_fg_mean"
+    cfg.msg_probe_tune_metric = "msg_probe/test/auc_maccs_mean"
     cfg.msg_probe_tune_param_space = [
         {
             "param": "msg_probe_learning_rate",

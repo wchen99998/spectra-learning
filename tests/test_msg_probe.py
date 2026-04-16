@@ -6,7 +6,6 @@ import torch
 
 from input_pipeline import _prepend_precursor_token_tf
 from utils.msg_probe import (
-    FG_SMARTS,
     MsgLinearProbe,
     MsgProbeSplitTargets,
     _build_task_spec,
@@ -23,6 +22,10 @@ from utils.msg_probe import (
     probe_steps_per_epoch,
     resolve_msg_probe_select_metric,
 )
+
+
+def _maccs(rows: list[list[int]]) -> np.ndarray:
+    return np.asarray(rows, dtype=np.int32)
 
 
 class _DummyDataset:
@@ -94,14 +97,14 @@ class MsgLinearProbeTests(unittest.TestCase):
     def test_output_shapes_match_task_heads(self):
         probe = MsgLinearProbe(
             input_dim=64,
-            task_names=("mol_weight", "hydroxyl", "amine"),
+            task_names=("mol_weight", "maccs"),
+            task_output_dims={"maccs": 4},
         )
         probe_inputs = torch.randn(7, 64)
         logits = probe(probe_inputs)
 
         self.assertEqual(logits["mol_weight"].shape, (7, 1))
-        self.assertEqual(logits["hydroxyl"].shape, (7, 1))
-        self.assertEqual(logits["amine"].shape, (7, 1))
+        self.assertEqual(logits["maccs"].shape, (7, 4))
 
     def test_output_shapes_match_multiclass_head(self):
         probe = MsgLinearProbe(
@@ -118,23 +121,25 @@ class MsgLinearProbeTests(unittest.TestCase):
     def test_finite_outputs(self):
         probe = MsgLinearProbe(
             input_dim=32,
-            task_names=("mol_weight", "hydroxyl"),
+            task_names=("mol_weight", "maccs"),
+            task_output_dims={"maccs": 4},
         )
         probe_inputs = torch.randn(3, 32)
         logits = probe(probe_inputs)
 
         self.assertTrue(torch.isfinite(logits["mol_weight"]).all().item())
-        self.assertTrue(torch.isfinite(logits["hydroxyl"]).all().item())
+        self.assertTrue(torch.isfinite(logits["maccs"]).all().item())
 
     def test_probe_heads_are_linear(self):
         probe = MsgLinearProbe(
             input_dim=32,
-            task_names=("mol_weight", "num_rings"),
-            task_output_dims={"num_rings": 4},
+            task_names=("mol_weight", "num_rings", "maccs"),
+            task_output_dims={"num_rings": 4, "maccs": 4},
         )
 
         self.assertIsInstance(probe.heads["mol_weight"], torch.nn.Linear)
         self.assertIsInstance(probe.heads["num_rings"], torch.nn.Linear)
+        self.assertIsInstance(probe.heads["maccs"], torch.nn.Linear)
 
 
 class MsgProbeStepTests(unittest.TestCase):
@@ -147,9 +152,13 @@ class MsgProbeStepTests(unittest.TestCase):
                     "num_heavy_atoms": np.asarray([2.0, 4.0, 5.0], dtype=np.float32),
                     "num_rings": np.asarray([0.0, 1.0, 2.0], dtype=np.float32),
                 },
-                classification={
-                    name: np.asarray([0, 1, 0], dtype=np.int32) for name in FG_SMARTS
-                },
+                maccs=_maccs(
+                    [
+                        [0, 1, 0, 1],
+                        [1, 0, 1, 0],
+                        [0, 1, 1, 0],
+                    ]
+                ),
             ),
             test_targets=MsgProbeSplitTargets(
                 regression={
@@ -158,9 +167,13 @@ class MsgProbeStepTests(unittest.TestCase):
                     "num_heavy_atoms": np.asarray([2.0, 4.0, 5.0], dtype=np.float32),
                     "num_rings": np.asarray([0.0, 1.0, 2.0], dtype=np.float32),
                 },
-                classification={
-                    name: np.asarray([0, 1, 0], dtype=np.int32) for name in FG_SMARTS
-                },
+                maccs=_maccs(
+                    [
+                        [0, 1, 0, 1],
+                        [1, 0, 1, 0],
+                        [0, 1, 1, 0],
+                    ]
+                ),
             ),
         )
         probe_input_dim = 16
@@ -175,9 +188,15 @@ class MsgProbeStepTests(unittest.TestCase):
             "probe_logp": torch.tensor([1.0, 1.5, 2.5], dtype=torch.float32),
             "probe_num_heavy_atoms": torch.tensor([2.0, 3.0, 5.0], dtype=torch.float32),
             "probe_num_rings": torch.tensor([0.0, 1.0, 2.0], dtype=torch.float32),
+            "probe_maccs": torch.tensor(
+                [
+                    [0, 1, 0, 1],
+                    [1, 0, 1, 0],
+                    [0, 1, 1, 0],
+                ],
+                dtype=torch.int32,
+            ),
         }
-        for name in FG_SMARTS:
-            batch[f"probe_fg_{name}"] = torch.tensor([0, 1, 1], dtype=torch.int32)
 
         def dummy_extractor(b):
             n = b["probe_valid_mol"].shape[0]
@@ -195,17 +214,11 @@ class MsgProbeStepTests(unittest.TestCase):
         self.assertEqual(result["batch_size"], 2)
         self.assertTrue(torch.isfinite(result["loss_total"]).item())
         self.assertEqual(result["predictions"]["num_rings"].shape, (2,))
+        self.assertEqual(result["predictions"]["maccs"].shape, (2, 4))
 
 
 class MsgProbeTaskSpecTests(unittest.TestCase):
-    def test_fg_tasks_follow_prevalence_filter(self):
-        train_fg = {name: np.zeros(4, dtype=np.int32) for name in FG_SMARTS}
-        test_fg = {name: np.zeros(4, dtype=np.int32) for name in FG_SMARTS}
-        train_fg["hydroxyl"] = np.asarray([0, 1, 0, 1], dtype=np.int32)
-        test_fg["hydroxyl"] = np.asarray([1, 0, 1, 0], dtype=np.int32)
-        train_fg["amine"] = np.asarray([0, 0, 0, 0], dtype=np.int32)
-        test_fg["amine"] = np.asarray([0, 1, 0, 1], dtype=np.int32)
-
+    def test_task_spec_includes_num_rings_and_maccs_bits(self):
         task_spec = _build_task_spec(
             train_targets=MsgProbeSplitTargets(
                 regression={
@@ -214,7 +227,14 @@ class MsgProbeTaskSpecTests(unittest.TestCase):
                     "num_heavy_atoms": np.linspace(2.0, 5.0, 4, dtype=np.float32),
                     "num_rings": np.asarray([0.0, 1.0, 2.0, 3.0], dtype=np.float32),
                 },
-                classification=train_fg,
+                maccs=_maccs(
+                    [
+                        [0, 1, 0, 1],
+                        [1, 0, 1, 0],
+                        [0, 1, 1, 0],
+                        [1, 1, 0, 0],
+                    ]
+                ),
             ),
             test_targets=MsgProbeSplitTargets(
                 regression={
@@ -223,7 +243,14 @@ class MsgProbeTaskSpecTests(unittest.TestCase):
                     "num_heavy_atoms": np.linspace(6.0, 9.0, 4, dtype=np.float32),
                     "num_rings": np.asarray([2.0, 3.0, 4.0, 5.0], dtype=np.float32),
                 },
-                classification=test_fg,
+                maccs=_maccs(
+                    [
+                        [1, 0, 0, 1],
+                        [0, 1, 1, 0],
+                        [1, 0, 1, 0],
+                        [0, 1, 0, 1],
+                    ]
+                ),
             ),
         )
 
@@ -231,16 +258,16 @@ class MsgProbeTaskSpecTests(unittest.TestCase):
             task_spec.regression_tasks,
             ("mol_weight", "logp", "num_heavy_atoms"),
         )
-        self.assertEqual(task_spec.classification_tasks, ("hydroxyl",))
         self.assertEqual(task_spec.num_rings_classes, (0, 1, 2, 3))
+        self.assertEqual(task_spec.maccs_bits, 4)
+        self.assertEqual(
+            _probe_task_names(task_spec),
+            ("mol_weight", "logp", "num_heavy_atoms", "num_rings", "maccs"),
+        )
 
 
 class MsgProbeMetricTests(unittest.TestCase):
-    def test_score_epoch_state_reports_num_rings_as_classification_metrics(self):
-        train_fg = {name: np.zeros(3, dtype=np.int32) for name in FG_SMARTS}
-        test_fg = {name: np.zeros(3, dtype=np.int32) for name in FG_SMARTS}
-        train_fg["hydroxyl"] = np.asarray([0, 1, 0], dtype=np.int32)
-        test_fg["hydroxyl"] = np.asarray([1, 0, 1], dtype=np.int32)
+    def test_score_epoch_state_reports_num_rings_and_maccs_metrics(self):
         task_spec = _build_task_spec(
             train_targets=MsgProbeSplitTargets(
                 regression={
@@ -249,7 +276,13 @@ class MsgProbeMetricTests(unittest.TestCase):
                     "num_heavy_atoms": np.asarray([2.0, 4.0, 6.0], dtype=np.float32),
                     "num_rings": np.asarray([0.0, 1.0, 2.0], dtype=np.float32),
                 },
-                classification=train_fg,
+                maccs=_maccs(
+                    [
+                        [0, 1, 0, 1],
+                        [1, 0, 1, 0],
+                        [0, 1, 1, 0],
+                    ]
+                ),
             ),
             test_targets=MsgProbeSplitTargets(
                 regression={
@@ -258,7 +291,13 @@ class MsgProbeMetricTests(unittest.TestCase):
                     "num_heavy_atoms": np.asarray([3.0, 5.0, 7.0], dtype=np.float32),
                     "num_rings": np.asarray([0.0, 1.0, 2.0], dtype=np.float32),
                 },
-                classification=test_fg,
+                maccs=_maccs(
+                    [
+                        [1, 0, 0, 1],
+                        [0, 1, 1, 0],
+                        [1, 0, 1, 0],
+                    ]
+                ),
             ),
         )
         epoch_state = _new_epoch_state(task_spec)
@@ -268,15 +307,27 @@ class MsgProbeMetricTests(unittest.TestCase):
                 "mol_weight": torch.tensor([10.0, 19.0, 29.0]),
                 "logp": torch.tensor([1.0, 2.0, 4.0]),
                 "num_heavy_atoms": torch.tensor([2.0, 5.0, 6.0]),
-                "hydroxyl": torch.tensor([0.1, 0.9, 0.2]),
                 "num_rings": torch.tensor([0.0, 2.0, 2.0]),
+                "maccs": torch.tensor(
+                    [
+                        [0.1, 0.9, 0.2, 0.8],
+                        [0.8, 0.2, 0.9, 0.1],
+                        [0.2, 0.8, 0.7, 0.3],
+                    ]
+                ),
             },
             "targets": {
                 "mol_weight": torch.tensor([10.0, 20.0, 30.0]),
                 "logp": torch.tensor([1.0, 2.0, 3.0]),
                 "num_heavy_atoms": torch.tensor([2.0, 4.0, 6.0]),
-                "hydroxyl": torch.tensor([0.0, 1.0, 0.0]),
                 "num_rings": torch.tensor([0.0, 1.0, 2.0]),
+                "maccs": torch.tensor(
+                    [
+                        [0.0, 1.0, 0.0, 1.0],
+                        [1.0, 0.0, 1.0, 0.0],
+                        [0.0, 1.0, 1.0, 0.0],
+                    ]
+                ),
             },
         }
         _update_epoch_state(epoch_state, result, task_spec)
@@ -294,6 +345,10 @@ class MsgProbeMetricTests(unittest.TestCase):
             metrics["msg_probe/test/r2_mean"],
             metrics["msg_probe/test/r2_mean_wo_num_rings"],
         )
+        self.assertEqual(metrics["msg_probe/test/num_maccs_auc_bits"], 4.0)
+        self.assertGreater(metrics["msg_probe/test/auc_maccs_mean"], 0.9)
+        self.assertEqual(metrics["msg_probe/test/num_maccs_recall_bits"], 4.0)
+        self.assertGreater(metrics["msg_probe/test/recall_maccs_mean"], 0.9)
 
     def test_select_metric_uses_tune_metric_fallback(self):
         cfg = {
@@ -303,8 +358,12 @@ class MsgProbeMetricTests(unittest.TestCase):
             resolve_msg_probe_select_metric(cfg),
             "msg_probe/test/mae_num_rings",
         )
-        self.assertFalse(msg_probe_metric_higher_is_better("msg_probe/test/mae_num_rings"))
-        self.assertTrue(msg_probe_metric_higher_is_better("msg_probe/test/auc_fg_mean"))
+        self.assertFalse(
+            msg_probe_metric_higher_is_better("msg_probe/test/mae_num_rings")
+        )
+        self.assertTrue(
+            msg_probe_metric_higher_is_better("msg_probe/test/auc_maccs_mean")
+        )
 
 
 class MsgProbeCollectionTests(unittest.TestCase):
@@ -318,10 +377,7 @@ class MsgProbeCollectionTests(unittest.TestCase):
                     "probe_logp": np.asarray([1.0, 2.0], dtype=np.float32),
                     "probe_num_heavy_atoms": np.asarray([2.0, 3.0], dtype=np.float32),
                     "probe_num_rings": np.asarray([0.0, 1.0], dtype=np.float32),
-                    **{
-                        f"probe_fg_{name}": np.asarray([0, 1], dtype=np.int32)
-                        for name in FG_SMARTS
-                    },
+                    "probe_maccs": _maccs([[0, 1, 0, 1], [1, 0, 1, 0]]),
                 },
                 {
                     "peak_mz": np.zeros((2, 60), dtype=np.float32),
@@ -330,10 +386,7 @@ class MsgProbeCollectionTests(unittest.TestCase):
                     "probe_logp": np.asarray([3.0, 4.0], dtype=np.float32),
                     "probe_num_heavy_atoms": np.asarray([4.0, 5.0], dtype=np.float32),
                     "probe_num_rings": np.asarray([2.0, 3.0], dtype=np.float32),
-                    **{
-                        f"probe_fg_{name}": np.asarray([1, 0], dtype=np.int32)
-                        for name in FG_SMARTS
-                    },
+                    "probe_maccs": _maccs([[1, 1, 0, 0], [0, 1, 1, 0]]),
                 },
             ],
             info={
@@ -359,8 +412,14 @@ class MsgProbeCollectionTests(unittest.TestCase):
         )
         self.assertTrue(
             np.array_equal(
-                targets.classification["hydroxyl"],
-                np.asarray([0, 1, 0], dtype=np.int32),
+                targets.maccs,
+                _maccs(
+                    [
+                        [0, 1, 0, 1],
+                        [1, 1, 0, 0],
+                        [0, 1, 1, 0],
+                    ]
+                ),
             )
         )
 
@@ -484,40 +543,34 @@ class ProbePrecursorTokenTfTests(unittest.TestCase):
             "precursor_mz": tf.constant([0.1, 0.2, 0.3], dtype=tf.float32),
             "fingerprint": tf.constant(np.zeros((B, 4), dtype=np.int32)),
             "probe_valid_mol": tf.constant([True, False, True]),
+            "probe_maccs": tf.constant(np.zeros((B, 4), dtype=np.int32)),
         }
 
         out = _prepend_precursor_token_tf(batch)
 
-        # Shapes are [B, N+1]
         self.assertEqual(out["peak_mz"].shape, (B, N + 1))
         self.assertEqual(out["peak_intensity"].shape, (B, N + 1))
         self.assertEqual(out["peak_valid_mask"].shape, (B, N + 1))
-
-        # precursor_mz key is removed
         self.assertNotIn("precursor_mz", out)
-
-        # Position 0 has sentinel intensity=-1 and valid=True
         np.testing.assert_array_equal(
             out["peak_intensity"][:, 0].numpy(), [-1.0, -1.0, -1.0]
         )
         np.testing.assert_array_equal(
             out["peak_valid_mask"][:, 0].numpy(), [True, True, True]
         )
-
-        # Position 0 mz equals original precursor_mz
         np.testing.assert_allclose(out["peak_mz"][:, 0].numpy(), [0.1, 0.2, 0.3])
-
-        # Original peaks shifted to positions 1..N
         np.testing.assert_array_equal(
             out["peak_mz"][:, 1:].numpy(),
             batch["peak_mz"].numpy(),
         )
-
-        # Passthrough keys preserved
         self.assertIn("fingerprint", out)
         self.assertIn("probe_valid_mol", out)
+        self.assertIn("probe_maccs", out)
         np.testing.assert_array_equal(
             out["fingerprint"].numpy(), batch["fingerprint"].numpy()
+        )
+        np.testing.assert_array_equal(
+            out["probe_maccs"].numpy(), batch["probe_maccs"].numpy()
         )
 
 

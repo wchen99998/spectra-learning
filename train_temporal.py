@@ -606,11 +606,12 @@ def train_temporal(
             logger.log_metrics(probe_metrics, step=global_step)
             last_msg_probe_metrics = probe_metrics
             logging.info(
-                "step=%d msg_probe(test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_fg_mean=%.4f)",
+                "step=%d msg_probe(test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f)",
                 global_step,
                 probe_metrics["msg_probe/test/r2_mean_wo_num_rings"],
                 probe_metrics["msg_probe/test/mae_num_rings"],
-                probe_metrics["msg_probe/test/auc_fg_mean"],
+                probe_metrics["msg_probe/test/auc_maccs_mean"],
+                probe_metrics["msg_probe/test/recall_maccs_mean"],
             )
 
     pbar.close()
