@@ -1,8 +1,8 @@
 """Exhaustive MSG probe sweep from a fixed checkpoint.
 
 This script:
-1. Extracts frozen encoder token embeddings once for a checkpoint.
-2. Exhaustively sweeps probe-head capacity and optimizer hyperparameters.
+1. Extracts frozen encoder probe inputs once for a checkpoint.
+2. Exhaustively sweeps linear-probe optimizer hyperparameters.
 3. Ranks trials by the best probe epoch on a chosen validation metric.
 4. Reevaluates saved checkpoints with the default probe config and the best tuned config.
 5. Writes JSON/CSV/Markdown summaries plus PNG plots.
@@ -46,9 +46,9 @@ from utils.msg_probe import (
     FG_SMARTS,
     REGRESSION_TARGET_KEYS,
     MsgLinearProbe,
-    MsgProbePooler,
     MsgProbeSplitTargets,
     _build_task_spec,
+    build_msg_probe_inputs,
     _probe_task_names,
     _probe_task_output_dims,
     msg_probe_metric_higher_is_better,
@@ -165,15 +165,10 @@ def _iter_probe_batches(
 
 def _allocate_split_cache(
     size: int,
-    token_shape: tuple[int, int],
+    input_dim: int,
 ) -> dict[str, torch.Tensor]:
-    num_tokens, model_dim = token_shape
     cache: dict[str, torch.Tensor] = {
-        "token_embeddings": torch.empty(
-            (size, num_tokens, model_dim),
-            dtype=torch.float16,
-        ),
-        "peak_valid_mask": torch.empty((size, num_tokens), dtype=torch.bool),
+        "probe_inputs": torch.empty((size, input_dim), dtype=torch.float16),
         "probe_valid_mol": torch.empty(size, dtype=torch.bool),
     }
     for name in REGRESSION_TARGET_KEYS:
@@ -208,24 +203,27 @@ def _extract_split_cache(
             peak_mz = batch["peak_mz"].to(device)
             peak_intensity = batch["peak_intensity"].to(device)
             peak_valid_mask = batch["peak_valid_mask"].to(device)
-            token_embeddings = model.encoder(
+            embeddings = model.encoder(
                 peak_mz,
                 peak_intensity,
                 valid_mask=peak_valid_mask,
             )
-            token_embeddings, _ = PeakSetEncoder.split_peak_and_cls(token_embeddings)
+            peak_embeddings, cls_embeddings = PeakSetEncoder.split_peak_and_cls(
+                embeddings
+            )
+            probe_inputs = build_msg_probe_inputs(
+                peak_embeddings,
+                cls_embeddings,
+                peak_valid_mask,
+            )
             if cache is None:
                 cache = _allocate_split_cache(
                     size=size,
-                    token_shape=(
-                        int(token_embeddings.shape[1]),
-                        int(token_embeddings.shape[2]),
-                    ),
+                    input_dim=int(probe_inputs.shape[1]),
                 )
-            take = int(token_embeddings.shape[0])
+            take = int(probe_inputs.shape[0])
             sl = slice(offset, offset + take)
-            cache["token_embeddings"][sl] = token_embeddings.cpu().to(torch.float16)
-            cache["peak_valid_mask"][sl] = batch["peak_valid_mask"].cpu()
+            cache["probe_inputs"][sl] = probe_inputs.cpu().to(torch.float16)
             cache["probe_valid_mol"][sl] = batch["probe_valid_mol"].to(torch.bool).cpu()
             for name in REGRESSION_TARGET_KEYS:
                 cache[f"probe_{name}"][sl] = batch[f"probe_{name}"].to(torch.float32).cpu()
@@ -234,11 +232,10 @@ def _extract_split_cache(
             offset += take
     assert cache is not None
     log.info(
-        "Extracted %s cache: %d samples, tokens=%d, dim=%d in %.1fs",
+        "Extracted %s cache: %d samples, input_dim=%d in %.1fs",
         split,
         size,
-        int(cache["token_embeddings"].shape[1]),
-        int(cache["token_embeddings"].shape[2]),
+        int(cache["probe_inputs"].shape[1]),
         time.time() - started,
     )
     return cache
@@ -259,7 +256,7 @@ def extract_checkpoint_cache(
     _mte = config.get("msg_probe_max_test_samples", None)
     max_train_samples = int(_mts) if _mts is not None else None
     max_test_samples = int(_mte) if _mte is not None else None
-    log.info("Extracting frozen embeddings from %s on %s", checkpoint_path, device)
+    log.info("Extracting frozen probe inputs from %s on %s", checkpoint_path, device)
     train_cache = _extract_split_cache(
         model=model,
         device=device,
@@ -318,7 +315,7 @@ def _move_cached_batch(
 ) -> dict[str, torch.Tensor]:
     moved: dict[str, torch.Tensor] = {}
     for key, value in batch.items():
-        if key == "token_embeddings":
+        if key == "probe_inputs":
             moved[key] = value.to(device=device, dtype=torch.float32)
         else:
             moved[key] = value.to(device=device)
@@ -336,28 +333,10 @@ def run_cached_msg_probe(
         train_targets=_build_split_targets_from_cache(train_cache),
         test_targets=_build_split_targets_from_cache(test_cache),
     )
-    pooler = MsgProbePooler(
-        model_dim=int(train_cache["token_embeddings"].shape[-1]),
-        pooling_type=str(config.get("msg_probe_pooling_type", "pma")),
-        pma_num_heads=int(
-            config.get(
-                "msg_probe_pma_num_heads",
-                config.get("encoder_num_heads", config.get("num_heads")),
-            )
-        ),
-        pma_num_seeds=int(config.get("msg_probe_pma_num_seeds", 1)),
-        norm_type=str(config.get("norm_type", "rmsnorm")),
-    )
     probe = MsgLinearProbe(
-        input_dim=int(train_cache["token_embeddings"].shape[-1]),
+        input_dim=int(train_cache["probe_inputs"].shape[-1]),
         task_names=_probe_task_names(task_spec),
-        pooler=pooler,
         task_output_dims=_probe_task_output_dims(task_spec),
-        hidden_dim=int(config.get("msg_probe_hidden_dim", 0)),
-        num_layers=int(config.get("msg_probe_num_layers", 1)),
-        dropout=float(config.get("msg_probe_dropout", 0.0)),
-        activation=str(config.get("msg_probe_activation", "gelu")),
-        init_method=str(config.get("msg_probe_init", "default")),
     ).to(device)
     num_probe_epochs = int(config.get("msg_probe_num_epochs", 20))
     probe_lr = float(config.get("msg_probe_learning_rate", 1e-3))
@@ -386,8 +365,8 @@ def run_cached_msg_probe(
 
     def feature_extractor(
         batch: dict[str, torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return batch["token_embeddings"], batch["peak_valid_mask"]
+    ) -> torch.Tensor:
+        return batch["probe_inputs"]
 
     final_metrics: dict[str, float] = {}
     curve: list[dict[str, float]] = []
@@ -746,11 +725,6 @@ SearchDim = RealDim | CategoricalDim
 DEFAULT_BAYESIAN_DIMS: list[SearchDim] = [
     RealDim("msg_probe_learning_rate", low=5e-5, high=3e-3, log_scale=True),
     RealDim("msg_probe_weight_decay", low=0.0, high=0.15),
-    RealDim("msg_probe_dropout", low=0.0, high=0.5),
-    CategoricalDim("msg_probe_hidden_dim", [256, 512, 1024]),
-    CategoricalDim("msg_probe_num_layers", [1, 2, 3]),
-    CategoricalDim("msg_probe_activation", ["gelu", "silu", "relu"]),
-    CategoricalDim("msg_probe_init", ["default", "xavier_uniform", "xavier_normal", "kaiming_normal", "orthogonal"]),
 ]
 
 

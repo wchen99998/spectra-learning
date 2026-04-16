@@ -8,7 +8,6 @@ from input_pipeline import _prepend_precursor_token_tf
 from utils.msg_probe import (
     FG_SMARTS,
     MsgLinearProbe,
-    MsgProbePooler,
     MsgProbeSplitTargets,
     _build_task_spec,
     _collect_split_targets,
@@ -18,6 +17,7 @@ from utils.msg_probe import (
     _probe_task_output_dims,
     _score_epoch_state,
     _update_epoch_state,
+    build_msg_probe_inputs,
     msg_probe_metric_higher_is_better,
     iter_massspec_probe,
     probe_steps_per_epoch,
@@ -62,97 +62,79 @@ class _DummyDataModule:
 
 
 class MsgLinearProbeTests(unittest.TestCase):
-    def test_output_shapes_match_task_heads(self):
-        pooler = MsgProbePooler(model_dim=32)
-        probe = MsgLinearProbe(
-            input_dim=32,
-            task_names=("mol_weight", "hydroxyl", "amine"),
-            pooler=pooler,
+    def test_build_msg_probe_inputs_concats_masked_mean_and_cls(self):
+        peak_embeddings = torch.tensor(
+            [
+                [[1.0, 2.0], [3.0, 4.0], [100.0, 200.0]],
+                [[2.0, 0.0], [4.0, 2.0], [6.0, 4.0]],
+            ]
         )
-        pooled = torch.randn(7, 32)
-        logits = probe(pooled)
+        cls_embeddings = torch.tensor([[10.0, 20.0], [30.0, 40.0]])
+        valid_mask = torch.tensor(
+            [
+                [True, True, False],
+                [True, False, False],
+            ]
+        )
+
+        probe_inputs = build_msg_probe_inputs(
+            peak_embeddings,
+            cls_embeddings,
+            valid_mask,
+        )
+
+        expected = torch.tensor(
+            [
+                [2.0, 3.0, 10.0, 20.0],
+                [2.0, 0.0, 30.0, 40.0],
+            ]
+        )
+        self.assertTrue(torch.allclose(probe_inputs, expected))
+
+    def test_output_shapes_match_task_heads(self):
+        probe = MsgLinearProbe(
+            input_dim=64,
+            task_names=("mol_weight", "hydroxyl", "amine"),
+        )
+        probe_inputs = torch.randn(7, 64)
+        logits = probe(probe_inputs)
 
         self.assertEqual(logits["mol_weight"].shape, (7, 1))
         self.assertEqual(logits["hydroxyl"].shape, (7, 1))
         self.assertEqual(logits["amine"].shape, (7, 1))
 
     def test_output_shapes_match_multiclass_head(self):
-        pooler = MsgProbePooler(model_dim=32)
         probe = MsgLinearProbe(
-            input_dim=32,
+            input_dim=64,
             task_names=("mol_weight", "num_rings"),
             task_output_dims={"num_rings": 4},
-            pooler=pooler,
         )
-        pooled = torch.randn(7, 32)
-        logits = probe(pooled)
+        probe_inputs = torch.randn(7, 64)
+        logits = probe(probe_inputs)
 
         self.assertEqual(logits["mol_weight"].shape, (7, 1))
         self.assertEqual(logits["num_rings"].shape, (7, 4))
 
     def test_finite_outputs(self):
-        pooler = MsgProbePooler(model_dim=16)
         probe = MsgLinearProbe(
-            input_dim=16,
+            input_dim=32,
             task_names=("mol_weight", "hydroxyl"),
-            pooler=pooler,
         )
-        pooled = torch.randn(3, 16)
-        logits = probe(pooled)
+        probe_inputs = torch.randn(3, 32)
+        logits = probe(probe_inputs)
 
         self.assertTrue(torch.isfinite(logits["mol_weight"]).all().item())
         self.assertTrue(torch.isfinite(logits["hydroxyl"]).all().item())
 
-    def test_hidden_probe_head_builds_mlp(self):
-        pooler = MsgProbePooler(model_dim=16)
+    def test_probe_heads_are_linear(self):
         probe = MsgLinearProbe(
-            input_dim=16,
-            task_names=("mol_weight",),
-            pooler=pooler,
-            hidden_dim=32,
-            num_layers=3,
+            input_dim=32,
+            task_names=("mol_weight", "num_rings"),
+            task_output_dims={"num_rings": 4},
         )
-        pooled = torch.randn(5, 16)
-        logits = probe(pooled)
 
-        self.assertEqual(logits["mol_weight"].shape, (5, 1))
-        self.assertIsInstance(probe.heads["mol_weight"], torch.nn.Sequential)
-
-    def test_hidden_probe_head_with_dropout(self):
-        pooler = MsgProbePooler(model_dim=16)
-        probe = MsgLinearProbe(
-            input_dim=16,
-            task_names=("mol_weight",),
-            pooler=pooler,
-            hidden_dim=32,
-            num_layers=3,
-            dropout=0.3,
-        )
-        pooled = torch.randn(5, 16)
-        logits = probe(pooled)
-
-        self.assertEqual(logits["mol_weight"].shape, (5, 1))
-        head = probe.heads["mol_weight"]
-        dropout_layers = [m for m in head.modules() if isinstance(m, torch.nn.Dropout)]
-        self.assertEqual(len(dropout_layers), 2)
-        self.assertEqual(dropout_layers[0].p, 0.3)
-
-    def test_activation_and_init_options(self):
-        for act in ("gelu", "silu", "relu", "tanh"):
-            for init in ("default", "xavier_uniform", "xavier_normal", "kaiming_normal", "orthogonal"):
-                pooler = MsgProbePooler(model_dim=16)
-                probe = MsgLinearProbe(
-                    input_dim=16,
-                    task_names=("mol_weight",),
-                    pooler=pooler,
-                    hidden_dim=32,
-                    num_layers=2,
-                    activation=act,
-                    init_method=init,
-                )
-                logits = probe(torch.randn(3, 16))
-                self.assertEqual(logits["mol_weight"].shape, (3, 1))
-                self.assertTrue(torch.isfinite(logits["mol_weight"]).all().item())
+        self.assertIsInstance(probe.heads["mol_weight"], torch.nn.Linear)
+        self.assertIsInstance(probe.heads["num_rings"], torch.nn.Linear)
 
 
 class MsgProbeStepTests(unittest.TestCase):
@@ -181,14 +163,11 @@ class MsgProbeStepTests(unittest.TestCase):
                 },
             ),
         )
-        input_dim = 8
-        num_peaks = 4
-        pooler = MsgProbePooler(model_dim=input_dim)
+        probe_input_dim = 16
         probe = MsgLinearProbe(
-            input_dim=input_dim,
+            input_dim=probe_input_dim,
             task_names=_probe_task_names(task_spec),
             task_output_dims=_probe_task_output_dims(task_spec),
-            pooler=pooler,
         )
         batch = {
             "probe_valid_mol": torch.tensor([True, False, True], dtype=torch.bool),
@@ -202,9 +181,7 @@ class MsgProbeStepTests(unittest.TestCase):
 
         def dummy_extractor(b):
             n = b["probe_valid_mol"].shape[0]
-            token_emb = torch.randn(n, num_peaks, input_dim)
-            valid_mask = torch.ones(n, num_peaks, dtype=torch.bool)
-            return token_emb, valid_mask
+            return torch.randn(n, probe_input_dim)
 
         result = _probe_step(
             probe,

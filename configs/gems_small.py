@@ -72,6 +72,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataloader_pin_memory = True
 
     cfg.masked_token_loss_weight = 1.0
+    cfg.cls_embedding_loss_weight = 1.0
     cfg.masked_token_loss_type = "l2"
     cfg.jepa_target_normalization = "zscore"
     cfg.jepa_target_layers = [1, 3, 5, 8]

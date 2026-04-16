@@ -31,52 +31,16 @@ class MsgProbeSplitTargets(NamedTuple):
     classification: dict[str, np.ndarray]
 
 
-class MsgProbePooler(torch.nn.Module):
-    def __init__(
-        self,
-        *,
-        model_dim: int,
-        pooling_type: str = "mean",
-        pma_num_heads: int = 8,
-        pma_num_seeds: int = 1,
-        norm_type: str = "rmsnorm",
-    ) -> None:
-        super().__init__()
-        self.pooling_type = pooling_type
-        if pooling_type == "pma":
-            self.pool_query = torch.nn.Parameter(
-                torch.empty(pma_num_seeds, model_dim)
-            )
-            torch.nn.init.xavier_normal_(self.pool_query)
-            self.pool_mha = torch.nn.MultiheadAttention(
-                embed_dim=model_dim,
-                num_heads=pma_num_heads,
-                batch_first=True,
-            )
-            kind = str(norm_type).lower()
-            if kind == "rmsnorm":
-                self.pool_norm = torch.nn.RMSNorm(model_dim, eps=1e-5)
-            else:
-                self.pool_norm = torch.nn.LayerNorm(model_dim, eps=1e-5)
-
-    def forward(
-        self,
-        embeddings: torch.Tensor,
-        valid_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        if self.pooling_type == "pma":
-            pooled, _ = self.pool_mha(
-                query=self.pool_query.unsqueeze(0).expand(
-                    embeddings.shape[0], -1, -1
-                ),
-                key=embeddings,
-                value=embeddings,
-                key_padding_mask=~valid_mask,
-                need_weights=False,
-            )
-            return self.pool_norm(pooled.mean(dim=1))
-        mask = valid_mask.unsqueeze(-1).float()
-        return (embeddings * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
+def build_msg_probe_inputs(
+    peak_embeddings: torch.Tensor,
+    cls_embeddings: torch.Tensor,
+    valid_mask: torch.Tensor,
+) -> torch.Tensor:
+    mask = valid_mask.unsqueeze(-1).to(dtype=peak_embeddings.dtype)
+    mean_readout = (peak_embeddings * mask).sum(dim=1) / mask.sum(dim=1).clamp(
+        min=1.0
+    )
+    return torch.cat((mean_readout, cls_embeddings), dim=-1)
 
 
 _NUM_RINGS_TASK = "num_rings"
@@ -85,97 +49,30 @@ _REGRESSION_PROBE_TASKS = tuple(
 )
 
 
-PROBE_ACTIVATIONS: dict[str, type[torch.nn.Module]] = {
-    "gelu": torch.nn.GELU,
-    "silu": torch.nn.SiLU,
-    "relu": torch.nn.ReLU,
-    "tanh": torch.nn.Tanh,
-}
-
-PROBE_INIT_METHODS = ("default", "xavier_uniform", "xavier_normal", "kaiming_normal", "orthogonal")
-
-
-def _apply_probe_init(module: torch.nn.Module, method: str) -> None:
-    if method == "default":
-        return
-    for m in module.modules():
-        if not isinstance(m, torch.nn.Linear):
-            continue
-        if method == "xavier_uniform":
-            torch.nn.init.xavier_uniform_(m.weight)
-        elif method == "xavier_normal":
-            torch.nn.init.xavier_normal_(m.weight)
-        elif method == "kaiming_normal":
-            torch.nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
-        elif method == "orthogonal":
-            torch.nn.init.orthogonal_(m.weight)
-        if m.bias is not None:
-            torch.nn.init.zeros_(m.bias)
-
-
 class MsgLinearProbe(torch.nn.Module):
     def __init__(
         self,
         *,
         input_dim: int,
         task_names: tuple[str, ...],
-        pooler: MsgProbePooler,
         task_output_dims: dict[str, int] | None = None,
-        hidden_dim: int = 0,
-        num_layers: int = 1,
-        dropout: float = 0.0,
-        activation: str = "gelu",
-        init_method: str = "default",
     ) -> None:
         super().__init__()
-        self.pooler = pooler
-        self.heads = torch.nn.ModuleDict({
-            name: self._build_head(
-                input_dim=input_dim,
-                output_dim=1 if task_output_dims is None else task_output_dims.get(name, 1),
-                hidden_dim=hidden_dim,
-                num_layers=num_layers,
-                dropout=dropout,
-                activation=activation,
-                init_method=init_method,
-            )
-            for name in task_names
-        })
-
-    @staticmethod
-    def _build_head(
-        *,
-        input_dim: int,
-        output_dim: int,
-        hidden_dim: int,
-        num_layers: int,
-        dropout: float = 0.0,
-        activation: str = "gelu",
-        init_method: str = "default",
-    ) -> torch.nn.Module:
-        if hidden_dim <= 0 or num_layers <= 1:
-            head = torch.nn.Linear(input_dim, output_dim)
-            _apply_probe_init(head, init_method)
-            return head
-        act_cls = PROBE_ACTIVATIONS.get(activation, torch.nn.GELU)
-        layers: list[torch.nn.Module] = []
-        in_dim = input_dim
-        for _ in range(num_layers - 1):
-            layers.append(torch.nn.Linear(in_dim, hidden_dim))
-            layers.append(act_cls())
-            if dropout > 0:
-                layers.append(torch.nn.Dropout(dropout))
-            in_dim = hidden_dim
-        layers.append(torch.nn.Linear(in_dim, output_dim))
-        head = torch.nn.Sequential(*layers)
-        _apply_probe_init(head, init_method)
-        return head
+        self.heads = torch.nn.ModuleDict(
+            {
+                name: torch.nn.Linear(
+                    input_dim,
+                    1 if task_output_dims is None else task_output_dims.get(name, 1),
+                )
+                for name in task_names
+            }
+        )
 
     def forward(
         self,
-        pooled: torch.Tensor,
+        probe_inputs: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        return {name: head(pooled) for name, head in self.heads.items()}
+        return {name: head(probe_inputs) for name, head in self.heads.items()}
 
 
 class DreamsLinearProbe(torch.nn.Module):
@@ -202,6 +99,7 @@ class DreamsLinearProbe(torch.nn.Module):
         x: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         return {name: head(x) for name, head in self.heads.items()}
+
 
 def _probe_task_names(task_spec: MsgProbeTaskSpec) -> tuple[str, ...]:
     task_names = task_spec.regression_tasks + task_spec.classification_tasks
@@ -337,17 +235,14 @@ def _probe_step(
     *,
     task_spec: MsgProbeTaskSpec,
     device: torch.device,
-    feature_extractor: Callable[
-        [dict[str, torch.Tensor]], tuple[torch.Tensor, torch.Tensor]
-    ],
+    feature_extractor: Callable[[dict[str, torch.Tensor]], torch.Tensor],
 ) -> dict[str, object] | None:
-    token_emb, peak_valid_mask = feature_extractor(batch)
+    probe_inputs = feature_extractor(batch)
     valid_mask = batch["probe_valid_mol"].to(device=device, dtype=torch.bool)
     if not bool(valid_mask.any()):
         return None
-    pooled = probe.pooler(token_emb, peak_valid_mask)
-    pooled = pooled[valid_mask]
-    logits = probe(pooled)
+    probe_inputs = probe_inputs[valid_mask]
+    logits = probe(probe_inputs)
     losses, predictions, task_targets = {}, {}, {}
     for name in task_spec.regression_tasks:
         target = batch[f"probe_{name}"][valid_mask].to(dtype=torch.float32)
@@ -381,7 +276,7 @@ def _probe_step(
         "losses": losses,
         "predictions": predictions,
         "targets": task_targets,
-        "batch_size": int(pooled.shape[0]),
+        "batch_size": int(probe_inputs.shape[0]),
     }
 
 
@@ -480,31 +375,24 @@ def run_msg_probe(
     max_train_samples = int(_mts) if _mts is not None else None
     _mte = config.get("msg_probe_max_test_samples", None)
     max_test_samples = int(_mte) if _mte is not None else None
-    probe_pooling_type = str(config.get("msg_probe_pooling_type", "mean"))
-    probe_pma_num_heads = int(
-        config.get(
-            "msg_probe_pma_num_heads",
-            config.get("encoder_num_heads", config.get("num_heads")),
-        )
-    )
-    probe_pma_num_seeds = int(config.get("msg_probe_pma_num_seeds", 1))
-    probe_hidden_dim = int(config.get("msg_probe_hidden_dim", 0))
-    probe_num_layers = int(config.get("msg_probe_num_layers", 1))
-    norm_type = str(config.get("norm_type", "rmsnorm"))
     peak_ordering = str(config.get("peak_ordering", "intensity"))
     probe_data = MassSpecProbeData.from_config(config)
 
     @torch.no_grad()
     def feature_extractor(
         batch: dict[str, torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         embeddings = model.encoder(
             batch["peak_mz"],
             batch["peak_intensity"],
             valid_mask=batch["peak_valid_mask"],
         )
-        embeddings, _ = PeakSetEncoder.split_peak_and_cls(embeddings)
-        return embeddings, batch["peak_valid_mask"]
+        peak_embeddings, cls_embeddings = PeakSetEncoder.split_peak_and_cls(embeddings)
+        return build_msg_probe_inputs(
+            peak_embeddings,
+            cls_embeddings,
+            batch["peak_valid_mask"],
+        )
 
     train_seed_base = int(config.seed) + 1_100_000
     test_seed_base = int(config.seed) + 1_200_000
@@ -525,26 +413,10 @@ def run_msg_probe(
     task_spec = _build_task_spec(train_targets=train_targets, test_targets=test_targets)
     was_training = model.training
     model.eval()
-    pooler = MsgProbePooler(
-        model_dim=int(config.model_dim),
-        pooling_type=probe_pooling_type,
-        pma_num_heads=probe_pma_num_heads,
-        pma_num_seeds=probe_pma_num_seeds,
-        norm_type=norm_type,
-    )
-    probe_dropout = float(config.get("msg_probe_dropout", 0.0))
-    probe_activation = str(config.get("msg_probe_activation", "gelu"))
-    probe_init = str(config.get("msg_probe_init", "default"))
     probe = MsgLinearProbe(
-        input_dim=int(config.model_dim),
+        input_dim=2 * int(config.model_dim),
         task_names=_probe_task_names(task_spec),
-        pooler=pooler,
         task_output_dims=_probe_task_output_dims(task_spec),
-        hidden_dim=probe_hidden_dim,
-        num_layers=probe_num_layers,
-        dropout=probe_dropout,
-        activation=probe_activation,
-        init_method=probe_init,
     ).to(device)
     optimizer = torch.optim.AdamW(
         probe.parameters(),

@@ -505,6 +505,7 @@ class PeakSetSIGReg(nn.Module):
         encoder_fourier_sigma: float = 10.0,
         encoder_fourier_trainable: bool = True,
         masked_token_loss_weight: float = 0.0,
+        cls_embedding_loss_weight: float = 1.0,
         masked_token_loss_type: str = "l1",
         jepa_target_normalization: str = "none",
         jepa_target_layers: list[int] | tuple[int, ...] | None = None,
@@ -595,6 +596,7 @@ class PeakSetSIGReg(nn.Module):
         )
         _reg("teacher_ema_update_step", torch.zeros((), dtype=torch.int64))
         self.masked_token_loss_weight = float(masked_token_loss_weight)
+        self.cls_embedding_loss_weight = float(cls_embedding_loss_weight)
         self.masked_token_loss_type = str(masked_token_loss_type).lower()
         self.jepa_target_normalization = str(jepa_target_normalization).lower()
         self.jepa_teacher_targets_per_block = bool(jepa_teacher_targets_per_block)
@@ -882,6 +884,75 @@ class PeakSetSIGReg(nn.Module):
         )
         return flat_teacher_targets.reshape(B, K, N, -1)
 
+    def _compute_pooled_teacher_peak_targets(
+        self,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+        peak_valid_mask: torch.Tensor,
+        visible_mask: torch.Tensor | None = None,
+        pack_n: int | None = None,
+        prefix_pack: bool = True,
+    ) -> torch.Tensor:
+        if visible_mask is None:
+            visible_mask = peak_valid_mask
+        if pack_n is None:
+            pack_n = self._full_pack_n
+        amp_dtype = (
+            torch.get_autocast_dtype("cuda")
+            if torch.is_autocast_enabled("cuda")
+            else torch.bfloat16
+        )
+        grad_context = (
+            torch.no_grad() if self.teacher_encoder is not None else nullcontext()
+        )
+        with grad_context, torch.autocast("cuda", dtype=amp_dtype):
+            teacher = self._teacher_encoder_module()
+            teacher_encoded = teacher(
+                peak_mz,
+                peak_intensity,
+                valid_mask=peak_valid_mask,
+                visible_mask=visible_mask,
+                pack_n=pack_n,
+                prefix_pack=prefix_pack,
+            )
+            teacher_peak_emb, _ = self.encoder.split_peak_and_cls(teacher_encoded)
+        return self.pool(teacher_peak_emb, visible_mask)
+
+    def _compute_pooled_teacher_peak_targets_per_block(
+        self,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+        peak_valid_mask: torch.Tensor,
+        context_mask: torch.Tensor,
+        target_masks: torch.Tensor,
+    ) -> torch.Tensor:
+        B, K, N = target_masks.shape
+        teacher_visible = context_mask.unsqueeze(1) | target_masks
+        flat_teacher_targets = self._compute_pooled_teacher_peak_targets(
+            peak_mz.repeat_interleave(K, dim=0),
+            peak_intensity.repeat_interleave(K, dim=0),
+            peak_valid_mask.repeat_interleave(K, dim=0),
+            visible_mask=teacher_visible.reshape(B * K, N),
+            pack_n=self._predictor_pack_n,
+            prefix_pack=False,
+        )
+        return flat_teacher_targets.reshape(B, K, -1)
+
+    def _embedding_loss(
+        self,
+        prediction: torch.Tensor,
+        target: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.masked_token_loss_type == "l2":
+            return (prediction - target).square().mean(dim=-1)
+        if self.masked_token_loss_type == "l2_sum":
+            return (prediction - target).square().sum(dim=-1)
+        if self.masked_token_loss_type == "l1":
+            return (prediction - target).abs().mean(dim=-1)
+        raise ValueError(
+            f"Unsupported masked_token_loss_type: {self.masked_token_loss_type}"
+        )
+
     def pool(
         self,
         embeddings: torch.Tensor,
@@ -960,7 +1031,7 @@ class PeakSetSIGReg(nn.Module):
             visible_mask=context_mask,
             pack_n=self._context_pack_n,
         )
-        context_emb, _ = self.encoder.split_peak_and_cls(context_encoded)
+        context_emb, context_cls = self.encoder.split_peak_and_cls(context_encoded)
         # Teacher sees full valid spectrum; loss mask selects target positions per block
         if teacher_targets is not None:
             target_token_target = teacher_targets
@@ -996,20 +1067,43 @@ class PeakSetSIGReg(nn.Module):
         loss_pred = predictor_output
         loss_target = target_token_target
         loss_target = self._apply_jepa_target_normalization(loss_target)
-        if self.masked_token_loss_type == "l2":
-            per_token_reg = (
-                (loss_pred - loss_target).square().mean(dim=-1)
-            )
-        elif self.masked_token_loss_type == "l2_sum":
-            per_token_reg = (
-                (loss_pred - loss_target).square().sum(dim=-1)
-            )
-        elif self.masked_token_loss_type == "l1":
-            per_token_reg = (loss_pred - loss_target).abs().mean(dim=-1)
+        per_token_reg = self._embedding_loss(loss_pred, loss_target)
+
+        if self.cls_embedding_loss_weight > 0:
+            cls_loss_weight = context_emb.new_tensor(self.cls_embedding_loss_weight)
+            if self.jepa_teacher_targets_per_block:
+                student_cls = context_cls.unsqueeze(1).expand(-1, K, -1)
+                cls_visible_mask = ctx_mask_v | target_masks
+                cls_target = self._compute_pooled_teacher_peak_targets_per_block(
+                    peak_mz,
+                    peak_intensity,
+                    peak_valid_mask,
+                    context_mask,
+                    target_masks,
+                )
+            else:
+                full_encoded = self.encoder(
+                    peak_mz,
+                    peak_intensity,
+                    valid_mask=peak_valid_mask,
+                    visible_mask=peak_valid_mask,
+                    pack_n=self._full_pack_n,
+                    prefix_pack=True,
+                )
+                _, student_cls = self.encoder.split_peak_and_cls(full_encoded)
+                cls_visible_mask = peak_valid_mask
+                cls_target = self._compute_pooled_teacher_peak_targets(
+                    peak_mz,
+                    peak_intensity,
+                    peak_valid_mask,
+                )
+            cls_embedding_loss = self._embedding_loss(student_cls, cls_target).mean()
+            cls_embedding_term = cls_loss_weight * cls_embedding_loss
         else:
-            raise ValueError(
-                f"Unsupported masked_token_loss_type: {self.masked_token_loss_type}"
-            )
+            cls_loss_weight = context_emb.new_tensor(0.0)
+            cls_embedding_loss = context_emb.new_tensor(0.0)
+            cls_embedding_term = context_emb.new_tensor(0.0)
+            cls_visible_mask = context_mask
         target_mask_float = target_masks.float()
         reg_num = (per_token_reg * target_mask_float).sum()
         reg_den = target_mask_float.sum().clamp_min(1.0)
@@ -1026,7 +1120,7 @@ class PeakSetSIGReg(nn.Module):
             sigreg_lambda_current = context_emb.new_tensor(0.0)
             token_sigreg_loss = context_emb.new_tensor(0.0)
             sigreg_term = context_emb.new_tensor(0.0)
-        loss = jepa_term + sigreg_term
+        loss = jepa_term + cls_embedding_term + sigreg_term
         with torch.no_grad():
             collapse_metrics: dict[str, torch.Tensor] = {}
             for k, v in _masked_embedding_stats(context_emb, context_mask).items():
@@ -1037,6 +1131,9 @@ class PeakSetSIGReg(nn.Module):
             "loss": loss,
             "local_global_loss": local_global_loss,
             "jepa_term": jepa_term,
+            "cls_embedding_loss": cls_embedding_loss,
+            "cls_embedding_term": cls_embedding_term,
+            "cls_embedding_loss_weight": cls_loss_weight,
             "regularizer_loss": token_sigreg_loss.to(dtype=context_emb.dtype),
             "sigreg_loss": token_sigreg_loss.to(dtype=context_emb.dtype),
             "token_sigreg_loss": token_sigreg_loss.to(dtype=context_emb.dtype),
@@ -1049,6 +1146,7 @@ class PeakSetSIGReg(nn.Module):
             / jepa_term.clamp_min(1e-8),
             "context_fraction": context_mask.float().sum() / valid_peak_count,
             "masked_fraction": target_masks.float().sum() / valid_peak_count,
+            "cls_visible_fraction": cls_visible_mask.float().sum() / valid_peak_count,
             **{f"encoder_{k}": v.to(context_emb.dtype) for k, v in reg_stats.items()},
             **collapse_metrics,
         }
@@ -1138,12 +1236,7 @@ class PeakSetSIGReg(nn.Module):
                 ).detach()
                 next_frame_emb, _ = self.encoder.split_peak_and_cls(next_frame_emb)
 
-        if self.masked_token_loss_type == "l2":
-            per_token = (predicted_next_frame - next_frame_emb).square().mean(dim=-1)
-        elif self.masked_token_loss_type == "l1":
-            per_token = (predicted_next_frame - next_frame_emb).abs().mean(dim=-1)
-        else:
-            per_token = (predicted_next_frame - next_frame_emb).square().mean(dim=-1)
+        per_token = self._embedding_loss(predicted_next_frame, next_frame_emb)
 
         next_frame_mask = next_frame_valid.float()
         loss = (per_token * next_frame_mask).sum() / next_frame_mask.sum().clamp_min(1.0)
