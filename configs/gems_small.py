@@ -86,25 +86,15 @@ def get_config() -> config_dict.ConfigDict:
     cfg.compile_mode = "reduce-overhead"
     cfg.representation_regularizer = "none"
     cfg.msg_probe_every_n_steps = 0.2
-    cfg.msg_probe_pooling_type = "pma"
-    cfg.msg_probe_pma_num_heads = cfg.encoder_num_heads
-    cfg.msg_probe_pma_num_seeds = 64
     cfg.msg_probe_num_epochs = 20
     cfg.msg_probe_learning_rate = 3e-4
     cfg.msg_probe_weight_decay = 0.0
     cfg.msg_probe_warmup_steps = 0
-    cfg.msg_probe_hidden_dim = 1024
-    cfg.msg_probe_num_layers = 2
-    cfg.msg_probe_dropout = 0.0
-    cfg.msg_probe_activation = "gelu"
-    cfg.msg_probe_init = "default"
     cfg.msg_probe_max_train_samples = None
     cfg.msg_probe_max_test_samples = None
     cfg.probe_dataset = "nist20"
     cfg.msg_probe_tune_metric = "msg_probe/test/auc_fg_mean"
     cfg.msg_probe_tune_param_space = [
-        {"param": "msg_probe_hidden_dim", "dist": "grid", "args": [0, 512, 1024]},
-        {"param": "msg_probe_num_layers", "dist": "grid", "args": [1, 2]},
         {
             "param": "msg_probe_learning_rate",
             "dist": "grid",
@@ -114,11 +104,6 @@ def get_config() -> config_dict.ConfigDict:
             "param": "msg_probe_weight_decay",
             "dist": "grid",
             "args": [0.0, 1e-2, 0.1],
-        },
-        {
-            "param": "msg_probe_dropout",
-            "dist": "grid",
-            "args": [0.0, 0.1, 0.3],
         },
     ]
     cfg.use_precursor_token = False

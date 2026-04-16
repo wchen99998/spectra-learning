@@ -16,9 +16,6 @@ def main() -> None:
     from utils.msg_probe import run_msg_probe
 
     cfg = get_config()
-    # Override probe pooling
-    cfg.msg_probe_pma_num_seeds = 64
-    cfg.msg_probe_pma_num_heads = 8
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -63,7 +60,7 @@ def main() -> None:
     print(f"Device: {device}")
     print(f"Checkpoint: {ckpt_path} (step {ckpt['global_step']})")
     print(f"Params: {total:,} total, {encoder:,} encoder")
-    print(f"Probe: PMA seeds={cfg.msg_probe_pma_num_seeds}, heads={cfg.msg_probe_pma_num_heads}")
+    print("Probe: linear, fixed readout=mean+cls")
     print(f"Probe epochs: {cfg.msg_probe_num_epochs}")
 
     metrics = run_msg_probe(config=cfg, model=model, device=device)

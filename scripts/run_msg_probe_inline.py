@@ -54,9 +54,6 @@ def make_config() -> config_dict.ConfigDict:
     cfg.masked_latent_predictor_num_layers = 2
 
     # Probe — small/fast for inline test
-    cfg.msg_probe_pooling_type = "pma"
-    cfg.msg_probe_pma_num_heads = cfg.num_heads
-    cfg.msg_probe_pma_num_seeds = 4
     cfg.msg_probe_num_epochs = 2
     cfg.msg_probe_learning_rate = 1e-3
     cfg.msg_probe_weight_decay = 1e-2
