@@ -33,6 +33,8 @@ _DEFAULT_BATCH_SIZE = 512
 _DEFAULT_ARTIFACT_DIR = Path("data/gems_artifacts")
 _NUM_PEAKS_OUTPUT = 60
 _METADATA_FILENAME = "metadata.json"
+_DEFAULT_JEPA_MASK_STRATEGY = "contiguous"
+_DEFAULT_JEPA_MASK_LENGTHS = (1, 2, 4, 8, 16)
 
 
 def numpy_batch_to_torch(batch: dict[str, Any]) -> dict[str, Any]:
@@ -147,6 +149,49 @@ class _GemsMemmapDataset(Dataset):
         }
 
 
+def _sample_ragged_block_mask_1d_torch(
+    active_positions: torch.Tensor,
+    *,
+    masked_fraction: float,
+    lengths: tuple[int, ...],
+    round_from: int,
+) -> torch.Tensor:
+    active_count = int(active_positions.sum().item())
+    if active_count == 0:
+        return torch.zeros_like(active_positions)
+    compressed_positions = torch.cumsum(active_positions.to(torch.int64), dim=0)
+    compressed_positions = compressed_positions - active_positions.to(torch.int64)
+    bs = torch.rand(len(lengths), device=active_positions.device)
+    bs = bs / bs.sum()
+    masks_by_length: list[torch.Tensor] = []
+    for length_idx, length in enumerate(lengths):
+        max_elem = int(
+            math.ceil(float(masked_fraction) * float(active_count) / float(length))
+        )
+        coeff_float = float(bs[length_idx].item()) * float(max_elem)
+        if length_idx < round_from:
+            coeff = int(math.ceil(coeff_float))
+        else:
+            coeff = int(round(coeff_float))
+        if coeff == 0:
+            masks_by_length.append(torch.zeros_like(active_positions))
+            continue
+        starts = torch.randint(
+            1 - int(length),
+            active_count,
+            (coeff,),
+            device=active_positions.device,
+        )
+        starts = starts.clamp_min_(0)
+        block_mask = (compressed_positions.unsqueeze(0) >= starts.unsqueeze(1)) & (
+            compressed_positions.unsqueeze(0)
+            < (starts + int(length)).unsqueeze(1)
+        )
+        block_mask &= active_positions.unsqueeze(0)
+        masks_by_length.append(block_mask.any(dim=0))
+    return torch.stack(masks_by_length, dim=0).any(dim=0)
+
+
 def _sample_block_masks_torch(
     peak_valid_mask: torch.Tensor,
     *,
@@ -154,16 +199,28 @@ def _sample_block_masks_torch(
     context_fraction: float,
     target_fraction: float,
     block_min_len: int,
+    mask_strategy: str = _DEFAULT_JEPA_MASK_STRATEGY,
+    mask_lengths: tuple[int, ...] = _DEFAULT_JEPA_MASK_LENGTHS,
+    mask_round_from: int = len(_DEFAULT_JEPA_MASK_LENGTHS),
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    strategy = str(mask_strategy).lower()
+    if strategy == "ragged_blocks":
+        strategy = "ragged"
+    if strategy not in {"contiguous", "ragged"}:
+        raise ValueError(f"Unsupported JEPA mask strategy: {mask_strategy!r}")
+    lengths = tuple(int(length) for length in mask_lengths)
+    round_from = int(mask_round_from)
+    device = peak_valid_mask.device
     batch_size, num_peaks = peak_valid_mask.shape
-    context_mask = torch.zeros(batch_size, num_peaks, dtype=torch.bool)
+    context_mask = torch.zeros(batch_size, num_peaks, dtype=torch.bool, device=device)
     target_masks = torch.zeros(
         batch_size,
         int(num_target_blocks),
         num_peaks,
         dtype=torch.bool,
+        device=device,
     )
-    positions = torch.arange(num_peaks)
+    positions = torch.arange(num_peaks, device=device)
     for row_idx in range(batch_size):
         row_valid = peak_valid_mask[row_idx]
         valid_count = int(row_valid.sum().item())
@@ -187,27 +244,54 @@ def _sample_block_masks_torch(
         else:
             context_len = min(desired_context, valid_count)
             target_len = 0
-        context_start = int(torch.randint(valid_count - context_len + 1, ()).item())
-        row_context = (positions >= context_start) & (
-            positions < context_start + context_len
-        )
-        row_context &= row_valid
+        if strategy == "contiguous":
+            context_start = int(
+                torch.randint(valid_count - context_len + 1, (), device=device).item()
+            )
+            row_context = (positions >= context_start) & (
+                positions < context_start + context_len
+            )
+            row_context &= row_valid
+        else:
+            row_context = _sample_ragged_block_mask_1d_torch(
+                row_valid,
+                masked_fraction=float(context_len) / float(valid_count),
+                lengths=lengths,
+                round_from=round_from,
+            )
         context_mask[row_idx] = row_context
         if num_target_blocks == 0 or target_len == 0:
             continue
-        compressed_positions = torch.where(
-            positions < context_start,
-            positions,
-            positions - context_len,
-        )
         valid_target_positions = row_valid & ~row_context
-        max_target_start = valid_count - context_len - target_len + 1
-        starts = torch.randint(max_target_start, (int(num_target_blocks),))
-        for block_idx, block_start in enumerate(starts.tolist()):
-            row_target = (compressed_positions >= block_start) & (
-                compressed_positions < block_start + target_len
+        if strategy == "contiguous":
+            compressed_positions = torch.where(
+                positions < context_start,
+                positions,
+                positions - context_len,
             )
-            target_masks[row_idx, block_idx] = row_target & valid_target_positions
+            max_target_start = valid_count - context_len - target_len + 1
+            starts = torch.randint(
+                max_target_start,
+                (int(num_target_blocks),),
+                device=device,
+            )
+            for block_idx, block_start in enumerate(starts.tolist()):
+                row_target = (compressed_positions >= block_start) & (
+                    compressed_positions < block_start + target_len
+                )
+                target_masks[row_idx, block_idx] = row_target & valid_target_positions
+            continue
+        available_for_targets = int(valid_target_positions.sum().item())
+        if available_for_targets == 0:
+            continue
+        target_fraction_on_available = float(target_len) / float(available_for_targets)
+        for block_idx in range(int(num_target_blocks)):
+            target_masks[row_idx, block_idx] = _sample_ragged_block_mask_1d_torch(
+                valid_target_positions,
+                masked_fraction=target_fraction_on_available,
+                lengths=lengths,
+                round_from=round_from,
+            )
     return context_mask, target_masks
 
 
@@ -261,6 +345,9 @@ class _GemsBatchCollator:
         context_fraction: float,
         target_fraction: float,
         block_min_len: int,
+        mask_strategy: str = _DEFAULT_JEPA_MASK_STRATEGY,
+        mask_lengths: tuple[int, ...] = _DEFAULT_JEPA_MASK_LENGTHS,
+        mask_round_from: int = len(_DEFAULT_JEPA_MASK_LENGTHS),
         use_precursor_token: bool,
         num_peaks: int,
         max_precursor_mz: float,
@@ -274,6 +361,9 @@ class _GemsBatchCollator:
         self.context_fraction = float(context_fraction)
         self.target_fraction = float(target_fraction)
         self.block_min_len = int(block_min_len)
+        self.mask_strategy = str(mask_strategy)
+        self.mask_lengths = tuple(int(length) for length in mask_lengths)
+        self.mask_round_from = int(mask_round_from)
         self.use_precursor_token = bool(use_precursor_token)
         self.num_peaks = int(num_peaks)
         self.max_precursor_mz = float(max_precursor_mz)
@@ -312,6 +402,9 @@ class _GemsBatchCollator:
                 context_fraction=self.context_fraction,
                 target_fraction=self.target_fraction,
                 block_min_len=self.block_min_len,
+                mask_strategy=self.mask_strategy,
+                mask_lengths=self.mask_lengths,
+                mask_round_from=self.mask_round_from,
             )
             batch["context_mask"] = context_mask
             batch["target_masks"] = target_masks
@@ -362,6 +455,16 @@ class GemsNativeDataModule:
         self.jepa_context_fraction = float(config.get("jepa_context_fraction", 0.5))
         self.jepa_target_fraction = float(config.get("jepa_target_fraction", 0.25))
         self.jepa_block_min_len = int(config.get("jepa_block_min_len", 1))
+        self.jepa_mask_strategy = str(
+            config.get("jepa_mask_strategy", _DEFAULT_JEPA_MASK_STRATEGY)
+        )
+        self.jepa_mask_lengths = tuple(
+            int(length)
+            for length in config.get("jepa_mask_lengths", _DEFAULT_JEPA_MASK_LENGTHS)
+        )
+        self.jepa_mask_round_from = int(
+            config.get("jepa_mask_round_from", len(self.jepa_mask_lengths))
+        )
         self.use_precursor_token = bool(config.get("use_precursor_token", False))
         self.num_peaks_output = int(config.get("num_peaks", _NUM_PEAKS_OUTPUT))
         self.gems_dir, self.gems_metadata = self._resolve_gems_artifact()
@@ -534,6 +637,9 @@ class GemsNativeDataModule:
                 context_fraction=self.jepa_context_fraction,
                 target_fraction=self.jepa_target_fraction,
                 block_min_len=self.jepa_block_min_len,
+                mask_strategy=self.jepa_mask_strategy,
+                mask_lengths=self.jepa_mask_lengths,
+                mask_round_from=self.jepa_mask_round_from,
                 use_precursor_token=self.use_precursor_token,
                 num_peaks=self.num_peaks_output,
                 max_precursor_mz=self.max_precursor_mz,

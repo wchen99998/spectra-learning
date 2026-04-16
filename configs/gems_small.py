@@ -13,11 +13,13 @@ def get_config() -> config_dict.ConfigDict:
     cfg.max_precursor_mz = 1000.0
     cfg.min_peak_intensity = 0.0001
     cfg.peak_drop_min_intensity = 0.0001
-    cfg.precursor_peak_exclusion_window_da = 0.0
+    cfg.precursor_peak_exclusion_window_da = 5.0
     cfg.peak_ordering = "mz"
     cfg.seed = 66
 
     # Model
+
+
     cfg.num_peaks = 64
     cfg.model_dim = 256
     cfg.encoder_num_layers = 8
@@ -37,10 +39,20 @@ def get_config() -> config_dict.ConfigDict:
     cfg.feature_mlp_hidden_dim = 512
     cfg.sigreg_num_slices = 256
     cfg.sigreg_lambda = 0.02
+    cfg.vicreg_lambda = 0.2
+    cfg.vicreg_inv_coeff = 0.0
+    cfg.vicreg_var_coeff = 25.0
+    cfg.vicreg_cov_coeff = 1.0
+    cfg.vicreg_variance_target = 1.0
+    cfg.vicreg_eps = 1e-4
     cfg.jepa_num_target_blocks = 2
     cfg.jepa_context_fraction = 0.35
     cfg.jepa_target_fraction = 0.2
     cfg.jepa_block_min_len = 1
+    cfg.jepa_mask_strategy = "ragged"
+    cfg.jepa_mask_lengths = (1, 2, 4, 8, 12)
+    cfg.jepa_mask_round_from = 3
+    cfg.use_sparse_packing = False
     cfg.norm_type = "layernorm"
 
     # Predictor
@@ -65,7 +77,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.optimizer_fused = True
     cfg.log_every_n_steps = 100
     cfg.checkpoint_every_steps = 25_000
-    cfg.dataloader_num_workers = 1
+    cfg.dataloader_num_workers = 8
     cfg.dataloader_prefetch_factor = 2
     cfg.dataloader_persistent_workers = True
     cfg.dataloader_pin_memory = True
@@ -121,3 +133,4 @@ def get_config() -> config_dict.ConfigDict:
     cfg.wandb_run_name_prefix = "jepa_masked_latent_index"
 
     return cfg
+

@@ -5,7 +5,9 @@ import math
 import torch
 
 from models.model import PeakSetSIGReg
+from models.peak_features import FourierFeatures, PeakFeatureEmbedder
 from train import _is_weight_decay_target
+from utils.spectra_preprocessing import PEAK_MZ_MAX
 from utils.training import load_pretrained_weights
 
 
@@ -86,6 +88,34 @@ class DataPipelineContractTests(unittest.TestCase):
         self.assertEqual(batch["target_masks"].shape, (3, 3, 8))
 
 
+class FourierFeatureTests(unittest.TestCase):
+    def test_lin_float_int_respects_num_freqs(self):
+        fourier = FourierFeatures(
+            strategy="lin_float_int",
+            x_min=1e-4,
+            x_max=1000.0,
+            num_freqs=512,
+        )
+        self.assertEqual(fourier.num_features(), 512)
+
+    def test_peak_embedder_fourier_branch_recovers_raw_mz_scale(self):
+        embedder = PeakFeatureEmbedder(
+            model_dim=32,
+            hidden_dim=16,
+            fourier_strategy="lin_float_int",
+            fourier_x_min=1e-4,
+            fourier_x_max=1000.0,
+            fourier_num_freqs=8,
+        )
+        normalized_peak_mz = torch.tensor([[0.5]], dtype=torch.float32)
+        prepared = embedder._prepare_fourier_mz(normalized_peak_mz)
+        self.assertAlmostEqual(
+            float(prepared.item()),
+            0.5 * PEAK_MZ_MAX,
+            places=6,
+        )
+
+
 class BlockJEPATests(unittest.TestCase):
     def _build_model(self, **kwargs) -> PeakSetSIGReg:
         model_kwargs = {
@@ -145,6 +175,41 @@ class BlockJEPATests(unittest.TestCase):
                 metrics["jepa_term"]
                 + metrics["cls_embedding_term"]
                 + metrics["sigreg_term"],
+            )
+        )
+
+    def test_vicreg_on_visible_context_contributes_to_loss(self):
+        model = self._build_model(
+            masked_token_loss_weight=1.0,
+            representation_regularizer="vicreg",
+            vicreg_lambda=0.02,
+        )
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+        metrics = model.forward_augmented(batch)
+        for key in (
+            "vicreg_term",
+            "token_vicreg_loss",
+            "vicreg_var_loss",
+            "vicreg_cov_loss",
+        ):
+            self.assertIn(key, metrics)
+        self.assertEqual(float(metrics["vicreg_inv_loss"].detach()), 0.0)
+        self.assertGreater(float(metrics["vicreg_var_loss"].detach()), 0.0)
+        self.assertGreaterEqual(float(metrics["vicreg_cov_loss"].detach()), 0.0)
+        self.assertGreater(float(metrics["token_vicreg_loss"].detach()), 0.0)
+        self.assertGreater(float(metrics["vicreg_term"].detach()), 0.0)
+        self.assertTrue(
+            torch.allclose(metrics["regularizer_loss"], metrics["token_vicreg_loss"])
+        )
+        self.assertTrue(
+            torch.allclose(metrics["regularizer_term"], metrics["vicreg_term"])
+        )
+        self.assertTrue(
+            torch.allclose(
+                metrics["loss"],
+                metrics["jepa_term"]
+                + metrics["cls_embedding_term"]
+                + metrics["vicreg_term"],
             )
         )
 

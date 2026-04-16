@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 
-from models.losses import SIGReg
+from models.losses import SIGReg, VICReg
 from models.peak_features import PeakFeatureEmbedder
 from networks import transformer_torch
 from networks.transformer_torch import _build_norm, create_visible_attention_mask
@@ -515,6 +515,12 @@ class PeakSetSIGReg(nn.Module):
         masked_latent_predictor_num_heads: int = 8,
         sigreg_num_slices: int = 256,
         sigreg_lambda: float = 0.02,
+        vicreg_lambda: float = 0.02,
+        vicreg_inv_coeff: float = 0.0,
+        vicreg_var_coeff: float = 25.0,
+        vicreg_cov_coeff: float = 1.0,
+        vicreg_variance_target: float = 1.0,
+        vicreg_eps: float = 1e-4,
         jepa_num_target_blocks: int = 2,
         jepa_context_fraction: float = 0.5,
         jepa_target_fraction: float = 0.25,
@@ -534,6 +540,7 @@ class PeakSetSIGReg(nn.Module):
         predictor_num_register_tokens: int = 0,
         predictor_dim: int | None = None,
         predictor_dropout: float = 0.0,
+        use_sparse_packing: bool = True,
     ):
         super().__init__()
         self.model_dim = model_dim
@@ -553,11 +560,12 @@ class PeakSetSIGReg(nn.Module):
         self.num_jepa_target_layers = len(self.jepa_target_layers)
         self.jepa_target_dim = self.num_jepa_target_layers * self.model_dim
         self.representation_regularizer = str(representation_regularizer).lower()
-        if self.representation_regularizer not in ("none", "", "sigreg"):
+        if self.representation_regularizer not in ("none", "", "sigreg", "vicreg"):
             raise ValueError(
                 f"Unsupported regularizer: {self.representation_regularizer!r}"
             )
         self.sigreg_lambda = float(sigreg_lambda)
+        self.vicreg_lambda = float(vicreg_lambda)
         _f = torch.float32
         _reg = self.register_buffer
         self.teacher_ema_update_every = int(teacher_ema_update_every)
@@ -607,13 +615,19 @@ class PeakSetSIGReg(nn.Module):
         self.norm_type = str(norm_type).lower()
         self.temporal_predictor_num_layers = int(temporal_predictor_num_layers)
         self.predictor_num_register_tokens = int(predictor_num_register_tokens)
+        self.use_sparse_packing = bool(use_sparse_packing)
         if self.jepa_num_target_blocks < 1:
             raise ValueError("jepa_num_target_blocks must be >= 1")
         N = int(num_peaks) + int(self.use_precursor_token)
-        self._context_pack_n = max(1, int(math.ceil(N * float(jepa_context_fraction))))
-        target_pack_n = max(1, int(math.ceil(N * float(jepa_target_fraction))))
-        self._predictor_pack_n = min(N, self._context_pack_n + target_pack_n)
-        self._full_pack_n = N
+        if self.use_sparse_packing:
+            self._context_pack_n = max(1, int(math.ceil(N * float(jepa_context_fraction))))
+            target_pack_n = max(1, int(math.ceil(N * float(jepa_target_fraction))))
+            self._predictor_pack_n = min(N, self._context_pack_n + target_pack_n)
+            self._full_pack_n = N
+        else:
+            self._context_pack_n = 0
+            self._predictor_pack_n = 0
+            self._full_pack_n = 0
         self.encoder = PeakSetEncoder(
             model_dim=model_dim,
             num_layers=self.encoder_num_layers,
@@ -686,6 +700,13 @@ class PeakSetSIGReg(nn.Module):
         nn.init.xavier_normal_(self.masked_latent_readout.weight)
         nn.init.zeros_(self.masked_latent_readout.bias)
         self.sigreg = SIGReg(num_slices=int(sigreg_num_slices))
+        self.vicreg = VICReg(
+            inv_coeff=float(vicreg_inv_coeff),
+            var_coeff=float(vicreg_var_coeff),
+            cov_coeff=float(vicreg_cov_coeff),
+            variance_target=float(vicreg_variance_target),
+            eps=float(vicreg_eps),
+        )
         # Temporal predictor for frame -> next-frame prediction.
         if self.temporal_predictor_num_layers > 0:
             self.temporal_predictor = _build_temporal_decoder_blocks(
@@ -1110,17 +1131,40 @@ class PeakSetSIGReg(nn.Module):
         local_global_loss = reg_num / reg_den
         jepa_term = self.masked_token_loss_weight * local_global_loss
         use_sigreg = self.representation_regularizer == "sigreg" and self.sigreg_lambda > 0
+        use_vicreg = self.representation_regularizer == "vicreg" and self.vicreg_lambda > 0
+        regularizer_lambda_current = context_emb.new_tensor(0.0)
+        regularizer_loss = context_emb.new_tensor(0.0)
+        regularizer_term = context_emb.new_tensor(0.0)
+        sigreg_lambda_current = context_emb.new_tensor(0.0)
+        token_sigreg_loss = context_emb.new_tensor(0.0)
+        sigreg_term = context_emb.new_tensor(0.0)
+        vicreg_lambda_current = context_emb.new_tensor(0.0)
+        token_vicreg_loss = context_emb.new_tensor(0.0)
+        vicreg_term = context_emb.new_tensor(0.0)
+        vicreg_inv_loss = context_emb.new_tensor(0.0)
+        vicreg_var_loss = context_emb.new_tensor(0.0)
+        vicreg_cov_loss = context_emb.new_tensor(0.0)
         if use_sigreg:
             sigreg_lambda_current = context_emb.new_tensor(self.sigreg_lambda)
             token_sigreg_loss = self.sigreg(context_emb.float(), valid_mask=context_mask)
             sigreg_term = sigreg_lambda_current * token_sigreg_loss.to(
                 dtype=context_emb.dtype
             )
-        else:
-            sigreg_lambda_current = context_emb.new_tensor(0.0)
-            token_sigreg_loss = context_emb.new_tensor(0.0)
-            sigreg_term = context_emb.new_tensor(0.0)
-        loss = jepa_term + cls_embedding_term + sigreg_term
+            regularizer_lambda_current = sigreg_lambda_current
+            regularizer_loss = token_sigreg_loss.to(dtype=context_emb.dtype)
+            regularizer_term = sigreg_term
+        elif use_vicreg:
+            vicreg_lambda_current = context_emb.new_tensor(self.vicreg_lambda)
+            vicreg_losses = self.vicreg(context_emb.float(), valid_mask=context_mask)
+            token_vicreg_loss = vicreg_losses["loss"].to(dtype=context_emb.dtype)
+            vicreg_inv_loss = vicreg_losses["inv_loss"].to(dtype=context_emb.dtype)
+            vicreg_var_loss = vicreg_losses["var_loss"].to(dtype=context_emb.dtype)
+            vicreg_cov_loss = vicreg_losses["cov_loss"].to(dtype=context_emb.dtype)
+            vicreg_term = vicreg_lambda_current * token_vicreg_loss
+            regularizer_lambda_current = vicreg_lambda_current
+            regularizer_loss = token_vicreg_loss
+            regularizer_term = vicreg_term
+        loss = jepa_term + cls_embedding_term + regularizer_term
         with torch.no_grad():
             collapse_metrics: dict[str, torch.Tensor] = {}
             for k, v in _masked_embedding_stats(context_emb, context_mask).items():
@@ -1134,13 +1178,23 @@ class PeakSetSIGReg(nn.Module):
             "cls_embedding_loss": cls_embedding_loss,
             "cls_embedding_term": cls_embedding_term,
             "cls_embedding_loss_weight": cls_loss_weight,
-            "regularizer_loss": token_sigreg_loss.to(dtype=context_emb.dtype),
+            "regularizer_loss": regularizer_loss,
+            "regularizer_term": regularizer_term,
+            "regularizer_lambda_current": regularizer_lambda_current,
             "sigreg_loss": token_sigreg_loss.to(dtype=context_emb.dtype),
             "token_sigreg_loss": token_sigreg_loss.to(dtype=context_emb.dtype),
-            "regularizer_term": sigreg_term,
             "sigreg_term": sigreg_term,
             "sigreg_lambda_current": sigreg_lambda_current,
-            "target_regularizer_term_over_jepa_term": sigreg_term
+            "vicreg_loss": token_vicreg_loss,
+            "token_vicreg_loss": token_vicreg_loss,
+            "vicreg_term": vicreg_term,
+            "vicreg_lambda_current": vicreg_lambda_current,
+            "vicreg_inv_loss": vicreg_inv_loss,
+            "vicreg_var_loss": vicreg_var_loss,
+            "vicreg_cov_loss": vicreg_cov_loss,
+            "target_vicreg_term_over_jepa_term": vicreg_term
+            / jepa_term.clamp_min(1e-8),
+            "target_regularizer_term_over_jepa_term": regularizer_term
             / jepa_term.clamp_min(1e-8),
             "target_sigreg_term_over_jepa_term": sigreg_term
             / jepa_term.clamp_min(1e-8),

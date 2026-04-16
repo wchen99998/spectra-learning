@@ -5,6 +5,8 @@ from math import ceil
 import torch
 from torch import nn
 
+from utils.spectra_preprocessing import PEAK_MZ_MAX
+
 
 class FourierFeatures(nn.Module):
     def __init__(
@@ -39,11 +41,15 @@ class FourierFeatures(nn.Module):
                 dtype=torch.float32,
             )
         else:
-            b = torch.tensor(
-                [1.0 / (x_min * i) for i in range(2, ceil(1.0 / x_min), 2)]
-                + [1.0 / i for i in range(2, ceil(x_max), 1)],
+            periods = torch.tensor(
+                [x_min * i for i in range(2, ceil(1.0 / x_min), 2)]
+                + [float(i) for i in range(2, ceil(x_max), 1)],
                 dtype=torch.float32,
             )
+            if num_freqs < periods.numel():
+                idx = torch.linspace(0, periods.numel() - 1, steps=num_freqs)
+                periods = periods[idx.round().to(torch.long)]
+            b = 1.0 / periods
         self.b = nn.Parameter(b.unsqueeze(0), requires_grad=trainable)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -76,6 +82,7 @@ class PeakFeatureEmbedder(nn.Module):
         fourier_dim = model_dim // 2
         raw_dim = model_dim - fourier_dim
 
+        self.fourier_input_scale = float(PEAK_MZ_MAX)
         self.mz_fourier = FourierFeatures(
             strategy=fourier_strategy,
             x_min=fourier_x_min,
@@ -105,9 +112,12 @@ class PeakFeatureEmbedder(nn.Module):
         nn.init.xavier_normal_(self.output_proj.weight)
         nn.init.zeros_(self.output_proj.bias)
 
+    def _prepare_fourier_mz(self, peak_mz: torch.Tensor) -> torch.Tensor:
+        return peak_mz.unsqueeze(-1) * self.fourier_input_scale
+
     def forward(self, peak_mz: torch.Tensor, peak_intensity: torch.Tensor) -> torch.Tensor:
         mz = peak_mz.unsqueeze(-1)
         intensity = peak_intensity.unsqueeze(-1)
-        fourier = self.fourier_ffn(self.mz_fourier(mz))
+        fourier = self.fourier_ffn(self.mz_fourier(self._prepare_fourier_mz(peak_mz)))
         raw = self.raw_ffn(torch.cat([mz, intensity], dim=-1))
         return self.output_proj(torch.cat([fourier, raw], dim=-1))

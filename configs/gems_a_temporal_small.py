@@ -42,6 +42,13 @@ def get_config() -> config_dict.ConfigDict:
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 1024
     cfg.sigreg_num_slices = 256
+    cfg.sigreg_lambda = 0.02
+    cfg.vicreg_lambda = 0.02
+    cfg.vicreg_inv_coeff = 0.0
+    cfg.vicreg_var_coeff = 25.0
+    cfg.vicreg_cov_coeff = 1.0
+    cfg.vicreg_variance_target = 1.0
+    cfg.vicreg_eps = 1e-4
     cfg.jepa_num_target_blocks = 2
     cfg.jepa_context_fraction = 0.5
     cfg.jepa_target_fraction = 0.1
@@ -61,7 +68,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.checkpoint_every_steps = 25_000
 
     # DataLoader
-    cfg.dataloader_num_workers = 4
+    cfg.dataloader_num_workers = 8
     cfg.dataloader_persistent_workers = True
     cfg.dataloader_prefetch_factor = 2
     cfg.dataloader_pin_memory = True

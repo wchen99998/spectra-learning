@@ -7,6 +7,7 @@ from unittest import mock
 
 import h5py
 import numpy as np
+import torch
 from ml_collections import config_dict
 from torch.utils.data import DataLoader
 
@@ -574,6 +575,83 @@ class MassSpecPreprocessTests(unittest.TestCase):
             probe_data = massspec_probe_data.MassSpecProbeData.from_config(cfg)
 
         self.assertEqual(probe_data.batch_size, 256)
+
+    def test_probe_collator_applies_peak_and_precursor_window_filters(self):
+        collator = massspec_probe_data._ProbeBatchCollator(
+            num_peaks=8,
+            max_precursor_mz=1000.0,
+            min_peak_intensity=1e-4,
+            peak_drop_min_intensity=0.01,
+            peak_ordering="mz",
+            use_precursor_token=False,
+            precursor_peak_exclusion_window_da=5.0,
+        )
+        spectra = torch.zeros((2, 128), dtype=torch.float32)
+        spectra[0, :5] = torch.tensor([90.0, 95.0, 97.0, 98.5, 150.0])
+        spectra[1, :4] = torch.tensor([50.0, 60.0, 194.0, 210.0])
+        intensity = torch.zeros((2, 128), dtype=torch.float32)
+        intensity[0, :5] = torch.tensor([1.0, 0.009, 0.8, 0.7, 0.5])
+        intensity[1, :4] = torch.tensor([0.02, 0.5, 0.8, 0.9])
+        batch = collator(
+            [
+                {
+                    "spectra": torch.stack([spectra[0], intensity[0]], dim=0),
+                    "precursor_mz_raw": 100.0,
+                    "fingerprint": torch.zeros(1024, dtype=torch.int32),
+                    "smiles": "CCO",
+                    "adduct_id": 0,
+                    "instrument_type_id": 0,
+                    "collision_energy": 0.0,
+                    "collision_energy_present": 0,
+                    "probe_valid_mol": True,
+                    "probe_maccs": torch.zeros(166, dtype=torch.int32),
+                    "probe_mol_weight": 0.0,
+                    "probe_logp": 0.0,
+                    "probe_num_heavy_atoms": 0.0,
+                    "probe_num_rings": 0.0,
+                },
+                {
+                    "spectra": torch.stack([spectra[1], intensity[1]], dim=0),
+                    "precursor_mz_raw": 200.0,
+                    "fingerprint": torch.zeros(1024, dtype=torch.int32),
+                    "smiles": "CCN",
+                    "adduct_id": 0,
+                    "instrument_type_id": 0,
+                    "collision_energy": 0.0,
+                    "collision_energy_present": 0,
+                    "probe_valid_mol": True,
+                    "probe_maccs": torch.zeros(166, dtype=torch.int32),
+                    "probe_mol_weight": 0.0,
+                    "probe_logp": 0.0,
+                    "probe_num_heavy_atoms": 0.0,
+                    "probe_num_rings": 0.0,
+                },
+            ]
+        )
+
+        peak_mz = batch["peak_mz"] * 1000.0
+        valid = batch["peak_valid_mask"]
+        precursor = batch["precursor_mz"] * 1000.0
+
+        self.assertEqual(int(valid[0].sum().item()), 1)
+        self.assertTrue(torch.allclose(peak_mz[0, :1], torch.tensor([90.0])))
+        self.assertEqual(int(valid[1].sum().item()), 3)
+        self.assertTrue(
+            torch.allclose(peak_mz[1, :3], torch.tensor([50.0, 60.0, 194.0]))
+        )
+        self.assertEqual(
+            int(
+                (
+                    valid
+                    & (peak_mz > (precursor.unsqueeze(1) - 5.0))
+                ).sum().item()
+            ),
+            0,
+        )
+        self.assertGreaterEqual(
+            float(batch["peak_intensity"][valid].min().item()),
+            0.01 - 1e-6,
+        )
 
     def test_process_massspec_probe_filters_large_precursor(self):
         spectra = np.zeros((4, 2, 128), dtype=np.float32)

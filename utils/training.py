@@ -74,6 +74,12 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         ),
         sigreg_num_slices=int(config.get("sigreg_num_slices", 256)),
         sigreg_lambda=float(config.get("sigreg_lambda", 0.02)),
+        vicreg_lambda=float(config.get("vicreg_lambda", 0.02)),
+        vicreg_inv_coeff=float(config.get("vicreg_inv_coeff", 0.0)),
+        vicreg_var_coeff=float(config.get("vicreg_var_coeff", 25.0)),
+        vicreg_cov_coeff=float(config.get("vicreg_cov_coeff", 1.0)),
+        vicreg_variance_target=float(config.get("vicreg_variance_target", 1.0)),
+        vicreg_eps=float(config.get("vicreg_eps", 1e-4)),
         jepa_num_target_blocks=int(config.get("jepa_num_target_blocks", 2)),
         jepa_context_fraction=float(config.get("jepa_context_fraction", 0.5)),
         jepa_target_fraction=float(config.get("jepa_target_fraction", 0.25)),
@@ -103,6 +109,7 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         ),
         predictor_dim=config.get("predictor_dim", None),
         predictor_dropout=float(config.get("predictor_dropout", 0.0)),
+        use_sparse_packing=bool(config.get("use_sparse_packing", True)),
     )
 
 
@@ -196,7 +203,8 @@ def auto_run_name(config: Any) -> str:
     regularizer = str(config.get("representation_regularizer", "none")).lower()
     if regularizer and regularizer != "none":
         parts.append(regularizer)
-        parts.append(f"lam{float(config.get('sigreg_lambda', 0.0)):.0e}")
+        lambda_key = "vicreg_lambda" if regularizer == "vicreg" else "sigreg_lambda"
+        parts.append(f"lam{float(config.get(lambda_key, 0.0)):.0e}")
     run_name_suffix = str(config.get("run_name_suffix", "")).strip()
     if run_name_suffix:
         parts.append(run_name_suffix)

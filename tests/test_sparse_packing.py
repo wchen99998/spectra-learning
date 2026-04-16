@@ -1,6 +1,8 @@
 import torch
+from ml_collections import config_dict
 
 from models.model import PackContext, PeakSetEncoder, PeakSetSIGReg, pack_sequence, unpack_sequence
+from utils.training import build_model_from_config
 
 
 def _assert_zero_at_mask(x: torch.Tensor, mask: torch.Tensor) -> None:
@@ -260,6 +262,28 @@ def test_forward_augmented_sparse_pack_matches_full_model_loss():
         rtol=1e-6,
         atol=1e-6,
     )
+
+
+def test_build_model_from_config_can_disable_sparse_packing():
+    cfg = config_dict.ConfigDict()
+    cfg.model_dim = 32
+    cfg.encoder_num_layers = 2
+    cfg.encoder_num_heads = 4
+    cfg.attention_mlp_multiple = 2.0
+    cfg.feature_mlp_hidden_dim = 16
+    cfg.masked_token_loss_weight = 1.0
+    cfg.jepa_num_target_blocks = 2
+    cfg.jepa_context_fraction = 0.5
+    cfg.jepa_target_fraction = 0.25
+    cfg.num_peaks = 8
+    cfg.use_sparse_packing = False
+
+    model = build_model_from_config(cfg)
+
+    assert model.use_sparse_packing is False
+    assert model._context_pack_n == 0
+    assert model._predictor_pack_n == 0
+    assert model._full_pack_n == 0
 
 
 @torch.no_grad()
