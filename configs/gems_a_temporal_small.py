@@ -17,6 +17,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.temporal_repo_id = "cjim8889/gems-a10-grouped"
     cfg.temporal_revision = "main"
     cfg.temporal_data_dir = "data/gems_grouped"
+    cfg.nist_full_probe_repo_id = "cjim8889/hr_msms_nist_probe_prepared"
+    cfg.nist_full_probe_revision = "main"
     cfg.batch_size = 256
     cfg.max_precursor_mz = 1000.0
     cfg.min_peak_intensity = 0.0001
@@ -52,7 +54,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.vicreg_eps = 1e-4
     cfg.jepa_num_target_blocks = 2
     cfg.jepa_context_fraction = 0.5
+    cfg.jepa_context_fraction_range = (0.5, 0.5)
     cfg.jepa_target_fraction = 0.1
+    cfg.jepa_target_fraction_range = (0.1, 0.1)
     cfg.norm_type = "layernorm"
 
     # Training

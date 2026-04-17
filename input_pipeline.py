@@ -36,6 +36,7 @@ _NUM_PEAKS_OUTPUT = 60
 _METADATA_FILENAME = "metadata.json"
 _DEFAULT_JEPA_MASK_STRATEGY = "contiguous"
 _DEFAULT_JEPA_MASK_LENGTHS = (1, 2, 4, 8, 16)
+_JEPA_MASK_STRATEGIES = ("contiguous", "ragged", "random")
 
 
 def numpy_batch_to_torch(batch: dict[str, Any]) -> dict[str, Any]:
@@ -195,6 +196,53 @@ def _sample_ragged_block_mask_1d_torch(
     return torch.stack(masks_by_length, dim=0).any(dim=0)
 
 
+def _sample_random_mask_1d_torch(
+    active_positions: torch.Tensor,
+    *,
+    masked_fraction: float,
+) -> torch.Tensor:
+    active_count = int(active_positions.sum().item())
+    if active_count == 0:
+        return torch.zeros_like(active_positions)
+    mask_count = min(
+        int(round(float(masked_fraction) * float(active_count))),
+        active_count,
+    )
+    if mask_count == 0:
+        return torch.zeros_like(active_positions)
+    active_indices = torch.where(active_positions)[0]
+    selected_indices = active_indices[
+        torch.randperm(active_count, device=active_positions.device)[:mask_count]
+    ]
+    mask = torch.zeros_like(active_positions)
+    mask[selected_indices] = True
+    return mask
+
+
+def _sample_mask_fraction_torch(
+    fraction_range: tuple[float, float],
+    *,
+    device: torch.device,
+) -> float:
+    low, high = (float(value) for value in fraction_range)
+    return float(torch.empty((), device=device).uniform_(low, high).item())
+
+
+def _sample_mask_strategy_torch(
+    mask_strategy: str,
+    *,
+    device: torch.device,
+) -> str:
+    strategy = str(mask_strategy).lower()
+    if strategy == "ragged_blocks":
+        strategy = "ragged"
+    if strategy == "all":
+        strategy = _JEPA_MASK_STRATEGIES[
+            int(torch.randint(len(_JEPA_MASK_STRATEGIES), (), device=device).item())
+        ]
+    return strategy
+
+
 def _sample_block_masks_torch(
     peak_valid_mask: torch.Tensor,
     *,
@@ -203,14 +251,20 @@ def _sample_block_masks_torch(
     target_fraction: float,
     block_min_len: int,
     mask_strategy: str = _DEFAULT_JEPA_MASK_STRATEGY,
+    context_fraction_range: tuple[float, float] | None = None,
+    target_fraction_range: tuple[float, float] | None = None,
     mask_lengths: tuple[int, ...] = _DEFAULT_JEPA_MASK_LENGTHS,
     mask_round_from: int = len(_DEFAULT_JEPA_MASK_LENGTHS),
 ) -> tuple[torch.Tensor, torch.Tensor]:
     strategy = str(mask_strategy).lower()
     if strategy == "ragged_blocks":
         strategy = "ragged"
-    if strategy not in {"contiguous", "ragged"}:
+    if strategy not in {*_JEPA_MASK_STRATEGIES, "all"}:
         raise ValueError(f"Unsupported JEPA mask strategy: {mask_strategy!r}")
+    if context_fraction_range is None:
+        context_fraction_range = (float(context_fraction), float(context_fraction))
+    if target_fraction_range is None:
+        target_fraction_range = (float(target_fraction), float(target_fraction))
     lengths = tuple(int(length) for length in mask_lengths)
     round_from = int(mask_round_from)
     device = peak_valid_mask.device
@@ -225,10 +279,22 @@ def _sample_block_masks_torch(
     )
     positions = torch.arange(num_peaks, device=device)
     for row_idx in range(batch_size):
+        row_strategy = _sample_mask_strategy_torch(strategy, device=device)
         row_valid = peak_valid_mask[row_idx]
         valid_count = int(row_valid.sum().item())
+        row_context_fraction = float(context_fraction)
+        row_target_fraction = float(target_fraction)
+        if row_strategy == "random":
+            row_context_fraction = _sample_mask_fraction_torch(
+                context_fraction_range,
+                device=device,
+            )
+            row_target_fraction = _sample_mask_fraction_torch(
+                target_fraction_range,
+                device=device,
+            )
         desired_context = max(
-            int(round(valid_count * float(context_fraction))),
+            int(round(valid_count * row_context_fraction)),
             int(block_min_len),
         )
         if num_target_blocks > 0:
@@ -240,14 +306,14 @@ def _sample_block_masks_torch(
             context_len = min(desired_context, max_context_len)
             available_for_targets = max(valid_count - context_len, 0)
             desired_target = max(
-                int(round(valid_count * float(target_fraction))),
+                int(round(valid_count * row_target_fraction)),
                 int(block_min_len),
             )
             target_len = min(desired_target, available_for_targets)
         else:
             context_len = min(desired_context, valid_count)
             target_len = 0
-        if strategy == "contiguous":
+        if row_strategy == "contiguous":
             context_start = int(
                 torch.randint(valid_count - context_len + 1, (), device=device).item()
             )
@@ -255,18 +321,23 @@ def _sample_block_masks_torch(
                 positions < context_start + context_len
             )
             row_context &= row_valid
-        else:
+        elif row_strategy == "ragged":
             row_context = _sample_ragged_block_mask_1d_torch(
                 row_valid,
                 masked_fraction=float(context_len) / float(valid_count),
                 lengths=lengths,
                 round_from=round_from,
             )
+        else:
+            row_context = _sample_random_mask_1d_torch(
+                row_valid,
+                masked_fraction=float(context_len) / float(valid_count),
+            )
         context_mask[row_idx] = row_context
         if num_target_blocks == 0 or target_len == 0:
             continue
         valid_target_positions = row_valid & ~row_context
-        if strategy == "contiguous":
+        if row_strategy == "contiguous":
             compressed_positions = torch.where(
                 positions < context_start,
                 positions,
@@ -289,12 +360,18 @@ def _sample_block_masks_torch(
             continue
         target_fraction_on_available = float(target_len) / float(available_for_targets)
         for block_idx in range(int(num_target_blocks)):
-            target_masks[row_idx, block_idx] = _sample_ragged_block_mask_1d_torch(
-                valid_target_positions,
-                masked_fraction=target_fraction_on_available,
-                lengths=lengths,
-                round_from=round_from,
-            )
+            if row_strategy == "ragged":
+                target_masks[row_idx, block_idx] = _sample_ragged_block_mask_1d_torch(
+                    valid_target_positions,
+                    masked_fraction=target_fraction_on_available,
+                    lengths=lengths,
+                    round_from=round_from,
+                )
+            else:
+                target_masks[row_idx, block_idx] = _sample_random_mask_1d_torch(
+                    valid_target_positions,
+                    masked_fraction=target_fraction_on_available,
+                )
     return context_mask, target_masks
 
 
@@ -363,6 +440,8 @@ class _GemsBatchCollator:
         target_fraction: float,
         block_min_len: int,
         mask_strategy: str = _DEFAULT_JEPA_MASK_STRATEGY,
+        context_fraction_range: tuple[float, float] | None = None,
+        target_fraction_range: tuple[float, float] | None = None,
         mask_lengths: tuple[int, ...] = _DEFAULT_JEPA_MASK_LENGTHS,
         mask_round_from: int = len(_DEFAULT_JEPA_MASK_LENGTHS),
         use_precursor_token: bool,
@@ -379,6 +458,16 @@ class _GemsBatchCollator:
         self.target_fraction = float(target_fraction)
         self.block_min_len = int(block_min_len)
         self.mask_strategy = str(mask_strategy)
+        if context_fraction_range is None:
+            context_fraction_range = (self.context_fraction, self.context_fraction)
+        if target_fraction_range is None:
+            target_fraction_range = (self.target_fraction, self.target_fraction)
+        self.context_fraction_range = tuple(
+            float(value) for value in context_fraction_range
+        )
+        self.target_fraction_range = tuple(
+            float(value) for value in target_fraction_range
+        )
         self.mask_lengths = tuple(int(length) for length in mask_lengths)
         self.mask_round_from = int(mask_round_from)
         self.use_precursor_token = bool(use_precursor_token)
@@ -420,6 +509,8 @@ class _GemsBatchCollator:
                 target_fraction=self.target_fraction,
                 block_min_len=self.block_min_len,
                 mask_strategy=self.mask_strategy,
+                context_fraction_range=self.context_fraction_range,
+                target_fraction_range=self.target_fraction_range,
                 mask_lengths=self.mask_lengths,
                 mask_round_from=self.mask_round_from,
             )
@@ -474,6 +565,26 @@ class GemsNativeDataModule:
         self.jepa_block_min_len = int(config.get("jepa_block_min_len", 1))
         self.jepa_mask_strategy = str(
             config.get("jepa_mask_strategy", _DEFAULT_JEPA_MASK_STRATEGY)
+        )
+        self.jepa_context_fraction_range = tuple(
+            float(value)
+            for value in config.get(
+                "jepa_context_fraction_range",
+                (
+                    self.jepa_context_fraction,
+                    self.jepa_context_fraction,
+                ),
+            )
+        )
+        self.jepa_target_fraction_range = tuple(
+            float(value)
+            for value in config.get(
+                "jepa_target_fraction_range",
+                (
+                    self.jepa_target_fraction,
+                    self.jepa_target_fraction,
+                ),
+            )
         )
         self.jepa_mask_lengths = tuple(
             int(length)
@@ -655,6 +766,8 @@ class GemsNativeDataModule:
                 target_fraction=self.jepa_target_fraction,
                 block_min_len=self.jepa_block_min_len,
                 mask_strategy=self.jepa_mask_strategy,
+                context_fraction_range=self.jepa_context_fraction_range,
+                target_fraction_range=self.jepa_target_fraction_range,
                 mask_lengths=self.jepa_mask_lengths,
                 mask_round_from=self.jepa_mask_round_from,
                 use_precursor_token=self.use_precursor_token,
@@ -698,3 +811,455 @@ class GemsNativeDataModule:
             seed=self.seed + int(epoch),
             drop_last=self.drop_remainder,
         )
+
+
+def _mask_block_ranges(mask: torch.Tensor) -> list[tuple[int, int]]:
+    positions = torch.nonzero(mask, as_tuple=False).squeeze(-1)
+    if positions.numel() == 0:
+        return []
+    ranges: list[tuple[int, int]] = []
+    start = int(positions[0].item())
+    prev = start
+    for value in positions[1:].tolist():
+        current = int(value)
+        if current != prev + 1:
+            ranges.append((start, prev))
+            start = current
+        prev = current
+    ranges.append((start, prev))
+    return ranges
+
+
+def _mask_block_ranges_in_active_order(
+    mask: torch.Tensor,
+    active_positions: torch.Tensor,
+) -> list[tuple[int, int]]:
+    active_indices = torch.nonzero(active_positions, as_tuple=False).squeeze(-1)
+    if active_indices.numel() == 0:
+        return []
+    return _mask_block_ranges(mask[active_indices])
+
+
+def _format_block_ranges(ranges: list[tuple[int, int]]) -> str:
+    if not ranges:
+        return "[]"
+    return "[" + ", ".join(f"({start}, {end})" for start, end in ranges) + "]"
+
+
+def _make_visualization_collator_kwargs(
+    datamodule: GemsNativeDataModule,
+) -> dict[str, Any]:
+    return {
+        "num_target_blocks": datamodule.jepa_num_target_blocks,
+        "context_fraction": datamodule.jepa_context_fraction,
+        "target_fraction": datamodule.jepa_target_fraction,
+        "block_min_len": datamodule.jepa_block_min_len,
+        "mask_strategy": datamodule.jepa_mask_strategy,
+        "context_fraction_range": datamodule.jepa_context_fraction_range,
+        "target_fraction_range": datamodule.jepa_target_fraction_range,
+        "mask_lengths": datamodule.jepa_mask_lengths,
+        "mask_round_from": datamodule.jepa_mask_round_from,
+        "use_precursor_token": datamodule.use_precursor_token,
+        "num_peaks": datamodule.num_peaks_output,
+        "max_precursor_mz": datamodule.max_precursor_mz,
+        "min_peak_intensity": datamodule.min_peak_intensity,
+        "peak_drop_min_intensity": datamodule.peak_drop_min_intensity,
+        "peak_ordering": datamodule.peak_ordering,
+        "precursor_peak_exclusion_window_da": datamodule.precursor_peak_exclusion_window_da,
+    }
+
+
+def _normalize_mask_strategy_name(mask_strategy: str) -> str:
+    strategy = str(mask_strategy).lower()
+    if strategy == "ragged_blocks":
+        strategy = "ragged"
+    return strategy
+
+
+def _resolve_visualization_strategies(
+    config_mask_strategy: str,
+    strategies: tuple[str, ...] | None = None,
+) -> tuple[str, ...]:
+    if strategies is not None:
+        resolved = [_normalize_mask_strategy_name(strategy) for strategy in strategies]
+        return tuple(dict.fromkeys(resolved))
+    default_strategies = list(_JEPA_MASK_STRATEGIES)
+    config_strategy = _normalize_mask_strategy_name(config_mask_strategy)
+    if config_strategy not in default_strategies:
+        default_strategies.append(config_strategy)
+    return tuple(default_strategies)
+
+
+def _load_real_mask_visualization_batches(
+    *,
+    config_path: str | Path,
+    split: str,
+    start_index: int,
+    num_samples: int,
+    seed: int,
+    strategies: tuple[str, ...] | None = None,
+) -> tuple[
+    config_dict.ConfigDict,
+    dict[str, torch.Tensor],
+    dict[str, dict[str, torch.Tensor]],
+    list[int],
+]:
+    from utils.training import load_config
+
+    config = load_config(Path(config_path).expanduser().resolve())
+    datamodule = GemsNativeDataModule(config, seed=seed)
+    dataset = datamodule._get_dataset(split)
+    sample_indices = [int(start_index) + offset for offset in range(int(num_samples))]
+    samples = [dataset[index] for index in sample_indices]
+    collator_kwargs = _make_visualization_collator_kwargs(datamodule)
+    resolved_strategies = _resolve_visualization_strategies(
+        datamodule.jepa_mask_strategy,
+        strategies,
+    )
+    raw_batch = _GemsBatchCollator(
+        augment=False,
+        **collator_kwargs,
+    )(samples)
+    strategy_batches: dict[str, dict[str, torch.Tensor]] = {}
+    for strategy in resolved_strategies:
+        torch.manual_seed(int(seed))
+        strategy_batches[strategy] = _GemsBatchCollator(
+            augment=True,
+            **(collator_kwargs | {"mask_strategy": strategy}),
+        )(samples)
+    return config, raw_batch, strategy_batches, sample_indices
+
+
+def _mask_rows_for_plot(
+    peak_valid_mask: torch.Tensor,
+    context_mask: torch.Tensor,
+    target_masks: torch.Tensor,
+) -> tuple[np.ndarray, list[str]]:
+    rows = [
+        peak_valid_mask,
+        context_mask,
+        *[target_masks[target_idx] for target_idx in range(int(target_masks.shape[0]))],
+    ]
+    labels = [
+        f"valid ({int(peak_valid_mask.sum().item())})",
+        f"context ({int(context_mask.sum().item())})",
+        *[
+            f"target {target_idx} ({int(target_masks[target_idx].sum().item())})"
+            for target_idx in range(int(target_masks.shape[0]))
+        ],
+    ]
+    matrix = torch.stack(rows, dim=0).to(torch.float32).cpu().numpy()
+    return matrix, labels
+
+
+def _set_slot_ticks(
+    ax: Any,
+    *,
+    num_slots: int,
+    use_precursor_token: bool,
+) -> None:
+    step = max(int(math.ceil(float(num_slots) / 8.0)), 1)
+    ticks = list(range(0, int(num_slots), step))
+    if ticks[-1] != int(num_slots) - 1:
+        ticks.append(int(num_slots) - 1)
+    labels = [str(tick) for tick in ticks]
+    if bool(use_precursor_token) and ticks:
+        labels[0] = "P"
+    ax.set_xticks(ticks)
+    ax.set_xticklabels(labels)
+
+
+def _plot_mask_strategy_panel(
+    *,
+    ax_slots: Any,
+    ax_masks: Any,
+    peak_intensity: torch.Tensor,
+    peak_valid_mask: torch.Tensor,
+    context_mask: torch.Tensor,
+    target_masks: torch.Tensor,
+    title: str,
+    use_precursor_token: bool,
+) -> None:
+    x = np.arange(int(peak_intensity.shape[0]))
+    valid = peak_valid_mask.cpu().numpy().astype(bool)
+    context = context_mask.cpu().numpy().astype(bool)
+    any_target = target_masks.any(dim=0).cpu().numpy().astype(bool)
+    free_valid = valid & (~context) & (~any_target)
+    padded = ~valid
+    heights = peak_intensity.cpu().numpy()
+
+    if np.any(free_valid):
+        ax_slots.bar(
+            x[free_valid],
+            heights[free_valid],
+            width=0.82,
+            color="#cbd5e1",
+            edgecolor="none",
+            label="Valid unused",
+        )
+    if np.any(context):
+        ax_slots.bar(
+            x[context],
+            heights[context],
+            width=0.82,
+            color="#2563eb",
+            edgecolor="none",
+            label="Context",
+        )
+    if np.any(any_target):
+        ax_slots.bar(
+            x[any_target],
+            heights[any_target],
+            width=0.82,
+            color="#f97316",
+            edgecolor="none",
+            label="Target (any block)",
+        )
+    if np.any(padded):
+        ax_slots.scatter(
+            x[padded],
+            np.zeros(int(padded.sum())),
+            color="#94a3b8",
+            marker="x",
+            s=18,
+            linewidths=1.0,
+            label="Padding",
+            zorder=5,
+        )
+
+    ax_slots.set_xlim(-0.5, len(x) - 0.5)
+    ax_slots.set_title(title, fontsize=11, fontweight="bold")
+    ax_slots.set_ylabel("Intensity")
+    ax_slots.grid(axis="y", alpha=0.2)
+    if bool(use_precursor_token):
+        ax_slots.axvline(0, color="black", linestyle="--", linewidth=1.0, alpha=0.35)
+        ax_slots.text(
+            0.01,
+            0.95,
+            "slot P = precursor",
+            transform=ax_slots.transAxes,
+            va="top",
+            ha="left",
+            fontsize=8,
+        )
+    ax_slots.legend(fontsize=7, loc="upper right")
+    _set_slot_ticks(
+        ax_slots,
+        num_slots=int(peak_intensity.shape[0]),
+        use_precursor_token=use_precursor_token,
+    )
+
+    mask_matrix, row_labels = _mask_rows_for_plot(
+        peak_valid_mask=peak_valid_mask,
+        context_mask=context_mask,
+        target_masks=target_masks,
+    )
+    ax_masks.imshow(
+        mask_matrix,
+        aspect="auto",
+        interpolation="nearest",
+        cmap="Blues",
+        vmin=0.0,
+        vmax=1.0,
+    )
+    ax_masks.set_yticks(np.arange(len(row_labels)))
+    ax_masks.set_yticklabels(row_labels, fontsize=8)
+    ax_masks.set_xlabel("Model input slot (P = precursor)" if use_precursor_token else "Peak slot")
+    _set_slot_ticks(
+        ax_masks,
+        num_slots=int(peak_intensity.shape[0]),
+        use_precursor_token=use_precursor_token,
+    )
+
+
+def _print_mask_strategy_summary(
+    *,
+    strategy: str,
+    batch: dict[str, torch.Tensor],
+    sample_index: int,
+    dataset_index: int,
+    use_precursor_token: bool,
+) -> None:
+    full_valid = batch["peak_valid_mask"][sample_index]
+    full_context = batch["context_mask"][sample_index]
+    full_targets = batch["target_masks"][sample_index]
+    peak_valid = full_valid[1:] if bool(use_precursor_token) else full_valid
+    peak_context = full_context[1:] if bool(use_precursor_token) else full_context
+    peak_targets = full_targets[:, 1:] if bool(use_precursor_token) else full_targets
+    valid_target_positions = peak_valid & (~peak_context)
+
+    print(
+        f"{strategy} | dataset_index={dataset_index} | "
+        f"valid={int(full_valid.sum().item())} | "
+        f"context={int(full_context.sum().item())} | "
+        f"target_counts={[int(mask.sum().item()) for mask in full_targets]}"
+    )
+    if bool(use_precursor_token):
+        print("  model slot P is the precursor token; active-order blocks ignore it")
+    print(
+        "  context: "
+        f"model-slot={_format_block_ranges(_mask_block_ranges(full_context))} | "
+        f"active-order={_format_block_ranges(_mask_block_ranges_in_active_order(peak_context, peak_valid))}"
+    )
+    for target_idx in range(int(full_targets.shape[0])):
+        print(
+            f"  target {target_idx}: "
+            f"model-slot={_format_block_ranges(_mask_block_ranges(full_targets[target_idx]))} | "
+            f"active-order={_format_block_ranges(_mask_block_ranges_in_active_order(peak_targets[target_idx], valid_target_positions))}"
+        )
+
+
+def visualize_real_mask_strategies(
+    *,
+    config_path: str | Path,
+    split: str,
+    start_index: int,
+    num_samples: int,
+    seed: int,
+    output_path: str | Path,
+    strategies: tuple[str, ...] | None = None,
+) -> Path:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    config, raw_batch, strategy_batches, sample_indices = _load_real_mask_visualization_batches(
+        config_path=config_path,
+        split=split,
+        start_index=start_index,
+        num_samples=num_samples,
+        seed=seed,
+        strategies=strategies,
+    )
+    resolved_strategies = tuple(strategy_batches.keys())
+    use_precursor_token = bool(config.get("use_precursor_token", False))
+    fig, axes = plt.subplots(
+        int(num_samples) * 2,
+        len(resolved_strategies),
+        figsize=(5.8 * len(resolved_strategies), 4.2 * int(num_samples)),
+        height_ratios=[ratio for _ in range(int(num_samples)) for ratio in (3.0, 1.2)],
+        squeeze=False,
+    )
+    fig.suptitle(
+        "Real-data JEPA masking on "
+        f"{split} split | samples {sample_indices[0]}-{sample_indices[-1]} | "
+        f"seed={seed} | strategies={','.join(resolved_strategies)}",
+        fontsize=14,
+        fontweight="bold",
+    )
+    for row_offset, dataset_index in enumerate(sample_indices):
+        peak_intensity = raw_batch["peak_intensity"][row_offset]
+        peak_valid_mask = raw_batch["peak_valid_mask"][row_offset]
+        for col_idx, strategy in enumerate(resolved_strategies):
+            batch = strategy_batches[strategy]
+            context_mask = batch["context_mask"][row_offset]
+            target_masks = batch["target_masks"][row_offset]
+            title = (
+                f"{strategy.title()} | dataset[{dataset_index}] | "
+                f"context={int(context_mask.sum().item())} | "
+                f"targets={[int(mask.sum().item()) for mask in target_masks]}"
+            )
+            _plot_mask_strategy_panel(
+                ax_slots=axes[row_offset * 2, col_idx],
+                ax_masks=axes[row_offset * 2 + 1, col_idx],
+                peak_intensity=peak_intensity,
+                peak_valid_mask=peak_valid_mask,
+                context_mask=context_mask,
+                target_masks=target_masks,
+                title=title,
+                use_precursor_token=use_precursor_token,
+            )
+            if row_offset == int(num_samples) - 1:
+                axes[row_offset * 2, col_idx].set_xlabel(
+                    "Model input slot (P = precursor)" if use_precursor_token else "Peak slot"
+                )
+            _print_mask_strategy_summary(
+                strategy=strategy,
+                batch=batch,
+                sample_index=row_offset,
+                dataset_index=dataset_index,
+                use_precursor_token=use_precursor_token,
+            )
+    output_path = Path(output_path).expanduser().resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.97))
+    fig.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved real-data mask visualization to {output_path}")
+    return output_path
+
+
+def _parse_args() -> Any:
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    visualize_parser = subparsers.add_parser(
+        "visualize-masks",
+        help="Visualize JEPA mask modes on real GeMS samples.",
+    )
+    visualize_parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("configs/gems_small.py"),
+        help="Path to an experiment config.",
+    )
+    visualize_parser.add_argument(
+        "--split",
+        choices=("train", "validation"),
+        default="validation",
+        help="Dataset split to sample from.",
+    )
+    visualize_parser.add_argument(
+        "--start-index",
+        type=int,
+        default=0,
+        help="Dataset index for the first sample in the figure.",
+    )
+    visualize_parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=3,
+        help="Number of consecutive real samples to visualize.",
+    )
+    visualize_parser.add_argument(
+        "--seed",
+        type=int,
+        default=7,
+        help="Torch RNG seed used when sampling context and target masks.",
+    )
+    visualize_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("reports/input_pipeline_real_masks.png"),
+        help="Output image path.",
+    )
+    visualize_parser.add_argument(
+        "--strategies",
+        nargs="+",
+        default=None,
+        help=(
+            "Mask strategies to render. Defaults to all concrete modes plus the config "
+            "mode if it is additional."
+        ),
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = _parse_args()
+    if args.command == "visualize-masks":
+        visualize_real_mask_strategies(
+            config_path=args.config,
+            split=args.split,
+            start_index=args.start_index,
+            num_samples=args.num_samples,
+            seed=args.seed,
+            output_path=args.output,
+            strategies=None if args.strategies is None else tuple(args.strategies),
+        )
+
+
+if __name__ == "__main__":
+    main()

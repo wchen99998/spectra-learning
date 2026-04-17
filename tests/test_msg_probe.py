@@ -1,4 +1,7 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -13,6 +16,7 @@ from utils.msg_probe import (
     MsgPmaPool,
     MsgProbeSplitTargets,
     MsgSequenceProbe,
+    _collect_num_rings_classes,
     _build_task_spec,
     _collect_split_targets,
     _new_epoch_state,
@@ -363,6 +367,45 @@ class MsgProbeTaskSpecTests(unittest.TestCase):
             ("mol_weight", "logp", "num_heavy_atoms", "num_rings", "maccs"),
         )
 
+    def test_task_spec_accepts_explicit_num_rings_classes(self):
+        task_spec = _build_task_spec(
+            train_targets=MsgProbeSplitTargets(
+                regression={
+                    "mol_weight": np.linspace(10.0, 13.0, 4, dtype=np.float32),
+                    "logp": np.linspace(1.0, 2.5, 4, dtype=np.float32),
+                    "num_heavy_atoms": np.linspace(2.0, 5.0, 4, dtype=np.float32),
+                    "num_rings": np.asarray([0.0, 1.0, 2.0, 3.0], dtype=np.float32),
+                },
+                maccs=_maccs(
+                    [
+                        [0, 1, 0, 1],
+                        [1, 0, 1, 0],
+                        [0, 1, 1, 0],
+                        [1, 1, 0, 0],
+                    ]
+                ),
+            ),
+            test_targets=MsgProbeSplitTargets(
+                regression={
+                    "mol_weight": np.linspace(14.0, 17.0, 4, dtype=np.float32),
+                    "logp": np.linspace(3.0, 4.5, 4, dtype=np.float32),
+                    "num_heavy_atoms": np.linspace(6.0, 9.0, 4, dtype=np.float32),
+                    "num_rings": np.asarray([2.0, 3.0, 4.0, 5.0], dtype=np.float32),
+                },
+                maccs=_maccs(
+                    [
+                        [1, 0, 0, 1],
+                        [0, 1, 1, 0],
+                        [1, 0, 1, 0],
+                        [0, 1, 0, 1],
+                    ]
+                ),
+            ),
+            num_rings_classes=(0, 1, 2, 3, 4, 5),
+        )
+
+        self.assertEqual(task_spec.num_rings_classes, (0, 1, 2, 3, 4, 5))
+
 
 class MsgProbeMetricTests(unittest.TestCase):
     def test_score_epoch_state_reports_num_rings_and_maccs_metrics(self):
@@ -520,6 +563,40 @@ class MsgProbeCollectionTests(unittest.TestCase):
                 ),
             )
         )
+
+    def test_collect_num_rings_classes_reads_all_probe_shards(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            train_shard = root / "train-shard"
+            test_shard = root / "test-shard"
+            train_shard.mkdir()
+            test_shard.mkdir()
+            np.save(
+                train_shard / "probe_valid_mol.npy",
+                np.asarray([True, False, True], dtype=bool),
+            )
+            np.save(
+                train_shard / "probe_num_rings.npy",
+                np.asarray([0.0, 99.0, 2.0], dtype=np.float32),
+            )
+            np.save(
+                test_shard / "probe_valid_mol.npy",
+                np.asarray([True, True, False], dtype=bool),
+            )
+            np.save(
+                test_shard / "probe_num_rings.npy",
+                np.asarray([5.0, 7.0, 11.0], dtype=np.float32),
+            )
+
+            probe_data = SimpleNamespace(
+                train_files=[str(train_shard)],
+                test_files=[str(test_shard)],
+            )
+
+            self.assertEqual(
+                _collect_num_rings_classes(probe_data),
+                (0, 2, 5, 7),
+            )
 
 
 class ProbeIterationTests(unittest.TestCase):

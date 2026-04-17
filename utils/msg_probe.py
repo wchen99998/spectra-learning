@@ -1,5 +1,6 @@
 import logging
 import math
+from pathlib import Path
 from typing import Callable, NamedTuple
 
 import numpy as np
@@ -380,19 +381,41 @@ def _collect_split_targets(
     )
 
 
+def _collect_num_rings_classes(
+    probe_data: MassSpecProbeData,
+) -> tuple[int, ...]:
+    classes: set[int] = set()
+    for shard_dir_str in (*probe_data.train_files, *probe_data.test_files):
+        shard_dir = Path(shard_dir_str)
+        valid_mask = np.load(shard_dir / "probe_valid_mol.npy", mmap_mode="r")
+        if not bool(np.any(valid_mask)):
+            continue
+        num_rings = np.load(shard_dir / "probe_num_rings.npy", mmap_mode="r")
+        classes.update(
+            np.asarray(num_rings[valid_mask], dtype=np.int32).tolist()
+        )
+    return tuple(sorted(classes))
+
+
 def _build_task_spec(
     *,
     train_targets: MsgProbeSplitTargets,
     test_targets: MsgProbeSplitTargets,
+    num_rings_classes: tuple[int, ...] | None = None,
 ) -> MsgProbeTaskSpec:
     regression_means, regression_stds = {}, {}
     for name in _REGRESSION_PROBE_TASKS:
         values = train_targets.regression[name].astype(np.float32)
         regression_means[name] = float(values.mean())
         regression_stds[name] = float(np.clip(values.std(), 1e-8, None))
-    num_rings_classes = tuple(
-        sorted(np.unique(train_targets.regression[_NUM_RINGS_TASK].astype(np.int32)).tolist())
-    )
+    if num_rings_classes is None:
+        num_rings_classes = tuple(
+            sorted(
+                np.unique(
+                    train_targets.regression[_NUM_RINGS_TASK].astype(np.int32)
+                ).tolist()
+            )
+        )
     return MsgProbeTaskSpec(
         regression_tasks=_REGRESSION_PROBE_TASKS,
         num_rings_classes=num_rings_classes,
@@ -670,7 +693,11 @@ def run_msg_probe(
         max_samples=max_test_samples,
         sample_randomly=randomize_test_subset,
     )
-    task_spec = _build_task_spec(train_targets=train_targets, test_targets=test_targets)
+    task_spec = _build_task_spec(
+        train_targets=train_targets,
+        test_targets=test_targets,
+        num_rings_classes=_collect_num_rings_classes(probe_data),
+    )
     variants = msg_probe_variants_from_config(config)
     was_training = model.training
     model.eval()
@@ -890,7 +917,11 @@ def run_dreams_probe(
         max_samples=max_test_samples,
         sample_randomly=randomize_test_subset,
     )
-    task_spec = _build_task_spec(train_targets=train_targets, test_targets=test_targets)
+    task_spec = _build_task_spec(
+        train_targets=train_targets,
+        test_targets=test_targets,
+        num_rings_classes=_collect_num_rings_classes(probe_data),
+    )
 
     probe = MsgLinearProbe(
         input_dim=dreams_dim,

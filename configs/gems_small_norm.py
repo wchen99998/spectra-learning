@@ -7,6 +7,8 @@ def get_config() -> config_dict.ConfigDict:
     # Dataset
     cfg.artifact_dir = "data/gems_artifacts_alpha"
     cfg.gems_native_repo_id = "cjim8889/gems-a10-native"
+    cfg.nist_full_probe_repo_id = "cjim8889/hr_msms_nist_probe_prepared"
+    cfg.nist_full_probe_revision = "main"
     cfg.batch_size = 256
     cfg.shuffle_buffer = 1_000_000
     cfg.drop_remainder = True
@@ -48,11 +50,13 @@ def get_config() -> config_dict.ConfigDict:
     cfg.vicreg_eps = 1e-4
     cfg.jepa_num_target_blocks = 2
     cfg.jepa_context_fraction = 0.45
+    cfg.jepa_context_fraction_range = (0.35, 0.55)
     cfg.jepa_target_fraction = 0.25
+    cfg.jepa_target_fraction_range = (0.15, 0.35)
     cfg.jepa_block_min_len = 1
-    cfg.jepa_mask_strategy = "ragged"
-    cfg.jepa_mask_lengths = (1, 2, 4, 8, 12)
-    cfg.jepa_mask_round_from = 3
+    cfg.jepa_mask_strategy = "all"
+    cfg.jepa_mask_lengths = (4, 8, 12)
+    cfg.jepa_mask_round_from = 2
     cfg.norm_type = "layernorm"
 
     # Predictor
@@ -66,12 +70,12 @@ def get_config() -> config_dict.ConfigDict:
 
     # Training
     cfg.num_epochs = 10
-    cfg.learning_rate = 2e-4
+    cfg.learning_rate = 5e-4
     cfg.warmup_steps = 20_000
     cfg.min_learning_rate = 3e-5
     cfg.b2 = 0.99
-    cfg.weight_decay = 1e-2
-    cfg.optimizer = "muon"
+    cfg.weight_decay = 0.5
+    cfg.optimizer = "adamw"
     cfg.device_prefetch_size = 8
     cfg.optimizer_capturable = True
     cfg.optimizer_fused = True
@@ -89,7 +93,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.use_ema_teacher_target = True
     cfg.teacher_ema_decay = 0.999
     cfg.teacher_ema_decay_start = 0.996
-    cfg.teacher_ema_decay_warmup_steps = 5_000
+    cfg.teacher_ema_decay_warmup_steps = 100_000
     cfg.teacher_ema_update_every = 5
     cfg.grad_clip_norm = 1.0
     cfg.autocast_dtype = "bf16"
@@ -107,7 +111,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_covariance_dim = 32
     cfg.msg_probe_pma_num_seeds = 32
     cfg.msg_probe_pma_num_heads = cfg.encoder_num_heads
-    cfg.probe_dataset = "nist20"
+    cfg.probe_dataset = "nist-full"
     cfg.msg_probe_tune_metric = "msg_probe/test/auc_maccs_mean"
     cfg.msg_probe_tune_param_space = [
         {

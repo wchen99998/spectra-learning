@@ -7,6 +7,8 @@ def get_config() -> config_dict.ConfigDict:
     # Dataset
     cfg.artifact_dir = "data/gems_artifacts_alpha"
     cfg.gems_native_repo_id = "cjim8889/gems-a10-native"
+    cfg.nist_full_probe_repo_id = "cjim8889/hr_msms_nist_probe_prepared"
+    cfg.nist_full_probe_revision = "main"
     cfg.batch_size = 256
     cfg.shuffle_buffer = 1_000_000
     cfg.drop_remainder = True
@@ -48,7 +50,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.vicreg_eps = 1e-4
     cfg.jepa_num_target_blocks = 2
     cfg.jepa_context_fraction = 0.45
+    cfg.jepa_context_fraction_range = (0.45, 0.45)
     cfg.jepa_target_fraction = 0.25
+    cfg.jepa_target_fraction_range = (0.25, 0.25)
     cfg.jepa_block_min_len = 1
     cfg.jepa_mask_strategy = "ragged"
     cfg.jepa_mask_lengths = (1, 2, 4, 8, 12)
@@ -71,7 +75,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.min_learning_rate = 3e-5
     cfg.b2 = 0.99
     cfg.weight_decay = 1e-2
-    cfg.optimizer = "muon"
+    cfg.optimizer = "adamw"
     cfg.device_prefetch_size = 8
     cfg.optimizer_capturable = True
     cfg.optimizer_fused = True

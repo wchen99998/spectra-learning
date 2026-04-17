@@ -1,5 +1,5 @@
 """Build a NIST hr_msms HDF5 matching the DreaMS Atlas schema consumed by the
-online MSG probe (see :func:`utils.massspec_probe_data.ensure_nist_full_probe_prepared`).
+offline NIST full probe artifact builder.
 
 The probe expects, at minimum, these datasets:
 
@@ -12,7 +12,7 @@ The probe expects, at minimum, these datasets:
 
 We parse ``hr_msms_nist.mgf`` (MS2, with SMILES), pack peaks to the top-128 by
 intensity, validate SMILES via RDKit, and write a GZIP-compressed HDF5 ready
-for :func:`ensure_nist_full_probe_prepared`.
+for :func:`utils.massspec_probe_data.build_nist_full_probe_artifact`.
 """
 
 from __future__ import annotations

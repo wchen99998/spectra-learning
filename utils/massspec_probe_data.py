@@ -7,7 +7,7 @@ from typing import Any, NamedTuple
 
 import numpy as np
 import torch
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, snapshot_download
 from ml_collections import config_dict
 from rdkit import Chem, DataStructs
 from rdkit.Chem import AllChem
@@ -53,6 +53,7 @@ _NIST20_TRAIN_FRAC = 0.70
 _NIST20_VAL_FRAC = 0.15
 NIST_FULL_METADATA_VERSION = 1
 NIST_FULL_HF_FILENAME = "hr_msms_nist.hdf5"
+NIST_FULL_ARTIFACT_FORMAT = "nist_full_probe_v1"
 
 MONA_A_METADATA_VERSION = 3
 MONA_A_HF_REPO = "roman-bushuiev/GeMS"
@@ -170,7 +171,7 @@ def _load_nist20_hdf5(hdf5_path: Path) -> dict[str, np.ndarray]:
         "fold": fold,
         "smiles": raw_smiles[idx].astype(str),
         "adduct": raw_adduct[idx].astype(str),
-        "instrument_type": np.full(n_valid, "unknown", dtype=str),
+        "instrument_type": np.repeat("unknown", n_valid).astype(str),
         "collision_energy": np.zeros(n_valid, dtype=np.float32),
         "collision_energy_present": np.zeros(n_valid, dtype=np.int32),
         "dreams_embedding": raw_dreams[idx] if raw_dreams is not None else None,
@@ -425,6 +426,30 @@ def ensure_nist20_probe_prepared(
     return metadata
 
 
+def build_nist_full_probe_artifact(
+    hdf5_path: Path,
+    output_dir: Path,
+    *,
+    max_precursor_mz: float,
+    num_shards: int = _DEFAULT_MASSSPEC_NUM_SHARDS,
+    extra_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    metadata = _filter_encode_and_write(
+        **_load_nist20_hdf5(hdf5_path),
+        output_dir=output_dir,
+        num_shards=num_shards,
+        max_precursor_mz=max_precursor_mz,
+        metadata_version=NIST_FULL_METADATA_VERSION,
+    )
+    metadata["artifact_format"] = NIST_FULL_ARTIFACT_FORMAT
+    metadata["source_hdf5_filename"] = hdf5_path.name
+    if extra_metadata is not None:
+        metadata.update(extra_metadata)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / _METADATA_FILENAME).write_text(json.dumps(metadata, indent=2))
+    return metadata
+
+
 def ensure_nist_full_probe_prepared(
     output_dir: Path,
     *,
@@ -433,32 +458,67 @@ def ensure_nist_full_probe_prepared(
     hdf5_repo_id: str,
     hdf5_filename: str = NIST_FULL_HF_FILENAME,
     num_shards: int = _DEFAULT_MASSSPEC_NUM_SHARDS,
+    use_cache: bool = True,
+) -> dict[str, Any]:
+    if use_cache:
+        cached = _probe_metadata_valid(
+            output_dir,
+            NIST_FULL_METADATA_VERSION,
+            max_precursor_mz,
+            expected_metadata={
+                "artifact_format": NIST_FULL_ARTIFACT_FORMAT,
+                "hdf5_repo_id": hdf5_repo_id,
+                "hdf5_filename": hdf5_filename,
+            },
+        )
+        if cached is not None:
+            return cached
+    hdf5_path = cache_dir / hdf5_filename
+    if not hdf5_path.exists():
+        hdf5_path = _download_hf_file(hdf5_repo_id, hdf5_filename, cache_dir)
+    return build_nist_full_probe_artifact(
+        hdf5_path,
+        output_dir,
+        max_precursor_mz=max_precursor_mz,
+        num_shards=num_shards,
+        extra_metadata={
+            "hdf5_repo_id": hdf5_repo_id,
+            "hdf5_filename": hdf5_filename,
+        },
+    )
+
+
+def ensure_nist_full_probe_downloaded(
+    output_dir: Path,
+    *,
+    max_precursor_mz: float,
+    repo_id: str,
+    revision: str = "main",
 ) -> dict[str, Any]:
     cached = _probe_metadata_valid(
         output_dir,
         NIST_FULL_METADATA_VERSION,
         max_precursor_mz,
-        expected_metadata={
-            "hdf5_repo_id": hdf5_repo_id,
-            "hdf5_filename": hdf5_filename,
-        },
+        expected_metadata={"artifact_format": NIST_FULL_ARTIFACT_FORMAT},
     )
     if cached is not None:
         return cached
-    hdf5_path = cache_dir / hdf5_filename
-    if not hdf5_path.exists():
-        hdf5_path = _download_hf_file(hdf5_repo_id, hdf5_filename, cache_dir)
-    metadata = _filter_encode_and_write(
-        **_load_nist20_hdf5(hdf5_path),
-        output_dir=output_dir,
-        num_shards=num_shards,
-        max_precursor_mz=max_precursor_mz,
-        metadata_version=NIST_FULL_METADATA_VERSION,
-    )
-    metadata["hdf5_repo_id"] = hdf5_repo_id
-    metadata["hdf5_filename"] = hdf5_filename
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / _METADATA_FILENAME).write_text(json.dumps(metadata, indent=2))
+    snapshot_download(
+        repo_id=repo_id,
+        repo_type="dataset",
+        revision=revision,
+        local_dir=output_dir,
+        allow_patterns=[_METADATA_FILENAME, "train/*", "val/*", "test/*"],
+    )
+    metadata = _probe_metadata_valid(
+        output_dir,
+        NIST_FULL_METADATA_VERSION,
+        max_precursor_mz,
+        expected_metadata={"artifact_format": NIST_FULL_ARTIFACT_FORMAT},
+    )
+    if metadata is None:
+        raise FileNotFoundError(f"Invalid NIST full probe artifact in {output_dir}")
     return metadata
 
 
@@ -695,22 +755,19 @@ class MassSpecProbeData(NamedTuple):
             )
         elif probe_dataset == "nist-full":
             output_dir = artifact_root / "nist_full_probe"
-            metadata = ensure_nist_full_probe_prepared(
+            metadata = ensure_nist_full_probe_downloaded(
                 output_dir,
                 max_precursor_mz=max_precursor_mz,
-                cache_dir=artifact_root,
-                hdf5_repo_id=str(
+                repo_id=str(
                     config.get(
-                        "nist_full_hdf5_repo_id",
-                        config.get("nist20_hdf5_repo_id", NIST20_HF_REPO),
+                        "nist_full_probe_repo_id",
+                        config.get(
+                            "nist_full_hdf5_repo_id",
+                            config.get("nist20_hdf5_repo_id", NIST20_HF_REPO),
+                        ),
                     )
                 ),
-                hdf5_filename=str(
-                    config.get(
-                        "nist_full_hdf5_filename",
-                        config.get("nist20_hdf5_filename", NIST_FULL_HF_FILENAME),
-                    )
-                ),
+                revision=str(config.get("nist_full_probe_revision", "main")),
             )
         elif probe_dataset == "mona_a":
             output_dir = artifact_root / "mona_a_probe"

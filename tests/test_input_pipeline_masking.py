@@ -1,3 +1,5 @@
+from unittest import mock
+
 import torch
 
 import input_pipeline
@@ -102,6 +104,80 @@ def test_sample_block_masks_ragged_stays_within_valid_support() -> None:
     assert int(target_masks.sum().item()) > 0
 
 
+def test_sample_block_masks_random_uses_fraction_ranges() -> None:
+    peak_valid_mask = torch.ones((2, 8), dtype=torch.bool)
+
+    torch.manual_seed(23)
+    context_mask, target_masks = input_pipeline._sample_block_masks_torch(
+        peak_valid_mask,
+        num_target_blocks=2,
+        context_fraction=0.4,
+        target_fraction=0.25,
+        block_min_len=1,
+        mask_strategy="random",
+        context_fraction_range=(0.25, 0.5),
+        target_fraction_range=(0.125, 0.25),
+    )
+
+    context_counts = context_mask.sum(dim=1)
+    target_counts = target_masks.sum(dim=2)
+
+    assert context_mask.shape == peak_valid_mask.shape
+    assert target_masks.shape == (2, 2, 8)
+    assert all(2 <= int(count.item()) <= 4 for count in context_counts)
+    assert all(1 <= int(count.item()) <= 2 for count in target_counts.reshape(-1))
+    assert not (context_mask & ~peak_valid_mask).any()
+    assert not (target_masks & ~peak_valid_mask.unsqueeze(1)).any()
+    assert not (target_masks & context_mask.unsqueeze(1)).any()
+
+
+def test_sample_block_masks_all_selects_per_row_mask_modes() -> None:
+    peak_valid_mask = torch.ones((3, 8), dtype=torch.bool)
+
+    with mock.patch.object(
+        input_pipeline,
+        "_sample_mask_strategy_torch",
+        side_effect=["contiguous", "ragged", "random"],
+    ) as sample_strategy:
+        torch.manual_seed(29)
+        context_mask, target_masks = input_pipeline._sample_block_masks_torch(
+            peak_valid_mask,
+            num_target_blocks=2,
+            context_fraction=0.375,
+            target_fraction=0.25,
+            block_min_len=1,
+            mask_strategy="all",
+            context_fraction_range=(0.375, 0.375),
+            target_fraction_range=(0.25, 0.25),
+            mask_lengths=(1, 2, 4),
+            mask_round_from=2,
+        )
+
+    assert sample_strategy.call_count == 3
+    assert context_mask.shape == peak_valid_mask.shape
+    assert target_masks.shape == (3, 2, 8)
+    assert not (context_mask & ~peak_valid_mask).any()
+    assert not (target_masks & ~peak_valid_mask.unsqueeze(1)).any()
+    assert not (target_masks & context_mask.unsqueeze(1)).any()
+
+
+def test_resolve_visualization_strategies_includes_random_mode() -> None:
+    assert input_pipeline._resolve_visualization_strategies("ragged") == (
+        "contiguous",
+        "ragged",
+        "random",
+    )
+
+
+def test_resolve_visualization_strategies_keeps_all_meta_mode() -> None:
+    assert input_pipeline._resolve_visualization_strategies("all") == (
+        "contiguous",
+        "ragged",
+        "random",
+        "all",
+    )
+
+
 def test_gems_batch_collator_generates_ragged_context_and_target_masks() -> None:
     collator = input_pipeline._GemsBatchCollator(
         augment=True,
@@ -155,3 +231,29 @@ def test_gems_batch_collator_generates_ragged_context_and_target_masks() -> None
     assert not (
         batch["target_masks"] & batch["context_mask"].unsqueeze(1)
     ).any()
+
+
+def test_mask_block_ranges_reports_absolute_slot_runs() -> None:
+    mask = torch.tensor(
+        [False, True, True, False, True, True, True, False],
+        dtype=torch.bool,
+    )
+
+    assert input_pipeline._mask_block_ranges(mask) == [(1, 2), (4, 6)]
+
+
+def test_mask_block_ranges_in_active_order_compresses_context_gap() -> None:
+    active_positions = torch.tensor(
+        [True, True, True, False, False, False, True, True, True],
+        dtype=torch.bool,
+    )
+    mask = torch.tensor(
+        [True, True, True, False, False, False, True, False, False],
+        dtype=torch.bool,
+    )
+
+    assert input_pipeline._mask_block_ranges(mask) == [(0, 2), (6, 6)]
+    assert input_pipeline._mask_block_ranges_in_active_order(
+        mask,
+        active_positions,
+    ) == [(0, 3)]
