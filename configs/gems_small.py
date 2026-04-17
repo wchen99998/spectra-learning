@@ -69,8 +69,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.learning_rate = 2e-4
     cfg.warmup_steps = 20_000
     cfg.min_learning_rate = 3e-5
-    cfg.b2 = 0.995
-    cfg.weight_decay = 0.
+    cfg.b2 = 0.99
+    cfg.weight_decay = 1e-2
     cfg.optimizer = "muon"
     cfg.device_prefetch_size = 8
     cfg.optimizer_capturable = True
@@ -102,6 +102,11 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_warmup_steps = 0
     cfg.msg_probe_max_train_samples = None
     cfg.msg_probe_max_test_samples = None
+    cfg.msg_probe_variants = ("mean", "covariance", "pma")
+    cfg.msg_probe_mlp_hidden_dim = cfg.model_dim
+    cfg.msg_probe_covariance_dim = 32
+    cfg.msg_probe_pma_num_seeds = 32
+    cfg.msg_probe_pma_num_heads = cfg.encoder_num_heads
     cfg.probe_dataset = "nist20"
     cfg.msg_probe_tune_metric = "msg_probe/test/auc_maccs_mean"
     cfg.msg_probe_tune_param_space = [
@@ -116,7 +121,7 @@ def get_config() -> config_dict.ConfigDict:
             "args": [0.0, 1e-2, 0.1],
         },
     ]
-    cfg.use_precursor_token = False
+    cfg.use_precursor_token = True
     cfg.muon_lr = None
     cfg.adamw_lr = None
     cfg.muon_momentum = 0.95

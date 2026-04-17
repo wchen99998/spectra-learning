@@ -21,7 +21,7 @@ from ml_collections import config_dict
 
 from input_pipeline import GemsNativeDataModule
 from models.model import PeakSetSIGReg
-from utils.msg_probe import run_msg_probe
+from utils.msg_probe import msg_probe_variants_from_config, run_msg_probe
 from utils.training import (
     build_logger,
     build_model_from_config,
@@ -427,6 +427,7 @@ def train_and_evaluate(
         msg_probe_every_n_steps = int(_msg_probe_raw)
     _gcn = config.get("grad_clip_norm", None)
     grad_clip_norm = float(_gcn) if _gcn is not None else None
+    msg_probe_variants = msg_probe_variants_from_config(config)
     last_msg_probe_metrics: dict[str, float] = {}
     _wandb_run = getattr(logger, "experiment", None)
     stopped_for_time_limit = False
@@ -513,56 +514,52 @@ def train_and_evaluate(
                 if _wandb_run is not None and _probe_epoch_log:
                     import wandb
 
-                    _epochs = [int(m["msg_probe_epoch"]) for m in _probe_epoch_log]
-                    _curve_keys = [
-                        (
-                            "r2_mean_wo_num_rings",
-                            "msg_probe/train/r2_mean_wo_num_rings",
-                            "msg_probe/test/r2_mean_wo_num_rings",
-                        ),
-                        (
-                            "auc_maccs_mean",
-                            "msg_probe/train/auc_maccs_mean",
-                            "msg_probe/test/auc_maccs_mean",
-                        ),
-                        (
-                            "recall_maccs_mean",
-                            "msg_probe/train/recall_maccs_mean",
-                            "msg_probe/test/recall_maccs_mean",
-                        ),
-                        (
-                            "mae_num_rings",
-                            "msg_probe/train/mae_num_rings",
-                            "msg_probe/test/mae_num_rings",
-                        ),
-                    ]
-                    for label, train_key, test_key in _curve_keys:
-                        _wandb_run.log(
-                            {
-                                f"msg_probe_curve/{label}": wandb.plot.line_series(
-                                    xs=_epochs,
-                                    ys=[
-                                        [m[train_key] for m in _probe_epoch_log],
-                                        [m[test_key] for m in _probe_epoch_log],
-                                    ],
-                                    keys=["train", "test"],
-                                    title=f"MSG Probe {label} (step {global_step})",
-                                    xname="probe_epoch",
-                                ),
-                            },
-                            step=global_step,
-                        )
+                    _curve_suffixes = (
+                        "r2_mean_wo_num_rings",
+                        "auc_maccs_mean",
+                        "recall_maccs_mean",
+                        "mae_num_rings",
+                    )
+                    for variant in msg_probe_variants:
+                        epoch_key = f"msg_probe/{variant}/epoch"
+                        if epoch_key not in _probe_epoch_log[0]:
+                            continue
+                        epochs = [int(m[epoch_key]) for m in _probe_epoch_log]
+                        for suffix in _curve_suffixes:
+                            train_key = f"msg_probe/{variant}/train/{suffix}"
+                            test_key = f"msg_probe/{variant}/test/{suffix}"
+                            _wandb_run.log(
+                                {
+                                    f"msg_probe_curve/{variant}/{suffix}": wandb.plot.line_series(
+                                        xs=epochs,
+                                        ys=[
+                                            [m[train_key] for m in _probe_epoch_log],
+                                            [m[test_key] for m in _probe_epoch_log],
+                                        ],
+                                        keys=["train", "test"],
+                                        title=f"MSG Probe {variant} {suffix} (step {global_step})",
+                                        xname="probe_epoch",
+                                    ),
+                                },
+                                step=global_step,
+                            )
                 last_msg_probe_metrics = probe_metrics
-                logging.info(
-                    "step=%d msg_probe best_epoch=%d (test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f maccs_bits=%d)",
-                    global_step,
-                    int(probe_metrics["msg_probe_epoch"]),
-                    probe_metrics["msg_probe/test/r2_mean_wo_num_rings"],
-                    probe_metrics["msg_probe/test/mae_num_rings"],
-                    probe_metrics["msg_probe/test/auc_maccs_mean"],
-                    probe_metrics["msg_probe/test/recall_maccs_mean"],
-                    int(probe_metrics["msg_probe/num_maccs_bits"]),
-                )
+                for variant in msg_probe_variants:
+                    variant_prefix = f"msg_probe/{variant}"
+                    epoch_key = f"{variant_prefix}/epoch"
+                    if epoch_key not in probe_metrics:
+                        continue
+                    logging.info(
+                        "step=%d msg_probe[%s] best_epoch=%d (test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f maccs_bits=%d)",
+                        global_step,
+                        variant,
+                        int(probe_metrics[epoch_key]),
+                        probe_metrics[f"{variant_prefix}/test/r2_mean_wo_num_rings"],
+                        probe_metrics[f"{variant_prefix}/test/mae_num_rings"],
+                        probe_metrics[f"{variant_prefix}/test/auc_maccs_mean"],
+                        probe_metrics[f"{variant_prefix}/test/recall_maccs_mean"],
+                        int(probe_metrics[f"{variant_prefix}/num_maccs_bits"]),
+                    )
         pbar.close()
         logging.info("Finished epoch %d at global_step=%d", epoch, global_step)
         del prefetcher

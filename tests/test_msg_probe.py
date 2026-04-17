@@ -6,8 +6,12 @@ import torch
 from input_pipeline import _prepend_precursor_token_torch
 from utils.spectra_preprocessing import PRECURSOR_TOKEN_INTENSITY
 from utils.msg_probe import (
+    MsgCovariancePool,
     MsgLinearProbe,
+    MsgMeanPool,
+    MsgPmaPool,
     MsgProbeSplitTargets,
+    MsgSequenceProbe,
     _build_task_spec,
     _collect_split_targets,
     _new_epoch_state,
@@ -17,6 +21,7 @@ from utils.msg_probe import (
     _score_epoch_state,
     _update_epoch_state,
     build_msg_probe_inputs,
+    msg_probe_variants_from_config,
     msg_probe_metric_higher_is_better,
     iter_massspec_probe,
     probe_steps_per_epoch,
@@ -141,6 +146,96 @@ class MsgLinearProbeTests(unittest.TestCase):
         self.assertIsInstance(probe.heads["mol_weight"], torch.nn.Linear)
         self.assertIsInstance(probe.heads["num_rings"], torch.nn.Linear)
         self.assertIsInstance(probe.heads["maccs"], torch.nn.Linear)
+
+
+class MsgSequenceProbeTests(unittest.TestCase):
+    def test_msg_probe_variants_from_config_defaults(self):
+        self.assertEqual(
+            msg_probe_variants_from_config({}),
+            ("mean", "covariance", "pma"),
+        )
+
+    def test_covariance_pool_matches_masked_second_moment(self):
+        pool = MsgCovariancePool(input_dim=2, compressed_dim=2)
+        with torch.no_grad():
+            pool.left_proj.weight.copy_(torch.eye(2))
+            pool.right_proj.weight.copy_(torch.eye(2))
+
+        peak_embeddings = torch.tensor(
+            [
+                [[1.0, 2.0], [3.0, 4.0], [100.0, 200.0]],
+                [[2.0, 1.0], [9.0, 9.0], [8.0, 8.0]],
+            ]
+        )
+        valid_mask = torch.tensor(
+            [
+                [True, True, False],
+                [True, False, False],
+            ]
+        )
+
+        pooled = pool(peak_embeddings, valid_mask)
+
+        expected = torch.tensor(
+            [
+                [5.0, 7.0, 7.0, 10.0],
+                [4.0, 2.0, 2.0, 1.0],
+            ]
+        )
+        self.assertTrue(torch.allclose(pooled, expected))
+
+    def test_pma_pool_returns_fixed_size_vectors(self):
+        pool = MsgPmaPool(input_dim=4, num_seeds=3, num_heads=2)
+        peak_embeddings = torch.randn(2, 5, 4)
+        valid_mask = torch.tensor(
+            [
+                [True, True, False, False, False],
+                [True, True, True, True, False],
+            ]
+        )
+
+        pooled = pool(peak_embeddings, valid_mask)
+
+        self.assertEqual(pooled.shape, (2, 4))
+        self.assertTrue(torch.isfinite(pooled).all().item())
+
+    def test_sequence_probe_output_shapes_match_task_heads_for_all_variants(self):
+        peak_embeddings = torch.randn(3, 6, 4)
+        valid_mask = torch.tensor(
+            [
+                [True, True, True, False, False, False],
+                [True, True, True, True, False, False],
+                [True, True, False, False, False, False],
+            ]
+        )
+        variants = (
+            MsgSequenceProbe(
+                pooler=MsgMeanPool(),
+                pooled_dim=4,
+                hidden_dim=8,
+                task_names=("mol_weight", "maccs"),
+                task_output_dims={"maccs": 4},
+            ),
+            MsgSequenceProbe(
+                pooler=MsgCovariancePool(input_dim=4, compressed_dim=3),
+                pooled_dim=9,
+                hidden_dim=8,
+                task_names=("mol_weight", "maccs"),
+                task_output_dims={"maccs": 4},
+            ),
+            MsgSequenceProbe(
+                pooler=MsgPmaPool(input_dim=4, num_seeds=2, num_heads=2),
+                pooled_dim=4,
+                hidden_dim=8,
+                task_names=("mol_weight", "maccs"),
+                task_output_dims={"maccs": 4},
+            ),
+        )
+
+        for probe in variants:
+            logits = probe(peak_embeddings, valid_mask)
+            self.assertEqual(logits["mol_weight"].shape, (3, 1))
+            self.assertEqual(logits["maccs"].shape, (3, 4))
 
 
 class MsgProbeStepTests(unittest.TestCase):
