@@ -703,6 +703,15 @@ class PeakSetSIGReg(nn.Module):
         self.masked_latent_readout = nn.Linear(self.predictor_dim, self.jepa_target_dim)
         nn.init.xavier_normal_(self.masked_latent_readout.weight)
         nn.init.zeros_(self.masked_latent_readout.bias)
+        self.cls_predictor = nn.Sequential(
+            _build_norm(self.model_dim, eps=None, norm_type=self.norm_type),
+            nn.Linear(self.model_dim, self.predictor_dim, bias=False),
+            nn.GELU(),
+            nn.Linear(self.predictor_dim, self.model_dim, bias=False),
+        )
+        for layer in self.cls_predictor:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_normal_(layer.weight)
         self.sigreg = SIGReg(num_slices=int(sigreg_num_slices))
         self.vicreg = VICReg(
             inv_coeff=float(vicreg_inv_coeff),
@@ -772,13 +781,51 @@ class PeakSetSIGReg(nn.Module):
         )
         self.teacher_ema_decay_step.add_(1)
 
-    def _apply_jepa_target_normalization(self, x: torch.Tensor) -> torch.Tensor:
+    def _apply_group_target_normalization(
+        self,
+        x: torch.Tensor,
+        group_dim: int,
+    ) -> torch.Tensor:
         if self.jepa_target_normalization == "none":
             return x
-        x = x.reshape(*x.shape[:-1], self.num_jepa_target_layers, self.model_dim)
+        x = x.reshape(*x.shape[:-1], -1, group_dim)
         mean = x.mean(dim=-1, keepdim=True)
         std = x.std(dim=-1, keepdim=True, unbiased=False).clamp_min(1e-6)
-        return ((x - mean) / std).reshape(*x.shape[:-2], self.jepa_target_dim)
+        return ((x - mean) / std).reshape(*x.shape[:-2], -1)
+
+    def _apply_jepa_target_normalization(self, x: torch.Tensor) -> torch.Tensor:
+        return self._apply_group_target_normalization(x, self.model_dim)
+
+    def _normalize_global_vector(self, x: torch.Tensor) -> torch.Tensor:
+        x = F.layer_norm(x.float(), (x.shape[-1],))
+        return F.normalize(x, dim=-1)
+
+    def _predict_global_from_context_cls(
+        self,
+        context_cls: torch.Tensor,
+    ) -> torch.Tensor:
+        return self._normalize_global_vector(self.cls_predictor(context_cls))
+
+    def _compute_global_teacher_target(
+        self,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+        peak_valid_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        return self._normalize_global_vector(
+            self._compute_pooled_teacher_peak_targets(
+                peak_mz,
+                peak_intensity,
+                peak_valid_mask,
+            )
+        )
+
+    def _global_alignment_loss(
+        self,
+        prediction: torch.Tensor,
+        target: torch.Tensor,
+    ) -> torch.Tensor:
+        return 2.0 - 2.0 * (prediction * target).sum(dim=-1)
 
     def _append_predictor_register_tokens(
         self,
@@ -1096,33 +1143,17 @@ class PeakSetSIGReg(nn.Module):
 
         if self.cls_embedding_loss_weight > 0:
             cls_loss_weight = context_emb.new_tensor(self.cls_embedding_loss_weight)
-            if self.jepa_teacher_targets_per_block:
-                student_cls = context_cls.unsqueeze(1).expand(-1, K, -1)
-                cls_visible_mask = ctx_mask_v | target_masks
-                cls_target = self._compute_pooled_teacher_peak_targets_per_block(
-                    peak_mz,
-                    peak_intensity,
-                    peak_valid_mask,
-                    context_mask,
-                    target_masks,
-                )
-            else:
-                full_encoded = self.encoder(
-                    peak_mz,
-                    peak_intensity,
-                    valid_mask=peak_valid_mask,
-                    visible_mask=peak_valid_mask,
-                    pack_n=self._full_pack_n,
-                    prefix_pack=True,
-                )
-                _, student_cls = self.encoder.split_peak_and_cls(full_encoded)
-                cls_visible_mask = peak_valid_mask
-                cls_target = self._compute_pooled_teacher_peak_targets(
-                    peak_mz,
-                    peak_intensity,
-                    peak_valid_mask,
-                )
-            cls_embedding_loss = self._embedding_loss(student_cls, cls_target).mean()
+            cls_visible_mask = context_mask
+            student_global = self._predict_global_from_context_cls(context_cls)
+            cls_target = self._compute_global_teacher_target(
+                peak_mz,
+                peak_intensity,
+                peak_valid_mask,
+            )
+            cls_embedding_loss = self._global_alignment_loss(
+                student_global,
+                cls_target,
+            ).mean()
             cls_embedding_term = cls_loss_weight * cls_embedding_loss
         else:
             cls_loss_weight = context_emb.new_tensor(0.0)

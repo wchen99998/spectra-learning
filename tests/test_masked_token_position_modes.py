@@ -467,6 +467,30 @@ def test_multilayer_zscore_normalizes_each_target_slice_independently():
 
 
 @torch.no_grad()
+def test_global_vector_normalization_produces_unit_norm_vectors():
+    model = _build_model(
+        predictor_layers=2,
+        jepa_target_normalization="zscore",
+    )
+    x = torch.randn(2, 3, model.model_dim)
+
+    normalized = model._normalize_global_vector(x)
+
+    assert torch.allclose(
+        normalized.mean(dim=-1),
+        torch.zeros(2, 3),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+    assert torch.allclose(
+        normalized.norm(dim=-1),
+        torch.ones(2, 3),
+        atol=1e-4,
+        rtol=1e-4,
+    )
+
+
+@torch.no_grad()
 def test_positions_outside_union_do_not_change_loss():
     model = _build_model(num_target_blocks=2)
     batch_a = _make_batch()

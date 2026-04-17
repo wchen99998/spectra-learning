@@ -408,25 +408,23 @@ class BlockJEPATests(unittest.TestCase):
             pack_n=model._context_pack_n,
         )
         _, context_cls = model.encoder.split_peak_and_cls(context_encoded)
-        cls_target = model._compute_pooled_teacher_peak_targets_per_block(
+        cls_target = model._compute_global_teacher_target(
             batch["peak_mz"],
             batch["peak_intensity"],
             batch["peak_valid_mask"],
-            batch["context_mask"],
-            batch["target_masks"],
         )
 
         metrics = model.forward_augmented(batch)
 
         torch.testing.assert_close(
             metrics["cls_embedding_loss"],
-            model._embedding_loss(
-                context_cls.unsqueeze(1).expand(-1, model.jepa_num_target_blocks, -1),
+            model._global_alignment_loss(
+                model._predict_global_from_context_cls(context_cls),
                 cls_target,
             ).mean(),
         )
         expected_visible_fraction = (
-            ((batch["context_mask"].unsqueeze(1) | batch["target_masks"]).float().sum())
+            batch["context_mask"].float().sum()
             / batch["peak_valid_mask"].float().sum()
         )
         torch.testing.assert_close(
@@ -443,16 +441,15 @@ class BlockJEPATests(unittest.TestCase):
         )
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
 
-        full_encoded = model.encoder(
+        context_encoded = model.encoder(
             batch["peak_mz"],
             batch["peak_intensity"],
             valid_mask=batch["peak_valid_mask"],
-            visible_mask=batch["peak_valid_mask"],
-            pack_n=model._full_pack_n,
-            prefix_pack=True,
+            visible_mask=batch["context_mask"],
+            pack_n=model._context_pack_n,
         )
-        _, full_cls = model.encoder.split_peak_and_cls(full_encoded)
-        cls_target = model._compute_pooled_teacher_peak_targets(
+        _, context_cls = model.encoder.split_peak_and_cls(context_encoded)
+        cls_target = model._compute_global_teacher_target(
             batch["peak_mz"],
             batch["peak_intensity"],
             batch["peak_valid_mask"],
@@ -462,9 +459,46 @@ class BlockJEPATests(unittest.TestCase):
 
         torch.testing.assert_close(
             metrics["cls_embedding_loss"],
-            model._embedding_loss(full_cls, cls_target).mean(),
+            model._global_alignment_loss(
+                model._predict_global_from_context_cls(context_cls),
+                cls_target,
+            ).mean(),
         )
-        self.assertEqual(float(metrics["cls_visible_fraction"]), 1.0)
+        expected_visible_fraction = (
+            batch["context_mask"].float().sum()
+            / batch["peak_valid_mask"].float().sum()
+        )
+        torch.testing.assert_close(
+            metrics["cls_visible_fraction"],
+            expected_visible_fraction,
+        )
+
+    def test_cls_embedding_is_independent_of_token_target_normalization(self):
+        torch.manual_seed(0)
+        model_none = self._build_model(
+            masked_token_loss_weight=0.0,
+            cls_embedding_loss_weight=1.0,
+            use_ema_teacher_target=True,
+            jepa_target_normalization="none",
+            jepa_teacher_targets_per_block=False,
+        )
+        torch.manual_seed(0)
+        model_zscore = self._build_model(
+            masked_token_loss_weight=0.0,
+            cls_embedding_loss_weight=1.0,
+            use_ema_teacher_target=True,
+            jepa_target_normalization="zscore",
+            jepa_teacher_targets_per_block=False,
+        )
+        batch = _make_batch(num_targets=model_none.jepa_num_target_blocks)
+
+        metrics_none = model_none.forward_augmented(batch)
+        metrics_zscore = model_zscore.forward_augmented(batch)
+
+        torch.testing.assert_close(
+            metrics_none["cls_embedding_loss"],
+            metrics_zscore["cls_embedding_loss"],
+        )
 
     def test_encode_output_shape(self):
         model = self._build_model()
