@@ -7,7 +7,6 @@ import torch
 from models.model import PeakSetSIGReg
 from models.peak_features import FourierFeatures, PeakFeatureEmbedder
 from train import _is_weight_decay_target
-from utils.spectra_preprocessing import PEAK_MZ_MAX
 from utils.training import load_pretrained_weights
 
 
@@ -89,29 +88,31 @@ class DataPipelineContractTests(unittest.TestCase):
 
 
 class FourierFeatureTests(unittest.TestCase):
-    def test_lin_float_int_respects_num_freqs(self):
+    def test_log_spaced_both_funcs_preserves_feature_width(self):
         fourier = FourierFeatures(
-            strategy="lin_float_int",
-            x_min=1e-4,
+            strategy="log_spaced",
+            x_min=3e-3,
             x_max=1000.0,
-            num_freqs=512,
+            funcs="both",
+            num_freqs=256,
         )
         self.assertEqual(fourier.num_features(), 512)
 
-    def test_peak_embedder_fourier_branch_recovers_raw_mz_scale(self):
+    def test_peak_embedder_fourier_branch_uses_configured_input_scale(self):
         embedder = PeakFeatureEmbedder(
             model_dim=32,
             hidden_dim=16,
-            fourier_strategy="lin_float_int",
-            fourier_x_min=1e-4,
+            fourier_strategy="log_spaced",
+            fourier_x_min=3e-3,
             fourier_x_max=1000.0,
             fourier_num_freqs=8,
+            fourier_input_scale=750.0,
         )
         normalized_peak_mz = torch.tensor([[0.5]], dtype=torch.float32)
         prepared = embedder._prepare_fourier_mz(normalized_peak_mz)
         self.assertAlmostEqual(
             float(prepared.item()),
-            0.5 * PEAK_MZ_MAX,
+            375.0,
             places=6,
         )
 
@@ -119,8 +120,8 @@ class FourierFeatureTests(unittest.TestCase):
         embedder = PeakFeatureEmbedder(
             model_dim=32,
             hidden_dim=16,
-            fourier_strategy="lin_float_int",
-            fourier_x_min=1e-4,
+            fourier_strategy="log_spaced",
+            fourier_x_min=3e-3,
             fourier_x_max=1000.0,
             fourier_num_freqs=8,
         )

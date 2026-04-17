@@ -12,6 +12,7 @@ from lightning.pytorch.loggers import CSVLogger
 from ml_collections import config_dict
 
 from models.model import PeakSetSIGReg
+from utils.spectra_preprocessing import PEAK_MZ_MAX
 
 
 def load_config(path: str | Path) -> config_dict.ConfigDict:
@@ -43,15 +44,21 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         attention_mlp_multiple=float(config.attention_mlp_multiple),
         feature_mlp_hidden_dim=int(config.get("feature_mlp_hidden_dim", 128)),
         encoder_fourier_strategy=str(
-            config.get("encoder_fourier_strategy", "lin_float_int")
+            config.get("encoder_fourier_strategy", "log_spaced")
         ),
-        encoder_fourier_x_min=float(config.get("encoder_fourier_x_min", 1e-4)),
+        encoder_fourier_x_min=float(config.get("encoder_fourier_x_min", 3e-3)),
         encoder_fourier_x_max=float(config.get("encoder_fourier_x_max", 1000.0)),
-        encoder_fourier_funcs=str(config.get("encoder_fourier_funcs", "sin")),
-        encoder_fourier_num_freqs=int(config.get("encoder_fourier_num_freqs", 512)),
+        encoder_fourier_funcs=str(config.get("encoder_fourier_funcs", "both")),
+        encoder_fourier_num_freqs=int(config.get("encoder_fourier_num_freqs", 256)),
         encoder_fourier_sigma=float(config.get("encoder_fourier_sigma", 10.0)),
         encoder_fourier_trainable=bool(
-            config.get("encoder_fourier_trainable", True)
+            config.get("encoder_fourier_trainable", False)
+        ),
+        encoder_fourier_input_scale=float(
+            config.get(
+                "encoder_fourier_input_scale",
+                config.get("peak_mz_max", config.get("max_precursor_mz", PEAK_MZ_MAX)),
+            )
         ),
         masked_token_loss_weight=float(config.get("masked_token_loss_weight", 0.0)),
         cls_embedding_loss_weight=float(config.get("cls_embedding_loss_weight", 1.0)),

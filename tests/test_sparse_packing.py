@@ -286,6 +286,25 @@ def test_build_model_from_config_can_disable_sparse_packing():
     assert model._full_pack_n == 0
 
 
+def test_build_model_from_config_uses_fourier_input_scale_from_peak_mz_config():
+    cfg = config_dict.ConfigDict()
+    cfg.model_dim = 32
+    cfg.encoder_num_layers = 2
+    cfg.encoder_num_heads = 4
+    cfg.attention_mlp_multiple = 2.0
+    cfg.feature_mlp_hidden_dim = 16
+    cfg.masked_token_loss_weight = 1.0
+    cfg.jepa_num_target_blocks = 2
+    cfg.jepa_context_fraction = 0.5
+    cfg.jepa_target_fraction = 0.25
+    cfg.num_peaks = 8
+    cfg.peak_mz_max = 750.0
+
+    model = build_model_from_config(cfg)
+
+    assert model.encoder.embedder.fourier_input_scale == 750.0
+
+
 @torch.no_grad()
 def test_encoder_sparse_pack_absolute_positions_use_original_positions():
     visible_mask = torch.tensor(

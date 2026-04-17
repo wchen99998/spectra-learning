@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from math import ceil
+from math import ceil, log10
 
 import torch
 from torch import nn
@@ -11,19 +11,20 @@ from utils.spectra_preprocessing import PEAK_MZ_MAX
 class FourierFeatures(nn.Module):
     def __init__(
         self,
-        strategy: str = "lin_float_int",
-        x_min: float = 1e-4,
+        strategy: str = "log_spaced",
+        x_min: float = 3e-3,
         x_max: float = 1000.0,
         *,
-        trainable: bool = True,
-        funcs: str = "sin",
+        trainable: bool = False,
+        funcs: str = "both",
         sigma: float = 10.0,
-        num_freqs: int = 512,
+        num_freqs: int = 256,
     ) -> None:
         super().__init__()
-        assert strategy in {"random", "voronov_et_al", "lin_float_int"}
+        assert strategy in {"random", "voronov_et_al", "lin_float_int", "log_spaced"}
         assert funcs in {"both", "sin", "cos"}
-        assert x_min < 1.0
+        assert x_min > 0.0
+        assert x_max > x_min
 
         self.funcs = funcs
         self.strategy = strategy
@@ -32,14 +33,14 @@ class FourierFeatures(nn.Module):
 
         if strategy == "random":
             b = torch.randn(num_freqs, dtype=torch.float32) * sigma
-        elif strategy == "voronov_et_al":
-            b = torch.tensor(
-                [
-                    1.0 / (x_min * (x_max / x_min) ** (2 * i / (num_freqs - 2)))
-                    for i in range(1, num_freqs)
-                ],
+        elif strategy in {"log_spaced", "voronov_et_al"}:
+            wavelengths = torch.logspace(
+                start=log10(x_min),
+                end=log10(x_max),
+                steps=num_freqs,
                 dtype=torch.float32,
             )
+            b = 1.0 / wavelengths
         else:
             periods = torch.tensor(
                 [x_min * i for i in range(2, ceil(1.0 / x_min), 2)]
@@ -70,19 +71,20 @@ class PeakFeatureEmbedder(nn.Module):
         *,
         model_dim: int,
         hidden_dim: int,
-        fourier_strategy: str = "lin_float_int",
-        fourier_x_min: float = 1e-4,
+        fourier_strategy: str = "log_spaced",
+        fourier_x_min: float = 3e-3,
         fourier_x_max: float = 1000.0,
-        fourier_funcs: str = "sin",
-        fourier_num_freqs: int = 512,
+        fourier_funcs: str = "both",
+        fourier_num_freqs: int = 256,
         fourier_sigma: float = 10.0,
-        fourier_trainable: bool = True,
+        fourier_trainable: bool = False,
+        fourier_input_scale: float = PEAK_MZ_MAX,
     ) -> None:
         super().__init__()
         fourier_dim = model_dim // 2
         raw_dim = model_dim - fourier_dim
 
-        self.fourier_input_scale = float(PEAK_MZ_MAX)
+        self.fourier_input_scale = float(fourier_input_scale)
         self.mz_fourier = FourierFeatures(
             strategy=fourier_strategy,
             x_min=fourier_x_min,
