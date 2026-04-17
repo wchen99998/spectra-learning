@@ -66,12 +66,12 @@ def get_config() -> config_dict.ConfigDict:
     cfg.predictor_dropout = 0.1
 
     # Training
-    cfg.num_epochs = 20
+    cfg.num_epochs = 10
     cfg.learning_rate = 2e-4
     cfg.warmup_steps = 20_000
     cfg.min_learning_rate = 3e-5
-    cfg.b2 = 0.95
-    cfg.weight_decay = 0.1
+    cfg.b2 = 0.995
+    cfg.weight_decay = 0.
     cfg.optimizer = "muon"
     cfg.device_prefetch_size = 8
     cfg.optimizer_capturable = True
