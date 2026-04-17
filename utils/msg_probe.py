@@ -37,14 +37,10 @@ class MsgProbeSplitTargets(NamedTuple):
 
 def build_msg_probe_inputs(
     peak_embeddings: torch.Tensor,
-    cls_embeddings: torch.Tensor,
     valid_mask: torch.Tensor,
 ) -> torch.Tensor:
     mask = valid_mask.unsqueeze(-1).to(dtype=peak_embeddings.dtype)
-    mean_readout = (peak_embeddings * mask).sum(dim=1) / mask.sum(dim=1).clamp(
-        min=1.0
-    )
-    return torch.cat((mean_readout, cls_embeddings), dim=-1)
+    return (peak_embeddings * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
 
 
 _NUM_RINGS_TASK = "num_rings"
@@ -386,10 +382,9 @@ def run_msg_probe(
             batch["peak_intensity"],
             valid_mask=batch["peak_valid_mask"],
         )
-        peak_embeddings, cls_embeddings = PeakSetEncoder.split_peak_and_cls(embeddings)
+        peak_embeddings, _ = PeakSetEncoder.split_peak_and_cls(embeddings)
         return build_msg_probe_inputs(
             peak_embeddings,
-            cls_embeddings,
             batch["peak_valid_mask"],
         )
 
@@ -413,7 +408,7 @@ def run_msg_probe(
     was_training = model.training
     model.eval()
     probe = MsgLinearProbe(
-        input_dim=2 * int(config.model_dim),
+        input_dim=int(config.model_dim),
         task_names=_probe_task_names(task_spec),
         task_output_dims=_probe_task_output_dims(task_spec),
     ).to(device)

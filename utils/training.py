@@ -61,7 +61,6 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
             )
         ),
         masked_token_loss_weight=float(config.get("masked_token_loss_weight", 0.0)),
-        cls_embedding_loss_weight=float(config.get("cls_embedding_loss_weight", 1.0)),
         masked_token_loss_type=str(config.get("masked_token_loss_type", "l1")),
         jepa_target_normalization=str(
             config.get("jepa_target_normalization", "none")

@@ -79,6 +79,24 @@ def test_load_resume_model_state_allows_sigreg_checkpoint_compatibility():
     _load_resume_model_state(restored, resume_state)
 
 
+def test_load_resume_model_state_allows_removed_cls_predictor_keys():
+    model = _small_model()
+    resume_state = model.state_dict()
+    resume_state["cls_predictor.0.weight"] = torch.ones(model.model_dim)
+    resume_state["cls_predictor.0.bias"] = torch.zeros(model.model_dim)
+    resume_state["cls_predictor.1.weight"] = torch.randn(
+        model.predictor_dim,
+        model.model_dim,
+    )
+    resume_state["cls_predictor.3.weight"] = torch.randn(
+        model.model_dim,
+        model.predictor_dim,
+    )
+
+    restored = _small_model()
+    _load_resume_model_state(restored, resume_state)
+
+
 def test_save_checkpoint_persists_teacher_ema_schedule_state():
     model = _small_model(
         use_ema_teacher_target=True,

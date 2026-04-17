@@ -209,12 +209,9 @@ def _extract_split_cache(
                 peak_intensity,
                 valid_mask=peak_valid_mask,
             )
-            peak_embeddings, cls_embeddings = PeakSetEncoder.split_peak_and_cls(
-                embeddings
-            )
+            peak_embeddings, _ = PeakSetEncoder.split_peak_and_cls(embeddings)
             probe_inputs = build_msg_probe_inputs(
                 peak_embeddings,
-                cls_embeddings,
                 peak_valid_mask,
             )
             if cache is None:

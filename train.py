@@ -313,7 +313,11 @@ def _load_resume_model_state(
         "sigreg_lambda_step",
     )
     missing = [key for key in missing if key not in allowed_missing]
-    unexpected = [key for key in unexpected if key not in allowed_unexpected]
+    unexpected = [
+        key
+        for key in unexpected
+        if key not in allowed_unexpected and not key.startswith("cls_predictor.")
+    ]
     if missing or unexpected:
         raise RuntimeError(
             "Checkpoint load mismatch: "

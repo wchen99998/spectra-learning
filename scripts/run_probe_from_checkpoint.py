@@ -60,7 +60,7 @@ def main() -> None:
     print(f"Device: {device}")
     print(f"Checkpoint: {ckpt_path} (step {ckpt['global_step']})")
     print(f"Params: {total:,} total, {encoder:,} encoder")
-    print("Probe: linear, fixed readout=mean+cls")
+    print("Probe: linear, fixed readout=mean_pool")
     print(f"Probe epochs: {cfg.msg_probe_num_epochs}")
 
     metrics = run_msg_probe(config=cfg, model=model, device=device)

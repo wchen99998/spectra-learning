@@ -67,14 +67,13 @@ class _DummyDataModule:
 
 
 class MsgLinearProbeTests(unittest.TestCase):
-    def test_build_msg_probe_inputs_concats_masked_mean_and_cls(self):
+    def test_build_msg_probe_inputs_returns_masked_mean_only(self):
         peak_embeddings = torch.tensor(
             [
                 [[1.0, 2.0], [3.0, 4.0], [100.0, 200.0]],
                 [[2.0, 0.0], [4.0, 2.0], [6.0, 4.0]],
             ]
         )
-        cls_embeddings = torch.tensor([[10.0, 20.0], [30.0, 40.0]])
         valid_mask = torch.tensor(
             [
                 [True, True, False],
@@ -84,14 +83,13 @@ class MsgLinearProbeTests(unittest.TestCase):
 
         probe_inputs = build_msg_probe_inputs(
             peak_embeddings,
-            cls_embeddings,
             valid_mask,
         )
 
         expected = torch.tensor(
             [
-                [2.0, 3.0, 10.0, 20.0],
-                [2.0, 0.0, 30.0, 40.0],
+                [2.0, 3.0],
+                [2.0, 0.0],
             ]
         )
         self.assertTrue(torch.allclose(probe_inputs, expected))
