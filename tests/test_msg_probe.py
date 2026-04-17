@@ -4,6 +4,7 @@ import numpy as np
 import torch
 
 from input_pipeline import _prepend_precursor_token_torch
+from utils.spectra_preprocessing import PRECURSOR_TOKEN_INTENSITY
 from utils.msg_probe import (
     MsgLinearProbe,
     MsgProbeSplitTargets,
@@ -552,8 +553,9 @@ class ProbePrecursorTokenTests(unittest.TestCase):
         self.assertEqual(out["peak_intensity"].shape, (B, N + 1))
         self.assertEqual(out["peak_valid_mask"].shape, (B, N + 1))
         self.assertNotIn("precursor_mz", out)
-        np.testing.assert_array_equal(
-            out["peak_intensity"][:, 0].numpy(), [-1.0, -1.0, -1.0]
+        np.testing.assert_allclose(
+            out["peak_intensity"][:, 0].numpy(),
+            [PRECURSOR_TOKEN_INTENSITY] * B,
         )
         np.testing.assert_array_equal(
             out["peak_valid_mask"][:, 0].numpy(), [True, True, True]

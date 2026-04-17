@@ -1,6 +1,5 @@
 import math
 from contextlib import nullcontext
-from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
@@ -11,6 +10,7 @@ from models.losses import SIGReg, VICReg
 from models.peak_features import PeakFeatureEmbedder
 from networks import transformer_torch
 from networks.transformer_torch import _build_norm, create_visible_attention_mask
+from utils.spectra_preprocessing import PRECURSOR_TOKEN_INTENSITY
 
 
 def _apply_depth_scaled_init(blocks: nn.ModuleList, num_layers: int) -> None:
@@ -115,77 +115,6 @@ def _merge_visible_mask(
     if visible_mask is not None and valid_mask is not None:
         return visible_mask & valid_mask
     return visible_mask if visible_mask is not None else valid_mask
-
-
-def _pack_indices(visible_mask: torch.Tensor, pack_n: int) -> torch.Tensor:
-    sort_idx = visible_mask.to(dtype=torch.int8).argsort(
-        dim=1,
-        descending=True,
-        stable=True,
-    )
-    return sort_idx[:, :pack_n]
-
-
-def _gather_packed_tokens(x: torch.Tensor, pack_idx: torch.Tensor) -> torch.Tensor:
-    return x.gather(1, pack_idx.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
-
-
-def _scatter_packed_tokens(
-    packed_x: torch.Tensor,
-    pack_idx: torch.Tensor,
-    seq_len: int,
-) -> torch.Tensor:
-    out = packed_x.new_zeros(packed_x.shape[0], seq_len, packed_x.shape[-1])
-    return out.scatter(1, pack_idx.unsqueeze(-1).expand_as(packed_x), packed_x)
-
-
-@dataclass
-class PackContext:
-    """Holds the state needed to unpack a packed sequence back to its original length."""
-
-    pack_idx: torch.Tensor | None  # [B, pack_n] index map; None when prefix_pack
-    seq_len: int  # original sequence length before packing
-    pack_n: int  # number of packed tokens (excluding appended special tokens)
-
-
-def pack_sequence(
-    x: torch.Tensor,
-    mask: torch.Tensor,
-    pack_n: int,
-    prefix_pack: bool = False,
-) -> tuple[PackContext, torch.Tensor, torch.Tensor]:
-    """Pack visible tokens into a dense sequence of length pack_n.
-
-    Returns (ctx, packed_x, packed_mask) where ctx stores everything needed
-    to later call ``unpack_sequence``.
-    """
-    seq_len = x.shape[1]
-    pack_n = min(int(pack_n), seq_len)
-    if prefix_pack:
-        ctx = PackContext(pack_idx=None, seq_len=seq_len, pack_n=pack_n)
-        return ctx, x[:, :pack_n], mask[:, :pack_n]
-    pack_idx = _pack_indices(mask, pack_n)
-    ctx = PackContext(pack_idx=pack_idx, seq_len=seq_len, pack_n=pack_n)
-    return ctx, _gather_packed_tokens(x, pack_idx), mask.gather(1, pack_idx)
-
-
-def unpack_sequence(
-    ctx: PackContext,
-    packed_x: torch.Tensor,
-    packed_mask: torch.Tensor,
-) -> torch.Tensor:
-    """Unpack a packed sequence back to the original sequence length.
-
-    ``packed_x`` may include trailing special/register tokens appended after
-    packing — only the first ``ctx.pack_n`` positions are unpacked.  Invalid
-    positions (where ``packed_mask`` is False) are zeroed.
-    """
-    peak_x = packed_x[:, : ctx.pack_n]
-    peak_mask = packed_mask[:, : ctx.pack_n]
-    peak_x = torch.where(peak_mask.unsqueeze(-1), peak_x, torch.zeros_like(peak_x))
-    if ctx.pack_idx is None:  # prefix_pack
-        return F.pad(peak_x, (0, 0, 0, ctx.seq_len - ctx.pack_n))
-    return _scatter_packed_tokens(peak_x, ctx.pack_idx, ctx.seq_len)
 
 
 class CrossAttention(nn.Module):
@@ -393,8 +322,6 @@ class PeakSetEncoder(nn.Module):
         peak_intensity: torch.Tensor,
         valid_mask: torch.Tensor | None = None,
         visible_mask: torch.Tensor | None = None,
-        pack_n: int = 0,
-        prefix_pack: bool = False,
         block_indices: list[int] | tuple[int, ...] = (),
     ) -> list[torch.Tensor]:
         block_indices = tuple(int(idx) for idx in block_indices)
@@ -406,24 +333,6 @@ class PeakSetEncoder(nn.Module):
         seq_len = peak_mz.shape[1]
         selected = set(block_indices)
         selected_peak_outputs: dict[int, torch.Tensor] = {}
-        if attn_mask is not None and pack_n > 0:
-            pack_ctx, packed_x, packed_mask = pack_sequence(
-                x, attn_mask, pack_n, prefix_pack,
-            )
-            packed_x, packed_mask = self._append_special_tokens(packed_x, packed_mask)
-            attn_mask = create_visible_attention_mask(packed_mask)
-            for block_idx, block in enumerate(self.blocks, start=1):
-                packed_x = block(packed_x, attn_mask=attn_mask)
-                if block_idx in selected and block_idx != self.num_layers:
-                    selected_peak_outputs[block_idx] = unpack_sequence(
-                        pack_ctx, packed_x, packed_mask,
-                    )
-            packed_x = self.final_norm(packed_x)
-            if self.num_layers in selected:
-                selected_peak_outputs[self.num_layers] = unpack_sequence(
-                    pack_ctx, packed_x, packed_mask,
-                )
-            return [selected_peak_outputs[idx] for idx in block_indices]
         x, attn_mask = self._append_special_tokens(x, attn_mask)
         attn_mask = (
             create_visible_attention_mask(attn_mask) if attn_mask is not None else None
@@ -446,8 +355,6 @@ class PeakSetEncoder(nn.Module):
         peak_intensity: torch.Tensor,
         valid_mask: torch.Tensor | None = None,
         visible_mask: torch.Tensor | None = None,
-        pack_n: int = 0,
-        prefix_pack: bool = False,
         return_cls_token: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         attn_mask = _merge_visible_mask(valid_mask, visible_mask)
@@ -456,21 +363,6 @@ class PeakSetEncoder(nn.Module):
             torch.arange(peak_mz.shape[1], device=x.device)
         ).unsqueeze(0).to(dtype=x.dtype)
         seq_len = peak_mz.shape[1]
-        if attn_mask is not None and pack_n > 0:
-            pack_ctx, packed_x, packed_mask = pack_sequence(
-                x, attn_mask, pack_n, prefix_pack,
-            )
-            packed_x, packed_mask = self._append_special_tokens(packed_x, packed_mask)
-            attn_mask = create_visible_attention_mask(packed_mask)
-            for block in self.blocks:
-                packed_x = block(packed_x, attn_mask=attn_mask)
-            packed_x = self.final_norm(packed_x)
-            cls_x = packed_x[:, pack_ctx.pack_n]
-            peak_x = unpack_sequence(pack_ctx, packed_x, packed_mask)
-            output = torch.cat([peak_x, cls_x.unsqueeze(1)], dim=1)
-            if return_cls_token:
-                return output, cls_x
-            return output
         x, attn_mask = self._append_special_tokens(x, attn_mask)
         attn_mask = (
             create_visible_attention_mask(attn_mask) if attn_mask is not None else None
@@ -511,7 +403,6 @@ class PeakSetSIGReg(nn.Module):
         masked_token_loss_type: str = "l1",
         jepa_target_normalization: str = "none",
         jepa_target_layers: list[int] | tuple[int, ...] | None = None,
-        jepa_teacher_targets_per_block: bool = False,
         representation_regularizer: str = "none",
         masked_latent_predictor_num_layers: int = 2,
         masked_latent_predictor_num_heads: int = 8,
@@ -542,7 +433,6 @@ class PeakSetSIGReg(nn.Module):
         predictor_num_register_tokens: int = 0,
         predictor_dim: int | None = None,
         predictor_dropout: float = 0.0,
-        use_sparse_packing: bool = True,
     ):
         super().__init__()
         self.model_dim = model_dim
@@ -608,7 +498,6 @@ class PeakSetSIGReg(nn.Module):
         self.masked_token_loss_weight = float(masked_token_loss_weight)
         self.masked_token_loss_type = str(masked_token_loss_type).lower()
         self.jepa_target_normalization = str(jepa_target_normalization).lower()
-        self.jepa_teacher_targets_per_block = bool(jepa_teacher_targets_per_block)
         if self.jepa_target_normalization not in ("none", "zscore"):
             raise ValueError(
                 "jepa_target_normalization must be one of ('none', 'zscore')"
@@ -616,19 +505,9 @@ class PeakSetSIGReg(nn.Module):
         self.norm_type = str(norm_type).lower()
         self.temporal_predictor_num_layers = int(temporal_predictor_num_layers)
         self.predictor_num_register_tokens = int(predictor_num_register_tokens)
-        self.use_sparse_packing = bool(use_sparse_packing)
         if self.jepa_num_target_blocks < 1:
             raise ValueError("jepa_num_target_blocks must be >= 1")
         N = int(num_peaks) + int(self.use_precursor_token)
-        if self.use_sparse_packing:
-            self._context_pack_n = max(1, int(math.ceil(N * float(jepa_context_fraction))))
-            target_pack_n = max(1, int(math.ceil(N * float(jepa_target_fraction))))
-            self._predictor_pack_n = min(N, self._context_pack_n + target_pack_n)
-            self._full_pack_n = N
-        else:
-            self._context_pack_n = 0
-            self._predictor_pack_n = 0
-            self._full_pack_n = 0
         self.encoder = PeakSetEncoder(
             model_dim=model_dim,
             num_layers=self.encoder_num_layers,
@@ -815,22 +694,10 @@ class PeakSetSIGReg(nn.Module):
         self,
         x: torch.Tensor,
         visible_mask: torch.Tensor,
-        pack_n: int = 0,
     ) -> torch.Tensor:
         if len(self.masked_latent_predictor) == 0:
             return x
         x = self._add_predictor_positions(x)
-        if pack_n > 0:
-            pack_ctx, packed_x, packed_mask = pack_sequence(x, visible_mask, pack_n)
-            packed_x, packed_mask = self._append_predictor_register_tokens(
-                packed_x, packed_mask,
-            )
-            packed_x = self.encoder_to_predictor_proj(packed_x)
-            predictor_attn_mask = create_visible_attention_mask(packed_mask)
-            for block in self.masked_latent_predictor:
-                packed_x = block(packed_x, attn_mask=predictor_attn_mask)
-            packed_x = self.predictor_final_norm(packed_x)
-            return unpack_sequence(pack_ctx, packed_x, packed_mask)
         x, visible_mask = self._append_predictor_register_tokens(x, visible_mask)
         x = self.encoder_to_predictor_proj(x)
         predictor_attn_mask = create_visible_attention_mask(visible_mask)
@@ -848,13 +715,11 @@ class PeakSetSIGReg(nn.Module):
         self,
         x: torch.Tensor,
         visible_mask: torch.Tensor,
-        pack_n: int = 0,
     ) -> torch.Tensor:
         return self.masked_latent_readout(
             self.predict_masked_latents(
                 x,
                 visible_mask,
-                pack_n=pack_n,
             )
         )
 
@@ -868,14 +733,7 @@ class PeakSetSIGReg(nn.Module):
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
         peak_valid_mask: torch.Tensor,
-        visible_mask: torch.Tensor | None = None,
-        pack_n: int | None = None,
-        prefix_pack: bool = True,
     ) -> torch.Tensor:
-        if visible_mask is None:
-            visible_mask = peak_valid_mask
-        if pack_n is None:
-            pack_n = self._full_pack_n
         # Autocast with the same dtype as the caller (inherits from outer
         # autocast context when called inside forward_augmented; falls back
         # to bf16 when called standalone, e.g. from evaluation code).
@@ -887,32 +745,10 @@ class PeakSetSIGReg(nn.Module):
                 peak_mz,
                 peak_intensity,
                 valid_mask=peak_valid_mask,
-                visible_mask=visible_mask,
-                pack_n=pack_n,
-                prefix_pack=prefix_pack,
+                visible_mask=peak_valid_mask,
                 block_indices=self.jepa_target_layers,
             )
             return torch.cat(teacher_peak_outputs, dim=-1)
-
-    def _compute_jepa_teacher_targets_per_block(
-        self,
-        peak_mz: torch.Tensor,
-        peak_intensity: torch.Tensor,
-        peak_valid_mask: torch.Tensor,
-        context_mask: torch.Tensor,
-        target_masks: torch.Tensor,
-    ) -> torch.Tensor:
-        B, K, N = target_masks.shape
-        teacher_visible = context_mask.unsqueeze(1) | target_masks
-        flat_teacher_targets = self._compute_jepa_teacher_targets(
-            peak_mz.repeat_interleave(K, dim=0),
-            peak_intensity.repeat_interleave(K, dim=0),
-            peak_valid_mask.repeat_interleave(K, dim=0),
-            visible_mask=teacher_visible.reshape(B * K, N),
-            pack_n=self._predictor_pack_n,
-            prefix_pack=False,
-        )
-        return flat_teacher_targets.reshape(B, K, N, -1)
 
     def _compute_pooled_teacher_peak_targets(
         self,
@@ -920,13 +756,9 @@ class PeakSetSIGReg(nn.Module):
         peak_intensity: torch.Tensor,
         peak_valid_mask: torch.Tensor,
         visible_mask: torch.Tensor | None = None,
-        pack_n: int | None = None,
-        prefix_pack: bool = True,
     ) -> torch.Tensor:
         if visible_mask is None:
             visible_mask = peak_valid_mask
-        if pack_n is None:
-            pack_n = self._full_pack_n
         amp_dtype = (
             torch.get_autocast_dtype("cuda")
             if torch.is_autocast_enabled("cuda")
@@ -942,31 +774,9 @@ class PeakSetSIGReg(nn.Module):
                 peak_intensity,
                 valid_mask=peak_valid_mask,
                 visible_mask=visible_mask,
-                pack_n=pack_n,
-                prefix_pack=prefix_pack,
             )
             teacher_peak_emb, _ = self.encoder.split_peak_and_cls(teacher_encoded)
         return self.pool(teacher_peak_emb, visible_mask)
-
-    def _compute_pooled_teacher_peak_targets_per_block(
-        self,
-        peak_mz: torch.Tensor,
-        peak_intensity: torch.Tensor,
-        peak_valid_mask: torch.Tensor,
-        context_mask: torch.Tensor,
-        target_masks: torch.Tensor,
-    ) -> torch.Tensor:
-        B, K, N = target_masks.shape
-        teacher_visible = context_mask.unsqueeze(1) | target_masks
-        flat_teacher_targets = self._compute_pooled_teacher_peak_targets(
-            peak_mz.repeat_interleave(K, dim=0),
-            peak_intensity.repeat_interleave(K, dim=0),
-            peak_valid_mask.repeat_interleave(K, dim=0),
-            visible_mask=teacher_visible.reshape(B * K, N),
-            pack_n=self._predictor_pack_n,
-            prefix_pack=False,
-        )
-        return flat_teacher_targets.reshape(B, K, -1)
 
     def _embedding_loss(
         self,
@@ -1002,9 +812,14 @@ class PeakSetSIGReg(nn.Module):
         context_mask: torch.Tensor | None = None,
         target_masks: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        B, N = peak_mz.shape
+        B = peak_mz.shape[0]
         device = peak_mz.device
-        pre_int = torch.full((B, 1), -1.0, device=device, dtype=peak_mz.dtype)
+        pre_int = torch.full(
+            (B, 1),
+            PRECURSOR_TOKEN_INTENSITY,
+            device=device,
+            dtype=peak_mz.dtype,
+        )
         pre_valid = torch.ones(B, 1, device=device, dtype=torch.bool)
         result: dict[str, torch.Tensor] = {
             "peak_mz": torch.cat([precursor_mz.unsqueeze(1), peak_mz], dim=1),
@@ -1059,20 +874,11 @@ class PeakSetSIGReg(nn.Module):
             peak_intensity,
             valid_mask=peak_valid_mask,
             visible_mask=context_mask,
-            pack_n=self._context_pack_n,
         )
         context_emb, _ = self.encoder.split_peak_and_cls(context_encoded)
         # Teacher sees full valid spectrum; loss mask selects target positions per block
         if teacher_targets is not None:
             target_token_target = teacher_targets
-        elif self.jepa_teacher_targets_per_block:
-            target_token_target = self._compute_jepa_teacher_targets_per_block(
-                peak_mz,
-                peak_intensity,
-                peak_valid_mask,
-                context_mask,
-                target_masks,
-            )
         else:
             teacher_targets_full = self._compute_jepa_teacher_targets(
                 peak_mz,
@@ -1092,7 +898,6 @@ class PeakSetSIGReg(nn.Module):
         predictor_output = self.predict_masked_targets(
             predictor_input.reshape(B * K, N, -1),
             (ctx_mask_v | target_masks).reshape(B * K, N),
-            pack_n=self._predictor_pack_n,
         ).reshape(B, K, N, -1)
         loss_pred = predictor_output
         loss_target = target_token_target
@@ -1199,8 +1004,6 @@ class PeakSetSIGReg(nn.Module):
             next_frame_int,
             valid_mask=next_frame_valid,
             visible_mask=next_frame_valid,
-            pack_n=self._full_pack_n,
-            prefix_pack=True,
         )
         teacher_embeddings, _ = self.encoder.split_peak_and_cls(teacher_embeddings)
         return teacher_embeddings
@@ -1232,8 +1035,6 @@ class PeakSetSIGReg(nn.Module):
             frame_int,
             valid_mask=frame_valid,
             visible_mask=frame_valid,
-            pack_n=self._full_pack_n,
-            prefix_pack=True,
         )  # [B, N, D]
         frame_emb, _ = self.encoder.split_peak_and_cls(frame_encoded)
 
@@ -1263,8 +1064,6 @@ class PeakSetSIGReg(nn.Module):
                     next_frame_int,
                     valid_mask=next_frame_valid,
                     visible_mask=next_frame_valid,
-                    pack_n=self._full_pack_n,
-                    prefix_pack=True,
                 ).detach()
                 next_frame_emb, _ = self.encoder.split_peak_and_cls(next_frame_emb)
 
@@ -1289,8 +1088,6 @@ class PeakSetSIGReg(nn.Module):
             intensity,
             valid_mask=valid,
             visible_mask=valid,
-            pack_n=self._full_pack_n,
-            prefix_pack=True,
         )
         _, cls_x = self.encoder.split_peak_and_cls(encoded)
         return cls_x

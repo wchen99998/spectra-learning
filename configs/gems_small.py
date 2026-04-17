@@ -53,7 +53,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_mask_strategy = "ragged"
     cfg.jepa_mask_lengths = (1, 2, 4, 8, 12)
     cfg.jepa_mask_round_from = 3
-    cfg.use_sparse_packing = False
     cfg.norm_type = "layernorm"
 
     # Predictor
@@ -87,7 +86,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_token_loss_type = "l2"
     cfg.jepa_target_normalization = "zscore"
     cfg.jepa_target_layers = [1, 3, 5, 8]
-    cfg.jepa_teacher_targets_per_block = False
     cfg.use_ema_teacher_target = True
     cfg.teacher_ema_decay = 0.999
     cfg.teacher_ema_decay_start = 0.996

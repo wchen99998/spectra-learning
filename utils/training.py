@@ -66,9 +66,6 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
             config.get("jepa_target_normalization", "none")
         ),
         jepa_target_layers=config.get("jepa_target_layers", None),
-        jepa_teacher_targets_per_block=bool(
-            config.get("jepa_teacher_targets_per_block", False)
-        ),
         representation_regularizer=str(
             config.get("representation_regularizer", "none")
         ),
@@ -115,7 +112,6 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         ),
         predictor_dim=config.get("predictor_dim", None),
         predictor_dropout=float(config.get("predictor_dropout", 0.0)),
-        use_sparse_packing=bool(config.get("use_sparse_packing", True)),
     )
 
 

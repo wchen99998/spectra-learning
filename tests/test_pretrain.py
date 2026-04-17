@@ -2,11 +2,13 @@ import tempfile
 import unittest
 import math
 
+import numpy as np
 import torch
 
 from models.model import PeakSetSIGReg
 from models.peak_features import FourierFeatures, PeakFeatureEmbedder
 from train import _is_weight_decay_target
+from utils.spectra_preprocessing import PRECURSOR_TOKEN_INTENSITY
 from utils.training import load_pretrained_weights
 
 
@@ -49,7 +51,7 @@ def _make_pipeline_prepended_batch(
     N = num_peaks + 1  # includes prepended precursor token
     peak_mz = torch.rand(batch_size, N)
     peak_intensity = torch.rand(batch_size, N)
-    peak_intensity[:, 0] = -1.0  # sentinel
+    peak_intensity[:, 0] = PRECURSOR_TOKEN_INTENSITY
     peak_valid_mask = torch.ones(batch_size, N, dtype=torch.bool)
     context_mask = torch.zeros(batch_size, N, dtype=torch.bool)
     context_mask[:, 0] = True  # precursor always in context
@@ -116,7 +118,7 @@ class FourierFeatureTests(unittest.TestCase):
             places=6,
         )
 
-    def test_peak_embedder_raw_branch_restores_clamped_log_intensity(self):
+    def test_peak_embedder_raw_branch_uses_normal_log_intensity(self):
         embedder = PeakFeatureEmbedder(
             model_dim=32,
             hidden_dim=16,
@@ -132,11 +134,17 @@ class FourierFeatureTests(unittest.TestCase):
 
         handle = embedder.raw_ffn.register_forward_pre_hook(capture_raw_input)
         peak_mz = torch.tensor([[0.25]], dtype=torch.float32)
-        peak_intensity = torch.tensor([[-1.0]], dtype=torch.float32)
+        peak_intensity = torch.tensor(
+            [[PRECURSOR_TOKEN_INTENSITY]],
+            dtype=torch.float32,
+        )
         embedder(peak_mz, peak_intensity)
         handle.remove()
 
-        expected = torch.tensor([[[0.25, -1.0, 0.0]]], dtype=torch.float32)
+        expected = torch.tensor(
+            [[[0.25, PRECURSOR_TOKEN_INTENSITY, math.log1p(PRECURSOR_TOKEN_INTENSITY)]]],
+            dtype=torch.float32,
+        )
         self.assertTrue(torch.allclose(captured["raw_input"], expected))
 
 
@@ -282,84 +290,23 @@ class BlockJEPATests(unittest.TestCase):
         )
         self.assertFalse(cls_targets.requires_grad)
 
-    def test_pooled_teacher_peak_targets_per_block_match_looped_teacher_forwards(self):
-        model = self._build_model(
-            use_ema_teacher_target=True,
-        )
-        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-
-        batched_targets = model._compute_pooled_teacher_peak_targets_per_block(
-            batch["peak_mz"],
-            batch["peak_intensity"],
-            batch["peak_valid_mask"],
-            batch["context_mask"],
-            batch["target_masks"],
-        )
-
-        expected_targets = []
-        for target_idx in range(model.jepa_num_target_blocks):
-            teacher_visible = batch["context_mask"] | batch["target_masks"][:, target_idx]
-            pooled_target = model._compute_pooled_teacher_peak_targets(
-                batch["peak_mz"],
-                batch["peak_intensity"],
-                batch["peak_valid_mask"],
-                visible_mask=teacher_visible,
-                pack_n=model._predictor_pack_n,
-                prefix_pack=False,
-            )
-            expected_targets.append(pooled_target)
-        expected_targets = torch.stack(expected_targets, dim=1)
-
-        torch.testing.assert_close(batched_targets, expected_targets)
-
-    def test_per_block_teacher_targets_match_looped_teacher_forwards(self):
+    def test_forward_augmented_uses_full_spectrum_teacher_targets(self):
         model = self._build_model(
             masked_token_loss_weight=1.0,
             use_ema_teacher_target=True,
-            jepa_teacher_targets_per_block=True,
             jepa_target_layers=[1],
         )
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-
-        batched_targets = model._compute_jepa_teacher_targets_per_block(
+        teacher_targets = model._compute_jepa_teacher_targets(
             batch["peak_mz"],
             batch["peak_intensity"],
             batch["peak_valid_mask"],
-            batch["context_mask"],
-            batch["target_masks"],
         )
-
-        teacher = model._teacher_encoder_module()
-        expected_targets = []
-        for target_idx in range(model.jepa_num_target_blocks):
-            teacher_visible = batch["context_mask"] | batch["target_masks"][:, target_idx]
-            target_layers = teacher.forward_peak_block_outputs(
-                batch["peak_mz"],
-                batch["peak_intensity"],
-                valid_mask=batch["peak_valid_mask"],
-                visible_mask=teacher_visible,
-                pack_n=model._predictor_pack_n,
-                prefix_pack=False,
-                block_indices=model.jepa_target_layers,
-            )
-            expected_targets.append(torch.cat(target_layers, dim=-1))
-        expected_targets = torch.stack(expected_targets, dim=1)
-
-        torch.testing.assert_close(batched_targets, expected_targets)
-
-    def test_forward_augmented_uses_per_block_teacher_targets_when_enabled(self):
-        model = self._build_model(
-            masked_token_loss_weight=1.0,
-            use_ema_teacher_target=True,
-            jepa_teacher_targets_per_block=True,
-        )
-        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-        teacher_targets = model._compute_jepa_teacher_targets_per_block(
-            batch["peak_mz"],
-            batch["peak_intensity"],
-            batch["peak_valid_mask"],
-            batch["context_mask"],
-            batch["target_masks"],
+        teacher_targets = teacher_targets.unsqueeze(1).expand(
+            -1,
+            model.jepa_num_target_blocks,
+            -1,
+            -1,
         )
 
         expected = model.forward_augmented(batch, teacher_targets=teacher_targets)
@@ -388,25 +335,10 @@ class BlockJEPATests(unittest.TestCase):
             )
         )
 
-    def test_cls_embedding_term_is_disabled_in_block_mode(self):
+    def test_cls_embedding_term_is_disabled_with_ema(self):
         model = self._build_model(
             masked_token_loss_weight=0.0,
             use_ema_teacher_target=True,
-            jepa_teacher_targets_per_block=True,
-        )
-        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-
-        metrics = model.forward_augmented(batch)
-
-        self.assertEqual(float(metrics["cls_embedding_loss"]), 0.0)
-        self.assertEqual(float(metrics["cls_embedding_term"]), 0.0)
-        self.assertEqual(float(metrics["cls_visible_fraction"]), 0.0)
-
-    def test_cls_embedding_term_is_disabled_in_full_mode(self):
-        model = self._build_model(
-            masked_token_loss_weight=0.0,
-            use_ema_teacher_target=True,
-            jepa_teacher_targets_per_block=False,
         )
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
 
@@ -422,14 +354,12 @@ class BlockJEPATests(unittest.TestCase):
             masked_token_loss_weight=0.0,
             use_ema_teacher_target=True,
             jepa_target_normalization="none",
-            jepa_teacher_targets_per_block=False,
         )
         torch.manual_seed(0)
         model_zscore = self._build_model(
             masked_token_loss_weight=0.0,
             use_ema_teacher_target=True,
             jepa_target_normalization="zscore",
-            jepa_teacher_targets_per_block=False,
         )
         batch = _make_batch(num_targets=model_none.jepa_num_target_blocks)
 
@@ -461,8 +391,6 @@ class BlockJEPATests(unittest.TestCase):
             batch["peak_intensity"],
             valid_mask=batch["peak_valid_mask"],
             visible_mask=batch["peak_valid_mask"],
-            pack_n=model._full_pack_n,
-            prefix_pack=True,
             return_cls_token=True,
         )
         pooled = model.encode(batch)
@@ -643,12 +571,12 @@ class PrecursorTokenTests(unittest.TestCase):
             "peak_intensity": torch.rand(3, N),
             "peak_valid_mask": torch.ones(3, N, dtype=torch.bool),
         }
-        batch["peak_intensity"][:, 0] = -1.0
+        batch["peak_intensity"][:, 0] = PRECURSOR_TOKEN_INTENSITY
         pooled = model.encode(batch)
         self.assertEqual(pooled.shape, (3, model.model_dim))
 
     def test_no_nan_from_sentinel_intensity(self):
-        """intensity=-1 must not produce NaN via log1p clamp."""
+        """The precursor sentinel intensity keeps log1p finite."""
         model = self._build_model()
         batch = _make_pipeline_prepended_batch(
             num_peaks=6,
@@ -695,7 +623,10 @@ class PrecursorTokenTests(unittest.TestCase):
         self.assertTrue(result["context_mask"][:, 0].all())
         self.assertFalse(result["target_masks"][:, :, 0].any())
         # Precursor intensity sentinel
-        self.assertTrue((result["peak_intensity"][:, 0] == -1.0).all())
+        torch.testing.assert_close(
+            result["peak_intensity"][:, 0],
+            torch.full((B,), PRECURSOR_TOKEN_INTENSITY),
+        )
 
 
 class PrependPrecursorTokenTests(unittest.TestCase):
@@ -729,7 +660,10 @@ class PrependPrecursorTokenTests(unittest.TestCase):
         self.assertEqual(out["target_masks"].shape, (B, K, N + 1))
 
         # Sentinel intensity at position 0
-        self.assertTrue((out["peak_intensity"][:, 0].numpy() == -1.0).all())
+        np.testing.assert_allclose(
+            out["peak_intensity"][:, 0].numpy(),
+            np.full(B, PRECURSOR_TOKEN_INTENSITY, dtype=np.float32),
+        )
         # Valid at position 0
         self.assertTrue(out["peak_valid_mask"][:, 0].numpy().all())
         # Context at position 0
