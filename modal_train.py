@@ -4,6 +4,7 @@ Usage:
     # Single run
     modal run modal_train.py
     modal run modal_train.py --config configs/gems_small.py --gpu H100
+    modal run modal_train.py --config configs/gems_small.py --workdir my_run
 
     # Parallel sweep (launches all experiments concurrently)
     modal run modal_train.py --sweep sweep_optim
@@ -15,15 +16,18 @@ Usage:
     modal run modal_train.py --sweep sweep_10m_ema_stopgrad
     modal run modal_train.py --sweep sweep_10m_ema_stopgrad_warmup_update
     modal run modal_train.py --sweep sweep_10m_ema_masking
-    modal run modal_train.py --sweep sweep_10m_ema_teacher_targets_per_block
     modal run modal_train.py --sweep sweep_10m_ema_deep_supervision
     modal run modal_train.py --sweep sweep_10m_ema_batch_size_flops_matched
     modal run modal_train.py --config configs/gems_small.py --sweep sweep_gems_small_peak_filtering
+    modal run modal_train.py --config configs/gems_small.py --sweep sweep_gems_small_predictor_scale
+    modal run modal_train.py --config configs/gems_small.py --sweep sweep_gems_small_predictor_scale_depth
+    modal run modal_train.py --config configs/gems_small.py --sweep sweep_gems_small_scale_100m_300m --detach
 
 Setup:
     1. modal setup
     2. modal secret create wandb-secret WANDB_API_KEY=<your-key>
-    3. modal run modal_train.py
+    3. modal secret create huggingface-secret HF_TOKEN=<your-token>
+    4. modal run modal_train.py
 """
 
 import json
@@ -36,6 +40,8 @@ HOURS = 60 * MINUTES
 DEFAULT_GPU = "H100"
 PROJECT_ROOT = "/root/spectra-learning"
 MAX_SWEEP_CONCURRENCY = 10
+TRAIN_TIMEOUT_HOURS = 13
+GEMS_SMALL_SWEEP_RUNTIME_HOURS = 12.0
 
 # ---------------------------------------------------------------------------
 # Persistent volume — data + experiments survive across runs
@@ -86,6 +92,14 @@ image = (
 )
 
 app = modal.App("spectra-training", image=image)
+huggingface_secret = modal.Secret.from_name(
+    "huggingface-secret",
+    required_keys=["HF_TOKEN"],
+)
+wandb_secret = modal.Secret.from_name(
+    "wandb-secret",
+    required_keys=["WANDB_API_KEY"],
+)
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +114,12 @@ BEST_SWEEP_OPTIM = {
     "weight_decay": 0.1,
     "representation_regularizer": "none",
     "sigreg_lambda": 0.02,
+    "vicreg_lambda": 0.02,
+    "vicreg_inv_coeff": 0.0,
+    "vicreg_var_coeff": 25.0,
+    "vicreg_cov_coeff": 1.0,
+    "vicreg_variance_target": 1.0,
+    "vicreg_eps": 1e-4,
 }
 
 TEN_M_BACKBONE = {
@@ -252,10 +272,10 @@ EMA_STOPGRAD_BEST_SAME_STEP = {
     "teacher_ema_update_every": 5,
 }
 JEPA_MASKING_SWEEP_TAG = "emask"
-JEPA_TEACHER_TARGETS_SWEEP_TAG = "emasktgt"
 JEPA_DEEP_SUPERVISION_SWEEP_TAG = "emadsup"
 BATCH_SIZE_SWEEP_TAG = "bsflops"
 PEAK_FILTER_SWEEP_TAG = "peakfilt"
+GEMS_SMALL_PREDICTOR_SCALE_SWEEP_TAG = "predscale"
 JEPA_MASKING_RECIPES = [
     (
         "b2-c35-t20",
@@ -338,20 +358,6 @@ JEPA_MASKING_RECIPES = [
         },
     ),
 ]
-JEPA_TEACHER_TARGETS_RECIPES = [
-    (
-        "full",
-        {
-            "jepa_teacher_targets_per_block": False,
-        },
-    ),
-    (
-        "perblk",
-        {
-            "jepa_teacher_targets_per_block": True,
-        },
-    ),
-]
 JEPA_DEEP_SUPERVISION_RECIPES = [
     (
         "spread4-z",
@@ -398,27 +404,57 @@ BATCH_SIZE_FLOPS_MATCHED_RECIPES = [
 ]
 PEAK_FILTER_RECIPES = [
     (
-        "base",
+        "peakoff-windowoff",
         {
             "peak_drop_min_intensity": 1e-4,
             "precursor_peak_exclusion_window_da": 0.0,
         },
     ),
     (
-        "mindrop1e3",
+        "peakon-windowoff",
         {
-            "peak_drop_min_intensity": 1e-3,
+            "peak_drop_min_intensity": 0.01,
             "precursor_peak_exclusion_window_da": 0.0,
         },
     ),
     (
-        "mindrop1e3-pre5",
+        "peakoff-windowon",
         {
-            "peak_drop_min_intensity": 1e-3,
+            "peak_drop_min_intensity": 1e-4,
+            "precursor_peak_exclusion_window_da": 5.0,
+        },
+    ),
+    (
+        "peakon-windowon",
+        {
+            "peak_drop_min_intensity": 0.01,
             "precursor_peak_exclusion_window_da": 5.0,
         },
     ),
 ]
+GEMS_SMALL_SCALE_SWEEP_TAG = "scale"
+GEMS_SMALL_100M = {
+    "model_dim": 768,
+    "encoder_num_layers": 12,
+    "encoder_num_heads": 12,
+    "encoder_num_kv_heads": 12,
+    "feature_mlp_hidden_dim": 1024,
+    "predictor_dim": 384,
+    "masked_latent_predictor_num_layers": 10,
+    "masked_latent_predictor_num_heads": 16,
+    "jepa_target_layers": [1, 4, 8, 12],
+}
+GEMS_SMALL_300M = {
+    "model_dim": 1024,
+    "encoder_num_layers": 20,
+    "encoder_num_heads": 16,
+    "encoder_num_kv_heads": 16,
+    "feature_mlp_hidden_dim": 2048,
+    "predictor_dim": 512,
+    "masked_latent_predictor_num_layers": 12,
+    "masked_latent_predictor_num_heads": 16,
+    "jepa_target_layers": [4, 8, 12, 16, 20],
+}
 
 
 SWEEPS: dict[str, list[dict]] = {
@@ -636,22 +672,7 @@ SWEEPS: dict[str, list[dict]] = {
         }
         for label, masking_overrides in JEPA_MASKING_RECIPES
     ],
-    # Fix the best EMA + masking recipe and ablate per-block teacher targets.
-    "sweep_10m_ema_teacher_targets_per_block": [
-        {
-            **TEN_M_BEST_SWEEP_OPTIM,
-            **EMA_STOPGRAD_BEST_SAME_STEP,
-            "use_ema_teacher_target": True,
-            "representation_regularizer": "none",
-            "jepa_num_target_blocks": 2,
-            "jepa_context_fraction": 0.35,
-            "jepa_target_fraction": 0.20,
-            "run_name_suffix": f"10m-{JEPA_TEACHER_TARGETS_SWEEP_TAG}-{label}",
-            **teacher_target_overrides,
-        }
-        for label, teacher_target_overrides in JEPA_TEACHER_TARGETS_RECIPES
-    ],
-    # Fix the current best recipe (EMA + masking + per-block teacher targets)
+    # Fix the current best recipe (EMA + masking)
     # and ablate the "bootleg deep supervision" target stack.
     #
     # This is a clean 2x2:
@@ -666,7 +687,6 @@ SWEEPS: dict[str, list[dict]] = {
             "jepa_num_target_blocks": 2,
             "jepa_context_fraction": 0.35,
             "jepa_target_fraction": 0.20,
-            "jepa_teacher_targets_per_block": True,
             "run_name_suffix": f"10m-{JEPA_DEEP_SUPERVISION_SWEEP_TAG}-{label}",
             **deep_supervision_overrides,
         }
@@ -687,13 +707,15 @@ SWEEPS: dict[str, list[dict]] = {
             "jepa_num_target_blocks": 2,
             "jepa_context_fraction": 0.35,
             "jepa_target_fraction": 0.20,
-            "jepa_teacher_targets_per_block": True,
             "msg_probe_batch_size": 256,
             "run_name_suffix": f"10m-{BATCH_SIZE_SWEEP_TAG}-{label}",
             **batch_size_overrides,
         }
         for label, batch_size_overrides in BATCH_SIZE_FLOPS_MATCHED_RECIPES
     ],
+    # Full 2x2 on/off sweep:
+    #   - peak filtering: base 1e-4 vs 0.01
+    #   - precursor window filtering: off vs 5 Da
     "sweep_gems_small_peak_filtering": [
         {
             "msg_probe_batch_size": 256,
@@ -701,6 +723,54 @@ SWEEPS: dict[str, list[dict]] = {
             **peak_filter_overrides,
         }
         for label, peak_filter_overrides in PEAK_FILTER_RECIPES
+    ],
+    # Predictor-size A/B on the current gems_small encoder.
+    #
+    # These settings were checked against the actual trainable parameter counts
+    # for configs/gems_small.py:
+    #   - predictor_dim=256 -> 3,414,272 predictor params vs 6,779,392 encoder
+    #     params (50.4%)
+    #   - predictor_dim=360 -> 6,689,664 predictor params vs 6,779,392 encoder
+    #     params (98.7%)
+    "sweep_gems_small_predictor_scale": [
+        {
+            "msg_probe_batch_size": 256,
+            "predictor_dim": 256,
+            "run_name_suffix": f"{GEMS_SMALL_PREDICTOR_SCALE_SWEEP_TAG}-50pct",
+        },
+        {
+            "msg_probe_batch_size": 256,
+            "predictor_dim": 360,
+            "run_name_suffix": f"{GEMS_SMALL_PREDICTOR_SCALE_SWEEP_TAG}-100pct",
+        },
+    ],
+    # Single depth-matched near-100% predictor run.
+    #
+    # This is separated from the original width-scaled sweep so it launches
+    # only the depth-based near-encoder-size predictor setting:
+    #   - predictor_dim=256, masked_latent_predictor_num_layers=8 ->
+    #     6,564,096 predictor params vs 6,779,392 encoder params (96.8%)
+    "sweep_gems_small_predictor_scale_depth_2": [
+        {
+            "msg_probe_batch_size": 256,
+            "predictor_dim": 256,
+            "masked_latent_predictor_num_layers": 8,
+            "run_name_suffix": (
+                f"{GEMS_SMALL_PREDICTOR_SCALE_SWEEP_TAG}-100pct-depth"
+            ),
+        },
+    ],
+    "sweep_gems_small_scale_100m_300m": [
+        {
+            "max_duration_hours": GEMS_SMALL_SWEEP_RUNTIME_HOURS,
+            "run_name_suffix": f"{GEMS_SMALL_SCALE_SWEEP_TAG}-100m-12h",
+            **GEMS_SMALL_100M,
+        },
+        {
+            "max_duration_hours": GEMS_SMALL_SWEEP_RUNTIME_HOURS,
+            "run_name_suffix": f"{GEMS_SMALL_SCALE_SWEEP_TAG}-300m-12h",
+            **GEMS_SMALL_300M,
+        },
     ],
 }
 
@@ -714,6 +784,7 @@ SWEEPS: dict[str, list[dict]] = {
     cpu=8.0,
     memory=32768,  # 32 GiB
     timeout=30 * MINUTES,
+    secrets=[huggingface_secret],
 )
 def prepare_data(
     config_path: str = "configs/gems_small.py",
@@ -769,12 +840,13 @@ def prepare_data(
     cpu=8.0,
     memory=32768,  # 32 GiB
     gpu=DEFAULT_GPU,
-    timeout=5 * HOURS,
-    secrets=[modal.Secret.from_name("wandb-secret", required_keys=["WANDB_API_KEY"])],
+    timeout=TRAIN_TIMEOUT_HOURS * HOURS,
+    secrets=[huggingface_secret, wandb_secret],
 )
 def train(
     config_path: str = "configs/gems_small.py",
     overrides_json: str = "{}",
+    workdir: str = "",
     workdir_tag: str = "",
 ):
     import logging
@@ -806,17 +878,20 @@ def train(
 
     run_name = auto_run_name(config)
     workdir_root = volume_path / "experiments"
-    if workdir_tag:
-        workdir_root = workdir_root / workdir_tag
-    workdir = workdir_root / run_name
-    workdir.mkdir(parents=True, exist_ok=True)
+    if workdir:
+        workdir_path = workdir_root / workdir
+    else:
+        if workdir_tag:
+            workdir_root = workdir_root / workdir_tag
+        workdir_path = workdir_root / run_name
+    workdir_path.mkdir(parents=True, exist_ok=True)
 
     logging.info("Run: %s", run_name)
-    logging.info("Workdir: %s", workdir)
+    logging.info("Workdir: %s", workdir_path)
     if overrides:
         logging.info("Overrides: %s", overrides)
 
-    results = train_and_evaluate(config, workdir=workdir)
+    results = train_and_evaluate(config, workdir=workdir_path)
 
     volume.commit()
     logging.info("Training complete. Results: %s", results)
@@ -829,11 +904,17 @@ def train(
 @app.local_entrypoint()
 def main(
     config: str = "configs/gems_small.py",
+    workdir: str = "",
     sweep: str = "",
     overrides: str = "{}",
     workdir_tag: str = "",
+    detach: bool = False,
 ):
     if sweep:
+        if workdir:
+            raise ValueError(
+                "--workdir is only supported for single runs; use --workdir-tag for sweeps."
+            )
         experiments = SWEEPS[sweep]
         prepare_payloads: list[str] = []
         base_overrides = json.loads(overrides)
@@ -850,6 +931,21 @@ def main(
         )
         for i, exp in enumerate(experiments):
             print(f"  [{i}] {exp or '(baseline)'}")
+        if detach:
+            handles = []
+            for exp in experiments:
+                merged = {**base_overrides, **exp}
+                handles.append(
+                    train.spawn(
+                        config_path=config,
+                        overrides_json=json.dumps(merged),
+                        workdir="",
+                        workdir_tag=workdir_tag,
+                    )
+                )
+            for i, handle in enumerate(handles):
+                print(f"[{i}] spawned: {handle.object_id}")
+            return
         for batch_start in range(0, len(experiments), MAX_SWEEP_CONCURRENCY):
             batch = experiments[batch_start: batch_start + MAX_SWEEP_CONCURRENCY]
             print(
@@ -863,6 +959,7 @@ def main(
                     train.spawn(
                         config_path=config,
                         overrides_json=json.dumps(merged),
+                        workdir="",
                         workdir_tag=workdir_tag,
                     )
                 )
@@ -873,8 +970,18 @@ def main(
         print("Preparing data on volume...")
         prepare_data.remote(config_path=config, overrides_json=overrides)
         print("Data ready.\n")
-        train.remote(
-            config_path=config,
-            overrides_json=overrides,
-            workdir_tag=workdir_tag,
-        )
+        if detach:
+            handle = train.spawn(
+                config_path=config,
+                overrides_json=overrides,
+                workdir=workdir,
+                workdir_tag=workdir_tag,
+            )
+            print(f"spawned: {handle.object_id}")
+        else:
+            train.remote(
+                config_path=config,
+                overrides_json=overrides,
+                workdir=workdir,
+                workdir_tag=workdir_tag,
+            )
