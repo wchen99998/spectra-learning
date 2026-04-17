@@ -576,6 +576,55 @@ class MassSpecPreprocessTests(unittest.TestCase):
 
         self.assertEqual(probe_data.batch_size, 256)
 
+    def test_probe_data_supports_nist_full_dataset(self):
+        cfg = config_dict.ConfigDict()
+        cfg.artifact_dir = "/tmp/probe-cache"
+        cfg.probe_dataset = "nist-full"
+        cfg.batch_size = 128
+        cfg.max_precursor_mz = 1000.0
+        cfg.min_peak_intensity = 1e-4
+        cfg.peak_ordering = "mz"
+        cfg.num_peaks = 60
+        cfg.nist_full_hdf5_repo_id = "owner/nist-full"
+        cfg.nist_full_hdf5_filename = "hr_msms_nist.hdf5"
+
+        metadata = {
+            "train_size": 8,
+            "val_size": 4,
+            "test_size": 2,
+            "metadata_version": massspec_probe_data.NIST_FULL_METADATA_VERSION,
+            "adduct_vocab": {"unknown": 0},
+            "instrument_type_vocab": {"unknown": 0},
+            "train_files": ["shard-00000-of-00001"],
+            "train_lengths": [8],
+            "val_files": ["shard-00000-of-00001"],
+            "val_lengths": [4],
+            "test_files": ["shard-00000-of-00001"],
+            "test_lengths": [2],
+            "dreams_dim": 0,
+        }
+
+        with mock.patch.object(
+            massspec_probe_data,
+            "ensure_nist_full_probe_prepared",
+            return_value=metadata,
+        ) as ensure_probe:
+            probe_data = massspec_probe_data.MassSpecProbeData.from_config(cfg)
+
+        self.assertEqual(probe_data.info["massspec_train_size"], 8)
+        self.assertEqual(
+            ensure_probe.call_args.args[0],
+            Path("/tmp/probe-cache/nist_full_probe"),
+        )
+        self.assertEqual(
+            ensure_probe.call_args.kwargs["hdf5_repo_id"],
+            "owner/nist-full",
+        )
+        self.assertEqual(
+            ensure_probe.call_args.kwargs["hdf5_filename"],
+            "hr_msms_nist.hdf5",
+        )
+
     def test_probe_collator_applies_peak_and_precursor_window_filters(self):
         collator = massspec_probe_data._ProbeBatchCollator(
             num_peaks=8,

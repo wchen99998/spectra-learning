@@ -1,13 +1,15 @@
 """Download NIST hr_msms MGF from GCS, build the probe HDF5, upload to HF.
 
 End-to-end pipeline for making ``hr_msms_nist.mgf`` consumable by the online
-MSG probe (``probe_dataset="nist20"``). The produced HDF5 matches the schema
+MSG probe (``probe_dataset="nist-full"``). The produced HDF5 matches the schema
 that :mod:`utils.massspec_probe_data` expects; enable it at train time by
 setting::
 
-    cfg.probe_dataset = "nist20"
-    cfg.nist20_hdf5_repo_id = "<hf-owner>/hr_msms_nist_probe"
-    cfg.nist20_hdf5_filename = "hr_msms_nist.hdf5"
+    cfg.probe_dataset = "nist-full"
+    cfg.nist_full_hdf5_repo_id = "<hf-owner>/hr_msms_nist_probe"
+    cfg.nist_full_hdf5_filename = "hr_msms_nist.hdf5"
+    cfg.nist_full_probe_train_samples = 4000
+    cfg.nist_full_probe_test_samples = 1000
 """
 
 from __future__ import annotations
@@ -46,7 +48,7 @@ def _download_from_gcs(gcs_uri: str, credentials_path: Path, work_dir: Path) -> 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Build + upload NIST hr_msms HDF5 for the MSG probe."
+        description="Build + upload full NIST hr_msms HDF5 for the MSG probe."
     )
     source_group = parser.add_mutually_exclusive_group(required=True)
     source_group.add_argument("--source-mgf-path", type=Path)

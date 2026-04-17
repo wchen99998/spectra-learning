@@ -59,6 +59,22 @@ def msg_probe_variants_from_config(
     return tuple(str(variant).lower() for variant in raw_variants)
 
 
+def resolve_msg_probe_sample_limits(
+    config: config_dict.ConfigDict,
+) -> tuple[int | None, int | None, bool]:
+    probe_dataset = str(config.get("probe_dataset", "massspec"))
+    raw_train = config.get("msg_probe_max_train_samples", None)
+    raw_test = config.get("msg_probe_max_test_samples", None)
+    if raw_train is None and probe_dataset == "nist-full":
+        raw_train = config.get("nist_full_probe_train_samples", 4_000)
+    if raw_test is None and probe_dataset == "nist-full":
+        raw_test = config.get("nist_full_probe_test_samples", 1_000)
+    max_train_samples = int(raw_train) if raw_train is not None else None
+    max_test_samples = int(raw_test) if raw_test is not None else None
+    randomize_test_subset = probe_dataset == "nist-full" and max_test_samples is not None
+    return max_train_samples, max_test_samples, randomize_test_subset
+
+
 class MsgLinearProbe(torch.nn.Module):
     def __init__(
         self,
@@ -279,12 +295,13 @@ def iter_massspec_probe(
     peak_ordering: str,
     drop_remainder: bool,
     max_samples: int | None = None,
+    sample_randomly: bool = False,
 ):
     dataset = probe_data.build_dataset(
         split,
         seed=seed,
         peak_ordering=peak_ordering,
-        shuffle=(split == "massspec_train"),
+        shuffle=(split == "massspec_train") or bool(sample_randomly),
         drop_remainder=drop_remainder,
     )
     size = int(probe_data.info[f"{split}_size"])
@@ -324,6 +341,7 @@ def _collect_split_targets(
     peak_ordering: str,
     seed: int,
     max_samples: int | None = None,
+    sample_randomly: bool = False,
 ) -> MsgProbeSplitTargets:
     regression = {name: [] for name in REGRESSION_TARGET_KEYS}
     maccs = []
@@ -334,6 +352,7 @@ def _collect_split_targets(
         peak_ordering=peak_ordering,
         drop_remainder=False,
         max_samples=max_samples,
+        sample_randomly=sample_randomly,
     ):
         valid_mask = (
             batch["probe_valid_mol"].detach().cpu().numpy().astype(bool, copy=False)
@@ -616,10 +635,9 @@ def run_msg_probe(
     probe_lr = float(config.get("msg_probe_learning_rate", 1e-3))
     probe_weight_decay = float(config.get("msg_probe_weight_decay", 1e-2))
     probe_warmup_steps = int(config.get("msg_probe_warmup_steps", 100))
-    _mts = config.get("msg_probe_max_train_samples", None)
-    max_train_samples = int(_mts) if _mts is not None else None
-    _mte = config.get("msg_probe_max_test_samples", None)
-    max_test_samples = int(_mte) if _mte is not None else None
+    max_train_samples, max_test_samples, randomize_test_subset = (
+        resolve_msg_probe_sample_limits(config)
+    )
     peak_ordering = str(config.get("peak_ordering", "intensity"))
     probe_data = MassSpecProbeData.from_config(config)
 
@@ -650,6 +668,7 @@ def run_msg_probe(
         peak_ordering=peak_ordering,
         seed=test_seed_base,
         max_samples=max_test_samples,
+        sample_randomly=randomize_test_subset,
     )
     task_spec = _build_task_spec(train_targets=train_targets, test_targets=test_targets)
     variants = msg_probe_variants_from_config(config)
@@ -752,6 +771,7 @@ def run_msg_probe(
                 peak_ordering=peak_ordering,
                 drop_remainder=False,
                 max_samples=max_test_samples,
+                sample_randomly=randomize_test_subset,
             ):
                 batch = move_batch(batch)
                 peak_embeddings = feature_extractor(batch)
@@ -842,10 +862,9 @@ def run_dreams_probe(
     probe_lr = float(config.get("msg_probe_learning_rate", 1e-3))
     probe_weight_decay = float(config.get("msg_probe_weight_decay", 1e-2))
     probe_warmup_steps = int(config.get("msg_probe_warmup_steps", 100))
-    _mts = config.get("msg_probe_max_train_samples", None)
-    max_train_samples = int(_mts) if _mts is not None else None
-    _mte = config.get("msg_probe_max_test_samples", None)
-    max_test_samples = int(_mte) if _mte is not None else None
+    max_train_samples, max_test_samples, randomize_test_subset = (
+        resolve_msg_probe_sample_limits(config)
+    )
     peak_ordering = str(config.get("peak_ordering", "intensity"))
     probe_data = MassSpecProbeData.from_config(config)
 
@@ -869,6 +888,7 @@ def run_dreams_probe(
         peak_ordering=peak_ordering,
         seed=test_seed_base,
         max_samples=max_test_samples,
+        sample_randomly=randomize_test_subset,
     )
     task_spec = _build_task_spec(train_targets=train_targets, test_targets=test_targets)
 
@@ -957,6 +977,7 @@ def run_dreams_probe(
                 peak_ordering=peak_ordering,
                 drop_remainder=False,
                 max_samples=max_test_samples,
+                sample_randomly=randomize_test_subset,
             ):
                 batch = move_batch(batch)
                 result = compiled_probe_step(

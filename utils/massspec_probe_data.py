@@ -51,6 +51,8 @@ NIST20_HF_FILENAME = (
 _NIST20_SPLIT_SEED = 42
 _NIST20_TRAIN_FRAC = 0.70
 _NIST20_VAL_FRAC = 0.15
+NIST_FULL_METADATA_VERSION = 1
+NIST_FULL_HF_FILENAME = "hr_msms_nist.hdf5"
 
 MONA_A_METADATA_VERSION = 3
 MONA_A_HF_REPO = "roman-bushuiev/GeMS"
@@ -339,6 +341,7 @@ def _probe_metadata_valid(
     output_dir: Path,
     expected_version: int,
     max_precursor_mz: float,
+    expected_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     metadata_path = output_dir / _METADATA_FILENAME
     if not metadata_path.exists():
@@ -348,6 +351,10 @@ def _probe_metadata_valid(
         return None
     if float(metadata.get("max_precursor_mz", float("inf"))) != float(max_precursor_mz):
         return None
+    if expected_metadata is not None:
+        for key, value in expected_metadata.items():
+            if metadata.get(key) != value:
+                return None
     for split in ("train", "val", "test"):
         if not all(
             (output_dir / split / name).exists()
@@ -391,7 +398,13 @@ def ensure_nist20_probe_prepared(
     hdf5_filename: str = NIST20_HF_FILENAME,
 ) -> dict[str, Any]:
     cached = _probe_metadata_valid(
-        output_dir, NIST20_METADATA_VERSION, max_precursor_mz
+        output_dir,
+        NIST20_METADATA_VERSION,
+        max_precursor_mz,
+        expected_metadata={
+            "hdf5_repo_id": hdf5_repo_id,
+            "hdf5_filename": hdf5_filename,
+        },
     )
     if cached is not None:
         return cached
@@ -405,6 +418,45 @@ def ensure_nist20_probe_prepared(
         max_precursor_mz=max_precursor_mz,
         metadata_version=NIST20_METADATA_VERSION,
     )
+    metadata["hdf5_repo_id"] = hdf5_repo_id
+    metadata["hdf5_filename"] = hdf5_filename
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / _METADATA_FILENAME).write_text(json.dumps(metadata, indent=2))
+    return metadata
+
+
+def ensure_nist_full_probe_prepared(
+    output_dir: Path,
+    *,
+    max_precursor_mz: float,
+    cache_dir: Path,
+    hdf5_repo_id: str,
+    hdf5_filename: str = NIST_FULL_HF_FILENAME,
+    num_shards: int = _DEFAULT_MASSSPEC_NUM_SHARDS,
+) -> dict[str, Any]:
+    cached = _probe_metadata_valid(
+        output_dir,
+        NIST_FULL_METADATA_VERSION,
+        max_precursor_mz,
+        expected_metadata={
+            "hdf5_repo_id": hdf5_repo_id,
+            "hdf5_filename": hdf5_filename,
+        },
+    )
+    if cached is not None:
+        return cached
+    hdf5_path = cache_dir / hdf5_filename
+    if not hdf5_path.exists():
+        hdf5_path = _download_hf_file(hdf5_repo_id, hdf5_filename, cache_dir)
+    metadata = _filter_encode_and_write(
+        **_load_nist20_hdf5(hdf5_path),
+        output_dir=output_dir,
+        num_shards=num_shards,
+        max_precursor_mz=max_precursor_mz,
+        metadata_version=NIST_FULL_METADATA_VERSION,
+    )
+    metadata["hdf5_repo_id"] = hdf5_repo_id
+    metadata["hdf5_filename"] = hdf5_filename
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / _METADATA_FILENAME).write_text(json.dumps(metadata, indent=2))
     return metadata
@@ -640,6 +692,25 @@ class MassSpecProbeData(NamedTuple):
                 cache_dir=artifact_root,
                 hdf5_repo_id=str(config.get("nist20_hdf5_repo_id", NIST20_HF_REPO)),
                 hdf5_filename=str(config.get("nist20_hdf5_filename", NIST20_HF_FILENAME)),
+            )
+        elif probe_dataset == "nist-full":
+            output_dir = artifact_root / "nist_full_probe"
+            metadata = ensure_nist_full_probe_prepared(
+                output_dir,
+                max_precursor_mz=max_precursor_mz,
+                cache_dir=artifact_root,
+                hdf5_repo_id=str(
+                    config.get(
+                        "nist_full_hdf5_repo_id",
+                        config.get("nist20_hdf5_repo_id", NIST20_HF_REPO),
+                    )
+                ),
+                hdf5_filename=str(
+                    config.get(
+                        "nist_full_hdf5_filename",
+                        config.get("nist20_hdf5_filename", NIST_FULL_HF_FILENAME),
+                    )
+                ),
             )
         elif probe_dataset == "mona_a":
             output_dir = artifact_root / "mona_a_probe"

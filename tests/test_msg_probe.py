@@ -2,6 +2,7 @@ import unittest
 
 import numpy as np
 import torch
+from ml_collections import config_dict
 
 from input_pipeline import _prepend_precursor_token_torch
 from utils.spectra_preprocessing import PRECURSOR_TOKEN_INTENSITY
@@ -25,6 +26,7 @@ from utils.msg_probe import (
     msg_probe_metric_higher_is_better,
     iter_massspec_probe,
     probe_steps_per_epoch,
+    resolve_msg_probe_sample_limits,
     resolve_msg_probe_select_metric,
 )
 
@@ -571,6 +573,30 @@ class ProbeIterationTests(unittest.TestCase):
         )
         self.assertEqual(dm.calls[0]["shuffle"], False)
 
+    def test_eval_probe_can_randomly_sample(self):
+        batches = [{"peak_mz": np.zeros((2, 60), dtype=np.float32)}]
+        dm = _DummyDataModule(
+            batches=batches,
+            info={
+                "massspec_train_size": 0,
+                "massspec_val_size": 0,
+                "massspec_test_size": 2,
+            },
+            batch_size=4,
+        )
+        _ = list(
+            iter_massspec_probe(
+                dm,
+                "massspec_test",
+                seed=321,
+                peak_ordering="intensity",
+                drop_remainder=False,
+                max_samples=1,
+                sample_randomly=True,
+            )
+        )
+        self.assertEqual(dm.calls[0]["shuffle"], True)
+
     def test_probe_iteration_respects_max_samples(self):
         batches = [
             {"peak_mz": np.zeros((4, 60), dtype=np.float32)},
@@ -627,6 +653,20 @@ class ProbeStepCountTests(unittest.TestCase):
             ),
             2,
         )
+
+
+class ProbeConfigTests(unittest.TestCase):
+    def test_nist_full_probe_defaults_use_random_subsets(self):
+        cfg = config_dict.ConfigDict()
+        cfg.probe_dataset = "nist-full"
+
+        train_samples, test_samples, randomize_test_subset = (
+            resolve_msg_probe_sample_limits(cfg)
+        )
+
+        self.assertEqual(train_samples, 4000)
+        self.assertEqual(test_samples, 1000)
+        self.assertTrue(randomize_test_subset)
 
 
 class ProbePrecursorTokenTests(unittest.TestCase):
