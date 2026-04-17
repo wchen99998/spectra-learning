@@ -30,7 +30,7 @@ from ml_collections import config_dict
 
 from input_pipeline_temporal import TemporalLightningDataModule
 from models.model import PeakSetSIGReg
-from utils.msg_probe import run_msg_probe
+from utils.msg_probe import msg_probe_variants_from_config, run_msg_probe
 from utils.schedulers import CapturableCosineSchedule
 from utils.training import (
     build_logger,
@@ -501,6 +501,7 @@ def train_temporal(
         msg_probe_every_n_steps = max(1, int(_msg_probe_raw * total_steps))
     else:
         msg_probe_every_n_steps = int(_msg_probe_raw)
+    msg_probe_variants = msg_probe_variants_from_config(config)
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     train_loader = datamodule.train_loader
@@ -605,14 +606,21 @@ def train_temporal(
             )
             logger.log_metrics(probe_metrics, step=global_step)
             last_msg_probe_metrics = probe_metrics
-            logging.info(
-                "step=%d msg_probe(test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f)",
-                global_step,
-                probe_metrics["msg_probe/test/r2_mean_wo_num_rings"],
-                probe_metrics["msg_probe/test/mae_num_rings"],
-                probe_metrics["msg_probe/test/auc_maccs_mean"],
-                probe_metrics["msg_probe/test/recall_maccs_mean"],
-            )
+            for variant in msg_probe_variants:
+                variant_prefix = f"msg_probe/{variant}"
+                epoch_key = f"{variant_prefix}/epoch"
+                if epoch_key not in probe_metrics:
+                    continue
+                logging.info(
+                    "step=%d msg_probe[%s] best_epoch=%d (test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f)",
+                    global_step,
+                    variant,
+                    int(probe_metrics[epoch_key]),
+                    probe_metrics[f"{variant_prefix}/test/r2_mean_wo_num_rings"],
+                    probe_metrics[f"{variant_prefix}/test/mae_num_rings"],
+                    probe_metrics[f"{variant_prefix}/test/auc_maccs_mean"],
+                    probe_metrics[f"{variant_prefix}/test/recall_maccs_mean"],
+                )
 
     pbar.close()
 
