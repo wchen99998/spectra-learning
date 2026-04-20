@@ -29,7 +29,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_num_kv_heads = 8
     cfg.encoder_num_register_tokens = 4
     cfg.encoder_apply_final_norm = True
-    cfg.encoder_qk_norm = True
+    cfg.encoder_qk_norm = False
     cfg.encoder_fourier_strategy = "log_spaced"
     cfg.encoder_fourier_x_min = 3e-3
     cfg.encoder_fourier_x_max = 1000.0
@@ -41,21 +41,24 @@ def get_config() -> config_dict.ConfigDict:
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 512
     cfg.sigreg_num_slices = 256
-    cfg.sigreg_lambda = 0.02
+    cfg.sigreg_lambda = 0.002
+    cfg.sigreg_precursor_scale = 4.0
     cfg.vicreg_lambda = 0.2
     cfg.vicreg_inv_coeff = 0.0
     cfg.vicreg_var_coeff = 25.0
     cfg.vicreg_cov_coeff = 1.0
     cfg.vicreg_variance_target = 1.0
     cfg.vicreg_eps = 1e-4
+
     cfg.jepa_num_target_blocks = 2
+    cfg.encoder_use_position_embedding = False
     cfg.jepa_context_fraction = 0.45
     cfg.jepa_context_fraction_range = (0.35, 0.55)
     cfg.jepa_target_fraction = 0.25
     cfg.jepa_target_fraction_range = (0.15, 0.35)
     cfg.jepa_block_min_len = 1
     cfg.jepa_mask_strategy = "all"
-    cfg.jepa_mask_lengths = (4, 8, 12)
+    cfg.jepa_mask_lengths = (2, 4, 8, 12)
     cfg.jepa_mask_round_from = 2
     cfg.norm_type = "layernorm"
 
@@ -65,17 +68,17 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_latent_predictor_num_layers = 8
     cfg.masked_latent_predictor_num_heads = 8
     cfg.temporal_predictor_num_layers = 0
-    cfg.predictor_dim = 128
-    cfg.predictor_dropout = 0.05
+    cfg.predictor_dim = 256
+    cfg.predictor_dropout = 0.15
 
     # Training
     cfg.num_epochs = 10
-    cfg.learning_rate = 5e-4
-    cfg.warmup_steps = 20_000
+    cfg.learning_rate = 1e-4
+    cfg.warmup_steps = 10_000
     cfg.min_learning_rate = 3e-5
-    cfg.b2 = 0.99
-    cfg.weight_decay = 0.5
-    cfg.optimizer = "adamw"
+    cfg.b2 = 0.999
+    cfg.weight_decay = 0.1
+    cfg.optimizer = "muon"
     cfg.device_prefetch_size = 8
     cfg.optimizer_capturable = True
     cfg.optimizer_fused = True
@@ -92,9 +95,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_target_layers = [3, 5, 8]
     cfg.use_ema_teacher_target = True
     cfg.teacher_ema_decay = 0.999
-    cfg.teacher_ema_decay_start = 0.996
-    cfg.teacher_ema_decay_warmup_steps = 100_000
-    cfg.teacher_ema_update_every = 5
+    cfg.teacher_ema_decay_start = 0.9
+    cfg.teacher_ema_decay_warmup_steps = 250_000
+    cfg.teacher_ema_update_every = 1
     cfg.grad_clip_norm = 1.0
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "reduce-overhead"
@@ -111,7 +114,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_covariance_dim = 32
     cfg.msg_probe_pma_num_seeds = 32
     cfg.msg_probe_pma_num_heads = cfg.encoder_num_heads
-    cfg.probe_dataset = "nist-full"
+    cfg.probe_dataset = "nist20"
     cfg.msg_probe_tune_metric = "msg_probe/test/auc_maccs_mean"
     cfg.msg_probe_tune_param_space = [
         {
