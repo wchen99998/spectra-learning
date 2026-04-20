@@ -38,6 +38,7 @@ def main() -> None:
         sigreg_num_slices=cfg.sigreg_num_slices,
         sigreg_lambda=cfg.sigreg_lambda,
         norm_type=cfg.norm_type,
+        encoder_use_position_embedding=cfg.get("encoder_use_position_embedding", True),
         use_precursor_token=cfg.use_precursor_token,
         masked_token_loss_weight=cfg.masked_token_loss_weight,
         masked_token_loss_type=cfg.masked_token_loss_type,

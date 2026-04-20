@@ -77,6 +77,7 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         ),
         sigreg_num_slices=int(config.get("sigreg_num_slices", 256)),
         sigreg_lambda=float(config.get("sigreg_lambda", 0.02)),
+        sigreg_precursor_scale=float(config.get("sigreg_precursor_scale", 1.0)),
         vicreg_lambda=float(config.get("vicreg_lambda", 0.02)),
         vicreg_inv_coeff=float(config.get("vicreg_inv_coeff", 0.0)),
         vicreg_var_coeff=float(config.get("vicreg_var_coeff", 25.0)),
@@ -95,6 +96,9 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         teacher_ema_update_every=int(config.get("teacher_ema_update_every", 1)),
         encoder_qk_norm=bool(config.get("encoder_qk_norm", False)),
         norm_type=str(config.get("norm_type", "rmsnorm")),
+        encoder_use_position_embedding=bool(
+            config.get("encoder_use_position_embedding", True)
+        ),
         encoder_apply_final_norm=bool(config.get("encoder_apply_final_norm", True)),
         predictor_apply_final_norm=bool(
             config.get("predictor_apply_final_norm", True)

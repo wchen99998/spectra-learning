@@ -96,7 +96,6 @@ def test_load_resume_model_state_allows_removed_cls_predictor_keys():
     restored = _small_model()
     _load_resume_model_state(restored, resume_state)
 
-
 def test_save_checkpoint_persists_teacher_ema_schedule_state():
     model = _small_model(
         use_ema_teacher_target=True,

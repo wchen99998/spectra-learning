@@ -25,6 +25,7 @@ def get_bench_config() -> config_dict.ConfigDict:
     cfg.encoder_num_heads = 12
     cfg.encoder_num_kv_heads = 12
     cfg.encoder_num_register_tokens = 4
+    cfg.encoder_use_position_embedding = True
     cfg.encoder_apply_final_norm = False
     cfg.encoder_qk_norm = False
     cfg.encoder_fourier_strategy = "lin_float_int"

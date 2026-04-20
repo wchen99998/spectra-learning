@@ -242,12 +242,14 @@ class PeakSetEncoder(nn.Module):
         norm_type: str = "rmsnorm",
         apply_final_norm: bool = True,
         num_peaks: int = 64,
+        use_position_embedding: bool = True,
         num_register_tokens: int = 0,
     ):
         super().__init__()
         self.num_layers = int(num_layers)
         norm_type = str(norm_type).lower()
         self.num_register_tokens = int(num_register_tokens)
+        self.use_position_embedding = bool(use_position_embedding)
         self.embedder = PeakFeatureEmbedder(
             model_dim=model_dim,
             hidden_dim=feature_mlp_hidden_dim,
@@ -288,6 +290,13 @@ class PeakSetEncoder(nn.Module):
             else nn.Identity()
         )
 
+    def _add_positions(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.use_position_embedding:
+            return x
+        return x + self.position_embedding(
+            torch.arange(x.shape[1], device=x.device)
+        ).unsqueeze(0).to(dtype=x.dtype)
+
     def _append_special_tokens(
         self,
         x: torch.Tensor,
@@ -326,10 +335,7 @@ class PeakSetEncoder(nn.Module):
     ) -> list[torch.Tensor]:
         block_indices = tuple(int(idx) for idx in block_indices)
         attn_mask = _merge_visible_mask(valid_mask, visible_mask)
-        x = self.embedder(peak_mz, peak_intensity)
-        x = x + self.position_embedding(
-            torch.arange(peak_mz.shape[1], device=x.device)
-        ).unsqueeze(0).to(dtype=x.dtype)
+        x = self._add_positions(self.embedder(peak_mz, peak_intensity))
         seq_len = peak_mz.shape[1]
         selected = set(block_indices)
         selected_peak_outputs: dict[int, torch.Tensor] = {}
@@ -358,10 +364,7 @@ class PeakSetEncoder(nn.Module):
         return_cls_token: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         attn_mask = _merge_visible_mask(valid_mask, visible_mask)
-        x = self.embedder(peak_mz, peak_intensity)
-        x = x + self.position_embedding(
-            torch.arange(peak_mz.shape[1], device=x.device)
-        ).unsqueeze(0).to(dtype=x.dtype)
+        x = self._add_positions(self.embedder(peak_mz, peak_intensity))
         seq_len = peak_mz.shape[1]
         x, attn_mask = self._append_special_tokens(x, attn_mask)
         attn_mask = (
@@ -408,6 +411,7 @@ class PeakSetSIGReg(nn.Module):
         masked_latent_predictor_num_heads: int = 8,
         sigreg_num_slices: int = 256,
         sigreg_lambda: float = 0.02,
+        sigreg_precursor_scale: float = 1.0,
         vicreg_lambda: float = 0.02,
         vicreg_inv_coeff: float = 0.0,
         vicreg_var_coeff: float = 25.0,
@@ -424,6 +428,7 @@ class PeakSetSIGReg(nn.Module):
         teacher_ema_update_every: int = 1,
         encoder_qk_norm: bool = False,
         norm_type: str = "rmsnorm",
+        encoder_use_position_embedding: bool = True,
         encoder_apply_final_norm: bool = True,
         predictor_apply_final_norm: bool = True,
         use_precursor_token: bool = False,
@@ -457,6 +462,7 @@ class PeakSetSIGReg(nn.Module):
                 f"Unsupported regularizer: {self.representation_regularizer!r}"
             )
         self.sigreg_lambda = float(sigreg_lambda)
+        self.sigreg_precursor_scale = float(sigreg_precursor_scale)
         self.vicreg_lambda = float(vicreg_lambda)
         _f = torch.float32
         _reg = self.register_buffer
@@ -525,6 +531,7 @@ class PeakSetSIGReg(nn.Module):
             fourier_input_scale=encoder_fourier_input_scale,
             qk_norm=encoder_qk_norm,
             norm_type=self.norm_type,
+            use_position_embedding=encoder_use_position_embedding,
             apply_final_norm=encoder_apply_final_norm,
             num_peaks=N,
             num_register_tokens=encoder_num_register_tokens,
@@ -625,10 +632,29 @@ class PeakSetSIGReg(nn.Module):
         self.advance_teacher_ema_decay_schedule()
         if step % self.teacher_ema_update_every != 0:
             return
-        teacher_params = list(self.teacher_encoder.module.parameters())
+        teacher = self._teacher_encoder_module()
+        teacher_params = list(teacher.parameters())
         student_params = list(self.encoder.parameters())
         # Pass tensor directly — _foreach_lerp_ accepts scalar tensors, no float() sync needed
         torch._foreach_lerp_(teacher_params, student_params, 1.0 - self.teacher_ema_decay_current)
+        teacher_buffers = dict(teacher.named_buffers())
+        student_buffers = dict(self.encoder.named_buffers())
+        float_teacher_buffers = []
+        float_student_buffers = []
+        for name, teacher_buffer in teacher_buffers.items():
+            student_buffer = student_buffers[name]
+            if torch.is_floating_point(teacher_buffer) or torch.is_complex(teacher_buffer):
+                float_teacher_buffers.append(teacher_buffer)
+                float_student_buffers.append(student_buffer)
+            else:
+                teacher_buffer.copy_(student_buffer)
+        if float_teacher_buffers:
+            torch._foreach_lerp_(
+                float_teacher_buffers,
+                float_student_buffers,
+                1.0 - self.teacher_ema_decay_current,
+            )
+        self.teacher_encoder.n_averaged.add_(1)
 
     @torch.no_grad()
     def advance_teacher_ema_decay_schedule(self) -> None:
@@ -929,7 +955,11 @@ class PeakSetSIGReg(nn.Module):
         vicreg_cov_loss = context_emb.new_tensor(0.0)
         if use_sigreg:
             sigreg_lambda_current = context_emb.new_tensor(self.sigreg_lambda)
-            token_sigreg_loss = self.sigreg(context_emb.float(), valid_mask=context_mask)
+            sigreg_weights = context_mask.float()
+            if self.use_precursor_token:
+                sigreg_weights = sigreg_weights.clone()
+                sigreg_weights[:, 0] *= self.sigreg_precursor_scale
+            token_sigreg_loss = self.sigreg(context_emb.float(), valid_mask=sigreg_weights)
             sigreg_term = sigreg_lambda_current * token_sigreg_loss.to(
                 dtype=context_emb.dtype
             )

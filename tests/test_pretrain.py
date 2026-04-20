@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import math
+from unittest import mock
 
 import numpy as np
 import torch
@@ -513,6 +514,43 @@ class BlockJEPATests(unittest.TestCase):
                 places=6,
             )
 
+    def test_update_teacher_immediately_updates_teacher_module(self):
+        model = self._build_model(
+            use_ema_teacher_target=True,
+            teacher_ema_decay_start=0.5,
+            teacher_ema_decay=0.5,
+            teacher_ema_decay_warmup_steps=0,
+        )
+        teacher = model._teacher_encoder_module()
+        name, student_param = next(iter(model.encoder.named_parameters()))
+        teacher_param = dict(teacher.named_parameters())[name]
+        with torch.no_grad():
+            teacher_param.zero_()
+            student_param.fill_(2.0)
+
+        model.update_teacher()
+
+        self.assertIs(teacher, model._teacher_encoder_module())
+        torch.testing.assert_close(teacher_param, torch.full_like(teacher_param, 1.0))
+        self.assertEqual(int(model.teacher_encoder.n_averaged.item()), 1)
+
+    def test_update_teacher_syncs_encoder_buffers(self):
+        model = self._build_model(
+            use_ema_teacher_target=True,
+            teacher_ema_decay_start=0.5,
+            teacher_ema_decay=0.5,
+            teacher_ema_decay_warmup_steps=0,
+        )
+        model.encoder.register_buffer("dummy_buffer", torch.tensor([4.0]))
+        model.teacher_encoder.module.register_buffer("dummy_buffer", torch.tensor([0.0]))
+
+        model.update_teacher()
+
+        torch.testing.assert_close(
+            model.teacher_encoder.module.dummy_buffer,
+            torch.tensor([2.0]),
+        )
+
     def test_weight_decay_targets_all_2d_weights(self):
         model = self._build_model()
         self.assertTrue(
@@ -595,6 +633,38 @@ class PrecursorTokenTests(unittest.TestCase):
         loss.backward()
         grads = [p.grad for p in model.encoder.parameters() if p.requires_grad]
         self.assertTrue(any(g is not None for g in grads))
+
+    def test_sigreg_precursor_scale_weights_precursor_slot(self):
+        model = self._build_model(
+            representation_regularizer="sigreg",
+            sigreg_lambda=0.02,
+            sigreg_precursor_scale=4.0,
+        )
+        batch = _make_pipeline_prepended_batch(
+            num_peaks=6,
+            num_targets=model.jepa_num_target_blocks,
+        )
+        captured: dict[str, torch.Tensor] = {}
+
+        def fake_sigreg_forward(
+            proj: torch.Tensor,
+            valid_mask: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            captured["valid_mask"] = valid_mask.detach().clone()
+            return proj.new_zeros(())
+
+        with mock.patch.object(model.sigreg, "forward", side_effect=fake_sigreg_forward):
+            model.forward_augmented(batch)
+
+        self.assertIn("valid_mask", captured)
+        torch.testing.assert_close(
+            captured["valid_mask"][:, 0],
+            torch.full_like(captured["valid_mask"][:, 0], 4.0),
+        )
+        torch.testing.assert_close(
+            captured["valid_mask"][:, 1:],
+            batch["context_mask"][:, 1:].float(),
+        )
 
     def test_prepend_precursor_token_shapes(self):
         B, N, K = 4, 6, 2

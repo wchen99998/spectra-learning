@@ -24,6 +24,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_num_kv_heads = 8
     cfg.encoder_num_register_tokens = 0
     cfg.predictor_num_register_tokens = 0
+    cfg.encoder_use_position_embedding = True
     cfg.encoder_qk_norm = False
     cfg.encoder_fourier_strategy = "log_spaced"
     cfg.encoder_fourier_x_min = 3e-3

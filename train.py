@@ -300,7 +300,7 @@ def _load_resume_model_state(
     state_dict: dict[str, torch.Tensor],
 ) -> None:
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    allowed_missing = (
+    allowed_missing_suffixes = (
         "sigreg.t",
         "sigreg.phi",
         "sigreg.weights",
@@ -312,7 +312,7 @@ def _load_resume_model_state(
         "sigreg_lambda_current",
         "sigreg_lambda_step",
     )
-    missing = [key for key in missing if key not in allowed_missing]
+    missing = [key for key in missing if not key.endswith(allowed_missing_suffixes)]
     unexpected = [
         key
         for key in unexpected

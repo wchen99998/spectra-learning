@@ -8,6 +8,7 @@ def _build_model(
     num_target_blocks: int = 2,
     predictor_layers: int = 2,
     predictor_num_register_tokens: int = 0,
+    encoder_use_position_embedding: bool = True,
     encoder_apply_final_norm: bool = True,
     predictor_apply_final_norm: bool = True,
     jepa_target_normalization: str = "none",
@@ -20,6 +21,7 @@ def _build_model(
         encoder_num_heads=4,
         num_peaks=6,
         feature_mlp_hidden_dim=32,
+        encoder_use_position_embedding=encoder_use_position_embedding,
         encoder_apply_final_norm=encoder_apply_final_norm,
         predictor_apply_final_norm=predictor_apply_final_norm,
         predictor_num_register_tokens=predictor_num_register_tokens,
@@ -146,6 +148,50 @@ def test_predictor_register_tokens_do_not_get_position_embeddings():
         atol=1e-6,
         rtol=1e-6,
     )
+
+
+@torch.no_grad()
+def test_encoder_position_embedding_toggle_matches_zeroed_table():
+    torch.manual_seed(0)
+    encoder_without_pos = PeakSetEncoder(
+        model_dim=32,
+        num_layers=2,
+        num_heads=4,
+        num_peaks=6,
+        feature_mlp_hidden_dim=32,
+        norm_type="layernorm",
+        use_position_embedding=False,
+    ).eval()
+    torch.manual_seed(0)
+    encoder_with_zeroed_pos = PeakSetEncoder(
+        model_dim=32,
+        num_layers=2,
+        num_heads=4,
+        num_peaks=6,
+        feature_mlp_hidden_dim=32,
+        norm_type="layernorm",
+        use_position_embedding=True,
+    ).eval()
+    with torch.no_grad():
+        encoder_with_zeroed_pos.position_embedding.weight.zero_()
+    peak_mz = torch.rand(2, 6)
+    peak_intensity = torch.rand(2, 6)
+    valid_mask = torch.ones(2, 6, dtype=torch.bool)
+
+    out_without_pos = encoder_without_pos(
+        peak_mz,
+        peak_intensity,
+        valid_mask=valid_mask,
+        visible_mask=valid_mask,
+    )
+    out_with_zeroed_pos = encoder_with_zeroed_pos(
+        peak_mz,
+        peak_intensity,
+        valid_mask=valid_mask,
+        visible_mask=valid_mask,
+    )
+
+    torch.testing.assert_close(out_without_pos, out_with_zeroed_pos)
 
 
 @torch.no_grad()

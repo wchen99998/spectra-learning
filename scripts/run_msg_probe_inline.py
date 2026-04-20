@@ -42,6 +42,7 @@ def make_config() -> config_dict.ConfigDict:
     cfg.encoder_fourier_trainable = True
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 128
+    cfg.encoder_use_position_embedding = True
     cfg.sigreg_num_slices = 256
     cfg.sigreg_lambda = 0.1
     cfg.representation_regularizer = "sigreg"
@@ -85,6 +86,7 @@ def main() -> None:
         sigreg_num_slices=cfg.sigreg_num_slices,
         sigreg_lambda=cfg.sigreg_lambda,
         norm_type=cfg.norm_type,
+        encoder_use_position_embedding=cfg.encoder_use_position_embedding,
         use_precursor_token=cfg.use_precursor_token,
         masked_token_loss_weight=cfg.masked_token_loss_weight,
         masked_token_loss_type=cfg.masked_token_loss_type,
