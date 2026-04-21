@@ -457,7 +457,15 @@ class PeakSetSIGReg(nn.Module):
         self.num_jepa_target_layers = len(self.jepa_target_layers)
         self.jepa_target_dim = self.num_jepa_target_layers * self.model_dim
         self.representation_regularizer = str(representation_regularizer).lower()
-        if self.representation_regularizer not in ("none", "", "sigreg", "vicreg"):
+        if self.representation_regularizer == "sigreg":
+            self.representation_regularizer = "sigreg-enc"
+        if self.representation_regularizer not in (
+            "none",
+            "",
+            "sigreg-enc",
+            "sigreg-pred",
+            "vicreg",
+        ):
             raise ValueError(
                 f"Unsupported regularizer: {self.representation_regularizer!r}"
             )
@@ -857,7 +865,7 @@ class PeakSetSIGReg(nn.Module):
             result["context_mask"] = torch.cat([pre_ctx, context_mask], dim=1)
         if target_masks is not None:
             K = target_masks.shape[1]
-            pre_tgt = torch.zeros(B, K, 1, device=device, dtype=torch.bool)
+            pre_tgt = torch.ones(B, K, 1, device=device, dtype=torch.bool)
             result["target_masks"] = torch.cat([pre_tgt, target_masks], dim=2)
         return result
 
@@ -893,6 +901,8 @@ class PeakSetSIGReg(nn.Module):
         peak_valid_mask = augmented_batch["peak_valid_mask"]
         context_mask = augmented_batch["context_mask"] & peak_valid_mask
         target_masks = augmented_batch["target_masks"] & peak_valid_mask.unsqueeze(1)
+        if self.use_precursor_token:
+            target_masks[:, :, 0] = peak_valid_mask[:, :1]
         B, N = peak_mz.shape
         K = self.jepa_num_target_blocks
         context_encoded = self.encoder(
@@ -939,7 +949,14 @@ class PeakSetSIGReg(nn.Module):
         reg_den = target_mask_float.sum().clamp_min(1.0)
         local_global_loss = reg_num / reg_den
         jepa_term = self.masked_token_loss_weight * local_global_loss
-        use_sigreg = self.representation_regularizer == "sigreg" and self.sigreg_lambda > 0
+        use_sigreg_enc = (
+            self.representation_regularizer == "sigreg-enc"
+            and self.sigreg_lambda > 0
+        )
+        use_sigreg_pred = (
+            self.representation_regularizer == "sigreg-pred"
+            and self.sigreg_lambda > 0
+        )
         use_vicreg = self.representation_regularizer == "vicreg" and self.vicreg_lambda > 0
         regularizer_lambda_current = context_emb.new_tensor(0.0)
         regularizer_loss = context_emb.new_tensor(0.0)
@@ -953,13 +970,17 @@ class PeakSetSIGReg(nn.Module):
         vicreg_inv_loss = context_emb.new_tensor(0.0)
         vicreg_var_loss = context_emb.new_tensor(0.0)
         vicreg_cov_loss = context_emb.new_tensor(0.0)
-        if use_sigreg:
+        if use_sigreg_enc or use_sigreg_pred:
             sigreg_lambda_current = context_emb.new_tensor(self.sigreg_lambda)
+            sigreg_input = context_emb.float()
             sigreg_weights = context_mask.float()
+            if use_sigreg_pred:
+                sigreg_input = predictor_output.float()
+                sigreg_weights = target_masks.float()
             if self.use_precursor_token:
                 sigreg_weights = sigreg_weights.clone()
-                sigreg_weights[:, 0] *= self.sigreg_precursor_scale
-            token_sigreg_loss = self.sigreg(context_emb.float(), valid_mask=sigreg_weights)
+                sigreg_weights[..., 0] *= self.sigreg_precursor_scale
+            token_sigreg_loss = self.sigreg(sigreg_input, valid_mask=sigreg_weights)
             sigreg_term = sigreg_lambda_current * token_sigreg_loss.to(
                 dtype=context_emb.dtype
             )

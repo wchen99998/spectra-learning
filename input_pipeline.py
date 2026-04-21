@@ -420,7 +420,7 @@ def _prepend_precursor_token_torch(
         num_targets = int(batch["target_masks"].shape[1])
         result["target_masks"] = torch.cat(
             [
-                torch.zeros(
+                torch.ones(
                     (batch_size, num_targets, 1), dtype=torch.bool, device=device
                 ),
                 batch["target_masks"],

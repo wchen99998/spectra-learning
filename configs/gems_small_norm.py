@@ -9,6 +9,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.gems_native_repo_id = "cjim8889/gems-a10-native"
     cfg.nist_full_probe_repo_id = "cjim8889/hr_msms_nist_probe_prepared"
     cfg.nist_full_probe_revision = "main"
+    cfg.nist_full_probe_train_samples = 4_000
+    cfg.nist_full_probe_test_samples = 1_000
+    cfg.nist_full_probe_num_repeats = 3
     cfg.batch_size = 256
     cfg.shuffle_buffer = 1_000_000
     cfg.drop_remainder = True
@@ -41,8 +44,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 512
     cfg.sigreg_num_slices = 256
-    cfg.sigreg_lambda = 0.002
-    cfg.sigreg_precursor_scale = 4.0
+    cfg.sigreg_lambda = 0.02
+    cfg.sigreg_precursor_scale = 1.0
     cfg.vicreg_lambda = 0.2
     cfg.vicreg_inv_coeff = 0.0
     cfg.vicreg_var_coeff = 25.0
@@ -101,7 +104,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.grad_clip_norm = 1.0
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "reduce-overhead"
-    cfg.representation_regularizer = "none"
+    cfg.representation_regularizer = "sigreg-enc"
     cfg.msg_probe_every_n_steps = 0.2
     cfg.msg_probe_num_epochs = 20
     cfg.msg_probe_learning_rate = 1e-3
@@ -114,7 +117,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_covariance_dim = 32
     cfg.msg_probe_pma_num_seeds = 32
     cfg.msg_probe_pma_num_heads = cfg.encoder_num_heads
-    cfg.probe_dataset = "nist20"
+    cfg.probe_dataset = "nist-full"
     cfg.msg_probe_tune_metric = "msg_probe/test/auc_maccs_mean"
     cfg.msg_probe_tune_param_space = [
         {

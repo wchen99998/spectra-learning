@@ -58,6 +58,7 @@ def _make_pipeline_prepended_batch(
     context_mask[:, 0] = True  # precursor always in context
     context_mask[:, 1:3] = True
     target_masks = torch.zeros(batch_size, num_targets, N, dtype=torch.bool)
+    target_masks[:, :, 0] = True
     for target_idx in range(num_targets):
         target_masks[:, target_idx, 3 + target_idx] = True
     return {
@@ -193,7 +194,7 @@ class BlockJEPATests(unittest.TestCase):
     def test_sigreg_on_encoder_output_contributes_to_loss(self):
         model = self._build_model(
             masked_token_loss_weight=1.0,
-            representation_regularizer="sigreg",
+            representation_regularizer="sigreg-enc",
             sigreg_lambda=0.02,
         )
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
@@ -209,6 +210,37 @@ class BlockJEPATests(unittest.TestCase):
                 + metrics["cls_embedding_term"]
                 + metrics["sigreg_term"],
             )
+        )
+
+    def test_sigreg_on_predictor_outputs_uses_masked_predictions(self):
+        model = self._build_model(
+            representation_regularizer="sigreg-pred",
+            sigreg_lambda=0.02,
+            predictor_dim=24,
+        )
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+        captured: dict[str, torch.Tensor] = {}
+
+        def fake_sigreg_forward(
+            proj: torch.Tensor,
+            valid_mask: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            captured["proj"] = proj.detach().clone()
+            captured["valid_mask"] = valid_mask.detach().clone()
+            return proj.new_zeros(())
+
+        with mock.patch.object(model.sigreg, "forward", side_effect=fake_sigreg_forward):
+            model.forward_augmented(batch)
+
+        self.assertIn("proj", captured)
+        self.assertEqual(
+            captured["proj"].shape,
+            (*batch["target_masks"].shape, model.jepa_target_dim),
+        )
+        self.assertNotEqual(captured["proj"].shape[-1], model.predictor_dim)
+        torch.testing.assert_close(
+            captured["valid_mask"],
+            batch["target_masks"].float(),
         )
 
     def test_vicreg_on_visible_context_contributes_to_loss(self):
@@ -636,7 +668,7 @@ class PrecursorTokenTests(unittest.TestCase):
 
     def test_sigreg_precursor_scale_weights_precursor_slot(self):
         model = self._build_model(
-            representation_regularizer="sigreg",
+            representation_regularizer="sigreg-enc",
             sigreg_lambda=0.02,
             sigreg_precursor_scale=4.0,
         )
@@ -666,6 +698,35 @@ class PrecursorTokenTests(unittest.TestCase):
             batch["context_mask"][:, 1:].float(),
         )
 
+    def test_sigreg_pred_always_targets_precursor_slot(self):
+        model = self._build_model(
+            representation_regularizer="sigreg-pred",
+            sigreg_lambda=0.02,
+        )
+        batch = _make_pipeline_prepended_batch(
+            num_peaks=6,
+            num_targets=model.jepa_num_target_blocks,
+        )
+        batch["target_masks"][:, :, 0] = False
+        captured: dict[str, torch.Tensor] = {}
+
+        def fake_sigreg_forward(
+            proj: torch.Tensor,
+            valid_mask: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            captured["valid_mask"] = valid_mask.detach().clone()
+            return proj.new_zeros(())
+
+        with mock.patch.object(model.sigreg, "forward", side_effect=fake_sigreg_forward):
+            model.forward_augmented(batch)
+
+        self.assertIn("valid_mask", captured)
+        self.assertTrue(captured["valid_mask"][:, :, 0].bool().all())
+        torch.testing.assert_close(
+            captured["valid_mask"][:, :, 1:],
+            batch["target_masks"][:, :, 1:].float(),
+        )
+
     def test_prepend_precursor_token_shapes(self):
         B, N, K = 4, 6, 2
         peak_mz = torch.rand(B, N)
@@ -688,10 +749,10 @@ class PrecursorTokenTests(unittest.TestCase):
         self.assertEqual(result["peak_valid_mask"].shape, (B, N + 1))
         self.assertEqual(result["context_mask"].shape, (B, N + 1))
         self.assertEqual(result["target_masks"].shape, (B, K, N + 1))
-        # Precursor token: valid=True, context=True, target=False
+        # Precursor token: valid=True, context=True, target=True
         self.assertTrue(result["peak_valid_mask"][:, 0].all())
         self.assertTrue(result["context_mask"][:, 0].all())
-        self.assertFalse(result["target_masks"][:, :, 0].any())
+        self.assertTrue(result["target_masks"][:, :, 0].all())
         # Precursor intensity sentinel
         torch.testing.assert_close(
             result["peak_intensity"][:, 0],
@@ -738,8 +799,8 @@ class PrependPrecursorTokenTests(unittest.TestCase):
         self.assertTrue(out["peak_valid_mask"][:, 0].numpy().all())
         # Context at position 0
         self.assertTrue(out["context_mask"][:, 0].numpy().all())
-        # Not a target at position 0
-        self.assertFalse(out["target_masks"][:, :, 0].numpy().any())
+        # Target at position 0
+        self.assertTrue(out["target_masks"][:, :, 0].numpy().all())
         # Precursor mz at position 0
         self.assertTrue(
             (out["peak_mz"][:, 0].numpy() == batch["precursor_mz"].numpy()).all()
