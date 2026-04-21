@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
 import torch
@@ -30,8 +31,10 @@ from utils.msg_probe import (
     msg_probe_metric_higher_is_better,
     iter_massspec_probe,
     probe_steps_per_epoch,
+    resolve_msg_probe_num_repeats,
     resolve_msg_probe_sample_limits,
     resolve_msg_probe_select_metric,
+    run_msg_probe,
 )
 
 
@@ -744,6 +747,90 @@ class ProbeConfigTests(unittest.TestCase):
         self.assertEqual(train_samples, 4000)
         self.assertEqual(test_samples, 1000)
         self.assertTrue(randomize_test_subset)
+
+    def test_nist_full_probe_repeat_defaults_to_one(self):
+        cfg = config_dict.ConfigDict()
+        cfg.probe_dataset = "nist-full"
+
+        self.assertEqual(resolve_msg_probe_num_repeats(cfg), 1)
+
+    def test_nist_full_probe_repeat_override_is_used(self):
+        cfg = config_dict.ConfigDict()
+        cfg.probe_dataset = "nist-full"
+        cfg.nist_full_probe_num_repeats = 3
+
+        self.assertEqual(resolve_msg_probe_num_repeats(cfg), 3)
+
+
+class RepeatedProbeTests(unittest.TestCase):
+    @staticmethod
+    def _aliased_msg_probe_metrics(*, auc: float, epoch: float) -> dict[str, float]:
+        return {
+            "msg_probe/mean/test/auc_maccs_mean": auc,
+            "msg_probe/mean/epoch": epoch,
+            "msg_probe/test/auc_maccs_mean": auc,
+            "msg_probe_epoch": epoch,
+        }
+
+    def test_run_msg_probe_averages_best_metrics_and_epoch_curves(self):
+        cfg = config_dict.ConfigDict()
+        cfg.seed = 7
+        cfg.probe_dataset = "nist-full"
+        cfg.nist_full_probe_num_repeats = 2
+
+        repeat_payloads = (
+            (
+                self._aliased_msg_probe_metrics(auc=0.6, epoch=2.0),
+                [
+                    self._aliased_msg_probe_metrics(auc=0.4, epoch=1.0),
+                    self._aliased_msg_probe_metrics(auc=0.6, epoch=2.0),
+                ],
+            ),
+            (
+                self._aliased_msg_probe_metrics(auc=0.8, epoch=4.0),
+                [
+                    self._aliased_msg_probe_metrics(auc=0.5, epoch=1.0),
+                    self._aliased_msg_probe_metrics(auc=0.9, epoch=2.0),
+                ],
+            ),
+        )
+
+        def fake_run_once(
+            *,
+            config,
+            model,
+            device,
+            on_epoch_end,
+            repeat_index,
+        ):
+            metrics, curve = repeat_payloads[repeat_index]
+            for epoch_metrics in curve:
+                if on_epoch_end is not None:
+                    on_epoch_end(dict(epoch_metrics))
+            return dict(metrics)
+
+        curve: list[dict[str, float]] = []
+        with mock.patch(
+            "utils.msg_probe._run_msg_probe_once",
+            side_effect=fake_run_once,
+        ):
+            metrics = run_msg_probe(
+                config=cfg,
+                model=mock.sentinel.model,
+                device=torch.device("cpu"),
+                on_epoch_end=curve.append,
+            )
+
+        self.assertAlmostEqual(metrics["msg_probe/mean/test/auc_maccs_mean"], 0.7)
+        self.assertAlmostEqual(metrics["msg_probe/test/auc_maccs_mean"], 0.7)
+        self.assertAlmostEqual(metrics["msg_probe/mean/epoch"], 3.0)
+        self.assertAlmostEqual(metrics["msg_probe_epoch"], 3.0)
+        self.assertAlmostEqual(metrics["msg_probe/repeats"], 2.0)
+        self.assertEqual(len(curve), 2)
+        self.assertAlmostEqual(curve[0]["msg_probe/mean/test/auc_maccs_mean"], 0.45)
+        self.assertAlmostEqual(curve[0]["msg_probe_epoch"], 1.0)
+        self.assertAlmostEqual(curve[1]["msg_probe/mean/test/auc_maccs_mean"], 0.75)
+        self.assertAlmostEqual(curve[1]["msg_probe_epoch"], 2.0)
 
 
 class ProbePrecursorTokenTests(unittest.TestCase):

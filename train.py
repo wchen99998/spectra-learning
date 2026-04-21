@@ -550,10 +550,10 @@ def train_and_evaluate(
                     if epoch_key not in probe_metrics:
                         continue
                     logging.info(
-                        "step=%d msg_probe[%s] best_epoch=%d (test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f maccs_bits=%d)",
+                        "step=%d msg_probe[%s] best_epoch=%.2f (test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f maccs_bits=%d)",
                         global_step,
                         variant,
-                        int(probe_metrics[epoch_key]),
+                        probe_metrics[epoch_key],
                         probe_metrics[f"{variant_prefix}/test/r2_mean_wo_num_rings"],
                         probe_metrics[f"{variant_prefix}/test/mae_num_rings"],
                         probe_metrics[f"{variant_prefix}/test/auc_maccs_mean"],

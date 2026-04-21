@@ -76,6 +76,16 @@ def resolve_msg_probe_sample_limits(
     return max_train_samples, max_test_samples, randomize_test_subset
 
 
+def resolve_msg_probe_num_repeats(
+    config: config_dict.ConfigDict,
+) -> int:
+    probe_dataset = str(config.get("probe_dataset", "massspec"))
+    raw_repeats = config.get("msg_probe_num_repeats", None)
+    if raw_repeats is None and probe_dataset == "nist-full":
+        raw_repeats = config.get("nist_full_probe_num_repeats", 1)
+    return int(raw_repeats) if raw_repeats is not None else 1
+
+
 class MsgLinearProbe(torch.nn.Module):
     def __init__(
         self,
@@ -587,6 +597,59 @@ def _with_mean_probe_aliases(metrics: dict[str, float]) -> dict[str, float]:
     return aliased
 
 
+def _average_metric_dicts(
+    metric_dicts: list[dict[str, float]],
+) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    for metrics in metric_dicts:
+        for key, value in metrics.items():
+            totals[key] = totals.get(key, 0.0) + float(value)
+            counts[key] = counts.get(key, 0) + 1
+    return {key: totals[key] / counts[key] for key in totals}
+
+
+def _run_repeated_probe(
+    *,
+    repeat_count: int,
+    metric_prefix: str,
+    run_once: Callable[
+        [int, Callable[[dict[str, float]], None] | None],
+        dict[str, float],
+    ],
+    on_epoch_end: Callable[[dict[str, float]], None] | None = None,
+) -> dict[str, float]:
+    if repeat_count == 1:
+        metrics = dict(run_once(0, on_epoch_end))
+        if metrics:
+            metrics[f"{metric_prefix}/repeats"] = 1.0
+        return metrics
+
+    repeat_metrics: list[dict[str, float]] = []
+    repeat_curves: list[list[dict[str, float]]] = []
+    for repeat_idx in range(repeat_count):
+        log.info("%s repeat %d/%d", metric_prefix, repeat_idx + 1, repeat_count)
+        repeat_curve: list[dict[str, float]] = []
+        metrics = run_once(repeat_idx, repeat_curve.append)
+        if metrics:
+            repeat_metrics.append(metrics)
+        if repeat_curve:
+            repeat_curves.append(repeat_curve)
+
+    averaged_metrics = _average_metric_dicts(repeat_metrics)
+    if averaged_metrics:
+        averaged_metrics[f"{metric_prefix}/repeats"] = float(repeat_count)
+    if on_epoch_end is not None and repeat_curves:
+        num_epochs = max(len(curve) for curve in repeat_curves)
+        for epoch_idx in range(num_epochs):
+            epoch_metrics = _average_metric_dicts(
+                [curve[epoch_idx] for curve in repeat_curves if epoch_idx < len(curve)]
+            )
+            if epoch_metrics:
+                on_epoch_end(epoch_metrics)
+    return averaged_metrics
+
+
 def _score_epoch_state(
     *,
     prefix: str,
@@ -647,12 +710,13 @@ def _score_epoch_state(
     return metrics
 
 
-def run_msg_probe(
+def _run_msg_probe_once(
     *,
     config: config_dict.ConfigDict,
     model: PeakSetSIGReg,
     device: torch.device,
     on_epoch_end: Callable[[dict[str, float]], None] | None = None,
+    repeat_index: int = 0,
 ) -> dict[str, float]:
     num_probe_epochs = int(config.get("msg_probe_num_epochs", 5))
     probe_lr = float(config.get("msg_probe_learning_rate", 1e-3))
@@ -676,8 +740,9 @@ def run_msg_probe(
         peak_embeddings, _ = PeakSetEncoder.split_peak_and_cls(embeddings)
         return peak_embeddings
 
-    train_seed_base = int(config.seed) + 1_100_000
-    test_seed_base = int(config.seed) + 1_200_000
+    seed_offset = 100_000 * int(repeat_index)
+    train_seed_base = int(config.seed) + 1_100_000 + seed_offset
+    test_seed_base = int(config.seed) + 1_200_000 + seed_offset
     train_targets = _collect_split_targets(
         probe_data=probe_data,
         split="massspec_train",
@@ -879,11 +944,34 @@ def run_msg_probe(
     return _with_mean_probe_aliases(best_metrics)
 
 
-def run_dreams_probe(
+def run_msg_probe(
+    *,
+    config: config_dict.ConfigDict,
+    model: PeakSetSIGReg,
+    device: torch.device,
+    on_epoch_end: Callable[[dict[str, float]], None] | None = None,
+) -> dict[str, float]:
+    metrics = _run_repeated_probe(
+        repeat_count=resolve_msg_probe_num_repeats(config),
+        metric_prefix="msg_probe",
+        run_once=lambda repeat_index, repeat_on_epoch_end: _run_msg_probe_once(
+            config=config,
+            model=model,
+            device=device,
+            on_epoch_end=repeat_on_epoch_end,
+            repeat_index=repeat_index,
+        ),
+        on_epoch_end=on_epoch_end,
+    )
+    return _with_mean_probe_aliases(metrics)
+
+
+def _run_dreams_probe_once(
     *,
     config: config_dict.ConfigDict,
     device: torch.device,
     on_epoch_end: Callable[[dict[str, float]], None] | None = None,
+    repeat_index: int = 0,
 ) -> dict[str, float]:
     num_probe_epochs = int(config.get("msg_probe_num_epochs", 5))
     probe_lr = float(config.get("msg_probe_learning_rate", 1e-3))
@@ -900,8 +988,9 @@ def run_dreams_probe(
         log.warning("No DreaMS embeddings in probe data; skipping Dreams probe")
         return {}
 
-    train_seed_base = int(config.seed) + 1_100_000
-    test_seed_base = int(config.seed) + 1_200_000
+    seed_offset = 100_000 * int(repeat_index)
+    train_seed_base = int(config.seed) + 1_100_000 + seed_offset
+    test_seed_base = int(config.seed) + 1_200_000 + seed_offset
     train_targets = _collect_split_targets(
         probe_data=probe_data,
         split="massspec_train",
@@ -1064,3 +1153,22 @@ def run_dreams_probe(
             best_metrics["dreams_probe/test/recall_maccs_mean"],
         )
     return best_metrics
+
+
+def run_dreams_probe(
+    *,
+    config: config_dict.ConfigDict,
+    device: torch.device,
+    on_epoch_end: Callable[[dict[str, float]], None] | None = None,
+) -> dict[str, float]:
+    return _run_repeated_probe(
+        repeat_count=resolve_msg_probe_num_repeats(config),
+        metric_prefix="dreams_probe",
+        run_once=lambda repeat_index, repeat_on_epoch_end: _run_dreams_probe_once(
+            config=config,
+            device=device,
+            on_epoch_end=repeat_on_epoch_end,
+            repeat_index=repeat_index,
+        ),
+        on_epoch_end=on_epoch_end,
+    )

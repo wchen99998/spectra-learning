@@ -19,6 +19,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.temporal_data_dir = "data/gems_grouped"
     cfg.nist_full_probe_repo_id = "cjim8889/hr_msms_nist_probe_prepared"
     cfg.nist_full_probe_revision = "main"
+    cfg.nist_full_probe_train_samples = 4_000
+    cfg.nist_full_probe_test_samples = 1_000
+    cfg.nist_full_probe_num_repeats = 3
     cfg.batch_size = 256
     cfg.max_precursor_mz = 1000.0
     cfg.min_peak_intensity = 0.0001

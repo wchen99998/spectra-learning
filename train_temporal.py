@@ -612,10 +612,10 @@ def train_temporal(
                 if epoch_key not in probe_metrics:
                     continue
                 logging.info(
-                    "step=%d msg_probe[%s] best_epoch=%d (test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f)",
+                    "step=%d msg_probe[%s] best_epoch=%.2f (test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f)",
                     global_step,
                     variant,
-                    int(probe_metrics[epoch_key]),
+                    probe_metrics[epoch_key],
                     probe_metrics[f"{variant_prefix}/test/r2_mean_wo_num_rings"],
                     probe_metrics[f"{variant_prefix}/test/mae_num_rings"],
                     probe_metrics[f"{variant_prefix}/test/auc_maccs_mean"],

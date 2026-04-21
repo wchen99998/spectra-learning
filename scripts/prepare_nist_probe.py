@@ -11,6 +11,7 @@ Enable it at train time by setting::
     cfg.nist_full_probe_revision = "main"
     cfg.nist_full_probe_train_samples = 4000
     cfg.nist_full_probe_test_samples = 1000
+    cfg.nist_full_probe_num_repeats = 3
 """
 
 from __future__ import annotations

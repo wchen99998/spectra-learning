@@ -9,6 +9,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.gems_native_repo_id = "cjim8889/gems-a10-native"
     cfg.nist_full_probe_repo_id = "cjim8889/hr_msms_nist_probe_prepared"
     cfg.nist_full_probe_revision = "main"
+    cfg.nist_full_probe_train_samples = 4_000
+    cfg.nist_full_probe_test_samples = 1_000
+    cfg.nist_full_probe_num_repeats = 3
     cfg.batch_size = 256
     cfg.shuffle_buffer = 1_000_000
     cfg.drop_remainder = True
