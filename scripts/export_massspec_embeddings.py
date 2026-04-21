@@ -26,8 +26,19 @@ def _inverse_vocab(vocab: dict[str, int]) -> dict[int, str]:
     return {int(idx): str(token) for token, idx in vocab.items()}
 
 
+def _tensor_to_arrow(value: torch.Tensor) -> pa.Array:
+    value = value.detach().cpu().contiguous()
+    if value.ndim == 1:
+        return pa.array(value.numpy())
+    if value.ndim == 2:
+        return pa.FixedSizeListArray.from_arrays(
+            pa.array(value.reshape(-1).numpy()), int(value.shape[1])
+        )
+    return pa.array(value.numpy().tolist())
+
+
 def _batch_to_table(
-    batch: dict[str, torch.Tensor],
+    batch: dict[str, object],
     *,
     encoder_embedding: torch.Tensor,
     adduct_vocab: dict[int, str],
@@ -35,8 +46,10 @@ def _batch_to_table(
 ) -> pa.Table:
     columns: dict[str, pa.Array] = {}
     for key, value in batch.items():
-        values = value.detach().cpu().numpy()
-        columns[key] = pa.array(values.tolist())
+        if isinstance(value, torch.Tensor):
+            columns[key] = _tensor_to_arrow(value)
+        else:
+            columns[key] = pa.array(list(value))
 
     adduct_ids = batch["adduct_id"].detach().cpu().tolist()
     instrument_ids = batch["instrument_type_id"].detach().cpu().tolist()
@@ -44,8 +57,8 @@ def _batch_to_table(
     columns["instrument_type"] = pa.array(
         [instrument_type_vocab[int(idx)] for idx in instrument_ids]
     )
-    columns["encoder_embedding"] = pa.array(
-        encoder_embedding.detach().cpu().to(torch.float32).tolist()
+    columns["encoder_embedding"] = _tensor_to_arrow(
+        encoder_embedding.detach().cpu().to(torch.float32)
     )
     return pa.table(columns)
 
@@ -67,15 +80,22 @@ def _build_massspec_probe_dataset_serial(
     )
 
 
+def _normalize_split(split: str) -> str:
+    return {
+        "massspec_train": "train",
+        "massspec_val": "val",
+        "massspec_test": "test",
+        "train": "train",
+        "val": "val",
+        "test": "test",
+    }[split]
+
+
 def _iter_split_smiles(
     config: config_dict.ConfigDict,
     split: str,
 ):
-    fold = {
-        "massspec_train": "train",
-        "massspec_val": "val",
-        "massspec_test": "test",
-    }[split]
+    fold = _normalize_split(split)
     max_precursor_mz = float(config.get("max_precursor_mz", 1000.0))
     tsv_path = download_massspec_tsv(
         Path(config.get("artifact_dir", "data/gems_artifacts"))
@@ -90,9 +110,9 @@ def _iter_split_smiles(
                 yield row["smiles"]
 
 
-def _encode_split(
+def _encode_splits(
     *,
-    split: str,
+    splits: list[str],
     model: PeakSetSIGReg,
     config: config_dict.ConfigDict,
     massspec_data: MassSpecProbeData,
@@ -104,13 +124,7 @@ def _encode_split(
     config_path: str,
     checkpoint_path: str,
 ) -> int:
-    dataset = _build_massspec_probe_dataset_serial(
-        massspec_data,
-        split,
-        seed=seed,
-        peak_ordering=peak_ordering,
-    )
-    smiles_iter = _iter_split_smiles(config, split)
+    probe_dataset = str(config.get("probe_dataset", "massspec"))
     adduct_vocab = _inverse_vocab(massspec_data.info["massspec_adduct_vocab"])
     instrument_type_vocab = _inverse_vocab(
         massspec_data.info["massspec_instrument_type_vocab"]
@@ -118,58 +132,76 @@ def _encode_split(
 
     writer: pq.ParquetWriter | None = None
     total_rows = 0
-    for batch in dataset:
-        batch = {
-            key: value.to(device) if isinstance(value, torch.Tensor) else value
-            for key, value in batch.items()
-        }
-
-        with torch.no_grad():
-            peak_mz = batch["peak_mz"]
-            peak_intensity = batch["peak_intensity"]
-            peak_valid_mask = batch["peak_valid_mask"]
-            embeddings = model.encoder(
-                peak_mz,
-                peak_intensity,
-                valid_mask=peak_valid_mask,
-            )
-            pooled_encoder = model.pool(embeddings, peak_valid_mask)
-
-        table = _batch_to_table(
-            batch,
-            encoder_embedding=pooled_encoder,
-            adduct_vocab=adduct_vocab,
-            instrument_type_vocab=instrument_type_vocab,
+    for split in splits:
+        dataset = _build_massspec_probe_dataset_serial(
+            massspec_data,
+            split,
+            seed=seed,
+            peak_ordering=peak_ordering,
         )
-        table = table.append_column(
-            "smiles",
-            pa.array([next(smiles_iter) for _ in range(table.num_rows)]),
+        split_label = _normalize_split(split)
+        smiles_iter = (
+            _iter_split_smiles(config, split)
+            if probe_dataset == "massspec"
+            else None
         )
-        if writer is None:
-            schema_metadata = {
-                "config_path": config_path,
-                "checkpoint_path": checkpoint_path,
-                "split": split,
-                "peak_ordering": peak_ordering,
-                "seed": str(seed),
-                "massspec_adduct_vocab": json.dumps(
-                    massspec_data.info["massspec_adduct_vocab"]
-                ),
-                "massspec_instrument_type_vocab": json.dumps(
-                    massspec_data.info["massspec_instrument_type_vocab"]
-                ),
+        for batch in dataset:
+            batch = {
+                key: value.to(device) if isinstance(value, torch.Tensor) else value
+                for key, value in batch.items()
             }
-            schema = table.schema.with_metadata(
-                {
-                    key.encode("utf-8"): value.encode("utf-8")
-                    for key, value in schema_metadata.items()
+
+            with torch.no_grad():
+                peak_mz = batch["peak_mz"]
+                peak_intensity = batch["peak_intensity"]
+                peak_valid_mask = batch["peak_valid_mask"]
+                embeddings = model.encoder(
+                    peak_mz,
+                    peak_intensity,
+                    valid_mask=peak_valid_mask,
+                )
+                pooled_encoder = model.pool(embeddings, peak_valid_mask)
+
+            table = _batch_to_table(
+                batch,
+                encoder_embedding=pooled_encoder,
+                adduct_vocab=adduct_vocab,
+                instrument_type_vocab=instrument_type_vocab,
+            )
+            if "smiles" not in table.column_names and smiles_iter is not None:
+                table = table.append_column(
+                    "smiles",
+                    pa.array([next(smiles_iter) for _ in range(table.num_rows)]),
+                )
+            table = table.append_column(
+                "split", pa.array([split_label] * table.num_rows)
+            )
+            if writer is None:
+                schema_metadata = {
+                    "config_path": config_path,
+                    "checkpoint_path": checkpoint_path,
+                    "probe_dataset": probe_dataset,
+                    "splits": json.dumps([_normalize_split(name) for name in splits]),
+                    "peak_ordering": peak_ordering,
+                    "seed": str(seed),
+                    "massspec_adduct_vocab": json.dumps(
+                        massspec_data.info["massspec_adduct_vocab"]
+                    ),
+                    "massspec_instrument_type_vocab": json.dumps(
+                        massspec_data.info["massspec_instrument_type_vocab"]
+                    ),
                 }
-            )
-            writer = pq.ParquetWriter(
-                output_path, schema=schema, compression=compression
-            )
-        writer.write_table(table.cast(writer.schema))
-        total_rows += table.num_rows
+                schema = table.schema.with_metadata(
+                    {
+                        key.encode("utf-8"): value.encode("utf-8")
+                        for key, value in schema_metadata.items()
+                    }
+                )
+                writer = pq.ParquetWriter(
+                    output_path, schema=schema, compression=compression
+                )
+            writer.write_table(table.cast(writer.schema))
+            total_rows += table.num_rows
 
     if writer is not None:
         writer.close()
@@ -182,14 +214,18 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--config", required=True, help="Path to config file.")
     parser.add_argument("--checkpoint", required=True, help="Path to model checkpoint.")
-    parser.add_argument(
-        "--output_dir", required=True, help="Directory for parquet outputs."
+    output_group = parser.add_mutually_exclusive_group(required=True)
+    output_group.add_argument(
+        "--output_dir", help="Directory for per-split parquet outputs."
+    )
+    output_group.add_argument(
+        "--output_path", help="Single parquet file for one or more splits."
     )
     parser.add_argument(
         "--split",
         default="all",
-        choices=("all", "massspec_train", "massspec_val", "massspec_test"),
-        help="MassSpec split to export.",
+        choices=("all", "train", "val", "test", "massspec_train", "massspec_val", "massspec_test"),
+        help="Probe split to export.",
     )
     parser.add_argument(
         "--batch_size",
@@ -244,18 +280,41 @@ def main() -> None:
         else str(args.peak_ordering)
     )
 
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
+    probe_dataset = str(config.get("probe_dataset", "massspec"))
     if args.split == "all":
-        splits = ["massspec_train", "massspec_val", "massspec_test"]
+        splits = (
+            ["massspec_train", "massspec_val", "massspec_test"]
+            if probe_dataset == "massspec"
+            else ["train", "val", "test"]
+        )
     else:
         splits = [args.split]
 
+    if args.output_path is not None:
+        output_path = Path(args.output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        num_rows = _encode_splits(
+            splits=splits,
+            model=model,
+            config=config,
+            massspec_data=massspec_data,
+            output_path=output_path,
+            seed=seed,
+            peak_ordering=peak_ordering,
+            device=device,
+            compression=args.compression,
+            config_path=str(Path(args.config).resolve()),
+            checkpoint_path=str(Path(args.checkpoint).resolve()),
+        )
+        logging.info("Wrote %d rows to %s", num_rows, output_path)
+        return
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     for split in splits:
         output_path = output_dir / f"{split}.parquet"
-        num_rows = _encode_split(
-            split=split,
+        num_rows = _encode_splits(
+            splits=[split],
             model=model,
             config=config,
             massspec_data=massspec_data,
