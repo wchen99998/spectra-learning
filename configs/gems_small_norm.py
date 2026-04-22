@@ -25,12 +25,12 @@ def get_config() -> config_dict.ConfigDict:
     # Model
 
 
-    cfg.num_peaks = 63
+    cfg.num_peaks = 128
     cfg.model_dim = 256
-    cfg.encoder_num_layers = 8
+    cfg.encoder_num_layers = 12
     cfg.encoder_num_heads = 8
     cfg.encoder_num_kv_heads = 8
-    cfg.encoder_num_register_tokens = 4
+    cfg.encoder_num_register_tokens = 2
     cfg.encoder_apply_final_norm = True
     cfg.encoder_qk_norm = False
     cfg.encoder_fourier_strategy = "log_spaced"
@@ -44,7 +44,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 512
     cfg.sigreg_num_slices = 256
-    cfg.sigreg_lambda = 0.02
+    cfg.sigreg_lambda = 0.003
     cfg.sigreg_precursor_scale = 1.0
     cfg.vicreg_lambda = 0.2
     cfg.vicreg_inv_coeff = 0.0
@@ -53,16 +53,16 @@ def get_config() -> config_dict.ConfigDict:
     cfg.vicreg_variance_target = 1.0
     cfg.vicreg_eps = 1e-4
 
-    cfg.jepa_num_target_blocks = 2
+    cfg.jepa_num_target_blocks = 3
     cfg.encoder_use_position_embedding = False
-    cfg.jepa_context_fraction = 0.45
-    cfg.jepa_context_fraction_range = (0.35, 0.55)
-    cfg.jepa_target_fraction = 0.25
+    cfg.jepa_context_fraction = 0.15
+    cfg.jepa_context_fraction_range = (0.1, 0.25)
+    cfg.jepa_target_fraction = 0.3
     cfg.jepa_target_fraction_range = (0.15, 0.35)
     cfg.jepa_block_min_len = 1
     cfg.jepa_mask_strategy = "all"
-    cfg.jepa_mask_lengths = (2, 4, 8, 12)
-    cfg.jepa_mask_round_from = 2
+    cfg.jepa_mask_lengths = (2, 4, 8, 12, 16)
+    cfg.jepa_mask_round_from = 3
     cfg.norm_type = "layernorm"
 
     # Predictor
@@ -80,12 +80,12 @@ def get_config() -> config_dict.ConfigDict:
     cfg.warmup_steps = 10_000
     cfg.min_learning_rate = 3e-5
     cfg.b2 = 0.999
-    cfg.weight_decay = 0.1
+    cfg.weight_decay = 0.05
     cfg.optimizer = "muon"
     cfg.device_prefetch_size = 8
     cfg.optimizer_capturable = True
     cfg.optimizer_fused = True
-    cfg.log_every_n_steps = 100
+    cfg.log_every_n_steps = 250
     cfg.checkpoint_every_steps = 25_000
     cfg.dataloader_num_workers = 8
     cfg.dataloader_prefetch_factor = 2
@@ -95,17 +95,17 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_token_loss_weight = 1.0
     cfg.masked_token_loss_type = "l2"
     cfg.jepa_target_normalization = "zscore"
-    cfg.jepa_target_layers = [3, 5, 8]
-    cfg.use_ema_teacher_target = True
-    cfg.teacher_ema_decay = 0.999
-    cfg.teacher_ema_decay_start = 0.9
+    cfg.jepa_target_layers = [3, 5, 8, 12]
+    cfg.use_ema_teacher_target = False
+    cfg.teacher_ema_decay = 0.95
+    cfg.teacher_ema_decay_start = 0.8
     cfg.teacher_ema_decay_warmup_steps = 250_000
     cfg.teacher_ema_update_every = 1
     cfg.grad_clip_norm = 1.0
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "reduce-overhead"
-    cfg.representation_regularizer = "sigreg-enc"
-    cfg.msg_probe_every_n_steps = 0.2
+    cfg.representation_regularizer = "slot-sigreg-enc"
+    cfg.msg_probe_every_n_steps = 0.25
     cfg.msg_probe_num_epochs = 20
     cfg.msg_probe_learning_rate = 1e-3
     cfg.msg_probe_weight_decay = 0.0
