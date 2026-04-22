@@ -1,12 +1,10 @@
 import math
-from contextlib import nullcontext
-
 import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 
-from models.losses import SIGReg, VICReg
+from models.losses import SIGReg, SlotwiseSIGReg, VICReg
 from models.peak_features import PeakFeatureEmbedder
 from networks import transformer_torch
 from networks.transformer_torch import _build_norm, create_visible_attention_mask
@@ -459,11 +457,15 @@ class PeakSetSIGReg(nn.Module):
         self.representation_regularizer = str(representation_regularizer).lower()
         if self.representation_regularizer == "sigreg":
             self.representation_regularizer = "sigreg-enc"
+        if self.representation_regularizer == "slog-sigreg-pred":
+            self.representation_regularizer = "slot-sigreg-pred"
         if self.representation_regularizer not in (
             "none",
             "",
             "sigreg-enc",
             "sigreg-pred",
+            "slot-sigreg-enc",
+            "slot-sigreg-pred",
             "vicreg",
         ):
             raise ValueError(
@@ -595,7 +597,13 @@ class PeakSetSIGReg(nn.Module):
         self.masked_latent_readout = nn.Linear(self.predictor_dim, self.jepa_target_dim)
         nn.init.xavier_normal_(self.masked_latent_readout.weight)
         nn.init.zeros_(self.masked_latent_readout.bias)
-        self.sigreg = SIGReg(num_slices=int(sigreg_num_slices))
+        sigreg_cls = (
+            SlotwiseSIGReg
+            if self.representation_regularizer
+            in ("slot-sigreg-enc", "slot-sigreg-pred")
+            else SIGReg
+        )
+        self.sigreg = sigreg_cls(num_slices=int(sigreg_num_slices))
         self.vicreg = VICReg(
             inv_coeff=float(vicreg_inv_coeff),
             var_coeff=float(vicreg_var_coeff),
@@ -768,12 +776,12 @@ class PeakSetSIGReg(nn.Module):
         peak_intensity: torch.Tensor,
         peak_valid_mask: torch.Tensor,
     ) -> torch.Tensor:
-        # Autocast with the same dtype as the caller (inherits from outer
-        # autocast context when called inside forward_augmented; falls back
-        # to bf16 when called standalone, e.g. from evaluation code).
-        amp_dtype = torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled("cuda") else torch.bfloat16
-        grad_context = torch.no_grad() if self.teacher_encoder is not None else nullcontext()
-        with grad_context, torch.autocast("cuda", dtype=amp_dtype):
+        amp_dtype = (
+            torch.get_autocast_dtype("cuda")
+            if torch.is_autocast_enabled("cuda")
+            else torch.bfloat16
+        )
+        with torch.no_grad(), torch.autocast("cuda", dtype=amp_dtype):
             teacher = self._teacher_encoder_module()
             teacher_peak_outputs = teacher.forward_peak_block_outputs(
                 peak_mz,
@@ -798,10 +806,7 @@ class PeakSetSIGReg(nn.Module):
             if torch.is_autocast_enabled("cuda")
             else torch.bfloat16
         )
-        grad_context = (
-            torch.no_grad() if self.teacher_encoder is not None else nullcontext()
-        )
-        with grad_context, torch.autocast("cuda", dtype=amp_dtype):
+        with torch.no_grad(), torch.autocast("cuda", dtype=amp_dtype):
             teacher = self._teacher_encoder_module()
             teacher_encoded = teacher(
                 peak_mz,
@@ -861,11 +866,11 @@ class PeakSetSIGReg(nn.Module):
             "peak_valid_mask": torch.cat([pre_valid, peak_valid_mask], dim=1),
         }
         if context_mask is not None:
-            pre_ctx = torch.ones(B, 1, device=device, dtype=torch.bool)
+            pre_ctx = torch.zeros(B, 1, device=device, dtype=torch.bool)
             result["context_mask"] = torch.cat([pre_ctx, context_mask], dim=1)
         if target_masks is not None:
             K = target_masks.shape[1]
-            pre_tgt = torch.ones(B, K, 1, device=device, dtype=torch.bool)
+            pre_tgt = torch.zeros(B, K, 1, device=device, dtype=torch.bool)
             result["target_masks"] = torch.cat([pre_tgt, target_masks], dim=2)
         return result
 
@@ -901,8 +906,6 @@ class PeakSetSIGReg(nn.Module):
         peak_valid_mask = augmented_batch["peak_valid_mask"]
         context_mask = augmented_batch["context_mask"] & peak_valid_mask
         target_masks = augmented_batch["target_masks"] & peak_valid_mask.unsqueeze(1)
-        if self.use_precursor_token:
-            target_masks[:, :, 0] = peak_valid_mask[:, :1]
         B, N = peak_mz.shape
         K = self.jepa_num_target_blocks
         context_encoded = self.encoder(
@@ -950,11 +953,11 @@ class PeakSetSIGReg(nn.Module):
         local_global_loss = reg_num / reg_den
         jepa_term = self.masked_token_loss_weight * local_global_loss
         use_sigreg_enc = (
-            self.representation_regularizer == "sigreg-enc"
+            self.representation_regularizer in ("sigreg-enc", "slot-sigreg-enc")
             and self.sigreg_lambda > 0
         )
         use_sigreg_pred = (
-            self.representation_regularizer == "sigreg-pred"
+            self.representation_regularizer in ("sigreg-pred", "slot-sigreg-pred")
             and self.sigreg_lambda > 0
         )
         use_vicreg = self.representation_regularizer == "vicreg" and self.vicreg_lambda > 0

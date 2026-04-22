@@ -411,7 +411,7 @@ def _prepend_precursor_token_torch(
     if "context_mask" in batch:
         result["context_mask"] = torch.cat(
             [
-                torch.ones((batch_size, 1), dtype=torch.bool, device=device),
+                torch.zeros((batch_size, 1), dtype=torch.bool, device=device),
                 batch["context_mask"],
             ],
             dim=1,
@@ -420,7 +420,7 @@ def _prepend_precursor_token_torch(
         num_targets = int(batch["target_masks"].shape[1])
         result["target_masks"] = torch.cat(
             [
-                torch.ones(
+                torch.zeros(
                     (batch_size, num_targets, 1), dtype=torch.bool, device=device
                 ),
                 batch["target_masks"],
@@ -497,6 +497,8 @@ class _GemsBatchCollator:
             precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
             min_peak_intensity=self.min_peak_intensity,
         )
+        if self.use_precursor_token:
+            batch = _prepend_precursor_token_torch(batch)
         no_valid = ~batch["peak_valid_mask"].any(dim=1)
         if bool(no_valid.any()):
             batch["peak_valid_mask"] = batch["peak_valid_mask"].clone()
@@ -516,8 +518,6 @@ class _GemsBatchCollator:
             )
             batch["context_mask"] = context_mask
             batch["target_masks"] = target_masks
-        if self.use_precursor_token:
-            batch = _prepend_precursor_token_torch(batch)
         return batch
 
 

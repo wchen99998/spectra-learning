@@ -233,6 +233,89 @@ def test_gems_batch_collator_generates_ragged_context_and_target_masks() -> None
     ).any()
 
 
+def test_gems_batch_collator_prepends_precursor_before_mask_sampling() -> None:
+    collator = input_pipeline._GemsBatchCollator(
+        augment=True,
+        num_target_blocks=2,
+        context_fraction=0.4,
+        target_fraction=0.25,
+        block_min_len=1,
+        mask_strategy="random",
+        use_precursor_token=True,
+        num_peaks=4,
+        max_precursor_mz=1000.0,
+        min_peak_intensity=1e-4,
+        peak_drop_min_intensity=1e-4,
+        peak_ordering="mz",
+        precursor_peak_exclusion_window_da=0.0,
+    )
+    samples = [
+        {
+            "spectra": torch.tensor(
+                [
+                    [100.0, 120.0, 140.0, 160.0],
+                    [1.0, 0.9, 0.8, 0.7],
+                ],
+                dtype=torch.float32,
+            ),
+            "precursor_mz_raw": torch.tensor(500.0, dtype=torch.float32),
+        },
+        {
+            "spectra": torch.tensor(
+                [
+                    [200.0, 220.0, 240.0, 260.0],
+                    [1.0, 0.95, 0.85, 0.75],
+                ],
+                dtype=torch.float32,
+            ),
+            "precursor_mz_raw": torch.tensor(600.0, dtype=torch.float32),
+        },
+    ]
+    expected_context = torch.tensor(
+        [
+            [False, True, False, False, False],
+            [False, False, True, False, False],
+        ],
+        dtype=torch.bool,
+    )
+    expected_targets = torch.tensor(
+        [
+            [
+                [False, False, False, True, False],
+                [False, False, False, False, True],
+            ],
+            [
+                [False, False, False, True, False],
+                [False, False, False, False, True],
+            ],
+        ],
+        dtype=torch.bool,
+    )
+    captured: dict[str, torch.Tensor] = {}
+
+    def fake_sample_masks(
+        peak_valid_mask: torch.Tensor,
+        **_: object,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        captured["peak_valid_mask"] = peak_valid_mask.detach().clone()
+        return expected_context.clone(), expected_targets.clone()
+
+    with mock.patch.object(
+        input_pipeline,
+        "_sample_block_masks_torch",
+        side_effect=fake_sample_masks,
+    ):
+        batch = collator(samples)
+
+    assert torch.equal(captured["peak_valid_mask"], batch["peak_valid_mask"])
+    assert batch["peak_mz"].shape == (2, 5)
+    assert batch["peak_valid_mask"][:, 0].all()
+    assert not batch["context_mask"][:, 0].any()
+    assert not batch["target_masks"][:, :, 0].any()
+    assert torch.equal(batch["context_mask"], expected_context)
+    assert torch.equal(batch["target_masks"], expected_targets)
+
+
 def test_mask_block_ranges_reports_absolute_slot_runs() -> None:
     mask = torch.tensor(
         [False, True, True, False, True, True, True, False],
