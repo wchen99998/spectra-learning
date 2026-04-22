@@ -56,11 +56,10 @@ class SIGReg(nn.Module):
         else:
             mask_weights = valid_mask.reshape(-1).to(dtype=flat.dtype, device=flat.device)
             sample_count = mask_weights.sum()
-            if bool((sample_count == 0).item()):
-                return flat.new_zeros(())
+            safe_count = sample_count.clamp_min(1.0)
             weight_view = mask_weights.unsqueeze(-1).unsqueeze(-1)
-            cos_mean = (x_t.cos() * weight_view).sum(0) / sample_count
-            sin_mean = (x_t.sin() * weight_view).sum(0) / sample_count
+            cos_mean = (x_t.cos() * weight_view).sum(0) / safe_count
+            sin_mean = (x_t.sin() * weight_view).sum(0) / safe_count
         err = (cos_mean - self.phi.to(flat)).square() + sin_mean.square()
         statistic = err @ self.weights.to(flat)
         return statistic.mean() * sample_count
@@ -137,17 +136,15 @@ class VICReg(nn.Module):
         else:
             weights = valid_mask.reshape(-1).to(device=flat.device, dtype=flat.dtype)
 
-        count = weights.sum().clamp_min(1.0)
-        if bool((count <= 1.0).item()):
-            zero = flat.new_zeros(())
-            d = flat.shape[-1]
-            return flat.new_zeros(d), flat.new_zeros(d, d), zero
-
+        count = weights.sum()
+        safe_count = count.clamp_min(1.0)
         weights_col = weights.unsqueeze(-1)
-        mean = (flat * weights_col).sum(dim=0, keepdim=True) / count
+        mean = (flat * weights_col).sum(dim=0, keepdim=True) / safe_count
         centered = flat - mean
         cov = centered.transpose(0, 1) @ (centered * weights_col)
         cov = cov / (count - 1.0).clamp_min(1.0)
+        enough_samples = (count > 1.0).to(dtype=flat.dtype)
+        cov = cov * enough_samples
         var = cov.diagonal()
         return var, cov, count
 
@@ -157,12 +154,10 @@ class VICReg(nn.Module):
         valid_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         var, cov, count = self._moments(z, valid_mask)
-        if bool((count <= 1.0).item()):
-            zero = z.new_zeros(())
-            return zero, zero
         std = torch.sqrt(var.clamp_min(0.0) + self.eps)
-        var_loss = F.relu(self.variance_target - std).mean()
-        cov_loss = _off_diagonal_squared_sum(cov) / cov.shape[0]
+        enough_samples = (count > 1.0).to(dtype=std.dtype)
+        var_loss = F.relu(self.variance_target - std).mean() * enough_samples
+        cov_loss = _off_diagonal_squared_sum(cov) / cov.shape[0] * enough_samples
         return var_loss, cov_loss
 
     def _invariance_loss(

@@ -1,6 +1,7 @@
 from unittest import mock
 
 import torch
+import torch._dynamo
 
 from models.losses import SIGReg, SlotwiseSIGReg
 
@@ -65,3 +66,15 @@ def test_slotwise_sigreg_supports_encoder_layout():
 
     assert result.ndim == 0
     assert torch.isfinite(result)
+
+
+def test_slotwise_sigreg_has_no_dynamo_graph_breaks():
+    torch.manual_seed(0)
+    sigreg = SlotwiseSIGReg(num_slices=8)
+    proj = torch.randn(2, 3, 4, 5)
+    valid_mask = torch.zeros(2, 3, 4)
+    valid_mask[:, :, :2] = 1.0
+
+    explain = torch._dynamo.explain(sigreg)(proj, valid_mask=valid_mask)
+
+    assert explain.graph_break_count == 0
