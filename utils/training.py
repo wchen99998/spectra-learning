@@ -222,13 +222,6 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         jepa_num_target_blocks=int(config.get("jepa_num_target_blocks", 2)),
         jepa_context_fraction=float(config.get("jepa_context_fraction", 0.5)),
         jepa_target_fraction=float(config.get("jepa_target_fraction", 0.25)),
-        use_ema_teacher_target=bool(config.get("use_ema_teacher_target", False)),
-        teacher_ema_decay=float(config.get("teacher_ema_decay", 0.996)),
-        teacher_ema_decay_start=float(config.get("teacher_ema_decay_start", 0.0)),
-        teacher_ema_decay_warmup_steps=int(
-            config.get("teacher_ema_decay_warmup_steps", 0)
-        ),
-        teacher_ema_update_every=int(config.get("teacher_ema_update_every", 1)),
         encoder_qk_norm=bool(config.get("encoder_qk_norm", False)),
         norm_type=str(config.get("norm_type", "rmsnorm")),
         encoder_use_position_embedding=bool(
@@ -312,7 +305,6 @@ def auto_run_name(config: Any) -> str:
 
     wd = float(config.get("weight_decay", 0))
     min_lr = config.get("min_learning_rate", None)
-    ema_decay = float(config.get("teacher_ema_decay", 0))
     warmup = int(config.get("warmup_steps", 0))
 
     parts = [
@@ -325,7 +317,6 @@ def auto_run_name(config: Any) -> str:
         opt,
         f"lr{lr:.0e}",
         f"wd{wd:.0e}",
-        f"ema{ema_decay:.4g}",
         f"ep{epochs}",
     ]
 
@@ -438,8 +429,6 @@ def load_pretrained_weights(
         "register_tokens",
         "predictor_register_tokens",
         "temporal_query_token",
-        "teacher_ema_decay_current",
-        "teacher_ema_decay_step",
     )
     allowed_missing_prefixes = ("masked_latent_readout.", "sigreg.")
     unexpected = [

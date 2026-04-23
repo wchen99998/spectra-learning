@@ -1,8 +1,8 @@
 """Benchmark: float32 matmul precision "high" (TF32) vs "medium" (bf16 internal).
 
-Teacher now has explicit @autocast in model.py. This measures whether
-set_float32_matmul_precision affects overall step throughput for the
-remaining fp32 matmuls (embedding stats, loss, etc.).
+Target computation now uses the shared encoder path with explicit autocast.
+This measures whether set_float32_matmul_precision affects overall step
+throughput for the remaining fp32 matmuls (embedding stats, loss, etc.).
 
 Uses Muon optimizer + reduce-overhead compile to match gems_small.py.
 """
@@ -53,11 +53,6 @@ def get_bench_config() -> config_dict.ConfigDict:
     cfg.masked_token_loss_type = "l2"
     cfg.jepa_target_normalization = "none"
     cfg.jepa_target_layers = [1, 4, 8, 12]
-    cfg.use_ema_teacher_target = True
-    cfg.teacher_ema_decay = 0.995
-    cfg.teacher_ema_decay_start = 0.99
-    cfg.teacher_ema_decay_warmup_steps = 500_000
-    cfg.teacher_ema_update_every = 1
     cfg.use_precursor_token = False
     cfg.optimizer = "muon"
     cfg.learning_rate = 5e-4
@@ -168,7 +163,6 @@ def build_and_bench(
             opt.zero_grad(set_to_none=True)
         for sched in schedulers:
             sched.step()
-        model.update_teacher()
 
     sps = bench_steps(model, _step, batch, torch.bfloat16, warmup=warmup, measure=steps)
 
@@ -190,14 +184,11 @@ def main():
 
     model_tmp = build_model_from_config(cfg)
     param_count = sum(p.numel() for p in model_tmp.parameters())
-    teacher_count = sum(
-        p.numel() for p in model_tmp.teacher_encoder.parameters()
-    ) if model_tmp.teacher_encoder is not None else 0
     del model_tmp
-    print(f"Model params: {param_count:,}  Teacher params: {teacher_count:,}")
+    print(f"Model params: {param_count:,}")
     print(f"Batch size: {args.batch_size}  Num peaks: {cfg.num_peaks}")
     print(f"Optimizer: Muon (GNS)  Compile: reduce-overhead")
-    print(f"Teacher: explicit @autocast(bf16)")
+    print("Targets: shared encoder + explicit @autocast(bf16)")
     print(f"GPU: {torch.cuda.get_device_name()}")
     print()
 

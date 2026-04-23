@@ -202,25 +202,7 @@ def _load_model_and_data(
         ckpt_path = latest_ckpt_path(Path(checkpoint_dir))
     assert ckpt_path is not None, f"No checkpoint found in {checkpoint_dir}"
     log.info("Loading checkpoint: %s", ckpt_path)
-    try:
-        load_pretrained_weights(backbone, ckpt_path)
-    except RuntimeError as e:
-        if "Missing key" in str(e) or "Unexpected key" in str(e):
-            log.warning(
-                "Strict load failed, retrying with strict=False (teacher_encoder key mismatch)"
-            )
-            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-            state_dict = ckpt.get("state_dict", ckpt.get("model", ckpt))
-            model_state = {
-                k.removeprefix("model."): v
-                for k, v in state_dict.items()
-                if k.startswith("model.")
-            }
-            if not model_state:
-                model_state = state_dict
-            backbone.load_state_dict(model_state, strict=False)
-        else:
-            raise
+    load_pretrained_weights(backbone, ckpt_path)
 
     backbone = backbone.to(device)
     backbone.eval()

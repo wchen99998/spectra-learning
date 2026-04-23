@@ -10,14 +10,12 @@ Usage:
     modal run modal_train.py --sweep sweep_optim
     modal run modal_train.py --sweep sweep_optim_refine
     modal run modal_train.py --sweep sweep_sigreg_compare
-    modal run modal_train.py --sweep sweep_10m_sigreg_ema_ablation
-    modal run modal_train.py --sweep sweep_10m_noema_sigreg_log_lambda
-    modal run modal_train.py --sweep sweep_10m_noema_sigreg_high_lambda
-    modal run modal_train.py --sweep sweep_10m_ema_stopgrad
-    modal run modal_train.py --sweep sweep_10m_ema_stopgrad_warmup_update
-    modal run modal_train.py --sweep sweep_10m_ema_masking
-    modal run modal_train.py --sweep sweep_10m_ema_deep_supervision
-    modal run modal_train.py --sweep sweep_10m_ema_batch_size_flops_matched
+    modal run modal_train.py --sweep sweep_10m_sigreg_ablation
+    modal run modal_train.py --sweep sweep_10m_sigreg_log_lambda
+    modal run modal_train.py --sweep sweep_10m_sigreg_high_lambda
+    modal run modal_train.py --sweep sweep_10m_masking
+    modal run modal_train.py --sweep sweep_10m_deep_supervision
+    modal run modal_train.py --sweep sweep_10m_batch_size_flops_matched
     modal run modal_train.py --config configs/gems_small.py --sweep sweep_gems_small_peak_filtering
     modal run modal_train.py --config configs/gems_small.py --sweep sweep_gems_small_predictor_scale
     modal run modal_train.py --config configs/gems_small.py --sweep sweep_gems_small_predictor_scale_depth
@@ -107,9 +105,6 @@ wandb_secret = modal.Secret.from_name(
 # ---------------------------------------------------------------------------
 BEST_SWEEP_OPTIM = {
     "jepa_target_normalization": "zscore",
-    "teacher_ema_decay": 0.9996,
-    "teacher_ema_decay_start": 0.999,
-    "teacher_ema_update_every": 1,
     "learning_rate": 2e-4,
     "weight_decay": 0.1,
     "representation_regularizer": "none",
@@ -149,130 +144,8 @@ NOEMA_SIGREG_HIGH_LAMBDAS = [
     ("5e01", 50.0),
 ]
 SIGREG_SAMPLE_SCALE_TAG = "sigcfscale"
-EMA_STOPGRAD_SWEEP_TAG = "emastop"
-EMA_STOPGRAD_RECIPES = [
-    (
-        "d995-s990-w500k-u2",
-        {
-            "teacher_ema_decay": 0.995,
-            "teacher_ema_decay_start": 0.99,
-            "teacher_ema_decay_warmup_steps": 500_000,
-            "teacher_ema_update_every": 2,
-        },
-    ),
-    (
-        "d999-s996-w100k-u1",
-        {
-            "teacher_ema_decay": 0.999,
-            "teacher_ema_decay_start": 0.996,
-            "teacher_ema_decay_warmup_steps": 100_000,
-            "teacher_ema_update_every": 1,
-        },
-    ),
-    (
-        "d999-s996-w100k-u2",
-        {
-            "teacher_ema_decay": 0.999,
-            "teacher_ema_decay_start": 0.996,
-            "teacher_ema_decay_warmup_steps": 100_000,
-            "teacher_ema_update_every": 2,
-        },
-    ),
-    (
-        "d999-s999-w0-u1",
-        {
-            "teacher_ema_decay": 0.999,
-            "teacher_ema_decay_start": 0.999,
-            "teacher_ema_decay_warmup_steps": 0,
-            "teacher_ema_update_every": 1,
-        },
-    ),
-    (
-        "d9996-s999-w500k-u1",
-        {
-            "teacher_ema_decay": 0.9996,
-            "teacher_ema_decay_start": 0.999,
-            "teacher_ema_decay_warmup_steps": 500_000,
-            "teacher_ema_update_every": 1,
-        },
-    ),
-    (
-        "d9996-s999-w100k-u1",
-        {
-            "teacher_ema_decay": 0.9996,
-            "teacher_ema_decay_start": 0.999,
-            "teacher_ema_decay_warmup_steps": 100_000,
-            "teacher_ema_update_every": 1,
-        },
-    ),
-    (
-        "d9996-s999-w500k-u2",
-        {
-            "teacher_ema_decay": 0.9996,
-            "teacher_ema_decay_start": 0.999,
-            "teacher_ema_decay_warmup_steps": 500_000,
-            "teacher_ema_update_every": 2,
-        },
-    ),
-    (
-        "d9996-s9996-w0-u1",
-        {
-            "teacher_ema_decay": 0.9996,
-            "teacher_ema_decay_start": 0.9996,
-            "teacher_ema_decay_warmup_steps": 0,
-            "teacher_ema_update_every": 1,
-        },
-    ),
-    (
-        "d9998-s999-w100k-u1",
-        {
-            "teacher_ema_decay": 0.9998,
-            "teacher_ema_decay_start": 0.999,
-            "teacher_ema_decay_warmup_steps": 100_000,
-            "teacher_ema_update_every": 1,
-        },
-    ),
-    (
-        "d9998-s999-w100k-u2",
-        {
-            "teacher_ema_decay": 0.9998,
-            "teacher_ema_decay_start": 0.999,
-            "teacher_ema_decay_warmup_steps": 100_000,
-            "teacher_ema_update_every": 2,
-        },
-    ),
-    (
-        "d9998-s9998-w0-u1",
-        {
-            "teacher_ema_decay": 0.9998,
-            "teacher_ema_decay_start": 0.9998,
-            "teacher_ema_decay_warmup_steps": 0,
-            "teacher_ema_update_every": 1,
-        },
-    ),
-    (
-        "d9999-s9996-w100k-u1",
-        {
-            "teacher_ema_decay": 0.9999,
-            "teacher_ema_decay_start": 0.9996,
-            "teacher_ema_decay_warmup_steps": 100_000,
-            "teacher_ema_update_every": 1,
-        },
-    ),
-]
-EMA_STOPGRAD_FIXED = {
-    "teacher_ema_decay": 0.999,
-    "teacher_ema_decay_start": 0.996,
-}
-EMA_STOPGRAD_WARMUP_STEPS = [5_000, 15_000]
-EMA_STOPGRAD_UPDATE_EVERY_VALUES = [1, 2, 5, 10, 20]
-EMA_STOPGRAD_BEST_SAME_STEP = {
-    **EMA_STOPGRAD_FIXED,
-    "teacher_ema_decay_warmup_steps": 5_000,
-    "teacher_ema_update_every": 5,
-}
-JEPA_MASKING_SWEEP_TAG = "emask"
-JEPA_DEEP_SUPERVISION_SWEEP_TAG = "emadsup"
+JEPA_MASKING_SWEEP_TAG = "mask"
+JEPA_DEEP_SUPERVISION_SWEEP_TAG = "dsup"
 BATCH_SIZE_SWEEP_TAG = "bsflops"
 PEAK_FILTER_SWEEP_TAG = "peakfilt"
 GEMS_SMALL_PREDICTOR_SCALE_SWEEP_TAG = "predscale"
@@ -492,50 +365,25 @@ GEMS_SMALL_300M = {
 
 SWEEPS: dict[str, list[dict]] = {
     # Anti-collapse sweep: downstream probe perf degrades during training.
-    # Three axes: (A) slower EMA teacher, (B) zscore target norm, (C) LR/WD.
+    # Two axes: (A) target normalization, (B) LR/WD.
     # Goal: isolate which mechanism prevents representation collapse.
     "sweep_optim": [
-        # 0) baseline — current settings (ema=0.995, update_every=2, norm=none)
+        # 0) baseline — current settings
         {},
-        # -- Axis A: slower EMA teacher --
-        # 1) moderate slowdown — teacher lags more, stabler targets
-        {"teacher_ema_decay": 0.999, "teacher_ema_decay_start": 0.996},
-        # 2) very slow EMA + every-step update — maximally stable teacher
-        {
-            "teacher_ema_decay": 0.9996,
-            "teacher_ema_decay_start": 0.999,
-            "teacher_ema_update_every": 1,
-        },
-        # -- Axis B: zscore target normalization --
-        # 3) zscore alone — normalizes per-layer teacher targets, prevents
-        #    variance collapse without changing EMA dynamics
+        # -- Axis A: zscore target normalization --
+        # 1) zscore alone — normalizes per-layer targets, prevents variance collapse
         {"jepa_target_normalization": "zscore"},
-        # 4) zscore + slower EMA — both stabilization mechanisms together
-        {
-            "jepa_target_normalization": "zscore",
-            "teacher_ema_decay": 0.999,
-            "teacher_ema_decay_start": 0.996,
-        },
-        # 5) zscore + very slow EMA — maximal anti-collapse
-        {
-            "jepa_target_normalization": "zscore",
-            "teacher_ema_decay": 0.9996,
-            "teacher_ema_decay_start": 0.999,
-            "teacher_ema_update_every": 1,
-        },
-        # -- Axis C: conservative LR/WD to reduce student drift --
-        # 6) lower LR + higher WD — student changes less per step
+        # -- Axis B: conservative LR/WD to reduce drift --
+        # 2) lower LR + higher WD — student changes less per step
         {"learning_rate": 2e-4, "weight_decay": 0.1},
-        # 7) kitchen sink: zscore + slow EMA + conservative LR/WD
+        # 3) kitchen sink: zscore + conservative LR/WD
         dict(BEST_SWEEP_OPTIM),
     ],
     # Refine around the winning anti-collapse run from sweep_optim:
-    # zscore targets + every-step slow EMA + conservative optimizer.
+    # zscore targets + conservative optimizer.
     #
     # This sweep is intentionally local. It keeps the stabilization recipe fixed
-    # and probes the remaining uncertainty in two places:
-    #   (A) LR/WD neighbourhood around the best 2e-4 / 0.1 corner
-    #   (B) Slightly faster/slower teacher lag around 0.9996 / 0.999
+    # and probes the remaining LR/WD neighbourhood around the best 2e-4 / 0.1 corner.
     #
     # If the centre point still wins after this sweep, we have much stronger
     # evidence that the original best run is not a fluke from a broad search.
@@ -551,17 +399,6 @@ SWEEPS: dict[str, list[dict]] = {
         {**BEST_SWEEP_OPTIM, "learning_rate": 3.0e-4, "weight_decay": 0.075},
         {**BEST_SWEEP_OPTIM, "learning_rate": 3.0e-4, "weight_decay": 0.10},
         {**BEST_SWEEP_OPTIM, "learning_rate": 3.0e-4, "weight_decay": 0.15},
-        # -- Teacher lag sensitivity at the winning optimizer point --
-        {
-            **BEST_SWEEP_OPTIM,
-            "teacher_ema_decay": 0.9993,
-            "teacher_ema_decay_start": 0.9985,
-        },
-        {
-            **BEST_SWEEP_OPTIM,
-            "teacher_ema_decay": 0.9998,
-            "teacher_ema_decay_start": 0.9993,
-        },
     ],
     # Direct A/B on the current best gems_small recipe.
     #
@@ -578,144 +415,63 @@ SWEEPS: dict[str, list[dict]] = {
             "run_name_suffix": "sigcmp-sigreg",
         },
     ],
-    # Controlled 10M-scale ablation.
+    # Controlled 10M-scale sigreg ablation on the shared-backbone target path.
     #
     # Backbone: 256d / 8L / 8H with 128d predictor and 4 predictor layers.
-    # This is ~10.5M trainable params without an EMA teacher.
-    #
-    # Runs:
-    #   1) EMA on,  SIGREG off  -> current JEPA baseline at this scale
-    #   2) EMA on,  SIGREG on   -> does SIGREG help even when EMA is present?
-    #   3) EMA off, SIGREG off  -> collapse-prone same-backbone control
-    #   4) EMA off, SIGREG on   -> can SIGREG replace teacher EMA as stabilizer?
-    "sweep_10m_sigreg_ema_ablation": [
+    "sweep_10m_sigreg_ablation": [
         {
             **TEN_M_BEST_SWEEP_OPTIM,
-            "use_ema_teacher_target": True,
             "representation_regularizer": "none",
-            "run_name_suffix": "10m-ema-none",
+            "run_name_suffix": "10m-none",
         },
         {
             **TEN_M_BEST_SWEEP_OPTIM,
-            "use_ema_teacher_target": True,
             "representation_regularizer": "sigreg",
-            "run_name_suffix": "10m-ema-sigreg",
+            "run_name_suffix": "10m-sigreg",
         },
+    ],
+    # Shared-backbone SIGREG sweep over a broad log-scale lambda range.
+    "sweep_10m_sigreg_log_lambda": [
         {
             **TEN_M_BEST_SWEEP_OPTIM,
-            "use_ema_teacher_target": False,
-            "representation_regularizer": "none",
-            "run_name_suffix": "10m-noema-none",
-        },
-        {
-            **TEN_M_BEST_SWEEP_OPTIM,
-            "use_ema_teacher_target": False,
             "representation_regularizer": "sigreg",
-            "run_name_suffix": "10m-noema-sigreg",
-        },
-    ],
-    # Follow-up sweep from the 10M ablation:
-    # keep the best EMA baseline as anchor, then sweep no-EMA + SIGREG with
-    # target/student gradients enabled through the same backbone.
-    "sweep_10m_noema_sigreg_log_lambda": [
-        {
-            **TEN_M_BEST_SWEEP_OPTIM,
-            "use_ema_teacher_target": True,
-            "representation_regularizer": "none",
-            "run_name_suffix": f"10m-ema-none-anchor-{SIGREG_SAMPLE_SCALE_TAG}",
-        },
-        *[
-            {
-                **TEN_M_BEST_SWEEP_OPTIM,
-                "use_ema_teacher_target": False,
-                "representation_regularizer": "sigreg",
-                "sigreg_lambda": sigreg_lambda,
-                "run_name_suffix": (
-                    f"10m-noema-sigreg-gradtgt-lam{sigreg_lambda:.0e}-"
-                    f"{SIGREG_SAMPLE_SCALE_TAG}"
-                ),
-            }
-            for sigreg_lambda in NOEMA_SIGREG_LOG_LAMBDAS
-        ],
-    ],
-    # Follow-up on the failed low-lambda no-EMA sweep:
-    # keep the EMA baseline anchor and test much stronger SIGREG weights.
-    "sweep_10m_noema_sigreg_high_lambda": [
-        {
-            **TEN_M_BEST_SWEEP_OPTIM,
-            "use_ema_teacher_target": True,
-            "representation_regularizer": "none",
-            "run_name_suffix": f"10m-ema-none-anchor-hi-{SIGREG_SAMPLE_SCALE_TAG}",
-        },
-        *[
-            {
-                **TEN_M_BEST_SWEEP_OPTIM,
-                "use_ema_teacher_target": False,
-                "representation_regularizer": "sigreg",
-                "sigreg_lambda": sigreg_lambda,
-                "run_name_suffix": (
-                    f"10m-noema-sigreg-gradtgt-hi-lam{label}-"
-                    f"{SIGREG_SAMPLE_SCALE_TAG}"
-                ),
-            }
-            for label, sigreg_lambda in NOEMA_SIGREG_HIGH_LAMBDAS
-        ],
-    ],
-    # Follow-up after the SIGREG sweep underperformed:
-    # keep SIGREG off, keep stopgrad on via EMA teacher targets, and sweep the
-    # EMA recipe itself at the 10M backbone scale.
-    "sweep_10m_ema_stopgrad": [
-        {
-            **TEN_M_BEST_SWEEP_OPTIM,
-            "use_ema_teacher_target": True,
-            "representation_regularizer": "none",
-            "run_name_suffix": f"10m-{EMA_STOPGRAD_SWEEP_TAG}-{label}",
-            **ema_overrides,
-        }
-        for label, ema_overrides in EMA_STOPGRAD_RECIPES
-    ],
-    # Refine around the best same-step EMA recipe:
-    # fix decay/start and sweep only warmup and update cadence.
-    "sweep_10m_ema_stopgrad_warmup_update": [
-        {
-            **TEN_M_BEST_SWEEP_OPTIM,
-            **EMA_STOPGRAD_FIXED,
-            "use_ema_teacher_target": True,
-            "representation_regularizer": "none",
-            "teacher_ema_decay_warmup_steps": warmup_steps,
-            "teacher_ema_update_every": update_every,
+            "sigreg_lambda": sigreg_lambda,
             "run_name_suffix": (
-                f"10m-{EMA_STOPGRAD_SWEEP_TAG}-d999-s996-"
-                f"w{warmup_steps // 1000}k-u{update_every}"
+                f"10m-sigreg-lam{sigreg_lambda:.0e}-{SIGREG_SAMPLE_SCALE_TAG}"
             ),
         }
-        for warmup_steps in EMA_STOPGRAD_WARMUP_STEPS
-        for update_every in EMA_STOPGRAD_UPDATE_EVERY_VALUES
+        for sigreg_lambda in NOEMA_SIGREG_LOG_LAMBDAS
     ],
-    # Fix the winning same-step EMA recipe and sweep only the JEPA masking
-    # pattern around the current GeMS default.
-    "sweep_10m_ema_masking": [
+    # Follow-up sweep with much stronger SIGREG weights.
+    "sweep_10m_sigreg_high_lambda": [
         {
             **TEN_M_BEST_SWEEP_OPTIM,
-            **EMA_STOPGRAD_BEST_SAME_STEP,
-            "use_ema_teacher_target": True,
+            "representation_regularizer": "sigreg",
+            "sigreg_lambda": sigreg_lambda,
+            "run_name_suffix": (
+                f"10m-sigreg-hi-lam{label}-{SIGREG_SAMPLE_SCALE_TAG}"
+            ),
+        }
+        for label, sigreg_lambda in NOEMA_SIGREG_HIGH_LAMBDAS
+    ],
+    # Sweep only the JEPA masking pattern around the current GeMS default.
+    "sweep_10m_masking": [
+        {
+            **TEN_M_BEST_SWEEP_OPTIM,
             "representation_regularizer": "none",
             "run_name_suffix": f"10m-{JEPA_MASKING_SWEEP_TAG}-{label}",
             **masking_overrides,
         }
         for label, masking_overrides in JEPA_MASKING_RECIPES
     ],
-    # Fix the current best recipe (EMA + masking)
-    # and ablate the "bootleg deep supervision" target stack.
+    # Ablate the target stack and target normalization.
     #
     # This is a clean 2x2:
     #   - layer stack: current spread 4-layer targets [1,3,5,8] vs deeper 2-layer targets [5,8]
     #   - target normalization: per-layer zscore vs no normalization
-    "sweep_10m_ema_deep_supervision": [
+    "sweep_10m_deep_supervision": [
         {
             **TEN_M_BEST_SWEEP_OPTIM,
-            **EMA_STOPGRAD_BEST_SAME_STEP,
-            "use_ema_teacher_target": True,
             "representation_regularizer": "none",
             "jepa_num_target_blocks": 2,
             "jepa_context_fraction": 0.35,
@@ -731,11 +487,9 @@ SWEEPS: dict[str, list[dict]] = {
     # sees roughly the same total number of samples, so total training FLOPs
     # stay roughly matched across batch sizes. Keep probe batch size fixed so
     # online probe metrics remain directly comparable across runs.
-    "sweep_10m_ema_batch_size_flops_matched": [
+    "sweep_10m_batch_size_flops_matched": [
         {
             **TEN_M_BEST_SWEEP_OPTIM,
-            **EMA_STOPGRAD_BEST_SAME_STEP,
-            "use_ema_teacher_target": True,
             "representation_regularizer": "none",
             "jepa_num_target_blocks": 2,
             "jepa_context_fraction": 0.35,

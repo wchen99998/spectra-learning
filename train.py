@@ -307,8 +307,6 @@ def _load_resume_model_state(
         "sigreg.t",
         "sigreg.phi",
         "sigreg.weights",
-        "teacher_ema_decay_current",
-        "teacher_ema_decay_step",
     )
     allowed_unexpected = (
         "sigreg_lambda_target",
@@ -477,7 +475,6 @@ def train_and_evaluate(
                 autocast_dtype,
                 grad_clip_norm,
             )
-            model.update_teacher()
             global_step += 1
             pbar.update(1)
             if global_step % log_every_n_steps == 0:
@@ -492,10 +489,6 @@ def train_and_evaluate(
                     log_metrics["train/learning_rate"] = optimizers[0].param_groups[0][
                         "lr"
                     ]
-                if model.teacher_encoder is not None:
-                    log_metrics["train/teacher_ema_decay"] = float(
-                        model.teacher_ema_decay_current
-                    )
                 log_metrics["epoch"] = epoch
                 log_metrics["global_step"] = global_step
                 logger.log_metrics(log_metrics, step=global_step)

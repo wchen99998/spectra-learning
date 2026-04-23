@@ -21,7 +21,6 @@ def _small_model(**overrides) -> PeakSetSIGReg:
         jepa_num_target_blocks=1,
         num_peaks=8,
         temporal_predictor_num_layers=2,
-        use_ema_teacher_target=False,
     )
     kwargs.update(overrides)
     return PeakSetSIGReg(**kwargs)
@@ -97,13 +96,12 @@ class TestForwardTemporal:
         assert model.temporal_query_token.grad is not None
         assert model.temporal_query_token.grad.abs().sum() > 0
 
-    def test_with_ema_teacher(self):
-        model = _small_model(use_ema_teacher_target=True, teacher_ema_decay=0.99)
+    def test_teacher_embeddings_require_grad(self):
+        model = _small_model()
         model.eval()
         batch = _temporal_batch()
         teacher_embeddings = model.compute_next_frame_teacher_embeddings(batch)
-        metrics = model.forward_temporal(batch, teacher_embeddings=teacher_embeddings)
-        assert torch.isfinite(metrics["loss"])
+        assert teacher_embeddings.requires_grad
 
     def test_teacher_embeddings_use_next_frame_precursor_when_enabled(self):
         model = _small_model(use_precursor_token=True)

@@ -2,7 +2,6 @@ import math
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 
 from models.losses import SIGReg, SlotwiseSIGReg, VICReg
 from models.peak_features import PeakFeatureEmbedder
@@ -419,11 +418,6 @@ class PeakSetSIGReg(nn.Module):
         jepa_num_target_blocks: int = 2,
         jepa_context_fraction: float = 0.5,
         jepa_target_fraction: float = 0.25,
-        use_ema_teacher_target: bool = False,
-        teacher_ema_decay: float = 0.996,
-        teacher_ema_decay_start: float = 0.0,
-        teacher_ema_decay_warmup_steps: int = 0,
-        teacher_ema_update_every: int = 1,
         encoder_qk_norm: bool = False,
         norm_type: str = "rmsnorm",
         encoder_use_position_embedding: bool = True,
@@ -474,43 +468,6 @@ class PeakSetSIGReg(nn.Module):
         self.sigreg_lambda = float(sigreg_lambda)
         self.sigreg_precursor_scale = float(sigreg_precursor_scale)
         self.vicreg_lambda = float(vicreg_lambda)
-        _f = torch.float32
-        _reg = self.register_buffer
-        self.teacher_ema_update_every = int(teacher_ema_update_every)
-        # EMA teacher buffers
-        teacher_ema_decay_start = float(teacher_ema_decay_start)
-        teacher_ema_decay = float(teacher_ema_decay)
-        teacher_ema_decay_warmup_steps = int(teacher_ema_decay_warmup_steps)
-        self.teacher_ema_decay_warmup_steps = teacher_ema_decay_warmup_steps
-        _reg(
-            "teacher_ema_decay_start_tensor",
-            torch.tensor(teacher_ema_decay_start, dtype=_f),
-            persistent=False,
-        )
-        _reg(
-            "teacher_ema_decay_target",
-            torch.tensor(teacher_ema_decay, dtype=_f),
-            persistent=False,
-        )
-        _reg(
-            "teacher_ema_decay_current",
-            torch.tensor(
-                teacher_ema_decay
-                if teacher_ema_decay_warmup_steps <= 0
-                else teacher_ema_decay_start,
-                dtype=_f,
-            ),
-        )
-        _reg(
-            "teacher_ema_decay_step",
-            torch.zeros((), dtype=torch.int64),
-        )
-        _reg(
-            "teacher_ema_decay_warmup_steps_tensor",
-            torch.tensor(max(teacher_ema_decay_warmup_steps, 1), dtype=_f),
-            persistent=False,
-        )
-        _reg("teacher_ema_update_step", torch.zeros((), dtype=torch.int64))
         self.masked_token_loss_weight = float(masked_token_loss_weight)
         self.masked_token_loss_type = str(masked_token_loss_type).lower()
         self.jepa_target_normalization = str(jepa_target_normalization).lower()
@@ -546,17 +503,6 @@ class PeakSetSIGReg(nn.Module):
             num_peaks=N,
             num_register_tokens=encoder_num_register_tokens,
         )
-        # EMA teacher encoder
-        if bool(use_ema_teacher_target):
-            self.teacher_encoder: AveragedModel | None = AveragedModel(
-                self.encoder,
-                multi_avg_fn=get_ema_multi_avg_fn(teacher_ema_decay),
-                use_buffers=True,
-            )
-            self.teacher_encoder.requires_grad_(False)
-            self.teacher_encoder.eval()
-        else:
-            self.teacher_encoder = None
         self.latent_mask_token = nn.Parameter(torch.empty(self.model_dim))
         nn.init.normal_(self.latent_mask_token, std=0.02)
 
@@ -628,68 +574,6 @@ class PeakSetSIGReg(nn.Module):
                     nn.init.zeros_(layer.bias)
             self.temporal_query_token = nn.Parameter(torch.empty(model_dim))
             nn.init.trunc_normal_(self.temporal_query_token, std=0.02)
-
-    def train(self, mode: bool = True) -> "PeakSetSIGReg":
-        super().train(mode)
-        if self.teacher_encoder is not None:
-            self.teacher_encoder.eval()
-        return self
-
-    @torch.no_grad()
-    def update_teacher(self) -> None:
-        if self.teacher_encoder is None:
-            return
-        # CPU shadow counter avoids GPU→CPU sync from .item()
-        if not hasattr(self, "_teacher_step_cpu"):
-            self._teacher_step_cpu = int(self.teacher_ema_update_step.item())
-        step = self._teacher_step_cpu
-        self._teacher_step_cpu += 1
-        self.teacher_ema_update_step.add_(1)
-        self.advance_teacher_ema_decay_schedule()
-        if step % self.teacher_ema_update_every != 0:
-            return
-        teacher = self._teacher_encoder_module()
-        teacher_params = list(teacher.parameters())
-        student_params = list(self.encoder.parameters())
-        # Pass tensor directly — _foreach_lerp_ accepts scalar tensors, no float() sync needed
-        torch._foreach_lerp_(teacher_params, student_params, 1.0 - self.teacher_ema_decay_current)
-        teacher_buffers = dict(teacher.named_buffers())
-        student_buffers = dict(self.encoder.named_buffers())
-        float_teacher_buffers = []
-        float_student_buffers = []
-        for name, teacher_buffer in teacher_buffers.items():
-            student_buffer = student_buffers[name]
-            if torch.is_floating_point(teacher_buffer) or torch.is_complex(teacher_buffer):
-                float_teacher_buffers.append(teacher_buffer)
-                float_student_buffers.append(student_buffer)
-            else:
-                teacher_buffer.copy_(student_buffer)
-        if float_teacher_buffers:
-            torch._foreach_lerp_(
-                float_teacher_buffers,
-                float_student_buffers,
-                1.0 - self.teacher_ema_decay_current,
-            )
-        self.teacher_encoder.n_averaged.add_(1)
-
-    @torch.no_grad()
-    def advance_teacher_ema_decay_schedule(self) -> None:
-        if self.teacher_ema_decay_warmup_steps <= 0:
-            self.teacher_ema_decay_current.copy_(self.teacher_ema_decay_target)
-            self.teacher_ema_decay_step.add_(1)
-            return
-        step = self.teacher_ema_decay_step.to(
-            dtype=self.teacher_ema_decay_current.dtype
-        )
-        ratio = torch.clamp(
-            step / self.teacher_ema_decay_warmup_steps_tensor, max=1.0
-        )
-        cosine_ratio = 0.5 * (1.0 - torch.cos(torch.pi * ratio))
-        delta = self.teacher_ema_decay_target - self.teacher_ema_decay_start_tensor
-        self.teacher_ema_decay_current.copy_(
-            self.teacher_ema_decay_start_tensor + delta * cosine_ratio
-        )
-        self.teacher_ema_decay_step.add_(1)
 
     def _apply_group_target_normalization(
         self,
@@ -765,11 +649,6 @@ class PeakSetSIGReg(nn.Module):
             )
         )
 
-    def _teacher_encoder_module(self) -> PeakSetEncoder:
-        if self.teacher_encoder is None:
-            return self.encoder
-        return self.teacher_encoder.module
-
     def _compute_jepa_teacher_targets(
         self,
         peak_mz: torch.Tensor,
@@ -781,9 +660,8 @@ class PeakSetSIGReg(nn.Module):
             if torch.is_autocast_enabled("cuda")
             else torch.bfloat16
         )
-        with torch.no_grad(), torch.autocast("cuda", dtype=amp_dtype):
-            teacher = self._teacher_encoder_module()
-            teacher_peak_outputs = teacher.forward_peak_block_outputs(
+        with torch.autocast("cuda", dtype=amp_dtype):
+            teacher_peak_outputs = self.encoder.forward_peak_block_outputs(
                 peak_mz,
                 peak_intensity,
                 valid_mask=peak_valid_mask,
@@ -822,9 +700,8 @@ class PeakSetSIGReg(nn.Module):
             if torch.is_autocast_enabled("cuda")
             else torch.bfloat16
         )
-        with torch.no_grad(), torch.autocast("cuda", dtype=amp_dtype):
-            teacher = self._teacher_encoder_module()
-            teacher_encoded = teacher(
+        with torch.autocast("cuda", dtype=amp_dtype):
+            teacher_encoded = self.encoder(
                 peak_mz,
                 peak_intensity,
                 valid_mask=peak_valid_mask,
@@ -1060,23 +937,23 @@ class PeakSetSIGReg(nn.Module):
         }
         return metrics
 
-    @torch.no_grad()
     def compute_next_frame_teacher_embeddings(
         self, batch: dict[str, torch.Tensor],
     ) -> torch.Tensor:
         """Compute teacher embeddings for the next frame."""
-        teacher = self._teacher_encoder_module()
         next_frame_mz, next_frame_int, next_frame_valid = self._get_temporal_frame_inputs(
             batch,
             "next_frame",
         )
-        teacher_embeddings = teacher(
+        teacher_embeddings = self.encoder(
             next_frame_mz,
             next_frame_int,
             valid_mask=next_frame_valid,
             visible_mask=next_frame_valid,
         )
-        teacher_embeddings, _ = self.encoder.split_peak_and_cls(teacher_embeddings)
+        teacher_embeddings, _ = self.encoder.split_peak_and_cls(
+            teacher_embeddings
+        )
         return teacher_embeddings
 
     def forward_temporal(
@@ -1128,15 +1005,7 @@ class PeakSetSIGReg(nn.Module):
         if teacher_embeddings is not None:
             next_frame_emb = teacher_embeddings
         else:
-            teacher = self._teacher_encoder_module()
-            with torch.no_grad():
-                next_frame_emb = teacher(
-                    next_frame_mz,
-                    next_frame_int,
-                    valid_mask=next_frame_valid,
-                    visible_mask=next_frame_valid,
-                ).detach()
-                next_frame_emb, _ = self.encoder.split_peak_and_cls(next_frame_emb)
+            next_frame_emb = self.compute_next_frame_teacher_embeddings(batch)
 
         per_token = self._embedding_loss(predicted_next_frame, next_frame_emb)
 

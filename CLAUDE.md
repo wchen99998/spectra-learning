@@ -44,7 +44,7 @@ python input_pipeline.py configs/gems_a_dataset.py
 
 - **PeakSetEncoder**: raw scalar peak features (`mz`, `intensity`, `log1p(intensity)`) -> MLP embedder -> N non-causal TransformerBlocks -> RMSNorm. Uses mass-aware RoPE on m/z only.
 - **Encoder**: raw scalar peak features (`mz`, `intensity`) -> Fourier/MLP embedder -> non-causal Transformer blocks.
-- **Teacher / Predictor**: EMA teacher encoder provides masked-token targets; predictor maps visible context tokens to target-space latents.
+- **Targets / Predictor**: shared encoder target states supervise masked-token prediction; predictor maps visible context tokens to target-space latents.
 - **SIGReg**: optional regularizer on learned representations.
 
 ### Masked Training Batch (`input_pipeline.py`)

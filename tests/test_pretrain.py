@@ -294,7 +294,7 @@ class BlockJEPATests(unittest.TestCase):
             )
         )
 
-    def test_teacher_targets_are_detached_without_ema(self):
+    def test_teacher_targets_require_grad(self):
         model = self._build_model(masked_token_loss_weight=1.0)
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
         teacher_targets = model._compute_jepa_teacher_targets(
@@ -302,20 +302,7 @@ class BlockJEPATests(unittest.TestCase):
             batch["peak_intensity"],
             batch["peak_valid_mask"],
         )
-        self.assertFalse(teacher_targets.requires_grad)
-
-    def test_teacher_targets_are_detached_with_ema(self):
-        model = self._build_model(
-            masked_token_loss_weight=1.0,
-            use_ema_teacher_target=True,
-        )
-        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-        teacher_targets = model._compute_jepa_teacher_targets(
-            batch["peak_mz"],
-            batch["peak_intensity"],
-            batch["peak_valid_mask"],
-        )
-        self.assertFalse(teacher_targets.requires_grad)
+        self.assertTrue(teacher_targets.requires_grad)
 
     def test_compute_teacher_targets_expands_per_target_block(self):
         model = self._build_model(
@@ -334,9 +321,10 @@ class BlockJEPATests(unittest.TestCase):
             -1,
         )
         actual = model.compute_teacher_targets(batch)
+        self.assertTrue(actual.requires_grad)
         self.assertTrue(torch.allclose(actual, expected))
 
-    def test_pooled_teacher_peak_targets_are_detached_without_ema(self):
+    def test_pooled_teacher_peak_targets_require_grad(self):
         model = self._build_model()
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
         cls_targets = model._compute_pooled_teacher_peak_targets(
@@ -344,24 +332,11 @@ class BlockJEPATests(unittest.TestCase):
             batch["peak_intensity"],
             batch["peak_valid_mask"],
         )
-        self.assertFalse(cls_targets.requires_grad)
-
-    def test_pooled_teacher_peak_targets_are_detached_with_ema(self):
-        model = self._build_model(
-            use_ema_teacher_target=True,
-        )
-        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-        cls_targets = model._compute_pooled_teacher_peak_targets(
-            batch["peak_mz"],
-            batch["peak_intensity"],
-            batch["peak_valid_mask"],
-        )
-        self.assertFalse(cls_targets.requires_grad)
+        self.assertTrue(cls_targets.requires_grad)
 
     def test_forward_augmented_uses_full_spectrum_teacher_targets(self):
         model = self._build_model(
             masked_token_loss_weight=1.0,
-            use_ema_teacher_target=True,
             jepa_target_layers=[1],
         )
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
@@ -403,30 +378,15 @@ class BlockJEPATests(unittest.TestCase):
             )
         )
 
-    def test_cls_embedding_term_is_disabled_with_ema(self):
-        model = self._build_model(
-            masked_token_loss_weight=0.0,
-            use_ema_teacher_target=True,
-        )
-        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-
-        metrics = model.forward_augmented(batch)
-
-        self.assertEqual(float(metrics["cls_embedding_loss"]), 0.0)
-        self.assertEqual(float(metrics["cls_embedding_term"]), 0.0)
-        self.assertEqual(float(metrics["cls_visible_fraction"]), 0.0)
-
     def test_cls_embedding_is_independent_of_token_target_normalization(self):
         torch.manual_seed(0)
         model_none = self._build_model(
             masked_token_loss_weight=0.0,
-            use_ema_teacher_target=True,
             jepa_target_normalization="none",
         )
         torch.manual_seed(0)
         model_zscore = self._build_model(
             masked_token_loss_weight=0.0,
-            use_ema_teacher_target=True,
             jepa_target_normalization="zscore",
         )
         batch = _make_batch(num_targets=model_none.jepa_num_target_blocks)
@@ -523,100 +483,6 @@ class BlockJEPATests(unittest.TestCase):
             torch.save({"state_dict": old_state}, path)
             loaded = self._build_model(jepa_target_layers=[1])
             load_pretrained_weights(loaded, path)
-
-    def test_teacher_ema_warmup_uses_cosine_schedule(self):
-        model = self._build_model(
-            use_ema_teacher_target=True,
-            teacher_ema_decay_start=0.9,
-            teacher_ema_decay=0.99,
-            teacher_ema_decay_warmup_steps=4,
-        )
-        expected = []
-        for step in range(5):
-            ratio = min(step / 4.0, 1.0)
-            cosine_ratio = 0.5 * (1.0 - math.cos(math.pi * ratio))
-            expected.append(0.9 + 0.09 * cosine_ratio)
-
-        actual = []
-        for _ in range(5):
-            model.advance_teacher_ema_decay_schedule()
-            actual.append(float(model.teacher_ema_decay_current))
-
-        for got, want in zip(actual, expected, strict=True):
-            self.assertAlmostEqual(got, want, places=6)
-
-    def test_teacher_ema_zero_warmup_stays_at_target_decay(self):
-        model = self._build_model(
-            use_ema_teacher_target=True,
-            teacher_ema_decay_start=0.9,
-            teacher_ema_decay=0.99,
-            teacher_ema_decay_warmup_steps=0,
-        )
-        self.assertAlmostEqual(float(model.teacher_ema_decay_current), 0.99, places=6)
-        model.update_teacher()
-        self.assertAlmostEqual(float(model.teacher_ema_decay_current), 0.99, places=6)
-
-    def test_teacher_ema_schedule_advances_per_train_step_not_update_cadence(self):
-        shared_kwargs = dict(
-            use_ema_teacher_target=True,
-            teacher_ema_decay_start=0.9,
-            teacher_ema_decay=0.99,
-            teacher_ema_decay_warmup_steps=4,
-        )
-        model_u1 = self._build_model(
-            **shared_kwargs,
-            teacher_ema_update_every=1,
-        )
-        model_u2 = self._build_model(
-            **shared_kwargs,
-            teacher_ema_update_every=2,
-        )
-
-        for _ in range(5):
-            model_u1.update_teacher()
-            model_u2.update_teacher()
-            self.assertAlmostEqual(
-                float(model_u1.teacher_ema_decay_current),
-                float(model_u2.teacher_ema_decay_current),
-                places=6,
-            )
-
-    def test_update_teacher_immediately_updates_teacher_module(self):
-        model = self._build_model(
-            use_ema_teacher_target=True,
-            teacher_ema_decay_start=0.5,
-            teacher_ema_decay=0.5,
-            teacher_ema_decay_warmup_steps=0,
-        )
-        teacher = model._teacher_encoder_module()
-        name, student_param = next(iter(model.encoder.named_parameters()))
-        teacher_param = dict(teacher.named_parameters())[name]
-        with torch.no_grad():
-            teacher_param.zero_()
-            student_param.fill_(2.0)
-
-        model.update_teacher()
-
-        self.assertIs(teacher, model._teacher_encoder_module())
-        torch.testing.assert_close(teacher_param, torch.full_like(teacher_param, 1.0))
-        self.assertEqual(int(model.teacher_encoder.n_averaged.item()), 1)
-
-    def test_update_teacher_syncs_encoder_buffers(self):
-        model = self._build_model(
-            use_ema_teacher_target=True,
-            teacher_ema_decay_start=0.5,
-            teacher_ema_decay=0.5,
-            teacher_ema_decay_warmup_steps=0,
-        )
-        model.encoder.register_buffer("dummy_buffer", torch.tensor([4.0]))
-        model.teacher_encoder.module.register_buffer("dummy_buffer", torch.tensor([0.0]))
-
-        model.update_teacher()
-
-        torch.testing.assert_close(
-            model.teacher_encoder.module.dummy_buffer,
-            torch.tensor([2.0]),
-        )
 
     def test_weight_decay_targets_all_2d_weights(self):
         model = self._build_model()

@@ -25,7 +25,7 @@ def get_config() -> config_dict.ConfigDict:
     # Model
 
 
-    cfg.num_peaks = 128
+    cfg.num_peaks = 64
     cfg.model_dim = 256
     cfg.encoder_num_layers = 12
     cfg.encoder_num_heads = 8
@@ -96,11 +96,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_token_loss_type = "l2"
     cfg.jepa_target_normalization = "zscore"
     cfg.jepa_target_layers = [3, 5, 8, 12]
-    cfg.use_ema_teacher_target = False
-    cfg.teacher_ema_decay = 0.95
-    cfg.teacher_ema_decay_start = 0.8
-    cfg.teacher_ema_decay_warmup_steps = 250_000
-    cfg.teacher_ema_update_every = 1
     cfg.grad_clip_norm = 1.0
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "reduce-overhead"

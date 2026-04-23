@@ -102,7 +102,6 @@ def main() -> None:
         if batch is None:
             break
         _train_step_impl(model, batch, optimizers, schedulers, autocast_dtype, grad_clip_norm)
-        model.update_teacher()
     if device.type == "cuda":
         torch.cuda.synchronize()
     log.info("Warmup done.")
@@ -134,7 +133,6 @@ def main() -> None:
                 prefetcher = _BatchPrefetcher(iter(train_loader), device, prefetch_size=device_prefetch_size)
                 batch = prefetcher.next()
             _train_step_impl(model, batch, optimizers, schedulers, autocast_dtype, grad_clip_norm)
-            model.update_teacher()
             if device.type == "cuda":
                 torch.cuda.synchronize()
             prof.step()

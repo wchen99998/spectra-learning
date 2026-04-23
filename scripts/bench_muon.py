@@ -259,7 +259,6 @@ def run_benchmark(
             prefetcher = prefetcher_factory()
             batch = prefetcher.next()
         do_step(batch)
-        model.update_teacher()
     torch.cuda.synchronize()
     log.info("[%s] Warmup done.", label)
 
@@ -276,7 +275,6 @@ def run_benchmark(
         t0 = time.perf_counter()
 
         do_step(batch)
-        model.update_teacher()
 
         torch.cuda.synchronize()
         t1 = time.perf_counter()

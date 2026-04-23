@@ -48,11 +48,7 @@ def main() -> None:
 
     ckpt_path = "experiments/TEST_MASKEDJEPA_small_sigreg_nist20_correct_bounded/trial_000/checkpoints/step-00525000.pt"
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    state = {
-        k: v for k, v in ckpt["model"].items()
-        if not k.startswith("teacher_encoder")
-    }
-    model.load_state_dict(state, strict=False)
+    model.load_state_dict(ckpt["model"], strict=False)
     model.to(device)
     model.eval()
 
