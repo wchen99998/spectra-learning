@@ -46,12 +46,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_num_slices = 256
     cfg.sigreg_lambda = 0.003
     cfg.sigreg_precursor_scale = 1.0
-    cfg.vicreg_lambda = 0.2
-    cfg.vicreg_inv_coeff = 0.0
-    cfg.vicreg_var_coeff = 25.0
-    cfg.vicreg_cov_coeff = 1.0
-    cfg.vicreg_variance_target = 1.0
-    cfg.vicreg_eps = 1e-4
 
     cfg.jepa_num_target_blocks = 3
     cfg.encoder_use_position_embedding = False

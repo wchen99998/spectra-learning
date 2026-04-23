@@ -50,12 +50,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.feature_mlp_hidden_dim = 1024
     cfg.sigreg_num_slices = 256
     cfg.sigreg_lambda = 0.02
-    cfg.vicreg_lambda = 0.02
-    cfg.vicreg_inv_coeff = 0.0
-    cfg.vicreg_var_coeff = 25.0
-    cfg.vicreg_cov_coeff = 1.0
-    cfg.vicreg_variance_target = 1.0
-    cfg.vicreg_eps = 1e-4
     cfg.jepa_num_target_blocks = 2
     cfg.jepa_context_fraction = 0.5
     cfg.jepa_context_fraction_range = (0.5, 0.5)

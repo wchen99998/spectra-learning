@@ -209,8 +209,29 @@ class BlockJEPATests(unittest.TestCase):
                 metrics = model.forward_augmented(batch)
                 self.assertIn("sigreg_term", metrics)
                 self.assertIn("token_sigreg_loss", metrics)
+                self.assertIn("context_token_sigreg_loss", metrics)
+                self.assertIn("teacher_token_sigreg_loss", metrics)
                 self.assertGreater(float(metrics["token_sigreg_loss"].detach()), 0.0)
+                self.assertGreater(
+                    float(metrics["context_token_sigreg_loss"].detach()), 0.0
+                )
+                self.assertGreater(
+                    float(metrics["teacher_token_sigreg_loss"].detach()), 0.0
+                )
                 self.assertGreater(float(metrics["sigreg_term"].detach()), 0.0)
+                self.assertTrue(
+                    torch.allclose(
+                        metrics["token_sigreg_loss"],
+                        metrics["context_token_sigreg_loss"]
+                        + metrics["teacher_token_sigreg_loss"],
+                    )
+                )
+                self.assertTrue(
+                    torch.allclose(
+                        metrics["sigreg_term"],
+                        metrics["context_sigreg_term"] + metrics["teacher_sigreg_term"],
+                    )
+                )
                 self.assertTrue(
                     torch.allclose(
                         metrics["loss"],
@@ -259,40 +280,65 @@ class BlockJEPATests(unittest.TestCase):
                     batch["target_masks"].float(),
                 )
 
-    def test_vicreg_on_visible_context_contributes_to_loss(self):
-        model = self._build_model(
-            masked_token_loss_weight=1.0,
-            representation_regularizer="vicreg",
-            vicreg_lambda=0.02,
-        )
-        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-        metrics = model.forward_augmented(batch)
-        for key in (
-            "vicreg_term",
-            "token_vicreg_loss",
-            "vicreg_var_loss",
-            "vicreg_cov_loss",
-        ):
-            self.assertIn(key, metrics)
-        self.assertEqual(float(metrics["vicreg_inv_loss"].detach()), 0.0)
-        self.assertGreater(float(metrics["vicreg_var_loss"].detach()), 0.0)
-        self.assertGreaterEqual(float(metrics["vicreg_cov_loss"].detach()), 0.0)
-        self.assertGreater(float(metrics["token_vicreg_loss"].detach()), 0.0)
-        self.assertGreater(float(metrics["vicreg_term"].detach()), 0.0)
-        self.assertTrue(
-            torch.allclose(metrics["regularizer_loss"], metrics["token_vicreg_loss"])
-        )
-        self.assertTrue(
-            torch.allclose(metrics["regularizer_term"], metrics["vicreg_term"])
-        )
-        self.assertTrue(
-            torch.allclose(
-                metrics["loss"],
-                metrics["jepa_term"]
-                + metrics["cls_embedding_term"]
-                + metrics["vicreg_term"],
-            )
-        )
+    def test_sigreg_on_encoder_outputs_uses_visible_context_and_full_teacher_spectra(self):
+        for regularizer in ("sigreg-enc", "slot-sigreg-enc"):
+            with self.subTest(regularizer=regularizer):
+                model = self._build_model(
+                    encoder_num_layers=2,
+                    representation_regularizer=regularizer,
+                    sigreg_lambda=0.02,
+                    jepa_target_layers=[1, 2],
+                )
+                batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+                captured: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+                def fake_sigreg_forward(
+                    proj: torch.Tensor,
+                    valid_mask: torch.Tensor | None = None,
+                ) -> torch.Tensor:
+                    captured.append(
+                        (proj.detach().clone(), valid_mask.detach().clone())
+                    )
+                    return proj.new_tensor(float(len(captured)))
+
+                with mock.patch.object(
+                    model.sigreg,
+                    "forward",
+                    side_effect=fake_sigreg_forward,
+                ):
+                    metrics = model.forward_augmented(batch)
+
+                self.assertEqual(len(captured), 2)
+                context_proj, context_mask = captured[0]
+                teacher_proj, teacher_mask = captured[1]
+                self.assertEqual(
+                    context_proj.shape,
+                    (*batch["context_mask"].shape, model.model_dim),
+                )
+                self.assertEqual(
+                    teacher_proj.shape,
+                    (*batch["peak_valid_mask"].shape, model.jepa_target_dim),
+                )
+                torch.testing.assert_close(
+                    context_mask,
+                    batch["context_mask"].float(),
+                )
+                torch.testing.assert_close(
+                    teacher_mask,
+                    batch["peak_valid_mask"].float(),
+                )
+                torch.testing.assert_close(
+                    metrics["context_token_sigreg_loss"],
+                    metrics["context_token_sigreg_loss"].new_tensor(1.0),
+                )
+                torch.testing.assert_close(
+                    metrics["teacher_token_sigreg_loss"],
+                    metrics["teacher_token_sigreg_loss"].new_tensor(2.0),
+                )
+                torch.testing.assert_close(
+                    metrics["token_sigreg_loss"],
+                    metrics["token_sigreg_loss"].new_tensor(3.0),
+                )
 
     def test_teacher_targets_require_grad(self):
         model = self._build_model(masked_token_loss_weight=1.0)
@@ -644,13 +690,13 @@ class PrecursorTokenTests(unittest.TestCase):
                     num_targets=model.jepa_num_target_blocks,
                     precursor_in_context=True,
                 )
-                captured: dict[str, torch.Tensor] = {}
+                captured_masks: list[torch.Tensor] = []
 
                 def fake_sigreg_forward(
                     proj: torch.Tensor,
                     valid_mask: torch.Tensor | None = None,
                 ) -> torch.Tensor:
-                    captured["valid_mask"] = valid_mask.detach().clone()
+                    captured_masks.append(valid_mask.detach().clone())
                     return proj.new_zeros(())
 
                 with mock.patch.object(
@@ -660,14 +706,23 @@ class PrecursorTokenTests(unittest.TestCase):
                 ):
                     model.forward_augmented(batch)
 
-                self.assertIn("valid_mask", captured)
+                self.assertEqual(len(captured_masks), 2)
+                context_mask, teacher_mask = captured_masks
                 torch.testing.assert_close(
-                    captured["valid_mask"][:, 0],
-                    torch.full_like(captured["valid_mask"][:, 0], 4.0),
+                    context_mask[:, 0],
+                    torch.full_like(context_mask[:, 0], 4.0),
                 )
                 torch.testing.assert_close(
-                    captured["valid_mask"][:, 1:],
+                    context_mask[:, 1:],
                     batch["context_mask"][:, 1:].float(),
+                )
+                torch.testing.assert_close(
+                    teacher_mask[:, 0],
+                    torch.full_like(teacher_mask[:, 0], 4.0),
+                )
+                torch.testing.assert_close(
+                    teacher_mask[:, 1:],
+                    batch["peak_valid_mask"][:, 1:].float(),
                 )
 
     def test_sigreg_pred_respects_precursor_target_mask(self):

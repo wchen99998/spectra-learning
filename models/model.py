@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from models.losses import SIGReg, SlotwiseSIGReg, VICReg
+from models.losses import SIGReg, SlotwiseSIGReg
 from models.peak_features import PeakFeatureEmbedder
 from networks import transformer_torch
 from networks.transformer_torch import _build_norm, create_visible_attention_mask
@@ -419,12 +419,6 @@ class PeakSetSIGReg(nn.Module):
         sigreg_num_slices: int = 256,
         sigreg_lambda: float = 0.02,
         sigreg_precursor_scale: float = 1.0,
-        vicreg_lambda: float = 0.02,
-        vicreg_inv_coeff: float = 0.0,
-        vicreg_var_coeff: float = 25.0,
-        vicreg_cov_coeff: float = 1.0,
-        vicreg_variance_target: float = 1.0,
-        vicreg_eps: float = 1e-4,
         jepa_num_target_blocks: int = 2,
         jepa_context_fraction: float = 0.5,
         jepa_target_fraction: float = 0.25,
@@ -470,14 +464,12 @@ class PeakSetSIGReg(nn.Module):
             "sigreg-pred",
             "slot-sigreg-enc",
             "slot-sigreg-pred",
-            "vicreg",
         ):
             raise ValueError(
                 f"Unsupported regularizer: {self.representation_regularizer!r}"
             )
         self.sigreg_lambda = float(sigreg_lambda)
         self.sigreg_precursor_scale = float(sigreg_precursor_scale)
-        self.vicreg_lambda = float(vicreg_lambda)
         self.masked_token_loss_weight = float(masked_token_loss_weight)
         self.masked_token_loss_type = str(masked_token_loss_type).lower()
         self.jepa_target_normalization = str(jepa_target_normalization).lower()
@@ -560,13 +552,6 @@ class PeakSetSIGReg(nn.Module):
             else SIGReg
         )
         self.sigreg = sigreg_cls(num_slices=int(sigreg_num_slices))
-        self.vicreg = VICReg(
-            inv_coeff=float(vicreg_inv_coeff),
-            var_coeff=float(vicreg_var_coeff),
-            cov_coeff=float(vicreg_cov_coeff),
-            variance_target=float(vicreg_variance_target),
-            eps=float(vicreg_eps),
-        )
         # Temporal predictor for frame -> next-frame prediction.
         if self.temporal_predictor_num_layers > 0:
             self.temporal_predictor = _build_temporal_decoder_blocks(
@@ -864,47 +849,62 @@ class PeakSetSIGReg(nn.Module):
             self.representation_regularizer in ("sigreg-pred", "slot-sigreg-pred")
             and self.sigreg_lambda > 0
         )
-        use_vicreg = self.representation_regularizer == "vicreg" and self.vicreg_lambda > 0
         regularizer_lambda_current = context_emb.new_tensor(0.0)
         regularizer_loss = context_emb.new_tensor(0.0)
         regularizer_term = context_emb.new_tensor(0.0)
         sigreg_lambda_current = context_emb.new_tensor(0.0)
         token_sigreg_loss = context_emb.new_tensor(0.0)
+        context_token_sigreg_loss = context_emb.new_tensor(0.0)
+        teacher_token_sigreg_loss = context_emb.new_tensor(0.0)
         sigreg_term = context_emb.new_tensor(0.0)
-        vicreg_lambda_current = context_emb.new_tensor(0.0)
-        token_vicreg_loss = context_emb.new_tensor(0.0)
-        vicreg_term = context_emb.new_tensor(0.0)
-        vicreg_inv_loss = context_emb.new_tensor(0.0)
-        vicreg_var_loss = context_emb.new_tensor(0.0)
-        vicreg_cov_loss = context_emb.new_tensor(0.0)
-        if use_sigreg_enc or use_sigreg_pred:
+        context_sigreg_term = context_emb.new_tensor(0.0)
+        teacher_sigreg_term = context_emb.new_tensor(0.0)
+        if use_sigreg_enc:
             sigreg_lambda_current = context_emb.new_tensor(self.sigreg_lambda)
-            sigreg_input = context_emb.float()
-            sigreg_weights = context_mask.float()
-            if use_sigreg_pred:
-                sigreg_input = predictor_output.float()
-                sigreg_weights = target_masks.float()
+            context_sigreg_weights = context_mask.float()
+            teacher_sigreg_weights = peak_valid_mask.float()
+            if self.use_precursor_token:
+                context_sigreg_weights = context_sigreg_weights.clone()
+                context_sigreg_weights[..., 0] *= self.sigreg_precursor_scale
+                teacher_sigreg_weights = teacher_sigreg_weights.clone()
+                teacher_sigreg_weights[..., 0] *= self.sigreg_precursor_scale
+            context_token_sigreg_loss = self.sigreg(
+                context_emb.float(),
+                valid_mask=context_sigreg_weights,
+            )
+            teacher_token_sigreg_loss = self.sigreg(
+                teacher_targets.float(),
+                valid_mask=teacher_sigreg_weights,
+            )
+            token_sigreg_loss = (
+                context_token_sigreg_loss + teacher_token_sigreg_loss
+            )
+            context_sigreg_term = sigreg_lambda_current * context_token_sigreg_loss.to(
+                dtype=context_emb.dtype
+            )
+            teacher_sigreg_term = sigreg_lambda_current * teacher_token_sigreg_loss.to(
+                dtype=context_emb.dtype
+            )
+            sigreg_term = context_sigreg_term + teacher_sigreg_term
+            regularizer_lambda_current = sigreg_lambda_current
+            regularizer_loss = token_sigreg_loss.to(dtype=context_emb.dtype)
+            regularizer_term = sigreg_term
+        elif use_sigreg_pred:
+            sigreg_lambda_current = context_emb.new_tensor(self.sigreg_lambda)
+            sigreg_weights = target_masks.float()
             if self.use_precursor_token:
                 sigreg_weights = sigreg_weights.clone()
                 sigreg_weights[..., 0] *= self.sigreg_precursor_scale
-            token_sigreg_loss = self.sigreg(sigreg_input, valid_mask=sigreg_weights)
+            token_sigreg_loss = self.sigreg(
+                predictor_output.float(),
+                valid_mask=sigreg_weights,
+            )
             sigreg_term = sigreg_lambda_current * token_sigreg_loss.to(
                 dtype=context_emb.dtype
             )
             regularizer_lambda_current = sigreg_lambda_current
             regularizer_loss = token_sigreg_loss.to(dtype=context_emb.dtype)
             regularizer_term = sigreg_term
-        elif use_vicreg:
-            vicreg_lambda_current = context_emb.new_tensor(self.vicreg_lambda)
-            vicreg_losses = self.vicreg(context_emb.float(), valid_mask=context_mask)
-            token_vicreg_loss = vicreg_losses["loss"].to(dtype=context_emb.dtype)
-            vicreg_inv_loss = vicreg_losses["inv_loss"].to(dtype=context_emb.dtype)
-            vicreg_var_loss = vicreg_losses["var_loss"].to(dtype=context_emb.dtype)
-            vicreg_cov_loss = vicreg_losses["cov_loss"].to(dtype=context_emb.dtype)
-            vicreg_term = vicreg_lambda_current * token_vicreg_loss
-            regularizer_lambda_current = vicreg_lambda_current
-            regularizer_loss = token_vicreg_loss
-            regularizer_term = vicreg_term
         loss = jepa_term + cls_embedding_term + regularizer_term
         with torch.no_grad():
             collapse_metrics: dict[str, torch.Tensor] = {}
@@ -924,17 +924,16 @@ class PeakSetSIGReg(nn.Module):
             "regularizer_lambda_current": regularizer_lambda_current,
             "sigreg_loss": token_sigreg_loss.to(dtype=context_emb.dtype),
             "token_sigreg_loss": token_sigreg_loss.to(dtype=context_emb.dtype),
+            "context_token_sigreg_loss": context_token_sigreg_loss.to(
+                dtype=context_emb.dtype
+            ),
+            "teacher_token_sigreg_loss": teacher_token_sigreg_loss.to(
+                dtype=context_emb.dtype
+            ),
             "sigreg_term": sigreg_term,
+            "context_sigreg_term": context_sigreg_term,
+            "teacher_sigreg_term": teacher_sigreg_term,
             "sigreg_lambda_current": sigreg_lambda_current,
-            "vicreg_loss": token_vicreg_loss,
-            "token_vicreg_loss": token_vicreg_loss,
-            "vicreg_term": vicreg_term,
-            "vicreg_lambda_current": vicreg_lambda_current,
-            "vicreg_inv_loss": vicreg_inv_loss,
-            "vicreg_var_loss": vicreg_var_loss,
-            "vicreg_cov_loss": vicreg_cov_loss,
-            "target_vicreg_term_over_jepa_term": vicreg_term
-            / jepa_term.clamp_min(1e-8),
             "target_regularizer_term_over_jepa_term": regularizer_term
             / jepa_term.clamp_min(1e-8),
             "target_sigreg_term_over_jepa_term": sigreg_term

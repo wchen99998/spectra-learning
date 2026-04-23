@@ -109,12 +109,6 @@ BEST_SWEEP_OPTIM = {
     "weight_decay": 0.1,
     "representation_regularizer": "none",
     "sigreg_lambda": 0.02,
-    "vicreg_lambda": 0.02,
-    "vicreg_inv_coeff": 0.0,
-    "vicreg_var_coeff": 25.0,
-    "vicreg_cov_coeff": 1.0,
-    "vicreg_variance_target": 1.0,
-    "vicreg_eps": 1e-4,
 }
 
 TEN_M_BACKBONE = {
