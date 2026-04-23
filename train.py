@@ -26,6 +26,7 @@ from utils.training import (
     build_logger,
     build_model_from_config,
     collect_and_log_param_metrics,
+    patch_gns_muon_compile_for_dynamic_shapes,
 )
 
 torch.set_float32_matmul_precision("high")
@@ -121,8 +122,9 @@ def _train_step_impl(
     else:
         autocast_ctx = torch.autocast(device_type=device_type, dtype=autocast_dtype)
     torch.compiler.cudagraph_mark_step_begin()
+    teacher_targets = model.compute_teacher_targets(batch)
     with autocast_ctx:
-        metrics = model.forward_augmented(batch)
+        metrics = model.forward_augmented_with_teacher_targets(batch, teacher_targets)
     metrics["loss"].backward()
     if grad_clip_norm is not None and grad_clip_norm > 0:
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
@@ -177,6 +179,7 @@ def _build_optimizers(
     fused = is_cuda if fused_cfg is None else bool(fused_cfg) and is_cuda
 
     if optimizer_type == "muon":
+        patch_gns_muon_compile_for_dynamic_shapes()
         from gram_newton_schulz import Muon as GNSMuon
 
         muon_lr = float(config.get("muon_lr", None) or base_lr)
@@ -405,7 +408,16 @@ def train_and_evaluate(
     else:
         raise ValueError(f"Unsupported autocast_dtype: {_ac_name}")
     _compile_mode = str(config.get("compile_mode", "max-autotune"))
-    model.forward_augmented = torch.compile(model.forward_augmented, mode=_compile_mode, fullgraph=False)
+    model.compute_teacher_targets = torch.compile(
+        model.compute_teacher_targets,
+        mode=_compile_mode,
+        fullgraph=False,
+    )
+    model.forward_augmented_with_teacher_targets = torch.compile(
+        model.forward_augmented_with_teacher_targets,
+        mode=_compile_mode,
+        fullgraph=False,
+    )
     optimizer_type = str(config.get("optimizer", "adamw")).lower()
     device_prefetch_size = int(config.get("device_prefetch_size", 1))
     max_duration_hours = config.get("max_duration_hours", None)

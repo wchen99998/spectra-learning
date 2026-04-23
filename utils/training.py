@@ -14,6 +14,141 @@ from ml_collections import config_dict
 from models.model import PeakSetSIGReg
 from utils.spectra_preprocessing import PEAK_MZ_MAX
 
+_GNS_MUON_DYNAMIC_PATCHED = False
+
+
+@torch.compile(fullgraph=True, mode="reduce-overhead", dynamic=True)
+def _stacked_muon_update_pre_orthogonalize(
+    gradients: torch.Tensor,
+    momentums: torch.Tensor,
+    momentum: torch.Tensor,
+    nesterov: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    gradients = gradients.to(dtype=momentums.dtype)
+    updated_momentums = momentums * momentum
+    updated_momentums = updated_momentums + gradients
+    if nesterov:
+        updates = updated_momentums * momentum + gradients
+    else:
+        updates = updated_momentums
+    return updates.to(dtype=torch.bfloat16), updated_momentums
+
+
+def _mark_matrices_dynamic(x: torch.Tensor) -> torch.Tensor:
+    dynamic_dims = {0}
+    if x.ndim >= 2:
+        dynamic_dims.add(x.ndim - 2)
+    if x.ndim >= 1:
+        dynamic_dims.add(x.ndim - 1)
+    for dim in sorted(dynamic_dims):
+        torch._dynamo.mark_dynamic(x, dim)
+    return x
+
+
+def _dynamic_muon_update_pre_orthogonalize(
+    G: list[torch.Tensor],
+    M: list[torch.Tensor],
+    momentum: torch.Tensor,
+    nesterov: bool,
+) -> list[torch.Tensor]:
+    if not G:
+        return []
+    gradients = _mark_matrices_dynamic(torch.stack(G, dim=0))
+    momentums = _mark_matrices_dynamic(torch.stack(M, dim=0))
+    updates, updated_momentums = _stacked_muon_update_pre_orthogonalize(
+        gradients,
+        momentums,
+        momentum,
+        nesterov,
+    )
+    for momentum_buffer, updated in zip(
+        M,
+        updated_momentums.unbind(0),
+        strict=True,
+    ):
+        momentum_buffer.copy_(updated)
+    return list(updates.unbind(0))
+
+
+def _sorted_create_param_batches(
+    params: list[torch.Tensor],
+) -> list[list[torch.Tensor]]:
+    groups: dict[tuple[torch.Size, torch.dtype], list[torch.Tensor]] = {}
+    for param in params:
+        groups.setdefault((param.shape, param.dtype), []).append(param)
+
+    batches = list(groups.values())
+    for batch in batches:
+        batch.sort(key=lambda param: param.data_ptr())
+
+    def _batch_order_key(batch: list[torch.Tensor]) -> tuple[int, int, int, int]:
+        rows, cols = batch[0].shape[-2:]
+        if rows == cols:
+            branch_kind = 0
+        elif rows > cols:
+            branch_kind = 1
+        else:
+            branch_kind = 2
+        return (-len(batch), branch_kind, -max(rows, cols), -min(rows, cols))
+
+    batches.sort(key=_batch_order_key)
+    return batches
+
+
+def patch_gns_muon_compile_for_dynamic_shapes() -> None:
+    global _GNS_MUON_DYNAMIC_PATCHED
+    if _GNS_MUON_DYNAMIC_PATCHED:
+        return
+
+    from gram_newton_schulz.gram_newton_schulz import GramNewtonSchulz
+    from gram_newton_schulz.muon import muon as muon_mod
+    from gram_newton_schulz.muon.muon_utils import muon_opt_utils
+    from gram_newton_schulz.standard_newton_schulz import StandardNewtonSchulz
+
+    gram_call = getattr(
+        GramNewtonSchulz.__call__,
+        "_torchdynamo_orig_callable",
+        GramNewtonSchulz.__call__,
+    )
+    compiled_gram_call = torch.compile(
+        gram_call,
+        fullgraph=True,
+        mode="reduce-overhead",
+        dynamic=True,
+    )
+    
+    def _dynamic_gram_call(self, X):
+        return compiled_gram_call(self, _mark_matrices_dynamic(X))
+
+    _dynamic_gram_call.__wrapped__ = gram_call
+    _dynamic_gram_call._torchdynamo_orig_callable = gram_call
+    GramNewtonSchulz.__call__ = _dynamic_gram_call
+
+    standard_call = getattr(
+        StandardNewtonSchulz.__call__,
+        "_torchdynamo_orig_callable",
+        StandardNewtonSchulz.__call__,
+    )
+    compiled_standard_call = torch.compile(
+        standard_call,
+        fullgraph=True,
+        mode="reduce-overhead",
+        dynamic=True,
+    )
+
+    def _dynamic_standard_call(self, X):
+        return compiled_standard_call(self, _mark_matrices_dynamic(X))
+
+    _dynamic_standard_call.__wrapped__ = standard_call
+    _dynamic_standard_call._torchdynamo_orig_callable = standard_call
+    StandardNewtonSchulz.__call__ = _dynamic_standard_call
+
+    muon_mod.muon_update_pre_orthogonalize = _dynamic_muon_update_pre_orthogonalize
+    muon_opt_utils.muon_update_pre_orthogonalize = _dynamic_muon_update_pre_orthogonalize
+    muon_mod.create_param_batches = _sorted_create_param_batches
+    muon_opt_utils.create_param_batches = _sorted_create_param_batches
+    _GNS_MUON_DYNAMIC_PATCHED = True
+
 
 def load_config(path: str | Path) -> config_dict.ConfigDict:
     path = Path(path)

@@ -317,6 +317,25 @@ class BlockJEPATests(unittest.TestCase):
         )
         self.assertFalse(teacher_targets.requires_grad)
 
+    def test_compute_teacher_targets_expands_per_target_block(self):
+        model = self._build_model(
+            masked_token_loss_weight=1.0,
+            jepa_target_layers=[1],
+        )
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+        expected = model._compute_jepa_teacher_targets(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            batch["peak_valid_mask"],
+        ).unsqueeze(1).expand(
+            -1,
+            model.jepa_num_target_blocks,
+            -1,
+            -1,
+        )
+        actual = model.compute_teacher_targets(batch)
+        self.assertTrue(torch.allclose(actual, expected))
+
     def test_pooled_teacher_peak_targets_are_detached_without_ema(self):
         model = self._build_model()
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)

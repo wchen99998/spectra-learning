@@ -792,6 +792,22 @@ class PeakSetSIGReg(nn.Module):
             )
             return torch.cat(teacher_peak_outputs, dim=-1)
 
+    def compute_teacher_targets(
+        self,
+        augmented_batch: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        teacher_targets = self._compute_jepa_teacher_targets(
+            augmented_batch["peak_mz"],
+            augmented_batch["peak_intensity"],
+            augmented_batch["peak_valid_mask"],
+        )
+        return teacher_targets.unsqueeze(1).expand(
+            -1,
+            self.jepa_num_target_blocks,
+            -1,
+            -1,
+        )
+
     def _compute_pooled_teacher_peak_targets(
         self,
         peak_mz: torch.Tensor,
@@ -901,6 +917,18 @@ class PeakSetSIGReg(nn.Module):
         augmented_batch: dict[str, torch.Tensor],
         teacher_targets: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
+        if teacher_targets is None:
+            teacher_targets = self.compute_teacher_targets(augmented_batch)
+        return self.forward_augmented_with_teacher_targets(
+            augmented_batch,
+            teacher_targets,
+        )
+
+    def forward_augmented_with_teacher_targets(
+        self,
+        augmented_batch: dict[str, torch.Tensor],
+        teacher_targets: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
         peak_mz = augmented_batch["peak_mz"]
         peak_intensity = augmented_batch["peak_intensity"]
         peak_valid_mask = augmented_batch["peak_valid_mask"]
@@ -915,17 +943,6 @@ class PeakSetSIGReg(nn.Module):
             visible_mask=context_mask,
         )
         context_emb, _ = self.encoder.split_peak_and_cls(context_encoded)
-        # Teacher sees full valid spectrum; loss mask selects target positions per block
-        if teacher_targets is not None:
-            target_token_target = teacher_targets
-        else:
-            teacher_targets_full = self._compute_jepa_teacher_targets(
-                peak_mz,
-                peak_intensity,
-                peak_valid_mask,
-            )
-            target_token_target = teacher_targets_full.unsqueeze(1).expand(-1, K, -1, -1)
-
         ctx_mask_v = context_mask.unsqueeze(1)
         context_emb_by_view = context_emb.unsqueeze(1).expand(-1, K, -1, -1)
         predictor_input = context_emb_by_view * ctx_mask_v.unsqueeze(-1)
@@ -939,7 +956,7 @@ class PeakSetSIGReg(nn.Module):
             (ctx_mask_v | target_masks).reshape(B * K, N),
         ).reshape(B, K, N, -1)
         loss_pred = predictor_output
-        loss_target = target_token_target
+        loss_target = teacher_targets
         loss_target = self._apply_jepa_target_normalization(loss_target)
         per_token_reg = self._embedding_loss(loss_pred, loss_target)
 

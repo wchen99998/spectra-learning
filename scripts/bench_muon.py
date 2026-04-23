@@ -19,7 +19,11 @@ import torch
 
 from input_pipeline import GemsNativeDataModule
 from train import _BatchPrefetcher, _train_step_impl
-from utils.training import build_model_from_config, load_config
+from utils.training import (
+    build_model_from_config,
+    load_config,
+    patch_gns_muon_compile_for_dynamic_shapes,
+)
 
 torch.set_float32_matmul_precision("high")
 logging.basicConfig(level=logging.INFO)
@@ -113,6 +117,7 @@ def build_gns_muon(config, model, total_steps, device, coefficients_preset, ns_a
 
     When ns_use_kernels=True, params with incompatible strides are routed to AdamW.
     """
+    patch_gns_muon_compile_for_dynamic_shapes()
     from gram_newton_schulz import Muon as GNSMuon
 
     base_lr = float(config.learning_rate)
@@ -193,8 +198,9 @@ def _compiled_train_step(
     else:
         autocast_ctx = torch.autocast(device_type=device_type, dtype=autocast_dtype)
     torch.compiler.cudagraph_mark_step_begin()
+    teacher_targets = model.compute_teacher_targets(batch)
     with autocast_ctx:
-        metrics = model.forward_augmented(batch)
+        metrics = model.forward_augmented_with_teacher_targets(batch, teacher_targets)
     metrics["loss"].backward()
     if grad_clip_norm is not None and grad_clip_norm > 0:
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
@@ -222,8 +228,13 @@ def run_benchmark(
     """Run warmup + timed steps, return per-step timings."""
     model.train()
     compile_mode = str(config.get("compile_mode", "reduce-overhead"))
-    model.forward_augmented = torch.compile(
-        model.forward_augmented, mode=compile_mode, fullgraph=False
+    model.compute_teacher_targets = torch.compile(
+        model.compute_teacher_targets, mode=compile_mode, fullgraph=False
+    )
+    model.forward_augmented_with_teacher_targets = torch.compile(
+        model.forward_augmented_with_teacher_targets,
+        mode=compile_mode,
+        fullgraph=False,
     )
 
     if compile_optimizers:
