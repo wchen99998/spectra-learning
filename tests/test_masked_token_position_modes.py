@@ -357,7 +357,6 @@ def test_local_global_loss_uses_target_tokens_only():
     peak_valid_mask = batch["peak_valid_mask"]
     context_mask = batch["context_mask"] & peak_valid_mask
     target_masks = batch["target_masks"] & peak_valid_mask.unsqueeze(1)
-    target_masks_by_view = target_masks.permute(1, 0, 2)
 
     context_encoded = model.encoder(
         peak_mz,
@@ -367,42 +366,32 @@ def test_local_global_loss_uses_target_tokens_only():
     )
     context_emb, _ = PeakSetEncoder.split_peak_and_cls(context_encoded)
     B, K, N = target_masks.shape
-    teacher_target = model.encoder(
+    teacher_target = model._compute_jepa_teacher_targets(
         peak_mz,
         peak_intensity,
-        valid_mask=peak_valid_mask,
-        visible_mask=peak_valid_mask,
+        peak_valid_mask,
     )
-    teacher_target, _ = PeakSetEncoder.split_peak_and_cls(teacher_target)
 
-    predictor_union_mask = context_mask.unsqueeze(0) | target_masks_by_view
-    predictor_input = torch.zeros_like(context_emb.unsqueeze(0).expand(K, -1, -1, -1))
-    predictor_input = torch.where(
-        context_mask.unsqueeze(0).unsqueeze(-1),
-        context_emb.unsqueeze(0).expand(K, -1, -1, -1),
-        predictor_input,
-    )
+    predictor_union_mask = context_mask.unsqueeze(1) | target_masks
+    predictor_input = context_emb.unsqueeze(1).expand(-1, K, -1, -1)
+    predictor_input = predictor_input * context_mask.unsqueeze(1).unsqueeze(-1)
     latent_mask_token = model.latent_mask_token.view(1, 1, 1, -1).to(
         dtype=context_emb.dtype,
         device=context_emb.device,
     )
     predictor_input = torch.where(
-        target_masks_by_view.unsqueeze(-1),
+        target_masks.unsqueeze(-1),
         latent_mask_token,
         predictor_input,
     )
     predictor_output = model.predict_masked_targets(
         predictor_input.reshape(B * K, N, -1),
         predictor_union_mask.reshape(B * K, N),
-    ).reshape(K, B, N, -1)
-
-    per_token_l1 = (
-        predictor_output
-        - teacher_target.unsqueeze(0).expand(K, -1, -1, -1).detach()
-    ).abs().mean(dim=-1)
+    ).reshape(B, K, N, -1)
     masked_only_loss = (
-        per_token_l1 * target_masks_by_view.float()
-    ).sum() / target_masks_by_view.float().sum().clamp_min(1.0)
+        model._embedding_loss(predictor_output, teacher_target.unsqueeze(1))
+        * target_masks.float()
+    ).sum() / target_masks.float().sum().clamp_min(1.0)
 
     assert torch.allclose(metrics["local_global_loss"], masked_only_loss)
 
@@ -422,7 +411,6 @@ def test_local_global_loss_can_zscore_teacher_targets():
     peak_valid_mask = batch["peak_valid_mask"]
     context_mask = batch["context_mask"] & peak_valid_mask
     target_masks = batch["target_masks"] & peak_valid_mask.unsqueeze(1)
-    target_masks_by_view = target_masks.permute(1, 0, 2)
 
     context_encoded = model.encoder(
         peak_mz,
@@ -432,46 +420,35 @@ def test_local_global_loss_can_zscore_teacher_targets():
     )
     context_emb, _ = PeakSetEncoder.split_peak_and_cls(context_encoded)
     B, K, N = target_masks.shape
-    teacher_target = model.encoder(
+    teacher_target = model._compute_jepa_teacher_targets(
         peak_mz,
         peak_intensity,
-        valid_mask=peak_valid_mask,
-        visible_mask=peak_valid_mask,
+        peak_valid_mask,
     )
-    teacher_target, _ = PeakSetEncoder.split_peak_and_cls(teacher_target)
-    teacher_target = teacher_target.unsqueeze(1).expand(-1, K, -1, -1)
     teacher_target = (teacher_target - teacher_target.mean(dim=-1, keepdim=True)) / (
         teacher_target.std(dim=-1, keepdim=True, unbiased=False).clamp_min(1e-6)
     )
 
-    predictor_union_mask = context_mask.unsqueeze(0) | target_masks_by_view
-    predictor_input = torch.zeros_like(context_emb.unsqueeze(0).expand(K, -1, -1, -1))
-    predictor_input = torch.where(
-        context_mask.unsqueeze(0).unsqueeze(-1),
-        context_emb.unsqueeze(0).expand(K, -1, -1, -1),
-        predictor_input,
-    )
+    predictor_union_mask = context_mask.unsqueeze(1) | target_masks
+    predictor_input = context_emb.unsqueeze(1).expand(-1, K, -1, -1)
+    predictor_input = predictor_input * context_mask.unsqueeze(1).unsqueeze(-1)
     latent_mask_token = model.latent_mask_token.view(1, 1, 1, -1).to(
         dtype=context_emb.dtype,
         device=context_emb.device,
     )
     predictor_input = torch.where(
-        target_masks_by_view.unsqueeze(-1),
+        target_masks.unsqueeze(-1),
         latent_mask_token,
         predictor_input,
     )
     predictor_output = model.predict_masked_targets(
         predictor_input.reshape(B * K, N, -1),
         predictor_union_mask.reshape(B * K, N),
-    ).reshape(K, B, N, -1)
-
-    per_token_l1 = (
-        predictor_output
-        - teacher_target.permute(1, 0, 2, 3).detach()
-    ).abs().mean(dim=-1)
+    ).reshape(B, K, N, -1)
     masked_only_loss = (
-        per_token_l1 * target_masks_by_view.float()
-    ).sum() / target_masks_by_view.float().sum().clamp_min(1.0)
+        model._embedding_loss(predictor_output, teacher_target.unsqueeze(1))
+        * target_masks.float()
+    ).sum() / target_masks.float().sum().clamp_min(1.0)
 
     assert torch.allclose(metrics["local_global_loss"], masked_only_loss)
 
@@ -503,14 +480,14 @@ def test_multilayer_zscore_normalizes_each_target_slice_independently():
 
 
 @torch.no_grad()
-def test_global_vector_normalization_produces_unit_norm_vectors():
+def test_single_layer_zscore_normalizes_each_target_slice():
     model = _build_model(
         predictor_layers=2,
         jepa_target_normalization="zscore",
     )
     x = torch.randn(2, 3, model.model_dim)
 
-    normalized = model._normalize_global_vector(x)
+    normalized = model._apply_jepa_target_normalization(x)
 
     assert torch.allclose(
         normalized.mean(dim=-1),
@@ -519,7 +496,7 @@ def test_global_vector_normalization_produces_unit_norm_vectors():
         rtol=1e-5,
     )
     assert torch.allclose(
-        normalized.norm(dim=-1),
+        normalized.std(dim=-1, unbiased=False),
         torch.ones(2, 3),
         atol=1e-4,
         rtol=1e-4,
@@ -527,7 +504,7 @@ def test_global_vector_normalization_produces_unit_norm_vectors():
 
 
 @torch.no_grad()
-def test_positions_outside_union_do_not_change_loss():
+def test_positions_outside_union_do_not_change_context_conditioning_with_fixed_teacher_targets():
     model = _build_model(num_target_blocks=2)
     batch_a = _make_batch()
     batch_b = {key: value.clone() for key, value in batch_a.items()}
@@ -542,19 +519,40 @@ def test_positions_outside_union_do_not_change_loss():
         batch_a["peak_mz"],
         batch_a["peak_intensity"],
         batch_a["peak_valid_mask"],
-    ).unsqueeze(1).expand(
-        -1,
-        model.jepa_num_target_blocks,
-        -1,
-        -1,
     )
-    metrics_a = model.forward_augmented(batch_a, teacher_targets=teacher_targets)
-    metrics_b = model.forward_augmented(batch_b, teacher_targets=teacher_targets)
+    latent_mask_token = model.latent_mask_token.view(1, 1, 1, -1)
 
-    assert torch.allclose(
-        metrics_a["local_global_loss"],
-        metrics_b["local_global_loss"],
-        atol=1e-6,
-        rtol=1e-6,
-    )
-    assert torch.allclose(metrics_a["loss"], metrics_b["loss"], atol=1e-6, rtol=1e-6)
+    def local_global_loss(batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        peak_mz = batch["peak_mz"]
+        peak_intensity = batch["peak_intensity"]
+        peak_valid_mask = batch["peak_valid_mask"]
+        context_mask = batch["context_mask"] & peak_valid_mask
+        target_masks = batch["target_masks"] & peak_valid_mask.unsqueeze(1)
+        B, K, N = target_masks.shape
+        context_encoded = model.encoder(
+            peak_mz,
+            peak_intensity,
+            valid_mask=peak_valid_mask,
+            visible_mask=context_mask,
+        )
+        context_emb, _ = PeakSetEncoder.split_peak_and_cls(context_encoded)
+        predictor_input = context_emb.unsqueeze(1).expand(-1, K, -1, -1)
+        predictor_input = predictor_input * context_mask.unsqueeze(1).unsqueeze(-1)
+        predictor_input = torch.where(
+            target_masks.unsqueeze(-1),
+            latent_mask_token.to(context_emb),
+            predictor_input,
+        )
+        predictor_output = model.predict_masked_targets(
+            predictor_input.reshape(B * K, N, -1),
+            (context_mask.unsqueeze(1) | target_masks).reshape(B * K, N),
+        ).reshape(B, K, N, -1)
+        return (
+            model._embedding_loss(predictor_output, teacher_targets.unsqueeze(1))
+            * target_masks.float()
+        ).sum() / target_masks.float().sum().clamp_min(1.0)
+
+    loss_a = local_global_loss(batch_a)
+    loss_b = local_global_loss(batch_b)
+
+    assert torch.allclose(loss_a, loss_b, atol=1e-6, rtol=1e-6)

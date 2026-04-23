@@ -304,7 +304,7 @@ class BlockJEPATests(unittest.TestCase):
         )
         self.assertTrue(teacher_targets.requires_grad)
 
-    def test_compute_teacher_targets_expands_per_target_block(self):
+    def test_compute_teacher_targets_returns_full_spectrum_once(self):
         model = self._build_model(
             masked_token_loss_weight=1.0,
             jepa_target_layers=[1],
@@ -314,11 +314,6 @@ class BlockJEPATests(unittest.TestCase):
             batch["peak_mz"],
             batch["peak_intensity"],
             batch["peak_valid_mask"],
-        ).unsqueeze(1).expand(
-            -1,
-            model.jepa_num_target_blocks,
-            -1,
-            -1,
         )
         actual = model.compute_teacher_targets(batch)
         self.assertTrue(actual.requires_grad)
@@ -340,26 +335,71 @@ class BlockJEPATests(unittest.TestCase):
             jepa_target_layers=[1],
         )
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+        peak_mz = batch["peak_mz"]
+        peak_intensity = batch["peak_intensity"]
+        peak_valid_mask = batch["peak_valid_mask"]
+        context_mask = batch["context_mask"] & peak_valid_mask
+        target_masks = batch["target_masks"] & peak_valid_mask.unsqueeze(1)
+        B, K, N = target_masks.shape
         teacher_targets = model._compute_jepa_teacher_targets(
-            batch["peak_mz"],
-            batch["peak_intensity"],
-            batch["peak_valid_mask"],
+            peak_mz,
+            peak_intensity,
+            peak_valid_mask,
         )
-        teacher_targets = teacher_targets.unsqueeze(1).expand(
-            -1,
-            model.jepa_num_target_blocks,
-            -1,
-            -1,
+        context_encoded = model.encoder(
+            peak_mz,
+            peak_intensity,
+            valid_mask=peak_valid_mask,
+            visible_mask=context_mask,
         )
+        context_emb, _ = model.encoder.split_peak_and_cls(context_encoded)
+        predictor_input = context_emb.unsqueeze(1).expand(-1, K, -1, -1)
+        predictor_input = predictor_input * context_mask.unsqueeze(1).unsqueeze(-1)
+        predictor_input = torch.where(
+            target_masks.unsqueeze(-1),
+            model.latent_mask_token.view(1, 1, 1, -1).to(context_emb),
+            predictor_input,
+        )
+        predictor_output = model.predict_masked_targets(
+            predictor_input.reshape(B * K, N, -1),
+            (context_mask.unsqueeze(1) | target_masks).reshape(B * K, N),
+        ).reshape(B, K, N, -1)
+        expected_local_global_loss = (
+            model._embedding_loss(predictor_output, teacher_targets.unsqueeze(1))
+            * target_masks.float()
+        ).sum() / target_masks.float().sum().clamp_min(1.0)
+        expected_jepa_term = model.masked_token_loss_weight * expected_local_global_loss
 
-        expected = model.forward_augmented(batch, teacher_targets=teacher_targets)
         actual = model.forward_augmented(batch)
 
-        for key in ("loss", "local_global_loss", "jepa_term"):
-            self.assertTrue(
-                torch.allclose(actual[key], expected[key], atol=1e-6, rtol=1e-6),
-                key,
+        self.assertTrue(
+            torch.allclose(
+                actual["local_global_loss"],
+                expected_local_global_loss,
+                atol=1e-6,
+                rtol=1e-6,
             )
+        )
+        self.assertTrue(
+            torch.allclose(actual["jepa_term"], expected_jepa_term, atol=1e-6, rtol=1e-6)
+        )
+        self.assertTrue(
+            torch.allclose(actual["loss"], expected_jepa_term, atol=1e-6, rtol=1e-6)
+        )
+
+    def test_forward_augmented_uses_single_encoder_pass(self):
+        model = self._build_model(masked_token_loss_weight=1.0)
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+
+        with mock.patch.object(
+            model.encoder,
+            "forward_with_block_outputs",
+            wraps=model.encoder.forward_with_block_outputs,
+        ) as encoder_forward:
+            metrics = model.forward_augmented(batch)
+
+        self.assertEqual(encoder_forward.call_count, 1)
+        self.assertTrue(torch.isfinite(metrics["loss"]))
 
     def test_cls_embedding_term_is_disabled(self):
         model = self._build_model(
@@ -444,13 +484,7 @@ class BlockJEPATests(unittest.TestCase):
             model,
             "forward_augmented",
             return_value={"loss": fake_loss},
-        ) as forward_augmented_mock, mock.patch.object(
-            model,
-            "forward_augmented_with_teacher_targets",
-            side_effect=AssertionError(
-                "forward_augmented_with_teacher_targets should not be called directly"
-            ),
-        ):
+        ) as forward_augmented_mock:
             metrics = _train_step_impl(
                 model,
                 batch,

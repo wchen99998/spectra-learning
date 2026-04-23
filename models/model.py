@@ -322,14 +322,14 @@ class PeakSetEncoder(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return x[:, :-1], x[:, -1]
 
-    def forward_peak_block_outputs(
+    def forward_with_block_outputs(
         self,
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
         valid_mask: torch.Tensor | None = None,
         visible_mask: torch.Tensor | None = None,
         block_indices: list[int] | tuple[int, ...] = (),
-    ) -> list[torch.Tensor]:
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         block_indices = tuple(int(idx) for idx in block_indices)
         attn_mask = _merge_visible_mask(valid_mask, visible_mask)
         x = self._add_positions(self.embedder(peak_mz, peak_intensity))
@@ -350,7 +350,27 @@ class PeakSetEncoder(nn.Module):
         x = self.final_norm(x)
         if self.num_layers in selected:
             selected_peak_outputs[self.num_layers] = x[:, :seq_len]
-        return [selected_peak_outputs[idx] for idx in block_indices]
+        peak_x = x[:, :seq_len]
+        cls_x = x[:, seq_len]
+        output = torch.cat([peak_x, cls_x.unsqueeze(1)], dim=1)
+        return output, [selected_peak_outputs[idx] for idx in block_indices]
+
+    def forward_peak_block_outputs(
+        self,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+        valid_mask: torch.Tensor | None = None,
+        visible_mask: torch.Tensor | None = None,
+        block_indices: list[int] | tuple[int, ...] = (),
+    ) -> list[torch.Tensor]:
+        _, peak_block_outputs = self.forward_with_block_outputs(
+            peak_mz,
+            peak_intensity,
+            valid_mask=valid_mask,
+            visible_mask=visible_mask,
+            block_indices=block_indices,
+        )
+        return peak_block_outputs
 
     def forward(
         self,
@@ -360,24 +380,14 @@ class PeakSetEncoder(nn.Module):
         visible_mask: torch.Tensor | None = None,
         return_cls_token: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        attn_mask = _merge_visible_mask(valid_mask, visible_mask)
-        x = self._add_positions(self.embedder(peak_mz, peak_intensity))
-        seq_len = peak_mz.shape[1]
-        x, attn_mask = self._append_special_tokens(x, attn_mask)
-        attn_mask = (
-            create_visible_attention_mask(attn_mask) if attn_mask is not None else None
+        output, _ = self.forward_with_block_outputs(
+            peak_mz,
+            peak_intensity,
+            valid_mask=valid_mask,
+            visible_mask=visible_mask,
         )
-        for block in self.blocks:
-            x = block(
-                x,
-                attn_mask=attn_mask,
-            )
-        x = self.final_norm(x)
-        peak_x = x[:, :seq_len]
-        cls_x = x[:, seq_len]
-        output = torch.cat([peak_x, cls_x.unsqueeze(1)], dim=1)
         if return_cls_token:
-            return output, cls_x
+            return output, output[:, -1]
         return output
 
 
@@ -674,17 +684,33 @@ class PeakSetSIGReg(nn.Module):
         self,
         augmented_batch: dict[str, torch.Tensor],
     ) -> torch.Tensor:
-        teacher_targets = self._compute_jepa_teacher_targets(
+        return self._compute_jepa_teacher_targets(
             augmented_batch["peak_mz"],
             augmented_batch["peak_intensity"],
             augmented_batch["peak_valid_mask"],
         )
-        return teacher_targets.unsqueeze(1).expand(
-            -1,
-            self.jepa_num_target_blocks,
-            -1,
-            -1,
+
+    def _encode_augmented_teacher_and_context(
+        self,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+        peak_valid_mask: torch.Tensor,
+        context_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_size = peak_mz.shape[0]
+        encoded, teacher_peak_outputs = self.encoder.forward_with_block_outputs(
+            torch.cat([peak_mz, peak_mz], dim=0),
+            torch.cat([peak_intensity, peak_intensity], dim=0),
+            valid_mask=torch.cat([peak_valid_mask, peak_valid_mask], dim=0),
+            visible_mask=torch.cat([peak_valid_mask, context_mask], dim=0),
+            block_indices=self.jepa_target_layers,
         )
+        teacher_targets = torch.cat(
+            [peak_output[:batch_size] for peak_output in teacher_peak_outputs],
+            dim=-1,
+        )
+        context_emb, _ = self.encoder.split_peak_and_cls(encoded[batch_size:])
+        return teacher_targets, context_emb
 
     def _compute_pooled_teacher_peak_targets(
         self,
@@ -792,19 +818,6 @@ class PeakSetSIGReg(nn.Module):
     def forward_augmented(
         self,
         augmented_batch: dict[str, torch.Tensor],
-        teacher_targets: torch.Tensor | None = None,
-    ) -> dict[str, torch.Tensor]:
-        if teacher_targets is None:
-            teacher_targets = self.compute_teacher_targets(augmented_batch)
-        return self.forward_augmented_with_teacher_targets(
-            augmented_batch,
-            teacher_targets,
-        )
-
-    def forward_augmented_with_teacher_targets(
-        self,
-        augmented_batch: dict[str, torch.Tensor],
-        teacher_targets: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         peak_mz = augmented_batch["peak_mz"]
         peak_intensity = augmented_batch["peak_intensity"]
@@ -813,13 +826,12 @@ class PeakSetSIGReg(nn.Module):
         target_masks = augmented_batch["target_masks"] & peak_valid_mask.unsqueeze(1)
         B, N = peak_mz.shape
         K = self.jepa_num_target_blocks
-        context_encoded = self.encoder(
+        teacher_targets, context_emb = self._encode_augmented_teacher_and_context(
             peak_mz,
             peak_intensity,
-            valid_mask=peak_valid_mask,
-            visible_mask=context_mask,
+            peak_valid_mask,
+            context_mask,
         )
-        context_emb, _ = self.encoder.split_peak_and_cls(context_encoded)
         ctx_mask_v = context_mask.unsqueeze(1)
         context_emb_by_view = context_emb.unsqueeze(1).expand(-1, K, -1, -1)
         predictor_input = context_emb_by_view * ctx_mask_v.unsqueeze(-1)
@@ -832,10 +844,8 @@ class PeakSetSIGReg(nn.Module):
             predictor_input.reshape(B * K, N, -1),
             (ctx_mask_v | target_masks).reshape(B * K, N),
         ).reshape(B, K, N, -1)
-        loss_pred = predictor_output
-        loss_target = teacher_targets
-        loss_target = self._apply_jepa_target_normalization(loss_target)
-        per_token_reg = self._embedding_loss(loss_pred, loss_target)
+        loss_target = self._apply_jepa_target_normalization(teacher_targets).unsqueeze(1)
+        per_token_reg = self._embedding_loss(predictor_output, loss_target)
 
         cls_loss_weight = context_emb.new_tensor(0.0)
         cls_embedding_loss = context_emb.new_tensor(0.0)
