@@ -105,24 +105,16 @@ def bench_steps(
     model.train()
     for _ in range(warmup):
         torch.compiler.cudagraph_mark_step_begin()
-        teacher_targets = model.compute_teacher_targets(batch)
         with torch.autocast("cuda", dtype=autocast_dtype):
-            metrics = model.forward_augmented_with_teacher_targets(
-                batch,
-                teacher_targets,
-            )
+            metrics = model.forward_augmented(batch)
         step_fn(metrics)
 
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     for _ in range(measure):
         torch.compiler.cudagraph_mark_step_begin()
-        teacher_targets = model.compute_teacher_targets(batch)
         with torch.autocast("cuda", dtype=autocast_dtype):
-            metrics = model.forward_augmented_with_teacher_targets(
-                batch,
-                teacher_targets,
-            )
+            metrics = model.forward_augmented(batch)
         step_fn(metrics)
     torch.cuda.synchronize()
     elapsed = time.perf_counter() - t0
@@ -144,11 +136,8 @@ def build_and_bench(
     torch.set_float32_matmul_precision(precision)
 
     model = build_model_from_config(cfg).to(device)
-    model.compute_teacher_targets = torch.compile(
-        model.compute_teacher_targets, mode="reduce-overhead", fullgraph=False,
-    )
-    model.forward_augmented_with_teacher_targets = torch.compile(
-        model.forward_augmented_with_teacher_targets,
+    model.forward_augmented = torch.compile(
+        model.forward_augmented,
         mode="reduce-overhead",
         fullgraph=False,
     )

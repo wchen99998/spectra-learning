@@ -82,11 +82,8 @@ def main() -> None:
     if not args.no_compile:
         compile_mode = str(config.get("compile_mode", "reduce-overhead"))
         log.info("Compiling with mode=%s", compile_mode)
-        model.compute_teacher_targets = torch.compile(
-            model.compute_teacher_targets, mode=compile_mode, fullgraph=False
-        )
-        model.forward_augmented_with_teacher_targets = torch.compile(
-            model.forward_augmented_with_teacher_targets,
+        model.forward_augmented = torch.compile(
+            model.forward_augmented,
             mode=compile_mode,
             fullgraph=True,
         )

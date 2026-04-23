@@ -9,7 +9,7 @@ import torch
 from models.losses import SlotwiseSIGReg
 from models.model import PeakSetSIGReg
 from models.peak_features import FourierFeatures, PeakFeatureEmbedder
-from train import _is_weight_decay_target
+from train import _is_weight_decay_target, _train_step_impl
 from utils.spectra_preprocessing import PRECURSOR_TOKEN_INTENSITY
 from utils.training import load_pretrained_weights
 
@@ -432,6 +432,36 @@ class BlockJEPATests(unittest.TestCase):
         loss.backward()
         grads = [p.grad for p in model.encoder.parameters() if p.requires_grad]
         self.assertTrue(any(g is not None for g in grads))
+
+    def test_train_step_impl_uses_forward_augmented_entrypoint(self):
+        model = self._build_model(masked_token_loss_weight=1.0)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+        fake_loss = torch.tensor(1.0, requires_grad=True)
+
+        with mock.patch.object(
+            model,
+            "forward_augmented",
+            return_value={"loss": fake_loss},
+        ) as forward_augmented_mock, mock.patch.object(
+            model,
+            "forward_augmented_with_teacher_targets",
+            side_effect=AssertionError(
+                "forward_augmented_with_teacher_targets should not be called directly"
+            ),
+        ):
+            metrics = _train_step_impl(
+                model,
+                batch,
+                [optimizer],
+                [scheduler],
+                autocast_dtype=None,
+                grad_clip_norm=None,
+            )
+
+        forward_augmented_mock.assert_called_once_with(batch)
+        self.assertIn("loss", metrics)
 
     def test_load_pretrained_weights_roundtrip(self):
         model = self._build_model()
