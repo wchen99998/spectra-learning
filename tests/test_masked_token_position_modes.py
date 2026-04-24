@@ -310,12 +310,18 @@ def test_multilayer_targets_widen_teacher_and_predictor_outputs():
     target_masks = batch["target_masks"] & peak_valid_mask.unsqueeze(1)
     B, K, N = target_masks.shape
 
+    teacher_target_features = model._compute_jepa_teacher_target_features(
+        peak_mz,
+        peak_intensity,
+        peak_valid_mask,
+    )
+    assert teacher_target_features.shape == (B, N, 2 * model.model_dim)
     teacher_targets = model._compute_jepa_teacher_targets(
         peak_mz,
         peak_intensity,
         peak_valid_mask,
     )
-    assert teacher_targets.shape == (B, N, 2 * model.model_dim)
+    assert teacher_targets.shape == (B, N, model.target_projector_dim)
 
     context_encoded = model.encoder(
         peak_mz,
@@ -335,11 +341,16 @@ def test_multilayer_targets_widen_teacher_and_predictor_outputs():
         model.latent_mask_token.view(1, 1, 1, -1).to(context_emb),
         predictor_input,
     )
+    predictor_output_features = model.predict_masked_target_features(
+        predictor_input.reshape(B * K, N, -1),
+        (context_mask.unsqueeze(1) | target_masks).reshape(B * K, N),
+    )
+    assert predictor_output_features.shape == (B * K, N, 2 * model.model_dim)
     predictor_output = model.predict_masked_targets(
         predictor_input.reshape(B * K, N, -1),
         (context_mask.unsqueeze(1) | target_masks).reshape(B * K, N),
     )
-    assert predictor_output.shape == (B * K, N, 2 * model.model_dim)
+    assert predictor_output.shape == (B * K, N, model.target_projector_dim)
 
     metrics = model.forward_augmented(batch)
     assert torch.isfinite(metrics["loss"])
@@ -424,9 +435,6 @@ def test_local_global_loss_can_zscore_teacher_targets():
         peak_mz,
         peak_intensity,
         peak_valid_mask,
-    )
-    teacher_target = (teacher_target - teacher_target.mean(dim=-1, keepdim=True)) / (
-        teacher_target.std(dim=-1, keepdim=True, unbiased=False).clamp_min(1e-6)
     )
 
     predictor_union_mask = context_mask.unsqueeze(1) | target_masks

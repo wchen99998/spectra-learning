@@ -64,6 +64,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_latent_predictor_num_heads = 8
     cfg.temporal_predictor_num_layers = 0
     cfg.predictor_dim = 128
+    cfg.target_projector_dim = cfg.model_dim
     cfg.predictor_dropout = 0.1
 
     # Training

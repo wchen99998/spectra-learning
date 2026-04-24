@@ -49,6 +49,32 @@ def test_slotwise_sigreg_matches_sum_of_slot_losses():
     torch.testing.assert_close(actual, expected)
 
 
+def test_slotwise_sigreg_uses_provided_directions_without_sampling():
+    torch.manual_seed(0)
+    sigreg = SlotwiseSIGReg(num_slices=8)
+    proj = torch.randn(2, 3, 4, 5)
+    valid_mask = torch.ones(2, 3, 4)
+    valid_mask[:, :, 1] = 0.0
+    directions = _normalize_directions(
+        torch.randn(proj.shape[-1], sigreg.num_slices, dtype=proj.dtype)
+    )
+
+    flat_proj = proj.reshape(-1, proj.shape[2], proj.shape[-1])
+    flat_mask = valid_mask.reshape(-1, proj.shape[2])
+    expected = proj.new_zeros(())
+    for slot_idx in range(proj.shape[2]):
+        expected = expected + sigreg._loss_from_flat(
+            flat_proj[:, slot_idx, :],
+            flat_mask[:, slot_idx],
+            directions=directions,
+        )
+
+    with mock.patch.object(sigreg, "_sample_directions", side_effect=AssertionError):
+        actual = sigreg(proj, valid_mask=valid_mask, directions=directions)
+
+    torch.testing.assert_close(actual, expected)
+
+
 def test_slotwise_sigreg_supports_encoder_layout():
     torch.manual_seed(0)
     sigreg = SlotwiseSIGReg(num_slices=8)
@@ -76,5 +102,24 @@ def test_slotwise_sigreg_has_no_dynamo_graph_breaks():
     valid_mask[:, :, :2] = 1.0
 
     explain = torch._dynamo.explain(sigreg)(proj, valid_mask=valid_mask)
+
+    assert explain.graph_break_count == 0
+
+
+def test_slotwise_sigreg_has_no_dynamo_graph_breaks_with_directions_input():
+    torch.manual_seed(0)
+    sigreg = SlotwiseSIGReg(num_slices=8)
+    proj = torch.randn(2, 3, 4, 5)
+    valid_mask = torch.zeros(2, 3, 4)
+    valid_mask[:, :, :2] = 1.0
+    directions = _normalize_directions(
+        torch.randn(proj.shape[-1], sigreg.num_slices, dtype=proj.dtype)
+    )
+
+    explain = torch._dynamo.explain(sigreg)(
+        proj,
+        valid_mask=valid_mask,
+        directions=directions,
+    )
 
     assert explain.graph_break_count == 0

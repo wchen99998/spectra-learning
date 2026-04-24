@@ -245,9 +245,12 @@ class BlockJEPATests(unittest.TestCase):
         for regularizer in ("sigreg-pred", "slot-sigreg-pred", "slog-sigreg-pred"):
             with self.subTest(regularizer=regularizer):
                 model = self._build_model(
+                    encoder_num_layers=2,
+                    jepa_target_layers=[1, 2],
                     representation_regularizer=regularizer,
                     sigreg_lambda=0.02,
-                    predictor_dim=24,
+                    predictor_dim=16,
+                    target_projector_dim=24,
                 )
                 if regularizer.startswith("slot-") or regularizer.startswith("slog-"):
                     self.assertIsInstance(model.sigreg, SlotwiseSIGReg)
@@ -279,6 +282,71 @@ class BlockJEPATests(unittest.TestCase):
                     captured["valid_mask"],
                     batch["target_masks"].float(),
                 )
+                self.assertEqual(captured["proj"].shape[-1], model.jepa_target_dim)
+                self.assertNotEqual(captured["proj"].shape[-1], model.target_projector_dim)
+
+    def test_sigreg_on_projected_outputs_uses_projected_student_and_teacher_targets(self):
+        for regularizer in ("sigreg-proj", "slot-sigreg-proj", "slog-sigreg-proj"):
+            with self.subTest(regularizer=regularizer):
+                model = self._build_model(
+                    encoder_num_layers=2,
+                    representation_regularizer=regularizer,
+                    sigreg_lambda=0.02,
+                    jepa_target_layers=[1, 2],
+                    target_projector_dim=24,
+                )
+                if regularizer.startswith("slot-") or regularizer.startswith("slog-"):
+                    self.assertIsInstance(model.sigreg, SlotwiseSIGReg)
+                batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+                captured: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+                def fake_sigreg_forward(
+                    proj: torch.Tensor,
+                    valid_mask: torch.Tensor | None = None,
+                ) -> torch.Tensor:
+                    captured.append(
+                        (proj.detach().clone(), valid_mask.detach().clone())
+                    )
+                    return proj.new_tensor(float(len(captured)))
+
+                with mock.patch.object(
+                    model.sigreg,
+                    "forward",
+                    side_effect=fake_sigreg_forward,
+                ):
+                    metrics = model.forward_augmented(batch)
+
+                self.assertEqual(len(captured), 2)
+                student_proj, student_mask = captured[0]
+                teacher_proj, teacher_mask = captured[1]
+                self.assertEqual(
+                    student_proj.shape,
+                    (*batch["target_masks"].shape, model.target_projector_dim),
+                )
+                self.assertEqual(
+                    teacher_proj.shape,
+                    (*batch["peak_valid_mask"].shape, model.target_projector_dim),
+                )
+                torch.testing.assert_close(
+                    student_mask,
+                    batch["target_masks"].float(),
+                )
+                torch.testing.assert_close(
+                    teacher_mask,
+                    batch["peak_valid_mask"].float(),
+                )
+                torch.testing.assert_close(
+                    metrics["projected_student_token_sigreg_loss"],
+                    metrics["projected_student_token_sigreg_loss"].new_tensor(1.0),
+                )
+                torch.testing.assert_close(
+                    metrics["projected_teacher_token_sigreg_loss"],
+                    metrics["projected_teacher_token_sigreg_loss"].new_tensor(2.0),
+                )
+                torch.testing.assert_close(
+                    metrics["token_sigreg_loss"],
+                    metrics["token_sigreg_loss"].new_tensor(3.0),
+                )
 
     def test_sigreg_on_encoder_outputs_uses_visible_context_and_full_teacher_spectra(self):
         for regularizer in ("sigreg-enc", "slot-sigreg-enc"):
@@ -288,6 +356,7 @@ class BlockJEPATests(unittest.TestCase):
                     representation_regularizer=regularizer,
                     sigreg_lambda=0.02,
                     jepa_target_layers=[1, 2],
+                    target_projector_dim=24,
                 )
                 batch = _make_batch(num_targets=model.jepa_num_target_blocks)
                 captured: list[tuple[torch.Tensor, torch.Tensor]] = []
@@ -588,7 +657,7 @@ class BlockJEPATests(unittest.TestCase):
             old_state = {
                 f"model.{k}": v
                 for k, v in model.state_dict().items()
-                if not k.startswith("masked_latent_readout.")
+                if not k.startswith(("masked_latent_readout.", "target_projector."))
             }
             torch.save({"state_dict": old_state}, path)
             loaded = self._build_model(jepa_target_layers=[1])

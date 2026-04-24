@@ -70,6 +70,9 @@ def test_load_resume_model_state_allows_sigreg_checkpoint_compatibility():
     resume_state = model.state_dict()
     for key in ("sigreg.t", "sigreg.phi", "sigreg.weights"):
         resume_state.pop(key)
+    for key in tuple(resume_state):
+        if key.startswith("target_projector."):
+            resume_state.pop(key)
     resume_state["sigreg_lambda_target"] = torch.tensor(0.02)
     resume_state["sigreg_lambda_current"] = torch.tensor(0.02)
     resume_state["sigreg_lambda_step"] = torch.tensor(0)

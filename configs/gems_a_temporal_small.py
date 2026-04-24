@@ -79,6 +79,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_token_loss_weight = 1.0
     cfg.masked_token_loss_type = "l2"
     cfg.jepa_target_normalization = "none"
+    cfg.target_projector_dim = cfg.model_dim
     cfg.grad_clip_norm = 1.0
     cfg.masked_latent_predictor_num_layers = 4
     cfg.autocast_dtype = "bf16"

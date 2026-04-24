@@ -29,8 +29,6 @@ from utils.training import (
 )
 
 torch.set_float32_matmul_precision("high")
-torch._dynamo.config.capture_scalar_outputs = True
-inductor_config.coordinate_descent_tuning = True
 inductor_config.triton.unique_kernel_names = True
 inductor_config.fx_graph_cache = True
 inductor_config.epilogue_fusion = True
@@ -310,7 +308,13 @@ def _load_resume_model_state(
         "sigreg_lambda_current",
         "sigreg_lambda_step",
     )
-    missing = [key for key in missing if not key.endswith(allowed_missing_suffixes)]
+    allowed_missing_prefixes = ("target_projector.",)
+    missing = [
+        key
+        for key in missing
+        if not key.endswith(allowed_missing_suffixes)
+        and not any(key.startswith(prefix) for prefix in allowed_missing_prefixes)
+    ]
     unexpected = [
         key
         for key in unexpected

@@ -63,10 +63,12 @@ class SIGReg(nn.Module):
         self,
         proj: torch.Tensor,
         valid_mask: torch.Tensor | None = None,
+        *,
+        directions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         flat = proj.reshape(-1, proj.size(-1))
         flat_mask = None if valid_mask is None else valid_mask.reshape(-1)
-        return self._loss_from_flat(flat, flat_mask)
+        return self._loss_from_flat(flat, flat_mask, directions=directions)
 
 
 class SlotwiseSIGReg(SIGReg):
@@ -74,6 +76,8 @@ class SlotwiseSIGReg(SIGReg):
         self,
         proj: torch.Tensor,
         valid_mask: torch.Tensor | None = None,
+        *,
+        directions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if proj.ndim == 3:
             proj = proj.unsqueeze(1)
@@ -86,11 +90,12 @@ class SlotwiseSIGReg(SIGReg):
             if valid_mask is None
             else valid_mask.reshape(batch_size * num_views, num_slots)
         )
-        directions = self._sample_directions(
-            dim,
-            device=proj.device,
-            dtype=proj.dtype,
-        )
+        if directions is None:
+            directions = self._sample_directions(
+                dim,
+                device=proj.device,
+                dtype=proj.dtype,
+            )
         total = proj.new_zeros(())
         for slot_idx in range(num_slots):
             total = total + self._loss_from_flat(

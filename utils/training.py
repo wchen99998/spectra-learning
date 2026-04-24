@@ -101,6 +101,7 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
             config.get("temporal_predictor_num_layers", 0)
         ),
         predictor_dim=config.get("predictor_dim", None),
+        target_projector_dim=config.get("target_projector_dim", None),
         predictor_dropout=float(config.get("predictor_dropout", 0.0)),
     )
 
@@ -194,6 +195,9 @@ def auto_run_name(config: Any) -> str:
     if regularizer and regularizer != "none":
         parts.append(regularizer)
         parts.append(f"lam{float(config.get('sigreg_lambda', 0.0)):.0e}")
+    target_projector_dim = config.get("target_projector_dim", None)
+    if target_projector_dim is not None and int(target_projector_dim) != dim:
+        parts.append(f"tproj{int(target_projector_dim)}")
     run_name_suffix = str(config.get("run_name_suffix", "")).strip()
     if run_name_suffix:
         parts.append(run_name_suffix)
@@ -287,7 +291,7 @@ def load_pretrained_weights(
         "predictor_register_tokens",
         "temporal_query_token",
     )
-    allowed_missing_prefixes = ("masked_latent_readout.", "sigreg.")
+    allowed_missing_prefixes = ("masked_latent_readout.", "target_projector.", "sigreg.")
     unexpected = [
         key for key in unexpected
         if not key.endswith(

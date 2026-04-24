@@ -337,7 +337,7 @@ def _load_pretrained_checkpoint(
     }
     sd = prefixed or sd
     for key in tuple(sd):
-        if key.startswith("masked_latent_readout.") or key.endswith(
+        if key.startswith(("masked_latent_readout.", "target_projector.")) or key.endswith(
             (
                 "position_embedding.weight",
                 "predictor_position_embedding.weight",
@@ -351,6 +351,7 @@ def _load_pretrained_checkpoint(
         "temporal_rt_proj.",
         "temporal_query_token",
         "masked_latent_readout.",
+        "target_projector.",
         "sigreg.",
     )
     allowed_suffixes = (

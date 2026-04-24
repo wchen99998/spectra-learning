@@ -118,6 +118,7 @@ TEN_M_BACKBONE = {
     "encoder_num_kv_heads": 8,
     "feature_mlp_hidden_dim": 512,
     "predictor_dim": 128,
+    "target_projector_dim": 256,
     "masked_latent_predictor_num_layers": 4,
     "masked_latent_predictor_num_heads": 8,
     "jepa_target_layers": [1, 3, 5, 8],
@@ -340,6 +341,7 @@ GEMS_SMALL_100M = {
     "encoder_num_kv_heads": 12,
     "feature_mlp_hidden_dim": 1024,
     "predictor_dim": 384,
+    "target_projector_dim": 768,
     "masked_latent_predictor_num_layers": 10,
     "masked_latent_predictor_num_heads": 16,
     "jepa_target_layers": [1, 4, 8, 12],
@@ -351,6 +353,7 @@ GEMS_SMALL_300M = {
     "encoder_num_kv_heads": 16,
     "feature_mlp_hidden_dim": 2048,
     "predictor_dim": 512,
+    "target_projector_dim": 1024,
     "masked_latent_predictor_num_layers": 12,
     "masked_latent_predictor_num_heads": 16,
     "jepa_target_layers": [4, 8, 12, 16, 20],
@@ -405,8 +408,8 @@ SWEEPS: dict[str, list[dict]] = {
         },
         {
             **BEST_SWEEP_OPTIM,
-            "representation_regularizer": "sigreg",
-            "run_name_suffix": "sigcmp-sigreg",
+            "representation_regularizer": "sigreg-proj",
+            "run_name_suffix": "sigcmp-sigreg-proj",
         },
     ],
     # Controlled 10M-scale sigreg ablation on the shared-backbone target path.
@@ -420,18 +423,18 @@ SWEEPS: dict[str, list[dict]] = {
         },
         {
             **TEN_M_BEST_SWEEP_OPTIM,
-            "representation_regularizer": "sigreg",
-            "run_name_suffix": "10m-sigreg",
+            "representation_regularizer": "sigreg-proj",
+            "run_name_suffix": "10m-sigreg-proj",
         },
     ],
     # Shared-backbone SIGREG sweep over a broad log-scale lambda range.
     "sweep_10m_sigreg_log_lambda": [
         {
             **TEN_M_BEST_SWEEP_OPTIM,
-            "representation_regularizer": "sigreg",
+            "representation_regularizer": "sigreg-proj",
             "sigreg_lambda": sigreg_lambda,
             "run_name_suffix": (
-                f"10m-sigreg-lam{sigreg_lambda:.0e}-{SIGREG_SAMPLE_SCALE_TAG}"
+                f"10m-sigreg-proj-lam{sigreg_lambda:.0e}-{SIGREG_SAMPLE_SCALE_TAG}"
             ),
         }
         for sigreg_lambda in NOEMA_SIGREG_LOG_LAMBDAS
@@ -440,10 +443,10 @@ SWEEPS: dict[str, list[dict]] = {
     "sweep_10m_sigreg_high_lambda": [
         {
             **TEN_M_BEST_SWEEP_OPTIM,
-            "representation_regularizer": "sigreg",
+            "representation_regularizer": "sigreg-proj",
             "sigreg_lambda": sigreg_lambda,
             "run_name_suffix": (
-                f"10m-sigreg-hi-lam{label}-{SIGREG_SAMPLE_SCALE_TAG}"
+                f"10m-sigreg-proj-hi-lam{label}-{SIGREG_SAMPLE_SCALE_TAG}"
             ),
         }
         for label, sigreg_lambda in NOEMA_SIGREG_HIGH_LAMBDAS

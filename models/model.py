@@ -433,11 +433,17 @@ class PeakSetSIGReg(nn.Module):
         encoder_num_register_tokens: int = 0,
         predictor_num_register_tokens: int = 0,
         predictor_dim: int | None = None,
+        target_projector_dim: int | None = None,
         predictor_dropout: float = 0.0,
     ):
         super().__init__()
         self.model_dim = model_dim
         self.predictor_dim = predictor_dim if predictor_dim is not None else model_dim
+        self.target_projector_dim = (
+            int(target_projector_dim)
+            if target_projector_dim is not None
+            else self.model_dim
+        )
         self.encoder_num_layers = int(encoder_num_layers)
         self.use_precursor_token = bool(use_precursor_token)
         self.jepa_num_target_blocks = int(jepa_num_target_blocks)
@@ -457,13 +463,17 @@ class PeakSetSIGReg(nn.Module):
             self.representation_regularizer = "sigreg-enc"
         if self.representation_regularizer == "slog-sigreg-pred":
             self.representation_regularizer = "slot-sigreg-pred"
+        if self.representation_regularizer == "slog-sigreg-proj":
+            self.representation_regularizer = "slot-sigreg-proj"
         if self.representation_regularizer not in (
             "none",
             "",
             "sigreg-enc",
             "sigreg-pred",
+            "sigreg-proj",
             "slot-sigreg-enc",
             "slot-sigreg-pred",
+            "slot-sigreg-proj",
         ):
             raise ValueError(
                 f"Unsupported regularizer: {self.representation_regularizer!r}"
@@ -545,10 +555,19 @@ class PeakSetSIGReg(nn.Module):
         self.masked_latent_readout = nn.Linear(self.predictor_dim, self.jepa_target_dim)
         nn.init.xavier_normal_(self.masked_latent_readout.weight)
         nn.init.zeros_(self.masked_latent_readout.bias)
+        self.target_projector = nn.Sequential(
+            nn.Linear(self.jepa_target_dim, self.jepa_target_dim),
+            nn.GELU(),
+            nn.Linear(self.jepa_target_dim, self.target_projector_dim),
+        )
+        for layer in self.target_projector:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_normal_(layer.weight)
+                nn.init.zeros_(layer.bias)
         sigreg_cls = (
             SlotwiseSIGReg
             if self.representation_regularizer
-            in ("slot-sigreg-enc", "slot-sigreg-pred")
+            in ("slot-sigreg-enc", "slot-sigreg-pred", "slot-sigreg-proj")
             else SIGReg
         )
         self.sigreg = sigreg_cls(num_slices=int(sigreg_num_slices))
@@ -632,7 +651,10 @@ class PeakSetSIGReg(nn.Module):
             x = x[:, :-self.predictor_num_register_tokens]
         return x
 
-    def predict_masked_targets(
+    def project_targets(self, x: torch.Tensor) -> torch.Tensor:
+        return self.target_projector(x)
+
+    def predict_masked_target_features(
         self,
         x: torch.Tensor,
         visible_mask: torch.Tensor,
@@ -644,7 +666,19 @@ class PeakSetSIGReg(nn.Module):
             )
         )
 
-    def _compute_jepa_teacher_targets(
+    def predict_masked_targets(
+        self,
+        x: torch.Tensor,
+        visible_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.project_targets(
+            self.predict_masked_target_features(
+                x,
+                visible_mask,
+            )
+        )
+
+    def _compute_jepa_teacher_target_features(
         self,
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
@@ -664,6 +698,21 @@ class PeakSetSIGReg(nn.Module):
                 block_indices=self.jepa_target_layers,
             )
             return torch.cat(teacher_peak_outputs, dim=-1)
+
+    def _compute_jepa_teacher_targets(
+        self,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+        peak_valid_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        teacher_target_features = self._compute_jepa_teacher_target_features(
+            peak_mz,
+            peak_intensity,
+            peak_valid_mask,
+        )
+        return self.project_targets(
+            self._apply_jepa_target_normalization(teacher_target_features)
+        )
 
     def compute_teacher_targets(
         self,
@@ -690,12 +739,12 @@ class PeakSetSIGReg(nn.Module):
             visible_mask=torch.cat([peak_valid_mask, context_mask], dim=0),
             block_indices=self.jepa_target_layers,
         )
-        teacher_targets = torch.cat(
+        teacher_target_features = torch.cat(
             [peak_output[:batch_size] for peak_output in teacher_peak_outputs],
             dim=-1,
         )
         context_emb, _ = self.encoder.split_peak_and_cls(encoded[batch_size:])
-        return teacher_targets, context_emb
+        return teacher_target_features, context_emb
 
     def _compute_pooled_teacher_peak_targets(
         self,
@@ -811,7 +860,7 @@ class PeakSetSIGReg(nn.Module):
         target_masks = augmented_batch["target_masks"] & peak_valid_mask.unsqueeze(1)
         B, N = peak_mz.shape
         K = self.jepa_num_target_blocks
-        teacher_targets, context_emb = self._encode_augmented_teacher_and_context(
+        teacher_target_features, context_emb = self._encode_augmented_teacher_and_context(
             peak_mz,
             peak_intensity,
             peak_valid_mask,
@@ -825,11 +874,15 @@ class PeakSetSIGReg(nn.Module):
             self.latent_mask_token.view(1, 1, 1, -1).to(context_emb),
             predictor_input,
         )
-        predictor_output = self.predict_masked_targets(
+        predictor_output_features = self.predict_masked_target_features(
             predictor_input.reshape(B * K, N, -1),
             (ctx_mask_v | target_masks).reshape(B * K, N),
         ).reshape(B, K, N, -1)
-        loss_target = self._apply_jepa_target_normalization(teacher_targets).unsqueeze(1)
+        predictor_output = self.project_targets(predictor_output_features)
+        teacher_targets = self.project_targets(
+            self._apply_jepa_target_normalization(teacher_target_features)
+        )
+        loss_target = teacher_targets.unsqueeze(1)
         per_token_reg = self._embedding_loss(predictor_output, loss_target)
 
         cls_loss_weight = context_emb.new_tensor(0.0)
@@ -849,6 +902,10 @@ class PeakSetSIGReg(nn.Module):
             self.representation_regularizer in ("sigreg-pred", "slot-sigreg-pred")
             and self.sigreg_lambda > 0
         )
+        use_sigreg_proj = (
+            self.representation_regularizer in ("sigreg-proj", "slot-sigreg-proj")
+            and self.sigreg_lambda > 0
+        )
         regularizer_lambda_current = context_emb.new_tensor(0.0)
         regularizer_loss = context_emb.new_tensor(0.0)
         regularizer_term = context_emb.new_tensor(0.0)
@@ -856,9 +913,15 @@ class PeakSetSIGReg(nn.Module):
         token_sigreg_loss = context_emb.new_tensor(0.0)
         context_token_sigreg_loss = context_emb.new_tensor(0.0)
         teacher_token_sigreg_loss = context_emb.new_tensor(0.0)
+        pred_token_sigreg_loss = context_emb.new_tensor(0.0)
+        projected_student_token_sigreg_loss = context_emb.new_tensor(0.0)
+        projected_teacher_token_sigreg_loss = context_emb.new_tensor(0.0)
         sigreg_term = context_emb.new_tensor(0.0)
         context_sigreg_term = context_emb.new_tensor(0.0)
         teacher_sigreg_term = context_emb.new_tensor(0.0)
+        pred_sigreg_term = context_emb.new_tensor(0.0)
+        projected_student_sigreg_term = context_emb.new_tensor(0.0)
+        projected_teacher_sigreg_term = context_emb.new_tensor(0.0)
         if use_sigreg_enc:
             sigreg_lambda_current = context_emb.new_tensor(self.sigreg_lambda)
             context_sigreg_weights = context_mask.float()
@@ -873,7 +936,7 @@ class PeakSetSIGReg(nn.Module):
                 valid_mask=context_sigreg_weights,
             )
             teacher_token_sigreg_loss = self.sigreg(
-                teacher_targets.float(),
+                teacher_target_features.float(),
                 valid_mask=teacher_sigreg_weights,
             )
             token_sigreg_loss = (
@@ -895,13 +958,46 @@ class PeakSetSIGReg(nn.Module):
             if self.use_precursor_token:
                 sigreg_weights = sigreg_weights.clone()
                 sigreg_weights[..., 0] *= self.sigreg_precursor_scale
-            token_sigreg_loss = self.sigreg(
-                predictor_output.float(),
+            pred_token_sigreg_loss = self.sigreg(
+                predictor_output_features.float(),
                 valid_mask=sigreg_weights,
             )
-            sigreg_term = sigreg_lambda_current * token_sigreg_loss.to(
+            token_sigreg_loss = pred_token_sigreg_loss
+            pred_sigreg_term = sigreg_lambda_current * pred_token_sigreg_loss.to(
                 dtype=context_emb.dtype
             )
+            sigreg_term = pred_sigreg_term
+            regularizer_lambda_current = sigreg_lambda_current
+            regularizer_loss = token_sigreg_loss.to(dtype=context_emb.dtype)
+            regularizer_term = sigreg_term
+        elif use_sigreg_proj:
+            sigreg_lambda_current = context_emb.new_tensor(self.sigreg_lambda)
+            student_sigreg_weights = target_masks.float()
+            teacher_sigreg_weights = peak_valid_mask.float()
+            if self.use_precursor_token:
+                student_sigreg_weights = student_sigreg_weights.clone()
+                student_sigreg_weights[..., 0] *= self.sigreg_precursor_scale
+                teacher_sigreg_weights = teacher_sigreg_weights.clone()
+                teacher_sigreg_weights[..., 0] *= self.sigreg_precursor_scale
+            projected_student_token_sigreg_loss = self.sigreg(
+                predictor_output.float(),
+                valid_mask=student_sigreg_weights,
+            )
+            projected_teacher_token_sigreg_loss = self.sigreg(
+                teacher_targets.float(),
+                valid_mask=teacher_sigreg_weights,
+            )
+            token_sigreg_loss = (
+                projected_student_token_sigreg_loss
+                + projected_teacher_token_sigreg_loss
+            )
+            projected_student_sigreg_term = sigreg_lambda_current * (
+                projected_student_token_sigreg_loss.to(dtype=context_emb.dtype)
+            )
+            projected_teacher_sigreg_term = sigreg_lambda_current * (
+                projected_teacher_token_sigreg_loss.to(dtype=context_emb.dtype)
+            )
+            sigreg_term = projected_student_sigreg_term + projected_teacher_sigreg_term
             regularizer_lambda_current = sigreg_lambda_current
             regularizer_loss = token_sigreg_loss.to(dtype=context_emb.dtype)
             regularizer_term = sigreg_term
@@ -930,9 +1026,19 @@ class PeakSetSIGReg(nn.Module):
             "teacher_token_sigreg_loss": teacher_token_sigreg_loss.to(
                 dtype=context_emb.dtype
             ),
+            "pred_token_sigreg_loss": pred_token_sigreg_loss.to(dtype=context_emb.dtype),
+            "projected_student_token_sigreg_loss": projected_student_token_sigreg_loss.to(
+                dtype=context_emb.dtype
+            ),
+            "projected_teacher_token_sigreg_loss": projected_teacher_token_sigreg_loss.to(
+                dtype=context_emb.dtype
+            ),
             "sigreg_term": sigreg_term,
             "context_sigreg_term": context_sigreg_term,
             "teacher_sigreg_term": teacher_sigreg_term,
+            "pred_sigreg_term": pred_sigreg_term,
+            "projected_student_sigreg_term": projected_student_sigreg_term,
+            "projected_teacher_sigreg_term": projected_teacher_sigreg_term,
             "sigreg_lambda_current": sigreg_lambda_current,
             "target_regularizer_term_over_jepa_term": regularizer_term
             / jepa_term.clamp_min(1e-8),
