@@ -1,5 +1,6 @@
 import logging
 import math
+import copy
 from pathlib import Path
 from typing import Callable, NamedTuple
 
@@ -10,7 +11,7 @@ from ml_collections import config_dict
 from sklearn.metrics import r2_score, roc_auc_score
 
 from input_pipeline import numpy_batch_to_torch
-from models.model import CrossAttention, PeakSetEncoder, PeakSetSIGReg
+from models.model import CovariancePool, CrossAttention, PeakSetEncoder, PeakSetSIGReg
 from utils.massspec_probe_data import MassSpecProbeData
 from utils.massspec_probe_targets import (
     FG_SMARTS,
@@ -62,18 +63,22 @@ def msg_probe_variants_from_config(
 
 def resolve_msg_probe_sample_limits(
     config: config_dict.ConfigDict,
-) -> tuple[int | None, int | None, bool]:
+) -> tuple[int | None, int | None, int | None, bool]:
     probe_dataset = str(config.get("probe_dataset", "massspec"))
     raw_train = config.get("msg_probe_max_train_samples", None)
+    raw_val = config.get("msg_probe_max_val_samples", None)
     raw_test = config.get("msg_probe_max_test_samples", None)
     if raw_train is None and probe_dataset == "nist-full":
         raw_train = config.get("nist_full_probe_train_samples", 4_000)
+    if raw_val is None and probe_dataset == "nist-full":
+        raw_val = config.get("nist_full_probe_val_samples", 1_000)
     if raw_test is None and probe_dataset == "nist-full":
         raw_test = config.get("nist_full_probe_test_samples", 1_000)
     max_train_samples = int(raw_train) if raw_train is not None else None
+    max_val_samples = int(raw_val) if raw_val is not None else None
     max_test_samples = int(raw_test) if raw_test is not None else None
     randomize_test_subset = probe_dataset == "nist-full" and max_test_samples is not None
-    return max_train_samples, max_test_samples, randomize_test_subset
+    return max_train_samples, max_val_samples, max_test_samples, randomize_test_subset
 
 
 def resolve_msg_probe_num_repeats(
@@ -152,31 +157,26 @@ class MsgMeanPool(torch.nn.Module):
         return build_msg_probe_inputs(peak_embeddings, valid_mask)
 
 
-class MsgCovariancePool(torch.nn.Module):
-    def __init__(
-        self,
-        *,
-        input_dim: int,
-        compressed_dim: int,
-    ) -> None:
+class MsgCovariancePool(CovariancePool):
+    pass
+
+
+class FrozenPooler(torch.nn.Module):
+    def __init__(self, pooler: torch.nn.Module) -> None:
         super().__init__()
-        self.left_proj = torch.nn.Linear(input_dim, compressed_dim, bias=False)
-        self.right_proj = torch.nn.Linear(input_dim, compressed_dim, bias=False)
-        torch.nn.init.xavier_normal_(self.left_proj.weight)
-        torch.nn.init.xavier_normal_(self.right_proj.weight)
+        object.__setattr__(self, "_pooler", pooler)
+
+    @property
+    def pooler(self) -> torch.nn.Module:
+        return self._pooler
 
     def forward(
         self,
         peak_embeddings: torch.Tensor,
         valid_mask: torch.Tensor,
     ) -> torch.Tensor:
-        mask = valid_mask.unsqueeze(-1).to(dtype=peak_embeddings.dtype)
-        left = self.left_proj(peak_embeddings) * mask
-        right = self.right_proj(peak_embeddings) * mask
-        denom = mask.sum(dim=1).clamp(min=1.0)
-        covariance = left.transpose(1, 2) @ right
-        covariance = covariance / denom.unsqueeze(-1)
-        return covariance.flatten(start_dim=1)
+        with torch.no_grad():
+            return self.pooler(peak_embeddings, valid_mask)
 
 
 class MsgPmaPool(torch.nn.Module):
@@ -263,6 +263,7 @@ def _build_msg_sequence_probe(
     *,
     config: config_dict.ConfigDict,
     task_spec: MsgProbeTaskSpec,
+    covariance_pooler: CovariancePool | None = None,
 ) -> MsgSequenceProbe:
     model_dim = int(config.model_dim)
     hidden_dim = int(config.get("msg_probe_mlp_hidden_dim", model_dim))
@@ -272,11 +273,15 @@ def _build_msg_sequence_probe(
         pooler = MsgMeanPool()
         pooled_dim = model_dim
     elif variant == "covariance":
-        compressed_dim = int(config.get("msg_probe_covariance_dim", 32))
-        pooler = MsgCovariancePool(
-            input_dim=model_dim,
-            compressed_dim=compressed_dim,
-        )
+        if covariance_pooler is None:
+            compressed_dim = int(config.get("msg_probe_covariance_dim", 32))
+            pooler = MsgCovariancePool(
+                input_dim=model_dim,
+                compressed_dim=compressed_dim,
+            )
+        else:
+            compressed_dim = int(covariance_pooler.left_proj.out_features)
+            pooler = FrozenPooler(covariance_pooler)
         pooled_dim = compressed_dim * compressed_dim
     elif variant == "pma":
         pooler = MsgPmaPool(
@@ -395,7 +400,11 @@ def _collect_num_rings_classes(
     probe_data: MassSpecProbeData,
 ) -> tuple[int, ...]:
     classes: set[int] = set()
-    for shard_dir_str in (*probe_data.train_files, *probe_data.test_files):
+    for shard_dir_str in (
+        *probe_data.train_files,
+        *probe_data.val_files,
+        *probe_data.test_files,
+    ):
         shard_dir = Path(shard_dir_str)
         valid_mask = np.load(shard_dir / "probe_valid_mol.npy", mmap_mode="r")
         if not bool(np.any(valid_mask)):
@@ -722,7 +731,15 @@ def _run_msg_probe_once(
     probe_lr = float(config.get("msg_probe_learning_rate", 1e-3))
     probe_weight_decay = float(config.get("msg_probe_weight_decay", 1e-2))
     probe_warmup_steps = int(config.get("msg_probe_warmup_steps", 100))
-    max_train_samples, max_test_samples, randomize_test_subset = (
+    early_stopping = bool(config.get("msg_probe_early_stopping", False))
+    early_stopping_patience = int(config.get("msg_probe_early_stopping_patience", 10))
+    early_stopping_min_delta = float(
+        config.get("msg_probe_early_stopping_min_delta", 0.0)
+    )
+    early_stopping_min_epochs = int(
+        config.get("msg_probe_early_stopping_min_epochs", 1)
+    )
+    max_train_samples, max_val_samples, max_test_samples, randomize_test_subset = (
         resolve_msg_probe_sample_limits(config)
     )
     peak_ordering = str(config.get("peak_ordering", "intensity"))
@@ -750,6 +767,14 @@ def _run_msg_probe_once(
         seed=train_seed_base,
         max_samples=max_train_samples,
     )
+    val_targets = _collect_split_targets(
+        probe_data=probe_data,
+        split="massspec_val",
+        peak_ordering=peak_ordering,
+        seed=train_seed_base + 10_000,
+        max_samples=max_val_samples,
+        sample_randomly=True,
+    )
     test_targets = _collect_split_targets(
         probe_data=probe_data,
         split="massspec_test",
@@ -760,7 +785,7 @@ def _run_msg_probe_once(
     )
     task_spec = _build_task_spec(
         train_targets=train_targets,
-        test_targets=test_targets,
+        test_targets=val_targets if early_stopping else test_targets,
         num_rings_classes=_collect_num_rings_classes(probe_data),
     )
     variants = msg_probe_variants_from_config(config)
@@ -771,6 +796,12 @@ def _run_msg_probe_once(
             variant,
             config=config,
             task_spec=task_spec,
+            covariance_pooler=(
+                model.covariance_pooler
+                if variant == "covariance"
+                and bool(config.get("train_covariance_pooling", False))
+                else None
+            ),
         ).to(device)
         for variant in variants
     }
@@ -817,6 +848,8 @@ def _run_msg_probe_once(
         variant: -float("inf") if higher_is_better else float("inf")
         for variant in variants
     }
+    best_state_by_variant: dict[str, dict[str, torch.Tensor]] = {}
+    epochs_without_improvement = {variant: 0 for variant in variants}
     for epoch_idx in range(num_probe_epochs):
         for probe in probes.values():
             probe.train()
@@ -824,14 +857,15 @@ def _run_msg_probe_once(
             variant: _new_epoch_state(task_spec)
             for variant in variants
         }
-        for batch in iter_massspec_probe(
+        train_iterator = iter_massspec_probe(
             probe_data,
             "massspec_train",
             seed=train_seed_base + epoch_idx,
             peak_ordering=peak_ordering,
             drop_remainder=False,
             max_samples=max_train_samples,
-        ):
+        )
+        for batch in train_iterator:
             batch = move_batch(batch)
             peak_embeddings = feature_extractor(batch)
             for variant in variants:
@@ -851,6 +885,35 @@ def _run_msg_probe_once(
                 _update_epoch_state(train_states[variant], result, task_spec)
         for probe in probes.values():
             probe.eval()
+        val_states = {
+            variant: _new_epoch_state(task_spec)
+            for variant in variants
+        }
+        if early_stopping:
+            with torch.no_grad():
+                val_iterator = iter_massspec_probe(
+                    probe_data,
+                    "massspec_val",
+                    seed=train_seed_base + 10_000,
+                    peak_ordering=peak_ordering,
+                    drop_remainder=False,
+                    max_samples=max_val_samples,
+                    sample_randomly=True,
+                )
+                for batch in val_iterator:
+                    batch = move_batch(batch)
+                    peak_embeddings = feature_extractor(batch)
+                    for variant in variants:
+                        result = _sequence_probe_step(
+                            probes[variant],
+                            batch,
+                            peak_embeddings,
+                            task_spec=task_spec,
+                            device=device,
+                        )
+                        if result is None:
+                            continue
+                        _update_epoch_state(val_states[variant], result, task_spec)
         test_states = {
             variant: _new_epoch_state(task_spec)
             for variant in variants
@@ -859,7 +922,7 @@ def _run_msg_probe_once(
             for batch in iter_massspec_probe(
                 probe_data,
                 "massspec_test",
-                seed=test_seed_base + epoch_idx,
+                seed=test_seed_base,
                 peak_ordering=peak_ordering,
                 drop_remainder=False,
                 max_samples=max_test_samples,
@@ -887,6 +950,15 @@ def _run_msg_probe_once(
                     epoch_state=train_states[variant],
                     task_spec=task_spec,
                 ),
+                **(
+                    _score_epoch_state(
+                        prefix=f"{variant_prefix}/val",
+                        epoch_state=val_states[variant],
+                        task_spec=task_spec,
+                    )
+                    if early_stopping
+                    else {}
+                ),
                 **_score_epoch_state(
                     prefix=f"{variant_prefix}/test",
                     epoch_state=test_states[variant],
@@ -897,20 +969,34 @@ def _run_msg_probe_once(
             }
             epoch_metrics.update(variant_metrics)
             variant_select_metric = _msg_probe_variant_metric_key(variant, select_metric)
+            if early_stopping:
+                variant_select_metric = variant_select_metric.replace(
+                    "/test/",
+                    "/val/",
+                )
             current_value = float(variant_metrics[variant_select_metric])
+            previous_best = best_metric_values[variant]
             is_better = (
-                current_value > best_metric_values[variant]
+                current_value > previous_best + early_stopping_min_delta
                 if higher_is_better
-                else current_value < best_metric_values[variant]
+                else current_value < previous_best - early_stopping_min_delta
             )
             if is_better:
                 best_metric_values[variant] = current_value
                 best_metrics_by_variant[variant] = dict(variant_metrics)
+                best_state_by_variant[variant] = copy.deepcopy(
+                    probes[variant].state_dict()
+                )
+                epochs_without_improvement[variant] = 0
+            else:
+                epochs_without_improvement[variant] += 1
             log.info(
-                "MSG probe [%s] epoch %d/%d test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f maccs_bits=%d",
+                "MSG probe [%s] epoch %d/%d train_samples=%d val_auc_maccs_mean=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f maccs_bits=%d",
                 variant,
                 epoch_idx + 1,
                 num_probe_epochs,
+                int(variant_metrics[f"{variant_prefix}/train/samples"]),
+                float(variant_metrics.get(f"{variant_prefix}/val/auc_maccs_mean", float("nan"))),
                 variant_metrics[f"{variant_prefix}/test/r2_mean_wo_num_rings"],
                 variant_metrics[f"{variant_prefix}/test/mae_num_rings"],
                 variant_metrics[f"{variant_prefix}/test/auc_maccs_mean"],
@@ -920,8 +1006,25 @@ def _run_msg_probe_once(
         epoch_metrics = _with_mean_probe_aliases(epoch_metrics)
         if on_epoch_end is not None:
             on_epoch_end(epoch_metrics)
+        if (
+            early_stopping
+            and epoch_idx + 1 >= early_stopping_min_epochs
+            and all(
+                epochs_without_improvement[variant] >= early_stopping_patience
+                for variant in variants
+            )
+        ):
+            log.info(
+                "MSG probe early stopping at epoch %d/%d after %d epochs without validation improvement",
+                epoch_idx + 1,
+                num_probe_epochs,
+                early_stopping_patience,
+            )
+            break
     best_metrics: dict[str, float] = {}
     for variant in variants:
+        if variant in best_state_by_variant:
+            probes[variant].load_state_dict(best_state_by_variant[variant])
         variant_metrics = best_metrics_by_variant.get(variant)
         if not variant_metrics:
             continue
@@ -977,7 +1080,7 @@ def _run_dreams_probe_once(
     probe_lr = float(config.get("msg_probe_learning_rate", 1e-3))
     probe_weight_decay = float(config.get("msg_probe_weight_decay", 1e-2))
     probe_warmup_steps = int(config.get("msg_probe_warmup_steps", 100))
-    max_train_samples, max_test_samples, randomize_test_subset = (
+    max_train_samples, _, max_test_samples, randomize_test_subset = (
         resolve_msg_probe_sample_limits(config)
     )
     peak_ordering = str(config.get("peak_ordering", "intensity"))

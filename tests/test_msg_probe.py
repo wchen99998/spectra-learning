@@ -9,15 +9,19 @@ import torch
 from ml_collections import config_dict
 
 from input_pipeline import _prepend_precursor_token_torch
+from models.model import CovariancePool
 from utils.spectra_preprocessing import PRECURSOR_TOKEN_INTENSITY
 from utils.msg_probe import (
+    FrozenPooler,
     MsgCovariancePool,
     MsgLinearProbe,
     MsgMeanPool,
     MsgPmaPool,
     MsgProbeSplitTargets,
+    MsgProbeTaskSpec,
     MsgSequenceProbe,
     _collect_num_rings_classes,
+    _build_msg_sequence_probe,
     _build_task_spec,
     _collect_split_targets,
     _new_epoch_state,
@@ -245,6 +249,35 @@ class MsgSequenceProbeTests(unittest.TestCase):
             logits = probe(peak_embeddings, valid_mask)
             self.assertEqual(logits["mol_weight"].shape, (3, 1))
             self.assertEqual(logits["maccs"].shape, (3, 4))
+
+    def test_covariance_probe_uses_learned_pooler_when_provided(self):
+        config = config_dict.ConfigDict()
+        config.model_dim = 4
+        config.msg_probe_mlp_hidden_dim = 8
+        config.msg_probe_covariance_dim = 3
+        task_spec = MsgProbeTaskSpec(
+            regression_tasks=("mol_weight",),
+            num_rings_classes=(),
+            maccs_bits=0,
+            regression_means={"mol_weight": 0.0},
+            regression_stds={"mol_weight": 1.0},
+        )
+        learned_pooler = CovariancePool(input_dim=4, compressed_dim=2)
+
+        probe = _build_msg_sequence_probe(
+            "covariance",
+            config=config,
+            task_spec=task_spec,
+            covariance_pooler=learned_pooler,
+        )
+
+        self.assertIsInstance(probe.pooler, FrozenPooler)
+        self.assertIs(probe.pooler.pooler, learned_pooler)
+        first_head = probe.heads.heads["mol_weight"][0]
+        self.assertEqual(first_head.in_features, 2 * 2)
+        probe_param_ids = {id(param) for param in probe.parameters()}
+        learned_param_ids = {id(param) for param in learned_pooler.parameters()}
+        self.assertFalse(probe_param_ids & learned_param_ids)
 
 
 class MsgProbeStepTests(unittest.TestCase):
@@ -571,8 +604,10 @@ class MsgProbeCollectionTests(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             train_shard = root / "train-shard"
+            val_shard = root / "val-shard"
             test_shard = root / "test-shard"
             train_shard.mkdir()
+            val_shard.mkdir()
             test_shard.mkdir()
             np.save(
                 train_shard / "probe_valid_mol.npy",
@@ -581,6 +616,14 @@ class MsgProbeCollectionTests(unittest.TestCase):
             np.save(
                 train_shard / "probe_num_rings.npy",
                 np.asarray([0.0, 99.0, 2.0], dtype=np.float32),
+            )
+            np.save(
+                val_shard / "probe_valid_mol.npy",
+                np.asarray([True, False], dtype=bool),
+            )
+            np.save(
+                val_shard / "probe_num_rings.npy",
+                np.asarray([4.0, 13.0], dtype=np.float32),
             )
             np.save(
                 test_shard / "probe_valid_mol.npy",
@@ -593,12 +636,13 @@ class MsgProbeCollectionTests(unittest.TestCase):
 
             probe_data = SimpleNamespace(
                 train_files=[str(train_shard)],
+                val_files=[str(val_shard)],
                 test_files=[str(test_shard)],
             )
 
             self.assertEqual(
                 _collect_num_rings_classes(probe_data),
-                (0, 2, 5, 7),
+                (0, 2, 4, 5, 7),
             )
 
 
@@ -740,11 +784,12 @@ class ProbeConfigTests(unittest.TestCase):
         cfg = config_dict.ConfigDict()
         cfg.probe_dataset = "nist-full"
 
-        train_samples, test_samples, randomize_test_subset = (
+        train_samples, val_samples, test_samples, randomize_test_subset = (
             resolve_msg_probe_sample_limits(cfg)
         )
 
         self.assertEqual(train_samples, 4000)
+        self.assertEqual(val_samples, 1000)
         self.assertEqual(test_samples, 1000)
         self.assertTrue(randomize_test_subset)
 
