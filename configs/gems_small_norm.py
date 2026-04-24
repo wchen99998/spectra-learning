@@ -44,7 +44,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 512
     cfg.sigreg_num_slices = 256
-    cfg.sigreg_lambda = 1.0
+    cfg.sigreg_lambda = 0.003
     cfg.sigreg_precursor_scale = 1.0
 
     cfg.jepa_num_target_blocks = 3
@@ -66,7 +66,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_latent_predictor_num_heads = 8
     cfg.temporal_predictor_num_layers = 0
     cfg.predictor_dim = 256
-    cfg.target_projector_dim = 64
+    cfg.target_projector_dim = cfg.model_dim
     cfg.predictor_dropout = 0.15
 
     # Training
@@ -94,7 +94,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.grad_clip_norm = 1.0
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "default"
-    cfg.representation_regularizer = "slot-sigreg-proj"
+    cfg.representation_regularizer = "slot-sigreg-enc"
     cfg.msg_probe_every_n_steps = 0.25
     cfg.msg_probe_num_epochs = 20
     cfg.msg_probe_learning_rate = 1e-3

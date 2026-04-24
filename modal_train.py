@@ -20,6 +20,7 @@ Usage:
     modal run modal_train.py --config configs/gems_small.py --sweep sweep_gems_small_predictor_scale
     modal run modal_train.py --config configs/gems_small.py --sweep sweep_gems_small_predictor_scale_depth
     modal run modal_train.py --config configs/gems_small.py --sweep sweep_gems_small_scale_100m_300m --detach
+    modal run modal_train.py --config configs/gems_small_norm.py --sweep sweep_gems_small_norm_sigreg_lambda --detach
 
 Setup:
     1. modal setup
@@ -555,6 +556,13 @@ SWEEPS: dict[str, list[dict]] = {
             "run_name_suffix": f"{GEMS_SMALL_SCALE_SWEEP_TAG}-300m-12h",
             **GEMS_SMALL_300M,
         },
+    ],
+    "sweep_gems_small_norm_sigreg_lambda": [
+        {
+            "sigreg_lambda": sigreg_lambda,
+            "run_name_suffix": f"norm-sigreg-lam{sigreg_lambda:.0e}",
+        }
+        for sigreg_lambda in (3e-4, 1e-3, 3e-3, 1e-2)
     ],
 }
 

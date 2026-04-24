@@ -85,22 +85,31 @@ class SlotwiseSIGReg(SIGReg):
                 valid_mask = valid_mask.unsqueeze(1)
         batch_size, num_views, num_slots, dim = proj.shape
         slot_proj = proj.reshape(batch_size * num_views, num_slots, dim)
-        slot_mask = (
-            None
-            if valid_mask is None
-            else valid_mask.reshape(batch_size * num_views, num_slots)
-        )
         if directions is None:
             directions = self._sample_directions(
                 dim,
                 device=proj.device,
                 dtype=proj.dtype,
             )
-        total = proj.new_zeros(())
-        for slot_idx in range(num_slots):
-            total = total + self._loss_from_flat(
-                slot_proj[:, slot_idx, :],
-                None if slot_mask is None else slot_mask[:, slot_idx],
-                directions=directions,
+        projected = torch.einsum("bld,ds->bls", slot_proj, directions)
+        x_t = projected.unsqueeze(-1) * self.t.to(projected)
+        if valid_mask is None:
+            sample_count = projected.new_full(
+                (num_slots,),
+                float(batch_size * num_views),
             )
-        return total
+            cos_mean = x_t.cos().mean(0)
+            sin_mean = x_t.sin().mean(0)
+        else:
+            slot_mask = valid_mask.reshape(batch_size * num_views, num_slots).to(
+                dtype=proj.dtype,
+                device=proj.device,
+            )
+            sample_count = slot_mask.sum(0)
+            safe_count = sample_count.clamp_min(1.0)
+            weight_view = slot_mask.unsqueeze(-1).unsqueeze(-1)
+            cos_mean = (x_t.cos() * weight_view).sum(0) / safe_count[:, None, None]
+            sin_mean = (x_t.sin() * weight_view).sum(0) / safe_count[:, None, None]
+        err = (cos_mean - self.phi.to(projected)).square() + sin_mean.square()
+        statistic = err @ self.weights.to(projected)
+        return (statistic.mean(-1) * sample_count).sum()

@@ -215,21 +215,20 @@ class BlockJEPATests(unittest.TestCase):
                 self.assertGreater(
                     float(metrics["context_token_sigreg_loss"].detach()), 0.0
                 )
-                self.assertGreater(
+                self.assertEqual(
                     float(metrics["teacher_token_sigreg_loss"].detach()), 0.0
                 )
                 self.assertGreater(float(metrics["sigreg_term"].detach()), 0.0)
                 self.assertTrue(
                     torch.allclose(
                         metrics["token_sigreg_loss"],
-                        metrics["context_token_sigreg_loss"]
-                        + metrics["teacher_token_sigreg_loss"],
+                        metrics["context_token_sigreg_loss"],
                     )
                 )
                 self.assertTrue(
                     torch.allclose(
                         metrics["sigreg_term"],
-                        metrics["context_sigreg_term"] + metrics["teacher_sigreg_term"],
+                        metrics["context_sigreg_term"],
                     )
                 )
                 self.assertTrue(
@@ -283,9 +282,11 @@ class BlockJEPATests(unittest.TestCase):
                     batch["target_masks"].float(),
                 )
                 self.assertEqual(captured["proj"].shape[-1], model.jepa_target_dim)
-                self.assertNotEqual(captured["proj"].shape[-1], model.target_projector_dim)
+                self.assertNotEqual(
+                    captured["proj"].shape[-1], model.target_projector_dim
+                )
 
-    def test_sigreg_on_projected_outputs_uses_projected_student_and_teacher_targets(self):
+    def test_sigreg_on_projected_outputs_uses_projected_student_targets(self):
         for regularizer in ("sigreg-proj", "slot-sigreg-proj", "slog-sigreg-proj"):
             with self.subTest(regularizer=regularizer):
                 model = self._build_model(
@@ -316,24 +317,15 @@ class BlockJEPATests(unittest.TestCase):
                 ):
                     metrics = model.forward_augmented(batch)
 
-                self.assertEqual(len(captured), 2)
+                self.assertEqual(len(captured), 1)
                 student_proj, student_mask = captured[0]
-                teacher_proj, teacher_mask = captured[1]
                 self.assertEqual(
                     student_proj.shape,
                     (*batch["target_masks"].shape, model.target_projector_dim),
                 )
-                self.assertEqual(
-                    teacher_proj.shape,
-                    (*batch["peak_valid_mask"].shape, model.target_projector_dim),
-                )
                 torch.testing.assert_close(
                     student_mask,
                     batch["target_masks"].float(),
-                )
-                torch.testing.assert_close(
-                    teacher_mask,
-                    batch["peak_valid_mask"].float(),
                 )
                 torch.testing.assert_close(
                     metrics["projected_student_token_sigreg_loss"],
@@ -341,14 +333,14 @@ class BlockJEPATests(unittest.TestCase):
                 )
                 torch.testing.assert_close(
                     metrics["projected_teacher_token_sigreg_loss"],
-                    metrics["projected_teacher_token_sigreg_loss"].new_tensor(2.0),
+                    metrics["projected_teacher_token_sigreg_loss"].new_tensor(0.0),
                 )
                 torch.testing.assert_close(
                     metrics["token_sigreg_loss"],
-                    metrics["token_sigreg_loss"].new_tensor(3.0),
+                    metrics["token_sigreg_loss"].new_tensor(1.0),
                 )
 
-    def test_sigreg_on_encoder_outputs_uses_visible_context_and_full_teacher_spectra(self):
+    def test_sigreg_on_encoder_outputs_uses_visible_context_only(self):
         for regularizer in ("sigreg-enc", "slot-sigreg-enc"):
             with self.subTest(regularizer=regularizer):
                 model = self._build_model(
@@ -377,24 +369,15 @@ class BlockJEPATests(unittest.TestCase):
                 ):
                     metrics = model.forward_augmented(batch)
 
-                self.assertEqual(len(captured), 2)
+                self.assertEqual(len(captured), 1)
                 context_proj, context_mask = captured[0]
-                teacher_proj, teacher_mask = captured[1]
                 self.assertEqual(
                     context_proj.shape,
                     (*batch["context_mask"].shape, model.model_dim),
                 )
-                self.assertEqual(
-                    teacher_proj.shape,
-                    (*batch["peak_valid_mask"].shape, model.jepa_target_dim),
-                )
                 torch.testing.assert_close(
                     context_mask,
                     batch["context_mask"].float(),
-                )
-                torch.testing.assert_close(
-                    teacher_mask,
-                    batch["peak_valid_mask"].float(),
                 )
                 torch.testing.assert_close(
                     metrics["context_token_sigreg_loss"],
@@ -402,14 +385,14 @@ class BlockJEPATests(unittest.TestCase):
                 )
                 torch.testing.assert_close(
                     metrics["teacher_token_sigreg_loss"],
-                    metrics["teacher_token_sigreg_loss"].new_tensor(2.0),
+                    metrics["teacher_token_sigreg_loss"].new_tensor(0.0),
                 )
                 torch.testing.assert_close(
                     metrics["token_sigreg_loss"],
-                    metrics["token_sigreg_loss"].new_tensor(3.0),
+                    metrics["token_sigreg_loss"].new_tensor(1.0),
                 )
 
-    def test_teacher_targets_require_grad(self):
+    def test_teacher_targets_are_detached(self):
         model = self._build_model(masked_token_loss_weight=1.0)
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
         teacher_targets = model._compute_jepa_teacher_targets(
@@ -417,7 +400,7 @@ class BlockJEPATests(unittest.TestCase):
             batch["peak_intensity"],
             batch["peak_valid_mask"],
         )
-        self.assertTrue(teacher_targets.requires_grad)
+        self.assertFalse(teacher_targets.requires_grad)
 
     def test_compute_teacher_targets_returns_full_spectrum_once(self):
         model = self._build_model(
@@ -431,7 +414,7 @@ class BlockJEPATests(unittest.TestCase):
             batch["peak_valid_mask"],
         )
         actual = model.compute_teacher_targets(batch)
-        self.assertTrue(actual.requires_grad)
+        self.assertFalse(actual.requires_grad)
         self.assertTrue(torch.allclose(actual, expected))
 
     def test_pooled_teacher_peak_targets_require_grad(self):
@@ -775,8 +758,8 @@ class PrecursorTokenTests(unittest.TestCase):
                 ):
                     model.forward_augmented(batch)
 
-                self.assertEqual(len(captured_masks), 2)
-                context_mask, teacher_mask = captured_masks
+                self.assertEqual(len(captured_masks), 1)
+                context_mask = captured_masks[0]
                 torch.testing.assert_close(
                     context_mask[:, 0],
                     torch.full_like(context_mask[:, 0], 4.0),
@@ -784,14 +767,6 @@ class PrecursorTokenTests(unittest.TestCase):
                 torch.testing.assert_close(
                     context_mask[:, 1:],
                     batch["context_mask"][:, 1:].float(),
-                )
-                torch.testing.assert_close(
-                    teacher_mask[:, 0],
-                    torch.full_like(teacher_mask[:, 0], 4.0),
-                )
-                torch.testing.assert_close(
-                    teacher_mask[:, 1:],
-                    batch["peak_valid_mask"][:, 1:].float(),
                 )
 
     def test_sigreg_pred_respects_precursor_target_mask(self):

@@ -705,14 +705,15 @@ class PeakSetSIGReg(nn.Module):
         peak_intensity: torch.Tensor,
         peak_valid_mask: torch.Tensor,
     ) -> torch.Tensor:
-        teacher_target_features = self._compute_jepa_teacher_target_features(
-            peak_mz,
-            peak_intensity,
-            peak_valid_mask,
-        )
-        return self.project_targets(
-            self._apply_jepa_target_normalization(teacher_target_features)
-        )
+        with torch.no_grad():
+            teacher_target_features = self._compute_jepa_teacher_target_features(
+                peak_mz,
+                peak_intensity,
+                peak_valid_mask,
+            )
+            return self.project_targets(
+                self._apply_jepa_target_normalization(teacher_target_features)
+            )
 
     def compute_teacher_targets(
         self,
@@ -879,9 +880,10 @@ class PeakSetSIGReg(nn.Module):
             (ctx_mask_v | target_masks).reshape(B * K, N),
         ).reshape(B, K, N, -1)
         predictor_output = self.project_targets(predictor_output_features)
-        teacher_targets = self.project_targets(
-            self._apply_jepa_target_normalization(teacher_target_features)
-        )
+        with torch.no_grad():
+            teacher_targets = self.project_targets(
+                self._apply_jepa_target_normalization(teacher_target_features.detach())
+            )
         loss_target = teacher_targets.unsqueeze(1)
         per_token_reg = self._embedding_loss(predictor_output, loss_target)
 
@@ -925,30 +927,18 @@ class PeakSetSIGReg(nn.Module):
         if use_sigreg_enc:
             sigreg_lambda_current = context_emb.new_tensor(self.sigreg_lambda)
             context_sigreg_weights = context_mask.float()
-            teacher_sigreg_weights = peak_valid_mask.float()
             if self.use_precursor_token:
                 context_sigreg_weights = context_sigreg_weights.clone()
                 context_sigreg_weights[..., 0] *= self.sigreg_precursor_scale
-                teacher_sigreg_weights = teacher_sigreg_weights.clone()
-                teacher_sigreg_weights[..., 0] *= self.sigreg_precursor_scale
             context_token_sigreg_loss = self.sigreg(
                 context_emb.float(),
                 valid_mask=context_sigreg_weights,
             )
-            teacher_token_sigreg_loss = self.sigreg(
-                teacher_target_features.float(),
-                valid_mask=teacher_sigreg_weights,
-            )
-            token_sigreg_loss = (
-                context_token_sigreg_loss + teacher_token_sigreg_loss
-            )
+            token_sigreg_loss = context_token_sigreg_loss
             context_sigreg_term = sigreg_lambda_current * context_token_sigreg_loss.to(
                 dtype=context_emb.dtype
             )
-            teacher_sigreg_term = sigreg_lambda_current * teacher_token_sigreg_loss.to(
-                dtype=context_emb.dtype
-            )
-            sigreg_term = context_sigreg_term + teacher_sigreg_term
+            sigreg_term = context_sigreg_term
             regularizer_lambda_current = sigreg_lambda_current
             regularizer_loss = token_sigreg_loss.to(dtype=context_emb.dtype)
             regularizer_term = sigreg_term
@@ -973,31 +963,18 @@ class PeakSetSIGReg(nn.Module):
         elif use_sigreg_proj:
             sigreg_lambda_current = context_emb.new_tensor(self.sigreg_lambda)
             student_sigreg_weights = target_masks.float()
-            teacher_sigreg_weights = peak_valid_mask.float()
             if self.use_precursor_token:
                 student_sigreg_weights = student_sigreg_weights.clone()
                 student_sigreg_weights[..., 0] *= self.sigreg_precursor_scale
-                teacher_sigreg_weights = teacher_sigreg_weights.clone()
-                teacher_sigreg_weights[..., 0] *= self.sigreg_precursor_scale
             projected_student_token_sigreg_loss = self.sigreg(
                 predictor_output.float(),
                 valid_mask=student_sigreg_weights,
             )
-            projected_teacher_token_sigreg_loss = self.sigreg(
-                teacher_targets.float(),
-                valid_mask=teacher_sigreg_weights,
-            )
-            token_sigreg_loss = (
-                projected_student_token_sigreg_loss
-                + projected_teacher_token_sigreg_loss
-            )
+            token_sigreg_loss = projected_student_token_sigreg_loss
             projected_student_sigreg_term = sigreg_lambda_current * (
                 projected_student_token_sigreg_loss.to(dtype=context_emb.dtype)
             )
-            projected_teacher_sigreg_term = sigreg_lambda_current * (
-                projected_teacher_token_sigreg_loss.to(dtype=context_emb.dtype)
-            )
-            sigreg_term = projected_student_sigreg_term + projected_teacher_sigreg_term
+            sigreg_term = projected_student_sigreg_term
             regularizer_lambda_current = sigreg_lambda_current
             regularizer_loss = token_sigreg_loss.to(dtype=context_emb.dtype)
             regularizer_term = sigreg_term
