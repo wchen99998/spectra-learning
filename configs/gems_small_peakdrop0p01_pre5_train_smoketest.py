@@ -10,6 +10,7 @@ def get_config():
     cfg.enable_wandb = False
     cfg.msg_probe_every_n_steps = 0
     cfg.log_every_n_steps = 20
+    cfg.collapse_metrics_every_n_steps = 20
     cfg.checkpoint_every_steps = 1000
     cfg.dataloader_num_workers = 8
     return cfg

@@ -10,6 +10,7 @@ def get_config():
     cfg.dataloader_prefetch_factor = 2
     cfg.enable_wandb = False
     cfg.log_every_n_steps = 10
+    cfg.collapse_metrics_every_n_steps = 10
     cfg.checkpoint_every_steps = 1_000_000
     cfg.msg_probe_every_n_steps = 0
     with cfg.ignore_type():

@@ -186,14 +186,30 @@ class BlockJEPATests(unittest.TestCase):
             "cls_visible_fraction",
             "context_fraction",
             "masked_fraction",
-            "global_emb_var_floor",
-            "encoder_emb_var_floor",
-            "global_emb_cov_offdiag_abs_mean",
-            "encoder_emb_cov_offdiag_abs_mean",
-            "global_emb_corr_offdiag_abs_mean",
-            "encoder_emb_corr_offdiag_abs_mean",
         ):
             self.assertIn(key, metrics, f"Missing key: {key}")
+
+    def test_forward_can_return_raw_collapse_data(self):
+        model = self._build_model()
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+        metrics, collapse_data = model.forward_augmented(batch, return_collapse_data=True)
+        self.assertIn("loss", metrics)
+        for key in (
+            "teacher_peak_emb",
+            "teacher_cls_emb",
+            "context_emb",
+            "context_mask",
+            "peak_valid_mask",
+            "target_masks",
+            "teacher_target_features",
+            "teacher_target_features_normalized",
+            "teacher_targets",
+            "predictor_output_features",
+            "predictor_output",
+            "pooled_mean",
+        ):
+            self.assertIn(key, collapse_data, f"Missing key: {key}")
+            self.assertFalse(collapse_data[key].requires_grad)
 
     def test_sigreg_on_encoder_output_contributes_to_loss(self):
         for regularizer in ("sigreg-enc", "slot-sigreg-enc"):

@@ -11,7 +11,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.nist_full_probe_revision = "main"
     cfg.nist_full_probe_train_samples = 4_000
     cfg.nist_full_probe_test_samples = 1_000
-    cfg.nist_full_probe_num_repeats = 3
+    cfg.nist_full_probe_num_repeats = 1
     cfg.batch_size = 256
     cfg.shuffle_buffer = 1_000_000
     cfg.drop_remainder = True
@@ -71,9 +71,9 @@ def get_config() -> config_dict.ConfigDict:
 
     # Training
     cfg.num_epochs = 10
-    cfg.learning_rate = 1e-4
+    cfg.learning_rate = 3e-4
     cfg.warmup_steps = 10_000
-    cfg.min_learning_rate = 3e-5
+    cfg.min_learning_rate = 1e-4
     cfg.b2 = 0.999
     cfg.weight_decay = 0.05
     cfg.optimizer = "muon"
@@ -81,6 +81,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.optimizer_capturable = True
     cfg.optimizer_fused = True
     cfg.log_every_n_steps = 250
+    cfg.collapse_metrics_every_n_steps = 250
     cfg.checkpoint_every_steps = 25_000
     cfg.dataloader_num_workers = 8
     cfg.dataloader_prefetch_factor = 2

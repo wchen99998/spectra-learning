@@ -3,11 +3,11 @@ import math
 import random
 import time
 import warnings
+import gc
 from collections import deque
 from collections.abc import Iterator
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import torch
@@ -20,7 +20,7 @@ import torch._inductor.config as inductor_config
 from ml_collections import config_dict
 
 from input_pipeline import GemsNativeDataModule
-from models.model import PeakSetSIGReg
+from models.model import PeakSetSIGReg, _collapse_diagnostics
 from utils.msg_probe import msg_probe_variants_from_config, run_msg_probe
 from utils.training import (
     build_logger,
@@ -112,6 +112,7 @@ def _train_step_impl(
     schedulers: list[torch.optim.lr_scheduler.LRScheduler],
     autocast_dtype: torch.dtype | None,
     grad_clip_norm: float | None,
+    compute_collapse_metrics: bool = False,
 ) -> dict[str, torch.Tensor]:
     device_type = next(model.parameters()).device.type
     if autocast_dtype is None or device_type != "cuda":
@@ -120,7 +121,17 @@ def _train_step_impl(
         autocast_ctx = torch.autocast(device_type=device_type, dtype=autocast_dtype)
     torch.compiler.cudagraph_mark_step_begin()
     with autocast_ctx:
-        metrics = model.forward_augmented(batch)
+        if compute_collapse_metrics:
+            metrics, collapse_data = model.forward_augmented(
+                batch,
+                return_collapse_data=True,
+            )
+        else:
+            metrics = model.forward_augmented(batch)
+            collapse_data = {}
+    if compute_collapse_metrics:
+        with torch.no_grad():
+            metrics.update(_collapse_diagnostics(**collapse_data))
     metrics["loss"].backward()
     if grad_clip_norm is not None and grad_clip_norm > 0:
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
@@ -352,12 +363,24 @@ def train_and_evaluate(
     total_steps = max(1, int(num_epochs * steps_per_epoch))
     loop_epochs = max(1, math.ceil(num_epochs))
     log_every_n_steps = int(config.get("log_every_n_steps", 50))
+    collapse_metrics_every_n_steps = int(
+        config.get("collapse_metrics_every_n_steps", log_every_n_steps)
+    )
     checkpoint_every_steps = int(config.checkpoint_every_steps)
     config.num_peaks = datamodule.info["num_peaks"]
     logging.info("Training for %s epochs (%d steps).", num_epochs, total_steps)
     logging.info("Steps per epoch: %d", steps_per_epoch)
     logging.info("Total steps: %d", total_steps)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        gc.collect()
+        torch.cuda.empty_cache()
+        free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+        logging.info(
+            "CUDA memory before model init: free=%.2f GiB total=%.2f GiB",
+            free_bytes / 1024**3,
+            total_bytes / 1024**3,
+        )
     model = build_model_from_config(config)
     model_param_metrics = collect_and_log_param_metrics(model)
     model.to(device).train()
@@ -479,10 +502,19 @@ def train_and_evaluate(
                 schedulers,
                 autocast_dtype,
                 grad_clip_norm,
+                compute_collapse_metrics=(
+                    collapse_metrics_every_n_steps > 0
+                    and (global_step + 1) % collapse_metrics_every_n_steps == 0
+                ),
             )
             global_step += 1
             pbar.update(1)
-            if global_step % log_every_n_steps == 0:
+            should_log_train = global_step % log_every_n_steps == 0
+            should_log_collapse = (
+                collapse_metrics_every_n_steps > 0
+                and global_step % collapse_metrics_every_n_steps == 0
+            )
+            if should_log_train or should_log_collapse:
                 loss_val = float(metrics["loss"].detach())
                 pbar.set_postfix(loss=f"{loss_val:.4f}", step=global_step)
                 log_metrics = {

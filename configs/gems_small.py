@@ -79,6 +79,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.optimizer_capturable = True
     cfg.optimizer_fused = True
     cfg.log_every_n_steps = 100
+    cfg.collapse_metrics_every_n_steps = 100
     cfg.checkpoint_every_steps = 25_000
     cfg.dataloader_num_workers = 8
     cfg.dataloader_prefetch_factor = 2
