@@ -93,6 +93,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "reduce-overhead"
     cfg.representation_regularizer = "none"
+    cfg.train_covariance_pooling = True
+    cfg.covariance_pooling_dim = 32
+    cfg.covariance_pooling_sigreg_lambda = cfg.sigreg_lambda
     cfg.msg_probe_every_n_steps = 0.2
     cfg.msg_probe_num_epochs = 20
     cfg.msg_probe_learning_rate = 1e-3
@@ -102,7 +105,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_max_test_samples = None
     cfg.msg_probe_variants = ("mean", "covariance", "pma")
     cfg.msg_probe_mlp_hidden_dim = cfg.model_dim
-    cfg.msg_probe_covariance_dim = 32
+    cfg.msg_probe_covariance_dim = cfg.covariance_pooling_dim
     cfg.msg_probe_pma_num_seeds = 32
     cfg.msg_probe_pma_num_heads = cfg.encoder_num_heads
     cfg.probe_dataset = "nist20"

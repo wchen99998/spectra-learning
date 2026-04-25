@@ -302,13 +302,20 @@ def _load_resume_model_state(
         "sigreg.t",
         "sigreg.phi",
         "sigreg.weights",
+        "covariance_sigreg.t",
+        "covariance_sigreg.phi",
+        "covariance_sigreg.weights",
     )
     allowed_unexpected = (
         "sigreg_lambda_target",
         "sigreg_lambda_current",
         "sigreg_lambda_step",
     )
-    allowed_missing_prefixes = ("target_projector.",)
+    allowed_missing_prefixes = (
+        "target_projector.",
+        "covariance_pooler.",
+        "covariance_sigreg.",
+    )
     missing = [
         key
         for key in missing
@@ -318,7 +325,9 @@ def _load_resume_model_state(
     unexpected = [
         key
         for key in unexpected
-        if key not in allowed_unexpected and not key.startswith("cls_predictor.")
+        if key not in allowed_unexpected
+        and not key.startswith("cls_predictor.")
+        and not key.startswith(("covariance_pooler.", "covariance_sigreg."))
     ]
     if missing or unexpected:
         raise RuntimeError(

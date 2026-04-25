@@ -40,7 +40,7 @@ def _tensor_to_arrow(value: torch.Tensor) -> pa.Array:
 def _batch_to_table(
     batch: dict[str, object],
     *,
-    encoder_embedding: torch.Tensor,
+    covariance_embedding: torch.Tensor,
     adduct_vocab: dict[int, str],
     instrument_type_vocab: dict[int, str],
 ) -> pa.Table:
@@ -57,8 +57,8 @@ def _batch_to_table(
     columns["instrument_type"] = pa.array(
         [instrument_type_vocab[int(idx)] for idx in instrument_ids]
     )
-    columns["encoder_embedding"] = _tensor_to_arrow(
-        encoder_embedding.detach().cpu().to(torch.float32)
+    columns["covariance_embedding"] = _tensor_to_arrow(
+        covariance_embedding.detach().cpu().to(torch.float32)
     )
     return pa.table(columns)
 
@@ -160,11 +160,15 @@ def _encode_splits(
                     peak_intensity,
                     valid_mask=peak_valid_mask,
                 )
-                pooled_encoder = model.pool(embeddings, peak_valid_mask)
+                peak_embeddings, _ = model.encoder.split_peak_and_cls(embeddings)
+                covariance_embedding = model.covariance_pooler(
+                    peak_embeddings.float(),
+                    peak_valid_mask,
+                )
 
             table = _batch_to_table(
                 batch,
-                encoder_embedding=pooled_encoder,
+                covariance_embedding=covariance_embedding,
                 adduct_vocab=adduct_vocab,
                 instrument_type_vocab=instrument_type_vocab,
             )
@@ -183,6 +187,10 @@ def _encode_splits(
                     "probe_dataset": probe_dataset,
                     "splits": json.dumps([_normalize_split(name) for name in splits]),
                     "peak_ordering": peak_ordering,
+                    "embedding_variant": "covariance",
+                    "covariance_pooling_dim": str(
+                        model.covariance_pooler.left_proj.out_features
+                    ),
                     "seed": str(seed),
                     "massspec_adduct_vocab": json.dumps(
                         massspec_data.info["massspec_adduct_vocab"]

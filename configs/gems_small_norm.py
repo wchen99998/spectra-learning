@@ -92,7 +92,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_target_normalization = "zscore"
     cfg.jepa_target_layers = [3, 5, 8, 12]
     cfg.grad_clip_norm = 1.0
-    cfg.autocast_dtype = "fp32"
+    cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "reduce-overhead"
     cfg.representation_regularizer = "slot-sigreg-enc"
     cfg.train_covariance_pooling = True

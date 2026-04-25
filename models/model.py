@@ -187,6 +187,33 @@ class TemporalDecoderBlock(nn.Module):
         return h + self.feed_forward(self.ffn_norm(h))
 
 
+class CovariancePool(nn.Module):
+    def __init__(
+        self,
+        *,
+        input_dim: int,
+        compressed_dim: int,
+    ) -> None:
+        super().__init__()
+        self.left_proj = nn.Linear(input_dim, compressed_dim, bias=False)
+        self.right_proj = nn.Linear(input_dim, compressed_dim, bias=False)
+        nn.init.xavier_normal_(self.left_proj.weight)
+        nn.init.xavier_normal_(self.right_proj.weight)
+
+    def forward(
+        self,
+        peak_embeddings: torch.Tensor,
+        valid_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        mask = valid_mask.unsqueeze(-1).to(dtype=peak_embeddings.dtype)
+        left = self.left_proj(peak_embeddings) * mask
+        right = self.right_proj(peak_embeddings) * mask
+        denom = mask.sum(dim=1).clamp(min=1.0)
+        covariance = left.transpose(1, 2) @ right
+        covariance = covariance / denom.unsqueeze(-1)
+        return covariance.flatten(start_dim=1)
+
+
 def _apply_temporal_depth_scaled_init(blocks: nn.ModuleList, num_layers: int) -> None:
     """Depth-scaled init for temporal decoder blocks.
 
@@ -435,6 +462,9 @@ class PeakSetSIGReg(nn.Module):
         predictor_dim: int | None = None,
         target_projector_dim: int | None = None,
         predictor_dropout: float = 0.0,
+        train_covariance_pooling: bool = False,
+        covariance_pooling_dim: int = 32,
+        covariance_pooling_sigreg_lambda: float | None = None,
     ):
         super().__init__()
         self.model_dim = model_dim
@@ -480,6 +510,12 @@ class PeakSetSIGReg(nn.Module):
             )
         self.sigreg_lambda = float(sigreg_lambda)
         self.sigreg_precursor_scale = float(sigreg_precursor_scale)
+        self.train_covariance_pooling = bool(train_covariance_pooling)
+        self.covariance_pooling_sigreg_lambda = (
+            float(covariance_pooling_sigreg_lambda)
+            if covariance_pooling_sigreg_lambda is not None
+            else float(sigreg_lambda)
+        )
         self.masked_token_loss_weight = float(masked_token_loss_weight)
         self.masked_token_loss_type = str(masked_token_loss_type).lower()
         self.jepa_target_normalization = str(jepa_target_normalization).lower()
@@ -571,6 +607,12 @@ class PeakSetSIGReg(nn.Module):
             else SIGReg
         )
         self.sigreg = sigreg_cls(num_slices=int(sigreg_num_slices))
+        if self.train_covariance_pooling:
+            self.covariance_pooler = CovariancePool(
+                input_dim=self.model_dim,
+                compressed_dim=int(covariance_pooling_dim),
+            )
+            self.covariance_sigreg = SIGReg(num_slices=int(sigreg_num_slices))
         # Temporal predictor for frame -> next-frame prediction.
         if self.temporal_predictor_num_layers > 0:
             self.temporal_predictor = _build_temporal_decoder_blocks(
@@ -731,7 +773,7 @@ class PeakSetSIGReg(nn.Module):
         peak_intensity: torch.Tensor,
         peak_valid_mask: torch.Tensor,
         context_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size = peak_mz.shape[0]
         encoded, teacher_peak_outputs = self.encoder.forward_with_block_outputs(
             torch.cat([peak_mz, peak_mz], dim=0),
@@ -744,8 +786,9 @@ class PeakSetSIGReg(nn.Module):
             [peak_output[:batch_size] for peak_output in teacher_peak_outputs],
             dim=-1,
         )
+        teacher_peak_emb, _ = self.encoder.split_peak_and_cls(encoded[:batch_size])
         context_emb, _ = self.encoder.split_peak_and_cls(encoded[batch_size:])
-        return teacher_target_features, context_emb
+        return teacher_target_features, teacher_peak_emb, context_emb
 
     def _compute_pooled_teacher_peak_targets(
         self,
@@ -861,7 +904,11 @@ class PeakSetSIGReg(nn.Module):
         target_masks = augmented_batch["target_masks"] & peak_valid_mask.unsqueeze(1)
         B, N = peak_mz.shape
         K = self.jepa_num_target_blocks
-        teacher_target_features, context_emb = self._encode_augmented_teacher_and_context(
+        (
+            teacher_target_features,
+            teacher_peak_emb,
+            context_emb,
+        ) = self._encode_augmented_teacher_and_context(
             peak_mz,
             peak_intensity,
             peak_valid_mask,
@@ -924,6 +971,9 @@ class PeakSetSIGReg(nn.Module):
         pred_sigreg_term = context_emb.new_tensor(0.0)
         projected_student_sigreg_term = context_emb.new_tensor(0.0)
         projected_teacher_sigreg_term = context_emb.new_tensor(0.0)
+        covariance_pooling_sigreg_loss = context_emb.new_tensor(0.0)
+        covariance_pooling_sigreg_term = context_emb.new_tensor(0.0)
+        covariance_pooling_sigreg_lambda_current = context_emb.new_tensor(0.0)
         if use_sigreg_enc:
             sigreg_lambda_current = context_emb.new_tensor(self.sigreg_lambda)
             context_sigreg_weights = context_mask.float()
@@ -978,7 +1028,27 @@ class PeakSetSIGReg(nn.Module):
             regularizer_lambda_current = sigreg_lambda_current
             regularizer_loss = token_sigreg_loss.to(dtype=context_emb.dtype)
             regularizer_term = sigreg_term
-        loss = jepa_term + cls_embedding_term + regularizer_term
+        if self.train_covariance_pooling and self.covariance_pooling_sigreg_lambda > 0:
+            covariance_pooling_sigreg_lambda_current = context_emb.new_tensor(
+                self.covariance_pooling_sigreg_lambda
+            )
+            covariance_embedding = self.covariance_pooler(
+                teacher_peak_emb.float(),
+                peak_valid_mask,
+            )
+            covariance_pooling_sigreg_loss = self.covariance_sigreg(
+                covariance_embedding,
+            )
+            covariance_pooling_sigreg_term = (
+                covariance_pooling_sigreg_lambda_current
+                * covariance_pooling_sigreg_loss.to(dtype=context_emb.dtype)
+            )
+        loss = (
+            jepa_term
+            + cls_embedding_term
+            + regularizer_term
+            + covariance_pooling_sigreg_term
+        )
         with torch.no_grad():
             collapse_metrics: dict[str, torch.Tensor] = {}
             for k, v in _masked_embedding_stats(context_emb, context_mask).items():
@@ -1017,10 +1087,20 @@ class PeakSetSIGReg(nn.Module):
             "projected_student_sigreg_term": projected_student_sigreg_term,
             "projected_teacher_sigreg_term": projected_teacher_sigreg_term,
             "sigreg_lambda_current": sigreg_lambda_current,
+            "covariance_pooling_sigreg_loss": covariance_pooling_sigreg_loss.to(
+                dtype=context_emb.dtype
+            ),
+            "covariance_pooling_sigreg_term": covariance_pooling_sigreg_term,
+            "covariance_pooling_sigreg_lambda_current": (
+                covariance_pooling_sigreg_lambda_current
+            ),
             "target_regularizer_term_over_jepa_term": regularizer_term
             / jepa_term.clamp_min(1e-8),
             "target_sigreg_term_over_jepa_term": sigreg_term
             / jepa_term.clamp_min(1e-8),
+            "covariance_pooling_sigreg_term_over_jepa_term": (
+                covariance_pooling_sigreg_term / jepa_term.clamp_min(1e-8)
+            ),
             "context_fraction": context_mask.float().sum() / valid_peak_count,
             "masked_fraction": target_masks.float().sum() / valid_peak_count,
             "cls_visible_fraction": cls_visible_mask.float().sum() / valid_peak_count,

@@ -103,6 +103,17 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         predictor_dim=config.get("predictor_dim", None),
         target_projector_dim=config.get("target_projector_dim", None),
         predictor_dropout=float(config.get("predictor_dropout", 0.0)),
+        train_covariance_pooling=bool(config.get("train_covariance_pooling", False)),
+        covariance_pooling_dim=int(
+            config.get(
+                "covariance_pooling_dim",
+                config.get("msg_probe_covariance_dim", 32),
+            )
+        ),
+        covariance_pooling_sigreg_lambda=config.get(
+            "covariance_pooling_sigreg_lambda",
+            None,
+        ),
     )
 
 
@@ -195,6 +206,21 @@ def auto_run_name(config: Any) -> str:
     if regularizer and regularizer != "none":
         parts.append(regularizer)
         parts.append(f"lam{float(config.get('sigreg_lambda', 0.0)):.0e}")
+    if config.get("train_covariance_pooling", False):
+        cov_dim = int(
+            config.get(
+                "covariance_pooling_dim",
+                config.get("msg_probe_covariance_dim", 32),
+            )
+        )
+        cov_lambda = float(
+            config.get(
+                "covariance_pooling_sigreg_lambda",
+                config.get("sigreg_lambda", 0.0),
+            )
+        )
+        parts.append(f"covpool{cov_dim}")
+        parts.append(f"covlam{cov_lambda:.0e}")
     target_projector_dim = config.get("target_projector_dim", None)
     if target_projector_dim is not None and int(target_projector_dim) != dim:
         parts.append(f"tproj{int(target_projector_dim)}")
@@ -291,12 +317,23 @@ def load_pretrained_weights(
         "predictor_register_tokens",
         "temporal_query_token",
     )
-    allowed_missing_prefixes = ("masked_latent_readout.", "target_projector.", "sigreg.")
+    allowed_missing_prefixes = (
+        "masked_latent_readout.",
+        "target_projector.",
+        "sigreg.",
+        "covariance_pooler.",
+        "covariance_sigreg.",
+    )
+    allowed_unexpected_prefixes = ("covariance_pooler.", "covariance_sigreg.")
     unexpected = [
         key for key in unexpected
-        if not key.endswith(
+        if not key.startswith(allowed_unexpected_prefixes)
+        and not key.endswith(
             (
                 "temporal_query_token",
+                "covariance_sigreg.t",
+                "covariance_sigreg.phi",
+                "covariance_sigreg.weights",
                 "sigreg_lambda_target",
                 "sigreg_lambda_current",
                 "sigreg_lambda_step",
