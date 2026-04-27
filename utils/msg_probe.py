@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from ml_collections import config_dict
-from sklearn.metrics import r2_score, roc_auc_score
+from sklearn.metrics import average_precision_score, r2_score, roc_auc_score
 
 from input_pipeline import numpy_batch_to_torch
 from models.model import CovariancePool, CrossAttention, PeakSetEncoder, PeakSetSIGReg
@@ -691,6 +691,7 @@ def _score_epoch_state(
         pred = np.concatenate(predictions[_MACCS_TASK], axis=0)
         target = np.concatenate(targets[_MACCS_TASK], axis=0)
         auc_values = []
+        average_precision_values = []
         recall_values = []
         precision_values = []
         for bit_idx in range(task_spec.maccs_bits):
@@ -701,20 +702,35 @@ def _score_epoch_state(
                     recall_values.append(
                         float(bit_pred[bit_target == 1].mean())
                     )
-                    if np.count_nonzero(bit_pred) > 0:
-                        precision_values.append(
-                            float(bit_target[bit_pred].mean())
-                        )
+                    precision_values.append(
+                        float(bit_target[bit_pred].mean())
+                        if np.count_nonzero(bit_pred) > 0
+                        else 0.0
+                    )
                 continue
             auc_values.append(float(roc_auc_score(bit_target, pred[:, bit_idx])))
+            average_precision_values.append(
+                float(average_precision_score(bit_target, pred[:, bit_idx]))
+            )
             recall_values.append(float(bit_pred[bit_target == 1].mean()))
-            if np.count_nonzero(bit_pred) > 0:
-                precision_values.append(float(bit_target[bit_pred].mean()))
+            precision_values.append(
+                float(bit_target[bit_pred].mean())
+                if np.count_nonzero(bit_pred) > 0
+                else 0.0
+            )
         metrics[f"{prefix}/num_maccs_auc_bits"] = float(len(auc_values))
+        metrics[f"{prefix}/num_maccs_average_precision_bits"] = float(
+            len(average_precision_values)
+        )
         metrics[f"{prefix}/num_maccs_recall_bits"] = float(len(recall_values))
         metrics[f"{prefix}/num_maccs_precision_bits"] = float(len(precision_values))
         metrics[f"{prefix}/auc_maccs_mean"] = (
             float(np.mean(auc_values)) if auc_values else float("nan")
+        )
+        metrics[f"{prefix}/average_precision_maccs_mean"] = (
+            float(np.mean(average_precision_values))
+            if average_precision_values
+            else float("nan")
         )
         metrics[f"{prefix}/recall_maccs_mean"] = (
             float(np.mean(recall_values)) if recall_values else float("nan")
@@ -1001,7 +1017,7 @@ def _run_msg_probe_once(
             else:
                 epochs_without_improvement[variant] += 1
             log.info(
-                "MSG probe [%s] epoch %d/%d train_samples=%d val_auc_maccs_mean=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f test_precision_maccs_mean=%.4f maccs_bits=%d",
+                "MSG probe [%s] epoch %d/%d train_samples=%d val_auc_maccs_mean=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_average_precision_maccs_mean=%.4f test_recall_maccs_mean=%.4f test_precision_maccs_mean=%.4f maccs_bits=%d",
                 variant,
                 epoch_idx + 1,
                 num_probe_epochs,
@@ -1010,6 +1026,7 @@ def _run_msg_probe_once(
                 variant_metrics[f"{variant_prefix}/test/r2_mean_wo_num_rings"],
                 variant_metrics[f"{variant_prefix}/test/mae_num_rings"],
                 variant_metrics[f"{variant_prefix}/test/auc_maccs_mean"],
+                variant_metrics[f"{variant_prefix}/test/average_precision_maccs_mean"],
                 variant_metrics[f"{variant_prefix}/test/recall_maccs_mean"],
                 variant_metrics[f"{variant_prefix}/test/precision_maccs_mean"],
                 int(variant_metrics[f"{variant_prefix}/num_maccs_bits"]),
@@ -1043,7 +1060,7 @@ def _run_msg_probe_once(
         variant_prefix = f"msg_probe/{variant}"
         variant_select_metric = _msg_probe_variant_metric_key(variant, select_metric)
         log.info(
-            "MSG probe [%s] best epoch %d: %s=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f test_precision_maccs_mean=%.4f",
+            "MSG probe [%s] best epoch %d: %s=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_average_precision_maccs_mean=%.4f test_recall_maccs_mean=%.4f test_precision_maccs_mean=%.4f",
             variant,
             int(variant_metrics[f"{variant_prefix}/epoch"]),
             variant_select_metric,
@@ -1051,6 +1068,7 @@ def _run_msg_probe_once(
             variant_metrics[f"{variant_prefix}/test/r2_mean_wo_num_rings"],
             variant_metrics[f"{variant_prefix}/test/mae_num_rings"],
             variant_metrics[f"{variant_prefix}/test/auc_maccs_mean"],
+            variant_metrics[f"{variant_prefix}/test/average_precision_maccs_mean"],
             variant_metrics[f"{variant_prefix}/test/recall_maccs_mean"],
             variant_metrics[f"{variant_prefix}/test/precision_maccs_mean"],
         )
@@ -1245,12 +1263,13 @@ def _run_dreams_probe_once(
             best_metric_value = current_value
             best_metrics = dict(epoch_metrics)
         log.info(
-            "DreaMS probe epoch %d/%d test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f test_precision_maccs_mean=%.4f maccs_bits=%d",
+            "DreaMS probe epoch %d/%d test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_average_precision_maccs_mean=%.4f test_recall_maccs_mean=%.4f test_precision_maccs_mean=%.4f maccs_bits=%d",
             epoch_idx + 1,
             num_probe_epochs,
             epoch_metrics["dreams_probe/test/r2_mean_wo_num_rings"],
             epoch_metrics["dreams_probe/test/mae_num_rings"],
             epoch_metrics["dreams_probe/test/auc_maccs_mean"],
+            epoch_metrics["dreams_probe/test/average_precision_maccs_mean"],
             epoch_metrics["dreams_probe/test/recall_maccs_mean"],
             epoch_metrics["dreams_probe/test/precision_maccs_mean"],
             int(epoch_metrics["dreams_probe/num_maccs_bits"]),
@@ -1259,13 +1278,14 @@ def _run_dreams_probe_once(
             on_epoch_end(epoch_metrics)
     if best_metrics:
         log.info(
-            "DreaMS probe best epoch %d: %s=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f test_precision_maccs_mean=%.4f",
+            "DreaMS probe best epoch %d: %s=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_average_precision_maccs_mean=%.4f test_recall_maccs_mean=%.4f test_precision_maccs_mean=%.4f",
             int(best_metrics["dreams_probe_epoch"]),
             probe_select_metric,
             best_metrics[probe_select_metric],
             best_metrics["dreams_probe/test/r2_mean_wo_num_rings"],
             best_metrics["dreams_probe/test/mae_num_rings"],
             best_metrics["dreams_probe/test/auc_maccs_mean"],
+            best_metrics["dreams_probe/test/average_precision_maccs_mean"],
             best_metrics["dreams_probe/test/recall_maccs_mean"],
             best_metrics["dreams_probe/test/precision_maccs_mean"],
         )

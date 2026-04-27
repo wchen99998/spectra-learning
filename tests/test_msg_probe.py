@@ -524,6 +524,12 @@ class MsgProbeMetricTests(unittest.TestCase):
         )
         self.assertEqual(metrics["msg_probe/test/num_maccs_auc_bits"], 4.0)
         self.assertGreater(metrics["msg_probe/test/auc_maccs_mean"], 0.9)
+        self.assertEqual(
+            metrics["msg_probe/test/num_maccs_average_precision_bits"], 4.0
+        )
+        self.assertGreater(
+            metrics["msg_probe/test/average_precision_maccs_mean"], 0.9
+        )
         self.assertEqual(metrics["msg_probe/test/num_maccs_recall_bits"], 4.0)
         self.assertGreater(metrics["msg_probe/test/recall_maccs_mean"], 0.9)
         self.assertEqual(metrics["msg_probe/test/num_maccs_precision_bits"], 4.0)

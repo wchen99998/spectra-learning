@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch._dynamo
 
 from tqdm import tqdm
 
@@ -33,6 +34,14 @@ inductor_config.triton.unique_kernel_names = True
 inductor_config.fx_graph_cache = True
 inductor_config.epilogue_fusion = True
 inductor_config.shape_padding = True
+
+
+def _configure_dynamo_for_optimizer(config: config_dict.ConfigDict) -> None:
+    if str(config.get("optimizer", "adamw")).lower() == "muon":
+        limit = int(config.get("dynamo_recompile_limit", 64))
+        torch._dynamo.config.recompile_limit = limit
+        torch._dynamo.config.cache_size_limit = limit
+        logging.info("TorchDynamo cache limits set to %d for Muon.", limit)
 
 _TRAIN_BATCH_KEYS = frozenset(
     {
@@ -362,6 +371,7 @@ def train_and_evaluate(
     config: config_dict.ConfigDict,
     workdir: str | Path,
 ) -> dict[str, float]:
+    _configure_dynamo_for_optimizer(config)
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     seed = int(config.seed)
