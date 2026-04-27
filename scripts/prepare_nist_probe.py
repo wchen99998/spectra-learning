@@ -12,6 +12,11 @@ Enable it at train time by setting::
     cfg.nist_full_probe_train_samples = 4000
     cfg.nist_full_probe_test_samples = 1000
     cfg.nist_full_probe_num_repeats = 3
+
+Select the fingerprint target used by the online probe with::
+
+    cfg.msg_probe_fingerprint = "maccs"   # 166 bits, default
+    cfg.msg_probe_fingerprint = "morgan"  # radius 2, 4096 bits
 """
 
 from __future__ import annotations

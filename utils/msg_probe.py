@@ -16,6 +16,7 @@ from utils.massspec_probe_data import MassSpecProbeData
 from utils.massspec_probe_targets import (
     FG_SMARTS,
     MACCS_FINGERPRINT_BITS,
+    MORGAN_PROBE_FINGERPRINT_BITS,
     REGRESSION_TARGET_KEYS,
 )
 from utils.schedulers import learning_rate_at_step
@@ -30,11 +31,18 @@ class MsgProbeTaskSpec(NamedTuple):
     maccs_bits: int
     regression_means: dict[str, float]
     regression_stds: dict[str, float]
+    fingerprint_task: str = "maccs"
 
 
 class MsgProbeSplitTargets(NamedTuple):
     regression: dict[str, np.ndarray]
     maccs: np.ndarray
+
+
+class MsgProbePairwiseAlignment(NamedTuple):
+    tanimoto: np.ndarray
+    cosine: np.ndarray
+    pearson: float
 
 
 def build_msg_probe_inputs(
@@ -47,9 +55,14 @@ def build_msg_probe_inputs(
 
 _NUM_RINGS_TASK = "num_rings"
 _MACCS_TASK = "maccs"
+_MORGAN_TASK = "morgan"
 _REGRESSION_PROBE_TASKS = tuple(
     name for name in REGRESSION_TARGET_KEYS if name != _NUM_RINGS_TASK
 )
+_PROBE_FINGERPRINT_BITS = {
+    _MACCS_TASK: MACCS_FINGERPRINT_BITS,
+    _MORGAN_TASK: MORGAN_PROBE_FINGERPRINT_BITS,
+}
 
 
 def msg_probe_variants_from_config(
@@ -59,6 +72,17 @@ def msg_probe_variants_from_config(
     if isinstance(raw_variants, str):
         return (raw_variants.lower(),)
     return tuple(str(variant).lower() for variant in raw_variants)
+
+
+def resolve_msg_probe_fingerprint(
+    config: config_dict.ConfigDict,
+) -> str:
+    return str(
+        config.get(
+            "msg_probe_fingerprint",
+            config.get("msg_probe_fingerprint_type", _MACCS_TASK),
+        )
+    ).lower()
 
 
 def resolve_msg_probe_sample_limits(
@@ -89,6 +113,12 @@ def resolve_msg_probe_num_repeats(
     if raw_repeats is None and probe_dataset == "nist-full":
         raw_repeats = config.get("nist_full_probe_num_repeats", 1)
     return int(raw_repeats) if raw_repeats is not None else 1
+
+
+def resolve_msg_probe_pairwise_alignment_num_pairs(
+    config: config_dict.ConfigDict,
+) -> int:
+    return int(config.get("msg_probe_pairwise_alignment_num_pairs", 20_000))
 
 
 class MsgLinearProbe(torch.nn.Module):
@@ -245,7 +275,7 @@ def _probe_task_names(task_spec: MsgProbeTaskSpec) -> tuple[str, ...]:
     if task_spec.num_rings_classes:
         task_names += (_NUM_RINGS_TASK,)
     if task_spec.maccs_bits > 0:
-        task_names += (_MACCS_TASK,)
+        task_names += (task_spec.fingerprint_task,)
     return task_names
 
 
@@ -254,7 +284,7 @@ def _probe_task_output_dims(task_spec: MsgProbeTaskSpec) -> dict[str, int]:
     if task_spec.num_rings_classes:
         output_dims[_NUM_RINGS_TASK] = len(task_spec.num_rings_classes)
     if task_spec.maccs_bits > 0:
-        output_dims[_MACCS_TASK] = task_spec.maccs_bits
+        output_dims[task_spec.fingerprint_task] = task_spec.maccs_bits
     return output_dims
 
 
@@ -358,9 +388,11 @@ def _collect_split_targets(
     seed: int,
     max_samples: int | None = None,
     sample_randomly: bool = False,
+    fingerprint_task: str = _MACCS_TASK,
 ) -> MsgProbeSplitTargets:
     regression = {name: [] for name in REGRESSION_TARGET_KEYS}
     maccs = []
+    fingerprint_key = f"probe_{fingerprint_task}"
     for batch in iter_massspec_probe(
         probe_data=probe_data,
         split=split,
@@ -379,7 +411,7 @@ def _collect_split_targets(
             regression[name].append(
                 batch[f"probe_{name}"][valid_mask].detach().cpu().numpy()
             )
-        maccs.append(batch["probe_maccs"][valid_mask].detach().cpu().numpy())
+        maccs.append(batch[fingerprint_key][valid_mask].detach().cpu().numpy())
 
     def _cat(d, dt):
         return {
@@ -391,7 +423,9 @@ def _collect_split_targets(
         maccs=(
             np.concatenate(maccs, axis=0)
             if maccs
-            else np.empty((0, MACCS_FINGERPRINT_BITS), dtype=np.int32)
+            else np.empty(
+                (0, _PROBE_FINGERPRINT_BITS[fingerprint_task]), dtype=np.int32
+            )
         ),
     )
 
@@ -421,6 +455,7 @@ def _build_task_spec(
     train_targets: MsgProbeSplitTargets,
     test_targets: MsgProbeSplitTargets,
     num_rings_classes: tuple[int, ...] | None = None,
+    fingerprint_task: str = _MACCS_TASK,
 ) -> MsgProbeTaskSpec:
     regression_means, regression_stds = {}, {}
     for name in _REGRESSION_PROBE_TASKS:
@@ -441,6 +476,7 @@ def _build_task_spec(
         maccs_bits=int(train_targets.maccs.shape[1]),
         regression_means=regression_means,
         regression_stds=regression_stds,
+        fingerprint_task=fingerprint_task,
     )
 
 
@@ -476,17 +512,234 @@ def _build_probe_result(
         )
         task_targets[_NUM_RINGS_TASK] = target.to(dtype=torch.float32)
     if task_spec.maccs_bits > 0:
-        target = batch["probe_maccs"][valid_mask].to(dtype=torch.float32)
-        pred = logits[_MACCS_TASK]
-        losses[_MACCS_TASK] = F.binary_cross_entropy_with_logits(pred, target)
-        predictions[_MACCS_TASK] = torch.sigmoid(pred.detach())
-        task_targets[_MACCS_TASK] = target
+        fingerprint_task = task_spec.fingerprint_task
+        target = batch[f"probe_{fingerprint_task}"][valid_mask].to(dtype=torch.float32)
+        pred = logits[fingerprint_task]
+        losses[fingerprint_task] = F.binary_cross_entropy_with_logits(pred, target)
+        predictions[fingerprint_task] = torch.sigmoid(pred.detach())
+        task_targets[fingerprint_task] = target
     return {
         "loss_total": torch.stack(list(losses.values())).mean(),
         "losses": losses,
         "predictions": predictions,
         "targets": task_targets,
         "batch_size": batch_size,
+    }
+
+
+def _binary_tanimoto_for_pairs(
+    bits: np.ndarray,
+    left_idx: np.ndarray,
+    right_idx: np.ndarray,
+    *,
+    chunk_size: int = 4096,
+) -> np.ndarray:
+    bits = bits.astype(bool, copy=False)
+    tanimoto = np.empty(len(left_idx), dtype=np.float32)
+    for start in range(0, len(left_idx), chunk_size):
+        end = min(start + chunk_size, len(left_idx))
+        left_bits = bits[left_idx[start:end]]
+        right_bits = bits[right_idx[start:end]]
+        intersection = np.count_nonzero(left_bits & right_bits, axis=1)
+        union = np.count_nonzero(left_bits | right_bits, axis=1)
+        tanimoto[start:end] = intersection / np.maximum(union, 1)
+    return tanimoto
+
+
+def _compute_pairwise_similarity_alignment(
+    *,
+    embeddings: np.ndarray,
+    morgan_bits: np.ndarray,
+    num_pairs: int,
+    seed: int,
+) -> MsgProbePairwiseAlignment:
+    rng = np.random.default_rng(int(seed))
+    n = int(embeddings.shape[0])
+    left_idx = rng.integers(0, n, size=int(num_pairs), dtype=np.int64)
+    right_idx = rng.integers(0, n - 1, size=int(num_pairs), dtype=np.int64)
+    right_idx += (right_idx >= left_idx).astype(np.int64)
+
+    embeddings = embeddings.astype(np.float32, copy=False)
+    embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True).clip(
+        min=1e-12
+    )
+    cosine = np.sum(embeddings[left_idx] * embeddings[right_idx], axis=1).astype(
+        np.float32,
+        copy=False,
+    )
+    tanimoto = _binary_tanimoto_for_pairs(morgan_bits, left_idx, right_idx)
+    pearson = float(np.corrcoef(tanimoto, cosine)[0, 1])
+    return MsgProbePairwiseAlignment(
+        tanimoto=tanimoto,
+        cosine=cosine,
+        pearson=pearson,
+    )
+
+
+def _plot_pairwise_similarity_alignment(
+    alignment: MsgProbePairwiseAlignment,
+    output_stem: Path,
+) -> tuple[Path, Path]:
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib as mpl
+    import matplotlib.pyplot as plt
+
+    output_stem.parent.mkdir(parents=True, exist_ok=True)
+    png_path = output_stem.with_suffix(".png")
+    pdf_path = output_stem.with_suffix(".pdf")
+    with mpl.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "font.size": 7,
+            "axes.labelsize": 8,
+            "axes.titlesize": 9,
+            "axes.linewidth": 0.6,
+            "xtick.labelsize": 7,
+            "ytick.labelsize": 7,
+            "xtick.major.width": 0.6,
+            "ytick.major.width": 0.6,
+            "xtick.major.size": 2.5,
+            "ytick.major.size": 2.5,
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+        }
+    ):
+        fig, ax = plt.subplots(figsize=(2.15, 2.15), constrained_layout=True)
+        ax.scatter(
+            alignment.tanimoto,
+            alignment.cosine,
+            s=1.4,
+            c="#63b7af",
+            alpha=0.18,
+            linewidths=0,
+            rasterized=True,
+        )
+        slope, intercept = np.polyfit(alignment.tanimoto, alignment.cosine, deg=1)
+        xs = np.asarray([0.0, 1.0], dtype=np.float32)
+        ax.plot(xs, slope * xs + intercept, color="#188f88", linewidth=1.2)
+        ax.axhline(0.0, color="#d7d7d7", linewidth=0.6, zorder=0)
+        ax.axvline(0.0, color="#d7d7d7", linewidth=0.6, zorder=0)
+        ax.set_xlim(0.0, 1.0)
+        ax.set_ylim(-0.1, 1.0)
+        ax.set_xticks([0.0, 0.5, 1.0])
+        ax.set_yticks([0.0, 0.5, 1.0])
+        ax.set_xticklabels(["0", "0.5", "1.0"])
+        ax.set_yticklabels(["0", "0.5", "1.0"])
+        ax.set_xlabel("Morgan Tanimoto")
+        ax.set_ylabel("Covariance cosine")
+        ax.set_title(f"Pearson = {alignment.pearson:.2f}", pad=8)
+        ax.tick_params(direction="in")
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        fig.savefig(png_path, dpi=600, bbox_inches="tight")
+        fig.savefig(pdf_path, bbox_inches="tight")
+        plt.close(fig)
+    return png_path, pdf_path
+
+
+def _collect_covariance_morgan_alignment_inputs(
+    *,
+    probe_data: MassSpecProbeData,
+    model: PeakSetSIGReg,
+    feature_extractor: Callable[[dict[str, torch.Tensor]], torch.Tensor],
+    move_batch: Callable[[dict[str, object]], dict[str, object]],
+    split: str,
+    peak_ordering: str,
+    seed: int,
+    max_samples: int | None,
+    sample_randomly: bool,
+    device: torch.device,
+) -> tuple[np.ndarray, np.ndarray]:
+    embeddings, morgan = [], []
+    with torch.no_grad():
+        for batch in iter_massspec_probe(
+            probe_data,
+            split,
+            seed=seed,
+            peak_ordering=peak_ordering,
+            drop_remainder=False,
+            max_samples=max_samples,
+            sample_randomly=sample_randomly,
+        ):
+            batch = move_batch(batch)
+            valid_mask = batch["probe_valid_mol"].to(device=device, dtype=torch.bool)
+            if not bool(valid_mask.any()):
+                continue
+            peak_embeddings = feature_extractor(batch)[valid_mask]
+            peak_valid_mask = batch["peak_valid_mask"][valid_mask].to(
+                device=device,
+                dtype=torch.bool,
+            )
+            covariance = model.covariance_pooler(
+                peak_embeddings.float(),
+                peak_valid_mask,
+            )
+            embeddings.append(covariance.detach().cpu().numpy())
+            morgan.append(batch["probe_morgan"][valid_mask].detach().cpu().numpy())
+    return np.concatenate(embeddings, axis=0), np.concatenate(morgan, axis=0)
+
+
+def _run_covariance_morgan_pairwise_alignment(
+    *,
+    config: config_dict.ConfigDict,
+    probe_data: MassSpecProbeData,
+    model: PeakSetSIGReg,
+    feature_extractor: Callable[[dict[str, torch.Tensor]], torch.Tensor],
+    move_batch: Callable[[dict[str, object]], dict[str, object]],
+    device: torch.device,
+    split: str,
+    peak_ordering: str,
+    seed: int,
+    max_samples: int | None,
+    sample_randomly: bool,
+    plot_dir: Path | None,
+    plot_step: int | None,
+    repeat_index: int,
+) -> dict[str, float]:
+    num_pairs = resolve_msg_probe_pairwise_alignment_num_pairs(config)
+    if (
+        num_pairs <= 0
+        or not hasattr(model, "covariance_pooler")
+        or int(probe_data.info.get("probe_morgan_bits", 0)) <= 0
+    ):
+        return {}
+    embeddings, morgan = _collect_covariance_morgan_alignment_inputs(
+        probe_data=probe_data,
+        model=model,
+        feature_extractor=feature_extractor,
+        move_batch=move_batch,
+        split=split,
+        peak_ordering=peak_ordering,
+        seed=seed,
+        max_samples=max_samples,
+        sample_randomly=sample_randomly,
+        device=device,
+    )
+    alignment = _compute_pairwise_similarity_alignment(
+        embeddings=embeddings,
+        morgan_bits=morgan,
+        num_pairs=num_pairs,
+        seed=seed + 77_000,
+    )
+    if plot_dir is not None and bool(
+        config.get("msg_probe_pairwise_alignment_plot", True)
+    ):
+        step_label = "unknown" if plot_step is None else f"{int(plot_step):08d}"
+        output_stem = (
+            plot_dir
+            / f"msg_probe_covariance_morgan_pairwise_step-{step_label}_repeat-{repeat_index:02d}"
+        )
+        _plot_pairwise_similarity_alignment(alignment, output_stem)
+    prefix = "msg_probe/covariance_morgan_pairwise"
+    return {
+        f"{prefix}/pearson": alignment.pearson,
+        f"{prefix}/num_pairs": float(num_pairs),
+        f"{prefix}/num_samples": float(embeddings.shape[0]),
+        f"{prefix}/mean_tanimoto": float(alignment.tanimoto.mean()),
+        f"{prefix}/mean_cosine": float(alignment.cosine.mean()),
     }
 
 
@@ -567,6 +820,12 @@ def _update_epoch_state(
 def resolve_msg_probe_select_metric(
     config: config_dict.ConfigDict,
 ) -> str:
+    if (
+        "msg_probe_select_metric" not in config
+        and "msg_probe_tune_metric" not in config
+    ):
+        fingerprint_task = resolve_msg_probe_fingerprint(config)
+        return f"msg_probe/test/auc_{fingerprint_task}_mean"
     return str(
         config.get(
             "msg_probe_select_metric",
@@ -599,8 +858,10 @@ def _with_mean_probe_aliases(metrics: dict[str, float]) -> dict[str, float]:
         for key, value in metrics.items():
             if key.startswith(mean_prefix):
                 aliased[legacy_prefix + key[len(mean_prefix):]] = value
-    if "msg_probe/mean/num_maccs_bits" in metrics:
-        aliased["msg_probe/num_maccs_bits"] = metrics["msg_probe/mean/num_maccs_bits"]
+    for fingerprint_task in (_MACCS_TASK, _MORGAN_TASK):
+        source_key = f"msg_probe/mean/num_{fingerprint_task}_bits"
+        if source_key in metrics:
+            aliased[f"msg_probe/num_{fingerprint_task}_bits"] = metrics[source_key]
     if "msg_probe/mean/epoch" in metrics:
         aliased["msg_probe_epoch"] = metrics["msg_probe/mean/epoch"]
     return aliased
@@ -688,8 +949,9 @@ def _score_epoch_state(
             np.mean(np.abs(pred - target) <= 1.0)
         )
     if task_spec.maccs_bits > 0:
-        pred = np.concatenate(predictions[_MACCS_TASK], axis=0)
-        target = np.concatenate(targets[_MACCS_TASK], axis=0)
+        fingerprint_task = task_spec.fingerprint_task
+        pred = np.concatenate(predictions[fingerprint_task], axis=0)
+        target = np.concatenate(targets[fingerprint_task], axis=0)
         auc_values = []
         average_precision_values = []
         recall_values = []
@@ -718,24 +980,28 @@ def _score_epoch_state(
                 if np.count_nonzero(bit_pred) > 0
                 else 0.0
             )
-        metrics[f"{prefix}/num_maccs_auc_bits"] = float(len(auc_values))
-        metrics[f"{prefix}/num_maccs_average_precision_bits"] = float(
+        metrics[f"{prefix}/num_{fingerprint_task}_auc_bits"] = float(len(auc_values))
+        metrics[f"{prefix}/num_{fingerprint_task}_average_precision_bits"] = float(
             len(average_precision_values)
         )
-        metrics[f"{prefix}/num_maccs_recall_bits"] = float(len(recall_values))
-        metrics[f"{prefix}/num_maccs_precision_bits"] = float(len(precision_values))
-        metrics[f"{prefix}/auc_maccs_mean"] = (
+        metrics[f"{prefix}/num_{fingerprint_task}_recall_bits"] = float(
+            len(recall_values)
+        )
+        metrics[f"{prefix}/num_{fingerprint_task}_precision_bits"] = float(
+            len(precision_values)
+        )
+        metrics[f"{prefix}/auc_{fingerprint_task}_mean"] = (
             float(np.mean(auc_values)) if auc_values else float("nan")
         )
-        metrics[f"{prefix}/average_precision_maccs_mean"] = (
+        metrics[f"{prefix}/average_precision_{fingerprint_task}_mean"] = (
             float(np.mean(average_precision_values))
             if average_precision_values
             else float("nan")
         )
-        metrics[f"{prefix}/recall_maccs_mean"] = (
+        metrics[f"{prefix}/recall_{fingerprint_task}_mean"] = (
             float(np.mean(recall_values)) if recall_values else float("nan")
         )
-        metrics[f"{prefix}/precision_maccs_mean"] = (
+        metrics[f"{prefix}/precision_{fingerprint_task}_mean"] = (
             float(np.mean(precision_values)) if precision_values else float("nan")
         )
     metrics[f"{prefix}/r2_mean"] = float(np.mean(regression_r2_values))
@@ -752,6 +1018,8 @@ def _run_msg_probe_once(
     device: torch.device,
     on_epoch_end: Callable[[dict[str, float]], None] | None = None,
     repeat_index: int = 0,
+    plot_dir: Path | None = None,
+    plot_step: int | None = None,
 ) -> dict[str, float]:
     num_probe_epochs = int(config.get("msg_probe_num_epochs", 5))
     probe_lr = float(config.get("msg_probe_learning_rate", 1e-3))
@@ -769,6 +1037,7 @@ def _run_msg_probe_once(
         resolve_msg_probe_sample_limits(config)
     )
     peak_ordering = str(config.get("peak_ordering", "intensity"))
+    fingerprint_task = resolve_msg_probe_fingerprint(config)
     probe_data = MassSpecProbeData.from_config(config)
 
     @torch.no_grad()
@@ -792,6 +1061,7 @@ def _run_msg_probe_once(
         peak_ordering=peak_ordering,
         seed=train_seed_base,
         max_samples=max_train_samples,
+        fingerprint_task=fingerprint_task,
     )
     val_targets = _collect_split_targets(
         probe_data=probe_data,
@@ -800,6 +1070,7 @@ def _run_msg_probe_once(
         seed=train_seed_base + 10_000,
         max_samples=max_val_samples,
         sample_randomly=True,
+        fingerprint_task=fingerprint_task,
     )
     test_targets = _collect_split_targets(
         probe_data=probe_data,
@@ -808,11 +1079,13 @@ def _run_msg_probe_once(
         seed=test_seed_base,
         max_samples=max_test_samples,
         sample_randomly=randomize_test_subset,
+        fingerprint_task=fingerprint_task,
     )
     task_spec = _build_task_spec(
         train_targets=train_targets,
         test_targets=val_targets if early_stopping else test_targets,
         num_rings_classes=_collect_num_rings_classes(probe_data),
+        fingerprint_task=fingerprint_task,
     )
     variants = msg_probe_variants_from_config(config)
     was_training = model.training
@@ -990,7 +1263,9 @@ def _run_msg_probe_once(
                     epoch_state=test_states[variant],
                     task_spec=task_spec,
                 ),
-                f"{variant_prefix}/num_maccs_bits": float(task_spec.maccs_bits),
+                f"{variant_prefix}/num_{fingerprint_task}_bits": float(
+                    task_spec.maccs_bits
+                ),
                 f"{variant_prefix}/epoch": float(epoch_idx + 1),
             }
             epoch_metrics.update(variant_metrics)
@@ -1017,19 +1292,32 @@ def _run_msg_probe_once(
             else:
                 epochs_without_improvement[variant] += 1
             log.info(
-                "MSG probe [%s] epoch %d/%d train_samples=%d val_auc_maccs_mean=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_average_precision_maccs_mean=%.4f test_recall_maccs_mean=%.4f test_precision_maccs_mean=%.4f maccs_bits=%d",
+                "MSG probe [%s] epoch %d/%d train_samples=%d val_auc_%s_mean=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f %s_bits=%d",
                 variant,
                 epoch_idx + 1,
                 num_probe_epochs,
                 int(variant_metrics[f"{variant_prefix}/train/samples"]),
-                float(variant_metrics.get(f"{variant_prefix}/val/auc_maccs_mean", float("nan"))),
+                fingerprint_task,
+                float(
+                    variant_metrics.get(
+                        f"{variant_prefix}/val/auc_{fingerprint_task}_mean",
+                        float("nan"),
+                    )
+                ),
                 variant_metrics[f"{variant_prefix}/test/r2_mean_wo_num_rings"],
                 variant_metrics[f"{variant_prefix}/test/mae_num_rings"],
-                variant_metrics[f"{variant_prefix}/test/auc_maccs_mean"],
-                variant_metrics[f"{variant_prefix}/test/average_precision_maccs_mean"],
-                variant_metrics[f"{variant_prefix}/test/recall_maccs_mean"],
-                variant_metrics[f"{variant_prefix}/test/precision_maccs_mean"],
-                int(variant_metrics[f"{variant_prefix}/num_maccs_bits"]),
+                fingerprint_task,
+                variant_metrics[f"{variant_prefix}/test/auc_{fingerprint_task}_mean"],
+                fingerprint_task,
+                variant_metrics[
+                    f"{variant_prefix}/test/average_precision_{fingerprint_task}_mean"
+                ],
+                fingerprint_task,
+                variant_metrics[f"{variant_prefix}/test/recall_{fingerprint_task}_mean"],
+                fingerprint_task,
+                variant_metrics[f"{variant_prefix}/test/precision_{fingerprint_task}_mean"],
+                fingerprint_task,
+                int(variant_metrics[f"{variant_prefix}/num_{fingerprint_task}_bits"]),
             )
         epoch_metrics = _with_mean_probe_aliases(epoch_metrics)
         if on_epoch_end is not None:
@@ -1060,18 +1348,42 @@ def _run_msg_probe_once(
         variant_prefix = f"msg_probe/{variant}"
         variant_select_metric = _msg_probe_variant_metric_key(variant, select_metric)
         log.info(
-            "MSG probe [%s] best epoch %d: %s=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_average_precision_maccs_mean=%.4f test_recall_maccs_mean=%.4f test_precision_maccs_mean=%.4f",
+            "MSG probe [%s] best epoch %d: %s=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f",
             variant,
             int(variant_metrics[f"{variant_prefix}/epoch"]),
             variant_select_metric,
             variant_metrics[variant_select_metric],
             variant_metrics[f"{variant_prefix}/test/r2_mean_wo_num_rings"],
             variant_metrics[f"{variant_prefix}/test/mae_num_rings"],
-            variant_metrics[f"{variant_prefix}/test/auc_maccs_mean"],
-            variant_metrics[f"{variant_prefix}/test/average_precision_maccs_mean"],
-            variant_metrics[f"{variant_prefix}/test/recall_maccs_mean"],
-            variant_metrics[f"{variant_prefix}/test/precision_maccs_mean"],
+            fingerprint_task,
+            variant_metrics[f"{variant_prefix}/test/auc_{fingerprint_task}_mean"],
+            fingerprint_task,
+            variant_metrics[
+                f"{variant_prefix}/test/average_precision_{fingerprint_task}_mean"
+            ],
+            fingerprint_task,
+            variant_metrics[f"{variant_prefix}/test/recall_{fingerprint_task}_mean"],
+            fingerprint_task,
+            variant_metrics[f"{variant_prefix}/test/precision_{fingerprint_task}_mean"],
         )
+    best_metrics.update(
+        _run_covariance_morgan_pairwise_alignment(
+            config=config,
+            probe_data=probe_data,
+            model=model,
+            feature_extractor=feature_extractor,
+            move_batch=move_batch,
+            device=device,
+            split="massspec_test",
+            peak_ordering=peak_ordering,
+            seed=test_seed_base + 50_000,
+            max_samples=max_test_samples,
+            sample_randomly=randomize_test_subset,
+            plot_dir=plot_dir,
+            plot_step=plot_step,
+            repeat_index=repeat_index,
+        )
+    )
     if was_training:
         model.train()
     return _with_mean_probe_aliases(best_metrics)
@@ -1083,17 +1395,29 @@ def run_msg_probe(
     model: PeakSetSIGReg,
     device: torch.device,
     on_epoch_end: Callable[[dict[str, float]], None] | None = None,
+    plot_dir: Path | None = None,
+    plot_step: int | None = None,
 ) -> dict[str, float]:
+    def run_once(
+        repeat_index: int,
+        repeat_on_epoch_end: Callable[[dict[str, float]], None] | None,
+    ) -> dict[str, float]:
+        kwargs = {
+            "config": config,
+            "model": model,
+            "device": device,
+            "on_epoch_end": repeat_on_epoch_end,
+            "repeat_index": repeat_index,
+        }
+        if plot_dir is not None:
+            kwargs["plot_dir"] = plot_dir
+            kwargs["plot_step"] = plot_step
+        return _run_msg_probe_once(**kwargs)
+
     metrics = _run_repeated_probe(
         repeat_count=resolve_msg_probe_num_repeats(config),
         metric_prefix="msg_probe",
-        run_once=lambda repeat_index, repeat_on_epoch_end: _run_msg_probe_once(
-            config=config,
-            model=model,
-            device=device,
-            on_epoch_end=repeat_on_epoch_end,
-            repeat_index=repeat_index,
-        ),
+        run_once=run_once,
         on_epoch_end=on_epoch_end,
     )
     return _with_mean_probe_aliases(metrics)
@@ -1114,6 +1438,7 @@ def _run_dreams_probe_once(
         resolve_msg_probe_sample_limits(config)
     )
     peak_ordering = str(config.get("peak_ordering", "intensity"))
+    fingerprint_task = resolve_msg_probe_fingerprint(config)
     probe_data = MassSpecProbeData.from_config(config)
 
     dreams_dim = probe_data.dreams_dim
@@ -1130,6 +1455,7 @@ def _run_dreams_probe_once(
         peak_ordering=peak_ordering,
         seed=train_seed_base,
         max_samples=max_train_samples,
+        fingerprint_task=fingerprint_task,
     )
     test_targets = _collect_split_targets(
         probe_data=probe_data,
@@ -1138,11 +1464,13 @@ def _run_dreams_probe_once(
         seed=test_seed_base,
         max_samples=max_test_samples,
         sample_randomly=randomize_test_subset,
+        fingerprint_task=fingerprint_task,
     )
     task_spec = _build_task_spec(
         train_targets=train_targets,
         test_targets=test_targets,
         num_rings_classes=_collect_num_rings_classes(probe_data),
+        fingerprint_task=fingerprint_task,
     )
 
     probe = MsgLinearProbe(
@@ -1250,7 +1578,7 @@ def _run_dreams_probe_once(
             **_score_epoch_state(
                 prefix="dreams_probe/test", epoch_state=test_state, task_spec=task_spec
             ),
-            "dreams_probe/num_maccs_bits": float(task_spec.maccs_bits),
+            f"dreams_probe/num_{fingerprint_task}_bits": float(task_spec.maccs_bits),
             "dreams_probe_epoch": float(epoch_idx + 1),
         }
         current_value = float(epoch_metrics[probe_select_metric])
@@ -1263,31 +1591,44 @@ def _run_dreams_probe_once(
             best_metric_value = current_value
             best_metrics = dict(epoch_metrics)
         log.info(
-            "DreaMS probe epoch %d/%d test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_average_precision_maccs_mean=%.4f test_recall_maccs_mean=%.4f test_precision_maccs_mean=%.4f maccs_bits=%d",
+            "DreaMS probe epoch %d/%d test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f %s_bits=%d",
             epoch_idx + 1,
             num_probe_epochs,
             epoch_metrics["dreams_probe/test/r2_mean_wo_num_rings"],
             epoch_metrics["dreams_probe/test/mae_num_rings"],
-            epoch_metrics["dreams_probe/test/auc_maccs_mean"],
-            epoch_metrics["dreams_probe/test/average_precision_maccs_mean"],
-            epoch_metrics["dreams_probe/test/recall_maccs_mean"],
-            epoch_metrics["dreams_probe/test/precision_maccs_mean"],
-            int(epoch_metrics["dreams_probe/num_maccs_bits"]),
+            fingerprint_task,
+            epoch_metrics[f"dreams_probe/test/auc_{fingerprint_task}_mean"],
+            fingerprint_task,
+            epoch_metrics[
+                f"dreams_probe/test/average_precision_{fingerprint_task}_mean"
+            ],
+            fingerprint_task,
+            epoch_metrics[f"dreams_probe/test/recall_{fingerprint_task}_mean"],
+            fingerprint_task,
+            epoch_metrics[f"dreams_probe/test/precision_{fingerprint_task}_mean"],
+            fingerprint_task,
+            int(epoch_metrics[f"dreams_probe/num_{fingerprint_task}_bits"]),
         )
         if on_epoch_end is not None:
             on_epoch_end(epoch_metrics)
     if best_metrics:
         log.info(
-            "DreaMS probe best epoch %d: %s=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_average_precision_maccs_mean=%.4f test_recall_maccs_mean=%.4f test_precision_maccs_mean=%.4f",
+            "DreaMS probe best epoch %d: %s=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f",
             int(best_metrics["dreams_probe_epoch"]),
             probe_select_metric,
             best_metrics[probe_select_metric],
             best_metrics["dreams_probe/test/r2_mean_wo_num_rings"],
             best_metrics["dreams_probe/test/mae_num_rings"],
-            best_metrics["dreams_probe/test/auc_maccs_mean"],
-            best_metrics["dreams_probe/test/average_precision_maccs_mean"],
-            best_metrics["dreams_probe/test/recall_maccs_mean"],
-            best_metrics["dreams_probe/test/precision_maccs_mean"],
+            fingerprint_task,
+            best_metrics[f"dreams_probe/test/auc_{fingerprint_task}_mean"],
+            fingerprint_task,
+            best_metrics[
+                f"dreams_probe/test/average_precision_{fingerprint_task}_mean"
+            ],
+            fingerprint_task,
+            best_metrics[f"dreams_probe/test/recall_{fingerprint_task}_mean"],
+            fingerprint_task,
+            best_metrics[f"dreams_probe/test/precision_{fingerprint_task}_mean"],
         )
     return best_metrics
 

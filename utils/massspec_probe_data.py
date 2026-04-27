@@ -16,8 +16,11 @@ from torch.utils.data import DataLoader, Dataset
 from input_pipeline import _prepend_precursor_token_torch
 from utils.massspec_probe_targets import (
     MACCS_FINGERPRINT_BITS,
+    MORGAN_PROBE_FINGERPRINT_BITS,
+    MORGAN_PROBE_FINGERPRINT_RADIUS,
     REGRESSION_TARGET_KEYS,
     build_maccs_targets_for_rows,
+    build_morgan_targets_for_rows,
     build_probe_targets_for_rows,
 )
 from utils.spectra_preprocessing import (
@@ -51,9 +54,9 @@ NIST20_HF_FILENAME = (
 _NIST20_SPLIT_SEED = 42
 _NIST20_TRAIN_FRAC = 0.70
 _NIST20_VAL_FRAC = 0.15
-NIST_FULL_METADATA_VERSION = 1
+NIST_FULL_METADATA_VERSION = 2
 NIST_FULL_HF_FILENAME = "hr_msms_nist.hdf5"
-NIST_FULL_ARTIFACT_FORMAT = "nist_full_probe_v1"
+NIST_FULL_ARTIFACT_FORMAT = "nist_full_probe_v2"
 
 MONA_A_METADATA_VERSION = 3
 MONA_A_HF_REPO = "roman-bushuiev/GeMS"
@@ -296,14 +299,19 @@ def _filter_encode_and_write(
     instrument_type_id, instrument_type_vocab = _encode_categorical_ids(instrument_type)
     probe_mol_props, _, probe_valid_mol = build_probe_targets_for_rows(smiles)
     probe_maccs, probe_maccs_valid = build_maccs_targets_for_rows(smiles)
-    probe_valid_mol &= probe_maccs_valid
+    probe_morgan, probe_morgan_valid = build_morgan_targets_for_rows(smiles)
+    probe_valid_mol &= probe_maccs_valid & probe_morgan_valid
     metadata: dict[str, Any] = {
         "metadata_version": metadata_version,
         "max_precursor_mz": float(max_precursor_mz),
         "adduct_vocab": adduct_vocab,
         "instrument_type_vocab": instrument_type_vocab,
-        "dreams_dim": int(dreams_embedding.shape[1]) if dreams_embedding is not None else 0,
+        "dreams_dim": (
+            int(dreams_embedding.shape[1]) if dreams_embedding is not None else 0
+        ),
         "probe_maccs_bits": MACCS_FINGERPRINT_BITS,
+        "probe_morgan_bits": MORGAN_PROBE_FINGERPRINT_BITS,
+        "probe_morgan_radius": MORGAN_PROBE_FINGERPRINT_RADIUS,
     }
     for split_name in ("train", "val", "test"):
         split_mask = fold == split_name
@@ -320,6 +328,7 @@ def _filter_encode_and_write(
             ),
             "probe_valid_mol": probe_valid_mol[split_mask].astype(bool),
             "probe_maccs": probe_maccs[split_mask].astype(np.int8),
+            "probe_morgan": probe_morgan[split_mask].astype(np.int8),
         }
         for name in REGRESSION_TARGET_KEYS:
             payload[f"probe_{name}"] = probe_mol_props[name][split_mask].astype(
@@ -577,6 +586,7 @@ class _ProbeMemmapDataset(Dataset):
             "collision_energy_present",
             "probe_valid_mol",
             "probe_maccs",
+            "probe_morgan",
             *[f"probe_{name}" for name in REGRESSION_TARGET_KEYS],
             "dreams_embedding",
         ]
@@ -680,6 +690,10 @@ class _ProbeBatchCollator:
         batch["probe_maccs"] = torch.stack(
             [sample["probe_maccs"] for sample in samples], dim=0
         ).to(torch.int32)
+        if "probe_morgan" in samples[0]:
+            batch["probe_morgan"] = torch.stack(
+                [sample["probe_morgan"] for sample in samples], dim=0
+            ).to(torch.int32)
         for name in REGRESSION_TARGET_KEYS:
             batch[f"probe_{name}"] = torch.tensor(
                 [float(sample[f"probe_{name}"]) for sample in samples],
@@ -794,6 +808,9 @@ class MassSpecProbeData(NamedTuple):
             "massspec_adduct_vocab_size": len(adduct_vocab),
             "massspec_instrument_type_vocab_size": len(instrument_type_vocab),
             "fingerprint_bits": _FINGERPRINT_BITS,
+            "probe_maccs_bits": int(metadata.get("probe_maccs_bits", 0)),
+            "probe_morgan_bits": int(metadata.get("probe_morgan_bits", 0)),
+            "probe_morgan_radius": int(metadata.get("probe_morgan_radius", 0)),
         }
         return cls(
             info=info,

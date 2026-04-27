@@ -24,6 +24,7 @@ from utils.gems_data import (
 )
 from utils.massspec_probe_targets import (
     build_maccs_targets_for_rows,
+    build_morgan_targets_for_rows,
     build_probe_targets_for_rows,
 )
 from utils.spectra_preprocessing import preprocess_peak_batch_numpy
@@ -743,7 +744,8 @@ class MassSpecPreprocessTests(unittest.TestCase):
             fingerprints = massspec_probe_data._compute_morgan_fingerprints(kept_smiles)
             probe_props, _, probe_valid = build_probe_targets_for_rows(kept_smiles)
             probe_maccs, probe_maccs_valid = build_maccs_targets_for_rows(kept_smiles)
-            probe_valid &= probe_maccs_valid
+            probe_morgan, probe_morgan_valid = build_morgan_targets_for_rows(kept_smiles)
+            probe_valid &= probe_maccs_valid & probe_morgan_valid
             expected_by_smiles = {
                 str(smiles): {
                     "spectra": kept_spectra[row_idx],
@@ -751,6 +753,7 @@ class MassSpecPreprocessTests(unittest.TestCase):
                     "dreams_embedding": kept_dreams[row_idx],
                     "fingerprint": fingerprints[row_idx],
                     "probe_maccs": probe_maccs[row_idx],
+                    "probe_morgan": probe_morgan[row_idx],
                     "probe_valid_mol": bool(probe_valid[row_idx]),
                     "adduct": str(kept_adduct[row_idx]),
                     **{
@@ -798,6 +801,10 @@ class MassSpecPreprocessTests(unittest.TestCase):
                 np.testing.assert_array_equal(
                     sample["probe_maccs"].numpy(),
                     expected["probe_maccs"],
+                )
+                np.testing.assert_array_equal(
+                    sample["probe_morgan"].numpy(),
+                    expected["probe_morgan"],
                 )
                 self.assertEqual(
                     bool(sample["probe_valid_mol"]),
@@ -847,6 +854,7 @@ class MassSpecPreprocessTests(unittest.TestCase):
                     "collision_energy_present": 0,
                     "probe_valid_mol": True,
                     "probe_maccs": torch.zeros(166, dtype=torch.int32),
+                    "probe_morgan": torch.zeros(4096, dtype=torch.int32),
                     "probe_mol_weight": 0.0,
                     "probe_logp": 0.0,
                     "probe_num_heavy_atoms": 0.0,
@@ -863,6 +871,7 @@ class MassSpecPreprocessTests(unittest.TestCase):
                     "collision_energy_present": 0,
                     "probe_valid_mol": True,
                     "probe_maccs": torch.zeros(166, dtype=torch.int32),
+                    "probe_morgan": torch.zeros(4096, dtype=torch.int32),
                     "probe_mol_weight": 0.0,
                     "probe_logp": 0.0,
                     "probe_num_heavy_atoms": 0.0,
@@ -942,6 +951,7 @@ class MassSpecPreprocessTests(unittest.TestCase):
             probe_num_heavy_atoms = np.load(shard_dir / "probe_num_heavy_atoms.npy")
             probe_num_rings = np.load(shard_dir / "probe_num_rings.npy")
             probe_maccs = np.load(shard_dir / "probe_maccs.npy")
+            probe_morgan = np.load(shard_dir / "probe_morgan.npy")
             probe_valid_mol = np.load(shard_dir / "probe_valid_mol.npy")
 
         self.assertEqual(metadata["train_size"], 1)
@@ -949,11 +959,14 @@ class MassSpecPreprocessTests(unittest.TestCase):
         self.assertEqual(metadata["test_size"], 1)
         self.assertEqual(metadata["max_precursor_mz"], 1000.0)
         self.assertEqual(metadata["probe_maccs_bits"], 166)
+        self.assertEqual(metadata["probe_morgan_bits"], 4096)
+        self.assertEqual(metadata["probe_morgan_radius"], 2)
         self.assertEqual(probe_mol_weight.shape, (1,))
         self.assertEqual(probe_logp.shape, (1,))
         self.assertEqual(probe_num_heavy_atoms.shape, (1,))
         self.assertEqual(probe_num_rings.shape, (1,))
         self.assertEqual(probe_maccs.shape, (1, 166))
+        self.assertEqual(probe_morgan.shape, (1, 4096))
         self.assertEqual(probe_valid_mol.shape, (1,))
 
     def test_benchmark_preprocess_matches_input_pipeline_without_precursor_window(self):

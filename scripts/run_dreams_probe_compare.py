@@ -36,9 +36,10 @@ def _build_markdown_report(
     config,
     metrics: dict[str, float],
 ) -> str:
-    from utils.msg_probe import resolve_msg_probe_select_metric
+    from utils.msg_probe import resolve_msg_probe_fingerprint, resolve_msg_probe_select_metric
 
     probe_batch_size = int(config.get("msg_probe_batch_size", config.get("batch_size", 512)))
+    fingerprint_task = resolve_msg_probe_fingerprint(config)
     select_metric = resolve_msg_probe_select_metric(config).replace(
         "msg_probe/",
         "dreams_probe/",
@@ -46,8 +47,8 @@ def _build_markdown_report(
     summary_keys = [
         "dreams_probe_epoch",
         select_metric,
-        "dreams_probe/test/auc_maccs_mean",
-        "dreams_probe/test/recall_maccs_mean",
+        f"dreams_probe/test/auc_{fingerprint_task}_mean",
+        f"dreams_probe/test/recall_{fingerprint_task}_mean",
         "dreams_probe/test/r2_mean_wo_num_rings",
         "dreams_probe/test/mae_num_rings",
         "dreams_probe/test/mae_mean",

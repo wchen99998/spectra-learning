@@ -30,7 +30,11 @@ from ml_collections import config_dict
 
 from input_pipeline_temporal import TemporalLightningDataModule
 from models.model import PeakSetSIGReg
-from utils.msg_probe import msg_probe_variants_from_config, run_msg_probe
+from utils.msg_probe import (
+    msg_probe_variants_from_config,
+    resolve_msg_probe_fingerprint,
+    run_msg_probe,
+)
 from utils.schedulers import CapturableCosineSchedule
 from utils.training import (
     build_logger,
@@ -70,6 +74,32 @@ _TEMPORAL_BATCH_KEYS = frozenset(
         "next_frame_precursor_mz",
     }
 )
+
+
+def _log_msg_probe_pairwise_plots_to_wandb(
+    *,
+    wandb_run: Any,
+    plot_dir: Path,
+    global_step: int,
+) -> None:
+    import wandb
+
+    plot_paths = sorted(
+        plot_dir.glob(
+            "msg_probe_covariance_morgan_pairwise_step-"
+            f"{global_step:08d}_repeat-*.png"
+        )
+    )
+    if plot_paths:
+        wandb_run.log(
+            {
+                f"msg_probe/covariance_morgan_pairwise/repeat_{idx:02d}": (
+                    wandb.Image(str(path))
+                )
+                for idx, path in enumerate(plot_paths)
+            },
+            step=global_step,
+        )
 
 
 def _move_batch_to_device(
@@ -553,28 +583,41 @@ def train_temporal(
             msg_probe_every_n_steps > 0
             and global_step % msg_probe_every_n_steps == 0
         ):
+            msg_probe_plot_dir = workdir / "msg_probe_plots"
             probe_metrics = run_msg_probe(
                 config=config,
                 model=model,
                 device=device,
+                plot_dir=msg_probe_plot_dir,
+                plot_step=global_step,
             )
             logger.log_metrics(probe_metrics, step=global_step)
+            if bool(config.get("enable_wandb", False)) and _wandb_run is not None:
+                _log_msg_probe_pairwise_plots_to_wandb(
+                    wandb_run=_wandb_run,
+                    plot_dir=msg_probe_plot_dir,
+                    global_step=global_step,
+                )
             last_msg_probe_metrics = probe_metrics
+            fingerprint_task = resolve_msg_probe_fingerprint(config)
             for variant in msg_probe_variants:
                 variant_prefix = f"msg_probe/{variant}"
                 epoch_key = f"{variant_prefix}/epoch"
                 if epoch_key not in probe_metrics:
                     continue
                 logging.info(
-                    "step=%d msg_probe[%s] best_epoch=%.2f (test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f test_precision_maccs_mean=%.4f)",
+                    "step=%d msg_probe[%s] best_epoch=%.2f (test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f)",
                     global_step,
                     variant,
                     probe_metrics[epoch_key],
                     probe_metrics[f"{variant_prefix}/test/r2_mean_wo_num_rings"],
                     probe_metrics[f"{variant_prefix}/test/mae_num_rings"],
-                    probe_metrics[f"{variant_prefix}/test/auc_maccs_mean"],
-                    probe_metrics[f"{variant_prefix}/test/recall_maccs_mean"],
-                    probe_metrics[f"{variant_prefix}/test/precision_maccs_mean"],
+                    fingerprint_task,
+                    probe_metrics[f"{variant_prefix}/test/auc_{fingerprint_task}_mean"],
+                    fingerprint_task,
+                    probe_metrics[f"{variant_prefix}/test/recall_{fingerprint_task}_mean"],
+                    fingerprint_task,
+                    probe_metrics[f"{variant_prefix}/test/precision_{fingerprint_task}_mean"],
                 )
 
     pbar.close()

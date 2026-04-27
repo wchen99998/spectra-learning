@@ -1,10 +1,14 @@
 """Tests for temporal finetuning (frame -> next-frame prediction)."""
 
 import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import torch
 
 from models.model import PeakSetSIGReg
+from train_temporal import _log_msg_probe_pairwise_plots_to_wandb
 
 
 def _small_model(**overrides) -> PeakSetSIGReg:
@@ -169,6 +173,43 @@ class TestForwardTemporal:
             loss_with_pos = model_with_pos.forward_temporal(batch)["loss"]
 
         assert not torch.allclose(loss_without_pos, loss_with_pos, atol=1e-6)
+
+    def test_msg_probe_pairwise_plots_log_to_wandb_at_step(self, tmp_path):
+        plot_dir = tmp_path / "msg_probe_plots"
+        plot_dir.mkdir()
+        (plot_dir / "msg_probe_covariance_morgan_pairwise_step-00125000_repeat-00.png").write_bytes(
+            b"png"
+        )
+        (plot_dir / "msg_probe_covariance_morgan_pairwise_step-00125000_repeat-01.png").write_bytes(
+            b"png"
+        )
+        (plot_dir / "msg_probe_covariance_morgan_pairwise_step-00025000_repeat-00.png").write_bytes(
+            b"old"
+        )
+        wandb_run = mock.Mock()
+        image_calls: list[str] = []
+
+        with mock.patch(
+            "wandb.Image",
+            side_effect=lambda path: image_calls.append(path) or SimpleNamespace(path=path),
+        ):
+            _log_msg_probe_pairwise_plots_to_wandb(
+                wandb_run=wandb_run,
+                plot_dir=plot_dir,
+                global_step=125_000,
+            )
+
+        wandb_run.log.assert_called_once()
+        payload, kwargs = wandb_run.log.call_args
+        assert kwargs == {"step": 125_000}
+        assert sorted(payload[0]) == [
+            "msg_probe/covariance_morgan_pairwise/repeat_00",
+            "msg_probe/covariance_morgan_pairwise/repeat_01",
+        ]
+        assert image_calls == [
+            str(plot_dir / "msg_probe_covariance_morgan_pairwise_step-00125000_repeat-00.png"),
+            str(plot_dir / "msg_probe_covariance_morgan_pairwise_step-00125000_repeat-01.png"),
+        ]
 
 
 class TestCheckpointPartialLoad:

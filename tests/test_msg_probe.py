@@ -21,6 +21,7 @@ from utils.msg_probe import (
     MsgProbeTaskSpec,
     MsgSequenceProbe,
     _collect_num_rings_classes,
+    _compute_pairwise_similarity_alignment,
     _build_msg_sequence_probe,
     _build_task_spec,
     _collect_split_targets,
@@ -28,6 +29,7 @@ from utils.msg_probe import (
     _probe_step,
     _probe_task_names,
     _probe_task_output_dims,
+    _plot_pairwise_similarity_alignment,
     _score_epoch_state,
     _update_epoch_state,
     build_msg_probe_inputs,
@@ -35,7 +37,9 @@ from utils.msg_probe import (
     msg_probe_metric_higher_is_better,
     iter_massspec_probe,
     probe_steps_per_epoch,
+    resolve_msg_probe_pairwise_alignment_num_pairs,
     resolve_msg_probe_num_repeats,
+    resolve_msg_probe_fingerprint,
     resolve_msg_probe_sample_limits,
     resolve_msg_probe_select_metric,
     run_msg_probe,
@@ -261,6 +265,7 @@ class MsgSequenceProbeTests(unittest.TestCase):
             maccs_bits=0,
             regression_means={"mol_weight": 0.0},
             regression_stds={"mol_weight": 1.0},
+            fingerprint_task="maccs",
         )
         learned_pooler = CovariancePool(input_dim=4, compressed_dim=2)
 
@@ -278,6 +283,65 @@ class MsgSequenceProbeTests(unittest.TestCase):
         probe_param_ids = {id(param) for param in probe.parameters()}
         learned_param_ids = {id(param) for param in learned_pooler.parameters()}
         self.assertFalse(probe_param_ids & learned_param_ids)
+
+
+class PairwiseAlignmentTests(unittest.TestCase):
+    def test_pairwise_alignment_uses_cosine_and_tanimoto(self):
+        embeddings = np.asarray(
+            [
+                [1.0, 0.0],
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+        morgan = np.asarray(
+            [
+                [1, 1, 0, 0],
+                [1, 1, 0, 0],
+                [0, 0, 1, 1],
+                [0, 0, 1, 1],
+            ],
+            dtype=np.int32,
+        )
+
+        alignment = _compute_pairwise_similarity_alignment(
+            embeddings=embeddings,
+            morgan_bits=morgan,
+            num_pairs=200,
+            seed=3,
+        )
+
+        self.assertEqual(alignment.tanimoto.shape, (200,))
+        self.assertEqual(alignment.cosine.shape, (200,))
+        self.assertGreater(alignment.pearson, 0.99)
+        self.assertTrue(set(np.unique(alignment.tanimoto)).issubset({0.0, 1.0}))
+
+    def test_pairwise_alignment_plot_writes_png_and_pdf(self):
+        alignment = _compute_pairwise_similarity_alignment(
+            embeddings=np.asarray(
+                [[1.0, 0.0], [0.8, 0.2], [0.0, 1.0], [0.2, 0.8]],
+                dtype=np.float32,
+            ),
+            morgan_bits=np.asarray(
+                [[1, 1, 0], [1, 0, 0], [0, 0, 1], [0, 1, 1]],
+                dtype=np.int32,
+            ),
+            num_pairs=64,
+            seed=5,
+        )
+
+        with TemporaryDirectory() as tmpdir:
+            png_path, pdf_path = _plot_pairwise_similarity_alignment(
+                alignment,
+                Path(tmpdir) / "alignment",
+            )
+
+            self.assertTrue(png_path.exists())
+            self.assertTrue(pdf_path.exists())
+            self.assertGreater(png_path.stat().st_size, 0)
+            self.assertGreater(pdf_path.stat().st_size, 0)
 
 
 class MsgProbeStepTests(unittest.TestCase):
@@ -608,6 +672,41 @@ class MsgProbeCollectionTests(unittest.TestCase):
             )
         )
 
+    def test_collect_split_targets_can_select_morgan_targets(self):
+        dm = _DummyDataModule(
+            batches=[
+                {
+                    "peak_mz": np.zeros((2, 60), dtype=np.float32),
+                    "probe_valid_mol": np.asarray([1, 1], dtype=np.int32),
+                    "probe_mol_weight": np.asarray([10.0, 20.0], dtype=np.float32),
+                    "probe_logp": np.asarray([1.0, 2.0], dtype=np.float32),
+                    "probe_num_heavy_atoms": np.asarray([2.0, 3.0], dtype=np.float32),
+                    "probe_num_rings": np.asarray([0.0, 1.0], dtype=np.float32),
+                    "probe_maccs": _maccs([[0, 1], [1, 0]]),
+                    "probe_morgan": _maccs([[1, 1, 0], [0, 1, 1]]),
+                },
+            ],
+            info={
+                "massspec_train_size": 2,
+                "massspec_val_size": 0,
+                "massspec_test_size": 0,
+            },
+            batch_size=2,
+        )
+
+        targets = _collect_split_targets(
+            probe_data=dm,
+            split="massspec_train",
+            peak_ordering="intensity",
+            seed=0,
+            fingerprint_task="morgan",
+        )
+
+        np.testing.assert_array_equal(
+            targets.maccs,
+            _maccs([[1, 1, 0], [0, 1, 1]]),
+        )
+
     def test_collect_num_rings_classes_reads_all_probe_shards(self):
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -813,6 +912,24 @@ class ProbeConfigTests(unittest.TestCase):
         cfg.nist_full_probe_num_repeats = 3
 
         self.assertEqual(resolve_msg_probe_num_repeats(cfg), 3)
+
+    def test_msg_probe_fingerprint_defaults_to_maccs(self):
+        cfg = config_dict.ConfigDict()
+
+        self.assertEqual(resolve_msg_probe_fingerprint(cfg), "maccs")
+        self.assertEqual(resolve_msg_probe_select_metric(cfg), "msg_probe/test/auc_maccs_mean")
+
+    def test_msg_probe_fingerprint_can_select_morgan_metric(self):
+        cfg = config_dict.ConfigDict()
+        cfg.msg_probe_fingerprint = "morgan"
+
+        self.assertEqual(resolve_msg_probe_fingerprint(cfg), "morgan")
+        self.assertEqual(resolve_msg_probe_select_metric(cfg), "msg_probe/test/auc_morgan_mean")
+
+    def test_pairwise_alignment_defaults_to_20k_pairs(self):
+        cfg = config_dict.ConfigDict()
+
+        self.assertEqual(resolve_msg_probe_pairwise_alignment_num_pairs(cfg), 20_000)
 
 
 class RepeatedProbeTests(unittest.TestCase):

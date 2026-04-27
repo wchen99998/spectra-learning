@@ -1,6 +1,7 @@
 import numpy as np
 from rdkit import Chem, DataStructs
 from rdkit.Chem import Descriptors, MACCSkeys, rdMolDescriptors
+from rdkit.Chem import AllChem
 
 FG_SMARTS: dict[str, str] = {
     "hydroxyl": "[OX2H]",
@@ -27,6 +28,8 @@ REGRESSION_TARGET_KEYS = (
     "num_rings",
 )
 MACCS_FINGERPRINT_BITS = 166
+MORGAN_PROBE_FINGERPRINT_BITS = 4096
+MORGAN_PROBE_FINGERPRINT_RADIUS = 2
 _MACCS_TOTAL_BITS = 167
 
 
@@ -68,6 +71,25 @@ def compute_maccs_fingerprint_bits_for_smiles(
     return maccs_bits, valid_mol_mask
 
 
+def compute_morgan_fingerprint_bits_for_smiles(
+    smiles: list[str],
+) -> tuple[np.ndarray, np.ndarray]:
+    n = len(smiles)
+    morgan_bits = np.zeros((n, MORGAN_PROBE_FINGERPRINT_BITS), dtype=np.int32)
+    valid_mol_mask = np.ones(n, dtype=bool)
+    for i, smi in enumerate(smiles):
+        if (mol := Chem.MolFromSmiles(smi)) is None:
+            valid_mol_mask[i] = False
+            continue
+        fp = AllChem.GetMorganFingerprintAsBitVect(
+            mol,
+            MORGAN_PROBE_FINGERPRINT_RADIUS,
+            nBits=MORGAN_PROBE_FINGERPRINT_BITS,
+        )
+        DataStructs.ConvertToNumpyArray(fp, morgan_bits[i])
+    return morgan_bits, valid_mol_mask
+
+
 def _build_row_indices(smiles: np.ndarray) -> tuple[list[str], np.ndarray]:
     unique_smiles, index_by_smiles = [], {}
     row_indices = np.empty(len(smiles), dtype=np.int64)
@@ -101,5 +123,16 @@ def build_maccs_targets_for_rows(
     maccs_bits, valid = compute_maccs_fingerprint_bits_for_smiles(unique_smiles)
     return (
         maccs_bits[row_indices].astype(np.int32, copy=False),
+        valid[row_indices],
+    )
+
+
+def build_morgan_targets_for_rows(
+    smiles: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    unique_smiles, row_indices = _build_row_indices(smiles)
+    morgan_bits, valid = compute_morgan_fingerprint_bits_for_smiles(unique_smiles)
+    return (
+        morgan_bits[row_indices].astype(np.int32, copy=False),
         valid[row_indices],
     )
