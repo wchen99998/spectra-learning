@@ -119,6 +119,8 @@ TEN_M_BACKBONE = {
     "encoder_num_heads": 8,
     "encoder_num_kv_heads": 8,
     "feature_mlp_hidden_dim": 512,
+    "encoder_fourier_mlp_hidden_dim": 1024,
+    "encoder_fourier_mlp_num_layers": 4,
     "predictor_dim": 128,
     "target_projector_dim": 256,
     "masked_latent_predictor_num_layers": 4,
@@ -343,6 +345,8 @@ GEMS_SMALL_100M = {
     "encoder_num_heads": 12,
     "encoder_num_kv_heads": 12,
     "feature_mlp_hidden_dim": 1024,
+    "encoder_fourier_mlp_hidden_dim": 1024,
+    "encoder_fourier_mlp_num_layers": 4,
     "predictor_dim": 384,
     "target_projector_dim": 768,
     "masked_latent_predictor_num_layers": 10,
@@ -355,6 +359,8 @@ GEMS_SMALL_300M = {
     "encoder_num_heads": 16,
     "encoder_num_kv_heads": 16,
     "feature_mlp_hidden_dim": 2048,
+    "encoder_fourier_mlp_hidden_dim": 1024,
+    "encoder_fourier_mlp_num_layers": 4,
     "predictor_dim": 512,
     "target_projector_dim": 1024,
     "masked_latent_predictor_num_layers": 12,
@@ -515,10 +521,10 @@ SWEEPS: dict[str, list[dict]] = {
     #
     # These settings were checked against the actual trainable parameter counts
     # for configs/gems_small.py:
-    #   - predictor_dim=256 -> 3,414,272 predictor params vs 6,779,392 encoder
-    #     params (50.4%)
-    #   - predictor_dim=360 -> 6,689,664 predictor params vs 6,779,392 encoder
-    #     params (98.7%)
+    #   - predictor_dim=256 -> 3,414,272 predictor params vs 9,190,144 encoder
+    #     params (37.2%)
+    #   - predictor_dim=360 -> 6,689,664 predictor params vs 9,190,144 encoder
+    #     params (72.8%)
     "sweep_gems_small_predictor_scale": [
         {
             "msg_probe_batch_size": 256,
@@ -536,7 +542,7 @@ SWEEPS: dict[str, list[dict]] = {
     # This is separated from the original width-scaled sweep so it launches
     # only the depth-based near-encoder-size predictor setting:
     #   - predictor_dim=256, masked_latent_predictor_num_layers=8 ->
-    #     6,564,096 predictor params vs 6,779,392 encoder params (96.8%)
+    #     6,564,096 predictor params vs 9,190,144 encoder params (71.4%)
     "sweep_gems_small_predictor_scale_depth_2": [
         {
             "msg_probe_batch_size": 256,

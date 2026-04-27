@@ -35,6 +35,10 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         "encoder_num_kv_heads",
         config.get("num_kv_heads", None),
     )
+    encoder_fourier_mlp_hidden_dim = config.get(
+        "encoder_fourier_mlp_hidden_dim",
+        None,
+    )
     return PeakSetSIGReg(
         model_dim=int(config.model_dim),
         encoder_num_layers=encoder_num_layers,
@@ -42,6 +46,14 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         encoder_num_kv_heads=encoder_num_kv_heads,
         attention_mlp_multiple=float(config.attention_mlp_multiple),
         feature_mlp_hidden_dim=int(config.get("feature_mlp_hidden_dim", 128)),
+        encoder_fourier_mlp_hidden_dim=(
+            None
+            if encoder_fourier_mlp_hidden_dim is None
+            else int(encoder_fourier_mlp_hidden_dim)
+        ),
+        encoder_fourier_mlp_num_layers=int(
+            config.get("encoder_fourier_mlp_num_layers", 2)
+        ),
         encoder_fourier_strategy=str(
             config.get("encoder_fourier_strategy", "log_spaced")
         ),
@@ -198,6 +210,16 @@ def auto_run_name(config: Any) -> str:
         f"ep{epochs}",
     ]
 
+    fourier_mlp_layers = int(config.get("encoder_fourier_mlp_num_layers", 2))
+    fourier_mlp_hidden = config.get("encoder_fourier_mlp_hidden_dim", None)
+    if fourier_mlp_layers != 2 or fourier_mlp_hidden is not None:
+        hidden = (
+            int(config.get("feature_mlp_hidden_dim", 128))
+            if fourier_mlp_hidden is None
+            else int(fourier_mlp_hidden)
+        )
+        parts.append(f"fmlp{fourier_mlp_layers}x{hidden}")
+
     if min_lr is not None:
         parts.append(f"minlr{float(min_lr):.0e}")
     if warmup > 0:
@@ -329,6 +351,20 @@ def load_pretrained_weights(
             )
         ):
             sd.pop(key)
+    resize_prefixes = (
+        "encoder.embedder.fourier_ffn.",
+        "teacher_encoder.embedder.fourier_ffn.",
+    )
+    model_sd = model.state_dict()
+    incompatible = [
+        key
+        for key, value in sd.items()
+        if key.startswith(resize_prefixes)
+        and key in model_sd
+        and value.shape != model_sd[key].shape
+    ]
+    for key in incompatible:
+        sd.pop(key)
     missing, unexpected = model.load_state_dict(sd, strict=False)
     sync_missing_teacher = any(key.startswith("teacher_encoder.") for key in missing)
     allowed_missing_suffixes = (
@@ -346,6 +382,7 @@ def load_pretrained_weights(
         "covariance_pooler.",
         "covariance_sigreg.",
         "teacher_encoder.",
+        "encoder.embedder.fourier_ffn.",
     )
     allowed_unexpected_prefixes = (
         "covariance_pooler.",
@@ -377,6 +414,8 @@ def load_pretrained_weights(
             "Checkpoint load mismatch: "
             f"missing={missing}, unexpected={unexpected}"
         )
+    if incompatible:
+        logging.warning("Skipped incompatible pretrained keys: %s", incompatible)
     if sync_missing_teacher:
         model.sync_ema_teacher()
 

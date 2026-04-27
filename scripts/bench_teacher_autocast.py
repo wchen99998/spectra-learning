@@ -37,6 +37,8 @@ def get_bench_config() -> config_dict.ConfigDict:
     cfg.encoder_fourier_trainable = True
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 1024
+    cfg.encoder_fourier_mlp_hidden_dim = 1024
+    cfg.encoder_fourier_mlp_num_layers = 4
     cfg.jepa_num_target_blocks = 2
     cfg.jepa_context_fraction = 0.35
     cfg.jepa_target_fraction = 0.2

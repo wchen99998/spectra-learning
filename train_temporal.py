@@ -374,6 +374,20 @@ def _load_pretrained_checkpoint(
             )
         ):
             sd.pop(key)
+    model_sd = model.state_dict()
+    resize_prefixes = (
+        "encoder.embedder.fourier_ffn.",
+        "teacher_encoder.embedder.fourier_ffn.",
+    )
+    incompatible = [
+        key
+        for key, value in sd.items()
+        if key.startswith(resize_prefixes)
+        and key in model_sd
+        and value.shape != model_sd[key].shape
+    ]
+    for key in incompatible:
+        sd.pop(key)
     missing, unexpected = model.load_state_dict(sd, strict=False)
     sync_missing_teacher = any(key.startswith("teacher_encoder.") for key in missing)
     # Validate only temporal keys are missing
@@ -385,6 +399,7 @@ def _load_pretrained_checkpoint(
         "target_projector.",
         "sigreg.",
         "teacher_encoder.",
+        "encoder.embedder.fourier_ffn.",
     )
     allowed_suffixes = (
         "encoder.position_embedding.weight",
@@ -414,6 +429,8 @@ def _load_pretrained_checkpoint(
     ]
     if unexpected:
         logging.warning("Unexpected keys in checkpoint (ignored): %s", unexpected)
+    if incompatible:
+        logging.warning("Skipped incompatible pretrained keys: %s", incompatible)
     if sync_missing_teacher:
         model.sync_ema_teacher()
     logging.info(

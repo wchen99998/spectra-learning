@@ -267,6 +267,29 @@ class TestCheckpointPartialLoad:
                     f"Encoder param {name} doesn't match after temporal checkpoint load"
                 )
 
+    def test_temporal_checkpoint_loader_allows_fourier_mlp_resize(self):
+        from train_temporal import _load_pretrained_checkpoint
+
+        pretrained = _small_model(temporal_predictor_num_layers=0)
+        full = _small_model(
+            encoder_fourier_mlp_hidden_dim=64,
+            encoder_fourier_mlp_num_layers=4,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/spatial.ckpt"
+            torch.save({"model": pretrained.state_dict()}, path)
+            _load_pretrained_checkpoint(full, path)
+
+        pretrained_sd = pretrained.state_dict()
+        for name, param in full.named_parameters():
+            if name.startswith("encoder.") and not name.startswith(
+                "encoder.embedder.fourier_ffn."
+            ):
+                assert torch.equal(param.data, pretrained_sd[name]), (
+                    f"Encoder param {name} doesn't match after temporal checkpoint load"
+                )
+
 
 class TestRTConditioningSensitivity:
     def test_different_delta_rt_different_predictions(self):

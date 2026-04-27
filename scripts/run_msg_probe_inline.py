@@ -42,6 +42,8 @@ def make_config() -> config_dict.ConfigDict:
     cfg.encoder_fourier_trainable = True
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 128
+    cfg.encoder_fourier_mlp_hidden_dim = 1024
+    cfg.encoder_fourier_mlp_num_layers = 4
     cfg.encoder_use_position_embedding = True
     cfg.sigreg_num_slices = 256
     cfg.sigreg_lambda = 0.1
@@ -74,6 +76,8 @@ def main() -> None:
         encoder_num_kv_heads=cfg.num_kv_heads,
         attention_mlp_multiple=cfg.attention_mlp_multiple,
         feature_mlp_hidden_dim=cfg.feature_mlp_hidden_dim,
+        encoder_fourier_mlp_hidden_dim=cfg.encoder_fourier_mlp_hidden_dim,
+        encoder_fourier_mlp_num_layers=cfg.encoder_fourier_mlp_num_layers,
         encoder_fourier_strategy=cfg.encoder_fourier_strategy,
         encoder_fourier_x_min=cfg.encoder_fourier_x_min,
         encoder_fourier_x_max=cfg.encoder_fourier_x_max,

@@ -37,6 +37,16 @@ def build_model(cfg) -> PeakSetSIGReg:
         encoder_num_kv_heads=getattr(cfg, "num_kv_heads", None),
         attention_mlp_multiple=cfg.attention_mlp_multiple,
         feature_mlp_hidden_dim=cfg.feature_mlp_hidden_dim,
+        encoder_fourier_mlp_hidden_dim=getattr(
+            cfg,
+            "encoder_fourier_mlp_hidden_dim",
+            None,
+        ),
+        encoder_fourier_mlp_num_layers=getattr(
+            cfg,
+            "encoder_fourier_mlp_num_layers",
+            2,
+        ),
         encoder_fourier_strategy=cfg.encoder_fourier_strategy,
         encoder_fourier_x_min=cfg.encoder_fourier_x_min,
         encoder_fourier_x_max=cfg.encoder_fourier_x_max,

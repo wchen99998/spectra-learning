@@ -43,6 +43,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_fourier_input_scale = 1000.0
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 512
+    cfg.encoder_fourier_mlp_hidden_dim = 1024
+    cfg.encoder_fourier_mlp_num_layers = 4
     cfg.sigreg_num_slices = 1024
     cfg.sigreg_lambda = 3e-4
     cfg.sigreg_precursor_scale = 1.0
