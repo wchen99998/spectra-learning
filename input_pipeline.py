@@ -196,6 +196,28 @@ def _sample_ragged_block_mask_1d_torch(
     return torch.stack(masks_by_length, dim=0).any(dim=0)
 
 
+def _sample_contiguous_mask_1d_torch(
+    active_positions: torch.Tensor,
+    *,
+    mask_count: int,
+) -> torch.Tensor:
+    active_count = int(active_positions.sum().item())
+    if active_count == 0:
+        return torch.zeros_like(active_positions)
+    count = min(int(mask_count), active_count)
+    start = int(
+        torch.randint(
+            active_count - count + 1,
+            (),
+            device=active_positions.device,
+        ).item()
+    )
+    compressed_positions = torch.cumsum(active_positions.to(torch.int64), dim=0)
+    compressed_positions = compressed_positions - active_positions.to(torch.int64)
+    mask = (compressed_positions >= start) & (compressed_positions < start + count)
+    return mask & active_positions
+
+
 def _sample_random_mask_1d_torch(
     active_positions: torch.Tensor,
     *,
@@ -277,7 +299,6 @@ def _sample_block_masks_torch(
         dtype=torch.bool,
         device=device,
     )
-    positions = torch.arange(num_peaks, device=device)
     for row_idx in range(batch_size):
         row_strategy = _sample_mask_strategy_torch(strategy, device=device)
         row_valid = peak_valid_mask[row_idx]
@@ -314,13 +335,10 @@ def _sample_block_masks_torch(
             context_len = min(desired_context, valid_count)
             target_len = 0
         if row_strategy == "contiguous":
-            context_start = int(
-                torch.randint(valid_count - context_len + 1, (), device=device).item()
+            row_context = _sample_contiguous_mask_1d_torch(
+                row_valid,
+                mask_count=context_len,
             )
-            row_context = (positions >= context_start) & (
-                positions < context_start + context_len
-            )
-            row_context &= row_valid
         elif row_strategy == "ragged":
             row_context = _sample_ragged_block_mask_1d_torch(
                 row_valid,
@@ -338,22 +356,11 @@ def _sample_block_masks_torch(
             continue
         valid_target_positions = row_valid & ~row_context
         if row_strategy == "contiguous":
-            compressed_positions = torch.where(
-                positions < context_start,
-                positions,
-                positions - context_len,
-            )
-            max_target_start = valid_count - context_len - target_len + 1
-            starts = torch.randint(
-                max_target_start,
-                (int(num_target_blocks),),
-                device=device,
-            )
-            for block_idx, block_start in enumerate(starts.tolist()):
-                row_target = (compressed_positions >= block_start) & (
-                    compressed_positions < block_start + target_len
+            for block_idx in range(int(num_target_blocks)):
+                target_masks[row_idx, block_idx] = _sample_contiguous_mask_1d_torch(
+                    valid_target_positions,
+                    mask_count=target_len,
                 )
-                target_masks[row_idx, block_idx] = row_target & valid_target_positions
             continue
         available_for_targets = int(valid_target_positions.sum().item())
         if available_for_targets == 0:

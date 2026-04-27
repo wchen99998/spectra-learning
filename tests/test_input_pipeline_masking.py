@@ -131,6 +131,55 @@ def test_sample_block_masks_random_uses_fraction_ranges() -> None:
     assert not (target_masks & context_mask.unsqueeze(1)).any()
 
 
+def test_sample_block_masks_context_and_targets_are_disjoint_for_all_modes() -> None:
+    peak_valid_mask = torch.tensor(
+        [
+            [True, False, True, True, False, True, True, False],
+            [False, True, True, False, True, True, False, True],
+            [True, True, False, True, False, True, True, False],
+        ],
+        dtype=torch.bool,
+    )
+    kwargs = dict(
+        num_target_blocks=2,
+        context_fraction=0.4,
+        target_fraction=0.25,
+        block_min_len=1,
+        context_fraction_range=(0.25, 0.5),
+        target_fraction_range=(0.125, 0.25),
+        mask_lengths=(1, 2, 3),
+        mask_round_from=2,
+    )
+
+    for seed, strategy in enumerate(("contiguous", "ragged", "random"), start=31):
+        torch.manual_seed(seed)
+        context_mask, target_masks = input_pipeline._sample_block_masks_torch(
+            peak_valid_mask,
+            mask_strategy=strategy,
+            **kwargs,
+        )
+
+        assert not (context_mask & ~peak_valid_mask).any()
+        assert not (target_masks & ~peak_valid_mask.unsqueeze(1)).any()
+        assert not (target_masks & context_mask.unsqueeze(1)).any()
+
+    with mock.patch.object(
+        input_pipeline,
+        "_sample_mask_strategy_torch",
+        side_effect=["contiguous", "ragged", "random"],
+    ):
+        torch.manual_seed(37)
+        context_mask, target_masks = input_pipeline._sample_block_masks_torch(
+            peak_valid_mask,
+            mask_strategy="all",
+            **kwargs,
+        )
+
+    assert not (context_mask & ~peak_valid_mask).any()
+    assert not (target_masks & ~peak_valid_mask.unsqueeze(1)).any()
+    assert not (target_masks & context_mask.unsqueeze(1)).any()
+
+
 def test_sample_block_masks_all_selects_per_row_mask_modes() -> None:
     peak_valid_mask = torch.ones((3, 8), dtype=torch.bool)
 
