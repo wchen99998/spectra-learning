@@ -114,6 +114,14 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
             "covariance_pooling_sigreg_lambda",
             None,
         ),
+        use_ema_teacher=bool(config.get("use_ema_teacher", False)),
+        ema_teacher_momentum=float(config.get("ema_teacher_momentum", 0.996)),
+        ema_teacher_momentum_mid=config.get("ema_teacher_momentum_mid", None),
+        ema_teacher_momentum_final=config.get("ema_teacher_momentum_final", None),
+        ema_teacher_schedule_peak_fraction=float(
+            config.get("ema_teacher_schedule_peak_fraction", 0.35)
+        ),
+        ema_teacher_schedule=str(config.get("ema_teacher_schedule", "constant")),
     )
 
 
@@ -221,6 +229,19 @@ def auto_run_name(config: Any) -> str:
         )
         parts.append(f"covpool{cov_dim}")
         parts.append(f"covlam{cov_lambda:.0e}")
+    if config.get("use_ema_teacher", False):
+        parts.append("ema")
+        parts.append(str(config.get("ema_teacher_schedule", "constant")))
+        parts.append(f"m{float(config.get('ema_teacher_momentum', 0.996)):.4f}")
+        ema_mid = config.get("ema_teacher_momentum_mid", None)
+        if ema_mid is not None:
+            parts.append(f"mm{float(ema_mid):.4f}")
+        ema_final = config.get("ema_teacher_momentum_final", None)
+        if ema_final is not None:
+            parts.append(f"mf{float(ema_final):.4f}")
+        if str(config.get("ema_teacher_schedule", "")).lower() == "slow-fast-slow":
+            peak_frac = float(config.get("ema_teacher_schedule_peak_fraction", 0.35))
+            parts.append(f"peak{peak_frac:.2f}")
     target_projector_dim = config.get("target_projector_dim", None)
     if target_projector_dim is not None and int(target_projector_dim) != dim:
         parts.append(f"tproj{int(target_projector_dim)}")
@@ -309,6 +330,7 @@ def load_pretrained_weights(
         ):
             sd.pop(key)
     missing, unexpected = model.load_state_dict(sd, strict=False)
+    sync_missing_teacher = any(key.startswith("teacher_encoder.") for key in missing)
     allowed_missing_suffixes = (
         "position_embedding.weight",
         "predictor_position_embedding.weight",
@@ -323,8 +345,13 @@ def load_pretrained_weights(
         "sigreg.",
         "covariance_pooler.",
         "covariance_sigreg.",
+        "teacher_encoder.",
     )
-    allowed_unexpected_prefixes = ("covariance_pooler.", "covariance_sigreg.")
+    allowed_unexpected_prefixes = (
+        "covariance_pooler.",
+        "covariance_sigreg.",
+        "teacher_encoder.",
+    )
     unexpected = [
         key for key in unexpected
         if not key.startswith(allowed_unexpected_prefixes)
@@ -350,6 +377,8 @@ def load_pretrained_weights(
             "Checkpoint load mismatch: "
             f"missing={missing}, unexpected={unexpected}"
         )
+    if sync_missing_teacher:
+        model.sync_ema_teacher()
 
 
 def latest_ckpt_path(directory: Path) -> str | None:

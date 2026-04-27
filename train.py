@@ -113,6 +113,8 @@ def _train_step_impl(
     autocast_dtype: torch.dtype | None,
     grad_clip_norm: float | None,
     compute_collapse_metrics: bool = False,
+    global_step: int = 0,
+    total_steps: int = 1,
 ) -> dict[str, torch.Tensor]:
     device_type = next(model.parameters()).device.type
     if autocast_dtype is None or device_type != "cuda":
@@ -138,8 +140,11 @@ def _train_step_impl(
     for opt in optimizers:
         opt.step()
         opt.zero_grad(set_to_none=True)
+    ema_momentum = model.update_ema_teacher(global_step + 1, total_steps)
     for sched in schedulers:
         sched.step()
+    if ema_momentum is not None:
+        metrics["ema_teacher_momentum"] = metrics["loss"].new_tensor(ema_momentum)
     return metrics
 
 
@@ -309,6 +314,7 @@ def _load_resume_model_state(
     state_dict: dict[str, torch.Tensor],
 ) -> None:
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    sync_missing_teacher = any(key.startswith("teacher_encoder.") for key in missing)
     allowed_missing_suffixes = (
         "sigreg.t",
         "sigreg.phi",
@@ -326,6 +332,7 @@ def _load_resume_model_state(
         "target_projector.",
         "covariance_pooler.",
         "covariance_sigreg.",
+        "teacher_encoder.",
     )
     missing = [
         key
@@ -338,13 +345,17 @@ def _load_resume_model_state(
         for key in unexpected
         if key not in allowed_unexpected
         and not key.startswith("cls_predictor.")
-        and not key.startswith(("covariance_pooler.", "covariance_sigreg."))
+        and not key.startswith(
+            ("covariance_pooler.", "covariance_sigreg.", "teacher_encoder.")
+        )
     ]
     if missing or unexpected:
         raise RuntimeError(
             "Checkpoint load mismatch: "
             f"missing={missing}, unexpected={unexpected}"
         )
+    if sync_missing_teacher:
+        model.sync_ema_teacher()
 
 
 def train_and_evaluate(
@@ -506,6 +517,8 @@ def train_and_evaluate(
                     collapse_metrics_every_n_steps > 0
                     and (global_step + 1) % collapse_metrics_every_n_steps == 0
                 ),
+                global_step=global_step,
+                total_steps=total_steps,
             )
             global_step += 1
             pbar.update(1)
@@ -560,6 +573,7 @@ def train_and_evaluate(
                         "r2_mean_wo_num_rings",
                         "auc_maccs_mean",
                         "recall_maccs_mean",
+                        "precision_maccs_mean",
                         "mae_num_rings",
                     )
                     for variant in msg_probe_variants:
@@ -592,7 +606,7 @@ def train_and_evaluate(
                     if epoch_key not in probe_metrics:
                         continue
                     logging.info(
-                        "step=%d msg_probe[%s] best_epoch=%.2f (test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f maccs_bits=%d)",
+                        "step=%d msg_probe[%s] best_epoch=%.2f (test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f test_precision_maccs_mean=%.4f maccs_bits=%d)",
                         global_step,
                         variant,
                         probe_metrics[epoch_key],
@@ -600,6 +614,7 @@ def train_and_evaluate(
                         probe_metrics[f"{variant_prefix}/test/mae_num_rings"],
                         probe_metrics[f"{variant_prefix}/test/auc_maccs_mean"],
                         probe_metrics[f"{variant_prefix}/test/recall_maccs_mean"],
+                        probe_metrics[f"{variant_prefix}/test/precision_maccs_mean"],
                         int(probe_metrics[f"{variant_prefix}/num_maccs_bits"]),
                     )
         pbar.close()

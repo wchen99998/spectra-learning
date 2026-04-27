@@ -345,6 +345,7 @@ def _load_pretrained_checkpoint(
         ):
             sd.pop(key)
     missing, unexpected = model.load_state_dict(sd, strict=False)
+    sync_missing_teacher = any(key.startswith("teacher_encoder.") for key in missing)
     # Validate only temporal keys are missing
     allowed_prefixes = (
         "temporal_predictor.",
@@ -353,6 +354,7 @@ def _load_pretrained_checkpoint(
         "masked_latent_readout.",
         "target_projector.",
         "sigreg.",
+        "teacher_encoder.",
     )
     allowed_suffixes = (
         "encoder.position_embedding.weight",
@@ -371,7 +373,8 @@ def _load_pretrained_checkpoint(
     unexpected = [
         key
         for key in unexpected
-        if not key.endswith(
+        if not key.startswith("teacher_encoder.")
+        and not key.endswith(
             (
                 "sigreg_lambda_target",
                 "sigreg_lambda_current",
@@ -381,6 +384,8 @@ def _load_pretrained_checkpoint(
     ]
     if unexpected:
         logging.warning("Unexpected keys in checkpoint (ignored): %s", unexpected)
+    if sync_missing_teacher:
+        model.sync_ema_teacher()
     logging.info(
         "Loaded pretrained checkpoint: %d keys loaded, %d temporal keys initialized fresh",
         len(sd) - len(unexpected),
@@ -495,9 +500,12 @@ def train_temporal(
         for opt in optimizers:
             opt.step()
             opt.zero_grad(set_to_none=True)
+        ema_momentum = model.update_ema_teacher(global_step + 1, total_steps)
         for sched in schedulers:
             sched.step()
         global_step += 1
+        if ema_momentum is not None:
+            metrics["ema_teacher_momentum"] = metrics["loss"].new_tensor(ema_momentum)
         pbar.update(1)
 
         if global_step % log_every_n_steps == 0:
@@ -558,7 +566,7 @@ def train_temporal(
                 if epoch_key not in probe_metrics:
                     continue
                 logging.info(
-                    "step=%d msg_probe[%s] best_epoch=%.2f (test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f)",
+                    "step=%d msg_probe[%s] best_epoch=%.2f (test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_maccs_mean=%.4f test_recall_maccs_mean=%.4f test_precision_maccs_mean=%.4f)",
                     global_step,
                     variant,
                     probe_metrics[epoch_key],
@@ -566,6 +574,7 @@ def train_temporal(
                     probe_metrics[f"{variant_prefix}/test/mae_num_rings"],
                     probe_metrics[f"{variant_prefix}/test/auc_maccs_mean"],
                     probe_metrics[f"{variant_prefix}/test/recall_maccs_mean"],
+                    probe_metrics[f"{variant_prefix}/test/precision_maccs_mean"],
                 )
 
     pbar.close()

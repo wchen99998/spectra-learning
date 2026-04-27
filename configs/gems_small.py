@@ -90,6 +90,10 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_token_loss_type = "l2"
     cfg.jepa_target_normalization = "zscore"
     cfg.jepa_target_layers = [1, 3, 5, 8]
+    cfg.use_ema_teacher = False
+    cfg.ema_teacher_momentum = 0.996
+    cfg.ema_teacher_momentum_final = 1.0
+    cfg.ema_teacher_schedule = "cosine"
     cfg.grad_clip_norm = 1.0
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "reduce-overhead"

@@ -184,6 +184,7 @@ class BlockJEPATests(unittest.TestCase):
             "cls_embedding_loss",
             "cls_embedding_term",
             "cls_visible_fraction",
+            "teacher_student_context_output_norm",
             "context_fraction",
             "masked_fraction",
         ):
@@ -576,6 +577,104 @@ class BlockJEPATests(unittest.TestCase):
         self.assertEqual(encoder_forward.call_count, 1)
         self.assertTrue(torch.isfinite(metrics["loss"]))
 
+    def test_ema_teacher_uses_separate_stop_gradient_encoder(self):
+        model = self._build_model(
+            masked_token_loss_weight=1.0,
+            use_ema_teacher=True,
+        )
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+
+        with (
+            mock.patch.object(
+                model.teacher_encoder,
+                "forward_with_block_outputs",
+                wraps=model.teacher_encoder.forward_with_block_outputs,
+            ) as teacher_forward,
+            mock.patch.object(
+                model.encoder,
+                "forward",
+                wraps=model.encoder.forward,
+            ) as student_forward,
+        ):
+            loss = model.forward_augmented(batch)["loss"]
+            loss.backward()
+
+        self.assertEqual(teacher_forward.call_count, 1)
+        self.assertEqual(student_forward.call_count, 1)
+        teacher_grads = [p.grad for p in model.teacher_encoder.parameters()]
+        self.assertTrue(all(grad is None for grad in teacher_grads))
+        student_grads = [
+            p.grad for p in model.encoder.parameters() if p.requires_grad
+        ]
+        self.assertTrue(any(grad is not None for grad in student_grads))
+
+    def test_train_step_updates_ema_teacher_with_schedule(self):
+        model = self._build_model(
+            masked_token_loss_weight=1.0,
+            use_ema_teacher=True,
+            ema_teacher_momentum=0.5,
+            ema_teacher_momentum_final=0.9,
+            ema_teacher_schedule="linear",
+        )
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+        before_student = next(model.encoder.parameters()).detach().clone()
+        before_teacher = next(model.teacher_encoder.parameters()).detach().clone()
+
+        metrics = _train_step_impl(
+            model,
+            batch,
+            [optimizer],
+            [scheduler],
+            autocast_dtype=None,
+            grad_clip_norm=None,
+            global_step=1,
+            total_steps=4,
+        )
+
+        after_student = next(model.encoder.parameters()).detach()
+        after_teacher = next(model.teacher_encoder.parameters()).detach()
+        expected_momentum = 0.7
+        self.assertIn("ema_teacher_momentum", metrics)
+        self.assertAlmostEqual(
+            float(metrics["ema_teacher_momentum"]),
+            expected_momentum,
+            places=6,
+        )
+        self.assertFalse(torch.equal(before_student, after_student))
+        self.assertTrue(
+            torch.allclose(
+                after_teacher,
+                before_teacher * expected_momentum
+                + after_student * (1.0 - expected_momentum),
+                atol=1e-6,
+                rtol=1e-6,
+            )
+        )
+
+    def test_slow_fast_slow_ema_schedule_uses_total_steps(self):
+        model = self._build_model(
+            use_ema_teacher=True,
+            ema_teacher_momentum=0.9995,
+            ema_teacher_momentum_mid=0.99,
+            ema_teacher_momentum_final=0.999,
+            ema_teacher_schedule_peak_fraction=0.35,
+            ema_teacher_schedule="slow-fast-slow",
+        )
+
+        self.assertAlmostEqual(model.ema_teacher_momentum_at(0, 100), 0.9995)
+        self.assertAlmostEqual(model.ema_teacher_momentum_at(35, 100), 0.99)
+        self.assertAlmostEqual(model.ema_teacher_momentum_at(100, 100), 0.999)
+        self.assertLess(
+            model.ema_teacher_momentum_at(20, 100),
+            model.ema_teacher_momentum_at(5, 100),
+        )
+        self.assertGreater(
+            model.ema_teacher_momentum_at(70, 100),
+            model.ema_teacher_momentum_at(45, 100),
+        )
+
     def test_cls_embedding_term_is_disabled(self):
         model = self._build_model(
             masked_token_loss_weight=1.0,
@@ -722,6 +821,20 @@ class BlockJEPATests(unittest.TestCase):
             torch.save({"state_dict": old_state}, path)
             loaded = self._build_model(jepa_target_layers=[1])
             load_pretrained_weights(loaded, path)
+
+    def test_load_pretrained_weights_syncs_missing_ema_teacher(self):
+        model = self._build_model()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/ckpt.pt"
+            torch.save({"model": model.state_dict()}, path)
+            loaded = self._build_model(use_ema_teacher=True)
+            load_pretrained_weights(loaded, path)
+
+        for student_param, teacher_param in zip(
+            loaded.encoder.parameters(),
+            loaded.teacher_encoder.parameters(),
+        ):
+            self.assertTrue(torch.equal(student_param, teacher_param))
 
     def test_weight_decay_targets_all_2d_weights(self):
         model = self._build_model()

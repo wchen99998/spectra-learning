@@ -44,7 +44,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.attention_mlp_multiple = 4.0
     cfg.feature_mlp_hidden_dim = 512
     cfg.sigreg_num_slices = 1024
-    cfg.sigreg_lambda = 1e-3
+    cfg.sigreg_lambda = 3e-4
     cfg.sigreg_precursor_scale = 1.0
 
     cfg.jepa_num_target_blocks = 2

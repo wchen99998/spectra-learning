@@ -1,3 +1,4 @@
+import copy
 import math
 import torch
 import torch.nn.functional as F
@@ -726,6 +727,12 @@ class PeakSetSIGReg(nn.Module):
         train_covariance_pooling: bool = False,
         covariance_pooling_dim: int = 32,
         covariance_pooling_sigreg_lambda: float | None = None,
+        use_ema_teacher: bool = False,
+        ema_teacher_momentum: float = 0.996,
+        ema_teacher_momentum_mid: float | None = None,
+        ema_teacher_momentum_final: float | None = None,
+        ema_teacher_schedule_peak_fraction: float = 0.35,
+        ema_teacher_schedule: str = "constant",
     ):
         super().__init__()
         self.model_dim = model_dim
@@ -745,7 +752,10 @@ class PeakSetSIGReg(nn.Module):
         )
         if not self.jepa_target_layers:
             raise ValueError("jepa_target_layers must not be empty")
-        if min(self.jepa_target_layers) < 1 or max(self.jepa_target_layers) > self.encoder_num_layers:
+        if (
+            min(self.jepa_target_layers) < 1
+            or max(self.jepa_target_layers) > self.encoder_num_layers
+        ):
             raise ValueError("jepa_target_layers must be within encoder depth")
         self.num_jepa_target_layers = len(self.jepa_target_layers)
         self.jepa_target_dim = self.num_jepa_target_layers * self.model_dim
@@ -812,6 +822,37 @@ class PeakSetSIGReg(nn.Module):
             num_peaks=N,
             num_register_tokens=encoder_num_register_tokens,
         )
+        self.use_ema_teacher = bool(use_ema_teacher)
+        self.ema_teacher_momentum = float(ema_teacher_momentum)
+        self.ema_teacher_momentum_mid = (
+            float(ema_teacher_momentum_mid)
+            if ema_teacher_momentum_mid is not None
+            else self.ema_teacher_momentum
+        )
+        self.ema_teacher_momentum_final = (
+            float(ema_teacher_momentum_final)
+            if ema_teacher_momentum_final is not None
+            else self.ema_teacher_momentum
+        )
+        self.ema_teacher_schedule_peak_fraction = float(
+            ema_teacher_schedule_peak_fraction
+        )
+        self.ema_teacher_schedule = str(ema_teacher_schedule).lower()
+        if self.ema_teacher_schedule not in (
+            "constant",
+            "linear",
+            "cosine",
+            "slow-fast-slow",
+        ):
+            raise ValueError(
+                "ema_teacher_schedule must be one of "
+                "('constant', 'linear', 'cosine', 'slow-fast-slow')"
+            )
+        if self.use_ema_teacher:
+            self.teacher_encoder = copy.deepcopy(self.encoder)
+            self.teacher_encoder.requires_grad_(False)
+        else:
+            self.teacher_encoder = None
         self.latent_mask_token = nn.Parameter(torch.empty(self.model_dim))
         nn.init.normal_(self.latent_mask_token, std=0.02)
 
@@ -891,6 +932,62 @@ class PeakSetSIGReg(nn.Module):
                     nn.init.zeros_(layer.bias)
             self.temporal_query_token = nn.Parameter(torch.empty(model_dim))
             nn.init.trunc_normal_(self.temporal_query_token, std=0.02)
+
+    def ema_teacher_momentum_at(
+        self,
+        step: int,
+        total_steps: int,
+    ) -> float:
+        if self.ema_teacher_schedule == "constant":
+            return self.ema_teacher_momentum
+        progress = min(1.0, max(0.0, float(step) / float(max(1, total_steps))))
+        if self.ema_teacher_schedule == "slow-fast-slow":
+            peak = min(1.0, max(1e-6, self.ema_teacher_schedule_peak_fraction))
+            if progress <= peak:
+                phase = progress / peak
+                eased = 0.5 - 0.5 * math.cos(math.pi * phase)
+                return self.ema_teacher_momentum + eased * (
+                    self.ema_teacher_momentum_mid - self.ema_teacher_momentum
+                )
+            phase = (progress - peak) / max(1e-6, 1.0 - peak)
+            eased = 0.5 - 0.5 * math.cos(math.pi * phase)
+            return self.ema_teacher_momentum_mid + eased * (
+                self.ema_teacher_momentum_final - self.ema_teacher_momentum_mid
+            )
+        if self.ema_teacher_schedule == "cosine":
+            progress = 0.5 - 0.5 * math.cos(math.pi * progress)
+        return self.ema_teacher_momentum + progress * (
+            self.ema_teacher_momentum_final - self.ema_teacher_momentum
+        )
+
+    @torch.no_grad()
+    def sync_ema_teacher(self) -> None:
+        if self.teacher_encoder is not None:
+            self.teacher_encoder.load_state_dict(self.encoder.state_dict())
+
+    @torch.no_grad()
+    def update_ema_teacher(
+        self,
+        step: int,
+        total_steps: int,
+    ) -> float | None:
+        if self.teacher_encoder is None:
+            return None
+        momentum = self.ema_teacher_momentum_at(step, total_steps)
+        for teacher_param, student_param in zip(
+            self.teacher_encoder.parameters(),
+            self.encoder.parameters(),
+        ):
+            teacher_param.lerp_(student_param, 1.0 - momentum)
+        for teacher_buffer, student_buffer in zip(
+            self.teacher_encoder.buffers(),
+            self.encoder.buffers(),
+        ):
+            if torch.is_floating_point(teacher_buffer):
+                teacher_buffer.lerp_(student_buffer, 1.0 - momentum)
+            else:
+                teacher_buffer.copy_(student_buffer)
+        return momentum
 
     def _apply_group_target_normalization(
         self,
@@ -993,7 +1090,12 @@ class PeakSetSIGReg(nn.Module):
             else torch.bfloat16
         )
         with torch.autocast("cuda", dtype=amp_dtype):
-            teacher_peak_outputs = self.encoder.forward_peak_block_outputs(
+            teacher_encoder = (
+                self.teacher_encoder
+                if self.teacher_encoder is not None
+                else self.encoder
+            )
+            teacher_peak_outputs = teacher_encoder.forward_peak_block_outputs(
                 peak_mz,
                 peak_intensity,
                 valid_mask=peak_valid_mask,
@@ -1036,6 +1138,39 @@ class PeakSetSIGReg(nn.Module):
         context_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size = peak_mz.shape[0]
+        if self.teacher_encoder is not None:
+            amp_dtype = (
+                torch.get_autocast_dtype("cuda")
+                if torch.is_autocast_enabled("cuda")
+                else torch.bfloat16
+            )
+            with torch.no_grad(), torch.autocast("cuda", dtype=amp_dtype):
+                teacher_encoded, teacher_peak_outputs = (
+                    self.teacher_encoder.forward_with_block_outputs(
+                        peak_mz,
+                        peak_intensity,
+                        valid_mask=peak_valid_mask,
+                        visible_mask=peak_valid_mask,
+                        block_indices=self.jepa_target_layers,
+                    )
+                )
+            context_encoded = self.encoder(
+                peak_mz,
+                peak_intensity,
+                valid_mask=peak_valid_mask,
+                visible_mask=context_mask,
+            )
+            teacher_target_features = torch.cat(teacher_peak_outputs, dim=-1)
+            teacher_peak_emb, teacher_cls_emb = self.teacher_encoder.split_peak_and_cls(
+                teacher_encoded
+            )
+            context_emb, _ = self.encoder.split_peak_and_cls(context_encoded)
+            return (
+                teacher_target_features,
+                teacher_peak_emb,
+                teacher_cls_emb,
+                context_emb,
+            )
         encoded, teacher_peak_outputs = self.encoder.forward_with_block_outputs(
             torch.cat([peak_mz, peak_mz], dim=0),
             torch.cat([peak_intensity, peak_intensity], dim=0),
@@ -1068,13 +1203,18 @@ class PeakSetSIGReg(nn.Module):
             else torch.bfloat16
         )
         with torch.autocast("cuda", dtype=amp_dtype):
-            teacher_encoded = self.encoder(
+            teacher_encoder = (
+                self.teacher_encoder
+                if self.teacher_encoder is not None
+                else self.encoder
+            )
+            teacher_encoded = teacher_encoder(
                 peak_mz,
                 peak_intensity,
                 valid_mask=peak_valid_mask,
                 visible_mask=visible_mask,
             )
-            teacher_peak_emb, _ = self.encoder.split_peak_and_cls(teacher_encoded)
+            teacher_peak_emb, _ = teacher_encoder.split_peak_and_cls(teacher_encoded)
         return self.pool(teacher_peak_emb, visible_mask)
 
     def _embedding_loss(
@@ -1316,6 +1456,11 @@ class PeakSetSIGReg(nn.Module):
             + covariance_pooling_sigreg_term
         )
         valid_peak_count = peak_valid_mask.float().sum().clamp_min(1.0)
+        context_weights = context_mask.float()
+        teacher_student_context_output_norm = (
+            (teacher_peak_emb.float() - context_emb.float()).norm(dim=-1)
+            * context_weights
+        ).sum() / context_weights.sum().clamp_min(1.0)
         collapse_data: dict[str, torch.Tensor] = {}
         if return_collapse_data:
             pooled_mean = self.pool(teacher_peak_emb, peak_valid_mask)
@@ -1381,6 +1526,9 @@ class PeakSetSIGReg(nn.Module):
             "covariance_pooling_sigreg_term_over_jepa_term": (
                 covariance_pooling_sigreg_term / jepa_term.clamp_min(1e-8)
             ),
+            "teacher_student_context_output_norm": (
+                teacher_student_context_output_norm.to(dtype=context_emb.dtype)
+            ),
             "context_fraction": context_mask.float().sum() / valid_peak_count,
             "masked_fraction": target_masks.float().sum() / valid_peak_count,
             "cls_visible_fraction": cls_visible_mask.float().sum() / valid_peak_count,
@@ -1397,15 +1545,27 @@ class PeakSetSIGReg(nn.Module):
             batch,
             "next_frame",
         )
-        teacher_embeddings = self.encoder(
-            next_frame_mz,
-            next_frame_int,
-            valid_mask=next_frame_valid,
-            visible_mask=next_frame_valid,
+        teacher_encoder = (
+            self.teacher_encoder
+            if self.teacher_encoder is not None
+            else self.encoder
         )
-        teacher_embeddings, _ = self.encoder.split_peak_and_cls(
-            teacher_embeddings
-        )
+        if self.teacher_encoder is None:
+            teacher_embeddings = teacher_encoder(
+                next_frame_mz,
+                next_frame_int,
+                valid_mask=next_frame_valid,
+                visible_mask=next_frame_valid,
+            )
+        else:
+            with torch.no_grad():
+                teacher_embeddings = teacher_encoder(
+                    next_frame_mz,
+                    next_frame_int,
+                    valid_mask=next_frame_valid,
+                    visible_mask=next_frame_valid,
+                )
+        teacher_embeddings, _ = teacher_encoder.split_peak_and_cls(teacher_embeddings)
         return teacher_embeddings
 
     def forward_temporal(

@@ -20,6 +20,7 @@ Usage:
     modal run modal_train.py --config configs/gems_small.py --sweep sweep_gems_small_predictor_scale
     modal run modal_train.py --config configs/gems_small.py --sweep sweep_gems_small_predictor_scale_depth
     modal run modal_train.py --config configs/gems_small.py --sweep sweep_gems_small_scale_100m_300m --detach
+    modal run modal_train.py --config configs/gems_small_norm.py --sweep sweep_sigreg_lambda_wide --detach
     modal run modal_train.py --config configs/gems_small_norm.py --sweep sweep_gems_small_norm_sigreg_lambda --detach
 
 Setup:
@@ -139,6 +140,7 @@ NOEMA_SIGREG_HIGH_LAMBDAS = [
     ("1e01", 10.0),
     ("5e01", 50.0),
 ]
+SIGREG_LAMBDA_WIDE_VALUES = (5e-06, 1e-06,)
 SIGREG_SAMPLE_SCALE_TAG = "sigcfscale"
 JEPA_MASKING_SWEEP_TAG = "mask"
 JEPA_DEEP_SUPERVISION_SWEEP_TAG = "dsup"
@@ -557,6 +559,13 @@ SWEEPS: dict[str, list[dict]] = {
             **GEMS_SMALL_300M,
         },
     ],
+    "sweep_sigreg_lambda_wide": [
+        {
+            "sigreg_lambda": sigreg_lambda,
+            "run_name_suffix": f"sigreg-lam{sigreg_lambda:.0e}",
+        }
+        for sigreg_lambda in SIGREG_LAMBDA_WIDE_VALUES
+    ],
     "sweep_gems_small_norm_sigreg_lambda": [
         {
             "sigreg_lambda": sigreg_lambda,
@@ -634,6 +643,7 @@ def prepare_data(
     gpu=DEFAULT_GPU,
     timeout=TRAIN_TIMEOUT_HOURS * HOURS,
     secrets=[huggingface_secret, wandb_secret],
+    single_use_containers=True,
 )
 def train(
     config_path: str = "configs/gems_small.py",
