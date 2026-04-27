@@ -228,6 +228,7 @@ def _encode_batch_impl(
         peak_mz,
         peak_intensity,
         valid_mask=peak_valid_mask,
+        precursor_mz=precursor_mz,
     )
     return model.pool(embeddings, peak_valid_mask)
 
@@ -243,6 +244,7 @@ def _encode_batch_mean_pool_impl(
         peak_mz,
         peak_intensity,
         valid_mask=peak_valid_mask,
+        precursor_mz=precursor_mz,
     )
     # Mean pool over valid (non-padding) tokens.
     mask = peak_valid_mask.unsqueeze(-1).float()  # [B, N, 1]

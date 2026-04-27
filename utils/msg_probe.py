@@ -1048,6 +1048,7 @@ def _run_msg_probe_once(
             batch["peak_mz"],
             batch["peak_intensity"],
             valid_mask=batch["peak_valid_mask"],
+            precursor_mz=batch.get("precursor_mz", None),
         )
         peak_embeddings, _ = PeakSetEncoder.split_peak_and_cls(embeddings)
         return peak_embeddings

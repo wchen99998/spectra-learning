@@ -400,6 +400,9 @@ def _load_pretrained_checkpoint(
         "sigreg.",
         "teacher_encoder.",
         "encoder.embedder.fourier_ffn.",
+        "encoder.spectral_attn_biases.",
+        "teacher_encoder.module.spectral_attn_biases.",
+        "teacher_encoder.spectral_attn_biases.",
     )
     allowed_suffixes = (
         "encoder.position_embedding.weight",

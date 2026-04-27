@@ -224,6 +224,9 @@ def _extract_representations(
             peak_mz = batch["peak_mz"].to(device)
             peak_intensity = batch["peak_intensity"].to(device)
             peak_valid_mask = batch["peak_valid_mask"].to(device)
+            precursor_mz = batch.get("precursor_mz", None)
+            if precursor_mz is not None:
+                precursor_mz = precursor_mz.to(device)
             if encoder_precision == "bf16_embedder_fp32":
                 with autocast_ctx:
                     embeddings = _encoder_forward_embedder_fp32(
@@ -231,6 +234,7 @@ def _extract_representations(
                         peak_mz,
                         peak_intensity,
                         peak_valid_mask,
+                        precursor_mz=precursor_mz,
                     )
             else:
                 with autocast_ctx:
@@ -238,6 +242,7 @@ def _extract_representations(
                         peak_mz,
                         peak_intensity,
                         valid_mask=peak_valid_mask,
+                        precursor_mz=precursor_mz,
                     )
             peak_embeddings, _ = PeakSetEncoder.split_peak_and_cls(embeddings)
             take = min(int(peak_embeddings.shape[0]), max_samples - seen)
@@ -274,6 +279,7 @@ def _encoder_forward_embedder_fp32(
     valid_mask: torch.Tensor,
     *,
     block_indices: tuple[int, ...] = (),
+    precursor_mz: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
     with torch.autocast(device_type=peak_mz.device.type, enabled=False):
         x = encoder._add_positions(
@@ -282,12 +288,20 @@ def _encoder_forward_embedder_fp32(
     seq_len = peak_mz.shape[1]
     selected = set(block_indices)
     selected_peak_outputs: dict[int, torch.Tensor] = {}
+    special_len = 1 + encoder.num_register_tokens
     x, attn_mask = encoder._append_special_tokens(x, valid_mask)
     from networks.transformer_torch import create_visible_attention_mask
 
     attn_mask = create_visible_attention_mask(attn_mask)
     for block_idx, block in enumerate(encoder.blocks, start=1):
-        x = block(x, attn_mask=attn_mask)
+        attn_bias = encoder._spectral_attn_bias(
+            block_idx - 1,
+            peak_mz,
+            peak_intensity,
+            precursor_mz,
+            num_special_tokens=special_len,
+        )
+        x = block(x, attn_mask=attn_mask, attn_bias=attn_bias)
         if block_idx in selected and block_idx != encoder.num_layers:
             selected_peak_outputs[block_idx] = x[:, :seq_len]
     x = encoder.final_norm(x)
@@ -520,19 +534,25 @@ def _evaluate_layerwise_dtype(
         max_samples=max_samples,
     ):
         take = min(int(batch["peak_mz"].shape[0]), max_samples - seen)
-        batches.append(
-            {
-                "peak_mz": batch["peak_mz"][:take].to(device),
-                "peak_intensity": batch["peak_intensity"][:take].to(device),
-                "peak_valid_mask": batch["peak_valid_mask"][:take].to(device),
-            }
-        )
+        entry = {
+            "peak_mz": batch["peak_mz"][:take].to(device),
+            "peak_intensity": batch["peak_intensity"][:take].to(device),
+            "peak_valid_mask": batch["peak_valid_mask"][:take].to(device),
+        }
+        if "precursor_mz" in batch:
+            entry["precursor_mz"] = batch["precursor_mz"][:take].to(device)
+        batches.append(entry)
         seen += take
         if seen >= max_samples:
             break
     peak_mz = torch.cat([batch["peak_mz"] for batch in batches], dim=0)
     peak_intensity = torch.cat([batch["peak_intensity"] for batch in batches], dim=0)
     valid_mask = torch.cat([batch["peak_valid_mask"] for batch in batches], dim=0).bool()
+    precursor_mz = (
+        torch.cat([batch["precursor_mz"] for batch in batches], dim=0)
+        if "precursor_mz" in batches[0]
+        else None
+    )
     encoder = model.encoder
     block_indices = tuple(
         idx
@@ -546,6 +566,7 @@ def _evaluate_layerwise_dtype(
             peak_intensity,
             valid_mask=valid_mask,
             block_indices=block_indices,
+            precursor_mz=precursor_mz,
         )
         with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
             bf16_embed = encoder._add_positions(encoder.embedder(peak_mz, peak_intensity))
@@ -554,6 +575,7 @@ def _evaluate_layerwise_dtype(
                 peak_intensity,
                 valid_mask=valid_mask,
                 block_indices=block_indices,
+                precursor_mz=precursor_mz,
             )
         with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
             mixed_out, mixed_blocks = _encoder_forward_embedder_fp32(
@@ -561,6 +583,7 @@ def _evaluate_layerwise_dtype(
                 peak_mz,
                 peak_intensity,
                 valid_mask,
+                precursor_mz=precursor_mz,
                 block_indices=block_indices,
             )
     rows = [_layer_metric_row("embedder", fp32_embed, bf16_embed, valid_mask)]

@@ -39,6 +39,10 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         "encoder_fourier_mlp_hidden_dim",
         None,
     )
+    spectral_bias_clip = config.get("spectral_bias_clip", None)
+    spectral_bias_clip = (
+        None if spectral_bias_clip is None else float(spectral_bias_clip)
+    )
     return PeakSetSIGReg(
         model_dim=int(config.model_dim),
         encoder_num_layers=encoder_num_layers,
@@ -102,6 +106,83 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
             config.get("predictor_apply_final_norm", True)
         ),
         use_precursor_token=bool(config.get("use_precursor_token", False)),
+        spectral_bias_relative_kind=str(
+            config.get("spectral_bias_relative_kind", "none")
+        ),
+        spectral_bias_use_precursor=bool(
+            config.get("spectral_bias_use_precursor", False)
+        ),
+        spectral_bias_use_intensity=bool(
+            config.get("spectral_bias_use_intensity", False)
+        ),
+        spectral_bias_num_freqs=int(
+            config.get(
+                "spectral_bias_num_freqs",
+                config.get("encoder_fourier_num_freqs", 128),
+            )
+        ),
+        spectral_bias_fourier_strategy=str(
+            config.get(
+                "spectral_bias_fourier_strategy",
+                config.get("encoder_fourier_strategy", "log_spaced"),
+            )
+        ),
+        spectral_bias_fourier_x_min=float(
+            config.get(
+                "spectral_bias_fourier_x_min",
+                config.get("encoder_fourier_x_min", 3e-3),
+            )
+        ),
+        spectral_bias_fourier_x_max=float(
+            config.get(
+                "spectral_bias_fourier_x_max",
+                config.get("encoder_fourier_x_max", 1000.0),
+            )
+        ),
+        spectral_bias_fourier_sigma=float(
+            config.get(
+                "spectral_bias_fourier_sigma",
+                config.get("encoder_fourier_sigma", 10.0),
+            )
+        ),
+        spectral_bias_fourier_trainable=bool(
+            config.get("spectral_bias_fourier_trainable", False)
+        ),
+        spectral_bias_mass_scale=float(
+            config.get(
+                "spectral_bias_mass_scale",
+                config.get("encoder_fourier_input_scale", PEAK_MZ_MAX),
+            )
+        ),
+        spectral_bias_precursor_scale=float(
+            config.get(
+                "spectral_bias_precursor_scale",
+                config.get("max_precursor_mz", PEAK_MZ_MAX),
+            )
+        ),
+        spectral_bias_rbf_num_basis=int(
+            config.get("spectral_bias_rbf_num_basis", 64)
+        ),
+        spectral_bias_rbf_delta_min=float(
+            config.get(
+                "spectral_bias_rbf_delta_min",
+                -float(config.get("max_precursor_mz", PEAK_MZ_MAX)),
+            )
+        ),
+        spectral_bias_rbf_delta_max=float(
+            config.get(
+                "spectral_bias_rbf_delta_max",
+                float(config.get("max_precursor_mz", PEAK_MZ_MAX)),
+            )
+        ),
+        spectral_bias_rbf_use_absolute_delta=bool(
+            config.get("spectral_bias_rbf_use_absolute_delta", False)
+        ),
+        spectral_bias_intensity_hidden_dim=int(
+            config.get("spectral_bias_intensity_hidden_dim", 16)
+        ),
+        spectral_bias_init_std=float(config.get("spectral_bias_init_std", 0.0)),
+        spectral_bias_clip=spectral_bias_clip,
         num_peaks=int(config.get("num_peaks", 64)),
         encoder_num_register_tokens=int(
             config.get("encoder_num_register_tokens", 0)
@@ -226,6 +307,20 @@ def auto_run_name(config: Any) -> str:
         parts.append(f"wu{warmup // 1000}k")
     if config.get("use_precursor_token", False):
         parts.append("prec")
+    spectral_kind = str(config.get("spectral_bias_relative_kind", "none")).lower()
+    spectral_precursor = bool(config.get("spectral_bias_use_precursor", False))
+    spectral_intensity = bool(config.get("spectral_bias_use_intensity", False))
+    if (
+        spectral_kind not in ("", "none", "false", "off")
+        or spectral_precursor
+        or spectral_intensity
+    ):
+        parts.append(f"sb{spectral_kind or 'none'}")
+        if spectral_precursor:
+            parts.append("sbprec")
+        if spectral_intensity:
+            parts.append("sbint")
+        parts.append(f"sbf{int(config.get('spectral_bias_num_freqs', 128))}")
     norm = str(config.get("norm_type", "")).lower()
     if norm and norm != "rmsnorm":
         parts.append(norm)
@@ -383,6 +478,9 @@ def load_pretrained_weights(
         "covariance_sigreg.",
         "teacher_encoder.",
         "encoder.embedder.fourier_ffn.",
+        "encoder.spectral_attn_biases.",
+        "teacher_encoder.module.spectral_attn_biases.",
+        "teacher_encoder.spectral_attn_biases.",
     )
     allowed_unexpected_prefixes = (
         "covariance_pooler.",

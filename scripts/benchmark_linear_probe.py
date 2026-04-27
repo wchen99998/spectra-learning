@@ -388,9 +388,13 @@ def extract_our_embeddings(
         batch_mz = torch.from_numpy(peak_mz[start:end]).to(device)
         batch_int = torch.from_numpy(peak_intensity[start:end]).to(device)
         batch_mask = torch.from_numpy(peak_valid_mask[start:end]).to(device)
+        batch_pmz = (
+            torch.from_numpy(precursor_mz_np[start:end]).to(device)
+            if precursor_mz_np is not None
+            else None
+        )
 
-        if model.use_precursor_token and precursor_mz_np is not None:
-            batch_pmz = torch.from_numpy(precursor_mz_np[start:end]).to(device)
+        if model.use_precursor_token and batch_pmz is not None:
             expanded = PeakSetSIGReg.prepend_precursor_token(
                 batch_mz,
                 batch_int,
@@ -402,7 +406,12 @@ def extract_our_embeddings(
             batch_mask = expanded["peak_valid_mask"]
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            token_emb = encoder(batch_mz, batch_int, valid_mask=batch_mask)
+            token_emb = encoder(
+                batch_mz,
+                batch_int,
+                valid_mask=batch_mask,
+                precursor_mz=batch_pmz,
+            )
         token_emb = token_emb[:, :-1]
 
         # Mean pool over valid tokens

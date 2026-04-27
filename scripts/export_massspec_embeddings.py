@@ -159,6 +159,7 @@ def _encode_splits(
                     peak_mz,
                     peak_intensity,
                     valid_mask=peak_valid_mask,
+                    precursor_mz=batch.get("precursor_mz", None),
                 )
                 peak_embeddings, _ = model.encoder.split_peak_and_cls(embeddings)
                 covariance_embedding = model.covariance_pooler(

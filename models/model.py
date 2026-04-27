@@ -6,6 +6,7 @@ from torch import nn
 
 from models.losses import SIGReg, SlotwiseSIGReg
 from models.peak_features import PeakFeatureEmbedder
+from models.spectral_attention_bias import SpectralGraphormerBias
 from networks import transformer_torch
 from networks.transformer_torch import _build_norm, create_visible_attention_mask
 from utils.spectra_preprocessing import PRECURSOR_TOKEN_INTENSITY
@@ -532,12 +533,38 @@ class PeakSetEncoder(nn.Module):
         num_peaks: int = 64,
         use_position_embedding: bool = True,
         num_register_tokens: int = 0,
+        use_precursor_token: bool = False,
+        spectral_bias_relative_kind: str = "none",
+        spectral_bias_use_precursor: bool = False,
+        spectral_bias_use_intensity: bool = False,
+        spectral_bias_num_freqs: int = 128,
+        spectral_bias_fourier_strategy: str = "log_spaced",
+        spectral_bias_fourier_x_min: float = 3e-3,
+        spectral_bias_fourier_x_max: float = 1000.0,
+        spectral_bias_fourier_sigma: float = 10.0,
+        spectral_bias_fourier_trainable: bool = False,
+        spectral_bias_mass_scale: float = 1000.0,
+        spectral_bias_precursor_scale: float = 1000.0,
+        spectral_bias_rbf_num_basis: int = 64,
+        spectral_bias_rbf_delta_min: float = -1000.0,
+        spectral_bias_rbf_delta_max: float = 1000.0,
+        spectral_bias_rbf_use_absolute_delta: bool = False,
+        spectral_bias_intensity_hidden_dim: int = 16,
+        spectral_bias_init_std: float = 0.0,
+        spectral_bias_clip: float | None = None,
     ):
         super().__init__()
         self.num_layers = int(num_layers)
         norm_type = str(norm_type).lower()
         self.num_register_tokens = int(num_register_tokens)
+        self.use_precursor_token = bool(use_precursor_token)
         self.use_position_embedding = bool(use_position_embedding)
+        relative_kind = str(spectral_bias_relative_kind).lower()
+        spectral_bias_enabled = (
+            relative_kind not in {"", "none", "false", "off"}
+            or bool(spectral_bias_use_precursor)
+            or bool(spectral_bias_use_intensity)
+        )
         self.embedder = PeakFeatureEmbedder(
             model_dim=model_dim,
             hidden_dim=feature_mlp_hidden_dim,
@@ -579,6 +606,38 @@ class PeakSetEncoder(nn.Module):
             if apply_final_norm
             else nn.Identity()
         )
+        if spectral_bias_enabled:
+            self.spectral_attn_biases = nn.ModuleList(
+                [
+                    SpectralGraphormerBias(
+                        num_heads=int(num_heads),
+                        mass_scale=float(spectral_bias_mass_scale),
+                        precursor_scale=float(spectral_bias_precursor_scale),
+                        first_token_is_precursor=self.use_precursor_token,
+                        relative_kind=spectral_bias_relative_kind,
+                        num_freqs=int(spectral_bias_num_freqs),
+                        fourier_strategy=str(spectral_bias_fourier_strategy),
+                        fourier_x_min=float(spectral_bias_fourier_x_min),
+                        fourier_x_max=float(spectral_bias_fourier_x_max),
+                        fourier_sigma=float(spectral_bias_fourier_sigma),
+                        fourier_trainable=bool(spectral_bias_fourier_trainable),
+                        use_precursor_bias=bool(spectral_bias_use_precursor),
+                        use_intensity_bias=bool(spectral_bias_use_intensity),
+                        intensity_hidden_dim=int(spectral_bias_intensity_hidden_dim),
+                        rbf_num_basis=int(spectral_bias_rbf_num_basis),
+                        rbf_delta_min=float(spectral_bias_rbf_delta_min),
+                        rbf_delta_max=float(spectral_bias_rbf_delta_max),
+                        rbf_use_absolute_delta=bool(
+                            spectral_bias_rbf_use_absolute_delta
+                        ),
+                        init_std=float(spectral_bias_init_std),
+                        bias_clip=spectral_bias_clip,
+                    )
+                    for _ in range(self.num_layers)
+                ]
+            )
+        else:
+            self.spectral_attn_biases = None
 
     def _add_positions(self, x: torch.Tensor) -> torch.Tensor:
         if not self.use_position_embedding:
@@ -609,6 +668,24 @@ class PeakSetEncoder(nn.Module):
         )
         return x, torch.cat([attn_mask, special_mask], dim=1)
 
+    def _spectral_attn_bias(
+        self,
+        block_idx: int,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+        precursor_mz: torch.Tensor | None,
+        *,
+        num_special_tokens: int,
+    ) -> torch.Tensor | None:
+        if self.spectral_attn_biases is None:
+            return None
+        return self.spectral_attn_biases[int(block_idx)](
+            peak_mz,
+            peak_intensity=peak_intensity,
+            precursor_mz=precursor_mz,
+            num_special_tokens=int(num_special_tokens),
+        )
+
     @staticmethod
     def split_peak_and_cls(
         x: torch.Tensor,
@@ -622,6 +699,7 @@ class PeakSetEncoder(nn.Module):
         valid_mask: torch.Tensor | None = None,
         visible_mask: torch.Tensor | None = None,
         block_indices: list[int] | tuple[int, ...] = (),
+        precursor_mz: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         block_indices = tuple(int(idx) for idx in block_indices)
         attn_mask = _merge_visible_mask(valid_mask, visible_mask)
@@ -629,14 +707,23 @@ class PeakSetEncoder(nn.Module):
         seq_len = peak_mz.shape[1]
         selected = set(block_indices)
         selected_peak_outputs: dict[int, torch.Tensor] = {}
+        special_len = 1 + self.num_register_tokens
         x, attn_mask = self._append_special_tokens(x, attn_mask)
         attn_mask = (
             create_visible_attention_mask(attn_mask) if attn_mask is not None else None
         )
         for block_idx, block in enumerate(self.blocks, start=1):
+            attn_bias = self._spectral_attn_bias(
+                block_idx - 1,
+                peak_mz,
+                peak_intensity,
+                precursor_mz,
+                num_special_tokens=special_len,
+            )
             x = block(
                 x,
                 attn_mask=attn_mask,
+                attn_bias=attn_bias,
             )
             if block_idx in selected and block_idx != self.num_layers:
                 selected_peak_outputs[block_idx] = x[:, :seq_len]
@@ -655,6 +742,7 @@ class PeakSetEncoder(nn.Module):
         valid_mask: torch.Tensor | None = None,
         visible_mask: torch.Tensor | None = None,
         block_indices: list[int] | tuple[int, ...] = (),
+        precursor_mz: torch.Tensor | None = None,
     ) -> list[torch.Tensor]:
         _, peak_block_outputs = self.forward_with_block_outputs(
             peak_mz,
@@ -662,6 +750,7 @@ class PeakSetEncoder(nn.Module):
             valid_mask=valid_mask,
             visible_mask=visible_mask,
             block_indices=block_indices,
+            precursor_mz=precursor_mz,
         )
         return peak_block_outputs
 
@@ -672,12 +761,14 @@ class PeakSetEncoder(nn.Module):
         valid_mask: torch.Tensor | None = None,
         visible_mask: torch.Tensor | None = None,
         return_cls_token: bool = False,
+        precursor_mz: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         output, _ = self.forward_with_block_outputs(
             peak_mz,
             peak_intensity,
             valid_mask=valid_mask,
             visible_mask=visible_mask,
+            precursor_mz=precursor_mz,
         )
         if return_cls_token:
             return output, output[:, -1]
@@ -723,6 +814,24 @@ class PeakSetSIGReg(nn.Module):
         encoder_apply_final_norm: bool = True,
         predictor_apply_final_norm: bool = True,
         use_precursor_token: bool = False,
+        spectral_bias_relative_kind: str = "none",
+        spectral_bias_use_precursor: bool = False,
+        spectral_bias_use_intensity: bool = False,
+        spectral_bias_num_freqs: int = 128,
+        spectral_bias_fourier_strategy: str = "log_spaced",
+        spectral_bias_fourier_x_min: float = 3e-3,
+        spectral_bias_fourier_x_max: float = 1000.0,
+        spectral_bias_fourier_sigma: float = 10.0,
+        spectral_bias_fourier_trainable: bool = False,
+        spectral_bias_mass_scale: float = 1000.0,
+        spectral_bias_precursor_scale: float = 1000.0,
+        spectral_bias_rbf_num_basis: int = 64,
+        spectral_bias_rbf_delta_min: float = -1000.0,
+        spectral_bias_rbf_delta_max: float = 1000.0,
+        spectral_bias_rbf_use_absolute_delta: bool = False,
+        spectral_bias_intensity_hidden_dim: int = 16,
+        spectral_bias_init_std: float = 0.0,
+        spectral_bias_clip: float | None = None,
         num_peaks: int = 64,
         temporal_predictor_num_layers: int = 0,
         encoder_num_register_tokens: int = 0,
@@ -829,6 +938,25 @@ class PeakSetSIGReg(nn.Module):
             apply_final_norm=encoder_apply_final_norm,
             num_peaks=N,
             num_register_tokens=encoder_num_register_tokens,
+            use_precursor_token=self.use_precursor_token,
+            spectral_bias_relative_kind=spectral_bias_relative_kind,
+            spectral_bias_use_precursor=spectral_bias_use_precursor,
+            spectral_bias_use_intensity=spectral_bias_use_intensity,
+            spectral_bias_num_freqs=spectral_bias_num_freqs,
+            spectral_bias_fourier_strategy=spectral_bias_fourier_strategy,
+            spectral_bias_fourier_x_min=spectral_bias_fourier_x_min,
+            spectral_bias_fourier_x_max=spectral_bias_fourier_x_max,
+            spectral_bias_fourier_sigma=spectral_bias_fourier_sigma,
+            spectral_bias_fourier_trainable=spectral_bias_fourier_trainable,
+            spectral_bias_mass_scale=spectral_bias_mass_scale,
+            spectral_bias_precursor_scale=spectral_bias_precursor_scale,
+            spectral_bias_rbf_num_basis=spectral_bias_rbf_num_basis,
+            spectral_bias_rbf_delta_min=spectral_bias_rbf_delta_min,
+            spectral_bias_rbf_delta_max=spectral_bias_rbf_delta_max,
+            spectral_bias_rbf_use_absolute_delta=spectral_bias_rbf_use_absolute_delta,
+            spectral_bias_intensity_hidden_dim=spectral_bias_intensity_hidden_dim,
+            spectral_bias_init_std=spectral_bias_init_std,
+            spectral_bias_clip=spectral_bias_clip,
         )
         self.use_ema_teacher = bool(use_ema_teacher)
         self.ema_teacher_momentum = float(ema_teacher_momentum)
@@ -1091,6 +1219,7 @@ class PeakSetSIGReg(nn.Module):
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
         peak_valid_mask: torch.Tensor,
+        precursor_mz: torch.Tensor | None = None,
     ) -> torch.Tensor:
         amp_dtype = (
             torch.get_autocast_dtype("cuda")
@@ -1109,6 +1238,7 @@ class PeakSetSIGReg(nn.Module):
                 valid_mask=peak_valid_mask,
                 visible_mask=peak_valid_mask,
                 block_indices=self.jepa_target_layers,
+                precursor_mz=precursor_mz,
             )
             return torch.cat(teacher_peak_outputs, dim=-1)
 
@@ -1117,12 +1247,14 @@ class PeakSetSIGReg(nn.Module):
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
         peak_valid_mask: torch.Tensor,
+        precursor_mz: torch.Tensor | None = None,
     ) -> torch.Tensor:
         with torch.no_grad():
             teacher_target_features = self._compute_jepa_teacher_target_features(
                 peak_mz,
                 peak_intensity,
                 peak_valid_mask,
+                precursor_mz=precursor_mz,
             )
             return self.project_targets(
                 self._apply_jepa_target_normalization(teacher_target_features)
@@ -1136,6 +1268,7 @@ class PeakSetSIGReg(nn.Module):
             augmented_batch["peak_mz"],
             augmented_batch["peak_intensity"],
             augmented_batch["peak_valid_mask"],
+            precursor_mz=augmented_batch.get("precursor_mz", None),
         )
 
     def _encode_augmented_teacher_and_context(
@@ -1144,6 +1277,7 @@ class PeakSetSIGReg(nn.Module):
         peak_intensity: torch.Tensor,
         peak_valid_mask: torch.Tensor,
         context_mask: torch.Tensor,
+        precursor_mz: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size = peak_mz.shape[0]
         if self.teacher_encoder is not None:
@@ -1160,6 +1294,7 @@ class PeakSetSIGReg(nn.Module):
                         valid_mask=peak_valid_mask,
                         visible_mask=peak_valid_mask,
                         block_indices=self.jepa_target_layers,
+                        precursor_mz=precursor_mz,
                     )
                 )
             context_encoded = self.encoder(
@@ -1167,6 +1302,7 @@ class PeakSetSIGReg(nn.Module):
                 peak_intensity,
                 valid_mask=peak_valid_mask,
                 visible_mask=context_mask,
+                precursor_mz=precursor_mz,
             )
             teacher_target_features = torch.cat(teacher_peak_outputs, dim=-1)
             teacher_peak_emb, teacher_cls_emb = self.teacher_encoder.split_peak_and_cls(
@@ -1185,6 +1321,11 @@ class PeakSetSIGReg(nn.Module):
             valid_mask=torch.cat([peak_valid_mask, peak_valid_mask], dim=0),
             visible_mask=torch.cat([peak_valid_mask, context_mask], dim=0),
             block_indices=self.jepa_target_layers,
+            precursor_mz=(
+                None
+                if precursor_mz is None
+                else torch.cat([precursor_mz, precursor_mz], dim=0)
+            ),
         )
         teacher_target_features = torch.cat(
             [peak_output[:batch_size] for peak_output in teacher_peak_outputs],
@@ -1202,6 +1343,7 @@ class PeakSetSIGReg(nn.Module):
         peak_intensity: torch.Tensor,
         peak_valid_mask: torch.Tensor,
         visible_mask: torch.Tensor | None = None,
+        precursor_mz: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if visible_mask is None:
             visible_mask = peak_valid_mask
@@ -1221,6 +1363,7 @@ class PeakSetSIGReg(nn.Module):
                 peak_intensity,
                 valid_mask=peak_valid_mask,
                 visible_mask=visible_mask,
+                precursor_mz=precursor_mz,
             )
             teacher_peak_emb, _ = teacher_encoder.split_peak_and_cls(teacher_encoded)
         return self.pool(teacher_peak_emb, visible_mask)
@@ -1312,6 +1455,7 @@ class PeakSetSIGReg(nn.Module):
         peak_mz = augmented_batch["peak_mz"]
         peak_intensity = augmented_batch["peak_intensity"]
         peak_valid_mask = augmented_batch["peak_valid_mask"]
+        precursor_mz = augmented_batch.get("precursor_mz", None)
         context_mask = augmented_batch["context_mask"] & peak_valid_mask
         target_masks = augmented_batch["target_masks"] & peak_valid_mask.unsqueeze(1)
         B, N = peak_mz.shape
@@ -1326,6 +1470,7 @@ class PeakSetSIGReg(nn.Module):
             peak_intensity,
             peak_valid_mask,
             context_mask,
+            precursor_mz=precursor_mz,
         )
         ctx_mask_v = context_mask.unsqueeze(1)
         context_emb_by_view = context_emb.unsqueeze(1).expand(-1, K, -1, -1)
@@ -1564,6 +1709,7 @@ class PeakSetSIGReg(nn.Module):
                 next_frame_int,
                 valid_mask=next_frame_valid,
                 visible_mask=next_frame_valid,
+                precursor_mz=batch.get("next_frame_precursor_mz", None),
             )
         else:
             with torch.no_grad():
@@ -1572,6 +1718,7 @@ class PeakSetSIGReg(nn.Module):
                     next_frame_int,
                     valid_mask=next_frame_valid,
                     visible_mask=next_frame_valid,
+                    precursor_mz=batch.get("next_frame_precursor_mz", None),
                 )
         teacher_embeddings, _ = teacher_encoder.split_peak_and_cls(teacher_embeddings)
         return teacher_embeddings
@@ -1603,6 +1750,7 @@ class PeakSetSIGReg(nn.Module):
             frame_int,
             valid_mask=frame_valid,
             visible_mask=frame_valid,
+            precursor_mz=batch.get("frame_precursor_mz", None),
         )  # [B, N, D]
         frame_emb, _ = self.encoder.split_peak_and_cls(frame_encoded)
 
@@ -1648,6 +1796,7 @@ class PeakSetSIGReg(nn.Module):
             intensity,
             valid_mask=valid,
             visible_mask=valid,
+            precursor_mz=batch.get("precursor_mz", None),
         )
         _, cls_x = self.encoder.split_peak_and_cls(encoded)
         return cls_x

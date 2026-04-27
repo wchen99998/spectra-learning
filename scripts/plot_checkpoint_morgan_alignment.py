@@ -170,6 +170,7 @@ def _embed_covariance(
                 batch["peak_mz"],
                 batch["peak_intensity"],
                 valid_mask=batch["peak_valid_mask"],
+                precursor_mz=batch.get("precursor_mz", None),
             )
             peak_embeddings, _ = model.encoder.split_peak_and_cls(encoded)
             cov = model.covariance_pooler(peak_embeddings.float(), batch["peak_valid_mask"])

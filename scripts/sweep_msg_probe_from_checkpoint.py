@@ -204,10 +204,14 @@ def _extract_split_cache(
             peak_mz = batch["peak_mz"].to(device)
             peak_intensity = batch["peak_intensity"].to(device)
             peak_valid_mask = batch["peak_valid_mask"].to(device)
+            precursor_mz = batch.get("precursor_mz", None)
+            if precursor_mz is not None:
+                precursor_mz = precursor_mz.to(device)
             embeddings = model.encoder(
                 peak_mz,
                 peak_intensity,
                 valid_mask=peak_valid_mask,
+                precursor_mz=precursor_mz,
             )
             peak_embeddings, _ = PeakSetEncoder.split_peak_and_cls(embeddings)
             probe_inputs = build_msg_probe_inputs(

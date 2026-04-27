@@ -342,6 +342,9 @@ def _load_resume_model_state(
         "covariance_pooler.",
         "covariance_sigreg.",
         "teacher_encoder.",
+        "encoder.spectral_attn_biases.",
+        "teacher_encoder.module.spectral_attn_biases.",
+        "teacher_encoder.spectral_attn_biases.",
     )
     missing = [
         key

@@ -11,6 +11,26 @@ def create_visible_attention_mask(visible_mask: torch.Tensor) -> torch.Tensor:
     return visible_mask[:, None, None, :]
 
 
+def combine_attention_mask_and_bias(
+    attn_mask: torch.Tensor | None,
+    attn_bias: torch.Tensor | None,
+    *,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    if attn_bias is None:
+        return attn_mask
+
+    bias = attn_bias.to(dtype=dtype)
+
+    if attn_mask is None:
+        return bias
+
+    if attn_mask.dtype == torch.bool:
+        return bias.masked_fill(~attn_mask, torch.finfo(dtype).min)
+
+    return bias + attn_mask.to(dtype=dtype)
+
+
 def _build_norm(dim: int, eps: float | None, norm_type: str) -> nn.Module:
     kind = str(norm_type).lower()
     if kind == "rmsnorm":
@@ -56,6 +76,7 @@ class Attention(nn.Module):
         x: torch.Tensor,
         *,
         attn_mask: torch.Tensor | None = None,
+        attn_bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         bsz, seqlen, _ = x.shape
 
@@ -79,7 +100,12 @@ class Attention(nn.Module):
             k = k.repeat_interleave(rep, dim=1)
             v = v.repeat_interleave(rep, dim=1)
 
-        attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        sdpa_mask = combine_attention_mask_and_bias(
+            attn_mask,
+            attn_bias,
+            dtype=q.dtype,
+        )
+        attn = F.scaled_dot_product_attention(q, k, v, attn_mask=sdpa_mask)
         attn = attn.transpose(1, 2).contiguous().view(bsz, seqlen, self.dim)
         return self.wo(attn)
 
@@ -140,9 +166,11 @@ class TransformerBlock(nn.Module):
         x: torch.Tensor,
         *,
         attn_mask: torch.Tensor | None = None,
+        attn_bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         h = x + self.drop(self.attention(
             self.attention_norm(x),
             attn_mask=attn_mask,
+            attn_bias=attn_bias,
         ))
         return h + self.drop(self.feed_forward(self.ffn_norm(h)))
