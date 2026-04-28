@@ -576,6 +576,30 @@ def _compute_pairwise_similarity_alignment(
     )
 
 
+def _compute_pairwise_similarity_alignment_for_indices(
+    *,
+    embeddings: np.ndarray,
+    tanimoto: np.ndarray,
+    left_idx: np.ndarray,
+    right_idx: np.ndarray,
+) -> MsgProbePairwiseAlignment:
+    embeddings = embeddings.astype(np.float32, copy=False)
+    embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True).clip(
+        min=1e-12
+    )
+    cosine = np.sum(embeddings[left_idx] * embeddings[right_idx], axis=1).astype(
+        np.float32,
+        copy=False,
+    )
+    tanimoto = tanimoto.astype(np.float32, copy=False)
+    pearson = float(np.corrcoef(tanimoto, cosine)[0, 1])
+    return MsgProbePairwiseAlignment(
+        tanimoto=tanimoto,
+        cosine=cosine,
+        pearson=pearson,
+    )
+
+
 def _plot_pairwise_similarity_alignment(
     alignment: MsgProbePairwiseAlignment,
     output_stem: Path,
@@ -585,6 +609,7 @@ def _plot_pairwise_similarity_alignment(
     matplotlib.use("Agg", force=True)
     import matplotlib as mpl
     import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap, LogNorm
 
     output_stem.parent.mkdir(parents=True, exist_ok=True)
     png_path = output_stem.with_suffix(".png")
@@ -607,23 +632,26 @@ def _plot_pairwise_similarity_alignment(
             "ps.fonttype": 42,
         }
     ):
+        cmap = LinearSegmentedColormap.from_list(
+            "nature_teal",
+            ["#ebe9fb", "#9bd6cf", "#1f9d8a"],
+        )
         fig, ax = plt.subplots(figsize=(2.15, 2.15), constrained_layout=True)
-        ax.scatter(
+        ax.hist2d(
             alignment.tanimoto,
             alignment.cosine,
-            s=1.4,
-            c="#63b7af",
-            alpha=0.18,
-            linewidths=0,
-            rasterized=True,
+            bins=120,
+            range=[[0.0, 1.0], [-0.25, 1.02]],
+            cmap=cmap,
+            norm=LogNorm(),
+            cmin=1,
         )
         slope, intercept = np.polyfit(alignment.tanimoto, alignment.cosine, deg=1)
         xs = np.asarray([0.0, 1.0], dtype=np.float32)
         ax.plot(xs, slope * xs + intercept, color="#188f88", linewidth=1.2)
         ax.axhline(0.0, color="#d7d7d7", linewidth=0.6, zorder=0)
-        ax.axvline(0.0, color="#d7d7d7", linewidth=0.6, zorder=0)
         ax.set_xlim(0.0, 1.0)
-        ax.set_ylim(-0.1, 1.0)
+        ax.set_ylim(-0.25, 1.02)
         ax.set_xticks([0.0, 0.5, 1.0])
         ax.set_yticks([0.0, 0.5, 1.0])
         ax.set_xticklabels(["0", "0.5", "1.0"])
@@ -632,8 +660,6 @@ def _plot_pairwise_similarity_alignment(
         ax.set_ylabel("Covariance cosine")
         ax.set_title(f"Pearson = {alignment.pearson:.2f}", pad=8)
         ax.tick_params(direction="in")
-        for spine in ("top", "right"):
-            ax.spines[spine].set_visible(False)
         fig.savefig(png_path, dpi=600, bbox_inches="tight")
         fig.savefig(pdf_path, bbox_inches="tight")
         plt.close(fig)
@@ -682,6 +708,80 @@ def _collect_covariance_morgan_alignment_inputs(
     return np.concatenate(embeddings, axis=0), np.concatenate(morgan, axis=0)
 
 
+def _collect_covariance_embeddings_for_indices(
+    *,
+    probe_data: MassSpecProbeData,
+    model: PeakSetSIGReg,
+    feature_extractor: Callable[[dict[str, torch.Tensor]], torch.Tensor],
+    move_batch: Callable[[dict[str, object]], dict[str, object]],
+    indices: np.ndarray,
+    peak_ordering: str,
+) -> np.ndarray:
+    embeddings = []
+    with torch.no_grad():
+        for batch in probe_data.build_indexed_dataset(
+            "all",
+            indices,
+            peak_ordering=peak_ordering,
+            drop_remainder=False,
+        ):
+            batch = move_batch(batch)
+            peak_embeddings = feature_extractor(batch)
+            covariance = model.covariance_pooler(
+                peak_embeddings.float(),
+                batch["peak_valid_mask"].to(dtype=torch.bool),
+            )
+            embeddings.append(covariance.detach().cpu().numpy())
+    return np.concatenate(embeddings, axis=0)
+
+
+def _run_prepared_covariance_morgan_pairwise_alignment(
+    *,
+    config: config_dict.ConfigDict,
+    probe_data: MassSpecProbeData,
+    model: PeakSetSIGReg,
+    feature_extractor: Callable[[dict[str, torch.Tensor]], torch.Tensor],
+    move_batch: Callable[[dict[str, object]], dict[str, object]],
+    peak_ordering: str,
+    num_pairs: int,
+) -> tuple[MsgProbePairwiseAlignment, int] | None:
+    raw_pair_path = str(
+        config.get(
+            "msg_probe_pairwise_alignment_path",
+            probe_data.pairwise_alignment_path,
+        )
+        or ""
+    )
+    if not raw_pair_path:
+        return None
+    pair_path = Path(raw_pair_path)
+    if not pair_path.exists():
+        return None
+
+    pair_data = np.load(pair_path)
+    tanimoto = pair_data["tanimoto"][:num_pairs]
+    left_endpoint = pair_data["left_endpoint"][:num_pairs]
+    right_endpoint = pair_data["right_endpoint"][:num_pairs]
+    endpoint_indices = pair_data["endpoint_index"]
+    endpoint_embeddings = _collect_covariance_embeddings_for_indices(
+        probe_data=probe_data,
+        model=model,
+        feature_extractor=feature_extractor,
+        move_batch=move_batch,
+        indices=endpoint_indices,
+        peak_ordering=peak_ordering,
+    )
+    return (
+        _compute_pairwise_similarity_alignment_for_indices(
+            embeddings=endpoint_embeddings,
+            tanimoto=tanimoto,
+            left_idx=left_endpoint,
+            right_idx=right_endpoint,
+        ),
+        int(len(endpoint_indices)),
+    )
+
+
 def _run_covariance_morgan_pairwise_alignment(
     *,
     config: config_dict.ConfigDict,
@@ -706,24 +806,39 @@ def _run_covariance_morgan_pairwise_alignment(
         or int(probe_data.info.get("probe_morgan_bits", 0)) <= 0
     ):
         return {}
-    embeddings, morgan = _collect_covariance_morgan_alignment_inputs(
+    prepared = _run_prepared_covariance_morgan_pairwise_alignment(
+        config=config,
         probe_data=probe_data,
         model=model,
         feature_extractor=feature_extractor,
         move_batch=move_batch,
-        split=split,
         peak_ordering=peak_ordering,
-        seed=seed,
-        max_samples=max_samples,
-        sample_randomly=sample_randomly,
-        device=device,
-    )
-    alignment = _compute_pairwise_similarity_alignment(
-        embeddings=embeddings,
-        morgan_bits=morgan,
         num_pairs=num_pairs,
-        seed=seed + 77_000,
     )
+    if prepared is None:
+        embeddings, morgan = _collect_covariance_morgan_alignment_inputs(
+            probe_data=probe_data,
+            model=model,
+            feature_extractor=feature_extractor,
+            move_batch=move_batch,
+            split=split,
+            peak_ordering=peak_ordering,
+            seed=seed,
+            max_samples=max_samples,
+            sample_randomly=sample_randomly,
+            device=device,
+        )
+        alignment = _compute_pairwise_similarity_alignment(
+            embeddings=embeddings,
+            morgan_bits=morgan,
+            num_pairs=num_pairs,
+            seed=seed + 77_000,
+        )
+        num_samples = int(embeddings.shape[0])
+        source = "random"
+    else:
+        alignment, num_samples = prepared
+        source = "prepared"
     if plot_dir is not None and bool(
         config.get("msg_probe_pairwise_alignment_plot", True)
     ):
@@ -736,10 +851,11 @@ def _run_covariance_morgan_pairwise_alignment(
     prefix = "msg_probe/covariance_morgan_pairwise"
     return {
         f"{prefix}/pearson": alignment.pearson,
-        f"{prefix}/num_pairs": float(num_pairs),
-        f"{prefix}/num_samples": float(embeddings.shape[0]),
+        f"{prefix}/num_pairs": float(len(alignment.tanimoto)),
+        f"{prefix}/num_samples": float(num_samples),
         f"{prefix}/mean_tanimoto": float(alignment.tanimoto.mean()),
         f"{prefix}/mean_cosine": float(alignment.cosine.mean()),
+        f"{prefix}/source_prepared": float(source == "prepared"),
     }
 
 

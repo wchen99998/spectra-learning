@@ -3,7 +3,9 @@
 End-to-end pipeline for making ``hr_msms_nist.mgf`` consumable by the online
 MSG probe (``probe_dataset="nist-full"``). The script writes the intermediate
 HDF5, materializes the fully prepared shard artifact expected by
-``MassSpecProbeData.from_config()``, and uploads that artifact to a dataset repo.
+``MassSpecProbeData.from_config()``, writes the fixed Morgan-balanced pair set
+used for online covariance/Tanimoto alignment plots, and uploads that artifact
+to a dataset repo.
 Enable it at train time by setting::
 
     cfg.probe_dataset = "nist-full"

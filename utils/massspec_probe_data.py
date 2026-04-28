@@ -11,7 +11,7 @@ from huggingface_hub import hf_hub_download, snapshot_download
 from ml_collections import config_dict
 from rdkit import Chem, DataStructs
 from rdkit.Chem import AllChem
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 
 from input_pipeline import _prepend_precursor_token_torch
 from utils.massspec_probe_targets import (
@@ -54,9 +54,13 @@ NIST20_HF_FILENAME = (
 _NIST20_SPLIT_SEED = 42
 _NIST20_TRAIN_FRAC = 0.70
 _NIST20_VAL_FRAC = 0.15
-NIST_FULL_METADATA_VERSION = 2
+NIST_FULL_METADATA_VERSION = 3
 NIST_FULL_HF_FILENAME = "hr_msms_nist.hdf5"
-NIST_FULL_ARTIFACT_FORMAT = "nist_full_probe_v2"
+NIST_FULL_ARTIFACT_FORMAT = "nist_full_probe_v3"
+NIST_FULL_PAIRWISE_ALIGNMENT_FILENAME = "morgan_tanimoto_balanced_pairs.npz"
+NIST_FULL_PAIRWISE_ALIGNMENT_NUM_PAIRS = 20_000
+NIST_FULL_PAIRWISE_ALIGNMENT_BIN_SIZE = 0.025
+NIST_FULL_PAIRWISE_ALIGNMENT_SEED = 66
 
 MONA_A_METADATA_VERSION = 3
 MONA_A_HF_REPO = "roman-bushuiev/GeMS"
@@ -235,6 +239,132 @@ def _compute_morgan_fingerprints(smiles: np.ndarray) -> np.ndarray:
     return fps
 
 
+def _representative_canonical_smiles(
+    smiles: np.ndarray,
+    valid_mol: np.ndarray,
+) -> tuple[np.ndarray, list[str]]:
+    raw_reps: dict[str, int] = {}
+    for idx, (smi, valid) in enumerate(zip(smiles, valid_mol, strict=True)):
+        if not bool(valid):
+            continue
+        raw = str(smi)
+        if raw not in raw_reps:
+            raw_reps[raw] = idx
+
+    reps: dict[str, int] = {}
+    for raw, idx in raw_reps.items():
+        mol = Chem.MolFromSmiles(raw)
+        canonical = Chem.MolToSmiles(mol)
+        if canonical not in reps:
+            reps[canonical] = idx
+    canonical_smiles = list(reps.keys())
+    return (
+        np.asarray([reps[smi] for smi in canonical_smiles], dtype=np.int64),
+        canonical_smiles,
+    )
+
+
+def _sample_balanced_morgan_pairs(
+    smiles: np.ndarray,
+    valid_mol: np.ndarray,
+    *,
+    num_pairs: int = NIST_FULL_PAIRWISE_ALIGNMENT_NUM_PAIRS,
+    bin_size: float = NIST_FULL_PAIRWISE_ALIGNMENT_BIN_SIZE,
+    seed: int = NIST_FULL_PAIRWISE_ALIGNMENT_SEED,
+) -> dict[str, np.ndarray] | None:
+    rep_indices, rep_smiles = _representative_canonical_smiles(smiles, valid_mol)
+    if len(rep_smiles) < 2:
+        return None
+
+    fps = [
+        AllChem.GetMorganFingerprintAsBitVect(  # type: ignore[attr-defined]
+            Chem.MolFromSmiles(smi),
+            radius=MORGAN_PROBE_FINGERPRINT_RADIUS,
+            nBits=MORGAN_PROBE_FINGERPRINT_BITS,
+        )
+        for smi in rep_smiles
+    ]
+    n_bins = int(round(1.0 / float(bin_size)))
+    target_per_bin = int(num_pairs) // n_bins
+    rng = np.random.default_rng(int(seed))
+    all_rep = np.arange(len(fps), dtype=np.int64)
+    pairs_by_bin: list[list[tuple[int, int, float]]] = [[] for _ in range(n_bins)]
+
+    for i in rng.permutation(len(fps)):
+        sims = np.asarray(DataStructs.BulkTanimotoSimilarity(fps[int(i)], fps), dtype=np.float32)
+        bin_ids = np.ceil(sims / float(bin_size)).astype(np.int16) - 1
+        for bin_idx in range(n_bins):
+            need = target_per_bin - len(pairs_by_bin[bin_idx])
+            if need <= 0:
+                continue
+            candidates = all_rep[(bin_ids == bin_idx) & (all_rep != int(i))]
+            if candidates.size:
+                take = rng.choice(
+                    candidates,
+                    size=min(need, candidates.size),
+                    replace=False,
+                )
+                pairs_by_bin[bin_idx].extend(
+                    (int(i), int(j), float(sims[j])) for j in take
+                )
+        if all(len(bucket) >= target_per_bin for bucket in pairs_by_bin):
+            break
+
+    pairs = [pair for bucket in pairs_by_bin for pair in bucket[:target_per_bin]]
+    if len(pairs) != target_per_bin * n_bins:
+        return None
+
+    left_index = rep_indices[[pair[0] for pair in pairs]]
+    right_index = rep_indices[[pair[1] for pair in pairs]]
+    endpoint_index, inverse = np.unique(
+        np.concatenate([left_index, right_index]),
+        return_inverse=True,
+    )
+    return {
+        "left_index": left_index.astype(np.int64),
+        "right_index": right_index.astype(np.int64),
+        "left_endpoint": inverse[: len(left_index)].astype(np.int64),
+        "right_endpoint": inverse[len(left_index) :].astype(np.int64),
+        "endpoint_index": endpoint_index.astype(np.int64),
+        "tanimoto": np.asarray([pair[2] for pair in pairs], dtype=np.float32),
+        "bin_counts": np.asarray(
+            [len(bucket[:target_per_bin]) for bucket in pairs_by_bin],
+            dtype=np.int32,
+        ),
+    }
+
+
+def _write_pairwise_alignment_artifact(
+    *,
+    output_dir: Path,
+    smiles: np.ndarray,
+    valid_mol: np.ndarray,
+) -> dict[str, Any]:
+    payload = _sample_balanced_morgan_pairs(smiles, valid_mol)
+    if payload is None:
+        return {
+            "pairwise_alignment_available": False,
+            "pairwise_alignment_num_pairs": 0,
+        }
+    np.savez_compressed(
+        output_dir / NIST_FULL_PAIRWISE_ALIGNMENT_FILENAME,
+        **payload,
+        bin_size=np.asarray(NIST_FULL_PAIRWISE_ALIGNMENT_BIN_SIZE, dtype=np.float32),
+        seed=np.asarray(NIST_FULL_PAIRWISE_ALIGNMENT_SEED, dtype=np.int64),
+    )
+    return {
+        "pairwise_alignment_available": True,
+        "pairwise_alignment_file": NIST_FULL_PAIRWISE_ALIGNMENT_FILENAME,
+        "pairwise_alignment_num_pairs": int(len(payload["tanimoto"])),
+        "pairwise_alignment_num_endpoints": int(len(payload["endpoint_index"])),
+        "pairwise_alignment_bin_size": float(NIST_FULL_PAIRWISE_ALIGNMENT_BIN_SIZE),
+        "pairwise_alignment_seed": int(NIST_FULL_PAIRWISE_ALIGNMENT_SEED),
+        "pairwise_alignment_fingerprint": "morgan",
+        "pairwise_alignment_morgan_bits": int(MORGAN_PROBE_FINGERPRINT_BITS),
+        "pairwise_alignment_morgan_radius": int(MORGAN_PROBE_FINGERPRINT_RADIUS),
+    }
+
+
 def _encode_categorical_ids(values: np.ndarray) -> tuple[np.ndarray, dict[str, int]]:
     normalized = np.asarray([str(v) or "unknown" for v in values], dtype=str)
     categories = ["unknown"] + sorted(set(normalized.tolist()) - {"unknown"})
@@ -313,6 +443,7 @@ def _filter_encode_and_write(
         "probe_morgan_bits": MORGAN_PROBE_FINGERPRINT_BITS,
         "probe_morgan_radius": MORGAN_PROBE_FINGERPRINT_RADIUS,
     }
+    split_ordered_smiles, split_ordered_valid = [], []
     for split_name in ("train", "val", "test"):
         split_mask = fold == split_name
         payload = {
@@ -344,6 +475,15 @@ def _filter_encode_and_write(
         metadata[f"{split_name}_files"] = shard_names
         metadata[f"{split_name}_lengths"] = shard_lengths
         metadata[f"{split_name}_size"] = int(np.count_nonzero(split_mask))
+        split_ordered_smiles.append(smiles[split_mask].astype(str))
+        split_ordered_valid.append(probe_valid_mol[split_mask].astype(bool))
+    metadata.update(
+        _write_pairwise_alignment_artifact(
+            output_dir=output_dir,
+            smiles=np.concatenate(split_ordered_smiles),
+            valid_mol=np.concatenate(split_ordered_valid),
+        )
+    )
     return metadata
 
 
@@ -518,7 +658,13 @@ def ensure_nist_full_probe_downloaded(
         repo_type="dataset",
         revision=revision,
         local_dir=output_dir,
-        allow_patterns=[_METADATA_FILENAME, "train/*", "val/*", "test/*"],
+        allow_patterns=[
+            _METADATA_FILENAME,
+            NIST_FULL_PAIRWISE_ALIGNMENT_FILENAME,
+            "train/*",
+            "val/*",
+            "test/*",
+        ],
     )
     metadata = _probe_metadata_valid(
         output_dir,
@@ -746,6 +892,7 @@ class MassSpecProbeData(NamedTuple):
     use_precursor_token: bool
     dreams_dim: int
     precursor_peak_exclusion_window_da: float
+    pairwise_alignment_path: str
 
     @classmethod
     def from_config(cls, config: config_dict.ConfigDict) -> "MassSpecProbeData":
@@ -811,7 +958,18 @@ class MassSpecProbeData(NamedTuple):
             "probe_maccs_bits": int(metadata.get("probe_maccs_bits", 0)),
             "probe_morgan_bits": int(metadata.get("probe_morgan_bits", 0)),
             "probe_morgan_radius": int(metadata.get("probe_morgan_radius", 0)),
+            "pairwise_alignment_available": bool(
+                metadata.get("pairwise_alignment_available", False)
+            ),
+            "pairwise_alignment_num_pairs": int(
+                metadata.get("pairwise_alignment_num_pairs", 0)
+            ),
+            "pairwise_alignment_num_endpoints": int(
+                metadata.get("pairwise_alignment_num_endpoints", 0)
+            ),
         }
+        pairwise_file = str(metadata.get("pairwise_alignment_file", ""))
+        pairwise_alignment_path = str(output_dir / pairwise_file) if pairwise_file else ""
         return cls(
             info=info,
             train_files=[str(output_dir / "train" / name) for name in metadata["train_files"]],
@@ -847,6 +1005,7 @@ class MassSpecProbeData(NamedTuple):
                     _DEFAULT_PRECURSOR_PEAK_EXCLUSION_WINDOW_DA,
                 )
             ),
+            pairwise_alignment_path=pairwise_alignment_path,
         )
 
     def build_dataset(
@@ -866,6 +1025,7 @@ class MassSpecProbeData(NamedTuple):
             "train": self.train_files,
             "val": self.val_files,
             "test": self.test_files,
+            "all": self.train_files + self.val_files + self.test_files,
         }[split]
         split_lengths = {
             "massspec_train": self.train_lengths,
@@ -874,6 +1034,7 @@ class MassSpecProbeData(NamedTuple):
             "train": self.train_lengths,
             "val": self.val_lengths,
             "test": self.test_lengths,
+            "all": self.train_lengths + self.val_lengths + self.test_lengths,
         }[split]
         dataset = _ProbeMemmapDataset(
             [
@@ -899,5 +1060,55 @@ class MassSpecProbeData(NamedTuple):
                 precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
             ),
             generator=generator,
+        )
+        return _LoaderAdapter(loader)
+
+    def build_indexed_dataset(
+        self,
+        split: str,
+        indices: np.ndarray,
+        *,
+        peak_ordering: str | None = None,
+        drop_remainder: bool = False,
+    ):
+        split_files = {
+            "massspec_train": self.train_files,
+            "massspec_val": self.val_files,
+            "massspec_test": self.test_files,
+            "train": self.train_files,
+            "val": self.val_files,
+            "test": self.test_files,
+            "all": self.train_files + self.val_files + self.test_files,
+        }[split]
+        split_lengths = {
+            "massspec_train": self.train_lengths,
+            "massspec_val": self.val_lengths,
+            "massspec_test": self.test_lengths,
+            "train": self.train_lengths,
+            "val": self.val_lengths,
+            "test": self.test_lengths,
+            "all": self.train_lengths + self.val_lengths + self.test_lengths,
+        }[split]
+        dataset = _ProbeMemmapDataset(
+            [
+                {"dir": path, "length": length}
+                for path, length in zip(split_files, split_lengths, strict=True)
+            ]
+        )
+        loader = DataLoader(
+            Subset(dataset, [int(idx) for idx in indices]),
+            batch_size=self.batch_size,
+            shuffle=False,
+            drop_last=bool(drop_remainder),
+            num_workers=0,
+            collate_fn=_ProbeBatchCollator(
+                num_peaks=self.num_peaks,
+                max_precursor_mz=self.max_precursor_mz,
+                min_peak_intensity=self.min_peak_intensity,
+                peak_drop_min_intensity=self.peak_drop_min_intensity,
+                peak_ordering=peak_ordering or self.peak_ordering,
+                use_precursor_token=self.use_precursor_token,
+                precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
+            ),
         )
         return _LoaderAdapter(loader)

@@ -29,6 +29,7 @@ from utils.msg_probe import (
     _probe_step,
     _probe_task_names,
     _probe_task_output_dims,
+    _compute_pairwise_similarity_alignment_for_indices,
     _plot_pairwise_similarity_alignment,
     _score_epoch_state,
     _update_epoch_state,
@@ -317,6 +318,21 @@ class PairwiseAlignmentTests(unittest.TestCase):
         self.assertEqual(alignment.cosine.shape, (200,))
         self.assertGreater(alignment.pearson, 0.99)
         self.assertTrue(set(np.unique(alignment.tanimoto)).issubset({0.0, 1.0}))
+
+    def test_pairwise_alignment_can_use_prepared_pair_indices(self):
+        alignment = _compute_pairwise_similarity_alignment_for_indices(
+            embeddings=np.asarray(
+                [[1.0, 0.0], [0.8, 0.2], [0.0, 1.0], [0.2, 0.8]],
+                dtype=np.float32,
+            ),
+            tanimoto=np.asarray([0.9, 0.1, 0.8, 0.2], dtype=np.float32),
+            left_idx=np.asarray([0, 0, 2, 2], dtype=np.int64),
+            right_idx=np.asarray([1, 2, 3, 1], dtype=np.int64),
+        )
+
+        self.assertEqual(alignment.tanimoto.shape, (4,))
+        self.assertEqual(alignment.cosine.shape, (4,))
+        self.assertGreater(alignment.pearson, 0.9)
 
     def test_pairwise_alignment_plot_writes_png_and_pdf(self):
         alignment = _compute_pairwise_similarity_alignment(

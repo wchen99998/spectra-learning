@@ -690,7 +690,13 @@ class MassSpecPreprocessTests(unittest.TestCase):
         self.assertEqual(kwargs["repo_type"], "dataset")
         self.assertEqual(
             kwargs["allow_patterns"],
-            ["metadata.json", "train/*", "val/*", "test/*"],
+            [
+                "metadata.json",
+                massspec_probe_data.NIST_FULL_PAIRWISE_ALIGNMENT_FILENAME,
+                "train/*",
+                "val/*",
+                "test/*",
+            ],
         )
 
     def test_probe_data_uses_local_nist_full_artifact_without_download(self):
@@ -824,6 +830,24 @@ class MassSpecPreprocessTests(unittest.TestCase):
 
         self.assertCountEqual(seen_smiles, kept_smiles.tolist())
         self.assertNotIn("CCC", seen_smiles)
+
+    def test_balanced_morgan_pair_sampler_writes_fixed_pair_payload(self):
+        payload = massspec_probe_data._sample_balanced_morgan_pairs(
+            np.asarray(["CC", "CCC", "CCCC", "CCO", "CCCO", "CCCCO"], dtype=str),
+            np.ones(6, dtype=bool),
+            num_pairs=4,
+            bin_size=0.5,
+            seed=1,
+        )
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["tanimoto"].shape, (4,))
+        self.assertEqual(payload["bin_counts"].tolist(), [2, 2])
+        self.assertEqual(
+            payload["left_endpoint"].shape,
+            payload["right_endpoint"].shape,
+        )
 
     def test_probe_collator_applies_peak_and_precursor_window_filters(self):
         collator = massspec_probe_data._ProbeBatchCollator(

@@ -91,15 +91,16 @@ def _log_msg_probe_pairwise_plots_to_wandb(
         )
     )
     if plot_paths:
-        wandb_run.log(
-            {
-                f"msg_probe/covariance_morgan_pairwise/repeat_{idx:02d}": (
-                    wandb.Image(str(path))
-                )
-                for idx, path in enumerate(plot_paths)
-            },
-            step=global_step,
+        payload = {
+            f"msg_probe/covariance_morgan_pairwise/repeat_{idx:02d}": (
+                wandb.Image(str(path))
+            )
+            for idx, path in enumerate(plot_paths)
+        }
+        payload["msg_probe/covariance_morgan_pairwise/plot"] = wandb.Image(
+            str(plot_paths[0])
         )
+        wandb_run.log(payload, step=global_step)
 
 
 def _move_batch_to_device(
