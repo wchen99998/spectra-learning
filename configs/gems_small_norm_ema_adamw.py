@@ -5,15 +5,16 @@ def get_config():
     cfg = get_base_config()
     cfg.use_ema_teacher = True
     cfg.ema_teacher_momentum = 0.9995
-    cfg.ema_teacher_momentum_mid = 0.95
+    cfg.ema_teacher_momentum_mid = 0.99
     cfg.ema_teacher_momentum_final = 0.999
-    cfg.ema_teacher_schedule_peak_fraction = 0.35
+    cfg.ema_teacher_schedule_peak_fraction = 0.2
     cfg.ema_teacher_schedule = "slow-fast-slow"
     cfg.sigreg_lambda = 0
     cfg.spectral_bias_relative_kind = "none"
 
     cfg.encoder_use_cls_token = False
     cfg.encoder_num_register_tokens = 0
+    cfg.jepa_mae_loss_weight = 0.1
 
     cfg.jepa_context_fraction = 0.2
     cfg.jepa_context_fraction_range = (0.2, 0.3)

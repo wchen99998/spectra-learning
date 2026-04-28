@@ -10,6 +10,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.nist_full_probe_repo_id = "cjim8889/hr_msms_nist_probe_prepared"
     cfg.nist_full_probe_revision = "main"
     cfg.nist_full_probe_train_samples = 4_000
+    cfg.nist_full_probe_val_samples = 1_000
     cfg.nist_full_probe_test_samples = 1_000
     cfg.nist_full_probe_num_repeats = 3
     cfg.batch_size = 256
@@ -132,7 +133,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_learning_rate = 1e-3
     cfg.msg_probe_weight_decay = 0.0
     cfg.msg_probe_warmup_steps = 0
+    cfg.msg_probe_sample_size = None
     cfg.msg_probe_max_train_samples = None
+    cfg.msg_probe_max_val_samples = None
     cfg.msg_probe_max_test_samples = None
     cfg.msg_probe_variants = ("mean", "covariance", "pma")
     cfg.msg_probe_mlp_hidden_dim = cfg.model_dim

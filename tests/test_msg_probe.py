@@ -7,6 +7,7 @@ from unittest import mock
 import numpy as np
 import torch
 from ml_collections import config_dict
+from sklearn.metrics import average_precision_score, roc_auc_score
 
 from input_pipeline import _prepend_precursor_token_torch
 from models.model import CovariancePool
@@ -615,6 +616,97 @@ class MsgProbeMetricTests(unittest.TestCase):
         self.assertEqual(metrics["msg_probe/test/num_maccs_precision_bits"], 4.0)
         self.assertGreater(metrics["msg_probe/test/precision_maccs_mean"], 0.9)
 
+    def test_score_epoch_state_matches_per_bit_fingerprint_metrics(self):
+        task_spec = MsgProbeTaskSpec(
+            regression_tasks=(),
+            num_rings_classes=(),
+            maccs_bits=5,
+            regression_means={},
+            regression_stds={},
+            fingerprint_task="maccs",
+        )
+        target = np.asarray(
+            [
+                [0, 0, 1, 0, 1],
+                [1, 0, 1, 0, 0],
+                [0, 0, 1, 1, 1],
+                [1, 0, 1, 1, 0],
+                [0, 0, 1, 0, 0],
+                [1, 0, 1, 1, 1],
+            ],
+            dtype=np.float32,
+        )
+        pred = np.asarray(
+            [
+                [0.1, 0.2, 0.9, 0.2, 0.8],
+                [0.9, 0.1, 0.7, 0.4, 0.3],
+                [0.2, 0.4, 0.8, 0.7, 0.6],
+                [0.8, 0.3, 0.6, 0.9, 0.2],
+                [0.4, 0.2, 0.95, 0.1, 0.4],
+                [0.7, 0.1, 0.85, 0.8, 0.7],
+            ],
+            dtype=np.float32,
+        )
+        epoch_state = _new_epoch_state(task_spec)
+        _update_epoch_state(
+            epoch_state,
+            {
+                "batch_size": int(target.shape[0]),
+                "predictions": {"maccs": torch.from_numpy(pred)},
+                "targets": {"maccs": torch.from_numpy(target)},
+            },
+            task_spec,
+        )
+
+        metrics = _score_epoch_state(
+            prefix="msg_probe/test",
+            epoch_state=epoch_state,
+            task_spec=task_spec,
+        )
+
+        auc_values = []
+        average_precision_values = []
+        recall_values = []
+        precision_values = []
+        for bit_idx in range(target.shape[1]):
+            bit_target = target[:, bit_idx]
+            bit_pred = pred[:, bit_idx] >= 0.5
+            if np.unique(bit_target).size < 2:
+                if np.count_nonzero(bit_target) > 0:
+                    recall_values.append(float(bit_pred[bit_target == 1].mean()))
+                    precision_values.append(
+                        float(bit_target[bit_pred].mean())
+                        if np.count_nonzero(bit_pred) > 0
+                        else 0.0
+                    )
+                continue
+            auc_values.append(float(roc_auc_score(bit_target, pred[:, bit_idx])))
+            average_precision_values.append(
+                float(average_precision_score(bit_target, pred[:, bit_idx]))
+            )
+            recall_values.append(float(bit_pred[bit_target == 1].mean()))
+            precision_values.append(
+                float(bit_target[bit_pred].mean())
+                if np.count_nonzero(bit_pred) > 0
+                else 0.0
+            )
+
+        self.assertEqual(metrics["msg_probe/test/num_maccs_auc_bits"], 3.0)
+        self.assertEqual(metrics["msg_probe/test/num_maccs_recall_bits"], 4.0)
+        self.assertAlmostEqual(
+            metrics["msg_probe/test/auc_maccs_mean"], np.mean(auc_values)
+        )
+        self.assertAlmostEqual(
+            metrics["msg_probe/test/average_precision_maccs_mean"],
+            np.mean(average_precision_values),
+        )
+        self.assertAlmostEqual(
+            metrics["msg_probe/test/recall_maccs_mean"], np.mean(recall_values)
+        )
+        self.assertAlmostEqual(
+            metrics["msg_probe/test/precision_maccs_mean"], np.mean(precision_values)
+        )
+
     def test_select_metric_uses_tune_metric_fallback(self):
         cfg = {
             "msg_probe_tune_metric": "msg_probe/test/mae_num_rings",
@@ -915,6 +1007,34 @@ class ProbeConfigTests(unittest.TestCase):
         self.assertEqual(val_samples, 1000)
         self.assertEqual(test_samples, 1000)
         self.assertTrue(randomize_test_subset)
+
+    def test_msg_probe_sample_size_applies_to_all_splits(self):
+        cfg = config_dict.ConfigDict()
+        cfg.msg_probe_sample_size = 123
+
+        train_samples, val_samples, test_samples, randomize_test_subset = (
+            resolve_msg_probe_sample_limits(cfg)
+        )
+
+        self.assertEqual(train_samples, 123)
+        self.assertEqual(val_samples, 123)
+        self.assertEqual(test_samples, 123)
+        self.assertFalse(randomize_test_subset)
+
+    def test_split_specific_sample_limits_override_global_sample_size(self):
+        cfg = config_dict.ConfigDict()
+        cfg.msg_probe_sample_size = 123
+        cfg.msg_probe_max_train_samples = 10
+        cfg.msg_probe_max_val_samples = 20
+        cfg.msg_probe_max_test_samples = 30
+
+        train_samples, val_samples, test_samples, _ = resolve_msg_probe_sample_limits(
+            cfg
+        )
+
+        self.assertEqual(train_samples, 10)
+        self.assertEqual(val_samples, 20)
+        self.assertEqual(test_samples, 30)
 
     def test_nist_full_probe_repeat_defaults_to_one(self):
         cfg = config_dict.ConfigDict()

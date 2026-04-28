@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from ml_collections import config_dict
-from sklearn.metrics import average_precision_score, r2_score, roc_auc_score
+from sklearn.metrics import r2_score
 
 from input_pipeline import numpy_batch_to_torch
 from models.model import CovariancePool, CrossAttention, PeakSetEncoder, PeakSetSIGReg
@@ -89,9 +89,16 @@ def resolve_msg_probe_sample_limits(
     config: config_dict.ConfigDict,
 ) -> tuple[int | None, int | None, int | None, bool]:
     probe_dataset = str(config.get("probe_dataset", "massspec"))
+    raw_sample_size = config.get("msg_probe_sample_size", None)
     raw_train = config.get("msg_probe_max_train_samples", None)
     raw_val = config.get("msg_probe_max_val_samples", None)
     raw_test = config.get("msg_probe_max_test_samples", None)
+    if raw_train is None:
+        raw_train = raw_sample_size
+    if raw_val is None:
+        raw_val = raw_sample_size
+    if raw_test is None:
+        raw_test = raw_sample_size
     if raw_train is None and probe_dataset == "nist-full":
         raw_train = config.get("nist_full_probe_train_samples", 4_000)
     if raw_val is None and probe_dataset == "nist-full":
@@ -1068,34 +1075,43 @@ def _score_epoch_state(
         fingerprint_task = task_spec.fingerprint_task
         pred = np.concatenate(predictions[fingerprint_task], axis=0)
         target = np.concatenate(targets[fingerprint_task], axis=0)
-        auc_values = []
-        average_precision_values = []
-        recall_values = []
-        precision_values = []
-        for bit_idx in range(task_spec.maccs_bits):
-            bit_target = target[:, bit_idx]
-            bit_pred = pred[:, bit_idx] >= 0.5
-            if np.unique(bit_target).size < 2:
-                if np.count_nonzero(bit_target) > 0:
-                    recall_values.append(
-                        float(bit_pred[bit_target == 1].mean())
-                    )
-                    precision_values.append(
-                        float(bit_target[bit_pred].mean())
-                        if np.count_nonzero(bit_pred) > 0
-                        else 0.0
-                    )
-                continue
-            auc_values.append(float(roc_auc_score(bit_target, pred[:, bit_idx])))
-            average_precision_values.append(
-                float(average_precision_score(bit_target, pred[:, bit_idx]))
+        positives = target.sum(axis=0)
+        valid_metric_mask = (positives > 0) & (positives < target.shape[0])
+        if np.count_nonzero(valid_metric_mask) > 0:
+            valid_target = target[:, valid_metric_mask].astype(np.float64)
+            valid_pred = pred[:, valid_metric_mask].astype(np.float64)
+            valid_positives = positives[valid_metric_mask].astype(np.float64)
+            valid_negatives = float(target.shape[0]) - valid_positives
+            ascending = np.argsort(valid_pred, axis=0)
+            target_ascending = np.take_along_axis(valid_target, ascending, axis=0)
+            negatives_before = np.cumsum(1.0 - target_ascending, axis=0)
+            auc_values = (
+                (target_ascending * negatives_before).sum(axis=0)
+                / (valid_positives * valid_negatives)
             )
-            recall_values.append(float(bit_pred[bit_target == 1].mean()))
-            precision_values.append(
-                float(bit_target[bit_pred].mean())
-                if np.count_nonzero(bit_pred) > 0
-                else 0.0
+            target_descending = target_ascending[::-1]
+            true_positives_at_rank = np.cumsum(target_descending, axis=0)
+            ranks = np.arange(
+                1, target_descending.shape[0] + 1, dtype=np.float64
+            )[:, None]
+            average_precision_values = (
+                (target_descending * true_positives_at_rank / ranks).sum(axis=0)
+                / valid_positives
             )
+        else:
+            auc_values = np.asarray([], dtype=np.float64)
+            average_precision_values = np.asarray([], dtype=np.float64)
+        positive_mask = positives > 0
+        bit_pred = pred >= 0.5
+        true_positives = (bit_pred & (target > 0)).sum(axis=0)
+        predicted_positives = bit_pred.sum(axis=0)
+        recall_values = true_positives[positive_mask] / positives[positive_mask]
+        precision_values = np.divide(
+            true_positives[positive_mask],
+            predicted_positives[positive_mask],
+            out=np.zeros_like(true_positives[positive_mask], dtype=np.float64),
+            where=predicted_positives[positive_mask] > 0,
+        )
         metrics[f"{prefix}/num_{fingerprint_task}_auc_bits"] = float(len(auc_values))
         metrics[f"{prefix}/num_{fingerprint_task}_average_precision_bits"] = float(
             len(average_precision_values)
@@ -1107,18 +1123,18 @@ def _score_epoch_state(
             len(precision_values)
         )
         metrics[f"{prefix}/auc_{fingerprint_task}_mean"] = (
-            float(np.mean(auc_values)) if auc_values else float("nan")
+            float(np.mean(auc_values)) if len(auc_values) else float("nan")
         )
         metrics[f"{prefix}/average_precision_{fingerprint_task}_mean"] = (
             float(np.mean(average_precision_values))
-            if average_precision_values
+            if len(average_precision_values)
             else float("nan")
         )
         metrics[f"{prefix}/recall_{fingerprint_task}_mean"] = (
-            float(np.mean(recall_values)) if recall_values else float("nan")
+            float(np.mean(recall_values)) if len(recall_values) else float("nan")
         )
         metrics[f"{prefix}/precision_{fingerprint_task}_mean"] = (
-            float(np.mean(precision_values)) if precision_values else float("nan")
+            float(np.mean(precision_values)) if len(precision_values) else float("nan")
         )
     metrics[f"{prefix}/r2_mean"] = float(np.mean(regression_r2_values))
     metrics[f"{prefix}/mae_mean"] = float(np.mean(regression_mae_values))
@@ -1551,7 +1567,15 @@ def _run_dreams_probe_once(
     probe_lr = float(config.get("msg_probe_learning_rate", 1e-3))
     probe_weight_decay = float(config.get("msg_probe_weight_decay", 1e-2))
     probe_warmup_steps = int(config.get("msg_probe_warmup_steps", 100))
-    max_train_samples, _, max_test_samples, randomize_test_subset = (
+    early_stopping = bool(config.get("msg_probe_early_stopping", False))
+    early_stopping_patience = int(config.get("msg_probe_early_stopping_patience", 10))
+    early_stopping_min_delta = float(
+        config.get("msg_probe_early_stopping_min_delta", 0.0)
+    )
+    early_stopping_min_epochs = int(
+        config.get("msg_probe_early_stopping_min_epochs", 1)
+    )
+    max_train_samples, max_val_samples, max_test_samples, randomize_test_subset = (
         resolve_msg_probe_sample_limits(config)
     )
     peak_ordering = str(config.get("peak_ordering", "intensity"))
@@ -1583,9 +1607,18 @@ def _run_dreams_probe_once(
         sample_randomly=randomize_test_subset,
         fingerprint_task=fingerprint_task,
     )
+    val_targets = _collect_split_targets(
+        probe_data=probe_data,
+        split="massspec_val",
+        peak_ordering=peak_ordering,
+        seed=train_seed_base + 10_000,
+        max_samples=max_val_samples,
+        sample_randomly=True,
+        fingerprint_task=fingerprint_task,
+    )
     task_spec = _build_task_spec(
         train_targets=train_targets,
-        test_targets=test_targets,
+        test_targets=val_targets if early_stopping else test_targets,
         num_rings_classes=_collect_num_rings_classes(probe_data),
         fingerprint_task=fingerprint_task,
     )
@@ -1631,14 +1664,17 @@ def _run_dreams_probe_once(
         }
 
     compiled_probe_step = torch.compile(_probe_step)
-    probe_select_metric = resolve_msg_probe_select_metric(config).replace(
-        "msg_probe/",
-        "dreams_probe/",
-    )
+    probe_select_metric = resolve_msg_probe_select_metric(config)
+    probe_select_metric = probe_select_metric.replace("msg_probe/", "dreams_probe/")
+    if early_stopping:
+        probe_select_metric = probe_select_metric.replace("/test/", "/val/")
+    else:
+        probe_select_metric = probe_select_metric.replace("/mean/", "/")
     higher_is_better = msg_probe_metric_higher_is_better(probe_select_metric)
 
     best_metrics: dict[str, float] = {}
     best_metric_value = -float("inf") if higher_is_better else float("inf")
+    epochs_without_improvement = 0
     for epoch_idx in range(num_probe_epochs):
         probe.train()
         train_state = _new_epoch_state(task_spec)
@@ -1671,7 +1707,7 @@ def _run_dreams_probe_once(
             for batch in iter_massspec_probe(
                 probe_data,
                 "massspec_test",
-                seed=test_seed_base + epoch_idx,
+                seed=test_seed_base,
                 peak_ordering=peak_ordering,
                 drop_remainder=False,
                 max_samples=max_test_samples,
@@ -1688,9 +1724,34 @@ def _run_dreams_probe_once(
                 if result is None:
                     continue
                 _update_epoch_state(test_state, result, task_spec)
+        val_state = _new_epoch_state(task_spec)
+        with torch.no_grad():
+            for batch in iter_massspec_probe(
+                probe_data,
+                "massspec_val",
+                seed=train_seed_base + 10_000,
+                peak_ordering=peak_ordering,
+                drop_remainder=False,
+                max_samples=max_val_samples,
+                sample_randomly=True,
+            ):
+                batch = move_batch(batch)
+                result = compiled_probe_step(
+                    probe,
+                    batch,
+                    task_spec=task_spec,
+                    device=device,
+                    feature_extractor=feature_extractor,
+                )
+                if result is None:
+                    continue
+                _update_epoch_state(val_state, result, task_spec)
         epoch_metrics = {
             **_score_epoch_state(
                 prefix="dreams_probe/train", epoch_state=train_state, task_spec=task_spec
+            ),
+            **_score_epoch_state(
+                prefix="dreams_probe/val", epoch_state=val_state, task_spec=task_spec
             ),
             **_score_epoch_state(
                 prefix="dreams_probe/test", epoch_state=test_state, task_spec=task_spec
@@ -1700,17 +1761,28 @@ def _run_dreams_probe_once(
         }
         current_value = float(epoch_metrics[probe_select_metric])
         is_better = (
-            current_value > best_metric_value
+            current_value > best_metric_value + early_stopping_min_delta
             if higher_is_better
-            else current_value < best_metric_value
+            else current_value < best_metric_value - early_stopping_min_delta
         )
         if is_better:
             best_metric_value = current_value
             best_metrics = dict(epoch_metrics)
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
         log.info(
-            "DreaMS probe epoch %d/%d test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f %s_bits=%d",
+            "DreaMS probe epoch %d/%d train_samples=%d val_auc_%s_mean=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f %s_bits=%d",
             epoch_idx + 1,
             num_probe_epochs,
+            int(epoch_metrics["dreams_probe/train/samples"]),
+            fingerprint_task,
+            float(
+                epoch_metrics.get(
+                    f"dreams_probe/val/auc_{fingerprint_task}_mean",
+                    float("nan"),
+                )
+            ),
             epoch_metrics["dreams_probe/test/r2_mean_wo_num_rings"],
             epoch_metrics["dreams_probe/test/mae_num_rings"],
             fingerprint_task,
@@ -1728,6 +1800,18 @@ def _run_dreams_probe_once(
         )
         if on_epoch_end is not None:
             on_epoch_end(epoch_metrics)
+        if (
+            early_stopping
+            and epoch_idx + 1 >= early_stopping_min_epochs
+            and epochs_without_improvement >= early_stopping_patience
+        ):
+            log.info(
+                "DreaMS probe early stopping at epoch %d/%d after %d epochs without validation improvement",
+                epoch_idx + 1,
+                num_probe_epochs,
+                early_stopping_patience,
+            )
+            break
     if best_metrics:
         log.info(
             "DreaMS probe best epoch %d: %s=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f",
