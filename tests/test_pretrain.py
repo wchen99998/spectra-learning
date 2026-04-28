@@ -612,6 +612,58 @@ class BlockJEPATests(unittest.TestCase):
             torch.allclose(actual["loss"], expected_jepa_term, atol=1e-6, rtol=1e-6)
         )
 
+    def test_jepa_mae_targets_use_configured_bins(self):
+        model = self._build_model(
+            jepa_mae_loss_weight=1.0,
+            jepa_mae_mz_bin_size=2.5,
+            jepa_mae_intensity_bin_size=0.1,
+        )
+        peak_mz = torch.tensor([[0.0, 0.0024, 0.0025, 0.999, 1.1]])
+        peak_intensity = torch.tensor([[0.0, 0.099, 0.1, 0.999, 1.1]])
+
+        mz_target, intensity_target = model._jepa_mae_targets(
+            peak_mz,
+            peak_intensity,
+        )
+
+        torch.testing.assert_close(
+            mz_target,
+            torch.tensor([[0, 0, 1, 399, 399]]),
+        )
+        torch.testing.assert_close(
+            intensity_target,
+            torch.tensor([[0, 0, 1, 9, 9]]),
+        )
+
+    def test_jepa_mae_value_prediction_contributes_to_loss(self):
+        model = self._build_model(
+            masked_token_loss_weight=1.0,
+            jepa_mae_loss_weight=0.25,
+        )
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+
+        metrics = model.forward_augmented(batch)
+
+        self.assertGreater(float(metrics["jepa_mae_loss"].detach()), 0.0)
+        self.assertGreater(float(metrics["jepa_mae_mz_loss"].detach()), 0.0)
+        self.assertGreater(float(metrics["jepa_mae_intensity_loss"].detach()), 0.0)
+        torch.testing.assert_close(
+            metrics["jepa_mae_loss"],
+            metrics["jepa_mae_mz_loss"] + metrics["jepa_mae_intensity_loss"],
+        )
+        torch.testing.assert_close(
+            metrics["jepa_mae_term"],
+            metrics["jepa_mae_loss"] * 0.25,
+        )
+        torch.testing.assert_close(
+            metrics["loss"],
+            metrics["jepa_term"]
+            + metrics["jepa_mae_term"]
+            + metrics["cls_embedding_term"]
+            + metrics["sigreg_term"]
+            + metrics["covariance_pooling_sigreg_term"],
+        )
+
     def test_forward_augmented_uses_single_encoder_pass(self):
         model = self._build_model(masked_token_loss_weight=1.0)
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)

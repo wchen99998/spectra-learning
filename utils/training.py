@@ -77,6 +77,18 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         ),
         masked_token_loss_weight=float(config.get("masked_token_loss_weight", 0.0)),
         masked_token_loss_type=str(config.get("masked_token_loss_type", "l1")),
+        jepa_mae_loss_weight=float(config.get("jepa_mae_loss_weight", 0.0)),
+        jepa_mae_mz_bin_size=float(config.get("jepa_mae_mz_bin_size", 2.5)),
+        jepa_mae_intensity_bin_size=float(
+            config.get("jepa_mae_intensity_bin_size", 0.1)
+        ),
+        jepa_mae_mz_max=float(
+            config.get(
+                "jepa_mae_mz_max",
+                config.get("peak_mz_max", PEAK_MZ_MAX),
+            )
+        ),
+        jepa_mae_intensity_max=float(config.get("jepa_mae_intensity_max", 1.0)),
         jepa_target_normalization=str(
             config.get("jepa_target_normalization", "none")
         ),
@@ -339,6 +351,14 @@ def auto_run_name(config: Any) -> str:
     if regularizer and regularizer != "none":
         parts.append(regularizer)
         parts.append(f"lam{float(config.get('sigreg_lambda', 0.0)):.0e}")
+    jepa_mae_loss_weight = float(config.get("jepa_mae_loss_weight", 0.0))
+    if jepa_mae_loss_weight > 0:
+        parts.append("jepamae")
+        parts.append(f"maew{jepa_mae_loss_weight:.0e}")
+        parts.append(f"mzbin{float(config.get('jepa_mae_mz_bin_size', 2.5)):g}")
+        parts.append(
+            f"intbin{float(config.get('jepa_mae_intensity_bin_size', 0.1)):g}"
+        )
     if config.get("train_covariance_pooling", False):
         cov_dim = int(
             config.get(
@@ -484,6 +504,8 @@ def load_pretrained_weights(
     allowed_missing_prefixes = (
         "masked_latent_readout.",
         "target_projector.",
+        "jepa_mae_mz_head.",
+        "jepa_mae_intensity_head.",
         "sigreg.",
         "covariance_pooler.",
         "covariance_sigreg.",
@@ -495,6 +517,8 @@ def load_pretrained_weights(
     )
     allowed_unexpected_prefixes = (
         "target_projector.",
+        "jepa_mae_mz_head.",
+        "jepa_mae_intensity_head.",
         "covariance_pooler.",
         "covariance_sigreg.",
         "teacher_encoder.",

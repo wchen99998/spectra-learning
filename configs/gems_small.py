@@ -109,6 +109,11 @@ def get_config() -> config_dict.ConfigDict:
 
     cfg.masked_token_loss_weight = 1.0
     cfg.masked_token_loss_type = "l2"
+    cfg.jepa_mae_loss_weight = 1.0
+    cfg.jepa_mae_mz_bin_size = 2.5
+    cfg.jepa_mae_intensity_bin_size = 0.1
+    cfg.jepa_mae_mz_max = 1000.0
+    cfg.jepa_mae_intensity_max = 1.0
     cfg.jepa_target_normalization = "zscore"
     cfg.jepa_target_layers = [1, 3, 5, 8]
     cfg.use_ema_teacher = False

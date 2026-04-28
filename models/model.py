@@ -9,7 +9,7 @@ from models.peak_features import PeakFeatureEmbedder
 from models.spectral_attention_bias import SpectralGraphormerBias
 from networks import transformer_torch
 from networks.transformer_torch import _build_norm, create_visible_attention_mask
-from utils.spectra_preprocessing import PRECURSOR_TOKEN_INTENSITY
+from utils.spectra_preprocessing import PEAK_MZ_MAX, PRECURSOR_TOKEN_INTENSITY
 
 
 def _apply_depth_scaled_init(blocks: nn.ModuleList, num_layers: int) -> None:
@@ -822,6 +822,11 @@ class PeakSetSIGReg(nn.Module):
         encoder_fourier_input_scale: float = 1000.0,
         masked_token_loss_weight: float = 0.0,
         masked_token_loss_type: str = "l1",
+        jepa_mae_loss_weight: float = 0.0,
+        jepa_mae_mz_bin_size: float = 2.5,
+        jepa_mae_intensity_bin_size: float = 0.1,
+        jepa_mae_mz_max: float = PEAK_MZ_MAX,
+        jepa_mae_intensity_max: float = 1.0,
         jepa_target_normalization: str = "none",
         jepa_target_layers: list[int] | tuple[int, ...] | None = None,
         representation_regularizer: str = "none",
@@ -938,6 +943,17 @@ class PeakSetSIGReg(nn.Module):
         )
         self.masked_token_loss_weight = float(masked_token_loss_weight)
         self.masked_token_loss_type = str(masked_token_loss_type).lower()
+        self.jepa_mae_loss_weight = float(jepa_mae_loss_weight)
+        self.jepa_mae_mz_bin_size = float(jepa_mae_mz_bin_size)
+        self.jepa_mae_intensity_bin_size = float(jepa_mae_intensity_bin_size)
+        self.jepa_mae_mz_max = float(jepa_mae_mz_max)
+        self.jepa_mae_intensity_max = float(jepa_mae_intensity_max)
+        self.jepa_mae_num_mz_bins = int(
+            math.ceil(self.jepa_mae_mz_max / self.jepa_mae_mz_bin_size)
+        )
+        self.jepa_mae_num_intensity_bins = int(
+            math.ceil(self.jepa_mae_intensity_max / self.jepa_mae_intensity_bin_size)
+        )
         self.jepa_target_normalization = str(jepa_target_normalization).lower()
         if self.jepa_target_normalization not in ("none", "zscore"):
             raise ValueError(
@@ -1076,6 +1092,22 @@ class PeakSetSIGReg(nn.Module):
                     nn.init.zeros_(layer.bias)
         else:
             self.target_projector = nn.Identity()
+        if self.jepa_mae_loss_weight > 0:
+            self.jepa_mae_mz_head = nn.Linear(
+                self.target_projector_dim,
+                self.jepa_mae_num_mz_bins,
+            )
+            self.jepa_mae_intensity_head = nn.Linear(
+                self.target_projector_dim,
+                self.jepa_mae_num_intensity_bins,
+            )
+            nn.init.xavier_normal_(self.jepa_mae_mz_head.weight)
+            nn.init.zeros_(self.jepa_mae_mz_head.bias)
+            nn.init.xavier_normal_(self.jepa_mae_intensity_head.weight)
+            nn.init.zeros_(self.jepa_mae_intensity_head.bias)
+        else:
+            self.jepa_mae_mz_head = None
+            self.jepa_mae_intensity_head = None
         sigreg_cls = (
             SlotwiseSIGReg
             if self.representation_regularizer
@@ -1448,6 +1480,66 @@ class PeakSetSIGReg(nn.Module):
             f"Unsupported masked_token_loss_type: {self.masked_token_loss_type}"
         )
 
+    def _jepa_mae_targets(
+        self,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        mz_target = torch.floor(
+            peak_mz.float() * self.jepa_mae_mz_max / self.jepa_mae_mz_bin_size
+        ).long()
+        intensity_target = torch.floor(
+            peak_intensity.float() / self.jepa_mae_intensity_bin_size
+        ).long()
+        return (
+            mz_target.clamp(0, self.jepa_mae_num_mz_bins - 1),
+            intensity_target.clamp(0, self.jepa_mae_num_intensity_bins - 1),
+        )
+
+    def _masked_ce_loss(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        valid_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        per_token = F.cross_entropy(
+            logits.flatten(0, -2).float(),
+            targets.reshape(-1),
+            reduction="none",
+        ).reshape_as(valid_mask)
+        weights = valid_mask.float()
+        return (per_token * weights).sum() / weights.sum().clamp_min(1.0)
+
+    def _jepa_mae_value_prediction_loss(
+        self,
+        predicted_latents: torch.Tensor,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+        target_masks: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        mz_logits = self.jepa_mae_mz_head(predicted_latents)
+        intensity_logits = self.jepa_mae_intensity_head(predicted_latents)
+        mz_target, intensity_target = self._jepa_mae_targets(peak_mz, peak_intensity)
+        view_shape = (mz_logits.shape[0], mz_logits.shape[1], mz_logits.shape[2])
+        mz_target = mz_target.unsqueeze(1).expand(view_shape)
+        intensity_target = intensity_target.unsqueeze(1).expand(view_shape)
+        mz_loss = self._masked_ce_loss(mz_logits, mz_target, target_masks)
+        intensity_loss = self._masked_ce_loss(
+            intensity_logits,
+            intensity_target,
+            target_masks,
+        )
+        value_loss = mz_loss + intensity_loss
+        target_weights = target_masks
+        mz_accuracy = (
+            (mz_logits.argmax(dim=-1) == mz_target).float() * target_weights.float()
+        ).sum() / target_weights.float().sum().clamp_min(1.0)
+        intensity_accuracy = (
+            (intensity_logits.argmax(dim=-1) == intensity_target).float()
+            * target_weights.float()
+        ).sum() / target_weights.float().sum().clamp_min(1.0)
+        return value_loss, mz_loss, intensity_loss, mz_accuracy, intensity_accuracy
+
     def pool(
         self,
         embeddings: torch.Tensor,
@@ -1598,6 +1690,29 @@ class PeakSetSIGReg(nn.Module):
         covariance_pooling_sigreg_loss = context_emb.new_tensor(0.0)
         covariance_pooling_sigreg_term = context_emb.new_tensor(0.0)
         covariance_pooling_sigreg_lambda_current = context_emb.new_tensor(0.0)
+        jepa_mae_loss = context_emb.new_tensor(0.0)
+        jepa_mae_mz_loss = context_emb.new_tensor(0.0)
+        jepa_mae_intensity_loss = context_emb.new_tensor(0.0)
+        jepa_mae_term = context_emb.new_tensor(0.0)
+        jepa_mae_mz_accuracy = context_emb.new_tensor(0.0)
+        jepa_mae_intensity_accuracy = context_emb.new_tensor(0.0)
+        jepa_mae_loss_weight = context_emb.new_tensor(self.jepa_mae_loss_weight)
+        if self.jepa_mae_loss_weight > 0:
+            (
+                jepa_mae_loss,
+                jepa_mae_mz_loss,
+                jepa_mae_intensity_loss,
+                jepa_mae_mz_accuracy,
+                jepa_mae_intensity_accuracy,
+            ) = self._jepa_mae_value_prediction_loss(
+                predictor_output,
+                peak_mz,
+                peak_intensity,
+                target_masks,
+            )
+            jepa_mae_term = jepa_mae_loss_weight * jepa_mae_loss.to(
+                dtype=context_emb.dtype
+            )
         if use_sigreg_enc:
             sigreg_lambda_current = context_emb.new_tensor(self.sigreg_lambda)
             context_sigreg_weights = context_mask.float()
@@ -1669,6 +1784,7 @@ class PeakSetSIGReg(nn.Module):
             )
         loss = (
             jepa_term
+            + jepa_mae_term
             + cls_embedding_term
             + regularizer_term
             + covariance_pooling_sigreg_term
@@ -1702,6 +1818,17 @@ class PeakSetSIGReg(nn.Module):
             "loss": loss,
             "local_global_loss": local_global_loss,
             "jepa_term": jepa_term,
+            "jepa_mae_loss": jepa_mae_loss.to(dtype=context_emb.dtype),
+            "jepa_mae_mz_loss": jepa_mae_mz_loss.to(dtype=context_emb.dtype),
+            "jepa_mae_intensity_loss": jepa_mae_intensity_loss.to(
+                dtype=context_emb.dtype
+            ),
+            "jepa_mae_term": jepa_mae_term,
+            "jepa_mae_loss_weight": jepa_mae_loss_weight,
+            "jepa_mae_mz_accuracy": jepa_mae_mz_accuracy.to(dtype=context_emb.dtype),
+            "jepa_mae_intensity_accuracy": jepa_mae_intensity_accuracy.to(
+                dtype=context_emb.dtype
+            ),
             "cls_embedding_loss": cls_embedding_loss,
             "cls_embedding_term": cls_embedding_term,
             "cls_embedding_loss_weight": cls_loss_weight,
@@ -1740,6 +1867,8 @@ class PeakSetSIGReg(nn.Module):
             "target_regularizer_term_over_jepa_term": regularizer_term
             / jepa_term.clamp_min(1e-8),
             "target_sigreg_term_over_jepa_term": sigreg_term
+            / jepa_term.clamp_min(1e-8),
+            "jepa_mae_term_over_jepa_term": jepa_mae_term
             / jepa_term.clamp_min(1e-8),
             "covariance_pooling_sigreg_term_over_jepa_term": (
                 covariance_pooling_sigreg_term / jepa_term.clamp_min(1e-8)

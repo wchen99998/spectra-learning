@@ -5,7 +5,7 @@ from ml_collections import config_dict
 
 from models.model import PeakSetSIGReg
 from train import _is_weight_decay_target, _load_resume_model_state, _save_checkpoint
-from utils.training import _build_wandb_init_kwargs
+from utils.training import _build_wandb_init_kwargs, build_model_from_config
 
 
 def _small_model(**overrides) -> PeakSetSIGReg:
@@ -149,3 +149,24 @@ def test_is_weight_decay_target_matches_pretrain_expectation():
         "encoder.embedder.mz_fourier.b",
         model.encoder.embedder.mz_fourier.b,
     )
+
+
+def test_jepa_mae_mz_scale_follows_peak_mz_preprocessing_scale():
+    cfg = config_dict.ConfigDict()
+    cfg.model_dim = 32
+    cfg.encoder_num_layers = 1
+    cfg.encoder_num_heads = 4
+    cfg.encoder_num_kv_heads = 4
+    cfg.attention_mlp_multiple = 2.0
+    cfg.feature_mlp_hidden_dim = 16
+    cfg.num_peaks = 8
+    cfg.peak_mz_max = 750.0
+    cfg.encoder_fourier_input_scale = 1000.0
+    cfg.max_precursor_mz = 2000.0
+    cfg.jepa_mae_loss_weight = 1.0
+    cfg.jepa_mae_mz_bin_size = 2.5
+
+    model = build_model_from_config(cfg)
+
+    assert model.jepa_mae_mz_max == 750.0
+    assert model.jepa_mae_num_mz_bins == 300

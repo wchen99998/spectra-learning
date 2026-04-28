@@ -342,6 +342,8 @@ def _load_resume_model_state(
     )
     allowed_missing_prefixes = (
         "target_projector.",
+        "jepa_mae_mz_head.",
+        "jepa_mae_intensity_head.",
         "covariance_pooler.",
         "covariance_sigreg.",
         "teacher_encoder.",
@@ -363,6 +365,8 @@ def _load_resume_model_state(
         and not key.startswith(
             (
                 "target_projector.",
+                "jepa_mae_mz_head.",
+                "jepa_mae_intensity_head.",
                 "covariance_pooler.",
                 "covariance_sigreg.",
                 "teacher_encoder.",
