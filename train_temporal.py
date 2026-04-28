@@ -460,7 +460,6 @@ def train_temporal(
     total_steps = max(1, int(datamodule.train_steps))
     log_every_n_steps = int(config.get("log_every_n_steps", 50))
     checkpoint_every_steps = int(config.checkpoint_every_steps)
-    config.num_peaks = datamodule.info["num_peaks"]
 
     logging.info("Temporal finetuning for %d steps.", total_steps)
 

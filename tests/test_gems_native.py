@@ -316,6 +316,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
 
             self.assertEqual(datamodule.info["train_size"], 2)
             self.assertEqual(datamodule.info["validation_size"], 1)
+            self.assertEqual(datamodule.info["num_peaks"], 64)
             self.assertNotIn("massspec_train_size", datamodule.info)
             self.assertTrue(
                 all(Path(path).exists() for path in datamodule.gems_train_shards)
@@ -329,6 +330,37 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             self.assertEqual(kwargs["repo_id"], "cjim8889/gems-a-native")
             self.assertEqual(kwargs["revision"], "unit-test")
             self.assertEqual(kwargs["repo_type"], "dataset")
+
+    def test_datamodule_separates_real_peaks_from_precursor_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_hdf5 = tmp_path / "GeMS_A.hdf5"
+            _write_fake_gems_hdf5(source_hdf5)
+            cfg = self._make_config(tmp_path)
+            cfg.num_peaks = 4
+            cfg.use_precursor_token = True
+            cfg.dataloader_num_workers = 0
+
+            def fake_snapshot_download(*, local_dir, **kwargs):
+                self._build_native_artifact(
+                    source_hdf5=source_hdf5,
+                    output_dir=Path(local_dir),
+                    cfg=cfg,
+                )
+                return str(local_dir)
+
+            with mock.patch.object(
+                input_pipeline,
+                "snapshot_download",
+                side_effect=fake_snapshot_download,
+            ):
+                datamodule = input_pipeline.GemsNativeDataModule(cfg, seed=42)
+                batch = next(iter(datamodule.train_loader_for_epoch(0)))
+
+        self.assertEqual(cfg.num_peaks, 4)
+        self.assertEqual(datamodule.info["num_peaks"], 4)
+        self.assertEqual(tuple(batch["peak_mz"].shape), (2, 5))
+        self.assertEqual(tuple(batch["target_masks"].shape), (2, 1, 5))
 
     def test_datamodule_uses_local_gems_cache_without_download(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -927,6 +959,52 @@ class MassSpecPreprocessTests(unittest.TestCase):
             float(batch["peak_intensity"][valid].min().item()),
             0.01 - 1e-6,
         )
+
+    def test_probe_collator_separates_real_peaks_from_precursor_token(self):
+        collator = massspec_probe_data._ProbeBatchCollator(
+            num_peaks=4,
+            max_precursor_mz=1000.0,
+            min_peak_intensity=1e-4,
+            peak_drop_min_intensity=1e-4,
+            peak_ordering="mz",
+            use_precursor_token=True,
+            precursor_peak_exclusion_window_da=0.0,
+        )
+        spectra = torch.zeros((2, 128), dtype=torch.float32)
+        spectra[0, :6] = torch.tensor([90.0, 100.0, 110.0, 120.0, 130.0, 140.0])
+        spectra[1, :6] = torch.tensor([190.0, 200.0, 210.0, 220.0, 230.0, 240.0])
+        intensity = torch.zeros((2, 128), dtype=torch.float32)
+        intensity[:, :6] = torch.tensor([1.0, 0.9, 0.8, 0.7, 0.6, 0.5])
+        samples = []
+        for idx, precursor_mz in enumerate((150.0, 250.0)):
+            samples.append(
+                {
+                    "spectra": torch.stack([spectra[idx], intensity[idx]], dim=0),
+                    "precursor_mz_raw": precursor_mz,
+                    "fingerprint": torch.zeros(1024, dtype=torch.int32),
+                    "smiles": "CCO",
+                    "adduct_id": 0,
+                    "instrument_type_id": 0,
+                    "collision_energy": 0.0,
+                    "collision_energy_present": 0,
+                    "probe_valid_mol": True,
+                    "probe_maccs": torch.zeros(166, dtype=torch.int32),
+                    "probe_morgan": torch.zeros(4096, dtype=torch.int32),
+                    "probe_mol_weight": 0.0,
+                    "probe_logp": 0.0,
+                    "probe_num_heavy_atoms": 0.0,
+                    "probe_num_rings": 0.0,
+                }
+            )
+
+        batch = collator(samples)
+
+        self.assertEqual(tuple(batch["peak_mz"].shape), (2, 5))
+        self.assertTrue(
+            torch.allclose(batch["peak_mz"][:, 0], torch.tensor([0.15, 0.25]))
+        )
+        self.assertTrue(torch.all(batch["peak_valid_mask"][:, 0]))
+        self.assertEqual(batch["peak_valid_mask"][:, 1:].sum().item(), 8)
 
     def test_process_massspec_probe_filters_large_precursor(self):
         spectra = np.zeros((4, 2, 128), dtype=np.float32)

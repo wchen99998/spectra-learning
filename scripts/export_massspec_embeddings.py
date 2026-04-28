@@ -274,7 +274,6 @@ def main() -> None:
 
     datamodule = GemsNativeDataModule(config, seed=int(config.seed))
     massspec_data = MassSpecProbeData.from_config(config)
-    config.num_peaks = int(datamodule.info["num_peaks"])
 
     device = torch.device(args.device)
     model = build_model_from_config(config)

@@ -192,7 +192,6 @@ def _load_model_and_data(
     config = load_config(config_path)
     datamodule = GemsNativeDataModule(config, seed=int(config.seed))
     massspec_data = MassSpecProbeData.from_config(config)
-    config.num_peaks = datamodule.info["num_peaks"]
 
     backbone = build_model_from_config(config)
 

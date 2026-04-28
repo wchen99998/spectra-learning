@@ -403,7 +403,6 @@ def train_and_evaluate(
         config.get("collapse_metrics_every_n_steps", log_every_n_steps)
     )
     checkpoint_every_steps = int(config.checkpoint_every_steps)
-    config.num_peaks = datamodule.info["num_peaks"]
     logging.info("Training for %s epochs (%d steps).", num_epochs, total_steps)
     logging.info("Steps per epoch: %d", steps_per_epoch)
     logging.info("Total steps: %d", total_steps)

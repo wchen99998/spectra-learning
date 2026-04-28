@@ -59,7 +59,6 @@ def main() -> None:
     log.info("Device: %s", device)
 
     datamodule = GemsNativeDataModule(config, seed=seed)
-    config.num_peaks = datamodule.info["num_peaks"]
     steps_per_epoch = datamodule.train_steps
     total_steps = max(1, int(float(config.num_epochs) * steps_per_epoch))
 

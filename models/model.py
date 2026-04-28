@@ -964,7 +964,7 @@ class PeakSetSIGReg(nn.Module):
         self.predictor_num_register_tokens = int(predictor_num_register_tokens)
         if self.jepa_num_target_blocks < 1:
             raise ValueError("jepa_num_target_blocks must be >= 1")
-        N = int(num_peaks) + int(self.use_precursor_token)
+        num_peak_tokens = int(num_peaks) + int(self.use_precursor_token)
         self.encoder = PeakSetEncoder(
             model_dim=model_dim,
             num_layers=self.encoder_num_layers,
@@ -986,7 +986,7 @@ class PeakSetSIGReg(nn.Module):
             norm_type=self.norm_type,
             use_position_embedding=encoder_use_position_embedding,
             apply_final_norm=encoder_apply_final_norm,
-            num_peaks=N,
+            num_peaks=num_peak_tokens,
             use_cls_token=self.encoder_use_cls_token,
             num_register_tokens=encoder_num_register_tokens,
             use_precursor_token=self.use_precursor_token,
@@ -1052,7 +1052,7 @@ class PeakSetSIGReg(nn.Module):
             self.encoder_to_predictor_proj = nn.Identity()
 
         self.predictor_position_embedding = _build_frozen_position_embedding(
-            N,
+            num_peak_tokens,
             self.model_dim,
         )
         if self.predictor_num_register_tokens > 0:

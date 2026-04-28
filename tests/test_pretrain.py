@@ -1061,6 +1061,12 @@ class PrecursorTokenTests(unittest.TestCase):
         model_kwargs.update(kwargs)
         return PeakSetSIGReg(**model_kwargs)
 
+    def test_model_sizes_position_tables_from_real_peaks_plus_precursor(self):
+        model = self._build_model(num_peaks=6, use_precursor_token=True)
+
+        self.assertEqual(model.encoder.position_embedding.num_embeddings, 7)
+        self.assertEqual(model.predictor_position_embedding.num_embeddings, 7)
+
     def test_forward_with_pipeline_prepended_batch(self):
         """forward_augmented works with pipeline-prepended batch (N+1 tensors, no precursor_mz key)."""
         model = self._build_model()

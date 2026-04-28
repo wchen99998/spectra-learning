@@ -634,7 +634,7 @@ class GemsNativeDataModule:
             "gems_dir": str(self.gems_dir),
             "train_size": int(self.gems_metadata["train_size"]),
             "validation_size": int(self.gems_metadata["validation_size"]),
-            "num_peaks": self.num_peaks_output + (1 if self.use_precursor_token else 0),
+            "num_peaks": self.num_peaks_output,
             "max_precursor_mz": self.max_precursor_mz,
             "peak_mz_min": PEAK_MZ_MIN,
             "peak_mz_max": PEAK_MZ_MAX,

@@ -70,6 +70,7 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model = PeakSetSIGReg(
+        num_peaks=cfg.num_peaks,
         model_dim=cfg.model_dim,
         encoder_num_layers=cfg.num_layers,
         encoder_num_heads=cfg.num_heads,
