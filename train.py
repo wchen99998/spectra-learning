@@ -336,6 +336,9 @@ def _load_resume_model_state(
         "sigreg_lambda_target",
         "sigreg_lambda_current",
         "sigreg_lambda_step",
+        "encoder.cls_token",
+        "encoder.register_tokens",
+        "predictor_register_tokens",
     )
     allowed_missing_prefixes = (
         "target_projector.",
@@ -358,7 +361,12 @@ def _load_resume_model_state(
         if key not in allowed_unexpected
         and not key.startswith("cls_predictor.")
         and not key.startswith(
-            ("covariance_pooler.", "covariance_sigreg.", "teacher_encoder.")
+            (
+                "target_projector.",
+                "covariance_pooler.",
+                "covariance_sigreg.",
+                "teacher_encoder.",
+            )
         )
     ]
     if missing or unexpected:

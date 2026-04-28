@@ -232,8 +232,8 @@ def test_encoder_final_norm_toggle_changes_output():
         valid_mask=valid_mask,
         visible_mask=valid_mask,
     )
-    out_1, _ = PeakSetEncoder.split_peak_and_cls(out_1)
-    out_2, _ = PeakSetEncoder.split_peak_and_cls(out_2)
+    out_1, _ = encoder_with_final_norm.split_peak_and_cls(out_1)
+    out_2, _ = encoder_without_final_norm.split_peak_and_cls(out_2)
 
     diff = (out_1 - out_2).abs().mean()
     assert float(diff) > 1e-3
@@ -329,7 +329,7 @@ def test_multilayer_targets_widen_teacher_and_predictor_outputs():
         valid_mask=peak_valid_mask,
         visible_mask=context_mask,
     )
-    context_emb, _ = PeakSetEncoder.split_peak_and_cls(context_encoded)
+    context_emb, _ = model.encoder.split_peak_and_cls(context_encoded)
     predictor_input = torch.zeros_like(context_emb.unsqueeze(1).expand(-1, K, -1, -1))
     predictor_input = torch.where(
         context_mask.unsqueeze(1).unsqueeze(-1),
@@ -375,7 +375,7 @@ def test_local_global_loss_uses_target_tokens_only():
         valid_mask=peak_valid_mask,
         visible_mask=context_mask,
     )
-    context_emb, _ = PeakSetEncoder.split_peak_and_cls(context_encoded)
+    context_emb, _ = model.encoder.split_peak_and_cls(context_encoded)
     B, K, N = target_masks.shape
     teacher_target = model._compute_jepa_teacher_targets(
         peak_mz,
@@ -429,7 +429,7 @@ def test_local_global_loss_can_zscore_teacher_targets():
         valid_mask=peak_valid_mask,
         visible_mask=context_mask,
     )
-    context_emb, _ = PeakSetEncoder.split_peak_and_cls(context_encoded)
+    context_emb, _ = model.encoder.split_peak_and_cls(context_encoded)
     B, K, N = target_masks.shape
     teacher_target = model._compute_jepa_teacher_targets(
         peak_mz,
@@ -543,7 +543,7 @@ def test_positions_outside_union_do_not_change_context_conditioning_with_fixed_t
             valid_mask=peak_valid_mask,
             visible_mask=context_mask,
         )
-        context_emb, _ = PeakSetEncoder.split_peak_and_cls(context_encoded)
+        context_emb, _ = model.encoder.split_peak_and_cls(context_encoded)
         predictor_input = context_emb.unsqueeze(1).expand(-1, K, -1, -1)
         predictor_input = predictor_input * context_mask.unsqueeze(1).unsqueeze(-1)
         predictor_input = torch.where(

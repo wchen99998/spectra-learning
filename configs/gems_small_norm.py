@@ -30,6 +30,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_num_layers = 12
     cfg.encoder_num_heads = 8
     cfg.encoder_num_kv_heads = 8
+    cfg.encoder_use_cls_token = True
     cfg.encoder_num_register_tokens = 2
     cfg.encoder_apply_final_norm = True
     cfg.encoder_qk_norm = False
@@ -86,6 +87,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_latent_predictor_num_heads = 8
     cfg.temporal_predictor_num_layers = 0
     cfg.predictor_dim = 256
+    cfg.use_target_projector = True
     cfg.target_projector_dim = cfg.model_dim
     cfg.predictor_dropout = 0.15
 

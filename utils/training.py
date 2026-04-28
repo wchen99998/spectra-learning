@@ -105,6 +105,7 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         predictor_apply_final_norm=bool(
             config.get("predictor_apply_final_norm", True)
         ),
+        encoder_use_cls_token=bool(config.get("encoder_use_cls_token", True)),
         use_precursor_token=bool(config.get("use_precursor_token", False)),
         spectral_bias_relative_kind=str(
             config.get("spectral_bias_relative_kind", "none")
@@ -195,6 +196,7 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         ),
         predictor_dim=config.get("predictor_dim", None),
         target_projector_dim=config.get("target_projector_dim", None),
+        use_target_projector=bool(config.get("use_target_projector", True)),
         predictor_dropout=float(config.get("predictor_dropout", 0.0)),
         train_covariance_pooling=bool(config.get("train_covariance_pooling", False)),
         covariance_pooling_dim=int(
@@ -324,6 +326,12 @@ def auto_run_name(config: Any) -> str:
     norm = str(config.get("norm_type", "")).lower()
     if norm and norm != "rmsnorm":
         parts.append(norm)
+    if not bool(config.get("encoder_use_cls_token", True)):
+        parts.append("no-cls")
+    if int(config.get("encoder_num_register_tokens", 0)) == 0:
+        parts.append("no-ereg")
+    if int(config.get("predictor_num_register_tokens", 0)) == 0:
+        parts.append("no-preg")
     target_layers = config.get("jepa_target_layers", None)
     if target_layers:
         parts.append(f"tgt{'_'.join(str(x) for x in target_layers)}")
@@ -359,9 +367,12 @@ def auto_run_name(config: Any) -> str:
         if str(config.get("ema_teacher_schedule", "")).lower() == "slow-fast-slow":
             peak_frac = float(config.get("ema_teacher_schedule_peak_fraction", 0.35))
             parts.append(f"peak{peak_frac:.2f}")
-    target_projector_dim = config.get("target_projector_dim", None)
-    if target_projector_dim is not None and int(target_projector_dim) != dim:
-        parts.append(f"tproj{int(target_projector_dim)}")
+    if not bool(config.get("use_target_projector", True)):
+        parts.append("no-tproj")
+    else:
+        target_projector_dim = config.get("target_projector_dim", None)
+        if target_projector_dim is not None and int(target_projector_dim) != dim:
+            parts.append(f"tproj{int(target_projector_dim)}")
     run_name_suffix = str(config.get("run_name_suffix", "")).strip()
     if run_name_suffix:
         parts.append(run_name_suffix)
@@ -483,6 +494,7 @@ def load_pretrained_weights(
         "teacher_encoder.spectral_attn_biases.",
     )
     allowed_unexpected_prefixes = (
+        "target_projector.",
         "covariance_pooler.",
         "covariance_sigreg.",
         "teacher_encoder.",
@@ -493,6 +505,9 @@ def load_pretrained_weights(
         and not key.endswith(
             (
                 "temporal_query_token",
+                "cls_token",
+                "register_tokens",
+                "predictor_register_tokens",
                 "covariance_sigreg.t",
                 "covariance_sigreg.phi",
                 "covariance_sigreg.weights",

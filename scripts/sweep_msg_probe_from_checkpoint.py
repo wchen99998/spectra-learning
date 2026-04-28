@@ -213,7 +213,7 @@ def _extract_split_cache(
                 valid_mask=peak_valid_mask,
                 precursor_mz=precursor_mz,
             )
-            peak_embeddings, _ = PeakSetEncoder.split_peak_and_cls(embeddings)
+            peak_embeddings, _ = model.encoder.split_peak_and_cls(embeddings)
             probe_inputs = build_msg_probe_inputs(
                 peak_embeddings,
                 peak_valid_mask,

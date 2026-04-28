@@ -30,6 +30,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_num_layers = 8
     cfg.encoder_num_heads = 8
     cfg.encoder_num_kv_heads = 8
+    cfg.encoder_use_cls_token = True
     cfg.encoder_num_register_tokens = 4
     cfg.encoder_use_position_embedding = True
     cfg.encoder_apply_final_norm = False

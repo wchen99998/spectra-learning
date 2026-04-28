@@ -193,6 +193,36 @@ class BlockJEPATests(unittest.TestCase):
         metrics = model.forward_augmented(batch)
         self.assertTrue(torch.isfinite(metrics["loss"]).item())
 
+    def test_target_projector_can_be_disabled(self):
+        model = self._build_model(
+            encoder_num_layers=2,
+            jepa_target_layers=[1, 2],
+            target_projector_dim=24,
+            use_target_projector=False,
+        )
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+
+        metrics, collapse_data = model.forward_augmented(
+            batch,
+            return_collapse_data=True,
+        )
+
+        self.assertTrue(torch.isfinite(metrics["loss"]).item())
+        self.assertIsInstance(model.target_projector, torch.nn.Identity)
+        self.assertEqual(model.target_projector_dim, model.jepa_target_dim)
+        self.assertEqual(
+            collapse_data["teacher_targets"].shape[-1],
+            model.jepa_target_dim,
+        )
+        self.assertEqual(
+            collapse_data["predictor_output"].shape[-1],
+            model.jepa_target_dim,
+        )
+        torch.testing.assert_close(
+            collapse_data["teacher_targets"],
+            collapse_data["teacher_target_features_normalized"],
+        )
+
     def test_forward_contains_expected_keys(self):
         model = self._build_model()
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
@@ -758,6 +788,77 @@ class BlockJEPATests(unittest.TestCase):
         self.assertEqual(peak_emb.shape, (3, 7, model.model_dim))
         self.assertTrue(torch.allclose(pooled, cls_emb))
 
+    def test_encoder_cls_token_can_be_disabled(self):
+        model = self._build_model(
+            encoder_use_cls_token=False,
+            encoder_num_register_tokens=2,
+        )
+        batch = {
+            "peak_mz": torch.rand(3, 6),
+            "peak_intensity": torch.rand(3, 6),
+            "peak_valid_mask": torch.ones(3, 6, dtype=torch.bool),
+        }
+
+        peak_emb, pooled_emb = model.encoder(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            valid_mask=batch["peak_valid_mask"],
+            visible_mask=batch["peak_valid_mask"],
+            return_cls_token=True,
+        )
+        encoded = model.encode(batch)
+
+        self.assertIsNone(model.encoder.cls_token)
+        self.assertEqual(peak_emb.shape, (3, 6, model.model_dim))
+        self.assertTrue(torch.allclose(encoded, pooled_emb))
+        self.assertTrue(
+            torch.allclose(
+                encoded,
+                model.pool(peak_emb, batch["peak_valid_mask"]),
+            )
+        )
+
+    def test_register_tokens_can_be_disabled(self):
+        model = self._build_model(
+            encoder_num_register_tokens=0,
+            predictor_num_register_tokens=0,
+        )
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+
+        metrics = model.forward_augmented(batch)
+
+        self.assertTrue(torch.isfinite(metrics["loss"]).item())
+        self.assertEqual(model.encoder.num_register_tokens, 0)
+        self.assertIsNone(model.encoder.register_tokens)
+        self.assertEqual(model.predictor_num_register_tokens, 0)
+        self.assertIsNone(model.predictor_register_tokens)
+
+    def test_all_special_tokens_can_be_disabled(self):
+        model = self._build_model(
+            encoder_use_cls_token=False,
+            encoder_num_register_tokens=0,
+            predictor_num_register_tokens=0,
+        )
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+
+        metrics, collapse_data = model.forward_augmented(
+            batch,
+            return_collapse_data=True,
+        )
+
+        self.assertTrue(torch.isfinite(metrics["loss"]).item())
+        self.assertEqual(
+            collapse_data["teacher_peak_emb"].shape[1],
+            batch["peak_mz"].shape[1],
+        )
+        self.assertEqual(
+            collapse_data["context_emb"].shape[1],
+            batch["peak_mz"].shape[1],
+        )
+        self.assertNotIn("encoder.cls_token", model.state_dict())
+        self.assertNotIn("encoder.register_tokens", model.state_dict())
+        self.assertNotIn("predictor_register_tokens", model.state_dict())
+
     def test_backward_populates_encoder_gradients(self):
         model = self._build_model()
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
@@ -826,6 +927,21 @@ class BlockJEPATests(unittest.TestCase):
             }
             torch.save({"state_dict": old_state}, path)
             loaded = self._build_model()
+            load_pretrained_weights(loaded, path)
+
+    def test_load_pretrained_weights_allows_removed_special_tokens(self):
+        model = self._build_model(
+            encoder_num_register_tokens=2,
+            predictor_num_register_tokens=2,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/ckpt.pt"
+            torch.save({"state_dict": model.state_dict()}, path)
+            loaded = self._build_model(
+                encoder_use_cls_token=False,
+                encoder_num_register_tokens=0,
+                predictor_num_register_tokens=0,
+            )
             load_pretrained_weights(loaded, path)
 
     def test_load_pretrained_weights_allows_missing_masked_latent_readout(self):

@@ -244,7 +244,7 @@ def _extract_representations(
                         valid_mask=peak_valid_mask,
                         precursor_mz=precursor_mz,
                     )
-            peak_embeddings, _ = PeakSetEncoder.split_peak_and_cls(embeddings)
+            peak_embeddings, _ = model.encoder.split_peak_and_cls(embeddings)
             take = min(int(peak_embeddings.shape[0]), max_samples - seen)
             reps.append(peak_embeddings[:take].detach().cpu().float())
             masks.append(peak_valid_mask[:take].detach().cpu())
@@ -288,7 +288,7 @@ def _encoder_forward_embedder_fp32(
     seq_len = peak_mz.shape[1]
     selected = set(block_indices)
     selected_peak_outputs: dict[int, torch.Tensor] = {}
-    special_len = 1 + encoder.num_register_tokens
+    special_len = int(encoder.use_cls_token) + encoder.num_register_tokens
     x, attn_mask = encoder._append_special_tokens(x, valid_mask)
     from networks.transformer_torch import create_visible_attention_mask
 
@@ -308,8 +308,11 @@ def _encoder_forward_embedder_fp32(
     if encoder.num_layers in selected:
         selected_peak_outputs[encoder.num_layers] = x[:, :seq_len]
     peak_x = x[:, :seq_len]
-    cls_x = x[:, seq_len]
-    output = torch.cat([peak_x, cls_x.unsqueeze(1)], dim=1)
+    if encoder.use_cls_token:
+        cls_x = x[:, seq_len]
+        output = torch.cat([peak_x, cls_x.unsqueeze(1)], dim=1)
+    else:
+        output = peak_x
     if block_indices:
         return output, [selected_peak_outputs[idx] for idx in block_indices]
     return output

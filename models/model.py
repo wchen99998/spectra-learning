@@ -377,6 +377,14 @@ def _merge_visible_mask(
     return visible_mask if visible_mask is not None else valid_mask
 
 
+def _masked_mean_pool(
+    embeddings: torch.Tensor,
+    valid_mask: torch.Tensor,
+) -> torch.Tensor:
+    mask = valid_mask.unsqueeze(-1).to(dtype=embeddings.dtype)
+    return (embeddings * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
+
+
 class CrossAttention(nn.Module):
     """Cross-attention: Q from prediction queries, KV from source embeddings."""
 
@@ -532,6 +540,7 @@ class PeakSetEncoder(nn.Module):
         apply_final_norm: bool = True,
         num_peaks: int = 64,
         use_position_embedding: bool = True,
+        use_cls_token: bool = True,
         num_register_tokens: int = 0,
         use_precursor_token: bool = False,
         spectral_bias_relative_kind: str = "none",
@@ -556,6 +565,7 @@ class PeakSetEncoder(nn.Module):
         super().__init__()
         self.num_layers = int(num_layers)
         norm_type = str(norm_type).lower()
+        self.use_cls_token = bool(use_cls_token)
         self.num_register_tokens = int(num_register_tokens)
         self.use_precursor_token = bool(use_precursor_token)
         self.use_position_embedding = bool(use_position_embedding)
@@ -583,8 +593,11 @@ class PeakSetEncoder(nn.Module):
             int(num_peaks),
             model_dim,
         )
-        self.cls_token = nn.Parameter(torch.empty(model_dim))
-        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        if self.use_cls_token:
+            self.cls_token = nn.Parameter(torch.empty(model_dim))
+            nn.init.trunc_normal_(self.cls_token, std=0.02)
+        else:
+            self.cls_token = None
         if self.num_register_tokens > 0:
             self.register_tokens = nn.Parameter(
                 torch.empty(self.num_register_tokens, model_dim)
@@ -651,12 +664,16 @@ class PeakSetEncoder(nn.Module):
         x: torch.Tensor,
         attn_mask: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        cls = self.cls_token.view(1, 1, -1).expand(x.shape[0], -1, -1).to(dtype=x.dtype)
-        if self.register_tokens is None:
-            special = cls
-        else:
+        special_tokens = []
+        if self.cls_token is not None:
+            cls = self.cls_token.view(1, 1, -1).expand(x.shape[0], -1, -1)
+            special_tokens.append(cls.to(dtype=x.dtype))
+        if self.register_tokens is not None:
             registers = self.register_tokens.unsqueeze(0).expand(x.shape[0], -1, -1)
-            special = torch.cat([cls, registers.to(dtype=x.dtype)], dim=1)
+            special_tokens.append(registers.to(dtype=x.dtype))
+        if not special_tokens:
+            return x, attn_mask
+        special = torch.cat(special_tokens, dim=1)
         x = torch.cat([x, special], dim=1)
         if attn_mask is None:
             return x, None
@@ -686,11 +703,13 @@ class PeakSetEncoder(nn.Module):
             num_special_tokens=int(num_special_tokens),
         )
 
-    @staticmethod
     def split_peak_and_cls(
+        self,
         x: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return x[:, :-1], x[:, -1]
+        if self.use_cls_token:
+            return x[:, :-1], x[:, -1]
+        return x, x.mean(dim=1)
 
     def forward_with_block_outputs(
         self,
@@ -707,7 +726,7 @@ class PeakSetEncoder(nn.Module):
         seq_len = peak_mz.shape[1]
         selected = set(block_indices)
         selected_peak_outputs: dict[int, torch.Tensor] = {}
-        special_len = 1 + self.num_register_tokens
+        special_len = int(self.use_cls_token) + self.num_register_tokens
         x, attn_mask = self._append_special_tokens(x, attn_mask)
         attn_mask = (
             create_visible_attention_mask(attn_mask) if attn_mask is not None else None
@@ -731,8 +750,11 @@ class PeakSetEncoder(nn.Module):
         if self.num_layers in selected:
             selected_peak_outputs[self.num_layers] = x[:, :seq_len]
         peak_x = x[:, :seq_len]
-        cls_x = x[:, seq_len]
-        output = torch.cat([peak_x, cls_x.unsqueeze(1)], dim=1)
+        if self.use_cls_token:
+            cls_x = x[:, seq_len]
+            output = torch.cat([peak_x, cls_x.unsqueeze(1)], dim=1)
+        else:
+            output = peak_x
         return output, [selected_peak_outputs[idx] for idx in block_indices]
 
     def forward_peak_block_outputs(
@@ -771,7 +793,10 @@ class PeakSetEncoder(nn.Module):
             precursor_mz=precursor_mz,
         )
         if return_cls_token:
-            return output, output[:, -1]
+            peak_x, cls_x = self.split_peak_and_cls(output)
+            if not self.use_cls_token and valid_mask is not None:
+                cls_x = _masked_mean_pool(peak_x, valid_mask)
+            return output, cls_x
         return output
 
 
@@ -813,6 +838,7 @@ class PeakSetSIGReg(nn.Module):
         encoder_use_position_embedding: bool = True,
         encoder_apply_final_norm: bool = True,
         predictor_apply_final_norm: bool = True,
+        encoder_use_cls_token: bool = True,
         use_precursor_token: bool = False,
         spectral_bias_relative_kind: str = "none",
         spectral_bias_use_precursor: bool = False,
@@ -838,6 +864,7 @@ class PeakSetSIGReg(nn.Module):
         predictor_num_register_tokens: int = 0,
         predictor_dim: int | None = None,
         target_projector_dim: int | None = None,
+        use_target_projector: bool = True,
         predictor_dropout: float = 0.0,
         train_covariance_pooling: bool = False,
         covariance_pooling_dim: int = 32,
@@ -852,12 +879,9 @@ class PeakSetSIGReg(nn.Module):
         super().__init__()
         self.model_dim = model_dim
         self.predictor_dim = predictor_dim if predictor_dim is not None else model_dim
-        self.target_projector_dim = (
-            int(target_projector_dim)
-            if target_projector_dim is not None
-            else self.model_dim
-        )
+        self.use_target_projector = bool(use_target_projector)
         self.encoder_num_layers = int(encoder_num_layers)
+        self.encoder_use_cls_token = bool(encoder_use_cls_token)
         self.use_precursor_token = bool(use_precursor_token)
         self.jepa_num_target_blocks = int(jepa_num_target_blocks)
         self.jepa_target_layers = (
@@ -874,6 +898,16 @@ class PeakSetSIGReg(nn.Module):
             raise ValueError("jepa_target_layers must be within encoder depth")
         self.num_jepa_target_layers = len(self.jepa_target_layers)
         self.jepa_target_dim = self.num_jepa_target_layers * self.model_dim
+        requested_target_projector_dim = (
+            int(target_projector_dim)
+            if target_projector_dim is not None
+            else self.model_dim
+        )
+        self.target_projector_dim = (
+            requested_target_projector_dim
+            if self.use_target_projector
+            else self.jepa_target_dim
+        )
         self.representation_regularizer = str(representation_regularizer).lower()
         if self.representation_regularizer == "sigreg":
             self.representation_regularizer = "sigreg-enc"
@@ -937,6 +971,7 @@ class PeakSetSIGReg(nn.Module):
             use_position_embedding=encoder_use_position_embedding,
             apply_final_norm=encoder_apply_final_norm,
             num_peaks=N,
+            use_cls_token=self.encoder_use_cls_token,
             num_register_tokens=encoder_num_register_tokens,
             use_precursor_token=self.use_precursor_token,
             spectral_bias_relative_kind=spectral_bias_relative_kind,
@@ -1029,15 +1064,18 @@ class PeakSetSIGReg(nn.Module):
         self.masked_latent_readout = nn.Linear(self.predictor_dim, self.jepa_target_dim)
         nn.init.xavier_normal_(self.masked_latent_readout.weight)
         nn.init.zeros_(self.masked_latent_readout.bias)
-        self.target_projector = nn.Sequential(
-            nn.Linear(self.jepa_target_dim, self.jepa_target_dim),
-            nn.GELU(),
-            nn.Linear(self.jepa_target_dim, self.target_projector_dim),
-        )
-        for layer in self.target_projector:
-            if isinstance(layer, nn.Linear):
-                nn.init.xavier_normal_(layer.weight)
-                nn.init.zeros_(layer.bias)
+        if self.use_target_projector:
+            self.target_projector = nn.Sequential(
+                nn.Linear(self.jepa_target_dim, self.jepa_target_dim),
+                nn.GELU(),
+                nn.Linear(self.jepa_target_dim, self.target_projector_dim),
+            )
+            for layer in self.target_projector:
+                if isinstance(layer, nn.Linear):
+                    nn.init.xavier_normal_(layer.weight)
+                    nn.init.zeros_(layer.bias)
+        else:
+            self.target_projector = nn.Identity()
         sigreg_cls = (
             SlotwiseSIGReg
             if self.representation_regularizer
@@ -1214,6 +1252,17 @@ class PeakSetSIGReg(nn.Module):
             )
         )
 
+    def _split_encoder_output(
+        self,
+        encoder: PeakSetEncoder,
+        embeddings: torch.Tensor,
+        valid_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        peak_embeddings, cls_embedding = encoder.split_peak_and_cls(embeddings)
+        if not encoder.use_cls_token:
+            cls_embedding = self.pool(peak_embeddings, valid_mask)
+        return peak_embeddings, cls_embedding
+
     def _compute_jepa_teacher_target_features(
         self,
         peak_mz: torch.Tensor,
@@ -1305,10 +1354,16 @@ class PeakSetSIGReg(nn.Module):
                 precursor_mz=precursor_mz,
             )
             teacher_target_features = torch.cat(teacher_peak_outputs, dim=-1)
-            teacher_peak_emb, teacher_cls_emb = self.teacher_encoder.split_peak_and_cls(
-                teacher_encoded
+            teacher_peak_emb, teacher_cls_emb = self._split_encoder_output(
+                self.teacher_encoder,
+                teacher_encoded,
+                peak_valid_mask,
             )
-            context_emb, _ = self.encoder.split_peak_and_cls(context_encoded)
+            context_emb, _ = self._split_encoder_output(
+                self.encoder,
+                context_encoded,
+                peak_valid_mask,
+            )
             return (
                 teacher_target_features,
                 teacher_peak_emb,
@@ -1331,10 +1386,16 @@ class PeakSetSIGReg(nn.Module):
             [peak_output[:batch_size] for peak_output in teacher_peak_outputs],
             dim=-1,
         )
-        teacher_peak_emb, teacher_cls_emb = self.encoder.split_peak_and_cls(
-            encoded[:batch_size]
+        teacher_peak_emb, teacher_cls_emb = self._split_encoder_output(
+            self.encoder,
+            encoded[:batch_size],
+            peak_valid_mask,
         )
-        context_emb, _ = self.encoder.split_peak_and_cls(encoded[batch_size:])
+        context_emb, _ = self._split_encoder_output(
+            self.encoder,
+            encoded[batch_size:],
+            peak_valid_mask,
+        )
         return teacher_target_features, teacher_peak_emb, teacher_cls_emb, context_emb
 
     def _compute_pooled_teacher_peak_targets(
@@ -1365,7 +1426,11 @@ class PeakSetSIGReg(nn.Module):
                 visible_mask=visible_mask,
                 precursor_mz=precursor_mz,
             )
-            teacher_peak_emb, _ = teacher_encoder.split_peak_and_cls(teacher_encoded)
+            teacher_peak_emb, _ = self._split_encoder_output(
+                teacher_encoder,
+                teacher_encoded,
+                peak_valid_mask,
+            )
         return self.pool(teacher_peak_emb, visible_mask)
 
     def _embedding_loss(
@@ -1720,7 +1785,11 @@ class PeakSetSIGReg(nn.Module):
                     visible_mask=next_frame_valid,
                     precursor_mz=batch.get("next_frame_precursor_mz", None),
                 )
-        teacher_embeddings, _ = teacher_encoder.split_peak_and_cls(teacher_embeddings)
+        teacher_embeddings, _ = self._split_encoder_output(
+            teacher_encoder,
+            teacher_embeddings,
+            next_frame_valid,
+        )
         return teacher_embeddings
 
     def forward_temporal(
@@ -1752,7 +1821,11 @@ class PeakSetSIGReg(nn.Module):
             visible_mask=frame_valid,
             precursor_mz=batch.get("frame_precursor_mz", None),
         )  # [B, N, D]
-        frame_emb, _ = self.encoder.split_peak_and_cls(frame_encoded)
+        frame_emb, _ = self._split_encoder_output(
+            self.encoder,
+            frame_encoded,
+            frame_valid,
+        )
 
         delta_rt = (next_frame_rt - frame_rt).unsqueeze(-1)  # [B, 1] in minutes
         rt_emb = self.temporal_rt_proj(delta_rt)  # [B, D]
@@ -1798,5 +1871,5 @@ class PeakSetSIGReg(nn.Module):
             visible_mask=valid,
             precursor_mz=batch.get("precursor_mz", None),
         )
-        _, cls_x = self.encoder.split_peak_and_cls(encoded)
+        peak_x, cls_x = self._split_encoder_output(self.encoder, encoded, valid)
         return cls_x

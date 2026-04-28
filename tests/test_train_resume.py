@@ -99,6 +99,29 @@ def test_load_resume_model_state_allows_removed_cls_predictor_keys():
     _load_resume_model_state(restored, resume_state)
 
 
+def test_load_resume_model_state_allows_removed_target_projector():
+    model = _small_model()
+    resume_state = model.state_dict()
+
+    restored = _small_model(use_target_projector=False)
+    _load_resume_model_state(restored, resume_state)
+
+
+def test_load_resume_model_state_allows_removed_special_tokens():
+    model = _small_model(
+        encoder_num_register_tokens=2,
+        predictor_num_register_tokens=2,
+    )
+    resume_state = model.state_dict()
+
+    restored = _small_model(
+        encoder_use_cls_token=False,
+        encoder_num_register_tokens=0,
+        predictor_num_register_tokens=0,
+    )
+    _load_resume_model_state(restored, resume_state)
+
+
 def test_build_wandb_init_kwargs_prefers_config_resume_id(monkeypatch):
     monkeypatch.delenv("WANDB_RESUME_ID", raising=False)
     cfg = config_dict.ConfigDict()
