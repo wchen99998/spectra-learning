@@ -1,5 +1,7 @@
 import copy
 import math
+from contextlib import nullcontext
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -10,6 +12,15 @@ from models.spectral_attention_bias import SpectralGraphormerBias
 from networks import transformer_torch
 from networks.transformer_torch import _build_norm, create_visible_attention_mask
 from utils.spectra_preprocessing import PEAK_MZ_MAX, PRECURSOR_TOKEN_INTENSITY
+
+
+def _active_autocast_context(device_type: str):
+    if torch.is_autocast_enabled(device_type):
+        return torch.autocast(
+            device_type=device_type,
+            dtype=torch.get_autocast_dtype(device_type),
+        )
+    return nullcontext()
 
 
 def _apply_depth_scaled_init(blocks: nn.ModuleList, num_layers: int) -> None:
@@ -389,7 +400,8 @@ class CrossAttention(nn.Module):
     """Cross-attention: Q from prediction queries, KV from source embeddings."""
 
     def __init__(self, dim: int, n_heads: int, *, n_kv_heads: int | None = None,
-                 qk_norm: bool = False, norm_type: str = "rmsnorm"):
+                 qk_norm: bool = False, norm_type: str = "rmsnorm",
+                 norm_eps: float = 1e-5):
         super().__init__()
         self.dim = dim
         self.n_heads = n_heads
@@ -400,8 +412,8 @@ class CrossAttention(nn.Module):
         self.wo = nn.Linear(self.dim, self.dim, bias=False)
         self.qk_norm = qk_norm
         if qk_norm:
-            self.q_norm = _build_norm(self.head_dim, eps=None, norm_type=norm_type)
-            self.k_norm = _build_norm(self.head_dim, eps=None, norm_type=norm_type)
+            self.q_norm = _build_norm(self.head_dim, eps=norm_eps, norm_type=norm_type)
+            self.k_norm = _build_norm(self.head_dim, eps=norm_eps, norm_type=norm_type)
         nn.init.xavier_normal_(self.wq.weight)
         nn.init.xavier_normal_(self.wkv.weight)
         nn.init.xavier_normal_(self.wo.weight)
@@ -441,14 +453,15 @@ class TemporalDecoderBlock(nn.Module):
         super().__init__()
         self.attention = transformer_torch.Attention(
             dim, n_heads, n_kv_heads=n_kv_heads,
-            qk_norm=qk_norm, norm_type=norm_type,
+            qk_norm=qk_norm, norm_type=norm_type, norm_eps=norm_eps,
         )
         self.cross_attn = CrossAttention(dim, n_heads, n_kv_heads=n_kv_heads,
-                                          qk_norm=qk_norm, norm_type=norm_type)
+                                          qk_norm=qk_norm, norm_type=norm_type,
+                                          norm_eps=norm_eps)
         self.feed_forward = transformer_torch.FeedForward(dim, hidden_dim=hidden_dim)
-        self.attention_norm = _build_norm(dim, eps=None, norm_type=norm_type)
-        self.cross_attn_norm = _build_norm(dim, eps=None, norm_type=norm_type)
-        self.ffn_norm = _build_norm(dim, eps=None, norm_type=norm_type)
+        self.attention_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
+        self.cross_attn_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
+        self.ffn_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
 
     def forward(self, x: torch.Tensor, memory: torch.Tensor, *,
                 memory_mask: torch.Tensor | None = None) -> torch.Tensor:
@@ -476,12 +489,14 @@ class CovariancePool(nn.Module):
         peak_embeddings: torch.Tensor,
         valid_mask: torch.Tensor,
     ) -> torch.Tensor:
-        mask = valid_mask.unsqueeze(-1).to(dtype=peak_embeddings.dtype)
-        left = self.left_proj(peak_embeddings) * mask
-        right = self.right_proj(peak_embeddings) * mask
-        denom = mask.sum(dim=1).clamp(min=1.0)
-        covariance = left.transpose(1, 2) @ right
-        covariance = covariance / denom.unsqueeze(-1)
+        with torch.autocast(device_type=peak_embeddings.device.type, enabled=False):
+            peak_embeddings = peak_embeddings.float()
+            mask = valid_mask.unsqueeze(-1).to(dtype=peak_embeddings.dtype)
+            left = self.left_proj(peak_embeddings) * mask
+            right = self.right_proj(peak_embeddings) * mask
+            denom = mask.sum(dim=1).clamp(min=1.0)
+            covariance = left.transpose(1, 2) @ right
+            covariance = covariance / denom.unsqueeze(-1)
         return covariance.flatten(start_dim=1)
 
 
@@ -537,6 +552,7 @@ class PeakSetEncoder(nn.Module):
         fourier_input_scale: float = 1000.0,
         qk_norm: bool = False,
         norm_type: str = "rmsnorm",
+        norm_eps: float = 1e-5,
         apply_final_norm: bool = True,
         num_peaks: int = 64,
         use_position_embedding: bool = True,
@@ -611,11 +627,12 @@ class PeakSetEncoder(nn.Module):
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             attention_mlp_multiple=attention_mlp_multiple,
+            norm_eps=norm_eps,
             qk_norm=qk_norm,
             norm_type=norm_type,
         )
         self.final_norm = (
-            _build_norm(model_dim, eps=None, norm_type=norm_type)
+            _build_norm(model_dim, eps=norm_eps, norm_type=norm_type)
             if apply_final_norm
             else nn.Identity()
         )
@@ -840,6 +857,7 @@ class PeakSetSIGReg(nn.Module):
         jepa_target_fraction: float = 0.25,
         encoder_qk_norm: bool = False,
         norm_type: str = "rmsnorm",
+        norm_eps: float = 1e-5,
         encoder_use_position_embedding: bool = True,
         encoder_apply_final_norm: bool = True,
         predictor_apply_final_norm: bool = True,
@@ -954,6 +972,7 @@ class PeakSetSIGReg(nn.Module):
                 "jepa_target_normalization must be one of ('none', 'zscore')"
             )
         self.norm_type = str(norm_type).lower()
+        self.norm_eps = float(norm_eps)
         self.temporal_predictor_num_layers = int(temporal_predictor_num_layers)
         self.predictor_num_register_tokens = int(predictor_num_register_tokens)
         if self.jepa_num_target_blocks < 1:
@@ -978,6 +997,7 @@ class PeakSetSIGReg(nn.Module):
             fourier_input_scale=encoder_fourier_input_scale,
             qk_norm=encoder_qk_norm,
             norm_type=self.norm_type,
+            norm_eps=self.norm_eps,
             use_position_embedding=encoder_use_position_embedding,
             apply_final_norm=encoder_apply_final_norm,
             num_peaks=num_peak_tokens,
@@ -1062,12 +1082,13 @@ class PeakSetSIGReg(nn.Module):
             num_heads=int(masked_latent_predictor_num_heads),
             num_kv_heads=None,
             attention_mlp_multiple=attention_mlp_multiple,
+            norm_eps=self.norm_eps,
             qk_norm=encoder_qk_norm,
             norm_type=self.norm_type,
             dropout=predictor_dropout,
         )
         self.predictor_final_norm = (
-            _build_norm(self.predictor_dim, eps=None, norm_type=self.norm_type)
+            _build_norm(self.predictor_dim, eps=self.norm_eps, norm_type=self.norm_type)
             if predictor_apply_final_norm
             else nn.Identity()
         )
@@ -1126,7 +1147,8 @@ class PeakSetSIGReg(nn.Module):
                 dim=model_dim, num_layers=self.temporal_predictor_num_layers,
                 num_heads=int(masked_latent_predictor_num_heads), num_kv_heads=None,
                 attention_mlp_multiple=attention_mlp_multiple,
-                qk_norm=encoder_qk_norm, norm_type=self.norm_type,
+                norm_eps=self.norm_eps, qk_norm=encoder_qk_norm,
+                norm_type=self.norm_type,
             )
             self.temporal_rt_proj = nn.Sequential(
                 nn.Linear(1, model_dim), nn.SiLU(), nn.Linear(model_dim, model_dim),
@@ -1220,10 +1242,12 @@ class PeakSetSIGReg(nn.Module):
     ) -> torch.Tensor:
         if self.jepa_target_normalization == "none":
             return x
-        x = x.reshape(*x.shape[:-1], -1, group_dim)
+        orig_dtype = x.dtype
+        x = x.float().reshape(*x.shape[:-1], -1, group_dim)
         mean = x.mean(dim=-1, keepdim=True)
         std = x.std(dim=-1, keepdim=True, unbiased=False).clamp_min(1e-6)
-        return ((x - mean) / std).reshape(*x.shape[:-2], -1)
+        normalized = ((x - mean) / std).reshape(*x.shape[:-2], -1)
+        return normalized.to(dtype=orig_dtype)
 
     def _apply_jepa_target_normalization(self, x: torch.Tensor) -> torch.Tensor:
         return self._apply_group_target_normalization(x, self.model_dim)
@@ -1328,12 +1352,7 @@ class PeakSetSIGReg(nn.Module):
         peak_valid_mask: torch.Tensor,
         precursor_mz: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        amp_dtype = (
-            torch.get_autocast_dtype("cuda")
-            if torch.is_autocast_enabled("cuda")
-            else torch.bfloat16
-        )
-        with torch.autocast("cuda", dtype=amp_dtype):
+        with _active_autocast_context(peak_mz.device.type):
             teacher_encoder = (
                 self.teacher_encoder
                 if self.teacher_encoder is not None
@@ -1388,12 +1407,7 @@ class PeakSetSIGReg(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size = peak_mz.shape[0]
         if self.teacher_encoder is not None:
-            amp_dtype = (
-                torch.get_autocast_dtype("cuda")
-                if torch.is_autocast_enabled("cuda")
-                else torch.bfloat16
-            )
-            with torch.no_grad(), torch.autocast("cuda", dtype=amp_dtype):
+            with torch.no_grad(), _active_autocast_context(peak_mz.device.type):
                 teacher_encoded, teacher_peak_outputs = (
                     self.teacher_encoder.forward_with_block_outputs(
                         peak_mz,
@@ -1466,12 +1480,7 @@ class PeakSetSIGReg(nn.Module):
     ) -> torch.Tensor:
         if visible_mask is None:
             visible_mask = peak_valid_mask
-        amp_dtype = (
-            torch.get_autocast_dtype("cuda")
-            if torch.is_autocast_enabled("cuda")
-            else torch.bfloat16
-        )
-        with torch.autocast("cuda", dtype=amp_dtype):
+        with _active_autocast_context(peak_mz.device.type):
             teacher_encoder = (
                 self.teacher_encoder
                 if self.teacher_encoder is not None
@@ -1496,6 +1505,8 @@ class PeakSetSIGReg(nn.Module):
         prediction: torch.Tensor,
         target: torch.Tensor,
     ) -> torch.Tensor:
+        prediction = prediction.float()
+        target = target.float()
         if self.masked_token_loss_type == "l2":
             return (prediction - target).square().mean(dim=-1)
         if self.masked_token_loss_type == "l2_sum":
@@ -1800,7 +1811,7 @@ class PeakSetSIGReg(nn.Module):
                 peak_valid_mask,
             )
             covariance_pooling_sigreg_loss = self.covariance_sigreg(
-                covariance_embedding,
+                covariance_embedding.float(),
             )
             covariance_pooling_sigreg_term = (
                 context_emb.new_tensor(self.sigreg_lambda)

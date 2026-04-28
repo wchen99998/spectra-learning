@@ -33,10 +33,11 @@ def combine_attention_mask_and_bias(
 
 def _build_norm(dim: int, eps: float | None, norm_type: str) -> nn.Module:
     kind = str(norm_type).lower()
+    eps = 1e-5 if eps is None else eps
     if kind == "rmsnorm":
         return nn.RMSNorm(dim, eps=eps)
     if kind == "layernorm":
-        return nn.LayerNorm(dim, eps=1e-5)
+        return nn.LayerNorm(dim, eps=eps)
     raise ValueError(f"Unsupported norm_type: {norm_type}")
 
 
@@ -49,6 +50,7 @@ class Attention(nn.Module):
         n_kv_heads: int | None = None,
         qk_norm: bool = False,
         norm_type: str = "rmsnorm",
+        norm_eps: float = 1e-5,
     ):
         super().__init__()
         self.dim = dim
@@ -63,8 +65,8 @@ class Attention(nn.Module):
         self.wo = nn.Linear(self.dim, self.dim, bias=False)
 
         if qk_norm:
-            self.q_norm = _build_norm(self.head_dim, eps=None, norm_type=norm_type)
-            self.k_norm = _build_norm(self.head_dim, eps=None, norm_type=norm_type)
+            self.q_norm = _build_norm(self.head_dim, eps=norm_eps, norm_type=norm_type)
+            self.k_norm = _build_norm(self.head_dim, eps=norm_eps, norm_type=norm_type)
 
         nn.init.xavier_normal_(self.wq.weight)
         nn.init.xavier_normal_(self.wk.weight)
@@ -152,13 +154,14 @@ class TransformerBlock(nn.Module):
             n_kv_heads=n_kv_heads,
             qk_norm=qk_norm,
             norm_type=norm_type,
+            norm_eps=norm_eps,
         )
         self.feed_forward = FeedForward(
             dim,
             hidden_dim=hidden_dim,
         )
-        self.attention_norm = _build_norm(dim, eps=None, norm_type=norm_type)
-        self.ffn_norm = _build_norm(dim, eps=None, norm_type=norm_type)
+        self.attention_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
+        self.ffn_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
         self.drop = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
 
     def forward(

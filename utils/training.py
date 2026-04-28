@@ -24,6 +24,17 @@ def load_config(path: str | Path) -> config_dict.ConfigDict:
     return module.get_config()
 
 
+def parse_autocast_dtype(value: object) -> torch.dtype | None:
+    name = str(value).lower()
+    if name in {"bf16", "bfloat16"}:
+        return torch.bfloat16
+    if name in {"fp32", "float32", "none"}:
+        return None
+    if name in {"fp16", "float16", "half"}:
+        raise ValueError("autocast_dtype=fp16 requires GradScaler; use bf16 or fp32")
+    raise ValueError(f"Unsupported autocast_dtype: {name}")
+
+
 def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
     encoder_num_layers = int(
         config.get("encoder_num_layers", config.get("num_layers"))
@@ -110,6 +121,7 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         jepa_target_fraction=float(config.get("jepa_target_fraction", 0.25)),
         encoder_qk_norm=bool(config.get("encoder_qk_norm", False)),
         norm_type=str(config.get("norm_type", "rmsnorm")),
+        norm_eps=float(config.get("norm_eps", 1e-5)),
         encoder_use_position_embedding=bool(
             config.get("encoder_use_position_embedding", True)
         ),

@@ -24,7 +24,7 @@ import torch.profiler
 
 from input_pipeline import GemsNativeDataModule
 from train import _BatchPrefetcher, _build_optimizers, _train_step_impl
-from utils.training import build_model_from_config, load_config
+from utils.training import build_model_from_config, load_config, parse_autocast_dtype
 
 torch.set_float32_matmul_precision("high")
 
@@ -68,10 +68,7 @@ def main() -> None:
     optimizers, schedulers = _build_optimizers(config, model, total_steps, device)
 
     # Autocast dtype
-    _ac = str(config.get("autocast_dtype", "bf16")).lower()
-    autocast_dtype = {"bf16": torch.bfloat16, "bfloat16": torch.bfloat16,
-                      "fp16": torch.float16, "float16": torch.float16,
-                      "fp32": None, "float32": None, "none": None}.get(_ac, torch.bfloat16)
+    autocast_dtype = parse_autocast_dtype(config.get("autocast_dtype", "bf16"))
 
     grad_clip_norm = config.get("grad_clip_norm", None)
     if grad_clip_norm is not None:

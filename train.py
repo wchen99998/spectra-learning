@@ -27,6 +27,7 @@ from utils.training import (
     build_logger,
     build_model_from_config,
     collect_and_log_param_metrics,
+    parse_autocast_dtype,
 )
 
 torch.set_float32_matmul_precision("high")
@@ -126,7 +127,7 @@ def _train_step_impl(
     total_steps: int = 1,
 ) -> dict[str, torch.Tensor]:
     device_type = next(model.parameters()).device.type
-    if autocast_dtype is None or device_type != "cuda":
+    if autocast_dtype is None:
         autocast_ctx = nullcontext()
     else:
         autocast_ctx = torch.autocast(device_type=device_type, dtype=autocast_dtype)
@@ -469,15 +470,7 @@ def train_and_evaluate(
         resume_steps_into_epoch %= steps_per_epoch
         del ckpt
     logger.log_metrics(model_param_metrics, step=global_step)
-    _ac_name = str(config.get("autocast_dtype", "bf16")).lower()
-    if _ac_name in {"bf16", "bfloat16"}:
-        autocast_dtype = torch.bfloat16
-    elif _ac_name in {"fp16", "float16", "half"}:
-        autocast_dtype = torch.float16
-    elif _ac_name in {"fp32", "float32", "none"}:
-        autocast_dtype = None
-    else:
-        raise ValueError(f"Unsupported autocast_dtype: {_ac_name}")
+    autocast_dtype = parse_autocast_dtype(config.get("autocast_dtype", "bf16"))
     _compile_mode = str(config.get("compile_mode", "max-autotune"))
     model.forward_augmented = torch.compile(
         model.forward_augmented,

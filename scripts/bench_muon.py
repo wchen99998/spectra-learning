@@ -22,6 +22,7 @@ from train import _BatchPrefetcher, _train_step_impl
 from utils.training import (
     build_model_from_config,
     load_config,
+    parse_autocast_dtype,
 )
 
 torch.set_float32_matmul_precision("high")
@@ -191,7 +192,7 @@ def _compiled_train_step(
     """Train step with compiled optimizer+scheduler steps."""
     from contextlib import nullcontext
     device_type = next(model.parameters()).device.type
-    if autocast_dtype is None or device_type != "cuda":
+    if autocast_dtype is None:
         autocast_ctx = nullcontext()
     else:
         autocast_ctx = torch.autocast(device_type=device_type, dtype=autocast_dtype)
@@ -299,10 +300,7 @@ def main():
     steps_per_epoch = datamodule.train_steps
     total_steps = max(1, int(float(config.num_epochs) * steps_per_epoch))
 
-    _ac = str(config.get("autocast_dtype", "bf16")).lower()
-    autocast_dtype = {"bf16": torch.bfloat16, "bfloat16": torch.bfloat16,
-                      "fp16": torch.float16, "float16": torch.float16,
-                      "fp32": None, "float32": None, "none": None}.get(_ac, torch.bfloat16)
+    autocast_dtype = parse_autocast_dtype(config.get("autocast_dtype", "bf16"))
     grad_clip_norm = config.get("grad_clip_norm", None)
     if grad_clip_norm is not None:
         grad_clip_norm = float(grad_clip_norm)
