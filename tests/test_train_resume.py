@@ -107,6 +107,20 @@ def test_load_resume_model_state_allows_removed_target_projector():
     _load_resume_model_state(restored, resume_state)
 
 
+def test_load_resume_model_state_syncs_missing_ema_target_projector():
+    model = _small_model()
+    resume_state = model.state_dict()
+
+    restored = _small_model(use_ema_teacher=True)
+    _load_resume_model_state(restored, resume_state)
+
+    for student_param, teacher_param in zip(
+        restored.target_projector.parameters(),
+        restored.teacher_target_projector.parameters(),
+    ):
+        assert torch.equal(student_param, teacher_param)
+
+
 def test_load_resume_model_state_allows_removed_special_tokens():
     model = _small_model(
         encoder_num_register_tokens=2,

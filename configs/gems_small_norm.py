@@ -126,7 +126,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.representation_regularizer = "slot-sigreg-enc"
     cfg.train_covariance_pooling = True
     cfg.covariance_pooling_dim = 64
-    cfg.covariance_pooling_sigreg_lambda = cfg.sigreg_lambda
     cfg.msg_probe_every_n_steps = 0.25
     cfg.msg_probe_num_epochs = 100
     cfg.msg_probe_early_stopping = True

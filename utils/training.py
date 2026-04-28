@@ -217,10 +217,6 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
                 config.get("msg_probe_covariance_dim", 32),
             )
         ),
-        covariance_pooling_sigreg_lambda=config.get(
-            "covariance_pooling_sigreg_lambda",
-            None,
-        ),
         use_ema_teacher=bool(config.get("use_ema_teacher", False)),
         ema_teacher_momentum=float(config.get("ema_teacher_momentum", 0.996)),
         ema_teacher_momentum_mid=config.get("ema_teacher_momentum_mid", None),
@@ -366,14 +362,7 @@ def auto_run_name(config: Any) -> str:
                 config.get("msg_probe_covariance_dim", 32),
             )
         )
-        cov_lambda = float(
-            config.get(
-                "covariance_pooling_sigreg_lambda",
-                config.get("sigreg_lambda", 0.0),
-            )
-        )
         parts.append(f"covpool{cov_dim}")
-        parts.append(f"covlam{cov_lambda:.0e}")
     if config.get("use_ema_teacher", False):
         parts.append("ema")
         parts.append(str(config.get("ema_teacher_schedule", "constant")))
@@ -492,7 +481,10 @@ def load_pretrained_weights(
     for key in incompatible:
         sd.pop(key)
     missing, unexpected = model.load_state_dict(sd, strict=False)
-    sync_missing_teacher = any(key.startswith("teacher_encoder.") for key in missing)
+    sync_missing_teacher = any(
+        key.startswith(("teacher_encoder.", "teacher_target_projector."))
+        for key in missing
+    )
     allowed_missing_suffixes = (
         "position_embedding.weight",
         "predictor_position_embedding.weight",
@@ -510,6 +502,7 @@ def load_pretrained_weights(
         "covariance_pooler.",
         "covariance_sigreg.",
         "teacher_encoder.",
+        "teacher_target_projector.",
         "encoder.embedder.fourier_ffn.",
         "encoder.spectral_attn_biases.",
         "teacher_encoder.module.spectral_attn_biases.",
@@ -522,6 +515,7 @@ def load_pretrained_weights(
         "covariance_pooler.",
         "covariance_sigreg.",
         "teacher_encoder.",
+        "teacher_target_projector.",
     )
     unexpected = [
         key for key in unexpected

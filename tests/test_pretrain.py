@@ -463,7 +463,7 @@ class BlockJEPATests(unittest.TestCase):
             masked_token_loss_weight=1.0,
             train_covariance_pooling=True,
             covariance_pooling_dim=4,
-            covariance_pooling_sigreg_lambda=0.03,
+            sigreg_lambda=0.03,
         )
         self.assertIsInstance(model.covariance_sigreg, SIGReg)
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
@@ -474,6 +474,10 @@ class BlockJEPATests(unittest.TestCase):
         )
         self.assertGreater(
             float(metrics["covariance_pooling_sigreg_term"].detach()), 0.0
+        )
+        torch.testing.assert_close(
+            metrics["covariance_pooling_sigreg_term"],
+            metrics["covariance_pooling_sigreg_loss"] * 0.03,
         )
         self.assertTrue(
             torch.allclose(
@@ -490,7 +494,7 @@ class BlockJEPATests(unittest.TestCase):
             representation_regularizer="slot-sigreg-enc",
             train_covariance_pooling=True,
             covariance_pooling_dim=4,
-            covariance_pooling_sigreg_lambda=0.03,
+            sigreg_lambda=0.03,
         )
         self.assertIsInstance(model.sigreg, SlotwiseSIGReg)
         self.assertIsInstance(model.covariance_sigreg, SIGReg)
@@ -709,6 +713,40 @@ class BlockJEPATests(unittest.TestCase):
         ]
         self.assertTrue(any(grad is not None for grad in student_grads))
 
+    def test_ema_teacher_uses_separate_stop_gradient_target_projector(self):
+        model = self._build_model(
+            masked_token_loss_weight=1.0,
+            use_ema_teacher=True,
+            target_projector_dim=24,
+        )
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+
+        with (
+            mock.patch.object(
+                model.teacher_target_projector,
+                "forward",
+                wraps=model.teacher_target_projector.forward,
+            ) as teacher_projector_forward,
+            mock.patch.object(
+                model.target_projector,
+                "forward",
+                wraps=model.target_projector.forward,
+            ) as student_projector_forward,
+        ):
+            loss = model.forward_augmented(batch)["loss"]
+            loss.backward()
+
+        self.assertEqual(teacher_projector_forward.call_count, 1)
+        self.assertEqual(student_projector_forward.call_count, 1)
+        teacher_projector_grads = [
+            p.grad for p in model.teacher_target_projector.parameters()
+        ]
+        self.assertTrue(all(grad is None for grad in teacher_projector_grads))
+        student_projector_grads = [
+            p.grad for p in model.target_projector.parameters() if p.requires_grad
+        ]
+        self.assertTrue(any(grad is not None for grad in student_projector_grads))
+
     def test_train_step_updates_ema_teacher_with_schedule(self):
         model = self._build_model(
             masked_token_loss_weight=1.0,
@@ -722,6 +760,10 @@ class BlockJEPATests(unittest.TestCase):
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
         before_student = next(model.encoder.parameters()).detach().clone()
         before_teacher = next(model.teacher_encoder.parameters()).detach().clone()
+        before_student_projector = next(model.target_projector.parameters()).detach().clone()
+        before_teacher_projector = (
+            next(model.teacher_target_projector.parameters()).detach().clone()
+        )
 
         metrics = _train_step_impl(
             model,
@@ -736,6 +778,10 @@ class BlockJEPATests(unittest.TestCase):
 
         after_student = next(model.encoder.parameters()).detach()
         after_teacher = next(model.teacher_encoder.parameters()).detach()
+        after_student_projector = next(model.target_projector.parameters()).detach()
+        after_teacher_projector = (
+            next(model.teacher_target_projector.parameters()).detach()
+        )
         expected_momentum = 0.7
         self.assertIn("ema_teacher_momentum", metrics)
         self.assertAlmostEqual(
@@ -749,6 +795,16 @@ class BlockJEPATests(unittest.TestCase):
                 after_teacher,
                 before_teacher * expected_momentum
                 + after_student * (1.0 - expected_momentum),
+                atol=1e-6,
+                rtol=1e-6,
+            )
+        )
+        self.assertFalse(torch.equal(before_student_projector, after_student_projector))
+        self.assertTrue(
+            torch.allclose(
+                after_teacher_projector,
+                before_teacher_projector * expected_momentum
+                + after_student_projector * (1.0 - expected_momentum),
                 atol=1e-6,
                 rtol=1e-6,
             )
@@ -1020,6 +1076,11 @@ class BlockJEPATests(unittest.TestCase):
         for student_param, teacher_param in zip(
             loaded.encoder.parameters(),
             loaded.teacher_encoder.parameters(),
+        ):
+            self.assertTrue(torch.equal(student_param, teacher_param))
+        for student_param, teacher_param in zip(
+            loaded.target_projector.parameters(),
+            loaded.teacher_target_projector.parameters(),
         ):
             self.assertTrue(torch.equal(student_param, teacher_param))
 

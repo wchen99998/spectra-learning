@@ -368,7 +368,13 @@ def _load_pretrained_checkpoint(
     }
     sd = prefixed or sd
     for key in tuple(sd):
-        if key.startswith(("masked_latent_readout.", "target_projector.")) or key.endswith(
+        if key.startswith(
+            (
+                "masked_latent_readout.",
+                "target_projector.",
+                "teacher_target_projector.",
+            )
+        ) or key.endswith(
             (
                 "position_embedding.weight",
                 "predictor_position_embedding.weight",
@@ -390,7 +396,10 @@ def _load_pretrained_checkpoint(
     for key in incompatible:
         sd.pop(key)
     missing, unexpected = model.load_state_dict(sd, strict=False)
-    sync_missing_teacher = any(key.startswith("teacher_encoder.") for key in missing)
+    sync_missing_teacher = any(
+        key.startswith(("teacher_encoder.", "teacher_target_projector."))
+        for key in missing
+    )
     # Validate only temporal keys are missing
     allowed_prefixes = (
         "temporal_predictor.",
@@ -398,6 +407,7 @@ def _load_pretrained_checkpoint(
         "temporal_query_token",
         "masked_latent_readout.",
         "target_projector.",
+        "teacher_target_projector.",
         "sigreg.",
         "teacher_encoder.",
         "encoder.embedder.fourier_ffn.",
@@ -423,6 +433,7 @@ def _load_pretrained_checkpoint(
         key
         for key in unexpected
         if not key.startswith("teacher_encoder.")
+        and not key.startswith("teacher_target_projector.")
         and not key.endswith(
             (
                 "sigreg_lambda_target",

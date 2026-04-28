@@ -127,7 +127,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.representation_regularizer = "none"
     cfg.train_covariance_pooling = True
     cfg.covariance_pooling_dim = 32
-    cfg.covariance_pooling_sigreg_lambda = cfg.sigreg_lambda
     cfg.msg_probe_every_n_steps = 0.2
     cfg.msg_probe_num_epochs = 20
     cfg.msg_probe_learning_rate = 1e-3

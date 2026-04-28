@@ -323,7 +323,10 @@ def _load_resume_model_state(
     state_dict: dict[str, torch.Tensor],
 ) -> None:
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    sync_missing_teacher = any(key.startswith("teacher_encoder.") for key in missing)
+    sync_missing_teacher = any(
+        key.startswith(("teacher_encoder.", "teacher_target_projector."))
+        for key in missing
+    )
     allowed_missing_suffixes = (
         "sigreg.t",
         "sigreg.phi",
@@ -347,6 +350,7 @@ def _load_resume_model_state(
         "covariance_pooler.",
         "covariance_sigreg.",
         "teacher_encoder.",
+        "teacher_target_projector.",
         "encoder.spectral_attn_biases.",
         "teacher_encoder.module.spectral_attn_biases.",
         "teacher_encoder.spectral_attn_biases.",
@@ -370,6 +374,7 @@ def _load_resume_model_state(
                 "covariance_pooler.",
                 "covariance_sigreg.",
                 "teacher_encoder.",
+                "teacher_target_projector.",
             )
         )
     ]

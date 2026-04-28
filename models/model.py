@@ -873,7 +873,6 @@ class PeakSetSIGReg(nn.Module):
         predictor_dropout: float = 0.0,
         train_covariance_pooling: bool = False,
         covariance_pooling_dim: int = 32,
-        covariance_pooling_sigreg_lambda: float | None = None,
         use_ema_teacher: bool = False,
         ema_teacher_momentum: float = 0.996,
         ema_teacher_momentum_mid: float | None = None,
@@ -936,11 +935,6 @@ class PeakSetSIGReg(nn.Module):
         self.sigreg_lambda = float(sigreg_lambda)
         self.sigreg_precursor_scale = float(sigreg_precursor_scale)
         self.train_covariance_pooling = bool(train_covariance_pooling)
-        self.covariance_pooling_sigreg_lambda = (
-            float(covariance_pooling_sigreg_lambda)
-            if covariance_pooling_sigreg_lambda is not None
-            else float(sigreg_lambda)
-        )
         self.masked_token_loss_weight = float(masked_token_loss_weight)
         self.masked_token_loss_type = str(masked_token_loss_type).lower()
         self.jepa_mae_loss_weight = float(jepa_mae_loss_weight)
@@ -1092,6 +1086,11 @@ class PeakSetSIGReg(nn.Module):
                     nn.init.zeros_(layer.bias)
         else:
             self.target_projector = nn.Identity()
+        if self.use_ema_teacher:
+            self.teacher_target_projector = copy.deepcopy(self.target_projector)
+            self.teacher_target_projector.requires_grad_(False)
+        else:
+            self.teacher_target_projector = None
         if self.jepa_mae_loss_weight > 0:
             self.jepa_mae_mz_head = nn.Linear(
                 self.target_projector_dim,
@@ -1170,6 +1169,31 @@ class PeakSetSIGReg(nn.Module):
     def sync_ema_teacher(self) -> None:
         if self.teacher_encoder is not None:
             self.teacher_encoder.load_state_dict(self.encoder.state_dict())
+        if self.teacher_target_projector is not None:
+            self.teacher_target_projector.load_state_dict(
+                self.target_projector.state_dict()
+            )
+
+    @staticmethod
+    @torch.no_grad()
+    def _update_ema_module(
+        teacher: nn.Module,
+        student: nn.Module,
+        momentum: float,
+    ) -> None:
+        for teacher_param, student_param in zip(
+            teacher.parameters(),
+            student.parameters(),
+        ):
+            teacher_param.lerp_(student_param, 1.0 - momentum)
+        for teacher_buffer, student_buffer in zip(
+            teacher.buffers(),
+            student.buffers(),
+        ):
+            if torch.is_floating_point(teacher_buffer):
+                teacher_buffer.lerp_(student_buffer, 1.0 - momentum)
+            else:
+                teacher_buffer.copy_(student_buffer)
 
     @torch.no_grad()
     def update_ema_teacher(
@@ -1180,19 +1204,13 @@ class PeakSetSIGReg(nn.Module):
         if self.teacher_encoder is None:
             return None
         momentum = self.ema_teacher_momentum_at(step, total_steps)
-        for teacher_param, student_param in zip(
-            self.teacher_encoder.parameters(),
-            self.encoder.parameters(),
-        ):
-            teacher_param.lerp_(student_param, 1.0 - momentum)
-        for teacher_buffer, student_buffer in zip(
-            self.teacher_encoder.buffers(),
-            self.encoder.buffers(),
-        ):
-            if torch.is_floating_point(teacher_buffer):
-                teacher_buffer.lerp_(student_buffer, 1.0 - momentum)
-            else:
-                teacher_buffer.copy_(student_buffer)
+        self._update_ema_module(self.teacher_encoder, self.encoder, momentum)
+        if self.teacher_target_projector is not None:
+            self._update_ema_module(
+                self.teacher_target_projector,
+                self.target_projector,
+                momentum,
+            )
         return momentum
 
     def _apply_group_target_normalization(
@@ -1259,6 +1277,14 @@ class PeakSetSIGReg(nn.Module):
 
     def project_targets(self, x: torch.Tensor) -> torch.Tensor:
         return self.target_projector(x)
+
+    def project_teacher_targets(self, x: torch.Tensor) -> torch.Tensor:
+        projector = (
+            self.teacher_target_projector
+            if self.teacher_target_projector is not None
+            else self.target_projector
+        )
+        return projector(x)
 
     def predict_masked_target_features(
         self,
@@ -1337,7 +1363,7 @@ class PeakSetSIGReg(nn.Module):
                 peak_valid_mask,
                 precursor_mz=precursor_mz,
             )
-            return self.project_targets(
+            return self.project_teacher_targets(
                 self._apply_jepa_target_normalization(teacher_target_features)
             )
 
@@ -1646,7 +1672,9 @@ class PeakSetSIGReg(nn.Module):
             teacher_target_features.detach()
         )
         with torch.no_grad():
-            teacher_targets = self.project_targets(teacher_target_features_normalized)
+            teacher_targets = self.project_teacher_targets(
+                teacher_target_features_normalized
+            )
         loss_target = teacher_targets.unsqueeze(1)
         per_token_reg = self._embedding_loss(predictor_output, loss_target)
 
@@ -1689,7 +1717,6 @@ class PeakSetSIGReg(nn.Module):
         projected_teacher_sigreg_term = context_emb.new_tensor(0.0)
         covariance_pooling_sigreg_loss = context_emb.new_tensor(0.0)
         covariance_pooling_sigreg_term = context_emb.new_tensor(0.0)
-        covariance_pooling_sigreg_lambda_current = context_emb.new_tensor(0.0)
         jepa_mae_loss = context_emb.new_tensor(0.0)
         jepa_mae_mz_loss = context_emb.new_tensor(0.0)
         jepa_mae_intensity_loss = context_emb.new_tensor(0.0)
@@ -1767,10 +1794,7 @@ class PeakSetSIGReg(nn.Module):
             regularizer_lambda_current = sigreg_lambda_current
             regularizer_loss = token_sigreg_loss.to(dtype=context_emb.dtype)
             regularizer_term = sigreg_term
-        if self.train_covariance_pooling and self.covariance_pooling_sigreg_lambda > 0:
-            covariance_pooling_sigreg_lambda_current = context_emb.new_tensor(
-                self.covariance_pooling_sigreg_lambda
-            )
+        if self.train_covariance_pooling and self.sigreg_lambda > 0:
             covariance_embedding = self.covariance_pooler(
                 teacher_peak_emb.float(),
                 peak_valid_mask,
@@ -1779,7 +1803,7 @@ class PeakSetSIGReg(nn.Module):
                 covariance_embedding,
             )
             covariance_pooling_sigreg_term = (
-                covariance_pooling_sigreg_lambda_current
+                context_emb.new_tensor(self.sigreg_lambda)
                 * covariance_pooling_sigreg_loss.to(dtype=context_emb.dtype)
             )
         loss = (
@@ -1861,9 +1885,6 @@ class PeakSetSIGReg(nn.Module):
                 dtype=context_emb.dtype
             ),
             "covariance_pooling_sigreg_term": covariance_pooling_sigreg_term,
-            "covariance_pooling_sigreg_lambda_current": (
-                covariance_pooling_sigreg_lambda_current
-            ),
             "target_regularizer_term_over_jepa_term": regularizer_term
             / jepa_term.clamp_min(1e-8),
             "target_sigreg_term_over_jepa_term": sigreg_term
