@@ -115,8 +115,8 @@ def test_full_model_forward():
         result = model.forward_augmented(batch)
 
     assert "loss" in result
-    assert "local_global_loss" in result
+    assert "masked_prediction_loss" in result
     assert "context_fraction" in result
-    assert "masked_fraction" in result
+    assert "target_fraction" in result
     for value in result.values():
         assert torch.isfinite(value)

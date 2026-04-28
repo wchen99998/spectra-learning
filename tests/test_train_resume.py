@@ -1,5 +1,6 @@
 import tempfile
 
+import pytest
 import torch
 from ml_collections import config_dict
 
@@ -17,7 +18,6 @@ def _small_model(**overrides) -> PeakSetSIGReg:
         attention_mlp_multiple=2.0,
         feature_mlp_hidden_dim=32,
         masked_token_loss_weight=1.0,
-        masked_token_loss_type="l2",
         masked_latent_predictor_num_layers=1,
         jepa_num_target_blocks=1,
         num_peaks=8,
@@ -65,7 +65,7 @@ def test_save_checkpoint_persists_nested_scalar_optimizer_state():
     assert saved_optimizer["scalar_optimizer_state"]["state"]
 
 
-def test_load_resume_model_state_allows_sigreg_checkpoint_compatibility():
+def test_load_resume_model_state_rejects_sigreg_checkpoint_drift():
     model = _small_model(representation_regularizer="sigreg", sigreg_lambda=0.02)
     resume_state = model.state_dict()
     for key in ("sigreg.t", "sigreg.phi", "sigreg.weights"):
@@ -78,10 +78,11 @@ def test_load_resume_model_state_allows_sigreg_checkpoint_compatibility():
     resume_state["sigreg_lambda_step"] = torch.tensor(0)
 
     restored = _small_model(representation_regularizer="sigreg", sigreg_lambda=0.02)
-    _load_resume_model_state(restored, resume_state)
+    with pytest.raises(RuntimeError, match="Missing key"):
+        _load_resume_model_state(restored, resume_state)
 
 
-def test_load_resume_model_state_allows_removed_cls_predictor_keys():
+def test_load_resume_model_state_rejects_removed_cls_predictor_keys():
     model = _small_model()
     resume_state = model.state_dict()
     resume_state["cls_predictor.0.weight"] = torch.ones(model.model_dim)
@@ -96,32 +97,29 @@ def test_load_resume_model_state_allows_removed_cls_predictor_keys():
     )
 
     restored = _small_model()
-    _load_resume_model_state(restored, resume_state)
+    with pytest.raises(RuntimeError, match="Unexpected key"):
+        _load_resume_model_state(restored, resume_state)
 
 
-def test_load_resume_model_state_allows_removed_target_projector():
+def test_load_resume_model_state_rejects_removed_target_projector():
     model = _small_model()
     resume_state = model.state_dict()
 
     restored = _small_model(use_target_projector=False)
-    _load_resume_model_state(restored, resume_state)
+    with pytest.raises(RuntimeError, match="Unexpected key"):
+        _load_resume_model_state(restored, resume_state)
 
 
-def test_load_resume_model_state_syncs_missing_ema_target_projector():
+def test_load_resume_model_state_rejects_missing_ema_target_projector():
     model = _small_model()
     resume_state = model.state_dict()
 
     restored = _small_model(use_ema_teacher=True)
-    _load_resume_model_state(restored, resume_state)
-
-    for student_param, teacher_param in zip(
-        restored.target_projector.parameters(),
-        restored.teacher_target_projector.parameters(),
-    ):
-        assert torch.equal(student_param, teacher_param)
+    with pytest.raises(RuntimeError, match="Missing key"):
+        _load_resume_model_state(restored, resume_state)
 
 
-def test_load_resume_model_state_allows_removed_special_tokens():
+def test_load_resume_model_state_rejects_removed_special_tokens():
     model = _small_model(
         encoder_num_register_tokens=2,
         predictor_num_register_tokens=2,
@@ -133,7 +131,8 @@ def test_load_resume_model_state_allows_removed_special_tokens():
         encoder_num_register_tokens=0,
         predictor_num_register_tokens=0,
     )
-    _load_resume_model_state(restored, resume_state)
+    with pytest.raises(RuntimeError, match="Unexpected key"):
+        _load_resume_model_state(restored, resume_state)
 
 
 def test_build_wandb_init_kwargs_prefers_config_resume_id(monkeypatch):

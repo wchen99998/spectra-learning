@@ -838,7 +838,6 @@ class PeakSetSIGReg(nn.Module):
         encoder_fourier_trainable: bool = False,
         encoder_fourier_input_scale: float = 1000.0,
         masked_token_loss_weight: float = 0.0,
-        masked_token_loss_type: str = "l1",
         jepa_mae_loss_weight: float = 0.0,
         jepa_mae_mz_bin_size: float = 2.5,
         jepa_mae_intensity_bin_size: float = 0.1,
@@ -853,8 +852,6 @@ class PeakSetSIGReg(nn.Module):
         sigreg_lambda: float = 0.02,
         sigreg_precursor_scale: float = 1.0,
         jepa_num_target_blocks: int = 2,
-        jepa_context_fraction: float = 0.5,
-        jepa_target_fraction: float = 0.25,
         encoder_qk_norm: bool = False,
         norm_type: str = "rmsnorm",
         norm_eps: float = 1e-5,
@@ -886,7 +883,6 @@ class PeakSetSIGReg(nn.Module):
         encoder_num_register_tokens: int = 0,
         predictor_num_register_tokens: int = 0,
         predictor_dim: int | None = None,
-        target_projector_dim: int | None = None,
         use_target_projector: bool = True,
         predictor_dropout: float = 0.0,
         train_covariance_pooling: bool = False,
@@ -920,15 +916,8 @@ class PeakSetSIGReg(nn.Module):
             raise ValueError("jepa_target_layers must be within encoder depth")
         self.num_jepa_target_layers = len(self.jepa_target_layers)
         self.jepa_target_dim = self.num_jepa_target_layers * self.model_dim
-        requested_target_projector_dim = (
-            int(target_projector_dim)
-            if target_projector_dim is not None
-            else self.model_dim
-        )
         self.target_projector_dim = (
-            requested_target_projector_dim
-            if self.use_target_projector
-            else self.jepa_target_dim
+            self.model_dim if self.use_target_projector else self.jepa_target_dim
         )
         self.representation_regularizer = str(representation_regularizer).lower()
         if self.representation_regularizer == "sigreg":
@@ -954,7 +943,6 @@ class PeakSetSIGReg(nn.Module):
         self.sigreg_precursor_scale = float(sigreg_precursor_scale)
         self.train_covariance_pooling = bool(train_covariance_pooling)
         self.masked_token_loss_weight = float(masked_token_loss_weight)
-        self.masked_token_loss_type = str(masked_token_loss_type).lower()
         self.jepa_mae_loss_weight = float(jepa_mae_loss_weight)
         self.jepa_mae_mz_bin_size = float(jepa_mae_mz_bin_size)
         self.jepa_mae_intensity_bin_size = float(jepa_mae_intensity_bin_size)
@@ -1507,15 +1495,7 @@ class PeakSetSIGReg(nn.Module):
     ) -> torch.Tensor:
         prediction = prediction.float()
         target = target.float()
-        if self.masked_token_loss_type == "l2":
-            return (prediction - target).square().mean(dim=-1)
-        if self.masked_token_loss_type == "l2_sum":
-            return (prediction - target).square().sum(dim=-1)
-        if self.masked_token_loss_type == "l1":
-            return (prediction - target).abs().mean(dim=-1)
-        raise ValueError(
-            f"Unsupported masked_token_loss_type: {self.masked_token_loss_type}"
-        )
+        return (prediction - target).square().mean(dim=-1)
 
     def _jepa_mae_targets(
         self,
@@ -1576,6 +1556,132 @@ class PeakSetSIGReg(nn.Module):
             * target_weights.float()
         ).sum() / target_weights.float().sum().clamp_min(1.0)
         return value_loss, mz_loss, intensity_loss, mz_accuracy, intensity_accuracy
+
+    def _predict_augmented_targets(
+        self,
+        context_emb: torch.Tensor,
+        context_mask: torch.Tensor,
+        target_masks: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_size, num_target_blocks, num_peaks = target_masks.shape
+        context_mask_by_view = context_mask.unsqueeze(1)
+        predictor_input = (
+            context_emb.unsqueeze(1).expand(-1, num_target_blocks, -1, -1)
+            * context_mask_by_view.unsqueeze(-1)
+        )
+        predictor_input = torch.where(
+            target_masks.unsqueeze(-1),
+            self.latent_mask_token.view(1, 1, 1, -1).to(context_emb),
+            predictor_input,
+        )
+        predictor_visible_mask = (context_mask_by_view | target_masks).reshape(
+            batch_size * num_target_blocks,
+            num_peaks,
+        )
+        predictor_features = self.predict_masked_target_features(
+            predictor_input.reshape(batch_size * num_target_blocks, num_peaks, -1),
+            predictor_visible_mask,
+        ).reshape(batch_size, num_target_blocks, num_peaks, -1)
+        return predictor_features, self.project_targets(predictor_features)
+
+    def _masked_prediction_loss(
+        self,
+        predictor_output: torch.Tensor,
+        teacher_targets: torch.Tensor,
+        target_masks: torch.Tensor,
+    ) -> torch.Tensor:
+        per_token = self._embedding_loss(predictor_output, teacher_targets.unsqueeze(1))
+        target_weights = target_masks.float()
+        return (per_token * target_weights).sum() / target_weights.sum().clamp_min(1.0)
+
+    def _jepa_mae_metrics(
+        self,
+        predictor_output: torch.Tensor,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+        target_masks: torch.Tensor,
+        reference: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if self.jepa_mae_loss_weight <= 0:
+            return reference.new_tensor(0.0), {}
+        (
+            value_loss,
+            _mz_loss,
+            _intensity_loss,
+            _mz_accuracy,
+            _intensity_accuracy,
+        ) = self._jepa_mae_value_prediction_loss(
+            predictor_output,
+            peak_mz,
+            peak_intensity,
+            target_masks,
+        )
+        loss_weight = reference.new_tensor(self.jepa_mae_loss_weight)
+        term = loss_weight * value_loss.to(dtype=reference.dtype)
+        return term, {
+            "jepa_mae_loss": value_loss.to(dtype=reference.dtype),
+            "jepa_mae_term": term,
+        }
+
+    def _sigreg_weights(self, mask: torch.Tensor) -> torch.Tensor:
+        weights = mask.float()
+        if self.use_precursor_token:
+            weights = weights.clone()
+            weights[..., 0] *= self.sigreg_precursor_scale
+        return weights
+
+    def _regularizer_metrics(
+        self,
+        context_emb: torch.Tensor,
+        context_mask: torch.Tensor,
+        predictor_output_features: torch.Tensor,
+        predictor_output: torch.Tensor,
+        target_masks: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if self.sigreg_lambda <= 0:
+            return context_emb.new_tensor(0.0), {}
+
+        if self.representation_regularizer in ("sigreg-enc", "slot-sigreg-enc"):
+            embeddings = context_emb.float()
+            weights = self._sigreg_weights(context_mask)
+        elif self.representation_regularizer in ("sigreg-pred", "slot-sigreg-pred"):
+            embeddings = predictor_output_features.float()
+            weights = self._sigreg_weights(target_masks)
+        elif self.representation_regularizer in ("sigreg-proj", "slot-sigreg-proj"):
+            embeddings = predictor_output.float()
+            weights = self._sigreg_weights(target_masks)
+        else:
+            return context_emb.new_tensor(0.0), {}
+
+        sigreg_loss = self.sigreg(embeddings, valid_mask=weights).to(
+            dtype=context_emb.dtype
+        )
+        sigreg_term = context_emb.new_tensor(self.sigreg_lambda) * sigreg_loss
+        return sigreg_term, {
+            "sigreg_loss": sigreg_loss,
+            "sigreg_term": sigreg_term,
+        }
+
+    def _covariance_pooling_metrics(
+        self,
+        teacher_peak_emb: torch.Tensor,
+        peak_valid_mask: torch.Tensor,
+        reference: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if not self.train_covariance_pooling or self.sigreg_lambda <= 0:
+            return reference.new_tensor(0.0), {}
+        covariance_embedding = self.covariance_pooler(
+            teacher_peak_emb.float(),
+            peak_valid_mask,
+        )
+        sigreg_loss = self.covariance_sigreg(covariance_embedding.float()).to(
+            dtype=reference.dtype
+        )
+        sigreg_term = reference.new_tensor(self.sigreg_lambda) * sigreg_loss
+        return sigreg_term, {
+            "covariance_sigreg_loss": sigreg_loss,
+            "covariance_sigreg_term": sigreg_term,
+        }
 
     def pool(
         self,
@@ -1652,8 +1758,6 @@ class PeakSetSIGReg(nn.Module):
         precursor_mz = augmented_batch.get("precursor_mz", None)
         context_mask = augmented_batch["context_mask"] & peak_valid_mask
         target_masks = augmented_batch["target_masks"] & peak_valid_mask.unsqueeze(1)
-        B, N = peak_mz.shape
-        K = self.jepa_num_target_blocks
         (
             teacher_target_features,
             teacher_peak_emb,
@@ -1666,19 +1770,11 @@ class PeakSetSIGReg(nn.Module):
             context_mask,
             precursor_mz=precursor_mz,
         )
-        ctx_mask_v = context_mask.unsqueeze(1)
-        context_emb_by_view = context_emb.unsqueeze(1).expand(-1, K, -1, -1)
-        predictor_input = context_emb_by_view * ctx_mask_v.unsqueeze(-1)
-        predictor_input = torch.where(
-            target_masks.unsqueeze(-1),
-            self.latent_mask_token.view(1, 1, 1, -1).to(context_emb),
-            predictor_input,
+        predictor_output_features, predictor_output = self._predict_augmented_targets(
+            context_emb,
+            context_mask,
+            target_masks,
         )
-        predictor_output_features = self.predict_masked_target_features(
-            predictor_input.reshape(B * K, N, -1),
-            (ctx_mask_v | target_masks).reshape(B * K, N),
-        ).reshape(B, K, N, -1)
-        predictor_output = self.project_targets(predictor_output_features)
         teacher_target_features_normalized = self._apply_jepa_target_normalization(
             teacher_target_features.detach()
         )
@@ -1686,150 +1782,41 @@ class PeakSetSIGReg(nn.Module):
             teacher_targets = self.project_teacher_targets(
                 teacher_target_features_normalized
             )
-        loss_target = teacher_targets.unsqueeze(1)
-        per_token_reg = self._embedding_loss(predictor_output, loss_target)
 
-        cls_loss_weight = context_emb.new_tensor(0.0)
-        cls_embedding_loss = context_emb.new_tensor(0.0)
-        cls_embedding_term = context_emb.new_tensor(0.0)
-        cls_visible_mask = torch.zeros_like(context_mask)
-        target_mask_float = target_masks.float()
-        reg_num = (per_token_reg * target_mask_float).sum()
-        reg_den = target_mask_float.sum().clamp_min(1.0)
-        local_global_loss = reg_num / reg_den
-        jepa_term = self.masked_token_loss_weight * local_global_loss
-        use_sigreg_enc = (
-            self.representation_regularizer in ("sigreg-enc", "slot-sigreg-enc")
-            and self.sigreg_lambda > 0
+        masked_prediction_loss = self._masked_prediction_loss(
+            predictor_output,
+            teacher_targets,
+            target_masks,
         )
-        use_sigreg_pred = (
-            self.representation_regularizer in ("sigreg-pred", "slot-sigreg-pred")
-            and self.sigreg_lambda > 0
+        masked_prediction_term = self.masked_token_loss_weight * masked_prediction_loss
+        jepa_mae_term, jepa_mae_metrics = self._jepa_mae_metrics(
+            predictor_output,
+            peak_mz,
+            peak_intensity,
+            target_masks,
+            context_emb,
         )
-        use_sigreg_proj = (
-            self.representation_regularizer in ("sigreg-proj", "slot-sigreg-proj")
-            and self.sigreg_lambda > 0
+        sigreg_term, sigreg_metrics = self._regularizer_metrics(
+            context_emb,
+            context_mask,
+            predictor_output_features,
+            predictor_output,
+            target_masks,
         )
-        regularizer_lambda_current = context_emb.new_tensor(0.0)
-        regularizer_loss = context_emb.new_tensor(0.0)
-        regularizer_term = context_emb.new_tensor(0.0)
-        sigreg_lambda_current = context_emb.new_tensor(0.0)
-        token_sigreg_loss = context_emb.new_tensor(0.0)
-        context_token_sigreg_loss = context_emb.new_tensor(0.0)
-        teacher_token_sigreg_loss = context_emb.new_tensor(0.0)
-        pred_token_sigreg_loss = context_emb.new_tensor(0.0)
-        projected_student_token_sigreg_loss = context_emb.new_tensor(0.0)
-        projected_teacher_token_sigreg_loss = context_emb.new_tensor(0.0)
-        sigreg_term = context_emb.new_tensor(0.0)
-        context_sigreg_term = context_emb.new_tensor(0.0)
-        teacher_sigreg_term = context_emb.new_tensor(0.0)
-        pred_sigreg_term = context_emb.new_tensor(0.0)
-        projected_student_sigreg_term = context_emb.new_tensor(0.0)
-        projected_teacher_sigreg_term = context_emb.new_tensor(0.0)
-        covariance_pooling_sigreg_loss = context_emb.new_tensor(0.0)
-        covariance_pooling_sigreg_term = context_emb.new_tensor(0.0)
-        jepa_mae_loss = context_emb.new_tensor(0.0)
-        jepa_mae_mz_loss = context_emb.new_tensor(0.0)
-        jepa_mae_intensity_loss = context_emb.new_tensor(0.0)
-        jepa_mae_term = context_emb.new_tensor(0.0)
-        jepa_mae_mz_accuracy = context_emb.new_tensor(0.0)
-        jepa_mae_intensity_accuracy = context_emb.new_tensor(0.0)
-        jepa_mae_loss_weight = context_emb.new_tensor(self.jepa_mae_loss_weight)
-        if self.jepa_mae_loss_weight > 0:
-            (
-                jepa_mae_loss,
-                jepa_mae_mz_loss,
-                jepa_mae_intensity_loss,
-                jepa_mae_mz_accuracy,
-                jepa_mae_intensity_accuracy,
-            ) = self._jepa_mae_value_prediction_loss(
-                predictor_output,
-                peak_mz,
-                peak_intensity,
-                target_masks,
-            )
-            jepa_mae_term = jepa_mae_loss_weight * jepa_mae_loss.to(
-                dtype=context_emb.dtype
-            )
-        if use_sigreg_enc:
-            sigreg_lambda_current = context_emb.new_tensor(self.sigreg_lambda)
-            context_sigreg_weights = context_mask.float()
-            if self.use_precursor_token:
-                context_sigreg_weights = context_sigreg_weights.clone()
-                context_sigreg_weights[..., 0] *= self.sigreg_precursor_scale
-            context_token_sigreg_loss = self.sigreg(
-                context_emb.float(),
-                valid_mask=context_sigreg_weights,
-            )
-            token_sigreg_loss = context_token_sigreg_loss
-            context_sigreg_term = sigreg_lambda_current * context_token_sigreg_loss.to(
-                dtype=context_emb.dtype
-            )
-            sigreg_term = context_sigreg_term
-            regularizer_lambda_current = sigreg_lambda_current
-            regularizer_loss = token_sigreg_loss.to(dtype=context_emb.dtype)
-            regularizer_term = sigreg_term
-        elif use_sigreg_pred:
-            sigreg_lambda_current = context_emb.new_tensor(self.sigreg_lambda)
-            sigreg_weights = target_masks.float()
-            if self.use_precursor_token:
-                sigreg_weights = sigreg_weights.clone()
-                sigreg_weights[..., 0] *= self.sigreg_precursor_scale
-            pred_token_sigreg_loss = self.sigreg(
-                predictor_output_features.float(),
-                valid_mask=sigreg_weights,
-            )
-            token_sigreg_loss = pred_token_sigreg_loss
-            pred_sigreg_term = sigreg_lambda_current * pred_token_sigreg_loss.to(
-                dtype=context_emb.dtype
-            )
-            sigreg_term = pred_sigreg_term
-            regularizer_lambda_current = sigreg_lambda_current
-            regularizer_loss = token_sigreg_loss.to(dtype=context_emb.dtype)
-            regularizer_term = sigreg_term
-        elif use_sigreg_proj:
-            sigreg_lambda_current = context_emb.new_tensor(self.sigreg_lambda)
-            student_sigreg_weights = target_masks.float()
-            if self.use_precursor_token:
-                student_sigreg_weights = student_sigreg_weights.clone()
-                student_sigreg_weights[..., 0] *= self.sigreg_precursor_scale
-            projected_student_token_sigreg_loss = self.sigreg(
-                predictor_output.float(),
-                valid_mask=student_sigreg_weights,
-            )
-            token_sigreg_loss = projected_student_token_sigreg_loss
-            projected_student_sigreg_term = sigreg_lambda_current * (
-                projected_student_token_sigreg_loss.to(dtype=context_emb.dtype)
-            )
-            sigreg_term = projected_student_sigreg_term
-            regularizer_lambda_current = sigreg_lambda_current
-            regularizer_loss = token_sigreg_loss.to(dtype=context_emb.dtype)
-            regularizer_term = sigreg_term
-        if self.train_covariance_pooling and self.sigreg_lambda > 0:
-            covariance_embedding = self.covariance_pooler(
-                teacher_peak_emb.float(),
+        covariance_sigreg_term, covariance_sigreg_metrics = (
+            self._covariance_pooling_metrics(
+                teacher_peak_emb,
                 peak_valid_mask,
+                context_emb,
             )
-            covariance_pooling_sigreg_loss = self.covariance_sigreg(
-                covariance_embedding.float(),
-            )
-            covariance_pooling_sigreg_term = (
-                context_emb.new_tensor(self.sigreg_lambda)
-                * covariance_pooling_sigreg_loss.to(dtype=context_emb.dtype)
-            )
+        )
         loss = (
-            jepa_term
+            masked_prediction_term
             + jepa_mae_term
-            + cls_embedding_term
-            + regularizer_term
-            + covariance_pooling_sigreg_term
+            + sigreg_term
+            + covariance_sigreg_term
         )
         valid_peak_count = peak_valid_mask.float().sum().clamp_min(1.0)
-        context_weights = context_mask.float()
-        teacher_student_context_output_norm = (
-            (teacher_peak_emb.float() - context_emb.float()).norm(dim=-1)
-            * context_weights
-        ).sum() / context_weights.sum().clamp_min(1.0)
         collapse_data: dict[str, torch.Tensor] = {}
         if return_collapse_data:
             pooled_mean = self.pool(teacher_peak_emb, peak_valid_mask)
@@ -1851,67 +1838,14 @@ class PeakSetSIGReg(nn.Module):
             }
         metrics = {
             "loss": loss,
-            "local_global_loss": local_global_loss,
-            "jepa_term": jepa_term,
-            "jepa_mae_loss": jepa_mae_loss.to(dtype=context_emb.dtype),
-            "jepa_mae_mz_loss": jepa_mae_mz_loss.to(dtype=context_emb.dtype),
-            "jepa_mae_intensity_loss": jepa_mae_intensity_loss.to(
-                dtype=context_emb.dtype
-            ),
-            "jepa_mae_term": jepa_mae_term,
-            "jepa_mae_loss_weight": jepa_mae_loss_weight,
-            "jepa_mae_mz_accuracy": jepa_mae_mz_accuracy.to(dtype=context_emb.dtype),
-            "jepa_mae_intensity_accuracy": jepa_mae_intensity_accuracy.to(
-                dtype=context_emb.dtype
-            ),
-            "cls_embedding_loss": cls_embedding_loss,
-            "cls_embedding_term": cls_embedding_term,
-            "cls_embedding_loss_weight": cls_loss_weight,
-            "regularizer_loss": regularizer_loss,
-            "regularizer_term": regularizer_term,
-            "regularizer_lambda_current": regularizer_lambda_current,
-            "sigreg_loss": token_sigreg_loss.to(dtype=context_emb.dtype),
-            "token_sigreg_loss": token_sigreg_loss.to(dtype=context_emb.dtype),
-            "context_token_sigreg_loss": context_token_sigreg_loss.to(
-                dtype=context_emb.dtype
-            ),
-            "teacher_token_sigreg_loss": teacher_token_sigreg_loss.to(
-                dtype=context_emb.dtype
-            ),
-            "pred_token_sigreg_loss": pred_token_sigreg_loss.to(dtype=context_emb.dtype),
-            "projected_student_token_sigreg_loss": projected_student_token_sigreg_loss.to(
-                dtype=context_emb.dtype
-            ),
-            "projected_teacher_token_sigreg_loss": projected_teacher_token_sigreg_loss.to(
-                dtype=context_emb.dtype
-            ),
-            "sigreg_term": sigreg_term,
-            "context_sigreg_term": context_sigreg_term,
-            "teacher_sigreg_term": teacher_sigreg_term,
-            "pred_sigreg_term": pred_sigreg_term,
-            "projected_student_sigreg_term": projected_student_sigreg_term,
-            "projected_teacher_sigreg_term": projected_teacher_sigreg_term,
-            "sigreg_lambda_current": sigreg_lambda_current,
-            "covariance_pooling_sigreg_loss": covariance_pooling_sigreg_loss.to(
-                dtype=context_emb.dtype
-            ),
-            "covariance_pooling_sigreg_term": covariance_pooling_sigreg_term,
-            "target_regularizer_term_over_jepa_term": regularizer_term
-            / jepa_term.clamp_min(1e-8),
-            "target_sigreg_term_over_jepa_term": sigreg_term
-            / jepa_term.clamp_min(1e-8),
-            "jepa_mae_term_over_jepa_term": jepa_mae_term
-            / jepa_term.clamp_min(1e-8),
-            "covariance_pooling_sigreg_term_over_jepa_term": (
-                covariance_pooling_sigreg_term / jepa_term.clamp_min(1e-8)
-            ),
-            "teacher_student_context_output_norm": (
-                teacher_student_context_output_norm.to(dtype=context_emb.dtype)
-            ),
+            "masked_prediction_loss": masked_prediction_loss,
+            "masked_prediction_term": masked_prediction_term,
             "context_fraction": context_mask.float().sum() / valid_peak_count,
-            "masked_fraction": target_masks.float().sum() / valid_peak_count,
-            "cls_visible_fraction": cls_visible_mask.float().sum() / valid_peak_count,
+            "target_fraction": target_masks.float().sum() / valid_peak_count,
         }
+        metrics.update(jepa_mae_metrics)
+        metrics.update(sigreg_metrics)
+        metrics.update(covariance_sigreg_metrics)
         if return_collapse_data:
             return metrics, collapse_data
         return metrics

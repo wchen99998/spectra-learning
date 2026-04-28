@@ -52,7 +52,6 @@ def get_bench_config() -> config_dict.ConfigDict:
     cfg.predictor_dim = 384
     cfg.predictor_dropout = 0.1
     cfg.masked_token_loss_weight = 1.0
-    cfg.masked_token_loss_type = "l2"
     cfg.jepa_target_normalization = "none"
     cfg.jepa_target_layers = [1, 4, 8, 12]
     cfg.use_precursor_token = False

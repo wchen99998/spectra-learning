@@ -51,7 +51,6 @@ def make_config() -> config_dict.ConfigDict:
     cfg.norm_type = "layernorm"
     cfg.use_precursor_token = True
     cfg.masked_token_loss_weight = 0.0
-    cfg.masked_token_loss_type = "l1"
     cfg.jepa_target_normalization = "none"
     cfg.masked_latent_predictor_num_layers = 2
 
@@ -94,7 +93,6 @@ def main() -> None:
         encoder_use_position_embedding=cfg.encoder_use_position_embedding,
         use_precursor_token=cfg.use_precursor_token,
         masked_token_loss_weight=cfg.masked_token_loss_weight,
-        masked_token_loss_type=cfg.masked_token_loss_type,
         jepa_target_normalization=cfg.jepa_target_normalization,
         masked_latent_predictor_num_layers=cfg.masked_latent_predictor_num_layers,
     ).to(device)

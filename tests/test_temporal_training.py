@@ -20,7 +20,6 @@ def _small_model(**overrides) -> PeakSetSIGReg:
         attention_mlp_multiple=2.0,
         feature_mlp_hidden_dim=32,
         masked_token_loss_weight=1.0,
-        masked_token_loss_type="l2",
         masked_latent_predictor_num_layers=1,
         jepa_num_target_blocks=1,
         num_peaks=8,
@@ -149,13 +148,12 @@ class TestForwardTemporal:
         metrics = model.forward_temporal(batch)
         assert torch.isfinite(metrics["loss"])
 
-    def test_different_loss_types(self):
-        for loss_type in ("l1", "l2"):
-            model = _small_model(masked_token_loss_type=loss_type)
-            model.eval()
-            batch = _temporal_batch()
-            metrics = model.forward_temporal(batch)
-            assert torch.isfinite(metrics["loss"]), f"Non-finite loss for {loss_type}"
+    def test_temporal_loss_is_finite(self):
+        model = _small_model()
+        model.eval()
+        batch = _temporal_batch()
+        metrics = model.forward_temporal(batch)
+        assert torch.isfinite(metrics["loss"])
 
     def test_temporal_predictor_absolute_positions_change_output(self):
         torch.manual_seed(0)

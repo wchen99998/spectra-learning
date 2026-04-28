@@ -86,7 +86,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_latent_predictor_num_heads = 8
     cfg.temporal_predictor_num_layers = 0
     cfg.predictor_dim = 128
-    cfg.target_projector_dim = cfg.model_dim
     cfg.predictor_dropout = 0.1
 
     # Training
@@ -109,7 +108,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataloader_pin_memory = True
 
     cfg.masked_token_loss_weight = 1.0
-    cfg.masked_token_loss_type = "l2"
     cfg.jepa_mae_loss_weight = 1.0
     cfg.jepa_mae_mz_bin_size = 2.5
     cfg.jepa_mae_intensity_bin_size = 0.1

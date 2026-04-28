@@ -289,11 +289,11 @@ def test_forward_augmented_reports_loss_metrics():
     model = _build_model()
     metrics = model.forward_augmented(_make_batch())
 
-    assert "local_global_loss" in metrics
+    assert "masked_prediction_loss" in metrics
     assert "context_fraction" in metrics
-    assert "masked_fraction" in metrics
-    assert torch.isfinite(metrics["local_global_loss"])
-    assert float(metrics["masked_fraction"]) > 0.0
+    assert "target_fraction" in metrics
+    assert torch.isfinite(metrics["masked_prediction_loss"])
+    assert float(metrics["target_fraction"]) > 0.0
 
 
 @torch.no_grad()
@@ -357,7 +357,7 @@ def test_multilayer_targets_widen_teacher_and_predictor_outputs():
 
 
 @torch.no_grad()
-def test_local_global_loss_uses_target_tokens_only():
+def test_masked_prediction_loss_uses_target_tokens_only():
     model = _build_model(num_target_blocks=2)
     batch = _make_batch()
 
@@ -404,11 +404,11 @@ def test_local_global_loss_uses_target_tokens_only():
         * target_masks.float()
     ).sum() / target_masks.float().sum().clamp_min(1.0)
 
-    assert torch.allclose(metrics["local_global_loss"], masked_only_loss)
+    assert torch.allclose(metrics["masked_prediction_loss"], masked_only_loss)
 
 
 @torch.no_grad()
-def test_local_global_loss_can_zscore_teacher_targets():
+def test_masked_prediction_loss_can_zscore_teacher_targets():
     model = _build_model(
         num_target_blocks=2,
         jepa_target_normalization="zscore",
@@ -458,7 +458,7 @@ def test_local_global_loss_can_zscore_teacher_targets():
         * target_masks.float()
     ).sum() / target_masks.float().sum().clamp_min(1.0)
 
-    assert torch.allclose(metrics["local_global_loss"], masked_only_loss)
+    assert torch.allclose(metrics["masked_prediction_loss"], masked_only_loss)
 
 
 @torch.no_grad()
@@ -530,7 +530,7 @@ def test_positions_outside_union_do_not_change_context_conditioning_with_fixed_t
     )
     latent_mask_token = model.latent_mask_token.view(1, 1, 1, -1)
 
-    def local_global_loss(batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    def masked_prediction_loss(batch: dict[str, torch.Tensor]) -> torch.Tensor:
         peak_mz = batch["peak_mz"]
         peak_intensity = batch["peak_intensity"]
         peak_valid_mask = batch["peak_valid_mask"]
@@ -560,7 +560,7 @@ def test_positions_outside_union_do_not_change_context_conditioning_with_fixed_t
             * target_masks.float()
         ).sum() / target_masks.float().sum().clamp_min(1.0)
 
-    loss_a = local_global_loss(batch_a)
-    loss_b = local_global_loss(batch_b)
+    loss_a = masked_prediction_loss(batch_a)
+    loss_b = masked_prediction_loss(batch_b)
 
     assert torch.allclose(loss_a, loss_b, atol=1e-6, rtol=1e-6)

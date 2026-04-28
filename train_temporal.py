@@ -98,9 +98,6 @@ def _log_msg_probe_pairwise_plots_to_wandb(
             )
             for idx, path in enumerate(plot_paths)
         }
-        payload["msg_probe/covariance_morgan_pairwise/plot"] = wandb.Image(
-            str(plot_paths[0])
-        )
         wandb_run.log(payload, step=global_step)
 
 

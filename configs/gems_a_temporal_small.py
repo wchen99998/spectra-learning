@@ -100,14 +100,12 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataloader_pin_memory = True
 
     cfg.masked_token_loss_weight = 1.0
-    cfg.masked_token_loss_type = "l2"
     cfg.jepa_mae_loss_weight = 1.0
     cfg.jepa_mae_mz_bin_size = 2.5
     cfg.jepa_mae_intensity_bin_size = 0.1
     cfg.jepa_mae_mz_max = 1000.0
     cfg.jepa_mae_intensity_max = 1.0
     cfg.jepa_target_normalization = "none"
-    cfg.target_projector_dim = cfg.model_dim
     cfg.grad_clip_norm = 1.0
     cfg.masked_latent_predictor_num_layers = 4
     cfg.autocast_dtype = "bf16"

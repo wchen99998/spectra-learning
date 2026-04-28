@@ -87,7 +87,6 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
             )
         ),
         masked_token_loss_weight=float(config.get("masked_token_loss_weight", 0.0)),
-        masked_token_loss_type=str(config.get("masked_token_loss_type", "l1")),
         jepa_mae_loss_weight=float(config.get("jepa_mae_loss_weight", 0.0)),
         jepa_mae_mz_bin_size=float(config.get("jepa_mae_mz_bin_size", 2.5)),
         jepa_mae_intensity_bin_size=float(
@@ -117,8 +116,6 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
         sigreg_lambda=float(config.get("sigreg_lambda", 0.02)),
         sigreg_precursor_scale=float(config.get("sigreg_precursor_scale", 1.0)),
         jepa_num_target_blocks=int(config.get("jepa_num_target_blocks", 2)),
-        jepa_context_fraction=float(config.get("jepa_context_fraction", 0.5)),
-        jepa_target_fraction=float(config.get("jepa_target_fraction", 0.25)),
         encoder_qk_norm=bool(config.get("encoder_qk_norm", False)),
         norm_type=str(config.get("norm_type", "rmsnorm")),
         norm_eps=float(config.get("norm_eps", 1e-5)),
@@ -219,7 +216,6 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
             config.get("temporal_predictor_num_layers", 0)
         ),
         predictor_dim=config.get("predictor_dim", None),
-        target_projector_dim=config.get("target_projector_dim", None),
         use_target_projector=bool(config.get("use_target_projector", True)),
         predictor_dropout=float(config.get("predictor_dropout", 0.0)),
         train_covariance_pooling=bool(config.get("train_covariance_pooling", False)),
@@ -390,10 +386,6 @@ def auto_run_name(config: Any) -> str:
             parts.append(f"peak{peak_frac:.2f}")
     if not bool(config.get("use_target_projector", True)):
         parts.append("no-tproj")
-    else:
-        target_projector_dim = config.get("target_projector_dim", None)
-        if target_projector_dim is not None and int(target_projector_dim) != dim:
-            parts.append(f"tproj{int(target_projector_dim)}")
     run_name_suffix = str(config.get("run_name_suffix", "")).strip()
     if run_name_suffix:
         parts.append(run_name_suffix)
@@ -465,102 +457,8 @@ def load_pretrained_weights(
     checkpoint_path: str,
 ) -> None:
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    sd = ckpt.get("state_dict") or ckpt.get("model") or ckpt
-    prefixed = {
-        k.removeprefix("model."): v for k, v in sd.items() if k.startswith("model.")
-    }
-    sd = prefixed or sd
-    for key in tuple(sd):
-        if key.endswith(
-            (
-                "position_embedding.weight",
-                "predictor_position_embedding.weight",
-            )
-        ):
-            sd.pop(key)
-    resize_prefixes = (
-        "encoder.embedder.fourier_ffn.",
-        "teacher_encoder.embedder.fourier_ffn.",
-    )
-    model_sd = model.state_dict()
-    incompatible = [
-        key
-        for key, value in sd.items()
-        if key.startswith(resize_prefixes)
-        and key in model_sd
-        and value.shape != model_sd[key].shape
-    ]
-    for key in incompatible:
-        sd.pop(key)
-    missing, unexpected = model.load_state_dict(sd, strict=False)
-    sync_missing_teacher = any(
-        key.startswith(("teacher_encoder.", "teacher_target_projector."))
-        for key in missing
-    )
-    allowed_missing_suffixes = (
-        "position_embedding.weight",
-        "predictor_position_embedding.weight",
-        "cls_token",
-        "register_tokens",
-        "predictor_register_tokens",
-        "temporal_query_token",
-    )
-    allowed_missing_prefixes = (
-        "masked_latent_readout.",
-        "target_projector.",
-        "jepa_mae_mz_head.",
-        "jepa_mae_intensity_head.",
-        "sigreg.",
-        "covariance_pooler.",
-        "covariance_sigreg.",
-        "teacher_encoder.",
-        "teacher_target_projector.",
-        "encoder.embedder.fourier_ffn.",
-        "encoder.spectral_attn_biases.",
-        "teacher_encoder.module.spectral_attn_biases.",
-        "teacher_encoder.spectral_attn_biases.",
-    )
-    allowed_unexpected_prefixes = (
-        "target_projector.",
-        "jepa_mae_mz_head.",
-        "jepa_mae_intensity_head.",
-        "covariance_pooler.",
-        "covariance_sigreg.",
-        "teacher_encoder.",
-        "teacher_target_projector.",
-    )
-    unexpected = [
-        key for key in unexpected
-        if not key.startswith(allowed_unexpected_prefixes)
-        and not key.endswith(
-            (
-                "temporal_query_token",
-                "cls_token",
-                "register_tokens",
-                "predictor_register_tokens",
-                "covariance_sigreg.t",
-                "covariance_sigreg.phi",
-                "covariance_sigreg.weights",
-                "sigreg_lambda_target",
-                "sigreg_lambda_current",
-                "sigreg_lambda_step",
-            )
-        )
-    ]
-    missing = [
-        key for key in missing
-        if not key.endswith(allowed_missing_suffixes)
-        and not any(key.startswith(prefix) for prefix in allowed_missing_prefixes)
-    ]
-    if missing or unexpected:
-        raise RuntimeError(
-            "Checkpoint load mismatch: "
-            f"missing={missing}, unexpected={unexpected}"
-        )
-    if incompatible:
-        logging.warning("Skipped incompatible pretrained keys: %s", incompatible)
-    if sync_missing_teacher:
-        model.sync_ema_teacher()
+    state_dict = ckpt["model"] if "model" in ckpt else ckpt["state_dict"]
+    model.load_state_dict(state_dict)
 
 
 def latest_ckpt_path(directory: Path) -> str | None:

@@ -193,11 +193,34 @@ class BlockJEPATests(unittest.TestCase):
         metrics = model.forward_augmented(batch)
         self.assertTrue(torch.isfinite(metrics["loss"]).item())
 
+    def test_target_projector_maps_multilayer_targets_to_model_dim(self):
+        model = self._build_model(
+            encoder_num_layers=2,
+            jepa_target_layers=[1, 2],
+        )
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+
+        metrics, collapse_data = model.forward_augmented(
+            batch,
+            return_collapse_data=True,
+        )
+
+        self.assertTrue(torch.isfinite(metrics["loss"]).item())
+        self.assertIsInstance(model.target_projector, torch.nn.Sequential)
+        self.assertEqual(model.target_projector_dim, model.model_dim)
+        self.assertEqual(
+            collapse_data["teacher_targets"].shape[-1],
+            model.model_dim,
+        )
+        self.assertEqual(
+            collapse_data["predictor_output"].shape[-1],
+            model.model_dim,
+        )
+
     def test_target_projector_can_be_disabled(self):
         model = self._build_model(
             encoder_num_layers=2,
             jepa_target_layers=[1, 2],
-            target_projector_dim=24,
             use_target_projector=False,
         )
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
@@ -229,13 +252,10 @@ class BlockJEPATests(unittest.TestCase):
         metrics = model.forward_augmented(batch)
         for key in (
             "loss",
-            "local_global_loss",
-            "cls_embedding_loss",
-            "cls_embedding_term",
-            "cls_visible_fraction",
-            "teacher_student_context_output_norm",
+            "masked_prediction_loss",
+            "masked_prediction_term",
             "context_fraction",
-            "masked_fraction",
+            "target_fraction",
         ):
             self.assertIn(key, metrics, f"Missing key: {key}")
 
@@ -274,35 +294,13 @@ class BlockJEPATests(unittest.TestCase):
                 batch = _make_batch(num_targets=model.jepa_num_target_blocks)
                 metrics = model.forward_augmented(batch)
                 self.assertIn("sigreg_term", metrics)
-                self.assertIn("token_sigreg_loss", metrics)
-                self.assertIn("context_token_sigreg_loss", metrics)
-                self.assertIn("teacher_token_sigreg_loss", metrics)
-                self.assertGreater(float(metrics["token_sigreg_loss"].detach()), 0.0)
-                self.assertGreater(
-                    float(metrics["context_token_sigreg_loss"].detach()), 0.0
-                )
-                self.assertEqual(
-                    float(metrics["teacher_token_sigreg_loss"].detach()), 0.0
-                )
+                self.assertIn("sigreg_loss", metrics)
+                self.assertGreater(float(metrics["sigreg_loss"].detach()), 0.0)
                 self.assertGreater(float(metrics["sigreg_term"].detach()), 0.0)
                 self.assertTrue(
                     torch.allclose(
-                        metrics["token_sigreg_loss"],
-                        metrics["context_token_sigreg_loss"],
-                    )
-                )
-                self.assertTrue(
-                    torch.allclose(
-                        metrics["sigreg_term"],
-                        metrics["context_sigreg_term"],
-                    )
-                )
-                self.assertTrue(
-                    torch.allclose(
                         metrics["loss"],
-                        metrics["jepa_term"]
-                        + metrics["cls_embedding_term"]
-                        + metrics["sigreg_term"],
+                        metrics["masked_prediction_term"] + metrics["sigreg_term"],
                     )
                 )
 
@@ -315,7 +313,6 @@ class BlockJEPATests(unittest.TestCase):
                     representation_regularizer=regularizer,
                     sigreg_lambda=0.02,
                     predictor_dim=16,
-                    target_projector_dim=24,
                 )
                 if regularizer.startswith("slot-") or regularizer.startswith("slog-"):
                     self.assertIsInstance(model.sigreg, SlotwiseSIGReg)
@@ -360,7 +357,6 @@ class BlockJEPATests(unittest.TestCase):
                     representation_regularizer=regularizer,
                     sigreg_lambda=0.02,
                     jepa_target_layers=[1, 2],
-                    target_projector_dim=24,
                 )
                 if regularizer.startswith("slot-") or regularizer.startswith("slog-"):
                     self.assertIsInstance(model.sigreg, SlotwiseSIGReg)
@@ -394,16 +390,8 @@ class BlockJEPATests(unittest.TestCase):
                     batch["target_masks"].float(),
                 )
                 torch.testing.assert_close(
-                    metrics["projected_student_token_sigreg_loss"],
-                    metrics["projected_student_token_sigreg_loss"].new_tensor(1.0),
-                )
-                torch.testing.assert_close(
-                    metrics["projected_teacher_token_sigreg_loss"],
-                    metrics["projected_teacher_token_sigreg_loss"].new_tensor(0.0),
-                )
-                torch.testing.assert_close(
-                    metrics["token_sigreg_loss"],
-                    metrics["token_sigreg_loss"].new_tensor(1.0),
+                    metrics["sigreg_loss"],
+                    metrics["sigreg_loss"].new_tensor(1.0),
                 )
 
     def test_sigreg_on_encoder_outputs_uses_visible_context_only(self):
@@ -414,7 +402,6 @@ class BlockJEPATests(unittest.TestCase):
                     representation_regularizer=regularizer,
                     sigreg_lambda=0.02,
                     jepa_target_layers=[1, 2],
-                    target_projector_dim=24,
                 )
                 batch = _make_batch(num_targets=model.jepa_num_target_blocks)
                 captured: list[tuple[torch.Tensor, torch.Tensor]] = []
@@ -445,20 +432,9 @@ class BlockJEPATests(unittest.TestCase):
                     context_mask,
                     batch["context_mask"].float(),
                 )
-                torch.testing.assert_close(
-                    metrics["context_token_sigreg_loss"],
-                    metrics["context_token_sigreg_loss"].new_tensor(1.0),
-                )
-                torch.testing.assert_close(
-                    metrics["teacher_token_sigreg_loss"],
-                    metrics["teacher_token_sigreg_loss"].new_tensor(0.0),
-                )
-                torch.testing.assert_close(
-                    metrics["token_sigreg_loss"],
-                    metrics["token_sigreg_loss"].new_tensor(1.0),
-                )
+                torch.testing.assert_close(metrics["sigreg_loss"], metrics["sigreg_loss"].new_tensor(1.0))
 
-    def test_covariance_pooling_sigreg_contributes_to_jepa_loss(self):
+    def test_covariance_sigreg_contributes_to_jepa_loss(self):
         model = self._build_model(
             masked_token_loss_weight=1.0,
             train_covariance_pooling=True,
@@ -469,27 +445,20 @@ class BlockJEPATests(unittest.TestCase):
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
         metrics = model.forward_augmented(batch)
 
-        self.assertGreater(
-            float(metrics["covariance_pooling_sigreg_loss"].detach()), 0.0
-        )
-        self.assertGreater(
-            float(metrics["covariance_pooling_sigreg_term"].detach()), 0.0
-        )
+        self.assertGreater(float(metrics["covariance_sigreg_loss"].detach()), 0.0)
+        self.assertGreater(float(metrics["covariance_sigreg_term"].detach()), 0.0)
         torch.testing.assert_close(
-            metrics["covariance_pooling_sigreg_term"],
-            metrics["covariance_pooling_sigreg_loss"] * 0.03,
+            metrics["covariance_sigreg_term"],
+            metrics["covariance_sigreg_loss"] * 0.03,
         )
         self.assertTrue(
             torch.allclose(
                 metrics["loss"],
-                metrics["jepa_term"]
-                + metrics["cls_embedding_term"]
-                + metrics["sigreg_term"]
-                + metrics["covariance_pooling_sigreg_term"],
+                metrics["masked_prediction_term"] + metrics["covariance_sigreg_term"],
             )
         )
 
-    def test_covariance_pooling_sigreg_is_not_slotwise(self):
+    def test_covariance_sigreg_is_not_slotwise(self):
         model = self._build_model(
             representation_regularizer="slot-sigreg-enc",
             train_covariance_pooling=True,
@@ -593,27 +562,27 @@ class BlockJEPATests(unittest.TestCase):
             predictor_input.reshape(B * K, N, -1),
             (context_mask.unsqueeze(1) | target_masks).reshape(B * K, N),
         ).reshape(B, K, N, -1)
-        expected_local_global_loss = (
+        expected_masked_prediction_loss = (
             model._embedding_loss(predictor_output, teacher_targets.unsqueeze(1))
             * target_masks.float()
         ).sum() / target_masks.float().sum().clamp_min(1.0)
-        expected_jepa_term = model.masked_token_loss_weight * expected_local_global_loss
+        expected_masked_prediction_term = model.masked_token_loss_weight * expected_masked_prediction_loss
 
         actual = model.forward_augmented(batch)
 
         self.assertTrue(
             torch.allclose(
-                actual["local_global_loss"],
-                expected_local_global_loss,
+                actual["masked_prediction_loss"],
+                expected_masked_prediction_loss,
                 atol=1e-6,
                 rtol=1e-6,
             )
         )
         self.assertTrue(
-            torch.allclose(actual["jepa_term"], expected_jepa_term, atol=1e-6, rtol=1e-6)
+            torch.allclose(actual["masked_prediction_term"], expected_masked_prediction_term, atol=1e-6, rtol=1e-6)
         )
         self.assertTrue(
-            torch.allclose(actual["loss"], expected_jepa_term, atol=1e-6, rtol=1e-6)
+            torch.allclose(actual["loss"], expected_masked_prediction_term, atol=1e-6, rtol=1e-6)
         )
 
     def test_jepa_mae_targets_use_configured_bins(self):
@@ -649,23 +618,14 @@ class BlockJEPATests(unittest.TestCase):
         metrics = model.forward_augmented(batch)
 
         self.assertGreater(float(metrics["jepa_mae_loss"].detach()), 0.0)
-        self.assertGreater(float(metrics["jepa_mae_mz_loss"].detach()), 0.0)
-        self.assertGreater(float(metrics["jepa_mae_intensity_loss"].detach()), 0.0)
-        torch.testing.assert_close(
-            metrics["jepa_mae_loss"],
-            metrics["jepa_mae_mz_loss"] + metrics["jepa_mae_intensity_loss"],
-        )
         torch.testing.assert_close(
             metrics["jepa_mae_term"],
             metrics["jepa_mae_loss"] * 0.25,
         )
         torch.testing.assert_close(
             metrics["loss"],
-            metrics["jepa_term"]
-            + metrics["jepa_mae_term"]
-            + metrics["cls_embedding_term"]
-            + metrics["sigreg_term"]
-            + metrics["covariance_pooling_sigreg_term"],
+            metrics["masked_prediction_term"]
+            + metrics["jepa_mae_term"],
         )
 
     def test_forward_augmented_uses_single_encoder_pass(self):
@@ -717,7 +677,6 @@ class BlockJEPATests(unittest.TestCase):
         model = self._build_model(
             masked_token_loss_weight=1.0,
             use_ema_teacher=True,
-            target_projector_dim=24,
         )
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
 
@@ -832,24 +791,22 @@ class BlockJEPATests(unittest.TestCase):
             model.ema_teacher_momentum_at(45, 100),
         )
 
-    def test_cls_embedding_term_is_disabled(self):
+    def test_forward_augmented_does_not_report_disabled_cls_metrics(self):
         model = self._build_model(
             masked_token_loss_weight=1.0,
         )
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
         metrics = model.forward_augmented(batch)
-        self.assertEqual(float(metrics["cls_embedding_loss"].detach()), 0.0)
-        self.assertEqual(float(metrics["cls_embedding_term"].detach()), 0.0)
+        self.assertNotIn("cls_embedding_loss", metrics)
+        self.assertNotIn("cls_embedding_term", metrics)
         self.assertTrue(
             torch.allclose(
                 metrics["loss"],
-                metrics["jepa_term"]
-                + metrics["cls_embedding_term"]
-                + metrics["sigreg_term"],
+                metrics["masked_prediction_term"],
             )
         )
 
-    def test_cls_embedding_is_independent_of_token_target_normalization(self):
+    def test_disabled_cls_metrics_are_not_affected_by_target_normalization(self):
         torch.manual_seed(0)
         model_none = self._build_model(
             masked_token_loss_weight=0.0,
@@ -865,8 +822,8 @@ class BlockJEPATests(unittest.TestCase):
         metrics_none = model_none.forward_augmented(batch)
         metrics_zscore = model_zscore.forward_augmented(batch)
 
-        self.assertEqual(float(metrics_none["cls_embedding_loss"]), 0.0)
-        self.assertEqual(float(metrics_zscore["cls_embedding_loss"]), 0.0)
+        self.assertNotIn("cls_embedding_loss", metrics_none)
+        self.assertNotIn("cls_embedding_loss", metrics_zscore)
 
     def test_encode_output_shape(self):
         model = self._build_model()
@@ -1003,25 +960,18 @@ class BlockJEPATests(unittest.TestCase):
         model = self._build_model()
         with tempfile.TemporaryDirectory() as tmpdir:
             path = f"{tmpdir}/ckpt.pt"
-            torch.save(
-                {
-                    "state_dict": {
-                        f"model.{k}": v for k, v in model.state_dict().items()
-                    }
-                },
-                path,
-            )
+            torch.save({"state_dict": model.state_dict()}, path)
             loaded = self._build_model()
             load_pretrained_weights(loaded, path)
             for key, value in model.state_dict().items():
                 self.assertTrue(torch.equal(value, loaded.state_dict()[key]), key)
 
-    def test_load_pretrained_weights_allows_missing_position_embeddings(self):
+    def test_load_pretrained_weights_rejects_missing_position_embeddings(self):
         model = self._build_model()
         with tempfile.TemporaryDirectory() as tmpdir:
             path = f"{tmpdir}/ckpt.pt"
             old_state = {
-                f"model.{k}": v
+                k: v
                 for k, v in model.state_dict().items()
                 if not k.endswith(
                     (
@@ -1035,9 +985,10 @@ class BlockJEPATests(unittest.TestCase):
             }
             torch.save({"state_dict": old_state}, path)
             loaded = self._build_model()
-            load_pretrained_weights(loaded, path)
+            with self.assertRaisesRegex(RuntimeError, "Missing key"):
+                load_pretrained_weights(loaded, path)
 
-    def test_load_pretrained_weights_allows_removed_special_tokens(self):
+    def test_load_pretrained_weights_rejects_removed_special_tokens(self):
         model = self._build_model(
             encoder_num_register_tokens=2,
             predictor_num_register_tokens=2,
@@ -1050,39 +1001,31 @@ class BlockJEPATests(unittest.TestCase):
                 encoder_num_register_tokens=0,
                 predictor_num_register_tokens=0,
             )
-            load_pretrained_weights(loaded, path)
+            with self.assertRaisesRegex(RuntimeError, "Unexpected key"):
+                load_pretrained_weights(loaded, path)
 
-    def test_load_pretrained_weights_allows_missing_masked_latent_readout(self):
+    def test_load_pretrained_weights_rejects_missing_masked_latent_readout(self):
         model = self._build_model(jepa_target_layers=[1])
         with tempfile.TemporaryDirectory() as tmpdir:
             path = f"{tmpdir}/ckpt.pt"
             old_state = {
-                f"model.{k}": v
+                k: v
                 for k, v in model.state_dict().items()
                 if not k.startswith(("masked_latent_readout.", "target_projector."))
             }
             torch.save({"state_dict": old_state}, path)
             loaded = self._build_model(jepa_target_layers=[1])
-            load_pretrained_weights(loaded, path)
+            with self.assertRaisesRegex(RuntimeError, "Missing key"):
+                load_pretrained_weights(loaded, path)
 
-    def test_load_pretrained_weights_syncs_missing_ema_teacher(self):
+    def test_load_pretrained_weights_rejects_missing_ema_teacher(self):
         model = self._build_model()
         with tempfile.TemporaryDirectory() as tmpdir:
             path = f"{tmpdir}/ckpt.pt"
             torch.save({"model": model.state_dict()}, path)
             loaded = self._build_model(use_ema_teacher=True)
-            load_pretrained_weights(loaded, path)
-
-        for student_param, teacher_param in zip(
-            loaded.encoder.parameters(),
-            loaded.teacher_encoder.parameters(),
-        ):
-            self.assertTrue(torch.equal(student_param, teacher_param))
-        for student_param, teacher_param in zip(
-            loaded.target_projector.parameters(),
-            loaded.teacher_target_projector.parameters(),
-        ):
-            self.assertTrue(torch.equal(student_param, teacher_param))
+            with self.assertRaisesRegex(RuntimeError, "Missing key"):
+                load_pretrained_weights(loaded, path)
 
     def test_weight_decay_targets_all_2d_weights(self):
         model = self._build_model()

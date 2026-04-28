@@ -61,9 +61,6 @@ def build_model(cfg) -> PeakSetSIGReg:
         ),
         jepa_target_normalization=getattr(cfg, "jepa_target_normalization", "none"),
         jepa_num_target_blocks=cfg.jepa_num_target_blocks,
-        jepa_context_fraction=cfg.jepa_context_fraction,
-        jepa_target_fraction=cfg.jepa_target_fraction,
-        jepa_block_min_len=cfg.jepa_block_min_len,
     )
 
 

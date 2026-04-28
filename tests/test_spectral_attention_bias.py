@@ -1,5 +1,6 @@
 import tempfile
 
+import pytest
 import torch
 
 from models.model import PeakSetSIGReg
@@ -157,7 +158,7 @@ def test_zero_init_spectral_bias_preserves_encoder_output():
     assert torch.allclose(actual, expected, atol=1e-6)
 
 
-def test_load_pretrained_weights_allows_missing_spectral_bias():
+def test_load_pretrained_weights_rejects_missing_spectral_bias():
     source = _small_model()
     target = _small_model(
         spectral_bias_relative_kind="harmonic",
@@ -169,7 +170,8 @@ def test_load_pretrained_weights_allows_missing_spectral_bias():
     with tempfile.TemporaryDirectory() as tmpdir:
         path = f"{tmpdir}/old.pt"
         torch.save(
-            {"state_dict": {f"model.{k}": v for k, v in source.state_dict().items()}},
+            {"state_dict": source.state_dict()},
             path,
         )
-        load_pretrained_weights(target, path)
+        with pytest.raises(RuntimeError, match="Missing key"):
+            load_pretrained_weights(target, path)

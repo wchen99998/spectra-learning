@@ -323,69 +323,19 @@ def _load_resume_model_state(
     model: PeakSetSIGReg,
     state_dict: dict[str, torch.Tensor],
 ) -> None:
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    sync_missing_teacher = any(
-        key.startswith(("teacher_encoder.", "teacher_target_projector."))
-        for key in missing
-    )
-    allowed_missing_suffixes = (
-        "sigreg.t",
-        "sigreg.phi",
-        "sigreg.weights",
-        "covariance_sigreg.t",
-        "covariance_sigreg.phi",
-        "covariance_sigreg.weights",
-    )
-    allowed_unexpected = (
-        "sigreg_lambda_target",
-        "sigreg_lambda_current",
-        "sigreg_lambda_step",
-        "encoder.cls_token",
-        "encoder.register_tokens",
-        "predictor_register_tokens",
-    )
-    allowed_missing_prefixes = (
-        "target_projector.",
-        "jepa_mae_mz_head.",
-        "jepa_mae_intensity_head.",
-        "covariance_pooler.",
-        "covariance_sigreg.",
-        "teacher_encoder.",
-        "teacher_target_projector.",
-        "encoder.spectral_attn_biases.",
-        "teacher_encoder.module.spectral_attn_biases.",
-        "teacher_encoder.spectral_attn_biases.",
-    )
-    missing = [
-        key
-        for key in missing
-        if not key.endswith(allowed_missing_suffixes)
-        and not any(key.startswith(prefix) for prefix in allowed_missing_prefixes)
-    ]
-    unexpected = [
-        key
-        for key in unexpected
-        if key not in allowed_unexpected
-        and not key.startswith("cls_predictor.")
-        and not key.startswith(
-            (
-                "target_projector.",
-                "jepa_mae_mz_head.",
-                "jepa_mae_intensity_head.",
-                "covariance_pooler.",
-                "covariance_sigreg.",
-                "teacher_encoder.",
-                "teacher_target_projector.",
-            )
-        )
-    ]
-    if missing or unexpected:
-        raise RuntimeError(
-            "Checkpoint load mismatch: "
-            f"missing={missing}, unexpected={unexpected}"
-        )
-    if sync_missing_teacher:
-        model.sync_ema_teacher()
+    model.load_state_dict(state_dict)
+
+
+def _load_optimizer_state(
+    optimizer: torch.optim.Optimizer,
+    state: dict,
+) -> None:
+    scalar_optimizer = getattr(optimizer, "scalar_optimizer", None)
+    if scalar_optimizer is None:
+        optimizer.load_state_dict(state)
+        return
+    optimizer.load_state_dict(state["state_dict"])
+    scalar_optimizer.load_state_dict(state["scalar_optimizer_state"])
 
 
 def train_and_evaluate(
@@ -441,26 +391,7 @@ def train_and_evaluate(
     if ckpt is not None:
         _load_resume_model_state(model, ckpt["model"])
         for obj, state in zip(optimizers, ckpt["optimizers"]):
-            if isinstance(state, dict) and "state_dict" in state:
-                obj.load_state_dict(state["state_dict"])
-                scalar_optimizer = getattr(obj, "scalar_optimizer", None)
-                scalar_state = state.get("scalar_optimizer_state")
-                if scalar_optimizer is not None and scalar_state is not None:
-                    scalar_optimizer.load_state_dict(scalar_state)
-                elif scalar_optimizer is not None:
-                    logging.warning(
-                        "Checkpoint is missing nested scalar optimizer state for %s; "
-                        "resumed Muon scalar parameters will use fresh AdamW state.",
-                        type(obj).__name__,
-                    )
-            else:
-                obj.load_state_dict(state)
-                if getattr(obj, "scalar_optimizer", None) is not None:
-                    logging.warning(
-                        "Checkpoint uses legacy optimizer format for %s; resumed Muon "
-                        "scalar parameters will use fresh AdamW state.",
-                        type(obj).__name__,
-                    )
+            _load_optimizer_state(obj, state)
         for obj, state in zip(schedulers, ckpt["schedulers"]):
             obj.load_state_dict(state)
         global_step = int(ckpt["global_step"])
