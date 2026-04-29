@@ -84,7 +84,7 @@ def get_config() -> config_dict.ConfigDict:
         setattr(cfg, f"jepa_intensity_aware_{key}", value)
 
     # Regularization and pooling
-    cfg.representation_regularizer = "slot-sigreg-enc"
+    cfg.representation_regularizer = "slot-sigreg-enc-pred"
     cfg.sigreg_lambda = 1e-5
     cfg.sigreg_num_slices = 1024
     cfg.sigreg_precursor_scale = 1
