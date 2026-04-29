@@ -32,6 +32,7 @@ from utils.msg_probe import (
     _probe_task_output_dims,
     _compute_pairwise_similarity_alignment_for_indices,
     _plot_pairwise_similarity_alignment,
+    _run_msg_probe_once,
     _score_epoch_state,
     _update_epoch_state,
     build_msg_probe_inputs,
@@ -89,6 +90,34 @@ class _DummyDataModule:
             }
         )
         return self._dataset
+
+
+class _SplitDummyDataModule:
+    def __init__(self, batches_by_split, info, batch_size):
+        self._batches_by_split = batches_by_split
+        self.info = info
+        self.batch_size = batch_size
+        self.calls = []
+
+    def build_dataset(
+        self,
+        split: str,
+        seed: int,
+        *,
+        peak_ordering: str | None = None,
+        shuffle: bool = False,
+        drop_remainder: bool = True,
+    ):
+        self.calls.append(
+            {
+                "split": split,
+                "seed": seed,
+                "peak_ordering": peak_ordering,
+                "shuffle": shuffle,
+                "drop_remainder": drop_remainder,
+            }
+        )
+        return _DummyDataset(self._batches_by_split[split])
 
 
 class MsgLinearProbeTests(unittest.TestCase):
@@ -1066,6 +1095,115 @@ class ProbeConfigTests(unittest.TestCase):
         cfg = config_dict.ConfigDict()
 
         self.assertEqual(resolve_msg_probe_pairwise_alignment_num_pairs(cfg), 20_000)
+
+
+class MsgProbeRunTests(unittest.TestCase):
+    @staticmethod
+    def _probe_batch(scale: float) -> dict[str, np.ndarray]:
+        peak_mz = np.asarray(
+            [
+                [0.1, 0.2, 0.3],
+                [0.2, 0.4, 0.6],
+                [0.3, 0.6, 0.9],
+                [0.4, 0.8, 1.2],
+            ],
+            dtype=np.float32,
+        )
+        peak_intensity = peak_mz * scale
+        return {
+            "peak_mz": peak_mz,
+            "peak_intensity": peak_intensity,
+            "peak_valid_mask": np.ones_like(peak_mz, dtype=bool),
+            "probe_valid_mol": np.ones(4, dtype=bool),
+            "probe_mol_weight": np.asarray([10.0, 12.0, 14.0, 16.0], dtype=np.float32),
+            "probe_logp": np.asarray([1.0, 1.5, 2.0, 2.5], dtype=np.float32),
+            "probe_num_heavy_atoms": np.asarray([2.0, 3.0, 4.0, 5.0], dtype=np.float32),
+            "probe_num_rings": np.asarray([0.0, 1.0, 0.0, 1.0], dtype=np.float32),
+            "probe_maccs": _maccs(
+                [
+                    [0, 1, 0, 1],
+                    [1, 0, 1, 0],
+                    [0, 1, 1, 0],
+                    [1, 0, 0, 1],
+                ]
+            ),
+        }
+
+    def test_validation_selected_msg_probe_evaluates_test_once_after_selection(self):
+        cfg = config_dict.ConfigDict()
+        cfg.seed = 11
+        cfg.model_dim = 4
+        cfg.msg_probe_variants = ("mean",)
+        cfg.msg_probe_mlp_hidden_dim = 8
+        cfg.msg_probe_num_epochs = 2
+        cfg.msg_probe_learning_rate = 1e-3
+        cfg.msg_probe_weight_decay = 0.0
+        cfg.msg_probe_warmup_steps = 0
+        cfg.msg_probe_early_stopping = True
+        cfg.msg_probe_early_stopping_patience = 10
+        cfg.msg_probe_pairwise_alignment_num_pairs = 0
+
+        probe_data = _SplitDummyDataModule(
+            batches_by_split={
+                "massspec_train": [self._probe_batch(1.0)],
+                "massspec_val": [self._probe_batch(1.5)],
+                "massspec_test": [self._probe_batch(2.0)],
+            },
+            info={
+                "massspec_train_size": 4,
+                "massspec_val_size": 4,
+                "massspec_test_size": 4,
+                "probe_morgan_bits": 0,
+            },
+            batch_size=4,
+        )
+
+        class DummyEncoder(torch.nn.Module):
+            def forward(
+                self,
+                peak_mz,
+                peak_intensity,
+                *,
+                valid_mask,
+                precursor_mz=None,
+            ):
+                values = peak_mz + peak_intensity
+                return values.unsqueeze(-1).repeat(1, 1, cfg.model_dim)
+
+            def split_peak_and_cls(self, embeddings):
+                return embeddings, None
+
+        class DummyModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.encoder = DummyEncoder()
+
+        curve: list[dict[str, float]] = []
+        with (
+            mock.patch(
+                "utils.msg_probe.MassSpecProbeData.from_config",
+                return_value=probe_data,
+            ),
+            mock.patch(
+                "utils.msg_probe._collect_num_rings_classes",
+                return_value=(0, 1),
+            ),
+        ):
+            metrics = _run_msg_probe_once(
+                config=cfg,
+                model=DummyModel(),
+                device=torch.device("cpu"),
+                on_epoch_end=curve.append,
+            )
+
+        test_calls = [
+            call for call in probe_data.calls if call["split"] == "massspec_test"
+        ]
+        self.assertEqual(len(test_calls), 1)
+        self.assertIn("msg_probe/mean/test/auc_maccs_mean", metrics)
+        self.assertIn("msg_probe/mean/val/auc_maccs_mean", metrics)
+        self.assertIn("msg_probe/mean/val/auc_maccs_mean", curve[0])
+        self.assertNotIn("msg_probe/mean/test/auc_maccs_mean", curve[0])
 
 
 class RepeatedProbeTests(unittest.TestCase):

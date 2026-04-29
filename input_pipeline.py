@@ -303,6 +303,8 @@ def _sample_block_masks_torch(
         row_strategy = _sample_mask_strategy_torch(strategy, device=device)
         row_valid = peak_valid_mask[row_idx]
         valid_count = int(row_valid.sum().item())
+        if valid_count == 0:
+            continue
         row_context_fraction = float(context_fraction)
         row_target_fraction = float(target_fraction)
         if row_strategy == "random":
@@ -418,7 +420,7 @@ def _prepend_precursor_token_torch(
     if "context_mask" in batch:
         result["context_mask"] = torch.cat(
             [
-                torch.zeros((batch_size, 1), dtype=torch.bool, device=device),
+                torch.ones((batch_size, 1), dtype=torch.bool, device=device),
                 batch["context_mask"],
             ],
             dim=1,
@@ -504,10 +506,8 @@ class _GemsBatchCollator:
             precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
             min_peak_intensity=self.min_peak_intensity,
         )
-        if self.use_precursor_token:
-            batch = _prepend_precursor_token_torch(batch)
         no_valid = ~batch["peak_valid_mask"].any(dim=1)
-        if bool(no_valid.any()):
+        if bool(no_valid.any()) and not self.use_precursor_token:
             batch["peak_valid_mask"] = batch["peak_valid_mask"].clone()
             batch["peak_valid_mask"][no_valid, 0] = True
         if self.augment:
@@ -525,6 +525,8 @@ class _GemsBatchCollator:
             )
             batch["context_mask"] = context_mask
             batch["target_masks"] = target_masks
+        if self.use_precursor_token:
+            batch = _prepend_precursor_token_torch(batch)
         return batch
 
 

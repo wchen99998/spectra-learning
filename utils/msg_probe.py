@@ -917,6 +917,87 @@ def _sequence_probe_step(
     )
 
 
+def _evaluate_sequence_probe_split(
+    *,
+    probe_data: MassSpecProbeData,
+    probes: dict[str, MsgSequenceProbe],
+    task_spec: MsgProbeTaskSpec,
+    feature_extractor: Callable[[dict[str, torch.Tensor]], torch.Tensor],
+    move_batch: Callable[[dict[str, object]], dict[str, object]],
+    split: str,
+    seed: int,
+    peak_ordering: str,
+    max_samples: int | None,
+    sample_randomly: bool,
+    device: torch.device,
+) -> dict[str, dict[str, object]]:
+    states = {variant: _new_epoch_state(task_spec) for variant in probes}
+    with torch.no_grad():
+        for batch in iter_massspec_probe(
+            probe_data,
+            split,
+            seed=seed,
+            peak_ordering=peak_ordering,
+            drop_remainder=False,
+            max_samples=max_samples,
+            sample_randomly=sample_randomly,
+        ):
+            batch = move_batch(batch)
+            peak_embeddings = feature_extractor(batch)
+            for variant, probe in probes.items():
+                result = _sequence_probe_step(
+                    probe,
+                    batch,
+                    peak_embeddings,
+                    task_spec=task_spec,
+                    device=device,
+                )
+                if result is None:
+                    continue
+                _update_epoch_state(states[variant], result, task_spec)
+    return states
+
+
+def _evaluate_linear_probe_split(
+    *,
+    probe_data: MassSpecProbeData,
+    probe: MsgLinearProbe,
+    compiled_probe_step: Callable[..., dict[str, object] | None],
+    task_spec: MsgProbeTaskSpec,
+    feature_extractor: Callable[[dict[str, torch.Tensor]], torch.Tensor],
+    move_batch: Callable[[dict[str, object]], dict[str, object]],
+    split: str,
+    seed: int,
+    peak_ordering: str,
+    max_samples: int | None,
+    sample_randomly: bool,
+    device: torch.device,
+) -> dict[str, object]:
+    state = _new_epoch_state(task_spec)
+    with torch.no_grad():
+        for batch in iter_massspec_probe(
+            probe_data,
+            split,
+            seed=seed,
+            peak_ordering=peak_ordering,
+            drop_remainder=False,
+            max_samples=max_samples,
+            sample_randomly=sample_randomly,
+        ):
+            batch = move_batch(batch)
+            result = compiled_probe_step(
+                probe,
+                batch,
+                task_spec=task_spec,
+                device=device,
+                feature_extractor=feature_extractor,
+            )
+            if result is None:
+                continue
+            _update_epoch_state(state, result, task_spec)
+    return state
+
+
 def _new_epoch_state(task_spec: MsgProbeTaskSpec) -> dict[str, object]:
     task_names = _probe_task_names(task_spec)
     return {
@@ -1205,7 +1286,7 @@ def _run_msg_probe_once(
         sample_randomly=True,
         fingerprint_task=fingerprint_task,
     )
-    test_targets = _collect_split_targets(
+    selection_targets = val_targets if early_stopping else _collect_split_targets(
         probe_data=probe_data,
         split="massspec_test",
         peak_ordering=peak_ordering,
@@ -1216,7 +1297,7 @@ def _run_msg_probe_once(
     )
     task_spec = _build_task_spec(
         train_targets=train_targets,
-        test_targets=val_targets if early_stopping else test_targets,
+        test_targets=selection_targets,
         num_rings_classes=_collect_num_rings_classes(probe_data),
         fingerprint_task=fingerprint_task,
     )
@@ -1317,62 +1398,36 @@ def _run_msg_probe_once(
                 _update_epoch_state(train_states[variant], result, task_spec)
         for probe in probes.values():
             probe.eval()
-        val_states = {
-            variant: _new_epoch_state(task_spec)
-            for variant in variants
-        }
+        val_states = {variant: _new_epoch_state(task_spec) for variant in variants}
         if early_stopping:
-            with torch.no_grad():
-                val_iterator = iter_massspec_probe(
-                    probe_data,
-                    "massspec_val",
-                    seed=train_seed_base + 10_000,
-                    peak_ordering=peak_ordering,
-                    drop_remainder=False,
-                    max_samples=max_val_samples,
-                    sample_randomly=True,
-                )
-                for batch in val_iterator:
-                    batch = move_batch(batch)
-                    peak_embeddings = feature_extractor(batch)
-                    for variant in variants:
-                        result = _sequence_probe_step(
-                            probes[variant],
-                            batch,
-                            peak_embeddings,
-                            task_spec=task_spec,
-                            device=device,
-                        )
-                        if result is None:
-                            continue
-                        _update_epoch_state(val_states[variant], result, task_spec)
-        test_states = {
-            variant: _new_epoch_state(task_spec)
-            for variant in variants
-        }
-        with torch.no_grad():
-            for batch in iter_massspec_probe(
-                probe_data,
-                "massspec_test",
+            val_states = _evaluate_sequence_probe_split(
+                probe_data=probe_data,
+                probes=probes,
+                task_spec=task_spec,
+                feature_extractor=feature_extractor,
+                move_batch=move_batch,
+                split="massspec_val",
+                seed=train_seed_base + 10_000,
+                peak_ordering=peak_ordering,
+                max_samples=max_val_samples,
+                sample_randomly=True,
+                device=device,
+            )
+        test_states = {variant: _new_epoch_state(task_spec) for variant in variants}
+        if not early_stopping:
+            test_states = _evaluate_sequence_probe_split(
+                probe_data=probe_data,
+                probes=probes,
+                task_spec=task_spec,
+                feature_extractor=feature_extractor,
+                move_batch=move_batch,
+                split="massspec_test",
                 seed=test_seed_base,
                 peak_ordering=peak_ordering,
-                drop_remainder=False,
                 max_samples=max_test_samples,
                 sample_randomly=randomize_test_subset,
-            ):
-                batch = move_batch(batch)
-                peak_embeddings = feature_extractor(batch)
-                for variant in variants:
-                    result = _sequence_probe_step(
-                        probes[variant],
-                        batch,
-                        peak_embeddings,
-                        task_spec=task_spec,
-                        device=device,
-                    )
-                    if result is None:
-                        continue
-                    _update_epoch_state(test_states[variant], result, task_spec)
+                device=device,
+            )
         epoch_metrics: dict[str, float] = {}
         for variant in variants:
             variant_prefix = f"msg_probe/{variant}"
@@ -1391,10 +1446,14 @@ def _run_msg_probe_once(
                     if early_stopping
                     else {}
                 ),
-                **_score_epoch_state(
-                    prefix=f"{variant_prefix}/test",
-                    epoch_state=test_states[variant],
-                    task_spec=task_spec,
+                **(
+                    {}
+                    if early_stopping
+                    else _score_epoch_state(
+                        prefix=f"{variant_prefix}/test",
+                        epoch_state=test_states[variant],
+                        task_spec=task_spec,
+                    )
                 ),
                 f"{variant_prefix}/num_{fingerprint_task}_bits": float(
                     task_spec.maccs_bits
@@ -1424,34 +1483,54 @@ def _run_msg_probe_once(
                 epochs_without_improvement[variant] = 0
             else:
                 epochs_without_improvement[variant] += 1
-            log.info(
-                "MSG probe [%s] epoch %d/%d train_samples=%d val_auc_%s_mean=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f %s_bits=%d",
-                variant,
-                epoch_idx + 1,
-                num_probe_epochs,
-                int(variant_metrics[f"{variant_prefix}/train/samples"]),
-                fingerprint_task,
-                float(
-                    variant_metrics.get(
-                        f"{variant_prefix}/val/auc_{fingerprint_task}_mean",
-                        float("nan"),
-                    )
-                ),
-                variant_metrics[f"{variant_prefix}/test/r2_mean_wo_num_rings"],
-                variant_metrics[f"{variant_prefix}/test/mae_num_rings"],
-                fingerprint_task,
-                variant_metrics[f"{variant_prefix}/test/auc_{fingerprint_task}_mean"],
-                fingerprint_task,
-                variant_metrics[
-                    f"{variant_prefix}/test/average_precision_{fingerprint_task}_mean"
-                ],
-                fingerprint_task,
-                variant_metrics[f"{variant_prefix}/test/recall_{fingerprint_task}_mean"],
-                fingerprint_task,
-                variant_metrics[f"{variant_prefix}/test/precision_{fingerprint_task}_mean"],
-                fingerprint_task,
-                int(variant_metrics[f"{variant_prefix}/num_{fingerprint_task}_bits"]),
-            )
+            if early_stopping:
+                log.info(
+                    "MSG probe [%s] epoch %d/%d train_samples=%d val_r2_mean_wo_num_rings=%.4f val_mae_num_rings=%.4f val_auc_%s_mean=%.4f val_average_precision_%s_mean=%.4f val_recall_%s_mean=%.4f val_precision_%s_mean=%.4f %s_bits=%d",
+                    variant,
+                    epoch_idx + 1,
+                    num_probe_epochs,
+                    int(variant_metrics[f"{variant_prefix}/train/samples"]),
+                    variant_metrics[f"{variant_prefix}/val/r2_mean_wo_num_rings"],
+                    variant_metrics[f"{variant_prefix}/val/mae_num_rings"],
+                    fingerprint_task,
+                    variant_metrics[f"{variant_prefix}/val/auc_{fingerprint_task}_mean"],
+                    fingerprint_task,
+                    variant_metrics[
+                        f"{variant_prefix}/val/average_precision_{fingerprint_task}_mean"
+                    ],
+                    fingerprint_task,
+                    variant_metrics[f"{variant_prefix}/val/recall_{fingerprint_task}_mean"],
+                    fingerprint_task,
+                    variant_metrics[f"{variant_prefix}/val/precision_{fingerprint_task}_mean"],
+                    fingerprint_task,
+                    int(variant_metrics[f"{variant_prefix}/num_{fingerprint_task}_bits"]),
+                )
+            else:
+                log.info(
+                    "MSG probe [%s] epoch %d/%d train_samples=%d test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f %s_bits=%d",
+                    variant,
+                    epoch_idx + 1,
+                    num_probe_epochs,
+                    int(variant_metrics[f"{variant_prefix}/train/samples"]),
+                    variant_metrics[f"{variant_prefix}/test/r2_mean_wo_num_rings"],
+                    variant_metrics[f"{variant_prefix}/test/mae_num_rings"],
+                    fingerprint_task,
+                    variant_metrics[f"{variant_prefix}/test/auc_{fingerprint_task}_mean"],
+                    fingerprint_task,
+                    variant_metrics[
+                        f"{variant_prefix}/test/average_precision_{fingerprint_task}_mean"
+                    ],
+                    fingerprint_task,
+                    variant_metrics[
+                        f"{variant_prefix}/test/recall_{fingerprint_task}_mean"
+                    ],
+                    fingerprint_task,
+                    variant_metrics[
+                        f"{variant_prefix}/test/precision_{fingerprint_task}_mean"
+                    ],
+                    fingerprint_task,
+                    int(variant_metrics[f"{variant_prefix}/num_{fingerprint_task}_bits"]),
+                )
         epoch_metrics = _with_mean_probe_aliases(epoch_metrics)
         if on_epoch_end is not None:
             on_epoch_end(epoch_metrics)
@@ -1470,16 +1549,48 @@ def _run_msg_probe_once(
                 early_stopping_patience,
             )
             break
-    best_metrics: dict[str, float] = {}
     for variant in variants:
         if variant in best_state_by_variant:
             probes[variant].load_state_dict(best_state_by_variant[variant])
-        variant_metrics = best_metrics_by_variant.get(variant)
+    final_test_metrics_by_variant: dict[str, dict[str, float]] = {}
+    if early_stopping:
+        selected_probes = {
+            variant: probes[variant]
+            for variant in variants
+            if variant in best_state_by_variant
+        }
+        final_test_states = _evaluate_sequence_probe_split(
+            probe_data=probe_data,
+            probes=selected_probes,
+            task_spec=task_spec,
+            feature_extractor=feature_extractor,
+            move_batch=move_batch,
+            split="massspec_test",
+            seed=test_seed_base,
+            peak_ordering=peak_ordering,
+            max_samples=max_test_samples,
+            sample_randomly=randomize_test_subset,
+            device=device,
+        )
+        final_test_metrics_by_variant = {
+            variant: _score_epoch_state(
+                prefix=f"msg_probe/{variant}/test",
+                epoch_state=state,
+                task_spec=task_spec,
+            )
+            for variant, state in final_test_states.items()
+        }
+    best_metrics: dict[str, float] = {}
+    for variant in variants:
+        variant_metrics = dict(best_metrics_by_variant.get(variant, {}))
         if not variant_metrics:
             continue
+        variant_metrics.update(final_test_metrics_by_variant.get(variant, {}))
         best_metrics.update(variant_metrics)
         variant_prefix = f"msg_probe/{variant}"
         variant_select_metric = _msg_probe_variant_metric_key(variant, select_metric)
+        if early_stopping:
+            variant_select_metric = variant_select_metric.replace("/test/", "/val/")
         log.info(
             "MSG probe [%s] best epoch %d: %s=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f",
             variant,
@@ -1598,15 +1709,6 @@ def _run_dreams_probe_once(
         max_samples=max_train_samples,
         fingerprint_task=fingerprint_task,
     )
-    test_targets = _collect_split_targets(
-        probe_data=probe_data,
-        split="massspec_test",
-        peak_ordering=peak_ordering,
-        seed=test_seed_base,
-        max_samples=max_test_samples,
-        sample_randomly=randomize_test_subset,
-        fingerprint_task=fingerprint_task,
-    )
     val_targets = _collect_split_targets(
         probe_data=probe_data,
         split="massspec_val",
@@ -1616,9 +1718,18 @@ def _run_dreams_probe_once(
         sample_randomly=True,
         fingerprint_task=fingerprint_task,
     )
+    selection_targets = val_targets if early_stopping else _collect_split_targets(
+        probe_data=probe_data,
+        split="massspec_test",
+        peak_ordering=peak_ordering,
+        seed=test_seed_base,
+        max_samples=max_test_samples,
+        sample_randomly=randomize_test_subset,
+        fingerprint_task=fingerprint_task,
+    )
     task_spec = _build_task_spec(
         train_targets=train_targets,
-        test_targets=val_targets if early_stopping else test_targets,
+        test_targets=selection_targets,
         num_rings_classes=_collect_num_rings_classes(probe_data),
         fingerprint_task=fingerprint_task,
     )
@@ -1674,6 +1785,7 @@ def _run_dreams_probe_once(
 
     best_metrics: dict[str, float] = {}
     best_metric_value = -float("inf") if higher_is_better else float("inf")
+    best_state: dict[str, torch.Tensor] = {}
     epochs_without_improvement = 0
     for epoch_idx in range(num_probe_epochs):
         probe.train()
@@ -1702,50 +1814,37 @@ def _run_dreams_probe_once(
             scheduler.step()
             _update_epoch_state(train_state, result, task_spec)
         probe.eval()
-        test_state = _new_epoch_state(task_spec)
-        with torch.no_grad():
-            for batch in iter_massspec_probe(
-                probe_data,
-                "massspec_test",
+        if early_stopping:
+            test_state = _new_epoch_state(task_spec)
+        else:
+            test_state = _evaluate_linear_probe_split(
+                probe_data=probe_data,
+                probe=probe,
+                compiled_probe_step=compiled_probe_step,
+                task_spec=task_spec,
+                feature_extractor=feature_extractor,
+                move_batch=move_batch,
+                split="massspec_test",
                 seed=test_seed_base,
                 peak_ordering=peak_ordering,
-                drop_remainder=False,
                 max_samples=max_test_samples,
                 sample_randomly=randomize_test_subset,
-            ):
-                batch = move_batch(batch)
-                result = compiled_probe_step(
-                    probe,
-                    batch,
-                    task_spec=task_spec,
-                    device=device,
-                    feature_extractor=feature_extractor,
-                )
-                if result is None:
-                    continue
-                _update_epoch_state(test_state, result, task_spec)
-        val_state = _new_epoch_state(task_spec)
-        with torch.no_grad():
-            for batch in iter_massspec_probe(
-                probe_data,
-                "massspec_val",
-                seed=train_seed_base + 10_000,
-                peak_ordering=peak_ordering,
-                drop_remainder=False,
-                max_samples=max_val_samples,
-                sample_randomly=True,
-            ):
-                batch = move_batch(batch)
-                result = compiled_probe_step(
-                    probe,
-                    batch,
-                    task_spec=task_spec,
-                    device=device,
-                    feature_extractor=feature_extractor,
-                )
-                if result is None:
-                    continue
-                _update_epoch_state(val_state, result, task_spec)
+                device=device,
+            )
+        val_state = _evaluate_linear_probe_split(
+            probe_data=probe_data,
+            probe=probe,
+            compiled_probe_step=compiled_probe_step,
+            task_spec=task_spec,
+            feature_extractor=feature_extractor,
+            move_batch=move_batch,
+            split="massspec_val",
+            seed=train_seed_base + 10_000,
+            peak_ordering=peak_ordering,
+            max_samples=max_val_samples,
+            sample_randomly=True,
+            device=device,
+        )
         epoch_metrics = {
             **_score_epoch_state(
                 prefix="dreams_probe/train", epoch_state=train_state, task_spec=task_spec
@@ -1753,8 +1852,14 @@ def _run_dreams_probe_once(
             **_score_epoch_state(
                 prefix="dreams_probe/val", epoch_state=val_state, task_spec=task_spec
             ),
-            **_score_epoch_state(
-                prefix="dreams_probe/test", epoch_state=test_state, task_spec=task_spec
+            **(
+                {}
+                if early_stopping
+                else _score_epoch_state(
+                    prefix="dreams_probe/test",
+                    epoch_state=test_state,
+                    task_spec=task_spec,
+                )
             ),
             f"dreams_probe/num_{fingerprint_task}_bits": float(task_spec.maccs_bits),
             "dreams_probe_epoch": float(epoch_idx + 1),
@@ -1768,36 +1873,59 @@ def _run_dreams_probe_once(
         if is_better:
             best_metric_value = current_value
             best_metrics = dict(epoch_metrics)
+            best_state = copy.deepcopy(probe.state_dict())
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
-        log.info(
-            "DreaMS probe epoch %d/%d train_samples=%d val_auc_%s_mean=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f %s_bits=%d",
-            epoch_idx + 1,
-            num_probe_epochs,
-            int(epoch_metrics["dreams_probe/train/samples"]),
-            fingerprint_task,
-            float(
-                epoch_metrics.get(
-                    f"dreams_probe/val/auc_{fingerprint_task}_mean",
-                    float("nan"),
-                )
-            ),
-            epoch_metrics["dreams_probe/test/r2_mean_wo_num_rings"],
-            epoch_metrics["dreams_probe/test/mae_num_rings"],
-            fingerprint_task,
-            epoch_metrics[f"dreams_probe/test/auc_{fingerprint_task}_mean"],
-            fingerprint_task,
-            epoch_metrics[
-                f"dreams_probe/test/average_precision_{fingerprint_task}_mean"
-            ],
-            fingerprint_task,
-            epoch_metrics[f"dreams_probe/test/recall_{fingerprint_task}_mean"],
-            fingerprint_task,
-            epoch_metrics[f"dreams_probe/test/precision_{fingerprint_task}_mean"],
-            fingerprint_task,
-            int(epoch_metrics[f"dreams_probe/num_{fingerprint_task}_bits"]),
-        )
+        if early_stopping:
+            log.info(
+                "DreaMS probe epoch %d/%d train_samples=%d val_r2_mean_wo_num_rings=%.4f val_mae_num_rings=%.4f val_auc_%s_mean=%.4f val_average_precision_%s_mean=%.4f val_recall_%s_mean=%.4f val_precision_%s_mean=%.4f %s_bits=%d",
+                epoch_idx + 1,
+                num_probe_epochs,
+                int(epoch_metrics["dreams_probe/train/samples"]),
+                epoch_metrics["dreams_probe/val/r2_mean_wo_num_rings"],
+                epoch_metrics["dreams_probe/val/mae_num_rings"],
+                fingerprint_task,
+                epoch_metrics[f"dreams_probe/val/auc_{fingerprint_task}_mean"],
+                fingerprint_task,
+                epoch_metrics[
+                    f"dreams_probe/val/average_precision_{fingerprint_task}_mean"
+                ],
+                fingerprint_task,
+                epoch_metrics[f"dreams_probe/val/recall_{fingerprint_task}_mean"],
+                fingerprint_task,
+                epoch_metrics[f"dreams_probe/val/precision_{fingerprint_task}_mean"],
+                fingerprint_task,
+                int(epoch_metrics[f"dreams_probe/num_{fingerprint_task}_bits"]),
+            )
+        else:
+            log.info(
+                "DreaMS probe epoch %d/%d train_samples=%d val_auc_%s_mean=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f %s_bits=%d",
+                epoch_idx + 1,
+                num_probe_epochs,
+                int(epoch_metrics["dreams_probe/train/samples"]),
+                fingerprint_task,
+                float(
+                    epoch_metrics.get(
+                        f"dreams_probe/val/auc_{fingerprint_task}_mean",
+                        float("nan"),
+                    )
+                ),
+                epoch_metrics["dreams_probe/test/r2_mean_wo_num_rings"],
+                epoch_metrics["dreams_probe/test/mae_num_rings"],
+                fingerprint_task,
+                epoch_metrics[f"dreams_probe/test/auc_{fingerprint_task}_mean"],
+                fingerprint_task,
+                epoch_metrics[
+                    f"dreams_probe/test/average_precision_{fingerprint_task}_mean"
+                ],
+                fingerprint_task,
+                epoch_metrics[f"dreams_probe/test/recall_{fingerprint_task}_mean"],
+                fingerprint_task,
+                epoch_metrics[f"dreams_probe/test/precision_{fingerprint_task}_mean"],
+                fingerprint_task,
+                int(epoch_metrics[f"dreams_probe/num_{fingerprint_task}_bits"]),
+            )
         if on_epoch_end is not None:
             on_epoch_end(epoch_metrics)
         if (
@@ -1813,6 +1941,29 @@ def _run_dreams_probe_once(
             )
             break
     if best_metrics:
+        if early_stopping:
+            probe.load_state_dict(best_state)
+            test_state = _evaluate_linear_probe_split(
+                probe_data=probe_data,
+                probe=probe,
+                compiled_probe_step=compiled_probe_step,
+                task_spec=task_spec,
+                feature_extractor=feature_extractor,
+                move_batch=move_batch,
+                split="massspec_test",
+                seed=test_seed_base,
+                peak_ordering=peak_ordering,
+                max_samples=max_test_samples,
+                sample_randomly=randomize_test_subset,
+                device=device,
+            )
+            best_metrics.update(
+                _score_epoch_state(
+                    prefix="dreams_probe/test",
+                    epoch_state=test_state,
+                    task_spec=task_spec,
+                )
+            )
         log.info(
             "DreaMS probe best epoch %d: %s=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f",
             int(best_metrics["dreams_probe_epoch"]),

@@ -535,17 +535,24 @@ def train_and_evaluate(
                             continue
                         epochs = [int(m[epoch_key]) for m in _probe_epoch_log]
                         for suffix in _curve_suffixes:
-                            train_key = f"msg_probe/{variant}/train/{suffix}"
-                            test_key = f"msg_probe/{variant}/test/{suffix}"
+                            split_keys = [
+                                (
+                                    split,
+                                    f"msg_probe/{variant}/{split}/{suffix}",
+                                )
+                                for split in ("train", "val", "test")
+                                if f"msg_probe/{variant}/{split}/{suffix}"
+                                in _probe_epoch_log[0]
+                            ]
                             _wandb_run.log(
                                 {
                                     f"msg_probe_curve/{variant}/{suffix}": wandb.plot.line_series(
                                         xs=epochs,
                                         ys=[
-                                            [m[train_key] for m in _probe_epoch_log],
-                                            [m[test_key] for m in _probe_epoch_log],
+                                            [m[key] for m in _probe_epoch_log]
+                                            for _, key in split_keys
                                         ],
-                                        keys=["train", "test"],
+                                        keys=[split for split, _ in split_keys],
                                         title=f"MSG Probe {variant} {suffix} (step {global_step})",
                                         xname="probe_epoch",
                                     ),

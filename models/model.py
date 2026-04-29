@@ -1238,7 +1238,19 @@ class PeakSetSIGReg(nn.Module):
         return normalized.to(dtype=orig_dtype)
 
     def _apply_jepa_target_normalization(self, x: torch.Tensor) -> torch.Tensor:
-        return self._apply_group_target_normalization(x, self.model_dim)
+        if (
+            self.jepa_target_normalization == "none"
+            or self.encoder_num_layers not in self.jepa_target_layers
+        ):
+            return self._apply_group_target_normalization(x, self.model_dim)
+        target_slices = x.split(self.model_dim, dim=-1)
+        normalized_slices = [
+            target_slice
+            if layer_idx == self.encoder_num_layers
+            else self._apply_group_target_normalization(target_slice, self.model_dim)
+            for layer_idx, target_slice in zip(self.jepa_target_layers, target_slices)
+        ]
+        return torch.cat(normalized_slices, dim=-1)
 
     def _append_predictor_register_tokens(
         self,
@@ -1717,7 +1729,7 @@ class PeakSetSIGReg(nn.Module):
             "peak_valid_mask": torch.cat([pre_valid, peak_valid_mask], dim=1),
         }
         if context_mask is not None:
-            pre_ctx = torch.zeros(B, 1, device=device, dtype=torch.bool)
+            pre_ctx = torch.ones(B, 1, device=device, dtype=torch.bool)
             result["context_mask"] = torch.cat([pre_ctx, context_mask], dim=1)
         if target_masks is not None:
             K = target_masks.shape[1]
@@ -1758,6 +1770,11 @@ class PeakSetSIGReg(nn.Module):
         precursor_mz = augmented_batch.get("precursor_mz", None)
         context_mask = augmented_batch["context_mask"] & peak_valid_mask
         target_masks = augmented_batch["target_masks"] & peak_valid_mask.unsqueeze(1)
+        if self.use_precursor_token:
+            context_mask = context_mask.clone()
+            target_masks = target_masks.clone()
+            context_mask[:, 0] = True
+            target_masks[:, :, 0] = False
         (
             teacher_target_features,
             teacher_peak_emb,

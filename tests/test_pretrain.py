@@ -1082,6 +1082,20 @@ class PrecursorTokenTests(unittest.TestCase):
         metrics = model.forward_augmented(batch)
         self.assertTrue(torch.isfinite(metrics["loss"]).item())
 
+    def test_forward_augmented_forces_precursor_context_not_target(self):
+        model = self._build_model()
+        batch = _make_pipeline_prepended_batch(
+            num_peaks=6,
+            num_targets=model.jepa_num_target_blocks,
+            precursor_in_context=False,
+            precursor_in_targets=True,
+        )
+
+        _, collapse_data = model.forward_augmented(batch, return_collapse_data=True)
+
+        self.assertTrue(collapse_data["context_mask"][:, 0].all())
+        self.assertFalse(collapse_data["target_masks"][:, :, 0].any())
+
     def test_encode_with_prepended_batch(self):
         """encode() works with a batch where precursor is already prepended."""
         model = self._build_model()
@@ -1211,9 +1225,9 @@ class PrecursorTokenTests(unittest.TestCase):
         self.assertEqual(result["peak_valid_mask"].shape, (B, N + 1))
         self.assertEqual(result["context_mask"].shape, (B, N + 1))
         self.assertEqual(result["target_masks"].shape, (B, K, N + 1))
-        # Precursor token: valid=True, masks preserved with an unselected new slot.
+        # Precursor token: valid=True, context-visible, never a target.
         self.assertTrue(result["peak_valid_mask"][:, 0].all())
-        self.assertFalse(result["context_mask"][:, 0].any())
+        self.assertTrue(result["context_mask"][:, 0].all())
         self.assertFalse(result["target_masks"][:, :, 0].any())
         # Precursor intensity sentinel
         torch.testing.assert_close(
@@ -1259,8 +1273,8 @@ class PrependPrecursorTokenTests(unittest.TestCase):
         )
         # Valid at position 0
         self.assertTrue(out["peak_valid_mask"][:, 0].numpy().all())
-        # Existing masks are preserved; prepending does not force-select the precursor.
-        self.assertFalse(out["context_mask"][:, 0].numpy().any())
+        # Existing masks are preserved after the always-visible precursor.
+        self.assertTrue(out["context_mask"][:, 0].numpy().all())
         self.assertFalse(out["target_masks"][:, :, 0].numpy().any())
         # Precursor mz at position 0
         self.assertTrue(

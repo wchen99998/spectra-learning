@@ -282,7 +282,7 @@ def test_gems_batch_collator_generates_ragged_context_and_target_masks() -> None
     ).any()
 
 
-def test_gems_batch_collator_prepends_precursor_before_mask_sampling() -> None:
+def test_gems_batch_collator_samples_real_peaks_then_prepends_precursor() -> None:
     collator = input_pipeline._GemsBatchCollator(
         augment=True,
         num_target_blocks=2,
@@ -320,10 +320,30 @@ def test_gems_batch_collator_prepends_precursor_before_mask_sampling() -> None:
             "precursor_mz_raw": torch.tensor(600.0, dtype=torch.float32),
         },
     ]
+    sampled_context = torch.tensor(
+        [
+            [True, False, False, False],
+            [False, True, False, False],
+        ],
+        dtype=torch.bool,
+    )
+    sampled_targets = torch.tensor(
+        [
+            [
+                [False, False, True, False],
+                [False, False, False, True],
+            ],
+            [
+                [False, False, True, False],
+                [False, False, False, True],
+            ],
+        ],
+        dtype=torch.bool,
+    )
     expected_context = torch.tensor(
         [
-            [False, True, False, False, False],
-            [False, False, True, False, False],
+            [True, True, False, False, False],
+            [True, False, True, False, False],
         ],
         dtype=torch.bool,
     )
@@ -347,7 +367,7 @@ def test_gems_batch_collator_prepends_precursor_before_mask_sampling() -> None:
         **_: object,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         captured["peak_valid_mask"] = peak_valid_mask.detach().clone()
-        return expected_context.clone(), expected_targets.clone()
+        return sampled_context.clone(), sampled_targets.clone()
 
     with mock.patch.object(
         input_pipeline,
@@ -356,13 +376,62 @@ def test_gems_batch_collator_prepends_precursor_before_mask_sampling() -> None:
     ):
         batch = collator(samples)
 
-    assert torch.equal(captured["peak_valid_mask"], batch["peak_valid_mask"])
+    assert torch.equal(captured["peak_valid_mask"], batch["peak_valid_mask"][:, 1:])
     assert batch["peak_mz"].shape == (2, 5)
     assert batch["peak_valid_mask"][:, 0].all()
-    assert not batch["context_mask"][:, 0].any()
+    assert batch["context_mask"][:, 0].all()
     assert not batch["target_masks"][:, :, 0].any()
     assert torch.equal(batch["context_mask"], expected_context)
     assert torch.equal(batch["target_masks"], expected_targets)
+
+
+def test_gems_batch_collator_keeps_precursor_visible_and_out_of_targets() -> None:
+    collator = input_pipeline._GemsBatchCollator(
+        augment=True,
+        num_target_blocks=2,
+        context_fraction=0.4,
+        target_fraction=0.25,
+        block_min_len=1,
+        mask_strategy="all",
+        mask_lengths=(1, 2, 4),
+        mask_round_from=2,
+        use_precursor_token=True,
+        num_peaks=6,
+        max_precursor_mz=1000.0,
+        min_peak_intensity=1e-4,
+        peak_drop_min_intensity=1e-4,
+        peak_ordering="mz",
+        precursor_peak_exclusion_window_da=0.0,
+    )
+    samples = [
+        {
+            "spectra": torch.tensor(
+                [
+                    [100.0, 120.0, 140.0, 160.0, 180.0, 200.0],
+                    [1.0, 0.9, 0.8, 0.7, 0.6, 0.5],
+                ],
+                dtype=torch.float32,
+            ),
+            "precursor_mz_raw": torch.tensor(500.0, dtype=torch.float32),
+        },
+        {
+            "spectra": torch.tensor(
+                [
+                    [200.0, 220.0, 240.0, 260.0, 280.0, 300.0],
+                    [1.0, 0.95, 0.85, 0.75, 0.65, 0.55],
+                ],
+                dtype=torch.float32,
+            ),
+            "precursor_mz_raw": torch.tensor(600.0, dtype=torch.float32),
+        },
+    ]
+
+    torch.manual_seed(23)
+    batch = collator(samples)
+
+    assert batch["peak_valid_mask"][:, 0].all()
+    assert batch["context_mask"][:, 0].all()
+    assert not batch["target_masks"][:, :, 0].any()
 
 
 def test_mask_block_ranges_reports_absolute_slot_runs() -> None:
