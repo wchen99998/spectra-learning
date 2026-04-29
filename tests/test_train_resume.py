@@ -5,7 +5,13 @@ import torch
 from ml_collections import config_dict
 
 from models.model import PeakSetSIGReg
-from train import _is_weight_decay_target, _load_resume_model_state, _save_checkpoint
+from train import (
+    _build_optimizers,
+    _is_predictor_parameter,
+    _is_weight_decay_target,
+    _load_resume_model_state,
+    _save_checkpoint,
+)
 from utils.training import _build_wandb_init_kwargs, build_model_from_config
 
 
@@ -24,6 +30,28 @@ def _small_model(**overrides) -> PeakSetSIGReg:
     )
     kwargs.update(overrides)
     return PeakSetSIGReg(**kwargs)
+
+
+def _optimizer_param_ids(optimizer: torch.optim.Optimizer) -> set[int]:
+    return {
+        id(param)
+        for group in optimizer.param_groups
+        for param in group["params"]
+    }
+
+
+def _optimizer_config(**overrides) -> config_dict.ConfigDict:
+    cfg = config_dict.ConfigDict()
+    cfg.learning_rate = 1e-3
+    cfg.min_learning_rate = 1e-4
+    cfg.warmup_steps = 0
+    cfg.b2 = 0.999
+    cfg.weight_decay = 0.01
+    cfg.optimizer = "adamw"
+    cfg.optimizer_capturable = False
+    cfg.optimizer_fused = False
+    cfg.update(overrides)
+    return cfg
 
 
 def test_save_checkpoint_persists_nested_scalar_optimizer_state():
@@ -63,6 +91,61 @@ def test_save_checkpoint_persists_nested_scalar_optimizer_state():
     assert "state_dict" in saved_optimizer
     assert "scalar_optimizer_state" in saved_optimizer
     assert saved_optimizer["scalar_optimizer_state"]["state"]
+
+
+def test_build_optimizers_uses_single_adamw_optimizer_by_default():
+    model = _small_model()
+    cfg = _optimizer_config()
+
+    optimizers, schedulers = _build_optimizers(
+        cfg,
+        model,
+        total_steps=10,
+        device=torch.device("cpu"),
+    )
+
+    assert len(optimizers) == 1
+    assert len(schedulers) == 1
+
+
+def test_build_optimizers_applies_predictor_learning_rate_ratio():
+    model = _small_model()
+    cfg = _optimizer_config(predictor_learning_rate_ratio=3.0)
+
+    optimizers, schedulers = _build_optimizers(
+        cfg,
+        model,
+        total_steps=10,
+        device=torch.device("cpu"),
+    )
+
+    assert len(optimizers) == 2
+    assert len(schedulers) == 2
+    assert all(
+        float(group["lr"]) == pytest.approx(1e-3)
+        for group in optimizers[0].param_groups
+    )
+    assert all(
+        float(group["lr"]) == pytest.approx(3e-3)
+        for group in optimizers[1].param_groups
+    )
+    assert schedulers[0].eta_min == pytest.approx(1e-4)
+    assert schedulers[1].eta_min == pytest.approx(3e-4)
+
+    predictor_param_ids = {
+        id(param)
+        for name, param in model.named_parameters()
+        if param.requires_grad and _is_predictor_parameter(name)
+    }
+    base_param_ids = _optimizer_param_ids(optimizers[0])
+    actual_predictor_param_ids = _optimizer_param_ids(optimizers[1])
+    all_trainable_param_ids = {
+        id(param) for param in model.parameters() if param.requires_grad
+    }
+
+    assert actual_predictor_param_ids == predictor_param_ids
+    assert base_param_ids.isdisjoint(actual_predictor_param_ids)
+    assert base_param_ids | actual_predictor_param_ids == all_trainable_param_ids
 
 
 def test_load_resume_model_state_rejects_sigreg_checkpoint_drift():

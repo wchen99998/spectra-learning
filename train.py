@@ -179,8 +179,43 @@ def _make_cosine_schedule(
     return cosine
 
 
+def _scaled_min_lr(min_lr: float | None, ratio: float) -> float | None:
+    return None if min_lr is None else float(min_lr) * ratio
+
+
 def _is_weight_decay_target(name: str, param: torch.nn.Parameter) -> bool:
     return param.ndim >= 2 and name.endswith("weight")
+
+
+_PREDICTOR_PARAM_PREFIXES = (
+    "encoder_to_predictor_proj.",
+    "masked_latent_predictor.",
+    "predictor_final_norm.",
+    "masked_latent_readout.",
+)
+_PREDICTOR_PARAM_NAMES = {
+    "latent_mask_token",
+    "predictor_register_tokens",
+}
+
+
+def _is_predictor_parameter(name: str) -> bool:
+    return name in _PREDICTOR_PARAM_NAMES or name.startswith(
+        _PREDICTOR_PARAM_PREFIXES
+    )
+
+
+def _build_adamw_param_groups(
+    decay_params: list[torch.nn.Parameter],
+    no_decay_params: list[torch.nn.Parameter],
+    weight_decay: float,
+) -> list[dict]:
+    param_groups = []
+    if no_decay_params:
+        param_groups.append({"params": no_decay_params, "weight_decay": 0.0})
+    if decay_params:
+        param_groups.append({"params": decay_params, "weight_decay": weight_decay})
+    return param_groups
 
 
 def _build_optimizers(
@@ -190,6 +225,7 @@ def _build_optimizers(
     device: torch.device,
 ) -> tuple[list[torch.optim.Optimizer], list[torch.optim.lr_scheduler.LRScheduler]]:
     base_lr = float(config.learning_rate)
+    predictor_lr_ratio = float(config.get("predictor_learning_rate_ratio", 1.0))
     warmup_steps = int(config.get("warmup_steps", 0))
     min_learning_rate = config.get("min_learning_rate", None)
     b2 = float(config.get("b2", 0.999))
@@ -207,6 +243,108 @@ def _build_optimizers(
         adamw_lr = float(config.get("adamw_lr", None) or base_lr)
         muon_momentum = float(config.get("muon_momentum", 0.95))
         muon_wd = float(config.get("muon_weight_decay", None) or weight_decay)
+
+        if predictor_lr_ratio != 1.0:
+            base_muon_params = []
+            predictor_muon_params = []
+            base_adamw_no_decay_params = []
+            base_adamw_decay_params = []
+            predictor_adamw_no_decay_params = []
+            predictor_adamw_decay_params = []
+            for name, param in model.named_parameters():
+                if not param.requires_grad:
+                    continue
+                is_predictor = _is_predictor_parameter(name)
+                if (
+                    _is_weight_decay_target(name, param)
+                    and param.stride()[0] % 8 == 0
+                ):
+                    (
+                        predictor_muon_params
+                        if is_predictor
+                        else base_muon_params
+                    ).append(param)
+                elif _is_weight_decay_target(name, param):
+                    (
+                        predictor_adamw_decay_params
+                        if is_predictor
+                        else base_adamw_decay_params
+                    ).append(param)
+                else:
+                    (
+                        predictor_adamw_no_decay_params
+                        if is_predictor
+                        else base_adamw_no_decay_params
+                    ).append(param)
+
+            muon_kwargs = dict(
+                weight_decay=muon_wd,
+                momentum=muon_momentum,
+                nesterov=bool(config.get("muon_nesterov", True)),
+                adjust_lr="rms_norm",
+                ns_coefficients_preset="YOU_COEFFICIENTS",
+                ns_use_kernels=bool(config.get("muon_ns_use_kernels", is_cuda)),
+            )
+            optimizer_specs = [
+                (
+                    base_muon_params,
+                    _build_adamw_param_groups(
+                        base_adamw_decay_params,
+                        base_adamw_no_decay_params,
+                        weight_decay,
+                    ),
+                    muon_lr,
+                    adamw_lr,
+                    min_learning_rate,
+                ),
+                (
+                    predictor_muon_params,
+                    _build_adamw_param_groups(
+                        predictor_adamw_decay_params,
+                        predictor_adamw_no_decay_params,
+                        weight_decay,
+                    ),
+                    muon_lr * predictor_lr_ratio,
+                    adamw_lr * predictor_lr_ratio,
+                    _scaled_min_lr(min_learning_rate, predictor_lr_ratio),
+                ),
+            ]
+            optimizers = []
+            schedulers = []
+            for (
+                muon_params,
+                adamw_params,
+                opt_muon_lr,
+                opt_adamw_lr,
+                opt_min_lr,
+            ) in optimizer_specs:
+                scalar_optimizer = (
+                    torch.optim.AdamW(
+                        adamw_params,
+                        lr=torch.tensor(opt_adamw_lr),
+                        betas=(0.9, b2),
+                        capturable=capturable,
+                        fused=fused,
+                    )
+                    if adamw_params
+                    else None
+                )
+                opt = GNSMuon(
+                    muon_params,
+                    lr=opt_muon_lr,
+                    scalar_optimizer=scalar_optimizer,
+                    **muon_kwargs,
+                )
+                optimizers.append(opt)
+                schedulers.append(
+                    _make_cosine_schedule(
+                        opt,
+                        total_steps,
+                        warmup_steps,
+                        opt_min_lr,
+                    )
+                )
+            return optimizers, schedulers
 
         muon_params = []
         adamw_params: list[dict] = [{"params": [], "weight_decay": 0.0}]
@@ -245,8 +383,75 @@ def _build_optimizers(
         )
         return (
             [muon_opt],
-            [_make_cosine_schedule(muon_opt, total_steps, warmup_steps, min_learning_rate)],
+            [
+                _make_cosine_schedule(
+                    muon_opt,
+                    total_steps,
+                    warmup_steps,
+                    min_learning_rate,
+                )
+            ],
         )
+    if predictor_lr_ratio != 1.0:
+        base_decay_params = []
+        base_no_decay_params = []
+        predictor_decay_params = []
+        predictor_no_decay_params = []
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            is_predictor = _is_predictor_parameter(name)
+            if _is_weight_decay_target(name, param):
+                (
+                    predictor_decay_params if is_predictor else base_decay_params
+                ).append(param)
+            else:
+                (
+                    predictor_no_decay_params if is_predictor else base_no_decay_params
+                ).append(param)
+        optimizer_specs = [
+            (
+                _build_adamw_param_groups(
+                    base_decay_params,
+                    base_no_decay_params,
+                    weight_decay,
+                ),
+                base_lr,
+                min_learning_rate,
+            ),
+            (
+                _build_adamw_param_groups(
+                    predictor_decay_params,
+                    predictor_no_decay_params,
+                    weight_decay,
+                ),
+                base_lr * predictor_lr_ratio,
+                _scaled_min_lr(min_learning_rate, predictor_lr_ratio),
+            ),
+        ]
+        optimizers = []
+        schedulers = []
+        for param_groups, lr, opt_min_lr in optimizer_specs:
+            if not param_groups:
+                continue
+            optimizer = torch.optim.AdamW(
+                param_groups,
+                lr=torch.tensor(lr),
+                betas=(0.9, b2),
+                capturable=capturable,
+                fused=fused,
+            )
+            optimizers.append(optimizer)
+            schedulers.append(
+                _make_cosine_schedule(
+                    optimizer,
+                    total_steps,
+                    warmup_steps,
+                    opt_min_lr,
+                )
+            )
+        return optimizers, schedulers
+
     decay_params = []
     no_decay_params = []
     for name, param in model.named_parameters():
@@ -266,7 +471,14 @@ def _build_optimizers(
         capturable=capturable,
         fused=fused,
     )
-    return [optimizer], [_make_cosine_schedule(optimizer, total_steps, warmup_steps, min_learning_rate)]
+    return [optimizer], [
+        _make_cosine_schedule(
+            optimizer,
+            total_steps,
+            warmup_steps,
+            min_learning_rate,
+        )
+    ]
 
 
 def _save_checkpoint(
@@ -409,6 +621,7 @@ def train_and_evaluate(
         fullgraph=False,
     )
     optimizer_type = str(config.get("optimizer", "adamw")).lower()
+    has_predictor_lr = float(config.get("predictor_learning_rate_ratio", 1.0)) != 1.0
     device_prefetch_size = int(config.get("device_prefetch_size", 1))
     max_duration_hours = config.get("max_duration_hours", None)
     deadline = (
@@ -488,10 +701,18 @@ def train_and_evaluate(
                 }
                 if optimizer_type == "muon":
                     log_metrics["train/lr_muon"] = optimizers[0].param_groups[0]["lr"]
+                    if has_predictor_lr:
+                        log_metrics["train/lr_predictor_muon"] = optimizers[
+                            1
+                        ].param_groups[0]["lr"]
                 else:
                     log_metrics["train/learning_rate"] = optimizers[0].param_groups[0][
                         "lr"
                     ]
+                    if has_predictor_lr:
+                        log_metrics["train/predictor_learning_rate"] = optimizers[
+                            1
+                        ].param_groups[0]["lr"]
                 log_metrics["epoch"] = epoch
                 log_metrics["global_step"] = global_step
                 logger.log_metrics(log_metrics, step=global_step)

@@ -321,6 +321,9 @@ def auto_run_name(config: Any) -> str:
 
     if min_lr is not None:
         parts.append(f"minlr{float(min_lr):.0e}")
+    predictor_lr_ratio = float(config.get("predictor_learning_rate_ratio", 1.0))
+    if predictor_lr_ratio != 1.0:
+        parts.append(f"predlr{predictor_lr_ratio:g}x")
     if warmup > 0:
         parts.append(f"wu{warmup // 1000}k")
     if config.get("use_precursor_token", False):

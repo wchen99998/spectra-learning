@@ -91,6 +91,7 @@ def get_config() -> config_dict.ConfigDict:
     # Training
     cfg.num_epochs = 10
     cfg.learning_rate = 2e-4
+    cfg.predictor_learning_rate_ratio = 1.0
     cfg.warmup_steps = 20_000
     cfg.min_learning_rate = 3e-5
     cfg.b2 = 0.99
