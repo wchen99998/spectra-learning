@@ -104,33 +104,6 @@ def test_sample_block_masks_ragged_stays_within_valid_support() -> None:
     assert int(target_masks.sum().item()) > 0
 
 
-def test_sample_block_masks_random_uses_fraction_ranges() -> None:
-    peak_valid_mask = torch.ones((2, 8), dtype=torch.bool)
-
-    torch.manual_seed(23)
-    context_mask, target_masks = input_pipeline._sample_block_masks_torch(
-        peak_valid_mask,
-        num_target_blocks=2,
-        context_fraction=0.4,
-        target_fraction=0.25,
-        block_min_len=1,
-        mask_strategy="random",
-        context_fraction_range=(0.25, 0.5),
-        target_fraction_range=(0.125, 0.25),
-    )
-
-    context_counts = context_mask.sum(dim=1)
-    target_counts = target_masks.sum(dim=2)
-
-    assert context_mask.shape == peak_valid_mask.shape
-    assert target_masks.shape == (2, 2, 8)
-    assert all(2 <= int(count.item()) <= 4 for count in context_counts)
-    assert all(1 <= int(count.item()) <= 2 for count in target_counts.reshape(-1))
-    assert not (context_mask & ~peak_valid_mask).any()
-    assert not (target_masks & ~peak_valid_mask.unsqueeze(1)).any()
-    assert not (target_masks & context_mask.unsqueeze(1)).any()
-
-
 def test_sample_block_masks_context_and_targets_are_disjoint_for_all_modes() -> None:
     peak_valid_mask = torch.tensor(
         [
@@ -145,13 +118,11 @@ def test_sample_block_masks_context_and_targets_are_disjoint_for_all_modes() -> 
         context_fraction=0.4,
         target_fraction=0.25,
         block_min_len=1,
-        context_fraction_range=(0.25, 0.5),
-        target_fraction_range=(0.125, 0.25),
         mask_lengths=(1, 2, 3),
         mask_round_from=2,
     )
 
-    for seed, strategy in enumerate(("contiguous", "ragged", "random"), start=31):
+    for seed, strategy in enumerate(("contiguous", "ragged"), start=31):
         torch.manual_seed(seed)
         context_mask, target_masks = input_pipeline._sample_block_masks_torch(
             peak_valid_mask,
@@ -166,7 +137,7 @@ def test_sample_block_masks_context_and_targets_are_disjoint_for_all_modes() -> 
     with mock.patch.object(
         input_pipeline,
         "_sample_mask_strategy_torch",
-        side_effect=["contiguous", "ragged", "random"],
+        side_effect=["contiguous", "ragged", "contiguous"],
     ):
         torch.manual_seed(37)
         context_mask, target_masks = input_pipeline._sample_block_masks_torch(
@@ -186,7 +157,7 @@ def test_sample_block_masks_all_selects_per_row_mask_modes() -> None:
     with mock.patch.object(
         input_pipeline,
         "_sample_mask_strategy_torch",
-        side_effect=["contiguous", "ragged", "random"],
+        side_effect=["contiguous", "ragged", "contiguous"],
     ) as sample_strategy:
         torch.manual_seed(29)
         context_mask, target_masks = input_pipeline._sample_block_masks_torch(
@@ -196,8 +167,6 @@ def test_sample_block_masks_all_selects_per_row_mask_modes() -> None:
             target_fraction=0.25,
             block_min_len=1,
             mask_strategy="all",
-            context_fraction_range=(0.375, 0.375),
-            target_fraction_range=(0.25, 0.25),
             mask_lengths=(1, 2, 4),
             mask_round_from=2,
         )
@@ -210,11 +179,10 @@ def test_sample_block_masks_all_selects_per_row_mask_modes() -> None:
     assert not (target_masks & context_mask.unsqueeze(1)).any()
 
 
-def test_resolve_visualization_strategies_includes_random_mode() -> None:
+def test_resolve_visualization_strategies_includes_supported_modes() -> None:
     assert input_pipeline._resolve_visualization_strategies("ragged") == (
         "contiguous",
         "ragged",
-        "random",
     )
 
 
@@ -222,7 +190,6 @@ def test_resolve_visualization_strategies_keeps_all_meta_mode() -> None:
     assert input_pipeline._resolve_visualization_strategies("all") == (
         "contiguous",
         "ragged",
-        "random",
         "all",
     )
 
@@ -289,7 +256,7 @@ def test_gems_batch_collator_samples_real_peaks_then_prepends_precursor() -> Non
         context_fraction=0.4,
         target_fraction=0.25,
         block_min_len=1,
-        mask_strategy="random",
+        mask_strategy="ragged",
         use_precursor_token=True,
         num_peaks=4,
         max_precursor_mz=1000.0,

@@ -379,20 +379,6 @@ def _evaluate_strategy(
         target_fraction=float(cfg.get("jepa_target_fraction", 0.25)),
         block_min_len=int(cfg.get("jepa_block_min_len", 1)),
         mask_strategy=name,
-        context_fraction_range=tuple(
-            float(v)
-            for v in cfg.get(
-                "jepa_context_fraction_range",
-                (cfg.get("jepa_context_fraction", 0.5), cfg.get("jepa_context_fraction", 0.5)),
-            )
-        ),
-        target_fraction_range=tuple(
-            float(v)
-            for v in cfg.get(
-                "jepa_target_fraction_range",
-                (cfg.get("jepa_target_fraction", 0.25), cfg.get("jepa_target_fraction", 0.25)),
-            )
-        ),
         mask_lengths=tuple(int(v) for v in cfg.get("jepa_mask_lengths", (1, 2, 4, 8, 16))),
         mask_round_from=int(cfg.get("jepa_mask_round_from", len(cfg.get("jepa_mask_lengths", (1, 2, 4, 8, 16))))),
     )
@@ -540,7 +526,7 @@ def main() -> None:
         "--strategies",
         nargs="+",
         default=None,
-        help="Mask strategies to evaluate. Defaults to config strategy plus contiguous/ragged/random/all.",
+        help="Mask strategies to evaluate. Defaults to config strategy plus contiguous/ragged/all.",
     )
     parser.add_argument("--output", type=Path, default=Path("outputs/masking_statistics.json"))
     args = parser.parse_args()
@@ -575,7 +561,7 @@ def main() -> None:
 
     configured = str(cfg.get("jepa_mask_strategy", "contiguous")).lower()
     if args.strategies is None:
-        strategies = tuple(dict.fromkeys([configured, "contiguous", "ragged", "random", "all"]))
+        strategies = tuple(dict.fromkeys([configured, "contiguous", "ragged", "all"]))
     else:
         strategies = tuple(args.strategies)
 
@@ -593,9 +579,7 @@ def main() -> None:
         "jepa": {
             "num_target_blocks": int(cfg.get("jepa_num_target_blocks", 2)),
             "context_fraction": float(cfg.get("jepa_context_fraction", 0.5)),
-            "context_fraction_range": list(cfg.get("jepa_context_fraction_range", (cfg.get("jepa_context_fraction", 0.5), cfg.get("jepa_context_fraction", 0.5)))),
             "target_fraction": float(cfg.get("jepa_target_fraction", 0.25)),
-            "target_fraction_range": list(cfg.get("jepa_target_fraction_range", (cfg.get("jepa_target_fraction", 0.25), cfg.get("jepa_target_fraction", 0.25)))),
             "block_min_len": int(cfg.get("jepa_block_min_len", 1)),
             "mask_lengths": list(cfg.get("jepa_mask_lengths", (1, 2, 4, 8, 16))),
             "mask_round_from": int(cfg.get("jepa_mask_round_from", len(cfg.get("jepa_mask_lengths", (1, 2, 4, 8, 16))))),

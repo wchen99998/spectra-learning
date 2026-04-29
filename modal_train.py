@@ -162,31 +162,16 @@ JEPA_MASKING_RECIPES = [
         {
             "jepa_num_target_blocks": 2,
             "jepa_context_fraction": 0.35,
-            "jepa_context_fraction_range": (0.35, 0.35),
             "jepa_target_fraction": 0.20,
-            "jepa_target_fraction_range": (0.20, 0.20),
             "jepa_mask_strategy": "ragged",
         },
     ),
     (
-        "rnd-c25-45-t15-25",
+        "all-c35-t20",
         {
             "jepa_num_target_blocks": 2,
             "jepa_context_fraction": 0.35,
-            "jepa_context_fraction_range": (0.25, 0.45),
             "jepa_target_fraction": 0.20,
-            "jepa_target_fraction_range": (0.15, 0.25),
-            "jepa_mask_strategy": "random",
-        },
-    ),
-    (
-        "all-c25-45-t15-25",
-        {
-            "jepa_num_target_blocks": 2,
-            "jepa_context_fraction": 0.35,
-            "jepa_context_fraction_range": (0.25, 0.45),
-            "jepa_target_fraction": 0.20,
-            "jepa_target_fraction_range": (0.15, 0.25),
             "jepa_mask_strategy": "all",
         },
     ),

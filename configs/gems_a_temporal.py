@@ -65,9 +65,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_lambda = 0.02
     cfg.jepa_num_target_blocks = 2
     cfg.jepa_context_fraction = 0.5
-    cfg.jepa_context_fraction_range = (0.5, 0.5)
     cfg.jepa_target_fraction = 0.25
-    cfg.jepa_target_fraction_range = (0.25, 0.25)
     cfg.jepa_block_min_len = 1
     cfg.jepa_mask_strategy = "contiguous"
     cfg.norm_type = "layernorm"

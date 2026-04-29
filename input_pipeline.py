@@ -36,7 +36,7 @@ _NUM_PEAKS_OUTPUT = 60
 _METADATA_FILENAME = "metadata.json"
 _DEFAULT_JEPA_MASK_STRATEGY = "contiguous"
 _DEFAULT_JEPA_MASK_LENGTHS = (1, 2, 4, 8, 16)
-_JEPA_MASK_STRATEGIES = ("contiguous", "ragged", "random")
+_JEPA_MASK_STRATEGIES = ("contiguous", "ragged")
 
 
 def numpy_batch_to_torch(batch: dict[str, Any]) -> dict[str, Any]:
@@ -218,38 +218,6 @@ def _sample_contiguous_mask_1d_torch(
     return mask & active_positions
 
 
-def _sample_random_mask_1d_torch(
-    active_positions: torch.Tensor,
-    *,
-    masked_fraction: float,
-) -> torch.Tensor:
-    active_count = int(active_positions.sum().item())
-    if active_count == 0:
-        return torch.zeros_like(active_positions)
-    mask_count = min(
-        int(round(float(masked_fraction) * float(active_count))),
-        active_count,
-    )
-    if mask_count == 0:
-        return torch.zeros_like(active_positions)
-    active_indices = torch.where(active_positions)[0]
-    selected_indices = active_indices[
-        torch.randperm(active_count, device=active_positions.device)[:mask_count]
-    ]
-    mask = torch.zeros_like(active_positions)
-    mask[selected_indices] = True
-    return mask
-
-
-def _sample_mask_fraction_torch(
-    fraction_range: tuple[float, float],
-    *,
-    device: torch.device,
-) -> float:
-    low, high = (float(value) for value in fraction_range)
-    return float(torch.empty((), device=device).uniform_(low, high).item())
-
-
 def _sample_mask_strategy_torch(
     mask_strategy: str,
     *,
@@ -273,8 +241,6 @@ def _sample_block_masks_torch(
     target_fraction: float,
     block_min_len: int,
     mask_strategy: str = _DEFAULT_JEPA_MASK_STRATEGY,
-    context_fraction_range: tuple[float, float] | None = None,
-    target_fraction_range: tuple[float, float] | None = None,
     mask_lengths: tuple[int, ...] = _DEFAULT_JEPA_MASK_LENGTHS,
     mask_round_from: int = len(_DEFAULT_JEPA_MASK_LENGTHS),
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -283,10 +249,6 @@ def _sample_block_masks_torch(
         strategy = "ragged"
     if strategy not in {*_JEPA_MASK_STRATEGIES, "all"}:
         raise ValueError(f"Unsupported JEPA mask strategy: {mask_strategy!r}")
-    if context_fraction_range is None:
-        context_fraction_range = (float(context_fraction), float(context_fraction))
-    if target_fraction_range is None:
-        target_fraction_range = (float(target_fraction), float(target_fraction))
     lengths = tuple(int(length) for length in mask_lengths)
     round_from = int(mask_round_from)
     device = peak_valid_mask.device
@@ -307,15 +269,6 @@ def _sample_block_masks_torch(
             continue
         row_context_fraction = float(context_fraction)
         row_target_fraction = float(target_fraction)
-        if row_strategy == "random":
-            row_context_fraction = _sample_mask_fraction_torch(
-                context_fraction_range,
-                device=device,
-            )
-            row_target_fraction = _sample_mask_fraction_torch(
-                target_fraction_range,
-                device=device,
-            )
         desired_context = max(
             int(round(valid_count * row_context_fraction)),
             int(block_min_len),
@@ -348,11 +301,6 @@ def _sample_block_masks_torch(
                 lengths=lengths,
                 round_from=round_from,
             )
-        else:
-            row_context = _sample_random_mask_1d_torch(
-                row_valid,
-                masked_fraction=float(context_len) / float(valid_count),
-            )
         context_mask[row_idx] = row_context
         if num_target_blocks == 0 or target_len == 0:
             continue
@@ -369,18 +317,12 @@ def _sample_block_masks_torch(
             continue
         target_fraction_on_available = float(target_len) / float(available_for_targets)
         for block_idx in range(int(num_target_blocks)):
-            if row_strategy == "ragged":
-                target_masks[row_idx, block_idx] = _sample_ragged_block_mask_1d_torch(
-                    valid_target_positions,
-                    masked_fraction=target_fraction_on_available,
-                    lengths=lengths,
-                    round_from=round_from,
-                )
-            else:
-                target_masks[row_idx, block_idx] = _sample_random_mask_1d_torch(
-                    valid_target_positions,
-                    masked_fraction=target_fraction_on_available,
-                )
+            target_masks[row_idx, block_idx] = _sample_ragged_block_mask_1d_torch(
+                valid_target_positions,
+                masked_fraction=target_fraction_on_available,
+                lengths=lengths,
+                round_from=round_from,
+            )
     return context_mask, target_masks
 
 
@@ -449,8 +391,6 @@ class _GemsBatchCollator:
         target_fraction: float,
         block_min_len: int,
         mask_strategy: str = _DEFAULT_JEPA_MASK_STRATEGY,
-        context_fraction_range: tuple[float, float] | None = None,
-        target_fraction_range: tuple[float, float] | None = None,
         mask_lengths: tuple[int, ...] = _DEFAULT_JEPA_MASK_LENGTHS,
         mask_round_from: int = len(_DEFAULT_JEPA_MASK_LENGTHS),
         use_precursor_token: bool,
@@ -467,16 +407,6 @@ class _GemsBatchCollator:
         self.target_fraction = float(target_fraction)
         self.block_min_len = int(block_min_len)
         self.mask_strategy = str(mask_strategy)
-        if context_fraction_range is None:
-            context_fraction_range = (self.context_fraction, self.context_fraction)
-        if target_fraction_range is None:
-            target_fraction_range = (self.target_fraction, self.target_fraction)
-        self.context_fraction_range = tuple(
-            float(value) for value in context_fraction_range
-        )
-        self.target_fraction_range = tuple(
-            float(value) for value in target_fraction_range
-        )
         self.mask_lengths = tuple(int(length) for length in mask_lengths)
         self.mask_round_from = int(mask_round_from)
         self.use_precursor_token = bool(use_precursor_token)
@@ -518,8 +448,6 @@ class _GemsBatchCollator:
                 target_fraction=self.target_fraction,
                 block_min_len=self.block_min_len,
                 mask_strategy=self.mask_strategy,
-                context_fraction_range=self.context_fraction_range,
-                target_fraction_range=self.target_fraction_range,
                 mask_lengths=self.mask_lengths,
                 mask_round_from=self.mask_round_from,
             )
@@ -574,26 +502,6 @@ class GemsNativeDataModule:
         self.jepa_block_min_len = int(config.get("jepa_block_min_len", 1))
         self.jepa_mask_strategy = str(
             config.get("jepa_mask_strategy", _DEFAULT_JEPA_MASK_STRATEGY)
-        )
-        self.jepa_context_fraction_range = tuple(
-            float(value)
-            for value in config.get(
-                "jepa_context_fraction_range",
-                (
-                    self.jepa_context_fraction,
-                    self.jepa_context_fraction,
-                ),
-            )
-        )
-        self.jepa_target_fraction_range = tuple(
-            float(value)
-            for value in config.get(
-                "jepa_target_fraction_range",
-                (
-                    self.jepa_target_fraction,
-                    self.jepa_target_fraction,
-                ),
-            )
         )
         self.jepa_mask_lengths = tuple(
             int(length)
@@ -775,8 +683,6 @@ class GemsNativeDataModule:
                 target_fraction=self.jepa_target_fraction,
                 block_min_len=self.jepa_block_min_len,
                 mask_strategy=self.jepa_mask_strategy,
-                context_fraction_range=self.jepa_context_fraction_range,
-                target_fraction_range=self.jepa_target_fraction_range,
                 mask_lengths=self.jepa_mask_lengths,
                 mask_round_from=self.jepa_mask_round_from,
                 use_precursor_token=self.use_precursor_token,
@@ -864,8 +770,6 @@ def _make_visualization_collator_kwargs(
         "target_fraction": datamodule.jepa_target_fraction,
         "block_min_len": datamodule.jepa_block_min_len,
         "mask_strategy": datamodule.jepa_mask_strategy,
-        "context_fraction_range": datamodule.jepa_context_fraction_range,
-        "target_fraction_range": datamodule.jepa_target_fraction_range,
         "mask_lengths": datamodule.jepa_mask_lengths,
         "mask_round_from": datamodule.jepa_mask_round_from,
         "use_precursor_token": datamodule.use_precursor_token,

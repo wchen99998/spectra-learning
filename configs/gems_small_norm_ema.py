@@ -12,9 +12,7 @@ def get_config():
     cfg.sigreg_lambda = 0
 
     cfg.jepa_context_fraction = 0.35
-    cfg.jepa_context_fraction_range = (0.3, 0.45)
     cfg.jepa_target_fraction = 0.2
-    cfg.jepa_target_fraction_range = (0.15, 0.3)
     cfg.jepa_block_min_len = 1
     cfg.jepa_mask_strategy = "all"
     cfg.jepa_mask_lengths = (2, 4, 8, 12,)

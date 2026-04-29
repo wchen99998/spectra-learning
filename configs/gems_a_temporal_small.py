@@ -74,9 +74,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.sigreg_lambda = 0.02
     cfg.jepa_num_target_blocks = 2
     cfg.jepa_context_fraction = 0.5
-    cfg.jepa_context_fraction_range = (0.5, 0.5)
     cfg.jepa_target_fraction = 0.1
-    cfg.jepa_target_fraction_range = (0.1, 0.1)
     cfg.norm_type = "layernorm"
 
     # Training
