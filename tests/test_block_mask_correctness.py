@@ -3,7 +3,7 @@
 import torch
 import torch.nn.functional as F
 
-from networks.transformer_torch import Attention, create_visible_attention_mask
+from spectra_learning.models.transformer import Attention, create_visible_attention_mask
 
 
 def _naive_masked_attention(q, k, v, valid_mask):

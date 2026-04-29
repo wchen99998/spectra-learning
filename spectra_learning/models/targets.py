@@ -1,6 +1,6 @@
 import torch
 
-from networks.transformer_torch import create_visible_attention_mask
+from spectra_learning.models.transformer import create_visible_attention_mask
 from spectra_learning.models.common import _active_autocast_context
 from spectra_learning.models.encoder import PeakSetEncoder
 

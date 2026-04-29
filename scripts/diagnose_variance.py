@@ -112,7 +112,7 @@ def diagnose_encoder(model: PeakSetSIGReg, batch: dict[str, torch.Tensor]):
     # Step 2: Per-block activations
     attn_mask = None
     if visible_mask is not None:
-        from networks.transformer_torch import create_visible_attention_mask
+        from spectra_learning.models.transformer import create_visible_attention_mask
 
         attn_mask = create_visible_attention_mask(visible_mask)
 

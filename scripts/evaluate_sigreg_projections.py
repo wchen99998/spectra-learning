@@ -290,7 +290,7 @@ def _encoder_forward_embedder_fp32(
     selected_peak_outputs: dict[int, torch.Tensor] = {}
     special_len = int(encoder.use_cls_token) + encoder.num_register_tokens
     x, attn_mask = encoder._append_special_tokens(x, valid_mask)
-    from networks.transformer_torch import create_visible_attention_mask
+    from spectra_learning.models.transformer import create_visible_attention_mask
 
     attn_mask = create_visible_attention_mask(attn_mask)
     for block_idx, block in enumerate(encoder.blocks, start=1):

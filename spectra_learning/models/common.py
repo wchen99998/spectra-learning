@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from networks import transformer_torch
+from spectra_learning.models.transformer import TransformerBlock
 
 
 def _active_autocast_context(device_type: str):
@@ -58,7 +58,7 @@ def _build_non_causal_blocks(
         dropout=dropout,
     )
     blocks = nn.ModuleList(
-        [transformer_torch.TransformerBlock(**block_kwargs) for _ in range(num_layers)]
+        [TransformerBlock(**block_kwargs) for _ in range(num_layers)]
     )
     _apply_depth_scaled_init(blocks, num_layers)
     return blocks

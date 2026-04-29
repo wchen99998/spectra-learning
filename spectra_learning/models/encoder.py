@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-from networks.transformer_torch import _build_norm, create_visible_attention_mask
+from spectra_learning.models.transformer import _build_norm, create_visible_attention_mask
 from spectra_learning.models.common import (
     _build_frozen_position_embedding,
     _build_non_causal_blocks,

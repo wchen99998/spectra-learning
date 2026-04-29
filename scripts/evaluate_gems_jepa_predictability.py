@@ -18,7 +18,7 @@ from ml_collections import config_dict
 
 from spectra_learning.data.gems.conversion import _prepend_precursor_token_torch
 from spectra_learning.data.gems.masking import _normalize_mask_strategy_name
-from networks.transformer_torch import _build_norm
+from spectra_learning.models.transformer import _build_norm
 from spectra_learning.data.gems.intensity_aware import (
     AWARE_MIXED_MASK_CONFIG,
     INTENSITY_AWARE_MASK_STRATEGY,

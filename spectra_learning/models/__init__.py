@@ -9,10 +9,18 @@ from spectra_learning.models.temporal import (
     CrossAttention,
     TemporalDecoderBlock,
 )
+from spectra_learning.models.transformer import (
+    Attention,
+    FeedForward,
+    TransformerBlock,
+    create_visible_attention_mask,
+)
 
 __all__ = [
+    "Attention",
     "CovariancePool",
     "CrossAttention",
+    "FeedForward",
     "FourierFeatures",
     "PeakFeatureEmbedder",
     "PeakSetEncoder",
@@ -22,4 +30,6 @@ __all__ = [
     "SlotwiseSIGReg",
     "SpectralGraphormerBias",
     "TemporalDecoderBlock",
+    "TransformerBlock",
+    "create_visible_attention_mask",
 ]

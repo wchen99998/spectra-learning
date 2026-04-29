@@ -4,8 +4,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from networks import transformer_torch
-from networks.transformer_torch import _build_norm
+from spectra_learning.models.transformer import Attention, FeedForward, _build_norm
 
 
 class CrossAttention(nn.Module):
@@ -63,14 +62,14 @@ class TemporalDecoderBlock(nn.Module):
                  norm_eps: float, hidden_dim: int | None,
                  qk_norm: bool = False, norm_type: str = "rmsnorm"):
         super().__init__()
-        self.attention = transformer_torch.Attention(
+        self.attention = Attention(
             dim, n_heads, n_kv_heads=n_kv_heads,
             qk_norm=qk_norm, norm_type=norm_type, norm_eps=norm_eps,
         )
         self.cross_attn = CrossAttention(dim, n_heads, n_kv_heads=n_kv_heads,
                                           qk_norm=qk_norm, norm_type=norm_type,
                                           norm_eps=norm_eps)
-        self.feed_forward = transformer_torch.FeedForward(dim, hidden_dim=hidden_dim)
+        self.feed_forward = FeedForward(dim, hidden_dim=hidden_dim)
         self.attention_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
         self.cross_attn_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
         self.ffn_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)

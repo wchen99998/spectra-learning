@@ -137,7 +137,7 @@ class FeedForward(nn.Module):
         nn.init.trunc_normal_(self.w2.weight, std=1.0 / math.sqrt(hidden_dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(torch.nn.functional.silu(self.w1(x)))
+        return self.w2(F.silu(self.w1(x)))
 
 
 class TransformerBlock(nn.Module):
@@ -177,9 +177,11 @@ class TransformerBlock(nn.Module):
         attn_mask: torch.Tensor | None = None,
         attn_bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        h = x + self.drop(self.attention(
-            self.attention_norm(x),
-            attn_mask=attn_mask,
-            attn_bias=attn_bias,
-        ))
+        h = x + self.drop(
+            self.attention(
+                self.attention_norm(x),
+                attn_mask=attn_mask,
+                attn_bias=attn_bias,
+            )
+        )
         return h + self.drop(self.feed_forward(self.ffn_norm(h)))
