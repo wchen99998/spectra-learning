@@ -632,7 +632,7 @@ class PeakSetEncoder(nn.Module):
             norm_type=norm_type,
         )
         self.final_norm = (
-            _build_norm(model_dim, eps=norm_eps, norm_type=norm_type)
+            _build_norm(model_dim, eps=norm_eps, norm_type=norm_type, affine=False)
             if apply_final_norm
             else nn.Identity()
         )
@@ -1076,7 +1076,12 @@ class PeakSetSIGReg(nn.Module):
             dropout=predictor_dropout,
         )
         self.predictor_final_norm = (
-            _build_norm(self.predictor_dim, eps=self.norm_eps, norm_type=self.norm_type)
+            _build_norm(
+                self.predictor_dim,
+                eps=self.norm_eps,
+                norm_type=self.norm_type,
+                affine=False,
+            )
             if predictor_apply_final_norm
             else nn.Identity()
         )

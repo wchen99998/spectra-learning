@@ -261,6 +261,26 @@ def test_predictor_final_norm_toggle_changes_output():
     assert float(diff) > 1e-3
 
 
+def test_encoder_and_predictor_final_norms_are_non_affine():
+    model = _build_model()
+
+    assert list(model.encoder.final_norm.parameters()) == []
+    assert list(model.predictor_final_norm.parameters()) == []
+    assert list(model.encoder.blocks[0].attention_norm.parameters())
+    assert list(model.masked_latent_predictor[0].attention_norm.parameters())
+
+    encoder = PeakSetEncoder(
+        model_dim=32,
+        num_layers=2,
+        num_heads=4,
+        num_peaks=6,
+        feature_mlp_hidden_dim=32,
+        norm_type="layernorm",
+        apply_final_norm=True,
+    )
+    assert list(encoder.final_norm.parameters()) == []
+
+
 @torch.no_grad()
 def test_predictor_output_is_independent_from_encoder_positions():
     torch.manual_seed(0)

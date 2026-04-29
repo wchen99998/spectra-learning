@@ -31,13 +31,19 @@ def combine_attention_mask_and_bias(
     return bias + attn_mask.to(dtype=dtype)
 
 
-def _build_norm(dim: int, eps: float | None, norm_type: str) -> nn.Module:
+def _build_norm(
+    dim: int,
+    eps: float | None,
+    norm_type: str,
+    *,
+    affine: bool = True,
+) -> nn.Module:
     kind = str(norm_type).lower()
     eps = 1e-5 if eps is None else eps
     if kind == "rmsnorm":
-        return nn.RMSNorm(dim, eps=eps)
+        return nn.RMSNorm(dim, eps=eps, elementwise_affine=affine)
     if kind == "layernorm":
-        return nn.LayerNorm(dim, eps=eps)
+        return nn.LayerNorm(dim, eps=eps, elementwise_affine=affine)
     raise ValueError(f"Unsupported norm_type: {norm_type}")
 
 
