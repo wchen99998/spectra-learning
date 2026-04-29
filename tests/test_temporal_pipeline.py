@@ -10,7 +10,7 @@ from ml_collections import config_dict
 
 from input_pipeline_temporal import (
     FramePairDataset,
-    TemporalLightningDataModule,
+    TemporalDataModule,
     _load_and_preprocess_all,
     _preprocess_chunk,
 )
@@ -329,7 +329,7 @@ class TestCollation:
             assert batch[f"{prefix}_precursor_mz"].shape == (4,)
 
 
-class TestTemporalLightningDataModule:
+class TestTemporalDataModule:
     def test_init_and_info(self, synthetic_data_dir: Path):
         cfg = config_dict.ConfigDict()
         cfg.temporal_data_dir = str(synthetic_data_dir)
@@ -339,7 +339,7 @@ class TestTemporalLightningDataModule:
         cfg.dataloader_num_workers = 0
         cfg.dataloader_pin_memory = False
 
-        dm = TemporalLightningDataModule(cfg, seed=42)
+        dm = TemporalDataModule(cfg, seed=42)
         assert dm.info["train_experiments"] == 11  # includes single-spectrum
         assert dm.info["train_usable_experiments"] == 10  # excludes single-spectrum
         assert dm.info["validation_experiments"] == 3
@@ -356,7 +356,7 @@ class TestTemporalLightningDataModule:
         cfg.dataloader_num_workers = 0
         cfg.dataloader_pin_memory = False
 
-        dm = TemporalLightningDataModule(cfg, seed=42)
+        dm = TemporalDataModule(cfg, seed=42)
         loader = dm.train_loader
         batch = next(iter(loader))
         assert len(loader) == 7
@@ -374,7 +374,7 @@ class TestTemporalLightningDataModule:
         cfg.dataloader_num_workers = 0
         cfg.dataloader_pin_memory = False
 
-        dm = TemporalLightningDataModule(cfg, seed=42)
+        dm = TemporalDataModule(cfg, seed=42)
         batch = next(iter(dm.val_loader))
         for prefix in ("frame", "next_frame"):
             assert batch[f"{prefix}_peak_mz"].shape == (2, 60)

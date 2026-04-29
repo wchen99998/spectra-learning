@@ -9,7 +9,8 @@ import torch
 from models.losses import SlotwiseSIGReg
 from models.model import PeakSetSIGReg
 from models.peak_features import FourierFeatures, PeakFeatureEmbedder
-from train import _is_weight_decay_target, _train_step_impl
+from spectra_learning.training.optimization import is_weight_decay_target
+from spectra_learning.training.steps import train_step_impl
 from utils.spectra_preprocessing import PRECURSOR_TOKEN_INTENSITY
 from utils.training import load_pretrained_weights
 
@@ -744,7 +745,7 @@ class BlockJEPATests(unittest.TestCase):
             next(model.teacher_target_projector.parameters()).detach().clone()
         )
 
-        metrics = _train_step_impl(
+        metrics = train_step_impl(
             model,
             batch,
             [optimizer],
@@ -964,7 +965,7 @@ class BlockJEPATests(unittest.TestCase):
             "forward_augmented",
             return_value={"loss": fake_loss},
         ) as forward_augmented_mock:
-            metrics = _train_step_impl(
+            metrics = train_step_impl(
                 model,
                 batch,
                 [optimizer],
@@ -1050,19 +1051,19 @@ class BlockJEPATests(unittest.TestCase):
     def test_weight_decay_targets_all_2d_weights(self):
         model = self._build_model()
         self.assertTrue(
-            _is_weight_decay_target(
+            is_weight_decay_target(
                 "encoder.embedder.output_proj.weight",
                 model.encoder.embedder.output_proj.weight,
             )
         )
         self.assertTrue(
-            _is_weight_decay_target(
+            is_weight_decay_target(
                 "encoder.embedder.fourier_ffn.0.weight",
                 model.encoder.embedder.fourier_ffn[0].weight,
             )
         )
         self.assertFalse(
-            _is_weight_decay_target(
+            is_weight_decay_target(
                 "encoder.embedder.mz_fourier.b",
                 model.encoder.embedder.mz_fourier.b,
             )
@@ -1260,7 +1261,7 @@ class PrependPrecursorTokenTests(unittest.TestCase):
     """Test the torch-side _prepend_precursor_token_torch function."""
 
     def test_shapes_and_values(self):
-        from input_pipeline import _prepend_precursor_token_torch
+        from spectra_learning.data.gems.conversion import _prepend_precursor_token_torch
 
         B, N, K = 4, 8, 2
         batch = {
@@ -1303,7 +1304,7 @@ class PrependPrecursorTokenTests(unittest.TestCase):
 
     def test_without_masks(self):
         """Works on raw (pre-augmentation) batches without context_mask/target_masks."""
-        from input_pipeline import _prepend_precursor_token_torch
+        from spectra_learning.data.gems.conversion import _prepend_precursor_token_torch
 
         B, N = 3, 5
         batch = {

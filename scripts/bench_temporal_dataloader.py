@@ -1,4 +1,4 @@
-"""Benchmark FramePairDataset / TemporalLightningDataModule throughput.
+"""Benchmark FramePairDataset / TemporalDataModule throughput.
 
 Uses ``torch.utils.benchmark.Timer`` for single-item latency and manual
 timing with multiple runs for DataLoader throughput (since DataLoader

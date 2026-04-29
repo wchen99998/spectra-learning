@@ -2,7 +2,7 @@ import importlib
 
 import torch
 
-import input_pipeline
+import spectra_learning.data.gems as gems
 from utils.intensity_aware_masking import (
     AWARE_MIXED_MASK_CONFIG,
     sample_intensity_aware_masks_torch,
@@ -67,7 +67,7 @@ def test_intensity_aware_masks_handle_sparse_rows() -> None:
 
 
 def test_gems_batch_collator_generates_intensity_aware_masks_before_precursor() -> None:
-    collator = input_pipeline._GemsBatchCollator(
+    collator = gems.GemsBatchCollator(
         augment=True,
         num_target_blocks=2,
         context_fraction=0.4,

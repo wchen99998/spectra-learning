@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from ml_collections import config_dict
 from sklearn.metrics import r2_score
 
-from input_pipeline import numpy_batch_to_torch
+from spectra_learning.data.gems.conversion import numpy_batch_to_torch
 from models.model import CovariancePool, CrossAttention, PeakSetEncoder, PeakSetSIGReg
 from utils.massspec_probe_data import MassSpecProbeData
 from utils.massspec_probe_targets import (

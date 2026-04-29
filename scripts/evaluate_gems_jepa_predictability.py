@@ -16,7 +16,8 @@ import torch
 import yaml
 from ml_collections import config_dict
 
-import input_pipeline
+from spectra_learning.data.gems.conversion import _prepend_precursor_token_torch
+from spectra_learning.data.gems.masking import _normalize_mask_strategy_name
 from networks.transformer_torch import _build_norm
 from utils.intensity_aware_masking import (
     AWARE_MIXED_MASK_CONFIG,
@@ -390,7 +391,7 @@ def evaluate_strategy(
         end = min(start + batch_size, int(pre["peak_valid_mask"].shape[0]))
         batch = {key: value[start:end].clone() for key, value in pre.items()}
         original_valid_count = batch["peak_valid_mask"].sum(dim=1).float()
-        if input_pipeline._normalize_mask_strategy_name(strategy) == INTENSITY_AWARE_MASK_STRATEGY:
+        if _normalize_mask_strategy_name(strategy) == INTENSITY_AWARE_MASK_STRATEGY:
             context, targets = sample_intensity_aware_masks_torch(
                 batch["peak_valid_mask"],
                 batch["peak_intensity"],
@@ -417,7 +418,7 @@ def evaluate_strategy(
         batch["context_mask"] = context
         batch["target_masks"] = targets
         if bool(cfg.use_precursor_token):
-            batch = input_pipeline._prepend_precursor_token_torch(batch)
+            batch = _prepend_precursor_token_torch(batch)
         batch = {key: value.to(device) for key, value in batch.items()}
 
         with torch.no_grad(), torch.autocast(
@@ -546,7 +547,7 @@ def main() -> None:
         "configured": str(cfg.jepa_mask_strategy),
         "num_target_blocks": int(cfg.jepa_num_target_blocks),
     }
-    if input_pipeline._normalize_mask_strategy_name(cfg.jepa_mask_strategy) == INTENSITY_AWARE_MASK_STRATEGY:
+    if _normalize_mask_strategy_name(cfg.jepa_mask_strategy) == INTENSITY_AWARE_MASK_STRATEGY:
         mask_policy["intensity_aware"] = {
             key: float(cfg.get(f"jepa_intensity_aware_{key}", value))
             for key, value in AWARE_MIXED_MASK_CONFIG.items()

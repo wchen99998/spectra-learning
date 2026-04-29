@@ -6,7 +6,7 @@ import math
 import random
 from pathlib import Path
 
-from train import train_and_evaluate
+from spectra_learning.training.pretrain import train_and_evaluate
 from utils.training import load_config
 
 

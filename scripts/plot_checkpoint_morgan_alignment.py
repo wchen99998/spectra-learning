@@ -16,7 +16,7 @@ from rdkit.Chem import AllChem
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from input_pipeline import _prepend_precursor_token_torch
+from spectra_learning.data.gems.conversion import _prepend_precursor_token_torch
 from utils.spectra_preprocessing import preprocess_peak_batch_torch
 from utils.training import build_model_from_config, load_config, load_pretrained_weights
 

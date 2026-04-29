@@ -131,7 +131,7 @@ def build_and_bench(
     steps: int,
 ) -> float:
     """Fresh model + optimizer for a given precision setting. Returns steps/s."""
-    from train import _build_optimizers
+    from spectra_learning.training.optimization import build_optimizers
 
     torch.compiler.reset()
     torch.set_float32_matmul_precision(precision)
@@ -143,7 +143,7 @@ def build_and_bench(
         fullgraph=False,
     )
     total_steps = 100_000
-    optimizers, schedulers = _build_optimizers(cfg, model, total_steps, device)
+    optimizers, schedulers = build_optimizers(cfg, model, total_steps, device)
     batch = make_fake_batch(batch_size, cfg.num_peaks, device)
 
     def _step(metrics):

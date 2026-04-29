@@ -2,7 +2,10 @@ from unittest import mock
 
 import torch
 
-import input_pipeline
+import spectra_learning.data.gems.masking as gems_masking
+import spectra_learning.data.gems.visualization as gems_visualization
+from spectra_learning.data.gems.collate import GemsBatchCollator
+import spectra_learning.data.gems.collate as gems_collate
 
 
 def test_sample_ragged_block_mask_uses_full_block_length() -> None:
@@ -12,7 +15,7 @@ def test_sample_ragged_block_mask_uses_full_block_length() -> None:
     )
 
     torch.manual_seed(4)
-    mask = input_pipeline._sample_ragged_block_mask_1d_torch(
+    mask = gems_masking._sample_ragged_block_mask_1d_torch(
         active_positions,
         masked_fraction=3.0 / 5.0,
         lengths=(3,),
@@ -30,7 +33,7 @@ def test_sample_ragged_block_mask_caps_length_to_active_support() -> None:
     )
 
     torch.manual_seed(4)
-    mask = input_pipeline._sample_ragged_block_mask_1d_torch(
+    mask = gems_masking._sample_ragged_block_mask_1d_torch(
         active_positions,
         masked_fraction=1.0,
         lengths=(5,),
@@ -58,13 +61,13 @@ def test_sample_block_masks_ragged_blocks_alias_matches_ragged() -> None:
     )
 
     torch.manual_seed(7)
-    context_mask, target_masks = input_pipeline._sample_block_masks_torch(
+    context_mask, target_masks = gems_masking._sample_block_masks_torch(
         peak_valid_mask,
         mask_strategy="ragged",
         **kwargs,
     )
     torch.manual_seed(7)
-    alias_context_mask, alias_target_masks = input_pipeline._sample_block_masks_torch(
+    alias_context_mask, alias_target_masks = gems_masking._sample_block_masks_torch(
         peak_valid_mask,
         mask_strategy="ragged_blocks",
         **kwargs,
@@ -84,7 +87,7 @@ def test_sample_block_masks_ragged_stays_within_valid_support() -> None:
     )
 
     torch.manual_seed(11)
-    context_mask, target_masks = input_pipeline._sample_block_masks_torch(
+    context_mask, target_masks = gems_masking._sample_block_masks_torch(
         peak_valid_mask,
         num_target_blocks=2,
         context_fraction=0.4,
@@ -124,7 +127,7 @@ def test_sample_block_masks_context_and_targets_are_disjoint_for_all_modes() -> 
 
     for seed, strategy in enumerate(("contiguous", "ragged"), start=31):
         torch.manual_seed(seed)
-        context_mask, target_masks = input_pipeline._sample_block_masks_torch(
+        context_mask, target_masks = gems_masking._sample_block_masks_torch(
             peak_valid_mask,
             mask_strategy=strategy,
             **kwargs,
@@ -135,12 +138,12 @@ def test_sample_block_masks_context_and_targets_are_disjoint_for_all_modes() -> 
         assert not (target_masks & context_mask.unsqueeze(1)).any()
 
     with mock.patch.object(
-        input_pipeline,
+        gems_masking,
         "_sample_mask_strategy_torch",
         side_effect=["contiguous", "ragged", "contiguous"],
     ):
         torch.manual_seed(37)
-        context_mask, target_masks = input_pipeline._sample_block_masks_torch(
+        context_mask, target_masks = gems_masking._sample_block_masks_torch(
             peak_valid_mask,
             mask_strategy="all",
             **kwargs,
@@ -155,12 +158,12 @@ def test_sample_block_masks_all_selects_per_row_mask_modes() -> None:
     peak_valid_mask = torch.ones((3, 8), dtype=torch.bool)
 
     with mock.patch.object(
-        input_pipeline,
+        gems_masking,
         "_sample_mask_strategy_torch",
         side_effect=["contiguous", "ragged", "contiguous"],
     ) as sample_strategy:
         torch.manual_seed(29)
-        context_mask, target_masks = input_pipeline._sample_block_masks_torch(
+        context_mask, target_masks = gems_masking._sample_block_masks_torch(
             peak_valid_mask,
             num_target_blocks=2,
             context_fraction=0.375,
@@ -180,14 +183,14 @@ def test_sample_block_masks_all_selects_per_row_mask_modes() -> None:
 
 
 def test_resolve_visualization_strategies_includes_supported_modes() -> None:
-    assert input_pipeline._resolve_visualization_strategies("ragged") == (
+    assert gems_visualization._resolve_visualization_strategies("ragged") == (
         "contiguous",
         "ragged",
     )
 
 
 def test_resolve_visualization_strategies_keeps_all_meta_mode() -> None:
-    assert input_pipeline._resolve_visualization_strategies("all") == (
+    assert gems_visualization._resolve_visualization_strategies("all") == (
         "contiguous",
         "ragged",
         "all",
@@ -195,7 +198,7 @@ def test_resolve_visualization_strategies_keeps_all_meta_mode() -> None:
 
 
 def test_gems_batch_collator_generates_ragged_context_and_target_masks() -> None:
-    collator = input_pipeline._GemsBatchCollator(
+    collator = GemsBatchCollator(
         augment=True,
         num_target_blocks=2,
         context_fraction=0.4,
@@ -250,7 +253,7 @@ def test_gems_batch_collator_generates_ragged_context_and_target_masks() -> None
 
 
 def test_gems_batch_collator_samples_real_peaks_then_prepends_precursor() -> None:
-    collator = input_pipeline._GemsBatchCollator(
+    collator = GemsBatchCollator(
         augment=True,
         num_target_blocks=2,
         context_fraction=0.4,
@@ -337,7 +340,7 @@ def test_gems_batch_collator_samples_real_peaks_then_prepends_precursor() -> Non
         return sampled_context.clone(), sampled_targets.clone()
 
     with mock.patch.object(
-        input_pipeline,
+        gems_collate,
         "_sample_block_masks_torch",
         side_effect=fake_sample_masks,
     ):
@@ -353,7 +356,7 @@ def test_gems_batch_collator_samples_real_peaks_then_prepends_precursor() -> Non
 
 
 def test_gems_batch_collator_keeps_precursor_visible_and_out_of_targets() -> None:
-    collator = input_pipeline._GemsBatchCollator(
+    collator = GemsBatchCollator(
         augment=True,
         num_target_blocks=2,
         context_fraction=0.4,
@@ -407,7 +410,7 @@ def test_mask_block_ranges_reports_absolute_slot_runs() -> None:
         dtype=torch.bool,
     )
 
-    assert input_pipeline._mask_block_ranges(mask) == [(1, 2), (4, 6)]
+    assert gems_visualization._mask_block_ranges(mask) == [(1, 2), (4, 6)]
 
 
 def test_mask_block_ranges_in_active_order_compresses_context_gap() -> None:
@@ -420,8 +423,8 @@ def test_mask_block_ranges_in_active_order_compresses_context_gap() -> None:
         dtype=torch.bool,
     )
 
-    assert input_pipeline._mask_block_ranges(mask) == [(0, 2), (6, 6)]
-    assert input_pipeline._mask_block_ranges_in_active_order(
+    assert gems_visualization._mask_block_ranges(mask) == [(0, 2), (6, 6)]
+    assert gems_visualization._mask_block_ranges_in_active_order(
         mask,
         active_positions,
     ) == [(0, 3)]

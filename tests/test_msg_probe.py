@@ -9,7 +9,7 @@ import torch
 from ml_collections import config_dict
 from sklearn.metrics import average_precision_score, roc_auc_score
 
-from input_pipeline import _prepend_precursor_token_torch
+from spectra_learning.data.gems.conversion import _prepend_precursor_token_torch
 from models.model import CovariancePool
 from utils.spectra_preprocessing import PRECURSOR_TOKEN_INTENSITY
 from utils.msg_probe import (

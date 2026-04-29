@@ -1,0 +1,49 @@
+from contextlib import nullcontext
+
+import torch
+
+from models.model import PeakSetSIGReg, _collapse_diagnostics
+
+
+def train_step_impl(
+    model: PeakSetSIGReg,
+    batch: dict[str, torch.Tensor],
+    optimizers: list[torch.optim.Optimizer],
+    schedulers: list[torch.optim.lr_scheduler.LRScheduler],
+    autocast_dtype: torch.dtype | None,
+    grad_clip_norm: float | None,
+    compute_collapse_metrics: bool = False,
+    global_step: int = 0,
+    total_steps: int = 1,
+) -> dict[str, torch.Tensor]:
+    device_type = next(model.parameters()).device.type
+    autocast_ctx = (
+        nullcontext()
+        if autocast_dtype is None
+        else torch.autocast(device_type=device_type, dtype=autocast_dtype)
+    )
+    torch.compiler.cudagraph_mark_step_begin()
+    with autocast_ctx:
+        if compute_collapse_metrics:
+            metrics, collapse_data = model.forward_augmented(
+                batch,
+                return_collapse_data=True,
+            )
+        else:
+            metrics = model.forward_augmented(batch)
+            collapse_data = {}
+    if compute_collapse_metrics:
+        with torch.no_grad():
+            metrics.update(_collapse_diagnostics(**collapse_data))
+    metrics["loss"].backward()
+    if grad_clip_norm is not None and grad_clip_norm > 0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
+    for optimizer in optimizers:
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+    ema_momentum = model.update_ema_teacher(global_step + 1, total_steps)
+    for scheduler in schedulers:
+        scheduler.step()
+    if ema_momentum is not None:
+        metrics["ema_teacher_momentum"] = metrics["loss"].new_tensor(ema_momentum)
+    return metrics

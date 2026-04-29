@@ -11,7 +11,8 @@ import torch
 from ml_collections import config_dict
 from torch.utils.data import DataLoader
 
-import input_pipeline
+import spectra_learning.data.gems as gems
+import spectra_learning.data.gems.artifacts as gems_artifacts
 import utils.massspec_probe_data as massspec_probe_data
 from scripts.benchmark_linear_probe import preprocess_dreams_spectra
 from scripts.prepare_gems_native import main as prepare_gems_main
@@ -305,13 +306,11 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 return str(local_dir)
 
             with (
-                mock.patch.object(
-                    input_pipeline,
-                    "snapshot_download",
+                mock.patch.object(gems_artifacts, "snapshot_download",
                     side_effect=fake_snapshot_download,
                 ) as download_mock,
             ):
-                datamodule = input_pipeline.GemsNativeDataModule(cfg, seed=42)
+                datamodule = gems.GemsNativeDataModule(cfg, seed=42)
                 batch = next(iter(datamodule.train_loader_for_epoch(0)))
 
             self.assertEqual(datamodule.info["train_size"], 2)
@@ -349,12 +348,10 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 )
                 return str(local_dir)
 
-            with mock.patch.object(
-                input_pipeline,
-                "snapshot_download",
+            with mock.patch.object(gems_artifacts, "snapshot_download",
                 side_effect=fake_snapshot_download,
             ):
-                datamodule = input_pipeline.GemsNativeDataModule(cfg, seed=42)
+                datamodule = gems.GemsNativeDataModule(cfg, seed=42)
                 batch = next(iter(datamodule.train_loader_for_epoch(0)))
 
         self.assertEqual(cfg.num_peaks, 4)
@@ -376,8 +373,8 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 cfg=cfg,
             )
 
-            with mock.patch.object(input_pipeline, "snapshot_download") as download_mock:
-                datamodule = input_pipeline.GemsNativeDataModule(cfg, seed=42)
+            with mock.patch.object(gems_artifacts, "snapshot_download") as download_mock:
+                datamodule = gems.GemsNativeDataModule(cfg, seed=42)
                 batch = next(iter(datamodule.train_loader_for_epoch(0)))
 
             self.assertIn("peak_mz", batch)
@@ -404,12 +401,10 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 )
                 return str(local_dir)
 
-            with mock.patch.object(
-                input_pipeline,
-                "snapshot_download",
+            with mock.patch.object(gems_artifacts, "snapshot_download",
                 side_effect=fake_snapshot_download,
             ) as download_mock:
-                datamodule = input_pipeline.GemsNativeDataModule(cfg, seed=42)
+                datamodule = gems.GemsNativeDataModule(cfg, seed=42)
                 batch = next(iter(datamodule.train_loader_for_epoch(0)))
 
             self.assertEqual(datamodule.info["train_size"], 2)
@@ -433,12 +428,10 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 )
                 return str(local_dir)
 
-            with mock.patch.object(
-                input_pipeline,
-                "snapshot_download",
+            with mock.patch.object(gems_artifacts, "snapshot_download",
                 side_effect=fake_snapshot_download,
             ):
-                datamodule = input_pipeline.GemsNativeDataModule(cfg, seed=42)
+                datamodule = gems.GemsNativeDataModule(cfg, seed=42)
 
             self.assertNotIn("gems_variants", str(datamodule.gems_dir))
             self.assertEqual(datamodule.gems_dir, Path(cfg.artifact_dir) / "gems")
@@ -461,12 +454,10 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 )
                 return str(local_dir)
 
-            with mock.patch.object(
-                input_pipeline,
-                "snapshot_download",
+            with mock.patch.object(gems_artifacts, "snapshot_download",
                 side_effect=fake_snapshot_download,
             ):
-                datamodule = input_pipeline.GemsNativeDataModule(cfg, seed=42)
+                datamodule = gems.GemsNativeDataModule(cfg, seed=42)
                 loader = datamodule.train_loader_for_epoch(0)
 
             self.assertEqual(loader.num_workers, 1)
@@ -491,12 +482,10 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 )
                 return str(local_dir)
 
-            with mock.patch.object(
-                input_pipeline,
-                "snapshot_download",
+            with mock.patch.object(gems_artifacts, "snapshot_download",
                 side_effect=fake_snapshot_download,
             ):
-                datamodule = input_pipeline.GemsNativeDataModule(cfg, seed=42)
+                datamodule = gems.GemsNativeDataModule(cfg, seed=42)
                 loader0 = datamodule.train_loader_for_epoch(0)
                 epoch0_batches = list(loader0)
                 del loader0
@@ -548,7 +537,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             artifact_dir.mkdir(parents=True, exist_ok=True)
             (artifact_dir / "metadata.json").write_text(json.dumps(metadata))
 
-            datamodule = input_pipeline.GemsNativeDataModule(cfg, seed=42)
+            datamodule = gems.GemsNativeDataModule(cfg, seed=42)
             train_dataset = datamodule._get_dataset("train")
             expected_ids = sorted(
                 float(train_dataset[idx]["precursor_mz_raw"])
@@ -572,7 +561,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             entries = _write_fake_native_shards(tmp_path / "train", [3, 2, 4])
-            dataset = input_pipeline._GemsMemmapDataset(entries)
+            dataset = gems.GemsMemmapDataset(entries)
             loader = DataLoader(
                 dataset,
                 batch_size=2,
@@ -580,7 +569,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 num_workers=4,
                 persistent_workers=True,
                 prefetch_factor=2,
-                collate_fn=input_pipeline._GemsBatchCollator(
+                collate_fn=gems.GemsBatchCollator(
                     augment=False,
                     num_target_blocks=1,
                     context_fraction=0.5,
@@ -606,7 +595,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             entries = _write_fake_native_shards(tmp_path / "train", [3, 2, 4])
-            dataset = input_pipeline._GemsMemmapDataset(entries)
+            dataset = gems.GemsMemmapDataset(entries)
             loader = DataLoader(
                 dataset,
                 batch_size=2,
@@ -614,7 +603,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 num_workers=4,
                 persistent_workers=True,
                 prefetch_factor=2,
-                collate_fn=input_pipeline._GemsBatchCollator(
+                collate_fn=gems.GemsBatchCollator(
                     augment=False,
                     num_target_blocks=1,
                     context_fraction=0.5,
@@ -645,7 +634,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             cfg = self._make_config(Path(tmp))
             cfg.gems_native_repo_id = ""
             with self.assertRaisesRegex(ValueError, "gems_native_repo_id"):
-                input_pipeline.GemsNativeDataModule(cfg, seed=42)
+                gems.GemsNativeDataModule(cfg, seed=42)
 
 
 class MassSpecPreprocessTests(unittest.TestCase):

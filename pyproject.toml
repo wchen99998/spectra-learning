@@ -10,7 +10,6 @@ dependencies = [
     "pyarrow>=16.0.0",
     "google-cloud-storage>=2.14.0",
     "h5py>=3.11.0",
-    "lightning==2.5.5",
     "matplotlib>=3.10.3",
     "ml-collections>=1.1.0",
     "rdkit>=2025.3.3",

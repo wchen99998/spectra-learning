@@ -14,9 +14,7 @@ from ml_collections import config_dict
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from input_pipeline import (
-    GemsNativeDataModule,
-)
+from spectra_learning.data.gems.datamodule import GemsNativeDataModule
 from models.model import PeakSetSIGReg
 from utils.massspec_probe_data import MassSpecProbeData, download_massspec_tsv
 from utils.training import build_model_from_config, load_config, load_pretrained_weights

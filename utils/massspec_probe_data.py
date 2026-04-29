@@ -13,7 +13,7 @@ from rdkit import Chem, DataStructs
 from rdkit.Chem import AllChem
 from torch.utils.data import DataLoader, Dataset, Subset
 
-from input_pipeline import _prepend_precursor_token_torch
+from spectra_learning.data.gems.conversion import _prepend_precursor_token_torch
 from utils.massspec_probe_targets import (
     MACCS_FINGERPRINT_BITS,
     MORGAN_PROBE_FINGERPRINT_BITS,

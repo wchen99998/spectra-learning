@@ -15,7 +15,8 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader, RandomSampler
 
-from input_pipeline import _GemsBatchCollator, _GemsMemmapDataset
+from spectra_learning.data.gems.collate import GemsBatchCollator
+from spectra_learning.data.gems.dataset import GemsMemmapDataset
 from utils.gems_native import load_gems_native_metadata
 
 
@@ -23,7 +24,7 @@ def _parse_workers(raw: str) -> list[int]:
     return [int(part.strip()) for part in raw.split(",") if part.strip()]
 
 
-def _build_dataset(artifact_dir: Path, split: str) -> _GemsMemmapDataset:
+def _build_dataset(artifact_dir: Path, split: str) -> GemsMemmapDataset:
     metadata = load_gems_native_metadata(artifact_dir)
     shard_key = f"{split}_shards"
     length_key = f"{split}_lengths"
@@ -38,11 +39,11 @@ def _build_dataset(artifact_dir: Path, split: str) -> _GemsMemmapDataset:
             strict=True,
         )
     ]
-    return _GemsMemmapDataset(entries)
+    return GemsMemmapDataset(entries)
 
 
 def _build_loader(
-    dataset: _GemsMemmapDataset,
+    dataset: GemsMemmapDataset,
     *,
     batch_size: int,
     num_workers: int,
@@ -67,7 +68,7 @@ def _build_loader(
         "num_workers": num_workers,
         "pin_memory": pin_memory,
         "drop_last": True,
-        "collate_fn": _GemsBatchCollator(
+        "collate_fn": GemsBatchCollator(
             augment=True,
             num_target_blocks=2,
             context_fraction=0.35,
@@ -90,7 +91,7 @@ def _build_loader(
 
 
 def _measure_throughput(
-    dataset: _GemsMemmapDataset,
+    dataset: GemsMemmapDataset,
     *,
     batch_size: int,
     num_workers: int,

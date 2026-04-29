@@ -60,7 +60,6 @@ base_image = (
         index_url="https://download.pytorch.org/whl/cu130",
     )
     .uv_pip_install(
-        "lightning==2.5.5",
         "ml-collections>=1.1.0",
         "rdkit>=2025.3.3",
         "scikit-learn>=1.8.0",
@@ -82,7 +81,7 @@ local = Path(__file__).parent
 image = (
     base_image
     .add_local_file(local / "train.py", remote_path=f"{PROJECT_ROOT}/train.py")
-    .add_local_file(local / "input_pipeline.py", remote_path=f"{PROJECT_ROOT}/input_pipeline.py")
+    .add_local_dir(local / "spectra_learning", remote_path=f"{PROJECT_ROOT}/spectra_learning")
     .add_local_dir(local / "configs", remote_path=f"{PROJECT_ROOT}/configs")
     .add_local_dir(local / "models", remote_path=f"{PROJECT_ROOT}/models")
     .add_local_dir(local / "networks", remote_path=f"{PROJECT_ROOT}/networks")
@@ -596,7 +595,7 @@ def prepare_data(
 
     # 1) Download training data (GeMS native shards)
     logging.info("Preparing training data...")
-    from input_pipeline import GemsNativeDataModule
+    from spectra_learning.data.gems.datamodule import GemsNativeDataModule
 
     datamodule = GemsNativeDataModule(config, seed=int(config.seed))
     logging.info(
@@ -648,7 +647,7 @@ def train(
 
     logging.basicConfig(level=logging.INFO)
 
-    from train import train_and_evaluate
+    from spectra_learning.training.pretrain import train_and_evaluate
     from utils.training import auto_run_name, load_config
 
     config = load_config(config_path)

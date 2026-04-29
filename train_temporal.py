@@ -28,7 +28,7 @@ warnings.filterwarnings("ignore", message="Profiler function.*will be ignored")
 import torch._inductor.config as inductor_config
 from ml_collections import config_dict
 
-from input_pipeline_temporal import TemporalLightningDataModule
+from input_pipeline_temporal import TemporalDataModule
 from models.model import PeakSetSIGReg
 from utils.msg_probe import (
     msg_probe_variants_from_config,
@@ -465,7 +465,7 @@ def train_temporal(
     np.random.seed(seed)
     random.seed(seed)
 
-    datamodule = TemporalLightningDataModule(config, seed=seed)
+    datamodule = TemporalDataModule(config, seed=seed)
     total_steps = max(1, int(datamodule.train_steps))
     log_every_n_steps = int(config.get("log_every_n_steps", 50))
     checkpoint_every_steps = int(config.checkpoint_every_steps)

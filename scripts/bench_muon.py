@@ -17,8 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import numpy as np
 import torch
 
-from input_pipeline import GemsNativeDataModule
-from train import _BatchPrefetcher, _train_step_impl
+from spectra_learning.data.gems.datamodule import GemsNativeDataModule
+from spectra_learning.training.batch import BatchPrefetcher
+from spectra_learning.training.steps import train_step_impl
 from utils.training import (
     build_model_from_config,
     load_config,
@@ -240,7 +241,7 @@ def run_benchmark(
             )
     else:
         def do_step(batch):
-            return _train_step_impl(
+            return train_step_impl(
                 model, batch, optimizers, schedulers, autocast_dtype, grad_clip_norm,
             )
 
@@ -309,7 +310,7 @@ def main():
     train_loader = datamodule.train_loader
 
     def make_prefetcher():
-        return _BatchPrefetcher(iter(train_loader), device, prefetch_size=device_prefetch_size)
+        return BatchPrefetcher(iter(train_loader), device, prefetch_size=device_prefetch_size)
 
     # Variants to benchmark: (label, build_fn, compile_optimizers)
     variants = [

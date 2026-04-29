@@ -5,12 +5,11 @@ import torch
 from ml_collections import config_dict
 
 from models.model import PeakSetSIGReg
-from train import (
-    _build_optimizers,
-    _is_predictor_parameter,
-    _is_weight_decay_target,
-    _load_resume_model_state,
-    _save_checkpoint,
+from spectra_learning.training.checkpointing import load_resume_model_state, save_checkpoint
+from spectra_learning.training.optimization import (
+    build_optimizers,
+    is_predictor_parameter,
+    is_weight_decay_target,
 )
 from utils.training import _build_wandb_init_kwargs, build_model_from_config
 
@@ -74,7 +73,7 @@ def test_save_checkpoint_persists_nested_scalar_optimizer_state():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         path = f"{tmpdir}/resume.pt"
-        _save_checkpoint(
+        save_checkpoint(
             path=path,
             model=model,
             optimizers=[optimizer],
@@ -97,7 +96,7 @@ def test_build_optimizers_uses_single_adamw_optimizer_by_default():
     model = _small_model()
     cfg = _optimizer_config()
 
-    optimizers, schedulers = _build_optimizers(
+    optimizers, schedulers = build_optimizers(
         cfg,
         model,
         total_steps=10,
@@ -112,7 +111,7 @@ def test_build_optimizers_applies_predictor_learning_rate_ratio():
     model = _small_model()
     cfg = _optimizer_config(predictor_learning_rate_ratio=3.0)
 
-    optimizers, schedulers = _build_optimizers(
+    optimizers, schedulers = build_optimizers(
         cfg,
         model,
         total_steps=10,
@@ -135,7 +134,7 @@ def test_build_optimizers_applies_predictor_learning_rate_ratio():
     predictor_param_ids = {
         id(param)
         for name, param in model.named_parameters()
-        if param.requires_grad and _is_predictor_parameter(name)
+        if param.requires_grad and is_predictor_parameter(name)
     }
     base_param_ids = _optimizer_param_ids(optimizers[0])
     actual_predictor_param_ids = _optimizer_param_ids(optimizers[1])
@@ -162,7 +161,7 @@ def test_load_resume_model_state_rejects_sigreg_checkpoint_drift():
 
     restored = _small_model(representation_regularizer="sigreg", sigreg_lambda=0.02)
     with pytest.raises(RuntimeError, match="Missing key"):
-        _load_resume_model_state(restored, resume_state)
+        load_resume_model_state(restored, resume_state)
 
 
 def test_load_resume_model_state_rejects_removed_cls_predictor_keys():
@@ -181,7 +180,7 @@ def test_load_resume_model_state_rejects_removed_cls_predictor_keys():
 
     restored = _small_model()
     with pytest.raises(RuntimeError, match="Unexpected key"):
-        _load_resume_model_state(restored, resume_state)
+        load_resume_model_state(restored, resume_state)
 
 
 def test_load_resume_model_state_rejects_removed_target_projector():
@@ -190,7 +189,7 @@ def test_load_resume_model_state_rejects_removed_target_projector():
 
     restored = _small_model(target_projector_dim=-1)
     with pytest.raises(RuntimeError, match="Unexpected key"):
-        _load_resume_model_state(restored, resume_state)
+        load_resume_model_state(restored, resume_state)
 
 
 def test_load_resume_model_state_rejects_missing_ema_target_projector():
@@ -199,7 +198,7 @@ def test_load_resume_model_state_rejects_missing_ema_target_projector():
 
     restored = _small_model(use_ema_teacher=True)
     with pytest.raises(RuntimeError, match="Missing key"):
-        _load_resume_model_state(restored, resume_state)
+        load_resume_model_state(restored, resume_state)
 
 
 def test_load_resume_model_state_rejects_removed_special_tokens():
@@ -215,7 +214,7 @@ def test_load_resume_model_state_rejects_removed_special_tokens():
         predictor_num_register_tokens=0,
     )
     with pytest.raises(RuntimeError, match="Unexpected key"):
-        _load_resume_model_state(restored, resume_state)
+        load_resume_model_state(restored, resume_state)
 
 
 def test_build_wandb_init_kwargs_prefers_config_resume_id(monkeypatch):
@@ -233,15 +232,15 @@ def test_build_wandb_init_kwargs_prefers_config_resume_id(monkeypatch):
 
 def test_is_weight_decay_target_matches_pretrain_expectation():
     model = _small_model()
-    assert _is_weight_decay_target(
+    assert is_weight_decay_target(
         "encoder.embedder.output_proj.weight",
         model.encoder.embedder.output_proj.weight,
     )
-    assert _is_weight_decay_target(
+    assert is_weight_decay_target(
         "encoder.embedder.fourier_ffn.0.weight",
         model.encoder.embedder.fourier_ffn[0].weight,
     )
-    assert not _is_weight_decay_target(
+    assert not is_weight_decay_target(
         "encoder.embedder.mz_fourier.b",
         model.encoder.embedder.mz_fourier.b,
     )

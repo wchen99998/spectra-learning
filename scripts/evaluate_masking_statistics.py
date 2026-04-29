@@ -14,7 +14,7 @@ from scipy import stats
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import input_pipeline
+from spectra_learning.data.gems.masking import _normalize_mask_strategy_name, _sample_block_masks_torch
 from utils.intensity_aware_masking import (
     AWARE_MIXED_MASK_CONFIG,
     INTENSITY_AWARE_MASK_STRATEGY,
@@ -377,7 +377,7 @@ def _evaluate_strategy(
     seed: int,
 ) -> dict[str, Any]:
     torch.manual_seed(seed)
-    strategy = input_pipeline._normalize_mask_strategy_name(name)
+    strategy = _normalize_mask_strategy_name(name)
     if strategy == INTENSITY_AWARE_MASK_STRATEGY:
         context, targets = sample_intensity_aware_masks_torch(
             peak_valid_mask,
@@ -398,7 +398,7 @@ def _evaluate_strategy(
             },
         )
     else:
-        context, targets = input_pipeline._sample_block_masks_torch(
+        context, targets = _sample_block_masks_torch(
             peak_valid_mask,
             num_target_blocks=int(cfg.get("jepa_num_target_blocks", 2)),
             context_fraction=float(cfg.get("jepa_context_fraction", 0.5)),
@@ -595,7 +595,7 @@ def main() -> None:
         "num_target_blocks": int(cfg.get("jepa_num_target_blocks", 2)),
         "mask_strategy": configured,
     }
-    if input_pipeline._normalize_mask_strategy_name(configured) == INTENSITY_AWARE_MASK_STRATEGY:
+    if _normalize_mask_strategy_name(configured) == INTENSITY_AWARE_MASK_STRATEGY:
         jepa_policy["intensity_aware"] = {
             key: float(cfg.get(f"jepa_intensity_aware_{key}", value))
             for key, value in AWARE_MIXED_MASK_CONFIG.items()

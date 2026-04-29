@@ -1,14 +1,13 @@
 import importlib.util
+import csv
 import logging
 import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-import lightning.pytorch as pl
 import numpy as np
 import torch
-from lightning.pytorch.loggers import CSVLogger
 from ml_collections import config_dict
 
 from models.model import PeakSetSIGReg
@@ -436,20 +435,80 @@ def _config_to_wandb_dict(config: Any | None) -> dict[str, Any]:
     return dict(_to_serialisable_config(vars(config)))
 
 
-def build_logger(config: config_dict.ConfigDict, workdir: Path) -> pl.loggers.Logger:
-    if config.get("enable_wandb", False):
-        from lightning.pytorch.loggers import WandbLogger
+class MetricLogger:
+    def log_hyperparams(self, params: dict[str, Any]) -> None:
+        pass
+
+    def log_metrics(self, metrics: dict[str, Any], step: int | None = None) -> None:
+        pass
+
+    @property
+    def experiment(self) -> Any:
+        return None
+
+
+class WandbMetricLogger(MetricLogger):
+    def __init__(self, config: config_dict.ConfigDict, workdir: Path) -> None:
+        import wandb
 
         wandb_kwargs = _build_wandb_init_kwargs(config)
-        logger = WandbLogger(
+        self._run = wandb.init(
             project=config.get("wandb_project", "md4"),
-            save_dir=str(workdir),
-            log_model=False,
+            dir=str(workdir),
+            config=_config_to_wandb_dict(config),
             **wandb_kwargs,
         )
+
+    @property
+    def experiment(self) -> Any:
+        return self._run
+
+    def log_hyperparams(self, params: dict[str, Any]) -> None:
+        self._run.config.update(params, allow_val_change=True)
+
+    def log_metrics(self, metrics: dict[str, Any], step: int | None = None) -> None:
+        self._run.log(_serialise_metrics(metrics), step=step)
+
+
+class CSVMetricLogger(MetricLogger):
+    def __init__(self, workdir: Path) -> None:
+        self.path = workdir / "csv_logs" / "metrics.csv"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fieldnames: list[str] = ["step"]
+        self._rows: list[dict[str, Any]] = []
+
+    def log_metrics(self, metrics: dict[str, Any], step: int | None = None) -> None:
+        row = {"step": step, **_serialise_metrics(metrics)}
+        for key in row:
+            if key not in self._fieldnames:
+                self._fieldnames.append(key)
+        self._rows.append(row)
+        self._write_rows()
+
+    def _write_rows(self) -> None:
+        with self.path.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=self._fieldnames)
+            writer.writeheader()
+            writer.writerows(self._rows)
+
+
+def _serialise_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    serialised = {}
+    for key, value in metrics.items():
+        if isinstance(value, torch.Tensor):
+            value = value.detach().cpu()
+            serialised[key] = value.item() if value.ndim == 0 else value.tolist()
+        else:
+            serialised[key] = value
+    return serialised
+
+
+def build_logger(config: config_dict.ConfigDict, workdir: Path) -> MetricLogger:
+    if config.get("enable_wandb", False):
+        logger = WandbMetricLogger(config, workdir)
         logger.log_hyperparams(_config_to_wandb_dict(config))
         return logger
-    return CSVLogger(save_dir=str(workdir), name="csv_logs")
+    return CSVMetricLogger(workdir)
 
 
 def load_pretrained_weights(

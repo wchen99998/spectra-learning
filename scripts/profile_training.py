@@ -22,8 +22,10 @@ import numpy as np
 import torch
 import torch.profiler
 
-from input_pipeline import GemsNativeDataModule
-from train import _BatchPrefetcher, _build_optimizers, _train_step_impl
+from spectra_learning.data.gems.datamodule import GemsNativeDataModule
+from spectra_learning.training.batch import BatchPrefetcher
+from spectra_learning.training.optimization import build_optimizers
+from spectra_learning.training.steps import train_step_impl
 from utils.training import build_model_from_config, load_config, parse_autocast_dtype
 
 torch.set_float32_matmul_precision("high")
@@ -65,7 +67,7 @@ def main() -> None:
     model = build_model_from_config(config)
     model.to(device).train()
 
-    optimizers, schedulers = _build_optimizers(config, model, total_steps, device)
+    optimizers, schedulers = build_optimizers(config, model, total_steps, device)
 
     # Autocast dtype
     autocast_dtype = parse_autocast_dtype(config.get("autocast_dtype", "bf16"))
@@ -89,12 +91,12 @@ def main() -> None:
 
     # Warmup (needed for torch.compile + CUDA graphs)
     log.info("Running %d warmup steps...", args.warmup_steps)
-    prefetcher = _BatchPrefetcher(iter(train_loader), device, prefetch_size=device_prefetch_size)
+    prefetcher = BatchPrefetcher(iter(train_loader), device, prefetch_size=device_prefetch_size)
     for i in range(args.warmup_steps):
         batch = prefetcher.next()
         if batch is None:
             break
-        _train_step_impl(model, batch, optimizers, schedulers, autocast_dtype, grad_clip_norm)
+        train_step_impl(model, batch, optimizers, schedulers, autocast_dtype, grad_clip_norm)
     if device.type == "cuda":
         torch.cuda.synchronize()
     log.info("Warmup done.")
@@ -123,9 +125,9 @@ def main() -> None:
             batch = prefetcher.next()
             if batch is None:
                 # wrap around
-                prefetcher = _BatchPrefetcher(iter(train_loader), device, prefetch_size=device_prefetch_size)
+                prefetcher = BatchPrefetcher(iter(train_loader), device, prefetch_size=device_prefetch_size)
                 batch = prefetcher.next()
-            _train_step_impl(model, batch, optimizers, schedulers, autocast_dtype, grad_clip_norm)
+            train_step_impl(model, batch, optimizers, schedulers, autocast_dtype, grad_clip_norm)
             if device.type == "cuda":
                 torch.cuda.synchronize()
             prof.step()

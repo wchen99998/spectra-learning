@@ -289,7 +289,7 @@ class FramePairDataset(Dataset):
         }
 
 
-class TemporalLightningDataModule:
+class TemporalDataModule:
     """Config-driven wrapper for temporal experiment-grouped datasets.
 
     Downloads from HuggingFace if ``temporal_repo_id`` is set, extracts tar
@@ -373,7 +373,7 @@ class TemporalLightningDataModule:
         self._val_loader: DataLoader | None = None
 
         logger.info(
-            "TemporalLightningDataModule: %d train experiments (%d usable), "
+            "TemporalDataModule: %d train experiments (%d usable), "
             "%d val experiments, batch_size=%d",
             len(self.train_files),
             train_usable,

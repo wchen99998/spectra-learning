@@ -69,7 +69,7 @@ Training batches contain:
 
 `ml_collections.ConfigDict` configs in `configs/`. Each config file is self-contained and loaded dynamically via importlib. Key config: `configs/gems_a_50_mask.py`.
 
-### Data Pipeline (`input_pipeline.py`)
+### Data Pipeline (`spectra_learning/data/gems/`)
 
 Native-shard based with auto-download from HuggingFace. `GemsNativeDataModule` memmaps raw peak spectra, preprocesses peaks in the PyTorch collator, and builds DataLoaders directly.
 
@@ -79,7 +79,7 @@ Native-shard based with auto-download from HuggingFace. `GemsNativeDataModule` m
 
 ## Code Style
 
-- Use PyTorch and PyTorch Lightning exclusively
+- Use PyTorch directly. Do not use training frameworks.
 - Avoid defensive programming and try-catch clauses
 - Prefer simple code over complicated solutions
 - Always use Context7 MCP for library/API documentation
@@ -95,6 +95,5 @@ Native-shard based with auto-download from HuggingFace. `GemsNativeDataModule` m
 
 ## Key Dependencies
 
-- PyTorch 2.10.0 (CUDA 13.0)
-- Lightning 2.5.5
+- PyTorch 2.11.0 (CUDA 13.0)
 - ml-collections, rdkit, wandb, huggingface_hub
