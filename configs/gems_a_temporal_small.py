@@ -109,7 +109,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "reduce-overhead"
     cfg.representation_regularizer = "none"
-    cfg.train_covariance_pooling = True
     cfg.covariance_pooling_dim = 32
     cfg.msg_probe_every_n_steps = 25000
     cfg.msg_probe_num_epochs = 20

@@ -20,7 +20,7 @@ def get_config():
 
     cfg.weight_decay = 1e-3
 
-    cfg.use_target_projector = False
+    cfg.target_projector_dim = -1
 
 
     cfg.run_name_suffix = "ema-teacher"

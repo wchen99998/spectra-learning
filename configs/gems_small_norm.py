@@ -120,7 +120,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "reduce-overhead"
     cfg.representation_regularizer = "slot-sigreg-enc"
-    cfg.train_covariance_pooling = True
     cfg.covariance_pooling_dim = 64
     cfg.msg_probe_every_n_steps = 0.25
     cfg.msg_probe_num_epochs = 100

@@ -188,7 +188,7 @@ def test_load_resume_model_state_rejects_removed_target_projector():
     model = _small_model()
     resume_state = model.state_dict()
 
-    restored = _small_model(use_target_projector=False)
+    restored = _small_model(target_projector_dim=-1)
     with pytest.raises(RuntimeError, match="Unexpected key"):
         _load_resume_model_state(restored, resume_state)
 

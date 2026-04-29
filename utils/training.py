@@ -216,13 +216,12 @@ def build_model_from_config(config: config_dict.ConfigDict) -> PeakSetSIGReg:
             config.get("temporal_predictor_num_layers", 0)
         ),
         predictor_dim=config.get("predictor_dim", None),
-        use_target_projector=bool(config.get("use_target_projector", True)),
+        target_projector_dim=config.get("target_projector_dim", None),
         predictor_dropout=float(config.get("predictor_dropout", 0.0)),
-        train_covariance_pooling=bool(config.get("train_covariance_pooling", False)),
         covariance_pooling_dim=int(
             config.get(
                 "covariance_pooling_dim",
-                config.get("msg_probe_covariance_dim", 32),
+                -1,
             )
         ),
         use_ema_teacher=bool(config.get("use_ema_teacher", False)),
@@ -366,13 +365,8 @@ def auto_run_name(config: Any) -> str:
         parts.append(
             f"intbin{float(config.get('jepa_mae_intensity_bin_size', 0.1)):g}"
         )
-    if config.get("train_covariance_pooling", False):
-        cov_dim = int(
-            config.get(
-                "covariance_pooling_dim",
-                config.get("msg_probe_covariance_dim", 32),
-            )
-        )
+    cov_dim = int(config.get("covariance_pooling_dim", -1))
+    if cov_dim > 0:
         parts.append(f"covpool{cov_dim}")
     if config.get("use_ema_teacher", False):
         parts.append("ema")
@@ -387,8 +381,11 @@ def auto_run_name(config: Any) -> str:
         if str(config.get("ema_teacher_schedule", "")).lower() == "slow-fast-slow":
             peak_frac = float(config.get("ema_teacher_schedule_peak_fraction", 0.35))
             parts.append(f"peak{peak_frac:.2f}")
-    if not bool(config.get("use_target_projector", True)):
+    target_projector_dim = config.get("target_projector_dim", None)
+    if target_projector_dim is not None and int(target_projector_dim) < 0:
         parts.append("no-tproj")
+    elif target_projector_dim is not None and int(target_projector_dim) != dim:
+        parts.append(f"tproj{int(target_projector_dim)}")
     run_name_suffix = str(config.get("run_name_suffix", "")).strip()
     if run_name_suffix:
         parts.append(run_name_suffix)

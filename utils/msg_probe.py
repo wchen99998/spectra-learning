@@ -1312,7 +1312,7 @@ def _run_msg_probe_once(
             covariance_pooler=(
                 model.covariance_pooler
                 if variant == "covariance"
-                and bool(config.get("train_covariance_pooling", False))
+                and model.train_covariance_pooling
                 else None
             ),
         ).to(device)

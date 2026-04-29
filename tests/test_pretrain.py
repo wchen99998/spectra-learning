@@ -221,7 +221,7 @@ class BlockJEPATests(unittest.TestCase):
         model = self._build_model(
             encoder_num_layers=2,
             jepa_target_layers=[1, 2],
-            use_target_projector=False,
+            target_projector_dim=-1,
         )
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
 
@@ -500,7 +500,6 @@ class BlockJEPATests(unittest.TestCase):
     def test_covariance_pooling_does_not_add_sigreg_loss(self):
         model = self._build_model(
             masked_token_loss_weight=1.0,
-            train_covariance_pooling=True,
             covariance_pooling_dim=4,
             sigreg_lambda=0.03,
         )

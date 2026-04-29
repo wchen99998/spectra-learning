@@ -883,10 +883,9 @@ class PeakSetSIGReg(nn.Module):
         encoder_num_register_tokens: int = 0,
         predictor_num_register_tokens: int = 0,
         predictor_dim: int | None = None,
-        use_target_projector: bool = True,
+        target_projector_dim: int | None = None,
         predictor_dropout: float = 0.0,
-        train_covariance_pooling: bool = False,
-        covariance_pooling_dim: int = 32,
+        covariance_pooling_dim: int = -1,
         use_ema_teacher: bool = False,
         ema_teacher_momentum: float = 0.996,
         ema_teacher_momentum_mid: float | None = None,
@@ -897,7 +896,6 @@ class PeakSetSIGReg(nn.Module):
         super().__init__()
         self.model_dim = model_dim
         self.predictor_dim = predictor_dim if predictor_dim is not None else model_dim
-        self.use_target_projector = bool(use_target_projector)
         self.encoder_num_layers = int(encoder_num_layers)
         self.encoder_use_cls_token = bool(encoder_use_cls_token)
         self.use_precursor_token = bool(use_precursor_token)
@@ -916,8 +914,16 @@ class PeakSetSIGReg(nn.Module):
             raise ValueError("jepa_target_layers must be within encoder depth")
         self.num_jepa_target_layers = len(self.jepa_target_layers)
         self.jepa_target_dim = self.num_jepa_target_layers * self.model_dim
+        raw_target_projector_dim = (
+            self.model_dim
+            if target_projector_dim is None
+            else int(target_projector_dim)
+        )
+        self.use_target_projector = raw_target_projector_dim >= 0
         self.target_projector_dim = (
-            self.model_dim if self.use_target_projector else self.jepa_target_dim
+            raw_target_projector_dim
+            if self.use_target_projector
+            else self.jepa_target_dim
         )
         self.representation_regularizer = str(representation_regularizer).lower()
         if self.representation_regularizer == "sigreg":
@@ -943,7 +949,8 @@ class PeakSetSIGReg(nn.Module):
             )
         self.sigreg_lambda = float(sigreg_lambda)
         self.sigreg_precursor_scale = float(sigreg_precursor_scale)
-        self.train_covariance_pooling = bool(train_covariance_pooling)
+        self.covariance_pooling_dim = int(covariance_pooling_dim)
+        self.train_covariance_pooling = self.covariance_pooling_dim > 0
         self.masked_token_loss_weight = float(masked_token_loss_weight)
         self.jepa_mae_loss_weight = float(jepa_mae_loss_weight)
         self.jepa_mae_mz_bin_size = float(jepa_mae_mz_bin_size)
@@ -1138,7 +1145,7 @@ class PeakSetSIGReg(nn.Module):
         if self.train_covariance_pooling:
             self.covariance_pooler = CovariancePool(
                 input_dim=self.model_dim,
-                compressed_dim=int(covariance_pooling_dim),
+                compressed_dim=self.covariance_pooling_dim,
             )
         # Temporal predictor for frame -> next-frame prediction.
         if self.temporal_predictor_num_layers > 0:
