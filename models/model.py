@@ -1133,7 +1133,6 @@ class PeakSetSIGReg(nn.Module):
                 input_dim=self.model_dim,
                 compressed_dim=int(covariance_pooling_dim),
             )
-            self.covariance_sigreg = SIGReg(num_slices=int(sigreg_num_slices))
         # Temporal predictor for frame -> next-frame prediction.
         if self.temporal_predictor_num_layers > 0:
             self.temporal_predictor = _build_temporal_decoder_blocks(
@@ -1679,27 +1678,6 @@ class PeakSetSIGReg(nn.Module):
             "sigreg_term": sigreg_term,
         }
 
-    def _covariance_pooling_metrics(
-        self,
-        teacher_peak_emb: torch.Tensor,
-        peak_valid_mask: torch.Tensor,
-        reference: torch.Tensor,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        if not self.train_covariance_pooling or self.sigreg_lambda <= 0:
-            return reference.new_tensor(0.0), {}
-        covariance_embedding = self.covariance_pooler(
-            teacher_peak_emb.float(),
-            peak_valid_mask,
-        )
-        sigreg_loss = self.covariance_sigreg(covariance_embedding.float()).to(
-            dtype=reference.dtype
-        )
-        sigreg_term = reference.new_tensor(self.sigreg_lambda) * sigreg_loss
-        return sigreg_term, {
-            "covariance_sigreg_loss": sigreg_loss,
-            "covariance_sigreg_term": sigreg_term,
-        }
-
     def pool(
         self,
         embeddings: torch.Tensor,
@@ -1825,18 +1803,10 @@ class PeakSetSIGReg(nn.Module):
             predictor_output,
             target_masks,
         )
-        covariance_sigreg_term, covariance_sigreg_metrics = (
-            self._covariance_pooling_metrics(
-                teacher_peak_emb,
-                peak_valid_mask,
-                context_emb,
-            )
-        )
         loss = (
             masked_prediction_term
             + jepa_mae_term
             + sigreg_term
-            + covariance_sigreg_term
         )
         valid_peak_count = peak_valid_mask.float().sum().clamp_min(1.0)
         collapse_data: dict[str, torch.Tensor] = {}
@@ -1867,7 +1837,6 @@ class PeakSetSIGReg(nn.Module):
         }
         metrics.update(jepa_mae_metrics)
         metrics.update(sigreg_metrics)
-        metrics.update(covariance_sigreg_metrics)
         if return_collapse_data:
             return metrics, collapse_data
         return metrics

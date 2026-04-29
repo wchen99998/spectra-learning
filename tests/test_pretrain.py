@@ -6,7 +6,7 @@ from unittest import mock
 import numpy as np
 import torch
 
-from models.losses import SIGReg, SlotwiseSIGReg
+from models.losses import SlotwiseSIGReg
 from models.model import PeakSetSIGReg
 from models.peak_features import FourierFeatures, PeakFeatureEmbedder
 from train import _is_weight_decay_target, _train_step_impl
@@ -434,63 +434,21 @@ class BlockJEPATests(unittest.TestCase):
                 )
                 torch.testing.assert_close(metrics["sigreg_loss"], metrics["sigreg_loss"].new_tensor(1.0))
 
-    def test_covariance_sigreg_contributes_to_jepa_loss(self):
+    def test_covariance_pooling_does_not_add_sigreg_loss(self):
         model = self._build_model(
             masked_token_loss_weight=1.0,
             train_covariance_pooling=True,
             covariance_pooling_dim=4,
             sigreg_lambda=0.03,
         )
-        self.assertIsInstance(model.covariance_sigreg, SIGReg)
+        self.assertTrue(hasattr(model, "covariance_pooler"))
+        self.assertFalse(hasattr(model, "covariance_sigreg"))
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
         metrics = model.forward_augmented(batch)
 
-        self.assertGreater(float(metrics["covariance_sigreg_loss"].detach()), 0.0)
-        self.assertGreater(float(metrics["covariance_sigreg_term"].detach()), 0.0)
-        torch.testing.assert_close(
-            metrics["covariance_sigreg_term"],
-            metrics["covariance_sigreg_loss"] * 0.03,
-        )
-        self.assertTrue(
-            torch.allclose(
-                metrics["loss"],
-                metrics["masked_prediction_term"] + metrics["covariance_sigreg_term"],
-            )
-        )
-
-    def test_covariance_sigreg_is_not_slotwise(self):
-        model = self._build_model(
-            representation_regularizer="slot-sigreg-enc",
-            train_covariance_pooling=True,
-            covariance_pooling_dim=4,
-            sigreg_lambda=0.03,
-        )
-        self.assertIsInstance(model.sigreg, SlotwiseSIGReg)
-        self.assertIsInstance(model.covariance_sigreg, SIGReg)
-        self.assertNotIsInstance(model.covariance_sigreg, SlotwiseSIGReg)
-        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-        captured: dict[str, torch.Tensor] = {}
-
-        def fake_covariance_sigreg_forward(
-            proj: torch.Tensor,
-            valid_mask: torch.Tensor | None = None,
-        ) -> torch.Tensor:
-            captured["proj"] = proj.detach().clone()
-            captured["valid_mask"] = valid_mask
-            return proj.new_tensor(1.0)
-
-        with mock.patch.object(
-            model.covariance_sigreg,
-            "forward",
-            side_effect=fake_covariance_sigreg_forward,
-        ):
-            model.forward_augmented(batch)
-
-        self.assertEqual(
-            captured["proj"].shape,
-            (batch["peak_mz"].shape[0], 4 * 4),
-        )
-        self.assertIsNone(captured["valid_mask"])
+        self.assertNotIn("covariance_sigreg_loss", metrics)
+        self.assertNotIn("covariance_sigreg_term", metrics)
+        torch.testing.assert_close(metrics["loss"], metrics["masked_prediction_term"])
 
     def test_teacher_targets_are_detached(self):
         model = self._build_model(masked_token_loss_weight=1.0)
