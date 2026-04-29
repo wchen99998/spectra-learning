@@ -12,8 +12,8 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
 def main() -> None:
     from configs.gems_a_masked_latent_index_small import get_config
-    from models.model import PeakSetSIGReg
-    from utils.msg_probe import run_msg_probe
+    from spectra_learning.models.model import PeakSetSIGReg
+    from spectra_learning.probes.massspec.msg_probe import run_msg_probe
 
     cfg = get_config()
 

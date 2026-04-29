@@ -10,7 +10,7 @@ from spectra_learning.data.gems.artifacts import resolve_gems_artifact
 from spectra_learning.data.gems.collate import GemsBatchCollator
 from spectra_learning.data.gems.dataset import GemsMemmapDataset
 from spectra_learning.data.gems.settings import GemsDataConfig
-from utils.spectra_preprocessing import PEAK_MZ_MAX, PEAK_MZ_MIN
+from spectra_learning.data.spectra import PEAK_MZ_MAX, PEAK_MZ_MIN
 
 
 class GemsNativeDataModule:

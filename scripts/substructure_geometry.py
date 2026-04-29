@@ -65,15 +65,18 @@ inductor_config.shape_padding = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from spectra_learning.data.gems.datamodule import GemsNativeDataModule
-from models.model import PeakSetSIGReg
-from utils.massspec_probe_data import MassSpecProbeData, _compute_morgan_fingerprints
-from utils.training import (
+from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.probes.massspec.data import MassSpecProbeData, _compute_morgan_fingerprints
+from spectra_learning.training.api import (
     build_model_from_config,
     load_config,
     load_pretrained_weights,
     latest_ckpt_path,
 )
-from utils.msg_probe import FG_SMARTS, compute_probe_targets_for_smiles
+from spectra_learning.probes.massspec.targets import (
+    FG_SMARTS,
+    compute_probe_targets_for_smiles,
+)
 
 log = logging.getLogger(__name__)
 

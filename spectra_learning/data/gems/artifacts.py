@@ -7,12 +7,12 @@ from urllib.request import urlretrieve
 from huggingface_hub import snapshot_download
 
 from spectra_learning.data.gems.settings import GEMS_METADATA_FILENAME
-from utils.gems_native import (
+from spectra_learning.data.gems.native import (
     build_gems_native_artifact,
     load_gems_native_metadata,
     validate_gems_native_artifact,
 )
-from utils.spectra_preprocessing import NUM_PEAKS_INPUT
+from spectra_learning.data.spectra import NUM_PEAKS_INPUT
 
 logger = logging.getLogger(__name__)
 

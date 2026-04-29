@@ -10,11 +10,11 @@ from typing import Any
 import numpy as np
 from tqdm import tqdm
 
-from utils.spectra_preprocessing import (
+from spectra_learning.data.spectra import (
     DEFAULT_MAX_PRECURSOR_MZ,
     NUM_PEAKS_INPUT,
 )
-from utils.gems_data import (
+from spectra_learning.data.gems.arrays import (
     CANONICAL_NUM_SHARDS,
     CANONICAL_SPLIT_SEED,
     CANONICAL_VALIDATION_FRACTION,

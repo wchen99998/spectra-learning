@@ -587,7 +587,7 @@ def prepare_data(
 
     logging.basicConfig(level=logging.INFO)
 
-    from utils.training import load_config
+    from spectra_learning.training.api import load_config
 
     config = load_config(config_path)
     config.update(json.loads(overrides_json))
@@ -606,7 +606,7 @@ def prepare_data(
 
     # 2) Download + process probe data
     logging.info("Preparing probe data...")
-    from utils.massspec_probe_data import MassSpecProbeData
+    from spectra_learning.probes.massspec.data import MassSpecProbeData
 
     probe_data = MassSpecProbeData.from_config(config)
     logging.info(
@@ -648,7 +648,7 @@ def train(
     logging.basicConfig(level=logging.INFO)
 
     from spectra_learning.training.pretrain import train_and_evaluate
-    from utils.training import auto_run_name, load_config
+    from spectra_learning.training.api import auto_run_name, load_config
 
     config = load_config(config_path)
 

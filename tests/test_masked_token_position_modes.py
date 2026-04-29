@@ -1,6 +1,7 @@
 import torch
 
-from models.model import PeakSetEncoder, PeakSetSIGReg
+from spectra_learning.models.encoder import PeakSetEncoder
+from spectra_learning.models.model import PeakSetSIGReg
 
 
 def _build_model(

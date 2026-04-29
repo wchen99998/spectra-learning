@@ -23,8 +23,8 @@ from spectra_learning.training.checkpointing import (
 )
 from spectra_learning.training.optimization import build_optimizers
 from spectra_learning.training.steps import train_step_impl
-from utils.msg_probe import msg_probe_variants_from_config, run_msg_probe
-from utils.training import (
+from spectra_learning.probes.massspec.msg_probe import msg_probe_variants_from_config, run_msg_probe
+from spectra_learning.training.api import (
     build_logger,
     build_model_from_config,
     collect_and_log_param_metrics,
@@ -206,7 +206,7 @@ def run_training_loop(
                 )
         pbar.close()
         logging.info("Finished epoch %d at global_step=%d", epoch, global_step)
-        if stopped_for_time_limit:
+        if stopped_for_time_limit or global_step >= total_steps:
             break
     last_msg_probe_metrics["run/stopped_for_time_limit"] = float(stopped_for_time_limit)
     last_msg_probe_metrics["run/final_global_step"] = float(global_step)
@@ -243,7 +243,11 @@ def total_training_steps(
     config: config_dict.ConfigDict,
     datamodule: GemsNativeDataModule,
 ) -> int:
-    return max(1, int(float(config.num_epochs) * datamodule.train_steps))
+    total_steps = max(1, int(float(config.num_epochs) * datamodule.train_steps))
+    training_max_steps = config.get("training_max_steps", None)
+    if training_max_steps is None:
+        return total_steps
+    return min(total_steps, max(1, int(training_max_steps)))
 
 
 def restore_training_state(

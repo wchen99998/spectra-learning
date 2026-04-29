@@ -3,12 +3,12 @@ import tempfile
 import pytest
 import torch
 
-from models.model import PeakSetSIGReg
-from models.spectral_attention_bias import (
+from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.models.spectral_attention_bias import (
     HarmonicRelativeLossBias,
     SpectralGraphormerBias,
 )
-from utils.training import load_pretrained_weights
+from spectra_learning.training.api import load_pretrained_weights
 
 
 def _small_model(**overrides) -> PeakSetSIGReg:

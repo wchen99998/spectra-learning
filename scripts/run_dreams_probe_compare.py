@@ -36,7 +36,7 @@ def _build_markdown_report(
     config,
     metrics: dict[str, float],
 ) -> str:
-    from utils.msg_probe import resolve_msg_probe_fingerprint, resolve_msg_probe_select_metric
+    from spectra_learning.probes.massspec.msg_probe import resolve_msg_probe_fingerprint, resolve_msg_probe_select_metric
 
     probe_batch_size = int(config.get("msg_probe_batch_size", config.get("batch_size", 512)))
     fingerprint_task = resolve_msg_probe_fingerprint(config)
@@ -114,8 +114,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    from utils.msg_probe import run_dreams_probe
-    from utils.training import load_config
+    from spectra_learning.probes.massspec.msg_probe import run_dreams_probe
+    from spectra_learning.training.api import load_config
 
     args = parse_args()
     config_path = Path(args.config)

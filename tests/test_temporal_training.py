@@ -7,7 +7,7 @@ from unittest import mock
 
 import torch
 
-from models.model import PeakSetSIGReg
+from spectra_learning.models.model import PeakSetSIGReg
 from train_temporal import _log_msg_probe_pairwise_plots_to_wandb
 
 

@@ -13,22 +13,22 @@ from torch.utils.data import DataLoader
 
 import spectra_learning.data.gems as gems
 import spectra_learning.data.gems.artifacts as gems_artifacts
-import utils.massspec_probe_data as massspec_probe_data
+import spectra_learning.probes.massspec.data as massspec_probe_data
 from scripts.benchmark_linear_probe import preprocess_dreams_spectra
 from scripts.prepare_gems_native import main as prepare_gems_main
-from utils.gems_native import (
+from spectra_learning.data.gems.native import (
     GEMS_NATIVE_METADATA_VERSION,
     build_gems_native_artifact,
 )
-from utils.gems_data import (
+from spectra_learning.data.gems.arrays import (
     CANONICAL_NUM_SHARDS,
 )
-from utils.massspec_probe_targets import (
+from spectra_learning.probes.massspec.targets import (
     build_maccs_targets_for_rows,
     build_morgan_targets_for_rows,
     build_probe_targets_for_rows,
 )
-from utils.spectra_preprocessing import preprocess_peak_batch_numpy
+from spectra_learning.data.spectra import preprocess_peak_batch_numpy
 
 
 def _write_fake_gems_hdf5(path: Path) -> None:

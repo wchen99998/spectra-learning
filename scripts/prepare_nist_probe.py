@@ -30,8 +30,8 @@ from pathlib import Path
 
 from huggingface_hub import HfApi, hf_hub_download
 
-from utils.massspec_probe_data import build_nist_full_probe_artifact
-from utils.nist_probe_hdf5 import build_nist_probe_hdf5
+from spectra_learning.probes.massspec.data import build_nist_full_probe_artifact
+from spectra_learning.probes.massspec.nist_hdf5 import build_nist_probe_hdf5
 
 log = logging.getLogger(__name__)
 

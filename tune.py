@@ -7,7 +7,7 @@ import random
 from pathlib import Path
 
 from spectra_learning.training.pretrain import train_and_evaluate
-from utils.training import load_config
+from spectra_learning.training.api import load_config
 
 
 def _sample_value(dist: str, args: list, rng: random.Random) -> object:
@@ -65,7 +65,7 @@ def run_trials(
     wandb_project: str,
     overrides: dict[str, object],
 ) -> list[dict]:
-    from utils.training import auto_run_name
+    from spectra_learning.training.api import auto_run_name
 
     results = []
     for idx, trial_params in enumerate(trial_configs):

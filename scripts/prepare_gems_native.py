@@ -9,7 +9,7 @@ from urllib.request import urlretrieve
 
 from huggingface_hub import HfApi
 
-from utils.gems_native import build_gems_native_artifact
+from spectra_learning.data.gems.native import build_gems_native_artifact
 
 log = logging.getLogger(__name__)
 

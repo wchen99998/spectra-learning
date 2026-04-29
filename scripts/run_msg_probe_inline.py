@@ -8,8 +8,8 @@ import sys
 import torch
 from ml_collections import config_dict
 
-from models.model import PeakSetSIGReg
-from utils.msg_probe import run_msg_probe
+from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.probes.massspec.msg_probe import run_msg_probe
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 

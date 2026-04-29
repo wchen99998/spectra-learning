@@ -15,12 +15,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from spectra_learning.data.gems.masking import _normalize_mask_strategy_name, _sample_block_masks_torch
-from utils.intensity_aware_masking import (
+from spectra_learning.data.gems.intensity_aware import (
     AWARE_MIXED_MASK_CONFIG,
     INTENSITY_AWARE_MASK_STRATEGY,
     sample_intensity_aware_masks_torch,
 )
-from utils.spectra_preprocessing import (
+from spectra_learning.data.spectra import (
     DEFAULT_MIN_PEAK_INTENSITY,
     DEFAULT_PRECURSOR_PEAK_EXCLUSION_WINDOW_DA,
     PEAK_MZ_MAX,

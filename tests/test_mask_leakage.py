@@ -6,7 +6,7 @@ the embeddings will change substantially.
 """
 
 import torch
-from models.model import PeakSetSIGReg
+from spectra_learning.models.model import PeakSetSIGReg
 
 
 def _make_batch(batch_size: int = 8, num_peaks: int = 60, valid_count: int = 30):

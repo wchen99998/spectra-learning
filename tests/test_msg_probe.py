@@ -10,40 +10,44 @@ from ml_collections import config_dict
 from sklearn.metrics import average_precision_score, roc_auc_score
 
 from spectra_learning.data.gems.conversion import _prepend_precursor_token_torch
-from models.model import CovariancePool
-from utils.spectra_preprocessing import PRECURSOR_TOKEN_INTENSITY
-from utils.msg_probe import (
+from spectra_learning.models.temporal import CovariancePool
+from spectra_learning.data.spectra import PRECURSOR_TOKEN_INTENSITY
+from spectra_learning.probes.massspec.msg_modules import (
     FrozenPooler,
     MsgCovariancePool,
     MsgLinearProbe,
     MsgMeanPool,
     MsgPmaPool,
+    MsgSequenceProbe,
+    _probe_task_names,
+    _probe_task_output_dims,
+    build_msg_sequence_probe as _build_msg_sequence_probe,
+)
+from spectra_learning.probes.massspec.msg_settings import (
     MsgProbeSplitTargets,
     MsgProbeTaskSpec,
-    MsgSequenceProbe,
+    build_msg_probe_inputs,
+    msg_probe_variants_from_config,
+    resolve_msg_probe_pairwise_alignment_num_pairs,
+    resolve_msg_probe_num_repeats,
+    resolve_msg_probe_fingerprint,
+    resolve_msg_probe_sample_limits,
+)
+from spectra_learning.probes.massspec.msg_probe import (
     _collect_num_rings_classes,
     _compute_pairwise_similarity_alignment,
-    _build_msg_sequence_probe,
     _build_task_spec,
     _collect_split_targets,
     _new_epoch_state,
     _probe_step,
-    _probe_task_names,
-    _probe_task_output_dims,
     _compute_pairwise_similarity_alignment_for_indices,
     _plot_pairwise_similarity_alignment,
     _run_msg_probe_once,
     _score_epoch_state,
     _update_epoch_state,
-    build_msg_probe_inputs,
-    msg_probe_variants_from_config,
     msg_probe_metric_higher_is_better,
     iter_massspec_probe,
     probe_steps_per_epoch,
-    resolve_msg_probe_pairwise_alignment_num_pairs,
-    resolve_msg_probe_num_repeats,
-    resolve_msg_probe_fingerprint,
-    resolve_msg_probe_sample_limits,
     resolve_msg_probe_select_metric,
     run_msg_probe,
 )
@@ -1181,11 +1185,11 @@ class MsgProbeRunTests(unittest.TestCase):
         curve: list[dict[str, float]] = []
         with (
             mock.patch(
-                "utils.msg_probe.MassSpecProbeData.from_config",
+                "spectra_learning.probes.massspec.msg_probe.MassSpecProbeData.from_config",
                 return_value=probe_data,
             ),
             mock.patch(
-                "utils.msg_probe._collect_num_rings_classes",
+                "spectra_learning.probes.massspec.msg_probe._collect_num_rings_classes",
                 return_value=(0, 1),
             ),
         ):
@@ -1255,7 +1259,7 @@ class RepeatedProbeTests(unittest.TestCase):
 
         curve: list[dict[str, float]] = []
         with mock.patch(
-            "utils.msg_probe._run_msg_probe_once",
+            "spectra_learning.probes.massspec.msg_probe._run_msg_probe_once",
             side_effect=fake_run_once,
         ):
             metrics = run_msg_probe(

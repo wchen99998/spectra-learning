@@ -13,7 +13,7 @@ import sys
 sys.path.insert(0, ".")
 
 from ml_collections import config_dict
-from utils.training import build_model_from_config
+from spectra_learning.training.api import build_model_from_config
 
 
 def get_bench_config() -> config_dict.ConfigDict:

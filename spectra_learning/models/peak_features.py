@@ -5,7 +5,7 @@ from math import ceil, log10
 import torch
 from torch import nn
 
-from utils.spectra_preprocessing import PEAK_MZ_MAX
+from spectra_learning.data.spectra import PEAK_MZ_MAX
 
 
 class FourierFeatures(nn.Module):

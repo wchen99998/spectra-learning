@@ -29,19 +29,16 @@ import torch._inductor.config as inductor_config
 from ml_collections import config_dict
 
 from input_pipeline_temporal import TemporalDataModule
-from models.model import PeakSetSIGReg
-from utils.msg_probe import (
+from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.probes.massspec.msg_probe import (
     msg_probe_variants_from_config,
     resolve_msg_probe_fingerprint,
     run_msg_probe,
 )
-from utils.schedulers import CapturableCosineSchedule
-from utils.training import (
-    build_logger,
-    build_model_from_config,
-    collect_and_log_param_metrics,
-    parse_autocast_dtype,
-)
+from spectra_learning.models.factory import build_model_from_config
+from spectra_learning.training.logging import build_logger
+from spectra_learning.training.runtime import collect_and_log_param_metrics, parse_autocast_dtype
+from spectra_learning.training.schedules import make_cosine_schedule
 
 torch.set_float32_matmul_precision("high")
 torch._dynamo.config.capture_scalar_outputs = True
@@ -164,7 +161,7 @@ def _save_checkpoint(
     path: Path,
     model: PeakSetSIGReg,
     optimizers: list[torch.optim.Optimizer],
-    schedulers: list[CapturableCosineSchedule],
+    schedulers: list[torch.optim.lr_scheduler.LRScheduler],
     global_step: int,
     epoch: int,
     loss: float,
@@ -203,7 +200,7 @@ def _build_temporal_optimizers(
     model: PeakSetSIGReg,
     total_steps: int,
     device: torch.device,
-) -> tuple[list[torch.optim.Optimizer], list[CapturableCosineSchedule]]:
+) -> tuple[list[torch.optim.Optimizer], list[torch.optim.lr_scheduler.LRScheduler]]:
     """Build optimizer with differential LR for encoder vs temporal predictor."""
     base_lr = float(config.learning_rate)
     encoder_lr = float(
@@ -229,14 +226,12 @@ def _build_temporal_optimizers(
     def _make_schedule(
         optimizer: torch.optim.Optimizer,
         lr: float,
-    ) -> CapturableCosineSchedule:
-        return CapturableCosineSchedule(
+    ) -> torch.optim.lr_scheduler.LRScheduler:
+        return make_cosine_schedule(
             optimizer,
-            base_lr=lr,
             total_steps=total_steps,
             warmup_steps=warmup_steps,
             min_lr=min_learning_rate,
-            device=device,
         )
 
     if optimizer_type == "muon":
@@ -264,7 +259,7 @@ def _build_temporal_optimizers(
         )
 
         optimizers: list[torch.optim.Optimizer] = []
-        schedulers: list[CapturableCosineSchedule] = []
+        schedulers: list[torch.optim.lr_scheduler.LRScheduler] = []
         muon_adamw_specs: list[tuple[list, str, float]] = [
             (encoder_matrix, "muon", encoder_muon_lr),
             (temporal_matrix, "muon", muon_lr),
@@ -326,7 +321,7 @@ def _build_temporal_optimizers(
         return param_groups
 
     optimizers: list[torch.optim.Optimizer] = []
-    schedulers: list[CapturableCosineSchedule] = []
+    schedulers: list[torch.optim.lr_scheduler.LRScheduler] = []
     optimizer_specs = [
         (
             _build_param_groups(encoder_decay, encoder_no_decay),
@@ -671,7 +666,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    from utils.training import load_config
+    from spectra_learning.training.api import load_config
 
     train_temporal(
         load_config(args.config),

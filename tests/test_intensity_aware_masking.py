@@ -3,7 +3,7 @@ import importlib
 import torch
 
 import spectra_learning.data.gems as gems
-from utils.intensity_aware_masking import (
+from spectra_learning.data.gems.intensity_aware import (
     AWARE_MIXED_MASK_CONFIG,
     sample_intensity_aware_masks_torch,
 )

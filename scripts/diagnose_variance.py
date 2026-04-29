@@ -18,7 +18,7 @@ from torch import nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from models.model import PeakSetSIGReg
+from spectra_learning.models.model import PeakSetSIGReg
 
 
 def load_config(config_path: str):

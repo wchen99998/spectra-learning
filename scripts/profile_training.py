@@ -26,7 +26,7 @@ from spectra_learning.data.gems.datamodule import GemsNativeDataModule
 from spectra_learning.training.batch import BatchPrefetcher
 from spectra_learning.training.optimization import build_optimizers
 from spectra_learning.training.steps import train_step_impl
-from utils.training import build_model_from_config, load_config, parse_autocast_dtype
+from spectra_learning.training.api import build_model_from_config, load_config, parse_autocast_dtype
 
 torch.set_float32_matmul_precision("high")
 

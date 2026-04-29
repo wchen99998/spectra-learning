@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import torch
 
-from models.losses import SIGReg
-from models.model import PeakSetEncoder, PeakSetSIGReg
+from spectra_learning.models.losses import SIGReg
+from spectra_learning.models.encoder import PeakSetEncoder
+from spectra_learning.models.model import PeakSetSIGReg
 from networks.transformer_torch import Attention, create_visible_attention_mask
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"

@@ -14,7 +14,7 @@ from rdkit.Chem import AllChem
 from torch.utils.data import DataLoader, Dataset, Subset
 
 from spectra_learning.data.gems.conversion import _prepend_precursor_token_torch
-from utils.massspec_probe_targets import (
+from spectra_learning.probes.massspec.targets import (
     MACCS_FINGERPRINT_BITS,
     MORGAN_PROBE_FINGERPRINT_BITS,
     MORGAN_PROBE_FINGERPRINT_RADIUS,
@@ -23,7 +23,7 @@ from utils.massspec_probe_targets import (
     build_morgan_targets_for_rows,
     build_probe_targets_for_rows,
 )
-from utils.spectra_preprocessing import (
+from spectra_learning.data.spectra import (
     DEFAULT_MAX_PRECURSOR_MZ,
     DEFAULT_MIN_PEAK_INTENSITY,
     NUM_PEAKS_INPUT,

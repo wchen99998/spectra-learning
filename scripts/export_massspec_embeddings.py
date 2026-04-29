@@ -15,9 +15,9 @@ from ml_collections import config_dict
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from spectra_learning.data.gems.datamodule import GemsNativeDataModule
-from models.model import PeakSetSIGReg
-from utils.massspec_probe_data import MassSpecProbeData, download_massspec_tsv
-from utils.training import build_model_from_config, load_config, load_pretrained_weights
+from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.probes.massspec.data import MassSpecProbeData, download_massspec_tsv
+from spectra_learning.training.api import build_model_from_config, load_config, load_pretrained_weights
 
 
 def _inverse_vocab(vocab: dict[str, int]) -> dict[int, str]:

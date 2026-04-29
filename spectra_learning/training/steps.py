@@ -2,7 +2,8 @@ from contextlib import nullcontext
 
 import torch
 
-from models.model import PeakSetSIGReg, _collapse_diagnostics
+from spectra_learning.models.diagnostics import _collapse_diagnostics
+from spectra_learning.models.model import PeakSetSIGReg
 
 
 def train_step_impl(

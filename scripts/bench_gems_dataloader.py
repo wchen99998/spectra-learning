@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader, RandomSampler
 
 from spectra_learning.data.gems.collate import GemsBatchCollator
 from spectra_learning.data.gems.dataset import GemsMemmapDataset
-from utils.gems_native import load_gems_native_metadata
+from spectra_learning.data.gems.native import load_gems_native_metadata
 
 
 def _parse_workers(raw: str) -> list[int]:

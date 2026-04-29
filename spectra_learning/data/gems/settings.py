@@ -4,8 +4,8 @@ from pathlib import Path
 import torch
 from ml_collections import config_dict
 
-from utils.intensity_aware_masking import AWARE_MIXED_MASK_CONFIG
-from utils.spectra_preprocessing import (
+from spectra_learning.data.gems.intensity_aware import AWARE_MIXED_MASK_CONFIG
+from spectra_learning.data.spectra import (
     DEFAULT_MAX_PRECURSOR_MZ,
     DEFAULT_MIN_PEAK_INTENSITY,
     DEFAULT_PRECURSOR_PEAK_EXCLUSION_WINDOW_DA,

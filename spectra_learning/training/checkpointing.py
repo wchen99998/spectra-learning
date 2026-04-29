@@ -2,7 +2,7 @@ from pathlib import Path
 
 import torch
 
-from models.model import PeakSetSIGReg
+from spectra_learning.models.model import PeakSetSIGReg
 
 
 def optimizer_state_dict(optimizer: torch.optim.Optimizer) -> dict:
@@ -67,3 +67,22 @@ def load_optimizer_state(optimizer: torch.optim.Optimizer, state: dict) -> None:
         return
     optimizer.load_state_dict(state["state_dict"])
     scalar_optimizer.load_state_dict(state["scalar_optimizer_state"])
+
+
+def load_pretrained_weights(
+    model: PeakSetSIGReg,
+    checkpoint_path: str,
+) -> None:
+    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    state_dict = ckpt["model"] if "model" in ckpt else ckpt["state_dict"]
+    model.load_state_dict(state_dict)
+
+
+def latest_ckpt_path(directory: Path) -> str | None:
+    checkpoint_dir = directory / "checkpoints"
+    root = checkpoint_dir if checkpoint_dir.exists() else directory
+    ckpts = sorted(
+        [*root.rglob("*.ckpt"), *root.rglob("*.pt")],
+        key=lambda p: p.stat().st_mtime,
+    )
+    return str(ckpts[-1]) if ckpts else None

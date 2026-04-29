@@ -3,7 +3,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from utils.spectra_preprocessing import PRECURSOR_TOKEN_INTENSITY
+from spectra_learning.data.spectra import PRECURSOR_TOKEN_INTENSITY
 
 
 def numpy_batch_to_torch(batch: dict[str, Any]) -> dict[str, Any]:

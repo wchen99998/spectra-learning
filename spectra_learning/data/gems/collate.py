@@ -7,12 +7,12 @@ from spectra_learning.data.gems.masking import (
     _normalize_mask_strategy_name,
     _sample_block_masks_torch,
 )
-from utils.intensity_aware_masking import (
+from spectra_learning.data.gems.intensity_aware import (
     AWARE_MIXED_MASK_CONFIG,
     INTENSITY_AWARE_MASK_STRATEGY,
     sample_intensity_aware_masks_torch,
 )
-from utils.spectra_preprocessing import PEAK_MZ_MAX, preprocess_peak_batch_torch
+from spectra_learning.data.spectra import PEAK_MZ_MAX, preprocess_peak_batch_torch
 
 
 class GemsBatchCollator:

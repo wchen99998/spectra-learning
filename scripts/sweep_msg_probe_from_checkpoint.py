@@ -39,24 +39,28 @@ import numpy as np
 import torch
 from ml_collections import config_dict
 
-from models.model import PeakSetEncoder
-from utils.massspec_probe_data import MassSpecProbeData
-from utils.msg_probe import (
-    REGRESSION_TARGET_KEYS,
+from spectra_learning.models.encoder import PeakSetEncoder
+from spectra_learning.probes.massspec.data import MassSpecProbeData
+from spectra_learning.probes.massspec.msg_modules import (
     MsgLinearProbe,
-    MsgProbeSplitTargets,
-    _build_task_spec,
-    build_msg_probe_inputs,
     _probe_task_names,
     _probe_task_output_dims,
+)
+from spectra_learning.probes.massspec.msg_probe import (
+    REGRESSION_TARGET_KEYS,
+    _build_task_spec,
     msg_probe_metric_higher_is_better,
     _new_epoch_state,
     _probe_step,
     _score_epoch_state,
     _update_epoch_state,
 )
-from utils.schedulers import learning_rate_at_step
-from utils.training import (
+from spectra_learning.probes.massspec.msg_settings import (
+    MsgProbeSplitTargets,
+    build_msg_probe_inputs,
+)
+from spectra_learning.training.schedules import learning_rate_at_step
+from spectra_learning.training.api import (
     build_model_from_config,
     latest_ckpt_path,
     load_config,

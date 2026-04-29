@@ -2,7 +2,7 @@ import logging
 import math
 import copy
 from pathlib import Path
-from typing import Callable, NamedTuple
+from typing import Callable
 
 import numpy as np
 import torch
@@ -11,333 +11,40 @@ from ml_collections import config_dict
 from sklearn.metrics import r2_score
 
 from spectra_learning.data.gems.conversion import numpy_batch_to_torch
-from models.model import CovariancePool, CrossAttention, PeakSetEncoder, PeakSetSIGReg
-from utils.massspec_probe_data import MassSpecProbeData
-from utils.massspec_probe_targets import (
+from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.probes.massspec.data import MassSpecProbeData
+from spectra_learning.probes.massspec.msg_modules import (
+    MsgLinearProbe,
+    MsgSequenceProbe,
+    _probe_task_names,
+    _probe_task_output_dims,
+    build_msg_sequence_probe as _build_msg_sequence_probe,
+)
+from spectra_learning.probes.massspec.msg_settings import (
+    MACCS_TASK as _MACCS_TASK,
+    MORGAN_TASK as _MORGAN_TASK,
+    NUM_RINGS_TASK as _NUM_RINGS_TASK,
+    PROBE_FINGERPRINT_BITS as _PROBE_FINGERPRINT_BITS,
+    REGRESSION_PROBE_TASKS as _REGRESSION_PROBE_TASKS,
+    MsgProbePairwiseAlignment,
+    MsgProbeSplitTargets,
+    MsgProbeTaskSpec,
+    msg_probe_variants_from_config,
+    resolve_msg_probe_fingerprint,
+    resolve_msg_probe_num_repeats,
+    resolve_msg_probe_pairwise_alignment_num_pairs,
+    resolve_msg_probe_sample_limits,
+)
+from spectra_learning.probes.massspec.targets import (
     FG_SMARTS,
-    MACCS_FINGERPRINT_BITS,
-    MORGAN_PROBE_FINGERPRINT_BITS,
     REGRESSION_TARGET_KEYS,
 )
-from utils.schedulers import learning_rate_at_step
+from spectra_learning.training.schedules import learning_rate_at_step
 
 
 log = logging.getLogger(__name__)
 
 
-class MsgProbeTaskSpec(NamedTuple):
-    regression_tasks: tuple[str, ...]
-    num_rings_classes: tuple[int, ...]
-    maccs_bits: int
-    regression_means: dict[str, float]
-    regression_stds: dict[str, float]
-    fingerprint_task: str = "maccs"
-
-
-class MsgProbeSplitTargets(NamedTuple):
-    regression: dict[str, np.ndarray]
-    maccs: np.ndarray
-
-
-class MsgProbePairwiseAlignment(NamedTuple):
-    tanimoto: np.ndarray
-    cosine: np.ndarray
-    pearson: float
-
-
-def build_msg_probe_inputs(
-    peak_embeddings: torch.Tensor,
-    valid_mask: torch.Tensor,
-) -> torch.Tensor:
-    mask = valid_mask.unsqueeze(-1).to(dtype=peak_embeddings.dtype)
-    return (peak_embeddings * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
-
-
-_NUM_RINGS_TASK = "num_rings"
-_MACCS_TASK = "maccs"
-_MORGAN_TASK = "morgan"
-_REGRESSION_PROBE_TASKS = tuple(
-    name for name in REGRESSION_TARGET_KEYS if name != _NUM_RINGS_TASK
-)
-_PROBE_FINGERPRINT_BITS = {
-    _MACCS_TASK: MACCS_FINGERPRINT_BITS,
-    _MORGAN_TASK: MORGAN_PROBE_FINGERPRINT_BITS,
-}
-
-
-def msg_probe_variants_from_config(
-    config: config_dict.ConfigDict,
-) -> tuple[str, ...]:
-    raw_variants = config.get("msg_probe_variants", ("mean", "covariance", "pma"))
-    if isinstance(raw_variants, str):
-        return (raw_variants.lower(),)
-    return tuple(str(variant).lower() for variant in raw_variants)
-
-
-def resolve_msg_probe_fingerprint(
-    config: config_dict.ConfigDict,
-) -> str:
-    return str(
-        config.get(
-            "msg_probe_fingerprint",
-            config.get("msg_probe_fingerprint_type", _MACCS_TASK),
-        )
-    ).lower()
-
-
-def resolve_msg_probe_sample_limits(
-    config: config_dict.ConfigDict,
-) -> tuple[int | None, int | None, int | None, bool]:
-    probe_dataset = str(config.get("probe_dataset", "massspec"))
-    raw_sample_size = config.get("msg_probe_sample_size", None)
-    raw_train = config.get("msg_probe_max_train_samples", None)
-    raw_val = config.get("msg_probe_max_val_samples", None)
-    raw_test = config.get("msg_probe_max_test_samples", None)
-    if raw_train is None:
-        raw_train = raw_sample_size
-    if raw_val is None:
-        raw_val = raw_sample_size
-    if raw_test is None:
-        raw_test = raw_sample_size
-    if raw_train is None and probe_dataset == "nist-full":
-        raw_train = config.get("nist_full_probe_train_samples", 4_000)
-    if raw_val is None and probe_dataset == "nist-full":
-        raw_val = config.get("nist_full_probe_val_samples", 1_000)
-    if raw_test is None and probe_dataset == "nist-full":
-        raw_test = config.get("nist_full_probe_test_samples", 1_000)
-    max_train_samples = int(raw_train) if raw_train is not None else None
-    max_val_samples = int(raw_val) if raw_val is not None else None
-    max_test_samples = int(raw_test) if raw_test is not None else None
-    randomize_test_subset = probe_dataset == "nist-full" and max_test_samples is not None
-    return max_train_samples, max_val_samples, max_test_samples, randomize_test_subset
-
-
-def resolve_msg_probe_num_repeats(
-    config: config_dict.ConfigDict,
-) -> int:
-    probe_dataset = str(config.get("probe_dataset", "massspec"))
-    raw_repeats = config.get("msg_probe_num_repeats", None)
-    if raw_repeats is None and probe_dataset == "nist-full":
-        raw_repeats = config.get("nist_full_probe_num_repeats", 1)
-    return int(raw_repeats) if raw_repeats is not None else 1
-
-
-def resolve_msg_probe_pairwise_alignment_num_pairs(
-    config: config_dict.ConfigDict,
-) -> int:
-    return int(config.get("msg_probe_pairwise_alignment_num_pairs", 20_000))
-
-
-class MsgLinearProbe(torch.nn.Module):
-    def __init__(
-        self,
-        *,
-        input_dim: int,
-        task_names: tuple[str, ...],
-        task_output_dims: dict[str, int] | None = None,
-    ) -> None:
-        super().__init__()
-        self.heads = torch.nn.ModuleDict(
-            {
-                name: torch.nn.Linear(
-                    input_dim,
-                    1 if task_output_dims is None else task_output_dims.get(name, 1),
-                )
-                for name in task_names
-            }
-        )
-
-    def forward(
-        self,
-        probe_inputs: torch.Tensor,
-    ) -> dict[str, torch.Tensor]:
-        return {name: head(probe_inputs) for name, head in self.heads.items()}
-
-
-class MsgProbeHeads(torch.nn.Module):
-    def __init__(
-        self,
-        *,
-        input_dim: int,
-        hidden_dim: int,
-        task_names: tuple[str, ...],
-        task_output_dims: dict[str, int] | None = None,
-    ) -> None:
-        super().__init__()
-        self.heads = torch.nn.ModuleDict(
-            {
-                name: torch.nn.Sequential(
-                    torch.nn.Linear(input_dim, hidden_dim),
-                    torch.nn.SiLU(),
-                    torch.nn.Linear(
-                        hidden_dim,
-                        1 if task_output_dims is None else task_output_dims.get(name, 1),
-                    ),
-                )
-                for name in task_names
-            }
-        )
-
-    def forward(
-        self,
-        probe_inputs: torch.Tensor,
-    ) -> dict[str, torch.Tensor]:
-        return {name: head(probe_inputs) for name, head in self.heads.items()}
-
-
-class MsgMeanPool(torch.nn.Module):
-    def forward(
-        self,
-        peak_embeddings: torch.Tensor,
-        valid_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        return build_msg_probe_inputs(peak_embeddings, valid_mask)
-
-
-class MsgCovariancePool(CovariancePool):
-    pass
-
-
-class FrozenPooler(torch.nn.Module):
-    def __init__(self, pooler: torch.nn.Module) -> None:
-        super().__init__()
-        object.__setattr__(self, "_pooler", pooler)
-
-    @property
-    def pooler(self) -> torch.nn.Module:
-        return self._pooler
-
-    def forward(
-        self,
-        peak_embeddings: torch.Tensor,
-        valid_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        with torch.no_grad():
-            return self.pooler(peak_embeddings, valid_mask)
-
-
-class MsgPmaPool(torch.nn.Module):
-    def __init__(
-        self,
-        *,
-        input_dim: int,
-        num_seeds: int,
-        num_heads: int,
-        qk_norm: bool = False,
-        norm_type: str = "layernorm",
-    ) -> None:
-        super().__init__()
-        self.seed_vectors = torch.nn.Parameter(torch.empty(num_seeds, input_dim))
-        torch.nn.init.trunc_normal_(self.seed_vectors, std=0.02)
-        self.cross_attention = CrossAttention(
-            dim=input_dim,
-            n_heads=num_heads,
-            qk_norm=qk_norm,
-            norm_type=norm_type,
-        )
-
-    def forward(
-        self,
-        peak_embeddings: torch.Tensor,
-        valid_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        seed_vectors = self.seed_vectors.unsqueeze(0).expand(peak_embeddings.shape[0], -1, -1)
-        pooled = self.cross_attention(
-            seed_vectors.to(dtype=peak_embeddings.dtype),
-            peak_embeddings,
-            memory_mask=valid_mask,
-        )
-        return pooled.mean(dim=1)
-
-
-class MsgSequenceProbe(torch.nn.Module):
-    def __init__(
-        self,
-        *,
-        pooler: torch.nn.Module,
-        pooled_dim: int,
-        hidden_dim: int,
-        task_names: tuple[str, ...],
-        task_output_dims: dict[str, int] | None = None,
-    ) -> None:
-        super().__init__()
-        self.pooler = pooler
-        self.heads = MsgProbeHeads(
-            input_dim=pooled_dim,
-            hidden_dim=hidden_dim,
-            task_names=task_names,
-            task_output_dims=task_output_dims,
-        )
-
-    def forward(
-        self,
-        peak_embeddings: torch.Tensor,
-        valid_mask: torch.Tensor,
-    ) -> dict[str, torch.Tensor]:
-        return self.heads(self.pooler(peak_embeddings, valid_mask))
-
-
-def _probe_task_names(task_spec: MsgProbeTaskSpec) -> tuple[str, ...]:
-    task_names = task_spec.regression_tasks
-    if task_spec.num_rings_classes:
-        task_names += (_NUM_RINGS_TASK,)
-    if task_spec.maccs_bits > 0:
-        task_names += (task_spec.fingerprint_task,)
-    return task_names
-
-
-def _probe_task_output_dims(task_spec: MsgProbeTaskSpec) -> dict[str, int]:
-    output_dims: dict[str, int] = {}
-    if task_spec.num_rings_classes:
-        output_dims[_NUM_RINGS_TASK] = len(task_spec.num_rings_classes)
-    if task_spec.maccs_bits > 0:
-        output_dims[task_spec.fingerprint_task] = task_spec.maccs_bits
-    return output_dims
-
-
-def _build_msg_sequence_probe(
-    variant: str,
-    *,
-    config: config_dict.ConfigDict,
-    task_spec: MsgProbeTaskSpec,
-    covariance_pooler: CovariancePool | None = None,
-) -> MsgSequenceProbe:
-    model_dim = int(config.model_dim)
-    hidden_dim = int(config.get("msg_probe_mlp_hidden_dim", model_dim))
-    task_names = _probe_task_names(task_spec)
-    task_output_dims = _probe_task_output_dims(task_spec)
-    if variant == "mean":
-        pooler = MsgMeanPool()
-        pooled_dim = model_dim
-    elif variant == "covariance":
-        if covariance_pooler is None:
-            compressed_dim = int(config.get("msg_probe_covariance_dim", 32))
-            pooler = MsgCovariancePool(
-                input_dim=model_dim,
-                compressed_dim=compressed_dim,
-            )
-        else:
-            compressed_dim = int(covariance_pooler.left_proj.out_features)
-            pooler = FrozenPooler(covariance_pooler)
-        pooled_dim = compressed_dim * compressed_dim
-    elif variant == "pma":
-        pooler = MsgPmaPool(
-            input_dim=model_dim,
-            num_seeds=int(config.get("msg_probe_pma_num_seeds", 4)),
-            num_heads=int(config.get("msg_probe_pma_num_heads", config.get("encoder_num_heads", 8))),
-            qk_norm=bool(config.get("encoder_qk_norm", False)),
-            norm_type=str(config.get("norm_type", "layernorm")),
-        )
-        pooled_dim = model_dim
-    else:
-        raise ValueError(f"Unsupported MSG probe variant: {variant!r}")
-    return MsgSequenceProbe(
-        pooler=pooler,
-        pooled_dim=pooled_dim,
-        hidden_dim=hidden_dim,
-        task_names=task_names,
-        task_output_dims=task_output_dims,
-    )
 
 
 def iter_massspec_probe(

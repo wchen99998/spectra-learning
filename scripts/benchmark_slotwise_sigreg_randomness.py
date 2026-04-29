@@ -14,7 +14,7 @@ from torch import nn
 
 sys.path.insert(0, ".")
 
-from models.losses import SlotwiseSIGReg
+from spectra_learning.models.losses import SlotwiseSIGReg
 
 _DTYPES: dict[str, torch.dtype] = {
     "float32": torch.float32,

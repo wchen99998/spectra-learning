@@ -3,7 +3,7 @@ from unittest import mock
 import torch
 import torch._dynamo
 
-from models.losses import SIGReg, SlotwiseSIGReg
+from spectra_learning.models.losses import SIGReg, SlotwiseSIGReg
 
 
 def _normalize_directions(directions: torch.Tensor) -> torch.Tensor:

@@ -6,13 +6,13 @@ from unittest import mock
 import numpy as np
 import torch
 
-from models.losses import SlotwiseSIGReg
-from models.model import PeakSetSIGReg
-from models.peak_features import FourierFeatures, PeakFeatureEmbedder
+from spectra_learning.models.losses import SlotwiseSIGReg
+from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.models.peak_features import FourierFeatures, PeakFeatureEmbedder
 from spectra_learning.training.optimization import is_weight_decay_target
 from spectra_learning.training.steps import train_step_impl
-from utils.spectra_preprocessing import PRECURSOR_TOKEN_INTENSITY
-from utils.training import load_pretrained_weights
+from spectra_learning.data.spectra import PRECURSOR_TOKEN_INTENSITY
+from spectra_learning.training.api import load_pretrained_weights
 
 
 def _make_batch(

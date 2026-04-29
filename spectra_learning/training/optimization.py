@@ -1,7 +1,7 @@
 import torch
 from ml_collections import config_dict
 
-from models.model import PeakSetSIGReg
+from spectra_learning.models.model import PeakSetSIGReg
 from spectra_learning.training.schedules import make_cosine_schedule, scaled_min_lr
 
 PREDICTOR_PARAM_PREFIXES = (

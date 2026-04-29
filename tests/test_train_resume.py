@@ -4,14 +4,14 @@ import pytest
 import torch
 from ml_collections import config_dict
 
-from models.model import PeakSetSIGReg
+from spectra_learning.models.model import PeakSetSIGReg
 from spectra_learning.training.checkpointing import load_resume_model_state, save_checkpoint
 from spectra_learning.training.optimization import (
     build_optimizers,
     is_predictor_parameter,
     is_weight_decay_target,
 )
-from utils.training import _build_wandb_init_kwargs, build_model_from_config
+from spectra_learning.training.api import _build_wandb_init_kwargs, build_model_from_config
 
 
 def _small_model(**overrides) -> PeakSetSIGReg:

@@ -19,18 +19,18 @@ from ml_collections import config_dict
 from spectra_learning.data.gems.conversion import _prepend_precursor_token_torch
 from spectra_learning.data.gems.masking import _normalize_mask_strategy_name
 from networks.transformer_torch import _build_norm
-from utils.intensity_aware_masking import (
+from spectra_learning.data.gems.intensity_aware import (
     AWARE_MIXED_MASK_CONFIG,
     INTENSITY_AWARE_MASK_STRATEGY,
     sample_intensity_aware_masks_torch,
 )
-from utils.spectra_preprocessing import (
+from spectra_learning.data.spectra import (
     DEFAULT_MIN_PEAK_INTENSITY,
     DEFAULT_PRECURSOR_PEAK_EXCLUSION_WINDOW_DA,
     PEAK_MZ_MAX,
     preprocess_peak_batch_torch,
 )
-from utils.training import build_model_from_config
+from spectra_learning.training.api import build_model_from_config
 
 
 JEPA_MASK_STRATEGIES = ("contiguous", "ragged", "random")

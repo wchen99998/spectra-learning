@@ -24,11 +24,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from models.losses import SlotwiseSIGReg
-from models.model import PeakSetEncoder
-from utils.massspec_probe_data import MassSpecProbeData
-from utils.msg_probe import iter_massspec_probe
-from utils.training import build_model_from_config, latest_ckpt_path, load_config, load_pretrained_weights
+from spectra_learning.models.losses import SlotwiseSIGReg
+from spectra_learning.models.encoder import PeakSetEncoder
+from spectra_learning.probes.massspec.data import MassSpecProbeData
+from spectra_learning.probes.massspec.msg_probe import iter_massspec_probe
+from spectra_learning.training.api import build_model_from_config, latest_ckpt_path, load_config, load_pretrained_weights
 
 
 def _parse_ints(value: str) -> list[int]:
