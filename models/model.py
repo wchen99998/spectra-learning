@@ -932,9 +932,11 @@ class PeakSetSIGReg(nn.Module):
             "sigreg-enc",
             "sigreg-pred",
             "sigreg-proj",
+            "sigreg-enc-pred",
             "slot-sigreg-enc",
             "slot-sigreg-pred",
             "slot-sigreg-proj",
+            "slot-sigreg-enc-pred",
         ):
             raise ValueError(
                 f"Unsupported regularizer: {self.representation_regularizer!r}"
@@ -1124,7 +1126,12 @@ class PeakSetSIGReg(nn.Module):
         sigreg_cls = (
             SlotwiseSIGReg
             if self.representation_regularizer
-            in ("slot-sigreg-enc", "slot-sigreg-pred", "slot-sigreg-proj")
+            in (
+                "slot-sigreg-enc",
+                "slot-sigreg-pred",
+                "slot-sigreg-proj",
+                "slot-sigreg-enc-pred",
+            )
             else SIGReg
         )
         self.sigreg = sigreg_cls(num_slices=int(sigreg_num_slices))
@@ -1656,6 +1663,27 @@ class PeakSetSIGReg(nn.Module):
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         if self.sigreg_lambda <= 0:
             return context_emb.new_tensor(0.0), {}
+
+        if self.representation_regularizer in (
+            "sigreg-enc-pred",
+            "slot-sigreg-enc-pred",
+        ):
+            encoder_loss = self.sigreg(
+                context_emb.float(),
+                valid_mask=self._sigreg_weights(context_mask),
+            ).to(dtype=context_emb.dtype)
+            predictor_loss = self.sigreg(
+                predictor_output_features.float(),
+                valid_mask=self._sigreg_weights(target_masks),
+            ).to(dtype=context_emb.dtype)
+            sigreg_loss = encoder_loss + predictor_loss
+            sigreg_term = context_emb.new_tensor(self.sigreg_lambda) * sigreg_loss
+            return sigreg_term, {
+                "sigreg_loss": sigreg_loss,
+                "sigreg_term": sigreg_term,
+                "sigreg_encoder_loss": encoder_loss,
+                "sigreg_predictor_loss": predictor_loss,
+            }
 
         if self.representation_regularizer in ("sigreg-enc", "slot-sigreg-enc"):
             embeddings = context_emb.float()

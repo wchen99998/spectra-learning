@@ -349,6 +349,69 @@ class BlockJEPATests(unittest.TestCase):
                     captured["proj"].shape[-1], model.target_projector_dim
                 )
 
+    def test_sigreg_on_encoder_and_predictor_outputs_combines_losses(self):
+        for regularizer in ("sigreg-enc-pred", "slot-sigreg-enc-pred"):
+            with self.subTest(regularizer=regularizer):
+                model = self._build_model(
+                    encoder_num_layers=2,
+                    jepa_target_layers=[1, 2],
+                    representation_regularizer=regularizer,
+                    sigreg_lambda=0.02,
+                    predictor_dim=16,
+                )
+                if regularizer.startswith("slot-"):
+                    self.assertIsInstance(model.sigreg, SlotwiseSIGReg)
+                batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+                captured: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+                def fake_sigreg_forward(
+                    proj: torch.Tensor,
+                    valid_mask: torch.Tensor | None = None,
+                ) -> torch.Tensor:
+                    captured.append(
+                        (proj.detach().clone(), valid_mask.detach().clone())
+                    )
+                    return proj.new_tensor(float(len(captured)))
+
+                with mock.patch.object(
+                    model.sigreg,
+                    "forward",
+                    side_effect=fake_sigreg_forward,
+                ):
+                    metrics = model.forward_augmented(batch)
+
+                self.assertEqual(len(captured), 2)
+                encoder_proj, encoder_mask = captured[0]
+                predictor_proj, predictor_mask = captured[1]
+                self.assertEqual(
+                    encoder_proj.shape,
+                    (*batch["context_mask"].shape, model.model_dim),
+                )
+                torch.testing.assert_close(
+                    encoder_mask,
+                    batch["context_mask"].float(),
+                )
+                self.assertEqual(
+                    predictor_proj.shape,
+                    (*batch["target_masks"].shape, model.jepa_target_dim),
+                )
+                torch.testing.assert_close(
+                    predictor_mask,
+                    batch["target_masks"].float(),
+                )
+                torch.testing.assert_close(
+                    metrics["sigreg_encoder_loss"],
+                    metrics["sigreg_encoder_loss"].new_tensor(1.0),
+                )
+                torch.testing.assert_close(
+                    metrics["sigreg_predictor_loss"],
+                    metrics["sigreg_predictor_loss"].new_tensor(2.0),
+                )
+                torch.testing.assert_close(
+                    metrics["sigreg_loss"],
+                    metrics["sigreg_loss"].new_tensor(3.0),
+                )
+
     def test_sigreg_on_projected_outputs_uses_projected_student_targets(self):
         for regularizer in ("sigreg-proj", "slot-sigreg-proj", "slog-sigreg-proj"):
             with self.subTest(regularizer=regularizer):
