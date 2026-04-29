@@ -12,6 +12,11 @@ from huggingface_hub import snapshot_download
 from ml_collections import config_dict
 from torch.utils.data import DataLoader, Dataset
 
+from utils.intensity_aware_masking import (
+    AWARE_MIXED_MASK_CONFIG,
+    INTENSITY_AWARE_MASK_STRATEGY,
+    sample_intensity_aware_masks_torch,
+)
 from utils.gems_native import (
     build_gems_native_artifact,
     load_gems_native_metadata,
@@ -400,6 +405,7 @@ class _GemsBatchCollator:
         peak_drop_min_intensity: float,
         peak_ordering: str,
         precursor_peak_exclusion_window_da: float,
+        intensity_aware_mask_config: dict[str, float] | None = None,
     ) -> None:
         self.augment = bool(augment)
         self.num_target_blocks = int(num_target_blocks)
@@ -409,6 +415,11 @@ class _GemsBatchCollator:
         self.mask_strategy = str(mask_strategy)
         self.mask_lengths = tuple(int(length) for length in mask_lengths)
         self.mask_round_from = int(mask_round_from)
+        self.intensity_aware_mask_config = dict(
+            AWARE_MIXED_MASK_CONFIG
+            if intensity_aware_mask_config is None
+            else intensity_aware_mask_config
+        )
         self.use_precursor_token = bool(use_precursor_token)
         self.num_peaks = int(num_peaks)
         self.max_precursor_mz = float(max_precursor_mz)
@@ -441,16 +452,25 @@ class _GemsBatchCollator:
             batch["peak_valid_mask"] = batch["peak_valid_mask"].clone()
             batch["peak_valid_mask"][no_valid, 0] = True
         if self.augment:
-            context_mask, target_masks = _sample_block_masks_torch(
-                batch["peak_valid_mask"],
-                num_target_blocks=self.num_target_blocks,
-                context_fraction=self.context_fraction,
-                target_fraction=self.target_fraction,
-                block_min_len=self.block_min_len,
-                mask_strategy=self.mask_strategy,
-                mask_lengths=self.mask_lengths,
-                mask_round_from=self.mask_round_from,
-            )
+            if _normalize_mask_strategy_name(self.mask_strategy) == INTENSITY_AWARE_MASK_STRATEGY:
+                context_mask, target_masks = sample_intensity_aware_masks_torch(
+                    batch["peak_valid_mask"],
+                    batch["peak_intensity"],
+                    batch["peak_mz"] * PEAK_MZ_MAX,
+                    num_target_blocks=self.num_target_blocks,
+                    **self.intensity_aware_mask_config,
+                )
+            else:
+                context_mask, target_masks = _sample_block_masks_torch(
+                    batch["peak_valid_mask"],
+                    num_target_blocks=self.num_target_blocks,
+                    context_fraction=self.context_fraction,
+                    target_fraction=self.target_fraction,
+                    block_min_len=self.block_min_len,
+                    mask_strategy=self.mask_strategy,
+                    mask_lengths=self.mask_lengths,
+                    mask_round_from=self.mask_round_from,
+                )
             batch["context_mask"] = context_mask
             batch["target_masks"] = target_masks
         if self.use_precursor_token:
@@ -510,6 +530,10 @@ class GemsNativeDataModule:
         self.jepa_mask_round_from = int(
             config.get("jepa_mask_round_from", len(self.jepa_mask_lengths))
         )
+        self.jepa_intensity_aware_mask_config = {
+            key: float(config.get(f"jepa_intensity_aware_{key}", value))
+            for key, value in AWARE_MIXED_MASK_CONFIG.items()
+        }
         self.use_precursor_token = bool(config.get("use_precursor_token", False))
         self.num_peaks_output = int(config.get("num_peaks", _NUM_PEAKS_OUTPUT))
         self.gems_dir, self.gems_metadata = self._resolve_gems_artifact()
@@ -685,6 +709,7 @@ class GemsNativeDataModule:
                 mask_strategy=self.jepa_mask_strategy,
                 mask_lengths=self.jepa_mask_lengths,
                 mask_round_from=self.jepa_mask_round_from,
+                intensity_aware_mask_config=self.jepa_intensity_aware_mask_config,
                 use_precursor_token=self.use_precursor_token,
                 num_peaks=self.num_peaks_output,
                 max_precursor_mz=self.max_precursor_mz,
@@ -772,6 +797,7 @@ def _make_visualization_collator_kwargs(
         "mask_strategy": datamodule.jepa_mask_strategy,
         "mask_lengths": datamodule.jepa_mask_lengths,
         "mask_round_from": datamodule.jepa_mask_round_from,
+        "intensity_aware_mask_config": datamodule.jepa_intensity_aware_mask_config,
         "use_precursor_token": datamodule.use_precursor_token,
         "num_peaks": datamodule.num_peaks_output,
         "max_precursor_mz": datamodule.max_precursor_mz,

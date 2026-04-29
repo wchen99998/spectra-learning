@@ -18,9 +18,15 @@ from ml_collections import config_dict
 
 import input_pipeline
 from networks.transformer_torch import _build_norm
+from utils.intensity_aware_masking import (
+    AWARE_MIXED_MASK_CONFIG,
+    INTENSITY_AWARE_MASK_STRATEGY,
+    sample_intensity_aware_masks_torch,
+)
 from utils.spectra_preprocessing import (
     DEFAULT_MIN_PEAK_INTENSITY,
     DEFAULT_PRECURSOR_PEAK_EXCLUSION_WINDOW_DA,
+    PEAK_MZ_MAX,
     preprocess_peak_batch_torch,
 )
 from utils.training import build_model_from_config
@@ -384,18 +390,30 @@ def evaluate_strategy(
         end = min(start + batch_size, int(pre["peak_valid_mask"].shape[0]))
         batch = {key: value[start:end].clone() for key, value in pre.items()}
         original_valid_count = batch["peak_valid_mask"].sum(dim=1).float()
-        context, targets = sample_block_masks(
-            batch["peak_valid_mask"],
-            num_target_blocks=int(cfg.jepa_num_target_blocks),
-            context_fraction=float(cfg.jepa_context_fraction),
-            target_fraction=float(cfg.jepa_target_fraction),
-            block_min_len=int(cfg.jepa_block_min_len),
-            mask_strategy=strategy,
-            context_fraction_range=tuple(float(v) for v in cfg.jepa_context_fraction_range),
-            target_fraction_range=tuple(float(v) for v in cfg.jepa_target_fraction_range),
-            mask_lengths=tuple(int(v) for v in cfg.jepa_mask_lengths),
-            mask_round_from=int(cfg.jepa_mask_round_from),
-        )
+        if input_pipeline._normalize_mask_strategy_name(strategy) == INTENSITY_AWARE_MASK_STRATEGY:
+            context, targets = sample_intensity_aware_masks_torch(
+                batch["peak_valid_mask"],
+                batch["peak_intensity"],
+                batch["peak_mz"] * PEAK_MZ_MAX,
+                num_target_blocks=int(cfg.jepa_num_target_blocks),
+                **{
+                    key: float(cfg.get(f"jepa_intensity_aware_{key}", value))
+                    for key, value in AWARE_MIXED_MASK_CONFIG.items()
+                },
+            )
+        else:
+            context, targets = sample_block_masks(
+                batch["peak_valid_mask"],
+                num_target_blocks=int(cfg.jepa_num_target_blocks),
+                context_fraction=float(cfg.get("jepa_context_fraction", 0.5)),
+                target_fraction=float(cfg.get("jepa_target_fraction", 0.25)),
+                block_min_len=int(cfg.get("jepa_block_min_len", 1)),
+                mask_strategy=strategy,
+                context_fraction_range=tuple(float(v) for v in cfg.get("jepa_context_fraction_range", (0.1, 0.25))),
+                target_fraction_range=tuple(float(v) for v in cfg.get("jepa_target_fraction_range", (0.15, 0.35))),
+                mask_lengths=tuple(int(v) for v in cfg.get("jepa_mask_lengths", (1, 2, 4, 8, 16))),
+                mask_round_from=int(cfg.get("jepa_mask_round_from", len(cfg.get("jepa_mask_lengths", (1, 2, 4, 8, 16))))),
+            )
         batch["context_mask"] = context
         batch["target_masks"] = targets
         if bool(cfg.use_precursor_token):
@@ -524,6 +542,24 @@ def main() -> None:
     missing, unexpected = model.load_state_dict(checkpoint["model"], strict=False)
     model.eval().to(device)
 
+    mask_policy = {
+        "configured": str(cfg.jepa_mask_strategy),
+        "num_target_blocks": int(cfg.jepa_num_target_blocks),
+    }
+    if input_pipeline._normalize_mask_strategy_name(cfg.jepa_mask_strategy) == INTENSITY_AWARE_MASK_STRATEGY:
+        mask_policy["intensity_aware"] = {
+            key: float(cfg.get(f"jepa_intensity_aware_{key}", value))
+            for key, value in AWARE_MIXED_MASK_CONFIG.items()
+        }
+    else:
+        mask_policy |= {
+            "context_fraction": float(cfg.get("jepa_context_fraction", 0.5)),
+            "context_fraction_range": list(cfg.get("jepa_context_fraction_range", (0.1, 0.25))),
+            "target_fraction": float(cfg.get("jepa_target_fraction", 0.25)),
+            "target_fraction_range": list(cfg.get("jepa_target_fraction_range", (0.15, 0.35))),
+            "mask_lengths": list(cfg.get("jepa_mask_lengths", (1, 2, 4, 8, 16))),
+        }
+
     result = {
         "estimator": (
             "trained JEPA predictor R2 lower-bound proxy for conditional-mean eta2"
@@ -541,15 +577,7 @@ def main() -> None:
         "split": "validation",
         "sampled_spectra": int(args.num_samples),
         "nonempty_spectra": int(pre["peak_valid_mask"].shape[0]),
-        "mask_policy": {
-            "configured": str(cfg.jepa_mask_strategy),
-            "context_fraction": float(cfg.jepa_context_fraction),
-            "context_fraction_range": list(cfg.jepa_context_fraction_range),
-            "target_fraction": float(cfg.jepa_target_fraction),
-            "target_fraction_range": list(cfg.jepa_target_fraction_range),
-            "num_target_blocks": int(cfg.jepa_num_target_blocks),
-            "mask_lengths": list(cfg.jepa_mask_lengths),
-        },
+        "mask_policy": mask_policy,
         "model": {
             "model_dim": int(cfg.model_dim),
             "encoder_layers": int(cfg.encoder_num_layers),
