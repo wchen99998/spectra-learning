@@ -115,7 +115,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_target_normalization = "zscore"
     cfg.jepa_target_layers = [1, 3, 5, 8]
     cfg.use_ema_teacher = False
-    cfg.ema_teacher_momentum = 0.996
+    cfg.ema_teacher_momentum_start = 0.996
     cfg.ema_teacher_momentum_final = 1.0
     cfg.ema_teacher_schedule = "cosine"
     cfg.grad_clip_norm = 1.0

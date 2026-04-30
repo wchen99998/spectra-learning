@@ -40,7 +40,7 @@ HOURS = 60 * MINUTES
 DEFAULT_GPU = "H100"
 PROJECT_ROOT = "/root/spectra-learning"
 MAX_SWEEP_CONCURRENCY = 10
-TRAIN_TIMEOUT_HOURS = 13
+TRAIN_TIMEOUT_HOURS = 24
 GEMS_SMALL_SWEEP_RUNTIME_HOURS = 12.0
 
 # ---------------------------------------------------------------------------
@@ -83,11 +83,6 @@ image = (
     .add_local_file(local / "train.py", remote_path=f"{PROJECT_ROOT}/train.py")
     .add_local_dir(local / "spectra_learning", remote_path=f"{PROJECT_ROOT}/spectra_learning")
     .add_local_dir(local / "configs", remote_path=f"{PROJECT_ROOT}/configs")
-    .add_local_dir(local / "models", remote_path=f"{PROJECT_ROOT}/models")
-    .add_local_dir(local / "networks", remote_path=f"{PROJECT_ROOT}/networks")
-    .add_local_dir(local / "utils", remote_path=f"{PROJECT_ROOT}/utils")
-    .add_local_dir(local / "kernels", remote_path=f"{PROJECT_ROOT}/kernels")
-    .add_local_dir(local / "optimizers", remote_path=f"{PROJECT_ROOT}/optimizers")
 )
 
 app = modal.App("spectra-training", image=image)

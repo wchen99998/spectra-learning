@@ -731,7 +731,7 @@ class BlockJEPATests(unittest.TestCase):
         model = self._build_model(
             masked_token_loss_weight=1.0,
             use_ema_teacher=True,
-            ema_teacher_momentum=0.5,
+            ema_teacher_momentum_start=0.5,
             ema_teacher_momentum_final=0.9,
             ema_teacher_schedule="linear",
         )
@@ -793,7 +793,7 @@ class BlockJEPATests(unittest.TestCase):
     def test_slow_fast_slow_ema_schedule_uses_total_steps(self):
         model = self._build_model(
             use_ema_teacher=True,
-            ema_teacher_momentum=0.9995,
+            ema_teacher_momentum_start=0.9995,
             ema_teacher_momentum_mid=0.99,
             ema_teacher_momentum_final=0.999,
             ema_teacher_schedule_peak_fraction=0.35,

@@ -172,16 +172,16 @@ def _build_encoder(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:
 
 def _build_teacher(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:
     model.use_ema_teacher = bool(cfg.use_ema_teacher)
-    model.ema_teacher_momentum = float(cfg.ema_teacher_momentum)
+    model.ema_teacher_momentum_start = float(cfg.ema_teacher_momentum_start)
     model.ema_teacher_momentum_mid = (
         float(cfg.ema_teacher_momentum_mid)
         if cfg.ema_teacher_momentum_mid is not None
-        else model.ema_teacher_momentum
+        else model.ema_teacher_momentum_start
     )
     model.ema_teacher_momentum_final = (
         float(cfg.ema_teacher_momentum_final)
         if cfg.ema_teacher_momentum_final is not None
-        else model.ema_teacher_momentum
+        else model.ema_teacher_momentum_start
     )
     model.ema_teacher_schedule_peak_fraction = float(
         cfg.ema_teacher_schedule_peak_fraction

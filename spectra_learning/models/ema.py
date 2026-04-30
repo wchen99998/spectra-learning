@@ -11,15 +11,15 @@ class EMATeacherMixin:
         total_steps: int,
     ) -> float:
         if self.ema_teacher_schedule == "constant":
-            return self.ema_teacher_momentum
+            return self.ema_teacher_momentum_start
         progress = min(1.0, max(0.0, float(step) / float(max(1, total_steps))))
         if self.ema_teacher_schedule == "slow-fast-slow":
             peak = min(1.0, max(1e-6, self.ema_teacher_schedule_peak_fraction))
             if progress <= peak:
                 phase = progress / peak
                 eased = 0.5 - 0.5 * math.cos(math.pi * phase)
-                return self.ema_teacher_momentum + eased * (
-                    self.ema_teacher_momentum_mid - self.ema_teacher_momentum
+                return self.ema_teacher_momentum_start + eased * (
+                    self.ema_teacher_momentum_mid - self.ema_teacher_momentum_start
                 )
             phase = (progress - peak) / max(1e-6, 1.0 - peak)
             eased = 0.5 - 0.5 * math.cos(math.pi * phase)
@@ -28,8 +28,8 @@ class EMATeacherMixin:
             )
         if self.ema_teacher_schedule == "cosine":
             progress = 0.5 - 0.5 * math.cos(math.pi * progress)
-        return self.ema_teacher_momentum + progress * (
-            self.ema_teacher_momentum_final - self.ema_teacher_momentum
+        return self.ema_teacher_momentum_start + progress * (
+            self.ema_teacher_momentum_final - self.ema_teacher_momentum_start
         )
 
     @torch.no_grad()

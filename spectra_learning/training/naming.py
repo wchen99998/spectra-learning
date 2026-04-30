@@ -132,14 +132,14 @@ def _ema_parts(config: Any) -> list[str]:
     parts = [
         "ema",
         str(config.get("ema_teacher_schedule", "constant")),
-        f"m{float(config.get('ema_teacher_momentum', 0.996)):.4f}",
+        f"mstart{float(config.get('ema_teacher_momentum_start', 0.996)):.4f}",
     ]
     ema_mid = config.get("ema_teacher_momentum_mid", None)
     if ema_mid is not None:
-        parts.append(f"mm{float(ema_mid):.4f}")
+        parts.append(f"mmid{float(ema_mid):.4f}")
     ema_final = config.get("ema_teacher_momentum_final", None)
     if ema_final is not None:
-        parts.append(f"mf{float(ema_final):.4f}")
+        parts.append(f"mfinal{float(ema_final):.4f}")
     if str(config.get("ema_teacher_schedule", "")).lower() == "slow-fast-slow":
         peak_frac = float(config.get("ema_teacher_schedule_peak_fraction", 0.35))
         parts.append(f"peak{peak_frac:.2f}")

@@ -75,7 +75,7 @@ class PeakSetSIGRegSettings:
     predictor_dropout: float = 0.0
     covariance_pooling_dim: int = -1
     use_ema_teacher: bool = False
-    ema_teacher_momentum: float = 0.996
+    ema_teacher_momentum_start: float = 0.996
     ema_teacher_momentum_mid: float | None = None
     ema_teacher_momentum_final: float | None = None
     ema_teacher_schedule_peak_fraction: float = 0.35
@@ -238,7 +238,7 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "predictor_dropout": float,
     "covariance_pooling_dim": int,
     "use_ema_teacher": bool,
-    "ema_teacher_momentum": float,
+    "ema_teacher_momentum_start": float,
     "ema_teacher_momentum_mid": _optional_float,
     "ema_teacher_momentum_final": _optional_float,
     "ema_teacher_schedule_peak_fraction": float,

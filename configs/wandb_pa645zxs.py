@@ -84,22 +84,20 @@ def get_config() -> config_dict.ConfigDict:
         setattr(cfg, f"jepa_intensity_aware_{key}", value)
 
     # Regularization and pooling
-    cfg.representation_regularizer = "slot-sigreg-enc-pred"
-    cfg.sigreg_lambda = 1e-5
+    cfg.representation_regularizer = "none"
+    cfg.sigreg_lambda = 0
     cfg.sigreg_num_slices = 1024
     cfg.sigreg_precursor_scale = 1
     cfg.covariance_pooling_dim = 64
 
     # EMA teacher
     cfg.use_ema_teacher = True
-    cfg.ema_teacher_momentum = 0.9995
-    cfg.ema_teacher_momentum_mid = 0.99
-    cfg.ema_teacher_momentum_final = 0.999
-    cfg.ema_teacher_schedule = "slow-fast-slow"
-    cfg.ema_teacher_schedule_peak_fraction = 0.2
+    cfg.ema_teacher_momentum_start = 0.99925
+    cfg.ema_teacher_momentum_final = 0.99925
+    cfg.ema_teacher_schedule = "cosine"
 
     # Training
-    cfg.num_epochs = 10
+    cfg.num_epochs = 30
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "reduce-overhead"
     cfg.device_prefetch_size = 8
@@ -145,11 +143,11 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_weight_decay = 0
 
     # Optimizer
-    cfg.learning_rate = 0.0003
+    cfg.learning_rate = 0.0001
     cfg.predictor_learning_rate_ratio = 2.
     cfg.min_learning_rate = 0.0001
-    cfg.warmup_steps = 10_000
-    cfg.weight_decay = 0.05
+    cfg.warmup_steps = 50_000
+    cfg.weight_decay = 0.01
     cfg.b2 = 0.999
     cfg.grad_clip_norm = 1
     cfg.optimizer = "muon"
