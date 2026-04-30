@@ -48,19 +48,28 @@ class EMATeacherMixin:
         student: nn.Module,
         momentum: float,
     ) -> None:
-        for teacher_param, student_param in zip(
-            teacher.parameters(),
-            student.parameters(),
-        ):
-            teacher_param.lerp_(student_param, 1.0 - momentum)
+        torch._foreach_lerp_(
+            list(teacher.parameters()),
+            list(student.parameters()),
+            1.0 - momentum,
+        )
+        teacher_float_buffers = []
+        student_float_buffers = []
         for teacher_buffer, student_buffer in zip(
             teacher.buffers(),
             student.buffers(),
         ):
             if torch.is_floating_point(teacher_buffer):
-                teacher_buffer.lerp_(student_buffer, 1.0 - momentum)
+                teacher_float_buffers.append(teacher_buffer)
+                student_float_buffers.append(student_buffer)
             else:
                 teacher_buffer.copy_(student_buffer)
+        if teacher_float_buffers:
+            torch._foreach_lerp_(
+                teacher_float_buffers,
+                student_float_buffers,
+                1.0 - momentum,
+            )
 
     @torch.no_grad()
     def update_ema_teacher(
