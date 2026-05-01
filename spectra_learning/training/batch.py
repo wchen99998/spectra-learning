@@ -22,7 +22,7 @@ def move_batch_to_device(
     return {
         k: v.to(device, non_blocking=True)
         if isinstance(v, torch.Tensor)
-        else torch.as_tensor(v, device=device)
+        else v
         for k, v in batch.items()
         if k in TRAIN_BATCH_KEYS
     }
@@ -68,6 +68,7 @@ class BatchPrefetcher:
             current_stream = torch.cuda.current_stream(device=self._device)
             current_stream.wait_event(ready_event)
             for value in batch.values():
-                value.record_stream(current_stream)
+                if isinstance(value, torch.Tensor):
+                    value.record_stream(current_stream)
         self._preload_one()
         return batch

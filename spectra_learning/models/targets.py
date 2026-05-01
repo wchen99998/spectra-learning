@@ -57,9 +57,8 @@ class TargetProjectionMixin:
     def _add_predictor_positions(self, x: torch.Tensor) -> torch.Tensor:
         # Real predictor/query slots get absolute positions; register tokens are
         # appended later and stay unpositioned.
-        return x + self.predictor_position_embedding(
-            torch.arange(x.shape[1], device=x.device)
-        ).unsqueeze(0).to(dtype=x.dtype)
+        positions = torch.arange(x.shape[1], device=x.device)
+        return x + self.predictor_position_embedding(positions).to(dtype=x.dtype)
 
     def predict_masked_latents(
         self,

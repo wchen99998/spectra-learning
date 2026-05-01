@@ -21,12 +21,14 @@ AWARE_MIXED_MASK_CONFIG = {
 }
 
 
-def _effective_count(p_row: torch.Tensor, mask: torch.Tensor) -> float:
-    mass = p_row[mask].sum()
+def _effective_count_from_stats(
+    mass: torch.Tensor,
+    weighted_log_mass: torch.Tensor,
+) -> float:
     if float(mass.item()) <= 0.0:
         return 0.0
-    q = p_row[mask] / mass
-    return float(torch.exp(-(q * torch.log(q)).sum()).item())
+    entropy = torch.log(mass) - weighted_log_mass / mass
+    return float(torch.exp(entropy).item())
 
 
 def _weighted_sample_until(
@@ -41,11 +43,25 @@ def _weighted_sample_until(
     mask = torch.zeros_like(p_row, dtype=torch.bool)
     if indices.numel() == 0:
         return mask
-    count_cap = int(indices.numel()) if max_count is None else min(int(max_count), int(indices.numel()))
-    order = indices[torch.multinomial(weights / weights.sum(), int(indices.numel()), replacement=False)]
+    count_cap = (
+        int(indices.numel())
+        if max_count is None
+        else min(int(max_count), int(indices.numel()))
+    )
+    order = indices[
+        torch.multinomial(weights / weights.sum(), int(indices.numel()), replacement=False)
+    ]
+    mass = p_row.new_zeros(())
+    weighted_log_mass = p_row.new_zeros(())
     for idx in order[:count_cap]:
         mask[idx] = True
-        if float(p_row[mask].sum().item()) >= float(mass_target) and _effective_count(p_row, mask) >= float(min_eff):
+        value = p_row[idx]
+        mass = mass + value
+        weighted_log_mass = weighted_log_mass + value * torch.log(value)
+        if float(mass.item()) >= float(mass_target) and _effective_count_from_stats(
+            mass,
+            weighted_log_mass,
+        ) >= float(min_eff):
             break
     return mask
 
@@ -61,16 +77,33 @@ def _weighted_fill_context_until(
     max_total_mass: float,
 ) -> torch.Tensor:
     mask = base_mask.clone()
-    if float(p_row[mask].sum().item()) >= float(total_mass_target) and _effective_count(p_row, mask) >= float(total_min_eff):
+    mass = p_row[mask].sum()
+    weighted_log_mass = (p_row[mask] * torch.log(p_row[mask])).sum()
+    if float(mass.item()) >= float(
+        total_mass_target
+    ) and _effective_count_from_stats(
+        mass,
+        weighted_log_mass,
+    ) >= float(total_min_eff):
         return mask
     if indices.numel() == 0:
         return mask
-    order = indices[torch.multinomial(weights / weights.sum(), int(indices.numel()), replacement=False)]
+    order = indices[
+        torch.multinomial(weights / weights.sum(), int(indices.numel()), replacement=False)
+    ]
     for idx in order:
-        if float((p_row[mask].sum() + p_row[idx]).item()) > float(max_total_mass):
+        value = p_row[idx]
+        if float((mass + value).item()) > float(max_total_mass):
             continue
         mask[idx] = True
-        if float(p_row[mask].sum().item()) >= float(total_mass_target) and _effective_count(p_row, mask) >= float(total_min_eff):
+        mass = mass + value
+        weighted_log_mass = weighted_log_mass + value * torch.log(value)
+        if float(mass.item()) >= float(
+            total_mass_target
+        ) and _effective_count_from_stats(
+            mass,
+            weighted_log_mass,
+        ) >= float(total_min_eff):
             break
     return mask
 

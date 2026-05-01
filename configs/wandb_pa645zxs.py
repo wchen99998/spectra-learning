@@ -30,7 +30,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.nist_full_probe_val_samples = 5000
     cfg.nist_full_probe_test_samples = 5000
     cfg.nist_full_probe_num_repeats = 1
-    cfg.batch_size = 256
+    cfg.batch_size = 1024
     cfg.shuffle_buffer = 1_000_000
     cfg.drop_remainder = True
     cfg.max_precursor_mz = 1000
@@ -43,6 +43,7 @@ def get_config() -> config_dict.ConfigDict:
     # Encoder
     cfg.num_peaks = 64
     cfg.model_dim = 384
+    cfg.encoder_use_cls_token = False
     cfg.encoder_num_layers = 14
     cfg.encoder_num_heads = 12
     cfg.encoder_num_kv_heads = 12
@@ -66,7 +67,7 @@ def get_config() -> config_dict.ConfigDict:
     # Masked latent predictor
     cfg.predictor_dim = 256
     cfg.predictor_dropout = 0.15
-    cfg.predictor_num_register_tokens = 2
+    cfg.predictor_num_register_tokens = 0
     cfg.predictor_apply_final_norm = False
     cfg.masked_latent_predictor_num_layers = 6
     cfg.masked_latent_predictor_num_heads = 8
@@ -97,7 +98,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.ema_teacher_schedule = "cosine"
 
     # Training
-    cfg.num_epochs = 30
+    cfg.num_epochs = 50
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "reduce-overhead"
     cfg.device_prefetch_size = 8
@@ -116,7 +117,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_early_stopping_min_delta = 0.0001
     cfg.msg_probe_early_stopping_min_epochs = 20
     cfg.msg_probe_early_stopping_patience = 20
-    cfg.msg_probe_every_n_steps = 0.25
+    cfg.msg_probe_every_n_steps = 1.0
     cfg.msg_probe_learning_rate = 0.001
     cfg.msg_probe_max_test_samples = None
     cfg.msg_probe_max_train_samples = None
@@ -144,10 +145,10 @@ def get_config() -> config_dict.ConfigDict:
 
     # Optimizer
     cfg.learning_rate = 0.0001
-    cfg.predictor_learning_rate_ratio = 2.
+    cfg.predictor_learning_rate_ratio = 1.
     cfg.min_learning_rate = 0.0001
     cfg.warmup_steps = 50_000
-    cfg.weight_decay = 0.01
+    cfg.weight_decay = 0.05
     cfg.b2 = 0.999
     cfg.grad_clip_norm = 1
     cfg.optimizer = "muon"

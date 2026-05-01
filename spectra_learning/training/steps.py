@@ -6,6 +6,17 @@ from spectra_learning.models.diagnostics import _collapse_diagnostics
 from spectra_learning.models.model import PeakSetSIGReg
 
 
+def _forward_augmented_for_batch(
+    model: PeakSetSIGReg,
+    batch: dict[str, torch.Tensor],
+    *,
+    return_collapse_data: bool,
+):
+    if return_collapse_data:
+        return model.forward_augmented(batch, return_collapse_data=True)
+    return model.forward_augmented(batch)
+
+
 def train_step_impl(
     model: PeakSetSIGReg,
     batch: dict[str, torch.Tensor],
@@ -26,19 +37,28 @@ def train_step_impl(
     torch.compiler.cudagraph_mark_step_begin()
     with autocast_ctx:
         if compute_collapse_metrics:
-            metrics, collapse_data = model.forward_augmented(
+            metrics, collapse_data = _forward_augmented_for_batch(
+                model,
                 batch,
                 return_collapse_data=True,
             )
         else:
-            metrics = model.forward_augmented(batch)
+            metrics = _forward_augmented_for_batch(
+                model,
+                batch,
+                return_collapse_data=False,
+            )
             collapse_data = {}
     if compute_collapse_metrics:
         with torch.no_grad():
             metrics.update(_collapse_diagnostics(**collapse_data))
     metrics["loss"].backward()
     if grad_clip_norm is not None and grad_clip_norm > 0:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
+        torch.nn.utils.clip_grad_norm_(
+            model.parameters(),
+            max_norm=grad_clip_norm,
+            foreach=True,
+        )
     for optimizer in optimizers:
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)

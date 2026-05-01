@@ -64,20 +64,49 @@ class Attention(nn.Module):
         self.n_kv_heads = n_heads if n_kv_heads is None else n_kv_heads
         self.head_dim = self.dim // self.n_heads
         self.qk_norm = qk_norm
+        self.q_size = self.n_heads * self.head_dim
+        self.kv_size = self.n_kv_heads * self.head_dim
 
-        self.wq = nn.Linear(self.dim, self.n_heads * self.head_dim, bias=False)
-        self.wk = nn.Linear(self.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wv = nn.Linear(self.dim, self.n_kv_heads * self.head_dim, bias=False)
+        self.wqkv = nn.Linear(self.dim, self.q_size + 2 * self.kv_size, bias=False)
         self.wo = nn.Linear(self.dim, self.dim, bias=False)
 
         if qk_norm:
             self.q_norm = _build_norm(self.head_dim, eps=norm_eps, norm_type=norm_type)
             self.k_norm = _build_norm(self.head_dim, eps=norm_eps, norm_type=norm_type)
 
-        nn.init.xavier_normal_(self.wq.weight)
-        nn.init.xavier_normal_(self.wk.weight)
-        nn.init.xavier_normal_(self.wv.weight)
+        nn.init.xavier_normal_(self.wqkv.weight[: self.q_size])
+        nn.init.xavier_normal_(self.wqkv.weight[self.q_size : self.q_size + self.kv_size])
+        nn.init.xavier_normal_(self.wqkv.weight[self.q_size + self.kv_size :])
         nn.init.xavier_normal_(self.wo.weight)
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        q_key = prefix + "wq.weight"
+        k_key = prefix + "wk.weight"
+        v_key = prefix + "wv.weight"
+        qkv_key = prefix + "wqkv.weight"
+        if qkv_key not in state_dict and q_key in state_dict:
+            state_dict[qkv_key] = torch.cat(
+                [state_dict.pop(q_key), state_dict.pop(k_key), state_dict.pop(v_key)],
+                dim=0,
+            )
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
     def forward(
         self,
@@ -88,9 +117,13 @@ class Attention(nn.Module):
     ) -> torch.Tensor:
         bsz, seqlen, _ = x.shape
 
-        xq = self.wq(x).view(bsz, seqlen, self.n_heads, self.head_dim)
-        xk = self.wk(x).view(bsz, seqlen, self.n_kv_heads, self.head_dim)
-        xv = self.wv(x).view(bsz, seqlen, self.n_kv_heads, self.head_dim)
+        xq, xk, xv = self.wqkv(x).split(
+            (self.q_size, self.kv_size, self.kv_size),
+            dim=-1,
+        )
+        xq = xq.view(bsz, seqlen, self.n_heads, self.head_dim)
+        xk = xk.view(bsz, seqlen, self.n_kv_heads, self.head_dim)
+        xv = xv.view(bsz, seqlen, self.n_kv_heads, self.head_dim)
 
         if self.qk_norm:
             xq = self.q_norm(xq)

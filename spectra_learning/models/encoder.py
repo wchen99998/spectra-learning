@@ -1,7 +1,10 @@
 import torch
 from torch import nn
 
-from spectra_learning.models.transformer import _build_norm, create_visible_attention_mask
+from spectra_learning.models.transformer import (
+    _build_norm,
+    create_visible_attention_mask,
+)
 from spectra_learning.models.common import (
     _build_frozen_position_embedding,
     _build_non_causal_blocks,
@@ -151,12 +154,14 @@ class PeakSetEncoder(nn.Module):
         else:
             self.spectral_attn_biases = None
 
-    def _add_positions(self, x: torch.Tensor) -> torch.Tensor:
+    def _add_positions(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
         if not self.use_position_embedding:
             return x
-        return x + self.position_embedding(
-            torch.arange(x.shape[1], device=x.device)
-        ).unsqueeze(0).to(dtype=x.dtype)
+        positions = torch.arange(x.shape[1], device=x.device)
+        return x + self.position_embedding(positions).to(dtype=x.dtype)
 
     def _append_special_tokens(
         self,
@@ -226,9 +231,11 @@ class PeakSetEncoder(nn.Module):
         selected = set(block_indices)
         selected_peak_outputs: dict[int, torch.Tensor] = {}
         special_len = int(self.use_cls_token) + self.num_register_tokens
-        x, attn_mask = self._append_special_tokens(x, attn_mask)
+        x, visible_mask = self._append_special_tokens(x, attn_mask)
         attn_mask = (
-            create_visible_attention_mask(attn_mask) if attn_mask is not None else None
+            create_visible_attention_mask(visible_mask)
+            if visible_mask is not None
+            else None
         )
         for block_idx, block in enumerate(self.blocks, start=1):
             attn_bias = self._spectral_attn_bias(

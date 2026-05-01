@@ -48,11 +48,13 @@ class EMATeacherMixin:
         student: nn.Module,
         momentum: float,
     ) -> None:
-        torch._foreach_lerp_(
-            list(teacher.parameters()),
-            list(student.parameters()),
-            1.0 - momentum,
-        )
+        teacher_params = list(teacher.parameters())
+        if teacher_params:
+            torch._foreach_lerp_(
+                teacher_params,
+                list(student.parameters()),
+                1.0 - momentum,
+            )
         teacher_float_buffers = []
         student_float_buffers = []
         for teacher_buffer, student_buffer in zip(

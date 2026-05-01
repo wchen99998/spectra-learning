@@ -5,14 +5,35 @@ import torch
 from spectra_learning.models.model import PeakSetSIGReg
 
 
+RUNTIME_PARAM_GROUP_KEYS = frozenset({"param_split_fn", "param_recombine_fn"})
+
+
+def _strip_runtime_param_group_keys(state: dict) -> dict:
+    if "param_groups" not in state:
+        return state
+    return {
+        **state,
+        "param_groups": [
+            {
+                key: value
+                for key, value in group.items()
+                if key not in RUNTIME_PARAM_GROUP_KEYS
+            }
+            for group in state["param_groups"]
+        ],
+    }
+
+
 def optimizer_state_dict(optimizer: torch.optim.Optimizer) -> dict:
-    state = optimizer.state_dict()
+    state = _strip_runtime_param_group_keys(optimizer.state_dict())
     scalar_optimizer = getattr(optimizer, "scalar_optimizer", None)
     if scalar_optimizer is None:
         return state
     return {
         "state_dict": state,
-        "scalar_optimizer_state": scalar_optimizer.state_dict(),
+        "scalar_optimizer_state": _strip_runtime_param_group_keys(
+            scalar_optimizer.state_dict()
+        ),
     }
 
 

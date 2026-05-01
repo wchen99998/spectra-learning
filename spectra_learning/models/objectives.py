@@ -93,11 +93,23 @@ class ObjectiveMixin:
             batch_size * num_target_blocks,
             num_peaks,
         )
+        flat_predictor_input = predictor_input.reshape(
+            batch_size * num_target_blocks,
+            num_peaks,
+            -1,
+        )
         predictor_features = self.predict_masked_target_features(
-            predictor_input.reshape(batch_size * num_target_blocks, num_peaks, -1),
+            flat_predictor_input,
             predictor_visible_mask,
-        ).reshape(batch_size, num_target_blocks, num_peaks, -1)
-        return predictor_features, self.project_targets(predictor_features)
+        )
+        predictor_features = predictor_features.reshape(
+            batch_size,
+            num_target_blocks,
+            num_peaks,
+            -1,
+        )
+        predictor_output = self.project_targets(predictor_features)
+        return predictor_features, predictor_output
 
     def _masked_prediction_loss(
         self,
@@ -156,6 +168,8 @@ class ObjectiveMixin:
         if self.sigreg_lambda <= 0:
             return context_emb.new_tensor(0.0), {}
 
+        target_weights = target_masks
+
         if self.representation_regularizer in (
             "sigreg-enc-pred",
             "slot-sigreg-enc-pred",
@@ -166,7 +180,7 @@ class ObjectiveMixin:
             ).to(dtype=context_emb.dtype)
             predictor_loss = self.sigreg(
                 predictor_output_features.float(),
-                valid_mask=self._sigreg_weights(target_masks),
+                valid_mask=self._sigreg_weights(target_weights),
             ).to(dtype=context_emb.dtype)
             sigreg_loss = encoder_loss + predictor_loss
             sigreg_term = context_emb.new_tensor(self.sigreg_lambda) * sigreg_loss
@@ -182,10 +196,10 @@ class ObjectiveMixin:
             weights = self._sigreg_weights(context_mask)
         elif self.representation_regularizer in ("sigreg-pred", "slot-sigreg-pred"):
             embeddings = predictor_output_features.float()
-            weights = self._sigreg_weights(target_masks)
+            weights = self._sigreg_weights(target_weights)
         elif self.representation_regularizer in ("sigreg-proj", "slot-sigreg-proj"):
             embeddings = predictor_output.float()
-            weights = self._sigreg_weights(target_masks)
+            weights = self._sigreg_weights(target_weights)
         else:
             return context_emb.new_tensor(0.0), {}
 
