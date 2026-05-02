@@ -31,6 +31,17 @@ def _effective_count_from_stats(
     return float(torch.exp(entropy).item())
 
 
+def _mixed_reliability_weights(
+    reliability: torch.Tensor,
+    *,
+    beta: float,
+    eps: float,
+) -> torch.Tensor:
+    weights = reliability.pow(float(beta))
+    weights = weights / weights.sum()
+    return (1.0 - float(eps)) * weights + float(eps) / float(reliability.numel())
+
+
 def _weighted_sample_until(
     *,
     indices: torch.Tensor,
@@ -215,9 +226,11 @@ def sample_intensity_aware_masks_torch(
 
         for target_idx in range(int(num_target_blocks)):
             reliability = (p_row[target_candidates] + 1e-6).pow(float(alpha))
-            weights = (1.0 - float(eps_target)) * reliability.pow(float(beta_target))
-            weights = weights / weights.sum()
-            weights = weights + float(eps_target) / float(target_candidates.numel())
+            weights = _mixed_reliability_weights(
+                reliability,
+                beta=float(beta_target),
+                eps=float(eps_target),
+            )
             target_masks[row_idx, target_idx] = _weighted_sample_until(
                 indices=target_candidates,
                 p_row=p_row,
@@ -242,9 +255,11 @@ def sample_intensity_aware_masks_torch(
             continue
 
         reliability = (p_row[context_candidates] + 1e-6).pow(float(alpha))
-        weights = (1.0 - float(eps_context)) * reliability.pow(float(beta_context))
-        weights = weights / weights.sum()
-        weights = weights + float(eps_context) / float(context_candidates.numel())
+        weights = _mixed_reliability_weights(
+            reliability,
+            beta=float(beta_context),
+            eps=float(eps_context),
+        )
         target_union_mass = float(p_row[target_union].sum().item())
         capped_context_mass = min(context_mass, max(0.0, 1.0 - target_union_mass - float(min_unused_mass)))
         context_mask[row_idx] = _weighted_fill_context_until(

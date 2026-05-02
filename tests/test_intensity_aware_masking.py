@@ -5,6 +5,7 @@ import torch
 import spectra_learning.data.gems as gems
 from spectra_learning.data.gems.intensity_aware import (
     AWARE_MIXED_MASK_CONFIG,
+    _mixed_reliability_weights,
     sample_intensity_aware_masks_torch,
 )
 
@@ -20,6 +21,21 @@ def _toy_spectra() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     )
     mz_da = torch.arange(16, dtype=torch.float32).unsqueeze(0).repeat(2, 1) * 10.0
     return valid, intensity, mz_da
+
+
+def test_mixed_reliability_weights_preserve_requested_epsilon_mix() -> None:
+    reliability = torch.tensor([0.1, 0.3, 0.6], dtype=torch.float32)
+    beta = 0.85
+    eps = 0.2
+
+    normalized_reliability = reliability.pow(beta)
+    normalized_reliability = normalized_reliability / normalized_reliability.sum()
+    expected = (1.0 - eps) * normalized_reliability + eps / reliability.numel()
+
+    assert torch.allclose(
+        _mixed_reliability_weights(reliability, beta=beta, eps=eps),
+        expected,
+    )
 
 
 def test_intensity_aware_masks_are_disjoint_and_leave_unused_mass() -> None:
