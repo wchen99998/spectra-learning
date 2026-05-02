@@ -31,6 +31,7 @@ Setup:
 """
 
 import json
+import time
 from pathlib import Path
 
 import modal
@@ -572,6 +573,7 @@ SWEEPS: dict[str, list[dict]] = {
 def prepare_data(
     config_path: str = "configs/gems_small.py",
     overrides_json: str = "{}",
+    prepare_probe: bool = True,
 ):
     import logging
     import os
@@ -600,15 +602,16 @@ def prepare_data(
     )
 
     # 2) Download + process probe data
-    logging.info("Preparing probe data...")
-    from spectra_learning.probes.massspec.data import MassSpecProbeData
+    if prepare_probe:
+        logging.info("Preparing probe data...")
+        from spectra_learning.probes.massspec.data import MassSpecProbeData
 
-    probe_data = MassSpecProbeData.from_config(config)
-    logging.info(
-        "Probe data ready: %d train / %d test samples",
-        probe_data.info["massspec_train_size"],
-        probe_data.info["massspec_test_size"],
-    )
+        probe_data = MassSpecProbeData.from_config(config)
+        logging.info(
+            "Probe data ready: %d train / %d test samples",
+            probe_data.info["massspec_train_size"],
+            probe_data.info["massspec_test_size"],
+        )
 
     volume.commit()
     logging.info("Volume committed — data is cached for all future runs.")
@@ -682,6 +685,234 @@ def train(
     return results
 
 
+@app.function(
+    image=image,
+    volumes={volume_path: volume},
+    cpu=16.0,
+    memory=65536,  # 64 GiB
+    gpu=f"{DEFAULT_GPU}:4",
+    timeout=TRAIN_TIMEOUT_HOURS * HOURS,
+    secrets=[huggingface_secret, wandb_secret],
+    single_use_containers=True,
+)
+def train_4gpu(
+    config_path: str = "configs/gems_small.py",
+    overrides_json: str = "{}",
+    workdir: str = "",
+    workdir_tag: str = "",
+):
+    return _train_torchrun_4gpu(
+        config_path=config_path,
+        overrides_json=overrides_json,
+        workdir=workdir,
+        workdir_tag=workdir_tag,
+        gpu_label=DEFAULT_GPU,
+    )
+
+
+@app.function(
+    image=image,
+    volumes={volume_path: volume},
+    cpu=32.0,
+    memory=131072,  # 128 GiB
+    gpu=f"{DEFAULT_GPU}:8",
+    timeout=TRAIN_TIMEOUT_HOURS * HOURS,
+    secrets=[huggingface_secret, wandb_secret],
+    single_use_containers=True,
+)
+def train_8gpu(
+    config_path: str = "configs/gems_small.py",
+    overrides_json: str = "{}",
+    workdir: str = "",
+    workdir_tag: str = "",
+):
+    return _train_torchrun_ngpu(
+        config_path=config_path,
+        overrides_json=overrides_json,
+        workdir=workdir,
+        workdir_tag=workdir_tag,
+        gpu_label=DEFAULT_GPU,
+        nproc_per_node=8,
+    )
+
+
+@app.function(
+    image=image,
+    volumes={volume_path: volume},
+    cpu=16.0,
+    memory=65536,  # 64 GiB
+    gpu="L40S:4",
+    timeout=TRAIN_TIMEOUT_HOURS * HOURS,
+    secrets=[huggingface_secret, wandb_secret],
+    single_use_containers=True,
+)
+def train_4gpu_l40s(
+    config_path: str = "configs/gems_small.py",
+    overrides_json: str = "{}",
+    workdir: str = "",
+    workdir_tag: str = "",
+):
+    return _train_torchrun_4gpu(
+        config_path=config_path,
+        overrides_json=overrides_json,
+        workdir=workdir,
+        workdir_tag=workdir_tag,
+        gpu_label="L40S",
+    )
+
+
+@app.function(
+    image=image,
+    volumes={volume_path: volume},
+    cpu=16.0,
+    memory=65536,  # 64 GiB
+    gpu="A10G:4",
+    timeout=TRAIN_TIMEOUT_HOURS * HOURS,
+    secrets=[huggingface_secret, wandb_secret],
+    single_use_containers=True,
+)
+def train_4gpu_a10g(
+    config_path: str = "configs/gems_small.py",
+    overrides_json: str = "{}",
+    workdir: str = "",
+    workdir_tag: str = "",
+):
+    return _train_torchrun_4gpu(
+        config_path=config_path,
+        overrides_json=overrides_json,
+        workdir=workdir,
+        workdir_tag=workdir_tag,
+        gpu_label="A10G",
+    )
+
+
+@app.function(
+    image=image,
+    volumes={volume_path: volume},
+    cpu=16.0,
+    memory=65536,  # 64 GiB
+    gpu="L4:4",
+    timeout=TRAIN_TIMEOUT_HOURS * HOURS,
+    secrets=[huggingface_secret, wandb_secret],
+    single_use_containers=True,
+)
+def train_4gpu_l4(
+    config_path: str = "configs/gems_small.py",
+    overrides_json: str = "{}",
+    workdir: str = "",
+    workdir_tag: str = "",
+):
+    return _train_torchrun_4gpu(
+        config_path=config_path,
+        overrides_json=overrides_json,
+        workdir=workdir,
+        workdir_tag=workdir_tag,
+        gpu_label="L4",
+    )
+
+
+def _train_torchrun_4gpu(
+    *,
+    config_path: str,
+    overrides_json: str,
+    workdir: str,
+    workdir_tag: str,
+    gpu_label: str,
+):
+    return _train_torchrun_ngpu(
+        config_path=config_path,
+        overrides_json=overrides_json,
+        workdir=workdir,
+        workdir_tag=workdir_tag,
+        gpu_label=gpu_label,
+        nproc_per_node=4,
+    )
+
+
+def _train_torchrun_ngpu(
+    *,
+    config_path: str,
+    overrides_json: str,
+    workdir: str,
+    workdir_tag: str,
+    gpu_label: str,
+    nproc_per_node: int,
+):
+    import logging
+    import os
+    import subprocess
+    import sys
+
+    os.chdir(PROJECT_ROOT)
+    sys.path.insert(0, PROJECT_ROOT)
+
+    logging.basicConfig(level=logging.INFO)
+
+    from spectra_learning.training.api import auto_run_name, load_config
+
+    config = load_config(config_path)
+    overrides = json.loads(overrides_json)
+    config.update(overrides)
+    config.artifact_dir = str(volume_path / "data" / "gems_artifacts_alpha")
+
+    import torch
+
+    sm_major = torch.cuda.get_device_capability()[0] if torch.cuda.is_available() else 0
+    if sm_major < 9:
+        config.muon_ns_use_kernels = False
+
+    run_name = auto_run_name(config)
+    workdir_root = volume_path / "experiments"
+    if workdir:
+        workdir_path = workdir_root / workdir
+    else:
+        if workdir_tag:
+            workdir_root = workdir_root / workdir_tag
+        workdir_path = workdir_root / run_name
+    workdir_path.mkdir(parents=True, exist_ok=True)
+
+    subprocess_overrides = dict(overrides)
+    subprocess_overrides["artifact_dir"] = str(volume_path / "data" / "gems_artifacts_alpha")
+    subprocess_overrides["muon_ns_use_kernels"] = bool(config.get("muon_ns_use_kernels", True))
+
+    metrics_path = workdir_path / "metrics.json"
+    command = [
+        sys.executable,
+        "-m",
+        "torch.distributed.run",
+        "--standalone",
+        f"--nproc_per_node={nproc_per_node}",
+        "train.py",
+        "--config",
+        config_path,
+        "--workdir",
+        str(workdir_path),
+        "--overrides-json",
+        json.dumps(subprocess_overrides, sort_keys=True),
+        "--metrics-json",
+        str(metrics_path),
+    ]
+    logging.info("Run: %s", run_name)
+    logging.info("GPU: %dx %s", nproc_per_node, gpu_label)
+    logging.info("Workdir: %s", workdir_path)
+    logging.info("Launching torchrun: %s", " ".join(command))
+    subprocess.run(command, check=True)
+
+    volume.commit()
+    results = json.loads(metrics_path.read_text())
+    logging.info("%d-GPU training complete. Results: %s", nproc_per_node, results)
+    return results
+
+
+FOUR_GPU_TRAINERS = {
+    "h100": train_4gpu,
+    "l40s": train_4gpu_l40s,
+    "a10": train_4gpu_a10g,
+    "a10g": train_4gpu_a10g,
+    "l4": train_4gpu_l4,
+}
+
+
 # ---------------------------------------------------------------------------
 # CLI entrypoint
 # ---------------------------------------------------------------------------
@@ -693,7 +924,200 @@ def main(
     overrides: str = "{}",
     workdir_tag: str = "",
     detach: bool = False,
+    run_8xh100: bool = False,
+    benchmark_multigpu: bool = False,
+    benchmark_constant_local_batch: bool = False,
+    benchmark_4gpu: str = "",
+    benchmark_steps: int = 40,
+    benchmark_warmup_steps: int = 10,
 ):
+    if benchmark_4gpu:
+        gpu_key = benchmark_4gpu.lower()
+        if gpu_key not in FOUR_GPU_TRAINERS:
+            raise ValueError(
+                "--benchmark-4gpu must be one of: "
+                f"{', '.join(sorted(FOUR_GPU_TRAINERS))}"
+            )
+        benchmark_overrides = {
+            **json.loads(overrides),
+            "enable_wandb": False,
+            "msg_probe_every_n_steps": 0,
+            "log_every_n_steps": 0,
+            "collapse_metrics_every_n_steps": 0,
+            "checkpoint_every_steps": 1_000_000,
+            "muon_ns_use_kernels": True,
+            "training_max_steps": int(benchmark_steps),
+            "throughput_warmup_steps": int(benchmark_warmup_steps),
+        }
+        benchmark_payload = json.dumps(benchmark_overrides, sort_keys=True)
+        benchmark_tag = workdir or f"ddp_4gpu_{gpu_key}_bench_{int(time.time())}"
+        print("Preparing data on volume...")
+        prepare_data.remote(
+            config_path=config,
+            overrides_json=benchmark_payload,
+            prepare_probe=False,
+        )
+        print("Data ready.\n")
+        print(
+            f"Running 4-GPU {benchmark_4gpu} benchmark: "
+            f"{benchmark_steps} steps, {benchmark_warmup_steps} warmup steps."
+        )
+        result = FOUR_GPU_TRAINERS[gpu_key].remote(
+            config_path=config,
+            overrides_json=benchmark_payload,
+            workdir=f"{benchmark_tag}/4gpu_{gpu_key}",
+            workdir_tag=workdir_tag,
+        )
+        print("\n4-GPU benchmark:")
+        print(json.dumps({
+            "gpu": benchmark_4gpu,
+            "global_batch_size": result["run/global_batch_size"],
+            "local_batch_size": result["run/local_batch_size"],
+            "samples_per_second": result["run/measured_samples_per_second"],
+            "steps_per_second": result["run/measured_steps_per_second"],
+            "metrics": result,
+        }, indent=2, sort_keys=True))
+        return
+
+    if run_8xh100:
+        payload = json.dumps(json.loads(overrides), sort_keys=True)
+        print("Preparing data on volume...")
+        prepare_data.remote(config_path=config, overrides_json=payload, prepare_probe=False)
+        print("Data ready.\n")
+        if detach:
+            handle = train_8gpu.spawn(
+                config_path=config,
+                overrides_json=payload,
+                workdir=workdir,
+                workdir_tag="",
+            )
+            print(f"spawned: {handle.object_id}")
+            return
+        train_8gpu.remote(
+            config_path=config,
+            overrides_json=payload,
+            workdir=workdir,
+            workdir_tag="",
+        )
+        return
+
+    if benchmark_constant_local_batch:
+        base_overrides = json.loads(overrides)
+        base_batch_size = int(base_overrides.get("batch_size", 256))
+        common_benchmark_overrides = {
+            **base_overrides,
+            "enable_wandb": False,
+            "msg_probe_every_n_steps": 0,
+            "log_every_n_steps": 0,
+            "collapse_metrics_every_n_steps": 0,
+            "checkpoint_every_steps": 1_000_000,
+            "muon_ns_use_kernels": True,
+            "training_max_steps": int(benchmark_steps),
+            "throughput_warmup_steps": int(benchmark_warmup_steps),
+        }
+        one_gpu_overrides = {
+            **common_benchmark_overrides,
+            "batch_size": base_batch_size,
+        }
+        four_gpu_overrides = {
+            **common_benchmark_overrides,
+            "batch_size": base_batch_size * 4,
+        }
+        benchmark_tag = workdir or f"ddp_constant_local_batch_bench_{int(time.time())}"
+        print("Preparing data on volume...")
+        prepare_data.remote(
+            config_path=config,
+            overrides_json=json.dumps(one_gpu_overrides, sort_keys=True),
+            prepare_probe=False,
+        )
+        print("Data ready.\n")
+        print(
+            "Running constant-local-batch benchmark: "
+            f"{benchmark_steps} steps, {benchmark_warmup_steps} warmup steps, "
+            f"local batch {base_batch_size}."
+        )
+        one_gpu = train.remote(
+            config_path=config,
+            overrides_json=json.dumps(one_gpu_overrides, sort_keys=True),
+            workdir=f"{benchmark_tag}/1gpu_bs{base_batch_size}",
+            workdir_tag=workdir_tag,
+        )
+        four_gpu = train_4gpu.remote(
+            config_path=config,
+            overrides_json=json.dumps(four_gpu_overrides, sort_keys=True),
+            workdir=f"{benchmark_tag}/4gpu_bs{base_batch_size * 4}",
+            workdir_tag=workdir_tag,
+        )
+        speedup = (
+            four_gpu["run/measured_samples_per_second"]
+            / one_gpu["run/measured_samples_per_second"]
+        )
+        print("\nConstant local batch benchmark:")
+        print(json.dumps({
+            "local_batch_size": base_batch_size,
+            "single_gpu_global_batch_size": one_gpu["run/global_batch_size"],
+            "four_gpu_global_batch_size": four_gpu["run/global_batch_size"],
+            "single_gpu_samples_per_second": one_gpu["run/measured_samples_per_second"],
+            "four_gpu_samples_per_second": four_gpu["run/measured_samples_per_second"],
+            "speedup": speedup,
+            "single_gpu_metrics": one_gpu,
+            "four_gpu_metrics": four_gpu,
+        }, indent=2, sort_keys=True))
+        return
+
+    if benchmark_multigpu:
+        base_overrides = json.loads(overrides)
+        benchmark_overrides = {
+            **base_overrides,
+            "enable_wandb": False,
+            "msg_probe_every_n_steps": 0,
+            "log_every_n_steps": 0,
+            "collapse_metrics_every_n_steps": 0,
+            "checkpoint_every_steps": 1_000_000,
+            "muon_ns_use_kernels": True,
+            "training_max_steps": int(benchmark_steps),
+            "throughput_warmup_steps": int(benchmark_warmup_steps),
+        }
+        benchmark_payload = json.dumps(benchmark_overrides, sort_keys=True)
+        benchmark_tag = workdir or f"ddp_fixed_batch_bench_{int(time.time())}"
+        print("Preparing data on volume...")
+        prepare_data.remote(
+            config_path=config,
+            overrides_json=benchmark_payload,
+            prepare_probe=False,
+        )
+        print("Data ready.\n")
+        print(
+            "Running fixed-global-batch benchmark: "
+            f"{benchmark_steps} steps, {benchmark_warmup_steps} warmup steps."
+        )
+        one_gpu = train.remote(
+            config_path=config,
+            overrides_json=benchmark_payload,
+            workdir=f"{benchmark_tag}/1gpu",
+            workdir_tag=workdir_tag,
+        )
+        four_gpu = train_4gpu.remote(
+            config_path=config,
+            overrides_json=benchmark_payload,
+            workdir=f"{benchmark_tag}/4gpu",
+            workdir_tag=workdir_tag,
+        )
+        speedup = (
+            four_gpu["run/measured_samples_per_second"]
+            / one_gpu["run/measured_samples_per_second"]
+        )
+        print("\nFixed batch benchmark:")
+        print(json.dumps({
+            "global_batch_size": one_gpu["run/global_batch_size"],
+            "single_gpu_samples_per_second": one_gpu["run/measured_samples_per_second"],
+            "four_gpu_samples_per_second": four_gpu["run/measured_samples_per_second"],
+            "speedup": speedup,
+            "single_gpu_metrics": one_gpu,
+            "four_gpu_metrics": four_gpu,
+        }, indent=2, sort_keys=True))
+        return
+
     if sweep:
         if workdir:
             raise ValueError(

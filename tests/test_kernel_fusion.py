@@ -5,7 +5,10 @@ import torch
 from spectra_learning.models.losses import SIGReg
 from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.model import PeakSetSIGReg
-from spectra_learning.models.transformer import Attention, create_visible_attention_mask
+from spectra_learning.models.transformer import (
+    Attention,
+    create_visible_attention_mask,
+)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 B, N, D = 16, 60, 128

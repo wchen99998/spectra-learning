@@ -6,9 +6,11 @@ from typing import Callable
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from ml_collections import config_dict
 from sklearn.metrics import r2_score
+from torch.nn.parallel import DistributedDataParallel
 
 from spectra_learning.data.gems.conversion import numpy_batch_to_torch
 from spectra_learning.models.model import PeakSetSIGReg
@@ -39,10 +41,33 @@ from spectra_learning.probes.massspec.targets import (
     FG_SMARTS,
     REGRESSION_TARGET_KEYS,
 )
+from spectra_learning.training.distributed import DistributedContext
 from spectra_learning.training.schedules import learning_rate_at_step
 
 
 log = logging.getLogger(__name__)
+
+
+def _is_distributed(distributed: DistributedContext | None) -> bool:
+    return distributed is not None and distributed.is_distributed
+
+
+def _is_main(distributed: DistributedContext | None) -> bool:
+    return distributed is None or distributed.is_main
+
+
+def _distributed_world_size(distributed: DistributedContext | None) -> int:
+    return distributed.world_size if distributed is not None else 1
+
+
+def _distributed_rank(distributed: DistributedContext | None) -> int:
+    return distributed.rank if distributed is not None else 0
+
+
+def _all_gather_object(value: object) -> list[object]:
+    gathered = [None for _ in range(dist.get_world_size())]
+    dist.all_gather_object(gathered, value)
+    return gathered
 
 
 
@@ -56,6 +81,9 @@ def iter_massspec_probe(
     drop_remainder: bool,
     max_samples: int | None = None,
     sample_randomly: bool = False,
+    distributed_world_size: int = 1,
+    distributed_rank: int = 0,
+    pad_distributed: bool = False,
 ):
     dataset = probe_data.build_dataset(
         split,
@@ -63,6 +91,10 @@ def iter_massspec_probe(
         peak_ordering=peak_ordering,
         shuffle=(split == "massspec_train") or bool(sample_randomly),
         drop_remainder=drop_remainder,
+        max_samples=max_samples,
+        distributed_world_size=distributed_world_size,
+        distributed_rank=distributed_rank,
+        pad_distributed=pad_distributed,
     )
     size = int(probe_data.info[f"{split}_size"])
     if max_samples is not None:
@@ -86,10 +118,13 @@ def probe_steps_per_epoch(
     split: str,
     drop_remainder: bool,
     max_samples: int | None = None,
+    distributed_world_size: int = 1,
 ) -> int:
     size = int(probe_data.info[f"{split}_size"])
     if max_samples is not None:
         size = min(size, int(max_samples))
+    if int(distributed_world_size) > 1:
+        size = math.ceil(size / int(distributed_world_size))
     batch_size = int(probe_data.batch_size)
     return size // batch_size if drop_remainder else math.ceil(size / batch_size)
 
@@ -103,6 +138,7 @@ def _collect_split_targets(
     max_samples: int | None = None,
     sample_randomly: bool = False,
     fingerprint_task: str = _MACCS_TASK,
+    distributed: DistributedContext | None = None,
 ) -> MsgProbeSplitTargets:
     regression = {name: [] for name in REGRESSION_TARGET_KEYS}
     maccs = []
@@ -115,6 +151,8 @@ def _collect_split_targets(
         drop_remainder=False,
         max_samples=max_samples,
         sample_randomly=sample_randomly,
+        distributed_world_size=_distributed_world_size(distributed),
+        distributed_rank=_distributed_rank(distributed),
     ):
         valid_mask = (
             batch["probe_valid_mol"].detach().cpu().numpy().astype(bool, copy=False)
@@ -132,7 +170,7 @@ def _collect_split_targets(
             n: np.concatenate(c) if c else np.empty(0, dtype=dt) for n, c in d.items()
         }
 
-    return MsgProbeSplitTargets(
+    targets = MsgProbeSplitTargets(
         regression=_cat(regression, np.float32),
         maccs=(
             np.concatenate(maccs, axis=0)
@@ -142,6 +180,37 @@ def _collect_split_targets(
             )
         ),
     )
+    if _is_distributed(distributed):
+        targets = _merge_split_targets(
+            _all_gather_object(targets),
+            fingerprint_task=fingerprint_task,
+        )
+    return targets
+
+
+def _merge_split_targets(
+    targets_by_rank: list[object],
+    *,
+    fingerprint_task: str,
+) -> MsgProbeSplitTargets:
+    targets = [target for target in targets_by_rank if isinstance(target, MsgProbeSplitTargets)]
+    regression = {
+        name: (
+            np.concatenate(
+                [target.regression[name] for target in targets],
+                axis=0,
+            )
+            if targets
+            else np.empty(0, dtype=np.float32)
+        )
+        for name in REGRESSION_TARGET_KEYS
+    }
+    maccs = (
+        np.concatenate([target.maccs for target in targets], axis=0)
+        if targets
+        else np.empty((0, _PROBE_FINGERPRINT_BITS[fingerprint_task]), dtype=np.int32)
+    )
+    return MsgProbeSplitTargets(regression=regression, maccs=maccs)
 
 
 def _collect_num_rings_classes(
@@ -392,6 +461,7 @@ def _collect_covariance_morgan_alignment_inputs(
     max_samples: int | None,
     sample_randomly: bool,
     device: torch.device,
+    distributed: DistributedContext | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     embeddings, morgan = [], []
     with torch.no_grad():
@@ -403,6 +473,8 @@ def _collect_covariance_morgan_alignment_inputs(
             drop_remainder=False,
             max_samples=max_samples,
             sample_randomly=sample_randomly,
+            distributed_world_size=_distributed_world_size(distributed),
+            distributed_rank=_distributed_rank(distributed),
         ):
             batch = move_batch(batch)
             valid_mask = batch["probe_valid_mol"].to(device=device, dtype=torch.bool)
@@ -419,7 +491,14 @@ def _collect_covariance_morgan_alignment_inputs(
             )
             embeddings.append(covariance.detach().cpu().numpy())
             morgan.append(batch["probe_morgan"][valid_mask].detach().cpu().numpy())
-    return np.concatenate(embeddings, axis=0), np.concatenate(morgan, axis=0)
+    local = (np.concatenate(embeddings, axis=0), np.concatenate(morgan, axis=0))
+    if not _is_distributed(distributed):
+        return local
+    gathered = _all_gather_object(local)
+    return (
+        np.concatenate([item[0] for item in gathered], axis=0),
+        np.concatenate([item[1] for item in gathered], axis=0),
+    )
 
 
 def _collect_covariance_embeddings_for_indices(
@@ -430,12 +509,17 @@ def _collect_covariance_embeddings_for_indices(
     move_batch: Callable[[dict[str, object]], dict[str, object]],
     indices: np.ndarray,
     peak_ordering: str,
+    distributed: DistributedContext | None = None,
 ) -> np.ndarray:
+    local_positions = np.arange(len(indices))[
+        _distributed_rank(distributed) :: _distributed_world_size(distributed)
+    ]
+    local_indices = indices[local_positions]
     embeddings = []
     with torch.no_grad():
         for batch in probe_data.build_indexed_dataset(
             "all",
-            indices,
+            local_indices,
             peak_ordering=peak_ordering,
             drop_remainder=False,
         ):
@@ -446,7 +530,17 @@ def _collect_covariance_embeddings_for_indices(
                 batch["peak_valid_mask"].to(dtype=torch.bool),
             )
             embeddings.append(covariance.detach().cpu().numpy())
-    return np.concatenate(embeddings, axis=0)
+    local_embeddings = np.concatenate(embeddings, axis=0)
+    if not _is_distributed(distributed):
+        return local_embeddings
+    gathered = _all_gather_object((local_positions, local_embeddings))
+    output = np.empty(
+        (len(indices), local_embeddings.shape[1]),
+        dtype=local_embeddings.dtype,
+    )
+    for positions, values in gathered:
+        output[positions] = values
+    return output
 
 
 def _run_prepared_covariance_morgan_pairwise_alignment(
@@ -458,6 +552,7 @@ def _run_prepared_covariance_morgan_pairwise_alignment(
     move_batch: Callable[[dict[str, object]], dict[str, object]],
     peak_ordering: str,
     num_pairs: int,
+    distributed: DistributedContext | None = None,
 ) -> tuple[MsgProbePairwiseAlignment, int] | None:
     raw_pair_path = str(
         config.get(
@@ -484,6 +579,7 @@ def _run_prepared_covariance_morgan_pairwise_alignment(
         move_batch=move_batch,
         indices=endpoint_indices,
         peak_ordering=peak_ordering,
+        distributed=distributed,
     )
     return (
         _compute_pairwise_similarity_alignment_for_indices(
@@ -512,6 +608,7 @@ def _run_covariance_morgan_pairwise_alignment(
     plot_dir: Path | None,
     plot_step: int | None,
     repeat_index: int,
+    distributed: DistributedContext | None = None,
 ) -> dict[str, float]:
     num_pairs = resolve_msg_probe_pairwise_alignment_num_pairs(config)
     if (
@@ -528,6 +625,7 @@ def _run_covariance_morgan_pairwise_alignment(
         move_batch=move_batch,
         peak_ordering=peak_ordering,
         num_pairs=num_pairs,
+        distributed=distributed,
     )
     if prepared is None:
         embeddings, morgan = _collect_covariance_morgan_alignment_inputs(
@@ -541,6 +639,7 @@ def _run_covariance_morgan_pairwise_alignment(
             max_samples=max_samples,
             sample_randomly=sample_randomly,
             device=device,
+            distributed=distributed,
         )
         alignment = _compute_pairwise_similarity_alignment(
             embeddings=embeddings,
@@ -553,7 +652,7 @@ def _run_covariance_morgan_pairwise_alignment(
     else:
         alignment, num_samples = prepared
         source = "prepared"
-    if plot_dir is not None and bool(
+    if _is_main(distributed) and plot_dir is not None and bool(
         config.get("msg_probe_pairwise_alignment_plot", True)
     ):
         step_label = "unknown" if plot_step is None else f"{int(plot_step):08d}"
@@ -604,9 +703,24 @@ def _sequence_probe_step(
     *,
     task_spec: MsgProbeTaskSpec,
     device: torch.device,
+    allow_empty: bool = False,
 ) -> dict[str, object] | None:
     valid_mask = batch["probe_valid_mol"].to(device=device, dtype=torch.bool)
     if not bool(valid_mask.any()):
+        if allow_empty:
+            logits = probe(
+                peak_embeddings[:1],
+                batch["peak_valid_mask"][:1].to(device=device, dtype=torch.bool),
+            )
+            zero_loss = torch.stack(
+                [value.float().sum() * 0.0 for value in logits.values()]
+            ).sum()
+            return {
+                "loss_total": zero_loss,
+                "predictions": {},
+                "targets": {},
+                "batch_size": 0,
+            }
         return None
     peak_embeddings = peak_embeddings[valid_mask]
     peak_valid_mask = batch["peak_valid_mask"][valid_mask].to(
@@ -637,6 +751,7 @@ def _evaluate_sequence_probe_split(
     max_samples: int | None,
     sample_randomly: bool,
     device: torch.device,
+    distributed: DistributedContext | None = None,
 ) -> dict[str, dict[str, object]]:
     states = {variant: _new_epoch_state(task_spec) for variant in probes}
     with torch.no_grad():
@@ -648,6 +763,8 @@ def _evaluate_sequence_probe_split(
             drop_remainder=False,
             max_samples=max_samples,
             sample_randomly=sample_randomly,
+            distributed_world_size=_distributed_world_size(distributed),
+            distributed_rank=_distributed_rank(distributed),
         ):
             batch = move_batch(batch)
             peak_embeddings = feature_extractor(batch)
@@ -662,7 +779,7 @@ def _evaluate_sequence_probe_split(
                 if result is None:
                     continue
                 _update_epoch_state(states[variant], result, task_spec)
-    return states
+    return _gather_variant_states(states, task_spec, distributed)
 
 
 def _evaluate_linear_probe_split(
@@ -726,6 +843,61 @@ def _update_epoch_state(
     for name in _probe_task_names(task_spec):
         predictions[name].append(result["predictions"][name].detach().cpu().numpy())
         targets[name].append(result["targets"][name].detach().cpu().numpy())
+
+
+def _merge_epoch_states(
+    states: list[dict[str, object]],
+    task_spec: MsgProbeTaskSpec,
+) -> dict[str, object]:
+    merged = _new_epoch_state(task_spec)
+    merged["count"] = sum(int(state["count"]) for state in states)
+    merged_predictions = merged["predictions"]
+    merged_targets = merged["targets"]
+    for state in states:
+        predictions = state["predictions"]
+        targets = state["targets"]
+        for name in _probe_task_names(task_spec):
+            merged_predictions[name].extend(predictions[name])
+            merged_targets[name].extend(targets[name])
+    return merged
+
+
+def _gather_epoch_state(
+    state: dict[str, object],
+    task_spec: MsgProbeTaskSpec,
+    distributed: DistributedContext | None,
+) -> dict[str, object]:
+    if not _is_distributed(distributed):
+        return state
+    return _merge_epoch_states(_all_gather_object(state), task_spec)
+
+
+def _gather_variant_states(
+    states: dict[str, dict[str, object]],
+    task_spec: MsgProbeTaskSpec,
+    distributed: DistributedContext | None,
+) -> dict[str, dict[str, object]]:
+    if not _is_distributed(distributed):
+        return states
+    return {
+        variant: _merge_epoch_states(_all_gather_object(state), task_spec)
+        for variant, state in states.items()
+    }
+
+
+def _wrap_probe_for_distributed(
+    probe: MsgSequenceProbe,
+    distributed: DistributedContext | None,
+) -> torch.nn.Module:
+    if not _is_distributed(distributed):
+        return probe
+    assert distributed is not None
+    return DistributedDataParallel(
+        probe,
+        device_ids=[distributed.local_rank] if distributed.device.type == "cuda" else None,
+        output_device=distributed.local_rank if distributed.device.type == "cuda" else None,
+        gradient_as_bucket_view=True,
+    )
 
 
 def resolve_msg_probe_select_metric(
@@ -940,6 +1112,7 @@ def _run_msg_probe_once(
     repeat_index: int = 0,
     plot_dir: Path | None = None,
     plot_step: int | None = None,
+    distributed: DistributedContext | None = None,
 ) -> dict[str, float]:
     num_probe_epochs = int(config.get("msg_probe_num_epochs", 5))
     probe_lr = float(config.get("msg_probe_learning_rate", 1e-3))
@@ -983,6 +1156,7 @@ def _run_msg_probe_once(
         seed=train_seed_base,
         max_samples=max_train_samples,
         fingerprint_task=fingerprint_task,
+        distributed=distributed,
     )
     val_targets = _collect_split_targets(
         probe_data=probe_data,
@@ -992,6 +1166,7 @@ def _run_msg_probe_once(
         max_samples=max_val_samples,
         sample_randomly=True,
         fingerprint_task=fingerprint_task,
+        distributed=distributed,
     )
     selection_targets = val_targets if early_stopping else _collect_split_targets(
         probe_data=probe_data,
@@ -1001,6 +1176,7 @@ def _run_msg_probe_once(
         max_samples=max_test_samples,
         sample_randomly=randomize_test_subset,
         fingerprint_task=fingerprint_task,
+        distributed=distributed,
     )
     task_spec = _build_task_spec(
         train_targets=train_targets,
@@ -1025,19 +1201,24 @@ def _run_msg_probe_once(
         ).to(device)
         for variant in variants
     }
+    train_probes = {
+        variant: _wrap_probe_for_distributed(probe, distributed)
+        for variant, probe in probes.items()
+    }
     optimizers = {
         variant: torch.optim.AdamW(
-            probe.parameters(),
+            train_probes[variant].parameters(),
             lr=probe_lr,
             weight_decay=probe_weight_decay,
         )
-        for variant, probe in probes.items()
+        for variant in probes
     }
     steps_per_epoch = probe_steps_per_epoch(
         probe_data,
         split="massspec_train",
         drop_remainder=False,
         max_samples=max_train_samples,
+        distributed_world_size=_distributed_world_size(distributed),
     )
     schedulers = {
         variant: torch.optim.lr_scheduler.LambdaLR(
@@ -1084,6 +1265,9 @@ def _run_msg_probe_once(
             peak_ordering=peak_ordering,
             drop_remainder=False,
             max_samples=max_train_samples,
+            distributed_world_size=_distributed_world_size(distributed),
+            distributed_rank=_distributed_rank(distributed),
+            pad_distributed=True,
         )
         for batch in train_iterator:
             batch = move_batch(batch)
@@ -1091,18 +1275,21 @@ def _run_msg_probe_once(
             for variant in variants:
                 optimizers[variant].zero_grad(set_to_none=True)
                 result = _sequence_probe_step(
-                    probes[variant],
+                    train_probes[variant],
                     batch,
                     peak_embeddings,
                     task_spec=task_spec,
                     device=device,
+                    allow_empty=_is_distributed(distributed),
                 )
                 if result is None:
                     continue
                 result["loss_total"].backward()
                 optimizers[variant].step()
                 schedulers[variant].step()
-                _update_epoch_state(train_states[variant], result, task_spec)
+                if int(result["batch_size"]) > 0:
+                    _update_epoch_state(train_states[variant], result, task_spec)
+        train_states = _gather_variant_states(train_states, task_spec, distributed)
         for probe in probes.values():
             probe.eval()
         val_states = {variant: _new_epoch_state(task_spec) for variant in variants}
@@ -1119,6 +1306,7 @@ def _run_msg_probe_once(
                 max_samples=max_val_samples,
                 sample_randomly=True,
                 device=device,
+                distributed=distributed,
             )
         test_states = {variant: _new_epoch_state(task_spec) for variant in variants}
         if not early_stopping:
@@ -1134,6 +1322,7 @@ def _run_msg_probe_once(
                 max_samples=max_test_samples,
                 sample_randomly=randomize_test_subset,
                 device=device,
+                distributed=distributed,
             )
         epoch_metrics: dict[str, float] = {}
         for variant in variants:
@@ -1190,7 +1379,7 @@ def _run_msg_probe_once(
                 epochs_without_improvement[variant] = 0
             else:
                 epochs_without_improvement[variant] += 1
-            if early_stopping:
+            if early_stopping and _is_main(distributed):
                 log.info(
                     "MSG probe [%s] epoch %d/%d train_samples=%d val_r2_mean_wo_num_rings=%.4f val_mae_num_rings=%.4f val_auc_%s_mean=%.4f val_average_precision_%s_mean=%.4f val_recall_%s_mean=%.4f val_precision_%s_mean=%.4f %s_bits=%d",
                     variant,
@@ -1212,7 +1401,7 @@ def _run_msg_probe_once(
                     fingerprint_task,
                     int(variant_metrics[f"{variant_prefix}/num_{fingerprint_task}_bits"]),
                 )
-            else:
+            elif _is_main(distributed):
                 log.info(
                     "MSG probe [%s] epoch %d/%d train_samples=%d test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f %s_bits=%d",
                     variant,
@@ -1239,7 +1428,7 @@ def _run_msg_probe_once(
                     int(variant_metrics[f"{variant_prefix}/num_{fingerprint_task}_bits"]),
                 )
         epoch_metrics = _with_mean_probe_aliases(epoch_metrics)
-        if on_epoch_end is not None:
+        if on_epoch_end is not None and _is_main(distributed):
             on_epoch_end(epoch_metrics)
         if (
             early_stopping
@@ -1249,12 +1438,13 @@ def _run_msg_probe_once(
                 for variant in variants
             )
         ):
-            log.info(
-                "MSG probe early stopping at epoch %d/%d after %d epochs without validation improvement",
-                epoch_idx + 1,
-                num_probe_epochs,
-                early_stopping_patience,
-            )
+            if _is_main(distributed):
+                log.info(
+                    "MSG probe early stopping at epoch %d/%d after %d epochs without validation improvement",
+                    epoch_idx + 1,
+                    num_probe_epochs,
+                    early_stopping_patience,
+                )
             break
     for variant in variants:
         if variant in best_state_by_variant:
@@ -1278,6 +1468,7 @@ def _run_msg_probe_once(
             max_samples=max_test_samples,
             sample_randomly=randomize_test_subset,
             device=device,
+            distributed=distributed,
         )
         final_test_metrics_by_variant = {
             variant: _score_epoch_state(
@@ -1298,25 +1489,26 @@ def _run_msg_probe_once(
         variant_select_metric = _msg_probe_variant_metric_key(variant, select_metric)
         if early_stopping:
             variant_select_metric = variant_select_metric.replace("/test/", "/val/")
-        log.info(
-            "MSG probe [%s] best epoch %d: %s=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f",
-            variant,
-            int(variant_metrics[f"{variant_prefix}/epoch"]),
-            variant_select_metric,
-            variant_metrics[variant_select_metric],
-            variant_metrics[f"{variant_prefix}/test/r2_mean_wo_num_rings"],
-            variant_metrics[f"{variant_prefix}/test/mae_num_rings"],
-            fingerprint_task,
-            variant_metrics[f"{variant_prefix}/test/auc_{fingerprint_task}_mean"],
-            fingerprint_task,
-            variant_metrics[
-                f"{variant_prefix}/test/average_precision_{fingerprint_task}_mean"
-            ],
-            fingerprint_task,
-            variant_metrics[f"{variant_prefix}/test/recall_{fingerprint_task}_mean"],
-            fingerprint_task,
-            variant_metrics[f"{variant_prefix}/test/precision_{fingerprint_task}_mean"],
-        )
+        if _is_main(distributed):
+            log.info(
+                "MSG probe [%s] best epoch %d: %s=%.4f test_r2_mean_wo_num_rings=%.4f test_mae_num_rings=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f",
+                variant,
+                int(variant_metrics[f"{variant_prefix}/epoch"]),
+                variant_select_metric,
+                variant_metrics[variant_select_metric],
+                variant_metrics[f"{variant_prefix}/test/r2_mean_wo_num_rings"],
+                variant_metrics[f"{variant_prefix}/test/mae_num_rings"],
+                fingerprint_task,
+                variant_metrics[f"{variant_prefix}/test/auc_{fingerprint_task}_mean"],
+                fingerprint_task,
+                variant_metrics[
+                    f"{variant_prefix}/test/average_precision_{fingerprint_task}_mean"
+                ],
+                fingerprint_task,
+                variant_metrics[f"{variant_prefix}/test/recall_{fingerprint_task}_mean"],
+                fingerprint_task,
+                variant_metrics[f"{variant_prefix}/test/precision_{fingerprint_task}_mean"],
+            )
     best_metrics.update(
         _run_covariance_morgan_pairwise_alignment(
             config=config,
@@ -1333,6 +1525,7 @@ def _run_msg_probe_once(
             plot_dir=plot_dir,
             plot_step=plot_step,
             repeat_index=repeat_index,
+            distributed=distributed,
         )
     )
     if was_training:
@@ -1348,6 +1541,7 @@ def run_msg_probe(
     on_epoch_end: Callable[[dict[str, float]], None] | None = None,
     plot_dir: Path | None = None,
     plot_step: int | None = None,
+    distributed: DistributedContext | None = None,
 ) -> dict[str, float]:
     def run_once(
         repeat_index: int,
@@ -1359,6 +1553,7 @@ def run_msg_probe(
             "device": device,
             "on_epoch_end": repeat_on_epoch_end,
             "repeat_index": repeat_index,
+            "distributed": distributed,
         }
         if plot_dir is not None:
             kwargs["plot_dir"] = plot_dir

@@ -1,12 +1,20 @@
 import tempfile
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
 from ml_collections import config_dict
 
 from spectra_learning.models.model import PeakSetSIGReg
-from spectra_learning.training.checkpointing import load_resume_model_state, save_checkpoint
+from spectra_learning.training.checkpointing import (
+    load_resume_model_state,
+    optimizer_state_dict,
+    save_checkpoint,
+)
+from spectra_learning.training import pretrain
 from spectra_learning.training.optimization import (
+    _split_muon_parameters,
     build_optimizers,
     is_predictor_parameter,
     is_weight_decay_target,
@@ -92,6 +100,181 @@ def test_save_checkpoint_persists_nested_scalar_optimizer_state():
     assert saved_optimizer["scalar_optimizer_state"]["state"]
 
 
+def test_training_loop_resumes_with_offset_loader(monkeypatch, tmp_path: Path):
+    cfg = config_dict.ConfigDict()
+    cfg.autocast_dtype = "bf16"
+    cfg.log_every_n_steps = 0
+    cfg.collapse_metrics_every_n_steps = 0
+    cfg.checkpoint_every_steps = 1000
+    cfg.msg_probe_every_n_steps = 0
+    cfg.device_prefetch_size = 1
+
+    class FakeDataModule:
+        train_steps = 5
+
+        def __init__(self) -> None:
+            self.calls = []
+
+        def train_loader_for_epoch(self, epoch: int, start_batch: int = 0):
+            self.calls.append((epoch, start_batch))
+            return [
+                {"peak_mz": torch.tensor([float(step)])}
+                for step in range(start_batch, self.train_steps)
+            ]
+
+    def fake_train_step_impl(*args, **kwargs):
+        return {"loss": torch.tensor(1.0)}
+
+    datamodule = FakeDataModule()
+    monkeypatch.setattr(pretrain, "train_step_impl", fake_train_step_impl)
+
+    metrics = pretrain.run_training_loop(
+        config=cfg,
+        datamodule=datamodule,
+        model=torch.nn.Linear(1, 1),
+        optimizers=[],
+        schedulers=[],
+        logger=SimpleNamespace(experiment=None, log_metrics=lambda *args, **kwargs: None),
+        checkpoint_dir=tmp_path,
+        start_epoch=0,
+        loop_epochs=1,
+        resume_offset=3,
+        global_step=3,
+        total_steps=5,
+        device=torch.device("cpu"),
+    )
+
+    assert datamodule.calls == [(0, 3)]
+    assert metrics["run/final_global_step"] == 5.0
+
+
+def test_training_loop_runs_distributed_online_probe_and_logs_on_main(monkeypatch, tmp_path: Path):
+    cfg = config_dict.ConfigDict()
+    cfg.autocast_dtype = "bf16"
+    cfg.log_every_n_steps = 0
+    cfg.collapse_metrics_every_n_steps = 0
+    cfg.checkpoint_every_steps = 1000
+    cfg.msg_probe_every_n_steps = 2
+    cfg.msg_probe_variants = ["mean"]
+    cfg.device_prefetch_size = 1
+    cfg.throughput_warmup_steps = 1000
+
+    class FakeDataModule:
+        train_steps = 2
+        global_batch_size = 4
+
+        def train_loader_for_epoch(self, epoch: int, start_batch: int = 0):
+            return [
+                {"peak_mz": torch.tensor([float(step)])}
+                for step in range(start_batch, self.train_steps)
+            ]
+
+    class FakeLogger:
+        experiment = None
+
+        def __init__(self) -> None:
+            self.logs = []
+
+        def log_metrics(self, metrics, step=None) -> None:
+            self.logs.append((dict(metrics), step))
+
+    probe_calls = []
+    barriers = []
+
+    def fake_train_step_impl(*args, **kwargs):
+        return {"loss": torch.tensor(1.0)}
+
+    def fake_run_msg_probe(*, config, model, device, distributed):
+        probe_calls.append((model, device))
+        return {"msg_probe/mean/test/auc_maccs_mean": 0.75}
+
+    def fake_barrier(distributed):
+        barriers.append((distributed.rank, distributed.world_size))
+
+    monkeypatch.setattr(pretrain, "train_step_impl", fake_train_step_impl)
+    monkeypatch.setattr(pretrain, "run_msg_probe", fake_run_msg_probe)
+    monkeypatch.setattr(pretrain, "barrier", fake_barrier)
+
+    device = torch.device("cpu")
+    model = torch.nn.Linear(1, 1)
+    main_logger = FakeLogger()
+    main_metrics = pretrain.run_training_loop(
+        config=cfg,
+        datamodule=FakeDataModule(),
+        model=model,
+        optimizers=[],
+        schedulers=[],
+        logger=main_logger,
+        checkpoint_dir=tmp_path,
+        start_epoch=0,
+        loop_epochs=1,
+        resume_offset=0,
+        global_step=0,
+        total_steps=2,
+        device=device,
+        distributed=pretrain.DistributedContext(
+            rank=0,
+            local_rank=0,
+            world_size=2,
+            device=device,
+        ),
+    )
+    worker_logger = FakeLogger()
+    worker_metrics = pretrain.run_training_loop(
+        config=cfg,
+        datamodule=FakeDataModule(),
+        model=model,
+        optimizers=[],
+        schedulers=[],
+        logger=worker_logger,
+        checkpoint_dir=tmp_path,
+        start_epoch=0,
+        loop_epochs=1,
+        resume_offset=0,
+        global_step=0,
+        total_steps=2,
+        device=device,
+        distributed=pretrain.DistributedContext(
+            rank=1,
+            local_rank=1,
+            world_size=2,
+            device=device,
+        ),
+    )
+
+    assert probe_calls == [(model, device), (model, device)]
+    assert main_logger.logs == [({"msg_probe/mean/test/auc_maccs_mean": 0.75}, 2)]
+    assert worker_logger.logs == []
+    assert barriers == [(0, 2), (0, 2), (1, 2), (1, 2)]
+    assert main_metrics["msg_probe/mean/test/auc_maccs_mean"] == 0.75
+    assert main_metrics["run/final_global_step"] == 2.0
+    assert worker_metrics["run/final_global_step"] == 2.0
+
+
+def test_optimizer_state_dict_strips_runtime_param_group_callables():
+    param = torch.nn.Parameter(torch.randn(4, 4))
+    optimizer = torch.optim.SGD(
+        [
+            {
+                "params": [param],
+                "param_split_fn": lambda x: [x],
+                "param_recombine_fn": lambda parts: parts[0],
+            }
+        ],
+        lr=0.1,
+    )
+
+    state = optimizer_state_dict(optimizer)
+
+    assert "param_split_fn" not in state["param_groups"][0]
+    assert "param_recombine_fn" not in state["param_groups"][0]
+
+    with tempfile.TemporaryFile() as f:
+        torch.save(state, f)
+        f.seek(0)
+        torch.load(f, weights_only=True)
+
+
 def test_build_optimizers_uses_single_adamw_optimizer_by_default():
     model = _small_model()
     cfg = _optimizer_config()
@@ -145,6 +328,30 @@ def test_build_optimizers_applies_predictor_learning_rate_ratio():
     assert actual_predictor_param_ids == predictor_param_ids
     assert base_param_ids.isdisjoint(actual_predictor_param_ids)
     assert base_param_ids | actual_predictor_param_ids == all_trainable_param_ids
+
+
+def test_muon_splits_merged_qkv_parameters_before_orthogonalization():
+    model = _small_model(encoder_num_kv_heads=2)
+
+    base_muon_groups, predictor_muon_groups, *_ = _split_muon_parameters(model)
+    qkv = model.encoder.blocks[0].attention.wqkv.weight
+    qkv_group = next(
+        group
+        for group in base_muon_groups
+        if any(param is qkv for param in group["params"])
+    )
+
+    update = torch.randn_like(qkv)
+    split_update = qkv_group["param_split_fn"](update)
+    recombined = qkv_group["param_recombine_fn"](split_update)
+
+    assert predictor_muon_groups
+    assert [part.shape for part in split_update] == [
+        torch.Size([64, 64]),
+        torch.Size([32, 64]),
+        torch.Size([32, 64]),
+    ]
+    torch.testing.assert_close(recombined, update)
 
 
 def test_load_resume_model_state_rejects_sigreg_checkpoint_drift():

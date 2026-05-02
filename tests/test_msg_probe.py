@@ -83,6 +83,10 @@ class _DummyDataModule:
         peak_ordering: str | None = None,
         shuffle: bool = False,
         drop_remainder: bool = True,
+        max_samples: int | None = None,
+        distributed_world_size: int = 1,
+        distributed_rank: int = 0,
+        pad_distributed: bool = False,
     ):
         self.calls.append(
             {
@@ -91,6 +95,10 @@ class _DummyDataModule:
                 "peak_ordering": peak_ordering,
                 "shuffle": shuffle,
                 "drop_remainder": drop_remainder,
+                "max_samples": max_samples,
+                "distributed_world_size": distributed_world_size,
+                "distributed_rank": distributed_rank,
+                "pad_distributed": pad_distributed,
             }
         )
         return self._dataset
@@ -111,6 +119,10 @@ class _SplitDummyDataModule:
         peak_ordering: str | None = None,
         shuffle: bool = False,
         drop_remainder: bool = True,
+        max_samples: int | None = None,
+        distributed_world_size: int = 1,
+        distributed_rank: int = 0,
+        pad_distributed: bool = False,
     ):
         self.calls.append(
             {
@@ -119,6 +131,10 @@ class _SplitDummyDataModule:
                 "peak_ordering": peak_ordering,
                 "shuffle": shuffle,
                 "drop_remainder": drop_remainder,
+                "max_samples": max_samples,
+                "distributed_world_size": distributed_world_size,
+                "distributed_rank": distributed_rank,
+                "pad_distributed": pad_distributed,
             }
         )
         return _DummyDataset(self._batches_by_split[split])
@@ -1250,6 +1266,7 @@ class RepeatedProbeTests(unittest.TestCase):
             device,
             on_epoch_end,
             repeat_index,
+            distributed,
         ):
             metrics, curve = repeat_payloads[repeat_index]
             for epoch_metrics in curve:

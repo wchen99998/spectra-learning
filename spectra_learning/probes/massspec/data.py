@@ -11,7 +11,7 @@ from huggingface_hub import hf_hub_download, snapshot_download
 from ml_collections import config_dict
 from rdkit import Chem, DataStructs
 from rdkit.Chem import AllChem
-from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data import DataLoader, Dataset, Sampler, Subset
 
 from spectra_learning.data.gems.conversion import _prepend_precursor_token_torch
 from spectra_learning.probes.massspec.targets import (
@@ -874,6 +874,51 @@ class _LoaderAdapter:
             }
 
 
+class _ProbeIndexSampler(Sampler[int]):
+    def __init__(
+        self,
+        dataset_size: int,
+        *,
+        generator: torch.Generator,
+        shuffle: bool,
+        max_samples: int | None,
+        distributed_world_size: int,
+        distributed_rank: int,
+        pad_to_equal: bool,
+    ) -> None:
+        self.dataset_size = int(dataset_size)
+        self.generator = generator
+        self.shuffle = bool(shuffle)
+        self.max_samples = max_samples
+        self.distributed_world_size = int(distributed_world_size)
+        self.distributed_rank = int(distributed_rank)
+        self.pad_to_equal = bool(pad_to_equal)
+        self._indices = self._build_indices()
+
+    def _build_indices(self) -> list[int]:
+        if self.shuffle:
+            order = torch.randperm(self.dataset_size, generator=self.generator).tolist()
+        else:
+            order = list(range(self.dataset_size))
+        if self.max_samples is not None:
+            order = order[: min(len(order), int(self.max_samples))]
+        if self.pad_to_equal and self.distributed_world_size > 1 and order:
+            total_size = (
+                math.ceil(len(order) / self.distributed_world_size)
+                * self.distributed_world_size
+            )
+            order = order + order[: total_size - len(order)]
+        if self.distributed_world_size > 1:
+            order = order[self.distributed_rank :: self.distributed_world_size]
+        return [int(idx) for idx in order]
+
+    def __iter__(self):
+        yield from self._indices
+
+    def __len__(self) -> int:
+        return len(self._indices)
+
+
 class MassSpecProbeData(NamedTuple):
     info: dict[str, Any]
     train_files: list[str]
@@ -1017,6 +1062,10 @@ class MassSpecProbeData(NamedTuple):
         shuffle: bool = False,
         drop_remainder: bool = True,
         num_parallel_reads: int | None = None,
+        max_samples: int | None = None,
+        distributed_world_size: int = 1,
+        distributed_rank: int = 0,
+        pad_distributed: bool = False,
     ):
         split_files = {
             "massspec_train": self.train_files,
@@ -1044,10 +1093,22 @@ class MassSpecProbeData(NamedTuple):
         )
         generator = torch.Generator()
         generator.manual_seed(int(seed))
+        sampler = None
+        if max_samples is not None or int(distributed_world_size) > 1:
+            sampler = _ProbeIndexSampler(
+                len(dataset),
+                generator=generator,
+                shuffle=bool(shuffle),
+                max_samples=max_samples,
+                distributed_world_size=int(distributed_world_size),
+                distributed_rank=int(distributed_rank),
+                pad_to_equal=bool(pad_distributed),
+            )
         loader = DataLoader(
             dataset,
             batch_size=self.batch_size,
-            shuffle=bool(shuffle),
+            shuffle=bool(shuffle) and sampler is None,
+            sampler=sampler,
             drop_last=bool(drop_remainder),
             num_workers=0,
             collate_fn=_ProbeBatchCollator(

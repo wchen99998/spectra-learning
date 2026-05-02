@@ -557,6 +557,246 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
         self.assertEqual(len(set(epoch0_ids)), len(expected_ids))
         self.assertEqual(len(set(epoch1_ids)), len(expected_ids))
 
+    def test_train_loader_start_batch_matches_epoch_suffix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cfg = self._make_config(tmp_path)
+            cfg.batch_size = 2
+            cfg.dataloader_num_workers = 0
+
+            artifact_dir = Path(cfg.artifact_dir) / "gems"
+            train_entries = _write_fake_native_shards(
+                artifact_dir / "train",
+                [5, 4],
+                num_peaks=int(cfg.num_peaks),
+            )
+            val_entries = _write_fake_native_shards(
+                artifact_dir / "validation",
+                [3],
+                num_peaks=int(cfg.num_peaks),
+            )
+            metadata = {
+                "gems_native_metadata_version": GEMS_NATIVE_METADATA_VERSION,
+                "num_peaks_input": 128,
+                "artifact_format": "raw_peaklist_v1",
+                "max_precursor_mz": float(cfg.max_precursor_mz),
+                "train_shards": [Path(entry["dir"]).name for entry in train_entries],
+                "train_lengths": [int(entry["length"]) for entry in train_entries],
+                "validation_shards": [
+                    Path(entry["dir"]).name for entry in val_entries
+                ],
+                "validation_lengths": [int(entry["length"]) for entry in val_entries],
+                "train_size": 9,
+                "validation_size": 3,
+                "validation_fraction": 0.25,
+                "split_seed": 42,
+                "num_shards": len(train_entries),
+                "source_hdf5_path": "unit-test",
+                "source_url": None,
+            }
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            (artifact_dir / "metadata.json").write_text(json.dumps(metadata))
+
+            datamodule = gems.GemsNativeDataModule(cfg, seed=42)
+            full_ids = [
+                round(float(value) * 1000.0, 6)
+                for batch in datamodule.train_loader_for_epoch(0)
+                for value in batch["precursor_mz"]
+            ]
+            offset_loader = datamodule.train_loader_for_epoch(0, start_batch=2)
+            offset_ids = [
+                round(float(value) * 1000.0, 6)
+                for batch in offset_loader
+                for value in batch["precursor_mz"]
+            ]
+
+        self.assertEqual(offset_ids, full_ids[4:])
+        self.assertEqual(len(offset_loader), datamodule.train_steps - 2)
+
+    def test_distributed_train_loader_splits_fixed_global_batch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cfg = self._make_config(tmp_path)
+            cfg.batch_size = 4
+            cfg.drop_remainder = True
+            cfg.dataloader_num_workers = 4
+
+            artifact_dir = Path(cfg.artifact_dir) / "gems"
+            train_entries = _write_fake_native_shards(
+                artifact_dir / "train",
+                [8],
+                num_peaks=int(cfg.num_peaks),
+            )
+            val_entries = _write_fake_native_shards(
+                artifact_dir / "validation",
+                [2],
+                num_peaks=int(cfg.num_peaks),
+            )
+            metadata = {
+                "gems_native_metadata_version": GEMS_NATIVE_METADATA_VERSION,
+                "num_peaks_input": 128,
+                "artifact_format": "raw_peaklist_v1",
+                "max_precursor_mz": float(cfg.max_precursor_mz),
+                "train_shards": [Path(entry["dir"]).name for entry in train_entries],
+                "train_lengths": [int(entry["length"]) for entry in train_entries],
+                "validation_shards": [
+                    Path(entry["dir"]).name for entry in val_entries
+                ],
+                "validation_lengths": [int(entry["length"]) for entry in val_entries],
+                "train_size": 8,
+                "validation_size": 2,
+                "validation_fraction": 0.2,
+                "split_seed": 42,
+                "num_shards": len(train_entries),
+                "source_hdf5_path": "unit-test",
+                "source_url": None,
+            }
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            (artifact_dir / "metadata.json").write_text(json.dumps(metadata))
+
+            rank_modules = [
+                gems.GemsNativeDataModule(
+                    cfg,
+                    seed=42,
+                    distributed_world_size=2,
+                    distributed_rank=rank,
+                )
+                for rank in range(2)
+            ]
+            rank_batches = [
+                [
+                    [round(float(value) * 1000.0, 6) for value in batch["precursor_mz"]]
+                    for batch in datamodule.train_loader_for_epoch(0)
+                ]
+                for datamodule in rank_modules
+            ]
+            offset_rank_batches = [
+                [
+                    [round(float(value) * 1000.0, 6) for value in batch["precursor_mz"]]
+                    for batch in datamodule.train_loader_for_epoch(0, start_batch=1)
+                ]
+                for datamodule in rank_modules
+            ]
+
+        for datamodule in rank_modules:
+            self.assertEqual(datamodule.global_batch_size, 4)
+            self.assertEqual(datamodule.batch_size, 2)
+            self.assertEqual(datamodule.train_steps, 2)
+            self.assertEqual(datamodule.dataloader_num_workers, 2)
+        self.assertEqual([len(batches) for batches in rank_batches], [2, 2])
+        for step in range(2):
+            self.assertEqual(len(rank_batches[0][step]), 2)
+            self.assertEqual(len(rank_batches[1][step]), 2)
+            self.assertFalse(set(rank_batches[0][step]) & set(rank_batches[1][step]))
+        self.assertEqual(
+            sorted(value for batches in rank_batches for batch in batches for value in batch),
+            list(range(8)),
+        )
+        self.assertEqual([len(batches) for batches in offset_rank_batches], [1, 1])
+        self.assertEqual(
+            sorted(
+                value
+                for batches in offset_rank_batches
+                for batch in batches
+                for value in batch
+            ),
+            sorted(value for batches in rank_batches for value in batches[1]),
+        )
+
+    def test_distributed_train_loader_keeps_global_steps_for_uneven_epoch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cfg = self._make_config(tmp_path)
+            cfg.batch_size = 4
+            cfg.drop_remainder = False
+            cfg.dataloader_num_workers = 0
+
+            artifact_dir = Path(cfg.artifact_dir) / "gems"
+            train_entries = _write_fake_native_shards(
+                artifact_dir / "train",
+                [9],
+                num_peaks=int(cfg.num_peaks),
+            )
+            val_entries = _write_fake_native_shards(
+                artifact_dir / "validation",
+                [2],
+                num_peaks=int(cfg.num_peaks),
+            )
+            metadata = {
+                "gems_native_metadata_version": GEMS_NATIVE_METADATA_VERSION,
+                "num_peaks_input": 128,
+                "artifact_format": "raw_peaklist_v1",
+                "max_precursor_mz": float(cfg.max_precursor_mz),
+                "train_shards": [Path(entry["dir"]).name for entry in train_entries],
+                "train_lengths": [int(entry["length"]) for entry in train_entries],
+                "validation_shards": [
+                    Path(entry["dir"]).name for entry in val_entries
+                ],
+                "validation_lengths": [int(entry["length"]) for entry in val_entries],
+                "train_size": 9,
+                "validation_size": 2,
+                "validation_fraction": 0.2,
+                "split_seed": 42,
+                "num_shards": len(train_entries),
+                "source_hdf5_path": "unit-test",
+                "source_url": None,
+            }
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            (artifact_dir / "metadata.json").write_text(json.dumps(metadata))
+
+            rank_modules = [
+                gems.GemsNativeDataModule(
+                    cfg,
+                    seed=123,
+                    distributed_world_size=2,
+                    distributed_rank=rank,
+                )
+                for rank in range(2)
+            ]
+            rank_batches = [
+                [
+                    [round(float(value) * 1000.0, 6) for value in batch["precursor_mz"]]
+                    for batch in datamodule.train_loader_for_epoch(0)
+                ]
+                for datamodule in rank_modules
+            ]
+            offset_rank_batches = [
+                [
+                    [round(float(value) * 1000.0, 6) for value in batch["precursor_mz"]]
+                    for batch in datamodule.train_loader_for_epoch(0, start_batch=2)
+                ]
+                for datamodule in rank_modules
+            ]
+
+        for datamodule in rank_modules:
+            self.assertEqual(datamodule.global_batch_size, 4)
+            self.assertEqual(datamodule.batch_size, 2)
+            self.assertEqual(datamodule.train_steps, 3)
+        self.assertEqual([len(batches) for batches in rank_batches], [3, 3])
+        self.assertEqual(
+            [[len(batch) for batch in batches] for batches in rank_batches],
+            [[2, 2, 1], [2, 2, 1]],
+        )
+        combined = [
+            value
+            for batches in rank_batches
+            for batch in batches
+            for value in batch
+        ]
+        self.assertEqual(sorted(set(combined)), list(range(9)))
+        self.assertEqual(len(combined), 10)
+        self.assertEqual(len(combined) - len(set(combined)), 1)
+        self.assertEqual([len(batches) for batches in offset_rank_batches], [1, 1])
+        self.assertEqual(
+            sorted(
+                value
+                for batches in offset_rank_batches
+                for batch in batches
+                for value in batch
+            ),
+            sorted(value for batches in rank_batches for value in batches[2]),
+        )
+
     def test_memmap_loader_multi_worker_covers_each_sample_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

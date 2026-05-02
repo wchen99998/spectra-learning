@@ -1,10 +1,12 @@
 import math
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import torch
 from ml_collections import config_dict
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
+from torch.utils.data.distributed import DistributedSampler
 
 from spectra_learning.data.gems.artifacts import resolve_gems_artifact
 from spectra_learning.data.gems.collate import GemsBatchCollator
@@ -13,12 +15,64 @@ from spectra_learning.data.gems.settings import GemsDataConfig
 from spectra_learning.data.spectra import PEAK_MZ_MAX, PEAK_MZ_MIN
 
 
+class _OffsetSampler(Sampler[int]):
+    def __init__(
+        self,
+        sampler: Sampler[int],
+        *,
+        start_index: int,
+    ) -> None:
+        self.sampler = sampler
+        self.start_index = int(start_index)
+
+    def __iter__(self) -> Iterator[int]:
+        for position, idx in enumerate(self.sampler):
+            if position >= self.start_index:
+                yield int(idx)
+
+    def __len__(self) -> int:
+        return len(self.sampler) - self.start_index
+
+
+class _ShuffledSampler(Sampler[int]):
+    def __init__(
+        self,
+        dataset: GemsMemmapDataset,
+        *,
+        shuffle: bool,
+        generator: torch.Generator,
+    ) -> None:
+        self.dataset = dataset
+        self.shuffle = bool(shuffle)
+        self.generator = generator
+
+    def __iter__(self) -> Iterator[int]:
+        if self.shuffle:
+            order = torch.randperm(len(self.dataset), generator=self.generator)
+            for idx in order:
+                yield int(idx)
+            return
+        yield from range(len(self.dataset))
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+
 class GemsNativeDataModule:
-    def __init__(self, config: config_dict.ConfigDict, seed: int) -> None:
+    def __init__(
+        self,
+        config: config_dict.ConfigDict,
+        seed: int,
+        *,
+        distributed_world_size: int = 1,
+        distributed_rank: int = 0,
+    ) -> None:
         self.config = GemsDataConfig.from_config(config)
         self.seed = int(seed)
         self.output_dir = self.config.artifact_dir
         self.gems_base_dir = self.output_dir / "gems"
+        self.distributed_world_size = int(distributed_world_size)
+        self.distributed_rank = int(distributed_rank)
         if not self.config.gems_native_repo_id:
             raise ValueError("GeMS configs must set gems_native_repo_id")
         self.gems_dir, self.gems_metadata = resolve_gems_artifact(
@@ -31,6 +85,7 @@ class GemsNativeDataModule:
             source_url=self.config.gems_native_source_url,
         )
         self._set_public_config_attrs()
+        self._set_distributed_batch_attrs()
         self._set_shard_entries()
         self.info = self._info()
         self.train_steps = self._train_steps()
@@ -45,6 +100,16 @@ class GemsNativeDataModule:
                 self.num_peaks_output = value
             else:
                 setattr(self, key, value)
+
+    def _set_distributed_batch_attrs(self) -> None:
+        self.global_batch_size = int(self.batch_size)
+        assert self.global_batch_size % self.distributed_world_size == 0
+        self.batch_size = self.global_batch_size // self.distributed_world_size
+        if self.distributed_world_size > 1 and self.dataloader_num_workers > 0:
+            self.dataloader_num_workers = max(
+                1,
+                self.dataloader_num_workers // self.distributed_world_size,
+            )
 
     def _set_shard_entries(self) -> None:
         self.gems_train_shards = [
@@ -85,8 +150,8 @@ class GemsNativeDataModule:
     def _train_steps(self) -> int:
         train_size = int(self.info["train_size"])
         if self.drop_remainder:
-            return train_size // self.batch_size
-        return math.ceil(train_size / self.batch_size)
+            return train_size // self.global_batch_size
+        return math.ceil(train_size / self.global_batch_size)
 
     def _get_dataset(self, split: str) -> GemsMemmapDataset:
         if split == "train":
@@ -105,19 +170,41 @@ class GemsNativeDataModule:
         shuffle: bool,
         seed: int,
         drop_last: bool,
+        start_batch: int = 0,
+        epoch: int = 0,
     ) -> DataLoader:
         generator = torch.Generator()
         generator.manual_seed(int(seed))
+        start_index = int(start_batch) * self.batch_size
         loader_kwargs: dict[str, Any] = {
             "dataset": dataset,
             "batch_size": self.batch_size,
-            "shuffle": bool(shuffle),
             "num_workers": self.dataloader_num_workers,
             "pin_memory": self.dataloader_pin_memory,
             "drop_last": bool(drop_last),
             "collate_fn": self._collator(augment=augment),
             "generator": generator,
         }
+        if self.distributed_world_size > 1:
+            sampler = DistributedSampler(
+                dataset,
+                shuffle=shuffle,
+                num_replicas=self.distributed_world_size,
+                rank=self.distributed_rank,
+                seed=self.seed,
+                drop_last=bool(drop_last),
+            )
+            sampler.set_epoch(int(epoch))
+            if start_index:
+                sampler = _OffsetSampler(sampler, start_index=start_index)
+            loader_kwargs["sampler"] = sampler
+        elif start_index:
+            loader_kwargs["sampler"] = _OffsetSampler(
+                _ShuffledSampler(dataset, shuffle=shuffle, generator=generator),
+                start_index=start_index,
+            )
+        else:
+            loader_kwargs["shuffle"] = bool(shuffle)
         if self.dataloader_num_workers > 0:
             loader_kwargs["persistent_workers"] = self.dataloader_persistent_workers
             loader_kwargs["prefetch_factor"] = self.dataloader_prefetch_factor
@@ -161,11 +248,13 @@ class GemsNativeDataModule:
             )
         return self._val_loader
 
-    def train_loader_for_epoch(self, epoch: int) -> DataLoader:
+    def train_loader_for_epoch(self, epoch: int, start_batch: int = 0) -> DataLoader:
         return self._make_loader(
             dataset=self._get_dataset("train"),
             augment=True,
             shuffle=True,
             seed=self.seed + int(epoch),
             drop_last=self.drop_remainder,
+            start_batch=start_batch,
+            epoch=epoch,
         )

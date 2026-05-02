@@ -4,6 +4,7 @@ import torch
 
 from spectra_learning.models.diagnostics import _collapse_diagnostics
 from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.training.distributed import unwrap_model
 
 
 def _forward_augmented_for_batch(
@@ -13,8 +14,8 @@ def _forward_augmented_for_batch(
     return_collapse_data: bool,
 ):
     if return_collapse_data:
-        return model.forward_augmented(batch, return_collapse_data=True)
-    return model.forward_augmented(batch)
+        return model(batch, return_collapse_data=True)
+    return model(batch)
 
 
 def train_step_impl(
@@ -62,7 +63,7 @@ def train_step_impl(
     for optimizer in optimizers:
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
-    ema_momentum = model.update_ema_teacher(global_step + 1, total_steps)
+    ema_momentum = unwrap_model(model).update_ema_teacher(global_step + 1, total_steps)
     for scheduler in schedulers:
         scheduler.step()
     if ema_momentum is not None:

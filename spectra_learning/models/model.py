@@ -27,3 +27,11 @@ class PeakSetSIGReg(
             self,
             PeakSetSIGRegSettings.create(settings, **overrides),
         )
+
+    def forward(self, augmented_batch, return_collapse_data: bool = False):
+        if return_collapse_data:
+            return self.forward_augmented(
+                augmented_batch,
+                return_collapse_data=True,
+            )
+        return self.forward_augmented(augmented_batch)

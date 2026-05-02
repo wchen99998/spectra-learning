@@ -1,5 +1,7 @@
 import argparse
+import json
 import logging
+import os
 from pathlib import Path
 
 from spectra_learning.training.pretrain import train_and_evaluate
@@ -16,6 +18,16 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional cap on training optimizer steps.",
     )
+    parser.add_argument(
+        "--overrides-json",
+        default="{}",
+        help="JSON object of config overrides applied after loading --config.",
+    )
+    parser.add_argument(
+        "--metrics-json",
+        default="",
+        help="Optional path where rank 0 writes final metrics as JSON.",
+    )
     return parser.parse_args()
 
 
@@ -23,12 +35,17 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
     args = parse_args()
     config = load_config(args.config)
+    config.update(json.loads(args.overrides_json))
     if args.training_max_steps is not None:
         config.training_max_steps = int(args.training_max_steps)
-    train_and_evaluate(
+    results = train_and_evaluate(
         config,
         workdir=Path(args.workdir).expanduser().resolve(),
     )
+    if args.metrics_json and int(os.environ.get("RANK", "0")) == 0:
+        metrics_path = Path(args.metrics_json).expanduser().resolve()
+        metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        metrics_path.write_text(json.dumps(results, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

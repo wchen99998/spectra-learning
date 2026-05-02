@@ -790,6 +790,33 @@ class BlockJEPATests(unittest.TestCase):
             )
         )
 
+    def test_train_step_updates_ema_teacher_with_disabled_target_projector(self):
+        model = self._build_model(
+            encoder_num_layers=2,
+            jepa_target_layers=[1, 2],
+            masked_token_loss_weight=1.0,
+            target_projector_dim=-1,
+            use_ema_teacher=True,
+        )
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+
+        metrics = train_step_impl(
+            model,
+            batch,
+            [optimizer],
+            [scheduler],
+            autocast_dtype=None,
+            grad_clip_norm=None,
+            global_step=1,
+            total_steps=4,
+        )
+
+        self.assertIsInstance(model.target_projector, torch.nn.Identity)
+        self.assertIn("ema_teacher_momentum", metrics)
+        self.assertTrue(torch.isfinite(metrics["loss"]).item())
+
     def test_slow_fast_slow_ema_schedule_uses_total_steps(self):
         model = self._build_model(
             use_ema_teacher=True,
