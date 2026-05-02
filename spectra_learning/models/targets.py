@@ -21,19 +21,7 @@ class TargetProjectionMixin:
         return normalized.to(dtype=orig_dtype)
 
     def _apply_jepa_target_normalization(self, x: torch.Tensor) -> torch.Tensor:
-        if (
-            self.jepa_target_normalization == "none"
-            or self.encoder_num_layers not in self.jepa_target_layers
-        ):
-            return self._apply_group_target_normalization(x, self.model_dim)
-        target_slices = x.split(self.model_dim, dim=-1)
-        normalized_slices = [
-            target_slice
-            if layer_idx == self.encoder_num_layers
-            else self._apply_group_target_normalization(target_slice, self.model_dim)
-            for layer_idx, target_slice in zip(self.jepa_target_layers, target_slices)
-        ]
-        return torch.cat(normalized_slices, dim=-1)
+        return self._apply_group_target_normalization(x, self.model_dim)
 
     def _append_predictor_register_tokens(
         self,

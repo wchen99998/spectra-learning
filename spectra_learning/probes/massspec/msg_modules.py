@@ -239,7 +239,7 @@ def _build_covariance_pooler(
     covariance_pooler: CovariancePool | None,
 ) -> tuple[torch.nn.Module, int]:
     if covariance_pooler is None:
-        compressed_dim = int(config.get("msg_probe_covariance_dim", 32))
+        compressed_dim = int(config.get("covariance_pooling_dim", 32))
         return (
             MsgCovariancePool(input_dim=model_dim, compressed_dim=compressed_dim),
             compressed_dim * compressed_dim,

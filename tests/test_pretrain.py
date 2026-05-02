@@ -505,6 +505,10 @@ class BlockJEPATests(unittest.TestCase):
             sigreg_lambda=0.03,
         )
         self.assertTrue(hasattr(model, "covariance_pooler"))
+        self.assertTrue(model.train_covariance_pooling)
+        self.assertTrue(
+            all(param.requires_grad for param in model.covariance_pooler.parameters())
+        )
         self.assertFalse(hasattr(model, "covariance_sigreg"))
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
         metrics = model.forward_augmented(batch)
@@ -512,6 +516,18 @@ class BlockJEPATests(unittest.TestCase):
         self.assertNotIn("covariance_sigreg_loss", metrics)
         self.assertNotIn("covariance_sigreg_term", metrics)
         torch.testing.assert_close(metrics["loss"], metrics["masked_prediction_term"])
+
+    def test_covariance_pooling_can_be_frozen(self):
+        model = self._build_model(
+            covariance_pooling_dim=4,
+            train_covariance_pooling=False,
+        )
+
+        self.assertTrue(hasattr(model, "covariance_pooler"))
+        self.assertFalse(model.train_covariance_pooling)
+        self.assertTrue(
+            all(not param.requires_grad for param in model.covariance_pooler.parameters())
+        )
 
     def test_teacher_targets_are_detached(self):
         model = self._build_model(masked_token_loss_weight=1.0)
@@ -1130,7 +1146,7 @@ class PrecursorTokenTests(unittest.TestCase):
         metrics = model.forward_augmented(batch)
         self.assertTrue(torch.isfinite(metrics["loss"]).item())
 
-    def test_forward_augmented_forces_precursor_context_not_target(self):
+    def test_forward_augmented_preserves_sampled_precursor_masks(self):
         model = self._build_model()
         batch = _make_pipeline_prepended_batch(
             num_peaks=6,
@@ -1141,8 +1157,8 @@ class PrecursorTokenTests(unittest.TestCase):
 
         _, collapse_data = model.forward_augmented(batch, return_collapse_data=True)
 
-        self.assertTrue(collapse_data["context_mask"][:, 0].all())
-        self.assertFalse(collapse_data["target_masks"][:, :, 0].any())
+        self.assertFalse(collapse_data["context_mask"][:, 0].any())
+        self.assertTrue(collapse_data["target_masks"][:, :, 0].all())
 
     def test_encode_with_prepended_batch(self):
         """encode() works with a batch where precursor is already prepended."""
@@ -1273,9 +1289,9 @@ class PrecursorTokenTests(unittest.TestCase):
         self.assertEqual(result["peak_valid_mask"].shape, (B, N + 1))
         self.assertEqual(result["context_mask"].shape, (B, N + 1))
         self.assertEqual(result["target_masks"].shape, (B, K, N + 1))
-        # Precursor token: valid=True, context-visible, never a target.
+        # Precursor token is valid; masks are supplied by the caller/sampler.
         self.assertTrue(result["peak_valid_mask"][:, 0].all())
-        self.assertTrue(result["context_mask"][:, 0].all())
+        self.assertFalse(result["context_mask"][:, 0].any())
         self.assertFalse(result["target_masks"][:, :, 0].any())
         # Precursor intensity sentinel
         torch.testing.assert_close(
@@ -1321,8 +1337,8 @@ class PrependPrecursorTokenTests(unittest.TestCase):
         )
         # Valid at position 0
         self.assertTrue(out["peak_valid_mask"][:, 0].numpy().all())
-        # Existing masks are preserved after the always-visible precursor.
-        self.assertTrue(out["context_mask"][:, 0].numpy().all())
+        # Existing masks are preserved after the unsampled precursor slot.
+        self.assertFalse(out["context_mask"][:, 0].numpy().any())
         self.assertFalse(out["target_masks"][:, :, 0].numpy().any())
         # Precursor mz at position 0
         self.assertTrue(

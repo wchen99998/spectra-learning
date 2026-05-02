@@ -58,7 +58,7 @@ def _prepend_precursor_token_torch(
     if "context_mask" in batch:
         result["context_mask"] = torch.cat(
             [
-                torch.ones((batch_size, 1), dtype=torch.bool, device=device),
+                torch.zeros((batch_size, 1), dtype=torch.bool, device=device),
                 batch["context_mask"],
             ],
             dim=1,

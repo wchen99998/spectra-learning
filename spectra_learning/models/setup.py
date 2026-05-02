@@ -62,7 +62,9 @@ def _configure_dimensions(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:
     model.temporal_predictor_num_layers = int(cfg.temporal_predictor_num_layers)
     model.predictor_num_register_tokens = int(cfg.predictor_num_register_tokens)
     model.covariance_pooling_dim = int(cfg.covariance_pooling_dim)
-    model.train_covariance_pooling = model.covariance_pooling_dim > 0
+    model.train_covariance_pooling = (
+        model.covariance_pooling_dim > 0 and bool(cfg.train_covariance_pooling)
+    )
 
 
 def _configure_targets(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:
@@ -302,11 +304,12 @@ def _build_regularizer(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:
         else SIGReg
     )
     model.sigreg = sigreg_cls(num_slices=int(cfg.sigreg_num_slices))
-    if model.train_covariance_pooling:
+    if model.covariance_pooling_dim > 0:
         model.covariance_pooler = CovariancePool(
             input_dim=model.model_dim,
             compressed_dim=model.covariance_pooling_dim,
         )
+        model.covariance_pooler.requires_grad_(model.train_covariance_pooling)
 
 
 def _build_temporal_predictor(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:

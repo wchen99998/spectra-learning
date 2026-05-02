@@ -123,6 +123,8 @@ def _regularizer_parts(config: Any) -> list[str]:
     cov_dim = int(config.get("covariance_pooling_dim", -1))
     if cov_dim > 0:
         parts.append(f"covpool{cov_dim}")
+        if not bool(config.get("train_covariance_pooling", True)):
+            parts.append("covfrozen")
     return parts
 
 

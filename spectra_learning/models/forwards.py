@@ -28,7 +28,7 @@ class ForwardMixin:
             "peak_valid_mask": torch.cat([pre_valid, peak_valid_mask], dim=1),
         }
         if context_mask is not None:
-            pre_ctx = torch.ones(B, 1, device=device, dtype=torch.bool)
+            pre_ctx = torch.zeros(B, 1, device=device, dtype=torch.bool)
             result["context_mask"] = torch.cat([pre_ctx, context_mask], dim=1)
         if target_masks is not None:
             K = target_masks.shape[1]
@@ -69,11 +69,6 @@ class ForwardMixin:
         precursor_mz = augmented_batch.get("precursor_mz", None)
         context_mask = augmented_batch["context_mask"] & peak_valid_mask
         target_masks = augmented_batch["target_masks"] & peak_valid_mask.unsqueeze(1)
-        if self.use_precursor_token:
-            context_mask = context_mask.clone()
-            target_masks = target_masks.clone()
-            context_mask[:, 0] = True
-            target_masks[:, :, 0] = False
         (
             teacher_target_features,
             teacher_peak_emb,

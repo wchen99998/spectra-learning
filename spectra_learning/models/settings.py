@@ -74,6 +74,7 @@ class PeakSetSIGRegSettings:
     target_projector_dim: int | None = None
     predictor_dropout: float = 0.0
     covariance_pooling_dim: int = -1
+    train_covariance_pooling: bool = True
     use_ema_teacher: bool = False
     ema_teacher_momentum_start: float = 0.996
     ema_teacher_momentum_mid: float | None = None
@@ -237,6 +238,7 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "target_projector_dim": _optional_int,
     "predictor_dropout": float,
     "covariance_pooling_dim": int,
+    "train_covariance_pooling": bool,
     "use_ema_teacher": bool,
     "ema_teacher_momentum_start": float,
     "ema_teacher_momentum_mid": _optional_float,

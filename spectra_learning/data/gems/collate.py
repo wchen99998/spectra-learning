@@ -59,11 +59,11 @@ class GemsBatchCollator:
 
     def __call__(self, samples: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
         batch = self._preprocess(samples)
+        if self.use_precursor_token:
+            batch = _prepend_precursor_token_torch(batch)
         self._ensure_nonempty_without_precursor(batch)
         if self.augment:
             batch["context_mask"], batch["target_masks"] = self._sample_masks(batch)
-        if self.use_precursor_token:
-            batch = _prepend_precursor_token_torch(batch)
         return batch
 
     def _preprocess(self, samples: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:

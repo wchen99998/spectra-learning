@@ -483,7 +483,7 @@ def test_masked_prediction_loss_can_zscore_teacher_targets():
 
 
 @torch.no_grad()
-def test_multilayer_zscore_skips_final_target_slice():
+def test_multilayer_zscore_normalizes_final_target_slice():
     model = _build_model(
         predictor_layers=2,
         jepa_target_normalization="zscore",
@@ -493,7 +493,6 @@ def test_multilayer_zscore_skips_final_target_slice():
 
     normalized = model._apply_jepa_target_normalization(x)
     normalized = normalized.reshape(2, 3, 2, model.model_dim)
-    x = x.reshape(2, 3, 2, model.model_dim)
 
     assert torch.allclose(
         normalized[:, :, 0].mean(dim=-1),
@@ -507,11 +506,22 @@ def test_multilayer_zscore_skips_final_target_slice():
         atol=1e-4,
         rtol=1e-4,
     )
-    torch.testing.assert_close(normalized[:, :, 1], x[:, :, 1])
+    assert torch.allclose(
+        normalized[:, :, 1].mean(dim=-1),
+        torch.zeros(2, 3),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+    assert torch.allclose(
+        normalized[:, :, 1].std(dim=-1, unbiased=False),
+        torch.ones(2, 3),
+        atol=1e-4,
+        rtol=1e-4,
+    )
 
 
 @torch.no_grad()
-def test_single_layer_zscore_skips_final_target_slice():
+def test_single_layer_zscore_normalizes_final_target_slice():
     model = _build_model(
         predictor_layers=2,
         jepa_target_normalization="zscore",
@@ -520,7 +530,18 @@ def test_single_layer_zscore_skips_final_target_slice():
 
     normalized = model._apply_jepa_target_normalization(x)
 
-    torch.testing.assert_close(normalized, x)
+    assert torch.allclose(
+        normalized.mean(dim=-1),
+        torch.zeros(2, 3),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+    assert torch.allclose(
+        normalized.std(dim=-1, unbiased=False),
+        torch.ones(2, 3),
+        atol=1e-4,
+        rtol=1e-4,
+    )
 
 
 @torch.no_grad()

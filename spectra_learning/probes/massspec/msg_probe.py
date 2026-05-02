@@ -900,6 +900,17 @@ def _wrap_probe_for_distributed(
     )
 
 
+def _online_probe_covariance_pooler(
+    model: PeakSetSIGReg,
+    variant: str,
+) -> torch.nn.Module | None:
+    if variant != "covariance":
+        return None
+    if bool(getattr(model, "train_covariance_pooling", False)):
+        return getattr(model, "covariance_pooler", None)
+    return None
+
+
 def resolve_msg_probe_select_metric(
     config: config_dict.ConfigDict,
 ) -> str:
@@ -1192,12 +1203,7 @@ def _run_msg_probe_once(
             variant,
             config=config,
             task_spec=task_spec,
-            covariance_pooler=(
-                model.covariance_pooler
-                if variant == "covariance"
-                and model.train_covariance_pooling
-                else None
-            ),
+            covariance_pooler=_online_probe_covariance_pooler(model, variant),
         ).to(device)
         for variant in variants
     }

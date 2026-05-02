@@ -39,6 +39,7 @@ from spectra_learning.probes.massspec.msg_probe import (
     _build_task_spec,
     _collect_split_targets,
     _new_epoch_state,
+    _online_probe_covariance_pooler,
     _probe_step,
     _compute_pairwise_similarity_alignment_for_indices,
     _plot_pairwise_similarity_alignment,
@@ -309,7 +310,7 @@ class MsgSequenceProbeTests(unittest.TestCase):
         config = config_dict.ConfigDict()
         config.model_dim = 4
         config.msg_probe_mlp_hidden_dim = 8
-        config.msg_probe_covariance_dim = 3
+        config.covariance_pooling_dim = 3
         task_spec = MsgProbeTaskSpec(
             regression_tasks=("mol_weight",),
             num_rings_classes=(),
@@ -334,6 +335,60 @@ class MsgSequenceProbeTests(unittest.TestCase):
         probe_param_ids = {id(param) for param in probe.parameters()}
         learned_param_ids = {id(param) for param in learned_pooler.parameters()}
         self.assertFalse(probe_param_ids & learned_param_ids)
+
+    def test_covariance_probe_trains_own_pooler_when_main_pooler_is_frozen(self):
+        config = config_dict.ConfigDict()
+        config.model_dim = 4
+        config.covariance_pooling_dim = 2
+        config.msg_probe_mlp_hidden_dim = 8
+        task_spec = MsgProbeTaskSpec(
+            regression_tasks=("mol_weight",),
+            num_rings_classes=(),
+            maccs_bits=0,
+            regression_means={"mol_weight": 0.0},
+            regression_stds={"mol_weight": 1.0},
+            fingerprint_task="maccs",
+        )
+        main_pooler = CovariancePool(input_dim=4, compressed_dim=2)
+        model = SimpleNamespace(
+            covariance_pooler=main_pooler,
+            train_covariance_pooling=False,
+        )
+
+        probe = _build_msg_sequence_probe(
+            "covariance",
+            config=config,
+            task_spec=task_spec,
+            covariance_pooler=_online_probe_covariance_pooler(model, "covariance"),
+        )
+        optimizer = torch.optim.AdamW(probe.parameters(), lr=1e-3)
+
+        self.assertIsInstance(probe.pooler, MsgCovariancePool)
+        self.assertEqual(probe.pooler.left_proj.out_features, 2)
+        self.assertTrue(all(param.requires_grad for param in probe.pooler.parameters()))
+        probe_param_ids = {id(param) for param in probe.parameters()}
+        probe_pooler_param_ids = {id(param) for param in probe.pooler.parameters()}
+        main_pooler_param_ids = {id(param) for param in main_pooler.parameters()}
+        optimizer_param_ids = {
+            id(param)
+            for group in optimizer.param_groups
+            for param in group["params"]
+        }
+
+        self.assertTrue(probe_pooler_param_ids <= optimizer_param_ids)
+        self.assertTrue(probe_pooler_param_ids <= probe_param_ids)
+        self.assertFalse(probe_param_ids & main_pooler_param_ids)
+
+    def test_covariance_probe_reuses_frozen_pooler_when_main_pooler_is_trainable(self):
+        main_pooler = CovariancePool(input_dim=4, compressed_dim=2)
+        model = SimpleNamespace(
+            covariance_pooler=main_pooler,
+            train_covariance_pooling=True,
+        )
+
+        pooler = _online_probe_covariance_pooler(model, "covariance")
+
+        self.assertIs(pooler, main_pooler)
 
 
 class PairwiseAlignmentTests(unittest.TestCase):

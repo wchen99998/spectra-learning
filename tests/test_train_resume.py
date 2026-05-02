@@ -330,6 +330,42 @@ def test_build_optimizers_applies_predictor_learning_rate_ratio():
     assert base_param_ids | actual_predictor_param_ids == all_trainable_param_ids
 
 
+def test_build_optimizers_respects_frozen_covariance_pooling():
+    cfg = _optimizer_config()
+    trainable_model = _small_model(covariance_pooling_dim=4)
+    frozen_model = _small_model(
+        covariance_pooling_dim=4,
+        train_covariance_pooling=False,
+    )
+
+    trainable_optimizers, _ = build_optimizers(
+        cfg,
+        trainable_model,
+        total_steps=10,
+        device=torch.device("cpu"),
+    )
+    frozen_optimizers, _ = build_optimizers(
+        cfg,
+        frozen_model,
+        total_steps=10,
+        device=torch.device("cpu"),
+    )
+
+    trainable_cov_ids = {
+        id(param) for param in trainable_model.covariance_pooler.parameters()
+    }
+    frozen_cov_ids = {id(param) for param in frozen_model.covariance_pooler.parameters()}
+    trainable_optimizer_ids = set().union(
+        *(_optimizer_param_ids(optimizer) for optimizer in trainable_optimizers)
+    )
+    frozen_optimizer_ids = set().union(
+        *(_optimizer_param_ids(optimizer) for optimizer in frozen_optimizers)
+    )
+
+    assert trainable_cov_ids <= trainable_optimizer_ids
+    assert frozen_cov_ids.isdisjoint(frozen_optimizer_ids)
+
+
 def test_muon_splits_merged_qkv_parameters_before_orthogonalization():
     model = _small_model(encoder_num_kv_heads=2)
 

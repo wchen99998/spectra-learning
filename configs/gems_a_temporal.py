@@ -114,7 +114,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_max_test_samples = None
     cfg.msg_probe_variants = ("mean", "covariance", "pma")
     cfg.msg_probe_mlp_hidden_dim = cfg.model_dim
-    cfg.msg_probe_covariance_dim = cfg.covariance_pooling_dim
     cfg.msg_probe_pma_num_seeds = 4
     cfg.msg_probe_pma_num_heads = cfg.encoder_num_heads
     cfg.probe_dataset = "nist20"

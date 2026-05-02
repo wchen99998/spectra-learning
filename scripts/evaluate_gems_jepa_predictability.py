@@ -390,7 +390,9 @@ def evaluate_strategy(
     for start in range(0, int(pre["peak_valid_mask"].shape[0]), batch_size):
         end = min(start + batch_size, int(pre["peak_valid_mask"].shape[0]))
         batch = {key: value[start:end].clone() for key, value in pre.items()}
-        original_valid_count = batch["peak_valid_mask"].sum(dim=1).float()
+        if bool(cfg.use_precursor_token):
+            batch = _prepend_precursor_token_torch(batch)
+        valid_count = batch["peak_valid_mask"].sum(dim=1).float()
         if _normalize_mask_strategy_name(strategy) == INTENSITY_AWARE_MASK_STRATEGY:
             context, targets = sample_intensity_aware_masks_torch(
                 batch["peak_valid_mask"],
@@ -417,8 +419,6 @@ def evaluate_strategy(
             )
         batch["context_mask"] = context
         batch["target_masks"] = targets
-        if bool(cfg.use_precursor_token):
-            batch = _prepend_precursor_token_torch(batch)
         batch = {key: value.to(device) for key, value in batch.items()}
 
         with torch.no_grad(), torch.autocast(
@@ -453,15 +453,11 @@ def evaluate_strategy(
         ).sum(dim=(0, 1)).double().cpu()
         rank_sse += (diff.square().sum(dim=-1) * weights).sum(dim=(0, 1)).double().cpu()
 
-        if bool(cfg.use_precursor_token):
-            context_count = collapse_data["context_mask"][:, 1:].sum(dim=1).float()
-            target_count = collapse_data["target_masks"][:, :, 1:].sum(dim=2).float()
-        else:
-            context_count = collapse_data["context_mask"].sum(dim=1).float()
-            target_count = collapse_data["target_masks"].sum(dim=2).float()
-        context_fracs.extend((context_count.cpu() / original_valid_count).tolist())
-        target_fracs.extend((target_count.cpu() / original_valid_count[:, None]).flatten().tolist())
-        valid_counts.extend(original_valid_count.cpu().tolist())
+        context_count = collapse_data["context_mask"].sum(dim=1).float()
+        target_count = collapse_data["target_masks"].sum(dim=2).float()
+        context_fracs.extend((context_count.cpu() / valid_count).tolist())
+        target_fracs.extend((target_count.cpu() / valid_count[:, None]).flatten().tolist())
+        valid_counts.extend(valid_count.cpu().tolist())
         losses.append(float(metrics["masked_prediction_loss"].detach().float().cpu()))
 
     mean = sum_vec / total_count

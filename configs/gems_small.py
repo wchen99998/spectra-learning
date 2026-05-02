@@ -44,7 +44,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_fourier_sigma = 10.0
     cfg.encoder_fourier_trainable = False
     cfg.encoder_fourier_input_scale = 1000.0
-    cfg.spectral_bias_relative_kind = "harmonic"
+    cfg.spectral_bias_relative_kind = "none"
     cfg.spectral_bias_use_precursor = True
     cfg.spectral_bias_use_intensity = False
     cfg.spectral_bias_num_freqs = 128
@@ -134,7 +134,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_max_test_samples = None
     cfg.msg_probe_variants = ("mean", "covariance", "pma")
     cfg.msg_probe_mlp_hidden_dim = cfg.model_dim
-    cfg.msg_probe_covariance_dim = cfg.covariance_pooling_dim
     cfg.msg_probe_pma_num_seeds = 32
     cfg.msg_probe_pma_num_heads = cfg.encoder_num_heads
     cfg.probe_dataset = "nist20"

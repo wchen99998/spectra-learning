@@ -252,7 +252,7 @@ def test_gems_batch_collator_generates_ragged_context_and_target_masks() -> None
     ).any()
 
 
-def test_gems_batch_collator_samples_real_peaks_then_prepends_precursor() -> None:
+def test_gems_batch_collator_samples_after_prepending_precursor() -> None:
     collator = GemsBatchCollator(
         augment=True,
         num_target_blocks=2,
@@ -292,36 +292,16 @@ def test_gems_batch_collator_samples_real_peaks_then_prepends_precursor() -> Non
     ]
     sampled_context = torch.tensor(
         [
-            [True, False, False, False],
-            [False, True, False, False],
+            [False, True, False, False, False],
+            [True, False, True, False, False],
         ],
         dtype=torch.bool,
     )
     sampled_targets = torch.tensor(
         [
             [
-                [False, False, True, False],
-                [False, False, False, True],
-            ],
-            [
-                [False, False, True, False],
-                [False, False, False, True],
-            ],
-        ],
-        dtype=torch.bool,
-    )
-    expected_context = torch.tensor(
-        [
-            [True, True, False, False, False],
-            [True, False, True, False, False],
-        ],
-        dtype=torch.bool,
-    )
-    expected_targets = torch.tensor(
-        [
-            [
+                [True, False, False, False, False],
                 [False, False, False, True, False],
-                [False, False, False, False, True],
             ],
             [
                 [False, False, False, True, False],
@@ -346,16 +326,17 @@ def test_gems_batch_collator_samples_real_peaks_then_prepends_precursor() -> Non
     ):
         batch = collator(samples)
 
-    assert torch.equal(captured["peak_valid_mask"], batch["peak_valid_mask"][:, 1:])
+    assert torch.equal(captured["peak_valid_mask"], batch["peak_valid_mask"])
     assert batch["peak_mz"].shape == (2, 5)
     assert batch["peak_valid_mask"][:, 0].all()
-    assert batch["context_mask"][:, 0].all()
-    assert not batch["target_masks"][:, :, 0].any()
-    assert torch.equal(batch["context_mask"], expected_context)
-    assert torch.equal(batch["target_masks"], expected_targets)
+    assert not batch["context_mask"][0, 0]
+    assert batch["context_mask"][1, 0]
+    assert batch["target_masks"][0, 0, 0]
+    assert torch.equal(batch["context_mask"], sampled_context)
+    assert torch.equal(batch["target_masks"], sampled_targets)
 
 
-def test_gems_batch_collator_keeps_precursor_visible_and_out_of_targets() -> None:
+def test_gems_batch_collator_allows_precursor_to_follow_sampled_masks() -> None:
     collator = GemsBatchCollator(
         augment=True,
         num_target_blocks=2,
@@ -396,12 +377,36 @@ def test_gems_batch_collator_keeps_precursor_visible_and_out_of_targets() -> Non
         },
     ]
 
-    torch.manual_seed(23)
-    batch = collator(samples)
+    sampled_context = torch.tensor(
+        [
+            [False, True, True, False, False, False, False],
+            [True, False, True, False, False, False, False],
+        ],
+        dtype=torch.bool,
+    )
+    sampled_targets = torch.zeros((2, 2, 7), dtype=torch.bool)
+    sampled_targets[0, 0, 0] = True
+    sampled_targets[0, 1, 3] = True
+    sampled_targets[1, 0, 3] = True
+    sampled_targets[1, 1, 4] = True
+
+    def fake_sample_masks(
+        peak_valid_mask: torch.Tensor,
+        **_: object,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert peak_valid_mask.shape == (2, 7)
+        return sampled_context.clone(), sampled_targets.clone()
+
+    with mock.patch.object(
+        gems_collate,
+        "_sample_block_masks_torch",
+        side_effect=fake_sample_masks,
+    ):
+        batch = collator(samples)
 
     assert batch["peak_valid_mask"][:, 0].all()
-    assert batch["context_mask"][:, 0].all()
-    assert not batch["target_masks"][:, :, 0].any()
+    assert torch.equal(batch["context_mask"], sampled_context)
+    assert torch.equal(batch["target_masks"], sampled_targets)
 
 
 def test_mask_block_ranges_reports_absolute_slot_runs() -> None:
