@@ -30,7 +30,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.nist_full_probe_val_samples = 5000
     cfg.nist_full_probe_test_samples = 5000
     cfg.nist_full_probe_num_repeats = 1
-    cfg.batch_size = 1024
+    cfg.batch_size = 256
     cfg.shuffle_buffer = 1_000_000
     cfg.drop_remainder = True
     cfg.max_precursor_mz = 1000
@@ -59,26 +59,26 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_fourier_trainable = False
     cfg.encoder_fourier_x_max = 1000
     cfg.encoder_fourier_x_min = 0.003
-    cfg.feature_mlp_hidden_dim = 512
+    cfg.feature_mlp_hidden_dim = 1024
     cfg.attention_mlp_multiple = 4
     cfg.norm_type = "layernorm"
     cfg.use_precursor_token = True
 
     # Masked latent predictor
     cfg.predictor_dim = 256
-    cfg.predictor_dropout = 0.15
+    cfg.predictor_dropout = 0.1
     cfg.predictor_num_register_tokens = 0
     cfg.predictor_apply_final_norm = False
     cfg.masked_latent_predictor_num_layers = 6
     cfg.masked_latent_predictor_num_heads = 8
     cfg.temporal_predictor_num_layers = 0
-    cfg.target_projector_dim = 256
+    cfg.target_projector_dim = -1
 
     # JEPA masking and targets
     cfg.jepa_num_target_blocks = 2
     cfg.jepa_mask_strategy = "intensity_aware"
     cfg.jepa_target_layers = [5, 8, 12, 14]
-    cfg.jepa_target_normalization = "zscore"
+    cfg.jepa_target_normalization = "none"
     cfg.masked_token_loss_type = "l2"
     cfg.masked_token_loss_weight = 1
     for key, value in aware_mixed.items():
@@ -93,7 +93,7 @@ def get_config() -> config_dict.ConfigDict:
 
     # EMA teacher
     cfg.use_ema_teacher = True
-    cfg.ema_teacher_momentum_start = 0.99925
+    cfg.ema_teacher_momentum_start = 0.999
     cfg.ema_teacher_momentum_final = 0.99925
     cfg.ema_teacher_schedule = "cosine"
 
@@ -112,7 +112,8 @@ def get_config() -> config_dict.ConfigDict:
 
     # MSG probe
     cfg.probe_dataset = "nist-full"
-    cfg.msg_probe_covariance_dim = 64
+    cfg.covariance_pooling_dim = 64
+    cfg.train_covariance_pooling = False
     cfg.msg_probe_early_stopping = True
     cfg.msg_probe_early_stopping_min_delta = 0.0001
     cfg.msg_probe_early_stopping_min_epochs = 20
@@ -144,14 +145,14 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_weight_decay = 0
 
     # Optimizer
-    cfg.learning_rate = 0.0001
-    cfg.predictor_learning_rate_ratio = 1.
+    cfg.learning_rate = 0.0003
+    cfg.predictor_learning_rate_ratio = 2.
     cfg.min_learning_rate = 0.0001
     cfg.warmup_steps = 50_000
     cfg.weight_decay = 0.05
     cfg.b2 = 0.999
     cfg.grad_clip_norm = 1
-    cfg.optimizer = "muon"
+    cfg.optimizer = "adamw"
     cfg.optimizer_capturable = True
     cfg.optimizer_fused = True
     cfg.adamw_lr = None
@@ -160,6 +161,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.muon_momentum = 0.95
     cfg.muon_nesterov = True
     cfg.muon_ns_steps = 5
+    cfg.muon_ns_use_kernels = True
     cfg.muon_weight_decay = None
 
     # Logging
