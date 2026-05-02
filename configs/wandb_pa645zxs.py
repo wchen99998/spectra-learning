@@ -75,7 +75,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.target_projector_dim = -1
 
     # JEPA masking and targets
-    cfg.jepa_num_target_blocks = 2
+    cfg.jepa_num_target_blocks = 3
     cfg.jepa_mask_strategy = "intensity_aware"
     cfg.jepa_target_layers = [5, 8, 12, 14]
     cfg.jepa_target_normalization = "none"
@@ -93,7 +93,7 @@ def get_config() -> config_dict.ConfigDict:
 
     # EMA teacher
     cfg.use_ema_teacher = True
-    cfg.ema_teacher_momentum_start = 0.999
+    cfg.ema_teacher_momentum_start = 0.996
     cfg.ema_teacher_momentum_final = 0.99925
     cfg.ema_teacher_schedule = "cosine"
 
