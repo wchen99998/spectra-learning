@@ -9,6 +9,7 @@ from spectra_learning.data.spectra import PEAK_MZ_MAX
 
 @dataclass(slots=True)
 class PeakSetSIGRegSettings:
+    training_mode: str = "jepa"
     model_dim: int = 768
     encoder_num_layers: int = 20
     encoder_num_heads: int = 12
@@ -26,6 +27,7 @@ class PeakSetSIGRegSettings:
     encoder_fourier_trainable: bool = False
     encoder_fourier_input_scale: float = PEAK_MZ_MAX
     masked_token_loss_weight: float = 0.0
+    mae_loss_weight: float = 1.0
     jepa_mae_loss_weight: float = 0.0
     jepa_mae_mz_bin_size: float = 2.5
     jepa_mae_intensity_bin_size: float = 0.1
@@ -173,6 +175,7 @@ def _identity(value: Any) -> Any:
 
 
 SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
+    "training_mode": str,
     "model_dim": int,
     "encoder_num_layers": int,
     "encoder_num_heads": int,
@@ -190,6 +193,7 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "encoder_fourier_trainable": bool,
     "encoder_fourier_input_scale": float,
     "masked_token_loss_weight": float,
+    "mae_loss_weight": float,
     "jepa_mae_loss_weight": float,
     "jepa_mae_mz_bin_size": float,
     "jepa_mae_intensity_bin_size": float,

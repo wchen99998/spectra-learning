@@ -665,6 +665,45 @@ class BlockJEPATests(unittest.TestCase):
             + metrics["jepa_mae_term"],
         )
 
+    def test_mae_training_mode_uses_binned_value_prediction_only(self):
+        model = self._build_model(
+            training_mode="mae",
+            masked_token_loss_weight=1.0,
+            jepa_mae_loss_weight=1.0,
+            mae_loss_weight=0.5,
+        )
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+
+        with mock.patch.object(
+            model,
+            "_encode_augmented_teacher_and_context",
+            side_effect=AssertionError("teacher path should not run"),
+        ):
+            metrics = model.forward_augmented(batch)
+
+        self.assertIn("mae_loss", metrics)
+        self.assertIn("mae_mz_loss", metrics)
+        self.assertIn("mae_intensity_loss", metrics)
+        self.assertIn("mae_mz_accuracy", metrics)
+        self.assertIn("mae_intensity_accuracy", metrics)
+        self.assertNotIn("masked_prediction_loss", metrics)
+        self.assertNotIn("jepa_mae_loss", metrics)
+        torch.testing.assert_close(metrics["mae_term"], metrics["mae_loss"] * 0.5)
+        torch.testing.assert_close(metrics["loss"], metrics["mae_term"])
+
+    def test_mae_training_mode_disables_ema_teacher(self):
+        model = self._build_model(
+            training_mode="mae",
+            use_ema_teacher=True,
+            masked_token_loss_weight=1.0,
+            jepa_mae_loss_weight=1.0,
+        )
+        self.assertFalse(model.use_ema_teacher)
+        self.assertIsNone(model.teacher_encoder)
+        self.assertIsNone(model.teacher_target_projector)
+        self.assertEqual(model.masked_token_loss_weight, 0.0)
+        self.assertEqual(model.jepa_mae_loss_weight, 0.0)
+
     def test_forward_augmented_uses_single_encoder_pass(self):
         model = self._build_model(masked_token_loss_weight=1.0)
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)

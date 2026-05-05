@@ -50,7 +50,7 @@ def train_step_impl(
                 return_collapse_data=False,
             )
             collapse_data = {}
-    if compute_collapse_metrics:
+    if compute_collapse_metrics and collapse_data:
         with torch.no_grad():
             metrics.update(_collapse_diagnostics(**collapse_data))
     metrics["loss"].backward()

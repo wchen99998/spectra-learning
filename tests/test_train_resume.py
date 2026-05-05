@@ -330,6 +330,38 @@ def test_build_optimizers_applies_predictor_learning_rate_ratio():
     assert base_param_ids | actual_predictor_param_ids == all_trainable_param_ids
 
 
+def test_mae_value_heads_use_predictor_learning_rate_group():
+    model = _small_model(training_mode="mae")
+    cfg = _optimizer_config(predictor_learning_rate_ratio=2.0)
+
+    optimizers, _ = build_optimizers(
+        cfg,
+        model,
+        total_steps=10,
+        device=torch.device("cpu"),
+    )
+
+    predictor_param_ids = {
+        id(param)
+        for name, param in model.named_parameters()
+        if param.requires_grad and is_predictor_parameter(name)
+    }
+    actual_predictor_param_ids = _optimizer_param_ids(optimizers[1])
+    value_head_names = {
+        name
+        for name, param in model.named_parameters()
+        if id(param) in actual_predictor_param_ids and name.startswith("jepa_mae_")
+    }
+
+    assert actual_predictor_param_ids == predictor_param_ids
+    assert value_head_names == {
+        "jepa_mae_mz_head.weight",
+        "jepa_mae_mz_head.bias",
+        "jepa_mae_intensity_head.weight",
+        "jepa_mae_intensity_head.bias",
+    }
+
+
 def test_build_optimizers_respects_frozen_covariance_pooling():
     cfg = _optimizer_config()
     trainable_model = _small_model(covariance_pooling_dim=4)

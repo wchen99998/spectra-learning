@@ -63,6 +63,12 @@ class ForwardMixin:
         augmented_batch: dict[str, torch.Tensor],
         return_collapse_data: bool = False,
     ) -> dict[str, torch.Tensor] | tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        if self.training_mode == "mae":
+            return self.forward_mae(
+                augmented_batch,
+                return_collapse_data=return_collapse_data,
+            )
+
         peak_mz = augmented_batch["peak_mz"]
         peak_intensity = augmented_batch["peak_intensity"]
         peak_valid_mask = augmented_batch["peak_valid_mask"]
@@ -150,6 +156,62 @@ class ForwardMixin:
         metrics.update(sigreg_metrics)
         if return_collapse_data:
             return metrics, collapse_data
+        return metrics
+
+    def forward_mae(
+        self,
+        augmented_batch: dict[str, torch.Tensor],
+        return_collapse_data: bool = False,
+    ) -> dict[str, torch.Tensor] | tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        peak_mz = augmented_batch["peak_mz"]
+        peak_intensity = augmented_batch["peak_intensity"]
+        peak_valid_mask = augmented_batch["peak_valid_mask"]
+        precursor_mz = augmented_batch.get("precursor_mz", None)
+        context_mask = augmented_batch["context_mask"] & peak_valid_mask
+        target_masks = augmented_batch["target_masks"] & peak_valid_mask.unsqueeze(1)
+
+        context_encoded = self.encoder(
+            peak_mz,
+            peak_intensity,
+            valid_mask=peak_valid_mask,
+            visible_mask=context_mask,
+            precursor_mz=precursor_mz,
+        )
+        context_emb, _ = self._split_encoder_output(
+            self.encoder,
+            context_encoded,
+            peak_valid_mask,
+        )
+        predictor_output_features, predictor_output = self._predict_augmented_targets(
+            context_emb,
+            context_mask,
+            target_masks,
+        )
+        mae_term, mae_metrics = self._mae_metrics(
+            predictor_output,
+            peak_mz,
+            peak_intensity,
+            target_masks,
+            context_emb,
+        )
+        sigreg_term, sigreg_metrics = self._regularizer_metrics(
+            context_emb,
+            context_mask,
+            predictor_output_features,
+            predictor_output,
+            target_masks,
+        )
+        loss = mae_term + sigreg_term
+        valid_peak_count = peak_valid_mask.float().sum().clamp_min(1.0)
+        metrics = {
+            "loss": loss,
+            "context_fraction": context_mask.float().sum() / valid_peak_count,
+            "target_fraction": target_masks.float().sum() / valid_peak_count,
+        }
+        metrics.update(mae_metrics)
+        metrics.update(sigreg_metrics)
+        if return_collapse_data:
+            return metrics, {}
         return metrics
 
     def compute_next_frame_teacher_embeddings(

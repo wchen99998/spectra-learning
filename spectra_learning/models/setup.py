@@ -32,6 +32,7 @@ SUPPORTED_REGULARIZERS = {
     *SLOTWISE_REGULARIZERS,
 }
 
+SUPPORTED_TRAINING_MODES = {"jepa", "mae"}
 SUPPORTED_TARGET_NORMALIZATIONS = {"none", "zscore"}
 SUPPORTED_EMA_SCHEDULES = {"constant", "linear", "cosine", "slow-fast-slow"}
 
@@ -50,6 +51,9 @@ def configure_peak_set_sigreg(model: nn.Module, cfg: PeakSetSIGRegSettings) -> N
 
 
 def _configure_dimensions(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:
+    model.training_mode = str(cfg.training_mode).lower()
+    if model.training_mode not in SUPPORTED_TRAINING_MODES:
+        raise ValueError("training_mode must be one of ('jepa', 'mae')")
     model.model_dim = int(cfg.model_dim)
     model.predictor_dim = (
         int(cfg.predictor_dim) if cfg.predictor_dim is not None else model.model_dim
@@ -106,8 +110,13 @@ def _configure_losses(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:
     )
     model.sigreg_lambda = float(cfg.sigreg_lambda)
     model.sigreg_precursor_scale = float(cfg.sigreg_precursor_scale)
-    model.masked_token_loss_weight = float(cfg.masked_token_loss_weight)
-    model.jepa_mae_loss_weight = float(cfg.jepa_mae_loss_weight)
+    model.mae_loss_weight = float(cfg.mae_loss_weight)
+    model.masked_token_loss_weight = (
+        0.0 if model.training_mode == "mae" else float(cfg.masked_token_loss_weight)
+    )
+    model.jepa_mae_loss_weight = (
+        0.0 if model.training_mode == "mae" else float(cfg.jepa_mae_loss_weight)
+    )
     model.jepa_mae_mz_bin_size = float(cfg.jepa_mae_mz_bin_size)
     model.jepa_mae_intensity_bin_size = float(cfg.jepa_mae_intensity_bin_size)
     model.jepa_mae_mz_max = float(cfg.jepa_mae_mz_max)
@@ -173,7 +182,7 @@ def _build_encoder(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:
 
 
 def _build_teacher(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:
-    model.use_ema_teacher = bool(cfg.use_ema_teacher)
+    model.use_ema_teacher = bool(cfg.use_ema_teacher) and model.training_mode != "mae"
     model.ema_teacher_momentum_start = float(cfg.ema_teacher_momentum_start)
     model.ema_teacher_momentum_mid = (
         float(cfg.ema_teacher_momentum_mid)
@@ -278,7 +287,7 @@ def _build_target_projectors(model: nn.Module, cfg: PeakSetSIGRegSettings) -> No
 
 
 def _build_jepa_mae_heads(model: nn.Module) -> None:
-    if model.jepa_mae_loss_weight <= 0:
+    if model.jepa_mae_loss_weight <= 0 and model.training_mode != "mae":
         model.jepa_mae_mz_head = None
         model.jepa_mae_intensity_head = None
         return

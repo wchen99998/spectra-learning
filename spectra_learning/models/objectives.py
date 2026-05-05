@@ -150,6 +150,37 @@ class ObjectiveMixin:
             "jepa_mae_term": term,
         }
 
+    def _mae_metrics(
+        self,
+        predictor_output: torch.Tensor,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+        target_masks: torch.Tensor,
+        reference: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        (
+            value_loss,
+            mz_loss,
+            intensity_loss,
+            mz_accuracy,
+            intensity_accuracy,
+        ) = self._jepa_mae_value_prediction_loss(
+            predictor_output,
+            peak_mz,
+            peak_intensity,
+            target_masks,
+        )
+        loss_weight = reference.new_tensor(self.mae_loss_weight)
+        term = loss_weight * value_loss.to(dtype=reference.dtype)
+        return term, {
+            "mae_loss": value_loss.to(dtype=reference.dtype),
+            "mae_term": term,
+            "mae_mz_loss": mz_loss.to(dtype=reference.dtype),
+            "mae_intensity_loss": intensity_loss.to(dtype=reference.dtype),
+            "mae_mz_accuracy": mz_accuracy.to(dtype=reference.dtype),
+            "mae_intensity_accuracy": intensity_accuracy.to(dtype=reference.dtype),
+        }
+
     def _sigreg_weights(self, mask: torch.Tensor) -> torch.Tensor:
         weights = mask.float()
         if self.use_precursor_token:

@@ -16,6 +16,7 @@ def auto_run_name(config: Any) -> str:
         f"wd{float(config.get('weight_decay', 0)):.0e}",
         f"ep{config.get('num_epochs', '?')}",
     ]
+    parts.extend(_training_mode_parts(config))
     parts.extend(_architecture_parts(config))
     parts.extend(_optimization_parts(config))
     parts.extend(_spectral_bias_parts(config))
@@ -62,6 +63,11 @@ def _architecture_parts(config: Any) -> list[str]:
     return parts
 
 
+def _training_mode_parts(config: Any) -> list[str]:
+    mode = str(config.get("training_mode", "jepa")).lower()
+    return [] if mode == "jepa" else [mode]
+
+
 def _optimization_parts(config: Any) -> list[str]:
     parts: list[str] = []
     min_lr = config.get("min_learning_rate", None)
@@ -94,8 +100,9 @@ def _spectral_bias_parts(config: Any) -> list[str]:
 
 def _target_parts(config: Any) -> list[str]:
     parts: list[str] = []
+    mode = str(config.get("training_mode", "jepa")).lower()
     target_layers = config.get("jepa_target_layers", None)
-    if target_layers:
+    if mode != "mae" and target_layers:
         parts.append(f"tgt{'_'.join(str(x) for x in target_layers)}")
     target_projector_dim = config.get("target_projector_dim", None)
     model_dim = int(config.get("model_dim", 0))
@@ -112,8 +119,13 @@ def _regularizer_parts(config: Any) -> list[str]:
     if regularizer and regularizer != "none":
         parts.append(regularizer)
         parts.append(f"lam{float(config.get('sigreg_lambda', 0.0)):.0e}")
-    jepa_mae_loss_weight = float(config.get("jepa_mae_loss_weight", 0.0))
-    if jepa_mae_loss_weight > 0:
+    if str(config.get("training_mode", "jepa")).lower() == "mae":
+        parts.append(f"maew{float(config.get('mae_loss_weight', 1.0)):.0e}")
+        parts.append(f"mzbin{float(config.get('jepa_mae_mz_bin_size', 2.5)):g}")
+        parts.append(
+            f"intbin{float(config.get('jepa_mae_intensity_bin_size', 0.1)):g}"
+        )
+    elif (jepa_mae_loss_weight := float(config.get("jepa_mae_loss_weight", 0.0))) > 0:
         parts.append("jepamae")
         parts.append(f"maew{jepa_mae_loss_weight:.0e}")
         parts.append(f"mzbin{float(config.get('jepa_mae_mz_bin_size', 2.5)):g}")
@@ -129,6 +141,8 @@ def _regularizer_parts(config: Any) -> list[str]:
 
 
 def _ema_parts(config: Any) -> list[str]:
+    if str(config.get("training_mode", "jepa")).lower() == "mae":
+        return []
     if not config.get("use_ema_teacher", False):
         return []
     parts = [

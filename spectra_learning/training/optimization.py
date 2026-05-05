@@ -12,6 +12,9 @@ PREDICTOR_PARAM_PREFIXES = (
     "masked_latent_predictor.",
     "predictor_final_norm.",
     "masked_latent_readout.",
+    "target_projector.",
+    "jepa_mae_mz_head.",
+    "jepa_mae_intensity_head.",
 )
 PREDICTOR_PARAM_NAMES = {
     "latent_mask_token",
