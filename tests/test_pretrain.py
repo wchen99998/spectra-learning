@@ -12,7 +12,10 @@ from spectra_learning.models.peak_features import FourierFeatures, PeakFeatureEm
 from spectra_learning.training.optimization import is_weight_decay_target
 from spectra_learning.training.steps import train_step_impl
 from spectra_learning.data.spectra import PRECURSOR_TOKEN_INTENSITY
-from spectra_learning.training.api import load_pretrained_weights
+from spectra_learning.training.api import (
+    load_frozen_teacher_weights,
+    load_pretrained_weights,
+)
 
 
 def _make_batch(
@@ -704,6 +707,33 @@ class BlockJEPATests(unittest.TestCase):
         self.assertEqual(model.masked_token_loss_weight, 0.0)
         self.assertEqual(model.jepa_mae_loss_weight, 0.0)
 
+    def test_mae_teacher_jepa_mode_uses_frozen_teacher_without_ema(self):
+        model = self._build_model(
+            training_mode="mae_teacher_jepa",
+            use_ema_teacher=True,
+            masked_token_loss_weight=1.0,
+            jepa_mae_loss_weight=1.0,
+        )
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+
+        metrics = model.forward_augmented(batch)
+        before_teacher = next(model.teacher_encoder.parameters()).detach().clone()
+        momentum = model.update_ema_teacher(step=1, total_steps=10)
+        after_teacher = next(model.teacher_encoder.parameters()).detach()
+
+        self.assertFalse(model.use_ema_teacher)
+        self.assertTrue(model.use_frozen_teacher)
+        self.assertIsNotNone(model.teacher_encoder)
+        self.assertIsNotNone(model.teacher_target_projector)
+        self.assertIn("masked_prediction_loss", metrics)
+        self.assertNotIn("mae_loss", metrics)
+        self.assertEqual(model.jepa_mae_loss_weight, 1.0)
+        self.assertIsNone(momentum)
+        torch.testing.assert_close(after_teacher, before_teacher)
+        self.assertTrue(
+            all(not param.requires_grad for param in model.teacher_encoder.parameters())
+        )
+
     def test_forward_augmented_uses_single_encoder_pass(self):
         model = self._build_model(masked_token_loss_weight=1.0)
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
@@ -1068,6 +1098,31 @@ class BlockJEPATests(unittest.TestCase):
             load_pretrained_weights(loaded, path)
             for key, value in model.state_dict().items():
                 self.assertTrue(torch.equal(value, loaded.state_dict()[key]), key)
+
+    def test_load_frozen_teacher_weights_uses_mae_encoder_only(self):
+        source = self._build_model(training_mode="mae")
+        with torch.no_grad():
+            for param in source.encoder.parameters():
+                param.fill_(0.123)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/mae.pt"
+            torch.save({"model": source.state_dict()}, path)
+            loaded = self._build_model(training_mode="mae_teacher_jepa")
+            before_student = next(loaded.encoder.parameters()).detach().clone()
+
+            load_frozen_teacher_weights(loaded, path)
+
+            source_encoder_param = next(source.encoder.parameters()).detach()
+            loaded_teacher_param = next(loaded.teacher_encoder.parameters()).detach()
+            loaded_student_param = next(loaded.encoder.parameters()).detach()
+            torch.testing.assert_close(loaded_teacher_param, source_encoder_param)
+            torch.testing.assert_close(loaded_student_param, before_student)
+            self.assertTrue(
+                all(
+                    not param.requires_grad
+                    for param in loaded.teacher_encoder.parameters()
+                )
+            )
 
     def test_load_pretrained_weights_rejects_missing_position_embeddings(self):
         model = self._build_model()

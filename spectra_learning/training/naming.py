@@ -141,7 +141,7 @@ def _regularizer_parts(config: Any) -> list[str]:
 
 
 def _ema_parts(config: Any) -> list[str]:
-    if str(config.get("training_mode", "jepa")).lower() == "mae":
+    if str(config.get("training_mode", "jepa")).lower() != "jepa":
         return []
     if not config.get("use_ema_teacher", False):
         return []

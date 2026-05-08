@@ -99,6 +99,30 @@ def load_pretrained_weights(
     model.load_state_dict(state_dict)
 
 
+def load_frozen_teacher_weights(
+    model: PeakSetSIGReg,
+    checkpoint_path: str,
+) -> None:
+    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    state_dict = ckpt["model"] if "model" in ckpt else ckpt["state_dict"]
+    encoder_state = {
+        key.removeprefix("encoder."): value
+        for key, value in state_dict.items()
+        if key.startswith("encoder.")
+    }
+    model.teacher_encoder.load_state_dict(encoder_state)
+    if model.teacher_target_projector is not None:
+        projector_state = {
+            key.removeprefix("target_projector."): value
+            for key, value in state_dict.items()
+            if key.startswith("target_projector.")
+        }
+        model.teacher_target_projector.load_state_dict(projector_state)
+    model.teacher_encoder.requires_grad_(False)
+    if model.teacher_target_projector is not None:
+        model.teacher_target_projector.requires_grad_(False)
+
+
 def latest_ckpt_path(directory: Path) -> str | None:
     checkpoint_dir = directory / "checkpoints"
     root = checkpoint_dir if checkpoint_dir.exists() else directory

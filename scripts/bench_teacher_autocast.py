@@ -61,7 +61,6 @@ def get_bench_config() -> config_dict.ConfigDict:
     cfg.b2 = 0.95
     cfg.warmup_steps = 0
     cfg.min_learning_rate = 3e-5
-    cfg.optimizer_capturable = True
     cfg.optimizer_fused = True
     cfg.muon_lr = None
     cfg.adamw_lr = None

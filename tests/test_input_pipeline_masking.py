@@ -125,7 +125,7 @@ def test_sample_block_masks_context_and_targets_are_disjoint_for_all_modes() -> 
         mask_round_from=2,
     )
 
-    for seed, strategy in enumerate(("contiguous", "ragged"), start=31):
+    for seed, strategy in enumerate(("contiguous", "ragged", "random"), start=31):
         torch.manual_seed(seed)
         context_mask, target_masks = gems_masking._sample_block_masks_torch(
             peak_valid_mask,
@@ -137,31 +137,46 @@ def test_sample_block_masks_context_and_targets_are_disjoint_for_all_modes() -> 
         assert not (target_masks & ~peak_valid_mask.unsqueeze(1)).any()
         assert not (target_masks & context_mask.unsqueeze(1)).any()
 
-    with mock.patch.object(
-        gems_masking,
-        "_sample_mask_strategy_torch",
-        side_effect=["contiguous", "ragged", "contiguous"],
-    ):
-        torch.manual_seed(37)
-        context_mask, target_masks = gems_masking._sample_block_masks_torch(
-            peak_valid_mask,
-            mask_strategy="all",
-            **kwargs,
-        )
+    torch.manual_seed(37)
+    context_mask, target_masks = gems_masking._sample_block_masks_torch(
+        peak_valid_mask,
+        mask_strategy="all",
+        **kwargs,
+    )
 
     assert not (context_mask & ~peak_valid_mask).any()
     assert not (target_masks & ~peak_valid_mask.unsqueeze(1)).any()
     assert not (target_masks & context_mask.unsqueeze(1)).any()
 
 
-def test_sample_block_masks_all_selects_per_row_mask_modes() -> None:
+def test_sample_block_masks_random_samples_exact_count_masks() -> None:
+    peak_valid_mask = torch.ones((2, 8), dtype=torch.bool)
+
+    torch.manual_seed(23)
+    context_mask, target_masks = gems_masking._sample_block_masks_torch(
+        peak_valid_mask,
+        num_target_blocks=2,
+        context_fraction=0.375,
+        target_fraction=0.25,
+        block_min_len=1,
+        mask_strategy="random",
+        mask_lengths=(1, 2, 4),
+        mask_round_from=2,
+    )
+
+    assert torch.equal(context_mask.sum(dim=1), torch.tensor([3, 3]))
+    assert torch.equal(target_masks.sum(dim=2), torch.full((2, 2), 2))
+    assert not (target_masks & context_mask.unsqueeze(1)).any()
+
+
+def test_sample_block_masks_all_uses_balanced_random_row_modes() -> None:
     peak_valid_mask = torch.ones((3, 8), dtype=torch.bool)
 
     with mock.patch.object(
         gems_masking,
-        "_sample_mask_strategy_torch",
-        side_effect=["contiguous", "ragged", "contiguous"],
-    ) as sample_strategy:
+        "_sample_all_mask_strategies_torch",
+        return_value=["contiguous", "ragged", "random"],
+    ) as sample_strategies:
         torch.manual_seed(29)
         context_mask, target_masks = gems_masking._sample_block_masks_torch(
             peak_valid_mask,
@@ -174,7 +189,7 @@ def test_sample_block_masks_all_selects_per_row_mask_modes() -> None:
             mask_round_from=2,
         )
 
-    assert sample_strategy.call_count == 3
+    assert sample_strategies.call_count == 1
     assert context_mask.shape == peak_valid_mask.shape
     assert target_masks.shape == (3, 2, 8)
     assert not (context_mask & ~peak_valid_mask).any()
@@ -182,10 +197,29 @@ def test_sample_block_masks_all_selects_per_row_mask_modes() -> None:
     assert not (target_masks & context_mask.unsqueeze(1)).any()
 
 
+def test_sample_all_mask_strategies_balances_modes() -> None:
+    torch.manual_seed(29)
+    strategies = gems_masking._sample_all_mask_strategies_torch(
+        6,
+        device=torch.device("cpu"),
+    )
+
+    counts = {
+        strategy: strategies.count(strategy)
+        for strategy in gems_masking.JEPA_MASK_STRATEGIES
+    }
+    assert counts == {
+        "contiguous": 2,
+        "ragged": 2,
+        "random": 2,
+    }
+
+
 def test_resolve_visualization_strategies_includes_supported_modes() -> None:
     assert gems_visualization._resolve_visualization_strategies("ragged") == (
         "contiguous",
         "ragged",
+        "random",
     )
 
 
@@ -193,6 +227,7 @@ def test_resolve_visualization_strategies_keeps_all_meta_mode() -> None:
     assert gems_visualization._resolve_visualization_strategies("all") == (
         "contiguous",
         "ragged",
+        "random",
         "all",
     )
 

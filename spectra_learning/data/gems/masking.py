@@ -4,7 +4,7 @@ import torch
 
 DEFAULT_JEPA_MASK_STRATEGY = "contiguous"
 DEFAULT_JEPA_MASK_LENGTHS = (1, 2, 4, 8, 16)
-JEPA_MASK_STRATEGIES = ("contiguous", "ragged")
+JEPA_MASK_STRATEGIES = ("contiguous", "ragged", "random")
 
 _DEFAULT_JEPA_MASK_STRATEGY = DEFAULT_JEPA_MASK_STRATEGY
 _DEFAULT_JEPA_MASK_LENGTHS = DEFAULT_JEPA_MASK_LENGTHS
@@ -73,6 +73,23 @@ def _sample_contiguous_mask_1d_torch(
     return mask & active_positions
 
 
+def _sample_random_mask_1d_torch(
+    active_positions: torch.Tensor,
+    *,
+    mask_count: int,
+) -> torch.Tensor:
+    active_indices = torch.nonzero(active_positions, as_tuple=False).squeeze(-1)
+    count = min(int(mask_count), int(active_indices.numel()))
+    selected = active_indices[
+        torch.randperm(int(active_indices.numel()), device=active_positions.device)[
+            :count
+        ]
+    ]
+    mask = torch.zeros_like(active_positions)
+    mask[selected] = True
+    return mask
+
+
 def _sample_mask_strategy_torch(
     mask_strategy: str,
     *,
@@ -84,6 +101,18 @@ def _sample_mask_strategy_torch(
             int(torch.randint(len(JEPA_MASK_STRATEGIES), (), device=device).item())
         ]
     return strategy
+
+
+def _sample_all_mask_strategies_torch(
+    batch_size: int,
+    *,
+    device: torch.device,
+) -> list[str]:
+    strategies: list[str] = []
+    while len(strategies) < int(batch_size):
+        order = torch.randperm(len(JEPA_MASK_STRATEGIES), device=device)
+        strategies.extend(JEPA_MASK_STRATEGIES[int(idx.item())] for idx in order)
+    return strategies[: int(batch_size)]
 
 
 def _target_lengths(
@@ -114,6 +143,8 @@ def _sample_row_mask(
 ) -> torch.Tensor:
     if strategy == "contiguous":
         return _sample_contiguous_mask_1d_torch(row_valid, mask_count=mask_count)
+    if strategy == "random":
+        return _sample_random_mask_1d_torch(row_valid, mask_count=mask_count)
     return _sample_ragged_block_mask_1d_torch(
         row_valid,
         masked_fraction=float(mask_count) / float(row_valid.sum().item()),
@@ -132,22 +163,16 @@ def _sample_target_rows(
     mask_lengths: tuple[int, ...],
     mask_round_from: int,
 ) -> None:
-    if strategy == "contiguous":
-        for block_idx in range(int(target_masks.shape[1])):
-            target_masks[row_idx, block_idx] = _sample_contiguous_mask_1d_torch(
-                valid_target_positions,
-                mask_count=target_len,
-            )
-        return
     available = int(valid_target_positions.sum().item())
     if available == 0:
         return
     for block_idx in range(int(target_masks.shape[1])):
-        target_masks[row_idx, block_idx] = _sample_ragged_block_mask_1d_torch(
+        target_masks[row_idx, block_idx] = _sample_row_mask(
             valid_target_positions,
-            masked_fraction=float(target_len) / float(available),
-            lengths=mask_lengths,
-            round_from=mask_round_from,
+            strategy,
+            mask_count=target_len,
+            mask_lengths=mask_lengths,
+            mask_round_from=mask_round_from,
         )
 
 
@@ -176,12 +201,21 @@ def _sample_block_masks_torch(
         dtype=torch.bool,
         device=peak_valid_mask.device,
     )
+    all_row_strategies = (
+        _sample_all_mask_strategies_torch(batch_size, device=peak_valid_mask.device)
+        if strategy == "all"
+        else None
+    )
     for row_idx in range(batch_size):
         row_valid = peak_valid_mask[row_idx]
         valid_count = int(row_valid.sum().item())
         if valid_count == 0:
             continue
-        row_strategy = _sample_mask_strategy_torch(strategy, device=peak_valid_mask.device)
+        row_strategy = (
+            all_row_strategies[row_idx]
+            if all_row_strategies is not None
+            else _sample_mask_strategy_torch(strategy, device=peak_valid_mask.device)
+        )
         context_len, target_len = _target_lengths(
             valid_count,
             num_target_blocks=int(num_target_blocks),

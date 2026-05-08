@@ -55,7 +55,6 @@ def _optimizer_config(**overrides) -> config_dict.ConfigDict:
     cfg.b2 = 0.999
     cfg.weight_decay = 0.01
     cfg.optimizer = "adamw"
-    cfg.optimizer_capturable = False
     cfg.optimizer_fused = False
     cfg.update(overrides)
     return cfg

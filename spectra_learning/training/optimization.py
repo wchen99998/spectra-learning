@@ -139,7 +139,6 @@ def _optimizer_settings(
         "b2": float(config.get("b2", 0.999)),
         "weight_decay": float(config.weight_decay),
         "is_cuda": is_cuda,
-        "capturable": bool(config.get("optimizer_capturable", True)) and is_cuda,
         "fused": is_cuda if fused_cfg is None else bool(fused_cfg) and is_cuda,
     }
 
@@ -149,14 +148,12 @@ def _adamw(
     *,
     lr: float,
     b2: float,
-    capturable: bool,
     fused: bool,
 ) -> torch.optim.AdamW:
     return torch.optim.AdamW(
         param_groups,
-        lr=torch.tensor(lr),
+        lr=lr,
         betas=(0.9, b2),
-        capturable=capturable,
         fused=fused,
     )
 
@@ -273,7 +270,6 @@ def _build_muon_specs(
                 adamw_params,
                 lr=adamw_lr,
                 b2=settings["b2"],
-                capturable=settings["capturable"],
                 fused=settings["fused"],
             )
             if adamw_params
@@ -332,7 +328,6 @@ def _build_single_muon_optimizer(
         ),
         lr=float(config.get("adamw_lr", None) or settings["base_lr"]),
         b2=settings["b2"],
-        capturable=settings["capturable"],
         fused=settings["fused"],
     )
     optimizer = GNSMuon(
@@ -397,7 +392,6 @@ def _build_split_adamw_optimizers(
             param_groups,
             lr=lr,
             b2=settings["b2"],
-            capturable=settings["capturable"],
             fused=settings["fused"],
         )
         optimizers.append(optimizer)
@@ -432,7 +426,6 @@ def _build_single_adamw_optimizer(
         ],
         lr=settings["base_lr"],
         b2=settings["b2"],
-        capturable=settings["capturable"],
         fused=settings["fused"],
     )
     scheduler = make_cosine_schedule(

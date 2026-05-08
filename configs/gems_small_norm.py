@@ -98,7 +98,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.weight_decay = 0.05
     cfg.optimizer = "muon"
     cfg.device_prefetch_size = 8
-    cfg.optimizer_capturable = True
     cfg.optimizer_fused = True
     cfg.log_every_n_steps = 250
     cfg.collapse_metrics_every_n_steps = 250

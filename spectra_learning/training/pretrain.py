@@ -16,6 +16,7 @@ from tqdm import tqdm
 from spectra_learning.data.gems.datamodule import GemsNativeDataModule
 from spectra_learning.training.batch import BatchPrefetcher
 from spectra_learning.training.checkpointing import (
+    load_frozen_teacher_weights,
     load_optimizer_state,
     load_resume_model_state,
     prune_checkpoints,
@@ -81,6 +82,7 @@ def train_and_evaluate(
     device = distributed.device
     clear_cuda_cache(device)
     model = build_model_from_config(config)
+    initialize_frozen_teacher(config, model, distributed)
     model_param_metrics = (
         collect_and_log_param_metrics(model) if distributed.is_main else {}
     )
@@ -146,6 +148,19 @@ def train_and_evaluate(
     }
     cleanup_distributed(distributed)
     return results
+
+
+def initialize_frozen_teacher(
+    config: config_dict.ConfigDict,
+    model: torch.nn.Module,
+    distributed: DistributedContext,
+) -> None:
+    if str(config.get("training_mode", "jepa")).lower() != "mae_teacher_jepa":
+        return
+    checkpoint_path = str(config.frozen_teacher_checkpoint_path)
+    if distributed.is_main:
+        logging.info("Loading frozen MAE teacher from %s.", checkpoint_path)
+    load_frozen_teacher_weights(model, checkpoint_path)
 
 
 def run_training_loop(

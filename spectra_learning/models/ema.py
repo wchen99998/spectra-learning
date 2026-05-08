@@ -79,7 +79,7 @@ class EMATeacherMixin:
         step: int,
         total_steps: int,
     ) -> float | None:
-        if self.teacher_encoder is None:
+        if not self.use_ema_teacher or self.teacher_encoder is None:
             return None
         momentum = self.ema_teacher_momentum_at(step, total_steps)
         self._update_ema_module(self.teacher_encoder, self.encoder, momentum)

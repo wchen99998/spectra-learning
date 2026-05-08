@@ -153,7 +153,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.b2 = 0.999
     cfg.grad_clip_norm = 1
     cfg.optimizer = "adamw"
-    cfg.optimizer_capturable = True
     cfg.optimizer_fused = True
     cfg.adamw_lr = None
     cfg.muon_lr = None

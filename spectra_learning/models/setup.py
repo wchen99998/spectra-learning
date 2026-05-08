@@ -32,7 +32,7 @@ SUPPORTED_REGULARIZERS = {
     *SLOTWISE_REGULARIZERS,
 }
 
-SUPPORTED_TRAINING_MODES = {"jepa", "mae"}
+SUPPORTED_TRAINING_MODES = {"jepa", "mae", "mae_teacher_jepa"}
 SUPPORTED_TARGET_NORMALIZATIONS = {"none", "zscore"}
 SUPPORTED_EMA_SCHEDULES = {"constant", "linear", "cosine", "slow-fast-slow"}
 
@@ -182,7 +182,8 @@ def _build_encoder(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:
 
 
 def _build_teacher(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:
-    model.use_ema_teacher = bool(cfg.use_ema_teacher) and model.training_mode != "mae"
+    model.use_frozen_teacher = model.training_mode == "mae_teacher_jepa"
+    model.use_ema_teacher = bool(cfg.use_ema_teacher) and model.training_mode == "jepa"
     model.ema_teacher_momentum_start = float(cfg.ema_teacher_momentum_start)
     model.ema_teacher_momentum_mid = (
         float(cfg.ema_teacher_momentum_mid)
@@ -203,7 +204,7 @@ def _build_teacher(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:
             "ema_teacher_schedule must be one of "
             "('constant', 'linear', 'cosine', 'slow-fast-slow')"
         )
-    if model.use_ema_teacher:
+    if model.use_ema_teacher or model.use_frozen_teacher:
         model.teacher_encoder = copy.deepcopy(model.encoder)
         model.teacher_encoder.requires_grad_(False)
     else:
@@ -279,7 +280,7 @@ def _build_target_projectors(model: nn.Module, cfg: PeakSetSIGRegSettings) -> No
     else:
         model.target_projector = nn.Identity()
 
-    if model.use_ema_teacher:
+    if model.use_ema_teacher or model.use_frozen_teacher:
         model.teacher_target_projector = copy.deepcopy(model.target_projector)
         model.teacher_target_projector.requires_grad_(False)
     else:

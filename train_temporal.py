@@ -212,7 +212,6 @@ def _build_temporal_optimizers(
     b2 = float(config.get("b2", 0.999))
     weight_decay = float(config.weight_decay)
     is_cuda = device.type == "cuda"
-    capturable = bool(config.get("optimizer_capturable", True)) and is_cuda
     fused_cfg = config.get("optimizer_fused", None)
     fused = is_cuda if fused_cfg is None else bool(fused_cfg) and is_cuda
 
@@ -276,10 +275,9 @@ def _build_temporal_optimizers(
             else:
                 opt = torch.optim.AdamW(
                     params,
-                    lr=torch.tensor(lr),
+                    lr=lr,
                     betas=(0.9, b2),
                     weight_decay=0.0,
-                    capturable=capturable,
                     fused=fused,
                 )
             optimizers.append(opt)
@@ -337,10 +335,9 @@ def _build_temporal_optimizers(
             continue
         optimizer = torch.optim.AdamW(
             param_groups,
-            lr=torch.tensor(lr),
+            lr=lr,
             betas=(0.9, b2),
             weight_decay=0.0,
-            capturable=capturable,
             fused=fused,
         )
         optimizers.append(optimizer)

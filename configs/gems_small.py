@@ -96,7 +96,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.weight_decay = 1e-2
     cfg.optimizer = "adamw"
     cfg.device_prefetch_size = 8
-    cfg.optimizer_capturable = True
     cfg.optimizer_fused = True
     cfg.log_every_n_steps = 100
     cfg.collapse_metrics_every_n_steps = 100
