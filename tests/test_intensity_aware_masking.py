@@ -59,6 +59,7 @@ def test_intensity_aware_masks_are_disjoint_and_leave_unused_mass() -> None:
     assert not (context & ~valid).any()
     assert not (targets & ~valid.unsqueeze(1)).any()
     assert not (targets & context.unsqueeze(1)).any()
+    assert (targets.sum(dim=1) <= 1).all()
     assert torch.all(unused_mass >= AWARE_MIXED_MASK_CONFIG["min_unused_mass"])
 
 
@@ -128,9 +129,12 @@ def test_gems_batch_collator_generates_intensity_aware_masks_with_precursor() ->
     assert batch["context_mask"].shape == (2, 17)
     assert batch["target_masks"].shape == (2, 2, 17)
     assert batch["peak_valid_mask"][:, 0].all()
+    assert batch["context_mask"][:, 0].all()
+    assert not batch["target_masks"][:, :, 0].any()
     assert not (batch["context_mask"] & ~batch["peak_valid_mask"]).any()
     assert not (batch["target_masks"] & ~batch["peak_valid_mask"].unsqueeze(1)).any()
     assert not (batch["target_masks"] & batch["context_mask"].unsqueeze(1)).any()
+    assert (batch["target_masks"].sum(dim=1) <= 1).all()
 
 
 def test_intensity_aware_config_variant_sets_strategy_and_params() -> None:

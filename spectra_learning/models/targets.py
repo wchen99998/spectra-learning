@@ -53,17 +53,16 @@ class TargetProjectionMixin:
         x: torch.Tensor,
         visible_mask: torch.Tensor,
     ) -> torch.Tensor:
-        if len(self.masked_latent_predictor) == 0:
-            return x
         x = self._add_predictor_positions(x)
         x, visible_mask = self._append_predictor_register_tokens(x, visible_mask)
         x = self.encoder_to_predictor_proj(x)
-        predictor_attn_mask = create_visible_attention_mask(visible_mask)
-        for block in self.masked_latent_predictor:
-            x = block(
-                x,
-                attn_mask=predictor_attn_mask,
-            )
+        if len(self.masked_latent_predictor) > 0:
+            predictor_attn_mask = create_visible_attention_mask(visible_mask)
+            for block in self.masked_latent_predictor:
+                x = block(
+                    x,
+                    attn_mask=predictor_attn_mask,
+                )
         x = self.predictor_final_norm(x)
         if self.predictor_num_register_tokens > 0:
             x = x[:, :-self.predictor_num_register_tokens]

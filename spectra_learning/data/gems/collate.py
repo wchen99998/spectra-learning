@@ -35,6 +35,7 @@ class GemsBatchCollator:
         mask_lengths: tuple[int, ...] = DEFAULT_JEPA_MASK_LENGTHS,
         mask_round_from: int = len(DEFAULT_JEPA_MASK_LENGTHS),
         intensity_aware_mask_config: dict[str, float] | None = None,
+        allow_target_overlap: bool = False,
     ) -> None:
         self.augment = bool(augment)
         self.num_target_blocks = int(num_target_blocks)
@@ -49,6 +50,7 @@ class GemsBatchCollator:
             if intensity_aware_mask_config is None
             else intensity_aware_mask_config
         )
+        self.allow_target_overlap = bool(allow_target_overlap)
         self.use_precursor_token = bool(use_precursor_token)
         self.num_peaks = int(num_peaks)
         self.max_precursor_mz = float(max_precursor_mz)
@@ -94,21 +96,34 @@ class GemsBatchCollator:
         self,
         batch: dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        sampling_valid_mask = batch["peak_valid_mask"]
+        if self.use_precursor_token:
+            sampling_valid_mask = sampling_valid_mask.clone()
+            sampling_valid_mask[:, 0] = False
+
         if _normalize_mask_strategy_name(self.mask_strategy) == INTENSITY_AWARE_MASK_STRATEGY:
-            return sample_intensity_aware_masks_torch(
-                batch["peak_valid_mask"],
+            context_mask, target_masks = sample_intensity_aware_masks_torch(
+                sampling_valid_mask,
                 batch["peak_intensity"],
                 batch["peak_mz"] * PEAK_MZ_MAX,
                 num_target_blocks=self.num_target_blocks,
+                allow_target_overlap=self.allow_target_overlap,
                 **self.intensity_aware_mask_config,
             )
-        return _sample_block_masks_torch(
-            batch["peak_valid_mask"],
-            num_target_blocks=self.num_target_blocks,
-            context_fraction=self.context_fraction,
-            target_fraction=self.target_fraction,
-            block_min_len=self.block_min_len,
-            mask_strategy=self.mask_strategy,
-            mask_lengths=self.mask_lengths,
-            mask_round_from=self.mask_round_from,
-        )
+        else:
+            context_mask, target_masks = _sample_block_masks_torch(
+                sampling_valid_mask,
+                num_target_blocks=self.num_target_blocks,
+                context_fraction=self.context_fraction,
+                target_fraction=self.target_fraction,
+                block_min_len=self.block_min_len,
+                mask_strategy=self.mask_strategy,
+                mask_lengths=self.mask_lengths,
+                mask_round_from=self.mask_round_from,
+                allow_target_overlap=self.allow_target_overlap,
+            )
+
+        if self.use_precursor_token:
+            context_mask[:, 0] = batch["peak_valid_mask"][:, 0]
+            target_masks[:, :, 0] = False
+        return context_mask, target_masks

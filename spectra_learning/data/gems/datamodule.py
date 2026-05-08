@@ -221,6 +221,7 @@ class GemsNativeDataModule:
             mask_lengths=self.jepa_mask_lengths,
             mask_round_from=self.jepa_mask_round_from,
             intensity_aware_mask_config=self.jepa_intensity_aware_mask_config,
+            allow_target_overlap=self.jepa_allow_target_overlap,
             use_precursor_token=self.use_precursor_token,
             num_peaks=self.num_peaks_output,
             max_precursor_mz=self.max_precursor_mz,

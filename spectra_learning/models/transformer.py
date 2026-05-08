@@ -62,6 +62,14 @@ class Attention(nn.Module):
         self.dim = dim
         self.n_heads = n_heads
         self.n_kv_heads = n_heads if n_kv_heads is None else n_kv_heads
+        if self.dim % self.n_heads != 0:
+            raise ValueError(
+                f"dim={self.dim} must be divisible by n_heads={self.n_heads}"
+            )
+        if self.n_heads % self.n_kv_heads != 0:
+            raise ValueError(
+                f"n_heads={self.n_heads} must be divisible by n_kv_heads={self.n_kv_heads}"
+            )
         self.head_dim = self.dim // self.n_heads
         self.qk_norm = qk_norm
         self.q_size = self.n_heads * self.head_dim

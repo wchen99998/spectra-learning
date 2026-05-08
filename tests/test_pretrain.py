@@ -260,6 +260,10 @@ class BlockJEPATests(unittest.TestCase):
             "masked_prediction_term",
             "context_fraction",
             "target_fraction",
+            "target_fraction_per_view",
+            "target_union_fraction",
+            "target_entry_fraction",
+            "target_overlap_entries",
         ):
             self.assertIn(key, metrics, f"Missing key: {key}")
 
@@ -1240,7 +1244,7 @@ class PrecursorTokenTests(unittest.TestCase):
         metrics = model.forward_augmented(batch)
         self.assertTrue(torch.isfinite(metrics["loss"]).item())
 
-    def test_forward_augmented_preserves_sampled_precursor_masks(self):
+    def test_forward_augmented_conditions_precursor_masks(self):
         model = self._build_model()
         batch = _make_pipeline_prepended_batch(
             num_peaks=6,
@@ -1251,8 +1255,8 @@ class PrecursorTokenTests(unittest.TestCase):
 
         _, collapse_data = model.forward_augmented(batch, return_collapse_data=True)
 
-        self.assertFalse(collapse_data["context_mask"][:, 0].any())
-        self.assertTrue(collapse_data["target_masks"][:, :, 0].all())
+        self.assertTrue(collapse_data["context_mask"][:, 0].all())
+        self.assertFalse(collapse_data["target_masks"][:, :, 0].any())
 
     def test_encode_with_prepended_batch(self):
         """encode() works with a batch where precursor is already prepended."""
@@ -1383,9 +1387,9 @@ class PrecursorTokenTests(unittest.TestCase):
         self.assertEqual(result["peak_valid_mask"].shape, (B, N + 1))
         self.assertEqual(result["context_mask"].shape, (B, N + 1))
         self.assertEqual(result["target_masks"].shape, (B, K, N + 1))
-        # Precursor token is valid; masks are supplied by the caller/sampler.
+        # Precursor token is valid, always visible, and never targeted.
         self.assertTrue(result["peak_valid_mask"][:, 0].all())
-        self.assertFalse(result["context_mask"][:, 0].any())
+        self.assertTrue(result["context_mask"][:, 0].all())
         self.assertFalse(result["target_masks"][:, :, 0].any())
         # Precursor intensity sentinel
         torch.testing.assert_close(

@@ -169,6 +169,45 @@ def test_sample_block_masks_random_samples_exact_count_masks() -> None:
     assert not (target_masks & context_mask.unsqueeze(1)).any()
 
 
+def test_sample_block_masks_ragged_caps_counts_and_keeps_targets() -> None:
+    peak_valid_mask = torch.ones((256, 64), dtype=torch.bool)
+
+    torch.manual_seed(0)
+    context_mask, target_masks = gems_masking._sample_block_masks_torch(
+        peak_valid_mask,
+        num_target_blocks=3,
+        context_fraction=0.35,
+        target_fraction=0.20,
+        block_min_len=1,
+        mask_strategy="ragged",
+        mask_lengths=(2, 4, 8, 12),
+        mask_round_from=3,
+    )
+
+    assert (context_mask.sum(dim=1) <= 22).all()
+    assert (target_masks.sum(dim=2) <= 13).all()
+    assert (target_masks.sum(dim=(1, 2)) > 0).all()
+    assert not (target_masks & context_mask.unsqueeze(1)).any()
+
+
+def test_sample_block_masks_target_blocks_are_disjoint_by_default() -> None:
+    peak_valid_mask = torch.ones((4, 10), dtype=torch.bool)
+
+    torch.manual_seed(41)
+    _, target_masks = gems_masking._sample_block_masks_torch(
+        peak_valid_mask,
+        num_target_blocks=3,
+        context_fraction=0.2,
+        target_fraction=0.4,
+        block_min_len=1,
+        mask_strategy="random",
+    )
+
+    target_entries = target_masks.sum(dim=1)
+    assert (target_entries <= 1).all()
+    assert torch.equal(target_masks.sum(dim=(1, 2)), target_masks.any(dim=1).sum(dim=1))
+
+
 def test_sample_block_masks_all_uses_balanced_random_row_modes() -> None:
     peak_valid_mask = torch.ones((3, 8), dtype=torch.bool)
 
@@ -287,7 +326,7 @@ def test_gems_batch_collator_generates_ragged_context_and_target_masks() -> None
     ).any()
 
 
-def test_gems_batch_collator_samples_after_prepending_precursor() -> None:
+def test_gems_batch_collator_samples_after_prepending_precursor_without_sampling_it() -> None:
     collator = GemsBatchCollator(
         augment=True,
         num_target_blocks=2,
@@ -328,7 +367,7 @@ def test_gems_batch_collator_samples_after_prepending_precursor() -> None:
     sampled_context = torch.tensor(
         [
             [False, True, False, False, False],
-            [True, False, True, False, False],
+            [False, False, True, False, False],
         ],
         dtype=torch.bool,
     )
@@ -361,17 +400,23 @@ def test_gems_batch_collator_samples_after_prepending_precursor() -> None:
     ):
         batch = collator(samples)
 
-    assert torch.equal(captured["peak_valid_mask"], batch["peak_valid_mask"])
+    expected_sampling_valid = batch["peak_valid_mask"].clone()
+    expected_sampling_valid[:, 0] = False
+    expected_context = sampled_context.clone()
+    expected_context[:, 0] = True
+    expected_targets = sampled_targets.clone()
+    expected_targets[:, :, 0] = False
+
+    assert torch.equal(captured["peak_valid_mask"], expected_sampling_valid)
     assert batch["peak_mz"].shape == (2, 5)
     assert batch["peak_valid_mask"][:, 0].all()
-    assert not batch["context_mask"][0, 0]
-    assert batch["context_mask"][1, 0]
-    assert batch["target_masks"][0, 0, 0]
-    assert torch.equal(batch["context_mask"], sampled_context)
-    assert torch.equal(batch["target_masks"], sampled_targets)
+    assert batch["context_mask"][:, 0].all()
+    assert not batch["target_masks"][:, :, 0].any()
+    assert torch.equal(batch["context_mask"], expected_context)
+    assert torch.equal(batch["target_masks"], expected_targets)
 
 
-def test_gems_batch_collator_allows_precursor_to_follow_sampled_masks() -> None:
+def test_gems_batch_collator_all_strategy_conditions_precursor() -> None:
     collator = GemsBatchCollator(
         augment=True,
         num_target_blocks=2,
@@ -415,7 +460,7 @@ def test_gems_batch_collator_allows_precursor_to_follow_sampled_masks() -> None:
     sampled_context = torch.tensor(
         [
             [False, True, True, False, False, False, False],
-            [True, False, True, False, False, False, False],
+            [False, False, True, False, False, False, False],
         ],
         dtype=torch.bool,
     )
@@ -430,6 +475,7 @@ def test_gems_batch_collator_allows_precursor_to_follow_sampled_masks() -> None:
         **_: object,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert peak_valid_mask.shape == (2, 7)
+        assert not peak_valid_mask[:, 0].any()
         return sampled_context.clone(), sampled_targets.clone()
 
     with mock.patch.object(
@@ -439,9 +485,14 @@ def test_gems_batch_collator_allows_precursor_to_follow_sampled_masks() -> None:
     ):
         batch = collator(samples)
 
+    expected_context = sampled_context.clone()
+    expected_context[:, 0] = True
+    expected_targets = sampled_targets.clone()
+    expected_targets[:, :, 0] = False
+
     assert batch["peak_valid_mask"][:, 0].all()
-    assert torch.equal(batch["context_mask"], sampled_context)
-    assert torch.equal(batch["target_masks"], sampled_targets)
+    assert torch.equal(batch["context_mask"], expected_context)
+    assert torch.equal(batch["target_masks"], expected_targets)
 
 
 def test_mask_block_ranges_reports_absolute_slot_runs() -> None:

@@ -14,6 +14,7 @@ def _build_model(
     predictor_apply_final_norm: bool = True,
     jepa_target_normalization: str = "none",
     jepa_target_layers: list[int] | None = None,
+    predictor_dim: int | None = None,
 ) -> PeakSetSIGReg:
     torch.manual_seed(0)
     model = PeakSetSIGReg(
@@ -26,6 +27,7 @@ def _build_model(
         encoder_apply_final_norm=encoder_apply_final_norm,
         predictor_apply_final_norm=predictor_apply_final_norm,
         predictor_num_register_tokens=predictor_num_register_tokens,
+        predictor_dim=predictor_dim,
         jepa_num_target_blocks=num_target_blocks,
         masked_token_loss_weight=1.0,
         masked_latent_predictor_num_layers=predictor_layers,
@@ -80,14 +82,22 @@ def _make_batch() -> dict[str, torch.Tensor]:
 
 
 @torch.no_grad()
-def test_predictor_zero_layers_is_identity():
-    model = _build_model(predictor_layers=0)
+def test_predictor_zero_layers_still_runs_projection_path():
+    model = _build_model(predictor_layers=0, predictor_dim=24)
     predictor_input = torch.randn(2, 6, model.model_dim)
     visible_mask = torch.ones(2, 6, dtype=torch.bool)
 
     out = model.predict_masked_latents(predictor_input, visible_mask)
 
-    assert torch.allclose(out, predictor_input)
+    assert out.shape == (2, 6, model.predictor_dim)
+
+
+@torch.no_grad()
+def test_predictor_zero_layers_with_projection_supports_forward():
+    model = _build_model(predictor_layers=0, predictor_dim=24)
+    metrics = model.forward_augmented(_make_batch())
+
+    assert torch.isfinite(metrics["loss"])
 
 
 @torch.no_grad()
@@ -313,8 +323,14 @@ def test_forward_augmented_reports_loss_metrics():
     assert "masked_prediction_loss" in metrics
     assert "context_fraction" in metrics
     assert "target_fraction" in metrics
+    assert "target_fraction_per_view" in metrics
+    assert "target_union_fraction" in metrics
+    assert "target_entry_fraction" in metrics
+    assert "target_overlap_entries" in metrics
     assert torch.isfinite(metrics["masked_prediction_loss"])
     assert float(metrics["target_fraction"]) > 0.0
+    assert torch.allclose(metrics["target_fraction"], metrics["target_fraction_per_view"])
+    assert float(metrics["target_entry_fraction"]) >= float(metrics["target_fraction"])
 
 
 @torch.no_grad()

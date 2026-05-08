@@ -168,6 +168,7 @@ def sample_intensity_aware_masks_torch(
     local_gap_da: float = AWARE_MIXED_MASK_CONFIG["local_gap_da"],
     local_gap_probability: float = AWARE_MIXED_MASK_CONFIG["local_gap_probability"],
     min_unused_mass: float = AWARE_MIXED_MASK_CONFIG["min_unused_mass"],
+    allow_target_overlap: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     device = peak_valid_mask.device
     batch_size, num_peaks = peak_valid_mask.shape
@@ -224,21 +225,28 @@ def sample_intensity_aware_masks_torch(
         if target_candidates.numel() == 0:
             continue
 
+        available_targets = target_candidates
         for target_idx in range(int(num_target_blocks)):
-            reliability = (p_row[target_candidates] + 1e-6).pow(float(alpha))
+            if available_targets.numel() == 0:
+                break
+            reliability = (p_row[available_targets] + 1e-6).pow(float(alpha))
             weights = _mixed_reliability_weights(
                 reliability,
                 beta=float(beta_target),
                 eps=float(eps_target),
             )
             target_masks[row_idx, target_idx] = _weighted_sample_until(
-                indices=target_candidates,
+                indices=available_targets,
                 p_row=p_row,
                 weights=weights,
                 mass_target=target_mass,
                 min_eff=float(min_eff_target),
                 max_count=target_count_cap,
             )
+            if not bool(allow_target_overlap):
+                available_targets = available_targets[
+                    ~target_masks[row_idx, target_idx, available_targets]
+                ]
 
         target_union = target_masks[row_idx].any(dim=0)
         blocked = target_union.clone()

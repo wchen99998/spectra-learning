@@ -38,6 +38,7 @@ class GemsDataConfig:
     jepa_mask_lengths: tuple[int, ...]
     jepa_mask_round_from: int
     jepa_intensity_aware_mask_config: dict[str, float]
+    jepa_allow_target_overlap: bool
     use_precursor_token: bool
     num_peaks: int
     dataloader_pin_memory: bool
@@ -96,6 +97,9 @@ class GemsDataConfig:
                 key: float(config.get(f"jepa_intensity_aware_{key}", value))
                 for key, value in AWARE_MIXED_MASK_CONFIG.items()
             },
+            jepa_allow_target_overlap=bool(
+                config.get("jepa_allow_target_overlap", False)
+            ),
             use_precursor_token=bool(config.get("use_precursor_token", False)),
             num_peaks=int(config.get("num_peaks", NUM_PEAKS_OUTPUT)),
             dataloader_pin_memory=bool(

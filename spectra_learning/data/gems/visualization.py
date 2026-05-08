@@ -57,6 +57,7 @@ def _make_visualization_collator_kwargs(datamodule: GemsNativeDataModule) -> dic
         "mask_lengths": datamodule.jepa_mask_lengths,
         "mask_round_from": datamodule.jepa_mask_round_from,
         "intensity_aware_mask_config": datamodule.jepa_intensity_aware_mask_config,
+        "allow_target_overlap": datamodule.jepa_allow_target_overlap,
         "use_precursor_token": datamodule.use_precursor_token,
         "num_peaks": datamodule.num_peaks_output,
         "max_precursor_mz": datamodule.max_precursor_mz,

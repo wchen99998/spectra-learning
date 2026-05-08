@@ -2,6 +2,7 @@
 
 import torch
 import torch.nn.functional as F
+import pytest
 
 from spectra_learning.models.transformer import Attention, create_visible_attention_mask
 
@@ -142,6 +143,16 @@ def test_attention_module_masks_hidden_keys():
 
     max_diff = (out1[:, :30, :] - out2[:, :30, :]).abs().max().item()
     assert max_diff < 1e-5, f"max_diff={max_diff}"
+
+
+def test_attention_rejects_non_divisible_heads():
+    with pytest.raises(ValueError, match="dim=63 must be divisible by n_heads=8"):
+        Attention(dim=63, n_heads=8)
+
+
+def test_attention_rejects_non_divisible_kv_heads():
+    with pytest.raises(ValueError, match="n_heads=6 must be divisible by n_kv_heads=4"):
+        Attention(dim=48, n_heads=6, n_kv_heads=4)
 
 
 if __name__ == "__main__":

@@ -28,13 +28,41 @@ class ForwardMixin:
             "peak_valid_mask": torch.cat([pre_valid, peak_valid_mask], dim=1),
         }
         if context_mask is not None:
-            pre_ctx = torch.zeros(B, 1, device=device, dtype=torch.bool)
+            pre_ctx = torch.ones(B, 1, device=device, dtype=torch.bool)
             result["context_mask"] = torch.cat([pre_ctx, context_mask], dim=1)
         if target_masks is not None:
             K = target_masks.shape[1]
             pre_tgt = torch.zeros(B, K, 1, device=device, dtype=torch.bool)
             result["target_masks"] = torch.cat([pre_tgt, target_masks], dim=2)
         return result
+
+    def _condition_precursor_masks(
+        self,
+        context_mask: torch.Tensor,
+        target_masks: torch.Tensor,
+        peak_valid_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.use_precursor_token:
+            context_mask[:, 0] = peak_valid_mask[:, 0]
+            target_masks[:, :, 0] = False
+        return context_mask, target_masks
+
+    @staticmethod
+    def _target_mask_metrics(
+        target_masks: torch.Tensor,
+        valid_peak_count: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        target_entries = target_masks.float().sum()
+        target_union = target_masks.any(dim=1).float().sum()
+        target_overlap_entries = target_entries - target_union
+        per_view_denominator = valid_peak_count * max(int(target_masks.shape[1]), 1)
+        return {
+            "target_fraction": target_entries / per_view_denominator,
+            "target_fraction_per_view": target_entries / per_view_denominator,
+            "target_union_fraction": target_union / valid_peak_count,
+            "target_entry_fraction": target_entries / valid_peak_count,
+            "target_overlap_entries": target_overlap_entries,
+        }
 
     def _get_temporal_frame_inputs(
         self,
@@ -75,6 +103,11 @@ class ForwardMixin:
         precursor_mz = augmented_batch.get("precursor_mz", None)
         context_mask = augmented_batch["context_mask"] & peak_valid_mask
         target_masks = augmented_batch["target_masks"] & peak_valid_mask.unsqueeze(1)
+        context_mask, target_masks = self._condition_precursor_masks(
+            context_mask,
+            target_masks,
+            peak_valid_mask,
+        )
         (
             teacher_target_features,
             teacher_peak_emb,
@@ -150,8 +183,8 @@ class ForwardMixin:
             "masked_prediction_loss": masked_prediction_loss,
             "masked_prediction_term": masked_prediction_term,
             "context_fraction": context_mask.float().sum() / valid_peak_count,
-            "target_fraction": target_masks.float().sum() / valid_peak_count,
         }
+        metrics.update(self._target_mask_metrics(target_masks, valid_peak_count))
         metrics.update(jepa_mae_metrics)
         metrics.update(sigreg_metrics)
         if return_collapse_data:
@@ -169,6 +202,11 @@ class ForwardMixin:
         precursor_mz = augmented_batch.get("precursor_mz", None)
         context_mask = augmented_batch["context_mask"] & peak_valid_mask
         target_masks = augmented_batch["target_masks"] & peak_valid_mask.unsqueeze(1)
+        context_mask, target_masks = self._condition_precursor_masks(
+            context_mask,
+            target_masks,
+            peak_valid_mask,
+        )
 
         context_encoded = self.encoder(
             peak_mz,
@@ -206,8 +244,8 @@ class ForwardMixin:
         metrics = {
             "loss": loss,
             "context_fraction": context_mask.float().sum() / valid_peak_count,
-            "target_fraction": target_masks.float().sum() / valid_peak_count,
         }
+        metrics.update(self._target_mask_metrics(target_masks, valid_peak_count))
         metrics.update(mae_metrics)
         metrics.update(sigreg_metrics)
         if return_collapse_data:
