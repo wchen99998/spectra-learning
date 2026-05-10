@@ -7,12 +7,12 @@ def get_config() -> config_dict.ConfigDict:
     # Dataset
     cfg.artifact_dir = "data/gems_artifacts_alpha"
     cfg.gems_native_repo_id = "cjim8889/gems-a10-native"
-    cfg.nist_full_probe_repo_id = "cjim8889/hr_msms_nist_probe_prepared"
-    cfg.nist_full_probe_revision = "main"
-    cfg.nist_full_probe_train_samples = 4_000
-    cfg.nist_full_probe_val_samples = 1_000
-    cfg.nist_full_probe_test_samples = 1_000
-    cfg.nist_full_probe_num_repeats = 1
+    cfg.nist_murcko_probe_repo_id = "cjim8889/hr_msms_nist_dreams_embeddings"
+    cfg.nist_murcko_probe_revision = "main"
+    cfg.nist_murcko_probe_train_samples = 4_000
+    cfg.nist_murcko_probe_val_samples = 1_000
+    cfg.nist_murcko_probe_test_samples = 1_000
+    cfg.nist_murcko_probe_num_repeats = 1
     cfg.batch_size = 256
     cfg.shuffle_buffer = 1_000_000
     cfg.drop_remainder = True
@@ -137,10 +137,10 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_mlp_hidden_dim = cfg.model_dim
     cfg.msg_probe_pma_num_seeds = 32
     cfg.msg_probe_pma_num_heads = cfg.encoder_num_heads
-    cfg.probe_dataset = "nist-full"
-    cfg.nist_full_probe_train_samples = 20_000
-    cfg.nist_full_probe_val_samples = 5_000
-    cfg.nist_full_probe_test_samples = 5_000
+    cfg.probe_dataset = "nist-murcko"
+    cfg.nist_murcko_probe_train_samples = 20_000
+    cfg.nist_murcko_probe_val_samples = 5_000
+    cfg.nist_murcko_probe_test_samples = 5_000
     cfg.msg_probe_tune_metric = "msg_probe/test/auc_maccs_mean"
     cfg.msg_probe_tune_param_space = [
         {

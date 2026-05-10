@@ -24,12 +24,12 @@ def get_config() -> config_dict.ConfigDict:
     # Dataset
     cfg.artifact_dir = "data/gems_artifacts_alpha"
     cfg.gems_native_repo_id = "cjim8889/gems-a10-native"
-    cfg.nist_full_probe_repo_id = "cjim8889/hr_msms_nist_probe_prepared"
-    cfg.nist_full_probe_revision = "main"
-    cfg.nist_full_probe_train_samples = 20_000
-    cfg.nist_full_probe_val_samples = 5000
-    cfg.nist_full_probe_test_samples = 5000
-    cfg.nist_full_probe_num_repeats = 1
+    cfg.nist_murcko_probe_repo_id = "cjim8889/hr_msms_nist_dreams_embeddings"
+    cfg.nist_murcko_probe_revision = "main"
+    cfg.nist_murcko_probe_train_samples = 20_000
+    cfg.nist_murcko_probe_val_samples = 5000
+    cfg.nist_murcko_probe_test_samples = 5000
+    cfg.nist_murcko_probe_num_repeats = 1
     cfg.batch_size = 256
     cfg.shuffle_buffer = 1_000_000
     cfg.drop_remainder = True
@@ -111,7 +111,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataloader_pin_memory = True
 
     # MSG probe
-    cfg.probe_dataset = "nist-full"
+    cfg.probe_dataset = "nist-murcko"
     cfg.covariance_pooling_dim = 64
     cfg.train_covariance_pooling = False
     cfg.msg_probe_early_stopping = True

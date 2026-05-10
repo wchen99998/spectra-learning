@@ -17,12 +17,12 @@ def get_config() -> config_dict.ConfigDict:
     cfg.temporal_repo_id = "cjim8889/gems-a10-grouped"
     cfg.temporal_revision = "main"
     cfg.temporal_data_dir = "data/gems_grouped"
-    cfg.nist_full_probe_repo_id = "cjim8889/hr_msms_nist_probe_prepared"
-    cfg.nist_full_probe_revision = "main"
-    cfg.nist_full_probe_train_samples = 4_000
-    cfg.nist_full_probe_val_samples = 1_000
-    cfg.nist_full_probe_test_samples = 1_000
-    cfg.nist_full_probe_num_repeats = 3
+    cfg.nist_murcko_probe_repo_id = "cjim8889/hr_msms_nist_dreams_embeddings"
+    cfg.nist_murcko_probe_revision = "main"
+    cfg.nist_murcko_probe_train_samples = 4_000
+    cfg.nist_murcko_probe_val_samples = 1_000
+    cfg.nist_murcko_probe_test_samples = 1_000
+    cfg.nist_murcko_probe_num_repeats = 3
     cfg.batch_size = 256
     cfg.max_precursor_mz = 1000.0
     cfg.min_peak_intensity = 0.0001
@@ -122,7 +122,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_mlp_hidden_dim = cfg.model_dim
     cfg.msg_probe_pma_num_seeds = 4
     cfg.msg_probe_pma_num_heads = cfg.encoder_num_heads
-    cfg.probe_dataset = "nist20"
+    cfg.probe_dataset = "nist-murcko"
     cfg.use_precursor_token = False
 
     # Temporal predictor

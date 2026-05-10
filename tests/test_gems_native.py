@@ -140,6 +140,51 @@ def _write_fake_nist_full_probe_artifact(
     return metadata
 
 
+def _write_fake_nist_murcko_parquet_artifact(root: Path) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    root.mkdir(parents=True, exist_ok=True)
+    rows_by_split = {
+        "train": [("CCO", 111.0), ("CCN", 222.0)],
+        "val": [("CCC", 333.0)],
+        "test": [("c1ccccc1", 444.0)],
+    }
+    for split_name, rows in rows_by_split.items():
+        metadata_json = [
+            json.dumps(
+                {
+                    "COLLISIONENERGY": str(10 + row_idx),
+                    "INSTRUMENTTYPE": "Q-TOF",
+                }
+            )
+            for row_idx, _ in enumerate(rows)
+        ]
+        table = pa.table(
+            {
+                "dreams_embedding": [
+                    [float(row_idx), float(row_idx + 1)]
+                    for row_idx, _ in enumerate(rows)
+                ],
+                "spectrum_mz": [
+                    [100.0 + row_idx, 101.0 + row_idx]
+                    for row_idx, _ in enumerate(rows)
+                ],
+                "spectrum_intensity": [[10.0, 5.0] for _ in rows],
+                "metadata_json": metadata_json,
+                "precursor_mz": [precursor for _, precursor in rows],
+                "adduct": ["[M+H]+"] * len(rows),
+                "smiles": [smiles for smiles, _ in rows],
+            }
+        )
+        pq.write_table(table, root / f"{split_name}.parquet")
+    (root / "metadata.json").write_text(
+        json.dumps(
+            {"fold_counts": {key: len(value) for key, value in rows_by_split.items()}}
+        )
+    )
+
+
 class GeMSNativeArtifactTests(unittest.TestCase):
     def test_build_gems_native_artifact_writes_expected_layout(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -984,6 +1029,66 @@ class MassSpecPreprocessTests(unittest.TestCase):
 
         self.assertEqual(probe_data.info["massspec_test_size"], 2)
         download_mock.assert_not_called()
+
+    def test_probe_data_supports_nist_murcko_dataset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cfg = config_dict.ConfigDict()
+            cfg.artifact_dir = str(tmp_path / "probe-cache")
+            cfg.probe_dataset = "nist-murcko"
+            cfg.batch_size = 2
+            cfg.max_precursor_mz = 1000.0
+            cfg.min_peak_intensity = 1e-4
+            cfg.peak_ordering = "mz"
+            cfg.num_peaks = 4
+            cfg.nist_murcko_probe_repo_id = "owner/nist-murcko"
+            cfg.nist_murcko_probe_revision = "unit-test"
+            cfg.nist_murcko_probe_split_dir = "murcko-split"
+
+            def fake_snapshot_download(*, local_dir, **kwargs):
+                _write_fake_nist_murcko_parquet_artifact(
+                    Path(local_dir) / "murcko-split"
+                )
+                return str(local_dir)
+
+            with mock.patch.object(
+                massspec_probe_data,
+                "snapshot_download",
+                side_effect=fake_snapshot_download,
+            ) as download_mock:
+                probe_data = massspec_probe_data.MassSpecProbeData.from_config(cfg)
+
+        self.assertEqual(probe_data.info["massspec_train_size"], 2)
+        self.assertEqual(probe_data.info["massspec_val_size"], 1)
+        self.assertEqual(probe_data.info["massspec_test_size"], 1)
+        self.assertEqual(probe_data.dreams_dim, 2)
+        self.assertFalse(probe_data.info["pairwise_alignment_available"])
+        self.assertEqual(
+            probe_data.train_files,
+            [
+                str(
+                    tmp_path
+                    / "probe-cache"
+                    / "nist_murcko_probe"
+                    / "train"
+                    / f"shard-0000{idx}-of-00002"
+                )
+                for idx in range(2)
+            ],
+        )
+        _, kwargs = download_mock.call_args
+        self.assertEqual(kwargs["repo_id"], "owner/nist-murcko")
+        self.assertEqual(kwargs["revision"], "unit-test")
+        self.assertEqual(kwargs["repo_type"], "dataset")
+        self.assertEqual(
+            kwargs["allow_patterns"],
+            [
+                "murcko-split/metadata.json",
+                "murcko-split/train.parquet",
+                "murcko-split/val.parquet",
+                "murcko-split/test.parquet",
+            ],
+        )
 
     def test_nist_full_artifact_preserves_row_alignment(self):
         with tempfile.TemporaryDirectory() as tmp:

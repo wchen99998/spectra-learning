@@ -1099,9 +1099,9 @@ class ProbeStepCountTests(unittest.TestCase):
 
 
 class ProbeConfigTests(unittest.TestCase):
-    def test_nist_full_probe_defaults_use_random_subsets(self):
+    def test_nist_murcko_probe_defaults_use_random_subsets(self):
         cfg = config_dict.ConfigDict()
-        cfg.probe_dataset = "nist-full"
+        cfg.probe_dataset = "nist-murcko"
 
         train_samples, val_samples, test_samples, randomize_test_subset = (
             resolve_msg_probe_sample_limits(cfg)
@@ -1110,6 +1110,22 @@ class ProbeConfigTests(unittest.TestCase):
         self.assertEqual(train_samples, 4000)
         self.assertEqual(val_samples, 1000)
         self.assertEqual(test_samples, 1000)
+        self.assertTrue(randomize_test_subset)
+
+    def test_nist_murcko_probe_split_limits_are_used(self):
+        cfg = config_dict.ConfigDict()
+        cfg.probe_dataset = "nist-murcko"
+        cfg.nist_murcko_probe_train_samples = 11
+        cfg.nist_murcko_probe_val_samples = 12
+        cfg.nist_murcko_probe_test_samples = 13
+
+        train_samples, val_samples, test_samples, randomize_test_subset = (
+            resolve_msg_probe_sample_limits(cfg)
+        )
+
+        self.assertEqual(train_samples, 11)
+        self.assertEqual(val_samples, 12)
+        self.assertEqual(test_samples, 13)
         self.assertTrue(randomize_test_subset)
 
     def test_msg_probe_sample_size_applies_to_all_splits(self):
@@ -1140,16 +1156,16 @@ class ProbeConfigTests(unittest.TestCase):
         self.assertEqual(val_samples, 20)
         self.assertEqual(test_samples, 30)
 
-    def test_nist_full_probe_repeat_defaults_to_one(self):
+    def test_nist_murcko_probe_repeat_defaults_to_one(self):
         cfg = config_dict.ConfigDict()
-        cfg.probe_dataset = "nist-full"
+        cfg.probe_dataset = "nist-murcko"
 
         self.assertEqual(resolve_msg_probe_num_repeats(cfg), 1)
 
-    def test_nist_full_probe_repeat_override_is_used(self):
+    def test_nist_murcko_probe_repeat_override_is_used(self):
         cfg = config_dict.ConfigDict()
-        cfg.probe_dataset = "nist-full"
-        cfg.nist_full_probe_num_repeats = 3
+        cfg.probe_dataset = "nist-murcko"
+        cfg.nist_murcko_probe_num_repeats = 3
 
         self.assertEqual(resolve_msg_probe_num_repeats(cfg), 3)
 
