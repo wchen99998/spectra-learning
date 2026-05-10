@@ -147,6 +147,34 @@ class FourierFeatureTests(unittest.TestCase):
         self.assertEqual(linear_layers[0].out_features, 64)
         self.assertEqual(linear_layers[-1].out_features, 16)
 
+    def test_peak_embedder_without_fourier_uses_full_capacity_raw_mlp(self):
+        embedder = PeakFeatureEmbedder(
+            model_dim=32,
+            hidden_dim=16,
+            fourier_mlp_hidden_dim=64,
+            fourier_mlp_num_layers=4,
+            fourier_strategy="log_spaced",
+            fourier_x_min=3e-3,
+            fourier_x_max=1000.0,
+            fourier_num_freqs=8,
+            use_fourier_features=False,
+        )
+
+        self.assertFalse(hasattr(embedder, "mz_fourier"))
+        self.assertFalse(hasattr(embedder, "fourier_ffn"))
+        linear_layers = [
+            layer for layer in embedder.raw_ffn if isinstance(layer, torch.nn.Linear)
+        ]
+        self.assertEqual(len(linear_layers), 4)
+        self.assertEqual(linear_layers[0].in_features, 3)
+        self.assertEqual(linear_layers[0].out_features, 64)
+        self.assertEqual(linear_layers[-1].out_features, 32)
+
+        peak_mz = torch.rand(2, 5)
+        peak_intensity = torch.rand(2, 5)
+        output = embedder(peak_mz, peak_intensity)
+        self.assertEqual(output.shape, (2, 5, 32))
+
     def test_peak_embedder_raw_branch_uses_normal_log_intensity(self):
         embedder = PeakFeatureEmbedder(
             model_dim=32,

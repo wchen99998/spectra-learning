@@ -54,6 +54,11 @@ def build_model(cfg) -> PeakSetSIGReg:
         encoder_fourier_num_freqs=cfg.encoder_fourier_num_freqs,
         encoder_fourier_sigma=cfg.encoder_fourier_sigma,
         encoder_fourier_trainable=cfg.encoder_fourier_trainable,
+        encoder_use_fourier_features=getattr(
+            cfg,
+            "encoder_use_fourier_features",
+            True,
+        ),
         sigreg_num_slices=cfg.sigreg_num_slices,
         sigreg_lambda=cfg.sigreg_lambda,
         encoder_use_position_embedding=getattr(

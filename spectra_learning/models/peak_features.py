@@ -95,38 +95,51 @@ class PeakFeatureEmbedder(nn.Module):
         fourier_sigma: float = 10.0,
         fourier_trainable: bool = False,
         fourier_input_scale: float = PEAK_MZ_MAX,
+        use_fourier_features: bool = True,
     ) -> None:
         super().__init__()
-        fourier_dim = model_dim // 2
-        raw_dim = model_dim - fourier_dim
+        self.use_fourier_features = bool(use_fourier_features)
         fourier_hidden_dim = (
             hidden_dim if fourier_mlp_hidden_dim is None else int(fourier_mlp_hidden_dim)
         )
 
         self.fourier_input_scale = float(fourier_input_scale)
-        self.mz_fourier = FourierFeatures(
-            strategy=fourier_strategy,
-            x_min=fourier_x_min,
-            x_max=fourier_x_max,
-            trainable=fourier_trainable,
-            funcs=fourier_funcs,
-            sigma=fourier_sigma,
-            num_freqs=fourier_num_freqs,
-        )
-        self.fourier_ffn = _build_mlp(
-            self.mz_fourier.num_features(),
-            fourier_hidden_dim,
-            fourier_dim,
-            int(fourier_mlp_num_layers),
-        )
-        self.raw_ffn = nn.Sequential(
-            nn.Linear(3, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, raw_dim),
-        )
+        if self.use_fourier_features:
+            fourier_dim = model_dim // 2
+            raw_dim = model_dim - fourier_dim
+            self.mz_fourier = FourierFeatures(
+                strategy=fourier_strategy,
+                x_min=fourier_x_min,
+                x_max=fourier_x_max,
+                trainable=fourier_trainable,
+                funcs=fourier_funcs,
+                sigma=fourier_sigma,
+                num_freqs=fourier_num_freqs,
+            )
+            self.fourier_ffn = _build_mlp(
+                self.mz_fourier.num_features(),
+                fourier_hidden_dim,
+                fourier_dim,
+                int(fourier_mlp_num_layers),
+            )
+            self.raw_ffn = nn.Sequential(
+                nn.Linear(3, hidden_dim),
+                nn.SiLU(),
+                nn.Linear(hidden_dim, raw_dim),
+            )
+        else:
+            self.raw_ffn = _build_mlp(
+                3,
+                fourier_hidden_dim,
+                model_dim,
+                int(fourier_mlp_num_layers),
+            )
         self.output_proj = nn.Linear(model_dim, model_dim)
 
-        for module in (self.fourier_ffn, self.raw_ffn):
+        modules = [self.raw_ffn]
+        if self.use_fourier_features:
+            modules.append(self.fourier_ffn)
+        for module in modules:
             for layer in module:
                 if isinstance(layer, nn.Linear):
                     nn.init.xavier_normal_(layer.weight)
@@ -144,8 +157,10 @@ class PeakFeatureEmbedder(nn.Module):
             mz = peak_mz.unsqueeze(-1)
             intensity = peak_intensity.unsqueeze(-1)
             log_intensity = torch.log1p(peak_intensity).unsqueeze(-1)
+            raw = self.raw_ffn(torch.cat([mz, intensity, log_intensity], dim=-1))
+            if not self.use_fourier_features:
+                return self.output_proj(raw)
             fourier = self.fourier_ffn(
                 self.mz_fourier(self._prepare_fourier_mz(peak_mz))
             )
-            raw = self.raw_ffn(torch.cat([mz, intensity, log_intensity], dim=-1))
             return self.output_proj(torch.cat([fourier, raw], dim=-1))

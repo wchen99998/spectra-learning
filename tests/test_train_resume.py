@@ -539,3 +539,30 @@ def test_jepa_mae_mz_scale_follows_peak_mz_preprocessing_scale():
 
     assert model.jepa_mae_mz_max == 750.0
     assert model.jepa_mae_num_mz_bins == 300
+
+
+def test_config_can_disable_encoder_fourier_features():
+    cfg = config_dict.ConfigDict()
+    cfg.model_dim = 32
+    cfg.encoder_num_layers = 1
+    cfg.encoder_num_heads = 4
+    cfg.encoder_num_kv_heads = 4
+    cfg.attention_mlp_multiple = 2.0
+    cfg.feature_mlp_hidden_dim = 16
+    cfg.num_peaks = 8
+    cfg.encoder_use_fourier_features = False
+    cfg.encoder_fourier_mlp_hidden_dim = 64
+    cfg.encoder_fourier_mlp_num_layers = 4
+
+    model = build_model_from_config(cfg)
+
+    assert not model.encoder.embedder.use_fourier_features
+    assert not hasattr(model.encoder.embedder, "mz_fourier")
+    raw_layers = [
+        layer
+        for layer in model.encoder.embedder.raw_ffn
+        if isinstance(layer, torch.nn.Linear)
+    ]
+    assert len(raw_layers) == 4
+    assert raw_layers[0].out_features == 64
+    assert raw_layers[-1].out_features == model.model_dim

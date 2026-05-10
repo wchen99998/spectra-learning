@@ -71,6 +71,7 @@ base_image = (
         "numpy",
         "matplotlib",
         "pandas>=2.0.0",
+        "pyarrow>=16.0.0",
     )
     .run_commands(
         "pip install --no-build-isolation gram-newton-schulz@git+https://github.com/Dao-AILab/gram-newton-schulz"

@@ -1,4 +1,9 @@
-from spectra_learning.training.naming import _ema_parts, _regularizer_parts, _target_parts
+from spectra_learning.training.naming import (
+    _architecture_parts,
+    _ema_parts,
+    _regularizer_parts,
+    _target_parts,
+)
 
 
 def test_ema_parts_label_momentum_points_explicitly() -> None:
@@ -43,3 +48,16 @@ def test_mae_mode_does_not_name_jepa_target_layers() -> None:
     assert _target_parts(
         {"training_mode": "mae", "jepa_target_layers": [1, 2], "model_dim": 32}
     ) == []
+
+
+def test_architecture_parts_name_disabled_fourier_features() -> None:
+    parts = _architecture_parts(
+        {
+            "encoder_use_fourier_features": False,
+            "encoder_fourier_mlp_num_layers": 4,
+            "encoder_fourier_mlp_hidden_dim": 64,
+        }
+    )
+
+    assert "no-fourier" in parts
+    assert "fmlp4x64" in parts

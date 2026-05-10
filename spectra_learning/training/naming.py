@@ -40,6 +40,8 @@ def _model_size_part(config: Any) -> str:
 
 def _architecture_parts(config: Any) -> list[str]:
     parts: list[str] = []
+    if not bool(config.get("encoder_use_fourier_features", True)):
+        parts.append("no-fourier")
     fourier_mlp_layers = int(config.get("encoder_fourier_mlp_num_layers", 2))
     fourier_mlp_hidden = config.get("encoder_fourier_mlp_hidden_dim", None)
     if fourier_mlp_layers != 2 or fourier_mlp_hidden is not None:

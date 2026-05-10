@@ -149,6 +149,7 @@ def _build_encoder(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:
         fourier_sigma=float(cfg.encoder_fourier_sigma),
         fourier_trainable=bool(cfg.encoder_fourier_trainable),
         fourier_input_scale=float(cfg.encoder_fourier_input_scale),
+        use_fourier_features=bool(cfg.encoder_use_fourier_features),
         qk_norm=bool(cfg.encoder_qk_norm),
         norm_type=model.norm_type,
         norm_eps=model.norm_eps,

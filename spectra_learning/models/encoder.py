@@ -35,6 +35,7 @@ class PeakSetEncoder(nn.Module):
         fourier_sigma: float = 10.0,
         fourier_trainable: bool = False,
         fourier_input_scale: float = 1000.0,
+        use_fourier_features: bool = True,
         qk_norm: bool = False,
         norm_type: str = "rmsnorm",
         norm_eps: float = 1e-5,
@@ -89,6 +90,7 @@ class PeakSetEncoder(nn.Module):
             fourier_sigma=fourier_sigma,
             fourier_trainable=fourier_trainable,
             fourier_input_scale=fourier_input_scale,
+            use_fourier_features=use_fourier_features,
         )
         self.position_embedding = _build_frozen_position_embedding(
             int(num_peaks),
