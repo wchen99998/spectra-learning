@@ -18,15 +18,17 @@ dependencies = [
     "tqdm>=4.66.4",
     "wandb==0.23.1",
     "gram-newton-schulz",
+    "nvidia-cutlass-dsl[cu13]==4.4.2",
     "modal>=1.4.1",
 ]
+
+[tool.uv]
+no-build-isolation-package = ["gram-newton-schulz"]
 
 [[tool.uv.index]]
 name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
 explicit = true
-
-no-build-isolation-package = ["gram-newton-schulz"]
 
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'linux'" }]
