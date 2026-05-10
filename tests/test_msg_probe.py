@@ -1166,8 +1166,14 @@ class ProbeConfigTests(unittest.TestCase):
         self.assertEqual(resolve_msg_probe_fingerprint(cfg), "morgan")
         self.assertEqual(resolve_msg_probe_select_metric(cfg), "msg_probe/test/auc_morgan_mean")
 
-    def test_pairwise_alignment_defaults_to_20k_pairs(self):
+    def test_pairwise_alignment_defaults_to_disabled(self):
         cfg = config_dict.ConfigDict()
+
+        self.assertEqual(resolve_msg_probe_pairwise_alignment_num_pairs(cfg), 0)
+
+    def test_pairwise_alignment_num_pairs_is_opt_in(self):
+        cfg = config_dict.ConfigDict()
+        cfg.msg_probe_pairwise_alignment_num_pairs = 20_000
 
         self.assertEqual(resolve_msg_probe_pairwise_alignment_num_pairs(cfg), 20_000)
 

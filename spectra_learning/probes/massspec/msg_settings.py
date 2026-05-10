@@ -105,4 +105,4 @@ def resolve_msg_probe_num_repeats(
 def resolve_msg_probe_pairwise_alignment_num_pairs(
     config: config_dict.ConfigDict,
 ) -> int:
-    return int(config.get("msg_probe_pairwise_alignment_num_pairs", 20_000))
+    return int(config.get("msg_probe_pairwise_alignment_num_pairs", 0))
