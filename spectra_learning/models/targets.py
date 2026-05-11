@@ -155,6 +155,23 @@ class TargetProjectionMixin:
                 self._apply_jepa_target_normalization(teacher_target_features)
             )
 
+    def _context_encoder_inputs(
+        self,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+        context_mask: torch.Tensor,
+        target_masks: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.masked_token_input_mode != "mz_sentinel":
+            return peak_mz, peak_intensity, context_mask
+        target_union = target_masks.any(dim=1)
+        masked_mz = torch.where(
+            target_union,
+            torch.full_like(peak_mz, self.masked_mz_sentinel),
+            peak_mz,
+        )
+        return masked_mz, peak_intensity, context_mask | target_union
+
     def compute_teacher_targets(
         self,
         augmented_batch: dict[str, torch.Tensor],
@@ -172,9 +189,16 @@ class TargetProjectionMixin:
         peak_intensity: torch.Tensor,
         peak_valid_mask: torch.Tensor,
         context_mask: torch.Tensor,
+        target_masks: torch.Tensor,
         precursor_mz: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size = peak_mz.shape[0]
+        context_mz, context_intensity, context_visible_mask = self._context_encoder_inputs(
+            peak_mz,
+            peak_intensity,
+            context_mask,
+            target_masks,
+        )
         if self.teacher_encoder is not None:
             with torch.no_grad(), _active_autocast_context(peak_mz.device.type):
                 teacher_encoded, teacher_peak_outputs = (
@@ -188,10 +212,10 @@ class TargetProjectionMixin:
                     )
                 )
             context_encoded = self.encoder(
-                peak_mz,
-                peak_intensity,
+                context_mz,
+                context_intensity,
                 valid_mask=peak_valid_mask,
-                visible_mask=context_mask,
+                visible_mask=context_visible_mask,
                 precursor_mz=precursor_mz,
             )
             teacher_target_features = torch.cat(teacher_peak_outputs, dim=-1)
@@ -212,10 +236,10 @@ class TargetProjectionMixin:
                 context_emb,
             )
         encoded, teacher_peak_outputs = self.encoder.forward_with_block_outputs(
-            torch.cat([peak_mz, peak_mz], dim=0),
-            torch.cat([peak_intensity, peak_intensity], dim=0),
+            torch.cat([peak_mz, context_mz], dim=0),
+            torch.cat([peak_intensity, context_intensity], dim=0),
             valid_mask=torch.cat([peak_valid_mask, peak_valid_mask], dim=0),
-            visible_mask=torch.cat([peak_valid_mask, context_mask], dim=0),
+            visible_mask=torch.cat([peak_valid_mask, context_visible_mask], dim=0),
             block_indices=self.jepa_target_layers,
             precursor_mz=(
                 None

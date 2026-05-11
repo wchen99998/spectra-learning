@@ -36,6 +36,8 @@ class PeakSetSIGRegSettings:
     jepa_mae_intensity_max: float = 1.0
     jepa_target_normalization: str = "none"
     jepa_target_layers: list[int] | tuple[int, ...] | None = None
+    masked_token_input_mode: str = "latent_token"
+    masked_mz_sentinel: float = -1.0
     representation_regularizer: str = "none"
     masked_latent_predictor_num_layers: int = 2
     masked_latent_predictor_num_heads: int = 8
@@ -203,6 +205,8 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "jepa_mae_intensity_max": float,
     "jepa_target_normalization": str,
     "jepa_target_layers": _identity,
+    "masked_token_input_mode": str,
+    "masked_mz_sentinel": float,
     "representation_regularizer": str,
     "masked_latent_predictor_num_layers": int,
     "masked_latent_predictor_num_heads": int,

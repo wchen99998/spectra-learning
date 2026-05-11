@@ -35,6 +35,7 @@ SUPPORTED_REGULARIZERS = {
 SUPPORTED_TRAINING_MODES = {"jepa", "mae", "mae_teacher_jepa"}
 SUPPORTED_TARGET_NORMALIZATIONS = {"none", "zscore"}
 SUPPORTED_EMA_SCHEDULES = {"constant", "linear", "cosine", "slow-fast-slow"}
+SUPPORTED_MASKED_TOKEN_INPUT_MODES = {"latent_token", "mz_sentinel"}
 
 
 def configure_peak_set_sigreg(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:
@@ -102,6 +103,12 @@ def _configure_targets(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:
     model.jepa_target_normalization = str(cfg.jepa_target_normalization).lower()
     if model.jepa_target_normalization not in SUPPORTED_TARGET_NORMALIZATIONS:
         raise ValueError("jepa_target_normalization must be one of ('none', 'zscore')")
+    model.masked_token_input_mode = str(cfg.masked_token_input_mode).lower()
+    if model.masked_token_input_mode not in SUPPORTED_MASKED_TOKEN_INPUT_MODES:
+        raise ValueError(
+            "masked_token_input_mode must be one of ('latent_token', 'mz_sentinel')"
+        )
+    model.masked_mz_sentinel = float(cfg.masked_mz_sentinel)
 
 
 def _configure_losses(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:

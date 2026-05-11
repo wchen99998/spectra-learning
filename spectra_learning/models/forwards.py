@@ -118,6 +118,7 @@ class ForwardMixin:
             peak_intensity,
             peak_valid_mask,
             context_mask,
+            target_masks,
             precursor_mz=precursor_mz,
         )
         predictor_output_features, predictor_output = self._predict_augmented_targets(
@@ -208,11 +209,18 @@ class ForwardMixin:
             peak_valid_mask,
         )
 
-        context_encoded = self.encoder(
+        context_mz, context_intensity, context_visible_mask = self._context_encoder_inputs(
             peak_mz,
             peak_intensity,
+            context_mask,
+            target_masks,
+        )
+
+        context_encoded = self.encoder(
+            context_mz,
+            context_intensity,
             valid_mask=peak_valid_mask,
-            visible_mask=context_mask,
+            visible_mask=context_visible_mask,
             precursor_mz=precursor_mz,
         )
         context_emb, _ = self._split_encoder_output(

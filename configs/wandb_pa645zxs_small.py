@@ -15,9 +15,12 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_num_heads = 8
     cfg.encoder_num_kv_heads = 8
     cfg.encoder_use_position_embedding = True
-    cfg.encoder_use_fourier_features = False
+    cfg.encoder_use_fourier_features = True
     cfg.encoder_fourier_mlp_hidden_dim = 1024
     cfg.encoder_fourier_mlp_num_layers = 4
+    cfg.encoder_fourier_num_freqs = 64
+    cfg.precursor_peak_exclusion_window_da = 0
+    cfg.masked_token_input_mode= "mz_sentinel"
 
     cfg.predictor_dim = 256
     cfg.masked_latent_predictor_num_layers = 6

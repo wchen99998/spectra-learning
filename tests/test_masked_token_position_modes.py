@@ -1,3 +1,5 @@
+from unittest import mock
+
 import torch
 
 from spectra_learning.models.encoder import PeakSetEncoder
@@ -14,7 +16,10 @@ def _build_model(
     predictor_apply_final_norm: bool = True,
     jepa_target_normalization: str = "none",
     jepa_target_layers: list[int] | None = None,
+    jepa_mae_loss_weight: float = 0.0,
     predictor_dim: int | None = None,
+    masked_token_input_mode: str = "latent_token",
+    masked_mz_sentinel: float = -1.0,
 ) -> PeakSetSIGReg:
     torch.manual_seed(0)
     model = PeakSetSIGReg(
@@ -33,6 +38,9 @@ def _build_model(
         masked_latent_predictor_num_layers=predictor_layers,
         jepa_target_normalization=jepa_target_normalization,
         jepa_target_layers=jepa_target_layers,
+        jepa_mae_loss_weight=jepa_mae_loss_weight,
+        masked_token_input_mode=masked_token_input_mode,
+        masked_mz_sentinel=masked_mz_sentinel,
     )
     model.eval()
     return model
@@ -331,6 +339,110 @@ def test_forward_augmented_reports_loss_metrics():
     assert float(metrics["target_fraction"]) > 0.0
     assert torch.allclose(metrics["target_fraction"], metrics["target_fraction_per_view"])
     assert float(metrics["target_entry_fraction"]) >= float(metrics["target_fraction"])
+
+
+@torch.no_grad()
+def test_mz_sentinel_mode_masks_only_target_mz_for_context_encoder():
+    model = _build_model(
+        masked_token_input_mode="mz_sentinel",
+        masked_mz_sentinel=-0.5,
+    )
+    batch = _make_batch()
+
+    context_mz, context_intensity, context_visible_mask = model._context_encoder_inputs(
+        batch["peak_mz"],
+        batch["peak_intensity"],
+        batch["context_mask"],
+        batch["target_masks"],
+    )
+
+    target_union = batch["target_masks"].any(dim=1)
+    torch.testing.assert_close(
+        context_mz[target_union],
+        torch.full_like(context_mz[target_union], -0.5),
+    )
+    torch.testing.assert_close(
+        context_mz[~target_union],
+        batch["peak_mz"][~target_union],
+    )
+    torch.testing.assert_close(context_intensity, batch["peak_intensity"])
+    assert torch.equal(context_visible_mask, batch["context_mask"] | target_union)
+
+
+@torch.no_grad()
+def test_mz_sentinel_mode_feeds_corrupted_target_embeddings_to_predictor():
+    model = _build_model(masked_token_input_mode="mz_sentinel")
+    batch = _make_batch()
+    context_emb = torch.randn(
+        batch["peak_mz"].shape[0],
+        batch["peak_mz"].shape[1],
+        model.model_dim,
+    )
+    captured: dict[str, torch.Tensor] = {}
+
+    def fake_predict_masked_target_features(
+        x: torch.Tensor,
+        visible_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        captured["x"] = x.detach().clone()
+        captured["visible_mask"] = visible_mask.detach().clone()
+        return x.new_zeros(x.shape[0], x.shape[1], model.jepa_target_dim)
+
+    with mock.patch.object(
+        model,
+        "predict_masked_target_features",
+        side_effect=fake_predict_masked_target_features,
+    ):
+        model._predict_augmented_targets(
+            context_emb,
+            batch["context_mask"],
+            batch["target_masks"],
+        )
+
+    B, K, N = batch["target_masks"].shape
+    predictor_input = captured["x"].reshape(B, K, N, -1)
+    expected_target_embeddings = context_emb.unsqueeze(1).expand(-1, K, -1, -1)
+
+    torch.testing.assert_close(
+        predictor_input[batch["target_masks"]],
+        expected_target_embeddings[batch["target_masks"]],
+    )
+    assert torch.equal(
+        captured["visible_mask"].reshape(B, K, N),
+        batch["context_mask"].unsqueeze(1) | batch["target_masks"],
+    )
+
+
+@torch.no_grad()
+def test_mz_sentinel_mode_value_objective_predicts_mz_only():
+    model = _build_model(
+        masked_token_input_mode="mz_sentinel",
+        jepa_mae_loss_weight=1.0,
+    )
+    batch = _make_batch()
+    predicted_latents = torch.randn(
+        batch["target_masks"].shape[0],
+        batch["target_masks"].shape[1],
+        batch["target_masks"].shape[2],
+        model.target_projector_dim,
+    )
+
+    (
+        value_loss,
+        mz_loss,
+        intensity_loss,
+        _mz_accuracy,
+        intensity_accuracy,
+    ) = model._jepa_mae_value_prediction_loss(
+        predicted_latents,
+        batch["peak_mz"],
+        batch["peak_intensity"],
+        batch["target_masks"],
+    )
+
+    torch.testing.assert_close(value_loss, mz_loss)
+    torch.testing.assert_close(intensity_loss, torch.zeros_like(intensity_loss))
+    torch.testing.assert_close(intensity_accuracy, torch.zeros_like(intensity_accuracy))
 
 
 @torch.no_grad()

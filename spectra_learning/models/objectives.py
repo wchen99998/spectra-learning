@@ -50,22 +50,26 @@ class ObjectiveMixin:
         target_masks: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         mz_logits = self.jepa_mae_mz_head(predicted_latents)
-        intensity_logits = self.jepa_mae_intensity_head(predicted_latents)
         mz_target, intensity_target = self._jepa_mae_targets(peak_mz, peak_intensity)
         view_shape = (mz_logits.shape[0], mz_logits.shape[1], mz_logits.shape[2])
         mz_target = mz_target.unsqueeze(1).expand(view_shape)
         intensity_target = intensity_target.unsqueeze(1).expand(view_shape)
         mz_loss = self._masked_ce_loss(mz_logits, mz_target, target_masks)
+        target_weights = target_masks
+        mz_accuracy = (
+            (mz_logits.argmax(dim=-1) == mz_target).float() * target_weights.float()
+        ).sum() / target_weights.float().sum().clamp_min(1.0)
+        if self.masked_token_input_mode == "mz_sentinel":
+            zero = mz_loss.new_zeros(())
+            return mz_loss, mz_loss, zero, mz_accuracy, zero
+
+        intensity_logits = self.jepa_mae_intensity_head(predicted_latents)
         intensity_loss = self._masked_ce_loss(
             intensity_logits,
             intensity_target,
             target_masks,
         )
         value_loss = mz_loss + intensity_loss
-        target_weights = target_masks
-        mz_accuracy = (
-            (mz_logits.argmax(dim=-1) == mz_target).float() * target_weights.float()
-        ).sum() / target_weights.float().sum().clamp_min(1.0)
         intensity_accuracy = (
             (intensity_logits.argmax(dim=-1) == intensity_target).float()
             * target_weights.float()
@@ -84,11 +88,18 @@ class ObjectiveMixin:
             context_emb.unsqueeze(1).expand(-1, num_target_blocks, -1, -1)
             * context_mask_by_view.unsqueeze(-1)
         )
-        predictor_input = torch.where(
-            target_masks.unsqueeze(-1),
-            self.latent_mask_token.view(1, 1, 1, -1).to(context_emb),
-            predictor_input,
-        )
+        if self.masked_token_input_mode == "mz_sentinel":
+            predictor_input = torch.where(
+                target_masks.unsqueeze(-1),
+                context_emb.unsqueeze(1).expand(-1, num_target_blocks, -1, -1),
+                predictor_input,
+            )
+        else:
+            predictor_input = torch.where(
+                target_masks.unsqueeze(-1),
+                self.latent_mask_token.view(1, 1, 1, -1).to(context_emb),
+                predictor_input,
+            )
         predictor_visible_mask = (context_mask_by_view | target_masks).reshape(
             batch_size * num_target_blocks,
             num_peaks,
