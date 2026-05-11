@@ -534,37 +534,45 @@ class SpectralGraphormerBias(nn.Module):
     ) -> torch.Tensor | None:
         mass_da = peak_mz.float() * self.mass_scale
 
-        pieces: list[torch.Tensor] = []
-        has_pair_bias = False
+        pair_pieces: list[torch.Tensor] = []
+        key_pieces: list[torch.Tensor] = []
 
         if self.relative_bias is not None:
-            pieces.append(self.relative_bias(mass_da))
-            has_pair_bias = True
+            pair_pieces.append(self.relative_bias(mass_da))
 
         if self.precursor_bias is not None:
             precursor_da = self._resolve_precursor_da(mass_da, precursor_mz)
             if precursor_da is not None:
-                pieces.append(self.precursor_bias(mass_da, precursor_da))
+                key_pieces.append(self.precursor_bias(mass_da, precursor_da))
 
         if self.intensity_bias is not None and peak_intensity is not None:
-            pieces.append(self.intensity_bias(peak_intensity))
-            has_pair_bias = True
+            pair_pieces.append(self.intensity_bias(peak_intensity))
 
-        if not pieces:
+        if not pair_pieces and not key_pieces:
             return None
 
-        bias = pieces[0]
-        for piece in pieces[1:]:
-            bias = bias + piece
+        pair_bias = None
+        for piece in pair_pieces:
+            pair_bias = piece if pair_bias is None else pair_bias + piece
 
-        if self.bias_clip is not None:
-            bias = bias.clamp(min=-self.bias_clip, max=self.bias_clip)
+        key_bias = None
+        for piece in key_pieces:
+            key_bias = piece if key_bias is None else key_bias + piece
 
         s = int(num_special_tokens)
         if s > 0:
-            if has_pair_bias:
-                bias = F.pad(bias, (0, s, 0, s), value=0.0)
-            else:
-                bias = F.pad(bias, (0, s, 0, 0), value=0.0)
+            if pair_bias is not None:
+                pair_bias = F.pad(pair_bias, (0, s, 0, s), value=0.0)
+            if key_bias is not None:
+                peak_count = peak_mz.shape[1]
+                key_bias = key_bias.expand(-1, -1, peak_count, -1)
+                key_bias = F.pad(key_bias, (0, s, 0, s), value=0.0)
+
+        bias = pair_bias if pair_bias is not None else key_bias
+        if pair_bias is not None and key_bias is not None:
+            bias = pair_bias + key_bias
+
+        if self.bias_clip is not None:
+            bias = bias.clamp(min=-self.bias_clip, max=self.bias_clip)
 
         return bias

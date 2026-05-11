@@ -93,6 +93,66 @@ def test_spectral_graphormer_bias_zero_init_pads_special_tokens():
     assert int(torch.count_nonzero(bias).item()) == 0
 
 
+def test_precursor_only_bias_does_not_apply_to_special_query_tokens():
+    precursor_only = SpectralGraphormerBias(
+        num_heads=2,
+        relative_kind="none",
+        use_precursor_bias=True,
+        num_freqs=4,
+        init_std=0.0,
+    )
+    relative_and_precursor = SpectralGraphormerBias(
+        num_heads=2,
+        relative_kind="harmonic",
+        use_precursor_bias=True,
+        num_freqs=4,
+        init_std=0.0,
+    )
+    with torch.no_grad():
+        precursor_only.precursor_bias.cos_weight.copy_(
+            torch.tensor(
+                [
+                    [0.20, -0.10, 0.30, 0.40],
+                    [-0.50, 0.60, -0.20, 0.10],
+                ]
+            )
+        )
+        precursor_only.precursor_bias.sin_weight.copy_(
+            torch.tensor(
+                [
+                    [0.70, 0.20, -0.40, 0.10],
+                    [0.30, -0.80, 0.50, 0.20],
+                ]
+            )
+        )
+        relative_and_precursor.precursor_bias.cos_weight.copy_(
+            precursor_only.precursor_bias.cos_weight
+        )
+        relative_and_precursor.precursor_bias.sin_weight.copy_(
+            precursor_only.precursor_bias.sin_weight
+        )
+
+    peak_mz = torch.tensor([[0.10, 0.20, 0.35]])
+    precursor_mz = torch.tensor([0.50])
+
+    precursor_bias = precursor_only(
+        peak_mz,
+        precursor_mz=precursor_mz,
+        num_special_tokens=2,
+    )
+    combined_bias = relative_and_precursor(
+        peak_mz,
+        precursor_mz=precursor_mz,
+        num_special_tokens=2,
+    )
+
+    assert precursor_bias.shape == (1, 2, 5, 5)
+    assert torch.count_nonzero(precursor_bias[:, :, :3, :3]).item() > 0
+    assert int(torch.count_nonzero(precursor_bias[:, :, 3:, :]).item()) == 0
+    assert int(torch.count_nonzero(precursor_bias[:, :, :, 3:]).item()) == 0
+    assert torch.equal(precursor_bias, combined_bias)
+
+
 def test_spectral_graphormer_bias_autocast_matches_fp32():
     torch.manual_seed(11)
     module = SpectralGraphormerBias(
