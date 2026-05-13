@@ -42,19 +42,20 @@ class MsgProbeHeads(torch.nn.Module):
         *,
         input_dim: int,
         hidden_dim: int,
+        num_layers: int = 2,
         task_names: tuple[str, ...],
         task_output_dims: dict[str, int] | None = None,
     ) -> None:
         super().__init__()
         self.heads = torch.nn.ModuleDict(
             {
-                name: torch.nn.Sequential(
-                    torch.nn.Linear(input_dim, hidden_dim),
-                    torch.nn.SiLU(),
-                    torch.nn.Linear(
-                        hidden_dim,
-                        1 if task_output_dims is None else task_output_dims.get(name, 1),
+                name: _build_mlp_head(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    output_dim=(
+                        1 if task_output_dims is None else task_output_dims.get(name, 1)
                     ),
+                    num_layers=num_layers,
                 )
                 for name in task_names
             }
@@ -143,6 +144,7 @@ class MsgSequenceProbe(torch.nn.Module):
         pooler: torch.nn.Module,
         pooled_dim: int,
         hidden_dim: int,
+        num_layers: int = 2,
         task_names: tuple[str, ...],
         task_output_dims: dict[str, int] | None = None,
     ) -> None:
@@ -151,6 +153,7 @@ class MsgSequenceProbe(torch.nn.Module):
         self.heads = MsgProbeHeads(
             input_dim=pooled_dim,
             hidden_dim=hidden_dim,
+            num_layers=num_layers,
             task_names=task_names,
             task_output_dims=task_output_dims,
         )
@@ -172,6 +175,7 @@ def build_msg_sequence_probe(
 ) -> MsgSequenceProbe:
     model_dim = int(config.model_dim)
     hidden_dim = int(config.get("msg_probe_mlp_hidden_dim", model_dim))
+    num_layers = int(config.get("msg_probe_mlp_num_layers", 2))
     task_names = _probe_task_names(task_spec)
     task_output_dims = _probe_task_output_dims(task_spec)
     pooler, pooled_dim = _build_pooler(
@@ -184,9 +188,34 @@ def build_msg_sequence_probe(
         pooler=pooler,
         pooled_dim=pooled_dim,
         hidden_dim=hidden_dim,
+        num_layers=num_layers,
         task_names=task_names,
         task_output_dims=task_output_dims,
     )
+
+
+def _build_mlp_head(
+    *,
+    input_dim: int,
+    hidden_dim: int,
+    output_dim: int,
+    num_layers: int,
+) -> torch.nn.Module:
+    if num_layers == 1:
+        return torch.nn.Linear(input_dim, output_dim)
+    layers: list[torch.nn.Module] = [
+        torch.nn.Linear(input_dim, hidden_dim),
+        torch.nn.SiLU(),
+    ]
+    for _ in range(num_layers - 2):
+        layers.extend(
+            [
+                torch.nn.Linear(hidden_dim, hidden_dim),
+                torch.nn.SiLU(),
+            ]
+        )
+    layers.append(torch.nn.Linear(hidden_dim, output_dim))
+    return torch.nn.Sequential(*layers)
 
 
 def _probe_task_names(task_spec: MsgProbeTaskSpec) -> tuple[str, ...]:

@@ -93,6 +93,7 @@ image = (
     )
     .add_local_dir(local / "spectra_learning", remote_path=f"{PROJECT_ROOT}/spectra_learning")
     .add_local_dir(local / "configs", remote_path=f"{PROJECT_ROOT}/configs")
+    .add_local_dir(local / "scripts", remote_path=f"{PROJECT_ROOT}/scripts")
 )
 
 app = modal.App("spectra-training", image=image)
@@ -742,6 +743,82 @@ def run_probe_checkpoint(
 @app.function(
     image=image,
     volumes={volume_path: volume},
+    cpu=8.0,
+    memory=32768,
+    gpu=PROBE_GPU,
+    timeout=PROBE_TIMEOUT_HOURS * HOURS,
+    secrets=[huggingface_secret],
+    single_use_containers=True,
+)
+def run_fluorine_checkpoint(
+    config_path: str,
+    checkpoint_path: str,
+    output_dir: str,
+    label: str,
+    embedding_cache_dir: str,
+):
+    import logging
+    import os
+    import sys
+    from argparse import Namespace
+    from pathlib import Path
+
+    os.chdir(PROJECT_ROOT)
+    sys.path.insert(0, PROJECT_ROOT)
+
+    logging.basicConfig(level=logging.INFO)
+    volume.reload()
+
+    from scripts.train_fluorine_detection import HF_REPO_ID, HF_SUBDIR, run
+
+    output_dir_path = Path(output_dir)
+    output_dir_path.mkdir(parents=True, exist_ok=True)
+    args = Namespace(
+        source="checkpoint",
+        config=Path(config_path),
+        checkpoint=Path(checkpoint_path),
+        train_covariance_pooler=True,
+        covariance_dim=64,
+        embedding_cache_dir=Path(embedding_cache_dir),
+        force_embedding_cache=False,
+        embedding_dtype="float16",
+        repo_id=HF_REPO_ID,
+        revision="main",
+        subdir=HF_SUBDIR,
+        cache_dir=volume_path / "data" / "fluorine_detection_fine_tuned",
+        num_shards=16,
+        parquet_batch_size=50_000,
+        output_json=output_dir_path / f"{label}.json",
+        device="cuda",
+        seed=42,
+        batch_size=512,
+        num_peaks=None,
+        peak_ordering=None,
+        epochs=20,
+        patience=5,
+        hidden_dims="256,512",
+        learning_rates="0.001,0.0003",
+        weight_decays="0.0001",
+        dropouts="0.1",
+        focal_alpha="auto",
+        focal_gamma=2.0,
+        select_metric="average_precision",
+        max_train_samples=None,
+        max_val_samples=None,
+        max_test_samples=None,
+    )
+    logging.info("Running fluorine checkpoint evaluation for %s", label)
+    metrics = run(args)
+    metrics["label"] = label
+    metrics["checkpoint_path"] = checkpoint_path
+    volume.commit()
+    logging.info("Fluorine checkpoint evaluation complete for %s", label)
+    return metrics
+
+
+@app.function(
+    image=image,
+    volumes={volume_path: volume},
     cpu=16.0,
     memory=65536,  # 64 GiB
     gpu=f"{DEFAULT_GPU}:4",
@@ -1052,6 +1129,251 @@ def _submit_probe_from_local(
         print(json.dumps(handle.get(), indent=2, sort_keys=True))
 
 
+def _submit_probe_sweep_from_local(
+    *,
+    config_path: str,
+    sweep_json_path: str,
+    checkpoint_path: str,
+    workdir: str,
+    global_step: int,
+    wait_for_results: bool,
+) -> None:
+    from spectra_learning.training.api import load_config
+    from spectra_learning.training.logging import _config_to_wandb_dict
+
+    local_checkpoint = Path(checkpoint_path).expanduser().resolve()
+    local_workdir = Path(workdir).expanduser().resolve()
+    local_workdir.mkdir(parents=True, exist_ok=True)
+    jobs = json.loads(Path(sweep_json_path).expanduser().resolve().read_text())
+    remote_checkpoint = _upload_probe_checkpoint(
+        local_checkpoint,
+        local_workdir,
+        int(global_step),
+    )
+    handles = []
+    records = []
+    for job in jobs:
+        name = str(job["name"])
+        overrides = dict(job["overrides"])
+        job_dir = local_workdir / name
+        job_dir.mkdir(parents=True, exist_ok=True)
+        config = load_config(config_path)
+        with config.ignore_type():
+            for key, value in overrides.items():
+                setattr(config, key, value)
+        config_dict = _config_to_wandb_dict(config)
+        (job_dir / "config.json").write_text(
+            json.dumps(config_dict, indent=2, sort_keys=True)
+        )
+        remote_workdir = volume_path / "modal_probe_runs" / local_workdir.name / name
+        handle = run_probe_checkpoint.spawn(
+            config_json=_modal_probe_config_json(json.dumps(config_dict, sort_keys=True)),
+            checkpoint_path=str(remote_checkpoint),
+            workdir=str(remote_workdir),
+            global_step=int(global_step),
+        )
+        record = {
+            "name": name,
+            "call_id": handle.object_id,
+            "local_dir": str(job_dir),
+            "remote_workdir": str(remote_workdir),
+            "remote_checkpoint": str(remote_checkpoint),
+            "overrides": overrides,
+        }
+        records.append(record)
+        handles.append((handle, record))
+        print(f"spawned {name}: {handle.object_id}")
+    manifest_path = local_workdir / "manifest.json"
+    manifest_path.write_text(json.dumps(records, indent=2, sort_keys=True))
+    print(f"manifest: {manifest_path}")
+    if not wait_for_results:
+        return
+
+    results = []
+    for handle, record in handles:
+        metrics = handle.get()
+        job_dir = Path(record["local_dir"])
+        (job_dir / "metrics.json").write_text(
+            json.dumps(metrics, indent=2, sort_keys=True)
+        )
+        summary = {
+            **record,
+            "best_epoch": metrics["msg_probe/covariance/epoch"],
+            "val_auc": metrics["msg_probe/covariance/val/auc_maccs_mean"],
+            "test_auc": metrics["msg_probe/covariance/test/auc_maccs_mean"],
+            "test_ap": metrics[
+                "msg_probe/covariance/test/average_precision_maccs_mean"
+            ],
+        }
+        results.append(summary)
+        results_path = local_workdir / "results.partial.json"
+        results_path.write_text(
+            json.dumps(
+                sorted(results, key=lambda item: item["test_auc"], reverse=True),
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        print(
+            f"completed {record['name']}: "
+            f"val_auc={summary['val_auc']:.4f} "
+            f"test_auc={summary['test_auc']:.4f} "
+            f"epoch={summary['best_epoch']:.0f}"
+        )
+    results = sorted(results, key=lambda item: item["test_auc"], reverse=True)
+    results_path = local_workdir / "results.json"
+    results_path.write_text(json.dumps(results, indent=2, sort_keys=True))
+    print(json.dumps(results, indent=2, sort_keys=True))
+
+
+def _submit_fluorine_sweep_from_local(
+    *,
+    config_path: str,
+    checkpoint_dir: str,
+    workdir: str,
+    max_checkpoints: int,
+    wait_for_results: bool,
+) -> None:
+    import re
+
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    from spectra_learning.training.checkpointing import is_main_checkpoint_path
+
+    local_workdir = Path(workdir).expanduser().resolve()
+    local_workdir.mkdir(parents=True, exist_ok=True)
+    checkpoint_root = Path(checkpoint_dir).expanduser().resolve()
+    checkpoints = sorted(
+        [
+            path
+            for path in checkpoint_root.glob("*.pt")
+            if path.name.startswith("step-") and is_main_checkpoint_path(path)
+        ],
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )[: int(max_checkpoints)]
+    handles = []
+    records = []
+    for order_idx, checkpoint_path in enumerate(checkpoints):
+        match = re.search(r"step-(\d+)", checkpoint_path.name)
+        global_step = int(match.group(1))
+        label = f"{order_idx:02d}_{checkpoint_path.stem}"
+        remote_checkpoint = _upload_probe_checkpoint(
+            checkpoint_path,
+            local_workdir / "checkpoint_uploads",
+            global_step,
+        )
+        remote_output_dir = volume_path / "fluorine_checkpoint_sweeps" / local_workdir.name
+        remote_embedding_cache_dir = (
+            volume_path / "fluorine_checkpoint_embeddings" / local_workdir.name / label
+        )
+        handle = run_fluorine_checkpoint.spawn(
+            config_path=config_path,
+            checkpoint_path=str(remote_checkpoint),
+            output_dir=str(remote_output_dir),
+            label=label,
+            embedding_cache_dir=str(remote_embedding_cache_dir),
+        )
+        record = {
+            "order": order_idx,
+            "label": label,
+            "global_step": global_step,
+            "checkpoint_path": str(checkpoint_path),
+            "remote_checkpoint": str(remote_checkpoint),
+            "remote_output_dir": str(remote_output_dir),
+            "remote_embedding_cache_dir": str(remote_embedding_cache_dir),
+            "call_id": handle.object_id,
+        }
+        records.append(record)
+        handles.append((handle, record))
+        print(f"spawned {label}: {handle.object_id}")
+    manifest_path = local_workdir / "manifest.json"
+    manifest_path.write_text(json.dumps(records, indent=2, sort_keys=True))
+    print(f"manifest: {manifest_path}")
+    if not wait_for_results:
+        return
+
+    def write_fluorine_results(results: list[dict], final: bool) -> None:
+        ordered_results = sorted(results, key=lambda value: value["order"])
+        partial_path = local_workdir / "results.partial.json"
+        partial_path.write_text(json.dumps(ordered_results, indent=2, sort_keys=True))
+
+        plot_path = local_workdir / "fluorine_precision_recall_curves.png"
+        pdf_path = local_workdir / "fluorine_precision_recall_curves.pdf"
+        fig, ax = plt.subplots(figsize=(7.5, 5.5), dpi=180)
+        colors = plt.cm.viridis_r(
+            [idx / max(1, len(ordered_results) - 1) for idx in range(len(ordered_results))]
+        )
+        for color, item in zip(colors, ordered_results):
+            curve = item["test_pr_curve"]
+            ax.plot(
+                curve["recall"],
+                curve["precision"],
+                color=color,
+                linewidth=2.0,
+                label=f"step {item['global_step']} AP={item['average_precision']:.3f}",
+            )
+        ax.set_xlabel("Recall")
+        ax.set_ylabel("Precision")
+        ax.set_xlim(0.0, 1.0)
+        ax.set_ylim(0.0, 1.02)
+        ax.grid(True, alpha=0.25)
+        ax.legend(loc="lower left", fontsize=8)
+        ax.set_title(
+            f"Fluorine Detection Precision-Recall by Checkpoint "
+            f"({len(ordered_results)}/{len(records)} ready)"
+        )
+        fig.tight_layout()
+        fig.savefig(plot_path)
+        fig.savefig(pdf_path)
+        plt.close(fig)
+
+        if final:
+            results_path = local_workdir / "results.json"
+            results_path.write_text(json.dumps(ordered_results, indent=2, sort_keys=True))
+            print(f"plot: {plot_path}")
+            print(json.dumps(ordered_results, indent=2, sort_keys=True))
+
+    import time
+
+    results_by_label = {}
+    pending = dict(handles)
+    while pending:
+        made_progress = False
+        for handle, record in list(pending.items()):
+            try:
+                metrics = handle.get(timeout=1)
+            except TimeoutError:
+                continue
+
+            made_progress = True
+            pending.pop(handle)
+            output_path = local_workdir / f"{record['label']}.json"
+            output_path.write_text(json.dumps(metrics, indent=2, sort_keys=True))
+            summary = {
+                **record,
+                "average_precision": metrics["test"]["test/average_precision"],
+                "roc_auc": metrics["test"]["test/roc_auc"],
+                "best_epoch": metrics["best_epoch"],
+                "best_hparams": metrics["best_hparams"],
+                "test_pr_curve": metrics["test_pr_curve"],
+            }
+            results_by_label[record["label"]] = summary
+            write_fluorine_results(list(results_by_label.values()), final=False)
+            print(
+                f"completed {record['label']}: "
+                f"AP={summary['average_precision']:.4f} "
+                f"AUC={summary['roc_auc']:.4f}"
+            )
+        if pending and not made_progress:
+            time.sleep(30.0)
+
+    write_fluorine_results(list(results_by_label.values()), final=True)
+
+
 def _with_async_probe_override(overrides: str, async_probes: bool) -> str:
     if not async_probes:
         return overrides
@@ -1093,7 +1415,32 @@ def main(
     submit_probe_workdir: str = "",
     submit_probe_global_step: int = 0,
     submit_probe_wait: bool = False,
+    submit_probe_sweep_json_path: str = "",
+    submit_fluorine_checkpoint_dir: str = "",
+    submit_fluorine_workdir: str = "",
+    submit_fluorine_max_checkpoints: int = 10,
 ):
+    if submit_fluorine_checkpoint_dir:
+        _submit_fluorine_sweep_from_local(
+            config_path=config,
+            checkpoint_dir=submit_fluorine_checkpoint_dir,
+            workdir=submit_fluorine_workdir,
+            max_checkpoints=int(submit_fluorine_max_checkpoints),
+            wait_for_results=submit_probe_wait,
+        )
+        return
+
+    if submit_probe_sweep_json_path:
+        _submit_probe_sweep_from_local(
+            config_path=config,
+            sweep_json_path=submit_probe_sweep_json_path,
+            checkpoint_path=submit_probe_checkpoint_path,
+            workdir=submit_probe_workdir,
+            global_step=int(submit_probe_global_step),
+            wait_for_results=submit_probe_wait,
+        )
+        return
+
     if submit_probe_checkpoint_path:
         _submit_probe_from_local(
             config_json_path=submit_probe_config_json_path,

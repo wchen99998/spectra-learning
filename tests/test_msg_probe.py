@@ -306,6 +306,26 @@ class MsgSequenceProbeTests(unittest.TestCase):
             self.assertEqual(logits["mol_weight"].shape, (3, 1))
             self.assertEqual(logits["maccs"].shape, (3, 4))
 
+    def test_sequence_probe_supports_deeper_mlp_heads(self):
+        probe = MsgSequenceProbe(
+            pooler=MsgMeanPool(),
+            pooled_dim=4,
+            hidden_dim=8,
+            num_layers=4,
+            task_names=("mol_weight", "maccs"),
+            task_output_dims={"maccs": 4},
+        )
+
+        head = probe.heads.heads["maccs"]
+        linear_layers = [
+            layer for layer in head if isinstance(layer, torch.nn.Linear)
+        ]
+
+        self.assertEqual(len(linear_layers), 4)
+        self.assertEqual(linear_layers[0].in_features, 4)
+        self.assertEqual(linear_layers[1].in_features, 8)
+        self.assertEqual(linear_layers[-1].out_features, 4)
+
     def test_covariance_probe_uses_learned_pooler_when_provided(self):
         config = config_dict.ConfigDict()
         config.model_dim = 4
