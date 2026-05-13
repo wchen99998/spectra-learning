@@ -6,16 +6,18 @@ from configs.wandb_pa645zxs import get_config as get_base_config
 def get_config() -> config_dict.ConfigDict:
     cfg = get_base_config()
 
-    cfg.num_epochs = 100
+    cfg.num_epochs = 25
 
-    cfg.batch_size = 2048
+    cfg.batch_size = 256
     cfg.model_dim = 512
     cfg.predictor_learning_rate_ratio = 1.0
     cfg.encoder_num_layers = 14
     cfg.encoder_num_heads = 8
     cfg.encoder_num_kv_heads = 8
-    cfg.encoder_use_position_embedding = True
+    cfg.encoder_use_position_embedding = False
     cfg.encoder_use_fourier_features = True
+    cfg.encoder_apply_final_norm = True
+    cfg.predictor_apply_final_norm = True
     cfg.encoder_fourier_mlp_hidden_dim = 1024
     cfg.encoder_fourier_mlp_num_layers = 4
     cfg.encoder_fourier_num_freqs = 64
@@ -45,6 +47,7 @@ def get_config() -> config_dict.ConfigDict:
 
     cfg.msg_probe_every_n_steps = 0.3
     cfg.msg_probe_batch_size = 256
+    cfg.msg_probe_backend = "modal"
     cfg.jepa_mask_strategy = "intensity_aware"
     cfg.jepa_num_target_blocks = 2
     cfg.jepa_context_fraction = 0.35
@@ -52,11 +55,11 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_block_min_len = 1
     cfg.jepa_mask_lengths = (2, 4, 8, 12)
     cfg.jepa_mask_round_from = 3
-    cfg.train_covariance_pooling = True
+    cfg.train_covariance_pooling = False
 
-    cfg.optimizer = "adamw"
+    cfg.optimizer = "muon"
     cfg.learning_rate = 2e-4
-    cfg.weight_decay = 0.1
+    cfg.weight_decay = 0.01
     cfg.min_learning_rate = 2e-05
     cfg.b2 = 0.98
 

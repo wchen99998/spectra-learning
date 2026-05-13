@@ -122,6 +122,7 @@ def _build_temporal_optimizers(
         "temporal_predictor.",
         "temporal_rt_proj.",
         "temporal_query_token",
+        "temporal_slot_embedding.",
     )
     optimizer_type = str(config.get("optimizer", "adamw")).lower()
 
@@ -274,6 +275,7 @@ def _load_pretrained_checkpoint(
             (
                 "position_embedding.weight",
                 "predictor_position_embedding.weight",
+                "latent_mask_token",
             )
         ):
             sd.pop(key)
@@ -301,6 +303,7 @@ def _load_pretrained_checkpoint(
         "temporal_predictor.",
         "temporal_rt_proj.",
         "temporal_query_token",
+        "temporal_slot_embedding.",
         "masked_latent_readout.",
         "target_projector.",
         "teacher_target_projector.",

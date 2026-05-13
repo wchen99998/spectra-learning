@@ -940,6 +940,7 @@ def test_wandb_logger_defines_msg_probe_global_step(monkeypatch, tmp_path: Path)
     }
     assert fake_run.definitions == [
         (("global_step",), {}),
+        (("train/*",), {"step_metric": "global_step"}),
         (("msg_probe/*",), {"step_metric": "global_step"}),
     ]
 
