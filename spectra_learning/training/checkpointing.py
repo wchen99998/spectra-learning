@@ -54,13 +54,53 @@ def save_checkpoint(
     covariance_pooler: torch.nn.Module | None = None,
 ) -> None:
     pooler_path = (
-        covariance_pooler_checkpoint_path(path) if covariance_pooler is not None else None
+        covariance_pooler_checkpoint_path(path)
+        if covariance_pooler is not None
+        else None
     )
     torch.save(
         {
             "model": model.state_dict(),
             "optimizers": [optimizer_state_dict(opt) for opt in optimizers],
             "schedulers": [sched.state_dict() for sched in schedulers],
+            "global_step": global_step,
+            "epoch": epoch,
+            "loss": loss,
+            "wandb_run_id": wandb_run_id,
+            "covariance_pooler_checkpoint": (
+                pooler_path.name if pooler_path is not None else None
+            ),
+        },
+        path,
+    )
+    if covariance_pooler is not None:
+        torch.save(
+            {
+                "pooler": covariance_pooler.state_dict(),
+                "global_step": global_step,
+                "epoch": epoch,
+            },
+            pooler_path,
+        )
+
+
+def save_probe_checkpoint(
+    path: Path,
+    model: PeakSetSIGReg,
+    global_step: int,
+    epoch: int,
+    loss: float,
+    wandb_run_id: str | None = None,
+    covariance_pooler: torch.nn.Module | None = None,
+) -> None:
+    pooler_path = (
+        covariance_pooler_checkpoint_path(path)
+        if covariance_pooler is not None
+        else None
+    )
+    torch.save(
+        {
+            "model": model.state_dict(),
             "global_step": global_step,
             "epoch": epoch,
             "loss": loss,

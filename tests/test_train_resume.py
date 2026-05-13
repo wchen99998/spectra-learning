@@ -1,4 +1,6 @@
 import tempfile
+import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,13 +17,19 @@ from spectra_learning.training.checkpointing import (
     save_checkpoint,
 )
 from spectra_learning.training import pretrain
+from spectra_learning.training import modal_probe as modal_probe_module
+from spectra_learning.probes.massspec import checkpoint_probe
 from spectra_learning.training.modules import PretrainModule
+from spectra_learning.training.modal_probe import save_and_submit_modal_msg_probe
+from spectra_learning.training.modal_probe import _path_is_modal_volume
+from spectra_learning.training.modal_probe import _spawn_modal_probe_from_volume
 from spectra_learning.training.optimization import (
     build_optimizers,
     is_predictor_parameter,
     is_weight_decay_target,
 )
 from spectra_learning.training.api import _build_wandb_init_kwargs, build_model_from_config
+from spectra_learning.training.logging import WandbMetricLogger, log_msg_probe_metrics
 
 
 def _small_model(**overrides) -> PeakSetSIGReg:
@@ -297,6 +305,346 @@ def test_training_loop_runs_distributed_online_probe_and_logs_on_main(monkeypatc
     assert worker_metrics["run/final_global_step"] == 2.0
 
 
+def test_training_loop_modal_probe_submits_on_main_without_inline_probe(monkeypatch, tmp_path: Path):
+    cfg = config_dict.ConfigDict()
+    cfg.autocast_dtype = "bf16"
+    cfg.log_every_n_steps = 0
+    cfg.collapse_metrics_every_n_steps = 0
+    cfg.checkpoint_every_steps = 1000
+    cfg.msg_probe_every_n_steps = 2
+    cfg.msg_probe_backend = "modal"
+    cfg.msg_probe_variants = ["mean"]
+    cfg.device_prefetch_size = 1
+    cfg.throughput_warmup_steps = 1000
+
+    class FakeDataModule:
+        train_steps = 2
+        global_batch_size = 4
+
+        def train_loader_for_epoch(self, epoch: int, start_batch: int = 0):
+            return [
+                {"peak_mz": torch.tensor([float(step)])}
+                for step in range(start_batch, self.train_steps)
+            ]
+
+    class FakeLogger:
+        experiment = None
+
+        def __init__(self) -> None:
+            self.logs = []
+
+        def log_metrics(self, metrics, step=None) -> None:
+            self.logs.append((dict(metrics), step))
+
+    submit_calls = []
+    barriers = []
+
+    def fake_train_step_impl(*args, **kwargs):
+        return {"loss": torch.tensor(1.0)}
+
+    def fake_run_msg_probe(**kwargs):
+        raise AssertionError("inline probe should not run in modal mode")
+
+    def fake_submit_modal_probe(**kwargs):
+        submit_calls.append(kwargs)
+        return {
+            "msg_probe/modal/submitted": 1.0,
+            "msg_probe/modal/call_id": "fc-test",
+        }
+
+    def fake_barrier(distributed):
+        barriers.append((distributed.rank, distributed.world_size))
+
+    monkeypatch.setattr(pretrain, "train_step_impl", fake_train_step_impl)
+    monkeypatch.setattr(pretrain, "run_msg_probe", fake_run_msg_probe)
+    monkeypatch.setattr(
+        pretrain,
+        "save_and_submit_modal_msg_probe",
+        fake_submit_modal_probe,
+    )
+    monkeypatch.setattr(pretrain, "barrier", fake_barrier)
+
+    device = torch.device("cpu")
+    model = torch.nn.Linear(1, 1)
+    main_logger = FakeLogger()
+    main_metrics = pretrain.run_training_loop(
+        config=cfg,
+        datamodule=FakeDataModule(),
+        model=model,
+        optimizers=[],
+        schedulers=[],
+        logger=main_logger,
+        checkpoint_dir=tmp_path,
+        start_epoch=0,
+        loop_epochs=1,
+        resume_offset=0,
+        global_step=0,
+        total_steps=2,
+        device=device,
+        distributed=pretrain.DistributedContext(
+            rank=0,
+            local_rank=0,
+            world_size=2,
+            device=device,
+        ),
+    )
+    worker_logger = FakeLogger()
+    worker_metrics = pretrain.run_training_loop(
+        config=cfg,
+        datamodule=FakeDataModule(),
+        model=model,
+        optimizers=[],
+        schedulers=[],
+        logger=worker_logger,
+        checkpoint_dir=tmp_path,
+        start_epoch=0,
+        loop_epochs=1,
+        resume_offset=0,
+        global_step=0,
+        total_steps=2,
+        device=device,
+        distributed=pretrain.DistributedContext(
+            rank=1,
+            local_rank=1,
+            world_size=2,
+            device=device,
+        ),
+    )
+
+    assert len(submit_calls) == 1
+    assert submit_calls[0]["global_step"] == 2
+    assert main_logger.logs == [({"msg_probe/modal/submitted": 1.0}, 2)]
+    assert worker_logger.logs == []
+    assert barriers == [(0, 2), (0, 2), (1, 2), (1, 2)]
+    assert main_metrics["msg_probe/modal/submitted"] == 1.0
+    assert main_metrics["run/modal_probe_call_ids"] == ["fc-test"]
+    assert main_metrics["run/modal_probe_calls"] == 1.0
+    assert main_metrics["run/final_global_step"] == 2.0
+    assert worker_metrics["run/final_global_step"] == 2.0
+
+
+def test_save_and_submit_modal_msg_probe_writes_checkpoint_and_manifest(tmp_path: Path):
+    cfg = config_dict.ConfigDict()
+    cfg.seed = 7
+    cfg.enable_wandb = False
+    model = _small_model()
+    calls = []
+
+    def submitter(config_json, checkpoint_path, workdir, global_step):
+        calls.append(
+            {
+                "config": json.loads(config_json),
+                "checkpoint_path": checkpoint_path,
+                "workdir": workdir,
+                "global_step": global_step,
+            }
+        )
+        return "call-123"
+
+    metrics = save_and_submit_modal_msg_probe(
+        config=cfg,
+        model=model,
+        covariance_pooler=None,
+        checkpoint_dir=tmp_path,
+        workdir=tmp_path,
+        global_step=12,
+        epoch=3,
+        loss=0.25,
+        wandb_run_id="wandb-run-1",
+        submitter=submitter,
+    )
+
+    checkpoint_path = tmp_path / "modal-probe-step-00000012.pt"
+    manifest_path = tmp_path / "modal-probe-step-00000012.submission.json"
+    config_path = tmp_path / "modal-probe-step-00000012.config.json"
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    manifest = json.loads(manifest_path.read_text())
+
+    assert calls[0]["config"]["seed"] == 7
+    assert calls[0]["checkpoint_path"] == checkpoint_path
+    assert calls[0]["global_step"] == 12
+    assert checkpoint["global_step"] == 12
+    assert checkpoint["wandb_run_id"] == "wandb-run-1"
+    assert "optimizers" not in checkpoint
+    assert "schedulers" not in checkpoint
+    assert config_path.exists()
+    assert manifest["call_id"] == "call-123"
+    assert metrics["msg_probe/modal/submitted"] == 1.0
+    assert metrics["msg_probe/modal/call_id"] == "call-123"
+
+
+def test_save_and_submit_modal_msg_probe_uses_detached_submit_process(monkeypatch, tmp_path: Path):
+    cfg = config_dict.ConfigDict()
+    cfg.seed = 7
+    cfg.enable_wandb = False
+    cfg.modal_probe_cli = "modal"
+    model = _small_model()
+    popen_calls = []
+
+    class FakeProcess:
+        pid = 1234
+
+    def fake_popen(command, **kwargs):
+        popen_calls.append((command, kwargs))
+        return FakeProcess()
+
+    monkeypatch.setattr(modal_probe_module.subprocess, "Popen", fake_popen)
+
+    metrics = save_and_submit_modal_msg_probe(
+        config=cfg,
+        model=model,
+        covariance_pooler=None,
+        checkpoint_dir=tmp_path,
+        workdir=tmp_path,
+        global_step=12,
+        epoch=3,
+        loss=0.25,
+    )
+
+    command, kwargs = popen_calls[0]
+    manifest_path = tmp_path / "modal-probe-step-00000012.submission.json"
+    manifest = json.loads(manifest_path.read_text())
+
+    assert command[:4] == ["modal", "run", "--detach", "modal_train.py"]
+    assert "--submit-probe-checkpoint-path" in command
+    assert "--submit-probe-config-json-path" in command
+    assert kwargs["start_new_session"] is True
+    assert manifest["call_id"] == "local-submit-pid-1234"
+    assert metrics["msg_probe/modal/submitted"] == 1.0
+    assert metrics["msg_probe/modal/call_id"] == "local-submit-pid-1234"
+
+
+def test_modal_probe_volume_path_detection_uses_mount_path_without_resolving_symlinks():
+    cfg = config_dict.ConfigDict()
+
+    assert _path_is_modal_volume(
+        Path("/vol/experiments/run/checkpoints/modal-probe-step-00000100.pt"),
+        cfg,
+    )
+
+
+def test_spawn_modal_probe_from_volume_commits_before_spawn(monkeypatch):
+    calls = []
+
+    class FakeVolume:
+        def commit(self):
+            calls.append("commit")
+
+    class FakeProbeFunction:
+        def spawn(self, **kwargs):
+            calls.append(("spawn", kwargs))
+            return SimpleNamespace(object_id="fc-test")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "modal_train",
+        SimpleNamespace(volume=FakeVolume(), run_probe_checkpoint=FakeProbeFunction()),
+    )
+
+    call_id = _spawn_modal_probe_from_volume(
+        config_json="{}",
+        checkpoint_path=Path("/vol/run/checkpoint.pt"),
+        workdir=Path("/vol/run"),
+        global_step=100,
+    )
+
+    assert call_id == "fc-test"
+    assert calls[0] == "commit"
+    assert calls[1][0] == "spawn"
+
+
+def test_modal_train_waits_for_probe_function_calls(monkeypatch):
+    import modal_train
+
+    calls = []
+
+    class FakeFunctionCall:
+        @staticmethod
+        def from_id(call_id):
+            calls.append(("from_id", call_id))
+            return f"call:{call_id}"
+
+        @staticmethod
+        def gather(*function_calls):
+            calls.append(("gather", function_calls))
+            return []
+
+    monkeypatch.setattr(modal_train.modal, "FunctionCall", FakeFunctionCall)
+
+    modal_train._wait_for_modal_probe_calls(
+        {"run/modal_probe_call_ids": ["fc-1", "fc-2"]}
+    )
+
+    assert calls == [
+        ("from_id", "fc-1"),
+        ("from_id", "fc-2"),
+        ("gather", ("call:fc-1", "call:fc-2")),
+    ]
+
+
+def test_run_checkpoint_msg_probe_loads_checkpoint_and_logs_metrics(monkeypatch, tmp_path: Path):
+    cfg = config_dict.ConfigDict()
+    cfg.model_dim = 32
+    cfg.encoder_num_layers = 1
+    cfg.encoder_num_heads = 4
+    cfg.encoder_num_kv_heads = 4
+    cfg.attention_mlp_multiple = 2.0
+    cfg.feature_mlp_hidden_dim = 16
+    cfg.masked_token_loss_weight = 1.0
+    cfg.masked_latent_predictor_num_layers = 1
+    cfg.jepa_num_target_blocks = 1
+    cfg.num_peaks = 8
+    cfg.enable_wandb = False
+    cfg.seed = 3
+    model = build_model_from_config(cfg)
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    save_checkpoint(
+        checkpoint_path,
+        model,
+        optimizers=[],
+        schedulers=[],
+        global_step=9,
+        epoch=1,
+        loss=0.1,
+        wandb_run_id="wandb-run-1",
+    )
+    calls = []
+    logger_configs = []
+
+    def fake_run_msg_probe(**kwargs):
+        calls.append(kwargs)
+        return {"msg_probe/mean/test/auc_maccs_mean": 0.5}
+
+    class FakeLogger:
+        def log_metrics(self, metrics, step=None) -> None:
+            pass
+
+    def fake_build_logger(config, workdir):
+        logger_configs.append(config.copy_and_resolve_references())
+        return FakeLogger()
+
+    monkeypatch.setattr(checkpoint_probe, "run_msg_probe", fake_run_msg_probe)
+    monkeypatch.setattr(checkpoint_probe, "build_logger", fake_build_logger)
+    monkeypatch.setattr(checkpoint_probe.torch.cuda, "is_available", lambda: False)
+
+    metrics = checkpoint_probe.run_checkpoint_msg_probe(
+        config_json=json.dumps(cfg.to_dict()),
+        checkpoint_path=checkpoint_path,
+        workdir=tmp_path / "probe",
+        global_step=9,
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["device"].type == "cpu"
+    assert logger_configs[0].wandb_resume_id == "wandb-run-1"
+    assert logger_configs[0].wandb_shared_mode is True
+    assert logger_configs[0].wandb_shared_primary is False
+    assert logger_configs[0].wandb_shared_label == "probe_step_9"
+    assert logger_configs[0].wandb_shared_update_finish_state is False
+    assert metrics["msg_probe/mean/test/auc_maccs_mean"] == 0.5
+    assert (tmp_path / "probe" / "msg_probe_step-00000009.json").exists()
+
+
 def test_build_optimizers_uses_single_adamw_optimizer_by_default():
     model = _small_model()
     cfg = _optimizer_config()
@@ -549,6 +897,141 @@ def test_load_resume_model_state_rejects_removed_special_tokens():
     )
     with pytest.raises(RuntimeError, match="Unexpected key"):
         load_resume_model_state(restored, resume_state)
+
+
+def test_wandb_logger_defines_msg_probe_global_step(monkeypatch, tmp_path: Path):
+    class FakeRun:
+        def __init__(self) -> None:
+            self.config = SimpleNamespace(update=lambda *args, **kwargs: None)
+            self.definitions = []
+
+        def define_metric(self, *args, **kwargs) -> None:
+            self.definitions.append((args, kwargs))
+
+    fake_run = FakeRun()
+    init_calls = []
+
+    def fake_init(**kwargs):
+        init_calls.append(kwargs)
+        return fake_run
+
+    class FakeSettings:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    monkeypatch.setitem(
+        sys.modules,
+        "wandb",
+        SimpleNamespace(init=fake_init, Settings=FakeSettings),
+    )
+    cfg = config_dict.ConfigDict()
+    cfg.enable_wandb = True
+    cfg.wandb_project = "test-project"
+    cfg.msg_probe_backend = "modal"
+
+    logger = WandbMetricLogger(cfg, tmp_path)
+
+    assert logger.experiment is fake_run
+    assert init_calls[0]["project"] == "test-project"
+    assert init_calls[0]["settings"].kwargs == {
+        "mode": "shared",
+        "x_label": "train",
+        "x_primary": True,
+    }
+    assert fake_run.definitions == [
+        (("global_step",), {}),
+        (("msg_probe/*",), {"step_metric": "global_step"}),
+    ]
+
+
+def test_wandb_logger_uses_non_primary_shared_settings(monkeypatch, tmp_path: Path):
+    class FakeRun:
+        config = SimpleNamespace(update=lambda *args, **kwargs: None)
+
+        def define_metric(self, *args, **kwargs) -> None:
+            pass
+
+    init_calls = []
+
+    def fake_init(**kwargs):
+        init_calls.append(kwargs)
+        return FakeRun()
+
+    class FakeSettings:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    monkeypatch.setitem(
+        sys.modules,
+        "wandb",
+        SimpleNamespace(init=fake_init, Settings=FakeSettings),
+    )
+    cfg = config_dict.ConfigDict()
+    cfg.enable_wandb = True
+    cfg.wandb_project = "test-project"
+    cfg.wandb_shared_mode = True
+    cfg.wandb_shared_primary = False
+    cfg.wandb_shared_label = "probe_step_100"
+    cfg.wandb_shared_update_finish_state = False
+
+    WandbMetricLogger(cfg, tmp_path)
+
+    assert init_calls[0]["settings"].kwargs == {
+        "mode": "shared",
+        "x_label": "probe_step_100",
+        "x_primary": False,
+        "x_update_finish_state": False,
+    }
+
+
+def test_log_msg_probe_metrics_uses_custom_global_step_for_wandb():
+    class FakeLogger:
+        def __init__(self) -> None:
+            self.logs = []
+
+        def log_metrics(self, metrics, step=None) -> None:
+            self.logs.append((metrics, step))
+
+    logger = FakeLogger()
+
+    log_msg_probe_metrics(
+        logger,
+        {"msg_probe/test/auc_maccs_mean": 0.5},
+        200,
+        enable_wandb=True,
+    )
+
+    assert logger.logs == [
+        (
+            {
+                "global_step": 200.0,
+                "msg_probe/test/auc_maccs_mean": 0.5,
+            },
+            None,
+        )
+    ]
+
+
+def test_log_msg_probe_metrics_uses_explicit_step_for_csv_logger():
+    class FakeLogger:
+        def __init__(self) -> None:
+            self.logs = []
+
+        def log_metrics(self, metrics, step=None) -> None:
+            self.logs.append((metrics, step))
+
+    logger = FakeLogger()
+
+    log_msg_probe_metrics(
+        logger,
+        {"msg_probe/test/auc_maccs_mean": 0.5},
+        200,
+        enable_wandb=False,
+    )
+
+    assert logger.logs == [
+        ({"msg_probe/test/auc_maccs_mean": 0.5}, 200),
+    ]
 
 
 def test_build_wandb_init_kwargs_prefers_config_resume_id(monkeypatch):

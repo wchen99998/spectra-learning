@@ -28,6 +28,17 @@ def _build_wandb_init_kwargs(config: Any | None) -> dict[str, Any]:
     return wandb_kwargs
 
 
+def _use_wandb_shared_mode(config: Any | None) -> bool:
+    if config is None:
+        return False
+    if config.get("wandb_shared_mode", False):
+        return True
+    probe_backend = str(
+        config.get("msg_probe_backend", config.get("msg_probe_run_mode", "inline"))
+    ).lower()
+    return probe_backend == "modal"
+
+
 def _to_serialisable_config(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
@@ -71,12 +82,31 @@ class WandbMetricLogger(MetricLogger):
         import wandb
 
         wandb_kwargs = _build_wandb_init_kwargs(config)
+        if _use_wandb_shared_mode(config):
+            primary = bool(config.get("wandb_shared_primary", True))
+            settings_kwargs = {
+                "mode": "shared",
+                "x_primary": primary,
+                "x_label": str(
+                    config.get(
+                        "wandb_shared_label",
+                        "train" if primary else "worker",
+                    )
+                ),
+            }
+            if not primary:
+                settings_kwargs["x_update_finish_state"] = bool(
+                    config.get("wandb_shared_update_finish_state", False)
+                )
+            wandb_kwargs["settings"] = wandb.Settings(**settings_kwargs)
         self._run = wandb.init(
             project=config.get("wandb_project", "md4"),
             dir=str(workdir),
             config=_config_to_wandb_dict(config),
             **wandb_kwargs,
         )
+        self._run.define_metric("global_step")
+        self._run.define_metric("msg_probe/*", step_metric="global_step")
 
     @property
     def experiment(self) -> Any:
@@ -128,3 +158,16 @@ def build_logger(config: config_dict.ConfigDict, workdir: Path) -> MetricLogger:
         logger.log_hyperparams(_config_to_wandb_dict(config))
         return logger
     return CSVMetricLogger(workdir)
+
+
+def log_msg_probe_metrics(
+    logger: MetricLogger,
+    metrics: dict[str, Any],
+    global_step: int,
+    *,
+    enable_wandb: bool,
+) -> None:
+    if enable_wandb:
+        logger.log_metrics({"global_step": float(global_step), **metrics})
+    else:
+        logger.log_metrics(metrics, step=int(global_step))

@@ -5,6 +5,7 @@ Usage:
     modal run modal_train.py
     modal run modal_train.py --config configs/gems_small.py --gpu H100
     modal run modal_train.py --config configs/gems_small.py --workdir my_run
+    modal run modal_train.py --config configs/gems_small.py --async-probes
 
     # Parallel sweep (launches all experiments concurrently)
     modal run modal_train.py --sweep sweep_optim
@@ -39,9 +40,11 @@ import modal
 MINUTES = 60
 HOURS = 60 * MINUTES
 DEFAULT_GPU = "H100"
+PROBE_GPU = "L4"
 PROJECT_ROOT = "/root/spectra-learning"
 MAX_SWEEP_CONCURRENCY = 10
 TRAIN_TIMEOUT_HOURS = 24
+PROBE_TIMEOUT_HOURS = 6
 GEMS_SMALL_SWEEP_RUNTIME_HOURS = 12.0
 
 # ---------------------------------------------------------------------------
@@ -72,6 +75,7 @@ base_image = (
         "matplotlib",
         "pandas>=2.0.0",
         "pyarrow>=16.0.0",
+        "modal>=1.4.1",
     )
     .run_commands(
         "pip install --no-build-isolation gram-newton-schulz@git+https://github.com/Dao-AILab/gram-newton-schulz"
@@ -83,6 +87,10 @@ local = Path(__file__).parent
 image = (
     base_image
     .add_local_file(local / "train.py", remote_path=f"{PROJECT_ROOT}/train.py")
+    .add_local_file(
+        local / "modal_train.py",
+        remote_path=f"{PROJECT_ROOT}/modal_train.py",
+    )
     .add_local_dir(local / "spectra_learning", remote_path=f"{PROJECT_ROOT}/spectra_learning")
     .add_local_dir(local / "configs", remote_path=f"{PROJECT_ROOT}/configs")
 )
@@ -689,6 +697,51 @@ def train(
 @app.function(
     image=image,
     volumes={volume_path: volume},
+    cpu=8.0,
+    memory=32768,  # 32 GiB
+    gpu=PROBE_GPU,
+    timeout=PROBE_TIMEOUT_HOURS * HOURS,
+    secrets=[huggingface_secret, wandb_secret],
+    single_use_containers=True,
+)
+def run_probe_checkpoint(
+    config_json: str,
+    checkpoint_path: str,
+    workdir: str,
+    global_step: int,
+):
+    import logging
+    import os
+    import sys
+
+    os.chdir(PROJECT_ROOT)
+    sys.path.insert(0, PROJECT_ROOT)
+
+    logging.basicConfig(level=logging.INFO)
+    volume.reload()
+
+    from spectra_learning.probes.massspec.checkpoint_probe import run_checkpoint_msg_probe
+
+    config_json = _modal_probe_config_json(config_json)
+    logging.info(
+        "Running Modal MSG probe on %s at global_step=%d",
+        checkpoint_path,
+        int(global_step),
+    )
+    metrics = run_checkpoint_msg_probe(
+        config_json=config_json,
+        checkpoint_path=checkpoint_path,
+        workdir=workdir,
+        global_step=int(global_step),
+    )
+    volume.commit()
+    logging.info("Modal MSG probe complete: %s", metrics)
+    return metrics
+
+
+@app.function(
+    image=image,
+    volumes={volume_path: volume},
     cpu=16.0,
     memory=65536,  # 64 GiB
     gpu=f"{DEFAULT_GPU}:4",
@@ -914,6 +967,109 @@ FOUR_GPU_TRAINERS = {
 }
 
 
+def _modal_probe_config_json(config_json: str) -> str:
+    payload = json.loads(config_json)
+    payload["artifact_dir"] = str(
+        payload.get(
+            "modal_probe_artifact_dir",
+            volume_path / "data" / "gems_artifacts_alpha",
+        )
+    )
+    return json.dumps(payload, sort_keys=True)
+
+
+def _upload_probe_checkpoint(
+    checkpoint_path: Path,
+    workdir: Path,
+    global_step: int,
+) -> Path:
+    from spectra_learning.training.checkpointing import covariance_pooler_checkpoint_path
+    from spectra_learning.training.modal_probe import modal_probe_remote_label
+
+    label = modal_probe_remote_label(workdir, global_step)
+    remote_dir = Path("modal_probe_checkpoints") / label
+    with volume.batch_upload(force=True) as batch:
+        batch.put_file(
+            str(checkpoint_path),
+            f"/{remote_dir.as_posix()}/{checkpoint_path.name}",
+        )
+        pooler_path = covariance_pooler_checkpoint_path(checkpoint_path)
+        if pooler_path.exists():
+            batch.put_file(
+                str(pooler_path),
+                f"/{remote_dir.as_posix()}/{pooler_path.name}",
+            )
+    return volume_path / remote_dir / checkpoint_path.name
+
+
+def _modal_probe_workdir(workdir: Path, global_step: int) -> Path:
+    from spectra_learning.training.modal_probe import modal_probe_remote_label
+
+    return volume_path / "modal_probe_runs" / modal_probe_remote_label(
+        workdir,
+        global_step,
+    )
+
+
+def _submit_probe_from_local(
+    *,
+    config_json_path: str,
+    checkpoint_path: str,
+    workdir: str,
+    global_step: int,
+    wait: bool,
+) -> None:
+    local_checkpoint = Path(checkpoint_path).expanduser().resolve()
+    local_workdir = Path(workdir).expanduser().resolve()
+    config_json = _modal_probe_config_json(
+        Path(config_json_path).expanduser().resolve().read_text()
+    )
+    remote_checkpoint = _upload_probe_checkpoint(
+        local_checkpoint,
+        local_workdir,
+        int(global_step),
+    )
+    remote_workdir = _modal_probe_workdir(local_workdir, int(global_step))
+    handle = run_probe_checkpoint.spawn(
+        config_json=config_json,
+        checkpoint_path=str(remote_checkpoint),
+        workdir=str(remote_workdir),
+        global_step=int(global_step),
+    )
+    print(
+        json.dumps(
+            {
+                "call_id": handle.object_id,
+                "checkpoint_path": str(remote_checkpoint),
+                "workdir": str(remote_workdir),
+                "global_step": int(global_step),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    if wait:
+        print(json.dumps(handle.get(), indent=2, sort_keys=True))
+
+
+def _with_async_probe_override(overrides: str, async_probes: bool) -> str:
+    if not async_probes:
+        return overrides
+    payload = json.loads(overrides)
+    payload["msg_probe_backend"] = "modal"
+    return json.dumps(payload, sort_keys=True)
+
+
+def _wait_for_modal_probe_calls(results: dict) -> None:
+    call_ids = list(results.get("run/modal_probe_call_ids", []) or [])
+    if not call_ids:
+        return
+    print(f"Waiting for {len(call_ids)} Modal probe job(s)...")
+    calls = [modal.FunctionCall.from_id(call_id) for call_id in call_ids]
+    modal.FunctionCall.gather(*calls)
+    print("Modal probe jobs complete.")
+
+
 # ---------------------------------------------------------------------------
 # CLI entrypoint
 # ---------------------------------------------------------------------------
@@ -931,7 +1087,25 @@ def main(
     benchmark_4gpu: str = "",
     benchmark_steps: int = 40,
     benchmark_warmup_steps: int = 10,
+    async_probes: bool = False,
+    submit_probe_config_json_path: str = "",
+    submit_probe_checkpoint_path: str = "",
+    submit_probe_workdir: str = "",
+    submit_probe_global_step: int = 0,
+    submit_probe_wait: bool = False,
 ):
+    if submit_probe_checkpoint_path:
+        _submit_probe_from_local(
+            config_json_path=submit_probe_config_json_path,
+            checkpoint_path=submit_probe_checkpoint_path,
+            workdir=submit_probe_workdir,
+            global_step=int(submit_probe_global_step),
+            wait=submit_probe_wait,
+        )
+        return
+
+    overrides = _with_async_probe_override(overrides, async_probes)
+
     if benchmark_4gpu:
         gpu_key = benchmark_4gpu.lower()
         if gpu_key not in FOUR_GPU_TRAINERS:
@@ -994,12 +1168,13 @@ def main(
             )
             print(f"spawned: {handle.object_id}")
             return
-        train_8gpu.remote(
+        result = train_8gpu.remote(
             config_path=config,
             overrides_json=payload,
             workdir=workdir,
             workdir_tag="",
         )
+        _wait_for_modal_probe_calls(result)
         return
 
     if benchmark_constant_local_batch:
@@ -1174,6 +1349,7 @@ def main(
                 )
             for offset, handle in enumerate(handles):
                 result = handle.get()
+                _wait_for_modal_probe_calls(result)
                 print(f"[{batch_start + offset}] done: {result}")
     else:
         print("Preparing data on volume...")
@@ -1188,9 +1364,10 @@ def main(
             )
             print(f"spawned: {handle.object_id}")
         else:
-            train.remote(
+            result = train.remote(
                 config_path=config,
                 overrides_json=overrides,
                 workdir=workdir,
                 workdir_tag=workdir_tag,
             )
+            _wait_for_modal_probe_calls(result)

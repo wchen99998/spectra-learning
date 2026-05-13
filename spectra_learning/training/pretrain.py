@@ -33,7 +33,11 @@ from spectra_learning.training.distributed import (
     unwrap_model,
     wrap_distributed_model,
 )
-from spectra_learning.training.logging import MetricLogger
+from spectra_learning.training.logging import MetricLogger, log_msg_probe_metrics
+from spectra_learning.training.modal_probe import (
+    save_and_submit_modal_msg_probe,
+    should_run_msg_probe_on_modal,
+)
 from spectra_learning.training.modules import PretrainModule, split_pretrain_module
 from spectra_learning.training.optimization import build_optimizers
 from spectra_learning.training.steps import train_step_impl
@@ -57,7 +61,7 @@ inductor_config.shape_padding = True
 def train_and_evaluate(
     config: config_dict.ConfigDict,
     workdir: str | Path,
-) -> dict[str, float]:
+) -> dict[str, object]:
     distributed = init_distributed_from_env()
     configure_torch_runtime(config)
     workdir = Path(workdir)
@@ -187,7 +191,7 @@ def run_training_loop(
     total_steps: int,
     device: torch.device,
     distributed: DistributedContext | None = None,
-) -> dict[str, float]:
+) -> dict[str, object]:
     if distributed is None:
         distributed = DistributedContext(
             rank=0,
@@ -210,6 +214,7 @@ def run_training_loop(
     last_msg_probe_metrics: dict[str, float] = {}
     stopped_for_time_limit = False
     initial_global_step = int(global_step)
+    modal_probe_call_ids: list[str] = []
     training_start_time = time.perf_counter()
     throughput_warmup_steps = int(config.get("throughput_warmup_steps", 0))
     measured_start_time: float | None = None
@@ -313,16 +318,32 @@ def run_training_loop(
                 base_model, covariance_pooler = split_pretrain_module(
                     unwrap_model(model)
                 )
-                last_msg_probe_metrics = run_and_log_msg_probe(
-                    config,
-                    base_model,
-                    device,
-                    logger,
-                    msg_probe_variants,
-                    global_step,
-                    distributed,
-                    covariance_pooler,
-                )
+                if should_run_msg_probe_on_modal(config):
+                    last_msg_probe_metrics = submit_and_log_modal_msg_probe(
+                        config=config,
+                        model=base_model,
+                        covariance_pooler=covariance_pooler,
+                        logger=logger,
+                        checkpoint_dir=checkpoint_dir,
+                        global_step=global_step,
+                        epoch=epoch,
+                        loss=float(metrics["loss"].detach()),
+                        distributed=distributed,
+                    )
+                    call_id = last_msg_probe_metrics.get("msg_probe/modal/call_id")
+                    if isinstance(call_id, str):
+                        modal_probe_call_ids.append(call_id)
+                else:
+                    last_msg_probe_metrics = run_and_log_msg_probe(
+                        config,
+                        base_model,
+                        device,
+                        logger,
+                        msg_probe_variants,
+                        global_step,
+                        distributed,
+                        covariance_pooler,
+                    )
                 barrier(distributed)
         pbar.close()
         if distributed.is_main:
@@ -365,6 +386,9 @@ def run_training_loop(
         if measured_elapsed > 0
         else 0.0
     )
+    if modal_probe_call_ids:
+        last_msg_probe_metrics["run/modal_probe_call_ids"] = modal_probe_call_ids
+        last_msg_probe_metrics["run/modal_probe_calls"] = float(len(modal_probe_call_ids))
     return last_msg_probe_metrics
 
 
@@ -538,7 +562,12 @@ def run_and_log_msg_probe(
         covariance_pooler=covariance_pooler,
     )
     if distributed.is_main:
-        logger.log_metrics(probe_metrics, step=global_step)
+        log_msg_probe_metrics(
+            logger,
+            probe_metrics,
+            global_step,
+            enable_wandb=bool(config.get("enable_wandb", False)),
+        )
         for variant in variants:
             prefix = f"msg_probe/{variant}"
             epoch_key = f"{prefix}/epoch"
@@ -551,6 +580,40 @@ def run_and_log_msg_probe(
                     probe_metrics[f"{prefix}/test/auc_maccs_mean"],
                 )
     return probe_metrics
+
+
+def submit_and_log_modal_msg_probe(
+    *,
+    config: config_dict.ConfigDict,
+    model: torch.nn.Module,
+    covariance_pooler: torch.nn.Module | None,
+    logger,
+    checkpoint_dir: Path,
+    global_step: int,
+    epoch: int,
+    loss: float,
+    distributed: DistributedContext,
+) -> dict[str, object]:
+    if not distributed.is_main:
+        return {}
+    metrics = save_and_submit_modal_msg_probe(
+        config=config,
+        model=model,
+        covariance_pooler=covariance_pooler,
+        checkpoint_dir=checkpoint_dir,
+        workdir=checkpoint_dir.parent,
+        global_step=global_step,
+        epoch=epoch,
+        loss=loss,
+        wandb_run_id=getattr(logger.experiment, "id", None),
+    )
+    log_msg_probe_metrics(
+        logger,
+        {key: value for key, value in metrics.items() if isinstance(value, float)},
+        global_step,
+        enable_wandb=bool(config.get("enable_wandb", False)),
+    )
+    return metrics
 
 
 def training_deadline(config: config_dict.ConfigDict) -> float | None:
