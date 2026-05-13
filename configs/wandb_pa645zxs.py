@@ -79,7 +79,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_mask_strategy = "intensity_aware"
     cfg.jepa_target_layers = [5, 8, 12, 14]
     cfg.jepa_target_normalization = "none"
-    cfg.masked_token_loss_type = "l2"
     cfg.masked_token_loss_weight = 1
     for key, value in aware_mixed.items():
         setattr(cfg, f"jepa_intensity_aware_{key}", value)
@@ -128,18 +127,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_pma_num_heads = 8
     cfg.msg_probe_pma_num_seeds = 32
     cfg.msg_probe_tune_metric = "msg_probe/test/auc_maccs_mean"
-    cfg.msg_probe_tune_param_space = [
-        {
-            "args": [0.0001, 0.0003, 0.001],
-            "dist": "grid",
-            "param": "msg_probe_learning_rate",
-        },
-        {
-            "args": [0, 0.01, 0.1],
-            "dist": "grid",
-            "param": "msg_probe_weight_decay",
-        },
-    ]
     cfg.msg_probe_variants = ["covariance"]
     cfg.msg_probe_warmup_steps = 0
     cfg.msg_probe_weight_decay = 0
@@ -166,7 +153,6 @@ def get_config() -> config_dict.ConfigDict:
     # Logging
     cfg.enable_wandb = True
     cfg.wandb_project = "jepa-debugging"
-    cfg.wandb_run_name_prefix = "jepa_masked_latent_index"
     cfg.run_name_suffix = "ema-teacher-intensity-aware-mixed"
 
     return cfg

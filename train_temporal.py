@@ -14,8 +14,6 @@ import logging
 import math
 import random
 import warnings
-from collections import deque
-from collections.abc import Iterator
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -36,6 +34,8 @@ from spectra_learning.probes.massspec.msg_probe import (
     run_msg_probe,
 )
 from spectra_learning.models.factory import build_model_from_config
+from spectra_learning.training.batch import BatchPrefetcher
+from spectra_learning.training.checkpointing import prune_checkpoints, save_checkpoint
 from spectra_learning.training.logging import build_logger
 from spectra_learning.training.runtime import collect_and_log_param_metrics, parse_autocast_dtype
 from spectra_learning.training.schedules import make_cosine_schedule
@@ -96,103 +96,6 @@ def _log_msg_probe_pairwise_plots_to_wandb(
             for idx, path in enumerate(plot_paths)
         }
         wandb_run.log(payload, step=global_step)
-
-
-def _move_batch_to_device(
-    batch: dict[str, torch.Tensor],
-    device: torch.device,
-) -> dict[str, torch.Tensor]:
-    return {
-        k: v.to(device, non_blocking=True)
-        if isinstance(v, torch.Tensor)
-        else torch.as_tensor(v, device=device)
-        for k, v in batch.items()
-        if k in _TEMPORAL_BATCH_KEYS
-    }
-
-
-class _BatchPrefetcher:
-    def __init__(
-        self,
-        loader: Iterator,
-        device: torch.device,
-        prefetch_size: int = 1,
-    ) -> None:
-        self._loader = loader
-        self._device = device
-        self._stream = (
-            torch.cuda.Stream(device=device) if device.type == "cuda" else None
-        )
-        self._ready: deque = deque()
-        self._exhausted = False
-        for _ in range(prefetch_size):
-            self._preload_one()
-
-    def _preload_one(self) -> None:
-        if self._exhausted:
-            return
-        if (batch := next(self._loader, None)) is None:
-            self._exhausted = True
-            return
-        if self._stream is None:
-            moved = _move_batch_to_device(batch, self._device)
-            ready_event = None
-        else:
-            with torch.cuda.stream(self._stream):
-                moved = _move_batch_to_device(batch, self._device)
-                ready_event = torch.cuda.Event()
-                ready_event.record(self._stream)
-        self._ready.append((moved, ready_event))
-
-    def next(self) -> dict[str, torch.Tensor] | None:
-        if not self._ready:
-            return None
-        batch, ready_event = self._ready.popleft()
-        if ready_event is not None:
-            current_stream = torch.cuda.current_stream(device=self._device)
-            current_stream.wait_event(ready_event)
-            for v in batch.values():
-                v.record_stream(current_stream)
-        self._preload_one()
-        return batch
-
-
-def _save_checkpoint(
-    path: Path,
-    model: PeakSetSIGReg,
-    optimizers: list[torch.optim.Optimizer],
-    schedulers: list[torch.optim.lr_scheduler.LRScheduler],
-    global_step: int,
-    epoch: int,
-    loss: float,
-) -> None:
-    torch.save(
-        {
-            "model": model.state_dict(),
-            "optimizers": [opt.state_dict() for opt in optimizers],
-            "schedulers": [sched.state_dict() for sched in schedulers],
-            "global_step": global_step,
-            "epoch": epoch,
-            "loss": loss,
-        },
-        path,
-    )
-
-
-def _prune_checkpoints(checkpoint_dir: Path, keep_top_k: int = 5) -> None:
-    pts = sorted(checkpoint_dir.glob("step-*.pt"), key=lambda p: p.stat().st_mtime)
-    if len(pts) <= keep_top_k:
-        return
-    losses: list[tuple[float, Path]] = []
-    for p in pts:
-        ckpt = torch.load(p, map_location="cpu", weights_only=True)
-        losses.append((ckpt.get("loss", float("inf")), p))
-    losses.sort(key=lambda x: x[0])
-    keep = {p for _, p in losses[:keep_top_k]}
-    keep.add(pts[-1])
-    for p in pts:
-        if p not in keep:
-            p.unlink()
 
 
 def _build_temporal_optimizers(
@@ -515,10 +418,12 @@ def train_temporal(
     compiled_forward = None
     last_msg_probe_metrics: dict[str, float] = {}
     _wandb_run = getattr(logger, "experiment", None)
-    prefetcher = _BatchPrefetcher(
+    prefetcher = BatchPrefetcher(
         iter(train_loader),
         device,
         prefetch_size=device_prefetch_size,
+        keys=_TEMPORAL_BATCH_KEYS,
+        tensorize_non_tensors=True,
     )
     pbar = tqdm(total=total_steps, desc="Temporal train", unit="step")
 
@@ -581,7 +486,7 @@ def train_temporal(
             logger.log_metrics(log_metrics, step=global_step)
 
         if global_step % checkpoint_every_steps == 0:
-            _save_checkpoint(
+            save_checkpoint(
                 checkpoint_dir / f"step-{global_step:08d}.pt",
                 model,
                 optimizers,
@@ -590,7 +495,7 @@ def train_temporal(
                 0,
                 float(metrics["loss"]),
             )
-            _prune_checkpoints(checkpoint_dir, keep_top_k=15)
+            prune_checkpoints(checkpoint_dir, keep_top_k=15)
 
         if (
             msg_probe_every_n_steps > 0
@@ -635,7 +540,7 @@ def train_temporal(
 
     pbar.close()
 
-    _save_checkpoint(
+    save_checkpoint(
         checkpoint_dir / "last.pt",
         model,
         optimizers,

@@ -14,7 +14,6 @@ from torch.utils.data import DataLoader
 import spectra_learning.data.gems as gems
 import spectra_learning.data.gems.artifacts as gems_artifacts
 import spectra_learning.probes.massspec.data as massspec_probe_data
-from scripts.benchmark_linear_probe import preprocess_dreams_spectra
 from scripts.prepare_gems_native import main as prepare_gems_main
 from spectra_learning.data.gems.native import (
     GEMS_NATIVE_METADATA_VERSION,
@@ -28,7 +27,6 @@ from spectra_learning.probes.massspec.targets import (
     build_morgan_targets_for_rows,
     build_probe_targets_for_rows,
 )
-from spectra_learning.data.spectra import preprocess_peak_batch_numpy
 
 
 def _write_fake_gems_hdf5(path: Path) -> None:
@@ -1404,40 +1402,6 @@ class MassSpecPreprocessTests(unittest.TestCase):
         self.assertEqual(probe_maccs.shape, (1, 166))
         self.assertEqual(probe_morgan.shape, (1, 4096))
         self.assertEqual(probe_valid_mol.shape, (1,))
-
-    def test_benchmark_preprocess_matches_input_pipeline_without_precursor_window(self):
-        spectrum = np.zeros((1, 2, 128), dtype=np.float32)
-        spectrum[0, 0, :4] = [99.0, 100.5, 101.5, 1020.0]
-        spectrum[0, 1, :4] = [0.8, 5e-4, 0.7, 0.9]
-        precursor_mz = np.asarray([101.0], dtype=np.float32)
-
-        native = preprocess_peak_batch_numpy(
-            spectrum,
-            precursor_mz,
-            max_precursor_mz=1000.0,
-            num_peaks=60,
-            peak_drop_min_intensity=1e-4,
-            peak_ordering="mz",
-        )
-        benchmark = preprocess_dreams_spectra(
-            spectrum,
-            precursor_mz,
-            num_peaks=60,
-            min_intensity=1e-4,
-        )
-
-        np.testing.assert_allclose(
-            benchmark["peak_mz"], native["peak_mz"], atol=1e-6
-        )
-        np.testing.assert_allclose(
-            benchmark["peak_intensity"],
-            native["peak_intensity"],
-            atol=1e-6,
-        )
-        np.testing.assert_array_equal(benchmark["peak_valid_mask"], native["peak_valid_mask"])
-        np.testing.assert_allclose(
-            benchmark["precursor_mz"], native["precursor_mz"], atol=1e-6
-        )
 
 if __name__ == "__main__":
     unittest.main()

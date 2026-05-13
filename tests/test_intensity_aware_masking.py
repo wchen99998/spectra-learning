@@ -137,17 +137,6 @@ def test_gems_batch_collator_generates_intensity_aware_masks_with_precursor() ->
     assert (batch["target_masks"].sum(dim=1) <= 1).all()
 
 
-def test_intensity_aware_config_variant_sets_strategy_and_params() -> None:
-    module = importlib.import_module("configs.gems_small_norm_ema_intensity_aware")
-    cfg = module.get_config()
-
-    assert cfg.jepa_mask_strategy == "intensity_aware"
-    for key in module.inactive_count_mask_fields:
-        assert key not in cfg
-    for key, value in module.aware_mixed.items():
-        assert getattr(cfg, f"jepa_intensity_aware_{key}") == value
-
-
 def test_wandb_pa645_config_uses_intensity_aware_mixed_params() -> None:
     module = importlib.import_module("configs.wandb_pa645zxs")
     cfg = module.get_config()

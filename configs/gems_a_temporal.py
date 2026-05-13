@@ -130,6 +130,5 @@ def get_config() -> config_dict.ConfigDict:
     # System / logging
     cfg.enable_wandb = True
     cfg.wandb_project = "jepa-pretraining"
-    cfg.wandb_run_name_prefix = "jepa_temporal"
 
     return cfg

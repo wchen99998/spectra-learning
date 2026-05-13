@@ -138,6 +138,5 @@ def get_config() -> config_dict.ConfigDict:
     # Logging
     cfg.enable_wandb = True
     cfg.wandb_project = "jepa-debugging"
-    cfg.wandb_run_name_prefix = "jepa_temporal_small"
 
     return cfg
