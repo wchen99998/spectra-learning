@@ -9,6 +9,7 @@ import torch
 from spectra_learning.models.losses import SlotwiseSIGReg
 from spectra_learning.models.model import PeakSetSIGReg
 from spectra_learning.models.peak_features import FourierFeatures, PeakFeatureEmbedder
+from spectra_learning.models.pooling import CovariancePool
 from spectra_learning.training.optimization import is_weight_decay_target
 from spectra_learning.training.steps import train_step_impl
 from spectra_learning.data.spectra import PRECURSOR_TOKEN_INTENSITY
@@ -538,14 +539,13 @@ class BlockJEPATests(unittest.TestCase):
             covariance_pooling_dim=4,
             sigreg_lambda=0.03,
         )
-        self.assertTrue(hasattr(model, "covariance_pooler"))
+        pooler = CovariancePool(input_dim=model.model_dim, compressed_dim=4)
+        self.assertFalse(hasattr(model, "covariance_pooler"))
         self.assertTrue(model.train_covariance_pooling)
-        self.assertTrue(
-            all(param.requires_grad for param in model.covariance_pooler.parameters())
-        )
+        self.assertTrue(all(param.requires_grad for param in pooler.parameters()))
         self.assertFalse(hasattr(model, "covariance_sigreg"))
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-        metrics = model.forward_augmented(batch)
+        metrics = model.forward_augmented(batch, covariance_pooler=pooler)
 
         self.assertNotIn("covariance_sigreg_loss", metrics)
         self.assertNotIn("covariance_sigreg_term", metrics)
@@ -561,13 +561,14 @@ class BlockJEPATests(unittest.TestCase):
         metrics["loss"].backward()
         cov_grad_norm = sum(
             param.grad.detach().norm()
-            for param in model.covariance_pooler.parameters()
+            for param in pooler.parameters()
             if param.grad is not None
         )
         self.assertGreater(float(cov_grad_norm), 0.0)
 
     def test_covariance_pooling_loss_matches_explicit_reconstruction(self):
         model = self._build_model(covariance_pooling_dim=2)
+        pooler = CovariancePool(input_dim=model.model_dim, compressed_dim=2)
         embeddings = torch.randn(3, 4, model.model_dim)
         valid_mask = torch.tensor(
             [
@@ -577,20 +578,24 @@ class BlockJEPATests(unittest.TestCase):
             ]
         )
 
-        term, metrics = model._covariance_pooling_metrics(embeddings, valid_mask)
+        term, metrics = model._covariance_pooling_metrics(
+            embeddings,
+            valid_mask,
+            pooler,
+        )
 
         x = embeddings.detach().float() * valid_mask.unsqueeze(-1).float()
         denom = valid_mask.float().sum(dim=1).clamp_min(1.0).view(-1, 1, 1)
-        emb = model.covariance_pooler(x, valid_mask).view(
+        emb = pooler(x, valid_mask).view(
             embeddings.shape[0],
             model.covariance_pooling_dim,
             model.covariance_pooling_dim,
         )
         target = x.transpose(1, 2) @ x / denom
         recons = (
-            model.covariance_pooler.left_proj.weight.float().T
+            pooler.left_proj.weight.float().T
             @ emb
-            @ model.covariance_pooler.right_proj.weight.float()
+            @ pooler.right_proj.weight.float()
         )
         explicit = torch.linalg.matrix_norm(recons - target, ord="fro", dim=(-2, -1))
         explicit = explicit.mean()
@@ -603,14 +608,14 @@ class BlockJEPATests(unittest.TestCase):
             covariance_pooling_dim=4,
             train_covariance_pooling=False,
         )
+        pooler = CovariancePool(input_dim=model.model_dim, compressed_dim=4)
+        pooler.requires_grad_(False)
 
-        self.assertTrue(hasattr(model, "covariance_pooler"))
+        self.assertFalse(hasattr(model, "covariance_pooler"))
         self.assertFalse(model.train_covariance_pooling)
-        self.assertTrue(
-            all(not param.requires_grad for param in model.covariance_pooler.parameters())
-        )
+        self.assertTrue(all(not param.requires_grad for param in pooler.parameters()))
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-        metrics = model.forward_augmented(batch)
+        metrics = model.forward_augmented(batch, covariance_pooler=pooler)
         self.assertNotIn("covariance_pooling_loss", metrics)
         self.assertNotIn("covariance_pooling_term", metrics)
 

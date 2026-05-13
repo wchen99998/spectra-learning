@@ -7,12 +7,16 @@ import torch
 from ml_collections import config_dict
 
 from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.models.pooling import CovariancePool
 from spectra_learning.training.checkpointing import (
+    covariance_pooler_checkpoint_path,
+    load_resume_covariance_pooler_state,
     load_resume_model_state,
     optimizer_state_dict,
     save_checkpoint,
 )
 from spectra_learning.training import pretrain
+from spectra_learning.training.modules import PretrainModule
 from spectra_learning.training.optimization import (
     _split_muon_parameters,
     build_optimizers,
@@ -99,6 +103,61 @@ def test_save_checkpoint_persists_nested_scalar_optimizer_state():
     assert saved_optimizer["scalar_optimizer_state"]["state"]
 
 
+def test_save_checkpoint_writes_covariance_pooler_sibling_pt():
+    model = _small_model()
+    pooler = CovariancePool(input_dim=model.model_dim, compressed_dim=4)
+    optimizer = torch.optim.AdamW(
+        [*model.parameters(), *pooler.parameters()],
+        lr=0.01,
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "step-00000012.pt"
+        save_checkpoint(
+            path=path,
+            model=model,
+            covariance_pooler=pooler,
+            optimizers=[optimizer],
+            schedulers=[],
+            global_step=12,
+            epoch=1,
+            loss=0.5,
+        )
+        ckpt = torch.load(path, map_location="cpu", weights_only=True)
+        pooler_path = covariance_pooler_checkpoint_path(path)
+        pooler_ckpt = torch.load(pooler_path, map_location="cpu", weights_only=True)
+
+    assert pooler_path.name == "covariance-pooler-step-00000012.pt"
+    assert ckpt["covariance_pooler_checkpoint"] == pooler_path.name
+    assert "covariance_pooler.left_proj.weight" not in ckpt["model"]
+    assert set(pooler_ckpt["pooler"]) == set(pooler.state_dict())
+    assert pooler_ckpt["global_step"] == 12
+
+
+def test_load_resume_covariance_pooler_state_reads_sibling_pt():
+    model = _small_model()
+    pooler = CovariancePool(input_dim=model.model_dim, compressed_dim=4)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "step-00000012.pt"
+        save_checkpoint(
+            path=path,
+            model=model,
+            covariance_pooler=pooler,
+            optimizers=[],
+            schedulers=[],
+            global_step=12,
+            epoch=1,
+            loss=0.5,
+        )
+        ckpt = torch.load(path, map_location="cpu", weights_only=True)
+        restored = CovariancePool(input_dim=model.model_dim, compressed_dim=4)
+        load_resume_covariance_pooler_state(restored, path, ckpt)
+
+    for key, value in pooler.state_dict().items():
+        torch.testing.assert_close(restored.state_dict()[key], value)
+
+
 def test_training_loop_resumes_with_offset_loader(monkeypatch, tmp_path: Path):
     cfg = config_dict.ConfigDict()
     cfg.autocast_dtype = "bf16"
@@ -183,7 +242,7 @@ def test_training_loop_runs_distributed_online_probe_and_logs_on_main(monkeypatc
     def fake_train_step_impl(*args, **kwargs):
         return {"loss": torch.tensor(1.0)}
 
-    def fake_run_msg_probe(*, config, model, device, distributed):
+    def fake_run_msg_probe(*, config, model, device, distributed, covariance_pooler=None):
         probe_calls.append((model, device))
         return {"msg_probe/mean/test/auc_maccs_mean": 0.75}
 
@@ -364,28 +423,34 @@ def test_mae_value_heads_use_predictor_learning_rate_group():
 def test_build_optimizers_respects_frozen_covariance_pooling():
     cfg = _optimizer_config()
     trainable_model = _small_model(covariance_pooling_dim=4)
+    trainable_pooler = CovariancePool(
+        input_dim=trainable_model.model_dim,
+        compressed_dim=4,
+    )
+    trainable_module = PretrainModule(trainable_model, trainable_pooler)
     frozen_model = _small_model(
         covariance_pooling_dim=4,
         train_covariance_pooling=False,
     )
+    frozen_pooler = CovariancePool(input_dim=frozen_model.model_dim, compressed_dim=4)
+    frozen_pooler.requires_grad_(False)
+    frozen_module = PretrainModule(frozen_model, frozen_pooler)
 
     trainable_optimizers, _ = build_optimizers(
         cfg,
-        trainable_model,
+        trainable_module,
         total_steps=10,
         device=torch.device("cpu"),
     )
     frozen_optimizers, _ = build_optimizers(
         cfg,
-        frozen_model,
+        frozen_module,
         total_steps=10,
         device=torch.device("cpu"),
     )
 
-    trainable_cov_ids = {
-        id(param) for param in trainable_model.covariance_pooler.parameters()
-    }
-    frozen_cov_ids = {id(param) for param in frozen_model.covariance_pooler.parameters()}
+    trainable_cov_ids = {id(param) for param in trainable_pooler.parameters()}
+    frozen_cov_ids = {id(param) for param in frozen_pooler.parameters()}
     trainable_optimizer_ids = set().union(
         *(_optimizer_param_ids(optimizer) for optimizer in trainable_optimizers)
     )

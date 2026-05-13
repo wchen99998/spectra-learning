@@ -28,10 +28,26 @@ class PeakSetSIGReg(
             PeakSetSIGRegSettings.create(settings, **overrides),
         )
 
-    def forward(self, augmented_batch, return_collapse_data: bool = False):
+    def forward(
+        self,
+        augmented_batch,
+        return_collapse_data: bool = False,
+        covariance_pooler: nn.Module | None = None,
+    ):
+        if covariance_pooler is None:
+            if return_collapse_data:
+                return self.forward_augmented(
+                    augmented_batch,
+                    return_collapse_data=True,
+                )
+            return self.forward_augmented(augmented_batch)
         if return_collapse_data:
             return self.forward_augmented(
                 augmented_batch,
                 return_collapse_data=True,
+                covariance_pooler=covariance_pooler,
             )
-        return self.forward_augmented(augmented_batch)
+        return self.forward_augmented(
+            augmented_batch,
+            covariance_pooler=covariance_pooler,
+        )

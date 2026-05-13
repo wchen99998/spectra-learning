@@ -6,6 +6,37 @@ from spectra_learning.models.model import PeakSetSIGReg
 
 
 RUNTIME_PARAM_GROUP_KEYS = frozenset({"param_split_fn", "param_recombine_fn"})
+COVARIANCE_POOLER_PREFIX = "covariance_pooler."
+COVARIANCE_POOLER_CHECKPOINT_PREFIX = "covariance-pooler-"
+
+
+def covariance_pooler_checkpoint_path(path: Path | str) -> Path:
+    path = Path(path)
+    return path.with_name(f"{COVARIANCE_POOLER_CHECKPOINT_PREFIX}{path.name}")
+
+
+def is_main_checkpoint_path(path: Path) -> bool:
+    return not path.name.startswith(COVARIANCE_POOLER_CHECKPOINT_PREFIX)
+
+
+def _model_state_without_legacy_pooler(
+    state_dict: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    return {
+        key: value
+        for key, value in state_dict.items()
+        if not key.startswith(COVARIANCE_POOLER_PREFIX)
+    }
+
+
+def _legacy_pooler_state(
+    state_dict: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    return {
+        key.removeprefix(COVARIANCE_POOLER_PREFIX): value
+        for key, value in state_dict.items()
+        if key.startswith(COVARIANCE_POOLER_PREFIX)
+    }
 
 
 def _strip_runtime_param_group_keys(state: dict) -> dict:
@@ -46,7 +77,11 @@ def save_checkpoint(
     epoch: int,
     loss: float,
     wandb_run_id: str | None = None,
+    covariance_pooler: torch.nn.Module | None = None,
 ) -> None:
+    pooler_path = (
+        covariance_pooler_checkpoint_path(path) if covariance_pooler is not None else None
+    )
     torch.save(
         {
             "model": model.state_dict(),
@@ -56,13 +91,28 @@ def save_checkpoint(
             "epoch": epoch,
             "loss": loss,
             "wandb_run_id": wandb_run_id,
+            "covariance_pooler_checkpoint": (
+                pooler_path.name if pooler_path is not None else None
+            ),
         },
         path,
     )
+    if covariance_pooler is not None:
+        torch.save(
+            {
+                "pooler": covariance_pooler.state_dict(),
+                "global_step": global_step,
+                "epoch": epoch,
+            },
+            pooler_path,
+        )
 
 
 def prune_checkpoints(checkpoint_dir: Path, keep_top_k: int = 5) -> None:
-    pts = sorted(checkpoint_dir.glob("step-*.pt"), key=lambda p: p.stat().st_mtime)
+    pts = sorted(
+        (p for p in checkpoint_dir.glob("step-*.pt") if is_main_checkpoint_path(p)),
+        key=lambda p: p.stat().st_mtime,
+    )
     if len(pts) <= keep_top_k:
         return
     losses = [(torch.load(p, map_location="cpu", weights_only=True).get("loss", float("inf")), p) for p in pts]
@@ -72,13 +122,39 @@ def prune_checkpoints(checkpoint_dir: Path, keep_top_k: int = 5) -> None:
     for path in pts:
         if path not in keep:
             path.unlink()
+            pooler_path = covariance_pooler_checkpoint_path(path)
+            if pooler_path.exists():
+                pooler_path.unlink()
 
 
 def load_resume_model_state(
     model: PeakSetSIGReg,
     state_dict: dict[str, torch.Tensor],
 ) -> None:
-    model.load_state_dict(state_dict)
+    model.load_state_dict(_model_state_without_legacy_pooler(state_dict))
+
+
+def load_resume_covariance_pooler_state(
+    covariance_pooler: torch.nn.Module | None,
+    checkpoint_path: Path | str,
+    checkpoint: dict,
+) -> None:
+    if covariance_pooler is None:
+        return
+    checkpoint_path = Path(checkpoint_path)
+    pooler_name = checkpoint.get("covariance_pooler_checkpoint", None)
+    pooler_path = (
+        checkpoint_path.with_name(pooler_name)
+        if pooler_name
+        else covariance_pooler_checkpoint_path(checkpoint_path)
+    )
+    if pooler_path.exists():
+        pooler_ckpt = torch.load(pooler_path, map_location="cpu", weights_only=True)
+        covariance_pooler.load_state_dict(pooler_ckpt["pooler"])
+        return
+    legacy_state = _legacy_pooler_state(checkpoint["model"])
+    if legacy_state:
+        covariance_pooler.load_state_dict(legacy_state)
 
 
 def load_optimizer_state(optimizer: torch.optim.Optimizer, state: dict) -> None:
@@ -96,7 +172,7 @@ def load_pretrained_weights(
 ) -> None:
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     state_dict = ckpt["model"] if "model" in ckpt else ckpt["state_dict"]
-    model.load_state_dict(state_dict)
+    model.load_state_dict(_model_state_without_legacy_pooler(state_dict))
 
 
 def load_frozen_teacher_weights(
@@ -127,7 +203,10 @@ def latest_ckpt_path(directory: Path) -> str | None:
     checkpoint_dir = directory / "checkpoints"
     root = checkpoint_dir if checkpoint_dir.exists() else directory
     ckpts = sorted(
-        [*root.rglob("*.ckpt"), *root.rglob("*.pt")],
+        [
+            *root.rglob("*.ckpt"),
+            *(p for p in root.rglob("*.pt") if is_main_checkpoint_path(p)),
+        ],
         key=lambda p: p.stat().st_mtime,
     )
     return str(ckpts[-1]) if ckpts else None

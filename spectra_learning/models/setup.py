@@ -12,7 +12,7 @@ from spectra_learning.models.common import (
 from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.losses import SIGReg, SlotwiseSIGReg
 from spectra_learning.models.settings import PeakSetSIGRegSettings
-from spectra_learning.models.temporal import CovariancePool, _build_temporal_decoder_blocks
+from spectra_learning.models.temporal import _build_temporal_decoder_blocks
 
 
 SLOTWISE_REGULARIZERS = {
@@ -323,12 +323,6 @@ def _build_regularizer(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:
         else SIGReg
     )
     model.sigreg = sigreg_cls(num_slices=int(cfg.sigreg_num_slices))
-    if model.covariance_pooling_dim > 0:
-        model.covariance_pooler = CovariancePool(
-            input_dim=model.model_dim,
-            compressed_dim=model.covariance_pooling_dim,
-        )
-        model.covariance_pooler.requires_grad_(model.train_covariance_pooling)
 
 
 def _build_temporal_predictor(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:

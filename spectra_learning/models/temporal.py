@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from spectra_learning.models.pooling import CovariancePool
 from spectra_learning.models.transformer import Attention, FeedForward, _build_norm
 
 
@@ -80,35 +81,6 @@ class TemporalDecoderBlock(nn.Module):
         h = h + self.cross_attn(self.cross_attn_norm(h), memory,
                                 memory_mask=memory_mask)
         return h + self.feed_forward(self.ffn_norm(h))
-
-
-class CovariancePool(nn.Module):
-    def __init__(
-        self,
-        *,
-        input_dim: int,
-        compressed_dim: int,
-    ) -> None:
-        super().__init__()
-        self.left_proj = nn.Linear(input_dim, compressed_dim, bias=False)
-        self.right_proj = nn.Linear(input_dim, compressed_dim, bias=False)
-        nn.init.xavier_normal_(self.left_proj.weight)
-        nn.init.xavier_normal_(self.right_proj.weight)
-
-    def forward(
-        self,
-        peak_embeddings: torch.Tensor,
-        valid_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        with torch.autocast(device_type=peak_embeddings.device.type, enabled=False):
-            peak_embeddings = peak_embeddings.float()
-            mask = valid_mask.unsqueeze(-1).to(dtype=peak_embeddings.dtype)
-            left = self.left_proj(peak_embeddings) * mask
-            right = self.right_proj(peak_embeddings) * mask
-            denom = mask.sum(dim=1).clamp(min=1.0)
-            covariance = left.transpose(1, 2) @ right
-            covariance = covariance / denom.unsqueeze(-1)
-        return covariance.flatten(start_dim=1)
 
 
 def _apply_temporal_depth_scaled_init(blocks: nn.ModuleList, num_layers: int) -> None:

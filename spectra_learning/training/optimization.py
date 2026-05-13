@@ -3,7 +3,6 @@ from functools import partial
 import torch
 from ml_collections import config_dict
 
-from spectra_learning.models.model import PeakSetSIGReg
 from spectra_learning.models.transformer import Attention
 from spectra_learning.training.schedules import make_cosine_schedule, scaled_min_lr
 
@@ -25,7 +24,12 @@ def is_weight_decay_target(name: str, param: torch.nn.Parameter) -> bool:
     return param.ndim >= 2 and name.endswith("weight")
 
 
+def _model_param_name(name: str) -> str:
+    return name.removeprefix("model.")
+
+
 def is_predictor_parameter(name: str) -> bool:
+    name = _model_param_name(name)
     return name in PREDICTOR_PARAM_NAMES or name.startswith(PREDICTOR_PARAM_PREFIXES)
 
 
@@ -42,7 +46,7 @@ def _recombine_qkv_update(parts: list[torch.Tensor]) -> torch.Tensor:
     return torch.cat(parts, dim=-2)
 
 
-def _attention_qkv_split_sizes(model: PeakSetSIGReg) -> dict[str, tuple[int, int]]:
+def _attention_qkv_split_sizes(model: torch.nn.Module) -> dict[str, tuple[int, int]]:
     return {
         f"{module_name}.wqkv.weight": (int(module.q_size), int(module.kv_size))
         for module_name, module in model.named_modules()
@@ -99,7 +103,7 @@ def build_adamw_param_groups(
 
 def build_optimizers(
     config: config_dict.ConfigDict,
-    model: PeakSetSIGReg,
+    model: torch.nn.Module,
     total_steps: int,
     device: torch.device,
 ) -> tuple[list[torch.optim.Optimizer], list[torch.optim.lr_scheduler.LRScheduler]]:
@@ -160,7 +164,7 @@ def _adamw(
 
 def _build_muon_optimizers(
     config: config_dict.ConfigDict,
-    model: PeakSetSIGReg,
+    model: torch.nn.Module,
     total_steps: int,
     predictor_lr_ratio: float,
     settings: dict,
@@ -188,7 +192,7 @@ def _muon_kwargs(config: config_dict.ConfigDict, settings: dict) -> dict:
 
 
 def _split_muon_parameters(
-    model: PeakSetSIGReg,
+    model: torch.nn.Module,
 ) -> tuple[list, list, list, list, list, list]:
     base_muon_params = []
     predictor_muon_params = []
@@ -226,7 +230,7 @@ def _split_muon_parameters(
 
 def _build_split_muon_optimizers(
     config: config_dict.ConfigDict,
-    model: PeakSetSIGReg,
+    model: torch.nn.Module,
     total_steps: int,
     predictor_lr_ratio: float,
     settings: dict,
@@ -295,7 +299,7 @@ def _build_muon_specs(
 
 def _build_single_muon_optimizer(
     config: config_dict.ConfigDict,
-    model: PeakSetSIGReg,
+    model: torch.nn.Module,
     total_steps: int,
     settings: dict,
 ) -> tuple[list[torch.optim.Optimizer], list[torch.optim.lr_scheduler.LRScheduler]]:
@@ -346,7 +350,7 @@ def _build_single_muon_optimizer(
 
 
 def _split_adamw_parameters(
-    model: PeakSetSIGReg,
+    model: torch.nn.Module,
 ) -> tuple[list, list, list, list]:
     base_decay_params = []
     base_no_decay_params = []
@@ -365,7 +369,7 @@ def _split_adamw_parameters(
 
 def _build_split_adamw_optimizers(
     config: config_dict.ConfigDict,
-    model: PeakSetSIGReg,
+    model: torch.nn.Module,
     total_steps: int,
     predictor_lr_ratio: float,
     settings: dict,
@@ -408,7 +412,7 @@ def _build_split_adamw_optimizers(
 
 def _build_single_adamw_optimizer(
     config: config_dict.ConfigDict,
-    model: PeakSetSIGReg,
+    model: torch.nn.Module,
     total_steps: int,
     settings: dict,
 ) -> tuple[list[torch.optim.Optimizer], list[torch.optim.lr_scheduler.LRScheduler]]:

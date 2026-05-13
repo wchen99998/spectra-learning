@@ -349,17 +349,11 @@ class MsgSequenceProbeTests(unittest.TestCase):
             regression_stds={"mol_weight": 1.0},
             fingerprint_task="maccs",
         )
-        main_pooler = CovariancePool(input_dim=4, compressed_dim=2)
-        model = SimpleNamespace(
-            covariance_pooler=main_pooler,
-            train_covariance_pooling=False,
-        )
-
         probe = _build_msg_sequence_probe(
             "covariance",
             config=config,
             task_spec=task_spec,
-            covariance_pooler=_online_probe_covariance_pooler(model, "covariance"),
+            covariance_pooler=_online_probe_covariance_pooler("covariance"),
         )
         optimizer = torch.optim.AdamW(probe.parameters(), lr=1e-3)
 
@@ -368,7 +362,6 @@ class MsgSequenceProbeTests(unittest.TestCase):
         self.assertTrue(all(param.requires_grad for param in probe.pooler.parameters()))
         probe_param_ids = {id(param) for param in probe.parameters()}
         probe_pooler_param_ids = {id(param) for param in probe.pooler.parameters()}
-        main_pooler_param_ids = {id(param) for param in main_pooler.parameters()}
         optimizer_param_ids = {
             id(param)
             for group in optimizer.param_groups
@@ -377,16 +370,11 @@ class MsgSequenceProbeTests(unittest.TestCase):
 
         self.assertTrue(probe_pooler_param_ids <= optimizer_param_ids)
         self.assertTrue(probe_pooler_param_ids <= probe_param_ids)
-        self.assertFalse(probe_param_ids & main_pooler_param_ids)
 
     def test_covariance_probe_reuses_frozen_pooler_when_main_pooler_is_trainable(self):
         main_pooler = CovariancePool(input_dim=4, compressed_dim=2)
-        model = SimpleNamespace(
-            covariance_pooler=main_pooler,
-            train_covariance_pooling=True,
-        )
 
-        pooler = _online_probe_covariance_pooler(model, "covariance")
+        pooler = _online_probe_covariance_pooler("covariance", main_pooler)
 
         self.assertIs(pooler, main_pooler)
 
@@ -404,10 +392,6 @@ class MsgSequenceProbeTests(unittest.TestCase):
             fingerprint_task="maccs",
         )
         main_pooler = CovariancePool(input_dim=4, compressed_dim=2)
-        model = SimpleNamespace(
-            covariance_pooler=main_pooler,
-            train_covariance_pooling=True,
-        )
         original_state = {
             name: param.detach().clone()
             for name, param in main_pooler.state_dict().items()
@@ -417,7 +401,10 @@ class MsgSequenceProbeTests(unittest.TestCase):
             "covariance",
             config=config,
             task_spec=task_spec,
-            covariance_pooler=_online_probe_covariance_pooler(model, "covariance"),
+            covariance_pooler=_online_probe_covariance_pooler(
+                "covariance",
+                main_pooler,
+            ),
         )
         optimizer = torch.optim.AdamW(probe.parameters(), lr=1e-3)
         peak_embeddings = torch.randn(3, 5, 4)

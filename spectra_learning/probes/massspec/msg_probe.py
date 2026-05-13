@@ -41,7 +41,7 @@ from spectra_learning.probes.massspec.targets import (
     FG_SMARTS,
     REGRESSION_TARGET_KEYS,
 )
-from spectra_learning.training.distributed import DistributedContext, unwrap_model
+from spectra_learning.training.distributed import DistributedContext
 from spectra_learning.training.schedules import learning_rate_at_step
 
 
@@ -452,7 +452,7 @@ def _plot_pairwise_similarity_alignment(
 def _collect_covariance_morgan_alignment_inputs(
     *,
     probe_data: MassSpecProbeData,
-    model: PeakSetSIGReg,
+    covariance_pooler: torch.nn.Module,
     feature_extractor: Callable[[dict[str, torch.Tensor]], torch.Tensor],
     move_batch: Callable[[dict[str, object]], dict[str, object]],
     split: str,
@@ -485,7 +485,7 @@ def _collect_covariance_morgan_alignment_inputs(
                 device=device,
                 dtype=torch.bool,
             )
-            covariance = model.covariance_pooler(
+            covariance = covariance_pooler(
                 peak_embeddings.float(),
                 peak_valid_mask,
             )
@@ -504,7 +504,7 @@ def _collect_covariance_morgan_alignment_inputs(
 def _collect_covariance_embeddings_for_indices(
     *,
     probe_data: MassSpecProbeData,
-    model: PeakSetSIGReg,
+    covariance_pooler: torch.nn.Module,
     feature_extractor: Callable[[dict[str, torch.Tensor]], torch.Tensor],
     move_batch: Callable[[dict[str, object]], dict[str, object]],
     indices: np.ndarray,
@@ -525,7 +525,7 @@ def _collect_covariance_embeddings_for_indices(
         ):
             batch = move_batch(batch)
             peak_embeddings = feature_extractor(batch)
-            covariance = model.covariance_pooler(
+            covariance = covariance_pooler(
                 peak_embeddings.float(),
                 batch["peak_valid_mask"].to(dtype=torch.bool),
             )
@@ -547,7 +547,7 @@ def _run_prepared_covariance_morgan_pairwise_alignment(
     *,
     config: config_dict.ConfigDict,
     probe_data: MassSpecProbeData,
-    model: PeakSetSIGReg,
+    covariance_pooler: torch.nn.Module,
     feature_extractor: Callable[[dict[str, torch.Tensor]], torch.Tensor],
     move_batch: Callable[[dict[str, object]], dict[str, object]],
     peak_ordering: str,
@@ -574,7 +574,7 @@ def _run_prepared_covariance_morgan_pairwise_alignment(
     endpoint_indices = pair_data["endpoint_index"]
     endpoint_embeddings = _collect_covariance_embeddings_for_indices(
         probe_data=probe_data,
-        model=model,
+        covariance_pooler=covariance_pooler,
         feature_extractor=feature_extractor,
         move_batch=move_batch,
         indices=endpoint_indices,
@@ -597,6 +597,7 @@ def _run_covariance_morgan_pairwise_alignment(
     config: config_dict.ConfigDict,
     probe_data: MassSpecProbeData,
     model: PeakSetSIGReg,
+    covariance_pooler: torch.nn.Module | None,
     feature_extractor: Callable[[dict[str, torch.Tensor]], torch.Tensor],
     move_batch: Callable[[dict[str, object]], dict[str, object]],
     device: torch.device,
@@ -613,14 +614,14 @@ def _run_covariance_morgan_pairwise_alignment(
     num_pairs = resolve_msg_probe_pairwise_alignment_num_pairs(config)
     if (
         num_pairs <= 0
-        or not hasattr(model, "covariance_pooler")
+        or covariance_pooler is None
         or int(probe_data.info.get("probe_morgan_bits", 0)) <= 0
     ):
         return {}
     prepared = _run_prepared_covariance_morgan_pairwise_alignment(
         config=config,
         probe_data=probe_data,
-        model=model,
+        covariance_pooler=covariance_pooler,
         feature_extractor=feature_extractor,
         move_batch=move_batch,
         peak_ordering=peak_ordering,
@@ -630,7 +631,7 @@ def _run_covariance_morgan_pairwise_alignment(
     if prepared is None:
         embeddings, morgan = _collect_covariance_morgan_alignment_inputs(
             probe_data=probe_data,
-            model=model,
+            covariance_pooler=covariance_pooler,
             feature_extractor=feature_extractor,
             move_batch=move_batch,
             split=split,
@@ -901,15 +902,12 @@ def _wrap_probe_for_distributed(
 
 
 def _online_probe_covariance_pooler(
-    model: PeakSetSIGReg,
     variant: str,
+    covariance_pooler: torch.nn.Module | None = None,
 ) -> torch.nn.Module | None:
     if variant != "covariance":
         return None
-    model = unwrap_model(model)
-    if bool(getattr(model, "train_covariance_pooling", False)):
-        return getattr(model, "covariance_pooler", None)
-    return None
+    return covariance_pooler
 
 
 def resolve_msg_probe_select_metric(
@@ -1120,6 +1118,7 @@ def _run_msg_probe_once(
     config: config_dict.ConfigDict,
     model: PeakSetSIGReg,
     device: torch.device,
+    covariance_pooler: torch.nn.Module | None = None,
     on_epoch_end: Callable[[dict[str, float]], None] | None = None,
     repeat_index: int = 0,
     plot_dir: Path | None = None,
@@ -1204,7 +1203,10 @@ def _run_msg_probe_once(
             variant,
             config=config,
             task_spec=task_spec,
-            covariance_pooler=_online_probe_covariance_pooler(model, variant),
+            covariance_pooler=_online_probe_covariance_pooler(
+                variant,
+                covariance_pooler,
+            ),
         ).to(device)
         for variant in variants
     }
@@ -1516,11 +1518,15 @@ def _run_msg_probe_once(
                 fingerprint_task,
                 variant_metrics[f"{variant_prefix}/test/precision_{fingerprint_task}_mean"],
             )
+    alignment_pooler = covariance_pooler
+    if alignment_pooler is None and "covariance" in probes:
+        alignment_pooler = probes["covariance"].pooler
     best_metrics.update(
         _run_covariance_morgan_pairwise_alignment(
             config=config,
             probe_data=probe_data,
             model=model,
+            covariance_pooler=alignment_pooler,
             feature_extractor=feature_extractor,
             move_batch=move_batch,
             device=device,
@@ -1545,6 +1551,7 @@ def run_msg_probe(
     config: config_dict.ConfigDict,
     model: PeakSetSIGReg,
     device: torch.device,
+    covariance_pooler: torch.nn.Module | None = None,
     on_epoch_end: Callable[[dict[str, float]], None] | None = None,
     plot_dir: Path | None = None,
     plot_step: int | None = None,
@@ -1562,6 +1569,8 @@ def run_msg_probe(
             "repeat_index": repeat_index,
             "distributed": distributed,
         }
+        if covariance_pooler is not None:
+            kwargs["covariance_pooler"] = covariance_pooler
         if plot_dir is not None:
             kwargs["plot_dir"] = plot_dir
             kwargs["plot_step"] = plot_step

@@ -1,7 +1,8 @@
 import torch
 from ml_collections import config_dict
 
-from spectra_learning.models.temporal import CovariancePool, CrossAttention
+from spectra_learning.models.pooling import CovariancePool
+from spectra_learning.models.temporal import CrossAttention
 from spectra_learning.probes.massspec.msg_settings import (
     NUM_RINGS_TASK,
     MsgProbeTaskSpec,

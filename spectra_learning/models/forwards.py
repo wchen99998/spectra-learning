@@ -90,11 +90,13 @@ class ForwardMixin:
         self,
         augmented_batch: dict[str, torch.Tensor],
         return_collapse_data: bool = False,
+        covariance_pooler: torch.nn.Module | None = None,
     ) -> dict[str, torch.Tensor] | tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
         if self.training_mode == "mae":
             return self.forward_mae(
                 augmented_batch,
                 return_collapse_data=return_collapse_data,
+                covariance_pooler=covariance_pooler,
             )
 
         peak_mz = augmented_batch["peak_mz"]
@@ -157,6 +159,7 @@ class ForwardMixin:
         covariance_term, covariance_metrics = self._covariance_pooling_metrics(
             context_emb,
             context_mask,
+            covariance_pooler,
         )
         loss = (
             masked_prediction_term
@@ -202,6 +205,7 @@ class ForwardMixin:
         self,
         augmented_batch: dict[str, torch.Tensor],
         return_collapse_data: bool = False,
+        covariance_pooler: torch.nn.Module | None = None,
     ) -> dict[str, torch.Tensor] | tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
         peak_mz = augmented_batch["peak_mz"]
         peak_intensity = augmented_batch["peak_intensity"]
@@ -256,6 +260,7 @@ class ForwardMixin:
         covariance_term, covariance_metrics = self._covariance_pooling_metrics(
             context_emb,
             context_visible_mask,
+            covariance_pooler,
         )
         loss = mae_term + sigreg_term + covariance_term
         valid_peak_count = peak_valid_mask.float().sum().clamp_min(1.0)
