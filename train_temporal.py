@@ -152,12 +152,15 @@ def _build_temporal_optimizers(
         encoder_muon_lr = float(config.get("encoder_muon_lr", None) or encoder_lr)
         adamw_lr = float(config.get("adamw_lr", None) or base_lr)
         encoder_adamw_lr = float(config.get("encoder_adamw_lr", None) or encoder_lr)
+        adjust_lr_fn = config.get("muon_adjust_lr_fn", "match_rms_adamw")
+        if adjust_lr_fn is not None:
+            adjust_lr_fn = str(adjust_lr_fn)
         muon_kwargs = dict(
             momentum=float(config.get("muon_momentum", 0.95)),
             nesterov=bool(config.get("muon_nesterov", True)),
             ns_steps=int(config.get("muon_ns_steps", 5)),
             weight_decay=float(config.get("muon_weight_decay", None) or weight_decay),
-            adjust_lr_fn=str(config.get("muon_adjust_lr_fn", "match_rms_adamw")),
+            adjust_lr_fn=adjust_lr_fn,
         )
 
         optimizers: list[torch.optim.Optimizer] = []
@@ -173,7 +176,7 @@ def _build_temporal_optimizers(
                 continue
             if opt_type == "muon":
                 opt = torch.optim.Muon(
-                    params, lr=torch.tensor(lr), **muon_kwargs
+                    params, lr=lr, **muon_kwargs
                 )
             else:
                 opt = torch.optim.AdamW(

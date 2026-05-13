@@ -12,13 +12,11 @@ from spectra_learning.training.checkpointing import (
     covariance_pooler_checkpoint_path,
     load_resume_covariance_pooler_state,
     load_resume_model_state,
-    optimizer_state_dict,
     save_checkpoint,
 )
 from spectra_learning.training import pretrain
 from spectra_learning.training.modules import PretrainModule
 from spectra_learning.training.optimization import (
-    _split_muon_parameters,
     build_optimizers,
     is_predictor_parameter,
     is_weight_decay_target,
@@ -64,23 +62,14 @@ def _optimizer_config(**overrides) -> config_dict.ConfigDict:
     return cfg
 
 
-def test_save_checkpoint_persists_nested_scalar_optimizer_state():
+def test_save_checkpoint_persists_optimizer_state():
     model = _small_model()
-    matrix_param = next(
-        param for param in model.parameters() if param.requires_grad and param.ndim >= 2
-    )
-    vector_param = next(
-        param for param in model.parameters() if param.requires_grad and param.ndim == 1
-    )
-    optimizer = torch.optim.SGD([matrix_param], lr=0.1)
-    optimizer.scalar_optimizer = torch.optim.AdamW([vector_param], lr=0.01)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
 
-    loss = matrix_param.sum() + vector_param.sum()
+    loss = sum(param.sum() for param in model.parameters())
     loss.backward()
     optimizer.step()
-    optimizer.scalar_optimizer.step()
     optimizer.zero_grad(set_to_none=True)
-    optimizer.scalar_optimizer.zero_grad(set_to_none=True)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         path = f"{tmpdir}/resume.pt"
@@ -98,9 +87,8 @@ def test_save_checkpoint_persists_nested_scalar_optimizer_state():
 
     saved_optimizer = ckpt["optimizers"][0]
     assert ckpt["wandb_run_id"] == "wandb-run-123"
-    assert "state_dict" in saved_optimizer
-    assert "scalar_optimizer_state" in saved_optimizer
-    assert saved_optimizer["scalar_optimizer_state"]["state"]
+    assert saved_optimizer["state"]
+    assert "scalar_optimizer_state" not in saved_optimizer
 
 
 def test_save_checkpoint_writes_covariance_pooler_sibling_pt():
@@ -309,30 +297,6 @@ def test_training_loop_runs_distributed_online_probe_and_logs_on_main(monkeypatc
     assert worker_metrics["run/final_global_step"] == 2.0
 
 
-def test_optimizer_state_dict_strips_runtime_param_group_callables():
-    param = torch.nn.Parameter(torch.randn(4, 4))
-    optimizer = torch.optim.SGD(
-        [
-            {
-                "params": [param],
-                "param_split_fn": lambda x: [x],
-                "param_recombine_fn": lambda parts: parts[0],
-            }
-        ],
-        lr=0.1,
-    )
-
-    state = optimizer_state_dict(optimizer)
-
-    assert "param_split_fn" not in state["param_groups"][0]
-    assert "param_recombine_fn" not in state["param_groups"][0]
-
-    with tempfile.TemporaryFile() as f:
-        torch.save(state, f)
-        f.seek(0)
-        torch.load(f, weights_only=True)
-
-
 def test_build_optimizers_uses_single_adamw_optimizer_by_default():
     model = _small_model()
     cfg = _optimizer_config()
@@ -462,28 +426,59 @@ def test_build_optimizers_respects_frozen_covariance_pooling():
     assert frozen_cov_ids.isdisjoint(frozen_optimizer_ids)
 
 
-def test_muon_splits_merged_qkv_parameters_before_orthogonalization():
+def test_build_optimizers_uses_official_torch_muon_and_adamw():
     model = _small_model(encoder_num_kv_heads=2)
+    cfg = _optimizer_config(optimizer="muon")
 
-    base_muon_groups, predictor_muon_groups, *_ = _split_muon_parameters(model)
+    optimizers, schedulers = build_optimizers(
+        cfg,
+        model,
+        total_steps=10,
+        device=torch.device("cpu"),
+    )
     qkv = model.encoder.blocks[0].attention.wqkv.weight
-    qkv_group = next(
-        group
-        for group in base_muon_groups
-        if any(param is qkv for param in group["params"])
+    muon_optimizer = next(opt for opt in optimizers if isinstance(opt, torch.optim.Muon))
+    adamw_optimizer = next(opt for opt in optimizers if isinstance(opt, torch.optim.AdamW))
+    muon_param_ids = _optimizer_param_ids(muon_optimizer)
+    adamw_param_ids = _optimizer_param_ids(adamw_optimizer)
+
+    assert len(optimizers) == 2
+    assert len(schedulers) == 2
+    assert not hasattr(muon_optimizer, "scalar_optimizer")
+    assert id(qkv) in muon_param_ids
+    assert all(param.ndim == 2 for group in muon_optimizer.param_groups for param in group["params"])
+    assert muon_param_ids.isdisjoint(adamw_param_ids)
+
+
+def test_build_optimizers_splits_official_muon_predictor_lr():
+    model = _small_model()
+    cfg = _optimizer_config(optimizer="muon", predictor_learning_rate_ratio=3.0)
+
+    optimizers, schedulers = build_optimizers(
+        cfg,
+        model,
+        total_steps=10,
+        device=torch.device("cpu"),
     )
 
-    update = torch.randn_like(qkv)
-    split_update = qkv_group["param_split_fn"](update)
-    recombined = qkv_group["param_recombine_fn"](split_update)
+    labels = [getattr(optimizer, "_spectra_lr_label") for optimizer in optimizers]
+    lrs = [float(optimizer.param_groups[0]["lr"]) for optimizer in optimizers]
+    predictor_param_ids = {
+        id(param)
+        for name, param in model.named_parameters()
+        if param.requires_grad and is_predictor_parameter(name)
+    }
+    predictor_muon_ids = _optimizer_param_ids(optimizers[1])
+    predictor_adamw_ids = _optimizer_param_ids(optimizers[3])
 
-    assert predictor_muon_groups
-    assert [part.shape for part in split_update] == [
-        torch.Size([64, 64]),
-        torch.Size([32, 64]),
-        torch.Size([32, 64]),
-    ]
-    torch.testing.assert_close(recombined, update)
+    assert labels == ["muon", "predictor_muon", "adamw", "predictor_adamw"]
+    assert lrs == pytest.approx([1e-3, 3e-3, 1e-3, 3e-3])
+    assert len(schedulers) == 4
+    assert isinstance(optimizers[0], torch.optim.Muon)
+    assert isinstance(optimizers[1], torch.optim.Muon)
+    assert isinstance(optimizers[2], torch.optim.AdamW)
+    assert isinstance(optimizers[3], torch.optim.AdamW)
+    assert predictor_muon_ids | predictor_adamw_ids == predictor_param_ids
 
 
 def test_load_resume_model_state_rejects_sigreg_checkpoint_drift():

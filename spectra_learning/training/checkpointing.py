@@ -5,7 +5,6 @@ import torch
 from spectra_learning.models.model import PeakSetSIGReg
 
 
-RUNTIME_PARAM_GROUP_KEYS = frozenset({"param_split_fn", "param_recombine_fn"})
 COVARIANCE_POOLER_PREFIX = "covariance_pooler."
 COVARIANCE_POOLER_CHECKPOINT_PREFIX = "covariance-pooler-"
 
@@ -39,33 +38,8 @@ def _legacy_pooler_state(
     }
 
 
-def _strip_runtime_param_group_keys(state: dict) -> dict:
-    if "param_groups" not in state:
-        return state
-    return {
-        **state,
-        "param_groups": [
-            {
-                key: value
-                for key, value in group.items()
-                if key not in RUNTIME_PARAM_GROUP_KEYS
-            }
-            for group in state["param_groups"]
-        ],
-    }
-
-
 def optimizer_state_dict(optimizer: torch.optim.Optimizer) -> dict:
-    state = _strip_runtime_param_group_keys(optimizer.state_dict())
-    scalar_optimizer = getattr(optimizer, "scalar_optimizer", None)
-    if scalar_optimizer is None:
-        return state
-    return {
-        "state_dict": state,
-        "scalar_optimizer_state": _strip_runtime_param_group_keys(
-            scalar_optimizer.state_dict()
-        ),
-    }
+    return optimizer.state_dict()
 
 
 def save_checkpoint(
@@ -158,12 +132,7 @@ def load_resume_covariance_pooler_state(
 
 
 def load_optimizer_state(optimizer: torch.optim.Optimizer, state: dict) -> None:
-    scalar_optimizer = getattr(optimizer, "scalar_optimizer", None)
-    if scalar_optimizer is None:
-        optimizer.load_state_dict(state)
-        return
-    optimizer.load_state_dict(state["state_dict"])
-    scalar_optimizer.load_state_dict(state["scalar_optimizer_state"])
+    optimizer.load_state_dict(state)
 
 
 def load_pretrained_weights(

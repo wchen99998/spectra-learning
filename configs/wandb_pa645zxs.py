@@ -147,7 +147,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.muon_momentum = 0.95
     cfg.muon_nesterov = True
     cfg.muon_ns_steps = 5
-    cfg.muon_ns_use_kernels = True
     cfg.muon_weight_decay = None
 
     # Logging
