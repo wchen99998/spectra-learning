@@ -61,7 +61,8 @@ class TemporalDecoderBlock(nn.Module):
 
     def __init__(self, *, dim: int, n_heads: int, n_kv_heads: int | None,
                  norm_eps: float, hidden_dim: int | None,
-                 qk_norm: bool = False, norm_type: str = "rmsnorm"):
+                 qk_norm: bool = False, norm_type: str = "rmsnorm",
+                 dropout: float = 0.0):
         super().__init__()
         self.attention = Attention(
             dim, n_heads, n_kv_heads=n_kv_heads,
@@ -74,13 +75,15 @@ class TemporalDecoderBlock(nn.Module):
         self.attention_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
         self.cross_attn_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
         self.ffn_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
+        self.drop = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
 
     def forward(self, x: torch.Tensor, memory: torch.Tensor, *,
                 memory_mask: torch.Tensor | None = None) -> torch.Tensor:
-        h = x + self.attention(self.attention_norm(x))
-        h = h + self.cross_attn(self.cross_attn_norm(h), memory,
-                                memory_mask=memory_mask)
-        return h + self.feed_forward(self.ffn_norm(h))
+        h = x + self.drop(self.attention(self.attention_norm(x)))
+        h = h + self.drop(
+            self.cross_attn(self.cross_attn_norm(h), memory, memory_mask=memory_mask)
+        )
+        return h + self.drop(self.feed_forward(self.ffn_norm(h)))
 
 
 def _apply_temporal_depth_scaled_init(blocks: nn.ModuleList, num_layers: int) -> None:
@@ -101,12 +104,14 @@ def _apply_temporal_depth_scaled_init(blocks: nn.ModuleList, num_layers: int) ->
 def _build_temporal_decoder_blocks(*, dim: int, num_layers: int, num_heads: int,
                                     num_kv_heads: int | None, attention_mlp_multiple: float,
                                     norm_eps: float = 1e-5, qk_norm: bool = False,
-                                    norm_type: str = "rmsnorm") -> nn.ModuleList:
+                                    norm_type: str = "rmsnorm",
+                                    dropout: float = 0.0) -> nn.ModuleList:
     block_kwargs = dict(
         dim=dim, n_heads=int(num_heads),
         n_kv_heads=int(num_heads) if num_kv_heads is None else int(num_kv_heads),
         norm_eps=norm_eps, hidden_dim=int(math.ceil(dim * attention_mlp_multiple)),
         qk_norm=qk_norm, norm_type=norm_type,
+        dropout=dropout,
     )
     blocks = nn.ModuleList([TemporalDecoderBlock(**block_kwargs) for _ in range(num_layers)])
     _apply_temporal_depth_scaled_init(blocks, num_layers)

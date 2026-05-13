@@ -5,10 +5,6 @@ import torch
 from torch import nn
 
 from spectra_learning.models.transformer import _build_norm
-from spectra_learning.models.common import (
-    _build_frozen_position_embedding,
-    _build_non_causal_blocks,
-)
 from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.losses import SIGReg, SlotwiseSIGReg
 from spectra_learning.models.settings import PeakSetSIGRegSettings
@@ -221,9 +217,6 @@ def _build_teacher(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:
 
 
 def _build_predictor(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:
-    model.latent_mask_token = nn.Parameter(torch.empty(model.model_dim))
-    nn.init.normal_(model.latent_mask_token, std=0.02)
-
     if model.predictor_dim != model.model_dim:
         model.encoder_to_predictor_proj = nn.Linear(
             model.model_dim,
@@ -234,19 +227,20 @@ def _build_predictor(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:
     else:
         model.encoder_to_predictor_proj = nn.Identity()
 
-    model.predictor_position_embedding = _build_frozen_position_embedding(
+    model.predictor_slot_embedding = nn.Embedding(
         model.num_peak_tokens,
-        model.model_dim,
+        model.predictor_dim,
     )
+    nn.init.trunc_normal_(model.predictor_slot_embedding.weight, std=0.02)
     if model.predictor_num_register_tokens > 0:
         model.predictor_register_tokens = nn.Parameter(
-            torch.empty(model.predictor_num_register_tokens, model.model_dim)
+            torch.empty(model.predictor_num_register_tokens, model.predictor_dim)
         )
         nn.init.trunc_normal_(model.predictor_register_tokens, std=0.02)
     else:
         model.predictor_register_tokens = None
 
-    model.masked_latent_predictor = _build_non_causal_blocks(
+    model.masked_latent_predictor = _build_temporal_decoder_blocks(
         dim=model.predictor_dim,
         num_layers=int(cfg.masked_latent_predictor_num_layers),
         num_heads=int(cfg.masked_latent_predictor_num_heads),
@@ -350,6 +344,11 @@ def _build_temporal_predictor(model: nn.Module, cfg: PeakSetSIGRegSettings) -> N
             nn.init.zeros_(layer.bias)
     model.temporal_query_token = nn.Parameter(torch.empty(model.model_dim))
     nn.init.trunc_normal_(model.temporal_query_token, std=0.02)
+    model.temporal_slot_embedding = nn.Embedding(
+        model.num_peak_tokens,
+        model.model_dim,
+    )
+    nn.init.trunc_normal_(model.temporal_slot_embedding.weight, std=0.02)
 
 
 def _canonical_regularizer(value: str) -> str:

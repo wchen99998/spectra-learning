@@ -1,6 +1,5 @@
 import torch
 
-from spectra_learning.models.transformer import create_visible_attention_mask
 from spectra_learning.models.common import _active_autocast_context
 from spectra_learning.models.encoder import PeakSetEncoder
 
@@ -23,46 +22,33 @@ class TargetProjectionMixin:
     def _apply_jepa_target_normalization(self, x: torch.Tensor) -> torch.Tensor:
         return self._apply_group_target_normalization(x, self.model_dim)
 
-    def _append_predictor_register_tokens(
-        self,
-        x: torch.Tensor,
-        visible_mask: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if self.predictor_register_tokens is None:
-            return x, visible_mask
-        registers = self.predictor_register_tokens.unsqueeze(0).expand(x.shape[0], -1, -1)
-        x = torch.cat([x, registers.to(dtype=x.dtype)], dim=1)
-        if visible_mask is None:
-            return x, None
-        register_mask = torch.ones(
-            x.shape[0],
-            self.predictor_num_register_tokens,
-            device=x.device,
-            dtype=torch.bool,
+    def _predictor_slot_queries(self, memory: torch.Tensor) -> torch.Tensor:
+        positions = torch.arange(memory.shape[1], device=memory.device)
+        queries = self.predictor_slot_embedding(positions)
+        return queries.unsqueeze(0).expand(memory.shape[0], -1, -1).to(
+            dtype=memory.dtype
         )
-        return x, torch.cat([visible_mask, register_mask], dim=1)
 
-    def _add_predictor_positions(self, x: torch.Tensor) -> torch.Tensor:
-        # Real predictor/query slots get absolute positions; register tokens are
-        # appended later and stay unpositioned.
-        positions = torch.arange(x.shape[1], device=x.device)
-        return x + self.predictor_position_embedding(positions).to(dtype=x.dtype)
+    def _append_predictor_register_queries(self, x: torch.Tensor) -> torch.Tensor:
+        if self.predictor_register_tokens is None:
+            return x
+        registers = self.predictor_register_tokens.unsqueeze(0).expand(
+            x.shape[0],
+            -1,
+            -1,
+        )
+        return torch.cat([x, registers.to(dtype=x.dtype)], dim=1)
 
     def predict_masked_latents(
         self,
-        x: torch.Tensor,
-        visible_mask: torch.Tensor,
+        context_emb: torch.Tensor,
+        context_mask: torch.Tensor,
     ) -> torch.Tensor:
-        x = self._add_predictor_positions(x)
-        x, visible_mask = self._append_predictor_register_tokens(x, visible_mask)
-        x = self.encoder_to_predictor_proj(x)
-        if len(self.masked_latent_predictor) > 0:
-            predictor_attn_mask = create_visible_attention_mask(visible_mask)
-            for block in self.masked_latent_predictor:
-                x = block(
-                    x,
-                    attn_mask=predictor_attn_mask,
-                )
+        memory = self.encoder_to_predictor_proj(context_emb)
+        x = self._predictor_slot_queries(memory)
+        x = self._append_predictor_register_queries(x)
+        for block in self.masked_latent_predictor:
+            x = block(x, memory, memory_mask=context_mask)
         x = self.predictor_final_norm(x)
         if self.predictor_num_register_tokens > 0:
             x = x[:, :-self.predictor_num_register_tokens]
@@ -81,25 +67,25 @@ class TargetProjectionMixin:
 
     def predict_masked_target_features(
         self,
-        x: torch.Tensor,
-        visible_mask: torch.Tensor,
+        context_emb: torch.Tensor,
+        context_mask: torch.Tensor,
     ) -> torch.Tensor:
         return self.masked_latent_readout(
             self.predict_masked_latents(
-                x,
-                visible_mask,
+                context_emb,
+                context_mask,
             )
         )
 
     def predict_masked_targets(
         self,
-        x: torch.Tensor,
-        visible_mask: torch.Tensor,
+        context_emb: torch.Tensor,
+        context_mask: torch.Tensor,
     ) -> torch.Tensor:
         return self.project_targets(
             self.predict_masked_target_features(
-                x,
-                visible_mask,
+                context_emb,
+                context_mask,
             )
         )
 

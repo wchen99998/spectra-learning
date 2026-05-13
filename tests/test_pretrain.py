@@ -678,17 +678,10 @@ class BlockJEPATests(unittest.TestCase):
             visible_mask=context_mask,
         )
         context_emb, _ = model.encoder.split_peak_and_cls(context_encoded)
-        predictor_input = context_emb.unsqueeze(1).expand(-1, K, -1, -1)
-        predictor_input = predictor_input * context_mask.unsqueeze(1).unsqueeze(-1)
-        predictor_input = torch.where(
-            target_masks.unsqueeze(-1),
-            model.latent_mask_token.view(1, 1, 1, -1).to(context_emb),
-            predictor_input,
-        )
         predictor_output = model.predict_masked_targets(
-            predictor_input.reshape(B * K, N, -1),
-            (context_mask.unsqueeze(1) | target_masks).reshape(B * K, N),
-        ).reshape(B, K, N, -1)
+            context_emb,
+            context_mask,
+        ).unsqueeze(1).expand(B, K, N, -1)
         expected_masked_prediction_loss = (
             model._embedding_loss(predictor_output, teacher_targets.unsqueeze(1))
             * target_masks.float()
@@ -1211,7 +1204,7 @@ class BlockJEPATests(unittest.TestCase):
                 )
             )
 
-    def test_load_pretrained_weights_rejects_missing_position_embeddings(self):
+    def test_load_pretrained_weights_rejects_missing_slot_and_position_embeddings(self):
         model = self._build_model()
         with tempfile.TemporaryDirectory() as tmpdir:
             path = f"{tmpdir}/ckpt.pt"
@@ -1221,7 +1214,7 @@ class BlockJEPATests(unittest.TestCase):
                 if not k.endswith(
                     (
                         "position_embedding.weight",
-                        "predictor_position_embedding.weight",
+                        "predictor_slot_embedding.weight",
                         "cls_token",
                         "register_tokens",
                         "predictor_register_tokens",
@@ -1314,7 +1307,7 @@ class PrecursorTokenTests(unittest.TestCase):
         model = self._build_model(num_peaks=6, use_precursor_token=True)
 
         self.assertEqual(model.encoder.position_embedding.num_embeddings, 7)
-        self.assertEqual(model.predictor_position_embedding.num_embeddings, 7)
+        self.assertEqual(model.predictor_slot_embedding.num_embeddings, 7)
 
     def test_forward_with_pipeline_prepended_batch(self):
         """forward_augmented works with pipeline-prepended batch (N+1 tensors, no precursor_mz key)."""

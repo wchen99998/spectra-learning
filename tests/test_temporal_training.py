@@ -155,22 +155,35 @@ class TestForwardTemporal:
         metrics = model.forward_temporal(batch)
         assert torch.isfinite(metrics["loss"])
 
-    def test_temporal_predictor_absolute_positions_change_output(self):
+    def test_temporal_predictor_slot_embeddings_change_output(self):
         torch.manual_seed(0)
-        model_without_pos = _small_model()
+        model_without_slot_identity = _small_model()
         torch.manual_seed(0)
-        model_with_pos = _small_model()
+        model_with_slot_identity = _small_model()
         with torch.no_grad():
-            model_without_pos.predictor_position_embedding.weight.zero_()
-        model_without_pos.eval()
-        model_with_pos.eval()
+            shared_query = model_without_slot_identity.temporal_slot_embedding.weight[:1]
+            model_without_slot_identity.temporal_slot_embedding.weight.copy_(
+                shared_query.expand_as(
+                    model_without_slot_identity.temporal_slot_embedding.weight
+                )
+            )
+        model_without_slot_identity.eval()
+        model_with_slot_identity.eval()
         batch = _temporal_batch(batch_size=2, num_peaks=8)
 
         with torch.no_grad():
-            loss_without_pos = model_without_pos.forward_temporal(batch)["loss"]
-            loss_with_pos = model_with_pos.forward_temporal(batch)["loss"]
+            loss_without_slot_identity = model_without_slot_identity.forward_temporal(
+                batch
+            )["loss"]
+            loss_with_slot_identity = model_with_slot_identity.forward_temporal(batch)[
+                "loss"
+            ]
 
-        assert not torch.allclose(loss_without_pos, loss_with_pos, atol=1e-6)
+        assert not torch.allclose(
+            loss_without_slot_identity,
+            loss_with_slot_identity,
+            atol=1e-6,
+        )
 
     def test_msg_probe_pairwise_plots_log_to_wandb_at_step(self, tmp_path):
         plot_dir = tmp_path / "msg_probe_plots"
@@ -222,7 +235,12 @@ class TestCheckpointPartialLoad:
         missing, unexpected = full.load_state_dict(sd, strict=False)
 
         # Only temporal keys should be missing
-        allowed_prefixes = ("temporal_predictor.", "temporal_rt_proj.", "temporal_query_token")
+        allowed_prefixes = (
+            "temporal_predictor.",
+            "temporal_rt_proj.",
+            "temporal_query_token",
+            "temporal_slot_embedding.",
+        )
         for key in missing:
             assert any(key.startswith(p) for p in allowed_prefixes), (
                 f"Unexpected missing key: {key}"

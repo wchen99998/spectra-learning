@@ -83,41 +83,15 @@ class ObjectiveMixin:
         target_masks: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_size, num_target_blocks, num_peaks = target_masks.shape
-        context_mask_by_view = context_mask.unsqueeze(1)
-        predictor_input = (
-            context_emb.unsqueeze(1).expand(-1, num_target_blocks, -1, -1)
-            * context_mask_by_view.unsqueeze(-1)
-        )
-        if self.masked_token_input_mode == "mz_sentinel":
-            predictor_input = torch.where(
-                target_masks.unsqueeze(-1),
-                context_emb.unsqueeze(1).expand(-1, num_target_blocks, -1, -1),
-                predictor_input,
-            )
-        else:
-            predictor_input = torch.where(
-                target_masks.unsqueeze(-1),
-                self.latent_mask_token.view(1, 1, 1, -1).to(context_emb),
-                predictor_input,
-            )
-        predictor_visible_mask = (context_mask_by_view | target_masks).reshape(
-            batch_size * num_target_blocks,
-            num_peaks,
-        )
-        flat_predictor_input = predictor_input.reshape(
-            batch_size * num_target_blocks,
-            num_peaks,
-            -1,
-        )
         predictor_features = self.predict_masked_target_features(
-            flat_predictor_input,
-            predictor_visible_mask,
+            context_emb,
+            context_mask,
         )
-        predictor_features = predictor_features.reshape(
+        predictor_features = predictor_features.unsqueeze(1).expand(
             batch_size,
             num_target_blocks,
             num_peaks,
-            -1,
+            predictor_features.shape[-1],
         )
         predictor_output = self.project_targets(predictor_features)
         return predictor_features, predictor_output

@@ -351,17 +351,17 @@ class ForwardMixin:
         delta_rt = (next_frame_rt - frame_rt).unsqueeze(-1)  # [B, 1] in minutes
         rt_emb = self.temporal_rt_proj(delta_rt)  # [B, D]
 
-        queries = self.temporal_query_token.view(1, 1, -1).expand(
-            B, frame_emb.shape[1], -1
+        positions = torch.arange(frame_emb.shape[1], device=frame_emb.device)
+        queries = self.temporal_slot_embedding(positions).unsqueeze(0).expand(
+            B,
+            -1,
+            -1,
         )
+        queries = queries + self.temporal_query_token.view(1, 1, -1)
         queries = queries + rt_emb.unsqueeze(1)
-        queries = self._add_predictor_positions(queries)
-        queries, _ = self._append_predictor_register_tokens(queries, None)
 
         for block in self.temporal_predictor:
             queries = block(queries, frame_emb, memory_mask=frame_valid)
-        if self.predictor_num_register_tokens > 0:
-            queries = queries[:, :-self.predictor_num_register_tokens]
         predicted_next_frame = queries  # [B, N, D]
 
         if teacher_embeddings is not None:

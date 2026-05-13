@@ -6,6 +6,7 @@ from spectra_learning.training.schedules import make_cosine_schedule, scaled_min
 PREDICTOR_PARAM_PREFIXES = (
     "encoder_to_predictor_proj.",
     "masked_latent_predictor.",
+    "predictor_slot_embedding.",
     "predictor_final_norm.",
     "masked_latent_readout.",
     "target_projector.",
@@ -13,7 +14,6 @@ PREDICTOR_PARAM_PREFIXES = (
     "jepa_mae_intensity_head.",
 )
 PREDICTOR_PARAM_NAMES = {
-    "latent_mask_token",
     "predictor_register_tokens",
 }
 
