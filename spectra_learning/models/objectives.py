@@ -254,6 +254,66 @@ class ObjectiveMixin:
             "sigreg_term": sigreg_term,
         }
 
+    def _covariance_pooling_metrics(
+        self,
+        embeddings: torch.Tensor,
+        valid_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if (
+            not self.train_covariance_pooling
+            or self.covariance_pooling_loss_weight <= 0
+            or not hasattr(self, "covariance_pooler")
+        ):
+            return embeddings.new_tensor(0.0), {}
+
+        with torch.autocast(device_type=embeddings.device.type, enabled=False):
+            x = embeddings.detach().float()
+            mask = valid_mask.unsqueeze(-1).to(dtype=x.dtype)
+            x = x * mask
+            denom = mask.sum(dim=1).clamp_min(1.0)
+
+            left = self.covariance_pooler.left_proj(x)
+            right = self.covariance_pooler.right_proj(x)
+            covariance = left.transpose(1, 2) @ right / denom.unsqueeze(-1)
+
+            left_gram = (
+                self.covariance_pooler.left_proj.weight.float()
+                @ self.covariance_pooler.left_proj.weight.float().T
+            )
+            right_gram = (
+                self.covariance_pooler.right_proj.weight.float()
+                @ self.covariance_pooler.right_proj.weight.float().T
+            )
+            projected_reconstruction = (
+                torch.einsum("ij,bjk->bik", left_gram, covariance)
+            )
+            projected_reconstruction = torch.einsum(
+                "bij,jk->bik",
+                projected_reconstruction,
+                right_gram,
+            )
+            reconstruction_norm_sq = (
+                covariance * projected_reconstruction
+            ).sum(dim=(1, 2))
+            cross_term = covariance.square().sum(dim=(1, 2))
+
+            token_gram = x @ x.transpose(1, 2) / denom.unsqueeze(-1)
+            target_norm_sq = token_gram.square().sum(dim=(1, 2))
+            loss_sq = (
+                reconstruction_norm_sq
+                - 2.0 * cross_term
+                + target_norm_sq
+            ).clamp_min(0.0)
+            covariance_loss = torch.sqrt(loss_sq + 1e-12).mean()
+
+        term = embeddings.new_tensor(self.covariance_pooling_loss_weight) * (
+            covariance_loss.to(dtype=embeddings.dtype)
+        )
+        return term, {
+            "covariance_pooling_loss": covariance_loss.to(dtype=embeddings.dtype),
+            "covariance_pooling_term": term,
+        }
+
     def pool(
         self,
         embeddings: torch.Tensor,

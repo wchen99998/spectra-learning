@@ -80,6 +80,7 @@ class PeakSetSIGRegSettings:
     predictor_dropout: float = 0.0
     covariance_pooling_dim: int = -1
     train_covariance_pooling: bool = True
+    covariance_pooling_loss_weight: float = 1.0
     use_ema_teacher: bool = False
     ema_teacher_momentum_start: float = 0.996
     ema_teacher_momentum_mid: float | None = None
@@ -249,6 +250,7 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "predictor_dropout": float,
     "covariance_pooling_dim": int,
     "train_covariance_pooling": bool,
+    "covariance_pooling_loss_weight": float,
     "use_ema_teacher": bool,
     "ema_teacher_momentum_start": float,
     "ema_teacher_momentum_mid": _optional_float,

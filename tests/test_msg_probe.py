@@ -390,6 +390,55 @@ class MsgSequenceProbeTests(unittest.TestCase):
 
         self.assertIs(pooler, main_pooler)
 
+    def test_online_covariance_probe_does_not_override_trainable_pooler(self):
+        config = config_dict.ConfigDict()
+        config.model_dim = 4
+        config.covariance_pooling_dim = 7
+        config.msg_probe_mlp_hidden_dim = 8
+        task_spec = MsgProbeTaskSpec(
+            regression_tasks=("mol_weight",),
+            num_rings_classes=(),
+            maccs_bits=0,
+            regression_means={"mol_weight": 0.0},
+            regression_stds={"mol_weight": 1.0},
+            fingerprint_task="maccs",
+        )
+        main_pooler = CovariancePool(input_dim=4, compressed_dim=2)
+        model = SimpleNamespace(
+            covariance_pooler=main_pooler,
+            train_covariance_pooling=True,
+        )
+        original_state = {
+            name: param.detach().clone()
+            for name, param in main_pooler.state_dict().items()
+        }
+
+        probe = _build_msg_sequence_probe(
+            "covariance",
+            config=config,
+            task_spec=task_spec,
+            covariance_pooler=_online_probe_covariance_pooler(model, "covariance"),
+        )
+        optimizer = torch.optim.AdamW(probe.parameters(), lr=1e-3)
+        peak_embeddings = torch.randn(3, 5, 4)
+        valid_mask = torch.ones(3, 5, dtype=torch.bool)
+        logits = probe(peak_embeddings, valid_mask)["mol_weight"]
+        loss = logits.square().mean()
+        loss.backward()
+        optimizer.step()
+        probe.load_state_dict(probe.state_dict())
+
+        self.assertIsInstance(probe.pooler, FrozenPooler)
+        self.assertIs(probe.pooler.pooler, main_pooler)
+        self.assertEqual(probe.heads.heads["mol_weight"][0].in_features, 2 * 2)
+        self.assertEqual(main_pooler.left_proj.out_features, 2)
+        probe_param_ids = {id(param) for param in probe.parameters()}
+        main_pooler_param_ids = {id(param) for param in main_pooler.parameters()}
+        self.assertFalse(probe_param_ids & main_pooler_param_ids)
+        self.assertFalse(main_pooler.state_dict().keys() <= probe.state_dict().keys())
+        for name, param in main_pooler.state_dict().items():
+            torch.testing.assert_close(param, original_state[name])
+
 
 class PairwiseAlignmentTests(unittest.TestCase):
     def test_pairwise_alignment_uses_cosine_and_tanimoto(self):

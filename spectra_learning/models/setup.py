@@ -70,6 +70,7 @@ def _configure_dimensions(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:
     model.train_covariance_pooling = (
         model.covariance_pooling_dim > 0 and bool(cfg.train_covariance_pooling)
     )
+    model.covariance_pooling_loss_weight = float(cfg.covariance_pooling_loss_weight)
 
 
 def _configure_targets(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:

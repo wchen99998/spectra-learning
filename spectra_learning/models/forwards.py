@@ -154,10 +154,15 @@ class ForwardMixin:
             predictor_output,
             target_masks,
         )
+        covariance_term, covariance_metrics = self._covariance_pooling_metrics(
+            context_emb,
+            context_mask,
+        )
         loss = (
             masked_prediction_term
             + jepa_mae_term
             + sigreg_term
+            + covariance_term
         )
         valid_peak_count = peak_valid_mask.float().sum().clamp_min(1.0)
         collapse_data: dict[str, torch.Tensor] = {}
@@ -188,6 +193,7 @@ class ForwardMixin:
         metrics.update(self._target_mask_metrics(target_masks, valid_peak_count))
         metrics.update(jepa_mae_metrics)
         metrics.update(sigreg_metrics)
+        metrics.update(covariance_metrics)
         if return_collapse_data:
             return metrics, collapse_data
         return metrics
@@ -247,7 +253,11 @@ class ForwardMixin:
             predictor_output,
             target_masks,
         )
-        loss = mae_term + sigreg_term
+        covariance_term, covariance_metrics = self._covariance_pooling_metrics(
+            context_emb,
+            context_visible_mask,
+        )
+        loss = mae_term + sigreg_term + covariance_term
         valid_peak_count = peak_valid_mask.float().sum().clamp_min(1.0)
         metrics = {
             "loss": loss,
@@ -256,6 +266,7 @@ class ForwardMixin:
         metrics.update(self._target_mask_metrics(target_masks, valid_peak_count))
         metrics.update(mae_metrics)
         metrics.update(sigreg_metrics)
+        metrics.update(covariance_metrics)
         if return_collapse_data:
             return metrics, {}
         return metrics

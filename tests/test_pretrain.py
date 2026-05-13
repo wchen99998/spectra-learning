@@ -533,9 +533,8 @@ class BlockJEPATests(unittest.TestCase):
                 )
                 torch.testing.assert_close(metrics["sigreg_loss"], metrics["sigreg_loss"].new_tensor(1.0))
 
-    def test_covariance_pooling_does_not_add_sigreg_loss(self):
+    def test_covariance_pooling_adds_unsupervised_loss(self):
         model = self._build_model(
-            masked_token_loss_weight=1.0,
             covariance_pooling_dim=4,
             sigreg_lambda=0.03,
         )
@@ -550,7 +549,54 @@ class BlockJEPATests(unittest.TestCase):
 
         self.assertNotIn("covariance_sigreg_loss", metrics)
         self.assertNotIn("covariance_sigreg_term", metrics)
-        torch.testing.assert_close(metrics["loss"], metrics["masked_prediction_term"])
+        self.assertIn("covariance_pooling_loss", metrics)
+        self.assertIn("covariance_pooling_term", metrics)
+        self.assertTrue(torch.isfinite(metrics["covariance_pooling_loss"]).item())
+        self.assertGreater(
+            float(metrics["covariance_pooling_loss"].detach()),
+            0.0,
+        )
+        torch.testing.assert_close(metrics["loss"], metrics["covariance_pooling_term"])
+
+        metrics["loss"].backward()
+        cov_grad_norm = sum(
+            param.grad.detach().norm()
+            for param in model.covariance_pooler.parameters()
+            if param.grad is not None
+        )
+        self.assertGreater(float(cov_grad_norm), 0.0)
+
+    def test_covariance_pooling_loss_matches_explicit_reconstruction(self):
+        model = self._build_model(covariance_pooling_dim=2)
+        embeddings = torch.randn(3, 4, model.model_dim)
+        valid_mask = torch.tensor(
+            [
+                [True, True, False, False],
+                [True, True, True, False],
+                [True, False, False, False],
+            ]
+        )
+
+        term, metrics = model._covariance_pooling_metrics(embeddings, valid_mask)
+
+        x = embeddings.detach().float() * valid_mask.unsqueeze(-1).float()
+        denom = valid_mask.float().sum(dim=1).clamp_min(1.0).view(-1, 1, 1)
+        emb = model.covariance_pooler(x, valid_mask).view(
+            embeddings.shape[0],
+            model.covariance_pooling_dim,
+            model.covariance_pooling_dim,
+        )
+        target = x.transpose(1, 2) @ x / denom
+        recons = (
+            model.covariance_pooler.left_proj.weight.float().T
+            @ emb
+            @ model.covariance_pooler.right_proj.weight.float()
+        )
+        explicit = torch.linalg.matrix_norm(recons - target, ord="fro", dim=(-2, -1))
+        explicit = explicit.mean()
+
+        torch.testing.assert_close(metrics["covariance_pooling_loss"], explicit)
+        torch.testing.assert_close(term, explicit)
 
     def test_covariance_pooling_can_be_frozen(self):
         model = self._build_model(
@@ -563,6 +609,10 @@ class BlockJEPATests(unittest.TestCase):
         self.assertTrue(
             all(not param.requires_grad for param in model.covariance_pooler.parameters())
         )
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+        metrics = model.forward_augmented(batch)
+        self.assertNotIn("covariance_pooling_loss", metrics)
+        self.assertNotIn("covariance_pooling_term", metrics)
 
     def test_teacher_targets_are_detached(self):
         model = self._build_model(masked_token_loss_weight=1.0)

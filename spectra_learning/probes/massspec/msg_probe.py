@@ -41,7 +41,7 @@ from spectra_learning.probes.massspec.targets import (
     FG_SMARTS,
     REGRESSION_TARGET_KEYS,
 )
-from spectra_learning.training.distributed import DistributedContext
+from spectra_learning.training.distributed import DistributedContext, unwrap_model
 from spectra_learning.training.schedules import learning_rate_at_step
 
 
@@ -906,6 +906,7 @@ def _online_probe_covariance_pooler(
 ) -> torch.nn.Module | None:
     if variant != "covariance":
         return None
+    model = unwrap_model(model)
     if bool(getattr(model, "train_covariance_pooling", False)):
         return getattr(model, "covariance_pooler", None)
     return None
