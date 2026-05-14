@@ -1161,6 +1161,12 @@ def _submit_probe_sweep_from_local(
         with config.ignore_type():
             for key, value in overrides.items():
                 setattr(config, key, value)
+        fingerprint = str(
+            config.get(
+                "msg_probe_fingerprint",
+                config.get("msg_probe_fingerprint_type", "maccs"),
+            )
+        ).lower()
         config_dict = _config_to_wandb_dict(config)
         (job_dir / "config.json").write_text(
             json.dumps(config_dict, indent=2, sort_keys=True)
@@ -1179,6 +1185,7 @@ def _submit_probe_sweep_from_local(
             "remote_workdir": str(remote_workdir),
             "remote_checkpoint": str(remote_checkpoint),
             "overrides": overrides,
+            "fingerprint": fingerprint,
         }
         records.append(record)
         handles.append((handle, record))
@@ -1196,13 +1203,18 @@ def _submit_probe_sweep_from_local(
         (job_dir / "metrics.json").write_text(
             json.dumps(metrics, indent=2, sort_keys=True)
         )
+        fingerprint = str(record["fingerprint"])
         summary = {
             **record,
             "best_epoch": metrics["msg_probe/covariance/epoch"],
-            "val_auc": metrics["msg_probe/covariance/val/auc_maccs_mean"],
-            "test_auc": metrics["msg_probe/covariance/test/auc_maccs_mean"],
+            "val_auc": metrics[
+                f"msg_probe/covariance/val/auc_{fingerprint}_mean"
+            ],
+            "test_auc": metrics[
+                f"msg_probe/covariance/test/auc_{fingerprint}_mean"
+            ],
             "test_ap": metrics[
-                "msg_probe/covariance/test/average_precision_maccs_mean"
+                f"msg_probe/covariance/test/average_precision_{fingerprint}_mean"
             ],
         }
         results.append(summary)

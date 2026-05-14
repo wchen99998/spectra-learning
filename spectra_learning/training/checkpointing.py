@@ -18,6 +18,12 @@ def is_main_checkpoint_path(path: Path) -> bool:
     return not path.name.startswith(COVARIANCE_POOLER_CHECKPOINT_PREFIX)
 
 
+def is_training_checkpoint_path(path: Path) -> bool:
+    return is_main_checkpoint_path(path) and (
+        path.name == "last.pt" or path.name.startswith("step-")
+    )
+
+
 def _model_state_without_legacy_pooler(
     state_dict: dict[str, torch.Tensor],
 ) -> dict[str, torch.Tensor]:
@@ -214,7 +220,7 @@ def latest_ckpt_path(directory: Path) -> str | None:
     ckpts = sorted(
         [
             *root.rglob("*.ckpt"),
-            *(p for p in root.rglob("*.pt") if is_main_checkpoint_path(p)),
+            *(p for p in root.rglob("*.pt") if is_training_checkpoint_path(p)),
         ],
         key=lambda p: p.stat().st_mtime,
     )

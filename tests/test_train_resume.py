@@ -12,6 +12,8 @@ from spectra_learning.models.model import PeakSetSIGReg
 from spectra_learning.models.pooling import CovariancePool
 from spectra_learning.training.checkpointing import (
     covariance_pooler_checkpoint_path,
+    is_training_checkpoint_path,
+    latest_ckpt_path,
     load_resume_covariance_pooler_state,
     load_resume_model_state,
     save_checkpoint,
@@ -128,6 +130,23 @@ def test_save_checkpoint_writes_covariance_pooler_sibling_pt():
     assert "covariance_pooler.left_proj.weight" not in ckpt["model"]
     assert set(pooler_ckpt["pooler"]) == set(pooler.state_dict())
     assert pooler_ckpt["global_step"] == 12
+
+
+def test_latest_ckpt_path_ignores_modal_probe_checkpoints(tmp_path: Path):
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    step_path = checkpoint_dir / "step-00000012.pt"
+    modal_probe_path = checkpoint_dir / "modal-probe-step-00000013.pt"
+    pooler_path = checkpoint_dir / "covariance-pooler-step-00000012.pt"
+
+    step_path.write_bytes(b"step")
+    modal_probe_path.write_bytes(b"probe")
+    pooler_path.write_bytes(b"pooler")
+
+    assert is_training_checkpoint_path(step_path)
+    assert not is_training_checkpoint_path(modal_probe_path)
+    assert not is_training_checkpoint_path(pooler_path)
+    assert latest_ckpt_path(tmp_path) == str(step_path)
 
 
 def test_load_resume_covariance_pooler_state_reads_sibling_pt():

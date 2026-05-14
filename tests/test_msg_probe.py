@@ -52,6 +52,10 @@ from spectra_learning.probes.massspec.msg_probe import (
     resolve_msg_probe_select_metric,
     run_msg_probe,
 )
+from spectra_learning.probes.massspec.targets import (
+    MORGAN_PROBE_FINGERPRINT_BITS,
+    MORGAN_PROBE_FINGERPRINT_RADIUS,
+)
 
 
 def _maccs(rows: list[list[int]]) -> np.ndarray:
@@ -775,6 +779,8 @@ class MsgProbeMetricTests(unittest.TestCase):
         self.assertGreater(metrics["msg_probe/test/recall_maccs_mean"], 0.9)
         self.assertEqual(metrics["msg_probe/test/num_maccs_precision_bits"], 4.0)
         self.assertGreater(metrics["msg_probe/test/precision_maccs_mean"], 0.9)
+        self.assertAlmostEqual(metrics["msg_probe/test/tanimoto_maccs_mean"], 1.0)
+        self.assertGreater(metrics["msg_probe/test/cosine_maccs_mean"], 0.95)
 
     def test_score_epoch_state_matches_per_bit_fingerprint_metrics(self):
         task_spec = MsgProbeTaskSpec(
@@ -828,6 +834,8 @@ class MsgProbeMetricTests(unittest.TestCase):
         average_precision_values = []
         recall_values = []
         precision_values = []
+        tanimoto_values = []
+        cosine_values = []
         for bit_idx in range(target.shape[1]):
             bit_target = target[:, bit_idx]
             bit_pred = pred[:, bit_idx] >= 0.5
@@ -850,6 +858,21 @@ class MsgProbeMetricTests(unittest.TestCase):
                 if np.count_nonzero(bit_pred) > 0
                 else 0.0
             )
+        bit_pred = pred >= 0.5
+        for sample_idx in range(target.shape[0]):
+            intersection = np.count_nonzero(bit_pred[sample_idx] & (target[sample_idx] > 0))
+            union = np.count_nonzero(bit_pred[sample_idx] | (target[sample_idx] > 0))
+            tanimoto_values.append(intersection / max(union, 1))
+            cosine_values.append(
+                float(
+                    np.dot(pred[sample_idx], target[sample_idx])
+                    / max(
+                        np.linalg.norm(pred[sample_idx])
+                        * np.linalg.norm(target[sample_idx]),
+                        1e-12,
+                    )
+                )
+            )
 
         self.assertEqual(metrics["msg_probe/test/num_maccs_auc_bits"], 3.0)
         self.assertEqual(metrics["msg_probe/test/num_maccs_recall_bits"], 4.0)
@@ -866,6 +889,60 @@ class MsgProbeMetricTests(unittest.TestCase):
         self.assertAlmostEqual(
             metrics["msg_probe/test/precision_maccs_mean"], np.mean(precision_values)
         )
+        self.assertAlmostEqual(
+            metrics["msg_probe/test/tanimoto_maccs_mean"], np.mean(tanimoto_values)
+        )
+        self.assertAlmostEqual(
+            metrics["msg_probe/test/cosine_maccs_mean"], np.mean(cosine_values)
+        )
+
+    def test_score_epoch_state_names_morgan_similarity_metrics(self):
+        task_spec = MsgProbeTaskSpec(
+            regression_tasks=(),
+            num_rings_classes=(),
+            maccs_bits=3,
+            regression_means={},
+            regression_stds={},
+            fingerprint_task="morgan",
+        )
+        epoch_state = _new_epoch_state(task_spec)
+        _update_epoch_state(
+            epoch_state,
+            {
+                "batch_size": 2,
+                "predictions": {
+                    "morgan": torch.tensor(
+                        [
+                            [0.9, 0.1, 0.8],
+                            [0.2, 0.7, 0.6],
+                        ],
+                        dtype=torch.float32,
+                    )
+                },
+                "targets": {
+                    "morgan": torch.tensor(
+                        [
+                            [1.0, 0.0, 1.0],
+                            [0.0, 1.0, 1.0],
+                        ],
+                        dtype=torch.float32,
+                    )
+                },
+            },
+            task_spec,
+        )
+
+        metrics = _score_epoch_state(
+            prefix="msg_probe/test",
+            epoch_state=epoch_state,
+            task_spec=task_spec,
+        )
+
+        self.assertIn("msg_probe/test/auc_morgan_mean", metrics)
+        self.assertIn("msg_probe/test/average_precision_morgan_mean", metrics)
+        self.assertEqual(metrics["msg_probe/test/tanimoto_morgan_mean"], 1.0)
+        self.assertGreater(metrics["msg_probe/test/cosine_morgan_mean"], 0.95)
+        self.assertNotIn("msg_probe/test/auc_maccs_mean", metrics)
 
     def test_select_metric_uses_tune_metric_fallback(self):
         cfg = {
@@ -1247,6 +1324,20 @@ class ProbeConfigTests(unittest.TestCase):
         cfg = config_dict.ConfigDict()
         cfg.msg_probe_pairwise_alignment_num_pairs = 20_000
 
+        self.assertEqual(resolve_msg_probe_pairwise_alignment_num_pairs(cfg), 20_000)
+
+    def test_morgan_probe_config_targets_4096_radius2_and_alignment(self):
+        from configs.wandb_pa645zxs_morgan import get_config
+
+        cfg = get_config()
+
+        self.assertEqual(resolve_msg_probe_fingerprint(cfg), "morgan")
+        self.assertEqual(
+            resolve_msg_probe_select_metric(cfg),
+            "msg_probe/test/auc_morgan_mean",
+        )
+        self.assertEqual(MORGAN_PROBE_FINGERPRINT_BITS, 4096)
+        self.assertEqual(MORGAN_PROBE_FINGERPRINT_RADIUS, 2)
         self.assertEqual(resolve_msg_probe_pairwise_alignment_num_pairs(cfg), 20_000)
 
 
