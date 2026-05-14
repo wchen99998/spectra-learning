@@ -20,6 +20,7 @@ from spectra_learning.training.checkpointing import (
     load_frozen_teacher_weights,
     load_optimizer_state,
     load_resume_model_state,
+    is_training_checkpoint_path,
     prune_checkpoints,
     save_checkpoint,
 )
@@ -41,7 +42,11 @@ from spectra_learning.training.modal_probe import (
 from spectra_learning.training.modules import PretrainModule, split_pretrain_module
 from spectra_learning.training.optimization import build_optimizers
 from spectra_learning.training.steps import train_step_impl
-from spectra_learning.probes.massspec.msg_probe import msg_probe_variants_from_config, run_msg_probe
+from spectra_learning.probes.massspec.msg_probe import (
+    msg_probe_variants_from_config,
+    resolve_msg_probe_fingerprint,
+    run_msg_probe,
+)
 from spectra_learning.models.pooling import build_covariance_pooler_from_config
 from spectra_learning.training.api import (
     build_logger,
@@ -449,7 +454,7 @@ def restore_training_state(
         (
             path
             for path in checkpoint_dir.glob("*.pt")
-            if not path.name.startswith("covariance-pooler-")
+            if is_training_checkpoint_path(path)
         ),
         key=lambda p: p.stat().st_mtime,
     )
@@ -568,16 +573,18 @@ def run_and_log_msg_probe(
             global_step,
             enable_wandb=bool(config.get("enable_wandb", False)),
         )
+        fingerprint_task = resolve_msg_probe_fingerprint(config)
         for variant in variants:
             prefix = f"msg_probe/{variant}"
             epoch_key = f"{prefix}/epoch"
             if epoch_key in probe_metrics:
                 logging.info(
-                    "step=%d msg_probe[%s] best_epoch=%.2f test_auc_maccs_mean=%.4f",
+                    "step=%d msg_probe[%s] best_epoch=%.2f test_auc_%s_mean=%.4f",
                     global_step,
                     variant,
                     probe_metrics[epoch_key],
-                    probe_metrics[f"{prefix}/test/auc_maccs_mean"],
+                    fingerprint_task,
+                    probe_metrics[f"{prefix}/test/auc_{fingerprint_task}_mean"],
                 )
     return probe_metrics
 

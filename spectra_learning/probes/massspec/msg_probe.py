@@ -1073,7 +1073,8 @@ def _score_epoch_state(
             average_precision_values = np.asarray([], dtype=np.float64)
         positive_mask = positives > 0
         bit_pred = pred >= 0.5
-        true_positives = (bit_pred & (target > 0)).sum(axis=0)
+        target_bits = target > 0
+        true_positives = (bit_pred & target_bits).sum(axis=0)
         predicted_positives = bit_pred.sum(axis=0)
         recall_values = true_positives[positive_mask] / positives[positive_mask]
         precision_values = np.divide(
@@ -1081,6 +1082,14 @@ def _score_epoch_state(
             predicted_positives[positive_mask],
             out=np.zeros_like(true_positives[positive_mask], dtype=np.float64),
             where=predicted_positives[positive_mask] > 0,
+        )
+        intersection = np.count_nonzero(bit_pred & target_bits, axis=1)
+        union = np.count_nonzero(bit_pred | target_bits, axis=1)
+        tanimoto_values = intersection / np.maximum(union, 1)
+        dot = np.sum(pred * target, axis=1)
+        cosine_values = dot / np.maximum(
+            np.linalg.norm(pred, axis=1) * np.linalg.norm(target, axis=1),
+            1e-12,
         )
         metrics[f"{prefix}/num_{fingerprint_task}_auc_bits"] = float(len(auc_values))
         metrics[f"{prefix}/num_{fingerprint_task}_average_precision_bits"] = float(
@@ -1105,6 +1114,12 @@ def _score_epoch_state(
         )
         metrics[f"{prefix}/precision_{fingerprint_task}_mean"] = (
             float(np.mean(precision_values)) if len(precision_values) else float("nan")
+        )
+        metrics[f"{prefix}/tanimoto_{fingerprint_task}_mean"] = float(
+            np.mean(tanimoto_values)
+        )
+        metrics[f"{prefix}/cosine_{fingerprint_task}_mean"] = float(
+            np.mean(cosine_values)
         )
     metrics[f"{prefix}/r2_mean"] = float(np.mean(regression_r2_values))
     metrics[f"{prefix}/mae_mean"] = float(np.mean(regression_mae_values))
