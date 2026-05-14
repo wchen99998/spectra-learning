@@ -37,27 +37,34 @@ class SIGReg(nn.Module):
         *,
         directions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if directions is None:
-            directions = self._sample_directions(
-                flat.size(-1),
-                device=flat.device,
-                dtype=flat.dtype,
-            )
-        x_t = (flat @ directions).unsqueeze(-1) * self.t.to(flat)
-        if valid_mask is None:
-            sample_count = flat.new_tensor(float(flat.size(0)))
-            cos_mean = x_t.cos().mean(0)
-            sin_mean = x_t.sin().mean(0)
-        else:
-            mask_weights = valid_mask.reshape(-1).to(dtype=flat.dtype, device=flat.device)
-            sample_count = mask_weights.sum()
-            safe_count = sample_count.clamp_min(1.0)
-            weight_view = mask_weights.unsqueeze(-1).unsqueeze(-1)
-            cos_mean = (x_t.cos() * weight_view).sum(0) / safe_count
-            sin_mean = (x_t.sin() * weight_view).sum(0) / safe_count
-        err = (cos_mean - self.phi.to(flat)).square() + sin_mean.square()
-        statistic = err @ self.weights.to(flat)
-        return statistic.mean() * sample_count
+        with torch.autocast(device_type=flat.device.type, enabled=False):
+            flat = flat.float()
+            if directions is None:
+                directions = self._sample_directions(
+                    flat.size(-1),
+                    device=flat.device,
+                    dtype=flat.dtype,
+                )
+            else:
+                directions = directions.to(device=flat.device, dtype=flat.dtype)
+            x_t = (flat @ directions).unsqueeze(-1) * self.t.to(flat)
+            if valid_mask is None:
+                sample_count = flat.new_tensor(float(flat.size(0)))
+                cos_mean = x_t.cos().mean(0)
+                sin_mean = x_t.sin().mean(0)
+            else:
+                mask_weights = valid_mask.reshape(-1).to(
+                    dtype=flat.dtype,
+                    device=flat.device,
+                )
+                sample_count = mask_weights.sum()
+                safe_count = sample_count.clamp_min(1.0)
+                weight_view = mask_weights.unsqueeze(-1).unsqueeze(-1)
+                cos_mean = (x_t.cos() * weight_view).sum(0) / safe_count
+                sin_mean = (x_t.sin() * weight_view).sum(0) / safe_count
+            err = (cos_mean - self.phi.to(flat)).square() + sin_mean.square()
+            statistic = err @ self.weights.to(flat)
+            return statistic.mean() * sample_count
 
     def forward(
         self,
@@ -79,37 +86,41 @@ class SlotwiseSIGReg(SIGReg):
         *,
         directions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if proj.ndim == 3:
-            proj = proj.unsqueeze(1)
-            if valid_mask is not None:
-                valid_mask = valid_mask.unsqueeze(1)
-        batch_size, num_views, num_slots, dim = proj.shape
-        slot_proj = proj.reshape(batch_size * num_views, num_slots, dim)
-        if directions is None:
-            directions = self._sample_directions(
-                dim,
-                device=proj.device,
-                dtype=proj.dtype,
-            )
-        projected = torch.einsum("bld,ds->bls", slot_proj, directions)
-        x_t = projected.unsqueeze(-1) * self.t.to(projected)
-        if valid_mask is None:
-            sample_count = projected.new_full(
-                (num_slots,),
-                float(batch_size * num_views),
-            )
-            cos_mean = x_t.cos().mean(0)
-            sin_mean = x_t.sin().mean(0)
-        else:
-            slot_mask = valid_mask.reshape(batch_size * num_views, num_slots).to(
-                dtype=proj.dtype,
-                device=proj.device,
-            )
-            sample_count = slot_mask.sum(0)
-            safe_count = sample_count.clamp_min(1.0)
-            weight_view = slot_mask.unsqueeze(-1).unsqueeze(-1)
-            cos_mean = (x_t.cos() * weight_view).sum(0) / safe_count[:, None, None]
-            sin_mean = (x_t.sin() * weight_view).sum(0) / safe_count[:, None, None]
-        err = (cos_mean - self.phi.to(projected)).square() + sin_mean.square()
-        statistic = err @ self.weights.to(projected)
-        return (statistic.mean(-1) * sample_count).sum()
+        with torch.autocast(device_type=proj.device.type, enabled=False):
+            proj = proj.float()
+            if proj.ndim == 3:
+                proj = proj.unsqueeze(1)
+                if valid_mask is not None:
+                    valid_mask = valid_mask.unsqueeze(1)
+            batch_size, num_views, num_slots, dim = proj.shape
+            slot_proj = proj.reshape(batch_size * num_views, num_slots, dim)
+            if directions is None:
+                directions = self._sample_directions(
+                    dim,
+                    device=proj.device,
+                    dtype=proj.dtype,
+                )
+            else:
+                directions = directions.to(device=proj.device, dtype=proj.dtype)
+            projected = torch.einsum("bld,ds->bls", slot_proj, directions)
+            x_t = projected.unsqueeze(-1) * self.t.to(projected)
+            if valid_mask is None:
+                sample_count = projected.new_full(
+                    (num_slots,),
+                    float(batch_size * num_views),
+                )
+                cos_mean = x_t.cos().mean(0)
+                sin_mean = x_t.sin().mean(0)
+            else:
+                slot_mask = valid_mask.reshape(batch_size * num_views, num_slots).to(
+                    dtype=proj.dtype,
+                    device=proj.device,
+                )
+                sample_count = slot_mask.sum(0)
+                safe_count = sample_count.clamp_min(1.0)
+                weight_view = slot_mask.unsqueeze(-1).unsqueeze(-1)
+                cos_mean = (x_t.cos() * weight_view).sum(0) / safe_count[:, None, None]
+                sin_mean = (x_t.sin() * weight_view).sum(0) / safe_count[:, None, None]
+            err = (cos_mean - self.phi.to(projected)).square() + sin_mean.square()
+            statistic = err @ self.weights.to(projected)
+            return (statistic.mean(-1) * sample_count).sum()

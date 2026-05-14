@@ -7,6 +7,7 @@ from spectra_learning.models.settings import PeakSetSIGRegSettings
 from spectra_learning.models.spectral_attention_bias import SpectralGraphormerBias
 from spectra_learning.models.temporal import (
     CrossAttention,
+    CrossAttentionDecoderBlock,
     TemporalDecoderBlock,
 )
 from spectra_learning.models.transformer import (
@@ -20,6 +21,7 @@ __all__ = [
     "Attention",
     "CovariancePool",
     "CrossAttention",
+    "CrossAttentionDecoderBlock",
     "FeedForward",
     "FourierFeatures",
     "PeakFeatureEmbedder",

@@ -8,7 +8,10 @@ from spectra_learning.models.transformer import _build_norm
 from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.losses import SIGReg, SlotwiseSIGReg
 from spectra_learning.models.settings import PeakSetSIGRegSettings
-from spectra_learning.models.temporal import _build_temporal_decoder_blocks
+from spectra_learning.models.temporal import (
+    _build_cross_attention_decoder_blocks,
+    _build_temporal_decoder_blocks,
+)
 
 
 SLOTWISE_REGULARIZERS = {
@@ -240,7 +243,7 @@ def _build_predictor(model: nn.Module, cfg: PeakSetSIGRegSettings) -> None:
     else:
         model.predictor_register_tokens = None
 
-    model.masked_latent_predictor = _build_temporal_decoder_blocks(
+    model.masked_latent_predictor = _build_cross_attention_decoder_blocks(
         dim=model.predictor_dim,
         num_layers=int(cfg.masked_latent_predictor_num_layers),
         num_heads=int(cfg.masked_latent_predictor_num_heads),

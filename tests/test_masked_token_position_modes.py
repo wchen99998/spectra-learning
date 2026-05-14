@@ -263,7 +263,7 @@ def test_encoder_and_predictor_final_norms_are_non_affine():
     assert list(model.encoder.final_norm.parameters()) == []
     assert list(model.predictor_final_norm.parameters()) == []
     assert list(model.encoder.blocks[0].attention_norm.parameters())
-    assert list(model.masked_latent_predictor[0].attention_norm.parameters())
+    assert list(model.masked_latent_predictor[0].cross_attn_norm.parameters())
 
     encoder = PeakSetEncoder(
         model_dim=32,
@@ -275,6 +275,16 @@ def test_encoder_and_predictor_final_norms_are_non_affine():
         apply_final_norm=True,
     )
     assert list(encoder.final_norm.parameters()) == []
+
+
+def test_masked_latent_predictor_uses_cross_attention_only_blocks():
+    model = _build_model(predictor_layers=2)
+    block = model.masked_latent_predictor[0]
+
+    assert hasattr(block, "cross_attn")
+    assert hasattr(block, "feed_forward")
+    assert not hasattr(block, "attention")
+    assert not hasattr(block, "attention_norm")
 
 
 @torch.no_grad()
