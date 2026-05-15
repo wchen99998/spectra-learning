@@ -41,6 +41,7 @@ MINUTES = 60
 HOURS = 60 * MINUTES
 DEFAULT_GPU = "H100"
 PROBE_GPU = "L4"
+FAST_PROBE_GPU = "H100"
 PROJECT_ROOT = "/root/spectra-learning"
 MAX_SWEEP_CONCURRENCY = 10
 TRAIN_TIMEOUT_HOURS = 24
@@ -695,17 +696,7 @@ def train(
     return results
 
 
-@app.function(
-    image=image,
-    volumes={volume_path: volume},
-    cpu=8.0,
-    memory=32768,  # 32 GiB
-    gpu=PROBE_GPU,
-    timeout=PROBE_TIMEOUT_HOURS * HOURS,
-    secrets=[huggingface_secret, wandb_secret],
-    single_use_containers=True,
-)
-def run_probe_checkpoint(
+def _run_probe_checkpoint_impl(
     config_json: str,
     checkpoint_path: str,
     workdir: str,
@@ -738,6 +729,54 @@ def run_probe_checkpoint(
     volume.commit()
     logging.info("Modal MSG probe complete: %s", metrics)
     return metrics
+
+
+@app.function(
+    image=image,
+    volumes={volume_path: volume},
+    cpu=8.0,
+    memory=32768,  # 32 GiB
+    gpu=PROBE_GPU,
+    timeout=PROBE_TIMEOUT_HOURS * HOURS,
+    secrets=[huggingface_secret, wandb_secret],
+    single_use_containers=True,
+)
+def run_probe_checkpoint(
+    config_json: str,
+    checkpoint_path: str,
+    workdir: str,
+    global_step: int,
+):
+    return _run_probe_checkpoint_impl(
+        config_json=config_json,
+        checkpoint_path=checkpoint_path,
+        workdir=workdir,
+        global_step=global_step,
+    )
+
+
+@app.function(
+    image=image,
+    volumes={volume_path: volume},
+    cpu=8.0,
+    memory=32768,  # 32 GiB
+    gpu=FAST_PROBE_GPU,
+    timeout=PROBE_TIMEOUT_HOURS * HOURS,
+    secrets=[huggingface_secret, wandb_secret],
+    single_use_containers=True,
+)
+def run_probe_checkpoint_h100(
+    config_json: str,
+    checkpoint_path: str,
+    workdir: str,
+    global_step: int,
+):
+    return _run_probe_checkpoint_impl(
+        config_json=config_json,
+        checkpoint_path=checkpoint_path,
+        workdir=workdir,
+        global_step=global_step,
+    )
 
 
 @app.function(
@@ -1088,6 +1127,14 @@ def _modal_probe_workdir(workdir: Path, global_step: int) -> Path:
     )
 
 
+def _probe_checkpoint_runner(probe_gpu: str):
+    return (
+        run_probe_checkpoint_h100
+        if str(probe_gpu).lower() == "h100"
+        else run_probe_checkpoint
+    )
+
+
 def _submit_probe_from_local(
     *,
     config_json_path: str,
@@ -1095,6 +1142,7 @@ def _submit_probe_from_local(
     workdir: str,
     global_step: int,
     wait: bool,
+    probe_gpu: str,
 ) -> None:
     local_checkpoint = Path(checkpoint_path).expanduser().resolve()
     local_workdir = Path(workdir).expanduser().resolve()
@@ -1107,7 +1155,7 @@ def _submit_probe_from_local(
         int(global_step),
     )
     remote_workdir = _modal_probe_workdir(local_workdir, int(global_step))
-    handle = run_probe_checkpoint.spawn(
+    handle = _probe_checkpoint_runner(probe_gpu).spawn(
         config_json=config_json,
         checkpoint_path=str(remote_checkpoint),
         workdir=str(remote_workdir),
@@ -1137,6 +1185,7 @@ def _submit_probe_sweep_from_local(
     workdir: str,
     global_step: int,
     wait_for_results: bool,
+    probe_gpu: str,
 ) -> None:
     from spectra_learning.training.api import load_config
     from spectra_learning.training.logging import _config_to_wandb_dict
@@ -1172,7 +1221,7 @@ def _submit_probe_sweep_from_local(
             json.dumps(config_dict, indent=2, sort_keys=True)
         )
         remote_workdir = volume_path / "modal_probe_runs" / local_workdir.name / name
-        handle = run_probe_checkpoint.spawn(
+        handle = _probe_checkpoint_runner(probe_gpu).spawn(
             config_json=_modal_probe_config_json(json.dumps(config_dict, sort_keys=True)),
             checkpoint_path=str(remote_checkpoint),
             workdir=str(remote_workdir),
@@ -1427,6 +1476,7 @@ def main(
     submit_probe_workdir: str = "",
     submit_probe_global_step: int = 0,
     submit_probe_wait: bool = False,
+    submit_probe_gpu: str = "",
     submit_probe_sweep_json_path: str = "",
     submit_fluorine_checkpoint_dir: str = "",
     submit_fluorine_workdir: str = "",
@@ -1450,6 +1500,7 @@ def main(
             workdir=submit_probe_workdir,
             global_step=int(submit_probe_global_step),
             wait_for_results=submit_probe_wait,
+            probe_gpu=submit_probe_gpu,
         )
         return
 
@@ -1460,6 +1511,7 @@ def main(
             workdir=submit_probe_workdir,
             global_step=int(submit_probe_global_step),
             wait=submit_probe_wait,
+            probe_gpu=submit_probe_gpu,
         )
         return
 

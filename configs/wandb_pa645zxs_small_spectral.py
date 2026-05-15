@@ -41,13 +41,14 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_token_loss_weight = 0
     cfg.jepa_mae_loss_weight = 0.0
     cfg.mae_loss_weight = 1.0
+    cfg.jepa_mae_mz_bin_size = 0.1
     cfg.collapse_metrics_every_n_steps = 0
     if "jepa_target_layers" in cfg:
         del cfg["jepa_target_layers"]
 
     cfg.msg_probe_every_n_steps = 0.3
     cfg.msg_probe_batch_size = 256
-    cfg.msg_probe_backend = "modal"
+    cfg.msg_probe_backend = "local"
     cfg.jepa_mask_strategy = "intensity_aware"
     cfg.jepa_num_target_blocks = 2
     cfg.jepa_context_fraction = 0.35
@@ -57,11 +58,16 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_mask_round_from = 3
     cfg.train_covariance_pooling = False
 
-    cfg.optimizer = "muon"
+    cfg.optimizer = "adamw"
     cfg.learning_rate = 2e-4
     cfg.weight_decay = 0.01
-    cfg.min_learning_rate = 2e-05
-    cfg.b2 = 0.98
+    cfg.min_learning_rate = 1e-05
+    cfg.warmup_steps = 10_000
+    cfg.b2 = 0.95
+
+    cfg.nist_murcko_probe_train_samples = 60_000
+    cfg.nist_murcko_probe_val_samples = 10_000
+    cfg.nist_murcko_probe_test_samples = 10_000
 
     cfg.run_name_suffix = "mae-all-masks-80m-200ep-pred20pct"
 

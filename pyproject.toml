@@ -16,7 +16,7 @@ dependencies = [
     "scikit-learn>=1.8.0",
     "torch==2.11.0; sys_platform == 'linux'",
     "tqdm>=4.66.4",
-    "wandb==0.23.1",
+    "wandb==0.27.0",
     "modal>=1.4.1",
 ]
 

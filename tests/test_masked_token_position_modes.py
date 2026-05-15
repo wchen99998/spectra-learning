@@ -357,8 +357,45 @@ def test_mz_sentinel_mode_masks_only_target_mz_for_context_encoder():
 
 
 @torch.no_grad()
-def test_predictor_receives_context_memory_and_context_mask():
+def test_mz_sentinel_predictor_receives_context_and_target_memory_mask():
     model = _build_model(masked_token_input_mode="mz_sentinel")
+    batch = _make_batch()
+    context_emb = torch.randn(
+        batch["peak_mz"].shape[0],
+        batch["peak_mz"].shape[1],
+        model.model_dim,
+    )
+    captured: dict[str, torch.Tensor] = {}
+
+    def fake_predict_masked_target_features(
+        x: torch.Tensor,
+        context_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        captured["x"] = x.detach().clone()
+        captured["context_mask"] = context_mask.detach().clone()
+        return x.new_zeros(x.shape[0], x.shape[1], model.jepa_target_dim)
+
+    with mock.patch.object(
+        model,
+        "predict_masked_target_features",
+        side_effect=fake_predict_masked_target_features,
+    ):
+        model._predict_augmented_targets(
+            context_emb,
+            batch["context_mask"],
+            batch["target_masks"],
+        )
+
+    B, K, N = batch["target_masks"].shape
+    target_union = batch["target_masks"].any(dim=1)
+    assert captured["x"].shape == (B, N, model.model_dim)
+    torch.testing.assert_close(captured["x"], context_emb)
+    assert torch.equal(captured["context_mask"], batch["context_mask"] | target_union)
+
+
+@torch.no_grad()
+def test_latent_token_predictor_receives_context_memory_mask_only():
+    model = _build_model(masked_token_input_mode="latent_token")
     batch = _make_batch()
     context_emb = torch.randn(
         batch["peak_mz"].shape[0],

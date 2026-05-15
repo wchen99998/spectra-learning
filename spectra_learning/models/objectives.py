@@ -83,9 +83,12 @@ class ObjectiveMixin:
         target_masks: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_size, num_target_blocks, num_peaks = target_masks.shape
+        predictor_memory_mask = context_mask
+        if self.masked_token_input_mode == "mz_sentinel":
+            predictor_memory_mask = context_mask | target_masks.any(dim=1)
         predictor_features = self.predict_masked_target_features(
             context_emb,
-            context_mask,
+            predictor_memory_mask,
         )
         predictor_features = predictor_features.unsqueeze(1).expand(
             batch_size,
