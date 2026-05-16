@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from typing import cast
 from unittest import mock
 
 import numpy as np
@@ -320,7 +321,7 @@ class MsgSequenceProbeTests(unittest.TestCase):
             task_output_dims={"maccs": 4},
         )
 
-        head = probe.heads.heads["maccs"]
+        head = cast(torch.nn.Sequential, probe.heads.heads["maccs"])
         linear_layers = [
             layer for layer in head if isinstance(layer, torch.nn.Linear)
         ]
@@ -354,7 +355,8 @@ class MsgSequenceProbeTests(unittest.TestCase):
 
         self.assertIsInstance(probe.pooler, FrozenPooler)
         self.assertIs(probe.pooler.pooler, learned_pooler)
-        first_head = probe.heads.heads["mol_weight"][0]
+        head = cast(torch.nn.Sequential, probe.heads.heads["mol_weight"])
+        first_head = cast(torch.nn.Linear, head[0])
         self.assertEqual(first_head.in_features, 2 * 2)
         probe_param_ids = {id(param) for param in probe.parameters()}
         learned_param_ids = {id(param) for param in learned_pooler.parameters()}
@@ -441,7 +443,9 @@ class MsgSequenceProbeTests(unittest.TestCase):
 
         self.assertIsInstance(probe.pooler, FrozenPooler)
         self.assertIs(probe.pooler.pooler, main_pooler)
-        self.assertEqual(probe.heads.heads["mol_weight"][0].in_features, 2 * 2)
+        head = cast(torch.nn.Sequential, probe.heads.heads["mol_weight"])
+        first_head = cast(torch.nn.Linear, head[0])
+        self.assertEqual(first_head.in_features, 2 * 2)
         self.assertEqual(main_pooler.left_proj.out_features, 2)
         probe_param_ids = {id(param) for param in probe.parameters()}
         main_pooler_param_ids = {id(param) for param in main_pooler.parameters()}
@@ -863,37 +867,33 @@ class MsgProbeMetricTests(unittest.TestCase):
             intersection = np.count_nonzero(bit_pred[sample_idx] & (target[sample_idx] > 0))
             union = np.count_nonzero(bit_pred[sample_idx] | (target[sample_idx] > 0))
             tanimoto_values.append(intersection / max(union, 1))
+            denominator = float(
+                np.linalg.norm(pred[sample_idx]) * np.linalg.norm(target[sample_idx])
+            )
             cosine_values.append(
-                float(
-                    np.dot(pred[sample_idx], target[sample_idx])
-                    / max(
-                        np.linalg.norm(pred[sample_idx])
-                        * np.linalg.norm(target[sample_idx]),
-                        1e-12,
-                    )
-                )
+                float(np.dot(pred[sample_idx], target[sample_idx]) / max(denominator, 1e-12))
             )
 
         self.assertEqual(metrics["msg_probe/test/num_maccs_auc_bits"], 3.0)
         self.assertEqual(metrics["msg_probe/test/num_maccs_recall_bits"], 4.0)
         self.assertAlmostEqual(
-            metrics["msg_probe/test/auc_maccs_mean"], np.mean(auc_values)
+            metrics["msg_probe/test/auc_maccs_mean"], float(np.mean(auc_values))
         )
         self.assertAlmostEqual(
             metrics["msg_probe/test/average_precision_maccs_mean"],
-            np.mean(average_precision_values),
+            float(np.mean(average_precision_values)),
         )
         self.assertAlmostEqual(
-            metrics["msg_probe/test/recall_maccs_mean"], np.mean(recall_values)
+            metrics["msg_probe/test/recall_maccs_mean"], float(np.mean(recall_values))
         )
         self.assertAlmostEqual(
-            metrics["msg_probe/test/precision_maccs_mean"], np.mean(precision_values)
+            metrics["msg_probe/test/precision_maccs_mean"], float(np.mean(precision_values))
         )
         self.assertAlmostEqual(
-            metrics["msg_probe/test/tanimoto_maccs_mean"], np.mean(tanimoto_values)
+            metrics["msg_probe/test/tanimoto_maccs_mean"], float(np.mean(tanimoto_values))
         )
         self.assertAlmostEqual(
-            metrics["msg_probe/test/cosine_maccs_mean"], np.mean(cosine_values)
+            metrics["msg_probe/test/cosine_maccs_mean"], float(np.mean(cosine_values))
         )
 
     def test_score_epoch_state_names_morgan_similarity_metrics(self):
@@ -1488,8 +1488,11 @@ class RepeatedProbeTests(unittest.TestCase):
             config,
             model,
             device,
+            covariance_pooler,
             on_epoch_end,
             repeat_index,
+            plot_dir,
+            plot_step,
             distributed,
         ):
             metrics, curve = repeat_payloads[repeat_index]

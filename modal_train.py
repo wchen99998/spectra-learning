@@ -33,7 +33,8 @@ Setup:
 
 import json
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import Any, cast
 
 import modal
 
@@ -53,6 +54,9 @@ GEMS_SMALL_SWEEP_RUNTIME_HOURS = 12.0
 # ---------------------------------------------------------------------------
 volume = modal.Volume.from_name("spectra-volume", create_if_missing=True)
 volume_path = Path("/vol")
+volume_mounts: dict[PurePosixPath | str, modal.CloudBucketMount | modal.Volume] = {
+    str(volume_path): volume
+}
 
 # ---------------------------------------------------------------------------
 # Container image
@@ -575,7 +579,7 @@ SWEEPS: dict[str, list[dict]] = {
 # ---------------------------------------------------------------------------
 @app.function(
     image=image,
-    volumes={volume_path: volume},
+    volumes=volume_mounts,
     cpu=8.0,
     memory=32768,  # 32 GiB
     timeout=30 * MINUTES,
@@ -633,7 +637,7 @@ def prepare_data(
 # ---------------------------------------------------------------------------
 @app.function(
     image=image,
-    volumes={volume_path: volume},
+    volumes=volume_mounts,
     cpu=8.0,
     memory=32768,  # 32 GiB
     gpu=DEFAULT_GPU,
@@ -718,13 +722,13 @@ def _run_probe_checkpoint_impl(
     logging.info(
         "Running Modal MSG probe on %s at global_step=%d",
         checkpoint_path,
-        int(global_step),
+        global_step,
     )
     metrics = run_checkpoint_msg_probe(
         config_json=config_json,
         checkpoint_path=checkpoint_path,
         workdir=workdir,
-        global_step=int(global_step),
+        global_step=global_step,
     )
     volume.commit()
     logging.info("Modal MSG probe complete: %s", metrics)
@@ -733,7 +737,7 @@ def _run_probe_checkpoint_impl(
 
 @app.function(
     image=image,
-    volumes={volume_path: volume},
+    volumes=volume_mounts,
     cpu=8.0,
     memory=32768,  # 32 GiB
     gpu=PROBE_GPU,
@@ -757,7 +761,7 @@ def run_probe_checkpoint(
 
 @app.function(
     image=image,
-    volumes={volume_path: volume},
+    volumes=volume_mounts,
     cpu=8.0,
     memory=32768,  # 32 GiB
     gpu=FAST_PROBE_GPU,
@@ -781,7 +785,7 @@ def run_probe_checkpoint_h100(
 
 @app.function(
     image=image,
-    volumes={volume_path: volume},
+    volumes=volume_mounts,
     cpu=8.0,
     memory=32768,
     gpu=PROBE_GPU,
@@ -857,7 +861,7 @@ def run_fluorine_checkpoint(
 
 @app.function(
     image=image,
-    volumes={volume_path: volume},
+    volumes=volume_mounts,
     cpu=16.0,
     memory=65536,  # 64 GiB
     gpu=f"{DEFAULT_GPU}:4",
@@ -882,7 +886,7 @@ def train_4gpu(
 
 @app.function(
     image=image,
-    volumes={volume_path: volume},
+    volumes=volume_mounts,
     cpu=32.0,
     memory=131072,  # 128 GiB
     gpu=f"{DEFAULT_GPU}:8",
@@ -908,7 +912,7 @@ def train_8gpu(
 
 @app.function(
     image=image,
-    volumes={volume_path: volume},
+    volumes=volume_mounts,
     cpu=16.0,
     memory=65536,  # 64 GiB
     gpu="L40S:4",
@@ -933,7 +937,7 @@ def train_4gpu_l40s(
 
 @app.function(
     image=image,
-    volumes={volume_path: volume},
+    volumes=volume_mounts,
     cpu=16.0,
     memory=65536,  # 64 GiB
     gpu="A10G:4",
@@ -958,7 +962,7 @@ def train_4gpu_a10g(
 
 @app.function(
     image=image,
-    volumes={volume_path: volume},
+    volumes=volume_mounts,
     cpu=16.0,
     memory=65536,  # 64 GiB
     gpu="L4:4",
@@ -1130,7 +1134,7 @@ def _modal_probe_workdir(workdir: Path, global_step: int) -> Path:
 def _probe_checkpoint_runner(probe_gpu: str):
     return (
         run_probe_checkpoint_h100
-        if str(probe_gpu).lower() == "h100"
+        if probe_gpu.lower() == "h100"
         else run_probe_checkpoint
     )
 
@@ -1152,14 +1156,15 @@ def _submit_probe_from_local(
     remote_checkpoint = _upload_probe_checkpoint(
         local_checkpoint,
         local_workdir,
-        int(global_step),
+        global_step,
     )
-    remote_workdir = _modal_probe_workdir(local_workdir, int(global_step))
-    handle = _probe_checkpoint_runner(probe_gpu).spawn(
+    remote_workdir = _modal_probe_workdir(local_workdir, global_step)
+    handle = _modal_spawn(
+        _probe_checkpoint_runner(probe_gpu),
         config_json=config_json,
         checkpoint_path=str(remote_checkpoint),
         workdir=str(remote_workdir),
-        global_step=int(global_step),
+        global_step=global_step,
     )
     print(
         json.dumps(
@@ -1167,7 +1172,7 @@ def _submit_probe_from_local(
                 "call_id": handle.object_id,
                 "checkpoint_path": str(remote_checkpoint),
                 "workdir": str(remote_workdir),
-                "global_step": int(global_step),
+                "global_step": global_step,
             },
             indent=2,
             sort_keys=True,
@@ -1197,7 +1202,7 @@ def _submit_probe_sweep_from_local(
     remote_checkpoint = _upload_probe_checkpoint(
         local_checkpoint,
         local_workdir,
-        int(global_step),
+        global_step,
     )
     handles = []
     records = []
@@ -1221,11 +1226,12 @@ def _submit_probe_sweep_from_local(
             json.dumps(config_dict, indent=2, sort_keys=True)
         )
         remote_workdir = volume_path / "modal_probe_runs" / local_workdir.name / name
-        handle = _probe_checkpoint_runner(probe_gpu).spawn(
+        handle = _modal_spawn(
+            _probe_checkpoint_runner(probe_gpu),
             config_json=_modal_probe_config_json(json.dumps(config_dict, sort_keys=True)),
             checkpoint_path=str(remote_checkpoint),
             workdir=str(remote_workdir),
-            global_step=int(global_step),
+            global_step=global_step,
         )
         record = {
             "name": name,
@@ -1252,7 +1258,7 @@ def _submit_probe_sweep_from_local(
         (job_dir / "metrics.json").write_text(
             json.dumps(metrics, indent=2, sort_keys=True)
         )
-        fingerprint = str(record["fingerprint"])
+        fingerprint = record["fingerprint"]
         summary = {
             **record,
             "best_epoch": metrics["msg_probe/covariance/epoch"],
@@ -1315,11 +1321,12 @@ def _submit_fluorine_sweep_from_local(
         ],
         key=lambda path: path.stat().st_mtime,
         reverse=True,
-    )[: int(max_checkpoints)]
+    )[: max_checkpoints]
     handles = []
     records = []
     for order_idx, checkpoint_path in enumerate(checkpoints):
         match = re.search(r"step-(\d+)", checkpoint_path.name)
+        assert match is not None
         global_step = int(match.group(1))
         label = f"{order_idx:02d}_{checkpoint_path.stem}"
         remote_checkpoint = _upload_probe_checkpoint(
@@ -1331,7 +1338,8 @@ def _submit_fluorine_sweep_from_local(
         remote_embedding_cache_dir = (
             volume_path / "fluorine_checkpoint_embeddings" / local_workdir.name / label
         )
-        handle = run_fluorine_checkpoint.spawn(
+        handle = _modal_spawn(
+            run_fluorine_checkpoint,
             config_path=config_path,
             checkpoint_path=str(remote_checkpoint),
             output_dir=str(remote_output_dir),
@@ -1365,7 +1373,7 @@ def _submit_fluorine_sweep_from_local(
         plot_path = local_workdir / "fluorine_precision_recall_curves.png"
         pdf_path = local_workdir / "fluorine_precision_recall_curves.pdf"
         fig, ax = plt.subplots(figsize=(7.5, 5.5), dpi=180)
-        colors = plt.cm.viridis_r(
+        colors = plt.get_cmap("viridis_r")(
             [idx / max(1, len(ordered_results) - 1) for idx in range(len(ordered_results))]
         )
         for color, item in zip(colors, ordered_results):
@@ -1453,6 +1461,14 @@ def _wait_for_modal_probe_calls(results: dict) -> None:
     print("Modal probe jobs complete.")
 
 
+def _modal_remote(function: object, **kwargs: Any) -> Any:
+    return cast(Any, function).remote(**kwargs)
+
+
+def _modal_spawn(function: object, **kwargs: Any) -> Any:
+    return cast(Any, function).spawn(**kwargs)
+
+
 # ---------------------------------------------------------------------------
 # CLI entrypoint
 # ---------------------------------------------------------------------------
@@ -1487,7 +1503,7 @@ def main(
             config_path=config,
             checkpoint_dir=submit_fluorine_checkpoint_dir,
             workdir=submit_fluorine_workdir,
-            max_checkpoints=int(submit_fluorine_max_checkpoints),
+            max_checkpoints=submit_fluorine_max_checkpoints,
             wait_for_results=submit_probe_wait,
         )
         return
@@ -1498,7 +1514,7 @@ def main(
             sweep_json_path=submit_probe_sweep_json_path,
             checkpoint_path=submit_probe_checkpoint_path,
             workdir=submit_probe_workdir,
-            global_step=int(submit_probe_global_step),
+            global_step=submit_probe_global_step,
             wait_for_results=submit_probe_wait,
             probe_gpu=submit_probe_gpu,
         )
@@ -1509,7 +1525,7 @@ def main(
             config_json_path=submit_probe_config_json_path,
             checkpoint_path=submit_probe_checkpoint_path,
             workdir=submit_probe_workdir,
-            global_step=int(submit_probe_global_step),
+            global_step=submit_probe_global_step,
             wait=submit_probe_wait,
             probe_gpu=submit_probe_gpu,
         )
@@ -1532,13 +1548,14 @@ def main(
             "collapse_metrics_every_n_steps": 0,
             "checkpoint_every_steps": 1_000_000,
             "muon_ns_use_kernels": True,
-            "training_max_steps": int(benchmark_steps),
-            "throughput_warmup_steps": int(benchmark_warmup_steps),
+            "training_max_steps": benchmark_steps,
+            "throughput_warmup_steps": benchmark_warmup_steps,
         }
         benchmark_payload = json.dumps(benchmark_overrides, sort_keys=True)
         benchmark_tag = workdir or f"ddp_4gpu_{gpu_key}_bench_{int(time.time())}"
         print("Preparing data on volume...")
-        prepare_data.remote(
+        _modal_remote(
+            prepare_data,
             config_path=config,
             overrides_json=benchmark_payload,
             prepare_probe=False,
@@ -1548,7 +1565,8 @@ def main(
             f"Running 4-GPU {benchmark_4gpu} benchmark: "
             f"{benchmark_steps} steps, {benchmark_warmup_steps} warmup steps."
         )
-        result = FOUR_GPU_TRAINERS[gpu_key].remote(
+        result = _modal_remote(
+            FOUR_GPU_TRAINERS[gpu_key],
             config_path=config,
             overrides_json=benchmark_payload,
             workdir=f"{benchmark_tag}/4gpu_{gpu_key}",
@@ -1568,10 +1586,16 @@ def main(
     if run_8xh100:
         payload = json.dumps(json.loads(overrides), sort_keys=True)
         print("Preparing data on volume...")
-        prepare_data.remote(config_path=config, overrides_json=payload, prepare_probe=False)
+        _modal_remote(
+            prepare_data,
+            config_path=config,
+            overrides_json=payload,
+            prepare_probe=False,
+        )
         print("Data ready.\n")
         if detach:
-            handle = train_8gpu.spawn(
+            handle = _modal_spawn(
+                train_8gpu,
                 config_path=config,
                 overrides_json=payload,
                 workdir=workdir,
@@ -1579,7 +1603,8 @@ def main(
             )
             print(f"spawned: {handle.object_id}")
             return
-        result = train_8gpu.remote(
+        result = _modal_remote(
+            train_8gpu,
             config_path=config,
             overrides_json=payload,
             workdir=workdir,
@@ -1599,8 +1624,8 @@ def main(
             "collapse_metrics_every_n_steps": 0,
             "checkpoint_every_steps": 1_000_000,
             "muon_ns_use_kernels": True,
-            "training_max_steps": int(benchmark_steps),
-            "throughput_warmup_steps": int(benchmark_warmup_steps),
+            "training_max_steps": benchmark_steps,
+            "throughput_warmup_steps": benchmark_warmup_steps,
         }
         one_gpu_overrides = {
             **common_benchmark_overrides,
@@ -1612,7 +1637,8 @@ def main(
         }
         benchmark_tag = workdir or f"ddp_constant_local_batch_bench_{int(time.time())}"
         print("Preparing data on volume...")
-        prepare_data.remote(
+        _modal_remote(
+            prepare_data,
             config_path=config,
             overrides_json=json.dumps(one_gpu_overrides, sort_keys=True),
             prepare_probe=False,
@@ -1623,13 +1649,15 @@ def main(
             f"{benchmark_steps} steps, {benchmark_warmup_steps} warmup steps, "
             f"local batch {base_batch_size}."
         )
-        one_gpu = train.remote(
+        one_gpu = _modal_remote(
+            train,
             config_path=config,
             overrides_json=json.dumps(one_gpu_overrides, sort_keys=True),
             workdir=f"{benchmark_tag}/1gpu_bs{base_batch_size}",
             workdir_tag=workdir_tag,
         )
-        four_gpu = train_4gpu.remote(
+        four_gpu = _modal_remote(
+            train_4gpu,
             config_path=config,
             overrides_json=json.dumps(four_gpu_overrides, sort_keys=True),
             workdir=f"{benchmark_tag}/4gpu_bs{base_batch_size * 4}",
@@ -1662,13 +1690,14 @@ def main(
             "collapse_metrics_every_n_steps": 0,
             "checkpoint_every_steps": 1_000_000,
             "muon_ns_use_kernels": True,
-            "training_max_steps": int(benchmark_steps),
-            "throughput_warmup_steps": int(benchmark_warmup_steps),
+            "training_max_steps": benchmark_steps,
+            "throughput_warmup_steps": benchmark_warmup_steps,
         }
         benchmark_payload = json.dumps(benchmark_overrides, sort_keys=True)
         benchmark_tag = workdir or f"ddp_fixed_batch_bench_{int(time.time())}"
         print("Preparing data on volume...")
-        prepare_data.remote(
+        _modal_remote(
+            prepare_data,
             config_path=config,
             overrides_json=benchmark_payload,
             prepare_probe=False,
@@ -1678,13 +1707,15 @@ def main(
             "Running fixed-global-batch benchmark: "
             f"{benchmark_steps} steps, {benchmark_warmup_steps} warmup steps."
         )
-        one_gpu = train.remote(
+        one_gpu = _modal_remote(
+            train,
             config_path=config,
             overrides_json=benchmark_payload,
             workdir=f"{benchmark_tag}/1gpu",
             workdir_tag=workdir_tag,
         )
-        four_gpu = train_4gpu.remote(
+        four_gpu = _modal_remote(
+            train_4gpu,
             config_path=config,
             overrides_json=benchmark_payload,
             workdir=f"{benchmark_tag}/4gpu",
@@ -1718,7 +1749,7 @@ def main(
             prepare_payloads.append(json.dumps(merged, sort_keys=True))
         print("Preparing data on volume...")
         for payload in dict.fromkeys(prepare_payloads):
-            prepare_data.remote(config_path=config, overrides_json=payload)
+            _modal_remote(prepare_data, config_path=config, overrides_json=payload)
         print("Data ready.\n")
         print(
             f"Launching {len(experiments)} experiments "
@@ -1731,7 +1762,8 @@ def main(
             for exp in experiments:
                 merged = {**base_overrides, **exp}
                 handles.append(
-                    train.spawn(
+                    _modal_spawn(
+                        train,
                         config_path=config,
                         overrides_json=json.dumps(merged),
                         workdir="",
@@ -1751,7 +1783,8 @@ def main(
             for exp in batch:
                 merged = {**base_overrides, **exp}
                 handles.append(
-                    train.spawn(
+                    _modal_spawn(
+                        train,
                         config_path=config,
                         overrides_json=json.dumps(merged),
                         workdir="",
@@ -1764,10 +1797,11 @@ def main(
                 print(f"[{batch_start + offset}] done: {result}")
     else:
         print("Preparing data on volume...")
-        prepare_data.remote(config_path=config, overrides_json=overrides)
+        _modal_remote(prepare_data, config_path=config, overrides_json=overrides)
         print("Data ready.\n")
         if detach:
-            handle = train.spawn(
+            handle = _modal_spawn(
+                train,
                 config_path=config,
                 overrides_json=overrides,
                 workdir=workdir,
@@ -1775,7 +1809,8 @@ def main(
             )
             print(f"spawned: {handle.object_id}")
         else:
-            result = train.remote(
+            result = _modal_remote(
+                train,
                 config_path=config,
                 overrides_json=overrides,
                 workdir=workdir,

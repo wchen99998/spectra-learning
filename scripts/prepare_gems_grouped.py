@@ -176,7 +176,7 @@ def main() -> None:
     # ---- Step 5: Write .npz files ----
     train_files: list[dict] = []
     val_files: list[dict] = []
-    filtered_count = 0
+    filtered_count: int = 0
     max_prec = args.max_precursor_mz
     seen_hashes: set[str] = set()
 

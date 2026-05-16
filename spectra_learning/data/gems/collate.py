@@ -37,27 +37,27 @@ class GemsBatchCollator:
         intensity_aware_mask_config: dict[str, float] | None = None,
         allow_target_overlap: bool = False,
     ) -> None:
-        self.augment = bool(augment)
-        self.num_target_blocks = int(num_target_blocks)
-        self.context_fraction = float(context_fraction)
-        self.target_fraction = float(target_fraction)
-        self.block_min_len = int(block_min_len)
-        self.mask_strategy = str(mask_strategy)
-        self.mask_lengths = tuple(int(length) for length in mask_lengths)
-        self.mask_round_from = int(mask_round_from)
+        self.augment = augment
+        self.num_target_blocks = num_target_blocks
+        self.context_fraction = context_fraction
+        self.target_fraction = target_fraction
+        self.block_min_len = block_min_len
+        self.mask_strategy = mask_strategy
+        self.mask_lengths = tuple(length for length in mask_lengths)
+        self.mask_round_from = mask_round_from
         self.intensity_aware_mask_config = dict(
             AWARE_MIXED_MASK_CONFIG
             if intensity_aware_mask_config is None
             else intensity_aware_mask_config
         )
-        self.allow_target_overlap = bool(allow_target_overlap)
-        self.use_precursor_token = bool(use_precursor_token)
-        self.num_peaks = int(num_peaks)
-        self.max_precursor_mz = float(max_precursor_mz)
-        self.min_peak_intensity = float(min_peak_intensity)
-        self.peak_drop_min_intensity = float(peak_drop_min_intensity)
-        self.peak_ordering = str(peak_ordering)
-        self.precursor_peak_exclusion_window_da = float(precursor_peak_exclusion_window_da)
+        self.allow_target_overlap = allow_target_overlap
+        self.use_precursor_token = use_precursor_token
+        self.num_peaks = num_peaks
+        self.max_precursor_mz = max_precursor_mz
+        self.min_peak_intensity = min_peak_intensity
+        self.peak_drop_min_intensity = peak_drop_min_intensity
+        self.peak_ordering = peak_ordering
+        self.precursor_peak_exclusion_window_da = precursor_peak_exclusion_window_da
 
     def __call__(self, samples: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
         batch = self._preprocess(samples)

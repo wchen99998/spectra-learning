@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Any
+
 import torch
 
 from spectra_learning.models.common import _active_autocast_context
@@ -6,7 +10,7 @@ from spectra_learning.models.encoder import PeakSetEncoder
 
 class TargetProjectionMixin:
     def _apply_group_target_normalization(
-        self,
+        self: Any,
         x: torch.Tensor,
         group_dim: int,
     ) -> torch.Tensor:
@@ -19,17 +23,26 @@ class TargetProjectionMixin:
         normalized = ((x - mean) / std).reshape(*x.shape[:-2], -1)
         return normalized.to(dtype=orig_dtype)
 
-    def _apply_jepa_target_normalization(self, x: torch.Tensor) -> torch.Tensor:
+    def _apply_jepa_target_normalization(
+        self: Any,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
         return self._apply_group_target_normalization(x, self.model_dim)
 
-    def _predictor_slot_queries(self, memory: torch.Tensor) -> torch.Tensor:
+    def _predictor_slot_queries(
+        self: Any,
+        memory: torch.Tensor,
+    ) -> torch.Tensor:
         positions = torch.arange(memory.shape[1], device=memory.device)
         queries = self.predictor_slot_embedding(positions)
         return queries.unsqueeze(0).expand(memory.shape[0], -1, -1).to(
             dtype=memory.dtype
         )
 
-    def _append_predictor_register_queries(self, x: torch.Tensor) -> torch.Tensor:
+    def _append_predictor_register_queries(
+        self: Any,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
         if self.predictor_register_tokens is None:
             return x
         registers = self.predictor_register_tokens.unsqueeze(0).expand(
@@ -40,7 +53,7 @@ class TargetProjectionMixin:
         return torch.cat([x, registers.to(dtype=x.dtype)], dim=1)
 
     def predict_masked_latents(
-        self,
+        self: Any,
         context_emb: torch.Tensor,
         context_mask: torch.Tensor,
     ) -> torch.Tensor:
@@ -54,10 +67,13 @@ class TargetProjectionMixin:
             x = x[:, :-self.predictor_num_register_tokens]
         return x
 
-    def project_targets(self, x: torch.Tensor) -> torch.Tensor:
+    def project_targets(self: Any, x: torch.Tensor) -> torch.Tensor:
         return self.target_projector(x)
 
-    def project_teacher_targets(self, x: torch.Tensor) -> torch.Tensor:
+    def project_teacher_targets(
+        self: Any,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
         projector = (
             self.teacher_target_projector
             if self.teacher_target_projector is not None
@@ -66,7 +82,7 @@ class TargetProjectionMixin:
         return projector(x)
 
     def predict_masked_target_features(
-        self,
+        self: Any,
         context_emb: torch.Tensor,
         context_mask: torch.Tensor,
     ) -> torch.Tensor:
@@ -78,7 +94,7 @@ class TargetProjectionMixin:
         )
 
     def predict_masked_targets(
-        self,
+        self: Any,
         context_emb: torch.Tensor,
         context_mask: torch.Tensor,
     ) -> torch.Tensor:
@@ -90,7 +106,7 @@ class TargetProjectionMixin:
         )
 
     def _split_encoder_output(
-        self,
+        self: Any,
         encoder: PeakSetEncoder,
         embeddings: torch.Tensor,
         valid_mask: torch.Tensor,
@@ -101,7 +117,7 @@ class TargetProjectionMixin:
         return peak_embeddings, cls_embedding
 
     def _compute_jepa_teacher_target_features(
-        self,
+        self: Any,
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
         peak_valid_mask: torch.Tensor,
@@ -124,7 +140,7 @@ class TargetProjectionMixin:
             return torch.cat(teacher_peak_outputs, dim=-1)
 
     def _compute_jepa_teacher_targets(
-        self,
+        self: Any,
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
         peak_valid_mask: torch.Tensor,
@@ -142,7 +158,7 @@ class TargetProjectionMixin:
             )
 
     def _context_encoder_inputs(
-        self,
+        self: Any,
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
         context_mask: torch.Tensor,
@@ -159,7 +175,7 @@ class TargetProjectionMixin:
         return masked_mz, peak_intensity, context_mask | target_union
 
     def compute_teacher_targets(
-        self,
+        self: Any,
         augmented_batch: dict[str, torch.Tensor],
     ) -> torch.Tensor:
         return self._compute_jepa_teacher_targets(
@@ -170,7 +186,7 @@ class TargetProjectionMixin:
         )
 
     def _encode_augmented_teacher_and_context(
-        self,
+        self: Any,
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
         peak_valid_mask: torch.Tensor,
@@ -250,7 +266,7 @@ class TargetProjectionMixin:
         return teacher_target_features, teacher_peak_emb, teacher_cls_emb, context_emb
 
     def _compute_pooled_teacher_peak_targets(
-        self,
+        self: Any,
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
         peak_valid_mask: torch.Tensor,

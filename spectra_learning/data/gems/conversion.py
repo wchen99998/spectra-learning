@@ -28,7 +28,7 @@ def numpy_batch_to_torch(batch: dict[str, Any]) -> dict[str, Any]:
 def _prepend_precursor_token_torch(
     batch: dict[str, torch.Tensor],
 ) -> dict[str, torch.Tensor]:
-    batch_size = int(batch["peak_mz"].shape[0])
+    batch_size = batch["peak_mz"].shape[0]
     device = batch["peak_intensity"].device
     result: dict[str, torch.Tensor] = {
         "peak_mz": torch.cat([batch["precursor_mz"].unsqueeze(1), batch["peak_mz"]], dim=1),
@@ -64,7 +64,7 @@ def _prepend_precursor_token_torch(
             dim=1,
         )
     if "target_masks" in batch:
-        num_targets = int(batch["target_masks"].shape[1])
+        num_targets = batch["target_masks"].shape[1]
         result["target_masks"] = torch.cat(
             [
                 torch.zeros((batch_size, num_targets, 1), dtype=torch.bool, device=device),

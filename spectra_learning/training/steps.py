@@ -1,28 +1,51 @@
 from contextlib import nullcontext
+from typing import Any, Literal, cast, overload
 
 import torch
 
 from spectra_learning.models.diagnostics import _collapse_diagnostics
-from spectra_learning.models.model import PeakSetSIGReg
 from spectra_learning.training.distributed import unwrap_model
+from spectra_learning.training.modules import PretrainModule
+from spectra_learning.training.schedules import LRSchedulerLike
+
+
+@overload
+def _forward_augmented_for_batch(
+    model: torch.nn.Module,
+    batch: dict[str, torch.Tensor],
+    *,
+    return_collapse_data: Literal[True],
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]: ...
+
+
+@overload
+def _forward_augmented_for_batch(
+    model: torch.nn.Module,
+    batch: dict[str, torch.Tensor],
+    *,
+    return_collapse_data: Literal[False],
+) -> dict[str, torch.Tensor]: ...
 
 
 def _forward_augmented_for_batch(
-    model: PeakSetSIGReg,
+    model: torch.nn.Module,
     batch: dict[str, torch.Tensor],
     *,
     return_collapse_data: bool,
-):
+) -> dict[str, torch.Tensor] | tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
     if return_collapse_data:
-        return model(batch, return_collapse_data=True)
-    return model(batch)
+        return cast(
+            tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]],
+            model(batch, return_collapse_data=True),
+        )
+    return cast(dict[str, torch.Tensor], model(batch))
 
 
 def train_step_impl(
-    model: PeakSetSIGReg,
+    model: torch.nn.Module,
     batch: dict[str, torch.Tensor],
     optimizers: list[torch.optim.Optimizer],
-    schedulers: list[torch.optim.lr_scheduler.LRScheduler],
+    schedulers: list[LRSchedulerLike],
     autocast_dtype: torch.dtype | None,
     grad_clip_norm: float | None,
     compute_collapse_metrics: bool = False,
@@ -49,10 +72,10 @@ def train_step_impl(
                 batch,
                 return_collapse_data=False,
             )
-            collapse_data = {}
+            collapse_data: dict[str, torch.Tensor] = {}
     if compute_collapse_metrics and collapse_data:
         with torch.no_grad():
-            metrics.update(_collapse_diagnostics(**collapse_data))
+            metrics.update(_collapse_diagnostics(**cast(dict[str, Any], collapse_data)))
     metrics["loss"].backward()
     if grad_clip_norm is not None and grad_clip_norm > 0:
         torch.nn.utils.clip_grad_norm_(
@@ -63,7 +86,8 @@ def train_step_impl(
     for optimizer in optimizers:
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
-    ema_momentum = unwrap_model(model).update_ema_teacher(global_step + 1, total_steps)
+    pretrain_module = cast(PretrainModule, unwrap_model(model))
+    ema_momentum = pretrain_module.update_ema_teacher(global_step + 1, total_steps)
     for scheduler in schedulers:
         scheduler.step()
     if ema_momentum is not None:

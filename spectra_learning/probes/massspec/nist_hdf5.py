@@ -122,7 +122,7 @@ def _extract_record(
     int_buf[: peak_int.size] = peak_int
 
     adduct = (record.get("precursortype") or "").strip() or "unknown"
-    return np.stack([mz_buf, int_buf], axis=0), float(precursor), smiles, adduct
+    return np.stack([mz_buf, int_buf], axis=0), precursor, smiles, adduct
 
 
 def build_nist_probe_hdf5(
@@ -140,7 +140,7 @@ def build_nist_probe_hdf5(
     precursor_parts: list[float] = []
     smiles_parts: list[str] = []
     adduct_parts: list[str] = []
-    n_raw = 0
+    n_raw: int = 0
 
     for record in tqdm(iter_mgf(mgf_path), desc="Parsing MGF", unit="spec"):
         n_raw += 1
@@ -180,9 +180,9 @@ def build_nist_probe_hdf5(
         fh.create_dataset("precursor_mz", data=precursor_mz, **kw)
         fh.create_dataset("smiles", data=smiles_arr, dtype=str_dtype, **kw)
         fh.create_dataset("adduct", data=adduct_arr, dtype=str_dtype, **kw)
-        fh.attrs["source"] = str(mgf_path.name)
-        fh.attrs["num_peaks_input"] = int(num_peaks_input)
-        fh.attrs["max_precursor_mz"] = float(max_precursor_mz)
+        fh.attrs["source"] = mgf_path.name
+        fh.attrs["num_peaks_input"] = num_peaks_input
+        fh.attrs["max_precursor_mz"] = max_precursor_mz
 
     log.info(
         "Wrote %s (%d spectra, %.1f MB)",
@@ -192,7 +192,7 @@ def build_nist_probe_hdf5(
     )
     return {
         "path": str(output_path),
-        "num_spectra": int(n_kept),
-        "num_raw": int(n_raw),
-        "size_bytes": int(output_path.stat().st_size),
+        "num_spectra": n_kept,
+        "num_raw": n_raw,
+        "size_bytes": output_path.stat().st_size,
     }

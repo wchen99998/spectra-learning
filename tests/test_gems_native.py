@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any, TypedDict, cast
 from unittest import mock
 
 import h5py
@@ -27,6 +28,11 @@ from spectra_learning.probes.massspec.targets import (
     build_morgan_targets_for_rows,
     build_probe_targets_for_rows,
 )
+
+
+class _NativeShardEntry(TypedDict):
+    dir: str
+    length: int
 
 
 def _write_fake_gems_hdf5(path: Path) -> None:
@@ -87,8 +93,8 @@ def _write_fake_nist_hdf5(path: Path) -> dict[str, np.ndarray]:
     }
 
 
-def _write_fake_native_shards(root: Path, lengths: list[int], num_peaks: int = 4) -> list[dict[str, int | str]]:
-    entries: list[dict[str, int | str]] = []
+def _write_fake_native_shards(root: Path, lengths: list[int], num_peaks: int = 4) -> list[_NativeShardEntry]:
+    entries: list[_NativeShardEntry] = []
     start = 0
     for shard_idx, length in enumerate(lengths):
         shard_dir = root / f"shard-{shard_idx:05d}"
@@ -99,7 +105,7 @@ def _write_fake_native_shards(root: Path, lengths: list[int], num_peaks: int = 4
         spectra[:, 1, 0] = 1.0
         np.save(shard_dir / "spectra.npy", spectra)
         np.save(shard_dir / "precursor_mz_raw.npy", precursor_mz_raw)
-        entries.append({"dir": str(shard_dir), "length": int(length)})
+        entries.append({"dir": str(shard_dir), "length": length})
         start += length
     return entries
 
@@ -564,11 +570,11 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 "artifact_format": "raw_peaklist_v1",
                 "max_precursor_mz": float(cfg.max_precursor_mz),
                 "train_shards": [Path(entry["dir"]).name for entry in train_entries],
-                "train_lengths": [int(entry["length"]) for entry in train_entries],
+                "train_lengths": [entry["length"] for entry in train_entries],
                 "validation_shards": [
                     Path(entry["dir"]).name for entry in val_entries
                 ],
-                "validation_lengths": [int(entry["length"]) for entry in val_entries],
+                "validation_lengths": [entry["length"] for entry in val_entries],
                 "train_size": 9,
                 "validation_size": 3,
                 "validation_fraction": 0.25,
@@ -624,11 +630,11 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 "artifact_format": "raw_peaklist_v1",
                 "max_precursor_mz": float(cfg.max_precursor_mz),
                 "train_shards": [Path(entry["dir"]).name for entry in train_entries],
-                "train_lengths": [int(entry["length"]) for entry in train_entries],
+                "train_lengths": [entry["length"] for entry in train_entries],
                 "validation_shards": [
                     Path(entry["dir"]).name for entry in val_entries
                 ],
-                "validation_lengths": [int(entry["length"]) for entry in val_entries],
+                "validation_lengths": [entry["length"] for entry in val_entries],
                 "train_size": 9,
                 "validation_size": 3,
                 "validation_fraction": 0.25,
@@ -681,11 +687,11 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 "artifact_format": "raw_peaklist_v1",
                 "max_precursor_mz": float(cfg.max_precursor_mz),
                 "train_shards": [Path(entry["dir"]).name for entry in train_entries],
-                "train_lengths": [int(entry["length"]) for entry in train_entries],
+                "train_lengths": [entry["length"] for entry in train_entries],
                 "validation_shards": [
                     Path(entry["dir"]).name for entry in val_entries
                 ],
-                "validation_lengths": [int(entry["length"]) for entry in val_entries],
+                "validation_lengths": [entry["length"] for entry in val_entries],
                 "train_size": 8,
                 "validation_size": 2,
                 "validation_fraction": 0.2,
@@ -771,11 +777,11 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 "artifact_format": "raw_peaklist_v1",
                 "max_precursor_mz": float(cfg.max_precursor_mz),
                 "train_shards": [Path(entry["dir"]).name for entry in train_entries],
-                "train_lengths": [int(entry["length"]) for entry in train_entries],
+                "train_lengths": [entry["length"] for entry in train_entries],
                 "validation_shards": [
                     Path(entry["dir"]).name for entry in val_entries
                 ],
-                "validation_lengths": [int(entry["length"]) for entry in val_entries],
+                "validation_lengths": [entry["length"] for entry in val_entries],
                 "train_size": 9,
                 "validation_size": 2,
                 "validation_fraction": 0.2,
@@ -844,7 +850,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             entries = _write_fake_native_shards(tmp_path / "train", [3, 2, 4])
-            dataset = gems.GemsMemmapDataset(entries)
+            dataset = gems.GemsMemmapDataset(cast(list[dict[str, Any]], entries))
             loader = DataLoader(
                 dataset,
                 batch_size=2,
@@ -870,7 +876,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
 
             ids = []
             for batch in loader:
-                ids.extend(int(round(float(v) * 1000.0)) for v in batch["precursor_mz"].tolist())
+                ids.extend(round(float(v) * 1000.0) for v in batch["precursor_mz"].tolist())
 
         self.assertEqual(ids, list(range(9)))
 
@@ -878,7 +884,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             entries = _write_fake_native_shards(tmp_path / "train", [3, 2, 4])
-            dataset = gems.GemsMemmapDataset(entries)
+            dataset = gems.GemsMemmapDataset(cast(list[dict[str, Any]], entries))
             loader = DataLoader(
                 dataset,
                 batch_size=2,
@@ -905,9 +911,9 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             first_pass = []
             second_pass = []
             for batch in loader:
-                first_pass.extend(int(round(float(v) * 1000.0)) for v in batch["precursor_mz"].tolist())
+                first_pass.extend(round(float(v) * 1000.0) for v in batch["precursor_mz"].tolist())
             for batch in loader:
-                second_pass.extend(int(round(float(v) * 1000.0)) for v in batch["precursor_mz"].tolist())
+                second_pass.extend(round(float(v) * 1000.0) for v in batch["precursor_mz"].tolist())
 
         self.assertEqual(first_pass, list(range(9)))
         self.assertEqual(second_pass, list(range(9)))
@@ -1116,7 +1122,7 @@ class MassSpecPreprocessTests(unittest.TestCase):
             probe_maccs, probe_maccs_valid = build_maccs_targets_for_rows(kept_smiles)
             probe_morgan, probe_morgan_valid = build_morgan_targets_for_rows(kept_smiles)
             probe_valid &= probe_maccs_valid & probe_morgan_valid
-            expected_by_smiles = {
+            expected_by_smiles: dict[str, dict[str, Any]] = {
                 str(smiles): {
                     "spectra": kept_spectra[row_idx],
                     "precursor": float(kept_precursor[row_idx]),

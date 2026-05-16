@@ -38,7 +38,7 @@ from spectra_learning.training.batch import BatchPrefetcher
 from spectra_learning.training.checkpointing import prune_checkpoints, save_checkpoint
 from spectra_learning.training.logging import build_logger
 from spectra_learning.training.runtime import collect_and_log_param_metrics, parse_autocast_dtype
-from spectra_learning.training.schedules import make_cosine_schedule
+from spectra_learning.training.schedules import LRSchedulerLike, make_cosine_schedule
 
 torch.set_float32_matmul_precision("high")
 torch._dynamo.config.capture_scalar_outputs = True
@@ -50,7 +50,11 @@ inductor_config.shape_padding = True
 inductor_config.aggressive_fusion = True
 
 
-def _is_weight_decay_target(name: str, param: torch.nn.Parameter) -> bool:
+def _config_get(config: config_dict.ConfigDict, key: str, default: Any) -> Any:
+    return config.get(key, default)
+
+
+def _is_weight_decay_target(name: str, param: torch.Tensor) -> bool:
     return (
         param.ndim >= 2
         and name.endswith("weight")
@@ -103,19 +107,23 @@ def _build_temporal_optimizers(
     model: PeakSetSIGReg,
     total_steps: int,
     device: torch.device,
-) -> tuple[list[torch.optim.Optimizer], list[torch.optim.lr_scheduler.LRScheduler]]:
+) -> tuple[list[torch.optim.Optimizer], list[LRSchedulerLike]]:
     """Build optimizer with differential LR for encoder vs temporal predictor."""
     base_lr = float(config.learning_rate)
     encoder_lr = float(
-        config.get("encoder_learning_rate", config.get("encoder_finetune_lr", None))
+        _config_get(
+            config,
+            "encoder_learning_rate",
+            _config_get(config, "encoder_finetune_lr", None),
+        )
         or base_lr
     )
-    warmup_steps = int(config.get("warmup_steps", 0))
-    min_learning_rate = config.get("min_learning_rate", None)
-    b2 = float(config.get("b2", 0.999))
+    warmup_steps = int(_config_get(config, "warmup_steps", 0))
+    min_learning_rate = _config_get(config, "min_learning_rate", None)
+    b2 = float(_config_get(config, "b2", 0.999))
     weight_decay = float(config.weight_decay)
     is_cuda = device.type == "cuda"
-    fused_cfg = config.get("optimizer_fused", None)
+    fused_cfg = _config_get(config, "optimizer_fused", None)
     fused = is_cuda if fused_cfg is None else bool(fused_cfg) and is_cuda
 
     temporal_prefixes = (
@@ -124,12 +132,12 @@ def _build_temporal_optimizers(
         "temporal_query_token",
         "temporal_slot_embedding.",
     )
-    optimizer_type = str(config.get("optimizer", "adamw")).lower()
+    optimizer_type = str(_config_get(config, "optimizer", "adamw")).lower()
 
     def _make_schedule(
         optimizer: torch.optim.Optimizer,
         lr: float,
-    ) -> torch.optim.lr_scheduler.LRScheduler:
+    ) -> LRSchedulerLike:
         return make_cosine_schedule(
             optimizer,
             total_steps=total_steps,
@@ -149,23 +157,23 @@ def _build_temporal_optimizers(
             else:
                 (temporal_scalar if is_temporal else encoder_scalar).append(param)
 
-        muon_lr = float(config.get("muon_lr", None) or base_lr)
-        encoder_muon_lr = float(config.get("encoder_muon_lr", None) or encoder_lr)
-        adamw_lr = float(config.get("adamw_lr", None) or base_lr)
-        encoder_adamw_lr = float(config.get("encoder_adamw_lr", None) or encoder_lr)
-        adjust_lr_fn = config.get("muon_adjust_lr_fn", "match_rms_adamw")
+        muon_lr = float(_config_get(config, "muon_lr", None) or base_lr)
+        encoder_muon_lr = float(_config_get(config, "encoder_muon_lr", None) or encoder_lr)
+        adamw_lr = float(_config_get(config, "adamw_lr", None) or base_lr)
+        encoder_adamw_lr = float(_config_get(config, "encoder_adamw_lr", None) or encoder_lr)
+        adjust_lr_fn = _config_get(config, "muon_adjust_lr_fn", "match_rms_adamw")
         if adjust_lr_fn is not None:
             adjust_lr_fn = str(adjust_lr_fn)
         muon_kwargs = dict(
-            momentum=float(config.get("muon_momentum", 0.95)),
-            nesterov=bool(config.get("muon_nesterov", True)),
-            ns_steps=int(config.get("muon_ns_steps", 5)),
-            weight_decay=float(config.get("muon_weight_decay", None) or weight_decay),
+            momentum=float(_config_get(config, "muon_momentum", 0.95)),
+            nesterov=bool(_config_get(config, "muon_nesterov", True)),
+            ns_steps=int(_config_get(config, "muon_ns_steps", 5)),
+            weight_decay=float(_config_get(config, "muon_weight_decay", None) or weight_decay),
             adjust_lr_fn=adjust_lr_fn,
         )
 
         optimizers: list[torch.optim.Optimizer] = []
-        schedulers: list[torch.optim.lr_scheduler.LRScheduler] = []
+        schedulers: list[LRSchedulerLike] = []
         muon_adamw_specs: list[tuple[list, str, float]] = [
             (encoder_matrix, "muon", encoder_muon_lr),
             (temporal_matrix, "muon", muon_lr),
@@ -226,7 +234,7 @@ def _build_temporal_optimizers(
         return param_groups
 
     optimizers: list[torch.optim.Optimizer] = []
-    schedulers: list[torch.optim.lr_scheduler.LRScheduler] = []
+    schedulers: list[LRSchedulerLike] = []
     optimizer_specs = [
         (
             _build_param_groups(encoder_decay, encoder_no_decay),
@@ -367,8 +375,8 @@ def train_temporal(
     random.seed(seed)
 
     datamodule = TemporalDataModule(config, seed=seed)
-    total_steps = max(1, int(datamodule.train_steps))
-    log_every_n_steps = int(config.get("log_every_n_steps", 50))
+    total_steps = max(1, datamodule.train_steps)
+    log_every_n_steps = int(_config_get(config, "log_every_n_steps", 50))
     checkpoint_every_steps = int(config.checkpoint_every_steps)
 
     logging.info("Temporal finetuning for %d steps.", total_steps)
@@ -377,7 +385,7 @@ def train_temporal(
     model = build_model_from_config(config)
 
     # Load pretrained checkpoint (partial — temporal keys missing)
-    ckpt_path = pretrained_checkpoint or config.get("pretrained_checkpoint", None)
+    ckpt_path = pretrained_checkpoint or _config_get(config, "pretrained_checkpoint", None)
     if ckpt_path:
         _load_pretrained_checkpoint(model, ckpt_path)
     else:
@@ -397,20 +405,20 @@ def train_temporal(
     global_step = 0
     logger.log_metrics(model_param_metrics, step=global_step)
 
-    autocast_dtype = parse_autocast_dtype(config.get("autocast_dtype", "bf16"))
+    autocast_dtype = parse_autocast_dtype(_config_get(config, "autocast_dtype", "bf16"))
 
-    _compile_mode = str(config.get("compile_mode", "max-autotune"))
+    _compile_mode = str(_config_get(config, "compile_mode", "max-autotune"))
     if autocast_dtype is not None:
         autocast_ctx = torch.autocast(device_type=device.type, dtype=autocast_dtype)
     else:
         autocast_ctx = nullcontext()
 
-    device_prefetch_size = int(config.get("device_prefetch_size", 1))
-    _gcn = config.get("grad_clip_norm", None)
+    device_prefetch_size = int(_config_get(config, "device_prefetch_size", 1))
+    _gcn = _config_get(config, "grad_clip_norm", None)
     grad_clip_norm = float(_gcn) if _gcn is not None else None
-    optimizer_type = str(config.get("optimizer", "adamw")).lower()
+    optimizer_type = str(_config_get(config, "optimizer", "adamw")).lower()
 
-    _msg_probe_raw = float(config.get("msg_probe_every_n_steps", 0))
+    _msg_probe_raw = float(_config_get(config, "msg_probe_every_n_steps", 0))
     if 0 < _msg_probe_raw <= 1:
         msg_probe_every_n_steps = max(1, int(_msg_probe_raw * total_steps))
     else:
@@ -516,7 +524,7 @@ def train_temporal(
                 plot_step=global_step,
             )
             logger.log_metrics(probe_metrics, step=global_step)
-            if bool(config.get("enable_wandb", False)) and _wandb_run is not None:
+            if bool(_config_get(config, "enable_wandb", False)) and _wandb_run is not None:
                 _log_msg_probe_pairwise_plots_to_wandb(
                     wandb_run=_wandb_run,
                     plot_dir=msg_probe_plot_dir,

@@ -18,7 +18,7 @@ def collect_and_log_param_metrics(model: torch.nn.Module) -> dict[str, float]:
     by_module: dict[str, list[int]] = {}
     total = trainable = 0
     for name, param in model.named_parameters():
-        numel = int(param.numel())
+        numel = param.numel()
         module_name = name.split(".", 1)[0]
         counts = by_module.setdefault(module_name, [0, 0])
         total += numel

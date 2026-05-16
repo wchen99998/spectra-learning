@@ -13,6 +13,7 @@ import json
 import logging
 import tarfile
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -28,6 +29,10 @@ _DEFAULT_MIN_PEAK_INTENSITY = 1e-4
 _DEFAULT_MAX_PRECURSOR_MZ = 1000.0
 _NUM_PEAKS_OUTPUT = 60
 _SECONDS_PER_MINUTE = 60.0
+
+
+def _config_get(config: config_dict.ConfigDict, key: str, default: Any) -> Any:
+    return config.get(key, default)
 
 
 def _preprocess_chunk(
@@ -264,9 +269,9 @@ class FramePairDataset(Dataset):
     def __len__(self) -> int:
         return self._num_experiments
 
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        offset = self._offsets[idx]
-        length = self._lengths[idx]
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        offset = self._offsets[index]
+        length = self._lengths[index]
 
         start = np.random.randint(length - 1)
         i0 = offset + start
@@ -299,13 +304,13 @@ class TemporalDataModule:
 
     def __init__(self, config: config_dict.ConfigDict, seed: int) -> None:
         self.config = config
-        self.seed = int(seed)
+        self.seed = seed
 
         # Resolve data directory — download from HuggingFace if repo_id is set
-        temporal_repo_id = str(config.get("temporal_repo_id", "")).strip()
-        temporal_revision = str(config.get("temporal_revision", "main"))
+        temporal_repo_id = str(_config_get(config, "temporal_repo_id", "")).strip()
+        temporal_revision = str(_config_get(config, "temporal_revision", "main"))
         local_dir = Path(
-            config.get("temporal_data_dir", "data/gems_grouped")
+            _config_get(config, "temporal_data_dir", "data/gems_grouped")
         ).expanduser().resolve()
 
         if temporal_repo_id:
@@ -319,23 +324,23 @@ class TemporalDataModule:
         with manifest_path.open() as f:
             self.manifest = json.load(f)
 
-        self.batch_size = int(config.get("batch_size", 256))
-        self.num_peaks = int(config.get("num_peaks", _NUM_PEAKS_OUTPUT))
+        self.batch_size = int(_config_get(config, "batch_size", 256))
+        self.num_peaks = int(_config_get(config, "num_peaks", _NUM_PEAKS_OUTPUT))
         self.min_peak_intensity = float(
-            config.get("min_peak_intensity", _DEFAULT_MIN_PEAK_INTENSITY)
+            _config_get(config, "min_peak_intensity", _DEFAULT_MIN_PEAK_INTENSITY)
         )
         self.max_precursor_mz = float(
-            config.get("max_precursor_mz", _DEFAULT_MAX_PRECURSOR_MZ)
+            _config_get(config, "max_precursor_mz", _DEFAULT_MAX_PRECURSOR_MZ)
         )
-        self.peak_ordering = str(config.get("peak_ordering", "mz"))
+        self.peak_ordering = str(_config_get(config, "peak_ordering", "mz"))
 
         # DataLoader settings
         default_pin = torch.cuda.is_available()
-        self.pin_memory = bool(config.get("dataloader_pin_memory", default_pin))
-        self.num_workers = int(config.get("dataloader_num_workers", 4))
-        self.prefetch_factor = int(config.get("dataloader_prefetch_factor", 2))
+        self.pin_memory = bool(_config_get(config, "dataloader_pin_memory", default_pin))
+        self.num_workers = int(_config_get(config, "dataloader_num_workers", 4))
+        self.prefetch_factor = int(_config_get(config, "dataloader_prefetch_factor", 2))
         self.persistent_workers = bool(
-            config.get("dataloader_persistent_workers", self.num_workers > 0)
+            _config_get(config, "dataloader_persistent_workers", self.num_workers > 0)
         )
 
         # Build datasets (pre-loads all data into RAM)
@@ -348,11 +353,11 @@ class TemporalDataModule:
         val_total = self.manifest["validation"]["total_spectra"]
 
         train_usable = sum(1 for f in self.train_files if f["num_spectra"] >= 2)
-        configured_train_steps = int(config.get("num_train_steps", 0))
+        configured_train_steps = int(_config_get(config, "num_train_steps", 0))
         if configured_train_steps > 0:
             self.train_steps = configured_train_steps
         else:
-            self.train_steps = int(float(config.get("num_epochs", 1.0)) * max(1, train_usable // self.batch_size))
+            self.train_steps = int(float(_config_get(config, "num_epochs", 1.0)) * max(1, train_usable // self.batch_size))
 
         self.info = {
             "data_dir": str(data_dir),

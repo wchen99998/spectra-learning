@@ -3,6 +3,7 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
@@ -10,6 +11,7 @@ from ml_collections import config_dict
 
 from spectra_learning.models.model import PeakSetSIGReg
 from spectra_learning.models.pooling import CovariancePool
+from spectra_learning.models.transformer import TransformerBlock
 from spectra_learning.training.checkpointing import (
     covariance_pooler_checkpoint_path,
     is_training_checkpoint_path,
@@ -32,6 +34,7 @@ from spectra_learning.training.optimization import (
 )
 from spectra_learning.training.api import _build_wandb_init_kwargs, build_model_from_config
 from spectra_learning.training.logging import WandbMetricLogger, log_msg_probe_metrics
+from spectra_learning.training.schedules import WarmupCosineSchedule
 
 
 def _small_model(**overrides) -> PeakSetSIGReg:
@@ -76,7 +79,7 @@ def test_save_checkpoint_persists_optimizer_state():
     model = _small_model()
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
 
-    loss = sum(param.sum() for param in model.parameters())
+    loss = torch.stack([param.sum() for param in model.parameters()]).sum()
     loss.backward()
     optimizer.step()
     optimizer.zero_grad(set_to_none=True)
@@ -184,6 +187,7 @@ def test_training_loop_resumes_with_offset_loader(monkeypatch, tmp_path: Path):
 
     class FakeDataModule:
         train_steps = 5
+        global_batch_size = 1
 
         def __init__(self) -> None:
             self.calls = []
@@ -700,8 +704,8 @@ def test_build_optimizers_applies_predictor_learning_rate_ratio():
         float(group["lr"]) == pytest.approx(3e-3)
         for group in optimizers[1].param_groups
     )
-    assert schedulers[0].eta_min == pytest.approx(1e-4)
-    assert schedulers[1].eta_min == pytest.approx(3e-4)
+    assert cast(WarmupCosineSchedule, schedulers[0]).eta_min == pytest.approx(1e-4)
+    assert cast(WarmupCosineSchedule, schedulers[1]).eta_min == pytest.approx(3e-4)
 
     predictor_param_ids = {
         id(param)
@@ -803,7 +807,8 @@ def test_build_optimizers_uses_official_torch_muon_and_adamw():
         total_steps=10,
         device=torch.device("cpu"),
     )
-    qkv = model.encoder.blocks[0].attention.wqkv.weight
+    block = cast(TransformerBlock, model.encoder.blocks[0])
+    qkv = block.attention.wqkv.weight
     muon_optimizer = next(opt for opt in optimizers if isinstance(opt, torch.optim.Muon))
     adamw_optimizer = next(opt for opt in optimizers if isinstance(opt, torch.optim.AdamW))
     muon_param_ids = _optimizer_param_ids(muon_optimizer)

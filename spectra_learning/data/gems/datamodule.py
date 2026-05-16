@@ -1,7 +1,7 @@
 import math
-from collections.abc import Iterator
+from collections.abc import Iterator, Sized
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 from ml_collections import config_dict
@@ -23,15 +23,15 @@ class _OffsetSampler(Sampler[int]):
         start_index: int,
     ) -> None:
         self.sampler = sampler
-        self.start_index = int(start_index)
+        self.start_index = start_index
 
     def __iter__(self) -> Iterator[int]:
         for position, idx in enumerate(self.sampler):
             if position >= self.start_index:
-                yield int(idx)
+                yield idx
 
     def __len__(self) -> int:
-        return len(self.sampler) - self.start_index
+        return len(cast(Sized, self.sampler)) - self.start_index
 
 
 class _ShuffledSampler(Sampler[int]):
@@ -43,7 +43,7 @@ class _ShuffledSampler(Sampler[int]):
         generator: torch.Generator,
     ) -> None:
         self.dataset = dataset
-        self.shuffle = bool(shuffle)
+        self.shuffle = shuffle
         self.generator = generator
 
     def __iter__(self) -> Iterator[int]:
@@ -59,6 +59,46 @@ class _ShuffledSampler(Sampler[int]):
 
 
 class GemsNativeDataModule:
+    config: GemsDataConfig
+    seed: int
+    output_dir: Path
+    gems_base_dir: Path
+    distributed_world_size: int
+    distributed_rank: int
+    gems_dir: Path
+    gems_metadata: dict[str, Any]
+    info: dict[str, Any]
+    train_steps: int
+    global_batch_size: int
+    batch_size: int
+    drop_remainder: bool
+    max_precursor_mz: float
+    min_peak_intensity: float
+    peak_drop_min_intensity: float
+    peak_ordering: str
+    precursor_peak_exclusion_window_da: float
+    jepa_num_target_blocks: int
+    jepa_context_fraction: float
+    jepa_target_fraction: float
+    jepa_block_min_len: int
+    jepa_mask_strategy: str
+    jepa_mask_lengths: tuple[int, ...]
+    jepa_mask_round_from: int
+    jepa_intensity_aware_mask_config: dict[str, float]
+    jepa_allow_target_overlap: bool
+    use_precursor_token: bool
+    num_peaks_output: int
+    dataloader_pin_memory: bool
+    dataloader_num_workers: int
+    dataloader_prefetch_factor: int
+    dataloader_persistent_workers: bool
+    gems_train_shards: list[str]
+    gems_validation_shards: list[str]
+    gems_train_files: list[str]
+    gems_validation_files: list[str]
+    _train_entries: list[dict[str, Any]]
+    _val_entries: list[dict[str, Any]]
+
     def __init__(
         self,
         config: config_dict.ConfigDict,
@@ -68,11 +108,11 @@ class GemsNativeDataModule:
         distributed_rank: int = 0,
     ) -> None:
         self.config = GemsDataConfig.from_config(config)
-        self.seed = int(seed)
+        self.seed = seed
         self.output_dir = self.config.artifact_dir
         self.gems_base_dir = self.output_dir / "gems"
-        self.distributed_world_size = int(distributed_world_size)
-        self.distributed_rank = int(distributed_rank)
+        self.distributed_world_size = distributed_world_size
+        self.distributed_rank = distributed_rank
         if not self.config.gems_native_repo_id:
             raise ValueError("GeMS configs must set gems_native_repo_id")
         self.gems_dir, self.gems_metadata = resolve_gems_artifact(
@@ -102,7 +142,7 @@ class GemsNativeDataModule:
                 setattr(self, key, value)
 
     def _set_distributed_batch_attrs(self) -> None:
-        self.global_batch_size = int(self.batch_size)
+        self.global_batch_size = self.batch_size
         assert self.global_batch_size % self.distributed_world_size == 0
         self.batch_size = self.global_batch_size // self.distributed_world_size
         if self.distributed_world_size > 1 and self.dataloader_num_workers > 0:
@@ -174,14 +214,14 @@ class GemsNativeDataModule:
         epoch: int = 0,
     ) -> DataLoader:
         generator = torch.Generator()
-        generator.manual_seed(int(seed))
-        start_index = int(start_batch) * self.batch_size
+        generator.manual_seed(seed)
+        start_index = start_batch * self.batch_size
         loader_kwargs: dict[str, Any] = {
             "dataset": dataset,
             "batch_size": self.batch_size,
             "num_workers": self.dataloader_num_workers,
             "pin_memory": self.dataloader_pin_memory,
-            "drop_last": bool(drop_last),
+            "drop_last": drop_last,
             "collate_fn": self._collator(augment=augment),
             "generator": generator,
         }
@@ -192,9 +232,9 @@ class GemsNativeDataModule:
                 num_replicas=self.distributed_world_size,
                 rank=self.distributed_rank,
                 seed=self.seed,
-                drop_last=bool(drop_last),
+                drop_last=drop_last,
             )
-            sampler.set_epoch(int(epoch))
+            sampler.set_epoch(epoch)
             if start_index:
                 sampler = _OffsetSampler(sampler, start_index=start_index)
             loader_kwargs["sampler"] = sampler
@@ -204,7 +244,7 @@ class GemsNativeDataModule:
                 start_index=start_index,
             )
         else:
-            loader_kwargs["shuffle"] = bool(shuffle)
+            loader_kwargs["shuffle"] = shuffle
         if self.dataloader_num_workers > 0:
             loader_kwargs["persistent_workers"] = self.dataloader_persistent_workers
             loader_kwargs["prefetch_factor"] = self.dataloader_prefetch_factor
@@ -254,7 +294,7 @@ class GemsNativeDataModule:
             dataset=self._get_dataset("train"),
             augment=True,
             shuffle=True,
-            seed=self.seed + int(epoch),
+            seed=self.seed + epoch,
             drop_last=self.drop_remainder,
             start_batch=start_batch,
             epoch=epoch,

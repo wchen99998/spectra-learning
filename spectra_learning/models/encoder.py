@@ -16,6 +16,10 @@ from spectra_learning.models.spectral_attention_bias import SpectralGraphormerBi
 
 
 class PeakSetEncoder(nn.Module):
+    cls_token: nn.Parameter | None
+    register_tokens: nn.Parameter | None
+    spectral_attn_biases: nn.ModuleList | None
+
     def __init__(
         self,
         *,
@@ -65,17 +69,17 @@ class PeakSetEncoder(nn.Module):
         spectral_bias_clip: float | None = None,
     ):
         super().__init__()
-        self.num_layers = int(num_layers)
-        norm_type = str(norm_type).lower()
-        self.use_cls_token = bool(use_cls_token)
-        self.num_register_tokens = int(num_register_tokens)
-        self.use_precursor_token = bool(use_precursor_token)
-        self.use_position_embedding = bool(use_position_embedding)
-        relative_kind = str(spectral_bias_relative_kind).lower()
+        self.num_layers = num_layers
+        norm_type = norm_type.lower()
+        self.use_cls_token = use_cls_token
+        self.num_register_tokens = num_register_tokens
+        self.use_precursor_token = use_precursor_token
+        self.use_position_embedding = use_position_embedding
+        relative_kind = spectral_bias_relative_kind.lower()
         spectral_bias_enabled = (
             relative_kind not in {"", "none", "false", "off"}
-            or bool(spectral_bias_use_precursor)
-            or bool(spectral_bias_use_intensity)
+            or spectral_bias_use_precursor
+            or spectral_bias_use_intensity
         )
         self.embedder = PeakFeatureEmbedder(
             model_dim=model_dim,
@@ -93,7 +97,7 @@ class PeakSetEncoder(nn.Module):
             use_fourier_features=use_fourier_features,
         )
         self.position_embedding = _build_frozen_position_embedding(
-            int(num_peaks),
+            num_peaks,
             model_dim,
         )
         if self.use_cls_token:
@@ -127,27 +131,25 @@ class PeakSetEncoder(nn.Module):
             self.spectral_attn_biases = nn.ModuleList(
                 [
                     SpectralGraphormerBias(
-                        num_heads=int(num_heads),
-                        mass_scale=float(spectral_bias_mass_scale),
-                        precursor_scale=float(spectral_bias_precursor_scale),
+                        num_heads=num_heads,
+                        mass_scale=spectral_bias_mass_scale,
+                        precursor_scale=spectral_bias_precursor_scale,
                         first_token_is_precursor=self.use_precursor_token,
                         relative_kind=spectral_bias_relative_kind,
-                        num_freqs=int(spectral_bias_num_freqs),
-                        fourier_strategy=str(spectral_bias_fourier_strategy),
-                        fourier_x_min=float(spectral_bias_fourier_x_min),
-                        fourier_x_max=float(spectral_bias_fourier_x_max),
-                        fourier_sigma=float(spectral_bias_fourier_sigma),
-                        fourier_trainable=bool(spectral_bias_fourier_trainable),
-                        use_precursor_bias=bool(spectral_bias_use_precursor),
-                        use_intensity_bias=bool(spectral_bias_use_intensity),
-                        intensity_hidden_dim=int(spectral_bias_intensity_hidden_dim),
-                        rbf_num_basis=int(spectral_bias_rbf_num_basis),
-                        rbf_delta_min=float(spectral_bias_rbf_delta_min),
-                        rbf_delta_max=float(spectral_bias_rbf_delta_max),
-                        rbf_use_absolute_delta=bool(
-                            spectral_bias_rbf_use_absolute_delta
-                        ),
-                        init_std=float(spectral_bias_init_std),
+                        num_freqs=spectral_bias_num_freqs,
+                        fourier_strategy=spectral_bias_fourier_strategy,
+                        fourier_x_min=spectral_bias_fourier_x_min,
+                        fourier_x_max=spectral_bias_fourier_x_max,
+                        fourier_sigma=spectral_bias_fourier_sigma,
+                        fourier_trainable=spectral_bias_fourier_trainable,
+                        use_precursor_bias=spectral_bias_use_precursor,
+                        use_intensity_bias=spectral_bias_use_intensity,
+                        intensity_hidden_dim=spectral_bias_intensity_hidden_dim,
+                        rbf_num_basis=spectral_bias_rbf_num_basis,
+                        rbf_delta_min=spectral_bias_rbf_delta_min,
+                        rbf_delta_max=spectral_bias_rbf_delta_max,
+                        rbf_use_absolute_delta=spectral_bias_rbf_use_absolute_delta,
+                        init_std=spectral_bias_init_std,
                         bias_clip=spectral_bias_clip,
                     )
                     for _ in range(self.num_layers)
@@ -202,7 +204,7 @@ class PeakSetEncoder(nn.Module):
     ) -> torch.Tensor | None:
         if self.spectral_attn_biases is None:
             return None
-        return self.spectral_attn_biases[int(block_idx)](
+        return self.spectral_attn_biases[block_idx](
             peak_mz,
             peak_intensity=peak_intensity,
             precursor_mz=precursor_mz,
@@ -226,7 +228,7 @@ class PeakSetEncoder(nn.Module):
         block_indices: list[int] | tuple[int, ...] = (),
         precursor_mz: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
-        block_indices = tuple(int(idx) for idx in block_indices)
+        block_indices = tuple(idx for idx in block_indices)
         attn_mask = _merge_visible_mask(valid_mask, visible_mask)
         x = self._add_positions(self.embedder(peak_mz, peak_intensity))
         seq_len = peak_mz.shape[1]

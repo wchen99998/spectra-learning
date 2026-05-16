@@ -4,7 +4,7 @@ import logging
 import math
 import re
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 import numpy as np
 import torch
@@ -74,6 +74,10 @@ MONA_A_HF_FILENAME = (
 )
 
 
+def _config_get(config: config_dict.ConfigDict, key: str, default: Any) -> Any:
+    return config.get(key, default)
+
+
 def _download_hf_file(repo_id: str, filename: str, local_dir: Path) -> Path:
     local_dir.mkdir(parents=True, exist_ok=True)
     path = hf_hub_download(
@@ -95,7 +99,7 @@ def _normalize_spectra_intensity(spectra: np.ndarray) -> np.ndarray:
     return spectra
 
 
-def _load_massspec_tsv(tsv_path: Path) -> dict[str, np.ndarray]:
+def _load_massspec_tsv(tsv_path: Path) -> dict[str, Any]:
     spectra, precursor, fold, smiles = [], [], [], []
     adduct, instrument_type = [], []
     collision_energy, collision_energy_present = [], []
@@ -136,7 +140,7 @@ def _load_massspec_tsv(tsv_path: Path) -> dict[str, np.ndarray]:
     }
 
 
-def _load_nist20_hdf5(hdf5_path: Path) -> dict[str, np.ndarray]:
+def _load_nist20_hdf5(hdf5_path: Path) -> dict[str, Any]:
     import h5py
     from rdkit.Chem.inchi import MolToInchi, InchiToInchiKey
 
@@ -220,7 +224,7 @@ def _collision_energy_from_metadata(
 def _load_nist_murcko_parquet_split(
     parquet_path: Path,
     split_name: str,
-) -> dict[str, np.ndarray]:
+) -> dict[str, Any]:
     import pyarrow.parquet as pq
 
     table = pq.read_table(
@@ -265,7 +269,7 @@ def _load_nist_murcko_parquet_split(
 
 def _load_nist_murcko_parquet_splits(
     source_dir: Path,
-) -> dict[str, np.ndarray]:
+) -> dict[str, Any]:
     payloads = [
         _load_nist_murcko_parquet_split(source_dir / f"{split}.parquet", split)
         for split in ("train", "val", "test")
@@ -277,7 +281,7 @@ def _load_nist_murcko_parquet_splits(
     }
 
 
-def _load_mona_a_pkl(pkl_path: Path) -> dict[str, np.ndarray]:
+def _load_mona_a_pkl(pkl_path: Path) -> dict[str, Any]:
     import pickle
     import pandas as pd
 
@@ -305,7 +309,7 @@ def _load_mona_a_pkl(pkl_path: Path) -> dict[str, np.ndarray]:
     n = len(df)
     return {
         "spectra": _normalize_spectra_intensity(
-            np.stack(df["PARSED PEAKS"].to_numpy()).astype(np.float32)
+            np.stack(list(df["PARSED PEAKS"].to_numpy())).astype(np.float32)
         ),
         "precursor": df["PRECURSOR M/Z"].to_numpy().astype(np.float32),
         "fold": np.where(df["val"].to_numpy(), "test", "train"),
@@ -378,15 +382,15 @@ def _sample_balanced_morgan_pairs(
         )
         for smi in rep_smiles
     ]
-    n_bins = int(round(1.0 / float(bin_size)))
-    target_per_bin = int(num_pairs) // n_bins
-    rng = np.random.default_rng(int(seed))
+    n_bins = round(1.0 / bin_size)
+    target_per_bin = num_pairs // n_bins
+    rng = np.random.default_rng(seed)
     all_rep = np.arange(len(fps), dtype=np.int64)
     pairs_by_bin: list[list[tuple[int, int, float]]] = [[] for _ in range(n_bins)]
 
     for i in rng.permutation(len(fps)):
         sims = np.asarray(DataStructs.BulkTanimotoSimilarity(fps[int(i)], fps), dtype=np.float32)
-        bin_ids = np.ceil(sims / float(bin_size)).astype(np.int16) - 1
+        bin_ids = np.ceil(sims / bin_size).astype(np.int16) - 1
         for bin_idx in range(n_bins):
             need = target_per_bin - len(pairs_by_bin[bin_idx])
             if need <= 0:
@@ -449,9 +453,9 @@ def _write_pairwise_alignment_artifact(
     return {
         "pairwise_alignment_available": True,
         "pairwise_alignment_file": NIST_FULL_PAIRWISE_ALIGNMENT_FILENAME,
-        "pairwise_alignment_num_pairs": int(len(payload["tanimoto"])),
-        "pairwise_alignment_num_endpoints": int(len(payload["endpoint_index"])),
-        "pairwise_alignment_bin_size": float(NIST_FULL_PAIRWISE_ALIGNMENT_BIN_SIZE),
+        "pairwise_alignment_num_pairs": len(payload["tanimoto"]),
+        "pairwise_alignment_num_endpoints": len(payload["endpoint_index"]),
+        "pairwise_alignment_bin_size": NIST_FULL_PAIRWISE_ALIGNMENT_BIN_SIZE,
         "pairwise_alignment_seed": int(NIST_FULL_PAIRWISE_ALIGNMENT_SEED),
         "pairwise_alignment_fingerprint": "morgan",
         "pairwise_alignment_morgan_bits": int(MORGAN_PROBE_FINGERPRINT_BITS),
@@ -472,7 +476,7 @@ def _write_probe_native_shards(
     num_shards: int,
 ) -> tuple[list[str], list[int]]:
     n = len(split_payload["spectra"])
-    num_shards = max(1, min(int(num_shards), n))
+    num_shards = max(1, min(num_shards, n))
     shard_size = math.ceil(n / num_shards)
     output_path.mkdir(parents=True, exist_ok=True)
     shard_names, shard_lengths = [], []
@@ -508,7 +512,7 @@ def _filter_encode_and_write(
     metadata_version: int,
     write_pairwise_alignment: bool = True,
 ) -> dict[str, Any]:
-    keep = np.isfinite(precursor) & (precursor <= float(max_precursor_mz))
+    keep = np.isfinite(precursor) & (precursor <= max_precursor_mz)
     spectra = spectra[keep]
     precursor = precursor[keep]
     fold = fold[keep]
@@ -528,7 +532,7 @@ def _filter_encode_and_write(
     probe_valid_mol &= probe_maccs_valid & probe_morgan_valid
     metadata: dict[str, Any] = {
         "metadata_version": metadata_version,
-        "max_precursor_mz": float(max_precursor_mz),
+        "max_precursor_mz": max_precursor_mz,
         "adduct_vocab": adduct_vocab,
         "instrument_type_vocab": instrument_type_vocab,
         "dreams_dim": (
@@ -569,7 +573,7 @@ def _filter_encode_and_write(
         )
         metadata[f"{split_name}_files"] = shard_names
         metadata[f"{split_name}_lengths"] = shard_lengths
-        metadata[f"{split_name}_size"] = int(np.count_nonzero(split_mask))
+        metadata[f"{split_name}_size"] = np.count_nonzero(split_mask)
         split_ordered_smiles.append(smiles[split_mask].astype(str))
         split_ordered_valid.append(probe_valid_mol[split_mask].astype(bool))
     if write_pairwise_alignment:
@@ -603,7 +607,7 @@ def _probe_metadata_valid(
     metadata = json.loads(metadata_path.read_text())
     if int(metadata.get("metadata_version", 0)) != expected_version:
         return None
-    if float(metadata.get("max_precursor_mz", float("inf"))) != float(max_precursor_mz):
+    if float(metadata.get("max_precursor_mz", float("inf"))) != max_precursor_mz:
         return None
     if expected_metadata is not None:
         for key, value in expected_metadata.items():
@@ -874,9 +878,9 @@ class _ProbeMemmapDataset(Dataset):
     def __len__(self) -> int:
         return int(self._starts[-1])
 
-    def _ensure_arrays(self) -> None:
+    def _ensure_arrays(self) -> list[dict[str, np.ndarray]]:
         if self._arrays is not None:
-            return
+            return self._arrays
         keys = [
             "spectra",
             "precursor_mz_raw",
@@ -892,23 +896,24 @@ class _ProbeMemmapDataset(Dataset):
             *[f"probe_{name}" for name in REGRESSION_TARGET_KEYS],
             "dreams_embedding",
         ]
-        self._arrays = []
+        arrays_by_shard: list[dict[str, np.ndarray]] = []
         for entry in self._shard_entries:
             shard_dir = entry["dir"]
-            arrays = {}
+            arrays: dict[str, np.ndarray] = {}
             for key in keys:
                 path = shard_dir / f"{key}.npy"
                 if path.exists():
                     arrays[key] = np.load(path, mmap_mode="r")
-            self._arrays.append(arrays)
+            arrays_by_shard.append(arrays)
+        self._arrays = arrays_by_shard
+        return arrays_by_shard
 
-    def __getitem__(self, idx: int) -> dict[str, Any]:
-        self._ensure_arrays()
-        assert self._arrays is not None
-        idx = int(idx)
-        shard_idx = int(np.searchsorted(self._starts, idx, side="right") - 1)
-        local_idx = idx - int(self._starts[shard_idx])
-        arrays = self._arrays[shard_idx]
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        arrays_by_shard = self._ensure_arrays()
+        index = index
+        shard_idx = int(np.searchsorted(self._starts, index, side="right") - 1)
+        local_idx = index - int(self._starts[shard_idx])
+        arrays = arrays_by_shard[shard_idx]
         sample: dict[str, Any] = {}
         for key, value in arrays.items():
             item = value[local_idx]
@@ -920,9 +925,9 @@ class _ProbeMemmapDataset(Dataset):
                 elif value.dtype == np.bool_:
                     sample[key] = bool(item)
                 elif value.dtype.kind in {"i", "u"}:
-                    sample[key] = int(item)
+                    sample[key] = int(cast(Any, item))
                 else:
-                    sample[key] = float(item)
+                    sample[key] = float(cast(Any, item))
             else:
                 sample[key] = item
         return sample
@@ -940,15 +945,13 @@ class _ProbeBatchCollator:
         use_precursor_token: bool,
         precursor_peak_exclusion_window_da: float,
     ) -> None:
-        self.num_peaks = int(num_peaks)
-        self.max_precursor_mz = float(max_precursor_mz)
-        self.min_peak_intensity = float(min_peak_intensity)
-        self.peak_drop_min_intensity = float(peak_drop_min_intensity)
-        self.peak_ordering = str(peak_ordering)
-        self.use_precursor_token = bool(use_precursor_token)
-        self.precursor_peak_exclusion_window_da = float(
-            precursor_peak_exclusion_window_da
-        )
+        self.num_peaks = num_peaks
+        self.max_precursor_mz = max_precursor_mz
+        self.min_peak_intensity = min_peak_intensity
+        self.peak_drop_min_intensity = peak_drop_min_intensity
+        self.peak_ordering = peak_ordering
+        self.use_precursor_token = use_precursor_token
+        self.precursor_peak_exclusion_window_da = precursor_peak_exclusion_window_da
 
     def __call__(self, samples: list[dict[str, Any]]) -> dict[str, Any]:
         spectra = torch.stack([sample["spectra"] for sample in samples], dim=0)
@@ -1042,13 +1045,13 @@ class _ProbeIndexSampler(Sampler[int]):
         distributed_rank: int,
         pad_to_equal: bool,
     ) -> None:
-        self.dataset_size = int(dataset_size)
+        self.dataset_size = dataset_size
         self.generator = generator
-        self.shuffle = bool(shuffle)
+        self.shuffle = shuffle
         self.max_samples = max_samples
-        self.distributed_world_size = int(distributed_world_size)
-        self.distributed_rank = int(distributed_rank)
-        self.pad_to_equal = bool(pad_to_equal)
+        self.distributed_world_size = distributed_world_size
+        self.distributed_rank = distributed_rank
+        self.pad_to_equal = pad_to_equal
         self._indices = self._build_indices()
 
     def _build_indices(self) -> list[int]:
@@ -1057,7 +1060,7 @@ class _ProbeIndexSampler(Sampler[int]):
         else:
             order = list(range(self.dataset_size))
         if self.max_samples is not None:
-            order = order[: min(len(order), int(self.max_samples))]
+            order = order[: min(len(order), self.max_samples)]
         if self.pad_to_equal and self.distributed_world_size > 1 and order:
             total_size = (
                 math.ceil(len(order) / self.distributed_world_size)
@@ -1098,22 +1101,26 @@ class MassSpecProbeData(NamedTuple):
     @classmethod
     def from_config(cls, config: config_dict.ConfigDict) -> "MassSpecProbeData":
         artifact_root = (
-            Path(config.get("artifact_dir", str(_DEFAULT_ARTIFACT_DIR)))
+            Path(_config_get(config, "artifact_dir", str(_DEFAULT_ARTIFACT_DIR)))
             .expanduser()
             .resolve()
         )
         max_precursor_mz = float(
-            config.get("max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
+            _config_get(config, "max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
         )
-        probe_dataset = str(config.get("probe_dataset", "massspec"))
+        probe_dataset = str(_config_get(config, "probe_dataset", "massspec"))
         if probe_dataset == "nist20":
             output_dir = artifact_root / "nist20_probe"
             metadata = ensure_nist20_probe_prepared(
                 output_dir,
                 max_precursor_mz=max_precursor_mz,
                 cache_dir=artifact_root,
-                hdf5_repo_id=str(config.get("nist20_hdf5_repo_id", NIST20_HF_REPO)),
-                hdf5_filename=str(config.get("nist20_hdf5_filename", NIST20_HF_FILENAME)),
+                hdf5_repo_id=str(
+                    _config_get(config, "nist20_hdf5_repo_id", NIST20_HF_REPO)
+                ),
+                hdf5_filename=str(
+                    _config_get(config, "nist20_hdf5_filename", NIST20_HF_FILENAME)
+                ),
             )
         elif probe_dataset == "nist-full":
             output_dir = artifact_root / "nist_full_probe"
@@ -1121,15 +1128,17 @@ class MassSpecProbeData(NamedTuple):
                 output_dir,
                 max_precursor_mz=max_precursor_mz,
                 repo_id=str(
-                    config.get(
+                    _config_get(
+                        config,
                         "nist_full_probe_repo_id",
-                        config.get(
+                        _config_get(
+                            config,
                             "nist_full_hdf5_repo_id",
-                            config.get("nist20_hdf5_repo_id", NIST20_HF_REPO),
+                            _config_get(config, "nist20_hdf5_repo_id", NIST20_HF_REPO),
                         ),
                     )
                 ),
-                revision=str(config.get("nist_full_probe_revision", "main")),
+                revision=str(_config_get(config, "nist_full_probe_revision", "main")),
             )
         elif probe_dataset == "nist-murcko":
             output_dir = artifact_root / "nist_murcko_probe"
@@ -1137,11 +1146,15 @@ class MassSpecProbeData(NamedTuple):
                 output_dir,
                 max_precursor_mz=max_precursor_mz,
                 repo_id=str(
-                    config.get("nist_murcko_probe_repo_id", NIST_MURCKO_HF_REPO)
+                    _config_get(config, "nist_murcko_probe_repo_id", NIST_MURCKO_HF_REPO)
                 ),
-                revision=str(config.get("nist_murcko_probe_revision", "main")),
+                revision=str(_config_get(config, "nist_murcko_probe_revision", "main")),
                 split_dir=str(
-                    config.get("nist_murcko_probe_split_dir", NIST_MURCKO_SPLIT_DIR)
+                    _config_get(
+                        config,
+                        "nist_murcko_probe_split_dir",
+                        NIST_MURCKO_SPLIT_DIR,
+                    )
                 ),
             )
         elif probe_dataset == "mona_a":
@@ -1193,28 +1206,33 @@ class MassSpecProbeData(NamedTuple):
             test_files=[str(output_dir / "test" / name) for name in metadata["test_files"]],
             test_lengths=[int(v) for v in metadata["test_lengths"]],
             batch_size=int(
-                config.get(
+                _config_get(
+                    config,
                     "msg_probe_batch_size",
-                    config.get("batch_size", _DEFAULT_BATCH_SIZE),
+                    _config_get(config, "batch_size", _DEFAULT_BATCH_SIZE),
                 )
             ),
-            shuffle_buffer=int(config.get("shuffle_buffer", _DEFAULT_SHUFFLE_BUFFER)),
+            shuffle_buffer=int(
+                _config_get(config, "shuffle_buffer", _DEFAULT_SHUFFLE_BUFFER)
+            ),
             max_precursor_mz=max_precursor_mz,
             min_peak_intensity=float(
-                config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)
+                _config_get(config, "min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)
             ),
             peak_drop_min_intensity=float(
-                config.get(
+                _config_get(
+                    config,
                     "peak_drop_min_intensity",
-                    config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY),
+                    _config_get(config, "min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY),
                 )
             ),
-            peak_ordering=str(config.get("peak_ordering", "mz")),
-            num_peaks=int(config.get("num_peaks", _NUM_PEAKS_OUTPUT)),
-            use_precursor_token=bool(config.get("use_precursor_token", False)),
+            peak_ordering=str(_config_get(config, "peak_ordering", "mz")),
+            num_peaks=int(_config_get(config, "num_peaks", _NUM_PEAKS_OUTPUT)),
+            use_precursor_token=bool(_config_get(config, "use_precursor_token", False)),
             dreams_dim=int(metadata.get("dreams_dim", 0)),
             precursor_peak_exclusion_window_da=float(
-                config.get(
+                _config_get(
+                    config,
                     "precursor_peak_exclusion_window_da",
                     _DEFAULT_PRECURSOR_PEAK_EXCLUSION_WINDOW_DA,
                 )
@@ -1261,24 +1279,24 @@ class MassSpecProbeData(NamedTuple):
             ]
         )
         generator = torch.Generator()
-        generator.manual_seed(int(seed))
+        generator.manual_seed(seed)
         sampler = None
-        if max_samples is not None or int(distributed_world_size) > 1:
+        if max_samples is not None or distributed_world_size > 1:
             sampler = _ProbeIndexSampler(
                 len(dataset),
                 generator=generator,
-                shuffle=bool(shuffle),
+                shuffle=shuffle,
                 max_samples=max_samples,
-                distributed_world_size=int(distributed_world_size),
-                distributed_rank=int(distributed_rank),
-                pad_to_equal=bool(pad_distributed),
+                distributed_world_size=distributed_world_size,
+                distributed_rank=distributed_rank,
+                pad_to_equal=pad_distributed,
             )
         loader = DataLoader(
             dataset,
             batch_size=self.batch_size,
-            shuffle=bool(shuffle) and sampler is None,
+            shuffle=shuffle and sampler is None,
             sampler=sampler,
-            drop_last=bool(drop_remainder),
+            drop_last=drop_remainder,
             num_workers=0,
             collate_fn=_ProbeBatchCollator(
                 num_peaks=self.num_peaks,
@@ -1329,7 +1347,7 @@ class MassSpecProbeData(NamedTuple):
             Subset(dataset, [int(idx) for idx in indices]),
             batch_size=self.batch_size,
             shuffle=False,
-            drop_last=bool(drop_remainder),
+            drop_last=drop_remainder,
             num_workers=0,
             collate_fn=_ProbeBatchCollator(
                 num_peaks=self.num_peaks,

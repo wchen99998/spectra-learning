@@ -5,10 +5,12 @@ import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any, cast
 
 import torch
 from ml_collections import config_dict
 
+from spectra_learning.models.model import PeakSetSIGReg
 from spectra_learning.training.checkpointing import save_probe_checkpoint
 from spectra_learning.training.logging import _config_to_wandb_dict
 
@@ -37,7 +39,7 @@ def should_run_msg_probe_on_modal(config: config_dict.ConfigDict) -> bool:
 def save_and_submit_modal_msg_probe(
     *,
     config: config_dict.ConfigDict,
-    model: torch.nn.Module,
+    model: PeakSetSIGReg,
     covariance_pooler: torch.nn.Module | None,
     checkpoint_dir: Path,
     workdir: Path,
@@ -47,13 +49,13 @@ def save_and_submit_modal_msg_probe(
     wandb_run_id: str | None = None,
     submitter: ModalProbeSubmitter | None = None,
 ) -> dict[str, object]:
-    checkpoint_path = checkpoint_dir / f"modal-probe-step-{int(global_step):08d}.pt"
+    checkpoint_path = checkpoint_dir / f"modal-probe-step-{global_step:08d}.pt"
     save_probe_checkpoint(
         checkpoint_path,
         model,
-        int(global_step),
-        int(epoch),
-        float(loss),
+        global_step,
+        epoch,
+        loss,
         wandb_run_id,
         covariance_pooler=covariance_pooler,
     )
@@ -64,13 +66,13 @@ def save_and_submit_modal_msg_probe(
 
     checkpoint_in_volume = _path_is_modal_volume(checkpoint_path, config)
     if submitter is not None:
-        call_id = submitter(config_json, checkpoint_path, workdir, int(global_step))
+        call_id = submitter(config_json, checkpoint_path, workdir, global_step)
     elif checkpoint_in_volume:
         call_id = _spawn_modal_probe_from_volume(
             config_json=config_json,
             checkpoint_path=checkpoint_path,
             workdir=workdir,
-            global_step=int(global_step),
+            global_step=global_step,
         )
     else:
         call_id = _spawn_modal_probe_submission_process(
@@ -78,7 +80,7 @@ def save_and_submit_modal_msg_probe(
             config_json_path=config_json_path,
             checkpoint_path=checkpoint_path,
             workdir=workdir,
-            global_step=int(global_step),
+            global_step=global_step,
         )
 
     submission_path = checkpoint_path.with_suffix(".submission.json")
@@ -88,7 +90,7 @@ def save_and_submit_modal_msg_probe(
                 "call_id": call_id,
                 "checkpoint_in_volume": checkpoint_in_volume,
                 "checkpoint_path": str(checkpoint_path),
-                "global_step": int(global_step),
+                "global_step": global_step,
             },
             indent=2,
             sort_keys=True,
@@ -96,7 +98,7 @@ def save_and_submit_modal_msg_probe(
     )
     log.info(
         "Submitted Modal MSG probe for global_step=%d checkpoint=%s call_id=%s",
-        int(global_step),
+        global_step,
         checkpoint_path,
         call_id,
     )
@@ -124,11 +126,11 @@ def _spawn_modal_probe_from_volume(
     import modal_train
 
     modal_train.volume.commit()
-    handle = modal_train.run_probe_checkpoint.spawn(
+    handle = cast(Any, modal_train.run_probe_checkpoint).spawn(
         config_json=config_json,
         checkpoint_path=str(checkpoint_path),
         workdir=str(workdir),
-        global_step=int(global_step),
+        global_step=global_step,
     )
     return str(handle.object_id)
 
@@ -162,7 +164,7 @@ def _spawn_modal_probe_submission_process(
         "--submit-probe-workdir",
         str(workdir),
         "--submit-probe-global-step",
-        str(int(global_step)),
+        str(global_step),
     ]
     stdout = log_path.open("ab")
     process = subprocess.Popen(
@@ -180,4 +182,4 @@ def modal_probe_remote_label(path: str | Path, global_step: int) -> str:
     source = str(Path(path).expanduser().resolve())
     digest = hashlib.sha1(source.encode("utf-8")).hexdigest()[:10]
     name = Path(source).name or "run"
-    return f"{name}-{digest}/step-{int(global_step):08d}"
+    return f"{name}-{digest}/step-{global_step:08d}"

@@ -3,6 +3,10 @@ from torch import nn
 
 
 class SIGReg(nn.Module):
+    t: torch.Tensor
+    phi: torch.Tensor
+    weights: torch.Tensor
+
     def __init__(self, knots: int = 17, num_slices: int = 256):
         super().__init__()
         self.num_slices = num_slices

@@ -38,7 +38,7 @@ def _build_norm(
     *,
     affine: bool = True,
 ) -> nn.Module:
-    kind = str(norm_type).lower()
+    kind = norm_type.lower()
     eps = 1e-5 if eps is None else eps
     if kind == "rmsnorm":
         return nn.RMSNorm(dim, eps=eps, elementwise_affine=affine)

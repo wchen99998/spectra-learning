@@ -5,6 +5,7 @@ import random
 import time
 import warnings
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -41,6 +42,7 @@ from spectra_learning.training.modal_probe import (
 )
 from spectra_learning.training.modules import PretrainModule, split_pretrain_module
 from spectra_learning.training.optimization import build_optimizers
+from spectra_learning.training.schedules import LRSchedulerLike
 from spectra_learning.training.steps import train_step_impl
 from spectra_learning.probes.massspec.msg_probe import (
     msg_probe_variants_from_config,
@@ -48,6 +50,7 @@ from spectra_learning.probes.massspec.msg_probe import (
     run_msg_probe,
 )
 from spectra_learning.models.pooling import build_covariance_pooler_from_config
+from spectra_learning.models.model import PeakSetSIGReg
 from spectra_learning.training.api import (
     build_logger,
     build_model_from_config,
@@ -61,6 +64,10 @@ inductor_config.triton.unique_kernel_names = True
 inductor_config.fx_graph_cache = True
 inductor_config.epilogue_fusion = True
 inductor_config.shape_padding = True
+
+
+def _config_get(config: config_dict.ConfigDict, key: str, default: Any) -> Any:
+    return config.get(key, default)
 
 
 def train_and_evaluate(
@@ -121,8 +128,10 @@ def train_and_evaluate(
     train_model = wrap_distributed_model(
         train_module,
         distributed,
-        static_graph=bool(config.get("ddp_static_graph", True)),
-        find_unused_parameters=bool(config.get("ddp_find_unused_parameters", False)),
+        static_graph=bool(_config_get(config, "ddp_static_graph", True)),
+        find_unused_parameters=bool(
+            _config_get(config, "ddp_find_unused_parameters", False)
+        ),
     )
     last_msg_probe_metrics = run_training_loop(
         config=config,
@@ -140,7 +149,7 @@ def train_and_evaluate(
         device=device,
         distributed=distributed,
     )
-    final_global_step = int(last_msg_probe_metrics["run/final_global_step"])
+    final_global_step = int(cast(float, last_msg_probe_metrics["run/final_global_step"]))
     if distributed.is_main:
         base_model, covariance_pooler = split_pretrain_module(unwrap_model(train_model))
         save_checkpoint(
@@ -169,10 +178,10 @@ def train_and_evaluate(
 
 def initialize_frozen_teacher(
     config: config_dict.ConfigDict,
-    model: torch.nn.Module,
+    model: PeakSetSIGReg,
     distributed: DistributedContext,
 ) -> None:
-    if str(config.get("training_mode", "jepa")).lower() != "mae_teacher_jepa":
+    if str(_config_get(config, "training_mode", "jepa")).lower() != "mae_teacher_jepa":
         return
     checkpoint_path = str(config.frozen_teacher_checkpoint_path)
     if distributed.is_main:
@@ -183,10 +192,10 @@ def initialize_frozen_teacher(
 def run_training_loop(
     *,
     config: config_dict.ConfigDict,
-    datamodule: GemsNativeDataModule,
+    datamodule: Any,
     model: torch.nn.Module,
     optimizers: list[torch.optim.Optimizer],
-    schedulers: list[torch.optim.lr_scheduler.LRScheduler],
+    schedulers: list[LRSchedulerLike],
     logger,
     checkpoint_dir: Path,
     start_epoch: int,
@@ -204,24 +213,24 @@ def run_training_loop(
             world_size=1,
             device=device,
         )
-    autocast_dtype = parse_autocast_dtype(config.get("autocast_dtype", "bf16"))
-    log_every_n_steps = int(config.get("log_every_n_steps", 50))
+    autocast_dtype = parse_autocast_dtype(_config_get(config, "autocast_dtype", "bf16"))
+    log_every_n_steps = int(_config_get(config, "log_every_n_steps", 50))
     collapse_every_n_steps = int(
-        config.get("collapse_metrics_every_n_steps", log_every_n_steps)
+        _config_get(config, "collapse_metrics_every_n_steps", log_every_n_steps)
     )
     checkpoint_every_steps = int(config.checkpoint_every_steps)
-    grad_clip_norm = optional_float(config.get("grad_clip_norm", None))
+    grad_clip_norm = optional_float(_config_get(config, "grad_clip_norm", None))
     msg_probe_every_n_steps = msg_probe_interval(config, datamodule, total_steps)
     msg_probe_variants = msg_probe_variants_from_config(config)
-    device_prefetch_size = int(config.get("device_prefetch_size", 1))
+    device_prefetch_size = int(_config_get(config, "device_prefetch_size", 1))
     deadline = training_deadline(config)
     wandb_run = getattr(logger, "experiment", None)
-    last_msg_probe_metrics: dict[str, float] = {}
+    last_msg_probe_metrics: dict[str, object] = {}
     stopped_for_time_limit = False
-    initial_global_step = int(global_step)
+    initial_global_step = global_step
     modal_probe_call_ids: list[str] = []
     training_start_time = time.perf_counter()
-    throughput_warmup_steps = int(config.get("throughput_warmup_steps", 0))
+    throughput_warmup_steps = int(_config_get(config, "throughput_warmup_steps", 0))
     measured_start_time: float | None = None
     measured_steps = 0
     for epoch in range(start_epoch, loop_epochs):
@@ -339,15 +348,17 @@ def run_training_loop(
                     if isinstance(call_id, str):
                         modal_probe_call_ids.append(call_id)
                 else:
-                    last_msg_probe_metrics = run_and_log_msg_probe(
-                        config,
-                        base_model,
-                        device,
-                        logger,
-                        msg_probe_variants,
-                        global_step,
-                        distributed,
-                        covariance_pooler,
+                    last_msg_probe_metrics = dict(
+                        run_and_log_msg_probe(
+                            config,
+                            base_model,
+                            device,
+                            logger,
+                            msg_probe_variants,
+                            global_step,
+                            distributed,
+                            covariance_pooler,
+                        )
                     )
                 barrier(distributed)
         pbar.close()
@@ -363,12 +374,10 @@ def run_training_loop(
         if measured_start_time is not None
         else 0.0
     )
-    global_batch_size = int(
-        getattr(datamodule, "global_batch_size", config.get("batch_size", 1))
-    )
+    global_batch_size = int(datamodule.global_batch_size)
     last_msg_probe_metrics["run/stopped_for_time_limit"] = float(stopped_for_time_limit)
     last_msg_probe_metrics["run/final_global_step"] = float(global_step)
-    last_msg_probe_metrics["run/train_elapsed_seconds"] = float(training_elapsed)
+    last_msg_probe_metrics["run/train_elapsed_seconds"] = training_elapsed
     last_msg_probe_metrics["run/steps_per_second"] = (
         float(global_step - initial_global_step) / training_elapsed
         if training_elapsed > 0
@@ -380,7 +389,7 @@ def run_training_loop(
         else 0.0
     )
     last_msg_probe_metrics["run/measured_steps"] = float(measured_steps)
-    last_msg_probe_metrics["run/measured_elapsed_seconds"] = float(measured_elapsed)
+    last_msg_probe_metrics["run/measured_elapsed_seconds"] = measured_elapsed
     last_msg_probe_metrics["run/measured_steps_per_second"] = (
         float(measured_steps) / measured_elapsed
         if measured_elapsed > 0
@@ -398,8 +407,8 @@ def run_training_loop(
 
 
 def configure_torch_runtime(config: config_dict.ConfigDict) -> None:
-    if str(config.get("optimizer", "adamw")).lower() == "muon":
-        limit = int(config.get("dynamo_recompile_limit", 64))
+    if str(_config_get(config, "optimizer", "adamw")).lower() == "muon":
+        limit = int(_config_get(config, "dynamo_recompile_limit", 64))
         torch._dynamo.config.recompile_limit = limit
         torch._dynamo.config.cache_size_limit = limit
         logging.info("TorchDynamo cache limits set to %d for Muon.", limit)
@@ -433,7 +442,7 @@ def total_training_steps(
     datamodule: GemsNativeDataModule,
 ) -> int:
     total_steps = max(1, int(float(config.num_epochs) * datamodule.train_steps))
-    training_max_steps = config.get("training_max_steps", None)
+    training_max_steps = _config_get(config, "training_max_steps", None)
     if training_max_steps is None:
         return total_steps
     return min(total_steps, max(1, int(training_max_steps)))
@@ -443,9 +452,9 @@ def restore_training_state(
     *,
     config: config_dict.ConfigDict,
     checkpoint_dir: Path,
-    model: torch.nn.Module,
+    model: PeakSetSIGReg,
     optimizers: list[torch.optim.Optimizer],
-    schedulers: list[torch.optim.lr_scheduler.LRScheduler],
+    schedulers: list[LRSchedulerLike],
     steps_per_epoch: int,
     device: torch.device,
     covariance_pooler: torch.nn.Module | None = None,
@@ -481,7 +490,7 @@ def restore_training_state(
 
 
 def compile_forward(model: torch.nn.Module, config: config_dict.ConfigDict) -> None:
-    compile_mode = str(config.get("compile_mode", "max-autotune"))
+    compile_mode = str(_config_get(config, "compile_mode", "max-autotune"))
     if compile_mode.lower() == "none":
         return
     model.compile(
@@ -516,8 +525,10 @@ def learning_rate_metrics(
     config: config_dict.ConfigDict,
     optimizers: list[torch.optim.Optimizer],
 ) -> dict[str, float]:
-    optimizer_type = str(config.get("optimizer", "adamw")).lower()
-    has_predictor_lr = float(config.get("predictor_learning_rate_ratio", 1.0)) != 1.0
+    optimizer_type = str(_config_get(config, "optimizer", "adamw")).lower()
+    has_predictor_lr = (
+        float(_config_get(config, "predictor_learning_rate_ratio", 1.0)) != 1.0
+    )
     if optimizer_type == "muon":
         metrics = {}
         for idx, optimizer in enumerate(optimizers):
@@ -535,7 +546,7 @@ def msg_probe_interval(
     datamodule: GemsNativeDataModule,
     total_steps: int,
 ) -> int:
-    raw = float(config.get("msg_probe_every_n_steps", 0))
+    raw = float(_config_get(config, "msg_probe_every_n_steps", 0))
     if 0 < raw <= 1:
         reference_steps = total_steps if float(config.num_epochs) < 1 else datamodule.train_steps
         return max(1, int(raw * reference_steps))
@@ -544,7 +555,7 @@ def msg_probe_interval(
 
 def run_and_log_msg_probe(
     config: config_dict.ConfigDict,
-    model: torch.nn.Module,
+    model: PeakSetSIGReg,
     device: torch.device,
     logger,
     variants: tuple[str, ...],
@@ -571,7 +582,7 @@ def run_and_log_msg_probe(
             logger,
             probe_metrics,
             global_step,
-            enable_wandb=bool(config.get("enable_wandb", False)),
+            enable_wandb=bool(_config_get(config, "enable_wandb", False)),
         )
         fingerprint_task = resolve_msg_probe_fingerprint(config)
         for variant in variants:
@@ -592,7 +603,7 @@ def run_and_log_msg_probe(
 def submit_and_log_modal_msg_probe(
     *,
     config: config_dict.ConfigDict,
-    model: torch.nn.Module,
+    model: PeakSetSIGReg,
     covariance_pooler: torch.nn.Module | None,
     logger,
     checkpoint_dir: Path,
@@ -618,20 +629,20 @@ def submit_and_log_modal_msg_probe(
         logger,
         {key: value for key, value in metrics.items() if isinstance(value, float)},
         global_step,
-        enable_wandb=bool(config.get("enable_wandb", False)),
+        enable_wandb=bool(_config_get(config, "enable_wandb", False)),
     )
     return metrics
 
 
 def training_deadline(config: config_dict.ConfigDict) -> float | None:
-    max_duration_hours = config.get("max_duration_hours", None)
+    max_duration_hours = _config_get(config, "max_duration_hours", None)
     if max_duration_hours is None:
         return None
     logging.info("Training wall-clock budget: %.2f hours", float(max_duration_hours))
     return time.perf_counter() + float(max_duration_hours) * 3600.0
 
 
-def optional_float(value: object) -> float | None:
+def optional_float(value: Any) -> float | None:
     return None if value is None else float(value)
 
 

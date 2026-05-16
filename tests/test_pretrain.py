@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import math
+from typing import cast
 from unittest import mock
 
 import numpy as np
@@ -360,6 +361,7 @@ class BlockJEPATests(unittest.TestCase):
                     proj: torch.Tensor,
                     valid_mask: torch.Tensor | None = None,
                 ) -> torch.Tensor:
+                    assert valid_mask is not None
                     captured["proj"] = proj.detach().clone()
                     captured["valid_mask"] = valid_mask.detach().clone()
                     return proj.new_zeros(())
@@ -405,6 +407,7 @@ class BlockJEPATests(unittest.TestCase):
                     proj: torch.Tensor,
                     valid_mask: torch.Tensor | None = None,
                 ) -> torch.Tensor:
+                    assert valid_mask is not None
                     captured.append(
                         (proj.detach().clone(), valid_mask.detach().clone())
                     )
@@ -467,6 +470,7 @@ class BlockJEPATests(unittest.TestCase):
                     proj: torch.Tensor,
                     valid_mask: torch.Tensor | None = None,
                 ) -> torch.Tensor:
+                    assert valid_mask is not None
                     captured.append(
                         (proj.detach().clone(), valid_mask.detach().clone())
                     )
@@ -510,6 +514,7 @@ class BlockJEPATests(unittest.TestCase):
                     proj: torch.Tensor,
                     valid_mask: torch.Tensor | None = None,
                 ) -> torch.Tensor:
+                    assert valid_mask is not None
                     captured.append(
                         (proj.detach().clone(), valid_mask.detach().clone())
                     )
@@ -797,9 +802,11 @@ class BlockJEPATests(unittest.TestCase):
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
 
         metrics = model.forward_augmented(batch)
-        before_teacher = next(model.teacher_encoder.parameters()).detach().clone()
+        teacher_encoder = model.teacher_encoder
+        assert teacher_encoder is not None
+        before_teacher = next(teacher_encoder.parameters()).detach().clone()
         momentum = model.update_ema_teacher(step=1, total_steps=10)
-        after_teacher = next(model.teacher_encoder.parameters()).detach()
+        after_teacher = next(teacher_encoder.parameters()).detach()
 
         self.assertFalse(model.use_ema_teacher)
         self.assertTrue(model.use_frozen_teacher)
@@ -811,7 +818,7 @@ class BlockJEPATests(unittest.TestCase):
         self.assertIsNone(momentum)
         torch.testing.assert_close(after_teacher, before_teacher)
         self.assertTrue(
-            all(not param.requires_grad for param in model.teacher_encoder.parameters())
+            all(not param.requires_grad for param in teacher_encoder.parameters())
         )
 
     def test_forward_augmented_uses_single_encoder_pass(self):
@@ -834,12 +841,14 @@ class BlockJEPATests(unittest.TestCase):
             use_ema_teacher=True,
         )
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+        teacher_encoder = model.teacher_encoder
+        assert teacher_encoder is not None
 
         with (
             mock.patch.object(
-                model.teacher_encoder,
+                teacher_encoder,
                 "forward_with_block_outputs",
-                wraps=model.teacher_encoder.forward_with_block_outputs,
+                wraps=teacher_encoder.forward_with_block_outputs,
             ) as teacher_forward,
             mock.patch.object(
                 model.encoder,
@@ -852,7 +861,7 @@ class BlockJEPATests(unittest.TestCase):
 
         self.assertEqual(teacher_forward.call_count, 1)
         self.assertEqual(student_forward.call_count, 1)
-        teacher_grads = [p.grad for p in model.teacher_encoder.parameters()]
+        teacher_grads = [p.grad for p in teacher_encoder.parameters()]
         self.assertTrue(all(grad is None for grad in teacher_grads))
         student_grads = [
             p.grad for p in model.encoder.parameters() if p.requires_grad
@@ -865,12 +874,14 @@ class BlockJEPATests(unittest.TestCase):
             use_ema_teacher=True,
         )
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+        teacher_target_projector = model.teacher_target_projector
+        assert teacher_target_projector is not None
 
         with (
             mock.patch.object(
-                model.teacher_target_projector,
+                teacher_target_projector,
                 "forward",
-                wraps=model.teacher_target_projector.forward,
+                wraps=teacher_target_projector.forward,
             ) as teacher_projector_forward,
             mock.patch.object(
                 model.target_projector,
@@ -884,7 +895,7 @@ class BlockJEPATests(unittest.TestCase):
         self.assertEqual(teacher_projector_forward.call_count, 1)
         self.assertEqual(student_projector_forward.call_count, 1)
         teacher_projector_grads = [
-            p.grad for p in model.teacher_target_projector.parameters()
+            p.grad for p in teacher_target_projector.parameters()
         ]
         self.assertTrue(all(grad is None for grad in teacher_projector_grads))
         student_projector_grads = [
@@ -904,10 +915,14 @@ class BlockJEPATests(unittest.TestCase):
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
         before_student = next(model.encoder.parameters()).detach().clone()
-        before_teacher = next(model.teacher_encoder.parameters()).detach().clone()
+        teacher_encoder = model.teacher_encoder
+        teacher_target_projector = model.teacher_target_projector
+        assert teacher_encoder is not None
+        assert teacher_target_projector is not None
+        before_teacher = next(teacher_encoder.parameters()).detach().clone()
         before_student_projector = next(model.target_projector.parameters()).detach().clone()
         before_teacher_projector = (
-            next(model.teacher_target_projector.parameters()).detach().clone()
+            next(teacher_target_projector.parameters()).detach().clone()
         )
 
         metrics = train_step_impl(
@@ -922,10 +937,10 @@ class BlockJEPATests(unittest.TestCase):
         )
 
         after_student = next(model.encoder.parameters()).detach()
-        after_teacher = next(model.teacher_encoder.parameters()).detach()
+        after_teacher = next(teacher_encoder.parameters()).detach()
         after_student_projector = next(model.target_projector.parameters()).detach()
         after_teacher_projector = (
-            next(model.teacher_target_projector.parameters()).detach()
+            next(teacher_target_projector.parameters()).detach()
         )
         expected_momentum = 0.7
         self.assertIn("ema_teacher_momentum", metrics)
@@ -1193,14 +1208,16 @@ class BlockJEPATests(unittest.TestCase):
             load_frozen_teacher_weights(loaded, path)
 
             source_encoder_param = next(source.encoder.parameters()).detach()
-            loaded_teacher_param = next(loaded.teacher_encoder.parameters()).detach()
+            loaded_teacher_encoder = loaded.teacher_encoder
+            assert loaded_teacher_encoder is not None
+            loaded_teacher_param = next(loaded_teacher_encoder.parameters()).detach()
             loaded_student_param = next(loaded.encoder.parameters()).detach()
             torch.testing.assert_close(loaded_teacher_param, source_encoder_param)
             torch.testing.assert_close(loaded_student_param, before_student)
             self.assertTrue(
                 all(
                     not param.requires_grad
-                    for param in loaded.teacher_encoder.parameters()
+                    for param in loaded_teacher_encoder.parameters()
                 )
             )
 
@@ -1276,7 +1293,7 @@ class BlockJEPATests(unittest.TestCase):
         self.assertTrue(
             is_weight_decay_target(
                 "encoder.embedder.fourier_ffn.0.weight",
-                model.encoder.embedder.fourier_ffn[0].weight,
+                cast(torch.nn.Linear, model.encoder.embedder.fourier_ffn[0]).weight,
             )
         )
         self.assertFalse(
@@ -1387,6 +1404,7 @@ class PrecursorTokenTests(unittest.TestCase):
                     proj: torch.Tensor,
                     valid_mask: torch.Tensor | None = None,
                 ) -> torch.Tensor:
+                    assert valid_mask is not None
                     captured_masks.append(valid_mask.detach().clone())
                     return proj.new_zeros(())
 
@@ -1425,6 +1443,7 @@ class PrecursorTokenTests(unittest.TestCase):
                     proj: torch.Tensor,
                     valid_mask: torch.Tensor | None = None,
                 ) -> torch.Tensor:
+                    assert valid_mask is not None
                     captured["valid_mask"] = valid_mask.detach().clone()
                     return proj.new_zeros(())
 

@@ -38,7 +38,11 @@ def test_harmonic_relative_loss_bias_matches_direct_trig():
     )
     with torch.no_grad():
         bias.freqs.b.copy_(torch.tensor([0.05, 0.10, 0.25]))
-        bias.cos_weight.copy_(
+        cos_weight = bias.cos_weight
+        sin_weight = bias.sin_weight
+        assert cos_weight is not None
+        assert sin_weight is not None
+        cos_weight.copy_(
             torch.tensor(
                 [
                     [0.20, -0.30, 0.50],
@@ -46,7 +50,7 @@ def test_harmonic_relative_loss_bias_matches_direct_trig():
                 ]
             )
         )
-        bias.sin_weight.copy_(
+        sin_weight.copy_(
             torch.tensor(
                 [
                     [0.60, 0.10, -0.20],
@@ -61,9 +65,13 @@ def test_harmonic_relative_loss_bias_matches_direct_trig():
     delta = mass_da.unsqueeze(2) - mass_da.unsqueeze(1)
     angles = 2.0 * torch.pi * delta.unsqueeze(-1) * bias.freqs.b
     scale = 1.0 / torch.sqrt(torch.tensor(3.0))
+    cos_weight = bias.cos_weight
+    sin_weight = bias.sin_weight
+    assert cos_weight is not None
+    assert sin_weight is not None
     expected = (
-        torch.cos(angles).unsqueeze(1) * bias.cos_weight.view(1, 2, 1, 1, 3)
-        + torch.sin(angles).unsqueeze(1) * bias.sin_weight.view(1, 2, 1, 1, 3)
+        torch.cos(angles).unsqueeze(1) * cos_weight.view(1, 2, 1, 1, 3)
+        + torch.sin(angles).unsqueeze(1) * sin_weight.view(1, 2, 1, 1, 3)
     ).sum(dim=-1) * scale
 
     assert torch.allclose(actual, expected, atol=1e-6)
@@ -109,7 +117,15 @@ def test_precursor_only_bias_does_not_apply_to_special_query_tokens():
         init_std=0.0,
     )
     with torch.no_grad():
-        precursor_only.precursor_bias.cos_weight.copy_(
+        precursor_only_bias = precursor_only.precursor_bias
+        relative_precursor_bias = relative_and_precursor.precursor_bias
+        assert precursor_only_bias is not None
+        assert relative_precursor_bias is not None
+        assert precursor_only_bias.cos_weight is not None
+        assert precursor_only_bias.sin_weight is not None
+        assert relative_precursor_bias.cos_weight is not None
+        assert relative_precursor_bias.sin_weight is not None
+        precursor_only_bias.cos_weight.copy_(
             torch.tensor(
                 [
                     [0.20, -0.10, 0.30, 0.40],
@@ -117,7 +133,7 @@ def test_precursor_only_bias_does_not_apply_to_special_query_tokens():
                 ]
             )
         )
-        precursor_only.precursor_bias.sin_weight.copy_(
+        precursor_only_bias.sin_weight.copy_(
             torch.tensor(
                 [
                     [0.70, 0.20, -0.40, 0.10],
@@ -125,12 +141,8 @@ def test_precursor_only_bias_does_not_apply_to_special_query_tokens():
                 ]
             )
         )
-        relative_and_precursor.precursor_bias.cos_weight.copy_(
-            precursor_only.precursor_bias.cos_weight
-        )
-        relative_and_precursor.precursor_bias.sin_weight.copy_(
-            precursor_only.precursor_bias.sin_weight
-        )
+        relative_precursor_bias.cos_weight.copy_(precursor_only_bias.cos_weight)
+        relative_precursor_bias.sin_weight.copy_(precursor_only_bias.sin_weight)
 
     peak_mz = torch.tensor([[0.10, 0.20, 0.35]])
     precursor_mz = torch.tensor([0.50])

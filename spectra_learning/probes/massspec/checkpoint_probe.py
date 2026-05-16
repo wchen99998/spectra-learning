@@ -32,7 +32,7 @@ def run_checkpoint_msg_probe(
         config.wandb_resume_id = wandb_run_id
         config.wandb_shared_mode = True
         config.wandb_shared_primary = False
-        config.wandb_shared_label = f"probe_step_{int(global_step)}"
+        config.wandb_shared_label = f"probe_step_{global_step}"
         config.wandb_shared_update_finish_state = False
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -59,9 +59,9 @@ def run_checkpoint_msg_probe(
     log_msg_probe_metrics(
         logger,
         metrics,
-        int(global_step),
+        global_step,
         enable_wandb=bool(config.get("enable_wandb", False)),
     )
-    metrics_path = workdir / f"msg_probe_step-{int(global_step):08d}.json"
+    metrics_path = workdir / f"msg_probe_step-{global_step:08d}.json"
     metrics_path.write_text(json.dumps(metrics, indent=2, sort_keys=True))
     return metrics

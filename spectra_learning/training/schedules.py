@@ -1,10 +1,22 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
+from typing import Protocol
 
 import torch
 
 _WARMUP_START_FACTOR = 1e-8
+
+
+class LRSchedulerLike(Protocol):
+    def step(self, epoch: int | None = None) -> None: ...
+
+    def get_last_lr(self) -> Sequence[float | torch.Tensor]: ...
+
+    def state_dict(self) -> dict: ...
+
+    def load_state_dict(self, state_dict: dict) -> None: ...
 
 
 def learning_rate_at_step(
@@ -42,11 +54,11 @@ class WarmupCosineSchedule:
         min_lr: float | None,
     ) -> None:
         self.optimizer = optimizer
-        self.total_steps = int(total_steps)
-        self.warmup_steps = int(warmup_steps)
+        self.total_steps = total_steps
+        self.warmup_steps = warmup_steps
         self.base_lrs = [_lr_to_float(group["lr"]) for group in optimizer.param_groups]
         base_lr = self.base_lrs[0]
-        self.eta_min = float(min_lr) if min_lr is not None else 0.1 * base_lr
+        self.eta_min = min_lr if min_lr is not None else 0.1 * base_lr
         self.last_epoch = 0
         self._last_lr: list[float] = []
         self._set_lrs(self._compute_lrs(self.last_epoch))
@@ -73,7 +85,7 @@ class WarmupCosineSchedule:
                 group["lr"] = lr
 
     def step(self, epoch: int | None = None) -> None:
-        self.last_epoch = self.last_epoch + 1 if epoch is None else int(epoch)
+        self.last_epoch = self.last_epoch + 1 if epoch is None else epoch
         self._set_lrs(self._compute_lrs(self.last_epoch))
 
     def get_last_lr(self) -> list[float]:
@@ -108,4 +120,4 @@ def make_cosine_schedule(
 
 
 def scaled_min_lr(min_lr: float | None, ratio: float) -> float | None:
-    return None if min_lr is None else float(min_lr) * ratio
+    return None if min_lr is None else min_lr * ratio

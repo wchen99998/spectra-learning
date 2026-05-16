@@ -1,6 +1,11 @@
+from __future__ import annotations
+
+from typing import Any, Literal, overload
+
 import torch
 
 from spectra_learning.data.spectra import PRECURSOR_TOKEN_INTENSITY
+from spectra_learning.models.objectives import CovariancePooler
 
 
 class ForwardMixin:
@@ -37,7 +42,7 @@ class ForwardMixin:
         return result
 
     def _condition_precursor_masks(
-        self,
+        self: Any,
         context_mask: torch.Tensor,
         target_masks: torch.Tensor,
         peak_valid_mask: torch.Tensor,
@@ -55,7 +60,7 @@ class ForwardMixin:
         target_entries = target_masks.float().sum()
         target_union = target_masks.any(dim=1).float().sum()
         target_overlap_entries = target_entries - target_union
-        per_view_denominator = valid_peak_count * max(int(target_masks.shape[1]), 1)
+        per_view_denominator = valid_peak_count * max(target_masks.shape[1], 1)
         return {
             "target_fraction": target_entries / per_view_denominator,
             "target_fraction_per_view": target_entries / per_view_denominator,
@@ -65,7 +70,7 @@ class ForwardMixin:
         }
 
     def _get_temporal_frame_inputs(
-        self,
+        self: Any,
         batch: dict[str, torch.Tensor],
         prefix: str,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -86,11 +91,27 @@ class ForwardMixin:
             with_precursor["peak_valid_mask"],
         )
 
+    @overload
     def forward_augmented(
-        self,
+        self: Any,
+        augmented_batch: dict[str, torch.Tensor],
+        return_collapse_data: Literal[False] = False,
+        covariance_pooler: CovariancePooler | None = None,
+    ) -> dict[str, torch.Tensor]: ...
+
+    @overload
+    def forward_augmented(
+        self: Any,
+        augmented_batch: dict[str, torch.Tensor],
+        return_collapse_data: Literal[True],
+        covariance_pooler: CovariancePooler | None = None,
+    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]: ...
+
+    def forward_augmented(
+        self: Any,
         augmented_batch: dict[str, torch.Tensor],
         return_collapse_data: bool = False,
-        covariance_pooler: torch.nn.Module | None = None,
+        covariance_pooler: CovariancePooler | None = None,
     ) -> dict[str, torch.Tensor] | tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
         if self.training_mode == "mae":
             return self.forward_mae(
@@ -201,11 +222,27 @@ class ForwardMixin:
             return metrics, collapse_data
         return metrics
 
+    @overload
     def forward_mae(
-        self,
+        self: Any,
+        augmented_batch: dict[str, torch.Tensor],
+        return_collapse_data: Literal[False] = False,
+        covariance_pooler: CovariancePooler | None = None,
+    ) -> dict[str, torch.Tensor]: ...
+
+    @overload
+    def forward_mae(
+        self: Any,
+        augmented_batch: dict[str, torch.Tensor],
+        return_collapse_data: Literal[True],
+        covariance_pooler: CovariancePooler | None = None,
+    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]: ...
+
+    def forward_mae(
+        self: Any,
         augmented_batch: dict[str, torch.Tensor],
         return_collapse_data: bool = False,
-        covariance_pooler: torch.nn.Module | None = None,
+        covariance_pooler: CovariancePooler | None = None,
     ) -> dict[str, torch.Tensor] | tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
         peak_mz = augmented_batch["peak_mz"]
         peak_intensity = augmented_batch["peak_intensity"]
@@ -277,7 +314,7 @@ class ForwardMixin:
         return metrics
 
     def compute_next_frame_teacher_embeddings(
-        self, batch: dict[str, torch.Tensor],
+        self: Any, batch: dict[str, torch.Tensor],
     ) -> torch.Tensor:
         """Compute teacher embeddings for the next frame."""
         next_frame_mz, next_frame_int, next_frame_valid = self._get_temporal_frame_inputs(
@@ -314,7 +351,7 @@ class ForwardMixin:
         return teacher_embeddings
 
     def forward_temporal(
-        self,
+        self: Any,
         batch: dict[str, torch.Tensor],
         teacher_embeddings: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
@@ -379,7 +416,7 @@ class ForwardMixin:
             "next_frame_pred_loss": loss.detach(),
         }
 
-    def encode(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    def encode(self: Any, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         mz, intensity, valid = (
             batch["peak_mz"],
             batch["peak_intensity"],

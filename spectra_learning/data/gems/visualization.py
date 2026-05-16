@@ -101,7 +101,7 @@ def _load_real_mask_visualization_batches(
     config = load_config(Path(config_path).expanduser().resolve())
     datamodule = GemsNativeDataModule(config, seed=seed)
     dataset = datamodule._get_dataset(split)
-    sample_indices = [int(start_index) + offset for offset in range(int(num_samples))]
+    sample_indices = [start_index + offset for offset in range(num_samples)]
     samples = [dataset[index] for index in sample_indices]
     collator_kwargs = _make_visualization_collator_kwargs(datamodule)
     resolved_strategies = _resolve_visualization_strategies(
@@ -111,7 +111,7 @@ def _load_real_mask_visualization_batches(
     raw_batch = GemsBatchCollator(augment=False, **collator_kwargs)(samples)
     strategy_batches: dict[str, dict[str, torch.Tensor]] = {}
     for strategy in resolved_strategies:
-        torch.manual_seed(int(seed))
+        torch.manual_seed(seed)
         strategy_batches[strategy] = GemsBatchCollator(
             augment=True,
             **(collator_kwargs | {"mask_strategy": strategy}),
@@ -127,14 +127,14 @@ def _mask_rows_for_plot(
     rows = [
         peak_valid_mask,
         context_mask,
-        *[target_masks[target_idx] for target_idx in range(int(target_masks.shape[0]))],
+        *[target_masks[target_idx] for target_idx in range(target_masks.shape[0])],
     ]
     labels = [
         f"valid ({int(peak_valid_mask.sum().item())})",
         f"context ({int(context_mask.sum().item())})",
         *[
             f"target {target_idx} ({int(target_masks[target_idx].sum().item())})"
-            for target_idx in range(int(target_masks.shape[0]))
+            for target_idx in range(target_masks.shape[0])
         ],
     ]
     matrix = torch.stack(rows, dim=0).to(torch.float32).cpu().numpy()
@@ -142,12 +142,12 @@ def _mask_rows_for_plot(
 
 
 def _set_slot_ticks(ax: Any, *, num_slots: int, use_precursor_token: bool) -> None:
-    step = max(int(math.ceil(float(num_slots) / 8.0)), 1)
-    ticks = list(range(0, int(num_slots), step))
-    if ticks[-1] != int(num_slots) - 1:
-        ticks.append(int(num_slots) - 1)
+    step = max(math.ceil(float(num_slots) / 8.0), 1)
+    ticks = list(range(0, num_slots, step))
+    if ticks[-1] != num_slots - 1:
+        ticks.append(num_slots - 1)
     labels = [str(tick) for tick in ticks]
-    if bool(use_precursor_token) and ticks:
+    if use_precursor_token and ticks:
         labels[0] = "P"
     ax.set_xticks(ticks)
     ax.set_xticklabels(labels)
@@ -164,7 +164,7 @@ def _plot_mask_strategy_panel(
     title: str,
     use_precursor_token: bool,
 ) -> None:
-    x = np.arange(int(peak_intensity.shape[0]))
+    x = np.arange(peak_intensity.shape[0])
     valid = peak_valid_mask.cpu().numpy().astype(bool)
     context = context_mask.cpu().numpy().astype(bool)
     any_target = target_masks.any(dim=0).cpu().numpy().astype(bool)
@@ -180,7 +180,7 @@ def _plot_mask_strategy_panel(
     ax_slots.legend(fontsize=7, loc="upper right")
     _set_slot_ticks(
         ax_slots,
-        num_slots=int(peak_intensity.shape[0]),
+        num_slots=peak_intensity.shape[0],
         use_precursor_token=use_precursor_token,
     )
     _plot_mask_rows(
@@ -221,7 +221,7 @@ def _plot_slot_bars(
 
 
 def _mark_precursor_slot(ax: Any, use_precursor_token: bool) -> None:
-    if bool(use_precursor_token):
+    if use_precursor_token:
         ax.axvline(0, color="black", linestyle="--", linewidth=1.0, alpha=0.35)
         ax.text(
             0.01,
@@ -253,7 +253,7 @@ def _plot_mask_rows(
     ax.set_xlabel("Model input slot (P = precursor)" if use_precursor_token else "Peak slot")
     _set_slot_ticks(
         ax,
-        num_slots=int(peak_valid_mask.shape[0]),
+        num_slots=peak_valid_mask.shape[0],
         use_precursor_token=use_precursor_token,
     )
 
@@ -269,9 +269,9 @@ def _print_mask_strategy_summary(
     full_valid = batch["peak_valid_mask"][sample_index]
     full_context = batch["context_mask"][sample_index]
     full_targets = batch["target_masks"][sample_index]
-    peak_valid = full_valid[1:] if bool(use_precursor_token) else full_valid
-    peak_context = full_context[1:] if bool(use_precursor_token) else full_context
-    peak_targets = full_targets[:, 1:] if bool(use_precursor_token) else full_targets
+    peak_valid = full_valid[1:] if use_precursor_token else full_valid
+    peak_context = full_context[1:] if use_precursor_token else full_context
+    peak_targets = full_targets[:, 1:] if use_precursor_token else full_targets
     valid_target_positions = peak_valid & (~peak_context)
     print(
         f"{strategy} | dataset_index={dataset_index} | "
@@ -279,14 +279,14 @@ def _print_mask_strategy_summary(
         f"context={int(full_context.sum().item())} | "
         f"target_counts={[int(mask.sum().item()) for mask in full_targets]}"
     )
-    if bool(use_precursor_token):
+    if use_precursor_token:
         print("  model slot P is the precursor token; active-order blocks ignore it")
     print(
         "  context: "
         f"model-slot={_format_block_ranges(_mask_block_ranges(full_context))} | "
         f"active-order={_format_block_ranges(_mask_block_ranges_in_active_order(peak_context, peak_valid))}"
     )
-    for target_idx in range(int(full_targets.shape[0])):
+    for target_idx in range(full_targets.shape[0]):
         print(
             f"  target {target_idx}: "
             f"model-slot={_format_block_ranges(_mask_block_ranges(full_targets[target_idx]))} | "
@@ -320,10 +320,10 @@ def visualize_real_mask_strategies(
     resolved_strategies = tuple(strategy_batches.keys())
     use_precursor_token = bool(config.get("use_precursor_token", False))
     fig, axes = plt.subplots(
-        int(num_samples) * 2,
+        num_samples * 2,
         len(resolved_strategies),
-        figsize=(5.8 * len(resolved_strategies), 4.2 * int(num_samples)),
-        height_ratios=[ratio for _ in range(int(num_samples)) for ratio in (3.0, 1.2)],
+        figsize=(5.8 * len(resolved_strategies), 4.2 * num_samples),
+        height_ratios=[ratio for _ in range(num_samples) for ratio in (3.0, 1.2)],
         squeeze=False,
     )
     fig.suptitle(
@@ -338,7 +338,7 @@ def visualize_real_mask_strategies(
         raw_batch=raw_batch,
         strategy_batches=strategy_batches,
         sample_indices=sample_indices,
-        num_samples=int(num_samples),
+        num_samples=num_samples,
         use_precursor_token=use_precursor_token,
     )
     output_path = Path(output_path).expanduser().resolve()

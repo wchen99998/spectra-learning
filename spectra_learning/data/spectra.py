@@ -28,8 +28,8 @@ def preprocess_peak_batch_numpy(
 ) -> dict[str, np.ndarray]:
     mz = spectra[:, 0, :].astype(np.float32, copy=False)
     intensity = spectra[:, 1, :].astype(np.float32, copy=False)
-    intensity_threshold = float(max(min_peak_intensity, peak_drop_min_intensity))
-    window = float(precursor_peak_exclusion_window_da)
+    intensity_threshold = max(min_peak_intensity, peak_drop_min_intensity)
+    window = precursor_peak_exclusion_window_da
     precursor_upper = precursor_mz[:, None] - window
     keep = (
         (mz >= PEAK_MZ_MIN)
@@ -68,8 +68,8 @@ def preprocess_peak_batch_numpy(
     mz = np.where(valid, mz, 0.0)
     intensity = np.where(valid, intensity, 0.0)
     precursor = (
-        np.clip(precursor_mz, 0.0, float(max_precursor_mz)).astype(np.float32)
-        / float(max_precursor_mz)
+        np.clip(precursor_mz, 0.0, max_precursor_mz).astype(np.float32)
+        / max_precursor_mz
     )
     return {
         "peak_mz": (mz / PEAK_MZ_MAX).astype(np.float32),
@@ -93,8 +93,8 @@ def preprocess_peak_batch_torch(
     ),
     min_peak_intensity: float = DEFAULT_MIN_PEAK_INTENSITY,
 ) -> dict[str, torch.Tensor]:
-    intensity_threshold = max(float(min_peak_intensity), float(peak_drop_min_intensity))
-    window = float(precursor_peak_exclusion_window_da)
+    intensity_threshold = max(min_peak_intensity, peak_drop_min_intensity)
+    window = precursor_peak_exclusion_window_da
     precursor_upper = precursor_mz[:, None] - window
     keep = (
         (mz >= PEAK_MZ_MIN)
@@ -129,9 +129,7 @@ def preprocess_peak_batch_torch(
     valid = torch.gather(valid, 1, order)
     mz = torch.where(valid, mz, torch.zeros_like(mz))
     intensity = torch.where(valid, intensity, torch.zeros_like(intensity))
-    precursor = torch.clamp(precursor_mz, 0.0, float(max_precursor_mz)) / float(
-        max_precursor_mz
-    )
+    precursor = torch.clamp(precursor_mz, 0.0, max_precursor_mz) / max_precursor_mz
     return {
         "peak_mz": mz / PEAK_MZ_MAX,
         "peak_intensity": intensity,

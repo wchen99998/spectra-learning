@@ -1,5 +1,6 @@
 import math
 from contextlib import nullcontext
+from typing import cast
 
 import torch
 import torch.nn.functional as F
@@ -28,11 +29,10 @@ def _apply_depth_scaled_init(blocks: nn.ModuleList, num_layers: int) -> None:
     if num_layers <= 0:
         return
     scale = 1.0 / math.sqrt(2.0 * num_layers)
-    for block in blocks:
-        if hasattr(block, "attention"):
-            block.attention.wo.weight.data.mul_(scale)
-        if hasattr(block, "feed_forward"):
-            block.feed_forward.w2.weight.data.mul_(scale)
+    for module in blocks:
+        block = cast(TransformerBlock, module)
+        block.attention.wo.weight.data.mul_(scale)
+        block.feed_forward.w2.weight.data.mul_(scale)
 
 
 def _build_non_causal_blocks(
@@ -49,10 +49,10 @@ def _build_non_causal_blocks(
 ) -> nn.ModuleList:
     block_kwargs = dict(
         dim=dim,
-        n_heads=int(num_heads),
-        n_kv_heads=int(num_heads) if num_kv_heads is None else int(num_kv_heads),
+        n_heads=num_heads,
+        n_kv_heads=num_heads if num_kv_heads is None else num_kv_heads,
         norm_eps=norm_eps,
-        hidden_dim=int(math.ceil(dim * attention_mlp_multiple)),
+        hidden_dim=math.ceil(dim * attention_mlp_multiple),
         qk_norm=qk_norm,
         norm_type=norm_type,
         dropout=dropout,

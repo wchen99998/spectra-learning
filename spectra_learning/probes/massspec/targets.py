@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 import numpy as np
 from rdkit import Chem, DataStructs
 from rdkit.Chem import Descriptors, MACCSkeys, rdMolDescriptors
@@ -32,6 +34,10 @@ MORGAN_PROBE_FINGERPRINT_BITS = 4096
 MORGAN_PROBE_FINGERPRINT_RADIUS = 2
 _MACCS_TOTAL_BITS = 167
 
+_descriptors = cast(Any, Descriptors)
+_maccskeys = cast(Any, MACCSkeys)
+_all_chem = cast(Any, AllChem)
+
 
 def compute_probe_targets_for_smiles(
     smiles: list[str],
@@ -47,8 +53,8 @@ def compute_probe_targets_for_smiles(
             continue
         for name, pattern in patterns.items():
             fg_counts[name][i] = len(mol.GetSubstructMatches(pattern))
-        mol_props["mol_weight"][i] = Descriptors.ExactMolWt(mol)
-        mol_props["logp"][i] = Descriptors.MolLogP(mol)
+        mol_props["mol_weight"][i] = _descriptors.ExactMolWt(mol)
+        mol_props["logp"][i] = _descriptors.MolLogP(mol)
         mol_props["num_heavy_atoms"][i] = float(mol.GetNumHeavyAtoms())
         mol_props["num_rings"][i] = float(rdMolDescriptors.CalcNumRings(mol))
     return mol_props, fg_counts, valid_mol_mask
@@ -64,7 +70,7 @@ def compute_maccs_fingerprint_bits_for_smiles(
         if (mol := Chem.MolFromSmiles(smi)) is None:
             valid_mol_mask[i] = False
             continue
-        fp = MACCSkeys.GenMACCSKeys(mol)
+        fp = _maccskeys.GenMACCSKeys(mol)
         full_bits = np.zeros(_MACCS_TOTAL_BITS, dtype=np.int8)
         DataStructs.ConvertToNumpyArray(fp, full_bits)
         maccs_bits[i] = full_bits[1:]
@@ -81,7 +87,7 @@ def compute_morgan_fingerprint_bits_for_smiles(
         if (mol := Chem.MolFromSmiles(smi)) is None:
             valid_mol_mask[i] = False
             continue
-        fp = AllChem.GetMorganFingerprintAsBitVect(
+        fp = _all_chem.GetMorganFingerprintAsBitVect(
             mol,
             MORGAN_PROBE_FINGERPRINT_RADIUS,
             nBits=MORGAN_PROBE_FINGERPRINT_BITS,

@@ -1,4 +1,5 @@
 import math
+from typing import cast
 
 import torch
 import torch.nn.functional as F
@@ -119,7 +120,8 @@ def _apply_temporal_depth_scaled_init(blocks: nn.ModuleList, num_layers: int) ->
     if num_layers <= 0:
         return
     scale = 1.0 / math.sqrt(3.0 * num_layers)
-    for block in blocks:
+    for module in blocks:
+        block = cast(TemporalDecoderBlock, module)
         block.attention.wo.weight.data.mul_(scale)
         block.cross_attn.wo.weight.data.mul_(scale)
         block.feed_forward.w2.weight.data.mul_(scale)
@@ -133,7 +135,8 @@ def _apply_cross_attention_depth_scaled_init(
     if num_layers <= 0:
         return
     scale = 1.0 / math.sqrt(2.0 * num_layers)
-    for block in blocks:
+    for module in blocks:
+        block = cast(CrossAttentionDecoderBlock, module)
         block.cross_attn.wo.weight.data.mul_(scale)
         block.feed_forward.w2.weight.data.mul_(scale)
 
@@ -144,9 +147,9 @@ def _build_temporal_decoder_blocks(*, dim: int, num_layers: int, num_heads: int,
                                     norm_type: str = "rmsnorm",
                                     dropout: float = 0.0) -> nn.ModuleList:
     block_kwargs = dict(
-        dim=dim, n_heads=int(num_heads),
-        n_kv_heads=int(num_heads) if num_kv_heads is None else int(num_kv_heads),
-        norm_eps=norm_eps, hidden_dim=int(math.ceil(dim * attention_mlp_multiple)),
+        dim=dim, n_heads=num_heads,
+        n_kv_heads=num_heads if num_kv_heads is None else num_kv_heads,
+        norm_eps=norm_eps, hidden_dim=math.ceil(dim * attention_mlp_multiple),
         qk_norm=qk_norm, norm_type=norm_type,
         dropout=dropout,
     )
@@ -163,9 +166,9 @@ def _build_cross_attention_decoder_blocks(*, dim: int, num_layers: int,
                                           norm_type: str = "rmsnorm",
                                           dropout: float = 0.0) -> nn.ModuleList:
     block_kwargs = dict(
-        dim=dim, n_heads=int(num_heads),
-        n_kv_heads=int(num_heads) if num_kv_heads is None else int(num_kv_heads),
-        norm_eps=norm_eps, hidden_dim=int(math.ceil(dim * attention_mlp_multiple)),
+        dim=dim, n_heads=num_heads,
+        n_kv_heads=num_heads if num_kv_heads is None else num_kv_heads,
+        norm_eps=norm_eps, hidden_dim=math.ceil(dim * attention_mlp_multiple),
         qk_norm=qk_norm, norm_type=norm_type,
         dropout=dropout,
     )

@@ -57,7 +57,7 @@ def write_gems_native_shards(
     num_workers: int = 1,
 ) -> tuple[list[str], list[int]]:
     n = len(spectra)
-    num_shards = max(1, min(int(num_shards), n))
+    num_shards = max(1, min(num_shards, n))
     shard_size = math.ceil(n / num_shards)
     output_path.mkdir(parents=True, exist_ok=True)
     jobs = [
@@ -117,7 +117,7 @@ def build_gems_native_artifact(
         np.isfinite(retention)
         & (retention > 0.0)
         & np.isfinite(precursor)
-        & (precursor <= float(max_precursor_mz))
+        & (precursor <= max_precursor_mz)
     )
     spectra = spectra[mask]
     precursor = precursor[mask]
@@ -142,7 +142,7 @@ def build_gems_native_artifact(
         spectra[val_idx],
         precursor[val_idx],
         output_dir / "validation",
-        num_shards=max(1, int(num_shards) // 4),
+        num_shards=max(1, num_shards // 4),
         desc="Validation",
         num_workers=_resolve_num_workers(num_workers),
     )
@@ -150,16 +150,16 @@ def build_gems_native_artifact(
         "gems_native_metadata_version": GEMS_NATIVE_METADATA_VERSION,
         "num_peaks_input": NUM_PEAKS_INPUT,
         "artifact_format": "raw_peaklist_v1",
-        "max_precursor_mz": float(max_precursor_mz),
+        "max_precursor_mz": max_precursor_mz,
         "train_shards": train_shards,
         "train_lengths": train_lengths,
         "validation_shards": val_shards,
         "validation_lengths": val_lengths,
-        "train_size": int(train_size),
-        "validation_size": int(n - train_size),
+        "train_size": train_size,
+        "validation_size": n - train_size,
         "validation_fraction": CANONICAL_VALIDATION_FRACTION,
         "split_seed": CANONICAL_SPLIT_SEED,
-        "num_shards": int(num_shards),
+        "num_shards": num_shards,
         "source_hdf5_path": source_path or str(hdf5_path),
         "source_url": source_url,
     }
@@ -171,7 +171,7 @@ def build_gems_native_artifact(
 def _resolve_num_workers(num_workers: int | None) -> int:
     if num_workers is None:
         return min(CANONICAL_NUM_SHARDS, os.cpu_count() or 1)
-    return max(1, int(num_workers))
+    return max(1, num_workers)
 
 
 def load_gems_native_metadata(artifact_dir: Path) -> dict[str, Any]:

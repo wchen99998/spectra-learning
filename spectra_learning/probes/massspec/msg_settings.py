@@ -1,4 +1,4 @@
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import numpy as np
 import torch
@@ -52,46 +52,56 @@ PROBE_FINGERPRINT_BITS = {
 NIST_PROBE_DATASETS = {"nist-full", "nist-murcko"}
 
 
+def _config_get(config: Any, key: str, default: Any) -> Any:
+    if hasattr(config, "get"):
+        return config.get(key, default)
+    return getattr(config, key, default)
+
+
 def msg_probe_variants_from_config(
-    config: config_dict.ConfigDict,
+    config: Any,
 ) -> tuple[str, ...]:
-    raw_variants = config.get("msg_probe_variants", ("mean", "covariance", "pma"))
+    raw_variants = _config_get(config, "msg_probe_variants", ("mean", "covariance", "pma"))
     if isinstance(raw_variants, str):
         return (raw_variants.lower(),)
     return tuple(str(variant).lower() for variant in raw_variants)
 
 
 def resolve_msg_probe_fingerprint(
-    config: config_dict.ConfigDict,
+    config: Any,
 ) -> str:
     return str(
-        config.get(
+        _config_get(
+            config,
             "msg_probe_fingerprint",
-            config.get("msg_probe_fingerprint_type", MACCS_TASK),
+            _config_get(config, "msg_probe_fingerprint_type", MACCS_TASK),
         )
     ).lower()
 
 
 def resolve_msg_probe_sample_limits(
-    config: config_dict.ConfigDict,
+    config: Any,
 ) -> tuple[int | None, int | None, int | None, bool]:
-    probe_dataset = str(config.get("probe_dataset", "massspec"))
-    raw_sample_size = config.get("msg_probe_sample_size", None)
-    raw_train = config.get("msg_probe_max_train_samples", None) or raw_sample_size
-    raw_val = config.get("msg_probe_max_val_samples", None) or raw_sample_size
-    raw_test = config.get("msg_probe_max_test_samples", None) or raw_sample_size
+    probe_dataset = str(_config_get(config, "probe_dataset", "massspec"))
+    raw_sample_size = _config_get(config, "msg_probe_sample_size", None)
+    raw_train = _config_get(config, "msg_probe_max_train_samples", None) or raw_sample_size
+    raw_val = _config_get(config, "msg_probe_max_val_samples", None) or raw_sample_size
+    raw_test = _config_get(config, "msg_probe_max_test_samples", None) or raw_sample_size
     if raw_train is None and probe_dataset in NIST_PROBE_DATASETS:
-        raw_train = config.get(
+        raw_train = _config_get(
+            config,
             f"{probe_dataset.replace('-', '_')}_probe_train_samples",
             4_000,
         )
     if raw_val is None and probe_dataset in NIST_PROBE_DATASETS:
-        raw_val = config.get(
+        raw_val = _config_get(
+            config,
             f"{probe_dataset.replace('-', '_')}_probe_val_samples",
             1_000,
         )
     if raw_test is None and probe_dataset in NIST_PROBE_DATASETS:
-        raw_test = config.get(
+        raw_test = _config_get(
+            config,
             f"{probe_dataset.replace('-', '_')}_probe_test_samples",
             1_000,
         )
@@ -105,12 +115,13 @@ def resolve_msg_probe_sample_limits(
 
 
 def resolve_msg_probe_num_repeats(
-    config: config_dict.ConfigDict,
+    config: Any,
 ) -> int:
-    probe_dataset = str(config.get("probe_dataset", "massspec"))
-    raw_repeats = config.get("msg_probe_num_repeats", None)
+    probe_dataset = str(_config_get(config, "probe_dataset", "massspec"))
+    raw_repeats = _config_get(config, "msg_probe_num_repeats", None)
     if raw_repeats is None and probe_dataset in NIST_PROBE_DATASETS:
-        raw_repeats = config.get(
+        raw_repeats = _config_get(
+            config,
             f"{probe_dataset.replace('-', '_')}_probe_num_repeats",
             1,
         )
@@ -118,6 +129,6 @@ def resolve_msg_probe_num_repeats(
 
 
 def resolve_msg_probe_pairwise_alignment_num_pairs(
-    config: config_dict.ConfigDict,
+    config: Any,
 ) -> int:
-    return int(config.get("msg_probe_pairwise_alignment_num_pairs", 0))
+    return int(_config_get(config, "msg_probe_pairwise_alignment_num_pairs", 0))

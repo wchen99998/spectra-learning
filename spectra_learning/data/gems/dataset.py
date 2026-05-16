@@ -23,13 +23,13 @@ class GemsMemmapDataset(Dataset):
     def __len__(self) -> int:
         return int(self._starts[-1])
 
-    def _ensure_arrays(self) -> None:
+    def _ensure_arrays(self) -> list[dict[str, np.ndarray]]:
         if self._arrays is not None:
-            return
-        self._arrays = []
+            return self._arrays
+        arrays: list[dict[str, np.ndarray]] = []
         for entry in self._shard_entries:
             shard_dir = entry["dir"]
-            self._arrays.append(
+            arrays.append(
                 {
                     "spectra": np.load(shard_dir / "spectra.npy", mmap_mode="r"),
                     "precursor_mz_raw": np.load(
@@ -38,13 +38,15 @@ class GemsMemmapDataset(Dataset):
                     ),
                 }
             )
+        self._arrays = arrays
+        return arrays
 
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        self._ensure_arrays()
-        idx = int(idx)
-        shard_idx = int(np.searchsorted(self._starts, idx, side="right") - 1)
-        local_idx = idx - int(self._starts[shard_idx])
-        arrays = self._arrays[shard_idx]
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        arrays_by_shard = self._ensure_arrays()
+        index = index
+        shard_idx = int(np.searchsorted(self._starts, index, side="right") - 1)
+        local_idx = index - int(self._starts[shard_idx])
+        arrays = arrays_by_shard[shard_idx]
         return {
             "spectra": torch.from_numpy(arrays["spectra"][local_idx].copy()),
             "precursor_mz_raw": torch.tensor(

@@ -1,10 +1,22 @@
+from __future__ import annotations
+
+from typing import Any, Protocol, cast
+
 import torch
 import torch.nn.functional as F
+from torch import nn
+
+class CovariancePooler(Protocol):
+    def reconstruction_loss(
+        self,
+        peak_embeddings: torch.Tensor,
+        valid_mask: torch.Tensor,
+    ) -> torch.Tensor: ...
 
 
 class ObjectiveMixin:
     def _embedding_loss(
-        self,
+        self: Any,
         prediction: torch.Tensor,
         target: torch.Tensor,
     ) -> torch.Tensor:
@@ -13,7 +25,7 @@ class ObjectiveMixin:
         return (prediction - target).square().mean(dim=-1)
 
     def _jepa_mae_targets(
-        self,
+        self: Any,
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -29,7 +41,7 @@ class ObjectiveMixin:
         )
 
     def _masked_ce_loss(
-        self,
+        self: Any,
         logits: torch.Tensor,
         targets: torch.Tensor,
         valid_mask: torch.Tensor,
@@ -43,13 +55,13 @@ class ObjectiveMixin:
         return (per_token * weights).sum() / weights.sum().clamp_min(1.0)
 
     def _jepa_mae_value_prediction_loss(
-        self,
+        self: Any,
         predicted_latents: torch.Tensor,
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
         target_masks: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        mz_logits = self.jepa_mae_mz_head(predicted_latents)
+        mz_logits = cast(nn.Linear, self.jepa_mae_mz_head)(predicted_latents)
         mz_target, intensity_target = self._jepa_mae_targets(peak_mz, peak_intensity)
         view_shape = (mz_logits.shape[0], mz_logits.shape[1], mz_logits.shape[2])
         mz_target = mz_target.unsqueeze(1).expand(view_shape)
@@ -63,7 +75,9 @@ class ObjectiveMixin:
             zero = mz_loss.new_zeros(())
             return mz_loss, mz_loss, zero, mz_accuracy, zero
 
-        intensity_logits = self.jepa_mae_intensity_head(predicted_latents)
+        intensity_logits = cast(nn.Linear, self.jepa_mae_intensity_head)(
+            predicted_latents
+        )
         intensity_loss = self._masked_ce_loss(
             intensity_logits,
             intensity_target,
@@ -77,7 +91,7 @@ class ObjectiveMixin:
         return value_loss, mz_loss, intensity_loss, mz_accuracy, intensity_accuracy
 
     def _predict_augmented_targets(
-        self,
+        self: Any,
         context_emb: torch.Tensor,
         context_mask: torch.Tensor,
         target_masks: torch.Tensor,
@@ -100,7 +114,7 @@ class ObjectiveMixin:
         return predictor_features, predictor_output
 
     def _masked_prediction_loss(
-        self,
+        self: Any,
         predictor_output: torch.Tensor,
         teacher_targets: torch.Tensor,
         target_masks: torch.Tensor,
@@ -110,7 +124,7 @@ class ObjectiveMixin:
         return (per_token * target_weights).sum() / target_weights.sum().clamp_min(1.0)
 
     def _jepa_mae_metrics(
-        self,
+        self: Any,
         predictor_output: torch.Tensor,
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
@@ -139,7 +153,7 @@ class ObjectiveMixin:
         }
 
     def _mae_metrics(
-        self,
+        self: Any,
         predictor_output: torch.Tensor,
         peak_mz: torch.Tensor,
         peak_intensity: torch.Tensor,
@@ -169,7 +183,7 @@ class ObjectiveMixin:
             "mae_intensity_accuracy": intensity_accuracy.to(dtype=reference.dtype),
         }
 
-    def _sigreg_weights(self, mask: torch.Tensor) -> torch.Tensor:
+    def _sigreg_weights(self: Any, mask: torch.Tensor) -> torch.Tensor:
         weights = mask.float()
         if self.use_precursor_token:
             weights = weights.clone()
@@ -177,7 +191,7 @@ class ObjectiveMixin:
         return weights
 
     def _regularizer_metrics(
-        self,
+        self: Any,
         context_emb: torch.Tensor,
         context_mask: torch.Tensor,
         predictor_output_features: torch.Tensor,
@@ -232,10 +246,10 @@ class ObjectiveMixin:
         }
 
     def _covariance_pooling_metrics(
-        self,
+        self: Any,
         embeddings: torch.Tensor,
         valid_mask: torch.Tensor,
-        covariance_pooler: torch.nn.Module | None = None,
+        covariance_pooler: CovariancePooler | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         if (
             not self.train_covariance_pooling
@@ -255,7 +269,7 @@ class ObjectiveMixin:
         }
 
     def pool(
-        self,
+        self: Any,
         embeddings: torch.Tensor,
         valid_mask: torch.Tensor,
     ) -> torch.Tensor:

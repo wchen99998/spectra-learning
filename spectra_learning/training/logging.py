@@ -84,7 +84,7 @@ class WandbMetricLogger(MetricLogger):
         wandb_kwargs = _build_wandb_init_kwargs(config)
         if _use_wandb_shared_mode(config):
             primary = bool(config.get("wandb_shared_primary", True))
-            settings_kwargs = {
+            settings_kwargs: dict[str, Any] = {
                 "mode": "shared",
                 "x_primary": primary,
                 "x_label": str(
@@ -162,7 +162,7 @@ def build_logger(config: config_dict.ConfigDict, workdir: Path) -> MetricLogger:
 
 
 def log_msg_probe_metrics(
-    logger: MetricLogger,
+    logger: Any,
     metrics: dict[str, Any],
     global_step: int,
     *,
@@ -171,4 +171,4 @@ def log_msg_probe_metrics(
     if enable_wandb:
         logger.log_metrics({"global_step": float(global_step), **metrics})
     else:
-        logger.log_metrics(metrics, step=int(global_step))
+        logger.log_metrics(metrics, step=global_step)

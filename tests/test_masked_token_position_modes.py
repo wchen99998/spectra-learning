@@ -2,8 +2,10 @@ from unittest import mock
 
 import torch
 
+from spectra_learning.models.common import TransformerBlock
 from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.models.temporal import CrossAttentionDecoderBlock
 
 
 def _build_model(
@@ -140,7 +142,9 @@ def test_predictor_has_no_legacy_mask_or_position_tokens_and_allows_registers():
     assert model.predictor_num_register_tokens == 2
     assert not hasattr(model, "latent_mask_token")
     assert not hasattr(model, "predictor_position_embedding")
-    assert model.predictor_register_tokens.shape == (2, model.predictor_dim)
+    predictor_register_tokens = model.predictor_register_tokens
+    assert predictor_register_tokens is not None
+    assert predictor_register_tokens.shape == (2, model.predictor_dim)
     assert "predictor_slot_embedding.weight" in model.state_dict()
     assert "predictor_register_tokens" in model.state_dict()
     assert out.shape == (1, 6, model.predictor_dim)
@@ -262,8 +266,12 @@ def test_encoder_and_predictor_final_norms_are_non_affine():
 
     assert list(model.encoder.final_norm.parameters()) == []
     assert list(model.predictor_final_norm.parameters()) == []
-    assert list(model.encoder.blocks[0].attention_norm.parameters())
-    assert list(model.masked_latent_predictor[0].cross_attn_norm.parameters())
+    encoder_block = model.encoder.blocks[0]
+    predictor_block = model.masked_latent_predictor[0]
+    assert isinstance(encoder_block, TransformerBlock)
+    assert isinstance(predictor_block, CrossAttentionDecoderBlock)
+    assert list(encoder_block.attention_norm.parameters())
+    assert list(predictor_block.cross_attn_norm.parameters())
 
     encoder = PeakSetEncoder(
         model_dim=32,

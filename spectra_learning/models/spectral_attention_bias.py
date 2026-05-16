@@ -9,10 +9,10 @@ from torch import nn
 
 
 def _init_weight(param: nn.Parameter, std: float) -> None:
-    if float(std) == 0.0:
+    if std == 0.0:
         nn.init.zeros_(param)
     else:
-        nn.init.normal_(param, mean=0.0, std=float(std))
+        nn.init.normal_(param, mean=0.0, std=std)
 
 
 def _make_frequency_b(
@@ -23,8 +23,8 @@ def _make_frequency_b(
     x_max: float,
     sigma: float,
 ) -> torch.Tensor:
-    strategy = str(strategy).lower()
-    num_freqs = int(num_freqs)
+    strategy = strategy.lower()
+    num_freqs = num_freqs
     if num_freqs <= 0:
         raise ValueError("num_freqs must be positive")
     if x_min <= 0.0:
@@ -33,12 +33,12 @@ def _make_frequency_b(
         raise ValueError("x_max must be larger than x_min")
 
     if strategy == "random":
-        return torch.randn(num_freqs, dtype=torch.float32) * float(sigma)
+        return torch.randn(num_freqs, dtype=torch.float32) * sigma
 
     if strategy in {"log_spaced", "voronov_et_al"}:
         wavelengths = torch.logspace(
-            start=log10(float(x_min)),
-            end=log10(float(x_max)),
+            start=log10(x_min),
+            end=log10(x_max),
             steps=num_freqs,
             dtype=torch.float32,
         )
@@ -46,19 +46,19 @@ def _make_frequency_b(
 
     if strategy == "lin_float_int":
         periods = torch.tensor(
-            [float(x_min) * i for i in range(2, ceil(1.0 / float(x_min)), 2)]
-            + [float(i) for i in range(2, ceil(float(x_max)), 1)],
+            [x_min * i for i in range(2, ceil(1.0 / x_min), 2)]
+            + [float(i) for i in range(2, ceil(x_max), 1)],
             dtype=torch.float32,
         )
         if periods.numel() == 0:
-            periods = torch.linspace(float(x_min), float(x_max), steps=num_freqs)
+            periods = torch.linspace(x_min, x_max, steps=num_freqs)
         if num_freqs < periods.numel():
             idx = torch.linspace(0, periods.numel() - 1, steps=num_freqs)
             periods = periods[idx.round().to(torch.long)]
         elif num_freqs > periods.numel():
             extra = torch.logspace(
-                log10(float(x_min)),
-                log10(float(x_max)),
+                log10(x_min),
+                log10(x_max),
                 steps=num_freqs - periods.numel(),
             )
             periods = torch.cat([periods, extra], dim=0)
@@ -88,11 +88,11 @@ class FourierFrequencyBank(nn.Module):
             x_max=x_max,
             sigma=sigma,
         )
-        self.b = nn.Parameter(b, requires_grad=bool(trainable))
+        self.b = nn.Parameter(b, requires_grad=trainable)
 
     @property
     def num_freqs(self) -> int:
-        return int(self.b.numel())
+        return self.b.numel()
 
     def angles(self, x_da: torch.Tensor) -> torch.Tensor:
         return (2.0 * math.pi) * x_da.float().unsqueeze(-1) * self.b.float()
@@ -104,6 +104,8 @@ class FourierFrequencyBank(nn.Module):
 
 class HarmonicRelativeLossBias(nn.Module):
     """Exact factorized Fourier bias for psi_h(m_i - m_j)."""
+
+    output_scale: torch.Tensor
 
     def __init__(
         self,
@@ -127,8 +129,8 @@ class HarmonicRelativeLossBias(nn.Module):
             sigma=sigma,
             trainable=trainable_freqs,
         )
-        self.num_heads = int(num_heads)
-        self.directional = bool(directional)
+        self.num_heads = num_heads
+        self.directional = directional
         self.cos_weight = nn.Parameter(torch.empty(self.num_heads, num_freqs))
         self.sin_weight = (
             nn.Parameter(torch.empty(self.num_heads, num_freqs))
@@ -163,6 +165,10 @@ class HarmonicRelativeLossBias(nn.Module):
 class PrecursorNeutralLossBias(nn.Module):
     """Key-only precursor neutral-loss bias eta_h(p - m_j)."""
 
+    cos_weight: nn.Parameter | None
+    sin_weight: nn.Parameter | None
+    output_scale: torch.Tensor
+
     def __init__(
         self,
         *,
@@ -188,9 +194,9 @@ class PrecursorNeutralLossBias(nn.Module):
             sigma=sigma,
             trainable=trainable_freqs,
         )
-        self.num_heads = int(num_heads)
-        self.use_cos = bool(use_cos)
-        self.use_sin = bool(use_sin)
+        self.num_heads = num_heads
+        self.use_cos = use_cos
+        self.use_sin = use_sin
 
         if self.use_cos:
             self.cos_weight = nn.Parameter(torch.empty(self.num_heads, num_freqs))
@@ -234,6 +240,8 @@ class PrecursorNeutralLossBias(nn.Module):
 class RBFRelativeLossBias(nn.Module):
     """Mass-tolerance-aware RBF bias for psi_h(m_i - m_j)."""
 
+    output_scale: torch.Tensor
+
     def __init__(
         self,
         *,
@@ -248,24 +256,24 @@ class RBFRelativeLossBias(nn.Module):
         init_std: float = 0.0,
     ) -> None:
         super().__init__()
-        self.num_heads = int(num_heads)
-        self.num_basis = int(num_basis)
-        self.use_absolute_delta = bool(use_absolute_delta)
+        self.num_heads = num_heads
+        self.num_basis = num_basis
+        self.use_absolute_delta = use_absolute_delta
 
-        lo = 0.0 if self.use_absolute_delta else float(delta_min)
-        hi = float(delta_max)
+        lo = 0.0 if self.use_absolute_delta else delta_min
+        hi = delta_max
         centers = torch.linspace(lo, hi, steps=self.num_basis, dtype=torch.float32)
-        self.centers = nn.Parameter(centers, requires_grad=bool(learnable_centers))
+        self.centers = nn.Parameter(centers, requires_grad=learnable_centers)
 
         if init_sigma is None:
             init_sigma = max((hi - lo) / max(1, self.num_basis - 1), 1e-3)
         self.log_sigma = nn.Parameter(
             torch.full(
                 (self.num_basis,),
-                math.log(float(init_sigma)),
+                math.log(init_sigma),
                 dtype=torch.float32,
             ),
-            requires_grad=bool(learnable_sigma),
+            requires_grad=learnable_sigma,
         )
         self.weight = nn.Parameter(torch.empty(self.num_heads, self.num_basis))
         _init_weight(self.weight, init_std)
@@ -292,6 +300,8 @@ class RBFRelativeLossBias(nn.Module):
 class LegacyDreamsDifferenceBias(nn.Module):
     """Ablation module for beta_ijh = w_h^T Phi(m_i) - w_h^T Phi(m_j)."""
 
+    output_scale: torch.Tensor
+
     def __init__(
         self,
         *,
@@ -313,7 +323,7 @@ class LegacyDreamsDifferenceBias(nn.Module):
             sigma=sigma,
             trainable=trainable_freqs,
         )
-        self.num_heads = int(num_heads)
+        self.num_heads = num_heads
         self.weight = nn.Parameter(torch.empty(self.num_heads, 2 * num_freqs))
         _init_weight(self.weight, init_std)
         self.register_buffer(
@@ -341,11 +351,11 @@ class IntensityPairBias(nn.Module):
         init_last_zero: bool = True,
     ) -> None:
         super().__init__()
-        self.num_heads = int(num_heads)
+        self.num_heads = num_heads
         self.mlp = nn.Sequential(
-            nn.Linear(6, int(hidden_dim)),
+            nn.Linear(6, hidden_dim),
             nn.SiLU(),
-            nn.Linear(int(hidden_dim), self.num_heads),
+            nn.Linear(hidden_dim, self.num_heads),
         )
         for module in self.mlp:
             if isinstance(module, nn.Linear):
@@ -385,6 +395,15 @@ class IntensityPairBias(nn.Module):
 class SpectralGraphormerBias(nn.Module):
     """Combines spectral Graphormer-style additive attention biases."""
 
+    relative_bias: (
+        HarmonicRelativeLossBias
+        | RBFRelativeLossBias
+        | LegacyDreamsDifferenceBias
+        | None
+    )
+    precursor_bias: PrecursorNeutralLossBias | None
+    intensity_bias: IntensityPairBias | None
+
     def __init__(
         self,
         *,
@@ -412,19 +431,19 @@ class SpectralGraphormerBias(nn.Module):
         bias_clip: float | None = None,
     ) -> None:
         super().__init__()
-        self.num_heads = int(num_heads)
-        self.mass_scale = float(mass_scale)
-        self.precursor_scale = float(precursor_scale)
-        self.first_token_is_precursor = bool(first_token_is_precursor)
-        self.bias_clip = None if bias_clip is None else float(bias_clip)
+        self.num_heads = num_heads
+        self.mass_scale = mass_scale
+        self.precursor_scale = precursor_scale
+        self.first_token_is_precursor = first_token_is_precursor
+        self.bias_clip = None if bias_clip is None else bias_clip
 
-        kind = str(relative_kind).lower()
+        kind = relative_kind.lower()
         if kind in {"", "none", "false", "off"}:
             self.relative_bias = None
         elif kind in {"harmonic", "fourier", "relative_fourier"}:
             self.relative_bias = HarmonicRelativeLossBias(
                 num_heads=self.num_heads,
-                num_freqs=int(num_freqs),
+                num_freqs=num_freqs,
                 strategy=fourier_strategy,
                 x_min=fourier_x_min,
                 x_max=fourier_x_max,
@@ -436,7 +455,7 @@ class SpectralGraphormerBias(nn.Module):
         elif kind in {"harmonic_even", "cos", "cosine", "magnitude"}:
             self.relative_bias = HarmonicRelativeLossBias(
                 num_heads=self.num_heads,
-                num_freqs=int(num_freqs),
+                num_freqs=num_freqs,
                 strategy=fourier_strategy,
                 x_min=fourier_x_min,
                 x_max=fourier_x_max,
@@ -448,17 +467,17 @@ class SpectralGraphormerBias(nn.Module):
         elif kind in {"rbf", "radial_basis"}:
             self.relative_bias = RBFRelativeLossBias(
                 num_heads=self.num_heads,
-                num_basis=int(rbf_num_basis),
-                delta_min=float(rbf_delta_min),
-                delta_max=float(rbf_delta_max),
+                num_basis=rbf_num_basis,
+                delta_min=rbf_delta_min,
+                delta_max=rbf_delta_max,
                 init_sigma=rbf_init_sigma,
-                use_absolute_delta=bool(rbf_use_absolute_delta),
+                use_absolute_delta=rbf_use_absolute_delta,
                 init_std=init_std,
             )
         elif kind in {"legacy_dreams", "dreams_difference", "dreams"}:
             self.relative_bias = LegacyDreamsDifferenceBias(
                 num_heads=self.num_heads,
-                num_freqs=int(num_freqs),
+                num_freqs=num_freqs,
                 strategy=fourier_strategy,
                 x_min=fourier_x_min,
                 x_max=fourier_x_max,
@@ -472,7 +491,7 @@ class SpectralGraphormerBias(nn.Module):
         if use_precursor_bias:
             self.precursor_bias = PrecursorNeutralLossBias(
                 num_heads=self.num_heads,
-                num_freqs=int(precursor_num_freqs or num_freqs),
+                num_freqs=precursor_num_freqs or num_freqs,
                 strategy=fourier_strategy,
                 x_min=fourier_x_min,
                 x_max=fourier_x_max,
@@ -489,7 +508,7 @@ class SpectralGraphormerBias(nn.Module):
             IntensityPairBias(
                 num_heads=self.num_heads,
                 hidden_dim=intensity_hidden_dim,
-                init_last_zero=(float(init_std) == 0.0),
+                init_last_zero=(init_std == 0.0),
             )
             if use_intensity_bias
             else None
@@ -559,7 +578,7 @@ class SpectralGraphormerBias(nn.Module):
         for piece in key_pieces:
             key_bias = piece if key_bias is None else key_bias + piece
 
-        s = int(num_special_tokens)
+        s = num_special_tokens
         if s > 0:
             if pair_bias is not None:
                 pair_bias = F.pad(pair_bias, (0, s, 0, s), value=0.0)
@@ -572,6 +591,7 @@ class SpectralGraphormerBias(nn.Module):
         if pair_bias is not None and key_bias is not None:
             bias = pair_bias + key_bias
 
+        assert bias is not None
         if self.bias_clip is not None:
             bias = bias.clamp(min=-self.bias_clip, max=self.bias_clip)
 

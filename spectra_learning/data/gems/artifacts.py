@@ -24,7 +24,7 @@ def _validate_gems_native_metadata(
 ) -> None:
     expected = {
         "num_peaks_input": int(NUM_PEAKS_INPUT),
-        "max_precursor_mz": float(max_precursor_mz),
+        "max_precursor_mz": max_precursor_mz,
         "artifact_format": "raw_peaklist_v1",
     }
     actual = {

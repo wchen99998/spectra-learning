@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import math
+from typing import Any, cast
 
 import torch
 from torch import nn
@@ -6,7 +9,7 @@ from torch import nn
 
 class EMATeacherMixin:
     def ema_teacher_momentum_at(
-        self,
+        self: Any,
         step: int,
         total_steps: int,
     ) -> float:
@@ -33,7 +36,7 @@ class EMATeacherMixin:
         )
 
     @torch.no_grad()
-    def sync_ema_teacher(self) -> None:
+    def sync_ema_teacher(self: Any) -> None:
         if self.teacher_encoder is not None:
             self.teacher_encoder.load_state_dict(self.encoder.state_dict())
         if self.teacher_target_projector is not None:
@@ -51,8 +54,8 @@ class EMATeacherMixin:
         teacher_params = list(teacher.parameters())
         if teacher_params:
             torch._foreach_lerp_(
-                teacher_params,
-                list(student.parameters()),
+                cast(list[torch.Tensor], teacher_params),
+                cast(list[torch.Tensor], list(student.parameters())),
                 1.0 - momentum,
             )
         teacher_float_buffers = []
@@ -75,7 +78,7 @@ class EMATeacherMixin:
 
     @torch.no_grad()
     def update_ema_teacher(
-        self,
+        self: Any,
         step: int,
         total_steps: int,
     ) -> float | None:

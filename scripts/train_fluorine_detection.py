@@ -7,7 +7,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Callable, NamedTuple
+from typing import Any, Callable, NamedTuple, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -36,7 +36,8 @@ from spectra_learning.data.spectra import (
     preprocess_peak_batch_torch,
 )
 from spectra_learning.models.factory import build_model_from_config
-from spectra_learning.models.temporal import CovariancePool
+from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.models.pooling import CovariancePool
 from spectra_learning.probes.massspec.data import _normalize_spectra_intensity
 from spectra_learning.training.checkpointing import load_pretrained_weights
 
@@ -48,6 +49,12 @@ HF_SUBDIR = "fine_tuned"
 CACHE_METADATA_VERSION = 1
 EMBEDDING_CACHE_METADATA_VERSION = 1
 SPLITS = ("train", "val", "test")
+
+
+def _config_get(config: Any, key: str, default: Any) -> Any:
+    if hasattr(config, "get"):
+        return config.get(key, default)
+    return getattr(config, key, default)
 
 
 class FluorineData(NamedTuple):
@@ -139,7 +146,7 @@ def _write_payload_shard(
     )
     for key, values in buffers.items():
         np.save(shard_dir / f"{key}.npy", np.concatenate(values, axis=0))
-    return int(length)
+    return length
 
 
 def _payload_from_parquet_rows(rows: dict[str, list[Any]]) -> dict[str, np.ndarray]:
@@ -165,7 +172,7 @@ def _write_split_cache_from_parquet(
 
     pf = pq.ParquetFile(path)
     n = int(pf.metadata.num_rows)
-    shard_count = max(1, min(int(num_shards), n))
+    shard_count = max(1, min(num_shards, n))
     shard_size = int(np.ceil(n / shard_count))
     shard_names, shard_lengths = [], []
     buffers: dict[str, list[np.ndarray]] = {
@@ -195,7 +202,7 @@ def _write_split_cache_from_parquet(
         "precursor_mz",
         "has_fluorine",
     ]
-    for batch in pf.iter_batches(batch_size=int(parquet_batch_size), columns=columns):
+    for batch in pf.iter_batches(batch_size=parquet_batch_size, columns=columns):
         payload = _payload_from_parquet_rows(batch.to_pydict())
         positive += int(payload["label"].sum())
         dreams_dim = int(payload["dreams_embedding"].shape[1])
@@ -283,13 +290,13 @@ class _FluorineShardDataset(Dataset):
     def __len__(self) -> int:
         return int(self._starts[-1])
 
-    def _ensure_arrays(self) -> None:
+    def _ensure_arrays(self) -> list[dict[str, np.ndarray]]:
         if self._arrays is not None:
-            return
-        self._arrays = []
+            return self._arrays
+        arrays_by_shard: list[dict[str, np.ndarray]] = []
         for entry in self._shards:
             shard_dir = entry["dir"]
-            self._arrays.append(
+            arrays_by_shard.append(
                 {
                     "spectra": np.load(shard_dir / "spectra.npy", mmap_mode="r"),
                     "precursor_mz_raw": np.load(
@@ -303,14 +310,15 @@ class _FluorineShardDataset(Dataset):
                     "label": np.load(shard_dir / "label.npy", mmap_mode="r"),
                 }
             )
+        self._arrays = arrays_by_shard
+        return arrays_by_shard
 
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        self._ensure_arrays()
-        assert self._arrays is not None
-        idx = int(idx)
-        shard_idx = int(np.searchsorted(self._starts, idx, side="right") - 1)
-        local_idx = idx - int(self._starts[shard_idx])
-        arrays = self._arrays[shard_idx]
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        arrays_by_shard = self._ensure_arrays()
+        index = index
+        shard_idx = int(np.searchsorted(self._starts, index, side="right") - 1)
+        local_idx = index - int(self._starts[shard_idx])
+        arrays = arrays_by_shard[shard_idx]
         return {
             "spectra": torch.from_numpy(arrays["spectra"][local_idx].copy()),
             "precursor_mz_raw": torch.tensor(
@@ -338,13 +346,13 @@ class _EmbeddingShardDataset(Dataset):
     def __len__(self) -> int:
         return int(self._starts[-1])
 
-    def _ensure_arrays(self) -> None:
+    def _ensure_arrays(self) -> list[dict[str, np.ndarray]]:
         if self._arrays is not None:
-            return
-        self._arrays = []
+            return self._arrays
+        arrays_by_shard: list[dict[str, np.ndarray]] = []
         for entry in self._shards:
             shard_dir = entry["dir"]
-            self._arrays.append(
+            arrays_by_shard.append(
                 {
                     "peak_embeddings": np.load(
                         shard_dir / "peak_embeddings.npy",
@@ -357,14 +365,15 @@ class _EmbeddingShardDataset(Dataset):
                     "label": np.load(shard_dir / "label.npy", mmap_mode="r"),
                 }
             )
+        self._arrays = arrays_by_shard
+        return arrays_by_shard
 
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        self._ensure_arrays()
-        assert self._arrays is not None
-        idx = int(idx)
-        shard_idx = int(np.searchsorted(self._starts, idx, side="right") - 1)
-        local_idx = idx - int(self._starts[shard_idx])
-        arrays = self._arrays[shard_idx]
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        arrays_by_shard = self._ensure_arrays()
+        index = index
+        shard_idx = int(np.searchsorted(self._starts, index, side="right") - 1)
+        local_idx = index - int(self._starts[shard_idx])
+        arrays = arrays_by_shard[shard_idx]
         return {
             "peak_embeddings": torch.from_numpy(
                 arrays["peak_embeddings"][local_idx].copy()
@@ -407,16 +416,16 @@ class _FastEmbeddingLoader:
             {"dir": Path(entry["dir"]), "length": int(entry["length"])}
             for entry in shard_entries
         ]
-        self.batch_size = int(batch_size)
-        self.shuffle = bool(shuffle)
-        self.seed = int(seed)
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.seed = seed
         self.max_samples = max_samples
         self._epoch = 0
 
     def __len__(self) -> int:
         n = sum(entry["length"] for entry in self._shards)
         if self.max_samples is not None:
-            n = min(n, int(self.max_samples))
+            n = min(n, self.max_samples)
         return int(np.ceil(n / self.batch_size))
 
     def __iter__(self):
@@ -432,13 +441,13 @@ class _FastEmbeddingLoader:
             peak_embeddings = np.load(shard_dir / "peak_embeddings.npy", mmap_mode="r")
             peak_valid_mask = np.load(shard_dir / "peak_valid_mask.npy", mmap_mode="r")
             labels = np.load(shard_dir / "label.npy", mmap_mode="r")
-            order = np.arange(int(entry["length"]))
+            order = np.arange(entry["length"])
             if self.shuffle:
                 rng.shuffle(order)
             if remaining is not None:
                 if remaining <= 0:
                     break
-                order = order[: min(len(order), int(remaining))]
+                order = order[: min(len(order), remaining)]
                 remaining -= len(order)
             for start in range(0, len(order), self.batch_size):
                 batch_idx = order[start : start + self.batch_size]
@@ -484,15 +493,13 @@ class _FluorineCollator:
         use_precursor_token: bool,
         precursor_peak_exclusion_window_da: float,
     ) -> None:
-        self.num_peaks = int(num_peaks)
-        self.max_precursor_mz = float(max_precursor_mz)
-        self.min_peak_intensity = float(min_peak_intensity)
-        self.peak_drop_min_intensity = float(peak_drop_min_intensity)
-        self.peak_ordering = str(peak_ordering)
-        self.use_precursor_token = bool(use_precursor_token)
-        self.precursor_peak_exclusion_window_da = float(
-            precursor_peak_exclusion_window_da
-        )
+        self.num_peaks = num_peaks
+        self.max_precursor_mz = max_precursor_mz
+        self.min_peak_intensity = min_peak_intensity
+        self.peak_drop_min_intensity = peak_drop_min_intensity
+        self.peak_ordering = peak_ordering
+        self.use_precursor_token = use_precursor_token
+        self.precursor_peak_exclusion_window_da = precursor_peak_exclusion_window_da
 
     def __call__(self, samples: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
         spectra = torch.stack([sample["spectra"] for sample in samples], dim=0)
@@ -575,7 +582,7 @@ def _metric_dict(targets: np.ndarray, logits: np.ndarray, prefix: str) -> dict[s
         f"{prefix}/roc_auc": float(roc_auc_score(targets, probs)),
         f"{prefix}/average_precision": float(average_precision_score(targets, probs)),
         f"{prefix}/accuracy": float(accuracy_score(targets, pred)),
-        f"{prefix}/balanced_accuracy": float(balanced_accuracy_score(targets, pred)),
+        f"{prefix}/balanced_accuracy": balanced_accuracy_score(targets, pred),
         f"{prefix}/f1": float(f1_score(targets, pred, zero_division=0)),
         f"{prefix}/precision": float(precision_score(targets, pred, zero_division=0)),
         f"{prefix}/recall": float(recall_score(targets, pred, zero_division=0)),
@@ -616,13 +623,13 @@ def _make_loader(
     )
     if max_samples is not None:
         generator = torch.Generator()
-        generator.manual_seed(int(seed))
+        generator.manual_seed(seed)
         indices = torch.randperm(len(dataset), generator=generator)[
-            : min(len(dataset), int(max_samples))
+            : min(len(dataset), max_samples)
         ].tolist()
         dataset = Subset(dataset, indices)
     generator = torch.Generator()
-    generator.manual_seed(int(seed))
+    generator.manual_seed(seed)
     collator: Callable[[list[dict[str, torch.Tensor]]], dict[str, torch.Tensor]]
     if dreams_only:
         collator = _FluorineDreamsCollator()
@@ -674,7 +681,7 @@ def _make_embedding_loader(
 @torch.no_grad()
 def _evaluate(
     classifier: MLPClassifier,
-    loader: DataLoader,
+    loader: Any,
     feature_fn: Callable[[dict[str, torch.Tensor]], torch.Tensor],
     *,
     device: torch.device,
@@ -695,15 +702,15 @@ def _evaluate(
 
 
 def _select_metric_value(metrics: dict[str, float], select_metric: str) -> float:
-    return float(metrics[select_metric])
+    return metrics[select_metric]
 
 
 def _train_trial(
     *,
     params: TrialParams,
     input_dim: int,
-    train_loader: DataLoader,
-    val_loader: DataLoader,
+    train_loader: Any,
+    val_loader: Any,
     device: torch.device,
     epochs: int,
     focal_alpha: float,
@@ -729,11 +736,11 @@ def _train_trial(
     )
 
     best_value = -float("inf") if higher_is_better else float("inf")
-    best_epoch = 0
+    best_epoch: int = 0
     best_val: dict[str, float] = {}
     best_classifier_state: dict[str, torch.Tensor] = {}
     best_pooler_state: dict[str, torch.Tensor] | None = None
-    epochs_without_improvement = 0
+    epochs_without_improvement: int = 0
     for epoch_idx in range(epochs):
         classifier.train()
         if trainable_pooler is not None:
@@ -836,7 +843,7 @@ def _embedding_cache_valid(
         "source_cache_dir": str(source_cache_dir),
         "config_path": str(config_path),
         "checkpoint_path": str(checkpoint_path),
-        "embedding_dtype": str(embedding_dtype),
+        "embedding_dtype": embedding_dtype,
     }
     for key, value in expected.items():
         if metadata.get(key) != value:
@@ -860,7 +867,7 @@ def _numpy_embedding_dtype(name: str) -> np.dtype:
 @torch.no_grad()
 def _write_embedding_cache_split(
     *,
-    model: torch.nn.Module,
+    model: PeakSetSIGReg,
     data: FluorineData,
     split: str,
     output_dir: Path,
@@ -881,8 +888,8 @@ def _write_embedding_cache_split(
     )
     np_dtype = _numpy_embedding_dtype(embedding_dtype)
     use_autocast = device.type == "cuda"
-    current_shard = 0
-    current_offset = 0
+    current_shard: int = 0
+    current_offset: int = 0
     peak_embeddings: np.memmap | None = None
     peak_valid_mask: np.memmap | None = None
     labels: np.memmap | None = None
@@ -897,13 +904,13 @@ def _write_embedding_cache_split(
             shard_dir / "peak_embeddings.npy",
             mode="w+",
             dtype=np_dtype,
-            shape=(shard_len, int(model.num_peak_tokens), int(model.model_dim)),
+            shape=(shard_len, model.num_peak_tokens, model.model_dim),
         )
         peak_valid_mask = np.lib.format.open_memmap(
             shard_dir / "peak_valid_mask.npy",
             mode="w+",
             dtype=bool,
-            shape=(shard_len, int(model.num_peak_tokens)),
+            shape=(shard_len, model.num_peak_tokens),
         )
         labels = np.lib.format.open_memmap(
             shard_dir / "label.npy",
@@ -931,7 +938,7 @@ def _write_embedding_cache_split(
         values = token_embeddings.detach().cpu().numpy().astype(np_dtype, copy=False)
         masks = batch["peak_valid_mask"].detach().cpu().numpy().astype(bool, copy=False)
         batch_labels = batch["label"].detach().cpu().numpy().astype(np.float32, copy=False)
-        source_offset = 0
+        source_offset: int = 0
         while source_offset < values.shape[0]:
             assert peak_embeddings is not None
             assert peak_valid_mask is not None
@@ -962,7 +969,7 @@ def ensure_embedding_cache(
     *,
     cache_dir: Path,
     source_data: FluorineData,
-    model: torch.nn.Module,
+    model: PeakSetSIGReg,
     config_path: Path,
     checkpoint_path: Path,
     device: torch.device,
@@ -989,8 +996,8 @@ def ensure_embedding_cache(
         "config_path": str(config_path),
         "checkpoint_path": str(checkpoint_path),
         "embedding_dtype": embedding_dtype,
-        "model_dim": int(model.model_dim),
-        "num_peak_tokens": int(model.num_peak_tokens),
+        "model_dim": model.model_dim,
+        "num_peak_tokens": model.num_peak_tokens,
     }
     for split in SPLITS:
         log.info("writing cached encoder embeddings for split=%s", split)
@@ -1015,7 +1022,7 @@ def _load_checkpoint_model(
     config_path: Path,
     checkpoint_path: Path,
     device: torch.device,
-) -> tuple[config_dict.ConfigDict, torch.nn.Module]:
+) -> tuple[config_dict.ConfigDict, PeakSetSIGReg]:
     config = load_config(config_path)
     model = build_model_from_config(config)
     load_pretrained_weights(model, str(checkpoint_path))
@@ -1027,7 +1034,7 @@ def _load_checkpoint_model(
 
 def _build_checkpoint_feature_factory(
     *,
-    model: torch.nn.Module,
+    model: PeakSetSIGReg,
     config: config_dict.ConfigDict,
     device: torch.device,
     train_covariance_pooler: bool,
@@ -1035,12 +1042,13 @@ def _build_checkpoint_feature_factory(
 ) -> tuple[int, Callable[[bool], tuple[Callable[[dict[str, torch.Tensor]], torch.Tensor], torch.nn.Module | None]]]:
     if train_covariance_pooler:
         compressed_dim = (
-            int(covariance_dim)
+            covariance_dim
             if covariance_dim is not None
-            else int(config.get("covariance_pooling_dim", 32))
+            else int(_config_get(config, "covariance_pooling_dim", 32))
         )
     else:
-        compressed_dim = int(model.covariance_pooler.left_proj.out_features)
+        checkpoint_pooler = cast(CovariancePool, cast(Any, model).covariance_pooler)
+        compressed_dim = checkpoint_pooler.left_proj.out_features
     input_dim = compressed_dim * compressed_dim
 
     @torch.no_grad()
@@ -1062,7 +1070,7 @@ def _build_checkpoint_feature_factory(
             ).to(device)
             trainable_pooler: torch.nn.Module | None = pooler
         else:
-            pooler = model.covariance_pooler
+            pooler = cast(CovariancePool, cast(Any, model).covariance_pooler)
             pooler.eval()
             pooler.requires_grad_(False)
             trainable_pooler = None
@@ -1087,9 +1095,9 @@ def _build_cached_embedding_feature_factory(
     covariance_dim: int | None,
 ) -> tuple[int, Callable[[bool], tuple[Callable[[dict[str, torch.Tensor]], torch.Tensor], torch.nn.Module | None]]]:
     compressed_dim = (
-        int(covariance_dim)
+        covariance_dim
         if covariance_dim is not None
-        else int(config.get("covariance_pooling_dim", 32))
+        else int(_config_get(config, "covariance_pooling_dim", 32))
     )
     input_dim = compressed_dim * compressed_dim
 
@@ -1154,22 +1162,23 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         num_peaks=int(
             args.num_peaks
             if args.num_peaks is not None
-            else (config.get("num_peaks", 60) if config is not None else 60)
+            else (_config_get(config, "num_peaks", 60) if config is not None else 60)
         ),
         max_precursor_mz=float(
-            config.get("max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
+            _config_get(config, "max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
             if config is not None
             else DEFAULT_MAX_PRECURSOR_MZ
         ),
         min_peak_intensity=float(
-            config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)
+            _config_get(config, "min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)
             if config is not None
             else DEFAULT_MIN_PEAK_INTENSITY
         ),
         peak_drop_min_intensity=float(
-            config.get(
+            _config_get(
+                config,
                 "peak_drop_min_intensity",
-                config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY),
+                _config_get(config, "min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY),
             )
             if config is not None
             else DEFAULT_MIN_PEAK_INTENSITY
@@ -1177,13 +1186,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         peak_ordering=str(
             args.peak_ordering
             if args.peak_ordering
-            else (config.get("peak_ordering", "intensity") if config is not None else "intensity")
+            else (
+                _config_get(config, "peak_ordering", "intensity")
+                if config is not None
+                else "intensity"
+            )
         ),
         use_precursor_token=bool(
-            config.get("use_precursor_token", False) if config is not None else False
+            _config_get(config, "use_precursor_token", False) if config is not None else False
         ),
         precursor_peak_exclusion_window_da=float(
-            config.get("precursor_peak_exclusion_window_da", 0.0)
+            _config_get(config, "precursor_peak_exclusion_window_da", 0.0)
             if config is not None
             else 0.0
         ),
@@ -1365,7 +1378,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "subdir": args.subdir,
         "cache_dir": str(cache_dir),
         "embedding_cache_dir": embedding_cache_dir,
-        "input_dim": int(input_dim),
+        "input_dim": input_dim,
         "train_size": int(metadata["train_size"]),
         "train_positive": int(metadata["train_positive"]),
         "val_size": int(metadata["val_size"]),
@@ -1373,7 +1386,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "focal_alpha": focal_alpha,
         "focal_gamma": float(args.focal_gamma),
         "best_hparams": best.params._asdict(),
-        "best_epoch": int(best.best_epoch),
+        "best_epoch": best.best_epoch,
         "best_val": best.best_val,
         "test": test_metrics,
         "trials": [

@@ -27,6 +27,7 @@ import argparse
 import logging
 import shutil
 from pathlib import Path
+from typing import Any, cast
 
 from huggingface_hub import HfApi, hf_hub_download
 
@@ -72,7 +73,7 @@ def _download_from_hf(repo_id: str, filename: str, work_dir: Path) -> Path:
 def main() -> None:
     from rdkit import RDLogger
 
-    RDLogger.DisableLog("rdApp.*")
+    cast(Any, RDLogger).DisableLog("rdApp.*")
     parser = argparse.ArgumentParser(
         description="Build + upload the prepared NIST full probe artifact."
     )

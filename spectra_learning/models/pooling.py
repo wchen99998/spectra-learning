@@ -21,7 +21,7 @@ class CovariancePool(nn.Module):
 
     @property
     def compressed_dim(self) -> int:
-        return int(self.left_proj.out_features)
+        return self.left_proj.out_features
 
     def covariance_matrix(
         self,

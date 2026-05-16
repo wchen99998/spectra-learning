@@ -12,7 +12,7 @@ _JEPA_MASK_STRATEGIES = JEPA_MASK_STRATEGIES
 
 
 def _normalize_mask_strategy_name(mask_strategy: str) -> str:
-    strategy = str(mask_strategy).lower()
+    strategy = mask_strategy.lower()
     if strategy == "ragged_blocks":
         strategy = "ragged"
     return strategy
@@ -34,12 +34,10 @@ def _sample_ragged_block_mask_1d_torch(
     bs = bs / bs.sum()
     masks_by_length: list[torch.Tensor] = []
     for length_idx, length in enumerate(lengths):
-        block_len = int(length)
-        max_elem = int(
-            math.ceil(float(masked_fraction) * float(active_count) / float(block_len))
-        )
-        coeff_float = float(bs[length_idx].item()) * float(max_elem)
-        coeff = int(math.ceil(coeff_float)) if length_idx < round_from else int(round(coeff_float))
+        block_len = length
+        max_elem = math.ceil(masked_fraction * active_count / block_len)
+        coeff_float = float(bs[length_idx].item()) * max_elem
+        coeff = math.ceil(coeff_float) if length_idx < round_from else round(coeff_float)
         if coeff == 0:
             masks_by_length.append(torch.zeros_like(active_positions))
             continue
@@ -65,7 +63,7 @@ def _sample_contiguous_mask_1d_torch(
     active_count = int(active_positions.sum().item())
     if active_count == 0:
         return torch.zeros_like(active_positions)
-    count = min(int(mask_count), active_count)
+    count = min(mask_count, active_count)
     start = int(torch.randint(active_count - count + 1, (), device=active_positions.device).item())
     compressed_positions = torch.cumsum(active_positions.to(torch.int64), dim=0)
     compressed_positions = compressed_positions - active_positions.to(torch.int64)
@@ -79,9 +77,9 @@ def _sample_random_mask_1d_torch(
     mask_count: int,
 ) -> torch.Tensor:
     active_indices = torch.nonzero(active_positions, as_tuple=False).squeeze(-1)
-    count = min(int(mask_count), int(active_indices.numel()))
+    count = min(mask_count, active_indices.numel())
     selected = active_indices[
-        torch.randperm(int(active_indices.numel()), device=active_positions.device)[
+        torch.randperm(active_indices.numel(), device=active_positions.device)[
             :count
         ]
     ]
@@ -96,7 +94,7 @@ def _fit_mask_to_count(
     *,
     mask_count: int,
 ) -> torch.Tensor:
-    count = min(int(mask_count), int(active_positions.sum().item()))
+    count = min(mask_count, int(active_positions.sum().item()))
     if count == 0:
         return torch.zeros_like(active_positions)
 
@@ -105,7 +103,7 @@ def _fit_mask_to_count(
     if current > count:
         selected = torch.nonzero(out, as_tuple=False).squeeze(-1)
         keep = selected[
-            torch.randperm(int(selected.numel()), device=out.device)[:count]
+            torch.randperm(selected.numel(), device=out.device)[:count]
         ]
         out = torch.zeros_like(active_positions)
         out[keep] = True
@@ -114,7 +112,7 @@ def _fit_mask_to_count(
     if current < count:
         candidates = torch.nonzero(active_positions & ~out, as_tuple=False).squeeze(-1)
         add = candidates[
-            torch.randperm(int(candidates.numel()), device=out.device)[
+            torch.randperm(candidates.numel(), device=out.device)[
                 : count - current
             ]
         ]
@@ -143,10 +141,10 @@ def _sample_all_mask_strategies_torch(
     device: torch.device,
 ) -> list[str]:
     strategies: list[str] = []
-    while len(strategies) < int(batch_size):
+    while len(strategies) < batch_size:
         order = torch.randperm(len(JEPA_MASK_STRATEGIES), device=device)
         strategies.extend(JEPA_MASK_STRATEGIES[int(idx.item())] for idx in order)
-    return strategies[: int(batch_size)]
+    return strategies[: batch_size]
 
 
 def _target_lengths(
@@ -159,24 +157,24 @@ def _target_lengths(
     allow_target_overlap: bool,
 ) -> tuple[int, int]:
     desired_context = max(
-        int(round(valid_count * float(context_fraction))),
-        int(block_min_len),
+        round(valid_count * context_fraction),
+        block_min_len,
     )
     if num_target_blocks == 0:
         return min(desired_context, valid_count), 0
-    reserve_for_targets = min(valid_count, int(num_target_blocks) * int(block_min_len))
+    reserve_for_targets = min(valid_count, num_target_blocks * block_min_len)
     context_len = min(desired_context, max(valid_count - reserve_for_targets, 0))
     desired_target = max(
-        int(round(valid_count * float(target_fraction))),
-        int(block_min_len),
+        round(valid_count * target_fraction),
+        block_min_len,
     )
     available_for_targets = max(valid_count - context_len, 0)
-    if bool(allow_target_overlap):
+    if allow_target_overlap:
         target_len = min(desired_target, available_for_targets)
     else:
         target_len = min(
             desired_target,
-            int(math.ceil(float(available_for_targets) / float(num_target_blocks))),
+            math.ceil(float(available_for_targets) / float(num_target_blocks)),
         )
     return context_len, target_len
 
@@ -190,7 +188,7 @@ def _sample_row_mask(
     mask_round_from: int,
 ) -> torch.Tensor:
     active_count = int(row_valid.sum().item())
-    count = min(int(mask_count), active_count)
+    count = min(mask_count, active_count)
     if count == 0:
         return torch.zeros_like(row_valid)
     if strategy == "contiguous":
@@ -218,12 +216,12 @@ def _reserve_target_capacity(
     reserve_count: int,
 ) -> torch.Tensor:
     available = int((row_valid & ~row_context).sum().item())
-    needed = min(int(reserve_count), int(row_valid.sum().item())) - available
+    needed = min(reserve_count, int(row_valid.sum().item())) - available
     if needed <= 0:
         return row_context
     context_indices = torch.nonzero(row_context, as_tuple=False).squeeze(-1)
     drop = context_indices[
-        torch.randperm(int(context_indices.numel()), device=row_context.device)[:needed]
+        torch.randperm(context_indices.numel(), device=row_context.device)[:needed]
     ]
     out = row_context.clone()
     out[drop] = False
@@ -244,8 +242,8 @@ def _sample_target_rows(
     available = valid_target_positions.clone()
     if not bool(available.any()):
         return
-    for block_idx in range(int(target_masks.shape[1])):
-        block_count = min(int(target_len), int(available.sum().item()))
+    for block_idx in range(target_masks.shape[1]):
+        block_count = min(target_len, int(available.sum().item()))
         if block_count == 0:
             return
         target_masks[row_idx, block_idx] = _sample_row_mask(
@@ -255,7 +253,7 @@ def _sample_target_rows(
             mask_lengths=mask_lengths,
             mask_round_from=mask_round_from,
         )
-        if not bool(allow_target_overlap):
+        if not allow_target_overlap:
             available = available & ~target_masks[row_idx, block_idx]
         else:
             available = valid_target_positions
@@ -276,13 +274,13 @@ def _sample_block_masks_torch(
     strategy = _normalize_mask_strategy_name(mask_strategy)
     if strategy not in {*JEPA_MASK_STRATEGIES, "all"}:
         raise ValueError(f"Unsupported JEPA mask strategy: {mask_strategy!r}")
-    lengths = tuple(int(length) for length in mask_lengths)
-    round_from = int(mask_round_from)
+    lengths = tuple(length for length in mask_lengths)
+    round_from = mask_round_from
     batch_size, num_peaks = peak_valid_mask.shape
     context_mask = torch.zeros_like(peak_valid_mask)
     target_masks = torch.zeros(
         batch_size,
-        int(num_target_blocks),
+        num_target_blocks,
         num_peaks,
         dtype=torch.bool,
         device=peak_valid_mask.device,
@@ -304,11 +302,11 @@ def _sample_block_masks_torch(
         )
         context_len, target_len = _target_lengths(
             valid_count,
-            num_target_blocks=int(num_target_blocks),
+            num_target_blocks=num_target_blocks,
             context_fraction=context_fraction,
             target_fraction=target_fraction,
             block_min_len=block_min_len,
-            allow_target_overlap=bool(allow_target_overlap),
+            allow_target_overlap=allow_target_overlap,
         )
         row_context = _sample_row_mask(
             row_valid,
@@ -320,10 +318,10 @@ def _sample_block_masks_torch(
         row_context = _reserve_target_capacity(
             row_context,
             row_valid,
-            reserve_count=int(num_target_blocks) * int(block_min_len),
+            reserve_count=num_target_blocks * block_min_len,
         )
         context_mask[row_idx] = row_context
-        if int(num_target_blocks) > 0 and target_len > 0:
+        if num_target_blocks > 0 and target_len > 0:
             _sample_target_rows(
                 target_masks,
                 row_idx,
@@ -332,6 +330,6 @@ def _sample_block_masks_torch(
                 target_len=target_len,
                 mask_lengths=lengths,
                 mask_round_from=round_from,
-                allow_target_overlap=bool(allow_target_overlap),
+                allow_target_overlap=allow_target_overlap,
             )
     return context_mask, target_masks

@@ -60,7 +60,7 @@ def barrier(context: DistributedContext) -> None:
 
 def any_rank(value: bool, context: DistributedContext) -> bool:
     if not context.is_distributed:
-        return bool(value)
+        return value
     flag = torch.tensor(int(value), device=context.device)
     dist.all_reduce(flag, op=dist.ReduceOp.MAX)
     return bool(flag.item())

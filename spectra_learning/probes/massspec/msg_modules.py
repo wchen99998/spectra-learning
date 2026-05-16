@@ -1,3 +1,5 @@
+from typing import Any
+
 import torch
 from ml_collections import config_dict
 
@@ -8,6 +10,10 @@ from spectra_learning.probes.massspec.msg_settings import (
     MsgProbeTaskSpec,
     build_msg_probe_inputs,
 )
+
+
+def _config_get(config: config_dict.ConfigDict, key: str, default: Any) -> Any:
+    return config.get(key, default)
 
 
 class MsgLinearProbe(torch.nn.Module):
@@ -82,6 +88,8 @@ class MsgCovariancePool(CovariancePool):
 
 
 class FrozenPooler(torch.nn.Module):
+    _pooler: torch.nn.Module
+
     def __init__(self, pooler: torch.nn.Module) -> None:
         super().__init__()
         object.__setattr__(self, "_pooler", pooler)
@@ -174,8 +182,8 @@ def build_msg_sequence_probe(
     covariance_pooler: CovariancePool | None = None,
 ) -> MsgSequenceProbe:
     model_dim = int(config.model_dim)
-    hidden_dim = int(config.get("msg_probe_mlp_hidden_dim", model_dim))
-    num_layers = int(config.get("msg_probe_mlp_num_layers", 2))
+    hidden_dim = int(_config_get(config, "msg_probe_mlp_hidden_dim", model_dim))
+    num_layers = int(_config_get(config, "msg_probe_mlp_num_layers", 2))
     task_names = _probe_task_names(task_spec)
     task_output_dims = _probe_task_output_dims(task_spec)
     pooler, pooled_dim = _build_pooler(
@@ -251,12 +259,16 @@ def _build_pooler(
         return (
             MsgPmaPool(
                 input_dim=model_dim,
-                num_seeds=int(config.get("msg_probe_pma_num_seeds", 4)),
+                num_seeds=int(_config_get(config, "msg_probe_pma_num_seeds", 4)),
                 num_heads=int(
-                    config.get("msg_probe_pma_num_heads", config.get("encoder_num_heads", 8))
+                    _config_get(
+                        config,
+                        "msg_probe_pma_num_heads",
+                        _config_get(config, "encoder_num_heads", 8),
+                    )
                 ),
-                qk_norm=bool(config.get("encoder_qk_norm", False)),
-                norm_type=str(config.get("norm_type", "layernorm")),
+                qk_norm=bool(_config_get(config, "encoder_qk_norm", False)),
+                norm_type=str(_config_get(config, "norm_type", "layernorm")),
             ),
             model_dim,
         )
@@ -269,10 +281,10 @@ def _build_covariance_pooler(
     covariance_pooler: CovariancePool | None,
 ) -> tuple[torch.nn.Module, int]:
     if covariance_pooler is None:
-        compressed_dim = int(config.get("covariance_pooling_dim", 32))
+        compressed_dim = int(_config_get(config, "covariance_pooling_dim", 32))
         return (
             MsgCovariancePool(input_dim=model_dim, compressed_dim=compressed_dim),
             compressed_dim * compressed_dim,
         )
-    compressed_dim = int(covariance_pooler.left_proj.out_features)
+    compressed_dim = covariance_pooler.left_proj.out_features
     return FrozenPooler(covariance_pooler), compressed_dim * compressed_dim

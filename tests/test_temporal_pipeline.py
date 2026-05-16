@@ -1,6 +1,7 @@
 """Tests for the temporal experiment-grouped pipeline (frame -> next frame)."""
 
 import json
+import operator
 from pathlib import Path
 
 import numpy as np
@@ -38,13 +39,13 @@ def synthetic_data_dir(tmp_path: Path) -> Path:
     train_dir.mkdir()
     val_dir.mkdir()
 
-    train_files = []
+    train_files: list[dict[str, object]] = []
     for i in range(10):
-        n = rng.integers(20, 200)
-        data = _make_synthetic_experiment(int(n), rng=rng)
+        n = operator.index(rng.integers(20, 200))
+        data = _make_synthetic_experiment(n, rng=rng)
         fname = f"exp_{i:04d}.npz"
         np.savez_compressed(train_dir / fname, **data)
-        train_files.append({"filename": fname, "experiment_name": f"exp_{i}", "num_spectra": int(n)})
+        train_files.append({"filename": fname, "experiment_name": f"exp_{i}", "num_spectra": n})
 
     # Include one single-spectrum experiment to test filtering
     data = _make_synthetic_experiment(1, rng=rng)
@@ -52,13 +53,13 @@ def synthetic_data_dir(tmp_path: Path) -> Path:
     np.savez_compressed(train_dir / fname, **data)
     train_files.append({"filename": fname, "experiment_name": "exp_single", "num_spectra": 1})
 
-    val_files = []
+    val_files: list[dict[str, object]] = []
     for i in range(3):
-        n = rng.integers(20, 200)
-        data = _make_synthetic_experiment(int(n), rng=rng)
+        n = operator.index(rng.integers(20, 200))
+        data = _make_synthetic_experiment(n, rng=rng)
         fname = f"val_{i:04d}.npz"
         np.savez_compressed(val_dir / fname, **data)
-        val_files.append({"filename": fname, "experiment_name": f"val_{i}", "num_spectra": int(n)})
+        val_files.append({"filename": fname, "experiment_name": f"val_{i}", "num_spectra": n})
 
     def _stats(files):
         counts = [f["num_spectra"] for f in files]

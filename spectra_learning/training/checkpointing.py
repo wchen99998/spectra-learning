@@ -3,6 +3,7 @@ from pathlib import Path
 import torch
 
 from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.training.schedules import LRSchedulerLike
 
 
 COVARIANCE_POOLER_PREFIX = "covariance_pooler."
@@ -49,16 +50,17 @@ def optimizer_state_dict(optimizer: torch.optim.Optimizer) -> dict:
 
 
 def save_checkpoint(
-    path: Path,
+    path: Path | str,
     model: PeakSetSIGReg,
     optimizers: list[torch.optim.Optimizer],
-    schedulers: list[torch.optim.lr_scheduler.LRScheduler],
+    schedulers: list[LRSchedulerLike],
     global_step: int,
     epoch: int,
     loss: float,
     wandb_run_id: str | None = None,
     covariance_pooler: torch.nn.Module | None = None,
 ) -> None:
+    path = Path(path)
     pooler_path = (
         covariance_pooler_checkpoint_path(path)
         if covariance_pooler is not None
@@ -80,18 +82,19 @@ def save_checkpoint(
         path,
     )
     if covariance_pooler is not None:
+        pooler_save_path = covariance_pooler_checkpoint_path(path)
         torch.save(
             {
                 "pooler": covariance_pooler.state_dict(),
                 "global_step": global_step,
                 "epoch": epoch,
             },
-            pooler_path,
+            pooler_save_path,
         )
 
 
 def save_probe_checkpoint(
-    path: Path,
+    path: Path | str,
     model: PeakSetSIGReg,
     global_step: int,
     epoch: int,
@@ -99,6 +102,7 @@ def save_probe_checkpoint(
     wandb_run_id: str | None = None,
     covariance_pooler: torch.nn.Module | None = None,
 ) -> None:
+    path = Path(path)
     pooler_path = (
         covariance_pooler_checkpoint_path(path)
         if covariance_pooler is not None
@@ -118,13 +122,14 @@ def save_probe_checkpoint(
         path,
     )
     if covariance_pooler is not None:
+        pooler_save_path = covariance_pooler_checkpoint_path(path)
         torch.save(
             {
                 "pooler": covariance_pooler.state_dict(),
                 "global_step": global_step,
                 "epoch": epoch,
             },
-            pooler_path,
+            pooler_save_path,
         )
 
 
@@ -201,17 +206,20 @@ def load_frozen_teacher_weights(
         for key, value in state_dict.items()
         if key.startswith("encoder.")
     }
-    model.teacher_encoder.load_state_dict(encoder_state)
-    if model.teacher_target_projector is not None:
+    teacher_encoder = model.teacher_encoder
+    assert teacher_encoder is not None
+    teacher_encoder.load_state_dict(encoder_state)
+    teacher_target_projector = model.teacher_target_projector
+    if teacher_target_projector is not None:
         projector_state = {
             key.removeprefix("target_projector."): value
             for key, value in state_dict.items()
             if key.startswith("target_projector.")
         }
-        model.teacher_target_projector.load_state_dict(projector_state)
-    model.teacher_encoder.requires_grad_(False)
-    if model.teacher_target_projector is not None:
-        model.teacher_target_projector.requires_grad_(False)
+        teacher_target_projector.load_state_dict(projector_state)
+    teacher_encoder.requires_grad_(False)
+    if teacher_target_projector is not None:
+        teacher_target_projector.requires_grad_(False)
 
 
 def latest_ckpt_path(directory: Path) -> str | None:

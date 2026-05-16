@@ -1,4 +1,5 @@
 import torch
+from typing import cast
 
 from spectra_learning.models.model import PeakSetSIGReg
 
@@ -17,7 +18,7 @@ class PretrainModule(torch.nn.Module):
         self,
         batch: dict[str, torch.Tensor],
         return_collapse_data: bool = False,
-    ):
+    ) -> dict[str, torch.Tensor] | tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
         return self.model(
             batch,
             return_collapse_data=return_collapse_data,
@@ -33,4 +34,4 @@ def split_pretrain_module(
 ) -> tuple[PeakSetSIGReg, torch.nn.Module | None]:
     if isinstance(module, PretrainModule):
         return module.model, module.covariance_pooler
-    return module, None
+    return cast(PeakSetSIGReg, module), None
