@@ -18,6 +18,37 @@ def _normalize_mask_strategy_name(mask_strategy: str) -> str:
     return strategy
 
 
+def _normalize_mask_strategy_names(
+    mask_strategy: str | tuple[str, ...] | list[str],
+) -> tuple[str, ...]:
+    if isinstance(mask_strategy, str):
+        strategies = mask_strategy.split(",")
+    else:
+        strategies = mask_strategy
+    return tuple(
+        _normalize_mask_strategy_name(str(strategy).strip())
+        for strategy in strategies
+        if str(strategy).strip()
+    )
+
+
+def _resolve_block_mask_strategy_pool(
+    mask_strategy: str | tuple[str, ...] | list[str],
+) -> tuple[str, ...]:
+    pool: list[str] = []
+    for strategy in _normalize_mask_strategy_names(mask_strategy):
+        if strategy == "all":
+            pool.extend(JEPA_MASK_STRATEGIES)
+        else:
+            pool.append(strategy)
+    strategy_pool = tuple(dict.fromkeys(pool))
+    if not strategy_pool or any(
+        strategy not in JEPA_MASK_STRATEGIES for strategy in strategy_pool
+    ):
+        raise ValueError(f"Unsupported JEPA mask strategy: {mask_strategy!r}")
+    return strategy_pool
+
+
 def _sample_ragged_block_mask_1d_torch(
     active_positions: torch.Tensor,
     *,
@@ -122,28 +153,16 @@ def _fit_mask_to_count(
     return out
 
 
-def _sample_mask_strategy_torch(
-    mask_strategy: str,
-    *,
-    device: torch.device,
-) -> str:
-    strategy = _normalize_mask_strategy_name(mask_strategy)
-    if strategy == "all":
-        return JEPA_MASK_STRATEGIES[
-            int(torch.randint(len(JEPA_MASK_STRATEGIES), (), device=device).item())
-        ]
-    return strategy
-
-
 def _sample_all_mask_strategies_torch(
     batch_size: int,
     *,
     device: torch.device,
+    mask_strategies: tuple[str, ...] = JEPA_MASK_STRATEGIES,
 ) -> list[str]:
     strategies: list[str] = []
     while len(strategies) < batch_size:
-        order = torch.randperm(len(JEPA_MASK_STRATEGIES), device=device)
-        strategies.extend(JEPA_MASK_STRATEGIES[int(idx.item())] for idx in order)
+        order = torch.randperm(len(mask_strategies), device=device)
+        strategies.extend(mask_strategies[int(idx.item())] for idx in order)
     return strategies[: batch_size]
 
 
@@ -266,14 +285,12 @@ def _sample_block_masks_torch(
     context_fraction: float,
     target_fraction: float,
     block_min_len: int,
-    mask_strategy: str = DEFAULT_JEPA_MASK_STRATEGY,
+    mask_strategy: str | tuple[str, ...] | list[str] = DEFAULT_JEPA_MASK_STRATEGY,
     mask_lengths: tuple[int, ...] = DEFAULT_JEPA_MASK_LENGTHS,
     mask_round_from: int = len(DEFAULT_JEPA_MASK_LENGTHS),
     allow_target_overlap: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    strategy = _normalize_mask_strategy_name(mask_strategy)
-    if strategy not in {*JEPA_MASK_STRATEGIES, "all"}:
-        raise ValueError(f"Unsupported JEPA mask strategy: {mask_strategy!r}")
+    strategy_pool = _resolve_block_mask_strategy_pool(mask_strategy)
     lengths = tuple(length for length in mask_lengths)
     round_from = mask_round_from
     batch_size, num_peaks = peak_valid_mask.shape
@@ -286,8 +303,12 @@ def _sample_block_masks_torch(
         device=peak_valid_mask.device,
     )
     all_row_strategies = (
-        _sample_all_mask_strategies_torch(batch_size, device=peak_valid_mask.device)
-        if strategy == "all"
+        _sample_all_mask_strategies_torch(
+            batch_size,
+            device=peak_valid_mask.device,
+            mask_strategies=strategy_pool,
+        )
+        if len(strategy_pool) > 1
         else None
     )
     for row_idx in range(batch_size):
@@ -298,7 +319,7 @@ def _sample_block_masks_torch(
         row_strategy = (
             all_row_strategies[row_idx]
             if all_row_strategies is not None
-            else _sample_mask_strategy_torch(strategy, device=peak_valid_mask.device)
+            else strategy_pool[0]
         )
         context_len, target_len = _target_lengths(
             valid_count,

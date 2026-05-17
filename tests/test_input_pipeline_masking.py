@@ -1,11 +1,13 @@
 from unittest import mock
 
 import torch
+from ml_collections import config_dict
 
 import spectra_learning.data.gems.masking as gems_masking
 import spectra_learning.data.gems.visualization as gems_visualization
 from spectra_learning.data.gems.collate import GemsBatchCollator
 import spectra_learning.data.gems.collate as gems_collate
+from spectra_learning.data.gems.settings import GemsDataConfig
 
 
 def test_sample_ragged_block_mask_uses_full_block_length() -> None:
@@ -149,6 +151,37 @@ def test_sample_block_masks_context_and_targets_are_disjoint_for_all_modes() -> 
     assert not (target_masks & context_mask.unsqueeze(1)).any()
 
 
+def test_sample_block_masks_accepts_selected_strategy_subset() -> None:
+    peak_valid_mask = torch.ones((2, 8), dtype=torch.bool)
+    kwargs = dict(
+        num_target_blocks=2,
+        context_fraction=0.4,
+        target_fraction=0.25,
+        block_min_len=1,
+        mask_lengths=(1, 2, 3),
+        mask_round_from=2,
+    )
+
+    with mock.patch.object(
+        gems_masking,
+        "_sample_all_mask_strategies_torch",
+        return_value=["ragged", "random"],
+    ) as sample_strategies:
+        context_mask, target_masks = gems_masking._sample_block_masks_torch(
+            peak_valid_mask,
+            mask_strategy=("ragged", "random"),
+            **kwargs,
+        )
+
+    assert sample_strategies.call_args.kwargs["mask_strategies"] == (
+        "ragged",
+        "random",
+    )
+    assert context_mask.shape == peak_valid_mask.shape
+    assert target_masks.shape == (2, 2, 8)
+    assert not (target_masks & context_mask.unsqueeze(1)).any()
+
+
 def test_sample_block_masks_random_samples_exact_count_masks() -> None:
     peak_valid_mask = torch.ones((2, 8), dtype=torch.bool)
 
@@ -254,6 +287,18 @@ def test_sample_all_mask_strategies_balances_modes() -> None:
     }
 
 
+def test_sample_all_mask_strategies_balances_selected_modes() -> None:
+    torch.manual_seed(29)
+    strategies = gems_masking._sample_all_mask_strategies_torch(
+        4,
+        device=torch.device("cpu"),
+        mask_strategies=("ragged", "random"),
+    )
+
+    assert strategies.count("ragged") == 2
+    assert strategies.count("random") == 2
+
+
 def test_resolve_visualization_strategies_includes_supported_modes() -> None:
     assert gems_visualization._resolve_visualization_strategies("ragged") == (
         "contiguous",
@@ -269,6 +314,25 @@ def test_resolve_visualization_strategies_keeps_all_meta_mode() -> None:
         "random",
         "all",
     )
+
+
+def test_resolve_visualization_strategies_includes_multiple_config_modes() -> None:
+    assert gems_visualization._resolve_visualization_strategies(
+        ("ragged", "intensity_aware"),
+    ) == (
+        "contiguous",
+        "ragged",
+        "random",
+        "intensity_aware",
+    )
+
+
+def test_gems_data_config_keeps_multiple_mask_strategies() -> None:
+    cfg = config_dict.ConfigDict({"jepa_mask_strategy": ["ragged", "random"]})
+
+    data_config = GemsDataConfig.from_config(cfg)
+
+    assert data_config.jepa_mask_strategy == ("ragged", "random")
 
 
 def test_gems_batch_collator_generates_ragged_context_and_target_masks() -> None:
@@ -414,6 +478,94 @@ def test_gems_batch_collator_samples_after_prepending_precursor_without_sampling
     assert not batch["target_masks"][:, :, 0].any()
     assert torch.equal(batch["context_mask"], expected_context)
     assert torch.equal(batch["target_masks"], expected_targets)
+
+
+def test_gems_batch_collator_combines_intensity_aware_and_block_strategy_rows() -> None:
+    collator = GemsBatchCollator(
+        augment=True,
+        num_target_blocks=2,
+        context_fraction=0.4,
+        target_fraction=0.25,
+        block_min_len=1,
+        mask_strategy=("intensity_aware", "random"),
+        use_precursor_token=False,
+        num_peaks=4,
+        max_precursor_mz=1000.0,
+        min_peak_intensity=1e-4,
+        peak_drop_min_intensity=1e-4,
+        peak_ordering="mz",
+        precursor_peak_exclusion_window_da=0.0,
+    )
+    samples = [
+        {
+            "spectra": torch.tensor(
+                [
+                    [100.0, 120.0, 140.0, 160.0],
+                    [1.0, 0.9, 0.8, 0.7],
+                ],
+                dtype=torch.float32,
+            ),
+            "precursor_mz_raw": torch.tensor(500.0, dtype=torch.float32),
+        },
+        {
+            "spectra": torch.tensor(
+                [
+                    [200.0, 220.0, 240.0, 260.0],
+                    [1.0, 0.95, 0.85, 0.75],
+                ],
+                dtype=torch.float32,
+            ),
+            "precursor_mz_raw": torch.tensor(600.0, dtype=torch.float32),
+        },
+    ]
+    intensity_context = torch.tensor(
+        [
+            [True, False, False, False],
+            [False, True, False, False],
+        ],
+        dtype=torch.bool,
+    )
+    intensity_targets = torch.zeros((2, 2, 4), dtype=torch.bool)
+    intensity_targets[0, 0, 1] = True
+    intensity_targets[1, 0, 2] = True
+    block_context = torch.tensor(
+        [
+            [False, False, True, False],
+            [False, False, False, True],
+        ],
+        dtype=torch.bool,
+    )
+    block_targets = torch.zeros((2, 2, 4), dtype=torch.bool)
+    block_targets[0, 0, 3] = True
+    block_targets[1, 0, 0] = True
+
+    with (
+        mock.patch.object(
+            gems_collate,
+            "_sample_all_mask_strategies_torch",
+            return_value=["intensity_aware", "random"],
+        ) as sample_strategies,
+        mock.patch.object(
+            gems_collate,
+            "sample_intensity_aware_masks_torch",
+            return_value=(intensity_context, intensity_targets),
+        ),
+        mock.patch.object(
+            gems_collate,
+            "_sample_block_masks_torch",
+            return_value=(block_context, block_targets),
+        ),
+    ):
+        batch = collator(samples)
+
+    assert sample_strategies.call_args.kwargs["mask_strategies"] == (
+        "intensity_aware",
+        "random",
+    )
+    assert torch.equal(batch["context_mask"][0], intensity_context[0])
+    assert torch.equal(batch["target_masks"][0], intensity_targets[0])
+    assert torch.equal(batch["context_mask"][1], block_context[1])
+    assert torch.equal(batch["target_masks"][1], block_targets[1])
 
 
 def test_gems_batch_collator_all_strategy_conditions_precursor() -> None:

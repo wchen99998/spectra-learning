@@ -22,6 +22,12 @@ def _config_get(config: config_dict.ConfigDict, key: str, default: Any) -> Any:
     return config.get(key, default)
 
 
+def _config_mask_strategy(value: Any) -> str | tuple[str, ...]:
+    if isinstance(value, str):
+        return value
+    return tuple(str(strategy) for strategy in value)
+
+
 @dataclass(frozen=True)
 class GemsDataConfig:
     artifact_dir: Path
@@ -40,7 +46,7 @@ class GemsDataConfig:
     jepa_context_fraction: float
     jepa_target_fraction: float
     jepa_block_min_len: int
-    jepa_mask_strategy: str
+    jepa_mask_strategy: str | tuple[str, ...]
     jepa_mask_lengths: tuple[int, ...]
     jepa_mask_round_from: int
     jepa_intensity_aware_mask_config: dict[str, float]
@@ -104,7 +110,7 @@ class GemsDataConfig:
                 _config_get(config, "jepa_target_fraction", 0.25)
             ),
             jepa_block_min_len=int(_config_get(config, "jepa_block_min_len", 1)),
-            jepa_mask_strategy=str(
+            jepa_mask_strategy=_config_mask_strategy(
                 _config_get(config, "jepa_mask_strategy", "contiguous")
             ),
             jepa_mask_lengths=jepa_mask_lengths,

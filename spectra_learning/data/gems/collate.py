@@ -4,7 +4,10 @@ from spectra_learning.data.gems.conversion import _prepend_precursor_token_torch
 from spectra_learning.data.gems.masking import (
     DEFAULT_JEPA_MASK_LENGTHS,
     DEFAULT_JEPA_MASK_STRATEGY,
+    JEPA_MASK_STRATEGIES,
     _normalize_mask_strategy_name,
+    _normalize_mask_strategy_names,
+    _sample_all_mask_strategies_torch,
     _sample_block_masks_torch,
 )
 from spectra_learning.data.gems.intensity_aware import (
@@ -31,7 +34,7 @@ class GemsBatchCollator:
         peak_drop_min_intensity: float,
         peak_ordering: str,
         precursor_peak_exclusion_window_da: float,
-        mask_strategy: str = DEFAULT_JEPA_MASK_STRATEGY,
+        mask_strategy: str | tuple[str, ...] | list[str] = DEFAULT_JEPA_MASK_STRATEGY,
         mask_lengths: tuple[int, ...] = DEFAULT_JEPA_MASK_LENGTHS,
         mask_round_from: int = len(DEFAULT_JEPA_MASK_LENGTHS),
         intensity_aware_mask_config: dict[str, float] | None = None,
@@ -101,14 +104,18 @@ class GemsBatchCollator:
             sampling_valid_mask = sampling_valid_mask.clone()
             sampling_valid_mask[:, 0] = False
 
-        if _normalize_mask_strategy_name(self.mask_strategy) == INTENSITY_AWARE_MASK_STRATEGY:
-            context_mask, target_masks = sample_intensity_aware_masks_torch(
+        strategies = self._mask_strategy_pool()
+        if len(strategies) == 1:
+            context_mask, target_masks = self._sample_masks_for_strategy(
+                batch,
                 sampling_valid_mask,
-                batch["peak_intensity"],
-                batch["peak_mz"] * PEAK_MZ_MAX,
-                num_target_blocks=self.num_target_blocks,
-                allow_target_overlap=self.allow_target_overlap,
-                **self.intensity_aware_mask_config,
+                strategies[0],
+            )
+        elif INTENSITY_AWARE_MASK_STRATEGY in strategies:
+            context_mask, target_masks = self._sample_mixed_strategy_masks(
+                batch,
+                sampling_valid_mask,
+                strategies,
             )
         else:
             context_mask, target_masks = _sample_block_masks_torch(
@@ -126,4 +133,74 @@ class GemsBatchCollator:
         if self.use_precursor_token:
             context_mask[:, 0] = batch["peak_valid_mask"][:, 0]
             target_masks[:, :, 0] = False
+        return context_mask, target_masks
+
+    def _mask_strategy_pool(self) -> tuple[str, ...]:
+        pool: list[str] = []
+        for strategy in _normalize_mask_strategy_names(self.mask_strategy):
+            if strategy == "all":
+                pool.extend(JEPA_MASK_STRATEGIES)
+            else:
+                pool.append(strategy)
+        return tuple(dict.fromkeys(pool))
+
+    def _sample_masks_for_strategy(
+        self,
+        batch: dict[str, torch.Tensor],
+        sampling_valid_mask: torch.Tensor,
+        strategy: str,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if _normalize_mask_strategy_name(strategy) == INTENSITY_AWARE_MASK_STRATEGY:
+            return sample_intensity_aware_masks_torch(
+                sampling_valid_mask,
+                batch["peak_intensity"],
+                batch["peak_mz"] * PEAK_MZ_MAX,
+                num_target_blocks=self.num_target_blocks,
+                allow_target_overlap=self.allow_target_overlap,
+                **self.intensity_aware_mask_config,
+            )
+        return _sample_block_masks_torch(
+            sampling_valid_mask,
+            num_target_blocks=self.num_target_blocks,
+            context_fraction=self.context_fraction,
+            target_fraction=self.target_fraction,
+            block_min_len=self.block_min_len,
+            mask_strategy=strategy,
+            mask_lengths=self.mask_lengths,
+            mask_round_from=self.mask_round_from,
+            allow_target_overlap=self.allow_target_overlap,
+        )
+
+    def _sample_mixed_strategy_masks(
+        self,
+        batch: dict[str, torch.Tensor],
+        sampling_valid_mask: torch.Tensor,
+        strategies: tuple[str, ...],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        row_strategies = _sample_all_mask_strategies_torch(
+            sampling_valid_mask.shape[0],
+            device=sampling_valid_mask.device,
+            mask_strategies=strategies,
+        )
+        context_mask = torch.zeros_like(sampling_valid_mask)
+        target_masks = torch.zeros(
+            sampling_valid_mask.shape[0],
+            self.num_target_blocks,
+            sampling_valid_mask.shape[1],
+            dtype=torch.bool,
+            device=sampling_valid_mask.device,
+        )
+        for strategy in dict.fromkeys(row_strategies):
+            strategy_context, strategy_targets = self._sample_masks_for_strategy(
+                batch,
+                sampling_valid_mask,
+                strategy,
+            )
+            rows = torch.tensor(
+                [row_strategy == strategy for row_strategy in row_strategies],
+                dtype=torch.bool,
+                device=sampling_valid_mask.device,
+            )
+            context_mask[rows] = strategy_context[rows]
+            target_masks[rows] = strategy_targets[rows]
         return context_mask, target_masks

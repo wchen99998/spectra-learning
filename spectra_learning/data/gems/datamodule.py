@@ -81,7 +81,7 @@ class GemsNativeDataModule:
     jepa_context_fraction: float
     jepa_target_fraction: float
     jepa_block_min_len: int
-    jepa_mask_strategy: str
+    jepa_mask_strategy: str | tuple[str, ...]
     jepa_mask_lengths: tuple[int, ...]
     jepa_mask_round_from: int
     jepa_intensity_aware_mask_config: dict[str, float]

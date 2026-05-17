@@ -11,6 +11,7 @@ from spectra_learning.data.gems.datamodule import GemsNativeDataModule
 from spectra_learning.data.gems.masking import (
     JEPA_MASK_STRATEGIES,
     _normalize_mask_strategy_name,
+    _normalize_mask_strategy_names,
 )
 
 
@@ -69,16 +70,16 @@ def _make_visualization_collator_kwargs(datamodule: GemsNativeDataModule) -> dic
 
 
 def _resolve_visualization_strategies(
-    config_mask_strategy: str,
+    config_mask_strategy: str | tuple[str, ...] | list[str],
     strategies: tuple[str, ...] | None = None,
 ) -> tuple[str, ...]:
     if strategies is not None:
         resolved = [_normalize_mask_strategy_name(strategy) for strategy in strategies]
         return tuple(dict.fromkeys(resolved))
     default_strategies = list(JEPA_MASK_STRATEGIES)
-    config_strategy = _normalize_mask_strategy_name(config_mask_strategy)
-    if config_strategy not in default_strategies:
-        default_strategies.append(config_strategy)
+    for config_strategy in _normalize_mask_strategy_names(config_mask_strategy):
+        if config_strategy not in default_strategies:
+            default_strategies.append(config_strategy)
     return tuple(default_strategies)
 
 
