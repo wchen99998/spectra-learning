@@ -44,6 +44,7 @@ class PeakSetSIGReg(
     jepa_target_normalization: str
     masked_token_input_mode: str
     masked_mz_sentinel: float
+    predictor_rope_input_scale: float
     representation_regularizer: str
     sigreg_lambda: float
     sigreg_precursor_scale: float
@@ -68,7 +69,8 @@ class PeakSetSIGReg(
     encoder: PeakSetEncoder
     teacher_encoder: PeakSetEncoder | None
     encoder_to_predictor_proj: nn.Module
-    predictor_slot_embedding: nn.Embedding
+    predictor_mask_token: nn.Parameter
+    predictor_intensity_embed: nn.Module
     predictor_register_tokens: nn.Parameter | None
     masked_latent_predictor: nn.ModuleList
     predictor_final_norm: nn.Module

@@ -7,12 +7,12 @@ from typing import TYPE_CHECKING
 import torch
 from torch import nn
 
+from spectra_learning.models.common import _build_non_causal_blocks
 from spectra_learning.models.transformer import _build_norm
 from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.losses import SIGReg, SlotwiseSIGReg
 from spectra_learning.models.settings import PeakSetSIGRegSettings
 from spectra_learning.models.temporal import (
-    _build_cross_attention_decoder_blocks,
     _build_temporal_decoder_blocks,
 )
 
@@ -218,6 +218,7 @@ def _build_teacher(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
 
 
 def _build_predictor(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
+    model.predictor_rope_input_scale = cfg.encoder_fourier_input_scale
     if model.predictor_dim != model.model_dim:
         encoder_to_predictor_proj = nn.Linear(
             model.model_dim,
@@ -229,12 +230,18 @@ def _build_predictor(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
     else:
         model.encoder_to_predictor_proj = nn.Identity()
 
-    predictor_slot_embedding = nn.Embedding(
-        model.num_peak_tokens,
-        model.predictor_dim,
+    model.predictor_mask_token = nn.Parameter(torch.empty(model.predictor_dim))
+    nn.init.trunc_normal_(model.predictor_mask_token, std=0.02)
+    predictor_intensity_embed = nn.Sequential(
+        nn.Linear(2, model.predictor_dim),
+        nn.SiLU(),
+        nn.Linear(model.predictor_dim, model.predictor_dim),
     )
-    nn.init.trunc_normal_(predictor_slot_embedding.weight, std=0.02)
-    model.predictor_slot_embedding = predictor_slot_embedding
+    for layer in predictor_intensity_embed:
+        if isinstance(layer, nn.Linear):
+            nn.init.xavier_normal_(layer.weight)
+            nn.init.zeros_(layer.bias)
+    model.predictor_intensity_embed = predictor_intensity_embed
     if model.predictor_num_register_tokens > 0:
         model.predictor_register_tokens = nn.Parameter(
             torch.empty(model.predictor_num_register_tokens, model.predictor_dim)
@@ -243,7 +250,7 @@ def _build_predictor(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
     else:
         model.predictor_register_tokens = None
 
-    model.masked_latent_predictor = _build_cross_attention_decoder_blocks(
+    model.masked_latent_predictor = _build_non_causal_blocks(
         dim=model.predictor_dim,
         num_layers=cfg.masked_latent_predictor_num_layers,
         num_heads=cfg.masked_latent_predictor_num_heads,

@@ -62,47 +62,33 @@ class ObjectiveMixin:
         target_masks: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         mz_logits = cast(nn.Linear, self.jepa_mae_mz_head)(predicted_latents)
-        mz_target, intensity_target = self._jepa_mae_targets(peak_mz, peak_intensity)
+        mz_target, _ = self._jepa_mae_targets(peak_mz, peak_intensity)
         view_shape = (mz_logits.shape[0], mz_logits.shape[1], mz_logits.shape[2])
         mz_target = mz_target.unsqueeze(1).expand(view_shape)
-        intensity_target = intensity_target.unsqueeze(1).expand(view_shape)
         mz_loss = self._masked_ce_loss(mz_logits, mz_target, target_masks)
         target_weights = target_masks
         mz_accuracy = (
             (mz_logits.argmax(dim=-1) == mz_target).float() * target_weights.float()
         ).sum() / target_weights.float().sum().clamp_min(1.0)
-        if self.masked_token_input_mode == "mz_sentinel":
-            zero = mz_loss.new_zeros(())
-            return mz_loss, mz_loss, zero, mz_accuracy, zero
-
-        intensity_logits = cast(nn.Linear, self.jepa_mae_intensity_head)(
-            predicted_latents
-        )
-        intensity_loss = self._masked_ce_loss(
-            intensity_logits,
-            intensity_target,
-            target_masks,
-        )
-        value_loss = mz_loss + intensity_loss
-        intensity_accuracy = (
-            (intensity_logits.argmax(dim=-1) == intensity_target).float()
-            * target_weights.float()
-        ).sum() / target_weights.float().sum().clamp_min(1.0)
-        return value_loss, mz_loss, intensity_loss, mz_accuracy, intensity_accuracy
+        zero = mz_loss.new_zeros(())
+        return mz_loss, mz_loss, zero, mz_accuracy, zero
 
     def _predict_augmented_targets(
         self: Any,
         context_emb: torch.Tensor,
         context_mask: torch.Tensor,
         target_masks: torch.Tensor,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_size, num_target_blocks, num_peaks = target_masks.shape
-        predictor_memory_mask = context_mask
-        if self.masked_token_input_mode == "mz_sentinel":
-            predictor_memory_mask = context_mask | target_masks.any(dim=1)
+        target_union = target_masks.any(dim=1)
         predictor_features = self.predict_masked_target_features(
             context_emb,
-            predictor_memory_mask,
+            context_mask,
+            peak_mz,
+            peak_intensity,
+            target_union,
         )
         predictor_features = predictor_features.unsqueeze(1).expand(
             batch_size,

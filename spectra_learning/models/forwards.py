@@ -148,6 +148,8 @@ class ForwardMixin:
             context_emb,
             context_mask,
             target_masks,
+            peak_mz,
+            peak_intensity,
         )
         teacher_target_features_normalized = self._apply_jepa_target_normalization(
             teacher_target_features.detach()
@@ -279,6 +281,8 @@ class ForwardMixin:
             context_emb,
             context_mask,
             target_masks,
+            peak_mz,
+            peak_intensity,
         )
         mae_term, mae_metrics = self._mae_metrics(
             predictor_output,
