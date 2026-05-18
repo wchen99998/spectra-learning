@@ -218,6 +218,7 @@ def _build_teacher(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
 
 
 def _build_predictor(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
+    model.predictor_use_rope = cfg.predictor_use_rope
     model.predictor_rope_input_scale = cfg.encoder_fourier_input_scale
     if model.predictor_dim != model.model_dim:
         encoder_to_predictor_proj = nn.Linear(

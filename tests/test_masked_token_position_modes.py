@@ -5,7 +5,6 @@ import torch
 from spectra_learning.models.common import TransformerBlock
 from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.model import PeakSetSIGReg
-from spectra_learning.models.temporal import CrossAttentionDecoderBlock
 
 
 def _build_model(
@@ -22,6 +21,7 @@ def _build_model(
     predictor_dim: int | None = None,
     masked_token_input_mode: str = "latent_token",
     masked_mz_sentinel: float = -1.0,
+    predictor_use_rope: bool = True,
 ) -> PeakSetSIGReg:
     torch.manual_seed(0)
     model = PeakSetSIGReg(
@@ -43,6 +43,7 @@ def _build_model(
         jepa_mae_loss_weight=jepa_mae_loss_weight,
         masked_token_input_mode=masked_token_input_mode,
         masked_mz_sentinel=masked_mz_sentinel,
+        predictor_use_rope=predictor_use_rope,
     )
     model.eval()
     return model
@@ -91,13 +92,45 @@ def _make_batch() -> dict[str, torch.Tensor]:
     }
 
 
+def _predictor_metadata(
+    context_emb: torch.Tensor,
+    context_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    B, N = context_mask.shape
+    peak_mz = torch.linspace(
+        0.1,
+        0.6,
+        N,
+        device=context_emb.device,
+        dtype=context_emb.dtype,
+    ).unsqueeze(0).expand(B, -1)
+    peak_intensity = torch.linspace(
+        0.9,
+        0.4,
+        N,
+        device=context_emb.device,
+        dtype=context_emb.dtype,
+    ).unsqueeze(0).expand(B, -1)
+    return peak_mz, peak_intensity, ~context_mask
+
+
 @torch.no_grad()
 def test_predictor_zero_layers_still_runs_projection_path():
     model = _build_model(predictor_layers=0, predictor_dim=24)
     predictor_input = torch.randn(2, 6, model.model_dim)
     visible_mask = torch.ones(2, 6, dtype=torch.bool)
+    peak_mz, peak_intensity, target_mask = _predictor_metadata(
+        predictor_input,
+        visible_mask,
+    )
 
-    out = model.predict_masked_latents(predictor_input, visible_mask)
+    out = model.predict_masked_latents(
+        predictor_input,
+        visible_mask,
+        peak_mz,
+        peak_intensity,
+        target_mask,
+    )
 
     assert out.shape == (2, 6, model.predictor_dim)
 
@@ -111,24 +144,17 @@ def test_predictor_zero_layers_with_projection_supports_forward():
 
 
 @torch.no_grad()
-def test_predictor_learned_slot_queries_change_output():
-    torch.manual_seed(0)
-    model_without_slot_identity = _build_model(predictor_layers=2)
-    torch.manual_seed(0)
-    model_with_slot_identity = _build_model(predictor_layers=2)
-    with torch.no_grad():
-        shared_query = model_without_slot_identity.predictor_slot_embedding.weight[:1]
-        model_without_slot_identity.predictor_slot_embedding.weight.copy_(
-            shared_query.expand_as(model_without_slot_identity.predictor_slot_embedding.weight)
-        )
-    context_emb = torch.randn(1, 6, model_with_slot_identity.model_dim)
-    context_mask = torch.ones(1, 6, dtype=torch.bool)
+def test_predictor_places_context_embeddings_in_original_slots():
+    model = _build_model(predictor_layers=0, predictor_apply_final_norm=False)
+    context_emb = torch.randn(1, 6, model.model_dim)
+    context_mask = torch.tensor([[False, True, False, True, False, False]])
+    peak_intensity = torch.rand(1, 6)
 
-    out_1 = model_without_slot_identity.predict_masked_latents(context_emb, context_mask)
-    out_2 = model_with_slot_identity.predict_masked_latents(context_emb, context_mask)
+    x = model._predictor_input_sequence(context_emb, context_mask, peak_intensity)
+    projected = model.encoder_to_predictor_proj(context_emb)
 
-    diff = (out_1 - out_2).abs().mean()
-    assert float(diff) > 1e-3
+    torch.testing.assert_close(x[context_mask], projected[context_mask])
+    assert not torch.allclose(x[~context_mask], projected[~context_mask])
 
 
 @torch.no_grad()
@@ -136,16 +162,29 @@ def test_predictor_has_no_legacy_mask_or_position_tokens_and_allows_registers():
     model = _build_model(predictor_layers=2, predictor_num_register_tokens=2)
     context_emb = torch.randn(1, 6, model.model_dim)
     context_mask = torch.ones(1, 6, dtype=torch.bool)
+    peak_mz, peak_intensity, target_mask = _predictor_metadata(
+        context_emb,
+        context_mask,
+    )
 
-    out = model.predict_masked_latents(context_emb, context_mask)
+    out = model.predict_masked_latents(
+        context_emb,
+        context_mask,
+        peak_mz,
+        peak_intensity,
+        target_mask,
+    )
 
     assert model.predictor_num_register_tokens == 2
-    assert not hasattr(model, "latent_mask_token")
+    assert hasattr(model, "predictor_mask_token")
+    assert hasattr(model, "predictor_intensity_embed")
     assert not hasattr(model, "predictor_position_embedding")
+    assert not hasattr(model, "predictor_slot_embedding")
     predictor_register_tokens = model.predictor_register_tokens
     assert predictor_register_tokens is not None
     assert predictor_register_tokens.shape == (2, model.predictor_dim)
-    assert "predictor_slot_embedding.weight" in model.state_dict()
+    assert "predictor_mask_token" in model.state_dict()
+    assert "predictor_intensity_embed.0.weight" in model.state_dict()
     assert "predictor_register_tokens" in model.state_dict()
     assert out.shape == (1, 6, model.predictor_dim)
 
@@ -251,10 +290,24 @@ def test_predictor_final_norm_toggle_changes_output():
     )
     predictor_input = torch.randn(1, 6, model_with_final_norm.model_dim)
     visible_mask = torch.ones(1, 6, dtype=torch.bool)
+    peak_mz, peak_intensity, target_mask = _predictor_metadata(
+        predictor_input,
+        visible_mask,
+    )
 
-    out_1 = model_with_final_norm.predict_masked_latents(predictor_input, visible_mask)
+    out_1 = model_with_final_norm.predict_masked_latents(
+        predictor_input,
+        visible_mask,
+        peak_mz,
+        peak_intensity,
+        target_mask,
+    )
     out_2 = model_without_final_norm.predict_masked_latents(
-        predictor_input, visible_mask
+        predictor_input,
+        visible_mask,
+        peak_mz,
+        peak_intensity,
+        target_mask,
     )
 
     diff = (out_1 - out_2).abs().mean()
@@ -269,9 +322,9 @@ def test_encoder_and_predictor_final_norms_are_non_affine():
     encoder_block = model.encoder.blocks[0]
     predictor_block = model.masked_latent_predictor[0]
     assert isinstance(encoder_block, TransformerBlock)
-    assert isinstance(predictor_block, CrossAttentionDecoderBlock)
+    assert isinstance(predictor_block, TransformerBlock)
     assert list(encoder_block.attention_norm.parameters())
-    assert list(predictor_block.cross_attn_norm.parameters())
+    assert list(predictor_block.attention_norm.parameters())
 
     encoder = PeakSetEncoder(
         model_dim=32,
@@ -285,14 +338,14 @@ def test_encoder_and_predictor_final_norms_are_non_affine():
     assert list(encoder.final_norm.parameters()) == []
 
 
-def test_masked_latent_predictor_uses_cross_attention_only_blocks():
+def test_masked_latent_predictor_uses_self_attention_blocks():
     model = _build_model(predictor_layers=2)
     block = model.masked_latent_predictor[0]
 
-    assert hasattr(block, "cross_attn")
+    assert hasattr(block, "attention")
+    assert hasattr(block, "attention_norm")
     assert hasattr(block, "feed_forward")
-    assert not hasattr(block, "attention")
-    assert not hasattr(block, "attention_norm")
+    assert not hasattr(block, "cross_attn")
 
 
 @torch.no_grad()
@@ -305,17 +358,59 @@ def test_predictor_output_is_independent_from_encoder_positions():
         model_without_encoder_pos.encoder.position_embedding.weight.zero_()
     predictor_input = torch.randn(1, 6, model_without_encoder_pos.model_dim)
     visible_mask = torch.ones(1, 6, dtype=torch.bool)
+    peak_mz, peak_intensity, target_mask = _predictor_metadata(
+        predictor_input,
+        visible_mask,
+    )
 
     out_1 = model_without_encoder_pos.predict_masked_latents(
         predictor_input,
         visible_mask,
+        peak_mz,
+        peak_intensity,
+        target_mask,
     )
     out_2 = model_with_encoder_pos.predict_masked_latents(
         predictor_input,
         visible_mask,
+        peak_mz,
+        peak_intensity,
+        target_mask,
     )
 
     assert torch.allclose(out_1, out_2)
+
+
+@torch.no_grad()
+def test_predictor_can_disable_rope():
+    model = _build_model(predictor_use_rope=False)
+    batch = _make_batch()
+    context_emb = torch.randn(
+        batch["peak_mz"].shape[0],
+        batch["peak_mz"].shape[1],
+        model.model_dim,
+    )
+    peak_mz_a = batch["peak_mz"]
+    peak_mz_b = peak_mz_a.clone()
+    target_union = batch["target_masks"].any(dim=1)
+    peak_mz_b[target_union] = peak_mz_b[target_union] + 0.25
+
+    out_a = model.predict_masked_targets(
+        context_emb,
+        batch["context_mask"],
+        peak_mz_a,
+        batch["peak_intensity"],
+        target_union,
+    )
+    out_b = model.predict_masked_targets(
+        context_emb,
+        batch["context_mask"],
+        peak_mz_b,
+        batch["peak_intensity"],
+        target_union,
+    )
+
+    torch.testing.assert_close(out_a[target_union], out_b[target_union])
 
 
 @torch.no_grad()
@@ -337,7 +432,7 @@ def test_forward_augmented_reports_loss_metrics():
 
 
 @torch.no_grad()
-def test_mz_sentinel_mode_masks_only_target_mz_for_context_encoder():
+def test_context_encoder_receives_context_only_in_mz_sentinel_mode():
     model = _build_model(
         masked_token_input_mode="mz_sentinel",
         masked_mz_sentinel=-0.5,
@@ -351,17 +446,9 @@ def test_mz_sentinel_mode_masks_only_target_mz_for_context_encoder():
         batch["target_masks"],
     )
 
-    target_union = batch["target_masks"].any(dim=1)
-    torch.testing.assert_close(
-        context_mz[target_union],
-        torch.full_like(context_mz[target_union], -0.5),
-    )
-    torch.testing.assert_close(
-        context_mz[~target_union],
-        batch["peak_mz"][~target_union],
-    )
+    torch.testing.assert_close(context_mz, batch["peak_mz"])
     torch.testing.assert_close(context_intensity, batch["peak_intensity"])
-    assert torch.equal(context_visible_mask, batch["context_mask"] | target_union)
+    assert torch.equal(context_visible_mask, batch["context_mask"])
 
 
 @torch.no_grad()
@@ -378,9 +465,15 @@ def test_mz_sentinel_predictor_receives_context_and_target_memory_mask():
     def fake_predict_masked_target_features(
         x: torch.Tensor,
         context_mask: torch.Tensor,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+        target_mask: torch.Tensor,
     ) -> torch.Tensor:
         captured["x"] = x.detach().clone()
         captured["context_mask"] = context_mask.detach().clone()
+        captured["peak_mz"] = peak_mz.detach().clone()
+        captured["peak_intensity"] = peak_intensity.detach().clone()
+        captured["target_mask"] = target_mask.detach().clone()
         return x.new_zeros(x.shape[0], x.shape[1], model.jepa_target_dim)
 
     with mock.patch.object(
@@ -392,17 +485,22 @@ def test_mz_sentinel_predictor_receives_context_and_target_memory_mask():
             context_emb,
             batch["context_mask"],
             batch["target_masks"],
+            batch["peak_mz"],
+            batch["peak_intensity"],
         )
 
     B, K, N = batch["target_masks"].shape
     target_union = batch["target_masks"].any(dim=1)
     assert captured["x"].shape == (B, N, model.model_dim)
     torch.testing.assert_close(captured["x"], context_emb)
-    assert torch.equal(captured["context_mask"], batch["context_mask"] | target_union)
+    torch.testing.assert_close(captured["peak_mz"], batch["peak_mz"])
+    torch.testing.assert_close(captured["peak_intensity"], batch["peak_intensity"])
+    assert torch.equal(captured["context_mask"], batch["context_mask"])
+    assert torch.equal(captured["target_mask"], target_union)
 
 
 @torch.no_grad()
-def test_latent_token_predictor_receives_context_memory_mask_only():
+def test_latent_token_predictor_receives_target_union_for_mask_tokens():
     model = _build_model(masked_token_input_mode="latent_token")
     batch = _make_batch()
     context_emb = torch.randn(
@@ -415,9 +513,13 @@ def test_latent_token_predictor_receives_context_memory_mask_only():
     def fake_predict_masked_target_features(
         x: torch.Tensor,
         context_mask: torch.Tensor,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+        target_mask: torch.Tensor,
     ) -> torch.Tensor:
         captured["x"] = x.detach().clone()
         captured["context_mask"] = context_mask.detach().clone()
+        captured["target_mask"] = target_mask.detach().clone()
         return x.new_zeros(x.shape[0], x.shape[1], model.jepa_target_dim)
 
     with mock.patch.object(
@@ -429,12 +531,16 @@ def test_latent_token_predictor_receives_context_memory_mask_only():
             context_emb,
             batch["context_mask"],
             batch["target_masks"],
+            batch["peak_mz"],
+            batch["peak_intensity"],
         )
 
     B, K, N = batch["target_masks"].shape
+    target_union = batch["target_masks"].any(dim=1)
     assert captured["x"].shape == (B, N, model.model_dim)
     torch.testing.assert_close(captured["x"], context_emb)
     assert torch.equal(captured["context_mask"], batch["context_mask"])
+    assert torch.equal(captured["target_mask"], target_union)
 
 
 @torch.no_grad()
@@ -506,11 +612,17 @@ def test_multilayer_targets_widen_teacher_and_predictor_outputs():
     predictor_output_features = model.predict_masked_target_features(
         context_emb,
         context_mask,
+        peak_mz,
+        peak_intensity,
+        target_masks.any(dim=1),
     )
     assert predictor_output_features.shape == (B, N, 2 * model.model_dim)
     predictor_output = model.predict_masked_targets(
         context_emb,
         context_mask,
+        peak_mz,
+        peak_intensity,
+        target_masks.any(dim=1),
     )
     assert predictor_output.shape == (B, N, model.target_projector_dim)
     predictor_output_features_by_view, predictor_output_by_view = (
@@ -518,6 +630,8 @@ def test_multilayer_targets_widen_teacher_and_predictor_outputs():
             context_emb,
             context_mask,
             target_masks,
+            peak_mz,
+            peak_intensity,
         )
     )
     assert predictor_output_features_by_view.shape == (
@@ -562,6 +676,9 @@ def test_masked_prediction_loss_uses_target_tokens_only():
     predictor_output = model.predict_masked_targets(
         context_emb,
         context_mask,
+        peak_mz,
+        peak_intensity,
+        target_masks.any(dim=1),
     ).unsqueeze(1).expand(B, K, N, -1)
     masked_only_loss = (
         model._embedding_loss(predictor_output, teacher_target.unsqueeze(1))
@@ -604,6 +721,9 @@ def test_masked_prediction_loss_can_zscore_teacher_targets():
     predictor_output = model.predict_masked_targets(
         context_emb,
         context_mask,
+        peak_mz,
+        peak_intensity,
+        target_masks.any(dim=1),
     ).unsqueeze(1).expand(B, K, N, -1)
     masked_only_loss = (
         model._embedding_loss(predictor_output, teacher_target.unsqueeze(1))
@@ -735,6 +855,9 @@ def test_positions_outside_union_do_not_change_context_conditioning_with_fixed_t
         predictor_output = model.predict_masked_targets(
             context_emb,
             context_mask,
+            peak_mz,
+            peak_intensity,
+            target_masks.any(dim=1),
         ).unsqueeze(1).expand(B, K, N, -1)
         return (
             model._embedding_loss(predictor_output, teacher_targets.unsqueeze(1))

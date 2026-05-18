@@ -51,6 +51,7 @@ class PeakSetSIGRegSettings:
     encoder_use_position_embedding: bool = True
     encoder_apply_final_norm: bool = True
     predictor_apply_final_norm: bool = True
+    predictor_use_rope: bool = True
     encoder_use_cls_token: bool = True
     use_precursor_token: bool = False
     spectral_bias_relative_kind: str = "none"
@@ -221,6 +222,7 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "encoder_use_position_embedding": bool,
     "encoder_apply_final_norm": bool,
     "predictor_apply_final_norm": bool,
+    "predictor_use_rope": bool,
     "encoder_use_cls_token": bool,
     "use_precursor_token": bool,
     "spectral_bias_relative_kind": str,

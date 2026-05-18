@@ -31,6 +31,33 @@ def combine_attention_mask_and_bias(
     return bias + attn_mask.to(dtype=dtype)
 
 
+def _apply_rope(x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+    rotary_dim = (x.shape[-1] // 2) * 2
+    x_rot = x[..., :rotary_dim]
+    x_pass = x[..., rotary_dim:]
+    x_pair = x_rot.float().reshape(*x_rot.shape[:-1], rotary_dim // 2, 2)
+    inv_freq = 1.0 / (
+        10000.0
+        ** (
+            torch.arange(0, rotary_dim, 2, device=x.device, dtype=torch.float32)
+            / rotary_dim
+        )
+    )
+    angles = positions.float().unsqueeze(-1) * inv_freq
+    cos = torch.cos(angles).unsqueeze(2)
+    sin = torch.sin(angles).unsqueeze(2)
+    even = x_pair[..., 0]
+    odd = x_pair[..., 1]
+    x_out = torch.stack(
+        (
+            even * cos - odd * sin,
+            even * sin + odd * cos,
+        ),
+        dim=-1,
+    ).flatten(-2)
+    return torch.cat([x_out.to(dtype=x.dtype), x_pass], dim=-1)
+
+
 def _build_norm(
     dim: int,
     eps: float | None,
@@ -122,6 +149,7 @@ class Attention(nn.Module):
         *,
         attn_mask: torch.Tensor | None = None,
         attn_bias: torch.Tensor | None = None,
+        rope_positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         bsz, seqlen, _ = x.shape
 
@@ -139,6 +167,9 @@ class Attention(nn.Module):
 
         xq = xq.to(dtype=xv.dtype)
         xk = xk.to(dtype=xv.dtype)
+        if rope_positions is not None:
+            xq = _apply_rope(xq, rope_positions)
+            xk = _apply_rope(xk, rope_positions)
 
         q = xq.transpose(1, 2)
         k = xk.transpose(1, 2)
@@ -217,12 +248,14 @@ class TransformerBlock(nn.Module):
         *,
         attn_mask: torch.Tensor | None = None,
         attn_bias: torch.Tensor | None = None,
+        rope_positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         h = x + self.drop(
             self.attention(
                 self.attention_norm(x),
                 attn_mask=attn_mask,
                 attn_bias=attn_bias,
+                rope_positions=rope_positions,
             )
         )
         return h + self.drop(self.feed_forward(self.ffn_norm(h)))

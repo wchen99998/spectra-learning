@@ -44,6 +44,7 @@ class PeakSetSIGReg(
     jepa_target_normalization: str
     masked_token_input_mode: str
     masked_mz_sentinel: float
+    predictor_use_rope: bool
     predictor_rope_input_scale: float
     representation_regularizer: str
     sigreg_lambda: float

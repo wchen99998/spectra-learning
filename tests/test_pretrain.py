@@ -686,6 +686,9 @@ class BlockJEPATests(unittest.TestCase):
         predictor_output = model.predict_masked_targets(
             context_emb,
             context_mask,
+            peak_mz,
+            peak_intensity,
+            target_masks.any(dim=1),
         ).unsqueeze(1).expand(B, K, N, -1)
         expected_masked_prediction_loss = (
             model._embedding_loss(predictor_output, teacher_targets.unsqueeze(1))
@@ -1221,7 +1224,7 @@ class BlockJEPATests(unittest.TestCase):
                 )
             )
 
-    def test_load_pretrained_weights_rejects_missing_slot_and_position_embeddings(self):
+    def test_load_pretrained_weights_rejects_missing_mask_and_position_embeddings(self):
         model = self._build_model()
         with tempfile.TemporaryDirectory() as tmpdir:
             path = f"{tmpdir}/ckpt.pt"
@@ -1231,7 +1234,11 @@ class BlockJEPATests(unittest.TestCase):
                 if not k.endswith(
                     (
                         "position_embedding.weight",
-                        "predictor_slot_embedding.weight",
+                        "predictor_mask_token",
+                        "predictor_intensity_embed.0.weight",
+                        "predictor_intensity_embed.0.bias",
+                        "predictor_intensity_embed.2.weight",
+                        "predictor_intensity_embed.2.bias",
                         "cls_token",
                         "register_tokens",
                         "predictor_register_tokens",
@@ -1324,7 +1331,7 @@ class PrecursorTokenTests(unittest.TestCase):
         model = self._build_model(num_peaks=6, use_precursor_token=True)
 
         self.assertEqual(model.encoder.position_embedding.num_embeddings, 7)
-        self.assertEqual(model.predictor_slot_embedding.num_embeddings, 7)
+        self.assertEqual(model.num_peak_tokens, 7)
 
     def test_forward_with_pipeline_prepended_batch(self):
         """forward_augmented works with pipeline-prepended batch (N+1 tensors, no precursor_mz key)."""

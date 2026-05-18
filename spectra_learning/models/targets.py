@@ -6,6 +6,7 @@ import torch
 
 from spectra_learning.models.common import _active_autocast_context
 from spectra_learning.models.encoder import PeakSetEncoder
+from spectra_learning.models.transformer import create_visible_attention_mask
 
 
 class TargetProjectionMixin:
@@ -29,39 +30,92 @@ class TargetProjectionMixin:
     ) -> torch.Tensor:
         return self._apply_group_target_normalization(x, self.model_dim)
 
-    def _predictor_slot_queries(
+    def _predictor_mask_tokens(
         self: Any,
-        memory: torch.Tensor,
+        peak_intensity: torch.Tensor,
     ) -> torch.Tensor:
-        positions = torch.arange(memory.shape[1], device=memory.device)
-        queries = self.predictor_slot_embedding(positions)
-        return queries.unsqueeze(0).expand(memory.shape[0], -1, -1).to(
-            dtype=memory.dtype
+        intensity = peak_intensity.unsqueeze(-1)
+        intensity_features = torch.cat(
+            [intensity, torch.log1p(peak_intensity).unsqueeze(-1)],
+            dim=-1,
+        )
+        mask = self.predictor_mask_token.view(1, 1, -1)
+        return mask.to(dtype=peak_intensity.dtype) + self.predictor_intensity_embed(
+            intensity_features
         )
 
-    def _append_predictor_register_queries(
+    def _append_predictor_register_tokens(
         self: Any,
         x: torch.Tensor,
-    ) -> torch.Tensor:
+        visible_mask: torch.Tensor,
+        rope_positions: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         if self.predictor_register_tokens is None:
-            return x
+            return x, visible_mask, rope_positions
         registers = self.predictor_register_tokens.unsqueeze(0).expand(
             x.shape[0],
             -1,
             -1,
         )
-        return torch.cat([x, registers.to(dtype=x.dtype)], dim=1)
+        register_mask = torch.ones(
+            x.shape[0],
+            registers.shape[1],
+            device=x.device,
+            dtype=torch.bool,
+        )
+        x = torch.cat([x, registers.to(dtype=x.dtype)], dim=1)
+        visible_mask = torch.cat([visible_mask, register_mask], dim=1)
+        if rope_positions is None:
+            return x, visible_mask, None
+        register_positions = torch.zeros(
+            x.shape[0],
+            registers.shape[1],
+            device=x.device,
+            dtype=rope_positions.dtype,
+        )
+        return x, visible_mask, torch.cat([rope_positions, register_positions], dim=1)
+
+    def _predictor_input_sequence(
+        self: Any,
+        context_emb: torch.Tensor,
+        context_mask: torch.Tensor,
+        peak_intensity: torch.Tensor,
+    ) -> torch.Tensor:
+        memory = self.encoder_to_predictor_proj(context_emb)
+        mask_tokens = self._predictor_mask_tokens(peak_intensity).to(dtype=memory.dtype)
+        return torch.where(context_mask.unsqueeze(-1), memory, mask_tokens)
 
     def predict_masked_latents(
         self: Any,
         context_emb: torch.Tensor,
         context_mask: torch.Tensor,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+        target_mask: torch.Tensor,
     ) -> torch.Tensor:
-        memory = self.encoder_to_predictor_proj(context_emb)
-        x = self._predictor_slot_queries(memory)
-        x = self._append_predictor_register_queries(x)
+        x = self._predictor_input_sequence(
+            context_emb,
+            context_mask,
+            peak_intensity,
+        )
+        visible_mask = context_mask | target_mask
+        rope_positions = (
+            peak_mz * self.predictor_rope_input_scale
+            if self.predictor_use_rope
+            else None
+        )
+        x, visible_mask, rope_positions = self._append_predictor_register_tokens(
+            x,
+            visible_mask,
+            rope_positions,
+        )
+        attn_mask = create_visible_attention_mask(visible_mask)
         for block in self.masked_latent_predictor:
-            x = block(x, memory, memory_mask=context_mask)
+            x = block(
+                x,
+                attn_mask=attn_mask,
+                rope_positions=rope_positions,
+            )
         x = self.predictor_final_norm(x)
         if self.predictor_num_register_tokens > 0:
             x = x[:, :-self.predictor_num_register_tokens]
@@ -85,11 +139,17 @@ class TargetProjectionMixin:
         self: Any,
         context_emb: torch.Tensor,
         context_mask: torch.Tensor,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+        target_mask: torch.Tensor,
     ) -> torch.Tensor:
         return self.masked_latent_readout(
             self.predict_masked_latents(
                 context_emb,
                 context_mask,
+                peak_mz,
+                peak_intensity,
+                target_mask,
             )
         )
 
@@ -97,11 +157,17 @@ class TargetProjectionMixin:
         self: Any,
         context_emb: torch.Tensor,
         context_mask: torch.Tensor,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+        target_mask: torch.Tensor,
     ) -> torch.Tensor:
         return self.project_targets(
             self.predict_masked_target_features(
                 context_emb,
                 context_mask,
+                peak_mz,
+                peak_intensity,
+                target_mask,
             )
         )
 
@@ -164,15 +230,7 @@ class TargetProjectionMixin:
         context_mask: torch.Tensor,
         target_masks: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if self.masked_token_input_mode != "mz_sentinel":
-            return peak_mz, peak_intensity, context_mask
-        target_union = target_masks.any(dim=1)
-        masked_mz = torch.where(
-            target_union,
-            torch.full_like(peak_mz, self.masked_mz_sentinel),
-            peak_mz,
-        )
-        return masked_mz, peak_intensity, context_mask | target_union
+        return peak_mz, peak_intensity, context_mask
 
     def compute_teacher_targets(
         self: Any,
