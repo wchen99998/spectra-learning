@@ -46,7 +46,7 @@ def get_config() -> config_dict.ConfigDict:
     if "jepa_target_layers" in cfg:
         del cfg["jepa_target_layers"]
 
-    cfg.msg_probe_every_n_steps = 0.3
+    cfg.msg_probe_every_n_steps = 0.25
     cfg.msg_probe_batch_size = 256
     cfg.msg_probe_backend = "local"
     cfg.jepa_mask_strategy = "intensity_aware"

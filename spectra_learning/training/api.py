@@ -5,6 +5,7 @@ from spectra_learning.training.checkpointing import load_frozen_teacher_weights
 from spectra_learning.training.logging import _build_wandb_init_kwargs, build_logger
 from spectra_learning.training.naming import auto_run_name
 from spectra_learning.training.runtime import (
+    build_grad_scaler,
     collect_and_log_param_metrics,
     parse_autocast_dtype,
 )
@@ -13,6 +14,7 @@ __all__ = [
     "_build_wandb_init_kwargs",
     "auto_run_name",
     "build_logger",
+    "build_grad_scaler",
     "build_model_from_config",
     "collect_and_log_param_metrics",
     "latest_ckpt_path",

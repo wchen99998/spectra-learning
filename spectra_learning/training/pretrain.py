@@ -19,6 +19,7 @@ from spectra_learning.training.batch import BatchPrefetcher
 from spectra_learning.training.checkpointing import (
     load_resume_covariance_pooler_state,
     load_frozen_teacher_weights,
+    load_grad_scaler_state,
     load_optimizer_state,
     load_resume_model_state,
     is_training_checkpoint_path,
@@ -52,6 +53,7 @@ from spectra_learning.probes.massspec.msg_probe import (
 from spectra_learning.models.pooling import build_covariance_pooler_from_config
 from spectra_learning.models.model import PeakSetSIGReg
 from spectra_learning.training.api import (
+    build_grad_scaler,
     build_logger,
     build_model_from_config,
     collect_and_log_param_metrics,
@@ -108,6 +110,8 @@ def train_and_evaluate(
         collect_and_log_param_metrics(train_module) if distributed.is_main else {}
     )
     train_module.to(device).train()
+    autocast_dtype = parse_autocast_dtype(_config_get(config, "autocast_dtype", "bf16"))
+    grad_scaler = build_grad_scaler(autocast_dtype, device)
     optimizers, schedulers = build_optimizers(config, train_module, total_steps, device)
     checkpoint_dir = workdir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -119,6 +123,7 @@ def train_and_evaluate(
         covariance_pooler=covariance_pooler,
         optimizers=optimizers,
         schedulers=schedulers,
+        grad_scaler=grad_scaler,
         steps_per_epoch=datamodule.train_steps,
         device=device,
     )
@@ -147,6 +152,8 @@ def train_and_evaluate(
         global_step=global_step,
         total_steps=total_steps,
         device=device,
+        autocast_dtype=autocast_dtype,
+        grad_scaler=grad_scaler,
         distributed=distributed,
     )
     final_global_step = int(cast(float, last_msg_probe_metrics["run/final_global_step"]))
@@ -162,6 +169,7 @@ def train_and_evaluate(
             float("nan"),
             getattr(logger.experiment, "id", None),
             covariance_pooler=covariance_pooler,
+            grad_scaler=grad_scaler,
         )
     barrier(distributed)
     results = {
@@ -204,6 +212,8 @@ def run_training_loop(
     global_step: int,
     total_steps: int,
     device: torch.device,
+    autocast_dtype: torch.dtype | None = None,
+    grad_scaler: torch.amp.GradScaler | None = None,
     distributed: DistributedContext | None = None,
 ) -> dict[str, object]:
     if distributed is None:
@@ -213,7 +223,12 @@ def run_training_loop(
             world_size=1,
             device=device,
         )
-    autocast_dtype = parse_autocast_dtype(_config_get(config, "autocast_dtype", "bf16"))
+    if autocast_dtype is None:
+        autocast_dtype = parse_autocast_dtype(
+            _config_get(config, "autocast_dtype", "bf16")
+        )
+    if grad_scaler is None:
+        grad_scaler = build_grad_scaler(autocast_dtype, device)
     log_every_n_steps = int(_config_get(config, "log_every_n_steps", 50))
     collapse_every_n_steps = int(
         _config_get(config, "collapse_metrics_every_n_steps", log_every_n_steps)
@@ -284,6 +299,7 @@ def run_training_loop(
                 schedulers,
                 autocast_dtype,
                 grad_clip_norm,
+                grad_scaler=grad_scaler,
                 compute_collapse_metrics=(
                     collapse_every_n_steps > 0
                     and (global_step + 1) % collapse_every_n_steps == 0
@@ -325,6 +341,7 @@ def run_training_loop(
                         float(metrics["loss"]),
                         getattr(wandb_run, "id", None),
                         covariance_pooler=covariance_pooler,
+                        grad_scaler=grad_scaler,
                     )
                     prune_checkpoints(checkpoint_dir, keep_top_k=15)
                 barrier(distributed)
@@ -458,6 +475,7 @@ def restore_training_state(
     steps_per_epoch: int,
     device: torch.device,
     covariance_pooler: torch.nn.Module | None = None,
+    grad_scaler: torch.amp.GradScaler | None = None,
 ) -> tuple[int, int, int]:
     checkpoints = sorted(
         (
@@ -481,6 +499,7 @@ def restore_training_state(
         load_optimizer_state(optimizer, state)
     for scheduler, state in zip(schedulers, ckpt["schedulers"], strict=True):
         scheduler.load_state_dict(state)
+    load_grad_scaler_state(grad_scaler, ckpt.get("grad_scaler"))
     global_step = int(ckpt["global_step"])
     start_epoch = int(ckpt["epoch"])
     resume_offset = global_step - start_epoch * steps_per_epoch

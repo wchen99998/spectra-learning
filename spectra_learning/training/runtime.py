@@ -10,8 +10,18 @@ def parse_autocast_dtype(value: object) -> torch.dtype | None:
     if name in {"fp32", "float32", "none"}:
         return None
     if name in {"fp16", "float16", "half"}:
-        raise ValueError("autocast_dtype=fp16 requires GradScaler; use bf16 or fp32")
+        return torch.float16
     raise ValueError(f"Unsupported autocast_dtype: {name}")
+
+
+def build_grad_scaler(
+    autocast_dtype: torch.dtype | None,
+    device: torch.device,
+) -> torch.amp.GradScaler:
+    return torch.amp.GradScaler(
+        device=device.type,
+        enabled=device.type == "cuda" and autocast_dtype == torch.float16,
+    )
 
 
 def collect_and_log_param_metrics(model: torch.nn.Module) -> dict[str, float]:

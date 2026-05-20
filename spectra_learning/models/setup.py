@@ -7,7 +7,10 @@ from typing import TYPE_CHECKING
 import torch
 from torch import nn
 
-from spectra_learning.models.common import _build_non_causal_blocks
+from spectra_learning.models.common import (
+    _build_frozen_position_embedding,
+    _build_non_causal_blocks,
+)
 from spectra_learning.models.transformer import _build_norm
 from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.losses import SIGReg, SlotwiseSIGReg
@@ -218,8 +221,9 @@ def _build_teacher(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
 
 
 def _build_predictor(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
-    model.predictor_use_rope = cfg.predictor_use_rope
-    model.predictor_rope_input_scale = cfg.encoder_fourier_input_scale
+    model.latent_mask_token = nn.Parameter(torch.empty(model.model_dim))
+    nn.init.normal_(model.latent_mask_token, std=0.02)
+
     if model.predictor_dim != model.model_dim:
         encoder_to_predictor_proj = nn.Linear(
             model.model_dim,
@@ -231,21 +235,13 @@ def _build_predictor(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
     else:
         model.encoder_to_predictor_proj = nn.Identity()
 
-    model.predictor_mask_token = nn.Parameter(torch.empty(model.predictor_dim))
-    nn.init.trunc_normal_(model.predictor_mask_token, std=0.02)
-    predictor_intensity_embed = nn.Sequential(
-        nn.Linear(2, model.predictor_dim),
-        nn.SiLU(),
-        nn.Linear(model.predictor_dim, model.predictor_dim),
+    model.predictor_position_embedding = _build_frozen_position_embedding(
+        model.num_peak_tokens,
+        model.model_dim,
     )
-    for layer in predictor_intensity_embed:
-        if isinstance(layer, nn.Linear):
-            nn.init.xavier_normal_(layer.weight)
-            nn.init.zeros_(layer.bias)
-    model.predictor_intensity_embed = predictor_intensity_embed
     if model.predictor_num_register_tokens > 0:
         model.predictor_register_tokens = nn.Parameter(
-            torch.empty(model.predictor_num_register_tokens, model.predictor_dim)
+            torch.empty(model.predictor_num_register_tokens, model.model_dim)
         )
         nn.init.trunc_normal_(model.predictor_register_tokens, std=0.02)
     else:

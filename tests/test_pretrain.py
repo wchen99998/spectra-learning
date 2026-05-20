@@ -683,13 +683,11 @@ class BlockJEPATests(unittest.TestCase):
             visible_mask=context_mask,
         )
         context_emb, _ = model.encoder.split_peak_and_cls(context_encoded)
-        predictor_output = model.predict_masked_targets(
+        _, predictor_output = model._predict_augmented_targets(
             context_emb,
             context_mask,
-            peak_mz,
-            peak_intensity,
-            target_masks.any(dim=1),
-        ).unsqueeze(1).expand(B, K, N, -1)
+            target_masks,
+        )
         expected_masked_prediction_loss = (
             model._embedding_loss(predictor_output, teacher_targets.unsqueeze(1))
             * target_masks.float()
@@ -1187,6 +1185,37 @@ class BlockJEPATests(unittest.TestCase):
         forward_augmented_mock.assert_called_once_with(batch)
         self.assertIn("loss", metrics)
 
+    def test_train_step_impl_supports_grad_scaler(self):
+        model = self._build_model(masked_token_loss_weight=1.0)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
+        grad_scaler = torch.amp.GradScaler(
+            device="cpu",
+            init_scale=16.0,
+            growth_interval=1,
+            enabled=True,
+        )
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+        before = next(model.encoder.parameters()).detach().clone()
+
+        metrics = train_step_impl(
+            model,
+            batch,
+            [optimizer],
+            [scheduler],
+            autocast_dtype=None,
+            grad_clip_norm=1.0,
+            grad_scaler=grad_scaler,
+        )
+
+        after = next(model.encoder.parameters()).detach()
+        self.assertIn("grad_scale", metrics)
+        self.assertEqual(float(metrics["optimizer_step_skipped"]), 0.0)
+        self.assertGreaterEqual(float(metrics["grad_scale"]), 16.0)
+        self.assertFalse(torch.equal(before, after))
+        self.assertEqual(scheduler.last_epoch, 1)
+        self.assertTrue(all(param.grad is None for param in model.parameters()))
+
     def test_load_pretrained_weights_roundtrip(self):
         model = self._build_model()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1234,11 +1263,7 @@ class BlockJEPATests(unittest.TestCase):
                 if not k.endswith(
                     (
                         "position_embedding.weight",
-                        "predictor_mask_token",
-                        "predictor_intensity_embed.0.weight",
-                        "predictor_intensity_embed.0.bias",
-                        "predictor_intensity_embed.2.weight",
-                        "predictor_intensity_embed.2.bias",
+                        "latent_mask_token",
                         "cls_token",
                         "register_tokens",
                         "predictor_register_tokens",

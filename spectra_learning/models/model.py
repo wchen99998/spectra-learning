@@ -70,8 +70,7 @@ class PeakSetSIGReg(
     encoder: PeakSetEncoder
     teacher_encoder: PeakSetEncoder | None
     encoder_to_predictor_proj: nn.Module
-    predictor_mask_token: nn.Parameter
-    predictor_intensity_embed: nn.Module
+    latent_mask_token: nn.Parameter
     predictor_register_tokens: nn.Parameter | None
     masked_latent_predictor: nn.ModuleList
     predictor_final_norm: nn.Module

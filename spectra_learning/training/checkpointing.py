@@ -49,6 +49,12 @@ def optimizer_state_dict(optimizer: torch.optim.Optimizer) -> dict:
     return optimizer.state_dict()
 
 
+def grad_scaler_state_dict(grad_scaler: torch.amp.GradScaler | None) -> dict | None:
+    if grad_scaler is None or not grad_scaler.is_enabled():
+        return None
+    return grad_scaler.state_dict()
+
+
 def save_checkpoint(
     path: Path | str,
     model: PeakSetSIGReg,
@@ -59,6 +65,7 @@ def save_checkpoint(
     loss: float,
     wandb_run_id: str | None = None,
     covariance_pooler: torch.nn.Module | None = None,
+    grad_scaler: torch.amp.GradScaler | None = None,
 ) -> None:
     path = Path(path)
     pooler_path = (
@@ -71,6 +78,7 @@ def save_checkpoint(
             "model": model.state_dict(),
             "optimizers": [optimizer_state_dict(opt) for opt in optimizers],
             "schedulers": [sched.state_dict() for sched in schedulers],
+            "grad_scaler": grad_scaler_state_dict(grad_scaler),
             "global_step": global_step,
             "epoch": epoch,
             "loss": loss,
@@ -184,6 +192,15 @@ def load_resume_covariance_pooler_state(
 
 def load_optimizer_state(optimizer: torch.optim.Optimizer, state: dict) -> None:
     optimizer.load_state_dict(state)
+
+
+def load_grad_scaler_state(
+    grad_scaler: torch.amp.GradScaler | None,
+    state: dict | None,
+) -> None:
+    if grad_scaler is None or not grad_scaler.is_enabled() or not state:
+        return
+    grad_scaler.load_state_dict(state)
 
 
 def load_pretrained_weights(

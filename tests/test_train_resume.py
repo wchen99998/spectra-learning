@@ -16,6 +16,7 @@ from spectra_learning.training.checkpointing import (
     covariance_pooler_checkpoint_path,
     is_training_checkpoint_path,
     latest_ckpt_path,
+    load_grad_scaler_state,
     load_resume_covariance_pooler_state,
     load_resume_model_state,
     save_checkpoint,
@@ -32,7 +33,12 @@ from spectra_learning.training.optimization import (
     is_predictor_parameter,
     is_weight_decay_target,
 )
-from spectra_learning.training.api import _build_wandb_init_kwargs, build_model_from_config
+from spectra_learning.training.api import (
+    _build_wandb_init_kwargs,
+    build_grad_scaler,
+    build_model_from_config,
+    parse_autocast_dtype,
+)
 from spectra_learning.training.logging import WandbMetricLogger, log_msg_probe_metrics
 from spectra_learning.training.schedules import WarmupCosineSchedule
 
@@ -102,6 +108,39 @@ def test_save_checkpoint_persists_optimizer_state():
     assert ckpt["wandb_run_id"] == "wandb-run-123"
     assert saved_optimizer["state"]
     assert "scalar_optimizer_state" not in saved_optimizer
+
+
+def test_fp16_autocast_parses_with_cpu_scaler_disabled():
+    assert parse_autocast_dtype("fp16") == torch.float16
+    assert not build_grad_scaler(torch.float16, torch.device("cpu")).is_enabled()
+
+
+def test_save_checkpoint_persists_grad_scaler_state():
+    model = _small_model()
+    grad_scaler = torch.amp.GradScaler(
+        device="cpu",
+        init_scale=16.0,
+        enabled=True,
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = f"{tmpdir}/resume.pt"
+        save_checkpoint(
+            path=path,
+            model=model,
+            optimizers=[],
+            schedulers=[],
+            global_step=12,
+            epoch=1,
+            loss=0.5,
+            grad_scaler=grad_scaler,
+        )
+        ckpt = torch.load(path, map_location="cpu", weights_only=True)
+        restored = torch.amp.GradScaler(device="cpu", enabled=True)
+        load_grad_scaler_state(restored, ckpt["grad_scaler"])
+
+    assert ckpt["grad_scaler"]["scale"] == 16.0
+    assert restored.state_dict()["scale"] == 16.0
 
 
 def test_save_checkpoint_writes_covariance_pooler_sibling_pt():
