@@ -21,7 +21,6 @@ def _build_model(
     predictor_dim: int | None = None,
     masked_token_input_mode: str = "latent_token",
     masked_mz_sentinel: float = -1.0,
-    predictor_use_rope: bool = True,
 ) -> PeakSetSIGReg:
     torch.manual_seed(0)
     model = PeakSetSIGReg(
@@ -43,7 +42,6 @@ def _build_model(
         jepa_mae_loss_weight=jepa_mae_loss_weight,
         masked_token_input_mode=masked_token_input_mode,
         masked_mz_sentinel=masked_mz_sentinel,
-        predictor_use_rope=predictor_use_rope,
     )
     model.eval()
     return model
@@ -381,21 +379,6 @@ def test_predictor_output_is_independent_from_encoder_positions():
     )
 
     assert torch.allclose(out_1, out_2)
-
-
-@torch.no_grad()
-def test_predictor_use_rope_setting_does_not_change_baseline_predictor_math():
-    torch.manual_seed(0)
-    model_with_setting = _build_model(predictor_use_rope=True)
-    torch.manual_seed(0)
-    model_without_setting = _build_model(predictor_use_rope=False)
-    predictor_input = torch.randn(1, 6, model_with_setting.model_dim)
-    visible_mask = torch.ones(1, 6, dtype=torch.bool)
-
-    out_a = model_with_setting.predict_masked_targets(predictor_input, visible_mask)
-    out_b = model_without_setting.predict_masked_targets(predictor_input, visible_mask)
-
-    torch.testing.assert_close(out_a, out_b)
 
 
 @torch.no_grad()

@@ -42,7 +42,7 @@ python input_pipeline.py configs/gems_a_dataset.py
 
 ### Model (PeakSetSIGReg in `models/model.py`)
 
-- **PeakSetEncoder**: raw scalar peak features (`mz`, `intensity`, `log1p(intensity)`) -> MLP embedder -> N non-causal TransformerBlocks -> RMSNorm. Uses mass-aware RoPE on m/z only.
+- **PeakSetEncoder**: raw scalar peak features (`mz`, `intensity`, `log1p(intensity)`) -> MLP embedder -> N non-causal TransformerBlocks -> RMSNorm.
 - **Encoder**: raw scalar peak features (`mz`, `intensity`) -> Fourier/MLP embedder -> non-causal Transformer blocks.
 - **Targets / Predictor**: shared encoder target states supervise masked-token prediction; predictor maps visible context tokens to target-space latents.
 - **SIGReg**: optional regularizer on learned representations.
@@ -90,8 +90,7 @@ Native-shard based with auto-download from HuggingFace. `GemsNativeDataModule` m
 
 ## Notebook Notes
 
-- Legacy notebooks that reference `FourierFeatures` are historical analyses from before the mass-aware RoPE migration.
-- Current evaluation notebook for the active architecture is `notebooks/mass_aware_rope_evaluation.ipynb` (executed copy saved via nbconvert as `notebooks/mass_aware_rope_evaluation.executed.ipynb`).
+- Legacy notebooks that reference `FourierFeatures` are historical analyses.
 
 ## Key Dependencies
 
