@@ -235,8 +235,11 @@ def _build_predictor(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
     else:
         model.encoder_to_predictor_proj = nn.Identity()
 
+    model.num_predictor_input_tokens = model.num_peak_tokens + int(
+        model.encoder_use_cls_token
+    )
     model.predictor_position_embedding = _build_frozen_position_embedding(
-        model.num_peak_tokens,
+        model.num_predictor_input_tokens,
         model.model_dim,
     )
     if model.predictor_num_register_tokens > 0:

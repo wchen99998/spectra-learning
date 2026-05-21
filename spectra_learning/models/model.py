@@ -66,6 +66,7 @@ class PeakSetSIGReg(
     ema_teacher_schedule_peak_fraction: float
     ema_teacher_schedule: str
     num_peak_tokens: int
+    num_predictor_input_tokens: int
 
     encoder: PeakSetEncoder
     teacher_encoder: PeakSetEncoder | None

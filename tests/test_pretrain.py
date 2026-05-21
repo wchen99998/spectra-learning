@@ -682,11 +682,12 @@ class BlockJEPATests(unittest.TestCase):
             valid_mask=peak_valid_mask,
             visible_mask=context_mask,
         )
-        context_emb, _ = model.encoder.split_peak_and_cls(context_encoded)
+        context_emb, context_cls_emb = model.encoder.split_peak_and_cls(context_encoded)
         _, predictor_output = model._predict_augmented_targets(
             context_emb,
             context_mask,
             target_masks,
+            context_cls_emb=context_cls_emb,
         )
         expected_masked_prediction_loss = (
             model._embedding_loss(predictor_output, teacher_targets.unsqueeze(1))

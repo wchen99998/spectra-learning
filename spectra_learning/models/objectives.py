@@ -95,6 +95,7 @@ class ObjectiveMixin:
         context_emb: torch.Tensor,
         context_mask: torch.Tensor,
         target_masks: torch.Tensor,
+        context_cls_emb: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch_size, num_target_blocks, num_peaks = target_masks.shape
         context_mask_by_view = context_mask.unsqueeze(1)
@@ -115,12 +116,36 @@ class ObjectiveMixin:
                 predictor_input,
             )
         predictor_visible_mask = (context_mask_by_view | target_masks).reshape(
-            batch_size * num_target_blocks,
+            batch_size,
+            num_target_blocks,
             num_peaks,
+        )
+        if context_cls_emb is not None:
+            cls_input = context_cls_emb[:, None, None, :].expand(
+                -1,
+                num_target_blocks,
+                -1,
+                -1,
+            )
+            predictor_input = torch.cat([predictor_input, cls_input], dim=2)
+            cls_visible_mask = torch.ones(
+                batch_size,
+                num_target_blocks,
+                1,
+                device=context_mask.device,
+                dtype=torch.bool,
+            )
+            predictor_visible_mask = torch.cat(
+                [predictor_visible_mask, cls_visible_mask],
+                dim=2,
+            )
+        predictor_visible_mask = predictor_visible_mask.reshape(
+            batch_size * num_target_blocks,
+            predictor_visible_mask.shape[2],
         )
         flat_predictor_input = predictor_input.reshape(
             batch_size * num_target_blocks,
-            num_peaks,
+            predictor_input.shape[2],
             -1,
         )
         predictor_features = self.predict_masked_target_features(
@@ -130,9 +155,10 @@ class ObjectiveMixin:
         predictor_features = predictor_features.reshape(
             batch_size,
             num_target_blocks,
-            num_peaks,
+            predictor_input.shape[2],
             -1,
         )
+        predictor_features = predictor_features[:, :, :num_peaks]
         predictor_output = self.project_targets(predictor_features)
         return predictor_features, predictor_output
 

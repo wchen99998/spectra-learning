@@ -136,6 +136,7 @@ class ForwardMixin:
             teacher_peak_emb,
             teacher_cls_emb,
             context_emb,
+            context_cls_emb,
         ) = self._encode_augmented_teacher_and_context(
             peak_mz,
             peak_intensity,
@@ -148,6 +149,7 @@ class ForwardMixin:
             context_emb,
             context_mask,
             target_masks,
+            context_cls_emb=context_cls_emb,
         )
         teacher_target_features_normalized = self._apply_jepa_target_normalization(
             teacher_target_features.detach()
@@ -270,7 +272,7 @@ class ForwardMixin:
             visible_mask=context_visible_mask,
             precursor_mz=precursor_mz,
         )
-        context_emb, _ = self._split_encoder_output(
+        context_emb, context_cls_emb = self._split_encoder_output(
             self.encoder,
             context_encoded,
             peak_valid_mask,
@@ -279,6 +281,9 @@ class ForwardMixin:
             context_emb,
             context_mask,
             target_masks,
+            context_cls_emb=(
+                context_cls_emb if self.encoder.use_cls_token else None
+            ),
         )
         mae_term, mae_metrics = self._mae_metrics(
             predictor_output,

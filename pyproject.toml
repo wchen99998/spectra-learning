@@ -28,24 +28,6 @@ explicit = true
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'linux'" }]
 
-[tool.pyrefly]
-preset = "default"
-project-includes = [
-    "configs",
-    "scripts",
-    "spectra_learning",
-    "tests",
-    "input_pipeline_temporal.py",
-    "modal_train.py",
-    "train.py",
-    "train_temporal.py",
-    "tune.py",
-]
-python-interpreter-path = ".venv/bin/python"
-python-platform = "linux"
-python-version = "3.12.11"
-tensor-shapes = true
-
 [dependency-groups]
 dev = [
     "pyrefly==1.0.0",

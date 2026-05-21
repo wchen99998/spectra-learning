@@ -206,7 +206,13 @@ class TargetProjectionMixin:
         context_mask: torch.Tensor,
         target_masks: torch.Tensor,
         precursor_mz: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+    ]:
         batch_size = peak_mz.shape[0]
         context_mz, context_intensity, context_visible_mask = self._context_encoder_inputs(
             peak_mz,
@@ -239,7 +245,7 @@ class TargetProjectionMixin:
                 teacher_encoded,
                 peak_valid_mask,
             )
-            context_emb, _ = self._split_encoder_output(
+            context_emb, context_cls_emb = self._split_encoder_output(
                 self.encoder,
                 context_encoded,
                 peak_valid_mask,
@@ -249,6 +255,7 @@ class TargetProjectionMixin:
                 teacher_peak_emb,
                 teacher_cls_emb,
                 context_emb,
+                context_cls_emb if self.encoder.use_cls_token else None,
             )
         encoded, teacher_peak_outputs = self.encoder.forward_with_block_outputs(
             torch.cat([peak_mz, context_mz], dim=0),
@@ -271,12 +278,18 @@ class TargetProjectionMixin:
             encoded[:batch_size],
             peak_valid_mask,
         )
-        context_emb, _ = self._split_encoder_output(
+        context_emb, context_cls_emb = self._split_encoder_output(
             self.encoder,
             encoded[batch_size:],
             peak_valid_mask,
         )
-        return teacher_target_features, teacher_peak_emb, teacher_cls_emb, context_emb
+        return (
+            teacher_target_features,
+            teacher_peak_emb,
+            teacher_cls_emb,
+            context_emb,
+            context_cls_emb if self.encoder.use_cls_token else None,
+        )
 
     def _compute_pooled_teacher_peak_targets(
         self: Any,
