@@ -83,6 +83,26 @@ def test_intensity_aware_masks_handle_sparse_rows() -> None:
     assert not (targets & context.unsqueeze(1)).any()
 
 
+def test_intensity_aware_masks_can_use_peak_count_fractions() -> None:
+    valid, intensity, mz_da = _toy_spectra()
+
+    torch.manual_seed(2)
+    context, targets = sample_intensity_aware_masks_torch(
+        valid,
+        intensity,
+        mz_da,
+        num_target_blocks=1,
+        context_fraction=0.7,
+        target_fraction=0.3,
+        tail_target_mix=1.0,
+        local_gap_probability=0.0,
+    )
+
+    assert torch.equal(context.sum(dim=1), torch.full((2,), 11))
+    assert torch.equal(targets.sum(dim=(1, 2)), torch.full((2,), 5))
+    assert not (targets & context.unsqueeze(1)).any()
+
+
 def test_gems_batch_collator_generates_intensity_aware_masks_with_precursor() -> None:
     collator = gems.GemsBatchCollator(
         augment=True,

@@ -18,6 +18,8 @@ AWARE_MIXED_MASK_CONFIG = {
     "local_gap_da": 1.0,
     "local_gap_probability": 0.50,
     "min_unused_mass": 0.09,
+    "context_fraction": 0.0,
+    "target_fraction": 0.0,
 }
 
 
@@ -77,6 +79,24 @@ def _weighted_sample_until(
     return mask
 
 
+def _weighted_sample_count(
+    *,
+    indices: torch.Tensor,
+    weights: torch.Tensor,
+    count: int,
+    like: torch.Tensor,
+) -> torch.Tensor:
+    mask = torch.zeros_like(like, dtype=torch.bool)
+    count = min(count, indices.numel())
+    if count == 0:
+        return mask
+    selected = indices[
+        torch.multinomial(weights / weights.sum(), count, replacement=False)
+    ]
+    mask[selected] = True
+    return mask
+
+
 def _weighted_fill_context_until(
     *,
     base_mask: torch.Tensor,
@@ -112,6 +132,28 @@ def _weighted_fill_context_until(
             weighted_log_mass,
         ) >= total_min_eff:
             break
+    return mask
+
+
+def _weighted_fill_context_count(
+    *,
+    base_mask: torch.Tensor,
+    indices: torch.Tensor,
+    weights: torch.Tensor,
+    total_count: int,
+) -> torch.Tensor:
+    mask = base_mask.clone()
+    remaining = total_count - int(mask.sum().item())
+    if remaining <= 0:
+        return mask
+    selected = indices[
+        torch.multinomial(
+            weights / weights.sum(),
+            min(remaining, indices.numel()),
+            replacement=False,
+        )
+    ]
+    mask[selected] = True
     return mask
 
 
@@ -164,6 +206,8 @@ def sample_intensity_aware_masks_torch(
     local_gap_da: float = AWARE_MIXED_MASK_CONFIG["local_gap_da"],
     local_gap_probability: float = AWARE_MIXED_MASK_CONFIG["local_gap_probability"],
     min_unused_mass: float = AWARE_MIXED_MASK_CONFIG["min_unused_mass"],
+    context_fraction: float = AWARE_MIXED_MASK_CONFIG["context_fraction"],
+    target_fraction: float = AWARE_MIXED_MASK_CONFIG["target_fraction"],
     allow_target_overlap: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     device = peak_valid_mask.device
@@ -210,7 +254,14 @@ def sample_intensity_aware_masks_torch(
         context_mass = float(torch.tensor(0.58 - 0.10 * tau + 0.05 * h).clamp(0.42, 0.68).item())
         target_count_cap = max(
             1,
-            round(float(valid_idx.numel()) * (0.12 + 0.10 * tau)),
+            round(
+                float(valid_idx.numel())
+                * (
+                    target_fraction
+                    if target_fraction > 0.0
+                    else 0.12 + 0.10 * tau
+                )
+            ),
         )
         base_target_candidates = torch.cat(
             [medium_idx, high_idx[~context_mask[row_idx, high_idx]]]
@@ -235,14 +286,22 @@ def sample_intensity_aware_masks_torch(
                 beta=beta_target,
                 eps=eps_target,
             )
-            target_masks[row_idx, target_idx] = _weighted_sample_until(
-                indices=available_targets,
-                p_row=p_row,
-                weights=weights,
-                mass_target=target_mass,
-                min_eff=min_eff_target,
-                max_count=target_count_cap,
-            )
+            if target_fraction > 0.0:
+                target_masks[row_idx, target_idx] = _weighted_sample_count(
+                    indices=available_targets,
+                    weights=weights,
+                    count=target_count_cap,
+                    like=p_row,
+                )
+            else:
+                target_masks[row_idx, target_idx] = _weighted_sample_until(
+                    indices=available_targets,
+                    p_row=p_row,
+                    weights=weights,
+                    mass_target=target_mass,
+                    min_eff=min_eff_target,
+                    max_count=target_count_cap,
+                )
             if not allow_target_overlap:
                 available_targets = available_targets[
                     ~target_masks[row_idx, target_idx, available_targets]
@@ -268,16 +327,31 @@ def sample_intensity_aware_masks_torch(
             beta=beta_context,
             eps=eps_context,
         )
-        target_union_mass = float(p_row[target_union].sum().item())
-        capped_context_mass = min(context_mass, max(0.0, 1.0 - target_union_mass - min_unused_mass))
-        context_mask[row_idx] = _weighted_fill_context_until(
-            base_mask=context_mask[row_idx],
-            indices=context_candidates,
-            p_row=p_row,
-            weights=weights,
-            total_mass_target=capped_context_mass,
-            total_min_eff=min_eff_context,
-            max_total_mass=capped_context_mass,
-        )
+        if context_fraction > 0.0:
+            context_count = min(
+                round(float(valid_idx.numel()) * context_fraction),
+                int((row_valid & ~target_union).sum().item()),
+            )
+            context_mask[row_idx] = _weighted_fill_context_count(
+                base_mask=context_mask[row_idx],
+                indices=context_candidates,
+                weights=weights,
+                total_count=context_count,
+            )
+        else:
+            target_union_mass = float(p_row[target_union].sum().item())
+            capped_context_mass = min(
+                context_mass,
+                max(0.0, 1.0 - target_union_mass - min_unused_mass),
+            )
+            context_mask[row_idx] = _weighted_fill_context_until(
+                base_mask=context_mask[row_idx],
+                indices=context_candidates,
+                p_row=p_row,
+                weights=weights,
+                total_mass_target=capped_context_mass,
+                total_min_eff=min_eff_context,
+                max_total_mass=capped_context_mass,
+            )
 
     return context_mask, target_masks
