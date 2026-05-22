@@ -50,6 +50,16 @@ def test_mae_mode_does_not_name_jepa_target_layers() -> None:
     ) == []
 
 
+def test_mae_teacher_jepa_mode_does_not_name_jepa_target_layers() -> None:
+    assert _target_parts(
+        {
+            "training_mode": "mae_teacher_jepa",
+            "jepa_target_layers": [1, 2],
+            "model_dim": 32,
+        }
+    ) == []
+
+
 def test_architecture_parts_name_disabled_fourier_features() -> None:
     parts = _architecture_parts(
         {

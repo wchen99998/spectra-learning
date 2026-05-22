@@ -41,6 +41,7 @@ import modal
 MINUTES = 60
 HOURS = 60 * MINUTES
 DEFAULT_GPU = "H100"
+B200_GPU = "B200"
 PROBE_GPU = "L4"
 FAST_PROBE_GPU = "H100"
 PROJECT_ROOT = "/root/spectra-learning"
@@ -651,6 +652,48 @@ def train(
     workdir: str = "",
     workdir_tag: str = "",
 ):
+    return _train_single_gpu(
+        config_path=config_path,
+        overrides_json=overrides_json,
+        workdir=workdir,
+        workdir_tag=workdir_tag,
+        gpu_label=DEFAULT_GPU,
+    )
+
+
+@app.function(
+    image=image,
+    volumes=volume_mounts,
+    cpu=8.0,
+    memory=65536,  # 64 GiB
+    gpu=B200_GPU,
+    timeout=TRAIN_TIMEOUT_HOURS * HOURS,
+    secrets=[huggingface_secret, wandb_secret],
+    single_use_containers=True,
+)
+def train_b200(
+    config_path: str = "configs/gems_small.py",
+    overrides_json: str = "{}",
+    workdir: str = "",
+    workdir_tag: str = "",
+):
+    return _train_single_gpu(
+        config_path=config_path,
+        overrides_json=overrides_json,
+        workdir=workdir,
+        workdir_tag=workdir_tag,
+        gpu_label=B200_GPU,
+    )
+
+
+def _train_single_gpu(
+    *,
+    config_path: str,
+    overrides_json: str,
+    workdir: str,
+    workdir_tag: str,
+    gpu_label: str,
+):
     import logging
     import os
     import sys
@@ -689,6 +732,7 @@ def train(
     workdir_path.mkdir(parents=True, exist_ok=True)
 
     logging.info("Run: %s", run_name)
+    logging.info("GPU: %s", gpu_label)
     logging.info("Workdir: %s", workdir_path)
     if overrides:
         logging.info("Overrides: %s", overrides)
@@ -1469,6 +1513,15 @@ def _modal_spawn(function: object, **kwargs: Any) -> Any:
     return cast(Any, function).spawn(**kwargs)
 
 
+def _single_gpu_trainer(gpu: str):
+    gpu_key = gpu.lower()
+    if gpu_key == "h100":
+        return train
+    if gpu_key == "b200":
+        return train_b200
+    raise ValueError("--gpu must be one of: H100, B200")
+
+
 # ---------------------------------------------------------------------------
 # CLI entrypoint
 # ---------------------------------------------------------------------------
@@ -1478,6 +1531,7 @@ def main(
     workdir: str = "",
     sweep: str = "",
     overrides: str = "{}",
+    gpu: str = DEFAULT_GPU,
     workdir_tag: str = "",
     detach: bool = False,
     run_8xh100: bool = False,
@@ -1532,6 +1586,7 @@ def main(
         return
 
     overrides = _with_async_probe_override(overrides, async_probes)
+    single_gpu_trainer = _single_gpu_trainer(gpu)
 
     if benchmark_4gpu:
         gpu_key = benchmark_4gpu.lower()
@@ -1763,7 +1818,7 @@ def main(
                 merged = {**base_overrides, **exp}
                 handles.append(
                     _modal_spawn(
-                        train,
+                        single_gpu_trainer,
                         config_path=config,
                         overrides_json=json.dumps(merged),
                         workdir="",
@@ -1784,7 +1839,7 @@ def main(
                 merged = {**base_overrides, **exp}
                 handles.append(
                     _modal_spawn(
-                        train,
+                        single_gpu_trainer,
                         config_path=config,
                         overrides_json=json.dumps(merged),
                         workdir="",
@@ -1801,7 +1856,7 @@ def main(
         print("Data ready.\n")
         if detach:
             handle = _modal_spawn(
-                train,
+                single_gpu_trainer,
                 config_path=config,
                 overrides_json=overrides,
                 workdir=workdir,
@@ -1810,7 +1865,7 @@ def main(
             print(f"spawned: {handle.object_id}")
         else:
             result = _modal_remote(
-                train,
+                single_gpu_trainer,
                 config_path=config,
                 overrides_json=overrides,
                 workdir=workdir,

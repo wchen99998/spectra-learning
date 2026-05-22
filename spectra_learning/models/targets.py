@@ -28,7 +28,7 @@ class TargetProjectionMixin:
         self: Any,
         x: torch.Tensor,
     ) -> torch.Tensor:
-        return self._apply_group_target_normalization(x, self.model_dim)
+        return self._apply_group_target_normalization(x, self.jepa_target_group_dim)
 
     def _append_predictor_register_tokens(
         self: Any,

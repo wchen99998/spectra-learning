@@ -823,6 +823,47 @@ class BlockJEPATests(unittest.TestCase):
             all(not param.requires_grad for param in teacher_encoder.parameters())
         )
 
+    def test_mae_teacher_jepa_uses_separate_frozen_teacher_config_last_layer(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            teacher_config_path = f"{tmpdir}/teacher_config.py"
+            with open(teacher_config_path, "w") as f:
+                f.write(
+                    "from ml_collections import config_dict\n\n"
+                    "def get_config():\n"
+                    "    cfg = config_dict.ConfigDict()\n"
+                    "    cfg.training_mode = 'mae'\n"
+                    "    cfg.model_dim = 24\n"
+                    "    cfg.encoder_num_layers = 2\n"
+                    "    cfg.encoder_num_heads = 4\n"
+                    "    cfg.encoder_num_kv_heads = 4\n"
+                    "    cfg.feature_mlp_hidden_dim = 16\n"
+                    "    cfg.encoder_fourier_num_freqs = 8\n"
+                    "    return cfg\n"
+                )
+            model = self._build_model(
+                training_mode="mae_teacher_jepa",
+                frozen_teacher_config_path=teacher_config_path,
+                encoder_num_layers=1,
+                jepa_target_layers=[1, 2],
+                jepa_target_normalization="zscore",
+                target_projector_dim=-1,
+            )
+
+        self.assertEqual(model.model_dim, 32)
+        self.assertEqual(model.teacher_model_dim, 24)
+        self.assertEqual(model.teacher_encoder_num_layers, 2)
+        self.assertEqual(model.jepa_target_layers, [2])
+        self.assertEqual(model.jepa_target_dim, 24)
+        self.assertEqual(model.jepa_target_group_dim, 24)
+        self.assertEqual(model.masked_latent_readout.out_features, 24)
+        self.assertIsNotNone(model.teacher_encoder)
+
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+        metrics = model.forward_augmented(batch)
+
+        self.assertIn("masked_prediction_loss", metrics)
+        self.assertTrue(torch.isfinite(metrics["loss"]).item())
+
     def test_forward_augmented_uses_single_encoder_pass(self):
         model = self._build_model(masked_token_loss_weight=1.0)
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 from torch import nn
 
+from spectra_learning.config import load_config
 from spectra_learning.models.common import (
     _build_frozen_position_embedding,
     _build_non_causal_blocks,
@@ -47,16 +48,27 @@ SUPPORTED_MASKED_TOKEN_INPUT_MODES = {"latent_token", "mz_sentinel"}
 
 
 def configure_peak_set_sigreg(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
+    frozen_teacher_cfg = _load_frozen_teacher_settings(cfg)
     _configure_dimensions(model, cfg)
-    _configure_targets(model, cfg)
+    _configure_targets(model, cfg, frozen_teacher_cfg)
     _configure_losses(model, cfg)
     _build_encoder(model, cfg)
-    _build_teacher(model, cfg)
+    _build_teacher(model, cfg, frozen_teacher_cfg)
     _build_predictor(model, cfg)
     _build_target_projectors(model, cfg)
     _build_jepa_mae_heads(model)
     _build_regularizer(model, cfg)
     _build_temporal_predictor(model, cfg)
+
+
+def _load_frozen_teacher_settings(
+    cfg: PeakSetSIGRegSettings,
+) -> PeakSetSIGRegSettings | None:
+    if cfg.training_mode.lower() != "mae_teacher_jepa":
+        return None
+    if cfg.frozen_teacher_config_path is None:
+        return None
+    return PeakSetSIGRegSettings.from_config(load_config(cfg.frozen_teacher_config_path))
 
 
 def _configure_dimensions(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
@@ -81,27 +93,43 @@ def _configure_dimensions(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> N
     model.covariance_pooling_loss_weight = cfg.covariance_pooling_loss_weight
 
 
-def _configure_targets(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
+def _configure_targets(
+    model: PeakSetSIGReg,
+    cfg: PeakSetSIGRegSettings,
+    frozen_teacher_cfg: PeakSetSIGRegSettings | None,
+) -> None:
     model.jepa_num_target_blocks = cfg.jepa_num_target_blocks
     if model.jepa_num_target_blocks < 1:
         raise ValueError("jepa_num_target_blocks must be >= 1")
-    model.jepa_target_layers = (
-        [model.encoder_num_layers]
-        if cfg.jepa_target_layers is None
-        else [layer_idx for layer_idx in cfg.jepa_target_layers]
+    model.teacher_model_dim = (
+        frozen_teacher_cfg.model_dim if frozen_teacher_cfg is not None else model.model_dim
     )
+    model.teacher_encoder_num_layers = (
+        frozen_teacher_cfg.encoder_num_layers
+        if frozen_teacher_cfg is not None
+        else model.encoder_num_layers
+    )
+    model.jepa_target_group_dim = model.teacher_model_dim
+    if model.training_mode == "mae_teacher_jepa":
+        model.jepa_target_layers = [model.teacher_encoder_num_layers]
+    else:
+        model.jepa_target_layers = (
+            [model.teacher_encoder_num_layers]
+            if cfg.jepa_target_layers is None
+            else [layer_idx for layer_idx in cfg.jepa_target_layers]
+        )
     if not model.jepa_target_layers:
         raise ValueError("jepa_target_layers must not be empty")
     if (
         min(model.jepa_target_layers) < 1
-        or max(model.jepa_target_layers) > model.encoder_num_layers
+        or max(model.jepa_target_layers) > model.teacher_encoder_num_layers
     ):
-        raise ValueError("jepa_target_layers must be within encoder depth")
+        raise ValueError("jepa_target_layers must be within teacher encoder depth")
 
     model.num_jepa_target_layers = len(model.jepa_target_layers)
-    model.jepa_target_dim = model.num_jepa_target_layers * model.model_dim
+    model.jepa_target_dim = model.num_jepa_target_layers * model.teacher_model_dim
     raw_target_projector_dim = (
-        model.model_dim
+        model.teacher_model_dim
         if cfg.target_projector_dim is None
         else cfg.target_projector_dim
     )
@@ -142,11 +170,18 @@ def _configure_losses(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
 
 
 def _build_encoder(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
-    num_peak_tokens = cfg.num_peaks + int(model.use_precursor_token)
-    model.num_peak_tokens = num_peak_tokens
-    model.encoder = PeakSetEncoder(
-        model_dim=model.model_dim,
-        num_layers=model.encoder_num_layers,
+    model.num_peak_tokens = _num_peak_tokens(cfg)
+    model.encoder = _build_peak_set_encoder(cfg)
+
+
+def _num_peak_tokens(cfg: PeakSetSIGRegSettings) -> int:
+    return cfg.num_peaks + int(cfg.use_precursor_token)
+
+
+def _build_peak_set_encoder(cfg: PeakSetSIGRegSettings) -> PeakSetEncoder:
+    return PeakSetEncoder(
+        model_dim=cfg.model_dim,
+        num_layers=cfg.encoder_num_layers,
         num_heads=cfg.encoder_num_heads,
         num_kv_heads=cfg.encoder_num_kv_heads,
         attention_mlp_multiple=cfg.attention_mlp_multiple,
@@ -163,14 +198,14 @@ def _build_encoder(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
         fourier_input_scale=cfg.encoder_fourier_input_scale,
         use_fourier_features=cfg.encoder_use_fourier_features,
         qk_norm=cfg.encoder_qk_norm,
-        norm_type=model.norm_type,
-        norm_eps=model.norm_eps,
+        norm_type=cfg.norm_type.lower(),
+        norm_eps=cfg.norm_eps,
         use_position_embedding=cfg.encoder_use_position_embedding,
         apply_final_norm=cfg.encoder_apply_final_norm,
-        num_peaks=num_peak_tokens,
-        use_cls_token=model.encoder_use_cls_token,
+        num_peaks=_num_peak_tokens(cfg),
+        use_cls_token=cfg.encoder_use_cls_token,
         num_register_tokens=cfg.encoder_num_register_tokens,
-        use_precursor_token=model.use_precursor_token,
+        use_precursor_token=cfg.use_precursor_token,
         spectral_bias_relative_kind=cfg.spectral_bias_relative_kind,
         spectral_bias_use_precursor=cfg.spectral_bias_use_precursor,
         spectral_bias_use_intensity=cfg.spectral_bias_use_intensity,
@@ -192,7 +227,11 @@ def _build_encoder(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
     )
 
 
-def _build_teacher(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
+def _build_teacher(
+    model: PeakSetSIGReg,
+    cfg: PeakSetSIGRegSettings,
+    frozen_teacher_cfg: PeakSetSIGRegSettings | None,
+) -> None:
     model.use_frozen_teacher = model.training_mode == "mae_teacher_jepa"
     model.use_ema_teacher = cfg.use_ema_teacher and model.training_mode == "jepa"
     model.ema_teacher_momentum_start = cfg.ema_teacher_momentum_start
@@ -213,8 +252,11 @@ def _build_teacher(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
             "ema_teacher_schedule must be one of "
             "('constant', 'linear', 'cosine', 'slow-fast-slow')"
         )
-    if model.use_ema_teacher or model.use_frozen_teacher:
+    if model.use_ema_teacher:
         model.teacher_encoder = copy.deepcopy(model.encoder)
+        model.teacher_encoder.requires_grad_(False)
+    elif model.use_frozen_teacher:
+        model.teacher_encoder = _build_peak_set_encoder(frozen_teacher_cfg or cfg)
         model.teacher_encoder.requires_grad_(False)
     else:
         model.teacher_encoder = None

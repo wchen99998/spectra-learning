@@ -58,6 +58,9 @@ class PeakSetSIGReg(
     jepa_mae_num_intensity_bins: int
     use_frozen_teacher: bool
     use_ema_teacher: bool
+    teacher_model_dim: int
+    teacher_encoder_num_layers: int
+    jepa_target_group_dim: int
     ema_teacher_momentum_start: float
     ema_teacher_momentum_mid: float
     ema_teacher_momentum_final: float

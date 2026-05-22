@@ -82,6 +82,7 @@ class PeakSetSIGRegSettings:
     train_covariance_pooling: bool = True
     covariance_pooling_loss_weight: float = 1.0
     use_ema_teacher: bool = False
+    frozen_teacher_config_path: str | None = None
     ema_teacher_momentum_start: float = 0.996
     ema_teacher_momentum_mid: float | None = None
     ema_teacher_momentum_final: float | None = None
@@ -252,6 +253,7 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "train_covariance_pooling": bool,
     "covariance_pooling_loss_weight": float,
     "use_ema_teacher": bool,
+    "frozen_teacher_config_path": lambda value: None if value is None else str(value),
     "ema_teacher_momentum_start": float,
     "ema_teacher_momentum_mid": _optional_float,
     "ema_teacher_momentum_final": _optional_float,
