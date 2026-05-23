@@ -80,7 +80,8 @@ def _configure_dimensions(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> N
         cfg.predictor_dim if cfg.predictor_dim is not None else model.model_dim
     )
     model.encoder_num_layers = cfg.encoder_num_layers
-    model.encoder_use_cls_token = cfg.encoder_use_cls_token
+    model.encoder_num_cls_tokens = _num_cls_tokens(cfg)
+    model.encoder_use_cls_token = model.encoder_num_cls_tokens > 0
     model.use_precursor_token = cfg.use_precursor_token
     model.norm_type = cfg.norm_type.lower()
     model.norm_eps = cfg.norm_eps
@@ -178,7 +179,16 @@ def _num_peak_tokens(cfg: PeakSetSIGRegSettings) -> int:
     return cfg.num_peaks + int(cfg.use_precursor_token)
 
 
+def _num_cls_tokens(cfg: PeakSetSIGRegSettings) -> int:
+    return (
+        int(cfg.encoder_use_cls_token)
+        if cfg.encoder_num_cls_tokens is None
+        else cfg.encoder_num_cls_tokens
+    )
+
+
 def _build_peak_set_encoder(cfg: PeakSetSIGRegSettings) -> PeakSetEncoder:
+    num_cls_tokens = _num_cls_tokens(cfg)
     return PeakSetEncoder(
         model_dim=cfg.model_dim,
         num_layers=cfg.encoder_num_layers,
@@ -203,7 +213,8 @@ def _build_peak_set_encoder(cfg: PeakSetSIGRegSettings) -> PeakSetEncoder:
         use_position_embedding=cfg.encoder_use_position_embedding,
         apply_final_norm=cfg.encoder_apply_final_norm,
         num_peaks=_num_peak_tokens(cfg),
-        use_cls_token=cfg.encoder_use_cls_token,
+        use_cls_token=num_cls_tokens > 0,
+        num_cls_tokens=num_cls_tokens,
         num_register_tokens=cfg.encoder_num_register_tokens,
         use_precursor_token=cfg.use_precursor_token,
         spectral_bias_relative_kind=cfg.spectral_bias_relative_kind,
@@ -277,8 +288,8 @@ def _build_predictor(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
     else:
         model.encoder_to_predictor_proj = nn.Identity()
 
-    model.num_predictor_input_tokens = model.num_peak_tokens + int(
-        model.encoder_use_cls_token
+    model.num_predictor_input_tokens = (
+        model.num_peak_tokens + model.encoder_num_cls_tokens
     )
     model.predictor_position_embedding = _build_frozen_position_embedding(
         model.num_predictor_input_tokens,

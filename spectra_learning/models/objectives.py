@@ -121,7 +121,9 @@ class ObjectiveMixin:
             num_peaks,
         )
         if context_cls_emb is not None:
-            cls_input = context_cls_emb[:, None, None, :].expand(
+            if context_cls_emb.ndim == 2:
+                context_cls_emb = context_cls_emb.unsqueeze(1)
+            cls_input = context_cls_emb[:, None, :, :].expand(
                 -1,
                 num_target_blocks,
                 -1,
@@ -131,7 +133,7 @@ class ObjectiveMixin:
             cls_visible_mask = torch.ones(
                 batch_size,
                 num_target_blocks,
-                1,
+                context_cls_emb.shape[1],
                 device=context_mask.device,
                 dtype=torch.bool,
             )
@@ -322,7 +324,8 @@ class ObjectiveMixin:
         embeddings: torch.Tensor,
         valid_mask: torch.Tensor,
     ) -> torch.Tensor:
-        if embeddings.shape[1] == valid_mask.shape[1] + 1:
-            embeddings = embeddings[:, :-1]
+        num_extra_tokens = embeddings.shape[1] - valid_mask.shape[1]
+        if num_extra_tokens > 0:
+            embeddings = embeddings[:, : valid_mask.shape[1]]
         mask = valid_mask.unsqueeze(-1).float()
         return (embeddings * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)

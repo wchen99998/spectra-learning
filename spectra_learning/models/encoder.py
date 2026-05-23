@@ -19,6 +19,7 @@ class PeakSetEncoder(nn.Module):
     cls_token: nn.Parameter | None
     register_tokens: nn.Parameter | None
     spectral_attn_biases: nn.ModuleList | None
+    num_cls_tokens: int
 
     def __init__(
         self,
@@ -47,6 +48,7 @@ class PeakSetEncoder(nn.Module):
         num_peaks: int = 64,
         use_position_embedding: bool = True,
         use_cls_token: bool = True,
+        num_cls_tokens: int | None = None,
         num_register_tokens: int = 0,
         use_precursor_token: bool = False,
         spectral_bias_relative_kind: str = "none",
@@ -71,7 +73,10 @@ class PeakSetEncoder(nn.Module):
         super().__init__()
         self.num_layers = num_layers
         norm_type = norm_type.lower()
-        self.use_cls_token = use_cls_token
+        self.num_cls_tokens = (
+            int(use_cls_token) if num_cls_tokens is None else num_cls_tokens
+        )
+        self.use_cls_token = self.num_cls_tokens > 0
         self.num_register_tokens = num_register_tokens
         self.use_precursor_token = use_precursor_token
         self.use_position_embedding = use_position_embedding
@@ -101,7 +106,12 @@ class PeakSetEncoder(nn.Module):
             model_dim,
         )
         if self.use_cls_token:
-            self.cls_token = nn.Parameter(torch.empty(model_dim))
+            cls_token_shape = (
+                (model_dim,)
+                if self.num_cls_tokens == 1
+                else (self.num_cls_tokens, model_dim)
+            )
+            self.cls_token = nn.Parameter(torch.empty(cls_token_shape))
             nn.init.trunc_normal_(self.cls_token, std=0.02)
         else:
             self.cls_token = None
@@ -174,7 +184,10 @@ class PeakSetEncoder(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         special_tokens = []
         if self.cls_token is not None:
-            cls = self.cls_token.view(1, 1, -1).expand(x.shape[0], -1, -1)
+            if self.cls_token.ndim == 1:
+                cls = self.cls_token.view(1, 1, -1).expand(x.shape[0], -1, -1)
+            else:
+                cls = self.cls_token.unsqueeze(0).expand(x.shape[0], -1, -1)
             special_tokens.append(cls.to(dtype=x.dtype))
         if self.register_tokens is not None:
             registers = self.register_tokens.unsqueeze(0).expand(x.shape[0], -1, -1)
@@ -216,7 +229,11 @@ class PeakSetEncoder(nn.Module):
         x: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.use_cls_token:
-            return x[:, :-1], x[:, -1]
+            peak_x = x[:, :-self.num_cls_tokens]
+            cls_x = x[:, -self.num_cls_tokens:]
+            if self.num_cls_tokens == 1:
+                return peak_x, cls_x[:, 0]
+            return peak_x, cls_x
         return x, x.mean(dim=1)
 
     def forward_with_block_outputs(
@@ -234,7 +251,7 @@ class PeakSetEncoder(nn.Module):
         seq_len = peak_mz.shape[1]
         selected = set(block_indices)
         selected_peak_outputs: dict[int, torch.Tensor] = {}
-        special_len = int(self.use_cls_token) + self.num_register_tokens
+        special_len = self.num_cls_tokens + self.num_register_tokens
         x, visible_mask = self._append_special_tokens(x, attn_mask)
         attn_mask = (
             create_visible_attention_mask(visible_mask)
@@ -261,8 +278,8 @@ class PeakSetEncoder(nn.Module):
             selected_peak_outputs[self.num_layers] = x[:, :seq_len]
         peak_x = x[:, :seq_len]
         if self.use_cls_token:
-            cls_x = x[:, seq_len]
-            output = torch.cat([peak_x, cls_x.unsqueeze(1)], dim=1)
+            cls_x = x[:, seq_len : seq_len + self.num_cls_tokens]
+            output = torch.cat([peak_x, cls_x], dim=1)
         else:
             output = peak_x
         return output, [selected_peak_outputs[idx] for idx in block_indices]

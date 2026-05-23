@@ -27,6 +27,7 @@ class PeakSetSIGReg(
     predictor_dim: int
     encoder_num_layers: int
     encoder_use_cls_token: bool
+    encoder_num_cls_tokens: int
     use_precursor_token: bool
     norm_type: str
     norm_eps: float

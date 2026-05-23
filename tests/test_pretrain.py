@@ -1124,6 +1124,35 @@ class BlockJEPATests(unittest.TestCase):
         self.assertEqual(peak_emb.shape, (3, 7, model.model_dim))
         self.assertTrue(torch.allclose(pooled, cls_emb))
 
+    def test_encoder_supports_multiple_cls_tokens(self):
+        model = self._build_model(
+            encoder_num_cls_tokens=3,
+            encoder_num_register_tokens=2,
+        )
+        batch = {
+            "peak_mz": torch.rand(3, 6),
+            "peak_intensity": torch.rand(3, 6),
+            "peak_valid_mask": torch.ones(3, 6, dtype=torch.bool),
+        }
+
+        peak_emb, cls_emb = model.encoder(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            valid_mask=batch["peak_valid_mask"],
+            visible_mask=batch["peak_valid_mask"],
+            return_cls_token=True,
+        )
+        encoded = model.encode(batch)
+        train_batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+        metrics = model.forward_augmented(train_batch)
+
+        self.assertEqual(model.encoder.num_cls_tokens, 3)
+        self.assertEqual(model.num_predictor_input_tokens, model.num_peak_tokens + 3)
+        self.assertEqual(peak_emb.shape, (3, 9, model.model_dim))
+        self.assertEqual(cls_emb.shape, (3, 3, model.model_dim))
+        self.assertTrue(torch.allclose(encoded, cls_emb))
+        self.assertTrue(torch.isfinite(metrics["loss"]).item())
+
     def test_encoder_cls_token_can_be_disabled(self):
         model = self._build_model(
             encoder_use_cls_token=False,

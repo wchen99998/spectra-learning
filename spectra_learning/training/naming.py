@@ -56,13 +56,23 @@ def _architecture_parts(config: Any) -> list[str]:
     norm = str(config.get("norm_type", "")).lower()
     if norm and norm != "rmsnorm":
         parts.append(norm)
-    if not bool(config.get("encoder_use_cls_token", True)):
+    num_cls_tokens = _encoder_num_cls_tokens(config)
+    if num_cls_tokens == 0:
         parts.append("no-cls")
+    elif num_cls_tokens != 1:
+        parts.append(f"cls{num_cls_tokens}")
     if int(config.get("encoder_num_register_tokens", 0)) == 0:
         parts.append("no-ereg")
     if int(config.get("predictor_num_register_tokens", 0)) == 0:
         parts.append("no-preg")
     return parts
+
+
+def _encoder_num_cls_tokens(config: Any) -> int:
+    configured = config.get("encoder_num_cls_tokens", None)
+    if configured is not None:
+        return int(configured)
+    return int(bool(config.get("encoder_use_cls_token", True)))
 
 
 def _training_mode_parts(config: Any) -> list[str]:

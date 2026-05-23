@@ -52,6 +52,7 @@ class PeakSetSIGRegSettings:
     encoder_apply_final_norm: bool = True
     predictor_apply_final_norm: bool = True
     encoder_use_cls_token: bool = True
+    encoder_num_cls_tokens: int | None = None
     use_precursor_token: bool = False
     spectral_bias_relative_kind: str = "none"
     spectral_bias_use_precursor: bool = False
@@ -153,6 +154,10 @@ def _apply_derived_defaults(values: dict[str, Any], config: Any) -> None:
 def _apply_dependent_defaults(values: dict[str, Any], config: Any) -> None:
     if not _config_has(config, "spectral_bias_mass_scale"):
         values["spectral_bias_mass_scale"] = values["encoder_fourier_input_scale"]
+    if values["encoder_num_cls_tokens"] is None:
+        values["encoder_num_cls_tokens"] = int(values["encoder_use_cls_token"])
+    else:
+        values["encoder_use_cls_token"] = values["encoder_num_cls_tokens"] > 0
 
 
 def _config_get(config: Any, key: str, default: Any) -> Any:
@@ -223,6 +228,7 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "encoder_apply_final_norm": bool,
     "predictor_apply_final_norm": bool,
     "encoder_use_cls_token": bool,
+    "encoder_num_cls_tokens": _optional_int,
     "use_precursor_token": bool,
     "spectral_bias_relative_kind": str,
     "spectral_bias_use_precursor": bool,
