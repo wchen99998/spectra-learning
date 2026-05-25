@@ -45,7 +45,6 @@ class PeakSetSIGRegSettings:
     sigreg_lambda: float = 0.02
     sigreg_precursor_scale: float = 1.0
     jepa_num_target_blocks: int = 2
-    encoder_qk_norm: bool = False
     norm_type: str = "rmsnorm"
     norm_eps: float = 1e-5
     encoder_use_position_embedding: bool = True
@@ -220,7 +219,6 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "sigreg_lambda": float,
     "sigreg_precursor_scale": float,
     "jepa_num_target_blocks": int,
-    "encoder_qk_norm": bool,
     "norm_type": str,
     "norm_eps": float,
     "encoder_use_position_embedding": bool,

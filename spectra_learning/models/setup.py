@@ -202,7 +202,6 @@ def _build_peak_set_encoder(cfg: PeakSetSIGRegSettings) -> PeakSetEncoder:
         fourier_trainable=cfg.encoder_fourier_trainable,
         fourier_input_scale=cfg.encoder_fourier_input_scale,
         use_fourier_features=cfg.encoder_use_fourier_features,
-        qk_norm=cfg.encoder_qk_norm,
         norm_type=cfg.norm_type.lower(),
         norm_eps=cfg.norm_eps,
         use_position_embedding=cfg.encoder_use_position_embedding,
@@ -305,7 +304,6 @@ def _build_predictor(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
         num_kv_heads=None,
         attention_mlp_multiple=cfg.attention_mlp_multiple,
         norm_eps=model.norm_eps,
-        qk_norm=cfg.encoder_qk_norm,
         norm_type=model.norm_type,
         dropout=cfg.predictor_dropout,
     )

@@ -114,8 +114,6 @@ class MsgPmaPool(torch.nn.Module):
         input_dim: int,
         num_seeds: int,
         num_heads: int,
-        qk_norm: bool = False,
-        norm_type: str = "layernorm",
     ) -> None:
         super().__init__()
         self.seed_vectors = torch.nn.Parameter(torch.empty(num_seeds, input_dim))
@@ -123,8 +121,6 @@ class MsgPmaPool(torch.nn.Module):
         self.cross_attention = CrossAttention(
             dim=input_dim,
             n_heads=num_heads,
-            qk_norm=qk_norm,
-            norm_type=norm_type,
         )
 
     def forward(
@@ -267,8 +263,6 @@ def _build_pooler(
                         _config_get(config, "encoder_num_heads", 8),
                     )
                 ),
-                qk_norm=bool(_config_get(config, "encoder_qk_norm", False)),
-                norm_type=str(_config_get(config, "norm_type", "layernorm")),
             ),
             model_dim,
         )

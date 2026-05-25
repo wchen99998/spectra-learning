@@ -41,7 +41,6 @@ class PeakSetEncoder(nn.Module):
         fourier_trainable: bool = False,
         fourier_input_scale: float = 1000.0,
         use_fourier_features: bool = True,
-        qk_norm: bool = False,
         norm_type: str = "rmsnorm",
         norm_eps: float = 1e-5,
         apply_final_norm: bool = True,
@@ -129,7 +128,6 @@ class PeakSetEncoder(nn.Module):
             num_kv_heads=num_kv_heads,
             attention_mlp_multiple=attention_mlp_multiple,
             norm_eps=norm_eps,
-            qk_norm=qk_norm,
             norm_type=norm_type,
         )
         self.final_norm = (

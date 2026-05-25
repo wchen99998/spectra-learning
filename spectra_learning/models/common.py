@@ -43,7 +43,6 @@ def _build_non_causal_blocks(
     num_kv_heads: int | None,
     attention_mlp_multiple: float,
     norm_eps: float = 1e-5,
-    qk_norm: bool = False,
     norm_type: str = "rmsnorm",
     dropout: float = 0.0,
 ) -> nn.ModuleList:
@@ -53,7 +52,6 @@ def _build_non_causal_blocks(
         n_kv_heads=num_heads if num_kv_heads is None else num_kv_heads,
         norm_eps=norm_eps,
         hidden_dim=math.ceil(dim * attention_mlp_multiple),
-        qk_norm=qk_norm,
         norm_type=norm_type,
         dropout=dropout,
     )

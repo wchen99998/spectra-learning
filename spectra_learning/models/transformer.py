@@ -54,9 +54,6 @@ class Attention(nn.Module):
         n_heads: int,
         *,
         n_kv_heads: int | None = None,
-        qk_norm: bool = False,
-        norm_type: str = "rmsnorm",
-        norm_eps: float = 1e-5,
     ):
         super().__init__()
         self.dim = dim
@@ -71,16 +68,11 @@ class Attention(nn.Module):
                 f"n_heads={self.n_heads} must be divisible by n_kv_heads={self.n_kv_heads}"
             )
         self.head_dim = self.dim // self.n_heads
-        self.qk_norm = qk_norm
         self.q_size = self.n_heads * self.head_dim
         self.kv_size = self.n_kv_heads * self.head_dim
 
         self.wqkv = nn.Linear(self.dim, self.q_size + 2 * self.kv_size, bias=False)
         self.wo = nn.Linear(self.dim, self.dim, bias=False)
-
-        if qk_norm:
-            self.q_norm = _build_norm(self.head_dim, eps=norm_eps, norm_type=norm_type)
-            self.k_norm = _build_norm(self.head_dim, eps=norm_eps, norm_type=norm_type)
 
         nn.init.xavier_normal_(self.wqkv.weight[: self.q_size])
         nn.init.xavier_normal_(self.wqkv.weight[self.q_size : self.q_size + self.kv_size])
@@ -133,10 +125,6 @@ class Attention(nn.Module):
         xk = xk.view(bsz, seqlen, self.n_kv_heads, self.head_dim)
         xv = xv.view(bsz, seqlen, self.n_kv_heads, self.head_dim)
 
-        if self.qk_norm:
-            xq = self.q_norm(xq)
-            xk = self.k_norm(xk)
-
         xq = xq.to(dtype=xv.dtype)
         xk = xk.to(dtype=xv.dtype)
 
@@ -168,9 +156,6 @@ class CrossAttention(nn.Module):
         n_heads: int,
         *,
         n_kv_heads: int | None = None,
-        qk_norm: bool = False,
-        norm_type: str = "rmsnorm",
-        norm_eps: float = 1e-5,
     ):
         super().__init__()
         self.dim = dim
@@ -180,10 +165,6 @@ class CrossAttention(nn.Module):
         self.wq = nn.Linear(self.dim, self.n_heads * self.head_dim, bias=False)
         self.wkv = nn.Linear(self.dim, 2 * self.n_kv_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(self.dim, self.dim, bias=False)
-        self.qk_norm = qk_norm
-        if qk_norm:
-            self.q_norm = _build_norm(self.head_dim, eps=norm_eps, norm_type=norm_type)
-            self.k_norm = _build_norm(self.head_dim, eps=norm_eps, norm_type=norm_type)
         nn.init.xavier_normal_(self.wq.weight)
         nn.init.xavier_normal_(self.wkv.weight)
         nn.init.xavier_normal_(self.wo.weight)
@@ -205,9 +186,6 @@ class CrossAttention(nn.Module):
         )
         xk = xk.view(bsz, mem_len, self.n_kv_heads, self.head_dim)
         xv = xv.view(bsz, mem_len, self.n_kv_heads, self.head_dim)
-        if self.qk_norm:
-            xq = self.q_norm(xq)
-            xk = self.k_norm(xk)
         q = xq.transpose(1, 2)
         k = xk.transpose(1, 2)
         v = xv.transpose(1, 2)
@@ -254,7 +232,6 @@ class TransformerBlock(nn.Module):
         n_kv_heads: int | None,
         norm_eps: float,
         hidden_dim: int | None,
-        qk_norm: bool = False,
         norm_type: str = "rmsnorm",
         dropout: float = 0.0,
     ):
@@ -263,9 +240,6 @@ class TransformerBlock(nn.Module):
             dim,
             n_heads,
             n_kv_heads=n_kv_heads,
-            qk_norm=qk_norm,
-            norm_type=norm_type,
-            norm_eps=norm_eps,
         )
         self.feed_forward = FeedForward(
             dim,

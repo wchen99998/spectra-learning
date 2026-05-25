@@ -50,7 +50,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_num_register_tokens = 2
     cfg.encoder_use_position_embedding = False
     cfg.encoder_apply_final_norm = False
-    cfg.encoder_qk_norm = False
     cfg.encoder_fourier_funcs = "both"
     cfg.encoder_fourier_input_scale = 1000
     cfg.encoder_fourier_num_freqs = 256
