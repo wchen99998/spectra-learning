@@ -33,17 +33,14 @@ class PeakSetEncoder(nn.Module):
         apply_final_norm: bool = True,
         num_peaks: int = 64,
         use_position_embedding: bool = True,
-        use_cls_token: bool = True,
-        num_cls_tokens: int | None = None,
+        num_cls_tokens: int = 1,
         num_register_tokens: int = 0,
         use_precursor_token: bool = False,
     ):
         super().__init__()
         self.num_layers = num_layers
         norm_type = norm_type.lower()
-        self.num_cls_tokens = (
-            int(use_cls_token) if num_cls_tokens is None else num_cls_tokens
-        )
+        self.num_cls_tokens = num_cls_tokens
         self.use_cls_token = self.num_cls_tokens > 0
         self.num_register_tokens = num_register_tokens
         self.use_precursor_token = use_precursor_token

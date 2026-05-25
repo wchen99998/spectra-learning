@@ -197,7 +197,6 @@ def _build_peak_set_encoder(cfg: PeakSetSIGRegSettings) -> PeakSetEncoder:
         use_position_embedding=cfg.encoder_use_position_embedding,
         apply_final_norm=cfg.encoder_apply_final_norm,
         num_peaks=_num_peak_tokens(cfg),
-        use_cls_token=num_cls_tokens > 0,
         num_cls_tokens=num_cls_tokens,
         num_register_tokens=cfg.encoder_num_register_tokens,
         use_precursor_token=cfg.use_precursor_token,
