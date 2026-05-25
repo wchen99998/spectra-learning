@@ -63,9 +63,6 @@ def _optimization_parts(config: Any) -> list[str]:
     min_lr = config.get("min_learning_rate", None)
     if min_lr is not None:
         parts.append(f"minlr{float(min_lr):.0e}")
-    predictor_lr_ratio = float(config.get("predictor_learning_rate_ratio", 1.0))
-    if predictor_lr_ratio != 1.0:
-        parts.append(f"predlr{predictor_lr_ratio:g}x")
     warmup = int(config.get("warmup_steps", 0))
     if warmup > 0:
         parts.append(f"wu{warmup // 1000}k")

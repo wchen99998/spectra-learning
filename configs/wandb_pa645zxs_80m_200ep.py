@@ -10,7 +10,6 @@ def get_config() -> config_dict.ConfigDict:
 
     cfg.batch_size = 1024
     cfg.model_dim = 512
-    cfg.predictor_learning_rate_ratio = 1.0
     cfg.encoder_num_layers = 16
     cfg.encoder_num_heads = 16
     cfg.encoder_use_position_embedding = True

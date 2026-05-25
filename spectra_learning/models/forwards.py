@@ -69,6 +69,7 @@ class ForwardMixin:
             teacher_target_features,
             teacher_peak_emb,
             context_emb,
+            context_pair,
         ) = self._encode_augmented_teacher_and_context(
             peak_mz,
             peak_intensity,
@@ -79,6 +80,7 @@ class ForwardMixin:
         )
         predictor_output_features, predictor_output = self._predict_augmented_targets(
             context_emb,
+            context_pair,
             context_mask,
             target_masks,
         )
@@ -184,7 +186,7 @@ class ForwardMixin:
             target_masks,
         )
 
-        context_encoded = self.encoder(
+        context_encoded, _, context_pair = self.encoder.forward_with_block_outputs(
             context_mz,
             context_intensity,
             valid_mask=peak_valid_mask,
@@ -193,6 +195,7 @@ class ForwardMixin:
         )
         predictor_output_features, predictor_output = self._predict_augmented_targets(
             context_encoded,
+            context_pair,
             context_mask,
             target_masks,
         )

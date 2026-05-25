@@ -133,7 +133,6 @@ def get_config() -> config_dict.ConfigDict:
 
     # Optimizer
     cfg.learning_rate = 0.0002
-    cfg.predictor_learning_rate_ratio = 1.0
     cfg.min_learning_rate = 0.00001
     cfg.warmup_steps = 10_000
     cfg.weight_decay = 0.01

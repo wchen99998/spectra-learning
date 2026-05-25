@@ -115,6 +115,7 @@ class PeakSetEncoder(nn.Module):
     ) -> tuple[
         Float[Tensor, "batch peaks dim"],
         list[Float[Tensor, "batch peaks dim"]],
+        Float[Tensor, "batch peaks peaks pair"],
     ]:
         block_indices = tuple(idx for idx in block_indices)
         peak_valid_mask = (
@@ -148,7 +149,7 @@ class PeakSetEncoder(nn.Module):
         x = self.final_norm(x)
         if self.num_layers in selected:
             selected_peak_outputs[self.num_layers] = x
-        return x, [selected_peak_outputs[idx] for idx in block_indices]
+        return x, [selected_peak_outputs[idx] for idx in block_indices], z
 
     def forward_peak_block_outputs(
         self,
@@ -159,7 +160,7 @@ class PeakSetEncoder(nn.Module):
         block_indices: list[int] | tuple[int, ...] = (),
         precursor_mz: Float[Tensor, "batch"] | None = None,
     ) -> list[Float[Tensor, "batch peaks dim"]]:
-        _, peak_block_outputs = self.forward_with_block_outputs(
+        _, peak_block_outputs, _ = self.forward_with_block_outputs(
             peak_mz,
             peak_intensity,
             valid_mask=valid_mask,
@@ -177,7 +178,7 @@ class PeakSetEncoder(nn.Module):
         visible_mask: Bool[Tensor, "batch peaks"] | None = None,
         precursor_mz: Float[Tensor, "batch"] | None = None,
     ) -> Float[Tensor, "batch peaks dim"]:
-        output, _ = self.forward_with_block_outputs(
+        output, _, _ = self.forward_with_block_outputs(
             peak_mz,
             peak_intensity,
             valid_mask=valid_mask,

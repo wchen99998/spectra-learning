@@ -6,33 +6,11 @@ from ml_collections import config_dict
 from spectra_learning.training.schedules import (
     LRSchedulerLike,
     make_cosine_schedule,
-    scaled_min_lr,
 )
 
-PREDICTOR_PARAM_PREFIXES = (
-    "encoder_to_predictor_proj.",
-    "masked_latent_predictor.",
-    "predictor_final_norm.",
-    "masked_latent_readout.",
-    "target_projector.",
-    "jepa_mae_mz_head.",
-    "jepa_mae_intensity_head.",
-)
-PREDICTOR_PARAM_NAMES = {
-    "latent_mask_token",
-}
 
 def is_weight_decay_target(name: str, param: Any) -> bool:
     return param.ndim >= 2 and name.endswith("weight")
-
-
-def _model_param_name(name: str) -> str:
-    return name.removeprefix("model.")
-
-
-def is_predictor_parameter(name: str) -> bool:
-    name = _model_param_name(name)
-    return name in PREDICTOR_PARAM_NAMES or name.startswith(PREDICTOR_PARAM_PREFIXES)
 
 
 def build_adamw_param_groups(
@@ -54,8 +32,6 @@ def build_optimizers(
     total_steps: int,
     device: torch.device,
 ) -> tuple[list[torch.optim.Optimizer], list[LRSchedulerLike]]:
-    base_lr = float(config.learning_rate)
-    predictor_lr_ratio = float(_config_get(config, "predictor_learning_rate_ratio", 1.0))
     optimizer_type = str(_config_get(config, "optimizer", "adamw")).lower()
     settings = _optimizer_settings(config, device)
     if optimizer_type == "muon":
@@ -63,15 +39,6 @@ def build_optimizers(
             config,
             model,
             total_steps,
-            predictor_lr_ratio,
-            settings,
-        )
-    if predictor_lr_ratio != 1.0:
-        return _build_split_adamw_optimizers(
-            config,
-            model,
-            total_steps,
-            predictor_lr_ratio,
             settings,
         )
     return _build_single_adamw_optimizer(config, model, total_steps, settings)
@@ -113,17 +80,8 @@ def _build_muon_optimizers(
     config: config_dict.ConfigDict,
     model: torch.nn.Module,
     total_steps: int,
-    predictor_lr_ratio: float,
     settings: dict,
 ) -> tuple[list[torch.optim.Optimizer], list[LRSchedulerLike]]:
-    if predictor_lr_ratio != 1.0:
-        return _build_split_muon_optimizers(
-            config,
-            model,
-            total_steps,
-            predictor_lr_ratio,
-            settings,
-        )
     return _build_single_muon_optimizer(config, model, total_steps, settings)
 
 
@@ -140,76 +98,6 @@ def _muon_kwargs(config: config_dict.ConfigDict, settings: dict) -> dict:
         ns_steps=int(_config_get(config, "muon_ns_steps", 5)),
         adjust_lr_fn=adjust_lr_fn,
     )
-
-
-def _split_muon_parameters(
-    model: torch.nn.Module,
-) -> tuple[list, list, list, list]:
-    base_muon_params = []
-    predictor_muon_params = []
-    base_adamw_no_decay_params = []
-    predictor_adamw_no_decay_params = []
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
-        is_predictor = is_predictor_parameter(name)
-        if is_weight_decay_target(name, param):
-            (predictor_muon_params if is_predictor else base_muon_params).append(param)
-        else:
-            (
-                predictor_adamw_no_decay_params
-                if is_predictor
-                else base_adamw_no_decay_params
-            ).append(param)
-    return (
-        base_muon_params,
-        predictor_muon_params,
-        base_adamw_no_decay_params,
-        predictor_adamw_no_decay_params,
-    )
-
-
-def _build_split_muon_optimizers(
-    config: config_dict.ConfigDict,
-    model: torch.nn.Module,
-    total_steps: int,
-    predictor_lr_ratio: float,
-    settings: dict,
-) -> tuple[list[torch.optim.Optimizer], list[LRSchedulerLike]]:
-    groups = _split_muon_parameters(model)
-    muon_lr = float(_config_get(config, "muon_lr", None) or settings["base_lr"])
-    adamw_lr = float(_config_get(config, "adamw_lr", None) or settings["base_lr"])
-    optimizer_specs = [
-        (
-            "muon",
-            "muon",
-            groups[0],
-            muon_lr,
-            settings["min_learning_rate"],
-        ),
-        (
-            "predictor_muon",
-            "muon",
-            groups[1],
-            muon_lr * predictor_lr_ratio,
-            scaled_min_lr(settings["min_learning_rate"], predictor_lr_ratio),
-        ),
-        (
-            "adamw",
-            "adamw",
-            build_adamw_param_groups([], groups[2], settings["weight_decay"]),
-            adamw_lr,
-            settings["min_learning_rate"],
-        ),
-        (
-            "predictor_adamw",
-            "adamw",
-            build_adamw_param_groups([], groups[3], settings["weight_decay"]),
-            adamw_lr * predictor_lr_ratio,
-            scaled_min_lr(settings["min_learning_rate"], predictor_lr_ratio),
-        ),
-    ]
-    return _build_muon_specs(config, total_steps, optimizer_specs, settings)
 
 
 def _build_muon_specs(
@@ -285,67 +173,6 @@ def _build_single_muon_optimizer(
         ),
     ]
     return _build_muon_specs(config, total_steps, optimizer_specs, settings)
-
-
-def _split_adamw_parameters(
-    model: torch.nn.Module,
-) -> tuple[list, list, list, list]:
-    base_decay_params = []
-    base_no_decay_params = []
-    predictor_decay_params = []
-    predictor_no_decay_params = []
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
-        is_predictor = is_predictor_parameter(name)
-        if is_weight_decay_target(name, param):
-            (predictor_decay_params if is_predictor else base_decay_params).append(param)
-        else:
-            (predictor_no_decay_params if is_predictor else base_no_decay_params).append(param)
-    return base_decay_params, base_no_decay_params, predictor_decay_params, predictor_no_decay_params
-
-
-def _build_split_adamw_optimizers(
-    config: config_dict.ConfigDict,
-    model: torch.nn.Module,
-    total_steps: int,
-    predictor_lr_ratio: float,
-    settings: dict,
-) -> tuple[list[torch.optim.Optimizer], list[LRSchedulerLike]]:
-    base_decay, base_no_decay, pred_decay, pred_no_decay = _split_adamw_parameters(model)
-    optimizer_specs = [
-        (
-            build_adamw_param_groups(base_decay, base_no_decay, settings["weight_decay"]),
-            settings["base_lr"],
-            settings["min_learning_rate"],
-        ),
-        (
-            build_adamw_param_groups(pred_decay, pred_no_decay, settings["weight_decay"]),
-            settings["base_lr"] * predictor_lr_ratio,
-            scaled_min_lr(settings["min_learning_rate"], predictor_lr_ratio),
-        ),
-    ]
-    optimizers: list[torch.optim.Optimizer] = []
-    schedulers: list[LRSchedulerLike] = []
-    for param_groups, lr, min_lr in optimizer_specs:
-        if not param_groups:
-            continue
-        optimizer = _adamw(
-            param_groups,
-            lr=lr,
-            b2=settings["b2"],
-            fused=settings["fused"],
-        )
-        optimizers.append(optimizer)
-        schedulers.append(
-            make_cosine_schedule(
-                optimizer,
-                total_steps,
-                settings["warmup_steps"],
-                min_lr,
-            )
-        )
-    return optimizers, schedulers
 
 
 def _build_single_adamw_optimizer(

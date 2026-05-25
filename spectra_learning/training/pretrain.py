@@ -545,19 +545,13 @@ def learning_rate_metrics(
     optimizers: list[torch.optim.Optimizer],
 ) -> dict[str, float]:
     optimizer_type = str(_config_get(config, "optimizer", "adamw")).lower()
-    has_predictor_lr = (
-        float(_config_get(config, "predictor_learning_rate_ratio", 1.0)) != 1.0
-    )
     if optimizer_type == "muon":
         metrics = {}
         for idx, optimizer in enumerate(optimizers):
             label = getattr(optimizer, "_spectra_lr_label", idx)
             metrics[f"train/lr_{label}"] = float(optimizer.param_groups[0]["lr"])
         return metrics
-    metrics = {"train/learning_rate": float(optimizers[0].param_groups[0]["lr"])}
-    if has_predictor_lr:
-        metrics["train/predictor_learning_rate"] = float(optimizers[1].param_groups[0]["lr"])
-    return metrics
+    return {"train/learning_rate": float(optimizers[0].param_groups[0]["lr"])}
 
 
 def msg_probe_interval(

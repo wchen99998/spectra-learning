@@ -7,7 +7,6 @@ from jaxtyping import Bool, Float
 from torch import Tensor
 
 from spectra_learning.models.common import _active_autocast_context
-from spectra_learning.models.transformer import create_visible_attention_mask
 
 
 class TargetProjectionMixin:
@@ -39,19 +38,32 @@ class TargetProjectionMixin:
         positions = torch.arange(x.shape[1], device=x.device)
         return x + self.predictor_position_embedding(positions).to(dtype=x.dtype)
 
+    def _add_predictor_pair_positions(
+        self: Any,
+        pair: Float[Tensor, "batch tokens tokens pair"],
+    ) -> Float[Tensor, "batch tokens tokens pair"]:
+        num_tokens = pair.shape[1]
+        positions = torch.arange(num_tokens * num_tokens, device=pair.device)
+        position_encoding = self.predictor_pair_position_embedding(positions)
+        position_encoding = position_encoding.view(num_tokens, num_tokens, -1)
+        return pair + position_encoding.to(dtype=pair.dtype)
+
     def predict_masked_latents(
         self: Any,
         x: Float[Tensor, "batch tokens dim"],
+        pair: Float[Tensor, "batch tokens tokens pair"],
         visible_mask: Bool[Tensor, "batch tokens"],
     ) -> Float[Tensor, "batch tokens dim"]:
         x = self._add_predictor_positions(x)
         x = self.encoder_to_predictor_proj(x)
+        pair = self._add_predictor_pair_positions(pair)
         if len(self.masked_latent_predictor) > 0:
-            predictor_attn_mask = create_visible_attention_mask(visible_mask)
             for block in self.masked_latent_predictor:
-                x = block(
+                x, pair = block(
                     x,
-                    attn_mask=predictor_attn_mask,
+                    pair,
+                    visible_mask,
+                    visible_mask,
                 )
         x = self.predictor_final_norm(x)
         return x
@@ -76,11 +88,13 @@ class TargetProjectionMixin:
     def predict_masked_target_features(
         self: Any,
         x: Float[Tensor, "batch tokens dim"],
+        pair: Float[Tensor, "batch tokens tokens pair"],
         visible_mask: Bool[Tensor, "batch tokens"],
     ) -> Float[Tensor, "batch tokens target_dim"]:
         return self.masked_latent_readout(
             self.predict_masked_latents(
                 x,
+                pair,
                 visible_mask,
             )
         )
@@ -88,11 +102,13 @@ class TargetProjectionMixin:
     def predict_masked_targets(
         self: Any,
         x: Float[Tensor, "batch tokens dim"],
+        pair: Float[Tensor, "batch tokens tokens pair"],
         visible_mask: Bool[Tensor, "batch tokens"],
     ) -> Float[Tensor, "batch tokens target_dim"]:
         return self.project_targets(
             self.predict_masked_target_features(
                 x,
+                pair,
                 visible_mask,
             )
         )
@@ -183,6 +199,7 @@ class TargetProjectionMixin:
         Float[Tensor, "batch peaks target_dim"],
         Float[Tensor, "batch peaks dim"],
         Float[Tensor, "batch peaks dim"],
+        Float[Tensor, "batch peaks peaks pair"],
     ]:
         batch_size = peak_mz.shape[0]
         context_mz, context_intensity, context_visible_mask = self._context_encoder_inputs(
@@ -193,7 +210,7 @@ class TargetProjectionMixin:
         )
         if self.teacher_encoder is not None:
             with torch.no_grad(), _active_autocast_context(peak_mz.device.type):
-                teacher_encoded, teacher_peak_outputs = (
+                teacher_encoded, teacher_peak_outputs, _ = (
                     self.teacher_encoder.forward_with_block_outputs(
                         peak_mz,
                         peak_intensity,
@@ -203,7 +220,7 @@ class TargetProjectionMixin:
                         precursor_mz=precursor_mz,
                     )
                 )
-            context_encoded = self.encoder(
+            context_encoded, _, context_pair = self.encoder.forward_with_block_outputs(
                 context_mz,
                 context_intensity,
                 valid_mask=peak_valid_mask,
@@ -215,8 +232,9 @@ class TargetProjectionMixin:
                 teacher_target_features,
                 teacher_encoded,
                 context_encoded,
+                context_pair,
             )
-        encoded, teacher_peak_outputs = self.encoder.forward_with_block_outputs(
+        encoded, teacher_peak_outputs, pair = self.encoder.forward_with_block_outputs(
             torch.cat([peak_mz, context_mz], dim=0),
             torch.cat([peak_intensity, context_intensity], dim=0),
             valid_mask=torch.cat([peak_valid_mask, peak_valid_mask], dim=0),
@@ -236,6 +254,7 @@ class TargetProjectionMixin:
             teacher_target_features,
             encoded[:batch_size],
             encoded[batch_size:],
+            pair[batch_size:],
         )
 
     def _compute_pooled_teacher_peak_targets(

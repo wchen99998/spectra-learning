@@ -117,7 +117,3 @@ def make_cosine_schedule(
     min_lr: float | None,
 ) -> WarmupCosineSchedule:
     return WarmupCosineSchedule(optimizer, total_steps, warmup_steps, min_lr)
-
-
-def scaled_min_lr(min_lr: float | None, ratio: float) -> float | None:
-    return None if min_lr is None else min_lr * ratio

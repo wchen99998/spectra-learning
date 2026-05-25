@@ -3,7 +3,6 @@ from unittest import mock
 import torch
 from torch import nn
 
-from spectra_learning.models.common import TransformerBlock
 from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pairformer import PairformerBlock
@@ -95,35 +94,53 @@ def _make_batch() -> dict[str, torch.Tensor]:
     }
 
 
-def _predictor_metadata(
-    context_emb: torch.Tensor,
+def _make_pair(model: PeakSetJEPA, single: torch.Tensor) -> torch.Tensor:
+    return torch.randn(
+        single.shape[0],
+        single.shape[1],
+        single.shape[1],
+        model.predictor_pair_dim,
+        device=single.device,
+        dtype=single.dtype,
+    )
+
+
+def _expected_predictor_pair(
+    model: PeakSetJEPA,
+    context_pair: torch.Tensor,
     context_mask: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    B, N = context_mask.shape
-    peak_mz = torch.linspace(
-        0.1,
-        0.6,
-        N,
-        device=context_emb.device,
-        dtype=context_emb.dtype,
-    ).unsqueeze(0).expand(B, -1)
-    peak_intensity = torch.linspace(
-        0.9,
-        0.4,
-        N,
-        device=context_emb.device,
-        dtype=context_emb.dtype,
-    ).unsqueeze(0).expand(B, -1)
-    return peak_mz, peak_intensity, ~context_mask
+    target_masks: torch.Tensor,
+) -> torch.Tensor:
+    B, K, N = target_masks.shape
+    context_mask_by_view = context_mask.unsqueeze(1)
+    visible_mask = context_mask_by_view | target_masks
+    expected_pair = context_pair.unsqueeze(1).expand(-1, K, -1, -1, -1)
+    context_pair_mask = context_mask_by_view.unsqueeze(3) & context_mask_by_view.unsqueeze(2)
+    expected_pair = expected_pair * context_pair_mask.unsqueeze(-1).to(
+        dtype=expected_pair.dtype
+    )
+    target_pair_mask = target_masks.unsqueeze(3) | target_masks.unsqueeze(2)
+    expected_pair = torch.where(
+        target_pair_mask.unsqueeze(-1),
+        model.pair_mask_token.view(1, 1, 1, 1, -1).to(context_pair),
+        expected_pair,
+    )
+    visible_pair_mask = visible_mask.unsqueeze(3) & visible_mask.unsqueeze(2)
+    expected_pair = expected_pair * visible_pair_mask.unsqueeze(-1).to(
+        dtype=expected_pair.dtype
+    )
+    return expected_pair.reshape(B * K, N, N, -1)
 
 
 @torch.no_grad()
 def test_predictor_zero_layers_still_runs_projection_path():
     model = _build_model(predictor_layers=0, predictor_dim=24)
     predictor_input = torch.randn(2, 6, model.model_dim)
+    predictor_pair = _make_pair(model, predictor_input)
     visible_mask = torch.ones(2, 6, dtype=torch.bool)
     out = model.predict_masked_latents(
         predictor_input,
+        predictor_pair,
         visible_mask,
     )
 
@@ -154,21 +171,28 @@ def test_predictor_absolute_positions_change_inputs():
 def test_predictor_has_position_embedding():
     model = _build_model(predictor_layers=2)
     context_emb = torch.randn(1, 6, model.model_dim)
+    context_pair = _make_pair(model, context_emb)
     context_mask = torch.ones(1, 6, dtype=torch.bool)
 
     out = model.predict_masked_latents(
         context_emb,
+        context_pair,
         context_mask,
     )
 
     assert hasattr(model, "latent_mask_token")
     assert model.latent_mask_token.shape == (model.model_dim,)
+    assert hasattr(model, "pair_mask_token")
+    assert model.pair_mask_token.shape == (model.predictor_pair_dim,)
     assert not hasattr(model, "predictor_mask_token")
     assert not hasattr(model, "predictor_intensity_embed")
     assert hasattr(model, "predictor_position_embedding")
+    assert hasattr(model, "predictor_pair_position_embedding")
     assert not hasattr(model, "predictor_slot_embedding")
     assert "latent_mask_token" in model.state_dict()
+    assert "pair_mask_token" in model.state_dict()
     assert "predictor_position_embedding.weight" in model.state_dict()
+    assert "predictor_pair_position_embedding.weight" in model.state_dict()
     assert out.shape == (1, 6, model.predictor_dim)
 
 
@@ -265,13 +289,16 @@ def test_predictor_final_norm_toggle_changes_output():
         predictor_apply_final_norm=False,
     )
     predictor_input = torch.randn(1, 6, model_with_final_norm.model_dim)
+    predictor_pair = _make_pair(model_with_final_norm, predictor_input)
     visible_mask = torch.ones(1, 6, dtype=torch.bool)
     out_1 = model_with_final_norm.predict_masked_latents(
         predictor_input,
+        predictor_pair,
         visible_mask,
     )
     out_2 = model_without_final_norm.predict_masked_latents(
         predictor_input,
+        predictor_pair,
         visible_mask,
     )
 
@@ -287,9 +314,9 @@ def test_encoder_and_predictor_final_norms_are_non_affine():
     encoder_block = model.encoder.blocks[0]
     predictor_block = model.masked_latent_predictor[0]
     assert isinstance(encoder_block, PairformerBlock)
-    assert isinstance(predictor_block, TransformerBlock)
+    assert isinstance(predictor_block, PairformerBlock)
     assert list(encoder_block.single_attention.single_norm.parameters())
-    assert list(predictor_block.attention_norm.parameters())
+    assert list(predictor_block.single_attention.single_norm.parameters())
 
     encoder = PeakSetEncoder(
         model_dim=32,
@@ -334,7 +361,6 @@ def test_pair_refresh_uses_sigmoid_gate_from_pair_state():
     block.refresh_pair = _ConstantPairUpdate()
     block.refresh_pair_gate_norm = nn.Identity()
     block.refresh_pair_gate.weight.zero_()
-    block.refresh_pair_gate.bias.zero_()
     block.tri_mul_out = _ZeroPairUpdate()
     block.tri_mul_in = _ZeroPairUpdate()
     block.tri_att_start = _ZeroPairUpdate()
@@ -390,14 +416,14 @@ def test_model_settings_pass_pair_refresh_layers_to_encoder():
     assert selected_model.encoder.blocks[1].refresh_pair is None
 
 
-def test_masked_latent_predictor_uses_self_attention_blocks():
+def test_masked_latent_predictor_uses_pairformer_blocks():
     model = _build_model(predictor_layers=2)
     block = model.masked_latent_predictor[0]
 
-    assert hasattr(block, "attention")
-    assert hasattr(block, "attention_norm")
-    assert hasattr(block, "feed_forward")
-    assert not hasattr(block, "cross_attn")
+    assert isinstance(block, PairformerBlock)
+    assert hasattr(block, "single_attention")
+    assert hasattr(block, "tri_mul_out")
+    assert hasattr(block, "tri_att_start")
 
 
 @torch.no_grad()
@@ -409,13 +435,16 @@ def test_predictor_output_is_independent_from_encoder_positions():
     with torch.no_grad():
         model_without_encoder_pos.encoder.position_embedding.weight.zero_()
     predictor_input = torch.randn(1, 6, model_without_encoder_pos.model_dim)
+    predictor_pair = _make_pair(model_without_encoder_pos, predictor_input)
     visible_mask = torch.ones(1, 6, dtype=torch.bool)
     out_1 = model_without_encoder_pos.predict_masked_latents(
         predictor_input,
+        predictor_pair,
         visible_mask,
     )
     out_2 = model_with_encoder_pos.predict_masked_latents(
         predictor_input,
+        predictor_pair,
         visible_mask,
     )
 
@@ -477,13 +506,16 @@ def test_mz_sentinel_predictor_receives_context_and_target_memory_mask():
         batch["peak_mz"].shape[1],
         model.model_dim,
     )
+    context_pair = _make_pair(model, context_emb)
     captured: dict[str, torch.Tensor] = {}
 
     def fake_predict_masked_target_features(
         x: torch.Tensor,
+        pair: torch.Tensor,
         visible_mask: torch.Tensor,
     ) -> torch.Tensor:
         captured["x"] = x.detach().clone()
+        captured["pair"] = pair.detach().clone()
         captured["visible_mask"] = visible_mask.detach().clone()
         return x.new_zeros(x.shape[0], x.shape[1], model.jepa_target_dim)
 
@@ -494,54 +526,7 @@ def test_mz_sentinel_predictor_receives_context_and_target_memory_mask():
     ):
         model._predict_augmented_targets(
             context_emb,
-            batch["context_mask"],
-            batch["target_masks"],
-        )
-
-    B, K, N = batch["target_masks"].shape
-    expected_context_emb = context_emb.unsqueeze(1).expand(-1, K, -1, -1)
-    expected_input = expected_context_emb * batch["context_mask"].unsqueeze(1).unsqueeze(
-        -1
-    )
-    expected_input = torch.where(
-        batch["target_masks"].unsqueeze(-1),
-        expected_context_emb,
-        expected_input,
-    ).reshape(B * K, N, -1)
-    expected_visible_mask = (
-        batch["context_mask"].unsqueeze(1) | batch["target_masks"]
-    ).reshape(B * K, N)
-    assert captured["x"].shape == (B * K, N, model.model_dim)
-    torch.testing.assert_close(captured["x"], expected_input)
-    assert torch.equal(captured["visible_mask"], expected_visible_mask)
-
-
-@torch.no_grad()
-def test_latent_token_predictor_receives_per_view_target_masks():
-    model = _build_model(masked_token_input_mode="latent_token")
-    batch = _make_batch()
-    context_emb = torch.randn(
-        batch["peak_mz"].shape[0],
-        batch["peak_mz"].shape[1],
-        model.model_dim,
-    )
-    captured: dict[str, torch.Tensor] = {}
-
-    def fake_predict_masked_target_features(
-        x: torch.Tensor,
-        visible_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        captured["x"] = x.detach().clone()
-        captured["visible_mask"] = visible_mask.detach().clone()
-        return x.new_zeros(x.shape[0], x.shape[1], model.jepa_target_dim)
-
-    with mock.patch.object(
-        model,
-        "predict_masked_target_features",
-        side_effect=fake_predict_masked_target_features,
-    ):
-        model._predict_augmented_targets(
-            context_emb,
+            context_pair,
             batch["context_mask"],
             batch["target_masks"],
         )
@@ -559,8 +544,76 @@ def test_latent_token_predictor_receives_per_view_target_masks():
     expected_visible_mask = (
         batch["context_mask"].unsqueeze(1) | batch["target_masks"]
     ).reshape(B * K, N)
+    expected_pair = _expected_predictor_pair(
+        model,
+        context_pair,
+        batch["context_mask"],
+        batch["target_masks"],
+    )
     assert captured["x"].shape == (B * K, N, model.model_dim)
+    assert captured["pair"].shape == (B * K, N, N, model.predictor_pair_dim)
     torch.testing.assert_close(captured["x"], expected_input)
+    torch.testing.assert_close(captured["pair"], expected_pair)
+    assert torch.equal(captured["visible_mask"], expected_visible_mask)
+
+
+@torch.no_grad()
+def test_latent_token_predictor_receives_per_view_target_masks():
+    model = _build_model(masked_token_input_mode="latent_token")
+    batch = _make_batch()
+    context_emb = torch.randn(
+        batch["peak_mz"].shape[0],
+        batch["peak_mz"].shape[1],
+        model.model_dim,
+    )
+    context_pair = _make_pair(model, context_emb)
+    captured: dict[str, torch.Tensor] = {}
+
+    def fake_predict_masked_target_features(
+        x: torch.Tensor,
+        pair: torch.Tensor,
+        visible_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        captured["x"] = x.detach().clone()
+        captured["pair"] = pair.detach().clone()
+        captured["visible_mask"] = visible_mask.detach().clone()
+        return x.new_zeros(x.shape[0], x.shape[1], model.jepa_target_dim)
+
+    with mock.patch.object(
+        model,
+        "predict_masked_target_features",
+        side_effect=fake_predict_masked_target_features,
+    ):
+        model._predict_augmented_targets(
+            context_emb,
+            context_pair,
+            batch["context_mask"],
+            batch["target_masks"],
+        )
+
+    B, K, N = batch["target_masks"].shape
+    expected_context_emb = context_emb.unsqueeze(1).expand(-1, K, -1, -1)
+    expected_input = expected_context_emb * batch["context_mask"].unsqueeze(1).unsqueeze(
+        -1
+    )
+    expected_input = torch.where(
+        batch["target_masks"].unsqueeze(-1),
+        model.latent_mask_token.view(1, 1, 1, -1).to(context_emb),
+        expected_input,
+    ).reshape(B * K, N, -1)
+    expected_visible_mask = (
+        batch["context_mask"].unsqueeze(1) | batch["target_masks"]
+    ).reshape(B * K, N)
+    expected_pair = _expected_predictor_pair(
+        model,
+        context_pair,
+        batch["context_mask"],
+        batch["target_masks"],
+    )
+    assert captured["x"].shape == (B * K, N, model.model_dim)
+    assert captured["pair"].shape == (B * K, N, N, model.predictor_pair_dim)
+    torch.testing.assert_close(captured["x"], expected_input)
+    torch.testing.assert_close(captured["pair"], expected_pair)
     assert torch.equal(captured["visible_mask"], expected_visible_mask)
 
 
@@ -623,7 +676,7 @@ def test_multilayer_targets_widen_teacher_and_predictor_outputs():
     )
     assert teacher_targets.shape == (B, N, model.target_projector_dim)
 
-    context_encoded = model.encoder(
+    context_encoded, _, context_pair = model.encoder.forward_with_block_outputs(
         peak_mz,
         peak_intensity,
         valid_mask=peak_valid_mask,
@@ -640,17 +693,20 @@ def test_multilayer_targets_widen_teacher_and_predictor_outputs():
     predictor_visible_mask = context_mask | target_union
     predictor_output_features = model.predict_masked_target_features(
         predictor_input,
+        context_pair,
         predictor_visible_mask,
     )
     assert predictor_output_features.shape == (B, N, 2 * model.model_dim)
     predictor_output = model.predict_masked_targets(
         predictor_input,
+        context_pair,
         predictor_visible_mask,
     )
     assert predictor_output.shape == (B, N, model.target_projector_dim)
     predictor_output_features_by_view, predictor_output_by_view = (
         model._predict_augmented_targets(
             context_emb,
+            context_pair,
             context_mask,
             target_masks,
         )
@@ -680,7 +736,7 @@ def test_masked_prediction_loss_uses_target_tokens_only():
     context_mask = batch["context_mask"] & peak_valid_mask
     target_masks = batch["target_masks"] & peak_valid_mask.unsqueeze(1)
 
-    context_encoded = model.encoder(
+    context_encoded, _, context_pair = model.encoder.forward_with_block_outputs(
         peak_mz,
         peak_intensity,
         valid_mask=peak_valid_mask,
@@ -696,6 +752,7 @@ def test_masked_prediction_loss_uses_target_tokens_only():
 
     _, predictor_output = model._predict_augmented_targets(
         context_emb,
+        context_pair,
         context_mask,
         target_masks,
     )
@@ -723,7 +780,7 @@ def test_masked_prediction_loss_can_zscore_teacher_targets():
     context_mask = batch["context_mask"] & peak_valid_mask
     target_masks = batch["target_masks"] & peak_valid_mask.unsqueeze(1)
 
-    context_encoded = model.encoder(
+    context_encoded, _, context_pair = model.encoder.forward_with_block_outputs(
         peak_mz,
         peak_intensity,
         valid_mask=peak_valid_mask,
@@ -739,6 +796,7 @@ def test_masked_prediction_loss_can_zscore_teacher_targets():
 
     _, predictor_output = model._predict_augmented_targets(
         context_emb,
+        context_pair,
         context_mask,
         target_masks,
     )
@@ -861,8 +919,7 @@ def test_positions_outside_union_do_not_change_context_conditioning_with_fixed_t
         peak_valid_mask = batch["peak_valid_mask"]
         context_mask = batch["context_mask"] & peak_valid_mask
         target_masks = batch["target_masks"] & peak_valid_mask.unsqueeze(1)
-        B, K, N = target_masks.shape
-        context_encoded = model.encoder(
+        context_encoded, _, context_pair = model.encoder.forward_with_block_outputs(
             peak_mz,
             peak_intensity,
             valid_mask=peak_valid_mask,
@@ -871,6 +928,7 @@ def test_positions_outside_union_do_not_change_context_conditioning_with_fixed_t
         context_emb = context_encoded
         _, predictor_output = model._predict_augmented_targets(
             context_emb,
+            context_pair,
             context_mask,
             target_masks,
         )

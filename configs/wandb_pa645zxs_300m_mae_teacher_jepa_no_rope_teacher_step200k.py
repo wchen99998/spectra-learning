@@ -37,7 +37,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_token_loss_weight = 1
     cfg.jepa_mae_loss_weight = 0.0
     cfg.mae_loss_weight = 0.0
-    cfg.predictor_learning_rate_ratio = 1.0
     cfg.collapse_metrics_every_n_steps = 250
     cfg.msg_probe_every_n_steps = 0.5
     cfg.max_duration_hours = 23.5

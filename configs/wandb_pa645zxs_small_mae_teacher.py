@@ -11,7 +11,6 @@ def get_config() -> config_dict.ConfigDict:
         "checkpoints/modal/no_fourier_embed_sentinel/step-01250000.pt"
     )
     cfg.use_ema_teacher = False
-    cfg.predictor_learning_rate_ratio = 1.0
     cfg.masked_token_loss_weight = 1
     cfg.jepa_mae_loss_weight = 0.0
     cfg.mae_loss_weight = 0.0

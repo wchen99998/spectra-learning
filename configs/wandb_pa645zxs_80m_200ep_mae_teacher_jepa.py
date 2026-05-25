@@ -11,7 +11,6 @@ def get_config() -> config_dict.ConfigDict:
         "experiments/wandb_pa645zxs_80m_200ep_mae_2gpu_10ep/checkpoints/last.pt"
     )
     cfg.use_ema_teacher = False
-    cfg.predictor_learning_rate_ratio = 1.0
     cfg.masked_token_loss_weight = 1
     cfg.jepa_mae_loss_weight = 0.0
     cfg.mae_loss_weight = 0.0

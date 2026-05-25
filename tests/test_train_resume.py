@@ -3,7 +3,6 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
 
 import pytest
 import torch
@@ -29,7 +28,6 @@ from spectra_learning.training.modal_probe import _path_is_modal_volume
 from spectra_learning.training.modal_probe import _spawn_modal_probe_from_volume
 from spectra_learning.training.optimization import (
     build_optimizers,
-    is_predictor_parameter,
     is_weight_decay_target,
 )
 from spectra_learning.training.api import (
@@ -39,7 +37,6 @@ from spectra_learning.training.api import (
     parse_autocast_dtype,
 )
 from spectra_learning.training.logging import WandbMetricLogger, log_msg_probe_metrics
-from spectra_learning.training.schedules import WarmupCosineSchedule
 
 
 def _small_model(**overrides) -> PeakSetJEPA:
@@ -719,78 +716,6 @@ def test_build_optimizers_uses_single_adamw_optimizer_by_default():
     assert len(schedulers) == 1
 
 
-def test_build_optimizers_applies_predictor_learning_rate_ratio():
-    model = _small_model()
-    cfg = _optimizer_config(predictor_learning_rate_ratio=3.0)
-
-    optimizers, schedulers = build_optimizers(
-        cfg,
-        model,
-        total_steps=10,
-        device=torch.device("cpu"),
-    )
-
-    assert len(optimizers) == 2
-    assert len(schedulers) == 2
-    assert all(
-        float(group["lr"]) == pytest.approx(1e-3)
-        for group in optimizers[0].param_groups
-    )
-    assert all(
-        float(group["lr"]) == pytest.approx(3e-3)
-        for group in optimizers[1].param_groups
-    )
-    assert cast(WarmupCosineSchedule, schedulers[0]).eta_min == pytest.approx(1e-4)
-    assert cast(WarmupCosineSchedule, schedulers[1]).eta_min == pytest.approx(3e-4)
-
-    predictor_param_ids = {
-        id(param)
-        for name, param in model.named_parameters()
-        if param.requires_grad and is_predictor_parameter(name)
-    }
-    base_param_ids = _optimizer_param_ids(optimizers[0])
-    actual_predictor_param_ids = _optimizer_param_ids(optimizers[1])
-    all_trainable_param_ids = {
-        id(param) for param in model.parameters() if param.requires_grad
-    }
-
-    assert actual_predictor_param_ids == predictor_param_ids
-    assert base_param_ids.isdisjoint(actual_predictor_param_ids)
-    assert base_param_ids | actual_predictor_param_ids == all_trainable_param_ids
-
-
-def test_mae_value_heads_use_predictor_learning_rate_group():
-    model = _small_model(training_mode="mae")
-    cfg = _optimizer_config(predictor_learning_rate_ratio=2.0)
-
-    optimizers, _ = build_optimizers(
-        cfg,
-        model,
-        total_steps=10,
-        device=torch.device("cpu"),
-    )
-
-    predictor_param_ids = {
-        id(param)
-        for name, param in model.named_parameters()
-        if param.requires_grad and is_predictor_parameter(name)
-    }
-    actual_predictor_param_ids = _optimizer_param_ids(optimizers[1])
-    value_head_names = {
-        name
-        for name, param in model.named_parameters()
-        if id(param) in actual_predictor_param_ids and name.startswith("jepa_mae_")
-    }
-
-    assert actual_predictor_param_ids == predictor_param_ids
-    assert value_head_names == {
-        "jepa_mae_mz_head.weight",
-        "jepa_mae_mz_head.bias",
-        "jepa_mae_intensity_head.weight",
-        "jepa_mae_intensity_head.bias",
-    }
-
-
 def test_build_optimizers_respects_frozen_covariance_pooling():
     cfg = _optimizer_config()
     trainable_model = _small_model(covariance_pooling_dim=4)
@@ -855,37 +780,6 @@ def test_build_optimizers_uses_official_torch_muon_and_adamw():
     assert id(qkv) in muon_param_ids
     assert all(param.ndim == 2 for group in muon_optimizer.param_groups for param in group["params"])
     assert muon_param_ids.isdisjoint(adamw_param_ids)
-
-
-def test_build_optimizers_splits_official_muon_predictor_lr():
-    model = _small_model()
-    cfg = _optimizer_config(optimizer="muon", predictor_learning_rate_ratio=3.0)
-
-    optimizers, schedulers = build_optimizers(
-        cfg,
-        model,
-        total_steps=10,
-        device=torch.device("cpu"),
-    )
-
-    labels = [getattr(optimizer, "_spectra_lr_label") for optimizer in optimizers]
-    lrs = [float(optimizer.param_groups[0]["lr"]) for optimizer in optimizers]
-    predictor_param_ids = {
-        id(param)
-        for name, param in model.named_parameters()
-        if param.requires_grad and is_predictor_parameter(name)
-    }
-    predictor_muon_ids = _optimizer_param_ids(optimizers[1])
-    predictor_adamw_ids = _optimizer_param_ids(optimizers[3])
-
-    assert labels == ["muon", "predictor_muon", "adamw", "predictor_adamw"]
-    assert lrs == pytest.approx([1e-3, 3e-3, 1e-3, 3e-3])
-    assert len(schedulers) == 4
-    assert isinstance(optimizers[0], torch.optim.Muon)
-    assert isinstance(optimizers[1], torch.optim.Muon)
-    assert isinstance(optimizers[2], torch.optim.AdamW)
-    assert isinstance(optimizers[3], torch.optim.AdamW)
-    assert predictor_muon_ids | predictor_adamw_ids == predictor_param_ids
 
 
 def test_load_resume_model_state_rejects_removed_cls_predictor_keys():

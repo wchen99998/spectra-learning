@@ -9,11 +9,12 @@ from torch import nn
 
 from spectra_learning.config import load_config
 from spectra_learning.models.common import (
+    _build_frozen_2d_position_embedding,
     _build_frozen_position_embedding,
-    _build_non_causal_blocks,
 )
 from spectra_learning.models.transformer import _build_norm
 from spectra_learning.models.encoder import PeakSetEncoder
+from spectra_learning.models.pairformer import PairformerBlock
 from spectra_learning.models.peak_features import PeakFeatureEmbedder
 from spectra_learning.models.settings import PeakSetJEPASettings
 
@@ -56,6 +57,9 @@ def _configure_dimensions(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
     model.model_dim = cfg.model_dim
     model.predictor_dim = (
         cfg.predictor_dim if cfg.predictor_dim is not None else model.model_dim
+    )
+    model.predictor_pair_dim = (
+        cfg.pairformer_pair_dim if cfg.pairformer_pair_dim is not None else model.model_dim
     )
     model.encoder_num_layers = cfg.encoder_num_layers
     model.norm_eps = cfg.norm_eps
@@ -227,6 +231,8 @@ def _build_teacher(
 def _build_predictor(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
     model.latent_mask_token = nn.Parameter(torch.empty(model.model_dim))
     nn.init.normal_(model.latent_mask_token, std=0.02)
+    model.pair_mask_token = nn.Parameter(torch.empty(model.predictor_pair_dim))
+    nn.init.normal_(model.pair_mask_token, std=0.02)
 
     if model.predictor_dim != model.model_dim:
         encoder_to_predictor_proj = nn.Linear(
@@ -244,15 +250,41 @@ def _build_predictor(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
         model.num_predictor_input_tokens,
         model.model_dim,
     )
+    model.predictor_pair_position_embedding = _build_frozen_2d_position_embedding(
+        model.num_predictor_input_tokens,
+        model.predictor_pair_dim,
+    )
 
-    model.masked_latent_predictor = _build_non_causal_blocks(
-        dim=model.predictor_dim,
-        num_layers=cfg.masked_latent_predictor_num_layers,
-        num_heads=cfg.masked_latent_predictor_num_heads,
-        num_kv_heads=None,
-        attention_mlp_multiple=cfg.attention_mlp_multiple,
-        norm_eps=model.norm_eps,
-        dropout=cfg.predictor_dropout,
+    pair_num_heads = (
+        cfg.pairformer_pair_num_heads
+        if cfg.pairformer_pair_num_heads is not None
+        else cfg.masked_latent_predictor_num_heads
+    )
+    refresh_pair_layers = (
+        None
+        if cfg.pairformer_refresh_pair_layers is None
+        else set(cfg.pairformer_refresh_pair_layers)
+    )
+    model.masked_latent_predictor = nn.ModuleList(
+        [
+            PairformerBlock(
+                single_dim=model.predictor_dim,
+                pair_dim=model.predictor_pair_dim,
+                num_heads=cfg.masked_latent_predictor_num_heads,
+                pair_num_heads=pair_num_heads,
+                attention_mlp_multiple=cfg.attention_mlp_multiple,
+                pair_feature_hidden_dim=cfg.pairformer_pair_feature_hidden_dim,
+                norm_eps=model.norm_eps,
+                dropout=cfg.predictor_dropout,
+                refresh_pair=cfg.pairformer_refresh_pair
+                and (
+                    refresh_pair_layers is None
+                    or block_idx in refresh_pair_layers
+                ),
+                use_cuequivariance=cfg.pairformer_use_cuequivariance,
+            )
+            for block_idx in range(1, cfg.masked_latent_predictor_num_layers + 1)
+        ]
     )
     model.predictor_final_norm = (
         _build_norm(

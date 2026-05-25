@@ -49,7 +49,8 @@ def init_cuequivariance_torch_compile() -> None:
 def _init_linear(linear: nn.Linear, *, gate: bool = False) -> None:
     if gate:
         nn.init.zeros_(linear.weight)
-        nn.init.ones_(linear.bias)
+        if linear.bias is not None:
+            nn.init.ones_(linear.bias)
         return
     nn.init.xavier_normal_(linear.weight)
     if linear.bias is not None:

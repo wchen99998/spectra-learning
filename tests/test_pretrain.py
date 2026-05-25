@@ -595,7 +595,7 @@ class BlockJEPATests(unittest.TestCase):
             peak_intensity,
             peak_valid_mask,
         )
-        context_encoded = model.encoder(
+        context_encoded, _, context_pair = model.encoder.forward_with_block_outputs(
             peak_mz,
             peak_intensity,
             valid_mask=peak_valid_mask,
@@ -604,6 +604,7 @@ class BlockJEPATests(unittest.TestCase):
         context_emb = context_encoded
         _, predictor_output = model._predict_augmented_targets(
             context_emb,
+            context_pair,
             context_mask,
             target_masks,
         )
@@ -812,8 +813,8 @@ class BlockJEPATests(unittest.TestCase):
             ) as teacher_forward,
             mock.patch.object(
                 model.encoder,
-                "forward",
-                wraps=model.encoder.forward,
+                "forward_with_block_outputs",
+                wraps=model.encoder.forward_with_block_outputs,
             ) as student_forward,
         ):
             loss = model.forward_augmented(batch)["loss"]

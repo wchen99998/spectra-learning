@@ -56,7 +56,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.predictor_dropout = 0.1
     cfg.predictor_apply_final_norm = True
     cfg.predictor_use_rope = False
-    cfg.predictor_learning_rate_ratio = 1.0
     cfg.masked_latent_predictor_num_layers = 6
     cfg.masked_latent_predictor_num_heads = 8
     cfg.target_projector_dim = -1

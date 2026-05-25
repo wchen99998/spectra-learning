@@ -102,6 +102,7 @@ class ObjectiveMixin:
     def _predict_augmented_targets(
         self: Any,
         context_emb: Float[Tensor, "batch peaks dim"],
+        context_pair: Float[Tensor, "batch peaks peaks pair"],
         context_mask: Bool[Tensor, "batch peaks"],
         target_masks: Bool[Tensor, "batch views peaks"],
     ) -> tuple[
@@ -115,22 +116,36 @@ class ObjectiveMixin:
             context_emb.unsqueeze(1).expand(-1, num_target_blocks, -1, -1)
             * context_mask_by_view.unsqueeze(-1)
         )
-        if self.masked_token_input_mode == "mz_sentinel":
-            predictor_input = torch.where(
-                target_masks.unsqueeze(-1),
-                context_emb.unsqueeze(1).expand(-1, num_target_blocks, -1, -1),
-                predictor_input,
-            )
-        else:
-            predictor_input = torch.where(
-                target_masks.unsqueeze(-1),
-                self.latent_mask_token.view(1, 1, 1, -1).to(context_emb),
-                predictor_input,
-            )
+        predictor_input = torch.where(
+            target_masks.unsqueeze(-1),
+            self.latent_mask_token.view(1, 1, 1, -1).to(context_emb),
+            predictor_input,
+        )
         predictor_visible_mask = (context_mask_by_view | target_masks).reshape(
             batch_size,
             num_target_blocks,
             num_peaks,
+        )
+        predictor_pair = context_pair.unsqueeze(1).expand(
+            -1,
+            num_target_blocks,
+            -1,
+            -1,
+            -1,
+        )
+        context_pair_mask = context_mask_by_view.unsqueeze(3) & context_mask_by_view.unsqueeze(2)
+        predictor_pair = predictor_pair * context_pair_mask.unsqueeze(-1).to(
+            dtype=predictor_pair.dtype
+        )
+        target_pair_mask = target_masks.unsqueeze(3) | target_masks.unsqueeze(2)
+        predictor_pair = torch.where(
+            target_pair_mask.unsqueeze(-1),
+            self.pair_mask_token.view(1, 1, 1, 1, -1).to(context_pair),
+            predictor_pair,
+        )
+        predictor_pair_mask = predictor_visible_mask.unsqueeze(3) & predictor_visible_mask.unsqueeze(2)
+        predictor_pair = predictor_pair * predictor_pair_mask.unsqueeze(-1).to(
+            dtype=predictor_pair.dtype
         )
         predictor_visible_mask = predictor_visible_mask.reshape(
             batch_size * num_target_blocks,
@@ -142,8 +157,15 @@ class ObjectiveMixin:
             predictor_input.shape[2],
             -1,
         )
+        flat_predictor_pair = predictor_pair.reshape(
+            batch_size * num_target_blocks,
+            predictor_pair.shape[2],
+            predictor_pair.shape[3],
+            -1,
+        )
         predictor_features = self.predict_masked_target_features(
             flat_predictor_input,
+            flat_predictor_pair,
             predictor_visible_mask,
         )
         predictor_features = predictor_features.reshape(

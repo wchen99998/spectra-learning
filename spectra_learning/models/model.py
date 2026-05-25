@@ -25,6 +25,7 @@ class PeakSetJEPA(
     training_mode: str
     model_dim: int
     predictor_dim: int
+    predictor_pair_dim: int
     encoder_num_layers: int
     norm_eps: float
     covariance_pooling_dim: int
@@ -65,6 +66,7 @@ class PeakSetJEPA(
     teacher_encoder: PeakSetEncoder | None
     encoder_to_predictor_proj: nn.Module
     latent_mask_token: nn.Parameter
+    pair_mask_token: nn.Parameter
     masked_latent_predictor: nn.ModuleList
     predictor_final_norm: nn.Module
     masked_latent_readout: nn.Linear
