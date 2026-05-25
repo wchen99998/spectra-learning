@@ -46,6 +46,12 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pairformer_pair_feature_hidden_dim = 512
     cfg.pairformer_use_cuequivariance = True
     cfg.pairformer_refresh_pair = True
+    cfg.pairformer_use_fourier_features = True
+    cfg.pairformer_fourier_num_freqs = 16
+    cfg.pairformer_fourier_x_min = 0.01
+    cfg.pairformer_fourier_x_max = 1000
+    cfg.pairformer_relative_fourier_x_min = 0.001
+    cfg.pairformer_relative_fourier_x_max = 1.0
     cfg.attention_mlp_multiple = 4
 
     # Masked latent predictor

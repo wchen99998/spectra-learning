@@ -222,6 +222,70 @@ class PairformerEncoderTests(unittest.TestCase):
         torch.testing.assert_close(reference_mass, torch.tensor([800.0]))
         torch.testing.assert_close(fallback_mass, torch.tensor([200.0]))
 
+    def test_pair_features_include_compact_fourier_encodings(self):
+        embedder = PairFeatureEmbedder(
+            single_dim=4,
+            pair_dim=8,
+            hidden_dim=16,
+            mz_scale=1000.0,
+            precursor_mz_scale=1000.0,
+            fourier_num_freqs=4,
+            fourier_x_min=1e-2,
+            fourier_x_max=1000.0,
+            relative_fourier_x_min=1e-3,
+            relative_fourier_x_max=1.0,
+        )
+        captured: dict[str, torch.Tensor] = {}
+
+        def capture_raw_input(_module, args):
+            captured["raw_input"] = args[0].detach().clone()
+
+        handle = embedder.raw_proj.register_forward_pre_hook(capture_raw_input)
+        peak_mz = torch.tensor([[0.10, 0.25]], dtype=torch.float32)
+        peak_intensity = torch.tensor([[1.0, 0.5]], dtype=torch.float32)
+        single = torch.zeros(1, 2, 4)
+        valid_mask = torch.ones(1, 2, dtype=torch.bool)
+        precursor_mz = torch.tensor([0.50], dtype=torch.float32)
+        embedder(
+            peak_mz,
+            peak_intensity,
+            single,
+            valid_mask,
+            precursor_mz=precursor_mz,
+        )
+        handle.remove()
+
+        raw = captured["raw_input"]
+        scalar_dim = 14 + embedder.mass_differences.numel()
+        pair_fourier_dim = 3 * embedder.pair_fourier.num_features()
+        relative_fourier_dim = embedder.relative_pair_fourier.num_features()
+        self.assertEqual(
+            raw.shape[-1],
+            scalar_dim + pair_fourier_dim + relative_fourier_dim,
+        )
+
+        raw_pair = raw[0, 0, 1]
+        torch.testing.assert_close(
+            raw_pair[:4],
+            torch.tensor([0.15, 0.15, 0.30, -0.15]),
+        )
+        expected_da_fourier = embedder._fourier_values(
+            embedder.pair_fourier,
+            torch.tensor([[[[150.0, 150.0, -150.0]]]]),
+        ).flatten()
+        expected_relative_fourier = embedder._fourier_values(
+            embedder.relative_pair_fourier,
+            torch.tensor([[[[0.30]]]]),
+        ).flatten()
+        torch.testing.assert_close(
+            raw_pair[scalar_dim : scalar_dim + pair_fourier_dim],
+            expected_da_fourier,
+        )
+        torch.testing.assert_close(
+            raw_pair[scalar_dim + pair_fourier_dim :],
+            expected_relative_fourier,
+        )
+
     def test_padding_values_do_not_leak_into_visible_peak_embeddings(self):
         model = self._build_model(encoder_use_cls_token=False)
         model.eval()

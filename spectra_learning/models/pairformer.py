@@ -16,6 +16,7 @@ from cuequivariance_torch import (
 )
 
 from spectra_learning.data.spectra import PEAK_MZ_MAX
+from spectra_learning.models.peak_features import FourierFeatures
 from spectra_learning.models.transformer import FeedForward, _build_norm
 
 
@@ -68,17 +69,37 @@ class PairFeatureEmbedder(nn.Module):
         mz_scale: float = PEAK_MZ_MAX,
         precursor_mz_scale: float = PEAK_MZ_MAX,
         sigma_ppm: float = 20.0,
+        use_fourier_features: bool = True,
+        fourier_num_freqs: int = 16,
+        fourier_x_min: float = 1e-2,
+        fourier_x_max: float = PEAK_MZ_MAX,
+        relative_fourier_x_min: float = 1e-3,
+        relative_fourier_x_max: float = 1.0,
     ) -> None:
         super().__init__()
         self.mz_scale = mz_scale
         self.precursor_mz_scale = precursor_mz_scale
         self.sigma_ppm = sigma_ppm
+        self.use_fourier_features = use_fourier_features
         self.register_buffer(
             "mass_differences",
             torch.tensor(COMMON_MASS_DIFFERENCES_DA, dtype=torch.float32),
             persistent=False,
         )
         raw_dim = 14 + len(COMMON_MASS_DIFFERENCES_DA)
+        if self.use_fourier_features:
+            self.pair_fourier = FourierFeatures(
+                x_min=fourier_x_min,
+                x_max=fourier_x_max,
+                num_freqs=fourier_num_freqs,
+            )
+            self.relative_pair_fourier = FourierFeatures(
+                x_min=relative_fourier_x_min,
+                x_max=relative_fourier_x_max,
+                num_freqs=fourier_num_freqs,
+            )
+            raw_dim += 3 * self.pair_fourier.num_features()
+            raw_dim += self.relative_pair_fourier.num_features()
         self.raw_proj = nn.Sequential(
             nn.Linear(raw_dim, hidden_dim),
             nn.SiLU(),
@@ -105,6 +126,13 @@ class PairFeatureEmbedder(nn.Module):
         mz_da = peak_mz.float() * self.mz_scale
         return (mz_da * valid_mask.float()).amax(dim=1).clamp_min(1.0)
 
+    def _fourier_values(
+        self,
+        fourier: FourierFeatures,
+        values: torch.Tensor,
+    ) -> torch.Tensor:
+        return fourier(values.unsqueeze(-1)).flatten(start_dim=-2)
+
     def forward(
         self,
         peak_mz: torch.Tensor,
@@ -125,6 +153,7 @@ class PairFeatureEmbedder(nn.Module):
             mz_j = mz_da.unsqueeze(1)
             d = mz_j - mz_i
             abs_d = d.abs()
+            relative_d = d / reference_mass
             complement = mz_i + mz_j - reference_mass
             mass_diffs = self.mass_differences.to(device=peak_mz.device)
             ppm = 1e6 * (abs_d.unsqueeze(-1) - mass_diffs) / mass_diffs
@@ -137,26 +166,37 @@ class PairFeatureEmbedder(nn.Module):
                 device=peak_mz.device,
                 dtype=peak_mz.dtype,
             ).view(1, peak_mz.shape[1], peak_mz.shape[1])
-            raw = torch.cat(
-                [
-                    d.unsqueeze(-1) / self.mz_scale,
-                    abs_d.unsqueeze(-1) / self.mz_scale,
-                    d.unsqueeze(-1) / reference_mass.unsqueeze(-1),
-                    complement.unsqueeze(-1) / self.mz_scale,
-                    mz_i.expand_as(d).unsqueeze(-1) / reference_mass.unsqueeze(-1),
-                    mz_j.expand_as(d).unsqueeze(-1) / reference_mass.unsqueeze(-1),
-                    intensity_i.expand_as(d).unsqueeze(-1),
-                    intensity_j.expand_as(d).unsqueeze(-1),
-                    (intensity_i * intensity_j).expand_as(d).unsqueeze(-1),
-                    torch.log1p(intensity_i).expand_as(d).unsqueeze(-1),
-                    torch.log1p(intensity_j).expand_as(d).unsqueeze(-1),
-                    torch.sign(d).unsqueeze(-1),
-                    diag.expand_as(d).unsqueeze(-1),
-                    (d > 0).to(dtype=peak_mz.dtype).unsqueeze(-1),
-                    radial,
-                ],
-                dim=-1,
-            )
+            raw_parts = [
+                d.unsqueeze(-1) / self.mz_scale,
+                abs_d.unsqueeze(-1) / self.mz_scale,
+                relative_d.unsqueeze(-1),
+                complement.unsqueeze(-1) / self.mz_scale,
+                mz_i.expand_as(d).unsqueeze(-1) / reference_mass.unsqueeze(-1),
+                mz_j.expand_as(d).unsqueeze(-1) / reference_mass.unsqueeze(-1),
+                intensity_i.expand_as(d).unsqueeze(-1),
+                intensity_j.expand_as(d).unsqueeze(-1),
+                (intensity_i * intensity_j).expand_as(d).unsqueeze(-1),
+                torch.log1p(intensity_i).expand_as(d).unsqueeze(-1),
+                torch.log1p(intensity_j).expand_as(d).unsqueeze(-1),
+                torch.sign(d).unsqueeze(-1),
+                diag.expand_as(d).unsqueeze(-1),
+                (d > 0).to(dtype=peak_mz.dtype).unsqueeze(-1),
+                radial,
+            ]
+            if self.use_fourier_features:
+                raw_parts.extend(
+                    [
+                        self._fourier_values(
+                            self.pair_fourier,
+                            torch.stack([d, abs_d, complement], dim=-1),
+                        ),
+                        self._fourier_values(
+                            self.relative_pair_fourier,
+                            relative_d.unsqueeze(-1),
+                        ),
+                    ]
+                )
+            raw = torch.cat(raw_parts, dim=-1)
         single_i = single.unsqueeze(2)
         single_j = single.unsqueeze(1)
         single_pair = torch.cat(

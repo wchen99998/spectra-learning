@@ -179,6 +179,12 @@ def _build_peak_set_encoder(cfg: PeakSetJEPASettings) -> PeakSetEncoder:
         pairformer_use_cuequivariance=cfg.pairformer_use_cuequivariance,
         pairformer_mz_scale=cfg.pairformer_mz_scale,
         pairformer_precursor_mz_scale=cfg.pairformer_precursor_mz_scale,
+        pairformer_use_fourier_features=cfg.pairformer_use_fourier_features,
+        pairformer_fourier_num_freqs=cfg.pairformer_fourier_num_freqs,
+        pairformer_fourier_x_min=cfg.pairformer_fourier_x_min,
+        pairformer_fourier_x_max=cfg.pairformer_fourier_x_max,
+        pairformer_relative_fourier_x_min=cfg.pairformer_relative_fourier_x_min,
+        pairformer_relative_fourier_x_max=cfg.pairformer_relative_fourier_x_max,
     )
 
 

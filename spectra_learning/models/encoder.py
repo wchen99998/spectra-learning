@@ -38,6 +38,12 @@ class PeakSetEncoder(nn.Module):
         pairformer_use_cuequivariance: bool = True,
         pairformer_mz_scale: float = 1000.0,
         pairformer_precursor_mz_scale: float = 1000.0,
+        pairformer_use_fourier_features: bool = True,
+        pairformer_fourier_num_freqs: int = 16,
+        pairformer_fourier_x_min: float = 1e-2,
+        pairformer_fourier_x_max: float = 1000.0,
+        pairformer_relative_fourier_x_min: float = 1e-3,
+        pairformer_relative_fourier_x_max: float = 1.0,
     ):
         super().__init__()
         self.num_layers = num_layers
@@ -75,6 +81,12 @@ class PeakSetEncoder(nn.Module):
             hidden_dim=pair_feature_hidden_dim,
             mz_scale=pairformer_mz_scale,
             precursor_mz_scale=pairformer_precursor_mz_scale,
+            use_fourier_features=pairformer_use_fourier_features,
+            fourier_num_freqs=pairformer_fourier_num_freqs,
+            fourier_x_min=pairformer_fourier_x_min,
+            fourier_x_max=pairformer_fourier_x_max,
+            relative_fourier_x_min=pairformer_relative_fourier_x_min,
+            relative_fourier_x_max=pairformer_relative_fourier_x_max,
         )
         self.blocks = nn.ModuleList(
             [

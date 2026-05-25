@@ -47,6 +47,12 @@ class PeakSetJEPASettings:
     pairformer_use_cuequivariance: bool = True
     pairformer_mz_scale: float = PEAK_MZ_MAX
     pairformer_precursor_mz_scale: float = PEAK_MZ_MAX
+    pairformer_use_fourier_features: bool = True
+    pairformer_fourier_num_freqs: int = 16
+    pairformer_fourier_x_min: float = 1e-2
+    pairformer_fourier_x_max: float = PEAK_MZ_MAX
+    pairformer_relative_fourier_x_min: float = 1e-3
+    pairformer_relative_fourier_x_max: float = 1.0
     predictor_apply_final_norm: bool = True
     encoder_use_cls_token: bool = True
     encoder_num_cls_tokens: int | None = None
@@ -100,6 +106,7 @@ def _apply_derived_defaults(values: dict[str, Any], config: Any) -> None:
     values["jepa_mae_mz_max"] = peak_mz_max
     values["pairformer_mz_scale"] = peak_mz_max
     values["pairformer_precursor_mz_scale"] = precursor_mz_max
+    values["pairformer_fourier_x_max"] = peak_mz_max
 
 
 def _apply_dependent_defaults(values: dict[str, Any]) -> None:
@@ -166,6 +173,12 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "pairformer_use_cuequivariance": bool,
     "pairformer_mz_scale": float,
     "pairformer_precursor_mz_scale": float,
+    "pairformer_use_fourier_features": bool,
+    "pairformer_fourier_num_freqs": int,
+    "pairformer_fourier_x_min": float,
+    "pairformer_fourier_x_max": float,
+    "pairformer_relative_fourier_x_min": float,
+    "pairformer_relative_fourier_x_max": float,
     "predictor_apply_final_norm": bool,
     "encoder_use_cls_token": bool,
     "encoder_num_cls_tokens": _optional_int,

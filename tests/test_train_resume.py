@@ -1126,6 +1126,11 @@ def test_jepa_mae_mz_scale_follows_peak_mz_preprocessing_scale():
     assert model.jepa_mae_num_mz_bins == 300
     assert model.encoder.pair_embedder.mz_scale == 750.0
     assert model.encoder.pair_embedder.precursor_mz_scale == 2000.0
+    assert model.encoder.pair_embedder.pair_fourier.num_freqs == 16
+    torch.testing.assert_close(
+        model.encoder.pair_embedder.pair_fourier.b[0, -1],
+        torch.tensor(1.0 / 750.0),
+    )
 
 
 def test_config_can_disable_encoder_fourier_features():
