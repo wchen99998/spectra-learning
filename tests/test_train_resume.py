@@ -716,46 +716,28 @@ def test_build_optimizers_uses_single_adamw_optimizer_by_default():
     assert len(schedulers) == 1
 
 
-def test_build_optimizers_respects_frozen_covariance_pooling():
+def test_build_optimizers_do_not_include_standalone_covariance_pooler():
     cfg = _optimizer_config()
-    trainable_model = _small_model(covariance_pooling_dim=4)
-    trainable_pooler = CovariancePool(
-        input_dim=trainable_model.model_dim,
+    model = _small_model()
+    pooler = CovariancePool(
+        input_dim=model.model_dim,
         compressed_dim=4,
     )
-    trainable_module = PretrainModule(trainable_model, trainable_pooler)
-    frozen_model = _small_model(
-        covariance_pooling_dim=4,
-        train_covariance_pooling=False,
-    )
-    frozen_pooler = CovariancePool(input_dim=frozen_model.model_dim, compressed_dim=4)
-    frozen_pooler.requires_grad_(False)
-    frozen_module = PretrainModule(frozen_model, frozen_pooler)
+    module = PretrainModule(model)
 
-    trainable_optimizers, _ = build_optimizers(
+    optimizers, _ = build_optimizers(
         cfg,
-        trainable_module,
-        total_steps=10,
-        device=torch.device("cpu"),
-    )
-    frozen_optimizers, _ = build_optimizers(
-        cfg,
-        frozen_module,
+        module,
         total_steps=10,
         device=torch.device("cpu"),
     )
 
-    trainable_cov_ids = {id(param) for param in trainable_pooler.parameters()}
-    frozen_cov_ids = {id(param) for param in frozen_pooler.parameters()}
-    trainable_optimizer_ids = set().union(
-        *(_optimizer_param_ids(optimizer) for optimizer in trainable_optimizers)
-    )
-    frozen_optimizer_ids = set().union(
-        *(_optimizer_param_ids(optimizer) for optimizer in frozen_optimizers)
+    pooler_param_ids = {id(param) for param in pooler.parameters()}
+    optimizer_param_ids = set().union(
+        *(_optimizer_param_ids(optimizer) for optimizer in optimizers)
     )
 
-    assert trainable_cov_ids <= trainable_optimizer_ids
-    assert frozen_cov_ids.isdisjoint(frozen_optimizer_ids)
+    assert pooler_param_ids.isdisjoint(optimizer_param_ids)
 
 
 def test_build_optimizers_uses_official_torch_muon_and_adamw():

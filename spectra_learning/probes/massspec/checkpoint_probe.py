@@ -4,11 +4,9 @@ from pathlib import Path
 import torch
 from ml_collections import config_dict
 
-from spectra_learning.models.pooling import build_covariance_pooler_from_config
 from spectra_learning.probes.massspec.msg_probe import run_msg_probe
 from spectra_learning.training.api import build_logger, build_model_from_config
 from spectra_learning.training.checkpointing import (
-    load_resume_covariance_pooler_state,
     load_resume_model_state,
 )
 from spectra_learning.training.logging import log_msg_probe_metrics
@@ -40,21 +38,11 @@ def run_checkpoint_msg_probe(
     load_resume_model_state(model, checkpoint["model"])
     model.to(device).eval()
 
-    covariance_pooler = build_covariance_pooler_from_config(config)
-    load_resume_covariance_pooler_state(
-        covariance_pooler,
-        checkpoint_path,
-        checkpoint,
-    )
-    if covariance_pooler is not None:
-        covariance_pooler.to(device).eval()
-
     logger = build_logger(config, workdir)
     metrics = run_msg_probe(
         config=config,
         model=model,
         device=device,
-        covariance_pooler=covariance_pooler,
     )
     log_msg_probe_metrics(
         logger,

@@ -6,8 +6,6 @@ import torch
 from jaxtyping import Bool, Float
 from torch import Tensor
 
-from spectra_learning.models.objectives import CovariancePooler
-
 
 class ForwardMixin:
     @staticmethod
@@ -32,7 +30,6 @@ class ForwardMixin:
         self: Any,
         augmented_batch: dict[str, Tensor],
         return_collapse_data: Literal[False] = False,
-        covariance_pooler: CovariancePooler | None = None,
     ) -> dict[str, Tensor]: ...
 
     @overload
@@ -40,14 +37,12 @@ class ForwardMixin:
         self: Any,
         augmented_batch: dict[str, Tensor],
         return_collapse_data: Literal[True],
-        covariance_pooler: CovariancePooler | None = None,
     ) -> tuple[dict[str, Tensor], dict[str, Tensor]]: ...
 
     def forward_augmented(
         self: Any,
         augmented_batch: dict[str, Tensor],
         return_collapse_data: bool = False,
-        covariance_pooler: CovariancePooler | None = None,
     ) -> dict[str, Tensor] | tuple[dict[str, Tensor], dict[str, Tensor]]:
         # augmented_batch tensors:
         # peak_mz/peak_intensity/context_mask/peak_valid_mask: [B, N]
@@ -56,7 +51,6 @@ class ForwardMixin:
             return self.forward_mae(
                 augmented_batch,
                 return_collapse_data=return_collapse_data,
-                covariance_pooler=covariance_pooler,
             )
 
         peak_mz = augmented_batch["peak_mz"]
@@ -105,16 +99,7 @@ class ForwardMixin:
             target_masks,
             context_emb,
         )
-        covariance_term, covariance_metrics = self._covariance_pooling_metrics(
-            context_emb,
-            context_mask,
-            covariance_pooler,
-        )
-        loss = (
-            masked_prediction_term
-            + jepa_mae_term
-            + covariance_term
-        )
+        loss = masked_prediction_term + jepa_mae_term
         valid_peak_count = peak_valid_mask.float().sum().clamp_min(1.0)
         collapse_data: dict[str, Tensor] = {}
         if return_collapse_data:
@@ -142,7 +127,6 @@ class ForwardMixin:
         }
         metrics.update(self._target_mask_metrics(target_masks, valid_peak_count))
         metrics.update(jepa_mae_metrics)
-        metrics.update(covariance_metrics)
         if return_collapse_data:
             return metrics, collapse_data
         return metrics
@@ -152,7 +136,6 @@ class ForwardMixin:
         self: Any,
         augmented_batch: dict[str, Tensor],
         return_collapse_data: Literal[False] = False,
-        covariance_pooler: CovariancePooler | None = None,
     ) -> dict[str, Tensor]: ...
 
     @overload
@@ -160,14 +143,12 @@ class ForwardMixin:
         self: Any,
         augmented_batch: dict[str, Tensor],
         return_collapse_data: Literal[True],
-        covariance_pooler: CovariancePooler | None = None,
     ) -> tuple[dict[str, Tensor], dict[str, Tensor]]: ...
 
     def forward_mae(
         self: Any,
         augmented_batch: dict[str, Tensor],
         return_collapse_data: bool = False,
-        covariance_pooler: CovariancePooler | None = None,
     ) -> dict[str, Tensor] | tuple[dict[str, Tensor], dict[str, Tensor]]:
         # augmented_batch tensors:
         # peak_mz/peak_intensity/context_mask/peak_valid_mask: [B, N]
@@ -206,12 +187,7 @@ class ForwardMixin:
             target_masks,
             context_encoded,
         )
-        covariance_term, covariance_metrics = self._covariance_pooling_metrics(
-            context_encoded,
-            context_visible_mask,
-            covariance_pooler,
-        )
-        loss = mae_term + covariance_term
+        loss = mae_term
         valid_peak_count = peak_valid_mask.float().sum().clamp_min(1.0)
         metrics = {
             "loss": loss,
@@ -219,7 +195,6 @@ class ForwardMixin:
         }
         metrics.update(self._target_mask_metrics(target_masks, valid_peak_count))
         metrics.update(mae_metrics)
-        metrics.update(covariance_metrics)
         if return_collapse_data:
             return metrics, {}
         return metrics

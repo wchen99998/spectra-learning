@@ -17,7 +17,6 @@ from tqdm import tqdm
 from spectra_learning.data.gems.datamodule import GemsNativeDataModule
 from spectra_learning.training.batch import BatchPrefetcher
 from spectra_learning.training.checkpointing import (
-    load_resume_covariance_pooler_state,
     load_frozen_teacher_weights,
     load_grad_scaler_state,
     load_optimizer_state,
@@ -50,7 +49,6 @@ from spectra_learning.probes.massspec.msg_probe import (
     resolve_msg_probe_fingerprint,
     run_msg_probe,
 )
-from spectra_learning.models.pooling import build_covariance_pooler_from_config
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.training.api import (
     build_grad_scaler,
@@ -104,8 +102,7 @@ def train_and_evaluate(
     clear_cuda_cache(device)
     model = build_model_from_config(config)
     initialize_frozen_teacher(config, model, distributed)
-    covariance_pooler = build_covariance_pooler_from_config(config)
-    train_module = PretrainModule(model, covariance_pooler)
+    train_module = PretrainModule(model)
     model_param_metrics = (
         collect_and_log_param_metrics(train_module) if distributed.is_main else {}
     )
@@ -120,7 +117,6 @@ def train_and_evaluate(
         config=config,
         checkpoint_dir=checkpoint_dir,
         model=model,
-        covariance_pooler=covariance_pooler,
         optimizers=optimizers,
         schedulers=schedulers,
         grad_scaler=grad_scaler,
@@ -158,7 +154,7 @@ def train_and_evaluate(
     )
     final_global_step = int(cast(float, last_msg_probe_metrics["run/final_global_step"]))
     if distributed.is_main:
-        base_model, covariance_pooler = split_pretrain_module(unwrap_model(train_model))
+        base_model, _ = split_pretrain_module(unwrap_model(train_model))
         save_checkpoint(
             checkpoint_dir / "last.pt",
             base_model,
@@ -168,7 +164,6 @@ def train_and_evaluate(
             final_global_step // datamodule.train_steps,
             float("nan"),
             getattr(logger.experiment, "id", None),
-            covariance_pooler=covariance_pooler,
             grad_scaler=grad_scaler,
         )
     barrier(distributed)
@@ -328,9 +323,7 @@ def run_training_loop(
                 )
             if global_step % checkpoint_every_steps == 0:
                 if distributed.is_main:
-                    base_model, covariance_pooler = split_pretrain_module(
-                        unwrap_model(model)
-                    )
+                    base_model, _ = split_pretrain_module(unwrap_model(model))
                     save_checkpoint(
                         checkpoint_dir / f"step-{global_step:08d}.pt",
                         base_model,
@@ -340,20 +333,16 @@ def run_training_loop(
                         global_step // datamodule.train_steps,
                         float(metrics["loss"]),
                         getattr(wandb_run, "id", None),
-                        covariance_pooler=covariance_pooler,
                         grad_scaler=grad_scaler,
                     )
                     prune_checkpoints(checkpoint_dir, keep_top_k=15)
                 barrier(distributed)
             if msg_probe_every_n_steps > 0 and global_step % msg_probe_every_n_steps == 0:
-                base_model, covariance_pooler = split_pretrain_module(
-                    unwrap_model(model)
-                )
+                base_model, _ = split_pretrain_module(unwrap_model(model))
                 if should_run_msg_probe_on_modal(config):
                     last_msg_probe_metrics = submit_and_log_modal_msg_probe(
                         config=config,
                         model=base_model,
-                        covariance_pooler=covariance_pooler,
                         logger=logger,
                         checkpoint_dir=checkpoint_dir,
                         global_step=global_step,
@@ -374,7 +363,6 @@ def run_training_loop(
                             msg_probe_variants,
                             global_step,
                             distributed,
-                            covariance_pooler,
                         )
                     )
                 barrier(distributed)
@@ -474,7 +462,6 @@ def restore_training_state(
     schedulers: list[LRSchedulerLike],
     steps_per_epoch: int,
     device: torch.device,
-    covariance_pooler: torch.nn.Module | None = None,
     grad_scaler: torch.amp.GradScaler | None = None,
 ) -> tuple[int, int, int]:
     checkpoints = sorted(
@@ -494,7 +481,6 @@ def restore_training_state(
     if resume_wandb_id:
         config.wandb_resume_id = resume_wandb_id
     load_resume_model_state(model, ckpt["model"])
-    load_resume_covariance_pooler_state(covariance_pooler, ckpt_path, ckpt)
     for optimizer, state in zip(optimizers, ckpt["optimizers"], strict=True):
         load_optimizer_state(optimizer, state)
     for scheduler, state in zip(schedulers, ckpt["schedulers"], strict=True):
@@ -574,7 +560,6 @@ def run_and_log_msg_probe(
     variants: tuple[str, ...],
     global_step: int,
     distributed: DistributedContext | None = None,
-    covariance_pooler: torch.nn.Module | None = None,
 ) -> dict[str, float]:
     if distributed is None:
         distributed = DistributedContext(
@@ -588,7 +573,6 @@ def run_and_log_msg_probe(
         model=model,
         device=device,
         distributed=distributed,
-        covariance_pooler=covariance_pooler,
     )
     if distributed.is_main:
         log_msg_probe_metrics(
@@ -617,7 +601,6 @@ def submit_and_log_modal_msg_probe(
     *,
     config: config_dict.ConfigDict,
     model: PeakSetJEPA,
-    covariance_pooler: torch.nn.Module | None,
     logger,
     checkpoint_dir: Path,
     global_step: int,
@@ -630,7 +613,6 @@ def submit_and_log_modal_msg_probe(
     metrics = save_and_submit_modal_msg_probe(
         config=config,
         model=model,
-        covariance_pooler=covariance_pooler,
         checkpoint_dir=checkpoint_dir,
         workdir=checkpoint_dir.parent,
         global_step=global_step,

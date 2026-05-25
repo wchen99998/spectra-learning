@@ -9,7 +9,7 @@ from torch import nn
 from spectra_learning.models.ema import EMATeacherMixin
 from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.forwards import ForwardMixin
-from spectra_learning.models.objectives import CovariancePooler, ObjectiveMixin
+from spectra_learning.models.objectives import ObjectiveMixin
 from spectra_learning.models.settings import PeakSetJEPASettings
 from spectra_learning.models.setup import configure_peak_set_model
 from spectra_learning.models.targets import TargetProjectionMixin
@@ -28,9 +28,6 @@ class PeakSetJEPA(
     predictor_pair_dim: int
     encoder_num_layers: int
     norm_eps: float
-    covariance_pooling_dim: int
-    train_covariance_pooling: bool
-    covariance_pooling_loss_weight: float
     jepa_num_target_blocks: int
     jepa_target_layers: list[int]
     num_jepa_target_layers: int
@@ -91,7 +88,6 @@ class PeakSetJEPA(
         self,
         augmented_batch: dict[str, Tensor],
         return_collapse_data: Literal[False] = False,
-        covariance_pooler: CovariancePooler | None = None,
     ) -> dict[str, Tensor]: ...
 
     @overload
@@ -99,32 +95,19 @@ class PeakSetJEPA(
         self,
         augmented_batch: dict[str, Tensor],
         return_collapse_data: Literal[True],
-        covariance_pooler: CovariancePooler | None = None,
     ) -> tuple[dict[str, Tensor], dict[str, Tensor]]: ...
 
     def forward(
         self,
         augmented_batch: dict[str, Tensor],
         return_collapse_data: bool = False,
-        covariance_pooler: CovariancePooler | None = None,
     ) -> dict[str, Tensor] | tuple[dict[str, Tensor], dict[str, Tensor]]:
         # augmented_batch tensors:
         # peak_mz/peak_intensity/context_mask/peak_valid_mask: [B, N]
         # target_masks: [B, K, N], precursor_mz: [B] when present.
-        if covariance_pooler is None:
-            if return_collapse_data:
-                return self.forward_augmented(
-                    augmented_batch,
-                    return_collapse_data=True,
-                )
-            return self.forward_augmented(augmented_batch)
         if return_collapse_data:
             return self.forward_augmented(
                 augmented_batch,
                 return_collapse_data=True,
-                covariance_pooler=covariance_pooler,
             )
-        return self.forward_augmented(
-            augmented_batch,
-            covariance_pooler=covariance_pooler,
-        )
+        return self.forward_augmented(augmented_batch)

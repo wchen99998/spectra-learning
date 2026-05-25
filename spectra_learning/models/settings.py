@@ -59,9 +59,6 @@ class PeakSetJEPASettings:
     predictor_dim: int | None = None
     target_projector_dim: int | None = None
     predictor_dropout: float = 0.0
-    covariance_pooling_dim: int = -1
-    train_covariance_pooling: bool = True
-    covariance_pooling_loss_weight: float = 1.0
     use_ema_teacher: bool = False
     frozen_teacher_config_path: str | None = None
     ema_teacher_momentum_start: float = 0.996
@@ -174,9 +171,6 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "predictor_dim": _optional_int,
     "target_projector_dim": _optional_int,
     "predictor_dropout": float,
-    "covariance_pooling_dim": int,
-    "train_covariance_pooling": bool,
-    "covariance_pooling_loss_weight": float,
     "use_ema_teacher": bool,
     "frozen_teacher_config_path": lambda value: None if value is None else str(value),
     "ema_teacher_momentum_start": float,

@@ -1,19 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Protocol, cast
+from typing import Any, cast
 
 import torch
 import torch.nn.functional as F
 from jaxtyping import Bool, Float, Int
 from torch import Tensor, nn
-
-
-class CovariancePooler(Protocol):
-    def reconstruction_loss(
-        self,
-        peak_embeddings: Float[Tensor, "batch peaks dim"],
-        valid_mask: Bool[Tensor, "batch peaks"],
-    ) -> Float[Tensor, ""]: ...
 
 
 class ObjectiveMixin:
@@ -246,29 +238,6 @@ class ObjectiveMixin:
             "mae_intensity_loss": intensity_loss.to(dtype=reference.dtype),
             "mae_mz_accuracy": mz_accuracy.to(dtype=reference.dtype),
             "mae_intensity_accuracy": intensity_accuracy.to(dtype=reference.dtype),
-        }
-
-    def _covariance_pooling_metrics(
-        self: Any,
-        embeddings: Float[Tensor, "batch peaks dim"],
-        valid_mask: Bool[Tensor, "batch peaks"],
-        covariance_pooler: CovariancePooler | None = None,
-    ) -> tuple[Float[Tensor, ""], dict[str, Tensor]]:
-        if (
-            not self.train_covariance_pooling
-            or self.covariance_pooling_loss_weight <= 0
-            or covariance_pooler is None
-        ):
-            return embeddings.new_tensor(0.0), {}
-
-        covariance_loss = covariance_pooler.reconstruction_loss(embeddings, valid_mask)
-
-        term = embeddings.new_tensor(self.covariance_pooling_loss_weight) * (
-            covariance_loss.to(dtype=embeddings.dtype)
-        )
-        return term, {
-            "covariance_pooling_loss": covariance_loss.to(dtype=embeddings.dtype),
-            "covariance_pooling_term": term,
         }
 
     def pool(

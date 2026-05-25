@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 import torch
 from jaxtyping import Bool, Float
 from torch import Tensor, nn
@@ -84,21 +82,3 @@ class CovariancePool(nn.Module):
                 + target_norm_sq
             ).clamp_min(0.0)
             return torch.sqrt(loss_sq + 1e-12).mean()
-
-
-def build_covariance_pooler_from_config(config: Any) -> CovariancePool | None:
-    dim = int(_config_get(config, "covariance_pooling_dim", -1))
-    if dim <= 0 or not bool(_config_get(config, "train_covariance_pooling", True)):
-        return None
-    pooler = CovariancePool(
-        input_dim=int(_config_get(config, "model_dim", None)),
-        compressed_dim=dim,
-    )
-    pooler.requires_grad_(True)
-    return pooler
-
-
-def _config_get(config: Any, key: str, default: Any) -> Any:
-    if hasattr(config, "get"):
-        return config.get(key, default)
-    return getattr(config, key, default)

@@ -99,11 +99,6 @@ def _objective_parts(config: Any) -> list[str]:
         parts.append(
             f"intbin{float(config.get('jepa_mae_intensity_bin_size', 0.1)):g}"
         )
-    cov_dim = int(config.get("covariance_pooling_dim", -1))
-    if cov_dim > 0:
-        parts.append(f"covpool{cov_dim}")
-        if not bool(config.get("train_covariance_pooling", True)):
-            parts.append("covfrozen")
     return parts
 
 

@@ -63,11 +63,6 @@ def _configure_dimensions(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
     )
     model.encoder_num_layers = cfg.encoder_num_layers
     model.norm_eps = cfg.norm_eps
-    model.covariance_pooling_dim = cfg.covariance_pooling_dim
-    model.train_covariance_pooling = (
-        model.covariance_pooling_dim > 0 and cfg.train_covariance_pooling
-    )
-    model.covariance_pooling_loss_weight = cfg.covariance_pooling_loss_weight
 
 
 def _configure_targets(

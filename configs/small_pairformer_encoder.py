@@ -9,11 +9,11 @@ def get_config() -> config_dict.ConfigDict:
     cfg.gems_native_repo_id = "cjim8889/gems-a10-native"
     cfg.nist_murcko_probe_repo_id = "cjim8889/hr_msms_nist_dreams_embeddings"
     cfg.nist_murcko_probe_revision = "main"
-    cfg.nist_murcko_probe_train_samples = 60_000
+    cfg.nist_murcko_probe_train_samples = 30_000
     cfg.nist_murcko_probe_val_samples = 10_000
     cfg.nist_murcko_probe_test_samples = 10_000
     cfg.nist_murcko_probe_num_repeats = 1
-    cfg.batch_size = 256
+    cfg.batch_size = 128
     cfg.shuffle_buffer = 1_000_000
     cfg.drop_remainder = True
     cfg.max_precursor_mz = 1000
@@ -24,9 +24,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.seed = 66
 
     # Encoder
-    cfg.num_peaks = 64
-    cfg.model_dim = 512
-    cfg.encoder_num_layers = 14
+    cfg.num_peaks = 32
+    cfg.model_dim = 128
+    cfg.encoder_num_layers = 8
     cfg.encoder_num_heads = 8
     cfg.encoder_use_position_embedding = False
     cfg.encoder_apply_final_norm = True
@@ -38,11 +38,12 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_fourier_x_max = 1000
     cfg.encoder_fourier_x_min = 0.003
     cfg.feature_mlp_hidden_dim = 1024
-    cfg.pairformer_pair_dim = 384
-    cfg.pairformer_pair_num_heads = 12
+    cfg.pairformer_pair_dim = 128
+    cfg.pairformer_pair_num_heads = 8
     cfg.pairformer_pair_feature_hidden_dim = 512
     cfg.pairformer_use_cuequivariance = True
     cfg.pairformer_refresh_pair = True
+    cfg.pairformer_refresh_pair_layers = [1, 2, 3, 4]
     cfg.pairformer_use_fourier_features = True
     cfg.pairformer_fourier_num_freqs = 16
     cfg.pairformer_fourier_x_min = 0.01
@@ -52,11 +53,11 @@ def get_config() -> config_dict.ConfigDict:
     cfg.attention_mlp_multiple = 4
 
     # Masked latent predictor
-    cfg.predictor_dim = 256
+    cfg.predictor_dim = 128
     cfg.predictor_dropout = 0.1
     cfg.predictor_apply_final_norm = True
     cfg.predictor_use_rope = False
-    cfg.masked_latent_predictor_num_layers = 6
+    cfg.masked_latent_predictor_num_layers = 4
     cfg.masked_latent_predictor_num_heads = 8
     cfg.target_projector_dim = -1
     cfg.masked_token_input_mode = "latent_token"
@@ -144,18 +145,12 @@ def get_config() -> config_dict.ConfigDict:
     cfg.optimizer = "adamw"
     cfg.optimizer_fused = True
     cfg.adamw_lr = None
-    cfg.muon_lr = None
-    cfg.muon_adjust_lr_fn = "match_rms_adamw"
-    cfg.muon_momentum = 0.95
-    cfg.muon_nesterov = True
-    cfg.muon_ns_steps = 5
-    cfg.muon_weight_decay = None
 
     # Logging
     cfg.enable_wandb = True
     cfg.wandb_project = "jepa-debugging"
     cfg.run_name_suffix = (
-        "mae-intensity-aware-ragged-no-rope-predictor-no-mz-warp-1view-ctx70-tgt30"
+        "mae-pairformer"
     )
 
     return cfg

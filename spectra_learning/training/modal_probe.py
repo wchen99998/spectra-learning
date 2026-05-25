@@ -40,7 +40,6 @@ def save_and_submit_modal_msg_probe(
     *,
     config: config_dict.ConfigDict,
     model: PeakSetJEPA,
-    covariance_pooler: torch.nn.Module | None,
     checkpoint_dir: Path,
     workdir: Path,
     global_step: int,
@@ -48,6 +47,7 @@ def save_and_submit_modal_msg_probe(
     loss: float,
     wandb_run_id: str | None = None,
     submitter: ModalProbeSubmitter | None = None,
+    covariance_pooler: torch.nn.Module | None = None,
 ) -> dict[str, object]:
     checkpoint_path = checkpoint_dir / f"modal-probe-step-{global_step:08d}.pt"
     save_probe_checkpoint(
