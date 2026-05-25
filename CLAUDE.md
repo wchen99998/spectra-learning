@@ -42,8 +42,7 @@ python input_pipeline.py configs/gems_a_dataset.py
 
 ### Model (PeakSetSIGReg in `models/model.py`)
 
-- **PeakSetEncoder**: raw scalar peak features (`mz`, `intensity`, `log1p(intensity)`) -> MLP embedder -> N non-causal TransformerBlocks -> RMSNorm.
-- **Encoder**: raw scalar peak features (`mz`, `intensity`) -> Fourier/MLP embedder -> non-causal Transformer blocks.
+- **PeakSetEncoder**: raw scalar peak features (`mz`, `intensity`, `log1p(intensity)`) -> Fourier/MLP embedder -> Pairformer blocks with pair features -> LayerNorm.
 - **Targets / Predictor**: shared encoder target states supervise masked-token prediction; predictor maps visible context tokens to target-space latents.
 - **SIGReg**: optional regularizer on learned representations.
 

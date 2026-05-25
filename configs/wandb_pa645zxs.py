@@ -46,7 +46,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_use_cls_token = False
     cfg.encoder_num_layers = 14
     cfg.encoder_num_heads = 12
-    cfg.encoder_num_kv_heads = 12
     cfg.encoder_num_register_tokens = 2
     cfg.encoder_use_position_embedding = False
     cfg.encoder_apply_final_norm = False
@@ -59,9 +58,12 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_fourier_x_max = 1000
     cfg.encoder_fourier_x_min = 0.003
     cfg.feature_mlp_hidden_dim = 1024
+    cfg.pairformer_pair_dim = 384
+    cfg.pairformer_pair_num_heads = 12
+    cfg.pairformer_pair_feature_hidden_dim = 512
+    cfg.pairformer_use_cuequivariance = True
+    cfg.pairformer_refresh_pair = True
     cfg.attention_mlp_multiple = 4
-    cfg.norm_type = "layernorm"
-    cfg.use_precursor_token = True
 
     # Masked latent predictor
     cfg.predictor_dim = 256
@@ -85,7 +87,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.representation_regularizer = "none"
     cfg.sigreg_lambda = 0
     cfg.sigreg_num_slices = 1024
-    cfg.sigreg_precursor_scale = 1
     cfg.covariance_pooling_dim = 64
 
     # EMA teacher

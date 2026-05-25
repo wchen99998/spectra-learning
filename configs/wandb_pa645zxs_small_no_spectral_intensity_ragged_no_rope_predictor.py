@@ -10,14 +10,9 @@ def get_config() -> config_dict.ConfigDict:
 
     cfg.predictor_use_rope = False
     cfg.encoder_use_cls_token = True
-    cfg.encoder_fourier_warp_enabled = False
+    cfg.peak_ordering = "intensity"
     cfg.jepa_num_target_blocks = 1
-    cfg.jepa_context_fraction = 0.70
-    cfg.jepa_target_fraction = 0.30
-    cfg.jepa_intensity_aware_context_fraction = 0.70
-    cfg.jepa_intensity_aware_target_fraction = 0.30
-    cfg.jepa_intensity_aware_tail_target_mix = 1.0
-    cfg.jepa_intensity_aware_local_gap_probability = 0.0
+    cfg.encoder_num_cls_tokens = 3
     cfg.run_name_suffix = (
         "mae-intensity-aware-ragged-no-rope-predictor-cls-no-mz-warp-1view-ctx70-tgt30"
     )

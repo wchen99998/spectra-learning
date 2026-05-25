@@ -29,7 +29,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_use_cls_token = True
     cfg.encoder_num_layers = 20
     cfg.encoder_num_heads = 16
-    cfg.encoder_num_kv_heads = 16
     cfg.encoder_num_register_tokens = 2
     cfg.encoder_use_position_embedding = False
     cfg.encoder_apply_final_norm = True
@@ -47,8 +46,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_fourier_x_min = 0.003
     cfg.feature_mlp_hidden_dim = 2048
     cfg.attention_mlp_multiple = 4
-    cfg.norm_type = "layernorm"
-    cfg.use_precursor_token = True
 
     # Masked latent predictor
     cfg.predictor_dim = 512
@@ -98,7 +95,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.representation_regularizer = "none"
     cfg.sigreg_lambda = 0
     cfg.sigreg_num_slices = 1024
-    cfg.sigreg_precursor_scale = 1
     cfg.covariance_pooling_dim = 64
     cfg.train_covariance_pooling = False
 

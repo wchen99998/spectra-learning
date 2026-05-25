@@ -1,6 +1,5 @@
 import torch
 
-from spectra_learning.data.gems.conversion import _prepend_precursor_token_torch
 from spectra_learning.data.gems.masking import (
     DEFAULT_JEPA_MASK_LENGTHS,
     DEFAULT_JEPA_MASK_STRATEGY,
@@ -27,7 +26,6 @@ class GemsBatchCollator:
         context_fraction: float,
         target_fraction: float,
         block_min_len: int,
-        use_precursor_token: bool,
         num_peaks: int,
         max_precursor_mz: float,
         min_peak_intensity: float,
@@ -54,7 +52,6 @@ class GemsBatchCollator:
             else intensity_aware_mask_config
         )
         self.allow_target_overlap = allow_target_overlap
-        self.use_precursor_token = use_precursor_token
         self.num_peaks = num_peaks
         self.max_precursor_mz = max_precursor_mz
         self.min_peak_intensity = min_peak_intensity
@@ -64,9 +61,7 @@ class GemsBatchCollator:
 
     def __call__(self, samples: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
         batch = self._preprocess(samples)
-        if self.use_precursor_token:
-            batch = _prepend_precursor_token_torch(batch)
-        self._ensure_nonempty_without_precursor(batch)
+        self._ensure_nonempty(batch)
         if self.augment:
             batch["context_mask"], batch["target_masks"] = self._sample_masks(batch)
         return batch
@@ -89,9 +84,9 @@ class GemsBatchCollator:
             min_peak_intensity=self.min_peak_intensity,
         )
 
-    def _ensure_nonempty_without_precursor(self, batch: dict[str, torch.Tensor]) -> None:
+    def _ensure_nonempty(self, batch: dict[str, torch.Tensor]) -> None:
         no_valid = ~batch["peak_valid_mask"].any(dim=1)
-        if bool(no_valid.any()) and not self.use_precursor_token:
+        if bool(no_valid.any()):
             batch["peak_valid_mask"] = batch["peak_valid_mask"].clone()
             batch["peak_valid_mask"][no_valid, 0] = True
 
@@ -100,9 +95,6 @@ class GemsBatchCollator:
         batch: dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         sampling_valid_mask = batch["peak_valid_mask"]
-        if self.use_precursor_token:
-            sampling_valid_mask = sampling_valid_mask.clone()
-            sampling_valid_mask[:, 0] = False
 
         strategies = self._mask_strategy_pool()
         if len(strategies) == 1:
@@ -130,9 +122,6 @@ class GemsBatchCollator:
                 allow_target_overlap=self.allow_target_overlap,
             )
 
-        if self.use_precursor_token:
-            context_mask[:, 0] = batch["peak_valid_mask"][:, 0]
-            target_masks[:, :, 0] = False
         return context_mask, target_masks
 
     def _mask_strategy_pool(self) -> tuple[str, ...]:

@@ -4,16 +4,15 @@ import math
 from typing import cast
 from unittest import mock
 
-import numpy as np
 import torch
 
 from spectra_learning.models.losses import SlotwiseSIGReg
 from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.models.pairformer import PairFeatureEmbedder
 from spectra_learning.models.peak_features import FourierFeatures, PeakFeatureEmbedder
 from spectra_learning.models.pooling import CovariancePool
 from spectra_learning.training.optimization import is_weight_decay_target
 from spectra_learning.training.steps import train_step_impl
-from spectra_learning.data.spectra import PRECURSOR_TOKEN_INTENSITY
 from spectra_learning.training.api import (
     load_frozen_teacher_weights,
     load_pretrained_weights,
@@ -44,40 +43,6 @@ def _make_batch(
     if include_precursor:
         batch["precursor_mz"] = torch.rand(batch_size) * 500 + 100
     return batch
-
-
-def _make_pipeline_prepended_batch(
-    batch_size: int = 4,
-    num_peaks: int = 6,
-    num_targets: int = 2,
-    *,
-    precursor_in_context: bool = False,
-    precursor_in_targets: bool = False,
-) -> dict[str, torch.Tensor]:
-    """Create a batch that mimics what the TF pipeline produces when use_precursor_token=True.
-
-    The precursor token is already at position 0, and `precursor_mz` is absent.
-    Total sequence length is num_peaks + 1.
-    """
-    N = num_peaks + 1  # includes prepended precursor token
-    peak_mz = torch.rand(batch_size, N)
-    peak_intensity = torch.rand(batch_size, N)
-    peak_intensity[:, 0] = PRECURSOR_TOKEN_INTENSITY
-    peak_valid_mask = torch.ones(batch_size, N, dtype=torch.bool)
-    context_mask = torch.zeros(batch_size, N, dtype=torch.bool)
-    context_mask[:, 0] = precursor_in_context
-    context_mask[:, 1:3] = True
-    target_masks = torch.zeros(batch_size, num_targets, N, dtype=torch.bool)
-    target_masks[:, :, 0] = precursor_in_targets
-    for target_idx in range(num_targets):
-        target_masks[:, target_idx, 3 + target_idx] = True
-    return {
-        "peak_mz": peak_mz,
-        "peak_intensity": peak_intensity,
-        "peak_valid_mask": peak_valid_mask,
-        "context_mask": context_mask,
-        "target_masks": target_masks,
-    }
 
 
 class DataPipelineContractTests(unittest.TestCase):
@@ -193,18 +158,140 @@ class FourierFeatureTests(unittest.TestCase):
 
         handle = embedder.raw_ffn.register_forward_pre_hook(capture_raw_input)
         peak_mz = torch.tensor([[0.25]], dtype=torch.float32)
-        peak_intensity = torch.tensor(
-            [[PRECURSOR_TOKEN_INTENSITY]],
-            dtype=torch.float32,
-        )
+        peak_intensity = torch.tensor([[0.5]], dtype=torch.float32)
         embedder(peak_mz, peak_intensity)
         handle.remove()
 
         expected = torch.tensor(
-            [[[0.25, PRECURSOR_TOKEN_INTENSITY, math.log1p(PRECURSOR_TOKEN_INTENSITY)]]],
+            [[[0.25, 0.5, math.log1p(0.5)]]],
             dtype=torch.float32,
         )
         self.assertTrue(torch.allclose(captured["raw_input"], expected))
+
+
+class PairformerEncoderTests(unittest.TestCase):
+    def _build_model(self, **kwargs) -> PeakSetSIGReg:
+        model_kwargs = {
+            "model_dim": 32,
+            "encoder_num_layers": 1,
+            "encoder_num_heads": 4,
+            "attention_mlp_multiple": 2.0,
+            "feature_mlp_hidden_dim": 16,
+            "num_peaks": 6,
+            "jepa_num_target_blocks": 2,
+            "masked_token_loss_weight": 1.0,
+            "pairformer_pair_dim": 32,
+            "pairformer_pair_num_heads": 4,
+            "pairformer_pair_feature_hidden_dim": 16,
+        }
+        model_kwargs.update(kwargs)
+        return PeakSetSIGReg(**model_kwargs)
+
+    def test_forward_uses_precursor_mass_features(self):
+        model = self._build_model()
+        batch = _make_batch(
+            num_peaks=6,
+            num_targets=model.jepa_num_target_blocks,
+            include_precursor=True,
+        )
+        batch["precursor_mz"] = batch["precursor_mz"] / 1000.0
+
+        metrics = model.forward_augmented(batch)
+
+        self.assertEqual(model.num_peak_tokens, 6)
+        self.assertTrue(torch.isfinite(metrics["loss"]).item())
+
+    def test_pair_features_use_precursor_mz_without_adduct_shift(self):
+        embedder = PairFeatureEmbedder(
+            single_dim=4,
+            pair_dim=8,
+            hidden_dim=16,
+            mz_scale=1000.0,
+            precursor_mz_scale=2000.0,
+        )
+        peak_mz = torch.tensor([[0.10, 0.20, 0.30]])
+        valid_mask = torch.tensor([[True, True, False]])
+        precursor_mz = torch.tensor([0.40])
+
+        reference_mass = embedder._reference_mass_da(
+            peak_mz,
+            valid_mask,
+            precursor_mz,
+        )
+        fallback_mass = embedder._reference_mass_da(
+            peak_mz,
+            valid_mask,
+            None,
+        )
+
+        torch.testing.assert_close(reference_mass, torch.tensor([800.0]))
+        torch.testing.assert_close(fallback_mass, torch.tensor([200.0]))
+
+    def test_padding_values_do_not_leak_into_visible_peak_embeddings(self):
+        model = self._build_model(encoder_use_cls_token=False)
+        model.eval()
+        valid_mask = torch.tensor(
+            [
+                [True, True, True, True, False, False],
+                [True, True, True, False, False, False],
+            ]
+        )
+        peak_mz = torch.rand(2, 6)
+        peak_intensity = torch.rand(2, 6)
+        peak_mz[:, 4:] = 0.0
+        peak_intensity[:, 4:] = 0.0
+        randomized_mz = peak_mz.clone()
+        randomized_intensity = peak_intensity.clone()
+        randomized_mz[~valid_mask] = torch.rand_like(randomized_mz[~valid_mask])
+        randomized_intensity[~valid_mask] = torch.rand_like(
+            randomized_intensity[~valid_mask]
+        )
+
+        with torch.no_grad():
+            base = model.encoder(
+                peak_mz,
+                peak_intensity,
+                valid_mask=valid_mask,
+                visible_mask=valid_mask,
+            )
+            randomized = model.encoder(
+                randomized_mz,
+                randomized_intensity,
+                valid_mask=valid_mask,
+                visible_mask=valid_mask,
+            )
+
+        torch.testing.assert_close(base[valid_mask], randomized[valid_mask])
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for compile test")
+    def test_cuda_pairformer_works_with_torch_compile(self):
+        model = self._build_model(
+            num_peaks=8,
+            encoder_use_cls_token=False,
+            jepa_num_target_blocks=1,
+            pairformer_use_cuequivariance=True,
+        ).cuda()
+        compiled_encoder = torch.compile(model.encoder, mode="reduce-overhead")
+        peak_mz = torch.linspace(0.05, 0.6, 8, device="cuda").view(1, 8)
+        peak_intensity = torch.rand(1, 8, device="cuda")
+        valid_mask = torch.ones(1, 8, device="cuda", dtype=torch.bool)
+        precursor_mz = torch.tensor([0.8], device="cuda")
+
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            output = compiled_encoder(
+                peak_mz,
+                peak_intensity,
+                valid_mask=valid_mask,
+                visible_mask=valid_mask,
+                precursor_mz=precursor_mz,
+            )
+
+        loss = output.float().square().mean()
+        loss.backward()
+        grads = [p.grad for p in model.encoder.parameters() if p.requires_grad]
+        self.assertEqual(output.shape, (1, 8, model.model_dim))
+        self.assertTrue(torch.isfinite(output.float()).all().item())
+        self.assertTrue(any(g is not None for g in grads))
 
 
 class BlockJEPATests(unittest.TestCase):
@@ -213,7 +300,6 @@ class BlockJEPATests(unittest.TestCase):
             "model_dim": 32,
             "encoder_num_layers": 1,
             "encoder_num_heads": 4,
-            "encoder_num_kv_heads": 4,
             "attention_mlp_multiple": 2.0,
             "feature_mlp_hidden_dim": 16,
             "jepa_num_target_blocks": 2,
@@ -835,7 +921,6 @@ class BlockJEPATests(unittest.TestCase):
                     "    cfg.model_dim = 24\n"
                     "    cfg.encoder_num_layers = 2\n"
                     "    cfg.encoder_num_heads = 4\n"
-                    "    cfg.encoder_num_kv_heads = 4\n"
                     "    cfg.feature_mlp_hidden_dim = 16\n"
                     "    cfg.encoder_fourier_num_freqs = 8\n"
                     "    return cfg\n"
@@ -1405,259 +1490,6 @@ class BlockJEPATests(unittest.TestCase):
                 model.encoder.embedder.mz_fourier.b,
             )
         )
-
-
-class PrecursorTokenTests(unittest.TestCase):
-    def _build_model(self, **kwargs) -> PeakSetSIGReg:
-        model_kwargs = {
-            "model_dim": 32,
-            "encoder_num_layers": 1,
-            "encoder_num_heads": 4,
-            "encoder_num_kv_heads": 4,
-            "attention_mlp_multiple": 2.0,
-            "feature_mlp_hidden_dim": 16,
-            "jepa_num_target_blocks": 2,
-            "use_precursor_token": True,
-            "num_peaks": 6,
-        }
-        model_kwargs.update(kwargs)
-        return PeakSetSIGReg(**model_kwargs)
-
-    def test_model_sizes_position_tables_from_real_peaks_plus_precursor(self):
-        model = self._build_model(num_peaks=6, use_precursor_token=True)
-
-        self.assertEqual(model.encoder.position_embedding.num_embeddings, 7)
-        self.assertEqual(model.num_peak_tokens, 7)
-
-    def test_forward_with_pipeline_prepended_batch(self):
-        """forward_augmented works with pipeline-prepended batch (N+1 tensors, no precursor_mz key)."""
-        model = self._build_model()
-        batch = _make_pipeline_prepended_batch(
-            num_peaks=6,
-            num_targets=model.jepa_num_target_blocks,
-        )
-        self.assertNotIn("precursor_mz", batch)
-        metrics = model.forward_augmented(batch)
-        self.assertTrue(torch.isfinite(metrics["loss"]).item())
-
-    def test_forward_augmented_conditions_precursor_masks(self):
-        model = self._build_model()
-        batch = _make_pipeline_prepended_batch(
-            num_peaks=6,
-            num_targets=model.jepa_num_target_blocks,
-            precursor_in_context=False,
-            precursor_in_targets=True,
-        )
-
-        _, collapse_data = model.forward_augmented(batch, return_collapse_data=True)
-
-        self.assertTrue(collapse_data["context_mask"][:, 0].all())
-        self.assertFalse(collapse_data["target_masks"][:, :, 0].any())
-
-    def test_encode_with_prepended_batch(self):
-        """encode() works with a batch where precursor is already prepended."""
-        model = self._build_model()
-        N = 7  # 6 peaks + 1 precursor
-        batch = {
-            "peak_mz": torch.rand(3, N),
-            "peak_intensity": torch.rand(3, N),
-            "peak_valid_mask": torch.ones(3, N, dtype=torch.bool),
-        }
-        batch["peak_intensity"][:, 0] = PRECURSOR_TOKEN_INTENSITY
-        pooled = model.encode(batch)
-        self.assertEqual(pooled.shape, (3, model.model_dim))
-
-    def test_no_nan_from_sentinel_intensity(self):
-        """The precursor sentinel intensity keeps log1p finite."""
-        model = self._build_model()
-        batch = _make_pipeline_prepended_batch(
-            num_peaks=6,
-            num_targets=model.jepa_num_target_blocks,
-        )
-        metrics = model.forward_augmented(batch)
-        self.assertFalse(torch.isnan(metrics["loss"]).item())
-
-    def test_gradients_through_precursor_token(self):
-        model = self._build_model()
-        batch = _make_pipeline_prepended_batch(
-            num_peaks=6,
-            num_targets=model.jepa_num_target_blocks,
-        )
-        loss = model.forward_augmented(batch)["loss"]
-        loss.backward()
-        grads = [p.grad for p in model.encoder.parameters() if p.requires_grad]
-        self.assertTrue(any(g is not None for g in grads))
-
-    def test_sigreg_precursor_scale_weights_precursor_slot(self):
-        for regularizer in ("sigreg-enc", "slot-sigreg-enc"):
-            with self.subTest(regularizer=regularizer):
-                model = self._build_model(
-                    representation_regularizer=regularizer,
-                    sigreg_lambda=0.02,
-                    sigreg_precursor_scale=4.0,
-                )
-                batch = _make_pipeline_prepended_batch(
-                    num_peaks=6,
-                    num_targets=model.jepa_num_target_blocks,
-                    precursor_in_context=True,
-                )
-                captured_masks: list[torch.Tensor] = []
-
-                def fake_sigreg_forward(
-                    proj: torch.Tensor,
-                    valid_mask: torch.Tensor | None = None,
-                ) -> torch.Tensor:
-                    assert valid_mask is not None
-                    captured_masks.append(valid_mask.detach().clone())
-                    return proj.new_zeros(())
-
-                with mock.patch.object(
-                    model.sigreg,
-                    "forward",
-                    side_effect=fake_sigreg_forward,
-                ):
-                    model.forward_augmented(batch)
-
-                self.assertEqual(len(captured_masks), 1)
-                context_mask = captured_masks[0]
-                torch.testing.assert_close(
-                    context_mask[:, 0],
-                    torch.full_like(context_mask[:, 0], 4.0),
-                )
-                torch.testing.assert_close(
-                    context_mask[:, 1:],
-                    batch["context_mask"][:, 1:].float(),
-                )
-
-    def test_sigreg_pred_respects_precursor_target_mask(self):
-        for regularizer in ("sigreg-pred", "slot-sigreg-pred", "slog-sigreg-pred"):
-            with self.subTest(regularizer=regularizer):
-                model = self._build_model(
-                    representation_regularizer=regularizer,
-                    sigreg_lambda=0.02,
-                )
-                batch = _make_pipeline_prepended_batch(
-                    num_peaks=6,
-                    num_targets=model.jepa_num_target_blocks,
-                )
-                captured: dict[str, torch.Tensor] = {}
-
-                def fake_sigreg_forward(
-                    proj: torch.Tensor,
-                    valid_mask: torch.Tensor | None = None,
-                ) -> torch.Tensor:
-                    assert valid_mask is not None
-                    captured["valid_mask"] = valid_mask.detach().clone()
-                    return proj.new_zeros(())
-
-                with mock.patch.object(
-                    model.sigreg,
-                    "forward",
-                    side_effect=fake_sigreg_forward,
-                ):
-                    model.forward_augmented(batch)
-
-                self.assertIn("valid_mask", captured)
-                torch.testing.assert_close(
-                    captured["valid_mask"],
-                    batch["target_masks"].float(),
-                )
-
-    def test_prepend_precursor_token_shapes(self):
-        B, N, K = 4, 6, 2
-        peak_mz = torch.rand(B, N)
-        peak_intensity = torch.rand(B, N)
-        peak_valid_mask = torch.ones(B, N, dtype=torch.bool)
-        precursor_mz = torch.rand(B) * 500
-        context_mask = torch.ones(B, N, dtype=torch.bool)
-        target_masks = torch.zeros(B, K, N, dtype=torch.bool)
-
-        result = PeakSetSIGReg.prepend_precursor_token(
-            peak_mz,
-            peak_intensity,
-            peak_valid_mask,
-            precursor_mz,
-            context_mask=context_mask,
-            target_masks=target_masks,
-        )
-        self.assertEqual(result["peak_mz"].shape, (B, N + 1))
-        self.assertEqual(result["peak_intensity"].shape, (B, N + 1))
-        self.assertEqual(result["peak_valid_mask"].shape, (B, N + 1))
-        self.assertEqual(result["context_mask"].shape, (B, N + 1))
-        self.assertEqual(result["target_masks"].shape, (B, K, N + 1))
-        # Precursor token is valid, always visible, and never targeted.
-        self.assertTrue(result["peak_valid_mask"][:, 0].all())
-        self.assertTrue(result["context_mask"][:, 0].all())
-        self.assertFalse(result["target_masks"][:, :, 0].any())
-        # Precursor intensity sentinel
-        torch.testing.assert_close(
-            result["peak_intensity"][:, 0],
-            torch.full((B,), PRECURSOR_TOKEN_INTENSITY),
-        )
-
-
-class PrependPrecursorTokenTests(unittest.TestCase):
-    """Test the torch-side _prepend_precursor_token_torch function."""
-
-    def test_shapes_and_values(self):
-        from spectra_learning.data.gems.conversion import _prepend_precursor_token_torch
-
-        B, N, K = 4, 8, 2
-        batch = {
-            "peak_mz": torch.rand(B, N),
-            "peak_intensity": torch.rand(B, N),
-            "peak_valid_mask": torch.ones(B, N, dtype=torch.bool),
-            "precursor_mz": torch.rand(B),
-            "context_mask": torch.ones(B, N, dtype=torch.bool),
-            "target_masks": torch.zeros(B, K, N, dtype=torch.bool),
-            "rt": torch.zeros(B),
-        }
-        out = _prepend_precursor_token_torch(batch)
-
-        # precursor_mz should be removed
-        self.assertNotIn("precursor_mz", out)
-        # rt should be preserved
-        self.assertIn("rt", out)
-
-        # Shapes: N+1 in sequence dim
-        self.assertEqual(out["peak_mz"].shape, (B, N + 1))
-        self.assertEqual(out["peak_intensity"].shape, (B, N + 1))
-        self.assertEqual(out["peak_valid_mask"].shape, (B, N + 1))
-        self.assertEqual(out["context_mask"].shape, (B, N + 1))
-        self.assertEqual(out["target_masks"].shape, (B, K, N + 1))
-
-        # Sentinel intensity at position 0
-        np.testing.assert_allclose(
-            out["peak_intensity"][:, 0].numpy(),
-            np.full(B, PRECURSOR_TOKEN_INTENSITY, dtype=np.float32),
-        )
-        # Valid at position 0
-        self.assertTrue(out["peak_valid_mask"][:, 0].numpy().all())
-        # Existing masks are preserved after the unsampled precursor slot.
-        self.assertFalse(out["context_mask"][:, 0].numpy().any())
-        self.assertFalse(out["target_masks"][:, :, 0].numpy().any())
-        # Precursor mz at position 0
-        self.assertTrue(
-            (out["peak_mz"][:, 0].numpy() == batch["precursor_mz"].numpy()).all()
-        )
-
-    def test_without_masks(self):
-        """Works on raw (pre-augmentation) batches without context_mask/target_masks."""
-        from spectra_learning.data.gems.conversion import _prepend_precursor_token_torch
-
-        B, N = 3, 5
-        batch = {
-            "peak_mz": torch.rand(B, N),
-            "peak_intensity": torch.rand(B, N),
-            "peak_valid_mask": torch.ones(B, N, dtype=torch.bool),
-            "precursor_mz": torch.rand(B),
-        }
-        out = _prepend_precursor_token_torch(batch)
-
-        self.assertNotIn("precursor_mz", out)
-        self.assertEqual(out["peak_mz"].shape, (B, N + 1))
-        self.assertNotIn("context_mask", out)
-        self.assertNotIn("target_masks", out)
 
 
 if __name__ == "__main__":

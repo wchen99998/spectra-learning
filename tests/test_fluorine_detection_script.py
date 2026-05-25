@@ -70,7 +70,6 @@ def test_fluorine_cache_and_collator_use_project_peak_preprocessing(monkeypatch,
         min_peak_intensity=1e-4,
         peak_drop_min_intensity=1e-4,
         peak_ordering="mz",
-        use_precursor_token=False,
         precursor_peak_exclusion_window_da=0.0,
     )
     batch = next(

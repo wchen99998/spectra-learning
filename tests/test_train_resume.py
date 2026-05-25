@@ -11,7 +11,6 @@ from ml_collections import config_dict
 
 from spectra_learning.models.model import PeakSetSIGReg
 from spectra_learning.models.pooling import CovariancePool
-from spectra_learning.models.transformer import TransformerBlock
 from spectra_learning.training.checkpointing import (
     covariance_pooler_checkpoint_path,
     is_training_checkpoint_path,
@@ -48,7 +47,6 @@ def _small_model(**overrides) -> PeakSetSIGReg:
         model_dim=64,
         encoder_num_layers=2,
         encoder_num_heads=4,
-        encoder_num_kv_heads=4,
         attention_mlp_multiple=2.0,
         feature_mlp_hidden_dim=32,
         masked_token_loss_weight=1.0,
@@ -649,7 +647,6 @@ def test_run_checkpoint_msg_probe_loads_checkpoint_and_logs_metrics(monkeypatch,
     cfg.model_dim = 32
     cfg.encoder_num_layers = 1
     cfg.encoder_num_heads = 4
-    cfg.encoder_num_kv_heads = 4
     cfg.attention_mlp_multiple = 2.0
     cfg.feature_mlp_hidden_dim = 16
     cfg.masked_token_loss_weight = 1.0
@@ -837,7 +834,7 @@ def test_build_optimizers_respects_frozen_covariance_pooling():
 
 
 def test_build_optimizers_uses_official_torch_muon_and_adamw():
-    model = _small_model(encoder_num_kv_heads=2)
+    model = _small_model()
     cfg = _optimizer_config(optimizer="muon")
 
     optimizers, schedulers = build_optimizers(
@@ -846,8 +843,7 @@ def test_build_optimizers_uses_official_torch_muon_and_adamw():
         total_steps=10,
         device=torch.device("cpu"),
     )
-    block = cast(TransformerBlock, model.encoder.blocks[0])
-    qkv = block.attention.wqkv.weight
+    qkv = model.encoder.blocks[0].single_attention.qkv.weight
     muon_optimizer = next(opt for opt in optimizers if isinstance(opt, torch.optim.Muon))
     adamw_optimizer = next(opt for opt in optimizers if isinstance(opt, torch.optim.AdamW))
     muon_param_ids = _optimizer_param_ids(muon_optimizer)
@@ -1132,7 +1128,6 @@ def test_jepa_mae_mz_scale_follows_peak_mz_preprocessing_scale():
     cfg.model_dim = 32
     cfg.encoder_num_layers = 1
     cfg.encoder_num_heads = 4
-    cfg.encoder_num_kv_heads = 4
     cfg.attention_mlp_multiple = 2.0
     cfg.feature_mlp_hidden_dim = 16
     cfg.num_peaks = 8
@@ -1146,6 +1141,8 @@ def test_jepa_mae_mz_scale_follows_peak_mz_preprocessing_scale():
 
     assert model.jepa_mae_mz_max == 750.0
     assert model.jepa_mae_num_mz_bins == 300
+    assert model.encoder.pair_embedder.mz_scale == 750.0
+    assert model.encoder.pair_embedder.precursor_mz_scale == 2000.0
 
 
 def test_config_can_disable_encoder_fourier_features():
@@ -1153,7 +1150,6 @@ def test_config_can_disable_encoder_fourier_features():
     cfg.model_dim = 32
     cfg.encoder_num_layers = 1
     cfg.encoder_num_heads = 4
-    cfg.encoder_num_kv_heads = 4
     cfg.attention_mlp_multiple = 2.0
     cfg.feature_mlp_hidden_dim = 16
     cfg.num_peaks = 8

@@ -5,6 +5,7 @@ import torch
 from spectra_learning.models.common import TransformerBlock
 from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.models.pairformer import PairformerBlock
 from spectra_learning.models.peak_features import PeakFeatureEmbedder
 
 
@@ -225,7 +226,6 @@ def test_encoder_position_embedding_toggle_matches_zeroed_table():
         num_layers=2,
         num_heads=4,
         num_peaks=6,
-        norm_type="layernorm",
         use_position_embedding=False,
     ).eval()
     torch.manual_seed(0)
@@ -235,7 +235,6 @@ def test_encoder_position_embedding_toggle_matches_zeroed_table():
         num_layers=2,
         num_heads=4,
         num_peaks=6,
-        norm_type="layernorm",
         use_position_embedding=True,
     ).eval()
     with torch.no_grad():
@@ -269,7 +268,6 @@ def test_encoder_final_norm_toggle_changes_output():
         num_layers=2,
         num_heads=4,
         num_peaks=6,
-        norm_type="layernorm",
         apply_final_norm=True,
     ).eval()
     torch.manual_seed(0)
@@ -279,7 +277,6 @@ def test_encoder_final_norm_toggle_changes_output():
         num_layers=2,
         num_heads=4,
         num_peaks=6,
-        norm_type="layernorm",
         apply_final_norm=False,
     ).eval()
     peak_mz = torch.rand(2, 6)
@@ -337,9 +334,9 @@ def test_encoder_and_predictor_final_norms_are_non_affine():
     assert list(model.predictor_final_norm.parameters()) == []
     encoder_block = model.encoder.blocks[0]
     predictor_block = model.masked_latent_predictor[0]
-    assert isinstance(encoder_block, TransformerBlock)
+    assert isinstance(encoder_block, PairformerBlock)
     assert isinstance(predictor_block, TransformerBlock)
-    assert list(encoder_block.attention_norm.parameters())
+    assert list(encoder_block.single_attention.single_norm.parameters())
     assert list(predictor_block.attention_norm.parameters())
 
     encoder = PeakSetEncoder(
@@ -348,7 +345,6 @@ def test_encoder_and_predictor_final_norms_are_non_affine():
         num_layers=2,
         num_heads=4,
         num_peaks=6,
-        norm_type="layernorm",
         apply_final_norm=True,
     )
     assert list(encoder.final_norm.parameters()) == []

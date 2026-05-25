@@ -14,7 +14,6 @@ from rdkit import Chem, DataStructs
 from rdkit.Chem import AllChem
 from torch.utils.data import DataLoader, Dataset, Sampler, Subset
 
-from spectra_learning.data.gems.conversion import _prepend_precursor_token_torch
 from spectra_learning.probes.massspec.targets import (
     MACCS_FINGERPRINT_BITS,
     MORGAN_PROBE_FINGERPRINT_BITS,
@@ -942,7 +941,6 @@ class _ProbeBatchCollator:
         min_peak_intensity: float,
         peak_drop_min_intensity: float,
         peak_ordering: str,
-        use_precursor_token: bool,
         precursor_peak_exclusion_window_da: float,
     ) -> None:
         self.num_peaks = num_peaks
@@ -950,7 +948,6 @@ class _ProbeBatchCollator:
         self.min_peak_intensity = min_peak_intensity
         self.peak_drop_min_intensity = peak_drop_min_intensity
         self.peak_ordering = peak_ordering
-        self.use_precursor_token = use_precursor_token
         self.precursor_peak_exclusion_window_da = precursor_peak_exclusion_window_da
 
     def __call__(self, samples: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1008,8 +1005,6 @@ class _ProbeBatchCollator:
             batch["dreams_embedding"] = torch.stack(
                 [sample["dreams_embedding"] for sample in samples], dim=0
             ).to(torch.float32)
-        if self.use_precursor_token:
-            batch = _prepend_precursor_token_torch(batch)
         return batch
 
 
@@ -1093,7 +1088,6 @@ class MassSpecProbeData(NamedTuple):
     peak_drop_min_intensity: float
     peak_ordering: str
     num_peaks: int
-    use_precursor_token: bool
     dreams_dim: int
     precursor_peak_exclusion_window_da: float
     pairwise_alignment_path: str
@@ -1228,7 +1222,6 @@ class MassSpecProbeData(NamedTuple):
             ),
             peak_ordering=str(_config_get(config, "peak_ordering", "mz")),
             num_peaks=int(_config_get(config, "num_peaks", _NUM_PEAKS_OUTPUT)),
-            use_precursor_token=bool(_config_get(config, "use_precursor_token", False)),
             dreams_dim=int(metadata.get("dreams_dim", 0)),
             precursor_peak_exclusion_window_da=float(
                 _config_get(
@@ -1304,7 +1297,6 @@ class MassSpecProbeData(NamedTuple):
                 min_peak_intensity=self.min_peak_intensity,
                 peak_drop_min_intensity=self.peak_drop_min_intensity,
                 peak_ordering=peak_ordering or self.peak_ordering,
-                use_precursor_token=self.use_precursor_token,
                 precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
             ),
             generator=generator,
@@ -1355,7 +1347,6 @@ class MassSpecProbeData(NamedTuple):
                 min_peak_intensity=self.min_peak_intensity,
                 peak_drop_min_intensity=self.peak_drop_min_intensity,
                 peak_ordering=peak_ordering or self.peak_ordering,
-                use_precursor_token=self.use_precursor_token,
                 precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
             ),
         )

@@ -10,9 +10,7 @@ import torch
 from ml_collections import config_dict
 from sklearn.metrics import average_precision_score, roc_auc_score
 
-from spectra_learning.data.gems.conversion import _prepend_precursor_token_torch
 from spectra_learning.models.pooling import CovariancePool
-from spectra_learning.data.spectra import PRECURSOR_TOKEN_INTENSITY
 from spectra_learning.probes.massspec.msg_modules import (
     FrozenPooler,
     MsgCovariancePool,
@@ -1523,48 +1521,6 @@ class RepeatedProbeTests(unittest.TestCase):
         self.assertAlmostEqual(curve[0]["msg_probe_epoch"], 1.0)
         self.assertAlmostEqual(curve[1]["msg_probe/mean/test/auc_maccs_mean"], 0.75)
         self.assertAlmostEqual(curve[1]["msg_probe_epoch"], 2.0)
-
-
-class ProbePrecursorTokenTests(unittest.TestCase):
-    def test_prepend_shapes_and_values(self):
-        B, N = 3, 5
-        batch = {
-            "peak_mz": torch.tensor(np.random.rand(B, N).astype(np.float32)),
-            "peak_intensity": torch.tensor(np.random.rand(B, N).astype(np.float32)),
-            "peak_valid_mask": torch.tensor(np.ones((B, N), dtype=bool)),
-            "precursor_mz": torch.tensor([0.1, 0.2, 0.3], dtype=torch.float32),
-            "fingerprint": torch.tensor(np.zeros((B, 4), dtype=np.int32)),
-            "probe_valid_mol": torch.tensor([True, False, True]),
-            "probe_maccs": torch.tensor(np.zeros((B, 4), dtype=np.int32)),
-        }
-
-        out = _prepend_precursor_token_torch(batch)
-
-        self.assertEqual(out["peak_mz"].shape, (B, N + 1))
-        self.assertEqual(out["peak_intensity"].shape, (B, N + 1))
-        self.assertEqual(out["peak_valid_mask"].shape, (B, N + 1))
-        self.assertNotIn("precursor_mz", out)
-        np.testing.assert_allclose(
-            out["peak_intensity"][:, 0].numpy(),
-            [PRECURSOR_TOKEN_INTENSITY] * B,
-        )
-        np.testing.assert_array_equal(
-            out["peak_valid_mask"][:, 0].numpy(), [True, True, True]
-        )
-        np.testing.assert_allclose(out["peak_mz"][:, 0].numpy(), [0.1, 0.2, 0.3])
-        np.testing.assert_array_equal(
-            out["peak_mz"][:, 1:].numpy(),
-            batch["peak_mz"].numpy(),
-        )
-        self.assertIn("fingerprint", out)
-        self.assertIn("probe_valid_mol", out)
-        self.assertIn("probe_maccs", out)
-        np.testing.assert_array_equal(
-            out["fingerprint"].numpy(), batch["fingerprint"].numpy()
-        )
-        np.testing.assert_array_equal(
-            out["probe_maccs"].numpy(), batch["probe_maccs"].numpy()
-        )
 
 
 if __name__ == "__main__":

@@ -86,7 +86,6 @@ class GemsNativeDataModule:
     jepa_mask_round_from: int
     jepa_intensity_aware_mask_config: dict[str, float]
     jepa_allow_target_overlap: bool
-    use_precursor_token: bool
     num_peaks_output: int
     dataloader_pin_memory: bool
     dataloader_num_workers: int
@@ -262,7 +261,6 @@ class GemsNativeDataModule:
             mask_round_from=self.jepa_mask_round_from,
             intensity_aware_mask_config=self.jepa_intensity_aware_mask_config,
             allow_target_overlap=self.jepa_allow_target_overlap,
-            use_precursor_token=self.use_precursor_token,
             num_peaks=self.num_peaks_output,
             max_precursor_mz=self.max_precursor_mz,
             min_peak_intensity=self.min_peak_intensity,

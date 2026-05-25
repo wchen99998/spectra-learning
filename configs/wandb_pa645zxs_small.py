@@ -13,7 +13,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.predictor_learning_rate_ratio = 1.0
     cfg.encoder_num_layers = 14
     cfg.encoder_num_heads = 8
-    cfg.encoder_num_kv_heads = 8
     cfg.encoder_use_position_embedding = True
     cfg.encoder_use_fourier_features = True
     cfg.encoder_fourier_mlp_hidden_dim = 1024

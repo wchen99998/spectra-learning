@@ -51,7 +51,6 @@ class GemsDataConfig:
     jepa_mask_round_from: int
     jepa_intensity_aware_mask_config: dict[str, float]
     jepa_allow_target_overlap: bool
-    use_precursor_token: bool
     num_peaks: int
     dataloader_pin_memory: bool
     dataloader_num_workers: int
@@ -124,7 +123,6 @@ class GemsDataConfig:
             jepa_allow_target_overlap=bool(
                 _config_get(config, "jepa_allow_target_overlap", False)
             ),
-            use_precursor_token=bool(_config_get(config, "use_precursor_token", False)),
             num_peaks=int(_config_get(config, "num_peaks", NUM_PEAKS_OUTPUT)),
             dataloader_pin_memory=bool(
                 _config_get(config, "dataloader_pin_memory", torch.cuda.is_available())

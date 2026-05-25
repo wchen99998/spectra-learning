@@ -379,14 +379,13 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             self.assertEqual(kwargs["revision"], "unit-test")
             self.assertEqual(kwargs["repo_type"], "dataset")
 
-    def test_datamodule_separates_real_peaks_from_precursor_token(self):
+    def test_datamodule_keeps_num_peaks(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             source_hdf5 = tmp_path / "GeMS_A.hdf5"
             _write_fake_gems_hdf5(source_hdf5)
             cfg = self._make_config(tmp_path)
             cfg.num_peaks = 4
-            cfg.use_precursor_token = True
             cfg.dataloader_num_workers = 0
 
             def fake_snapshot_download(*, local_dir, **kwargs):
@@ -405,8 +404,8 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
 
         self.assertEqual(cfg.num_peaks, 4)
         self.assertEqual(datamodule.info["num_peaks"], 4)
-        self.assertEqual(tuple(batch["peak_mz"].shape), (2, 5))
-        self.assertEqual(tuple(batch["target_masks"].shape), (2, 1, 5))
+        self.assertEqual(tuple(batch["peak_mz"].shape), (2, 4))
+        self.assertEqual(tuple(batch["target_masks"].shape), (2, 1, 4))
 
     def test_datamodule_uses_local_gems_cache_without_download(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -864,7 +863,6 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                     context_fraction=0.5,
                     target_fraction=0.5,
                     block_min_len=1,
-                    use_precursor_token=False,
                     num_peaks=4,
                     max_precursor_mz=1000.0,
                     min_peak_intensity=1e-4,
@@ -898,7 +896,6 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                     context_fraction=0.5,
                     target_fraction=0.5,
                     block_min_len=1,
-                    use_precursor_token=False,
                     num_peaks=4,
                     max_precursor_mz=1000.0,
                     min_peak_intensity=1e-4,
@@ -1226,7 +1223,6 @@ class MassSpecPreprocessTests(unittest.TestCase):
             min_peak_intensity=1e-4,
             peak_drop_min_intensity=0.01,
             peak_ordering="mz",
-            use_precursor_token=False,
             precursor_peak_exclusion_window_da=5.0,
         )
         spectra = torch.zeros((2, 128), dtype=torch.float32)
@@ -1298,14 +1294,13 @@ class MassSpecPreprocessTests(unittest.TestCase):
             0.01 - 1e-6,
         )
 
-    def test_probe_collator_separates_real_peaks_from_precursor_token(self):
+    def test_probe_collator_keeps_num_peaks(self):
         collator = massspec_probe_data._ProbeBatchCollator(
             num_peaks=4,
             max_precursor_mz=1000.0,
             min_peak_intensity=1e-4,
             peak_drop_min_intensity=1e-4,
             peak_ordering="mz",
-            use_precursor_token=True,
             precursor_peak_exclusion_window_da=0.0,
         )
         spectra = torch.zeros((2, 128), dtype=torch.float32)
@@ -1337,12 +1332,8 @@ class MassSpecPreprocessTests(unittest.TestCase):
 
         batch = collator(samples)
 
-        self.assertEqual(tuple(batch["peak_mz"].shape), (2, 5))
-        self.assertTrue(
-            torch.allclose(batch["peak_mz"][:, 0], torch.tensor([0.15, 0.25]))
-        )
-        self.assertTrue(torch.all(batch["peak_valid_mask"][:, 0]))
-        self.assertEqual(batch["peak_valid_mask"][:, 1:].sum().item(), 8)
+        self.assertEqual(tuple(batch["peak_mz"].shape), (2, 4))
+        self.assertEqual(batch["peak_valid_mask"].sum().item(), 8)
 
     def test_process_massspec_probe_filters_large_precursor(self):
         spectra = np.zeros((4, 2, 128), dtype=np.float32)

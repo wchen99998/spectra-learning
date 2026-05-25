@@ -14,17 +14,11 @@ def create_visible_attention_mask(visible_mask: torch.Tensor) -> torch.Tensor:
 def _build_norm(
     dim: int,
     eps: float | None,
-    norm_type: str,
     *,
     affine: bool = True,
 ) -> nn.Module:
-    kind = norm_type.lower()
     eps = 1e-5 if eps is None else eps
-    if kind == "rmsnorm":
-        return nn.RMSNorm(dim, eps=eps, elementwise_affine=affine)
-    if kind == "layernorm":
-        return nn.LayerNorm(dim, eps=eps, elementwise_affine=affine)
-    raise ValueError(f"Unsupported norm_type: {norm_type}")
+    return nn.LayerNorm(dim, eps=eps, elementwise_affine=affine)
 
 
 class Attention(nn.Module):
@@ -206,7 +200,6 @@ class TransformerBlock(nn.Module):
         n_kv_heads: int | None,
         norm_eps: float,
         hidden_dim: int | None,
-        norm_type: str = "rmsnorm",
         dropout: float = 0.0,
     ):
         super().__init__()
@@ -219,8 +212,8 @@ class TransformerBlock(nn.Module):
             dim,
             hidden_dim=hidden_dim,
         )
-        self.attention_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
-        self.ffn_norm = _build_norm(dim, eps=norm_eps, norm_type=norm_type)
+        self.attention_norm = _build_norm(dim, eps=norm_eps)
+        self.ffn_norm = _build_norm(dim, eps=norm_eps)
         self.drop = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
 
     def forward(

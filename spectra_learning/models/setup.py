@@ -79,8 +79,6 @@ def _configure_dimensions(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> N
     model.encoder_num_layers = cfg.encoder_num_layers
     model.encoder_num_cls_tokens = _num_cls_tokens(cfg)
     model.encoder_use_cls_token = model.encoder_num_cls_tokens > 0
-    model.use_precursor_token = cfg.use_precursor_token
-    model.norm_type = cfg.norm_type.lower()
     model.norm_eps = cfg.norm_eps
     model.predictor_num_register_tokens = cfg.predictor_num_register_tokens
     model.covariance_pooling_dim = cfg.covariance_pooling_dim
@@ -150,7 +148,6 @@ def _configure_losses(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
         cfg.representation_regularizer
     )
     model.sigreg_lambda = cfg.sigreg_lambda
-    model.sigreg_precursor_scale = cfg.sigreg_precursor_scale
     model.mae_loss_weight = cfg.mae_loss_weight
     model.masked_token_loss_weight = (
         0.0 if model.training_mode == "mae" else cfg.masked_token_loss_weight
@@ -172,7 +169,7 @@ def _build_encoder(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
 
 
 def _num_peak_tokens(cfg: PeakSetSIGRegSettings) -> int:
-    return cfg.num_peaks + int(cfg.use_precursor_token)
+    return cfg.num_peaks
 
 
 def _num_cls_tokens(cfg: PeakSetSIGRegSettings) -> int:
@@ -190,16 +187,21 @@ def _build_peak_set_encoder(cfg: PeakSetSIGRegSettings) -> PeakSetEncoder:
         embedder=_build_peak_feature_embedder(cfg),
         num_layers=cfg.encoder_num_layers,
         num_heads=cfg.encoder_num_heads,
-        num_kv_heads=cfg.encoder_num_kv_heads,
         attention_mlp_multiple=cfg.attention_mlp_multiple,
-        norm_type=cfg.norm_type.lower(),
         norm_eps=cfg.norm_eps,
         use_position_embedding=cfg.encoder_use_position_embedding,
         apply_final_norm=cfg.encoder_apply_final_norm,
         num_peaks=_num_peak_tokens(cfg),
         num_cls_tokens=num_cls_tokens,
         num_register_tokens=cfg.encoder_num_register_tokens,
-        use_precursor_token=cfg.use_precursor_token,
+        pair_dim=cfg.pairformer_pair_dim,
+        pair_num_heads=cfg.pairformer_pair_num_heads,
+        pair_feature_hidden_dim=cfg.pairformer_pair_feature_hidden_dim,
+        pairformer_dropout=cfg.pairformer_dropout,
+        pairformer_refresh_pair=cfg.pairformer_refresh_pair,
+        pairformer_use_cuequivariance=cfg.pairformer_use_cuequivariance,
+        pairformer_mz_scale=cfg.pairformer_mz_scale,
+        pairformer_precursor_mz_scale=cfg.pairformer_precursor_mz_scale,
     )
 
 
@@ -293,14 +295,12 @@ def _build_predictor(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
         num_kv_heads=None,
         attention_mlp_multiple=cfg.attention_mlp_multiple,
         norm_eps=model.norm_eps,
-        norm_type=model.norm_type,
         dropout=cfg.predictor_dropout,
     )
     model.predictor_final_norm = (
         _build_norm(
             model.predictor_dim,
             eps=model.norm_eps,
-            norm_type=model.norm_type,
             affine=False,
         )
         if cfg.predictor_apply_final_norm

@@ -13,7 +13,6 @@ class PeakSetSIGRegSettings:
     model_dim: int = 768
     encoder_num_layers: int = 20
     encoder_num_heads: int = 12
-    encoder_num_kv_heads: int | None = None
     attention_mlp_multiple: float = 4.0
     feature_mlp_hidden_dim: int = 128
     encoder_fourier_mlp_hidden_dim: int | None = None
@@ -43,16 +42,21 @@ class PeakSetSIGRegSettings:
     masked_latent_predictor_num_heads: int = 8
     sigreg_num_slices: int = 256
     sigreg_lambda: float = 0.02
-    sigreg_precursor_scale: float = 1.0
     jepa_num_target_blocks: int = 2
-    norm_type: str = "rmsnorm"
     norm_eps: float = 1e-5
     encoder_use_position_embedding: bool = True
     encoder_apply_final_norm: bool = True
+    pairformer_pair_dim: int | None = None
+    pairformer_pair_num_heads: int | None = None
+    pairformer_pair_feature_hidden_dim: int = 128
+    pairformer_dropout: float = 0.0
+    pairformer_refresh_pair: bool = True
+    pairformer_use_cuequivariance: bool = True
+    pairformer_mz_scale: float = PEAK_MZ_MAX
+    pairformer_precursor_mz_scale: float = PEAK_MZ_MAX
     predictor_apply_final_norm: bool = True
     encoder_use_cls_token: bool = True
     encoder_num_cls_tokens: int | None = None
-    use_precursor_token: bool = False
     num_peaks: int = 64
     encoder_num_register_tokens: int = 0
     predictor_num_register_tokens: int = 0
@@ -98,8 +102,11 @@ def _default_values(settings: PeakSetSIGRegSettings) -> dict[str, Any]:
 
 def _apply_derived_defaults(values: dict[str, Any], config: Any) -> None:
     peak_mz_max = float(_config_get(config, "peak_mz_max", PEAK_MZ_MAX))
+    precursor_mz_max = float(_config_get(config, "max_precursor_mz", peak_mz_max))
     values["encoder_fourier_input_scale"] = peak_mz_max
     values["jepa_mae_mz_max"] = peak_mz_max
+    values["pairformer_mz_scale"] = peak_mz_max
+    values["pairformer_precursor_mz_scale"] = precursor_mz_max
 
 
 def _apply_dependent_defaults(values: dict[str, Any]) -> None:
@@ -132,7 +139,6 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "model_dim": int,
     "encoder_num_layers": int,
     "encoder_num_heads": int,
-    "encoder_num_kv_heads": _optional_int,
     "attention_mlp_multiple": float,
     "feature_mlp_hidden_dim": int,
     "encoder_fourier_mlp_hidden_dim": _optional_int,
@@ -162,16 +168,21 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "masked_latent_predictor_num_heads": int,
     "sigreg_num_slices": int,
     "sigreg_lambda": float,
-    "sigreg_precursor_scale": float,
     "jepa_num_target_blocks": int,
-    "norm_type": str,
     "norm_eps": float,
     "encoder_use_position_embedding": bool,
     "encoder_apply_final_norm": bool,
+    "pairformer_pair_dim": _optional_int,
+    "pairformer_pair_num_heads": _optional_int,
+    "pairformer_pair_feature_hidden_dim": int,
+    "pairformer_dropout": float,
+    "pairformer_refresh_pair": bool,
+    "pairformer_use_cuequivariance": bool,
+    "pairformer_mz_scale": float,
+    "pairformer_precursor_mz_scale": float,
     "predictor_apply_final_norm": bool,
     "encoder_use_cls_token": bool,
     "encoder_num_cls_tokens": _optional_int,
-    "use_precursor_token": bool,
     "num_peaks": int,
     "encoder_num_register_tokens": int,
     "predictor_num_register_tokens": int,

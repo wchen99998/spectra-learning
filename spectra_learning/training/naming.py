@@ -50,11 +50,6 @@ def _architecture_parts(config: Any) -> list[str]:
             else int(fourier_mlp_hidden)
         )
         parts.append(f"fmlp{fourier_mlp_layers}x{hidden}")
-    if config.get("use_precursor_token", False):
-        parts.append("prec")
-    norm = str(config.get("norm_type", "")).lower()
-    if norm and norm != "rmsnorm":
-        parts.append(norm)
     num_cls_tokens = _encoder_num_cls_tokens(config)
     if num_cls_tokens == 0:
         parts.append("no-cls")

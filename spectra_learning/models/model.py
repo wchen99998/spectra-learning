@@ -28,8 +28,6 @@ class PeakSetSIGReg(
     encoder_num_layers: int
     encoder_use_cls_token: bool
     encoder_num_cls_tokens: int
-    use_precursor_token: bool
-    norm_type: str
     norm_eps: float
     predictor_num_register_tokens: int
     covariance_pooling_dim: int
@@ -46,7 +44,6 @@ class PeakSetSIGReg(
     masked_mz_sentinel: float
     representation_regularizer: str
     sigreg_lambda: float
-    sigreg_precursor_scale: float
     mae_loss_weight: float
     masked_token_loss_weight: float
     jepa_mae_loss_weight: float

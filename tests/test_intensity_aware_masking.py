@@ -103,7 +103,7 @@ def test_intensity_aware_masks_can_use_peak_count_fractions() -> None:
     assert not (targets & context.unsqueeze(1)).any()
 
 
-def test_gems_batch_collator_generates_intensity_aware_masks_with_precursor() -> None:
+def test_gems_batch_collator_generates_intensity_aware_masks() -> None:
     collator = gems.GemsBatchCollator(
         augment=True,
         num_target_blocks=2,
@@ -111,7 +111,6 @@ def test_gems_batch_collator_generates_intensity_aware_masks_with_precursor() ->
         target_fraction=0.25,
         block_min_len=1,
         mask_strategy="intensity_aware",
-        use_precursor_token=True,
         num_peaks=16,
         max_precursor_mz=1000.0,
         min_peak_intensity=1e-4,
@@ -146,11 +145,8 @@ def test_gems_batch_collator_generates_intensity_aware_masks_with_precursor() ->
     torch.manual_seed(3)
     batch = collator(samples)
 
-    assert batch["context_mask"].shape == (2, 17)
-    assert batch["target_masks"].shape == (2, 2, 17)
-    assert batch["peak_valid_mask"][:, 0].all()
-    assert batch["context_mask"][:, 0].all()
-    assert not batch["target_masks"][:, :, 0].any()
+    assert batch["context_mask"].shape == (2, 16)
+    assert batch["target_masks"].shape == (2, 2, 16)
     assert not (batch["context_mask"] & ~batch["peak_valid_mask"]).any()
     assert not (batch["target_masks"] & ~batch["peak_valid_mask"].unsqueeze(1)).any()
     assert not (batch["target_masks"] & batch["context_mask"].unsqueeze(1)).any()

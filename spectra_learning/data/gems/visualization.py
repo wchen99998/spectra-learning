@@ -59,7 +59,6 @@ def _make_visualization_collator_kwargs(datamodule: GemsNativeDataModule) -> dic
         "mask_round_from": datamodule.jepa_mask_round_from,
         "intensity_aware_mask_config": datamodule.jepa_intensity_aware_mask_config,
         "allow_target_overlap": datamodule.jepa_allow_target_overlap,
-        "use_precursor_token": datamodule.use_precursor_token,
         "num_peaks": datamodule.num_peaks_output,
         "max_precursor_mz": datamodule.max_precursor_mz,
         "min_peak_intensity": datamodule.min_peak_intensity,
@@ -142,16 +141,13 @@ def _mask_rows_for_plot(
     return matrix, labels
 
 
-def _set_slot_ticks(ax: Any, *, num_slots: int, use_precursor_token: bool) -> None:
+def _set_slot_ticks(ax: Any, *, num_slots: int) -> None:
     step = max(math.ceil(float(num_slots) / 8.0), 1)
     ticks = list(range(0, num_slots, step))
     if ticks[-1] != num_slots - 1:
         ticks.append(num_slots - 1)
-    labels = [str(tick) for tick in ticks]
-    if use_precursor_token and ticks:
-        labels[0] = "P"
     ax.set_xticks(ticks)
-    ax.set_xticklabels(labels)
+    ax.set_xticklabels([str(tick) for tick in ticks])
 
 
 def _plot_mask_strategy_panel(
@@ -163,7 +159,6 @@ def _plot_mask_strategy_panel(
     context_mask: torch.Tensor,
     target_masks: torch.Tensor,
     title: str,
-    use_precursor_token: bool,
 ) -> None:
     x = np.arange(peak_intensity.shape[0])
     valid = peak_valid_mask.cpu().numpy().astype(bool)
@@ -177,19 +172,16 @@ def _plot_mask_strategy_panel(
     ax_slots.set_title(title, fontsize=11, fontweight="bold")
     ax_slots.set_ylabel("Intensity")
     ax_slots.grid(axis="y", alpha=0.2)
-    _mark_precursor_slot(ax_slots, use_precursor_token)
     ax_slots.legend(fontsize=7, loc="upper right")
     _set_slot_ticks(
         ax_slots,
         num_slots=peak_intensity.shape[0],
-        use_precursor_token=use_precursor_token,
     )
     _plot_mask_rows(
         ax_masks,
         peak_valid_mask=peak_valid_mask,
         context_mask=context_mask,
         target_masks=target_masks,
-        use_precursor_token=use_precursor_token,
     )
 
 
@@ -221,27 +213,12 @@ def _plot_slot_bars(
         )
 
 
-def _mark_precursor_slot(ax: Any, use_precursor_token: bool) -> None:
-    if use_precursor_token:
-        ax.axvline(0, color="black", linestyle="--", linewidth=1.0, alpha=0.35)
-        ax.text(
-            0.01,
-            0.95,
-            "slot P = precursor",
-            transform=ax.transAxes,
-            va="top",
-            ha="left",
-            fontsize=8,
-        )
-
-
 def _plot_mask_rows(
     ax: Any,
     *,
     peak_valid_mask: torch.Tensor,
     context_mask: torch.Tensor,
     target_masks: torch.Tensor,
-    use_precursor_token: bool,
 ) -> None:
     mask_matrix, row_labels = _mask_rows_for_plot(
         peak_valid_mask=peak_valid_mask,
@@ -251,11 +228,10 @@ def _plot_mask_rows(
     ax.imshow(mask_matrix, aspect="auto", interpolation="nearest", cmap="Blues", vmin=0.0, vmax=1.0)
     ax.set_yticks(np.arange(len(row_labels)))
     ax.set_yticklabels(row_labels, fontsize=8)
-    ax.set_xlabel("Model input slot (P = precursor)" if use_precursor_token else "Peak slot")
+    ax.set_xlabel("Peak slot")
     _set_slot_ticks(
         ax,
         num_slots=peak_valid_mask.shape[0],
-        use_precursor_token=use_precursor_token,
     )
 
 
@@ -265,14 +241,13 @@ def _print_mask_strategy_summary(
     batch: dict[str, torch.Tensor],
     sample_index: int,
     dataset_index: int,
-    use_precursor_token: bool,
 ) -> None:
     full_valid = batch["peak_valid_mask"][sample_index]
     full_context = batch["context_mask"][sample_index]
     full_targets = batch["target_masks"][sample_index]
-    peak_valid = full_valid[1:] if use_precursor_token else full_valid
-    peak_context = full_context[1:] if use_precursor_token else full_context
-    peak_targets = full_targets[:, 1:] if use_precursor_token else full_targets
+    peak_valid = full_valid
+    peak_context = full_context
+    peak_targets = full_targets
     valid_target_positions = peak_valid & (~peak_context)
     print(
         f"{strategy} | dataset_index={dataset_index} | "
@@ -280,8 +255,6 @@ def _print_mask_strategy_summary(
         f"context={int(full_context.sum().item())} | "
         f"target_counts={[int(mask.sum().item()) for mask in full_targets]}"
     )
-    if use_precursor_token:
-        print("  model slot P is the precursor token; active-order blocks ignore it")
     print(
         "  context: "
         f"model-slot={_format_block_ranges(_mask_block_ranges(full_context))} | "
@@ -319,7 +292,6 @@ def visualize_real_mask_strategies(
         strategies=strategies,
     )
     resolved_strategies = tuple(strategy_batches.keys())
-    use_precursor_token = bool(config.get("use_precursor_token", False))
     fig, axes = plt.subplots(
         num_samples * 2,
         len(resolved_strategies),
@@ -340,7 +312,6 @@ def visualize_real_mask_strategies(
         strategy_batches=strategy_batches,
         sample_indices=sample_indices,
         num_samples=num_samples,
-        use_precursor_token=use_precursor_token,
     )
     output_path = Path(output_path).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -358,7 +329,6 @@ def _draw_strategy_grid(
     strategy_batches: dict[str, dict[str, torch.Tensor]],
     sample_indices: list[int],
     num_samples: int,
-    use_precursor_token: bool,
 ) -> None:
     for row_offset, dataset_index in enumerate(sample_indices):
         peak_intensity = raw_batch["peak_intensity"][row_offset]
@@ -374,18 +344,14 @@ def _draw_strategy_grid(
                 context_mask=context_mask,
                 target_masks=target_masks,
                 title=_strategy_panel_title(strategy, dataset_index, context_mask, target_masks),
-                use_precursor_token=use_precursor_token,
             )
             if row_offset == num_samples - 1:
-                axes[row_offset * 2, col_idx].set_xlabel(
-                    "Model input slot (P = precursor)" if use_precursor_token else "Peak slot"
-                )
+                axes[row_offset * 2, col_idx].set_xlabel("Peak slot")
             _print_mask_strategy_summary(
                 strategy=strategy,
                 batch=batch,
                 sample_index=row_offset,
                 dataset_index=dataset_index,
-                use_precursor_token=use_precursor_token,
             )
 
 

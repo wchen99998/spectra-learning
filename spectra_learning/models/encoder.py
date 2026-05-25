@@ -1,16 +1,13 @@
 import torch
 from torch import nn
 
-from spectra_learning.models.transformer import (
-    _build_norm,
-    create_visible_attention_mask,
-)
+from spectra_learning.models.transformer import _build_norm
 from spectra_learning.models.common import (
     _build_frozen_position_embedding,
-    _build_non_causal_blocks,
     _masked_mean_pool,
     _merge_visible_mask,
 )
+from spectra_learning.models.pairformer import PairFeatureEmbedder, PairformerBlock
 from spectra_learning.models.peak_features import PeakFeatureEmbedder
 
 
@@ -26,24 +23,27 @@ class PeakSetEncoder(nn.Module):
         embedder: PeakFeatureEmbedder,
         num_layers: int,
         num_heads: int,
-        num_kv_heads: int | None = None,
         attention_mlp_multiple: float = 4.0,
-        norm_type: str = "rmsnorm",
         norm_eps: float = 1e-5,
         apply_final_norm: bool = True,
         num_peaks: int = 64,
         use_position_embedding: bool = True,
         num_cls_tokens: int = 1,
         num_register_tokens: int = 0,
-        use_precursor_token: bool = False,
+        pair_dim: int | None = None,
+        pair_num_heads: int | None = None,
+        pair_feature_hidden_dim: int = 128,
+        pairformer_dropout: float = 0.0,
+        pairformer_refresh_pair: bool = True,
+        pairformer_use_cuequivariance: bool = True,
+        pairformer_mz_scale: float = 1000.0,
+        pairformer_precursor_mz_scale: float = 1000.0,
     ):
         super().__init__()
         self.num_layers = num_layers
-        norm_type = norm_type.lower()
         self.num_cls_tokens = num_cls_tokens
         self.use_cls_token = self.num_cls_tokens > 0
         self.num_register_tokens = num_register_tokens
-        self.use_precursor_token = use_precursor_token
         self.use_position_embedding = use_position_embedding
         self.embedder = embedder
         self.position_embedding = _build_frozen_position_embedding(
@@ -67,17 +67,34 @@ class PeakSetEncoder(nn.Module):
             nn.init.trunc_normal_(self.register_tokens, std=0.02)
         else:
             self.register_tokens = None
-        self.blocks = _build_non_causal_blocks(
-            dim=model_dim,
-            num_layers=self.num_layers,
-            num_heads=num_heads,
-            num_kv_heads=num_kv_heads,
-            attention_mlp_multiple=attention_mlp_multiple,
-            norm_eps=norm_eps,
-            norm_type=norm_type,
+        pair_dim = model_dim if pair_dim is None else pair_dim
+        pair_num_heads = num_heads if pair_num_heads is None else pair_num_heads
+        self.pair_embedder = PairFeatureEmbedder(
+            single_dim=model_dim,
+            pair_dim=pair_dim,
+            hidden_dim=pair_feature_hidden_dim,
+            mz_scale=pairformer_mz_scale,
+            precursor_mz_scale=pairformer_precursor_mz_scale,
+        )
+        self.blocks = nn.ModuleList(
+            [
+                PairformerBlock(
+                    single_dim=model_dim,
+                    pair_dim=pair_dim,
+                    num_heads=num_heads,
+                    pair_num_heads=pair_num_heads,
+                    attention_mlp_multiple=attention_mlp_multiple,
+                    pair_feature_hidden_dim=pair_feature_hidden_dim,
+                    norm_eps=norm_eps,
+                    dropout=pairformer_dropout,
+                    refresh_pair=pairformer_refresh_pair,
+                    use_cuequivariance=pairformer_use_cuequivariance,
+                )
+                for _ in range(self.num_layers)
+            ]
         )
         self.final_norm = (
-            _build_norm(model_dim, eps=norm_eps, norm_type=norm_type, affine=False)
+            _build_norm(model_dim, eps=norm_eps, affine=False)
             if apply_final_norm
             else nn.Identity()
         )
@@ -142,21 +159,32 @@ class PeakSetEncoder(nn.Module):
         precursor_mz: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         block_indices = tuple(idx for idx in block_indices)
-        attn_mask = _merge_visible_mask(valid_mask, visible_mask)
+        peak_valid_mask = (
+            torch.ones_like(peak_mz, dtype=torch.bool)
+            if valid_mask is None
+            else valid_mask
+        )
+        peak_visible_mask = _merge_visible_mask(peak_valid_mask, visible_mask)
+        if peak_visible_mask is None:
+            peak_visible_mask = peak_valid_mask
         x = self._add_positions(self.embedder(peak_mz, peak_intensity))
+        z = self.pair_embedder(
+            peak_mz,
+            peak_intensity,
+            x,
+            peak_visible_mask,
+            precursor_mz=precursor_mz,
+        )
         seq_len = peak_mz.shape[1]
         selected = set(block_indices)
         selected_peak_outputs: dict[int, torch.Tensor] = {}
-        x, visible_mask = self._append_special_tokens(x, attn_mask)
-        attn_mask = (
-            create_visible_attention_mask(visible_mask)
-            if visible_mask is not None
-            else None
-        )
+        x, token_visible_mask = self._append_special_tokens(x, peak_visible_mask)
         for block_idx, block in enumerate(self.blocks, start=1):
-            x = block(
+            x, z = block(
                 x,
-                attn_mask=attn_mask,
+                z,
+                peak_visible_mask,
+                token_visible_mask,
             )
             if block_idx in selected and block_idx != self.num_layers:
                 selected_peak_outputs[block_idx] = x[:, :seq_len]

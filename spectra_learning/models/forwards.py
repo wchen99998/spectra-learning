@@ -4,54 +4,10 @@ from typing import Any, Literal, overload
 
 import torch
 
-from spectra_learning.data.spectra import PRECURSOR_TOKEN_INTENSITY
 from spectra_learning.models.objectives import CovariancePooler
 
 
 class ForwardMixin:
-    @staticmethod
-    def prepend_precursor_token(
-        peak_mz: torch.Tensor,
-        peak_intensity: torch.Tensor,
-        peak_valid_mask: torch.Tensor,
-        precursor_mz: torch.Tensor,
-        context_mask: torch.Tensor | None = None,
-        target_masks: torch.Tensor | None = None,
-    ) -> dict[str, torch.Tensor]:
-        B = peak_mz.shape[0]
-        device = peak_mz.device
-        pre_int = torch.full(
-            (B, 1),
-            PRECURSOR_TOKEN_INTENSITY,
-            device=device,
-            dtype=peak_mz.dtype,
-        )
-        pre_valid = torch.ones(B, 1, device=device, dtype=torch.bool)
-        result: dict[str, torch.Tensor] = {
-            "peak_mz": torch.cat([precursor_mz.unsqueeze(1), peak_mz], dim=1),
-            "peak_intensity": torch.cat([pre_int, peak_intensity], dim=1),
-            "peak_valid_mask": torch.cat([pre_valid, peak_valid_mask], dim=1),
-        }
-        if context_mask is not None:
-            pre_ctx = torch.ones(B, 1, device=device, dtype=torch.bool)
-            result["context_mask"] = torch.cat([pre_ctx, context_mask], dim=1)
-        if target_masks is not None:
-            K = target_masks.shape[1]
-            pre_tgt = torch.zeros(B, K, 1, device=device, dtype=torch.bool)
-            result["target_masks"] = torch.cat([pre_tgt, target_masks], dim=2)
-        return result
-
-    def _condition_precursor_masks(
-        self: Any,
-        context_mask: torch.Tensor,
-        target_masks: torch.Tensor,
-        peak_valid_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.use_precursor_token:
-            context_mask[:, 0] = peak_valid_mask[:, 0]
-            target_masks[:, :, 0] = False
-        return context_mask, target_masks
-
     @staticmethod
     def _target_mask_metrics(
         target_masks: torch.Tensor,
@@ -104,11 +60,6 @@ class ForwardMixin:
         precursor_mz = augmented_batch.get("precursor_mz", None)
         context_mask = augmented_batch["context_mask"] & peak_valid_mask
         target_masks = augmented_batch["target_masks"] & peak_valid_mask.unsqueeze(1)
-        context_mask, target_masks = self._condition_precursor_masks(
-            context_mask,
-            target_masks,
-            peak_valid_mask,
-        )
         (
             teacher_target_features,
             teacher_peak_emb,
@@ -230,11 +181,6 @@ class ForwardMixin:
         precursor_mz = augmented_batch.get("precursor_mz", None)
         context_mask = augmented_batch["context_mask"] & peak_valid_mask
         target_masks = augmented_batch["target_masks"] & peak_valid_mask.unsqueeze(1)
-        context_mask, target_masks = self._condition_precursor_masks(
-            context_mask,
-            target_masks,
-            peak_valid_mask,
-        )
 
         context_mz, context_intensity, context_visible_mask = self._context_encoder_inputs(
             peak_mz,

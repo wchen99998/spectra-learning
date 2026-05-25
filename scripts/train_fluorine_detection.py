@@ -28,7 +28,6 @@ from sklearn.metrics import (
 from torch.utils.data import DataLoader, Dataset, Subset
 
 from spectra_learning.config.loading import load_config
-from spectra_learning.data.gems.conversion import _prepend_precursor_token_torch
 from spectra_learning.data.spectra import (
     DEFAULT_MAX_PRECURSOR_MZ,
     DEFAULT_MIN_PEAK_INTENSITY,
@@ -66,7 +65,6 @@ class FluorineData(NamedTuple):
     min_peak_intensity: float
     peak_drop_min_intensity: float
     peak_ordering: str
-    use_precursor_token: bool
     precursor_peak_exclusion_window_da: float
 
 
@@ -490,7 +488,6 @@ class _FluorineCollator:
         min_peak_intensity: float,
         peak_drop_min_intensity: float,
         peak_ordering: str,
-        use_precursor_token: bool,
         precursor_peak_exclusion_window_da: float,
     ) -> None:
         self.num_peaks = num_peaks
@@ -498,7 +495,6 @@ class _FluorineCollator:
         self.min_peak_intensity = min_peak_intensity
         self.peak_drop_min_intensity = peak_drop_min_intensity
         self.peak_ordering = peak_ordering
-        self.use_precursor_token = use_precursor_token
         self.precursor_peak_exclusion_window_da = precursor_peak_exclusion_window_da
 
     def __call__(self, samples: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
@@ -522,8 +518,6 @@ class _FluorineCollator:
         batch["label"] = torch.stack([sample["label"] for sample in samples]).to(
             torch.float32
         )
-        if self.use_precursor_token:
-            batch = _prepend_precursor_token_torch(batch)
         return batch
 
 
@@ -640,7 +634,6 @@ def _make_loader(
             min_peak_intensity=data.min_peak_intensity,
             peak_drop_min_intensity=data.peak_drop_min_intensity,
             peak_ordering=data.peak_ordering,
-            use_precursor_token=data.use_precursor_token,
             precursor_peak_exclusion_window_da=data.precursor_peak_exclusion_window_da,
         )
     return DataLoader(
@@ -1191,9 +1184,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 if config is not None
                 else "intensity"
             )
-        ),
-        use_precursor_token=bool(
-            _config_get(config, "use_precursor_token", False) if config is not None else False
         ),
         precursor_peak_exclusion_window_da=float(
             _config_get(config, "precursor_peak_exclusion_window_da", 0.0)

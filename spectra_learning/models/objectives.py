@@ -235,11 +235,7 @@ class ObjectiveMixin:
         }
 
     def _sigreg_weights(self: Any, mask: torch.Tensor) -> torch.Tensor:
-        weights = mask.float()
-        if self.use_precursor_token:
-            weights = weights.clone()
-            weights[..., 0] *= self.sigreg_precursor_scale
-        return weights
+        return mask.float()
 
     def _regularizer_metrics(
         self: Any,

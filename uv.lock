@@ -534,6 +534,66 @@ nvtx = [
 ]
 
 [[package]]
+name = "cuequivariance"
+version = "0.10.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "networkx" },
+    { name = "numpy" },
+    { name = "opt-einsum" },
+    { name = "scipy" },
+    { name = "sympy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9e/df/eaad918ad320805c08ec29ca5f3df8f89b1d0b6c828668d0c10e94ae6b6e/cuequivariance-0.10.0.tar.gz", hash = "sha256:8be785f84a0c25b6b3e927e551078be261f0900c583a7c8c95744bcd5fa1967d", size = 214826, upload-time = "2026-04-22T01:20:40.317Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1b/52/3131b6dc9577eaa556b2b66584a44df32a9d4356aa641ff5d33c8b797225/cuequivariance-0.10.0-py3-none-any.whl", hash = "sha256:340f5160b99efe57f8a220db75747e59b8a0f9f3bbced7ec527c46f8cc615e87", size = 246357, upload-time = "2026-04-22T01:20:38.828Z" },
+]
+
+[[package]]
+name = "cuequivariance-ops-cu13"
+version = "0.10.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "nvidia-cublas" },
+    { name = "nvidia-ml-py" },
+    { name = "platformdirs" },
+    { name = "tqdm" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/32/a0/ef1e3b1ffa2bb7dfc9066d8d4291707c72b2e355da3dd2bcd4d70293d1fd/cuequivariance_ops_cu13-0.10.0-py3-none-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:839b6df3f5e8353d6fb7ed5e68da021b4c011a0627f25cd9ede7b77aaf545123", size = 31933768, upload-time = "2026-04-22T01:14:26.024Z" },
+    { url = "https://files.pythonhosted.org/packages/07/cf/022d16fd54d97193d9122900e01223eaeae2802c1f8a8ce0e1bd11524c9a/cuequivariance_ops_cu13-0.10.0-py3-none-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:ebd13ab08fa6e4f9f22890cd9742cdda0b6018064ce568d8c2dea1b51c1b3990", size = 31999272, upload-time = "2026-04-22T01:14:29.039Z" },
+]
+
+[[package]]
+name = "cuequivariance-ops-torch-cu13"
+version = "0.10.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cuequivariance-ops-cu13" },
+    { name = "scipy" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/27/c3/ebef52bcf5b6ff90e45cfe4c375b8dd9e9a46370963a3cad85e6a4fd77d1/cuequivariance_ops_torch_cu13-0.10.0-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:cfe828719878c0ba3265e7cae375e74d4b7acfcb5b43836c90b6f05ec9e92247", size = 387554, upload-time = "2026-04-22T01:14:56.365Z" },
+    { url = "https://files.pythonhosted.org/packages/56/e5/e9e49c50a5db15ce5b750ffe58decf9cade91686d657bf46f78de07af5be/cuequivariance_ops_torch_cu13-0.10.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e947273492b9bf3c72d4d47d782002c5d8504d2430e8e73e8ba7a47fda4b4bf7", size = 393719, upload-time = "2026-04-22T01:14:57.871Z" },
+    { url = "https://files.pythonhosted.org/packages/72/91/ed7cf0e1b847d5c25fe375267bbc276701ab8e1abeb170df30cc2d3363f2/cuequivariance_ops_torch_cu13-0.10.0-cp313-cp313-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:00137ce86b7b50838a754affc1aebccd7cb5bfd1acf436fc5488401f287fbbb4", size = 387445, upload-time = "2026-04-22T01:14:59.254Z" },
+    { url = "https://files.pythonhosted.org/packages/ea/4e/8855fd6d0962bf4deef2e5825b8a5a290762548641e18ed82756e2d879b3/cuequivariance_ops_torch_cu13-0.10.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:16611f6e2afcd8672f5b5d16d9f48346f8cdbdf49465b0365a4dd336ebc0b75b", size = 393655, upload-time = "2026-04-22T01:15:00.515Z" },
+    { url = "https://files.pythonhosted.org/packages/8d/27/b19d776f6082e2fedbc8dc532824c3d2bc0b39ef7421370e0d9907f50c7f/cuequivariance_ops_torch_cu13-0.10.0-cp314-cp314-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:8a3d98c735ac225b6ad40c396cf5323b62ba182a8d7dcad64ef7fd7ae598b300", size = 387193, upload-time = "2026-04-22T01:15:02.013Z" },
+    { url = "https://files.pythonhosted.org/packages/9b/c2/cb2eb554332be6dbdf0d46107e694b23d3ffa1d3813dbfdc674ac1dd7ad3/cuequivariance_ops_torch_cu13-0.10.0-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:aa043fbc59c66151a1bfd77a303e353cdf70d9e1d54fe0a8ec0ae08af2d95bee", size = 393500, upload-time = "2026-04-22T01:15:03.291Z" },
+]
+
+[[package]]
+name = "cuequivariance-torch"
+version = "0.10.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cuequivariance" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/35/d6/b2e18f0c7f176741804ecdaec1821b954988b952f668b619ae463ea31818/cuequivariance_torch-0.10.0.tar.gz", hash = "sha256:90af8143f3b8f6e97beeca2853a31fd67f1de9c1820a0547465f82d78b423df8", size = 167365, upload-time = "2026-04-22T01:20:46.178Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2b/a3/5c2b6cac9bf5d210536c26bfb1ba191c3c36883ec8188076576332a4a49f/cuequivariance_torch-0.10.0-py3-none-any.whl", hash = "sha256:3a13afba71c5e2c2dc154032879c640e9d8653a177efeca0bc9fb99e607cf540", size = 183213, upload-time = "2026-04-22T01:20:45.018Z" },
+]
+
+[[package]]
 name = "cycler"
 version = "0.12.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1229,6 +1289,8 @@ name = "md4-mae-min"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "cuequivariance-ops-torch-cu13" },
+    { name = "cuequivariance-torch" },
     { name = "google-cloud-storage" },
     { name = "h5py" },
     { name = "huggingface-hub" },
@@ -1253,6 +1315,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cuequivariance-ops-torch-cu13", specifier = "==0.10.0" },
+    { name = "cuequivariance-torch", specifier = "==0.10.0" },
     { name = "google-cloud-storage", specifier = ">=2.14.0" },
     { name = "h5py", specifier = ">=3.11.0" },
     { name = "huggingface-hub", specifier = ">=0.33.2" },
@@ -1484,6 +1548,7 @@ source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e1/a5/fce49e2ae977e0ccc084e5adafceb4f0ac0c8333cb6863501618a7277f67/nvidia_cublas-13.1.0.3-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:c86fc7f7ae36d7528288c5d88098edcb7b02c633d262e7ddbb86b0ad91be5df2", size = 542851226, upload-time = "2025-10-09T08:59:04.818Z" },
     { url = "https://files.pythonhosted.org/packages/e7/44/423ac00af4dd95a5aeb27207e2c0d9b7118702149bf4704c3ddb55bb7429/nvidia_cublas-13.1.0.3-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:ee8722c1f0145ab246bccb9e452153b5e0515fd094c3678df50b2a0888b8b171", size = 423133236, upload-time = "2025-10-09T08:59:32.536Z" },
+    { url = "https://files.pythonhosted.org/packages/10/f5/f50bc3f5c2bb57ab8f5b4d78bc1146b57810d42cb8fcb28cbe2e14050376/nvidia_cublas-13.1.0.3-py3-none-win_amd64.whl", hash = "sha256:2a3b94a37def342471c59fad7856caee4926809a72dd5270155d6a31b5b277be", size = 404355960, upload-time = "2025-10-09T09:07:00.987Z" },
 ]
 
 [[package]]
@@ -1591,6 +1656,15 @@ wheels = [
 ]
 
 [[package]]
+name = "nvidia-ml-py"
+version = "13.595.45"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ce/49/c29f6e30d8662d2e94fef17739ea7309cc76aba269922ae999e4cc07f268/nvidia_ml_py-13.595.45.tar.gz", hash = "sha256:c9f34897fe0441ff35bc8f35baf80f830a20b0f4e6ce71e0a325bc0e66acf079", size = 50780, upload-time = "2026-03-19T16:59:44.956Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8a/24/fc256107d23597fa33d319505ce77160fa1a2349c096d01901ffc7cb7fc4/nvidia_ml_py-13.595.45-py3-none-any.whl", hash = "sha256:b65a7977f503d56154b14d683710125ef93594adb63fbf7e559336e3318f1376", size = 51776, upload-time = "2026-03-19T16:59:43.603Z" },
+]
+
+[[package]]
 name = "nvidia-nccl-cu13"
 version = "2.28.9"
 source = { registry = "https://pypi.org/simple" }
@@ -1624,6 +1698,15 @@ source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c2/f3/d86c845465a2723ad7e1e5c36dcd75ddb82898b3f53be47ebd429fb2fa5d/nvidia_nvtx-13.0.85-py3-none-manylinux1_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:4936d1d6780fbe68db454f5e72a42ff64d1fd6397df9f363ae786930fd5c1cd4", size = 148047, upload-time = "2025-09-04T08:29:01.761Z" },
     { url = "https://files.pythonhosted.org/packages/a8/64/3708a90d1ebe202ffdeb7185f878a3c84d15c2b2c31858da2ce0583e2def/nvidia_nvtx-13.0.85-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:cb7780edb6b14107373c835bf8b72e7a178bac7367e23da7acb108f973f157a6", size = 148878, upload-time = "2025-09-04T08:28:53.627Z" },
+]
+
+[[package]]
+name = "opt-einsum"
+version = "3.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/8c/b9/2ac072041e899a52f20cf9510850ff58295003aa75525e58343591b0cbfb/opt_einsum-3.4.0.tar.gz", hash = "sha256:96ca72f1b886d148241348783498194c577fa30a8faac108586b14f1ba4473ac", size = 63004, upload-time = "2024-09-26T14:33:24.483Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/23/cd/066e86230ae37ed0be70aae89aabf03ca8d9f39c8aea0dec8029455b5540/opt_einsum-3.4.0-py3-none-any.whl", hash = "sha256:69bb92469f86a1565195ece4ac0323943e83477171b91d24c35afe028a90d7cd", size = 71932, upload-time = "2024-09-26T14:33:23.039Z" },
 ]
 
 [[package]]
@@ -2369,7 +2452,7 @@ name = "sympy"
 version = "1.14.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "mpmath", marker = "sys_platform == 'linux'" },
+    { name = "mpmath" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/83/d3/803453b36afefb7c2bb238361cd4ae6125a569b4db67cd9e79846ba2d68c/sympy-1.14.0.tar.gz", hash = "sha256:d3d3fe8df1e5a0b42f0e7bdf50541697dbe7d23746e894990c030e2b05e72517", size = 7793921, upload-time = "2025-04-27T18:05:01.611Z" }
 wheels = [

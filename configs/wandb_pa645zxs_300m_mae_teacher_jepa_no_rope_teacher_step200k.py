@@ -26,7 +26,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.model_dim = 1024
     cfg.encoder_num_layers = 20
     cfg.encoder_num_heads = 16
-    cfg.encoder_num_kv_heads = 16
     cfg.feature_mlp_hidden_dim = 2048
     cfg.encoder_fourier_mlp_hidden_dim = 1024
     cfg.encoder_fourier_mlp_num_layers = 4

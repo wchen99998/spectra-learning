@@ -18,7 +18,6 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from spectra_learning.config.loading import load_config
-from spectra_learning.data.gems.conversion import _prepend_precursor_token_torch
 from spectra_learning.data.spectra import (
     DEFAULT_MAX_PRECURSOR_MZ,
     DEFAULT_MIN_PEAK_INTENSITY,
@@ -319,8 +318,6 @@ def _preprocess_mgf_batch(
             _config_get(config, "min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)
         ),
     )
-    if bool(_config_get(config, "use_precursor_token", False)):
-        batch = _prepend_precursor_token_torch(batch)
     return batch
 
 

@@ -1,0 +1,545 @@
+from __future__ import annotations
+
+import math
+import os
+
+import torch
+import torch.nn.functional as F
+from torch import nn
+
+os.environ.setdefault("CUEQ_TORCH_COMPILE", "1")
+
+import cuequivariance_ops_torch
+from cuequivariance_torch import (
+    triangle_attention as cue_triangle_attention,
+    triangle_multiplicative_update as cue_triangle_multiplicative_update,
+)
+
+from spectra_learning.data.spectra import PEAK_MZ_MAX
+from spectra_learning.models.transformer import FeedForward, _build_norm
+
+
+COMMON_MASS_DIFFERENCES_DA = (
+    1.003355,
+    17.026549,
+    18.010565,
+    28.031300,
+    44.026215,
+    57.021464,
+    71.037114,
+    97.052764,
+    99.068414,
+    113.084064,
+    129.042593,
+    147.068414,
+)
+
+_CUE_TRITON_CACHE_INITIALIZED = False
+
+
+def init_cuequivariance_torch_compile() -> None:
+    global _CUE_TRITON_CACHE_INITIALIZED
+    if not _CUE_TRITON_CACHE_INITIALIZED:
+        cuequivariance_ops_torch.init_triton_cache()
+        _CUE_TRITON_CACHE_INITIALIZED = True
+
+
+def _init_linear(linear: nn.Linear, *, gate: bool = False) -> None:
+    if gate:
+        nn.init.zeros_(linear.weight)
+        nn.init.ones_(linear.bias)
+        return
+    nn.init.xavier_normal_(linear.weight)
+    if linear.bias is not None:
+        nn.init.zeros_(linear.bias)
+
+
+def _pair_mask(peak_mask: torch.Tensor) -> torch.Tensor:
+    return peak_mask.unsqueeze(2) & peak_mask.unsqueeze(1)
+
+
+class PairFeatureEmbedder(nn.Module):
+    def __init__(
+        self,
+        *,
+        single_dim: int,
+        pair_dim: int,
+        hidden_dim: int,
+        mz_scale: float = PEAK_MZ_MAX,
+        precursor_mz_scale: float = PEAK_MZ_MAX,
+        sigma_ppm: float = 20.0,
+    ) -> None:
+        super().__init__()
+        self.mz_scale = mz_scale
+        self.precursor_mz_scale = precursor_mz_scale
+        self.sigma_ppm = sigma_ppm
+        self.register_buffer(
+            "mass_differences",
+            torch.tensor(COMMON_MASS_DIFFERENCES_DA, dtype=torch.float32),
+            persistent=False,
+        )
+        raw_dim = 14 + len(COMMON_MASS_DIFFERENCES_DA)
+        self.raw_proj = nn.Sequential(
+            nn.Linear(raw_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, pair_dim),
+        )
+        self.single_pair_proj = nn.Sequential(
+            nn.Linear(4 * single_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, pair_dim),
+        )
+        for module in (self.raw_proj, self.single_pair_proj):
+            for layer in module:
+                if isinstance(layer, nn.Linear):
+                    _init_linear(layer)
+
+    def _reference_mass_da(
+        self,
+        peak_mz: torch.Tensor,
+        valid_mask: torch.Tensor,
+        precursor_mz: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if precursor_mz is not None:
+            return (precursor_mz.float() * self.precursor_mz_scale).clamp_min(1.0)
+        mz_da = peak_mz.float() * self.mz_scale
+        return (mz_da * valid_mask.float()).amax(dim=1).clamp_min(1.0)
+
+    def forward(
+        self,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+        single: torch.Tensor,
+        valid_mask: torch.Tensor,
+        precursor_mz: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        with torch.autocast(device_type=peak_mz.device.type, enabled=False):
+            mz_da = peak_mz.float() * self.mz_scale
+            intensity = peak_intensity.float()
+            reference_mass = self._reference_mass_da(
+                peak_mz,
+                valid_mask,
+                precursor_mz,
+            ).view(-1, 1, 1)
+            mz_i = mz_da.unsqueeze(2)
+            mz_j = mz_da.unsqueeze(1)
+            d = mz_j - mz_i
+            abs_d = d.abs()
+            complement = mz_i + mz_j - reference_mass
+            mass_diffs = self.mass_differences.to(device=peak_mz.device)
+            ppm = 1e6 * (abs_d.unsqueeze(-1) - mass_diffs) / mass_diffs
+            radial = torch.exp(-0.5 * (ppm / self.sigma_ppm).square())
+
+            intensity_i = intensity.unsqueeze(2)
+            intensity_j = intensity.unsqueeze(1)
+            diag = torch.eye(
+                peak_mz.shape[1],
+                device=peak_mz.device,
+                dtype=peak_mz.dtype,
+            ).view(1, peak_mz.shape[1], peak_mz.shape[1])
+            raw = torch.cat(
+                [
+                    d.unsqueeze(-1) / self.mz_scale,
+                    abs_d.unsqueeze(-1) / self.mz_scale,
+                    d.unsqueeze(-1) / reference_mass.unsqueeze(-1),
+                    complement.unsqueeze(-1) / self.mz_scale,
+                    mz_i.expand_as(d).unsqueeze(-1) / reference_mass.unsqueeze(-1),
+                    mz_j.expand_as(d).unsqueeze(-1) / reference_mass.unsqueeze(-1),
+                    intensity_i.expand_as(d).unsqueeze(-1),
+                    intensity_j.expand_as(d).unsqueeze(-1),
+                    (intensity_i * intensity_j).expand_as(d).unsqueeze(-1),
+                    torch.log1p(intensity_i).expand_as(d).unsqueeze(-1),
+                    torch.log1p(intensity_j).expand_as(d).unsqueeze(-1),
+                    torch.sign(d).unsqueeze(-1),
+                    diag.expand_as(d).unsqueeze(-1),
+                    (d > 0).to(dtype=peak_mz.dtype).unsqueeze(-1),
+                    radial,
+                ],
+                dim=-1,
+            )
+        single_i = single.unsqueeze(2)
+        single_j = single.unsqueeze(1)
+        single_pair = torch.cat(
+            [
+                single_i.expand(-1, -1, single.shape[1], -1),
+                single_j.expand(-1, single.shape[1], -1, -1),
+                single_i * single_j,
+                single_j - single_i,
+            ],
+            dim=-1,
+        )
+        z = self.raw_proj(raw.to(dtype=single.dtype)) + self.single_pair_proj(single_pair)
+        return z * _pair_mask(valid_mask).unsqueeze(-1).to(dtype=z.dtype)
+
+
+class SingleToPair(nn.Module):
+    def __init__(
+        self,
+        *,
+        single_dim: int,
+        pair_dim: int,
+        hidden_dim: int,
+        norm_eps: float,
+    ) -> None:
+        super().__init__()
+        self.norm = _build_norm(single_dim, eps=norm_eps)
+        self.proj = nn.Sequential(
+            nn.Linear(4 * single_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, pair_dim),
+        )
+        for layer in self.proj:
+            if isinstance(layer, nn.Linear):
+                _init_linear(layer)
+
+    def forward(
+        self,
+        single: torch.Tensor,
+        pair_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        single = self.norm(single)
+        single_i = single.unsqueeze(2)
+        single_j = single.unsqueeze(1)
+        pair = torch.cat(
+            [
+                single_i.expand(-1, -1, single.shape[1], -1),
+                single_j.expand(-1, single.shape[1], -1, -1),
+                single_i * single_j,
+                single_j - single_i,
+            ],
+            dim=-1,
+        )
+        return self.proj(pair) * pair_mask.unsqueeze(-1).to(dtype=single.dtype)
+
+
+class TriangleMultiplicativeUpdate(nn.Module):
+    def __init__(
+        self,
+        pair_dim: int,
+        *,
+        direction: str,
+        norm_eps: float,
+        use_cuequivariance: bool,
+    ) -> None:
+        super().__init__()
+        self.direction = direction
+        self.norm_eps = norm_eps
+        self.norm_in = _build_norm(pair_dim, eps=norm_eps)
+        self.p_in = nn.Linear(pair_dim, 2 * pair_dim)
+        self.g_in = nn.Linear(pair_dim, 2 * pair_dim)
+        self.norm_out = _build_norm(pair_dim, eps=norm_eps)
+        self.use_cuequivariance = use_cuequivariance
+        self.p_out = nn.Linear(pair_dim, pair_dim)
+        self.g_out = nn.Linear(pair_dim, pair_dim)
+        _init_linear(self.p_in)
+        _init_linear(self.g_in, gate=True)
+        _init_linear(self.p_out)
+        _init_linear(self.g_out, gate=True)
+
+    def _can_use_cuequivariance(self, x: torch.Tensor) -> bool:
+        return self.use_cuequivariance and x.is_cuda and x.shape[-1] % 32 == 0
+
+    def _torch_forward(
+        self,
+        x: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        pair_mask = mask.unsqueeze(-1).to(dtype=x.dtype)
+        x_norm = self.norm_in(x)
+        a, b = (self.p_in(x_norm) * torch.sigmoid(self.g_in(x_norm))).chunk(2, dim=-1)
+        a = a * pair_mask
+        b = b * pair_mask
+        if self.direction == "outgoing":
+            update = torch.einsum("bikc,bjkc->bijc", a, b)
+        else:
+            update = torch.einsum("bkic,bkjc->bijc", a, b)
+        update = self.p_out(self.norm_out(update))
+        update = update * torch.sigmoid(self.g_out(x_norm))
+        return update * pair_mask
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if self._can_use_cuequivariance(x):
+            init_cuequivariance_torch_compile()
+            return cue_triangle_multiplicative_update(
+                x=x,
+                direction=self.direction,
+                mask=mask,
+                norm_in_weight=self.norm_in.weight,
+                norm_in_bias=getattr(self.norm_in, "bias", None),
+                p_in_weight=self.p_in.weight,
+                p_in_bias=self.p_in.bias,
+                g_in_weight=self.g_in.weight,
+                g_in_bias=self.g_in.bias,
+                norm_out_weight=self.norm_out.weight,
+                norm_out_bias=getattr(self.norm_out, "bias", None),
+                p_out_weight=self.p_out.weight,
+                p_out_bias=self.p_out.bias,
+                g_out_weight=self.g_out.weight,
+                g_out_bias=self.g_out.bias,
+                eps=self.norm_eps,
+            )
+        return self._torch_forward(x, mask)
+
+
+class TriangleAttention(nn.Module):
+    def __init__(
+        self,
+        pair_dim: int,
+        *,
+        num_heads: int,
+        ending: bool,
+        norm_eps: float,
+        use_cuequivariance: bool,
+    ) -> None:
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = pair_dim // num_heads
+        self.ending = ending
+        self.use_cuequivariance = use_cuequivariance
+        self.norm = _build_norm(pair_dim, eps=norm_eps)
+        self.qkv = nn.Linear(pair_dim, 3 * pair_dim, bias=False)
+        self.bias = nn.Linear(pair_dim, num_heads, bias=False)
+        self.g = nn.Linear(pair_dim, pair_dim)
+        self.o = nn.Linear(pair_dim, pair_dim)
+        _init_linear(self.qkv)
+        _init_linear(self.bias)
+        _init_linear(self.g, gate=True)
+        _init_linear(self.o)
+
+    def _can_use_cuequivariance(self, q: torch.Tensor) -> bool:
+        return self.use_cuequivariance and q.is_cuda
+
+    def _start_attention(
+        self,
+        x: torch.Tensor,
+        peak_mask: torch.Tensor,
+        pair_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size, num_peaks, _, pair_dim = x.shape
+        x_norm = self.norm(x)
+        qkv = self.qkv(x_norm).view(
+            batch_size,
+            num_peaks,
+            num_peaks,
+            3,
+            self.num_heads,
+            self.head_dim,
+        )
+        q, k, v = qkv.unbind(dim=3)
+        q = q.permute(0, 1, 3, 2, 4)
+        k = k.permute(0, 1, 3, 2, 4)
+        v = v.permute(0, 1, 3, 2, 4)
+        bias = self.bias(x_norm).permute(0, 3, 1, 2).unsqueeze(1)
+        key_mask = peak_mask[:, None, None, None, :].expand(
+            batch_size,
+            num_peaks,
+            1,
+            1,
+            num_peaks,
+        )
+        if self._can_use_cuequivariance(q):
+            out = cue_triangle_attention(
+                q,
+                k,
+                v,
+                bias,
+                key_mask,
+                scale=1.0 / math.sqrt(self.head_dim),
+            )
+        else:
+            scores = (
+                torch.einsum("bnhqd,bnhkd->bnhqk", q, k)
+                * (1.0 / math.sqrt(self.head_dim))
+                + bias
+            )
+            scores = scores.masked_fill(~key_mask, float("-inf"))
+            attn = torch.softmax(scores.float(), dim=-1).to(dtype=v.dtype)
+            out = torch.einsum("bnhqk,bnhkd->bnhqd", attn, v)
+        out = out.permute(0, 1, 3, 2, 4).reshape(
+            batch_size,
+            num_peaks,
+            num_peaks,
+            pair_dim,
+        )
+        out = out * torch.sigmoid(self.g(x_norm))
+        out = self.o(out)
+        return out * pair_mask.unsqueeze(-1).to(dtype=out.dtype)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        peak_mask: torch.Tensor,
+        pair_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.ending:
+            return self._start_attention(
+                x.transpose(1, 2),
+                peak_mask,
+                pair_mask.transpose(1, 2),
+            ).transpose(1, 2)
+        return self._start_attention(x, peak_mask, pair_mask)
+
+
+class AttentionPairBias(nn.Module):
+    def __init__(
+        self,
+        *,
+        single_dim: int,
+        pair_dim: int,
+        num_heads: int,
+        norm_eps: float,
+    ) -> None:
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = single_dim // num_heads
+        self.single_norm = _build_norm(single_dim, eps=norm_eps)
+        self.pair_norm = _build_norm(pair_dim, eps=norm_eps)
+        self.qkv = nn.Linear(single_dim, 3 * single_dim, bias=False)
+        self.pair_bias = nn.Linear(pair_dim, num_heads, bias=False)
+        self.g = nn.Linear(single_dim, single_dim)
+        self.o = nn.Linear(single_dim, single_dim)
+        _init_linear(self.qkv)
+        _init_linear(self.pair_bias)
+        _init_linear(self.g, gate=True)
+        _init_linear(self.o)
+
+    def forward(
+        self,
+        single: torch.Tensor,
+        pair: torch.Tensor,
+        token_mask: torch.Tensor,
+        num_peak_tokens: int,
+    ) -> torch.Tensor:
+        batch_size, num_tokens, single_dim = single.shape
+        single_norm = self.single_norm(single)
+        qkv = self.qkv(single_norm).view(
+            batch_size,
+            num_tokens,
+            3,
+            self.num_heads,
+            self.head_dim,
+        )
+        q, k, v = qkv.unbind(dim=2)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        peak_bias = self.pair_bias(self.pair_norm(pair)).permute(0, 3, 1, 2)
+        extra_tokens = num_tokens - num_peak_tokens
+        attn_bias = F.pad(peak_bias, (0, extra_tokens, 0, extra_tokens)).float()
+        attn_bias = attn_bias.masked_fill(
+            ~token_mask[:, None, None, :],
+            float("-inf"),
+        )
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias)
+        out = out.transpose(1, 2).contiguous().view(batch_size, num_tokens, single_dim)
+        out = out * torch.sigmoid(self.g(single_norm))
+        return self.o(out)
+
+
+class PairformerBlock(nn.Module):
+    def __init__(
+        self,
+        *,
+        single_dim: int,
+        pair_dim: int,
+        num_heads: int,
+        pair_num_heads: int,
+        attention_mlp_multiple: float,
+        pair_feature_hidden_dim: int,
+        norm_eps: float,
+        dropout: float,
+        refresh_pair: bool,
+        use_cuequivariance: bool,
+    ) -> None:
+        super().__init__()
+        self.refresh_pair = (
+            SingleToPair(
+                single_dim=single_dim,
+                pair_dim=pair_dim,
+                hidden_dim=pair_feature_hidden_dim,
+                norm_eps=norm_eps,
+            )
+            if refresh_pair
+            else None
+        )
+        self.tri_mul_out = TriangleMultiplicativeUpdate(
+            pair_dim,
+            direction="outgoing",
+            norm_eps=norm_eps,
+            use_cuequivariance=use_cuequivariance,
+        )
+        self.tri_mul_in = TriangleMultiplicativeUpdate(
+            pair_dim,
+            direction="incoming",
+            norm_eps=norm_eps,
+            use_cuequivariance=use_cuequivariance,
+        )
+        self.tri_att_start = TriangleAttention(
+            pair_dim,
+            num_heads=pair_num_heads,
+            ending=False,
+            norm_eps=norm_eps,
+            use_cuequivariance=use_cuequivariance,
+        )
+        self.tri_att_end = TriangleAttention(
+            pair_dim,
+            num_heads=pair_num_heads,
+            ending=True,
+            norm_eps=norm_eps,
+            use_cuequivariance=use_cuequivariance,
+        )
+        self.pair_transition_norm = _build_norm(
+            pair_dim,
+            eps=norm_eps,
+        )
+        self.pair_transition = FeedForward(
+            pair_dim,
+            hidden_dim=math.ceil(pair_dim * attention_mlp_multiple),
+        )
+        self.single_attention = AttentionPairBias(
+            single_dim=single_dim,
+            pair_dim=pair_dim,
+            num_heads=num_heads,
+            norm_eps=norm_eps,
+        )
+        self.single_transition_norm = _build_norm(
+            single_dim,
+            eps=norm_eps,
+        )
+        self.single_transition = FeedForward(
+            single_dim,
+            hidden_dim=math.ceil(single_dim * attention_mlp_multiple),
+        )
+        self.drop = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
+
+    def forward(
+        self,
+        single: torch.Tensor,
+        pair: torch.Tensor,
+        peak_mask: torch.Tensor,
+        token_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        pair_mask = _pair_mask(peak_mask)
+        if self.refresh_pair is not None:
+            pair = pair + self.drop(
+                self.refresh_pair(single[:, : peak_mask.shape[1]], pair_mask)
+            )
+            pair = pair * pair_mask.unsqueeze(-1).to(dtype=pair.dtype)
+        pair = pair + self.drop(self.tri_mul_out(pair, pair_mask))
+        pair = pair + self.drop(self.tri_mul_in(pair, pair_mask))
+        pair = pair + self.drop(self.tri_att_start(pair, peak_mask, pair_mask))
+        pair = pair + self.drop(self.tri_att_end(pair, peak_mask, pair_mask))
+        pair = pair + self.drop(self.pair_transition(self.pair_transition_norm(pair)))
+        pair = pair * pair_mask.unsqueeze(-1).to(dtype=pair.dtype)
+        single = single + self.drop(
+            self.single_attention(single, pair, token_mask, peak_mask.shape[1])
+        )
+        single = single + self.drop(
+            self.single_transition(self.single_transition_norm(single))
+        )
+        return single, pair
