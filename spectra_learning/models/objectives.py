@@ -4,31 +4,33 @@ from typing import Any, Protocol, cast
 
 import torch
 import torch.nn.functional as F
-from torch import nn
+from jaxtyping import Bool, Float, Int
+from torch import Tensor, nn
+
 
 class CovariancePooler(Protocol):
     def reconstruction_loss(
         self,
-        peak_embeddings: torch.Tensor,
-        valid_mask: torch.Tensor,
-    ) -> torch.Tensor: ...
+        peak_embeddings: Float[Tensor, "batch peaks dim"],
+        valid_mask: Bool[Tensor, "batch peaks"],
+    ) -> Float[Tensor, ""]: ...
 
 
 class ObjectiveMixin:
     def _embedding_loss(
         self: Any,
-        prediction: torch.Tensor,
-        target: torch.Tensor,
-    ) -> torch.Tensor:
+        prediction: Float[Tensor, "*batch dim"],
+        target: Float[Tensor, "*batch dim"],
+    ) -> Float[Tensor, "*batch"]:
         prediction = prediction.float()
         target = target.float()
         return (prediction - target).square().mean(dim=-1)
 
     def _jepa_mae_targets(
         self: Any,
-        peak_mz: torch.Tensor,
-        peak_intensity: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        peak_mz: Float[Tensor, "batch peaks"],
+        peak_intensity: Float[Tensor, "batch peaks"],
+    ) -> tuple[Int[Tensor, "batch peaks"], Int[Tensor, "batch peaks"]]:
         mz_target = torch.floor(
             peak_mz.float() * self.jepa_mae_mz_max / self.jepa_mae_mz_bin_size
         ).long()
@@ -42,10 +44,10 @@ class ObjectiveMixin:
 
     def _masked_ce_loss(
         self: Any,
-        logits: torch.Tensor,
-        targets: torch.Tensor,
-        valid_mask: torch.Tensor,
-    ) -> torch.Tensor:
+        logits: Float[Tensor, "... classes"],
+        targets: Int[Tensor, "..."],
+        valid_mask: Bool[Tensor, "..."],
+    ) -> Float[Tensor, ""]:
         per_token = F.cross_entropy(
             logits.flatten(0, -2).float(),
             targets.reshape(-1),
@@ -56,13 +58,20 @@ class ObjectiveMixin:
 
     def _jepa_mae_value_prediction_loss(
         self: Any,
-        predicted_latents: torch.Tensor,
-        peak_mz: torch.Tensor,
-        peak_intensity: torch.Tensor,
-        target_masks: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        predicted_latents: Float[Tensor, "batch views peaks dim"],
+        peak_mz: Float[Tensor, "batch peaks"],
+        peak_intensity: Float[Tensor, "batch peaks"],
+        target_masks: Bool[Tensor, "batch views peaks"],
+    ) -> tuple[
+        Float[Tensor, ""],
+        Float[Tensor, ""],
+        Float[Tensor, ""],
+        Float[Tensor, ""],
+        Float[Tensor, ""],
+    ]:
         mz_logits = cast(nn.Linear, self.jepa_mae_mz_head)(predicted_latents)
         mz_target, intensity_target = self._jepa_mae_targets(peak_mz, peak_intensity)
+        # targets: [B, N] -> [B, K, N], matching predicted_latents/logits.
         view_shape = (mz_logits.shape[0], mz_logits.shape[1], mz_logits.shape[2])
         mz_target = mz_target.unsqueeze(1).expand(view_shape)
         intensity_target = intensity_target.unsqueeze(1).expand(view_shape)
@@ -92,13 +101,19 @@ class ObjectiveMixin:
 
     def _predict_augmented_targets(
         self: Any,
-        context_emb: torch.Tensor,
-        context_mask: torch.Tensor,
-        target_masks: torch.Tensor,
-        context_cls_emb: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        context_emb: Float[Tensor, "batch peaks dim"],
+        context_mask: Bool[Tensor, "batch peaks"],
+        target_masks: Bool[Tensor, "batch views peaks"],
+        context_cls_emb: (
+            Float[Tensor, "batch dim"] | Float[Tensor, "batch cls_tokens dim"] | None
+        ) = None,
+    ) -> tuple[
+        Float[Tensor, "batch views peaks target_dim"],
+        Float[Tensor, "batch views peaks target_dim"],
+    ]:
         batch_size, num_target_blocks, num_peaks = target_masks.shape
         context_mask_by_view = context_mask.unsqueeze(1)
+        # predictor_input: [B, K, N, D]
         predictor_input = (
             context_emb.unsqueeze(1).expand(-1, num_target_blocks, -1, -1)
             * context_mask_by_view.unsqueeze(-1)
@@ -145,6 +160,7 @@ class ObjectiveMixin:
             batch_size * num_target_blocks,
             predictor_visible_mask.shape[2],
         )
+        # Flatten target views into the batch: [B, K, T, D] -> [B*K, T, D].
         flat_predictor_input = predictor_input.reshape(
             batch_size * num_target_blocks,
             predictor_input.shape[2],
@@ -166,22 +182,22 @@ class ObjectiveMixin:
 
     def _masked_prediction_loss(
         self: Any,
-        predictor_output: torch.Tensor,
-        teacher_targets: torch.Tensor,
-        target_masks: torch.Tensor,
-    ) -> torch.Tensor:
+        predictor_output: Float[Tensor, "batch views peaks target_dim"],
+        teacher_targets: Float[Tensor, "batch peaks target_dim"],
+        target_masks: Bool[Tensor, "batch views peaks"],
+    ) -> Float[Tensor, ""]:
         per_token = self._embedding_loss(predictor_output, teacher_targets.unsqueeze(1))
         target_weights = target_masks.float()
         return (per_token * target_weights).sum() / target_weights.sum().clamp_min(1.0)
 
     def _jepa_mae_metrics(
         self: Any,
-        predictor_output: torch.Tensor,
-        peak_mz: torch.Tensor,
-        peak_intensity: torch.Tensor,
-        target_masks: torch.Tensor,
-        reference: torch.Tensor,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        predictor_output: Float[Tensor, "batch views peaks target_dim"],
+        peak_mz: Float[Tensor, "batch peaks"],
+        peak_intensity: Float[Tensor, "batch peaks"],
+        target_masks: Bool[Tensor, "batch views peaks"],
+        reference: Float[Tensor, "*batch dim"],
+    ) -> tuple[Float[Tensor, ""], dict[str, Tensor]]:
         if self.jepa_mae_loss_weight <= 0:
             return reference.new_tensor(0.0), {}
         (
@@ -205,12 +221,12 @@ class ObjectiveMixin:
 
     def _mae_metrics(
         self: Any,
-        predictor_output: torch.Tensor,
-        peak_mz: torch.Tensor,
-        peak_intensity: torch.Tensor,
-        target_masks: torch.Tensor,
-        reference: torch.Tensor,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        predictor_output: Float[Tensor, "batch views peaks target_dim"],
+        peak_mz: Float[Tensor, "batch peaks"],
+        peak_intensity: Float[Tensor, "batch peaks"],
+        target_masks: Bool[Tensor, "batch views peaks"],
+        reference: Float[Tensor, "*batch dim"],
+    ) -> tuple[Float[Tensor, ""], dict[str, Tensor]]:
         (
             value_loss,
             mz_loss,
@@ -236,10 +252,10 @@ class ObjectiveMixin:
 
     def _covariance_pooling_metrics(
         self: Any,
-        embeddings: torch.Tensor,
-        valid_mask: torch.Tensor,
+        embeddings: Float[Tensor, "batch peaks dim"],
+        valid_mask: Bool[Tensor, "batch peaks"],
         covariance_pooler: CovariancePooler | None = None,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    ) -> tuple[Float[Tensor, ""], dict[str, Tensor]]:
         if (
             not self.train_covariance_pooling
             or self.covariance_pooling_loss_weight <= 0
@@ -259,9 +275,9 @@ class ObjectiveMixin:
 
     def pool(
         self: Any,
-        embeddings: torch.Tensor,
-        valid_mask: torch.Tensor,
-    ) -> torch.Tensor:
+        embeddings: Float[Tensor, "batch tokens dim"],
+        valid_mask: Bool[Tensor, "batch peaks"],
+    ) -> Float[Tensor, "batch dim"]:
         num_extra_tokens = embeddings.shape[1] - valid_mask.shape[1]
         if num_extra_tokens > 0:
             embeddings = embeddings[:, : valid_mask.shape[1]]

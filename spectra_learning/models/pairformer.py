@@ -5,7 +5,8 @@ import os
 
 import torch
 import torch.nn.functional as F
-from torch import nn
+from jaxtyping import Bool, Float
+from torch import Tensor, nn
 
 os.environ.setdefault("CUEQ_TORCH_COMPILE", "1")
 
@@ -55,7 +56,9 @@ def _init_linear(linear: nn.Linear, *, gate: bool = False) -> None:
         nn.init.zeros_(linear.bias)
 
 
-def _pair_mask(peak_mask: torch.Tensor) -> torch.Tensor:
+def _pair_mask(
+    peak_mask: Bool[Tensor, "batch peaks"],
+) -> Bool[Tensor, "batch peaks peaks"]:
     return peak_mask.unsqueeze(2) & peak_mask.unsqueeze(1)
 
 
@@ -117,10 +120,11 @@ class PairFeatureEmbedder(nn.Module):
 
     def _reference_mass_da(
         self,
-        peak_mz: torch.Tensor,
-        valid_mask: torch.Tensor,
-        precursor_mz: torch.Tensor | None,
-    ) -> torch.Tensor:
+        peak_mz: Float[Tensor, "batch peaks"],
+        valid_mask: Bool[Tensor, "batch peaks"],
+        precursor_mz: Float[Tensor, "batch"] | None,
+    ) -> Float[Tensor, "batch"]:
+        # peak_mz: [B, N], precursor_mz: [B] -> reference mass: [B]
         if precursor_mz is not None:
             return (precursor_mz.float() * self.precursor_mz_scale).clamp_min(1.0)
         mz_da = peak_mz.float() * self.mz_scale
@@ -129,18 +133,19 @@ class PairFeatureEmbedder(nn.Module):
     def _fourier_values(
         self,
         fourier: FourierFeatures,
-        values: torch.Tensor,
-    ) -> torch.Tensor:
+        values: Float[Tensor, "*batch features"],
+    ) -> Float[Tensor, "*batch fourier"]:
+        # values: [..., F] -> [..., F * 2 * num_freqs]
         return fourier(values.unsqueeze(-1)).flatten(start_dim=-2)
 
     def forward(
         self,
-        peak_mz: torch.Tensor,
-        peak_intensity: torch.Tensor,
-        single: torch.Tensor,
-        valid_mask: torch.Tensor,
-        precursor_mz: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        peak_mz: Float[Tensor, "batch peaks"],
+        peak_intensity: Float[Tensor, "batch peaks"],
+        single: Float[Tensor, "batch peaks dim"],
+        valid_mask: Bool[Tensor, "batch peaks"],
+        precursor_mz: Float[Tensor, "batch"] | None = None,
+    ) -> Float[Tensor, "batch peaks peaks pair"]:
         with torch.autocast(device_type=peak_mz.device.type, enabled=False):
             mz_da = peak_mz.float() * self.mz_scale
             intensity = peak_intensity.float()
@@ -149,6 +154,7 @@ class PairFeatureEmbedder(nn.Module):
                 valid_mask,
                 precursor_mz,
             ).view(-1, 1, 1)
+            # mz_i: [B, N, 1], mz_j: [B, 1, N], d/abs_d/relative_d: [B, N, N]
             mz_i = mz_da.unsqueeze(2)
             mz_j = mz_da.unsqueeze(1)
             d = mz_j - mz_i
@@ -156,6 +162,7 @@ class PairFeatureEmbedder(nn.Module):
             relative_d = d / reference_mass
             complement = mz_i + mz_j - reference_mass
             mass_diffs = self.mass_differences.to(device=peak_mz.device)
+            # radial: [B, N, N, num_common_mass_differences]
             ppm = 1e6 * (abs_d.unsqueeze(-1) - mass_diffs) / mass_diffs
             radial = torch.exp(-0.5 * (ppm / self.sigma_ppm).square())
 
@@ -197,6 +204,7 @@ class PairFeatureEmbedder(nn.Module):
                     ]
                 )
             raw = torch.cat(raw_parts, dim=-1)
+            # raw: [B, N, N, pair_raw_features]
         single_i = single.unsqueeze(2)
         single_j = single.unsqueeze(1)
         single_pair = torch.cat(
@@ -208,6 +216,7 @@ class PairFeatureEmbedder(nn.Module):
             ],
             dim=-1,
         )
+        # single_pair: [B, N, N, 4 * D]; z: [B, N, N, P]
         z = self.raw_proj(raw.to(dtype=single.dtype)) + self.single_pair_proj(single_pair)
         return z * _pair_mask(valid_mask).unsqueeze(-1).to(dtype=z.dtype)
 
@@ -234,9 +243,9 @@ class SingleToPair(nn.Module):
 
     def forward(
         self,
-        single: torch.Tensor,
-        pair_mask: torch.Tensor,
-    ) -> torch.Tensor:
+        single: Float[Tensor, "batch peaks dim"],
+        pair_mask: Bool[Tensor, "batch peaks peaks"],
+    ) -> Float[Tensor, "batch peaks peaks pair"]:
         single = self.norm(single)
         single_i = single.unsqueeze(2)
         single_j = single.unsqueeze(1)
@@ -249,6 +258,7 @@ class SingleToPair(nn.Module):
             ],
             dim=-1,
         )
+        # pair: [B, N, N, 4 * D] -> [B, N, N, P]
         return self.proj(pair) * pair_mask.unsqueeze(-1).to(dtype=single.dtype)
 
 
@@ -276,19 +286,23 @@ class TriangleMultiplicativeUpdate(nn.Module):
         _init_linear(self.p_out)
         _init_linear(self.g_out, gate=True)
 
-    def _can_use_cuequivariance(self, x: torch.Tensor) -> bool:
+    def _can_use_cuequivariance(
+        self,
+        x: Float[Tensor, "batch peaks peaks pair"],
+    ) -> bool:
         return self.use_cuequivariance and x.is_cuda and x.shape[-1] % 32 == 0
 
     def _torch_forward(
         self,
-        x: torch.Tensor,
-        mask: torch.Tensor,
-    ) -> torch.Tensor:
+        x: Float[Tensor, "batch peaks peaks pair"],
+        mask: Bool[Tensor, "batch peaks peaks"],
+    ) -> Float[Tensor, "batch peaks peaks pair"]:
         pair_mask = mask.unsqueeze(-1).to(dtype=x.dtype)
         x_norm = self.norm_in(x)
         a, b = (self.p_in(x_norm) * torch.sigmoid(self.g_in(x_norm))).chunk(2, dim=-1)
         a = a * pair_mask
         b = b * pair_mask
+        # a/b: [B, N, N, P]; update contracts the middle triangle node k.
         if self.direction == "outgoing":
             update = torch.einsum("bikc,bjkc->bijc", a, b)
         else:
@@ -299,9 +313,9 @@ class TriangleMultiplicativeUpdate(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,
-        mask: torch.Tensor,
-    ) -> torch.Tensor:
+        x: Float[Tensor, "batch peaks peaks pair"],
+        mask: Bool[Tensor, "batch peaks peaks"],
+    ) -> Float[Tensor, "batch peaks peaks pair"]:
         if self._can_use_cuequivariance(x):
             init_cuequivariance_torch_compile()
             return cue_triangle_multiplicative_update(
@@ -350,15 +364,18 @@ class TriangleAttention(nn.Module):
         _init_linear(self.g, gate=True)
         _init_linear(self.o)
 
-    def _can_use_cuequivariance(self, q: torch.Tensor) -> bool:
+    def _can_use_cuequivariance(
+        self,
+        q: Float[Tensor, "batch peaks heads peaks head_dim"],
+    ) -> bool:
         return self.use_cuequivariance and q.is_cuda
 
     def _start_attention(
         self,
-        x: torch.Tensor,
-        peak_mask: torch.Tensor,
-        pair_mask: torch.Tensor,
-    ) -> torch.Tensor:
+        x: Float[Tensor, "batch peaks peaks pair"],
+        peak_mask: Bool[Tensor, "batch peaks"],
+        pair_mask: Bool[Tensor, "batch peaks peaks"],
+    ) -> Float[Tensor, "batch peaks peaks pair"]:
         batch_size, num_peaks, _, pair_dim = x.shape
         x_norm = self.norm(x)
         qkv = self.qkv(x_norm).view(
@@ -370,9 +387,11 @@ class TriangleAttention(nn.Module):
             self.head_dim,
         )
         q, k, v = qkv.unbind(dim=3)
+        # q/k/v: [B, N, N, H, Dh] -> [B, N, H, N, Dh] for attention over j.
         q = q.permute(0, 1, 3, 2, 4)
         k = k.permute(0, 1, 3, 2, 4)
         v = v.permute(0, 1, 3, 2, 4)
+        # bias: [B, 1, H, N, N], key_mask: [B, N, 1, 1, N]
         bias = self.bias(x_norm).permute(0, 3, 1, 2).unsqueeze(1)
         key_mask = peak_mask[:, None, None, None, :].expand(
             batch_size,
@@ -411,10 +430,10 @@ class TriangleAttention(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,
-        peak_mask: torch.Tensor,
-        pair_mask: torch.Tensor,
-    ) -> torch.Tensor:
+        x: Float[Tensor, "batch peaks peaks pair"],
+        peak_mask: Bool[Tensor, "batch peaks"],
+        pair_mask: Bool[Tensor, "batch peaks peaks"],
+    ) -> Float[Tensor, "batch peaks peaks pair"]:
         if self.ending:
             return self._start_attention(
                 x.transpose(1, 2),
@@ -449,11 +468,11 @@ class AttentionPairBias(nn.Module):
 
     def forward(
         self,
-        single: torch.Tensor,
-        pair: torch.Tensor,
-        token_mask: torch.Tensor,
+        single: Float[Tensor, "batch tokens dim"],
+        pair: Float[Tensor, "batch peaks peaks pair"],
+        token_mask: Bool[Tensor, "batch tokens"],
         num_peak_tokens: int,
-    ) -> torch.Tensor:
+    ) -> Float[Tensor, "batch tokens dim"]:
         batch_size, num_tokens, single_dim = single.shape
         single_norm = self.single_norm(single)
         qkv = self.qkv(single_norm).view(
@@ -468,6 +487,7 @@ class AttentionPairBias(nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
+        # peak_bias: [B, H, N, N] -> attn_bias: [B, H, T, T].
         peak_bias = self.pair_bias(self.pair_norm(pair)).permute(0, 3, 1, 2)
         extra_tokens = num_tokens - num_peak_tokens
         attn_bias = F.pad(peak_bias, (0, extra_tokens, 0, extra_tokens)).float()
@@ -559,11 +579,14 @@ class PairformerBlock(nn.Module):
 
     def forward(
         self,
-        single: torch.Tensor,
-        pair: torch.Tensor,
-        peak_mask: torch.Tensor,
-        token_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        single: Float[Tensor, "batch tokens dim"],
+        pair: Float[Tensor, "batch peaks peaks pair"],
+        peak_mask: Bool[Tensor, "batch peaks"],
+        token_mask: Bool[Tensor, "batch tokens"],
+    ) -> tuple[
+        Float[Tensor, "batch tokens dim"],
+        Float[Tensor, "batch peaks peaks pair"],
+    ]:
         pair_mask = _pair_mask(peak_mask)
         if self.refresh_pair is not None:
             pair = pair + self.drop(

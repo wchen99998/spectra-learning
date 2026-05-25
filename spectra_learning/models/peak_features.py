@@ -3,7 +3,8 @@ from __future__ import annotations
 from math import log10
 
 import torch
-from torch import nn
+from jaxtyping import Float
+from torch import Tensor, nn
 
 from spectra_learning.data.spectra import PEAK_MZ_MAX
 
@@ -30,7 +31,8 @@ class FourierFeatures(nn.Module):
         )
         self.register_buffer("b", (1.0 / wavelengths).unsqueeze(0))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Float[Tensor, "*batch 1"]) -> Float[Tensor, "*batch fourier"]:
+        # x: [..., 1] -> [..., 2 * num_freqs]
         angles = 2 * torch.pi * x @ self.b
         return torch.cat((torch.cos(angles), torch.sin(angles)), dim=-1)
 
@@ -117,19 +119,29 @@ class PeakFeatureEmbedder(nn.Module):
         nn.init.xavier_normal_(self.output_proj.weight)
         nn.init.zeros_(self.output_proj.bias)
 
-    def _prepare_fourier_mz(self, peak_mz: torch.Tensor) -> torch.Tensor:
+    def _prepare_fourier_mz(
+        self,
+        peak_mz: Float[Tensor, "batch peaks"],
+    ) -> Float[Tensor, "batch peaks 1"]:
+        # peak_mz: [B, N] -> [B, N, 1], in Da-scale units for Fourier features.
         return peak_mz.unsqueeze(-1) * self.fourier_input_scale
 
-    def forward(self, peak_mz: torch.Tensor, peak_intensity: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        peak_mz: Float[Tensor, "batch peaks"],
+        peak_intensity: Float[Tensor, "batch peaks"],
+    ) -> Float[Tensor, "batch peaks dim"]:
         with torch.autocast(device_type=peak_mz.device.type, enabled=False):
             peak_mz = peak_mz.float()
             peak_intensity = peak_intensity.float()
+            # mz/intensity/log_intensity: [B, N, 1]; raw: [B, N, D_raw]
             mz = peak_mz.unsqueeze(-1)
             intensity = peak_intensity.unsqueeze(-1)
             log_intensity = torch.log1p(peak_intensity).unsqueeze(-1)
             raw = self.raw_ffn(torch.cat([mz, intensity, log_intensity], dim=-1))
             if not self.use_fourier_features:
                 return self.output_proj(raw)
+            # fourier: [B, N, D_fourier]; cat([fourier, raw]): [B, N, D]
             fourier = self.fourier_ffn(
                 self.mz_fourier(self._prepare_fourier_mz(peak_mz))
             )

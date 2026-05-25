@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 import torch
+from jaxtyping import Bool, Float
+from torch import Tensor
 
 from spectra_learning.models.common import _active_autocast_context
 from spectra_learning.models.encoder import PeakSetEncoder
@@ -12,12 +14,13 @@ from spectra_learning.models.transformer import create_visible_attention_mask
 class TargetProjectionMixin:
     def _apply_group_target_normalization(
         self: Any,
-        x: torch.Tensor,
+        x: Float[Tensor, "*batch dim"],
         group_dim: int,
-    ) -> torch.Tensor:
+    ) -> Float[Tensor, "*batch dim"]:
         if self.jepa_target_normalization == "none":
             return x
         orig_dtype = x.dtype
+        # x: [..., groups * group_dim] -> [..., groups, group_dim]
         x = x.float().reshape(*x.shape[:-1], -1, group_dim)
         mean = x.mean(dim=-1, keepdim=True)
         std = x.std(dim=-1, keepdim=True, unbiased=False).clamp_min(1e-6)
@@ -26,15 +29,18 @@ class TargetProjectionMixin:
 
     def _apply_jepa_target_normalization(
         self: Any,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
+        x: Float[Tensor, "batch peaks dim"],
+    ) -> Float[Tensor, "batch peaks dim"]:
         return self._apply_group_target_normalization(x, self.jepa_target_group_dim)
 
     def _append_predictor_register_tokens(
         self: Any,
-        x: torch.Tensor,
-        visible_mask: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        x: Float[Tensor, "batch tokens dim"],
+        visible_mask: Bool[Tensor, "batch tokens"] | None,
+    ) -> tuple[
+        Float[Tensor, "batch tokens_out dim"],
+        Bool[Tensor, "batch tokens_out"] | None,
+    ]:
         if self.predictor_register_tokens is None:
             return x, visible_mask
         registers = self.predictor_register_tokens.unsqueeze(0).expand(
@@ -55,16 +61,16 @@ class TargetProjectionMixin:
 
     def _add_predictor_positions(
         self: Any,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
+        x: Float[Tensor, "batch tokens dim"],
+    ) -> Float[Tensor, "batch tokens dim"]:
         positions = torch.arange(x.shape[1], device=x.device)
         return x + self.predictor_position_embedding(positions).to(dtype=x.dtype)
 
     def predict_masked_latents(
         self: Any,
-        x: torch.Tensor,
-        visible_mask: torch.Tensor,
-    ) -> torch.Tensor:
+        x: Float[Tensor, "batch tokens dim"],
+        visible_mask: Bool[Tensor, "batch tokens"],
+    ) -> Float[Tensor, "batch tokens dim"]:
         x = self._add_predictor_positions(x)
         x, visible_mask = self._append_predictor_register_tokens(x, visible_mask)
         x = self.encoder_to_predictor_proj(x)
@@ -80,13 +86,16 @@ class TargetProjectionMixin:
             x = x[:, :-self.predictor_num_register_tokens]
         return x
 
-    def project_targets(self: Any, x: torch.Tensor) -> torch.Tensor:
+    def project_targets(
+        self: Any,
+        x: Float[Tensor, "*batch dim"],
+    ) -> Float[Tensor, "*batch target_dim"]:
         return self.target_projector(x)
 
     def project_teacher_targets(
         self: Any,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
+        x: Float[Tensor, "*batch dim"],
+    ) -> Float[Tensor, "*batch target_dim"]:
         projector = (
             self.teacher_target_projector
             if self.teacher_target_projector is not None
@@ -96,9 +105,9 @@ class TargetProjectionMixin:
 
     def predict_masked_target_features(
         self: Any,
-        x: torch.Tensor,
-        visible_mask: torch.Tensor,
-    ) -> torch.Tensor:
+        x: Float[Tensor, "batch tokens dim"],
+        visible_mask: Bool[Tensor, "batch tokens"],
+    ) -> Float[Tensor, "batch tokens target_dim"]:
         return self.masked_latent_readout(
             self.predict_masked_latents(
                 x,
@@ -108,9 +117,9 @@ class TargetProjectionMixin:
 
     def predict_masked_targets(
         self: Any,
-        x: torch.Tensor,
-        visible_mask: torch.Tensor,
-    ) -> torch.Tensor:
+        x: Float[Tensor, "batch tokens dim"],
+        visible_mask: Bool[Tensor, "batch tokens"],
+    ) -> Float[Tensor, "batch tokens target_dim"]:
         return self.project_targets(
             self.predict_masked_target_features(
                 x,
@@ -121,9 +130,12 @@ class TargetProjectionMixin:
     def _split_encoder_output(
         self: Any,
         encoder: PeakSetEncoder,
-        embeddings: torch.Tensor,
-        valid_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        embeddings: Float[Tensor, "batch output_tokens dim"],
+        valid_mask: Bool[Tensor, "batch peaks"],
+    ) -> tuple[
+        Float[Tensor, "batch peaks dim"],
+        Float[Tensor, "batch dim"] | Float[Tensor, "batch cls_tokens dim"],
+    ]:
         peak_embeddings, cls_embedding = encoder.split_peak_and_cls(embeddings)
         if not encoder.use_cls_token:
             cls_embedding = self.pool(peak_embeddings, valid_mask)
@@ -131,11 +143,11 @@ class TargetProjectionMixin:
 
     def _compute_jepa_teacher_target_features(
         self: Any,
-        peak_mz: torch.Tensor,
-        peak_intensity: torch.Tensor,
-        peak_valid_mask: torch.Tensor,
-        precursor_mz: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        peak_mz: Float[Tensor, "batch peaks"],
+        peak_intensity: Float[Tensor, "batch peaks"],
+        peak_valid_mask: Bool[Tensor, "batch peaks"],
+        precursor_mz: Float[Tensor, "batch"] | None = None,
+    ) -> Float[Tensor, "batch peaks target_dim"]:
         with _active_autocast_context(peak_mz.device.type):
             teacher_encoder = (
                 self.teacher_encoder
@@ -150,15 +162,16 @@ class TargetProjectionMixin:
                 block_indices=self.jepa_target_layers,
                 precursor_mz=precursor_mz,
             )
+            # teacher_peak_outputs: target_layers * [B, N, D] -> [B, N, L*D]
             return torch.cat(teacher_peak_outputs, dim=-1)
 
     def _compute_jepa_teacher_targets(
         self: Any,
-        peak_mz: torch.Tensor,
-        peak_intensity: torch.Tensor,
-        peak_valid_mask: torch.Tensor,
-        precursor_mz: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        peak_mz: Float[Tensor, "batch peaks"],
+        peak_intensity: Float[Tensor, "batch peaks"],
+        peak_valid_mask: Bool[Tensor, "batch peaks"],
+        precursor_mz: Float[Tensor, "batch"] | None = None,
+    ) -> Float[Tensor, "batch peaks target_dim"]:
         with torch.no_grad():
             teacher_target_features = self._compute_jepa_teacher_target_features(
                 peak_mz,
@@ -172,11 +185,15 @@ class TargetProjectionMixin:
 
     def _context_encoder_inputs(
         self: Any,
-        peak_mz: torch.Tensor,
-        peak_intensity: torch.Tensor,
-        context_mask: torch.Tensor,
-        target_masks: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        peak_mz: Float[Tensor, "batch peaks"],
+        peak_intensity: Float[Tensor, "batch peaks"],
+        context_mask: Bool[Tensor, "batch peaks"],
+        target_masks: Bool[Tensor, "batch views peaks"],
+    ) -> tuple[
+        Float[Tensor, "batch peaks"],
+        Float[Tensor, "batch peaks"],
+        Bool[Tensor, "batch peaks"],
+    ]:
         if self.masked_token_input_mode != "mz_sentinel":
             return peak_mz, peak_intensity, context_mask
         target_union = target_masks.any(dim=1)
@@ -189,8 +206,8 @@ class TargetProjectionMixin:
 
     def compute_teacher_targets(
         self: Any,
-        augmented_batch: dict[str, torch.Tensor],
-    ) -> torch.Tensor:
+        augmented_batch: dict[str, Tensor],
+    ) -> Float[Tensor, "batch peaks target_dim"]:
         return self._compute_jepa_teacher_targets(
             augmented_batch["peak_mz"],
             augmented_batch["peak_intensity"],
@@ -200,18 +217,18 @@ class TargetProjectionMixin:
 
     def _encode_augmented_teacher_and_context(
         self: Any,
-        peak_mz: torch.Tensor,
-        peak_intensity: torch.Tensor,
-        peak_valid_mask: torch.Tensor,
-        context_mask: torch.Tensor,
-        target_masks: torch.Tensor,
-        precursor_mz: torch.Tensor | None = None,
+        peak_mz: Float[Tensor, "batch peaks"],
+        peak_intensity: Float[Tensor, "batch peaks"],
+        peak_valid_mask: Bool[Tensor, "batch peaks"],
+        context_mask: Bool[Tensor, "batch peaks"],
+        target_masks: Bool[Tensor, "batch views peaks"],
+        precursor_mz: Float[Tensor, "batch"] | None = None,
     ) -> tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor | None,
+        Float[Tensor, "batch peaks target_dim"],
+        Float[Tensor, "batch peaks dim"],
+        Float[Tensor, "batch dim"] | Float[Tensor, "batch cls_tokens dim"],
+        Float[Tensor, "batch peaks dim"],
+        Float[Tensor, "batch dim"] | Float[Tensor, "batch cls_tokens dim"] | None,
     ]:
         batch_size = peak_mz.shape[0]
         context_mz, context_intensity, context_visible_mask = self._context_encoder_inputs(
@@ -268,7 +285,7 @@ class TargetProjectionMixin:
                 if precursor_mz is None
                 else torch.cat([precursor_mz, precursor_mz], dim=0)
             ),
-        )
+            )
         teacher_target_features = torch.cat(
             [peak_output[:batch_size] for peak_output in teacher_peak_outputs],
             dim=-1,
@@ -293,12 +310,12 @@ class TargetProjectionMixin:
 
     def _compute_pooled_teacher_peak_targets(
         self: Any,
-        peak_mz: torch.Tensor,
-        peak_intensity: torch.Tensor,
-        peak_valid_mask: torch.Tensor,
-        visible_mask: torch.Tensor | None = None,
-        precursor_mz: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        peak_mz: Float[Tensor, "batch peaks"],
+        peak_intensity: Float[Tensor, "batch peaks"],
+        peak_valid_mask: Bool[Tensor, "batch peaks"],
+        visible_mask: Bool[Tensor, "batch peaks"] | None = None,
+        precursor_mz: Float[Tensor, "batch"] | None = None,
+    ) -> Float[Tensor, "batch dim"]:
         if visible_mask is None:
             visible_mask = peak_valid_mask
         with _active_autocast_context(peak_mz.device.type):

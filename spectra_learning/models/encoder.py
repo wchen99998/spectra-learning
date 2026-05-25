@@ -1,5 +1,6 @@
 import torch
-from torch import nn
+from jaxtyping import Bool, Float
+from torch import Tensor, nn
 
 from spectra_learning.models.transformer import _build_norm
 from spectra_learning.models.common import (
@@ -113,8 +114,8 @@ class PeakSetEncoder(nn.Module):
 
     def _add_positions(
         self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
+        x: Float[Tensor, "batch peaks dim"],
+    ) -> Float[Tensor, "batch peaks dim"]:
         if not self.use_position_embedding:
             return x
         positions = torch.arange(x.shape[1], device=x.device)
@@ -122,9 +123,12 @@ class PeakSetEncoder(nn.Module):
 
     def _append_special_tokens(
         self,
-        x: torch.Tensor,
-        attn_mask: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        x: Float[Tensor, "batch peaks dim"],
+        attn_mask: Bool[Tensor, "batch peaks"] | None,
+    ) -> tuple[
+        Float[Tensor, "batch tokens dim"],
+        Bool[Tensor, "batch tokens"] | None,
+    ]:
         special_tokens = []
         if self.cls_token is not None:
             if self.cls_token.ndim == 1:
@@ -151,8 +155,11 @@ class PeakSetEncoder(nn.Module):
 
     def split_peak_and_cls(
         self,
-        x: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        x: Float[Tensor, "batch tokens dim"],
+    ) -> tuple[
+        Float[Tensor, "batch peaks dim"],
+        Float[Tensor, "batch dim"] | Float[Tensor, "batch cls_tokens dim"],
+    ]:
         if self.use_cls_token:
             peak_x = x[:, :-self.num_cls_tokens]
             cls_x = x[:, -self.num_cls_tokens:]
@@ -163,13 +170,16 @@ class PeakSetEncoder(nn.Module):
 
     def forward_with_block_outputs(
         self,
-        peak_mz: torch.Tensor,
-        peak_intensity: torch.Tensor,
-        valid_mask: torch.Tensor | None = None,
-        visible_mask: torch.Tensor | None = None,
+        peak_mz: Float[Tensor, "batch peaks"],
+        peak_intensity: Float[Tensor, "batch peaks"],
+        valid_mask: Bool[Tensor, "batch peaks"] | None = None,
+        visible_mask: Bool[Tensor, "batch peaks"] | None = None,
         block_indices: list[int] | tuple[int, ...] = (),
-        precursor_mz: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        precursor_mz: Float[Tensor, "batch"] | None = None,
+    ) -> tuple[
+        Float[Tensor, "batch output_tokens dim"],
+        list[Float[Tensor, "batch peaks dim"]],
+    ]:
         block_indices = tuple(idx for idx in block_indices)
         peak_valid_mask = (
             torch.ones_like(peak_mz, dtype=torch.bool)
@@ -180,6 +190,7 @@ class PeakSetEncoder(nn.Module):
         if peak_visible_mask is None:
             peak_visible_mask = peak_valid_mask
         x = self._add_positions(self.embedder(peak_mz, peak_intensity))
+        # x: [B, N, D], z: [B, N, N, P], masks: [B, N]
         z = self.pair_embedder(
             peak_mz,
             peak_intensity,
@@ -189,8 +200,9 @@ class PeakSetEncoder(nn.Module):
         )
         seq_len = peak_mz.shape[1]
         selected = set(block_indices)
-        selected_peak_outputs: dict[int, torch.Tensor] = {}
+        selected_peak_outputs: dict[int, Float[Tensor, "batch peaks dim"]] = {}
         x, token_visible_mask = self._append_special_tokens(x, peak_visible_mask)
+        # x/token_visible_mask include peak, CLS, and register tokens; z stays peak-pair only.
         for block_idx, block in enumerate(self.blocks, start=1):
             x, z = block(
                 x,
@@ -213,13 +225,13 @@ class PeakSetEncoder(nn.Module):
 
     def forward_peak_block_outputs(
         self,
-        peak_mz: torch.Tensor,
-        peak_intensity: torch.Tensor,
-        valid_mask: torch.Tensor | None = None,
-        visible_mask: torch.Tensor | None = None,
+        peak_mz: Float[Tensor, "batch peaks"],
+        peak_intensity: Float[Tensor, "batch peaks"],
+        valid_mask: Bool[Tensor, "batch peaks"] | None = None,
+        visible_mask: Bool[Tensor, "batch peaks"] | None = None,
         block_indices: list[int] | tuple[int, ...] = (),
-        precursor_mz: torch.Tensor | None = None,
-    ) -> list[torch.Tensor]:
+        precursor_mz: Float[Tensor, "batch"] | None = None,
+    ) -> list[Float[Tensor, "batch peaks dim"]]:
         _, peak_block_outputs = self.forward_with_block_outputs(
             peak_mz,
             peak_intensity,
@@ -232,13 +244,19 @@ class PeakSetEncoder(nn.Module):
 
     def forward(
         self,
-        peak_mz: torch.Tensor,
-        peak_intensity: torch.Tensor,
-        valid_mask: torch.Tensor | None = None,
-        visible_mask: torch.Tensor | None = None,
+        peak_mz: Float[Tensor, "batch peaks"],
+        peak_intensity: Float[Tensor, "batch peaks"],
+        valid_mask: Bool[Tensor, "batch peaks"] | None = None,
+        visible_mask: Bool[Tensor, "batch peaks"] | None = None,
         return_cls_token: bool = False,
-        precursor_mz: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        precursor_mz: Float[Tensor, "batch"] | None = None,
+    ) -> (
+        Float[Tensor, "batch output_tokens dim"]
+        | tuple[
+            Float[Tensor, "batch output_tokens dim"],
+            Float[Tensor, "batch dim"] | Float[Tensor, "batch cls_tokens dim"],
+        ]
+    ):
         output, _ = self.forward_with_block_outputs(
             peak_mz,
             peak_intensity,

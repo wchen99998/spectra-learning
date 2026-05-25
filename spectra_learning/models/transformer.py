@@ -2,10 +2,13 @@ import math
 
 import torch
 import torch.nn.functional as F
-from torch import nn
+from jaxtyping import Bool, Float
+from torch import Tensor, nn
 
 
-def create_visible_attention_mask(visible_mask: torch.Tensor) -> torch.Tensor:
+def create_visible_attention_mask(
+    visible_mask: Bool[Tensor, "batch tokens"],
+) -> Bool[Tensor, "batch 1 1 tokens"]:
     # We mask keys only. Hidden query rows are dropped or ignored by callers,
     # and allowing them to attend to visible keys avoids empty-row SDPA masks.
     return visible_mask[:, None, None, :]
@@ -84,16 +87,21 @@ class Attention(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,
+        x: Float[Tensor, "batch tokens dim"],
         *,
-        attn_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        attn_mask: (
+            Bool[Tensor, "batch #heads #query_tokens #key_tokens"]
+            | Float[Tensor, "batch #heads #query_tokens #key_tokens"]
+            | None
+        ) = None,
+    ) -> Float[Tensor, "batch tokens dim"]:
         bsz, seqlen, _ = x.shape
 
         xq, xk, xv = self.wqkv(x).split(
             (self.q_size, self.kv_size, self.kv_size),
             dim=-1,
         )
+        # xq/xk/xv: [B, T, H, Dh] before transposing to SDPA's [B, H, T, Dh].
         xq = xq.view(bsz, seqlen, self.n_heads, self.head_dim)
         xk = xk.view(bsz, seqlen, self.n_kv_heads, self.head_dim)
         xv = xv.view(bsz, seqlen, self.n_kv_heads, self.head_dim)
@@ -139,11 +147,11 @@ class CrossAttention(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,
-        memory: torch.Tensor,
+        x: Float[Tensor, "batch tokens dim"],
+        memory: Float[Tensor, "batch memory dim"],
         *,
-        memory_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        memory_mask: Bool[Tensor, "batch memory"] | None = None,
+    ) -> Float[Tensor, "batch tokens dim"]:
         bsz, tgt_len, _ = x.shape
         mem_len = memory.shape[1]
         xq = self.wq(x).view(bsz, tgt_len, self.n_heads, self.head_dim)
@@ -187,7 +195,7 @@ class FeedForward(nn.Module):
         nn.init.trunc_normal_(self.w1.weight, std=1.0 / math.sqrt(dim))
         nn.init.trunc_normal_(self.w2.weight, std=1.0 / math.sqrt(hidden_dim))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Float[Tensor, "*batch dim"]) -> Float[Tensor, "*batch dim"]:
         return self.w2(F.silu(self.w1(x)))
 
 
@@ -218,10 +226,14 @@ class TransformerBlock(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,
+        x: Float[Tensor, "batch tokens dim"],
         *,
-        attn_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        attn_mask: (
+            Bool[Tensor, "batch #heads #query_tokens #key_tokens"]
+            | Float[Tensor, "batch #heads #query_tokens #key_tokens"]
+            | None
+        ) = None,
+    ) -> Float[Tensor, "batch tokens dim"]:
         h = x + self.drop(
             self.attention(
                 self.attention_norm(x),

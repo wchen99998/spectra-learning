@@ -20,6 +20,7 @@ dependencies = [
     "modal>=1.4.1",
     "cuequivariance-torch==0.10.0",
     "cuequivariance-ops-torch-cu13==0.10.0",
+    "jaxtyping>=0.3.10",
 ]
 
 [[tool.uv.index]]

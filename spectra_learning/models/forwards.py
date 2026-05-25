@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any, Literal, overload
 
 import torch
+from jaxtyping import Bool, Float
+from torch import Tensor
 
 from spectra_learning.models.objectives import CovariancePooler
 
@@ -10,9 +12,9 @@ from spectra_learning.models.objectives import CovariancePooler
 class ForwardMixin:
     @staticmethod
     def _target_mask_metrics(
-        target_masks: torch.Tensor,
-        valid_peak_count: torch.Tensor,
-    ) -> dict[str, torch.Tensor]:
+        target_masks: Bool[Tensor, "batch views peaks"],
+        valid_peak_count: Float[Tensor, ""],
+    ) -> dict[str, Tensor]:
         target_entries = target_masks.float().sum()
         target_union = target_masks.any(dim=1).float().sum()
         target_overlap_entries = target_entries - target_union
@@ -28,25 +30,28 @@ class ForwardMixin:
     @overload
     def forward_augmented(
         self: Any,
-        augmented_batch: dict[str, torch.Tensor],
+        augmented_batch: dict[str, Tensor],
         return_collapse_data: Literal[False] = False,
         covariance_pooler: CovariancePooler | None = None,
-    ) -> dict[str, torch.Tensor]: ...
+    ) -> dict[str, Tensor]: ...
 
     @overload
     def forward_augmented(
         self: Any,
-        augmented_batch: dict[str, torch.Tensor],
+        augmented_batch: dict[str, Tensor],
         return_collapse_data: Literal[True],
         covariance_pooler: CovariancePooler | None = None,
-    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]: ...
+    ) -> tuple[dict[str, Tensor], dict[str, Tensor]]: ...
 
     def forward_augmented(
         self: Any,
-        augmented_batch: dict[str, torch.Tensor],
+        augmented_batch: dict[str, Tensor],
         return_collapse_data: bool = False,
         covariance_pooler: CovariancePooler | None = None,
-    ) -> dict[str, torch.Tensor] | tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    ) -> dict[str, Tensor] | tuple[dict[str, Tensor], dict[str, Tensor]]:
+        # augmented_batch tensors:
+        # peak_mz/peak_intensity/context_mask/peak_valid_mask: [B, N]
+        # target_masks: [B, K, N], precursor_mz: [B] when present.
         if self.training_mode == "mae":
             return self.forward_mae(
                 augmented_batch,
@@ -112,7 +117,7 @@ class ForwardMixin:
             + covariance_term
         )
         valid_peak_count = peak_valid_mask.float().sum().clamp_min(1.0)
-        collapse_data: dict[str, torch.Tensor] = {}
+        collapse_data: dict[str, Tensor] = {}
         if return_collapse_data:
             pooled_mean = self.pool(teacher_peak_emb, peak_valid_mask)
             collapse_data = {
@@ -147,25 +152,28 @@ class ForwardMixin:
     @overload
     def forward_mae(
         self: Any,
-        augmented_batch: dict[str, torch.Tensor],
+        augmented_batch: dict[str, Tensor],
         return_collapse_data: Literal[False] = False,
         covariance_pooler: CovariancePooler | None = None,
-    ) -> dict[str, torch.Tensor]: ...
+    ) -> dict[str, Tensor]: ...
 
     @overload
     def forward_mae(
         self: Any,
-        augmented_batch: dict[str, torch.Tensor],
+        augmented_batch: dict[str, Tensor],
         return_collapse_data: Literal[True],
         covariance_pooler: CovariancePooler | None = None,
-    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]: ...
+    ) -> tuple[dict[str, Tensor], dict[str, Tensor]]: ...
 
     def forward_mae(
         self: Any,
-        augmented_batch: dict[str, torch.Tensor],
+        augmented_batch: dict[str, Tensor],
         return_collapse_data: bool = False,
         covariance_pooler: CovariancePooler | None = None,
-    ) -> dict[str, torch.Tensor] | tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    ) -> dict[str, Tensor] | tuple[dict[str, Tensor], dict[str, Tensor]]:
+        # augmented_batch tensors:
+        # peak_mz/peak_intensity/context_mask/peak_valid_mask: [B, N]
+        # target_masks: [B, K, N], precursor_mz: [B] when present.
         peak_mz = augmented_batch["peak_mz"]
         peak_intensity = augmented_batch["peak_intensity"]
         peak_valid_mask = augmented_batch["peak_valid_mask"]
@@ -225,7 +233,10 @@ class ForwardMixin:
             return metrics, {}
         return metrics
 
-    def encode(self: Any, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    def encode(
+        self: Any,
+        batch: dict[str, Tensor],
+    ) -> Float[Tensor, "batch dim"] | Float[Tensor, "batch cls_tokens dim"]:
         mz, intensity, valid = (
             batch["peak_mz"],
             batch["peak_intensity"],

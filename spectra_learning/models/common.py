@@ -4,7 +4,8 @@ from typing import cast
 
 import torch
 import torch.nn.functional as F
-from torch import nn
+from jaxtyping import Bool, Float
+from torch import Tensor, nn
 
 from spectra_learning.models.transformer import TransformerBlock
 
@@ -60,7 +61,10 @@ def _build_non_causal_blocks(
     return blocks
 
 
-def _build_sincos_position_table(num_positions: int, dim: int) -> torch.Tensor:
+def _build_sincos_position_table(
+    num_positions: int,
+    dim: int,
+) -> Float[Tensor, "positions dim"]:
     half_dim = dim // 2
     positions = torch.arange(num_positions, dtype=torch.float32).unsqueeze(1)
     if half_dim == 0:
@@ -84,17 +88,17 @@ def _build_frozen_position_embedding(num_positions: int, dim: int) -> nn.Embeddi
 
 
 def _merge_visible_mask(
-    valid_mask: torch.Tensor | None,
-    visible_mask: torch.Tensor | None,
-) -> torch.Tensor | None:
+    valid_mask: Bool[Tensor, "batch peaks"] | None,
+    visible_mask: Bool[Tensor, "batch peaks"] | None,
+) -> Bool[Tensor, "batch peaks"] | None:
     if visible_mask is not None and valid_mask is not None:
         return visible_mask & valid_mask
     return visible_mask if visible_mask is not None else valid_mask
 
 
 def _masked_mean_pool(
-    embeddings: torch.Tensor,
-    valid_mask: torch.Tensor,
-) -> torch.Tensor:
+    embeddings: Float[Tensor, "batch peaks dim"],
+    valid_mask: Bool[Tensor, "batch peaks"],
+) -> Float[Tensor, "batch dim"]:
     mask = valid_mask.unsqueeze(-1).to(dtype=embeddings.dtype)
     return (embeddings * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)

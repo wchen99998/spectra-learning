@@ -3,7 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-from torch import nn
+from jaxtyping import Bool, Float
+from torch import Tensor, nn
 
 
 class CovariancePool(nn.Module):
@@ -25,9 +26,9 @@ class CovariancePool(nn.Module):
 
     def covariance_matrix(
         self,
-        peak_embeddings: torch.Tensor,
-        valid_mask: torch.Tensor,
-    ) -> torch.Tensor:
+        peak_embeddings: Float[Tensor, "batch peaks dim"],
+        valid_mask: Bool[Tensor, "batch peaks"],
+    ) -> Float[Tensor, "batch compressed compressed"]:
         mask = valid_mask.unsqueeze(-1).to(dtype=peak_embeddings.dtype)
         left = self.left_proj(peak_embeddings) * mask
         right = self.right_proj(peak_embeddings) * mask
@@ -37,18 +38,18 @@ class CovariancePool(nn.Module):
 
     def forward(
         self,
-        peak_embeddings: torch.Tensor,
-        valid_mask: torch.Tensor,
-    ) -> torch.Tensor:
+        peak_embeddings: Float[Tensor, "batch peaks dim"],
+        valid_mask: Bool[Tensor, "batch peaks"],
+    ) -> Float[Tensor, "batch flattened_covariance"]:
         with torch.autocast(device_type=peak_embeddings.device.type, enabled=False):
             covariance = self.covariance_matrix(peak_embeddings.float(), valid_mask)
         return covariance.flatten(start_dim=1)
 
     def reconstruction_loss(
         self,
-        peak_embeddings: torch.Tensor,
-        valid_mask: torch.Tensor,
-    ) -> torch.Tensor:
+        peak_embeddings: Float[Tensor, "batch peaks dim"],
+        valid_mask: Bool[Tensor, "batch peaks"],
+    ) -> Float[Tensor, ""]:
         with torch.autocast(device_type=peak_embeddings.device.type, enabled=False):
             x = peak_embeddings.detach().float()
             mask = valid_mask.unsqueeze(-1).to(dtype=x.dtype)

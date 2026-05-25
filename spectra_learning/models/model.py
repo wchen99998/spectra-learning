@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Literal, overload
 
 import torch
+from torch import Tensor
 from torch import nn
 
 from spectra_learning.models.ema import EMATeacherMixin
@@ -90,25 +91,28 @@ class PeakSetJEPA(
     @overload
     def forward(
         self,
-        augmented_batch: dict[str, torch.Tensor],
+        augmented_batch: dict[str, Tensor],
         return_collapse_data: Literal[False] = False,
         covariance_pooler: CovariancePooler | None = None,
-    ) -> dict[str, torch.Tensor]: ...
+    ) -> dict[str, Tensor]: ...
 
     @overload
     def forward(
         self,
-        augmented_batch: dict[str, torch.Tensor],
+        augmented_batch: dict[str, Tensor],
         return_collapse_data: Literal[True],
         covariance_pooler: CovariancePooler | None = None,
-    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]: ...
+    ) -> tuple[dict[str, Tensor], dict[str, Tensor]]: ...
 
     def forward(
         self,
-        augmented_batch: dict[str, torch.Tensor],
+        augmented_batch: dict[str, Tensor],
         return_collapse_data: bool = False,
         covariance_pooler: CovariancePooler | None = None,
-    ) -> dict[str, torch.Tensor] | tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    ) -> dict[str, Tensor] | tuple[dict[str, Tensor], dict[str, Tensor]]:
+        # augmented_batch tensors:
+        # peak_mz/peak_intensity/context_mask/peak_valid_mask: [B, N]
+        # target_masks: [B, K, N], precursor_mz: [B] when present.
         if covariance_pooler is None:
             if return_collapse_data:
                 return self.forward_augmented(

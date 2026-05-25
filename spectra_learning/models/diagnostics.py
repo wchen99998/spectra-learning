@@ -2,12 +2,18 @@ import math
 
 import torch
 import torch.nn.functional as F
+from jaxtyping import Bool, Float
+from torch import Tensor
 
 
 def _masked_flatten(
-    emb: torch.Tensor,
-    valid_mask: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    emb: Float[Tensor, "*batch dim"],
+    valid_mask: Bool[Tensor, "*batch"],
+) -> tuple[
+    Float[Tensor, "tokens dim"],
+    Float[Tensor, "tokens"],
+    Float[Tensor, "dim"],
+]:
     flat = emb.float().reshape(-1, emb.shape[-1])
     weights = valid_mask.reshape(-1).float()
     count = weights.sum().clamp_min(1.0)
@@ -17,9 +23,14 @@ def _masked_flatten(
 
 
 def _weighted_covariance(
-    emb: torch.Tensor,
-    valid_mask: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    emb: Float[Tensor, "*batch dim"],
+    valid_mask: Bool[Tensor, "*batch"],
+) -> tuple[
+    Float[Tensor, "dim dim"],
+    Float[Tensor, "tokens dim"],
+    Float[Tensor, "tokens"],
+    Float[Tensor, "dim"],
+]:
     flat, weights, mean = _masked_flatten(emb, valid_mask)
     centered = flat - mean
     with torch.autocast(device_type=emb.device.type, enabled=False):
@@ -32,10 +43,10 @@ def _weighted_covariance(
 
 
 def _sample_for_pairwise_cosine(
-    flat: torch.Tensor,
-    weights: torch.Tensor,
+    flat: Float[Tensor, "tokens dim"],
+    weights: Float[Tensor, "tokens"],
     max_samples: int = 1024,
-) -> torch.Tensor:
+) -> Float[Tensor, "sampled_tokens dim"]:
     valid = flat[weights > 0]
     if valid.shape[0] <= max_samples:
         return valid
@@ -44,9 +55,9 @@ def _sample_for_pairwise_cosine(
 
 
 def _pairwise_cosine_stats(
-    flat: torch.Tensor,
-    weights: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    flat: Float[Tensor, "tokens dim"],
+    weights: Float[Tensor, "tokens"],
+) -> tuple[Float[Tensor, ""], Float[Tensor, ""]]:
     sample = _sample_for_pairwise_cosine(flat, weights)
     normed = F.normalize(sample, dim=-1)
     cos = normed @ normed.transpose(0, 1)
@@ -56,9 +67,9 @@ def _pairwise_cosine_stats(
 
 
 def _embedding_geometry_metrics(
-    emb: torch.Tensor,
-    valid_mask: torch.Tensor,
-) -> dict[str, torch.Tensor]:
+    emb: Float[Tensor, "*batch dim"],
+    valid_mask: Bool[Tensor, "*batch"],
+) -> dict[str, Tensor]:
     cov, flat, weights, mean = _weighted_covariance(emb, valid_mask)
     var = cov.diagonal()
     trace = var.sum()
@@ -89,16 +100,16 @@ def _embedding_geometry_metrics(
 
 def _prefix_metrics(
     prefix: str,
-    metrics: dict[str, torch.Tensor],
-) -> dict[str, torch.Tensor]:
+    metrics: dict[str, Tensor],
+) -> dict[str, Tensor]:
     return {f"{prefix}/{key}": value for key, value in metrics.items()}
 
 
 def _token_prediction_r2(
-    prediction: torch.Tensor,
-    target: torch.Tensor,
-    valid_mask: torch.Tensor,
-) -> torch.Tensor:
+    prediction: Float[Tensor, "batch views peaks dim"],
+    target: Float[Tensor, "batch views peaks dim"],
+    valid_mask: Bool[Tensor, "batch views peaks"],
+) -> Float[Tensor, ""]:
     weights = valid_mask.unsqueeze(-1).float()
     count = weights.sum().clamp_min(1.0)
     mean = (target.float() * weights).sum(dim=(0, 1, 2)) / count
@@ -108,10 +119,10 @@ def _token_prediction_r2(
 
 
 def _pooled_prediction_r2(
-    prediction: torch.Tensor,
-    target: torch.Tensor,
-    valid_mask: torch.Tensor,
-) -> torch.Tensor:
+    prediction: Float[Tensor, "batch views peaks dim"],
+    target: Float[Tensor, "batch views peaks dim"],
+    valid_mask: Bool[Tensor, "batch views peaks"],
+) -> Float[Tensor, ""]:
     weights = valid_mask.unsqueeze(-1).float()
     denom = weights.sum(dim=2).clamp_min(1.0)
     pooled_prediction = (prediction.float() * weights).sum(dim=2) / denom
@@ -123,9 +134,9 @@ def _pooled_prediction_r2(
 
 
 def _within_spectrum_pairwise_cosine(
-    emb: torch.Tensor,
-    valid_mask: torch.Tensor,
-) -> torch.Tensor:
+    emb: Float[Tensor, "batch peaks dim"],
+    valid_mask: Bool[Tensor, "batch peaks"],
+) -> Float[Tensor, ""]:
     normed = F.normalize(emb.float(), dim=-1)
     cos = normed @ normed.transpose(1, 2)
     pair_mask = valid_mask.unsqueeze(1) & valid_mask.unsqueeze(2)
@@ -137,20 +148,20 @@ def _within_spectrum_pairwise_cosine(
 
 def _collapse_diagnostics(
     *,
-    teacher_peak_emb: torch.Tensor,
-    teacher_cls_emb: torch.Tensor,
-    context_emb: torch.Tensor,
-    context_mask: torch.Tensor,
-    peak_valid_mask: torch.Tensor,
-    target_masks: torch.Tensor,
-    teacher_target_features: torch.Tensor,
-    teacher_target_features_normalized: torch.Tensor,
-    teacher_targets: torch.Tensor,
-    predictor_output_features: torch.Tensor,
-    predictor_output: torch.Tensor,
-    pooled_mean: torch.Tensor,
-) -> dict[str, torch.Tensor]:
-    metrics: dict[str, torch.Tensor] = {}
+    teacher_peak_emb: Float[Tensor, "batch peaks dim"],
+    teacher_cls_emb: Float[Tensor, "batch dim"],
+    context_emb: Float[Tensor, "batch peaks dim"],
+    context_mask: Bool[Tensor, "batch peaks"],
+    peak_valid_mask: Bool[Tensor, "batch peaks"],
+    target_masks: Bool[Tensor, "batch views peaks"],
+    teacher_target_features: Float[Tensor, "batch peaks target_dim"],
+    teacher_target_features_normalized: Float[Tensor, "batch peaks target_dim"],
+    teacher_targets: Float[Tensor, "batch peaks target_dim"],
+    predictor_output_features: Float[Tensor, "batch views peaks target_dim"],
+    predictor_output: Float[Tensor, "batch views peaks target_dim"],
+    pooled_mean: Float[Tensor, "batch dim"],
+) -> dict[str, Tensor]:
+    metrics: dict[str, Tensor] = {}
     metrics.update(
         _prefix_metrics(
             "repr/token",
