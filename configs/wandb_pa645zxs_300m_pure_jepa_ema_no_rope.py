@@ -50,15 +50,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.norm_type = "layernorm"
     cfg.use_precursor_token = True
 
-    # Spectral bias
-    cfg.spectral_bias_relative_kind = "none"
-    cfg.spectral_bias_use_precursor = False
-    cfg.spectral_bias_use_intensity = False
-    cfg.spectral_bias_num_freqs = 16
-    cfg.spectral_bias_fourier_x_min = 0.1
-    cfg.spectral_bias_fourier_x_max = 1000.0
-    cfg.spectral_bias_init_std = 0.0
-
     # Masked latent predictor
     cfg.predictor_dim = 512
     cfg.predictor_dropout = 0.1

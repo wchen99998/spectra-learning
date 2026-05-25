@@ -4,7 +4,6 @@ from spectra_learning.models.model import PeakSetSIGReg
 from spectra_learning.models.peak_features import FourierFeatures, PeakFeatureEmbedder
 from spectra_learning.models.pooling import CovariancePool
 from spectra_learning.models.settings import PeakSetSIGRegSettings
-from spectra_learning.models.spectral_attention_bias import SpectralGraphormerBias
 from spectra_learning.models.transformer import (
     Attention,
     CrossAttention,
@@ -25,7 +24,6 @@ __all__ = [
     "PeakSetSIGRegSettings",
     "SIGReg",
     "SlotwiseSIGReg",
-    "SpectralGraphormerBias",
     "TransformerBlock",
     "create_visible_attention_mask",
 ]

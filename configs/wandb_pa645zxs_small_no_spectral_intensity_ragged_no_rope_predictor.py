@@ -19,7 +19,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_intensity_aware_tail_target_mix = 1.0
     cfg.jepa_intensity_aware_local_gap_probability = 0.0
     cfg.run_name_suffix = (
-        "mae-no-spectral-bias-intensity-aware-ragged-no-rope-predictor-cls-no-mz-warp-1view-ctx70-tgt30"
+        "mae-intensity-aware-ragged-no-rope-predictor-cls-no-mz-warp-1view-ctx70-tgt30"
     )
 
     return cfg

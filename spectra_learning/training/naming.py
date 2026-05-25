@@ -19,7 +19,6 @@ def auto_run_name(config: Any) -> str:
     parts.extend(_training_mode_parts(config))
     parts.extend(_architecture_parts(config))
     parts.extend(_optimization_parts(config))
-    parts.extend(_spectral_bias_parts(config))
     parts.extend(_target_parts(config))
     parts.extend(_regularizer_parts(config))
     parts.extend(_ema_parts(config))
@@ -91,22 +90,6 @@ def _optimization_parts(config: Any) -> list[str]:
     warmup = int(config.get("warmup_steps", 0))
     if warmup > 0:
         parts.append(f"wu{warmup // 1000}k")
-    return parts
-
-
-def _spectral_bias_parts(config: Any) -> list[str]:
-    parts: list[str] = []
-    kind = str(config.get("spectral_bias_relative_kind", "none")).lower()
-    use_precursor = bool(config.get("spectral_bias_use_precursor", False))
-    use_intensity = bool(config.get("spectral_bias_use_intensity", False))
-    if kind in ("", "none", "false", "off") and not use_precursor and not use_intensity:
-        return parts
-    parts.append(f"sb{kind or 'none'}")
-    if use_precursor:
-        parts.append("sbprec")
-    if use_intensity:
-        parts.append("sbint")
-    parts.append(f"sbf{int(config.get('spectral_bias_num_freqs', 128))}")
     return parts
 
 

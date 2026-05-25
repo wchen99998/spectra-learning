@@ -53,24 +53,6 @@ class PeakSetSIGRegSettings:
     encoder_use_cls_token: bool = True
     encoder_num_cls_tokens: int | None = None
     use_precursor_token: bool = False
-    spectral_bias_relative_kind: str = "none"
-    spectral_bias_use_precursor: bool = False
-    spectral_bias_use_intensity: bool = False
-    spectral_bias_num_freqs: int = 128
-    spectral_bias_fourier_strategy: str = "log_spaced"
-    spectral_bias_fourier_x_min: float = 3e-3
-    spectral_bias_fourier_x_max: float = 1000.0
-    spectral_bias_fourier_sigma: float = 10.0
-    spectral_bias_fourier_trainable: bool = False
-    spectral_bias_mass_scale: float = PEAK_MZ_MAX
-    spectral_bias_precursor_scale: float = PEAK_MZ_MAX
-    spectral_bias_rbf_num_basis: int = 64
-    spectral_bias_rbf_delta_min: float = -PEAK_MZ_MAX
-    spectral_bias_rbf_delta_max: float = PEAK_MZ_MAX
-    spectral_bias_rbf_use_absolute_delta: bool = False
-    spectral_bias_intensity_hidden_dim: int = 16
-    spectral_bias_init_std: float = 0.0
-    spectral_bias_clip: float | None = None
     num_peaks: int = 64
     encoder_num_register_tokens: int = 0
     predictor_num_register_tokens: int = 0
@@ -94,7 +76,7 @@ class PeakSetSIGRegSettings:
         _apply_derived_defaults(values, config)
         for name, cast in SETTING_CASTS.items():
             values[name] = cast(_config_get(config, name, values[name]))
-        _apply_dependent_defaults(values, config)
+        _apply_dependent_defaults(values)
         return cls(**values)
 
     @classmethod
@@ -116,42 +98,11 @@ def _default_values(settings: PeakSetSIGRegSettings) -> dict[str, Any]:
 
 def _apply_derived_defaults(values: dict[str, Any], config: Any) -> None:
     peak_mz_max = float(_config_get(config, "peak_mz_max", PEAK_MZ_MAX))
-    precursor_mz_max = float(_config_get(config, "max_precursor_mz", PEAK_MZ_MAX))
     values["encoder_fourier_input_scale"] = peak_mz_max
     values["jepa_mae_mz_max"] = peak_mz_max
-    values["spectral_bias_precursor_scale"] = precursor_mz_max
-    values["spectral_bias_rbf_delta_min"] = -precursor_mz_max
-    values["spectral_bias_rbf_delta_max"] = precursor_mz_max
-    values["spectral_bias_num_freqs"] = _config_get(
-        config,
-        "encoder_fourier_num_freqs",
-        values["spectral_bias_num_freqs"],
-    )
-    values["spectral_bias_fourier_strategy"] = _config_get(
-        config,
-        "encoder_fourier_strategy",
-        values["spectral_bias_fourier_strategy"],
-    )
-    values["spectral_bias_fourier_x_min"] = _config_get(
-        config,
-        "encoder_fourier_x_min",
-        values["spectral_bias_fourier_x_min"],
-    )
-    values["spectral_bias_fourier_x_max"] = _config_get(
-        config,
-        "encoder_fourier_x_max",
-        values["spectral_bias_fourier_x_max"],
-    )
-    values["spectral_bias_fourier_sigma"] = _config_get(
-        config,
-        "encoder_fourier_sigma",
-        values["spectral_bias_fourier_sigma"],
-    )
 
 
-def _apply_dependent_defaults(values: dict[str, Any], config: Any) -> None:
-    if not _config_has(config, "spectral_bias_mass_scale"):
-        values["spectral_bias_mass_scale"] = values["encoder_fourier_input_scale"]
+def _apply_dependent_defaults(values: dict[str, Any]) -> None:
     if values["encoder_num_cls_tokens"] is None:
         values["encoder_num_cls_tokens"] = int(values["encoder_use_cls_token"])
     else:
@@ -162,12 +113,6 @@ def _config_get(config: Any, key: str, default: Any) -> Any:
     if hasattr(config, "get"):
         return config.get(key, default)
     return getattr(config, key, default)
-
-
-def _config_has(config: Any, key: str) -> bool:
-    if hasattr(config, "__contains__") and key in config:
-        return True
-    return hasattr(config, key)
 
 
 def _optional_int(value: Any) -> int | None:
@@ -227,24 +172,6 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "encoder_use_cls_token": bool,
     "encoder_num_cls_tokens": _optional_int,
     "use_precursor_token": bool,
-    "spectral_bias_relative_kind": str,
-    "spectral_bias_use_precursor": bool,
-    "spectral_bias_use_intensity": bool,
-    "spectral_bias_num_freqs": int,
-    "spectral_bias_fourier_strategy": str,
-    "spectral_bias_fourier_x_min": float,
-    "spectral_bias_fourier_x_max": float,
-    "spectral_bias_fourier_sigma": float,
-    "spectral_bias_fourier_trainable": bool,
-    "spectral_bias_mass_scale": float,
-    "spectral_bias_precursor_scale": float,
-    "spectral_bias_rbf_num_basis": int,
-    "spectral_bias_rbf_delta_min": float,
-    "spectral_bias_rbf_delta_max": float,
-    "spectral_bias_rbf_use_absolute_delta": bool,
-    "spectral_bias_intensity_hidden_dim": int,
-    "spectral_bias_init_std": float,
-    "spectral_bias_clip": _optional_float,
     "num_peaks": int,
     "encoder_num_register_tokens": int,
     "predictor_num_register_tokens": int,
