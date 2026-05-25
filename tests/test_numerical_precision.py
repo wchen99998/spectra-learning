@@ -6,7 +6,6 @@ from spectra_learning.models.peak_features import FourierFeatures, PeakFeatureEm
 
 def test_raw_fourier_features_are_autocast_sensitive():
     fourier = FourierFeatures(
-        strategy="log_spaced",
         x_min=2e-4,
         x_max=1.0,
         num_freqs=32,
@@ -28,7 +27,6 @@ def test_peak_feature_embedder_runs_fourier_stem_in_fp32_under_autocast():
     embedder = PeakFeatureEmbedder(
         model_dim=32,
         hidden_dim=16,
-        fourier_strategy="log_spaced",
         fourier_x_min=2e-4,
         fourier_x_max=1.0,
         fourier_num_freqs=32,

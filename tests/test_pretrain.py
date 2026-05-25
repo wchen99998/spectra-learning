@@ -66,21 +66,20 @@ class DataPipelineContractTests(unittest.TestCase):
 
 
 class FourierFeatureTests(unittest.TestCase):
-    def test_log_spaced_both_funcs_preserves_feature_width(self):
+    def test_log_spaced_fourier_preserves_feature_width_without_trainable_params(self):
         fourier = FourierFeatures(
-            strategy="log_spaced",
             x_min=3e-3,
             x_max=1000.0,
-            funcs="both",
             num_freqs=256,
         )
         self.assertEqual(fourier.num_features(), 512)
+        self.assertEqual(list(fourier.parameters()), [])
+        self.assertFalse(fourier.b.requires_grad)
 
     def test_peak_embedder_fourier_branch_uses_configured_input_scale(self):
         embedder = PeakFeatureEmbedder(
             model_dim=32,
             hidden_dim=16,
-            fourier_strategy="log_spaced",
             fourier_x_min=3e-3,
             fourier_x_max=1000.0,
             fourier_num_freqs=8,
@@ -100,7 +99,6 @@ class FourierFeatureTests(unittest.TestCase):
             hidden_dim=16,
             fourier_mlp_hidden_dim=64,
             fourier_mlp_num_layers=4,
-            fourier_strategy="log_spaced",
             fourier_x_min=3e-3,
             fourier_x_max=1000.0,
             fourier_num_freqs=8,
@@ -119,7 +117,6 @@ class FourierFeatureTests(unittest.TestCase):
             hidden_dim=16,
             fourier_mlp_hidden_dim=64,
             fourier_mlp_num_layers=4,
-            fourier_strategy="log_spaced",
             fourier_x_min=3e-3,
             fourier_x_max=1000.0,
             fourier_num_freqs=8,
@@ -145,7 +142,6 @@ class FourierFeatureTests(unittest.TestCase):
         embedder = PeakFeatureEmbedder(
             model_dim=32,
             hidden_dim=16,
-            fourier_strategy="log_spaced",
             fourier_x_min=3e-3,
             fourier_x_max=1000.0,
             fourier_num_freqs=8,

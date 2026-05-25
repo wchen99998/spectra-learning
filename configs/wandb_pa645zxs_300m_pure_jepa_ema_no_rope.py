@@ -33,15 +33,10 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_use_position_embedding = False
     cfg.encoder_apply_final_norm = True
     cfg.encoder_use_fourier_features = True
-    cfg.encoder_fourier_funcs = "both"
     cfg.encoder_fourier_input_scale = 1000
     cfg.encoder_fourier_mlp_hidden_dim = 1024
     cfg.encoder_fourier_mlp_num_layers = 4
     cfg.encoder_fourier_num_freqs = 64
-    cfg.encoder_fourier_sigma = 10
-    cfg.encoder_fourier_strategy = "log_spaced"
-    cfg.encoder_fourier_trainable = True
-    cfg.encoder_fourier_warp_enabled = False
     cfg.encoder_fourier_x_max = 1000
     cfg.encoder_fourier_x_min = 0.003
     cfg.feature_mlp_hidden_dim = 2048

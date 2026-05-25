@@ -17,13 +17,9 @@ class PeakSetJEPASettings:
     feature_mlp_hidden_dim: int = 128
     encoder_fourier_mlp_hidden_dim: int | None = None
     encoder_fourier_mlp_num_layers: int = 2
-    encoder_fourier_strategy: str = "log_spaced"
     encoder_fourier_x_min: float = 3e-3
     encoder_fourier_x_max: float = 1000.0
-    encoder_fourier_funcs: str = "both"
     encoder_fourier_num_freqs: int = 256
-    encoder_fourier_sigma: float = 10.0
-    encoder_fourier_trainable: bool = False
     encoder_fourier_input_scale: float = PEAK_MZ_MAX
     encoder_use_fourier_features: bool = True
     masked_token_loss_weight: float = 0.0
@@ -140,13 +136,9 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "feature_mlp_hidden_dim": int,
     "encoder_fourier_mlp_hidden_dim": _optional_int,
     "encoder_fourier_mlp_num_layers": int,
-    "encoder_fourier_strategy": str,
     "encoder_fourier_x_min": float,
     "encoder_fourier_x_max": float,
-    "encoder_fourier_funcs": str,
     "encoder_fourier_num_freqs": int,
-    "encoder_fourier_sigma": float,
-    "encoder_fourier_trainable": bool,
     "encoder_fourier_input_scale": float,
     "encoder_use_fourier_features": bool,
     "masked_token_loss_weight": float,

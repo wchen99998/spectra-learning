@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from math import ceil, log10
+from math import log10
 
 import torch
 from torch import nn
@@ -11,58 +11,31 @@ from spectra_learning.data.spectra import PEAK_MZ_MAX
 class FourierFeatures(nn.Module):
     def __init__(
         self,
-        strategy: str = "log_spaced",
         x_min: float = 3e-3,
         x_max: float = 1000.0,
         *,
-        trainable: bool = False,
-        funcs: str = "both",
-        sigma: float = 10.0,
         num_freqs: int = 256,
     ) -> None:
         super().__init__()
-        assert strategy in {"random", "voronov_et_al", "lin_float_int", "log_spaced"}
-        assert funcs in {"both", "sin", "cos"}
         assert x_min > 0.0
         assert x_max > x_min
 
-        self.funcs = funcs
-        self.strategy = strategy
-        self.trainable = trainable
         self.num_freqs = num_freqs
 
-        if strategy == "random":
-            b = torch.randn(num_freqs, dtype=torch.float32) * sigma
-        elif strategy in {"log_spaced", "voronov_et_al"}:
-            wavelengths = torch.logspace(
-                start=log10(x_min),
-                end=log10(x_max),
-                steps=num_freqs,
-                dtype=torch.float32,
-            )
-            b = 1.0 / wavelengths
-        else:
-            periods = torch.tensor(
-                [x_min * i for i in range(2, ceil(1.0 / x_min), 2)]
-                + [float(i) for i in range(2, ceil(x_max), 1)],
-                dtype=torch.float32,
-            )
-            if num_freqs < periods.numel():
-                idx = torch.linspace(0, periods.numel() - 1, steps=num_freqs)
-                periods = periods[idx.round().to(torch.long)]
-            b = 1.0 / periods
-        self.b = nn.Parameter(b.unsqueeze(0), requires_grad=trainable)
+        wavelengths = torch.logspace(
+            start=log10(x_min),
+            end=log10(x_max),
+            steps=num_freqs,
+            dtype=torch.float32,
+        )
+        self.register_buffer("b", (1.0 / wavelengths).unsqueeze(0))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         angles = 2 * torch.pi * x @ self.b
-        if self.funcs == "both":
-            return torch.cat((torch.cos(angles), torch.sin(angles)), dim=-1)
-        if self.funcs == "cos":
-            return torch.cos(angles)
-        return torch.sin(angles)
+        return torch.cat((torch.cos(angles), torch.sin(angles)), dim=-1)
 
     def num_features(self) -> int:
-        return self.b.shape[1] if self.funcs != "both" else 2 * self.b.shape[1]
+        return 2 * self.b.shape[1]
 
 
 def _build_mlp(
@@ -92,13 +65,9 @@ class PeakFeatureEmbedder(nn.Module):
         hidden_dim: int,
         fourier_mlp_hidden_dim: int | None = None,
         fourier_mlp_num_layers: int = 2,
-        fourier_strategy: str = "log_spaced",
         fourier_x_min: float = 3e-3,
         fourier_x_max: float = 1000.0,
-        fourier_funcs: str = "both",
         fourier_num_freqs: int = 256,
-        fourier_sigma: float = 10.0,
-        fourier_trainable: bool = False,
         fourier_input_scale: float = PEAK_MZ_MAX,
         use_fourier_features: bool = True,
     ) -> None:
@@ -113,12 +82,8 @@ class PeakFeatureEmbedder(nn.Module):
             fourier_dim = model_dim // 2
             raw_dim = model_dim - fourier_dim
             self.mz_fourier = FourierFeatures(
-                strategy=fourier_strategy,
                 x_min=fourier_x_min,
                 x_max=fourier_x_max,
-                trainable=fourier_trainable,
-                funcs=fourier_funcs,
-                sigma=fourier_sigma,
                 num_freqs=fourier_num_freqs,
             )
             self.fourier_ffn = _build_mlp(

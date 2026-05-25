@@ -188,13 +188,9 @@ def _build_peak_feature_embedder(cfg: PeakSetJEPASettings) -> PeakFeatureEmbedde
         hidden_dim=cfg.feature_mlp_hidden_dim,
         fourier_mlp_hidden_dim=cfg.encoder_fourier_mlp_hidden_dim,
         fourier_mlp_num_layers=cfg.encoder_fourier_mlp_num_layers,
-        fourier_strategy=cfg.encoder_fourier_strategy,
         fourier_x_min=cfg.encoder_fourier_x_min,
         fourier_x_max=cfg.encoder_fourier_x_max,
-        fourier_funcs=cfg.encoder_fourier_funcs,
         fourier_num_freqs=cfg.encoder_fourier_num_freqs,
-        fourier_sigma=cfg.encoder_fourier_sigma,
-        fourier_trainable=cfg.encoder_fourier_trainable,
         fourier_input_scale=cfg.encoder_fourier_input_scale,
         use_fourier_features=cfg.encoder_use_fourier_features,
     )
