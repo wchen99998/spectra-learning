@@ -527,6 +527,12 @@ class PairformerBlock(nn.Module):
             if refresh_pair
             else None
         )
+        self.refresh_pair_gate_norm = (
+            _build_norm(pair_dim, eps=norm_eps) if refresh_pair else None
+        )
+        self.refresh_pair_gate = nn.Linear(pair_dim, pair_dim, bias=False) if refresh_pair else None
+        if refresh_pair:
+            _init_linear(self.refresh_pair_gate, gate=True)
         self.tri_mul_out = TriangleMultiplicativeUpdate(
             pair_dim,
             direction="outgoing",
@@ -589,9 +595,11 @@ class PairformerBlock(nn.Module):
     ]:
         pair_mask = _pair_mask(peak_mask)
         if self.refresh_pair is not None:
-            pair = pair + self.drop(
-                self.refresh_pair(single[:, : peak_mask.shape[1]], pair_mask)
+            refresh = self.refresh_pair(single[:, : peak_mask.shape[1]], pair_mask)
+            gate = torch.sigmoid(
+                self.refresh_pair_gate(self.refresh_pair_gate_norm(pair))
             )
+            pair = pair + self.drop(gate * refresh)
             pair = pair * pair_mask.unsqueeze(-1).to(dtype=pair.dtype)
         pair = pair + self.drop(self.tri_mul_out(pair, pair_mask))
         pair = pair + self.drop(self.tri_mul_in(pair, pair_mask))

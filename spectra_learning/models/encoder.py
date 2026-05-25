@@ -29,6 +29,7 @@ class PeakSetEncoder(nn.Module):
         pair_feature_hidden_dim: int = 128,
         pairformer_dropout: float = 0.0,
         pairformer_refresh_pair: bool = True,
+        pairformer_refresh_pair_layers: list[int] | tuple[int, ...] | None = None,
         pairformer_use_cuequivariance: bool = True,
         pairformer_mz_scale: float = 1000.0,
         pairformer_precursor_mz_scale: float = 1000.0,
@@ -49,6 +50,11 @@ class PeakSetEncoder(nn.Module):
         )
         pair_dim = model_dim if pair_dim is None else pair_dim
         pair_num_heads = num_heads if pair_num_heads is None else pair_num_heads
+        refresh_pair_layers = (
+            None
+            if pairformer_refresh_pair_layers is None
+            else set(pairformer_refresh_pair_layers)
+        )
         self.pair_embedder = PairFeatureEmbedder(
             single_dim=model_dim,
             pair_dim=pair_dim,
@@ -73,10 +79,14 @@ class PeakSetEncoder(nn.Module):
                     pair_feature_hidden_dim=pair_feature_hidden_dim,
                     norm_eps=norm_eps,
                     dropout=pairformer_dropout,
-                    refresh_pair=pairformer_refresh_pair,
+                    refresh_pair=pairformer_refresh_pair
+                    and (
+                        refresh_pair_layers is None
+                        or block_idx in refresh_pair_layers
+                    ),
                     use_cuequivariance=pairformer_use_cuequivariance,
                 )
-                for _ in range(self.num_layers)
+                for block_idx in range(1, self.num_layers + 1)
             ]
         )
         self.final_norm = (
