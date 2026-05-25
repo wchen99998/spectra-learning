@@ -68,9 +68,7 @@ class ForwardMixin:
         (
             teacher_target_features,
             teacher_peak_emb,
-            teacher_cls_emb,
             context_emb,
-            context_cls_emb,
         ) = self._encode_augmented_teacher_and_context(
             peak_mz,
             peak_intensity,
@@ -83,7 +81,6 @@ class ForwardMixin:
             context_emb,
             context_mask,
             target_masks,
-            context_cls_emb=context_cls_emb,
         )
         teacher_target_features_normalized = self._apply_jepa_target_normalization(
             teacher_target_features.detach()
@@ -122,7 +119,6 @@ class ForwardMixin:
             pooled_mean = self.pool(teacher_peak_emb, peak_valid_mask)
             collapse_data = {
                 "teacher_peak_emb": teacher_peak_emb.detach(),
-                "teacher_cls_emb": teacher_cls_emb.detach(),
                 "context_emb": context_emb.detach(),
                 "context_mask": context_mask.detach(),
                 "peak_valid_mask": peak_valid_mask.detach(),
@@ -195,28 +191,20 @@ class ForwardMixin:
             visible_mask=context_visible_mask,
             precursor_mz=precursor_mz,
         )
-        context_emb, context_cls_emb = self._split_encoder_output(
-            self.encoder,
-            context_encoded,
-            peak_valid_mask,
-        )
         predictor_output_features, predictor_output = self._predict_augmented_targets(
-            context_emb,
+            context_encoded,
             context_mask,
             target_masks,
-            context_cls_emb=(
-                context_cls_emb if self.encoder.use_cls_token else None
-            ),
         )
         mae_term, mae_metrics = self._mae_metrics(
             predictor_output,
             peak_mz,
             peak_intensity,
             target_masks,
-            context_emb,
+            context_encoded,
         )
         covariance_term, covariance_metrics = self._covariance_pooling_metrics(
-            context_emb,
+            context_encoded,
             context_visible_mask,
             covariance_pooler,
         )
@@ -236,7 +224,7 @@ class ForwardMixin:
     def encode(
         self: Any,
         batch: dict[str, Tensor],
-    ) -> Float[Tensor, "batch dim"] | Float[Tensor, "batch cls_tokens dim"]:
+    ) -> Float[Tensor, "batch dim"]:
         mz, intensity, valid = (
             batch["peak_mz"],
             batch["peak_intensity"],
@@ -249,5 +237,4 @@ class ForwardMixin:
             visible_mask=valid,
             precursor_mz=batch.get("precursor_mz", None),
         )
-        peak_x, cls_x = self._split_encoder_output(self.encoder, encoded, valid)
-        return cls_x
+        return self.pool(encoded, valid)

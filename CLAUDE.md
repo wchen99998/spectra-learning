@@ -38,7 +38,7 @@ python input_pipeline.py configs/gems_a_dataset.py
 1. Data flows from `GemsNativeDataModule`, which loads native GeMS shard artifacts and applies peak preprocessing on the fly.
 2. The training collator produces masked-context JEPA batches with `peak_*`, `context_mask`, and `target_masks`.
 3. The compiled forward pass (`torch.compile` with `reduce-overhead` + CUDA graphs) runs the batch through encoder -> masked latent predictor -> JEPA losses.
-4. During training, `run_msg_probe` trains fixed linear probes on frozen `mean + cls` readouts.
+4. During training, `run_msg_probe` trains fixed linear probes on frozen mean-pooled readouts.
 
 ### Model (PeakSetJEPA in `models/model.py`)
 

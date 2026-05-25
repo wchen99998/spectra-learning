@@ -26,11 +26,8 @@ def get_config() -> config_dict.ConfigDict:
     # Encoder
     cfg.num_peaks = 64
     cfg.model_dim = 512
-    cfg.encoder_use_cls_token = True
-    cfg.encoder_num_cls_tokens = 3
     cfg.encoder_num_layers = 14
     cfg.encoder_num_heads = 8
-    cfg.encoder_num_register_tokens = 2
     cfg.encoder_use_position_embedding = False
     cfg.encoder_apply_final_norm = True
     cfg.encoder_use_fourier_features = True
@@ -57,7 +54,6 @@ def get_config() -> config_dict.ConfigDict:
     # Masked latent predictor
     cfg.predictor_dim = 256
     cfg.predictor_dropout = 0.1
-    cfg.predictor_num_register_tokens = 0
     cfg.predictor_apply_final_norm = True
     cfg.predictor_use_rope = False
     cfg.predictor_learning_rate_ratio = 1.0
@@ -160,7 +156,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.enable_wandb = True
     cfg.wandb_project = "jepa-debugging"
     cfg.run_name_suffix = (
-        "mae-intensity-aware-ragged-no-rope-predictor-cls-no-mz-warp-1view-ctx70-tgt30"
+        "mae-intensity-aware-ragged-no-rope-predictor-no-mz-warp-1view-ctx70-tgt30"
     )
 
     return cfg

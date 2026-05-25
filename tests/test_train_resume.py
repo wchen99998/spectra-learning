@@ -925,22 +925,6 @@ def test_load_resume_model_state_rejects_missing_ema_target_projector():
         load_resume_model_state(restored, resume_state)
 
 
-def test_load_resume_model_state_rejects_removed_special_tokens():
-    model = _small_model(
-        encoder_num_register_tokens=2,
-        predictor_num_register_tokens=2,
-    )
-    resume_state = model.state_dict()
-
-    restored = _small_model(
-        encoder_use_cls_token=False,
-        encoder_num_register_tokens=0,
-        predictor_num_register_tokens=0,
-    )
-    with pytest.raises(RuntimeError, match="Unexpected key"):
-        load_resume_model_state(restored, resume_state)
-
-
 def test_wandb_logger_defines_msg_probe_global_step(monkeypatch, tmp_path: Path):
     class FakeRun:
         def __init__(self) -> None:

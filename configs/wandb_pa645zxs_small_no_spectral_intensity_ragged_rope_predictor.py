@@ -9,7 +9,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg = get_ragged_config()
 
     cfg.masked_token_input_mode = "latent_token"
-    cfg.encoder_use_cls_token = True
     cfg.run_name_suffix = "mae-intensity-aware-ragged-predictor"
 
     return cfg

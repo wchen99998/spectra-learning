@@ -104,9 +104,6 @@ class ObjectiveMixin:
         context_emb: Float[Tensor, "batch peaks dim"],
         context_mask: Bool[Tensor, "batch peaks"],
         target_masks: Bool[Tensor, "batch views peaks"],
-        context_cls_emb: (
-            Float[Tensor, "batch dim"] | Float[Tensor, "batch cls_tokens dim"] | None
-        ) = None,
     ) -> tuple[
         Float[Tensor, "batch views peaks target_dim"],
         Float[Tensor, "batch views peaks target_dim"],
@@ -135,27 +132,6 @@ class ObjectiveMixin:
             num_target_blocks,
             num_peaks,
         )
-        if context_cls_emb is not None:
-            if context_cls_emb.ndim == 2:
-                context_cls_emb = context_cls_emb.unsqueeze(1)
-            cls_input = context_cls_emb[:, None, :, :].expand(
-                -1,
-                num_target_blocks,
-                -1,
-                -1,
-            )
-            predictor_input = torch.cat([predictor_input, cls_input], dim=2)
-            cls_visible_mask = torch.ones(
-                batch_size,
-                num_target_blocks,
-                context_cls_emb.shape[1],
-                device=context_mask.device,
-                dtype=torch.bool,
-            )
-            predictor_visible_mask = torch.cat(
-                [predictor_visible_mask, cls_visible_mask],
-                dim=2,
-            )
         predictor_visible_mask = predictor_visible_mask.reshape(
             batch_size * num_target_blocks,
             predictor_visible_mask.shape[2],

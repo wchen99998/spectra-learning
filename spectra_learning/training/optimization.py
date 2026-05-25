@@ -20,7 +20,6 @@ PREDICTOR_PARAM_PREFIXES = (
 )
 PREDICTOR_PARAM_NAMES = {
     "latent_mask_token",
-    "predictor_register_tokens",
 }
 
 def is_weight_decay_target(name: str, param: Any) -> bool:

@@ -9,12 +9,10 @@ def get_config() -> config_dict.ConfigDict:
     cfg = get_rope_predictor_config()
 
     cfg.predictor_use_rope = False
-    cfg.encoder_use_cls_token = True
     cfg.peak_ordering = "intensity"
     cfg.jepa_num_target_blocks = 1
-    cfg.encoder_num_cls_tokens = 3
     cfg.run_name_suffix = (
-        "mae-intensity-aware-ragged-no-rope-predictor-cls-no-mz-warp-1view-ctx70-tgt30"
+        "mae-intensity-aware-ragged-no-rope-predictor-no-mz-warp-1view-ctx70-tgt30"
     )
 
     return cfg

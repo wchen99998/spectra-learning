@@ -58,10 +58,7 @@ def _configure_dimensions(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
         cfg.predictor_dim if cfg.predictor_dim is not None else model.model_dim
     )
     model.encoder_num_layers = cfg.encoder_num_layers
-    model.encoder_num_cls_tokens = _num_cls_tokens(cfg)
-    model.encoder_use_cls_token = model.encoder_num_cls_tokens > 0
     model.norm_eps = cfg.norm_eps
-    model.predictor_num_register_tokens = cfg.predictor_num_register_tokens
     model.covariance_pooling_dim = cfg.covariance_pooling_dim
     model.train_covariance_pooling = (
         model.covariance_pooling_dim > 0 and cfg.train_covariance_pooling
@@ -149,16 +146,7 @@ def _num_peak_tokens(cfg: PeakSetJEPASettings) -> int:
     return cfg.num_peaks
 
 
-def _num_cls_tokens(cfg: PeakSetJEPASettings) -> int:
-    return (
-        int(cfg.encoder_use_cls_token)
-        if cfg.encoder_num_cls_tokens is None
-        else cfg.encoder_num_cls_tokens
-    )
-
-
 def _build_peak_set_encoder(cfg: PeakSetJEPASettings) -> PeakSetEncoder:
-    num_cls_tokens = _num_cls_tokens(cfg)
     return PeakSetEncoder(
         model_dim=cfg.model_dim,
         embedder=_build_peak_feature_embedder(cfg),
@@ -169,8 +157,6 @@ def _build_peak_set_encoder(cfg: PeakSetJEPASettings) -> PeakSetEncoder:
         use_position_embedding=cfg.encoder_use_position_embedding,
         apply_final_norm=cfg.encoder_apply_final_norm,
         num_peaks=_num_peak_tokens(cfg),
-        num_cls_tokens=num_cls_tokens,
-        num_register_tokens=cfg.encoder_num_register_tokens,
         pair_dim=cfg.pairformer_pair_dim,
         pair_num_heads=cfg.pairformer_pair_num_heads,
         pair_feature_hidden_dim=cfg.pairformer_pair_feature_hidden_dim,
@@ -252,20 +238,11 @@ def _build_predictor(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
     else:
         model.encoder_to_predictor_proj = nn.Identity()
 
-    model.num_predictor_input_tokens = (
-        model.num_peak_tokens + model.encoder_num_cls_tokens
-    )
+    model.num_predictor_input_tokens = model.num_peak_tokens
     model.predictor_position_embedding = _build_frozen_position_embedding(
         model.num_predictor_input_tokens,
         model.model_dim,
     )
-    if model.predictor_num_register_tokens > 0:
-        model.predictor_register_tokens = nn.Parameter(
-            torch.empty(model.predictor_num_register_tokens, model.model_dim)
-        )
-        nn.init.trunc_normal_(model.predictor_register_tokens, std=0.02)
-    else:
-        model.predictor_register_tokens = None
 
     model.masked_latent_predictor = _build_non_causal_blocks(
         dim=model.predictor_dim,

@@ -926,8 +926,7 @@ def _write_embedding_cache_split(
                 valid_mask=batch["peak_valid_mask"],
                 precursor_mz=batch.get("precursor_mz", None),
             )
-            token_embeddings, _ = model.encoder.split_peak_and_cls(encoded)
-            token_embeddings = _peak_tokens_only(token_embeddings, batch["peak_valid_mask"])
+            token_embeddings = _peak_tokens_only(encoded, batch["peak_valid_mask"])
         values = token_embeddings.detach().cpu().numpy().astype(np_dtype, copy=False)
         masks = batch["peak_valid_mask"].detach().cpu().numpy().astype(bool, copy=False)
         batch_labels = batch["label"].detach().cpu().numpy().astype(np.float32, copy=False)
@@ -1052,8 +1051,7 @@ def _build_checkpoint_feature_factory(
             valid_mask=batch["peak_valid_mask"],
             precursor_mz=batch.get("precursor_mz", None),
         )
-        peak_embeddings, _ = model.encoder.split_peak_and_cls(embeddings)
-        return _peak_tokens_only(peak_embeddings, batch["peak_valid_mask"])
+        return _peak_tokens_only(embeddings, batch["peak_valid_mask"])
 
     def build_feature_fn(training: bool):
         if train_covariance_pooler:

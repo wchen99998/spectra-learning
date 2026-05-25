@@ -155,8 +155,7 @@ def _encode_peak_tokens(
             valid_mask=batch["peak_valid_mask"],
             precursor_mz=batch.get("precursor_mz", None),
         )
-        peak_embeddings, _ = model.encoder.split_peak_and_cls(encoded)
-        return _peak_tokens_only(peak_embeddings, batch["peak_valid_mask"])
+        return _peak_tokens_only(encoded, batch["peak_valid_mask"])
 
 
 def train_covariance_pooler(

@@ -1412,9 +1412,6 @@ class MsgProbeRunTests(unittest.TestCase):
                 values = peak_mz + peak_intensity
                 return values.unsqueeze(-1).repeat(1, 1, cfg.model_dim)
 
-            def split_peak_and_cls(self, embeddings):
-                return embeddings, None
-
         class DummyModel(torch.nn.Module):
             def __init__(self):
                 super().__init__()

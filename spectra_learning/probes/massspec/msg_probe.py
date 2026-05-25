@@ -1187,8 +1187,7 @@ def _run_msg_probe_once(
             valid_mask=batch["peak_valid_mask"],
             precursor_mz=batch.get("precursor_mz", None),
         )
-        peak_embeddings, _ = model.encoder.split_peak_and_cls(embeddings)
-        return peak_embeddings
+        return embeddings
 
     seed_offset = 100_000 * repeat_index
     train_seed_base = int(config.seed) + 1_100_000 + seed_offset

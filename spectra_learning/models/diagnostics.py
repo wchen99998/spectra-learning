@@ -149,7 +149,6 @@ def _within_spectrum_pairwise_cosine(
 def _collapse_diagnostics(
     *,
     teacher_peak_emb: Float[Tensor, "batch peaks dim"],
-    teacher_cls_emb: Float[Tensor, "batch dim"],
     context_emb: Float[Tensor, "batch peaks dim"],
     context_mask: Bool[Tensor, "batch peaks"],
     peak_valid_mask: Bool[Tensor, "batch peaks"],
@@ -188,25 +187,6 @@ def _collapse_diagnostics(
             ),
         )
     )
-    metrics.update(
-        _prefix_metrics(
-            "repr/cls",
-            _embedding_geometry_metrics(
-                teacher_cls_emb.unsqueeze(1),
-                spectrum_mask.unsqueeze(1),
-            ),
-        )
-    )
-    probe_feature = torch.cat([teacher_cls_emb.float(), pooled_mean.float()], dim=-1)
-    metrics.update(
-        _prefix_metrics(
-            "repr/spec_probe_feature",
-            _embedding_geometry_metrics(
-                probe_feature.unsqueeze(1),
-                spectrum_mask.unsqueeze(1),
-            ),
-        )
-    )
 
     residual = teacher_peak_emb - pooled_mean.unsqueeze(1)
     within = _embedding_geometry_metrics(residual, peak_valid_mask)
@@ -223,16 +203,6 @@ def _collapse_diagnostics(
         metrics["repr/token/embedding_norm_p50"]
         / metrics["repr/spec_mean/embedding_norm_p50"].clamp_min(1e-12)
     )
-    metrics["repr/cls_to_mean_peak_cosine"] = F.cosine_similarity(
-        teacher_cls_emb.float(),
-        pooled_mean.float(),
-        dim=-1,
-    ).mean()
-    metrics["repr/cls_norm_over_mean_peak_norm"] = (
-        teacher_cls_emb.float().norm(dim=-1).mean()
-        / pooled_mean.float().norm(dim=-1).mean().clamp_min(1e-12)
-    )
-
     expanded_teacher_features = teacher_target_features.unsqueeze(1).expand_as(
         predictor_output_features
     )

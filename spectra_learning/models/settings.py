@@ -54,11 +54,7 @@ class PeakSetJEPASettings:
     pairformer_relative_fourier_x_min: float = 1e-3
     pairformer_relative_fourier_x_max: float = 1.0
     predictor_apply_final_norm: bool = True
-    encoder_use_cls_token: bool = True
-    encoder_num_cls_tokens: int | None = None
     num_peaks: int = 64
-    encoder_num_register_tokens: int = 0
-    predictor_num_register_tokens: int = 0
     predictor_dim: int | None = None
     target_projector_dim: int | None = None
     predictor_dropout: float = 0.0
@@ -79,7 +75,6 @@ class PeakSetJEPASettings:
         _apply_derived_defaults(values, config)
         for name, cast in SETTING_CASTS.items():
             values[name] = cast(_config_get(config, name, values[name]))
-        _apply_dependent_defaults(values)
         return cls(**values)
 
     @classmethod
@@ -107,13 +102,6 @@ def _apply_derived_defaults(values: dict[str, Any], config: Any) -> None:
     values["pairformer_mz_scale"] = peak_mz_max
     values["pairformer_precursor_mz_scale"] = precursor_mz_max
     values["pairformer_fourier_x_max"] = peak_mz_max
-
-
-def _apply_dependent_defaults(values: dict[str, Any]) -> None:
-    if values["encoder_num_cls_tokens"] is None:
-        values["encoder_num_cls_tokens"] = int(values["encoder_use_cls_token"])
-    else:
-        values["encoder_use_cls_token"] = values["encoder_num_cls_tokens"] > 0
 
 
 def _config_get(config: Any, key: str, default: Any) -> Any:
@@ -180,11 +168,7 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "pairformer_relative_fourier_x_min": float,
     "pairformer_relative_fourier_x_max": float,
     "predictor_apply_final_norm": bool,
-    "encoder_use_cls_token": bool,
-    "encoder_num_cls_tokens": _optional_int,
     "num_peaks": int,
-    "encoder_num_register_tokens": int,
-    "predictor_num_register_tokens": int,
     "predictor_dim": _optional_int,
     "target_projector_dim": _optional_int,
     "predictor_dropout": float,

@@ -13,7 +13,6 @@ def _build_model(
     *,
     num_target_blocks: int = 2,
     predictor_layers: int = 2,
-    predictor_num_register_tokens: int = 0,
     encoder_use_position_embedding: bool = True,
     encoder_apply_final_norm: bool = True,
     predictor_apply_final_norm: bool = True,
@@ -34,7 +33,6 @@ def _build_model(
         encoder_use_position_embedding=encoder_use_position_embedding,
         encoder_apply_final_norm=encoder_apply_final_norm,
         predictor_apply_final_norm=predictor_apply_final_norm,
-        predictor_num_register_tokens=predictor_num_register_tokens,
         predictor_dim=predictor_dim,
         jepa_num_target_blocks=num_target_blocks,
         masked_token_loss_weight=1.0,
@@ -152,47 +150,8 @@ def test_predictor_absolute_positions_change_inputs():
 
 
 @torch.no_grad()
-def test_predictor_register_tokens_do_not_get_position_embeddings():
-    torch.manual_seed(0)
-    model_without_pos = _build_model(
-        predictor_layers=2,
-        predictor_num_register_tokens=2,
-    )
-    torch.manual_seed(0)
-    model_with_pos = _build_model(
-        predictor_layers=2,
-        predictor_num_register_tokens=2,
-    )
-    with torch.no_grad():
-        model_without_pos.predictor_position_embedding.weight.zero_()
-    predictor_input = torch.randn(1, 6, model_with_pos.model_dim)
-    visible_mask = torch.ones(1, 6, dtype=torch.bool)
-
-    x_without_pos = model_without_pos._add_predictor_positions(predictor_input)
-    x_without_pos, _ = model_without_pos._append_predictor_register_tokens(
-        x_without_pos,
-        visible_mask,
-    )
-    x_with_pos = model_with_pos._add_predictor_positions(predictor_input)
-    x_with_pos, _ = model_with_pos._append_predictor_register_tokens(
-        x_with_pos,
-        visible_mask,
-    )
-
-    reg_count = model_with_pos.predictor_num_register_tokens
-    assert torch.allclose(
-        x_without_pos[:, -reg_count:],
-        x_with_pos[:, -reg_count:],
-    )
-    assert not torch.allclose(
-        x_without_pos[:, :-reg_count],
-        x_with_pos[:, :-reg_count],
-    )
-
-
-@torch.no_grad()
-def test_predictor_has_position_embedding_and_allows_registers():
-    model = _build_model(predictor_layers=2, predictor_num_register_tokens=2)
+def test_predictor_has_position_embedding():
+    model = _build_model(predictor_layers=2)
     context_emb = torch.randn(1, 6, model.model_dim)
     context_mask = torch.ones(1, 6, dtype=torch.bool)
 
@@ -201,19 +160,14 @@ def test_predictor_has_position_embedding_and_allows_registers():
         context_mask,
     )
 
-    assert model.predictor_num_register_tokens == 2
     assert hasattr(model, "latent_mask_token")
     assert model.latent_mask_token.shape == (model.model_dim,)
     assert not hasattr(model, "predictor_mask_token")
     assert not hasattr(model, "predictor_intensity_embed")
     assert hasattr(model, "predictor_position_embedding")
     assert not hasattr(model, "predictor_slot_embedding")
-    predictor_register_tokens = model.predictor_register_tokens
-    assert predictor_register_tokens is not None
-    assert predictor_register_tokens.shape == (2, model.model_dim)
     assert "latent_mask_token" in model.state_dict()
     assert "predictor_position_embedding.weight" in model.state_dict()
-    assert "predictor_register_tokens" in model.state_dict()
     assert out.shape == (1, 6, model.predictor_dim)
 
 
@@ -295,9 +249,6 @@ def test_encoder_final_norm_toggle_changes_output():
         valid_mask=valid_mask,
         visible_mask=valid_mask,
     )
-    out_1, _ = encoder_with_final_norm.split_peak_and_cls(out_1)
-    out_2, _ = encoder_without_final_norm.split_peak_and_cls(out_2)
-
     diff = (out_1 - out_2).abs().mean()
     assert float(diff) > 1e-3
 
@@ -525,49 +476,6 @@ def test_latent_token_predictor_receives_per_view_target_masks():
 
 
 @torch.no_grad()
-def test_predictor_receives_cls_as_unmasked_context_token():
-    model = _build_model(masked_token_input_mode="latent_token")
-    batch = _make_batch()
-    B, K, N = batch["target_masks"].shape
-    context_emb = torch.randn(B, N, model.model_dim)
-    context_cls_emb = torch.randn(B, model.model_dim)
-    captured: dict[str, torch.Tensor] = {}
-
-    def fake_predict_masked_target_features(
-        x: torch.Tensor,
-        visible_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        captured["x"] = x.detach().clone()
-        captured["visible_mask"] = visible_mask.detach().clone()
-        return x.new_zeros(x.shape[0], x.shape[1], model.jepa_target_dim)
-
-    with mock.patch.object(
-        model,
-        "predict_masked_target_features",
-        side_effect=fake_predict_masked_target_features,
-    ):
-        predictor_features, predictor_output = model._predict_augmented_targets(
-            context_emb,
-            batch["context_mask"],
-            batch["target_masks"],
-            context_cls_emb=context_cls_emb,
-        )
-
-    expected_cls = (
-        context_cls_emb[:, None, :]
-        .expand(-1, K, -1)
-        .reshape(B * K, model.model_dim)
-    )
-    assert model.predictor_position_embedding.num_embeddings == N + 1
-    assert captured["x"].shape == (B * K, N + 1, model.model_dim)
-    assert captured["visible_mask"].shape == (B * K, N + 1)
-    torch.testing.assert_close(captured["x"][:, -1], expected_cls)
-    assert captured["visible_mask"][:, -1].all()
-    assert predictor_features.shape == (B, K, N, model.jepa_target_dim)
-    assert predictor_output.shape == (B, K, N, model.target_projector_dim)
-
-
-@torch.no_grad()
 def test_mz_sentinel_mode_value_objective_predicts_mz_only():
     model = _build_model(
         masked_token_input_mode="mz_sentinel",
@@ -632,7 +540,7 @@ def test_multilayer_targets_widen_teacher_and_predictor_outputs():
         valid_mask=peak_valid_mask,
         visible_mask=context_mask,
     )
-    context_emb, context_cls_emb = model.encoder.split_peak_and_cls(context_encoded)
+    context_emb = context_encoded
     target_union = target_masks.any(dim=1)
     predictor_input = context_emb * context_mask.unsqueeze(-1)
     predictor_input = torch.where(
@@ -656,7 +564,6 @@ def test_multilayer_targets_widen_teacher_and_predictor_outputs():
             context_emb,
             context_mask,
             target_masks,
-            context_cls_emb=context_cls_emb,
         )
     )
     assert predictor_output_features_by_view.shape == (
@@ -690,7 +597,7 @@ def test_masked_prediction_loss_uses_target_tokens_only():
         valid_mask=peak_valid_mask,
         visible_mask=context_mask,
     )
-    context_emb, context_cls_emb = model.encoder.split_peak_and_cls(context_encoded)
+    context_emb = context_encoded
     B, K, N = target_masks.shape
     teacher_target = model._compute_jepa_teacher_targets(
         peak_mz,
@@ -702,7 +609,6 @@ def test_masked_prediction_loss_uses_target_tokens_only():
         context_emb,
         context_mask,
         target_masks,
-        context_cls_emb=context_cls_emb,
     )
     masked_only_loss = (
         model._embedding_loss(predictor_output, teacher_target.unsqueeze(1))
@@ -734,7 +640,7 @@ def test_masked_prediction_loss_can_zscore_teacher_targets():
         valid_mask=peak_valid_mask,
         visible_mask=context_mask,
     )
-    context_emb, context_cls_emb = model.encoder.split_peak_and_cls(context_encoded)
+    context_emb = context_encoded
     B, K, N = target_masks.shape
     teacher_target = model._compute_jepa_teacher_targets(
         peak_mz,
@@ -746,7 +652,6 @@ def test_masked_prediction_loss_can_zscore_teacher_targets():
         context_emb,
         context_mask,
         target_masks,
-        context_cls_emb=context_cls_emb,
     )
     masked_only_loss = (
         model._embedding_loss(predictor_output, teacher_target.unsqueeze(1))
@@ -874,12 +779,11 @@ def test_positions_outside_union_do_not_change_context_conditioning_with_fixed_t
             valid_mask=peak_valid_mask,
             visible_mask=context_mask,
         )
-        context_emb, context_cls_emb = model.encoder.split_peak_and_cls(context_encoded)
+        context_emb = context_encoded
         _, predictor_output = model._predict_augmented_targets(
             context_emb,
             context_mask,
             target_masks,
-            context_cls_emb=context_cls_emb,
         )
         return (
             model._embedding_loss(predictor_output, teacher_targets.unsqueeze(1))

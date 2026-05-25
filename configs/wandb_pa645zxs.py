@@ -43,10 +43,8 @@ def get_config() -> config_dict.ConfigDict:
     # Encoder
     cfg.num_peaks = 64
     cfg.model_dim = 384
-    cfg.encoder_use_cls_token = False
     cfg.encoder_num_layers = 14
     cfg.encoder_num_heads = 12
-    cfg.encoder_num_register_tokens = 2
     cfg.encoder_use_position_embedding = False
     cfg.encoder_apply_final_norm = False
     cfg.encoder_fourier_input_scale = 1000
@@ -64,7 +62,6 @@ def get_config() -> config_dict.ConfigDict:
     # Masked latent predictor
     cfg.predictor_dim = 256
     cfg.predictor_dropout = 0.1
-    cfg.predictor_num_register_tokens = 0
     cfg.predictor_apply_final_norm = False
     cfg.masked_latent_predictor_num_layers = 6
     cfg.masked_latent_predictor_num_heads = 8
