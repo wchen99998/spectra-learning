@@ -124,7 +124,6 @@ class PeakSetEncoder(nn.Module):
             peak_visible_mask,
             precursor_mz=precursor_mz,
         )
-        seq_len = peak_mz.shape[1]
         selected = set(block_indices)
         selected_peak_outputs: dict[int, Float[Tensor, "batch peaks dim"]] = {}
         for block_idx, block in enumerate(self.blocks, start=1):
@@ -135,11 +134,11 @@ class PeakSetEncoder(nn.Module):
                 peak_visible_mask,
             )
             if block_idx in selected and block_idx != self.num_layers:
-                selected_peak_outputs[block_idx] = x[:, :seq_len]
+                selected_peak_outputs[block_idx] = x
         x = self.final_norm(x)
         if self.num_layers in selected:
-            selected_peak_outputs[self.num_layers] = x[:, :seq_len]
-        return x[:, :seq_len], [selected_peak_outputs[idx] for idx in block_indices]
+            selected_peak_outputs[self.num_layers] = x
+        return x, [selected_peak_outputs[idx] for idx in block_indices]
 
     def forward_peak_block_outputs(
         self,
