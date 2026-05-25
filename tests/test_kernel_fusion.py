@@ -5,6 +5,7 @@ import torch
 from spectra_learning.models.losses import SIGReg
 from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.models.peak_features import PeakFeatureEmbedder
 from spectra_learning.models.transformer import (
     Attention,
     create_visible_attention_mask,
@@ -12,6 +13,10 @@ from spectra_learning.models.transformer import (
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 B, N, D = 16, 60, 128
+
+
+def _build_encoder_embedder() -> PeakFeatureEmbedder:
+    return PeakFeatureEmbedder(model_dim=D, hidden_dim=64)
 
 
 def _make_batch(
@@ -71,9 +76,9 @@ def test_encoder_with_visible_mask():
     encoder = (
         PeakSetEncoder(
             model_dim=D,
+            embedder=_build_encoder_embedder(),
             num_layers=2,
             num_heads=4,
-            feature_mlp_hidden_dim=64,
         )
         .to(DEVICE)
         .eval()

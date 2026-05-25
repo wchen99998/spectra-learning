@@ -15,6 +15,7 @@ from spectra_learning.models.common import (
 from spectra_learning.models.transformer import _build_norm
 from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.losses import SIGReg, SlotwiseSIGReg
+from spectra_learning.models.peak_features import PeakFeatureEmbedder
 from spectra_learning.models.settings import PeakSetSIGRegSettings
 
 if TYPE_CHECKING:
@@ -186,11 +187,27 @@ def _build_peak_set_encoder(cfg: PeakSetSIGRegSettings) -> PeakSetEncoder:
     num_cls_tokens = _num_cls_tokens(cfg)
     return PeakSetEncoder(
         model_dim=cfg.model_dim,
+        embedder=_build_peak_feature_embedder(cfg),
         num_layers=cfg.encoder_num_layers,
         num_heads=cfg.encoder_num_heads,
         num_kv_heads=cfg.encoder_num_kv_heads,
         attention_mlp_multiple=cfg.attention_mlp_multiple,
-        feature_mlp_hidden_dim=cfg.feature_mlp_hidden_dim,
+        norm_type=cfg.norm_type.lower(),
+        norm_eps=cfg.norm_eps,
+        use_position_embedding=cfg.encoder_use_position_embedding,
+        apply_final_norm=cfg.encoder_apply_final_norm,
+        num_peaks=_num_peak_tokens(cfg),
+        use_cls_token=num_cls_tokens > 0,
+        num_cls_tokens=num_cls_tokens,
+        num_register_tokens=cfg.encoder_num_register_tokens,
+        use_precursor_token=cfg.use_precursor_token,
+    )
+
+
+def _build_peak_feature_embedder(cfg: PeakSetSIGRegSettings) -> PeakFeatureEmbedder:
+    return PeakFeatureEmbedder(
+        model_dim=cfg.model_dim,
+        hidden_dim=cfg.feature_mlp_hidden_dim,
         fourier_mlp_hidden_dim=cfg.encoder_fourier_mlp_hidden_dim,
         fourier_mlp_num_layers=cfg.encoder_fourier_mlp_num_layers,
         fourier_strategy=cfg.encoder_fourier_strategy,
@@ -202,15 +219,6 @@ def _build_peak_set_encoder(cfg: PeakSetSIGRegSettings) -> PeakSetEncoder:
         fourier_trainable=cfg.encoder_fourier_trainable,
         fourier_input_scale=cfg.encoder_fourier_input_scale,
         use_fourier_features=cfg.encoder_use_fourier_features,
-        norm_type=cfg.norm_type.lower(),
-        norm_eps=cfg.norm_eps,
-        use_position_embedding=cfg.encoder_use_position_embedding,
-        apply_final_norm=cfg.encoder_apply_final_norm,
-        num_peaks=_num_peak_tokens(cfg),
-        use_cls_token=num_cls_tokens > 0,
-        num_cls_tokens=num_cls_tokens,
-        num_register_tokens=cfg.encoder_num_register_tokens,
-        use_precursor_token=cfg.use_precursor_token,
     )
 
 

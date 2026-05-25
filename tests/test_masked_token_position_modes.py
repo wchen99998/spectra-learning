@@ -5,6 +5,7 @@ import torch
 from spectra_learning.models.common import TransformerBlock
 from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.models.peak_features import PeakFeatureEmbedder
 
 
 def _build_model(
@@ -45,6 +46,10 @@ def _build_model(
     )
     model.eval()
     return model
+
+
+def _build_encoder_embedder() -> PeakFeatureEmbedder:
+    return PeakFeatureEmbedder(model_dim=32, hidden_dim=32)
 
 
 def _make_batch() -> dict[str, torch.Tensor]:
@@ -216,20 +221,20 @@ def test_encoder_position_embedding_toggle_matches_zeroed_table():
     torch.manual_seed(0)
     encoder_without_pos = PeakSetEncoder(
         model_dim=32,
+        embedder=_build_encoder_embedder(),
         num_layers=2,
         num_heads=4,
         num_peaks=6,
-        feature_mlp_hidden_dim=32,
         norm_type="layernorm",
         use_position_embedding=False,
     ).eval()
     torch.manual_seed(0)
     encoder_with_zeroed_pos = PeakSetEncoder(
         model_dim=32,
+        embedder=_build_encoder_embedder(),
         num_layers=2,
         num_heads=4,
         num_peaks=6,
-        feature_mlp_hidden_dim=32,
         norm_type="layernorm",
         use_position_embedding=True,
     ).eval()
@@ -260,20 +265,20 @@ def test_encoder_final_norm_toggle_changes_output():
     torch.manual_seed(0)
     encoder_with_final_norm = PeakSetEncoder(
         model_dim=32,
+        embedder=_build_encoder_embedder(),
         num_layers=2,
         num_heads=4,
         num_peaks=6,
-        feature_mlp_hidden_dim=32,
         norm_type="layernorm",
         apply_final_norm=True,
     ).eval()
     torch.manual_seed(0)
     encoder_without_final_norm = PeakSetEncoder(
         model_dim=32,
+        embedder=_build_encoder_embedder(),
         num_layers=2,
         num_heads=4,
         num_peaks=6,
-        feature_mlp_hidden_dim=32,
         norm_type="layernorm",
         apply_final_norm=False,
     ).eval()
@@ -339,10 +344,10 @@ def test_encoder_and_predictor_final_norms_are_non_affine():
 
     encoder = PeakSetEncoder(
         model_dim=32,
+        embedder=_build_encoder_embedder(),
         num_layers=2,
         num_heads=4,
         num_peaks=6,
-        feature_mlp_hidden_dim=32,
         norm_type="layernorm",
         apply_final_norm=True,
     )

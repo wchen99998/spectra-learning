@@ -23,22 +23,11 @@ class PeakSetEncoder(nn.Module):
         self,
         *,
         model_dim: int,
+        embedder: PeakFeatureEmbedder,
         num_layers: int,
         num_heads: int,
         num_kv_heads: int | None = None,
         attention_mlp_multiple: float = 4.0,
-        feature_mlp_hidden_dim: int = 128,
-        fourier_mlp_hidden_dim: int | None = None,
-        fourier_mlp_num_layers: int = 2,
-        fourier_strategy: str = "log_spaced",
-        fourier_x_min: float = 3e-3,
-        fourier_x_max: float = 1000.0,
-        fourier_funcs: str = "both",
-        fourier_num_freqs: int = 256,
-        fourier_sigma: float = 10.0,
-        fourier_trainable: bool = False,
-        fourier_input_scale: float = 1000.0,
-        use_fourier_features: bool = True,
         norm_type: str = "rmsnorm",
         norm_eps: float = 1e-5,
         apply_final_norm: bool = True,
@@ -59,21 +48,7 @@ class PeakSetEncoder(nn.Module):
         self.num_register_tokens = num_register_tokens
         self.use_precursor_token = use_precursor_token
         self.use_position_embedding = use_position_embedding
-        self.embedder = PeakFeatureEmbedder(
-            model_dim=model_dim,
-            hidden_dim=feature_mlp_hidden_dim,
-            fourier_mlp_hidden_dim=fourier_mlp_hidden_dim,
-            fourier_mlp_num_layers=fourier_mlp_num_layers,
-            fourier_strategy=fourier_strategy,
-            fourier_x_min=fourier_x_min,
-            fourier_x_max=fourier_x_max,
-            fourier_funcs=fourier_funcs,
-            fourier_num_freqs=fourier_num_freqs,
-            fourier_sigma=fourier_sigma,
-            fourier_trainable=fourier_trainable,
-            fourier_input_scale=fourier_input_scale,
-            use_fourier_features=use_fourier_features,
-        )
+        self.embedder = embedder
         self.position_embedding = _build_frozen_position_embedding(
             num_peaks,
             model_dim,
