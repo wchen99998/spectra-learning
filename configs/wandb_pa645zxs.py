@@ -71,7 +71,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.predictor_apply_final_norm = False
     cfg.masked_latent_predictor_num_layers = 6
     cfg.masked_latent_predictor_num_heads = 8
-    cfg.temporal_predictor_num_layers = 0
     cfg.target_projector_dim = -1
 
     # JEPA masking and targets

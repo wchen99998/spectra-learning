@@ -5,13 +5,9 @@ from spectra_learning.models.peak_features import FourierFeatures, PeakFeatureEm
 from spectra_learning.models.pooling import CovariancePool
 from spectra_learning.models.settings import PeakSetSIGRegSettings
 from spectra_learning.models.spectral_attention_bias import SpectralGraphormerBias
-from spectra_learning.models.temporal import (
-    CrossAttention,
-    CrossAttentionDecoderBlock,
-    TemporalDecoderBlock,
-)
 from spectra_learning.models.transformer import (
     Attention,
+    CrossAttention,
     FeedForward,
     TransformerBlock,
     create_visible_attention_mask,
@@ -21,7 +17,6 @@ __all__ = [
     "Attention",
     "CovariancePool",
     "CrossAttention",
-    "CrossAttentionDecoderBlock",
     "FeedForward",
     "FourierFeatures",
     "PeakFeatureEmbedder",
@@ -31,7 +26,6 @@ __all__ = [
     "SIGReg",
     "SlotwiseSIGReg",
     "SpectralGraphormerBias",
-    "TemporalDecoderBlock",
     "TransformerBlock",
     "create_visible_attention_mask",
 ]

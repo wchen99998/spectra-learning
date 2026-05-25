@@ -68,7 +68,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.predictor_use_rope = False
     cfg.masked_latent_predictor_num_layers = 12
     cfg.masked_latent_predictor_num_heads = 16
-    cfg.temporal_predictor_num_layers = 0
     cfg.target_projector_dim = -1
     cfg.masked_token_input_mode = "latent_token"
 

@@ -159,6 +159,70 @@ class Attention(nn.Module):
         return self.wo(attn)
 
 
+class CrossAttention(nn.Module):
+    """Cross-attention with queries from x and keys/values from memory."""
+
+    def __init__(
+        self,
+        dim: int,
+        n_heads: int,
+        *,
+        n_kv_heads: int | None = None,
+        qk_norm: bool = False,
+        norm_type: str = "rmsnorm",
+        norm_eps: float = 1e-5,
+    ):
+        super().__init__()
+        self.dim = dim
+        self.n_heads = n_heads
+        self.n_kv_heads = n_heads if n_kv_heads is None else n_kv_heads
+        self.head_dim = self.dim // self.n_heads
+        self.wq = nn.Linear(self.dim, self.n_heads * self.head_dim, bias=False)
+        self.wkv = nn.Linear(self.dim, 2 * self.n_kv_heads * self.head_dim, bias=False)
+        self.wo = nn.Linear(self.dim, self.dim, bias=False)
+        self.qk_norm = qk_norm
+        if qk_norm:
+            self.q_norm = _build_norm(self.head_dim, eps=norm_eps, norm_type=norm_type)
+            self.k_norm = _build_norm(self.head_dim, eps=norm_eps, norm_type=norm_type)
+        nn.init.xavier_normal_(self.wq.weight)
+        nn.init.xavier_normal_(self.wkv.weight)
+        nn.init.xavier_normal_(self.wo.weight)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        memory: torch.Tensor,
+        *,
+        memory_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        bsz, tgt_len, _ = x.shape
+        mem_len = memory.shape[1]
+        xq = self.wq(x).view(bsz, tgt_len, self.n_heads, self.head_dim)
+        kv = self.wkv(memory)
+        xk, xv = kv.split(
+            [self.n_kv_heads * self.head_dim, self.n_kv_heads * self.head_dim],
+            dim=-1,
+        )
+        xk = xk.view(bsz, mem_len, self.n_kv_heads, self.head_dim)
+        xv = xv.view(bsz, mem_len, self.n_kv_heads, self.head_dim)
+        if self.qk_norm:
+            xq = self.q_norm(xq)
+            xk = self.k_norm(xk)
+        q = xq.transpose(1, 2)
+        k = xk.transpose(1, 2)
+        v = xv.transpose(1, 2)
+        attn_mask = None
+        if memory_mask is not None:
+            attn_mask = memory_mask[:, None, None, :].to(dtype=q.dtype)
+            attn_mask = attn_mask.masked_fill(
+                attn_mask == 0,
+                float("-inf"),
+            ).masked_fill(attn_mask == 1, 0.0)
+        attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        attn = attn.transpose(1, 2).contiguous().view(bsz, tgt_len, self.dim)
+        return self.wo(attn)
+
+
 class FeedForward(nn.Module):
     def __init__(
         self,

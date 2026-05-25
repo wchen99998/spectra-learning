@@ -69,28 +69,6 @@ class ForwardMixin:
             "target_overlap_entries": target_overlap_entries,
         }
 
-    def _get_temporal_frame_inputs(
-        self: Any,
-        batch: dict[str, torch.Tensor],
-        prefix: str,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        peak_mz = batch[f"{prefix}_peak_mz"]
-        peak_intensity = batch[f"{prefix}_peak_intensity"]
-        peak_valid_mask = batch[f"{prefix}_peak_valid_mask"]
-        if not self.use_precursor_token:
-            return peak_mz, peak_intensity, peak_valid_mask
-        with_precursor = self.prepend_precursor_token(
-            peak_mz,
-            peak_intensity,
-            peak_valid_mask,
-            batch[f"{prefix}_precursor_mz"],
-        )
-        return (
-            with_precursor["peak_mz"],
-            with_precursor["peak_intensity"],
-            with_precursor["peak_valid_mask"],
-        )
-
     @overload
     def forward_augmented(
         self: Any,
@@ -317,109 +295,6 @@ class ForwardMixin:
         if return_collapse_data:
             return metrics, {}
         return metrics
-
-    def compute_next_frame_teacher_embeddings(
-        self: Any, batch: dict[str, torch.Tensor],
-    ) -> torch.Tensor:
-        """Compute teacher embeddings for the next frame."""
-        next_frame_mz, next_frame_int, next_frame_valid = self._get_temporal_frame_inputs(
-            batch,
-            "next_frame",
-        )
-        teacher_encoder = (
-            self.teacher_encoder
-            if self.teacher_encoder is not None
-            else self.encoder
-        )
-        if self.teacher_encoder is None:
-            teacher_embeddings = teacher_encoder(
-                next_frame_mz,
-                next_frame_int,
-                valid_mask=next_frame_valid,
-                visible_mask=next_frame_valid,
-                precursor_mz=batch.get("next_frame_precursor_mz", None),
-            )
-        else:
-            with torch.no_grad():
-                teacher_embeddings = teacher_encoder(
-                    next_frame_mz,
-                    next_frame_int,
-                    valid_mask=next_frame_valid,
-                    visible_mask=next_frame_valid,
-                    precursor_mz=batch.get("next_frame_precursor_mz", None),
-                )
-        teacher_embeddings, _ = self._split_encoder_output(
-            teacher_encoder,
-            teacher_embeddings,
-            next_frame_valid,
-        )
-        return teacher_embeddings
-
-    def forward_temporal(
-        self: Any,
-        batch: dict[str, torch.Tensor],
-        teacher_embeddings: torch.Tensor | None = None,
-    ) -> dict[str, torch.Tensor]:
-        """Predict next-frame token embeddings from the full current frame."""
-        if self.temporal_predictor_num_layers <= 0:
-            raise ValueError(
-                "forward_temporal requires temporal_predictor_num_layers > 0"
-            )
-        frame_mz, frame_int, frame_valid = self._get_temporal_frame_inputs(
-            batch,
-            "frame",
-        )
-        next_frame_mz, next_frame_int, next_frame_valid = self._get_temporal_frame_inputs(
-            batch,
-            "next_frame",
-        )
-        frame_rt = batch["frame_rt"]
-        next_frame_rt = batch["next_frame_rt"]
-        B = frame_mz.shape[0]
-
-        frame_encoded = self.encoder(
-            frame_mz,
-            frame_int,
-            valid_mask=frame_valid,
-            visible_mask=frame_valid,
-            precursor_mz=batch.get("frame_precursor_mz", None),
-        )  # [B, N, D]
-        frame_emb, _ = self._split_encoder_output(
-            self.encoder,
-            frame_encoded,
-            frame_valid,
-        )
-
-        delta_rt = (next_frame_rt - frame_rt).unsqueeze(-1)  # [B, 1] in minutes
-        rt_emb = self.temporal_rt_proj(delta_rt)  # [B, D]
-
-        positions = torch.arange(frame_emb.shape[1], device=frame_emb.device)
-        queries = self.temporal_slot_embedding(positions).unsqueeze(0).expand(
-            B,
-            -1,
-            -1,
-        )
-        queries = queries + self.temporal_query_token.view(1, 1, -1)
-        queries = queries + rt_emb.unsqueeze(1)
-
-        for block in self.temporal_predictor:
-            queries = block(queries, frame_emb, memory_mask=frame_valid)
-        predicted_next_frame = queries  # [B, N, D]
-
-        if teacher_embeddings is not None:
-            next_frame_emb = teacher_embeddings
-        else:
-            next_frame_emb = self.compute_next_frame_teacher_embeddings(batch)
-
-        per_token = self._embedding_loss(predicted_next_frame, next_frame_emb)
-
-        next_frame_mask = next_frame_valid.float()
-        loss = (per_token * next_frame_mask).sum() / next_frame_mask.sum().clamp_min(1.0)
-
-        return {
-            "loss": loss,
-            "next_frame_pred_loss": loss.detach(),
-        }
 
     def encode(self: Any, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         mz, intensity, valid = (

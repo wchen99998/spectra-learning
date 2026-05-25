@@ -11,7 +11,7 @@ from ml_collections import config_dict
 from sklearn.metrics import average_precision_score, roc_auc_score
 
 from spectra_learning.data.gems.conversion import _prepend_precursor_token_torch
-from spectra_learning.models.temporal import CovariancePool
+from spectra_learning.models.pooling import CovariancePool
 from spectra_learning.data.spectra import PRECURSOR_TOKEN_INTENSITY
 from spectra_learning.probes.massspec.msg_modules import (
     FrozenPooler,

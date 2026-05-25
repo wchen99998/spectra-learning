@@ -16,9 +16,6 @@ from spectra_learning.models.transformer import _build_norm
 from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.losses import SIGReg, SlotwiseSIGReg
 from spectra_learning.models.settings import PeakSetSIGRegSettings
-from spectra_learning.models.temporal import (
-    _build_temporal_decoder_blocks,
-)
 
 if TYPE_CHECKING:
     from spectra_learning.models.model import PeakSetSIGReg
@@ -58,7 +55,6 @@ def configure_peak_set_sigreg(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) 
     _build_target_projectors(model, cfg)
     _build_jepa_mae_heads(model)
     _build_regularizer(model, cfg)
-    _build_temporal_predictor(model, cfg)
 
 
 def _load_frozen_teacher_settings(
@@ -85,7 +81,6 @@ def _configure_dimensions(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> N
     model.use_precursor_token = cfg.use_precursor_token
     model.norm_type = cfg.norm_type.lower()
     model.norm_eps = cfg.norm_eps
-    model.temporal_predictor_num_layers = cfg.temporal_predictor_num_layers
     model.predictor_num_register_tokens = cfg.predictor_num_register_tokens
     model.covariance_pooling_dim = cfg.covariance_pooling_dim
     model.train_covariance_pooling = (
@@ -384,40 +379,6 @@ def _build_regularizer(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None
         else SIGReg
     )
     model.sigreg = sigreg_cls(num_slices=cfg.sigreg_num_slices)
-
-
-def _build_temporal_predictor(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
-    if model.temporal_predictor_num_layers <= 0:
-        return
-
-    model.temporal_predictor = _build_temporal_decoder_blocks(
-        dim=model.model_dim,
-        num_layers=model.temporal_predictor_num_layers,
-        num_heads=cfg.masked_latent_predictor_num_heads,
-        num_kv_heads=None,
-        attention_mlp_multiple=cfg.attention_mlp_multiple,
-        norm_eps=model.norm_eps,
-        qk_norm=cfg.encoder_qk_norm,
-        norm_type=model.norm_type,
-    )
-    temporal_rt_proj = nn.Sequential(
-        nn.Linear(1, model.model_dim),
-        nn.SiLU(),
-        nn.Linear(model.model_dim, model.model_dim),
-    )
-    for layer in temporal_rt_proj:
-        if isinstance(layer, nn.Linear):
-            nn.init.xavier_normal_(layer.weight)
-            nn.init.zeros_(layer.bias)
-    model.temporal_rt_proj = temporal_rt_proj
-    model.temporal_query_token = nn.Parameter(torch.empty(model.model_dim))
-    nn.init.trunc_normal_(model.temporal_query_token, std=0.02)
-    temporal_slot_embedding = nn.Embedding(
-        model.num_peak_tokens,
-        model.model_dim,
-    )
-    nn.init.trunc_normal_(temporal_slot_embedding.weight, std=0.02)
-    model.temporal_slot_embedding = temporal_slot_embedding
 
 
 def _canonical_regularizer(value: str) -> str:

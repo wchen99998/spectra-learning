@@ -73,7 +73,6 @@ class PeakSetSIGRegSettings:
     spectral_bias_init_std: float = 0.0
     spectral_bias_clip: float | None = None
     num_peaks: int = 64
-    temporal_predictor_num_layers: int = 0
     encoder_num_register_tokens: int = 0
     predictor_num_register_tokens: int = 0
     predictor_dim: int | None = None
@@ -249,7 +248,6 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "spectral_bias_init_std": float,
     "spectral_bias_clip": _optional_float,
     "num_peaks": int,
-    "temporal_predictor_num_layers": int,
     "encoder_num_register_tokens": int,
     "predictor_num_register_tokens": int,
     "predictor_dim": _optional_int,

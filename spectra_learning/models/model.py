@@ -31,7 +31,6 @@ class PeakSetSIGReg(
     use_precursor_token: bool
     norm_type: str
     norm_eps: float
-    temporal_predictor_num_layers: int
     predictor_num_register_tokens: int
     covariance_pooling_dim: int
     train_covariance_pooling: bool
@@ -83,10 +82,6 @@ class PeakSetSIGReg(
     jepa_mae_mz_head: nn.Linear | None
     jepa_mae_intensity_head: nn.Linear | None
     sigreg: SIGReg
-    temporal_predictor: nn.ModuleList
-    temporal_rt_proj: nn.Module
-    temporal_query_token: nn.Parameter
-    temporal_slot_embedding: nn.Embedding
 
     def __init__(
         self,
