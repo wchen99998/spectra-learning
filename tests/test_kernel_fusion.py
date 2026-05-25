@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import torch
 
-from spectra_learning.models.losses import SIGReg
 from spectra_learning.models.encoder import PeakSetEncoder
-from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.peak_features import PeakFeatureEmbedder
 from spectra_learning.models.transformer import (
     Attention,
@@ -62,15 +61,6 @@ def test_attention_mask_plumbing():
     assert not torch.allclose(out_masked, out_no_mask, atol=1e-5)
 
 
-def test_sigreg_forward():
-    torch.manual_seed(42)
-    sigreg = SIGReg(num_slices=256).to(DEVICE)
-    proj = torch.randn(4, B, D, device=DEVICE)
-    result = sigreg(proj)
-    assert result.ndim == 0
-    assert torch.isfinite(result)
-
-
 def test_encoder_with_visible_mask():
     torch.manual_seed(42)
     encoder = (
@@ -108,7 +98,7 @@ def test_encoder_with_visible_mask():
 def test_full_model_forward():
     torch.manual_seed(42)
     model = (
-        PeakSetSIGReg(
+        PeakSetJEPA(
             model_dim=D,
             encoder_num_layers=2,
             encoder_num_heads=4,

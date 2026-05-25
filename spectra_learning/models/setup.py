@@ -14,30 +14,12 @@ from spectra_learning.models.common import (
 )
 from spectra_learning.models.transformer import _build_norm
 from spectra_learning.models.encoder import PeakSetEncoder
-from spectra_learning.models.losses import SIGReg, SlotwiseSIGReg
 from spectra_learning.models.peak_features import PeakFeatureEmbedder
-from spectra_learning.models.settings import PeakSetSIGRegSettings
+from spectra_learning.models.settings import PeakSetJEPASettings
 
 if TYPE_CHECKING:
-    from spectra_learning.models.model import PeakSetSIGReg
+    from spectra_learning.models.model import PeakSetJEPA
 
-
-SLOTWISE_REGULARIZERS = {
-    "slot-sigreg-enc",
-    "slot-sigreg-pred",
-    "slot-sigreg-proj",
-    "slot-sigreg-enc-pred",
-}
-
-SUPPORTED_REGULARIZERS = {
-    "none",
-    "",
-    "sigreg-enc",
-    "sigreg-pred",
-    "sigreg-proj",
-    "sigreg-enc-pred",
-    *SLOTWISE_REGULARIZERS,
-}
 
 SUPPORTED_TRAINING_MODES = {"jepa", "mae", "mae_teacher_jepa"}
 SUPPORTED_TARGET_NORMALIZATIONS = {"none", "zscore"}
@@ -45,7 +27,7 @@ SUPPORTED_EMA_SCHEDULES = {"constant", "linear", "cosine", "slow-fast-slow"}
 SUPPORTED_MASKED_TOKEN_INPUT_MODES = {"latent_token", "mz_sentinel"}
 
 
-def configure_peak_set_sigreg(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
+def configure_peak_set_model(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
     frozen_teacher_cfg = _load_frozen_teacher_settings(cfg)
     _configure_dimensions(model, cfg)
     _configure_targets(model, cfg, frozen_teacher_cfg)
@@ -55,20 +37,19 @@ def configure_peak_set_sigreg(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) 
     _build_predictor(model, cfg)
     _build_target_projectors(model, cfg)
     _build_jepa_mae_heads(model)
-    _build_regularizer(model, cfg)
 
 
 def _load_frozen_teacher_settings(
-    cfg: PeakSetSIGRegSettings,
-) -> PeakSetSIGRegSettings | None:
+    cfg: PeakSetJEPASettings,
+) -> PeakSetJEPASettings | None:
     if cfg.training_mode.lower() != "mae_teacher_jepa":
         return None
     if cfg.frozen_teacher_config_path is None:
         return None
-    return PeakSetSIGRegSettings.from_config(load_config(cfg.frozen_teacher_config_path))
+    return PeakSetJEPASettings.from_config(load_config(cfg.frozen_teacher_config_path))
 
 
-def _configure_dimensions(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
+def _configure_dimensions(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
     model.training_mode = cfg.training_mode.lower()
     if model.training_mode not in SUPPORTED_TRAINING_MODES:
         raise ValueError("training_mode must be one of ('jepa', 'mae')")
@@ -89,9 +70,9 @@ def _configure_dimensions(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> N
 
 
 def _configure_targets(
-    model: PeakSetSIGReg,
-    cfg: PeakSetSIGRegSettings,
-    frozen_teacher_cfg: PeakSetSIGRegSettings | None,
+    model: PeakSetJEPA,
+    cfg: PeakSetJEPASettings,
+    frozen_teacher_cfg: PeakSetJEPASettings | None,
 ) -> None:
     model.jepa_num_target_blocks = cfg.jepa_num_target_blocks
     if model.jepa_num_target_blocks < 1:
@@ -143,11 +124,7 @@ def _configure_targets(
     model.masked_mz_sentinel = cfg.masked_mz_sentinel
 
 
-def _configure_losses(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
-    model.representation_regularizer = _canonical_regularizer(
-        cfg.representation_regularizer
-    )
-    model.sigreg_lambda = cfg.sigreg_lambda
+def _configure_losses(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
     model.mae_loss_weight = cfg.mae_loss_weight
     model.masked_token_loss_weight = (
         0.0 if model.training_mode == "mae" else cfg.masked_token_loss_weight
@@ -163,16 +140,16 @@ def _configure_losses(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
     model.jepa_mae_num_intensity_bins = math.ceil(model.jepa_mae_intensity_max / model.jepa_mae_intensity_bin_size)
 
 
-def _build_encoder(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
+def _build_encoder(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
     model.num_peak_tokens = _num_peak_tokens(cfg)
     model.encoder = _build_peak_set_encoder(cfg)
 
 
-def _num_peak_tokens(cfg: PeakSetSIGRegSettings) -> int:
+def _num_peak_tokens(cfg: PeakSetJEPASettings) -> int:
     return cfg.num_peaks
 
 
-def _num_cls_tokens(cfg: PeakSetSIGRegSettings) -> int:
+def _num_cls_tokens(cfg: PeakSetJEPASettings) -> int:
     return (
         int(cfg.encoder_use_cls_token)
         if cfg.encoder_num_cls_tokens is None
@@ -180,7 +157,7 @@ def _num_cls_tokens(cfg: PeakSetSIGRegSettings) -> int:
     )
 
 
-def _build_peak_set_encoder(cfg: PeakSetSIGRegSettings) -> PeakSetEncoder:
+def _build_peak_set_encoder(cfg: PeakSetJEPASettings) -> PeakSetEncoder:
     num_cls_tokens = _num_cls_tokens(cfg)
     return PeakSetEncoder(
         model_dim=cfg.model_dim,
@@ -205,7 +182,7 @@ def _build_peak_set_encoder(cfg: PeakSetSIGRegSettings) -> PeakSetEncoder:
     )
 
 
-def _build_peak_feature_embedder(cfg: PeakSetSIGRegSettings) -> PeakFeatureEmbedder:
+def _build_peak_feature_embedder(cfg: PeakSetJEPASettings) -> PeakFeatureEmbedder:
     return PeakFeatureEmbedder(
         model_dim=cfg.model_dim,
         hidden_dim=cfg.feature_mlp_hidden_dim,
@@ -224,9 +201,9 @@ def _build_peak_feature_embedder(cfg: PeakSetSIGRegSettings) -> PeakFeatureEmbed
 
 
 def _build_teacher(
-    model: PeakSetSIGReg,
-    cfg: PeakSetSIGRegSettings,
-    frozen_teacher_cfg: PeakSetSIGRegSettings | None,
+    model: PeakSetJEPA,
+    cfg: PeakSetJEPASettings,
+    frozen_teacher_cfg: PeakSetJEPASettings | None,
 ) -> None:
     model.use_frozen_teacher = model.training_mode == "mae_teacher_jepa"
     model.use_ema_teacher = cfg.use_ema_teacher and model.training_mode == "jepa"
@@ -258,7 +235,7 @@ def _build_teacher(
         model.teacher_encoder = None
 
 
-def _build_predictor(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
+def _build_predictor(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
     model.latent_mask_token = nn.Parameter(torch.empty(model.model_dim))
     nn.init.normal_(model.latent_mask_token, std=0.02)
 
@@ -315,7 +292,7 @@ def _build_predictor(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
     model.masked_latent_readout = masked_latent_readout
 
 
-def _build_target_projectors(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
+def _build_target_projectors(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
     if model.use_target_projector:
         target_projector = nn.Sequential(
             nn.Linear(model.jepa_target_dim, model.jepa_target_dim),
@@ -337,7 +314,7 @@ def _build_target_projectors(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -
         model.teacher_target_projector = None
 
 
-def _build_jepa_mae_heads(model: PeakSetSIGReg) -> None:
+def _build_jepa_mae_heads(model: PeakSetJEPA) -> None:
     if model.jepa_mae_loss_weight <= 0 and model.training_mode != "mae":
         model.jepa_mae_mz_head = None
         model.jepa_mae_intensity_head = None
@@ -357,25 +334,3 @@ def _build_jepa_mae_heads(model: PeakSetSIGReg) -> None:
     nn.init.zeros_(jepa_mae_intensity_head.bias)
     model.jepa_mae_mz_head = jepa_mae_mz_head
     model.jepa_mae_intensity_head = jepa_mae_intensity_head
-
-
-def _build_regularizer(model: PeakSetSIGReg, cfg: PeakSetSIGRegSettings) -> None:
-    sigreg_cls = (
-        SlotwiseSIGReg
-        if model.representation_regularizer in SLOTWISE_REGULARIZERS
-        else SIGReg
-    )
-    model.sigreg = sigreg_cls(num_slices=cfg.sigreg_num_slices)
-
-
-def _canonical_regularizer(value: str) -> str:
-    regularizer = value.lower()
-    aliases = {
-        "sigreg": "sigreg-enc",
-        "slog-sigreg-pred": "slot-sigreg-pred",
-        "slog-sigreg-proj": "slot-sigreg-proj",
-    }
-    regularizer = aliases.get(regularizer, regularizer)
-    if regularizer not in SUPPORTED_REGULARIZERS:
-        raise ValueError(f"Unsupported regularizer: {regularizer!r}")
-    return regularizer

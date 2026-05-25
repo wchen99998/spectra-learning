@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-PyTorch-based deep learning framework for pretraining SIGReg models on continuous mass spectrometry peak sets. The pipeline ingests raw peak lists from GeMS and MassSpecGym datasets, preprocesses them into native shard artifacts, and trains a masked latent prediction model with JEPA-style teacher targets plus SIGReg regularization. During training, a periodic MSG linear probe evaluates learned representations on molecular property regression and MACCS fingerprint prediction.
+PyTorch-based deep learning framework for pretraining JEPA-style models on continuous mass spectrometry peak sets. The pipeline ingests raw peak lists from GeMS and MassSpecGym datasets, preprocesses them into native shard artifacts, and trains a masked latent prediction model with teacher targets. During training, a periodic MSG linear probe evaluates learned representations on molecular property regression and MACCS fingerprint prediction.
 
 ## Commands
 
@@ -22,7 +22,7 @@ python -m pytest tests/
 python -m pytest tests/test_pretrain.py
 
 # Single test class or method
-python -m pytest tests/test_pretrain.py::SIGRegForwardTests::test_forward_loss_is_finite
+python -m pytest tests/test_pretrain.py::BlockJEPATests::test_forward_loss_is_finite
 ```
 
 ### Data preparation (standalone)
@@ -40,11 +40,10 @@ python input_pipeline.py configs/gems_a_dataset.py
 3. The compiled forward pass (`torch.compile` with `reduce-overhead` + CUDA graphs) runs the batch through encoder -> masked latent predictor -> JEPA losses.
 4. During training, `run_msg_probe` trains fixed linear probes on frozen `mean + cls` readouts.
 
-### Model (PeakSetSIGReg in `models/model.py`)
+### Model (PeakSetJEPA in `models/model.py`)
 
 - **PeakSetEncoder**: raw scalar peak features (`mz`, `intensity`, `log1p(intensity)`) -> Fourier/MLP embedder -> Pairformer blocks with pair features -> LayerNorm.
 - **Targets / Predictor**: shared encoder target states supervise masked-token prediction; predictor maps visible context tokens to target-space latents.
-- **SIGReg**: optional regularizer on learned representations.
 
 ### Masked Training Batch (`input_pipeline.py`)
 
@@ -71,10 +70,6 @@ Training batches contain:
 ### Data Pipeline (`spectra_learning/data/gems/`)
 
 Native-shard based with auto-download from HuggingFace. `GemsNativeDataModule` memmaps raw peak spectra, preprocesses peaks in the PyTorch collator, and builds DataLoaders directly.
-
-### Key Aliases
-
-`PeakSetJEPA = PeakSetSIGReg` (historical alias in `models/model.py:463`)
 
 ## Code Style
 

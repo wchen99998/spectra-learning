@@ -234,64 +234,6 @@ class ObjectiveMixin:
             "mae_intensity_accuracy": intensity_accuracy.to(dtype=reference.dtype),
         }
 
-    def _sigreg_weights(self: Any, mask: torch.Tensor) -> torch.Tensor:
-        return mask.float()
-
-    def _regularizer_metrics(
-        self: Any,
-        context_emb: torch.Tensor,
-        context_mask: torch.Tensor,
-        predictor_output_features: torch.Tensor,
-        predictor_output: torch.Tensor,
-        target_masks: torch.Tensor,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        if self.sigreg_lambda <= 0:
-            return context_emb.new_tensor(0.0), {}
-
-        target_weights = target_masks
-
-        if self.representation_regularizer in (
-            "sigreg-enc-pred",
-            "slot-sigreg-enc-pred",
-        ):
-            encoder_loss = self.sigreg(
-                context_emb.float(),
-                valid_mask=self._sigreg_weights(context_mask),
-            ).to(dtype=context_emb.dtype)
-            predictor_loss = self.sigreg(
-                predictor_output_features.float(),
-                valid_mask=self._sigreg_weights(target_weights),
-            ).to(dtype=context_emb.dtype)
-            sigreg_loss = encoder_loss + predictor_loss
-            sigreg_term = context_emb.new_tensor(self.sigreg_lambda) * sigreg_loss
-            return sigreg_term, {
-                "sigreg_loss": sigreg_loss,
-                "sigreg_term": sigreg_term,
-                "sigreg_encoder_loss": encoder_loss,
-                "sigreg_predictor_loss": predictor_loss,
-            }
-
-        if self.representation_regularizer in ("sigreg-enc", "slot-sigreg-enc"):
-            embeddings = context_emb.float()
-            weights = self._sigreg_weights(context_mask)
-        elif self.representation_regularizer in ("sigreg-pred", "slot-sigreg-pred"):
-            embeddings = predictor_output_features.float()
-            weights = self._sigreg_weights(target_weights)
-        elif self.representation_regularizer in ("sigreg-proj", "slot-sigreg-proj"):
-            embeddings = predictor_output.float()
-            weights = self._sigreg_weights(target_weights)
-        else:
-            return context_emb.new_tensor(0.0), {}
-
-        sigreg_loss = self.sigreg(embeddings, valid_mask=weights).to(
-            dtype=context_emb.dtype
-        )
-        sigreg_term = context_emb.new_tensor(self.sigreg_lambda) * sigreg_loss
-        return sigreg_term, {
-            "sigreg_loss": sigreg_loss,
-            "sigreg_term": sigreg_term,
-        }
-
     def _covariance_pooling_metrics(
         self: Any,
         embeddings: torch.Tensor,

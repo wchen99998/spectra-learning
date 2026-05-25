@@ -8,7 +8,7 @@ from spectra_learning.data.spectra import PEAK_MZ_MAX
 
 
 @dataclass(slots=True)
-class PeakSetSIGRegSettings:
+class PeakSetJEPASettings:
     training_mode: str = "jepa"
     model_dim: int = 768
     encoder_num_layers: int = 20
@@ -37,11 +37,8 @@ class PeakSetSIGRegSettings:
     jepa_target_layers: list[int] | tuple[int, ...] | None = None
     masked_token_input_mode: str = "latent_token"
     masked_mz_sentinel: float = -1.0
-    representation_regularizer: str = "none"
     masked_latent_predictor_num_layers: int = 2
     masked_latent_predictor_num_heads: int = 8
-    sigreg_num_slices: int = 256
-    sigreg_lambda: float = 0.02
     jepa_num_target_blocks: int = 2
     norm_eps: float = 1e-5
     encoder_use_position_embedding: bool = True
@@ -75,7 +72,7 @@ class PeakSetSIGRegSettings:
     ema_teacher_schedule: str = "constant"
 
     @classmethod
-    def from_config(cls, config: Any) -> "PeakSetSIGRegSettings":
+    def from_config(cls, config: Any) -> "PeakSetJEPASettings":
         values = _default_values(cls())
         _apply_derived_defaults(values, config)
         for name, cast in SETTING_CASTS.items():
@@ -86,9 +83,9 @@ class PeakSetSIGRegSettings:
     @classmethod
     def create(
         cls,
-        settings: "PeakSetSIGRegSettings | None" = None,
+        settings: "PeakSetJEPASettings | None" = None,
         **overrides: Any,
-    ) -> "PeakSetSIGRegSettings":
+    ) -> "PeakSetJEPASettings":
         if settings is None:
             return cls(**overrides)
         if not overrides:
@@ -96,7 +93,7 @@ class PeakSetSIGRegSettings:
         return replace(settings, **overrides)
 
 
-def _default_values(settings: PeakSetSIGRegSettings) -> dict[str, Any]:
+def _default_values(settings: PeakSetJEPASettings) -> dict[str, Any]:
     return {field.name: getattr(settings, field.name) for field in fields(settings)}
 
 
@@ -163,11 +160,8 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "jepa_target_layers": _identity,
     "masked_token_input_mode": str,
     "masked_mz_sentinel": float,
-    "representation_regularizer": str,
     "masked_latent_predictor_num_layers": int,
     "masked_latent_predictor_num_heads": int,
-    "sigreg_num_slices": int,
-    "sigreg_lambda": float,
     "jepa_num_target_blocks": int,
     "norm_eps": float,
     "encoder_use_position_embedding": bool,

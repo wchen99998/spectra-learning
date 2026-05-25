@@ -9,7 +9,7 @@ from spectra_learning.training.api import load_config
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train peak-set SIGReg model.")
+    parser = argparse.ArgumentParser(description="Train peak-set JEPA model.")
     parser.add_argument("--config", required=True, help="Path to config file.")
     parser.add_argument("--workdir", required=True, help="Output directory.")
     parser.add_argument(

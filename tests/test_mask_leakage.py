@@ -6,7 +6,7 @@ the embeddings will change substantially.
 """
 
 import torch
-from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.models.model import PeakSetJEPA
 
 
 def _make_batch(batch_size: int = 8, num_peaks: int = 60, valid_count: int = 30):
@@ -31,7 +31,7 @@ def _make_batch(batch_size: int = 8, num_peaks: int = 60, valid_count: int = 30)
 def test_padding_leakage():
     """Core test: randomize padding positions and check embedding stability."""
     torch.manual_seed(42)
-    model = PeakSetSIGReg(
+    model = PeakSetJEPA(
         model_dim=64,
         encoder_num_layers=4,
         encoder_num_heads=4,
@@ -136,7 +136,7 @@ def test_padding_leakage():
 def test_padding_leakage_mean_pool():
     """Same test but with mean pooling (to check if it's just PMA)."""
     torch.manual_seed(42)
-    model = PeakSetSIGReg(
+    model = PeakSetJEPA(
         model_dim=64,
         encoder_num_layers=4,
         encoder_num_heads=4,

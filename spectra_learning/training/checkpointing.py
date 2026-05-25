@@ -2,7 +2,7 @@ from pathlib import Path
 
 import torch
 
-from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.training.schedules import LRSchedulerLike
 
 
@@ -57,7 +57,7 @@ def grad_scaler_state_dict(grad_scaler: torch.amp.GradScaler | None) -> dict | N
 
 def save_checkpoint(
     path: Path | str,
-    model: PeakSetSIGReg,
+    model: PeakSetJEPA,
     optimizers: list[torch.optim.Optimizer],
     schedulers: list[LRSchedulerLike],
     global_step: int,
@@ -103,7 +103,7 @@ def save_checkpoint(
 
 def save_probe_checkpoint(
     path: Path | str,
-    model: PeakSetSIGReg,
+    model: PeakSetJEPA,
     global_step: int,
     epoch: int,
     loss: float,
@@ -161,7 +161,7 @@ def prune_checkpoints(checkpoint_dir: Path, keep_top_k: int = 5) -> None:
 
 
 def load_resume_model_state(
-    model: PeakSetSIGReg,
+    model: PeakSetJEPA,
     state_dict: dict[str, torch.Tensor],
 ) -> None:
     model.load_state_dict(_model_state_without_legacy_pooler(state_dict))
@@ -204,7 +204,7 @@ def load_grad_scaler_state(
 
 
 def load_pretrained_weights(
-    model: PeakSetSIGReg,
+    model: PeakSetJEPA,
     checkpoint_path: str,
 ) -> None:
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
@@ -213,7 +213,7 @@ def load_pretrained_weights(
 
 
 def load_frozen_teacher_weights(
-    model: PeakSetSIGReg,
+    model: PeakSetJEPA,
     checkpoint_path: str,
 ) -> None:
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)

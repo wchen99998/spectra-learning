@@ -10,7 +10,7 @@ from typing import Any, cast
 import torch
 from ml_collections import config_dict
 
-from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.training.checkpointing import save_probe_checkpoint
 from spectra_learning.training.logging import _config_to_wandb_dict
 
@@ -39,7 +39,7 @@ def should_run_msg_probe_on_modal(config: config_dict.ConfigDict) -> bool:
 def save_and_submit_modal_msg_probe(
     *,
     config: config_dict.ConfigDict,
-    model: PeakSetSIGReg,
+    model: PeakSetJEPA,
     covariance_pooler: torch.nn.Module | None,
     checkpoint_dir: Path,
     workdir: Path,

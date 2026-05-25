@@ -51,7 +51,7 @@ from spectra_learning.probes.massspec.msg_probe import (
     run_msg_probe,
 )
 from spectra_learning.models.pooling import build_covariance_pooler_from_config
-from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.training.api import (
     build_grad_scaler,
     build_logger,
@@ -186,7 +186,7 @@ def train_and_evaluate(
 
 def initialize_frozen_teacher(
     config: config_dict.ConfigDict,
-    model: PeakSetSIGReg,
+    model: PeakSetJEPA,
     distributed: DistributedContext,
 ) -> None:
     if str(_config_get(config, "training_mode", "jepa")).lower() != "mae_teacher_jepa":
@@ -469,7 +469,7 @@ def restore_training_state(
     *,
     config: config_dict.ConfigDict,
     checkpoint_dir: Path,
-    model: PeakSetSIGReg,
+    model: PeakSetJEPA,
     optimizers: list[torch.optim.Optimizer],
     schedulers: list[LRSchedulerLike],
     steps_per_epoch: int,
@@ -574,7 +574,7 @@ def msg_probe_interval(
 
 def run_and_log_msg_probe(
     config: config_dict.ConfigDict,
-    model: PeakSetSIGReg,
+    model: PeakSetJEPA,
     device: torch.device,
     logger,
     variants: tuple[str, ...],
@@ -622,7 +622,7 @@ def run_and_log_msg_probe(
 def submit_and_log_modal_msg_probe(
     *,
     config: config_dict.ConfigDict,
-    model: PeakSetSIGReg,
+    model: PeakSetJEPA,
     covariance_pooler: torch.nn.Module | None,
     logger,
     checkpoint_dir: Path,

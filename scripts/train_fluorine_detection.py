@@ -35,7 +35,7 @@ from spectra_learning.data.spectra import (
     preprocess_peak_batch_torch,
 )
 from spectra_learning.models.factory import build_model_from_config
-from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pooling import CovariancePool
 from spectra_learning.probes.massspec.data import _normalize_spectra_intensity
 from spectra_learning.training.checkpointing import load_pretrained_weights
@@ -860,7 +860,7 @@ def _numpy_embedding_dtype(name: str) -> np.dtype:
 @torch.no_grad()
 def _write_embedding_cache_split(
     *,
-    model: PeakSetSIGReg,
+    model: PeakSetJEPA,
     data: FluorineData,
     split: str,
     output_dir: Path,
@@ -962,7 +962,7 @@ def ensure_embedding_cache(
     *,
     cache_dir: Path,
     source_data: FluorineData,
-    model: PeakSetSIGReg,
+    model: PeakSetJEPA,
     config_path: Path,
     checkpoint_path: Path,
     device: torch.device,
@@ -1015,7 +1015,7 @@ def _load_checkpoint_model(
     config_path: Path,
     checkpoint_path: Path,
     device: torch.device,
-) -> tuple[config_dict.ConfigDict, PeakSetSIGReg]:
+) -> tuple[config_dict.ConfigDict, PeakSetJEPA]:
     config = load_config(config_path)
     model = build_model_from_config(config)
     load_pretrained_weights(model, str(checkpoint_path))
@@ -1027,7 +1027,7 @@ def _load_checkpoint_model(
 
 def _build_checkpoint_feature_factory(
     *,
-    model: PeakSetSIGReg,
+    model: PeakSetJEPA,
     config: config_dict.ConfigDict,
     device: torch.device,
     train_covariance_pooler: bool,

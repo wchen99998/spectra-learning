@@ -8,14 +8,13 @@ from torch import nn
 from spectra_learning.models.ema import EMATeacherMixin
 from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.forwards import ForwardMixin
-from spectra_learning.models.losses import SIGReg
 from spectra_learning.models.objectives import CovariancePooler, ObjectiveMixin
-from spectra_learning.models.settings import PeakSetSIGRegSettings
-from spectra_learning.models.setup import configure_peak_set_sigreg
+from spectra_learning.models.settings import PeakSetJEPASettings
+from spectra_learning.models.setup import configure_peak_set_model
 from spectra_learning.models.targets import TargetProjectionMixin
 
 
-class PeakSetSIGReg(
+class PeakSetJEPA(
     EMATeacherMixin,
     TargetProjectionMixin,
     ObjectiveMixin,
@@ -42,8 +41,6 @@ class PeakSetSIGReg(
     jepa_target_normalization: str
     masked_token_input_mode: str
     masked_mz_sentinel: float
-    representation_regularizer: str
-    sigreg_lambda: float
     mae_loss_weight: float
     masked_token_loss_weight: float
     jepa_mae_loss_weight: float
@@ -78,17 +75,16 @@ class PeakSetSIGReg(
     teacher_target_projector: nn.Module | None
     jepa_mae_mz_head: nn.Linear | None
     jepa_mae_intensity_head: nn.Linear | None
-    sigreg: SIGReg
 
     def __init__(
         self,
-        settings: PeakSetSIGRegSettings | None = None,
+        settings: PeakSetJEPASettings | None = None,
         **overrides: Any,
     ) -> None:
         super().__init__()
-        configure_peak_set_sigreg(
+        configure_peak_set_model(
             self,
-            PeakSetSIGRegSettings.create(settings, **overrides),
+            PeakSetJEPASettings.create(settings, **overrides),
         )
 
     @overload

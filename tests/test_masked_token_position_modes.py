@@ -4,7 +4,7 @@ import torch
 
 from spectra_learning.models.common import TransformerBlock
 from spectra_learning.models.encoder import PeakSetEncoder
-from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pairformer import PairformerBlock
 from spectra_learning.models.peak_features import PeakFeatureEmbedder
 
@@ -23,9 +23,9 @@ def _build_model(
     predictor_dim: int | None = None,
     masked_token_input_mode: str = "latent_token",
     masked_mz_sentinel: float = -1.0,
-) -> PeakSetSIGReg:
+) -> PeakSetJEPA:
     torch.manual_seed(0)
-    model = PeakSetSIGReg(
+    model = PeakSetJEPA(
         model_dim=32,
         encoder_num_layers=2,
         encoder_num_heads=4,

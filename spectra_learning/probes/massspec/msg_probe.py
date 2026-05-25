@@ -14,7 +14,7 @@ from torch.nn.parallel import DistributedDataParallel
 
 from spectra_learning.data.gems.conversion import numpy_batch_to_torch
 from spectra_learning.models.pooling import CovariancePool
-from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.probes.massspec.data import MassSpecProbeData
 from spectra_learning.probes.massspec.msg_modules import (
     MsgLinearProbe,
@@ -608,7 +608,7 @@ def _run_covariance_morgan_pairwise_alignment(
     *,
     config: config_dict.ConfigDict,
     probe_data: MassSpecProbeData,
-    model: PeakSetSIGReg,
+    model: PeakSetJEPA,
     covariance_pooler: torch.nn.Module | None,
     feature_extractor: Callable[[ProbeBatch], torch.Tensor],
     move_batch: Callable[[dict[str, Any]], ProbeBatch],
@@ -1582,7 +1582,7 @@ def _run_msg_probe_once(
 def run_msg_probe(
     *,
     config: config_dict.ConfigDict,
-    model: PeakSetSIGReg,
+    model: PeakSetJEPA,
     device: torch.device,
     covariance_pooler: torch.nn.Module | None = None,
     on_epoch_end: Callable[[dict[str, float]], None] | None = None,

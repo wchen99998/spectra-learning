@@ -1,7 +1,7 @@
 from spectra_learning.training.naming import (
     _architecture_parts,
     _ema_parts,
-    _regularizer_parts,
+    _objective_parts,
     _target_parts,
 )
 
@@ -31,7 +31,7 @@ def test_ema_parts_are_suppressed_for_mae_mode() -> None:
 
 
 def test_mae_mode_names_primary_binned_objective() -> None:
-    parts = _regularizer_parts(
+    parts = _objective_parts(
         {
             "training_mode": "mae",
             "mae_loss_weight": 0.5,

@@ -91,10 +91,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_intensity_aware_context_fraction = 0.70
     cfg.jepa_intensity_aware_target_fraction = 0.30
 
-    # Regularization and pooling
-    cfg.representation_regularizer = "none"
-    cfg.sigreg_lambda = 0
-    cfg.sigreg_num_slices = 1024
+    # Pooling
     cfg.covariance_pooling_dim = 64
     cfg.train_covariance_pooling = False
 

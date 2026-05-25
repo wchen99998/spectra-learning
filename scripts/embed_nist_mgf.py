@@ -25,7 +25,7 @@ from spectra_learning.data.spectra import (
     preprocess_peak_batch_torch,
 )
 from spectra_learning.models.factory import build_model_from_config
-from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pooling import CovariancePool
 from spectra_learning.probes.massspec.data import MassSpecProbeData
 from spectra_learning.probes.massspec.msg_probe import iter_massspec_probe
@@ -68,7 +68,7 @@ def _config_get(config: Any, key: str, default: Any) -> Any:
 
 
 def _load_checkpoint_for_encoder(
-    model: PeakSetSIGReg,
+    model: PeakSetJEPA,
     checkpoint_path: Path,
 ) -> dict[str, Any]:
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
@@ -139,7 +139,7 @@ def _build_maccs_head(
 
 @torch.no_grad()
 def _encode_peak_tokens(
-    model: PeakSetSIGReg,
+    model: PeakSetJEPA,
     batch: dict[str, torch.Tensor],
     device: torch.device,
 ) -> torch.Tensor:
@@ -161,7 +161,7 @@ def _encode_peak_tokens(
 
 def train_covariance_pooler(
     *,
-    model: PeakSetSIGReg,
+    model: PeakSetJEPA,
     config: Any,
     device: torch.device,
     epochs: int,
@@ -388,7 +388,7 @@ def _parquet_table(
 @torch.no_grad()
 def embed_mgf_to_parquet(
     *,
-    model: PeakSetSIGReg,
+    model: PeakSetJEPA,
     pooler: CovariancePool,
     config: Any,
     mgf_path: Path,

@@ -1,12 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-from spectra_learning.models.losses import SIGReg, SlotwiseSIGReg
 from spectra_learning.models.peak_features import FourierFeatures, PeakFeatureEmbedder
-
-
-def _normalize_directions(directions: torch.Tensor) -> torch.Tensor:
-    return directions / directions.norm(dim=0, keepdim=True).clamp_min(1e-12)
 
 
 def test_raw_fourier_features_are_autocast_sensitive():
@@ -44,44 +39,6 @@ def test_peak_feature_embedder_runs_fourier_stem_in_fp32_under_autocast():
     expected = embedder(peak_mz, peak_intensity)
     with torch.autocast(device_type=peak_mz.device.type, dtype=torch.bfloat16):
         actual = embedder(peak_mz, peak_intensity)
-
-    assert actual.dtype == torch.float32
-    torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
-
-
-def test_sigreg_runs_fp32_under_autocast():
-    torch.manual_seed(0)
-    sigreg = SIGReg(num_slices=16)
-    proj = torch.randn(3, 5, 11)
-    valid_mask = torch.tensor(
-        [
-            [1.0, 1.0, 0.0, 1.0, 1.0],
-            [1.0, 0.0, 1.0, 1.0, 0.0],
-            [1.0, 1.0, 1.0, 0.0, 1.0],
-        ]
-    )
-    directions = _normalize_directions(torch.randn(11, sigreg.num_slices))
-
-    expected = sigreg(proj, valid_mask=valid_mask, directions=directions)
-    with torch.autocast(device_type=proj.device.type, dtype=torch.bfloat16):
-        actual = sigreg(proj, valid_mask=valid_mask, directions=directions)
-
-    assert actual.dtype == torch.float32
-    torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
-
-
-def test_slotwise_sigreg_runs_fp32_under_autocast():
-    torch.manual_seed(0)
-    sigreg = SlotwiseSIGReg(num_slices=16)
-    proj = torch.randn(3, 2, 5, 11)
-    valid_mask = torch.ones(3, 2, 5)
-    valid_mask[:, :, 2] = 0.0
-    valid_mask[1, 0, 4] = 0.0
-    directions = _normalize_directions(torch.randn(11, sigreg.num_slices))
-
-    expected = sigreg(proj, valid_mask=valid_mask, directions=directions)
-    with torch.autocast(device_type=proj.device.type, dtype=torch.bfloat16):
-        actual = sigreg(proj, valid_mask=valid_mask, directions=directions)
 
     assert actual.dtype == torch.float32
     torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)

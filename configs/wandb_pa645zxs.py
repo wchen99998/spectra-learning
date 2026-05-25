@@ -83,10 +83,7 @@ def get_config() -> config_dict.ConfigDict:
     for key, value in aware_mixed.items():
         setattr(cfg, f"jepa_intensity_aware_{key}", value)
 
-    # Regularization and pooling
-    cfg.representation_regularizer = "none"
-    cfg.sigreg_lambda = 0
-    cfg.sigreg_num_slices = 1024
+    # Pooling
     cfg.covariance_pooling_dim = 64
 
     # EMA teacher

@@ -6,8 +6,7 @@ from unittest import mock
 
 import torch
 
-from spectra_learning.models.losses import SlotwiseSIGReg
-from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pairformer import PairFeatureEmbedder
 from spectra_learning.models.peak_features import FourierFeatures, PeakFeatureEmbedder
 from spectra_learning.models.pooling import CovariancePool
@@ -170,7 +169,7 @@ class FourierFeatureTests(unittest.TestCase):
 
 
 class PairformerEncoderTests(unittest.TestCase):
-    def _build_model(self, **kwargs) -> PeakSetSIGReg:
+    def _build_model(self, **kwargs) -> PeakSetJEPA:
         model_kwargs = {
             "model_dim": 32,
             "encoder_num_layers": 1,
@@ -185,7 +184,7 @@ class PairformerEncoderTests(unittest.TestCase):
             "pairformer_pair_feature_hidden_dim": 16,
         }
         model_kwargs.update(kwargs)
-        return PeakSetSIGReg(**model_kwargs)
+        return PeakSetJEPA(**model_kwargs)
 
     def test_forward_uses_precursor_mass_features(self):
         model = self._build_model()
@@ -295,7 +294,7 @@ class PairformerEncoderTests(unittest.TestCase):
 
 
 class BlockJEPATests(unittest.TestCase):
-    def _build_model(self, **kwargs) -> PeakSetSIGReg:
+    def _build_model(self, **kwargs) -> PeakSetJEPA:
         model_kwargs = {
             "model_dim": 32,
             "encoder_num_layers": 1,
@@ -305,7 +304,7 @@ class BlockJEPATests(unittest.TestCase):
             "jepa_num_target_blocks": 2,
         }
         model_kwargs.update(kwargs)
-        return PeakSetSIGReg(**model_kwargs)
+        return PeakSetJEPA(**model_kwargs)
 
     def test_forward_loss_is_finite(self):
         model = self._build_model()
@@ -405,241 +404,17 @@ class BlockJEPATests(unittest.TestCase):
             self.assertIn(key, collapse_data, f"Missing key: {key}")
             self.assertFalse(collapse_data[key].requires_grad)
 
-    def test_sigreg_on_encoder_output_contributes_to_loss(self):
-        for regularizer in ("sigreg-enc", "slot-sigreg-enc"):
-            with self.subTest(regularizer=regularizer):
-                model = self._build_model(
-                    masked_token_loss_weight=1.0,
-                    representation_regularizer=regularizer,
-                    sigreg_lambda=0.02,
-                )
-                if regularizer.startswith("slot-"):
-                    self.assertIsInstance(model.sigreg, SlotwiseSIGReg)
-                batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-                metrics = model.forward_augmented(batch)
-                self.assertIn("sigreg_term", metrics)
-                self.assertIn("sigreg_loss", metrics)
-                self.assertGreater(float(metrics["sigreg_loss"].detach()), 0.0)
-                self.assertGreater(float(metrics["sigreg_term"].detach()), 0.0)
-                self.assertTrue(
-                    torch.allclose(
-                        metrics["loss"],
-                        metrics["masked_prediction_term"] + metrics["sigreg_term"],
-                    )
-                )
-
-    def test_sigreg_on_predictor_outputs_uses_masked_predictions(self):
-        for regularizer in ("sigreg-pred", "slot-sigreg-pred", "slog-sigreg-pred"):
-            with self.subTest(regularizer=regularizer):
-                model = self._build_model(
-                    encoder_num_layers=2,
-                    jepa_target_layers=[1, 2],
-                    representation_regularizer=regularizer,
-                    sigreg_lambda=0.02,
-                    predictor_dim=16,
-                )
-                if regularizer.startswith("slot-") or regularizer.startswith("slog-"):
-                    self.assertIsInstance(model.sigreg, SlotwiseSIGReg)
-                batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-                captured: dict[str, torch.Tensor] = {}
-
-                def fake_sigreg_forward(
-                    proj: torch.Tensor,
-                    valid_mask: torch.Tensor | None = None,
-                ) -> torch.Tensor:
-                    assert valid_mask is not None
-                    captured["proj"] = proj.detach().clone()
-                    captured["valid_mask"] = valid_mask.detach().clone()
-                    return proj.new_zeros(())
-
-                with mock.patch.object(
-                    model.sigreg,
-                    "forward",
-                    side_effect=fake_sigreg_forward,
-                ):
-                    model.forward_augmented(batch)
-
-                self.assertIn("proj", captured)
-                self.assertEqual(
-                    captured["proj"].shape,
-                    (*batch["target_masks"].shape, model.jepa_target_dim),
-                )
-                self.assertNotEqual(captured["proj"].shape[-1], model.predictor_dim)
-                torch.testing.assert_close(
-                    captured["valid_mask"],
-                    batch["target_masks"].float(),
-                )
-                self.assertEqual(captured["proj"].shape[-1], model.jepa_target_dim)
-                self.assertNotEqual(
-                    captured["proj"].shape[-1], model.target_projector_dim
-                )
-
-    def test_sigreg_on_encoder_and_predictor_outputs_combines_losses(self):
-        for regularizer in ("sigreg-enc-pred", "slot-sigreg-enc-pred"):
-            with self.subTest(regularizer=regularizer):
-                model = self._build_model(
-                    encoder_num_layers=2,
-                    jepa_target_layers=[1, 2],
-                    representation_regularizer=regularizer,
-                    sigreg_lambda=0.02,
-                    predictor_dim=16,
-                )
-                if regularizer.startswith("slot-"):
-                    self.assertIsInstance(model.sigreg, SlotwiseSIGReg)
-                batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-                captured: list[tuple[torch.Tensor, torch.Tensor]] = []
-
-                def fake_sigreg_forward(
-                    proj: torch.Tensor,
-                    valid_mask: torch.Tensor | None = None,
-                ) -> torch.Tensor:
-                    assert valid_mask is not None
-                    captured.append(
-                        (proj.detach().clone(), valid_mask.detach().clone())
-                    )
-                    return proj.new_tensor(float(len(captured)))
-
-                with mock.patch.object(
-                    model.sigreg,
-                    "forward",
-                    side_effect=fake_sigreg_forward,
-                ):
-                    metrics = model.forward_augmented(batch)
-
-                self.assertEqual(len(captured), 2)
-                encoder_proj, encoder_mask = captured[0]
-                predictor_proj, predictor_mask = captured[1]
-                self.assertEqual(
-                    encoder_proj.shape,
-                    (*batch["context_mask"].shape, model.model_dim),
-                )
-                torch.testing.assert_close(
-                    encoder_mask,
-                    batch["context_mask"].float(),
-                )
-                self.assertEqual(
-                    predictor_proj.shape,
-                    (*batch["target_masks"].shape, model.jepa_target_dim),
-                )
-                torch.testing.assert_close(
-                    predictor_mask,
-                    batch["target_masks"].float(),
-                )
-                torch.testing.assert_close(
-                    metrics["sigreg_encoder_loss"],
-                    metrics["sigreg_encoder_loss"].new_tensor(1.0),
-                )
-                torch.testing.assert_close(
-                    metrics["sigreg_predictor_loss"],
-                    metrics["sigreg_predictor_loss"].new_tensor(2.0),
-                )
-                torch.testing.assert_close(
-                    metrics["sigreg_loss"],
-                    metrics["sigreg_loss"].new_tensor(3.0),
-                )
-
-    def test_sigreg_on_projected_outputs_uses_projected_student_targets(self):
-        for regularizer in ("sigreg-proj", "slot-sigreg-proj", "slog-sigreg-proj"):
-            with self.subTest(regularizer=regularizer):
-                model = self._build_model(
-                    encoder_num_layers=2,
-                    representation_regularizer=regularizer,
-                    sigreg_lambda=0.02,
-                    jepa_target_layers=[1, 2],
-                )
-                if regularizer.startswith("slot-") or regularizer.startswith("slog-"):
-                    self.assertIsInstance(model.sigreg, SlotwiseSIGReg)
-                batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-                captured: list[tuple[torch.Tensor, torch.Tensor]] = []
-
-                def fake_sigreg_forward(
-                    proj: torch.Tensor,
-                    valid_mask: torch.Tensor | None = None,
-                ) -> torch.Tensor:
-                    assert valid_mask is not None
-                    captured.append(
-                        (proj.detach().clone(), valid_mask.detach().clone())
-                    )
-                    return proj.new_tensor(float(len(captured)))
-
-                with mock.patch.object(
-                    model.sigreg,
-                    "forward",
-                    side_effect=fake_sigreg_forward,
-                ):
-                    metrics = model.forward_augmented(batch)
-
-                self.assertEqual(len(captured), 1)
-                student_proj, student_mask = captured[0]
-                self.assertEqual(
-                    student_proj.shape,
-                    (*batch["target_masks"].shape, model.target_projector_dim),
-                )
-                torch.testing.assert_close(
-                    student_mask,
-                    batch["target_masks"].float(),
-                )
-                torch.testing.assert_close(
-                    metrics["sigreg_loss"],
-                    metrics["sigreg_loss"].new_tensor(1.0),
-                )
-
-    def test_sigreg_on_encoder_outputs_uses_visible_context_only(self):
-        for regularizer in ("sigreg-enc", "slot-sigreg-enc"):
-            with self.subTest(regularizer=regularizer):
-                model = self._build_model(
-                    encoder_num_layers=2,
-                    representation_regularizer=regularizer,
-                    sigreg_lambda=0.02,
-                    jepa_target_layers=[1, 2],
-                )
-                batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-                captured: list[tuple[torch.Tensor, torch.Tensor]] = []
-
-                def fake_sigreg_forward(
-                    proj: torch.Tensor,
-                    valid_mask: torch.Tensor | None = None,
-                ) -> torch.Tensor:
-                    assert valid_mask is not None
-                    captured.append(
-                        (proj.detach().clone(), valid_mask.detach().clone())
-                    )
-                    return proj.new_tensor(float(len(captured)))
-
-                with mock.patch.object(
-                    model.sigreg,
-                    "forward",
-                    side_effect=fake_sigreg_forward,
-                ):
-                    metrics = model.forward_augmented(batch)
-
-                self.assertEqual(len(captured), 1)
-                context_proj, context_mask = captured[0]
-                self.assertEqual(
-                    context_proj.shape,
-                    (*batch["context_mask"].shape, model.model_dim),
-                )
-                torch.testing.assert_close(
-                    context_mask,
-                    batch["context_mask"].float(),
-                )
-                torch.testing.assert_close(metrics["sigreg_loss"], metrics["sigreg_loss"].new_tensor(1.0))
-
     def test_covariance_pooling_adds_unsupervised_loss(self):
         model = self._build_model(
             covariance_pooling_dim=4,
-            sigreg_lambda=0.03,
         )
         pooler = CovariancePool(input_dim=model.model_dim, compressed_dim=4)
         self.assertFalse(hasattr(model, "covariance_pooler"))
         self.assertTrue(model.train_covariance_pooling)
         self.assertTrue(all(param.requires_grad for param in pooler.parameters()))
-        self.assertFalse(hasattr(model, "covariance_sigreg"))
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
         metrics = model.forward_augmented(batch, covariance_pooler=pooler)
 
-        self.assertNotIn("covariance_sigreg_loss", metrics)
-        self.assertNotIn("covariance_sigreg_term", metrics)
         self.assertIn("covariance_pooling_loss", metrics)
         self.assertIn("covariance_pooling_term", metrics)
         self.assertTrue(torch.isfinite(metrics["covariance_pooling_loss"]).item())

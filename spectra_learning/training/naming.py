@@ -20,7 +20,7 @@ def auto_run_name(config: Any) -> str:
     parts.extend(_architecture_parts(config))
     parts.extend(_optimization_parts(config))
     parts.extend(_target_parts(config))
-    parts.extend(_regularizer_parts(config))
+    parts.extend(_objective_parts(config))
     parts.extend(_ema_parts(config))
     suffix = str(config.get("run_name_suffix", "")).strip()
     if suffix:
@@ -103,12 +103,8 @@ def _target_parts(config: Any) -> list[str]:
     return parts
 
 
-def _regularizer_parts(config: Any) -> list[str]:
+def _objective_parts(config: Any) -> list[str]:
     parts: list[str] = []
-    regularizer = str(config.get("representation_regularizer", "none")).lower()
-    if regularizer and regularizer != "none":
-        parts.append(regularizer)
-        parts.append(f"lam{float(config.get('sigreg_lambda', 0.0)):.0e}")
     if str(config.get("training_mode", "jepa")).lower() == "mae":
         parts.append(f"maew{float(config.get('mae_loss_weight', 1.0)):.0e}")
         parts.append(f"mzbin{float(config.get('jepa_mae_mz_bin_size', 2.5)):g}")

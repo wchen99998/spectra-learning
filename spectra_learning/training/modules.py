@@ -1,13 +1,13 @@
 import torch
 from typing import cast
 
-from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.models.model import PeakSetJEPA
 
 
 class PretrainModule(torch.nn.Module):
     def __init__(
         self,
-        model: PeakSetSIGReg,
+        model: PeakSetJEPA,
         covariance_pooler: torch.nn.Module | None = None,
     ) -> None:
         super().__init__()
@@ -31,7 +31,7 @@ class PretrainModule(torch.nn.Module):
 
 def split_pretrain_module(
     module: torch.nn.Module,
-) -> tuple[PeakSetSIGReg, torch.nn.Module | None]:
+) -> tuple[PeakSetJEPA, torch.nn.Module | None]:
     if isinstance(module, PretrainModule):
         return module.model, module.covariance_pooler
-    return cast(PeakSetSIGReg, module), None
+    return cast(PeakSetJEPA, module), None

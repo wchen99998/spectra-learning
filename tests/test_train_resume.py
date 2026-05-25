@@ -9,7 +9,7 @@ import pytest
 import torch
 from ml_collections import config_dict
 
-from spectra_learning.models.model import PeakSetSIGReg
+from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pooling import CovariancePool
 from spectra_learning.training.checkpointing import (
     covariance_pooler_checkpoint_path,
@@ -42,7 +42,7 @@ from spectra_learning.training.logging import WandbMetricLogger, log_msg_probe_m
 from spectra_learning.training.schedules import WarmupCosineSchedule
 
 
-def _small_model(**overrides) -> PeakSetSIGReg:
+def _small_model(**overrides) -> PeakSetJEPA:
     kwargs = dict(
         model_dim=64,
         encoder_num_layers=2,
@@ -55,7 +55,7 @@ def _small_model(**overrides) -> PeakSetSIGReg:
         num_peaks=8,
     )
     kwargs.update(overrides)
-    return PeakSetSIGReg(**kwargs)
+    return PeakSetJEPA(**kwargs)
 
 
 def _optimizer_param_ids(optimizer: torch.optim.Optimizer) -> set[int]:
@@ -886,23 +886,6 @@ def test_build_optimizers_splits_official_muon_predictor_lr():
     assert isinstance(optimizers[2], torch.optim.AdamW)
     assert isinstance(optimizers[3], torch.optim.AdamW)
     assert predictor_muon_ids | predictor_adamw_ids == predictor_param_ids
-
-
-def test_load_resume_model_state_rejects_sigreg_checkpoint_drift():
-    model = _small_model(representation_regularizer="sigreg", sigreg_lambda=0.02)
-    resume_state = model.state_dict()
-    for key in ("sigreg.t", "sigreg.phi", "sigreg.weights"):
-        resume_state.pop(key)
-    for key in tuple(resume_state):
-        if key.startswith("target_projector."):
-            resume_state.pop(key)
-    resume_state["sigreg_lambda_target"] = torch.tensor(0.02)
-    resume_state["sigreg_lambda_current"] = torch.tensor(0.02)
-    resume_state["sigreg_lambda_step"] = torch.tensor(0)
-
-    restored = _small_model(representation_regularizer="sigreg", sigreg_lambda=0.02)
-    with pytest.raises(RuntimeError, match="Missing key"):
-        load_resume_model_state(restored, resume_state)
 
 
 def test_load_resume_model_state_rejects_removed_cls_predictor_keys():

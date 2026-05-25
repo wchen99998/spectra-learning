@@ -10,10 +10,6 @@ Usage:
     # Parallel sweep (launches all experiments concurrently)
     modal run modal_train.py --sweep sweep_optim
     modal run modal_train.py --sweep sweep_optim_refine
-    modal run modal_train.py --sweep sweep_sigreg_compare
-    modal run modal_train.py --sweep sweep_10m_sigreg_ablation
-    modal run modal_train.py --sweep sweep_10m_sigreg_log_lambda
-    modal run modal_train.py --sweep sweep_10m_sigreg_high_lambda
     modal run modal_train.py --sweep sweep_10m_masking
     modal run modal_train.py --sweep sweep_10m_deep_supervision
     modal run modal_train.py --sweep sweep_10m_batch_size_flops_matched
@@ -21,8 +17,6 @@ Usage:
     modal run modal_train.py --config configs/gems_small.py --sweep sweep_gems_small_predictor_scale
     modal run modal_train.py --config configs/gems_small.py --sweep sweep_gems_small_predictor_scale_depth
     modal run modal_train.py --config configs/gems_small.py --sweep sweep_gems_small_scale_100m_300m --detach
-    modal run modal_train.py --config configs/gems_small_norm.py --sweep sweep_sigreg_lambda_wide --detach
-    modal run modal_train.py --config configs/gems_small_norm.py --sweep sweep_gems_small_norm_sigreg_lambda --detach
 
 Setup:
     1. modal setup
@@ -120,8 +114,6 @@ BEST_SWEEP_OPTIM = {
     "jepa_target_normalization": "zscore",
     "learning_rate": 2e-4,
     "weight_decay": 0.1,
-    "representation_regularizer": "none",
-    "sigreg_lambda": 0.02,
 }
 
 TEN_M_BACKBONE = {
@@ -143,16 +135,6 @@ TEN_M_BEST_SWEEP_OPTIM = {
     **TEN_M_BACKBONE,
 }
 
-NOEMA_SIGREG_LOG_LAMBDAS = [10.0 ** exp for exp in (-4.0, -3.5, -3.0, -2.5, -2.0, -1.5, -1.0)]
-NOEMA_SIGREG_HIGH_LAMBDAS = [
-    ("2e-02", 0.02),
-    ("2e-01", 0.2),
-    ("2e00", 2.0),
-    ("1e01", 10.0),
-    ("5e01", 50.0),
-]
-SIGREG_LAMBDA_WIDE_VALUES = (5e-06, 1e-06,)
-SIGREG_SAMPLE_SCALE_TAG = "sigcfscale"
 JEPA_MASKING_SWEEP_TAG = "mask"
 JEPA_DEEP_SUPERVISION_SWEEP_TAG = "dsup"
 BATCH_SIZE_SWEEP_TAG = "bsflops"
@@ -396,65 +378,10 @@ SWEEPS: dict[str, list[dict]] = {
         {**BEST_SWEEP_OPTIM, "learning_rate": 3.0e-4, "weight_decay": 0.10},
         {**BEST_SWEEP_OPTIM, "learning_rate": 3.0e-4, "weight_decay": 0.15},
     ],
-    # Direct A/B on the current best gems_small recipe.
-    #
-    # This keeps the winning JEPA stabilization settings fixed and changes only
-    # the representation regularizer so the comparison is attributable.
-    "sweep_sigreg_compare": [
-        {
-            **BEST_SWEEP_OPTIM,
-            "run_name_suffix": "sigcmp-none",
-        },
-        {
-            **BEST_SWEEP_OPTIM,
-            "representation_regularizer": "sigreg-proj",
-            "run_name_suffix": "sigcmp-sigreg-proj",
-        },
-    ],
-    # Controlled 10M-scale sigreg ablation on the shared-backbone target path.
-    #
-    # Backbone: 256d / 8L / 8H with 128d predictor and 4 predictor layers.
-    "sweep_10m_sigreg_ablation": [
-        {
-            **TEN_M_BEST_SWEEP_OPTIM,
-            "representation_regularizer": "none",
-            "run_name_suffix": "10m-none",
-        },
-        {
-            **TEN_M_BEST_SWEEP_OPTIM,
-            "representation_regularizer": "sigreg-proj",
-            "run_name_suffix": "10m-sigreg-proj",
-        },
-    ],
-    # Shared-backbone SIGREG sweep over a broad log-scale lambda range.
-    "sweep_10m_sigreg_log_lambda": [
-        {
-            **TEN_M_BEST_SWEEP_OPTIM,
-            "representation_regularizer": "sigreg-proj",
-            "sigreg_lambda": sigreg_lambda,
-            "run_name_suffix": (
-                f"10m-sigreg-proj-lam{sigreg_lambda:.0e}-{SIGREG_SAMPLE_SCALE_TAG}"
-            ),
-        }
-        for sigreg_lambda in NOEMA_SIGREG_LOG_LAMBDAS
-    ],
-    # Follow-up sweep with much stronger SIGREG weights.
-    "sweep_10m_sigreg_high_lambda": [
-        {
-            **TEN_M_BEST_SWEEP_OPTIM,
-            "representation_regularizer": "sigreg-proj",
-            "sigreg_lambda": sigreg_lambda,
-            "run_name_suffix": (
-                f"10m-sigreg-proj-hi-lam{label}-{SIGREG_SAMPLE_SCALE_TAG}"
-            ),
-        }
-        for label, sigreg_lambda in NOEMA_SIGREG_HIGH_LAMBDAS
-    ],
     # Sweep only the JEPA masking pattern around the current GeMS default.
     "sweep_10m_masking": [
         {
             **TEN_M_BEST_SWEEP_OPTIM,
-            "representation_regularizer": "none",
             "run_name_suffix": f"10m-{JEPA_MASKING_SWEEP_TAG}-{label}",
             **masking_overrides,
         }
@@ -468,7 +395,6 @@ SWEEPS: dict[str, list[dict]] = {
     "sweep_10m_deep_supervision": [
         {
             **TEN_M_BEST_SWEEP_OPTIM,
-            "representation_regularizer": "none",
             "jepa_num_target_blocks": 2,
             "jepa_context_fraction": 0.35,
             "jepa_target_fraction": 0.20,
@@ -486,7 +412,6 @@ SWEEPS: dict[str, list[dict]] = {
     "sweep_10m_batch_size_flops_matched": [
         {
             **TEN_M_BEST_SWEEP_OPTIM,
-            "representation_regularizer": "none",
             "jepa_num_target_blocks": 2,
             "jepa_context_fraction": 0.35,
             "jepa_target_fraction": 0.20,
@@ -554,20 +479,6 @@ SWEEPS: dict[str, list[dict]] = {
             "run_name_suffix": f"{GEMS_SMALL_SCALE_SWEEP_TAG}-300m-12h",
             **GEMS_SMALL_300M,
         },
-    ],
-    "sweep_sigreg_lambda_wide": [
-        {
-            "sigreg_lambda": sigreg_lambda,
-            "run_name_suffix": f"sigreg-lam{sigreg_lambda:.0e}",
-        }
-        for sigreg_lambda in SIGREG_LAMBDA_WIDE_VALUES
-    ],
-    "sweep_gems_small_norm_sigreg_lambda": [
-        {
-            "sigreg_lambda": sigreg_lambda,
-            "run_name_suffix": f"norm-sigreg-lam{sigreg_lambda:.0e}",
-        }
-        for sigreg_lambda in (3e-4, 1e-3, 3e-3, 1e-2)
     ],
 }
 
