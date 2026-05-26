@@ -221,8 +221,7 @@ class ObjectiveMixin:
     ) -> Int[Tensor, "batch peaks peaks"]:
         mz_da = peak_mz.float() * self.distogram_mz_max
         pair_distance = (mz_da.unsqueeze(2) - mz_da.unsqueeze(1)).abs()
-        bin_width = self.distogram_mz_max / self.distogram_num_bins
-        return torch.floor(pair_distance / bin_width).long().clamp(
+        return torch.floor(pair_distance / self.jepa_mae_mz_bin_size).long().clamp(
             0,
             self.distogram_num_bins - 1,
         )

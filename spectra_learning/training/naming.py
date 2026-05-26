@@ -86,9 +86,11 @@ def _target_parts(config: Any) -> list[str]:
 
 def _objective_parts(config: Any) -> list[str]:
     parts: list[str] = []
+    has_mz_bin_part = False
     if str(config.get("training_mode", "jepa")).lower() == "mae":
         parts.append(f"maew{float(config.get('mae_loss_weight', 1.0)):.0e}")
         parts.append(f"mzbin{float(config.get('jepa_mae_mz_bin_size', 2.5)):g}")
+        has_mz_bin_part = True
         parts.append(
             f"intbin{float(config.get('jepa_mae_intensity_bin_size', 0.1)):g}"
         )
@@ -96,13 +98,15 @@ def _objective_parts(config: Any) -> list[str]:
         parts.append("jepamae")
         parts.append(f"maew{jepa_mae_loss_weight:.0e}")
         parts.append(f"mzbin{float(config.get('jepa_mae_mz_bin_size', 2.5)):g}")
+        has_mz_bin_part = True
         parts.append(
             f"intbin{float(config.get('jepa_mae_intensity_bin_size', 0.1)):g}"
         )
     if (distogram_loss_weight := float(config.get("distogram_loss_weight", 0.0))) > 0:
         parts.append("disto")
         parts.append(f"distow{distogram_loss_weight:.0e}")
-        parts.append(f"distobins{int(config.get('distogram_num_bins', 64))}")
+        if not has_mz_bin_part:
+            parts.append(f"mzbin{float(config.get('jepa_mae_mz_bin_size', 2.5)):g}")
     return parts
 
 

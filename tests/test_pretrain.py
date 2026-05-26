@@ -592,15 +592,16 @@ class BlockJEPATests(unittest.TestCase):
             + metrics["jepa_mae_term"],
         )
 
-    def test_distogram_targets_use_configured_bins(self):
+    def test_distogram_targets_use_shared_mz_bin_size(self):
         model = self._build_model(
             distogram_loss_weight=1.0,
-            distogram_num_bins=4,
+            jepa_mae_mz_bin_size=250.0,
         )
         peak_mz = torch.tensor([[0.0, 0.249, 0.25, 1.0, 1.5]])
 
         targets = model._distogram_targets(peak_mz)
 
+        self.assertEqual(model.distogram_num_bins, 4)
         torch.testing.assert_close(
             targets[0, 0],
             torch.tensor([0, 0, 1, 3, 3]),
@@ -633,12 +634,13 @@ class BlockJEPATests(unittest.TestCase):
     def test_distogram_logits_symmetrise_predictor_pairs(self):
         model = self._build_model(
             distogram_loss_weight=1.0,
-            distogram_num_bins=4,
+            jepa_mae_mz_bin_size=250.0,
         )
         predictor_pair = torch.randn(2, 1, 4, 4, model.predictor_pair_dim)
 
         logits = model._distogram_logits(predictor_pair)
 
+        self.assertEqual(logits.shape[-1], 4)
         torch.testing.assert_close(logits[:, :, 1, 2], logits[:, :, 2, 1])
 
     def test_distogram_loss_contributes_to_loss(self):

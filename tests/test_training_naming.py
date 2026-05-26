@@ -44,6 +44,37 @@ def test_mae_mode_names_primary_binned_objective() -> None:
     assert parts == ["maew5e-01", "mzbin2.5", "intbin0.1"]
 
 
+def test_distogram_objective_uses_shared_mz_bin_name() -> None:
+    parts = _objective_parts(
+        {
+            "distogram_loss_weight": 1.0,
+            "jepa_mae_mz_bin_size": 0.1,
+        }
+    )
+
+    assert parts == ["disto", "distow1e+00", "mzbin0.1"]
+
+
+def test_distogram_objective_does_not_duplicate_mae_mz_bin_name() -> None:
+    parts = _objective_parts(
+        {
+            "jepa_mae_loss_weight": 1.0,
+            "distogram_loss_weight": 1.0,
+            "jepa_mae_mz_bin_size": 0.1,
+            "jepa_mae_intensity_bin_size": 0.1,
+        }
+    )
+
+    assert parts == [
+        "jepamae",
+        "maew1e+00",
+        "mzbin0.1",
+        "intbin0.1",
+        "disto",
+        "distow1e+00",
+    ]
+
+
 def test_mae_mode_does_not_name_jepa_target_layers() -> None:
     assert _target_parts(
         {"training_mode": "mae", "jepa_target_layers": [1, 2], "model_dim": 32}

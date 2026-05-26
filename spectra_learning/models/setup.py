@@ -130,14 +130,20 @@ def _configure_losses(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
         0.0 if model.training_mode == "mae" else cfg.jepa_mae_loss_weight
     )
     model.distogram_loss_weight = cfg.distogram_loss_weight
-    model.distogram_num_bins = cfg.distogram_num_bins
     model.distogram_mz_max = cfg.distogram_mz_max
     model.jepa_mae_mz_bin_size = cfg.jepa_mae_mz_bin_size
     model.jepa_mae_intensity_bin_size = cfg.jepa_mae_intensity_bin_size
     model.jepa_mae_mz_max = cfg.jepa_mae_mz_max
     model.jepa_mae_intensity_max = cfg.jepa_mae_intensity_max
-    model.jepa_mae_num_mz_bins = math.ceil(model.jepa_mae_mz_max / model.jepa_mae_mz_bin_size)
-    model.jepa_mae_num_intensity_bins = math.ceil(model.jepa_mae_intensity_max / model.jepa_mae_intensity_bin_size)
+    model.jepa_mae_num_mz_bins = math.ceil(
+        model.jepa_mae_mz_max / model.jepa_mae_mz_bin_size
+    )
+    model.distogram_num_bins = math.ceil(
+        model.distogram_mz_max / model.jepa_mae_mz_bin_size
+    )
+    model.jepa_mae_num_intensity_bins = math.ceil(
+        model.jepa_mae_intensity_max / model.jepa_mae_intensity_bin_size
+    )
 
 
 def _build_encoder(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
