@@ -54,6 +54,22 @@ class TargetProjectionMixin:
         pair: Float[Tensor, "batch tokens tokens pair"],
         visible_mask: Bool[Tensor, "batch tokens"],
     ) -> Float[Tensor, "batch tokens dim"]:
+        x, _pair = self._predict_masked_latents_and_pair(
+            x,
+            pair,
+            visible_mask,
+        )
+        return x
+
+    def _predict_masked_latents_and_pair(
+        self: Any,
+        x: Float[Tensor, "batch tokens dim"],
+        pair: Float[Tensor, "batch tokens tokens pair"],
+        visible_mask: Bool[Tensor, "batch tokens"],
+    ) -> tuple[
+        Float[Tensor, "batch tokens dim"],
+        Float[Tensor, "batch tokens tokens pair"],
+    ]:
         x = self._add_predictor_positions(x)
         x = self.encoder_to_predictor_proj(x)
         pair = self._add_predictor_pair_positions(pair)
@@ -66,7 +82,9 @@ class TargetProjectionMixin:
                     visible_mask,
                 )
         x = self.predictor_final_norm(x)
-        return x
+        pair_mask = visible_mask.unsqueeze(2) & visible_mask.unsqueeze(1)
+        pair = pair * pair_mask.unsqueeze(-1).to(dtype=pair.dtype)
+        return x, pair
 
     def project_targets(
         self: Any,
@@ -98,6 +116,22 @@ class TargetProjectionMixin:
                 visible_mask,
             )
         )
+
+    def predict_masked_target_features_with_pair(
+        self: Any,
+        x: Float[Tensor, "batch tokens dim"],
+        pair: Float[Tensor, "batch tokens tokens pair"],
+        visible_mask: Bool[Tensor, "batch tokens"],
+    ) -> tuple[
+        Float[Tensor, "batch tokens target_dim"],
+        Float[Tensor, "batch tokens tokens pair"],
+    ]:
+        x, pair = self._predict_masked_latents_and_pair(
+            x,
+            pair,
+            visible_mask,
+        )
+        return self.masked_latent_readout(x), pair
 
     def predict_masked_targets(
         self: Any,

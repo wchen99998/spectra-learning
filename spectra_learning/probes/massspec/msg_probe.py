@@ -15,7 +15,10 @@ from torch.nn.parallel import DistributedDataParallel
 from spectra_learning.data.gems.conversion import numpy_batch_to_torch
 from spectra_learning.models.pooling import CovariancePool
 from spectra_learning.models.model import PeakSetJEPA
-from spectra_learning.probes.massspec.data import MassSpecProbeData
+from spectra_learning.probes.massspec.data import (
+    MassSpecProbeData,
+    probe_local_batch_size,
+)
 from spectra_learning.probes.massspec.msg_modules import (
     MsgLinearProbe,
     MsgSequenceProbe,
@@ -134,7 +137,10 @@ def probe_steps_per_epoch(
         size = min(size, max_samples)
     if distributed_world_size > 1:
         size = math.ceil(size / distributed_world_size)
-    batch_size = int(probe_data.batch_size)
+    batch_size = probe_local_batch_size(
+        int(probe_data.batch_size),
+        distributed_world_size,
+    )
     return size // batch_size if drop_remainder else math.ceil(size / batch_size)
 
 
@@ -532,6 +538,7 @@ def _collect_covariance_embeddings_for_indices(
             local_indices,
             peak_ordering=peak_ordering,
             drop_remainder=False,
+            distributed_world_size=_distributed_world_size(distributed),
         ):
             batch = move_batch(batch)
             peak_embeddings = feature_extractor(batch)

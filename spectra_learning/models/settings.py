@@ -25,6 +25,9 @@ class PeakSetJEPASettings:
     masked_token_loss_weight: float = 0.0
     mae_loss_weight: float = 1.0
     jepa_mae_loss_weight: float = 0.0
+    distogram_loss_weight: float = 0.0
+    distogram_num_bins: int = 64
+    distogram_mz_max: float = PEAK_MZ_MAX
     jepa_mae_mz_bin_size: float = 2.5
     jepa_mae_intensity_bin_size: float = 0.1
     jepa_mae_mz_max: float = PEAK_MZ_MAX
@@ -97,6 +100,7 @@ def _apply_derived_defaults(values: dict[str, Any], config: Any) -> None:
     precursor_mz_max = float(_config_get(config, "max_precursor_mz", peak_mz_max))
     values["encoder_fourier_input_scale"] = peak_mz_max
     values["jepa_mae_mz_max"] = peak_mz_max
+    values["distogram_mz_max"] = peak_mz_max
     values["pairformer_mz_scale"] = peak_mz_max
     values["pairformer_precursor_mz_scale"] = precursor_mz_max
     values["pairformer_fourier_x_max"] = peak_mz_max
@@ -137,6 +141,9 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "masked_token_loss_weight": float,
     "mae_loss_weight": float,
     "jepa_mae_loss_weight": float,
+    "distogram_loss_weight": float,
+    "distogram_num_bins": int,
+    "distogram_mz_max": float,
     "jepa_mae_mz_bin_size": float,
     "jepa_mae_intensity_bin_size": float,
     "jepa_mae_mz_max": float,

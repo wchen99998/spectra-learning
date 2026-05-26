@@ -2,6 +2,7 @@ import gc
 import logging
 import math
 import random
+import signal
 import time
 import warnings
 from pathlib import Path
@@ -65,15 +66,40 @@ inductor_config.fx_graph_cache = True
 inductor_config.epilogue_fusion = True
 inductor_config.shape_padding = True
 
+_STOP_REQUESTED = False
+
 
 def _config_get(config: config_dict.ConfigDict, key: str, default: Any) -> Any:
     return config.get(key, default)
+
+
+def _handle_stop_signal(signum: int, frame: object) -> None:
+    del frame
+    global _STOP_REQUESTED
+    _STOP_REQUESTED = True
+    logging.warning("Received signal %d; stopping after the current step.", signum)
+
+
+def install_stop_signal_handlers() -> None:
+    signal.signal(signal.SIGTERM, _handle_stop_signal)
+    signal.signal(signal.SIGINT, _handle_stop_signal)
+
+
+def stop_requested() -> bool:
+    return _STOP_REQUESTED
+
+
+def stop_requested_on_any_rank(distributed: DistributedContext) -> bool:
+    if not distributed.is_distributed or not torch.distributed.is_initialized():
+        return stop_requested()
+    return any_rank(stop_requested(), distributed)
 
 
 def train_and_evaluate(
     config: config_dict.ConfigDict,
     workdir: str | Path,
 ) -> dict[str, object]:
+    install_stop_signal_handlers()
     distributed = init_distributed_from_env()
     configure_torch_runtime(config)
     workdir = Path(workdir)
@@ -237,6 +263,7 @@ def run_training_loop(
     wandb_run = getattr(logger, "experiment", None)
     last_msg_probe_metrics: dict[str, object] = {}
     stopped_for_time_limit = False
+    stopped_for_signal = False
     initial_global_step = global_step
     modal_probe_call_ids: list[str] = []
     training_start_time = time.perf_counter()
@@ -273,6 +300,11 @@ def run_training_loop(
             disable=not distributed.is_main,
         )
         while global_step < total_steps and (batch := prefetcher.next()) is not None:
+            if stop_requested_on_any_rank(distributed):
+                if distributed.is_main:
+                    logging.info("Received stop request at global_step=%d.", global_step)
+                stopped_for_signal = True
+                break
             if deadline is not None and any_rank(
                 time.perf_counter() >= deadline,
                 distributed,
@@ -369,7 +401,7 @@ def run_training_loop(
         pbar.close()
         if distributed.is_main:
             logging.info("Finished epoch %d at global_step=%d", epoch, global_step)
-        if stopped_for_time_limit or global_step >= total_steps:
+        if stopped_for_time_limit or stopped_for_signal or global_step >= total_steps:
             break
     synchronize_device(device)
     barrier(distributed)
@@ -381,6 +413,7 @@ def run_training_loop(
     )
     global_batch_size = int(datamodule.global_batch_size)
     last_msg_probe_metrics["run/stopped_for_time_limit"] = float(stopped_for_time_limit)
+    last_msg_probe_metrics["run/stopped_for_signal"] = float(stopped_for_signal)
     last_msg_probe_metrics["run/final_global_step"] = float(global_step)
     last_msg_probe_metrics["run/train_elapsed_seconds"] = training_elapsed
     last_msg_probe_metrics["run/steps_per_second"] = (

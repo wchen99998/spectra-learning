@@ -22,6 +22,7 @@ from spectra_learning.probes.massspec.msg_modules import (
     _probe_task_output_dims,
     build_msg_sequence_probe as _build_msg_sequence_probe,
 )
+from spectra_learning.probes.massspec.data import probe_local_batch_size
 from spectra_learning.probes.massspec.msg_settings import (
     MsgProbeSplitTargets,
     MsgProbeTaskSpec,
@@ -1224,6 +1225,28 @@ class ProbeStepCountTests(unittest.TestCase):
                 split="massspec_train",
                 drop_remainder=False,
                 max_samples=5,
+            ),
+            2,
+        )
+
+    def test_probe_steps_per_epoch_treats_batch_size_as_global_under_ddp(self):
+        dm = _DummyDataModule(
+            batches=[],
+            info={
+                "massspec_train_size": 16,
+                "massspec_val_size": 0,
+                "massspec_test_size": 0,
+            },
+            batch_size=8,
+        )
+
+        self.assertEqual(probe_local_batch_size(dm.batch_size, 4), 2)
+        self.assertEqual(
+            probe_steps_per_epoch(
+                dm,
+                split="massspec_train",
+                drop_remainder=False,
+                distributed_world_size=4,
             ),
             2,
         )

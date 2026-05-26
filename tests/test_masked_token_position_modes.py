@@ -509,20 +509,20 @@ def test_mz_sentinel_predictor_receives_context_and_target_memory_mask():
     context_pair = _make_pair(model, context_emb)
     captured: dict[str, torch.Tensor] = {}
 
-    def fake_predict_masked_target_features(
+    def fake_predict_masked_target_features_with_pair(
         x: torch.Tensor,
         pair: torch.Tensor,
         visible_mask: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         captured["x"] = x.detach().clone()
         captured["pair"] = pair.detach().clone()
         captured["visible_mask"] = visible_mask.detach().clone()
-        return x.new_zeros(x.shape[0], x.shape[1], model.jepa_target_dim)
+        return x.new_zeros(x.shape[0], x.shape[1], model.jepa_target_dim), pair
 
     with mock.patch.object(
         model,
-        "predict_masked_target_features",
-        side_effect=fake_predict_masked_target_features,
+        "predict_masked_target_features_with_pair",
+        side_effect=fake_predict_masked_target_features_with_pair,
     ):
         model._predict_augmented_targets(
             context_emb,
@@ -569,20 +569,20 @@ def test_latent_token_predictor_receives_per_view_target_masks():
     context_pair = _make_pair(model, context_emb)
     captured: dict[str, torch.Tensor] = {}
 
-    def fake_predict_masked_target_features(
+    def fake_predict_masked_target_features_with_pair(
         x: torch.Tensor,
         pair: torch.Tensor,
         visible_mask: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         captured["x"] = x.detach().clone()
         captured["pair"] = pair.detach().clone()
         captured["visible_mask"] = visible_mask.detach().clone()
-        return x.new_zeros(x.shape[0], x.shape[1], model.jepa_target_dim)
+        return x.new_zeros(x.shape[0], x.shape[1], model.jepa_target_dim), pair
 
     with mock.patch.object(
         model,
-        "predict_masked_target_features",
-        side_effect=fake_predict_masked_target_features,
+        "predict_masked_target_features_with_pair",
+        side_effect=fake_predict_masked_target_features_with_pair,
     ):
         model._predict_augmented_targets(
             context_emb,

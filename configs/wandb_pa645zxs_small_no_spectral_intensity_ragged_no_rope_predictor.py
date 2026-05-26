@@ -9,7 +9,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg = get_rope_predictor_config()
 
     cfg.predictor_use_rope = False
-    cfg.peak_ordering = "intensity"
     cfg.jepa_num_target_blocks = 1
     cfg.run_name_suffix = (
         "mae-intensity-aware-ragged-no-rope-predictor-no-mz-warp-1view-ctx70-tgt30"

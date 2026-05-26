@@ -259,6 +259,55 @@ def test_training_loop_resumes_with_offset_loader(monkeypatch, tmp_path: Path):
     assert metrics["run/final_global_step"] == 5.0
 
 
+def test_training_loop_stops_when_signal_requested(monkeypatch, tmp_path: Path):
+    cfg = config_dict.ConfigDict()
+    cfg.autocast_dtype = "bf16"
+    cfg.log_every_n_steps = 0
+    cfg.collapse_metrics_every_n_steps = 0
+    cfg.checkpoint_every_steps = 1000
+    cfg.msg_probe_every_n_steps = 0
+    cfg.device_prefetch_size = 1
+
+    class FakeDataModule:
+        train_steps = 2
+        global_batch_size = 1
+
+        def train_loader_for_epoch(self, epoch: int, start_batch: int = 0):
+            return [
+                {"peak_mz": torch.tensor([float(step)])}
+                for step in range(start_batch, self.train_steps)
+            ]
+
+    train_step_calls = []
+
+    def fake_train_step_impl(*args, **kwargs):
+        train_step_calls.append((args, kwargs))
+        return {"loss": torch.tensor(1.0)}
+
+    monkeypatch.setattr(pretrain, "train_step_impl", fake_train_step_impl)
+    monkeypatch.setattr(pretrain, "_STOP_REQUESTED", True)
+
+    metrics = pretrain.run_training_loop(
+        config=cfg,
+        datamodule=FakeDataModule(),
+        model=torch.nn.Linear(1, 1),
+        optimizers=[],
+        schedulers=[],
+        logger=SimpleNamespace(experiment=None, log_metrics=lambda *args, **kwargs: None),
+        checkpoint_dir=tmp_path,
+        start_epoch=0,
+        loop_epochs=1,
+        resume_offset=0,
+        global_step=0,
+        total_steps=2,
+        device=torch.device("cpu"),
+    )
+
+    assert train_step_calls == []
+    assert metrics["run/stopped_for_signal"] == 1.0
+    assert metrics["run/final_global_step"] == 0.0
+
+
 def test_training_loop_runs_distributed_online_probe_and_logs_on_main(monkeypatch, tmp_path: Path):
     cfg = config_dict.ConfigDict()
     cfg.autocast_dtype = "bf16"

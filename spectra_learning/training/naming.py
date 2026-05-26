@@ -99,6 +99,10 @@ def _objective_parts(config: Any) -> list[str]:
         parts.append(
             f"intbin{float(config.get('jepa_mae_intensity_bin_size', 0.1)):g}"
         )
+    if (distogram_loss_weight := float(config.get("distogram_loss_weight", 0.0))) > 0:
+        parts.append("disto")
+        parts.append(f"distow{distogram_loss_weight:.0e}")
+        parts.append(f"distobins{int(config.get('distogram_num_bins', 64))}")
     return parts
 
 

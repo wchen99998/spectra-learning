@@ -38,6 +38,7 @@ def configure_peak_set_model(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> No
     _build_predictor(model, cfg)
     _build_target_projectors(model, cfg)
     _build_jepa_mae_heads(model)
+    _build_distogram_head(model)
 
 
 def _load_frozen_teacher_settings(
@@ -128,6 +129,9 @@ def _configure_losses(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
     model.jepa_mae_loss_weight = (
         0.0 if model.training_mode == "mae" else cfg.jepa_mae_loss_weight
     )
+    model.distogram_loss_weight = cfg.distogram_loss_weight
+    model.distogram_num_bins = cfg.distogram_num_bins
+    model.distogram_mz_max = cfg.distogram_mz_max
     model.jepa_mae_mz_bin_size = cfg.jepa_mae_mz_bin_size
     model.jepa_mae_intensity_bin_size = cfg.jepa_mae_intensity_bin_size
     model.jepa_mae_mz_max = cfg.jepa_mae_mz_max
@@ -341,3 +345,17 @@ def _build_jepa_mae_heads(model: PeakSetJEPA) -> None:
     nn.init.zeros_(jepa_mae_intensity_head.bias)
     model.jepa_mae_mz_head = jepa_mae_mz_head
     model.jepa_mae_intensity_head = jepa_mae_intensity_head
+
+
+def _build_distogram_head(model: PeakSetJEPA) -> None:
+    if model.distogram_loss_weight <= 0:
+        model.distogram_head = None
+        return
+
+    distogram_head = nn.Linear(
+        model.predictor_pair_dim,
+        model.distogram_num_bins,
+    )
+    nn.init.xavier_normal_(distogram_head.weight)
+    nn.init.zeros_(distogram_head.bias)
+    model.distogram_head = distogram_head

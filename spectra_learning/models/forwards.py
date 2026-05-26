@@ -72,11 +72,13 @@ class ForwardMixin:
             target_masks,
             precursor_mz=precursor_mz,
         )
-        predictor_output_features, predictor_output = self._predict_augmented_targets(
-            context_emb,
-            context_pair,
-            context_mask,
-            target_masks,
+        predictor_output_features, predictor_output, predictor_pair = (
+            self._predict_augmented_target_outputs(
+                context_emb,
+                context_pair,
+                context_mask,
+                target_masks,
+            )
         )
         teacher_target_features_normalized = self._apply_jepa_target_normalization(
             teacher_target_features.detach()
@@ -99,7 +101,15 @@ class ForwardMixin:
             target_masks,
             context_emb,
         )
-        loss = masked_prediction_term + jepa_mae_term
+        predictor_visible_masks = context_mask.unsqueeze(1) | target_masks
+        distogram_term, distogram_metrics = self._distogram_metrics(
+            predictor_pair,
+            peak_mz,
+            target_masks,
+            predictor_visible_masks,
+            predictor_output,
+        )
+        loss = masked_prediction_term + jepa_mae_term + distogram_term
         valid_peak_count = peak_valid_mask.float().sum().clamp_min(1.0)
         collapse_data: dict[str, Tensor] = {}
         if return_collapse_data:
@@ -127,6 +137,7 @@ class ForwardMixin:
         }
         metrics.update(self._target_mask_metrics(target_masks, valid_peak_count))
         metrics.update(jepa_mae_metrics)
+        metrics.update(distogram_metrics)
         if return_collapse_data:
             return metrics, collapse_data
         return metrics
@@ -174,11 +185,13 @@ class ForwardMixin:
             visible_mask=context_visible_mask,
             precursor_mz=precursor_mz,
         )
-        predictor_output_features, predictor_output = self._predict_augmented_targets(
-            context_encoded,
-            context_pair,
-            context_mask,
-            target_masks,
+        predictor_output_features, predictor_output, predictor_pair = (
+            self._predict_augmented_target_outputs(
+                context_encoded,
+                context_pair,
+                context_mask,
+                target_masks,
+            )
         )
         mae_term, mae_metrics = self._mae_metrics(
             predictor_output,
@@ -187,7 +200,15 @@ class ForwardMixin:
             target_masks,
             context_encoded,
         )
-        loss = mae_term
+        predictor_visible_masks = context_mask.unsqueeze(1) | target_masks
+        distogram_term, distogram_metrics = self._distogram_metrics(
+            predictor_pair,
+            peak_mz,
+            target_masks,
+            predictor_visible_masks,
+            predictor_output,
+        )
+        loss = mae_term + distogram_term
         valid_peak_count = peak_valid_mask.float().sum().clamp_min(1.0)
         metrics = {
             "loss": loss,
@@ -195,6 +216,7 @@ class ForwardMixin:
         }
         metrics.update(self._target_mask_metrics(target_masks, valid_peak_count))
         metrics.update(mae_metrics)
+        metrics.update(distogram_metrics)
         if return_collapse_data:
             return metrics, {}
         return metrics

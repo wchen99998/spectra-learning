@@ -101,6 +101,27 @@ class ObjectiveMixin:
         Float[Tensor, "batch views peaks target_dim"],
         Float[Tensor, "batch views peaks target_dim"],
     ]:
+        predictor_features, predictor_output, _predictor_pair = (
+            self._predict_augmented_target_outputs(
+                context_emb,
+                context_pair,
+                context_mask,
+                target_masks,
+            )
+        )
+        return predictor_features, predictor_output
+
+    def _predict_augmented_target_outputs(
+        self: Any,
+        context_emb: Float[Tensor, "batch peaks dim"],
+        context_pair: Float[Tensor, "batch peaks peaks pair"],
+        context_mask: Bool[Tensor, "batch peaks"],
+        target_masks: Bool[Tensor, "batch views peaks"],
+    ) -> tuple[
+        Float[Tensor, "batch views peaks target_dim"],
+        Float[Tensor, "batch views peaks target_dim"],
+        Float[Tensor, "batch views peaks peaks pair"],
+    ]:
         batch_size, num_target_blocks, num_peaks = target_masks.shape
         context_mask_by_view = context_mask.unsqueeze(1)
         # predictor_input: [B, K, N, D]
@@ -125,7 +146,9 @@ class ObjectiveMixin:
             -1,
             -1,
         )
-        context_pair_mask = context_mask_by_view.unsqueeze(3) & context_mask_by_view.unsqueeze(2)
+        context_pair_mask = (
+            context_mask_by_view.unsqueeze(3) & context_mask_by_view.unsqueeze(2)
+        )
         predictor_pair = predictor_pair * context_pair_mask.unsqueeze(-1).to(
             dtype=predictor_pair.dtype
         )
@@ -135,7 +158,9 @@ class ObjectiveMixin:
             self.pair_mask_token.view(1, 1, 1, 1, -1).to(context_pair),
             predictor_pair,
         )
-        predictor_pair_mask = predictor_visible_mask.unsqueeze(3) & predictor_visible_mask.unsqueeze(2)
+        predictor_pair_mask = (
+            predictor_visible_mask.unsqueeze(3) & predictor_visible_mask.unsqueeze(2)
+        )
         predictor_pair = predictor_pair * predictor_pair_mask.unsqueeze(-1).to(
             dtype=predictor_pair.dtype
         )
@@ -155,10 +180,12 @@ class ObjectiveMixin:
             predictor_pair.shape[3],
             -1,
         )
-        predictor_features = self.predict_masked_target_features(
-            flat_predictor_input,
-            flat_predictor_pair,
-            predictor_visible_mask,
+        predictor_features, predictor_pair = (
+            self.predict_masked_target_features_with_pair(
+                flat_predictor_input,
+                flat_predictor_pair,
+                predictor_visible_mask,
+            )
         )
         predictor_features = predictor_features.reshape(
             batch_size,
@@ -167,8 +194,16 @@ class ObjectiveMixin:
             -1,
         )
         predictor_features = predictor_features[:, :, :num_peaks]
+        predictor_pair = predictor_pair.reshape(
+            batch_size,
+            num_target_blocks,
+            flat_predictor_pair.shape[1],
+            flat_predictor_pair.shape[2],
+            -1,
+        )
+        predictor_pair = predictor_pair[:, :, :num_peaks, :num_peaks]
         predictor_output = self.project_targets(predictor_features)
-        return predictor_features, predictor_output
+        return predictor_features, predictor_output, predictor_pair
 
     def _masked_prediction_loss(
         self: Any,
@@ -179,6 +214,72 @@ class ObjectiveMixin:
         per_token = self._embedding_loss(predictor_output, teacher_targets.unsqueeze(1))
         target_weights = target_masks.float()
         return (per_token * target_weights).sum() / target_weights.sum().clamp_min(1.0)
+
+    def _distogram_targets(
+        self: Any,
+        peak_mz: Float[Tensor, "batch peaks"],
+    ) -> Int[Tensor, "batch peaks peaks"]:
+        mz_da = peak_mz.float() * self.distogram_mz_max
+        pair_distance = (mz_da.unsqueeze(2) - mz_da.unsqueeze(1)).abs()
+        bin_width = self.distogram_mz_max / self.distogram_num_bins
+        return torch.floor(pair_distance / bin_width).long().clamp(
+            0,
+            self.distogram_num_bins - 1,
+        )
+
+    def _distogram_pair_mask(
+        self: Any,
+        target_masks: Bool[Tensor, "batch views peaks"],
+        predictor_visible_masks: Bool[Tensor, "batch views peaks"],
+    ) -> Bool[Tensor, "batch views peaks peaks"]:
+        target_pair_mask = target_masks.unsqueeze(3) | target_masks.unsqueeze(2)
+        visible_pair_mask = (
+            predictor_visible_masks.unsqueeze(3) & predictor_visible_masks.unsqueeze(2)
+        )
+        diagonal = torch.eye(
+            target_masks.shape[-1],
+            dtype=torch.bool,
+            device=target_masks.device,
+        )
+        return target_pair_mask & visible_pair_mask & ~diagonal.view(
+            1,
+            1,
+            target_masks.shape[-1],
+            target_masks.shape[-1],
+        )
+
+    def _distogram_logits(
+        self: Any,
+        predictor_pair: Float[Tensor, "batch views peaks peaks pair"],
+    ) -> Float[Tensor, "batch views peaks peaks bins"]:
+        sym_pair = predictor_pair + predictor_pair.transpose(2, 3)
+        return cast(nn.Linear, self.distogram_head)(sym_pair)
+
+    def _distogram_metrics(
+        self: Any,
+        predictor_pair: Float[Tensor, "batch views peaks peaks pair"],
+        peak_mz: Float[Tensor, "batch peaks"],
+        target_masks: Bool[Tensor, "batch views peaks"],
+        predictor_visible_masks: Bool[Tensor, "batch views peaks"],
+        reference: Float[Tensor, "*batch dim"],
+    ) -> tuple[Float[Tensor, ""], dict[str, Tensor]]:
+        if self.distogram_loss_weight <= 0:
+            return reference.new_tensor(0.0), {}
+        logits = self._distogram_logits(predictor_pair)
+        targets = self._distogram_targets(peak_mz).unsqueeze(1).expand(
+            logits.shape[0],
+            logits.shape[1],
+            logits.shape[2],
+            logits.shape[3],
+        )
+        pair_mask = self._distogram_pair_mask(target_masks, predictor_visible_masks)
+        distogram_loss = self._masked_ce_loss(logits, targets, pair_mask)
+        loss_weight = reference.new_tensor(self.distogram_loss_weight)
+        term = loss_weight * distogram_loss.to(dtype=reference.dtype)
+        return term, {
+            "distogram_loss": distogram_loss.to(dtype=reference.dtype),
+            "distogram_term": term,
+        }
 
     def _jepa_mae_metrics(
         self: Any,

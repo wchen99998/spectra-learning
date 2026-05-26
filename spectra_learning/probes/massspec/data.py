@@ -1028,6 +1028,13 @@ class _LoaderAdapter:
             }
 
 
+def probe_local_batch_size(global_batch_size: int, distributed_world_size: int) -> int:
+    if distributed_world_size <= 1:
+        return global_batch_size
+    assert global_batch_size % distributed_world_size == 0
+    return global_batch_size // distributed_world_size
+
+
 class _ProbeIndexSampler(Sampler[int]):
     def __init__(
         self,
@@ -1284,9 +1291,10 @@ class MassSpecProbeData(NamedTuple):
                 distributed_rank=distributed_rank,
                 pad_to_equal=pad_distributed,
             )
+        batch_size = probe_local_batch_size(self.batch_size, distributed_world_size)
         loader = DataLoader(
             dataset,
-            batch_size=self.batch_size,
+            batch_size=batch_size,
             shuffle=shuffle and sampler is None,
             sampler=sampler,
             drop_last=drop_remainder,
@@ -1310,6 +1318,7 @@ class MassSpecProbeData(NamedTuple):
         *,
         peak_ordering: str | None = None,
         drop_remainder: bool = False,
+        distributed_world_size: int = 1,
     ):
         split_files = {
             "massspec_train": self.train_files,
@@ -1335,9 +1344,10 @@ class MassSpecProbeData(NamedTuple):
                 for path, length in zip(split_files, split_lengths, strict=True)
             ]
         )
+        batch_size = probe_local_batch_size(self.batch_size, distributed_world_size)
         loader = DataLoader(
             Subset(dataset, [int(idx) for idx in indices]),
-            batch_size=self.batch_size,
+            batch_size=batch_size,
             shuffle=False,
             drop_last=drop_remainder,
             num_workers=0,

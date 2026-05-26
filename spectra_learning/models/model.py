@@ -40,6 +40,9 @@ class PeakSetJEPA(
     mae_loss_weight: float
     masked_token_loss_weight: float
     jepa_mae_loss_weight: float
+    distogram_loss_weight: float
+    distogram_num_bins: int
+    distogram_mz_max: float
     jepa_mae_mz_bin_size: float
     jepa_mae_intensity_bin_size: float
     jepa_mae_mz_max: float
@@ -71,6 +74,7 @@ class PeakSetJEPA(
     teacher_target_projector: nn.Module | None
     jepa_mae_mz_head: nn.Linear | None
     jepa_mae_intensity_head: nn.Linear | None
+    distogram_head: nn.Linear | None
 
     def __init__(
         self,

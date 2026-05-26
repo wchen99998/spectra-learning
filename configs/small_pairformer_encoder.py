@@ -75,6 +75,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_token_loss_weight = 0
     cfg.jepa_mae_loss_weight = 0.0
     cfg.mae_loss_weight = 1.0
+    cfg.distogram_loss_weight = 1.0
     cfg.jepa_mae_mz_bin_size = 0.1
     cfg.jepa_intensity_aware_tau = 0.5
     cfg.jepa_intensity_aware_alpha = 0.75

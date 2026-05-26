@@ -592,6 +592,74 @@ class BlockJEPATests(unittest.TestCase):
             + metrics["jepa_mae_term"],
         )
 
+    def test_distogram_targets_use_configured_bins(self):
+        model = self._build_model(
+            distogram_loss_weight=1.0,
+            distogram_num_bins=4,
+        )
+        peak_mz = torch.tensor([[0.0, 0.249, 0.25, 1.0, 1.5]])
+
+        targets = model._distogram_targets(peak_mz)
+
+        torch.testing.assert_close(
+            targets[0, 0],
+            torch.tensor([0, 0, 1, 3, 3]),
+        )
+
+    def test_distogram_pair_mask_uses_pairs_with_either_target_endpoint(self):
+        model = self._build_model(distogram_loss_weight=1.0)
+        target_masks = torch.tensor([[[False, True, False, False]]])
+        predictor_visible_masks = torch.tensor([[[True, True, True, False]]])
+
+        pair_mask = model._distogram_pair_mask(
+            target_masks,
+            predictor_visible_masks,
+        )
+
+        expected = torch.tensor(
+            [
+                [
+                    [
+                        [False, True, False, False],
+                        [True, False, True, False],
+                        [False, True, False, False],
+                        [False, False, False, False],
+                    ]
+                ]
+            ]
+        )
+        torch.testing.assert_close(pair_mask, expected)
+
+    def test_distogram_logits_symmetrise_predictor_pairs(self):
+        model = self._build_model(
+            distogram_loss_weight=1.0,
+            distogram_num_bins=4,
+        )
+        predictor_pair = torch.randn(2, 1, 4, 4, model.predictor_pair_dim)
+
+        logits = model._distogram_logits(predictor_pair)
+
+        torch.testing.assert_close(logits[:, :, 1, 2], logits[:, :, 2, 1])
+
+    def test_distogram_loss_contributes_to_loss(self):
+        model = self._build_model(
+            masked_token_loss_weight=1.0,
+            distogram_loss_weight=0.25,
+        )
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+
+        metrics = model.forward_augmented(batch)
+
+        self.assertGreater(float(metrics["distogram_loss"].detach()), 0.0)
+        torch.testing.assert_close(
+            metrics["distogram_term"],
+            metrics["distogram_loss"] * 0.25,
+        )
+        torch.testing.assert_close(
+            metrics["loss"],
+            metrics["masked_prediction_term"] + metrics["distogram_term"],
+        )
+
     def test_mae_training_mode_uses_binned_value_prediction_only(self):
         model = self._build_model(
             training_mode="mae",
