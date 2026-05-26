@@ -5,7 +5,7 @@ from torch import nn
 
 from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.model import PeakSetJEPA
-from spectra_learning.models.pairformer import PairformerBlock
+from spectra_learning.models.pairformer import PairformerBlock, PairMixerBlock
 from spectra_learning.models.peak_features import PeakFeatureEmbedder
 
 
@@ -313,9 +313,9 @@ def test_encoder_and_predictor_final_norms_are_non_affine():
     assert list(model.predictor_final_norm.parameters()) == []
     encoder_block = model.encoder.blocks[0]
     predictor_block = model.masked_latent_predictor[0]
-    assert isinstance(encoder_block, PairformerBlock)
+    assert isinstance(encoder_block, PairMixerBlock)
     assert isinstance(predictor_block, PairformerBlock)
-    assert list(encoder_block.single_attention.single_norm.parameters())
+    assert list(encoder_block.single_attention_norm.parameters())
     assert list(predictor_block.single_attention.single_norm.parameters())
 
     encoder = PeakSetEncoder(
@@ -382,22 +382,36 @@ def test_pair_refresh_uses_sigmoid_gate_from_pair_state():
     torch.testing.assert_close(out_pair, expected_pair)
 
 
-def test_pair_refresh_layers_select_only_requested_blocks():
-    encoder = PeakSetEncoder(
+def test_backbone_uses_pairmixer_without_pairformer_attention_extras():
+    model = _build_model()
+    block = model.encoder.blocks[0]
+
+    assert isinstance(block, PairMixerBlock)
+    assert not hasattr(block, "refresh_pair")
+    assert not hasattr(block, "tri_att_start")
+    assert not hasattr(block, "tri_att_end")
+    assert not hasattr(block.single_attention, "pair_bias")
+
+
+def test_predictor_pair_refresh_layers_select_only_requested_blocks():
+    model = PeakSetJEPA(
         model_dim=32,
-        embedder=_build_encoder_embedder(),
-        num_layers=3,
-        num_heads=4,
+        encoder_num_layers=2,
+        encoder_num_heads=4,
         num_peaks=6,
+        feature_mlp_hidden_dim=32,
+        jepa_num_target_blocks=2,
+        masked_token_loss_weight=1.0,
+        masked_latent_predictor_num_layers=3,
         pairformer_refresh_pair_layers=[2],
     )
 
-    assert encoder.blocks[0].refresh_pair is None
-    assert encoder.blocks[1].refresh_pair is not None
-    assert encoder.blocks[2].refresh_pair is None
+    assert model.masked_latent_predictor[0].refresh_pair is None
+    assert model.masked_latent_predictor[1].refresh_pair is not None
+    assert model.masked_latent_predictor[2].refresh_pair is None
 
 
-def test_model_settings_pass_pair_refresh_layers_to_encoder():
+def test_model_settings_pass_pair_refresh_layers_to_predictor_only():
     model = _build_model()
     selected_model = PeakSetJEPA(
         model_dim=32,
@@ -410,10 +424,12 @@ def test_model_settings_pass_pair_refresh_layers_to_encoder():
         pairformer_refresh_pair_layers=[1],
     )
 
-    assert model.encoder.blocks[0].refresh_pair is not None
-    assert model.encoder.blocks[1].refresh_pair is not None
-    assert selected_model.encoder.blocks[0].refresh_pair is not None
-    assert selected_model.encoder.blocks[1].refresh_pair is None
+    assert not hasattr(model.encoder.blocks[0], "refresh_pair")
+    assert not hasattr(selected_model.encoder.blocks[0], "refresh_pair")
+    assert model.masked_latent_predictor[0].refresh_pair is not None
+    assert model.masked_latent_predictor[1].refresh_pair is not None
+    assert selected_model.masked_latent_predictor[0].refresh_pair is not None
+    assert selected_model.masked_latent_predictor[1].refresh_pair is None
 
 
 def test_masked_latent_predictor_uses_pairformer_blocks():

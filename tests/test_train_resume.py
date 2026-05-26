@@ -799,7 +799,7 @@ def test_build_optimizers_uses_official_torch_muon_and_adamw():
         total_steps=10,
         device=torch.device("cpu"),
     )
-    qkv = model.encoder.blocks[0].single_attention.qkv.weight
+    qkv = model.encoder.blocks[0].single_attention.wqkv.weight
     muon_optimizer = next(opt for opt in optimizers if isinstance(opt, torch.optim.Muon))
     adamw_optimizer = next(opt for opt in optimizers if isinstance(opt, torch.optim.AdamW))
     muon_param_ids = _optimizer_param_ids(muon_optimizer)

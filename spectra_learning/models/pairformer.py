@@ -18,7 +18,7 @@ from cuequivariance_torch import (
 
 from spectra_learning.data.spectra import PEAK_MZ_MAX
 from spectra_learning.models.peak_features import FourierFeatures
-from spectra_learning.models.transformer import FeedForward, _build_norm
+from spectra_learning.models.transformer import Attention, FeedForward, _build_norm
 
 
 COMMON_MASS_DIFFERENCES_DA = (
@@ -500,6 +500,84 @@ class AttentionPairBias(nn.Module):
         out = out.transpose(1, 2).contiguous().view(batch_size, num_tokens, single_dim)
         out = out * torch.sigmoid(self.g(single_norm))
         return self.o(out)
+
+
+class PairMixerBlock(nn.Module):
+    def __init__(
+        self,
+        *,
+        single_dim: int,
+        pair_dim: int,
+        num_heads: int,
+        attention_mlp_multiple: float,
+        norm_eps: float,
+        dropout: float,
+        use_cuequivariance: bool,
+    ) -> None:
+        super().__init__()
+        self.tri_mul_out = TriangleMultiplicativeUpdate(
+            pair_dim,
+            direction="outgoing",
+            norm_eps=norm_eps,
+            use_cuequivariance=use_cuequivariance,
+        )
+        self.tri_mul_in = TriangleMultiplicativeUpdate(
+            pair_dim,
+            direction="incoming",
+            norm_eps=norm_eps,
+            use_cuequivariance=use_cuequivariance,
+        )
+        self.pair_transition_norm = _build_norm(
+            pair_dim,
+            eps=norm_eps,
+        )
+        self.pair_transition = FeedForward(
+            pair_dim,
+            hidden_dim=math.ceil(pair_dim * attention_mlp_multiple),
+        )
+        self.single_attention_norm = _build_norm(
+            single_dim,
+            eps=norm_eps,
+        )
+        self.single_attention = Attention(
+            single_dim,
+            num_heads,
+        )
+        self.single_transition_norm = _build_norm(
+            single_dim,
+            eps=norm_eps,
+        )
+        self.single_transition = FeedForward(
+            single_dim,
+            hidden_dim=math.ceil(single_dim * attention_mlp_multiple),
+        )
+        self.drop = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
+
+    def forward(
+        self,
+        single: Float[Tensor, "batch tokens dim"],
+        pair: Float[Tensor, "batch peaks peaks pair"],
+        peak_mask: Bool[Tensor, "batch peaks"],
+        token_mask: Bool[Tensor, "batch tokens"],
+    ) -> tuple[
+        Float[Tensor, "batch tokens dim"],
+        Float[Tensor, "batch peaks peaks pair"],
+    ]:
+        pair_mask = _pair_mask(peak_mask)
+        pair = pair + self.drop(self.tri_mul_out(pair, pair_mask))
+        pair = pair + self.drop(self.tri_mul_in(pair, pair_mask))
+        pair = pair + self.drop(self.pair_transition(self.pair_transition_norm(pair)))
+        pair = pair * pair_mask.unsqueeze(-1).to(dtype=pair.dtype)
+        single = single + self.drop(
+            self.single_attention(
+                self.single_attention_norm(single),
+                attn_mask=token_mask[:, None, None, :],
+            )
+        )
+        single = single + self.drop(
+            self.single_transition(self.single_transition_norm(single))
+        )
+        return single, pair
 
 
 class PairformerBlock(nn.Module):

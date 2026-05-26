@@ -7,7 +7,7 @@ from spectra_learning.models.common import (
     _build_frozen_position_embedding,
     _merge_visible_mask,
 )
-from spectra_learning.models.pairformer import PairFeatureEmbedder, PairformerBlock
+from spectra_learning.models.pairformer import PairFeatureEmbedder, PairMixerBlock
 from spectra_learning.models.peak_features import PeakFeatureEmbedder
 
 
@@ -25,11 +25,8 @@ class PeakSetEncoder(nn.Module):
         num_peaks: int = 64,
         use_position_embedding: bool = True,
         pair_dim: int | None = None,
-        pair_num_heads: int | None = None,
         pair_feature_hidden_dim: int = 128,
         pairformer_dropout: float = 0.0,
-        pairformer_refresh_pair: bool = True,
-        pairformer_refresh_pair_layers: list[int] | tuple[int, ...] | None = None,
         pairformer_use_cuequivariance: bool = True,
         pairformer_mz_scale: float = 1000.0,
         pairformer_precursor_mz_scale: float = 1000.0,
@@ -49,12 +46,6 @@ class PeakSetEncoder(nn.Module):
             model_dim,
         )
         pair_dim = model_dim if pair_dim is None else pair_dim
-        pair_num_heads = num_heads if pair_num_heads is None else pair_num_heads
-        refresh_pair_layers = (
-            None
-            if pairformer_refresh_pair_layers is None
-            else set(pairformer_refresh_pair_layers)
-        )
         self.pair_embedder = PairFeatureEmbedder(
             single_dim=model_dim,
             pair_dim=pair_dim,
@@ -70,23 +61,16 @@ class PeakSetEncoder(nn.Module):
         )
         self.blocks = nn.ModuleList(
             [
-                PairformerBlock(
+                PairMixerBlock(
                     single_dim=model_dim,
                     pair_dim=pair_dim,
                     num_heads=num_heads,
-                    pair_num_heads=pair_num_heads,
                     attention_mlp_multiple=attention_mlp_multiple,
-                    pair_feature_hidden_dim=pair_feature_hidden_dim,
                     norm_eps=norm_eps,
                     dropout=pairformer_dropout,
-                    refresh_pair=pairformer_refresh_pair
-                    and (
-                        refresh_pair_layers is None
-                        or block_idx in refresh_pair_layers
-                    ),
                     use_cuequivariance=pairformer_use_cuequivariance,
                 )
-                for block_idx in range(1, self.num_layers + 1)
+                for _ in range(self.num_layers)
             ]
         )
         self.final_norm = (
