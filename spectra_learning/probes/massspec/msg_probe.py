@@ -21,9 +21,9 @@ from spectra_learning.probes.massspec.data import (
 )
 from spectra_learning.probes.massspec.msg_modules import (
     MsgLinearProbe,
-    MsgSequenceProbe,
     _probe_task_names,
     _probe_task_output_dims,
+    _uses_pair_features,
     build_msg_sequence_probe as _build_msg_sequence_probe,
 )
 from spectra_learning.probes.massspec.msg_settings import (
@@ -54,6 +54,7 @@ log = logging.getLogger(__name__)
 ProbeBatch = dict[str, torch.Tensor]
 ProbeStepResult = dict[str, Any]
 EpochState = dict[str, Any]
+EncoderFeatures = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 
 
 def _config_get(config: config_dict.ConfigDict, key: str, default: Any) -> Any:
@@ -80,6 +81,32 @@ def _all_gather_object(value: object) -> list[object]:
     gathered: list[object] = [None for _ in range(dist.get_world_size())]
     dist.all_gather_object(gathered, value)
     return gathered
+
+
+def _feature_single(features: EncoderFeatures) -> torch.Tensor:
+    if isinstance(features, tuple):
+        return features[0]
+    return features
+
+
+def _feature_pair(features: EncoderFeatures) -> torch.Tensor | None:
+    if isinstance(features, tuple):
+        return features[1]
+    return None
+
+
+def _probe_call(
+    probe: torch.nn.Module,
+    peak_embeddings: torch.Tensor,
+    peak_valid_mask: torch.Tensor,
+    pair_embeddings: torch.Tensor | None,
+) -> dict[str, torch.Tensor]:
+    if pair_embeddings is None:
+        return cast(dict[str, torch.Tensor], probe(peak_embeddings, peak_valid_mask))
+    return cast(
+        dict[str, torch.Tensor],
+        probe(peak_embeddings, peak_valid_mask, pair_embeddings),
+    )
 
 
 
@@ -468,7 +495,7 @@ def _collect_covariance_morgan_alignment_inputs(
     *,
     probe_data: MassSpecProbeData,
     covariance_pooler: torch.nn.Module,
-    feature_extractor: Callable[[ProbeBatch], torch.Tensor],
+    feature_extractor: Callable[[ProbeBatch], EncoderFeatures],
     move_batch: Callable[[dict[str, Any]], ProbeBatch],
     split: str,
     peak_ordering: str,
@@ -495,7 +522,7 @@ def _collect_covariance_morgan_alignment_inputs(
             valid_mask = batch["probe_valid_mol"].to(device=device, dtype=torch.bool)
             if not bool(valid_mask.any()):
                 continue
-            peak_embeddings = feature_extractor(batch)[valid_mask]
+            peak_embeddings = _feature_single(feature_extractor(batch))[valid_mask]
             peak_valid_mask = batch["peak_valid_mask"][valid_mask].to(
                 device=device,
                 dtype=torch.bool,
@@ -521,7 +548,7 @@ def _collect_covariance_embeddings_for_indices(
     *,
     probe_data: MassSpecProbeData,
     covariance_pooler: torch.nn.Module,
-    feature_extractor: Callable[[ProbeBatch], torch.Tensor],
+    feature_extractor: Callable[[ProbeBatch], EncoderFeatures],
     move_batch: Callable[[dict[str, Any]], ProbeBatch],
     indices: np.ndarray,
     peak_ordering: str,
@@ -541,7 +568,7 @@ def _collect_covariance_embeddings_for_indices(
             distributed_world_size=_distributed_world_size(distributed),
         ):
             batch = move_batch(batch)
-            peak_embeddings = feature_extractor(batch)
+            peak_embeddings = _feature_single(feature_extractor(batch))
             covariance = covariance_pooler(
                 peak_embeddings.float(),
                 batch["peak_valid_mask"].to(dtype=torch.bool),
@@ -566,7 +593,7 @@ def _run_prepared_covariance_morgan_pairwise_alignment(
     config: config_dict.ConfigDict,
     probe_data: MassSpecProbeData,
     covariance_pooler: torch.nn.Module,
-    feature_extractor: Callable[[ProbeBatch], torch.Tensor],
+    feature_extractor: Callable[[ProbeBatch], EncoderFeatures],
     move_batch: Callable[[dict[str, Any]], ProbeBatch],
     peak_ordering: str,
     num_pairs: int,
@@ -617,7 +644,7 @@ def _run_covariance_morgan_pairwise_alignment(
     probe_data: MassSpecProbeData,
     model: PeakSetJEPA,
     covariance_pooler: torch.nn.Module | None,
-    feature_extractor: Callable[[ProbeBatch], torch.Tensor],
+    feature_extractor: Callable[[ProbeBatch], EncoderFeatures],
     move_batch: Callable[[dict[str, Any]], ProbeBatch],
     device: torch.device,
     split: str,
@@ -719,20 +746,27 @@ def _probe_step(
 def _sequence_probe_step(
     probe: torch.nn.Module,
     batch: ProbeBatch,
-    peak_embeddings: torch.Tensor,
+    features: EncoderFeatures,
     *,
     task_spec: MsgProbeTaskSpec,
     device: torch.device,
     allow_empty: bool = False,
 ) -> ProbeStepResult | None:
     valid_mask = batch["probe_valid_mol"].to(device=device, dtype=torch.bool)
+    peak_embeddings = _feature_single(features)
+    pair_embeddings = _feature_pair(features)
     if not bool(valid_mask.any()):
         if allow_empty:
+            empty_pair_embeddings = None
+            if pair_embeddings is not None:
+                empty_pair_embeddings = pair_embeddings[:1]
             logits = cast(
                 dict[str, torch.Tensor],
-                probe(
+                _probe_call(
+                    probe,
                     peak_embeddings[:1],
                     batch["peak_valid_mask"][:1].to(device=device, dtype=torch.bool),
+                    empty_pair_embeddings,
                 ),
             )
             zero_loss = torch.stack(
@@ -750,7 +784,14 @@ def _sequence_probe_step(
         device=device,
         dtype=torch.bool,
     )
-    logits = cast(dict[str, torch.Tensor], probe(peak_embeddings, peak_valid_mask))
+    if pair_embeddings is not None:
+        pair_embeddings = pair_embeddings[valid_mask]
+    logits = _probe_call(
+        probe,
+        peak_embeddings,
+        peak_valid_mask,
+        pair_embeddings,
+    )
     return _build_probe_result(
         logits,
         batch,
@@ -764,9 +805,9 @@ def _sequence_probe_step(
 def _evaluate_sequence_probe_split(
     *,
     probe_data: MassSpecProbeData,
-    probes: dict[str, MsgSequenceProbe],
+    probes: dict[str, torch.nn.Module],
     task_spec: MsgProbeTaskSpec,
-    feature_extractor: Callable[[ProbeBatch], torch.Tensor],
+    feature_extractor: Callable[[ProbeBatch], EncoderFeatures],
     move_batch: Callable[[dict[str, Any]], ProbeBatch],
     split: str,
     seed: int,
@@ -790,12 +831,12 @@ def _evaluate_sequence_probe_split(
             distributed_rank=_distributed_rank(distributed),
         ):
             batch = move_batch(batch)
-            peak_embeddings = feature_extractor(batch)
+            features = feature_extractor(batch)
             for variant, probe in probes.items():
                 result = _sequence_probe_step(
                     probe,
                     batch,
-                    peak_embeddings,
+                    features,
                     task_spec=task_spec,
                     device=device,
                 )
@@ -909,7 +950,7 @@ def _gather_variant_states(
 
 
 def _wrap_probe_for_distributed(
-    probe: MsgSequenceProbe,
+    probe: torch.nn.Module,
     distributed: DistributedContext | None,
 ) -> torch.nn.Module:
     if not _is_distributed(distributed):
@@ -1183,18 +1224,27 @@ def _run_msg_probe_once(
     peak_ordering = str(_config_get(config, "peak_ordering", "intensity"))
     fingerprint_task = resolve_msg_probe_fingerprint(config)
     probe_data = MassSpecProbeData.from_config(config)
+    variants = msg_probe_variants_from_config(config)
+    use_pair_features = any(_uses_pair_features(variant) for variant in variants)
 
     @torch.no_grad()
     def feature_extractor(
         batch: dict[str, torch.Tensor],
-    ) -> torch.Tensor:
-        embeddings = model.encoder(
+    ) -> EncoderFeatures:
+        if use_pair_features:
+            embeddings, _, pair_embeddings = model.encoder.forward_with_block_outputs(
+                batch["peak_mz"],
+                batch["peak_intensity"],
+                valid_mask=batch["peak_valid_mask"],
+                precursor_mz=batch.get("precursor_mz", None),
+            )
+            return embeddings, pair_embeddings
+        return model.encoder(
             batch["peak_mz"],
             batch["peak_intensity"],
             valid_mask=batch["peak_valid_mask"],
             precursor_mz=batch.get("precursor_mz", None),
         )
-        return embeddings
 
     seed_offset = 100_000 * repeat_index
     train_seed_base = int(config.seed) + 1_100_000 + seed_offset
@@ -1234,7 +1284,6 @@ def _run_msg_probe_once(
         num_rings_classes=_collect_num_rings_classes(probe_data),
         fingerprint_task=fingerprint_task,
     )
-    variants = msg_probe_variants_from_config(config)
     was_training = model.training
     model.eval()
     probes = {
@@ -1319,13 +1368,13 @@ def _run_msg_probe_once(
         )
         for batch in train_iterator:
             batch = move_batch(batch)
-            peak_embeddings = feature_extractor(batch)
+            features = feature_extractor(batch)
             for variant in variants:
                 optimizers[variant].zero_grad(set_to_none=True)
                 result = _sequence_probe_step(
                     train_probes[variant],
                     batch,
-                    peak_embeddings,
+                    features,
                     task_spec=task_spec,
                     device=device,
                     allow_empty=_is_distributed(distributed),

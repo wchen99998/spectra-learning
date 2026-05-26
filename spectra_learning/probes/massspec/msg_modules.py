@@ -3,8 +3,13 @@ from typing import Any
 import torch
 from ml_collections import config_dict
 
-from spectra_learning.models.pooling import CovariancePool
-from spectra_learning.models.transformer import CrossAttention
+from spectra_learning.models.pooling import CovariancePool, SinglePairCovariancePool
+from spectra_learning.models.transformer import (
+    CrossAttention,
+    FeedForward,
+    TransformerBlock,
+    _build_norm,
+)
 from spectra_learning.probes.massspec.msg_settings import (
     NUM_RINGS_TASK,
     MsgProbeTaskSpec,
@@ -87,6 +92,10 @@ class MsgCovariancePool(CovariancePool):
     pass
 
 
+class MsgSinglePairCovariancePool(SinglePairCovariancePool):
+    pass
+
+
 class FrozenPooler(torch.nn.Module):
     _pooler: torch.nn.Module
 
@@ -141,6 +150,150 @@ class MsgPmaPool(torch.nn.Module):
         return pooled.mean(dim=1)
 
 
+class MsgPmaSetBlock(torch.nn.Module):
+    def __init__(
+        self,
+        *,
+        dim: int,
+        num_heads: int,
+        hidden_dim: int,
+        norm_eps: float,
+    ) -> None:
+        super().__init__()
+        self.latent_norm = _build_norm(dim, eps=norm_eps)
+        self.memory_norm = _build_norm(dim, eps=norm_eps)
+        self.cross_attention = CrossAttention(
+            dim=dim,
+            n_heads=num_heads,
+        )
+        self.self_attention = TransformerBlock(
+            dim=dim,
+            n_heads=num_heads,
+            n_kv_heads=None,
+            norm_eps=norm_eps,
+            hidden_dim=hidden_dim,
+        )
+        self.ffn_norm = _build_norm(dim, eps=norm_eps)
+        self.feed_forward = FeedForward(dim, hidden_dim=hidden_dim)
+
+    def forward(
+        self,
+        latents: torch.Tensor,
+        memory: torch.Tensor,
+        memory_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        latents = latents + self.cross_attention(
+            self.latent_norm(latents),
+            self.memory_norm(memory),
+            memory_mask=memory_mask,
+        )
+        latents = self.self_attention(latents)
+        return latents + self.feed_forward(self.ffn_norm(latents))
+
+
+class MsgPmaSetEncoder(torch.nn.Module):
+    def __init__(
+        self,
+        *,
+        input_dim: int,
+        latent_dim: int,
+        num_tokens: int,
+        num_heads: int,
+        num_blocks: int,
+        hidden_dim: int,
+        norm_eps: float,
+    ) -> None:
+        super().__init__()
+        self.input_proj = (
+            torch.nn.Identity()
+            if input_dim == latent_dim
+            else torch.nn.Linear(input_dim, latent_dim)
+        )
+        self.seed_vectors = torch.nn.Parameter(torch.empty(num_tokens, latent_dim))
+        torch.nn.init.trunc_normal_(self.seed_vectors, std=0.02)
+        self.blocks = torch.nn.ModuleList(
+            [
+                MsgPmaSetBlock(
+                    dim=latent_dim,
+                    num_heads=num_heads,
+                    hidden_dim=hidden_dim,
+                    norm_eps=norm_eps,
+                )
+                for _ in range(num_blocks)
+            ]
+        )
+        self.final_norm = _build_norm(latent_dim, eps=norm_eps)
+
+    def forward(
+        self,
+        memory: torch.Tensor,
+        memory_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        memory = self.input_proj(memory)
+        latents = self.seed_vectors.unsqueeze(0).expand(memory.shape[0], -1, -1)
+        latents = latents.to(dtype=memory.dtype)
+        for block in self.blocks:
+            latents = block(latents, memory, memory_mask)
+        return self.final_norm(latents)
+
+
+class MsgSinglePairPmaPool(torch.nn.Module):
+    def __init__(
+        self,
+        *,
+        single_dim: int,
+        pair_dim: int,
+        latent_dim: int,
+        num_tokens: int,
+        num_heads: int,
+        num_blocks: int,
+        hidden_dim: int,
+        norm_eps: float,
+    ) -> None:
+        super().__init__()
+        self.single_encoder = MsgPmaSetEncoder(
+            input_dim=single_dim,
+            latent_dim=latent_dim,
+            num_tokens=num_tokens,
+            num_heads=num_heads,
+            num_blocks=num_blocks,
+            hidden_dim=hidden_dim,
+            norm_eps=norm_eps,
+        )
+        self.pair_encoder = MsgPmaSetEncoder(
+            input_dim=pair_dim,
+            latent_dim=latent_dim,
+            num_tokens=num_tokens,
+            num_heads=num_heads,
+            num_blocks=num_blocks,
+            hidden_dim=hidden_dim,
+            norm_eps=norm_eps,
+        )
+
+    def forward(
+        self,
+        peak_embeddings: torch.Tensor,
+        valid_mask: torch.Tensor,
+        pair_embeddings: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size, num_peaks, _, pair_dim = pair_embeddings.shape
+        pair_mask = valid_mask.unsqueeze(2) & valid_mask.unsqueeze(1)
+        pair_memory = pair_embeddings.reshape(
+            batch_size,
+            num_peaks * num_peaks,
+            pair_dim,
+        )
+        pair_memory_mask = pair_mask.reshape(batch_size, num_peaks * num_peaks)
+        tokens = torch.cat(
+            [
+                self.single_encoder(peak_embeddings, valid_mask),
+                self.pair_encoder(pair_memory, pair_memory_mask),
+            ],
+            dim=1,
+        )
+        return tokens.flatten(start_dim=1)
+
+
 class MsgSequenceProbe(torch.nn.Module):
     def __init__(
         self,
@@ -166,8 +319,67 @@ class MsgSequenceProbe(torch.nn.Module):
         self,
         peak_embeddings: torch.Tensor,
         valid_mask: torch.Tensor,
+        pair_embeddings: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         return self.heads(self.pooler(peak_embeddings, valid_mask))
+
+
+class MsgSinglePairLinearProbe(torch.nn.Module):
+    def __init__(
+        self,
+        *,
+        pooler: MsgSinglePairPmaPool,
+        pooled_dim: int,
+        task_names: tuple[str, ...],
+        task_output_dims: dict[str, int] | None = None,
+    ) -> None:
+        super().__init__()
+        self.pooler = pooler
+        self.heads = MsgLinearProbe(
+            input_dim=pooled_dim,
+            task_names=task_names,
+            task_output_dims=task_output_dims,
+        )
+
+    def forward(
+        self,
+        peak_embeddings: torch.Tensor,
+        valid_mask: torch.Tensor,
+        pair_embeddings: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        assert pair_embeddings is not None
+        return self.heads(self.pooler(peak_embeddings, valid_mask, pair_embeddings))
+
+
+class MsgSinglePairCovarianceProbe(torch.nn.Module):
+    def __init__(
+        self,
+        *,
+        pooler: MsgSinglePairCovariancePool,
+        pooled_dim: int,
+        hidden_dim: int,
+        num_layers: int = 2,
+        task_names: tuple[str, ...],
+        task_output_dims: dict[str, int] | None = None,
+    ) -> None:
+        super().__init__()
+        self.pooler = pooler
+        self.heads = MsgProbeHeads(
+            input_dim=pooled_dim,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            task_names=task_names,
+            task_output_dims=task_output_dims,
+        )
+
+    def forward(
+        self,
+        peak_embeddings: torch.Tensor,
+        valid_mask: torch.Tensor,
+        pair_embeddings: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        assert pair_embeddings is not None
+        return self.heads(self.pooler(peak_embeddings, valid_mask, pair_embeddings))
 
 
 def build_msg_sequence_probe(
@@ -176,12 +388,65 @@ def build_msg_sequence_probe(
     config: config_dict.ConfigDict,
     task_spec: MsgProbeTaskSpec,
     covariance_pooler: CovariancePool | None = None,
-) -> MsgSequenceProbe:
+) -> torch.nn.Module:
     model_dim = int(config.model_dim)
     hidden_dim = int(_config_get(config, "msg_probe_mlp_hidden_dim", model_dim))
     num_layers = int(_config_get(config, "msg_probe_mlp_num_layers", 2))
     task_names = _probe_task_names(task_spec)
     task_output_dims = _probe_task_output_dims(task_spec)
+    if _is_single_pair_covariance_variant(variant):
+        compressed_dim = int(_config_get(config, "covariance_pooling_dim", 32))
+        pooler = MsgSinglePairCovariancePool(
+            single_dim=model_dim,
+            pair_dim=int(_config_get(config, "pairformer_pair_dim", model_dim)),
+            compressed_dim=compressed_dim,
+            include_diagonal=bool(
+                _config_get(
+                    config,
+                    "msg_probe_single_pair_covariance_include_diagonal",
+                    False,
+                )
+            ),
+        )
+        return MsgSinglePairCovarianceProbe(
+            pooler=pooler,
+            pooled_dim=compressed_dim * compressed_dim,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            task_names=task_names,
+            task_output_dims=task_output_dims,
+        )
+    if _is_single_pair_pma_variant(variant):
+        pair_dim = int(_config_get(config, "pairformer_pair_dim", model_dim))
+        num_tokens = int(_config_get(config, "msg_probe_single_pair_pma_num_tokens", 8))
+        num_heads = int(
+            _config_get(
+                config,
+                "msg_probe_single_pair_pma_num_heads",
+                _config_get(
+                    config,
+                    "msg_probe_pma_num_heads",
+                    _config_get(config, "encoder_num_heads", 8),
+                ),
+            )
+        )
+        num_blocks = _single_pair_pma_num_blocks(variant, config)
+        pooler = MsgSinglePairPmaPool(
+            single_dim=model_dim,
+            pair_dim=pair_dim,
+            latent_dim=model_dim,
+            num_tokens=num_tokens,
+            num_heads=num_heads,
+            num_blocks=num_blocks,
+            hidden_dim=hidden_dim,
+            norm_eps=float(_config_get(config, "norm_eps", 1e-5)),
+        )
+        return MsgSinglePairLinearProbe(
+            pooler=pooler,
+            pooled_dim=2 * num_tokens * model_dim,
+            task_names=task_names,
+            task_output_dims=task_output_dims,
+        )
     pooler, pooled_dim = _build_pooler(
         variant,
         config=config,
@@ -238,6 +503,31 @@ def _probe_task_output_dims(task_spec: MsgProbeTaskSpec) -> dict[str, int]:
     if task_spec.maccs_bits > 0:
         output_dims[task_spec.fingerprint_task] = task_spec.maccs_bits
     return output_dims
+
+
+def _is_single_pair_pma_variant(variant: str) -> bool:
+    return variant == "single_pair_pma" or variant.startswith("single_pair_pma_")
+
+
+def _is_single_pair_covariance_variant(variant: str) -> bool:
+    return variant in ("single_pair_covariance", "pair_covariance")
+
+
+def _uses_pair_features(variant: str) -> bool:
+    return _is_single_pair_pma_variant(variant) or _is_single_pair_covariance_variant(
+        variant
+    )
+
+
+def _single_pair_pma_num_blocks(
+    variant: str,
+    config: config_dict.ConfigDict,
+) -> int:
+    prefix = "single_pair_pma_"
+    if variant.startswith(prefix):
+        suffix = variant[len(prefix):].removesuffix("blocks").removesuffix("block")
+        return int(suffix)
+    return int(_config_get(config, "msg_probe_single_pair_pma_num_blocks", 2))
 
 
 def _build_pooler(

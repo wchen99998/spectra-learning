@@ -18,6 +18,10 @@ from spectra_learning.probes.massspec.msg_modules import (
     MsgMeanPool,
     MsgPmaPool,
     MsgSequenceProbe,
+    MsgSinglePairCovariancePool,
+    MsgSinglePairCovarianceProbe,
+    MsgSinglePairLinearProbe,
+    MsgSinglePairPmaPool,
     _probe_task_names,
     _probe_task_output_dims,
     build_msg_sequence_probe as _build_msg_sequence_probe,
@@ -257,6 +261,35 @@ class MsgSequenceProbeTests(unittest.TestCase):
         )
         self.assertTrue(torch.allclose(pooled, expected))
 
+    def test_single_pair_covariance_pool_uses_off_diagonal_pair_second_moment(self):
+        pool = MsgSinglePairCovariancePool(
+            single_dim=2,
+            pair_dim=2,
+            compressed_dim=2,
+        )
+        with torch.no_grad():
+            pool.single_pool.left_proj.weight.copy_(torch.eye(2))
+            pool.single_pool.right_proj.weight.copy_(torch.eye(2))
+            pool.pair_left_proj.weight.copy_(torch.eye(2))
+            pool.pair_right_proj.weight.copy_(torch.eye(2))
+            pool.output_proj.weight.zero_()
+            pool.output_proj.bias.zero_()
+            pool.output_proj.weight[:, 4:].copy_(torch.eye(4))
+
+        peak_embeddings = torch.tensor([[[1.0, 0.0], [0.0, 1.0], [9.0, 9.0]]])
+        pair_embeddings = torch.zeros(1, 3, 3, 2)
+        pair_embeddings[0, 0, 0] = torch.tensor([100.0, 100.0])
+        pair_embeddings[0, 1, 1] = torch.tensor([100.0, 100.0])
+        pair_embeddings[0, 0, 1] = torch.tensor([1.0, 2.0])
+        pair_embeddings[0, 1, 0] = torch.tensor([3.0, 4.0])
+        pair_embeddings[0, 0, 2] = torch.tensor([100.0, 100.0])
+        valid_mask = torch.tensor([[True, True, False]])
+
+        pooled = pool(peak_embeddings, valid_mask, pair_embeddings)
+
+        expected = torch.tensor([[5.0, 7.0, 7.0, 10.0]])
+        torch.testing.assert_close(pooled, expected)
+
     def test_pma_pool_returns_fixed_size_vectors(self):
         pool = MsgPmaPool(input_dim=4, num_seeds=3, num_heads=2)
         peak_embeddings = torch.randn(2, 5, 4)
@@ -271,6 +304,97 @@ class MsgSequenceProbeTests(unittest.TestCase):
 
         self.assertEqual(pooled.shape, (2, 4))
         self.assertTrue(torch.isfinite(pooled).all().item())
+
+    def test_single_pair_pma_pool_flattens_single_and_pair_tokens(self):
+        pool = MsgSinglePairPmaPool(
+            single_dim=4,
+            pair_dim=6,
+            latent_dim=4,
+            num_tokens=3,
+            num_heads=2,
+            num_blocks=2,
+            hidden_dim=8,
+            norm_eps=1e-5,
+        )
+        peak_embeddings = torch.randn(2, 5, 4)
+        pair_embeddings = torch.randn(2, 5, 5, 6)
+        valid_mask = torch.tensor(
+            [
+                [True, True, False, False, False],
+                [True, True, True, True, False],
+            ]
+        )
+
+        pooled = pool(peak_embeddings, valid_mask, pair_embeddings)
+
+        self.assertEqual(pooled.shape, (2, 2 * 3 * 4))
+        self.assertTrue(torch.isfinite(pooled).all().item())
+
+    def test_single_pair_pma_probe_uses_linear_heads(self):
+        config = config_dict.ConfigDict()
+        config.model_dim = 4
+        config.pairformer_pair_dim = 6
+        config.encoder_num_heads = 2
+        config.msg_probe_mlp_hidden_dim = 8
+        task_spec = MsgProbeTaskSpec(
+            regression_tasks=("mol_weight",),
+            num_rings_classes=(0, 1),
+            maccs_bits=4,
+            regression_means={"mol_weight": 0.0},
+            regression_stds={"mol_weight": 1.0},
+            fingerprint_task="maccs",
+        )
+        probe = _build_msg_sequence_probe(
+            "single_pair_pma_2",
+            config=config,
+            task_spec=task_spec,
+        )
+        peak_embeddings = torch.randn(3, 5, 4)
+        pair_embeddings = torch.randn(3, 5, 5, 6)
+        valid_mask = torch.ones(3, 5, dtype=torch.bool)
+
+        logits = probe(peak_embeddings, valid_mask, pair_embeddings)
+
+        self.assertIsInstance(probe, MsgSinglePairLinearProbe)
+        self.assertEqual(len(probe.pooler.single_encoder.blocks), 2)
+        self.assertIsInstance(probe.heads.heads["mol_weight"], torch.nn.Linear)
+        self.assertEqual(logits["mol_weight"].shape, (3, 1))
+        self.assertEqual(logits["num_rings"].shape, (3, 2))
+        self.assertEqual(logits["maccs"].shape, (3, 4))
+
+    def test_single_pair_covariance_probe_uses_mlp_heads(self):
+        config = config_dict.ConfigDict()
+        config.model_dim = 4
+        config.pairformer_pair_dim = 6
+        config.covariance_pooling_dim = 3
+        config.msg_probe_mlp_hidden_dim = 8
+        task_spec = MsgProbeTaskSpec(
+            regression_tasks=("mol_weight",),
+            num_rings_classes=(0, 1),
+            maccs_bits=4,
+            regression_means={"mol_weight": 0.0},
+            regression_stds={"mol_weight": 1.0},
+            fingerprint_task="maccs",
+        )
+        probe = _build_msg_sequence_probe(
+            "single_pair_covariance",
+            config=config,
+            task_spec=task_spec,
+        )
+        peak_embeddings = torch.randn(3, 5, 4)
+        pair_embeddings = torch.randn(3, 5, 5, 6)
+        valid_mask = torch.ones(3, 5, dtype=torch.bool)
+
+        logits = probe(peak_embeddings, valid_mask, pair_embeddings)
+
+        self.assertIsInstance(probe, MsgSinglePairCovarianceProbe)
+        self.assertEqual(probe.pooler.output_dim, 3 * 3)
+        head = cast(torch.nn.Sequential, probe.heads.heads["mol_weight"])
+        first_head = cast(torch.nn.Linear, head[0])
+        self.assertEqual(first_head.in_features, 3 * 3)
+        self.assertEqual(logits["mol_weight"].shape, (3, 1))
+        self.assertEqual(logits["num_rings"].shape, (3, 2))
+        self.assertEqual(logits["maccs"].shape, (3, 4))
 
     def test_sequence_probe_output_shapes_match_task_heads_for_all_variants(self):
         peak_embeddings = torch.randn(3, 6, 4)
