@@ -531,6 +531,7 @@ def compile_forward(model: torch.nn.Module, config: config_dict.ConfigDict) -> N
     compile_mode = str(_config_get(config, "compile_mode", "max-autotune"))
     if compile_mode.lower() == "none":
         return
+    inductor_config.shape_padding = not compile_mode.startswith("max-autotune")
     model.compile(
         mode=compile_mode,
         fullgraph=False,

@@ -169,7 +169,6 @@ def _build_peak_set_encoder(cfg: PeakSetJEPASettings) -> PeakSetEncoder:
         pair_dim=cfg.pairformer_pair_dim,
         pair_feature_hidden_dim=cfg.pairformer_pair_feature_hidden_dim,
         pairformer_dropout=cfg.pairformer_dropout,
-        pairformer_use_cuequivariance=cfg.pairformer_use_cuequivariance,
         pairformer_mz_scale=cfg.pairformer_mz_scale,
         pairformer_precursor_mz_scale=cfg.pairformer_precursor_mz_scale,
         pairformer_use_fourier_features=cfg.pairformer_use_fourier_features,
@@ -283,7 +282,6 @@ def _build_predictor(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
                     refresh_pair_layers is None
                     or block_idx in refresh_pair_layers
                 ),
-                use_cuequivariance=cfg.pairformer_use_cuequivariance,
             )
             for block_idx in range(1, cfg.masked_latent_predictor_num_layers + 1)
         ]

@@ -76,6 +76,49 @@ def _optimizer_config(**overrides) -> config_dict.ConfigDict:
     return cfg
 
 
+class _CompileRecorder(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.compile_kwargs = None
+
+    def compile(self, **kwargs) -> None:
+        self.compile_kwargs = kwargs
+
+
+def test_compile_forward_disables_shape_padding_for_max_autotune():
+    original = pretrain.inductor_config.shape_padding
+    try:
+        pretrain.inductor_config.shape_padding = True
+        model = _CompileRecorder()
+
+        pretrain.compile_forward(model, {"compile_mode": "max-autotune"})
+
+        assert pretrain.inductor_config.shape_padding is False
+        assert model.compile_kwargs == {
+            "mode": "max-autotune",
+            "fullgraph": False,
+        }
+    finally:
+        pretrain.inductor_config.shape_padding = original
+
+
+def test_compile_forward_enables_shape_padding_for_reduce_overhead():
+    original = pretrain.inductor_config.shape_padding
+    try:
+        pretrain.inductor_config.shape_padding = False
+        model = _CompileRecorder()
+
+        pretrain.compile_forward(model, {"compile_mode": "reduce-overhead"})
+
+        assert pretrain.inductor_config.shape_padding is True
+        assert model.compile_kwargs == {
+            "mode": "reduce-overhead",
+            "fullgraph": False,
+        }
+    finally:
+        pretrain.inductor_config.shape_padding = original
+
+
 def test_save_checkpoint_persists_optimizer_state():
     model = _small_model()
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)

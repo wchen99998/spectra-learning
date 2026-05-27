@@ -356,7 +356,6 @@ def test_pair_refresh_uses_sigmoid_gate_from_pair_state():
         norm_eps=1e-5,
         dropout=0.0,
         refresh_pair=True,
-        use_cuequivariance=False,
     )
     block.refresh_pair = _ConstantPairUpdate()
     block.refresh_pair_gate_norm = nn.Identity()

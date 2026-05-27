@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 import math
-import os
 
 import torch
 import torch.nn.functional as F
 from jaxtyping import Bool, Float
 from torch import Tensor, nn
-
-os.environ.setdefault("CUEQ_TORCH_COMPILE", "1")
 
 from spectra_learning.data.spectra import PEAK_MZ_MAX
 from spectra_learning.models.peak_features import FourierFeatures
@@ -29,30 +26,6 @@ COMMON_MASS_DIFFERENCES_DA = (
     129.042593,
     147.068414,
 )
-
-_CUE_TRITON_CACHE_INITIALIZED = False
-
-
-def init_cuequivariance_torch_compile() -> None:
-    global _CUE_TRITON_CACHE_INITIALIZED
-    if not _CUE_TRITON_CACHE_INITIALIZED:
-        import cuequivariance_ops_torch
-
-        cuequivariance_ops_torch.init_triton_cache()
-        _CUE_TRITON_CACHE_INITIALIZED = True
-
-
-def cue_triangle_multiplicative_update(**kwargs: object) -> Tensor:
-    from cuequivariance_torch import triangle_multiplicative_update
-
-    return triangle_multiplicative_update(**kwargs)
-
-
-def cue_triangle_attention(*args: object, **kwargs: object) -> Tensor:
-    from cuequivariance_torch import triangle_attention
-
-    return triangle_attention(*args, **kwargs)
-
 
 def _init_linear(linear: nn.Linear, *, gate: bool = False) -> None:
     if gate:
@@ -278,7 +251,6 @@ class TriangleMultiplicativeUpdate(nn.Module):
         *,
         direction: str,
         norm_eps: float,
-        use_cuequivariance: bool,
     ) -> None:
         super().__init__()
         self.direction = direction
@@ -287,7 +259,6 @@ class TriangleMultiplicativeUpdate(nn.Module):
         self.p_in = nn.Linear(pair_dim, 2 * pair_dim)
         self.g_in = nn.Linear(pair_dim, 2 * pair_dim)
         self.norm_out = _build_norm(pair_dim, eps=norm_eps)
-        self.use_cuequivariance = use_cuequivariance
         self.p_out = nn.Linear(pair_dim, pair_dim)
         self.g_out = nn.Linear(pair_dim, pair_dim)
         _init_linear(self.p_in)
@@ -295,13 +266,7 @@ class TriangleMultiplicativeUpdate(nn.Module):
         _init_linear(self.p_out)
         _init_linear(self.g_out, gate=True)
 
-    def _can_use_cuequivariance(
-        self,
-        x: Float[Tensor, "batch peaks peaks pair"],
-    ) -> bool:
-        return self.use_cuequivariance and x.is_cuda and x.shape[-1] % 32 == 0
-
-    def _torch_forward(
+    def forward(
         self,
         x: Float[Tensor, "batch peaks peaks pair"],
         mask: Bool[Tensor, "batch peaks peaks"],
@@ -320,33 +285,6 @@ class TriangleMultiplicativeUpdate(nn.Module):
         update = update * torch.sigmoid(self.g_out(x_norm))
         return update * pair_mask
 
-    def forward(
-        self,
-        x: Float[Tensor, "batch peaks peaks pair"],
-        mask: Bool[Tensor, "batch peaks peaks"],
-    ) -> Float[Tensor, "batch peaks peaks pair"]:
-        if self._can_use_cuequivariance(x):
-            init_cuequivariance_torch_compile()
-            return cue_triangle_multiplicative_update(
-                x=x,
-                direction=self.direction,
-                mask=mask,
-                norm_in_weight=self.norm_in.weight,
-                norm_in_bias=getattr(self.norm_in, "bias", None),
-                p_in_weight=self.p_in.weight,
-                p_in_bias=self.p_in.bias,
-                g_in_weight=self.g_in.weight,
-                g_in_bias=self.g_in.bias,
-                norm_out_weight=self.norm_out.weight,
-                norm_out_bias=getattr(self.norm_out, "bias", None),
-                p_out_weight=self.p_out.weight,
-                p_out_bias=self.p_out.bias,
-                g_out_weight=self.g_out.weight,
-                g_out_bias=self.g_out.bias,
-                eps=self.norm_eps,
-            )
-        return self._torch_forward(x, mask)
-
 
 class TriangleAttention(nn.Module):
     def __init__(
@@ -356,13 +294,11 @@ class TriangleAttention(nn.Module):
         num_heads: int,
         ending: bool,
         norm_eps: float,
-        use_cuequivariance: bool,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = pair_dim // num_heads
         self.ending = ending
-        self.use_cuequivariance = use_cuequivariance
         self.norm = _build_norm(pair_dim, eps=norm_eps)
         self.qkv = nn.Linear(pair_dim, 3 * pair_dim, bias=False)
         self.bias = nn.Linear(pair_dim, num_heads, bias=False)
@@ -372,12 +308,6 @@ class TriangleAttention(nn.Module):
         _init_linear(self.bias)
         _init_linear(self.g, gate=True)
         _init_linear(self.o)
-
-    def _can_use_cuequivariance(
-        self,
-        q: Float[Tensor, "batch peaks heads peaks head_dim"],
-    ) -> bool:
-        return self.use_cuequivariance and q.is_cuda
 
     def _start_attention(
         self,
@@ -409,24 +339,14 @@ class TriangleAttention(nn.Module):
             1,
             num_peaks,
         )
-        if self._can_use_cuequivariance(q):
-            out = cue_triangle_attention(
-                q,
-                k,
-                v,
-                bias,
-                key_mask,
-                scale=1.0 / math.sqrt(self.head_dim),
-            )
-        else:
-            scores = (
-                torch.einsum("bnhqd,bnhkd->bnhqk", q, k)
-                * (1.0 / math.sqrt(self.head_dim))
-                + bias
-            )
-            scores = scores.masked_fill(~key_mask, float("-inf"))
-            attn = torch.softmax(scores.float(), dim=-1).to(dtype=v.dtype)
-            out = torch.einsum("bnhqk,bnhkd->bnhqd", attn, v)
+        scores = (
+            torch.einsum("bnhqd,bnhkd->bnhqk", q, k)
+            * (1.0 / math.sqrt(self.head_dim))
+            + bias
+        )
+        scores = scores.masked_fill(~key_mask, float("-inf"))
+        attn = torch.softmax(scores.float(), dim=-1).to(dtype=v.dtype)
+        out = torch.einsum("bnhqk,bnhkd->bnhqd", attn, v)
         out = out.permute(0, 1, 3, 2, 4).reshape(
             batch_size,
             num_peaks,
@@ -520,20 +440,17 @@ class PairMixerBlock(nn.Module):
         attention_mlp_multiple: float,
         norm_eps: float,
         dropout: float,
-        use_cuequivariance: bool,
     ) -> None:
         super().__init__()
         self.tri_mul_out = TriangleMultiplicativeUpdate(
             pair_dim,
             direction="outgoing",
             norm_eps=norm_eps,
-            use_cuequivariance=use_cuequivariance,
         )
         self.tri_mul_in = TriangleMultiplicativeUpdate(
             pair_dim,
             direction="incoming",
             norm_eps=norm_eps,
-            use_cuequivariance=use_cuequivariance,
         )
         self.pair_transition_norm = _build_norm(
             pair_dim,
@@ -601,7 +518,6 @@ class PairformerBlock(nn.Module):
         norm_eps: float,
         dropout: float,
         refresh_pair: bool,
-        use_cuequivariance: bool,
     ) -> None:
         super().__init__()
         self.refresh_pair = (
@@ -624,27 +540,23 @@ class PairformerBlock(nn.Module):
             pair_dim,
             direction="outgoing",
             norm_eps=norm_eps,
-            use_cuequivariance=use_cuequivariance,
         )
         self.tri_mul_in = TriangleMultiplicativeUpdate(
             pair_dim,
             direction="incoming",
             norm_eps=norm_eps,
-            use_cuequivariance=use_cuequivariance,
         )
         self.tri_att_start = TriangleAttention(
             pair_dim,
             num_heads=pair_num_heads,
             ending=False,
             norm_eps=norm_eps,
-            use_cuequivariance=use_cuequivariance,
         )
         self.tri_att_end = TriangleAttention(
             pair_dim,
             num_heads=pair_num_heads,
             ending=True,
             norm_eps=norm_eps,
-            use_cuequivariance=use_cuequivariance,
         )
         self.pair_transition_norm = _build_norm(
             pair_dim,

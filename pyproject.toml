@@ -18,8 +18,6 @@ dependencies = [
     "tqdm>=4.66.4",
     "wandb==0.27.0",
     "modal>=1.4.1",
-    "cuequivariance-torch==0.10.0",
-    "cuequivariance-ops-torch-cu13==0.10.0",
     "jaxtyping>=0.3.10",
 ]
 

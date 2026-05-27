@@ -326,7 +326,6 @@ class PairformerEncoderTests(unittest.TestCase):
         model = self._build_model(
             num_peaks=8,
             jepa_num_target_blocks=1,
-            pairformer_use_cuequivariance=True,
         ).cuda()
         compiled_encoder = torch.compile(model.encoder, mode="reduce-overhead")
         peak_mz = torch.linspace(0.05, 0.6, 8, device="cuda").view(1, 8)

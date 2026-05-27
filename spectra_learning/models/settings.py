@@ -47,7 +47,6 @@ class PeakSetJEPASettings:
     pairformer_dropout: float = 0.0
     pairformer_refresh_pair: bool = True
     pairformer_refresh_pair_layers: list[int] | tuple[int, ...] | None = None
-    pairformer_use_cuequivariance: bool = True
     pairformer_mz_scale: float = PEAK_MZ_MAX
     pairformer_precursor_mz_scale: float = PEAK_MZ_MAX
     pairformer_use_fourier_features: bool = True
@@ -162,7 +161,6 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "pairformer_dropout": float,
     "pairformer_refresh_pair": bool,
     "pairformer_refresh_pair_layers": _identity,
-    "pairformer_use_cuequivariance": bool,
     "pairformer_mz_scale": float,
     "pairformer_precursor_mz_scale": float,
     "pairformer_use_fourier_features": bool,
