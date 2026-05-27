@@ -16,6 +16,7 @@ import spectra_learning.data.gems as gems
 import spectra_learning.data.gems.artifacts as gems_artifacts
 import spectra_learning.probes.massspec.data as massspec_probe_data
 from scripts.prepare_gems_native import main as prepare_gems_main
+from scripts.prepare_nist_murcko_probe import build_nist_murcko_probe_artifact
 from spectra_learning.data.gems.native import (
     GEMS_NATIVE_METADATA_VERSION,
     build_gems_native_artifact,
@@ -187,6 +188,43 @@ def _write_fake_nist_murcko_parquet_artifact(root: Path) -> None:
             {"fold_counts": {key: len(value) for key, value in rows_by_split.items()}}
         )
     )
+
+
+def _write_fake_nist_murcko_probe_artifact(
+    root: Path,
+    *,
+    max_precursor_mz: float = 1000.0,
+) -> dict[str, object]:
+    split_lengths = {
+        "train": [1, 1],
+        "val": [1],
+        "test": [1],
+    }
+    metadata: dict[str, object] = {
+        "metadata_version": massspec_probe_data.NIST_MURCKO_METADATA_VERSION,
+        "artifact_format": massspec_probe_data.NIST_MURCKO_ARTIFACT_FORMAT,
+        "max_precursor_mz": max_precursor_mz,
+        "adduct_vocab": {"unknown": 0},
+        "instrument_type_vocab": {"unknown": 0},
+        "dreams_dim": 2,
+        "probe_maccs_bits": 166,
+        "pairwise_alignment_available": False,
+        "pairwise_alignment_num_pairs": 0,
+        "pairwise_alignment_num_endpoints": 0,
+    }
+    for split_name, lengths in split_lengths.items():
+        shard_names = []
+        split_dir = root / split_name
+        for shard_idx in range(len(lengths)):
+            shard_name = f"shard-{shard_idx:05d}-of-{len(lengths):05d}"
+            (split_dir / shard_name).mkdir(parents=True, exist_ok=True)
+            shard_names.append(shard_name)
+        metadata[f"{split_name}_files"] = shard_names
+        metadata[f"{split_name}_lengths"] = lengths
+        metadata[f"{split_name}_size"] = sum(lengths)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "metadata.json").write_text(json.dumps(metadata))
+    return metadata
 
 
 class GeMSNativeArtifactTests(unittest.TestCase):
@@ -1044,11 +1082,10 @@ class MassSpecPreprocessTests(unittest.TestCase):
             cfg.num_peaks = 4
             cfg.nist_murcko_probe_repo_id = "owner/nist-murcko"
             cfg.nist_murcko_probe_revision = "unit-test"
-            cfg.nist_murcko_probe_split_dir = "murcko-split"
 
             def fake_snapshot_download(*, local_dir, **kwargs):
-                _write_fake_nist_murcko_parquet_artifact(
-                    Path(local_dir) / "murcko-split"
+                _write_fake_nist_murcko_probe_artifact(
+                    Path(local_dir) / massspec_probe_data.NIST_MURCKO_PREPARED_SUBDIR
                 )
                 return str(local_dir)
 
@@ -1084,12 +1121,64 @@ class MassSpecPreprocessTests(unittest.TestCase):
         self.assertEqual(
             kwargs["allow_patterns"],
             [
-                "murcko-split/metadata.json",
-                "murcko-split/train.parquet",
-                "murcko-split/val.parquet",
-                "murcko-split/test.parquet",
+                "nist_murcko_probe/metadata.json",
+                "nist_murcko_probe/train/*",
+                "nist_murcko_probe/val/*",
+                "nist_murcko_probe/test/*",
             ],
         )
+
+    def test_probe_data_uses_local_nist_murcko_artifact_without_download(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            artifact_root = tmp_path / "probe-cache" / "nist_murcko_probe"
+            _write_fake_nist_murcko_probe_artifact(artifact_root)
+
+            cfg = config_dict.ConfigDict()
+            cfg.artifact_dir = str(tmp_path / "probe-cache")
+            cfg.probe_dataset = "nist-murcko"
+            cfg.batch_size = 2
+            cfg.max_precursor_mz = 1000.0
+            cfg.min_peak_intensity = 1e-4
+            cfg.peak_ordering = "mz"
+            cfg.num_peaks = 4
+            cfg.nist_murcko_probe_repo_id = "owner/nist-murcko"
+
+            with mock.patch.object(
+                massspec_probe_data,
+                "snapshot_download",
+            ) as download_mock:
+                probe_data = massspec_probe_data.MassSpecProbeData.from_config(cfg)
+
+        self.assertEqual(probe_data.info["massspec_train_size"], 2)
+        self.assertEqual(probe_data.dreams_dim, 2)
+        download_mock.assert_not_called()
+
+    def test_build_nist_murcko_artifact_from_parquet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_dir = tmp_path / "source" / "murcko-split"
+            artifact_dir = tmp_path / "artifact"
+            _write_fake_nist_murcko_parquet_artifact(source_dir)
+
+            metadata = build_nist_murcko_probe_artifact(
+                source_dir,
+                artifact_dir,
+                max_precursor_mz=1000.0,
+                num_shards=4,
+                extra_metadata={"parquet_split_dir": "murcko-split"},
+            )
+
+            self.assertEqual(metadata["artifact_format"], "nist_murcko_probe_v1")
+            self.assertEqual(metadata["train_size"], 2)
+            self.assertEqual(metadata["val_size"], 1)
+            self.assertEqual(metadata["test_size"], 1)
+            self.assertEqual(metadata["dreams_dim"], 2)
+            self.assertFalse(metadata["pairwise_alignment_available"])
+            self.assertEqual(metadata["parquet_split_dir"], "murcko-split")
+            shard_dir = artifact_dir / "train" / metadata["train_files"][0]
+            self.assertTrue((shard_dir / "spectra.npy").exists())
+            self.assertEqual(np.load(shard_dir / "dreams_embedding.npy").shape[1], 2)
 
     def test_nist_full_artifact_preserves_row_alignment(self):
         with tempfile.TemporaryDirectory() as tmp:
