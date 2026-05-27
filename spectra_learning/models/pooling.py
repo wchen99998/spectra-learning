@@ -156,10 +156,20 @@ class SinglePairCovariancePool(nn.Module):
                 pair_embeddings.float(),
                 valid_mask,
             )
+            single_features = single_covariance.flatten(start_dim=1)
+            pair_features = pair_covariance.flatten(start_dim=1)
+            single_features = torch.nn.functional.layer_norm(
+                single_features,
+                (self.output_dim,),
+            )
+            pair_features = torch.nn.functional.layer_norm(
+                pair_features,
+                (self.output_dim,),
+            )
             pooled = torch.cat(
                 [
-                    single_covariance.flatten(start_dim=1),
-                    pair_covariance.flatten(start_dim=1),
+                    single_features,
+                    pair_features,
                 ],
                 dim=1,
             )

@@ -287,7 +287,10 @@ class MsgSequenceProbeTests(unittest.TestCase):
 
         pooled = pool(peak_embeddings, valid_mask, pair_embeddings)
 
-        expected = torch.tensor([[5.0, 7.0, 7.0, 10.0]])
+        expected = torch.nn.functional.layer_norm(
+            torch.tensor([[5.0, 7.0, 7.0, 10.0]]),
+            (4,),
+        )
         torch.testing.assert_close(pooled, expected)
 
     def test_pma_pool_returns_fixed_size_vectors(self):

@@ -10,12 +10,6 @@ from torch import Tensor, nn
 
 os.environ.setdefault("CUEQ_TORCH_COMPILE", "1")
 
-import cuequivariance_ops_torch
-from cuequivariance_torch import (
-    triangle_attention as cue_triangle_attention,
-    triangle_multiplicative_update as cue_triangle_multiplicative_update,
-)
-
 from spectra_learning.data.spectra import PEAK_MZ_MAX
 from spectra_learning.models.peak_features import FourierFeatures
 from spectra_learning.models.transformer import Attention, FeedForward, _build_norm
@@ -42,8 +36,22 @@ _CUE_TRITON_CACHE_INITIALIZED = False
 def init_cuequivariance_torch_compile() -> None:
     global _CUE_TRITON_CACHE_INITIALIZED
     if not _CUE_TRITON_CACHE_INITIALIZED:
+        import cuequivariance_ops_torch
+
         cuequivariance_ops_torch.init_triton_cache()
         _CUE_TRITON_CACHE_INITIALIZED = True
+
+
+def cue_triangle_multiplicative_update(**kwargs: object) -> Tensor:
+    from cuequivariance_torch import triangle_multiplicative_update
+
+    return triangle_multiplicative_update(**kwargs)
+
+
+def cue_triangle_attention(*args: object, **kwargs: object) -> Tensor:
+    from cuequivariance_torch import triangle_attention
+
+    return triangle_attention(*args, **kwargs)
 
 
 def _init_linear(linear: nn.Linear, *, gate: bool = False) -> None:
