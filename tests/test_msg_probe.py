@@ -45,6 +45,7 @@ from spectra_learning.probes.massspec.msg_probe import (
     _new_epoch_state,
     _online_probe_covariance_pooler,
     _probe_step,
+    _resolve_probe_warmup_steps,
     _compute_pairwise_similarity_alignment_for_indices,
     _plot_pairwise_similarity_alignment,
     _run_msg_probe_once,
@@ -1449,6 +1450,19 @@ class ProbeConfigTests(unittest.TestCase):
         cfg.nist_murcko_probe_num_repeats = 3
 
         self.assertEqual(resolve_msg_probe_num_repeats(cfg), 3)
+
+    def test_msg_probe_warmup_epochs_override_step_count(self):
+        cfg = config_dict.ConfigDict()
+        cfg.msg_probe_warmup_epochs = 0.5
+        cfg.msg_probe_warmup_steps = 0
+
+        self.assertEqual(_resolve_probe_warmup_steps(cfg, steps_per_epoch=118), 59)
+
+    def test_msg_probe_warmup_steps_still_work(self):
+        cfg = config_dict.ConfigDict()
+        cfg.msg_probe_warmup_steps = 17
+
+        self.assertEqual(_resolve_probe_warmup_steps(cfg, steps_per_epoch=118), 17)
 
     def test_msg_probe_fingerprint_defaults_to_maccs(self):
         cfg = config_dict.ConfigDict()

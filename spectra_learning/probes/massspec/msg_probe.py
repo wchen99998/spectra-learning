@@ -973,6 +973,13 @@ def _online_probe_covariance_pooler(
     return cast(CovariancePool | None, covariance_pooler)
 
 
+def _resolve_probe_warmup_steps(config: Any, steps_per_epoch: int) -> int:
+    warmup_epochs = _config_get(config, "msg_probe_warmup_epochs", None)
+    if warmup_epochs is not None:
+        return int(round(float(warmup_epochs) * steps_per_epoch))
+    return int(_config_get(config, "msg_probe_warmup_steps", 100))
+
+
 def resolve_msg_probe_select_metric(
     config: Any,
 ) -> str:
@@ -1207,7 +1214,10 @@ def _run_msg_probe_once(
     num_probe_epochs = int(_config_get(config, "msg_probe_num_epochs", 5))
     probe_lr = float(_config_get(config, "msg_probe_learning_rate", 1e-3))
     probe_weight_decay = float(_config_get(config, "msg_probe_weight_decay", 1e-2))
-    probe_warmup_steps = int(_config_get(config, "msg_probe_warmup_steps", 100))
+    probe_grad_clip_norm = _config_get(config, "msg_probe_grad_clip_norm", None)
+    probe_grad_clip_norm = (
+        None if probe_grad_clip_norm is None else float(probe_grad_clip_norm)
+    )
     early_stopping = bool(_config_get(config, "msg_probe_early_stopping", False))
     early_stopping_patience = int(
         _config_get(config, "msg_probe_early_stopping_patience", 10)
@@ -1317,6 +1327,7 @@ def _run_msg_probe_once(
         max_samples=max_train_samples,
         distributed_world_size=_distributed_world_size(distributed),
     )
+    probe_warmup_steps = _resolve_probe_warmup_steps(config, steps_per_epoch)
     schedulers = {
         variant: torch.optim.lr_scheduler.LambdaLR(
             optimizers[variant],
@@ -1382,6 +1393,11 @@ def _run_msg_probe_once(
                 if result is None:
                     continue
                 result["loss_total"].backward()
+                if probe_grad_clip_norm is not None and probe_grad_clip_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        train_probes[variant].parameters(),
+                        max_norm=probe_grad_clip_norm,
+                    )
                 optimizers[variant].step()
                 schedulers[variant].step()
                 if int(result["batch_size"]) > 0:
@@ -1680,7 +1696,10 @@ def _run_dreams_probe_once(
     num_probe_epochs = int(_config_get(config, "msg_probe_num_epochs", 5))
     probe_lr = float(_config_get(config, "msg_probe_learning_rate", 1e-3))
     probe_weight_decay = float(_config_get(config, "msg_probe_weight_decay", 1e-2))
-    probe_warmup_steps = int(_config_get(config, "msg_probe_warmup_steps", 100))
+    probe_grad_clip_norm = _config_get(config, "msg_probe_grad_clip_norm", None)
+    probe_grad_clip_norm = (
+        None if probe_grad_clip_norm is None else float(probe_grad_clip_norm)
+    )
     early_stopping = bool(_config_get(config, "msg_probe_early_stopping", False))
     early_stopping_patience = int(
         _config_get(config, "msg_probe_early_stopping_patience", 10)
@@ -1755,6 +1774,7 @@ def _run_dreams_probe_once(
         drop_remainder=False,
         max_samples=max_train_samples,
     )
+    probe_warmup_steps = _resolve_probe_warmup_steps(config, steps_per_epoch)
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,
         lr_lambda=lambda step_idx: (
@@ -1815,6 +1835,11 @@ def _run_dreams_probe_once(
             if result is None:
                 continue
             result["loss_total"].backward()
+            if probe_grad_clip_norm is not None and probe_grad_clip_norm > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    probe.parameters(),
+                    max_norm=probe_grad_clip_norm,
+                )
             optimizer.step()
             scheduler.step()
             _update_epoch_state(train_state, result, task_spec)

@@ -39,6 +39,8 @@ class MsgLinearProbe(torch.nn.Module):
                 for name in task_names
             }
         )
+        for head in self.heads.values():
+            _init_probe_output(head)
 
     def forward(
         self,
@@ -471,20 +473,36 @@ def _build_mlp_head(
     num_layers: int,
 ) -> torch.nn.Module:
     if num_layers == 1:
-        return torch.nn.Linear(input_dim, output_dim)
+        linear = torch.nn.Linear(input_dim, output_dim)
+        _init_probe_output(linear)
+        return linear
     layers: list[torch.nn.Module] = [
         torch.nn.Linear(input_dim, hidden_dim),
         torch.nn.SiLU(),
     ]
+    _init_probe_hidden(layers[0])
     for _ in range(num_layers - 2):
-        layers.extend(
-            [
-                torch.nn.Linear(hidden_dim, hidden_dim),
-                torch.nn.SiLU(),
-            ]
-        )
-    layers.append(torch.nn.Linear(hidden_dim, output_dim))
+        hidden = torch.nn.Linear(hidden_dim, hidden_dim)
+        _init_probe_hidden(hidden)
+        layers.extend([hidden, torch.nn.SiLU()])
+    output = torch.nn.Linear(hidden_dim, output_dim)
+    _init_probe_output(output)
+    layers.append(output)
     return torch.nn.Sequential(*layers)
+
+
+def _init_probe_hidden(linear: torch.nn.Module) -> None:
+    assert isinstance(linear, torch.nn.Linear)
+    torch.nn.init.xavier_uniform_(linear.weight)
+    if linear.bias is not None:
+        torch.nn.init.zeros_(linear.bias)
+
+
+def _init_probe_output(linear: torch.nn.Module) -> None:
+    assert isinstance(linear, torch.nn.Linear)
+    torch.nn.init.normal_(linear.weight, mean=0.0, std=1e-3)
+    if linear.bias is not None:
+        torch.nn.init.zeros_(linear.bias)
 
 
 def _probe_task_names(task_spec: MsgProbeTaskSpec) -> tuple[str, ...]:

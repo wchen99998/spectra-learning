@@ -120,7 +120,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_early_stopping_min_epochs = 20
     cfg.msg_probe_early_stopping_patience = 20
     cfg.msg_probe_every_n_steps = 1.0
-    cfg.msg_probe_learning_rate = 0.001
+    cfg.msg_probe_learning_rate = 0.0003
     cfg.msg_probe_max_test_samples = None
     cfg.msg_probe_max_train_samples = None
     cfg.msg_probe_max_val_samples = None
@@ -130,6 +130,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_pma_num_seeds = 32
     cfg.msg_probe_tune_metric = "msg_probe/test/auc_maccs_mean"
     cfg.msg_probe_variants = ["single_pair_covariance"]
+    cfg.msg_probe_warmup_epochs = 0.5
+    cfg.msg_probe_grad_clip_norm = 1.0
     cfg.msg_probe_warmup_steps = 0
     cfg.msg_probe_weight_decay = 0
     cfg.msg_probe_batch_size = 256
