@@ -13,7 +13,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.nist_murcko_probe_val_samples = 10_000
     cfg.nist_murcko_probe_test_samples = 10_000
     cfg.nist_murcko_probe_num_repeats = 1
-    cfg.batch_size = 128
+    cfg.batch_size = 512
     cfg.shuffle_buffer = 1_000_000
     cfg.drop_remainder = True
     cfg.max_precursor_mz = 1000
@@ -120,7 +120,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_early_stopping_min_delta = 0.0001
     cfg.msg_probe_early_stopping_min_epochs = 20
     cfg.msg_probe_early_stopping_patience = 20
-    cfg.msg_probe_every_n_steps = 0.25
+    cfg.msg_probe_every_n_steps = 1.0
     cfg.msg_probe_learning_rate = 0.001
     cfg.msg_probe_max_test_samples = None
     cfg.msg_probe_max_train_samples = None
@@ -130,16 +130,16 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_pma_num_heads = 8
     cfg.msg_probe_pma_num_seeds = 32
     cfg.msg_probe_tune_metric = "msg_probe/test/auc_maccs_mean"
-    cfg.msg_probe_variants = ["covariance"]
+    cfg.msg_probe_variants = ["single_pair_covariance"]
     cfg.msg_probe_warmup_steps = 0
     cfg.msg_probe_weight_decay = 0
     cfg.msg_probe_batch_size = 256
     cfg.msg_probe_backend = "local"
 
     # Optimizer
-    cfg.learning_rate = 0.0002
-    cfg.min_learning_rate = 0.00001
-    cfg.warmup_steps = 10_000
+    cfg.learning_rate = 0.0004
+    cfg.min_learning_rate = 0.00004
+    cfg.warmup_steps = 5_000
     cfg.weight_decay = 0.01
     cfg.b2 = 0.95
     cfg.grad_clip_norm = 1
