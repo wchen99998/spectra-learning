@@ -21,6 +21,7 @@ from sklearn.metrics import (
     average_precision_score,
     balanced_accuracy_score,
     f1_score,
+    precision_recall_curve,
     precision_score,
     recall_score,
     roc_auc_score,
@@ -36,7 +37,7 @@ from spectra_learning.data.spectra import (
 )
 from spectra_learning.models.factory import build_model_from_config
 from spectra_learning.models.model import PeakSetJEPA
-from spectra_learning.models.pooling import CovariancePool
+from spectra_learning.models.pooling import CovariancePool, SinglePairCovariancePool
 from spectra_learning.probes.massspec.data import _normalize_spectra_intensity
 from spectra_learning.training.checkpointing import load_pretrained_weights
 
@@ -565,12 +566,17 @@ def binary_focal_loss_with_logits(
     return (alpha_t * (1.0 - p_t).pow(gamma) * bce).mean()
 
 
-def _metric_dict(targets: np.ndarray, logits: np.ndarray, prefix: str) -> dict[str, float]:
+def _sigmoid_logits(logits: np.ndarray) -> np.ndarray:
     probs = np.empty_like(logits, dtype=np.float64)
     positive = logits >= 0
     probs[positive] = 1.0 / (1.0 + np.exp(-logits[positive]))
     exp_logits = np.exp(logits[~positive])
     probs[~positive] = exp_logits / (1.0 + exp_logits)
+    return probs
+
+
+def _metric_dict(targets: np.ndarray, logits: np.ndarray, prefix: str) -> dict[str, float]:
+    probs = _sigmoid_logits(logits)
     pred = probs >= 0.5
     return {
         f"{prefix}/roc_auc": float(roc_auc_score(targets, probs)),
@@ -582,6 +588,29 @@ def _metric_dict(targets: np.ndarray, logits: np.ndarray, prefix: str) -> dict[s
         f"{prefix}/recall": float(recall_score(targets, pred, zero_division=0)),
         f"{prefix}/positive_rate": float(np.mean(targets)),
     }
+
+
+def _precision_recall_curve_dict(
+    targets: np.ndarray,
+    logits: np.ndarray,
+) -> dict[str, list[float]]:
+    precision, recall, threshold = precision_recall_curve(
+        targets,
+        _sigmoid_logits(logits),
+    )
+    return {
+        "precision": precision.tolist(),
+        "recall": recall.tolist(),
+        "threshold": threshold.tolist(),
+    }
+
+
+def _tensor_state_to_cpu(
+    state: dict[str, torch.Tensor] | None,
+) -> dict[str, torch.Tensor] | None:
+    if state is None:
+        return None
+    return {key: value.detach().cpu().clone() for key, value in state.items()}
 
 
 def _parse_int_grid(raw: str) -> tuple[int, ...]:
@@ -672,6 +701,24 @@ def _make_embedding_loader(
 
 
 @torch.no_grad()
+def _prediction_arrays(
+    classifier: MLPClassifier,
+    loader: Any,
+    feature_fn: Callable[[dict[str, torch.Tensor]], torch.Tensor],
+    *,
+    device: torch.device,
+) -> tuple[np.ndarray, np.ndarray]:
+    classifier.eval()
+    logits, targets = [], []
+    for batch in loader:
+        batch = _move_batch(batch, device)
+        features = feature_fn(batch)
+        logits.append(classifier(features).detach().cpu().numpy())
+        targets.append(batch["label"].detach().cpu().numpy())
+    return np.concatenate(targets, axis=0), np.concatenate(logits, axis=0)
+
+
+@torch.no_grad()
 def _evaluate(
     classifier: MLPClassifier,
     loader: Any,
@@ -680,16 +727,15 @@ def _evaluate(
     device: torch.device,
     prefix: str,
 ) -> dict[str, float]:
-    classifier.eval()
-    logits, targets = [], []
-    for batch in loader:
-        batch = _move_batch(batch, device)
-        features = feature_fn(batch)
-        logits.append(classifier(features).detach().cpu().numpy())
-        targets.append(batch["label"].detach().cpu().numpy())
+    targets, logits = _prediction_arrays(
+        classifier,
+        loader,
+        feature_fn,
+        device=device,
+    )
     return _metric_dict(
-        np.concatenate(targets, axis=0),
-        np.concatenate(logits, axis=0),
+        targets,
+        logits,
         prefix,
     )
 
@@ -1031,14 +1077,14 @@ def _build_checkpoint_feature_factory(
     device: torch.device,
     train_covariance_pooler: bool,
     covariance_dim: int | None,
+    pooling: str,
 ) -> tuple[int, Callable[[bool], tuple[Callable[[dict[str, torch.Tensor]], torch.Tensor], torch.nn.Module | None]]]:
-    if train_covariance_pooler:
-        compressed_dim = (
-            covariance_dim
-            if covariance_dim is not None
-            else int(_config_get(config, "covariance_pooling_dim", 32))
-        )
-    else:
+    compressed_dim = (
+        covariance_dim
+        if covariance_dim is not None
+        else int(_config_get(config, "covariance_pooling_dim", 32))
+    )
+    if not train_covariance_pooler and pooling == "covariance":
         checkpoint_pooler = cast(CovariancePool, cast(Any, model).covariance_pooler)
         compressed_dim = checkpoint_pooler.left_proj.out_features
     input_dim = compressed_dim * compressed_dim
@@ -1053,7 +1099,39 @@ def _build_checkpoint_feature_factory(
         )
         return _peak_tokens_only(embeddings, batch["peak_valid_mask"])
 
+    @torch.no_grad()
+    def encode_single_pair(
+        batch: dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        peak_embeddings, _, pair_embeddings = model.encoder.forward_with_block_outputs(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            valid_mask=batch["peak_valid_mask"],
+            precursor_mz=batch.get("precursor_mz", None),
+        )
+        return _peak_tokens_only(peak_embeddings, batch["peak_valid_mask"]), pair_embeddings
+
     def build_feature_fn(training: bool):
+        if pooling == "single_pair_covariance":
+            pooler = SinglePairCovariancePool(
+                single_dim=int(config.model_dim),
+                pair_dim=int(_config_get(config, "pairformer_pair_dim", config.model_dim)),
+                compressed_dim=compressed_dim,
+            ).to(device)
+            trainable_pooler: torch.nn.Module | None = pooler if train_covariance_pooler else None
+            if trainable_pooler is None:
+                pooler.requires_grad_(False)
+
+            def feature_fn(batch: dict[str, torch.Tensor]) -> torch.Tensor:
+                peak_embeddings, pair_embeddings = encode_single_pair(batch)
+                return pooler(
+                    peak_embeddings.float(),
+                    batch["peak_valid_mask"].to(dtype=torch.bool),
+                    pair_embeddings.float(),
+                )
+
+            return feature_fn, trainable_pooler
+
         if train_covariance_pooler:
             pooler = CovariancePool(
                 input_dim=int(config.model_dim),
@@ -1299,6 +1377,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 device=device,
                 train_covariance_pooler=bool(args.train_covariance_pooler),
                 covariance_dim=args.covariance_dim,
+                pooling=args.pooling,
             )
             embedding_cache_dir = ""
 
@@ -1352,13 +1431,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         device=device,
         build_feature_fn=build_feature_fn,
     )
-    test_metrics = _evaluate(
+    test_targets, test_logits = _prediction_arrays(
         classifier,
         test_loader,
         feature_fn,
         device=device,
-        prefix="test",
     )
+    test_metrics = _metric_dict(test_targets, test_logits, "test")
     payload: dict[str, Any] = {
         "source": args.source,
         "repo_id": args.repo_id,
@@ -1366,6 +1445,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "subdir": args.subdir,
         "cache_dir": str(cache_dir),
         "embedding_cache_dir": embedding_cache_dir,
+        "pooling": args.pooling,
         "input_dim": input_dim,
         "train_size": int(metadata["train_size"]),
         "train_positive": int(metadata["train_positive"]),
@@ -1377,6 +1457,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "best_epoch": best.best_epoch,
         "best_val": best.best_val,
         "test": test_metrics,
+        "test_pr_curve": _precision_recall_curve_dict(test_targets, test_logits),
         "trials": [
             {
                 "hparams": result.params._asdict(),
@@ -1386,6 +1467,35 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             for result in results
         ],
     }
+    if args.output_state:
+        output_state_path = args.output_state.expanduser().resolve()
+        output_state_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "mode": "probe",
+                "input_dim": int(input_dim),
+                "covariance_dim": int(
+                    args.covariance_dim
+                    if args.covariance_dim is not None
+                    else _config_get(checkpoint_config, "covariance_pooling_dim", 32)
+                ),
+                "pooling": args.pooling,
+                "pair_dim": int(_config_get(checkpoint_config, "pairformer_pair_dim", checkpoint_config.model_dim)),
+                "pooler_state": _tensor_state_to_cpu(best.pooler_state),
+                "classifier_state": _tensor_state_to_cpu(best.classifier_state),
+                "best_epoch": int(best.best_epoch),
+                "best_val": best.best_val,
+                "hparams": best.params._asdict(),
+                "focal_alpha": focal_alpha,
+                "focal_gamma": float(args.focal_gamma),
+                "embedding_cache_dir": embedding_cache_dir,
+                "train_size": int(metadata["train_size"]),
+                "train_positive": int(metadata["train_positive"]),
+                "val_size": int(metadata["val_size"]),
+                "val_positive": int(metadata["val_positive"]),
+            },
+            output_state_path,
+        )
     if args.output_json:
         output_path = args.output_json.expanduser().resolve()
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1400,6 +1510,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source", choices=("checkpoint", "dreams"), required=True)
     parser.add_argument("--config", type=Path)
     parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument(
+        "--pooling",
+        choices=("covariance", "single_pair_covariance"),
+        default="covariance",
+    )
     parser.add_argument("--train-covariance-pooler", action="store_true")
     parser.add_argument("--covariance-dim", type=int, default=None)
     parser.add_argument("--embedding-cache-dir", type=Path, default=None)
@@ -1420,6 +1535,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-shards", type=int, default=16)
     parser.add_argument("--parquet-batch-size", type=int, default=50_000)
     parser.add_argument("--output-json", type=Path, default=None)
+    parser.add_argument("--output-state", type=Path, default=None)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--batch-size", type=int, default=512)
