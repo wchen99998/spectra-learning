@@ -45,6 +45,7 @@ class PeakSetJEPASettings:
     pairformer_pair_num_heads: int | None = None
     pairformer_pair_feature_hidden_dim: int = 128
     pairformer_dropout: float = 0.0
+    pairmixer_use_pair_bias_attention: bool = False
     pairformer_refresh_pair: bool = True
     pairformer_refresh_pair_layers: list[int] | tuple[int, ...] | None = None
     pairformer_mz_scale: float = PEAK_MZ_MAX
@@ -159,6 +160,7 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "pairformer_pair_num_heads": _optional_int,
     "pairformer_pair_feature_hidden_dim": int,
     "pairformer_dropout": float,
+    "pairmixer_use_pair_bias_attention": bool,
     "pairformer_refresh_pair": bool,
     "pairformer_refresh_pair_layers": _identity,
     "pairformer_mz_scale": float,

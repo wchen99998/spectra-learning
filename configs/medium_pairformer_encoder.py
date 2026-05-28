@@ -25,9 +25,9 @@ def get_config() -> config_dict.ConfigDict:
 
     # Encoder
     cfg.num_peaks = 32
-    cfg.model_dim = 128
-    cfg.encoder_num_layers = 8
-    cfg.encoder_num_heads = 8
+    cfg.model_dim = 512
+    cfg.encoder_num_layers = 10
+    cfg.encoder_num_heads = 16
     cfg.encoder_use_position_embedding = False
     cfg.encoder_apply_final_norm = True
     cfg.encoder_use_fourier_features = True
@@ -38,12 +38,12 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_fourier_x_max = 1000
     cfg.encoder_fourier_x_min = 0.003
     cfg.feature_mlp_hidden_dim = 1024
-    cfg.pairformer_pair_dim = 128
-    cfg.pairformer_pair_num_heads = 8
-    cfg.pairformer_pair_feature_hidden_dim = 512
+    cfg.pairformer_pair_dim = 384
+    cfg.pairformer_pair_num_heads = 12
+    cfg.pairformer_pair_feature_hidden_dim = 768
     cfg.pairmixer_use_pair_bias_attention = True
     cfg.pairformer_refresh_pair = True
-    cfg.pairformer_refresh_pair_layers = [1, 2, 3, 4]
+    cfg.pairformer_refresh_pair_layers = [1, 2]
     cfg.pairformer_use_fourier_features = True
     cfg.pairformer_fourier_num_freqs = 16
     cfg.pairformer_fourier_x_min = 0.01
@@ -53,11 +53,11 @@ def get_config() -> config_dict.ConfigDict:
     cfg.attention_mlp_multiple = 4
 
     # Masked latent predictor
-    cfg.predictor_dim = 128
+    cfg.predictor_dim = 256
     cfg.predictor_dropout = 0.1
     cfg.predictor_apply_final_norm = True
     cfg.predictor_use_rope = False
-    cfg.masked_latent_predictor_num_layers = 4
+    cfg.masked_latent_predictor_num_layers = 2
     cfg.masked_latent_predictor_num_heads = 8
     cfg.target_projector_dim = -1
     cfg.masked_token_input_mode = "latent_token"
@@ -152,8 +152,6 @@ def get_config() -> config_dict.ConfigDict:
     # Logging
     cfg.enable_wandb = True
     cfg.wandb_project = "jepa-debugging"
-    cfg.run_name_suffix = (
-        "mae-pairformer"
-    )
+    cfg.run_name_suffix = "mae-medium-pairformer-92m"
 
     return cfg
