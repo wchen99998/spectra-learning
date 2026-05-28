@@ -440,8 +440,10 @@ class PairMixerBlock(nn.Module):
         attention_mlp_multiple: float,
         norm_eps: float,
         dropout: float,
+        use_pair_bias_attention: bool = False,
     ) -> None:
         super().__init__()
+        self.use_pair_bias_attention = use_pair_bias_attention
         self.tri_mul_out = TriangleMultiplicativeUpdate(
             pair_dim,
             direction="outgoing",
@@ -460,14 +462,22 @@ class PairMixerBlock(nn.Module):
             pair_dim,
             hidden_dim=math.ceil(pair_dim * attention_mlp_multiple),
         )
-        self.single_attention_norm = _build_norm(
-            single_dim,
-            eps=norm_eps,
-        )
-        self.single_attention = Attention(
-            single_dim,
-            num_heads,
-        )
+        if self.use_pair_bias_attention:
+            self.single_attention = AttentionPairBias(
+                single_dim=single_dim,
+                pair_dim=pair_dim,
+                num_heads=num_heads,
+                norm_eps=norm_eps,
+            )
+        else:
+            self.single_attention_norm = _build_norm(
+                single_dim,
+                eps=norm_eps,
+            )
+            self.single_attention = Attention(
+                single_dim,
+                num_heads,
+            )
         self.single_transition_norm = _build_norm(
             single_dim,
             eps=norm_eps,
@@ -493,12 +503,22 @@ class PairMixerBlock(nn.Module):
         pair = pair + self.drop(self.tri_mul_in(pair, pair_mask))
         pair = pair + self.drop(self.pair_transition(self.pair_transition_norm(pair)))
         pair = pair * pair_mask.unsqueeze(-1).to(dtype=pair.dtype)
-        single = single + self.drop(
-            self.single_attention(
-                self.single_attention_norm(single),
-                attn_mask=token_mask[:, None, None, :],
+        if self.use_pair_bias_attention:
+            single = single + self.drop(
+                self.single_attention(
+                    single,
+                    pair,
+                    token_mask,
+                    peak_mask.shape[1],
+                )
             )
-        )
+        else:
+            single = single + self.drop(
+                self.single_attention(
+                    self.single_attention_norm(single),
+                    attn_mask=token_mask[:, None, None, :],
+                )
+            )
         single = single + self.drop(
             self.single_transition(self.single_transition_norm(single))
         )

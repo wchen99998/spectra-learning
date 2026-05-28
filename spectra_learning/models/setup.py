@@ -169,6 +169,7 @@ def _build_peak_set_encoder(cfg: PeakSetJEPASettings) -> PeakSetEncoder:
         pair_dim=cfg.pairformer_pair_dim,
         pair_feature_hidden_dim=cfg.pairformer_pair_feature_hidden_dim,
         pairformer_dropout=cfg.pairformer_dropout,
+        pairmixer_use_pair_bias_attention=cfg.pairmixer_use_pair_bias_attention,
         pairformer_mz_scale=cfg.pairformer_mz_scale,
         pairformer_precursor_mz_scale=cfg.pairformer_precursor_mz_scale,
         pairformer_use_fourier_features=cfg.pairformer_use_fourier_features,
