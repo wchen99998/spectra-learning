@@ -397,55 +397,67 @@ def _module_state_to_cpu(module: torch.nn.Module) -> dict[str, torch.Tensor]:
     }
 
 
-def _finetune_logits(
-    *,
-    model: torch.nn.Module,
-    pooler: torch.nn.Module,
-    classifier: MLPClassifier,
-    batch: dict[str, torch.Tensor],
-    pooling: str,
-) -> torch.Tensor:
-    if pooling == "single_pair_covariance":
-        peak_embeddings, _, pair_embeddings = model.encoder.forward_with_block_outputs(
-            batch["peak_mz"],
-            batch["peak_intensity"],
-            valid_mask=batch["peak_valid_mask"],
-            precursor_mz=batch.get("precursor_mz", None),
-        )
-        peak_embeddings = _peak_tokens_only(peak_embeddings, batch["peak_valid_mask"])
-        features = pooler(
-            peak_embeddings.float(),
-            batch["peak_valid_mask"].to(dtype=torch.bool),
-            pair_embeddings.float(),
-        )
-    else:
-        encoded = model.encoder(
-            batch["peak_mz"],
-            batch["peak_intensity"],
-            valid_mask=batch["peak_valid_mask"],
-            precursor_mz=batch.get("precursor_mz", None),
-        )
-        peak_embeddings = _peak_tokens_only(encoded, batch["peak_valid_mask"])
-        features = pooler(
-            peak_embeddings.float(),
-            batch["peak_valid_mask"].to(dtype=torch.bool),
-        )
-    return classifier(features)
+class FluorineFinetuneModule(torch.nn.Module):
+    def __init__(
+        self,
+        *,
+        encoder: torch.nn.Module,
+        pooler: torch.nn.Module,
+        classifier: MLPClassifier,
+        pooling: str,
+    ) -> None:
+        super().__init__()
+        self.encoder = encoder
+        self.pooler = pooler
+        self.classifier = classifier
+        self.pooling = pooling
+
+    def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        if self.pooling == "single_pair_covariance":
+            peak_embeddings, _, pair_embeddings = self.encoder.forward_with_block_outputs(
+                batch["peak_mz"],
+                batch["peak_intensity"],
+                valid_mask=batch["peak_valid_mask"],
+                precursor_mz=batch.get("precursor_mz", None),
+            )
+            peak_embeddings = _peak_tokens_only(peak_embeddings, batch["peak_valid_mask"])
+            features = self.pooler(
+                peak_embeddings.float(),
+                batch["peak_valid_mask"].to(dtype=torch.bool),
+                pair_embeddings.float(),
+            )
+        else:
+            encoded = self.encoder(
+                batch["peak_mz"],
+                batch["peak_intensity"],
+                valid_mask=batch["peak_valid_mask"],
+                precursor_mz=batch.get("precursor_mz", None),
+            )
+            peak_embeddings = _peak_tokens_only(encoded, batch["peak_valid_mask"])
+            features = self.pooler(
+                peak_embeddings.float(),
+                batch["peak_valid_mask"].to(dtype=torch.bool),
+            )
+        return self.classifier(features)
+
+
+def _wrap_data_parallel(
+    module: torch.nn.Module,
+    device_ids: list[int] | None,
+) -> torch.nn.Module:
+    if device_ids is not None and len(device_ids) > 1:
+        return torch.nn.DataParallel(module, device_ids=device_ids)
+    return module
 
 
 @torch.no_grad()
 def predict_finetuned(
     *,
-    model: torch.nn.Module,
-    pooler: torch.nn.Module,
-    classifier: MLPClassifier,
+    finetune_module: torch.nn.Module,
     loader: DataLoader,
     device: torch.device,
-    pooling: str,
 ) -> tuple[np.ndarray, np.ndarray]:
-    model.eval()
-    pooler.eval()
-    classifier.eval()
+    finetune_module.eval()
     use_autocast = device.type == "cuda"
     logits, targets = [], []
     for batch in loader:
@@ -455,13 +467,7 @@ def predict_finetuned(
             dtype=torch.bfloat16,
             enabled=use_autocast,
         ):
-            batch_logits = _finetune_logits(
-                model=model,
-                pooler=pooler,
-                classifier=classifier,
-                batch=batch,
-                pooling=pooling,
-            )
+            batch_logits = finetune_module(batch)
         logits.append(batch_logits.float().detach().cpu().numpy())
         targets.append(batch["label"].detach().cpu().numpy())
     return np.concatenate(targets, axis=0), np.concatenate(logits, axis=0)
@@ -491,14 +497,28 @@ def train_or_load_finetuned(
     max_train_samples: int | None,
     max_val_samples: int | None,
     pooling: str,
+    device_ids: list[int] | None,
 ) -> dict[str, Any]:
+    requested_hparams = {
+        "hidden_dim": int(hidden_dim),
+        "dropout": float(dropout),
+        "model_learning_rate": float(model_learning_rate),
+        "head_learning_rate": float(head_learning_rate),
+        "weight_decay": float(weight_decay),
+        "epochs": int(epochs),
+        "patience": int(patience),
+    }
     if state_path.exists():
         state = torch.load(state_path, map_location=device)
+        state_hparams = state.get("hparams", {})
         if (
             state.get("mode") == "finetune"
             and state.get("config_path") == str(config_path)
             and state.get("checkpoint_path") == str(checkpoint_path)
             and state.get("pooling", "covariance") == pooling
+            and all(state_hparams.get(key) == value for key, value in requested_hparams.items())
+            and state.get("max_train_samples") == max_train_samples
+            and state.get("max_val_samples") == max_val_samples
         ):
             model.load_state_dict(state["model_state"])
             return state
@@ -554,6 +574,13 @@ def train_or_load_finetuned(
         dropout=dropout,
     ).to(device)
     model.requires_grad_(True)
+    finetune_module = FluorineFinetuneModule(
+        encoder=model.encoder,
+        pooler=pooler,
+        classifier=classifier,
+        pooling=pooling,
+    ).to(device)
+    finetune_module = _wrap_data_parallel(finetune_module, device_ids)
     optimizer = torch.optim.AdamW(
         [
             {
@@ -582,9 +609,7 @@ def train_or_load_finetuned(
     epochs_without_improvement = 0
     use_autocast = device.type == "cuda"
     for epoch_idx in range(epochs):
-        model.train()
-        pooler.train()
-        classifier.train()
+        finetune_module.train()
         running_loss = 0.0
         seen = 0
         for batch in train_loader:
@@ -595,13 +620,7 @@ def train_or_load_finetuned(
                 dtype=torch.bfloat16,
                 enabled=use_autocast,
             ):
-                logits = _finetune_logits(
-                    model=model,
-                    pooler=pooler,
-                    classifier=classifier,
-                    batch=batch,
-                    pooling=pooling,
-                )
+                logits = finetune_module(batch)
                 loss = binary_focal_loss_with_logits(
                     logits.float(),
                     batch["label"],
@@ -614,12 +633,9 @@ def train_or_load_finetuned(
             seen += int(batch["label"].shape[0])
 
         val_targets, val_logits = predict_finetuned(
-            model=model,
-            pooler=pooler,
-            classifier=classifier,
+            finetune_module=finetune_module,
             loader=val_loader,
             device=device,
-            pooling=pooling,
         )
         val_metrics = _metric_dict(val_targets, val_logits, "val")
         history.append(
@@ -655,12 +671,9 @@ def train_or_load_finetuned(
     pooler.load_state_dict(best_pooler_state)
     classifier.load_state_dict(best_classifier_state)
     test_targets, test_logits = predict_finetuned(
-        model=model,
-        pooler=pooler,
-        classifier=classifier,
+        finetune_module=finetune_module,
         loader=test_loader,
         device=device,
-        pooling=pooling,
     )
     test_metrics = _metric_dict(test_targets, test_logits, "test")
 
@@ -679,16 +692,11 @@ def train_or_load_finetuned(
         "best_val": best_val,
         "test": test_metrics,
         "history": history,
-        "hparams": {
-            "hidden_dim": int(hidden_dim),
-            "dropout": float(dropout),
-            "model_learning_rate": float(model_learning_rate),
-            "head_learning_rate": float(head_learning_rate),
-            "weight_decay": float(weight_decay),
-        },
+        "hparams": requested_hparams,
         "focal_alpha": focal_alpha,
         "focal_gamma": focal_gamma,
         "finetune_cache_dir": str(cache_dir),
+        "device_ids": device_ids if device_ids is not None else [],
         "train_size": int(data.metadata["train_size"]),
         "train_positive": int(data.metadata["train_positive"]),
         "val_size": int(data.metadata["val_size"]),
@@ -711,6 +719,7 @@ def evaluate_msnlib(
     device: torch.device,
     batch_size: int,
     num_workers: int,
+    device_ids: list[int] | None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     covariance_dim = int(head_state.get("covariance_dim", 64))
     pooling = str(head_state.get("pooling", "covariance"))
@@ -734,6 +743,14 @@ def evaluate_msnlib(
     ).to(device)
     classifier.load_state_dict(head_state["classifier_state"])
     classifier.eval()
+    finetune_module = FluorineFinetuneModule(
+        encoder=model.encoder,
+        pooler=pooler,
+        classifier=classifier,
+        pooling=pooling,
+    ).to(device)
+    finetune_module = _wrap_data_parallel(finetune_module, device_ids)
+    finetune_module.eval()
 
     collator = MsnlibCollator(
         num_peaks=int(config.get("num_peaks", 64)),
@@ -768,32 +785,7 @@ def evaluate_msnlib(
             dtype=torch.bfloat16,
             enabled=use_autocast,
         ):
-            if pooling == "single_pair_covariance":
-                peak_embeddings, _, pair_embeddings = model.encoder.forward_with_block_outputs(
-                    batch["peak_mz"],
-                    batch["peak_intensity"],
-                    valid_mask=batch["peak_valid_mask"],
-                    precursor_mz=batch.get("precursor_mz", None),
-                )
-                peak_embeddings = _peak_tokens_only(peak_embeddings, batch["peak_valid_mask"])
-                features = pooler(
-                    peak_embeddings.float(),
-                    batch["peak_valid_mask"].to(dtype=torch.bool),
-                    pair_embeddings.float(),
-                )
-            else:
-                encoded = model.encoder(
-                    batch["peak_mz"],
-                    batch["peak_intensity"],
-                    valid_mask=batch["peak_valid_mask"],
-                    precursor_mz=batch.get("precursor_mz", None),
-                )
-                peak_embeddings = _peak_tokens_only(encoded, batch["peak_valid_mask"])
-                features = pooler(
-                    peak_embeddings.float(),
-                    batch["peak_valid_mask"].to(dtype=torch.bool),
-                )
-            batch_logits = classifier(features)
+            batch_logits = finetune_module(batch)
         logits.append(batch_logits.float().detach().cpu().numpy())
         targets.append(batch["label"].detach().cpu().numpy())
         row_indices.append(batch["row_idx"].detach().cpu().numpy())
@@ -883,6 +875,7 @@ def write_outputs(
             "hparams": head_state["hparams"],
             "pooling": head_state.get("pooling", "covariance"),
             "pair_dim": head_state.get("pair_dim", None),
+            "device_ids": head_state.get("device_ids", []),
             "focal_alpha": head_state["focal_alpha"],
             "focal_gamma": head_state["focal_gamma"],
             "embedding_cache_dir": head_state.get("embedding_cache_dir", ""),
@@ -1163,6 +1156,7 @@ def parse_args() -> argparse.Namespace:
         default=Path("results/fluorine_msnlib_ours_checkpoint"),
     )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--device-ids", default=None)
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
@@ -1190,10 +1184,17 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+def parse_device_ids(raw: str | None) -> list[int] | None:
+    if raw is None or raw == "":
+        return None
+    return [int(item) for item in raw.split(",") if item]
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     args = parse_args()
     device = torch.device(args.device)
+    device_ids = parse_device_ids(args.device_ids)
     torch.manual_seed(args.seed)
     checkpoint_path = resolve_checkpoint_path(args.checkpoint, args.workdir)
     config, model = _load_checkpoint_model(
@@ -1235,6 +1236,7 @@ def main() -> None:
             max_train_samples=args.max_train_samples,
             max_val_samples=args.max_val_samples,
             pooling=args.pooling,
+            device_ids=device_ids,
         )
     data = parse_mgf(args.mgf.expanduser().resolve())
     log.info(
@@ -1251,6 +1253,7 @@ def main() -> None:
         device=device,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        device_ids=device_ids,
     )
     summary = write_outputs(
         output_prefix=args.output_prefix.expanduser().resolve(),
