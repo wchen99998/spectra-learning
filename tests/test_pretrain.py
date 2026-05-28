@@ -642,6 +642,51 @@ class BlockJEPATests(unittest.TestCase):
         self.assertEqual(logits.shape[-1], 4)
         torch.testing.assert_close(logits[:, :, 1, 2], logits[:, :, 2, 1])
 
+    def test_distogram_loss_matches_full_logit_masked_ce(self):
+        model = self._build_model(
+            distogram_loss_weight=0.25,
+            jepa_mae_mz_bin_size=250.0,
+        )
+        batch = _make_batch(
+            batch_size=2,
+            num_peaks=6,
+            num_targets=model.jepa_num_target_blocks,
+        )
+        predictor_pair = torch.randn(
+            2,
+            model.jepa_num_target_blocks,
+            6,
+            6,
+            model.predictor_pair_dim,
+        )
+        predictor_visible_masks = (
+            batch["context_mask"].unsqueeze(1) | batch["target_masks"]
+        )
+
+        full_logits = model._distogram_logits(predictor_pair)
+        targets = model._distogram_targets(batch["peak_mz"]).unsqueeze(1).expand(
+            full_logits.shape[0],
+            full_logits.shape[1],
+            full_logits.shape[2],
+            full_logits.shape[3],
+        )
+        pair_mask = model._distogram_pair_mask(
+            batch["target_masks"],
+            predictor_visible_masks,
+        )
+        expected_loss = model._masked_ce_loss(full_logits, targets, pair_mask)
+
+        term, metrics = model._distogram_metrics(
+            predictor_pair,
+            batch["peak_mz"],
+            batch["target_masks"],
+            predictor_visible_masks,
+            predictor_pair,
+        )
+
+        torch.testing.assert_close(metrics["distogram_loss"], expected_loss)
+        torch.testing.assert_close(term, expected_loss * 0.25)
+
     def test_distogram_loss_contributes_to_loss(self):
         model = self._build_model(
             masked_token_loss_weight=1.0,
