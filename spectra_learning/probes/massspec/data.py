@@ -2,7 +2,6 @@ import csv
 import json
 import logging
 import math
-import re
 from pathlib import Path
 from typing import Any, NamedTuple, cast
 
@@ -63,7 +62,7 @@ NIST_FULL_PAIRWISE_ALIGNMENT_BIN_SIZE = 0.025
 NIST_FULL_PAIRWISE_ALIGNMENT_SEED = 66
 NIST_MURCKO_METADATA_VERSION = 1
 NIST_MURCKO_HF_REPO = "cjim8889/hr_msms_nist_dreams_embeddings"
-NIST_MURCKO_SPLIT_DIR = "hr_msms_nist_dreams_embeddings_murcko_split"
+NIST_MURCKO_PREPARED_SUBDIR = "nist_murcko_probe"
 NIST_MURCKO_ARTIFACT_FORMAT = "nist_murcko_probe_v1"
 
 MONA_A_METADATA_VERSION = 3
@@ -190,93 +189,6 @@ def _load_nist20_hdf5(hdf5_path: Path) -> dict[str, Any]:
         "collision_energy": np.zeros(n_valid, dtype=np.float32),
         "collision_energy_present": np.zeros(n_valid, dtype=np.int32),
         "dreams_embedding": raw_dreams[idx] if raw_dreams is not None else None,
-    }
-
-
-def _spectra_from_peak_lists(
-    mz_lists: list[list[float]],
-    intensity_lists: list[list[float]],
-) -> np.ndarray:
-    spectra = np.zeros((len(mz_lists), 2, NUM_PEAKS_INPUT), dtype=np.float32)
-    for i, (mz, intensity) in enumerate(zip(mz_lists, intensity_lists, strict=True)):
-        n = min(len(mz), NUM_PEAKS_INPUT)
-        spectra[i, 0, :n] = np.asarray(mz[:n], dtype=np.float32)
-        spectra[i, 1, :n] = np.asarray(intensity[:n], dtype=np.float32)
-    return _normalize_spectra_intensity(spectra)
-
-
-def _collision_energy_from_metadata(
-    metadata_json: list[str],
-) -> tuple[np.ndarray, np.ndarray]:
-    collision_energy = np.zeros(len(metadata_json), dtype=np.float32)
-    collision_energy_present = np.zeros(len(metadata_json), dtype=np.int32)
-    for i, raw in enumerate(metadata_json):
-        metadata = json.loads(raw)
-        value = str(metadata.get("COLLISIONENERGY", "")).strip()
-        match = re.search(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)", value)
-        if match is not None and value.lower() != "nan":
-            collision_energy[i] = float(match.group(0))
-            collision_energy_present[i] = 1
-    return collision_energy, collision_energy_present
-
-
-def _load_nist_murcko_parquet_split(
-    parquet_path: Path,
-    split_name: str,
-) -> dict[str, Any]:
-    import pyarrow.parquet as pq
-
-    table = pq.read_table(
-        parquet_path,
-        columns=[
-            "dreams_embedding",
-            "spectrum_mz",
-            "spectrum_intensity",
-            "metadata_json",
-            "precursor_mz",
-            "adduct",
-            "smiles",
-        ],
-    )
-    rows = table.to_pydict()
-    metadata = [json.loads(raw) for raw in rows["metadata_json"]]
-    collision_energy, collision_energy_present = _collision_energy_from_metadata(
-        rows["metadata_json"]
-    )
-    n = len(rows["smiles"])
-    return {
-        "spectra": _spectra_from_peak_lists(
-            rows["spectrum_mz"],
-            rows["spectrum_intensity"],
-        ),
-        "precursor": np.asarray(rows["precursor_mz"], dtype=np.float32),
-        "fold": np.repeat(split_name, n),
-        "smiles": np.asarray(rows["smiles"], dtype=str),
-        "adduct": np.asarray(
-            [value or "unknown" for value in rows["adduct"]],
-            dtype=str,
-        ),
-        "instrument_type": np.asarray(
-            [item.get("INSTRUMENTTYPE", "") or "unknown" for item in metadata],
-            dtype=str,
-        ),
-        "collision_energy": collision_energy,
-        "collision_energy_present": collision_energy_present,
-        "dreams_embedding": np.asarray(rows["dreams_embedding"], dtype=np.float32),
-    }
-
-
-def _load_nist_murcko_parquet_splits(
-    source_dir: Path,
-) -> dict[str, Any]:
-    payloads = [
-        _load_nist_murcko_parquet_split(source_dir / f"{split}.parquet", split)
-        for split in ("train", "val", "test")
-    ]
-    keys = payloads[0].keys()
-    return {
-        key: np.concatenate([payload[key] for payload in payloads], axis=0)
-        for key in keys
     }
 
 
@@ -784,55 +696,44 @@ def ensure_nist_full_probe_downloaded(
     return metadata
 
 
-def ensure_nist_murcko_probe_prepared(
+def ensure_nist_murcko_probe_downloaded(
     output_dir: Path,
     *,
     max_precursor_mz: float,
     repo_id: str = NIST_MURCKO_HF_REPO,
     revision: str = "main",
-    split_dir: str = NIST_MURCKO_SPLIT_DIR,
-    num_shards: int = _DEFAULT_MASSSPEC_NUM_SHARDS,
+    subdir: str = NIST_MURCKO_PREPARED_SUBDIR,
 ) -> dict[str, Any]:
     cached = _probe_metadata_valid(
         output_dir,
         NIST_MURCKO_METADATA_VERSION,
         max_precursor_mz,
-        expected_metadata={
-            "artifact_format": NIST_MURCKO_ARTIFACT_FORMAT,
-            "parquet_repo_id": repo_id,
-            "parquet_revision": revision,
-            "parquet_split_dir": split_dir,
-        },
+        expected_metadata={"artifact_format": NIST_MURCKO_ARTIFACT_FORMAT},
     )
     if cached is not None:
         return cached
-    source_root = output_dir / "source"
+    subdir = subdir.strip("/")
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
     snapshot_download(
         repo_id=repo_id,
         repo_type="dataset",
         revision=revision,
-        local_dir=source_root,
+        local_dir=output_dir.parent,
         allow_patterns=[
-            f"{split_dir}/metadata.json",
-            f"{split_dir}/train.parquet",
-            f"{split_dir}/val.parquet",
-            f"{split_dir}/test.parquet",
+            f"{subdir}/{_METADATA_FILENAME}",
+            f"{subdir}/train/*",
+            f"{subdir}/val/*",
+            f"{subdir}/test/*",
         ],
     )
-    metadata = _filter_encode_and_write(
-        **_load_nist_murcko_parquet_splits(source_root / split_dir),
-        output_dir=output_dir,
-        num_shards=num_shards,
-        max_precursor_mz=max_precursor_mz,
-        metadata_version=NIST_MURCKO_METADATA_VERSION,
-        write_pairwise_alignment=False,
+    metadata = _probe_metadata_valid(
+        output_dir,
+        NIST_MURCKO_METADATA_VERSION,
+        max_precursor_mz,
+        expected_metadata={"artifact_format": NIST_MURCKO_ARTIFACT_FORMAT},
     )
-    metadata["artifact_format"] = NIST_MURCKO_ARTIFACT_FORMAT
-    metadata["parquet_repo_id"] = repo_id
-    metadata["parquet_revision"] = revision
-    metadata["parquet_split_dir"] = split_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / _METADATA_FILENAME).write_text(json.dumps(metadata, indent=2))
+    if metadata is None:
+        raise FileNotFoundError(f"Invalid NIST Murcko probe artifact in {output_dir}")
     return metadata
 
 
@@ -1142,21 +1043,22 @@ class MassSpecProbeData(NamedTuple):
                 revision=str(_config_get(config, "nist_full_probe_revision", "main")),
             )
         elif probe_dataset == "nist-murcko":
-            output_dir = artifact_root / "nist_murcko_probe"
-            metadata = ensure_nist_murcko_probe_prepared(
+            murcko_subdir = str(
+                _config_get(
+                    config,
+                    "nist_murcko_probe_hf_subdir",
+                    NIST_MURCKO_PREPARED_SUBDIR,
+                )
+            ).strip("/")
+            output_dir = artifact_root / murcko_subdir
+            metadata = ensure_nist_murcko_probe_downloaded(
                 output_dir,
                 max_precursor_mz=max_precursor_mz,
                 repo_id=str(
                     _config_get(config, "nist_murcko_probe_repo_id", NIST_MURCKO_HF_REPO)
                 ),
                 revision=str(_config_get(config, "nist_murcko_probe_revision", "main")),
-                split_dir=str(
-                    _config_get(
-                        config,
-                        "nist_murcko_probe_split_dir",
-                        NIST_MURCKO_SPLIT_DIR,
-                    )
-                ),
+                subdir=murcko_subdir,
             )
         elif probe_dataset == "mona_a":
             output_dir = artifact_root / "mona_a_probe"
