@@ -1450,6 +1450,61 @@ class MassSpecPreprocessTests(unittest.TestCase):
                 (artifact_dir / metadata["morgan_auxiliary_files"][split_name][0]).exists()
             )
 
+    def test_build_mcebio_murcko_artifact_keeps_everything_in_test(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            mgf_path = tmp_path / "source.mgf"
+            mgf_path.write_text(
+                "\n".join(
+                    [
+                        "BEGIN IONS",
+                        "TITLE=fluoro",
+                        "PEPMASS=111.0",
+                        "SMILES=CC(F)O",
+                        "PRECURSORTYPE=[M+H]+",
+                        "INSTRUMENTTYPE=Q-TOF",
+                        "10 100",
+                        "20 50",
+                        "END IONS",
+                        "BEGIN IONS",
+                        "TITLE=plain",
+                        "PEPMASS=222.0",
+                        "SMILES=CCO",
+                        "PRECURSORTYPE=[M+H]+",
+                        "INSTRUMENTTYPE=Q-TOF",
+                        "11 100",
+                        "21 50",
+                        "END IONS",
+                    ]
+                )
+            )
+            artifact_dir = tmp_path / "artifact"
+
+            metadata = build_murcko_mgf_dataset(
+                mgf_path=mgf_path,
+                output_dir=artifact_dir,
+                source_uri="source.mgf",
+                val_frac=0.2,
+                test_frac=0.2,
+                seed=1,
+                min_precursor_mz=1.0,
+                max_precursor_mz=1000.0,
+                num_peaks_input=128,
+                num_workers=1,
+                batch_size=2,
+                parquet_batch_size=2,
+                single_split="test",
+            )
+
+            self.assertEqual(metadata["train_size"], 0)
+            self.assertEqual(metadata["val_size"], 0)
+            self.assertEqual(metadata["test_size"], 2)
+            self.assertEqual(metadata["test_positive"], 1)
+            self.assertEqual(metadata["train_files"], [])
+            self.assertEqual(metadata["val_files"], [])
+            self.assertEqual(metadata["test_files"], ["test.parquet"])
+            self.assertTrue((artifact_dir / "test.parquet").exists())
+
     def test_nist_full_artifact_preserves_row_alignment(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

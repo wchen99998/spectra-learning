@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=("probe", "finetune"),
+        choices=("probe", "finetune", "lora"),
         default="probe",
     )
     parser.add_argument("--config", type=Path, default=Path("configs/wandb_pa645zxs_small.py"))
@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-json", default=None)
     parser.add_argument("--output-state", default=None)
     parser.add_argument("--head-state", type=Path, default=None)
-    parser.add_argument("--output-prefix", type=Path, default=None)
+    parser.add_argument("--output-prefix", default=None)
     parser.add_argument("--comparison-dir", type=Path, default=None)
     parser.add_argument(
         "--previous-ours-prefix",
@@ -91,6 +91,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--finetune-model-lr", type=float, default=3e-6)
     parser.add_argument("--finetune-head-lr", type=float, default=1e-4)
     parser.add_argument("--finetune-weight-decay", type=float, default=0.0001)
+    parser.add_argument(
+        "--autocast-dtype",
+        choices=("bf16", "bfloat16", "fp16", "float16", "fp32", "float32", "none"),
+        default=None,
+    )
+    parser.add_argument("--lora-rank", type=int, default=8)
+    parser.add_argument("--lora-alpha", type=float, default=16.0)
+    parser.add_argument("--lora-dropout", type=float, default=0.0)
+    parser.add_argument("--lora-learning-rate", type=float, default=1e-4)
     parser.add_argument("--hidden-dim", type=int, default=256)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--max-train-samples", type=int, default=None)
@@ -109,7 +118,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     payload = run(parse_args())
-    print(json.dumps(payload, indent=2, sort_keys=True))
+    if payload:
+        print(json.dumps(payload, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

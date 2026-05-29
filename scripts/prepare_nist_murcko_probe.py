@@ -460,6 +460,34 @@ def _build_fold_map(
     return fold_by_smiles, metadata
 
 
+def _build_single_split_fold_map(
+    rows: list[FirstPassRow],
+    *,
+    split: str,
+) -> tuple[dict[str, str], dict[str, Any]]:
+    canonical_to_hist: dict[str, str] = {}
+    hist_counts: dict[str, int] = defaultdict(int)
+    canonical_counts: Counter[str] = Counter()
+    for row in rows:
+        canonical_to_hist[row.canonical_smiles] = row.murcko_hist_key
+        hist_counts[row.murcko_hist_key] += 1
+        canonical_counts[row.canonical_smiles] += 1
+
+    fold_by_smiles = {canonical: split for canonical in canonical_to_hist}
+    split_counts = Counter({split: sum(canonical_counts.values())})
+    return fold_by_smiles, {
+        "split_seed": None,
+        "val_frac": 0.0,
+        "test_frac": 1.0 if split == "test" else 0.0,
+        "num_unique_smiles": len(canonical_counts),
+        "num_murcko_histograms": len(hist_counts),
+        "murcko_hist_split_counts": dict(split_counts),
+        "murcko_hist_train_keys": len(hist_counts) if split == "train" else 0,
+        "murcko_hist_val_keys": len(hist_counts) if split == "val" else 0,
+        "murcko_hist_test_keys": len(hist_counts) if split == "test" else 0,
+    }
+
+
 def _fixed_size_int8_array(values: list[np.ndarray], width: int) -> pa.Array:
     if not values:
         return pa.array([], type=pa.list_(pa.int8(), width))
@@ -615,6 +643,7 @@ def build_murcko_mgf_dataset(
     num_workers: int,
     batch_size: int,
     parquet_batch_size: int,
+    single_split: str | None = None,
 ) -> dict[str, Any]:
     first_rows = _first_pass(
         mgf_path,
@@ -623,12 +652,18 @@ def build_murcko_mgf_dataset(
         num_workers=num_workers,
         batch_size=batch_size,
     )
-    fold_by_smiles, split_metadata = _build_fold_map(
-        first_rows,
-        val_frac=val_frac,
-        test_frac=test_frac,
-        seed=seed,
-    )
+    if single_split is None:
+        fold_by_smiles, split_metadata = _build_fold_map(
+            first_rows,
+            val_frac=val_frac,
+            test_frac=test_frac,
+            seed=seed,
+        )
+    else:
+        fold_by_smiles, split_metadata = _build_single_split_fold_map(
+            first_rows,
+            split=single_split,
+        )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     writers: dict[str, pq.ParquetWriter] = {}
@@ -819,6 +854,7 @@ def main() -> None:
             num_workers=args.num_workers,
             batch_size=args.batch_size,
             parquet_batch_size=args.parquet_batch_size,
+            single_split="test" if spec.name == "mcebio" else None,
         )
         top_metadata["datasets"][spec.name] = {
             "subdir": spec.subdir.strip("/"),

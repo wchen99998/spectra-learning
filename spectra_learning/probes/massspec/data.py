@@ -902,6 +902,11 @@ def ensure_murcko_fluorine_data_downloaded(
             required_splits=("test",),
         ),
     )
+    if int(test_metadata.get("train_size", 0)) or int(test_metadata.get("val_size", 0)):
+        raise ValueError(
+            f"{test_subdir} must be a held-out test-only artifact; regenerate it with "
+            "scripts/prepare_nist_murcko_probe.py"
+        )
     metadata: dict[str, Any] = {
         "metadata_version": 1,
         "storage_format": "parquet",
@@ -1389,14 +1394,14 @@ def build_murcko_fluorine_loader(
     )
     generator = torch.Generator()
     generator.manual_seed(seed)
-    return DataLoader(
-        dataset,
-        batch_size=probe_local_batch_size(data.batch_size, distributed_world_size),
-        shuffle=loader_shuffle,
-        sampler=sampler,
-        drop_last=drop_last,
-        num_workers=num_workers,
-        collate_fn=_MurckoFluorineCollator(
+    loader_kwargs = {
+        "dataset": dataset,
+        "batch_size": probe_local_batch_size(data.batch_size, distributed_world_size),
+        "shuffle": loader_shuffle,
+        "sampler": sampler,
+        "drop_last": drop_last,
+        "num_workers": num_workers,
+        "collate_fn": _MurckoFluorineCollator(
             num_peaks=data.num_peaks,
             max_precursor_mz=data.max_precursor_mz,
             min_peak_intensity=data.min_peak_intensity,
@@ -1405,8 +1410,12 @@ def build_murcko_fluorine_loader(
             precursor_peak_exclusion_window_da=data.precursor_peak_exclusion_window_da,
             dreams_only=dreams_only,
         ),
-        generator=generator,
-    )
+        "generator": generator,
+    }
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = True
+        loader_kwargs["prefetch_factor"] = 4
+    return DataLoader(**loader_kwargs)
 
 
 class _ProbeBatchCollator:

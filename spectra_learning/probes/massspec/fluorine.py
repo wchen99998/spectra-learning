@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import copy
 import csv
+import io
 import itertools
 import json
 import logging
@@ -12,6 +13,7 @@ from typing import Any, Callable, NamedTuple, cast
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch._inductor.config as inductor_config
 import torch.nn.functional as F
 from ml_collections import config_dict
 from sklearn.metrics import (
@@ -25,6 +27,7 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from spectra_learning.config.loading import load_config
 from spectra_learning.data.spectra import (
@@ -32,6 +35,12 @@ from spectra_learning.data.spectra import (
     DEFAULT_MIN_PEAK_INTENSITY,
 )
 from spectra_learning.models.factory import build_model_from_config
+from spectra_learning.models.lora import (
+    apply_lora_to_linear_modules,
+    load_lora_state_dict,
+    lora_parameters,
+    lora_state_dict,
+)
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pooling import CovariancePool, SinglePairCovariancePool
 from spectra_learning.probes.massspec.data import (
@@ -47,14 +56,50 @@ from spectra_learning.training.checkpointing import (
     load_pretrained_weights,
     save_torch_checkpoint,
 )
-from spectra_learning.training.storage import StoragePath, normalize_storage_path, write_text
+from spectra_learning.training.distributed import (
+    DistributedContext,
+    barrier,
+    cleanup_distributed,
+    init_distributed_from_env,
+    wrap_distributed_model,
+)
+from spectra_learning.training.runtime import build_grad_scaler, parse_autocast_dtype
+from spectra_learning.training.storage import (
+    StoragePath,
+    is_remote_path,
+    list_storage_files,
+    local_cache_path,
+    normalize_storage_path,
+    read_text,
+    storage_exists,
+    storage_mkdir,
+    storage_parent,
+    storage_with_suffix,
+    upload_local_file,
+    write_text,
+)
 
 
 log = logging.getLogger(__name__)
 
+torch.set_float32_matmul_precision("high")
+inductor_config.triton.unique_kernel_names = True
+inductor_config.fx_graph_cache = True
+inductor_config.epilogue_fusion = True
+
 HF_REPO_ID = NIST_MURCKO_HF_REPO
 HF_TRAIN_SUBDIR = NIST_MURCKO_PREPARED_SUBDIR
 HF_TEST_SUBDIR = MCEBIO_MURCKO_PREPARED_SUBDIR
+LORA_ENCODER_TARGET_SUFFIXES = (
+    "single_attention.wqkv",
+    "single_attention.wo",
+    "single_attention.qkv",
+    "single_attention.o",
+    "single_transition.w1",
+    "single_transition.w2",
+    "pair_transition.w1",
+    "pair_transition.w2",
+)
 
 
 def _config_get(config: Any, key: str, default: Any) -> Any:
@@ -177,6 +222,8 @@ def _make_loader(
     max_samples: int | None,
     dreams_only: bool = False,
     num_workers: int = 0,
+    distributed_world_size: int = 1,
+    distributed_rank: int = 0,
 ) -> Any:
     return build_murcko_fluorine_loader(
         data,
@@ -186,6 +233,8 @@ def _make_loader(
         max_samples=max_samples,
         dreams_only=dreams_only,
         num_workers=num_workers,
+        distributed_world_size=distributed_world_size,
+        distributed_rank=distributed_rank,
     )
 
 
@@ -470,6 +519,8 @@ def build_fluorine_data(
     cache_dir: Path,
     batch_size: int,
     revision: str,
+    distributed_world_size: int = 1,
+    distributed_rank: int = 0,
 ) -> FluorineData:
     return build_murcko_fluorine_data(
         cache_dir=cache_dir,
@@ -491,6 +542,8 @@ def build_fluorine_data(
         revision=revision,
         train_subdir=HF_TRAIN_SUBDIR,
         test_subdir=HF_TEST_SUBDIR,
+        distributed_world_size=distributed_world_size,
+        distributed_rank=distributed_rank,
     )
 
 
@@ -499,6 +552,41 @@ def _module_state_to_cpu(module: torch.nn.Module) -> dict[str, torch.Tensor]:
         key: value.detach().cpu().clone()
         for key, value in module.state_dict().items()
     }
+
+
+def _lora_config(
+    *,
+    rank: int,
+    alpha: float,
+    dropout: float,
+) -> dict[str, Any]:
+    return {
+        "rank": int(rank),
+        "alpha": float(alpha),
+        "dropout": float(dropout),
+        "target_suffixes": list(LORA_ENCODER_TARGET_SUFFIXES),
+    }
+
+
+def apply_fluorine_lora(
+    encoder: torch.nn.Module,
+    lora_config: dict[str, Any],
+) -> tuple[str, ...]:
+    return apply_lora_to_linear_modules(
+        encoder,
+        target_suffixes=tuple(lora_config["target_suffixes"]),
+        rank=int(lora_config["rank"]),
+        alpha=float(lora_config["alpha"]),
+        dropout=float(lora_config["dropout"]),
+    )
+
+
+def load_fluorine_lora_state(
+    encoder: torch.nn.Module,
+    head_state: dict[str, Any],
+) -> None:
+    apply_fluorine_lora(encoder, head_state["lora_config"])
+    load_lora_state_dict(encoder, head_state["lora_state"])
 
 
 class FluorineFinetuneModule(torch.nn.Module):
@@ -574,21 +662,48 @@ def _wrap_data_parallel(
     return module
 
 
+def compile_fluorine_module(module: torch.nn.Module, config: Any) -> None:
+    compile_mode = str(_config_get(config, "compile_mode", "none"))
+    if compile_mode.lower() == "none":
+        return
+    inductor_config.shape_padding = not compile_mode.startswith("max-autotune")
+    module.compile(
+        mode=compile_mode,
+        fullgraph=False,
+    )
+
+
+def _autocast_dtype_name(dtype: torch.dtype | None) -> str:
+    if dtype is None:
+        return "none"
+    if dtype == torch.bfloat16:
+        return "bf16"
+    if dtype == torch.float16:
+        return "fp16"
+    return str(dtype)
+
+
+def _resolve_autocast_dtype(config: Any, raw: str | None) -> torch.dtype | None:
+    value = _config_get(config, "autocast_dtype", "bf16") if raw is None else raw
+    return parse_autocast_dtype(value)
+
+
 @torch.no_grad()
 def predict_finetuned(
     *,
     finetune_module: torch.nn.Module,
     loader: DataLoader,
     device: torch.device,
+    autocast_dtype: torch.dtype | None,
 ) -> tuple[np.ndarray, np.ndarray]:
     finetune_module.eval()
-    use_autocast = device.type == "cuda"
+    use_autocast = device.type == "cuda" and autocast_dtype is not None
     logits, targets = [], []
     for batch in loader:
         batch = _move_batch(batch, device)
         with torch.autocast(
             device_type=device.type,
-            dtype=torch.bfloat16,
+            dtype=autocast_dtype if autocast_dtype is not None else torch.bfloat16,
             enabled=use_autocast,
         ):
             batch_logits = finetune_module(batch)
@@ -607,17 +722,20 @@ def train_or_load_finetuned(
     cache_dir: Path,
     device: torch.device,
     batch_size: int,
+    num_workers: int,
     seed: int,
     epochs: int,
     patience: int,
     model_learning_rate: float,
     head_learning_rate: float,
     weight_decay: float,
+    autocast_dtype: torch.dtype | None,
     hidden_dim: int,
     dropout: float,
     revision: str,
     max_train_samples: int | None,
     max_val_samples: int | None,
+    max_test_samples: int | None,
     pooling: str,
     device_ids: list[int] | None,
 ) -> dict[str, Any]:
@@ -627,6 +745,7 @@ def train_or_load_finetuned(
         "model_learning_rate": float(model_learning_rate),
         "head_learning_rate": float(head_learning_rate),
         "weight_decay": float(weight_decay),
+        "autocast_dtype": _autocast_dtype_name(autocast_dtype),
         "epochs": int(epochs),
         "patience": int(patience),
     }
@@ -658,6 +777,7 @@ def train_or_load_finetuned(
         seed=seed,
         max_samples=max_train_samples,
         dreams_only=False,
+        num_workers=num_workers,
     )
     val_loader = _make_loader(
         data,
@@ -666,14 +786,16 @@ def train_or_load_finetuned(
         seed=seed + 10_000,
         max_samples=max_val_samples,
         dreams_only=False,
+        num_workers=num_workers,
     )
     test_loader = _make_loader(
         data,
         "test",
         shuffle=False,
         seed=seed + 20_000,
-        max_samples=None,
+        max_samples=max_test_samples,
         dreams_only=False,
+        num_workers=num_workers,
     )
     covariance_dim = int(config.get("covariance_pooling_dim", 64))
     input_dim = covariance_dim * covariance_dim
@@ -700,6 +822,7 @@ def train_or_load_finetuned(
         classifier=classifier,
         pooling=pooling,
     ).to(device)
+    compile_fluorine_module(finetune_module, config)
     finetune_module = _wrap_data_parallel(finetune_module, device_ids)
     optimizer = torch.optim.AdamW(
         [
@@ -727,7 +850,8 @@ def train_or_load_finetuned(
     best_classifier_state: dict[str, torch.Tensor] = {}
     history: list[dict[str, Any]] = []
     epochs_without_improvement = 0
-    use_autocast = device.type == "cuda"
+    use_autocast = device.type == "cuda" and autocast_dtype is not None
+    grad_scaler = build_grad_scaler(autocast_dtype, device)
     best_state_path = state_path.with_name(f"{state_path.stem}.best.pt")
 
     def make_state(
@@ -752,6 +876,7 @@ def train_or_load_finetuned(
             "test": test_metrics,
             "history": history,
             "hparams": requested_hparams,
+            "autocast_dtype": _autocast_dtype_name(autocast_dtype),
             "focal_alpha": focal_alpha,
             "focal_gamma": focal_gamma,
             "finetune_cache_dir": str(cache_dir),
@@ -768,12 +893,19 @@ def train_or_load_finetuned(
         finetune_module.train()
         running_loss = 0.0
         seen = 0
-        for batch in train_loader:
+        pbar = tqdm(
+            train_loader,
+            desc=f"finetune epoch {epoch_idx + 1}/{epochs}",
+            unit="batch",
+            dynamic_ncols=True,
+            mininterval=5.0,
+        )
+        for batch in pbar:
             batch = _move_batch(batch, device)
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(
                 device_type=device.type,
-                dtype=torch.bfloat16,
+                dtype=autocast_dtype if autocast_dtype is not None else torch.bfloat16,
                 enabled=use_autocast,
             ):
                 logits = finetune_module(batch)
@@ -783,15 +915,22 @@ def train_or_load_finetuned(
                     alpha=focal_alpha,
                     gamma=focal_gamma,
                 )
-            loss.backward()
-            optimizer.step()
+            if grad_scaler.is_enabled():
+                grad_scaler.scale(loss).backward()
+                grad_scaler.step(optimizer)
+                grad_scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
             running_loss += float(loss.detach().cpu()) * int(batch["label"].shape[0])
             seen += int(batch["label"].shape[0])
+            pbar.set_postfix(loss=f"{running_loss / float(seen):.5f}")
 
         val_targets, val_logits = predict_finetuned(
             finetune_module=finetune_module,
             loader=val_loader,
             device=device,
+            autocast_dtype=autocast_dtype,
         )
         val_metrics = _metric_dict(val_targets, val_logits, "val")
         history.append(
@@ -832,12 +971,319 @@ def train_or_load_finetuned(
         finetune_module=finetune_module,
         loader=test_loader,
         device=device,
+        autocast_dtype=autocast_dtype,
     )
     test_metrics = _metric_dict(test_targets, test_logits, "test")
 
     state = make_state(test_metrics=test_metrics, complete=True)
     state_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(state, state_path)
+    return state
+
+
+def train_or_load_lora(
+    *,
+    state_path: Path,
+    model: torch.nn.Module,
+    config: Any,
+    config_path: Path,
+    checkpoint_path: Path,
+    cache_dir: Path,
+    device: torch.device,
+    batch_size: int,
+    num_workers: int,
+    seed: int,
+    epochs: int,
+    patience: int,
+    lora_rank: int,
+    lora_alpha: float,
+    lora_dropout: float,
+    lora_learning_rate: float,
+    head_learning_rate: float,
+    weight_decay: float,
+    autocast_dtype: torch.dtype | None,
+    hidden_dim: int,
+    dropout: float,
+    revision: str,
+    max_train_samples: int | None,
+    max_val_samples: int | None,
+    max_test_samples: int | None,
+    pooling: str,
+    device_ids: list[int] | None,
+    distributed: DistributedContext | None = None,
+) -> dict[str, Any]:
+    distributed_world_size = distributed.world_size if distributed is not None else 1
+    distributed_rank = distributed.rank if distributed is not None else 0
+    is_main = distributed is None or distributed.is_main
+    requested_hparams = {
+        "hidden_dim": int(hidden_dim),
+        "dropout": float(dropout),
+        "lora_rank": int(lora_rank),
+        "lora_alpha": float(lora_alpha),
+        "lora_dropout": float(lora_dropout),
+        "lora_learning_rate": float(lora_learning_rate),
+        "head_learning_rate": float(head_learning_rate),
+        "weight_decay": float(weight_decay),
+        "autocast_dtype": _autocast_dtype_name(autocast_dtype),
+        "epochs": int(epochs),
+        "patience": int(patience),
+    }
+    if state_path.exists():
+        state = torch.load(state_path, map_location=device)
+        state_hparams = state.get("hparams", {})
+        if (
+            state.get("mode") == "lora"
+            and state.get("config_path") == str(config_path)
+            and state.get("checkpoint_path") == str(checkpoint_path)
+            and state.get("pooling", "covariance") == pooling
+            and all(state_hparams.get(key) == value for key, value in requested_hparams.items())
+            and state.get("max_train_samples") == max_train_samples
+            and state.get("max_val_samples") == max_val_samples
+        ):
+            model.encoder.requires_grad_(False)
+            load_fluorine_lora_state(model.encoder, state)
+            return state
+
+    data = build_fluorine_data(
+        config=config,
+        cache_dir=cache_dir,
+        batch_size=batch_size,
+        revision=revision,
+        distributed_world_size=distributed_world_size,
+        distributed_rank=distributed_rank,
+    )
+    train_loader = _make_loader(
+        data,
+        "train",
+        shuffle=True,
+        seed=seed,
+        max_samples=max_train_samples,
+        dreams_only=False,
+        num_workers=num_workers,
+        distributed_world_size=distributed_world_size,
+        distributed_rank=distributed_rank,
+    )
+    val_loader = _make_loader(
+        data,
+        "val",
+        shuffle=False,
+        seed=seed + 10_000,
+        max_samples=max_val_samples,
+        dreams_only=False,
+        num_workers=num_workers,
+    )
+    test_loader = _make_loader(
+        data,
+        "test",
+        shuffle=False,
+        seed=seed + 20_000,
+        max_samples=max_test_samples,
+        dreams_only=False,
+        num_workers=num_workers,
+    )
+    covariance_dim = int(config.get("covariance_pooling_dim", 64))
+    input_dim = covariance_dim * covariance_dim
+    if pooling == "single_pair_covariance":
+        pooler: torch.nn.Module = SinglePairCovariancePool(
+            single_dim=int(config.model_dim),
+            pair_dim=int(config.get("pairformer_pair_dim", config.model_dim)),
+            compressed_dim=covariance_dim,
+        ).to(device)
+    else:
+        pooler = CovariancePool(
+            input_dim=int(config.model_dim),
+            compressed_dim=covariance_dim,
+        ).to(device)
+    classifier = MLPClassifier(
+        input_dim=input_dim,
+        hidden_dim=hidden_dim,
+        dropout=dropout,
+    ).to(device)
+    model.encoder.requires_grad_(False)
+    lora_config = _lora_config(
+        rank=lora_rank,
+        alpha=lora_alpha,
+        dropout=lora_dropout,
+    )
+    applied_modules = apply_fluorine_lora(model.encoder, lora_config)
+    lora_config = {**lora_config, "applied_modules": list(applied_modules)}
+    finetune_module = FluorineFinetuneModule(
+        encoder=model.encoder,
+        pooler=pooler,
+        classifier=classifier,
+        pooling=pooling,
+    ).to(device)
+    compile_fluorine_module(finetune_module, config)
+    if distributed is not None:
+        finetune_module = wrap_distributed_model(
+            finetune_module,
+            distributed,
+            static_graph=True,
+        )
+    finetune_module = _wrap_data_parallel(finetune_module, device_ids)
+    optimizer = torch.optim.AdamW(
+        [
+            {
+                "params": list(lora_parameters(model.encoder)),
+                "lr": lora_learning_rate,
+                "weight_decay": weight_decay,
+            },
+            {
+                "params": list(pooler.parameters()) + list(classifier.parameters()),
+                "lr": head_learning_rate,
+                "weight_decay": weight_decay,
+            },
+        ]
+    )
+    focal_alpha = 1.0 - float(data.metadata["train_positive"]) / float(
+        data.metadata["train_size"]
+    )
+    focal_gamma = 2.0
+    best_value = -float("inf")
+    best_epoch = 0
+    best_val: dict[str, float] = {}
+    best_lora_state: dict[str, torch.Tensor] = {}
+    best_pooler_state: dict[str, torch.Tensor] = {}
+    best_classifier_state: dict[str, torch.Tensor] = {}
+    history: list[dict[str, Any]] = []
+    epochs_without_improvement = 0
+    use_autocast = device.type == "cuda" and autocast_dtype is not None
+    grad_scaler = build_grad_scaler(autocast_dtype, device)
+    best_state_path = state_path.with_name(f"{state_path.stem}.best.pt")
+
+    def make_state(
+        *,
+        test_metrics: dict[str, float] | None,
+        complete: bool,
+    ) -> dict[str, Any]:
+        return {
+            "mode": "lora",
+            "complete": complete,
+            "config_path": str(config_path),
+            "checkpoint_path": str(checkpoint_path),
+            "input_dim": int(input_dim),
+            "covariance_dim": int(covariance_dim),
+            "pooling": pooling,
+            "pair_dim": int(config.get("pairformer_pair_dim", config.model_dim)),
+            "lora_config": lora_config,
+            "lora_state": best_lora_state,
+            "pooler_state": best_pooler_state,
+            "classifier_state": best_classifier_state,
+            "best_epoch": int(best_epoch),
+            "best_val": best_val,
+            "test": test_metrics,
+            "history": history,
+            "hparams": requested_hparams,
+            "autocast_dtype": _autocast_dtype_name(autocast_dtype),
+            "focal_alpha": focal_alpha,
+            "focal_gamma": focal_gamma,
+            "finetune_cache_dir": str(cache_dir),
+            "device_ids": device_ids if device_ids is not None else [],
+            "train_size": int(data.metadata["train_size"]),
+            "train_positive": int(data.metadata["train_positive"]),
+            "val_size": int(data.metadata["val_size"]),
+            "val_positive": int(data.metadata["val_positive"]),
+            "max_train_samples": max_train_samples,
+            "max_val_samples": max_val_samples,
+        }
+
+    for epoch_idx in range(epochs):
+        sampler = getattr(train_loader, "sampler", None)
+        if hasattr(sampler, "set_epoch"):
+            sampler.set_epoch(epoch_idx)
+        finetune_module.train()
+        running_loss = 0.0
+        seen = 0
+        pbar = tqdm(
+            train_loader,
+            desc=f"lora epoch {epoch_idx + 1}/{epochs}",
+            unit="batch",
+            dynamic_ncols=True,
+            mininterval=5.0,
+            disable=not is_main,
+        )
+        for batch in pbar:
+            batch = _move_batch(batch, device)
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(
+                device_type=device.type,
+                dtype=autocast_dtype if autocast_dtype is not None else torch.bfloat16,
+                enabled=use_autocast,
+            ):
+                logits = finetune_module(batch)
+                loss = binary_focal_loss_with_logits(
+                    logits.float(),
+                    batch["label"],
+                    alpha=focal_alpha,
+                    gamma=focal_gamma,
+                )
+            if grad_scaler.is_enabled():
+                grad_scaler.scale(loss).backward()
+                grad_scaler.step(optimizer)
+                grad_scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
+            running_loss += float(loss.detach().cpu()) * int(batch["label"].shape[0])
+            seen += int(batch["label"].shape[0])
+            if is_main:
+                pbar.set_postfix(loss=f"{running_loss / float(seen):.5f}")
+
+        val_targets, val_logits = predict_finetuned(
+            finetune_module=finetune_module,
+            loader=val_loader,
+            device=device,
+            autocast_dtype=autocast_dtype,
+        )
+        val_metrics = _metric_dict(val_targets, val_logits, "val")
+        history.append(
+            {
+                "epoch": epoch_idx + 1,
+                "train_loss": running_loss / float(seen),
+                "val": val_metrics,
+            }
+        )
+        current_value = val_metrics["val/average_precision"]
+        if current_value > best_value:
+            best_value = current_value
+            best_epoch = epoch_idx + 1
+            best_val = dict(val_metrics)
+            best_lora_state = lora_state_dict(model.encoder)
+            best_pooler_state = _module_state_to_cpu(pooler)
+            best_classifier_state = _module_state_to_cpu(classifier)
+            epochs_without_improvement = 0
+            if is_main:
+                state_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(make_state(test_metrics=None, complete=False), best_state_path)
+        else:
+            epochs_without_improvement += 1
+        if is_main:
+            log.info(
+                "lora epoch=%d/%d train_loss=%.5f val_ap=%.4f val_auc=%.4f",
+                epoch_idx + 1,
+                epochs,
+                running_loss / float(seen),
+                val_metrics["val/average_precision"],
+                val_metrics["val/roc_auc"],
+            )
+        if epochs_without_improvement >= patience:
+            break
+
+    load_lora_state_dict(model.encoder, best_lora_state)
+    pooler.load_state_dict(best_pooler_state)
+    classifier.load_state_dict(best_classifier_state)
+    test_targets, test_logits = predict_finetuned(
+        finetune_module=finetune_module,
+        loader=test_loader,
+        device=device,
+        autocast_dtype=autocast_dtype,
+    )
+    test_metrics = _metric_dict(test_targets, test_logits, "test")
+
+    state = make_state(test_metrics=test_metrics, complete=True)
+    if is_main:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(state, state_path)
     return state
 
 
@@ -851,10 +1297,15 @@ def evaluate_fluorine_test_split(
     device: torch.device,
     batch_size: int,
     num_workers: int,
+    max_test_samples: int | None,
+    autocast_dtype: torch.dtype | None,
     device_ids: list[int] | None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     covariance_dim = int(head_state.get("covariance_dim", 64))
     pooling = str(head_state.get("pooling", "covariance"))
+    if head_state.get("mode") == "lora":
+        model.encoder.requires_grad_(False)
+        load_fluorine_lora_state(model.encoder, head_state)
     if pooling == "single_pair_covariance":
         pooler = SinglePairCovariancePool(
             single_dim=int(config.model_dim),
@@ -890,17 +1341,17 @@ def evaluate_fluorine_test_split(
         "test",
         shuffle=False,
         seed=0,
-        max_samples=None,
+        max_samples=max_test_samples,
         dreams_only=False,
         num_workers=num_workers,
     )
-    use_autocast = device.type == "cuda"
+    use_autocast = device.type == "cuda" and autocast_dtype is not None
     logits, targets, row_indices = [], [], []
     for batch in loader:
         batch = _move_batch(batch, device)
         with torch.autocast(
             device_type=device.type,
-            dtype=torch.bfloat16,
+            dtype=autocast_dtype if autocast_dtype is not None else torch.bfloat16,
             enabled=use_autocast,
         ):
             batch_logits = finetune_module(batch)
@@ -959,23 +1410,84 @@ def summarize_metrics(targets: np.ndarray, logits: np.ndarray) -> dict[str, floa
     return metrics
 
 
+def _write_figure(path: StoragePath, fig: plt.Figure) -> None:
+    if is_remote_path(path):
+        local_path = local_cache_path(path)
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(local_path)
+        upload_local_file(local_path, path)
+        return
+    output_path = Path(path).expanduser()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path)
+
+
+def _write_csv_text(path: StoragePath, rows: list[list[Any]]) -> None:
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerows(rows)
+    write_text(path, buffer.getvalue())
+
+
+def write_training_curve_plot(
+    *,
+    output_prefix: StoragePath,
+    history: list[dict[str, Any]],
+) -> str | None:
+    if not history:
+        return None
+    epochs = [int(row["epoch"]) for row in history]
+    train_loss = [float(row["train_loss"]) for row in history]
+    val_ap = [float(row["val"]["val/average_precision"]) for row in history]
+    val_auc = [float(row["val"]["val/roc_auc"]) for row in history]
+
+    fig, loss_ax = plt.subplots(figsize=(7, 4.6), dpi=180)
+    metric_ax = loss_ax.twinx()
+    loss_ax.plot(epochs, train_loss, color="#2458a6", marker="o", label="Train loss")
+    metric_ax.plot(epochs, val_ap, color="#16a34a", marker="o", label="Val AP")
+    metric_ax.plot(epochs, val_auc, color="#b45309", marker="o", label="Val ROC AUC")
+    loss_ax.set_xlabel("Epoch")
+    loss_ax.set_ylabel("Train focal loss")
+    metric_ax.set_ylabel("Validation metric")
+    loss_ax.grid(True, alpha=0.25)
+    loss_handles, loss_labels = loss_ax.get_legend_handles_labels()
+    metric_handles, metric_labels = metric_ax.get_legend_handles_labels()
+    loss_ax.legend(
+        loss_handles + metric_handles,
+        loss_labels + metric_labels,
+        loc="best",
+        frameon=False,
+        fontsize=8,
+    )
+    fig.tight_layout()
+    plot_path = storage_with_suffix(output_prefix, ".training_curves.png")
+    _write_figure(plot_path, fig)
+    plt.close(fig)
+    return str(plot_path)
+
+
 def write_standard_fluorine_outputs(
     *,
-    output_prefix: Path,
+    output_prefix: StoragePath,
     config_path: Path,
     checkpoint_path: Path,
-    head_state_path: Path,
+    head_state_path: StoragePath,
     data: FluorineData,
     targets: np.ndarray,
     logits: np.ndarray,
     row_indices: np.ndarray,
     head_state: dict[str, Any],
 ) -> dict[str, Any]:
-    output_prefix.parent.mkdir(parents=True, exist_ok=True)
+    storage_mkdir(storage_parent(output_prefix))
     probs = sigmoid(logits)
     precision, recall, thresholds = precision_recall_curve(targets, probs)
     metrics = summarize_metrics(targets, logits)
     train_cache_metrics = _metric_dict(targets, logits, "mcebio")
+    history = list(head_state.get("history", []))
+    training_curve_plot = write_training_curve_plot(
+        output_prefix=output_prefix,
+        history=history,
+    )
     summary = {
         "mode": head_state.get("mode", "probe"),
         "dataset": {
@@ -1005,38 +1517,40 @@ def write_standard_fluorine_outputs(
             "train_positive": head_state.get("train_positive", None),
             "val_size": head_state.get("val_size", None),
             "val_positive": head_state.get("val_positive", None),
+            "history": history,
+            "training_curve_plot": training_curve_plot,
         },
     }
-    summary_path = output_prefix.with_suffix(".summary.json")
-    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True))
+    summary_path = storage_with_suffix(output_prefix, ".summary.json")
+    write_text(summary_path, json.dumps(summary, indent=2, sort_keys=True))
 
-    pr_path = output_prefix.with_suffix(".pr_curve.csv")
-    with pr_path.open("w", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["precision", "recall", "threshold"])
-        for i in range(len(precision)):
-            threshold = thresholds[i] if i < len(thresholds) else ""
-            writer.writerow([precision[i], recall[i], threshold])
+    pr_path = storage_with_suffix(output_prefix, ".pr_curve.csv")
+    pr_rows = [["precision", "recall", "threshold"]]
+    for i in range(len(precision)):
+        threshold = thresholds[i] if i < len(thresholds) else ""
+        pr_rows.append([precision[i], recall[i], threshold])
+    _write_csv_text(pr_path, pr_rows)
 
-    pred_path = output_prefix.with_suffix(".predictions.csv")
-    with pred_path.open("w", newline="") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=["eval_index", "row_idx", "label", "score", "logit"],
+    pred_path = storage_with_suffix(output_prefix, ".predictions.csv")
+    pred_buffer = io.StringIO()
+    pred_writer = csv.DictWriter(
+        pred_buffer,
+        fieldnames=["eval_index", "row_idx", "label", "score", "logit"],
+    )
+    pred_writer.writeheader()
+    for eval_i, row_i in enumerate(row_indices):
+        pred_writer.writerow(
+            {
+                "eval_index": eval_i,
+                "row_idx": int(row_i),
+                "label": int(targets[eval_i]),
+                "score": float(probs[eval_i]),
+                "logit": float(logits[eval_i]),
+            }
         )
-        writer.writeheader()
-        for eval_i, row_i in enumerate(row_indices):
-            writer.writerow(
-                {
-                    "eval_index": eval_i,
-                    "row_idx": int(row_i),
-                    "label": int(targets[eval_i]),
-                    "score": float(probs[eval_i]),
-                    "logit": float(logits[eval_i]),
-                }
-            )
+    write_text(pred_path, pred_buffer.getvalue())
 
-    fig_path = output_prefix.with_suffix(".pr_curve.png")
+    fig_path = storage_with_suffix(output_prefix, ".pr_curve.png")
     fig, ax = plt.subplots(figsize=(6, 5), dpi=180)
     ax.plot(recall, precision, color="#2458a6", linewidth=2.0)
     ax.set_xlabel("Recall")
@@ -1046,11 +1560,12 @@ def write_standard_fluorine_outputs(
     ax.set_ylim(0.0, 1.02)
     ax.grid(True, alpha=0.25)
     fig.tight_layout()
-    fig.savefig(fig_path)
+    _write_figure(fig_path, fig)
     plt.close(fig)
 
-    report_path = output_prefix.with_suffix(".report.md")
-    report_path.write_text(
+    report_path = storage_with_suffix(output_prefix, ".report.md")
+    write_text(
+        report_path,
         "\n".join(
             [
                 "# Fluorine Evaluation on MCEBIO Murcko Test",
@@ -1072,18 +1587,120 @@ def write_standard_fluorine_outputs(
     return summary
 
 
-def read_pr_curve(path: Path) -> tuple[np.ndarray, np.ndarray]:
+def read_pr_curve(path: StoragePath) -> tuple[np.ndarray, np.ndarray]:
     recall, precision = [], []
-    with path.open() as handle:
-        for row in csv.DictReader(handle):
-            recall.append(float(row["recall"]))
-            precision.append(float(row["precision"]))
+    for row in csv.DictReader(io.StringIO(read_text(path))):
+        recall.append(float(row["recall"]))
+        precision.append(float(row["precision"]))
     return np.asarray(recall), np.asarray(precision)
+
+
+def _pr_curve_summary_path(pr_curve_path: StoragePath) -> StoragePath:
+    raw = str(pr_curve_path)
+    return f"{raw.removesuffix('.pr_curve.csv')}.summary.json"
+
+
+def _pr_curve_label(summary: dict[str, Any], pr_curve_path: StoragePath) -> str:
+    name = str(summary.get("name") or Path(str(pr_curve_path)).name.removesuffix(".pr_curve.csv"))
+    mode = str(summary.get("mode", "")).replace("_", " ")
+    ap = float(summary["metrics"]["average_precision"])
+    test_size = summary.get("dataset", {}).get("test_size")
+    label = name.replace("_", " ")
+    if mode:
+        label = f"{label} [{mode}]"
+    if test_size is not None:
+        label = f"{label} n={int(test_size)}"
+    return f"{label} AP={ap:.3f}"
+
+
+def write_all_pr_curve_comparison(
+    *,
+    output_prefix: StoragePath,
+    curve_dirs: list[StoragePath],
+) -> dict[str, Any]:
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for directory in curve_dirs:
+        for item in list_storage_files(directory):
+            if not item.name.endswith(".pr_curve.csv"):
+                continue
+            pr_curve_path = item.path
+            key = str(pr_curve_path)
+            if key in seen:
+                continue
+            seen.add(key)
+            summary_path = _pr_curve_summary_path(pr_curve_path)
+            if not storage_exists(summary_path):
+                continue
+            summary = json.loads(read_text(summary_path))
+            metrics = summary.get("metrics", {})
+            if "average_precision" not in metrics:
+                continue
+            recall, precision = read_pr_curve(pr_curve_path)
+            entries.append(
+                {
+                    "name": str(summary.get("name") or item.name.removesuffix(".pr_curve.csv")),
+                    "mode": summary.get("mode"),
+                    "summary": str(summary_path),
+                    "pr_curve": str(pr_curve_path),
+                    "average_precision": float(metrics["average_precision"]),
+                    "roc_auc": metrics.get("roc_auc"),
+                    "positive_rate": metrics.get("positive_rate"),
+                    "test_size": summary.get("dataset", {}).get("test_size"),
+                    "recall": recall,
+                    "precision": precision,
+                    "label": _pr_curve_label(summary, pr_curve_path),
+                }
+            )
+
+    entries.sort(key=lambda row: row["average_precision"], reverse=True)
+    fig, ax = plt.subplots(figsize=(8.4, 6.0), dpi=180)
+    colors = plt.cm.tab20(np.linspace(0.0, 1.0, max(len(entries), 1)))
+    current_pr_curve = str(storage_with_suffix(output_prefix, ".pr_curve.csv"))
+    for idx, entry in enumerate(entries):
+        is_current = entry["pr_curve"] == current_pr_curve
+        ax.plot(
+            entry["recall"],
+            entry["precision"],
+            color=colors[idx],
+            linewidth=2.8 if is_current else 1.6,
+            alpha=1.0 if is_current else 0.78,
+            label=entry["label"],
+        )
+    ax.set_xlabel("Recall")
+    ax.set_ylabel("Precision")
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.02)
+    ax.grid(True, alpha=0.25)
+    ax.legend(loc="lower left", frameon=False, fontsize=7)
+    ax.set_title("All Fluorine PR Curves on MCEBIO")
+    fig.tight_layout()
+    plot_path = storage_with_suffix(output_prefix, ".all_pr_curves.png")
+    _write_figure(plot_path, fig)
+    plt.close(fig)
+
+    payload = {
+        "comparison_plot": str(plot_path),
+        "curve_dirs": [str(directory) for directory in curve_dirs],
+        "curves": [
+            {
+                key: value
+                for key, value in entry.items()
+                if key not in {"recall", "precision", "label"}
+            }
+            for entry in entries
+        ],
+    }
+    write_text(
+        storage_with_suffix(output_prefix, ".all_pr_curves.summary.json"),
+        json.dumps(payload, indent=2, sort_keys=True),
+    )
+    return payload
 
 
 def write_dreams_comparison(
     *,
-    output_prefix: Path,
+    output_prefix: StoragePath,
     comparison_dir: Path,
     summary: dict[str, Any],
     previous_ours_prefix: Path | None,
@@ -1091,14 +1708,21 @@ def write_dreams_comparison(
     fig, ax = plt.subplots(figsize=(6.4, 5.0), dpi=180)
     colors = {
         "ours_finetune": "#2458a6",
+        "ours_lora": "#7c3aed",
         "ours_probe": "#2563eb",
         "ours_previous_probe": "#16a34a",
         "dreams_embedding_model": "#111827",
         "dreams_ssl_backbone": "#b45309",
     }
-    ours_key = "ours_finetune" if summary["mode"] == "finetune" else "ours_probe"
-    ours_recall, ours_precision = read_pr_curve(output_prefix.with_suffix(".pr_curve.csv"))
-    ours_label = "Ours full fine-tune" if summary["mode"] == "finetune" else "Ours probe"
+    ours_key = {
+        "finetune": "ours_finetune",
+        "lora": "ours_lora",
+    }.get(summary["mode"], "ours_probe")
+    ours_recall, ours_precision = read_pr_curve(storage_with_suffix(output_prefix, ".pr_curve.csv"))
+    ours_label = {
+        "finetune": "Ours full fine-tune",
+        "lora": "Ours LoRA",
+    }.get(summary["mode"], "Ours probe")
     ax.plot(
         ours_recall,
         ours_precision,
@@ -1109,7 +1733,7 @@ def write_dreams_comparison(
 
     previous_ours: dict[str, Any] | None = None
     if previous_ours_prefix is not None:
-        previous_summary = json.loads(previous_ours_prefix.with_suffix(".summary.json").read_text())
+        previous_summary = json.loads(read_text(previous_ours_prefix.with_suffix(".summary.json")))
         previous_recall, previous_precision = read_pr_curve(
             previous_ours_prefix.with_suffix(".pr_curve.csv")
         )
@@ -1162,24 +1786,25 @@ def write_dreams_comparison(
     ax.legend(loc="lower left", frameon=False, fontsize=8)
     ax.set_title("Fluorine PR Curves on MCEBIO Murcko Test")
     fig.tight_layout()
-    plot_path = output_prefix.with_suffix(".vs_dreams_actual_pr_curve.png")
-    fig.savefig(plot_path)
+    plot_path = storage_with_suffix(output_prefix, ".vs_dreams_actual_pr_curve.png")
+    _write_figure(plot_path, fig)
     plt.close(fig)
 
     payload = {
         "comparison_plot": str(plot_path),
         "ours": {
             "mode": summary["mode"],
-            "summary": str(output_prefix.with_suffix(".summary.json")),
-            "pr_curve": str(output_prefix.with_suffix(".pr_curve.csv")),
+            "summary": str(storage_with_suffix(output_prefix, ".summary.json")),
+            "pr_curve": str(storage_with_suffix(output_prefix, ".pr_curve.csv")),
             "average_precision": summary["metrics"]["average_precision"],
         },
         "previous_ours": previous_ours,
         "comparison_dir": str(comparison_dir),
         "compared": compared,
     }
-    output_prefix.with_suffix(".vs_dreams_actual_summary.json").write_text(
-        json.dumps(payload, indent=2, sort_keys=True)
+    write_text(
+        storage_with_suffix(output_prefix, ".vs_dreams_actual_summary.json"),
+        json.dumps(payload, indent=2, sort_keys=True),
     )
     return payload
 
@@ -1201,12 +1826,16 @@ def resolve_checkpoint_path(
 def default_state_path(mode: str) -> Path:
     if mode == "finetune":
         return Path("results/fluorine_detection_full_finetune_state.pt")
+    if mode == "lora":
+        return Path("results/fluorine_detection_lora_state.pt")
     return Path("results/fluorine_detection_probe_state.pt")
 
 
 def default_output_prefix(mode: str) -> Path:
     if mode == "finetune":
         return Path("results/fluorine_detection_full_finetune")
+    if mode == "lora":
+        return Path("results/fluorine_detection_lora")
     return Path("results/fluorine_detection_probe")
 
 
@@ -1426,7 +2055,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if mode == "probe":
         return run_probe(args)
 
-    device = torch.device(args.device)
+    distributed = init_distributed_from_env()
+    device = distributed.device if distributed.is_distributed else torch.device(args.device)
     device_ids = parse_device_ids(getattr(args, "device_ids", None))
     checkpoint_path = resolve_checkpoint_path(args.checkpoint, getattr(args, "workdir", None))
     config, model = _load_checkpoint_model(
@@ -1440,9 +2070,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         else default_state_path(mode).resolve()
     )
     output_prefix = (
-        args.output_prefix.expanduser().resolve()
+        normalize_storage_path(args.output_prefix)
         if getattr(args, "output_prefix", None) is not None
         else default_output_prefix(mode).resolve()
+    )
+    autocast_dtype = _resolve_autocast_dtype(
+        config,
+        getattr(args, "autocast_dtype", None),
     )
     epochs = int(args.epochs if args.epochs is not None else 3)
     patience = int(args.patience if args.patience is not None else 2)
@@ -1457,22 +2091,61 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             cache_dir=args.finetune_cache_dir.expanduser().resolve(),
             device=device,
             batch_size=args.batch_size,
+            num_workers=args.num_workers,
             seed=args.seed,
             epochs=epochs,
             patience=patience,
             model_learning_rate=args.finetune_model_lr,
             head_learning_rate=args.finetune_head_lr,
             weight_decay=args.finetune_weight_decay,
+            autocast_dtype=autocast_dtype,
             hidden_dim=args.hidden_dim,
             dropout=args.dropout,
             revision=args.revision,
             max_train_samples=args.max_train_samples,
             max_val_samples=args.max_val_samples,
+            max_test_samples=args.max_test_samples,
             pooling=args.pooling,
             device_ids=device_ids,
         )
+    elif mode == "lora":
+        head_state = train_or_load_lora(
+            state_path=head_state_path,
+            model=model,
+            config=config,
+            config_path=args.config.expanduser().resolve(),
+            checkpoint_path=checkpoint_path,
+            cache_dir=args.finetune_cache_dir.expanduser().resolve(),
+            device=device,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            seed=args.seed,
+            epochs=epochs,
+            patience=patience,
+            lora_rank=args.lora_rank,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            lora_learning_rate=args.lora_learning_rate,
+            head_learning_rate=args.finetune_head_lr,
+            weight_decay=args.finetune_weight_decay,
+            autocast_dtype=autocast_dtype,
+            hidden_dim=args.hidden_dim,
+            dropout=args.dropout,
+            revision=args.revision,
+            max_train_samples=args.max_train_samples,
+            max_val_samples=args.max_val_samples,
+            max_test_samples=args.max_test_samples,
+            pooling=args.pooling,
+            device_ids=device_ids,
+            distributed=distributed,
+        )
     else:
         raise ValueError(f"unsupported fluorine mode: {mode}")
+
+    if distributed.is_distributed and not distributed.is_main:
+        barrier(distributed)
+        cleanup_distributed(distributed)
+        return {}
 
     data = build_fluorine_data(
         config=config,
@@ -1493,6 +2166,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         device=device,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        max_test_samples=args.max_test_samples,
+        autocast_dtype=autocast_dtype,
         device_ids=device_ids,
     )
     summary = write_standard_fluorine_outputs(
@@ -1513,17 +2188,28 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             summary=summary,
             previous_ours_prefix=(
                 args.previous_ours_prefix.expanduser().resolve()
-                if mode == "finetune"
+                if mode in {"finetune", "lora"}
                 else None
             ),
         )
         summary["comparison"] = comparison
-        output_prefix.with_suffix(".summary.json").write_text(
-            json.dumps(summary, indent=2, sort_keys=True)
-        )
+    curve_dirs: list[StoragePath] = [storage_parent(output_prefix)]
+    if args.comparison_dir is not None:
+        curve_dirs.append(args.comparison_dir.expanduser().resolve())
+    summary["all_pr_curves"] = write_all_pr_curve_comparison(
+        output_prefix=output_prefix,
+        curve_dirs=curve_dirs,
+    )
+    write_text(
+        storage_with_suffix(output_prefix, ".summary.json"),
+        json.dumps(summary, indent=2, sort_keys=True),
+    )
     if args.output_json:
         write_text(
             normalize_storage_path(args.output_json),
             json.dumps(summary, indent=2, sort_keys=True),
         )
+    if distributed.is_distributed:
+        barrier(distributed)
+        cleanup_distributed(distributed)
     return summary
