@@ -4,6 +4,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import urlretrieve
 
+import torch
 from huggingface_hub import snapshot_download
 
 from spectra_learning.data.gems.settings import GEMS_METADATA_FILENAME
@@ -43,6 +44,14 @@ def _gems_native_artifact_dir_name(*, max_precursor_mz: float) -> str:
     return f"gems_native_raw_pmax{value}"
 
 
+def _coordinate_distributed_io(distributed_world_size: int) -> bool:
+    return (
+        distributed_world_size > 1
+        and torch.distributed.is_available()
+        and torch.distributed.is_initialized()
+    )
+
+
 def _download_gems_source_hdf5(source_url: str, output_dir: Path) -> Path:
     filename = Path(urlparse(source_url).path).name or "source.hdf5"
     source_dir = output_dir / "gems_source"
@@ -59,7 +68,16 @@ def ensure_base_gems_artifact(
     gems_base_dir: Path,
     repo_id: str,
     revision: str,
+    distributed_world_size: int = 1,
+    distributed_rank: int = 0,
 ) -> dict:
+    coordinated = _coordinate_distributed_io(distributed_world_size)
+    if coordinated and distributed_rank != 0:
+        torch.distributed.barrier()
+        metadata = load_gems_native_metadata(gems_base_dir)
+        validate_gems_native_artifact(gems_base_dir, metadata)
+        return metadata
+
     metadata_path = gems_base_dir / GEMS_METADATA_FILENAME
     should_download = True
     if metadata_path.exists():
@@ -76,6 +94,8 @@ def ensure_base_gems_artifact(
             local_dir=gems_base_dir,
             allow_patterns=[GEMS_METADATA_FILENAME, "train/*", "validation/*"],
         )
+    if coordinated:
+        torch.distributed.barrier()
     metadata = load_gems_native_metadata(gems_base_dir)
     validate_gems_native_artifact(gems_base_dir, metadata)
     return metadata
@@ -88,15 +108,27 @@ def ensure_custom_gems_artifact(
     max_precursor_mz: float,
     source_hdf5_path: str,
     source_url: str,
+    distributed_world_size: int = 1,
+    distributed_rank: int = 0,
 ) -> Path:
     variant_dir = output_dir / "gems_variants" / _gems_native_artifact_dir_name(
         max_precursor_mz=max_precursor_mz,
     )
+    coordinated = _coordinate_distributed_io(distributed_world_size)
+    if coordinated and distributed_rank != 0:
+        torch.distributed.barrier()
+        metadata = load_gems_native_metadata(variant_dir)
+        validate_gems_native_artifact(variant_dir, metadata)
+        _validate_gems_native_metadata(metadata, max_precursor_mz=max_precursor_mz)
+        return variant_dir
+
     metadata_path = variant_dir / GEMS_METADATA_FILENAME
     if metadata_path.exists():
         metadata = load_gems_native_metadata(variant_dir)
         validate_gems_native_artifact(variant_dir, metadata)
         _validate_gems_native_metadata(metadata, max_precursor_mz=max_precursor_mz)
+        if coordinated:
+            torch.distributed.barrier()
         return variant_dir
     source_path = source_hdf5_path or str(base_metadata.get("source_hdf5_path", "")).strip()
     resolved_source_url = source_url or str(base_metadata.get("source_url", "")).strip()
@@ -116,6 +148,8 @@ def ensure_custom_gems_artifact(
         source_path=str(hdf5_path),
         source_url=resolved_source_url or None,
     )
+    if coordinated:
+        torch.distributed.barrier()
     return variant_dir
 
 
@@ -128,11 +162,15 @@ def resolve_gems_artifact(
     max_precursor_mz: float,
     source_hdf5_path: str,
     source_url: str,
+    distributed_world_size: int = 1,
+    distributed_rank: int = 0,
 ) -> tuple[Path, dict]:
     base_metadata = ensure_base_gems_artifact(
         gems_base_dir=gems_base_dir,
         repo_id=repo_id,
         revision=revision,
+        distributed_world_size=distributed_world_size,
+        distributed_rank=distributed_rank,
     )
     try:
         _validate_gems_native_metadata(
@@ -147,6 +185,8 @@ def resolve_gems_artifact(
             max_precursor_mz=max_precursor_mz,
             source_hdf5_path=source_hdf5_path,
             source_url=source_url,
+            distributed_world_size=distributed_world_size,
+            distributed_rank=distributed_rank,
         )
         metadata = load_gems_native_metadata(variant_dir)
         validate_gems_native_artifact(variant_dir, metadata)

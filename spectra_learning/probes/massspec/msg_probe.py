@@ -1189,7 +1189,11 @@ def _run_msg_probe_once(
     )
     peak_ordering = str(_config_get(config, "peak_ordering", "intensity"))
     fingerprint_task = resolve_msg_probe_fingerprint(config)
-    probe_data = MassSpecProbeData.from_config(config)
+    probe_data = MassSpecProbeData.from_config(
+        config,
+        distributed_world_size=_distributed_world_size(distributed),
+        distributed_rank=_distributed_rank(distributed),
+    )
     variants = msg_probe_variants_from_config(config)
     use_pair_features = any(_uses_pair_features(variant) for variant in variants)
 

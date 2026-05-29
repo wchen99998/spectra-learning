@@ -11,7 +11,8 @@ from huggingface_hub import hf_hub_download, snapshot_download
 from ml_collections import config_dict
 from rdkit import Chem, DataStructs
 from rdkit.Chem import AllChem
-from torch.utils.data import DataLoader, Dataset, Sampler, Subset
+from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data.distributed import DistributedSampler
 
 from spectra_learning.probes.massspec.targets import (
     MACCS_FINGERPRINT_BITS,
@@ -60,10 +61,11 @@ NIST_FULL_PAIRWISE_ALIGNMENT_FILENAME = "morgan_tanimoto_balanced_pairs.npz"
 NIST_FULL_PAIRWISE_ALIGNMENT_NUM_PAIRS = 20_000
 NIST_FULL_PAIRWISE_ALIGNMENT_BIN_SIZE = 0.025
 NIST_FULL_PAIRWISE_ALIGNMENT_SEED = 66
-NIST_MURCKO_METADATA_VERSION = 1
-NIST_MURCKO_HF_REPO = "cjim8889/hr_msms_nist_dreams_embeddings"
+NIST_MURCKO_METADATA_VERSION = 2
+NIST_MURCKO_HF_REPO = "cjim8889/hr_msms_nist_mcebio_murcko_20260529"
 NIST_MURCKO_PREPARED_SUBDIR = "nist_murcko_probe"
-NIST_MURCKO_ARTIFACT_FORMAT = "nist_murcko_probe_v1"
+MCEBIO_MURCKO_PREPARED_SUBDIR = "mcebio_murcko_probe"
+NIST_MURCKO_ARTIFACT_FORMAT = "nist_murcko_parquet_v2"
 
 MONA_A_METADATA_VERSION = 3
 MONA_A_HF_REPO = "roman-bushuiev/GeMS"
@@ -85,6 +87,37 @@ def _download_hf_file(repo_id: str, filename: str, local_dir: Path) -> Path:
         local_dir=str(local_dir),
     )
     return Path(path)
+
+
+def _coordinate_distributed_download(distributed_world_size: int) -> bool:
+    return (
+        distributed_world_size > 1
+        and torch.distributed.is_available()
+        and torch.distributed.is_initialized()
+    )
+
+
+def _snapshot_download_rank_zero(
+    *,
+    repo_id: str,
+    repo_type: str,
+    revision: str,
+    local_dir: Path,
+    allow_patterns: list[str],
+    distributed_world_size: int,
+    distributed_rank: int,
+) -> None:
+    coordinated = _coordinate_distributed_download(distributed_world_size)
+    if not coordinated or distributed_rank == 0:
+        snapshot_download(
+            repo_id=repo_id,
+            repo_type=repo_type,
+            revision=revision,
+            local_dir=local_dir,
+            allow_patterns=allow_patterns,
+        )
+    if coordinated:
+        torch.distributed.barrier()
 
 
 def download_massspec_tsv(output_dir: Path) -> Path:
@@ -524,8 +557,12 @@ def _probe_metadata_valid(
         for key, value in expected_metadata.items():
             if metadata.get(key) != value:
                 return None
+    storage_format = str(metadata.get("storage_format", "native"))
     for split in ("train", "val", "test"):
-        if not all(
+        if storage_format == "parquet":
+            if not all((output_dir / name).exists() for name in metadata.get(f"{split}_files", [])):
+                return None
+        elif not all(
             (output_dir / split / name).exists()
             for name in metadata.get(f"{split}_files", [])
         ):
@@ -703,6 +740,9 @@ def ensure_nist_murcko_probe_downloaded(
     repo_id: str = NIST_MURCKO_HF_REPO,
     revision: str = "main",
     subdir: str = NIST_MURCKO_PREPARED_SUBDIR,
+    include_morgan: bool = False,
+    distributed_world_size: int = 1,
+    distributed_rank: int = 0,
 ) -> dict[str, Any]:
     cached = _probe_metadata_valid(
         output_dir,
@@ -710,21 +750,36 @@ def ensure_nist_murcko_probe_downloaded(
         max_precursor_mz,
         expected_metadata={"artifact_format": NIST_MURCKO_ARTIFACT_FORMAT},
     )
-    if cached is not None:
+    if cached is not None and (
+        not include_morgan
+        or bool(cached.get("morgan_auxiliary_available", False))
+        and all(
+            (output_dir / name).exists()
+            for names in cached.get("morgan_auxiliary_files", {}).values()
+            for name in names
+        )
+    ):
+        if _coordinate_distributed_download(distributed_world_size):
+            torch.distributed.barrier()
         return cached
     subdir = subdir.strip("/")
     output_dir.parent.mkdir(parents=True, exist_ok=True)
-    snapshot_download(
+    allow_patterns = [
+        f"{subdir}/{_METADATA_FILENAME}",
+        f"{subdir}/train.parquet",
+        f"{subdir}/val.parquet",
+        f"{subdir}/test.parquet",
+    ]
+    if include_morgan:
+        allow_patterns.append(f"{subdir}/auxiliary/morgan/*")
+    _snapshot_download_rank_zero(
         repo_id=repo_id,
         repo_type="dataset",
         revision=revision,
         local_dir=output_dir.parent,
-        allow_patterns=[
-            f"{subdir}/{_METADATA_FILENAME}",
-            f"{subdir}/train/*",
-            f"{subdir}/val/*",
-            f"{subdir}/test/*",
-        ],
+        allow_patterns=allow_patterns,
+        distributed_world_size=distributed_world_size,
+        distributed_rank=distributed_rank,
     )
     metadata = _probe_metadata_valid(
         output_dir,
@@ -735,6 +790,191 @@ def ensure_nist_murcko_probe_downloaded(
     if metadata is None:
         raise FileNotFoundError(f"Invalid NIST Murcko probe artifact in {output_dir}")
     return metadata
+
+
+class MurckoFluorineData(NamedTuple):
+    metadata: dict[str, Any]
+    root: Path
+    batch_size: int
+    num_peaks: int
+    max_precursor_mz: float
+    min_peak_intensity: float
+    peak_drop_min_intensity: float
+    peak_ordering: str
+    precursor_peak_exclusion_window_da: float
+
+
+def _read_murcko_subdir_metadata(
+    cache_dir: Path,
+    subdir: str,
+    *,
+    required_splits: tuple[str, ...],
+) -> dict[str, Any] | None:
+    metadata_path = cache_dir / subdir / _METADATA_FILENAME
+    if not metadata_path.exists():
+        return None
+    metadata = json.loads(metadata_path.read_text())
+    for split in required_splits:
+        for filename in metadata.get(f"{split}_files", []):
+            if not (cache_dir / subdir / filename).exists():
+                return None
+    return metadata
+
+
+def _murcko_fluorine_split_metadata(
+    source_metadata: dict[str, Any],
+    *,
+    subdir: str,
+    source_split: str,
+    target_split: str,
+) -> dict[str, Any]:
+    return {
+        f"{target_split}_files": [
+            f"{subdir}/{filename}" for filename in source_metadata[f"{source_split}_files"]
+        ],
+        f"{target_split}_lengths": [
+            int(value) for value in source_metadata[f"{source_split}_lengths"]
+        ],
+        f"{target_split}_size": int(source_metadata[f"{source_split}_size"]),
+        f"{target_split}_positive": int(source_metadata.get(f"{source_split}_positive", 0)),
+    }
+
+
+def ensure_murcko_fluorine_data_downloaded(
+    cache_dir: Path,
+    *,
+    repo_id: str = NIST_MURCKO_HF_REPO,
+    revision: str = "main",
+    train_subdir: str = NIST_MURCKO_PREPARED_SUBDIR,
+    test_subdir: str = MCEBIO_MURCKO_PREPARED_SUBDIR,
+    distributed_world_size: int = 1,
+    distributed_rank: int = 0,
+) -> dict[str, Any]:
+    train_subdir = train_subdir.strip("/")
+    test_subdir = test_subdir.strip("/")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    allow_patterns = [
+        f"{train_subdir}/{_METADATA_FILENAME}",
+        f"{train_subdir}/train.parquet",
+        f"{train_subdir}/val.parquet",
+        f"{test_subdir}/{_METADATA_FILENAME}",
+        f"{test_subdir}/test.parquet",
+    ]
+    needs_download = (
+        _read_murcko_subdir_metadata(
+            cache_dir,
+            train_subdir,
+            required_splits=("train", "val"),
+        )
+        is None
+        or _read_murcko_subdir_metadata(
+            cache_dir,
+            test_subdir,
+            required_splits=("test",),
+        )
+        is None
+    )
+    if needs_download:
+        _snapshot_download_rank_zero(
+            repo_id=repo_id,
+            repo_type="dataset",
+            revision=revision,
+            local_dir=cache_dir,
+            allow_patterns=allow_patterns,
+            distributed_world_size=distributed_world_size,
+            distributed_rank=distributed_rank,
+        )
+    elif _coordinate_distributed_download(distributed_world_size):
+        torch.distributed.barrier()
+    train_metadata = cast(
+        dict[str, Any],
+        _read_murcko_subdir_metadata(
+            cache_dir,
+            train_subdir,
+            required_splits=("train", "val"),
+        ),
+    )
+    test_metadata = cast(
+        dict[str, Any],
+        _read_murcko_subdir_metadata(
+            cache_dir,
+            test_subdir,
+            required_splits=("test",),
+        ),
+    )
+    metadata: dict[str, Any] = {
+        "metadata_version": 1,
+        "storage_format": "parquet",
+        "repo_id": repo_id,
+        "revision": revision,
+        "train_subdir": train_subdir,
+        "test_subdir": test_subdir,
+        "dreams_dim": int(train_metadata.get("dreams_dim", 0)),
+    }
+    metadata.update(
+        _murcko_fluorine_split_metadata(
+            train_metadata,
+            subdir=train_subdir,
+            source_split="train",
+            target_split="train",
+        )
+    )
+    metadata.update(
+        _murcko_fluorine_split_metadata(
+            train_metadata,
+            subdir=train_subdir,
+            source_split="val",
+            target_split="val",
+        )
+    )
+    metadata.update(
+        _murcko_fluorine_split_metadata(
+            test_metadata,
+            subdir=test_subdir,
+            source_split="test",
+            target_split="test",
+        )
+    )
+    return metadata
+
+
+def build_murcko_fluorine_data(
+    *,
+    cache_dir: Path,
+    batch_size: int,
+    num_peaks: int,
+    max_precursor_mz: float,
+    min_peak_intensity: float,
+    peak_drop_min_intensity: float,
+    peak_ordering: str,
+    precursor_peak_exclusion_window_da: float,
+    repo_id: str = NIST_MURCKO_HF_REPO,
+    revision: str = "main",
+    train_subdir: str = NIST_MURCKO_PREPARED_SUBDIR,
+    test_subdir: str = MCEBIO_MURCKO_PREPARED_SUBDIR,
+    distributed_world_size: int = 1,
+    distributed_rank: int = 0,
+) -> MurckoFluorineData:
+    metadata = ensure_murcko_fluorine_data_downloaded(
+        cache_dir,
+        repo_id=repo_id,
+        revision=revision,
+        train_subdir=train_subdir,
+        test_subdir=test_subdir,
+        distributed_world_size=distributed_world_size,
+        distributed_rank=distributed_rank,
+    )
+    return MurckoFluorineData(
+        metadata=metadata,
+        root=cache_dir,
+        batch_size=batch_size,
+        num_peaks=num_peaks,
+        max_precursor_mz=max_precursor_mz,
+        min_peak_intensity=min_peak_intensity,
+        peak_drop_min_intensity=peak_drop_min_intensity,
+        peak_ordering=peak_ordering,
+        precursor_peak_exclusion_window_da=precursor_peak_exclusion_window_da,
+    )
 
 
 def ensure_mona_a_probe_prepared(
@@ -831,6 +1071,342 @@ class _ProbeMemmapDataset(Dataset):
             else:
                 sample[key] = item
         return sample
+
+
+def _spectra_from_peak_lists(
+    mz_lists: list[list[float]],
+    intensity_lists: list[list[float]],
+) -> np.ndarray:
+    spectra = np.zeros((len(mz_lists), 2, NUM_PEAKS_INPUT), dtype=np.float32)
+    for i, (mz, intensity) in enumerate(zip(mz_lists, intensity_lists, strict=True)):
+        n = min(len(mz), NUM_PEAKS_INPUT)
+        spectra[i, 0, :n] = np.asarray(mz[:n], dtype=np.float32)
+        spectra[i, 1, :n] = np.asarray(intensity[:n], dtype=np.float32)
+    return _normalize_spectra_intensity(spectra)
+
+
+class _ProbeParquetDataset(Dataset):
+    def __init__(
+        self,
+        entries: list[dict[str, Any]],
+        *,
+        adduct_vocab: dict[str, int],
+        instrument_type_vocab: dict[str, int],
+    ) -> None:
+        self._entries = [
+            {
+                "path": Path(entry["path"]),
+                "length": int(entry["length"]),
+                "morgan_files": [Path(path) for path in entry.get("morgan_files", [])],
+            }
+            for entry in entries
+        ]
+        lengths = np.asarray([entry["length"] for entry in self._entries], dtype=np.int64)
+        self._starts = np.zeros(len(lengths) + 1, dtype=np.int64)
+        np.cumsum(lengths, out=self._starts[1:])
+        self._adduct_vocab = adduct_vocab
+        self._instrument_type_vocab = instrument_type_vocab
+        self._arrays: list[dict[str, np.ndarray]] | None = None
+
+    def __len__(self) -> int:
+        return int(self._starts[-1])
+
+    def _load_entry(self, entry: dict[str, Any]) -> dict[str, np.ndarray]:
+        import pyarrow.parquet as pq
+
+        path = Path(entry["path"])
+        table = pq.read_table(path)
+        rows = table.to_pydict()
+        n = len(rows["precursor_mz"])
+        arrays: dict[str, np.ndarray] = {
+            "spectra": _spectra_from_peak_lists(
+                rows["spectrum_mz"],
+                rows["spectrum_intensity"],
+            ),
+            "precursor_mz_raw": np.asarray(rows["precursor_mz"], dtype=np.float32),
+            "fingerprint": np.zeros((n, _FINGERPRINT_BITS), dtype=np.int8),
+            "smiles": np.asarray(rows["canonical_smiles"], dtype=str),
+            "adduct_id": np.asarray(
+                [self._adduct_vocab[value] for value in rows["adduct"]],
+                dtype=np.int32,
+            ),
+            "instrument_type_id": np.asarray(
+                [self._instrument_type_vocab[value] for value in rows["instrument_type"]],
+                dtype=np.int32,
+            ),
+            "collision_energy": np.asarray(rows["collision_energy"], dtype=np.float32),
+            "collision_energy_present": np.asarray(
+                rows["collision_energy_present"],
+                dtype=np.int32,
+            ),
+            "probe_valid_mol": np.ones(n, dtype=bool),
+            "probe_maccs": np.asarray(rows["maccs_166"], dtype=np.int8),
+        }
+        for name in REGRESSION_TARGET_KEYS:
+            arrays[f"probe_{name}"] = np.asarray(rows[name], dtype=np.float32)
+        morgan_files = entry.get("morgan_files", [])
+        if morgan_files:
+            arrays["probe_morgan"] = np.concatenate(
+                [
+                    np.load(Path(path), allow_pickle=False)["morgan"].astype(np.int8)
+                    for path in morgan_files
+                ],
+                axis=0,
+            )
+        return arrays
+
+    def _ensure_arrays(self) -> list[dict[str, np.ndarray]]:
+        if self._arrays is not None:
+            return self._arrays
+        self._arrays = [self._load_entry(entry) for entry in self._entries]
+        return self._arrays
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        arrays_by_entry = self._ensure_arrays()
+        entry_idx = int(np.searchsorted(self._starts, index, side="right") - 1)
+        local_idx = index - int(self._starts[entry_idx])
+        arrays = arrays_by_entry[entry_idx]
+        sample: dict[str, Any] = {}
+        for key, value in arrays.items():
+            item = value[local_idx]
+            if isinstance(item, np.ndarray):
+                sample[key] = torch.from_numpy(item.copy())
+            elif np.isscalar(item):
+                if value.dtype.kind in {"U", "S"}:
+                    sample[key] = str(item)
+                elif value.dtype == np.bool_:
+                    sample[key] = bool(item)
+                elif value.dtype.kind in {"i", "u"}:
+                    sample[key] = int(cast(Any, item))
+                else:
+                    sample[key] = float(cast(Any, item))
+            else:
+                sample[key] = item
+        return sample
+
+
+class _MurckoFluorineParquetDataset(Dataset):
+    def __init__(self, entries: list[dict[str, Any]]) -> None:
+        self._entries = [
+            {"path": Path(entry["path"]), "length": int(entry["length"])}
+            for entry in entries
+        ]
+        lengths = np.asarray([entry["length"] for entry in self._entries], dtype=np.int64)
+        self._starts = np.zeros(len(lengths) + 1, dtype=np.int64)
+        np.cumsum(lengths, out=self._starts[1:])
+        self._arrays: list[dict[str, np.ndarray]] | None = None
+
+    def __len__(self) -> int:
+        return int(self._starts[-1])
+
+    def _load_entry(self, entry: dict[str, Any]) -> dict[str, np.ndarray]:
+        import pyarrow.parquet as pq
+
+        table = pq.read_table(Path(entry["path"]))
+        rows = table.to_pydict()
+        arrays: dict[str, np.ndarray] = {
+            "spectra": _spectra_from_peak_lists(
+                rows["spectrum_mz"],
+                rows["spectrum_intensity"],
+            ),
+            "precursor_mz_raw": np.asarray(rows["precursor_mz"], dtype=np.float32),
+            "label": np.asarray(rows["has_fluorine"], dtype=np.float32),
+        }
+        if "dreams_embedding" in rows:
+            arrays["dreams_embedding"] = np.asarray(
+                rows["dreams_embedding"],
+                dtype=np.float32,
+            )
+        return arrays
+
+    def _ensure_arrays(self) -> list[dict[str, np.ndarray]]:
+        if self._arrays is not None:
+            return self._arrays
+        self._arrays = [self._load_entry(entry) for entry in self._entries]
+        return self._arrays
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        arrays_by_entry = self._ensure_arrays()
+        entry_idx = int(np.searchsorted(self._starts, index, side="right") - 1)
+        local_idx = index - int(self._starts[entry_idx])
+        arrays = arrays_by_entry[entry_idx]
+        sample = {
+            "spectra": torch.from_numpy(arrays["spectra"][local_idx].copy()),
+            "precursor_mz_raw": torch.tensor(
+                float(arrays["precursor_mz_raw"][local_idx]),
+                dtype=torch.float32,
+            ),
+            "label": torch.tensor(float(arrays["label"][local_idx]), dtype=torch.float32),
+            "row_idx": torch.tensor(index, dtype=torch.long),
+        }
+        if "dreams_embedding" in arrays:
+            sample["dreams_embedding"] = torch.from_numpy(
+                arrays["dreams_embedding"][local_idx].copy()
+            )
+        return sample
+
+
+class _MurckoFluorineCollator:
+    def __init__(
+        self,
+        *,
+        num_peaks: int,
+        max_precursor_mz: float,
+        min_peak_intensity: float,
+        peak_drop_min_intensity: float,
+        peak_ordering: str,
+        precursor_peak_exclusion_window_da: float,
+        dreams_only: bool,
+    ) -> None:
+        self.num_peaks = num_peaks
+        self.max_precursor_mz = max_precursor_mz
+        self.min_peak_intensity = min_peak_intensity
+        self.peak_drop_min_intensity = peak_drop_min_intensity
+        self.peak_ordering = peak_ordering
+        self.precursor_peak_exclusion_window_da = precursor_peak_exclusion_window_da
+        self.dreams_only = dreams_only
+
+    def __call__(self, samples: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+        if self.dreams_only:
+            return {
+                "dreams_embedding": torch.stack(
+                    [sample["dreams_embedding"] for sample in samples],
+                    dim=0,
+                ).to(torch.float32),
+                "label": torch.stack([sample["label"] for sample in samples]).to(
+                    torch.float32
+                ),
+                "row_idx": torch.stack([sample["row_idx"] for sample in samples]).to(
+                    torch.long
+                ),
+            }
+        spectra = torch.stack([sample["spectra"] for sample in samples], dim=0)
+        precursor_raw = torch.stack([sample["precursor_mz_raw"] for sample in samples])
+        batch = preprocess_peak_batch_torch(
+            spectra[:, 0, :],
+            spectra[:, 1, :],
+            precursor_raw,
+            num_peaks=self.num_peaks,
+            peak_drop_min_intensity=self.peak_drop_min_intensity,
+            peak_ordering=self.peak_ordering,
+            max_precursor_mz=self.max_precursor_mz,
+            precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
+            min_peak_intensity=self.min_peak_intensity,
+        )
+        if "dreams_embedding" in samples[0]:
+            batch["dreams_embedding"] = torch.stack(
+                [sample["dreams_embedding"] for sample in samples],
+                dim=0,
+            ).to(torch.float32)
+        batch["label"] = torch.stack([sample["label"] for sample in samples]).to(
+            torch.float32
+        )
+        batch["row_idx"] = torch.stack([sample["row_idx"] for sample in samples]).to(
+            torch.long
+        )
+        return batch
+
+
+def _subset_for_max_samples(
+    dataset: Dataset,
+    *,
+    max_samples: int | None,
+    shuffle: bool,
+    seed: int,
+) -> tuple[Dataset, bool]:
+    if max_samples is None:
+        return dataset, shuffle
+    n = min(len(dataset), max_samples)
+    if shuffle:
+        generator = torch.Generator()
+        generator.manual_seed(seed)
+        indices = torch.randperm(len(dataset), generator=generator)[:n].tolist()
+    else:
+        indices = list(range(n))
+    return Subset(dataset, [int(idx) for idx in indices]), False
+
+
+def _loader_sampler(
+    dataset: Dataset,
+    *,
+    shuffle: bool,
+    seed: int,
+    drop_last: bool,
+    distributed_world_size: int,
+    distributed_rank: int,
+) -> tuple[DistributedSampler | None, bool]:
+    if distributed_world_size <= 1:
+        return None, shuffle
+    return (
+        DistributedSampler(
+            dataset,
+            num_replicas=distributed_world_size,
+            rank=distributed_rank,
+            shuffle=shuffle,
+            seed=seed,
+            drop_last=drop_last,
+        ),
+        False,
+    )
+
+
+def build_murcko_fluorine_loader(
+    data: MurckoFluorineData,
+    split: str,
+    *,
+    shuffle: bool,
+    seed: int,
+    max_samples: int | None,
+    dreams_only: bool = False,
+    drop_last: bool = False,
+    distributed_world_size: int = 1,
+    distributed_rank: int = 0,
+    num_workers: int = 0,
+) -> DataLoader:
+    dataset: Dataset = _MurckoFluorineParquetDataset(
+        [
+            {"path": data.root / path, "length": length}
+            for path, length in zip(
+                data.metadata[f"{split}_files"],
+                data.metadata[f"{split}_lengths"],
+                strict=True,
+            )
+        ]
+    )
+    dataset, shuffle = _subset_for_max_samples(
+        dataset,
+        max_samples=max_samples,
+        shuffle=shuffle,
+        seed=seed,
+    )
+    sampler, loader_shuffle = _loader_sampler(
+        dataset,
+        shuffle=shuffle,
+        seed=seed,
+        drop_last=drop_last,
+        distributed_world_size=distributed_world_size,
+        distributed_rank=distributed_rank,
+    )
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    return DataLoader(
+        dataset,
+        batch_size=probe_local_batch_size(data.batch_size, distributed_world_size),
+        shuffle=loader_shuffle,
+        sampler=sampler,
+        drop_last=drop_last,
+        num_workers=num_workers,
+        collate_fn=_MurckoFluorineCollator(
+            num_peaks=data.num_peaks,
+            max_precursor_mz=data.max_precursor_mz,
+            min_peak_intensity=data.min_peak_intensity,
+            peak_drop_min_intensity=data.peak_drop_min_intensity,
+            peak_ordering=data.peak_ordering,
+            precursor_peak_exclusion_window_da=data.precursor_peak_exclusion_window_da,
+            dreams_only=dreams_only,
+        ),
+        generator=generator,
+    )
 
 
 class _ProbeBatchCollator:
@@ -936,59 +1512,18 @@ def probe_local_batch_size(global_batch_size: int, distributed_world_size: int) 
     return global_batch_size // distributed_world_size
 
 
-class _ProbeIndexSampler(Sampler[int]):
-    def __init__(
-        self,
-        dataset_size: int,
-        *,
-        generator: torch.Generator,
-        shuffle: bool,
-        max_samples: int | None,
-        distributed_world_size: int,
-        distributed_rank: int,
-        pad_to_equal: bool,
-    ) -> None:
-        self.dataset_size = dataset_size
-        self.generator = generator
-        self.shuffle = shuffle
-        self.max_samples = max_samples
-        self.distributed_world_size = distributed_world_size
-        self.distributed_rank = distributed_rank
-        self.pad_to_equal = pad_to_equal
-        self._indices = self._build_indices()
-
-    def _build_indices(self) -> list[int]:
-        if self.shuffle:
-            order = torch.randperm(self.dataset_size, generator=self.generator).tolist()
-        else:
-            order = list(range(self.dataset_size))
-        if self.max_samples is not None:
-            order = order[: min(len(order), self.max_samples)]
-        if self.pad_to_equal and self.distributed_world_size > 1 and order:
-            total_size = (
-                math.ceil(len(order) / self.distributed_world_size)
-                * self.distributed_world_size
-            )
-            order = order + order[: total_size - len(order)]
-        if self.distributed_world_size > 1:
-            order = order[self.distributed_rank :: self.distributed_world_size]
-        return [int(idx) for idx in order]
-
-    def __iter__(self):
-        yield from self._indices
-
-    def __len__(self) -> int:
-        return len(self._indices)
-
-
 class MassSpecProbeData(NamedTuple):
     info: dict[str, Any]
+    storage_format: str
     train_files: list[str]
     train_lengths: list[int]
+    train_morgan_files: list[str]
     val_files: list[str]
     val_lengths: list[int]
+    val_morgan_files: list[str]
     test_files: list[str]
     test_lengths: list[int]
+    test_morgan_files: list[str]
     batch_size: int
     shuffle_buffer: int
     max_precursor_mz: float
@@ -1001,7 +1536,13 @@ class MassSpecProbeData(NamedTuple):
     pairwise_alignment_path: str
 
     @classmethod
-    def from_config(cls, config: config_dict.ConfigDict) -> "MassSpecProbeData":
+    def from_config(
+        cls,
+        config: config_dict.ConfigDict,
+        *,
+        distributed_world_size: int = 1,
+        distributed_rank: int = 0,
+    ) -> "MassSpecProbeData":
         artifact_root = (
             Path(_config_get(config, "artifact_dir", str(_DEFAULT_ARTIFACT_DIR)))
             .expanduser()
@@ -1010,71 +1551,41 @@ class MassSpecProbeData(NamedTuple):
         max_precursor_mz = float(
             _config_get(config, "max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
         )
-        probe_dataset = str(_config_get(config, "probe_dataset", "massspec"))
-        if probe_dataset == "nist20":
-            output_dir = artifact_root / "nist20_probe"
-            metadata = ensure_nist20_probe_prepared(
-                output_dir,
-                max_precursor_mz=max_precursor_mz,
-                cache_dir=artifact_root,
-                hdf5_repo_id=str(
-                    _config_get(config, "nist20_hdf5_repo_id", NIST20_HF_REPO)
-                ),
-                hdf5_filename=str(
-                    _config_get(config, "nist20_hdf5_filename", NIST20_HF_FILENAME)
-                ),
-            )
-        elif probe_dataset == "nist-full":
-            output_dir = artifact_root / "nist_full_probe"
-            metadata = ensure_nist_full_probe_downloaded(
-                output_dir,
-                max_precursor_mz=max_precursor_mz,
-                repo_id=str(
-                    _config_get(
-                        config,
-                        "nist_full_probe_repo_id",
-                        _config_get(
-                            config,
-                            "nist_full_hdf5_repo_id",
-                            _config_get(config, "nist20_hdf5_repo_id", NIST20_HF_REPO),
-                        ),
-                    )
-                ),
-                revision=str(_config_get(config, "nist_full_probe_revision", "main")),
-            )
-        elif probe_dataset == "nist-murcko":
-            murcko_subdir = str(
+        include_morgan = (
+            str(
                 _config_get(
                     config,
-                    "nist_murcko_probe_hf_subdir",
-                    NIST_MURCKO_PREPARED_SUBDIR,
+                    "msg_probe_fingerprint",
+                    _config_get(config, "msg_probe_fingerprint_type", "maccs"),
                 )
-            ).strip("/")
-            output_dir = artifact_root / murcko_subdir
-            metadata = ensure_nist_murcko_probe_downloaded(
-                output_dir,
-                max_precursor_mz=max_precursor_mz,
-                repo_id=str(
-                    _config_get(config, "nist_murcko_probe_repo_id", NIST_MURCKO_HF_REPO)
-                ),
-                revision=str(_config_get(config, "nist_murcko_probe_revision", "main")),
-                subdir=murcko_subdir,
+            ).lower()
+            == "morgan"
+            or int(_config_get(config, "msg_probe_pairwise_alignment_num_pairs", 0)) > 0
+        )
+        murcko_subdir = str(
+            _config_get(
+                config,
+                "nist_murcko_probe_hf_subdir",
+                NIST_MURCKO_PREPARED_SUBDIR,
             )
-        elif probe_dataset == "mona_a":
-            output_dir = artifact_root / "mona_a_probe"
-            metadata = ensure_mona_a_probe_prepared(
-                output_dir,
-                max_precursor_mz=max_precursor_mz,
-                cache_dir=artifact_root,
-            )
-        else:
-            output_dir = artifact_root / "massspec_probe"
-            metadata = ensure_massspec_probe_prepared(
-                output_dir,
-                max_precursor_mz=max_precursor_mz,
-            )
+        ).strip("/")
+        output_dir = artifact_root / murcko_subdir
+        metadata = ensure_nist_murcko_probe_downloaded(
+            output_dir,
+            max_precursor_mz=max_precursor_mz,
+            repo_id=str(
+                _config_get(config, "nist_murcko_probe_repo_id", NIST_MURCKO_HF_REPO)
+            ),
+            revision=str(_config_get(config, "nist_murcko_probe_revision", "main")),
+            subdir=murcko_subdir,
+            include_morgan=include_morgan,
+            distributed_world_size=distributed_world_size,
+            distributed_rank=distributed_rank,
+        )
         adduct_vocab = metadata.get("adduct_vocab", {"unknown": 0})
         instrument_type_vocab = metadata.get("instrument_type_vocab", {"unknown": 0})
+        storage_format = str(metadata.get("storage_format", "native"))
+        morgan_files = metadata.get("morgan_auxiliary_files", {}) if include_morgan else {}
         info = {
             "massspec_train_size": int(metadata.get("train_size", 0)),
             "massspec_val_size": int(metadata.get("val_size", 0)),
@@ -1086,7 +1597,9 @@ class MassSpecProbeData(NamedTuple):
             "massspec_instrument_type_vocab_size": len(instrument_type_vocab),
             "fingerprint_bits": _FINGERPRINT_BITS,
             "probe_maccs_bits": int(metadata.get("probe_maccs_bits", 0)),
-            "probe_morgan_bits": int(metadata.get("probe_morgan_bits", 0)),
+            "probe_morgan_bits": int(metadata.get("probe_morgan_bits", 0))
+            if include_morgan
+            else 0,
             "probe_morgan_radius": int(metadata.get("probe_morgan_radius", 0)),
             "pairwise_alignment_available": bool(
                 metadata.get("pairwise_alignment_available", False)
@@ -1100,14 +1613,36 @@ class MassSpecProbeData(NamedTuple):
         }
         pairwise_file = str(metadata.get("pairwise_alignment_file", ""))
         pairwise_alignment_path = str(output_dir / pairwise_file) if pairwise_file else ""
+        if storage_format == "parquet":
+            train_files = [str(output_dir / name) for name in metadata["train_files"]]
+            val_files = [str(output_dir / name) for name in metadata["val_files"]]
+            test_files = [str(output_dir / name) for name in metadata["test_files"]]
+        else:
+            train_files = [
+                str(output_dir / "train" / name) for name in metadata["train_files"]
+            ]
+            val_files = [str(output_dir / "val" / name) for name in metadata["val_files"]]
+            test_files = [
+                str(output_dir / "test" / name) for name in metadata["test_files"]
+            ]
         return cls(
             info=info,
-            train_files=[str(output_dir / "train" / name) for name in metadata["train_files"]],
+            storage_format=storage_format,
+            train_files=train_files,
             train_lengths=[int(v) for v in metadata["train_lengths"]],
-            val_files=[str(output_dir / "val" / name) for name in metadata["val_files"]],
+            train_morgan_files=[
+                str(output_dir / name) for name in morgan_files.get("train", [])
+            ],
+            val_files=val_files,
             val_lengths=[int(v) for v in metadata["val_lengths"]],
-            test_files=[str(output_dir / "test" / name) for name in metadata["test_files"]],
+            val_morgan_files=[
+                str(output_dir / name) for name in morgan_files.get("val", [])
+            ],
+            test_files=test_files,
             test_lengths=[int(v) for v in metadata["test_lengths"]],
+            test_morgan_files=[
+                str(output_dir / name) for name in morgan_files.get("test", [])
+            ],
             batch_size=int(
                 _config_get(
                     config,
@@ -1174,30 +1709,61 @@ class MassSpecProbeData(NamedTuple):
             "test": self.test_lengths,
             "all": self.train_lengths + self.val_lengths + self.test_lengths,
         }[split]
-        dataset = _ProbeMemmapDataset(
-            [
-                {"dir": path, "length": length}
-                for path, length in zip(split_files, split_lengths, strict=True)
-            ]
+        split_morgan_files = {
+            "massspec_train": [self.train_morgan_files] if self.train_files else [],
+            "massspec_val": [self.val_morgan_files] if self.val_files else [],
+            "massspec_test": [self.test_morgan_files] if self.test_files else [],
+            "train": [self.train_morgan_files] if self.train_files else [],
+            "val": [self.val_morgan_files] if self.val_files else [],
+            "test": [self.test_morgan_files] if self.test_files else [],
+            "all": (
+                ([self.train_morgan_files] if self.train_files else [])
+                + ([self.val_morgan_files] if self.val_files else [])
+                + ([self.test_morgan_files] if self.test_files else [])
+            ),
+        }[split]
+        if self.storage_format == "parquet":
+            dataset = _ProbeParquetDataset(
+                [
+                    {"path": path, "length": length, "morgan_files": morgan_files}
+                    for path, length, morgan_files in zip(
+                        split_files,
+                        split_lengths,
+                        split_morgan_files,
+                        strict=True,
+                    )
+                ],
+                adduct_vocab=self.info["massspec_adduct_vocab"],
+                instrument_type_vocab=self.info["massspec_instrument_type_vocab"],
+            )
+        else:
+            dataset = _ProbeMemmapDataset(
+                [
+                    {"dir": path, "length": length}
+                    for path, length in zip(split_files, split_lengths, strict=True)
+                ]
+            )
+        dataset, shuffle = _subset_for_max_samples(
+            dataset,
+            max_samples=max_samples,
+            shuffle=shuffle,
+            seed=seed,
+        )
+        sampler, loader_shuffle = _loader_sampler(
+            dataset,
+            shuffle=shuffle,
+            seed=seed,
+            drop_last=drop_remainder,
+            distributed_world_size=distributed_world_size,
+            distributed_rank=distributed_rank,
         )
         generator = torch.Generator()
         generator.manual_seed(seed)
-        sampler = None
-        if max_samples is not None or distributed_world_size > 1:
-            sampler = _ProbeIndexSampler(
-                len(dataset),
-                generator=generator,
-                shuffle=shuffle,
-                max_samples=max_samples,
-                distributed_world_size=distributed_world_size,
-                distributed_rank=distributed_rank,
-                pad_to_equal=pad_distributed,
-            )
         batch_size = probe_local_batch_size(self.batch_size, distributed_world_size)
         loader = DataLoader(
             dataset,
             batch_size=batch_size,
-            shuffle=shuffle and sampler is None,
+            shuffle=loader_shuffle,
             sampler=sampler,
             drop_last=drop_remainder,
             num_workers=0,
@@ -1240,12 +1806,40 @@ class MassSpecProbeData(NamedTuple):
             "test": self.test_lengths,
             "all": self.train_lengths + self.val_lengths + self.test_lengths,
         }[split]
-        dataset = _ProbeMemmapDataset(
-            [
-                {"dir": path, "length": length}
-                for path, length in zip(split_files, split_lengths, strict=True)
-            ]
-        )
+        split_morgan_files = {
+            "massspec_train": [self.train_morgan_files] if self.train_files else [],
+            "massspec_val": [self.val_morgan_files] if self.val_files else [],
+            "massspec_test": [self.test_morgan_files] if self.test_files else [],
+            "train": [self.train_morgan_files] if self.train_files else [],
+            "val": [self.val_morgan_files] if self.val_files else [],
+            "test": [self.test_morgan_files] if self.test_files else [],
+            "all": (
+                ([self.train_morgan_files] if self.train_files else [])
+                + ([self.val_morgan_files] if self.val_files else [])
+                + ([self.test_morgan_files] if self.test_files else [])
+            ),
+        }[split]
+        if self.storage_format == "parquet":
+            dataset = _ProbeParquetDataset(
+                [
+                    {"path": path, "length": length, "morgan_files": morgan_files}
+                    for path, length, morgan_files in zip(
+                        split_files,
+                        split_lengths,
+                        split_morgan_files,
+                        strict=True,
+                    )
+                ],
+                adduct_vocab=self.info["massspec_adduct_vocab"],
+                instrument_type_vocab=self.info["massspec_instrument_type_vocab"],
+            )
+        else:
+            dataset = _ProbeMemmapDataset(
+                [
+                    {"dir": path, "length": length}
+                    for path, length in zip(split_files, split_lengths, strict=True)
+                ]
+            )
         batch_size = probe_local_batch_size(self.batch_size, distributed_world_size)
         loader = DataLoader(
             Subset(dataset, [int(idx) for idx in indices]),

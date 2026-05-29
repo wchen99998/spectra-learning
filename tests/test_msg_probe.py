@@ -1309,7 +1309,7 @@ class ProbeConfigTests(unittest.TestCase):
         self.assertEqual(train_samples, 123)
         self.assertEqual(val_samples, 123)
         self.assertEqual(test_samples, 123)
-        self.assertFalse(randomize_test_subset)
+        self.assertTrue(randomize_test_subset)
 
     def test_split_specific_sample_limits_override_global_sample_size(self):
         cfg = config_dict.ConfigDict()
@@ -1504,8 +1504,7 @@ class RepeatedProbeTests(unittest.TestCase):
     def test_run_msg_probe_averages_best_metrics_and_epoch_curves(self):
         cfg = config_dict.ConfigDict()
         cfg.seed = 7
-        cfg.probe_dataset = "nist-full"
-        cfg.nist_full_probe_num_repeats = 2
+        cfg.nist_murcko_probe_num_repeats = 2
 
         repeat_payloads = (
             (

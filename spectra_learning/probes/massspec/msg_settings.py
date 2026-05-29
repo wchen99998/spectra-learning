@@ -48,9 +48,6 @@ PROBE_FINGERPRINT_BITS = {
     MACCS_TASK: MACCS_FINGERPRINT_BITS,
     MORGAN_TASK: MORGAN_PROBE_FINGERPRINT_BITS,
 }
-NIST_PROBE_DATASETS = {"nist-full", "nist-murcko"}
-
-
 def _config_get(config: Any, key: str, default: Any) -> Any:
     if hasattr(config, "get"):
         return config.get(key, default)
@@ -81,47 +78,43 @@ def resolve_msg_probe_fingerprint(
 def resolve_msg_probe_sample_limits(
     config: Any,
 ) -> tuple[int | None, int | None, int | None, bool]:
-    probe_dataset = str(_config_get(config, "probe_dataset", "massspec"))
     raw_sample_size = _config_get(config, "msg_probe_sample_size", None)
     raw_train = _config_get(config, "msg_probe_max_train_samples", None) or raw_sample_size
     raw_val = _config_get(config, "msg_probe_max_val_samples", None) or raw_sample_size
     raw_test = _config_get(config, "msg_probe_max_test_samples", None) or raw_sample_size
-    if raw_train is None and probe_dataset in NIST_PROBE_DATASETS:
+    if raw_train is None:
         raw_train = _config_get(
             config,
-            f"{probe_dataset.replace('-', '_')}_probe_train_samples",
+            "nist_murcko_probe_train_samples",
             4_000,
         )
-    if raw_val is None and probe_dataset in NIST_PROBE_DATASETS:
+    if raw_val is None:
         raw_val = _config_get(
             config,
-            f"{probe_dataset.replace('-', '_')}_probe_val_samples",
+            "nist_murcko_probe_val_samples",
             1_000,
         )
-    if raw_test is None and probe_dataset in NIST_PROBE_DATASETS:
+    if raw_test is None:
         raw_test = _config_get(
             config,
-            f"{probe_dataset.replace('-', '_')}_probe_test_samples",
+            "nist_murcko_probe_test_samples",
             1_000,
         )
     max_train_samples = int(raw_train) if raw_train is not None else None
     max_val_samples = int(raw_val) if raw_val is not None else None
     max_test_samples = int(raw_test) if raw_test is not None else None
-    randomize_test_subset = (
-        probe_dataset in NIST_PROBE_DATASETS and max_test_samples is not None
-    )
+    randomize_test_subset = max_test_samples is not None
     return max_train_samples, max_val_samples, max_test_samples, randomize_test_subset
 
 
 def resolve_msg_probe_num_repeats(
     config: Any,
 ) -> int:
-    probe_dataset = str(_config_get(config, "probe_dataset", "massspec"))
     raw_repeats = _config_get(config, "msg_probe_num_repeats", None)
-    if raw_repeats is None and probe_dataset in NIST_PROBE_DATASETS:
+    if raw_repeats is None:
         raw_repeats = _config_get(
             config,
-            f"{probe_dataset.replace('-', '_')}_probe_num_repeats",
+            "nist_murcko_probe_num_repeats",
             1,
         )
     return int(raw_repeats) if raw_repeats is not None else 1
