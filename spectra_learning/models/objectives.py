@@ -264,15 +264,19 @@ class ObjectiveMixin:
     ) -> tuple[Float[Tensor, ""], dict[str, Tensor]]:
         if self.distogram_loss_weight <= 0:
             return reference.new_tensor(0.0), {}
-        logits = self._distogram_logits(predictor_pair)
-        targets = self._distogram_targets(peak_mz).unsqueeze(1).expand(
-            logits.shape[0],
-            logits.shape[1],
-            logits.shape[2],
-            logits.shape[3],
-        )
         pair_mask = self._distogram_pair_mask(target_masks, predictor_visible_masks)
-        distogram_loss = self._masked_ce_loss(logits, targets, pair_mask)
+        sym_pair = predictor_pair + predictor_pair.transpose(2, 3)
+        logits = cast(nn.Linear, self.distogram_head)(sym_pair[pair_mask])
+        targets = self._distogram_targets(peak_mz).unsqueeze(1).expand(
+            predictor_pair.shape[0],
+            predictor_pair.shape[1],
+            predictor_pair.shape[2],
+            predictor_pair.shape[3],
+        )
+        distogram_loss = F.cross_entropy(
+            logits.float(),
+            targets[pair_mask].reshape(-1),
+        )
         loss_weight = reference.new_tensor(self.distogram_loss_weight)
         term = loss_weight * distogram_loss.to(dtype=reference.dtype)
         return term, {
