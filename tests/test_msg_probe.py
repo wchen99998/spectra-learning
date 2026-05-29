@@ -1,7 +1,6 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from types import SimpleNamespace
 from typing import cast
 from unittest import mock
 
@@ -38,7 +37,6 @@ from spectra_learning.probes.massspec.msg_settings import (
     resolve_msg_probe_sample_limits,
 )
 from spectra_learning.probes.massspec.msg_probe import (
-    _collect_num_rings_classes,
     _compute_pairwise_similarity_alignment,
     _build_task_spec,
     _collect_split_targets,
@@ -181,48 +179,43 @@ class MsgLinearProbeTests(unittest.TestCase):
     def test_output_shapes_match_task_heads(self):
         probe = MsgLinearProbe(
             input_dim=64,
-            task_names=("mol_weight", "maccs"),
-            task_output_dims={"maccs": 4},
+            task_names=("maccs",),
+            task_output_dims={"maccs": 7},
         )
         probe_inputs = torch.randn(7, 64)
         logits = probe(probe_inputs)
 
-        self.assertEqual(logits["mol_weight"].shape, (7, 1))
-        self.assertEqual(logits["maccs"].shape, (7, 4))
+        self.assertEqual(logits["maccs"].shape, (7, 7))
 
-    def test_output_shapes_match_multiclass_head(self):
+    def test_output_shapes_match_regression_only_heads(self):
         probe = MsgLinearProbe(
             input_dim=64,
-            task_names=("mol_weight", "num_rings"),
-            task_output_dims={"num_rings": 4},
+            task_names=("mol_weight", "logp"),
         )
         probe_inputs = torch.randn(7, 64)
         logits = probe(probe_inputs)
 
         self.assertEqual(logits["mol_weight"].shape, (7, 1))
-        self.assertEqual(logits["num_rings"].shape, (7, 4))
+        self.assertEqual(logits["logp"].shape, (7, 1))
 
     def test_finite_outputs(self):
         probe = MsgLinearProbe(
             input_dim=32,
-            task_names=("mol_weight", "maccs"),
-            task_output_dims={"maccs": 4},
+            task_names=("maccs",),
+            task_output_dims={"maccs": 7},
         )
         probe_inputs = torch.randn(3, 32)
         logits = probe(probe_inputs)
 
-        self.assertTrue(torch.isfinite(logits["mol_weight"]).all().item())
         self.assertTrue(torch.isfinite(logits["maccs"]).all().item())
 
-    def test_probe_heads_are_linear(self):
+    def test_probe_head_is_linear(self):
         probe = MsgLinearProbe(
             input_dim=32,
-            task_names=("mol_weight", "num_rings", "maccs"),
-            task_output_dims={"num_rings": 4, "maccs": 4},
+            task_names=("maccs",),
+            task_output_dims={"maccs": 7},
         )
 
-        self.assertIsInstance(probe.heads["mol_weight"], torch.nn.Linear)
-        self.assertIsInstance(probe.heads["num_rings"], torch.nn.Linear)
         self.assertIsInstance(probe.heads["maccs"], torch.nn.Linear)
 
 
@@ -342,7 +335,6 @@ class MsgSequenceProbeTests(unittest.TestCase):
         config.msg_probe_mlp_hidden_dim = 8
         task_spec = MsgProbeTaskSpec(
             regression_tasks=("mol_weight",),
-            num_rings_classes=(0, 1),
             maccs_bits=4,
             regression_means={"mol_weight": 0.0},
             regression_stds={"mol_weight": 1.0},
@@ -361,10 +353,8 @@ class MsgSequenceProbeTests(unittest.TestCase):
 
         self.assertIsInstance(probe, MsgSinglePairLinearProbe)
         self.assertEqual(len(probe.pooler.single_encoder.blocks), 2)
-        self.assertIsInstance(probe.heads.heads["mol_weight"], torch.nn.Linear)
-        self.assertEqual(logits["mol_weight"].shape, (3, 1))
-        self.assertEqual(logits["num_rings"].shape, (3, 2))
-        self.assertEqual(logits["maccs"].shape, (3, 4))
+        self.assertIsInstance(probe.heads.heads["maccs"], torch.nn.Linear)
+        self.assertEqual(logits["maccs"].shape, (3, 5))
 
     def test_single_pair_covariance_probe_uses_mlp_heads(self):
         config = config_dict.ConfigDict()
@@ -374,7 +364,6 @@ class MsgSequenceProbeTests(unittest.TestCase):
         config.msg_probe_mlp_hidden_dim = 8
         task_spec = MsgProbeTaskSpec(
             regression_tasks=("mol_weight",),
-            num_rings_classes=(0, 1),
             maccs_bits=4,
             regression_means={"mol_weight": 0.0},
             regression_stds={"mol_weight": 1.0},
@@ -393,12 +382,10 @@ class MsgSequenceProbeTests(unittest.TestCase):
 
         self.assertIsInstance(probe, MsgSinglePairCovarianceProbe)
         self.assertEqual(probe.pooler.output_dim, 3 * 3)
-        head = cast(torch.nn.Sequential, probe.heads.heads["mol_weight"])
+        head = cast(torch.nn.Sequential, probe.heads.heads["maccs"])
         first_head = cast(torch.nn.Linear, head[0])
         self.assertEqual(first_head.in_features, 3 * 3)
-        self.assertEqual(logits["mol_weight"].shape, (3, 1))
-        self.assertEqual(logits["num_rings"].shape, (3, 2))
-        self.assertEqual(logits["maccs"].shape, (3, 4))
+        self.assertEqual(logits["maccs"].shape, (3, 5))
 
     def test_sequence_probe_output_shapes_match_task_heads_for_all_variants(self):
         peak_embeddings = torch.randn(3, 6, 4)
@@ -414,29 +401,28 @@ class MsgSequenceProbeTests(unittest.TestCase):
                 pooler=MsgMeanPool(),
                 pooled_dim=4,
                 hidden_dim=8,
-                task_names=("mol_weight", "maccs"),
-                task_output_dims={"maccs": 4},
+                task_names=("maccs",),
+                task_output_dims={"maccs": 7},
             ),
             MsgSequenceProbe(
                 pooler=MsgCovariancePool(input_dim=4, compressed_dim=3),
                 pooled_dim=9,
                 hidden_dim=8,
-                task_names=("mol_weight", "maccs"),
-                task_output_dims={"maccs": 4},
+                task_names=("maccs",),
+                task_output_dims={"maccs": 7},
             ),
             MsgSequenceProbe(
                 pooler=MsgPmaPool(input_dim=4, num_seeds=2, num_heads=2),
                 pooled_dim=4,
                 hidden_dim=8,
-                task_names=("mol_weight", "maccs"),
-                task_output_dims={"maccs": 4},
+                task_names=("maccs",),
+                task_output_dims={"maccs": 7},
             ),
         )
 
         for probe in variants:
             logits = probe(peak_embeddings, valid_mask)
-            self.assertEqual(logits["mol_weight"].shape, (3, 1))
-            self.assertEqual(logits["maccs"].shape, (3, 4))
+            self.assertEqual(logits["maccs"].shape, (3, 7))
 
     def test_sequence_probe_supports_deeper_mlp_heads(self):
         probe = MsgSequenceProbe(
@@ -444,8 +430,8 @@ class MsgSequenceProbeTests(unittest.TestCase):
             pooled_dim=4,
             hidden_dim=8,
             num_layers=4,
-            task_names=("mol_weight", "maccs"),
-            task_output_dims={"maccs": 4},
+            task_names=("maccs",),
+            task_output_dims={"maccs": 7},
         )
 
         head = cast(torch.nn.Sequential, probe.heads.heads["maccs"])
@@ -456,7 +442,7 @@ class MsgSequenceProbeTests(unittest.TestCase):
         self.assertEqual(len(linear_layers), 4)
         self.assertEqual(linear_layers[0].in_features, 4)
         self.assertEqual(linear_layers[1].in_features, 8)
-        self.assertEqual(linear_layers[-1].out_features, 4)
+        self.assertEqual(linear_layers[-1].out_features, 7)
 
     def test_covariance_probe_uses_learned_pooler_when_provided(self):
         config = config_dict.ConfigDict()
@@ -465,7 +451,6 @@ class MsgSequenceProbeTests(unittest.TestCase):
         config.covariance_pooling_dim = 3
         task_spec = MsgProbeTaskSpec(
             regression_tasks=("mol_weight",),
-            num_rings_classes=(),
             maccs_bits=0,
             regression_means={"mol_weight": 0.0},
             regression_stds={"mol_weight": 1.0},
@@ -496,7 +481,6 @@ class MsgSequenceProbeTests(unittest.TestCase):
         config.msg_probe_mlp_hidden_dim = 8
         task_spec = MsgProbeTaskSpec(
             regression_tasks=("mol_weight",),
-            num_rings_classes=(),
             maccs_bits=0,
             regression_means={"mol_weight": 0.0},
             regression_stds={"mol_weight": 1.0},
@@ -538,7 +522,6 @@ class MsgSequenceProbeTests(unittest.TestCase):
         config.msg_probe_mlp_hidden_dim = 8
         task_spec = MsgProbeTaskSpec(
             regression_tasks=("mol_weight",),
-            num_rings_classes=(),
             maccs_bits=0,
             regression_means={"mol_weight": 0.0},
             regression_stds={"mol_weight": 1.0},
@@ -727,12 +710,13 @@ class MsgProbeStepTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["batch_size"], 2)
         self.assertTrue(torch.isfinite(result["loss_total"]).item())
-        self.assertEqual(result["predictions"]["num_rings"].shape, (2,))
+        self.assertEqual(result["predictions"]["mol_weight"].shape, (2,))
+        self.assertNotIn("num_rings", result["predictions"])
         self.assertEqual(result["predictions"]["maccs"].shape, (2, 4))
 
 
 class MsgProbeTaskSpecTests(unittest.TestCase):
-    def test_task_spec_includes_num_rings_and_maccs_bits(self):
+    def test_task_spec_uses_one_fingerprint_head_for_regression_and_bits(self):
         task_spec = _build_task_spec(
             train_targets=MsgProbeSplitTargets(
                 regression={
@@ -772,55 +756,13 @@ class MsgProbeTaskSpecTests(unittest.TestCase):
             task_spec.regression_tasks,
             ("mol_weight", "logp", "num_heavy_atoms"),
         )
-        self.assertEqual(task_spec.num_rings_classes, (0, 1, 2, 3))
         self.assertEqual(task_spec.maccs_bits, 4)
-        self.assertEqual(
-            _probe_task_names(task_spec),
-            ("mol_weight", "logp", "num_heavy_atoms", "num_rings", "maccs"),
-        )
-
-    def test_task_spec_accepts_explicit_num_rings_classes(self):
-        task_spec = _build_task_spec(
-            train_targets=MsgProbeSplitTargets(
-                regression={
-                    "mol_weight": np.linspace(10.0, 13.0, 4, dtype=np.float32),
-                    "logp": np.linspace(1.0, 2.5, 4, dtype=np.float32),
-                    "num_heavy_atoms": np.linspace(2.0, 5.0, 4, dtype=np.float32),
-                    "num_rings": np.asarray([0.0, 1.0, 2.0, 3.0], dtype=np.float32),
-                },
-                maccs=_maccs(
-                    [
-                        [0, 1, 0, 1],
-                        [1, 0, 1, 0],
-                        [0, 1, 1, 0],
-                        [1, 1, 0, 0],
-                    ]
-                ),
-            ),
-            test_targets=MsgProbeSplitTargets(
-                regression={
-                    "mol_weight": np.linspace(14.0, 17.0, 4, dtype=np.float32),
-                    "logp": np.linspace(3.0, 4.5, 4, dtype=np.float32),
-                    "num_heavy_atoms": np.linspace(6.0, 9.0, 4, dtype=np.float32),
-                    "num_rings": np.asarray([2.0, 3.0, 4.0, 5.0], dtype=np.float32),
-                },
-                maccs=_maccs(
-                    [
-                        [1, 0, 0, 1],
-                        [0, 1, 1, 0],
-                        [1, 0, 1, 0],
-                        [0, 1, 0, 1],
-                    ]
-                ),
-            ),
-            num_rings_classes=(0, 1, 2, 3, 4, 5),
-        )
-
-        self.assertEqual(task_spec.num_rings_classes, (0, 1, 2, 3, 4, 5))
+        self.assertEqual(_probe_task_names(task_spec), ("maccs",))
+        self.assertEqual(_probe_task_output_dims(task_spec), {"maccs": 7})
 
 
 class MsgProbeMetricTests(unittest.TestCase):
-    def test_score_epoch_state_reports_num_rings_and_maccs_metrics(self):
+    def test_score_epoch_state_reports_regression_and_maccs_metrics(self):
         task_spec = _build_task_spec(
             train_targets=MsgProbeSplitTargets(
                 regression={
@@ -860,7 +802,6 @@ class MsgProbeMetricTests(unittest.TestCase):
                 "mol_weight": torch.tensor([10.0, 19.0, 29.0]),
                 "logp": torch.tensor([1.0, 2.0, 4.0]),
                 "num_heavy_atoms": torch.tensor([2.0, 5.0, 6.0]),
-                "num_rings": torch.tensor([0.0, 2.0, 2.0]),
                 "maccs": torch.tensor(
                     [
                         [0.1, 0.9, 0.2, 0.8],
@@ -873,7 +814,6 @@ class MsgProbeMetricTests(unittest.TestCase):
                 "mol_weight": torch.tensor([10.0, 20.0, 30.0]),
                 "logp": torch.tensor([1.0, 2.0, 3.0]),
                 "num_heavy_atoms": torch.tensor([2.0, 4.0, 6.0]),
-                "num_rings": torch.tensor([0.0, 1.0, 2.0]),
                 "maccs": torch.tensor(
                     [
                         [0.0, 1.0, 0.0, 1.0],
@@ -891,13 +831,9 @@ class MsgProbeMetricTests(unittest.TestCase):
         )
 
         self.assertNotIn("msg_probe/test/r2_num_rings", metrics)
-        self.assertEqual(metrics["msg_probe/test/acc_num_rings_exact"], 2 / 3)
-        self.assertEqual(metrics["msg_probe/test/acc_num_rings_within_1"], 1.0)
-        self.assertAlmostEqual(metrics["msg_probe/test/mae_num_rings"], 1 / 3)
-        self.assertEqual(
-            metrics["msg_probe/test/r2_mean"],
-            metrics["msg_probe/test/r2_mean_wo_num_rings"],
-        )
+        self.assertNotIn("msg_probe/test/acc_num_rings_exact", metrics)
+        self.assertNotIn("msg_probe/test/mae_num_rings", metrics)
+        self.assertNotIn("msg_probe/test/r2_mean_wo_num_rings", metrics)
         self.assertEqual(metrics["msg_probe/test/num_maccs_auc_bits"], 4.0)
         self.assertGreater(metrics["msg_probe/test/auc_maccs_mean"], 0.9)
         self.assertEqual(
@@ -916,7 +852,6 @@ class MsgProbeMetricTests(unittest.TestCase):
     def test_score_epoch_state_matches_per_bit_fingerprint_metrics(self):
         task_spec = MsgProbeTaskSpec(
             regression_tasks=(),
-            num_rings_classes=(),
             maccs_bits=5,
             regression_means={},
             regression_stds={},
@@ -1026,7 +961,6 @@ class MsgProbeMetricTests(unittest.TestCase):
     def test_score_epoch_state_names_morgan_similarity_metrics(self):
         task_spec = MsgProbeTaskSpec(
             regression_tasks=(),
-            num_rings_classes=(),
             maccs_bits=3,
             regression_means={},
             regression_stds={},
@@ -1073,14 +1007,14 @@ class MsgProbeMetricTests(unittest.TestCase):
 
     def test_select_metric_uses_tune_metric_fallback(self):
         cfg = {
-            "msg_probe_tune_metric": "msg_probe/test/mae_num_rings",
+            "msg_probe_tune_metric": "msg_probe/test/mae_mol_weight",
         }
         self.assertEqual(
             resolve_msg_probe_select_metric(cfg),
-            "msg_probe/test/mae_num_rings",
+            "msg_probe/test/mae_mol_weight",
         )
         self.assertFalse(
-            msg_probe_metric_higher_is_better("msg_probe/test/mae_num_rings")
+            msg_probe_metric_higher_is_better("msg_probe/test/mae_mol_weight")
         )
         self.assertTrue(
             msg_probe_metric_higher_is_better("msg_probe/test/auc_maccs_mean")
@@ -1178,52 +1112,6 @@ class MsgProbeCollectionTests(unittest.TestCase):
             targets.maccs,
             _maccs([[1, 1, 0], [0, 1, 1]]),
         )
-
-    def test_collect_num_rings_classes_reads_all_probe_shards(self):
-        with TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            train_shard = root / "train-shard"
-            val_shard = root / "val-shard"
-            test_shard = root / "test-shard"
-            train_shard.mkdir()
-            val_shard.mkdir()
-            test_shard.mkdir()
-            np.save(
-                train_shard / "probe_valid_mol.npy",
-                np.asarray([True, False, True], dtype=bool),
-            )
-            np.save(
-                train_shard / "probe_num_rings.npy",
-                np.asarray([0.0, 99.0, 2.0], dtype=np.float32),
-            )
-            np.save(
-                val_shard / "probe_valid_mol.npy",
-                np.asarray([True, False], dtype=bool),
-            )
-            np.save(
-                val_shard / "probe_num_rings.npy",
-                np.asarray([4.0, 13.0], dtype=np.float32),
-            )
-            np.save(
-                test_shard / "probe_valid_mol.npy",
-                np.asarray([True, True, False], dtype=bool),
-            )
-            np.save(
-                test_shard / "probe_num_rings.npy",
-                np.asarray([5.0, 7.0, 11.0], dtype=np.float32),
-            )
-
-            probe_data = SimpleNamespace(
-                train_files=[str(train_shard)],
-                val_files=[str(val_shard)],
-                test_files=[str(test_shard)],
-            )
-
-            self.assertEqual(
-                _collect_num_rings_classes(probe_data),
-                (0, 2, 4, 5, 7),
-            )
-
 
 class ProbeIterationTests(unittest.TestCase):
     def test_train_probe_uses_shuffle_and_includes_remainder(self):
@@ -1582,15 +1470,9 @@ class MsgProbeRunTests(unittest.TestCase):
                 self.encoder = DummyEncoder()
 
         curve: list[dict[str, float]] = []
-        with (
-            mock.patch(
-                "spectra_learning.probes.massspec.msg_probe.MassSpecProbeData.from_config",
-                return_value=probe_data,
-            ),
-            mock.patch(
-                "spectra_learning.probes.massspec.msg_probe._collect_num_rings_classes",
-                return_value=(0, 1),
-            ),
+        with mock.patch(
+            "spectra_learning.probes.massspec.msg_probe.MassSpecProbeData.from_config",
+            return_value=probe_data,
         ):
             metrics = _run_msg_probe_once(
                 config=cfg,

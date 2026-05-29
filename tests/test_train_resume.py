@@ -749,6 +749,63 @@ def test_run_checkpoint_msg_probe_loads_checkpoint_and_logs_metrics(monkeypatch,
     assert (tmp_path / "probe" / "msg_probe_step-00000009.json").exists()
 
 
+def test_run_checkpoint_msg_probe_script_infers_step_and_applies_overrides(monkeypatch):
+    from scripts import run_checkpoint_msg_probe as script
+
+    cfg = config_dict.ConfigDict()
+    cfg.seed = 3
+    cfg.msg_probe_num_epochs = 100
+    calls = []
+
+    def fake_load_config(path):
+        assert path == Path("configs/base.py")
+        return cfg
+
+    def fake_load_torch_checkpoint(path, *, map_location, weights_only):
+        calls.append(("load_checkpoint", path, map_location, weights_only))
+        return {"global_step": 12}
+
+    def fake_run_checkpoint_msg_probe(**kwargs):
+        calls.append(("run_probe", kwargs))
+        config_payload = json.loads(kwargs["config_json"])
+        assert config_payload["seed"] == 3
+        assert config_payload["msg_probe_num_epochs"] == 2
+        return {"msg_probe/mean/test/auc_maccs_mean": 0.75}
+
+    monkeypatch.setattr(script, "load_config", fake_load_config)
+    monkeypatch.setattr(script, "load_torch_checkpoint", fake_load_torch_checkpoint)
+    monkeypatch.setattr(
+        script,
+        "run_checkpoint_msg_probe",
+        fake_run_checkpoint_msg_probe,
+    )
+
+    metrics = script.main(
+        [
+            "--config",
+            "configs/base.py",
+            "--checkpoint",
+            "checkpoints/step-00000012.pt",
+            "--workdir",
+            "experiments/probe",
+            "--overrides-json",
+            '{"msg_probe_num_epochs": 2}',
+        ]
+    )
+
+    assert metrics["msg_probe/mean/test/auc_maccs_mean"] == 0.75
+    assert calls[0][0] == "load_checkpoint"
+    assert calls[1][0] == "run_probe"
+    run_kwargs = calls[1][1]
+    assert json.loads(run_kwargs["config_json"]) == {
+        "seed": 3,
+        "msg_probe_num_epochs": 2,
+    }
+    assert run_kwargs["checkpoint_path"] == "checkpoints/step-00000012.pt"
+    assert run_kwargs["workdir"] == "experiments/probe"
+    assert run_kwargs["global_step"] == 12
+
+
 def test_build_optimizers_uses_single_adamw_optimizer_by_default():
     model = _small_model()
     cfg = _optimizer_config()

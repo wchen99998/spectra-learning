@@ -13,7 +13,6 @@ from spectra_learning.probes.massspec.targets import (
 
 class MsgProbeTaskSpec(NamedTuple):
     regression_tasks: tuple[str, ...]
-    num_rings_classes: tuple[int, ...]
     maccs_bits: int
     regression_means: dict[str, float]
     regression_stds: dict[str, float]

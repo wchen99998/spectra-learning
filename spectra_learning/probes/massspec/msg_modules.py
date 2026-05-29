@@ -11,7 +11,6 @@ from spectra_learning.models.transformer import (
     _build_norm,
 )
 from spectra_learning.probes.massspec.msg_settings import (
-    NUM_RINGS_TASK,
     MsgProbeTaskSpec,
     build_msg_probe_inputs,
 )
@@ -506,9 +505,13 @@ def _init_probe_output(linear: torch.nn.Module) -> None:
 
 
 def _probe_task_names(task_spec: MsgProbeTaskSpec) -> tuple[str, ...]:
+    if task_spec.maccs_bits > 0:
+        return (task_spec.fingerprint_task,)
+    return task_spec.regression_tasks
+
+
+def _probe_prediction_names(task_spec: MsgProbeTaskSpec) -> tuple[str, ...]:
     task_names = task_spec.regression_tasks
-    if task_spec.num_rings_classes:
-        task_names += (NUM_RINGS_TASK,)
     if task_spec.maccs_bits > 0:
         task_names += (task_spec.fingerprint_task,)
     return task_names
@@ -516,10 +519,10 @@ def _probe_task_names(task_spec: MsgProbeTaskSpec) -> tuple[str, ...]:
 
 def _probe_task_output_dims(task_spec: MsgProbeTaskSpec) -> dict[str, int]:
     output_dims: dict[str, int] = {}
-    if task_spec.num_rings_classes:
-        output_dims[NUM_RINGS_TASK] = len(task_spec.num_rings_classes)
     if task_spec.maccs_bits > 0:
-        output_dims[task_spec.fingerprint_task] = task_spec.maccs_bits
+        output_dims[task_spec.fingerprint_task] = (
+            len(task_spec.regression_tasks) + task_spec.maccs_bits
+        )
     return output_dims
 
 
