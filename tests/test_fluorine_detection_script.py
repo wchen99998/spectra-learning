@@ -7,8 +7,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 
-from scripts import train_fluorine_detection as fluorine
 from spectra_learning.probes.massspec import data as massspec_data
+from spectra_learning.probes.massspec import fluorine
 
 
 def _write_split(path: Path, labels: list[bool]) -> None:
