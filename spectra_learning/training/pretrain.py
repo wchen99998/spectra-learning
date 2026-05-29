@@ -37,10 +37,6 @@ from spectra_learning.training.distributed import (
     wrap_distributed_model,
 )
 from spectra_learning.training.logging import MetricLogger, log_msg_probe_metrics
-from spectra_learning.training.modal_probe import (
-    save_and_submit_modal_msg_probe,
-    should_run_msg_probe_on_modal,
-)
 from spectra_learning.training.modules import PretrainModule, split_pretrain_module
 from spectra_learning.training.optimization import build_optimizers
 from spectra_learning.training.schedules import LRSchedulerLike
@@ -50,7 +46,6 @@ from spectra_learning.training.storage import (
     normalize_storage_path,
     storage_join,
     storage_mkdir,
-    storage_parent,
 )
 from spectra_learning.training.steps import train_step_impl
 from spectra_learning.probes.massspec.msg_probe import (
@@ -283,7 +278,6 @@ def run_training_loop(
     stopped_for_time_limit = False
     stopped_for_signal = False
     initial_global_step = global_step
-    modal_probe_call_ids: list[str] = []
     training_start_time = time.perf_counter()
     throughput_warmup_steps = int(_config_get(config, "throughput_warmup_steps", 0))
     measured_start_time: float | None = None
@@ -390,32 +384,17 @@ def run_training_loop(
                 barrier(distributed)
             if msg_probe_every_n_steps > 0 and global_step % msg_probe_every_n_steps == 0:
                 base_model, _ = split_pretrain_module(unwrap_model(model))
-                if should_run_msg_probe_on_modal(config):
-                    last_msg_probe_metrics = submit_and_log_modal_msg_probe(
-                        config=config,
-                        model=base_model,
-                        logger=logger,
-                        checkpoint_dir=checkpoint_dir,
-                        global_step=global_step,
-                        epoch=epoch,
-                        loss=float(metrics["loss"].detach()),
-                        distributed=distributed,
+                last_msg_probe_metrics = dict(
+                    run_and_log_msg_probe(
+                        config,
+                        base_model,
+                        device,
+                        logger,
+                        msg_probe_variants,
+                        global_step,
+                        distributed,
                     )
-                    call_id = last_msg_probe_metrics.get("msg_probe/modal/call_id")
-                    if isinstance(call_id, str):
-                        modal_probe_call_ids.append(call_id)
-                else:
-                    last_msg_probe_metrics = dict(
-                        run_and_log_msg_probe(
-                            config,
-                            base_model,
-                            device,
-                            logger,
-                            msg_probe_variants,
-                            global_step,
-                            distributed,
-                        )
-                    )
+                )
                 barrier(distributed)
         pbar.close()
         if distributed.is_main:
@@ -457,9 +436,6 @@ def run_training_loop(
         if measured_elapsed > 0
         else 0.0
     )
-    if modal_probe_call_ids:
-        last_msg_probe_metrics["run/modal_probe_call_ids"] = modal_probe_call_ids
-        last_msg_probe_metrics["run/modal_probe_calls"] = float(len(modal_probe_call_ids))
     if owns_checkpoint_writer:
         checkpoint_writer.close()
     return last_msg_probe_metrics
@@ -643,38 +619,6 @@ def run_and_log_msg_probe(
                     probe_metrics[f"{prefix}/test/auc_{fingerprint_task}_mean"],
                 )
     return probe_metrics
-
-
-def submit_and_log_modal_msg_probe(
-    *,
-    config: config_dict.ConfigDict,
-    model: PeakSetJEPA,
-    logger,
-    checkpoint_dir: StoragePath,
-    global_step: int,
-    epoch: int,
-    loss: float,
-    distributed: DistributedContext,
-) -> dict[str, object]:
-    if not distributed.is_main:
-        return {}
-    metrics = save_and_submit_modal_msg_probe(
-        config=config,
-        model=model,
-        checkpoint_dir=checkpoint_dir,
-        workdir=storage_parent(checkpoint_dir),
-        global_step=global_step,
-        epoch=epoch,
-        loss=loss,
-        wandb_run_id=getattr(logger.experiment, "id", None),
-    )
-    log_msg_probe_metrics(
-        logger,
-        {key: value for key, value in metrics.items() if isinstance(value, float)},
-        global_step,
-        enable_wandb=bool(_config_get(config, "enable_wandb", False)),
-    )
-    return metrics
 
 
 def training_deadline(config: config_dict.ConfigDict) -> float | None:

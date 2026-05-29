@@ -111,7 +111,6 @@ def get_config() -> config_dict.ConfigDict:
 
     # MSG probe
     cfg.probe_dataset = "nist-murcko"
-    cfg.msg_probe_backend = "local"
     cfg.msg_probe_batch_size = 256
     cfg.msg_probe_early_stopping = True
     cfg.msg_probe_early_stopping_min_delta = 0.0001

@@ -136,7 +136,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_warmup_steps = 0
     cfg.msg_probe_weight_decay = 0
     cfg.msg_probe_batch_size = 256
-    cfg.msg_probe_backend = "local"
 
     # Optimizer
     cfg.learning_rate = 0.0004

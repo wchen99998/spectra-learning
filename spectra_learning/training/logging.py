@@ -31,12 +31,7 @@ def _build_wandb_init_kwargs(config: Any | None) -> dict[str, Any]:
 def _use_wandb_shared_mode(config: Any | None) -> bool:
     if config is None:
         return False
-    if config.get("wandb_shared_mode", False):
-        return True
-    probe_backend = str(
-        config.get("msg_probe_backend", config.get("msg_probe_run_mode", "inline"))
-    ).lower()
-    return probe_backend == "modal"
+    return bool(config.get("wandb_shared_mode", False))
 
 
 def _to_serialisable_config(value: Any) -> Any:
