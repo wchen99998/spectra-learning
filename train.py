@@ -2,10 +2,10 @@ import argparse
 import json
 import logging
 import os
-from pathlib import Path
 
 from spectra_learning.training.pretrain import train_and_evaluate
 from spectra_learning.training.api import load_config
+from spectra_learning.training.storage import normalize_storage_path, write_text
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,12 +40,13 @@ def main() -> None:
         config.training_max_steps = int(args.training_max_steps)
     results = train_and_evaluate(
         config,
-        workdir=Path(args.workdir).expanduser().resolve(),
+        workdir=normalize_storage_path(args.workdir),
     )
     if args.metrics_json and int(os.environ.get("RANK", "0")) == 0:
-        metrics_path = Path(args.metrics_json).expanduser().resolve()
-        metrics_path.parent.mkdir(parents=True, exist_ok=True)
-        metrics_path.write_text(json.dumps(results, indent=2, sort_keys=True))
+        write_text(
+            normalize_storage_path(args.metrics_json),
+            json.dumps(results, indent=2, sort_keys=True),
+        )
 
 
 if __name__ == "__main__":

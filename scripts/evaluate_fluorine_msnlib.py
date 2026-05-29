@@ -35,6 +35,7 @@ from spectra_learning.data.spectra import (
 from spectra_learning.models.pooling import CovariancePool, SinglePairCovariancePool
 from spectra_learning.probes.massspec.data import _normalize_spectra_intensity
 from spectra_learning.training.checkpointing import latest_ckpt_path
+from spectra_learning.training.storage import StoragePath, normalize_storage_path
 
 from scripts.train_fluorine_detection import (
     EmbeddingData,
@@ -405,35 +406,57 @@ class FluorineFinetuneModule(torch.nn.Module):
         pooler: torch.nn.Module,
         classifier: MLPClassifier,
         pooling: str,
+        freeze_encoder: bool = False,
     ) -> None:
         super().__init__()
         self.encoder = encoder
         self.pooler = pooler
         self.classifier = classifier
         self.pooling = pooling
+        self.freeze_encoder = freeze_encoder
 
     def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         if self.pooling == "single_pair_covariance":
-            peak_embeddings, _, pair_embeddings = self.encoder.forward_with_block_outputs(
-                batch["peak_mz"],
-                batch["peak_intensity"],
-                valid_mask=batch["peak_valid_mask"],
-                precursor_mz=batch.get("precursor_mz", None),
-            )
-            peak_embeddings = _peak_tokens_only(peak_embeddings, batch["peak_valid_mask"])
+            if self.freeze_encoder:
+                with torch.no_grad():
+                    peak_embeddings, _, pair_embeddings = self.encoder.forward_with_block_outputs(
+                        batch["peak_mz"],
+                        batch["peak_intensity"],
+                        valid_mask=batch["peak_valid_mask"],
+                        precursor_mz=batch.get("precursor_mz", None),
+                    )
+                    peak_embeddings = _peak_tokens_only(peak_embeddings, batch["peak_valid_mask"])
+            else:
+                peak_embeddings, _, pair_embeddings = self.encoder.forward_with_block_outputs(
+                    batch["peak_mz"],
+                    batch["peak_intensity"],
+                    valid_mask=batch["peak_valid_mask"],
+                    precursor_mz=batch.get("precursor_mz", None),
+                )
+                peak_embeddings = _peak_tokens_only(peak_embeddings, batch["peak_valid_mask"])
             features = self.pooler(
                 peak_embeddings.float(),
                 batch["peak_valid_mask"].to(dtype=torch.bool),
                 pair_embeddings.float(),
             )
         else:
-            encoded = self.encoder(
-                batch["peak_mz"],
-                batch["peak_intensity"],
-                valid_mask=batch["peak_valid_mask"],
-                precursor_mz=batch.get("precursor_mz", None),
-            )
-            peak_embeddings = _peak_tokens_only(encoded, batch["peak_valid_mask"])
+            if self.freeze_encoder:
+                with torch.no_grad():
+                    encoded = self.encoder(
+                        batch["peak_mz"],
+                        batch["peak_intensity"],
+                        valid_mask=batch["peak_valid_mask"],
+                        precursor_mz=batch.get("precursor_mz", None),
+                    )
+                    peak_embeddings = _peak_tokens_only(encoded, batch["peak_valid_mask"])
+            else:
+                encoded = self.encoder(
+                    batch["peak_mz"],
+                    batch["peak_intensity"],
+                    valid_mask=batch["peak_valid_mask"],
+                    precursor_mz=batch.get("precursor_mz", None),
+                )
+                peak_embeddings = _peak_tokens_only(encoded, batch["peak_valid_mask"])
             features = self.pooler(
                 peak_embeddings.float(),
                 batch["peak_valid_mask"].to(dtype=torch.bool),
@@ -608,6 +631,42 @@ def train_or_load_finetuned(
     history: list[dict[str, Any]] = []
     epochs_without_improvement = 0
     use_autocast = device.type == "cuda"
+    best_state_path = state_path.with_name(f"{state_path.stem}.best.pt")
+
+    def make_state(
+        *,
+        test_metrics: dict[str, float] | None,
+        complete: bool,
+    ) -> dict[str, Any]:
+        return {
+            "mode": "finetune",
+            "complete": complete,
+            "config_path": str(config_path),
+            "checkpoint_path": str(checkpoint_path),
+            "input_dim": int(input_dim),
+            "covariance_dim": int(covariance_dim),
+            "pooling": pooling,
+            "pair_dim": int(config.get("pairformer_pair_dim", config.model_dim)),
+            "model_state": best_model_state,
+            "pooler_state": best_pooler_state,
+            "classifier_state": best_classifier_state,
+            "best_epoch": int(best_epoch),
+            "best_val": best_val,
+            "test": test_metrics,
+            "history": history,
+            "hparams": requested_hparams,
+            "focal_alpha": focal_alpha,
+            "focal_gamma": focal_gamma,
+            "finetune_cache_dir": str(cache_dir),
+            "device_ids": device_ids if device_ids is not None else [],
+            "train_size": int(data.metadata["train_size"]),
+            "train_positive": int(data.metadata["train_positive"]),
+            "val_size": int(data.metadata["val_size"]),
+            "val_positive": int(data.metadata["val_positive"]),
+            "max_train_samples": max_train_samples,
+            "max_val_samples": max_val_samples,
+        }
+
     for epoch_idx in range(epochs):
         finetune_module.train()
         running_loss = 0.0
@@ -654,6 +713,8 @@ def train_or_load_finetuned(
             best_pooler_state = _module_state_to_cpu(pooler)
             best_classifier_state = _module_state_to_cpu(classifier)
             epochs_without_improvement = 0
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(make_state(test_metrics=None, complete=False), best_state_path)
         else:
             epochs_without_improvement += 1
         log.info(
@@ -677,33 +738,241 @@ def train_or_load_finetuned(
     )
     test_metrics = _metric_dict(test_targets, test_logits, "test")
 
-    state = {
-        "mode": "finetune",
-        "config_path": str(config_path),
-        "checkpoint_path": str(checkpoint_path),
-        "input_dim": int(input_dim),
-        "covariance_dim": int(covariance_dim),
-        "pooling": pooling,
-        "pair_dim": int(config.get("pairformer_pair_dim", config.model_dim)),
-        "model_state": best_model_state,
-        "pooler_state": best_pooler_state,
-        "classifier_state": best_classifier_state,
-        "best_epoch": int(best_epoch),
-        "best_val": best_val,
-        "test": test_metrics,
-        "history": history,
-        "hparams": requested_hparams,
-        "focal_alpha": focal_alpha,
-        "focal_gamma": focal_gamma,
-        "finetune_cache_dir": str(cache_dir),
-        "device_ids": device_ids if device_ids is not None else [],
-        "train_size": int(data.metadata["train_size"]),
-        "train_positive": int(data.metadata["train_positive"]),
-        "val_size": int(data.metadata["val_size"]),
-        "val_positive": int(data.metadata["val_positive"]),
-        "max_train_samples": max_train_samples,
-        "max_val_samples": max_val_samples,
+    state = make_state(test_metrics=test_metrics, complete=True)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(state, state_path)
+    return state
+
+
+def train_or_load_frozen_probe(
+    *,
+    state_path: Path,
+    model: torch.nn.Module,
+    config: Any,
+    config_path: Path,
+    checkpoint_path: Path,
+    cache_dir: Path,
+    device: torch.device,
+    batch_size: int,
+    seed: int,
+    epochs: int,
+    patience: int,
+    learning_rate: float,
+    weight_decay: float,
+    hidden_dim: int,
+    dropout: float,
+    repo_id: str,
+    revision: str,
+    subdir: str,
+    max_train_samples: int | None,
+    max_val_samples: int | None,
+    pooling: str,
+    device_ids: list[int] | None,
+) -> dict[str, Any]:
+    requested_hparams = {
+        "hidden_dim": int(hidden_dim),
+        "dropout": float(dropout),
+        "learning_rate": float(learning_rate),
+        "weight_decay": float(weight_decay),
+        "epochs": int(epochs),
+        "patience": int(patience),
     }
+    if state_path.exists():
+        state = torch.load(state_path, map_location=device)
+        state_hparams = state.get("hparams", {})
+        if (
+            state.get("mode") == "frozen_probe"
+            and state.get("config_path") == str(config_path)
+            and state.get("checkpoint_path") == str(checkpoint_path)
+            and state.get("pooling", "covariance") == pooling
+            and all(state_hparams.get(key) == value for key, value in requested_hparams.items())
+            and state.get("max_train_samples") == max_train_samples
+            and state.get("max_val_samples") == max_val_samples
+            and state.get("complete", False)
+        ):
+            return state
+
+    data = build_fluorine_data(
+        config=config,
+        cache_dir=cache_dir,
+        batch_size=batch_size,
+        repo_id=repo_id,
+        revision=revision,
+        subdir=subdir,
+    )
+    train_loader = _make_loader(
+        data,
+        "train",
+        shuffle=True,
+        seed=seed,
+        max_samples=max_train_samples,
+        dreams_only=False,
+    )
+    val_loader = _make_loader(
+        data,
+        "val",
+        shuffle=False,
+        seed=seed + 10_000,
+        max_samples=max_val_samples,
+        dreams_only=False,
+    )
+    test_loader = _make_loader(
+        data,
+        "test",
+        shuffle=False,
+        seed=seed + 20_000,
+        max_samples=None,
+        dreams_only=False,
+    )
+    covariance_dim = int(config.get("covariance_pooling_dim", 64))
+    input_dim = covariance_dim * covariance_dim
+    if pooling == "single_pair_covariance":
+        pooler: torch.nn.Module = SinglePairCovariancePool(
+            single_dim=int(config.model_dim),
+            pair_dim=int(config.get("pairformer_pair_dim", config.model_dim)),
+            compressed_dim=covariance_dim,
+        ).to(device)
+    else:
+        pooler = CovariancePool(
+            input_dim=int(config.model_dim),
+            compressed_dim=covariance_dim,
+        ).to(device)
+    classifier = MLPClassifier(
+        input_dim=input_dim,
+        hidden_dim=hidden_dim,
+        dropout=dropout,
+    ).to(device)
+    model.requires_grad_(False)
+    finetune_module = FluorineFinetuneModule(
+        encoder=model.encoder,
+        pooler=pooler,
+        classifier=classifier,
+        pooling=pooling,
+        freeze_encoder=True,
+    ).to(device)
+    finetune_module = _wrap_data_parallel(finetune_module, device_ids)
+    optimizer = torch.optim.AdamW(
+        list(pooler.parameters()) + list(classifier.parameters()),
+        lr=learning_rate,
+        weight_decay=weight_decay,
+    )
+    focal_alpha = 1.0 - float(data.metadata["train_positive"]) / float(
+        data.metadata["train_size"]
+    )
+    focal_gamma = 2.0
+    best_value = -float("inf")
+    best_epoch = 0
+    best_val: dict[str, float] = {}
+    best_pooler_state: dict[str, torch.Tensor] = {}
+    best_classifier_state: dict[str, torch.Tensor] = {}
+    history: list[dict[str, Any]] = []
+    epochs_without_improvement = 0
+    use_autocast = device.type == "cuda"
+    best_state_path = state_path.with_name(f"{state_path.stem}.best.pt")
+
+    def make_state(
+        *,
+        test_metrics: dict[str, float] | None,
+        complete: bool,
+    ) -> dict[str, Any]:
+        return {
+            "mode": "frozen_probe",
+            "complete": complete,
+            "config_path": str(config_path),
+            "checkpoint_path": str(checkpoint_path),
+            "input_dim": int(input_dim),
+            "covariance_dim": int(covariance_dim),
+            "pooling": pooling,
+            "pair_dim": int(config.get("pairformer_pair_dim", config.model_dim)),
+            "pooler_state": best_pooler_state,
+            "classifier_state": best_classifier_state,
+            "best_epoch": int(best_epoch),
+            "best_val": best_val,
+            "test": test_metrics,
+            "history": history,
+            "hparams": requested_hparams,
+            "focal_alpha": focal_alpha,
+            "focal_gamma": focal_gamma,
+            "finetune_cache_dir": str(cache_dir),
+            "device_ids": device_ids if device_ids is not None else [],
+            "train_size": int(data.metadata["train_size"]),
+            "train_positive": int(data.metadata["train_positive"]),
+            "val_size": int(data.metadata["val_size"]),
+            "val_positive": int(data.metadata["val_positive"]),
+            "max_train_samples": max_train_samples,
+            "max_val_samples": max_val_samples,
+        }
+
+    for epoch_idx in range(epochs):
+        finetune_module.train()
+        running_loss = 0.0
+        seen = 0
+        for batch in train_loader:
+            batch = _move_batch(batch, device)
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(
+                device_type=device.type,
+                dtype=torch.bfloat16,
+                enabled=use_autocast,
+            ):
+                logits = finetune_module(batch)
+                loss = binary_focal_loss_with_logits(
+                    logits.float(),
+                    batch["label"],
+                    alpha=focal_alpha,
+                    gamma=focal_gamma,
+                )
+            loss.backward()
+            optimizer.step()
+            running_loss += float(loss.detach().cpu()) * int(batch["label"].shape[0])
+            seen += int(batch["label"].shape[0])
+
+        val_targets, val_logits = predict_finetuned(
+            finetune_module=finetune_module,
+            loader=val_loader,
+            device=device,
+        )
+        val_metrics = _metric_dict(val_targets, val_logits, "val")
+        history.append(
+            {
+                "epoch": epoch_idx + 1,
+                "train_loss": running_loss / float(seen),
+                "val": val_metrics,
+            }
+        )
+        current_value = val_metrics["val/average_precision"]
+        if current_value > best_value:
+            best_value = current_value
+            best_epoch = epoch_idx + 1
+            best_val = dict(val_metrics)
+            best_pooler_state = _module_state_to_cpu(pooler)
+            best_classifier_state = _module_state_to_cpu(classifier)
+            epochs_without_improvement = 0
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(make_state(test_metrics=None, complete=False), best_state_path)
+        else:
+            epochs_without_improvement += 1
+        log.info(
+            "frozen probe epoch=%d/%d train_loss=%.5f val_ap=%.4f val_auc=%.4f",
+            epoch_idx + 1,
+            epochs,
+            running_loss / float(seen),
+            val_metrics["val/average_precision"],
+            val_metrics["val/roc_auc"],
+        )
+        if epochs_without_improvement >= patience:
+            break
+
+    pooler.load_state_dict(best_pooler_state)
+    classifier.load_state_dict(best_classifier_state)
+    test_targets, test_logits = predict_finetuned(
+        finetune_module=finetune_module,
+        loader=test_loader,
+        device=device,
+    )
+    test_metrics = _metric_dict(test_targets, test_logits, "test")
+
+    state = make_state(test_metrics=test_metrics, complete=True)
     state_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(state, state_path)
     return state
@@ -1084,26 +1353,33 @@ def write_dreams_comparison(
     return payload
 
 
-def resolve_checkpoint_path(checkpoint: Path | None, workdir: Path | None) -> Path:
+def resolve_checkpoint_path(
+    checkpoint: StoragePath | None,
+    workdir: StoragePath | None,
+) -> StoragePath:
     if checkpoint is not None:
-        return checkpoint.expanduser().resolve()
+        return normalize_storage_path(checkpoint)
     if workdir is not None:
-        latest = latest_ckpt_path(workdir.expanduser().resolve())
+        latest = latest_ckpt_path(normalize_storage_path(workdir))
         if latest is None:
             raise FileNotFoundError(f"no checkpoint found under {workdir}")
-        return Path(latest).resolve()
+        return normalize_storage_path(latest)
     return Path("checkpoints/modal/no_fourier_embed_sentinel/step-01250000.pt").resolve()
 
 
 def default_state_path(mode: str) -> Path:
     if mode == "finetune":
         return Path("results/fluorine_msnlib_latest_full_finetune_state.pt")
+    if mode == "frozen_probe":
+        return Path("results/fluorine_msnlib_frozen_single_pair_probe_state.pt")
     return Path("results/fluorine_small_covariance_head_state.pt")
 
 
 def default_output_prefix(mode: str) -> Path:
     if mode == "finetune":
         return Path("results/fluorine_msnlib_latest_full_finetune")
+    if mode == "frozen_probe":
+        return Path("results/fluorine_msnlib_frozen_single_pair_probe")
     return Path("results/fluorine_msnlib_ours_checkpoint")
 
 
@@ -1111,7 +1387,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Evaluate the small Spectra checkpoint fluorine head on public MSnLib MCEBIO MGF."
     )
-    parser.add_argument("--mode", choices=("probe", "finetune"), default="probe")
+    parser.add_argument("--mode", choices=("probe", "finetune", "frozen_probe"), default="probe")
     parser.add_argument(
         "--pooling",
         choices=("covariance", "single_pair_covariance"),
@@ -1123,10 +1399,9 @@ def parse_args() -> argparse.Namespace:
         default=Path("data/massive_msv000094528/source/20240411_mcebio_library_pos_all_lib_MS2.mgf"),
     )
     parser.add_argument("--config", type=Path, default=Path("configs/wandb_pa645zxs_small.py"))
-    parser.add_argument("--workdir", type=Path, default=None)
+    parser.add_argument("--workdir", default=None)
     parser.add_argument(
         "--checkpoint",
-        type=Path,
         default=None,
     )
     parser.add_argument(
@@ -1211,6 +1486,31 @@ def main() -> None:
             batch_size=args.batch_size,
             seed=args.seed,
             epochs=args.epochs,
+        )
+    elif args.mode == "frozen_probe":
+        head_state = train_or_load_frozen_probe(
+            state_path=args.head_state.expanduser().resolve(),
+            model=model,
+            config=config,
+            config_path=args.config.expanduser().resolve(),
+            checkpoint_path=checkpoint_path,
+            cache_dir=args.finetune_cache_dir.expanduser().resolve(),
+            device=device,
+            batch_size=args.batch_size,
+            seed=args.seed,
+            epochs=args.epochs,
+            patience=args.patience,
+            learning_rate=args.finetune_head_lr,
+            weight_decay=args.finetune_weight_decay,
+            hidden_dim=args.hidden_dim,
+            dropout=args.dropout,
+            repo_id=args.repo_id,
+            revision=args.revision,
+            subdir=args.subdir,
+            max_train_samples=args.max_train_samples,
+            max_val_samples=args.max_val_samples,
+            pooling=args.pooling,
+            device_ids=device_ids,
         )
     else:
         head_state = train_or_load_finetuned(

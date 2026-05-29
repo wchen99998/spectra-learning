@@ -18,13 +18,13 @@ from tqdm import tqdm
 from spectra_learning.data.gems.datamodule import GemsNativeDataModule
 from spectra_learning.training.batch import BatchPrefetcher
 from spectra_learning.training.checkpointing import (
+    AsyncCheckpointWriter,
     load_frozen_teacher_weights,
     load_grad_scaler_state,
     load_optimizer_state,
     load_resume_model_state,
-    is_training_checkpoint_path,
-    prune_checkpoints,
-    save_checkpoint,
+    load_torch_checkpoint,
+    training_checkpoint_paths,
 )
 from spectra_learning.training.distributed import (
     DistributedContext,
@@ -44,6 +44,14 @@ from spectra_learning.training.modal_probe import (
 from spectra_learning.training.modules import PretrainModule, split_pretrain_module
 from spectra_learning.training.optimization import build_optimizers
 from spectra_learning.training.schedules import LRSchedulerLike
+from spectra_learning.training.storage import (
+    StoragePath,
+    local_scratch_dir,
+    normalize_storage_path,
+    storage_join,
+    storage_mkdir,
+    storage_parent,
+)
 from spectra_learning.training.steps import train_step_impl
 from spectra_learning.probes.massspec.msg_probe import (
     msg_probe_variants_from_config,
@@ -102,9 +110,11 @@ def train_and_evaluate(
     install_stop_signal_handlers()
     distributed = init_distributed_from_env()
     configure_torch_runtime(config)
-    workdir = Path(workdir)
+    workdir = normalize_storage_path(workdir)
+    local_workdir = local_scratch_dir(workdir)
     if distributed.is_main:
-        workdir.mkdir(parents=True, exist_ok=True)
+        local_workdir.mkdir(parents=True, exist_ok=True)
+        storage_mkdir(workdir)
     barrier(distributed)
     seed_all(int(config.seed))
     datamodule = GemsNativeDataModule(
@@ -136,9 +146,10 @@ def train_and_evaluate(
     autocast_dtype = parse_autocast_dtype(_config_get(config, "autocast_dtype", "bf16"))
     grad_scaler = build_grad_scaler(autocast_dtype, device)
     optimizers, schedulers = build_optimizers(config, train_module, total_steps, device)
-    checkpoint_dir = workdir / "checkpoints"
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    logger = build_logger(config, workdir) if distributed.is_main else MetricLogger()
+    checkpoint_dir = storage_join(workdir, "checkpoints")
+    if distributed.is_main:
+        storage_mkdir(checkpoint_dir)
+    logger = build_logger(config, local_workdir) if distributed.is_main else MetricLogger()
     start_epoch, global_step, resume_offset = restore_training_state(
         config=config,
         checkpoint_dir=checkpoint_dir,
@@ -160,6 +171,7 @@ def train_and_evaluate(
             _config_get(config, "ddp_find_unused_parameters", False)
         ),
     )
+    checkpoint_writer = AsyncCheckpointWriter()
     last_msg_probe_metrics = run_training_loop(
         config=config,
         datamodule=datamodule,
@@ -177,12 +189,13 @@ def train_and_evaluate(
         autocast_dtype=autocast_dtype,
         grad_scaler=grad_scaler,
         distributed=distributed,
+        checkpoint_writer=checkpoint_writer,
     )
     final_global_step = int(cast(float, last_msg_probe_metrics["run/final_global_step"]))
     if distributed.is_main:
         base_model, _ = split_pretrain_module(unwrap_model(train_model))
-        save_checkpoint(
-            checkpoint_dir / "last.pt",
+        checkpoint_writer.save_checkpoint(
+            storage_join(checkpoint_dir, "last.pt"),
             base_model,
             optimizers,
             schedulers,
@@ -192,6 +205,7 @@ def train_and_evaluate(
             getattr(logger.experiment, "id", None),
             grad_scaler=grad_scaler,
         )
+    checkpoint_writer.close()
     barrier(distributed)
     results = {
         **last_msg_probe_metrics,
@@ -226,7 +240,7 @@ def run_training_loop(
     optimizers: list[torch.optim.Optimizer],
     schedulers: list[LRSchedulerLike],
     logger,
-    checkpoint_dir: Path,
+    checkpoint_dir: StoragePath,
     start_epoch: int,
     loop_epochs: int,
     resume_offset: int,
@@ -236,6 +250,7 @@ def run_training_loop(
     autocast_dtype: torch.dtype | None = None,
     grad_scaler: torch.amp.GradScaler | None = None,
     distributed: DistributedContext | None = None,
+    checkpoint_writer: AsyncCheckpointWriter | None = None,
 ) -> dict[str, object]:
     if distributed is None:
         distributed = DistributedContext(
@@ -250,6 +265,9 @@ def run_training_loop(
         )
     if grad_scaler is None:
         grad_scaler = build_grad_scaler(autocast_dtype, device)
+    owns_checkpoint_writer = checkpoint_writer is None
+    if checkpoint_writer is None:
+        checkpoint_writer = AsyncCheckpointWriter()
     log_every_n_steps = int(_config_get(config, "log_every_n_steps", 50))
     collapse_every_n_steps = int(
         _config_get(config, "collapse_metrics_every_n_steps", log_every_n_steps)
@@ -356,8 +374,8 @@ def run_training_loop(
             if global_step % checkpoint_every_steps == 0:
                 if distributed.is_main:
                     base_model, _ = split_pretrain_module(unwrap_model(model))
-                    save_checkpoint(
-                        checkpoint_dir / f"step-{global_step:08d}.pt",
+                    checkpoint_writer.save_checkpoint(
+                        storage_join(checkpoint_dir, f"step-{global_step:08d}.pt"),
                         base_model,
                         optimizers,
                         schedulers,
@@ -366,8 +384,9 @@ def run_training_loop(
                         float(metrics["loss"]),
                         getattr(wandb_run, "id", None),
                         grad_scaler=grad_scaler,
+                        prune_checkpoint_dir=checkpoint_dir,
+                        keep_top_k=15,
                     )
-                    prune_checkpoints(checkpoint_dir, keep_top_k=15)
                 barrier(distributed)
             if msg_probe_every_n_steps > 0 and global_step % msg_probe_every_n_steps == 0:
                 base_model, _ = split_pretrain_module(unwrap_model(model))
@@ -441,6 +460,8 @@ def run_training_loop(
     if modal_probe_call_ids:
         last_msg_probe_metrics["run/modal_probe_call_ids"] = modal_probe_call_ids
         last_msg_probe_metrics["run/modal_probe_calls"] = float(len(modal_probe_call_ids))
+    if owns_checkpoint_writer:
+        checkpoint_writer.close()
     return last_msg_probe_metrics
 
 
@@ -489,7 +510,7 @@ def total_training_steps(
 def restore_training_state(
     *,
     config: config_dict.ConfigDict,
-    checkpoint_dir: Path,
+    checkpoint_dir: StoragePath,
     model: PeakSetJEPA,
     optimizers: list[torch.optim.Optimizer],
     schedulers: list[LRSchedulerLike],
@@ -497,19 +518,12 @@ def restore_training_state(
     device: torch.device,
     grad_scaler: torch.amp.GradScaler | None = None,
 ) -> tuple[int, int, int]:
-    checkpoints = sorted(
-        (
-            path
-            for path in checkpoint_dir.glob("*.pt")
-            if is_training_checkpoint_path(path)
-        ),
-        key=lambda p: p.stat().st_mtime,
-    )
+    checkpoints = training_checkpoint_paths(checkpoint_dir)
     if not checkpoints:
         return 0, 0, 0
     ckpt_path = checkpoints[-1]
     logging.info("Resuming from checkpoint: %s", ckpt_path)
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
+    ckpt = load_torch_checkpoint(ckpt_path, map_location=device, weights_only=True)
     resume_wandb_id = ckpt.get("wandb_run_id")
     if resume_wandb_id:
         config.wandb_resume_id = resume_wandb_id
@@ -636,7 +650,7 @@ def submit_and_log_modal_msg_probe(
     config: config_dict.ConfigDict,
     model: PeakSetJEPA,
     logger,
-    checkpoint_dir: Path,
+    checkpoint_dir: StoragePath,
     global_step: int,
     epoch: int,
     loss: float,
@@ -648,7 +662,7 @@ def submit_and_log_modal_msg_probe(
         config=config,
         model=model,
         checkpoint_dir=checkpoint_dir,
-        workdir=checkpoint_dir.parent,
+        workdir=storage_parent(checkpoint_dir),
         global_step=global_step,
         epoch=epoch,
         loss=loss,

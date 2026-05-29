@@ -1,9 +1,11 @@
 import tempfile
 import json
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+import fsspec
 import pytest
 import torch
 from ml_collections import config_dict
@@ -11,15 +13,18 @@ from ml_collections import config_dict
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pooling import CovariancePool
 from spectra_learning.training.checkpointing import (
+    AsyncCheckpointWriter,
     covariance_pooler_checkpoint_path,
     is_training_checkpoint_path,
     latest_ckpt_path,
+    load_torch_checkpoint,
     load_grad_scaler_state,
     load_resume_covariance_pooler_state,
     load_resume_model_state,
     save_checkpoint,
 )
 from spectra_learning.training import pretrain
+from spectra_learning.training import checkpointing as checkpointing_module
 from spectra_learning.training import modal_probe as modal_probe_module
 from spectra_learning.probes.massspec import checkpoint_probe
 from spectra_learning.training.modules import PretrainModule
@@ -37,6 +42,12 @@ from spectra_learning.training.api import (
     parse_autocast_dtype,
 )
 from spectra_learning.training.logging import WandbMetricLogger, log_msg_probe_metrics
+
+
+def _clear_memory_fs(prefix: str) -> None:
+    fs = fsspec.filesystem("memory")
+    if fs.exists(prefix):
+        fs.rm(prefix, recursive=True)
 
 
 def _small_model(**overrides) -> PeakSetJEPA:
@@ -212,6 +223,97 @@ def test_save_checkpoint_writes_covariance_pooler_sibling_pt():
     assert pooler_ckpt["global_step"] == 12
 
 
+def test_save_checkpoint_writes_fsspec_uri_checkpoint():
+    _clear_memory_fs("/spectra-remote-save")
+    model = _small_model()
+    path = "memory://spectra-remote-save/run/checkpoints/step-00000012.pt"
+
+    save_checkpoint(
+        path=path,
+        model=model,
+        optimizers=[],
+        schedulers=[],
+        global_step=12,
+        epoch=1,
+        loss=0.5,
+        wandb_run_id="wandb-run-123",
+    )
+    ckpt = load_torch_checkpoint(path, map_location="cpu", weights_only=True)
+
+    assert ckpt["global_step"] == 12
+    assert ckpt["wandb_run_id"] == "wandb-run-123"
+
+
+def test_remote_covariance_pooler_checkpoint_uses_sibling_uri():
+    _clear_memory_fs("/spectra-remote-pooler")
+    model = _small_model()
+    pooler = CovariancePool(input_dim=model.model_dim, compressed_dim=4)
+    path = "memory://spectra-remote-pooler/run/checkpoints/step-00000012.pt"
+
+    save_checkpoint(
+        path=path,
+        model=model,
+        covariance_pooler=pooler,
+        optimizers=[],
+        schedulers=[],
+        global_step=12,
+        epoch=1,
+        loss=0.5,
+    )
+    ckpt = load_torch_checkpoint(path, map_location="cpu", weights_only=True)
+    pooler_path = covariance_pooler_checkpoint_path(path)
+    pooler_ckpt = load_torch_checkpoint(
+        pooler_path,
+        map_location="cpu",
+        weights_only=True,
+    )
+    restored = CovariancePool(input_dim=model.model_dim, compressed_dim=4)
+    load_resume_covariance_pooler_state(restored, path, ckpt)
+
+    assert pooler_path == (
+        "memory://spectra-remote-pooler/run/checkpoints/"
+        "covariance-pooler-step-00000012.pt"
+    )
+    assert ckpt["covariance_pooler_checkpoint"] == "covariance-pooler-step-00000012.pt"
+    assert set(pooler_ckpt["pooler"]) == set(pooler.state_dict())
+    for key, value in pooler.state_dict().items():
+        torch.testing.assert_close(restored.state_dict()[key], value)
+
+
+def test_async_checkpoint_writer_returns_before_torch_save_finishes(monkeypatch, tmp_path: Path):
+    model = _small_model()
+    save_entered = threading.Event()
+    release_save = threading.Event()
+    original_save = checkpointing_module.torch.save
+
+    def slow_save(obj, path):
+        save_entered.set()
+        release_save.wait(timeout=10.0)
+        original_save(obj, path)
+
+    monkeypatch.setattr(checkpointing_module.torch, "save", slow_save)
+    writer = AsyncCheckpointWriter()
+    path = tmp_path / "step-00000012.pt"
+
+    writer.save_checkpoint(
+        path=path,
+        model=model,
+        optimizers=[],
+        schedulers=[],
+        global_step=12,
+        epoch=1,
+        loss=0.5,
+    )
+
+    assert save_entered.wait(timeout=1.0)
+    assert not path.exists()
+
+    release_save.set()
+    writer.close()
+    ckpt = torch.load(path, map_location="cpu", weights_only=True)
+    assert ckpt["global_step"] == 12
+
+
 def test_latest_ckpt_path_ignores_modal_probe_checkpoints(tmp_path: Path):
     checkpoint_dir = tmp_path / "checkpoints"
     checkpoint_dir.mkdir()
@@ -227,6 +329,27 @@ def test_latest_ckpt_path_ignores_modal_probe_checkpoints(tmp_path: Path):
     assert not is_training_checkpoint_path(modal_probe_path)
     assert not is_training_checkpoint_path(pooler_path)
     assert latest_ckpt_path(tmp_path) == str(step_path)
+
+
+def test_latest_ckpt_path_supports_fsspec_uri():
+    _clear_memory_fs("/spectra-remote-latest")
+    fs = fsspec.filesystem("memory")
+    fs.pipe_file(
+        "/spectra-remote-latest/run/checkpoints/modal-probe-step-00000013.pt",
+        b"probe",
+    )
+    fs.pipe_file(
+        "/spectra-remote-latest/run/checkpoints/covariance-pooler-step-00000012.pt",
+        b"pooler",
+    )
+    fs.pipe_file(
+        "/spectra-remote-latest/run/checkpoints/step-00000012.pt",
+        b"step",
+    )
+
+    assert latest_ckpt_path("memory://spectra-remote-latest/run") == (
+        "memory://spectra-remote-latest/run/checkpoints/step-00000012.pt"
+    )
 
 
 def test_load_resume_covariance_pooler_state_reads_sibling_pt():
@@ -300,6 +423,120 @@ def test_training_loop_resumes_with_offset_loader(monkeypatch, tmp_path: Path):
 
     assert datamodule.calls == [(0, 3)]
     assert metrics["run/final_global_step"] == 5.0
+
+
+def test_training_loop_continues_while_checkpoint_save_is_pending(monkeypatch, tmp_path: Path):
+    cfg = config_dict.ConfigDict()
+    cfg.autocast_dtype = "bf16"
+    cfg.log_every_n_steps = 0
+    cfg.collapse_metrics_every_n_steps = 0
+    cfg.checkpoint_every_steps = 1
+    cfg.msg_probe_every_n_steps = 0
+    cfg.device_prefetch_size = 1
+    cfg.throughput_warmup_steps = 1000
+
+    class FakeDataModule:
+        train_steps = 2
+        global_batch_size = 1
+
+        def train_loader_for_epoch(self, epoch: int, start_batch: int = 0):
+            return [
+                {"peak_mz": torch.tensor([float(step)])}
+                for step in range(start_batch, self.train_steps)
+            ]
+
+    train_steps = []
+    save_entered = threading.Event()
+    release_save = threading.Event()
+    original_save = checkpointing_module.torch.save
+
+    def fake_train_step_impl(*args, **kwargs):
+        train_steps.append(len(train_steps))
+        return {"loss": torch.tensor(1.0)}
+
+    def slow_save(obj, path):
+        save_entered.set()
+        release_save.wait(timeout=10.0)
+        original_save(obj, path)
+
+    monkeypatch.setattr(pretrain, "train_step_impl", fake_train_step_impl)
+    monkeypatch.setattr(checkpointing_module.torch, "save", slow_save)
+
+    writer = AsyncCheckpointWriter()
+    metrics = pretrain.run_training_loop(
+        config=cfg,
+        datamodule=FakeDataModule(),
+        model=_small_model(),
+        optimizers=[],
+        schedulers=[],
+        logger=SimpleNamespace(experiment=None, log_metrics=lambda *args, **kwargs: None),
+        checkpoint_dir=tmp_path,
+        start_epoch=0,
+        loop_epochs=1,
+        resume_offset=0,
+        global_step=0,
+        total_steps=2,
+        device=torch.device("cpu"),
+        checkpoint_writer=writer,
+    )
+
+    assert save_entered.wait(timeout=1.0)
+    assert train_steps == [0, 1]
+    assert metrics["run/final_global_step"] == 2.0
+    assert not (tmp_path / "step-00000001.pt").exists()
+
+    release_save.set()
+    writer.close()
+    assert (tmp_path / "step-00000001.pt").exists()
+    assert (tmp_path / "step-00000002.pt").exists()
+
+
+def test_training_loop_writes_fsspec_checkpoint_dir(monkeypatch):
+    _clear_memory_fs("/spectra-loop-remote")
+    cfg = config_dict.ConfigDict()
+    cfg.autocast_dtype = "bf16"
+    cfg.log_every_n_steps = 0
+    cfg.collapse_metrics_every_n_steps = 0
+    cfg.checkpoint_every_steps = 1
+    cfg.msg_probe_every_n_steps = 0
+    cfg.device_prefetch_size = 1
+    cfg.throughput_warmup_steps = 1000
+
+    class FakeDataModule:
+        train_steps = 1
+        global_batch_size = 1
+
+        def train_loader_for_epoch(self, epoch: int, start_batch: int = 0):
+            return [{"peak_mz": torch.tensor([0.0])}]
+
+    def fake_train_step_impl(*args, **kwargs):
+        return {"loss": torch.tensor(1.0)}
+
+    monkeypatch.setattr(pretrain, "train_step_impl", fake_train_step_impl)
+
+    metrics = pretrain.run_training_loop(
+        config=cfg,
+        datamodule=FakeDataModule(),
+        model=_small_model(),
+        optimizers=[],
+        schedulers=[],
+        logger=SimpleNamespace(experiment=None, log_metrics=lambda *args, **kwargs: None),
+        checkpoint_dir="memory://spectra-loop-remote/run/checkpoints",
+        start_epoch=0,
+        loop_epochs=1,
+        resume_offset=0,
+        global_step=0,
+        total_steps=1,
+        device=torch.device("cpu"),
+    )
+    ckpt = load_torch_checkpoint(
+        "memory://spectra-loop-remote/run/checkpoints/step-00000001.pt",
+        map_location="cpu",
+        weights_only=True,
+    )
+
+    assert metrics["run/final_global_step"] == 1.0
+    assert ckpt["global_step"] == 1
 
 
 def test_training_loop_stops_when_signal_requested(monkeypatch, tmp_path: Path):

@@ -39,7 +39,15 @@ from spectra_learning.models.factory import build_model_from_config
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pooling import CovariancePool, SinglePairCovariancePool
 from spectra_learning.probes.massspec.data import _normalize_spectra_intensity
-from spectra_learning.training.checkpointing import load_pretrained_weights
+from spectra_learning.training.checkpointing import (
+    load_pretrained_weights,
+    save_torch_checkpoint,
+)
+from spectra_learning.training.storage import (
+    StoragePath,
+    normalize_storage_path,
+    write_text,
+)
 
 
 log = logging.getLogger(__name__)
@@ -870,7 +878,7 @@ def _embedding_cache_valid(
     *,
     source_cache_dir: Path,
     config_path: Path,
-    checkpoint_path: Path,
+    checkpoint_path: StoragePath,
     embedding_dtype: str,
 ) -> dict[str, Any] | None:
     metadata_path = cache_dir / "metadata.json"
@@ -1009,14 +1017,14 @@ def ensure_embedding_cache(
     source_data: FluorineData,
     model: PeakSetJEPA,
     config_path: Path,
-    checkpoint_path: Path,
+    checkpoint_path: StoragePath,
     device: torch.device,
     embedding_dtype: str,
     force: bool,
 ) -> dict[str, Any]:
     source_cache_dir = source_data.root.resolve()
     config_path = config_path.resolve()
-    checkpoint_path = checkpoint_path.resolve()
+    checkpoint_path = normalize_storage_path(checkpoint_path)
     if not force:
         cached = _embedding_cache_valid(
             cache_dir,
@@ -1058,12 +1066,12 @@ def ensure_embedding_cache(
 
 def _load_checkpoint_model(
     config_path: Path,
-    checkpoint_path: Path,
+    checkpoint_path: StoragePath,
     device: torch.device,
 ) -> tuple[config_dict.ConfigDict, PeakSetJEPA]:
     config = load_config(config_path)
     model = build_model_from_config(config)
-    load_pretrained_weights(model, str(checkpoint_path))
+    load_pretrained_weights(model, checkpoint_path)
     model.to(device)
     model.eval()
     model.requires_grad_(False)
@@ -1296,9 +1304,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         input_dim = int(metadata["dreams_dim"])
         embedding_cache_dir = ""
     else:
+        checkpoint_path = normalize_storage_path(args.checkpoint)
         checkpoint_config, model = _load_checkpoint_model(
             args.config.expanduser().resolve(),
-            args.checkpoint.expanduser().resolve(),
+            checkpoint_path,
             device,
         )
         if args.embedding_cache_dir is not None:
@@ -1308,7 +1317,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 source_data=data,
                 model=model,
                 config_path=args.config.expanduser().resolve(),
-                checkpoint_path=args.checkpoint.expanduser().resolve(),
+                checkpoint_path=checkpoint_path,
                 device=device,
                 embedding_dtype=args.embedding_dtype,
                 force=args.force_embedding_cache,
@@ -1468,9 +1477,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         ],
     }
     if args.output_state:
-        output_state_path = args.output_state.expanduser().resolve()
-        output_state_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(
+        save_torch_checkpoint(
             {
                 "mode": "probe",
                 "input_dim": int(input_dim),
@@ -1494,12 +1501,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "val_size": int(metadata["val_size"]),
                 "val_positive": int(metadata["val_positive"]),
             },
-            output_state_path,
+            normalize_storage_path(args.output_state),
         )
     if args.output_json:
-        output_path = args.output_json.expanduser().resolve()
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+        write_text(
+            normalize_storage_path(args.output_json),
+            json.dumps(payload, indent=2, sort_keys=True),
+        )
     return payload
 
 
@@ -1509,7 +1517,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--source", choices=("checkpoint", "dreams"), required=True)
     parser.add_argument("--config", type=Path)
-    parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--checkpoint")
     parser.add_argument(
         "--pooling",
         choices=("covariance", "single_pair_covariance"),
@@ -1534,8 +1542,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--num-shards", type=int, default=16)
     parser.add_argument("--parquet-batch-size", type=int, default=50_000)
-    parser.add_argument("--output-json", type=Path, default=None)
-    parser.add_argument("--output-state", type=Path, default=None)
+    parser.add_argument("--output-json", default=None)
+    parser.add_argument("--output-state", default=None)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--batch-size", type=int, default=512)

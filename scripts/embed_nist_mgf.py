@@ -31,6 +31,8 @@ from spectra_learning.probes.massspec.data import MassSpecProbeData
 from spectra_learning.probes.massspec.msg_probe import iter_massspec_probe
 from spectra_learning.probes.massspec.msg_settings import resolve_msg_probe_sample_limits
 from spectra_learning.probes.massspec.nist_hdf5 import _to_float, iter_mgf
+from spectra_learning.training.checkpointing import load_torch_checkpoint
+from spectra_learning.training.storage import StoragePath, normalize_storage_path
 
 
 log = logging.getLogger(__name__)
@@ -69,9 +71,13 @@ def _config_get(config: Any, key: str, default: Any) -> Any:
 
 def _load_checkpoint_for_encoder(
     model: PeakSetJEPA,
-    checkpoint_path: Path,
+    checkpoint_path: StoragePath,
 ) -> dict[str, Any]:
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    checkpoint = load_torch_checkpoint(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=True,
+    )
     raw_state = checkpoint["model"] if "model" in checkpoint else checkpoint["state_dict"]
     state = {
         key: value
@@ -481,7 +487,7 @@ def parse_args() -> argparse.Namespace:
             "NIST MGF into one parquet file."
         )
     )
-    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--mgf", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -528,7 +534,10 @@ def main() -> None:
 
     log.info("building model from %s", args.config)
     model = build_model_from_config(config)
-    checkpoint_info = _load_checkpoint_for_encoder(model, args.checkpoint)
+    checkpoint_info = _load_checkpoint_for_encoder(
+        model,
+        normalize_storage_path(args.checkpoint),
+    )
     model.to(device)
     model.eval()
     model.requires_grad_(False)
