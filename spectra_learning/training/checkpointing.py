@@ -386,10 +386,12 @@ def load_grad_scaler_state(
 def load_pretrained_weights(
     model: PeakSetJEPA,
     checkpoint_path: StoragePath,
+    *,
+    strict: bool = True,
 ) -> None:
     ckpt = load_torch_checkpoint(checkpoint_path, map_location="cpu", weights_only=True)
     state_dict = ckpt["model"] if "model" in ckpt else ckpt["state_dict"]
-    model.load_state_dict(_model_state_without_legacy_pooler(state_dict))
+    model.load_state_dict(_model_state_without_legacy_pooler(state_dict), strict=strict)
 
 
 def load_frozen_teacher_weights(

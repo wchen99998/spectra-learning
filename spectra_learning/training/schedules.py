@@ -57,8 +57,10 @@ class WarmupCosineSchedule:
         self.total_steps = total_steps
         self.warmup_steps = warmup_steps
         self.base_lrs = [_lr_to_float(group["lr"]) for group in optimizer.param_groups]
-        base_lr = self.base_lrs[0]
-        self.eta_min = min_lr if min_lr is not None else 0.1 * base_lr
+        self.eta_mins = [
+            min_lr if min_lr is not None else 0.1 * base_lr
+            for base_lr in self.base_lrs
+        ]
         self.last_epoch = 0
         self._last_lr: list[float] = []
         self._set_lrs(self._compute_lrs(self.last_epoch))
@@ -70,9 +72,9 @@ class WarmupCosineSchedule:
                 base_lr=base_lr,
                 total_steps=self.total_steps,
                 warmup_steps=self.warmup_steps,
-                min_learning_rate=self.eta_min,
+                min_learning_rate=eta_min,
             )
-            for base_lr in self.base_lrs
+            for base_lr, eta_min in zip(self.base_lrs, self.eta_mins, strict=True)
         ]
 
     def _set_lrs(self, lrs: list[float]) -> None:
@@ -96,7 +98,7 @@ class WarmupCosineSchedule:
             "total_steps": self.total_steps,
             "warmup_steps": self.warmup_steps,
             "base_lrs": self.base_lrs,
-            "eta_min": self.eta_min,
+            "eta_mins": self.eta_mins,
             "last_epoch": self.last_epoch,
             "_last_lr": self._last_lr,
         }
@@ -105,7 +107,10 @@ class WarmupCosineSchedule:
         self.total_steps = int(state_dict["total_steps"])
         self.warmup_steps = int(state_dict["warmup_steps"])
         self.base_lrs = [float(lr) for lr in state_dict["base_lrs"]]
-        self.eta_min = float(state_dict["eta_min"])
+        if "eta_mins" in state_dict:
+            self.eta_mins = [float(lr) for lr in state_dict["eta_mins"]]
+        else:
+            self.eta_mins = [float(state_dict["eta_min"]) for _ in self.base_lrs]
         self.last_epoch = int(state_dict["last_epoch"])
         self._set_lrs(self._compute_lrs(self.last_epoch))
 

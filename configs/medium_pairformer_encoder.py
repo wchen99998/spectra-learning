@@ -7,7 +7,7 @@ def get_config() -> config_dict.ConfigDict:
     # Dataset
     cfg.artifact_dir = "data/gems_artifacts_alpha"
     cfg.gems_native_repo_id = "cjim8889/gems-a10-native"
-    cfg.nist_murcko_probe_repo_id = "cjim8889/hr_msms_nist_dreams_embeddings"
+    cfg.nist_murcko_probe_repo_id = "cjim8889/hr_msms_nist_mcebio_murcko_20260529"
     cfg.nist_murcko_probe_revision = "main"
     cfg.nist_murcko_probe_train_samples = 30_000
     cfg.nist_murcko_probe_val_samples = 10_000
@@ -94,6 +94,22 @@ def get_config() -> config_dict.ConfigDict:
     # Pooling
     cfg.covariance_pooling_dim = 64
     cfg.train_covariance_pooling = False
+
+    # Contrastive NIST Murcko training
+    cfg.contrastive_temperature = 0.1
+    cfg.contrastive_loss_weight = 1.0
+    cfg.contrastive_triplet_hard_fraction = None
+    cfg.online_probe_loss_weight = 1.0
+    cfg.contrastive_batch_size = 128
+    cfg.contrastive_covariance_dim = 64
+    cfg.contrastive_projection_dim = 256
+    cfg.contrastive_projection_hidden_dim = 1024
+    cfg.contrastive_online_probe_hidden_dim = 1024
+    cfg.contrastive_pairs_per_epoch = 30_000
+    cfg.contrastive_val_pairs_per_epoch = 10_000
+    cfg.contrastive_val_every_n_steps = 1_000
+    cfg.contrastive_single_pair_include_diagonal = False
+    cfg.contrastive_compile_mode = "none"
 
     # EMA teacher
     cfg.use_ema_teacher = False

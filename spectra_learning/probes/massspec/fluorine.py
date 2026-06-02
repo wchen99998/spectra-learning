@@ -54,6 +54,8 @@ from spectra_learning.probes.massspec.data import (
 from spectra_learning.training.checkpointing import (
     latest_ckpt_path,
     load_pretrained_weights,
+    load_resume_covariance_pooler_state,
+    load_torch_checkpoint,
     save_torch_checkpoint,
 )
 from spectra_learning.training.distributed import (
@@ -398,7 +400,7 @@ def _load_checkpoint_model(
 ) -> tuple[config_dict.ConfigDict, PeakSetJEPA]:
     config = load_config(config_path)
     model = build_model_from_config(config)
-    load_pretrained_weights(model, checkpoint_path)
+    load_pretrained_weights(model, checkpoint_path, strict=False)
     model.to(device)
     model.eval()
     model.requires_grad_(False)
@@ -727,8 +729,11 @@ def train_or_load_finetuned(
     epochs: int,
     patience: int,
     model_learning_rate: float,
+    pooler_learning_rate: float,
     head_learning_rate: float,
     weight_decay: float,
+    focal_alpha: str,
+    focal_gamma: float,
     autocast_dtype: torch.dtype | None,
     hidden_dim: int,
     dropout: float,
@@ -738,16 +743,25 @@ def train_or_load_finetuned(
     max_test_samples: int | None,
     pooling: str,
     device_ids: list[int] | None,
+    select_metric: str,
+    distributed: DistributedContext | None = None,
 ) -> dict[str, Any]:
+    distributed_world_size = distributed.world_size if distributed is not None else 1
+    distributed_rank = distributed.rank if distributed is not None else 0
+    is_main = distributed is None or distributed.is_main
     requested_hparams = {
         "hidden_dim": int(hidden_dim),
         "dropout": float(dropout),
         "model_learning_rate": float(model_learning_rate),
+        "pooler_learning_rate": float(pooler_learning_rate),
         "head_learning_rate": float(head_learning_rate),
         "weight_decay": float(weight_decay),
         "autocast_dtype": _autocast_dtype_name(autocast_dtype),
         "epochs": int(epochs),
         "patience": int(patience),
+        "select_metric": select_metric,
+        "focal_alpha": focal_alpha,
+        "focal_gamma": float(focal_gamma),
     }
     if state_path.exists():
         state = torch.load(state_path, map_location=device)
@@ -769,6 +783,8 @@ def train_or_load_finetuned(
         cache_dir=cache_dir,
         batch_size=batch_size,
         revision=revision,
+        distributed_world_size=distributed_world_size,
+        distributed_rank=distributed_rank,
     )
     train_loader = _make_loader(
         data,
@@ -778,6 +794,8 @@ def train_or_load_finetuned(
         max_samples=max_train_samples,
         dreams_only=False,
         num_workers=num_workers,
+        distributed_world_size=distributed_world_size,
+        distributed_rank=distributed_rank,
     )
     val_loader = _make_loader(
         data,
@@ -810,6 +828,12 @@ def train_or_load_finetuned(
             input_dim=int(config.model_dim),
             compressed_dim=covariance_dim,
         ).to(device)
+    checkpoint = load_torch_checkpoint(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=True,
+    )
+    load_resume_covariance_pooler_state(pooler, checkpoint_path, checkpoint)
     classifier = MLPClassifier(
         input_dim=input_dim,
         hidden_dim=hidden_dim,
@@ -823,6 +847,12 @@ def train_or_load_finetuned(
         pooling=pooling,
     ).to(device)
     compile_fluorine_module(finetune_module, config)
+    if distributed is not None:
+        finetune_module = wrap_distributed_model(
+            finetune_module,
+            distributed,
+            static_graph=True,
+        )
     finetune_module = _wrap_data_parallel(finetune_module, device_ids)
     optimizer = torch.optim.AdamW(
         [
@@ -832,16 +862,22 @@ def train_or_load_finetuned(
                 "weight_decay": weight_decay,
             },
             {
-                "params": list(pooler.parameters()) + list(classifier.parameters()),
+                "params": pooler.parameters(),
+                "lr": pooler_learning_rate,
+                "weight_decay": weight_decay,
+            },
+            {
+                "params": classifier.parameters(),
                 "lr": head_learning_rate,
                 "weight_decay": weight_decay,
             },
         ]
     )
-    focal_alpha = 1.0 - float(data.metadata["train_positive"]) / float(
-        data.metadata["train_size"]
+    focal_alpha_value = (
+        1.0 - float(data.metadata["train_positive"]) / float(data.metadata["train_size"])
+        if focal_alpha == "auto"
+        else float(focal_alpha)
     )
-    focal_gamma = 2.0
     best_value = -float("inf")
     best_epoch = 0
     best_val: dict[str, float] = {}
@@ -877,10 +913,11 @@ def train_or_load_finetuned(
             "history": history,
             "hparams": requested_hparams,
             "autocast_dtype": _autocast_dtype_name(autocast_dtype),
-            "focal_alpha": focal_alpha,
+            "focal_alpha": focal_alpha_value,
             "focal_gamma": focal_gamma,
             "finetune_cache_dir": str(cache_dir),
             "device_ids": device_ids if device_ids is not None else [],
+            "distributed_world_size": distributed_world_size,
             "train_size": int(data.metadata["train_size"]),
             "train_positive": int(data.metadata["train_positive"]),
             "val_size": int(data.metadata["val_size"]),
@@ -890,6 +927,9 @@ def train_or_load_finetuned(
         }
 
     for epoch_idx in range(epochs):
+        sampler = getattr(train_loader, "sampler", None)
+        if hasattr(sampler, "set_epoch"):
+            sampler.set_epoch(epoch_idx)
         finetune_module.train()
         running_loss = 0.0
         seen = 0
@@ -899,6 +939,7 @@ def train_or_load_finetuned(
             unit="batch",
             dynamic_ncols=True,
             mininterval=5.0,
+            disable=not is_main,
         )
         for batch in pbar:
             batch = _move_batch(batch, device)
@@ -912,7 +953,7 @@ def train_or_load_finetuned(
                 loss = binary_focal_loss_with_logits(
                     logits.float(),
                     batch["label"],
-                    alpha=focal_alpha,
+                    alpha=focal_alpha_value,
                     gamma=focal_gamma,
                 )
             if grad_scaler.is_enabled():
@@ -924,7 +965,8 @@ def train_or_load_finetuned(
                 optimizer.step()
             running_loss += float(loss.detach().cpu()) * int(batch["label"].shape[0])
             seen += int(batch["label"].shape[0])
-            pbar.set_postfix(loss=f"{running_loss / float(seen):.5f}")
+            if is_main:
+                pbar.set_postfix(loss=f"{running_loss / float(seen):.5f}")
 
         val_targets, val_logits = predict_finetuned(
             finetune_module=finetune_module,
@@ -940,7 +982,7 @@ def train_or_load_finetuned(
                 "val": val_metrics,
             }
         )
-        current_value = val_metrics["val/average_precision"]
+        current_value = val_metrics[f"val/{select_metric}"]
         if current_value > best_value:
             best_value = current_value
             best_epoch = epoch_idx + 1
@@ -949,18 +991,20 @@ def train_or_load_finetuned(
             best_pooler_state = _module_state_to_cpu(pooler)
             best_classifier_state = _module_state_to_cpu(classifier)
             epochs_without_improvement = 0
-            state_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save(make_state(test_metrics=None, complete=False), best_state_path)
+            if is_main:
+                state_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(make_state(test_metrics=None, complete=False), best_state_path)
         else:
             epochs_without_improvement += 1
-        log.info(
-            "finetune epoch=%d/%d train_loss=%.5f val_ap=%.4f val_auc=%.4f",
-            epoch_idx + 1,
-            epochs,
-            running_loss / float(seen),
-            val_metrics["val/average_precision"],
-            val_metrics["val/roc_auc"],
-        )
+        if is_main:
+            log.info(
+                "finetune epoch=%d/%d train_loss=%.5f val_ap=%.4f val_auc=%.4f",
+                epoch_idx + 1,
+                epochs,
+                running_loss / float(seen),
+                val_metrics["val/average_precision"],
+                val_metrics["val/roc_auc"],
+            )
         if epochs_without_improvement >= patience:
             break
 
@@ -976,8 +1020,9 @@ def train_or_load_finetuned(
     test_metrics = _metric_dict(test_targets, test_logits, "test")
 
     state = make_state(test_metrics=test_metrics, complete=True)
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(state, state_path)
+    if is_main:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(state, state_path)
     return state
 
 
@@ -2096,8 +2141,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             epochs=epochs,
             patience=patience,
             model_learning_rate=args.finetune_model_lr,
+            pooler_learning_rate=args.finetune_pooler_lr,
             head_learning_rate=args.finetune_head_lr,
             weight_decay=args.finetune_weight_decay,
+            focal_alpha=args.focal_alpha,
+            focal_gamma=args.focal_gamma,
             autocast_dtype=autocast_dtype,
             hidden_dim=args.hidden_dim,
             dropout=args.dropout,
@@ -2107,6 +2155,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             max_test_samples=args.max_test_samples,
             pooling=args.pooling,
             device_ids=device_ids,
+            select_metric=args.select_metric,
+            distributed=distributed,
         )
     elif mode == "lora":
         head_state = train_or_load_lora(

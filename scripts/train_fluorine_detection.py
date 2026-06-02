@@ -89,6 +89,7 @@ def parse_args() -> argparse.Namespace:
         choices=("average_precision", "roc_auc", "balanced_accuracy", "f1"),
     )
     parser.add_argument("--finetune-model-lr", type=float, default=3e-6)
+    parser.add_argument("--finetune-pooler-lr", type=float, default=3e-6)
     parser.add_argument("--finetune-head-lr", type=float, default=1e-4)
     parser.add_argument("--finetune-weight-decay", type=float, default=0.0001)
     parser.add_argument(
