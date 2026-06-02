@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from spectra_learning.models.model import PeakSetJEPA
 
 
-SUPPORTED_TRAINING_MODES = {"jepa", "mae", "mae_teacher_jepa"}
+SUPPORTED_TRAINING_MODES = {"jepa", "mae", "mae_teacher_jepa", "contrastive"}
 SUPPORTED_TARGET_NORMALIZATIONS = {"none", "zscore"}
 SUPPORTED_EMA_SCHEDULES = {"constant", "linear", "cosine", "slow-fast-slow"}
 SUPPORTED_MASKED_TOKEN_INPUT_MODES = {"latent_token", "mz_sentinel"}
@@ -54,7 +54,9 @@ def _load_frozen_teacher_settings(
 def _configure_dimensions(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
     model.training_mode = cfg.training_mode.lower()
     if model.training_mode not in SUPPORTED_TRAINING_MODES:
-        raise ValueError("training_mode must be one of ('jepa', 'mae')")
+        raise ValueError(
+            "training_mode must be one of ('jepa', 'mae', 'mae_teacher_jepa', 'contrastive')"
+        )
     model.model_dim = cfg.model_dim
     model.predictor_dim = (
         cfg.predictor_dim if cfg.predictor_dim is not None else model.model_dim

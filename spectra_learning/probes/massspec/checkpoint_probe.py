@@ -4,9 +4,12 @@ from pathlib import Path
 import torch
 from ml_collections import config_dict
 
+from spectra_learning.models.pooling import SinglePairCovariancePool
 from spectra_learning.probes.massspec.msg_probe import run_msg_probe
 from spectra_learning.training.api import build_logger, build_model_from_config
 from spectra_learning.training.checkpointing import (
+    covariance_pooler_checkpoint_path,
+    load_resume_covariance_pooler_state,
     load_torch_checkpoint,
     load_resume_model_state,
 )
@@ -16,6 +19,7 @@ from spectra_learning.training.storage import (
     normalize_storage_path,
     storage_join,
     storage_mkdir,
+    storage_exists,
     write_text,
 )
 
@@ -39,6 +43,8 @@ def run_checkpoint_msg_probe(
         map_location="cpu",
         weights_only=True,
     )
+    if checkpoint.get("training_mode", None):
+        config.training_mode = checkpoint["training_mode"]
     wandb_run_id = str(checkpoint.get("wandb_run_id", "") or "")
     if wandb_run_id:
         config.wandb_resume_id = wandb_run_id
@@ -51,12 +57,19 @@ def run_checkpoint_msg_probe(
     model = build_model_from_config(config)
     load_resume_model_state(model, checkpoint["model"])
     model.to(device).eval()
+    covariance_pooler = _checkpoint_covariance_pooler(
+        config,
+        checkpoint_path=checkpoint_path,
+        checkpoint=checkpoint,
+        device=device,
+    )
 
     logger = build_logger(config, local_workdir)
     metrics = run_msg_probe(
         config=config,
         model=model,
         device=device,
+        covariance_pooler=covariance_pooler,
     )
     log_msg_probe_metrics(
         logger,
@@ -67,3 +80,29 @@ def run_checkpoint_msg_probe(
     metrics_path = storage_join(workdir, f"msg_probe_step-{global_step:08d}.json")
     write_text(metrics_path, json.dumps(metrics, indent=2, sort_keys=True))
     return metrics
+
+
+def _checkpoint_covariance_pooler(
+    config: config_dict.ConfigDict,
+    *,
+    checkpoint_path: str | Path,
+    checkpoint: dict,
+    device: torch.device,
+) -> torch.nn.Module | None:
+    pooler_name = checkpoint.get("covariance_pooler_checkpoint", None)
+    pooler_path = covariance_pooler_checkpoint_path(checkpoint_path)
+    if not pooler_name and not storage_exists(pooler_path):
+        return None
+    compressed_dim = int(
+        config.get("contrastive_covariance_dim", config.get("covariance_pooling_dim", 32))
+    )
+    pooler = SinglePairCovariancePool(
+        single_dim=int(config.model_dim),
+        pair_dim=int(config.get("pairformer_pair_dim", config.model_dim)),
+        compressed_dim=compressed_dim,
+        include_diagonal=bool(
+            config.get("contrastive_single_pair_include_diagonal", False)
+        ),
+    )
+    load_resume_covariance_pooler_state(pooler, checkpoint_path, checkpoint)
+    return pooler.to(device)

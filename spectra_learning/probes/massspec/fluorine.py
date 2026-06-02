@@ -26,7 +26,7 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
 from spectra_learning.config.loading import load_config
@@ -259,6 +259,58 @@ def _prediction_arrays(
 
 
 @torch.no_grad()
+def _cache_frozen_features(
+    loader: Any,
+    feature_fn: Callable[[dict[str, torch.Tensor]], torch.Tensor],
+    *,
+    device: torch.device,
+    split: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    feature_chunks, label_chunks = [], []
+    for batch in tqdm(loader, desc=f"cache {split} features", unit="batch", dynamic_ncols=True):
+        batch = _move_batch(batch, device)
+        feature_chunks.append(feature_fn(batch).detach().float().cpu())
+        label_chunks.append(batch["label"].detach().float().cpu())
+    return torch.cat(feature_chunks, dim=0), torch.cat(label_chunks, dim=0)
+
+
+def _cached_loader(
+    features: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    batch_size: int,
+    shuffle: bool,
+    seed: int,
+) -> DataLoader:
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    return DataLoader(
+        TensorDataset(features, labels),
+        batch_size=batch_size,
+        shuffle=shuffle,
+        generator=generator if shuffle else None,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+
+
+@torch.no_grad()
+def _cached_prediction_arrays(
+    classifier: MLPClassifier,
+    loader: DataLoader,
+    *,
+    device: torch.device,
+) -> tuple[np.ndarray, np.ndarray]:
+    classifier.eval()
+    logits, targets = [], []
+    for features, labels in loader:
+        features = features.to(device, non_blocking=True)
+        logits.append(classifier(features).detach().cpu().numpy())
+        targets.append(labels.detach().cpu().numpy())
+    return np.concatenate(targets, axis=0), np.concatenate(logits, axis=0)
+
+
+@torch.no_grad()
 def _evaluate(
     classifier: MLPClassifier,
     loader: Any,
@@ -280,8 +332,108 @@ def _evaluate(
     )
 
 
+@torch.no_grad()
+def _cached_evaluate(
+    classifier: MLPClassifier,
+    loader: DataLoader,
+    *,
+    device: torch.device,
+    prefix: str,
+) -> dict[str, float]:
+    targets, logits = _cached_prediction_arrays(classifier, loader, device=device)
+    return _metric_dict(targets, logits, prefix)
+
+
 def _select_metric_value(metrics: dict[str, float], select_metric: str) -> float:
     return metrics[select_metric]
+
+
+def _train_cached_trial(
+    *,
+    params: TrialParams,
+    input_dim: int,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    device: torch.device,
+    epochs: int,
+    focal_alpha: float,
+    focal_gamma: float,
+    select_metric: str,
+    higher_is_better: bool,
+    patience: int,
+) -> TrialResult:
+    classifier = MLPClassifier(
+        input_dim=input_dim,
+        hidden_dim=params.hidden_dim,
+        dropout=params.dropout,
+    ).to(device)
+    optimizer = torch.optim.AdamW(
+        classifier.parameters(),
+        lr=params.learning_rate,
+        weight_decay=params.weight_decay,
+    )
+
+    best_value = -float("inf") if higher_is_better else float("inf")
+    best_epoch = 0
+    best_val: dict[str, float] = {}
+    best_classifier_state: dict[str, torch.Tensor] = {}
+    epochs_without_improvement = 0
+    for epoch_idx in range(epochs):
+        classifier.train()
+        for features, labels in train_loader:
+            features = features.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
+            logits = classifier(features)
+            loss = binary_focal_loss_with_logits(
+                logits,
+                labels,
+                alpha=focal_alpha,
+                gamma=focal_gamma,
+            )
+            loss.backward()
+            optimizer.step()
+
+        val_metrics = _cached_evaluate(
+            classifier,
+            val_loader,
+            device=device,
+            prefix="val",
+        )
+        current_value = _select_metric_value(val_metrics, select_metric)
+        improved = (
+            current_value > best_value
+            if higher_is_better
+            else current_value < best_value
+        )
+        if improved:
+            best_value = current_value
+            best_epoch = epoch_idx + 1
+            best_val = dict(val_metrics)
+            best_classifier_state = copy.deepcopy(classifier.state_dict())
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+        log.info(
+            "cached trial hidden=%d lr=%.3g wd=%.3g dropout=%.2f epoch=%d/%d val_ap=%.4f val_auc=%.4f",
+            params.hidden_dim,
+            params.learning_rate,
+            params.weight_decay,
+            params.dropout,
+            epoch_idx + 1,
+            epochs,
+            val_metrics["val/average_precision"],
+            val_metrics["val/roc_auc"],
+        )
+        if epochs_without_improvement >= patience:
+            break
+    return TrialResult(
+        params=params,
+        best_epoch=best_epoch,
+        best_val=best_val,
+        classifier_state=best_classifier_state,
+        pooler_state=None,
+    )
 
 
 def _train_trial(
@@ -411,6 +563,7 @@ def _build_checkpoint_feature_factory(
     *,
     model: PeakSetJEPA,
     config: config_dict.ConfigDict,
+    checkpoint_path: StoragePath,
     device: torch.device,
     train_covariance_pooler: bool,
     covariance_dim: int | None,
@@ -455,6 +608,17 @@ def _build_checkpoint_feature_factory(
                 pair_dim=int(_config_get(config, "pairformer_pair_dim", config.model_dim)),
                 compressed_dim=compressed_dim,
             ).to(device)
+            if not train_covariance_pooler:
+                checkpoint = load_torch_checkpoint(
+                    checkpoint_path,
+                    map_location="cpu",
+                    weights_only=True,
+                )
+                load_resume_covariance_pooler_state(
+                    pooler,
+                    checkpoint_path,
+                    checkpoint,
+                )
             trainable_pooler: torch.nn.Module | None = pooler if train_covariance_pooler else None
             if trainable_pooler is None:
                 pooler.requires_grad_(False)
@@ -1969,6 +2133,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
     input_dim, build_feature_fn = _build_checkpoint_feature_factory(
         model=model,
         config=checkpoint_config,
+        checkpoint_path=checkpoint_path,
         device=device,
         train_covariance_pooler=bool(args.train_covariance_pooler),
         covariance_dim=args.covariance_dim,
@@ -1993,44 +2158,125 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
     ]
     select_metric = f"val/{args.select_metric}"
     higher_is_better = args.select_metric not in {"loss"}
-    results = [
-        _train_trial(
-            params=params,
-            input_dim=input_dim,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            device=device,
-            epochs=args.epochs,
-            focal_alpha=focal_alpha,
-            focal_gamma=args.focal_gamma,
-            select_metric=select_metric,
-            higher_is_better=higher_is_better,
-            patience=args.patience,
-            build_feature_fn=build_feature_fn,
-        )
-        for params in trial_params
-    ]
-    best = max(
-        results,
-        key=lambda result: _select_metric_value(result.best_val, select_metric),
-    )
-    if not higher_is_better:
-        best = min(
+
+    if bool(args.train_covariance_pooler):
+        results = [
+            _train_trial(
+                params=params,
+                input_dim=input_dim,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                device=device,
+                epochs=args.epochs,
+                focal_alpha=focal_alpha,
+                focal_gamma=args.focal_gamma,
+                select_metric=select_metric,
+                higher_is_better=higher_is_better,
+                patience=args.patience,
+                build_feature_fn=build_feature_fn,
+            )
+            for params in trial_params
+        ]
+        best = max(
             results,
             key=lambda result: _select_metric_value(result.best_val, select_metric),
         )
-    classifier, feature_fn = _instantiate_best_model(
-        result=best,
-        input_dim=input_dim,
-        device=device,
-        build_feature_fn=build_feature_fn,
-    )
-    test_targets, test_logits = _prediction_arrays(
-        classifier,
-        test_loader,
-        feature_fn,
-        device=device,
-    )
+        if not higher_is_better:
+            best = min(
+                results,
+                key=lambda result: _select_metric_value(result.best_val, select_metric),
+            )
+        classifier, feature_fn = _instantiate_best_model(
+            result=best,
+            input_dim=input_dim,
+            device=device,
+            build_feature_fn=build_feature_fn,
+        )
+        test_targets, test_logits = _prediction_arrays(
+            classifier,
+            test_loader,
+            feature_fn,
+            device=device,
+        )
+    else:
+        feature_fn, _ = build_feature_fn(False)
+        train_features, train_labels = _cache_frozen_features(
+            train_loader,
+            feature_fn,
+            device=device,
+            split="train",
+        )
+        val_features, val_labels = _cache_frozen_features(
+            val_loader,
+            feature_fn,
+            device=device,
+            split="val",
+        )
+        test_features, test_labels = _cache_frozen_features(
+            test_loader,
+            feature_fn,
+            device=device,
+            split="test",
+        )
+        train_feature_loader = _cached_loader(
+            train_features,
+            train_labels,
+            batch_size=int(args.batch_size),
+            shuffle=True,
+            seed=int(args.seed),
+        )
+        val_feature_loader = _cached_loader(
+            val_features,
+            val_labels,
+            batch_size=int(args.batch_size),
+            shuffle=False,
+            seed=int(args.seed) + 10_000,
+        )
+        test_feature_loader = _cached_loader(
+            test_features,
+            test_labels,
+            batch_size=int(args.batch_size),
+            shuffle=False,
+            seed=int(args.seed) + 20_000,
+        )
+        results = [
+            _train_cached_trial(
+                params=params,
+                input_dim=input_dim,
+                train_loader=train_feature_loader,
+                val_loader=val_feature_loader,
+                device=device,
+                epochs=args.epochs,
+                focal_alpha=focal_alpha,
+                focal_gamma=args.focal_gamma,
+                select_metric=select_metric,
+                higher_is_better=higher_is_better,
+                patience=args.patience,
+            )
+            for params in trial_params
+        ]
+        best = max(
+            results,
+            key=lambda result: _select_metric_value(result.best_val, select_metric),
+        )
+        if not higher_is_better:
+            best = min(
+                results,
+                key=lambda result: _select_metric_value(result.best_val, select_metric),
+            )
+        classifier = MLPClassifier(
+            input_dim=input_dim,
+            hidden_dim=best.params.hidden_dim,
+            dropout=best.params.dropout,
+        ).to(device)
+        classifier.load_state_dict(best.classifier_state)
+        classifier.eval()
+        test_targets, test_logits = _cached_prediction_arrays(
+            classifier,
+            test_feature_loader,
+            device=device,
+        )
+
     test_metrics = _metric_dict(test_targets, test_logits, "test")
     payload: dict[str, Any] = {
         "repo_id": HF_REPO_ID,

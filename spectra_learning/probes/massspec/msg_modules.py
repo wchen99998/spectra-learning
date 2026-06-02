@@ -108,13 +108,9 @@ class FrozenPooler(torch.nn.Module):
     def pooler(self) -> torch.nn.Module:
         return self._pooler
 
-    def forward(
-        self,
-        peak_embeddings: torch.Tensor,
-        valid_mask: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, *args: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
-            return self.pooler(peak_embeddings, valid_mask)
+            return self.pooler(*args)
 
 
 class MsgPmaPool(torch.nn.Module):
@@ -388,7 +384,7 @@ def build_msg_sequence_probe(
     *,
     config: config_dict.ConfigDict,
     task_spec: MsgProbeTaskSpec,
-    covariance_pooler: CovariancePool | None = None,
+    covariance_pooler: torch.nn.Module | None = None,
 ) -> torch.nn.Module:
     model_dim = int(config.model_dim)
     hidden_dim = int(_config_get(config, "msg_probe_mlp_hidden_dim", model_dim))
@@ -396,22 +392,31 @@ def build_msg_sequence_probe(
     task_names = _probe_task_names(task_spec)
     task_output_dims = _probe_task_output_dims(task_spec)
     if _is_single_pair_covariance_variant(variant):
-        compressed_dim = int(_config_get(config, "covariance_pooling_dim", 32))
-        pooler = MsgSinglePairCovariancePool(
-            single_dim=model_dim,
-            pair_dim=int(_config_get(config, "pairformer_pair_dim", model_dim)),
-            compressed_dim=compressed_dim,
-            include_diagonal=bool(
-                _config_get(
-                    config,
-                    "msg_probe_single_pair_covariance_include_diagonal",
-                    False,
-                )
-            ),
-        )
+        if covariance_pooler is None:
+            compressed_dim = int(_config_get(config, "covariance_pooling_dim", 32))
+            pooler = MsgSinglePairCovariancePool(
+                single_dim=model_dim,
+                pair_dim=int(_config_get(config, "pairformer_pair_dim", model_dim)),
+                compressed_dim=compressed_dim,
+                include_diagonal=bool(
+                    _config_get(
+                        config,
+                        "msg_probe_single_pair_covariance_include_diagonal",
+                        False,
+                    )
+                ),
+            )
+            pooled_dim = compressed_dim * compressed_dim
+        else:
+            pooler = (
+                FrozenPooler(covariance_pooler)
+                if bool(_config_get(config, "msg_probe_freeze_supplied_pooler", True))
+                else covariance_pooler
+            )
+            pooled_dim = covariance_pooler.output_dim
         return MsgSinglePairCovarianceProbe(
             pooler=pooler,
-            pooled_dim=compressed_dim * compressed_dim,
+            pooled_dim=pooled_dim,
             hidden_dim=hidden_dim,
             num_layers=num_layers,
             task_names=task_names,
@@ -592,4 +597,9 @@ def _build_covariance_pooler(
             compressed_dim * compressed_dim,
         )
     compressed_dim = covariance_pooler.left_proj.out_features
-    return FrozenPooler(covariance_pooler), compressed_dim * compressed_dim
+    pooler = (
+        FrozenPooler(covariance_pooler)
+        if bool(_config_get(config, "msg_probe_freeze_supplied_pooler", True))
+        else covariance_pooler
+    )
+    return pooler, compressed_dim * compressed_dim

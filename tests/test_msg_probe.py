@@ -387,6 +387,76 @@ class MsgSequenceProbeTests(unittest.TestCase):
         self.assertEqual(first_head.in_features, 3 * 3)
         self.assertEqual(logits["maccs"].shape, (3, 5))
 
+    def test_single_pair_covariance_probe_reuses_trained_pooler(self):
+        config = config_dict.ConfigDict()
+        config.model_dim = 4
+        config.pairformer_pair_dim = 6
+        config.covariance_pooling_dim = 7
+        config.msg_probe_mlp_hidden_dim = 8
+        task_spec = MsgProbeTaskSpec(
+            regression_tasks=("mol_weight",),
+            maccs_bits=4,
+            regression_means={"mol_weight": 0.0},
+            regression_stds={"mol_weight": 1.0},
+            fingerprint_task="maccs",
+        )
+        trained_pooler = MsgSinglePairCovariancePool(
+            single_dim=4,
+            pair_dim=6,
+            compressed_dim=3,
+        )
+
+        probe = _build_msg_sequence_probe(
+            "single_pair_covariance",
+            config=config,
+            task_spec=task_spec,
+            covariance_pooler=_online_probe_covariance_pooler(
+                "single_pair_covariance",
+                trained_pooler,
+            ),
+        )
+
+        self.assertIsInstance(probe.pooler, FrozenPooler)
+        self.assertIs(probe.pooler.pooler, trained_pooler)
+        head = cast(torch.nn.Sequential, probe.heads.heads["maccs"])
+        first_head = cast(torch.nn.Linear, head[0])
+        self.assertEqual(first_head.in_features, 3 * 3)
+        probe_param_ids = {id(param) for param in probe.parameters()}
+        trained_param_ids = {id(param) for param in trained_pooler.parameters()}
+        self.assertFalse(probe_param_ids & trained_param_ids)
+
+    def test_single_pair_covariance_probe_can_train_supplied_pooler(self):
+        config = config_dict.ConfigDict()
+        config.model_dim = 4
+        config.pairformer_pair_dim = 6
+        config.covariance_pooling_dim = 7
+        config.msg_probe_mlp_hidden_dim = 8
+        config.msg_probe_freeze_supplied_pooler = False
+        task_spec = MsgProbeTaskSpec(
+            regression_tasks=("mol_weight",),
+            maccs_bits=4,
+            regression_means={"mol_weight": 0.0},
+            regression_stds={"mol_weight": 1.0},
+            fingerprint_task="maccs",
+        )
+        trained_pooler = MsgSinglePairCovariancePool(
+            single_dim=4,
+            pair_dim=6,
+            compressed_dim=3,
+        )
+
+        probe = _build_msg_sequence_probe(
+            "single_pair_covariance",
+            config=config,
+            task_spec=task_spec,
+            covariance_pooler=trained_pooler,
+        )
+
+        self.assertIs(probe.pooler, trained_pooler)
+        probe_param_ids = {id(param) for param in probe.parameters()}
+        trained_param_ids = {id(param) for param in trained_pooler.parameters()}
+        self.assertTrue(probe_param_ids & trained_param_ids)
+
     def test_sequence_probe_output_shapes_match_task_heads_for_all_variants(self):
         peak_embeddings = torch.randn(3, 6, 4)
         valid_mask = torch.tensor(

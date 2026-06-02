@@ -1357,11 +1357,6 @@ def build_contrastive_module(
     maccs_pos_weight: torch.Tensor | None = None,
 ) -> ContrastiveTrainingModule:
     model = build_model_from_config(config)
-    teacher_model = (
-        build_model_from_config(config)
-        if float(_config_get(config, "contrastive_encoder_anchor_loss_weight", 0.0)) > 0
-        else None
-    )
     compressed_dim = int(_config_get(config, "contrastive_covariance_dim", _config_get(config, "covariance_pooling_dim", 32)))
     pooler = SinglePairCovariancePool(
         single_dim=int(config.model_dim),
@@ -1376,6 +1371,11 @@ def build_contrastive_module(
         input_dim=pooled_dim,
         hidden_dim=int(_config_get(config, "contrastive_online_probe_hidden_dim", config.model_dim)),
         output_dim=len(REGRESSION_TARGET_KEYS) + MACCS_FINGERPRINT_BITS,
+    )
+    teacher_model = (
+        build_model_from_config(config)
+        if float(_config_get(config, "contrastive_encoder_anchor_loss_weight", 0.0)) > 0
+        else None
     )
     return ContrastiveTrainingModule(
         model=model,

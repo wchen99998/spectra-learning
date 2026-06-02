@@ -925,10 +925,10 @@ def _wrap_probe_for_distributed(
 def _online_probe_covariance_pooler(
     variant: str,
     covariance_pooler: torch.nn.Module | None = None,
-) -> CovariancePool | None:
-    if variant != "covariance":
+) -> torch.nn.Module | None:
+    if variant not in ("covariance", "single_pair_covariance", "pair_covariance"):
         return None
-    return cast(CovariancePool | None, covariance_pooler)
+    return covariance_pooler
 
 
 def _resolve_probe_warmup_steps(config: Any, steps_per_epoch: int) -> int:

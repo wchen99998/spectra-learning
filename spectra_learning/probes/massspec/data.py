@@ -1097,6 +1097,7 @@ class _ProbeParquetDataset(Dataset):
         *,
         adduct_vocab: dict[str, int],
         instrument_type_vocab: dict[str, int],
+        indices: list[int] | np.ndarray | None = None,
     ) -> None:
         self._entries = [
             {
@@ -1111,16 +1112,61 @@ class _ProbeParquetDataset(Dataset):
         np.cumsum(lengths, out=self._starts[1:])
         self._adduct_vocab = adduct_vocab
         self._instrument_type_vocab = instrument_type_vocab
+        self._indices = (
+            np.asarray(indices, dtype=np.int64)
+            if indices is not None
+            else None
+        )
+        self._position_map = self._build_position_map()
         self._arrays: list[dict[str, np.ndarray]] | None = None
 
+    def subset(self, indices: list[int]) -> "_ProbeParquetDataset":
+        base_indices = np.arange(int(self._starts[-1]), dtype=np.int64)
+        if self._indices is not None:
+            base_indices = self._indices
+        return _ProbeParquetDataset(
+            self._entries,
+            adduct_vocab=self._adduct_vocab,
+            instrument_type_vocab=self._instrument_type_vocab,
+            indices=base_indices[np.asarray(indices, dtype=np.int64)],
+        )
+
+    def _build_position_map(self) -> np.ndarray | None:
+        if self._indices is None:
+            return None
+        counts = np.zeros(len(self._entries), dtype=np.int64)
+        position_map = np.empty((len(self._indices), 2), dtype=np.int64)
+        for position, index in enumerate(self._indices):
+            entry_idx = int(np.searchsorted(self._starts, index, side="right") - 1)
+            position_map[position, 0] = entry_idx
+            position_map[position, 1] = counts[entry_idx]
+            counts[entry_idx] += 1
+        return position_map
+
     def __len__(self) -> int:
+        if self._indices is not None:
+            return int(len(self._indices))
         return int(self._starts[-1])
 
-    def _load_entry(self, entry: dict[str, Any]) -> dict[str, np.ndarray]:
+    def _entry_local_indices(self, entry_idx: int) -> np.ndarray | None:
+        if self._indices is None:
+            return None
+        assert self._position_map is not None
+        selected = self._indices[self._position_map[:, 0] == entry_idx]
+        return selected - int(self._starts[entry_idx])
+
+    def _load_entry(
+        self,
+        entry: dict[str, Any],
+        *,
+        local_indices: np.ndarray | None = None,
+    ) -> dict[str, np.ndarray]:
         import pyarrow.parquet as pq
 
         path = Path(entry["path"])
         table = pq.read_table(path)
+        if local_indices is not None:
+            table = table.take(local_indices)
         rows = table.to_pydict()
         n = len(rows["precursor_mz"])
         arrays: dict[str, np.ndarray] = {
@@ -1151,25 +1197,36 @@ class _ProbeParquetDataset(Dataset):
             arrays[f"probe_{name}"] = np.asarray(rows[name], dtype=np.float32)
         morgan_files = entry.get("morgan_files", [])
         if morgan_files:
-            arrays["probe_morgan"] = np.concatenate(
+            morgan = np.concatenate(
                 [
                     np.load(Path(path), allow_pickle=False)["morgan"].astype(np.int8)
                     for path in morgan_files
                 ],
                 axis=0,
             )
+            arrays["probe_morgan"] = (
+                morgan[local_indices] if local_indices is not None else morgan
+            )
         return arrays
 
     def _ensure_arrays(self) -> list[dict[str, np.ndarray]]:
         if self._arrays is not None:
             return self._arrays
-        self._arrays = [self._load_entry(entry) for entry in self._entries]
+        self._arrays = [
+            self._load_entry(entry, local_indices=self._entry_local_indices(entry_idx))
+            for entry_idx, entry in enumerate(self._entries)
+        ]
         return self._arrays
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         arrays_by_entry = self._ensure_arrays()
-        entry_idx = int(np.searchsorted(self._starts, index, side="right") - 1)
-        local_idx = index - int(self._starts[entry_idx])
+        if self._indices is None:
+            entry_idx = int(np.searchsorted(self._starts, index, side="right") - 1)
+            local_idx = index - int(self._starts[entry_idx])
+        else:
+            assert self._position_map is not None
+            entry_idx = int(self._position_map[index, 0])
+            local_idx = int(self._position_map[index, 1])
         arrays = arrays_by_entry[entry_idx]
         sample: dict[str, Any] = {}
         for key, value in arrays.items():
@@ -1328,6 +1385,8 @@ def _subset_for_max_samples(
         indices = torch.randperm(len(dataset), generator=generator)[:n].tolist()
     else:
         indices = list(range(n))
+    if isinstance(dataset, _ProbeParquetDataset):
+        return dataset.subset(indices), False
     return Subset(dataset, [int(idx) for idx in indices]), False
 
 
