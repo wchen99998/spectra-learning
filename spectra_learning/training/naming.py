@@ -107,6 +107,11 @@ def _objective_parts(config: Any) -> list[str]:
         parts.append(f"distow{distogram_loss_weight:.0e}")
         if not has_mz_bin_part:
             parts.append(f"mzbin{float(config.get('jepa_mae_mz_bin_size', 2.5)):g}")
+    if (
+        latent_pair_loss_weight := float(config.get("latent_pair_loss_weight", 0.0))
+    ) > 0:
+        parts.append("latentpair")
+        parts.append(f"pairw{latent_pair_loss_weight:.0e}")
     return parts
 
 

@@ -75,6 +75,12 @@ def test_distogram_objective_does_not_duplicate_mae_mz_bin_name() -> None:
     ]
 
 
+def test_latent_pair_objective_is_named_when_enabled() -> None:
+    parts = _objective_parts({"latent_pair_loss_weight": 0.5})
+
+    assert parts == ["latentpair", "pairw5e-01"]
+
+
 def test_mae_mode_does_not_name_jepa_target_layers() -> None:
     assert _target_parts(
         {"training_mode": "mae", "jepa_target_layers": [1, 2], "model_dim": 32}

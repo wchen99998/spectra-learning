@@ -26,6 +26,7 @@ class PeakSetJEPASettings:
     mae_loss_weight: float = 1.0
     jepa_mae_loss_weight: float = 0.0
     distogram_loss_weight: float = 0.0
+    latent_pair_loss_weight: float = 0.0
     distogram_mz_max: float = PEAK_MZ_MAX
     jepa_mae_mz_bin_size: float = 2.5
     jepa_mae_intensity_bin_size: float = 0.1
@@ -141,6 +142,7 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "mae_loss_weight": float,
     "jepa_mae_loss_weight": float,
     "distogram_loss_weight": float,
+    "latent_pair_loss_weight": float,
     "distogram_mz_max": float,
     "jepa_mae_mz_bin_size": float,
     "jepa_mae_intensity_bin_size": float,

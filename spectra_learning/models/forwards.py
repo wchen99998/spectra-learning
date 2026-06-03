@@ -62,6 +62,7 @@ class ForwardMixin:
         (
             teacher_target_features,
             teacher_peak_emb,
+            teacher_pair,
             context_emb,
             context_pair,
         ) = self._encode_augmented_teacher_and_context(
@@ -109,13 +110,26 @@ class ForwardMixin:
             predictor_visible_masks,
             predictor_output,
         )
-        loss = masked_prediction_term + jepa_mae_term + distogram_term
+        latent_pair_term, latent_pair_metrics = self._latent_pair_metrics(
+            predictor_pair,
+            teacher_pair,
+            target_masks,
+            predictor_visible_masks,
+            predictor_output,
+        )
+        loss = (
+            masked_prediction_term
+            + jepa_mae_term
+            + distogram_term
+            + latent_pair_term
+        )
         valid_peak_count = peak_valid_mask.float().sum().clamp_min(1.0)
         collapse_data: dict[str, Tensor] = {}
         if return_collapse_data:
             pooled_mean = self.pool(teacher_peak_emb, peak_valid_mask)
             collapse_data = {
                 "teacher_peak_emb": teacher_peak_emb.detach(),
+                "teacher_pair": teacher_pair.detach(),
                 "context_emb": context_emb.detach(),
                 "context_mask": context_mask.detach(),
                 "peak_valid_mask": peak_valid_mask.detach(),
@@ -127,6 +141,7 @@ class ForwardMixin:
                 "teacher_targets": teacher_targets.detach(),
                 "predictor_output_features": predictor_output_features.detach(),
                 "predictor_output": predictor_output.detach(),
+                "predictor_pair": predictor_pair.detach(),
                 "pooled_mean": pooled_mean.detach(),
             }
         metrics = {
@@ -138,6 +153,7 @@ class ForwardMixin:
         metrics.update(self._target_mask_metrics(target_masks, valid_peak_count))
         metrics.update(jepa_mae_metrics)
         metrics.update(distogram_metrics)
+        metrics.update(latent_pair_metrics)
         if return_collapse_data:
             return metrics, collapse_data
         return metrics

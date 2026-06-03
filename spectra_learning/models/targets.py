@@ -232,6 +232,7 @@ class TargetProjectionMixin:
     ) -> tuple[
         Float[Tensor, "batch peaks target_dim"],
         Float[Tensor, "batch peaks dim"],
+        Float[Tensor, "batch peaks peaks pair"],
         Float[Tensor, "batch peaks dim"],
         Float[Tensor, "batch peaks peaks pair"],
     ]:
@@ -244,7 +245,7 @@ class TargetProjectionMixin:
         )
         if self.teacher_encoder is not None:
             with torch.no_grad(), _active_autocast_context(peak_mz.device.type):
-                teacher_encoded, teacher_peak_outputs, _ = (
+                teacher_encoded, teacher_peak_outputs, teacher_pair = (
                     self.teacher_encoder.forward_with_block_outputs(
                         peak_mz,
                         peak_intensity,
@@ -265,6 +266,7 @@ class TargetProjectionMixin:
             return (
                 teacher_target_features,
                 teacher_encoded,
+                teacher_pair,
                 context_encoded,
                 context_pair,
             )
@@ -287,6 +289,7 @@ class TargetProjectionMixin:
         return (
             teacher_target_features,
             encoded[:batch_size],
+            pair[:batch_size],
             encoded[batch_size:],
             pair[batch_size:],
         )

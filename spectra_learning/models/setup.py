@@ -84,6 +84,11 @@ def _configure_targets(
         if frozen_teacher_cfg is not None
         else model.encoder_num_layers
     )
+    model.teacher_pair_dim = (
+        _pair_dim(frozen_teacher_cfg)
+        if frozen_teacher_cfg is not None
+        else model.predictor_pair_dim
+    )
     model.jepa_target_group_dim = model.teacher_model_dim
     if model.training_mode == "mae_teacher_jepa":
         model.jepa_target_layers = [model.teacher_encoder_num_layers]
@@ -132,6 +137,9 @@ def _configure_losses(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
         0.0 if model.training_mode == "mae" else cfg.jepa_mae_loss_weight
     )
     model.distogram_loss_weight = cfg.distogram_loss_weight
+    model.latent_pair_loss_weight = (
+        0.0 if model.training_mode == "mae" else cfg.latent_pair_loss_weight
+    )
     model.distogram_mz_max = cfg.distogram_mz_max
     model.jepa_mae_mz_bin_size = cfg.jepa_mae_mz_bin_size
     model.jepa_mae_intensity_bin_size = cfg.jepa_mae_intensity_bin_size
@@ -181,6 +189,10 @@ def _build_peak_set_encoder(cfg: PeakSetJEPASettings) -> PeakSetEncoder:
         pairformer_relative_fourier_x_min=cfg.pairformer_relative_fourier_x_min,
         pairformer_relative_fourier_x_max=cfg.pairformer_relative_fourier_x_max,
     )
+
+
+def _pair_dim(cfg: PeakSetJEPASettings) -> int:
+    return cfg.model_dim if cfg.pairformer_pair_dim is None else cfg.pairformer_pair_dim
 
 
 def _build_peak_feature_embedder(cfg: PeakSetJEPASettings) -> PeakFeatureEmbedder:
@@ -289,6 +301,20 @@ def _build_predictor(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
     nn.init.xavier_normal_(masked_latent_readout.weight)
     nn.init.zeros_(masked_latent_readout.bias)
     model.masked_latent_readout = masked_latent_readout
+
+    if (
+        model.latent_pair_loss_weight > 0
+        and model.predictor_pair_dim != model.teacher_pair_dim
+    ):
+        masked_pair_readout = nn.Linear(
+            model.predictor_pair_dim,
+            model.teacher_pair_dim,
+        )
+        nn.init.xavier_normal_(masked_pair_readout.weight)
+        nn.init.zeros_(masked_pair_readout.bias)
+        model.masked_pair_readout = masked_pair_readout
+    else:
+        model.masked_pair_readout = nn.Identity()
 
 
 def _build_target_projectors(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:

@@ -226,7 +226,7 @@ class ObjectiveMixin:
             self.distogram_num_bins - 1,
         )
 
-    def _distogram_pair_mask(
+    def _target_pair_mask(
         self: Any,
         target_masks: Bool[Tensor, "batch views peaks"],
         predictor_visible_masks: Bool[Tensor, "batch views peaks"],
@@ -246,6 +246,13 @@ class ObjectiveMixin:
             target_masks.shape[-1],
             target_masks.shape[-1],
         )
+
+    def _distogram_pair_mask(
+        self: Any,
+        target_masks: Bool[Tensor, "batch views peaks"],
+        predictor_visible_masks: Bool[Tensor, "batch views peaks"],
+    ) -> Bool[Tensor, "batch views peaks peaks"]:
+        return self._target_pair_mask(target_masks, predictor_visible_masks)
 
     def _distogram_logits(
         self: Any,
@@ -282,6 +289,42 @@ class ObjectiveMixin:
         return term, {
             "distogram_loss": distogram_loss.to(dtype=reference.dtype),
             "distogram_term": term,
+        }
+
+    def _latent_pair_metrics(
+        self: Any,
+        predictor_pair: Float[Tensor, "batch views peaks peaks pair"],
+        teacher_pair: Float[Tensor, "batch peaks peaks pair"],
+        target_masks: Bool[Tensor, "batch views peaks"],
+        predictor_visible_masks: Bool[Tensor, "batch views peaks"],
+        reference: Float[Tensor, "*batch dim"],
+    ) -> tuple[Float[Tensor, ""], dict[str, Tensor]]:
+        if self.latent_pair_loss_weight <= 0:
+            return reference.new_tensor(0.0), {}
+        pair_mask = self._target_pair_mask(target_masks, predictor_visible_masks)
+        predicted_pair = self.masked_pair_readout(predictor_pair)
+        with torch.no_grad():
+            teacher_pair_targets = self._apply_group_target_normalization(
+                teacher_pair.detach(),
+                self.teacher_pair_dim,
+            )
+            teacher_pair_targets = teacher_pair_targets.unsqueeze(1).expand(
+                predicted_pair.shape[0],
+                predicted_pair.shape[1],
+                predicted_pair.shape[2],
+                predicted_pair.shape[3],
+                predicted_pair.shape[4],
+            )
+        per_pair = self._embedding_loss(predicted_pair, teacher_pair_targets)
+        pair_weights = pair_mask.float()
+        latent_pair_loss = (
+            per_pair * pair_weights
+        ).sum() / pair_weights.sum().clamp_min(1.0)
+        loss_weight = reference.new_tensor(self.latent_pair_loss_weight)
+        term = loss_weight * latent_pair_loss.to(dtype=reference.dtype)
+        return term, {
+            "latent_pair_loss": latent_pair_loss.to(dtype=reference.dtype),
+            "latent_pair_term": term,
         }
 
     def _jepa_mae_metrics(
