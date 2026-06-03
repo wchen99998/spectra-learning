@@ -14,7 +14,7 @@ from spectra_learning.models.common import (
 )
 from spectra_learning.models.transformer import _build_norm
 from spectra_learning.models.encoder import PeakSetEncoder
-from spectra_learning.models.pairformer import PairformerBlock
+from spectra_learning.models.pairformer import PairMixerBlock
 from spectra_learning.models.peak_features import PeakFeatureEmbedder
 from spectra_learning.models.settings import PeakSetJEPASettings
 
@@ -259,34 +259,18 @@ def _build_predictor(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
         model.predictor_pair_dim,
     )
 
-    pair_num_heads = (
-        cfg.pairformer_pair_num_heads
-        if cfg.pairformer_pair_num_heads is not None
-        else cfg.masked_latent_predictor_num_heads
-    )
-    refresh_pair_layers = (
-        None
-        if cfg.pairformer_refresh_pair_layers is None
-        else set(cfg.pairformer_refresh_pair_layers)
-    )
     model.masked_latent_predictor = nn.ModuleList(
         [
-            PairformerBlock(
+            PairMixerBlock(
                 single_dim=model.predictor_dim,
                 pair_dim=model.predictor_pair_dim,
                 num_heads=cfg.masked_latent_predictor_num_heads,
-                pair_num_heads=pair_num_heads,
                 attention_mlp_multiple=cfg.attention_mlp_multiple,
-                pair_feature_hidden_dim=cfg.pairformer_pair_feature_hidden_dim,
                 norm_eps=model.norm_eps,
                 dropout=cfg.predictor_dropout,
-                refresh_pair=cfg.pairformer_refresh_pair
-                and (
-                    refresh_pair_layers is None
-                    or block_idx in refresh_pair_layers
-                ),
+                use_pair_bias_attention=cfg.pairmixer_use_pair_bias_attention,
             )
-            for block_idx in range(1, cfg.masked_latent_predictor_num_layers + 1)
+            for _ in range(cfg.masked_latent_predictor_num_layers)
         ]
     )
     model.predictor_final_norm = (

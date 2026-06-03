@@ -319,9 +319,9 @@ def test_encoder_and_predictor_final_norms_are_non_affine():
     encoder_block = model.encoder.blocks[0]
     predictor_block = model.masked_latent_predictor[0]
     assert isinstance(encoder_block, PairMixerBlock)
-    assert isinstance(predictor_block, PairformerBlock)
+    assert isinstance(predictor_block, PairMixerBlock)
     assert list(encoder_block.single_attention_norm.parameters())
-    assert list(predictor_block.single_attention.single_norm.parameters())
+    assert list(predictor_block.single_attention_norm.parameters())
 
     encoder = PeakSetEncoder(
         model_dim=32,
@@ -408,6 +408,7 @@ def test_pairmixer_can_use_pair_bias_attention():
         pairmixer_use_pair_bias_attention=True,
     )
     block = model.encoder.blocks[0]
+    predictor_block = model.masked_latent_predictor[0]
     batch = _make_batch()
 
     encoded = model.encoder(
@@ -420,6 +421,9 @@ def test_pairmixer_can_use_pair_bias_attention():
     assert isinstance(block, PairMixerBlock)
     assert isinstance(block.single_attention, AttentionPairBias)
     assert not hasattr(block, "single_attention_norm")
+    assert isinstance(predictor_block, PairMixerBlock)
+    assert isinstance(predictor_block.single_attention, AttentionPairBias)
+    assert not hasattr(predictor_block, "single_attention_norm")
     assert encoded.shape == (2, 6, 32)
 
 
@@ -431,7 +435,7 @@ def test_pairmixer_pair_bias_attention_setting_is_configurable():
     assert settings.pairmixer_use_pair_bias_attention
 
 
-def test_predictor_pair_refresh_layers_select_only_requested_blocks():
+def test_predictor_uses_pairmixer_without_pairformer_refresh_layers():
     model = PeakSetJEPA(
         model_dim=32,
         encoder_num_layers=2,
@@ -444,12 +448,14 @@ def test_predictor_pair_refresh_layers_select_only_requested_blocks():
         pairformer_refresh_pair_layers=[2],
     )
 
-    assert model.masked_latent_predictor[0].refresh_pair is None
-    assert model.masked_latent_predictor[1].refresh_pair is not None
-    assert model.masked_latent_predictor[2].refresh_pair is None
+    for block in model.masked_latent_predictor:
+        assert isinstance(block, PairMixerBlock)
+        assert not hasattr(block, "refresh_pair")
+        assert not hasattr(block, "tri_att_start")
+        assert not hasattr(block, "tri_att_end")
 
 
-def test_model_settings_pass_pair_refresh_layers_to_predictor_only():
+def test_pairformer_refresh_settings_do_not_change_pairmixer_blocks():
     model = _build_model()
     selected_model = PeakSetJEPA(
         model_dim=32,
@@ -464,20 +470,21 @@ def test_model_settings_pass_pair_refresh_layers_to_predictor_only():
 
     assert not hasattr(model.encoder.blocks[0], "refresh_pair")
     assert not hasattr(selected_model.encoder.blocks[0], "refresh_pair")
-    assert model.masked_latent_predictor[0].refresh_pair is not None
-    assert model.masked_latent_predictor[1].refresh_pair is not None
-    assert selected_model.masked_latent_predictor[0].refresh_pair is not None
-    assert selected_model.masked_latent_predictor[1].refresh_pair is None
+    assert not hasattr(model.masked_latent_predictor[0], "refresh_pair")
+    assert not hasattr(model.masked_latent_predictor[1], "refresh_pair")
+    assert not hasattr(selected_model.masked_latent_predictor[0], "refresh_pair")
+    assert not hasattr(selected_model.masked_latent_predictor[1], "refresh_pair")
 
 
-def test_masked_latent_predictor_uses_pairformer_blocks():
+def test_masked_latent_predictor_uses_pairmixer_blocks():
     model = _build_model(predictor_layers=2)
     block = model.masked_latent_predictor[0]
 
-    assert isinstance(block, PairformerBlock)
+    assert isinstance(block, PairMixerBlock)
     assert hasattr(block, "single_attention")
     assert hasattr(block, "tri_mul_out")
-    assert hasattr(block, "tri_att_start")
+    assert not hasattr(block, "tri_att_start")
+    assert not hasattr(block, "tri_att_end")
 
 
 @torch.no_grad()
