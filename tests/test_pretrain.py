@@ -773,6 +773,29 @@ class BlockJEPATests(unittest.TestCase):
             metrics["masked_prediction_term"] + metrics["latent_pair_term"],
         )
 
+    def test_latent_pair_loss_supports_collapse_diagnostics(self):
+        model = self._build_model(
+            masked_token_loss_weight=1.0,
+            latent_pair_loss_weight=0.25,
+        )
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+
+        metrics = train_step_impl(
+            model,
+            batch,
+            [optimizer],
+            [scheduler],
+            autocast_dtype=None,
+            grad_clip_norm=None,
+            compute_collapse_metrics=True,
+        )
+
+        self.assertIn("latent_pair_loss", metrics)
+        self.assertIn("repr/token/embedding_norm_p50", metrics)
+        self.assertTrue(torch.isfinite(metrics["loss"]).item())
+
     def test_mae_training_mode_uses_binned_value_prediction_only(self):
         model = self._build_model(
             training_mode="mae",

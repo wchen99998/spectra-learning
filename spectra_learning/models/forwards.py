@@ -129,7 +129,6 @@ class ForwardMixin:
             pooled_mean = self.pool(teacher_peak_emb, peak_valid_mask)
             collapse_data = {
                 "teacher_peak_emb": teacher_peak_emb.detach(),
-                "teacher_pair": teacher_pair.detach(),
                 "context_emb": context_emb.detach(),
                 "context_mask": context_mask.detach(),
                 "peak_valid_mask": peak_valid_mask.detach(),
@@ -141,7 +140,6 @@ class ForwardMixin:
                 "teacher_targets": teacher_targets.detach(),
                 "predictor_output_features": predictor_output_features.detach(),
                 "predictor_output": predictor_output.detach(),
-                "predictor_pair": predictor_pair.detach(),
                 "pooled_mean": pooled_mean.detach(),
             }
         metrics = {
