@@ -728,7 +728,11 @@ class BlockJEPATests(unittest.TestCase):
             batch["target_masks"],
             predictor_visible_masks,
         )
-        teacher_pair_targets = teacher_pair.unsqueeze(1).expand(
+        teacher_pair_targets = torch.nn.functional.layer_norm(
+            teacher_pair.float(),
+            (model.teacher_pair_dim,),
+        )
+        teacher_pair_targets = teacher_pair_targets.unsqueeze(1).expand(
             predictor_pair.shape[0],
             predictor_pair.shape[1],
             predictor_pair.shape[2],

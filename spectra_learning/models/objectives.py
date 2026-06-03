@@ -304,10 +304,10 @@ class ObjectiveMixin:
         pair_mask = self._target_pair_mask(target_masks, predictor_visible_masks)
         predicted_pair = self.masked_pair_readout(predictor_pair)
         with torch.no_grad():
-            teacher_pair_targets = self._apply_group_target_normalization(
-                teacher_pair.detach(),
-                self.teacher_pair_dim,
-            )
+            teacher_pair_targets = F.layer_norm(
+                teacher_pair.detach().float(),
+                (self.teacher_pair_dim,),
+            ).to(dtype=predicted_pair.dtype)
             teacher_pair_targets = teacher_pair_targets.unsqueeze(1).expand(
                 predicted_pair.shape[0],
                 predicted_pair.shape[1],
