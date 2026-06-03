@@ -21,6 +21,8 @@ dependencies = [
     "jaxtyping>=0.3.10",
     "fsspec>=2026.1.0",
     "gcsfs>=2026.1.0",
+    "torchax[tpu]>=0.0.12",
+    "optax>=0.2.8",
 ]
 
 [[tool.uv.index]]

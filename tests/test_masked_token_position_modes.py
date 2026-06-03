@@ -25,6 +25,7 @@ def _build_model(
     jepa_target_layers: list[int] | None = None,
     jepa_mae_loss_weight: float = 0.0,
     predictor_dim: int | None = None,
+    masked_latent_predictor_block_type: str = "pairformer",
     masked_token_input_mode: str = "latent_token",
     masked_mz_sentinel: float = -1.0,
 ) -> PeakSetJEPA:
@@ -39,6 +40,7 @@ def _build_model(
         encoder_apply_final_norm=encoder_apply_final_norm,
         predictor_apply_final_norm=predictor_apply_final_norm,
         predictor_dim=predictor_dim,
+        masked_latent_predictor_block_type=masked_latent_predictor_block_type,
         jepa_num_target_blocks=num_target_blocks,
         masked_token_loss_weight=1.0,
         masked_latent_predictor_num_layers=predictor_layers,
@@ -478,6 +480,18 @@ def test_masked_latent_predictor_uses_pairformer_blocks():
     assert hasattr(block, "single_attention")
     assert hasattr(block, "tri_mul_out")
     assert hasattr(block, "tri_att_start")
+
+
+def test_masked_latent_predictor_can_use_pairmixer_blocks():
+    model = _build_model(
+        predictor_layers=2,
+        masked_latent_predictor_block_type="pairmixer",
+    )
+    block = model.masked_latent_predictor[0]
+
+    assert isinstance(block, PairMixerBlock)
+    assert isinstance(block.single_attention, AttentionPairBias)
+    assert not hasattr(block, "tri_att_start")
 
 
 @torch.no_grad()

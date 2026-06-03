@@ -17,6 +17,7 @@ from spectra_learning.training.checkpointing import (
     covariance_pooler_checkpoint_path,
     is_training_checkpoint_path,
     latest_ckpt_path,
+    load_pretrained_weights,
     load_torch_checkpoint,
     load_grad_scaler_state,
     load_resume_covariance_pooler_state,
@@ -885,6 +886,161 @@ def test_load_resume_model_state_rejects_removed_cls_predictor_keys():
 
     restored = _small_model()
     with pytest.raises(RuntimeError, match="Unexpected key"):
+        load_resume_model_state(restored, resume_state)
+
+
+def test_load_resume_model_state_ignores_legacy_distogram_head_when_disabled():
+    model = _small_model(distogram_loss_weight=1.0)
+    resume_state = model.state_dict()
+
+    restored = _small_model(distogram_loss_weight=0.0)
+    load_resume_model_state(restored, resume_state)
+
+    for key, value in restored.state_dict().items():
+        torch.testing.assert_close(value, resume_state[key])
+
+
+def test_load_resume_model_state_accepts_legacy_checkpoint_without_pair_mask_token():
+    model = _small_model()
+    resume_state = dict(model.state_dict())
+    resume_state.pop("pair_mask_token")
+
+    restored = _small_model()
+    initial_pair_mask_token = restored.pair_mask_token.detach().clone()
+    load_resume_model_state(restored, resume_state)
+
+    restored_state = restored.state_dict()
+    for key, value in resume_state.items():
+        torch.testing.assert_close(restored_state[key], value)
+    torch.testing.assert_close(restored.pair_mask_token, initial_pair_mask_token)
+
+
+def test_load_pretrained_weights_accepts_legacy_checkpoint_without_pair_mask_token(tmp_path: Path):
+    model = _small_model()
+    state = dict(model.state_dict())
+    state.pop("pair_mask_token")
+    path = tmp_path / "legacy.pt"
+    torch.save({"model": state}, path)
+
+    restored = _small_model()
+    initial_pair_mask_token = restored.pair_mask_token.detach().clone()
+    load_pretrained_weights(restored, path)
+
+    restored_state = restored.state_dict()
+    for key, value in state.items():
+        torch.testing.assert_close(restored_state[key], value)
+    torch.testing.assert_close(restored.pair_mask_token, initial_pair_mask_token)
+
+
+def test_load_pretrained_weights_accepts_old_checkpoint_with_stale_distogram_head(
+    tmp_path: Path,
+):
+    model = _small_model(distogram_loss_weight=1.0)
+    state = dict(model.state_dict())
+    state.pop("pair_mask_token")
+    path = tmp_path / "old.pt"
+    torch.save({"model": state}, path)
+
+    restored = _small_model(distogram_loss_weight=0.0)
+    initial_pair_mask_token = restored.pair_mask_token.detach().clone()
+    load_pretrained_weights(restored, path)
+
+    restored_state = restored.state_dict()
+    for key, value in state.items():
+        if key.startswith("distogram_head."):
+            continue
+        torch.testing.assert_close(restored_state[key], value)
+    assert not any(key.startswith("distogram_head.") for key in restored_state)
+    torch.testing.assert_close(restored.pair_mask_token, initial_pair_mask_token)
+
+
+def test_restore_training_state_accepts_legacy_optimizer_without_pair_mask_token(tmp_path: Path):
+    cfg = _optimizer_config()
+    source = _small_model()
+    optimizers, schedulers = build_optimizers(cfg, source, 10, torch.device("cpu"))
+    optimizer = optimizers[0]
+    for param in source.parameters():
+        param.grad = torch.ones_like(param)
+    optimizer.step()
+
+    sentinel_name = "encoder.embedder.fourier_ffn.0.bias"
+    source_param = next(
+        param for name, param in source.named_parameters() if name == sentinel_name
+    )
+    optimizer.state[source_param]["exp_avg"].fill_(7.0)
+    optimizer.state[source_param]["exp_avg_sq"].fill_(11.0)
+
+    optimizer_state = optimizer.state_dict()
+    pair_group_idx = next(
+        group_idx
+        for group_idx, group in enumerate(optimizer.param_groups)
+        if any(param is source.pair_mask_token for param in group["params"])
+    )
+    pair_param_idx = next(
+        param_idx
+        for param_idx, param in enumerate(optimizer.param_groups[pair_group_idx]["params"])
+        if param is source.pair_mask_token
+    )
+    pair_state_key = optimizer_state["param_groups"][pair_group_idx]["params"].pop(
+        pair_param_idx,
+    )
+    optimizer_state["state"].pop(pair_state_key)
+
+    model_state = dict(source.state_dict())
+    model_state.pop("pair_mask_token")
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    torch.save(
+        {
+            "model": model_state,
+            "optimizers": [optimizer_state],
+            "schedulers": [schedulers[0].state_dict()],
+            "global_step": 3,
+            "epoch": 0,
+            "loss": 1.0,
+        },
+        checkpoint_dir / "step-00000003.pt",
+    )
+
+    restored = _small_model()
+    restored_optimizers, restored_schedulers = build_optimizers(
+        cfg,
+        restored,
+        10,
+        torch.device("cpu"),
+    )
+    start_epoch, global_step, resume_offset = pretrain.restore_training_state(
+        config=cfg,
+        checkpoint_dir=checkpoint_dir,
+        model=restored,
+        optimizers=restored_optimizers,
+        schedulers=restored_schedulers,
+        steps_per_epoch=10,
+        device=torch.device("cpu"),
+    )
+
+    restored_optimizer = restored_optimizers[0]
+    restored_param = next(
+        param for name, param in restored.named_parameters() if name == sentinel_name
+    )
+    assert (start_epoch, global_step, resume_offset) == (0, 3, 3)
+    assert restored.pair_mask_token not in restored_optimizer.state
+    torch.testing.assert_close(
+        restored_optimizer.state[restored_param]["exp_avg"],
+        torch.full_like(restored_optimizer.state[restored_param]["exp_avg"], 7.0),
+    )
+    torch.testing.assert_close(
+        restored_optimizer.state[restored_param]["exp_avg_sq"],
+        torch.full_like(restored_optimizer.state[restored_param]["exp_avg_sq"], 11.0),
+    )
+
+
+def test_load_resume_model_state_rejects_missing_distogram_head_when_enabled():
+    model = _small_model(distogram_loss_weight=0.0)
+    resume_state = model.state_dict()
+
+    restored = _small_model(distogram_loss_weight=1.0)
+    with pytest.raises(RuntimeError, match="Missing key"):
         load_resume_model_state(restored, resume_state)
 
 

@@ -453,8 +453,10 @@ class BlockJEPATests(unittest.TestCase):
             "teacher_target_features",
             "teacher_target_features_normalized",
             "teacher_targets",
+            "teacher_pair",
             "predictor_output_features",
             "predictor_output",
+            "predictor_pair",
             "pooled_mean",
         ):
             self.assertIn(key, collapse_data, f"Missing key: {key}")
@@ -606,12 +608,12 @@ class BlockJEPATests(unittest.TestCase):
             torch.tensor([0, 0, 1, 3, 3]),
         )
 
-    def test_distogram_pair_mask_uses_pairs_with_either_target_endpoint(self):
-        model = self._build_model(distogram_loss_weight=1.0)
+    def test_target_pair_mask_uses_pairs_with_either_target_endpoint(self):
+        model = self._build_model(pair_latent_loss_weight=1.0)
         target_masks = torch.tensor([[[False, True, False, False]]])
         predictor_visible_masks = torch.tensor([[[True, True, True, False]]])
 
-        pair_mask = model._distogram_pair_mask(
+        pair_mask = model._target_pair_mask(
             target_masks,
             predictor_visible_masks,
         )
@@ -629,6 +631,63 @@ class BlockJEPATests(unittest.TestCase):
             ]
         )
         torch.testing.assert_close(pair_mask, expected)
+
+    def test_pair_latent_loss_matches_masked_pair_mse(self):
+        model = self._build_model(pair_latent_loss_weight=0.25)
+        batch = _make_batch(
+            batch_size=2,
+            num_peaks=6,
+            num_targets=model.jepa_num_target_blocks,
+        )
+        predictor_pair = torch.randn(
+            2,
+            model.jepa_num_target_blocks,
+            6,
+            6,
+            model.predictor_pair_dim,
+        )
+        teacher_pair = torch.randn(2, 6, 6, model.predictor_pair_dim)
+        predictor_visible_masks = (
+            batch["context_mask"].unsqueeze(1) | batch["target_masks"]
+        )
+        pair_mask = model._target_pair_mask(
+            batch["target_masks"],
+            predictor_visible_masks,
+        )
+        expected_loss = (
+            model._embedding_loss(predictor_pair, teacher_pair.unsqueeze(1))
+            * pair_mask.float()
+        ).sum() / pair_mask.float().sum().clamp_min(1.0)
+
+        term, metrics = model._pair_latent_metrics(
+            predictor_pair,
+            teacher_pair,
+            batch["target_masks"],
+            predictor_visible_masks,
+            predictor_pair,
+        )
+
+        torch.testing.assert_close(metrics["pair_latent_loss"], expected_loss)
+        torch.testing.assert_close(term, expected_loss * 0.25)
+
+    def test_pair_latent_loss_contributes_to_loss(self):
+        model = self._build_model(
+            masked_token_loss_weight=1.0,
+            pair_latent_loss_weight=0.25,
+        )
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+
+        metrics = model.forward_augmented(batch)
+
+        self.assertGreater(float(metrics["pair_latent_loss"].detach()), 0.0)
+        torch.testing.assert_close(
+            metrics["pair_latent_term"],
+            metrics["pair_latent_loss"] * 0.25,
+        )
+        torch.testing.assert_close(
+            metrics["loss"],
+            metrics["masked_prediction_term"] + metrics["pair_latent_term"],
+        )
 
     def test_distogram_logits_symmetrise_predictor_pairs(self):
         model = self._build_model(
@@ -670,7 +729,7 @@ class BlockJEPATests(unittest.TestCase):
             full_logits.shape[2],
             full_logits.shape[3],
         )
-        pair_mask = model._distogram_pair_mask(
+        pair_mask = model._target_pair_mask(
             batch["target_masks"],
             predictor_visible_masks,
         )
@@ -1137,6 +1196,16 @@ class BlockJEPATests(unittest.TestCase):
             load_pretrained_weights(loaded, path)
             for key, value in model.state_dict().items():
                 self.assertTrue(torch.equal(value, loaded.state_dict()[key]), key)
+
+    def test_load_pretrained_weights_ignores_legacy_distogram_head_when_disabled(self):
+        model = self._build_model(distogram_loss_weight=1.0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/ckpt.pt"
+            torch.save({"state_dict": model.state_dict()}, path)
+            loaded = self._build_model(distogram_loss_weight=0.0)
+            load_pretrained_weights(loaded, path)
+            for key, value in loaded.state_dict().items():
+                self.assertTrue(torch.equal(value, model.state_dict()[key]), key)
 
     def test_load_frozen_teacher_weights_uses_mae_encoder_only(self):
         source = self._build_model(training_mode="mae")

@@ -155,6 +155,7 @@ class PairFeatureEmbedder(nn.Module):
                 device=peak_mz.device,
                 dtype=peak_mz.dtype,
             ).view(1, peak_mz.shape[1], peak_mz.shape[1])
+            diag = d * 0.0 + diag
             raw_parts = [
                 d.unsqueeze(-1) / self.mz_scale,
                 abs_d.unsqueeze(-1) / self.mz_scale,
@@ -168,7 +169,7 @@ class PairFeatureEmbedder(nn.Module):
                 torch.log1p(intensity_i).expand_as(d).unsqueeze(-1),
                 torch.log1p(intensity_j).expand_as(d).unsqueeze(-1),
                 torch.sign(d).unsqueeze(-1),
-                diag.expand_as(d).unsqueeze(-1),
+                diag.unsqueeze(-1),
                 (d > 0).to(dtype=peak_mz.dtype).unsqueeze(-1),
                 radial,
             ]

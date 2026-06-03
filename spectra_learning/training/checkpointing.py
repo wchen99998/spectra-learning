@@ -55,6 +55,23 @@ def _model_state_without_legacy_pooler(
     }
 
 
+def _model_state_for_load(
+    model: PeakSetJEPA,
+    state_dict: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    state = _model_state_without_legacy_pooler(state_dict)
+    model_state = model.state_dict()
+    if "pair_mask_token" in model_state and "pair_mask_token" not in state:
+        state = {**state, "pair_mask_token": model_state["pair_mask_token"]}
+    if not any(key.startswith("distogram_head.") for key in model_state):
+        state = {
+            key: value
+            for key, value in state.items()
+            if not key.startswith("distogram_head.")
+        }
+    return state
+
+
 def _legacy_pooler_state(
     state_dict: dict[str, torch.Tensor],
 ) -> dict[str, torch.Tensor]:
@@ -341,7 +358,7 @@ def load_resume_model_state(
     model: PeakSetJEPA,
     state_dict: dict[str, torch.Tensor],
 ) -> None:
-    model.load_state_dict(_model_state_without_legacy_pooler(state_dict))
+    model.load_state_dict(_model_state_for_load(model, state_dict))
 
 
 def load_resume_covariance_pooler_state(
@@ -370,8 +387,41 @@ def load_resume_covariance_pooler_state(
         covariance_pooler.load_state_dict(legacy_state)
 
 
-def load_optimizer_state(optimizer: torch.optim.Optimizer, state: dict) -> None:
-    optimizer.load_state_dict(state)
+def _optimizer_state_for_load(
+    optimizer: torch.optim.Optimizer,
+    state: dict,
+    missing_params: list[torch.nn.Parameter],
+) -> dict:
+    if not missing_params:
+        return state
+    state = copy.deepcopy(state)
+    param_ids = [
+        int(param_id)
+        for group in state["param_groups"]
+        for param_id in group["params"]
+    ]
+    param_ids.extend(int(param_id) for param_id in state["state"])
+    next_param_id = max(param_ids, default=-1) + 1
+    for missing_param in missing_params:
+        for group_idx, group in enumerate(optimizer.param_groups):
+            for param_idx, param in enumerate(group["params"]):
+                if param is missing_param:
+                    state["param_groups"][group_idx]["params"].insert(
+                        param_idx,
+                        next_param_id,
+                    )
+                    next_param_id += 1
+    return state
+
+
+def load_optimizer_state(
+    optimizer: torch.optim.Optimizer,
+    state: dict,
+    missing_params: list[torch.nn.Parameter] | None = None,
+) -> None:
+    optimizer.load_state_dict(
+        _optimizer_state_for_load(optimizer, state, missing_params or []),
+    )
 
 
 def load_grad_scaler_state(
@@ -389,7 +439,7 @@ def load_pretrained_weights(
 ) -> None:
     ckpt = load_torch_checkpoint(checkpoint_path, map_location="cpu", weights_only=True)
     state_dict = ckpt["model"] if "model" in ckpt else ckpt["state_dict"]
-    model.load_state_dict(_model_state_without_legacy_pooler(state_dict))
+    model.load_state_dict(_model_state_for_load(model, state_dict))
 
 
 def load_frozen_teacher_weights(

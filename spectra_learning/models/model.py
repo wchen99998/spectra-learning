@@ -40,6 +40,7 @@ class PeakSetJEPA(
     mae_loss_weight: float
     masked_token_loss_weight: float
     jepa_mae_loss_weight: float
+    pair_latent_loss_weight: float
     distogram_loss_weight: float
     distogram_num_bins: int
     distogram_mz_max: float

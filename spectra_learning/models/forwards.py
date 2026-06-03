@@ -61,6 +61,7 @@ class ForwardMixin:
         target_masks = augmented_batch["target_masks"] & peak_valid_mask.unsqueeze(1)
         (
             teacher_target_features,
+            teacher_pair,
             teacher_peak_emb,
             context_emb,
             context_pair,
@@ -102,6 +103,13 @@ class ForwardMixin:
             context_emb,
         )
         predictor_visible_masks = context_mask.unsqueeze(1) | target_masks
+        pair_latent_term, pair_latent_metrics = self._pair_latent_metrics(
+            predictor_pair,
+            teacher_pair.detach(),
+            target_masks,
+            predictor_visible_masks,
+            predictor_output,
+        )
         distogram_term, distogram_metrics = self._distogram_metrics(
             predictor_pair,
             peak_mz,
@@ -109,7 +117,12 @@ class ForwardMixin:
             predictor_visible_masks,
             predictor_output,
         )
-        loss = masked_prediction_term + jepa_mae_term + distogram_term
+        loss = (
+            masked_prediction_term
+            + pair_latent_term
+            + jepa_mae_term
+            + distogram_term
+        )
         valid_peak_count = peak_valid_mask.float().sum().clamp_min(1.0)
         collapse_data: dict[str, Tensor] = {}
         if return_collapse_data:
@@ -121,12 +134,14 @@ class ForwardMixin:
                 "peak_valid_mask": peak_valid_mask.detach(),
                 "target_masks": target_masks.detach(),
                 "teacher_target_features": teacher_target_features.detach(),
+                "teacher_pair": teacher_pair.detach(),
                 "teacher_target_features_normalized": (
                     teacher_target_features_normalized.detach()
                 ),
                 "teacher_targets": teacher_targets.detach(),
                 "predictor_output_features": predictor_output_features.detach(),
                 "predictor_output": predictor_output.detach(),
+                "predictor_pair": predictor_pair.detach(),
                 "pooled_mean": pooled_mean.detach(),
             }
         metrics = {
@@ -136,6 +151,7 @@ class ForwardMixin:
             "context_fraction": context_mask.float().sum() / valid_peak_count,
         }
         metrics.update(self._target_mask_metrics(target_masks, valid_peak_count))
+        metrics.update(pair_latent_metrics)
         metrics.update(jepa_mae_metrics)
         metrics.update(distogram_metrics)
         if return_collapse_data:

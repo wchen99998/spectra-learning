@@ -55,6 +55,12 @@ def test_distogram_objective_uses_shared_mz_bin_name() -> None:
     assert parts == ["disto", "distow1e+00", "mzbin0.1"]
 
 
+def test_pair_latent_objective_names_weight() -> None:
+    parts = _objective_parts({"pair_latent_loss_weight": 1.0})
+
+    assert parts == ["pairlat", "pairw1e+00"]
+
+
 def test_distogram_objective_does_not_duplicate_mae_mz_bin_name() -> None:
     parts = _objective_parts(
         {

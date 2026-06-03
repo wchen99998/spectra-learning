@@ -14,7 +14,7 @@ from spectra_learning.models.common import (
 )
 from spectra_learning.models.transformer import _build_norm
 from spectra_learning.models.encoder import PeakSetEncoder
-from spectra_learning.models.pairformer import PairformerBlock
+from spectra_learning.models.pairformer import PairformerBlock, PairMixerBlock
 from spectra_learning.models.peak_features import PeakFeatureEmbedder
 from spectra_learning.models.settings import PeakSetJEPASettings
 
@@ -26,6 +26,7 @@ SUPPORTED_TRAINING_MODES = {"jepa", "mae", "mae_teacher_jepa"}
 SUPPORTED_TARGET_NORMALIZATIONS = {"none", "zscore"}
 SUPPORTED_EMA_SCHEDULES = {"constant", "linear", "cosine", "slow-fast-slow"}
 SUPPORTED_MASKED_TOKEN_INPUT_MODES = {"latent_token", "mz_sentinel"}
+SUPPORTED_PREDICTOR_BLOCK_TYPES = {"pairformer", "pairmixer"}
 
 
 def configure_peak_set_model(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
@@ -128,6 +129,9 @@ def _configure_losses(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
     )
     model.jepa_mae_loss_weight = (
         0.0 if model.training_mode == "mae" else cfg.jepa_mae_loss_weight
+    )
+    model.pair_latent_loss_weight = (
+        0.0 if model.training_mode == "mae" else cfg.pair_latent_loss_weight
     )
     model.distogram_loss_weight = cfg.distogram_loss_weight
     model.distogram_mz_max = cfg.distogram_mz_max
@@ -267,22 +271,21 @@ def _build_predictor(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
         if cfg.pairformer_refresh_pair_layers is None
         else set(cfg.pairformer_refresh_pair_layers)
     )
+    predictor_block_type = cfg.masked_latent_predictor_block_type.lower()
+    if predictor_block_type not in SUPPORTED_PREDICTOR_BLOCK_TYPES:
+        raise ValueError(
+            "masked_latent_predictor_block_type must be one of "
+            "('pairformer', 'pairmixer')"
+        )
     model.masked_latent_predictor = nn.ModuleList(
         [
-            PairformerBlock(
-                single_dim=model.predictor_dim,
-                pair_dim=model.predictor_pair_dim,
-                num_heads=cfg.masked_latent_predictor_num_heads,
-                pair_num_heads=pair_num_heads,
-                attention_mlp_multiple=cfg.attention_mlp_multiple,
-                pair_feature_hidden_dim=cfg.pairformer_pair_feature_hidden_dim,
-                norm_eps=model.norm_eps,
-                dropout=cfg.predictor_dropout,
-                refresh_pair=cfg.pairformer_refresh_pair
-                and (
-                    refresh_pair_layers is None
-                    or block_idx in refresh_pair_layers
-                ),
+            _build_predictor_block(
+                cfg,
+                model,
+                predictor_block_type,
+                pair_num_heads,
+                refresh_pair_layers,
+                block_idx,
             )
             for block_idx in range(1, cfg.masked_latent_predictor_num_layers + 1)
         ]
@@ -303,6 +306,38 @@ def _build_predictor(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
     nn.init.xavier_normal_(masked_latent_readout.weight)
     nn.init.zeros_(masked_latent_readout.bias)
     model.masked_latent_readout = masked_latent_readout
+
+
+def _build_predictor_block(
+    cfg: PeakSetJEPASettings,
+    model: PeakSetJEPA,
+    predictor_block_type: str,
+    pair_num_heads: int,
+    refresh_pair_layers: set[int] | None,
+    block_idx: int,
+) -> nn.Module:
+    if predictor_block_type == "pairmixer":
+        return PairMixerBlock(
+            single_dim=model.predictor_dim,
+            pair_dim=model.predictor_pair_dim,
+            num_heads=cfg.masked_latent_predictor_num_heads,
+            attention_mlp_multiple=cfg.attention_mlp_multiple,
+            norm_eps=model.norm_eps,
+            dropout=cfg.predictor_dropout,
+            use_pair_bias_attention=cfg.predictor_pairmixer_use_pair_bias_attention,
+        )
+    return PairformerBlock(
+        single_dim=model.predictor_dim,
+        pair_dim=model.predictor_pair_dim,
+        num_heads=cfg.masked_latent_predictor_num_heads,
+        pair_num_heads=pair_num_heads,
+        attention_mlp_multiple=cfg.attention_mlp_multiple,
+        pair_feature_hidden_dim=cfg.pairformer_pair_feature_hidden_dim,
+        norm_eps=model.norm_eps,
+        dropout=cfg.predictor_dropout,
+        refresh_pair=cfg.pairformer_refresh_pair
+        and (refresh_pair_layers is None or block_idx in refresh_pair_layers),
+    )
 
 
 def _build_target_projectors(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:

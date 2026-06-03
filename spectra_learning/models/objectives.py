@@ -9,6 +9,13 @@ from torch import Tensor, nn
 
 
 class ObjectiveMixin:
+    def _scalar_like(
+        self: Any,
+        reference: Float[Tensor, "*batch dim"],
+        value: float,
+    ) -> Float[Tensor, ""]:
+        return torch.as_tensor(value, dtype=reference.dtype, device=reference.device)
+
     def _embedding_loss(
         self: Any,
         prediction: Float[Tensor, "*batch dim"],
@@ -40,11 +47,11 @@ class ObjectiveMixin:
         targets: Int[Tensor, "..."],
         valid_mask: Bool[Tensor, "..."],
     ) -> Float[Tensor, ""]:
-        per_token = F.cross_entropy(
-            logits.flatten(0, -2).float(),
-            targets.reshape(-1),
-            reduction="none",
-        ).reshape_as(valid_mask)
+        log_probs = F.log_softmax(logits.float(), dim=-1)
+        target_one_hot = F.one_hot(targets, num_classes=logits.shape[-1]).to(
+            dtype=log_probs.dtype
+        )
+        per_token = -(log_probs * target_one_hot).sum(dim=-1)
         weights = valid_mask.float()
         return (per_token * weights).sum() / weights.sum().clamp_min(1.0)
 
@@ -226,7 +233,7 @@ class ObjectiveMixin:
             self.distogram_num_bins - 1,
         )
 
-    def _distogram_pair_mask(
+    def _target_pair_mask(
         self: Any,
         target_masks: Bool[Tensor, "batch views peaks"],
         predictor_visible_masks: Bool[Tensor, "batch views peaks"],
@@ -247,6 +254,41 @@ class ObjectiveMixin:
             target_masks.shape[-1],
         )
 
+    def _pair_latent_loss(
+        self: Any,
+        predictor_pair: Float[Tensor, "batch views peaks peaks pair"],
+        teacher_pair: Float[Tensor, "batch peaks peaks pair"],
+        target_masks: Bool[Tensor, "batch views peaks"],
+        predictor_visible_masks: Bool[Tensor, "batch views peaks"],
+    ) -> Float[Tensor, ""]:
+        per_pair = self._embedding_loss(predictor_pair, teacher_pair.unsqueeze(1))
+        pair_mask = self._target_pair_mask(target_masks, predictor_visible_masks)
+        weights = pair_mask.float()
+        return (per_pair * weights).sum() / weights.sum().clamp_min(1.0)
+
+    def _pair_latent_metrics(
+        self: Any,
+        predictor_pair: Float[Tensor, "batch views peaks peaks pair"],
+        teacher_pair: Float[Tensor, "batch peaks peaks pair"],
+        target_masks: Bool[Tensor, "batch views peaks"],
+        predictor_visible_masks: Bool[Tensor, "batch views peaks"],
+        reference: Float[Tensor, "*batch dim"],
+    ) -> tuple[Float[Tensor, ""], dict[str, Tensor]]:
+        if self.pair_latent_loss_weight <= 0:
+            return self._scalar_like(reference, 0.0), {}
+        pair_latent_loss = self._pair_latent_loss(
+            predictor_pair,
+            teacher_pair,
+            target_masks,
+            predictor_visible_masks,
+        )
+        loss_weight = self._scalar_like(reference, self.pair_latent_loss_weight)
+        term = loss_weight * pair_latent_loss.to(dtype=reference.dtype)
+        return term, {
+            "pair_latent_loss": pair_latent_loss.to(dtype=reference.dtype),
+            "pair_latent_term": term,
+        }
+
     def _distogram_logits(
         self: Any,
         predictor_pair: Float[Tensor, "batch views peaks peaks pair"],
@@ -263,21 +305,24 @@ class ObjectiveMixin:
         reference: Float[Tensor, "*batch dim"],
     ) -> tuple[Float[Tensor, ""], dict[str, Tensor]]:
         if self.distogram_loss_weight <= 0:
-            return reference.new_tensor(0.0), {}
-        pair_mask = self._distogram_pair_mask(target_masks, predictor_visible_masks)
+            return self._scalar_like(reference, 0.0), {}
+        pair_mask = self._target_pair_mask(target_masks, predictor_visible_masks)
         sym_pair = predictor_pair + predictor_pair.transpose(2, 3)
-        logits = cast(nn.Linear, self.distogram_head)(sym_pair[pair_mask])
+        logits = cast(nn.Linear, self.distogram_head)(sym_pair)
         targets = self._distogram_targets(peak_mz).unsqueeze(1).expand(
             predictor_pair.shape[0],
             predictor_pair.shape[1],
             predictor_pair.shape[2],
             predictor_pair.shape[3],
         )
-        distogram_loss = F.cross_entropy(
-            logits.float(),
-            targets[pair_mask].reshape(-1),
+        log_probs = F.log_softmax(logits.float(), dim=-1)
+        target_one_hot = F.one_hot(targets, num_classes=logits.shape[-1]).to(
+            dtype=log_probs.dtype
         )
-        loss_weight = reference.new_tensor(self.distogram_loss_weight)
+        per_pair = -(log_probs * target_one_hot).sum(dim=-1)
+        weights = pair_mask.float()
+        distogram_loss = (per_pair * weights).sum() / weights.sum().clamp_min(1.0)
+        loss_weight = self._scalar_like(reference, self.distogram_loss_weight)
         term = loss_weight * distogram_loss.to(dtype=reference.dtype)
         return term, {
             "distogram_loss": distogram_loss.to(dtype=reference.dtype),
@@ -293,7 +338,7 @@ class ObjectiveMixin:
         reference: Float[Tensor, "*batch dim"],
     ) -> tuple[Float[Tensor, ""], dict[str, Tensor]]:
         if self.jepa_mae_loss_weight <= 0:
-            return reference.new_tensor(0.0), {}
+            return self._scalar_like(reference, 0.0), {}
         (
             value_loss,
             _mz_loss,
@@ -306,7 +351,7 @@ class ObjectiveMixin:
             peak_intensity,
             target_masks,
         )
-        loss_weight = reference.new_tensor(self.jepa_mae_loss_weight)
+        loss_weight = self._scalar_like(reference, self.jepa_mae_loss_weight)
         term = loss_weight * value_loss.to(dtype=reference.dtype)
         return term, {
             "jepa_mae_loss": value_loss.to(dtype=reference.dtype),
@@ -333,7 +378,7 @@ class ObjectiveMixin:
             peak_intensity,
             target_masks,
         )
-        loss_weight = reference.new_tensor(self.mae_loss_weight)
+        loss_weight = self._scalar_like(reference, self.mae_loss_weight)
         term = loss_weight * value_loss.to(dtype=reference.dtype)
         return term, {
             "mae_loss": value_loss.to(dtype=reference.dtype),

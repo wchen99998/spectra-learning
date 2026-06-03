@@ -25,6 +25,7 @@ class PeakSetJEPASettings:
     masked_token_loss_weight: float = 0.0
     mae_loss_weight: float = 1.0
     jepa_mae_loss_weight: float = 0.0
+    pair_latent_loss_weight: float = 0.0
     distogram_loss_weight: float = 0.0
     distogram_mz_max: float = PEAK_MZ_MAX
     jepa_mae_mz_bin_size: float = 2.5
@@ -57,6 +58,8 @@ class PeakSetJEPASettings:
     pairformer_relative_fourier_x_min: float = 1e-3
     pairformer_relative_fourier_x_max: float = 1.0
     predictor_apply_final_norm: bool = True
+    masked_latent_predictor_block_type: str = "pairformer"
+    predictor_pairmixer_use_pair_bias_attention: bool = True
     num_peaks: int = 64
     predictor_dim: int | None = None
     target_projector_dim: int | None = None
@@ -140,6 +143,7 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "masked_token_loss_weight": float,
     "mae_loss_weight": float,
     "jepa_mae_loss_weight": float,
+    "pair_latent_loss_weight": float,
     "distogram_loss_weight": float,
     "distogram_mz_max": float,
     "jepa_mae_mz_bin_size": float,
@@ -172,6 +176,8 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "pairformer_relative_fourier_x_min": float,
     "pairformer_relative_fourier_x_max": float,
     "predictor_apply_final_norm": bool,
+    "masked_latent_predictor_block_type": str,
+    "predictor_pairmixer_use_pair_bias_attention": bool,
     "num_peaks": int,
     "predictor_dim": _optional_int,
     "target_projector_dim": _optional_int,

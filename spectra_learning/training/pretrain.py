@@ -102,6 +102,11 @@ def train_and_evaluate(
     config: config_dict.ConfigDict,
     workdir: str | Path,
 ) -> dict[str, object]:
+    if str(_config_get(config, "training_backend", "torch")).lower() == "torchax":
+        from spectra_learning.training.torchax_backend import train_and_evaluate_torchax
+
+        return train_and_evaluate_torchax(config, workdir)
+
     install_stop_signal_handlers()
     distributed = init_distributed_from_env()
     configure_torch_runtime(config)
@@ -503,9 +508,14 @@ def restore_training_state(
     resume_wandb_id = ckpt.get("wandb_run_id")
     if resume_wandb_id:
         config.wandb_resume_id = resume_wandb_id
+    missing_optimizer_params = [
+        param
+        for name, param in model.named_parameters()
+        if name == "pair_mask_token" and name not in ckpt["model"]
+    ]
     load_resume_model_state(model, ckpt["model"])
     for optimizer, state in zip(optimizers, ckpt["optimizers"], strict=True):
-        load_optimizer_state(optimizer, state)
+        load_optimizer_state(optimizer, state, missing_optimizer_params)
     for scheduler, state in zip(schedulers, ckpt["schedulers"], strict=True):
         scheduler.load_state_dict(state)
     load_grad_scaler_state(grad_scaler, ckpt.get("grad_scaler"))
