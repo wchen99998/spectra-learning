@@ -22,6 +22,7 @@ class PeakSetEncoder(nn.Module):
         attention_mlp_multiple: float = 4.0,
         norm_eps: float = 1e-5,
         apply_final_norm: bool = True,
+        apply_final_pair_norm: bool = False,
         num_peaks: int = 64,
         use_position_embedding: bool = True,
         pair_dim: int | None = None,
@@ -78,6 +79,11 @@ class PeakSetEncoder(nn.Module):
             if apply_final_norm
             else nn.Identity()
         )
+        self.final_pair_norm = (
+            _build_norm(pair_dim, eps=norm_eps, affine=True)
+            if apply_final_pair_norm
+            else nn.Identity()
+        )
 
     def _add_positions(
         self,
@@ -131,6 +137,9 @@ class PeakSetEncoder(nn.Module):
             if block_idx in selected and block_idx != self.num_layers:
                 selected_peak_outputs[block_idx] = x
         x = self.final_norm(x)
+        z = self.final_pair_norm(z)
+        pair_mask = peak_visible_mask.unsqueeze(2) & peak_visible_mask.unsqueeze(1)
+        z = z * pair_mask.unsqueeze(-1).to(dtype=z.dtype)
         if self.num_layers in selected:
             selected_peak_outputs[self.num_layers] = x
         return x, [selected_peak_outputs[idx] for idx in block_indices], z

@@ -321,6 +321,41 @@ class PairformerEncoderTests(unittest.TestCase):
 
         torch.testing.assert_close(base[valid_mask], randomized[valid_mask])
 
+    def test_final_pair_norm_normalizes_valid_pairs_and_masks_invalid_pairs(self):
+        model = self._build_model(encoder_apply_final_pair_norm=True)
+        peak_mz = torch.rand(2, 6)
+        peak_intensity = torch.rand(2, 6)
+        valid_mask = torch.tensor(
+            [
+                [True, True, True, True, False, False],
+                [True, True, True, False, False, False],
+            ]
+        )
+
+        with torch.no_grad():
+            _, _, pair = model.encoder.forward_with_block_outputs(
+                peak_mz,
+                peak_intensity,
+                valid_mask=valid_mask,
+                visible_mask=valid_mask,
+            )
+
+        pair_mask = valid_mask.unsqueeze(2) & valid_mask.unsqueeze(1)
+        valid_pair = pair[pair_mask].float()
+        torch.testing.assert_close(
+            valid_pair.mean(dim=-1),
+            torch.zeros_like(valid_pair[..., 0]),
+            atol=1e-5,
+            rtol=1e-5,
+        )
+        torch.testing.assert_close(
+            valid_pair.var(dim=-1, unbiased=False),
+            torch.ones_like(valid_pair[..., 0]),
+            atol=2e-4,
+            rtol=2e-4,
+        )
+        torch.testing.assert_close(pair[~pair_mask], torch.zeros_like(pair[~pair_mask]))
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for compile test")
     def test_cuda_pairformer_works_with_torch_compile(self):
         model = self._build_model(
@@ -733,6 +768,57 @@ class BlockJEPATests(unittest.TestCase):
             (model.teacher_pair_dim,),
         )
         teacher_pair_targets = teacher_pair_targets.unsqueeze(1).expand(
+            predictor_pair.shape[0],
+            predictor_pair.shape[1],
+            predictor_pair.shape[2],
+            predictor_pair.shape[3],
+            predictor_pair.shape[4],
+        )
+        expected_loss = (
+            model._embedding_loss(
+                model.masked_pair_readout(predictor_pair),
+                teacher_pair_targets,
+            )
+            * pair_mask.float()
+        ).sum() / pair_mask.float().sum().clamp_min(1.0)
+
+        term, metrics = model._latent_pair_metrics(
+            predictor_pair,
+            teacher_pair,
+            batch["target_masks"],
+            predictor_visible_masks,
+            predictor_pair,
+        )
+
+        torch.testing.assert_close(metrics["latent_pair_loss"], expected_loss)
+        torch.testing.assert_close(term, expected_loss * 0.25)
+
+    def test_latent_pair_loss_can_use_unnormalized_pair_targets(self):
+        model = self._build_model(
+            latent_pair_loss_weight=0.25,
+            latent_pair_target_normalization="none",
+        )
+        batch = _make_batch(
+            batch_size=2,
+            num_peaks=6,
+            num_targets=model.jepa_num_target_blocks,
+        )
+        predictor_pair = torch.randn(
+            2,
+            model.jepa_num_target_blocks,
+            6,
+            6,
+            model.predictor_pair_dim,
+        )
+        teacher_pair = torch.randn(2, 6, 6, model.teacher_pair_dim)
+        predictor_visible_masks = (
+            batch["context_mask"].unsqueeze(1) | batch["target_masks"]
+        )
+        pair_mask = model._target_pair_mask(
+            batch["target_masks"],
+            predictor_visible_masks,
+        )
+        teacher_pair_targets = teacher_pair.unsqueeze(1).expand(
             predictor_pair.shape[0],
             predictor_pair.shape[1],
             predictor_pair.shape[2],

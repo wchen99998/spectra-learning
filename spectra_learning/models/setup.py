@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 SUPPORTED_TRAINING_MODES = {"jepa", "mae", "mae_teacher_jepa", "contrastive"}
 SUPPORTED_TARGET_NORMALIZATIONS = {"none", "zscore"}
+SUPPORTED_LATENT_PAIR_TARGET_NORMALIZATIONS = {"none", "layernorm"}
 SUPPORTED_EMA_SCHEDULES = {"constant", "linear", "cosine", "slow-fast-slow"}
 SUPPORTED_MASKED_TOKEN_INPUT_MODES = {"latent_token", "mz_sentinel"}
 
@@ -140,6 +141,16 @@ def _configure_losses(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
     model.latent_pair_loss_weight = (
         0.0 if model.training_mode == "mae" else cfg.latent_pair_loss_weight
     )
+    model.latent_pair_target_normalization = (
+        cfg.latent_pair_target_normalization.lower()
+    )
+    if (
+        model.latent_pair_target_normalization
+        not in SUPPORTED_LATENT_PAIR_TARGET_NORMALIZATIONS
+    ):
+        raise ValueError(
+            "latent_pair_target_normalization must be one of ('none', 'layernorm')"
+        )
     model.distogram_mz_max = cfg.distogram_mz_max
     model.jepa_mae_mz_bin_size = cfg.jepa_mae_mz_bin_size
     model.jepa_mae_intensity_bin_size = cfg.jepa_mae_intensity_bin_size
@@ -175,6 +186,7 @@ def _build_peak_set_encoder(cfg: PeakSetJEPASettings) -> PeakSetEncoder:
         norm_eps=cfg.norm_eps,
         use_position_embedding=cfg.encoder_use_position_embedding,
         apply_final_norm=cfg.encoder_apply_final_norm,
+        apply_final_pair_norm=cfg.encoder_apply_final_pair_norm,
         num_peaks=_num_peak_tokens(cfg),
         pair_dim=cfg.pairformer_pair_dim,
         pair_feature_hidden_dim=cfg.pairformer_pair_feature_hidden_dim,

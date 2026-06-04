@@ -33,6 +33,7 @@ class PeakSetJEPASettings:
     jepa_mae_mz_max: float = PEAK_MZ_MAX
     jepa_mae_intensity_max: float = 1.0
     jepa_target_normalization: str = "none"
+    latent_pair_target_normalization: str = "layernorm"
     jepa_target_layers: list[int] | tuple[int, ...] | None = None
     masked_token_input_mode: str = "latent_token"
     masked_mz_sentinel: float = -1.0
@@ -42,6 +43,7 @@ class PeakSetJEPASettings:
     norm_eps: float = 1e-5
     encoder_use_position_embedding: bool = True
     encoder_apply_final_norm: bool = True
+    encoder_apply_final_pair_norm: bool = False
     pairformer_pair_dim: int | None = None
     pairformer_pair_num_heads: int | None = None
     pairformer_pair_feature_hidden_dim: int = 128
@@ -149,6 +151,7 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "jepa_mae_mz_max": float,
     "jepa_mae_intensity_max": float,
     "jepa_target_normalization": str,
+    "latent_pair_target_normalization": str,
     "jepa_target_layers": _identity,
     "masked_token_input_mode": str,
     "masked_mz_sentinel": float,
@@ -158,6 +161,7 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "norm_eps": float,
     "encoder_use_position_embedding": bool,
     "encoder_apply_final_norm": bool,
+    "encoder_apply_final_pair_norm": bool,
     "pairformer_pair_dim": _optional_int,
     "pairformer_pair_num_heads": _optional_int,
     "pairformer_pair_feature_hidden_dim": int,

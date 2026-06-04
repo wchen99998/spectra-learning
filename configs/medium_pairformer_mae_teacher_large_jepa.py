@@ -1,14 +1,14 @@
 from ml_collections import config_dict
 
 
-TEACHER_CONFIG_PATH = "configs/medium_pairformer_encoder.py"
+TEACHER_CONFIG_PATH = "configs/medium_pairformer_pairnorm_encoder.py"
 TEACHER_CHECKPOINT_PATH = (
     "gs://metal-repeater-411410-spectra-checkpoints/"
-    "pairformer_medium/checkpoints/step-00100000.pt"
+    "pairformer_medium_pairnorm/checkpoints/step-00100000.pt"
 )
 OUTPUT_WORKDIR = (
     "gs://metal-repeater-411410-spectra-checkpoints/"
-    "pairformer_medium_large_jepa"
+    "pairformer_medium_large_pairnorm_jepa"
 )
 
 
@@ -91,6 +91,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.mae_loss_weight = 0.0
     cfg.distogram_loss_weight = 0.0
     cfg.latent_pair_loss_weight = 1.0
+    cfg.latent_pair_target_normalization = "none"
     cfg.jepa_mae_mz_bin_size = 0.1
     cfg.jepa_intensity_aware_tau = 0.5
     cfg.jepa_intensity_aware_alpha = 0.75
