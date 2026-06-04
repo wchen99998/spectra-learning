@@ -210,16 +210,18 @@ class WeightedOnlineSampler(Sampler[int]):
             self.num_samples = len(weights) // num_replicas
         else:
             self.num_samples = math.ceil(len(weights) / num_replicas)
+        self.total_size = self.num_samples * num_replicas
 
     def __iter__(self):
         generator = torch.Generator()
-        generator.manual_seed(self.seed + self.epoch * self.num_replicas + self.rank)
+        generator.manual_seed(self.seed + self.epoch)
         indices = torch.multinomial(
             self.weights,
-            self.num_samples,
+            self.total_size,
             replacement=True,
             generator=generator,
         )
+        indices = indices[self.rank : self.total_size : self.num_replicas]
         return iter(indices.tolist())
 
     def __len__(self) -> int:
