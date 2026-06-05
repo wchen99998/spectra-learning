@@ -7,13 +7,13 @@ def get_config() -> config_dict.ConfigDict:
     # Dataset
     cfg.artifact_dir = "data/gems_artifacts_alpha"
     cfg.gems_native_repo_id = "cjim8889/gems-a10-native"
-    cfg.nist_murcko_probe_repo_id = "cjim8889/hr_msms_nist_dreams_embeddings"
+    cfg.nist_murcko_probe_repo_id = "cjim8889/hr_msms_nist_mcebio_murcko_20260529"
     cfg.nist_murcko_probe_revision = "main"
     cfg.nist_murcko_probe_train_samples = 30_000
     cfg.nist_murcko_probe_val_samples = 10_000
     cfg.nist_murcko_probe_test_samples = 10_000
     cfg.nist_murcko_probe_num_repeats = 1
-    cfg.batch_size = 512
+    cfg.batch_size = 256
     cfg.shuffle_buffer = 1_000_000
     cfg.drop_remainder = True
     cfg.max_precursor_mz = 1000
@@ -24,7 +24,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.seed = 66
 
     # Encoder
-    cfg.num_peaks = 32
+    cfg.num_peaks = 31
     cfg.model_dim = 128
     cfg.encoder_num_layers = 8
     cfg.encoder_num_heads = 8
@@ -120,7 +120,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_early_stopping_min_delta = 0.0001
     cfg.msg_probe_early_stopping_min_epochs = 20
     cfg.msg_probe_early_stopping_patience = 20
-    cfg.msg_probe_every_n_steps = 1.0
+    cfg.msg_probe_every_n_steps = 0.25
     cfg.msg_probe_learning_rate = 0.0003
     cfg.msg_probe_max_test_samples = None
     cfg.msg_probe_max_train_samples = None
@@ -130,7 +130,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_pma_num_heads = 8
     cfg.msg_probe_pma_num_seeds = 32
     cfg.msg_probe_tune_metric = "msg_probe/test/auc_maccs_mean"
-    cfg.msg_probe_variants = ["single_pair_covariance"]
+    cfg.msg_probe_variants = ["cls"]
     cfg.msg_probe_warmup_epochs = 0.5
     cfg.msg_probe_grad_clip_norm = 1.0
     cfg.msg_probe_warmup_steps = 0
@@ -138,8 +138,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_batch_size = 256
 
     # Optimizer
-    cfg.learning_rate = 0.0004
-    cfg.min_learning_rate = 0.00004
+    cfg.learning_rate = 0.0003
+    cfg.min_learning_rate = 0.00002
     cfg.warmup_steps = 5_000
     cfg.weight_decay = 0.01
     cfg.b2 = 0.95
