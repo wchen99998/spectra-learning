@@ -2029,7 +2029,7 @@ def resolve_checkpoint_path(
         if latest is None:
             raise FileNotFoundError(f"no checkpoint found under {workdir}")
         return normalize_storage_path(latest)
-    return Path("checkpoints/modal/no_fourier_embed_sentinel/step-01250000.pt").resolve()
+    raise ValueError("checkpoint or workdir is required")
 
 
 def default_state_path(mode: str) -> Path:

@@ -17,7 +17,6 @@ dependencies = [
     "torch==2.11.0; sys_platform == 'linux'",
     "tqdm>=4.66.4",
     "wandb==0.27.0",
-    "modal>=1.4.1",
     "jaxtyping>=0.3.10",
     "fsspec>=2026.1.0",
     "gcsfs>=2026.1.0",
