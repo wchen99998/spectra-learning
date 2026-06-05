@@ -119,8 +119,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_early_stopping = True
     cfg.msg_probe_early_stopping_min_delta = 0.0001
     cfg.msg_probe_early_stopping_min_epochs = 20
-    cfg.msg_probe_early_stopping_patience = 20
-    cfg.msg_probe_every_n_steps = 0.25
+    cfg.msg_probe_early_stopping_patience = 3
+    cfg.msg_probe_every_n_steps = 20000.
     cfg.msg_probe_learning_rate = 0.0003
     cfg.msg_probe_max_test_samples = None
     cfg.msg_probe_max_train_samples = None
