@@ -152,6 +152,7 @@ def _configure_losses(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
             "latent_pair_target_normalization must be one of ('none', 'layernorm')"
         )
     model.distogram_mz_max = cfg.distogram_mz_max
+    model.distogram_loss_chunk_size = cfg.distogram_loss_chunk_size
     model.jepa_mae_mz_bin_size = cfg.jepa_mae_mz_bin_size
     model.jepa_mae_intensity_bin_size = cfg.jepa_mae_intensity_bin_size
     model.jepa_mae_mz_max = cfg.jepa_mae_mz_max

@@ -46,6 +46,7 @@ class PeakSetJEPA(
     latent_pair_target_normalization: str
     distogram_num_bins: int
     distogram_mz_max: float
+    distogram_loss_chunk_size: int
     jepa_mae_mz_bin_size: float
     jepa_mae_intensity_bin_size: float
     jepa_mae_mz_max: float

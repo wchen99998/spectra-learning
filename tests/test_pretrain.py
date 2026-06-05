@@ -43,6 +43,19 @@ def _make_batch(
     return batch
 
 
+class _RecordingLinear(torch.nn.Linear):
+    input_shapes: list[tuple[int, ...]]
+
+    def __init__(self, source: torch.nn.Linear) -> None:
+        super().__init__(source.in_features, source.out_features)
+        self.load_state_dict(source.state_dict())
+        self.input_shapes = []
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        self.input_shapes.append(tuple(input.shape))
+        return super().forward(input)
+
+
 class DataPipelineContractTests(unittest.TestCase):
     def test_batch_has_required_keys(self):
         batch = _make_batch()
@@ -721,6 +734,42 @@ class BlockJEPATests(unittest.TestCase):
 
         torch.testing.assert_close(metrics["distogram_loss"], expected_loss)
         torch.testing.assert_close(term, expected_loss * 0.25)
+
+    def test_distogram_head_uses_static_chunk_shape(self):
+        model = self._build_model(
+            distogram_loss_weight=1.0,
+            distogram_loss_chunk_size=17,
+        )
+        recording_head = _RecordingLinear(cast(torch.nn.Linear, model.distogram_head))
+        model.distogram_head = recording_head
+        batch = _make_batch(
+            batch_size=2,
+            num_peaks=6,
+            num_targets=model.jepa_num_target_blocks,
+        )
+        predictor_pair = torch.randn(
+            2,
+            model.jepa_num_target_blocks,
+            6,
+            6,
+            model.predictor_pair_dim,
+        )
+        predictor_visible_masks = (
+            batch["context_mask"].unsqueeze(1) | batch["target_masks"]
+        )
+
+        model._distogram_metrics(
+            predictor_pair,
+            batch["peak_mz"],
+            batch["target_masks"],
+            predictor_visible_masks,
+            predictor_pair,
+        )
+
+        self.assertEqual(
+            set(recording_head.input_shapes),
+            {(17, model.predictor_pair_dim)},
+        )
 
     def test_distogram_loss_contributes_to_loss(self):
         model = self._build_model(

@@ -48,6 +48,35 @@ class ObjectiveMixin:
         weights = valid_mask.float()
         return (per_token * weights).sum() / weights.sum().clamp_min(1.0)
 
+    def _chunked_masked_linear_ce_loss(
+        self: Any,
+        inputs: Float[Tensor, "... dim"],
+        head: nn.Linear,
+        targets: Int[Tensor, "..."],
+        valid_mask: Bool[Tensor, "..."],
+        chunk_size: int,
+    ) -> Float[Tensor, ""]:
+        flat_inputs = inputs.reshape(-1, inputs.shape[-1])
+        flat_targets = targets.reshape(-1)
+        flat_weights = valid_mask.reshape(-1).float()
+        weight_sum = flat_weights.sum().clamp_min(1.0)
+        padding = (-flat_inputs.shape[0]) % chunk_size
+        if padding:
+            flat_inputs = F.pad(flat_inputs, (0, 0, 0, padding))
+            flat_targets = F.pad(flat_targets, (0, padding))
+            flat_weights = F.pad(flat_weights, (0, padding))
+
+        loss_sum = flat_inputs.new_zeros((), dtype=torch.float32)
+        for start in range(0, flat_inputs.shape[0], chunk_size):
+            stop = start + chunk_size
+            per_pair = F.cross_entropy(
+                head(flat_inputs[start:stop]).float(),
+                flat_targets[start:stop],
+                reduction="none",
+            )
+            loss_sum = loss_sum + (per_pair * flat_weights[start:stop]).sum()
+        return loss_sum / weight_sum
+
     def _jepa_mae_value_prediction_loss(
         self: Any,
         predicted_latents: Float[Tensor, "batch views peaks dim"],
@@ -273,16 +302,18 @@ class ObjectiveMixin:
             return reference.new_tensor(0.0), {}
         pair_mask = self._distogram_pair_mask(target_masks, predictor_visible_masks)
         sym_pair = predictor_pair + predictor_pair.transpose(2, 3)
-        logits = cast(nn.Linear, self.distogram_head)(sym_pair[pair_mask])
         targets = self._distogram_targets(peak_mz).unsqueeze(1).expand(
-            predictor_pair.shape[0],
-            predictor_pair.shape[1],
-            predictor_pair.shape[2],
-            predictor_pair.shape[3],
+            sym_pair.shape[0],
+            sym_pair.shape[1],
+            sym_pair.shape[2],
+            sym_pair.shape[3],
         )
-        distogram_loss = F.cross_entropy(
-            logits.float(),
-            targets[pair_mask].reshape(-1),
+        distogram_loss = self._chunked_masked_linear_ce_loss(
+            sym_pair,
+            cast(nn.Linear, self.distogram_head),
+            targets,
+            pair_mask,
+            self.distogram_loss_chunk_size,
         )
         loss_weight = reference.new_tensor(self.distogram_loss_weight)
         term = loss_weight * distogram_loss.to(dtype=reference.dtype)
