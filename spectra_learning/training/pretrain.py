@@ -522,6 +522,11 @@ def compile_forward(model: torch.nn.Module, config: config_dict.ConfigDict) -> N
     if compile_mode.lower() == "none":
         return
     inductor_config.shape_padding = not compile_mode.startswith("max-autotune")
+    inductor_config.triton.cudagraph_skip_dynamic_graphs = bool(
+        _config_get(config, "cudagraph_skip_dynamic_graphs", False)
+    )
+    if inductor_config.triton.cudagraph_skip_dynamic_graphs:
+        logging.info("Skipping CUDA Graph capture for dynamic-shape Inductor graphs.")
     model.compile(
         mode=compile_mode,
         fullgraph=False,
