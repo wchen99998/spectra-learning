@@ -14,6 +14,7 @@ def _masked_flatten(
     Float[Tensor, "tokens"],
     Float[Tensor, "dim"],
 ]:
+    emb = emb[..., : valid_mask.shape[-1], :]
     flat = emb.float().reshape(-1, emb.shape[-1])
     weights = valid_mask.reshape(-1).float()
     count = weights.sum().clamp_min(1.0)
@@ -137,6 +138,7 @@ def _within_spectrum_pairwise_cosine(
     emb: Float[Tensor, "batch peaks dim"],
     valid_mask: Bool[Tensor, "batch peaks"],
 ) -> Float[Tensor, ""]:
+    emb = emb[:, : valid_mask.shape[1]]
     normed = F.normalize(emb.float(), dim=-1)
     cos = normed @ normed.transpose(1, 2)
     pair_mask = valid_mask.unsqueeze(1) & valid_mask.unsqueeze(2)

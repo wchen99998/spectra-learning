@@ -332,7 +332,11 @@ class PairformerEncoderTests(unittest.TestCase):
                 visible_mask=valid_mask,
             )
 
-        torch.testing.assert_close(base[valid_mask], randomized[valid_mask])
+        torch.testing.assert_close(
+            base[:, : valid_mask.shape[1]][valid_mask],
+            randomized[:, : valid_mask.shape[1]][valid_mask],
+        )
+        torch.testing.assert_close(base[:, -1], randomized[:, -1])
 
     def test_final_pair_norm_normalizes_valid_pairs_and_masks_invalid_pairs(self):
         model = self._build_model(encoder_apply_final_pair_norm=True)
@@ -353,7 +357,14 @@ class PairformerEncoderTests(unittest.TestCase):
                 visible_mask=valid_mask,
             )
 
-        pair_mask = valid_mask.unsqueeze(2) & valid_mask.unsqueeze(1)
+        token_mask = torch.cat(
+            [
+                valid_mask,
+                torch.ones(valid_mask.shape[0], 1, dtype=torch.bool),
+            ],
+            dim=1,
+        )
+        pair_mask = token_mask.unsqueeze(2) & token_mask.unsqueeze(1)
         valid_pair = pair[pair_mask].float()
         torch.testing.assert_close(
             valid_pair.mean(dim=-1),
@@ -393,7 +404,7 @@ class PairformerEncoderTests(unittest.TestCase):
         loss = output.float().square().mean()
         loss.backward()
         grads = [p.grad for p in model.encoder.parameters() if p.requires_grad]
-        self.assertEqual(output.shape, (1, 8, model.model_dim))
+        self.assertEqual(output.shape, (1, 9, model.model_dim))
         self.assertTrue(torch.isfinite(output.float()).all().item())
         self.assertTrue(any(g is not None for g in grads))
 
@@ -1303,7 +1314,7 @@ class BlockJEPATests(unittest.TestCase):
         )
         encoded = model.encode(batch)
 
-        self.assertEqual(peak_emb.shape, (3, 6, model.model_dim))
+        self.assertEqual(peak_emb.shape, (3, 7, model.model_dim))
         self.assertTrue(
             torch.allclose(
                 encoded,
@@ -1311,7 +1322,7 @@ class BlockJEPATests(unittest.TestCase):
             )
         )
 
-    def test_model_omits_special_token_parameters(self):
+    def test_model_exposes_cls_special_token_parameters(self):
         model = self._build_model()
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
 
@@ -1323,12 +1334,14 @@ class BlockJEPATests(unittest.TestCase):
         self.assertTrue(torch.isfinite(metrics["loss"]).item())
         self.assertEqual(
             collapse_data["teacher_peak_emb"].shape[1],
-            batch["peak_mz"].shape[1],
+            batch["peak_mz"].shape[1] + 1,
         )
         self.assertEqual(
             collapse_data["context_emb"].shape[1],
-            batch["peak_mz"].shape[1],
+            batch["peak_mz"].shape[1] + 1,
         )
+        self.assertIn("encoder.cls_token", model.state_dict())
+        self.assertIn("encoder.cls_cls_pair_token", model.state_dict())
 
     def test_backward_populates_encoder_gradients(self):
         model = self._build_model()

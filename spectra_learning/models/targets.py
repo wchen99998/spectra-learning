@@ -169,7 +169,10 @@ class TargetProjectionMixin:
                 precursor_mz=precursor_mz,
             )
             # teacher_peak_outputs: target_layers * [B, N, D] -> [B, N, L*D]
-            return torch.cat(teacher_peak_outputs, dim=-1)
+            return torch.cat(
+                [output[:, : peak_mz.shape[1]] for output in teacher_peak_outputs],
+                dim=-1,
+            )
 
     def _compute_jepa_teacher_targets(
         self: Any,
@@ -231,10 +234,10 @@ class TargetProjectionMixin:
         precursor_mz: Float[Tensor, "batch"] | None = None,
     ) -> tuple[
         Float[Tensor, "batch peaks target_dim"],
-        Float[Tensor, "batch peaks dim"],
+        Float[Tensor, "batch tokens dim"],
         Float[Tensor, "batch peaks peaks pair"],
-        Float[Tensor, "batch peaks dim"],
-        Float[Tensor, "batch peaks peaks pair"],
+        Float[Tensor, "batch tokens dim"],
+        Float[Tensor, "batch tokens tokens pair"],
     ]:
         batch_size = peak_mz.shape[0]
         context_mz, context_intensity, context_visible_mask = self._context_encoder_inputs(
@@ -264,9 +267,9 @@ class TargetProjectionMixin:
             )
             teacher_target_features = torch.cat(teacher_peak_outputs, dim=-1)
             return (
-                teacher_target_features,
+                teacher_target_features[:, : peak_mz.shape[1]],
                 teacher_encoded,
-                teacher_pair,
+                teacher_pair[:, : peak_mz.shape[1], : peak_mz.shape[1]],
                 context_encoded,
                 context_pair,
             )
@@ -283,13 +286,16 @@ class TargetProjectionMixin:
             ),
             )
         teacher_target_features = torch.cat(
-            [peak_output[:batch_size] for peak_output in teacher_peak_outputs],
+            [
+                peak_output[:batch_size, : peak_mz.shape[1]]
+                for peak_output in teacher_peak_outputs
+            ],
             dim=-1,
         )
         return (
             teacher_target_features,
             encoded[:batch_size],
-            pair[:batch_size],
+            pair[:batch_size, : peak_mz.shape[1], : peak_mz.shape[1]],
             encoded[batch_size:],
             pair[batch_size:],
         )

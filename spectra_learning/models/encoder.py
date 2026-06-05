@@ -47,6 +47,14 @@ class PeakSetEncoder(nn.Module):
             model_dim,
         )
         pair_dim = model_dim if pair_dim is None else pair_dim
+        self.cls_token = nn.Parameter(torch.empty(model_dim))
+        self.cls_to_peak_pair_token = nn.Parameter(torch.empty(pair_dim))
+        self.peak_to_cls_pair_token = nn.Parameter(torch.empty(pair_dim))
+        self.cls_cls_pair_token = nn.Parameter(torch.empty(pair_dim))
+        nn.init.normal_(self.cls_token, std=0.02)
+        nn.init.normal_(self.cls_to_peak_pair_token, std=0.02)
+        nn.init.normal_(self.peak_to_cls_pair_token, std=0.02)
+        nn.init.normal_(self.cls_cls_pair_token, std=0.02)
         self.pair_embedder = PairFeatureEmbedder(
             single_dim=model_dim,
             pair_dim=pair_dim,
@@ -94,6 +102,38 @@ class PeakSetEncoder(nn.Module):
         positions = torch.arange(x.shape[1], device=x.device)
         return x + self.position_embedding(positions).to(dtype=x.dtype)
 
+    def _append_cls_token(
+        self,
+        x: Float[Tensor, "batch peaks dim"],
+    ) -> Float[Tensor, "batch tokens dim"]:
+        cls = self.cls_token.view(1, 1, -1).expand(x.shape[0], 1, -1)
+        return torch.cat([x, cls.to(dtype=x.dtype)], dim=1)
+
+    def _append_cls_pair_tokens(
+        self,
+        pair: Float[Tensor, "batch peaks peaks pair"],
+    ) -> Float[Tensor, "batch tokens tokens pair"]:
+        batch_size, num_peaks, _, pair_dim = pair.shape
+        tokens = num_peaks + 1
+        expanded = pair.new_empty(batch_size, tokens, tokens, pair_dim)
+        expanded[:, :num_peaks, :num_peaks] = pair
+        expanded[:, -1, :num_peaks] = self.cls_to_peak_pair_token.to(dtype=pair.dtype)
+        expanded[:, :num_peaks, -1] = self.peak_to_cls_pair_token.to(dtype=pair.dtype)
+        expanded[:, -1, -1] = self.cls_cls_pair_token.to(dtype=pair.dtype)
+        return expanded
+
+    def _append_cls_mask(
+        self,
+        peak_mask: Bool[Tensor, "batch peaks"],
+    ) -> Bool[Tensor, "batch tokens"]:
+        cls_mask = torch.ones(
+            peak_mask.shape[0],
+            1,
+            device=peak_mask.device,
+            dtype=torch.bool,
+        )
+        return torch.cat([peak_mask, cls_mask], dim=1)
+
     def forward_with_block_outputs(
         self,
         peak_mz: Float[Tensor, "batch peaks"],
@@ -103,9 +143,9 @@ class PeakSetEncoder(nn.Module):
         block_indices: list[int] | tuple[int, ...] = (),
         precursor_mz: Float[Tensor, "batch"] | None = None,
     ) -> tuple[
-        Float[Tensor, "batch peaks dim"],
-        list[Float[Tensor, "batch peaks dim"]],
-        Float[Tensor, "batch peaks peaks pair"],
+        Float[Tensor, "batch tokens dim"],
+        list[Float[Tensor, "batch tokens dim"]],
+        Float[Tensor, "batch tokens tokens pair"],
     ]:
         block_indices = tuple(idx for idx in block_indices)
         peak_valid_mask = (
@@ -125,20 +165,23 @@ class PeakSetEncoder(nn.Module):
             peak_visible_mask,
             precursor_mz=precursor_mz,
         )
+        x = self._append_cls_token(x)
+        z = self._append_cls_pair_tokens(z)
+        token_visible_mask = self._append_cls_mask(peak_visible_mask)
         selected = set(block_indices)
-        selected_peak_outputs: dict[int, Float[Tensor, "batch peaks dim"]] = {}
+        selected_peak_outputs: dict[int, Float[Tensor, "batch tokens dim"]] = {}
         for block_idx, block in enumerate(self.blocks, start=1):
             x, z = block(
                 x,
                 z,
-                peak_visible_mask,
-                peak_visible_mask,
+                token_visible_mask,
+                token_visible_mask,
             )
             if block_idx in selected and block_idx != self.num_layers:
                 selected_peak_outputs[block_idx] = x
         x = self.final_norm(x)
         z = self.final_pair_norm(z)
-        pair_mask = peak_visible_mask.unsqueeze(2) & peak_visible_mask.unsqueeze(1)
+        pair_mask = token_visible_mask.unsqueeze(2) & token_visible_mask.unsqueeze(1)
         z = z * pair_mask.unsqueeze(-1).to(dtype=z.dtype)
         if self.num_layers in selected:
             selected_peak_outputs[self.num_layers] = x
@@ -152,7 +195,7 @@ class PeakSetEncoder(nn.Module):
         visible_mask: Bool[Tensor, "batch peaks"] | None = None,
         block_indices: list[int] | tuple[int, ...] = (),
         precursor_mz: Float[Tensor, "batch"] | None = None,
-    ) -> list[Float[Tensor, "batch peaks dim"]]:
+    ) -> list[Float[Tensor, "batch tokens dim"]]:
         _, peak_block_outputs, _ = self.forward_with_block_outputs(
             peak_mz,
             peak_intensity,
@@ -170,7 +213,7 @@ class PeakSetEncoder(nn.Module):
         valid_mask: Bool[Tensor, "batch peaks"] | None = None,
         visible_mask: Bool[Tensor, "batch peaks"] | None = None,
         precursor_mz: Float[Tensor, "batch"] | None = None,
-    ) -> Float[Tensor, "batch peaks dim"]:
+    ) -> Float[Tensor, "batch tokens dim"]:
         output, _, _ = self.forward_with_block_outputs(
             peak_mz,
             peak_intensity,

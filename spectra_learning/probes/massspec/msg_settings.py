@@ -34,6 +34,7 @@ def build_msg_probe_inputs(
     peak_embeddings: torch.Tensor,
     valid_mask: torch.Tensor,
 ) -> torch.Tensor:
+    peak_embeddings = peak_embeddings[:, : valid_mask.shape[1]]
     mask = valid_mask.unsqueeze(-1).to(dtype=peak_embeddings.dtype)
     return (peak_embeddings * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
 

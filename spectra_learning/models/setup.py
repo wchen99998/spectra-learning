@@ -274,7 +274,7 @@ def _build_predictor(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
     else:
         model.encoder_to_predictor_proj = nn.Identity()
 
-    model.num_predictor_input_tokens = model.num_peak_tokens
+    model.num_predictor_input_tokens = model.num_peak_tokens + 1
     model.predictor_position_embedding = _build_frozen_position_embedding(
         model.num_predictor_input_tokens,
         model.model_dim,

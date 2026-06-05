@@ -134,6 +134,7 @@ class MsgPmaPool(torch.nn.Module):
         peak_embeddings: torch.Tensor,
         valid_mask: torch.Tensor,
     ) -> torch.Tensor:
+        peak_embeddings = peak_embeddings[:, : valid_mask.shape[1]]
         seed_vectors = self.seed_vectors.unsqueeze(0).expand(
             peak_embeddings.shape[0],
             -1,
@@ -273,7 +274,10 @@ class MsgSinglePairPmaPool(torch.nn.Module):
         valid_mask: torch.Tensor,
         pair_embeddings: torch.Tensor,
     ) -> torch.Tensor:
-        batch_size, num_peaks, _, pair_dim = pair_embeddings.shape
+        num_peaks = valid_mask.shape[1]
+        peak_embeddings = peak_embeddings[:, :num_peaks]
+        pair_embeddings = pair_embeddings[:, :num_peaks, :num_peaks]
+        batch_size, _, _, pair_dim = pair_embeddings.shape
         pair_mask = valid_mask.unsqueeze(2) & valid_mask.unsqueeze(1)
         pair_memory = pair_embeddings.reshape(
             batch_size,
@@ -289,6 +293,23 @@ class MsgSinglePairPmaPool(torch.nn.Module):
             dim=1,
         )
         return tokens.flatten(start_dim=1)
+
+
+class MsgSinglePairClsPool(torch.nn.Module):
+    def forward(
+        self,
+        peak_embeddings: torch.Tensor,
+        valid_mask: torch.Tensor,
+        pair_embeddings: torch.Tensor,
+    ) -> torch.Tensor:
+        cls_idx = valid_mask.shape[1]
+        return torch.cat(
+            [
+                peak_embeddings[:, cls_idx],
+                pair_embeddings[:, cls_idx, cls_idx],
+            ],
+            dim=-1,
+        )
 
 
 class MsgSequenceProbe(torch.nn.Module):
@@ -379,6 +400,37 @@ class MsgSinglePairCovarianceProbe(torch.nn.Module):
         return self.heads(self.pooler(peak_embeddings, valid_mask, pair_embeddings))
 
 
+class MsgSinglePairClsProbe(torch.nn.Module):
+    def __init__(
+        self,
+        *,
+        pooler: MsgSinglePairClsPool,
+        pooled_dim: int,
+        hidden_dim: int,
+        num_layers: int = 2,
+        task_names: tuple[str, ...],
+        task_output_dims: dict[str, int] | None = None,
+    ) -> None:
+        super().__init__()
+        self.pooler = pooler
+        self.heads = MsgProbeHeads(
+            input_dim=pooled_dim,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            task_names=task_names,
+            task_output_dims=task_output_dims,
+        )
+
+    def forward(
+        self,
+        peak_embeddings: torch.Tensor,
+        valid_mask: torch.Tensor,
+        pair_embeddings: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        assert pair_embeddings is not None
+        return self.heads(self.pooler(peak_embeddings, valid_mask, pair_embeddings))
+
+
 def build_msg_sequence_probe(
     variant: str,
     *,
@@ -391,6 +443,16 @@ def build_msg_sequence_probe(
     num_layers = int(_config_get(config, "msg_probe_mlp_num_layers", 2))
     task_names = _probe_task_names(task_spec)
     task_output_dims = _probe_task_output_dims(task_spec)
+    if variant == "cls":
+        pair_dim = int(_config_get(config, "pairformer_pair_dim", model_dim))
+        return MsgSinglePairClsProbe(
+            pooler=MsgSinglePairClsPool(),
+            pooled_dim=model_dim + pair_dim,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            task_names=task_names,
+            task_output_dims=task_output_dims,
+        )
     if _is_single_pair_covariance_variant(variant):
         if covariance_pooler is None:
             compressed_dim = int(_config_get(config, "covariance_pooling_dim", 32))
@@ -540,8 +602,10 @@ def _is_single_pair_covariance_variant(variant: str) -> bool:
 
 
 def _uses_pair_features(variant: str) -> bool:
-    return _is_single_pair_pma_variant(variant) or _is_single_pair_covariance_variant(
-        variant
+    return (
+        variant == "cls"
+        or _is_single_pair_pma_variant(variant)
+        or _is_single_pair_covariance_variant(variant)
     )
 
 

@@ -17,12 +17,15 @@ from spectra_learning.probes.massspec.msg_modules import (
     MsgMeanPool,
     MsgPmaPool,
     MsgSequenceProbe,
+    MsgSinglePairClsPool,
+    MsgSinglePairClsProbe,
     MsgSinglePairCovariancePool,
     MsgSinglePairCovarianceProbe,
     MsgSinglePairLinearProbe,
     MsgSinglePairPmaPool,
     _probe_task_names,
     _probe_task_output_dims,
+    _uses_pair_features,
     build_msg_sequence_probe as _build_msg_sequence_probe,
 )
 from spectra_learning.probes.massspec.data import probe_local_batch_size
@@ -255,6 +258,19 @@ class MsgSequenceProbeTests(unittest.TestCase):
         )
         self.assertTrue(torch.allclose(pooled, expected))
 
+    def test_covariance_pool_ignores_cls_token(self):
+        pool = MsgCovariancePool(input_dim=2, compressed_dim=2)
+        with torch.no_grad():
+            pool.left_proj.weight.copy_(torch.eye(2))
+            pool.right_proj.weight.copy_(torch.eye(2))
+
+        peak_embeddings = torch.tensor([[[1.0, 2.0], [3.0, 4.0], [100.0, 200.0]]])
+        valid_mask = torch.tensor([[True, True]])
+
+        pooled = pool(peak_embeddings, valid_mask)
+
+        torch.testing.assert_close(pooled, torch.tensor([[5.0, 7.0, 7.0, 10.0]]))
+
     def test_single_pair_covariance_pool_uses_off_diagonal_pair_second_moment(self):
         pool = MsgSinglePairCovariancePool(
             single_dim=2,
@@ -270,13 +286,14 @@ class MsgSequenceProbeTests(unittest.TestCase):
             pool.output_proj.bias.zero_()
             pool.output_proj.weight[:, 4:].copy_(torch.eye(4))
 
-        peak_embeddings = torch.tensor([[[1.0, 0.0], [0.0, 1.0], [9.0, 9.0]]])
-        pair_embeddings = torch.zeros(1, 3, 3, 2)
+        peak_embeddings = torch.tensor([[[1.0, 0.0], [0.0, 1.0], [9.0, 9.0], [99.0, 99.0]]])
+        pair_embeddings = torch.zeros(1, 4, 4, 2)
         pair_embeddings[0, 0, 0] = torch.tensor([100.0, 100.0])
         pair_embeddings[0, 1, 1] = torch.tensor([100.0, 100.0])
         pair_embeddings[0, 0, 1] = torch.tensor([1.0, 2.0])
         pair_embeddings[0, 1, 0] = torch.tensor([3.0, 4.0])
         pair_embeddings[0, 0, 2] = torch.tensor([100.0, 100.0])
+        pair_embeddings[0, 3, 3] = torch.tensor([99.0, 99.0])
         valid_mask = torch.tensor([[True, True, False]])
 
         pooled = pool(peak_embeddings, valid_mask, pair_embeddings)
@@ -326,6 +343,53 @@ class MsgSequenceProbeTests(unittest.TestCase):
 
         self.assertEqual(pooled.shape, (2, 2 * 3 * 4))
         self.assertTrue(torch.isfinite(pooled).all().item())
+
+    def test_cls_pool_concatenates_single_cls_and_pair_cls(self):
+        pool = MsgSinglePairClsPool()
+        peak_embeddings = torch.randn(2, 4, 3)
+        pair_embeddings = torch.randn(2, 4, 4, 5)
+        valid_mask = torch.ones(2, 3, dtype=torch.bool)
+
+        pooled = pool(peak_embeddings, valid_mask, pair_embeddings)
+
+        expected = torch.cat(
+            [
+                peak_embeddings[:, 3],
+                pair_embeddings[:, 3, 3],
+            ],
+            dim=-1,
+        )
+        torch.testing.assert_close(pooled, expected)
+
+    def test_cls_probe_uses_pair_features_and_mlp_heads(self):
+        config = config_dict.ConfigDict()
+        config.model_dim = 4
+        config.pairformer_pair_dim = 6
+        config.msg_probe_mlp_hidden_dim = 8
+        task_spec = MsgProbeTaskSpec(
+            regression_tasks=("mol_weight",),
+            maccs_bits=4,
+            regression_means={"mol_weight": 0.0},
+            regression_stds={"mol_weight": 1.0},
+            fingerprint_task="maccs",
+        )
+        probe = _build_msg_sequence_probe(
+            "cls",
+            config=config,
+            task_spec=task_spec,
+        )
+        peak_embeddings = torch.randn(3, 6, 4)
+        pair_embeddings = torch.randn(3, 6, 6, 6)
+        valid_mask = torch.ones(3, 5, dtype=torch.bool)
+
+        logits = probe(peak_embeddings, valid_mask, pair_embeddings)
+
+        self.assertTrue(_uses_pair_features("cls"))
+        self.assertIsInstance(probe, MsgSinglePairClsProbe)
+        head = cast(torch.nn.Sequential, probe.heads.heads["maccs"])
+        first_head = cast(torch.nn.Linear, head[0])
+        self.assertEqual(first_head.in_features, 10)
+        self.assertEqual(logits["maccs"].shape, (3, 5))
 
     def test_single_pair_pma_probe_uses_linear_heads(self):
         config = config_dict.ConfigDict()

@@ -118,13 +118,33 @@ def _expected_predictor_pair(
 ) -> torch.Tensor:
     B, K, N = target_masks.shape
     context_mask_by_view = context_mask.unsqueeze(1)
-    visible_mask = context_mask_by_view | target_masks
+    visible_mask = torch.cat(
+        [
+            context_mask_by_view | target_masks,
+            torch.ones(B, K, 1, dtype=torch.bool, device=target_masks.device),
+        ],
+        dim=2,
+    )
     expected_pair = context_pair.unsqueeze(1).expand(-1, K, -1, -1, -1)
-    context_pair_mask = context_mask_by_view.unsqueeze(3) & context_mask_by_view.unsqueeze(2)
+    context_token_mask = torch.cat(
+        [
+            context_mask_by_view.expand(-1, K, -1),
+            torch.ones(B, K, 1, dtype=torch.bool, device=target_masks.device),
+        ],
+        dim=2,
+    )
+    context_pair_mask = context_token_mask.unsqueeze(3) & context_token_mask.unsqueeze(2)
     expected_pair = expected_pair * context_pair_mask.unsqueeze(-1).to(
         dtype=expected_pair.dtype
     )
-    target_pair_mask = target_masks.unsqueeze(3) | target_masks.unsqueeze(2)
+    target_token_mask = torch.cat(
+        [
+            target_masks,
+            torch.zeros(B, K, 1, dtype=torch.bool, device=target_masks.device),
+        ],
+        dim=2,
+    )
+    target_pair_mask = target_token_mask.unsqueeze(3) | target_token_mask.unsqueeze(2)
     expected_pair = torch.where(
         target_pair_mask.unsqueeze(-1),
         model.pair_mask_token.view(1, 1, 1, 1, -1).to(context_pair),
@@ -134,7 +154,7 @@ def _expected_predictor_pair(
     expected_pair = expected_pair * visible_pair_mask.unsqueeze(-1).to(
         dtype=expected_pair.dtype
     )
-    return expected_pair.reshape(B * K, N, N, -1)
+    return expected_pair.reshape(B * K, N + 1, N + 1, -1)
 
 
 @torch.no_grad()
@@ -424,7 +444,7 @@ def test_pairmixer_can_use_pair_bias_attention():
     assert isinstance(predictor_block, PairMixerBlock)
     assert isinstance(predictor_block.single_attention, AttentionPairBias)
     assert not hasattr(predictor_block, "single_attention_norm")
-    assert encoded.shape == (2, 6, 32)
+    assert encoded.shape == (2, 7, 32)
 
 
 def test_pairmixer_pair_bias_attention_setting_is_configurable():
@@ -564,7 +584,7 @@ def test_mz_sentinel_predictor_receives_context_and_target_memory_mask():
     batch = _make_batch()
     context_emb = torch.randn(
         batch["peak_mz"].shape[0],
-        batch["peak_mz"].shape[1],
+        batch["peak_mz"].shape[1] + 1,
         model.model_dim,
     )
     context_pair = _make_pair(model, context_emb)
@@ -593,7 +613,7 @@ def test_mz_sentinel_predictor_receives_context_and_target_memory_mask():
         )
 
     B, K, N = batch["target_masks"].shape
-    expected_context_emb = context_emb.unsqueeze(1).expand(-1, K, -1, -1)
+    expected_context_emb = context_emb[:, :N].unsqueeze(1).expand(-1, K, -1, -1)
     expected_input = expected_context_emb * batch["context_mask"].unsqueeze(1).unsqueeze(
         -1
     )
@@ -601,18 +621,29 @@ def test_mz_sentinel_predictor_receives_context_and_target_memory_mask():
         batch["target_masks"].unsqueeze(-1),
         model.latent_mask_token.view(1, 1, 1, -1).to(context_emb),
         expected_input,
-    ).reshape(B * K, N, -1)
-    expected_visible_mask = (
-        batch["context_mask"].unsqueeze(1) | batch["target_masks"]
-    ).reshape(B * K, N)
+    )
+    expected_input = torch.cat(
+        [
+            expected_input,
+            context_emb[:, N : N + 1].unsqueeze(1).expand(-1, K, -1, -1),
+        ],
+        dim=2,
+    ).reshape(B * K, N + 1, -1)
+    expected_visible_mask = torch.cat(
+        [
+            batch["context_mask"].unsqueeze(1) | batch["target_masks"],
+            torch.ones(B, K, 1, dtype=torch.bool),
+        ],
+        dim=2,
+    ).reshape(B * K, N + 1)
     expected_pair = _expected_predictor_pair(
         model,
         context_pair,
         batch["context_mask"],
         batch["target_masks"],
     )
-    assert captured["x"].shape == (B * K, N, model.model_dim)
-    assert captured["pair"].shape == (B * K, N, N, model.predictor_pair_dim)
+    assert captured["x"].shape == (B * K, N + 1, model.model_dim)
+    assert captured["pair"].shape == (B * K, N + 1, N + 1, model.predictor_pair_dim)
     torch.testing.assert_close(captured["x"], expected_input)
     torch.testing.assert_close(captured["pair"], expected_pair)
     assert torch.equal(captured["visible_mask"], expected_visible_mask)
@@ -624,7 +655,7 @@ def test_latent_token_predictor_receives_per_view_target_masks():
     batch = _make_batch()
     context_emb = torch.randn(
         batch["peak_mz"].shape[0],
-        batch["peak_mz"].shape[1],
+        batch["peak_mz"].shape[1] + 1,
         model.model_dim,
     )
     context_pair = _make_pair(model, context_emb)
@@ -653,7 +684,7 @@ def test_latent_token_predictor_receives_per_view_target_masks():
         )
 
     B, K, N = batch["target_masks"].shape
-    expected_context_emb = context_emb.unsqueeze(1).expand(-1, K, -1, -1)
+    expected_context_emb = context_emb[:, :N].unsqueeze(1).expand(-1, K, -1, -1)
     expected_input = expected_context_emb * batch["context_mask"].unsqueeze(1).unsqueeze(
         -1
     )
@@ -661,18 +692,29 @@ def test_latent_token_predictor_receives_per_view_target_masks():
         batch["target_masks"].unsqueeze(-1),
         model.latent_mask_token.view(1, 1, 1, -1).to(context_emb),
         expected_input,
-    ).reshape(B * K, N, -1)
-    expected_visible_mask = (
-        batch["context_mask"].unsqueeze(1) | batch["target_masks"]
-    ).reshape(B * K, N)
+    )
+    expected_input = torch.cat(
+        [
+            expected_input,
+            context_emb[:, N : N + 1].unsqueeze(1).expand(-1, K, -1, -1),
+        ],
+        dim=2,
+    ).reshape(B * K, N + 1, -1)
+    expected_visible_mask = torch.cat(
+        [
+            batch["context_mask"].unsqueeze(1) | batch["target_masks"],
+            torch.ones(B, K, 1, dtype=torch.bool),
+        ],
+        dim=2,
+    ).reshape(B * K, N + 1)
     expected_pair = _expected_predictor_pair(
         model,
         context_pair,
         batch["context_mask"],
         batch["target_masks"],
     )
-    assert captured["x"].shape == (B * K, N, model.model_dim)
-    assert captured["pair"].shape == (B * K, N, N, model.predictor_pair_dim)
+    assert captured["x"].shape == (B * K, N + 1, model.model_dim)
+    assert captured["pair"].shape == (B * K, N + 1, N + 1, model.predictor_pair_dim)
     torch.testing.assert_close(captured["x"], expected_input)
     torch.testing.assert_close(captured["pair"], expected_pair)
     assert torch.equal(captured["visible_mask"], expected_visible_mask)
@@ -745,25 +787,32 @@ def test_multilayer_targets_widen_teacher_and_predictor_outputs():
     )
     context_emb = context_encoded
     target_union = target_masks.any(dim=1)
-    predictor_input = context_emb * context_mask.unsqueeze(-1)
+    predictor_input = context_emb[:, :N] * context_mask.unsqueeze(-1)
     predictor_input = torch.where(
         target_union.unsqueeze(-1),
         model.latent_mask_token.view(1, 1, -1).to(context_emb),
         predictor_input,
     )
-    predictor_visible_mask = context_mask | target_union
+    predictor_input = torch.cat([predictor_input, context_emb[:, N : N + 1]], dim=1)
+    predictor_visible_mask = torch.cat(
+        [
+            context_mask | target_union,
+            torch.ones(B, 1, dtype=torch.bool),
+        ],
+        dim=1,
+    )
     predictor_output_features = model.predict_masked_target_features(
         predictor_input,
         context_pair,
         predictor_visible_mask,
     )
-    assert predictor_output_features.shape == (B, N, 2 * model.model_dim)
+    assert predictor_output_features.shape == (B, N + 1, 2 * model.model_dim)
     predictor_output = model.predict_masked_targets(
         predictor_input,
         context_pair,
         predictor_visible_mask,
     )
-    assert predictor_output.shape == (B, N, model.target_projector_dim)
+    assert predictor_output.shape == (B, N + 1, model.target_projector_dim)
     predictor_output_features_by_view, predictor_output_by_view = (
         model._predict_augmented_targets(
             context_emb,
