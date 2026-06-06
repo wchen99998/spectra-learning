@@ -5,8 +5,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg = config_dict.ConfigDict()
 
     # Dataset
-    cfg.artifact_dir = "data/gems_artifacts_alpha"
-    cfg.gems_native_repo_id = "cjim8889/gems-a10-native"
+    cfg.artifact_dir = "data/gems_artifacts_beta"
+    cfg.gems_native_repo_id = "cjim8889/gems-b-native"
     cfg.nist_murcko_probe_repo_id = "cjim8889/hr_msms_nist_mcebio_murcko_20260529"
     cfg.nist_murcko_probe_revision = "main"
     cfg.nist_murcko_probe_train_samples = 30_000
