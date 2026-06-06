@@ -160,7 +160,7 @@ def build_gems_native_artifact(
         "validation_fraction": CANONICAL_VALIDATION_FRACTION,
         "split_seed": CANONICAL_SPLIT_SEED,
         "num_shards": num_shards,
-        "source_hdf5_path": source_path or str(hdf5_path),
+        "source_hdf5_path": source_path or "",
         "source_url": source_url,
     }
     with (output_dir / METADATA_FILENAME).open("w") as handle:

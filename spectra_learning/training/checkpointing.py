@@ -1,4 +1,5 @@
 import copy
+import logging
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from spectra_learning.training.storage import (
 
 COVARIANCE_POOLER_PREFIX = "covariance_pooler."
 COVARIANCE_POOLER_CHECKPOINT_PREFIX = "covariance-pooler-"
+log = logging.getLogger(__name__)
 
 
 def covariance_pooler_checkpoint_path(path: StoragePath) -> StoragePath:
@@ -222,14 +224,29 @@ class AsyncCheckpointWriter:
         )
         self._futures.append(future)
 
+    def log_completed_failures(self) -> None:
+        pending = []
+        for future in self._futures:
+            if future.done():
+                self._log_future_result(future)
+            else:
+                pending.append(future)
+        self._futures = pending
+
     def wait(self) -> None:
         for future in self._futures:
-            future.result()
+            self._log_future_result(future)
         self._futures.clear()
 
     def close(self) -> None:
         self.wait()
         self._executor.shutdown(wait=True)
+
+    def _log_future_result(self, future: Future[None]) -> None:
+        try:
+            future.result()
+        except Exception:
+            log.warning("Checkpoint write failed.", exc_info=True)
 
 
 def save_checkpoint(
