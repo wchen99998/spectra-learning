@@ -13,7 +13,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.nist_murcko_probe_val_samples = 10_000
     cfg.nist_murcko_probe_test_samples = 10_000
     cfg.nist_murcko_probe_num_repeats = 1
-    cfg.batch_size = 512
+    cfg.batch_size = 2048
     cfg.shuffle_buffer = 1_000_000
     cfg.drop_remainder = True
     cfg.max_precursor_mz = 1000
@@ -24,7 +24,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.seed = 66
 
     # Encoder
-    cfg.num_peaks = 32
+    cfg.num_peaks = 31
     cfg.model_dim = 960
     cfg.encoder_num_layers = 18
     cfg.encoder_num_heads = 16
@@ -80,7 +80,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.distogram_loss_weight = 1.0
     cfg.latent_pair_loss_weight = 0.0
     cfg.latent_pair_target_normalization = "none"
-    cfg.jepa_mae_mz_bin_size = 0.1
+    cfg.jepa_mae_mz_bin_size = 1.0
     cfg.jepa_intensity_aware_tau = 0.5
     cfg.jepa_intensity_aware_alpha = 0.75
     cfg.jepa_intensity_aware_beta_context = 0.85
@@ -124,6 +124,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_epochs = 25
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "reduce-overhead"
+    cfg.use_deepspeed = True
+    cfg.deepspeed_zero_stage = 2
+    cfg.gradient_accumulation_steps = 4
     cfg.device_prefetch_size = 8
     cfg.log_every_n_steps = 250
     cfg.collapse_metrics_every_n_steps = 0
@@ -138,8 +141,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_early_stopping = True
     cfg.msg_probe_early_stopping_min_delta = 0.0001
     cfg.msg_probe_early_stopping_min_epochs = 20
-    cfg.msg_probe_early_stopping_patience = 20
-    cfg.msg_probe_every_n_steps = 1.0
+    cfg.msg_probe_early_stopping_patience = 3
+    cfg.msg_probe_every_n_steps = 25_000.
     cfg.msg_probe_learning_rate = 0.0003
     cfg.msg_probe_max_test_samples = None
     cfg.msg_probe_max_train_samples = None
@@ -157,15 +160,16 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_batch_size = 256
 
     # Optimizer
-    cfg.learning_rate = 0.0002
+    cfg.learning_rate = 1e-3
     cfg.min_learning_rate = 0.00003
-    cfg.warmup_steps = 5_000
+    cfg.warmup_steps = 10_000
     cfg.weight_decay = 0.01
     cfg.b2 = 0.95
     cfg.grad_clip_norm = 1
-    cfg.optimizer = "adamw"
+    cfg.optimizer = "muon"
     cfg.optimizer_fused = True
     cfg.adamw_lr = None
+    cfg.deepspeed_muon_ns_method = "gram"
 
     # Logging
     cfg.enable_wandb = True

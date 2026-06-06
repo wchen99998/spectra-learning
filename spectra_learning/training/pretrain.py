@@ -171,7 +171,6 @@ def train_and_evaluate(
         storage_mkdir(checkpoint_dir)
     logger = build_logger(config, local_workdir) if distributed.is_main else MetricLogger()
     if use_deepspeed:
-        compile_forward(train_module, config)
         train_model, optimizers, schedulers = initialize_deepspeed(
             config=config,
             model=train_module,
@@ -180,6 +179,7 @@ def train_and_evaluate(
             autocast_dtype=autocast_dtype,
             grad_clip_norm=grad_clip_norm,
         )
+        compile_forward(train_model, config)
         start_epoch, global_step, resume_offset = restore_deepspeed_training_state(
             config=config,
             checkpoint_dir=checkpoint_dir,
@@ -203,7 +203,6 @@ def train_and_evaluate(
             steps_per_epoch=datamodule.train_steps,
             device=device,
         )
-        compile_forward(train_module, config)
         train_model = wrap_distributed_model(
             train_module,
             distributed,
@@ -212,6 +211,7 @@ def train_and_evaluate(
                 _config_get(config, "ddp_find_unused_parameters", False)
             ),
         )
+        compile_forward(train_model, config)
     if distributed.is_main:
         logger.log_metrics(model_param_metrics, step=global_step)
     checkpoint_writer = AsyncCheckpointWriter()
@@ -236,7 +236,8 @@ def train_and_evaluate(
         flops_per_optimizer_step=flops_per_optimizer_step,
     )
     final_global_step = int(cast(float, last_msg_probe_metrics["run/final_global_step"]))
-    if is_deepspeed_engine(train_model):
+    save_final_checkpoint = bool(_config_get(config, "save_final_checkpoint", True))
+    if is_deepspeed_engine(train_model) and save_final_checkpoint:
         save_deepspeed_checkpoint(
             checkpoint_dir=checkpoint_dir,
             engine=train_model,
@@ -246,7 +247,7 @@ def train_and_evaluate(
             wandb_run_id=getattr(logger.experiment, "id", None),
             name="last",
         )
-    elif distributed.is_main:
+    elif distributed.is_main and save_final_checkpoint:
         base_model, _ = split_pretrain_module(unwrap_model(train_model))
         checkpoint_writer.save_checkpoint(
             storage_join(checkpoint_dir, "last.pt"),
@@ -529,6 +530,13 @@ def run_training_loop(
         if measured_elapsed > 0
         else 0.0
     )
+    if device.type == "cuda":
+        last_msg_probe_metrics["run/cuda_max_memory_allocated_gib"] = (
+            torch.cuda.max_memory_allocated(device) / 1024**3
+        )
+        last_msg_probe_metrics["run/cuda_max_memory_reserved_gib"] = (
+            torch.cuda.max_memory_reserved(device) / 1024**3
+        )
     if owns_checkpoint_writer:
         checkpoint_writer.close()
     return last_msg_probe_metrics
@@ -620,10 +628,23 @@ def compile_forward(model: torch.nn.Module, config: config_dict.ConfigDict) -> N
     )
     if inductor_config.triton.cudagraph_skip_dynamic_graphs:
         logging.info("Skipping CUDA Graph capture for dynamic-shape Inductor graphs.")
-    model.compile(
-        mode=compile_mode,
-        fullgraph=False,
-    )
+    compile_cudagraphs = _config_get(config, "compile_cudagraphs", None)
+    if compile_cudagraphs is None:
+        compile_kwargs: dict[str, Any] = {
+            "mode": compile_mode,
+            "fullgraph": False,
+        }
+    else:
+        compile_options = dict(torch._inductor.list_mode_options(compile_mode))
+        compile_options["triton.cudagraphs"] = bool(compile_cudagraphs)
+        compile_kwargs = {
+            "options": compile_options,
+            "fullgraph": False,
+        }
+    if is_deepspeed_engine(model):
+        model.compile(compile_kwargs=compile_kwargs)
+    else:
+        model.compile(**compile_kwargs)
 
 
 def log_train_metrics(

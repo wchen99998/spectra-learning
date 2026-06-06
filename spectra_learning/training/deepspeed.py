@@ -1,5 +1,8 @@
+import ctypes
 import json
 import logging
+import os
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -35,6 +38,8 @@ def initialize_deepspeed(
     autocast_dtype: torch.dtype | None,
     grad_clip_norm: float | None,
 ) -> tuple[torch.nn.Module, list[torch.optim.Optimizer], list[LRSchedulerLike]]:
+    configure_deepspeed_cuda_toolchain()
+
     import deepspeed
 
     ds_config = build_deepspeed_config(
@@ -51,6 +56,54 @@ def initialize_deepspeed(
         lr_scheduler=scheduler_factory,
     )
     return engine, [optimizer], [scheduler]
+
+
+def configure_deepspeed_cuda_toolchain() -> None:
+    cuda_root = _nvidia_cuda_home()
+    os.environ["CUDA_HOME"] = str(cuda_root)
+    _prepend_env_path("PATH", Path(sys.executable).parent)
+    _prepend_env_path("PATH", cuda_root / "bin")
+    _prepend_env_path("LIBRARY_PATH", cuda_root / "lib")
+    _ensure_cuda_runtime_link(cuda_root)
+    _preload_cuda_runtime(cuda_root)
+    os.environ.setdefault(
+        "TORCH_EXTENSIONS_DIR",
+        str(Path.home() / ".cache" / "torch_extensions"),
+    )
+
+    import torch.utils.cpp_extension as cpp_extension
+
+    cpp_extension.CUDA_HOME = str(cuda_root)
+
+
+def _nvidia_cuda_home() -> Path:
+    import nvidia
+
+    cuda_major = str(torch.version.cuda).split(".", maxsplit=1)[0]
+    cuda_root = Path(nvidia.__path__[0]) / f"cu{cuda_major}"
+    assert (cuda_root / "bin" / "nvcc").exists()
+    return cuda_root
+
+
+def _prepend_env_path(key: str, path: Path) -> None:
+    value = str(path)
+    parts = [part for part in os.environ.get(key, "").split(os.pathsep) if part]
+    if value not in parts:
+        os.environ[key] = os.pathsep.join([value, *parts])
+
+
+def _ensure_cuda_runtime_link(cuda_root: Path) -> None:
+    cuda_major = str(torch.version.cuda).split(".", maxsplit=1)[0]
+    libcudart = cuda_root / "lib" / "libcudart.so"
+    versioned_libcudart = cuda_root / "lib" / f"libcudart.so.{cuda_major}"
+    if not libcudart.exists() and versioned_libcudart.exists():
+        libcudart.symlink_to(versioned_libcudart.name)
+
+
+def _preload_cuda_runtime(cuda_root: Path) -> None:
+    cuda_major = str(torch.version.cuda).split(".", maxsplit=1)[0]
+    libcudart = cuda_root / "lib" / f"libcudart.so.{cuda_major}"
+    ctypes.CDLL(str(libcudart), mode=ctypes.RTLD_GLOBAL)
 
 
 def build_deepspeed_config(
@@ -71,10 +124,11 @@ def build_deepspeed_config(
     }
     if grad_clip_norm is not None and grad_clip_norm > 0:
         ds_config["gradient_clipping"] = float(grad_clip_norm)
-    if autocast_dtype == torch.bfloat16:
-        ds_config["bf16"] = {"enabled": True}
-    elif autocast_dtype == torch.float16:
-        ds_config["fp16"] = {"enabled": True, "loss_scale": 0}
+    if autocast_dtype is not None:
+        ds_config["torch_autocast"] = {
+            "enabled": True,
+            "dtype": _deepspeed_dtype_name(autocast_dtype),
+        }
     return _deep_update(ds_config, _deepspeed_config_overrides(config))
 
 
@@ -91,8 +145,10 @@ def _deepspeed_optimizer_config(config: config_dict.ConfigDict) -> dict[str, Any
                 "lr": float(config.learning_rate),
                 "momentum": float(_config_get(config, "muon_momentum", 0.95)),
                 "weight_decay": weight_decay,
-                "muon_lr": float(_config_get(config, "muon_lr", config.learning_rate)),
-                "adam_lr": float(_config_get(config, "adamw_lr", config.learning_rate)),
+                "muon_lr": _float_config(config, "muon_lr", config.learning_rate),
+                "adam_lr": _float_config(config, "adamw_lr", config.learning_rate),
+                "betas": [0.9, float(_config_get(config, "b2", 0.999))],
+                "eps": float(_config_get(config, "adam_eps", 1e-8)),
                 "ns_method": str(_config_get(config, "deepspeed_muon_ns_method", "gram")),
             },
         }
@@ -223,3 +279,16 @@ def _deep_update(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any
 
 def _config_get(config: config_dict.ConfigDict, key: str, default: Any) -> Any:
     return config.get(key, default)
+
+
+def _float_config(config: config_dict.ConfigDict, key: str, default: Any) -> float:
+    value = _config_get(config, key, default)
+    return float(default if value is None else value)
+
+
+def _deepspeed_dtype_name(dtype: torch.dtype) -> str:
+    if dtype == torch.bfloat16:
+        return "bfloat16"
+    if dtype == torch.float16:
+        return "float16"
+    raise ValueError(f"Unsupported DeepSpeed torch_autocast dtype: {dtype}")

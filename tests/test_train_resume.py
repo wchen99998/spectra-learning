@@ -148,6 +148,51 @@ def test_compile_forward_enables_shape_padding_for_reduce_overhead():
         pretrain.inductor_config.shape_padding = original
 
 
+def test_compile_forward_can_disable_cudagraphs():
+    model = _CompileRecorder()
+
+    pretrain.compile_forward(
+        model,
+        {"compile_mode": "reduce-overhead", "compile_cudagraphs": False},
+    )
+
+    assert model.compile_kwargs == {
+        "options": {"triton.cudagraphs": False},
+        "fullgraph": False,
+    }
+
+
+def test_compile_forward_passes_kwargs_to_deepspeed_engine_compile():
+    class DeepSpeedEngine(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.module = torch.nn.Linear(2, 2)
+            self.compile_kwargs = None
+
+        def is_gradient_accumulation_boundary(self) -> bool:
+            return True
+
+        def backward(self, loss) -> None:
+            pass
+
+        def step(self) -> None:
+            pass
+
+        def compile(self, **kwargs) -> None:
+            self.compile_kwargs = kwargs
+
+    engine = DeepSpeedEngine()
+
+    pretrain.compile_forward(engine, {"compile_mode": "reduce-overhead"})
+
+    assert engine.compile_kwargs == {
+        "compile_kwargs": {
+            "mode": "reduce-overhead",
+            "fullgraph": False,
+        },
+    }
+
+
 def test_save_checkpoint_persists_optimizer_state():
     model = _small_model()
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
@@ -1052,7 +1097,12 @@ def test_build_deepspeed_config_uses_zero_and_microbatching():
     assert ds_config["gradient_accumulation_steps"] == 4
     assert ds_config["zero_optimization"] == {"stage": 1}
     assert ds_config["gradient_clipping"] == 1.0
-    assert ds_config["bf16"] == {"enabled": True}
+    assert ds_config["torch_autocast"] == {
+        "enabled": True,
+        "dtype": "bfloat16",
+    }
+    assert "bf16" not in ds_config
+    assert "fp16" not in ds_config
     assert ds_config["optimizer"]["type"] == "Adam"
     assert ds_config["optimizer"]["params"]["adam_w_mode"] is True
 
@@ -1076,10 +1126,17 @@ def test_build_deepspeed_config_uses_muon_gram_orthogonalization():
     optimizer_config = ds_config["optimizer"]
 
     assert ds_config["zero_optimization"] == {"stage": 2}
-    assert ds_config["fp16"] == {"enabled": True, "loss_scale": 0}
+    assert ds_config["torch_autocast"] == {
+        "enabled": True,
+        "dtype": "float16",
+    }
+    assert "bf16" not in ds_config
+    assert "fp16" not in ds_config
     assert optimizer_config["type"] == "Muon"
     assert optimizer_config["params"]["muon_lr"] == 2e-3
     assert optimizer_config["params"]["adam_lr"] == 5e-4
+    assert optimizer_config["params"]["betas"] == [0.9, 0.999]
+    assert optimizer_config["params"]["eps"] == 1e-8
     assert optimizer_config["params"]["momentum"] == 0.9
     assert optimizer_config["params"]["ns_method"] == "gram"
 

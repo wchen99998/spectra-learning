@@ -1502,6 +1502,43 @@ class BlockJEPATests(unittest.TestCase):
         self.assertEqual(engine.backward_calls, 2)
         self.assertEqual(engine.step_calls, 2)
 
+    def test_train_step_impl_does_not_wrap_deepspeed_engine_in_autocast(self):
+        class DeepSpeedEngine(torch.nn.Module):
+            def __init__(self, module: torch.nn.Module) -> None:
+                super().__init__()
+                self.module = module
+                self.autocast_enabled = None
+
+            def forward(self, *args, **kwargs):
+                self.autocast_enabled = torch.is_autocast_enabled("cpu")
+                return self.module(*args, **kwargs)
+
+            def is_gradient_accumulation_boundary(self) -> bool:
+                return True
+
+            def backward(self, loss: torch.Tensor) -> None:
+                loss.backward()
+
+            def step(self) -> None:
+                pass
+
+        model = PretrainModule(self._build_model(masked_token_loss_weight=1.0))
+        engine = DeepSpeedEngine(model)
+        batch = _make_batch(num_targets=model.model.jepa_num_target_blocks)
+
+        train_step_impl(
+            engine,
+            batch,
+            [],
+            [],
+            autocast_dtype=torch.bfloat16,
+            grad_clip_norm=None,
+            global_step=0,
+            total_steps=2,
+        )
+
+        self.assertFalse(engine.autocast_enabled)
+
     def test_load_pretrained_weights_roundtrip(self):
         model = self._build_model()
         with tempfile.TemporaryDirectory() as tmpdir:

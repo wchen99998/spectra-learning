@@ -57,9 +57,10 @@ def train_step_impl(
     accumulation_step: int = 0,
 ) -> dict[str, torch.Tensor]:
     device_type = next(model.parameters()).device.type
+    use_deepspeed = is_deepspeed_engine(model)
     autocast_ctx = (
         nullcontext()
-        if autocast_dtype is None
+        if autocast_dtype is None or use_deepspeed
         else torch.autocast(device_type=device_type, dtype=autocast_dtype)
     )
     torch.compiler.cudagraph_mark_step_begin()
@@ -80,7 +81,7 @@ def train_step_impl(
     if compute_collapse_metrics and collapse_data:
         with torch.no_grad():
             metrics.update(_collapse_diagnostics(**cast(dict[str, Any], collapse_data)))
-    if is_deepspeed_engine(model):
+    if use_deepspeed:
         optimizer_step = _deepspeed_backward_and_step(metrics["loss"], model)
         step_skipped = False
     else:
@@ -112,7 +113,7 @@ def train_step_impl(
     ema_momentum = None
     if not step_skipped:
         ema_momentum = pretrain_module.update_ema_teacher(global_step + 1, total_steps)
-        if not is_deepspeed_engine(model):
+        if not use_deepspeed:
             for scheduler in schedulers:
                 scheduler.step()
     if ema_momentum is not None:
