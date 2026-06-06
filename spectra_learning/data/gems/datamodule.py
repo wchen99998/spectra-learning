@@ -71,6 +71,7 @@ class GemsNativeDataModule:
     train_steps: int
     global_batch_size: int
     batch_size: int
+    gradient_accumulation_steps: int
     drop_remainder: bool
     max_precursor_mz: float
     min_peak_intensity: float
@@ -143,9 +144,11 @@ class GemsNativeDataModule:
                 setattr(self, key, value)
 
     def _set_distributed_batch_attrs(self) -> None:
+        self.gradient_accumulation_steps = self.config.gradient_accumulation_steps
         self.global_batch_size = self.batch_size
-        assert self.global_batch_size % self.distributed_world_size == 0
-        self.batch_size = self.global_batch_size // self.distributed_world_size
+        denominator = self.distributed_world_size * self.gradient_accumulation_steps
+        assert self.global_batch_size % denominator == 0
+        self.batch_size = self.global_batch_size // denominator
         if self.distributed_world_size > 1 and self.dataloader_num_workers > 0:
             self.dataloader_num_workers = max(
                 1,
@@ -216,7 +219,9 @@ class GemsNativeDataModule:
     ) -> DataLoader:
         generator = torch.Generator()
         generator.manual_seed(seed)
-        start_index = start_batch * self.batch_size
+        start_index = (
+            start_batch * self.batch_size * self.gradient_accumulation_steps
+        )
         loader_kwargs: dict[str, Any] = {
             "dataset": dataset,
             "batch_size": self.batch_size,

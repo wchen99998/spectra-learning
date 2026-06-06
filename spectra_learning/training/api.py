@@ -7,7 +7,11 @@ from spectra_learning.training.naming import auto_run_name
 from spectra_learning.training.runtime import (
     build_grad_scaler,
     collect_and_log_param_metrics,
+    cumulative_training_flops,
+    estimate_training_flops_per_optimizer_step,
+    estimate_training_flops_per_sample,
     parse_autocast_dtype,
+    trainable_parameter_count,
 )
 
 __all__ = [
@@ -17,9 +21,13 @@ __all__ = [
     "build_grad_scaler",
     "build_model_from_config",
     "collect_and_log_param_metrics",
+    "cumulative_training_flops",
+    "estimate_training_flops_per_optimizer_step",
+    "estimate_training_flops_per_sample",
     "latest_ckpt_path",
     "load_frozen_teacher_weights",
     "load_config",
     "load_pretrained_weights",
     "parse_autocast_dtype",
+    "trainable_parameter_count",
 ]

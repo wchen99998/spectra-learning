@@ -36,6 +36,14 @@ from spectra_learning.training.distributed import (
     unwrap_model,
     wrap_distributed_model,
 )
+from spectra_learning.training.deepspeed import (
+    deepspeed_enabled,
+    gradient_accumulation_steps,
+    initialize_deepspeed,
+    is_deepspeed_engine,
+    restore_deepspeed_training_state,
+    save_deepspeed_checkpoint,
+)
 from spectra_learning.training.logging import MetricLogger, log_msg_probe_metrics
 from spectra_learning.training.modules import PretrainModule, split_pretrain_module
 from spectra_learning.training.optimization import build_optimizers
@@ -59,6 +67,8 @@ from spectra_learning.training.api import (
     build_logger,
     build_model_from_config,
     collect_and_log_param_metrics,
+    cumulative_training_flops,
+    estimate_training_flops_per_optimizer_step,
     parse_autocast_dtype,
 )
 
@@ -124,10 +134,12 @@ def train_and_evaluate(
         logging.info("Training for %s epochs (%d steps).", config.num_epochs, total_steps)
         logging.info("Steps per epoch: %d", datamodule.train_steps)
         logging.info(
-            "Distributed: world_size=%d global_batch_size=%d local_batch_size=%d",
+            "Distributed: world_size=%d global_batch_size=%d "
+            "local_micro_batch_size=%d grad_accum_steps=%d",
             distributed.world_size,
             datamodule.global_batch_size,
             datamodule.batch_size,
+            gradient_accumulation_steps(config),
         )
     device = distributed.device
     clear_cuda_cache(device)
@@ -137,35 +149,71 @@ def train_and_evaluate(
     model_param_metrics = (
         collect_and_log_param_metrics(train_module) if distributed.is_main else {}
     )
+    flops_per_optimizer_step = estimate_training_flops_per_optimizer_step(
+        config,
+        train_module,
+        datamodule.global_batch_size,
+    )
+    if distributed.is_main:
+        model_param_metrics["model/flops_per_optimizer_step_estimate"] = (
+            flops_per_optimizer_step
+        )
+        model_param_metrics["model/flops_per_sample_estimate"] = (
+            flops_per_optimizer_step / float(datamodule.global_batch_size)
+        )
     train_module.to(device).train()
     autocast_dtype = parse_autocast_dtype(_config_get(config, "autocast_dtype", "bf16"))
-    grad_scaler = build_grad_scaler(autocast_dtype, device)
-    optimizers, schedulers = build_optimizers(config, train_module, total_steps, device)
+    grad_clip_norm = optional_float(_config_get(config, "grad_clip_norm", None))
+    use_deepspeed = deepspeed_enabled(config)
+    grad_scaler = None if use_deepspeed else build_grad_scaler(autocast_dtype, device)
     checkpoint_dir = storage_join(workdir, "checkpoints")
     if distributed.is_main:
         storage_mkdir(checkpoint_dir)
     logger = build_logger(config, local_workdir) if distributed.is_main else MetricLogger()
-    start_epoch, global_step, resume_offset = restore_training_state(
-        config=config,
-        checkpoint_dir=checkpoint_dir,
-        model=model,
-        optimizers=optimizers,
-        schedulers=schedulers,
-        grad_scaler=grad_scaler,
-        steps_per_epoch=datamodule.train_steps,
-        device=device,
-    )
+    if use_deepspeed:
+        compile_forward(train_module, config)
+        train_model, optimizers, schedulers = initialize_deepspeed(
+            config=config,
+            model=train_module,
+            total_steps=total_steps,
+            train_micro_batch_size_per_gpu=datamodule.batch_size,
+            autocast_dtype=autocast_dtype,
+            grad_clip_norm=grad_clip_norm,
+        )
+        start_epoch, global_step, resume_offset = restore_deepspeed_training_state(
+            config=config,
+            checkpoint_dir=checkpoint_dir,
+            engine=train_model,
+            steps_per_epoch=datamodule.train_steps,
+        )
+    else:
+        optimizers, schedulers = build_optimizers(
+            config,
+            train_module,
+            total_steps,
+            device,
+        )
+        start_epoch, global_step, resume_offset = restore_training_state(
+            config=config,
+            checkpoint_dir=checkpoint_dir,
+            model=model,
+            optimizers=optimizers,
+            schedulers=schedulers,
+            grad_scaler=grad_scaler,
+            steps_per_epoch=datamodule.train_steps,
+            device=device,
+        )
+        compile_forward(train_module, config)
+        train_model = wrap_distributed_model(
+            train_module,
+            distributed,
+            static_graph=bool(_config_get(config, "ddp_static_graph", True)),
+            find_unused_parameters=bool(
+                _config_get(config, "ddp_find_unused_parameters", False)
+            ),
+        )
     if distributed.is_main:
         logger.log_metrics(model_param_metrics, step=global_step)
-    compile_forward(train_module, config)
-    train_model = wrap_distributed_model(
-        train_module,
-        distributed,
-        static_graph=bool(_config_get(config, "ddp_static_graph", True)),
-        find_unused_parameters=bool(
-            _config_get(config, "ddp_find_unused_parameters", False)
-        ),
-    )
     checkpoint_writer = AsyncCheckpointWriter()
     last_msg_probe_metrics = run_training_loop(
         config=config,
@@ -185,9 +233,20 @@ def train_and_evaluate(
         grad_scaler=grad_scaler,
         distributed=distributed,
         checkpoint_writer=checkpoint_writer,
+        flops_per_optimizer_step=flops_per_optimizer_step,
     )
     final_global_step = int(cast(float, last_msg_probe_metrics["run/final_global_step"]))
-    if distributed.is_main:
+    if is_deepspeed_engine(train_model):
+        save_deepspeed_checkpoint(
+            checkpoint_dir=checkpoint_dir,
+            engine=train_model,
+            global_step=final_global_step,
+            epoch=final_global_step // datamodule.train_steps,
+            loss=float("nan"),
+            wandb_run_id=getattr(logger.experiment, "id", None),
+            name="last",
+        )
+    elif distributed.is_main:
         base_model, _ = split_pretrain_module(unwrap_model(train_model))
         checkpoint_writer.save_checkpoint(
             storage_join(checkpoint_dir, "last.pt"),
@@ -209,6 +268,7 @@ def train_and_evaluate(
         "run/world_size": float(distributed.world_size),
         "run/global_batch_size": float(datamodule.global_batch_size),
         "run/local_batch_size": float(datamodule.batch_size),
+        "run/gradient_accumulation_steps": float(gradient_accumulation_steps(config)),
     }
     cleanup_distributed(distributed)
     return results
@@ -246,6 +306,7 @@ def run_training_loop(
     grad_scaler: torch.amp.GradScaler | None = None,
     distributed: DistributedContext | None = None,
     checkpoint_writer: AsyncCheckpointWriter | None = None,
+    flops_per_optimizer_step: float | None = None,
 ) -> dict[str, object]:
     if distributed is None:
         distributed = DistributedContext(
@@ -258,17 +319,24 @@ def run_training_loop(
         autocast_dtype = parse_autocast_dtype(
             _config_get(config, "autocast_dtype", "bf16")
         )
-    if grad_scaler is None:
+    if grad_scaler is None and not is_deepspeed_engine(model):
         grad_scaler = build_grad_scaler(autocast_dtype, device)
     owns_checkpoint_writer = checkpoint_writer is None
     if checkpoint_writer is None:
         checkpoint_writer = AsyncCheckpointWriter()
+    if flops_per_optimizer_step is None:
+        flops_per_optimizer_step = estimate_training_flops_per_optimizer_step(
+            config,
+            unwrap_model(model),
+            int(datamodule.global_batch_size),
+        )
     log_every_n_steps = int(_config_get(config, "log_every_n_steps", 50))
     collapse_every_n_steps = int(
         _config_get(config, "collapse_metrics_every_n_steps", log_every_n_steps)
     )
     checkpoint_every_steps = int(config.checkpoint_every_steps)
     grad_clip_norm = optional_float(_config_get(config, "grad_clip_norm", None))
+    grad_accum_steps = gradient_accumulation_steps(config)
     msg_probe_every_n_steps = msg_probe_interval(config, datamodule, total_steps)
     msg_probe_variants = msg_probe_variants_from_config(config)
     device_prefetch_size = int(_config_get(config, "device_prefetch_size", 1))
@@ -311,6 +379,7 @@ def run_training_loop(
             unit="step",
             disable=not distributed.is_main,
         )
+        accumulation_step = 0
         while global_step < total_steps and (batch := prefetcher.next()) is not None:
             if stop_requested_on_any_rank(distributed):
                 if distributed.is_main:
@@ -331,6 +400,9 @@ def run_training_loop(
                 synchronize_device(device)
                 barrier(distributed)
                 measured_start_time = time.perf_counter()
+            next_micro_step_is_boundary = (
+                (accumulation_step + 1) % grad_accum_steps == 0
+            )
             metrics = train_step_impl(
                 model,
                 batch,
@@ -340,12 +412,21 @@ def run_training_loop(
                 grad_clip_norm,
                 grad_scaler=grad_scaler,
                 compute_collapse_metrics=(
-                    collapse_every_n_steps > 0
+                    next_micro_step_is_boundary
+                    and collapse_every_n_steps > 0
                     and (global_step + 1) % collapse_every_n_steps == 0
                 ),
                 global_step=global_step,
                 total_steps=total_steps,
+                gradient_accumulation_steps=grad_accum_steps,
+                accumulation_step=accumulation_step,
             )
+            accumulation_step += 1
+            optimizer_step = bool(
+                float(metrics.get("optimizer_step", metrics["loss"].new_tensor(1.0)))
+            )
+            if not optimizer_step:
+                continue
             global_step += 1
             if measured_start_time is not None:
                 measured_steps += 1
@@ -364,9 +445,19 @@ def run_training_loop(
                     epoch=epoch,
                     global_step=global_step,
                     every_n_steps=log_every_n_steps,
+                    flops_per_optimizer_step=flops_per_optimizer_step,
                 )
             if global_step % checkpoint_every_steps == 0:
-                if distributed.is_main:
+                if is_deepspeed_engine(model):
+                    save_deepspeed_checkpoint(
+                        checkpoint_dir=checkpoint_dir,
+                        engine=model,
+                        global_step=global_step,
+                        epoch=global_step // datamodule.train_steps,
+                        loss=float(metrics["loss"]),
+                        wandb_run_id=getattr(wandb_run, "id", None),
+                    )
+                elif distributed.is_main:
                     base_model, _ = split_pretrain_module(unwrap_model(model))
                     checkpoint_writer.save_checkpoint(
                         storage_join(checkpoint_dir, f"step-{global_step:08d}.pt"),
@@ -396,6 +487,8 @@ def run_training_loop(
                     )
                 )
                 barrier(distributed)
+            if distributed.is_main and not is_deepspeed_engine(model):
+                checkpoint_writer.log_completed_failures()
         pbar.close()
         if distributed.is_main:
             logging.info("Finished epoch %d at global_step=%d", epoch, global_step)
@@ -543,13 +636,21 @@ def log_train_metrics(
     epoch: int,
     global_step: int,
     every_n_steps: int,
+    flops_per_optimizer_step: float,
 ) -> None:
     if every_n_steps <= 0 or global_step % every_n_steps != 0:
         return
     loss_val = float(metrics["loss"].detach())
     pbar.set_postfix(loss=f"{loss_val:.4f}", step=global_step)
-    log_metrics = {f"train/{key}": float(value.detach()) for key, value in metrics.items()}
+    log_metrics = {
+        f"train/{key}": float(value.detach())
+        for key, value in metrics.items()
+    }
     log_metrics.update(learning_rate_metrics(config, optimizers))
+    cumulative_flops = cumulative_training_flops(global_step, flops_per_optimizer_step)
+    log_metrics["train/cumulative_flops"] = cumulative_flops
+    log_metrics["train/cumulative_peta_flops"] = cumulative_flops / 1e15
+    log_metrics["train/flops_per_optimizer_step"] = float(flops_per_optimizer_step)
     log_metrics["epoch"] = epoch
     log_metrics["global_step"] = global_step
     logger.log_metrics(log_metrics, step=global_step)

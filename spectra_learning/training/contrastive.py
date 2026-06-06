@@ -37,6 +37,8 @@ from spectra_learning.training.api import (
     build_logger,
     build_model_from_config,
     collect_and_log_param_metrics,
+    cumulative_training_flops,
+    estimate_training_flops_per_optimizer_step,
     parse_autocast_dtype,
 )
 from spectra_learning.training.checkpointing import (
@@ -1635,6 +1637,18 @@ def train_contrastive(
     if module.teacher_model is not None:
         module.teacher_model.eval()
     param_metrics = collect_and_log_param_metrics(module) if distributed.is_main else {}
+    flops_per_optimizer_step = estimate_training_flops_per_optimizer_step(
+        config,
+        module,
+        global_spectra_batch_size,
+    )
+    if distributed.is_main:
+        param_metrics["model/flops_per_optimizer_step_estimate"] = (
+            flops_per_optimizer_step
+        )
+        param_metrics["model/flops_per_sample_estimate"] = (
+            flops_per_optimizer_step / float(global_spectra_batch_size)
+        )
     autocast_dtype = parse_autocast_dtype(_config_get(config, "autocast_dtype", "bf16"))
     grad_scaler = build_grad_scaler(autocast_dtype, distributed.device)
     optimizers, schedulers = build_contrastive_optimizers(
@@ -1684,6 +1698,7 @@ def train_contrastive(
         global_step=global_step,
         total_steps=total_steps,
         distributed=distributed,
+        flops_per_optimizer_step=flops_per_optimizer_step,
     )
     cleanup_distributed(distributed)
     return {**results, **param_metrics}
@@ -1718,11 +1733,18 @@ def run_contrastive_loop(
     global_step: int,
     total_steps: int,
     distributed: DistributedContext,
+    flops_per_optimizer_step: float | None = None,
 ) -> dict[str, object]:
     log_every_n_steps = int(_config_get(config, "log_every_n_steps", 50))
     val_every_n_steps = int(_config_get(config, "contrastive_val_every_n_steps", 0))
     checkpoint_every_steps = int(config.checkpoint_every_steps)
     grad_clip_norm = _optional_float(_config_get(config, "grad_clip_norm", None))
+    if flops_per_optimizer_step is None:
+        flops_per_optimizer_step = estimate_training_flops_per_optimizer_step(
+            config,
+            unwrap_model(model),
+            int(_config_get(config, "contrastive_batch_size", config.batch_size)),
+        )
     loop_epochs = max(1, math.ceil(float(config.num_epochs)))
     start_time = time.perf_counter()
     last_val_metrics: dict[str, torch.Tensor] = {}
@@ -1781,6 +1803,15 @@ def run_contrastive_loop(
                 }
                 payload["global_step"] = global_step
                 payload["epoch"] = epoch
+                cumulative_flops = cumulative_training_flops(
+                    global_step,
+                    flops_per_optimizer_step,
+                )
+                payload["train/cumulative_flops"] = cumulative_flops
+                payload["train/cumulative_peta_flops"] = cumulative_flops / 1e15
+                payload["train/flops_per_optimizer_step"] = float(
+                    flops_per_optimizer_step
+                )
                 logger.log_metrics(payload, step=global_step)
                 pbar.set_postfix(
                     loss=f"{float(log_metrics['loss'].detach()):.4f}",

@@ -4,6 +4,7 @@ from typing import Any, Literal, cast, overload
 import torch
 
 from spectra_learning.models.diagnostics import _collapse_diagnostics
+from spectra_learning.training.deepspeed import is_deepspeed_engine
 from spectra_learning.training.distributed import unwrap_model
 from spectra_learning.training.modules import PretrainModule
 from spectra_learning.training.schedules import LRSchedulerLike
@@ -52,6 +53,8 @@ def train_step_impl(
     compute_collapse_metrics: bool = False,
     global_step: int = 0,
     total_steps: int = 1,
+    gradient_accumulation_steps: int = 1,
+    accumulation_step: int = 0,
 ) -> dict[str, torch.Tensor]:
     device_type = next(model.parameters()).device.type
     autocast_ctx = (
@@ -77,27 +80,54 @@ def train_step_impl(
     if compute_collapse_metrics and collapse_data:
         with torch.no_grad():
             metrics.update(_collapse_diagnostics(**cast(dict[str, Any], collapse_data)))
-    step_skipped = _backward_and_step(
-        metrics["loss"],
-        model,
-        optimizers,
-        grad_clip_norm,
-        grad_scaler,
-    )
+    if is_deepspeed_engine(model):
+        optimizer_step = _deepspeed_backward_and_step(metrics["loss"], model)
+        step_skipped = False
+    else:
+        optimizer_step = (accumulation_step + 1) % gradient_accumulation_steps == 0
+        step_skipped = _backward_and_step(
+            metrics["loss"] / gradient_accumulation_steps,
+            model,
+            optimizers,
+            grad_clip_norm,
+            grad_scaler,
+            optimizer_step=optimizer_step,
+        )
+    metrics["optimizer_step"] = metrics["loss"].new_tensor(float(optimizer_step))
+    if gradient_accumulation_steps > 1:
+        metrics["gradient_accumulation_steps"] = metrics["loss"].new_tensor(
+            float(gradient_accumulation_steps)
+        )
+        metrics["micro_step"] = metrics["loss"].new_tensor(
+            float(accumulation_step + 1)
+        )
     if _grad_scaler_enabled(grad_scaler):
         metrics["grad_scale"] = metrics["loss"].new_tensor(float(grad_scaler.get_scale()))
         metrics["optimizer_step_skipped"] = metrics["loss"].new_tensor(
             float(step_skipped)
         )
+    if not optimizer_step:
+        return metrics
     pretrain_module = cast(PretrainModule, unwrap_model(model))
     ema_momentum = None
     if not step_skipped:
         ema_momentum = pretrain_module.update_ema_teacher(global_step + 1, total_steps)
-        for scheduler in schedulers:
-            scheduler.step()
+        if not is_deepspeed_engine(model):
+            for scheduler in schedulers:
+                scheduler.step()
     if ema_momentum is not None:
         metrics["ema_teacher_momentum"] = metrics["loss"].new_tensor(ema_momentum)
     return metrics
+
+
+def _deepspeed_backward_and_step(
+    loss: torch.Tensor,
+    model: torch.nn.Module,
+) -> bool:
+    optimizer_step = bool(model.is_gradient_accumulation_boundary())
+    model.backward(loss)
+    model.step()
+    return optimizer_step
 
 
 def _backward_and_step(
@@ -106,16 +136,29 @@ def _backward_and_step(
     optimizers: list[torch.optim.Optimizer],
     grad_clip_norm: float | None,
     grad_scaler: torch.amp.GradScaler | None,
+    *,
+    optimizer_step: bool,
 ) -> bool:
+    sync_context = (
+        nullcontext()
+        if optimizer_step or not hasattr(model, "no_sync")
+        else model.no_sync()
+    )
     if not _grad_scaler_enabled(grad_scaler):
-        loss.backward()
+        with sync_context:
+            loss.backward()
+        if not optimizer_step:
+            return False
         _clip_grad_norm(model, grad_clip_norm)
         for optimizer in optimizers:
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
         return False
 
-    grad_scaler.scale(loss).backward()
+    with sync_context:
+        grad_scaler.scale(loss).backward()
+    if not optimizer_step:
+        return False
     active_optimizers = [
         optimizer for optimizer in optimizers if _optimizer_has_grad(optimizer)
     ]

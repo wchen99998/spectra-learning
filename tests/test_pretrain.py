@@ -10,6 +10,7 @@ from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pairformer import PairFeatureEmbedder
 from spectra_learning.models.peak_features import FourierFeatures, PeakFeatureEmbedder
 from spectra_learning.training.optimization import is_weight_decay_target
+from spectra_learning.training.modules import PretrainModule
 from spectra_learning.training.steps import train_step_impl
 from spectra_learning.training.api import (
     load_frozen_teacher_weights,
@@ -1405,6 +1406,101 @@ class BlockJEPATests(unittest.TestCase):
         self.assertFalse(torch.equal(before, after))
         self.assertEqual(scheduler.last_epoch, 1)
         self.assertTrue(all(param.grad is None for param in model.parameters()))
+
+    def test_train_step_impl_accumulates_before_optimizer_step(self):
+        model = self._build_model(masked_token_loss_weight=1.0)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+        before = next(model.encoder.parameters()).detach().clone()
+
+        first_metrics = train_step_impl(
+            model,
+            batch,
+            [optimizer],
+            [scheduler],
+            autocast_dtype=None,
+            grad_clip_norm=None,
+            gradient_accumulation_steps=2,
+            accumulation_step=0,
+        )
+        middle = next(model.encoder.parameters()).detach().clone()
+        second_metrics = train_step_impl(
+            model,
+            batch,
+            [optimizer],
+            [scheduler],
+            autocast_dtype=None,
+            grad_clip_norm=None,
+            global_step=0,
+            total_steps=2,
+            gradient_accumulation_steps=2,
+            accumulation_step=1,
+        )
+        after = next(model.encoder.parameters()).detach()
+
+        self.assertEqual(float(first_metrics["optimizer_step"]), 0.0)
+        self.assertEqual(float(second_metrics["optimizer_step"]), 1.0)
+        self.assertTrue(torch.equal(before, middle))
+        self.assertFalse(torch.equal(before, after))
+        self.assertEqual(scheduler.last_epoch, 1)
+        self.assertTrue(all(param.grad is None for param in model.parameters()))
+
+    def test_train_step_impl_delegates_backward_and_step_to_deepspeed_engine(self):
+        class DeepSpeedEngine(torch.nn.Module):
+            def __init__(self, module: torch.nn.Module) -> None:
+                super().__init__()
+                self.module = module
+                self.boundaries = [False, True]
+                self.micro_step = 0
+                self.backward_calls = 0
+                self.step_calls = 0
+
+            def forward(self, *args, **kwargs):
+                return self.module(*args, **kwargs)
+
+            def is_gradient_accumulation_boundary(self) -> bool:
+                return self.boundaries[self.micro_step]
+
+            def backward(self, loss: torch.Tensor) -> None:
+                self.backward_calls += 1
+                loss.backward()
+
+            def step(self) -> None:
+                self.step_calls += 1
+                self.micro_step += 1
+
+        model = PretrainModule(self._build_model(masked_token_loss_weight=1.0))
+        engine = DeepSpeedEngine(model)
+        batch = _make_batch(num_targets=model.model.jepa_num_target_blocks)
+
+        first_metrics = train_step_impl(
+            engine,
+            batch,
+            [],
+            [],
+            autocast_dtype=None,
+            grad_clip_norm=None,
+            gradient_accumulation_steps=2,
+            accumulation_step=0,
+        )
+        second_metrics = train_step_impl(
+            engine,
+            batch,
+            [],
+            [],
+            autocast_dtype=None,
+            grad_clip_norm=None,
+            global_step=0,
+            total_steps=2,
+            gradient_accumulation_steps=2,
+            accumulation_step=1,
+        )
+
+        self.assertEqual(float(first_metrics["optimizer_step"]), 0.0)
+        self.assertEqual(float(second_metrics["optimizer_step"]), 1.0)
+        self.assertEqual(engine.backward_calls, 2)
+        self.assertEqual(engine.step_calls, 2)
 
     def test_load_pretrained_weights_roundtrip(self):
         model = self._build_model()

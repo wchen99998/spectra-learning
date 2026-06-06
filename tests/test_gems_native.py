@@ -381,6 +381,57 @@ class GeMSNativeArtifactTests(unittest.TestCase):
             self.assertEqual(Path(kwargs["folder_path"]), artifact_dir)
             self.assertEqual(kwargs["repo_type"], "dataset")
             self.assertEqual(kwargs["revision"], "main")
+            self.assertEqual(kwargs["num_workers"], 8)
+
+    def test_prepare_gems_native_script_downloads_hf_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            hdf5_path = tmp_path / "GeMS_B.hdf5"
+            _write_fake_gems_hdf5(hdf5_path)
+
+            with (
+                mock.patch("scripts.prepare_gems_native.HfApi") as api_cls,
+                mock.patch(
+                    "scripts.prepare_gems_native.hf_hub_download",
+                    return_value=str(hdf5_path),
+                ) as download_mock,
+                mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "prepare_gems_native.py",
+                        "--source-gems-b",
+                        "--hf-repo-id",
+                        "cjim8889/gems-b-native",
+                        "--work-dir",
+                        str(tmp_path / "work"),
+                        "--num-workers",
+                        "1",
+                    ],
+                ),
+            ):
+                api = api_cls.return_value
+                prepare_gems_main()
+
+            artifact_dir = tmp_path / "work" / "artifact"
+            metadata = json.loads((artifact_dir / "metadata.json").read_text())
+            self.assertEqual(metadata["source_hdf5_path"], "")
+            self.assertEqual(
+                metadata["source_url"],
+                "https://huggingface.co/datasets/roman-bushuiev/GeMS/resolve/main/data/GeMS_B/GeMS_B.hdf5",
+            )
+            download_mock.assert_called_once_with(
+                repo_id="roman-bushuiev/GeMS",
+                filename="data/GeMS_B/GeMS_B.hdf5",
+                repo_type="dataset",
+                revision="main",
+                local_dir=(tmp_path / "work").resolve() / "source",
+            )
+            api.create_repo.assert_called_once_with(
+                "cjim8889/gems-b-native",
+                repo_type="dataset",
+                exist_ok=True,
+            )
 
     def test_build_gems_native_artifact_supports_parallel_shard_writes(self):
         with tempfile.TemporaryDirectory() as tmp:

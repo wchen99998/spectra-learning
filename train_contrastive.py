@@ -12,6 +12,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train NIST Murcko contrastive model.")
     parser.add_argument("--config", required=True, help="Path to config file.")
     parser.add_argument("--workdir", required=True, help="Output directory.")
+    parser.add_argument("--local_rank", type=int, default=0)
     parser.add_argument(
         "--init-checkpoint",
         default="",

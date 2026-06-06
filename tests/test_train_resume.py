@@ -1,5 +1,6 @@
 import tempfile
 import json
+import logging
 import sys
 import threading
 from pathlib import Path
@@ -30,6 +31,11 @@ from spectra_learning.training.modules import PretrainModule
 from spectra_learning.training.optimization import (
     build_optimizers,
     is_weight_decay_target,
+)
+from spectra_learning.training.deepspeed import build_deepspeed_config
+from spectra_learning.training.runtime import (
+    cumulative_training_flops,
+    estimate_training_flops_per_optimizer_step,
 )
 from spectra_learning.training.api import (
     _build_wandb_init_kwargs,
@@ -81,6 +87,22 @@ def _optimizer_config(**overrides) -> config_dict.ConfigDict:
     cfg.optimizer_fused = False
     cfg.update(overrides)
     return cfg
+
+
+class _FakePbar:
+    def __init__(self) -> None:
+        self.postfix = None
+
+    def set_postfix(self, **kwargs) -> None:
+        self.postfix = kwargs
+
+
+class _FakeLogger:
+    def __init__(self) -> None:
+        self.logs = []
+
+    def log_metrics(self, metrics, step=None) -> None:
+        self.logs.append((dict(metrics), step))
 
 
 class _CompileRecorder(torch.nn.Module):
@@ -310,6 +332,33 @@ def test_async_checkpoint_writer_returns_before_torch_save_finishes(monkeypatch,
     assert ckpt["global_step"] == 12
 
 
+def test_async_checkpoint_writer_logs_background_failures(monkeypatch, tmp_path: Path, caplog):
+    def fail_write_job(*args, **kwargs):
+        raise OSError("upload failed")
+
+    monkeypatch.setattr(
+        checkpointing_module,
+        "_write_training_checkpoint_job",
+        fail_write_job,
+    )
+    writer = AsyncCheckpointWriter()
+
+    with caplog.at_level(logging.WARNING):
+        writer.save_checkpoint(
+            path=tmp_path / "step-00000012.pt",
+            model=_small_model(),
+            optimizers=[],
+            schedulers=[],
+            global_step=12,
+            epoch=1,
+            loss=0.5,
+        )
+        writer.close()
+
+    assert "Checkpoint write failed." in caplog.text
+    assert "upload failed" in caplog.text
+
+
 def test_latest_ckpt_path_ignores_non_training_checkpoints(tmp_path: Path):
     checkpoint_dir = tmp_path / "checkpoints"
     checkpoint_dir.mkdir()
@@ -419,6 +468,61 @@ def test_training_loop_resumes_with_offset_loader(monkeypatch, tmp_path: Path):
 
     assert datamodule.calls == [(0, 3)]
     assert metrics["run/final_global_step"] == 5.0
+
+
+def test_training_loop_counts_optimizer_steps_with_gradient_accumulation(
+    monkeypatch,
+    tmp_path: Path,
+):
+    cfg = config_dict.ConfigDict()
+    cfg.autocast_dtype = "bf16"
+    cfg.log_every_n_steps = 0
+    cfg.collapse_metrics_every_n_steps = 0
+    cfg.checkpoint_every_steps = 1000
+    cfg.msg_probe_every_n_steps = 0
+    cfg.device_prefetch_size = 1
+    cfg.gradient_accumulation_steps = 2
+
+    class FakeDataModule:
+        train_steps = 2
+        global_batch_size = 4
+
+        def train_loader_for_epoch(self, epoch: int, start_batch: int = 0):
+            return [
+                {"peak_mz": torch.tensor([float(step)])}
+                for step in range(start_batch, self.train_steps * 2)
+            ]
+
+    accumulation_steps = []
+
+    def fake_train_step_impl(*args, **kwargs):
+        accumulation_step = int(kwargs["accumulation_step"])
+        accumulation_steps.append(accumulation_step)
+        return {
+            "loss": torch.tensor(1.0),
+            "optimizer_step": torch.tensor(float((accumulation_step + 1) % 2 == 0)),
+        }
+
+    monkeypatch.setattr(pretrain, "train_step_impl", fake_train_step_impl)
+
+    metrics = pretrain.run_training_loop(
+        config=cfg,
+        datamodule=FakeDataModule(),
+        model=torch.nn.Linear(1, 1),
+        optimizers=[],
+        schedulers=[],
+        logger=SimpleNamespace(experiment=None, log_metrics=lambda *args, **kwargs: None),
+        checkpoint_dir=tmp_path,
+        start_epoch=0,
+        loop_epochs=1,
+        resume_offset=0,
+        global_step=0,
+        total_steps=2,
+        device=torch.device("cpu"),
+    )
+
+    assert accumulation_steps == [0, 1, 2, 3]
+    assert metrics["run/final_global_step"] == 2.0
 
 
 def test_training_loop_continues_while_checkpoint_save_is_pending(monkeypatch, tmp_path: Path):
@@ -821,6 +925,66 @@ def test_build_optimizers_uses_single_adamw_optimizer_by_default():
     assert len(schedulers) == 1
 
 
+def test_estimate_training_flops_per_optimizer_step_uses_trainable_params():
+    model = torch.nn.Sequential(
+        torch.nn.Linear(4, 3),
+        torch.nn.Linear(3, 2),
+    )
+    model[1].requires_grad_(False)
+    cfg = config_dict.ConfigDict()
+
+    flops_per_step = estimate_training_flops_per_optimizer_step(
+        cfg,
+        model,
+        global_batch_size=8,
+    )
+
+    assert flops_per_step == 6.0 * sum(p.numel() for p in model[0].parameters()) * 8
+    assert cumulative_training_flops(5, flops_per_step) == 5 * flops_per_step
+
+
+def test_estimate_training_flops_per_optimizer_step_supports_config_override():
+    model = torch.nn.Linear(2, 2)
+    cfg = config_dict.ConfigDict()
+    cfg.training_flops_per_optimizer_step = 123.0
+
+    assert (
+        estimate_training_flops_per_optimizer_step(
+            cfg,
+            model,
+            global_batch_size=8,
+        )
+        == 123.0
+    )
+
+
+def test_log_train_metrics_includes_cumulative_flops():
+    cfg = _optimizer_config()
+    logger = _FakeLogger()
+    pbar = _FakePbar()
+    optimizer = torch.optim.SGD([torch.nn.Parameter(torch.ones(()))], lr=0.1)
+
+    pretrain.log_train_metrics(
+        cfg,
+        logger,
+        pbar,
+        {"loss": torch.tensor(2.0)},
+        [optimizer],
+        epoch=3,
+        global_step=5,
+        every_n_steps=1,
+        flops_per_optimizer_step=1.5e12,
+    )
+
+    payload, step = logger.logs[-1]
+    assert step == 5
+    assert payload["train/cumulative_flops"] == 7.5e12
+    assert payload["train/cumulative_peta_flops"] == 0.0075
+    assert payload["train/flops_per_optimizer_step"] == 1.5e12
+    assert payload["global_step"] == 5
+    assert pbar.postfix == {"loss": "2.0000", "step": 5}
+
+
 def test_build_optimizers_do_not_include_standalone_covariance_pooler():
     cfg = _optimizer_config()
     model = _small_model()
@@ -867,6 +1031,57 @@ def test_build_optimizers_uses_official_torch_muon_and_adamw():
     assert id(qkv) in muon_param_ids
     assert all(param.ndim == 2 for group in muon_optimizer.param_groups for param in group["params"])
     assert muon_param_ids.isdisjoint(adamw_param_ids)
+
+
+def test_build_deepspeed_config_uses_zero_and_microbatching():
+    cfg = _optimizer_config(
+        batch_size=64,
+        gradient_accumulation_steps=4,
+        deepspeed_zero_stage=1,
+    )
+
+    ds_config = build_deepspeed_config(
+        cfg,
+        train_micro_batch_size_per_gpu=8,
+        autocast_dtype=torch.bfloat16,
+        grad_clip_norm=1.0,
+    )
+
+    assert ds_config["train_batch_size"] == 64
+    assert ds_config["train_micro_batch_size_per_gpu"] == 8
+    assert ds_config["gradient_accumulation_steps"] == 4
+    assert ds_config["zero_optimization"] == {"stage": 1}
+    assert ds_config["gradient_clipping"] == 1.0
+    assert ds_config["bf16"] == {"enabled": True}
+    assert ds_config["optimizer"]["type"] == "Adam"
+    assert ds_config["optimizer"]["params"]["adam_w_mode"] is True
+
+
+def test_build_deepspeed_config_uses_muon_gram_orthogonalization():
+    cfg = _optimizer_config(
+        optimizer="muon",
+        batch_size=32,
+        gradient_accumulation_steps=2,
+        muon_lr=2e-3,
+        adamw_lr=5e-4,
+        muon_momentum=0.9,
+    )
+
+    ds_config = build_deepspeed_config(
+        cfg,
+        train_micro_batch_size_per_gpu=8,
+        autocast_dtype=torch.float16,
+        grad_clip_norm=None,
+    )
+    optimizer_config = ds_config["optimizer"]
+
+    assert ds_config["zero_optimization"] == {"stage": 2}
+    assert ds_config["fp16"] == {"enabled": True, "loss_scale": 0}
+    assert optimizer_config["type"] == "Muon"
+    assert optimizer_config["params"]["muon_lr"] == 2e-3
+    assert optimizer_config["params"]["adam_lr"] == 5e-4
+    assert optimizer_config["params"]["momentum"] == 0.9
+    assert optimizer_config["params"]["ns_method"] == "gram"
 
 
 def test_load_resume_model_state_rejects_removed_cls_predictor_keys():

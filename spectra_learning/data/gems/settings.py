@@ -36,6 +36,7 @@ class GemsDataConfig:
     gems_native_source_hdf5_path: str
     gems_native_source_url: str
     batch_size: int
+    gradient_accumulation_steps: int
     drop_remainder: bool
     max_precursor_mz: float
     min_peak_intensity: float
@@ -85,6 +86,9 @@ class GemsDataConfig:
                 _config_get(config, "gems_native_source_url", "")
             ).strip(),
             batch_size=int(_config_get(config, "batch_size", DEFAULT_BATCH_SIZE)),
+            gradient_accumulation_steps=int(
+                _config_get(config, "gradient_accumulation_steps", 1)
+            ),
             drop_remainder=bool(_config_get(config, "drop_remainder", True)),
             max_precursor_mz=float(
                 _config_get(config, "max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)

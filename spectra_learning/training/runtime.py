@@ -1,6 +1,11 @@
 import logging
 
 import torch
+from ml_collections import config_dict
+
+
+def _config_get(config: config_dict.ConfigDict, key: str, default: object) -> object:
+    return config.get(key, default)
 
 
 def parse_autocast_dtype(value: object) -> torch.dtype | None:
@@ -58,3 +63,33 @@ def collect_and_log_param_metrics(model: torch.nn.Module) -> dict[str, float]:
         metrics[f"model/params_total/{module_name}"] = float(mod_total)
         metrics[f"model/params_trainable/{module_name}"] = float(mod_train)
     return metrics
+
+
+def trainable_parameter_count(model: torch.nn.Module) -> int:
+    return sum(param.numel() for param in model.parameters() if param.requires_grad)
+
+
+def estimate_training_flops_per_sample(
+    config: config_dict.ConfigDict,
+    model: torch.nn.Module,
+) -> float:
+    configured = _config_get(config, "training_flops_per_sample", None)
+    if configured is not None:
+        return float(configured)
+    multiplier = float(_config_get(config, "training_flops_per_parameter", 6.0))
+    return multiplier * float(trainable_parameter_count(model))
+
+
+def estimate_training_flops_per_optimizer_step(
+    config: config_dict.ConfigDict,
+    model: torch.nn.Module,
+    global_batch_size: int,
+) -> float:
+    configured = _config_get(config, "training_flops_per_optimizer_step", None)
+    if configured is not None:
+        return float(configured)
+    return estimate_training_flops_per_sample(config, model) * float(global_batch_size)
+
+
+def cumulative_training_flops(global_step: int, flops_per_optimizer_step: float) -> float:
+    return float(global_step) * float(flops_per_optimizer_step)
