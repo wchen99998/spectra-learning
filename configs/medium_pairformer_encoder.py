@@ -42,8 +42,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pairformer_pair_num_heads = 12
     cfg.pairformer_pair_feature_hidden_dim = 768
     cfg.pairmixer_use_pair_bias_attention = True
-    cfg.pairformer_refresh_pair = True
-    cfg.pairformer_refresh_pair_layers = [1, 2]
     cfg.pairformer_use_fourier_features = True
     cfg.pairformer_fourier_num_freqs = 16
     cfg.pairformer_fourier_x_min = 0.01

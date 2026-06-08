@@ -455,7 +455,7 @@ def test_pairmixer_pair_bias_attention_setting_is_configurable():
     assert settings.pairmixer_use_pair_bias_attention
 
 
-def test_predictor_uses_pairmixer_without_pairformer_refresh_layers():
+def test_predictor_uses_pairmixer_without_pairformer_attention_extras():
     model = PeakSetJEPA(
         model_dim=32,
         encoder_num_layers=2,
@@ -465,7 +465,6 @@ def test_predictor_uses_pairmixer_without_pairformer_refresh_layers():
         jepa_num_target_blocks=2,
         masked_token_loss_weight=1.0,
         masked_latent_predictor_num_layers=3,
-        pairformer_refresh_pair_layers=[2],
     )
 
     for block in model.masked_latent_predictor:
@@ -473,27 +472,6 @@ def test_predictor_uses_pairmixer_without_pairformer_refresh_layers():
         assert not hasattr(block, "refresh_pair")
         assert not hasattr(block, "tri_att_start")
         assert not hasattr(block, "tri_att_end")
-
-
-def test_pairformer_refresh_settings_do_not_change_pairmixer_blocks():
-    model = _build_model()
-    selected_model = PeakSetJEPA(
-        model_dim=32,
-        encoder_num_layers=2,
-        encoder_num_heads=4,
-        num_peaks=6,
-        feature_mlp_hidden_dim=32,
-        jepa_num_target_blocks=2,
-        masked_token_loss_weight=1.0,
-        pairformer_refresh_pair_layers=[1],
-    )
-
-    assert not hasattr(model.encoder.blocks[0], "refresh_pair")
-    assert not hasattr(selected_model.encoder.blocks[0], "refresh_pair")
-    assert not hasattr(model.masked_latent_predictor[0], "refresh_pair")
-    assert not hasattr(model.masked_latent_predictor[1], "refresh_pair")
-    assert not hasattr(selected_model.masked_latent_predictor[0], "refresh_pair")
-    assert not hasattr(selected_model.masked_latent_predictor[1], "refresh_pair")
 
 
 def test_masked_latent_predictor_uses_pairmixer_blocks():
