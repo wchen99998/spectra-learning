@@ -9,9 +9,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.gems_native_repo_id = "cjim8889/gems-a10-native"
     cfg.nist_murcko_probe_repo_id = "cjim8889/hr_msms_nist_mcebio_murcko_20260529"
     cfg.nist_murcko_probe_revision = "main"
-    cfg.nist_murcko_probe_train_samples = 30_000
-    cfg.nist_murcko_probe_val_samples = 10_000
-    cfg.nist_murcko_probe_test_samples = 10_000
+    cfg.nist_murcko_probe_train_samples = 100_000
+    cfg.nist_murcko_probe_val_samples = 20_000
+    cfg.nist_murcko_probe_test_samples = 20_000
     cfg.nist_murcko_probe_num_repeats = 1
     cfg.batch_size = 1024
     cfg.gradient_accumulation_steps = 2
@@ -138,8 +138,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_early_stopping = True
     cfg.msg_probe_early_stopping_min_delta = 0.0001
     cfg.msg_probe_early_stopping_min_epochs = 20
-    cfg.msg_probe_early_stopping_patience = 20
-    cfg.msg_probe_every_n_steps = 1.0
+    cfg.msg_probe_early_stopping_patience = 5
+    cfg.msg_probe_every_n_steps = 50_000.
     cfg.msg_probe_learning_rate = 0.0003
     cfg.msg_probe_max_test_samples = None
     cfg.msg_probe_max_train_samples = None
@@ -154,7 +154,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_grad_clip_norm = 1.0
     cfg.msg_probe_warmup_steps = 0
     cfg.msg_probe_weight_decay = 0
-    cfg.msg_probe_batch_size = 256
+    cfg.msg_probe_batch_size = 512
 
     # Optimizer
     cfg.learning_rate = 4e-04
