@@ -110,7 +110,6 @@ def train_and_evaluate(
 ) -> dict[str, object]:
     install_stop_signal_handlers()
     distributed = init_distributed_from_env()
-    configure_torch_runtime(config)
     workdir = normalize_storage_path(workdir)
     local_workdir = local_scratch_dir(workdir)
     if distributed.is_main:
@@ -493,10 +492,6 @@ def run_training_loop(
     return last_msg_probe_metrics
 
 
-def configure_torch_runtime(config: config_dict.ConfigDict) -> None:
-    pass
-
-
 def seed_all(seed: int) -> None:
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -685,6 +680,3 @@ def training_deadline(config: config_dict.ConfigDict) -> float | None:
 
 def optional_float(value: Any) -> float | None:
     return None if value is None else float(value)
-
-
-_configure_dynamo_for_optimizer = configure_torch_runtime

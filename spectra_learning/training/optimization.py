@@ -33,7 +33,7 @@ def build_optimizers(
     device: torch.device,
 ) -> tuple[list[torch.optim.Optimizer], list[LRSchedulerLike]]:
     settings = _optimizer_settings(config, device)
-    return _build_single_adamw_optimizer(config, model, total_steps, settings)
+    return _build_single_adamw_optimizer(model, total_steps, settings)
 
 
 def _optimizer_settings(
@@ -48,7 +48,6 @@ def _optimizer_settings(
         "min_learning_rate": _config_get(config, "min_learning_rate", None),
         "b2": float(_config_get(config, "b2", 0.999)),
         "weight_decay": float(config.weight_decay),
-        "is_cuda": is_cuda,
         "fused": is_cuda if fused_cfg is None else bool(fused_cfg) and is_cuda,
     }
 
@@ -69,7 +68,6 @@ def _adamw(
 
 
 def _build_single_adamw_optimizer(
-    config: config_dict.ConfigDict,
     model: torch.nn.Module,
     total_steps: int,
     settings: dict,
