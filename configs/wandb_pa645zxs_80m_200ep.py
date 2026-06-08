@@ -36,7 +36,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_mask_lengths = (2, 4, 8, 12)
     cfg.jepa_mask_round_from = 3
 
-    cfg.optimizer = "muon"
+    cfg.optimizer = "adamw"
 
     cfg.run_name_suffix = "mae-all-masks-80m-200ep-pred20pct"
 

@@ -130,12 +130,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.optimizer = "adamw"
     cfg.optimizer_fused = True
     cfg.adamw_lr = None
-    cfg.muon_lr = None
-    cfg.muon_adjust_lr_fn = "match_rms_adamw"
-    cfg.muon_momentum = 0.95
-    cfg.muon_nesterov = True
-    cfg.muon_ns_steps = 5
-    cfg.muon_weight_decay = None
 
     # Logging
     cfg.enable_wandb = True

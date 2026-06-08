@@ -32,7 +32,6 @@ from spectra_learning.training.optimization import (
     build_optimizers,
     is_weight_decay_target,
 )
-from spectra_learning.training.deepspeed import build_deepspeed_config
 from spectra_learning.training.runtime import (
     cumulative_training_flops,
     estimate_training_flops_per_optimizer_step,
@@ -1009,9 +1008,9 @@ def test_build_optimizers_do_not_include_standalone_covariance_pooler():
     assert pooler_param_ids.isdisjoint(optimizer_param_ids)
 
 
-def test_build_optimizers_uses_official_torch_muon_and_adamw():
+def test_build_optimizers_uses_single_adamw_optimizer():
     model = _small_model()
-    cfg = _optimizer_config(optimizer="muon")
+    cfg = _optimizer_config()
 
     optimizers, schedulers = build_optimizers(
         cfg,
@@ -1019,69 +1018,17 @@ def test_build_optimizers_uses_official_torch_muon_and_adamw():
         total_steps=10,
         device=torch.device("cpu"),
     )
-    qkv = model.encoder.blocks[0].single_attention.wqkv.weight
-    muon_optimizer = next(opt for opt in optimizers if isinstance(opt, torch.optim.Muon))
-    adamw_optimizer = next(opt for opt in optimizers if isinstance(opt, torch.optim.AdamW))
-    muon_param_ids = _optimizer_param_ids(muon_optimizer)
-    adamw_param_ids = _optimizer_param_ids(adamw_optimizer)
+    optimizer = optimizers[0]
+    optimized_param_ids = _optimizer_param_ids(optimizer)
+    trainable_param_ids = {
+        id(param) for param in model.parameters() if param.requires_grad
+    }
 
-    assert len(optimizers) == 2
-    assert len(schedulers) == 2
-    assert not hasattr(muon_optimizer, "scalar_optimizer")
-    assert id(qkv) in muon_param_ids
-    assert all(param.ndim == 2 for group in muon_optimizer.param_groups for param in group["params"])
-    assert muon_param_ids.isdisjoint(adamw_param_ids)
-
-
-def test_build_deepspeed_config_uses_zero_and_microbatching():
-    cfg = _optimizer_config(
-        batch_size=64,
-        gradient_accumulation_steps=4,
-        deepspeed_zero_stage=1,
-    )
-
-    ds_config = build_deepspeed_config(
-        cfg,
-        train_micro_batch_size_per_gpu=8,
-        autocast_dtype=torch.bfloat16,
-        grad_clip_norm=1.0,
-    )
-
-    assert ds_config["train_batch_size"] == 64
-    assert ds_config["train_micro_batch_size_per_gpu"] == 8
-    assert ds_config["gradient_accumulation_steps"] == 4
-    assert ds_config["zero_optimization"] == {"stage": 1}
-    assert ds_config["gradient_clipping"] == 1.0
-    assert ds_config["bf16"] == {"enabled": True}
-    assert ds_config["optimizer"]["type"] == "Adam"
-    assert ds_config["optimizer"]["params"]["adam_w_mode"] is True
-
-
-def test_build_deepspeed_config_uses_muon_gram_orthogonalization():
-    cfg = _optimizer_config(
-        optimizer="muon",
-        batch_size=32,
-        gradient_accumulation_steps=2,
-        muon_lr=2e-3,
-        adamw_lr=5e-4,
-        muon_momentum=0.9,
-    )
-
-    ds_config = build_deepspeed_config(
-        cfg,
-        train_micro_batch_size_per_gpu=8,
-        autocast_dtype=torch.float16,
-        grad_clip_norm=None,
-    )
-    optimizer_config = ds_config["optimizer"]
-
-    assert ds_config["zero_optimization"] == {"stage": 2}
-    assert ds_config["fp16"] == {"enabled": True, "loss_scale": 0}
-    assert optimizer_config["type"] == "Muon"
-    assert optimizer_config["params"]["muon_lr"] == 2e-3
-    assert optimizer_config["params"]["adam_lr"] == 5e-4
-    assert optimizer_config["params"]["momentum"] == 0.9
-    assert optimizer_config["params"]["ns_method"] == "gram"
+    assert len(optimizers) == 1
+    assert len(schedulers) == 1
+    assert isinstance(optimizer, torch.optim.AdamW)
+    assert optimized_param_ids == trainable_param_ids
+    assert {group["weight_decay"] for group in optimizer.param_groups} == {0.0, 0.01}
 
 
 def test_load_resume_model_state_rejects_removed_cls_predictor_keys():

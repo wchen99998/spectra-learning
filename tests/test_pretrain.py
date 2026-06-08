@@ -1446,62 +1446,6 @@ class BlockJEPATests(unittest.TestCase):
         self.assertEqual(scheduler.last_epoch, 1)
         self.assertTrue(all(param.grad is None for param in model.parameters()))
 
-    def test_train_step_impl_delegates_backward_and_step_to_deepspeed_engine(self):
-        class DeepSpeedEngine(torch.nn.Module):
-            def __init__(self, module: torch.nn.Module) -> None:
-                super().__init__()
-                self.module = module
-                self.boundaries = [False, True]
-                self.micro_step = 0
-                self.backward_calls = 0
-                self.step_calls = 0
-
-            def forward(self, *args, **kwargs):
-                return self.module(*args, **kwargs)
-
-            def is_gradient_accumulation_boundary(self) -> bool:
-                return self.boundaries[self.micro_step]
-
-            def backward(self, loss: torch.Tensor) -> None:
-                self.backward_calls += 1
-                loss.backward()
-
-            def step(self) -> None:
-                self.step_calls += 1
-                self.micro_step += 1
-
-        model = PretrainModule(self._build_model(masked_token_loss_weight=1.0))
-        engine = DeepSpeedEngine(model)
-        batch = _make_batch(num_targets=model.model.jepa_num_target_blocks)
-
-        first_metrics = train_step_impl(
-            engine,
-            batch,
-            [],
-            [],
-            autocast_dtype=None,
-            grad_clip_norm=None,
-            gradient_accumulation_steps=2,
-            accumulation_step=0,
-        )
-        second_metrics = train_step_impl(
-            engine,
-            batch,
-            [],
-            [],
-            autocast_dtype=None,
-            grad_clip_norm=None,
-            global_step=0,
-            total_steps=2,
-            gradient_accumulation_steps=2,
-            accumulation_step=1,
-        )
-
-        self.assertEqual(float(first_metrics["optimizer_step"]), 0.0)
-        self.assertEqual(float(second_metrics["optimizer_step"]), 1.0)
-        self.assertEqual(engine.backward_calls, 2)
-        self.assertEqual(engine.step_calls, 2)
-
     def test_load_pretrained_weights_roundtrip(self):
         model = self._build_model()
         with tempfile.TemporaryDirectory() as tmpdir:

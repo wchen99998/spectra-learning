@@ -69,8 +69,6 @@ def any_rank(value: bool, context: DistributedContext) -> bool:
 def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
     if isinstance(model, DistributedDataParallel):
         return model.module
-    if model.__class__.__name__ == "DeepSpeedEngine":
-        return model.module
     return model
 
 

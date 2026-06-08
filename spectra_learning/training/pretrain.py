@@ -36,14 +36,6 @@ from spectra_learning.training.distributed import (
     unwrap_model,
     wrap_distributed_model,
 )
-from spectra_learning.training.deepspeed import (
-    deepspeed_enabled,
-    gradient_accumulation_steps,
-    initialize_deepspeed,
-    is_deepspeed_engine,
-    restore_deepspeed_training_state,
-    save_deepspeed_checkpoint,
-)
 from spectra_learning.training.logging import MetricLogger, log_msg_probe_metrics
 from spectra_learning.training.modules import PretrainModule, split_pretrain_module
 from spectra_learning.training.optimization import build_optimizers
@@ -84,6 +76,10 @@ _STOP_REQUESTED = False
 
 def _config_get(config: config_dict.ConfigDict, key: str, default: Any) -> Any:
     return config.get(key, default)
+
+
+def gradient_accumulation_steps(config: config_dict.ConfigDict) -> int:
+    return int(_config_get(config, "gradient_accumulation_steps", 1))
 
 
 def _handle_stop_signal(signum: int, frame: object) -> None:
@@ -164,54 +160,36 @@ def train_and_evaluate(
     train_module.to(device).train()
     autocast_dtype = parse_autocast_dtype(_config_get(config, "autocast_dtype", "bf16"))
     grad_clip_norm = optional_float(_config_get(config, "grad_clip_norm", None))
-    use_deepspeed = deepspeed_enabled(config)
-    grad_scaler = None if use_deepspeed else build_grad_scaler(autocast_dtype, device)
+    grad_scaler = build_grad_scaler(autocast_dtype, device)
     checkpoint_dir = storage_join(workdir, "checkpoints")
     if distributed.is_main:
         storage_mkdir(checkpoint_dir)
     logger = build_logger(config, local_workdir) if distributed.is_main else MetricLogger()
-    if use_deepspeed:
-        compile_forward(train_module, config)
-        train_model, optimizers, schedulers = initialize_deepspeed(
-            config=config,
-            model=train_module,
-            total_steps=total_steps,
-            train_micro_batch_size_per_gpu=datamodule.batch_size,
-            autocast_dtype=autocast_dtype,
-            grad_clip_norm=grad_clip_norm,
-        )
-        start_epoch, global_step, resume_offset = restore_deepspeed_training_state(
-            config=config,
-            checkpoint_dir=checkpoint_dir,
-            engine=train_model,
-            steps_per_epoch=datamodule.train_steps,
-        )
-    else:
-        optimizers, schedulers = build_optimizers(
-            config,
-            train_module,
-            total_steps,
-            device,
-        )
-        start_epoch, global_step, resume_offset = restore_training_state(
-            config=config,
-            checkpoint_dir=checkpoint_dir,
-            model=model,
-            optimizers=optimizers,
-            schedulers=schedulers,
-            grad_scaler=grad_scaler,
-            steps_per_epoch=datamodule.train_steps,
-            device=device,
-        )
-        compile_forward(train_module, config)
-        train_model = wrap_distributed_model(
-            train_module,
-            distributed,
-            static_graph=bool(_config_get(config, "ddp_static_graph", True)),
-            find_unused_parameters=bool(
-                _config_get(config, "ddp_find_unused_parameters", False)
-            ),
-        )
+    optimizers, schedulers = build_optimizers(
+        config,
+        train_module,
+        total_steps,
+        device,
+    )
+    start_epoch, global_step, resume_offset = restore_training_state(
+        config=config,
+        checkpoint_dir=checkpoint_dir,
+        model=model,
+        optimizers=optimizers,
+        schedulers=schedulers,
+        grad_scaler=grad_scaler,
+        steps_per_epoch=datamodule.train_steps,
+        device=device,
+    )
+    compile_forward(train_module, config)
+    train_model = wrap_distributed_model(
+        train_module,
+        distributed,
+        static_graph=bool(_config_get(config, "ddp_static_graph", True)),
+        find_unused_parameters=bool(
+            _config_get(config, "ddp_find_unused_parameters", False)
+        ),
+    )
     if distributed.is_main:
         logger.log_metrics(model_param_metrics, step=global_step)
     checkpoint_writer = AsyncCheckpointWriter()
@@ -236,17 +214,7 @@ def train_and_evaluate(
         flops_per_optimizer_step=flops_per_optimizer_step,
     )
     final_global_step = int(cast(float, last_msg_probe_metrics["run/final_global_step"]))
-    if is_deepspeed_engine(train_model):
-        save_deepspeed_checkpoint(
-            checkpoint_dir=checkpoint_dir,
-            engine=train_model,
-            global_step=final_global_step,
-            epoch=final_global_step // datamodule.train_steps,
-            loss=float("nan"),
-            wandb_run_id=getattr(logger.experiment, "id", None),
-            name="last",
-        )
-    elif distributed.is_main:
+    if distributed.is_main:
         base_model, _ = split_pretrain_module(unwrap_model(train_model))
         checkpoint_writer.save_checkpoint(
             storage_join(checkpoint_dir, "last.pt"),
@@ -319,7 +287,7 @@ def run_training_loop(
         autocast_dtype = parse_autocast_dtype(
             _config_get(config, "autocast_dtype", "bf16")
         )
-    if grad_scaler is None and not is_deepspeed_engine(model):
+    if grad_scaler is None:
         grad_scaler = build_grad_scaler(autocast_dtype, device)
     owns_checkpoint_writer = checkpoint_writer is None
     if checkpoint_writer is None:
@@ -448,16 +416,7 @@ def run_training_loop(
                     flops_per_optimizer_step=flops_per_optimizer_step,
                 )
             if global_step % checkpoint_every_steps == 0:
-                if is_deepspeed_engine(model):
-                    save_deepspeed_checkpoint(
-                        checkpoint_dir=checkpoint_dir,
-                        engine=model,
-                        global_step=global_step,
-                        epoch=global_step // datamodule.train_steps,
-                        loss=float(metrics["loss"]),
-                        wandb_run_id=getattr(wandb_run, "id", None),
-                    )
-                elif distributed.is_main:
+                if distributed.is_main:
                     base_model, _ = split_pretrain_module(unwrap_model(model))
                     checkpoint_writer.save_checkpoint(
                         storage_join(checkpoint_dir, f"step-{global_step:08d}.pt"),
@@ -487,7 +446,7 @@ def run_training_loop(
                     )
                 )
                 barrier(distributed)
-            if distributed.is_main and not is_deepspeed_engine(model):
+            if distributed.is_main:
                 checkpoint_writer.log_completed_failures()
         pbar.close()
         if distributed.is_main:
@@ -535,11 +494,7 @@ def run_training_loop(
 
 
 def configure_torch_runtime(config: config_dict.ConfigDict) -> None:
-    if str(_config_get(config, "optimizer", "adamw")).lower() == "muon":
-        limit = int(_config_get(config, "dynamo_recompile_limit", 64))
-        torch._dynamo.config.recompile_limit = limit
-        torch._dynamo.config.cache_size_limit = limit
-        logging.info("TorchDynamo cache limits set to %d for Muon.", limit)
+    pass
 
 
 def seed_all(seed: int) -> None:
@@ -660,13 +615,6 @@ def learning_rate_metrics(
     config: config_dict.ConfigDict,
     optimizers: list[torch.optim.Optimizer],
 ) -> dict[str, float]:
-    optimizer_type = str(_config_get(config, "optimizer", "adamw")).lower()
-    if optimizer_type == "muon":
-        metrics = {}
-        for idx, optimizer in enumerate(optimizers):
-            label = getattr(optimizer, "_spectra_lr_label", idx)
-            metrics[f"train/lr_{label}"] = float(optimizer.param_groups[0]["lr"])
-        return metrics
     return {"train/learning_rate": float(optimizers[0].param_groups[0]["lr"])}
 
 

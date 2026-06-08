@@ -32,15 +32,7 @@ def build_optimizers(
     total_steps: int,
     device: torch.device,
 ) -> tuple[list[torch.optim.Optimizer], list[LRSchedulerLike]]:
-    optimizer_type = str(_config_get(config, "optimizer", "adamw")).lower()
     settings = _optimizer_settings(config, device)
-    if optimizer_type == "muon":
-        return _build_muon_optimizers(
-            config,
-            model,
-            total_steps,
-            settings,
-        )
     return _build_single_adamw_optimizer(config, model, total_steps, settings)
 
 
@@ -76,105 +68,6 @@ def _adamw(
     )
 
 
-def _build_muon_optimizers(
-    config: config_dict.ConfigDict,
-    model: torch.nn.Module,
-    total_steps: int,
-    settings: dict,
-) -> tuple[list[torch.optim.Optimizer], list[LRSchedulerLike]]:
-    return _build_single_muon_optimizer(config, model, total_steps, settings)
-
-
-def _muon_kwargs(config: config_dict.ConfigDict, settings: dict) -> dict:
-    adjust_lr_fn = _config_get(config, "muon_adjust_lr_fn", "match_rms_adamw")
-    if adjust_lr_fn is not None:
-        adjust_lr_fn = str(adjust_lr_fn)
-    return dict(
-        weight_decay=float(
-            _config_get(config, "muon_weight_decay", None) or settings["weight_decay"]
-        ),
-        momentum=float(_config_get(config, "muon_momentum", 0.95)),
-        nesterov=bool(_config_get(config, "muon_nesterov", True)),
-        ns_steps=int(_config_get(config, "muon_ns_steps", 5)),
-        adjust_lr_fn=adjust_lr_fn,
-    )
-
-
-def _build_muon_specs(
-    config: config_dict.ConfigDict,
-    total_steps: int,
-    optimizer_specs: list[tuple],
-    settings: dict,
-) -> tuple[list[torch.optim.Optimizer], list[LRSchedulerLike]]:
-    optimizers: list[torch.optim.Optimizer] = []
-    schedulers: list[LRSchedulerLike] = []
-    for label, optimizer_type, params, lr, min_lr in optimizer_specs:
-        if not params:
-            continue
-        if optimizer_type == "muon":
-            optimizer = torch.optim.Muon(
-                params,
-                lr=lr,
-                **_muon_kwargs(config, settings),
-            )
-        else:
-            optimizer = _adamw(
-                params,
-                lr=lr,
-                b2=settings["b2"],
-                fused=settings["fused"],
-            )
-        setattr(optimizer, "_spectra_lr_label", label)
-        optimizers.append(optimizer)
-        schedulers.append(
-            make_cosine_schedule(
-                optimizer,
-                total_steps,
-                settings["warmup_steps"],
-                min_lr,
-            )
-        )
-    return optimizers, schedulers
-
-
-def _build_single_muon_optimizer(
-    config: config_dict.ConfigDict,
-    model: torch.nn.Module,
-    total_steps: int,
-    settings: dict,
-) -> tuple[list[torch.optim.Optimizer], list[LRSchedulerLike]]:
-    muon_params: list[torch.nn.Parameter] = []
-    adamw_no_decay_params = []
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
-        if is_weight_decay_target(name, param):
-            muon_params.append(param)
-        else:
-            adamw_no_decay_params.append(param)
-    optimizer_specs = [
-        (
-            "muon",
-            "muon",
-            muon_params,
-            float(_config_get(config, "muon_lr", None) or settings["base_lr"]),
-            settings["min_learning_rate"],
-        ),
-        (
-            "adamw",
-            "adamw",
-            build_adamw_param_groups(
-                [],
-                adamw_no_decay_params,
-                settings["weight_decay"],
-            ),
-            float(_config_get(config, "adamw_lr", None) or settings["base_lr"]),
-            settings["min_learning_rate"],
-        ),
-    ]
-    return _build_muon_specs(config, total_steps, optimizer_specs, settings)
-
-
 def _build_single_adamw_optimizer(
     config: config_dict.ConfigDict,
     model: torch.nn.Module,
@@ -188,11 +81,13 @@ def _build_single_adamw_optimizer(
             decay_params.append(param)
         elif param.requires_grad:
             no_decay_params.append(param)
+    param_groups = build_adamw_param_groups(
+        decay_params,
+        no_decay_params,
+        settings["weight_decay"],
+    )
     optimizer = _adamw(
-        [
-            {"params": no_decay_params, "weight_decay": 0.0},
-            {"params": decay_params, "weight_decay": settings["weight_decay"]},
-        ],
+        param_groups,
         lr=settings["base_lr"],
         b2=settings["b2"],
         fused=settings["fused"],

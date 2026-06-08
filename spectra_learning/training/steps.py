@@ -4,7 +4,6 @@ from typing import Any, Literal, cast, overload
 import torch
 
 from spectra_learning.models.diagnostics import _collapse_diagnostics
-from spectra_learning.training.deepspeed import is_deepspeed_engine
 from spectra_learning.training.distributed import unwrap_model
 from spectra_learning.training.modules import PretrainModule
 from spectra_learning.training.schedules import LRSchedulerLike
@@ -80,19 +79,15 @@ def train_step_impl(
     if compute_collapse_metrics and collapse_data:
         with torch.no_grad():
             metrics.update(_collapse_diagnostics(**cast(dict[str, Any], collapse_data)))
-    if is_deepspeed_engine(model):
-        optimizer_step = _deepspeed_backward_and_step(metrics["loss"], model)
-        step_skipped = False
-    else:
-        optimizer_step = (accumulation_step + 1) % gradient_accumulation_steps == 0
-        step_skipped = _backward_and_step(
-            metrics["loss"] / gradient_accumulation_steps,
-            model,
-            optimizers,
-            grad_clip_norm,
-            grad_scaler,
-            optimizer_step=optimizer_step,
-        )
+    optimizer_step = (accumulation_step + 1) % gradient_accumulation_steps == 0
+    step_skipped = _backward_and_step(
+        metrics["loss"] / gradient_accumulation_steps,
+        model,
+        optimizers,
+        grad_clip_norm,
+        grad_scaler,
+        optimizer_step=optimizer_step,
+    )
     metrics["optimizer_step"] = metrics["loss"].new_tensor(float(optimizer_step))
     if gradient_accumulation_steps > 1:
         metrics["gradient_accumulation_steps"] = metrics["loss"].new_tensor(
@@ -112,22 +107,11 @@ def train_step_impl(
     ema_momentum = None
     if not step_skipped:
         ema_momentum = pretrain_module.update_ema_teacher(global_step + 1, total_steps)
-        if not is_deepspeed_engine(model):
-            for scheduler in schedulers:
-                scheduler.step()
+        for scheduler in schedulers:
+            scheduler.step()
     if ema_momentum is not None:
         metrics["ema_teacher_momentum"] = metrics["loss"].new_tensor(ema_momentum)
     return metrics
-
-
-def _deepspeed_backward_and_step(
-    loss: torch.Tensor,
-    model: torch.nn.Module,
-) -> bool:
-    optimizer_step = bool(model.is_gradient_accumulation_boundary())
-    model.backward(loss)
-    model.step()
-    return optimizer_step
 
 
 def _backward_and_step(
