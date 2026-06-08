@@ -120,8 +120,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.ema_teacher_schedule = "cosine"
 
     # Training
-    cfg.num_epochs = 5
-    cfg.training_max_steps = 100_000
+    cfg.num_epochs = 8
+    cfg.training_max_steps = 300_000
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "max-autotune"
     cfg.device_prefetch_size = 8

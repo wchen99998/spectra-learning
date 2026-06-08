@@ -61,33 +61,36 @@ def train_step_impl(
         if autocast_dtype is None
         else torch.autocast(device_type=device_type, dtype=autocast_dtype)
     )
-    torch.compiler.cudagraph_mark_step_begin()
-    with autocast_ctx:
-        if compute_collapse_metrics:
-            metrics, collapse_data = _forward_augmented_for_batch(
-                model,
-                batch,
-                return_collapse_data=True,
-            )
-        else:
-            metrics = _forward_augmented_for_batch(
-                model,
-                batch,
-                return_collapse_data=False,
-            )
-            collapse_data: dict[str, torch.Tensor] = {}
-    if compute_collapse_metrics and collapse_data:
-        with torch.no_grad():
-            metrics.update(_collapse_diagnostics(**cast(dict[str, Any], collapse_data)))
     optimizer_step = (accumulation_step + 1) % gradient_accumulation_steps == 0
-    step_skipped = _backward_and_step(
-        metrics["loss"] / gradient_accumulation_steps,
-        model,
-        optimizers,
-        grad_clip_norm,
-        grad_scaler,
-        optimizer_step=optimizer_step,
-    )
+    with _ddp_sync_context(model, optimizer_step):
+        with autocast_ctx:
+            if compute_collapse_metrics:
+                metrics, collapse_data = _forward_augmented_for_batch(
+                    model,
+                    batch,
+                    return_collapse_data=True,
+                )
+            else:
+                metrics = _forward_augmented_for_batch(
+                    model,
+                    batch,
+                    return_collapse_data=False,
+                )
+                collapse_data: dict[str, torch.Tensor] = {}
+        if compute_collapse_metrics and collapse_data:
+            with torch.no_grad():
+                metrics.update(
+                    _collapse_diagnostics(**cast(dict[str, Any], collapse_data))
+                )
+        step_skipped = _backward_and_step(
+            metrics["loss"] / gradient_accumulation_steps,
+            model,
+            optimizers,
+            grad_clip_norm,
+            grad_scaler,
+            optimizer_step=optimizer_step,
+        )
+    metrics = _clone_detached_metric_tensors(metrics)
     metrics["optimizer_step"] = metrics["loss"].new_tensor(float(optimizer_step))
     if gradient_accumulation_steps > 1:
         metrics["gradient_accumulation_steps"] = metrics["loss"].new_tensor(
@@ -123,14 +126,8 @@ def _backward_and_step(
     *,
     optimizer_step: bool,
 ) -> bool:
-    sync_context = (
-        nullcontext()
-        if optimizer_step or not hasattr(model, "no_sync")
-        else model.no_sync()
-    )
     if not _grad_scaler_enabled(grad_scaler):
-        with sync_context:
-            loss.backward()
+        loss.backward()
         if not optimizer_step:
             return False
         _clip_grad_norm(model, grad_clip_norm)
@@ -139,8 +136,7 @@ def _backward_and_step(
             optimizer.zero_grad(set_to_none=True)
         return False
 
-    with sync_context:
-        grad_scaler.scale(loss).backward()
+    grad_scaler.scale(loss).backward()
     if not optimizer_step:
         return False
     active_optimizers = [
@@ -158,6 +154,23 @@ def _backward_and_step(
     for optimizer in optimizers:
         optimizer.zero_grad(set_to_none=True)
     return bool(active_optimizers) and float(grad_scaler.get_scale()) < previous_scale
+
+
+def _ddp_sync_context(
+    model: torch.nn.Module,
+    optimizer_step: bool,
+):
+    return (
+        nullcontext()
+        if optimizer_step or not hasattr(model, "no_sync")
+        else model.no_sync()
+    )
+
+
+def _clone_detached_metric_tensors(
+    metrics: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    return {key: value.detach().clone() for key, value in metrics.items()}
 
 
 def _grad_scaler_enabled(grad_scaler: torch.amp.GradScaler | None) -> bool:
