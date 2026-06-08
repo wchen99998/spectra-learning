@@ -121,13 +121,13 @@ def get_config() -> config_dict.ConfigDict:
 
     # Training
     cfg.num_epochs = 5
-    cfg.training_max_steps = 100_000
+    cfg.training_max_steps = 300_000
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "reduce-overhead"
     cfg.device_prefetch_size = 8
     cfg.log_every_n_steps = 250
     cfg.collapse_metrics_every_n_steps = 0
-    cfg.checkpoint_every_steps = 25_000
+    cfg.checkpoint_every_steps = 15_000
     cfg.dataloader_num_workers = 8
     cfg.dataloader_prefetch_factor = 2
     cfg.dataloader_persistent_workers = True

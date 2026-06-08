@@ -82,6 +82,16 @@ def gradient_accumulation_steps(config: config_dict.ConfigDict) -> int:
     return int(_config_get(config, "gradient_accumulation_steps", 1))
 
 
+def effective_compile_mode(config: config_dict.ConfigDict) -> str:
+    compile_mode = str(_config_get(config, "compile_mode", "max-autotune"))
+    if (
+        compile_mode.lower() == "max-autotune"
+        and gradient_accumulation_steps(config) > 1
+    ):
+        return "max-autotune-no-cudagraphs"
+    return compile_mode
+
+
 def _handle_stop_signal(signum: int, frame: object) -> None:
     del frame
     global _STOP_REQUESTED
@@ -184,7 +194,13 @@ def train_and_evaluate(
     train_model = wrap_distributed_model(
         train_module,
         distributed,
-        static_graph=bool(_config_get(config, "ddp_static_graph", True)),
+        static_graph=bool(
+            _config_get(
+                config,
+                "ddp_static_graph",
+                gradient_accumulation_steps(config) == 1,
+            )
+        ),
         find_unused_parameters=bool(
             _config_get(config, "ddp_find_unused_parameters", False)
         ),
@@ -317,6 +333,9 @@ def run_training_loop(
     throughput_warmup_steps = int(_config_get(config, "throughput_warmup_steps", 0))
     measured_start_time: float | None = None
     measured_steps = 0
+    profiler = make_torch_profiler(config, distributed, device)
+    if profiler is not None:
+        profiler.start()
     for epoch in range(start_epoch, loop_epochs):
         if distributed.is_main:
             logging.info("Starting epoch %d at global_step=%d", epoch, global_step)
@@ -395,6 +414,8 @@ def run_training_loop(
             if not optimizer_step:
                 continue
             global_step += 1
+            if profiler is not None:
+                profiler.step()
             if measured_start_time is not None:
                 measured_steps += 1
             pbar.update(1)
@@ -454,6 +475,8 @@ def run_training_loop(
             break
     synchronize_device(device)
     barrier(distributed)
+    if profiler is not None:
+        profiler.stop()
     training_elapsed = time.perf_counter() - training_start_time
     measured_elapsed = (
         time.perf_counter() - measured_start_time
@@ -515,6 +538,36 @@ def synchronize_device(device: torch.device) -> None:
         torch.cuda.synchronize(device)
 
 
+def make_torch_profiler(
+    config: config_dict.ConfigDict,
+    distributed: DistributedContext,
+    device: torch.device,
+) -> torch.profiler.profile | None:
+    profile_dir = str(_config_get(config, "torch_profile_dir", "") or "")
+    if not profile_dir:
+        return None
+    activities = [torch.profiler.ProfilerActivity.CPU]
+    if device.type == "cuda":
+        activities.append(torch.profiler.ProfilerActivity.CUDA)
+    return torch.profiler.profile(
+        activities=activities,
+        schedule=torch.profiler.schedule(
+            wait=int(_config_get(config, "torch_profile_wait_steps", 1)),
+            warmup=int(_config_get(config, "torch_profile_warmup_steps", 1)),
+            active=int(_config_get(config, "torch_profile_active_steps", 3)),
+            repeat=int(_config_get(config, "torch_profile_repeat", 1)),
+        ),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(
+            profile_dir,
+            worker_name=f"rank{distributed.rank}",
+        ),
+        record_shapes=bool(_config_get(config, "torch_profile_record_shapes", False)),
+        profile_memory=bool(_config_get(config, "torch_profile_memory", False)),
+        with_stack=bool(_config_get(config, "torch_profile_with_stack", False)),
+        with_flops=bool(_config_get(config, "torch_profile_with_flops", False)),
+    )
+
+
 def total_training_steps(
     config: config_dict.ConfigDict,
     datamodule: GemsNativeDataModule,
@@ -561,15 +614,27 @@ def restore_training_state(
 
 
 def compile_forward(model: torch.nn.Module, config: config_dict.ConfigDict) -> None:
-    compile_mode = str(_config_get(config, "compile_mode", "max-autotune"))
+    requested_compile_mode = str(_config_get(config, "compile_mode", "max-autotune"))
+    compile_mode = effective_compile_mode(config)
     if compile_mode.lower() == "none":
         return
     inductor_config.shape_padding = not compile_mode.startswith("max-autotune")
     inductor_config.triton.cudagraph_skip_dynamic_graphs = bool(
         _config_get(config, "cudagraph_skip_dynamic_graphs", False)
     )
+    cudagraph_trees = _config_get(config, "cudagraph_trees", None)
+    if cudagraph_trees is not None:
+        inductor_config.triton.cudagraph_trees = bool(cudagraph_trees)
     if inductor_config.triton.cudagraph_skip_dynamic_graphs:
         logging.info("Skipping CUDA Graph capture for dynamic-shape Inductor graphs.")
+    if compile_mode != requested_compile_mode:
+        logging.info(
+            "Using torch.compile mode %s for requested mode %s with "
+            "gradient_accumulation_steps=%d.",
+            compile_mode,
+            requested_compile_mode,
+            gradient_accumulation_steps(config),
+        )
     model.compile(
         mode=compile_mode,
         fullgraph=False,

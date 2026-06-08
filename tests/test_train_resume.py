@@ -130,6 +130,46 @@ def test_compile_forward_disables_shape_padding_for_max_autotune():
         pretrain.inductor_config.shape_padding = original
 
 
+def test_compile_forward_uses_no_cudagraphs_for_max_autotune_with_accumulation():
+    original = pretrain.inductor_config.shape_padding
+    try:
+        pretrain.inductor_config.shape_padding = True
+        model = _CompileRecorder()
+
+        pretrain.compile_forward(
+            model,
+            {
+                "compile_mode": "max-autotune",
+                "gradient_accumulation_steps": 2,
+            },
+        )
+
+        assert pretrain.inductor_config.shape_padding is False
+        assert model.compile_kwargs == {
+            "mode": "max-autotune-no-cudagraphs",
+            "fullgraph": False,
+        }
+    finally:
+        pretrain.inductor_config.shape_padding = original
+
+
+def test_compile_forward_keeps_explicit_no_cudagraphs_mode():
+    model = _CompileRecorder()
+
+    pretrain.compile_forward(
+        model,
+        {
+            "compile_mode": "max-autotune-no-cudagraphs",
+            "gradient_accumulation_steps": 2,
+        },
+    )
+
+    assert model.compile_kwargs == {
+        "mode": "max-autotune-no-cudagraphs",
+        "fullgraph": False,
+    }
+
+
 def test_compile_forward_enables_shape_padding_for_reduce_overhead():
     original = pretrain.inductor_config.shape_padding
     try:

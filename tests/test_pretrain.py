@@ -1,6 +1,6 @@
+import math
 import tempfile
 import unittest
-import math
 from typing import cast
 from unittest import mock
 
@@ -55,6 +55,32 @@ class _RecordingLinear(torch.nn.Linear):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         self.input_shapes.append(tuple(input.shape))
         return super().forward(input)
+
+
+class _NoSyncRecordingModule(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.tensor(1.0))
+        self.in_no_sync = False
+        self.forward_no_sync_values: list[bool] = []
+
+    def no_sync(self):
+        return _NoSyncRecorder(self)
+
+    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        self.forward_no_sync_values.append(self.in_no_sync)
+        return {"loss": self.weight * batch["x"]}
+
+
+class _NoSyncRecorder:
+    def __init__(self, module: _NoSyncRecordingModule) -> None:
+        self.module = module
+
+    def __enter__(self) -> None:
+        self.module.in_no_sync = True
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.module.in_no_sync = False
 
 
 class DataPipelineContractTests(unittest.TestCase):
@@ -1441,10 +1467,32 @@ class BlockJEPATests(unittest.TestCase):
 
         self.assertEqual(float(first_metrics["optimizer_step"]), 0.0)
         self.assertEqual(float(second_metrics["optimizer_step"]), 1.0)
+        self.assertFalse(first_metrics["loss"].requires_grad)
+        self.assertFalse(second_metrics["loss"].requires_grad)
         self.assertTrue(torch.equal(before, middle))
         self.assertFalse(torch.equal(before, after))
         self.assertEqual(scheduler.last_epoch, 1)
         self.assertTrue(all(param.grad is None for param in model.parameters()))
+
+    def test_train_step_impl_wraps_accumulation_forward_in_no_sync(self):
+        model = _NoSyncRecordingModule()
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        batch = {"x": torch.tensor(2.0)}
+
+        metrics = train_step_impl(
+            model,
+            batch,
+            [optimizer],
+            [],
+            autocast_dtype=None,
+            grad_clip_norm=None,
+            gradient_accumulation_steps=2,
+            accumulation_step=0,
+        )
+
+        self.assertEqual(model.forward_no_sync_values, [True])
+        self.assertEqual(float(metrics["optimizer_step"]), 0.0)
+        self.assertFalse(metrics["loss"].requires_grad)
 
     def test_load_pretrained_weights_roundtrip(self):
         model = self._build_model()
