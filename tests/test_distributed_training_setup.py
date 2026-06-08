@@ -5,10 +5,7 @@ import torch
 from ml_collections import config_dict
 from torch.utils.data.distributed import DistributedSampler
 
-from spectra_learning.probes.massspec.targets import (
-    MACCS_FINGERPRINT_BITS,
-    REGRESSION_TARGET_KEYS,
-)
+from spectra_learning.probes.massspec.targets import MACCS_FINGERPRINT_BITS
 from spectra_learning.training.contrastive import (
     ContrastiveSplit,
     WeightedOnlineSampler,
@@ -33,10 +30,6 @@ def _contrastive_split(num_compounds: int = 8) -> ContrastiveSplit:
         collision_energy=collision_energy,
         collision_energy_present=np.ones(num_rows, dtype=np.int32),
         probe_maccs=np.zeros((num_rows, MACCS_FINGERPRINT_BITS), dtype=np.int8),
-        regression_targets={
-            name: np.zeros(num_rows, dtype=np.float32)
-            for name in REGRESSION_TARGET_KEYS
-        },
     )
 
 

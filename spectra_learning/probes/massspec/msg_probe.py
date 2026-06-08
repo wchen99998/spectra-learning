@@ -1142,16 +1142,9 @@ def _score_epoch_state(
         metrics[f"{prefix}/cosine_{fingerprint_task}_mean"] = float(
             np.mean(cosine_values)
         )
-    metrics[f"{prefix}/r2_mean"] = (
-        float(np.mean(regression_r2_values))
-        if regression_r2_values
-        else float("nan")
-    )
-    metrics[f"{prefix}/mae_mean"] = (
-        float(np.mean(regression_mae_values))
-        if regression_mae_values
-        else float("nan")
-    )
+    if regression_r2_values:
+        metrics[f"{prefix}/r2_mean"] = float(np.mean(regression_r2_values))
+        metrics[f"{prefix}/mae_mean"] = float(np.mean(regression_mae_values))
     return metrics
 
 
@@ -1453,13 +1446,11 @@ def _run_msg_probe_once(
                 epochs_without_improvement[variant] += 1
             if early_stopping and _is_main(distributed):
                 log.info(
-                    "MSG probe [%s] epoch %d/%d train_samples=%d val_r2_mean=%.4f val_mae_mean=%.4f val_auc_%s_mean=%.4f val_average_precision_%s_mean=%.4f val_recall_%s_mean=%.4f val_precision_%s_mean=%.4f %s_bits=%d",
+                    "MSG probe [%s] epoch %d/%d train_samples=%d val_auc_%s_mean=%.4f val_average_precision_%s_mean=%.4f val_recall_%s_mean=%.4f val_precision_%s_mean=%.4f %s_bits=%d",
                     variant,
                     epoch_idx + 1,
                     num_probe_epochs,
                     int(variant_metrics[f"{variant_prefix}/train/samples"]),
-                    variant_metrics[f"{variant_prefix}/val/r2_mean"],
-                    variant_metrics[f"{variant_prefix}/val/mae_mean"],
                     fingerprint_task,
                     variant_metrics[f"{variant_prefix}/val/auc_{fingerprint_task}_mean"],
                     fingerprint_task,
@@ -1475,13 +1466,11 @@ def _run_msg_probe_once(
                 )
             elif _is_main(distributed):
                 log.info(
-                    "MSG probe [%s] epoch %d/%d train_samples=%d test_r2_mean=%.4f test_mae_mean=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f %s_bits=%d",
+                    "MSG probe [%s] epoch %d/%d train_samples=%d test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f %s_bits=%d",
                     variant,
                     epoch_idx + 1,
                     num_probe_epochs,
                     int(variant_metrics[f"{variant_prefix}/train/samples"]),
-                    variant_metrics[f"{variant_prefix}/test/r2_mean"],
-                    variant_metrics[f"{variant_prefix}/test/mae_mean"],
                     fingerprint_task,
                     variant_metrics[f"{variant_prefix}/test/auc_{fingerprint_task}_mean"],
                     fingerprint_task,
@@ -1563,13 +1552,11 @@ def _run_msg_probe_once(
             variant_select_metric = variant_select_metric.replace("/test/", "/val/")
         if _is_main(distributed):
             log.info(
-                "MSG probe [%s] best epoch %d: %s=%.4f test_r2_mean=%.4f test_mae_mean=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f",
+                "MSG probe [%s] best epoch %d: %s=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f",
                 variant,
                 int(variant_metrics[f"{variant_prefix}/epoch"]),
                 variant_select_metric,
                 variant_metrics[variant_select_metric],
-                variant_metrics[f"{variant_prefix}/test/r2_mean"],
-                variant_metrics[f"{variant_prefix}/test/mae_mean"],
                 fingerprint_task,
                 variant_metrics[f"{variant_prefix}/test/auc_{fingerprint_task}_mean"],
                 fingerprint_task,
@@ -1867,12 +1854,10 @@ def _run_dreams_probe_once(
             epochs_without_improvement += 1
         if early_stopping:
             log.info(
-                "DreaMS probe epoch %d/%d train_samples=%d val_r2_mean=%.4f val_mae_mean=%.4f val_auc_%s_mean=%.4f val_average_precision_%s_mean=%.4f val_recall_%s_mean=%.4f val_precision_%s_mean=%.4f %s_bits=%d",
+                "DreaMS probe epoch %d/%d train_samples=%d val_auc_%s_mean=%.4f val_average_precision_%s_mean=%.4f val_recall_%s_mean=%.4f val_precision_%s_mean=%.4f %s_bits=%d",
                 epoch_idx + 1,
                 num_probe_epochs,
                 int(epoch_metrics["dreams_probe/train/samples"]),
-                epoch_metrics["dreams_probe/val/r2_mean"],
-                epoch_metrics["dreams_probe/val/mae_mean"],
                 fingerprint_task,
                 epoch_metrics[f"dreams_probe/val/auc_{fingerprint_task}_mean"],
                 fingerprint_task,
@@ -1888,7 +1873,7 @@ def _run_dreams_probe_once(
             )
         else:
             log.info(
-                "DreaMS probe epoch %d/%d train_samples=%d val_auc_%s_mean=%.4f test_r2_mean=%.4f test_mae_mean=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f %s_bits=%d",
+                "DreaMS probe epoch %d/%d train_samples=%d val_auc_%s_mean=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f %s_bits=%d",
                 epoch_idx + 1,
                 num_probe_epochs,
                 int(epoch_metrics["dreams_probe/train/samples"]),
@@ -1897,8 +1882,6 @@ def _run_dreams_probe_once(
                         f"dreams_probe/val/auc_{fingerprint_task}_mean",
                         float("nan"),
                     ),
-                epoch_metrics["dreams_probe/test/r2_mean"],
-                epoch_metrics["dreams_probe/test/mae_mean"],
                 fingerprint_task,
                 epoch_metrics[f"dreams_probe/test/auc_{fingerprint_task}_mean"],
                 fingerprint_task,
@@ -1951,12 +1934,10 @@ def _run_dreams_probe_once(
                 )
             )
         log.info(
-            "DreaMS probe best epoch %d: %s=%.4f test_r2_mean=%.4f test_mae_mean=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f",
+            "DreaMS probe best epoch %d: %s=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f",
             int(best_metrics["dreams_probe_epoch"]),
             probe_select_metric,
             best_metrics[probe_select_metric],
-            best_metrics["dreams_probe/test/r2_mean"],
-            best_metrics["dreams_probe/test/mae_mean"],
             fingerprint_task,
             best_metrics[f"dreams_probe/test/auc_{fingerprint_task}_mean"],
             fingerprint_task,

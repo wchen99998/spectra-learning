@@ -9,10 +9,7 @@ import torch.nn.functional as F
 from ml_collections import config_dict
 
 from spectra_learning.probes.massspec import data as massspec_data
-from spectra_learning.probes.massspec.targets import (
-    MACCS_FINGERPRINT_BITS,
-    REGRESSION_TARGET_KEYS,
-)
+from spectra_learning.probes.massspec.targets import MACCS_FINGERPRINT_BITS
 from spectra_learning.training import contrastive as contrastive_training
 from spectra_learning.training.contrastive import (
     NistMurckoContrastivePairs,
@@ -50,11 +47,6 @@ def _write_split(root: Path, split: str, rows: list[tuple[str, float]]) -> None:
         "murcko_hist_json": pa.array(["{}"] * n, type=pa.string()),
         "metadata_json": pa.array(["{}"] * n, type=pa.string()),
     }
-    for target_idx, name in enumerate(REGRESSION_TARGET_KEYS):
-        payload[name] = pa.array(
-            [float(target_idx + row_idx + 1) for row_idx in range(n)],
-            type=pa.float32(),
-        )
     pq.write_table(pa.table(payload), root / f"{split}.parquet")
 
 
@@ -176,9 +168,6 @@ def test_dreams_triplets_use_mass_matched_different_compound_negative():
         collision_energy=np.asarray([10.0, 20.0, 10.0, 20.0, 10.0, 20.0]),
         collision_energy_present=np.ones(6, dtype=np.int32),
         probe_maccs=np.zeros((6, MACCS_FINGERPRINT_BITS), dtype=np.int8),
-        regression_targets={
-            name: np.zeros(6, dtype=np.float32) for name in REGRESSION_TARGET_KEYS
-        },
     )
     dataset = NistMurckoContrastivePairs(
         split,
@@ -288,11 +277,9 @@ def test_contrastive_loss_uses_normalized_pooler_output(monkeypatch):
         online_probe=contrastive_training.OnlineProbeHead(
             input_dim=pooled.shape[1],
             hidden_dim=8,
-            output_dim=len(REGRESSION_TARGET_KEYS) + MACCS_FINGERPRINT_BITS,
+            output_dim=MACCS_FINGERPRINT_BITS,
         ),
         teacher_model=None,
-        regression_means={name: 0.0 for name in REGRESSION_TARGET_KEYS},
-        regression_stds={name: 1.0 for name in REGRESSION_TARGET_KEYS},
         temperature=0.1,
         loss_type="info_nce",
         triplet_margin=0.2,
@@ -313,8 +300,6 @@ def test_contrastive_loss_uses_normalized_pooler_output(monkeypatch):
         "compound_id": torch.tensor([0, 0, 1, 1]),
         "probe_maccs": torch.zeros(4, MACCS_FINGERPRINT_BITS),
     }
-    for name in REGRESSION_TARGET_KEYS:
-        batch[f"probe_{name}"] = torch.zeros(4)
 
     module(batch)
 
@@ -361,11 +346,9 @@ def test_encoder_anchor_loss_compares_student_to_teacher_pooler_output():
         online_probe=contrastive_training.OnlineProbeHead(
             input_dim=4,
             hidden_dim=8,
-            output_dim=len(REGRESSION_TARGET_KEYS) + MACCS_FINGERPRINT_BITS,
+            output_dim=MACCS_FINGERPRINT_BITS,
         ),
         teacher_model=FakeModel(-1.0),
-        regression_means={name: 0.0 for name in REGRESSION_TARGET_KEYS},
-        regression_stds={name: 1.0 for name in REGRESSION_TARGET_KEYS},
         temperature=0.1,
         loss_type="dreams_triplet",
         triplet_margin=0.2,
@@ -386,8 +369,6 @@ def test_encoder_anchor_loss_compares_student_to_teacher_pooler_output():
         "compound_id": torch.tensor([0, 0, 1, 1]),
         "probe_maccs": torch.zeros(4, MACCS_FINGERPRINT_BITS),
     }
-    for name in REGRESSION_TARGET_KEYS:
-        batch[f"probe_{name}"] = torch.zeros(4)
 
     result = module(batch)
 
@@ -900,53 +881,33 @@ def test_pairwise_maccs_auc_loss_can_focus_hard_pairs():
 
 
 def test_online_probe_auc_bce_weight_controls_auc_mix():
-    logits = torch.zeros(4, len(REGRESSION_TARGET_KEYS) + MACCS_FINGERPRINT_BITS)
-    logits[:, len(REGRESSION_TARGET_KEYS)] = torch.tensor([2.0, 1.0, -1.0, -2.0])
+    logits = torch.zeros(4, MACCS_FINGERPRINT_BITS)
+    logits[:, 0] = torch.tensor([2.0, 1.0, -1.0, -2.0])
     batch = {"probe_maccs": torch.zeros(4, MACCS_FINGERPRINT_BITS)}
     batch["probe_maccs"][:, 0] = torch.tensor([1.0, 1.0, 0.0, 0.0])
-    for name in REGRESSION_TARGET_KEYS:
-        batch[f"probe_{name}"] = torch.zeros(4)
 
-    loss, _, _, _ = contrastive_training.online_probe_loss(
+    loss, _, _ = contrastive_training.online_probe_loss(
         logits,
         batch,
-        regression_means={name: 0.0 for name in REGRESSION_TARGET_KEYS},
-        regression_stds={name: 1.0 for name in REGRESSION_TARGET_KEYS},
         maccs_loss_type="auc_bce",
-        regression_loss_weight=0.0,
         auc_loss_weight=1.0,
     )
     expected = contrastive_training.pairwise_maccs_auc_loss(
-        logits[:, len(REGRESSION_TARGET_KEYS) :],
+        logits,
         batch["probe_maccs"],
     )
     torch.testing.assert_close(loss, expected)
 
 
-def test_online_probe_loss_can_focus_maccs_without_regression():
-    logits = torch.zeros(2, len(REGRESSION_TARGET_KEYS) + MACCS_FINGERPRINT_BITS)
+def test_online_probe_loss_uses_only_maccs_targets():
+    logits = torch.zeros(2, MACCS_FINGERPRINT_BITS)
     batch = {
         "probe_maccs": torch.zeros(2, MACCS_FINGERPRINT_BITS),
     }
-    for name in REGRESSION_TARGET_KEYS:
-        batch[f"probe_{name}"] = torch.ones(2)
 
-    loss, maccs_bce, regression_loss, _ = contrastive_training.online_probe_loss(
+    loss, maccs_bce, _ = contrastive_training.online_probe_loss(
         logits,
         batch,
-        regression_means={name: 0.0 for name in REGRESSION_TARGET_KEYS},
-        regression_stds={name: 1.0 for name in REGRESSION_TARGET_KEYS},
-        regression_loss_weight=0.0,
         maccs_loss_weight=1.0,
     )
     torch.testing.assert_close(loss, maccs_bce)
-
-    loss, _, regression_loss, _ = contrastive_training.online_probe_loss(
-        logits,
-        batch,
-        regression_means={name: 0.0 for name in REGRESSION_TARGET_KEYS},
-        regression_stds={name: 1.0 for name in REGRESSION_TARGET_KEYS},
-        regression_loss_weight=1.0,
-        maccs_loss_weight=0.0,
-    )
-    torch.testing.assert_close(loss, regression_loss)

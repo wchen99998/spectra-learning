@@ -844,13 +844,13 @@ class MsgProbeStepTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["batch_size"], 2)
         self.assertTrue(torch.isfinite(result["loss_total"]).item())
-        self.assertEqual(result["predictions"]["mol_weight"].shape, (2,))
+        self.assertNotIn("mol_weight", result["predictions"])
         self.assertNotIn("num_rings", result["predictions"])
         self.assertEqual(result["predictions"]["maccs"].shape, (2, 4))
 
 
 class MsgProbeTaskSpecTests(unittest.TestCase):
-    def test_task_spec_uses_one_fingerprint_head_for_regression_and_bits(self):
+    def test_task_spec_uses_one_fingerprint_head_for_maccs_bits(self):
         task_spec = _build_task_spec(
             train_targets=MsgProbeSplitTargets(
                 regression={
@@ -886,17 +886,14 @@ class MsgProbeTaskSpecTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(
-            task_spec.regression_tasks,
-            ("mol_weight", "logp", "num_heavy_atoms"),
-        )
+        self.assertEqual(task_spec.regression_tasks, ())
         self.assertEqual(task_spec.maccs_bits, 4)
         self.assertEqual(_probe_task_names(task_spec), ("maccs",))
-        self.assertEqual(_probe_task_output_dims(task_spec), {"maccs": 7})
+        self.assertEqual(_probe_task_output_dims(task_spec), {"maccs": 4})
 
 
 class MsgProbeMetricTests(unittest.TestCase):
-    def test_score_epoch_state_reports_regression_and_maccs_metrics(self):
+    def test_score_epoch_state_reports_maccs_metrics(self):
         task_spec = _build_task_spec(
             train_targets=MsgProbeSplitTargets(
                 regression={
@@ -968,6 +965,8 @@ class MsgProbeMetricTests(unittest.TestCase):
         self.assertNotIn("msg_probe/test/acc_num_rings_exact", metrics)
         self.assertNotIn("msg_probe/test/mae_num_rings", metrics)
         self.assertNotIn("msg_probe/test/r2_mean_wo_num_rings", metrics)
+        self.assertNotIn("msg_probe/test/r2_mean", metrics)
+        self.assertNotIn("msg_probe/test/mae_mean", metrics)
         self.assertEqual(metrics["msg_probe/test/num_maccs_auc_bits"], 4.0)
         self.assertGreater(metrics["msg_probe/test/auc_maccs_mean"], 0.9)
         self.assertEqual(
@@ -1193,12 +1192,7 @@ class MsgProbeCollectionTests(unittest.TestCase):
             seed=0,
         )
 
-        self.assertTrue(
-            np.array_equal(
-                targets.regression["mol_weight"],
-                np.asarray([10.0, 30.0, 40.0], dtype=np.float32),
-            )
-        )
+        self.assertEqual(targets.regression, {})
         self.assertTrue(
             np.array_equal(
                 targets.maccs,

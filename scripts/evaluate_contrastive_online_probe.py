@@ -20,10 +20,7 @@ from spectra_learning.data.spectra import (
 from spectra_learning.probes.massspec.data import MassSpecProbeData
 from spectra_learning.probes.massspec.msg_probe import iter_massspec_probe
 from spectra_learning.probes.massspec.msg_settings import resolve_msg_probe_sample_limits
-from spectra_learning.probes.massspec.targets import (
-    MACCS_FINGERPRINT_BITS,
-    REGRESSION_TARGET_KEYS,
-)
+from spectra_learning.probes.massspec.targets import MACCS_FINGERPRINT_BITS
 from spectra_learning.training.api import load_config, parse_autocast_dtype
 from spectra_learning.training.checkpointing import (
     load_resume_covariance_pooler_state,
@@ -115,8 +112,6 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
     probe_data = MassSpecProbeData.from_config(config)
     module = build_contrastive_module(
         config,
-        regression_means={name: 0.0 for name in REGRESSION_TARGET_KEYS},
-        regression_stds={name: 1.0 for name in REGRESSION_TARGET_KEYS},
         maccs_pos_weight=torch.ones(MACCS_FINGERPRINT_BITS),
     )
 
@@ -232,7 +227,7 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
                     batch["peak_valid_mask"].to(dtype=torch.bool),
                     pair_embeddings.float(),
                 )
-                logits = module.online_probe(pooled)[:, len(REGRESSION_TARGET_KEYS) :]
+                logits = module.online_probe(pooled)
             logits_by_batch.append(logits.float().cpu().numpy())
             targets_by_batch.append(batch["probe_maccs"].cpu().numpy())
 

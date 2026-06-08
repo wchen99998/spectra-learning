@@ -28,10 +28,7 @@ from spectra_learning.probes.massspec.data import (
     MassSpecProbeData,
     probe_local_batch_size,
 )
-from spectra_learning.probes.massspec.targets import (
-    MACCS_FINGERPRINT_BITS,
-    REGRESSION_TARGET_KEYS,
-)
+from spectra_learning.probes.massspec.targets import MACCS_FINGERPRINT_BITS
 from spectra_learning.training.api import (
     build_grad_scaler,
     build_logger,
@@ -86,7 +83,6 @@ class ContrastiveSplit(NamedTuple):
     collision_energy: np.ndarray
     collision_energy_present: np.ndarray
     probe_maccs: np.ndarray
-    regression_targets: dict[str, np.ndarray]
 
 
 class ContrastiveBatchCollator:
@@ -175,10 +171,6 @@ class ContrastiveBatchCollator:
         batch["probe_maccs"] = torch.from_numpy(self.split.probe_maccs[indices].copy()).to(
             torch.float32
         )
-        for name, values in self.split.regression_targets.items():
-            batch[f"probe_{name}"] = torch.from_numpy(values[indices].copy()).to(
-                torch.float32
-            )
         return batch
 
 
@@ -271,10 +263,6 @@ class ContrastiveOnlineBatchCollator:
         batch["probe_maccs"] = torch.from_numpy(
             self.split.probe_maccs[row_indices].copy()
         ).to(torch.float32)
-        for name, values in self.split.regression_targets.items():
-            batch[f"probe_{name}"] = torch.from_numpy(values[row_indices].copy()).to(
-                torch.float32
-            )
         return batch
 
 
@@ -459,7 +447,6 @@ def _load_contrastive_split(
         "collision_energy",
         "collision_energy_present",
         "maccs_166",
-        *REGRESSION_TARGET_KEYS,
     ]
     for path in files:
         parquet_file = pq.ParquetFile(path)
@@ -477,13 +464,6 @@ def _load_contrastive_split(
     intensity_lists = [
         intensity for chunk in chunks for intensity in chunk["spectrum_intensity"]
     ]
-    regression_targets = {
-        name: np.concatenate(
-            [np.asarray(chunk[name], dtype=np.float32) for chunk in chunks],
-            axis=0,
-        )
-        for name in REGRESSION_TARGET_KEYS
-    }
     return ContrastiveSplit(
         spectra=_fixed_spectra_from_lists(mz_lists, intensity_lists),
         precursor_mz=np.concatenate(
@@ -509,17 +489,7 @@ def _load_contrastive_split(
             [np.asarray(chunk["maccs_166"], dtype=np.int8) for chunk in chunks],
             axis=0,
         ),
-        regression_targets=regression_targets,
     )
-
-
-def _regression_stats(split: ContrastiveSplit) -> tuple[dict[str, float], dict[str, float]]:
-    means = {name: float(values.mean()) for name, values in split.regression_targets.items()}
-    stds = {
-        name: float(np.clip(values.std(), 1e-8, None))
-        for name, values in split.regression_targets.items()
-    }
-    return means, stds
 
 
 def _maccs_pos_weight(split: ContrastiveSplit) -> torch.Tensor:
@@ -720,8 +690,6 @@ class ContrastiveTrainingModule(torch.nn.Module):
         pooler: SinglePairCovariancePool,
         online_probe: OnlineProbeHead,
         teacher_model: PeakSetJEPA | None,
-        regression_means: dict[str, float],
-        regression_stds: dict[str, float],
         temperature: float,
         loss_type: str,
         triplet_margin: float,
@@ -733,7 +701,6 @@ class ContrastiveTrainingModule(torch.nn.Module):
         online_probe_loss_weight: float,
         encoder_anchor_loss_weight: float,
         online_maccs_loss_type: str = "bce",
-        online_regression_loss_weight: float = 1.0,
         online_maccs_loss_weight: float = 1.0,
         online_auc_loss_weight: float = 0.5,
         online_auc_hard_fraction: float | None = None,
@@ -745,8 +712,6 @@ class ContrastiveTrainingModule(torch.nn.Module):
         self.pooler = pooler
         self.online_probe = online_probe
         self.teacher_model = teacher_model
-        self.regression_means = regression_means
-        self.regression_stds = regression_stds
         self.temperature = temperature
         self.loss_type = loss_type
         self.triplet_margin = triplet_margin
@@ -761,7 +726,6 @@ class ContrastiveTrainingModule(torch.nn.Module):
         self.online_probe_loss_weight = online_probe_loss_weight
         self.encoder_anchor_loss_weight = encoder_anchor_loss_weight
         self.online_maccs_loss_type = online_maccs_loss_type
-        self.online_regression_loss_weight = online_regression_loss_weight
         self.online_maccs_loss_weight = online_maccs_loss_weight
         self.online_auc_loss_weight = online_auc_loss_weight
         self.online_auc_hard_fraction = online_auc_hard_fraction
@@ -878,15 +842,12 @@ class ContrastiveTrainingModule(torch.nn.Module):
             )
         probe_batch = batch if online_batch is None else online_batch
         probe_pooled = pooled if online_batch is None else self._pooled_features(online_batch)
-        probe_loss, probe_maccs_bce, probe_regression_loss, probe_bit_accuracy = (
+        probe_loss, probe_maccs_bce, probe_bit_accuracy = (
             online_probe_loss(
                 self.online_probe(probe_pooled),
                 probe_batch,
-                regression_means=self.regression_means,
-                regression_stds=self.regression_stds,
                 maccs_loss_type=self.online_maccs_loss_type,
                 maccs_pos_weight=self.maccs_pos_weight,
-                regression_loss_weight=self.online_regression_loss_weight,
                 maccs_loss_weight=self.online_maccs_loss_weight,
                 auc_loss_weight=self.online_auc_loss_weight,
                 auc_hard_fraction=self.online_auc_hard_fraction,
@@ -927,7 +888,6 @@ class ContrastiveTrainingModule(torch.nn.Module):
             "contrastive_accuracy": contrastive_accuracy,
             "online_probe_loss": probe_loss,
             "online_probe_maccs_bce": probe_maccs_bce,
-            "online_probe_regression_loss": probe_regression_loss,
             "online_probe_maccs_bit_accuracy": probe_bit_accuracy,
             "encoder_anchor_loss": anchor_loss,
         }
@@ -1243,23 +1203,13 @@ def online_probe_loss(
     logits: torch.Tensor,
     batch: dict[str, torch.Tensor],
     *,
-    regression_means: dict[str, float],
-    regression_stds: dict[str, float],
     maccs_loss_type: str = "bce",
     maccs_pos_weight: torch.Tensor | None = None,
-    regression_loss_weight: float = 1.0,
     maccs_loss_weight: float = 1.0,
     auc_loss_weight: float = 0.5,
     auc_hard_fraction: float | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    regression_logits = logits[:, : len(REGRESSION_TARGET_KEYS)]
-    maccs_logits = logits[:, len(REGRESSION_TARGET_KEYS) :]
-    regression_losses = []
-    for idx, name in enumerate(REGRESSION_TARGET_KEYS):
-        target = batch[f"probe_{name}"].to(dtype=torch.float32)
-        normalized = (target - regression_means[name]) / regression_stds[name]
-        regression_losses.append(F.mse_loss(regression_logits[:, idx], normalized))
-    regression_loss = torch.stack(regression_losses).mean()
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    maccs_logits = logits
     maccs_target = batch["probe_maccs"].to(dtype=torch.float32)
     maccs_bce = F.binary_cross_entropy_with_logits(maccs_logits, maccs_target)
     if maccs_loss_type == "bce":
@@ -1312,11 +1262,8 @@ def online_probe_loss(
     else:
         raise ValueError(f"Unsupported online MACCS loss: {maccs_loss_type!r}")
     bit_accuracy = ((maccs_logits > 0) == (maccs_target > 0.5)).float().mean()
-    probe_loss = (
-        regression_loss * regression_loss.new_tensor(regression_loss_weight)
-        + maccs_loss * maccs_loss.new_tensor(maccs_loss_weight)
-    ) / maccs_loss.new_tensor(regression_loss_weight + maccs_loss_weight)
-    return probe_loss, maccs_bce, regression_loss, bit_accuracy
+    probe_loss = maccs_loss * maccs_loss.new_tensor(maccs_loss_weight)
+    return probe_loss, maccs_bce, bit_accuracy
 
 
 def gather_online_probe_logits(
@@ -1356,8 +1303,6 @@ def pairwise_maccs_auc_loss(
 def build_contrastive_module(
     config: config_dict.ConfigDict,
     *,
-    regression_means: dict[str, float],
-    regression_stds: dict[str, float],
     maccs_pos_weight: torch.Tensor | None = None,
 ) -> ContrastiveTrainingModule:
     model = build_model_from_config(config)
@@ -1374,7 +1319,7 @@ def build_contrastive_module(
     online_probe = OnlineProbeHead(
         input_dim=pooled_dim,
         hidden_dim=int(_config_get(config, "contrastive_online_probe_hidden_dim", config.model_dim)),
-        output_dim=len(REGRESSION_TARGET_KEYS) + MACCS_FINGERPRINT_BITS,
+        output_dim=MACCS_FINGERPRINT_BITS,
     )
     teacher_model = (
         build_model_from_config(config)
@@ -1386,8 +1331,6 @@ def build_contrastive_module(
         pooler=pooler,
         online_probe=online_probe,
         teacher_model=teacher_model,
-        regression_means=regression_means,
-        regression_stds=regression_stds,
         temperature=float(_config_get(config, "contrastive_temperature", 0.1)),
         loss_type=str(_config_get(config, "contrastive_loss_type", "info_nce")),
         triplet_margin=float(_config_get(config, "contrastive_triplet_margin", 0.2)),
@@ -1417,9 +1360,6 @@ def build_contrastive_module(
         ),
         online_maccs_loss_type=str(
             _config_get(config, "contrastive_online_maccs_loss_type", "bce")
-        ),
-        online_regression_loss_weight=float(
-            _config_get(config, "contrastive_online_regression_loss_weight", 1.0)
         ),
         online_maccs_loss_weight=float(
             _config_get(config, "contrastive_online_maccs_loss_weight", 1.0)
@@ -1540,7 +1480,6 @@ def train_contrastive(
             )
         ),
     )
-    regression_means, regression_stds = _regression_stats(train_split)
     maccs_pos_weight = _maccs_pos_weight(train_split)
 
     global_spectra_batch_size = int(_config_get(config, "contrastive_batch_size", config.batch_size))
@@ -1603,8 +1542,6 @@ def train_contrastive(
     total_steps = total_contrastive_steps(config, train_loader)
     module = build_contrastive_module(
         config,
-        regression_means=regression_means,
-        regression_stds=regression_stds,
         maccs_pos_weight=maccs_pos_weight,
     )
     init_checkpoint = _config_get(config, "contrastive_init_checkpoint_path", "")

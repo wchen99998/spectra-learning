@@ -7,7 +7,6 @@ from ml_collections import config_dict
 from spectra_learning.probes.massspec.targets import (
     MACCS_FINGERPRINT_BITS,
     MORGAN_PROBE_FINGERPRINT_BITS,
-    REGRESSION_TARGET_KEYS,
 )
 
 
@@ -39,12 +38,9 @@ def build_msg_probe_inputs(
     return (peak_embeddings * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
 
 
-NUM_RINGS_TASK = "num_rings"
 MACCS_TASK = "maccs"
 MORGAN_TASK = "morgan"
-REGRESSION_PROBE_TASKS = tuple(
-    name for name in REGRESSION_TARGET_KEYS if name != NUM_RINGS_TASK
-)
+REGRESSION_PROBE_TASKS: tuple[str, ...] = ()
 PROBE_FINGERPRINT_BITS = {
     MACCS_TASK: MACCS_FINGERPRINT_BITS,
     MORGAN_TASK: MORGAN_PROBE_FINGERPRINT_BITS,
