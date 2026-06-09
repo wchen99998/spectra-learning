@@ -93,6 +93,7 @@ class SinglePairCovariancePool(nn.Module):
         pair_dim: int,
         compressed_dim: int,
         include_diagonal: bool = False,
+        include_cls_token: bool = False,
     ) -> None:
         super().__init__()
         self.single_pool = CovariancePool(
@@ -106,6 +107,7 @@ class SinglePairCovariancePool(nn.Module):
             compressed_dim * compressed_dim,
         )
         self.include_diagonal = include_diagonal
+        self.include_cls_token = include_cls_token
         nn.init.xavier_normal_(self.pair_left_proj.weight)
         nn.init.xavier_normal_(self.pair_right_proj.weight)
         nn.init.xavier_normal_(self.output_proj.weight)
@@ -119,27 +121,42 @@ class SinglePairCovariancePool(nn.Module):
     def output_dim(self) -> int:
         return self.compressed_dim * self.compressed_dim
 
+    def _token_mask(
+        self,
+        valid_mask: Bool[Tensor, "batch peaks"],
+    ) -> Bool[Tensor, "batch tokens"]:
+        if not self.include_cls_token:
+            return valid_mask
+        cls_mask = torch.ones(
+            valid_mask.shape[0],
+            1,
+            device=valid_mask.device,
+            dtype=torch.bool,
+        )
+        return torch.cat([valid_mask, cls_mask], dim=1)
+
     def pair_covariance_matrix(
         self,
         pair_embeddings: Float[Tensor, "batch peaks peaks pair"],
         valid_mask: Bool[Tensor, "batch peaks"],
     ) -> Float[Tensor, "batch compressed compressed"]:
-        num_peaks = valid_mask.shape[1]
-        pair_embeddings = pair_embeddings[:, :num_peaks, :num_peaks]
+        token_mask = self._token_mask(valid_mask)
+        num_tokens = token_mask.shape[1]
+        pair_embeddings = pair_embeddings[:, :num_tokens, :num_tokens]
         batch_size = pair_embeddings.shape[0]
-        pair_mask = valid_mask.unsqueeze(2) & valid_mask.unsqueeze(1)
+        pair_mask = token_mask.unsqueeze(2) & token_mask.unsqueeze(1)
         if not self.include_diagonal:
             diagonal = torch.eye(
-                num_peaks,
+                num_tokens,
                 device=valid_mask.device,
                 dtype=torch.bool,
-            ).view(1, num_peaks, num_peaks)
+            ).view(1, num_tokens, num_tokens)
             pair_mask = pair_mask & ~diagonal
         pair_mask_f = pair_mask.unsqueeze(-1).to(dtype=pair_embeddings.dtype)
         left = self.pair_left_proj(pair_embeddings) * pair_mask_f
         right = self.pair_right_proj(pair_embeddings) * pair_mask_f
-        left = left.reshape(batch_size, num_peaks * num_peaks, self.compressed_dim)
-        right = right.reshape(batch_size, num_peaks * num_peaks, self.compressed_dim)
+        left = left.reshape(batch_size, num_tokens * num_tokens, self.compressed_dim)
+        right = right.reshape(batch_size, num_tokens * num_tokens, self.compressed_dim)
         denom = pair_mask_f.sum(dim=(1, 2)).clamp_min(1.0)
         covariance = left.transpose(1, 2) @ right
         return covariance / denom.unsqueeze(-1)
@@ -151,9 +168,10 @@ class SinglePairCovariancePool(nn.Module):
         pair_embeddings: Float[Tensor, "batch peaks peaks pair"],
     ) -> Float[Tensor, "batch flattened_covariance"]:
         with torch.autocast(device_type=peak_embeddings.device.type, enabled=False):
+            token_mask = self._token_mask(valid_mask)
             single_covariance = self.single_pool.covariance_matrix(
-                peak_embeddings.float(),
-                valid_mask,
+                peak_embeddings[:, : token_mask.shape[1]].float(),
+                token_mask,
             )
             pair_covariance = self.pair_covariance_matrix(
                 pair_embeddings.float(),

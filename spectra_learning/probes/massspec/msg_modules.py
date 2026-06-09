@@ -247,8 +247,12 @@ class MsgSinglePairPmaPool(torch.nn.Module):
         num_blocks: int,
         hidden_dim: int,
         norm_eps: float,
+        include_cls_token: bool = False,
     ) -> None:
         super().__init__()
+        self.latent_dim = latent_dim
+        self.num_tokens = num_tokens
+        self.include_cls_token = include_cls_token
         self.single_encoder = MsgPmaSetEncoder(
             input_dim=single_dim,
             latent_dim=latent_dim,
@@ -268,26 +272,43 @@ class MsgSinglePairPmaPool(torch.nn.Module):
             norm_eps=norm_eps,
         )
 
+    @property
+    def output_dim(self) -> int:
+        return 2 * self.num_tokens * self.latent_dim
+
+    def _token_mask(self, valid_mask: torch.Tensor) -> torch.Tensor:
+        if not self.include_cls_token:
+            return valid_mask
+        cls_mask = torch.ones(
+            valid_mask.shape[0],
+            1,
+            device=valid_mask.device,
+            dtype=torch.bool,
+        )
+        return torch.cat([valid_mask, cls_mask], dim=1)
+
     def forward(
         self,
         peak_embeddings: torch.Tensor,
         valid_mask: torch.Tensor,
         pair_embeddings: torch.Tensor,
     ) -> torch.Tensor:
-        num_peaks = valid_mask.shape[1]
-        peak_embeddings = peak_embeddings[:, :num_peaks]
-        pair_embeddings = pair_embeddings[:, :num_peaks, :num_peaks]
+        token_mask = self._token_mask(valid_mask)
+        num_tokens = token_mask.shape[1]
+        dtype = self.single_encoder.seed_vectors.dtype
+        peak_embeddings = peak_embeddings[:, :num_tokens].to(dtype=dtype)
+        pair_embeddings = pair_embeddings[:, :num_tokens, :num_tokens].to(dtype=dtype)
         batch_size, _, _, pair_dim = pair_embeddings.shape
-        pair_mask = valid_mask.unsqueeze(2) & valid_mask.unsqueeze(1)
+        pair_mask = token_mask.unsqueeze(2) & token_mask.unsqueeze(1)
         pair_memory = pair_embeddings.reshape(
             batch_size,
-            num_peaks * num_peaks,
+            num_tokens * num_tokens,
             pair_dim,
         )
-        pair_memory_mask = pair_mask.reshape(batch_size, num_peaks * num_peaks)
+        pair_memory_mask = pair_mask.reshape(batch_size, num_tokens * num_tokens)
         tokens = torch.cat(
             [
-                self.single_encoder(peak_embeddings, valid_mask),
+                self.single_encoder(peak_embeddings, token_mask),
                 self.pair_encoder(pair_memory, pair_memory_mask),
             ],
             dim=1,
@@ -508,10 +529,13 @@ def build_msg_sequence_probe(
             num_blocks=num_blocks,
             hidden_dim=hidden_dim,
             norm_eps=float(_config_get(config, "norm_eps", 1e-5)),
+            include_cls_token=bool(
+                _config_get(config, "msg_probe_single_pair_pma_include_cls_token", False)
+            ),
         )
         return MsgSinglePairLinearProbe(
             pooler=pooler,
-            pooled_dim=2 * num_tokens * model_dim,
+            pooled_dim=pooler.output_dim,
             task_names=task_names,
             task_output_dims=task_output_dims,
         )

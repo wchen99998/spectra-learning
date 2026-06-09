@@ -39,6 +39,11 @@ from spectra_learning.training.distributed import (
 from spectra_learning.training.logging import MetricLogger, log_msg_probe_metrics
 from spectra_learning.training.modules import PretrainModule, split_pretrain_module
 from spectra_learning.training.optimization import build_optimizers
+from spectra_learning.training.performance import (
+    apply_activation_checkpointing,
+    compile_forward as compile_training_forward,
+    register_bf16_adamw_state_hooks,
+)
 from spectra_learning.training.schedules import LRSchedulerLike
 from spectra_learning.training.storage import (
     StoragePath,
@@ -167,6 +172,7 @@ def train_and_evaluate(
             flops_per_optimizer_step / float(datamodule.global_batch_size)
         )
     train_module.to(device).train()
+    apply_activation_checkpointing(train_module, config)
     autocast_dtype = parse_autocast_dtype(_config_get(config, "autocast_dtype", "bf16"))
     grad_clip_norm = optional_float(_config_get(config, "grad_clip_norm", None))
     grad_scaler = build_grad_scaler(autocast_dtype, device)
@@ -180,6 +186,7 @@ def train_and_evaluate(
         total_steps,
         device,
     )
+    register_bf16_adamw_state_hooks(optimizers, config)
     start_epoch, global_step, resume_offset = restore_training_state(
         config=config,
         checkpoint_dir=checkpoint_dir,
@@ -635,10 +642,7 @@ def compile_forward(model: torch.nn.Module, config: config_dict.ConfigDict) -> N
             requested_compile_mode,
             gradient_accumulation_steps(config),
         )
-    model.compile(
-        mode=compile_mode,
-        fullgraph=False,
-    )
+    compile_training_forward(model, config, compile_mode=compile_mode)
 
 
 def log_train_metrics(
