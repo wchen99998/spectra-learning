@@ -43,8 +43,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pairformer_pair_dim = 384
     cfg.pairformer_pair_num_heads = 12
     cfg.pairformer_pair_feature_hidden_dim = 768
-    cfg.pairmixer_triangle_mediator_rank = 8
-    cfg.pairmixer_use_commuted_low_rank_triangle = True
+    cfg.pairmixer_triangle_mediator_rank = 0
+    cfg.pairmixer_use_commuted_low_rank_triangle = False
     cfg.pairformer_use_fourier_features = True
     cfg.pairformer_fourier_num_freqs = 16
     cfg.pairformer_fourier_x_min = 0.01
