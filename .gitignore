@@ -22,6 +22,7 @@ experiments/
 .serena/
 
 results/
+outputs/
 
 5m_30/
 checkpoints/

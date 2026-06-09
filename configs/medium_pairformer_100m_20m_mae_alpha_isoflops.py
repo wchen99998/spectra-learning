@@ -13,8 +13,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.nist_murcko_probe_val_samples = 20_000
     cfg.nist_murcko_probe_test_samples = 20_000
     cfg.nist_murcko_probe_num_repeats = 1
-    cfg.batch_size = 1024
-    cfg.gradient_accumulation_steps = 2
+    cfg.batch_size = 512
+    cfg.gradient_accumulation_steps = 4
     cfg.shuffle_buffer = 1_000_000
     cfg.drop_remainder = True
     cfg.max_precursor_mz = 1000
@@ -26,23 +26,23 @@ def get_config() -> config_dict.ConfigDict:
 
     # Encoder
     cfg.num_peaks = 31
-    cfg.model_dim = 512
+    cfg.model_dim = 640
     cfg.encoder_num_layers = 15
-    cfg.encoder_num_heads = 16
+    cfg.encoder_num_heads = 10
     cfg.encoder_use_position_embedding = False
     cfg.encoder_apply_final_norm = True
     cfg.encoder_apply_final_pair_norm = True
     cfg.encoder_use_fourier_features = True
     cfg.encoder_fourier_input_scale = 1000
-    cfg.encoder_fourier_mlp_hidden_dim = 1024
+    cfg.encoder_fourier_mlp_hidden_dim = 1280
     cfg.encoder_fourier_mlp_num_layers = 4
     cfg.encoder_fourier_num_freqs = 64
     cfg.encoder_fourier_x_max = 1000
     cfg.encoder_fourier_x_min = 0.003
-    cfg.feature_mlp_hidden_dim = 1024
-    cfg.pairformer_pair_dim = 384
-    cfg.pairformer_pair_num_heads = 12
-    cfg.pairformer_pair_feature_hidden_dim = 768
+    cfg.feature_mlp_hidden_dim = 1280
+    cfg.pairformer_pair_dim = 256
+    cfg.pairformer_pair_num_heads = 10
+    cfg.pairformer_pair_feature_hidden_dim = 512
     cfg.pairmixer_use_pair_bias_attention = True
     cfg.pairformer_use_fourier_features = True
     cfg.pairformer_fourier_num_freqs = 16
@@ -53,12 +53,12 @@ def get_config() -> config_dict.ConfigDict:
     cfg.attention_mlp_multiple = 4
 
     # Masked latent predictor
-    cfg.predictor_dim = 512
+    cfg.predictor_dim = 640
     cfg.predictor_dropout = 0.1
     cfg.predictor_apply_final_norm = True
     cfg.predictor_use_rope = False
     cfg.masked_latent_predictor_num_layers = 3
-    cfg.masked_latent_predictor_num_heads = 16
+    cfg.masked_latent_predictor_num_heads = 10
     cfg.target_projector_dim = -1
     cfg.masked_token_input_mode = "latent_token"
 
@@ -124,7 +124,21 @@ def get_config() -> config_dict.ConfigDict:
     cfg.training_max_steps = 300_000
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "reduce-overhead"
+    cfg.activation_checkpoint_mode = "none"
+    cfg.activation_checkpoint_every_n_layers = 1
+    cfg.activation_checkpoint_modules = ("encoder", "predictor")
+    cfg.activation_checkpoint_preserve_rng_state = True
+    cfg.jax_scan_accumulation = True
     cfg.device_prefetch_size = 8
+    cfg.throughput_warmup_steps = 25
+    cfg.torchax_mesh_devices = 1
+    cfg.torchax_mesh_axis = "data"
+    cfg.torchax_distributed_initialize = False
+    cfg.torchax_coordinator_address = ""
+    cfg.torchax_cluster_detection_method = ""
+    cfg.torchax_initialization_timeout = 300
+    cfg.torchax_lazy_opt_state = True
+    cfg.torchax_offload_opt_state_during_accumulation = True
     cfg.log_every_n_steps = 250
     cfg.collapse_metrics_every_n_steps = 0
     cfg.checkpoint_every_steps = 15_000

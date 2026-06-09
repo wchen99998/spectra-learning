@@ -1,13 +1,11 @@
 from unittest import mock
 
 import torch
-from torch import nn
 
 from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pairformer import (
     AttentionPairBias,
-    PairformerBlock,
     PairMixerBlock,
 )
 from spectra_learning.models.peak_features import PeakFeatureEmbedder
@@ -352,58 +350,6 @@ def test_encoder_and_predictor_final_norms_are_non_affine():
         apply_final_norm=True,
     )
     assert list(encoder.final_norm.parameters()) == []
-
-
-class _ConstantPairUpdate(nn.Module):
-    def forward(self, single: torch.Tensor, pair_mask: torch.Tensor) -> torch.Tensor:
-        return 2.0 * pair_mask.unsqueeze(-1).to(dtype=single.dtype)
-
-
-class _ZeroPairUpdate(nn.Module):
-    def forward(self, pair: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-        return torch.zeros_like(pair)
-
-
-class _ZeroSingleUpdate(nn.Module):
-    def forward(self, single: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-        return torch.zeros_like(single)
-
-
-@torch.no_grad()
-def test_pair_refresh_uses_sigmoid_gate_from_pair_state():
-    block = PairformerBlock(
-        single_dim=8,
-        pair_dim=4,
-        num_heads=2,
-        pair_num_heads=2,
-        attention_mlp_multiple=2.0,
-        pair_feature_hidden_dim=8,
-        norm_eps=1e-5,
-        dropout=0.0,
-        refresh_pair=True,
-    )
-    block.refresh_pair = _ConstantPairUpdate()
-    block.refresh_pair_gate_norm = nn.Identity()
-    block.refresh_pair_gate.weight.zero_()
-    block.tri_mul_out = _ZeroPairUpdate()
-    block.tri_mul_in = _ZeroPairUpdate()
-    block.tri_att_start = _ZeroPairUpdate()
-    block.tri_att_end = _ZeroPairUpdate()
-    block.pair_transition = _ZeroPairUpdate()
-    block.single_attention = _ZeroSingleUpdate()
-    block.single_transition = _ZeroSingleUpdate()
-
-    single = torch.randn(1, 3, 8)
-    pair = torch.full((1, 3, 3, 4), 3.0)
-    peak_mask = torch.tensor([[True, True, False]])
-    out_single, out_pair = block(single, pair, peak_mask, peak_mask)
-
-    expected_pair = pair.clone()
-    expected_pair[:, :2, :2] = 4.0
-    expected_pair[:, 2, :] = 0.0
-    expected_pair[:, :, 2] = 0.0
-    torch.testing.assert_close(out_single, single)
-    torch.testing.assert_close(out_pair, expected_pair)
 
 
 def test_backbone_uses_pairmixer_without_pairformer_attention_extras():

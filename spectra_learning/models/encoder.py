@@ -107,31 +107,32 @@ class PeakSetEncoder(nn.Module):
         x: Float[Tensor, "batch peaks dim"],
     ) -> Float[Tensor, "batch tokens dim"]:
         cls = self.cls_token.view(1, 1, -1).expand(x.shape[0], 1, -1)
-        return torch.cat([x, cls.to(dtype=x.dtype)], dim=1)
+        cls = cls.to(dtype=x.dtype) + x[:, :1] * 0.0
+        return torch.cat([x, cls], dim=1)
 
     def _append_cls_pair_tokens(
         self,
         pair: Float[Tensor, "batch peaks peaks pair"],
     ) -> Float[Tensor, "batch tokens tokens pair"]:
-        batch_size, num_peaks, _, pair_dim = pair.shape
-        tokens = num_peaks + 1
-        expanded = pair.new_empty(batch_size, tokens, tokens, pair_dim)
-        expanded[:, :num_peaks, :num_peaks] = pair
-        expanded[:, -1, :num_peaks] = self.cls_to_peak_pair_token.to(dtype=pair.dtype)
-        expanded[:, :num_peaks, -1] = self.peak_to_cls_pair_token.to(dtype=pair.dtype)
-        expanded[:, -1, -1] = self.cls_cls_pair_token.to(dtype=pair.dtype)
-        return expanded
+        peak_to_cls = self.peak_to_cls_pair_token.view(1, 1, 1, -1).to(
+            dtype=pair.dtype
+        )
+        peak_to_cls = peak_to_cls + pair[:, :, :1] * 0.0
+        with_cls_column = torch.cat([pair, peak_to_cls], dim=2)
+        cls_to_peak = self.cls_to_peak_pair_token.view(1, 1, 1, -1).to(
+            dtype=pair.dtype
+        )
+        cls_to_peak = cls_to_peak + pair[:, :1] * 0.0
+        cls_cls = self.cls_cls_pair_token.view(1, 1, 1, -1).to(dtype=pair.dtype)
+        cls_cls = cls_cls + pair[:, :1, :1] * 0.0
+        cls_row = torch.cat([cls_to_peak, cls_cls], dim=2)
+        return torch.cat([with_cls_column, cls_row], dim=1)
 
     def _append_cls_mask(
         self,
         peak_mask: Bool[Tensor, "batch peaks"],
     ) -> Bool[Tensor, "batch tokens"]:
-        cls_mask = torch.ones(
-            peak_mask.shape[0],
-            1,
-            device=peak_mask.device,
-            dtype=torch.bool,
-        )
+        cls_mask = torch.ones_like(peak_mask[:, :1])
         return torch.cat([peak_mask, cls_mask], dim=1)
 
     def forward_with_block_outputs(

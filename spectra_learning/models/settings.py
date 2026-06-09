@@ -70,6 +70,10 @@ class PeakSetJEPASettings:
     ema_teacher_momentum_final: float | None = None
     ema_teacher_schedule_peak_fraction: float = 0.35
     ema_teacher_schedule: str = "constant"
+    activation_checkpoint_mode: str = "none"
+    activation_checkpoint_every_n_layers: int = 1
+    activation_checkpoint_modules: tuple[str, ...] = ("encoder", "predictor")
+    autocast_dtype: str = "none"
 
     @classmethod
     def from_config(cls, config: Any) -> "PeakSetJEPASettings":
@@ -187,4 +191,8 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "ema_teacher_momentum_final": _optional_float,
     "ema_teacher_schedule_peak_fraction": float,
     "ema_teacher_schedule": str,
+    "activation_checkpoint_mode": str,
+    "activation_checkpoint_every_n_layers": int,
+    "activation_checkpoint_modules": tuple,
+    "autocast_dtype": str,
 }

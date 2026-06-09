@@ -22,6 +22,7 @@ from spectra_learning.training.storage import (
     storage_with_name,
     upload_local_file,
 )
+from spectra_learning.training.torchax_runtime import tensor_to_portable_cpu
 
 
 COVARIANCE_POOLER_PREFIX = "covariance_pooler."
@@ -79,7 +80,7 @@ def grad_scaler_state_dict(grad_scaler: torch.amp.GradScaler | None) -> dict | N
 
 def _snapshot_value(value: Any) -> Any:
     if isinstance(value, torch.Tensor):
-        return value.detach().to("cpu", copy=True)
+        return tensor_to_portable_cpu(value)
     if isinstance(value, dict):
         return {key: _snapshot_value(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -139,7 +140,7 @@ def _write_torch_checkpoint(state: dict[str, Any], path: StoragePath) -> None:
     local_path = local_cache_path(path) if is_remote_path(path) else Path(path).expanduser()
     local_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = local_path.with_name(f".{local_path.name}.tmp")
-    torch.save(state, tmp_path)
+    torch.save(_snapshot_value(state), tmp_path)
     tmp_path.replace(local_path)
     if is_remote_path(path):
         upload_local_file(local_path, path)

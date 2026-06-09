@@ -94,7 +94,7 @@ class ForwardMixin:
             teacher_targets,
             target_masks,
         )
-        masked_prediction_term = self.masked_token_loss_weight * masked_prediction_loss
+        masked_prediction_term = masked_prediction_loss * self.masked_token_loss_weight
         jepa_mae_term, jepa_mae_metrics = self._jepa_mae_metrics(
             predictor_output,
             peak_mz,
