@@ -43,7 +43,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pairformer_pair_dim = 384
     cfg.pairformer_pair_num_heads = 12
     cfg.pairformer_pair_feature_hidden_dim = 768
-    cfg.pairmixer_use_pair_bias_attention = True
+    cfg.pairmixer_triangle_mediator_rank = 8
+    cfg.pairmixer_use_commuted_low_rank_triangle = True
     cfg.pairformer_use_fourier_features = True
     cfg.pairformer_fourier_num_freqs = 16
     cfg.pairformer_fourier_x_min = 0.01
@@ -170,6 +171,6 @@ def get_config() -> config_dict.ConfigDict:
     # Logging
     cfg.enable_wandb = True
     cfg.wandb_project = "jepa-debugging"
-    cfg.run_name_suffix = "mae-100m-20m-alpha-isoflops-100k-bs1024-ga2"
+    cfg.run_name_suffix = "mae-100m-20m-alpha-isoflops-commuted-lrtri8-100k-bs1024-ga2"
 
     return cfg

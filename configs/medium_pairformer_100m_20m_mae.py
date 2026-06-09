@@ -42,7 +42,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pairformer_pair_dim = 384
     cfg.pairformer_pair_num_heads = 12
     cfg.pairformer_pair_feature_hidden_dim = 768
-    cfg.pairmixer_use_pair_bias_attention = True
     cfg.pairformer_use_fourier_features = True
     cfg.pairformer_fourier_num_freqs = 16
     cfg.pairformer_fourier_x_min = 0.01
@@ -122,6 +121,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_epochs = 25
     cfg.autocast_dtype = "bf16"
     cfg.compile_mode = "reduce-overhead"
+    cfg.activation_checkpoint_mode = "none"
     cfg.device_prefetch_size = 8
     cfg.log_every_n_steps = 250
     cfg.collapse_metrics_every_n_steps = 0
