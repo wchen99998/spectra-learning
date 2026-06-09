@@ -57,11 +57,7 @@ def use_jax_nnx_backend(config: Any) -> bool:
 
 def build_jax_optimizer(config: Any, model: PeakSetJEPAJax) -> nnx.Optimizer:
     grad_accum_steps = int(_config_get(config, "gradient_accumulation_steps", 1))
-    optimizer = optax.adamw(
-        learning_rate=float(_config_get(config, "learning_rate", 1e-3)),
-        b2=float(_config_get(config, "b2", 0.999)),
-        weight_decay=float(_config_get(config, "weight_decay", 0.0)),
-    )
+    optimizer = build_jax_optax_transform(config)
     use_multistep = (
         bool(_config_get(config, "jax_optax_multistep_accumulation", False))
         and _jax_data_parallel_devices(config) == 1
@@ -73,6 +69,14 @@ def build_jax_optimizer(config: Any, model: PeakSetJEPAJax) -> nnx.Optimizer:
             use_grad_mean=True,
         ).gradient_transformation()
     return nnx.Optimizer(model, optimizer, wrt=trainable_param_filter)
+
+
+def build_jax_optax_transform(config: Any) -> optax.GradientTransformation:
+    return optax.adamw(
+        learning_rate=float(_config_get(config, "learning_rate", 1e-3)),
+        b2=float(_config_get(config, "b2", 0.999)),
+        weight_decay=float(_config_get(config, "weight_decay", 0.0)),
+    )
 
 
 def torch_batch_to_jax(batch: dict[str, torch.Tensor]) -> dict[str, Array]:
@@ -409,6 +413,143 @@ def _accumulated_metrics_and_grads(
     return {"loss": loss}, grads
 
 
+def init_pure_optax_train_state(
+    config: Any,
+    model: PeakSetJEPAJax,
+) -> tuple[Any, nnx.State, nnx.State, Any, optax.GradientTransformation]:
+    graphdef, trainable_params, static_state = nnx.split(
+        model,
+        trainable_param_filter,
+        ...,
+    )
+    trainable_params = nnx.as_pure(trainable_params)
+    static_state = nnx.as_pure(static_state)
+    optimizer = build_jax_optax_transform(config)
+    opt_state = optimizer.init(trainable_params)
+    return graphdef, trainable_params, static_state, opt_state, optimizer
+
+
+def make_pure_accumulated_train_step(
+    graphdef: Any,
+    optimizer: optax.GradientTransformation,
+    *,
+    sharded: bool,
+    scan_zero_init: bool = False,
+):
+    def accumulated_metrics_and_grads(
+        trainable_params: nnx.State,
+        static_state: nnx.State,
+        batch: dict[str, Array],
+    ) -> tuple[dict[str, Array], nnx.State]:
+        def loss_fn(params: nnx.State, micro_batch: dict[str, Array]):
+            functional_model = nnx.merge(graphdef, params, static_state)
+            return functional_model(micro_batch, loss_only=True)["loss"]
+
+        def micro_batch_grad(micro_batch: dict[str, Array]):
+            return jax.value_and_grad(loss_fn)(
+                trainable_params,
+                micro_batch,
+            )
+
+        def scan_body(carry: tuple[nnx.State, Array], micro_batch):
+            grad_accumulator, loss_accumulator = carry
+            micro_loss, micro_grads = micro_batch_grad(micro_batch)
+            grad_accumulator = jax.tree.map(
+                lambda lhs, rhs: lhs + rhs,
+                grad_accumulator,
+                micro_grads,
+            )
+            return (grad_accumulator, loss_accumulator + micro_loss), None
+
+        if scan_zero_init:
+            grads = jax.tree.map(jnp.zeros_like, trainable_params)
+            loss = jnp.asarray(0.0, dtype=jnp.float32)
+            (grads, loss), _ = jax.lax.scan(
+                scan_body,
+                (grads, loss),
+                batch,
+            )
+            num_micro_batches = float(jax.tree.leaves(batch)[0].shape[0])
+            grads = jax.tree.map(lambda value: value / num_micro_batches, grads)
+            loss = loss / num_micro_batches
+            return {"loss": loss}, grads
+
+        first_batch = jax.tree.map(lambda value: value[0], batch)
+        remaining_batches = jax.tree.map(lambda value: value[1:], batch)
+        loss, grads = micro_batch_grad(first_batch)
+
+        (grads, loss), _ = jax.lax.scan(
+            scan_body,
+            (grads, loss),
+            remaining_batches,
+        )
+        num_micro_batches = float(jax.tree.leaves(batch)[0].shape[0])
+        grads = jax.tree.map(lambda value: value / num_micro_batches, grads)
+        loss = loss / num_micro_batches
+        return {"loss": loss}, grads
+
+    if sharded:
+
+        @jax.jit(donate_argnums=(0, 2))
+        @jax.shard_map(
+            mesh=JAX_DATA_MESH,
+            in_specs=(P(), P(), P(), P(None, JAX_DATA_AXIS)),
+            out_specs=(P(), P(), P()),
+            axis_names={JAX_DATA_AXIS},
+            check_vma=False,
+        )
+        def pure_sharded_accumulated_train_step(
+            trainable_params: nnx.State,
+            static_state: nnx.State,
+            opt_state: Any,
+            batch: dict[str, Array],
+        ) -> tuple[nnx.State, Any, dict[str, Array]]:
+            metrics, grads = accumulated_metrics_and_grads(
+                trainable_params,
+                static_state,
+                batch,
+            )
+            metrics = jax.tree.map(
+                lambda value: jax.lax.pmean(value, JAX_DATA_AXIS),
+                metrics,
+            )
+            grads = jax.tree.map(
+                lambda value: jax.lax.pmean(value, JAX_DATA_AXIS),
+                grads,
+            )
+            updates, opt_state = optimizer.update(
+                grads,
+                opt_state,
+                trainable_params,
+            )
+            trainable_params = optax.apply_updates(trainable_params, updates)
+            return trainable_params, opt_state, metrics
+
+        return pure_sharded_accumulated_train_step
+
+    @jax.jit(donate_argnums=(0, 2))
+    def pure_accumulated_train_step(
+        trainable_params: nnx.State,
+        static_state: nnx.State,
+        opt_state: Any,
+        batch: dict[str, Array],
+    ) -> tuple[nnx.State, Any, dict[str, Array]]:
+        metrics, grads = accumulated_metrics_and_grads(
+            trainable_params,
+            static_state,
+            batch,
+        )
+        updates, opt_state = optimizer.update(
+            grads,
+            opt_state,
+            trainable_params,
+        )
+        trainable_params = optax.apply_updates(trainable_params, updates)
+        return trainable_params, opt_state, metrics
+
+    return pure_accumulated_train_step
+
+
 def train_and_evaluate_jax(
     config: config_dict.ConfigDict,
     workdir: str | Path,
@@ -488,6 +629,29 @@ def _run_jax_training_loop(
         and use_compiled_accumulation
         and not use_scan_accumulation
     )
+    use_pure_optax_step = (
+        bool(_config_get(config, "jax_pure_optax_step", False))
+        and use_scan_accumulation
+        and not model.use_ema_teacher
+    )
+    pure_trainable_params = None
+    pure_static_state = None
+    pure_opt_state = None
+    pure_train_step = None
+    if use_pure_optax_step:
+        (
+            pure_graphdef,
+            pure_trainable_params,
+            pure_static_state,
+            pure_opt_state,
+            pure_optimizer,
+        ) = init_pure_optax_train_state(config, model)
+        pure_train_step = make_pure_accumulated_train_step(
+            pure_graphdef,
+            pure_optimizer,
+            sharded=use_sharded_step,
+            scan_zero_init=bool(_config_get(config, "jax_scan_zero_init", False)),
+        )
     timing_barriers = bool(_config_get(config, "jax_timing_barriers", False))
     profile_dir = str(_config_get(config, "jax_profile_dir", ""))
     profile_start_step = int(_config_get(config, "jax_profile_start_step", warmup_steps))
@@ -561,20 +725,33 @@ def _run_jax_training_loop(
                     profile_started = True
                     profile_active = True
                 step_start = time.perf_counter()
-                metrics, apply_token = (
-                    jax_sharded_accumulated_train_step(model, optimizer, batch)
-                    if use_sharded_step
-                    else jax_accumulated_train_step(model, optimizer, batch)
-                )
-                if timing_barriers:
-                    jax.block_until_ready((metrics, apply_token))
+                if use_pure_optax_step:
+                    pure_trainable_params, pure_opt_state, metrics = pure_train_step(
+                        pure_trainable_params,
+                        pure_static_state,
+                        pure_opt_state,
+                        batch,
+                    )
+                    if timing_barriers:
+                        jax.block_until_ready(
+                            (pure_trainable_params, pure_opt_state, metrics)
+                        )
+                else:
+                    metrics, apply_token = (
+                        jax_sharded_accumulated_train_step(model, optimizer, batch)
+                        if use_sharded_step
+                        else jax_accumulated_train_step(model, optimizer, batch)
+                    )
+                    if timing_barriers:
+                        jax.block_until_ready((metrics, apply_token))
                 if timing_enabled:
                     timing["compiled_step_seconds"] += (
                         time.perf_counter() - step_start
                     )
-                ema_momentum = model.update_ema_teacher(global_step + 1, total_steps)
-                if ema_momentum is not None:
-                    metrics["ema_teacher_momentum"] = jnp.asarray(ema_momentum)
+                if not use_pure_optax_step:
+                    ema_momentum = model.update_ema_teacher(global_step + 1, total_steps)
+                    if ema_momentum is not None:
+                        metrics["ema_teacher_momentum"] = jnp.asarray(ema_momentum)
                 last_metrics = metrics
                 global_step += 1
                 if measured_start is not None:
@@ -814,6 +991,9 @@ def _run_jax_training_loop(
         pbar.close()
         if global_step >= total_steps:
             break
+    if use_pure_optax_step:
+        jax.block_until_ready(pure_trainable_params)
+        nnx.update(model, pure_trainable_params)
     jax.effects_barrier()
     if profile_active:
         jax.profiler.stop_trace()

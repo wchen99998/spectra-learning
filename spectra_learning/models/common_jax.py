@@ -119,7 +119,8 @@ class LayerNorm(nnx.Module):
     def __call__(self, x: Array) -> Array:
         x_float = x.astype(jnp.float32)
         mean = jnp.mean(x_float, axis=-1, keepdims=True)
-        var = jnp.mean(jnp.square(x_float - mean), axis=-1, keepdims=True)
+        mean_square = jnp.mean(jnp.square(x_float), axis=-1, keepdims=True)
+        var = jnp.maximum(mean_square - jnp.square(mean), 0.0)
         y = (x_float - mean) * jax.lax.rsqrt(var + self.eps)
         if self.weight is not None:
             y = y * self.weight[...] + self.bias[...]

@@ -129,6 +129,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.activation_checkpoint_modules = ("encoder", "predictor")
     cfg.activation_checkpoint_preserve_rng_state = True
     cfg.jax_scan_accumulation = True
+    cfg.jax_pure_optax_step = True
+    cfg.jax_scan_zero_init = True
     cfg.device_prefetch_size = 8
     cfg.throughput_warmup_steps = 25
     cfg.torchax_mesh_devices = 1
