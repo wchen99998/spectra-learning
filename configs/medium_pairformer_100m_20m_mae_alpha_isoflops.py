@@ -124,7 +124,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.num_epochs = 8
     cfg.training_max_steps = 300_000
     cfg.autocast_dtype = "bf16"
-    cfg.compile_mode = "max-autotune"
+    cfg.compile_mode = "max-autotune-no-cudagraphs"
+    cfg.activation_checkpoint_mode = "selective_ac"
     cfg.device_prefetch_size = 8
     cfg.log_every_n_steps = 250
     cfg.collapse_metrics_every_n_steps = 0
