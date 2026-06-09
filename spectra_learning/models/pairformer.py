@@ -423,7 +423,7 @@ class AttentionPairBias(nn.Module):
         attn_bias = attn_bias.masked_fill(
             ~token_mask[:, None, None, :],
             float("-inf"),
-        )
+        ).contiguous()
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias)
         out = out.transpose(1, 2).contiguous().view(batch_size, num_tokens, single_dim)
         out = out * torch.sigmoid(self.g(single_norm))
