@@ -21,6 +21,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--step-name", default="accumulated_train_step")
     parser.add_argument("--devices", type=int, default=4)
     parser.add_argument("--peak-flops-per-device", type=float, default=TPU_V6E_BF16_PEAK_FLOPS)
+    parser.add_argument("--model-flops-per-step", type=float, default=None)
+    parser.add_argument("--leaf-model-flops-per-step", type=float, default=None)
     parser.add_argument("--top", type=int, default=20)
     parser.add_argument("--stack-depth", type=int, default=4)
     return parser.parse_args()
@@ -266,6 +268,24 @@ def main() -> None:
             * float(measured_steps_per_second)
             / peak
         )
+    override_mfu_percent = None
+    if measured_steps_per_second is not None and args.model_flops_per_step is not None:
+        peak = args.devices * args.peak_flops_per_device
+        override_mfu_percent = (
+            100.0 * args.model_flops_per_step * float(measured_steps_per_second) / peak
+        )
+    override_leaf_mfu_percent = None
+    if (
+        measured_steps_per_second is not None
+        and args.leaf_model_flops_per_step is not None
+    ):
+        peak = args.devices * args.peak_flops_per_device
+        override_leaf_mfu_percent = (
+            100.0
+            * args.leaf_model_flops_per_step
+            * float(measured_steps_per_second)
+            / peak
+        )
     duration_us = sum(duration_by_category.values())
     leaf_duration_us = sum(leaf_duration_by_category.values())
     step_window_leaf_duration_us = sum(step_leaf_duration_by_category.values())
@@ -301,6 +321,10 @@ def main() -> None:
         "mfu_percent_from_metrics": mfu_percent,
         "leaf_mfu_percent_from_metrics": leaf_mfu_percent,
         "step_window_leaf_mfu_percent_from_metrics": step_window_leaf_mfu_percent,
+        "override_model_flops_per_step": args.model_flops_per_step,
+        "override_leaf_model_flops_per_step": args.leaf_model_flops_per_step,
+        "override_mfu_percent_from_metrics": override_mfu_percent,
+        "override_leaf_mfu_percent_from_metrics": override_leaf_mfu_percent,
         "flops_by_process": dict(flops_by_process),
         "leaf_flops_by_process": dict(leaf_flops_by_process),
         "step_window_flops_by_process": dict(step_flops_by_process),
