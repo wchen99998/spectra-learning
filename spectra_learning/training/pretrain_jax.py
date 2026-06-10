@@ -638,7 +638,22 @@ def _run_jax_training_loop(
     pure_static_state = None
     pure_opt_state = None
     pure_train_step = None
+    pure_full_static_state = None
+    pure_full_train_step = None
+    context_encoder_pack_tokens = int(
+        getattr(model, "mae_context_encoder_pack_tokens", 0)
+    )
     if use_pure_optax_step:
+        if context_encoder_pack_tokens > 0:
+            model.mae_context_encoder_pack_tokens = 0
+            (
+                pure_full_graphdef,
+                _full_trainable_params,
+                pure_full_static_state,
+                _full_opt_state,
+                _full_optimizer,
+            ) = init_pure_optax_train_state(config, model)
+            model.mae_context_encoder_pack_tokens = context_encoder_pack_tokens
         (
             pure_graphdef,
             pure_trainable_params,
@@ -653,6 +668,13 @@ def _run_jax_training_loop(
             sharded=use_sharded_step,
             scan_zero_init=scan_zero_init,
         )
+        if context_encoder_pack_tokens > 0:
+            pure_full_train_step = make_pure_accumulated_train_step(
+                pure_full_graphdef,
+                pure_optimizer,
+                sharded=use_sharded_step,
+                scan_zero_init=scan_zero_init,
+            )
     timing_barriers = bool(_config_get(config, "jax_timing_barriers", False))
     profile_dir = str(_config_get(config, "jax_profile_dir", ""))
     profile_start_step = int(_config_get(config, "jax_profile_start_step", warmup_steps))
@@ -679,6 +701,10 @@ def _run_jax_training_loop(
     train_start = time.perf_counter()
     measured_start: float | None = None
     measured_steps = 0
+    context_encoder_packed_steps = 0
+    context_encoder_full_fallback_steps = 0
+    measured_context_encoder_packed_steps = 0
+    measured_context_encoder_full_fallback_steps = 0
     for epoch in range(loop_epochs):
         loader = datamodule.train_loader_for_epoch(epoch)
         loader_iter = iter(loader)
@@ -691,6 +717,7 @@ def _run_jax_training_loop(
             if use_scan_accumulation:
                 dataloader_elapsed = 0.0
                 transfer_elapsed = 0.0
+                max_context_count = 0
                 micro_batches = []
                 for _ in range(grad_accum_steps):
                     dataloader_start = time.perf_counter()
@@ -699,6 +726,17 @@ def _run_jax_training_loop(
                     except StopIteration:
                         break
                     dataloader_elapsed += time.perf_counter() - dataloader_start
+                    if pure_full_train_step is not None:
+                        context_count = (
+                            (
+                                torch_batch["context_mask"]
+                                & torch_batch["peak_valid_mask"]
+                            )
+                            .sum(dim=1)
+                            .max()
+                            .item()
+                        )
+                        max_context_count = max(max_context_count, int(context_count))
                     transfer_start = time.perf_counter()
                     micro_batches.append(torch_batch_to_jax(torch_batch))
                     if timing_barriers:
@@ -727,9 +765,28 @@ def _run_jax_training_loop(
                     profile_active = True
                 step_start = time.perf_counter()
                 if use_pure_optax_step:
-                    pure_trainable_params, pure_opt_state, metrics = pure_train_step(
+                    selected_train_step = pure_train_step
+                    selected_static_state = pure_static_state
+                    used_context_full_fallback = False
+                    if (
+                        pure_full_train_step is not None
+                        and max_context_count > context_encoder_pack_tokens
+                    ):
+                        selected_train_step = pure_full_train_step
+                        selected_static_state = pure_full_static_state
+                        used_context_full_fallback = True
+                    if pure_full_train_step is not None:
+                        if used_context_full_fallback:
+                            context_encoder_full_fallback_steps += 1
+                            if timing_enabled:
+                                measured_context_encoder_full_fallback_steps += 1
+                        else:
+                            context_encoder_packed_steps += 1
+                            if timing_enabled:
+                                measured_context_encoder_packed_steps += 1
+                    pure_trainable_params, pure_opt_state, metrics = selected_train_step(
                         pure_trainable_params,
-                        pure_static_state,
+                        selected_static_state,
                         pure_opt_state,
                         batch,
                     )
@@ -1023,6 +1080,22 @@ def _run_jax_training_loop(
         ),
         "train/loss": loss,
     }
+    if context_encoder_pack_tokens > 0:
+        result.update(
+            {
+                "run/context_encoder_pack_tokens": float(context_encoder_pack_tokens),
+                "run/context_encoder_packed_steps": float(context_encoder_packed_steps),
+                "run/context_encoder_full_fallback_steps": float(
+                    context_encoder_full_fallback_steps
+                ),
+                "run/measured_context_encoder_packed_steps": float(
+                    measured_context_encoder_packed_steps
+                ),
+                "run/measured_context_encoder_full_fallback_steps": float(
+                    measured_context_encoder_full_fallback_steps
+                ),
+            }
+        )
     for name, value in timing.items():
         result[f"run/profile_{name}"] = value
     if timing["measured_microbatches"] > 0:

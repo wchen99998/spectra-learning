@@ -58,6 +58,7 @@ class PeakSetJEPASettings:
     pairmixer_relative_fourier_x_min: float = 1e-3
     pairmixer_relative_fourier_x_max: float = 1.0
     predictor_apply_final_norm: bool = True
+    mae_context_encoder_pack_tokens: int = 0
     num_peaks: int = 64
     predictor_dim: int | None = None
     target_projector_dim: int | None = None
@@ -178,6 +179,7 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "pairmixer_relative_fourier_x_min": float,
     "pairmixer_relative_fourier_x_max": float,
     "predictor_apply_final_norm": bool,
+    "mae_context_encoder_pack_tokens": int,
     "num_peaks": int,
     "predictor_dim": _optional_int,
     "target_projector_dim": _optional_int,

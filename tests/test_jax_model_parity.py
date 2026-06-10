@@ -176,6 +176,22 @@ def _assert_metrics_close(
         np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=atol, err_msg=key)
 
 
+def _assert_jax_metrics_close(
+    expected_metrics,
+    actual_metrics,
+    *,
+    atol: float = 2e-5,
+) -> None:
+    for key, expected_value in expected_metrics.items():
+        np.testing.assert_allclose(
+            np.asarray(actual_metrics[key]),
+            np.asarray(expected_value),
+            rtol=1e-5,
+            atol=atol,
+            err_msg=key,
+        )
+
+
 @pytest.mark.parametrize("mask_strategy", ["contiguous", "random"])
 def test_jax_mae_matches_pytorch_on_real_collated_batch(mask_strategy: str):
     torch.manual_seed(7)
@@ -220,6 +236,25 @@ def test_jax_model_loads_plain_pytorch_checkpoint_and_matches_output():
     jax_metrics = jax_model(batch)
 
     _assert_metrics_close(torch_metrics, jax_metrics)
+
+
+def test_jax_mae_packed_context_encoder_matches_full_encoder():
+    torch.manual_seed(13)
+    kwargs = {**_small_mae_kwargs(), "encoder_use_position_embedding": False}
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    full_model = PeakSetJEPAJax(**kwargs)
+    packed_model = PeakSetJEPAJax(
+        **kwargs,
+        mae_context_encoder_pack_tokens=3,
+    )
+    full_model.load_torch_state_dict(torch_model.state_dict())
+    packed_model.load_torch_state_dict(torch_model.state_dict())
+    batch = _real_pattern_batch("contiguous")
+
+    full_metrics = full_model(batch)
+    packed_metrics = packed_model(batch)
+
+    _assert_jax_metrics_close(full_metrics, packed_metrics, atol=5e-4)
 
 
 def test_jax_optax_train_step_updates_loaded_pytorch_weights():
