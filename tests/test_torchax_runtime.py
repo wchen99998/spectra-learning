@@ -39,8 +39,8 @@ def _small_model() -> PeakSetJEPA:
         masked_latent_predictor_num_heads=2,
         jepa_num_target_blocks=1,
         num_peaks=4,
-        pairformer_pair_dim=8,
-        pairformer_pair_feature_hidden_dim=4,
+        pairmixer_pair_dim=8,
+        pairmixer_pair_feature_hidden_dim=4,
     )
 
 

@@ -63,7 +63,7 @@ def _configure_dimensions(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
         cfg.predictor_dim if cfg.predictor_dim is not None else model.model_dim
     )
     model.predictor_pair_dim = (
-        cfg.pairformer_pair_dim if cfg.pairformer_pair_dim is not None else model.model_dim
+        cfg.pairmixer_pair_dim if cfg.pairmixer_pair_dim is not None else model.model_dim
     )
     model.encoder_num_layers = cfg.encoder_num_layers
     model.norm_eps = cfg.norm_eps
@@ -189,23 +189,23 @@ def _build_peak_set_encoder(cfg: PeakSetJEPASettings) -> PeakSetEncoder:
         apply_final_norm=cfg.encoder_apply_final_norm,
         apply_final_pair_norm=cfg.encoder_apply_final_pair_norm,
         num_peaks=_num_peak_tokens(cfg),
-        pair_dim=cfg.pairformer_pair_dim,
-        pair_feature_hidden_dim=cfg.pairformer_pair_feature_hidden_dim,
-        pairformer_dropout=cfg.pairformer_dropout,
+        pair_dim=cfg.pairmixer_pair_dim,
+        pair_feature_hidden_dim=cfg.pairmixer_pair_feature_hidden_dim,
+        pairmixer_dropout=cfg.pairmixer_dropout,
         pairmixer_use_pair_bias_attention=cfg.pairmixer_use_pair_bias_attention,
-        pairformer_mz_scale=cfg.pairformer_mz_scale,
-        pairformer_precursor_mz_scale=cfg.pairformer_precursor_mz_scale,
-        pairformer_use_fourier_features=cfg.pairformer_use_fourier_features,
-        pairformer_fourier_num_freqs=cfg.pairformer_fourier_num_freqs,
-        pairformer_fourier_x_min=cfg.pairformer_fourier_x_min,
-        pairformer_fourier_x_max=cfg.pairformer_fourier_x_max,
-        pairformer_relative_fourier_x_min=cfg.pairformer_relative_fourier_x_min,
-        pairformer_relative_fourier_x_max=cfg.pairformer_relative_fourier_x_max,
+        pairmixer_mz_scale=cfg.pairmixer_mz_scale,
+        pairmixer_precursor_mz_scale=cfg.pairmixer_precursor_mz_scale,
+        pairmixer_use_fourier_features=cfg.pairmixer_use_fourier_features,
+        pairmixer_fourier_num_freqs=cfg.pairmixer_fourier_num_freqs,
+        pairmixer_fourier_x_min=cfg.pairmixer_fourier_x_min,
+        pairmixer_fourier_x_max=cfg.pairmixer_fourier_x_max,
+        pairmixer_relative_fourier_x_min=cfg.pairmixer_relative_fourier_x_min,
+        pairmixer_relative_fourier_x_max=cfg.pairmixer_relative_fourier_x_max,
     )
 
 
 def _pair_dim(cfg: PeakSetJEPASettings) -> int:
-    return cfg.model_dim if cfg.pairformer_pair_dim is None else cfg.pairformer_pair_dim
+    return cfg.model_dim if cfg.pairmixer_pair_dim is None else cfg.pairmixer_pair_dim
 
 
 def _build_peak_feature_embedder(cfg: PeakSetJEPASettings) -> PeakFeatureEmbedder:

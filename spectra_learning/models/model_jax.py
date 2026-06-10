@@ -67,7 +67,7 @@ class PeakSetJEPAJax(nnx.Module):
         self.model_dim = cfg.model_dim
         self.predictor_dim = cfg.predictor_dim if cfg.predictor_dim is not None else cfg.model_dim
         self.predictor_pair_dim = (
-            cfg.pairformer_pair_dim if cfg.pairformer_pair_dim is not None else cfg.model_dim
+            cfg.pairmixer_pair_dim if cfg.pairmixer_pair_dim is not None else cfg.model_dim
         )
         self.encoder_num_layers = cfg.encoder_num_layers
         self.norm_eps = cfg.norm_eps
@@ -287,18 +287,18 @@ class PeakSetJEPAJax(nnx.Module):
             apply_final_norm=cfg.encoder_apply_final_norm,
             apply_final_pair_norm=cfg.encoder_apply_final_pair_norm,
             num_peaks=cfg.num_peaks,
-            pair_dim=cfg.pairformer_pair_dim,
-            pair_feature_hidden_dim=cfg.pairformer_pair_feature_hidden_dim,
-            pairformer_dropout=cfg.pairformer_dropout,
+            pair_dim=cfg.pairmixer_pair_dim,
+            pair_feature_hidden_dim=cfg.pairmixer_pair_feature_hidden_dim,
+            pairmixer_dropout=cfg.pairmixer_dropout,
             pairmixer_use_pair_bias_attention=cfg.pairmixer_use_pair_bias_attention,
-            pairformer_mz_scale=cfg.pairformer_mz_scale,
-            pairformer_precursor_mz_scale=cfg.pairformer_precursor_mz_scale,
-            pairformer_use_fourier_features=cfg.pairformer_use_fourier_features,
-            pairformer_fourier_num_freqs=cfg.pairformer_fourier_num_freqs,
-            pairformer_fourier_x_min=cfg.pairformer_fourier_x_min,
-            pairformer_fourier_x_max=cfg.pairformer_fourier_x_max,
-            pairformer_relative_fourier_x_min=cfg.pairformer_relative_fourier_x_min,
-            pairformer_relative_fourier_x_max=cfg.pairformer_relative_fourier_x_max,
+            pairmixer_mz_scale=cfg.pairmixer_mz_scale,
+            pairmixer_precursor_mz_scale=cfg.pairmixer_precursor_mz_scale,
+            pairmixer_use_fourier_features=cfg.pairmixer_use_fourier_features,
+            pairmixer_fourier_num_freqs=cfg.pairmixer_fourier_num_freqs,
+            pairmixer_fourier_x_min=cfg.pairmixer_fourier_x_min,
+            pairmixer_fourier_x_max=cfg.pairmixer_fourier_x_max,
+            pairmixer_relative_fourier_x_min=cfg.pairmixer_relative_fourier_x_min,
+            pairmixer_relative_fourier_x_max=cfg.pairmixer_relative_fourier_x_max,
             activation_checkpoint_mode=cfg.activation_checkpoint_mode,
             activation_checkpoint_every_n_layers=(
                 cfg.activation_checkpoint_every_n_layers
@@ -1226,4 +1226,4 @@ def _load_frozen_teacher_settings(
 
 
 def _pair_dim(cfg: PeakSetJEPASettings) -> int:
-    return cfg.model_dim if cfg.pairformer_pair_dim is None else cfg.pairformer_pair_dim
+    return cfg.model_dim if cfg.pairmixer_pair_dim is None else cfg.pairmixer_pair_dim

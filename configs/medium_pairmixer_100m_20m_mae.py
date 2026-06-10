@@ -5,8 +5,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg = config_dict.ConfigDict()
 
     # Dataset
-    cfg.artifact_dir = "data/gems_artifacts_alpha"
-    cfg.gems_native_repo_id = "cjim8889/gems-a10-native"
+    cfg.artifact_dir = "data/gems_artifacts_beta"
+    cfg.gems_native_repo_id = "cjim8889/gems-b-native"
     cfg.nist_murcko_probe_repo_id = "cjim8889/hr_msms_nist_mcebio_murcko_20260529"
     cfg.nist_murcko_probe_revision = "main"
     cfg.nist_murcko_probe_train_samples = 30_000
@@ -26,10 +26,11 @@ def get_config() -> config_dict.ConfigDict:
     # Encoder
     cfg.num_peaks = 32
     cfg.model_dim = 512
-    cfg.encoder_num_layers = 10
+    cfg.encoder_num_layers = 15
     cfg.encoder_num_heads = 16
     cfg.encoder_use_position_embedding = False
     cfg.encoder_apply_final_norm = True
+    cfg.encoder_apply_final_pair_norm = True
     cfg.encoder_use_fourier_features = True
     cfg.encoder_fourier_input_scale = 1000
     cfg.encoder_fourier_mlp_hidden_dim = 1024
@@ -38,30 +39,30 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_fourier_x_max = 1000
     cfg.encoder_fourier_x_min = 0.003
     cfg.feature_mlp_hidden_dim = 1024
-    cfg.pairformer_pair_dim = 384
-    cfg.pairformer_pair_num_heads = 12
-    cfg.pairformer_pair_feature_hidden_dim = 768
+    cfg.pairmixer_pair_dim = 384
+    cfg.pairmixer_pair_feature_hidden_dim = 768
     cfg.pairmixer_use_pair_bias_attention = True
-    cfg.pairformer_use_fourier_features = True
-    cfg.pairformer_fourier_num_freqs = 16
-    cfg.pairformer_fourier_x_min = 0.01
-    cfg.pairformer_fourier_x_max = 1000
-    cfg.pairformer_relative_fourier_x_min = 0.001
-    cfg.pairformer_relative_fourier_x_max = 1.0
+    cfg.pairmixer_use_fourier_features = True
+    cfg.pairmixer_fourier_num_freqs = 16
+    cfg.pairmixer_fourier_x_min = 0.01
+    cfg.pairmixer_fourier_x_max = 1000
+    cfg.pairmixer_relative_fourier_x_min = 0.001
+    cfg.pairmixer_relative_fourier_x_max = 1.0
     cfg.attention_mlp_multiple = 4
 
     # Masked latent predictor
-    cfg.predictor_dim = 256
+    cfg.predictor_dim = 512
     cfg.predictor_dropout = 0.1
     cfg.predictor_apply_final_norm = True
     cfg.predictor_use_rope = False
-    cfg.masked_latent_predictor_num_layers = 2
-    cfg.masked_latent_predictor_num_heads = 8
+    cfg.masked_latent_predictor_num_layers = 3
+    cfg.masked_latent_predictor_num_heads = 16
     cfg.target_projector_dim = -1
     cfg.masked_token_input_mode = "latent_token"
 
-    # JEPA masking and targets
+    # MAE masking and reconstruction objectives
     cfg.training_mode = "mae"
+    cfg.use_ema_teacher = False
     cfg.jepa_num_target_blocks = 1
     cfg.jepa_mask_strategy = ["intensity_aware", "ragged"]
     cfg.jepa_context_fraction = 0.35
@@ -70,11 +71,13 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_mask_lengths = (2, 4, 8, 12)
     cfg.jepa_mask_round_from = 3
     cfg.jepa_target_normalization = "none"
-    cfg.masked_token_loss_weight = 0
+    cfg.masked_token_loss_weight = 0.0
     cfg.jepa_mae_loss_weight = 0.0
     cfg.mae_loss_weight = 1.0
     cfg.distogram_loss_weight = 1.0
-    cfg.jepa_mae_mz_bin_size = 0.1
+    cfg.latent_pair_loss_weight = 0.0
+    cfg.latent_pair_target_normalization = "none"
+    cfg.jepa_mae_mz_bin_size = 0.5
     cfg.jepa_intensity_aware_tau = 0.5
     cfg.jepa_intensity_aware_alpha = 0.75
     cfg.jepa_intensity_aware_beta_context = 0.85
@@ -110,7 +113,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.contrastive_compile_mode = "none"
 
     # EMA teacher
-    cfg.use_ema_teacher = False
     cfg.ema_teacher_momentum_start = 0.996
     cfg.ema_teacher_momentum_final = 0.99925
     cfg.ema_teacher_schedule = "cosine"
@@ -152,8 +154,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_batch_size = 256
 
     # Optimizer
-    cfg.learning_rate = 0.0004
-    cfg.min_learning_rate = 0.00004
+    cfg.learning_rate = 0.0002
+    cfg.min_learning_rate = 0.00003
     cfg.warmup_steps = 5_000
     cfg.weight_decay = 0.01
     cfg.b2 = 0.95
@@ -165,6 +167,6 @@ def get_config() -> config_dict.ConfigDict:
     # Logging
     cfg.enable_wandb = True
     cfg.wandb_project = "jepa-debugging"
-    cfg.run_name_suffix = "mae-medium-pairformer-92m"
+    cfg.run_name_suffix = "mae-100m-encoder-20m-predictor-pairmixer"
 
     return cfg

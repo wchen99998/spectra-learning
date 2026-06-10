@@ -52,10 +52,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_fourier_x_max = 1000
     cfg.encoder_fourier_x_min = 0.003
     cfg.feature_mlp_hidden_dim = 1024
-    cfg.pairformer_pair_dim = 384
-    cfg.pairformer_pair_num_heads = 12
-    cfg.pairformer_pair_feature_hidden_dim = 512
-    cfg.pairformer_use_cuequivariance = True
+    cfg.pairmixer_pair_dim = 384
+    cfg.pairmixer_pair_feature_hidden_dim = 512
     cfg.attention_mlp_multiple = 4
 
     # Masked latent predictor

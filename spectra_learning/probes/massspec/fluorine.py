@@ -605,7 +605,7 @@ def _build_checkpoint_feature_factory(
         if pooling == "single_pair_covariance":
             pooler = SinglePairCovariancePool(
                 single_dim=int(config.model_dim),
-                pair_dim=int(_config_get(config, "pairformer_pair_dim", config.model_dim)),
+                pair_dim=int(_config_get(config, "pairmixer_pair_dim", config.model_dim)),
                 compressed_dim=compressed_dim,
             ).to(device)
             if not train_covariance_pooler:
@@ -984,7 +984,7 @@ def train_or_load_finetuned(
     if pooling == "single_pair_covariance":
         pooler: torch.nn.Module = SinglePairCovariancePool(
             single_dim=int(config.model_dim),
-            pair_dim=int(config.get("pairformer_pair_dim", config.model_dim)),
+            pair_dim=int(config.get("pairmixer_pair_dim", config.model_dim)),
             compressed_dim=covariance_dim,
         ).to(device)
     else:
@@ -1067,7 +1067,7 @@ def train_or_load_finetuned(
             "input_dim": int(input_dim),
             "covariance_dim": int(covariance_dim),
             "pooling": pooling,
-            "pair_dim": int(config.get("pairformer_pair_dim", config.model_dim)),
+            "pair_dim": int(config.get("pairmixer_pair_dim", config.model_dim)),
             "model_state": best_model_state,
             "pooler_state": best_pooler_state,
             "classifier_state": best_classifier_state,
@@ -1295,7 +1295,7 @@ def train_or_load_lora(
     if pooling == "single_pair_covariance":
         pooler: torch.nn.Module = SinglePairCovariancePool(
             single_dim=int(config.model_dim),
-            pair_dim=int(config.get("pairformer_pair_dim", config.model_dim)),
+            pair_dim=int(config.get("pairmixer_pair_dim", config.model_dim)),
             compressed_dim=covariance_dim,
         ).to(device)
     else:
@@ -1373,7 +1373,7 @@ def train_or_load_lora(
             "input_dim": int(input_dim),
             "covariance_dim": int(covariance_dim),
             "pooling": pooling,
-            "pair_dim": int(config.get("pairformer_pair_dim", config.model_dim)),
+            "pair_dim": int(config.get("pairmixer_pair_dim", config.model_dim)),
             "lora_config": lora_config,
             "lora_state": best_lora_state,
             "pooler_state": best_pooler_state,
@@ -1518,7 +1518,7 @@ def evaluate_fluorine_test_split(
     if pooling == "single_pair_covariance":
         pooler = SinglePairCovariancePool(
             single_dim=int(config.model_dim),
-            pair_dim=int(head_state.get("pair_dim", config.get("pairformer_pair_dim", config.model_dim))),
+            pair_dim=int(head_state.get("pair_dim", config.get("pairmixer_pair_dim", config.model_dim))),
             compressed_dim=covariance_dim,
         ).to(device)
     else:
@@ -2317,7 +2317,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                     else _config_get(checkpoint_config, "covariance_pooling_dim", 32)
                 ),
                 "pooling": args.pooling,
-                "pair_dim": int(_config_get(checkpoint_config, "pairformer_pair_dim", checkpoint_config.model_dim)),
+                "pair_dim": int(_config_get(checkpoint_config, "pairmixer_pair_dim", checkpoint_config.model_dim)),
                 "pooler_state": _tensor_state_to_cpu(best.pooler_state),
                 "classifier_state": _tensor_state_to_cpu(best.classifier_state),
                 "best_epoch": int(best.best_epoch),

@@ -45,9 +45,9 @@ def _small_mae_kwargs() -> dict[str, object]:
         "attention_mlp_multiple": 2.0,
         "feature_mlp_hidden_dim": 8,
         "encoder_fourier_num_freqs": 4,
-        "pairformer_fourier_num_freqs": 2,
-        "pairformer_pair_dim": 12,
-        "pairformer_pair_feature_hidden_dim": 8,
+        "pairmixer_fourier_num_freqs": 2,
+        "pairmixer_pair_dim": 12,
+        "pairmixer_pair_feature_hidden_dim": 8,
         "masked_latent_predictor_num_layers": 1,
         "masked_latent_predictor_num_heads": 4,
         "num_peaks": 5,
@@ -68,9 +68,9 @@ def _tiny_mae_kwargs() -> dict[str, object]:
         "attention_mlp_multiple": 1.0,
         "feature_mlp_hidden_dim": 4,
         "encoder_fourier_num_freqs": 1,
-        "pairformer_fourier_num_freqs": 1,
-        "pairformer_pair_dim": 4,
-        "pairformer_pair_feature_hidden_dim": 4,
+        "pairmixer_fourier_num_freqs": 1,
+        "pairmixer_pair_dim": 4,
+        "pairmixer_pair_feature_hidden_dim": 4,
         "masked_latent_predictor_num_layers": 1,
         "masked_latent_predictor_num_heads": 1,
         "num_peaks": 3,
@@ -93,9 +93,9 @@ def _small_jepa_kwargs(**overrides: object) -> dict[str, object]:
         "attention_mlp_multiple": 2.0,
         "feature_mlp_hidden_dim": 8,
         "encoder_fourier_num_freqs": 4,
-        "pairformer_fourier_num_freqs": 2,
-        "pairformer_pair_dim": 12,
-        "pairformer_pair_feature_hidden_dim": 8,
+        "pairmixer_fourier_num_freqs": 2,
+        "pairmixer_pair_dim": 12,
+        "pairmixer_pair_feature_hidden_dim": 8,
         "masked_latent_predictor_num_layers": 1,
         "masked_latent_predictor_num_heads": 4,
         "num_peaks": 5,
@@ -895,9 +895,9 @@ def test_jax_mae_teacher_jepa_matches_pytorch_with_teacher_config():
                 "    cfg.attention_mlp_multiple = 2.0\n"
                 "    cfg.feature_mlp_hidden_dim = 8\n"
                 "    cfg.encoder_fourier_num_freqs = 4\n"
-                "    cfg.pairformer_fourier_num_freqs = 2\n"
-                "    cfg.pairformer_pair_dim = 10\n"
-                "    cfg.pairformer_pair_feature_hidden_dim = 8\n"
+                "    cfg.pairmixer_fourier_num_freqs = 2\n"
+                "    cfg.pairmixer_pair_dim = 10\n"
+                "    cfg.pairmixer_pair_feature_hidden_dim = 8\n"
                 "    cfg.pairmixer_use_pair_bias_attention = True\n"
                 "    cfg.num_peaks = 5\n"
                 "    cfg.jepa_num_target_blocks = 1\n"

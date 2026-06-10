@@ -1309,7 +1309,7 @@ def build_contrastive_module(
     compressed_dim = int(_config_get(config, "contrastive_covariance_dim", _config_get(config, "covariance_pooling_dim", 32)))
     pooler = SinglePairCovariancePool(
         single_dim=int(config.model_dim),
-        pair_dim=int(_config_get(config, "pairformer_pair_dim", config.model_dim)),
+        pair_dim=int(_config_get(config, "pairmixer_pair_dim", config.model_dim)),
         compressed_dim=compressed_dim,
         include_diagonal=bool(
             _config_get(config, "contrastive_single_pair_include_diagonal", False)

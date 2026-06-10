@@ -444,7 +444,7 @@ def build_msg_sequence_probe(
     task_names = _probe_task_names(task_spec)
     task_output_dims = _probe_task_output_dims(task_spec)
     if variant == "cls":
-        pair_dim = int(_config_get(config, "pairformer_pair_dim", model_dim))
+        pair_dim = int(_config_get(config, "pairmixer_pair_dim", model_dim))
         return MsgSinglePairClsProbe(
             pooler=MsgSinglePairClsPool(),
             pooled_dim=model_dim + pair_dim,
@@ -458,7 +458,7 @@ def build_msg_sequence_probe(
             compressed_dim = int(_config_get(config, "covariance_pooling_dim", 32))
             pooler = MsgSinglePairCovariancePool(
                 single_dim=model_dim,
-                pair_dim=int(_config_get(config, "pairformer_pair_dim", model_dim)),
+                pair_dim=int(_config_get(config, "pairmixer_pair_dim", model_dim)),
                 compressed_dim=compressed_dim,
                 include_diagonal=bool(
                     _config_get(
@@ -485,7 +485,7 @@ def build_msg_sequence_probe(
             task_output_dims=task_output_dims,
         )
     if _is_single_pair_pma_variant(variant):
-        pair_dim = int(_config_get(config, "pairformer_pair_dim", model_dim))
+        pair_dim = int(_config_get(config, "pairmixer_pair_dim", model_dim))
         num_tokens = int(_config_get(config, "msg_probe_single_pair_pma_num_tokens", 8))
         num_heads = int(
             _config_get(

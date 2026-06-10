@@ -109,9 +109,8 @@ def _config(artifact_dir: Path) -> config_dict.ConfigDict:
     cfg.encoder_apply_final_norm = True
     cfg.encoder_use_fourier_features = False
     cfg.feature_mlp_hidden_dim = 16
-    cfg.pairformer_pair_dim = 16
-    cfg.pairformer_pair_num_heads = 4
-    cfg.pairformer_pair_feature_hidden_dim = 16
+    cfg.pairmixer_pair_dim = 16
+    cfg.pairmixer_pair_feature_hidden_dim = 16
     cfg.attention_mlp_multiple = 2.0
     cfg.masked_latent_predictor_num_layers = 1
     cfg.masked_latent_predictor_num_heads = 4

@@ -214,9 +214,8 @@ class PairMixerEncoderTests(unittest.TestCase):
             "num_peaks": 6,
             "jepa_num_target_blocks": 2,
             "masked_token_loss_weight": 1.0,
-            "pairformer_pair_dim": 32,
-            "pairformer_pair_num_heads": 4,
-            "pairformer_pair_feature_hidden_dim": 16,
+            "pairmixer_pair_dim": 32,
+            "pairmixer_pair_feature_hidden_dim": 16,
         }
         model_kwargs.update(kwargs)
         return PeakSetJEPA(**model_kwargs)
@@ -1099,7 +1098,7 @@ class BlockJEPATests(unittest.TestCase):
                     "    cfg.encoder_num_heads = 4\n"
                     "    cfg.feature_mlp_hidden_dim = 16\n"
                     "    cfg.encoder_fourier_num_freqs = 8\n"
-                    "    cfg.pairformer_pair_dim = 16\n"
+                    "    cfg.pairmixer_pair_dim = 16\n"
                     "    return cfg\n"
                 )
             model = self._build_model(

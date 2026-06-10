@@ -27,16 +27,16 @@ class PeakSetEncoder(nn.Module):
         use_position_embedding: bool = True,
         pair_dim: int | None = None,
         pair_feature_hidden_dim: int = 128,
-        pairformer_dropout: float = 0.0,
+        pairmixer_dropout: float = 0.0,
         pairmixer_use_pair_bias_attention: bool = False,
-        pairformer_mz_scale: float = 1000.0,
-        pairformer_precursor_mz_scale: float = 1000.0,
-        pairformer_use_fourier_features: bool = True,
-        pairformer_fourier_num_freqs: int = 16,
-        pairformer_fourier_x_min: float = 1e-2,
-        pairformer_fourier_x_max: float = 1000.0,
-        pairformer_relative_fourier_x_min: float = 1e-3,
-        pairformer_relative_fourier_x_max: float = 1.0,
+        pairmixer_mz_scale: float = 1000.0,
+        pairmixer_precursor_mz_scale: float = 1000.0,
+        pairmixer_use_fourier_features: bool = True,
+        pairmixer_fourier_num_freqs: int = 16,
+        pairmixer_fourier_x_min: float = 1e-2,
+        pairmixer_fourier_x_max: float = 1000.0,
+        pairmixer_relative_fourier_x_min: float = 1e-3,
+        pairmixer_relative_fourier_x_max: float = 1.0,
     ):
         super().__init__()
         self.num_layers = num_layers
@@ -59,14 +59,14 @@ class PeakSetEncoder(nn.Module):
             single_dim=model_dim,
             pair_dim=pair_dim,
             hidden_dim=pair_feature_hidden_dim,
-            mz_scale=pairformer_mz_scale,
-            precursor_mz_scale=pairformer_precursor_mz_scale,
-            use_fourier_features=pairformer_use_fourier_features,
-            fourier_num_freqs=pairformer_fourier_num_freqs,
-            fourier_x_min=pairformer_fourier_x_min,
-            fourier_x_max=pairformer_fourier_x_max,
-            relative_fourier_x_min=pairformer_relative_fourier_x_min,
-            relative_fourier_x_max=pairformer_relative_fourier_x_max,
+            mz_scale=pairmixer_mz_scale,
+            precursor_mz_scale=pairmixer_precursor_mz_scale,
+            use_fourier_features=pairmixer_use_fourier_features,
+            fourier_num_freqs=pairmixer_fourier_num_freqs,
+            fourier_x_min=pairmixer_fourier_x_min,
+            fourier_x_max=pairmixer_fourier_x_max,
+            relative_fourier_x_min=pairmixer_relative_fourier_x_min,
+            relative_fourier_x_max=pairmixer_relative_fourier_x_max,
         )
         self.blocks = nn.ModuleList(
             [
@@ -76,7 +76,7 @@ class PeakSetEncoder(nn.Module):
                     num_heads=num_heads,
                     attention_mlp_multiple=attention_mlp_multiple,
                     norm_eps=norm_eps,
-                    dropout=pairformer_dropout,
+                    dropout=pairmixer_dropout,
                     use_pair_bias_attention=pairmixer_use_pair_bias_attention,
                 )
                 for _ in range(self.num_layers)

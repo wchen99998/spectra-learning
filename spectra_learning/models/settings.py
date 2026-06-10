@@ -45,19 +45,18 @@ class PeakSetJEPASettings:
     encoder_use_position_embedding: bool = True
     encoder_apply_final_norm: bool = True
     encoder_apply_final_pair_norm: bool = False
-    pairformer_pair_dim: int | None = None
-    pairformer_pair_num_heads: int | None = None
-    pairformer_pair_feature_hidden_dim: int = 128
-    pairformer_dropout: float = 0.0
+    pairmixer_pair_dim: int | None = None
+    pairmixer_pair_feature_hidden_dim: int = 128
+    pairmixer_dropout: float = 0.0
     pairmixer_use_pair_bias_attention: bool = False
-    pairformer_mz_scale: float = PEAK_MZ_MAX
-    pairformer_precursor_mz_scale: float = PEAK_MZ_MAX
-    pairformer_use_fourier_features: bool = True
-    pairformer_fourier_num_freqs: int = 16
-    pairformer_fourier_x_min: float = 1e-2
-    pairformer_fourier_x_max: float = PEAK_MZ_MAX
-    pairformer_relative_fourier_x_min: float = 1e-3
-    pairformer_relative_fourier_x_max: float = 1.0
+    pairmixer_mz_scale: float = PEAK_MZ_MAX
+    pairmixer_precursor_mz_scale: float = PEAK_MZ_MAX
+    pairmixer_use_fourier_features: bool = True
+    pairmixer_fourier_num_freqs: int = 16
+    pairmixer_fourier_x_min: float = 1e-2
+    pairmixer_fourier_x_max: float = PEAK_MZ_MAX
+    pairmixer_relative_fourier_x_min: float = 1e-3
+    pairmixer_relative_fourier_x_max: float = 1.0
     predictor_apply_final_norm: bool = True
     num_peaks: int = 64
     predictor_dim: int | None = None
@@ -106,9 +105,9 @@ def _apply_derived_defaults(values: dict[str, Any], config: Any) -> None:
     values["encoder_fourier_input_scale"] = peak_mz_max
     values["jepa_mae_mz_max"] = peak_mz_max
     values["distogram_mz_max"] = peak_mz_max
-    values["pairformer_mz_scale"] = peak_mz_max
-    values["pairformer_precursor_mz_scale"] = precursor_mz_max
-    values["pairformer_fourier_x_max"] = peak_mz_max
+    values["pairmixer_mz_scale"] = peak_mz_max
+    values["pairmixer_precursor_mz_scale"] = precursor_mz_max
+    values["pairmixer_fourier_x_max"] = peak_mz_max
 
 
 def _config_get(config: Any, key: str, default: Any) -> Any:
@@ -166,19 +165,18 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "encoder_use_position_embedding": bool,
     "encoder_apply_final_norm": bool,
     "encoder_apply_final_pair_norm": bool,
-    "pairformer_pair_dim": _optional_int,
-    "pairformer_pair_num_heads": _optional_int,
-    "pairformer_pair_feature_hidden_dim": int,
-    "pairformer_dropout": float,
+    "pairmixer_pair_dim": _optional_int,
+    "pairmixer_pair_feature_hidden_dim": int,
+    "pairmixer_dropout": float,
     "pairmixer_use_pair_bias_attention": bool,
-    "pairformer_mz_scale": float,
-    "pairformer_precursor_mz_scale": float,
-    "pairformer_use_fourier_features": bool,
-    "pairformer_fourier_num_freqs": int,
-    "pairformer_fourier_x_min": float,
-    "pairformer_fourier_x_max": float,
-    "pairformer_relative_fourier_x_min": float,
-    "pairformer_relative_fourier_x_max": float,
+    "pairmixer_mz_scale": float,
+    "pairmixer_precursor_mz_scale": float,
+    "pairmixer_use_fourier_features": bool,
+    "pairmixer_fourier_num_freqs": int,
+    "pairmixer_fourier_x_min": float,
+    "pairmixer_fourier_x_max": float,
+    "pairmixer_relative_fourier_x_min": float,
+    "pairmixer_relative_fourier_x_max": float,
     "predictor_apply_final_norm": bool,
     "num_peaks": int,
     "predictor_dim": _optional_int,

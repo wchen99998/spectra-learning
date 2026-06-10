@@ -1,6 +1,6 @@
 from ml_collections import config_dict
 
-from configs.medium_pairformer_100m_20m_mae_alpha_isoflops import (
+from configs.medium_pairmixer_100m_20m_mae_alpha_isoflops import (
     get_config as get_alpha_config,
 )
 

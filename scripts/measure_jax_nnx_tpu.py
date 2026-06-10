@@ -15,7 +15,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Measure JAX NNX TPU training throughput.")
     parser.add_argument(
         "--config",
-        default="configs/medium_pairformer_100m_20m_mae_alpha_isoflops.py",
+        default="configs/medium_pairmixer_100m_20m_mae_alpha_isoflops.py",
     )
     parser.add_argument("--workdir", required=True)
     parser.add_argument("--metrics-json", default="")

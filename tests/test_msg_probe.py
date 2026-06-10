@@ -364,7 +364,7 @@ class MsgSequenceProbeTests(unittest.TestCase):
     def test_cls_probe_uses_pair_features_and_mlp_heads(self):
         config = config_dict.ConfigDict()
         config.model_dim = 4
-        config.pairformer_pair_dim = 6
+        config.pairmixer_pair_dim = 6
         config.msg_probe_mlp_hidden_dim = 8
         task_spec = MsgProbeTaskSpec(
             regression_tasks=("mol_weight",),
@@ -394,7 +394,7 @@ class MsgSequenceProbeTests(unittest.TestCase):
     def test_single_pair_pma_probe_uses_linear_heads(self):
         config = config_dict.ConfigDict()
         config.model_dim = 4
-        config.pairformer_pair_dim = 6
+        config.pairmixer_pair_dim = 6
         config.encoder_num_heads = 2
         config.msg_probe_mlp_hidden_dim = 8
         task_spec = MsgProbeTaskSpec(
@@ -423,7 +423,7 @@ class MsgSequenceProbeTests(unittest.TestCase):
     def test_single_pair_covariance_probe_uses_mlp_heads(self):
         config = config_dict.ConfigDict()
         config.model_dim = 4
-        config.pairformer_pair_dim = 6
+        config.pairmixer_pair_dim = 6
         config.covariance_pooling_dim = 3
         config.msg_probe_mlp_hidden_dim = 8
         task_spec = MsgProbeTaskSpec(
@@ -454,7 +454,7 @@ class MsgSequenceProbeTests(unittest.TestCase):
     def test_single_pair_covariance_probe_reuses_trained_pooler(self):
         config = config_dict.ConfigDict()
         config.model_dim = 4
-        config.pairformer_pair_dim = 6
+        config.pairmixer_pair_dim = 6
         config.covariance_pooling_dim = 7
         config.msg_probe_mlp_hidden_dim = 8
         task_spec = MsgProbeTaskSpec(
@@ -492,7 +492,7 @@ class MsgSequenceProbeTests(unittest.TestCase):
     def test_single_pair_covariance_probe_can_train_supplied_pooler(self):
         config = config_dict.ConfigDict()
         config.model_dim = 4
-        config.pairformer_pair_dim = 6
+        config.pairmixer_pair_dim = 6
         config.covariance_pooling_dim = 7
         config.msg_probe_mlp_hidden_dim = 8
         config.msg_probe_freeze_supplied_pooler = False
