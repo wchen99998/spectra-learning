@@ -646,11 +646,12 @@ def _run_jax_training_loop(
             pure_opt_state,
             pure_optimizer,
         ) = init_pure_optax_train_state(config, model)
+        scan_zero_init = bool(_config_get(config, "jax_scan_zero_init", False))
         pure_train_step = make_pure_accumulated_train_step(
             pure_graphdef,
             pure_optimizer,
             sharded=use_sharded_step,
-            scan_zero_init=bool(_config_get(config, "jax_scan_zero_init", False)),
+            scan_zero_init=scan_zero_init,
         )
     timing_barriers = bool(_config_get(config, "jax_timing_barriers", False))
     profile_dir = str(_config_get(config, "jax_profile_dir", ""))
