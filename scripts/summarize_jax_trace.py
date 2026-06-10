@@ -17,6 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--devices", type=int, default=4)
     parser.add_argument("--peak-flops-per-device", type=float, default=TPU_V6E_BF16_PEAK_FLOPS)
     parser.add_argument("--top", type=int, default=20)
+    parser.add_argument("--stack-depth", type=int, default=4)
     return parser.parse_args()
 
 
@@ -30,10 +31,21 @@ def _as_int(value: object) -> int:
     return int(value) if value is not None else 0
 
 
+def _trim_source_line(source_line: str) -> str:
+    cwd = str(Path.cwd())
+    return source_line.replace(cwd + "/", "")
+
+
 def _source_key(source_stack: str) -> str:
     first = source_stack.splitlines()[0] if source_stack else "<unknown>"
-    cwd = str(Path.cwd())
-    return first.replace(cwd + "/", "")
+    return _trim_source_line(first)
+
+
+def _stack_key(source_stack: str, depth: int) -> str:
+    lines = source_stack.splitlines()[:depth]
+    if not lines:
+        return "<unknown>"
+    return " | ".join(_trim_source_line(line) for line in lines)
 
 
 def _process_names(events: list[dict]) -> dict[int, str]:
@@ -77,17 +89,23 @@ def main() -> None:
     flops_by_process: Counter[str] = Counter()
     flops_by_category: Counter[str] = Counter()
     flops_by_source: Counter[str] = Counter()
+    flops_by_stack: Counter[str] = Counter()
     flops_by_tf_op: Counter[str] = Counter()
     leaf_flops_by_process: Counter[str] = Counter()
     leaf_flops_by_category: Counter[str] = Counter()
     leaf_flops_by_source: Counter[str] = Counter()
+    leaf_flops_by_stack: Counter[str] = Counter()
     leaf_flops_by_tf_op: Counter[str] = Counter()
     bytes_by_category: Counter[str] = Counter()
     duration_by_category: Counter[str] = Counter()
     bytes_by_source: Counter[str] = Counter()
+    bytes_by_stack: Counter[str] = Counter()
     duration_by_source: Counter[str] = Counter()
+    duration_by_stack: Counter[str] = Counter()
     data_formatting_duration_by_source: Counter[str] = Counter()
+    data_formatting_duration_by_stack: Counter[str] = Counter()
     data_formatting_bytes_by_source: Counter[str] = Counter()
+    data_formatting_bytes_by_stack: Counter[str] = Counter()
     step_events_by_process: defaultdict[str, list[dict]] = defaultdict(list)
 
     for event in events:
@@ -117,25 +135,33 @@ def main() -> None:
             continue
         flops = _as_int(event_args.get("model_flops"))
         category = event_args.get("hlo_category", "<unknown>")
+        source_stack = event_args.get("source_stack", "")
+        source = _source_key(source_stack)
+        stack = _stack_key(source_stack, args.stack_depth)
         flops_by_process[process] += flops
         flops_by_category[category] += flops
-        flops_by_source[_source_key(event_args.get("source_stack", ""))] += flops
+        flops_by_source[source] += flops
+        flops_by_stack[stack] += flops
         flops_by_tf_op[event_args.get("tf_op", "<unknown>")] += flops
         if category not in CONTAINER_HLO_CATEGORIES:
             leaf_flops_by_process[process] += flops
             leaf_flops_by_category[category] += flops
-            leaf_flops_by_source[_source_key(event_args.get("source_stack", ""))] += flops
+            leaf_flops_by_source[source] += flops
+            leaf_flops_by_stack[stack] += flops
             leaf_flops_by_tf_op[event_args.get("tf_op", "<unknown>")] += flops
-        source = _source_key(event_args.get("source_stack", ""))
         raw_bytes = _as_int(event_args.get("raw_bytes_accessed"))
         duration_ns = int(float(event.get("dur", 0.0)) * 1000.0)
         bytes_by_category[category] += raw_bytes
         duration_by_category[category] += duration_ns
         bytes_by_source[source] += raw_bytes
+        bytes_by_stack[stack] += raw_bytes
         duration_by_source[source] += duration_ns
+        duration_by_stack[stack] += duration_ns
         if category == "data formatting":
             data_formatting_duration_by_source[source] += duration_ns
             data_formatting_bytes_by_source[source] += raw_bytes
+            data_formatting_duration_by_stack[stack] += duration_ns
+            data_formatting_bytes_by_stack[stack] += raw_bytes
         if _in_windows(event, step_windows_by_process.get(process, [])):
             step_flops_by_process[process] += flops
             if category not in CONTAINER_HLO_CATEGORIES:
@@ -209,6 +235,7 @@ def main() -> None:
             args.top,
         ),
         "top_flops_by_source": _summarize_counter(flops_by_source, total_flops, args.top),
+        "top_flops_by_stack": _summarize_counter(flops_by_stack, total_flops, args.top),
         "top_flops_by_tf_op": _summarize_counter(flops_by_tf_op, total_flops, args.top),
         "top_leaf_flops_by_category": _summarize_counter(
             leaf_flops_by_category,
@@ -217,6 +244,11 @@ def main() -> None:
         ),
         "top_leaf_flops_by_source": _summarize_counter(
             leaf_flops_by_source,
+            leaf_flops,
+            args.top,
+        ),
+        "top_leaf_flops_by_stack": _summarize_counter(
+            leaf_flops_by_stack,
             leaf_flops,
             args.top,
         ),
@@ -235,6 +267,11 @@ def main() -> None:
             sum(bytes_by_source.values()),
             args.top,
         ),
+        "top_bytes_by_stack": _summarize_counter(
+            bytes_by_stack,
+            sum(bytes_by_stack.values()),
+            args.top,
+        ),
         "top_duration_us_by_category": _summarize_counter(
             duration_by_category,
             sum(duration_by_category.values()),
@@ -245,14 +282,29 @@ def main() -> None:
             sum(duration_by_source.values()),
             args.top,
         ),
+        "top_duration_us_by_stack": _summarize_counter(
+            duration_by_stack,
+            sum(duration_by_stack.values()),
+            args.top,
+        ),
         "top_data_formatting_duration_us_by_source": _summarize_counter(
             data_formatting_duration_by_source,
             sum(data_formatting_duration_by_source.values()),
             args.top,
         ),
+        "top_data_formatting_duration_us_by_stack": _summarize_counter(
+            data_formatting_duration_by_stack,
+            sum(data_formatting_duration_by_stack.values()),
+            args.top,
+        ),
         "top_data_formatting_bytes_by_source": _summarize_counter(
             data_formatting_bytes_by_source,
             sum(data_formatting_bytes_by_source.values()),
+            args.top,
+        ),
+        "top_data_formatting_bytes_by_stack": _summarize_counter(
+            data_formatting_bytes_by_stack,
+            sum(data_formatting_bytes_by_stack.values()),
             args.top,
         ),
     }
