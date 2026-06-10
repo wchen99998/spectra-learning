@@ -222,19 +222,19 @@ class TriangleMultiplicativeUpdate(nnx.Module):
         self.p_out = Linear(pair_dim, pair_dim, compute_dtype=compute_dtype)
         self.g_out = Linear(pair_dim, pair_dim, compute_dtype=compute_dtype)
 
-    def __call__(self, x: Array, mask: Array) -> Array:
+    def __call__(self, x: Array, token_mask: Array, mask: Array) -> Array:
         pair_mask_f = mask[..., None].astype(x.dtype)
         x_norm = self.norm_in(x)
         projected = self.p_in(x_norm) * jax.nn.sigmoid(self.g_in(x_norm))
         a, b = jnp.split(projected, 2, axis=-1)
-        a = a * pair_mask_f
-        b = b * pair_mask_f
         if self.direction == "outgoing":
+            a = a * token_mask[:, None, :, None].astype(a.dtype)
             update = jnp.sum(
                 a[:, :, None, :, :] * b[:, None, :, :, :],
                 axis=3,
             )
         else:
+            a = a * token_mask[:, :, None, None].astype(a.dtype)
             update = jnp.sum(
                 a[:, :, :, None, :] * b[:, :, None, :, :],
                 axis=1,
@@ -401,8 +401,8 @@ class PairMixerBlock(nnx.Module):
     ) -> tuple[Array, Array]:
         del rng
         pair_mask_value = pair_mask(peak_mask)
-        pair = pair + self.tri_mul_out(pair, pair_mask_value)
-        pair = pair + self.tri_mul_in(pair, pair_mask_value)
+        pair = pair + self.tri_mul_out(pair, peak_mask, pair_mask_value)
+        pair = pair + self.tri_mul_in(pair, peak_mask, pair_mask_value)
         pair = pair + self.pair_transition(self.pair_transition_norm(pair))
         pair = pair * pair_mask_value[..., None].astype(pair.dtype)
         if self.use_pair_bias_attention:
