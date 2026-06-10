@@ -7,6 +7,10 @@ from pathlib import Path
 
 TPU_V6E_BF16_PEAK_FLOPS = 918e12
 CONTAINER_HLO_CATEGORIES = {"while", "conditional"}
+SOURCE_ALIASES = {
+    "spectra_learning/models/pairformer.py": "spectra_learning/models/pairmixer.py",
+    "spectra_learning/models/pairformer_jax.py": "spectra_learning/models/pairmixer_jax.py",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,7 +37,10 @@ def _as_int(value: object) -> int:
 
 def _trim_source_line(source_line: str) -> str:
     cwd = str(Path.cwd())
-    return source_line.replace(cwd + "/", "")
+    source_line = source_line.replace(cwd + "/", "")
+    for old, new in SOURCE_ALIASES.items():
+        source_line = source_line.replace(old, new)
+    return source_line
 
 
 def _source_key(source_stack: str) -> str:
@@ -102,6 +109,12 @@ def main() -> None:
     bytes_by_stack: Counter[str] = Counter()
     duration_by_source: Counter[str] = Counter()
     duration_by_stack: Counter[str] = Counter()
+    leaf_bytes_by_category: Counter[str] = Counter()
+    leaf_duration_by_category: Counter[str] = Counter()
+    leaf_bytes_by_source: Counter[str] = Counter()
+    leaf_bytes_by_stack: Counter[str] = Counter()
+    leaf_duration_by_source: Counter[str] = Counter()
+    leaf_duration_by_stack: Counter[str] = Counter()
     data_formatting_duration_by_source: Counter[str] = Counter()
     data_formatting_duration_by_stack: Counter[str] = Counter()
     data_formatting_bytes_by_source: Counter[str] = Counter()
@@ -125,6 +138,9 @@ def main() -> None:
     }
     step_flops_by_process: Counter[str] = Counter()
     step_leaf_flops_by_process: Counter[str] = Counter()
+    step_leaf_duration_by_category: Counter[str] = Counter()
+    step_leaf_duration_by_source: Counter[str] = Counter()
+    step_leaf_duration_by_stack: Counter[str] = Counter()
 
     for event in events:
         if event.get("ph") != "X":
@@ -150,22 +166,33 @@ def main() -> None:
             leaf_flops_by_stack[stack] += flops
             leaf_flops_by_tf_op[event_args.get("tf_op", "<unknown>")] += flops
         raw_bytes = _as_int(event_args.get("raw_bytes_accessed"))
-        duration_ns = int(float(event.get("dur", 0.0)) * 1000.0)
+        duration_us = float(event.get("dur", 0.0))
         bytes_by_category[category] += raw_bytes
-        duration_by_category[category] += duration_ns
+        duration_by_category[category] += duration_us
         bytes_by_source[source] += raw_bytes
         bytes_by_stack[stack] += raw_bytes
-        duration_by_source[source] += duration_ns
-        duration_by_stack[stack] += duration_ns
+        duration_by_source[source] += duration_us
+        duration_by_stack[stack] += duration_us
+        is_leaf = category not in CONTAINER_HLO_CATEGORIES
+        if is_leaf:
+            leaf_bytes_by_category[category] += raw_bytes
+            leaf_duration_by_category[category] += duration_us
+            leaf_bytes_by_source[source] += raw_bytes
+            leaf_bytes_by_stack[stack] += raw_bytes
+            leaf_duration_by_source[source] += duration_us
+            leaf_duration_by_stack[stack] += duration_us
         if category == "data formatting":
-            data_formatting_duration_by_source[source] += duration_ns
+            data_formatting_duration_by_source[source] += duration_us
             data_formatting_bytes_by_source[source] += raw_bytes
-            data_formatting_duration_by_stack[stack] += duration_ns
+            data_formatting_duration_by_stack[stack] += duration_us
             data_formatting_bytes_by_stack[stack] += raw_bytes
         if _in_windows(event, step_windows_by_process.get(process, [])):
             step_flops_by_process[process] += flops
-            if category not in CONTAINER_HLO_CATEGORIES:
+            if is_leaf:
                 step_leaf_flops_by_process[process] += flops
+                step_leaf_duration_by_category[category] += duration_us
+                step_leaf_duration_by_source[source] += duration_us
+                step_leaf_duration_by_stack[stack] += duration_us
 
     total_flops = sum(flops_by_process.values())
     leaf_flops = sum(leaf_flops_by_process.values())
@@ -205,6 +232,10 @@ def main() -> None:
             * float(measured_steps_per_second)
             / peak
         )
+    duration_us = sum(duration_by_category.values())
+    leaf_duration_us = sum(leaf_duration_by_category.values())
+    step_window_leaf_duration_us = sum(step_leaf_duration_by_category.values())
+    data_formatting_duration_us = sum(data_formatting_duration_by_source.values())
 
     summary = {
         "trace": str(args.trace_json),
@@ -220,6 +251,17 @@ def main() -> None:
         "step_window_model_flops_per_step": step_window_flops_per_step,
         "step_window_leaf_model_flops": step_window_leaf_flops,
         "step_window_leaf_model_flops_per_step": step_window_leaf_flops_per_step,
+        "duration_us": duration_us,
+        "leaf_duration_us": leaf_duration_us,
+        "leaf_duration_us_per_step": leaf_duration_us / inferred_steps if inferred_steps else 0.0,
+        "step_window_leaf_duration_us": step_window_leaf_duration_us,
+        "step_window_leaf_duration_us_per_step": (
+            step_window_leaf_duration_us / inferred_steps if inferred_steps else 0.0
+        ),
+        "data_formatting_duration_us": data_formatting_duration_us,
+        "data_formatting_duration_us_per_step": (
+            data_formatting_duration_us / inferred_steps if inferred_steps else 0.0
+        ),
         "metrics_steps_per_second": measured_steps_per_second,
         "metrics_samples_per_second": metrics.get("run/measured_samples_per_second"),
         "mfu_percent_from_metrics": mfu_percent,
@@ -272,6 +314,21 @@ def main() -> None:
             sum(bytes_by_stack.values()),
             args.top,
         ),
+        "top_leaf_bytes_by_category": _summarize_counter(
+            leaf_bytes_by_category,
+            sum(leaf_bytes_by_category.values()),
+            args.top,
+        ),
+        "top_leaf_bytes_by_source": _summarize_counter(
+            leaf_bytes_by_source,
+            sum(leaf_bytes_by_source.values()),
+            args.top,
+        ),
+        "top_leaf_bytes_by_stack": _summarize_counter(
+            leaf_bytes_by_stack,
+            sum(leaf_bytes_by_stack.values()),
+            args.top,
+        ),
         "top_duration_us_by_category": _summarize_counter(
             duration_by_category,
             sum(duration_by_category.values()),
@@ -285,6 +342,36 @@ def main() -> None:
         "top_duration_us_by_stack": _summarize_counter(
             duration_by_stack,
             sum(duration_by_stack.values()),
+            args.top,
+        ),
+        "top_leaf_duration_us_by_category": _summarize_counter(
+            leaf_duration_by_category,
+            sum(leaf_duration_by_category.values()),
+            args.top,
+        ),
+        "top_leaf_duration_us_by_source": _summarize_counter(
+            leaf_duration_by_source,
+            sum(leaf_duration_by_source.values()),
+            args.top,
+        ),
+        "top_leaf_duration_us_by_stack": _summarize_counter(
+            leaf_duration_by_stack,
+            sum(leaf_duration_by_stack.values()),
+            args.top,
+        ),
+        "top_step_window_leaf_duration_us_by_category": _summarize_counter(
+            step_leaf_duration_by_category,
+            sum(step_leaf_duration_by_category.values()),
+            args.top,
+        ),
+        "top_step_window_leaf_duration_us_by_source": _summarize_counter(
+            step_leaf_duration_by_source,
+            sum(step_leaf_duration_by_source.values()),
+            args.top,
+        ),
+        "top_step_window_leaf_duration_us_by_stack": _summarize_counter(
+            step_leaf_duration_by_stack,
+            sum(step_leaf_duration_by_stack.values()),
             args.top,
         ),
         "top_data_formatting_duration_us_by_source": _summarize_counter(
