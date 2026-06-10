@@ -13,7 +13,7 @@ from spectra_learning.models.common_jax import (
     merge_visible_mask,
     should_activation_checkpoint,
 )
-from spectra_learning.models.pairformer_jax import PairFeatureEmbedder, PairMixerBlock
+from spectra_learning.models.pairmixer_jax import PairFeatureEmbedder, PairMixerBlock
 from spectra_learning.models.peak_features_jax import PeakFeatureEmbedder
 
 

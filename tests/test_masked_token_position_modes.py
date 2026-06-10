@@ -4,7 +4,7 @@ import torch
 
 from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.model import PeakSetJEPA
-from spectra_learning.models.pairformer import (
+from spectra_learning.models.pairmixer import (
     AttentionPairBias,
     PairMixerBlock,
 )
@@ -352,7 +352,7 @@ def test_encoder_and_predictor_final_norms_are_non_affine():
     assert list(encoder.final_norm.parameters()) == []
 
 
-def test_backbone_uses_pairmixer_without_pairformer_attention_extras():
+def test_backbone_uses_pairmixer_without_pair_bias_attention():
     model = _build_model()
     block = model.encoder.blocks[0]
 
@@ -401,7 +401,7 @@ def test_pairmixer_pair_bias_attention_setting_is_configurable():
     assert settings.pairmixer_use_pair_bias_attention
 
 
-def test_predictor_uses_pairmixer_without_pairformer_attention_extras():
+def test_predictor_uses_pairmixer_without_pair_bias_attention():
     model = PeakSetJEPA(
         model_dim=32,
         encoder_num_layers=2,

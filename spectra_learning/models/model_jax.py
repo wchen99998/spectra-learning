@@ -25,7 +25,7 @@ from spectra_learning.models.common_jax import (
     should_activation_checkpoint,
 )
 from spectra_learning.models.encoder_jax import PeakSetEncoder
-from spectra_learning.models.pairformer_jax import PairMixerBlock
+from spectra_learning.models.pairmixer_jax import PairMixerBlock
 from spectra_learning.models.peak_features_jax import PeakFeatureEmbedder
 from spectra_learning.models.settings import PeakSetJEPASettings
 from spectra_learning.training.checkpointing import load_torch_checkpoint

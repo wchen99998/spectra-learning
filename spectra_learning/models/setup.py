@@ -14,7 +14,7 @@ from spectra_learning.models.common import (
 )
 from spectra_learning.models.transformer import _build_norm
 from spectra_learning.models.encoder import PeakSetEncoder
-from spectra_learning.models.pairformer import PairMixerBlock
+from spectra_learning.models.pairmixer import PairMixerBlock
 from spectra_learning.models.peak_features import PeakFeatureEmbedder
 from spectra_learning.models.settings import PeakSetJEPASettings
 

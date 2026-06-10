@@ -7,7 +7,7 @@ from spectra_learning.models.common import (
     _build_frozen_position_embedding,
     _merge_visible_mask,
 )
-from spectra_learning.models.pairformer import PairFeatureEmbedder, PairMixerBlock
+from spectra_learning.models.pairmixer import PairFeatureEmbedder, PairMixerBlock
 from spectra_learning.models.peak_features import PeakFeatureEmbedder
 
 
