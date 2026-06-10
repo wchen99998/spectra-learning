@@ -71,10 +71,32 @@ def flattened_matmul(a: jax.Array, b: jax.Array) -> jax.Array:
     return jnp.transpose(update, (0, 2, 3, 1))
 
 
+def elementwise_reduce(a: jax.Array, b: jax.Array) -> jax.Array:
+    outgoing = jnp.sum(a[:, :, None, :, :] * b[:, None, :, :, :], axis=3)
+    incoming = jnp.sum(a[:, :, :, None, :] * b[:, :, None, :, :], axis=1)
+    return outgoing + incoming
+
+
+def elementwise_reduce_f32_sum(a: jax.Array, b: jax.Array) -> jax.Array:
+    a_float = a.astype(jnp.float32)
+    b_float = b.astype(jnp.float32)
+    outgoing = jnp.sum(
+        a_float[:, :, None, :, :] * b_float[:, None, :, :, :],
+        axis=3,
+    )
+    incoming = jnp.sum(
+        a_float[:, :, :, None, :] * b_float[:, :, None, :, :],
+        axis=1,
+    )
+    return (outgoing + incoming).astype(a.dtype)
+
+
 VARIANTS = {
     "current_channel_einsum": current_channel_einsum,
     "direct_einsum": direct_einsum,
     "flattened_matmul": flattened_matmul,
+    "elementwise_reduce": elementwise_reduce,
+    "elementwise_reduce_f32_sum": elementwise_reduce_f32_sum,
 }
 
 

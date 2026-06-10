@@ -215,11 +215,6 @@ class TriangleMultiplicativeUpdate(nnx.Module):
     ) -> None:
         self.direction = direction
         self.compute_dtype = compute_dtype
-        self.einsum_precision = (
-            jax.lax.Precision.DEFAULT
-            if compute_dtype == jnp.bfloat16
-            else None
-        )
         self.norm_in = LayerNorm(pair_dim, eps=norm_eps)
         self.p_in = Linear(pair_dim, 2 * pair_dim, compute_dtype=compute_dtype)
         self.g_in = Linear(pair_dim, 2 * pair_dim, compute_dtype=compute_dtype)
@@ -234,23 +229,16 @@ class TriangleMultiplicativeUpdate(nnx.Module):
         a, b = jnp.split(projected, 2, axis=-1)
         a = a * pair_mask_f
         b = b * pair_mask_f
-        a_channel_major = jnp.transpose(a, (0, 3, 1, 2))
-        b_channel_major = jnp.transpose(b, (0, 3, 1, 2))
         if self.direction == "outgoing":
-            update_channel_major = jnp.einsum(
-                "bcik,bcjk->bcij",
-                a_channel_major,
-                b_channel_major,
-                precision=self.einsum_precision,
+            update = jnp.sum(
+                a[:, :, None, :, :] * b[:, None, :, :, :],
+                axis=3,
             )
         else:
-            update_channel_major = jnp.einsum(
-                "bcki,bckj->bcij",
-                a_channel_major,
-                b_channel_major,
-                precision=self.einsum_precision,
+            update = jnp.sum(
+                a[:, :, :, None, :] * b[:, :, None, :, :],
+                axis=1,
             )
-        update = jnp.transpose(update_channel_major, (0, 2, 3, 1))
         update = self.p_out(self.norm_out(update))
         update = update * jax.nn.sigmoid(self.g_out(x_norm))
         return update * pair_mask_f
