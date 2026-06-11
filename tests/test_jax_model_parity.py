@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import torch
 from flax import nnx
+from ml_collections import config_dict
 from torch.utils.data import DataLoader
 
 from spectra_learning.data.gems.collate import GemsBatchCollator
@@ -29,6 +30,7 @@ from spectra_learning.training.pretrain_jax import (
     jax_sharded_grad_step,
     jax_sharded_local_grad_step,
     jax_train_step,
+    initialize_jax_model_from_torch_seed,
     init_pure_optax_train_state,
     make_pure_accumulated_train_step,
     trainable_param_filter,
@@ -201,6 +203,25 @@ def test_jax_mae_matches_pytorch_on_real_collated_batch(mask_strategy: str):
     jax_model.load_torch_state_dict(torch_model.state_dict())
     batch = _real_pattern_batch(mask_strategy)
 
+    with torch.no_grad():
+        torch_metrics = torch_model(batch)
+    jax_metrics = jax_model(batch)
+
+    _assert_metrics_close(torch_metrics, jax_metrics)
+
+
+def test_initialize_jax_model_from_torch_seed_matches_pytorch_forward():
+    seed = 123
+    kwargs = _small_mae_kwargs()
+    torch.manual_seed(seed)
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    jax_model = PeakSetJEPAJax(**kwargs)
+    cfg = config_dict.ConfigDict(kwargs)
+    cfg.seed = seed
+
+    initialize_jax_model_from_torch_seed(cfg, jax_model)
+
+    batch = _real_pattern_batch("contiguous")
     with torch.no_grad():
         torch_metrics = torch_model(batch)
     jax_metrics = jax_model(batch)

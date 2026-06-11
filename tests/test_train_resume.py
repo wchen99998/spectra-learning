@@ -36,6 +36,7 @@ from spectra_learning.training.runtime import (
     cumulative_training_flops,
     estimate_training_flops_per_optimizer_step,
 )
+from spectra_learning.training.schedules import learning_rate_at_step
 from spectra_learning.training.api import (
     _build_wandb_init_kwargs,
     build_grad_scaler,
@@ -185,6 +186,323 @@ def test_compile_forward_enables_shape_padding_for_reduce_overhead():
         }
     finally:
         pretrain.inductor_config.shape_padding = original
+
+
+def test_jax_device_backend_aliases_use_native_jax():
+    from spectra_learning.training.pretrain_jax import use_jax_nnx_backend
+
+    assert use_jax_nnx_backend({"device_backend": "jax"})
+    assert use_jax_nnx_backend({"device_backend": "tpu"})
+    assert use_jax_nnx_backend({"device_backend": "jax_nnx"})
+
+
+def test_jax_train_metrics_logging_skips_non_main_without_device_get(monkeypatch):
+    from spectra_learning.training import pretrain_jax
+
+    cfg = config_dict.ConfigDict()
+    logger = _FakeLogger()
+    pbar = _FakePbar()
+
+    monkeypatch.setattr(pretrain_jax.jax, "process_index", lambda: 1)
+    monkeypatch.setattr(
+        pretrain_jax.jax,
+        "device_get",
+        lambda value: pytest.fail("non-main process materialized metrics"),
+    )
+
+    pretrain_jax._log_jax_train_metrics(
+        cfg,
+        logger,
+        pbar,
+        {"loss": object()},
+        epoch=0,
+        global_step=10,
+        total_steps=100,
+        every_n_steps=10,
+    )
+
+    assert logger.logs == []
+    assert pbar.postfix is None
+
+
+def test_jax_train_metrics_logging_materializes_once_on_main(monkeypatch):
+    from spectra_learning.training import pretrain_jax
+
+    cfg = config_dict.ConfigDict()
+    cfg.learning_rate = 0.003
+    cfg.min_learning_rate = 0.0003
+    cfg.warmup_steps = 20
+    logger = _FakeLogger()
+    pbar = _FakePbar()
+    device_get_calls = 0
+
+    def fake_device_get(value):
+        nonlocal device_get_calls
+        device_get_calls += 1
+        return value
+
+    monkeypatch.setattr(pretrain_jax.jax, "process_index", lambda: 0)
+    monkeypatch.setattr(pretrain_jax.jax, "device_get", fake_device_get)
+
+    pretrain_jax._log_jax_train_metrics(
+        cfg,
+        logger,
+        pbar,
+        {
+            "loss": pretrain_jax.np.asarray(1.25),
+            "ema_teacher_momentum": pretrain_jax.np.asarray(0.99),
+        },
+        epoch=2,
+        global_step=10,
+        total_steps=100,
+        every_n_steps=10,
+    )
+
+    expected_lr = learning_rate_at_step(
+        10,
+        base_lr=0.003,
+        total_steps=100,
+        warmup_steps=20,
+        min_learning_rate=0.0003,
+    )
+    assert device_get_calls == 1
+    assert pbar.postfix == {"loss": "1.2500", "step": 10}
+    assert logger.logs[0][1] == 10
+    assert logger.logs[0][0]["train/loss"] == pytest.approx(1.25)
+    assert logger.logs[0][0]["train/ema_teacher_momentum"] == pytest.approx(0.99)
+    assert logger.logs[0][0]["train/learning_rate"] == pytest.approx(expected_lr)
+    assert logger.logs[0][0]["epoch"] == 2.0
+    assert logger.logs[0][0]["global_step"] == 10.0
+
+
+def test_jax_optax_transform_uses_learning_rate_schedule(monkeypatch):
+    from spectra_learning.training import pretrain_jax
+
+    calls = []
+    sentinel = object()
+
+    def fake_adamw(**kwargs):
+        calls.append(kwargs)
+        return sentinel
+
+    cfg = config_dict.ConfigDict()
+    cfg.learning_rate = 0.004
+    cfg.min_learning_rate = 0.0004
+    cfg.warmup_steps = 20
+    cfg.b2 = 0.95
+    cfg.weight_decay = 0.1
+
+    monkeypatch.setattr(pretrain_jax.optax, "adamw", fake_adamw)
+
+    transform = pretrain_jax.build_jax_optax_transform(cfg, total_steps=100)
+
+    assert transform is sentinel
+    assert callable(calls[0]["learning_rate"])
+    assert callable(calls[0]["mask"])
+    assert calls[0]["b2"] == pytest.approx(0.95)
+    assert calls[0]["weight_decay"] == pytest.approx(0.1)
+
+
+def test_jax_weight_decay_mask_matches_torch_matrix_weight_rule():
+    from spectra_learning.training import pretrain_jax
+
+    params = {
+        "linear": {
+            "weight": pretrain_jax.np.ones((4, 3)),
+            "bias": pretrain_jax.np.ones((4,)),
+        },
+        "norm": {
+            "weight": pretrain_jax.np.ones((4,)),
+            "bias": pretrain_jax.np.ones((4,)),
+        },
+        "token": pretrain_jax.np.ones((4,)),
+    }
+
+    mask = pretrain_jax._jax_weight_decay_mask(params)
+
+    assert mask == {
+        "linear": {"weight": True, "bias": False},
+        "norm": {"weight": False, "bias": False},
+        "token": False,
+    }
+
+
+def test_scheduled_jax_learning_rate_matches_torch_schedule():
+    from spectra_learning.training import pretrain_jax
+
+    cfg = config_dict.ConfigDict()
+    cfg.learning_rate = 0.004
+    cfg.min_learning_rate = 0.0004
+    cfg.warmup_steps = 20
+
+    for step in (0, 10, 20, 60, 100):
+        assert pretrain_jax._scheduled_jax_learning_rate(
+            cfg,
+            global_step=step,
+            total_steps=100,
+        ) == pytest.approx(
+            learning_rate_at_step(
+                step,
+                base_lr=0.004,
+                total_steps=100,
+                warmup_steps=20,
+                min_learning_rate=0.0004,
+            )
+        )
+
+
+def test_train_and_evaluate_jax_logs_final_metrics_on_main_process(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from spectra_learning.training import pretrain_jax
+
+    logger = _FakeLogger()
+    datamodule_kwargs = {}
+
+    class FakeDataModule:
+        train_steps = 3
+        global_batch_size = 32
+        batch_size = 16
+
+        def __init__(self, config, **kwargs) -> None:
+            del config
+            datamodule_kwargs.update(kwargs)
+
+    def fake_run_jax_training_loop(**kwargs):
+        assert kwargs["logger"] is logger
+        return {"run/final_global_step": 3.0, "train/loss": 1.5}
+
+    def fake_build_jax_optimizer(config, model, *, total_steps):
+        del config, model
+        assert total_steps == 3
+        return object()
+
+    cfg = config_dict.ConfigDict()
+    cfg.seed = 7
+    cfg.num_epochs = 1
+    cfg.enable_wandb = True
+
+    monkeypatch.setattr(pretrain_jax, "configure_jax_runtime", lambda config: None)
+    monkeypatch.setattr(pretrain_jax, "initialize_jax_distributed", lambda config: None)
+    monkeypatch.setattr(pretrain_jax.jax, "process_index", lambda: 0)
+    monkeypatch.setattr(pretrain_jax.jax, "process_count", lambda: 2)
+    monkeypatch.setattr(pretrain_jax.jax, "device_count", lambda: 8)
+    monkeypatch.setattr(pretrain_jax.jax, "local_device_count", lambda: 4)
+    monkeypatch.setattr(
+        pretrain_jax.multihost_utils,
+        "sync_global_devices",
+        lambda name: None,
+    )
+    monkeypatch.setattr(pretrain_jax, "storage_mkdir", lambda path: None)
+    monkeypatch.setattr(pretrain_jax, "GemsNativeDataModule", FakeDataModule)
+    monkeypatch.setattr(pretrain_jax, "build_model_from_config", lambda config: object())
+    monkeypatch.setattr(pretrain_jax, "training_checkpoint_paths", lambda path: [])
+    monkeypatch.setattr(
+        pretrain_jax,
+        "initialize_jax_model_from_torch_seed",
+        lambda config, model: None,
+    )
+    monkeypatch.setattr(pretrain_jax, "build_jax_optimizer", fake_build_jax_optimizer)
+    monkeypatch.setattr(pretrain_jax, "build_logger", lambda config, workdir: logger)
+    monkeypatch.setattr(
+        pretrain_jax,
+        "_run_jax_training_loop",
+        fake_run_jax_training_loop,
+    )
+
+    results = pretrain_jax.train_and_evaluate_jax(cfg, tmp_path)
+
+    assert datamodule_kwargs["distributed_world_size"] == 2
+    assert datamodule_kwargs["distributed_rank"] == 0
+    assert results["run/jax_process_count"] == 2.0
+    assert results["run/jax_data_parallel_devices"] == 8.0
+    assert results["run/device_microbatch_size"] == 4.0
+    assert logger.logs == [
+        (
+            {
+                "global_step": 3.0,
+                "run/final_global_step": 3.0,
+                "train/loss": 1.5,
+                "run/world_size": 2.0,
+                "run/jax_device_count": 8.0,
+                "run/jax_process_index": 0.0,
+                "run/jax_process_count": 2.0,
+                "run/jax_data_parallel_devices": 8.0,
+                "run/global_batch_size": 32.0,
+                "run/local_batch_size": 16.0,
+                "run/device_microbatch_size": 4.0,
+                "run/gradient_accumulation_steps": 1.0,
+                "run/device_backend": "jax_nnx",
+            },
+            3,
+        )
+    ]
+
+
+def test_train_and_evaluate_jax_skips_logger_on_worker_process(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from spectra_learning.training import pretrain_jax
+
+    class FakeDataModule:
+        train_steps = 3
+        global_batch_size = 32
+        batch_size = 16
+
+        def __init__(self, config, **kwargs) -> None:
+            del config, kwargs
+
+    def fake_run_jax_training_loop(**kwargs):
+        assert isinstance(kwargs["logger"], pretrain_jax.MetricLogger)
+        return {"run/final_global_step": 3.0, "train/loss": float("nan")}
+
+    cfg = config_dict.ConfigDict()
+    cfg.seed = 7
+    cfg.num_epochs = 1
+    cfg.enable_wandb = True
+
+    monkeypatch.setattr(pretrain_jax, "configure_jax_runtime", lambda config: None)
+    monkeypatch.setattr(pretrain_jax, "initialize_jax_distributed", lambda config: None)
+    monkeypatch.setattr(pretrain_jax.jax, "process_index", lambda: 1)
+    monkeypatch.setattr(pretrain_jax.jax, "process_count", lambda: 2)
+    monkeypatch.setattr(pretrain_jax.jax, "device_count", lambda: 8)
+    monkeypatch.setattr(pretrain_jax.jax, "local_device_count", lambda: 4)
+    monkeypatch.setattr(
+        pretrain_jax.multihost_utils,
+        "sync_global_devices",
+        lambda name: None,
+    )
+    monkeypatch.setattr(pretrain_jax, "storage_mkdir", lambda path: None)
+    monkeypatch.setattr(pretrain_jax, "GemsNativeDataModule", FakeDataModule)
+    monkeypatch.setattr(pretrain_jax, "build_model_from_config", lambda config: object())
+    monkeypatch.setattr(pretrain_jax, "training_checkpoint_paths", lambda path: [])
+    monkeypatch.setattr(
+        pretrain_jax,
+        "initialize_jax_model_from_torch_seed",
+        lambda config, model: None,
+    )
+    monkeypatch.setattr(
+        pretrain_jax,
+        "build_jax_optimizer",
+        lambda config, model, *, total_steps: object(),
+    )
+    monkeypatch.setattr(
+        pretrain_jax,
+        "build_logger",
+        lambda config, workdir: pytest.fail("worker process initialized logger"),
+    )
+    monkeypatch.setattr(
+        pretrain_jax,
+        "_run_jax_training_loop",
+        fake_run_jax_training_loop,
+    )
+
+    results = pretrain_jax.train_and_evaluate_jax(cfg, tmp_path)
+
+    assert results["run/jax_process_index"] == 1.0
+    assert results["run/jax_process_count"] == 2.0
 
 
 def test_save_checkpoint_persists_optimizer_state():
@@ -1146,6 +1464,7 @@ def test_wandb_logger_defines_msg_probe_global_step(monkeypatch, tmp_path: Path)
         (("global_step",), {}),
         (("train/*",), {"step_metric": "global_step"}),
         (("msg_probe/*",), {"step_metric": "global_step"}),
+        (("run/*",), {"step_metric": "global_step"}),
     ]
 
 

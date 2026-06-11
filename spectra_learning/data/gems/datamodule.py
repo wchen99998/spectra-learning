@@ -92,6 +92,7 @@ class GemsNativeDataModule:
     dataloader_num_workers: int
     dataloader_prefetch_factor: int
     dataloader_persistent_workers: bool
+    dataloader_multiprocessing_context: str
     gems_train_shards: list[str]
     gems_validation_shards: list[str]
     gems_train_files: list[str]
@@ -254,6 +255,10 @@ class GemsNativeDataModule:
         if self.dataloader_num_workers > 0:
             loader_kwargs["persistent_workers"] = self.dataloader_persistent_workers
             loader_kwargs["prefetch_factor"] = self.dataloader_prefetch_factor
+            if self.dataloader_multiprocessing_context:
+                loader_kwargs["multiprocessing_context"] = (
+                    self.dataloader_multiprocessing_context
+                )
         return DataLoader(**loader_kwargs)
 
     def _collator(self, *, augment: bool) -> GemsBatchCollator:

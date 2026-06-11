@@ -22,8 +22,6 @@ from spectra_learning.training.storage import (
     storage_with_name,
     upload_local_file,
 )
-from spectra_learning.training.torchax_runtime import tensor_to_portable_cpu
-
 
 COVARIANCE_POOLER_PREFIX = "covariance_pooler."
 COVARIANCE_POOLER_CHECKPOINT_PREFIX = "covariance-pooler-"
@@ -80,7 +78,7 @@ def grad_scaler_state_dict(grad_scaler: torch.amp.GradScaler | None) -> dict | N
 
 def _snapshot_value(value: Any) -> Any:
     if isinstance(value, torch.Tensor):
-        return tensor_to_portable_cpu(value)
+        return value.detach().to("cpu", copy=True)
     if isinstance(value, dict):
         return {key: _snapshot_value(item) for key, item in value.items()}
     if isinstance(value, list):

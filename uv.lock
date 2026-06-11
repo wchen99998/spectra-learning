@@ -1489,6 +1489,7 @@ dependencies = [
     { name = "google-cloud-storage" },
     { name = "h5py" },
     { name = "huggingface-hub" },
+    { name = "jax", extra = ["tpu"], marker = "sys_platform == 'linux'" },
     { name = "jaxtyping" },
     { name = "matplotlib" },
     { name = "ml-collections" },
@@ -1498,7 +1499,6 @@ dependencies = [
     { name = "rdkit" },
     { name = "scikit-learn" },
     { name = "torch", marker = "sys_platform == 'linux'" },
-    { name = "torchax", extra = ["tpu"], marker = "sys_platform == 'linux'" },
     { name = "tqdm" },
     { name = "wandb" },
 ]
@@ -1512,12 +1512,13 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "flax", specifier = ">=0.12.0" },
+    { name = "flax", specifier = ">=0.12.7" },
     { name = "fsspec", specifier = ">=2026.1.0" },
     { name = "gcsfs", specifier = ">=2026.1.0" },
     { name = "google-cloud-storage", specifier = ">=2.14.0" },
     { name = "h5py", specifier = ">=3.11.0" },
     { name = "huggingface-hub", specifier = ">=0.33.2" },
+    { name = "jax", extras = ["tpu"], marker = "sys_platform == 'linux'", specifier = ">=0.10.1" },
     { name = "jaxtyping", specifier = ">=0.3.10" },
     { name = "matplotlib", specifier = ">=3.10.3" },
     { name = "ml-collections", specifier = ">=1.1.0" },
@@ -1527,7 +1528,6 @@ requires-dist = [
     { name = "rdkit", specifier = ">=2025.3.3" },
     { name = "scikit-learn", specifier = ">=1.8.0" },
     { name = "torch", marker = "sys_platform == 'linux'", specifier = "==2.12.0", index = "https://download.pytorch.org/whl/cu130" },
-    { name = "torchax", extras = ["tpu"], marker = "sys_platform == 'linux'", specifier = ">=0.0.12" },
     { name = "tqdm", specifier = ">=4.66.4" },
     { name = "wandb", specifier = "==0.27.0" },
 ]
@@ -2970,19 +2970,6 @@ wheels = [
     { url = "https://download-r2.pytorch.org/whl/cu130/torch-2.12.0%2Bcu130-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:3ff7366f6919232f099ef702c3ebd3509c91ab37c367e408cb3799c6bed214a4", upload-time = "2026-05-12T23:56:52Z" },
     { url = "https://download-r2.pytorch.org/whl/cu130/torch-2.12.0%2Bcu130-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:4526d2f200d9e7c7f0a04bfdeff982c4e86f7a0bac3c190ce48cd8caa3d5c888", upload-time = "2026-05-12T23:58:58Z" },
     { url = "https://download-r2.pytorch.org/whl/cu130/torch-2.12.0%2Bcu130-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:a255426cf47827e73975378fd03f3a581fc1d21241f294d6ab43b7f610ccd49c", upload-time = "2026-05-12T23:59:20Z" },
-]
-
-[[package]]
-name = "torchax"
-version = "0.0.12"
-source = { registry = "https://pypi.org/simple" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/7b/8d/3f732bda973f0cbd09f57d981e8d9cbafa1e883fff93640ae9848021c045/torchax-0.0.12-py3-none-any.whl", hash = "sha256:dd5e60724e9acbab291e39488ccf9c2019d7eadf1ce1b4bf6a3a85df430d95f6", size = 115217, upload-time = "2026-05-04T09:06:04.276Z" },
-]
-
-[package.optional-dependencies]
-tpu = [
-    { name = "jax", extra = ["tpu"], marker = "sys_platform == 'linux'" },
 ]
 
 [[package]]

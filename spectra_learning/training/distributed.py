@@ -5,13 +5,6 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 
-from spectra_learning.training.torchax_runtime import (
-    TORCHAX_DEVICE_BACKENDS,
-    device_backend_name,
-    initialize_torchax_distributed,
-    torchax_device,
-)
-
 
 @dataclass(frozen=True)
 class DistributedContext:
@@ -34,18 +27,6 @@ def init_distributed_from_env(device_backend: object = "auto") -> DistributedCon
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("RANK", "0"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    backend_name = device_backend_name(device_backend)
-    if backend_name in TORCHAX_DEVICE_BACKENDS:
-        import jax
-
-        initialize_torchax_distributed({})
-        return DistributedContext(
-            rank=jax.process_index(),
-            local_rank=local_rank,
-            world_size=jax.process_count(),
-            device=torchax_device(),
-            backend="jax",
-        )
     if world_size > 1:
         if torch.cuda.is_available():
             torch.cuda.set_device(local_rank)

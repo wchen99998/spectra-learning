@@ -47,7 +47,6 @@ from spectra_learning.training.storage import (
     storage_join,
     storage_mkdir,
 )
-from spectra_learning.training.torchax_runtime import synchronize_torchax, use_torchax_backend
 from spectra_learning.training.pretrain_jax import use_jax_nnx_backend
 from spectra_learning.training.steps import train_step_impl
 from spectra_learning.probes.massspec.msg_probe import (
@@ -125,10 +124,6 @@ def train_and_evaluate(
         from spectra_learning.training.pretrain_jax import train_and_evaluate_jax
 
         return train_and_evaluate_jax(config, workdir)
-    if use_torchax_backend(config):
-        from spectra_learning.training.torchax_pretrain import train_and_evaluate_torchax
-
-        return train_and_evaluate_torchax(config, workdir)
     install_stop_signal_handlers()
     distributed = init_distributed_from_env(_config_get(config, "device_backend", "auto"))
     workdir = normalize_storage_path(workdir)
@@ -548,8 +543,6 @@ def clear_cuda_cache(device: torch.device) -> None:
 def synchronize_device(device: torch.device) -> None:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
-    if device.type == "jax":
-        synchronize_torchax()
 
 
 def make_torch_profiler(
@@ -628,8 +621,6 @@ def restore_training_state(
 
 
 def compile_forward(model: torch.nn.Module, config: config_dict.ConfigDict) -> None:
-    if use_torchax_backend(config):
-        return
     requested_compile_mode = str(_config_get(config, "compile_mode", "max-autotune"))
     compile_mode = effective_compile_mode(config)
     if compile_mode.lower() == "none":
