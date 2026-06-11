@@ -23,6 +23,11 @@ from spectra_learning.models.common_jax import Array, batch_to_jax
 from spectra_learning.models.factory_jax import build_model_from_config
 from spectra_learning.models.model_jax import PeakSetJEPAJax
 from spectra_learning.training.checkpointing import training_checkpoint_paths
+from spectra_learning.training.checkpointing_jax import (
+    build_jax_checkpoint_manager,
+    restore_jax_training_state,
+    save_jax_training_state,
+)
 from spectra_learning.training.logging import MetricLogger, build_logger
 from spectra_learning.training.schedules import learning_rate_at_step
 from spectra_learning.training.storage import (
@@ -172,6 +177,17 @@ def build_jax_optax_transform(
     *,
     total_steps: int | None = None,
 ) -> optax.GradientTransformation:
+    optimizer = str(_config_get(config, "optimizer", "adamw")).lower()
+    if optimizer == "muon":
+        return _jax_muon_transform(config, total_steps=total_steps)
+    return _jax_adamw_transform(config, total_steps=total_steps)
+
+
+def _jax_adamw_transform(
+    config: Any,
+    *,
+    total_steps: int | None = None,
+) -> optax.GradientTransformation:
     return optax.adamw(
         learning_rate=_jax_learning_rate_schedule(config, total_steps=total_steps),
         b2=float(_config_get(config, "b2", 0.999)),
@@ -180,10 +196,94 @@ def build_jax_optax_transform(
     )
 
 
-def _jax_learning_rate_schedule(config: Any, *, total_steps: int | None = None):
-    base_lr = float(_config_get(config, "learning_rate", 1e-3))
+def _jax_muon_transform(
+    config: Any,
+    *,
+    total_steps: int | None = None,
+) -> optax.GradientTransformation:
+    return _jax_split_qkv_transform(
+        optax.contrib.muon(
+            learning_rate=_jax_learning_rate_schedule(config, total_steps=total_steps),
+            ns_coeffs=_config_get(config, "muon_ns_coeffs", (3.4445, -4.7750, 2.0315)),
+            ns_steps=int(_config_get(config, "muon_ns_steps", 5)),
+            beta=float(_config_get(config, "muon_beta", 0.95)),
+            eps=float(_config_get(config, "muon_eps", 1e-8)),
+            weight_decay=float(_config_get(config, "weight_decay", 0.0)),
+            weight_decay_mask=_jax_weight_decay_mask,
+            mu_dtype=_config_get(config, "muon_mu_dtype", None),
+            nesterov=bool(_config_get(config, "muon_nesterov", True)),
+            adaptive=bool(_config_get(config, "muon_adaptive", False)),
+            preconditioning=str(_config_get(config, "muon_preconditioning", "frobenius")),
+            adam_b1=float(_config_get(config, "muon_adam_b1", 0.9)),
+            adam_b2=float(
+                _config_get(config, "muon_adam_b2", _config_get(config, "b2", 0.999))
+            ),
+            adam_eps_root=float(_config_get(config, "muon_adam_eps_root", 0.0)),
+            adam_weight_decay=float(_config_get(config, "muon_adam_weight_decay", 0.0)),
+            adam_learning_rate=_jax_muon_adam_learning_rate_schedule(
+                config,
+                total_steps=total_steps,
+            ),
+            muon_weight_dimension_numbers=_jax_muon_weight_dimension_numbers,
+            consistent_rms=_jax_muon_consistent_rms(config),
+        )
+    )
+
+
+def _jax_muon_adam_learning_rate_schedule(
+    config: Any,
+    *,
+    total_steps: int | None = None,
+):
+    adam_learning_rate = _config_get(config, "muon_adam_learning_rate", None)
+    if adam_learning_rate is None:
+        return None
+    return _jax_learning_rate_schedule(
+        config,
+        total_steps=total_steps,
+        base_lr=float(adam_learning_rate),
+        min_lr=_config_get(config, "muon_adam_min_learning_rate", None),
+    )
+
+
+def _jax_muon_consistent_rms(config: Any) -> float | None:
+    adjust_lr_fn = str(_config_get(config, "muon_adjust_lr_fn", "") or "").lower()
+    if adjust_lr_fn == "match_rms_adamw":
+        return 0.2
+    return _config_get(config, "muon_consistent_rms", None)
+
+
+def _jax_learning_rate_schedule(
+    config: Any,
+    *,
+    total_steps: int | None = None,
+    base_lr: float | None = None,
+    min_lr: Any = None,
+):
+    if base_lr is None:
+        base_lr = float(_config_get(config, "learning_rate", 1e-3))
+        if min_lr is None:
+            min_lr = _config_get(config, "min_learning_rate", None)
+    else:
+        base_lr = float(base_lr)
     warmup_steps = int(_config_get(config, "warmup_steps", 0))
-    min_lr = _config_get(config, "min_learning_rate", None)
+    return _jax_cosine_learning_rate_schedule(
+        config,
+        total_steps=total_steps,
+        base_lr=base_lr,
+        warmup_steps=warmup_steps,
+        min_lr=min_lr,
+    )
+
+
+def _jax_cosine_learning_rate_schedule(
+    config: Any,
+    *,
+    total_steps: int | None,
+    base_lr: float,
+    warmup_steps: int,
+    min_lr: Any,
+):
     min_lr = float(min_lr) if min_lr is not None else 0.1 * base_lr
     raw_total_steps = total_steps or _config_get(config, "training_max_steps", None)
     if raw_total_steps is None:
@@ -226,6 +326,88 @@ def _jax_weight_decay_mask(params: Any) -> Any:
         lambda path, value: _tree_path_key(path[-1]) == "weight" and value.ndim >= 2,
         params,
     )
+
+
+def _jax_muon_weight_dimension_numbers(params: Any) -> Any:
+    return jax.tree.map_with_path(
+        lambda path, value: (
+            _jax_muon_weight_dimension_number(path, value)
+            if _tree_path_key(path[-1]) == "weight" and value.ndim >= 2
+            else None
+        ),
+        params,
+    )
+
+
+def _jax_muon_weight_dimension_number(
+    path: tuple[Any, ...],
+    value: Any,
+) -> optax.contrib.MuonDimensionNumbers:
+    if _jax_qkv_weight_path(path) and value.ndim == 3:
+        return optax.contrib.MuonDimensionNumbers(reduction_axis=2, output_axis=1)
+    return optax.contrib.MuonDimensionNumbers(reduction_axis=1, output_axis=0)
+
+
+def _jax_split_qkv_transform(
+    transform: optax.GradientTransformation,
+) -> optax.GradientTransformation:
+    def init_fn(params):
+        return transform.init(_jax_split_qkv_tree(params))
+
+    def update_fn(updates, state, params=None):
+        split_updates = _jax_split_qkv_tree(updates)
+        split_params = None if params is None else _jax_split_qkv_tree(params)
+        split_updates, state = transform.update(split_updates, state, split_params)
+        return _jax_unsplit_qkv_tree(split_updates, updates), state
+
+    return optax.GradientTransformation(init_fn, update_fn)
+
+
+def _jax_split_qkv_tree(tree: Any) -> Any:
+    return jax.tree.map_with_path(_jax_split_qkv_leaf, tree)
+
+
+def _jax_unsplit_qkv_tree(tree: Any, reference: Any) -> Any:
+    return jax.tree.map_with_path(
+        lambda path, value: _jax_unsplit_qkv_leaf(path, value, reference),
+        tree,
+    )
+
+
+def _jax_split_qkv_leaf(path: tuple[Any, ...], value: Any) -> Any:
+    if _jax_split_qkv_leaf_path(path, value):
+        return value.reshape(3, value.shape[0] // 3, value.shape[1])
+    return value
+
+
+def _jax_unsplit_qkv_leaf(path: tuple[Any, ...], value: Any, reference: Any) -> Any:
+    if _jax_split_qkv_leaf_path(path, _jax_tree_get_path(reference, path)):
+        return value.reshape(value.shape[0] * value.shape[1], value.shape[2])
+    return value
+
+
+def _jax_split_qkv_leaf_path(path: tuple[Any, ...], value: Any) -> bool:
+    return (
+        _jax_qkv_weight_path(path)
+        and value.ndim == 2
+        and value.shape[0] % 3 == 0
+    )
+
+
+def _jax_qkv_weight_path(path: tuple[Any, ...]) -> bool:
+    parts = _tree_path_parts(path)
+    return len(parts) >= 2 and parts[-1] == "weight" and parts[-2] in {"qkv", "wqkv"}
+
+
+def _jax_tree_get_path(tree: Any, path: tuple[Any, ...]) -> Any:
+    value = tree
+    for path_entry in path:
+        value = value[_tree_path_key(path_entry)]
+    return value
+
+
+def _tree_path_parts(path: tuple[Any, ...]) -> tuple[str, ...]:
+    return tuple(str(_tree_path_key(path_entry)) for path_entry in path)
 
 
 def _tree_path_key(path_entry: Any) -> Any:
@@ -923,11 +1105,17 @@ def train_and_evaluate_jax(
     if is_main_process:
         storage_mkdir(checkpoint_dir)
     multihost_utils.sync_global_devices("spectra_learning_jax_checkpoint_dir_ready")
-    checkpoints = training_checkpoint_paths(checkpoint_dir)
-    if checkpoints:
-        model.load_torch_checkpoint(checkpoints[-1])
-    else:
-        initialize_jax_model_from_torch_seed(config, model)
+    checkpoint_manager = build_jax_checkpoint_manager(
+        checkpoint_dir,
+        max_to_keep=int(_config_get(config, "jax_checkpoint_max_to_keep", 5)),
+    )
+    resume_step = checkpoint_manager.latest_step()
+    if resume_step is None:
+        checkpoints = training_checkpoint_paths(checkpoint_dir)
+        if checkpoints:
+            model.load_torch_checkpoint(checkpoints[-1])
+        else:
+            initialize_jax_model_from_torch_seed(config, model)
     optimizer = build_jax_optimizer(config, model, total_steps=total_steps)
     logger = build_logger(config, local_workdir) if is_main_process else MetricLogger()
     metrics = _run_jax_training_loop(
@@ -937,7 +1125,10 @@ def train_and_evaluate_jax(
         optimizer=optimizer,
         logger=logger,
         total_steps=total_steps,
+        checkpoint_manager=checkpoint_manager,
+        resume_step=resume_step,
     )
+    checkpoint_manager.close()
     data_parallel_devices = _jax_data_parallel_devices(config)
     run_metrics = {
         "run/world_size": float(jax.process_count()),
@@ -989,6 +1180,8 @@ def _run_jax_training_loop(
     optimizer: nnx.Optimizer,
     logger: MetricLogger,
     total_steps: int,
+    checkpoint_manager: Any,
+    resume_step: int | None,
 ) -> dict[str, object]:
     log_every_n_steps = int(_config_get(config, "log_every_n_steps", 50))
     warmup_steps = int(_config_get(config, "throughput_warmup_steps", 0))
@@ -1161,6 +1354,53 @@ def _run_jax_training_loop(
                     pure_pack_train_steps
                 )
             ]
+    checkpoint_every_steps = int(_config_get(config, "checkpoint_every_steps", 0))
+
+    def jax_checkpoint_state() -> dict[str, Any]:
+        if use_pure_optax_step:
+            return {
+                "trainable_params": pure_trainable_params,
+                "static_state": pure_static_state,
+                "opt_state": pure_opt_state,
+            }
+        return {
+            "model": nnx.as_pure(nnx.state(model)),
+            "optimizer": nnx.as_pure(nnx.state(optimizer)),
+        }
+
+    def save_checkpoint(step: int) -> None:
+        save_jax_training_state(checkpoint_manager, step, jax_checkpoint_state())
+
+    def maybe_save_checkpoint(step: int) -> None:
+        if checkpoint_every_steps <= 0 or step % checkpoint_every_steps != 0:
+            return
+        save_checkpoint(step)
+
+    start_step = 0
+    if resume_step is not None:
+        restored = restore_jax_training_state(
+            checkpoint_manager,
+            int(resume_step),
+            jax_checkpoint_state(),
+        )
+        if use_pure_optax_step:
+            pure_trainable_params = restored["trainable_params"]
+            pure_static_state = restored["static_state"]
+            pure_opt_state = restored["opt_state"]
+            # Pack variants only differ in graphdef; their static states are
+            # numerically identical, so they all share the restored tree.
+            if pure_full_static_state is not None:
+                pure_full_static_state = pure_static_state
+            pure_pack_train_steps = [
+                (pack_tokens, pure_static_state, pack_train_step)
+                for pack_tokens, _pack_static_state, pack_train_step in (
+                    pure_pack_train_steps
+                )
+            ]
+        else:
+            nnx.update(model, restored["model"])
+            nnx.update(optimizer, restored["optimizer"])
+        start_step = int(resume_step)
     timing_barriers = bool(_config_get(config, "jax_timing_barriers", False))
     compile_stall_threshold_seconds = float(
         _config_get(config, "jax_compile_stall_threshold_seconds", 0.0)
@@ -1202,7 +1442,8 @@ def _run_jax_training_loop(
         "measured_microbatches": 0.0,
     }
     loop_epochs = max(1, math.ceil(float(config.num_epochs)))
-    global_step = 0
+    global_step = start_step
+    start_epoch = min(start_step // datamodule.train_steps, loop_epochs - 1)
     accumulation_step = 0
     accumulated_grads = None
     last_metrics: dict[str, Array] = {}
@@ -1219,11 +1460,17 @@ def _run_jax_training_loop(
     measured_context_encoder_pack_steps_by_size = {
         pack: 0 for pack in context_encoder_pack_choices
     }
-    for epoch in range(loop_epochs):
-        loader = datamodule.train_loader_for_epoch(epoch)
+    for epoch in range(start_epoch, loop_epochs):
+        epoch_start_batch = (
+            global_step - epoch * datamodule.train_steps if epoch == start_epoch else 0
+        )
+        loader = datamodule.train_loader_for_epoch(epoch, start_batch=epoch_start_batch)
         loader_iter = iter(loader)
         pbar = tqdm(
-            total=min(datamodule.train_steps, total_steps - global_step),
+            total=min(
+                datamodule.train_steps - epoch_start_batch,
+                total_steps - global_step,
+            ),
             desc=f"Epoch {epoch}",
             unit="step",
             disable=jax.process_index() != 0,
@@ -1366,6 +1613,7 @@ def _run_jax_training_loop(
                     total_steps=total_steps,
                     every_n_steps=log_every_n_steps,
                 )
+                maybe_save_checkpoint(global_step)
                 if profile_active and global_step >= profile_end_step:
                     jax.effects_barrier()
                     jax.profiler.stop_trace()
@@ -1446,6 +1694,7 @@ def _run_jax_training_loop(
                     total_steps=total_steps,
                     every_n_steps=log_every_n_steps,
                 )
+                maybe_save_checkpoint(global_step)
                 if profile_active and global_step >= profile_end_step:
                     jax.effects_barrier()
                     jax.profiler.stop_trace()
@@ -1509,6 +1758,7 @@ def _run_jax_training_loop(
                         total_steps=total_steps,
                         every_n_steps=log_every_n_steps,
                     )
+                    maybe_save_checkpoint(global_step)
                     if profile_active and global_step >= profile_end_step:
                         jax.effects_barrier()
                         jax.profiler.stop_trace()
@@ -1638,6 +1888,7 @@ def _run_jax_training_loop(
                 total_steps=total_steps,
                 every_n_steps=log_every_n_steps,
             )
+            maybe_save_checkpoint(global_step)
             if profile_active and global_step >= profile_end_step:
                 jax.effects_barrier()
                 jax.profiler.stop_trace()
@@ -1655,6 +1906,9 @@ def _run_jax_training_loop(
     measured_elapsed = (
         time.perf_counter() - measured_start if measured_start is not None else 0.0
     )
+    if global_step > start_step and checkpoint_manager.latest_step() != global_step:
+        save_checkpoint(global_step)
+    checkpoint_manager.wait_until_finished()
     global_batch_size = int(datamodule.global_batch_size)
     loss = (
         float(jax.device_get(last_metrics["loss"]))

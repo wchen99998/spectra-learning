@@ -105,6 +105,14 @@ class _FakeLogger:
         self.logs.append((dict(metrics), step))
 
 
+class _FakeCheckpointManager:
+    def latest_step(self) -> int | None:
+        return None
+
+    def close(self) -> None:
+        pass
+
+
 class _CompileRecorder(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -303,6 +311,95 @@ def test_jax_optax_transform_uses_learning_rate_schedule(monkeypatch):
     assert calls[0]["weight_decay"] == pytest.approx(0.1)
 
 
+def test_jax_optax_transform_supports_muon(monkeypatch):
+    from spectra_learning.training import pretrain_jax
+
+    calls = []
+    sentinel = object()
+
+    def fake_muon(**kwargs):
+        calls.append(kwargs)
+        return pretrain_jax.optax.GradientTransformation(
+            lambda params: sentinel,
+            lambda updates, state, params=None: (updates, state),
+        )
+
+    cfg = config_dict.ConfigDict()
+    cfg.optimizer = "muon"
+    cfg.learning_rate = 0.02
+    cfg.min_learning_rate = 0.002
+    cfg.warmup_steps = 20
+    cfg.b2 = 0.95
+    cfg.weight_decay = 0.05
+    cfg.muon_beta = 0.95
+    cfg.muon_ns_steps = 5
+    cfg.muon_ns_coeffs = (3.4445, -4.7750, 2.0315)
+    cfg.muon_eps = 1e-8
+    cfg.muon_mu_dtype = "float32"
+    cfg.muon_nesterov = True
+    cfg.muon_adaptive = False
+    cfg.muon_preconditioning = "frobenius"
+    cfg.muon_adam_learning_rate = 0.0004
+    cfg.muon_adam_min_learning_rate = 0.00004
+    cfg.muon_adam_b1 = 0.9
+    cfg.muon_adam_b2 = 0.95
+    cfg.muon_adam_eps_root = 0.0
+    cfg.muon_adam_weight_decay = 0.0
+    cfg.muon_consistent_rms = None
+
+    monkeypatch.setattr(pretrain_jax.optax.contrib, "muon", fake_muon)
+
+    transform = pretrain_jax.build_jax_optax_transform(cfg, total_steps=100)
+
+    assert transform.init({}) is sentinel
+    assert callable(calls[0]["learning_rate"])
+    assert callable(calls[0]["adam_learning_rate"])
+    assert calls[0]["ns_coeffs"] == pytest.approx((3.4445, -4.7750, 2.0315))
+    assert calls[0]["ns_steps"] == 5
+    assert calls[0]["beta"] == pytest.approx(0.95)
+    assert calls[0]["weight_decay"] == pytest.approx(0.05)
+    assert calls[0]["weight_decay_mask"] is pretrain_jax._jax_weight_decay_mask
+    assert calls[0]["muon_weight_dimension_numbers"] is (
+        pretrain_jax._jax_muon_weight_dimension_numbers
+    )
+    assert calls[0]["mu_dtype"] == "float32"
+    assert calls[0]["nesterov"] is True
+    assert calls[0]["adaptive"] is False
+    assert calls[0]["preconditioning"] == "frobenius"
+    assert calls[0]["adam_b1"] == pytest.approx(0.9)
+    assert calls[0]["adam_b2"] == pytest.approx(0.95)
+    assert calls[0]["adam_eps_root"] == pytest.approx(0.0)
+    assert calls[0]["adam_weight_decay"] == pytest.approx(0.0)
+    assert calls[0]["consistent_rms"] is None
+
+
+def test_jax_muon_adjust_lr_match_rms_adamw_maps_to_consistent_rms(monkeypatch):
+    from spectra_learning.training import pretrain_jax
+
+    calls = []
+
+    def fake_muon(**kwargs):
+        calls.append(kwargs)
+        return pretrain_jax.optax.GradientTransformation(
+            lambda params: None,
+            lambda updates, state, params=None: (updates, state),
+        )
+
+    cfg = config_dict.ConfigDict()
+    cfg.optimizer = "muon"
+    cfg.learning_rate = 0.0004
+    cfg.min_learning_rate = 0.00004
+    cfg.warmup_steps = 20
+    cfg.weight_decay = 0.05
+    cfg.muon_adjust_lr_fn = "match_rms_adamw"
+
+    monkeypatch.setattr(pretrain_jax.optax.contrib, "muon", fake_muon)
+
+    pretrain_jax.build_jax_optax_transform(cfg, total_steps=100)
+
+    assert calls[0]["consistent_rms"] == pytest.approx(0.2)
+
+
 def test_jax_weight_decay_mask_matches_torch_matrix_weight_rule():
     from spectra_learning.training import pretrain_jax
 
@@ -325,6 +422,97 @@ def test_jax_weight_decay_mask_matches_torch_matrix_weight_rule():
         "norm": {"weight": False, "bias": False},
         "token": False,
     }
+
+
+def test_jax_muon_weight_dimension_numbers_matches_matrix_weight_rule():
+    from spectra_learning.training import pretrain_jax
+
+    params = {
+        "linear": {
+            "weight": pretrain_jax.np.ones((4, 3)),
+            "bias": pretrain_jax.np.ones((4,)),
+        },
+        "norm": {
+            "weight": pretrain_jax.np.ones((4,)),
+            "bias": pretrain_jax.np.ones((4,)),
+        },
+        "token": pretrain_jax.np.ones((4,)),
+    }
+
+    dim_numbers = pretrain_jax._jax_muon_weight_dimension_numbers(params)
+
+    assert isinstance(
+        dim_numbers["linear"]["weight"],
+        pretrain_jax.optax.contrib.MuonDimensionNumbers,
+    )
+    assert dim_numbers["linear"]["weight"].reduction_axis == 1
+    assert dim_numbers["linear"]["weight"].output_axis == 0
+    assert dim_numbers["linear"]["bias"] is None
+    assert dim_numbers["norm"]["weight"] is None
+    assert dim_numbers["norm"]["bias"] is None
+    assert dim_numbers["token"] is None
+
+
+def test_jax_muon_weight_dimension_numbers_splits_qkv_blocks():
+    from spectra_learning.training import pretrain_jax
+
+    params = {
+        "attention": {
+            "wqkv": {"weight": pretrain_jax.np.ones((3, 4, 5))},
+            "wo": {"weight": pretrain_jax.np.ones((4, 5))},
+        },
+        "pair_attention": {
+            "qkv": {"weight": pretrain_jax.np.ones((3, 4, 5))},
+        },
+    }
+
+    dim_numbers = pretrain_jax._jax_muon_weight_dimension_numbers(params)
+
+    assert dim_numbers["attention"]["wqkv"]["weight"].reduction_axis == 2
+    assert dim_numbers["attention"]["wqkv"]["weight"].output_axis == 1
+    assert dim_numbers["attention"]["wo"]["weight"].reduction_axis == 1
+    assert dim_numbers["attention"]["wo"]["weight"].output_axis == 0
+    assert dim_numbers["pair_attention"]["qkv"]["weight"].reduction_axis == 2
+    assert dim_numbers["pair_attention"]["qkv"]["weight"].output_axis == 1
+
+
+def test_jax_muon_split_qkv_transform_preserves_model_update_shapes():
+    from spectra_learning.training import pretrain_jax
+
+    calls = {}
+
+    def init_fn(params):
+        calls["init_wqkv_shape"] = params["attention"]["wqkv"]["weight"].shape
+        calls["init_wo_shape"] = params["attention"]["wo"]["weight"].shape
+        return "state"
+
+    def update_fn(updates, state, params=None):
+        calls["update_wqkv_shape"] = updates["attention"]["wqkv"]["weight"].shape
+        calls["param_wqkv_shape"] = params["attention"]["wqkv"]["weight"].shape
+        return updates, state
+
+    transform = pretrain_jax._jax_split_qkv_transform(
+        pretrain_jax.optax.GradientTransformation(init_fn, update_fn)
+    )
+    params = {
+        "attention": {
+            "wqkv": {"weight": pretrain_jax.np.ones((12, 5))},
+            "wo": {"weight": pretrain_jax.np.ones((4, 5))},
+        },
+    }
+
+    state = transform.init(params)
+    updates, state = transform.update(params, state, params)
+
+    assert state == "state"
+    assert calls == {
+        "init_wqkv_shape": (3, 4, 5),
+        "init_wo_shape": (4, 5),
+        "update_wqkv_shape": (3, 4, 5),
+        "param_wqkv_shape": (3, 4, 5),
+    }
+    assert updates["attention"]["wqkv"]["weight"].shape == (12, 5)
+    assert updates["attention"]["wo"]["weight"].shape == (4, 5)
 
 
 def test_scheduled_jax_learning_rate_matches_torch_schedule():
@@ -385,6 +573,11 @@ def test_train_and_evaluate_jax_logs_final_metrics_on_main_process(
 
     monkeypatch.setattr(pretrain_jax, "configure_jax_runtime", lambda config: None)
     monkeypatch.setattr(pretrain_jax, "initialize_jax_distributed", lambda config: None)
+    monkeypatch.setattr(
+        pretrain_jax,
+        "build_jax_checkpoint_manager",
+        lambda checkpoint_dir, *, max_to_keep: _FakeCheckpointManager(),
+    )
     monkeypatch.setattr(pretrain_jax.jax, "process_index", lambda: 0)
     monkeypatch.setattr(pretrain_jax.jax, "process_count", lambda: 2)
     monkeypatch.setattr(pretrain_jax.jax, "device_count", lambda: 8)
@@ -465,6 +658,11 @@ def test_train_and_evaluate_jax_skips_logger_on_worker_process(
 
     monkeypatch.setattr(pretrain_jax, "configure_jax_runtime", lambda config: None)
     monkeypatch.setattr(pretrain_jax, "initialize_jax_distributed", lambda config: None)
+    monkeypatch.setattr(
+        pretrain_jax,
+        "build_jax_checkpoint_manager",
+        lambda checkpoint_dir, *, max_to_keep: _FakeCheckpointManager(),
+    )
     monkeypatch.setattr(pretrain_jax.jax, "process_index", lambda: 1)
     monkeypatch.setattr(pretrain_jax.jax, "process_count", lambda: 2)
     monkeypatch.setattr(pretrain_jax.jax, "device_count", lambda: 8)
