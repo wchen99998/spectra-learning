@@ -1,0 +1,980 @@
+from __future__ import annotations
+
+import os
+import tempfile
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+import torch
+from flax import nnx
+from ml_collections import config_dict
+from torch.utils.data import DataLoader
+
+from spectra_learning.data.gems.collate import GemsBatchCollator
+from spectra_learning.models.model import PeakSetJEPA
+from spectra_learning.models.model_jax import PeakSetJEPAJax
+from spectra_learning.training.checkpointing import save_torch_checkpoint
+from spectra_learning.training.pretrain_jax import (
+    build_jax_optimizer,
+    jax_accumulated_train_step,
+    jax_apply_grads,
+    jax_apply_accumulated_train_step,
+    jax_grad_step,
+    jax_local_grad_step,
+    jax_multistep_train_step,
+    jax_sharded_accumulated_train_step,
+    jax_sharded_apply_grads,
+    jax_sharded_apply_accumulated_train_step,
+    jax_sharded_grad_step,
+    jax_sharded_local_grad_step,
+    jax_train_step,
+    initialize_jax_model_from_torch_seed,
+    init_pure_optax_train_state,
+    make_pure_accumulated_train_step,
+    trainable_param_filter,
+    torch_batch_to_jax,
+)
+
+
+def _small_mae_kwargs() -> dict[str, object]:
+    return {
+        "training_mode": "mae",
+        "model_dim": 16,
+        "encoder_num_layers": 1,
+        "encoder_num_heads": 4,
+        "attention_mlp_multiple": 2.0,
+        "feature_mlp_hidden_dim": 8,
+        "encoder_fourier_num_freqs": 4,
+        "pairmixer_fourier_num_freqs": 2,
+        "pairmixer_pair_dim": 12,
+        "pairmixer_pair_feature_hidden_dim": 8,
+        "masked_latent_predictor_num_layers": 1,
+        "masked_latent_predictor_num_heads": 4,
+        "num_peaks": 5,
+        "jepa_num_target_blocks": 1,
+        "distogram_loss_weight": 1.0,
+        "pairmixer_use_pair_bias_attention": True,
+        "predictor_dropout": 0.0,
+        "target_projector_dim": -1,
+    }
+
+
+def _tiny_mae_kwargs() -> dict[str, object]:
+    return {
+        "training_mode": "mae",
+        "model_dim": 4,
+        "encoder_num_layers": 1,
+        "encoder_num_heads": 1,
+        "attention_mlp_multiple": 1.0,
+        "feature_mlp_hidden_dim": 4,
+        "encoder_fourier_num_freqs": 1,
+        "pairmixer_fourier_num_freqs": 1,
+        "pairmixer_pair_dim": 4,
+        "pairmixer_pair_feature_hidden_dim": 4,
+        "masked_latent_predictor_num_layers": 1,
+        "masked_latent_predictor_num_heads": 1,
+        "num_peaks": 3,
+        "jepa_num_target_blocks": 1,
+        "distogram_loss_weight": 0.0,
+        "pairmixer_use_pair_bias_attention": False,
+        "predictor_dropout": 0.0,
+        "target_projector_dim": -1,
+        "jepa_mae_mz_bin_size": 100.0,
+        "jepa_mae_intensity_bin_size": 0.5,
+    }
+
+
+def _small_jepa_kwargs(**overrides: object) -> dict[str, object]:
+    kwargs: dict[str, object] = {
+        "training_mode": "jepa",
+        "model_dim": 16,
+        "encoder_num_layers": 1,
+        "encoder_num_heads": 4,
+        "attention_mlp_multiple": 2.0,
+        "feature_mlp_hidden_dim": 8,
+        "encoder_fourier_num_freqs": 4,
+        "pairmixer_fourier_num_freqs": 2,
+        "pairmixer_pair_dim": 12,
+        "pairmixer_pair_feature_hidden_dim": 8,
+        "masked_latent_predictor_num_layers": 1,
+        "masked_latent_predictor_num_heads": 4,
+        "num_peaks": 5,
+        "jepa_num_target_blocks": 1,
+        "masked_token_loss_weight": 1.0,
+        "distogram_loss_weight": 1.0,
+        "latent_pair_loss_weight": 1.0,
+        "latent_pair_target_normalization": "layernorm",
+        "pairmixer_use_pair_bias_attention": True,
+        "predictor_dropout": 0.0,
+        "target_projector_dim": -1,
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def _sample(mz: list[float], intensity: list[float], precursor_mz: float) -> dict[str, torch.Tensor]:
+    spectra = torch.zeros(2, 128, dtype=torch.float32)
+    spectra[0, : len(mz)] = torch.tensor(mz, dtype=torch.float32)
+    spectra[1, : len(intensity)] = torch.tensor(intensity, dtype=torch.float32)
+    return {
+        "spectra": spectra,
+        "precursor_mz_raw": torch.tensor(precursor_mz, dtype=torch.float32),
+    }
+
+
+def _real_pattern_batch(
+    mask_strategy: str,
+    *,
+    num_peaks: int = 5,
+) -> dict[str, torch.Tensor]:
+    torch.manual_seed(123)
+    samples = [
+        _sample([100.0, 125.0, 150.0, 175.0, 200.0], [1.0, 0.8, 0.4, 0.2, 0.1], 500.0),
+        _sample([220.0, 240.0, 300.0], [0.9, 0.3, 0.2], 620.0),
+        _sample([80.0, 81.0, 120.0, 180.0, 260.0, 400.0], [0.5, 1.0, 0.7, 0.4, 0.2, 0.1], 700.0),
+    ]
+    collator = GemsBatchCollator(
+        augment=True,
+        num_target_blocks=1,
+        context_fraction=0.4,
+        target_fraction=0.35,
+        block_min_len=1,
+        num_peaks=num_peaks,
+        max_precursor_mz=1000.0,
+        min_peak_intensity=0.0,
+        peak_drop_min_intensity=0.0,
+        peak_ordering="mz",
+        precursor_peak_exclusion_window_da=0.0,
+        mask_strategy=mask_strategy,
+        mask_lengths=(1, 2, 3),
+        mask_round_from=2,
+    )
+    loader = DataLoader(samples, batch_size=3, collate_fn=collator, num_workers=0)
+    return next(iter(loader))
+
+
+def _real_pattern_batch_size(
+    mask_strategy: str,
+    batch_size: int,
+    *,
+    num_peaks: int = 5,
+) -> dict[str, torch.Tensor]:
+    batch = _real_pattern_batch(mask_strategy, num_peaks=num_peaks)
+    indices = torch.arange(batch_size) % next(iter(batch.values())).shape[0]
+    return {key: value[indices] for key, value in batch.items()}
+
+
+def _assert_metrics_close(
+    torch_metrics: dict[str, torch.Tensor],
+    jax_metrics,
+    *,
+    atol: float = 2e-5,
+) -> None:
+    for key, torch_value in torch_metrics.items():
+        expected = torch_value.detach().cpu().numpy()
+        actual = np.asarray(jax_metrics[key])
+        np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=atol, err_msg=key)
+
+
+def _assert_jax_metrics_close(
+    expected_metrics,
+    actual_metrics,
+    *,
+    atol: float = 2e-5,
+) -> None:
+    for key, expected_value in expected_metrics.items():
+        np.testing.assert_allclose(
+            np.asarray(actual_metrics[key]),
+            np.asarray(expected_value),
+            rtol=1e-5,
+            atol=atol,
+            err_msg=key,
+        )
+
+
+@pytest.mark.parametrize("mask_strategy", ["contiguous", "random"])
+def test_jax_mae_matches_pytorch_on_real_collated_batch(mask_strategy: str):
+    torch.manual_seed(7)
+    kwargs = _small_mae_kwargs()
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    jax_model = PeakSetJEPAJax(**kwargs)
+    jax_model.load_torch_state_dict(torch_model.state_dict())
+    batch = _real_pattern_batch(mask_strategy)
+
+    with torch.no_grad():
+        torch_metrics = torch_model(batch)
+    jax_metrics = jax_model(batch)
+
+    _assert_metrics_close(torch_metrics, jax_metrics)
+
+
+def test_initialize_jax_model_from_torch_seed_matches_pytorch_forward():
+    seed = 123
+    kwargs = _small_mae_kwargs()
+    torch.manual_seed(seed)
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    jax_model = PeakSetJEPAJax(**kwargs)
+    cfg = config_dict.ConfigDict(kwargs)
+    cfg.seed = seed
+
+    initialize_jax_model_from_torch_seed(cfg, jax_model)
+
+    batch = _real_pattern_batch("contiguous")
+    with torch.no_grad():
+        torch_metrics = torch_model(batch)
+    jax_metrics = jax_model(batch)
+
+    _assert_metrics_close(torch_metrics, jax_metrics)
+
+
+def test_jax_model_loads_plain_pytorch_checkpoint_and_matches_output():
+    torch.manual_seed(11)
+    kwargs = _small_mae_kwargs()
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    batch = _real_pattern_batch("ragged")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = f"{tmpdir}/step-00000009.pt"
+        save_torch_checkpoint(
+            {
+                "model": torch_model.state_dict(),
+                "optimizers": [],
+                "schedulers": [],
+                "grad_scaler": None,
+                "global_step": 9,
+                "epoch": 0,
+                "loss": 0.0,
+                "wandb_run_id": None,
+            },
+            path,
+        )
+        jax_model = PeakSetJEPAJax(**kwargs)
+        jax_model.load_torch_checkpoint(path)
+
+    with torch.no_grad():
+        torch_metrics = torch_model(batch)
+    jax_metrics = jax_model(batch)
+
+    _assert_metrics_close(torch_metrics, jax_metrics)
+
+
+def test_jax_mae_packed_context_encoder_matches_full_encoder():
+    torch.manual_seed(13)
+    kwargs = {**_small_mae_kwargs(), "encoder_use_position_embedding": False}
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    full_model = PeakSetJEPAJax(**kwargs)
+    packed_model = PeakSetJEPAJax(
+        **kwargs,
+        mae_context_encoder_pack_tokens=3,
+    )
+    full_model.load_torch_state_dict(torch_model.state_dict())
+    packed_model.load_torch_state_dict(torch_model.state_dict())
+    batch = _real_pattern_batch("contiguous")
+
+    full_metrics = full_model(batch)
+    packed_metrics = packed_model(batch)
+
+    _assert_jax_metrics_close(full_metrics, packed_metrics, atol=5e-4)
+
+
+def test_jax_optax_train_step_updates_loaded_pytorch_weights():
+    torch.manual_seed(17)
+    kwargs = _small_mae_kwargs()
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    jax_model = PeakSetJEPAJax(**kwargs)
+    jax_model.load_torch_state_dict(torch_model.state_dict())
+    optimizer = build_jax_optimizer(
+        {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95},
+        jax_model,
+    )
+    batch = torch_batch_to_jax(_real_pattern_batch("contiguous"))
+    before = np.asarray(jax_model.jepa_mae_mz_head.weight[...])
+
+    metrics = jax_train_step(jax_model, optimizer, batch)
+
+    after = np.asarray(jax_model.jepa_mae_mz_head.weight[...])
+    assert np.isfinite(np.asarray(metrics["loss"]))
+    assert not np.allclose(before, after)
+
+
+@pytest.mark.parametrize("mode", ["full", "selective"])
+def test_jax_activation_checkpointing_matches_uncheckpointed_update(mode: str):
+    torch.manual_seed(18)
+    kwargs = _small_mae_kwargs()
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    base_model = PeakSetJEPAJax(**kwargs)
+    checkpointed_model = PeakSetJEPAJax(
+        **{
+            **kwargs,
+            "activation_checkpoint_mode": mode,
+            "activation_checkpoint_every_n_layers": 1,
+            "activation_checkpoint_modules": ("encoder", "predictor"),
+        }
+    )
+    base_model.load_torch_state_dict(torch_model.state_dict())
+    checkpointed_model.load_torch_state_dict(torch_model.state_dict())
+    optimizer_config = {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95}
+    base_optimizer = build_jax_optimizer(optimizer_config, base_model)
+    checkpointed_optimizer = build_jax_optimizer(optimizer_config, checkpointed_model)
+    batch = torch_batch_to_jax(_real_pattern_batch("contiguous"))
+
+    base_metrics = jax_train_step(base_model, base_optimizer, batch)
+    checkpointed_metrics = jax_train_step(
+        checkpointed_model,
+        checkpointed_optimizer,
+        batch,
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(checkpointed_metrics["loss"]),
+        np.asarray(base_metrics["loss"]),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        np.asarray(checkpointed_model.jepa_mae_mz_head.weight[...]),
+        np.asarray(base_model.jepa_mae_mz_head.weight[...]),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_jax_bf16_autocast_uses_bf16_activations_and_fp32_loss():
+    kwargs = {**_small_mae_kwargs(), "autocast_dtype": "bf16"}
+    jax_model = PeakSetJEPAJax(**kwargs)
+    batch = torch_batch_to_jax(_real_pattern_batch("contiguous"))
+
+    encoded, _, pair = jax_model.encoder.forward_with_block_outputs(
+        batch["peak_mz"],
+        batch["peak_intensity"],
+        valid_mask=batch["peak_valid_mask"],
+        visible_mask=batch["peak_valid_mask"],
+        precursor_mz=batch.get("precursor_mz", None),
+    )
+    metrics = jax_model(batch)
+
+    assert encoded.dtype == jnp.bfloat16
+    assert pair.dtype == jnp.bfloat16
+    assert metrics["loss"].dtype == jnp.float32
+
+
+def test_jax_accumulated_grad_step_updates_loaded_pytorch_weights():
+    import jax
+
+    torch.manual_seed(19)
+    kwargs = _small_mae_kwargs()
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    jax_model = PeakSetJEPAJax(**kwargs)
+    jax_model.load_torch_state_dict(torch_model.state_dict())
+    optimizer = build_jax_optimizer(
+        {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95},
+        jax_model,
+    )
+    batch = torch_batch_to_jax(_real_pattern_batch("random"))
+    before = np.asarray(jax_model.jepa_mae_mz_head.weight[...])
+
+    (_loss_0, metrics), grads_0 = jax_grad_step(jax_model, batch)
+    (_loss_1, _metrics_1), grads_1 = jax_grad_step(jax_model, batch)
+    grads = jax.tree.map(lambda lhs, rhs: (lhs + rhs) * 0.5, grads_0, grads_1)
+    jax_apply_grads(jax_model, optimizer, grads)
+
+    after = np.asarray(jax_model.jepa_mae_mz_head.weight[...])
+    assert np.isfinite(np.asarray(metrics["loss"]))
+    assert not np.allclose(before, after)
+
+
+def test_jax_optax_multistep_matches_manual_accumulation():
+    torch.manual_seed(20)
+    kwargs = _small_mae_kwargs()
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    manual_model = PeakSetJEPAJax(**kwargs)
+    multistep_model = PeakSetJEPAJax(**kwargs)
+    manual_model.load_torch_state_dict(torch_model.state_dict())
+    multistep_model.load_torch_state_dict(torch_model.state_dict())
+    optimizer_config = {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95}
+    manual_optimizer = build_jax_optimizer(optimizer_config, manual_model)
+    multistep_optimizer = build_jax_optimizer(
+        {
+            **optimizer_config,
+            "gradient_accumulation_steps": 2,
+            "jax_optax_multistep_accumulation": True,
+            "jax_mesh_devices": 1,
+        },
+        multistep_model,
+    )
+    batch_0 = torch_batch_to_jax(_real_pattern_batch("contiguous"))
+    batch_1 = torch_batch_to_jax(_real_pattern_batch("random"))
+
+    (_loss_0, _metrics_0), grads_0 = jax_grad_step(manual_model, batch_0)
+    (_loss_1, _metrics_1), grads_1 = jax_grad_step(manual_model, batch_1)
+    grads = jax.tree.map(lambda lhs, rhs: (lhs + rhs) * 0.5, grads_0, grads_1)
+    jax_apply_grads(manual_model, manual_optimizer, grads)
+    jax_multistep_train_step(multistep_model, multistep_optimizer, batch_0)
+    jax_multistep_train_step(multistep_model, multistep_optimizer, batch_1)
+
+    np.testing.assert_allclose(
+        np.asarray(multistep_model.jepa_mae_mz_head.weight[...]),
+        np.asarray(manual_model.jepa_mae_mz_head.weight[...]),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_jax_accumulated_train_step_matches_manual_accumulation():
+    torch.manual_seed(22)
+    kwargs = _small_mae_kwargs()
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    manual_model = PeakSetJEPAJax(**kwargs)
+    accumulated_model = PeakSetJEPAJax(**kwargs)
+    manual_model.load_torch_state_dict(torch_model.state_dict())
+    accumulated_model.load_torch_state_dict(torch_model.state_dict())
+    optimizer_config = {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95}
+    manual_optimizer = build_jax_optimizer(optimizer_config, manual_model)
+    accumulated_optimizer = build_jax_optimizer(optimizer_config, accumulated_model)
+    batch_0 = torch_batch_to_jax(_real_pattern_batch("contiguous"))
+    batch_1 = torch_batch_to_jax(_real_pattern_batch("random"))
+    accumulated_batch = jax.tree.map(
+        lambda lhs, rhs: jnp.stack([lhs, rhs]),
+        batch_0,
+        batch_1,
+    )
+
+    (_loss_0, _metrics_0), grads_0 = jax_grad_step(manual_model, batch_0)
+    (_loss_1, _metrics_1), grads_1 = jax_grad_step(manual_model, batch_1)
+    grads = jax.tree.map(lambda lhs, rhs: (lhs + rhs) * 0.5, grads_0, grads_1)
+    jax_apply_grads(manual_model, manual_optimizer, grads)
+    jax_accumulated_train_step(accumulated_model, accumulated_optimizer, accumulated_batch)
+
+    np.testing.assert_allclose(
+        np.asarray(accumulated_model.jepa_mae_mz_head.weight[...]),
+        np.asarray(manual_model.jepa_mae_mz_head.weight[...]),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_jax_pure_optax_accumulated_train_step_matches_nnx_optimizer():
+    torch.manual_seed(22)
+    kwargs = _small_mae_kwargs()
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    nnx_model = PeakSetJEPAJax(**kwargs)
+    pure_model = PeakSetJEPAJax(**kwargs)
+    nnx_model.load_torch_state_dict(torch_model.state_dict())
+    pure_model.load_torch_state_dict(torch_model.state_dict())
+    optimizer_config = {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95}
+    nnx_optimizer = build_jax_optimizer(optimizer_config, nnx_model)
+    batch_0 = torch_batch_to_jax(_real_pattern_batch("contiguous"))
+    batch_1 = torch_batch_to_jax(_real_pattern_batch("random"))
+    accumulated_batch = jax.tree.map(
+        lambda lhs, rhs: jnp.stack([lhs, rhs]),
+        batch_0,
+        batch_1,
+    )
+
+    jax_accumulated_train_step(nnx_model, nnx_optimizer, accumulated_batch)
+    graphdef, trainable_params, static_state, opt_state, optimizer = (
+        init_pure_optax_train_state(optimizer_config, pure_model)
+    )
+    pure_train_step = make_pure_accumulated_train_step(
+        graphdef,
+        optimizer,
+        sharded=False,
+    )
+    trainable_params, opt_state, metrics = pure_train_step(
+        trainable_params,
+        static_state,
+        opt_state,
+        accumulated_batch,
+    )
+    nnx.update(pure_model, trainable_params)
+
+    assert np.isfinite(np.asarray(metrics["loss"]))
+    np.testing.assert_allclose(
+        np.asarray(pure_model.jepa_mae_mz_head.weight[...]),
+        np.asarray(nnx_model.jepa_mae_mz_head.weight[...]),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_jax_pure_optax_zero_init_accumulated_train_step_matches_default():
+    torch.manual_seed(22)
+    kwargs = _small_mae_kwargs()
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    default_model = PeakSetJEPAJax(**kwargs)
+    zero_init_model = PeakSetJEPAJax(**kwargs)
+    default_model.load_torch_state_dict(torch_model.state_dict())
+    zero_init_model.load_torch_state_dict(torch_model.state_dict())
+    optimizer_config = {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95}
+    batch_0 = torch_batch_to_jax(_real_pattern_batch("contiguous"))
+    batch_1 = torch_batch_to_jax(_real_pattern_batch("random"))
+    accumulated_batch = jax.tree.map(
+        lambda lhs, rhs: jnp.stack([lhs, rhs]),
+        batch_0,
+        batch_1,
+    )
+
+    graphdef, trainable_params, static_state, opt_state, optimizer = (
+        init_pure_optax_train_state(optimizer_config, default_model)
+    )
+    default_train_step = make_pure_accumulated_train_step(
+        graphdef,
+        optimizer,
+        sharded=False,
+    )
+    trainable_params, opt_state, default_metrics = default_train_step(
+        trainable_params,
+        static_state,
+        opt_state,
+        accumulated_batch,
+    )
+    nnx.update(default_model, trainable_params)
+
+    graphdef, trainable_params, static_state, opt_state, optimizer = (
+        init_pure_optax_train_state(optimizer_config, zero_init_model)
+    )
+    zero_init_train_step = make_pure_accumulated_train_step(
+        graphdef,
+        optimizer,
+        sharded=False,
+        scan_zero_init=True,
+    )
+    trainable_params, opt_state, zero_init_metrics = zero_init_train_step(
+        trainable_params,
+        static_state,
+        opt_state,
+        accumulated_batch,
+    )
+    nnx.update(zero_init_model, trainable_params)
+
+    np.testing.assert_allclose(
+        np.asarray(zero_init_metrics["loss"]),
+        np.asarray(default_metrics["loss"]),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        np.asarray(zero_init_model.jepa_mae_mz_head.weight[...]),
+        np.asarray(default_model.jepa_mae_mz_head.weight[...]),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_jax_device_accumulation_matches_manual_accumulation():
+    torch.manual_seed(23)
+    kwargs = _small_mae_kwargs()
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    manual_model = PeakSetJEPAJax(**kwargs)
+    accumulated_model = PeakSetJEPAJax(**kwargs)
+    manual_model.load_torch_state_dict(torch_model.state_dict())
+    accumulated_model.load_torch_state_dict(torch_model.state_dict())
+    optimizer_config = {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95}
+    manual_optimizer = build_jax_optimizer(optimizer_config, manual_model)
+    accumulated_optimizer = build_jax_optimizer(optimizer_config, accumulated_model)
+    batch_0 = torch_batch_to_jax(_real_pattern_batch("contiguous"))
+    batch_1 = torch_batch_to_jax(_real_pattern_batch("random"))
+
+    (_loss_0, _metrics_0), grads_0 = jax_grad_step(manual_model, batch_0)
+    (_loss_1, _metrics_1), grads_1 = jax_grad_step(manual_model, batch_1)
+    grads = jax.tree.map(lambda lhs, rhs: (lhs + rhs) * 0.5, grads_0, grads_1)
+    jax_apply_grads(manual_model, manual_optimizer, grads)
+    accumulated_grads = jax_local_grad_step(accumulated_model, batch_0)
+    jax_apply_accumulated_train_step(
+        accumulated_model,
+        accumulated_optimizer,
+        batch_1,
+        accumulated_grads,
+        jnp.asarray(0.5, dtype=jnp.float32),
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(accumulated_model.jepa_mae_mz_head.weight[...]),
+        np.asarray(manual_model.jepa_mae_mz_head.weight[...]),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+@pytest.mark.skipif(
+    os.environ.get("RUN_JAX_SHARDED_TESTS") != "1",
+    reason="explicit shard_map TPU smoke test",
+)
+def test_jax_sharded_accumulated_grad_step_updates_on_all_devices():
+    torch.manual_seed(21)
+    kwargs = _tiny_mae_kwargs()
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    jax_model = PeakSetJEPAJax(**kwargs)
+    jax_model.load_torch_state_dict(torch_model.state_dict())
+    optimizer = build_jax_optimizer(
+        {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95},
+        jax_model,
+    )
+    batch = torch_batch_to_jax(
+        _real_pattern_batch_size(
+            "contiguous",
+            jax.device_count(),
+            num_peaks=int(kwargs["num_peaks"]),
+        )
+    )
+    before = np.asarray(jax_model.jepa_mae_mz_head.weight[...])
+
+    (_loss_0, metrics), grads_0 = jax_sharded_grad_step(jax_model, batch)
+    (_loss_1, _metrics_1), grads_1 = jax_sharded_grad_step(jax_model, batch)
+    grads = jax.tree.map(lambda lhs, rhs: (lhs + rhs) * 0.5, grads_0, grads_1)
+    jax_sharded_apply_grads(jax_model, optimizer, grads)
+
+    after = np.asarray(jax_model.jepa_mae_mz_head.weight[...])
+    assert np.isfinite(np.asarray(metrics["loss"]))
+    assert not np.allclose(before, after)
+
+
+@pytest.mark.skipif(
+    os.environ.get("RUN_JAX_SHARDED_TESTS") != "1",
+    reason="explicit shard_map TPU smoke test",
+)
+def test_jax_sharded_accumulated_train_step_updates_on_all_devices():
+    torch.manual_seed(22)
+    kwargs = _tiny_mae_kwargs()
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    jax_model = PeakSetJEPAJax(**kwargs)
+    jax_model.load_torch_state_dict(torch_model.state_dict())
+    optimizer = build_jax_optimizer(
+        {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95},
+        jax_model,
+    )
+    batch = torch_batch_to_jax(
+        _real_pattern_batch_size(
+            "contiguous",
+            jax.device_count(),
+            num_peaks=int(kwargs["num_peaks"]),
+        )
+    )
+    accumulated_batch = jax.tree.map(lambda value: jnp.stack([value, value]), batch)
+    before = np.asarray(jax_model.jepa_mae_mz_head.weight[...])
+
+    metrics, _apply_token = jax_sharded_accumulated_train_step(
+        jax_model,
+        optimizer,
+        accumulated_batch,
+    )
+
+    after = np.asarray(jax_model.jepa_mae_mz_head.weight[...])
+    assert np.isfinite(np.asarray(metrics["loss"]))
+    assert not np.allclose(before, after)
+
+
+@pytest.mark.skipif(
+    os.environ.get("RUN_JAX_SHARDED_TESTS") != "1",
+    reason="explicit shard_map TPU smoke test",
+)
+def test_jax_sharded_pure_optax_accumulated_train_step_updates_on_all_devices():
+    torch.manual_seed(22)
+    kwargs = _tiny_mae_kwargs()
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    jax_model = PeakSetJEPAJax(**kwargs)
+    jax_model.load_torch_state_dict(torch_model.state_dict())
+    batch = torch_batch_to_jax(
+        _real_pattern_batch_size(
+            "contiguous",
+            jax.device_count(),
+            num_peaks=int(kwargs["num_peaks"]),
+        )
+    )
+    accumulated_batch = jax.tree.map(lambda value: jnp.stack([value, value]), batch)
+    graphdef, trainable_params, static_state, opt_state, optimizer = (
+        init_pure_optax_train_state(
+            {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95},
+            jax_model,
+        )
+    )
+    pure_train_step = make_pure_accumulated_train_step(
+        graphdef,
+        optimizer,
+        sharded=True,
+    )
+    before = np.asarray(jax_model.jepa_mae_mz_head.weight[...])
+
+    trainable_params, opt_state, metrics = pure_train_step(
+        trainable_params,
+        static_state,
+        opt_state,
+        accumulated_batch,
+    )
+    nnx.update(jax_model, trainable_params)
+
+    after = np.asarray(jax_model.jepa_mae_mz_head.weight[...])
+    assert np.isfinite(np.asarray(metrics["loss"]))
+    assert not np.allclose(before, after)
+
+
+@pytest.mark.skipif(
+    os.environ.get("RUN_JAX_SHARDED_TESTS") != "1",
+    reason="explicit shard_map TPU smoke test",
+)
+def test_jax_sharded_device_accumulation_matches_manual_accumulation():
+    torch.manual_seed(23)
+    kwargs = _tiny_mae_kwargs()
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    manual_model = PeakSetJEPAJax(**kwargs)
+    accumulated_model = PeakSetJEPAJax(**kwargs)
+    manual_model.load_torch_state_dict(torch_model.state_dict())
+    accumulated_model.load_torch_state_dict(torch_model.state_dict())
+    optimizer_config = {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95}
+    manual_optimizer = build_jax_optimizer(optimizer_config, manual_model)
+    accumulated_optimizer = build_jax_optimizer(optimizer_config, accumulated_model)
+    batch_0 = torch_batch_to_jax(
+        _real_pattern_batch_size(
+            "contiguous",
+            jax.device_count(),
+            num_peaks=int(kwargs["num_peaks"]),
+        )
+    )
+    batch_1 = torch_batch_to_jax(
+        _real_pattern_batch_size(
+            "random",
+            jax.device_count(),
+            num_peaks=int(kwargs["num_peaks"]),
+        )
+    )
+
+    (_loss_0, _metrics_0), grads_0 = jax_sharded_grad_step(manual_model, batch_0)
+    (_loss_1, _metrics_1), grads_1 = jax_sharded_grad_step(manual_model, batch_1)
+    grads = jax.tree.map(lambda lhs, rhs: (lhs + rhs) * 0.5, grads_0, grads_1)
+    jax_sharded_apply_grads(manual_model, manual_optimizer, grads)
+    accumulated_grads = jax_sharded_local_grad_step(accumulated_model, batch_0)
+    jax_sharded_apply_accumulated_train_step(
+        accumulated_model,
+        accumulated_optimizer,
+        batch_1,
+        accumulated_grads,
+        jnp.asarray(0.5, dtype=jnp.float32),
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(accumulated_model.jepa_mae_mz_head.weight[...]),
+        np.asarray(manual_model.jepa_mae_mz_head.weight[...]),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "mask_strategy"),
+    [
+        (_small_jepa_kwargs(), "contiguous"),
+        (
+            _small_jepa_kwargs(
+                masked_token_input_mode="mz_sentinel",
+                jepa_mae_loss_weight=0.5,
+                distogram_loss_weight=0.0,
+                latent_pair_loss_weight=0.0,
+            ),
+            "random",
+        ),
+        (
+            _small_jepa_kwargs(
+                jepa_target_normalization="zscore",
+                target_projector_dim=8,
+                latent_pair_loss_weight=0.0,
+            ),
+            "ragged",
+        ),
+    ],
+)
+def test_jax_jepa_matches_pytorch_on_real_collated_batch(
+    kwargs: dict[str, object],
+    mask_strategy: str,
+):
+    torch.manual_seed(23)
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    jax_model = PeakSetJEPAJax(**kwargs)
+    jax_model.load_torch_state_dict(torch_model.state_dict())
+    batch = _real_pattern_batch(mask_strategy)
+
+    with torch.no_grad():
+        torch_metrics = torch_model(batch)
+    jax_metrics = jax_model(batch)
+
+    _assert_metrics_close(torch_metrics, jax_metrics)
+
+
+def test_jax_contrastive_matches_pytorch_on_real_collated_batch():
+    torch.manual_seed(27)
+    kwargs = _small_jepa_kwargs(
+        training_mode="contrastive",
+        distogram_loss_weight=0.0,
+        latent_pair_loss_weight=0.0,
+    )
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    jax_model = PeakSetJEPAJax(**kwargs)
+    jax_model.load_torch_state_dict(torch_model.state_dict())
+    batch = _real_pattern_batch("ragged")
+
+    with torch.no_grad():
+        torch_metrics = torch_model(batch)
+    jax_metrics = jax_model(batch)
+
+    _assert_metrics_close(torch_metrics, jax_metrics)
+
+
+def test_jax_jepa_ema_teacher_checkpoint_matches_pytorch():
+    torch.manual_seed(29)
+    kwargs = _small_jepa_kwargs(
+        use_ema_teacher=True,
+        target_projector_dim=8,
+        distogram_loss_weight=0.0,
+        latent_pair_loss_weight=0.0,
+    )
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    batch = _real_pattern_batch("contiguous")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = f"{tmpdir}/step-00000002.pt"
+        save_torch_checkpoint(
+            {
+                "model": torch_model.state_dict(),
+                "optimizers": [],
+                "schedulers": [],
+                "grad_scaler": None,
+                "global_step": 2,
+                "epoch": 0,
+                "loss": 0.0,
+                "wandb_run_id": None,
+            },
+            path,
+        )
+        jax_model = PeakSetJEPAJax(**kwargs)
+        jax_model.load_torch_checkpoint(path)
+
+    with torch.no_grad():
+        torch_metrics = torch_model(batch)
+    jax_metrics = jax_model(batch)
+
+    _assert_metrics_close(torch_metrics, jax_metrics)
+
+
+def test_jax_optimizer_excludes_frozen_teacher_and_buffer_params():
+    torch.manual_seed(30)
+    kwargs = _small_jepa_kwargs(
+        use_ema_teacher=True,
+        target_projector_dim=8,
+        ema_teacher_momentum_start=0.5,
+        ema_teacher_momentum_final=0.9,
+        ema_teacher_schedule="linear",
+        distogram_loss_weight=0.0,
+        latent_pair_loss_weight=0.0,
+    )
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    jax_model = PeakSetJEPAJax(**kwargs)
+    jax_model.load_torch_state_dict(torch_model.state_dict())
+    trainable_paths = {
+        ".".join(str(part) for part in path)
+        for path, _value in nnx.state(jax_model, trainable_param_filter).flat_state()
+    }
+    assert not any("teacher_encoder" in path for path in trainable_paths)
+    assert not any("teacher_target_projector" in path for path in trainable_paths)
+    assert not any("position_embedding" in path for path in trainable_paths)
+    assert not any(path.endswith(".b") for path in trainable_paths)
+
+    optimizer = build_jax_optimizer(
+        {"learning_rate": 1e-3, "weight_decay": 0.5, "b2": 0.95},
+        jax_model,
+    )
+    batch = torch_batch_to_jax(_real_pattern_batch("contiguous"))
+    before_student = np.asarray(jax_model.target_projector.linear0.weight[...])
+    before_teacher = np.asarray(jax_model.teacher_target_projector.linear0.weight[...])
+    before_encoder_teacher = np.asarray(jax_model.teacher_encoder.cls_token[...])
+    before_position = np.asarray(jax_model.encoder.position_embedding.weight[...])
+    before_fourier = np.asarray(jax_model.encoder.embedder.mz_fourier.b[...])
+
+    (_loss, metrics), grads = jax_grad_step(jax_model, batch)
+    jax_apply_grads(jax_model, optimizer, grads)
+
+    after_student = np.asarray(jax_model.target_projector.linear0.weight[...])
+    after_teacher = np.asarray(jax_model.teacher_target_projector.linear0.weight[...])
+    after_encoder_teacher = np.asarray(jax_model.teacher_encoder.cls_token[...])
+    after_position = np.asarray(jax_model.encoder.position_embedding.weight[...])
+    after_fourier = np.asarray(jax_model.encoder.embedder.mz_fourier.b[...])
+    assert np.isfinite(np.asarray(metrics["loss"]))
+    assert not np.allclose(before_student, after_student)
+    np.testing.assert_array_equal(after_teacher, before_teacher)
+    np.testing.assert_array_equal(after_encoder_teacher, before_encoder_teacher)
+    np.testing.assert_array_equal(after_position, before_position)
+    np.testing.assert_array_equal(after_fourier, before_fourier)
+
+    momentum = jax_model.update_ema_teacher(step=2, total_steps=4)
+    assert momentum == pytest.approx(0.7)
+    expected_teacher = before_teacher * momentum + after_student * (1.0 - momentum)
+    np.testing.assert_allclose(
+        np.asarray(jax_model.teacher_target_projector.linear0.weight[...]),
+        expected_teacher,
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_jax_mae_teacher_jepa_matches_pytorch_with_default_teacher():
+    torch.manual_seed(31)
+    kwargs = _small_jepa_kwargs(
+        training_mode="mae_teacher_jepa",
+        target_projector_dim=8,
+        jepa_mae_loss_weight=0.5,
+        distogram_loss_weight=0.0,
+        latent_pair_loss_weight=0.0,
+    )
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    jax_model = PeakSetJEPAJax(**kwargs)
+    jax_model.load_torch_state_dict(torch_model.state_dict())
+    batch = _real_pattern_batch("random")
+
+    with torch.no_grad():
+        torch_metrics = torch_model(batch)
+    jax_metrics = jax_model(batch)
+
+    _assert_metrics_close(torch_metrics, jax_metrics)
+
+
+def test_jax_mae_teacher_jepa_matches_pytorch_with_teacher_config():
+    torch.manual_seed(37)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        teacher_config_path = f"{tmpdir}/teacher_config.py"
+        with open(teacher_config_path, "w") as f:
+            f.write(
+                "from ml_collections import config_dict\n"
+                "def get_config():\n"
+                "    cfg = config_dict.ConfigDict()\n"
+                "    cfg.training_mode = 'mae'\n"
+                "    cfg.model_dim = 12\n"
+                "    cfg.encoder_num_layers = 1\n"
+                "    cfg.encoder_num_heads = 3\n"
+                "    cfg.attention_mlp_multiple = 2.0\n"
+                "    cfg.feature_mlp_hidden_dim = 8\n"
+                "    cfg.encoder_fourier_num_freqs = 4\n"
+                "    cfg.pairmixer_fourier_num_freqs = 2\n"
+                "    cfg.pairmixer_pair_dim = 10\n"
+                "    cfg.pairmixer_pair_feature_hidden_dim = 8\n"
+                "    cfg.pairmixer_use_pair_bias_attention = True\n"
+                "    cfg.num_peaks = 5\n"
+                "    cfg.jepa_num_target_blocks = 1\n"
+                "    cfg.target_projector_dim = -1\n"
+                "    return cfg\n"
+            )
+        kwargs = _small_jepa_kwargs(
+            training_mode="mae_teacher_jepa",
+            frozen_teacher_config_path=teacher_config_path,
+            target_projector_dim=-1,
+            jepa_mae_loss_weight=0.0,
+            distogram_loss_weight=0.0,
+            latent_pair_loss_weight=0.0,
+        )
+        torch_model = PeakSetJEPA(**kwargs).eval()
+        jax_model = PeakSetJEPAJax(**kwargs)
+        jax_model.load_torch_state_dict(torch_model.state_dict())
+        batch = _real_pattern_batch("contiguous")
+
+        with torch.no_grad():
+            torch_metrics = torch_model(batch)
+        jax_metrics = jax_model(batch)
+
+    _assert_metrics_close(torch_metrics, jax_metrics)

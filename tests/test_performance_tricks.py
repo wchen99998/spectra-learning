@@ -1,6 +1,9 @@
 import torch
 
 from spectra_learning.models.model import PeakSetJEPA
+from spectra_learning.training.activation_checkpointing import (
+    apply_activation_checkpointing as apply_pretrain_activation_checkpointing,
+)
 from spectra_learning.training.modules import PretrainModule
 from spectra_learning.training.performance import (
     apply_activation_checkpointing,
@@ -21,8 +24,8 @@ def _tiny_pretrain_module() -> PretrainModule:
         jepa_num_target_blocks=2,
         masked_latent_predictor_num_layers=1,
         masked_latent_predictor_num_heads=4,
-        pairformer_pair_dim=32,
-        pairformer_pair_feature_hidden_dim=16,
+        pairmixer_pair_dim=32,
+        pairmixer_pair_feature_hidden_dim=16,
     )
     return PretrainModule(model)
 
@@ -42,9 +45,25 @@ def test_activation_checkpointing_preserves_state_dict_keys():
     assert set(module.state_dict()) == before
 
 
-def test_activation_checkpointing_accepts_ac_aliases():
-    assert activation_checkpoint_mode({"activation_checkpoint_mode": "selective_ac"}) == "selective"
-    assert activation_checkpoint_mode({"activation_checkpoint_mode": "full_ac"}) == "full"
+def test_activation_checkpointing_accepts_canonical_modes():
+    assert activation_checkpoint_mode({"activation_checkpoint_mode": "selective"}) == "selective"
+    assert activation_checkpoint_mode({"activation_checkpoint_mode": "full"}) == "full"
+
+
+def test_pretrain_activation_checkpointing_accepts_canonical_modes():
+    module = _tiny_pretrain_module()
+
+    apply_pretrain_activation_checkpointing(
+        module,
+        {
+            "activation_checkpoint_mode": "selective",
+            "activation_checkpoint_preserve_rng_state": True,
+        },
+    )
+
+    assert hasattr(module.model.encoder.blocks[0], "_checkpoint_wrapped_module")
+    assert hasattr(module.model.masked_latent_predictor[0], "_checkpoint_wrapped_module")
+
 
 
 def test_activation_checkpointing_works_with_default_full_module_compile():
@@ -53,7 +72,7 @@ def test_activation_checkpointing_works_with_default_full_module_compile():
     apply_activation_checkpointing(
         module,
         {
-            "activation_checkpoint_mode": "full_ac",
+            "activation_checkpoint_mode": "full",
             "activation_checkpoint_preserve_rng_state": True,
         },
     )

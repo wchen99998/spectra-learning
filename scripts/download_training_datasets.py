@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=Path,
-        default=Path("configs/medium_pairformer_encoder.py"),
+        default=Path("configs/medium_pairmixer_encoder.py"),
         help="Config whose dataset repo IDs and preprocessing settings should be used.",
     )
     parser.add_argument("--skip-gems", action="store_true")

@@ -23,7 +23,6 @@ from spectra_learning.training.storage import (
     upload_local_file,
 )
 
-
 COVARIANCE_POOLER_PREFIX = "covariance_pooler."
 COVARIANCE_POOLER_CHECKPOINT_PREFIX = "covariance-pooler-"
 log = logging.getLogger(__name__)
@@ -139,7 +138,7 @@ def _write_torch_checkpoint(state: dict[str, Any], path: StoragePath) -> None:
     local_path = local_cache_path(path) if is_remote_path(path) else Path(path).expanduser()
     local_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = local_path.with_name(f".{local_path.name}.tmp")
-    torch.save(state, tmp_path)
+    torch.save(_snapshot_value(state), tmp_path)
     tmp_path.replace(local_path)
     if is_remote_path(path):
         upload_local_file(local_path, path)

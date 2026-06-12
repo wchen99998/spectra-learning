@@ -17,7 +17,7 @@ from torch.utils.checkpoint import (
 )
 
 from spectra_learning.models.model import PeakSetJEPA
-from spectra_learning.models.pairformer import PairMixerBlock
+from spectra_learning.models.pairmixer import PairMixerBlock
 from spectra_learning.training.modules import PretrainModule, split_pretrain_module
 
 
@@ -28,18 +28,11 @@ def _config_get(config: config_dict.ConfigDict, key: str, default: Any) -> Any:
 def activation_checkpoint_mode(config: config_dict.ConfigDict) -> str:
     mode = str(_config_get(config, "activation_checkpoint_mode", "none"))
     mode = mode.lower().replace("-", "_")
-    aliases = {
-        "none": "none",
-        "selective": "selective",
-        "selective_ac": "selective",
-        "full": "full",
-        "full_ac": "full",
-    }
-    assert mode in aliases, (
+    assert mode in {"none", "selective", "full"}, (
         "activation_checkpoint_mode must be one of "
-        "'none', 'selective_ac', or 'full_ac'."
+        "'none', 'selective', or 'full'."
     )
-    return aliases[mode]
+    return mode
 
 
 def _pair_mixer_lists(model: PeakSetJEPA) -> Iterable[torch.nn.ModuleList]:

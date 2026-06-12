@@ -1,17 +1,6 @@
 from ml_collections import config_dict
 
 
-TEACHER_CONFIG_PATH = "configs/medium_pairformer_pairnorm_encoder.py"
-TEACHER_CHECKPOINT_PATH = (
-    "gs://metal-repeater-411410-spectra-checkpoints/"
-    "pairformer_medium_pairnorm/checkpoints/step-00100000.pt"
-)
-OUTPUT_WORKDIR = (
-    "gs://metal-repeater-411410-spectra-checkpoints/"
-    "pairformer_medium_large_pairnorm_jepa"
-)
-
-
 def get_config() -> config_dict.ConfigDict:
     cfg = config_dict.ConfigDict()
 
@@ -24,7 +13,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.nist_murcko_probe_val_samples = 10_000
     cfg.nist_murcko_probe_test_samples = 10_000
     cfg.nist_murcko_probe_num_repeats = 1
-    cfg.batch_size = 1024
+    cfg.batch_size = 512
     cfg.shuffle_buffer = 1_000_000
     cfg.drop_remainder = True
     cfg.max_precursor_mz = 1000
@@ -36,46 +25,42 @@ def get_config() -> config_dict.ConfigDict:
 
     # Encoder
     cfg.num_peaks = 32
-    cfg.model_dim = 768
-    cfg.encoder_num_layers = 18
+    cfg.model_dim = 512
+    cfg.encoder_num_layers = 10
     cfg.encoder_num_heads = 16
     cfg.encoder_use_position_embedding = False
     cfg.encoder_apply_final_norm = True
     cfg.encoder_use_fourier_features = True
     cfg.encoder_fourier_input_scale = 1000
-    cfg.encoder_fourier_mlp_hidden_dim = 1536
+    cfg.encoder_fourier_mlp_hidden_dim = 1024
     cfg.encoder_fourier_mlp_num_layers = 4
     cfg.encoder_fourier_num_freqs = 64
     cfg.encoder_fourier_x_max = 1000
     cfg.encoder_fourier_x_min = 0.003
-    cfg.feature_mlp_hidden_dim = 1536
-    cfg.pairformer_pair_dim = 512
-    cfg.pairformer_pair_num_heads = 16
-    cfg.pairformer_pair_feature_hidden_dim = 1024
+    cfg.feature_mlp_hidden_dim = 1024
+    cfg.pairmixer_pair_dim = 384
+    cfg.pairmixer_pair_feature_hidden_dim = 768
     cfg.pairmixer_use_pair_bias_attention = True
-    cfg.pairformer_use_fourier_features = True
-    cfg.pairformer_fourier_num_freqs = 16
-    cfg.pairformer_fourier_x_min = 0.01
-    cfg.pairformer_fourier_x_max = 1000
-    cfg.pairformer_relative_fourier_x_min = 0.001
-    cfg.pairformer_relative_fourier_x_max = 1.0
+    cfg.pairmixer_use_fourier_features = True
+    cfg.pairmixer_fourier_num_freqs = 16
+    cfg.pairmixer_fourier_x_min = 0.01
+    cfg.pairmixer_fourier_x_max = 1000
+    cfg.pairmixer_relative_fourier_x_min = 0.001
+    cfg.pairmixer_relative_fourier_x_max = 1.0
     cfg.attention_mlp_multiple = 4
 
     # Masked latent predictor
-    cfg.predictor_dim = 512
+    cfg.predictor_dim = 256
     cfg.predictor_dropout = 0.1
     cfg.predictor_apply_final_norm = True
     cfg.predictor_use_rope = False
-    cfg.masked_latent_predictor_num_layers = 7
-    cfg.masked_latent_predictor_num_heads = 16
+    cfg.masked_latent_predictor_num_layers = 2
+    cfg.masked_latent_predictor_num_heads = 8
     cfg.target_projector_dim = -1
     cfg.masked_token_input_mode = "latent_token"
 
-    # Frozen medium MAE teacher and JEPA objectives
-    cfg.training_mode = "mae_teacher_jepa"
-    cfg.frozen_teacher_config_path = TEACHER_CONFIG_PATH
-    cfg.frozen_teacher_checkpoint_path = TEACHER_CHECKPOINT_PATH
-    cfg.use_ema_teacher = False
+    # JEPA masking and targets
+    cfg.training_mode = "mae"
     cfg.jepa_num_target_blocks = 1
     cfg.jepa_mask_strategy = ["intensity_aware", "ragged"]
     cfg.jepa_context_fraction = 0.35
@@ -84,12 +69,10 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_mask_lengths = (2, 4, 8, 12)
     cfg.jepa_mask_round_from = 3
     cfg.jepa_target_normalization = "none"
-    cfg.masked_token_loss_weight = 1.0
+    cfg.masked_token_loss_weight = 0
     cfg.jepa_mae_loss_weight = 0.0
-    cfg.mae_loss_weight = 0.0
-    cfg.distogram_loss_weight = 0.0
-    cfg.latent_pair_loss_weight = 1.0
-    cfg.latent_pair_target_normalization = "none"
+    cfg.mae_loss_weight = 1.0
+    cfg.distogram_loss_weight = 1.0
     cfg.jepa_mae_mz_bin_size = 0.1
     cfg.jepa_intensity_aware_tau = 0.5
     cfg.jepa_intensity_aware_alpha = 0.75
@@ -126,6 +109,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.contrastive_compile_mode = "none"
 
     # EMA teacher
+    cfg.use_ema_teacher = False
     cfg.ema_teacher_momentum_start = 0.996
     cfg.ema_teacher_momentum_final = 0.99925
     cfg.ema_teacher_schedule = "cosine"
@@ -136,7 +120,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.compile_mode = "reduce-overhead"
     cfg.device_prefetch_size = 8
     cfg.log_every_n_steps = 250
-    cfg.collapse_metrics_every_n_steps = 250
+    cfg.collapse_metrics_every_n_steps = 0
     cfg.checkpoint_every_steps = 25_000
     cfg.dataloader_num_workers = 8
     cfg.dataloader_prefetch_factor = 2
@@ -149,7 +133,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_early_stopping_min_delta = 0.0001
     cfg.msg_probe_early_stopping_min_epochs = 20
     cfg.msg_probe_early_stopping_patience = 20
-    cfg.msg_probe_every_n_steps = 0.5
+    cfg.msg_probe_every_n_steps = 1.0
     cfg.msg_probe_learning_rate = 0.0003
     cfg.msg_probe_max_test_samples = None
     cfg.msg_probe_max_train_samples = None
@@ -167,8 +151,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_batch_size = 256
 
     # Optimizer
-    cfg.learning_rate = 0.0002
-    cfg.min_learning_rate = 0.00003
+    cfg.learning_rate = 0.0004
+    cfg.min_learning_rate = 0.00004
     cfg.warmup_steps = 5_000
     cfg.weight_decay = 0.01
     cfg.b2 = 0.95
@@ -177,10 +161,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.optimizer_fused = True
     cfg.adamw_lr = None
 
-    # Output and logging
-    cfg.output_workdir = OUTPUT_WORKDIR
+    # Logging
     cfg.enable_wandb = True
     cfg.wandb_project = "jepa-debugging"
-    cfg.run_name_suffix = "mae-teacher-large-jepa-medium-teacher-step100k"
+    cfg.run_name_suffix = "mae-medium-pairmixer-92m"
 
     return cfg

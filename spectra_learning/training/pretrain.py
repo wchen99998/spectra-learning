@@ -68,6 +68,7 @@ from spectra_learning.training.api import (
     estimate_training_flops_per_optimizer_step,
     parse_autocast_dtype,
 )
+from spectra_learning.training.activation_checkpointing import apply_activation_checkpointing
 
 warnings.filterwarnings("ignore", message="Profiler function.*will be ignored")
 torch.set_float32_matmul_precision("high")
@@ -81,6 +82,10 @@ _STOP_REQUESTED = False
 
 def _config_get(config: config_dict.ConfigDict, key: str, default: Any) -> Any:
     return config.get(key, default)
+
+
+def _use_jax_backend(config: config_dict.ConfigDict) -> bool:
+    return str(_config_get(config, "device_backend", "auto")).lower() == "jax"
 
 
 def gradient_accumulation_steps(config: config_dict.ConfigDict) -> int:
@@ -123,8 +128,12 @@ def train_and_evaluate(
     config: config_dict.ConfigDict,
     workdir: str | Path,
 ) -> dict[str, object]:
+    if _use_jax_backend(config):
+        from spectra_learning.training.pretrain_jax import train_and_evaluate_jax
+
+        return train_and_evaluate_jax(config, workdir)
     install_stop_signal_handlers()
-    distributed = init_distributed_from_env()
+    distributed = init_distributed_from_env(_config_get(config, "device_backend", "auto"))
     workdir = normalize_storage_path(workdir)
     local_workdir = local_scratch_dir(workdir)
     if distributed.is_main:
@@ -180,6 +189,7 @@ def train_and_evaluate(
     if distributed.is_main:
         storage_mkdir(checkpoint_dir)
     logger = build_logger(config, local_workdir) if distributed.is_main else MetricLogger()
+    apply_activation_checkpointing(train_module, config)
     optimizers, schedulers = build_optimizers(
         config,
         train_module,

@@ -12,6 +12,7 @@ class DistributedContext:
     local_rank: int
     world_size: int
     device: torch.device
+    backend: str = "torch"
 
     @property
     def is_distributed(self) -> bool:
@@ -22,7 +23,7 @@ class DistributedContext:
         return self.rank == 0
 
 
-def init_distributed_from_env() -> DistributedContext:
+def init_distributed_from_env(device_backend: object = "auto") -> DistributedContext:
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("RANK", "0"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -49,17 +50,17 @@ def init_distributed_from_env() -> DistributedContext:
 
 
 def cleanup_distributed(context: DistributedContext) -> None:
-    if context.is_distributed:
+    if context.is_distributed and context.backend == "torch":
         dist.destroy_process_group()
 
 
 def barrier(context: DistributedContext) -> None:
-    if context.is_distributed:
+    if context.is_distributed and context.backend == "torch":
         dist.barrier()
 
 
 def any_rank(value: bool, context: DistributedContext) -> bool:
-    if not context.is_distributed:
+    if not context.is_distributed or context.backend != "torch":
         return value
     flag = torch.tensor(int(value), device=context.device)
     dist.all_reduce(flag, op=dist.ReduceOp.MAX)
@@ -79,7 +80,7 @@ def wrap_distributed_model(
     static_graph: bool = True,
     find_unused_parameters: bool = False,
 ) -> torch.nn.Module:
-    if not context.is_distributed:
+    if not context.is_distributed or context.backend != "torch":
         return model
     return DistributedDataParallel(
         model,
@@ -95,7 +96,7 @@ def reduce_metric_tensors(
     metrics: dict[str, torch.Tensor],
     context: DistributedContext,
 ) -> dict[str, torch.Tensor]:
-    if not context.is_distributed:
+    if not context.is_distributed or context.backend != "torch":
         return metrics
     reduced = {}
     for key, value in metrics.items():

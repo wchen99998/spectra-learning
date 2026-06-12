@@ -8,6 +8,20 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor, nn
 
 
+def _zero_scalar_like(value: Tensor) -> Tensor:
+    return value.reshape(-1)[0] * 0.0
+
+
+def _cross_entropy_from_logits(
+    logits: Float[Tensor, "... classes"],
+    targets: Int[Tensor, "..."],
+) -> Float[Tensor, "..."]:
+    logits = logits.float()
+    classes = torch.arange(logits.shape[-1], device=targets.device)
+    target_one_hot = (classes == targets.unsqueeze(-1)).to(dtype=logits.dtype)
+    return -(F.log_softmax(logits, dim=-1) * target_one_hot).sum(dim=-1)
+
+
 class ObjectiveMixin:
     def _embedding_loss(
         self: Any,
@@ -40,11 +54,7 @@ class ObjectiveMixin:
         targets: Int[Tensor, "..."],
         valid_mask: Bool[Tensor, "..."],
     ) -> Float[Tensor, ""]:
-        per_token = F.cross_entropy(
-            logits.flatten(0, -2).float(),
-            targets.reshape(-1),
-            reduction="none",
-        ).reshape_as(valid_mask)
+        per_token = _cross_entropy_from_logits(logits, targets)
         weights = valid_mask.float()
         return (per_token * weights).sum() / weights.sum().clamp_min(1.0)
 
@@ -69,10 +79,9 @@ class ObjectiveMixin:
         loss_sum = flat_inputs.new_zeros((), dtype=torch.float32)
         for start in range(0, flat_inputs.shape[0], chunk_size):
             stop = start + chunk_size
-            per_pair = F.cross_entropy(
+            per_pair = _cross_entropy_from_logits(
                 head(flat_inputs[start:stop]).float(),
                 flat_targets[start:stop],
-                reduction="none",
             )
             loss_sum = loss_sum + (per_pair * flat_weights[start:stop]).sum()
         return loss_sum / weight_sum
@@ -102,7 +111,7 @@ class ObjectiveMixin:
             (mz_logits.argmax(dim=-1) == mz_target).float() * target_weights.float()
         ).sum() / target_weights.float().sum().clamp_min(1.0)
         if self.masked_token_input_mode == "mz_sentinel":
-            zero = mz_loss.new_zeros(())
+            zero = mz_loss * 0.0
             return mz_loss, mz_loss, zero, mz_accuracy, zero
 
         intensity_logits = cast(nn.Linear, self.jepa_mae_intensity_head)(
@@ -160,9 +169,11 @@ class ObjectiveMixin:
             context_peak_emb.unsqueeze(1).expand(-1, num_target_blocks, -1, -1)
             * context_mask_by_view.unsqueeze(-1)
         )
+        latent_mask_token = self.latent_mask_token.view(1, 1, 1, -1).to(context_emb)
+        latent_mask_token = latent_mask_token + predictor_input[:, :, :1] * 0.0
         predictor_input = torch.where(
             target_masks.unsqueeze(-1),
-            self.latent_mask_token.view(1, 1, 1, -1).to(context_emb),
+            latent_mask_token,
             predictor_input,
         )
         predictor_input = torch.cat(
@@ -176,13 +187,7 @@ class ObjectiveMixin:
         predictor_visible_mask = torch.cat(
             [
                 predictor_visible_mask,
-                torch.ones(
-                    batch_size,
-                    num_target_blocks,
-                    1,
-                    dtype=torch.bool,
-                    device=target_masks.device,
-                ),
+                torch.ones_like(predictor_visible_mask[:, :, :1]),
             ],
             dim=2,
         )
@@ -196,12 +201,10 @@ class ObjectiveMixin:
         context_token_mask = torch.cat(
             [
                 context_mask_by_view.expand(-1, num_target_blocks, -1),
-                torch.ones(
-                    batch_size,
+                torch.ones_like(context_mask_by_view[:, :, :1]).expand(
+                    -1,
                     num_target_blocks,
-                    1,
-                    dtype=torch.bool,
-                    device=target_masks.device,
+                    -1,
                 ),
             ],
             dim=2,
@@ -215,20 +218,18 @@ class ObjectiveMixin:
         target_token_mask = torch.cat(
             [
                 target_masks,
-                torch.zeros(
-                    batch_size,
-                    num_target_blocks,
-                    1,
-                    dtype=torch.bool,
-                    device=target_masks.device,
-                ),
+                torch.zeros_like(target_masks[:, :, :1]),
             ],
             dim=2,
         )
         target_pair_mask = target_token_mask.unsqueeze(3) | target_token_mask.unsqueeze(2)
+        pair_mask_token = self.pair_mask_token.view(1, 1, 1, 1, -1).to(
+            context_pair
+        )
+        pair_mask_token = pair_mask_token + predictor_pair[:, :, :1, :1] * 0.0
         predictor_pair = torch.where(
             target_pair_mask.unsqueeze(-1),
-            self.pair_mask_token.view(1, 1, 1, 1, -1).to(context_pair),
+            pair_mask_token,
             predictor_pair,
         )
         predictor_pair_mask = (
@@ -343,7 +344,7 @@ class ObjectiveMixin:
         reference: Float[Tensor, "*batch dim"],
     ) -> tuple[Float[Tensor, ""], dict[str, Tensor]]:
         if self.distogram_loss_weight <= 0:
-            return reference.new_tensor(0.0), {}
+            return _zero_scalar_like(reference), {}
         pair_mask = self._distogram_pair_mask(target_masks, predictor_visible_masks)
         sym_pair = predictor_pair + predictor_pair.transpose(2, 3)
         targets = self._distogram_targets(peak_mz).unsqueeze(1).expand(
@@ -359,8 +360,7 @@ class ObjectiveMixin:
             pair_mask,
             self.distogram_loss_chunk_size,
         )
-        loss_weight = reference.new_tensor(self.distogram_loss_weight)
-        term = loss_weight * distogram_loss.to(dtype=reference.dtype)
+        term = distogram_loss.to(dtype=reference.dtype) * self.distogram_loss_weight
         return term, {
             "distogram_loss": distogram_loss.to(dtype=reference.dtype),
             "distogram_term": term,
@@ -375,7 +375,7 @@ class ObjectiveMixin:
         reference: Float[Tensor, "*batch dim"],
     ) -> tuple[Float[Tensor, ""], dict[str, Tensor]]:
         if self.latent_pair_loss_weight <= 0:
-            return reference.new_tensor(0.0), {}
+            return _zero_scalar_like(reference), {}
         pair_mask = self._target_pair_mask(target_masks, predictor_visible_masks)
         predicted_pair = self.masked_pair_readout(predictor_pair)
         with torch.no_grad():
@@ -398,8 +398,7 @@ class ObjectiveMixin:
         latent_pair_loss = (
             per_pair * pair_weights
         ).sum() / pair_weights.sum().clamp_min(1.0)
-        loss_weight = reference.new_tensor(self.latent_pair_loss_weight)
-        term = loss_weight * latent_pair_loss.to(dtype=reference.dtype)
+        term = latent_pair_loss.to(dtype=reference.dtype) * self.latent_pair_loss_weight
         return term, {
             "latent_pair_loss": latent_pair_loss.to(dtype=reference.dtype),
             "latent_pair_term": term,
@@ -414,7 +413,7 @@ class ObjectiveMixin:
         reference: Float[Tensor, "*batch dim"],
     ) -> tuple[Float[Tensor, ""], dict[str, Tensor]]:
         if self.jepa_mae_loss_weight <= 0:
-            return reference.new_tensor(0.0), {}
+            return _zero_scalar_like(reference), {}
         (
             value_loss,
             _mz_loss,
@@ -427,8 +426,7 @@ class ObjectiveMixin:
             peak_intensity,
             target_masks,
         )
-        loss_weight = reference.new_tensor(self.jepa_mae_loss_weight)
-        term = loss_weight * value_loss.to(dtype=reference.dtype)
+        term = value_loss.to(dtype=reference.dtype) * self.jepa_mae_loss_weight
         return term, {
             "jepa_mae_loss": value_loss.to(dtype=reference.dtype),
             "jepa_mae_term": term,
@@ -454,8 +452,7 @@ class ObjectiveMixin:
             peak_intensity,
             target_masks,
         )
-        loss_weight = reference.new_tensor(self.mae_loss_weight)
-        term = loss_weight * value_loss.to(dtype=reference.dtype)
+        term = value_loss.to(dtype=reference.dtype) * self.mae_loss_weight
         return term, {
             "mae_loss": value_loss.to(dtype=reference.dtype),
             "mae_term": term,

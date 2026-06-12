@@ -1,15 +1,14 @@
 from unittest import mock
 
 import torch
-from torch import nn
 
 from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.model import PeakSetJEPA
-from spectra_learning.models.pairformer import (
+from spectra_learning.models.pairmixer import (
     AttentionPairBias,
     CommutedLowRankTriangle,
-    PairformerBlock,
     PairMixerBlock,
+    TriangleAttention,
 )
 from spectra_learning.models.peak_features import PeakFeatureEmbedder
 from spectra_learning.models.settings import PeakSetJEPASettings
@@ -355,59 +354,7 @@ def test_encoder_and_predictor_final_norms_are_non_affine():
     assert list(encoder.final_norm.parameters()) == []
 
 
-class _ConstantPairUpdate(nn.Module):
-    def forward(self, single: torch.Tensor, pair_mask: torch.Tensor) -> torch.Tensor:
-        return 2.0 * pair_mask.unsqueeze(-1).to(dtype=single.dtype)
-
-
-class _ZeroPairUpdate(nn.Module):
-    def forward(self, pair: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-        return torch.zeros_like(pair)
-
-
-class _ZeroSingleUpdate(nn.Module):
-    def forward(self, single: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-        return torch.zeros_like(single)
-
-
-@torch.no_grad()
-def test_pair_refresh_uses_sigmoid_gate_from_pair_state():
-    block = PairformerBlock(
-        single_dim=8,
-        pair_dim=4,
-        num_heads=2,
-        pair_num_heads=2,
-        attention_mlp_multiple=2.0,
-        pair_feature_hidden_dim=8,
-        norm_eps=1e-5,
-        dropout=0.0,
-        refresh_pair=True,
-    )
-    block.refresh_pair = _ConstantPairUpdate()
-    block.refresh_pair_gate_norm = nn.Identity()
-    block.refresh_pair_gate.weight.zero_()
-    block.tri_mul_out = _ZeroPairUpdate()
-    block.tri_mul_in = _ZeroPairUpdate()
-    block.tri_att_start = _ZeroPairUpdate()
-    block.tri_att_end = _ZeroPairUpdate()
-    block.pair_transition = _ZeroPairUpdate()
-    block.single_attention = _ZeroSingleUpdate()
-    block.single_transition = _ZeroSingleUpdate()
-
-    single = torch.randn(1, 3, 8)
-    pair = torch.full((1, 3, 3, 4), 3.0)
-    peak_mask = torch.tensor([[True, True, False]])
-    out_single, out_pair = block(single, pair, peak_mask, peak_mask)
-
-    expected_pair = pair.clone()
-    expected_pair[:, :2, :2] = 4.0
-    expected_pair[:, 2, :] = 0.0
-    expected_pair[:, :, 2] = 0.0
-    torch.testing.assert_close(out_single, single)
-    torch.testing.assert_close(out_pair, expected_pair)
-
-
-def test_backbone_uses_pairmixer_without_pairformer_attention_extras():
+def test_backbone_uses_pairmixer_without_pair_bias_attention():
     model = _build_model()
     block = model.encoder.blocks[0]
 
@@ -457,6 +404,45 @@ def test_pairmixer_pair_bias_attention_setting_is_configurable():
 
 
 @torch.no_grad()
+def test_triangle_attention_is_retained_for_pair_features():
+    pair = torch.randn(2, 5, 5, 16)
+    peak_mask = torch.tensor(
+        [
+            [True, True, True, False, False],
+            [True, True, True, True, False],
+        ]
+    )
+    pair_mask = peak_mask.unsqueeze(2) & peak_mask.unsqueeze(1)
+
+    start = TriangleAttention(
+        16,
+        num_heads=4,
+        ending=False,
+        norm_eps=1e-5,
+    )
+    end = TriangleAttention(
+        16,
+        num_heads=4,
+        ending=True,
+        norm_eps=1e-5,
+    )
+
+    start_out = start(pair, peak_mask, pair_mask)
+    end_out = end(pair, peak_mask, pair_mask)
+
+    assert start_out.shape == pair.shape
+    assert end_out.shape == pair.shape
+    torch.testing.assert_close(
+        start_out[~pair_mask],
+        torch.zeros_like(start_out[~pair_mask]),
+    )
+    torch.testing.assert_close(
+        end_out[~pair_mask],
+        torch.zeros_like(end_out[~pair_mask]),
+    )
+
+
+@torch.no_grad()
 def test_pairmixer_can_use_commuted_low_rank_triangle():
     settings = PeakSetJEPASettings.from_config(
         {
@@ -492,7 +478,7 @@ def test_pairmixer_can_use_commuted_low_rank_triangle():
     assert torch.isfinite(model.forward_augmented(_make_batch())["loss"])
 
 
-def test_predictor_uses_pairmixer_without_pairformer_attention_extras():
+def test_predictor_uses_pairmixer_without_pair_bias_attention():
     model = PeakSetJEPA(
         model_dim=32,
         encoder_num_layers=2,

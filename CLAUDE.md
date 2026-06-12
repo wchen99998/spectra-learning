@@ -42,7 +42,7 @@ python input_pipeline.py configs/gems_a_dataset.py
 
 ### Model (PeakSetJEPA in `models/model.py`)
 
-- **PeakSetEncoder**: raw scalar peak features (`mz`, `intensity`, `log1p(intensity)`) -> Fourier/MLP embedder -> Pairformer blocks with pair features -> LayerNorm.
+- **PeakSetEncoder**: raw scalar peak features (`mz`, `intensity`, `log1p(intensity)`) -> Fourier/MLP embedder -> PairMixer blocks with pair features -> LayerNorm.
 - **Targets / Predictor**: shared encoder target states supervise masked-token prediction; predictor maps visible context tokens to target-space latents.
 
 ### Masked Training Batch (`input_pipeline.py`)

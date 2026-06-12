@@ -7,7 +7,7 @@ from unittest import mock
 import torch
 
 from spectra_learning.models.model import PeakSetJEPA
-from spectra_learning.models.pairformer import PairFeatureEmbedder
+from spectra_learning.models.pairmixer import PairFeatureEmbedder
 from spectra_learning.models.peak_features import FourierFeatures, PeakFeatureEmbedder
 from spectra_learning.training.optimization import is_weight_decay_target
 from spectra_learning.training.modules import PretrainModule
@@ -203,7 +203,7 @@ class FourierFeatureTests(unittest.TestCase):
         self.assertTrue(torch.allclose(captured["raw_input"], expected))
 
 
-class PairformerEncoderTests(unittest.TestCase):
+class PairMixerEncoderTests(unittest.TestCase):
     def _build_model(self, **kwargs) -> PeakSetJEPA:
         model_kwargs = {
             "model_dim": 32,
@@ -214,9 +214,8 @@ class PairformerEncoderTests(unittest.TestCase):
             "num_peaks": 6,
             "jepa_num_target_blocks": 2,
             "masked_token_loss_weight": 1.0,
-            "pairformer_pair_dim": 32,
-            "pairformer_pair_num_heads": 4,
-            "pairformer_pair_feature_hidden_dim": 16,
+            "pairmixer_pair_dim": 32,
+            "pairmixer_pair_feature_hidden_dim": 16,
         }
         model_kwargs.update(kwargs)
         return PeakSetJEPA(**model_kwargs)
@@ -408,7 +407,7 @@ class PairformerEncoderTests(unittest.TestCase):
         torch.testing.assert_close(pair[~pair_mask], torch.zeros_like(pair[~pair_mask]))
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for compile test")
-    def test_cuda_pairformer_works_with_torch_compile(self):
+    def test_cuda_pairmixer_works_with_torch_compile(self):
         model = self._build_model(
             num_peaks=8,
             jepa_num_target_blocks=1,
@@ -1099,7 +1098,7 @@ class BlockJEPATests(unittest.TestCase):
                     "    cfg.encoder_num_heads = 4\n"
                     "    cfg.feature_mlp_hidden_dim = 16\n"
                     "    cfg.encoder_fourier_num_freqs = 8\n"
-                    "    cfg.pairformer_pair_dim = 16\n"
+                    "    cfg.pairmixer_pair_dim = 16\n"
                     "    return cfg\n"
                 )
             model = self._build_model(

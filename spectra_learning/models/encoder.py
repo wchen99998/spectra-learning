@@ -7,7 +7,7 @@ from spectra_learning.models.common import (
     _build_frozen_position_embedding,
     _merge_visible_mask,
 )
-from spectra_learning.models.pairformer import PairFeatureEmbedder, PairMixerBlock
+from spectra_learning.models.pairmixer import PairFeatureEmbedder, PairMixerBlock
 from spectra_learning.models.peak_features import PeakFeatureEmbedder
 
 
@@ -27,18 +27,18 @@ class PeakSetEncoder(nn.Module):
         use_position_embedding: bool = True,
         pair_dim: int | None = None,
         pair_feature_hidden_dim: int = 128,
-        pairformer_dropout: float = 0.0,
+        pairmixer_dropout: float = 0.0,
         pairmixer_triangle_mediator_rank: int = 0,
         pairmixer_use_commuted_low_rank_triangle: bool = False,
         pairmixer_use_pair_bias_attention: bool = False,
-        pairformer_mz_scale: float = 1000.0,
-        pairformer_precursor_mz_scale: float = 1000.0,
-        pairformer_use_fourier_features: bool = True,
-        pairformer_fourier_num_freqs: int = 16,
-        pairformer_fourier_x_min: float = 1e-2,
-        pairformer_fourier_x_max: float = 1000.0,
-        pairformer_relative_fourier_x_min: float = 1e-3,
-        pairformer_relative_fourier_x_max: float = 1.0,
+        pairmixer_mz_scale: float = 1000.0,
+        pairmixer_precursor_mz_scale: float = 1000.0,
+        pairmixer_use_fourier_features: bool = True,
+        pairmixer_fourier_num_freqs: int = 16,
+        pairmixer_fourier_x_min: float = 1e-2,
+        pairmixer_fourier_x_max: float = 1000.0,
+        pairmixer_relative_fourier_x_min: float = 1e-3,
+        pairmixer_relative_fourier_x_max: float = 1.0,
     ):
         super().__init__()
         self.num_layers = num_layers
@@ -61,14 +61,14 @@ class PeakSetEncoder(nn.Module):
             single_dim=model_dim,
             pair_dim=pair_dim,
             hidden_dim=pair_feature_hidden_dim,
-            mz_scale=pairformer_mz_scale,
-            precursor_mz_scale=pairformer_precursor_mz_scale,
-            use_fourier_features=pairformer_use_fourier_features,
-            fourier_num_freqs=pairformer_fourier_num_freqs,
-            fourier_x_min=pairformer_fourier_x_min,
-            fourier_x_max=pairformer_fourier_x_max,
-            relative_fourier_x_min=pairformer_relative_fourier_x_min,
-            relative_fourier_x_max=pairformer_relative_fourier_x_max,
+            mz_scale=pairmixer_mz_scale,
+            precursor_mz_scale=pairmixer_precursor_mz_scale,
+            use_fourier_features=pairmixer_use_fourier_features,
+            fourier_num_freqs=pairmixer_fourier_num_freqs,
+            fourier_x_min=pairmixer_fourier_x_min,
+            fourier_x_max=pairmixer_fourier_x_max,
+            relative_fourier_x_min=pairmixer_relative_fourier_x_min,
+            relative_fourier_x_max=pairmixer_relative_fourier_x_max,
         )
         self.blocks = nn.ModuleList(
             [
@@ -78,7 +78,7 @@ class PeakSetEncoder(nn.Module):
                     num_heads=num_heads,
                     attention_mlp_multiple=attention_mlp_multiple,
                     norm_eps=norm_eps,
-                    dropout=pairformer_dropout,
+                    dropout=pairmixer_dropout,
                     triangle_mediator_rank=pairmixer_triangle_mediator_rank,
                     use_commuted_low_rank_triangle=(
                         pairmixer_use_commuted_low_rank_triangle
@@ -114,31 +114,32 @@ class PeakSetEncoder(nn.Module):
         x: Float[Tensor, "batch peaks dim"],
     ) -> Float[Tensor, "batch tokens dim"]:
         cls = self.cls_token.view(1, 1, -1).expand(x.shape[0], 1, -1)
-        return torch.cat([x, cls.to(dtype=x.dtype)], dim=1)
+        cls = cls.to(dtype=x.dtype) + x[:, :1] * 0.0
+        return torch.cat([x, cls], dim=1)
 
     def _append_cls_pair_tokens(
         self,
         pair: Float[Tensor, "batch peaks peaks pair"],
     ) -> Float[Tensor, "batch tokens tokens pair"]:
-        batch_size, num_peaks, _, pair_dim = pair.shape
-        tokens = num_peaks + 1
-        expanded = pair.new_empty(batch_size, tokens, tokens, pair_dim)
-        expanded[:, :num_peaks, :num_peaks] = pair
-        expanded[:, -1, :num_peaks] = self.cls_to_peak_pair_token.to(dtype=pair.dtype)
-        expanded[:, :num_peaks, -1] = self.peak_to_cls_pair_token.to(dtype=pair.dtype)
-        expanded[:, -1, -1] = self.cls_cls_pair_token.to(dtype=pair.dtype)
-        return expanded
+        peak_to_cls = self.peak_to_cls_pair_token.view(1, 1, 1, -1).to(
+            dtype=pair.dtype
+        )
+        peak_to_cls = peak_to_cls + pair[:, :, :1] * 0.0
+        with_cls_column = torch.cat([pair, peak_to_cls], dim=2)
+        cls_to_peak = self.cls_to_peak_pair_token.view(1, 1, 1, -1).to(
+            dtype=pair.dtype
+        )
+        cls_to_peak = cls_to_peak + pair[:, :1] * 0.0
+        cls_cls = self.cls_cls_pair_token.view(1, 1, 1, -1).to(dtype=pair.dtype)
+        cls_cls = cls_cls + pair[:, :1, :1] * 0.0
+        cls_row = torch.cat([cls_to_peak, cls_cls], dim=2)
+        return torch.cat([with_cls_column, cls_row], dim=1)
 
     def _append_cls_mask(
         self,
         peak_mask: Bool[Tensor, "batch peaks"],
     ) -> Bool[Tensor, "batch tokens"]:
-        cls_mask = torch.ones(
-            peak_mask.shape[0],
-            1,
-            device=peak_mask.device,
-            dtype=torch.bool,
-        )
+        cls_mask = torch.ones_like(peak_mask[:, :1])
         return torch.cat([peak_mask, cls_mask], dim=1)
 
     def forward_with_block_outputs(

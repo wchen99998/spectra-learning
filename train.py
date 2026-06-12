@@ -43,7 +43,8 @@ def main() -> None:
         config,
         workdir=normalize_storage_path(args.workdir),
     )
-    if args.metrics_json and int(os.environ.get("RANK", "0")) == 0:
+    process_index = int(results.get("run/jax_process_index", os.environ.get("RANK", "0")))
+    if args.metrics_json and process_index == 0:
         write_text(
             normalize_storage_path(args.metrics_json),
             json.dumps(results, indent=2, sort_keys=True),

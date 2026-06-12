@@ -39,16 +39,15 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_fourier_x_max = 1000
     cfg.encoder_fourier_x_min = 0.003
     cfg.feature_mlp_hidden_dim = 1024
-    cfg.pairformer_pair_dim = 384
-    cfg.pairformer_pair_num_heads = 12
-    cfg.pairformer_pair_feature_hidden_dim = 768
+    cfg.pairmixer_pair_dim = 384
+    cfg.pairmixer_pair_feature_hidden_dim = 768
     cfg.pairmixer_use_pair_bias_attention = True
-    cfg.pairformer_use_fourier_features = True
-    cfg.pairformer_fourier_num_freqs = 16
-    cfg.pairformer_fourier_x_min = 0.01
-    cfg.pairformer_fourier_x_max = 1000
-    cfg.pairformer_relative_fourier_x_min = 0.001
-    cfg.pairformer_relative_fourier_x_max = 1.0
+    cfg.pairmixer_use_fourier_features = True
+    cfg.pairmixer_fourier_num_freqs = 16
+    cfg.pairmixer_fourier_x_min = 0.01
+    cfg.pairmixer_fourier_x_max = 1000
+    cfg.pairmixer_relative_fourier_x_min = 0.001
+    cfg.pairmixer_relative_fourier_x_max = 1.0
     cfg.attention_mlp_multiple = 4
 
     # Masked latent predictor
@@ -169,6 +168,6 @@ def get_config() -> config_dict.ConfigDict:
     # Logging
     cfg.enable_wandb = True
     cfg.wandb_project = "jepa-debugging"
-    cfg.run_name_suffix = "mae-100m-encoder-20m-predictor-pairformer"
+    cfg.run_name_suffix = "mae-100m-encoder-20m-predictor-pairmixer"
 
     return cfg

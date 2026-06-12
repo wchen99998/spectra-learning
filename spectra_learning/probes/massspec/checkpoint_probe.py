@@ -98,7 +98,7 @@ def _checkpoint_covariance_pooler(
     )
     pooler = SinglePairCovariancePool(
         single_dim=int(config.model_dim),
-        pair_dim=int(config.get("pairformer_pair_dim", config.model_dim)),
+        pair_dim=int(config.get("pairmixer_pair_dim", config.model_dim)),
         compressed_dim=compressed_dim,
         include_diagonal=bool(
             config.get("contrastive_single_pair_include_diagonal", False)
