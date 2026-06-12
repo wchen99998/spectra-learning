@@ -64,6 +64,7 @@ class GemsDataConfig:
     dataloader_prefetch_factor: int
     dataloader_persistent_workers: bool
     dataloader_multiprocessing_context: str
+    dataloader_output_format: str
 
     @classmethod
     def from_config(cls, config: config_dict.ConfigDict) -> "GemsDataConfig":
@@ -169,5 +170,8 @@ class GemsDataConfig:
             ),
             dataloader_multiprocessing_context=str(
                 _config_get(config, "dataloader_multiprocessing_context", "")
+            ),
+            dataloader_output_format=str(
+                _config_get(config, "dataloader_output_format", "torch")
             ),
         )

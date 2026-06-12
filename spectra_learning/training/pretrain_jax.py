@@ -399,7 +399,7 @@ def _tree_path_key(path_entry: Any) -> Any:
 
 
 def torch_batch_to_jax(
-    batch: dict[str, torch.Tensor],
+    batch: dict[str, Any],
     *,
     data_mesh: Mesh | None = None,
     batch_axis: int = 0,
@@ -1072,10 +1072,12 @@ def train_and_evaluate_jax(
     multihost_utils.sync_global_devices("spectra_learning_jax_workdir_ready")
     torch.manual_seed(int(config.seed))
     config.dataloader_pin_memory = False
+    config.dataloader_persistent_workers = False
+    config.dataloader_output_format = "numpy"
     if int(_config_get(config, "dataloader_num_workers", 0)) > 0:
         config.dataloader_multiprocessing_context = str(
-            _config_get(config, "dataloader_multiprocessing_context", "spawn")
-            or "spawn"
+            _config_get(config, "dataloader_multiprocessing_context", "forkserver")
+            or "forkserver"
         )
     datamodule = GemsNativeDataModule(
         config,
@@ -1473,15 +1475,13 @@ def _run_jax_training_loop(
                         break
                     dataloader_elapsed += time.perf_counter() - dataloader_start
                     if pure_full_train_step is not None:
-                        context_count = (
-                            (
-                                torch_batch["context_mask"]
-                                & torch_batch["peak_valid_mask"]
-                            )
-                            .sum(dim=1)
-                            .max()
-                            .item()
+                        active_context = (
+                            torch_batch["context_mask"] & torch_batch["peak_valid_mask"]
                         )
+                        if isinstance(active_context, np.ndarray):
+                            context_count = int(active_context.sum(axis=1).max())
+                        else:
+                            context_count = int(active_context.sum(dim=1).max().item())
                         max_context_count = max(max_context_count, int(context_count))
                     transfer_start = time.perf_counter()
                     micro_batches.append(torch_batch_to_jax(torch_batch))

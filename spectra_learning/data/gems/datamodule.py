@@ -96,6 +96,7 @@ class GemsNativeDataModule:
     dataloader_prefetch_factor: int
     dataloader_persistent_workers: bool
     dataloader_multiprocessing_context: str
+    dataloader_output_format: str
     gems_train_shards: list[str]
     gems_validation_shards: list[str]
     gems_train_files: list[str]
@@ -207,10 +208,16 @@ class GemsNativeDataModule:
     def _get_dataset(self, split: str) -> GemsMemmapDataset:
         if split == "train":
             if self._train_dataset is None:
-                self._train_dataset = GemsMemmapDataset(self._train_entries)
+                self._train_dataset = GemsMemmapDataset(
+                    self._train_entries,
+                    return_numpy=True,
+                )
             return self._train_dataset
         if self._val_dataset is None:
-            self._val_dataset = GemsMemmapDataset(self._val_entries)
+            self._val_dataset = GemsMemmapDataset(
+                self._val_entries,
+                return_numpy=True,
+            )
         return self._val_dataset
 
     def _make_loader(
@@ -288,6 +295,7 @@ class GemsNativeDataModule:
             peak_filtering=self.peak_filtering,
             grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
             grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
+            output_format=self.dataloader_output_format,
         )
 
     @property

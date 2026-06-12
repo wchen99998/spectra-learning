@@ -62,22 +62,23 @@ def _group_peak_indices_numpy(
     isotope_charges: tuple[int, ...],
 ) -> list[np.ndarray]:
     parent = list(range(len(mz)))
+    search = mz.searchsorted
     for i, value in enumerate(mz):
-        shoulder_end = int(np.searchsorted(mz, value + shoulder_da, side="right"))
+        shoulder_end = int(search(value + shoulder_da, side="right"))
         for j in range(i + 1, shoulder_end):
             _union_group_parent(parent, i, j)
         for charge in isotope_charges:
             if charge > 1 and value / charge < 100.0:
                 continue
-            pattern_edges: list[int] = []
+            inv_charge = 1.0 / charge
             for lo_delta, hi_delta in _SIRIUS_ISOTOPE_RANGES_DA:
-                lo = int(np.searchsorted(mz, value + lo_delta / charge, side="left"))
-                hi = int(np.searchsorted(mz, value + hi_delta / charge, side="right"))
-                if hi <= max(i + 1, lo):
+                lo = int(search(value + lo_delta * inv_charge, side="left"))
+                hi = int(search(value + hi_delta * inv_charge, side="right"))
+                start = max(i + 1, lo)
+                if hi <= start:
                     break
-                pattern_edges.extend(range(max(i + 1, lo), hi))
-            for j in pattern_edges:
-                _union_group_parent(parent, i, j)
+                for j in range(start, hi):
+                    _union_group_parent(parent, i, j)
 
     groups_by_root: dict[int, list[int]] = {}
     for i in range(len(mz)):
@@ -134,7 +135,7 @@ def _select_grouped_peaks_numpy(
             isotope_charges=isotope_charges,
         )
         representatives = np.asarray(
-            [group[np.argmax(row_intensity[group])] for group in groups],
+            [group[row_intensity[group].argmax()] for group in groups],
             dtype=np.int64,
         )
         order = np.argsort(-row_intensity[representatives], kind="stable")

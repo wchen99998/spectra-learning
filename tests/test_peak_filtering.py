@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from ml_collections import config_dict
 
+from spectra_learning.data.gems.collate import GemsBatchCollator
 from spectra_learning.data.gems.settings import GemsDataConfig
 from spectra_learning.data.spectra import (
     DEFAULT_GROUPED_PEAK_SHOULDER_DA,
@@ -85,6 +86,7 @@ def test_gems_data_config_reads_grouped_peak_filtering_fields() -> None:
     cfg.peak_filtering = PEAK_FILTERING_GROUPED
     cfg.grouped_peak_shoulder_da = 0.05
     cfg.grouped_peak_isotope_charges = (1, 2, 3)
+    cfg.dataloader_output_format = "numpy"
 
     data_config = GemsDataConfig.from_config(cfg)
 
@@ -92,3 +94,45 @@ def test_gems_data_config_reads_grouped_peak_filtering_fields() -> None:
     assert data_config.peak_filtering == PEAK_FILTERING_GROUPED
     assert data_config.grouped_peak_shoulder_da == 0.05
     assert data_config.grouped_peak_isotope_charges == (1, 2, 3)
+    assert data_config.dataloader_output_format == "numpy"
+
+
+def test_gems_collator_can_return_numpy_batch() -> None:
+    collator = GemsBatchCollator(
+        augment=True,
+        num_target_blocks=1,
+        context_fraction=0.5,
+        target_fraction=0.25,
+        block_min_len=1,
+        num_peaks=4,
+        max_precursor_mz=1000.0,
+        min_peak_intensity=1e-4,
+        peak_drop_min_intensity=1e-4,
+        peak_ordering="mz",
+        precursor_peak_exclusion_window_da=0.0,
+        peak_filtering=PEAK_FILTERING_GROUPED,
+        grouped_peak_shoulder_da=0.05,
+        grouped_peak_isotope_charges=(1,),
+        mask_strategy="contiguous",
+        output_format="numpy",
+    )
+    samples = [
+        {
+            "spectra": np.asarray(
+                [
+                    [100.0, 100.03, 101.002, 150.0, 300.0],
+                    [1.0, 0.9, 0.8, 0.7, 0.6],
+                ],
+                dtype=np.float32,
+            ),
+            "precursor_mz_raw": np.float32(500.0),
+        }
+    ]
+
+    batch = collator(samples)
+
+    assert isinstance(batch["peak_mz"], np.ndarray)
+    assert isinstance(batch["context_mask"], np.ndarray)
+    assert isinstance(batch["target_masks"], np.ndarray)
+    assert batch["peak_mz"].shape == (1, 4)
+    assert batch["context_mask"].dtype == bool

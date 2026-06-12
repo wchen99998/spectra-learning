@@ -1,3 +1,6 @@
+from typing import Any
+
+import numpy as np
 import torch
 
 from spectra_learning.data.gems.masking import (
@@ -19,6 +22,7 @@ from spectra_learning.data.spectra import (
     DEFAULT_GROUPED_PEAK_SHOULDER_DA,
     DEFAULT_PEAK_FILTERING,
     PEAK_MZ_MAX,
+    preprocess_peak_batch_numpy,
     preprocess_peak_batch_torch,
 )
 
@@ -48,6 +52,7 @@ class GemsBatchCollator:
         mask_round_from: int = len(DEFAULT_JEPA_MASK_LENGTHS),
         intensity_aware_mask_config: dict[str, float] | None = None,
         allow_target_overlap: bool = False,
+        output_format: str = "torch",
     ) -> None:
         self.augment = augment
         self.num_target_blocks = num_target_blocks
@@ -72,15 +77,50 @@ class GemsBatchCollator:
         self.grouped_peak_isotope_charges = grouped_peak_isotope_charges
         self.peak_ordering = peak_ordering
         self.precursor_peak_exclusion_window_da = precursor_peak_exclusion_window_da
+        self.output_format = output_format
 
-    def __call__(self, samples: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+    def __call__(self, samples: list[dict[str, Any]]) -> dict[str, Any]:
         batch = self._preprocess(samples)
         self._ensure_nonempty(batch)
         if self.augment:
             batch["context_mask"], batch["target_masks"] = self._sample_masks(batch)
+        if self.output_format == "numpy":
+            return self._batch_to_numpy(batch)
         return batch
 
-    def _preprocess(self, samples: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+    def _preprocess(self, samples: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+        if isinstance(samples[0]["spectra"], np.ndarray):
+            return self._preprocess_numpy(samples)
+        return self._preprocess_torch(samples)
+
+    def _preprocess_numpy(
+        self,
+        samples: list[dict[str, Any]],
+    ) -> dict[str, torch.Tensor]:
+        spectra = np.stack([sample["spectra"] for sample in samples], axis=0)
+        precursor_mz_raw = np.asarray(
+            [sample["precursor_mz_raw"] for sample in samples],
+            dtype=np.float32,
+        )
+        batch = preprocess_peak_batch_numpy(
+            spectra,
+            precursor_mz_raw,
+            num_peaks=self.num_peaks,
+            peak_drop_min_intensity=self.peak_drop_min_intensity,
+            peak_ordering=self.peak_ordering,
+            max_precursor_mz=self.max_precursor_mz,
+            precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
+            min_peak_intensity=self.min_peak_intensity,
+            peak_filtering=self.peak_filtering,
+            grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
+            grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
+        )
+        return {key: torch.from_numpy(value) for key, value in batch.items()}
+
+    def _preprocess_torch(
+        self,
+        samples: list[dict[str, Any]],
+    ) -> dict[str, torch.Tensor]:
         spectra = torch.stack([sample["spectra"] for sample in samples], dim=0)
         precursor_mz_raw = torch.stack(
             [sample["precursor_mz_raw"] for sample in samples],
@@ -100,6 +140,9 @@ class GemsBatchCollator:
             grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
             grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
         )
+
+    def _batch_to_numpy(self, batch: dict[str, torch.Tensor]) -> dict[str, np.ndarray]:
+        return {key: value.detach().cpu().numpy() for key, value in batch.items()}
 
     def _ensure_nonempty(self, batch: dict[str, torch.Tensor]) -> None:
         no_valid = ~batch["peak_valid_mask"].any(dim=1)

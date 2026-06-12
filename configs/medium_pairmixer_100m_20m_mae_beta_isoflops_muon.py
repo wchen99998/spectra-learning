@@ -28,6 +28,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.muon_adam_eps_root = 0.0
     cfg.muon_adam_weight_decay = 0.0
     cfg.muon_consistent_rms = 0.2
+    cfg.dataloader_num_workers = 12
     cfg.run_name_suffix = "mae-100m-20m-beta-isoflops-100k-bs1024-ga2-muon-matchrms-lr3e-4"
 
     return cfg
