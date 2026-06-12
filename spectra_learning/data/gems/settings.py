@@ -8,7 +8,10 @@ from ml_collections import config_dict
 from spectra_learning.data.gems.intensity_aware import AWARE_MIXED_MASK_CONFIG
 from spectra_learning.data.spectra import (
     DEFAULT_MAX_PRECURSOR_MZ,
+    DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
+    DEFAULT_GROUPED_PEAK_SHOULDER_DA,
     DEFAULT_MIN_PEAK_INTENSITY,
+    DEFAULT_PEAK_FILTERING,
     DEFAULT_PRECURSOR_PEAK_EXCLUSION_WINDOW_DA,
 )
 
@@ -41,6 +44,9 @@ class GemsDataConfig:
     max_precursor_mz: float
     min_peak_intensity: float
     peak_drop_min_intensity: float
+    peak_filtering: str
+    grouped_peak_shoulder_da: float
+    grouped_peak_isotope_charges: tuple[int, ...]
     peak_ordering: str
     precursor_peak_exclusion_window_da: float
     jepa_num_target_blocks: int
@@ -97,6 +103,24 @@ class GemsDataConfig:
             min_peak_intensity=min_peak_intensity,
             peak_drop_min_intensity=float(
                 _config_get(config, "peak_drop_min_intensity", min_peak_intensity)
+            ),
+            peak_filtering=str(
+                _config_get(config, "peak_filtering", DEFAULT_PEAK_FILTERING)
+            ),
+            grouped_peak_shoulder_da=float(
+                _config_get(
+                    config,
+                    "grouped_peak_shoulder_da",
+                    DEFAULT_GROUPED_PEAK_SHOULDER_DA,
+                )
+            ),
+            grouped_peak_isotope_charges=tuple(
+                int(charge)
+                for charge in _config_get(
+                    config,
+                    "grouped_peak_isotope_charges",
+                    DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
+                )
             ),
             peak_ordering=str(_config_get(config, "peak_ordering", "mz")),
             precursor_peak_exclusion_window_da=float(

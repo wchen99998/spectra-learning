@@ -32,7 +32,10 @@ from tqdm import tqdm
 from spectra_learning.config.loading import load_config
 from spectra_learning.data.spectra import (
     DEFAULT_MAX_PRECURSOR_MZ,
+    DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
+    DEFAULT_GROUPED_PEAK_SHOULDER_DA,
     DEFAULT_MIN_PEAK_INTENSITY,
+    DEFAULT_PEAK_FILTERING,
 )
 from spectra_learning.models.factory import build_model_from_config
 from spectra_learning.models.lora import (
@@ -703,6 +706,17 @@ def build_fluorine_data(
         peak_ordering=str(config.get("peak_ordering", "mz")),
         precursor_peak_exclusion_window_da=float(
             config.get("precursor_peak_exclusion_window_da", 0.0)
+        ),
+        peak_filtering=str(config.get("peak_filtering", DEFAULT_PEAK_FILTERING)),
+        grouped_peak_shoulder_da=float(
+            config.get("grouped_peak_shoulder_da", DEFAULT_GROUPED_PEAK_SHOULDER_DA)
+        ),
+        grouped_peak_isotope_charges=tuple(
+            int(charge)
+            for charge in config.get(
+                "grouped_peak_isotope_charges",
+                DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
+            )
         ),
         repo_id=HF_REPO_ID,
         revision=revision,
@@ -2099,6 +2113,24 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         ),
         precursor_peak_exclusion_window_da=float(
             _config_get(checkpoint_config, "precursor_peak_exclusion_window_da", 0.0)
+        ),
+        peak_filtering=str(
+            _config_get(checkpoint_config, "peak_filtering", DEFAULT_PEAK_FILTERING)
+        ),
+        grouped_peak_shoulder_da=float(
+            _config_get(
+                checkpoint_config,
+                "grouped_peak_shoulder_da",
+                DEFAULT_GROUPED_PEAK_SHOULDER_DA,
+            )
+        ),
+        grouped_peak_isotope_charges=tuple(
+            int(charge)
+            for charge in _config_get(
+                checkpoint_config,
+                "grouped_peak_isotope_charges",
+                DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
+            )
         ),
         repo_id=HF_REPO_ID,
         revision=args.revision,

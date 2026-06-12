@@ -13,8 +13,11 @@ from torch.utils.data import DataLoader, Dataset
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from spectra_learning.data.spectra import (
+    DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
+    DEFAULT_GROUPED_PEAK_SHOULDER_DA,
     DEFAULT_MAX_PRECURSOR_MZ,
     DEFAULT_MIN_PEAK_INTENSITY,
+    DEFAULT_PEAK_FILTERING,
     preprocess_peak_batch_torch,
 )
 from spectra_learning.probes.massspec.data import MassSpecProbeData
@@ -57,6 +60,11 @@ class ContrastiveOnlineEvalCollator:
         peak_drop_min_intensity: float,
         peak_ordering: str,
         precursor_peak_exclusion_window_da: float,
+        peak_filtering: str = DEFAULT_PEAK_FILTERING,
+        grouped_peak_shoulder_da: float = DEFAULT_GROUPED_PEAK_SHOULDER_DA,
+        grouped_peak_isotope_charges: tuple[int, ...] = (
+            DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES
+        ),
     ) -> None:
         self.split = split
         self.num_peaks = num_peaks
@@ -65,6 +73,9 @@ class ContrastiveOnlineEvalCollator:
         self.peak_drop_min_intensity = peak_drop_min_intensity
         self.peak_ordering = peak_ordering
         self.precursor_peak_exclusion_window_da = precursor_peak_exclusion_window_da
+        self.peak_filtering = peak_filtering
+        self.grouped_peak_shoulder_da = grouped_peak_shoulder_da
+        self.grouped_peak_isotope_charges = grouped_peak_isotope_charges
 
     def __call__(self, indices: list[int]) -> dict[str, torch.Tensor]:
         row_indices = np.asarray(indices, dtype=np.int64)
@@ -80,6 +91,9 @@ class ContrastiveOnlineEvalCollator:
             max_precursor_mz=self.max_precursor_mz,
             precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
             min_peak_intensity=self.min_peak_intensity,
+            peak_filtering=self.peak_filtering,
+            grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
+            grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
         )
         batch["probe_maccs"] = torch.from_numpy(
             self.split.probe_maccs[row_indices].copy()
@@ -193,6 +207,20 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
                 peak_ordering=str(config.get("peak_ordering", "mz")),
                 precursor_peak_exclusion_window_da=float(
                     config.get("precursor_peak_exclusion_window_da", 0.0)
+                ),
+                peak_filtering=str(config.get("peak_filtering", DEFAULT_PEAK_FILTERING)),
+                grouped_peak_shoulder_da=float(
+                    config.get(
+                        "grouped_peak_shoulder_da",
+                        DEFAULT_GROUPED_PEAK_SHOULDER_DA,
+                    )
+                ),
+                grouped_peak_isotope_charges=tuple(
+                    int(charge)
+                    for charge in config.get(
+                        "grouped_peak_isotope_charges",
+                        DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
+                    )
                 ),
             ),
         )

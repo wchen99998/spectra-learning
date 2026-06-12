@@ -65,6 +65,9 @@ def _make_visualization_collator_kwargs(datamodule: GemsNativeDataModule) -> dic
         "peak_drop_min_intensity": datamodule.peak_drop_min_intensity,
         "peak_ordering": datamodule.peak_ordering,
         "precursor_peak_exclusion_window_da": datamodule.precursor_peak_exclusion_window_da,
+        "peak_filtering": datamodule.peak_filtering,
+        "grouped_peak_shoulder_da": datamodule.grouped_peak_shoulder_da,
+        "grouped_peak_isotope_charges": datamodule.grouped_peak_isotope_charges,
     }
 
 

@@ -19,8 +19,11 @@ from tqdm import tqdm
 
 from spectra_learning.config.loading import load_config
 from spectra_learning.data.spectra import (
+    DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
+    DEFAULT_GROUPED_PEAK_SHOULDER_DA,
     DEFAULT_MAX_PRECURSOR_MZ,
     DEFAULT_MIN_PEAK_INTENSITY,
+    DEFAULT_PEAK_FILTERING,
     NUM_PEAKS_INPUT,
     preprocess_peak_batch_torch,
 )
@@ -321,6 +324,22 @@ def _preprocess_mgf_batch(
         ),
         min_peak_intensity=float(
             _config_get(config, "min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)
+        ),
+        peak_filtering=str(_config_get(config, "peak_filtering", DEFAULT_PEAK_FILTERING)),
+        grouped_peak_shoulder_da=float(
+            _config_get(
+                config,
+                "grouped_peak_shoulder_da",
+                DEFAULT_GROUPED_PEAK_SHOULDER_DA,
+            )
+        ),
+        grouped_peak_isotope_charges=tuple(
+            int(charge)
+            for charge in _config_get(
+                config,
+                "grouped_peak_isotope_charges",
+                DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
+            )
         ),
     )
     return batch

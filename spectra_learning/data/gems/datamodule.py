@@ -76,6 +76,9 @@ class GemsNativeDataModule:
     max_precursor_mz: float
     min_peak_intensity: float
     peak_drop_min_intensity: float
+    peak_filtering: str
+    grouped_peak_shoulder_da: float
+    grouped_peak_isotope_charges: tuple[int, ...]
     peak_ordering: str
     precursor_peak_exclusion_window_da: float
     jepa_num_target_blocks: int
@@ -190,6 +193,9 @@ class GemsNativeDataModule:
             "max_precursor_mz": self.max_precursor_mz,
             "peak_mz_min": PEAK_MZ_MIN,
             "peak_mz_max": PEAK_MZ_MAX,
+            "peak_filtering": self.peak_filtering,
+            "grouped_peak_shoulder_da": self.grouped_peak_shoulder_da,
+            "grouped_peak_isotope_charges": list(self.grouped_peak_isotope_charges),
         }
 
     def _train_steps(self) -> int:
@@ -279,6 +285,9 @@ class GemsNativeDataModule:
             peak_drop_min_intensity=self.peak_drop_min_intensity,
             peak_ordering=self.peak_ordering,
             precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
+            peak_filtering=self.peak_filtering,
+            grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
+            grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
         )
 
     @property

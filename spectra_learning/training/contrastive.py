@@ -18,7 +18,10 @@ from tqdm import tqdm
 
 from spectra_learning.data.spectra import (
     DEFAULT_MAX_PRECURSOR_MZ,
+    DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
+    DEFAULT_GROUPED_PEAK_SHOULDER_DA,
     DEFAULT_MIN_PEAK_INTENSITY,
+    DEFAULT_PEAK_FILTERING,
     NUM_PEAKS_INPUT,
     preprocess_peak_batch_torch,
 )
@@ -96,6 +99,11 @@ class ContrastiveBatchCollator:
         peak_drop_min_intensity: float,
         peak_ordering: str,
         precursor_peak_exclusion_window_da: float,
+        peak_filtering: str = DEFAULT_PEAK_FILTERING,
+        grouped_peak_shoulder_da: float = DEFAULT_GROUPED_PEAK_SHOULDER_DA,
+        grouped_peak_isotope_charges: tuple[int, ...] = (
+            DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES
+        ),
     ) -> None:
         self.split = split
         self.num_peaks = num_peaks
@@ -104,6 +112,9 @@ class ContrastiveBatchCollator:
         self.peak_drop_min_intensity = peak_drop_min_intensity
         self.peak_ordering = peak_ordering
         self.precursor_peak_exclusion_window_da = precursor_peak_exclusion_window_da
+        self.peak_filtering = peak_filtering
+        self.grouped_peak_shoulder_da = grouped_peak_shoulder_da
+        self.grouped_peak_isotope_charges = grouped_peak_isotope_charges
 
     def __call__(self, pairs: list[dict[str, int]]) -> dict[str, torch.Tensor]:
         has_explicit_negative = "negative_idx" in pairs[0]
@@ -164,6 +175,9 @@ class ContrastiveBatchCollator:
             max_precursor_mz=self.max_precursor_mz,
             precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
             min_peak_intensity=self.min_peak_intensity,
+            peak_filtering=self.peak_filtering,
+            grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
+            grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
         )
         batch["compound_id"] = compound_ids
         batch["positive_index"] = positive_index
@@ -236,6 +250,11 @@ class ContrastiveOnlineBatchCollator:
         peak_drop_min_intensity: float,
         peak_ordering: str,
         precursor_peak_exclusion_window_da: float,
+        peak_filtering: str = DEFAULT_PEAK_FILTERING,
+        grouped_peak_shoulder_da: float = DEFAULT_GROUPED_PEAK_SHOULDER_DA,
+        grouped_peak_isotope_charges: tuple[int, ...] = (
+            DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES
+        ),
     ) -> None:
         self.split = split
         self.num_peaks = num_peaks
@@ -244,6 +263,9 @@ class ContrastiveOnlineBatchCollator:
         self.peak_drop_min_intensity = peak_drop_min_intensity
         self.peak_ordering = peak_ordering
         self.precursor_peak_exclusion_window_da = precursor_peak_exclusion_window_da
+        self.peak_filtering = peak_filtering
+        self.grouped_peak_shoulder_da = grouped_peak_shoulder_da
+        self.grouped_peak_isotope_charges = grouped_peak_isotope_charges
 
     def __call__(self, indices: list[int]) -> dict[str, torch.Tensor]:
         row_indices = np.asarray(indices, dtype=np.int64)
@@ -259,6 +281,9 @@ class ContrastiveOnlineBatchCollator:
             max_precursor_mz=self.max_precursor_mz,
             precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
             min_peak_intensity=self.min_peak_intensity,
+            peak_filtering=self.peak_filtering,
+            grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
+            grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
         )
         batch["probe_maccs"] = torch.from_numpy(
             self.split.probe_maccs[row_indices].copy()
@@ -572,6 +597,24 @@ def build_contrastive_loader(
             precursor_peak_exclusion_window_da=float(
                 _config_get(config, "precursor_peak_exclusion_window_da", 0.0)
             ),
+            peak_filtering=str(
+                _config_get(config, "peak_filtering", DEFAULT_PEAK_FILTERING)
+            ),
+            grouped_peak_shoulder_da=float(
+                _config_get(
+                    config,
+                    "grouped_peak_shoulder_da",
+                    DEFAULT_GROUPED_PEAK_SHOULDER_DA,
+                )
+            ),
+            grouped_peak_isotope_charges=tuple(
+                int(charge)
+                for charge in _config_get(
+                    config,
+                    "grouped_peak_isotope_charges",
+                    DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
+                )
+            ),
         ),
     }
     if num_workers > 0:
@@ -652,6 +695,24 @@ def build_contrastive_online_loader(
             peak_ordering=str(_config_get(config, "peak_ordering", "mz")),
             precursor_peak_exclusion_window_da=float(
                 _config_get(config, "precursor_peak_exclusion_window_da", 0.0)
+            ),
+            peak_filtering=str(
+                _config_get(config, "peak_filtering", DEFAULT_PEAK_FILTERING)
+            ),
+            grouped_peak_shoulder_da=float(
+                _config_get(
+                    config,
+                    "grouped_peak_shoulder_da",
+                    DEFAULT_GROUPED_PEAK_SHOULDER_DA,
+                )
+            ),
+            grouped_peak_isotope_charges=tuple(
+                int(charge)
+                for charge in _config_get(
+                    config,
+                    "grouped_peak_isotope_charges",
+                    DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
+                )
             ),
         ),
     }
