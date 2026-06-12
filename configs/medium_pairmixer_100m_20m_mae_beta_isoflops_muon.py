@@ -28,6 +28,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.muon_adam_eps_root = 0.0
     cfg.muon_adam_weight_decay = 0.0
     cfg.muon_consistent_rms = 0.2
+    cfg.peak_filtering = "grouped"
+    cfg.grouped_peak_shoulder_da = 0.05
+    cfg.grouped_peak_isotope_charges = (1, 2, 3)
     cfg.dataloader_num_workers = 12
     cfg.run_name_suffix = "mae-100m-20m-beta-isoflops-100k-bs1024-ga2-muon-matchrms-lr3e-4"
 
