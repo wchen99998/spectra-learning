@@ -6,6 +6,7 @@ from torch import nn
 from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pairformer import (
+    AttentionPairBias,
     CommutedLowRankTriangle,
     PairformerBlock,
     PairMixerBlock,
@@ -415,6 +416,44 @@ def test_backbone_uses_pairmixer_without_pairformer_attention_extras():
     assert not hasattr(block, "tri_att_start")
     assert not hasattr(block, "tri_att_end")
     assert not hasattr(block.single_attention, "pair_bias")
+
+
+@torch.no_grad()
+def test_pairmixer_can_use_pair_bias_attention():
+    model = PeakSetJEPA(
+        model_dim=32,
+        encoder_num_layers=2,
+        encoder_num_heads=4,
+        num_peaks=6,
+        feature_mlp_hidden_dim=32,
+        pairmixer_use_pair_bias_attention=True,
+    )
+    block = model.encoder.blocks[0]
+    predictor_block = model.masked_latent_predictor[0]
+    batch = _make_batch()
+
+    encoded = model.encoder(
+        batch["peak_mz"],
+        batch["peak_intensity"],
+        valid_mask=batch["peak_valid_mask"],
+        visible_mask=batch["peak_valid_mask"],
+    )
+
+    assert isinstance(block, PairMixerBlock)
+    assert isinstance(block.single_attention, AttentionPairBias)
+    assert not hasattr(block, "single_attention_norm")
+    assert isinstance(predictor_block, PairMixerBlock)
+    assert isinstance(predictor_block.single_attention, AttentionPairBias)
+    assert not hasattr(predictor_block, "single_attention_norm")
+    assert encoded.shape == (2, 7, 32)
+
+
+def test_pairmixer_pair_bias_attention_setting_is_configurable():
+    settings = PeakSetJEPASettings.from_config(
+        {"pairmixer_use_pair_bias_attention": True}
+    )
+
+    assert settings.pairmixer_use_pair_bias_attention
 
 
 @torch.no_grad()

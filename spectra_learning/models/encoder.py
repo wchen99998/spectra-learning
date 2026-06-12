@@ -30,6 +30,7 @@ class PeakSetEncoder(nn.Module):
         pairformer_dropout: float = 0.0,
         pairmixer_triangle_mediator_rank: int = 0,
         pairmixer_use_commuted_low_rank_triangle: bool = False,
+        pairmixer_use_pair_bias_attention: bool = False,
         pairformer_mz_scale: float = 1000.0,
         pairformer_precursor_mz_scale: float = 1000.0,
         pairformer_use_fourier_features: bool = True,
@@ -83,6 +84,7 @@ class PeakSetEncoder(nn.Module):
                         pairmixer_use_commuted_low_rank_triangle
                     ),
                     max_mediator_tokens=num_peaks + 1,
+                    use_pair_bias_attention=pairmixer_use_pair_bias_attention,
                 )
                 for _ in range(self.num_layers)
             ]

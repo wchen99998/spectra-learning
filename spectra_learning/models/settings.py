@@ -51,6 +51,7 @@ class PeakSetJEPASettings:
     pairformer_dropout: float = 0.0
     pairmixer_triangle_mediator_rank: int = 0
     pairmixer_use_commuted_low_rank_triangle: bool = False
+    pairmixer_use_pair_bias_attention: bool = False
     pairformer_mz_scale: float = PEAK_MZ_MAX
     pairformer_precursor_mz_scale: float = PEAK_MZ_MAX
     pairformer_use_fourier_features: bool = True
@@ -169,6 +170,7 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "pairformer_dropout": float,
     "pairmixer_triangle_mediator_rank": int,
     "pairmixer_use_commuted_low_rank_triangle": bool,
+    "pairmixer_use_pair_bias_attention": bool,
     "pairformer_mz_scale": float,
     "pairformer_precursor_mz_scale": float,
     "pairformer_use_fourier_features": bool,

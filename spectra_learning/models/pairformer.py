@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 
 import torch
+import torch.nn.functional as F
 from jaxtyping import Bool, Float
 from torch import Tensor, nn
 
@@ -431,6 +432,63 @@ class TriangleAttention(nn.Module):
         return self._start_attention(x, peak_mask, pair_mask)
 
 
+class AttentionPairBias(nn.Module):
+    def __init__(
+        self,
+        *,
+        single_dim: int,
+        pair_dim: int,
+        num_heads: int,
+        norm_eps: float,
+    ) -> None:
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = single_dim // num_heads
+        self.single_norm = _build_norm(single_dim, eps=norm_eps)
+        self.pair_norm = _build_norm(pair_dim, eps=norm_eps)
+        self.qkv = nn.Linear(single_dim, 3 * single_dim, bias=False)
+        self.pair_bias = nn.Linear(pair_dim, num_heads, bias=False)
+        self.g = nn.Linear(single_dim, single_dim)
+        self.o = nn.Linear(single_dim, single_dim)
+        _init_linear(self.qkv)
+        _init_linear(self.pair_bias)
+        _init_linear(self.g, gate=True)
+        _init_linear(self.o)
+
+    def forward(
+        self,
+        single: Float[Tensor, "batch tokens dim"],
+        pair: Float[Tensor, "batch peaks peaks pair"],
+        token_mask: Bool[Tensor, "batch tokens"],
+        num_peak_tokens: int,
+    ) -> Float[Tensor, "batch tokens dim"]:
+        batch_size, num_tokens, single_dim = single.shape
+        single_norm = self.single_norm(single)
+        qkv = self.qkv(single_norm).view(
+            batch_size,
+            num_tokens,
+            3,
+            self.num_heads,
+            self.head_dim,
+        )
+        q, k, v = qkv.unbind(dim=2)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        peak_bias = self.pair_bias(self.pair_norm(pair)).permute(0, 3, 1, 2)
+        extra_tokens = num_tokens - num_peak_tokens
+        attn_bias = F.pad(peak_bias, (0, extra_tokens, 0, extra_tokens)).float()
+        attn_bias = attn_bias.masked_fill(
+            ~token_mask[:, None, None, :],
+            float("-inf"),
+        ).contiguous()
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias)
+        out = out.transpose(1, 2).contiguous().view(batch_size, num_tokens, single_dim)
+        out = out * torch.sigmoid(self.g(single_norm))
+        return self.o(out)
+
+
 class PairMixerBlock(nn.Module):
     def __init__(
         self,
@@ -444,8 +502,10 @@ class PairMixerBlock(nn.Module):
         triangle_mediator_rank: int = 0,
         use_commuted_low_rank_triangle: bool = False,
         max_mediator_tokens: int = 0,
+        use_pair_bias_attention: bool = False,
     ) -> None:
         super().__init__()
+        self.use_pair_bias_attention = use_pair_bias_attention
         if use_commuted_low_rank_triangle and triangle_mediator_rank > 0:
             self.tri_mul_out = CommutedLowRankTriangle(
                 pair_dim,
@@ -482,14 +542,22 @@ class PairMixerBlock(nn.Module):
             pair_dim,
             hidden_dim=math.ceil(pair_dim * attention_mlp_multiple),
         )
-        self.single_attention_norm = _build_norm(
-            single_dim,
-            eps=norm_eps,
-        )
-        self.single_attention = Attention(
-            single_dim,
-            num_heads,
-        )
+        if self.use_pair_bias_attention:
+            self.single_attention = AttentionPairBias(
+                single_dim=single_dim,
+                pair_dim=pair_dim,
+                num_heads=num_heads,
+                norm_eps=norm_eps,
+            )
+        else:
+            self.single_attention_norm = _build_norm(
+                single_dim,
+                eps=norm_eps,
+            )
+            self.single_attention = Attention(
+                single_dim,
+                num_heads,
+            )
         self.single_transition_norm = _build_norm(
             single_dim,
             eps=norm_eps,
@@ -515,12 +583,22 @@ class PairMixerBlock(nn.Module):
         pair = pair + self.drop(self.tri_mul_in(pair, pair_mask))
         pair = pair + self.drop(self.pair_transition(self.pair_transition_norm(pair)))
         pair = pair * pair_mask.unsqueeze(-1).to(dtype=pair.dtype)
-        single = single + self.drop(
-            self.single_attention(
-                self.single_attention_norm(single),
-                attn_mask=token_mask[:, None, None, :],
+        if self.use_pair_bias_attention:
+            single = single + self.drop(
+                self.single_attention(
+                    single,
+                    pair,
+                    token_mask,
+                    peak_mask.shape[1],
+                )
             )
-        )
+        else:
+            single = single + self.drop(
+                self.single_attention(
+                    self.single_attention_norm(single),
+                    attn_mask=token_mask[:, None, None, :],
+                )
+            )
         single = single + self.drop(
             self.single_transition(self.single_transition_norm(single))
         )
