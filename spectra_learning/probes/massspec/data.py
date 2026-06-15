@@ -821,7 +821,10 @@ def _read_murcko_subdir_metadata(
         return None
     metadata = json.loads(metadata_path.read_text())
     for split in required_splits:
-        for filename in metadata.get(f"{split}_files", []):
+        filenames = metadata.get(f"{split}_files", [])
+        if not filenames:
+            return None
+        for filename in filenames:
             if not (cache_dir / subdir / filename).exists():
                 return None
     return metadata
@@ -864,7 +867,7 @@ def ensure_murcko_fluorine_data_downloaded(
         f"{train_subdir}/train.parquet",
         f"{train_subdir}/val.parquet",
         f"{test_subdir}/{_METADATA_FILENAME}",
-        f"{test_subdir}/test.parquet",
+        f"{test_subdir}/all.parquet",
     ]
     needs_download = (
         _read_murcko_subdir_metadata(
@@ -876,7 +879,7 @@ def ensure_murcko_fluorine_data_downloaded(
         or _read_murcko_subdir_metadata(
             cache_dir,
             test_subdir,
-            required_splits=("test",),
+            required_splits=("all",),
         )
         is None
     )
@@ -905,14 +908,9 @@ def ensure_murcko_fluorine_data_downloaded(
         _read_murcko_subdir_metadata(
             cache_dir,
             test_subdir,
-            required_splits=("test",),
+            required_splits=("all",),
         ),
     )
-    if int(test_metadata.get("train_size", 0)) or int(test_metadata.get("val_size", 0)):
-        raise ValueError(
-            f"{test_subdir} must be a held-out test-only artifact; regenerate it with "
-            "scripts/prepare_nist_murcko_probe.py"
-        )
     metadata: dict[str, Any] = {
         "metadata_version": 1,
         "storage_format": "parquet",
@@ -942,7 +940,7 @@ def ensure_murcko_fluorine_data_downloaded(
         _murcko_fluorine_split_metadata(
             test_metadata,
             subdir=test_subdir,
-            source_split="test",
+            source_split="all",
             target_split="test",
         )
     )

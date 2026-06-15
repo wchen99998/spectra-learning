@@ -55,6 +55,27 @@ DEFAULT_MCEBIO_MGF_PATH = Path(
 MCEBIO_MURCKO_PREPARED_SUBDIR = "mcebio_murcko_probe"
 RAW_SUBDIR = "raw"
 SPLITS = ("train", "val", "test")
+STANDALONE_SPLIT = "all"
+DEFAULT_NIST_ALLOWED_ADDUCTS = ("[M+H]+",)
+DEFAULT_NIST_SPLIT_SIZE_CAPS = {"train": 100_000, "val": 25_000, "test": 25_000}
+SPECTRAL_LSH_MZ_BIN_WIDTH = 0.05
+SPECTRAL_LSH_INTENSITY_BINS = 10
+SPECTRAL_LSH_NUM_HASHES = 32
+SPECTRAL_LSH_BAND_SIZE = 4
+_SPECTRAL_LSH_PRIME = np.uint64(4_294_967_311)
+_SPECTRAL_LSH_RNG = np.random.default_rng(1729)
+_SPECTRAL_LSH_A = _SPECTRAL_LSH_RNG.integers(
+    1,
+    int(_SPECTRAL_LSH_PRIME),
+    size=SPECTRAL_LSH_NUM_HASHES,
+    dtype=np.uint64,
+)
+_SPECTRAL_LSH_B = _SPECTRAL_LSH_RNG.integers(
+    0,
+    int(_SPECTRAL_LSH_PRIME),
+    size=SPECTRAL_LSH_NUM_HASHES,
+    dtype=np.uint64,
+)
 
 CHEMICAL_PROPERTY_COLUMNS = (
     *REGRESSION_TARGET_KEYS,
@@ -73,9 +94,12 @@ METADATA_COLUMNS = (
     "pepmass",
     "charge",
     "precursortype",
+    "adduct",
     "collisionenergy",
+    "collision energy",
     "instrument",
     "instrumenttype",
+    "instrument_type",
     "ionmode",
     "spectrumtype",
     "formula",
@@ -211,8 +235,16 @@ def _metadata_json(record: dict[str, Any]) -> str:
     )
 
 
+def _record_value(record: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = str(record.get(key, "")).strip()
+        if value:
+            return value
+    return ""
+
+
 def _collision_energy(record: dict[str, Any]) -> tuple[float, int]:
-    raw = str(record.get("collisionenergy", "")).strip()
+    raw = _record_value(record, "collisionenergy", "collision energy")
     if not raw or raw.lower() == "nan":
         return 0.0, 0
     token = ""
@@ -229,6 +261,17 @@ def _collision_energy(record: dict[str, Any]) -> tuple[float, int]:
 def _precursor_mz(record: dict[str, Any]) -> float:
     pepmass = str(record.get("pepmass", ""))
     return _to_float(pepmass.split()[0]) if pepmass else float("nan")
+
+
+def _record_adduct(record: dict[str, Any]) -> str:
+    return _record_value(record, "precursortype", "adduct") or "unknown"
+
+
+def _record_matches_adducts(
+    record: dict[str, Any],
+    allowed_adducts: tuple[str, ...] | None,
+) -> bool:
+    return allowed_adducts is None or _record_adduct(record) in allowed_adducts
 
 
 def _top_peaks(record: dict[str, Any], num_peaks_input: int) -> tuple[list[float], list[float]]:
@@ -253,6 +296,97 @@ def _morgan_bits(mol: Chem.Mol) -> np.ndarray:
     fp = _MORGAN_GENERATOR.GetFingerprint(mol)
     DataStructs.ConvertToNumpyArray(fp, bits)
     return bits
+
+
+def _spectral_tokens(row: dict[str, Any]) -> set[int]:
+    mz = np.asarray(row["spectrum_mz"], dtype=np.float32)
+    intensity = np.asarray(row["spectrum_intensity"], dtype=np.float32)
+    keep = intensity > 0
+    mz = mz[keep]
+    intensity = intensity[keep]
+    normalized = intensity / intensity.max()
+    mz_bins = np.rint(mz / SPECTRAL_LSH_MZ_BIN_WIDTH).astype(np.int64)
+    intensity_bins = np.minimum(
+        (normalized * SPECTRAL_LSH_INTENSITY_BINS).astype(np.int64),
+        SPECTRAL_LSH_INTENSITY_BINS - 1,
+    )
+    return set((mz_bins * SPECTRAL_LSH_INTENSITY_BINS + intensity_bins).tolist())
+
+
+def _minhash_signature(tokens: set[int]) -> tuple[int, ...]:
+    token_array = np.asarray(list(tokens), dtype=np.uint64)
+    hashes = (
+        _SPECTRAL_LSH_A[:, None] * token_array[None, :] + _SPECTRAL_LSH_B[:, None]
+    )
+    hashes %= _SPECTRAL_LSH_PRIME
+    return tuple(int(value) for value in hashes.min(axis=1).tolist())
+
+
+def _jaccard(left: set[int], right: set[int]) -> float:
+    return len(left & right) / len(left | right)
+
+
+class SpectralLshThinner:
+    def __init__(
+        self,
+        *,
+        splits: tuple[str, ...],
+        threshold: float,
+        split_size_caps: dict[str, int],
+        unique_smiles_by_split: dict[str, set[str]],
+    ) -> None:
+        self.threshold = threshold
+        self.split_size_caps = split_size_caps
+        self.unique_smiles_by_split = unique_smiles_by_split
+        self.pre_lsh_counts: Counter[str] = Counter()
+        self.removed_counts: Counter[str] = Counter()
+        self.kept_counts: Counter[str] = Counter()
+        self.kept_smiles = {split: set() for split in splits}
+        self.tokens_by_split: dict[str, list[set[int]]] = {split: [] for split in splits}
+        self.buckets: dict[str, dict[tuple[int, tuple[int, ...]], list[int]]] = {
+            split: defaultdict(list) for split in splits
+        }
+
+    def keep(self, split: str, row: dict[str, Any]) -> bool:
+        self.pre_lsh_counts[split] += 1
+        canonical = row["canonical_smiles"]
+        tokens = _spectral_tokens(row)
+        cap = self.split_size_caps.get(split)
+        if canonical in self.kept_smiles[split]:
+            remaining_unseen = len(
+                self.unique_smiles_by_split[split] - self.kept_smiles[split]
+            )
+            if cap is not None and self.kept_counts[split] + 1 + remaining_unseen > cap:
+                self.removed_counts[split] += 1
+                return False
+            if self._has_match(split, tokens):
+                self.removed_counts[split] += 1
+                return False
+        self._add(split, canonical, tokens)
+        return True
+
+    def _has_match(self, split: str, tokens: set[int]) -> bool:
+        signature = _minhash_signature(tokens)
+        candidates: set[int] = set()
+        for band_idx in range(SPECTRAL_LSH_NUM_HASHES // SPECTRAL_LSH_BAND_SIZE):
+            start = band_idx * SPECTRAL_LSH_BAND_SIZE
+            key = (band_idx, signature[start : start + SPECTRAL_LSH_BAND_SIZE])
+            candidates.update(self.buckets[split].get(key, ()))
+        return any(
+            _jaccard(tokens, self.tokens_by_split[split][candidate]) >= self.threshold
+            for candidate in candidates
+        )
+
+    def _add(self, split: str, canonical: str, tokens: set[int]) -> None:
+        spectrum_id = len(self.tokens_by_split[split])
+        self.tokens_by_split[split].append(tokens)
+        signature = _minhash_signature(tokens)
+        for band_idx in range(SPECTRAL_LSH_NUM_HASHES // SPECTRAL_LSH_BAND_SIZE):
+            start = band_idx * SPECTRAL_LSH_BAND_SIZE
+            key = (band_idx, signature[start : start + SPECTRAL_LSH_BAND_SIZE])
+            self.buckets[split][key].append(spectrum_id)
+        self.kept_smiles[split].add(canonical)
+        self.kept_counts[split] += 1
 
 
 def _chemical_properties(mol: Chem.Mol) -> dict[str, float]:
@@ -281,9 +415,11 @@ def _mol_from_record(record: dict[str, Any]) -> tuple[Chem.Mol, str] | None:
 
 
 def _first_pass_task(
-    payload: tuple[int, dict[str, Any], float, float],
+    payload: tuple[int, dict[str, Any], float, float, tuple[str, ...] | None],
 ) -> FirstPassRow | None:
-    _, record, min_precursor_mz, max_precursor_mz = payload
+    _, record, min_precursor_mz, max_precursor_mz, allowed_adducts = payload
+    if not _record_matches_adducts(record, allowed_adducts):
+        return None
     precursor = _precursor_mz(record)
     if not math.isfinite(precursor) or precursor < min_precursor_mz or precursor > max_precursor_mz:
         return None
@@ -302,9 +438,11 @@ def _first_pass_task(
 
 
 def _full_pass_task(
-    payload: tuple[int, dict[str, Any], float, float, int],
+    payload: tuple[int, dict[str, Any], float, float, int, tuple[str, ...] | None],
 ) -> FullRow | None:
-    spectrum_index, record, min_precursor_mz, max_precursor_mz, num_peaks_input = payload
+    spectrum_index, record, min_precursor_mz, max_precursor_mz, num_peaks_input, allowed_adducts = payload
+    if not _record_matches_adducts(record, allowed_adducts):
+        return None
     precursor = _precursor_mz(record)
     if not math.isfinite(precursor) or precursor < min_precursor_mz or precursor > max_precursor_mz:
         return None
@@ -326,8 +464,9 @@ def _full_pass_task(
         "spectrum_intensity": peak_intensity,
         "smiles": str(record.get("smiles", "")).strip(),
         "canonical_smiles": canonical,
-        "adduct": str(record.get("precursortype", "")).strip() or "unknown",
-        "instrument_type": str(record.get("instrumenttype", "")).strip() or "unknown",
+        "adduct": _record_adduct(record),
+        "instrument_type": _record_value(record, "instrumenttype", "instrument_type")
+        or "unknown",
         "collision_energy": collision_energy,
         "collision_energy_present": collision_energy_present,
         "has_fluorine": "F" in atom_symbols,
@@ -475,17 +614,25 @@ def _build_single_split_fold_map(
 
     fold_by_smiles = {canonical: split for canonical in canonical_to_hist}
     split_counts = Counter({split: sum(canonical_counts.values())})
-    return fold_by_smiles, {
+    metadata = {
         "split_seed": None,
         "val_frac": 0.0,
         "test_frac": 1.0 if split == "test" else 0.0,
         "num_unique_smiles": len(canonical_counts),
         "num_murcko_histograms": len(hist_counts),
         "murcko_hist_split_counts": dict(split_counts),
-        "murcko_hist_train_keys": len(hist_counts) if split == "train" else 0,
-        "murcko_hist_val_keys": len(hist_counts) if split == "val" else 0,
-        "murcko_hist_test_keys": len(hist_counts) if split == "test" else 0,
     }
+    if split in SPLITS:
+        metadata.update(
+            {
+                "murcko_hist_train_keys": len(hist_counts) if split == "train" else 0,
+                "murcko_hist_val_keys": len(hist_counts) if split == "val" else 0,
+                "murcko_hist_test_keys": len(hist_counts) if split == "test" else 0,
+            }
+        )
+    else:
+        metadata[f"murcko_hist_{split}_keys"] = len(hist_counts)
+    return fold_by_smiles, metadata
 
 
 def _fixed_size_int8_array(values: list[np.ndarray], width: int) -> pa.Array:
@@ -575,6 +722,7 @@ def _first_pass(
     *,
     min_precursor_mz: float,
     max_precursor_mz: float,
+    allowed_adducts: tuple[str, ...] | None,
     num_workers: int,
     batch_size: int,
 ) -> list[FirstPassRow]:
@@ -586,9 +734,13 @@ def _first_pass(
             max_precursor_mz=max_precursor_mz,
             batch_size=batch_size,
         ):
+            full_batch = [
+                (spectrum_index, record, min_mz, max_mz, allowed_adducts)
+                for spectrum_index, record, min_mz, max_mz in batch
+            ]
             for row in tqdm(
-                executor.map(_first_pass_task, batch, chunksize=max(1, batch_size // num_workers)),
-                total=len(batch),
+                executor.map(_first_pass_task, full_batch, chunksize=max(1, batch_size // num_workers)),
+                total=len(full_batch),
                 desc=f"{mgf_path.name} first pass",
                 leave=False,
             ):
@@ -629,6 +781,33 @@ def _flush_split(
     morgans.clear()
 
 
+def _unique_smiles_by_split(
+    fold_by_smiles: dict[str, str],
+    splits: tuple[str, ...],
+) -> dict[str, set[str]]:
+    unique_smiles = {split: set() for split in splits}
+    for canonical, split in fold_by_smiles.items():
+        unique_smiles[split].add(canonical)
+    return unique_smiles
+
+
+def _normalize_split_size_caps(
+    split_size_caps: dict[str, int] | None,
+    unique_smiles_by_split: dict[str, set[str]],
+    splits: tuple[str, ...],
+) -> dict[str, int] | None:
+    if split_size_caps is None:
+        return None
+    caps = {split: int(split_size_caps[split]) for split in splits if split in split_size_caps}
+    for split, cap in caps.items():
+        unique_count = len(unique_smiles_by_split[split])
+        if cap < unique_count:
+            raise ValueError(
+                f"{split} cap {cap} is smaller than {unique_count} unique canonical SMILES"
+            )
+    return caps
+
+
 def build_murcko_mgf_dataset(
     *,
     mgf_path: Path,
@@ -644,11 +823,15 @@ def build_murcko_mgf_dataset(
     batch_size: int,
     parquet_batch_size: int,
     single_split: str | None = None,
+    allowed_adducts: tuple[str, ...] | None = None,
+    split_size_caps: dict[str, int] | None = None,
+    spectral_lsh_threshold: float = 0.90,
 ) -> dict[str, Any]:
     first_rows = _first_pass(
         mgf_path,
         min_precursor_mz=min_precursor_mz,
         max_precursor_mz=max_precursor_mz,
+        allowed_adducts=allowed_adducts,
         num_workers=num_workers,
         batch_size=batch_size,
     )
@@ -664,14 +847,32 @@ def build_murcko_mgf_dataset(
             first_rows,
             split=single_split,
         )
+    active_splits = (single_split,) if single_split is not None else SPLITS
+    unique_smiles_by_split = _unique_smiles_by_split(fold_by_smiles, active_splits)
+    normalized_split_size_caps = _normalize_split_size_caps(
+        split_size_caps,
+        unique_smiles_by_split,
+        active_splits,
+    )
+    lsh_thinner = (
+        SpectralLshThinner(
+            splits=active_splits,
+            threshold=spectral_lsh_threshold,
+            split_size_caps=normalized_split_size_caps,
+            unique_smiles_by_split=unique_smiles_by_split,
+        )
+        if normalized_split_size_caps is not None
+        else None
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     writers: dict[str, pq.ParquetWriter] = {}
-    buffers = {split: [] for split in SPLITS}
-    morgan_buffers = {split: [] for split in SPLITS}
-    morgan_files: dict[str, list[str]] = {split: [] for split in SPLITS}
-    morgan_lengths: dict[str, list[int]] = {split: [] for split in SPLITS}
+    buffers = {split: [] for split in active_splits}
+    morgan_buffers = {split: [] for split in active_splits}
+    morgan_files: dict[str, list[str]] = {split: [] for split in active_splits}
+    morgan_lengths: dict[str, list[int]] = {split: [] for split in active_splits}
     split_counts: Counter[str] = Counter()
+    pre_lsh_split_counts: Counter[str] = Counter()
     fluorine_counts: Counter[str] = Counter()
     sulfur_counts: Counter[str] = Counter()
     adducts: set[str] = set()
@@ -686,11 +887,22 @@ def build_murcko_mgf_dataset(
                 batch_size=batch_size,
             ):
                 full_batch = [
-                    (spectrum_index, record, min_mz, max_mz, num_peaks_input)
+                    (
+                        spectrum_index,
+                        record,
+                        min_mz,
+                        max_mz,
+                        num_peaks_input,
+                        allowed_adducts,
+                    )
                     for spectrum_index, record, min_mz, max_mz in batch
                 ]
                 for item in tqdm(
-                    executor.map(_full_pass_task, full_batch, chunksize=max(1, batch_size // num_workers)),
+                    executor.map(
+                        _full_pass_task,
+                        full_batch,
+                        chunksize=max(1, batch_size // num_workers),
+                    ),
                     total=len(full_batch),
                     desc=f"{mgf_path.name} write splits",
                     leave=False,
@@ -700,6 +912,10 @@ def build_murcko_mgf_dataset(
                     row = item.row
                     split = fold_by_smiles[row["canonical_smiles"]]
                     row["fold"] = split
+                    if lsh_thinner is None:
+                        pre_lsh_split_counts[split] += 1
+                    elif not lsh_thinner.keep(split, row):
+                        continue
                     buffers[split].append(row)
                     morgan_buffers[split].append(item.morgan)
                     split_counts[split] += 1
@@ -717,7 +933,7 @@ def build_murcko_mgf_dataset(
                             morgan_files=morgan_files,
                             morgan_lengths=morgan_lengths,
                         )
-        for split in SPLITS:
+        for split in active_splits:
             _flush_split(
                 split=split,
                 output_dir=output_dir,
@@ -733,15 +949,22 @@ def build_murcko_mgf_dataset(
 
     adduct_vocab = {value: idx for idx, value in enumerate(sorted(adducts))}
     instrument_type_vocab = {value: idx for idx, value in enumerate(sorted(instruments))}
+    if lsh_thinner is not None:
+        pre_lsh_split_counts = lsh_thinner.pre_lsh_counts
+        lsh_removed_counts = lsh_thinner.removed_counts
+    else:
+        lsh_removed_counts = Counter()
     metadata: dict[str, Any] = {
         "metadata_version": NIST_MURCKO_METADATA_VERSION,
         "artifact_format": NIST_MURCKO_ARTIFACT_FORMAT,
         "storage_format": "parquet",
         "source_uri": source_uri,
         "source_raw_file": f"{RAW_SUBDIR}/{mgf_path.name}",
+        "splits": list(active_splits),
         "num_peaks_input": num_peaks_input,
         "min_precursor_mz": min_precursor_mz,
         "max_precursor_mz": max_precursor_mz,
+        "allowed_adducts": list(allowed_adducts) if allowed_adducts is not None else None,
         "adduct_vocab": adduct_vocab,
         "instrument_type_vocab": instrument_type_vocab,
         "dreams_dim": 0,
@@ -757,9 +980,21 @@ def build_murcko_mgf_dataset(
         "pairwise_alignment_available": False,
         "pairwise_alignment_num_pairs": 0,
         "pairwise_alignment_num_endpoints": 0,
+        "spectral_lsh_enabled": lsh_thinner is not None,
+        "spectral_lsh_threshold": spectral_lsh_threshold,
+        "split_size_caps": normalized_split_size_caps,
+        "pre_lsh_split_sizes": {
+            split: pre_lsh_split_counts[split] for split in active_splits
+        },
+        "lsh_removed_by_split": {
+            split: lsh_removed_counts[split] for split in active_splits
+        },
+        "unique_smiles_by_split": {
+            split: len(unique_smiles_by_split[split]) for split in active_splits
+        },
     }
     metadata.update(split_metadata)
-    for split in SPLITS:
+    for split in active_splits:
         metadata[f"{split}_files"] = [f"{split}.parquet"] if split_counts[split] else []
         metadata[f"{split}_lengths"] = [split_counts[split]] if split_counts[split] else []
         metadata[f"{split}_size"] = split_counts[split]
@@ -768,14 +1003,9 @@ def build_murcko_mgf_dataset(
 
     (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True))
     log.info(
-        "%s: train=%d val=%d test=%d fluorine train/val/test=%d/%d/%d",
+        "%s: %s",
         output_dir.name,
-        metadata["train_size"],
-        metadata["val_size"],
-        metadata["test_size"],
-        metadata["train_positive"],
-        metadata["val_positive"],
-        metadata["test_positive"],
+        " ".join(f"{split}={metadata[f'{split}_size']}" for split in active_splits),
     )
     return metadata
 
@@ -804,7 +1034,9 @@ def main() -> None:
 
     RDLogger.DisableLog("rdApp.*")
     parser = argparse.ArgumentParser(
-        description="Build Murcko-split NIST/MCEBIO Parquet datasets from raw MGF."
+        description=(
+            "Build Murcko-split NIST and standalone MCEBIO Parquet datasets from raw MGF."
+        )
     )
     parser.add_argument("--nist-mgf", default=DEFAULT_NIST_MGF_URI)
     parser.add_argument("--mcebio-mgf", default=str(DEFAULT_MCEBIO_MGF_PATH))
@@ -825,6 +1057,28 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, default=os.cpu_count() or 1)
     parser.add_argument("--batch-size", type=int, default=2048)
     parser.add_argument("--parquet-batch-size", type=int, default=50_000)
+    parser.add_argument(
+        "--nist-allowed-adducts",
+        nargs="*",
+        default=list(DEFAULT_NIST_ALLOWED_ADDUCTS),
+        help="Allowed NIST PRECURSORTYPE values. Pass the flag with no values to disable filtering.",
+    )
+    parser.add_argument(
+        "--nist-target-train-size",
+        type=int,
+        default=DEFAULT_NIST_SPLIT_SIZE_CAPS["train"],
+    )
+    parser.add_argument(
+        "--nist-target-val-size",
+        type=int,
+        default=DEFAULT_NIST_SPLIT_SIZE_CAPS["val"],
+    )
+    parser.add_argument(
+        "--nist-target-test-size",
+        type=int,
+        default=DEFAULT_NIST_SPLIT_SIZE_CAPS["test"],
+    )
+    parser.add_argument("--spectral-lsh-threshold", type=float, default=0.90)
     args = parser.parse_args()
 
     work_dir = args.work_dir.expanduser().resolve()
@@ -841,6 +1095,20 @@ def main() -> None:
     }
     for spec in _build_dataset_specs(args):
         raw_mgf = _stage_raw_mgf(spec.source, raw_dir, args.gcs_credentials)
+        allowed_adducts = (
+            tuple(args.nist_allowed_adducts)
+            if spec.name == "nist" and args.nist_allowed_adducts
+            else None
+        )
+        split_size_caps = (
+            {
+                "train": args.nist_target_train_size,
+                "val": args.nist_target_val_size,
+                "test": args.nist_target_test_size,
+            }
+            if spec.name == "nist"
+            else None
+        )
         metadata = build_murcko_mgf_dataset(
             mgf_path=raw_mgf,
             output_dir=staging_root / spec.subdir.strip("/"),
@@ -854,15 +1122,18 @@ def main() -> None:
             num_workers=args.num_workers,
             batch_size=args.batch_size,
             parquet_batch_size=args.parquet_batch_size,
-            single_split="test" if spec.name == "mcebio" else None,
+            single_split=STANDALONE_SPLIT if spec.name == "mcebio" else None,
+            allowed_adducts=allowed_adducts,
+            split_size_caps=split_size_caps,
+            spectral_lsh_threshold=args.spectral_lsh_threshold,
         )
         top_metadata["datasets"][spec.name] = {
             "subdir": spec.subdir.strip("/"),
             "source_raw_file": metadata["source_raw_file"],
-            "train_size": metadata["train_size"],
-            "val_size": metadata["val_size"],
-            "test_size": metadata["test_size"],
+            "splits": metadata["splits"],
         }
+        for split in metadata["splits"]:
+            top_metadata["datasets"][spec.name][f"{split}_size"] = metadata[f"{split}_size"]
     (staging_root / "metadata.json").write_text(json.dumps(top_metadata, indent=2, sort_keys=True))
 
     if args.skip_upload:
