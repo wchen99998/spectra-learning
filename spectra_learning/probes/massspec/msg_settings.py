@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from ml_collections import config_dict
 
-from spectra_learning.probes.massspec.targets import (
+from spectra_learning.data.massspec_targets import (
     MACCS_FINGERPRINT_BITS,
     MORGAN_PROBE_FINGERPRINT_BITS,
 )

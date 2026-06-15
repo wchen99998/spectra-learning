@@ -33,7 +33,7 @@ from spectra_learning.models.pooling import CovariancePool
 from spectra_learning.probes.massspec.data import MassSpecProbeData
 from spectra_learning.probes.massspec.msg_probe import iter_massspec_probe
 from spectra_learning.probes.massspec.msg_settings import resolve_msg_probe_sample_limits
-from spectra_learning.probes.massspec.nist_hdf5 import _to_float, iter_mgf
+from spectra_learning.data.mgf import _to_float, iter_mgf
 from spectra_learning.training.checkpointing import load_torch_checkpoint
 from spectra_learning.training.storage import StoragePath, normalize_storage_path
 

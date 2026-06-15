@@ -11,8 +11,7 @@ The probe expects, at minimum, these datasets:
 ``DreaMS_embedding`` (optional): (N, D) float
 
 We parse ``hr_msms_nist.mgf`` (MS2, with SMILES), pack peaks to the top-128 by
-intensity, validate SMILES via RDKit, and write a GZIP-compressed HDF5 ready
-for :func:`spectra_learning.probes.massspec.data.build_nist_full_probe_artifact`.
+intensity, validate SMILES via RDKit, and write a GZIP-compressed HDF5.
 """
 
 from __future__ import annotations

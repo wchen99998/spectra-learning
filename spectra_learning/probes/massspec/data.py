@@ -14,7 +14,7 @@ from rdkit.Chem import AllChem
 from torch.utils.data import DataLoader, Dataset, Subset
 from torch.utils.data.distributed import DistributedSampler
 
-from spectra_learning.probes.massspec.targets import (
+from spectra_learning.data.massspec_targets import (
     MACCS_FINGERPRINT_BITS,
     MORGAN_PROBE_FINGERPRINT_BITS,
     MORGAN_PROBE_FINGERPRINT_RADIUS,
@@ -22,6 +22,11 @@ from spectra_learning.probes.massspec.targets import (
     build_maccs_targets_for_rows,
     build_morgan_targets_for_rows,
     build_probe_targets_for_rows,
+)
+from spectra_learning.data.murcko import (
+    NIST_MURCKO_HF_REPO,
+    NIST_MURCKO_PREPARED_SUBDIR,
+    ensure_nist_murcko_probe_downloaded,
 )
 from spectra_learning.data.spectra import (
     DEFAULT_MAX_PRECURSOR_MZ,
@@ -64,12 +69,6 @@ NIST_FULL_PAIRWISE_ALIGNMENT_FILENAME = "morgan_tanimoto_balanced_pairs.npz"
 NIST_FULL_PAIRWISE_ALIGNMENT_NUM_PAIRS = 20_000
 NIST_FULL_PAIRWISE_ALIGNMENT_BIN_SIZE = 0.025
 NIST_FULL_PAIRWISE_ALIGNMENT_SEED = 66
-NIST_MURCKO_METADATA_VERSION = 2
-NIST_MURCKO_HF_REPO = "cjim8889/hr_msms_nist_mcebio_murcko_20260529"
-NIST_MURCKO_PREPARED_SUBDIR = "nist_murcko_probe"
-MCEBIO_MURCKO_PREPARED_SUBDIR = "mcebio_murcko_probe"
-NIST_MURCKO_ARTIFACT_FORMAT = "nist_murcko_parquet_v2"
-
 MONA_A_METADATA_VERSION = 3
 MONA_A_HF_REPO = "roman-bushuiev/GeMS"
 MONA_A_HF_FILENAME = (
@@ -90,37 +89,6 @@ def _download_hf_file(repo_id: str, filename: str, local_dir: Path) -> Path:
         local_dir=str(local_dir),
     )
     return Path(path)
-
-
-def _coordinate_distributed_download(distributed_world_size: int) -> bool:
-    return (
-        distributed_world_size > 1
-        and torch.distributed.is_available()
-        and torch.distributed.is_initialized()
-    )
-
-
-def _snapshot_download_rank_zero(
-    *,
-    repo_id: str,
-    repo_type: str,
-    revision: str,
-    local_dir: Path,
-    allow_patterns: list[str],
-    distributed_world_size: int,
-    distributed_rank: int,
-) -> None:
-    coordinated = _coordinate_distributed_download(distributed_world_size)
-    if not coordinated or distributed_rank == 0:
-        snapshot_download(
-            repo_id=repo_id,
-            repo_type=repo_type,
-            revision=revision,
-            local_dir=local_dir,
-            allow_patterns=allow_patterns,
-        )
-    if coordinated:
-        torch.distributed.barrier()
 
 
 def download_massspec_tsv(output_dir: Path) -> Path:
@@ -736,264 +704,6 @@ def ensure_nist_full_probe_downloaded(
     return metadata
 
 
-def ensure_nist_murcko_probe_downloaded(
-    output_dir: Path,
-    *,
-    max_precursor_mz: float,
-    repo_id: str = NIST_MURCKO_HF_REPO,
-    revision: str = "main",
-    subdir: str = NIST_MURCKO_PREPARED_SUBDIR,
-    include_morgan: bool = False,
-    distributed_world_size: int = 1,
-    distributed_rank: int = 0,
-) -> dict[str, Any]:
-    cached = _probe_metadata_valid(
-        output_dir,
-        NIST_MURCKO_METADATA_VERSION,
-        max_precursor_mz,
-        expected_metadata={"artifact_format": NIST_MURCKO_ARTIFACT_FORMAT},
-    )
-    if cached is not None and (
-        not include_morgan
-        or bool(cached.get("morgan_auxiliary_available", False))
-        and all(
-            (output_dir / name).exists()
-            for names in cached.get("morgan_auxiliary_files", {}).values()
-            for name in names
-        )
-    ):
-        if _coordinate_distributed_download(distributed_world_size):
-            torch.distributed.barrier()
-        return cached
-    subdir = subdir.strip("/")
-    output_dir.parent.mkdir(parents=True, exist_ok=True)
-    allow_patterns = [
-        f"{subdir}/{_METADATA_FILENAME}",
-        f"{subdir}/train.parquet",
-        f"{subdir}/val.parquet",
-        f"{subdir}/test.parquet",
-    ]
-    if include_morgan:
-        allow_patterns.append(f"{subdir}/auxiliary/morgan/*")
-    _snapshot_download_rank_zero(
-        repo_id=repo_id,
-        repo_type="dataset",
-        revision=revision,
-        local_dir=output_dir.parent,
-        allow_patterns=allow_patterns,
-        distributed_world_size=distributed_world_size,
-        distributed_rank=distributed_rank,
-    )
-    metadata = _probe_metadata_valid(
-        output_dir,
-        NIST_MURCKO_METADATA_VERSION,
-        max_precursor_mz,
-        expected_metadata={"artifact_format": NIST_MURCKO_ARTIFACT_FORMAT},
-    )
-    if metadata is None:
-        raise FileNotFoundError(f"Invalid NIST Murcko probe artifact in {output_dir}")
-    return metadata
-
-
-class MurckoFluorineData(NamedTuple):
-    metadata: dict[str, Any]
-    root: Path
-    batch_size: int
-    num_peaks: int
-    max_precursor_mz: float
-    min_peak_intensity: float
-    peak_drop_min_intensity: float
-    peak_filtering: str
-    grouped_peak_shoulder_da: float
-    grouped_peak_isotope_charges: tuple[int, ...]
-    peak_ordering: str
-    precursor_peak_exclusion_window_da: float
-
-
-def _read_murcko_subdir_metadata(
-    cache_dir: Path,
-    subdir: str,
-    *,
-    required_splits: tuple[str, ...],
-) -> dict[str, Any] | None:
-    metadata_path = cache_dir / subdir / _METADATA_FILENAME
-    if not metadata_path.exists():
-        return None
-    metadata = json.loads(metadata_path.read_text())
-    for split in required_splits:
-        filenames = metadata.get(f"{split}_files", [])
-        if not filenames:
-            return None
-        for filename in filenames:
-            if not (cache_dir / subdir / filename).exists():
-                return None
-    return metadata
-
-
-def _murcko_fluorine_split_metadata(
-    source_metadata: dict[str, Any],
-    *,
-    subdir: str,
-    source_split: str,
-    target_split: str,
-) -> dict[str, Any]:
-    return {
-        f"{target_split}_files": [
-            f"{subdir}/{filename}" for filename in source_metadata[f"{source_split}_files"]
-        ],
-        f"{target_split}_lengths": [
-            int(value) for value in source_metadata[f"{source_split}_lengths"]
-        ],
-        f"{target_split}_size": int(source_metadata[f"{source_split}_size"]),
-        f"{target_split}_positive": int(source_metadata.get(f"{source_split}_positive", 0)),
-    }
-
-
-def ensure_murcko_fluorine_data_downloaded(
-    cache_dir: Path,
-    *,
-    repo_id: str = NIST_MURCKO_HF_REPO,
-    revision: str = "main",
-    train_subdir: str = NIST_MURCKO_PREPARED_SUBDIR,
-    test_subdir: str = MCEBIO_MURCKO_PREPARED_SUBDIR,
-    distributed_world_size: int = 1,
-    distributed_rank: int = 0,
-) -> dict[str, Any]:
-    train_subdir = train_subdir.strip("/")
-    test_subdir = test_subdir.strip("/")
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    allow_patterns = [
-        f"{train_subdir}/{_METADATA_FILENAME}",
-        f"{train_subdir}/train.parquet",
-        f"{train_subdir}/val.parquet",
-        f"{test_subdir}/{_METADATA_FILENAME}",
-        f"{test_subdir}/all.parquet",
-    ]
-    needs_download = (
-        _read_murcko_subdir_metadata(
-            cache_dir,
-            train_subdir,
-            required_splits=("train", "val"),
-        )
-        is None
-        or _read_murcko_subdir_metadata(
-            cache_dir,
-            test_subdir,
-            required_splits=("all",),
-        )
-        is None
-    )
-    if needs_download:
-        _snapshot_download_rank_zero(
-            repo_id=repo_id,
-            repo_type="dataset",
-            revision=revision,
-            local_dir=cache_dir,
-            allow_patterns=allow_patterns,
-            distributed_world_size=distributed_world_size,
-            distributed_rank=distributed_rank,
-        )
-    elif _coordinate_distributed_download(distributed_world_size):
-        torch.distributed.barrier()
-    train_metadata = cast(
-        dict[str, Any],
-        _read_murcko_subdir_metadata(
-            cache_dir,
-            train_subdir,
-            required_splits=("train", "val"),
-        ),
-    )
-    test_metadata = cast(
-        dict[str, Any],
-        _read_murcko_subdir_metadata(
-            cache_dir,
-            test_subdir,
-            required_splits=("all",),
-        ),
-    )
-    metadata: dict[str, Any] = {
-        "metadata_version": 1,
-        "storage_format": "parquet",
-        "repo_id": repo_id,
-        "revision": revision,
-        "train_subdir": train_subdir,
-        "test_subdir": test_subdir,
-        "dreams_dim": int(train_metadata.get("dreams_dim", 0)),
-    }
-    metadata.update(
-        _murcko_fluorine_split_metadata(
-            train_metadata,
-            subdir=train_subdir,
-            source_split="train",
-            target_split="train",
-        )
-    )
-    metadata.update(
-        _murcko_fluorine_split_metadata(
-            train_metadata,
-            subdir=train_subdir,
-            source_split="val",
-            target_split="val",
-        )
-    )
-    metadata.update(
-        _murcko_fluorine_split_metadata(
-            test_metadata,
-            subdir=test_subdir,
-            source_split="all",
-            target_split="test",
-        )
-    )
-    return metadata
-
-
-def build_murcko_fluorine_data(
-    *,
-    cache_dir: Path,
-    batch_size: int,
-    num_peaks: int,
-    max_precursor_mz: float,
-    min_peak_intensity: float,
-    peak_drop_min_intensity: float,
-    peak_ordering: str,
-    precursor_peak_exclusion_window_da: float,
-    peak_filtering: str = DEFAULT_PEAK_FILTERING,
-    grouped_peak_shoulder_da: float = DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-    grouped_peak_isotope_charges: tuple[int, ...] = (
-        DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES
-    ),
-    repo_id: str = NIST_MURCKO_HF_REPO,
-    revision: str = "main",
-    train_subdir: str = NIST_MURCKO_PREPARED_SUBDIR,
-    test_subdir: str = MCEBIO_MURCKO_PREPARED_SUBDIR,
-    distributed_world_size: int = 1,
-    distributed_rank: int = 0,
-) -> MurckoFluorineData:
-    metadata = ensure_murcko_fluorine_data_downloaded(
-        cache_dir,
-        repo_id=repo_id,
-        revision=revision,
-        train_subdir=train_subdir,
-        test_subdir=test_subdir,
-        distributed_world_size=distributed_world_size,
-        distributed_rank=distributed_rank,
-    )
-    return MurckoFluorineData(
-        metadata=metadata,
-        root=cache_dir,
-        batch_size=batch_size,
-        num_peaks=num_peaks,
-        max_precursor_mz=max_precursor_mz,
-        min_peak_intensity=min_peak_intensity,
-        peak_drop_min_intensity=peak_drop_min_intensity,
-        peak_filtering=peak_filtering,
-        grouped_peak_shoulder_da=grouped_peak_shoulder_da,
-        grouped_peak_isotope_charges=grouped_peak_isotope_charges,
-        peak_ordering=peak_ordering,
-        precursor_peak_exclusion_window_da=precursor_peak_exclusion_window_da,
-    )
-
-
 def ensure_mona_a_probe_prepared(
     output_dir: Path,
     *,
@@ -1116,6 +826,7 @@ class _ProbeParquetDataset(Dataset):
                 "path": Path(entry["path"]),
                 "length": int(entry["length"]),
                 "morgan_files": [Path(path) for path in entry.get("morgan_files", [])],
+                "dreams_files": [Path(path) for path in entry.get("dreams_files", [])],
             }
             for entry in entries
         ]
@@ -1219,6 +930,40 @@ class _ProbeParquetDataset(Dataset):
             arrays["probe_morgan"] = (
                 morgan[local_indices] if local_indices is not None else morgan
             )
+        dreams_files = entry.get("dreams_files", [])
+        if dreams_files:
+            dreams_payloads = [
+                np.load(Path(path), allow_pickle=False) for path in dreams_files
+            ]
+            dreams = np.concatenate(
+                [
+                    payload["dreams_embedding"].astype(np.float32)
+                    for payload in dreams_payloads
+                ],
+                axis=0,
+            )
+            dreams_valid = np.concatenate(
+                [
+                    payload["dreams_embedding_valid"].astype(bool)
+                    for payload in dreams_payloads
+                ],
+                axis=0,
+            )
+            spectrum_index = np.concatenate(
+                [
+                    payload["spectrum_index"].astype(np.int64)
+                    for payload in dreams_payloads
+                ],
+                axis=0,
+            )
+            if local_indices is not None:
+                dreams = dreams[local_indices]
+                dreams_valid = dreams_valid[local_indices]
+                spectrum_index = spectrum_index[local_indices]
+            assert dreams.shape[0] == n
+            assert np.array_equal(spectrum_index, np.asarray(rows["spectrum_index"], dtype=np.int64))
+            arrays["dreams_embedding"] = dreams
+            arrays["dreams_embedding_valid"] = dreams_valid
         return arrays
 
     def _ensure_arrays(self) -> list[dict[str, np.ndarray]]:
@@ -1257,139 +1002,6 @@ class _ProbeParquetDataset(Dataset):
             else:
                 sample[key] = item
         return sample
-
-
-class _MurckoFluorineParquetDataset(Dataset):
-    def __init__(self, entries: list[dict[str, Any]]) -> None:
-        self._entries = [
-            {"path": Path(entry["path"]), "length": int(entry["length"])}
-            for entry in entries
-        ]
-        lengths = np.asarray([entry["length"] for entry in self._entries], dtype=np.int64)
-        self._starts = np.zeros(len(lengths) + 1, dtype=np.int64)
-        np.cumsum(lengths, out=self._starts[1:])
-        self._arrays: list[dict[str, np.ndarray]] | None = None
-
-    def __len__(self) -> int:
-        return int(self._starts[-1])
-
-    def _load_entry(self, entry: dict[str, Any]) -> dict[str, np.ndarray]:
-        import pyarrow.parquet as pq
-
-        table = pq.read_table(Path(entry["path"]))
-        rows = table.to_pydict()
-        arrays: dict[str, np.ndarray] = {
-            "spectra": _spectra_from_peak_lists(
-                rows["spectrum_mz"],
-                rows["spectrum_intensity"],
-            ),
-            "precursor_mz_raw": np.asarray(rows["precursor_mz"], dtype=np.float32),
-            "label": np.asarray(rows["has_fluorine"], dtype=np.float32),
-        }
-        if "dreams_embedding" in rows:
-            arrays["dreams_embedding"] = np.asarray(
-                rows["dreams_embedding"],
-                dtype=np.float32,
-            )
-        return arrays
-
-    def _ensure_arrays(self) -> list[dict[str, np.ndarray]]:
-        if self._arrays is not None:
-            return self._arrays
-        self._arrays = [self._load_entry(entry) for entry in self._entries]
-        return self._arrays
-
-    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        arrays_by_entry = self._ensure_arrays()
-        entry_idx = int(np.searchsorted(self._starts, index, side="right") - 1)
-        local_idx = index - int(self._starts[entry_idx])
-        arrays = arrays_by_entry[entry_idx]
-        sample = {
-            "spectra": torch.from_numpy(arrays["spectra"][local_idx].copy()),
-            "precursor_mz_raw": torch.tensor(
-                float(arrays["precursor_mz_raw"][local_idx]),
-                dtype=torch.float32,
-            ),
-            "label": torch.tensor(float(arrays["label"][local_idx]), dtype=torch.float32),
-            "row_idx": torch.tensor(index, dtype=torch.long),
-        }
-        if "dreams_embedding" in arrays:
-            sample["dreams_embedding"] = torch.from_numpy(
-                arrays["dreams_embedding"][local_idx].copy()
-            )
-        return sample
-
-
-class _MurckoFluorineCollator:
-    def __init__(
-        self,
-        *,
-        num_peaks: int,
-        max_precursor_mz: float,
-        min_peak_intensity: float,
-        peak_drop_min_intensity: float,
-        peak_ordering: str,
-        precursor_peak_exclusion_window_da: float,
-        dreams_only: bool,
-        peak_filtering: str = DEFAULT_PEAK_FILTERING,
-        grouped_peak_shoulder_da: float = DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-        grouped_peak_isotope_charges: tuple[int, ...] = (
-            DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES
-        ),
-    ) -> None:
-        self.num_peaks = num_peaks
-        self.max_precursor_mz = max_precursor_mz
-        self.min_peak_intensity = min_peak_intensity
-        self.peak_drop_min_intensity = peak_drop_min_intensity
-        self.peak_ordering = peak_ordering
-        self.precursor_peak_exclusion_window_da = precursor_peak_exclusion_window_da
-        self.peak_filtering = peak_filtering
-        self.grouped_peak_shoulder_da = grouped_peak_shoulder_da
-        self.grouped_peak_isotope_charges = grouped_peak_isotope_charges
-        self.dreams_only = dreams_only
-
-    def __call__(self, samples: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
-        if self.dreams_only:
-            return {
-                "dreams_embedding": torch.stack(
-                    [sample["dreams_embedding"] for sample in samples],
-                    dim=0,
-                ).to(torch.float32),
-                "label": torch.stack([sample["label"] for sample in samples]).to(
-                    torch.float32
-                ),
-                "row_idx": torch.stack([sample["row_idx"] for sample in samples]).to(
-                    torch.long
-                ),
-            }
-        spectra = torch.stack([sample["spectra"] for sample in samples], dim=0)
-        precursor_raw = torch.stack([sample["precursor_mz_raw"] for sample in samples])
-        batch = preprocess_peak_batch_torch(
-            spectra[:, 0, :],
-            spectra[:, 1, :],
-            precursor_raw,
-            num_peaks=self.num_peaks,
-            peak_drop_min_intensity=self.peak_drop_min_intensity,
-            peak_ordering=self.peak_ordering,
-            max_precursor_mz=self.max_precursor_mz,
-            precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
-            min_peak_intensity=self.min_peak_intensity,
-            peak_filtering=self.peak_filtering,
-            grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
-            grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
-        )
-        if "dreams_embedding" in samples[0]:
-            batch["dreams_embedding"] = torch.stack(
-                [sample["dreams_embedding"] for sample in samples],
-                dim=0,
-            ).to(torch.float32)
-        batch["label"] = torch.stack([sample["label"] for sample in samples]).to(
-            torch.float32
-        )
-        batch["row_idx"] = torch.stack([sample["row_idx"] for sample in samples]).to(
-            torch.long
-        )
-        return batch
 
 
 def _subset_for_max_samples(
@@ -1435,72 +1047,6 @@ def _loader_sampler(
         ),
         False,
     )
-
-
-def build_murcko_fluorine_loader(
-    data: MurckoFluorineData,
-    split: str,
-    *,
-    shuffle: bool,
-    seed: int,
-    max_samples: int | None,
-    dreams_only: bool = False,
-    drop_last: bool = False,
-    distributed_world_size: int = 1,
-    distributed_rank: int = 0,
-    num_workers: int = 0,
-) -> DataLoader:
-    dataset: Dataset = _MurckoFluorineParquetDataset(
-        [
-            {"path": data.root / path, "length": length}
-            for path, length in zip(
-                data.metadata[f"{split}_files"],
-                data.metadata[f"{split}_lengths"],
-                strict=True,
-            )
-        ]
-    )
-    dataset, shuffle = _subset_for_max_samples(
-        dataset,
-        max_samples=max_samples,
-        shuffle=shuffle,
-        seed=seed,
-    )
-    sampler, loader_shuffle = _loader_sampler(
-        dataset,
-        shuffle=shuffle,
-        seed=seed,
-        drop_last=drop_last,
-        distributed_world_size=distributed_world_size,
-        distributed_rank=distributed_rank,
-    )
-    generator = torch.Generator()
-    generator.manual_seed(seed)
-    loader_kwargs = {
-        "dataset": dataset,
-        "batch_size": probe_local_batch_size(data.batch_size, distributed_world_size),
-        "shuffle": loader_shuffle,
-        "sampler": sampler,
-        "drop_last": drop_last,
-        "num_workers": num_workers,
-        "collate_fn": _MurckoFluorineCollator(
-            num_peaks=data.num_peaks,
-            max_precursor_mz=data.max_precursor_mz,
-            min_peak_intensity=data.min_peak_intensity,
-            peak_drop_min_intensity=data.peak_drop_min_intensity,
-            peak_ordering=data.peak_ordering,
-            precursor_peak_exclusion_window_da=data.precursor_peak_exclusion_window_da,
-            peak_filtering=data.peak_filtering,
-            grouped_peak_shoulder_da=data.grouped_peak_shoulder_da,
-            grouped_peak_isotope_charges=data.grouped_peak_isotope_charges,
-            dreams_only=dreams_only,
-        ),
-        "generator": generator,
-    }
-    if num_workers > 0:
-        loader_kwargs["persistent_workers"] = True
-        loader_kwargs["prefetch_factor"] = 4
-    return DataLoader(**loader_kwargs)
 
 
 class _ProbeBatchCollator:
@@ -1587,6 +1133,11 @@ class _ProbeBatchCollator:
             batch["dreams_embedding"] = torch.stack(
                 [sample["dreams_embedding"] for sample in samples], dim=0
             ).to(torch.float32)
+        if "dreams_embedding_valid" in samples[0]:
+            batch["dreams_embedding_valid"] = torch.tensor(
+                [bool(sample["dreams_embedding_valid"]) for sample in samples],
+                dtype=torch.bool,
+            )
         return batch
 
 
@@ -1623,12 +1174,15 @@ class MassSpecProbeData(NamedTuple):
     train_files: list[str]
     train_lengths: list[int]
     train_morgan_files: list[str]
+    train_dreams_files: list[str]
     val_files: list[str]
     val_lengths: list[int]
     val_morgan_files: list[str]
+    val_dreams_files: list[str]
     test_files: list[str]
     test_lengths: list[int]
     test_morgan_files: list[str]
+    test_dreams_files: list[str]
     batch_size: int
     shuffle_buffer: int
     max_precursor_mz: float
@@ -1670,6 +1224,9 @@ class MassSpecProbeData(NamedTuple):
             == "morgan"
             or int(_config_get(config, "msg_probe_pairwise_alignment_num_pairs", 0)) > 0
         )
+        include_dreams = bool(
+            _config_get(config, "nist_murcko_probe_include_dreams_auxiliary", False)
+        )
         murcko_subdir = str(
             _config_get(
                 config,
@@ -1687,6 +1244,7 @@ class MassSpecProbeData(NamedTuple):
             revision=str(_config_get(config, "nist_murcko_probe_revision", "main")),
             subdir=murcko_subdir,
             include_morgan=include_morgan,
+            include_dreams=include_dreams,
             distributed_world_size=distributed_world_size,
             distributed_rank=distributed_rank,
         )
@@ -1694,6 +1252,7 @@ class MassSpecProbeData(NamedTuple):
         instrument_type_vocab = metadata.get("instrument_type_vocab", {"unknown": 0})
         storage_format = str(metadata.get("storage_format", "native"))
         morgan_files = metadata.get("morgan_auxiliary_files", {}) if include_morgan else {}
+        dreams_files = metadata.get("dreams_auxiliary_files", {}) if include_dreams else {}
         info = {
             "massspec_train_size": int(metadata.get("train_size", 0)),
             "massspec_val_size": int(metadata.get("val_size", 0)),
@@ -1718,6 +1277,11 @@ class MassSpecProbeData(NamedTuple):
             "pairwise_alignment_num_endpoints": int(
                 metadata.get("pairwise_alignment_num_endpoints", 0)
             ),
+            "dreams_auxiliary_available": bool(
+                include_dreams and metadata.get("dreams_auxiliary_available", False)
+            ),
+            "dreams_valid_counts": metadata.get("dreams_valid_counts", {}),
+            "dreams_invalid_counts": metadata.get("dreams_invalid_counts", {}),
         }
         pairwise_file = str(metadata.get("pairwise_alignment_file", ""))
         pairwise_alignment_path = str(output_dir / pairwise_file) if pairwise_file else ""
@@ -1741,15 +1305,24 @@ class MassSpecProbeData(NamedTuple):
             train_morgan_files=[
                 str(output_dir / name) for name in morgan_files.get("train", [])
             ],
+            train_dreams_files=[
+                str(output_dir / name) for name in dreams_files.get("train", [])
+            ],
             val_files=val_files,
             val_lengths=[int(v) for v in metadata["val_lengths"]],
             val_morgan_files=[
                 str(output_dir / name) for name in morgan_files.get("val", [])
             ],
+            val_dreams_files=[
+                str(output_dir / name) for name in dreams_files.get("val", [])
+            ],
             test_files=test_files,
             test_lengths=[int(v) for v in metadata["test_lengths"]],
             test_morgan_files=[
                 str(output_dir / name) for name in morgan_files.get("test", [])
+            ],
+            test_dreams_files=[
+                str(output_dir / name) for name in dreams_files.get("test", [])
             ],
             batch_size=int(
                 _config_get(
@@ -1848,14 +1421,33 @@ class MassSpecProbeData(NamedTuple):
                 + ([self.test_morgan_files] if self.test_files else [])
             ),
         }[split]
+        split_dreams_files = {
+            "massspec_train": [self.train_dreams_files] if self.train_files else [],
+            "massspec_val": [self.val_dreams_files] if self.val_files else [],
+            "massspec_test": [self.test_dreams_files] if self.test_files else [],
+            "train": [self.train_dreams_files] if self.train_files else [],
+            "val": [self.val_dreams_files] if self.val_files else [],
+            "test": [self.test_dreams_files] if self.test_files else [],
+            "all": (
+                ([self.train_dreams_files] if self.train_files else [])
+                + ([self.val_dreams_files] if self.val_files else [])
+                + ([self.test_dreams_files] if self.test_files else [])
+            ),
+        }[split]
         if self.storage_format == "parquet":
             dataset = _ProbeParquetDataset(
                 [
-                    {"path": path, "length": length, "morgan_files": morgan_files}
-                    for path, length, morgan_files in zip(
+                    {
+                        "path": path,
+                        "length": length,
+                        "morgan_files": morgan_files,
+                        "dreams_files": dreams_files,
+                    }
+                    for path, length, morgan_files, dreams_files in zip(
                         split_files,
                         split_lengths,
                         split_morgan_files,
+                        split_dreams_files,
                         strict=True,
                     )
                 ],
@@ -1948,14 +1540,33 @@ class MassSpecProbeData(NamedTuple):
                 + ([self.test_morgan_files] if self.test_files else [])
             ),
         }[split]
+        split_dreams_files = {
+            "massspec_train": [self.train_dreams_files] if self.train_files else [],
+            "massspec_val": [self.val_dreams_files] if self.val_files else [],
+            "massspec_test": [self.test_dreams_files] if self.test_files else [],
+            "train": [self.train_dreams_files] if self.train_files else [],
+            "val": [self.val_dreams_files] if self.val_files else [],
+            "test": [self.test_dreams_files] if self.test_files else [],
+            "all": (
+                ([self.train_dreams_files] if self.train_files else [])
+                + ([self.val_dreams_files] if self.val_files else [])
+                + ([self.test_dreams_files] if self.test_files else [])
+            ),
+        }[split]
         if self.storage_format == "parquet":
             dataset = _ProbeParquetDataset(
                 [
-                    {"path": path, "length": length, "morgan_files": morgan_files}
-                    for path, length, morgan_files in zip(
+                    {
+                        "path": path,
+                        "length": length,
+                        "morgan_files": morgan_files,
+                        "dreams_files": dreams_files,
+                    }
+                    for path, length, morgan_files, dreams_files in zip(
                         split_files,
                         split_lengths,
                         split_morgan_files,
+                        split_dreams_files,
                         strict=True,
                     )
                 ],

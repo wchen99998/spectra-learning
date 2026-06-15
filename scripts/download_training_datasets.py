@@ -35,6 +35,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Also download NIST Murcko Morgan auxiliary files.",
     )
+    parser.add_argument(
+        "--include-dreams",
+        action="store_true",
+        help="Also download NIST Murcko DreaMS auxiliary files.",
+    )
     return parser.parse_args()
 
 
@@ -46,6 +51,8 @@ def main() -> None:
 
     if args.include_morgan:
         config.msg_probe_fingerprint = "morgan"
+    if args.include_dreams:
+        config.nist_murcko_probe_include_dreams_auxiliary = True
 
     if not args.skip_gems:
         gems = GemsNativeDataModule(config, seed=int(config.seed))

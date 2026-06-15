@@ -58,7 +58,7 @@ from spectra_learning.probes.massspec.msg_probe import (
     resolve_msg_probe_select_metric,
     run_msg_probe,
 )
-from spectra_learning.probes.massspec.targets import (
+from spectra_learning.data.massspec_targets import (
     MORGAN_PROBE_FINGERPRINT_BITS,
     MORGAN_PROBE_FINGERPRINT_RADIUS,
 )

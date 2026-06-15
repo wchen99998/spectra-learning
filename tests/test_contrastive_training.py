@@ -8,8 +8,8 @@ import torch
 import torch.nn.functional as F
 from ml_collections import config_dict
 
-from spectra_learning.probes.massspec import data as massspec_data
-from spectra_learning.probes.massspec.targets import MACCS_FINGERPRINT_BITS
+from spectra_learning.data import murcko as murcko_data
+from spectra_learning.data.massspec_targets import MACCS_FINGERPRINT_BITS
 from spectra_learning.training import contrastive as contrastive_training
 from spectra_learning.training.contrastive import (
     NistMurckoContrastivePairs,
@@ -60,8 +60,8 @@ def _write_artifact(root: Path) -> None:
     for split, rows in rows_by_split.items():
         _write_split(root, split, rows)
     metadata = {
-        "metadata_version": massspec_data.NIST_MURCKO_METADATA_VERSION,
-        "artifact_format": massspec_data.NIST_MURCKO_ARTIFACT_FORMAT,
+        "metadata_version": murcko_data.NIST_MURCKO_METADATA_VERSION,
+        "artifact_format": murcko_data.NIST_MURCKO_ARTIFACT_FORMAT,
         "storage_format": "parquet",
         "max_precursor_mz": 1000.0,
         "adduct_vocab": {"[M+H]+": 0},

@@ -46,7 +46,7 @@ from spectra_learning.models.lora import (
 )
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pooling import CovariancePool, SinglePairCovariancePool
-from spectra_learning.probes.massspec.data import (
+from spectra_learning.data.murcko import (
     MCEBIO_MURCKO_PREPARED_SUBDIR,
     NIST_MURCKO_HF_REPO,
     NIST_MURCKO_PREPARED_SUBDIR,
@@ -126,6 +126,7 @@ class TrialResult(NamedTuple):
     best_val: dict[str, float]
     classifier_state: dict[str, torch.Tensor]
     pooler_state: dict[str, torch.Tensor] | None
+    history: list[dict[str, Any]]
 
 
 class MLPClassifier(torch.nn.Module):
@@ -251,14 +252,36 @@ def _prediction_arrays(
     *,
     device: torch.device,
 ) -> tuple[np.ndarray, np.ndarray]:
+    targets, logits, _ = _prediction_arrays_with_rows(
+        classifier,
+        loader,
+        feature_fn,
+        device=device,
+    )
+    return targets, logits
+
+
+@torch.no_grad()
+def _prediction_arrays_with_rows(
+    classifier: MLPClassifier,
+    loader: Any,
+    feature_fn: Callable[[dict[str, torch.Tensor]], torch.Tensor],
+    *,
+    device: torch.device,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     classifier.eval()
-    logits, targets = [], []
+    logits, targets, row_indices = [], [], []
     for batch in loader:
         batch = _move_batch(batch, device)
         features = feature_fn(batch)
         logits.append(classifier(features).detach().cpu().numpy())
         targets.append(batch["label"].detach().cpu().numpy())
-    return np.concatenate(targets, axis=0), np.concatenate(logits, axis=0)
+        row_indices.append(batch["row_idx"].detach().cpu().numpy())
+    return (
+        np.concatenate(targets, axis=0),
+        np.concatenate(logits, axis=0),
+        np.concatenate(row_indices, axis=0),
+    )
 
 
 @torch.no_grad()
@@ -268,13 +291,18 @@ def _cache_frozen_features(
     *,
     device: torch.device,
     split: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    feature_chunks, label_chunks = [], []
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    feature_chunks, label_chunks, row_chunks = [], [], []
     for batch in tqdm(loader, desc=f"cache {split} features", unit="batch", dynamic_ncols=True):
         batch = _move_batch(batch, device)
         feature_chunks.append(feature_fn(batch).detach().float().cpu())
         label_chunks.append(batch["label"].detach().float().cpu())
-    return torch.cat(feature_chunks, dim=0), torch.cat(label_chunks, dim=0)
+        row_chunks.append(batch["row_idx"].detach().cpu())
+    return (
+        torch.cat(feature_chunks, dim=0),
+        torch.cat(label_chunks, dim=0),
+        torch.cat(row_chunks, dim=0),
+    )
 
 
 def _cached_loader(
@@ -364,6 +392,7 @@ def _train_cached_trial(
     select_metric: str,
     higher_is_better: bool,
     patience: int,
+    progress_output_prefix: StoragePath | None = None,
 ) -> TrialResult:
     classifier = MLPClassifier(
         input_dim=input_dim,
@@ -381,8 +410,11 @@ def _train_cached_trial(
     best_val: dict[str, float] = {}
     best_classifier_state: dict[str, torch.Tensor] = {}
     epochs_without_improvement = 0
+    history: list[dict[str, Any]] = []
     for epoch_idx in range(epochs):
         classifier.train()
+        running_loss = 0.0
+        seen = 0
         for features, labels in train_loader:
             features = features.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
@@ -396,6 +428,8 @@ def _train_cached_trial(
             )
             loss.backward()
             optimizer.step()
+            running_loss += float(loss.detach().cpu()) * int(labels.shape[0])
+            seen += int(labels.shape[0])
 
         val_metrics = _cached_evaluate(
             classifier,
@@ -403,6 +437,18 @@ def _train_cached_trial(
             device=device,
             prefix="val",
         )
+        history.append(
+            {
+                "epoch": epoch_idx + 1,
+                "train_loss": running_loss / float(seen),
+                "val": val_metrics,
+            }
+        )
+        if progress_output_prefix is not None:
+            write_training_history_outputs(
+                output_prefix=progress_output_prefix,
+                history=history,
+            )
         current_value = _select_metric_value(val_metrics, select_metric)
         improved = (
             current_value > best_value
@@ -436,6 +482,7 @@ def _train_cached_trial(
         best_val=best_val,
         classifier_state=best_classifier_state,
         pooler_state=None,
+        history=history,
     )
 
 
@@ -453,6 +500,7 @@ def _train_trial(
     higher_is_better: bool,
     patience: int,
     build_feature_fn: Callable[[bool], tuple[Callable[[dict[str, torch.Tensor]], torch.Tensor], torch.nn.Module | None]],
+    progress_output_prefix: StoragePath | None = None,
 ) -> TrialResult:
     classifier = MLPClassifier(
         input_dim=input_dim,
@@ -475,10 +523,13 @@ def _train_trial(
     best_classifier_state: dict[str, torch.Tensor] = {}
     best_pooler_state: dict[str, torch.Tensor] | None = None
     epochs_without_improvement: int = 0
+    history: list[dict[str, Any]] = []
     for epoch_idx in range(epochs):
         classifier.train()
         if trainable_pooler is not None:
             trainable_pooler.train()
+        running_loss = 0.0
+        seen = 0
         for batch in train_loader:
             batch = _move_batch(batch, device)
             optimizer.zero_grad(set_to_none=True)
@@ -492,6 +543,8 @@ def _train_trial(
             )
             loss.backward()
             optimizer.step()
+            running_loss += float(loss.detach().cpu()) * int(batch["label"].shape[0])
+            seen += int(batch["label"].shape[0])
 
         val_metrics = _evaluate(
             classifier,
@@ -500,6 +553,18 @@ def _train_trial(
             device=device,
             prefix="val",
         )
+        history.append(
+            {
+                "epoch": epoch_idx + 1,
+                "train_loss": running_loss / float(seen),
+                "val": val_metrics,
+            }
+        )
+        if progress_output_prefix is not None:
+            write_training_history_outputs(
+                output_prefix=progress_output_prefix,
+                history=history,
+            )
         current_value = _select_metric_value(val_metrics, select_metric)
         improved = (
             current_value > best_value
@@ -538,6 +603,7 @@ def _train_trial(
         best_val=best_val,
         classifier_state=best_classifier_state,
         pooler_state=best_pooler_state,
+        history=history,
     )
 
 
@@ -922,6 +988,8 @@ def train_or_load_finetuned(
     pooling: str,
     device_ids: list[int] | None,
     select_metric: str,
+    progress_output_prefix: StoragePath | None = None,
+    eval_test_every_epoch: bool = False,
     distributed: DistributedContext | None = None,
 ) -> dict[str, Any]:
     distributed_world_size = distributed.world_size if distributed is not None else 1
@@ -1153,13 +1221,29 @@ def train_or_load_finetuned(
             autocast_dtype=autocast_dtype,
         )
         val_metrics = _metric_dict(val_targets, val_logits, "val")
-        history.append(
-            {
-                "epoch": epoch_idx + 1,
-                "train_loss": running_loss / float(seen),
-                "val": val_metrics,
-            }
-        )
+        history_row: dict[str, Any] = {
+            "epoch": epoch_idx + 1,
+            "train_loss": running_loss / float(seen),
+            "val": val_metrics,
+        }
+        if eval_test_every_epoch:
+            epoch_test_targets, epoch_test_logits = predict_finetuned(
+                finetune_module=finetune_module,
+                loader=test_loader,
+                device=device,
+                autocast_dtype=autocast_dtype,
+            )
+            history_row["test"] = _metric_dict(
+                epoch_test_targets,
+                epoch_test_logits,
+                "test",
+            )
+        history.append(history_row)
+        if is_main and progress_output_prefix is not None:
+            write_training_history_outputs(
+                output_prefix=progress_output_prefix,
+                history=history,
+            )
         current_value = val_metrics[f"val/{select_metric}"]
         if current_value > best_value:
             best_value = current_value
@@ -1233,6 +1317,8 @@ def train_or_load_lora(
     max_test_samples: int | None,
     pooling: str,
     device_ids: list[int] | None,
+    progress_output_prefix: StoragePath | None = None,
+    eval_test_every_epoch: bool = False,
     distributed: DistributedContext | None = None,
 ) -> dict[str, Any]:
     distributed_world_size = distributed.world_size if distributed is not None else 1
@@ -1459,13 +1545,29 @@ def train_or_load_lora(
             autocast_dtype=autocast_dtype,
         )
         val_metrics = _metric_dict(val_targets, val_logits, "val")
-        history.append(
-            {
-                "epoch": epoch_idx + 1,
-                "train_loss": running_loss / float(seen),
-                "val": val_metrics,
-            }
-        )
+        history_row: dict[str, Any] = {
+            "epoch": epoch_idx + 1,
+            "train_loss": running_loss / float(seen),
+            "val": val_metrics,
+        }
+        if eval_test_every_epoch:
+            epoch_test_targets, epoch_test_logits = predict_finetuned(
+                finetune_module=finetune_module,
+                loader=test_loader,
+                device=device,
+                autocast_dtype=autocast_dtype,
+            )
+            history_row["test"] = _metric_dict(
+                epoch_test_targets,
+                epoch_test_logits,
+                "test",
+            )
+        history.append(history_row)
+        if is_main and progress_output_prefix is not None:
+            write_training_history_outputs(
+                output_prefix=progress_output_prefix,
+                history=history,
+            )
         current_value = val_metrics["val/average_precision"]
         if current_value > best_value:
             best_value = current_value
@@ -1663,12 +1765,40 @@ def write_training_curve_plot(
     train_loss = [float(row["train_loss"]) for row in history]
     val_ap = [float(row["val"]["val/average_precision"]) for row in history]
     val_auc = [float(row["val"]["val/roc_auc"]) for row in history]
+    test_epochs = [int(row["epoch"]) for row in history if "test" in row]
+    test_ap = [
+        float(row["test"]["test/average_precision"])
+        for row in history
+        if "test" in row
+    ]
+    test_auc = [
+        float(row["test"]["test/roc_auc"])
+        for row in history
+        if "test" in row
+    ]
 
     fig, loss_ax = plt.subplots(figsize=(7, 4.6), dpi=180)
     metric_ax = loss_ax.twinx()
     loss_ax.plot(epochs, train_loss, color="#2458a6", marker="o", label="Train loss")
     metric_ax.plot(epochs, val_ap, color="#16a34a", marker="o", label="Val AP")
     metric_ax.plot(epochs, val_auc, color="#b45309", marker="o", label="Val ROC AUC")
+    if test_epochs:
+        metric_ax.plot(
+            test_epochs,
+            test_ap,
+            color="#7c3aed",
+            marker="s",
+            linestyle="--",
+            label="Test AP",
+        )
+        metric_ax.plot(
+            test_epochs,
+            test_auc,
+            color="#dc2626",
+            marker="s",
+            linestyle="--",
+            label="Test ROC AUC",
+        )
     loss_ax.set_xlabel("Epoch")
     loss_ax.set_ylabel("Train focal loss")
     metric_ax.set_ylabel("Validation metric")
@@ -1687,6 +1817,22 @@ def write_training_curve_plot(
     _write_figure(plot_path, fig)
     plt.close(fig)
     return str(plot_path)
+
+
+def write_training_history_outputs(
+    *,
+    output_prefix: StoragePath,
+    history: list[dict[str, Any]],
+) -> dict[str, str | None]:
+    history_path = storage_with_suffix(output_prefix, ".history.json")
+    write_text(history_path, json.dumps(history, indent=2, sort_keys=True))
+    return {
+        "history": str(history_path),
+        "training_curve_plot": write_training_curve_plot(
+            output_prefix=output_prefix,
+            history=history,
+        ),
+    }
 
 
 def write_standard_fluorine_outputs(
@@ -2071,12 +2217,23 @@ def parse_device_ids(raw: str | None) -> list[int] | None:
 def run_probe(args: argparse.Namespace) -> dict[str, Any]:
     device = torch.device(args.device)
     checkpoint_path = resolve_checkpoint_path(args.checkpoint, getattr(args, "workdir", None))
+    config_path = args.config.expanduser().resolve()
     checkpoint_config, model = _load_checkpoint_model(
-        args.config.expanduser().resolve(),
+        config_path,
         checkpoint_path,
         device,
     )
     cache_dir = args.cache_dir.expanduser().resolve()
+    output_prefix = (
+        normalize_storage_path(args.output_prefix)
+        if getattr(args, "output_prefix", None) is not None
+        else default_output_prefix("probe").resolve()
+    )
+    head_state_path = (
+        normalize_storage_path(args.output_state)
+        if getattr(args, "output_state", None)
+        else default_state_path("probe").resolve()
+    )
     data = build_murcko_fluorine_data(
         cache_dir=cache_dir,
         batch_size=int(args.batch_size),
@@ -2190,6 +2347,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
     ]
     select_metric = f"val/{args.select_metric}"
     higher_is_better = args.select_metric not in {"loss"}
+    progress_output_prefix = output_prefix if len(trial_params) == 1 else None
 
     if bool(args.train_covariance_pooler):
         results = [
@@ -2206,6 +2364,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 higher_is_better=higher_is_better,
                 patience=args.patience,
                 build_feature_fn=build_feature_fn,
+                progress_output_prefix=progress_output_prefix,
             )
             for params in trial_params
         ]
@@ -2224,7 +2383,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             device=device,
             build_feature_fn=build_feature_fn,
         )
-        test_targets, test_logits = _prediction_arrays(
+        test_targets, test_logits, test_row_indices_np = _prediction_arrays_with_rows(
             classifier,
             test_loader,
             feature_fn,
@@ -2232,19 +2391,19 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         )
     else:
         feature_fn, _ = build_feature_fn(False)
-        train_features, train_labels = _cache_frozen_features(
+        train_features, train_labels, _ = _cache_frozen_features(
             train_loader,
             feature_fn,
             device=device,
             split="train",
         )
-        val_features, val_labels = _cache_frozen_features(
+        val_features, val_labels, _ = _cache_frozen_features(
             val_loader,
             feature_fn,
             device=device,
             split="val",
         )
-        test_features, test_labels = _cache_frozen_features(
+        test_features, test_labels, test_row_indices = _cache_frozen_features(
             test_loader,
             feature_fn,
             device=device,
@@ -2284,6 +2443,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 select_metric=select_metric,
                 higher_is_better=higher_is_better,
                 patience=args.patience,
+                progress_output_prefix=progress_output_prefix,
             )
             for params in trial_params
         ]
@@ -2308,6 +2468,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             test_feature_loader,
             device=device,
         )
+        test_row_indices_np = test_row_indices.numpy()
 
     test_metrics = _metric_dict(test_targets, test_logits, "test")
     payload: dict[str, Any] = {
@@ -2338,32 +2499,73 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             for result in results
         ],
     }
-    if args.output_state:
-        save_torch_checkpoint(
-            {
-                "mode": "probe",
-                "input_dim": int(input_dim),
-                "covariance_dim": int(
-                    args.covariance_dim
-                    if args.covariance_dim is not None
-                    else _config_get(checkpoint_config, "covariance_pooling_dim", 32)
-                ),
-                "pooling": args.pooling,
-                "pair_dim": int(_config_get(checkpoint_config, "pairmixer_pair_dim", checkpoint_config.model_dim)),
-                "pooler_state": _tensor_state_to_cpu(best.pooler_state),
-                "classifier_state": _tensor_state_to_cpu(best.classifier_state),
-                "best_epoch": int(best.best_epoch),
-                "best_val": best.best_val,
-                "hparams": best.params._asdict(),
-                "focal_alpha": focal_alpha,
-                "focal_gamma": float(args.focal_gamma),
-                "train_size": int(metadata["train_size"]),
-                "train_positive": int(metadata["train_positive"]),
-                "val_size": int(metadata["val_size"]),
-                "val_positive": int(metadata["val_positive"]),
-            },
-            normalize_storage_path(args.output_state),
+    head_state = {
+        "mode": "probe",
+        "complete": True,
+        "config_path": str(config_path),
+        "checkpoint_path": str(checkpoint_path),
+        "input_dim": int(input_dim),
+        "covariance_dim": int(
+            args.covariance_dim
+            if args.covariance_dim is not None
+            else _config_get(checkpoint_config, "covariance_pooling_dim", 32)
+        ),
+        "pooling": args.pooling,
+        "pair_dim": int(
+            _config_get(checkpoint_config, "pairmixer_pair_dim", checkpoint_config.model_dim)
+        ),
+        "pooler_state": _tensor_state_to_cpu(best.pooler_state),
+        "classifier_state": _tensor_state_to_cpu(best.classifier_state),
+        "best_epoch": int(best.best_epoch),
+        "best_val": best.best_val,
+        "test": test_metrics,
+        "history": best.history,
+        "hparams": best.params._asdict(),
+        "focal_alpha": focal_alpha,
+        "focal_gamma": float(args.focal_gamma),
+        "train_size": int(metadata["train_size"]),
+        "train_positive": int(metadata["train_positive"]),
+        "val_size": int(metadata["val_size"]),
+        "val_positive": int(metadata["val_positive"]),
+        "max_train_samples": args.max_train_samples,
+        "max_val_samples": args.max_val_samples,
+    }
+    save_torch_checkpoint(head_state, head_state_path)
+    summary = write_standard_fluorine_outputs(
+        output_prefix=output_prefix,
+        config_path=config_path,
+        checkpoint_path=checkpoint_path,
+        head_state_path=head_state_path,
+        data=data,
+        targets=test_targets,
+        logits=test_logits,
+        row_indices=test_row_indices_np,
+        head_state=head_state,
+    )
+    if args.comparison_dir is not None:
+        comparison = write_dreams_comparison(
+            output_prefix=output_prefix,
+            comparison_dir=args.comparison_dir.expanduser().resolve(),
+            summary=summary,
+            previous_ours_prefix=None,
         )
+        summary["comparison"] = comparison
+    curve_dirs: list[StoragePath] = [storage_parent(output_prefix)]
+    if args.comparison_dir is not None:
+        curve_dirs.append(args.comparison_dir.expanduser().resolve())
+    summary["all_pr_curves"] = write_all_pr_curve_comparison(
+        output_prefix=output_prefix,
+        curve_dirs=curve_dirs,
+    )
+    write_text(
+        storage_with_suffix(output_prefix, ".summary.json"),
+        json.dumps(summary, indent=2, sort_keys=True),
+    )
+    payload["standard_outputs"] = {
+        "summary": str(storage_with_suffix(output_prefix, ".summary.json")),
+        "state": str(head_state_path),
+        "output_prefix": str(output_prefix),
+    }
     if args.output_json:
         write_text(
             normalize_storage_path(args.output_json),
@@ -2434,6 +2636,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             pooling=args.pooling,
             device_ids=device_ids,
             select_metric=args.select_metric,
+            progress_output_prefix=output_prefix,
+            eval_test_every_epoch=bool(getattr(args, "eval_test_every_epoch", False)),
             distributed=distributed,
         )
     elif mode == "lora":
@@ -2465,6 +2669,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             max_test_samples=args.max_test_samples,
             pooling=args.pooling,
             device_ids=device_ids,
+            progress_output_prefix=output_prefix,
+            eval_test_every_epoch=bool(getattr(args, "eval_test_every_epoch", False)),
             distributed=distributed,
         )
     else:

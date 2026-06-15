@@ -31,7 +31,7 @@ from spectra_learning.probes.massspec.data import (
     MassSpecProbeData,
     probe_local_batch_size,
 )
-from spectra_learning.probes.massspec.targets import MACCS_FINGERPRINT_BITS
+from spectra_learning.data.massspec_targets import MACCS_FINGERPRINT_BITS
 from spectra_learning.training.api import (
     build_grad_scaler,
     build_logger,

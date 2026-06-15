@@ -41,7 +41,7 @@ from spectra_learning.probes.massspec.msg_settings import (
     resolve_msg_probe_pairwise_alignment_num_pairs,
     resolve_msg_probe_sample_limits,
 )
-from spectra_learning.probes.massspec.targets import FG_SMARTS
+from spectra_learning.data.massspec_targets import FG_SMARTS
 from spectra_learning.training.distributed import DistributedContext
 from spectra_learning.training.schedules import learning_rate_at_step
 
@@ -1661,6 +1661,7 @@ def _run_dreams_probe_once(
     )
     peak_ordering = str(_config_get(config, "peak_ordering", "intensity"))
     fingerprint_task = resolve_msg_probe_fingerprint(config)
+    config.nist_murcko_probe_include_dreams_auxiliary = True
     probe_data = MassSpecProbeData.from_config(config)
 
     dreams_dim = probe_data.dreams_dim

@@ -5,7 +5,7 @@ import torch
 from ml_collections import config_dict
 from torch.utils.data.distributed import DistributedSampler
 
-from spectra_learning.probes.massspec.targets import MACCS_FINGERPRINT_BITS
+from spectra_learning.data.massspec_targets import MACCS_FINGERPRINT_BITS
 from spectra_learning.training.contrastive import (
     ContrastiveSplit,
     WeightedOnlineSampler,

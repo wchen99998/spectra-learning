@@ -23,7 +23,7 @@ from spectra_learning.data.spectra import (
 from spectra_learning.probes.massspec.data import MassSpecProbeData
 from spectra_learning.probes.massspec.msg_probe import iter_massspec_probe
 from spectra_learning.probes.massspec.msg_settings import resolve_msg_probe_sample_limits
-from spectra_learning.probes.massspec.targets import MACCS_FINGERPRINT_BITS
+from spectra_learning.data.massspec_targets import MACCS_FINGERPRINT_BITS
 from spectra_learning.training.api import load_config, parse_autocast_dtype
 from spectra_learning.training.checkpointing import (
     load_resume_covariance_pooler_state,
