@@ -21,8 +21,6 @@ from spectra_learning.data.spectra import (
     preprocess_peak_batch_torch,
 )
 from spectra_learning.data.massspec_probe import MassSpecProbeData
-from spectra_learning.probes.massspec.msg_probe import iter_massspec_probe
-from spectra_learning.probes.massspec.msg_settings import resolve_msg_probe_sample_limits
 from spectra_learning.data.massspec_targets import MACCS_FINGERPRINT_BITS
 from spectra_learning.training.api import load_config, parse_autocast_dtype
 from spectra_learning.training.checkpointing import (
@@ -110,7 +108,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--split", choices=("train", "val", "test"), default="test")
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--max-samples", type=int, default=None)
-    parser.add_argument("--msg-probe-sampling", action="store_true")
     parser.add_argument("--overrides-json", default="{}")
     parser.add_argument("--metrics-json", default="")
     parser.add_argument("--logits-npz", default="")
@@ -143,81 +140,47 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
     module.to(device).eval()
     autocast_dtype = parse_autocast_dtype(config.get("autocast_dtype", "bf16"))
     batch_size = args.batch_size or int(config.get("msg_probe_batch_size", 256))
-    if args.msg_probe_sampling:
-        config.msg_probe_batch_size = batch_size
-        max_train_samples, max_val_samples, max_test_samples, randomize_test_subset = (
-            resolve_msg_probe_sample_limits(config)
-        )
-        max_samples_by_split = {
-            "train": max_train_samples,
-            "val": max_val_samples,
-            "test": max_test_samples,
-        }
-        seeds_by_split = {
-            "train": int(config.seed) + 1_100_000,
-            "val": int(config.seed) + 1_110_000,
-            "test": int(config.seed) + 1_200_000,
-        }
-        random_by_split = {
-            "train": False,
-            "val": True,
-            "test": randomize_test_subset,
-        }
-        loader = iter_massspec_probe(
-            probe_data,
-            f"massspec_{args.split}",
-            seed=seeds_by_split[args.split],
-            peak_ordering=str(config.get("peak_ordering", "mz")),
-            drop_remainder=False,
-            max_samples=(
-                args.max_samples
-                if args.max_samples is not None
-                else max_samples_by_split[args.split]
+    split_files = {
+        "train": probe_data.train_files,
+        "val": probe_data.val_files,
+        "test": probe_data.test_files,
+    }[args.split]
+    split = _load_contrastive_split(split_files, max_samples=args.max_samples)
+    loader = DataLoader(
+        ContrastiveOnlineEvalDataset(split),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=int(config.get("dataloader_num_workers", 0)),
+        pin_memory=bool(config.get("dataloader_pin_memory", False)),
+        collate_fn=ContrastiveOnlineEvalCollator(
+            split,
+            num_peaks=int(config.get("num_peaks", 60)),
+            max_precursor_mz=float(
+                config.get("max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
             ),
-            sample_randomly=random_by_split[args.split],
-        )
-    else:
-        split_files = {
-            "train": probe_data.train_files,
-            "val": probe_data.val_files,
-            "test": probe_data.test_files,
-        }[args.split]
-        split = _load_contrastive_split(split_files, max_samples=args.max_samples)
-        loader = DataLoader(
-            ContrastiveOnlineEvalDataset(split),
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=int(config.get("dataloader_num_workers", 0)),
-            pin_memory=bool(config.get("dataloader_pin_memory", False)),
-            collate_fn=ContrastiveOnlineEvalCollator(
-                split,
-                num_peaks=int(config.get("num_peaks", 60)),
-                max_precursor_mz=float(
-                    config.get("max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
-                ),
-                min_peak_intensity=float(
-                    config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)
-                ),
-                peak_drop_min_intensity=float(
-                    config.get(
-                        "peak_drop_min_intensity",
-                        config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY),
-                    )
-                ),
-                peak_ordering=str(config.get("peak_ordering", "mz")),
-                precursor_peak_exclusion_window_da=float(
-                    config.get("precursor_peak_exclusion_window_da", 0.0)
-                ),
-                peak_filtering=str(config.get("peak_filtering", DEFAULT_PEAK_FILTERING)),
-                grouped_peak_shoulder_da=float(
-                    config.get(
-                        "grouped_peak_shoulder_da",
-                        DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-                    )
-                ),
-                grouped_peak_isotope_charges=tuple(
-                    int(charge)
-                    for charge in config.get(
+            min_peak_intensity=float(
+                config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)
+            ),
+            peak_drop_min_intensity=float(
+                config.get(
+                    "peak_drop_min_intensity",
+                    config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY),
+                )
+            ),
+            peak_ordering=str(config.get("peak_ordering", "mz")),
+            precursor_peak_exclusion_window_da=float(
+                config.get("precursor_peak_exclusion_window_da", 0.0)
+            ),
+            peak_filtering=str(config.get("peak_filtering", DEFAULT_PEAK_FILTERING)),
+            grouped_peak_shoulder_da=float(
+                config.get(
+                    "grouped_peak_shoulder_da",
+                    DEFAULT_GROUPED_PEAK_SHOULDER_DA,
+                )
+            ),
+            grouped_peak_isotope_charges=tuple(
+                int(charge)
+                for charge in config.get(
                         "grouped_peak_isotope_charges",
                         DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
                     )

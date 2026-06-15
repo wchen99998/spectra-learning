@@ -596,13 +596,14 @@ def _init_probe_output(linear: torch.nn.Module) -> None:
 
 
 def _probe_task_names(task_spec: MsgProbeTaskSpec) -> tuple[str, ...]:
+    task_names = task_spec.regression_tasks + task_spec.binary_tasks
     if task_spec.maccs_bits > 0:
-        return (task_spec.fingerprint_task,)
-    return task_spec.regression_tasks
+        task_names += (task_spec.fingerprint_task,)
+    return task_names
 
 
 def _probe_prediction_names(task_spec: MsgProbeTaskSpec) -> tuple[str, ...]:
-    task_names = task_spec.regression_tasks
+    task_names = task_spec.regression_tasks + task_spec.binary_tasks
     if task_spec.maccs_bits > 0:
         task_names += (task_spec.fingerprint_task,)
     return task_names

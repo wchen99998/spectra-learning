@@ -30,7 +30,6 @@ from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pooling import CovariancePool
 from spectra_learning.data.massspec_probe import MassSpecProbeData
 from spectra_learning.probes.massspec.msg_probe import iter_massspec_probe
-from spectra_learning.probes.massspec.msg_settings import resolve_msg_probe_sample_limits
 from spectra_learning.training.checkpointing import load_torch_checkpoint
 from spectra_learning.training.storage import StoragePath, normalize_storage_path
 
@@ -79,30 +78,11 @@ def _load_checkpoint_for_encoder(
         weights_only=True,
     )
     raw_state = checkpoint["model"] if "model" in checkpoint else checkpoint["state_dict"]
-    state = {
-        key: value
-        for key, value in raw_state.items()
-        if not key.startswith("covariance_pooler.")
-    }
-    target = model.state_dict()
-    matched = {
-        key: value
-        for key, value in state.items()
-        if key in target and tuple(value.shape) == tuple(target[key].shape)
-    }
-    model.load_state_dict(matched, strict=False)
-    skipped = len(state) - len(matched)
-    log.info(
-        "loaded %d checkpoint tensors; skipped %d shape/name mismatches",
-        len(matched),
-        skipped,
-    )
+    model.load_state_dict(raw_state)
     return {
         "global_step": checkpoint.get("global_step", None),
         "epoch": checkpoint.get("epoch", None),
         "loss": checkpoint.get("loss", None),
-        "loaded_tensors": len(matched),
-        "skipped_tensors": skipped,
     }
 
 
@@ -193,9 +173,6 @@ def train_covariance_pooler(
         lr=learning_rate,
         weight_decay=weight_decay,
     )
-    default_train_samples, _, _, _ = resolve_msg_probe_sample_limits(config)
-    if max_train_samples is None:
-        max_train_samples = default_train_samples
     peak_ordering = str(_config_get(config, "peak_ordering", "mz"))
     losses: list[float] = []
     samples_seen = 0

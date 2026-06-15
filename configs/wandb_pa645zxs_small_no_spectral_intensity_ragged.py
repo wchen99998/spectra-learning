@@ -24,9 +24,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.min_learning_rate = 1e-05
     cfg.warmup_steps = 10_000
     cfg.b2 = 0.95
-    cfg.nist_murcko_probe_train_samples = 60_000
-    cfg.nist_murcko_probe_val_samples = 10_000
-    cfg.nist_murcko_probe_test_samples = 10_000
 
     del cfg["jepa_mask_strategy"]
     cfg.jepa_mask_strategy = ["intensity_aware", "ragged"]

@@ -89,6 +89,26 @@ def _optimizer_config(**overrides) -> config_dict.ConfigDict:
     return cfg
 
 
+def test_msg_probe_interval_zero_runs_at_final_training_step():
+    cfg = config_dict.ConfigDict()
+    cfg.msg_probe_every_n_steps = 0
+    cfg.num_epochs = 2
+
+    datamodule = SimpleNamespace(train_steps=10)
+
+    assert pretrain.msg_probe_interval(cfg, datamodule, total_steps=23) == 23
+
+
+def test_msg_probe_interval_negative_disables_probe():
+    cfg = config_dict.ConfigDict()
+    cfg.msg_probe_every_n_steps = -1
+    cfg.num_epochs = 2
+
+    datamodule = SimpleNamespace(train_steps=10)
+
+    assert pretrain.msg_probe_interval(cfg, datamodule, total_steps=23) == -1
+
+
 class _FakePbar:
     def __init__(self) -> None:
         self.postfix = None
@@ -980,7 +1000,7 @@ def test_training_loop_resumes_with_offset_loader(monkeypatch, tmp_path: Path):
     cfg.log_every_n_steps = 0
     cfg.collapse_metrics_every_n_steps = 0
     cfg.checkpoint_every_steps = 1000
-    cfg.msg_probe_every_n_steps = 0
+    cfg.msg_probe_every_n_steps = -1
     cfg.device_prefetch_size = 1
 
     class FakeDataModule:
@@ -1032,7 +1052,7 @@ def test_training_loop_counts_optimizer_steps_with_gradient_accumulation(
     cfg.log_every_n_steps = 0
     cfg.collapse_metrics_every_n_steps = 0
     cfg.checkpoint_every_steps = 1000
-    cfg.msg_probe_every_n_steps = 0
+    cfg.msg_probe_every_n_steps = -1
     cfg.device_prefetch_size = 1
     cfg.gradient_accumulation_steps = 2
 
@@ -1084,7 +1104,7 @@ def test_training_loop_continues_while_checkpoint_save_is_pending(monkeypatch, t
     cfg.log_every_n_steps = 0
     cfg.collapse_metrics_every_n_steps = 0
     cfg.checkpoint_every_steps = 1
-    cfg.msg_probe_every_n_steps = 0
+    cfg.msg_probe_every_n_steps = -1
     cfg.device_prefetch_size = 1
     cfg.throughput_warmup_steps = 1000
 
@@ -1151,7 +1171,7 @@ def test_training_loop_writes_fsspec_checkpoint_dir(monkeypatch):
     cfg.log_every_n_steps = 0
     cfg.collapse_metrics_every_n_steps = 0
     cfg.checkpoint_every_steps = 1
-    cfg.msg_probe_every_n_steps = 0
+    cfg.msg_probe_every_n_steps = -1
     cfg.device_prefetch_size = 1
     cfg.throughput_warmup_steps = 1000
 
@@ -1198,7 +1218,7 @@ def test_training_loop_stops_when_signal_requested(monkeypatch, tmp_path: Path):
     cfg.log_every_n_steps = 0
     cfg.collapse_metrics_every_n_steps = 0
     cfg.checkpoint_every_steps = 1000
-    cfg.msg_probe_every_n_steps = 0
+    cfg.msg_probe_every_n_steps = -1
     cfg.device_prefetch_size = 1
 
     class FakeDataModule:
@@ -1620,6 +1640,27 @@ def test_load_resume_model_state_rejects_missing_ema_target_projector():
     restored = _small_model(use_ema_teacher=True)
     with pytest.raises(RuntimeError, match="Missing key"):
         load_resume_model_state(restored, resume_state)
+
+
+def test_load_resume_model_state_rejects_embedded_covariance_pooler_keys():
+    model = _small_model()
+    resume_state = model.state_dict()
+    resume_state["covariance_pooler.left_proj.weight"] = torch.randn(4, model.model_dim)
+
+    restored = _small_model()
+    with pytest.raises(RuntimeError, match="Unexpected key"):
+        load_resume_model_state(restored, resume_state)
+
+
+def test_load_resume_covariance_pooler_state_requires_sidecar_key():
+    model = _small_model()
+    pooler = CovariancePool(input_dim=model.model_dim, compressed_dim=4)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "step-00000012.pt"
+        ckpt = {"model": model.state_dict()}
+        with pytest.raises(KeyError, match="covariance_pooler_checkpoint"):
+            load_resume_covariance_pooler_state(pooler, path, ckpt)
 
 
 def test_wandb_logger_defines_msg_probe_global_step(monkeypatch, tmp_path: Path):

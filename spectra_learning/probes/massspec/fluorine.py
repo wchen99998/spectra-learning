@@ -621,7 +621,7 @@ def _load_checkpoint_model(
 ) -> tuple[config_dict.ConfigDict, PeakSetJEPA]:
     config = load_config(config_path)
     model = build_model_from_config(config)
-    load_pretrained_weights(model, checkpoint_path, strict=False)
+    load_pretrained_weights(model, checkpoint_path)
     model.to(device)
     model.eval()
     model.requires_grad_(False)

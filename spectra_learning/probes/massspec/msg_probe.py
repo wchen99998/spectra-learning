@@ -29,6 +29,7 @@ from spectra_learning.probes.massspec.msg_settings import (
     MACCS_TASK as _MACCS_TASK,
     MORGAN_TASK as _MORGAN_TASK,
     PROBE_FINGERPRINT_BITS as _PROBE_FINGERPRINT_BITS,
+    BINARY_PROBE_TASKS as _BINARY_PROBE_TASKS,
     REGRESSION_PROBE_TASKS as _REGRESSION_PROBE_TASKS,
     MsgProbePairwiseAlignment,
     MsgProbeSplitTargets,
@@ -37,7 +38,7 @@ from spectra_learning.probes.massspec.msg_settings import (
     resolve_msg_probe_fingerprint,
     resolve_msg_probe_num_repeats,
     resolve_msg_probe_pairwise_alignment_num_pairs,
-    resolve_msg_probe_sample_limits,
+    validate_msg_probe_config,
 )
 from spectra_learning.data.massspec_targets import FG_SMARTS
 from spectra_learning.training.distributed import DistributedContext
@@ -178,6 +179,7 @@ def _collect_split_targets(
     distributed: DistributedContext | None = None,
 ) -> MsgProbeSplitTargets:
     regression = {name: [] for name in _REGRESSION_PROBE_TASKS}
+    binary = {name: [] for name in _BINARY_PROBE_TASKS}
     maccs = []
     fingerprint_key = f"probe_{fingerprint_task}"
     for batch in iter_massspec_probe(
@@ -200,6 +202,10 @@ def _collect_split_targets(
             regression[name].append(
                 batch[f"probe_{name}"][valid_mask].detach().cpu().numpy()
             )
+        for name in _BINARY_PROBE_TASKS:
+            binary[name].append(
+                batch[f"probe_{name}"][valid_mask].detach().cpu().numpy()
+            )
         maccs.append(batch[fingerprint_key][valid_mask].detach().cpu().numpy())
 
     def _cat(d, dt):
@@ -209,6 +215,7 @@ def _collect_split_targets(
 
     targets = MsgProbeSplitTargets(
         regression=_cat(regression, np.float32),
+        binary=_cat(binary, np.float32),
         maccs=(
             np.concatenate(maccs, axis=0)
             if maccs
@@ -242,12 +249,23 @@ def _merge_split_targets(
         )
         for name in _REGRESSION_PROBE_TASKS
     }
+    binary = {
+        name: (
+            np.concatenate(
+                [target.binary[name] for target in targets],
+                axis=0,
+            )
+            if targets
+            else np.empty(0, dtype=np.float32)
+        )
+        for name in _BINARY_PROBE_TASKS
+    }
     maccs = (
         np.concatenate([target.maccs for target in targets], axis=0)
         if targets
         else np.empty((0, _PROBE_FINGERPRINT_BITS[fingerprint_task]), dtype=np.int32)
     )
-    return MsgProbeSplitTargets(regression=regression, maccs=maccs)
+    return MsgProbeSplitTargets(regression=regression, binary=binary, maccs=maccs)
 
 
 def _build_task_spec(
@@ -263,6 +281,7 @@ def _build_task_spec(
         regression_stds[name] = float(np.clip(values.std(), 1e-8, None))
     return MsgProbeTaskSpec(
         regression_tasks=_REGRESSION_PROBE_TASKS,
+        binary_tasks=_BINARY_PROBE_TASKS,
         maccs_bits=int(train_targets.maccs.shape[1]),
         regression_means=regression_means,
         regression_stds=regression_stds,
@@ -293,6 +312,12 @@ def _build_probe_result(
             pred = joint_logits[:, regression_idx]
         losses[name] = F.mse_loss(pred, (target - mean) / std)
         predictions[name] = pred.detach() * std + mean
+        task_targets[name] = target
+    for name in task_spec.binary_tasks:
+        target = batch[f"probe_{name}"][valid_mask].to(dtype=torch.float32)
+        pred = logits[name].squeeze(-1)
+        losses[name] = F.binary_cross_entropy_with_logits(pred, target)
+        predictions[name] = torch.sigmoid(pred.detach())
         task_targets[name] = target
     if task_spec.maccs_bits > 0:
         fingerprint_task = task_spec.fingerprint_task
@@ -939,17 +964,12 @@ def _resolve_probe_warmup_steps(config: Any, steps_per_epoch: int) -> int:
 def resolve_msg_probe_select_metric(
     config: Any,
 ) -> str:
-    if (
-        "msg_probe_select_metric" not in config
-        and "msg_probe_tune_metric" not in config
-    ):
-        fingerprint_task = resolve_msg_probe_fingerprint(config)
-        return f"msg_probe/test/auc_{fingerprint_task}_mean"
+    validate_msg_probe_config(config)
     return str(
         _config_get(
             config,
             "msg_probe_select_metric",
-            _config_get(config, "msg_probe_tune_metric", "msg_probe/test/auc_maccs_mean"),
+            "msg_probe/test/auc_fluorine",
         )
     )
 
@@ -968,23 +988,6 @@ def _msg_probe_variant_metric_key(
     if metric_key.startswith("msg_probe/"):
         return variant_prefix + metric_key[len("msg_probe/"):]
     return metric_key
-
-
-def _with_mean_probe_aliases(metrics: dict[str, float]) -> dict[str, float]:
-    aliased = dict(metrics)
-    for split in ("train", "test"):
-        mean_prefix = f"msg_probe/mean/{split}/"
-        legacy_prefix = f"msg_probe/{split}/"
-        for key, value in metrics.items():
-            if key.startswith(mean_prefix):
-                aliased[legacy_prefix + key[len(mean_prefix):]] = value
-    for fingerprint_task in (_MACCS_TASK, _MORGAN_TASK):
-        source_key = f"msg_probe/mean/num_{fingerprint_task}_bits"
-        if source_key in metrics:
-            aliased[f"msg_probe/num_{fingerprint_task}_bits"] = metrics[source_key]
-    if "msg_probe/mean/epoch" in metrics:
-        aliased["msg_probe_epoch"] = metrics["msg_probe/mean/epoch"]
-    return aliased
 
 
 def _average_metric_dicts(
@@ -1060,6 +1063,41 @@ def _score_epoch_state(
         metrics[f"{prefix}/mae_{name}"] = float(np.mean(np.abs(target - pred)))
         regression_r2_values.append(metrics[f"{prefix}/r2_{name}"])
         regression_mae_values.append(metrics[f"{prefix}/mae_{name}"])
+    for name in task_spec.binary_tasks:
+        pred = np.concatenate(predictions[name], axis=0).astype(np.float64)
+        target = np.concatenate(targets[name], axis=0).astype(np.float64)
+        positives = float(target.sum())
+        negatives = float(target.shape[0]) - positives
+        if positives > 0 and negatives > 0:
+            order = np.argsort(pred)
+            target_ordered = target[order]
+            negatives_before = np.cumsum(1.0 - target_ordered)
+            auc = float((target_ordered * negatives_before).sum() / (positives * negatives))
+            target_descending = target_ordered[::-1]
+            true_positives_at_rank = np.cumsum(target_descending)
+            ranks = np.arange(1, target_descending.shape[0] + 1, dtype=np.float64)
+            average_precision = float(
+                (target_descending * true_positives_at_rank / ranks).sum()
+                / positives
+            )
+        else:
+            auc = float("nan")
+            average_precision = float("nan")
+        predicted = pred >= 0.5
+        target_bits = target > 0
+        true_positives = float(np.count_nonzero(predicted & target_bits))
+        predicted_positives = float(np.count_nonzero(predicted))
+        metrics[f"{prefix}/positive_{name}"] = positives
+        metrics[f"{prefix}/auc_{name}"] = auc
+        metrics[f"{prefix}/average_precision_{name}"] = average_precision
+        metrics[f"{prefix}/recall_{name}"] = (
+            true_positives / positives if positives > 0 else float("nan")
+        )
+        metrics[f"{prefix}/precision_{name}"] = (
+            true_positives / predicted_positives
+            if predicted_positives > 0
+            else float("nan")
+        )
     if task_spec.maccs_bits > 0:
         fingerprint_task = task_spec.fingerprint_task
         pred = np.concatenate(predictions[fingerprint_task], axis=0)
@@ -1175,9 +1213,6 @@ def _run_msg_probe_once(
     early_stopping_min_epochs = int(
         _config_get(config, "msg_probe_early_stopping_min_epochs", 1)
     )
-    max_train_samples, max_val_samples, max_test_samples, randomize_test_subset = (
-        resolve_msg_probe_sample_limits(config)
-    )
     peak_ordering = str(_config_get(config, "peak_ordering", "intensity"))
     fingerprint_task = resolve_msg_probe_fingerprint(config)
     probe_data = MassSpecProbeData.from_config(
@@ -1215,7 +1250,6 @@ def _run_msg_probe_once(
         split="massspec_train",
         peak_ordering=peak_ordering,
         seed=train_seed_base,
-        max_samples=max_train_samples,
         fingerprint_task=fingerprint_task,
         distributed=distributed,
     )
@@ -1224,8 +1258,6 @@ def _run_msg_probe_once(
         split="massspec_val",
         peak_ordering=peak_ordering,
         seed=train_seed_base + 10_000,
-        max_samples=max_val_samples,
-        sample_randomly=True,
         fingerprint_task=fingerprint_task,
         distributed=distributed,
     )
@@ -1234,8 +1266,6 @@ def _run_msg_probe_once(
         split="massspec_test",
         peak_ordering=peak_ordering,
         seed=test_seed_base,
-        max_samples=max_test_samples,
-        sample_randomly=randomize_test_subset,
         fingerprint_task=fingerprint_task,
         distributed=distributed,
     )
@@ -1274,7 +1304,6 @@ def _run_msg_probe_once(
         probe_data,
         split="massspec_train",
         drop_remainder=False,
-        max_samples=max_train_samples,
         distributed_world_size=_distributed_world_size(distributed),
     )
     probe_warmup_steps = _resolve_probe_warmup_steps(config, steps_per_epoch)
@@ -1322,7 +1351,6 @@ def _run_msg_probe_once(
             seed=train_seed_base + epoch_idx,
             peak_ordering=peak_ordering,
             drop_remainder=False,
-            max_samples=max_train_samples,
             distributed_world_size=_distributed_world_size(distributed),
             distributed_rank=_distributed_rank(distributed),
             pad_distributed=True,
@@ -1366,8 +1394,8 @@ def _run_msg_probe_once(
                 split="massspec_val",
                 seed=train_seed_base + 10_000,
                 peak_ordering=peak_ordering,
-                max_samples=max_val_samples,
-                sample_randomly=True,
+                max_samples=None,
+                sample_randomly=False,
                 device=device,
                 distributed=distributed,
             )
@@ -1382,8 +1410,8 @@ def _run_msg_probe_once(
                 split="massspec_test",
                 seed=test_seed_base,
                 peak_ordering=peak_ordering,
-                max_samples=max_test_samples,
-                sample_randomly=randomize_test_subset,
+                max_samples=None,
+                sample_randomly=False,
                 device=device,
                 distributed=distributed,
             )
@@ -1486,7 +1514,6 @@ def _run_msg_probe_once(
                     fingerprint_task,
                     int(variant_metrics[f"{variant_prefix}/num_{fingerprint_task}_bits"]),
                 )
-        epoch_metrics = _with_mean_probe_aliases(epoch_metrics)
         if on_epoch_end is not None and _is_main(distributed):
             on_epoch_end(epoch_metrics)
         if (
@@ -1524,8 +1551,8 @@ def _run_msg_probe_once(
             split="massspec_test",
             seed=test_seed_base,
             peak_ordering=peak_ordering,
-            max_samples=max_test_samples,
-            sample_randomly=randomize_test_subset,
+            max_samples=None,
+            sample_randomly=False,
             device=device,
             distributed=distributed,
         )
@@ -1581,8 +1608,8 @@ def _run_msg_probe_once(
             split="massspec_test",
             peak_ordering=peak_ordering,
             seed=test_seed_base + 50_000,
-            max_samples=max_test_samples,
-            sample_randomly=randomize_test_subset,
+            max_samples=None,
+            sample_randomly=False,
             plot_dir=plot_dir,
             plot_step=plot_step,
             repeat_index=repeat_index,
@@ -1591,7 +1618,7 @@ def _run_msg_probe_once(
     )
     if was_training:
         model.train()
-    return _with_mean_probe_aliases(best_metrics)
+    return best_metrics
 
 
 def run_msg_probe(
@@ -1627,7 +1654,7 @@ def run_msg_probe(
         run_once=run_once,
         on_epoch_end=on_epoch_end,
     )
-    return _with_mean_probe_aliases(metrics)
+    return metrics
 
 
 def _run_dreams_probe_once(
@@ -1654,9 +1681,6 @@ def _run_dreams_probe_once(
     early_stopping_min_epochs = int(
         _config_get(config, "msg_probe_early_stopping_min_epochs", 1)
     )
-    max_train_samples, max_val_samples, max_test_samples, randomize_test_subset = (
-        resolve_msg_probe_sample_limits(config)
-    )
     peak_ordering = str(_config_get(config, "peak_ordering", "intensity"))
     fingerprint_task = resolve_msg_probe_fingerprint(config)
     config.nist_murcko_probe_include_dreams_auxiliary = True
@@ -1675,7 +1699,6 @@ def _run_dreams_probe_once(
         split="massspec_train",
         peak_ordering=peak_ordering,
         seed=train_seed_base,
-        max_samples=max_train_samples,
         fingerprint_task=fingerprint_task,
     )
     val_targets = _collect_split_targets(
@@ -1683,8 +1706,6 @@ def _run_dreams_probe_once(
         split="massspec_val",
         peak_ordering=peak_ordering,
         seed=train_seed_base + 10_000,
-        max_samples=max_val_samples,
-        sample_randomly=True,
         fingerprint_task=fingerprint_task,
     )
     selection_targets = val_targets if early_stopping else _collect_split_targets(
@@ -1692,8 +1713,6 @@ def _run_dreams_probe_once(
         split="massspec_test",
         peak_ordering=peak_ordering,
         seed=test_seed_base,
-        max_samples=max_test_samples,
-        sample_randomly=randomize_test_subset,
         fingerprint_task=fingerprint_task,
     )
     task_spec = _build_task_spec(
@@ -1716,7 +1735,6 @@ def _run_dreams_probe_once(
         probe_data,
         split="massspec_train",
         drop_remainder=False,
-        max_samples=max_train_samples,
     )
     probe_warmup_steps = _resolve_probe_warmup_steps(config, steps_per_epoch)
     scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -1765,7 +1783,6 @@ def _run_dreams_probe_once(
             seed=train_seed_base + epoch_idx,
             peak_ordering=peak_ordering,
             drop_remainder=False,
-            max_samples=max_train_samples,
         ):
             batch = move_batch(batch)
             optimizer.zero_grad(set_to_none=True)
@@ -1801,8 +1818,8 @@ def _run_dreams_probe_once(
                 split="massspec_test",
                 seed=test_seed_base,
                 peak_ordering=peak_ordering,
-                max_samples=max_test_samples,
-                sample_randomly=randomize_test_subset,
+                max_samples=None,
+                sample_randomly=False,
                 device=device,
             )
         val_state = _evaluate_linear_probe_split(
@@ -1815,8 +1832,8 @@ def _run_dreams_probe_once(
             split="massspec_val",
             seed=train_seed_base + 10_000,
             peak_ordering=peak_ordering,
-            max_samples=max_val_samples,
-            sample_randomly=True,
+            max_samples=None,
+            sample_randomly=False,
             device=device,
         )
         epoch_metrics = {
@@ -1921,8 +1938,8 @@ def _run_dreams_probe_once(
                 split="massspec_test",
                 seed=test_seed_base,
                 peak_ordering=peak_ordering,
-                max_samples=max_test_samples,
-                sample_randomly=randomize_test_subset,
+                max_samples=None,
+                sample_randomly=False,
                 device=device,
             )
             best_metrics.update(

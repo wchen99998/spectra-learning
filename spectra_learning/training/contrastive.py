@@ -1522,21 +1522,13 @@ def train_contrastive(
     train_split = _load_contrastive_split(
         probe_data.train_files,
         max_samples=_optional_int(
-            _config_get(
-                config,
-                "contrastive_max_train_samples",
-                _config_get(config, "nist_murcko_probe_train_samples", None),
-            )
+            _config_get(config, "contrastive_max_train_samples", None)
         ),
     )
     val_split = _load_contrastive_split(
         probe_data.val_files,
         max_samples=_optional_int(
-            _config_get(
-                config,
-                "contrastive_max_val_samples",
-                _config_get(config, "nist_murcko_probe_val_samples", None),
-            )
+            _config_get(config, "contrastive_max_val_samples", None)
         ),
     )
     maccs_pos_weight = _maccs_pos_weight(train_split)
@@ -1608,13 +1600,11 @@ def train_contrastive(
         load_pretrained_weights(
             module.model,
             normalize_storage_path(init_checkpoint),
-            strict=False,
         )
         if module.teacher_model is not None:
             load_pretrained_weights(
                 module.teacher_model,
                 normalize_storage_path(init_checkpoint),
-                strict=False,
             )
     full_init_checkpoint = _config_get(config, "contrastive_init_full_checkpoint_path", "")
     if full_init_checkpoint:

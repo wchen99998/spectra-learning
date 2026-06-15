@@ -29,9 +29,10 @@ from spectra_learning.data.massspec_targets import (
     build_probe_targets_for_rows,
 )
 from spectra_learning.data.murcko import (
+    MCEBIO_MURCKO_PREPARED_SUBDIR,
     NIST_MURCKO_HF_REPO,
     NIST_MURCKO_PREPARED_SUBDIR,
-    ensure_nist_murcko_probe_downloaded,
+    ensure_murcko_fluorine_data_downloaded,
 )
 from spectra_learning.data.spectra import (
     DEFAULT_MAX_PRECURSOR_MZ,
@@ -43,6 +44,7 @@ from spectra_learning.data.spectra import (
     preprocess_peak_batch_numpy,
     preprocess_peak_batch_torch,
 )
+from spectra_learning.config.msg_probe import validate_msg_probe_config
 
 logger = logging.getLogger(__name__)
 
@@ -921,6 +923,8 @@ class _ProbeParquetDataset(Dataset):
             ),
             "probe_valid_mol": np.ones(n, dtype=bool),
             "probe_maccs": np.asarray(rows["maccs_166"], dtype=np.int8),
+            "probe_fluorine": np.asarray(rows["has_fluorine"], dtype=np.float32),
+            "probe_sulfur": np.asarray(rows["has_sulfur"], dtype=np.float32),
         }
         for name in REGRESSION_TARGET_KEYS:
             arrays[f"probe_{name}"] = np.asarray(rows[name], dtype=np.float32)
@@ -1073,6 +1077,16 @@ class _ProbeBatchCollator:
             ],
             dim=0,
         ).to(torch.int32)
+        if "probe_fluorine" in samples[0]:
+            batch["probe_fluorine"] = torch.tensor(
+                [float(sample["probe_fluorine"]) for sample in samples],
+                dtype=torch.float32,
+            )
+        if "probe_sulfur" in samples[0]:
+            batch["probe_sulfur"] = torch.tensor(
+                [float(sample["probe_sulfur"]) for sample in samples],
+                dtype=torch.float32,
+            )
         if "probe_morgan" in samples[0]:
             batch["probe_morgan"] = torch.stack(
                 [
@@ -1195,6 +1209,7 @@ class MassSpecProbeData(NamedTuple):
         distributed_world_size: int = 1,
         distributed_rank: int = 0,
     ) -> "MassSpecProbeData":
+        validate_msg_probe_config(config)
         artifact_root = (
             Path(_config_get(config, "artifact_dir", str(_DEFAULT_ARTIFACT_DIR)))
             .expanduser()
@@ -1204,13 +1219,7 @@ class MassSpecProbeData(NamedTuple):
             _config_get(config, "max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
         )
         include_morgan = (
-            str(
-                _config_get(
-                    config,
-                    "msg_probe_fingerprint",
-                    _config_get(config, "msg_probe_fingerprint_type", "maccs"),
-                )
-            ).lower()
+            str(_config_get(config, "msg_probe_fingerprint", "maccs")).lower()
             == "morgan"
             or int(_config_get(config, "msg_probe_pairwise_alignment_num_pairs", 0)) > 0
         )
@@ -1224,15 +1233,22 @@ class MassSpecProbeData(NamedTuple):
                 NIST_MURCKO_PREPARED_SUBDIR,
             )
         ).strip("/")
-        output_dir = artifact_root / murcko_subdir
-        metadata = ensure_nist_murcko_probe_downloaded(
+        mcebio_subdir = str(
+            _config_get(
+                config,
+                "mcebio_murcko_probe_hf_subdir",
+                MCEBIO_MURCKO_PREPARED_SUBDIR,
+            )
+        ).strip("/")
+        output_dir = artifact_root
+        metadata = ensure_murcko_fluorine_data_downloaded(
             output_dir,
-            max_precursor_mz=max_precursor_mz,
             repo_id=str(
                 _config_get(config, "nist_murcko_probe_repo_id", NIST_MURCKO_HF_REPO)
             ),
             revision=str(_config_get(config, "nist_murcko_probe_revision", "main")),
-            subdir=murcko_subdir,
+            train_subdir=murcko_subdir,
+            test_subdir=mcebio_subdir,
             include_morgan=include_morgan,
             include_dreams=include_dreams,
             distributed_world_size=distributed_world_size,
@@ -1241,8 +1257,22 @@ class MassSpecProbeData(NamedTuple):
         adduct_vocab = metadata.get("adduct_vocab", {"unknown": 0})
         instrument_type_vocab = metadata.get("instrument_type_vocab", {"unknown": 0})
         storage_format = str(metadata.get("storage_format", "native"))
-        morgan_files = metadata.get("morgan_auxiliary_files", {}) if include_morgan else {}
-        dreams_files = metadata.get("dreams_auxiliary_files", {}) if include_dreams else {}
+        morgan_files = (
+            {
+                split: metadata.get(f"{split}_morgan_files", [])
+                for split in ("train", "val", "test")
+            }
+            if include_morgan
+            else {}
+        )
+        dreams_files = (
+            {
+                split: metadata.get(f"{split}_dreams_files", [])
+                for split in ("train", "val", "test")
+            }
+            if include_dreams
+            else {}
+        )
         info = {
             "massspec_train_size": int(metadata.get("train_size", 0)),
             "massspec_val_size": int(metadata.get("val_size", 0)),

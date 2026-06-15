@@ -37,7 +37,6 @@ from spectra_learning.probes.massspec.msg_settings import (
     resolve_msg_probe_pairwise_alignment_num_pairs,
     resolve_msg_probe_num_repeats,
     resolve_msg_probe_fingerprint,
-    resolve_msg_probe_sample_limits,
 )
 from spectra_learning.probes.massspec.msg_probe import (
     _compute_pairwise_similarity_alignment,
@@ -819,6 +818,8 @@ class MsgProbeStepTests(unittest.TestCase):
             "probe_logp": torch.tensor([1.0, 1.5, 2.5], dtype=torch.float32),
             "probe_num_heavy_atoms": torch.tensor([2.0, 3.0, 5.0], dtype=torch.float32),
             "probe_num_rings": torch.tensor([0.0, 1.0, 2.0], dtype=torch.float32),
+            "probe_fluorine": torch.tensor([0.0, 1.0, 1.0], dtype=torch.float32),
+            "probe_sulfur": torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32),
             "probe_maccs": torch.tensor(
                 [
                     [0, 1, 0, 1],
@@ -846,6 +847,8 @@ class MsgProbeStepTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(result["loss_total"]).item())
         self.assertNotIn("mol_weight", result["predictions"])
         self.assertNotIn("num_rings", result["predictions"])
+        self.assertEqual(result["predictions"]["fluorine"].shape, (2,))
+        self.assertEqual(result["predictions"]["sulfur"].shape, (2,))
         self.assertEqual(result["predictions"]["maccs"].shape, (2, 4))
 
 
@@ -887,8 +890,9 @@ class MsgProbeTaskSpecTests(unittest.TestCase):
         )
 
         self.assertEqual(task_spec.regression_tasks, ())
+        self.assertEqual(task_spec.binary_tasks, ("fluorine", "sulfur"))
         self.assertEqual(task_spec.maccs_bits, 4)
-        self.assertEqual(_probe_task_names(task_spec), ("maccs",))
+        self.assertEqual(_probe_task_names(task_spec), ("fluorine", "sulfur", "maccs"))
         self.assertEqual(_probe_task_output_dims(task_spec), {"maccs": 4})
 
 
@@ -933,6 +937,8 @@ class MsgProbeMetricTests(unittest.TestCase):
                 "mol_weight": torch.tensor([10.0, 19.0, 29.0]),
                 "logp": torch.tensor([1.0, 2.0, 4.0]),
                 "num_heavy_atoms": torch.tensor([2.0, 5.0, 6.0]),
+                "fluorine": torch.tensor([0.1, 0.9, 0.8]),
+                "sulfur": torch.tensor([0.8, 0.1, 0.2]),
                 "maccs": torch.tensor(
                     [
                         [0.1, 0.9, 0.2, 0.8],
@@ -945,6 +951,8 @@ class MsgProbeMetricTests(unittest.TestCase):
                 "mol_weight": torch.tensor([10.0, 20.0, 30.0]),
                 "logp": torch.tensor([1.0, 2.0, 3.0]),
                 "num_heavy_atoms": torch.tensor([2.0, 4.0, 6.0]),
+                "fluorine": torch.tensor([0.0, 1.0, 1.0]),
+                "sulfur": torch.tensor([1.0, 0.0, 0.0]),
                 "maccs": torch.tensor(
                     [
                         [0.0, 1.0, 0.0, 1.0],
@@ -981,6 +989,8 @@ class MsgProbeMetricTests(unittest.TestCase):
         self.assertGreater(metrics["msg_probe/test/precision_maccs_mean"], 0.9)
         self.assertAlmostEqual(metrics["msg_probe/test/tanimoto_maccs_mean"], 1.0)
         self.assertGreater(metrics["msg_probe/test/cosine_maccs_mean"], 0.95)
+        self.assertGreater(metrics["msg_probe/test/auc_fluorine"], 0.9)
+        self.assertGreater(metrics["msg_probe/test/auc_sulfur"], 0.9)
 
     def test_score_epoch_state_matches_per_bit_fingerprint_metrics(self):
         task_spec = MsgProbeTaskSpec(
@@ -1138,20 +1148,24 @@ class MsgProbeMetricTests(unittest.TestCase):
         self.assertGreater(metrics["msg_probe/test/cosine_morgan_mean"], 0.95)
         self.assertNotIn("msg_probe/test/auc_maccs_mean", metrics)
 
-    def test_select_metric_uses_tune_metric_fallback(self):
+    def test_select_metric_rejects_tune_metric(self):
         cfg = {
             "msg_probe_tune_metric": "msg_probe/test/mae_mol_weight",
         }
-        self.assertEqual(
-            resolve_msg_probe_select_metric(cfg),
-            "msg_probe/test/mae_mol_weight",
-        )
+        with self.assertRaisesRegex(ValueError, "msg_probe_tune_metric"):
+            resolve_msg_probe_select_metric(cfg)
         self.assertFalse(
             msg_probe_metric_higher_is_better("msg_probe/test/mae_mol_weight")
         )
         self.assertTrue(
             msg_probe_metric_higher_is_better("msg_probe/test/auc_maccs_mean")
         )
+
+    def test_fingerprint_rejects_fingerprint_type_alias(self):
+        cfg = {"msg_probe_fingerprint_type": "morgan"}
+
+        with self.assertRaisesRegex(ValueError, "msg_probe_fingerprint_type"):
+            resolve_msg_probe_fingerprint(cfg)
 
 
 class MsgProbeCollectionTests(unittest.TestCase):
@@ -1165,6 +1179,8 @@ class MsgProbeCollectionTests(unittest.TestCase):
                     "probe_logp": np.asarray([1.0, 2.0], dtype=np.float32),
                     "probe_num_heavy_atoms": np.asarray([2.0, 3.0], dtype=np.float32),
                     "probe_num_rings": np.asarray([0.0, 1.0], dtype=np.float32),
+                    "probe_fluorine": np.asarray([0.0, 1.0], dtype=np.float32),
+                    "probe_sulfur": np.asarray([1.0, 0.0], dtype=np.float32),
                     "probe_maccs": _maccs([[0, 1, 0, 1], [1, 0, 1, 0]]),
                 },
                 {
@@ -1174,6 +1190,8 @@ class MsgProbeCollectionTests(unittest.TestCase):
                     "probe_logp": np.asarray([3.0, 4.0], dtype=np.float32),
                     "probe_num_heavy_atoms": np.asarray([4.0, 5.0], dtype=np.float32),
                     "probe_num_rings": np.asarray([2.0, 3.0], dtype=np.float32),
+                    "probe_fluorine": np.asarray([1.0, 0.0], dtype=np.float32),
+                    "probe_sulfur": np.asarray([0.0, 1.0], dtype=np.float32),
                     "probe_maccs": _maccs([[1, 1, 0, 0], [0, 1, 1, 0]]),
                 },
             ],
@@ -1205,6 +1223,18 @@ class MsgProbeCollectionTests(unittest.TestCase):
                 ),
             )
         )
+        self.assertTrue(
+            np.array_equal(
+                targets.binary["fluorine"],
+                np.asarray([0.0, 1.0, 0.0], dtype=np.float32),
+            )
+        )
+        self.assertTrue(
+            np.array_equal(
+                targets.binary["sulfur"],
+                np.asarray([1.0, 0.0, 1.0], dtype=np.float32),
+            )
+        )
 
     def test_collect_split_targets_can_select_morgan_targets(self):
         dm = _DummyDataModule(
@@ -1216,6 +1246,8 @@ class MsgProbeCollectionTests(unittest.TestCase):
                     "probe_logp": np.asarray([1.0, 2.0], dtype=np.float32),
                     "probe_num_heavy_atoms": np.asarray([2.0, 3.0], dtype=np.float32),
                     "probe_num_rings": np.asarray([0.0, 1.0], dtype=np.float32),
+                    "probe_fluorine": np.asarray([0.0, 1.0], dtype=np.float32),
+                    "probe_sulfur": np.asarray([1.0, 0.0], dtype=np.float32),
                     "probe_maccs": _maccs([[0, 1], [1, 0]]),
                     "probe_morgan": _maccs([[1, 1, 0], [0, 1, 1]]),
                 },
@@ -1397,63 +1429,6 @@ class ProbeStepCountTests(unittest.TestCase):
 
 
 class ProbeConfigTests(unittest.TestCase):
-    def test_nist_murcko_probe_defaults_use_random_subsets(self):
-        cfg = config_dict.ConfigDict()
-        cfg.probe_dataset = "nist-murcko"
-
-        train_samples, val_samples, test_samples, randomize_test_subset = (
-            resolve_msg_probe_sample_limits(cfg)
-        )
-
-        self.assertEqual(train_samples, 4000)
-        self.assertEqual(val_samples, 1000)
-        self.assertEqual(test_samples, 1000)
-        self.assertTrue(randomize_test_subset)
-
-    def test_nist_murcko_probe_split_limits_are_used(self):
-        cfg = config_dict.ConfigDict()
-        cfg.probe_dataset = "nist-murcko"
-        cfg.nist_murcko_probe_train_samples = 11
-        cfg.nist_murcko_probe_val_samples = 12
-        cfg.nist_murcko_probe_test_samples = 13
-
-        train_samples, val_samples, test_samples, randomize_test_subset = (
-            resolve_msg_probe_sample_limits(cfg)
-        )
-
-        self.assertEqual(train_samples, 11)
-        self.assertEqual(val_samples, 12)
-        self.assertEqual(test_samples, 13)
-        self.assertTrue(randomize_test_subset)
-
-    def test_msg_probe_sample_size_applies_to_all_splits(self):
-        cfg = config_dict.ConfigDict()
-        cfg.msg_probe_sample_size = 123
-
-        train_samples, val_samples, test_samples, randomize_test_subset = (
-            resolve_msg_probe_sample_limits(cfg)
-        )
-
-        self.assertEqual(train_samples, 123)
-        self.assertEqual(val_samples, 123)
-        self.assertEqual(test_samples, 123)
-        self.assertTrue(randomize_test_subset)
-
-    def test_split_specific_sample_limits_override_global_sample_size(self):
-        cfg = config_dict.ConfigDict()
-        cfg.msg_probe_sample_size = 123
-        cfg.msg_probe_max_train_samples = 10
-        cfg.msg_probe_max_val_samples = 20
-        cfg.msg_probe_max_test_samples = 30
-
-        train_samples, val_samples, test_samples, _ = resolve_msg_probe_sample_limits(
-            cfg
-        )
-
-        self.assertEqual(train_samples, 10)
-        self.assertEqual(val_samples, 20)
-        self.assertEqual(test_samples, 30)
-
     def test_nist_murcko_probe_repeat_defaults_to_one(self):
         cfg = config_dict.ConfigDict()
         cfg.probe_dataset = "nist-murcko"
@@ -1484,14 +1459,14 @@ class ProbeConfigTests(unittest.TestCase):
         cfg = config_dict.ConfigDict()
 
         self.assertEqual(resolve_msg_probe_fingerprint(cfg), "maccs")
-        self.assertEqual(resolve_msg_probe_select_metric(cfg), "msg_probe/test/auc_maccs_mean")
+        self.assertEqual(resolve_msg_probe_select_metric(cfg), "msg_probe/test/auc_fluorine")
 
     def test_msg_probe_fingerprint_can_select_morgan_metric(self):
         cfg = config_dict.ConfigDict()
         cfg.msg_probe_fingerprint = "morgan"
 
         self.assertEqual(resolve_msg_probe_fingerprint(cfg), "morgan")
-        self.assertEqual(resolve_msg_probe_select_metric(cfg), "msg_probe/test/auc_morgan_mean")
+        self.assertEqual(resolve_msg_probe_select_metric(cfg), "msg_probe/test/auc_fluorine")
 
     def test_pairwise_alignment_defaults_to_disabled(self):
         cfg = config_dict.ConfigDict()
@@ -1512,7 +1487,7 @@ class ProbeConfigTests(unittest.TestCase):
         self.assertEqual(resolve_msg_probe_fingerprint(cfg), "morgan")
         self.assertEqual(
             resolve_msg_probe_select_metric(cfg),
-            "msg_probe/test/auc_morgan_mean",
+            "msg_probe/test/auc_fluorine",
         )
         self.assertEqual(MORGAN_PROBE_FINGERPRINT_BITS, 4096)
         self.assertEqual(MORGAN_PROBE_FINGERPRINT_RADIUS, 2)
@@ -1541,6 +1516,8 @@ class MsgProbeRunTests(unittest.TestCase):
             "probe_logp": np.asarray([1.0, 1.5, 2.0, 2.5], dtype=np.float32),
             "probe_num_heavy_atoms": np.asarray([2.0, 3.0, 4.0, 5.0], dtype=np.float32),
             "probe_num_rings": np.asarray([0.0, 1.0, 0.0, 1.0], dtype=np.float32),
+            "probe_fluorine": np.asarray([0.0, 1.0, 0.0, 1.0], dtype=np.float32),
+            "probe_sulfur": np.asarray([1.0, 0.0, 1.0, 0.0], dtype=np.float32),
             "probe_maccs": _maccs(
                 [
                     [0, 1, 0, 1],
@@ -1613,6 +1590,8 @@ class MsgProbeRunTests(unittest.TestCase):
             call for call in probe_data.calls if call["split"] == "massspec_test"
         ]
         self.assertEqual(len(test_calls), 1)
+        self.assertIn("msg_probe/mean/test/auc_fluorine", metrics)
+        self.assertIn("msg_probe/mean/test/auc_sulfur", metrics)
         self.assertIn("msg_probe/mean/test/auc_maccs_mean", metrics)
         self.assertIn("msg_probe/mean/val/auc_maccs_mean", metrics)
         self.assertIn("msg_probe/mean/val/auc_maccs_mean", curve[0])
@@ -1621,12 +1600,10 @@ class MsgProbeRunTests(unittest.TestCase):
 
 class RepeatedProbeTests(unittest.TestCase):
     @staticmethod
-    def _aliased_msg_probe_metrics(*, auc: float, epoch: float) -> dict[str, float]:
+    def _msg_probe_metrics(*, auc: float, epoch: float) -> dict[str, float]:
         return {
             "msg_probe/mean/test/auc_maccs_mean": auc,
             "msg_probe/mean/epoch": epoch,
-            "msg_probe/test/auc_maccs_mean": auc,
-            "msg_probe_epoch": epoch,
         }
 
     def test_run_msg_probe_averages_best_metrics_and_epoch_curves(self):
@@ -1636,17 +1613,17 @@ class RepeatedProbeTests(unittest.TestCase):
 
         repeat_payloads = (
             (
-                self._aliased_msg_probe_metrics(auc=0.6, epoch=2.0),
+                self._msg_probe_metrics(auc=0.6, epoch=2.0),
                 [
-                    self._aliased_msg_probe_metrics(auc=0.4, epoch=1.0),
-                    self._aliased_msg_probe_metrics(auc=0.6, epoch=2.0),
+                    self._msg_probe_metrics(auc=0.4, epoch=1.0),
+                    self._msg_probe_metrics(auc=0.6, epoch=2.0),
                 ],
             ),
             (
-                self._aliased_msg_probe_metrics(auc=0.8, epoch=4.0),
+                self._msg_probe_metrics(auc=0.8, epoch=4.0),
                 [
-                    self._aliased_msg_probe_metrics(auc=0.5, epoch=1.0),
-                    self._aliased_msg_probe_metrics(auc=0.9, epoch=2.0),
+                    self._msg_probe_metrics(auc=0.5, epoch=1.0),
+                    self._msg_probe_metrics(auc=0.9, epoch=2.0),
                 ],
             ),
         )
@@ -1682,15 +1659,15 @@ class RepeatedProbeTests(unittest.TestCase):
             )
 
         self.assertAlmostEqual(metrics["msg_probe/mean/test/auc_maccs_mean"], 0.7)
-        self.assertAlmostEqual(metrics["msg_probe/test/auc_maccs_mean"], 0.7)
         self.assertAlmostEqual(metrics["msg_probe/mean/epoch"], 3.0)
-        self.assertAlmostEqual(metrics["msg_probe_epoch"], 3.0)
         self.assertAlmostEqual(metrics["msg_probe/repeats"], 2.0)
+        self.assertNotIn("msg_probe/test/auc_maccs_mean", metrics)
+        self.assertNotIn("msg_probe_epoch", metrics)
         self.assertEqual(len(curve), 2)
         self.assertAlmostEqual(curve[0]["msg_probe/mean/test/auc_maccs_mean"], 0.45)
-        self.assertAlmostEqual(curve[0]["msg_probe_epoch"], 1.0)
+        self.assertAlmostEqual(curve[0]["msg_probe/mean/epoch"], 1.0)
         self.assertAlmostEqual(curve[1]["msg_probe/mean/test/auc_maccs_mean"], 0.75)
-        self.assertAlmostEqual(curve[1]["msg_probe_epoch"], 2.0)
+        self.assertAlmostEqual(curve[1]["msg_probe/mean/epoch"], 2.0)
 
 
 if __name__ == "__main__":

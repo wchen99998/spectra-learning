@@ -8,7 +8,6 @@ from spectra_learning.models.pooling import SinglePairCovariancePool
 from spectra_learning.probes.massspec.msg_probe import run_msg_probe
 from spectra_learning.training.api import build_logger, build_model_from_config
 from spectra_learning.training.checkpointing import (
-    covariance_pooler_checkpoint_path,
     load_resume_covariance_pooler_state,
     load_torch_checkpoint,
     load_resume_model_state,
@@ -19,7 +18,6 @@ from spectra_learning.training.storage import (
     normalize_storage_path,
     storage_join,
     storage_mkdir,
-    storage_exists,
     write_text,
 )
 
@@ -90,8 +88,7 @@ def _checkpoint_covariance_pooler(
     device: torch.device,
 ) -> torch.nn.Module | None:
     pooler_name = checkpoint.get("covariance_pooler_checkpoint", None)
-    pooler_path = covariance_pooler_checkpoint_path(checkpoint_path)
-    if not pooler_name and not storage_exists(pooler_path):
+    if not pooler_name:
         return None
     compressed_dim = int(
         config.get("contrastive_covariance_dim", config.get("covariance_pooling_dim", 32))

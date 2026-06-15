@@ -324,6 +324,7 @@ def _murcko_fluorine_split_metadata(
     subdir: str,
     source_split: str,
     target_split: str,
+    include_morgan: bool,
     include_dreams: bool,
 ) -> dict[str, Any]:
     metadata = {
@@ -336,6 +337,18 @@ def _murcko_fluorine_split_metadata(
         f"{target_split}_size": int(source_metadata[f"{source_split}_size"]),
         f"{target_split}_positive": int(source_metadata.get(f"{source_split}_positive", 0)),
     }
+    morgan_files = source_metadata.get("morgan_auxiliary_files", {}).get(source_split, [])
+    if include_morgan and morgan_files:
+        metadata[f"{target_split}_morgan_files"] = [
+            f"{subdir}/{filename}" for filename in morgan_files
+        ]
+        metadata[f"{target_split}_morgan_lengths"] = [
+            int(value)
+            for value in source_metadata.get("morgan_auxiliary_lengths", {}).get(
+                source_split,
+                [],
+            )
+        ]
     dreams_files = source_metadata.get("dreams_auxiliary_files", {}).get(source_split, [])
     if include_dreams and dreams_files:
         metadata[f"{target_split}_dreams_files"] = [
@@ -362,6 +375,11 @@ def _murcko_subdir_auxiliary_available(
     return _auxiliary_files_available(cache_dir / subdir, metadata, auxiliary_name)
 
 
+def _merge_vocabularies(*vocabs: dict[str, int]) -> dict[str, int]:
+    values = sorted({value for vocab in vocabs for value in vocab})
+    return {value: idx for idx, value in enumerate(values)}
+
+
 def ensure_murcko_fluorine_data_downloaded(
     cache_dir: Path,
     *,
@@ -369,6 +387,7 @@ def ensure_murcko_fluorine_data_downloaded(
     revision: str = "main",
     train_subdir: str = NIST_MURCKO_PREPARED_SUBDIR,
     test_subdir: str = MCEBIO_MURCKO_PREPARED_SUBDIR,
+    include_morgan: bool = False,
     include_dreams: bool = False,
     distributed_world_size: int = 1,
     distributed_rank: int = 0,
@@ -383,6 +402,13 @@ def ensure_murcko_fluorine_data_downloaded(
         f"{test_subdir}/metadata.json",
         f"{test_subdir}/all.parquet",
     ]
+    if include_morgan:
+        allow_patterns.extend(
+            [
+                f"{train_subdir}/auxiliary/morgan/*",
+                f"{test_subdir}/auxiliary/morgan/*",
+            ]
+        )
     if include_dreams:
         allow_patterns.extend(
             [
@@ -401,6 +427,22 @@ def ensure_murcko_fluorine_data_downloaded(
         required_splits=("all",),
     )
     needs_download = train_cached is None or test_cached is None or (
+        include_morgan
+        and (
+            not _murcko_subdir_auxiliary_available(
+                cache_dir,
+                train_subdir,
+                train_cached,
+                "morgan",
+            )
+            or not _murcko_subdir_auxiliary_available(
+                cache_dir,
+                test_subdir,
+                test_cached,
+                "morgan",
+            )
+        )
+    ) or (
         include_dreams
         and (
             not _murcko_subdir_auxiliary_available(
@@ -445,6 +487,21 @@ def ensure_murcko_fluorine_data_downloaded(
             required_splits=("all",),
         ),
     )
+    if include_morgan:
+        if not _murcko_subdir_auxiliary_available(
+            cache_dir,
+            train_subdir,
+            train_metadata,
+            "morgan",
+        ):
+            raise FileNotFoundError(f"Missing NIST Murcko Morgan auxiliary files in {cache_dir / train_subdir}")
+        if not _murcko_subdir_auxiliary_available(
+            cache_dir,
+            test_subdir,
+            test_metadata,
+            "morgan",
+        ):
+            raise FileNotFoundError(f"Missing MCEBIO Morgan auxiliary files in {cache_dir / test_subdir}")
     if include_dreams:
         if not _murcko_subdir_auxiliary_available(
             cache_dir,
@@ -467,6 +524,22 @@ def ensure_murcko_fluorine_data_downloaded(
         "revision": revision,
         "train_subdir": train_subdir,
         "test_subdir": test_subdir,
+        "adduct_vocab": _merge_vocabularies(
+            train_metadata.get("adduct_vocab", {"unknown": 0}),
+            test_metadata.get("adduct_vocab", {"unknown": 0}),
+        ),
+        "instrument_type_vocab": _merge_vocabularies(
+            train_metadata.get("instrument_type_vocab", {"unknown": 0}),
+            test_metadata.get("instrument_type_vocab", {"unknown": 0}),
+        ),
+        "probe_maccs_bits": int(train_metadata.get("probe_maccs_bits", MACCS_FINGERPRINT_BITS)),
+        "probe_morgan_bits": int(train_metadata.get("probe_morgan_bits", MORGAN_PROBE_FINGERPRINT_BITS)) if include_morgan else 0,
+        "probe_morgan_radius": int(train_metadata.get("probe_morgan_radius", MORGAN_PROBE_FINGERPRINT_RADIUS)),
+        "morgan_auxiliary_available": bool(
+            include_morgan
+            and train_metadata.get("morgan_auxiliary_available", False)
+            and test_metadata.get("morgan_auxiliary_available", False)
+        ),
         "dreams_dim": int(train_metadata.get("dreams_dim", 0)),
         "dreams_auxiliary_available": bool(
             include_dreams
@@ -480,6 +553,7 @@ def ensure_murcko_fluorine_data_downloaded(
             subdir=train_subdir,
             source_split="train",
             target_split="train",
+            include_morgan=include_morgan,
             include_dreams=include_dreams,
         )
     )
@@ -489,6 +563,7 @@ def ensure_murcko_fluorine_data_downloaded(
             subdir=train_subdir,
             source_split="val",
             target_split="val",
+            include_morgan=include_morgan,
             include_dreams=include_dreams,
         )
     )
@@ -498,6 +573,7 @@ def ensure_murcko_fluorine_data_downloaded(
             subdir=test_subdir,
             source_split="all",
             target_split="test",
+            include_morgan=include_morgan,
             include_dreams=include_dreams,
         )
     )

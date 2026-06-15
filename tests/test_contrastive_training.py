@@ -82,6 +82,32 @@ def _write_artifact(root: Path) -> None:
     (root / "metadata.json").write_text(json.dumps(metadata))
 
 
+def _write_mcebio_artifact(root: Path) -> None:
+    root.mkdir(parents=True)
+    rows = [("CCS", 10.0), ("CCS", 20.0)]
+    _write_split(root, "all", rows)
+    metadata = {
+        "metadata_version": murcko_data.NIST_MURCKO_METADATA_VERSION,
+        "artifact_format": murcko_data.NIST_MURCKO_ARTIFACT_FORMAT,
+        "storage_format": "parquet",
+        "max_precursor_mz": 1000.0,
+        "adduct_vocab": {"[M+H]+": 0},
+        "instrument_type_vocab": {"Q-TOF": 0},
+        "dreams_dim": 0,
+        "probe_maccs_bits": 166,
+        "probe_morgan_bits": 4096,
+        "probe_morgan_radius": 2,
+        "pairwise_alignment_available": False,
+        "pairwise_alignment_num_pairs": 0,
+        "pairwise_alignment_num_endpoints": 0,
+        "all_files": ["all.parquet"],
+        "all_lengths": [len(rows)],
+        "all_size": len(rows),
+        "all_positive": 0,
+    }
+    (root / "metadata.json").write_text(json.dumps(metadata))
+
+
 def _config(artifact_dir: Path) -> config_dict.ConfigDict:
     cfg = config_dict.ConfigDict()
     cfg.artifact_dir = str(artifact_dir)
@@ -198,6 +224,7 @@ def test_dreams_triplets_use_mass_matched_different_compound_negative():
 def test_contrastive_smoke_training_writes_frozen_pooler_checkpoint(tmp_path: Path):
     artifact_dir = tmp_path / "artifacts"
     _write_artifact(artifact_dir / "nist_murcko_probe")
+    _write_mcebio_artifact(artifact_dir / "mcebio_murcko_probe")
     workdir = tmp_path / "work"
 
     results = train_contrastive(_config(artifact_dir), workdir)

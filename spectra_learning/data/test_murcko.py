@@ -307,7 +307,9 @@ def test_murcko_fluorine_cache_and_loader_use_shared_peak_preprocessing(
           "dreams_auxiliary_lengths": {
             "train": [4],
             "val": [2]
-          }
+          },
+          "adduct_vocab": {"[M+H]+": 0},
+          "instrument_type_vocab": {"Q-TOF": 0}
         }
         """
     )
@@ -325,7 +327,9 @@ def test_murcko_fluorine_cache_and_loader_use_shared_peak_preprocessing(
           },
           "dreams_auxiliary_lengths": {
             "all": [2]
-          }
+          },
+          "adduct_vocab": {"[M+H-H2O]+": 0},
+          "instrument_type_vocab": {"Orbitrap": 0}
         }
         """
     )
@@ -349,6 +353,8 @@ def test_murcko_fluorine_cache_and_loader_use_shared_peak_preprocessing(
     assert metadata["train_positive"] == 2
     assert metadata["test_size"] == 2
     assert metadata["test_positive"] == 1
+    assert metadata["adduct_vocab"] == {"[M+H-H2O]+": 0, "[M+H]+": 1}
+    assert metadata["instrument_type_vocab"] == {"Orbitrap": 0, "Q-TOF": 1}
     assert not metadata["dreams_auxiliary_available"]
     assert "train_dreams_files" not in metadata
     assert "test_dreams_files" not in metadata

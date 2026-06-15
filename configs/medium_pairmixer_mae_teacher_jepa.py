@@ -20,9 +20,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.gems_native_hf_subdir = "gems_a10_native"
     cfg.nist_murcko_probe_repo_id = "cjim8889/msms_evaluation_100ktrain_20260615"
     cfg.nist_murcko_probe_revision = "main"
-    cfg.nist_murcko_probe_train_samples = 30_000
-    cfg.nist_murcko_probe_val_samples = 10_000
-    cfg.nist_murcko_probe_test_samples = 10_000
     cfg.nist_murcko_probe_num_repeats = 1
     cfg.batch_size = 512
     cfg.shuffle_buffer = 1_000_000
@@ -149,14 +146,11 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_early_stopping_patience = 20
     cfg.msg_probe_every_n_steps = 0.5
     cfg.msg_probe_learning_rate = 0.0003
-    cfg.msg_probe_max_test_samples = None
-    cfg.msg_probe_max_train_samples = None
-    cfg.msg_probe_max_val_samples = None
     cfg.msg_probe_mlp_hidden_dim = 256
     cfg.msg_probe_num_epochs = 100
     cfg.msg_probe_pma_num_heads = 8
     cfg.msg_probe_pma_num_seeds = 32
-    cfg.msg_probe_tune_metric = "msg_probe/test/auc_maccs_mean"
+    cfg.msg_probe_select_metric = "msg_probe/test/auc_fluorine"
     cfg.msg_probe_variants = ["single_pair_covariance"]
     cfg.msg_probe_warmup_epochs = 0.5
     cfg.msg_probe_grad_clip_norm = 1.0

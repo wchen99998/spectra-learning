@@ -698,6 +698,10 @@ def msg_probe_interval(
     total_steps: int,
 ) -> int:
     raw = float(_config_get(config, "msg_probe_every_n_steps", 0))
+    if raw < 0:
+        return int(raw)
+    if raw == 0:
+        return total_steps
     if 0 < raw <= 1:
         reference_steps = total_steps if float(config.num_epochs) < 1 else datamodule.train_steps
         return max(1, int(raw * reference_steps))

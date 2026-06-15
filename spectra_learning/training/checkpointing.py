@@ -16,14 +16,12 @@ from spectra_learning.training.storage import (
     local_path_for_read,
     storage_delete,
     storage_delete_if_exists,
-    storage_exists,
     storage_join,
     storage_name,
     storage_with_name,
     upload_local_file,
 )
 
-COVARIANCE_POOLER_PREFIX = "covariance_pooler."
 COVARIANCE_POOLER_CHECKPOINT_PREFIX = "covariance-pooler-"
 log = logging.getLogger(__name__)
 
@@ -44,26 +42,6 @@ def is_training_checkpoint_path(path: StoragePath) -> bool:
     return is_main_checkpoint_path(path) and (
         name == "last.pt" or name.startswith("step-")
     )
-
-
-def _model_state_without_legacy_pooler(
-    state_dict: dict[str, torch.Tensor],
-) -> dict[str, torch.Tensor]:
-    return {
-        key: value
-        for key, value in state_dict.items()
-        if not key.startswith(COVARIANCE_POOLER_PREFIX)
-    }
-
-
-def _legacy_pooler_state(
-    state_dict: dict[str, torch.Tensor],
-) -> dict[str, torch.Tensor]:
-    return {
-        key.removeprefix(COVARIANCE_POOLER_PREFIX): value
-        for key, value in state_dict.items()
-        if key.startswith(COVARIANCE_POOLER_PREFIX)
-    }
 
 
 def optimizer_state_dict(optimizer: torch.optim.Optimizer) -> dict:
@@ -357,7 +335,7 @@ def load_resume_model_state(
     model: PeakSetJEPA,
     state_dict: dict[str, torch.Tensor],
 ) -> None:
-    model.load_state_dict(_model_state_without_legacy_pooler(state_dict))
+    model.load_state_dict(state_dict)
 
 
 def load_resume_covariance_pooler_state(
@@ -367,23 +345,16 @@ def load_resume_covariance_pooler_state(
 ) -> None:
     if covariance_pooler is None:
         return
-    pooler_name = checkpoint.get("covariance_pooler_checkpoint", None)
-    pooler_path = (
-        storage_with_name(checkpoint_path, pooler_name)
-        if pooler_name
-        else covariance_pooler_checkpoint_path(checkpoint_path)
+    pooler_path = storage_with_name(
+        checkpoint_path,
+        checkpoint["covariance_pooler_checkpoint"],
     )
-    if storage_exists(pooler_path):
-        pooler_ckpt = load_torch_checkpoint(
-            pooler_path,
-            map_location="cpu",
-            weights_only=True,
-        )
-        covariance_pooler.load_state_dict(pooler_ckpt["pooler"])
-        return
-    legacy_state = _legacy_pooler_state(checkpoint["model"])
-    if legacy_state:
-        covariance_pooler.load_state_dict(legacy_state)
+    pooler_ckpt = load_torch_checkpoint(
+        pooler_path,
+        map_location="cpu",
+        weights_only=True,
+    )
+    covariance_pooler.load_state_dict(pooler_ckpt["pooler"])
 
 
 def load_optimizer_state(optimizer: torch.optim.Optimizer, state: dict) -> None:
@@ -402,12 +373,14 @@ def load_grad_scaler_state(
 def load_pretrained_weights(
     model: PeakSetJEPA,
     checkpoint_path: StoragePath,
-    *,
-    strict: bool = True,
 ) -> None:
-    ckpt = load_torch_checkpoint(checkpoint_path, map_location="cpu", weights_only=True)
+    ckpt = load_torch_checkpoint(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=True,
+    )
     state_dict = ckpt["model"] if "model" in ckpt else ckpt["state_dict"]
-    model.load_state_dict(_model_state_without_legacy_pooler(state_dict), strict=strict)
+    model.load_state_dict(state_dict)
 
 
 def load_frozen_teacher_weights(
