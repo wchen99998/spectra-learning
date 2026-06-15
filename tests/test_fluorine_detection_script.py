@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import pytest
 import torch
 
 from spectra_learning.probes.massspec import fluorine
@@ -46,9 +47,18 @@ def test_fluorine_outputs_support_fsspec_prefix(monkeypatch, tmp_path: Path):
         "mode": "lora",
         "best_epoch": 1,
         "best_val": {"val/average_precision": 0.5, "val/roc_auc": 0.75},
+        "test": None,
         "hparams": {"hidden_dim": 8, "dropout": 0.1},
+        "pooling": "covariance",
+        "pair_dim": 4,
+        "device_ids": [],
         "focal_alpha": 0.5,
         "focal_gamma": 2.0,
+        "finetune_cache_dir": str(tmp_path),
+        "train_size": 8,
+        "train_positive": 4,
+        "val_size": 4,
+        "val_positive": 2,
         "history": [
             {
                 "epoch": 1,
@@ -223,3 +233,51 @@ def test_lora_cached_state_injects_adapters_without_full_model_state(tmp_path: P
     assert isinstance(block.pair_transition.w1, LoRALinear)
     assert isinstance(block.pair_transition.w2, LoRALinear)
     assert isinstance(block.embed, torch.nn.Linear)
+
+
+def test_lora_cached_state_requires_pooling_field(tmp_path: Path):
+    config_path = tmp_path / "config.py"
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    state_path = tmp_path / "lora_state.pt"
+    torch.save(
+        {
+            "mode": "lora",
+            "config_path": str(config_path),
+            "checkpoint_path": str(checkpoint_path),
+            "hparams": {},
+            "max_train_samples": None,
+            "max_val_samples": None,
+        },
+        state_path,
+    )
+
+    with pytest.raises(KeyError, match="pooling"):
+        fluorine.train_or_load_lora(
+            state_path=state_path,
+            model=_FakeFluorineModel(),
+            config={},
+            config_path=config_path,
+            checkpoint_path=checkpoint_path,
+            cache_dir=tmp_path,
+            device=torch.device("cpu"),
+            batch_size=1,
+            num_workers=0,
+            seed=0,
+            epochs=3,
+            patience=2,
+            lora_rank=2,
+            lora_alpha=4.0,
+            lora_dropout=0.0,
+            lora_learning_rate=1e-4,
+            head_learning_rate=1e-4,
+            weight_decay=0.01,
+            autocast_dtype=torch.bfloat16,
+            hidden_dim=8,
+            dropout=0.1,
+            revision="main",
+            max_train_samples=None,
+            max_val_samples=None,
+            max_test_samples=None,
+            pooling="covariance",
+            device_ids=None,
+        )

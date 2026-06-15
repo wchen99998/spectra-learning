@@ -415,6 +415,28 @@ class MassSpecProbeMurckoDataTests(unittest.TestCase):
         barrier_mock.assert_called_once()
         self.assertEqual(probe_data.info["massspec_train_size"], 2)
 
+    def test_nist_full_download_rejects_invalid_metadata_without_download(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output_dir = tmp_path / "nist-full"
+            output_dir.mkdir()
+            (output_dir / "metadata.json").write_text(
+                json.dumps({"metadata_version": 0, "max_precursor_mz": 1000.0})
+            )
+
+            with mock.patch.object(
+                massspec_probe_data,
+                "snapshot_download",
+            ) as download_mock:
+                with self.assertRaisesRegex(ValueError, "Delete the artifact directory"):
+                    massspec_probe_data.ensure_nist_full_probe_downloaded(
+                        output_dir,
+                        max_precursor_mz=1000.0,
+                        repo_id="owner/nist-full",
+                    )
+
+            download_mock.assert_not_called()
+
     def test_probe_dataset_can_return_jax_batches(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

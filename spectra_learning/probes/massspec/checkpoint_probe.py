@@ -43,7 +43,7 @@ def run_checkpoint_msg_probe(
     )
     if checkpoint.get("training_mode", None):
         config.training_mode = checkpoint["training_mode"]
-    wandb_run_id = str(checkpoint.get("wandb_run_id", "") or "")
+    wandb_run_id = str(checkpoint["wandb_run_id"] or "")
     if wandb_run_id:
         config.wandb_resume_id = wandb_run_id
         config.wandb_shared_mode = True

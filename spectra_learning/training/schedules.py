@@ -107,10 +107,7 @@ class WarmupCosineSchedule:
         self.total_steps = int(state_dict["total_steps"])
         self.warmup_steps = int(state_dict["warmup_steps"])
         self.base_lrs = [float(lr) for lr in state_dict["base_lrs"]]
-        if "eta_mins" in state_dict:
-            self.eta_mins = [float(lr) for lr in state_dict["eta_mins"]]
-        else:
-            self.eta_mins = [float(state_dict["eta_min"]) for _ in self.base_lrs]
+        self.eta_mins = [float(lr) for lr in state_dict["eta_mins"]]
         self.last_epoch = int(state_dict["last_epoch"])
         self._set_lrs(self._compute_lrs(self.last_epoch))
 

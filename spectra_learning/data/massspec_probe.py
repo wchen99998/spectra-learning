@@ -529,24 +529,37 @@ def _probe_metadata_valid(
         return None
     metadata = json.loads(metadata_path.read_text())
     if int(metadata.get("metadata_version", 0)) != expected_version:
-        return None
+        _raise_invalid_probe_artifact(output_dir, "metadata_version mismatch")
     if float(metadata.get("max_precursor_mz", float("inf"))) != max_precursor_mz:
-        return None
+        _raise_invalid_probe_artifact(output_dir, "max_precursor_mz mismatch")
     if expected_metadata is not None:
         for key, value in expected_metadata.items():
             if metadata.get(key) != value:
-                return None
+                _raise_invalid_probe_artifact(output_dir, f"{key} mismatch")
     storage_format = str(metadata.get("storage_format", "native"))
     for split in ("train", "val", "test"):
+        filenames = metadata.get(f"{split}_files", [])
+        if not filenames:
+            _raise_invalid_probe_artifact(
+                output_dir,
+                f"missing {split}_files metadata",
+            )
         if storage_format == "parquet":
-            if not all((output_dir / name).exists() for name in metadata.get(f"{split}_files", [])):
-                return None
+            if not all((output_dir / name).exists() for name in filenames):
+                _raise_invalid_probe_artifact(output_dir, f"missing {split} files")
         elif not all(
             (output_dir / split / name).exists()
-            for name in metadata.get(f"{split}_files", [])
+            for name in filenames
         ):
-            return None
+            _raise_invalid_probe_artifact(output_dir, f"missing {split} files")
     return metadata
+
+
+def _raise_invalid_probe_artifact(output_dir: Path, reason: str) -> None:
+    raise ValueError(
+        f"Invalid massspec probe artifact in {output_dir}: {reason}. "
+        "Delete the artifact directory and rebuild or download it again."
+    )
 
 
 def ensure_massspec_probe_prepared(

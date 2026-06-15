@@ -1011,15 +1011,15 @@ def train_or_load_finetuned(
     }
     if state_path.exists():
         state = torch.load(state_path, map_location=device)
-        state_hparams = state.get("hparams", {})
+        state_hparams = state["hparams"]
         if (
-            state.get("mode") == "finetune"
-            and state.get("config_path") == str(config_path)
-            and state.get("checkpoint_path") == str(checkpoint_path)
-            and state.get("pooling", "covariance") == pooling
+            state["mode"] == "finetune"
+            and state["config_path"] == str(config_path)
+            and state["checkpoint_path"] == str(checkpoint_path)
+            and state["pooling"] == pooling
             and all(state_hparams.get(key) == value for key, value in requested_hparams.items())
-            and state.get("max_train_samples") == max_train_samples
-            and state.get("max_val_samples") == max_val_samples
+            and state["max_train_samples"] == max_train_samples
+            and state["max_val_samples"] == max_val_samples
         ):
             model.load_state_dict(state["model_state"])
             return state
@@ -1339,15 +1339,15 @@ def train_or_load_lora(
     }
     if state_path.exists():
         state = torch.load(state_path, map_location=device)
-        state_hparams = state.get("hparams", {})
+        state_hparams = state["hparams"]
         if (
-            state.get("mode") == "lora"
-            and state.get("config_path") == str(config_path)
-            and state.get("checkpoint_path") == str(checkpoint_path)
-            and state.get("pooling", "covariance") == pooling
+            state["mode"] == "lora"
+            and state["config_path"] == str(config_path)
+            and state["checkpoint_path"] == str(checkpoint_path)
+            and state["pooling"] == pooling
             and all(state_hparams.get(key) == value for key, value in requested_hparams.items())
-            and state.get("max_train_samples") == max_train_samples
-            and state.get("max_val_samples") == max_val_samples
+            and state["max_train_samples"] == max_train_samples
+            and state["max_val_samples"] == max_val_samples
         ):
             model.encoder.requires_grad_(False)
             load_fluorine_lora_state(model.encoder, state)
@@ -1626,15 +1626,15 @@ def evaluate_fluorine_test_split(
     autocast_dtype: torch.dtype | None,
     device_ids: list[int] | None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    covariance_dim = int(head_state.get("covariance_dim", 64))
-    pooling = str(head_state.get("pooling", "covariance"))
-    if head_state.get("mode") == "lora":
+    covariance_dim = int(head_state["covariance_dim"])
+    pooling = str(head_state["pooling"])
+    if head_state["mode"] == "lora":
         model.encoder.requires_grad_(False)
         load_fluorine_lora_state(model.encoder, head_state)
     if pooling == "single_pair_covariance":
         pooler = SinglePairCovariancePool(
             single_dim=int(config.model_dim),
-            pair_dim=int(head_state.get("pair_dim", config.get("pairmixer_pair_dim", config.model_dim))),
+            pair_dim=int(head_state["pair_dim"]),
             compressed_dim=covariance_dim,
         ).to(device)
     else:
@@ -1852,13 +1852,13 @@ def write_standard_fluorine_outputs(
     precision, recall, thresholds = precision_recall_curve(targets, probs)
     metrics = summarize_metrics(targets, logits)
     train_cache_metrics = _metric_dict(targets, logits, "mcebio")
-    history = list(head_state.get("history", []))
+    history = list(head_state["history"])
     training_curve_plot = write_training_curve_plot(
         output_prefix=output_prefix,
         history=history,
     )
     summary = {
-        "mode": head_state.get("mode", "probe"),
+        "mode": head_state["mode"],
         "dataset": {
             "repo_id": HF_REPO_ID,
             "train_subdir": HF_TRAIN_SUBDIR,
@@ -1874,18 +1874,18 @@ def write_standard_fluorine_outputs(
         "head": {
             "best_epoch": head_state["best_epoch"],
             "best_val": head_state["best_val"],
-            "test": head_state.get("test", None),
+            "test": head_state["test"],
             "hparams": head_state["hparams"],
-            "pooling": head_state.get("pooling", "covariance"),
-            "pair_dim": head_state.get("pair_dim", None),
-            "device_ids": head_state.get("device_ids", []),
+            "pooling": head_state["pooling"],
+            "pair_dim": head_state["pair_dim"],
+            "device_ids": head_state["device_ids"],
             "focal_alpha": head_state["focal_alpha"],
             "focal_gamma": head_state["focal_gamma"],
-            "finetune_cache_dir": head_state.get("finetune_cache_dir", ""),
-            "train_size": head_state.get("train_size", None),
-            "train_positive": head_state.get("train_positive", None),
-            "val_size": head_state.get("val_size", None),
-            "val_positive": head_state.get("val_positive", None),
+            "finetune_cache_dir": head_state["finetune_cache_dir"],
+            "train_size": head_state["train_size"],
+            "train_positive": head_state["train_positive"],
+            "val_size": head_state["val_size"],
+            "val_positive": head_state["val_positive"],
             "history": history,
             "training_curve_plot": training_curve_plot,
         },

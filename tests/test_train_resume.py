@@ -1,6 +1,5 @@
 import tempfile
 import json
-import logging
 import sys
 import threading
 from pathlib import Path
@@ -905,7 +904,7 @@ def test_async_checkpoint_writer_returns_before_torch_save_finishes(monkeypatch,
     assert ckpt["global_step"] == 12
 
 
-def test_async_checkpoint_writer_logs_background_failures(monkeypatch, tmp_path: Path, caplog):
+def test_async_checkpoint_writer_raises_background_failures(monkeypatch, tmp_path: Path):
     def fail_write_job(*args, **kwargs):
         raise OSError("upload failed")
 
@@ -916,20 +915,17 @@ def test_async_checkpoint_writer_logs_background_failures(monkeypatch, tmp_path:
     )
     writer = AsyncCheckpointWriter()
 
-    with caplog.at_level(logging.WARNING):
-        writer.save_checkpoint(
-            path=tmp_path / "step-00000012.pt",
-            model=_small_model(),
-            optimizers=[],
-            schedulers=[],
-            global_step=12,
-            epoch=1,
-            loss=0.5,
-        )
+    writer.save_checkpoint(
+        path=tmp_path / "step-00000012.pt",
+        model=_small_model(),
+        optimizers=[],
+        schedulers=[],
+        global_step=12,
+        epoch=1,
+        loss=0.5,
+    )
+    with pytest.raises(OSError, match="upload failed"):
         writer.close()
-
-    assert "Checkpoint write failed." in caplog.text
-    assert "upload failed" in caplog.text
 
 
 def test_latest_ckpt_path_ignores_non_training_checkpoints(tmp_path: Path):
@@ -992,6 +988,76 @@ def test_load_resume_covariance_pooler_state_reads_sibling_pt():
 
     for key, value in pooler.state_dict().items():
         torch.testing.assert_close(restored.state_dict()[key], value)
+
+
+def test_restore_training_state_loads_canonical_checkpoint(tmp_path: Path):
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    source = _small_model()
+    torch.save(
+        {
+            "model": source.state_dict(),
+            "optimizers": [],
+            "schedulers": [],
+            "grad_scaler": None,
+            "global_step": 3,
+            "epoch": 0,
+            "loss": 0.5,
+            "wandb_run_id": "wandb-run-123",
+            "covariance_pooler_checkpoint": None,
+        },
+        checkpoint_dir / "step-00000003.pt",
+    )
+    restored = _small_model()
+    config = config_dict.ConfigDict()
+
+    start_epoch, global_step, resume_offset = pretrain.restore_training_state(
+        config=config,
+        checkpoint_dir=checkpoint_dir,
+        model=restored,
+        optimizers=[],
+        schedulers=[],
+        steps_per_epoch=5,
+        device=torch.device("cpu"),
+    )
+
+    assert (start_epoch, global_step, resume_offset) == (0, 3, 3)
+    assert config.wandb_resume_id == "wandb-run-123"
+    for key, value in source.state_dict().items():
+        torch.testing.assert_close(restored.state_dict()[key], value)
+
+
+@pytest.mark.parametrize("missing_key", ["grad_scaler", "loss"])
+def test_restore_training_state_rejects_missing_checkpoint_keys(
+    tmp_path: Path,
+    missing_key: str,
+):
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    state = {
+        "model": _small_model().state_dict(),
+        "optimizers": [],
+        "schedulers": [],
+        "grad_scaler": None,
+        "global_step": 3,
+        "epoch": 0,
+        "loss": 0.5,
+        "wandb_run_id": None,
+        "covariance_pooler_checkpoint": None,
+    }
+    state.pop(missing_key)
+    torch.save(state, checkpoint_dir / "step-00000003.pt")
+
+    with pytest.raises(KeyError, match=missing_key):
+        pretrain.restore_training_state(
+            config=config_dict.ConfigDict(),
+            checkpoint_dir=checkpoint_dir,
+            model=_small_model(),
+            optimizers=[],
+            schedulers=[],
+            steps_per_epoch=5,
+            device=torch.device("cpu"),
+        )
 
 
 def test_training_loop_resumes_with_offset_loader(monkeypatch, tmp_path: Path):

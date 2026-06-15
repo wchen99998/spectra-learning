@@ -77,12 +77,11 @@ def _load_checkpoint_for_encoder(
         map_location="cpu",
         weights_only=True,
     )
-    raw_state = checkpoint["model"] if "model" in checkpoint else checkpoint["state_dict"]
-    model.load_state_dict(raw_state)
+    model.load_state_dict(checkpoint["model"])
     return {
-        "global_step": checkpoint.get("global_step", None),
-        "epoch": checkpoint.get("epoch", None),
-        "loss": checkpoint.get("loss", None),
+        "global_step": checkpoint["global_step"],
+        "epoch": checkpoint["epoch"],
+        "loss": checkpoint["loss"],
     }
 
 

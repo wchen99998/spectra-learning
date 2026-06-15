@@ -37,8 +37,6 @@ class GemsDataConfig:
     gems_native_repo_id: str
     gems_native_hf_subdir: str
     gems_native_revision: str
-    gems_native_source_hdf5_path: str
-    gems_native_source_url: str
     batch_size: int
     gradient_accumulation_steps: int
     drop_remainder: bool
@@ -91,12 +89,6 @@ class GemsDataConfig:
                 _config_get(config, "gems_native_hf_subdir", "")
             ).strip("/"),
             gems_native_revision=str(_config_get(config, "gems_native_revision", "main")),
-            gems_native_source_hdf5_path=str(
-                _config_get(config, "gems_native_source_hdf5_path", "")
-            ).strip(),
-            gems_native_source_url=str(
-                _config_get(config, "gems_native_source_url", "")
-            ).strip(),
             batch_size=int(_config_get(config, "batch_size", DEFAULT_BATCH_SIZE)),
             gradient_accumulation_steps=int(
                 _config_get(config, "gradient_accumulation_steps", 1)

@@ -1,5 +1,4 @@
 import copy
-import logging
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -23,7 +22,6 @@ from spectra_learning.training.storage import (
 )
 
 COVARIANCE_POOLER_CHECKPOINT_PREFIX = "covariance-pooler-"
-log = logging.getLogger(__name__)
 
 
 def covariance_pooler_checkpoint_path(path: StoragePath) -> StoragePath:
@@ -220,10 +218,7 @@ class AsyncCheckpointWriter:
         self._executor.shutdown(wait=True)
 
     def _log_future_result(self, future: Future[None]) -> None:
-        try:
-            future.result()
-        except Exception:
-            log.warning("Checkpoint write failed.", exc_info=True)
+        future.result()
 
 
 def save_checkpoint(
@@ -313,10 +308,9 @@ def prune_checkpoints(checkpoint_dir: StoragePath, keep_top_k: int = 5) -> None:
         return
     losses = [
         (
-            load_torch_checkpoint(entry.path, map_location="cpu", weights_only=True).get(
-                "loss",
-                float("inf"),
-            ),
+            load_torch_checkpoint(entry.path, map_location="cpu", weights_only=True)[
+                "loss"
+            ],
             entry,
         )
         for entry in pts
@@ -379,8 +373,7 @@ def load_pretrained_weights(
         map_location="cpu",
         weights_only=True,
     )
-    state_dict = ckpt["model"] if "model" in ckpt else ckpt["state_dict"]
-    model.load_state_dict(state_dict)
+    model.load_state_dict(ckpt["model"])
 
 
 def load_frozen_teacher_weights(
@@ -388,10 +381,9 @@ def load_frozen_teacher_weights(
     checkpoint_path: StoragePath,
 ) -> None:
     ckpt = load_torch_checkpoint(checkpoint_path, map_location="cpu", weights_only=True)
-    state_dict = ckpt["model"] if "model" in ckpt else ckpt["state_dict"]
     encoder_state = {
         key.removeprefix("encoder."): value
-        for key, value in state_dict.items()
+        for key, value in ckpt["model"].items()
         if key.startswith("encoder.")
     }
     teacher_encoder = model.teacher_encoder
@@ -401,7 +393,7 @@ def load_frozen_teacher_weights(
     if teacher_target_projector is not None:
         projector_state = {
             key.removeprefix("target_projector."): value
-            for key, value in state_dict.items()
+            for key, value in ckpt["model"].items()
             if key.startswith("target_projector.")
         }
         teacher_target_projector.load_state_dict(projector_state)

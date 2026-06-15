@@ -170,27 +170,40 @@ def _probe_metadata_valid(
         return None
     metadata = json.loads(metadata_path.read_text())
     if int(metadata.get("metadata_version", 0)) != expected_version:
-        return None
+        _raise_invalid_murcko_artifact(output_dir, "metadata_version mismatch")
     if float(metadata.get("max_precursor_mz", float("inf"))) != max_precursor_mz:
-        return None
+        _raise_invalid_murcko_artifact(output_dir, "max_precursor_mz mismatch")
     if expected_metadata is not None:
         for key, value in expected_metadata.items():
             if metadata.get(key) != value:
-                return None
+                _raise_invalid_murcko_artifact(output_dir, f"{key} mismatch")
     storage_format = str(metadata.get("storage_format", "native"))
     for split in ("train", "val", "test"):
+        filenames = metadata.get(f"{split}_files", [])
+        if not filenames:
+            _raise_invalid_murcko_artifact(
+                output_dir,
+                f"missing {split}_files metadata",
+            )
         if storage_format == "parquet":
             if not all(
                 (output_dir / name).exists()
-                for name in metadata.get(f"{split}_files", [])
+                for name in filenames
             ):
-                return None
+                _raise_invalid_murcko_artifact(output_dir, f"missing {split} files")
         elif not all(
             (output_dir / split / name).exists()
-            for name in metadata.get(f"{split}_files", [])
+            for name in filenames
         ):
-            return None
+            _raise_invalid_murcko_artifact(output_dir, f"missing {split} files")
     return metadata
+
+
+def _raise_invalid_murcko_artifact(output_dir: Path, reason: str) -> None:
+    raise ValueError(
+        f"Invalid Murcko probe artifact in {output_dir}: {reason}. "
+        "Delete the artifact directory and rebuild or download it again."
+    )
 
 
 def _coordinate_distributed_download(distributed_world_size: int) -> bool:
@@ -254,11 +267,25 @@ def ensure_nist_murcko_probe_downloaded(
         max_precursor_mz,
         expected_metadata={"artifact_format": NIST_MURCKO_ARTIFACT_FORMAT},
     )
-    if cached is not None and (
-        not include_morgan or _auxiliary_files_available(output_dir, cached, "morgan")
-    ) and (
-        not include_dreams or _auxiliary_files_available(output_dir, cached, "dreams")
-    ):
+    if cached is not None:
+        if include_morgan and not _auxiliary_files_available(
+            output_dir,
+            cached,
+            "morgan",
+        ):
+            _raise_invalid_murcko_artifact(
+                output_dir,
+                "missing Morgan auxiliary files",
+            )
+        if include_dreams and not _auxiliary_files_available(
+            output_dir,
+            cached,
+            "dreams",
+        ):
+            _raise_invalid_murcko_artifact(
+                output_dir,
+                "missing DreaMS auxiliary files",
+            )
         if _coordinate_distributed_download(distributed_world_size):
             torch.distributed.barrier()
         return cached
@@ -311,10 +338,16 @@ def _read_murcko_subdir_metadata(
     for split in required_splits:
         filenames = metadata.get(f"{split}_files", [])
         if not filenames:
-            return None
+            _raise_invalid_murcko_artifact(
+                cache_dir / subdir,
+                f"missing {split}_files metadata",
+            )
         for filename in filenames:
             if not (cache_dir / subdir / filename).exists():
-                return None
+                _raise_invalid_murcko_artifact(
+                    cache_dir / subdir,
+                    f"missing {filename}",
+                )
     return metadata
 
 
@@ -372,7 +405,12 @@ def _murcko_subdir_auxiliary_available(
 ) -> bool:
     if metadata is None:
         return False
-    return _auxiliary_files_available(cache_dir / subdir, metadata, auxiliary_name)
+    if _auxiliary_files_available(cache_dir / subdir, metadata, auxiliary_name):
+        return True
+    _raise_invalid_murcko_artifact(
+        cache_dir / subdir,
+        f"missing {auxiliary_name} auxiliary files",
+    )
 
 
 def _merge_vocabularies(*vocabs: dict[str, int]) -> dict[str, int]:

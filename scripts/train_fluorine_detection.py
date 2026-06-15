@@ -106,6 +106,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-train-samples", type=int, default=None)
     parser.add_argument("--max-val-samples", type=int, default=None)
     parser.add_argument("--max-test-samples", type=int, default=None)
+    parser.add_argument("--eval-test-every-epoch", action="store_true")
     args = parser.parse_args()
     if args.epochs is None:
         args.epochs = 20 if args.mode == "probe" else 3

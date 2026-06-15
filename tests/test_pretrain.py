@@ -1497,11 +1497,20 @@ class BlockJEPATests(unittest.TestCase):
         model = self._build_model()
         with tempfile.TemporaryDirectory() as tmpdir:
             path = f"{tmpdir}/ckpt.pt"
-            torch.save({"state_dict": model.state_dict()}, path)
+            torch.save({"model": model.state_dict()}, path)
             loaded = self._build_model()
             load_pretrained_weights(loaded, path)
             for key, value in model.state_dict().items():
                 self.assertTrue(torch.equal(value, loaded.state_dict()[key]), key)
+
+    def test_load_pretrained_weights_rejects_state_dict_checkpoint(self):
+        model = self._build_model()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/ckpt.pt"
+            torch.save({"state_dict": model.state_dict()}, path)
+            loaded = self._build_model()
+            with self.assertRaisesRegex(KeyError, "model"):
+                load_pretrained_weights(loaded, path)
 
     def test_load_frozen_teacher_weights_uses_mae_encoder_only(self):
         source = self._build_model(training_mode="mae")
@@ -1544,7 +1553,7 @@ class BlockJEPATests(unittest.TestCase):
                     )
                 )
             }
-            torch.save({"state_dict": old_state}, path)
+            torch.save({"model": old_state}, path)
             loaded = self._build_model()
             with self.assertRaisesRegex(RuntimeError, "Missing key"):
                 load_pretrained_weights(loaded, path)
@@ -1558,7 +1567,7 @@ class BlockJEPATests(unittest.TestCase):
                 for k, v in model.state_dict().items()
                 if not k.startswith(("masked_latent_readout.", "target_projector."))
             }
-            torch.save({"state_dict": old_state}, path)
+            torch.save({"model": old_state}, path)
             loaded = self._build_model(jepa_target_layers=[1])
             with self.assertRaisesRegex(RuntimeError, "Missing key"):
                 load_pretrained_weights(loaded, path)

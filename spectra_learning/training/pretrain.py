@@ -613,7 +613,8 @@ def restore_training_state(
     ckpt_path = checkpoints[-1]
     logging.info("Resuming from checkpoint: %s", ckpt_path)
     ckpt = load_torch_checkpoint(ckpt_path, map_location=device, weights_only=True)
-    resume_wandb_id = ckpt.get("wandb_run_id")
+    _ = ckpt["loss"]
+    resume_wandb_id = ckpt["wandb_run_id"]
     if resume_wandb_id:
         config.wandb_resume_id = resume_wandb_id
     load_resume_model_state(model, ckpt["model"])
@@ -621,7 +622,7 @@ def restore_training_state(
         load_optimizer_state(optimizer, state)
     for scheduler, state in zip(schedulers, ckpt["schedulers"], strict=True):
         scheduler.load_state_dict(state)
-    load_grad_scaler_state(grad_scaler, ckpt.get("grad_scaler"))
+    load_grad_scaler_state(grad_scaler, ckpt["grad_scaler"])
     global_step = int(ckpt["global_step"])
     start_epoch = int(ckpt["epoch"])
     resume_offset = global_step - start_epoch * steps_per_epoch

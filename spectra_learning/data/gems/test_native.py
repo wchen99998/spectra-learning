@@ -642,11 +642,9 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
         barrier_mock.assert_called_once()
         self.assertEqual(datamodule.info["train_size"], 2)
 
-    def test_datamodule_replaces_legacy_gems_cache_with_native_artifact(self):
+    def test_datamodule_rejects_legacy_gems_cache_without_download(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            source_hdf5 = tmp_path / "GeMS_A.hdf5"
-            _write_fake_gems_hdf5(source_hdf5)
             cfg = self._make_config(tmp_path)
 
             artifact_dir = Path(cfg.artifact_dir) / "gems"
@@ -655,23 +653,11 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 json.dumps({"gems_metadata_version": 1})
             )
 
-            def fake_snapshot_download(*, local_dir, **kwargs):
-                self._build_native_artifact(
-                    source_hdf5=source_hdf5,
-                    output_dir=Path(local_dir),
-                    cfg=cfg,
-                )
-                return str(local_dir)
+            with mock.patch.object(gems_artifacts, "snapshot_download") as download_mock:
+                with self.assertRaisesRegex(ValueError, "Delete the artifact directory"):
+                    gems.GemsNativeDataModule(cfg, seed=42)
 
-            with mock.patch.object(gems_artifacts, "snapshot_download",
-                side_effect=fake_snapshot_download,
-            ) as download_mock:
-                datamodule = gems.GemsNativeDataModule(cfg, seed=42)
-                batch = next(iter(datamodule.train_loader_for_epoch(0)))
-
-            self.assertEqual(datamodule.info["train_size"], 2)
-            self.assertIn("peak_mz", batch)
-            download_mock.assert_called_once()
+            download_mock.assert_not_called()
 
     def test_datamodule_reuses_same_raw_artifact_for_peak_filter_overrides(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -698,7 +684,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             self.assertNotIn("gems_variants", str(datamodule.gems_dir))
             self.assertEqual(datamodule.gems_dir, Path(cfg.artifact_dir) / "gems")
 
-    def test_datamodule_builds_custom_gems_variant_from_downloaded_raw_hdf5(self):
+    def test_datamodule_rejects_precursor_mz_mismatch_without_variant_build(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             source_hdf5 = tmp_path / "GeMS_A.hdf5"
@@ -711,11 +697,6 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             def fake_snapshot_download(*, local_dir, **kwargs):
                 download_calls.append(kwargs)
                 artifact_dir = Path(local_dir) / "gems_a10_native"
-                raw_path = artifact_dir / "raw" / source_hdf5.name
-                if kwargs["allow_patterns"] == ["gems_a10_native/raw/GeMS_A.hdf5"]:
-                    raw_path.parent.mkdir(parents=True, exist_ok=True)
-                    raw_path.write_bytes(source_hdf5.read_bytes())
-                    return str(local_dir)
                 base_cfg = self._make_config(tmp_path)
                 self._build_native_artifact(
                     source_hdf5=source_hdf5,
@@ -735,13 +716,12 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 "snapshot_download",
                 side_effect=fake_snapshot_download,
             ):
-                datamodule = gems.GemsNativeDataModule(cfg, seed=42)
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "preprocessing mismatch",
+                ):
+                    gems.GemsNativeDataModule(cfg, seed=42)
 
-        self.assertEqual(
-            datamodule.gems_dir,
-            Path(cfg.artifact_dir) / "gems_variants" / "gems_native_raw_pmax650p0",
-        )
-        self.assertEqual(datamodule.info["train_size"] + datamodule.info["validation_size"], 2)
         self.assertEqual(
             [call["allow_patterns"] for call in download_calls],
             [
@@ -750,11 +730,10 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                     "gems_a10_native/train/*",
                     "gems_a10_native/validation/*",
                 ],
-                ["gems_a10_native/raw/GeMS_A.hdf5"],
             ],
         )
 
-    def test_datamodule_rank_one_waits_for_custom_gems_variant(self):
+    def test_datamodule_rank_one_rejects_precursor_mz_mismatch_without_variant(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             source_hdf5 = tmp_path / "GeMS_A.hdf5"
@@ -769,29 +748,8 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
 
             cfg = self._make_config(tmp_path)
             cfg.max_precursor_mz = 650.0
-            variant_dir = (
-                Path(cfg.artifact_dir)
-                / "gems_variants"
-                / "gems_native_raw_pmax650p0"
-            )
-            barrier_calls = 0
-
-            def fake_barrier():
-                nonlocal barrier_calls
-                barrier_calls += 1
-                if barrier_calls == 2:
-                    self._build_native_artifact(
-                        source_hdf5=source_hdf5,
-                        output_dir=variant_dir,
-                        cfg=cfg,
-                    )
 
             with (
-                mock.patch.object(
-                    gems_artifacts,
-                    "build_gems_native_artifact",
-                    side_effect=AssertionError("rank 1 should not build variant"),
-                ),
                 mock.patch.object(
                     gems_artifacts.torch.distributed,
                     "is_available",
@@ -805,18 +763,21 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 mock.patch.object(
                     gems_artifacts.torch.distributed,
                     "barrier",
-                    side_effect=fake_barrier,
+                    return_value=None,
                 ) as barrier_mock,
             ):
-                datamodule = gems.GemsNativeDataModule(
-                    cfg,
-                    seed=42,
-                    distributed_world_size=2,
-                    distributed_rank=1,
-                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "preprocessing mismatch",
+                ):
+                    gems.GemsNativeDataModule(
+                        cfg,
+                        seed=42,
+                        distributed_world_size=2,
+                        distributed_rank=1,
+                    )
 
-        self.assertEqual(barrier_mock.call_count, 2)
-        self.assertEqual(datamodule.gems_dir, variant_dir)
+        barrier_mock.assert_called_once()
 
     def test_native_loader_respects_persistent_workers_config(self):
         with tempfile.TemporaryDirectory() as tmp:

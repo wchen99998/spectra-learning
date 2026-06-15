@@ -277,6 +277,60 @@ def test_ensure_nist_murcko_downloads_dreams_auxiliary(monkeypatch, tmp_path: Pa
     ]
 
 
+def test_ensure_nist_murcko_rejects_invalid_metadata_without_download(
+    monkeypatch,
+    tmp_path: Path,
+):
+    output_dir = tmp_path / "probe-cache" / "nist_murcko_probe"
+    output_dir.mkdir(parents=True)
+    (output_dir / "metadata.json").write_text(
+        json.dumps({"metadata_version": 0, "max_precursor_mz": 1000.0})
+    )
+    calls = []
+
+    def fake_snapshot_download(**kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(murcko, "snapshot_download", fake_snapshot_download)
+
+    with pytest.raises(ValueError, match="Delete the artifact directory"):
+        murcko.ensure_nist_murcko_probe_downloaded(
+            output_dir,
+            max_precursor_mz=1000.0,
+            repo_id="owner/nist-murcko",
+            revision="unit-test",
+        )
+
+    assert calls == []
+
+
+def test_murcko_fluorine_rejects_partial_metadata_without_download(
+    monkeypatch,
+    tmp_path: Path,
+):
+    train_dir = tmp_path / "cache" / "nist_murcko_probe"
+    train_dir.mkdir(parents=True)
+    (train_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "train_files": ["missing-train.parquet"],
+                "val_files": ["missing-val.parquet"],
+            }
+        )
+    )
+    calls = []
+
+    def fake_snapshot_download(**kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(murcko, "snapshot_download", fake_snapshot_download)
+
+    with pytest.raises(ValueError, match="Delete the artifact directory"):
+        murcko.ensure_murcko_fluorine_data_downloaded(tmp_path / "cache")
+
+    assert calls == []
+
+
 def test_murcko_fluorine_cache_and_loader_use_shared_peak_preprocessing(
     monkeypatch,
     tmp_path: Path,

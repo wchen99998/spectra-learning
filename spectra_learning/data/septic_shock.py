@@ -266,6 +266,51 @@ def load_septic_shock_metadata(cache_dir: Path) -> dict[str, Any]:
     return json.loads((cache_dir / "metadata.json").read_text())
 
 
+def _raise_invalid_septic_shock_artifact(artifact_dir: Path, reason: str) -> None:
+    raise ValueError(
+        f"Invalid septic-shock artifact in {artifact_dir}: {reason}. "
+        "Delete the artifact directory and rebuild or download it again."
+    )
+
+
+def _validate_septic_shock_peaklist_artifact(
+    artifact_dir: Path,
+    metadata: dict[str, Any],
+) -> None:
+    if int(metadata.get("metadata_version", 0)) != SEPTIC_SHOCK_METADATA_VERSION:
+        _raise_invalid_septic_shock_artifact(
+            artifact_dir,
+            "metadata_version mismatch",
+        )
+    if metadata.get("task") != SEPTIC_SHOCK_TASK:
+        _raise_invalid_septic_shock_artifact(artifact_dir, "task mismatch")
+    if metadata.get("artifact_format") != SEPTIC_SHOCK_ARTIFACT_FORMAT:
+        _raise_invalid_septic_shock_artifact(
+            artifact_dir,
+            "artifact_format mismatch",
+        )
+    if int(metadata.get("num_peaks_input", 0)) != NUM_PEAKS_INPUT:
+        _raise_invalid_septic_shock_artifact(
+            artifact_dir,
+            "num_peaks_input mismatch",
+        )
+    for split in ("train", "val", "test"):
+        shard_names = metadata.get(f"{split}_shards", [])
+        if not shard_names:
+            _raise_invalid_septic_shock_artifact(
+                artifact_dir,
+                f"missing {split}_shards metadata",
+            )
+        for shard_name in shard_names:
+            shard_dir = artifact_dir / split / shard_name
+            for filename in ("spectra.npy", "precursor_mz_raw.npy", "sample_index.npy"):
+                if not (shard_dir / filename).exists():
+                    _raise_invalid_septic_shock_artifact(
+                        artifact_dir,
+                        f"missing {split}/{shard_name}/{filename}",
+                    )
+
+
 def _coordinate_distributed_download(distributed_world_size: int) -> bool:
     return (
         distributed_world_size > 1
@@ -320,7 +365,9 @@ def ensure_septic_shock_artifact_downloaded(
             torch.distributed.barrier()
     elif coordinated:
         torch.distributed.barrier()
-    return artifact_dir, load_septic_shock_metadata(artifact_dir)
+    metadata = load_septic_shock_metadata(artifact_dir)
+    _validate_septic_shock_peaklist_artifact(artifact_dir, metadata)
+    return artifact_dir, metadata
 
 
 def _write_peaklist_shard(

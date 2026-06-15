@@ -1297,8 +1297,7 @@ class PeakSetJEPAJax(nnx.Module):
 
     def load_torch_checkpoint(self, checkpoint_path: str | Path) -> None:
         ckpt = load_torch_checkpoint(checkpoint_path, map_location="cpu", weights_only=True)
-        state_dict = ckpt["model"] if "model" in ckpt else ckpt["state_dict"]
-        self.load_torch_state_dict(state_dict)
+        self.load_torch_state_dict(ckpt["model"])
 
 
 def _cross_entropy_from_logits(logits: Array, targets: Array) -> Array:

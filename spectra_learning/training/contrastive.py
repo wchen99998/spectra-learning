@@ -1990,6 +1990,7 @@ def save_contrastive_checkpoint_if_main(
             "global_step": global_step,
             "epoch": epoch,
             "loss": loss,
+            "wandb_run_id": None,
             "training_mode": "contrastive",
             "covariance_pooler_checkpoint": storage_name(pooler_path),
         },
@@ -2013,6 +2014,8 @@ def restore_contrastive_state(
     ckpt_path = checkpoints[-1]
     log.info("Resuming contrastive training from %s", ckpt_path)
     ckpt = load_torch_checkpoint(ckpt_path, map_location=device, weights_only=True)
+    _ = ckpt["loss"]
+    _ = ckpt["wandb_run_id"]
     load_resume_model_state(module.model, ckpt["model"])
     load_resume_covariance_pooler_state(module.pooler, ckpt_path, ckpt)
     module.online_probe.load_state_dict(ckpt["online_probe"])
@@ -2020,7 +2023,7 @@ def restore_contrastive_state(
         load_optimizer_state(optimizer, state)
     for scheduler, state in zip(schedulers, ckpt["schedulers"], strict=True):
         scheduler.load_state_dict(state)
-    load_grad_scaler_state(grad_scaler, ckpt.get("grad_scaler"))
+    load_grad_scaler_state(grad_scaler, ckpt["grad_scaler"])
     global_step = int(ckpt["global_step"])
     start_epoch = int(ckpt["epoch"])
     resume_offset = global_step - start_epoch * steps_per_epoch

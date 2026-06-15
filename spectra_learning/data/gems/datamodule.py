@@ -121,13 +121,10 @@ class GemsNativeDataModule:
         if not self.config.gems_native_repo_id:
             raise ValueError("GeMS configs must set gems_native_repo_id")
         self.gems_dir, self.gems_metadata = resolve_gems_artifact(
-            output_dir=self.output_dir,
             gems_base_dir=self.gems_base_dir,
             repo_id=self.config.gems_native_repo_id,
             revision=self.config.gems_native_revision,
             max_precursor_mz=self.config.max_precursor_mz,
-            source_hdf5_path=self.config.gems_native_source_hdf5_path,
-            source_url=self.config.gems_native_source_url,
             repo_subdir=self.config.gems_native_hf_subdir,
             distributed_world_size=distributed_world_size,
             distributed_rank=distributed_rank,

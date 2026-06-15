@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 from spectra_learning.data.spectra import (
@@ -301,22 +302,36 @@ def test_build_peaklist_artifact_uses_project_loader(monkeypatch, tmp_path: Path
 def test_build_septic_shock_data_downloads_hf_subdir(monkeypatch, tmp_path: Path) -> None:
     source_root = tmp_path / "source_repo"
     artifact_dir = source_root / "septic"
-    shard_dir = artifact_dir / "train" / "shard-00000-of-00001"
-    shard_dir.mkdir(parents=True, exist_ok=True)
     spectra = np.zeros((1, 2, 128), dtype=np.float32)
     spectra[0, 0, :2] = [25.0, 50.0]
     spectra[0, 1, :2] = [5.0, 10.0]
-    np.save(shard_dir / "spectra.npy", spectra)
-    np.save(
-        shard_dir / "precursor_mz_raw.npy",
-        np.asarray([100.0], dtype=np.float32),
-    )
-    np.save(shard_dir / "sample_index.npy", np.asarray([0], dtype=np.int64))
+    for split in ("train", "val", "test"):
+        shard_dir = artifact_dir / split / "shard-00000-of-00001"
+        shard_dir.mkdir(parents=True, exist_ok=True)
+        split_spectra = spectra if split == "train" else spectra[:0]
+        np.save(shard_dir / "spectra.npy", split_spectra)
+        np.save(
+            shard_dir / "precursor_mz_raw.npy",
+            np.asarray([100.0], dtype=np.float32) if split == "train" else np.asarray([], dtype=np.float32),
+        )
+        np.save(
+            shard_dir / "sample_index.npy",
+            np.asarray([0], dtype=np.int64) if split == "train" else np.asarray([], dtype=np.int64),
+        )
     metadata = {
+        "metadata_version": septic_shock.SEPTIC_SHOCK_METADATA_VERSION,
+        "task": septic_shock.SEPTIC_SHOCK_TASK,
         "artifact_format": septic_shock.SEPTIC_SHOCK_ARTIFACT_FORMAT,
+        "num_peaks_input": 128,
         "train_shards": ["shard-00000-of-00001"],
         "train_scan_lengths": [1],
         "train_num_scans": 1,
+        "val_shards": ["shard-00000-of-00001"],
+        "val_scan_lengths": [0],
+        "val_num_scans": 0,
+        "test_shards": ["shard-00000-of-00001"],
+        "test_scan_lengths": [0],
+        "test_num_scans": 0,
         "samples": [
             {
                 "sample_index": 0,
@@ -370,3 +385,27 @@ def test_build_septic_shock_data_downloads_hf_subdir(monkeypatch, tmp_path: Path
     ]
     assert torch.allclose(batch["label"], torch.tensor([1.0]))
     assert torch.allclose(batch["peak_mz"][0], torch.tensor([0.025, 0.05]))
+
+
+def test_septic_shock_hf_artifact_rejects_invalid_metadata_without_download(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    artifact_dir = tmp_path / "cache" / "septic"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "metadata.json").write_text(json.dumps({"metadata_version": 0}))
+    calls = []
+
+    def fake_snapshot_download(**kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(septic_shock, "snapshot_download", fake_snapshot_download)
+
+    with pytest.raises(ValueError, match="Delete the artifact directory"):
+        septic_shock.ensure_septic_shock_artifact_downloaded(
+            tmp_path / "cache",
+            repo_id="unit/septic",
+            subdir="septic",
+        )
+
+    assert calls == []
