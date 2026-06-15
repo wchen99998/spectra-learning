@@ -1,7 +1,7 @@
 """Build per-experiment .npz files from GeMS HDF5, grouped by experiment name.
 
 Usage:
-    python scripts/prepare_gems_grouped.py \
+    python -m spectra_learning.data.gems.grouped \
         --source-hdf5 data/data/GeMS_A/GeMS_A10.hdf5 \
         --output-dir data/gems_grouped \
         --max-precursor-mz 1000.0 \
@@ -93,17 +93,21 @@ def build_manifest(
     }
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Build per-experiment .npz files from GeMS HDF5."
+def build_gems_grouped_artifact(
+    *,
+    source_hdf5: Path,
+    output_dir: Path,
+    max_precursor_mz: float = 1000.0,
+    val_fraction: float = 0.05,
+    split_seed: int = 42,
+) -> dict:
+    args = argparse.Namespace(
+        source_hdf5=source_hdf5,
+        output_dir=output_dir,
+        max_precursor_mz=max_precursor_mz,
+        val_fraction=val_fraction,
+        split_seed=split_seed,
     )
-    parser.add_argument("--source-hdf5", type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--max-precursor-mz", type=float, default=1000.0)
-    parser.add_argument("--val-fraction", type=float, default=0.05)
-    parser.add_argument("--split-seed", type=int, default=42)
-    args = parser.parse_args()
-
     source_hdf5 = args.source_hdf5.expanduser().resolve()
     output_dir = args.output_dir.expanduser().resolve()
 
@@ -279,6 +283,26 @@ def main() -> None:
             info.get("mean_spectra", 0),
             info.get("median_spectra", 0),
         )
+    return manifest
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Build per-experiment .npz files from GeMS HDF5."
+    )
+    parser.add_argument("--source-hdf5", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--max-precursor-mz", type=float, default=1000.0)
+    parser.add_argument("--val-fraction", type=float, default=0.05)
+    parser.add_argument("--split-seed", type=int, default=42)
+    args = parser.parse_args()
+    build_gems_grouped_artifact(
+        source_hdf5=args.source_hdf5,
+        output_dir=args.output_dir,
+        max_precursor_mz=args.max_precursor_mz,
+        val_fraction=args.val_fraction,
+        split_seed=args.split_seed,
+    )
 
 
 if __name__ == "__main__":

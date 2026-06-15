@@ -298,7 +298,16 @@ def test_murcko_fluorine_cache_and_loader_use_shared_peak_preprocessing(
           "val_lengths": [2],
           "val_size": 2,
           "val_positive": 1,
-          "dreams_dim": 2
+          "dreams_dim": 2,
+          "dreams_auxiliary_available": true,
+          "dreams_auxiliary_files": {
+            "train": ["auxiliary/dreams/train-part-00000.npz"],
+            "val": ["auxiliary/dreams/val-part-00000.npz"]
+          },
+          "dreams_auxiliary_lengths": {
+            "train": [4],
+            "val": [2]
+          }
         }
         """
     )
@@ -309,7 +318,14 @@ def test_murcko_fluorine_cache_and_loader_use_shared_peak_preprocessing(
           "all_lengths": [2],
           "all_size": 2,
           "all_positive": 1,
-          "dreams_dim": 2
+          "dreams_dim": 2,
+          "dreams_auxiliary_available": true,
+          "dreams_auxiliary_files": {
+            "all": ["auxiliary/dreams/all-part-00000.npz"]
+          },
+          "dreams_auxiliary_lengths": {
+            "all": [2]
+          }
         }
         """
     )
@@ -333,6 +349,9 @@ def test_murcko_fluorine_cache_and_loader_use_shared_peak_preprocessing(
     assert metadata["train_positive"] == 2
     assert metadata["test_size"] == 2
     assert metadata["test_positive"] == 1
+    assert not metadata["dreams_auxiliary_available"]
+    assert "train_dreams_files" not in metadata
+    assert "test_dreams_files" not in metadata
     assert (cache_dir / metadata["train_files"][0]).exists()
     assert (cache_dir / metadata["test_files"][0]).exists()
 
@@ -353,6 +372,21 @@ def test_murcko_fluorine_cache_and_loader_use_shared_peak_preprocessing(
     assert torch.allclose(batch["peak_intensity"][0], torch.tensor([0.5, 1.0]))
     assert torch.equal(batch["peak_valid_mask"][0], torch.tensor([True, True]))
     assert torch.allclose(batch["label"], torch.tensor([1.0, 0.0]))
+
+    distributed_batch = next(
+        iter(
+            murcko.build_murcko_fluorine_loader(
+                data,
+                "train",
+                shuffle=False,
+                seed=0,
+                max_samples=None,
+                distributed_world_size=2,
+                distributed_rank=1,
+            )
+        )
+    )
+    assert tuple(distributed_batch["label"].shape) == (1,)
 
 
 def test_murcko_fluorine_loader_reads_dreams_auxiliary(monkeypatch, tmp_path: Path):
@@ -864,3 +898,297 @@ def test_build_mcebio_murcko_artifact_writes_standalone_all_split(tmp_path: Path
     assert {row["fold"] for row in rows} == {"all"}
     assert {row["instrument_type"] for row in rows} == {"Q-TOF", "Orbitrap"}
     assert [row["collision_energy"] for row in rows] == [12.0, 24.0]
+
+
+def test_prepare_murcko_mgf_collection_builds_nist_and_mcebio(tmp_path: Path):
+    nist_mgf = tmp_path / "nist.mgf"
+    nist_mgf.write_text(
+        "\n".join(
+            _mgf_block(
+                "ethanol",
+                pepmass=111.0,
+                smiles="CCO",
+                adduct="[M+H]+",
+                peaks=[(10.0, 100.0), (20.0, 50.0)],
+            )
+            + _mgf_block(
+                "fluoro",
+                pepmass=112.0,
+                smiles="CC(F)O",
+                adduct="[M+H]+",
+                peaks=[(30.0, 100.0), (40.0, 50.0)],
+            )
+            + _mgf_block(
+                "phenol",
+                pepmass=113.0,
+                smiles="c1ccccc1O",
+                adduct="[M+H]+",
+                peaks=[(50.0, 100.0), (60.0, 50.0)],
+            )
+            + _mgf_block(
+                "propane",
+                pepmass=114.0,
+                smiles="CCC",
+                adduct="[M+H]+",
+                peaks=[(70.0, 100.0), (80.0, 50.0)],
+            )
+        )
+    )
+    mcebio_mgf = tmp_path / "mcebio.mgf"
+    mcebio_mgf.write_text(
+        "\n".join(
+            _mgf_block(
+                "mcebio-fluoro",
+                pepmass=211.0,
+                smiles="CC(F)N",
+                adduct="[M+H]+",
+                peaks=[(11.0, 100.0), (21.0, 50.0)],
+            )
+            + _mgf_block(
+                "mcebio-plain",
+                pepmass=212.0,
+                smiles="CCN",
+                adduct="[M+H]+",
+                peaks=[(31.0, 100.0), (41.0, 50.0)],
+            )
+        )
+    )
+
+    metadata = murcko.prepare_murcko_mgf_collection(
+        nist_mgf=str(nist_mgf),
+        mcebio_mgf=str(mcebio_mgf),
+        work_dir=tmp_path / "work",
+        upload=False,
+        val_frac=0.25,
+        test_frac=0.25,
+        num_workers=1,
+        batch_size=2,
+        parquet_batch_size=2,
+        nist_split_size_caps={"train": 10, "val": 10, "test": 10},
+    )
+    artifact_dir = Path(metadata["artifact_dir"])
+
+    assert metadata["datasets"]["nist"]["subdir"] == murcko.NIST_MURCKO_PREPARED_SUBDIR
+    assert metadata["datasets"]["mcebio"]["subdir"] == murcko.MCEBIO_MURCKO_PREPARED_SUBDIR
+    assert metadata["datasets"]["mcebio"]["splits"] == ["all"]
+    assert (artifact_dir / murcko.NIST_MURCKO_PREPARED_SUBDIR / "metadata.json").exists()
+    assert (
+        artifact_dir / murcko.MCEBIO_MURCKO_PREPARED_SUBDIR / "metadata.json"
+    ).exists()
+    assert (artifact_dir / "raw" / nist_mgf.name).exists()
+    assert (artifact_dir / "raw" / mcebio_mgf.name).exists()
+
+
+def test_prepare_murcko_mgf_collection_builds_dreams_before_upload(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from spectra_learning.data import murcko_dreams
+
+    nist_mgf = tmp_path / "nist.mgf"
+    nist_mgf.write_text(
+        "\n".join(
+            _mgf_block(
+                "ethanol",
+                pepmass=111.0,
+                smiles="CCO",
+                adduct="[M+H]+",
+                peaks=[(10.0, 100.0), (20.0, 50.0)],
+            )
+            + _mgf_block(
+                "fluoro",
+                pepmass=112.0,
+                smiles="CC(F)O",
+                adduct="[M+H]+",
+                peaks=[(30.0, 100.0), (40.0, 50.0)],
+            )
+            + _mgf_block(
+                "phenol",
+                pepmass=113.0,
+                smiles="c1ccccc1O",
+                adduct="[M+H]+",
+                peaks=[(50.0, 100.0), (60.0, 50.0)],
+            )
+            + _mgf_block(
+                "propane",
+                pepmass=114.0,
+                smiles="CCC",
+                adduct="[M+H]+",
+                peaks=[(70.0, 100.0), (80.0, 50.0)],
+            )
+        )
+    )
+    mcebio_mgf = tmp_path / "mcebio.mgf"
+    mcebio_mgf.write_text(
+        "\n".join(
+            _mgf_block(
+                "mcebio-fluoro",
+                pepmass=211.0,
+                smiles="CC(F)N",
+                adduct="[M+H]+",
+                peaks=[(11.0, 100.0), (21.0, 50.0)],
+            )
+            + _mgf_block(
+                "mcebio-plain",
+                pepmass=212.0,
+                smiles="CCN",
+                adduct="[M+H]+",
+                peaks=[(31.0, 100.0), (41.0, 50.0)],
+            )
+        )
+    )
+    events = []
+
+    def fake_build_dreams_auxiliary(**kwargs):
+        marker = (
+            Path(kwargs["artifact_dir"])
+            / murcko.NIST_MURCKO_PREPARED_SUBDIR
+            / "auxiliary"
+            / "dreams"
+            / "train-part-00000.npz"
+        )
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_bytes(b"fake dreams")
+        events.append(("dreams", kwargs))
+        return [marker]
+
+    class FakeHfApi:
+        def create_repo(self, *args, **kwargs):
+            events.append(("create_repo", args, kwargs))
+
+        def upload_large_folder(self, **kwargs):
+            metadata = json.loads((Path(kwargs["folder_path"]) / "metadata.json").read_text())
+            assert metadata["dreams_auxiliary_built"]
+            assert metadata["dreams_auxiliary_paths"] == [
+                "nist_murcko_probe/auxiliary/dreams/train-part-00000.npz"
+            ]
+            assert (
+                Path(kwargs["folder_path"])
+                / "nist_murcko_probe"
+                / "auxiliary"
+                / "dreams"
+                / "train-part-00000.npz"
+            ).exists()
+            events.append(("upload", kwargs))
+
+    monkeypatch.setattr(
+        murcko_dreams,
+        "build_murcko_dreams_auxiliary",
+        fake_build_dreams_auxiliary,
+    )
+    monkeypatch.setattr(murcko, "HfApi", FakeHfApi)
+
+    metadata = murcko.prepare_murcko_mgf_collection(
+        nist_mgf=str(nist_mgf),
+        mcebio_mgf=str(mcebio_mgf),
+        work_dir=tmp_path / "work",
+        upload=True,
+        hf_repo_id="unit/repo",
+        hf_revision="unit-test",
+        build_dreams_auxiliary=True,
+        dreams_root=tmp_path / "Dreams",
+        dreams_checkpoint=tmp_path / "Dreams" / "embedding_model.ckpt",
+        dreams_subdirs=[murcko.NIST_MURCKO_PREPARED_SUBDIR],
+        dreams_device="cpu",
+        val_frac=0.25,
+        test_frac=0.25,
+        num_workers=1,
+        batch_size=2,
+        parquet_batch_size=2,
+        nist_split_size_caps={"train": 10, "val": 10, "test": 10},
+    )
+
+    assert [event[0] for event in events] == ["dreams", "create_repo", "upload"]
+    assert metadata["dreams_auxiliary_built"]
+
+
+def test_murcko_fluorine_loader_can_return_jax_batches(tmp_path: Path):
+    root = tmp_path / "cache"
+    nist = root / "nist_murcko_probe"
+    mcebio = root / "mcebio_murcko_probe"
+    _write_split(nist / "train.parquet", [True, False])
+    _write_split(nist / "val.parquet", [False])
+    _write_split(mcebio / "all.parquet", [False, True])
+    _write_dreams_auxiliary(nist, "train", 2, 100.0)
+    _write_dreams_auxiliary(mcebio, "all", 2, 300.0)
+    (nist / "metadata.json").write_text(
+        """
+        {
+          "train_files": ["train.parquet"],
+          "train_lengths": [2],
+          "train_size": 2,
+          "train_positive": 1,
+          "val_files": ["val.parquet"],
+          "val_lengths": [1],
+          "val_size": 1,
+          "val_positive": 0,
+          "dreams_dim": 2,
+          "dreams_auxiliary_available": true,
+          "dreams_auxiliary_files": {
+            "train": ["auxiliary/dreams/train-part-00000.npz"]
+          },
+          "dreams_auxiliary_lengths": {
+            "train": [2]
+          }
+        }
+        """
+    )
+    (mcebio / "metadata.json").write_text(
+        """
+        {
+          "all_files": ["all.parquet"],
+          "all_lengths": [2],
+          "all_size": 2,
+          "all_positive": 1,
+          "dreams_dim": 2,
+          "dreams_auxiliary_available": true,
+          "dreams_auxiliary_files": {
+            "all": ["auxiliary/dreams/all-part-00000.npz"]
+          },
+          "dreams_auxiliary_lengths": {
+            "all": [2]
+          }
+        }
+        """
+    )
+    metadata = murcko.ensure_murcko_fluorine_data_downloaded(
+        root,
+        repo_id="unit/repo",
+        train_subdir="nist_murcko_probe",
+        test_subdir="mcebio_murcko_probe",
+        include_dreams=True,
+    )
+    data = _fluorine_data(metadata, root)
+
+    batch = next(
+        iter(
+            murcko.build_murcko_fluorine_loader(
+                data,
+                "train",
+                shuffle=False,
+                seed=0,
+                max_samples=None,
+                output_format="jax",
+            )
+        )
+    )
+    dreams_batch = next(
+        iter(
+            murcko.build_murcko_fluorine_loader(
+                data,
+                "test",
+                shuffle=False,
+                seed=0,
+                max_samples=None,
+                dreams_only=True,
+                output_format="jax",
+            )
+        )
+    )
+    import jax
+
+    assert isinstance(batch["peak_mz"], jax.Array)
+    assert isinstance(batch["label"], jax.Array)
+    assert tuple(batch["peak_mz"].shape) == (2, 2)
+    assert isinstance(dreams_batch["dreams_embedding"], jax.Array)
+    assert tuple(dreams_batch["dreams_embedding"].shape) == (2, 2)

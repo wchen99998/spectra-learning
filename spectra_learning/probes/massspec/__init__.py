@@ -1,6 +1,6 @@
 from typing import Any
 
-from spectra_learning.probes.massspec.data import MassSpecProbeData
+from spectra_learning.data.massspec_probe import MassSpecProbeData
 
 
 def __getattr__(name: str) -> Any:

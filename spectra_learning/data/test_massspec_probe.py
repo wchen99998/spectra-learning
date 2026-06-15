@@ -3,12 +3,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
 import torch
 from ml_collections import config_dict
 
 from spectra_learning.data import murcko as murcko_data
 from spectra_learning.data.test_murcko import _write_fake_nist_murcko_probe_artifact
-import spectra_learning.probes.massspec.data as massspec_probe_data
+import spectra_learning.data.massspec_probe as massspec_probe_data
 
 
 class MassSpecProbeMurckoDataTests(unittest.TestCase):
@@ -332,3 +333,74 @@ class MassSpecProbeMurckoDataTests(unittest.TestCase):
         self.assertEqual(download_calls, [])
         barrier_mock.assert_called_once()
         self.assertEqual(probe_data.info["massspec_train_size"], 2)
+
+    def test_probe_dataset_can_return_jax_batches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            artifact_root = tmp_path / "probe-cache" / "nist_murcko_probe"
+            _write_fake_nist_murcko_probe_artifact(artifact_root)
+
+            cfg = config_dict.ConfigDict()
+            cfg.artifact_dir = str(tmp_path / "probe-cache")
+            cfg.probe_dataset = "nist-murcko"
+            cfg.batch_size = 2
+            cfg.max_precursor_mz = 1000.0
+            cfg.min_peak_intensity = 1e-4
+            cfg.peak_ordering = "mz"
+            cfg.num_peaks = 4
+
+            probe_data = massspec_probe_data.MassSpecProbeData.from_config(cfg)
+            batch = next(
+                iter(
+                    probe_data.build_dataset(
+                        "massspec_train",
+                        seed=0,
+                        peak_ordering="mz",
+                        shuffle=False,
+                        drop_remainder=False,
+                        output_format="jax",
+                    )
+                )
+            )
+
+        import jax
+
+        self.assertIsInstance(batch["peak_mz"], jax.Array)
+        self.assertIsInstance(batch["probe_maccs"], jax.Array)
+        self.assertEqual(tuple(batch["peak_mz"].shape), (2, 4))
+        self.assertEqual(batch["smiles"], ["CCO", "CC(F)O"])
+
+    def test_indexed_probe_dataset_can_return_jax_batches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            artifact_root = tmp_path / "probe-cache" / "nist_murcko_probe"
+            _write_fake_nist_murcko_probe_artifact(artifact_root)
+
+            cfg = config_dict.ConfigDict()
+            cfg.artifact_dir = str(tmp_path / "probe-cache")
+            cfg.probe_dataset = "nist-murcko"
+            cfg.batch_size = 2
+            cfg.max_precursor_mz = 1000.0
+            cfg.min_peak_intensity = 1e-4
+            cfg.peak_ordering = "mz"
+            cfg.num_peaks = 4
+
+            probe_data = massspec_probe_data.MassSpecProbeData.from_config(cfg)
+            batch = next(
+                iter(
+                    probe_data.build_indexed_dataset(
+                        "massspec_train",
+                        np.asarray([1, 0], dtype=np.int64),
+                        peak_ordering="mz",
+                        drop_remainder=False,
+                        output_format="jax",
+                    )
+                )
+            )
+
+        import jax
+
+        self.assertIsInstance(batch["peak_mz"], jax.Array)
+        self.assertIsInstance(batch["probe_maccs"], jax.Array)
+        self.assertEqual(tuple(batch["peak_mz"].shape), (2, 4))
+        self.assertEqual(batch["smiles"], ["CC(F)O", "CCO"])

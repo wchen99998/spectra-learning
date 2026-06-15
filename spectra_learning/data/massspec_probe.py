@@ -12,8 +12,13 @@ from ml_collections import config_dict
 from rdkit import Chem, DataStructs
 from rdkit.Chem import AllChem
 from torch.utils.data import DataLoader, Dataset, Subset
-from torch.utils.data.distributed import DistributedSampler
 
+from spectra_learning.data.gems.conversion import batch_to_numpy, format_batch
+from spectra_learning.data.loading import (
+    loader_sampler,
+    local_batch_size,
+    subset_for_max_samples,
+)
 from spectra_learning.data.massspec_targets import (
     MACCS_FINGERPRINT_BITS,
     MORGAN_PROBE_FINGERPRINT_BITS,
@@ -35,6 +40,7 @@ from spectra_learning.data.spectra import (
     DEFAULT_MIN_PEAK_INTENSITY,
     DEFAULT_PEAK_FILTERING,
     NUM_PEAKS_INPUT,
+    preprocess_peak_batch_numpy,
     preprocess_peak_batch_torch,
 )
 
@@ -785,7 +791,7 @@ class _ProbeMemmapDataset(Dataset):
         for key, value in arrays.items():
             item = value[local_idx]
             if isinstance(item, np.ndarray):
-                sample[key] = torch.from_numpy(item.copy())
+                sample[key] = item.copy()
             elif np.isscalar(item):
                 if value.dtype.kind in {"U", "S"}:
                     sample[key] = str(item)
@@ -989,7 +995,7 @@ class _ProbeParquetDataset(Dataset):
         for key, value in arrays.items():
             item = value[local_idx]
             if isinstance(item, np.ndarray):
-                sample[key] = torch.from_numpy(item.copy())
+                sample[key] = item.copy()
             elif np.isscalar(item):
                 if value.dtype.kind in {"U", "S"}:
                     sample[key] = str(item)
@@ -1002,51 +1008,6 @@ class _ProbeParquetDataset(Dataset):
             else:
                 sample[key] = item
         return sample
-
-
-def _subset_for_max_samples(
-    dataset: Dataset,
-    *,
-    max_samples: int | None,
-    shuffle: bool,
-    seed: int,
-) -> tuple[Dataset, bool]:
-    if max_samples is None:
-        return dataset, shuffle
-    n = min(len(dataset), max_samples)
-    if shuffle:
-        generator = torch.Generator()
-        generator.manual_seed(seed)
-        indices = torch.randperm(len(dataset), generator=generator)[:n].tolist()
-    else:
-        indices = list(range(n))
-    if isinstance(dataset, _ProbeParquetDataset):
-        return dataset.subset(indices), False
-    return Subset(dataset, [int(idx) for idx in indices]), False
-
-
-def _loader_sampler(
-    dataset: Dataset,
-    *,
-    shuffle: bool,
-    seed: int,
-    drop_last: bool,
-    distributed_world_size: int,
-    distributed_rank: int,
-) -> tuple[DistributedSampler | None, bool]:
-    if distributed_world_size <= 1:
-        return None, shuffle
-    return (
-        DistributedSampler(
-            dataset,
-            num_replicas=distributed_world_size,
-            rank=distributed_rank,
-            shuffle=shuffle,
-            seed=seed,
-            drop_last=drop_last,
-        ),
-        False,
-    )
 
 
 class _ProbeBatchCollator:
@@ -1064,6 +1025,7 @@ class _ProbeBatchCollator:
         grouped_peak_isotope_charges: tuple[int, ...] = (
             DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES
         ),
+        output_format: str = "torch",
     ) -> None:
         self.num_peaks = num_peaks
         self.max_precursor_mz = max_precursor_mz
@@ -1074,29 +1036,16 @@ class _ProbeBatchCollator:
         self.peak_filtering = peak_filtering
         self.grouped_peak_shoulder_da = grouped_peak_shoulder_da
         self.grouped_peak_isotope_charges = grouped_peak_isotope_charges
+        self.output_format = output_format
 
     def __call__(self, samples: list[dict[str, Any]]) -> dict[str, Any]:
-        spectra = torch.stack([sample["spectra"] for sample in samples], dim=0)
-        precursor_raw = torch.tensor(
-            [float(sample["precursor_mz_raw"]) for sample in samples],
-            dtype=torch.float32,
-        )
-        batch: dict[str, Any] = preprocess_peak_batch_torch(
-            spectra[:, 0, :],
-            spectra[:, 1, :],
-            precursor_raw,
-            num_peaks=self.num_peaks,
-            peak_drop_min_intensity=self.peak_drop_min_intensity,
-            peak_ordering=self.peak_ordering,
-            max_precursor_mz=self.max_precursor_mz,
-            precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
-            min_peak_intensity=self.min_peak_intensity,
-            peak_filtering=self.peak_filtering,
-            grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
-            grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
-        )
+        batch = self._preprocess(samples)
         batch["fingerprint"] = torch.stack(
-            [sample["fingerprint"] for sample in samples], dim=0
+            [
+                torch.as_tensor(sample["fingerprint"], dtype=torch.int32)
+                for sample in samples
+            ],
+            dim=0,
         ).to(torch.int32)
         batch["smiles"] = [str(sample["smiles"]) for sample in samples]
         batch["adduct_id"] = torch.tensor(
@@ -1118,11 +1067,19 @@ class _ProbeBatchCollator:
             dtype=torch.bool,
         )
         batch["probe_maccs"] = torch.stack(
-            [sample["probe_maccs"] for sample in samples], dim=0
+            [
+                torch.as_tensor(sample["probe_maccs"], dtype=torch.int32)
+                for sample in samples
+            ],
+            dim=0,
         ).to(torch.int32)
         if "probe_morgan" in samples[0]:
             batch["probe_morgan"] = torch.stack(
-                [sample["probe_morgan"] for sample in samples], dim=0
+                [
+                    torch.as_tensor(sample["probe_morgan"], dtype=torch.int32)
+                    for sample in samples
+                ],
+                dim=0,
             ).to(torch.int32)
         for name in REGRESSION_TARGET_KEYS:
             batch[f"probe_{name}"] = torch.tensor(
@@ -1131,14 +1088,59 @@ class _ProbeBatchCollator:
             )
         if "dreams_embedding" in samples[0]:
             batch["dreams_embedding"] = torch.stack(
-                [sample["dreams_embedding"] for sample in samples], dim=0
+                [
+                    torch.as_tensor(sample["dreams_embedding"], dtype=torch.float32)
+                    for sample in samples
+                ],
+                dim=0,
             ).to(torch.float32)
         if "dreams_embedding_valid" in samples[0]:
             batch["dreams_embedding_valid"] = torch.tensor(
                 [bool(sample["dreams_embedding_valid"]) for sample in samples],
                 dtype=torch.bool,
             )
-        return batch
+        return format_batch(batch, self.output_format)
+
+    def _preprocess(self, samples: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+        if isinstance(samples[0]["spectra"], np.ndarray):
+            spectra = np.stack([sample["spectra"] for sample in samples], axis=0)
+            precursor_raw = np.asarray(
+                [sample["precursor_mz_raw"] for sample in samples],
+                dtype=np.float32,
+            )
+            batch = preprocess_peak_batch_numpy(
+                spectra,
+                precursor_raw,
+                num_peaks=self.num_peaks,
+                peak_drop_min_intensity=self.peak_drop_min_intensity,
+                peak_ordering=self.peak_ordering,
+                max_precursor_mz=self.max_precursor_mz,
+                precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
+                min_peak_intensity=self.min_peak_intensity,
+                peak_filtering=self.peak_filtering,
+                grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
+                grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
+            )
+            return {key: torch.from_numpy(value) for key, value in batch.items()}
+        spectra = torch.stack([sample["spectra"] for sample in samples], dim=0)
+        precursor_raw = torch.tensor(
+            [float(sample["precursor_mz_raw"]) for sample in samples],
+            dtype=torch.float32,
+        )
+        return preprocess_peak_batch_torch(
+            spectra[:, 0, :],
+            spectra[:, 1, :],
+            precursor_raw,
+            num_peaks=self.num_peaks,
+            peak_drop_min_intensity=self.peak_drop_min_intensity,
+            peak_ordering=self.peak_ordering,
+            max_precursor_mz=self.max_precursor_mz,
+            precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
+            min_peak_intensity=self.min_peak_intensity,
+            peak_filtering=self.peak_filtering,
+            grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
+            grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
+        )
 
 
 class _LoaderAdapter:
@@ -1153,19 +1155,7 @@ class _LoaderAdapter:
 
     def as_numpy_iterator(self):
         for batch in self._loader:
-            yield {
-                key: value.detach().cpu().numpy()
-                if isinstance(value, torch.Tensor)
-                else value
-                for key, value in batch.items()
-            }
-
-
-def probe_local_batch_size(global_batch_size: int, distributed_world_size: int) -> int:
-    if distributed_world_size <= 1:
-        return global_batch_size
-    assert global_batch_size % distributed_world_size == 0
-    return global_batch_size // distributed_world_size
+            yield batch_to_numpy(batch)
 
 
 class MassSpecProbeData(NamedTuple):
@@ -1389,6 +1379,7 @@ class MassSpecProbeData(NamedTuple):
         distributed_world_size: int = 1,
         distributed_rank: int = 0,
         pad_distributed: bool = False,
+        output_format: str = "torch",
     ):
         split_files = {
             "massspec_train": self.train_files,
@@ -1461,13 +1452,13 @@ class MassSpecProbeData(NamedTuple):
                     for path, length in zip(split_files, split_lengths, strict=True)
                 ]
             )
-        dataset, shuffle = _subset_for_max_samples(
+        dataset, shuffle = subset_for_max_samples(
             dataset,
             max_samples=max_samples,
             shuffle=shuffle,
             seed=seed,
         )
-        sampler, loader_shuffle = _loader_sampler(
+        sampler, loader_shuffle = loader_sampler(
             dataset,
             shuffle=shuffle,
             seed=seed,
@@ -1477,7 +1468,7 @@ class MassSpecProbeData(NamedTuple):
         )
         generator = torch.Generator()
         generator.manual_seed(seed)
-        batch_size = probe_local_batch_size(self.batch_size, distributed_world_size)
+        batch_size = local_batch_size(self.batch_size, distributed_world_size)
         loader = DataLoader(
             dataset,
             batch_size=batch_size,
@@ -1495,6 +1486,7 @@ class MassSpecProbeData(NamedTuple):
                 peak_filtering=self.peak_filtering,
                 grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
                 grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
+                output_format=output_format,
             ),
             generator=generator,
         )
@@ -1508,6 +1500,7 @@ class MassSpecProbeData(NamedTuple):
         peak_ordering: str | None = None,
         drop_remainder: bool = False,
         distributed_world_size: int = 1,
+        output_format: str = "torch",
     ):
         split_files = {
             "massspec_train": self.train_files,
@@ -1580,7 +1573,7 @@ class MassSpecProbeData(NamedTuple):
                     for path, length in zip(split_files, split_lengths, strict=True)
                 ]
             )
-        batch_size = probe_local_batch_size(self.batch_size, distributed_world_size)
+        batch_size = local_batch_size(self.batch_size, distributed_world_size)
         loader = DataLoader(
             Subset(dataset, [int(idx) for idx in indices]),
             batch_size=batch_size,
@@ -1597,6 +1590,7 @@ class MassSpecProbeData(NamedTuple):
                 peak_filtering=self.peak_filtering,
                 grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
                 grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
+                output_format=output_format,
             ),
         )
         return _LoaderAdapter(loader)

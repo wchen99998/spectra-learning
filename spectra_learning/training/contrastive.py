@@ -25,12 +25,10 @@ from spectra_learning.data.spectra import (
     NUM_PEAKS_INPUT,
     preprocess_peak_batch_torch,
 )
+from spectra_learning.data.loading import local_batch_size
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pooling import SinglePairCovariancePool
-from spectra_learning.probes.massspec.data import (
-    MassSpecProbeData,
-    probe_local_batch_size,
-)
+from spectra_learning.data.massspec_probe import MassSpecProbeData
 from spectra_learning.data.massspec_targets import MACCS_FINGERPRINT_BITS
 from spectra_learning.training.api import (
     build_grad_scaler,
@@ -552,7 +550,7 @@ def build_contrastive_loader(
         ),
     )
     assert dataset.eligible
-    local_pairs_per_batch = probe_local_batch_size(
+    local_pairs_per_batch = local_batch_size(
         global_pairs_per_batch,
         distributed.world_size,
     )
@@ -638,7 +636,7 @@ def build_contrastive_online_loader(
     seed: int,
     distributed: DistributedContext,
 ) -> DataLoader:
-    local_batch_size = probe_local_batch_size(
+    per_rank_batch_size = local_batch_size(
         global_batch_size,
         distributed.world_size,
     )
@@ -670,7 +668,7 @@ def build_contrastive_online_loader(
     num_workers = int(_config_get(config, "dataloader_num_workers", 0))
     loader_kwargs = {
         "dataset": dataset,
-        "batch_size": local_batch_size,
+        "batch_size": per_rank_batch_size,
         "shuffle": (split_name == "train" and sampler is None),
         "sampler": sampler,
         "drop_last": (split_name == "train"),

@@ -22,11 +22,17 @@ from huggingface_hub import HfApi, snapshot_download
 from rdkit import Chem, DataStructs
 from rdkit.Chem import Descriptors, MACCSkeys, rdFingerprintGenerator, rdMolDescriptors
 from rdkit.Chem.Scaffolds import MurckoScaffold
-from torch.utils.data import DataLoader, Dataset, Subset
-from torch.utils.data.distributed import DistributedSampler
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from spectra_learning.data.gems.collate import GemsBatchCollator
+from spectra_learning.data.gems.conversion import format_batch
+from spectra_learning.data.loading import (
+    loader_sampler,
+    local_batch_size,
+    subset_for_max_samples,
+)
+from spectra_learning.data.repositories import MSMS_EVALUATION_HF_REPO
 from spectra_learning.data.massspec_targets import (
     MACCS_FINGERPRINT_BITS,
     MORGAN_PROBE_FINGERPRINT_BITS,
@@ -52,7 +58,7 @@ DEFAULT_MCEBIO_MGF_PATH = Path(
     "data/massive_msv000094528/source/20240411_mcebio_library_pos_all_lib_MS2.mgf"
 )
 NIST_MURCKO_METADATA_VERSION = 2
-NIST_MURCKO_HF_REPO = "cjim8889/hr_msms_nist_mcebio_murcko_20260529"
+NIST_MURCKO_HF_REPO = MSMS_EVALUATION_HF_REPO
 NIST_MURCKO_PREPARED_SUBDIR = "nist_murcko_probe"
 MCEBIO_MURCKO_PREPARED_SUBDIR = "mcebio_murcko_probe"
 NIST_MURCKO_ARTIFACT_FORMAT = "nist_murcko_parquet_v2"
@@ -318,6 +324,7 @@ def _murcko_fluorine_split_metadata(
     subdir: str,
     source_split: str,
     target_split: str,
+    include_dreams: bool,
 ) -> dict[str, Any]:
     metadata = {
         f"{target_split}_files": [
@@ -330,7 +337,7 @@ def _murcko_fluorine_split_metadata(
         f"{target_split}_positive": int(source_metadata.get(f"{source_split}_positive", 0)),
     }
     dreams_files = source_metadata.get("dreams_auxiliary_files", {}).get(source_split, [])
-    if dreams_files:
+    if include_dreams and dreams_files:
         metadata[f"{target_split}_dreams_files"] = [
             f"{subdir}/{filename}" for filename in dreams_files
         ]
@@ -473,6 +480,7 @@ def ensure_murcko_fluorine_data_downloaded(
             subdir=train_subdir,
             source_split="train",
             target_split="train",
+            include_dreams=include_dreams,
         )
     )
     metadata.update(
@@ -481,6 +489,7 @@ def ensure_murcko_fluorine_data_downloaded(
             subdir=train_subdir,
             source_split="val",
             target_split="val",
+            include_dreams=include_dreams,
         )
     )
     metadata.update(
@@ -489,6 +498,7 @@ def ensure_murcko_fluorine_data_downloaded(
             subdir=test_subdir,
             source_split="all",
             target_split="test",
+            include_dreams=include_dreams,
         )
     )
     return metadata
@@ -637,28 +647,22 @@ class _MurckoFluorineParquetDataset(Dataset):
         self._arrays = [self._load_entry(entry) for entry in self._entries]
         return self._arrays
 
-    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+    def __getitem__(self, index: int) -> dict[str, Any]:
         arrays_by_entry = self._ensure_arrays()
         entry_idx = int(np.searchsorted(self._starts, index, side="right") - 1)
         local_idx = index - int(self._starts[entry_idx])
         arrays = arrays_by_entry[entry_idx]
         sample = {
-            "spectra": torch.from_numpy(arrays["spectra"][local_idx].copy()),
-            "precursor_mz_raw": torch.tensor(
-                float(arrays["precursor_mz_raw"][local_idx]),
-                dtype=torch.float32,
-            ),
-            "label": torch.tensor(float(arrays["label"][local_idx]), dtype=torch.float32),
-            "row_idx": torch.tensor(index, dtype=torch.long),
+            "spectra": arrays["spectra"][local_idx].copy(),
+            "precursor_mz_raw": np.float32(arrays["precursor_mz_raw"][local_idx]),
+            "label": np.float32(arrays["label"][local_idx]),
+            "row_idx": np.int64(index),
         }
         if "dreams_embedding" in arrays:
-            sample["dreams_embedding"] = torch.from_numpy(
-                arrays["dreams_embedding"][local_idx].copy()
-            )
+            sample["dreams_embedding"] = arrays["dreams_embedding"][local_idx].copy()
         if "dreams_embedding_valid" in arrays:
-            sample["dreams_embedding_valid"] = torch.tensor(
-                bool(arrays["dreams_embedding_valid"][local_idx]),
-                dtype=torch.bool,
+            sample["dreams_embedding_valid"] = bool(
+                arrays["dreams_embedding_valid"][local_idx]
             )
         return sample
 
@@ -674,6 +678,7 @@ class _MurckoFluorineCollator:
         peak_ordering: str,
         precursor_peak_exclusion_window_da: float,
         dreams_only: bool,
+        output_format: str,
         peak_filtering: str = DEFAULT_PEAK_FILTERING,
         grouped_peak_shoulder_da: float = DEFAULT_GROUPED_PEAK_SHOULDER_DA,
         grouped_peak_isotope_charges: tuple[int, ...] = (
@@ -681,6 +686,7 @@ class _MurckoFluorineCollator:
         ),
     ) -> None:
         self.dreams_only = dreams_only
+        self.output_format = output_format
         self.peak_collator = GemsBatchCollator(
             augment=False,
             num_target_blocks=0,
@@ -696,96 +702,57 @@ class _MurckoFluorineCollator:
             peak_filtering=peak_filtering,
             grouped_peak_shoulder_da=grouped_peak_shoulder_da,
             grouped_peak_isotope_charges=grouped_peak_isotope_charges,
+            output_format="torch",
         )
 
-    def __call__(self, samples: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+    def __call__(self, samples: list[dict[str, Any]]) -> dict[str, Any]:
         if self.dreams_only:
             batch = {
                 "dreams_embedding": torch.stack(
-                    [sample["dreams_embedding"] for sample in samples],
+                    [
+                        torch.as_tensor(sample["dreams_embedding"], dtype=torch.float32)
+                        for sample in samples
+                    ],
                     dim=0,
-                ).to(torch.float32),
-                "label": torch.stack([sample["label"] for sample in samples]).to(
-                    torch.float32
                 ),
-                "row_idx": torch.stack([sample["row_idx"] for sample in samples]).to(
-                    torch.long
+                "label": torch.as_tensor(
+                    [sample["label"] for sample in samples],
+                    dtype=torch.float32,
+                ),
+                "row_idx": torch.as_tensor(
+                    [sample["row_idx"] for sample in samples],
+                    dtype=torch.long,
                 ),
             }
             if "dreams_embedding_valid" in samples[0]:
-                batch["dreams_embedding_valid"] = torch.stack(
+                batch["dreams_embedding_valid"] = torch.as_tensor(
                     [sample["dreams_embedding_valid"] for sample in samples],
-                    dim=0,
-                ).to(torch.bool)
-            return batch
+                    dtype=torch.bool,
+                )
+            return format_batch(batch, self.output_format)
         batch = self.peak_collator(samples)
         if "dreams_embedding" in samples[0]:
             batch["dreams_embedding"] = torch.stack(
-                [sample["dreams_embedding"] for sample in samples],
+                [
+                    torch.as_tensor(sample["dreams_embedding"], dtype=torch.float32)
+                    for sample in samples
+                ],
                 dim=0,
-            ).to(torch.float32)
+            )
         if "dreams_embedding_valid" in samples[0]:
-            batch["dreams_embedding_valid"] = torch.stack(
+            batch["dreams_embedding_valid"] = torch.as_tensor(
                 [sample["dreams_embedding_valid"] for sample in samples],
-                dim=0,
-            ).to(torch.bool)
-        batch["label"] = torch.stack([sample["label"] for sample in samples]).to(
-            torch.float32
+                dtype=torch.bool,
+            )
+        batch["label"] = torch.as_tensor(
+            [sample["label"] for sample in samples],
+            dtype=torch.float32,
         )
-        batch["row_idx"] = torch.stack([sample["row_idx"] for sample in samples]).to(
-            torch.long
+        batch["row_idx"] = torch.as_tensor(
+            [sample["row_idx"] for sample in samples],
+            dtype=torch.long,
         )
-        return batch
-
-
-def _subset_for_max_samples(
-    dataset: Dataset,
-    *,
-    max_samples: int | None,
-    shuffle: bool,
-    seed: int,
-) -> tuple[Dataset, bool]:
-    if max_samples is None:
-        return dataset, shuffle
-    n = min(len(dataset), max_samples)
-    if shuffle:
-        generator = torch.Generator()
-        generator.manual_seed(seed)
-        indices = torch.randperm(len(dataset), generator=generator)[:n].tolist()
-    else:
-        indices = list(range(n))
-    return Subset(dataset, [int(idx) for idx in indices]), False
-
-
-def _loader_sampler(
-    dataset: Dataset,
-    *,
-    shuffle: bool,
-    seed: int,
-    drop_last: bool,
-    distributed_world_size: int,
-    distributed_rank: int,
-) -> tuple[DistributedSampler | None, bool]:
-    if distributed_world_size <= 1:
-        return None, shuffle
-    return (
-        DistributedSampler(
-            dataset,
-            num_replicas=distributed_world_size,
-            rank=distributed_rank,
-            shuffle=shuffle,
-            seed=seed,
-            drop_last=drop_last,
-        ),
-        False,
-    )
-
-
-def local_batch_size(global_batch_size: int, distributed_world_size: int) -> int:
-    if distributed_world_size <= 1:
-        return global_batch_size
-    assert global_batch_size % distributed_world_size == 0
-    return global_batch_size // distributed_world_size
+        return format_batch(batch, self.output_format)
 
 
 def build_murcko_fluorine_loader(
@@ -800,6 +767,7 @@ def build_murcko_fluorine_loader(
     distributed_world_size: int = 1,
     distributed_rank: int = 0,
     num_workers: int = 0,
+    output_format: str = "torch",
 ) -> DataLoader:
     split_files = data.metadata[f"{split}_files"]
     split_lengths = data.metadata[f"{split}_lengths"]
@@ -818,13 +786,13 @@ def build_murcko_fluorine_loader(
             )
         ]
     )
-    dataset, shuffle = _subset_for_max_samples(
+    dataset, shuffle = subset_for_max_samples(
         dataset,
         max_samples=max_samples,
         shuffle=shuffle,
         seed=seed,
     )
-    sampler, loader_shuffle = _loader_sampler(
+    sampler, loader_shuffle = loader_sampler(
         dataset,
         shuffle=shuffle,
         seed=seed,
@@ -852,6 +820,7 @@ def build_murcko_fluorine_loader(
             grouped_peak_shoulder_da=data.grouped_peak_shoulder_da,
             grouped_peak_isotope_charges=data.grouped_peak_isotope_charges,
             dreams_only=dreams_only,
+            output_format=output_format,
         ),
         "generator": generator,
     }
@@ -1736,23 +1705,167 @@ def build_murcko_mgf_dataset(
     return metadata
 
 
-def _build_dataset_specs(args: argparse.Namespace) -> list[DatasetSpec]:
+def _build_dataset_specs(
+    *,
+    nist_mgf: str,
+    mcebio_mgf: str | None,
+    nist_subdir: str,
+    mcebio_subdir: str,
+) -> list[DatasetSpec]:
     specs = [
         DatasetSpec(
             name="nist",
-            source=args.nist_mgf,
-            subdir=args.nist_subdir,
+            source=nist_mgf,
+            subdir=nist_subdir,
         )
     ]
-    if args.mcebio_mgf:
+    if mcebio_mgf:
         specs.append(
             DatasetSpec(
                 name="mcebio",
-                source=args.mcebio_mgf,
-                subdir=args.mcebio_subdir,
+                source=mcebio_mgf,
+                subdir=mcebio_subdir,
             )
         )
     return specs
+
+
+def prepare_murcko_mgf_collection(
+    *,
+    nist_mgf: str = DEFAULT_NIST_MGF_URI,
+    mcebio_mgf: str | None = str(DEFAULT_MCEBIO_MGF_PATH),
+    nist_subdir: str = NIST_MURCKO_PREPARED_SUBDIR,
+    mcebio_subdir: str = MCEBIO_MURCKO_PREPARED_SUBDIR,
+    gcs_credentials: Path | None = None,
+    work_dir: Path,
+    hf_repo_id: str = NIST_MURCKO_HF_REPO,
+    hf_revision: str = "main",
+    hf_private: bool = False,
+    upload: bool = True,
+    val_frac: float = 0.10,
+    test_frac: float = 0.10,
+    seed: int = 42,
+    min_precursor_mz: float = 1.0,
+    max_precursor_mz: float = 1000.0,
+    num_peaks_input: int = NUM_PEAKS_INPUT,
+    num_workers: int = os.cpu_count() or 1,
+    batch_size: int = 2048,
+    parquet_batch_size: int = 50_000,
+    nist_allowed_adducts: tuple[str, ...] | None = DEFAULT_NIST_ALLOWED_ADDUCTS,
+    nist_split_size_caps: dict[str, int] | None = DEFAULT_NIST_SPLIT_SIZE_CAPS,
+    spectral_lsh_threshold: float = 0.90,
+    build_dreams_auxiliary: bool = False,
+    dreams_root: Path = Path("/home/wuhao/Dreams"),
+    dreams_checkpoint: Path | None = None,
+    dreams_subdirs: list[str] | None = None,
+    dreams_n_highest_peaks: int = 100,
+    dreams_batch_size: int = 256,
+    dreams_device: str | None = None,
+) -> dict[str, Any]:
+    work_dir = work_dir.expanduser().resolve()
+    staging_root = work_dir / "artifact"
+    raw_dir = staging_root / RAW_SUBDIR
+    if staging_root.exists():
+        shutil.rmtree(staging_root)
+    staging_root.mkdir(parents=True, exist_ok=True)
+
+    top_metadata: dict[str, Any] = {
+        "metadata_version": NIST_MURCKO_METADATA_VERSION,
+        "artifact_format": "murcko_mgf_dataset_collection_v1",
+        "datasets": {},
+    }
+    for spec in _build_dataset_specs(
+        nist_mgf=nist_mgf,
+        mcebio_mgf=mcebio_mgf,
+        nist_subdir=nist_subdir,
+        mcebio_subdir=mcebio_subdir,
+    ):
+        raw_mgf = _stage_raw_mgf(spec.source, raw_dir, gcs_credentials)
+        allowed_adducts = nist_allowed_adducts if spec.name == "nist" else None
+        split_size_caps = nist_split_size_caps if spec.name == "nist" else None
+        metadata = build_murcko_mgf_dataset(
+            mgf_path=raw_mgf,
+            output_dir=staging_root / spec.subdir.strip("/"),
+            source_uri=spec.source,
+            val_frac=val_frac,
+            test_frac=test_frac,
+            seed=seed,
+            min_precursor_mz=min_precursor_mz,
+            max_precursor_mz=max_precursor_mz,
+            num_peaks_input=num_peaks_input,
+            num_workers=num_workers,
+            batch_size=batch_size,
+            parquet_batch_size=parquet_batch_size,
+            single_split=STANDALONE_SPLIT if spec.name == "mcebio" else None,
+            allowed_adducts=allowed_adducts,
+            split_size_caps=split_size_caps,
+            spectral_lsh_threshold=spectral_lsh_threshold,
+        )
+        top_metadata["datasets"][spec.name] = {
+            "subdir": spec.subdir.strip("/"),
+            "source_raw_file": metadata["source_raw_file"],
+            "splits": metadata["splits"],
+        }
+        for split in metadata["splits"]:
+            top_metadata["datasets"][spec.name][f"{split}_size"] = metadata[
+                f"{split}_size"
+            ]
+    (staging_root / "metadata.json").write_text(
+        json.dumps(top_metadata, indent=2, sort_keys=True)
+    )
+
+    if build_dreams_auxiliary:
+        from spectra_learning.data.murcko_dreams import build_murcko_dreams_auxiliary
+
+        checkpoint = (
+            dreams_checkpoint
+            if dreams_checkpoint is not None
+            else dreams_root / "dreams/models/pretrained/embedding_model.ckpt"
+        )
+        dreams_paths = build_murcko_dreams_auxiliary(
+            artifact_dir=staging_root,
+            dreams_root=dreams_root,
+            checkpoint=checkpoint,
+            subdirs=dreams_subdirs,
+            n_highest_peaks=dreams_n_highest_peaks,
+            batch_size=dreams_batch_size,
+            device=dreams_device
+            if dreams_device is not None
+            else ("cuda" if torch.cuda.is_available() else "cpu"),
+            upload=False,
+        )
+        top_metadata = json.loads((staging_root / "metadata.json").read_text())
+        top_metadata["dreams_auxiliary_built"] = True
+        top_metadata["dreams_auxiliary_paths"] = [
+            str(path.relative_to(staging_root)) for path in dreams_paths
+        ]
+        (staging_root / "metadata.json").write_text(
+            json.dumps(top_metadata, indent=2, sort_keys=True)
+        )
+
+    if upload:
+        api = HfApi()
+        api.create_repo(
+            hf_repo_id,
+            repo_type="dataset",
+            exist_ok=True,
+            private=hf_private,
+        )
+        log.info("Uploading %s -> %s", staging_root, hf_repo_id)
+        api.upload_large_folder(
+            repo_id=hf_repo_id,
+            folder_path=staging_root,
+            repo_type="dataset",
+            revision=hf_revision,
+        )
+        log.info(
+            "Uploaded Murcko MGF dataset to https://huggingface.co/datasets/%s",
+            hf_repo_id,
+        )
+    else:
+        log.info("upload disabled; staged dataset left at %s", staging_root)
+    top_metadata["artifact_dir"] = str(staging_root)
+    return top_metadata
 
 
 def main() -> None:
@@ -1805,82 +1918,56 @@ def main() -> None:
         default=DEFAULT_NIST_SPLIT_SIZE_CAPS["test"],
     )
     parser.add_argument("--spectral-lsh-threshold", type=float, default=0.90)
+    parser.add_argument("--build-dreams-auxiliary", action="store_true")
+    parser.add_argument("--dreams-root", type=Path, default=Path("/home/wuhao/Dreams"))
+    parser.add_argument("--dreams-checkpoint", type=Path, default=None)
+    parser.add_argument(
+        "--dreams-subdir",
+        action="append",
+        default=None,
+        help="Prepared subdir for DreaMS auxiliary generation. Defaults to NIST and MCEBIO.",
+    )
+    parser.add_argument("--dreams-n-highest-peaks", type=int, default=100)
+    parser.add_argument("--dreams-batch-size", type=int, default=256)
+    parser.add_argument("--dreams-device", default=None)
     args = parser.parse_args()
-
-    work_dir = args.work_dir.expanduser().resolve()
-    staging_root = work_dir / "artifact"
-    raw_dir = staging_root / RAW_SUBDIR
-    if staging_root.exists():
-        shutil.rmtree(staging_root)
-    staging_root.mkdir(parents=True, exist_ok=True)
-
-    top_metadata: dict[str, Any] = {
-        "metadata_version": NIST_MURCKO_METADATA_VERSION,
-        "artifact_format": "murcko_mgf_dataset_collection_v1",
-        "datasets": {},
-    }
-    for spec in _build_dataset_specs(args):
-        raw_mgf = _stage_raw_mgf(spec.source, raw_dir, args.gcs_credentials)
-        allowed_adducts = (
-            tuple(args.nist_allowed_adducts)
-            if spec.name == "nist" and args.nist_allowed_adducts
-            else None
-        )
-        split_size_caps = (
-            {
-                "train": args.nist_target_train_size,
-                "val": args.nist_target_val_size,
-                "test": args.nist_target_test_size,
-            }
-            if spec.name == "nist"
-            else None
-        )
-        metadata = build_murcko_mgf_dataset(
-            mgf_path=raw_mgf,
-            output_dir=staging_root / spec.subdir.strip("/"),
-            source_uri=spec.source,
-            val_frac=args.val_frac,
-            test_frac=args.test_frac,
-            seed=args.seed,
-            min_precursor_mz=args.min_precursor_mz,
-            max_precursor_mz=args.max_precursor_mz,
-            num_peaks_input=args.num_peaks_input,
-            num_workers=args.num_workers,
-            batch_size=args.batch_size,
-            parquet_batch_size=args.parquet_batch_size,
-            single_split=STANDALONE_SPLIT if spec.name == "mcebio" else None,
-            allowed_adducts=allowed_adducts,
-            split_size_caps=split_size_caps,
-            spectral_lsh_threshold=args.spectral_lsh_threshold,
-        )
-        top_metadata["datasets"][spec.name] = {
-            "subdir": spec.subdir.strip("/"),
-            "source_raw_file": metadata["source_raw_file"],
-            "splits": metadata["splits"],
-        }
-        for split in metadata["splits"]:
-            top_metadata["datasets"][spec.name][f"{split}_size"] = metadata[f"{split}_size"]
-    (staging_root / "metadata.json").write_text(json.dumps(top_metadata, indent=2, sort_keys=True))
-
-    if args.skip_upload:
-        log.info("--skip-upload set; staged dataset left at %s", staging_root)
-        return
-
-    api = HfApi()
-    api.create_repo(
-        args.hf_repo_id,
-        repo_type="dataset",
-        exist_ok=True,
-        private=args.hf_private,
+    prepare_murcko_mgf_collection(
+        nist_mgf=args.nist_mgf,
+        mcebio_mgf=args.mcebio_mgf,
+        nist_subdir=args.nist_subdir,
+        mcebio_subdir=args.mcebio_subdir,
+        gcs_credentials=args.gcs_credentials,
+        work_dir=args.work_dir,
+        hf_repo_id=args.hf_repo_id,
+        hf_revision=args.hf_revision,
+        hf_private=args.hf_private,
+        upload=not args.skip_upload,
+        val_frac=args.val_frac,
+        test_frac=args.test_frac,
+        seed=args.seed,
+        min_precursor_mz=args.min_precursor_mz,
+        max_precursor_mz=args.max_precursor_mz,
+        num_peaks_input=args.num_peaks_input,
+        num_workers=args.num_workers,
+        batch_size=args.batch_size,
+        parquet_batch_size=args.parquet_batch_size,
+        nist_allowed_adducts=(
+            tuple(args.nist_allowed_adducts) if args.nist_allowed_adducts else None
+        ),
+        nist_split_size_caps={
+            "train": args.nist_target_train_size,
+            "val": args.nist_target_val_size,
+            "test": args.nist_target_test_size,
+        },
+        spectral_lsh_threshold=args.spectral_lsh_threshold,
+        build_dreams_auxiliary=args.build_dreams_auxiliary,
+        dreams_root=args.dreams_root,
+        dreams_checkpoint=args.dreams_checkpoint,
+        dreams_subdirs=args.dreams_subdir,
+        dreams_n_highest_peaks=args.dreams_n_highest_peaks,
+        dreams_batch_size=args.dreams_batch_size,
+        dreams_device=args.dreams_device,
     )
-    log.info("Uploading %s -> %s", staging_root, args.hf_repo_id)
-    api.upload_large_folder(
-        repo_id=args.hf_repo_id,
-        folder_path=staging_root,
-        repo_type="dataset",
-        revision=args.hf_revision,
-    )
-    log.info("Uploaded Murcko MGF dataset to https://huggingface.co/datasets/%s", args.hf_repo_id)
 
 
 if __name__ == "__main__":

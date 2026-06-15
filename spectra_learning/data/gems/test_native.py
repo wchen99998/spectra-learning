@@ -14,11 +14,15 @@ from torch.utils.data import DataLoader
 
 import spectra_learning.data.gems as gems
 import spectra_learning.data.gems.artifacts as gems_artifacts
-import spectra_learning.probes.massspec.data as massspec_probe_data
-from scripts.prepare_gems_native import main as prepare_gems_main
+import spectra_learning.data.massspec_probe as massspec_probe_data
 from spectra_learning.data.gems.native import (
+    GEMS_A10_SOURCE_FILENAME,
+    GEMS_B_SOURCE_FILENAME,
     GEMS_NATIVE_METADATA_VERSION,
+    GEMS_SOURCE_REPO_ID,
     build_gems_native_artifact,
+    main as prepare_gems_main,
+    prepare_gems_native_dataset,
 )
 from spectra_learning.data.gems.arrays import (
     CANONICAL_NUM_SHARDS,
@@ -28,6 +32,7 @@ from spectra_learning.data.massspec_targets import (
     build_morgan_targets_for_rows,
     build_probe_targets_for_rows,
 )
+from spectra_learning.data.repositories import GEMS_NATIVE_HF_REPO
 
 
 class _NativeShardEntry(TypedDict):
@@ -196,19 +201,19 @@ class GeMSNativeArtifactTests(unittest.TestCase):
             self.assertEqual(metadata["train_size"] + metadata["validation_size"], 2)
             self.assertEqual(metadata["max_precursor_mz"], 650.0)
 
-    def test_prepare_gems_native_script_builds_and_uploads(self):
+    def test_prepare_gems_native_module_builds_and_uploads(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             hdf5_path = tmp_path / "GeMS_A.hdf5"
             _write_fake_gems_hdf5(hdf5_path)
 
             with (
-                mock.patch("scripts.prepare_gems_native.HfApi") as api_cls,
+                mock.patch("spectra_learning.data.gems.native.HfApi") as api_cls,
                 mock.patch.object(
                     sys,
                     "argv",
                     [
-                        "prepare_gems_native.py",
+                        "python -m spectra_learning.data.gems.native",
                         "--source-hdf5-path",
                         str(hdf5_path),
                         "--hf-repo-id",
@@ -227,6 +232,9 @@ class GeMSNativeArtifactTests(unittest.TestCase):
 
             artifact_dir = tmp_path / "work" / "artifact"
             self.assertTrue((artifact_dir / "metadata.json").exists())
+            metadata = json.loads((artifact_dir / "metadata.json").read_text())
+            self.assertEqual(metadata["raw_hdf5_path"], "")
+            self.assertFalse((artifact_dir / "raw" / "GeMS_A.hdf5").exists())
             api.create_repo.assert_called_once_with(
                 "cjim8889/test-gems-native",
                 repo_type="dataset",
@@ -240,26 +248,56 @@ class GeMSNativeArtifactTests(unittest.TestCase):
             self.assertEqual(kwargs["revision"], "main")
             self.assertEqual(kwargs["num_workers"], 8)
 
-    def test_prepare_gems_native_script_downloads_hf_source(self):
+    def test_prepare_gems_native_dataset_uploads_into_hf_subdir(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            hdf5_path = tmp_path / "GeMS_B.hdf5"
+            hdf5_path = tmp_path / "GeMS_A.hdf5"
+            _write_fake_gems_hdf5(hdf5_path)
+
+            with mock.patch("spectra_learning.data.gems.native.HfApi") as api_cls:
+                api = api_cls.return_value
+                metadata = prepare_gems_native_dataset(
+                    work_dir=tmp_path / "work",
+                    hf_repo_id="cjim8889/test-gems-native",
+                    hf_subdir="gems_a10_native",
+                    source_hdf5_path=hdf5_path,
+                    source_url="https://example.test/GeMS_A.hdf5",
+                    num_workers=1,
+                )
+
+            artifact_root = tmp_path / "work" / "artifact"
+            artifact_dir = artifact_root / "gems_a10_native"
+            self.assertTrue((artifact_dir / "metadata.json").exists())
+            self.assertEqual(metadata["hf_subdir"], "gems_a10_native")
+            self.assertEqual(metadata["raw_hdf5_path"], "")
+            self.assertEqual(metadata["source_url"], "https://example.test/GeMS_A.hdf5")
+            self.assertFalse((artifact_dir / "raw" / "GeMS_A.hdf5").exists())
+            api.upload_large_folder.assert_called_once()
+            _, kwargs = api.upload_large_folder.call_args
+            self.assertEqual(Path(kwargs["folder_path"]), artifact_root)
+
+    def test_prepare_gems_native_module_downloads_gems_a10_hf_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            hdf5_path = tmp_path / "GeMS_A10.hdf5"
             _write_fake_gems_hdf5(hdf5_path)
 
             with (
-                mock.patch("scripts.prepare_gems_native.HfApi") as api_cls,
+                mock.patch("spectra_learning.data.gems.native.HfApi") as api_cls,
                 mock.patch(
-                    "scripts.prepare_gems_native.hf_hub_download",
+                    "spectra_learning.data.gems.native.hf_hub_download",
                     return_value=str(hdf5_path),
                 ) as download_mock,
                 mock.patch.object(
                     sys,
                     "argv",
                     [
-                        "prepare_gems_native.py",
-                        "--source-gems-b",
+                        "python -m spectra_learning.data.gems.native",
+                        "--source-gems-a10",
                         "--hf-repo-id",
-                        "cjim8889/gems-b-native",
+                        GEMS_NATIVE_HF_REPO,
+                        "--hf-subdir",
+                        "gems_a10_native",
                         "--work-dir",
                         str(tmp_path / "work"),
                         "--num-workers",
@@ -270,22 +308,100 @@ class GeMSNativeArtifactTests(unittest.TestCase):
                 api = api_cls.return_value
                 prepare_gems_main()
 
-            artifact_dir = tmp_path / "work" / "artifact"
+            artifact_dir = tmp_path / "work" / "artifact" / "gems_a10_native"
             metadata = json.loads((artifact_dir / "metadata.json").read_text())
+            self.assertEqual(metadata["hf_subdir"], "gems_a10_native")
+            self.assertEqual(metadata["raw_hdf5_path"], "")
+            self.assertFalse((artifact_dir / "raw" / "GeMS_A10.hdf5").exists())
             self.assertEqual(metadata["source_hdf5_path"], "")
             self.assertEqual(
                 metadata["source_url"],
-                "https://huggingface.co/datasets/roman-bushuiev/GeMS/resolve/main/data/GeMS_B/GeMS_B.hdf5",
+                f"https://huggingface.co/datasets/{GEMS_SOURCE_REPO_ID}/resolve/main/{GEMS_A10_SOURCE_FILENAME}",
             )
             download_mock.assert_called_once_with(
-                repo_id="roman-bushuiev/GeMS",
-                filename="data/GeMS_B/GeMS_B.hdf5",
+                repo_id=GEMS_SOURCE_REPO_ID,
+                filename=GEMS_A10_SOURCE_FILENAME,
                 repo_type="dataset",
                 revision="main",
                 local_dir=(tmp_path / "work").resolve() / "source",
             )
             api.create_repo.assert_called_once_with(
-                "cjim8889/gems-b-native",
+                GEMS_NATIVE_HF_REPO,
+                repo_type="dataset",
+                exist_ok=True,
+            )
+
+    def test_prepare_gems_native_dataset_can_include_raw_hdf5(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            hdf5_path = tmp_path / "GeMS_A.hdf5"
+            _write_fake_gems_hdf5(hdf5_path)
+
+            with mock.patch("spectra_learning.data.gems.native.HfApi"):
+                metadata = prepare_gems_native_dataset(
+                    work_dir=tmp_path / "work",
+                    hf_repo_id="cjim8889/test-gems-native",
+                    hf_subdir="gems_a10_native",
+                    source_hdf5_path=hdf5_path,
+                    num_workers=1,
+                    include_raw=True,
+                )
+
+            artifact_dir = tmp_path / "work" / "artifact" / "gems_a10_native"
+            self.assertEqual(metadata["raw_hdf5_path"], "raw/GeMS_A.hdf5")
+            self.assertTrue((artifact_dir / "raw" / "GeMS_A.hdf5").exists())
+
+    def test_prepare_gems_native_module_downloads_hf_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            hdf5_path = tmp_path / "GeMS_B.hdf5"
+            _write_fake_gems_hdf5(hdf5_path)
+
+            with (
+                mock.patch("spectra_learning.data.gems.native.HfApi") as api_cls,
+                mock.patch(
+                    "spectra_learning.data.gems.native.hf_hub_download",
+                    return_value=str(hdf5_path),
+                ) as download_mock,
+                mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "python -m spectra_learning.data.gems.native",
+                        "--source-gems-b",
+                        "--hf-repo-id",
+                        GEMS_NATIVE_HF_REPO,
+                        "--hf-subdir",
+                        "gems_b_native",
+                        "--work-dir",
+                        str(tmp_path / "work"),
+                        "--num-workers",
+                        "1",
+                    ],
+                ),
+            ):
+                api = api_cls.return_value
+                prepare_gems_main()
+
+            artifact_dir = tmp_path / "work" / "artifact" / "gems_b_native"
+            metadata = json.loads((artifact_dir / "metadata.json").read_text())
+            self.assertEqual(metadata["hf_subdir"], "gems_b_native")
+            self.assertEqual(metadata["raw_hdf5_path"], "")
+            self.assertFalse((artifact_dir / "raw" / "GeMS_B.hdf5").exists())
+            self.assertEqual(metadata["source_hdf5_path"], "")
+            self.assertEqual(
+                metadata["source_url"],
+                f"https://huggingface.co/datasets/{GEMS_SOURCE_REPO_ID}/resolve/main/{GEMS_B_SOURCE_FILENAME}",
+            )
+            download_mock.assert_called_once_with(
+                repo_id=GEMS_SOURCE_REPO_ID,
+                filename=GEMS_B_SOURCE_FILENAME,
+                repo_type="dataset",
+                revision="main",
+                local_dir=(tmp_path / "work").resolve() / "source",
+            )
+            api.create_repo.assert_called_once_with(
+                GEMS_NATIVE_HF_REPO,
                 repo_type="dataset",
                 exist_ok=True,
             )
@@ -384,6 +500,45 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             self.assertEqual(kwargs["repo_id"], "cjim8889/gems-a-native")
             self.assertEqual(kwargs["revision"], "unit-test")
             self.assertEqual(kwargs["repo_type"], "dataset")
+
+    def test_datamodule_downloads_gems_artifact_from_hf_subdir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_hdf5 = tmp_path / "GeMS_A.hdf5"
+            _write_fake_gems_hdf5(source_hdf5)
+            cfg = self._make_config(tmp_path)
+            cfg.gems_native_hf_subdir = "gems_a10_native"
+
+            def fake_snapshot_download(*, local_dir, **kwargs):
+                self._build_native_artifact(
+                    source_hdf5=source_hdf5,
+                    output_dir=Path(local_dir) / "gems_a10_native",
+                    cfg=cfg,
+                )
+                return str(local_dir)
+
+            with mock.patch.object(
+                gems_artifacts,
+                "snapshot_download",
+                side_effect=fake_snapshot_download,
+            ) as download_mock:
+                datamodule = gems.GemsNativeDataModule(cfg, seed=42)
+                batch = next(iter(datamodule.train_loader_for_epoch(0)))
+
+            self.assertEqual(
+                datamodule.gems_dir,
+                Path(cfg.artifact_dir) / "gems" / "gems_a10_native",
+            )
+            self.assertIn("peak_mz", batch)
+            _, kwargs = download_mock.call_args
+            self.assertEqual(
+                kwargs["allow_patterns"],
+                [
+                    "gems_a10_native/metadata.json",
+                    "gems_a10_native/train/*",
+                    "gems_a10_native/validation/*",
+                ],
+            )
 
     def test_datamodule_keeps_num_peaks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -542,6 +697,62 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
 
             self.assertNotIn("gems_variants", str(datamodule.gems_dir))
             self.assertEqual(datamodule.gems_dir, Path(cfg.artifact_dir) / "gems")
+
+    def test_datamodule_builds_custom_gems_variant_from_downloaded_raw_hdf5(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_hdf5 = tmp_path / "GeMS_A.hdf5"
+            _write_fake_gems_hdf5(source_hdf5)
+            cfg = self._make_config(tmp_path)
+            cfg.gems_native_hf_subdir = "gems_a10_native"
+            cfg.max_precursor_mz = 650.0
+            download_calls = []
+
+            def fake_snapshot_download(*, local_dir, **kwargs):
+                download_calls.append(kwargs)
+                artifact_dir = Path(local_dir) / "gems_a10_native"
+                raw_path = artifact_dir / "raw" / source_hdf5.name
+                if kwargs["allow_patterns"] == ["gems_a10_native/raw/GeMS_A.hdf5"]:
+                    raw_path.parent.mkdir(parents=True, exist_ok=True)
+                    raw_path.write_bytes(source_hdf5.read_bytes())
+                    return str(local_dir)
+                base_cfg = self._make_config(tmp_path)
+                self._build_native_artifact(
+                    source_hdf5=source_hdf5,
+                    output_dir=artifact_dir,
+                    cfg=base_cfg,
+                )
+                metadata_path = artifact_dir / "metadata.json"
+                metadata = json.loads(metadata_path.read_text())
+                metadata["source_hdf5_path"] = ""
+                metadata["source_url"] = None
+                metadata["raw_hdf5_path"] = f"raw/{source_hdf5.name}"
+                metadata_path.write_text(json.dumps(metadata))
+                return str(local_dir)
+
+            with mock.patch.object(
+                gems_artifacts,
+                "snapshot_download",
+                side_effect=fake_snapshot_download,
+            ):
+                datamodule = gems.GemsNativeDataModule(cfg, seed=42)
+
+        self.assertEqual(
+            datamodule.gems_dir,
+            Path(cfg.artifact_dir) / "gems_variants" / "gems_native_raw_pmax650p0",
+        )
+        self.assertEqual(datamodule.info["train_size"] + datamodule.info["validation_size"], 2)
+        self.assertEqual(
+            [call["allow_patterns"] for call in download_calls],
+            [
+                [
+                    "gems_a10_native/metadata.json",
+                    "gems_a10_native/train/*",
+                    "gems_a10_native/validation/*",
+                ],
+                ["gems_a10_native/raw/GeMS_A.hdf5"],
+            ],
+        )
 
     def test_datamodule_rank_one_waits_for_custom_gems_variant(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1114,25 +1325,25 @@ class MassSpecPreprocessTests(unittest.TestCase):
                 seen_smiles.append(smiles)
                 expected = expected_by_smiles[smiles]
                 np.testing.assert_allclose(
-                    sample["spectra"].numpy(),
+                    np.asarray(sample["spectra"]),
                     expected["spectra"],
                     atol=1e-6,
                 )
                 self.assertEqual(float(sample["precursor_mz_raw"]), expected["precursor"])
                 np.testing.assert_array_equal(
-                    sample["dreams_embedding"].numpy(),
+                    np.asarray(sample["dreams_embedding"]),
                     expected["dreams_embedding"],
                 )
                 np.testing.assert_array_equal(
-                    sample["fingerprint"].numpy(),
+                    np.asarray(sample["fingerprint"]),
                     expected["fingerprint"],
                 )
                 np.testing.assert_array_equal(
-                    sample["probe_maccs"].numpy(),
+                    np.asarray(sample["probe_maccs"]),
                     expected["probe_maccs"],
                 )
                 np.testing.assert_array_equal(
-                    sample["probe_morgan"].numpy(),
+                    np.asarray(sample["probe_morgan"]),
                     expected["probe_morgan"],
                 )
                 self.assertEqual(

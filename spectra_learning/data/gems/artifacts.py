@@ -63,48 +63,84 @@ def _download_gems_source_hdf5(source_url: str, output_dir: Path) -> Path:
     return download_path
 
 
+def _download_gems_raw_hdf5(
+    *,
+    base_artifact_dir: Path,
+    repo_id: str,
+    revision: str,
+    repo_subdir: str,
+    raw_hdf5_path: str,
+) -> Path:
+    repo_subdir = repo_subdir.strip("/")
+    prefix = f"{repo_subdir}/" if repo_subdir else ""
+    local_dir = base_artifact_dir.parent if repo_subdir else base_artifact_dir
+    hdf5_path = base_artifact_dir / raw_hdf5_path
+    if not hdf5_path.exists():
+        snapshot_download(
+            repo_id=repo_id,
+            repo_type="dataset",
+            revision=revision,
+            local_dir=local_dir,
+            allow_patterns=[f"{prefix}{raw_hdf5_path}"],
+        )
+    return hdf5_path
+
+
 def ensure_base_gems_artifact(
     *,
     gems_base_dir: Path,
     repo_id: str,
     revision: str,
+    repo_subdir: str = "",
     distributed_world_size: int = 1,
     distributed_rank: int = 0,
-) -> dict:
+) -> tuple[Path, dict]:
+    repo_subdir = repo_subdir.strip("/")
+    artifact_dir = gems_base_dir / repo_subdir if repo_subdir else gems_base_dir
+    download_dir = gems_base_dir if repo_subdir else artifact_dir
+    prefix = f"{repo_subdir}/" if repo_subdir else ""
     coordinated = _coordinate_distributed_io(distributed_world_size)
     if coordinated and distributed_rank != 0:
         torch.distributed.barrier()
-        metadata = load_gems_native_metadata(gems_base_dir)
-        validate_gems_native_artifact(gems_base_dir, metadata)
-        return metadata
+        metadata = load_gems_native_metadata(artifact_dir)
+        validate_gems_native_artifact(artifact_dir, metadata)
+        return artifact_dir, metadata
 
-    metadata_path = gems_base_dir / GEMS_METADATA_FILENAME
+    metadata_path = artifact_dir / GEMS_METADATA_FILENAME
     should_download = True
     if metadata_path.exists():
-        existing_metadata = load_gems_native_metadata(gems_base_dir)
+        existing_metadata = load_gems_native_metadata(artifact_dir)
         should_download = "gems_native_metadata_version" not in existing_metadata
         if should_download:
-            shutil.rmtree(gems_base_dir)
+            shutil.rmtree(artifact_dir)
     if should_download:
         logger.info("Downloading GeMS native artifact from %s@%s", repo_id, revision)
         snapshot_download(
             repo_id=repo_id,
             repo_type="dataset",
             revision=revision,
-            local_dir=gems_base_dir,
-            allow_patterns=[GEMS_METADATA_FILENAME, "train/*", "validation/*"],
+            local_dir=download_dir,
+            allow_patterns=[
+                f"{prefix}{GEMS_METADATA_FILENAME}",
+                f"{prefix}train/*",
+                f"{prefix}validation/*",
+            ],
         )
     if coordinated:
         torch.distributed.barrier()
-    metadata = load_gems_native_metadata(gems_base_dir)
-    validate_gems_native_artifact(gems_base_dir, metadata)
-    return metadata
+    metadata = load_gems_native_metadata(artifact_dir)
+    validate_gems_native_artifact(artifact_dir, metadata)
+    return artifact_dir, metadata
 
 
 def ensure_custom_gems_artifact(
     *,
     output_dir: Path,
+    base_artifact_dir: Path,
     base_metadata: dict,
+    repo_id: str,
+    revision: str,
+    repo_subdir: str,
     max_precursor_mz: float,
     source_hdf5_path: str,
     source_url: str,
@@ -132,8 +168,17 @@ def ensure_custom_gems_artifact(
         return variant_dir
     source_path = source_hdf5_path or str(base_metadata.get("source_hdf5_path", "")).strip()
     resolved_source_url = source_url or str(base_metadata.get("source_url", "")).strip()
+    raw_hdf5_path = str(base_metadata.get("raw_hdf5_path", "")).strip()
     if source_path:
         hdf5_path = Path(source_path).expanduser().resolve()
+    elif raw_hdf5_path:
+        hdf5_path = _download_gems_raw_hdf5(
+            base_artifact_dir=base_artifact_dir,
+            repo_id=repo_id,
+            revision=revision,
+            repo_subdir=repo_subdir,
+            raw_hdf5_path=raw_hdf5_path,
+        )
     elif resolved_source_url:
         hdf5_path = _download_gems_source_hdf5(resolved_source_url, output_dir)
     else:
@@ -162,13 +207,15 @@ def resolve_gems_artifact(
     max_precursor_mz: float,
     source_hdf5_path: str,
     source_url: str,
+    repo_subdir: str = "",
     distributed_world_size: int = 1,
     distributed_rank: int = 0,
 ) -> tuple[Path, dict]:
-    base_metadata = ensure_base_gems_artifact(
+    base_artifact_dir, base_metadata = ensure_base_gems_artifact(
         gems_base_dir=gems_base_dir,
         repo_id=repo_id,
         revision=revision,
+        repo_subdir=repo_subdir,
         distributed_world_size=distributed_world_size,
         distributed_rank=distributed_rank,
     )
@@ -177,11 +224,15 @@ def resolve_gems_artifact(
             base_metadata,
             max_precursor_mz=max_precursor_mz,
         )
-        return gems_base_dir, base_metadata
+        return base_artifact_dir, base_metadata
     except ValueError:
         variant_dir = ensure_custom_gems_artifact(
             output_dir=output_dir,
+            base_artifact_dir=base_artifact_dir,
             base_metadata=base_metadata,
+            repo_id=repo_id,
+            revision=revision,
+            repo_subdir=repo_subdir,
             max_precursor_mz=max_precursor_mz,
             source_hdf5_path=source_hdf5_path,
             source_url=source_url,

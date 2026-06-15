@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import argparse
 import base64
 import hashlib
 import json
 import re
+import shutil
 import urllib.request
 import zipfile
 import zlib
@@ -14,10 +16,18 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 import torch
+from huggingface_hub import HfApi, snapshot_download
 from sklearn.model_selection import train_test_split
-from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data import DataLoader, Dataset
 
 from spectra_learning.data.gems.collate import GemsBatchCollator
+from spectra_learning.data.gems.conversion import format_batch
+from spectra_learning.data.loading import (
+    loader_sampler,
+    local_batch_size,
+    subset_for_max_samples,
+)
+from spectra_learning.data.repositories import MSMS_EVALUATION_HF_REPO
 from spectra_learning.data.spectra import (
     DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
     DEFAULT_GROUPED_PEAK_SHOULDER_DA,
@@ -56,6 +66,8 @@ SEPTIC_SHOCK_POSITIVE_LABEL = "Septic shock"
 SEPTIC_SHOCK_NEGATIVE_LABEL = "Non-septic shock"
 SEPTIC_SHOCK_ARTIFACT_FORMAT = "raw_peaklist_v1"
 SEPTIC_SHOCK_TASK = "septic_shock_st003189"
+SEPTIC_SHOCK_DEFAULT_HF_REPO_ID = MSMS_EVALUATION_HF_REPO
+SEPTIC_SHOCK_DEFAULT_HF_SUBDIR = "septic_shock_st003189_raw_peaklist_v1"
 
 USE_PYTEOMICS_MZXML = True
 
@@ -254,6 +266,63 @@ def load_septic_shock_metadata(cache_dir: Path) -> dict[str, Any]:
     return json.loads((cache_dir / "metadata.json").read_text())
 
 
+def _coordinate_distributed_download(distributed_world_size: int) -> bool:
+    return (
+        distributed_world_size > 1
+        and torch.distributed.is_available()
+        and torch.distributed.is_initialized()
+    )
+
+
+def ensure_septic_shock_artifact_downloaded(
+    cache_dir: Path,
+    *,
+    repo_id: str = SEPTIC_SHOCK_DEFAULT_HF_REPO_ID,
+    revision: str = "main",
+    subdir: str = SEPTIC_SHOCK_DEFAULT_HF_SUBDIR,
+    distributed_world_size: int = 1,
+    distributed_rank: int = 0,
+) -> tuple[Path, dict[str, Any]]:
+    cache_dir = cache_dir.expanduser().resolve()
+    subdir = subdir.strip("/")
+    artifact_dir = cache_dir / subdir if subdir else cache_dir
+    metadata_path = artifact_dir / "metadata.json"
+    coordinated = _coordinate_distributed_download(distributed_world_size)
+    if not metadata_path.exists():
+        if not coordinated or distributed_rank == 0:
+            allow_patterns = (
+                [
+                    f"{subdir}/metadata.json",
+                    f"{subdir}/README.md",
+                    f"{subdir}/train/**",
+                    f"{subdir}/val/**",
+                    f"{subdir}/test/**",
+                    f"{subdir}/raw/**",
+                ]
+                if subdir
+                else [
+                    "metadata.json",
+                    "README.md",
+                    "train/**",
+                    "val/**",
+                    "test/**",
+                    "raw/**",
+                ]
+            )
+            snapshot_download(
+                repo_id=repo_id,
+                repo_type="dataset",
+                revision=revision,
+                local_dir=cache_dir,
+                allow_patterns=allow_patterns,
+            )
+        if coordinated:
+            torch.distributed.barrier()
+    elif coordinated:
+        torch.distributed.barrier()
+    return artifact_dir, load_septic_shock_metadata(artifact_dir)
+
+
 def _write_peaklist_shard(
     output_dir: Path,
     *,
@@ -324,8 +393,13 @@ def build_septic_shock_peaklist_artifact(
         spectra_chunks, precursor_chunks, sample_chunks = [], [], []
         scan_start = 0
         for record in split_records:
+            source_mzxml_path = cache_dir / record["mzxml_path"]
+            raw_output_path = output_dir / record["mzxml_path"]
+            raw_output_path.parent.mkdir(parents=True, exist_ok=True)
+            if source_mzxml_path.resolve() != raw_output_path.resolve():
+                shutil.copy2(source_mzxml_path, raw_output_path)
             spectra, precursor_mz = read_mzxml_sample_spectra(
-                cache_dir / record["mzxml_path"],
+                source_mzxml_path,
                 ms_level=ms_level,
             )
             artifact_record = dict(record)
@@ -532,10 +606,10 @@ class SepticShockMzXMLDataset(Dataset):
             ms_level=self.ms_level,
         )
         return {
-            "spectra": torch.from_numpy(spectra),
-            "precursor_mz_raw": torch.from_numpy(precursor_mz),
-            "label": torch.tensor(float(record["label"]), dtype=torch.float32),
-            "sample_index": torch.tensor(int(record["sample_index"]), dtype=torch.long),
+            "spectra": spectra,
+            "precursor_mz_raw": precursor_mz,
+            "label": np.float32(record["label"]),
+            "sample_index": np.int64(record["sample_index"]),
             "sample_id": str(record["sample_id"]),
             "raw_file_name": str(record["raw_file_name"]),
         }
@@ -569,7 +643,13 @@ class SepticShockPeaklistDataset(Dataset):
         self._arrays = arrays
         self._positions = [
             [
-                (entry_idx, np.flatnonzero(arrays[entry_idx]["sample_index"] == int(record["sample_index"])))
+                (
+                    entry_idx,
+                    np.flatnonzero(
+                        arrays[entry_idx]["sample_index"]
+                        == int(record["sample_index"])
+                    ),
+                )
                 for entry_idx in range(len(arrays))
             ]
             for record in self.records
@@ -597,12 +677,10 @@ class SepticShockPeaklistDataset(Dataset):
             axis=0,
         )
         return {
-            "spectra": torch.from_numpy(spectra.astype(np.float32, copy=True)),
-            "precursor_mz_raw": torch.from_numpy(
-                precursor_mz.astype(np.float32, copy=True)
-            ),
-            "label": torch.tensor(float(record["label"]), dtype=torch.float32),
-            "sample_index": torch.tensor(int(record["sample_index"]), dtype=torch.long),
+            "spectra": spectra.astype(np.float32, copy=True),
+            "precursor_mz_raw": precursor_mz.astype(np.float32, copy=True),
+            "label": np.float32(record["label"]),
+            "sample_index": np.int64(record["sample_index"]),
             "sample_id": str(record["sample_id"]),
             "raw_file_name": str(record["raw_file_name"]),
         }
@@ -623,6 +701,7 @@ class SepticShockCollator:
         grouped_peak_isotope_charges: tuple[int, ...] = (
             DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES
         ),
+        output_format: str = "torch",
     ) -> None:
         self.num_peaks = num_peaks
         self.max_precursor_mz = max_precursor_mz
@@ -633,6 +712,7 @@ class SepticShockCollator:
         self.peak_filtering = peak_filtering
         self.grouped_peak_shoulder_da = grouped_peak_shoulder_da
         self.grouped_peak_isotope_charges = grouped_peak_isotope_charges
+        self.output_format = output_format
         self.peak_collator = GemsBatchCollator(
             augment=False,
             num_target_blocks=0,
@@ -648,6 +728,7 @@ class SepticShockCollator:
             peak_filtering=peak_filtering,
             grouped_peak_shoulder_da=grouped_peak_shoulder_da,
             grouped_peak_isotope_charges=grouped_peak_isotope_charges,
+            output_format="torch",
         )
 
     def __call__(self, samples: list[dict[str, Any]]) -> dict[str, Any]:
@@ -670,32 +751,17 @@ class SepticShockCollator:
         ]
         batch["spectrum_sample_index"] = torch.cat(sample_positions, dim=0)
         batch["spectrum_count"] = spectrum_counts
-        batch["sample_index"] = torch.stack([sample["sample_index"] for sample in samples])
-        batch["label"] = torch.stack([sample["label"] for sample in samples]).to(
-            torch.float32
+        batch["sample_index"] = torch.as_tensor(
+            [sample["sample_index"] for sample in samples],
+            dtype=torch.long,
+        )
+        batch["label"] = torch.as_tensor(
+            [sample["label"] for sample in samples],
+            dtype=torch.float32,
         )
         batch["sample_id"] = [sample["sample_id"] for sample in samples]
         batch["raw_file_name"] = [sample["raw_file_name"] for sample in samples]
-        return batch
-
-
-def _subset_for_max_samples(
-    dataset: Dataset,
-    *,
-    max_samples: int | None,
-    shuffle: bool,
-    seed: int,
-) -> tuple[Dataset, bool]:
-    if max_samples is None:
-        return dataset, shuffle
-    n = min(len(dataset), max_samples)
-    if shuffle:
-        generator = torch.Generator()
-        generator.manual_seed(seed)
-        indices = torch.randperm(len(dataset), generator=generator)[:n].tolist()
-    else:
-        indices = list(range(n))
-    return Subset(dataset, [int(idx) for idx in indices]), False
+        return format_batch(batch, self.output_format)
 
 
 def build_septic_shock_data(
@@ -719,17 +785,30 @@ def build_septic_shock_data(
     prepare: bool = False,
     download_raw: bool = False,
     split_seed: int = SEPTIC_SHOCK_SPLIT_SEED,
+    hf_repo_id: str | None = None,
+    hf_revision: str = "main",
+    hf_subdir: str = SEPTIC_SHOCK_DEFAULT_HF_SUBDIR,
+    distributed_world_size: int = 1,
+    distributed_rank: int = 0,
 ) -> SepticShockData:
     cache_dir = cache_dir.expanduser().resolve()
-    metadata = (
-        prepare_septic_shock_dataset(
+    if prepare:
+        metadata = prepare_septic_shock_dataset(
             cache_dir,
             download_raw=download_raw,
             split_seed=split_seed,
         )
-        if prepare
-        else load_septic_shock_metadata(cache_dir)
-    )
+    elif hf_repo_id is not None:
+        cache_dir, metadata = ensure_septic_shock_artifact_downloaded(
+            cache_dir,
+            repo_id=hf_repo_id,
+            revision=hf_revision,
+            subdir=hf_subdir,
+            distributed_world_size=distributed_world_size,
+            distributed_rank=distributed_rank,
+        )
+    else:
+        metadata = load_septic_shock_metadata(cache_dir)
     return SepticShockData(
         metadata=metadata,
         root=cache_dir,
@@ -756,6 +835,9 @@ def build_septic_shock_loader(
     max_samples: int | None = None,
     drop_last: bool = False,
     num_workers: int = 0,
+    distributed_world_size: int = 1,
+    distributed_rank: int = 0,
+    output_format: str = "torch",
 ) -> DataLoader:
     if data.metadata.get("artifact_format") == SEPTIC_SHOCK_ARTIFACT_FORMAT:
         dataset: Dataset = SepticShockPeaklistDataset(data, split)
@@ -768,18 +850,27 @@ def build_septic_shock_loader(
             root=data.root,
             ms_level=data.ms_level,
         )
-    dataset, shuffle = _subset_for_max_samples(
+    dataset, shuffle = subset_for_max_samples(
         dataset,
         max_samples=max_samples,
         shuffle=shuffle,
         seed=seed,
     )
+    sampler, loader_shuffle = loader_sampler(
+        dataset,
+        shuffle=shuffle,
+        seed=seed,
+        drop_last=drop_last,
+        distributed_world_size=distributed_world_size,
+        distributed_rank=distributed_rank,
+    )
     generator = torch.Generator()
     generator.manual_seed(seed)
     loader_kwargs = {
         "dataset": dataset,
-        "batch_size": data.batch_size,
-        "shuffle": shuffle,
+        "batch_size": local_batch_size(data.batch_size, distributed_world_size),
+        "shuffle": loader_shuffle,
+        "sampler": sampler,
         "drop_last": drop_last,
         "num_workers": num_workers,
         "collate_fn": SepticShockCollator(
@@ -792,6 +883,7 @@ def build_septic_shock_loader(
             peak_filtering=data.peak_filtering,
             grouped_peak_shoulder_da=data.grouped_peak_shoulder_da,
             grouped_peak_isotope_charges=data.grouped_peak_isotope_charges,
+            output_format=output_format,
         ),
         "generator": generator,
     }
@@ -799,3 +891,139 @@ def build_septic_shock_loader(
         loader_kwargs["persistent_workers"] = True
         loader_kwargs["prefetch_factor"] = 4
     return DataLoader(**loader_kwargs)
+
+
+def prepare_septic_shock_peaklist_dataset(
+    *,
+    cache_dir: Path,
+    split_seed: int = SEPTIC_SHOCK_SPLIT_SEED,
+    download_raw: bool = False,
+    force: bool = False,
+    dry_run: bool = False,
+    build_peaklist_artifact: bool = False,
+    artifact_dir: Path | None = None,
+    ms_level: int | None = None,
+    upload: bool = False,
+    hf_repo_id: str = SEPTIC_SHOCK_DEFAULT_HF_REPO_ID,
+    hf_subdir: str = SEPTIC_SHOCK_DEFAULT_HF_SUBDIR,
+) -> dict[str, Any]:
+    metadata = prepare_septic_shock_dataset(
+        cache_dir,
+        download_raw=bool(download_raw and not dry_run),
+        split_seed=int(split_seed),
+        force=force,
+    )
+    summary: dict[str, Any] = {
+        "cache_dir": str(cache_dir.expanduser().resolve()),
+        "num_samples": int(metadata["num_samples"]),
+        "label_counts": metadata["label_counts"],
+        "split_counts": metadata["split_counts"],
+        "raw_url": SEPTIC_SHOCK_RAW_URL,
+        "raw_archive_bytes": SEPTIC_SHOCK_RAW_BYTES,
+        "raw_archive_md5": SEPTIC_SHOCK_RAW_MD5,
+        "downloaded_raw": bool(metadata["downloaded_raw"]),
+    }
+    if build_peaklist_artifact:
+        output_dir = artifact_dir if artifact_dir is not None else cache_dir / "artifact"
+        artifact_metadata = build_septic_shock_peaklist_artifact(
+            cache_dir=cache_dir,
+            output_dir=output_dir,
+            ms_level=ms_level,
+            split_seed=int(split_seed),
+        )
+        summary["artifact_dir"] = str(output_dir.expanduser().resolve())
+        summary["artifact_format"] = artifact_metadata["artifact_format"]
+        summary["artifact_split_counts"] = artifact_metadata["split_counts"]
+        summary["artifact_num_scans"] = {
+            split: int(artifact_metadata[f"{split}_num_scans"])
+            for split in ("train", "val", "test")
+        }
+        if upload:
+            path_in_repo = hf_subdir.strip("/")
+            HfApi().upload_folder(
+                repo_id=hf_repo_id,
+                repo_type="dataset",
+                folder_path=output_dir,
+                path_in_repo=path_in_repo,
+                commit_message=(
+                    "Add ST003189 septic-shock raw peaklist evaluation artifact"
+                ),
+            )
+            summary["uploaded_to"] = (
+                f"https://huggingface.co/datasets/{hf_repo_id}/tree/main/"
+                f"{path_in_repo}"
+            )
+    return summary
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Prepare Metabolomics Workbench ST003189 septic-shock metadata and "
+            "optionally download/extract the raw mzXML archive."
+        )
+    )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=Path("data/septic_shock_st003189"),
+    )
+    parser.add_argument("--split-seed", type=int, default=SEPTIC_SHOCK_SPLIT_SEED)
+    parser.add_argument(
+        "--download-raw",
+        action="store_true",
+        help="Download and verify the 2.5 GB ST003189 raw mzXML archive.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Refresh downloaded metadata/raw files and re-extract the archive.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Download metadata only and print the raw archive URL/checksum.",
+    )
+    parser.add_argument(
+        "--build-peaklist-artifact",
+        action="store_true",
+        help="Convert extracted mzXML files to the project-native raw peaklist artifact.",
+    )
+    parser.add_argument(
+        "--artifact-dir",
+        type=Path,
+        default=None,
+        help="Output directory for the raw peaklist artifact.",
+    )
+    parser.add_argument(
+        "--ms-level",
+        type=int,
+        default=None,
+        help="Optional mzXML msLevel filter. Omit to include all scans.",
+    )
+    parser.add_argument("--upload", action="store_true")
+    parser.add_argument("--hf-repo-id", default=SEPTIC_SHOCK_DEFAULT_HF_REPO_ID)
+    parser.add_argument("--hf-subdir", default=SEPTIC_SHOCK_DEFAULT_HF_SUBDIR)
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    summary = prepare_septic_shock_peaklist_dataset(
+        cache_dir=args.cache_dir,
+        split_seed=args.split_seed,
+        download_raw=args.download_raw,
+        force=args.force,
+        dry_run=args.dry_run,
+        build_peaklist_artifact=args.build_peaklist_artifact,
+        artifact_dir=args.artifact_dir,
+        ms_level=args.ms_level,
+        upload=args.upload,
+        hf_repo_id=args.hf_repo_id,
+        hf_subdir=args.hf_subdir,
+    )
+    print(json.dumps(summary, indent=2, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

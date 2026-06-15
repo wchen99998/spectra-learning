@@ -1,5 +1,10 @@
 from spectra_learning.data.gems.collate import GemsBatchCollator
-from spectra_learning.data.gems.conversion import numpy_batch_to_torch
+from spectra_learning.data.gems.conversion import (
+    batch_to_jax,
+    batch_to_numpy,
+    format_batch,
+    numpy_batch_to_torch,
+)
 from spectra_learning.data.gems.datamodule import GemsNativeDataModule
 from spectra_learning.data.gems.dataset import GemsMemmapDataset
 from spectra_learning.data.gems.masking import (
@@ -21,6 +26,9 @@ __all__ = [
     "GemsDataConfig",
     "GemsMemmapDataset",
     "GemsNativeDataModule",
+    "batch_to_jax",
+    "batch_to_numpy",
+    "format_batch",
     "numpy_batch_to_torch",
     "visualize_real_mask_strategies",
 ]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -206,6 +207,37 @@ def test_septic_shock_loader_preserves_sample_grouping(monkeypatch, tmp_path: Pa
     assert torch.allclose(batch["peak_intensity"][0], torch.tensor([0.5, 1.0]))
     assert torch.equal(batch["peak_valid_mask"][0], torch.tensor([True, True]))
 
+    jax_batch = next(
+        iter(
+            septic_shock.build_septic_shock_loader(
+                data,
+                "train",
+                shuffle=False,
+                seed=0,
+                output_format="jax",
+            )
+        )
+    )
+    import jax
+
+    assert isinstance(jax_batch["peak_mz"], jax.Array)
+    assert isinstance(jax_batch["label"], jax.Array)
+    assert tuple(jax_batch["peak_mz"].shape) == (3, 2)
+
+    distributed_batch = next(
+        iter(
+            septic_shock.build_septic_shock_loader(
+                data,
+                "train",
+                shuffle=False,
+                seed=0,
+                distributed_world_size=2,
+                distributed_rank=1,
+            )
+        )
+    )
+    assert tuple(distributed_batch["label"].shape) == (1,)
+
 
 def test_build_peaklist_artifact_uses_project_loader(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(septic_shock, "USE_PYTEOMICS_MZXML", False)
@@ -241,6 +273,7 @@ def test_build_peaklist_artifact_uses_project_loader(monkeypatch, tmp_path: Path
     assert metadata["num_peaks_input"] == 128
     assert metadata["train_num_scans"] == 68
     assert (artifact_dir / "train" / "shard-00000-of-00001" / "spectra.npy").exists()
+    assert (artifact_dir / "raw" / "mzxml" / "0.mzXML").exists()
 
     data = septic_shock.build_septic_shock_data(
         cache_dir=artifact_dir,
@@ -263,3 +296,77 @@ def test_build_peaklist_artifact_uses_project_loader(monkeypatch, tmp_path: Path
     assert torch.allclose(batch["peak_mz"][0], torch.tensor([0.025, 0.05]))
     assert torch.allclose(batch["peak_intensity"][0], torch.tensor([0.5, 1.0]))
     assert torch.equal(batch["spectrum_count"], torch.tensor([1, 1]))
+
+
+def test_build_septic_shock_data_downloads_hf_subdir(monkeypatch, tmp_path: Path) -> None:
+    source_root = tmp_path / "source_repo"
+    artifact_dir = source_root / "septic"
+    shard_dir = artifact_dir / "train" / "shard-00000-of-00001"
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    spectra = np.zeros((1, 2, 128), dtype=np.float32)
+    spectra[0, 0, :2] = [25.0, 50.0]
+    spectra[0, 1, :2] = [5.0, 10.0]
+    np.save(shard_dir / "spectra.npy", spectra)
+    np.save(
+        shard_dir / "precursor_mz_raw.npy",
+        np.asarray([100.0], dtype=np.float32),
+    )
+    np.save(shard_dir / "sample_index.npy", np.asarray([0], dtype=np.int64))
+    metadata = {
+        "artifact_format": septic_shock.SEPTIC_SHOCK_ARTIFACT_FORMAT,
+        "train_shards": ["shard-00000-of-00001"],
+        "train_scan_lengths": [1],
+        "train_num_scans": 1,
+        "samples": [
+            {
+                "sample_index": 0,
+                "sample_id": "0",
+                "raw_file_name": "0.mzXML",
+                "label": 1,
+                "label_name": "Septic shock",
+                "split": "train",
+                "mzxml_path": "raw/mzxml/0.mzXML",
+            }
+        ],
+    }
+    (artifact_dir / "metadata.json").write_text(json.dumps(metadata))
+
+    calls = []
+
+    def fake_snapshot_download(*, local_dir, **kwargs):
+        calls.append(kwargs)
+        shutil.copytree(source_root, local_dir, dirs_exist_ok=True)
+        return str(local_dir)
+
+    monkeypatch.setattr(septic_shock, "snapshot_download", fake_snapshot_download)
+
+    data = septic_shock.build_septic_shock_data(
+        cache_dir=tmp_path / "cache",
+        batch_size=1,
+        num_peaks=2,
+        hf_repo_id="unit/septic",
+        hf_subdir="septic",
+    )
+    batch = next(
+        iter(
+            septic_shock.build_septic_shock_loader(
+                data,
+                "train",
+                shuffle=False,
+                seed=0,
+            )
+        )
+    )
+
+    assert data.root == tmp_path / "cache" / "septic"
+    assert calls[0]["repo_id"] == "unit/septic"
+    assert calls[0]["allow_patterns"] == [
+        "septic/metadata.json",
+        "septic/README.md",
+        "septic/train/**",
+        "septic/val/**",
+        "septic/test/**",
+        "septic/raw/**",
+    ]
+    assert torch.allclose(batch["label"], torch.tensor([1.0]))
+    assert torch.allclose(batch["peak_mz"][0], torch.tensor([0.025, 0.05]))

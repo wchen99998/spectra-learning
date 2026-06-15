@@ -28,7 +28,7 @@ from spectra_learning.probes.massspec.msg_modules import (
     _uses_pair_features,
     build_msg_sequence_probe as _build_msg_sequence_probe,
 )
-from spectra_learning.probes.massspec.data import probe_local_batch_size
+from spectra_learning.data.loading import local_batch_size
 from spectra_learning.probes.massspec.msg_settings import (
     MsgProbeSplitTargets,
     MsgProbeTaskSpec,
@@ -1384,7 +1384,7 @@ class ProbeStepCountTests(unittest.TestCase):
             batch_size=8,
         )
 
-        self.assertEqual(probe_local_batch_size(dm.batch_size, 4), 2)
+        self.assertEqual(local_batch_size(dm.batch_size, 4), 2)
         self.assertEqual(
             probe_steps_per_epoch(
                 dm,

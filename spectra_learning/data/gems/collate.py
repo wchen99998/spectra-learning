@@ -3,6 +3,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from spectra_learning.data.gems.conversion import format_batch
 from spectra_learning.data.gems.masking import (
     DEFAULT_JEPA_MASK_LENGTHS,
     DEFAULT_JEPA_MASK_STRATEGY,
@@ -84,9 +85,7 @@ class GemsBatchCollator:
         self._ensure_nonempty(batch)
         if self.augment:
             batch["context_mask"], batch["target_masks"] = self._sample_masks(batch)
-        if self.output_format == "numpy":
-            return self._batch_to_numpy(batch)
-        return batch
+        return format_batch(batch, self.output_format)
 
     def _preprocess(self, samples: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
         if isinstance(samples[0]["spectra"], np.ndarray):
@@ -140,9 +139,6 @@ class GemsBatchCollator:
             grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
             grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
         )
-
-    def _batch_to_numpy(self, batch: dict[str, torch.Tensor]) -> dict[str, np.ndarray]:
-        return {key: value.detach().cpu().numpy() for key, value in batch.items()}
 
     def _ensure_nonempty(self, batch: dict[str, torch.Tensor]) -> None:
         no_valid = ~batch["peak_valid_mask"].any(dim=1)

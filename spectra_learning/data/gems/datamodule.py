@@ -128,6 +128,7 @@ class GemsNativeDataModule:
             max_precursor_mz=self.config.max_precursor_mz,
             source_hdf5_path=self.config.gems_native_source_hdf5_path,
             source_url=self.config.gems_native_source_url,
+            repo_subdir=self.config.gems_native_hf_subdir,
             distributed_world_size=distributed_world_size,
             distributed_rank=distributed_rank,
         )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import logging
 import shutil
@@ -18,13 +19,17 @@ from huggingface_hub import HfApi
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from spectra_learning.data.murcko import (
+    MCEBIO_MURCKO_PREPARED_SUBDIR,
+    NIST_MURCKO_PREPARED_SUBDIR,
+)
 
 DEFAULT_ARTIFACT_DIR = Path("data/prepared/nist_murcko_mh_lsh/artifact")
 DEFAULT_DREAMS_ROOT = Path("/home/wuhao/Dreams")
 DEFAULT_DREAMS_CHECKPOINT = (
     DEFAULT_DREAMS_ROOT / "dreams/models/pretrained/embedding_model.ckpt"
 )
-DEFAULT_SUBDIRS = ("nist_murcko_probe", "mcebio_murcko_probe")
+DEFAULT_SUBDIRS = (NIST_MURCKO_PREPARED_SUBDIR, MCEBIO_MURCKO_PREPARED_SUBDIR)
 DEFAULT_N_HIGHEST_PEAKS = 100
 DEFAULT_BATCH_SIZE = 256
 
@@ -46,7 +51,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", type=Path, default=DEFAULT_DREAMS_CHECKPOINT)
     parser.add_argument("--n-highest-peaks", type=int, default=DEFAULT_N_HIGHEST_PEAKS)
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--device",
+        default="cuda" if torch.cuda.is_available() else "cpu",
+    )
     parser.add_argument("--upload", action="store_true")
     parser.add_argument("--hf-repo-id", default="")
     parser.add_argument("--hf-revision", default="main")
@@ -86,7 +94,7 @@ def _validate_rows(
     dformat: Any,
     n_highest_peaks: int,
 ) -> tuple[np.ndarray, dict[str, int]]:
-    from dreams.utils import spectra as su
+    su = importlib.import_module("dreams.utils.spectra")
 
     valid = np.zeros(len(rows), dtype=bool)
     problem_counts: Counter[str] = Counter()
@@ -111,8 +119,8 @@ def _compute_embeddings(
     spec_preproc: Any,
     batch_size: int,
 ) -> np.ndarray:
-    import dreams.utils.data as du
-    from dreams.definitions import SPECTRUM
+    du = importlib.import_module("dreams.utils.data")
+    spectrum_key = importlib.import_module("dreams.definitions").SPECTRUM
 
     spectra = [_row_spectrum(row) for row in rows]
     precursors = [float(row["precursor_mz"]) for row in rows]
@@ -120,7 +128,7 @@ def _compute_embeddings(
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, drop_last=False)
     predictions = []
     for batch in tqdm(dataloader, desc="DreaMS embeddings", leave=False):
-        spectrum = batch[SPECTRUM].to(device=model.device, dtype=model.dtype)
+        spectrum = batch[spectrum_key].to(device=model.device, dtype=model.dtype)
         with torch.inference_mode():
             predictions.append(model(spectrum).detach().cpu().to(torch.float32).numpy())
     return np.concatenate(predictions, axis=0).astype(np.float32, copy=False)
@@ -132,16 +140,18 @@ def _load_model(
     device: str,
     n_highest_peaks: int,
 ) -> tuple[torch.nn.Module, Any, Any]:
-    import dreams.utils.data as du
-    import dreams.utils.dformats as dformats
-    from dreams.api import PreTrainedModel
-    from dreams.models.heads.heads import ContrastiveHead
+    du = importlib.import_module("dreams.utils.data")
+    dformats = importlib.import_module("dreams.utils.dformats")
+    pre_trained_model = importlib.import_module("dreams.api").PreTrainedModel
+    contrastive_head = importlib.import_module(
+        "dreams.models.heads.heads"
+    ).ContrastiveHead
 
     dformat = dformats.DataFormatA()
     checkpoint = checkpoint.expanduser().resolve()
-    model_ckpt = PreTrainedModel.from_ckpt(
+    model_ckpt = pre_trained_model.from_ckpt(
         checkpoint,
-        ContrastiveHead,
+        contrastive_head,
         n_highest_peaks,
     )
     model_ckpt.model.to(torch.device(device))
@@ -334,19 +344,27 @@ def _upload_paths(
         )
 
 
-def main() -> None:
-    args = _parse_args()
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    _install_dreams_path(args.dreams_root)
-    artifact_dir = args.artifact_dir.expanduser().resolve()
-    subdirs = args.subdir if args.subdir else list(DEFAULT_SUBDIRS)
+def build_murcko_dreams_auxiliary(
+    *,
+    artifact_dir: Path,
+    dreams_root: Path = DEFAULT_DREAMS_ROOT,
+    checkpoint: Path = DEFAULT_DREAMS_CHECKPOINT,
+    subdirs: list[str] | None = None,
+    n_highest_peaks: int = DEFAULT_N_HIGHEST_PEAKS,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    upload: bool = False,
+    hf_repo_id: str = "",
+    hf_revision: str = "main",
+    hf_private: bool = False,
+) -> list[Path]:
+    _install_dreams_path(dreams_root)
+    artifact_dir = artifact_dir.expanduser().resolve()
+    subdirs = subdirs if subdirs is not None else list(DEFAULT_SUBDIRS)
     model, spec_preproc, dformat = _load_model(
-        args.checkpoint,
-        device=args.device,
-        n_highest_peaks=args.n_highest_peaks,
+        checkpoint,
+        device=device,
+        n_highest_peaks=n_highest_peaks,
     )
     upload_paths: list[Path] = []
     for subdir in subdirs:
@@ -357,21 +375,43 @@ def main() -> None:
                 model=model,
                 spec_preproc=spec_preproc,
                 dformat=dformat,
-                batch_size=args.batch_size,
-                n_highest_peaks=args.n_highest_peaks,
-                checkpoint=args.checkpoint,
+                batch_size=batch_size,
+                n_highest_peaks=n_highest_peaks,
+                checkpoint=checkpoint,
             )
         )
-    if args.upload:
-        if not args.hf_repo_id:
+    if upload:
+        if not hf_repo_id:
             raise ValueError("--hf-repo-id is required with --upload")
         _upload_paths(
             artifact_dir=artifact_dir,
-            repo_id=args.hf_repo_id,
-            revision=args.hf_revision,
-            private=args.hf_private,
+            repo_id=hf_repo_id,
+            revision=hf_revision,
+            private=hf_private,
             paths=upload_paths,
         )
+    return upload_paths
+
+
+def main() -> None:
+    args = _parse_args()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    build_murcko_dreams_auxiliary(
+        artifact_dir=args.artifact_dir,
+        dreams_root=args.dreams_root,
+        checkpoint=args.checkpoint,
+        subdirs=args.subdir,
+        n_highest_peaks=args.n_highest_peaks,
+        batch_size=args.batch_size,
+        device=args.device,
+        upload=args.upload,
+        hf_repo_id=args.hf_repo_id,
+        hf_revision=args.hf_revision,
+        hf_private=args.hf_private,
+    )
 
 
 if __name__ == "__main__":

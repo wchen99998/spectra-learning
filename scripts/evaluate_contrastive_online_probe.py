@@ -20,7 +20,7 @@ from spectra_learning.data.spectra import (
     DEFAULT_PEAK_FILTERING,
     preprocess_peak_batch_torch,
 )
-from spectra_learning.probes.massspec.data import MassSpecProbeData
+from spectra_learning.data.massspec_probe import MassSpecProbeData
 from spectra_learning.probes.massspec.msg_probe import iter_massspec_probe
 from spectra_learning.probes.massspec.msg_settings import resolve_msg_probe_sample_limits
 from spectra_learning.data.massspec_targets import MACCS_FINGERPRINT_BITS

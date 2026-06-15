@@ -4,11 +4,8 @@ import argparse
 import json
 import logging
 import math
-import sys
 from pathlib import Path
 from typing import Any
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 import pyarrow as pa
@@ -18,6 +15,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from spectra_learning.config.loading import load_config
+from spectra_learning.data.mgf import _to_float, iter_mgf
 from spectra_learning.data.spectra import (
     DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
     DEFAULT_GROUPED_PEAK_SHOULDER_DA,
@@ -30,10 +28,9 @@ from spectra_learning.data.spectra import (
 from spectra_learning.models.factory import build_model_from_config
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pooling import CovariancePool
-from spectra_learning.probes.massspec.data import MassSpecProbeData
+from spectra_learning.data.massspec_probe import MassSpecProbeData
 from spectra_learning.probes.massspec.msg_probe import iter_massspec_probe
 from spectra_learning.probes.massspec.msg_settings import resolve_msg_probe_sample_limits
-from spectra_learning.data.mgf import _to_float, iter_mgf
 from spectra_learning.training.checkpointing import load_torch_checkpoint
 from spectra_learning.training.storage import StoragePath, normalize_storage_path
 

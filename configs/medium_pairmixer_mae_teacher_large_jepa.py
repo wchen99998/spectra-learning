@@ -17,8 +17,9 @@ def get_config() -> config_dict.ConfigDict:
 
     # Dataset
     cfg.artifact_dir = "data/gems_artifacts_alpha"
-    cfg.gems_native_repo_id = "cjim8889/gems-a10-native"
-    cfg.nist_murcko_probe_repo_id = "cjim8889/hr_msms_nist_mcebio_murcko_20260529"
+    cfg.gems_native_repo_id = "cjim8889/gems_native_20260615"
+    cfg.gems_native_hf_subdir = "gems_a10_native"
+    cfg.nist_murcko_probe_repo_id = "cjim8889/msms_evaluation_100ktrain_20260615"
     cfg.nist_murcko_probe_revision = "main"
     cfg.nist_murcko_probe_train_samples = 30_000
     cfg.nist_murcko_probe_val_samples = 10_000

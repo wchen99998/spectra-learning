@@ -13,12 +13,10 @@ from sklearn.metrics import r2_score
 from torch.nn.parallel import DistributedDataParallel
 
 from spectra_learning.data.gems.conversion import numpy_batch_to_torch
+from spectra_learning.data.loading import local_batch_size
 from spectra_learning.models.pooling import CovariancePool
 from spectra_learning.models.model import PeakSetJEPA
-from spectra_learning.probes.massspec.data import (
-    MassSpecProbeData,
-    probe_local_batch_size,
-)
+from spectra_learning.data.massspec_probe import MassSpecProbeData
 from spectra_learning.probes.massspec.msg_modules import (
     MsgLinearProbe,
     _probe_prediction_names,
@@ -161,7 +159,7 @@ def probe_steps_per_epoch(
         size = min(size, max_samples)
     if distributed_world_size > 1:
         size = math.ceil(size / distributed_world_size)
-    batch_size = probe_local_batch_size(
+    batch_size = local_batch_size(
         int(probe_data.batch_size),
         distributed_world_size,
     )
