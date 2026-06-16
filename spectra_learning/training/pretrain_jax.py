@@ -39,6 +39,7 @@ from spectra_learning.training.checkpointing_jax import (
     restore_jax_training_state,
     save_jax_training_state,
 )
+from spectra_learning.training.jax_runtime_flags import configure_jax_tpu_xla_flags
 from spectra_learning.training.logging import (
     MetricLogger,
     build_logger,
@@ -72,6 +73,7 @@ def trainable_param_filter(path: tuple[object, ...], value: object) -> bool:
 
 
 def configure_jax_runtime(config: Any) -> None:
+    configure_jax_tpu_xla_flags()
     if bool(_config_get(config, "jax_log_compiles", False)) or _env_enabled(
         "JAX_LOG_COMPILES"
     ):
@@ -83,6 +85,26 @@ def configure_jax_runtime(config: Any) -> None:
     compilation_cache_dir = str(_config_get(config, "jax_compilation_cache_dir", ""))
     if compilation_cache_dir:
         jax.config.update("jax_compilation_cache_dir", compilation_cache_dir)
+        jax.config.update(
+            "jax_enable_compilation_cache",
+            bool(_config_get(config, "jax_enable_compilation_cache", True)),
+        )
+    min_compile_time = _config_get(
+        config, "jax_persistent_cache_min_compile_time_secs", None
+    )
+    if min_compile_time is not None:
+        jax.config.update(
+            "jax_persistent_cache_min_compile_time_secs",
+            float(min_compile_time),
+        )
+    min_entry_size = _config_get(
+        config, "jax_persistent_cache_min_entry_size_bytes", None
+    )
+    if min_entry_size is not None:
+        jax.config.update(
+            "jax_persistent_cache_min_entry_size_bytes",
+            int(min_entry_size),
+        )
 
 
 def initialize_jax_distributed(config: Any) -> None:
@@ -1511,16 +1533,30 @@ def _precompile_jax_training_steps(
     pack_variant_count = 0
     full_fallback_count = 0
     step_specs = []
-    for pack_tokens, static_state, train_step in pure_pack_train_steps:
-        step_specs.append(
-            (static_state, train_step, _limit_context_count(batch, pack_tokens))
-        )
-        pack_variant_count += 1
-    if pure_full_train_step is not None:
-        step_specs.append((pure_full_static_state, pure_full_train_step, batch))
-        full_fallback_count += 1
-    if pure_train_step is not None:
-        step_specs.append((pure_static_state, pure_train_step, batch))
+    variant_selector = str(_config_get(config, "jax_precompile_variant", "default"))
+    pack_train_steps = {
+        pack_tokens: (static_state, train_step)
+        for pack_tokens, static_state, train_step in pure_pack_train_steps
+    }
+    pack_choices = tuple(pack_tokens for pack_tokens, _, _ in pure_pack_train_steps)
+    variants = _jax_train_step_compile_variants(
+        pack_choices,
+        selector=variant_selector,
+        has_default_train_step=pure_train_step is not None,
+        has_full_fallback=pure_full_train_step is not None,
+    )
+    for _variant_name, pack_tokens, full_fallback in variants:
+        if full_fallback:
+            step_specs.append((pure_full_static_state, pure_full_train_step, batch))
+            full_fallback_count += 1
+        elif pack_tokens is None:
+            step_specs.append((pure_static_state, pure_train_step, batch))
+        else:
+            static_state, train_step = pack_train_steps[pack_tokens]
+            step_specs.append(
+                (static_state, train_step, _limit_context_count(batch, pack_tokens))
+            )
+            pack_variant_count += 1
     for static_state, train_step, compile_batch in step_specs:
         compile_params = _clone_jax_tree(pure_trainable_params)
         compile_opt_state = _clone_jax_tree(pure_opt_state)
@@ -1540,6 +1576,45 @@ def _precompile_jax_training_steps(
         "run/precompile_pack_variants": float(pack_variant_count),
         "run/precompile_full_fallback": float(full_fallback_count),
     }
+
+
+def _jax_train_step_compile_variants(
+    pack_choices: tuple[int, ...],
+    *,
+    selector: str,
+    has_default_train_step: bool,
+    has_full_fallback: bool,
+) -> tuple[tuple[str, int | None, bool], ...]:
+    selector = selector.lower()
+    if selector == "default":
+        if pack_choices:
+            pack_tokens = pack_choices[0]
+            return ((f"pack{pack_tokens}", pack_tokens, False),)
+        assert has_default_train_step
+        return (("default", None, False),)
+    if selector == "largest-pack":
+        assert pack_choices
+        pack_tokens = pack_choices[-1]
+        return ((f"pack{pack_tokens}", pack_tokens, False),)
+    if selector == "full":
+        assert has_full_fallback
+        return (("full", 0, True),)
+    if selector == "all":
+        variants = tuple(
+            (f"pack{pack_tokens}", pack_tokens, False)
+            for pack_tokens in pack_choices
+        )
+        if has_full_fallback:
+            variants = (*variants, ("full", 0, True))
+        if variants:
+            return variants
+        assert has_default_train_step
+        return (("default", None, False),)
+    if selector.startswith("pack:"):
+        pack_tokens = int(selector.split(":", 1)[1])
+        assert pack_tokens in pack_choices
+        return ((f"pack{pack_tokens}", pack_tokens, False),)
+    raise ValueError(f"Unknown JAX train-step compile variant selector: {selector}")
 
 
 def _raise_on_jax_compile_stall(

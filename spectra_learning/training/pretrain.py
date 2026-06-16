@@ -38,6 +38,7 @@ from spectra_learning.training.distributed import (
     wrap_distributed_model,
 )
 from spectra_learning.training.logging import MetricLogger, log_msg_probe_metrics
+from spectra_learning.training.jax_runtime_flags import configure_jax_tpu_xla_flags
 from spectra_learning.training.modules import PretrainModule, split_pretrain_module
 from spectra_learning.training.optimization import build_optimizers
 from spectra_learning.training.performance import (
@@ -135,6 +136,7 @@ def train_and_evaluate(
     workdir: str | Path,
 ) -> dict[str, object]:
     if _use_jax_backend(config):
+        configure_jax_tpu_xla_flags()
         from spectra_learning.training.pretrain_jax import train_and_evaluate_jax
 
         return train_and_evaluate_jax(config, workdir)

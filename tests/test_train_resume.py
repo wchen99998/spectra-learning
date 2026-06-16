@@ -3,7 +3,7 @@ import json
 import sys
 import threading
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import fsspec
 import pytest
@@ -219,6 +219,37 @@ def test_jax_device_backend_uses_native_jax():
     assert pretrain._use_jax_backend({"device_backend": "jax"})
     assert not pretrain._use_jax_backend({"device_backend": "auto"})
     assert not pretrain._use_jax_backend({"device_backend": "torch"})
+
+
+def test_jax_backend_applies_tpu_flags_before_dispatch(monkeypatch, tmp_path):
+    cfg = config_dict.ConfigDict()
+    cfg.device_backend = "jax"
+    calls = []
+
+    def fake_configure_jax_tpu_xla_flags():
+        calls.append("flags")
+
+    def fake_train_and_evaluate_jax(config, workdir):
+        assert config is cfg
+        assert workdir == tmp_path
+        calls.append("train")
+        return {"run/device_backend": "jax"}
+
+    fake_pretrain_jax = ModuleType("spectra_learning.training.pretrain_jax")
+    fake_pretrain_jax.train_and_evaluate_jax = fake_train_and_evaluate_jax
+    monkeypatch.setattr(
+        pretrain,
+        "configure_jax_tpu_xla_flags",
+        fake_configure_jax_tpu_xla_flags,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "spectra_learning.training.pretrain_jax",
+        fake_pretrain_jax,
+    )
+
+    assert pretrain.train_and_evaluate(cfg, tmp_path) == {"run/device_backend": "jax"}
+    assert calls == ["flags", "train"]
 
 
 def test_jax_train_metrics_logging_skips_non_main_without_device_get(monkeypatch):
