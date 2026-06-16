@@ -40,6 +40,7 @@ from spectra_learning.probes.massspec.msg_settings import (
     resolve_msg_probe_pairwise_alignment_num_pairs,
     validate_msg_probe_config,
 )
+from spectra_learning.probes.massspec.pr_curves import build_precision_recall_curve
 from spectra_learning.data.massspec_targets import FG_SMARTS
 from spectra_learning.training.distributed import DistributedContext
 from spectra_learning.training.schedules import learning_rate_at_step
@@ -991,15 +992,22 @@ def _msg_probe_variant_metric_key(
 
 
 def _average_metric_dicts(
-    metric_dicts: list[dict[str, float]],
-) -> dict[str, float]:
+    metric_dicts: list[dict[str, Any]],
+) -> dict[str, Any]:
     totals: dict[str, float] = {}
     counts: dict[str, int] = {}
+    artifacts: dict[str, Any] = {}
     for metrics in metric_dicts:
         for key, value in metrics.items():
+            if not isinstance(value, (int, float, np.number)):
+                artifacts.setdefault(key, value)
+                continue
             totals[key] = totals.get(key, 0.0) + value
             counts[key] = counts.get(key, 0) + 1
-    return {key: totals[key] / counts[key] for key in totals}
+    return {
+        **{key: totals[key] / counts[key] for key in totals},
+        **artifacts,
+    }
 
 
 def _run_repeated_probe(
@@ -1008,17 +1016,17 @@ def _run_repeated_probe(
     metric_prefix: str,
     run_once: Callable[
         [int, Callable[[dict[str, float]], None] | None],
-        dict[str, float],
+        dict[str, Any],
     ],
     on_epoch_end: Callable[[dict[str, float]], None] | None = None,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     if repeat_count == 1:
         metrics = dict(run_once(0, on_epoch_end))
         if metrics:
             metrics[f"{metric_prefix}/repeats"] = 1.0
         return metrics
 
-    repeat_metrics: list[dict[str, float]] = []
+    repeat_metrics: list[dict[str, Any]] = []
     repeat_curves: list[list[dict[str, float]]] = []
     for repeat_idx in range(repeat_count):
         log.info("%s repeat %d/%d", metric_prefix, repeat_idx + 1, repeat_count)
@@ -1048,9 +1056,10 @@ def _score_epoch_state(
     prefix: str,
     epoch_state: EpochState,
     task_spec: MsgProbeTaskSpec,
-) -> dict[str, float]:
+    include_pr_curves: bool = False,
+) -> dict[str, Any]:
     count = int(epoch_state["count"])
-    metrics: dict[str, float] = {
+    metrics: dict[str, Any] = {
         f"{prefix}/samples": float(count),
     }
     regression_r2_values, regression_mae_values = [], []
@@ -1098,6 +1107,13 @@ def _score_epoch_state(
             if predicted_positives > 0
             else float("nan")
         )
+        if include_pr_curves and name in ("fluorine", "sulfur"):
+            metrics[f"{prefix}/pr_curve_{name}"] = build_precision_recall_curve(
+                prefix=prefix,
+                name=name,
+                pred=pred,
+                target=target,
+            )
     if task_spec.maccs_bits > 0:
         fingerprint_task = task_spec.fingerprint_task
         pred = np.concatenate(predictions[fingerprint_task], axis=0)
@@ -1184,6 +1200,14 @@ def _score_epoch_state(
     return metrics
 
 
+def _sulfur_metric_subset(metrics: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in metrics.items()
+        if key.endswith("/samples") or key.rsplit("/", 1)[-1].endswith("_sulfur")
+    }
+
+
 def _run_msg_probe_once(
     *,
     config: config_dict.ConfigDict,
@@ -1195,7 +1219,7 @@ def _run_msg_probe_once(
     plot_dir: Path | None = None,
     plot_step: int | None = None,
     distributed: DistributedContext | None = None,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     num_probe_epochs = int(_config_get(config, "msg_probe_num_epochs", 5))
     probe_lr = float(_config_get(config, "msg_probe_learning_rate", 1e-3))
     probe_weight_decay = float(_config_get(config, "msg_probe_weight_decay", 1e-2))
@@ -1331,7 +1355,8 @@ def _run_msg_probe_once(
 
     select_metric = resolve_msg_probe_select_metric(config)
     higher_is_better = msg_probe_metric_higher_is_better(select_metric)
-    best_metrics_by_variant: dict[str, dict[str, float]] = {}
+    best_metrics_by_variant: dict[str, dict[str, Any]] = {}
+    best_test_state_by_variant: dict[str, EpochState] = {}
     best_metric_values = {
         variant: -float("inf") if higher_is_better else float("inf")
         for variant in variants
@@ -1467,6 +1492,8 @@ def _run_msg_probe_once(
                 best_state_by_variant[variant] = copy.deepcopy(
                     probes[variant].state_dict()
                 )
+                if not early_stopping:
+                    best_test_state_by_variant[variant] = test_states[variant]
                 epochs_without_improvement[variant] = 0
             else:
                 epochs_without_improvement[variant] += 1
@@ -1535,7 +1562,7 @@ def _run_msg_probe_once(
     for variant in variants:
         if variant in best_state_by_variant:
             probes[variant].load_state_dict(best_state_by_variant[variant])
-    final_test_metrics_by_variant: dict[str, dict[str, float]] = {}
+    final_test_metrics_by_variant: dict[str, dict[str, Any]] = {}
     if early_stopping:
         selected_probes = {
             variant: probes[variant]
@@ -1561,15 +1588,51 @@ def _run_msg_probe_once(
                 prefix=f"msg_probe/{variant}/test",
                 epoch_state=state,
                 task_spec=task_spec,
+                include_pr_curves=True,
             )
             for variant, state in final_test_states.items()
         }
-    best_metrics: dict[str, float] = {}
+    else:
+        final_test_metrics_by_variant = {
+            variant: _score_epoch_state(
+                prefix=f"msg_probe/{variant}/test",
+                epoch_state=state,
+                task_spec=task_spec,
+                include_pr_curves=True,
+            )
+            for variant, state in best_test_state_by_variant.items()
+        }
+    mcebio_sulfur_metrics_by_variant = {
+        variant: _sulfur_metric_subset(
+            _score_epoch_state(
+                prefix=f"msg_probe/{variant}/mcebio_sulfur_test",
+                epoch_state=state,
+                task_spec=task_spec,
+                include_pr_curves=True,
+            )
+        )
+        for variant, state in _evaluate_sequence_probe_split(
+            probe_data=probe_data,
+            probes=probes,
+            task_spec=task_spec,
+            feature_extractor=feature_extractor,
+            move_batch=move_batch,
+            split="massspec_mcebio_test",
+            seed=test_seed_base + 75_000,
+            peak_ordering=peak_ordering,
+            max_samples=None,
+            sample_randomly=False,
+            device=device,
+            distributed=distributed,
+        ).items()
+    }
+    best_metrics: dict[str, Any] = {}
     for variant in variants:
         variant_metrics = dict(best_metrics_by_variant.get(variant, {}))
         if not variant_metrics:
             continue
         variant_metrics.update(final_test_metrics_by_variant.get(variant, {}))
+        variant_metrics.update(mcebio_sulfur_metrics_by_variant.get(variant, {}))
         best_metrics.update(variant_metrics)
         variant_prefix = f"msg_probe/{variant}"
         variant_select_metric = _msg_probe_variant_metric_key(variant, select_metric)
@@ -1631,11 +1694,11 @@ def run_msg_probe(
     plot_dir: Path | None = None,
     plot_step: int | None = None,
     distributed: DistributedContext | None = None,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     def run_once(
         repeat_index: int,
         repeat_on_epoch_end: Callable[[dict[str, float]], None] | None,
-    ) -> dict[str, float]:
+    ) -> dict[str, Any]:
         return _run_msg_probe_once(
             config=config,
             model=model,

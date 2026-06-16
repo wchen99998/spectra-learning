@@ -8,6 +8,10 @@ import numpy as np
 import torch
 from ml_collections import config_dict
 
+from spectra_learning.probes.massspec.pr_curves import (
+    PrecisionRecallCurve,
+    precision_recall_points,
+)
 from spectra_learning.training.naming import auto_run_name
 
 
@@ -114,7 +118,10 @@ class WandbMetricLogger(MetricLogger):
         self._run.config.update(params, allow_val_change=True)
 
     def log_metrics(self, metrics: dict[str, Any], step: int | None = None) -> None:
-        self._run.log(_serialise_metrics(metrics), step=step)
+        self._run.log(
+            _serialise_metrics(metrics, enable_wandb_artifacts=True),
+            step=step,
+        )
 
 
 class CSVMetricLogger(MetricLogger):
@@ -139,9 +146,49 @@ class CSVMetricLogger(MetricLogger):
             writer.writerows(self._rows)
 
 
-def _serialise_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+def _wandb_precision_recall_image(curve: PrecisionRecallCurve) -> Any:
+    import matplotlib.pyplot as plt
+    import wandb
+
+    recall, precision = precision_recall_points(curve)
+    fig, ax = plt.subplots(figsize=(5.0, 4.0), dpi=140)
+    ax.plot(recall, precision, linewidth=2.0)
+    ax.set_title(curve.title)
+    ax.set_xlabel("Recall")
+    ax.set_ylabel("Precision")
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.02)
+    ax.grid(alpha=0.25)
+    fig.tight_layout()
+    image = wandb.Image(fig)
+    plt.close(fig)
+    return image
+
+
+def _wandb_precision_recall_native(curve: PrecisionRecallCurve) -> Any:
+    import wandb
+
+    return wandb.plot.pr_curve(
+        y_true=curve.targets.tolist(),
+        y_probas=curve.two_class_probabilities.tolist(),
+        labels=curve.class_labels,
+        classes_to_plot=[1],
+        title=curve.title,
+    )
+
+
+def _serialise_metrics(
+    metrics: dict[str, Any],
+    *,
+    enable_wandb_artifacts: bool = False,
+) -> dict[str, Any]:
     serialised = {}
     for key, value in metrics.items():
+        if isinstance(value, PrecisionRecallCurve):
+            if enable_wandb_artifacts:
+                serialised[f"{key}/image"] = _wandb_precision_recall_image(value)
+                serialised[f"{key}/native"] = _wandb_precision_recall_native(value)
+            continue
         if isinstance(value, torch.Tensor):
             value = value.detach().cpu()
             serialised[key] = value.item() if value.ndim == 0 else value.tolist()

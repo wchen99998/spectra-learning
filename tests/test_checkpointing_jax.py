@@ -419,6 +419,7 @@ def test_run_msg_probe_jax_uses_jax_dataset_and_optimizer(monkeypatch):
             "massspec_train_size": 2,
             "massspec_val_size": 2,
             "massspec_test_size": 2,
+            "massspec_mcebio_test_size": 2,
             "probe_maccs_bits": 2,
         }
 
@@ -466,10 +467,17 @@ def test_run_msg_probe_jax_uses_jax_dataset_and_optimizer(monkeypatch):
     assert metrics["msg_probe/repeats"] == 1.0
     assert metrics["msg_probe/mean/epoch"] == 1.0
     assert "msg_probe/mean/test/auc_fluorine" in metrics
+    assert "msg_probe/mean/test/pr_curve_fluorine" in metrics
+    assert "msg_probe/mean/test/pr_curve_sulfur" in metrics
+    assert "msg_probe/mean/mcebio_sulfur_test/auc_sulfur" in metrics
+    assert "msg_probe/mean/mcebio_sulfur_test/pr_curve_sulfur" in metrics
+    assert "msg_probe/mean/mcebio_sulfur_test/auc_fluorine" not in metrics
+    assert "msg_probe/mean/mcebio_sulfur_test/pr_curve_fluorine" not in metrics
     assert [call[0] for call in fake_probe_data.calls] == [
         "massspec_train",
         "massspec_val",
         "massspec_test",
         "massspec_train",
         "massspec_test",
+        "massspec_mcebio_test",
     ]

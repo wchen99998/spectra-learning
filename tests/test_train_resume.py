@@ -42,7 +42,12 @@ from spectra_learning.training.api import (
     build_model_from_config,
     parse_autocast_dtype,
 )
-from spectra_learning.training.logging import WandbMetricLogger, log_msg_probe_metrics
+from spectra_learning.probes.massspec.pr_curves import PrecisionRecallCurve
+from spectra_learning.training.logging import (
+    WandbMetricLogger,
+    _serialise_metrics,
+    log_msg_probe_metrics,
+)
 
 
 def _clear_memory_fs(prefix: str) -> None:
@@ -1895,6 +1900,40 @@ def test_wandb_logger_uses_non_primary_shared_settings(monkeypatch, tmp_path: Pa
         "x_label": "probe_step_100",
         "x_primary": False,
         "x_update_finish_state": False,
+    }
+
+
+def test_serialise_metrics_expands_pr_curves_for_wandb(monkeypatch):
+    from spectra_learning.training import logging as logging_module
+
+    curve = PrecisionRecallCurve(
+        label="sulfur",
+        targets=torch.tensor([0, 1]).numpy(),
+        probabilities=torch.tensor([0.2, 0.8]).numpy(),
+        title="sulfur pr",
+    )
+    monkeypatch.setattr(
+        logging_module,
+        "_wandb_precision_recall_image",
+        lambda value: f"image:{value.label}",
+    )
+    monkeypatch.setattr(
+        logging_module,
+        "_wandb_precision_recall_native",
+        lambda value: f"native:{value.label}",
+    )
+
+    csv_metrics = _serialise_metrics({"metric": 1.0, "curve": curve})
+    wandb_metrics = _serialise_metrics(
+        {"metric": 1.0, "curve": curve},
+        enable_wandb_artifacts=True,
+    )
+
+    assert csv_metrics == {"metric": 1.0}
+    assert wandb_metrics == {
+        "metric": 1.0,
+        "curve/image": "image:sulfur",
+        "curve/native": "native:sulfur",
     }
 
 

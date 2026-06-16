@@ -172,6 +172,9 @@ def _write_fake_nist_murcko_probe_artifact(
         metadata[f"{split_name}_lengths"] = [len(rows)]
         metadata[f"{split_name}_size"] = len(rows)
         metadata[f"{split_name}_positive"] = sum(1 for _, _, has_f, _ in rows if has_f)
+        metadata[f"{split_name}_sulfur_positive"] = sum(
+            1 for _, _, _, has_s in rows if has_s
+        )
     (root / "metadata.json").write_text(json.dumps(metadata))
     return metadata
 

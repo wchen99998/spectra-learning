@@ -32,7 +32,8 @@ from spectra_learning.data.murcko import (
     MCEBIO_MURCKO_PREPARED_SUBDIR,
     NIST_MURCKO_HF_REPO,
     NIST_MURCKO_PREPARED_SUBDIR,
-    ensure_murcko_fluorine_data_downloaded,
+    ensure_mcebio_murcko_probe_downloaded,
+    ensure_nist_murcko_probe_downloaded,
 )
 from spectra_learning.data.spectra import (
     DEFAULT_MAX_PRECURSOR_MZ,
@@ -86,6 +87,11 @@ MONA_A_HF_FILENAME = (
 
 def _config_get(config: config_dict.ConfigDict, key: str, default: Any) -> Any:
     return config.get(key, default)
+
+
+def _merge_vocabularies(*vocabs: dict[str, int]) -> dict[str, int]:
+    values = sorted({value for vocab in vocabs for value in vocab})
+    return {value: idx for idx, value in enumerate(values)}
 
 
 def _download_hf_file(repo_id: str, filename: str, local_dir: Path) -> Path:
@@ -1200,6 +1206,10 @@ class MassSpecProbeData(NamedTuple):
     test_lengths: list[int]
     test_morgan_files: list[str]
     test_dreams_files: list[str]
+    mcebio_test_files: list[str]
+    mcebio_test_lengths: list[int]
+    mcebio_test_morgan_files: list[str]
+    mcebio_test_dreams_files: list[str]
     batch_size: int
     shuffle_buffer: int
     max_precursor_mz: float
@@ -1231,11 +1241,13 @@ class MassSpecProbeData(NamedTuple):
         max_precursor_mz = float(
             _config_get(config, "max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
         )
-        include_morgan = (
-            str(_config_get(config, "msg_probe_fingerprint", "maccs")).lower()
-            == "morgan"
-            or int(_config_get(config, "msg_probe_pairwise_alignment_num_pairs", 0)) > 0
-        )
+        msg_probe_fingerprint = str(
+            _config_get(config, "msg_probe_fingerprint", "maccs")
+        ).lower()
+        include_morgan_probe = msg_probe_fingerprint == "morgan"
+        include_morgan = include_morgan_probe or int(
+            _config_get(config, "msg_probe_pairwise_alignment_num_pairs", 0)
+        ) > 0
         include_dreams = bool(
             _config_get(config, "nist_murcko_probe_include_dreams_auxiliary", False)
         )
@@ -1253,109 +1265,158 @@ class MassSpecProbeData(NamedTuple):
                 MCEBIO_MURCKO_PREPARED_SUBDIR,
             )
         ).strip("/")
-        output_dir = artifact_root
-        metadata = ensure_murcko_fluorine_data_downloaded(
-            output_dir,
+        nist_dir = artifact_root / murcko_subdir
+        nist_metadata = ensure_nist_murcko_probe_downloaded(
+            nist_dir,
+            max_precursor_mz=max_precursor_mz,
             repo_id=str(
                 _config_get(config, "nist_murcko_probe_repo_id", NIST_MURCKO_HF_REPO)
             ),
             revision=str(_config_get(config, "nist_murcko_probe_revision", "main")),
-            train_subdir=murcko_subdir,
-            test_subdir=mcebio_subdir,
+            subdir=murcko_subdir,
             include_morgan=include_morgan,
             include_dreams=include_dreams,
             distributed_world_size=distributed_world_size,
             distributed_rank=distributed_rank,
         )
-        adduct_vocab = metadata.get("adduct_vocab", {"unknown": 0})
-        instrument_type_vocab = metadata.get("instrument_type_vocab", {"unknown": 0})
-        storage_format = str(metadata.get("storage_format", "native"))
+        mcebio_metadata = ensure_mcebio_murcko_probe_downloaded(
+            artifact_root,
+            repo_id=str(
+                _config_get(config, "nist_murcko_probe_repo_id", NIST_MURCKO_HF_REPO)
+            ),
+            revision=str(_config_get(config, "nist_murcko_probe_revision", "main")),
+            subdir=mcebio_subdir,
+            include_morgan=include_morgan_probe,
+            include_dreams=include_dreams,
+            distributed_world_size=distributed_world_size,
+            distributed_rank=distributed_rank,
+        )
+        adduct_vocab = _merge_vocabularies(
+            nist_metadata.get("adduct_vocab", {"unknown": 0}),
+            mcebio_metadata.get("adduct_vocab", {"unknown": 0}),
+        )
+        instrument_type_vocab = _merge_vocabularies(
+            nist_metadata.get("instrument_type_vocab", {"unknown": 0}),
+            mcebio_metadata.get("instrument_type_vocab", {"unknown": 0}),
+        )
+        storage_format = str(nist_metadata.get("storage_format", "native"))
         morgan_files = (
             {
-                split: metadata.get(f"{split}_morgan_files", [])
+                split: nist_metadata.get("morgan_auxiliary_files", {}).get(split, [])
                 for split in ("train", "val", "test")
             }
             if include_morgan
             else {}
         )
+        mcebio_morgan_files = (
+            mcebio_metadata.get("morgan_auxiliary_files", {}).get("all", [])
+            if include_morgan_probe
+            else []
+        )
         dreams_files = (
             {
-                split: metadata.get(f"{split}_dreams_files", [])
+                split: nist_metadata.get("dreams_auxiliary_files", {}).get(split, [])
                 for split in ("train", "val", "test")
             }
             if include_dreams
             else {}
         )
+        mcebio_dreams_files = (
+            mcebio_metadata.get("dreams_auxiliary_files", {}).get("all", [])
+            if include_dreams
+            else []
+        )
         info = {
-            "massspec_train_size": int(metadata.get("train_size", 0)),
-            "massspec_val_size": int(metadata.get("val_size", 0)),
-            "massspec_test_size": int(metadata.get("test_size", 0)),
-            "massspec_metadata_version": int(metadata.get("metadata_version", 0)),
+            "massspec_train_size": int(nist_metadata.get("train_size", 0)),
+            "massspec_val_size": int(nist_metadata.get("val_size", 0)),
+            "massspec_test_size": int(nist_metadata.get("test_size", 0)),
+            "massspec_mcebio_test_size": int(mcebio_metadata.get("all_size", 0)),
+            "massspec_metadata_version": int(nist_metadata.get("metadata_version", 0)),
             "massspec_adduct_vocab": adduct_vocab,
             "massspec_instrument_type_vocab": instrument_type_vocab,
             "massspec_adduct_vocab_size": len(adduct_vocab),
             "massspec_instrument_type_vocab_size": len(instrument_type_vocab),
             "fingerprint_bits": _FINGERPRINT_BITS,
-            "probe_maccs_bits": int(metadata.get("probe_maccs_bits", 0)),
-            "probe_morgan_bits": int(metadata.get("probe_morgan_bits", 0))
+            "probe_maccs_bits": int(nist_metadata.get("probe_maccs_bits", 0)),
+            "probe_morgan_bits": int(nist_metadata.get("probe_morgan_bits", 0))
             if include_morgan
             else 0,
-            "probe_morgan_radius": int(metadata.get("probe_morgan_radius", 0)),
+            "probe_morgan_radius": int(nist_metadata.get("probe_morgan_radius", 0)),
             "pairwise_alignment_available": bool(
-                metadata.get("pairwise_alignment_available", False)
+                nist_metadata.get("pairwise_alignment_available", False)
             ),
             "pairwise_alignment_num_pairs": int(
-                metadata.get("pairwise_alignment_num_pairs", 0)
+                nist_metadata.get("pairwise_alignment_num_pairs", 0)
             ),
             "pairwise_alignment_num_endpoints": int(
-                metadata.get("pairwise_alignment_num_endpoints", 0)
+                nist_metadata.get("pairwise_alignment_num_endpoints", 0)
             ),
             "dreams_auxiliary_available": bool(
-                include_dreams and metadata.get("dreams_auxiliary_available", False)
+                include_dreams
+                and nist_metadata.get("dreams_auxiliary_available", False)
+                and mcebio_metadata.get("dreams_auxiliary_available", False)
             ),
-            "dreams_valid_counts": metadata.get("dreams_valid_counts", {}),
-            "dreams_invalid_counts": metadata.get("dreams_invalid_counts", {}),
+            "dreams_valid_counts": nist_metadata.get("dreams_valid_counts", {}),
+            "dreams_invalid_counts": nist_metadata.get("dreams_invalid_counts", {}),
         }
-        pairwise_file = str(metadata.get("pairwise_alignment_file", ""))
-        pairwise_alignment_path = str(output_dir / pairwise_file) if pairwise_file else ""
+        pairwise_file = str(nist_metadata.get("pairwise_alignment_file", ""))
+        pairwise_alignment_path = str(nist_dir / pairwise_file) if pairwise_file else ""
         if storage_format == "parquet":
-            train_files = [str(output_dir / name) for name in metadata["train_files"]]
-            val_files = [str(output_dir / name) for name in metadata["val_files"]]
-            test_files = [str(output_dir / name) for name in metadata["test_files"]]
+            train_files = [str(nist_dir / name) for name in nist_metadata["train_files"]]
+            val_files = [str(nist_dir / name) for name in nist_metadata["val_files"]]
+            test_files = [str(nist_dir / name) for name in nist_metadata["test_files"]]
+            mcebio_test_files = [
+                str(artifact_root / mcebio_subdir / name)
+                for name in mcebio_metadata["all_files"]
+            ]
         else:
             train_files = [
-                str(output_dir / "train" / name) for name in metadata["train_files"]
+                str(nist_dir / "train" / name) for name in nist_metadata["train_files"]
             ]
-            val_files = [str(output_dir / "val" / name) for name in metadata["val_files"]]
+            val_files = [str(nist_dir / "val" / name) for name in nist_metadata["val_files"]]
             test_files = [
-                str(output_dir / "test" / name) for name in metadata["test_files"]
+                str(nist_dir / "test" / name) for name in nist_metadata["test_files"]
+            ]
+            mcebio_test_files = [
+                str(artifact_root / mcebio_subdir / name)
+                for name in mcebio_metadata["all_files"]
             ]
         return cls(
             info=info,
             storage_format=storage_format,
             train_files=train_files,
-            train_lengths=[int(v) for v in metadata["train_lengths"]],
+            train_lengths=[int(v) for v in nist_metadata["train_lengths"]],
             train_morgan_files=[
-                str(output_dir / name) for name in morgan_files.get("train", [])
+                str(nist_dir / name) for name in morgan_files.get("train", [])
             ],
             train_dreams_files=[
-                str(output_dir / name) for name in dreams_files.get("train", [])
+                str(nist_dir / name) for name in dreams_files.get("train", [])
             ],
             val_files=val_files,
-            val_lengths=[int(v) for v in metadata["val_lengths"]],
+            val_lengths=[int(v) for v in nist_metadata["val_lengths"]],
             val_morgan_files=[
-                str(output_dir / name) for name in morgan_files.get("val", [])
+                str(nist_dir / name) for name in morgan_files.get("val", [])
             ],
             val_dreams_files=[
-                str(output_dir / name) for name in dreams_files.get("val", [])
+                str(nist_dir / name) for name in dreams_files.get("val", [])
             ],
             test_files=test_files,
-            test_lengths=[int(v) for v in metadata["test_lengths"]],
+            test_lengths=[int(v) for v in nist_metadata["test_lengths"]],
             test_morgan_files=[
-                str(output_dir / name) for name in morgan_files.get("test", [])
+                str(nist_dir / name) for name in morgan_files.get("test", [])
             ],
             test_dreams_files=[
-                str(output_dir / name) for name in dreams_files.get("test", [])
+                str(nist_dir / name) for name in dreams_files.get("test", [])
+            ],
+            mcebio_test_files=mcebio_test_files,
+            mcebio_test_lengths=[int(v) for v in mcebio_metadata["all_lengths"]],
+            mcebio_test_morgan_files=[
+                str(artifact_root / mcebio_subdir / name)
+                for name in mcebio_morgan_files
+            ],
+            mcebio_test_dreams_files=[
+                str(artifact_root / mcebio_subdir / name)
+                for name in mcebio_dreams_files
             ],
             batch_size=int(
                 _config_get(
@@ -1398,7 +1459,7 @@ class MassSpecProbeData(NamedTuple):
             ),
             peak_ordering=str(_config_get(config, "peak_ordering", "mz")),
             num_peaks=int(_config_get(config, "num_peaks", _NUM_PEAKS_OUTPUT)),
-            dreams_dim=int(metadata.get("dreams_dim", 0)),
+            dreams_dim=int(nist_metadata.get("dreams_dim", 0)),
             precursor_peak_exclusion_window_da=float(
                 _config_get(
                     config,
@@ -1428,6 +1489,7 @@ class MassSpecProbeData(NamedTuple):
             "massspec_train": self.train_files,
             "massspec_val": self.val_files,
             "massspec_test": self.test_files,
+            "massspec_mcebio_test": self.mcebio_test_files,
             "train": self.train_files,
             "val": self.val_files,
             "test": self.test_files,
@@ -1437,6 +1499,7 @@ class MassSpecProbeData(NamedTuple):
             "massspec_train": self.train_lengths,
             "massspec_val": self.val_lengths,
             "massspec_test": self.test_lengths,
+            "massspec_mcebio_test": self.mcebio_test_lengths,
             "train": self.train_lengths,
             "val": self.val_lengths,
             "test": self.test_lengths,
@@ -1446,6 +1509,9 @@ class MassSpecProbeData(NamedTuple):
             "massspec_train": [self.train_morgan_files] if self.train_files else [],
             "massspec_val": [self.val_morgan_files] if self.val_files else [],
             "massspec_test": [self.test_morgan_files] if self.test_files else [],
+            "massspec_mcebio_test": (
+                [self.mcebio_test_morgan_files] if self.mcebio_test_files else []
+            ),
             "train": [self.train_morgan_files] if self.train_files else [],
             "val": [self.val_morgan_files] if self.val_files else [],
             "test": [self.test_morgan_files] if self.test_files else [],
@@ -1459,6 +1525,9 @@ class MassSpecProbeData(NamedTuple):
             "massspec_train": [self.train_dreams_files] if self.train_files else [],
             "massspec_val": [self.val_dreams_files] if self.val_files else [],
             "massspec_test": [self.test_dreams_files] if self.test_files else [],
+            "massspec_mcebio_test": (
+                [self.mcebio_test_dreams_files] if self.mcebio_test_files else []
+            ),
             "train": [self.train_dreams_files] if self.train_files else [],
             "val": [self.val_dreams_files] if self.val_files else [],
             "test": [self.test_dreams_files] if self.test_files else [],
@@ -1549,6 +1618,7 @@ class MassSpecProbeData(NamedTuple):
             "massspec_train": self.train_files,
             "massspec_val": self.val_files,
             "massspec_test": self.test_files,
+            "massspec_mcebio_test": self.mcebio_test_files,
             "train": self.train_files,
             "val": self.val_files,
             "test": self.test_files,
@@ -1558,6 +1628,7 @@ class MassSpecProbeData(NamedTuple):
             "massspec_train": self.train_lengths,
             "massspec_val": self.val_lengths,
             "massspec_test": self.test_lengths,
+            "massspec_mcebio_test": self.mcebio_test_lengths,
             "train": self.train_lengths,
             "val": self.val_lengths,
             "test": self.test_lengths,
@@ -1567,6 +1638,9 @@ class MassSpecProbeData(NamedTuple):
             "massspec_train": [self.train_morgan_files] if self.train_files else [],
             "massspec_val": [self.val_morgan_files] if self.val_files else [],
             "massspec_test": [self.test_morgan_files] if self.test_files else [],
+            "massspec_mcebio_test": (
+                [self.mcebio_test_morgan_files] if self.mcebio_test_files else []
+            ),
             "train": [self.train_morgan_files] if self.train_files else [],
             "val": [self.val_morgan_files] if self.val_files else [],
             "test": [self.test_morgan_files] if self.test_files else [],
@@ -1580,6 +1654,9 @@ class MassSpecProbeData(NamedTuple):
             "massspec_train": [self.train_dreams_files] if self.train_files else [],
             "massspec_val": [self.val_dreams_files] if self.val_files else [],
             "massspec_test": [self.test_dreams_files] if self.test_files else [],
+            "massspec_mcebio_test": (
+                [self.mcebio_test_dreams_files] if self.mcebio_test_files else []
+            ),
             "train": [self.train_dreams_files] if self.train_files else [],
             "val": [self.val_dreams_files] if self.val_files else [],
             "test": [self.test_dreams_files] if self.test_files else [],

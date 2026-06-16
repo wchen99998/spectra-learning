@@ -20,6 +20,10 @@ def _write_fake_mcebio_murcko_probe_artifact(
     include_dreams: bool = False,
 ) -> None:
     tmp_root = root.parent / f"{root.name}_tmp"
+    if root.exists():
+        shutil.rmtree(root)
+    if tmp_root.exists():
+        shutil.rmtree(tmp_root)
     metadata = _write_fake_nist_murcko_probe_artifact(
         tmp_root,
         include_dreams=include_dreams,
@@ -45,6 +49,7 @@ def _write_fake_mcebio_murcko_probe_artifact(
             "all_lengths": metadata["test_lengths"],
             "all_size": metadata["test_size"],
             "all_positive": metadata["test_positive"],
+            "all_sulfur_positive": metadata["test_sulfur_positive"],
             "morgan_auxiliary_files": {
                 "all": ["auxiliary/morgan/all-part-00000.npz"]
             },
@@ -128,6 +133,7 @@ class MassSpecProbeMurckoDataTests(unittest.TestCase):
         self.assertEqual(probe_data.info["massspec_train_size"], 2)
         self.assertEqual(probe_data.info["massspec_val_size"], 1)
         self.assertEqual(probe_data.info["massspec_test_size"], 1)
+        self.assertEqual(probe_data.info["massspec_mcebio_test_size"], 1)
         self.assertEqual(probe_data.dreams_dim, 0)
         self.assertEqual(probe_data.storage_format, "parquet")
         self.assertFalse(probe_data.info["pairwise_alignment_available"])
@@ -142,6 +148,28 @@ class MassSpecProbeMurckoDataTests(unittest.TestCase):
                 )
             ],
         )
+        self.assertEqual(
+            probe_data.test_files,
+            [
+                str(
+                    tmp_path
+                    / "probe-cache"
+                    / "nist_murcko_probe"
+                    / "test.parquet"
+                )
+            ],
+        )
+        self.assertEqual(
+            probe_data.mcebio_test_files,
+            [
+                str(
+                    tmp_path
+                    / "probe-cache"
+                    / "mcebio_murcko_probe"
+                    / "all.parquet"
+                )
+            ],
+        )
         _, kwargs = download_mock.call_args
         self.assertEqual(kwargs["repo_id"], "owner/nist-murcko")
         self.assertEqual(kwargs["revision"], "unit-test")
@@ -152,8 +180,7 @@ class MassSpecProbeMurckoDataTests(unittest.TestCase):
                 "nist_murcko_probe/metadata.json",
                 "nist_murcko_probe/train.parquet",
                 "nist_murcko_probe/val.parquet",
-                "mcebio_murcko_probe/metadata.json",
-                "mcebio_murcko_probe/all.parquet",
+                "nist_murcko_probe/test.parquet",
             ],
         )
 
@@ -194,10 +221,8 @@ class MassSpecProbeMurckoDataTests(unittest.TestCase):
                 "nist_murcko_probe/metadata.json",
                 "nist_murcko_probe/train.parquet",
                 "nist_murcko_probe/val.parquet",
-                "mcebio_murcko_probe/metadata.json",
-                "mcebio_murcko_probe/all.parquet",
+                "nist_murcko_probe/test.parquet",
                 "nist_murcko_probe/auxiliary/dreams/*",
-                "mcebio_murcko_probe/auxiliary/dreams/*",
             ],
         )
 
@@ -321,7 +346,7 @@ class MassSpecProbeMurckoDataTests(unittest.TestCase):
                 )
 
         self.assertEqual(download_calls, [])
-        barrier_mock.assert_called_once()
+        self.assertEqual(barrier_mock.call_count, 2)
         self.assertEqual(probe_data.info["massspec_train_size"], 2)
 
     def test_nist_full_download_rejects_invalid_metadata_without_download(self):
@@ -381,6 +406,50 @@ class MassSpecProbeMurckoDataTests(unittest.TestCase):
         self.assertIsInstance(batch["probe_sulfur"], jax.Array)
         self.assertEqual(tuple(batch["peak_mz"].shape), (2, 4))
         self.assertEqual(batch["smiles"], ["CCO", "CC(F)O"])
+
+    def test_probe_dataset_exposes_mcebio_as_separate_test_split(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            _write_fake_combined_murcko_probe_artifacts(tmp_path / "probe-cache")
+
+            cfg = config_dict.ConfigDict()
+            cfg.artifact_dir = str(tmp_path / "probe-cache")
+            cfg.batch_size = 2
+            cfg.max_precursor_mz = 1000.0
+            cfg.min_peak_intensity = 1e-4
+            cfg.peak_ordering = "mz"
+            cfg.num_peaks = 4
+
+            probe_data = massspec_probe_data.MassSpecProbeData.from_config(cfg)
+            nist_test = next(
+                iter(
+                    probe_data.build_dataset(
+                        "massspec_test",
+                        seed=0,
+                        peak_ordering="mz",
+                        shuffle=False,
+                        drop_remainder=False,
+                    )
+                )
+            )
+            mcebio_test = next(
+                iter(
+                    probe_data.build_dataset(
+                        "massspec_mcebio_test",
+                        seed=0,
+                        peak_ordering="mz",
+                        shuffle=False,
+                        drop_remainder=False,
+                    )
+                )
+            )
+
+        self.assertEqual(probe_data.info["massspec_test_size"], 1)
+        self.assertEqual(probe_data.info["massspec_mcebio_test_size"], 1)
+        self.assertEqual(nist_test["smiles"], ["c1ccccc1"])
+        self.assertEqual(mcebio_test["smiles"], ["c1ccccc1"])
+        self.assertIn("mcebio_murcko_probe/all.parquet", probe_data.mcebio_test_files[0])
+        self.assertIn("nist_murcko_probe/test.parquet", probe_data.test_files[0])
 
     def test_indexed_probe_dataset_can_return_jax_batches(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -25,6 +25,7 @@ from spectra_learning.probes.massspec.msg_settings import (
     resolve_msg_probe_fingerprint,
     resolve_msg_probe_num_repeats,
 )
+from spectra_learning.probes.massspec.pr_curves import build_precision_recall_curve
 
 
 log = logging.getLogger(__name__)
@@ -40,11 +41,11 @@ def run_msg_probe_jax(
     config: config_dict.ConfigDict,
     model: PeakSetJEPAJax,
     on_epoch_end: Callable[[dict[str, float]], None] | None = None,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     def run_once(
         repeat_index: int,
         repeat_on_epoch_end: Callable[[dict[str, float]], None] | None,
-    ) -> dict[str, float]:
+    ) -> dict[str, Any]:
         return _run_msg_probe_once_jax(
             config=config,
             model=model,
@@ -66,7 +67,7 @@ def _run_msg_probe_once_jax(
     model: PeakSetJEPAJax,
     on_epoch_end: Callable[[dict[str, float]], None] | None,
     repeat_index: int,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     num_probe_epochs = int(_config_get(config, "msg_probe_num_epochs", 5))
     probe_lr = float(_config_get(config, "msg_probe_learning_rate", 1e-3))
     probe_weight_decay = float(_config_get(config, "msg_probe_weight_decay", 1e-2))
@@ -149,8 +150,9 @@ def _run_msg_probe_once_jax(
 
     select_metric = resolve_msg_probe_select_metric_jax(config)
     higher_is_better = msg_probe_metric_higher_is_better(select_metric)
-    best_metrics_by_variant: dict[str, dict[str, float]] = {}
+    best_metrics_by_variant: dict[str, dict[str, Any]] = {}
     best_params_by_variant: dict[str, JaxProbeParams] = {}
+    best_test_state_by_variant: dict[str, EpochState] = {}
     best_metric_values = {
         variant: -float("inf") if higher_is_better else float("inf")
         for variant in variants
@@ -253,6 +255,8 @@ def _run_msg_probe_once_jax(
                 best_metric_values[variant] = current_value
                 best_metrics_by_variant[variant] = dict(variant_metrics)
                 best_params_by_variant[variant] = _clone_tree(params_by_variant[variant])
+                if not early_stopping:
+                    best_test_state_by_variant[variant] = eval_states[variant]
                 epochs_without_improvement[variant] = 0
             else:
                 epochs_without_improvement[variant] += 1
@@ -282,7 +286,7 @@ def _run_msg_probe_once_jax(
             )
             break
 
-    final_test_metrics_by_variant: dict[str, dict[str, float]] = {}
+    final_test_metrics_by_variant: dict[str, dict[str, Any]] = {}
     if early_stopping:
         final_states = {variant: _new_epoch_state(task_spec) for variant in variants}
         for batch in iter_massspec_probe_jax(
@@ -311,16 +315,62 @@ def _run_msg_probe_once_jax(
                 prefix=f"msg_probe/{variant}/test",
                 epoch_state=state,
                 task_spec=task_spec,
+                include_pr_curves=True,
             )
             for variant, state in final_states.items()
         }
+    else:
+        final_test_metrics_by_variant = {
+            variant: _score_epoch_state(
+                prefix=f"msg_probe/{variant}/test",
+                epoch_state=state,
+                task_spec=task_spec,
+                include_pr_curves=True,
+            )
+            for variant, state in best_test_state_by_variant.items()
+        }
 
-    best_metrics: dict[str, float] = {}
+    mcebio_states = {variant: _new_epoch_state(task_spec) for variant in variants}
+    for batch in iter_massspec_probe_jax(
+        probe_data=probe_data,
+        split="massspec_mcebio_test",
+        seed=test_seed_base + 75_000,
+        peak_ordering=peak_ordering,
+        drop_remainder=False,
+    ):
+        features = _extract_features(model, batch, use_pair_features=use_pair_features)
+        for variant in variants:
+            params = best_params_by_variant.get(variant, params_by_variant[variant])
+            _update_epoch_state_from_predictions(
+                mcebio_states[variant],
+                _probe_predictions(
+                    params,
+                    variant=variant,
+                    task_spec=task_spec,
+                    batch=batch,
+                    features=features,
+                ),
+                task_spec,
+            )
+    mcebio_sulfur_metrics_by_variant = {
+        variant: _sulfur_metric_subset(
+            _score_epoch_state(
+                prefix=f"msg_probe/{variant}/mcebio_sulfur_test",
+                epoch_state=state,
+                task_spec=task_spec,
+                include_pr_curves=True,
+            )
+        )
+        for variant, state in mcebio_states.items()
+    }
+
+    best_metrics: dict[str, Any] = {}
     for variant in variants:
         variant_metrics = dict(best_metrics_by_variant.get(variant, {}))
         if not variant_metrics:
             continue
         variant_metrics.update(final_test_metrics_by_variant.get(variant, {}))
+        variant_metrics.update(mcebio_sulfur_metrics_by_variant.get(variant, {}))
         best_metrics.update(variant_metrics)
     return best_metrics
 
@@ -870,9 +920,10 @@ def _score_epoch_state(
     prefix: str,
     epoch_state: EpochState,
     task_spec: MsgProbeTaskSpec,
-) -> dict[str, float]:
+    include_pr_curves: bool = False,
+) -> dict[str, Any]:
     count = int(epoch_state["count"])
-    metrics: dict[str, float] = {f"{prefix}/samples": float(count)}
+    metrics: dict[str, Any] = {f"{prefix}/samples": float(count)}
     regression_r2_values, regression_mae_values = [], []
     predictions = epoch_state["predictions"]
     targets = epoch_state["targets"]
@@ -887,6 +938,13 @@ def _score_epoch_state(
         pred = np.concatenate(predictions[name], axis=0).astype(np.float64)
         target = np.concatenate(targets[name], axis=0).astype(np.float64)
         metrics.update(_binary_metrics(prefix, name, pred, target))
+        if include_pr_curves and name in ("fluorine", "sulfur"):
+            metrics[f"{prefix}/pr_curve_{name}"] = build_precision_recall_curve(
+                prefix=prefix,
+                name=name,
+                pred=pred,
+                target=target,
+            )
     if task_spec.maccs_bits > 0:
         fingerprint_task = task_spec.fingerprint_task
         pred = np.concatenate(predictions[fingerprint_task], axis=0)
@@ -896,6 +954,14 @@ def _score_epoch_state(
         metrics[f"{prefix}/r2_mean"] = float(np.mean(regression_r2_values))
         metrics[f"{prefix}/mae_mean"] = float(np.mean(regression_mae_values))
     return metrics
+
+
+def _sulfur_metric_subset(metrics: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in metrics.items()
+        if key.endswith("/samples") or key.rsplit("/", 1)[-1].endswith("_sulfur")
+    }
 
 
 def _binary_metrics(
@@ -1021,17 +1087,17 @@ def _run_repeated_probe_jax(
     metric_prefix: str,
     run_once: Callable[
         [int, Callable[[dict[str, float]], None] | None],
-        dict[str, float],
+        dict[str, Any],
     ],
     on_epoch_end: Callable[[dict[str, float]], None] | None = None,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     if repeat_count == 1:
         metrics = dict(run_once(0, on_epoch_end))
         if metrics:
             metrics[f"{metric_prefix}/repeats"] = 1.0
         return metrics
 
-    repeat_metrics: list[dict[str, float]] = []
+    repeat_metrics: list[dict[str, Any]] = []
     repeat_curves: list[list[dict[str, float]]] = []
     for repeat_idx in range(repeat_count):
         repeat_curve: list[dict[str, float]] = []
@@ -1147,14 +1213,21 @@ def _resolve_probe_warmup_steps(config: Any, steps_per_epoch: int) -> int:
     return int(_config_get(config, "msg_probe_warmup_steps", 100))
 
 
-def _average_metric_dicts(metric_dicts: list[dict[str, float]]) -> dict[str, float]:
+def _average_metric_dicts(metric_dicts: list[dict[str, Any]]) -> dict[str, Any]:
     totals: dict[str, float] = {}
     counts: dict[str, int] = {}
+    artifacts: dict[str, Any] = {}
     for metrics in metric_dicts:
         for key, value in metrics.items():
+            if not isinstance(value, (int, float, np.number)):
+                artifacts.setdefault(key, value)
+                continue
             totals[key] = totals.get(key, 0.0) + value
             counts[key] = counts.get(key, 0) + 1
-    return {key: totals[key] / counts[key] for key in totals}
+    return {
+        **{key: totals[key] / counts[key] for key in totals},
+        **artifacts,
+    }
 
 
 def _r2_score(target: np.ndarray, pred: np.ndarray) -> float:

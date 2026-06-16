@@ -325,6 +325,86 @@ def ensure_nist_murcko_probe_downloaded(
     return metadata
 
 
+def ensure_mcebio_murcko_probe_downloaded(
+    cache_dir: Path,
+    *,
+    repo_id: str = NIST_MURCKO_HF_REPO,
+    revision: str = "main",
+    subdir: str = MCEBIO_MURCKO_PREPARED_SUBDIR,
+    include_morgan: bool = False,
+    include_dreams: bool = False,
+    distributed_world_size: int = 1,
+    distributed_rank: int = 0,
+) -> dict[str, Any]:
+    subdir = subdir.strip("/")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    allow_patterns = [
+        f"{subdir}/metadata.json",
+        f"{subdir}/all.parquet",
+    ]
+    if include_morgan:
+        allow_patterns.append(f"{subdir}/auxiliary/morgan/*")
+    if include_dreams:
+        allow_patterns.append(f"{subdir}/auxiliary/dreams/*")
+    cached = _read_murcko_subdir_metadata(
+        cache_dir,
+        subdir,
+        required_splits=("all",),
+    )
+    needs_download = cached is None or (
+        include_morgan
+        and not _murcko_subdir_auxiliary_available(
+            cache_dir,
+            subdir,
+            cached,
+            "morgan",
+        )
+    ) or (
+        include_dreams
+        and not _murcko_subdir_auxiliary_available(
+            cache_dir,
+            subdir,
+            cached,
+            "dreams",
+        )
+    )
+    if needs_download:
+        _snapshot_download_rank_zero(
+            repo_id=repo_id,
+            repo_type="dataset",
+            revision=revision,
+            local_dir=cache_dir,
+            allow_patterns=allow_patterns,
+            distributed_world_size=distributed_world_size,
+            distributed_rank=distributed_rank,
+        )
+    elif _coordinate_distributed_download(distributed_world_size):
+        torch.distributed.barrier()
+    metadata = cast(
+        dict[str, Any],
+        _read_murcko_subdir_metadata(
+            cache_dir,
+            subdir,
+            required_splits=("all",),
+        ),
+    )
+    if include_morgan and not _murcko_subdir_auxiliary_available(
+        cache_dir,
+        subdir,
+        metadata,
+        "morgan",
+    ):
+        raise FileNotFoundError(f"Missing MCEBIO Morgan auxiliary files in {cache_dir / subdir}")
+    if include_dreams and not _murcko_subdir_auxiliary_available(
+        cache_dir,
+        subdir,
+        metadata,
+        "dreams",
+    ):
+        raise FileNotFoundError(f"Missing MCEBIO DreaMS auxiliary files in {cache_dir / subdir}")
+    return metadata
+
+
 def _read_murcko_subdir_metadata(
     cache_dir: Path,
     subdir: str,

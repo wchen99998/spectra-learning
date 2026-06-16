@@ -57,6 +57,7 @@ from spectra_learning.probes.massspec.msg_probe import (
     resolve_msg_probe_select_metric,
     run_msg_probe,
 )
+from spectra_learning.probes.massspec.pr_curves import PrecisionRecallCurve
 from spectra_learning.data.massspec_targets import (
     MORGAN_PROBE_FINGERPRINT_BITS,
     MORGAN_PROBE_FINGERPRINT_RADIUS,
@@ -1549,11 +1550,13 @@ class MsgProbeRunTests(unittest.TestCase):
                 "massspec_train": [self._probe_batch(1.0)],
                 "massspec_val": [self._probe_batch(1.5)],
                 "massspec_test": [self._probe_batch(2.0)],
+                "massspec_mcebio_test": [self._probe_batch(2.5)],
             },
             info={
                 "massspec_train_size": 4,
                 "massspec_val_size": 4,
                 "massspec_test_size": 4,
+                "massspec_mcebio_test_size": 4,
                 "probe_morgan_bits": 0,
             },
             batch_size=4,
@@ -1591,13 +1594,35 @@ class MsgProbeRunTests(unittest.TestCase):
         test_calls = [
             call for call in probe_data.calls if call["split"] == "massspec_test"
         ]
+        mcebio_test_calls = [
+            call
+            for call in probe_data.calls
+            if call["split"] == "massspec_mcebio_test"
+        ]
         self.assertEqual(len(test_calls), 1)
+        self.assertEqual(len(mcebio_test_calls), 1)
         self.assertIn("msg_probe/mean/test/auc_fluorine", metrics)
         self.assertIn("msg_probe/mean/test/auc_sulfur", metrics)
+        self.assertIsInstance(
+            metrics["msg_probe/mean/test/pr_curve_fluorine"],
+            PrecisionRecallCurve,
+        )
+        self.assertIsInstance(
+            metrics["msg_probe/mean/test/pr_curve_sulfur"],
+            PrecisionRecallCurve,
+        )
         self.assertIn("msg_probe/mean/test/auc_maccs_mean", metrics)
+        self.assertIn("msg_probe/mean/mcebio_sulfur_test/auc_sulfur", metrics)
+        self.assertIsInstance(
+            metrics["msg_probe/mean/mcebio_sulfur_test/pr_curve_sulfur"],
+            PrecisionRecallCurve,
+        )
+        self.assertNotIn("msg_probe/mean/mcebio_sulfur_test/auc_fluorine", metrics)
+        self.assertNotIn("msg_probe/mean/mcebio_sulfur_test/pr_curve_fluorine", metrics)
         self.assertIn("msg_probe/mean/val/auc_maccs_mean", metrics)
         self.assertIn("msg_probe/mean/val/auc_maccs_mean", curve[0])
         self.assertNotIn("msg_probe/mean/test/auc_maccs_mean", curve[0])
+        self.assertNotIn("msg_probe/mean/test/pr_curve_fluorine", curve[0])
 
 
 class RepeatedProbeTests(unittest.TestCase):
