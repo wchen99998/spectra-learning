@@ -9,14 +9,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from spectra_learning.config.loading import load_config
-from spectra_learning.probes.massspec.checkpoint_probe import run_checkpoint_msg_probe
+from spectra_learning.probes.massspec.checkpoint_probe import (
+    DEFAULT_STANDALONE_WANDB_PROJECT,
+    run_checkpoint_msg_probe,
+)
 from spectra_learning.training.checkpointing import load_torch_checkpoint
 from spectra_learning.training.storage import normalize_storage_path
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the MSG online probe for a saved training checkpoint."
+        description="Run standalone MSG probe evaluation for a saved training checkpoint."
     )
     parser.add_argument("--config", type=Path, required=True, help="Path to config file.")
     parser.add_argument("--checkpoint", required=True, help="Checkpoint path or URI.")
@@ -32,10 +35,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="{}",
         help="JSON object of config overrides applied after loading --config.",
     )
+    parser.add_argument(
+        "--wandb-project",
+        default=DEFAULT_STANDALONE_WANDB_PROJECT,
+        help="Standalone W&B project for probe results.",
+    )
+    parser.add_argument(
+        "--no-wandb",
+        action="store_true",
+        help="Write local JSON metrics without uploading a W&B run.",
+    )
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> dict[str, float]:
+def main(argv: list[str] | None = None) -> dict[str, object]:
     args = parse_args(argv)
     config = load_config(args.config)
     config.update(json.loads(args.overrides_json))
@@ -54,6 +67,7 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
         checkpoint_path=args.checkpoint,
         workdir=args.workdir,
         global_step=global_step,
+        wandb_project=None if args.no_wandb else args.wandb_project,
     )
     logging.info("Wrote MSG probe metrics for step %d to %s", global_step, args.workdir)
     return metrics

@@ -20,7 +20,7 @@ def _build_wandb_init_kwargs(config: Any | None) -> dict[str, Any]:
         return {}
     wandb_kwargs = dict(config.get("wandb_kwargs", {}) or {})
     resume_id = str(config.get("wandb_resume_id", "") or "")
-    if not resume_id:
+    if not resume_id and bool(config.get("wandb_resume_from_env", True)):
         resume_id = os.environ.get("WANDB_RESUME_ID", "")
     if resume_id:
         wandb_kwargs.setdefault("id", resume_id)

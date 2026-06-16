@@ -1548,14 +1548,23 @@ def test_run_checkpoint_msg_probe_loads_checkpoint_and_logs_metrics(monkeypatch,
     )
     calls = []
     logger_configs = []
+    logger_logs = []
 
     def fake_run_msg_probe(**kwargs):
         calls.append(kwargs)
-        return {"msg_probe/mean/test/auc_maccs_mean": 0.5}
+        return {
+            "msg_probe/mean/test/auc_maccs_mean": 0.5,
+            "msg_probe/mean/test/pr_curve_sulfur": PrecisionRecallCurve(
+                label="sulfur",
+                targets=torch.tensor([0, 1]).numpy(),
+                probabilities=torch.tensor([0.2, 0.8]).numpy(),
+                title="sulfur pr",
+            ),
+        }
 
     class FakeLogger:
         def log_metrics(self, metrics, step=None) -> None:
-            pass
+            logger_logs.append((metrics, step))
 
     def fake_build_logger(config, workdir):
         logger_configs.append(config.copy_and_resolve_references())
@@ -1574,13 +1583,101 @@ def test_run_checkpoint_msg_probe_loads_checkpoint_and_logs_metrics(monkeypatch,
 
     assert len(calls) == 1
     assert calls[0]["device"].type == "cpu"
-    assert logger_configs[0].wandb_resume_id == "wandb-run-1"
-    assert logger_configs[0].wandb_shared_mode is True
-    assert logger_configs[0].wandb_shared_primary is False
-    assert logger_configs[0].wandb_shared_label == "probe_step_9"
-    assert logger_configs[0].wandb_shared_update_finish_state is False
+    assert logger_configs[0].enable_wandb is True
+    assert logger_configs[0].wandb_project == "msg-probe-evaluations"
+    assert logger_configs[0].wandb_resume_id == ""
+    assert logger_configs[0].wandb_resume_from_env is False
+    assert logger_configs[0].wandb_shared_mode is False
+    assert logger_configs[0].source_wandb_run_id == "wandb-run-1"
+    assert logger_configs[0].msg_probe_checkpoint_path == str(checkpoint_path)
+    assert logger_configs[0].msg_probe_global_step == 9
+    assert logger_configs[0].wandb_kwargs["name"] == "msg_probe_step-00000009_checkpoint"
+    assert logger_logs[0][0]["global_step"] == 9.0
+    assert logger_logs[0][1] is None
     assert metrics["msg_probe/mean/test/auc_maccs_mean"] == 0.5
-    assert (tmp_path / "probe" / "msg_probe_step-00000009.json").exists()
+    metrics_json = json.loads(
+        (tmp_path / "probe" / "msg_probe_step-00000009.json").read_text()
+    )
+    assert metrics_json == {"msg_probe/mean/test/auc_maccs_mean": 0.5}
+
+
+def test_run_msg_probe_evaluation_logs_supplied_model_to_standalone_wandb(
+    monkeypatch,
+    tmp_path: Path,
+):
+    from configs.medium_pairmixer_100m_20m_mae_beta_isoflops_muon import get_config
+
+    cfg = get_config()
+    fake_model = torch.nn.Linear(1, 1)
+    run_calls = []
+
+    def fake_run_msg_probe(**kwargs):
+        run_calls.append(kwargs)
+        return {
+            "msg_probe/mean/test/auc_sulfur": 0.75,
+            "msg_probe/mean/test/pr_curve_sulfur": PrecisionRecallCurve(
+                label="sulfur",
+                targets=torch.tensor([0, 1, 1]).numpy(),
+                probabilities=torch.tensor([0.1, 0.8, 0.6]).numpy(),
+                title="sulfur pr",
+            ),
+        }
+
+    init_calls = []
+    wandb_logs = []
+
+    class FakeRun:
+        def __init__(self) -> None:
+            self.config = SimpleNamespace(update=lambda *args, **kwargs: None)
+
+        def define_metric(self, *args, **kwargs) -> None:
+            pass
+
+        def log(self, metrics, step=None) -> None:
+            wandb_logs.append((metrics, step))
+
+    def fake_init(**kwargs):
+        init_calls.append(kwargs)
+        return FakeRun()
+
+    def fake_pr_curve(**kwargs):
+        return {"native_pr": kwargs}
+
+    monkeypatch.setitem(
+        sys.modules,
+        "wandb",
+        SimpleNamespace(
+            init=fake_init,
+            Image=lambda figure: {"image": figure.__class__.__name__},
+            plot=SimpleNamespace(pr_curve=fake_pr_curve),
+        ),
+    )
+    monkeypatch.setattr(checkpoint_probe, "run_msg_probe", fake_run_msg_probe)
+
+    metrics = checkpoint_probe.run_msg_probe_evaluation(
+        config=cfg,
+        model=fake_model,
+        workdir=tmp_path / "probe",
+        global_step=123,
+        checkpoint_path="gs://bucket/checkpoints/step-00000123.pt",
+        wandb_project="standalone-probes",
+    )
+
+    assert run_calls[0]["model"] is fake_model
+    assert init_calls[0]["project"] == "standalone-probes"
+    assert init_calls[0]["name"] == "msg_probe_step-00000123_step-00000123"
+    assert "id" not in init_calls[0]
+    assert wandb_logs[0][1] is None
+    payload = wandb_logs[0][0]
+    assert payload["global_step"] == 123.0
+    assert payload["msg_probe/mean/test/auc_sulfur"] == 0.75
+    assert "msg_probe/mean/test/pr_curve_sulfur/image" in payload
+    assert "msg_probe/mean/test/pr_curve_sulfur/native" in payload
+    assert metrics["msg_probe/mean/test/auc_sulfur"] == 0.75
+    metrics_json = json.loads(
+        (tmp_path / "probe" / "msg_probe_step-00000123.json").read_text()
+    )
+    assert metrics_json == {"msg_probe/mean/test/auc_sulfur": 0.75}
 
 
 def test_run_checkpoint_msg_probe_script_infers_step_and_applies_overrides(monkeypatch):
@@ -1638,6 +1735,7 @@ def test_run_checkpoint_msg_probe_script_infers_step_and_applies_overrides(monke
     assert run_kwargs["checkpoint_path"] == "checkpoints/step-00000012.pt"
     assert run_kwargs["workdir"] == "experiments/probe"
     assert run_kwargs["global_step"] == 12
+    assert run_kwargs["wandb_project"] == script.DEFAULT_STANDALONE_WANDB_PROJECT
 
 
 def test_build_optimizers_uses_single_adamw_optimizer_by_default():
@@ -1998,6 +2096,17 @@ def test_build_wandb_init_kwargs_prefers_config_resume_id(monkeypatch):
     assert kwargs["id"] == "resume-123"
     assert kwargs["resume"] == "must"
     assert "name" not in kwargs
+
+
+def test_build_wandb_init_kwargs_can_ignore_resume_env(monkeypatch):
+    monkeypatch.setenv("WANDB_RESUME_ID", "resume-from-env")
+    cfg = config_dict.ConfigDict()
+    cfg.wandb_resume_from_env = False
+    cfg.wandb_kwargs = {"name": "fresh-standalone-run"}
+
+    kwargs = _build_wandb_init_kwargs(cfg)
+
+    assert kwargs == {"name": "fresh-standalone-run"}
 
 
 def test_is_weight_decay_target_matches_pretrain_expectation():
