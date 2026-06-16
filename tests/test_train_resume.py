@@ -1314,6 +1314,74 @@ def test_training_loop_stops_when_signal_requested(monkeypatch, tmp_path: Path):
     assert metrics["run/final_global_step"] == 0.0
 
 
+def test_training_loop_logs_limited_validation_loss(monkeypatch, tmp_path: Path):
+    cfg = config_dict.ConfigDict()
+    cfg.autocast_dtype = "bf16"
+    cfg.log_every_n_steps = 0
+    cfg.collapse_metrics_every_n_steps = 0
+    cfg.checkpoint_every_steps = 1000
+    cfg.msg_probe_every_n_steps = -1
+    cfg.val_every_n_steps = 2
+    cfg.val_num_steps = 2
+    cfg.device_prefetch_size = 1
+    cfg.throughput_warmup_steps = 1000
+
+    class FakeDataModule:
+        train_steps = 2
+        global_batch_size = 1
+
+        def train_loader_for_epoch(self, epoch: int, start_batch: int = 0):
+            return [
+                {"peak_mz": torch.tensor([float(step)])}
+                for step in range(start_batch, self.train_steps)
+            ]
+
+        @property
+        def val_loader(self):
+            return [
+                {"peak_mz": torch.tensor([2.0])},
+                {"peak_mz": torch.tensor([4.0])},
+                {"peak_mz": torch.tensor([100.0])},
+            ]
+
+    class FakeModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(()))
+
+        def forward(self, batch):
+            loss = batch["peak_mz"].float().mean() + self.weight * 0.0
+            return {"loss": loss}
+
+    def fake_train_step_impl(*args, **kwargs):
+        return {"loss": torch.tensor(1.0)}
+
+    logger = _FakeLogger()
+    monkeypatch.setattr(pretrain, "train_step_impl", fake_train_step_impl)
+
+    metrics = pretrain.run_training_loop(
+        config=cfg,
+        datamodule=FakeDataModule(),
+        model=FakeModel(),
+        optimizers=[],
+        schedulers=[],
+        logger=logger,
+        checkpoint_dir=tmp_path,
+        start_epoch=0,
+        loop_epochs=1,
+        resume_offset=0,
+        global_step=0,
+        total_steps=2,
+        device=torch.device("cpu"),
+    )
+
+    assert logger.logs == [
+        ({"val/loss": pytest.approx(3.0), "global_step": 2}, 2)
+    ]
+    assert metrics["val/loss"] == pytest.approx(3.0)
+    assert metrics["run/final_global_step"] == 2.0
+
+
 def test_training_loop_runs_distributed_online_probe_and_logs_on_main(monkeypatch, tmp_path: Path):
     cfg = config_dict.ConfigDict()
     cfg.autocast_dtype = "bf16"
@@ -1753,6 +1821,7 @@ def test_wandb_logger_defines_msg_probe_global_step(monkeypatch, tmp_path: Path)
     assert fake_run.definitions == [
         (("global_step",), {}),
         (("train/*",), {"step_metric": "global_step"}),
+        (("val/*",), {"step_metric": "global_step"}),
         (("msg_probe/*",), {"step_metric": "global_step"}),
         (("run/*",), {"step_metric": "global_step"}),
     ]

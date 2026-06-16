@@ -34,6 +34,8 @@ def get_config() -> config_dict.ConfigDict:
         del cfg["jepa_target_layers"]
 
     cfg.msg_probe_every_n_steps = 0.3
+    cfg.val_every_n_steps = cfg.msg_probe_every_n_steps
+    cfg.val_num_steps = 64
     cfg.jepa_mask_strategy = "intensity_aware"
     cfg.jepa_num_target_blocks = 2
     cfg.jepa_context_fraction = 0.35

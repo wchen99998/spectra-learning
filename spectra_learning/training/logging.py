@@ -102,6 +102,7 @@ class WandbMetricLogger(MetricLogger):
         )
         self._run.define_metric("global_step")
         self._run.define_metric("train/*", step_metric="global_step")
+        self._run.define_metric("val/*", step_metric="global_step")
         self._run.define_metric("msg_probe/*", step_metric="global_step")
         self._run.define_metric("run/*", step_metric="global_step")
 

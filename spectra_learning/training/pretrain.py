@@ -5,6 +5,7 @@ import random
 import signal
 import time
 import warnings
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, cast
 
@@ -68,6 +69,12 @@ from spectra_learning.training.api import (
     parse_autocast_dtype,
 )
 from spectra_learning.training.activation_checkpointing import apply_activation_checkpointing
+from spectra_learning.training.cadence import (
+    msg_probe_interval as resolve_msg_probe_interval,
+    should_run_at_step,
+    validation_interval,
+    validation_steps,
+)
 
 warnings.filterwarnings("ignore", message="Profiler function.*will be ignored")
 torch.set_float32_matmul_precision("high")
@@ -336,11 +343,14 @@ def run_training_loop(
     grad_clip_norm = optional_float(_config_get(config, "grad_clip_norm", None))
     grad_accum_steps = gradient_accumulation_steps(config)
     msg_probe_every_n_steps = msg_probe_interval(config, datamodule, total_steps)
+    val_every_n_steps = validation_interval(config, datamodule, total_steps)
+    val_num_steps = validation_steps(config)
     msg_probe_variants = msg_probe_variants_from_config(config)
     device_prefetch_size = int(_config_get(config, "device_prefetch_size", 1))
     deadline = training_deadline(config)
     wandb_run = getattr(logger, "experiment", None)
     last_msg_probe_metrics: dict[str, object] = {}
+    last_validation_metrics: dict[str, object] = {}
     stopped_for_time_limit = False
     stopped_for_signal = False
     initial_global_step = global_step
@@ -467,7 +477,28 @@ def run_training_loop(
                         keep_top_k=15,
                     )
                 barrier(distributed)
-            if msg_probe_every_n_steps > 0 and global_step % msg_probe_every_n_steps == 0:
+            if should_run_at_step(val_every_n_steps, global_step):
+                val_metrics = evaluate_validation_loss(
+                    datamodule=datamodule,
+                    model=model,
+                    device=device,
+                    autocast_dtype=autocast_dtype,
+                    distributed=distributed,
+                    max_steps=val_num_steps,
+                    prefetch_size=device_prefetch_size,
+                )
+                last_validation_metrics = {
+                    f"val/{key}": float(value.detach())
+                    for key, value in val_metrics.items()
+                }
+                if distributed.is_main:
+                    log_validation_metrics(
+                        logger,
+                        pbar,
+                        last_validation_metrics,
+                        global_step=global_step,
+                    )
+            if should_run_at_step(msg_probe_every_n_steps, global_step):
                 base_model, _ = split_pretrain_module(unwrap_model(model))
                 last_msg_probe_metrics = dict(
                     run_and_log_msg_probe(
@@ -501,6 +532,7 @@ def run_training_loop(
     global_batch_size = int(datamodule.global_batch_size)
     last_msg_probe_metrics["run/stopped_for_time_limit"] = float(stopped_for_time_limit)
     last_msg_probe_metrics["run/stopped_for_signal"] = float(stopped_for_signal)
+    last_msg_probe_metrics.update(last_validation_metrics)
     last_msg_probe_metrics["run/final_global_step"] = float(global_step)
     last_msg_probe_metrics["run/train_elapsed_seconds"] = training_elapsed
     last_msg_probe_metrics["run/steps_per_second"] = (
@@ -654,6 +686,61 @@ def compile_forward(model: torch.nn.Module, config: config_dict.ConfigDict) -> N
     compile_training_forward(model, config, compile_mode=compile_mode)
 
 
+def evaluate_validation_loss(
+    *,
+    datamodule: Any,
+    model: torch.nn.Module,
+    device: torch.device,
+    autocast_dtype: torch.dtype | None,
+    distributed: DistributedContext,
+    max_steps: int,
+    prefetch_size: int,
+) -> dict[str, torch.Tensor]:
+    was_training = model.training
+    model.eval()
+    totals: dict[str, torch.Tensor] = {}
+    steps = 0
+    prefetcher = BatchPrefetcher(
+        iter(datamodule.val_loader),
+        device,
+        prefetch_size=min(prefetch_size, max_steps),
+    )
+
+    def autocast_context():
+        if autocast_dtype is None:
+            return nullcontext()
+        return torch.autocast(device_type=device.type, dtype=autocast_dtype)
+
+    with torch.no_grad():
+        while steps < max_steps and (batch := prefetcher.next()) is not None:
+            with autocast_context():
+                metrics = cast(dict[str, torch.Tensor], model(batch))
+            for key, value in metrics.items():
+                totals[key] = totals.get(key, torch.zeros_like(value)) + value.detach()
+            steps += 1
+    if was_training:
+        model.train()
+    averaged = {key: value / float(steps) for key, value in totals.items()}
+    return reduce_metric_tensors(averaged, distributed)
+
+
+def log_validation_metrics(
+    logger,
+    pbar: tqdm,
+    metrics: dict[str, object],
+    *,
+    global_step: int,
+) -> None:
+    pbar.set_postfix(val_loss=f"{float(metrics['val/loss']):.4f}", step=global_step)
+    logger.log_metrics(
+        {
+            **metrics,
+            "global_step": global_step,
+        },
+        step=global_step,
+    )
+
+
 def log_train_metrics(
     config: config_dict.ConfigDict,
     logger,
@@ -696,15 +783,7 @@ def msg_probe_interval(
     datamodule: GemsNativeDataModule,
     total_steps: int,
 ) -> int:
-    raw = float(_config_get(config, "msg_probe_every_n_steps", 0))
-    if raw < 0:
-        return int(raw)
-    if raw == 0:
-        return total_steps
-    if 0 < raw <= 1:
-        reference_steps = total_steps if float(config.num_epochs) < 1 else datamodule.train_steps
-        return max(1, int(raw * reference_steps))
-    return int(raw)
+    return resolve_msg_probe_interval(config, datamodule, total_steps)
 
 
 def run_and_log_msg_probe(

@@ -96,8 +96,10 @@ class _FakeDataModule:
         batch: dict[str, torch.Tensor],
         train_steps: int,
         gradient_accumulation_steps: int = 1,
+        val_batch: dict[str, torch.Tensor] | None = None,
     ) -> None:
         self._batch = batch
+        self._val_batch = batch if val_batch is None else val_batch
         self._accum = gradient_accumulation_steps
         self.train_steps = train_steps
         self.global_batch_size = int(batch["peak_mz"].shape[0])
@@ -107,6 +109,18 @@ class _FakeDataModule:
     def train_loader_for_epoch(self, epoch: int, start_batch: int = 0):
         self.loader_calls.append((epoch, start_batch))
         return [self._batch] * ((self.train_steps - start_batch) * self._accum)
+
+    @property
+    def val_loader(self):
+        return [self._val_batch]
+
+
+class _RecordingLogger(MetricLogger):
+    def __init__(self) -> None:
+        self.logs = []
+
+    def log_metrics(self, metrics, step=None) -> None:
+        self.logs.append((dict(metrics), step))
 
 
 def test_jax_checkpoint_roundtrip_preserves_values_and_sharding(tmp_path):
@@ -199,6 +213,7 @@ def test_jax_training_loop_saves_periodically_and_resumes(tmp_path):
     cfg.learning_rate = 1e-3
     cfg.checkpoint_every_steps = 2
     cfg.log_every_n_steps = 0
+    cfg.msg_probe_every_n_steps = -1
     batch = _tiny_torch_batch()
 
     model = PeakSetJEPAJax(**kwargs)
@@ -265,6 +280,7 @@ def test_jax_training_loop_pure_optax_saves_and_resumes(tmp_path):
     cfg.gradient_accumulation_steps = 2
     cfg.checkpoint_every_steps = 2
     cfg.log_every_n_steps = 0
+    cfg.msg_probe_every_n_steps = -1
     batch = _tiny_torch_batch()
 
     model = PeakSetJEPAJax(**kwargs)
@@ -326,3 +342,134 @@ def test_jax_training_loop_pure_optax_saves_and_resumes(tmp_path):
         strict=True,
     ):
         np.testing.assert_array_equal(np.asarray(expected), np.asarray(actual))
+
+
+def test_jax_training_loop_logs_validation_and_online_probe(monkeypatch, tmp_path):
+    from spectra_learning.training import pretrain_jax
+
+    kwargs = _tiny_mae_kwargs()
+    cfg = config_dict.ConfigDict(kwargs)
+    cfg.seed = 5
+    cfg.num_epochs = 1
+    cfg.learning_rate = 1e-3
+    cfg.checkpoint_every_steps = 1000
+    cfg.log_every_n_steps = 0
+    cfg.jax_precompile_train_steps = False
+    cfg.val_every_n_steps = 2
+    cfg.val_num_steps = 1
+    cfg.msg_probe_every_n_steps = 2
+    cfg.msg_probe_variants = ["mean"]
+    batch = _tiny_torch_batch()
+
+    probe_calls = []
+
+    def fake_run_msg_probe_jax(*, config, model):
+        probe_calls.append((config, model))
+        return {"msg_probe/mean/test/auc_maccs_mean": 0.5}
+
+    monkeypatch.setattr(pretrain_jax, "run_msg_probe_jax", fake_run_msg_probe_jax)
+
+    model = PeakSetJEPAJax(**kwargs)
+    initialize_jax_model_from_torch_seed(cfg, model)
+    datamodule = _FakeDataModule(batch, train_steps=2)
+    manager = build_jax_checkpoint_manager(tmp_path / "checkpoints")
+    logger = _RecordingLogger()
+    metrics = _run_jax_training_loop(
+        config=cfg,
+        datamodule=datamodule,
+        model=model,
+        logger=logger,
+        total_steps=2,
+        checkpoint_manager=manager,
+        resume_step=None,
+    )
+    manager.close()
+
+    assert len(probe_calls) == 1
+    assert metrics["run/final_global_step"] == 2.0
+    assert np.isfinite(metrics["val/loss"])
+    assert metrics["msg_probe/mean/test/auc_maccs_mean"] == 0.5
+    assert any(step == 2 and "val/loss" in payload for payload, step in logger.logs)
+    assert any(
+        step == 2 and payload.get("msg_probe/mean/test/auc_maccs_mean") == 0.5
+        for payload, step in logger.logs
+    )
+
+
+def test_run_msg_probe_jax_uses_jax_dataset_and_optimizer(monkeypatch):
+    from spectra_learning.probes.massspec import msg_probe_jax
+
+    def to_jax_batch(batch: dict[str, torch.Tensor]) -> dict[str, object]:
+        converted = {
+            key: jnp.asarray(value.detach().cpu().numpy())
+            for key, value in batch.items()
+        }
+        converted["probe_valid_mol"] = jnp.asarray([True, True])
+        converted["probe_fluorine"] = jnp.asarray([0.0, 1.0], dtype=jnp.float32)
+        converted["probe_sulfur"] = jnp.asarray([1.0, 0.0], dtype=jnp.float32)
+        converted["probe_maccs"] = jnp.asarray(
+            [[1, 0], [0, 1]],
+            dtype=jnp.int32,
+        )
+        return converted
+
+    class FakeProbeData:
+        batch_size = 2
+        info = {
+            "massspec_train_size": 2,
+            "massspec_val_size": 2,
+            "massspec_test_size": 2,
+            "probe_maccs_bits": 2,
+        }
+
+        def __init__(self, batch: dict[str, object]) -> None:
+            self.batch = batch
+            self.calls = []
+
+        def build_dataset(self, split: str, **kwargs):
+            self.calls.append((split, kwargs))
+            assert kwargs["output_format"] == "jax"
+            return [self.batch]
+
+    class FakeMassSpecProbeData:
+        @staticmethod
+        def from_config(config):
+            assert config is cfg
+            return fake_probe_data
+
+    kwargs = _tiny_mae_kwargs()
+    cfg = config_dict.ConfigDict(kwargs)
+    cfg.seed = 9
+    cfg.msg_probe_batch_size = 2
+    cfg.msg_probe_num_epochs = 1
+    cfg.msg_probe_learning_rate = 0.01
+    cfg.msg_probe_weight_decay = 0.0
+    cfg.msg_probe_warmup_steps = 0
+    cfg.msg_probe_mlp_hidden_dim = 4
+    cfg.msg_probe_variants = ["mean"]
+    cfg.msg_probe_early_stopping = False
+    cfg.msg_probe_num_repeats = 1
+    cfg.peak_ordering = "mz"
+    fake_probe_data = FakeProbeData(to_jax_batch(_tiny_torch_batch()))
+    monkeypatch.setattr(
+        msg_probe_jax,
+        "MassSpecProbeData",
+        FakeMassSpecProbeData,
+    )
+
+    model = PeakSetJEPAJax(**kwargs)
+    initialize_jax_model_from_torch_seed(cfg, model)
+
+    metrics = msg_probe_jax.run_msg_probe_jax(config=cfg, model=model)
+
+    assert "torch" not in msg_probe_jax.__dict__
+    assert metrics["msg_probe/repeats"] == 1.0
+    assert metrics["msg_probe/mean/epoch"] == 1.0
+    assert "msg_probe/mean/test/auc_fluorine" in metrics
+    assert [call[0] for call in fake_probe_data.calls] == [
+        "massspec_train",
+        "massspec_val",
+        "massspec_test",
+        "massspec_train",
+        "massspec_test",
+    ]

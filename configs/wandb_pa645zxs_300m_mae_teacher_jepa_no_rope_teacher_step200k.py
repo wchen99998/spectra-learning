@@ -39,6 +39,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.mae_loss_weight = 0.0
     cfg.collapse_metrics_every_n_steps = 250
     cfg.msg_probe_every_n_steps = 0.5
+    cfg.val_every_n_steps = cfg.msg_probe_every_n_steps
+    cfg.val_num_steps = 64
     cfg.max_duration_hours = 23.5
 
     cfg.jepa_target_layers = [5, 8, 12, 14]

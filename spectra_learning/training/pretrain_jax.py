@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import os
-from functools import cache
+import logging
 import math
+import os
 import time
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -22,12 +23,27 @@ from spectra_learning.data.gems.datamodule import GemsNativeDataModule
 from spectra_learning.models.common_jax import Array, batch_to_jax
 from spectra_learning.models.factory_jax import build_model_from_config
 from spectra_learning.models.model_jax import PeakSetJEPAJax
+from spectra_learning.probes.massspec.msg_probe_jax import run_msg_probe_jax
+from spectra_learning.probes.massspec.msg_settings import (
+    msg_probe_variants_from_config,
+    resolve_msg_probe_fingerprint,
+)
+from spectra_learning.training.cadence import (
+    msg_probe_interval,
+    should_run_at_step,
+    validation_interval,
+    validation_steps,
+)
 from spectra_learning.training.checkpointing_jax import (
     build_jax_checkpoint_manager,
     restore_jax_training_state,
     save_jax_training_state,
 )
-from spectra_learning.training.logging import MetricLogger, build_logger
+from spectra_learning.training.logging import (
+    MetricLogger,
+    build_logger,
+    log_msg_probe_metrics,
+)
 from spectra_learning.training.schedules import learning_rate_at_step
 from spectra_learning.training.storage import (
     local_scratch_dir,
@@ -702,6 +718,49 @@ def make_pure_accumulated_train_step(
     return pure_accumulated_train_step
 
 
+def make_pure_eval_step(
+    graphdef: Any,
+    *,
+    sharded: bool,
+    data_mesh: Mesh | None = None,
+):
+    if sharded:
+        data_mesh = _jax_data_mesh() if data_mesh is None else data_mesh
+
+        @jax.jit
+        @jax.shard_map(
+            mesh=data_mesh,
+            in_specs=(P(), P(), P(JAX_DATA_AXIS)),
+            out_specs=P(),
+            axis_names={JAX_DATA_AXIS},
+            check_vma=False,
+        )
+        def pure_sharded_eval_step(
+            trainable_params: nnx.State,
+            static_state: nnx.State,
+            batch: dict[str, Array],
+        ) -> dict[str, Array]:
+            functional_model = nnx.merge(graphdef, trainable_params, static_state)
+            metrics = functional_model(batch)
+            return jax.tree.map(
+                lambda value: jax.lax.pmean(value, JAX_DATA_AXIS),
+                metrics,
+            )
+
+        return pure_sharded_eval_step
+
+    @jax.jit
+    def pure_eval_step(
+        trainable_params: nnx.State,
+        static_state: nnx.State,
+        batch: dict[str, Array],
+    ) -> dict[str, Array]:
+        functional_model = nnx.merge(graphdef, trainable_params, static_state)
+        return functional_model(batch)
+
+    return pure_eval_step
+
+
 def train_and_evaluate_jax(
     config: config_dict.ConfigDict,
     workdir: str | Path,
@@ -815,6 +874,8 @@ def _run_jax_training_loop(
     data_parallel_devices = _jax_data_parallel_devices(config)
     data_mesh = _jax_data_mesh_for_device_count(data_parallel_devices)
     use_sharded_step = data_parallel_devices > 1
+    pure_graphdef = None
+    pure_full_graphdef = None
     pure_trainable_params = None
     pure_static_state = None
     pure_opt_state = None
@@ -906,6 +967,14 @@ def _run_jax_training_loop(
             sharded=use_sharded_step,
             data_mesh=data_mesh,
         )
+    eval_graphdef = (
+        pure_full_graphdef if pure_full_graphdef is not None else pure_graphdef
+    )
+    pure_eval_step = make_pure_eval_step(
+        eval_graphdef,
+        sharded=use_sharded_step,
+        data_mesh=data_mesh,
+    )
     if use_sharded_step:
         # Commit the training state to the data mesh once so precompile and
         # every training step share one input-sharding signature; otherwise
@@ -935,6 +1004,10 @@ def _run_jax_training_loop(
             )
         ]
     checkpoint_every_steps = int(_config_get(config, "checkpoint_every_steps", 0))
+    val_every_n_steps = validation_interval(config, datamodule, total_steps)
+    val_num_steps = validation_steps(config)
+    msg_probe_every_n_steps = msg_probe_interval(config, datamodule, total_steps)
+    msg_probe_variants = msg_probe_variants_from_config(config)
 
     def jax_checkpoint_state() -> dict[str, Any]:
         return {
@@ -1011,6 +1084,8 @@ def _run_jax_training_loop(
     global_step = start_step
     start_epoch = min(start_step // datamodule.train_steps, loop_epochs - 1)
     last_metrics: dict[str, Array] = {}
+    last_validation_metrics: dict[str, float] = {}
+    last_msg_probe_metrics: dict[str, float] = {}
     train_start = time.perf_counter()
     measured_start: float | None = None
     measured_steps = 0
@@ -1160,6 +1235,41 @@ def _run_jax_training_loop(
                 every_n_steps=log_every_n_steps,
             )
             maybe_save_checkpoint(global_step)
+            if should_run_at_step(val_every_n_steps, global_step):
+                eval_static_state = (
+                    pure_full_static_state
+                    if pure_full_static_state is not None
+                    else pure_static_state
+                )
+                last_validation_metrics = _evaluate_jax_validation_loss(
+                    datamodule=datamodule,
+                    trainable_params=pure_trainable_params,
+                    static_state=eval_static_state,
+                    eval_step=pure_eval_step,
+                    max_steps=val_num_steps,
+                    use_sharded_step=use_sharded_step,
+                    data_mesh=data_mesh,
+                )
+                _log_jax_validation_metrics(
+                    logger,
+                    pbar,
+                    last_validation_metrics,
+                    global_step=global_step,
+                )
+            if should_run_at_step(msg_probe_every_n_steps, global_step):
+                if jax.process_index() == 0:
+                    jax.block_until_ready(pure_trainable_params)
+                    nnx.update(model, pure_trainable_params)
+                    last_msg_probe_metrics = run_and_log_msg_probe_jax(
+                        config=config,
+                        model=model,
+                        logger=logger,
+                        variants=msg_probe_variants,
+                        global_step=global_step,
+                    )
+                multihost_utils.sync_global_devices(
+                    f"spectra_learning_jax_msg_probe_{global_step}"
+                )
             if profile_active and global_step >= profile_end_step:
                 jax.effects_barrier()
                 jax.profiler.stop_trace()
@@ -1204,6 +1314,8 @@ def _run_jax_training_loop(
         ),
         "train/loss": loss,
     }
+    result.update(last_validation_metrics)
+    result.update(last_msg_probe_metrics)
     result.update(precompile_metrics)
     if context_encoder_pack_choices:
         result.update(
@@ -1283,6 +1395,83 @@ def _log_jax_train_metrics(
     host_metrics["epoch"] = float(epoch)
     host_metrics["global_step"] = float(global_step)
     logger.log_metrics(host_metrics, step=global_step)
+
+
+def _evaluate_jax_validation_loss(
+    *,
+    datamodule: GemsNativeDataModule,
+    trainable_params: nnx.State,
+    static_state: nnx.State,
+    eval_step: Any,
+    max_steps: int,
+    use_sharded_step: bool,
+    data_mesh: Mesh,
+) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    steps = 0
+    for torch_batch in datamodule.val_loader:
+        if steps >= max_steps:
+            break
+        batch = torch_batch_to_jax(torch_batch)
+        if use_sharded_step:
+            batch = _put_batch_on_data_mesh(batch, data_mesh, batch_axis=0)
+        metrics = jax.device_get(eval_step(trainable_params, static_state, batch))
+        for key, value in metrics.items():
+            totals[key] = totals.get(key, 0.0) + float(np.asarray(value))
+        steps += 1
+    return {f"val/{key}": value / float(steps) for key, value in totals.items()}
+
+
+def _log_jax_validation_metrics(
+    logger: MetricLogger,
+    pbar: tqdm,
+    metrics: dict[str, float],
+    *,
+    global_step: int,
+) -> None:
+    if jax.process_index() != 0:
+        return
+    pbar.set_postfix(val_loss=f"{metrics['val/loss']:.4f}", step=global_step)
+    logger.log_metrics(
+        {
+            "global_step": float(global_step),
+            **metrics,
+        },
+        step=global_step,
+    )
+
+
+def run_and_log_msg_probe_jax(
+    *,
+    config: config_dict.ConfigDict,
+    model: PeakSetJEPAJax,
+    logger: MetricLogger,
+    variants: tuple[str, ...],
+    global_step: int,
+) -> dict[str, float]:
+    probe_metrics = run_msg_probe_jax(config=config, model=model)
+    log_msg_probe_metrics(
+        logger,
+        probe_metrics,
+        global_step,
+        enable_wandb=bool(_config_get(config, "enable_wandb", False)),
+    )
+    fingerprint_task: str | None = None
+    for variant in variants:
+        prefix = f"msg_probe/{variant}"
+        epoch_key = f"{prefix}/epoch"
+        if epoch_key in probe_metrics:
+            if fingerprint_task is None:
+                fingerprint_task = resolve_msg_probe_fingerprint(config)
+            logging.info(
+                "step=%d msg_probe[%s] best_epoch=%.2f test_auc_%s_mean=%.4f",
+                global_step,
+                variant,
+                probe_metrics[epoch_key],
+                fingerprint_task,
+                probe_metrics[f"{prefix}/test/auc_{fingerprint_task}_mean"],
+            )
+    return probe_metrics
 
 
 def _precompile_jax_training_steps(

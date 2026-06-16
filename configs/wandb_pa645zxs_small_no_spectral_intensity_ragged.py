@@ -17,6 +17,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_token_input_mode = "mz_sentinel"
     cfg.jepa_mae_mz_bin_size = 0.1
     cfg.msg_probe_every_n_steps = 0.25
+    cfg.val_every_n_steps = cfg.msg_probe_every_n_steps
+    cfg.val_num_steps = 64
     cfg.msg_probe_batch_size = 256
     cfg.learning_rate = 2e-4
     cfg.weight_decay = 0.01

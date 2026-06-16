@@ -100,6 +100,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_early_stopping_min_epochs = 20
     cfg.msg_probe_early_stopping_patience = 20
     cfg.msg_probe_every_n_steps = 1.0
+    cfg.val_every_n_steps = cfg.msg_probe_every_n_steps
+    cfg.val_num_steps = 64
     cfg.msg_probe_learning_rate = 0.001
     cfg.msg_probe_mlp_hidden_dim = 256
     cfg.msg_probe_num_epochs = 100
