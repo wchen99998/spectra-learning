@@ -1,7 +1,7 @@
 import os
 
 from ml_collections import config_dict
-import torch
+import numpy as np
 
 from spectra_learning.training import tpu_compile
 from spectra_learning.training.jax_runtime_flags import (
@@ -107,8 +107,8 @@ def test_runtime_precompile_uses_selected_default_pack_variant():
         def train_loader_for_epoch(self, epoch):
             del epoch
             batch = {
-                "peak_valid_mask": torch.ones((2, 31), dtype=torch.bool),
-                "context_mask": torch.ones((2, 31), dtype=torch.bool),
+                "peak_valid_mask": np.ones((2, 31), dtype=bool),
+                "context_mask": np.ones((2, 31), dtype=bool),
             }
             return iter([batch])
 

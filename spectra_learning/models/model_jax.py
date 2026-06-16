@@ -17,7 +17,6 @@ from spectra_learning.models.common_jax import (
     Linear,
     activation_checkpoint_policy,
     assign_param,
-    batch_to_jax,
     build_frozen_2d_position_embedding,
     build_frozen_position_embedding,
     gelu,
@@ -304,24 +303,19 @@ class PeakSetJEPAJax(nnx.Module):
 
     def __call__(
         self,
-        augmented_batch: dict[str, Array | torch.Tensor],
+        augmented_batch: dict[str, Array],
         *,
         return_collapse_data: bool = False,
         loss_only: bool = False,
     ) -> dict[str, Array] | tuple[dict[str, Array], dict[str, Array]]:
-        batch = (
-            batch_to_jax(augmented_batch)
-            if any(isinstance(value, torch.Tensor) for value in augmented_batch.values())
-            else augmented_batch
-        )
         if self.training_mode == "mae":
             return self.forward_mae(
-                batch,
+                augmented_batch,
                 return_collapse_data=return_collapse_data,
                 loss_only=loss_only,
             )
         return self.forward_augmented(
-            batch,
+            augmented_batch,
             return_collapse_data=return_collapse_data,
             loss_only=loss_only,
         )
@@ -744,17 +738,12 @@ class PeakSetJEPAJax(nnx.Module):
         )
         return teacher_encoded[:, : peak_mz.shape[1]]
 
-    def compute_teacher_targets(self, augmented_batch: dict[str, Array | torch.Tensor]) -> Array:
-        batch = (
-            batch_to_jax(augmented_batch)
-            if any(isinstance(value, torch.Tensor) for value in augmented_batch.values())
-            else augmented_batch
-        )
+    def compute_teacher_targets(self, augmented_batch: dict[str, Array]) -> Array:
         teacher_target_features = self._compute_jepa_teacher_target_features(
-            batch["peak_mz"],
-            batch["peak_intensity"],
-            batch["peak_valid_mask"],
-            precursor_mz=batch.get("precursor_mz", None),
+            augmented_batch["peak_mz"],
+            augmented_batch["peak_intensity"],
+            augmented_batch["peak_valid_mask"],
+            precursor_mz=augmented_batch.get("precursor_mz", None),
         )
         return self.project_teacher_targets(
             self._apply_jepa_target_normalization(teacher_target_features)
@@ -1154,12 +1143,7 @@ class PeakSetJEPAJax(nnx.Module):
         mask = valid_mask[..., None].astype(embeddings.dtype)
         return (embeddings * mask).sum(axis=1) / jnp.maximum(mask.sum(axis=1), 1.0)
 
-    def encode(self, batch: dict[str, Array | torch.Tensor]) -> Array:
-        batch = (
-            batch_to_jax(batch)
-            if any(isinstance(value, torch.Tensor) for value in batch.values())
-            else batch
-        )
+    def encode(self, batch: dict[str, Array]) -> Array:
         encoded = self.encoder(
             batch["peak_mz"],
             batch["peak_intensity"],

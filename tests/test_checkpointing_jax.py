@@ -54,16 +54,16 @@ def _zeros_like_with_sharding(value: jax.Array) -> jax.Array:
     return jax.device_put(jnp.zeros_like(value), value.sharding)
 
 
-def _tiny_torch_batch() -> dict[str, torch.Tensor]:
+def _tiny_numpy_batch() -> dict[str, np.ndarray]:
     torch.manual_seed(123)
 
     def sample(mz, intensity, precursor_mz):
-        spectra = torch.zeros(2, 128, dtype=torch.float32)
-        spectra[0, : len(mz)] = torch.tensor(mz, dtype=torch.float32)
-        spectra[1, : len(intensity)] = torch.tensor(intensity, dtype=torch.float32)
+        spectra = np.zeros((2, 128), dtype=np.float32)
+        spectra[0, : len(mz)] = np.asarray(mz, dtype=np.float32)
+        spectra[1, : len(intensity)] = np.asarray(intensity, dtype=np.float32)
         return {
             "spectra": spectra,
-            "precursor_mz_raw": torch.tensor(precursor_mz, dtype=torch.float32),
+            "precursor_mz_raw": np.asarray(precursor_mz, dtype=np.float32),
         }
 
     collator = GemsBatchCollator(
@@ -81,6 +81,7 @@ def _tiny_torch_batch() -> dict[str, torch.Tensor]:
         mask_strategy="contiguous",
         mask_lengths=(1, 2, 3),
         mask_round_from=2,
+        output_format="numpy",
     )
     return collator(
         [
@@ -93,10 +94,10 @@ def _tiny_torch_batch() -> dict[str, torch.Tensor]:
 class _FakeDataModule:
     def __init__(
         self,
-        batch: dict[str, torch.Tensor],
+        batch: dict[str, np.ndarray],
         train_steps: int,
         gradient_accumulation_steps: int = 1,
-        val_batch: dict[str, torch.Tensor] | None = None,
+        val_batch: dict[str, np.ndarray] | None = None,
     ) -> None:
         self._batch = batch
         self._val_batch = batch if val_batch is None else val_batch
@@ -214,7 +215,7 @@ def test_jax_training_loop_saves_periodically_and_resumes(tmp_path):
     cfg.checkpoint_every_steps = 2
     cfg.log_every_n_steps = 0
     cfg.msg_probe_every_n_steps = -1
-    batch = _tiny_torch_batch()
+    batch = _tiny_numpy_batch()
 
     model = PeakSetJEPAJax(**kwargs)
     initialize_jax_model_from_torch_seed(cfg, model)
@@ -281,7 +282,7 @@ def test_jax_training_loop_pure_optax_saves_and_resumes(tmp_path):
     cfg.checkpoint_every_steps = 2
     cfg.log_every_n_steps = 0
     cfg.msg_probe_every_n_steps = -1
-    batch = _tiny_torch_batch()
+    batch = _tiny_numpy_batch()
 
     model = PeakSetJEPAJax(**kwargs)
     initialize_jax_model_from_torch_seed(cfg, model)
@@ -359,7 +360,7 @@ def test_jax_training_loop_logs_validation_and_online_probe(monkeypatch, tmp_pat
     cfg.val_num_steps = 1
     cfg.msg_probe_every_n_steps = 2
     cfg.msg_probe_variants = ["mean"]
-    batch = _tiny_torch_batch()
+    batch = _tiny_numpy_batch()
 
     probe_calls = []
 
@@ -399,11 +400,8 @@ def test_jax_training_loop_logs_validation_and_online_probe(monkeypatch, tmp_pat
 def test_run_msg_probe_jax_uses_jax_dataset_and_optimizer(monkeypatch):
     from spectra_learning.probes.massspec import msg_probe_jax
 
-    def to_jax_batch(batch: dict[str, torch.Tensor]) -> dict[str, object]:
-        converted = {
-            key: jnp.asarray(value.detach().cpu().numpy())
-            for key, value in batch.items()
-        }
+    def to_jax_batch(batch: dict[str, np.ndarray]) -> dict[str, object]:
+        converted = {key: jnp.asarray(value) for key, value in batch.items()}
         converted["probe_valid_mol"] = jnp.asarray([True, True])
         converted["probe_fluorine"] = jnp.asarray([0.0, 1.0], dtype=jnp.float32)
         converted["probe_sulfur"] = jnp.asarray([1.0, 0.0], dtype=jnp.float32)
@@ -451,7 +449,7 @@ def test_run_msg_probe_jax_uses_jax_dataset_and_optimizer(monkeypatch):
     cfg.msg_probe_early_stopping = False
     cfg.msg_probe_num_repeats = 1
     cfg.peak_ordering = "mz"
-    fake_probe_data = FakeProbeData(to_jax_batch(_tiny_torch_batch()))
+    fake_probe_data = FakeProbeData(to_jax_batch(_tiny_numpy_batch()))
     monkeypatch.setattr(
         msg_probe_jax,
         "MassSpecProbeData",

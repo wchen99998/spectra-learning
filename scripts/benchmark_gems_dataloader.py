@@ -50,13 +50,13 @@ def _run_once(args: argparse.Namespace, workers: int, repeat: int) -> float:
     if args.backend == "jax":
         import jax
 
-        from spectra_learning.training.pretrain_jax import torch_batch_to_jax
+        from spectra_learning.training.pretrain_jax import numpy_batch_to_jax
 
     datamodule = GemsNativeDataModule(config, seed=int(_config_get(config, "seed", 0)) + repeat)
     loader = datamodule.train_loader_for_epoch(repeat)
     iterator = iter(loader)
     if args.backend == "jax":
-        consume = lambda batch: jax.block_until_ready(torch_batch_to_jax(batch))
+        consume = lambda batch: jax.block_until_ready(numpy_batch_to_jax(batch))
     elif args.backend == "torch-cuda":
         import torch
 

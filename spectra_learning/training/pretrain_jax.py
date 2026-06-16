@@ -20,7 +20,7 @@ from ml_collections import config_dict
 from tqdm import tqdm
 
 from spectra_learning.data.gems.datamodule import GemsNativeDataModule
-from spectra_learning.models.common_jax import Array, batch_to_jax
+from spectra_learning.models.common_jax import Array
 from spectra_learning.models.factory_jax import build_model_from_config
 from spectra_learning.models.model_jax import PeakSetJEPAJax
 from spectra_learning.probes.massspec.msg_probe_jax import run_msg_probe_jax
@@ -424,20 +424,19 @@ def _tree_path_key(path_entry: Any) -> Any:
     return getattr(path_entry, "key", path_entry)
 
 
-def torch_batch_to_jax(
+def numpy_batch_to_jax(
     batch: dict[str, Any],
     *,
     data_mesh: Mesh | None = None,
     batch_axis: int = 0,
 ) -> dict[str, Array]:
-    jax_batch = batch_to_jax(batch)
     if data_mesh is None:
-        return jax_batch
-    return _put_batch_on_data_mesh(jax_batch, data_mesh, batch_axis=batch_axis)
+        return {key: _numpy_array_to_jax(value) for key, value in batch.items()}
+    return _put_batch_on_data_mesh(batch, data_mesh, batch_axis=batch_axis)
 
 
 def _put_batch_on_data_mesh(
-    batch: dict[str, Array],
+    batch: dict[str, Any],
     data_mesh: Mesh,
     *,
     batch_axis: int,
@@ -449,7 +448,7 @@ def _put_batch_on_data_mesh(
 
 
 def _put_batch_array_on_data_mesh(
-    value: Array,
+    value: Any,
     data_mesh: Mesh,
     *,
     batch_axis: int,
@@ -462,7 +461,14 @@ def _put_batch_array_on_data_mesh(
     sharding = NamedSharding(data_mesh, spec)
     if jax.process_count() > 1:
         return jax.make_array_from_process_local_data(sharding, value)
-    return jax.device_put(value, sharding)
+    return jax.device_put(_numpy_array_to_jax(value), sharding)
+
+
+def _numpy_array_to_jax(value: Any) -> Array:
+    if isinstance(value, jax.Array):
+        return value
+    assert isinstance(value, np.ndarray | np.generic)
+    return jnp.asarray(value)
 
 
 def _replicate_tree_on_data_mesh(tree: Any, data_mesh: Mesh) -> Any:
@@ -491,8 +497,10 @@ def _jax_data_mesh(config: Any | None = None) -> Mesh:
 
 @cache
 def _jax_data_mesh_for_device_count(device_count: int) -> Mesh:
-    devices = np.asarray(jax.devices()[:device_count])
-    return Mesh(devices, (JAX_DATA_AXIS,))
+    devices = (
+        None if device_count == jax.device_count() else jax.devices()[:device_count]
+    )
+    return jax.make_mesh((device_count,), (JAX_DATA_AXIS,), devices=devices)
 
 
 @nnx.jit
@@ -1159,15 +1167,17 @@ def _run_jax_training_loop(
                         context_count = int(active_context.sum(dim=1).max().item())
                     max_context_count = max(max_context_count, int(context_count))
                 transfer_start = time.perf_counter()
-                micro_batches.append(torch_batch_to_jax(torch_batch))
-                if timing_barriers:
-                    jax.block_until_ready(micro_batches[-1])
+                micro_batches.append(torch_batch)
                 transfer_elapsed += time.perf_counter() - transfer_start
             if len(micro_batches) < grad_accum_steps:
                 break
-            batch = _stack_micro_batches(micro_batches)
-            if use_sharded_step:
-                batch = _put_batch_on_data_mesh(batch, data_mesh, batch_axis=1)
+            batch = numpy_batch_to_jax(
+                _stack_micro_batches(micro_batches),
+                data_mesh=data_mesh if use_sharded_step else None,
+                batch_axis=1,
+            )
+            if timing_barriers:
+                jax.block_until_ready(batch)
             timing_enabled = measured_start is not None
             if timing_enabled:
                 timing["dataloader_seconds"] += dataloader_elapsed
@@ -1435,9 +1445,11 @@ def _evaluate_jax_validation_loss(
     for torch_batch in datamodule.val_loader:
         if steps >= max_steps:
             break
-        batch = torch_batch_to_jax(torch_batch)
-        if use_sharded_step:
-            batch = _put_batch_on_data_mesh(batch, data_mesh, batch_axis=0)
+        batch = numpy_batch_to_jax(
+            torch_batch,
+            data_mesh=data_mesh if use_sharded_step else None,
+            batch_axis=0,
+        )
         metrics = jax.device_get(eval_step(trainable_params, static_state, batch))
         for key, value in metrics.items():
             totals[key] = totals.get(key, 0.0) + float(np.asarray(value))
@@ -1523,12 +1535,12 @@ def _precompile_jax_training_steps(
     compile_start = time.perf_counter()
     precompile_repetitions = int(_config_get(config, "jax_precompile_repetitions", 1))
     loader_iter = iter(datamodule.train_loader_for_epoch(0))
-    micro_batches = [
-        torch_batch_to_jax(next(loader_iter)) for _ in range(grad_accum_steps)
-    ]
-    batch = _stack_micro_batches(micro_batches)
-    if use_sharded_step:
-        batch = _put_batch_on_data_mesh(batch, data_mesh, batch_axis=1)
+    micro_batches = [next(loader_iter) for _ in range(grad_accum_steps)]
+    batch = numpy_batch_to_jax(
+        _stack_micro_batches(micro_batches),
+        data_mesh=data_mesh if use_sharded_step else None,
+        batch_axis=1,
+    )
 
     train_step_count = 0
     pack_variant_count = 0
@@ -1673,8 +1685,15 @@ def _jax_data_parallel_devices(config: Any) -> int:
     return int(requested)
 
 
-def _stack_micro_batches(batches: list[dict[str, Array]]) -> dict[str, Array]:
-    return jax.tree.map(lambda *values: jnp.stack(values), *batches)
+def _stack_micro_batches(batches: list[dict[str, Any]]) -> dict[str, Any]:
+    return jax.tree.map(_stack_micro_batch_values, *batches)
+
+
+def _stack_micro_batch_values(*values: Any) -> Any:
+    first = values[0]
+    if isinstance(first, np.ndarray):
+        return np.stack(values)
+    return jnp.stack(values)
 
 
 def _context_encoder_pack_choices(config: Any, default_pack_tokens: int) -> tuple[int, ...]:

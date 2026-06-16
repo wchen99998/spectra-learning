@@ -26,8 +26,8 @@ from spectra_learning.training.pretrain_jax import (
     initialize_jax_model_from_torch_seed,
     init_pure_optax_train_state,
     make_pure_accumulated_train_step,
+    numpy_batch_to_jax,
     trainable_param_filter,
-    torch_batch_to_jax,
 )
 
 
@@ -159,6 +159,14 @@ def _real_pattern_batch_size(
     return {key: value[indices] for key, value in batch.items()}
 
 
+def _numpy_batch(batch: dict[str, torch.Tensor]) -> dict[str, np.ndarray]:
+    return {key: value.detach().cpu().numpy() for key, value in batch.items()}
+
+
+def _jax_batch(batch: dict[str, torch.Tensor]) -> dict[str, jax.Array]:
+    return numpy_batch_to_jax(_numpy_batch(batch))
+
+
 def _assert_metrics_close(
     torch_metrics: dict[str, torch.Tensor],
     jax_metrics,
@@ -198,7 +206,7 @@ def test_jax_mae_matches_pytorch_on_real_collated_batch(mask_strategy: str):
 
     with torch.no_grad():
         torch_metrics = torch_model(batch)
-    jax_metrics = jax_model(batch)
+    jax_metrics = jax_model(_jax_batch(batch))
 
     _assert_metrics_close(torch_metrics, jax_metrics)
 
@@ -217,7 +225,7 @@ def test_initialize_jax_model_from_torch_seed_matches_pytorch_forward():
     batch = _real_pattern_batch("contiguous")
     with torch.no_grad():
         torch_metrics = torch_model(batch)
-    jax_metrics = jax_model(batch)
+    jax_metrics = jax_model(_jax_batch(batch))
 
     _assert_metrics_close(torch_metrics, jax_metrics)
 
@@ -247,7 +255,7 @@ def test_jax_model_loads_plain_pytorch_checkpoint_and_matches_output():
 
     with torch.no_grad():
         torch_metrics = torch_model(batch)
-    jax_metrics = jax_model(batch)
+    jax_metrics = jax_model(_jax_batch(batch))
 
     _assert_metrics_close(torch_metrics, jax_metrics)
 
@@ -265,8 +273,9 @@ def test_jax_mae_packed_context_encoder_matches_full_encoder():
     packed_model.load_torch_state_dict(torch_model.state_dict())
     batch = _real_pattern_batch("contiguous")
 
-    full_metrics = full_model(batch)
-    packed_metrics = packed_model(batch)
+    jax_batch = _jax_batch(batch)
+    full_metrics = full_model(jax_batch)
+    packed_metrics = packed_model(jax_batch)
 
     _assert_jax_metrics_close(full_metrics, packed_metrics, atol=5e-4)
 
@@ -281,7 +290,7 @@ def test_jax_optax_train_step_updates_loaded_pytorch_weights():
         {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95},
         jax_model,
     )
-    batch = torch_batch_to_jax(_real_pattern_batch("contiguous"))
+    batch = _jax_batch(_real_pattern_batch("contiguous"))
     before = np.asarray(jax_model.jepa_mae_mz_head.weight[...])
 
     metrics = jax_train_step(jax_model, optimizer, batch)
@@ -310,7 +319,7 @@ def test_jax_activation_checkpointing_matches_uncheckpointed_update(mode: str):
     optimizer_config = {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95}
     base_optimizer = build_jax_optimizer(optimizer_config, base_model)
     checkpointed_optimizer = build_jax_optimizer(optimizer_config, checkpointed_model)
-    batch = torch_batch_to_jax(_real_pattern_batch("contiguous"))
+    batch = _jax_batch(_real_pattern_batch("contiguous"))
 
     base_metrics = jax_train_step(base_model, base_optimizer, batch)
     checkpointed_metrics = jax_train_step(
@@ -336,7 +345,7 @@ def test_jax_activation_checkpointing_matches_uncheckpointed_update(mode: str):
 def test_jax_bf16_autocast_uses_bf16_activations_and_fp32_loss():
     kwargs = {**_small_mae_kwargs(), "autocast_dtype": "bf16"}
     jax_model = PeakSetJEPAJax(**kwargs)
-    batch = torch_batch_to_jax(_real_pattern_batch("contiguous"))
+    batch = _jax_batch(_real_pattern_batch("contiguous"))
 
     encoded, pair = jax_model.encoder.forward_with_pair(
         batch["peak_mz"],
@@ -364,7 +373,7 @@ def test_jax_accumulated_grad_step_updates_loaded_pytorch_weights():
         {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95},
         jax_model,
     )
-    batch = torch_batch_to_jax(_real_pattern_batch("random"))
+    batch = _jax_batch(_real_pattern_batch("random"))
     before = np.asarray(jax_model.jepa_mae_mz_head.weight[...])
 
     (_loss_0, metrics), grads_0 = jax_grad_step(jax_model, batch)
@@ -387,8 +396,8 @@ def test_jax_pure_optax_accumulated_train_step_matches_manual_accumulation():
     pure_model.load_torch_state_dict(torch_model.state_dict())
     optimizer_config = {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95}
     manual_optimizer = build_jax_optimizer(optimizer_config, manual_model)
-    batch_0 = torch_batch_to_jax(_real_pattern_batch("contiguous"))
-    batch_1 = torch_batch_to_jax(_real_pattern_batch("random"))
+    batch_0 = _jax_batch(_real_pattern_batch("contiguous"))
+    batch_1 = _jax_batch(_real_pattern_batch("random"))
     accumulated_batch = jax.tree.map(
         lambda lhs, rhs: jnp.stack([lhs, rhs]),
         batch_0,
@@ -438,7 +447,7 @@ def test_jax_sharded_accumulated_grad_step_updates_on_all_devices():
         {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95},
         jax_model,
     )
-    batch = torch_batch_to_jax(
+    batch = _jax_batch(
         _real_pattern_batch_size(
             "contiguous",
             jax.device_count(),
@@ -467,7 +476,7 @@ def test_jax_sharded_pure_optax_accumulated_train_step_updates_on_all_devices():
     torch_model = PeakSetJEPA(**kwargs).eval()
     jax_model = PeakSetJEPAJax(**kwargs)
     jax_model.load_torch_state_dict(torch_model.state_dict())
-    batch = torch_batch_to_jax(
+    batch = _jax_batch(
         _real_pattern_batch_size(
             "contiguous",
             jax.device_count(),
@@ -536,7 +545,7 @@ def test_jax_jepa_matches_pytorch_on_real_collated_batch(
 
     with torch.no_grad():
         torch_metrics = torch_model(batch)
-    jax_metrics = jax_model(batch)
+    jax_metrics = jax_model(_jax_batch(batch))
 
     _assert_metrics_close(torch_metrics, jax_metrics)
 
@@ -555,7 +564,7 @@ def test_jax_contrastive_matches_pytorch_on_real_collated_batch():
 
     with torch.no_grad():
         torch_metrics = torch_model(batch)
-    jax_metrics = jax_model(batch)
+    jax_metrics = jax_model(_jax_batch(batch))
 
     _assert_metrics_close(torch_metrics, jax_metrics)
 
@@ -590,7 +599,7 @@ def test_jax_jepa_ema_teacher_checkpoint_matches_pytorch():
 
     with torch.no_grad():
         torch_metrics = torch_model(batch)
-    jax_metrics = jax_model(batch)
+    jax_metrics = jax_model(_jax_batch(batch))
 
     _assert_metrics_close(torch_metrics, jax_metrics)
 
@@ -622,7 +631,7 @@ def test_jax_optimizer_excludes_frozen_teacher_and_buffer_params():
         {"learning_rate": 1e-3, "weight_decay": 0.5, "b2": 0.95},
         jax_model,
     )
-    batch = torch_batch_to_jax(_real_pattern_batch("contiguous"))
+    batch = _jax_batch(_real_pattern_batch("contiguous"))
     before_student = np.asarray(jax_model.target_projector.linear0.weight[...])
     before_teacher = np.asarray(jax_model.teacher_target_projector.linear0.weight[...])
     before_encoder_teacher = np.asarray(jax_model.teacher_encoder.cls_token[...])
@@ -671,7 +680,7 @@ def test_jax_mae_teacher_jepa_matches_pytorch_with_default_teacher():
 
     with torch.no_grad():
         torch_metrics = torch_model(batch)
-    jax_metrics = jax_model(batch)
+    jax_metrics = jax_model(_jax_batch(batch))
 
     _assert_metrics_close(torch_metrics, jax_metrics)
 
@@ -716,6 +725,6 @@ def test_jax_mae_teacher_jepa_matches_pytorch_with_teacher_config():
 
         with torch.no_grad():
             torch_metrics = torch_model(batch)
-        jax_metrics = jax_model(batch)
+        jax_metrics = jax_model(_jax_batch(batch))
 
     _assert_metrics_close(torch_metrics, jax_metrics)
