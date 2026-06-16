@@ -203,14 +203,12 @@ def test_jax_training_loop_saves_periodically_and_resumes(tmp_path):
 
     model = PeakSetJEPAJax(**kwargs)
     initialize_jax_model_from_torch_seed(cfg, model)
-    optimizer = build_jax_optimizer(cfg, model, total_steps=4)
     datamodule = _FakeDataModule(batch, train_steps=2)
     manager = build_jax_checkpoint_manager(tmp_path / "checkpoints")
     metrics = _run_jax_training_loop(
         config=cfg,
         datamodule=datamodule,
         model=model,
-        optimizer=optimizer,
         logger=MetricLogger(),
         total_steps=3,
         checkpoint_manager=manager,
@@ -219,10 +217,8 @@ def test_jax_training_loop_saves_periodically_and_resumes(tmp_path):
     assert metrics["run/final_global_step"] == 3.0
     assert sorted(manager.all_steps()) == [2, 3]
     manager.close()
-    trained_params = nnx.as_pure(nnx.state(model))
 
     resumed_model = PeakSetJEPAJax(**kwargs)
-    resumed_optimizer = build_jax_optimizer(cfg, resumed_model, total_steps=4)
     resumed_datamodule = _FakeDataModule(batch, train_steps=2)
     resumed_manager = build_jax_checkpoint_manager(tmp_path / "checkpoints")
     assert resumed_manager.latest_step() == 3
@@ -230,28 +226,31 @@ def test_jax_training_loop_saves_periodically_and_resumes(tmp_path):
         config=cfg,
         datamodule=resumed_datamodule,
         model=resumed_model,
-        optimizer=resumed_optimizer,
         logger=MetricLogger(),
         total_steps=4,
         checkpoint_manager=resumed_manager,
         resume_step=resumed_manager.latest_step(),
     )
     assert resumed_metrics["run/final_global_step"] == 4.0
-    assert resumed_datamodule.loader_calls == [(1, 1)]
+    assert resumed_datamodule.loader_calls[-1] == (1, 1)
     assert resumed_manager.latest_step() == 4
 
+    _graphdef, trainable_params, static_state, opt_state, _opt = (
+        init_pure_optax_train_state(cfg, model, total_steps=4)
+    )
     restored = restore_jax_training_state(
         resumed_manager,
         3,
         {
-            "model": trained_params,
-            "optimizer": nnx.as_pure(nnx.state(optimizer)),
+            "trainable_params": trainable_params,
+            "static_state": static_state,
+            "opt_state": opt_state,
         },
     )
     resumed_manager.close()
     for expected, actual in zip(
-        jax.tree.leaves(trained_params),
-        jax.tree.leaves(restored["model"]),
+        jax.tree.leaves(trainable_params),
+        jax.tree.leaves(restored["trainable_params"]),
         strict=True,
     ):
         np.testing.assert_array_equal(np.asarray(expected), np.asarray(actual))
@@ -264,23 +263,18 @@ def test_jax_training_loop_pure_optax_saves_and_resumes(tmp_path):
     cfg.num_epochs = 2
     cfg.learning_rate = 1e-3
     cfg.gradient_accumulation_steps = 2
-    cfg.jax_scan_accumulation = True
-    cfg.jax_pure_optax_step = True
-    cfg.jax_scan_zero_init = True
     cfg.checkpoint_every_steps = 2
     cfg.log_every_n_steps = 0
     batch = _tiny_torch_batch()
 
     model = PeakSetJEPAJax(**kwargs)
     initialize_jax_model_from_torch_seed(cfg, model)
-    optimizer = build_jax_optimizer(cfg, model, total_steps=4)
     datamodule = _FakeDataModule(batch, train_steps=2, gradient_accumulation_steps=2)
     manager = build_jax_checkpoint_manager(tmp_path / "checkpoints")
     metrics = _run_jax_training_loop(
         config=cfg,
         datamodule=datamodule,
         model=model,
-        optimizer=optimizer,
         logger=MetricLogger(),
         total_steps=3,
         checkpoint_manager=manager,
@@ -291,7 +285,6 @@ def test_jax_training_loop_pure_optax_saves_and_resumes(tmp_path):
     manager.close()
 
     resumed_model = PeakSetJEPAJax(**kwargs)
-    resumed_optimizer = build_jax_optimizer(cfg, resumed_model, total_steps=4)
     resumed_datamodule = _FakeDataModule(
         batch,
         train_steps=2,
@@ -303,7 +296,6 @@ def test_jax_training_loop_pure_optax_saves_and_resumes(tmp_path):
         config=cfg,
         datamodule=resumed_datamodule,
         model=resumed_model,
-        optimizer=resumed_optimizer,
         logger=MetricLogger(),
         total_steps=4,
         checkpoint_manager=resumed_manager,

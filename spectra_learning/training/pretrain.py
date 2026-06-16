@@ -40,7 +40,6 @@ from spectra_learning.training.logging import MetricLogger, log_msg_probe_metric
 from spectra_learning.training.modules import PretrainModule, split_pretrain_module
 from spectra_learning.training.optimization import build_optimizers
 from spectra_learning.training.performance import (
-    apply_activation_checkpointing,
     compile_forward as compile_training_forward,
     register_bf16_adamw_state_hooks,
 )
@@ -189,7 +188,6 @@ def train_and_evaluate(
     if distributed.is_main:
         storage_mkdir(checkpoint_dir)
     logger = build_logger(config, local_workdir) if distributed.is_main else MetricLogger()
-    apply_activation_checkpointing(train_module, config)
     optimizers, schedulers = build_optimizers(
         config,
         train_module,

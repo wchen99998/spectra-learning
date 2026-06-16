@@ -417,8 +417,6 @@ def training_checkpoint_paths(checkpoint_dir: StoragePath) -> list[StoragePath]:
 def latest_ckpt_path(directory: StoragePath) -> str | None:
     checkpoint_dir = storage_join(directory, "checkpoints")
     ckpts = _latest_checkpoint_entries(checkpoint_dir)
-    if not ckpts:
-        ckpts = _latest_checkpoint_entries(directory)
     return str(ckpts[-1].path) if ckpts else None
 
 
@@ -426,9 +424,8 @@ def _latest_checkpoint_entries(directory: StoragePath) -> list:
     return sorted(
         (
             entry
-            for entry in list_storage_files(directory, recursive=True)
-            if entry.name.endswith(".ckpt")
-            or (entry.name.endswith(".pt") and is_training_checkpoint_path(entry.path))
+            for entry in list_storage_files(directory)
+            if entry.name.endswith(".pt") and is_training_checkpoint_path(entry.path)
         ),
         key=lambda entry: entry.mtime,
     )

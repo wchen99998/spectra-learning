@@ -2,6 +2,7 @@ from typing import Any
 
 
 DEPRECATED_MSG_PROBE_CONFIG_KEYS = (
+    "probe_dataset",
     "msg_probe_tune_metric",
     "msg_probe_sample_size",
     "msg_probe_max_train_samples",

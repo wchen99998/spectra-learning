@@ -56,35 +56,6 @@ class Attention(nn.Module):
         nn.init.xavier_normal_(self.wqkv.weight[self.q_size + self.kv_size :])
         nn.init.xavier_normal_(self.wo.weight)
 
-    def _load_from_state_dict(
-        self,
-        state_dict,
-        prefix,
-        local_metadata,
-        strict,
-        missing_keys,
-        unexpected_keys,
-        error_msgs,
-    ):
-        q_key = prefix + "wq.weight"
-        k_key = prefix + "wk.weight"
-        v_key = prefix + "wv.weight"
-        qkv_key = prefix + "wqkv.weight"
-        if qkv_key not in state_dict and q_key in state_dict:
-            state_dict[qkv_key] = torch.cat(
-                [state_dict.pop(q_key), state_dict.pop(k_key), state_dict.pop(v_key)],
-                dim=0,
-            )
-        super()._load_from_state_dict(
-            state_dict,
-            prefix,
-            local_metadata,
-            strict,
-            missing_keys,
-            unexpected_keys,
-            error_msgs,
-        )
-
     def forward(
         self,
         x: Float[Tensor, "batch tokens dim"],

@@ -51,7 +51,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.predictor_dim = 256
     cfg.predictor_dropout = 0.1
     cfg.predictor_apply_final_norm = True
-    cfg.predictor_use_rope = False
     cfg.masked_latent_predictor_num_layers = 2
     cfg.masked_latent_predictor_num_heads = 8
     cfg.target_projector_dim = -1
@@ -88,7 +87,6 @@ def get_config() -> config_dict.ConfigDict:
 
     # Pooling
     cfg.covariance_pooling_dim = 64
-    cfg.train_covariance_pooling = False
 
     # Contrastive NIST Murcko training
     cfg.contrastive_temperature = 0.1
@@ -97,8 +95,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.online_probe_loss_weight = 1.0
     cfg.contrastive_batch_size = 128
     cfg.contrastive_covariance_dim = 64
-    cfg.contrastive_projection_dim = 256
-    cfg.contrastive_projection_hidden_dim = 1024
     cfg.contrastive_online_probe_hidden_dim = 1024
     cfg.contrastive_pairs_per_epoch = 30_000
     cfg.contrastive_val_pairs_per_epoch = 10_000
@@ -126,7 +122,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataloader_pin_memory = True
 
     # MSG probe
-    cfg.probe_dataset = "nist-murcko"
     cfg.msg_probe_early_stopping = True
     cfg.msg_probe_early_stopping_min_delta = 0.0001
     cfg.msg_probe_early_stopping_min_epochs = 20
@@ -154,7 +149,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.grad_clip_norm = 1
     cfg.optimizer = "adamw"
     cfg.optimizer_fused = True
-    cfg.adamw_lr = None
 
     # Logging
     cfg.enable_wandb = True

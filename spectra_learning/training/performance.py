@@ -6,18 +6,8 @@ from typing import Any
 
 import torch
 from ml_collections import config_dict
-from torch._functorch.partitioners import get_default_op_list
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-    CheckpointImpl,
-    checkpoint_wrapper,
-)
-from torch.utils.checkpoint import (
-    CheckpointPolicy,
-    create_selective_checkpoint_contexts,
-)
 
 from spectra_learning.models.model import PeakSetJEPA
-from spectra_learning.models.pairmixer import PairMixerBlock
 from spectra_learning.training.modules import PretrainModule, split_pretrain_module
 
 
@@ -25,90 +15,9 @@ def _config_get(config: config_dict.ConfigDict, key: str, default: Any) -> Any:
     return config.get(key, default)
 
 
-def activation_checkpoint_mode(config: config_dict.ConfigDict) -> str:
-    mode = str(_config_get(config, "activation_checkpoint_mode", "none"))
-    mode = mode.lower().replace("-", "_")
-    assert mode in {"none", "selective", "full"}, (
-        "activation_checkpoint_mode must be one of "
-        "'none', 'selective', or 'full'."
-    )
-    return mode
-
-
 def _pair_mixer_lists(model: PeakSetJEPA) -> Iterable[torch.nn.ModuleList]:
     yield model.encoder.blocks
     yield model.masked_latent_predictor
-
-
-def _save_ops() -> dict[Any, CheckpointPolicy]:
-    compute_ops = {
-        torch.ops.aten._scaled_dot_product_cudnn_attention.default,
-        torch.ops.aten._scaled_dot_product_attention_math.default,
-        torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
-        torch.ops.aten.linear.default,
-    }
-    save_ops = {
-        op.default
-        for op in get_default_op_list().compute_intensive_ops
-    }
-    save_ops.update(compute_ops)
-    return {op: CheckpointPolicy.MUST_SAVE for op in save_ops}
-
-
-def _selective_checkpoint_context_fn():
-    save_ops = _save_ops()
-    mm_ops = (torch.ops.aten.mm.default, torch.ops.aten.linear.default)
-
-    def policy(ctx, func, *args, **kwargs) -> CheckpointPolicy:
-        del kwargs
-        if func in mm_ops and args[0].shape[-1] >= 128:
-            return CheckpointPolicy.PREFER_RECOMPUTE
-        return save_ops.get(func, CheckpointPolicy.PREFER_RECOMPUTE)
-
-    return create_selective_checkpoint_contexts(policy)
-
-
-def _checkpoint_block(
-    block: torch.nn.Module,
-    *,
-    mode: str,
-    preserve_rng_state: bool,
-) -> torch.nn.Module:
-    if mode == "full":
-        return checkpoint_wrapper(
-            block,
-            checkpoint_impl=CheckpointImpl.NO_REENTRANT,
-            preserve_rng_state=preserve_rng_state,
-        )
-    return checkpoint_wrapper(
-        block,
-        checkpoint_impl=CheckpointImpl.NO_REENTRANT,
-        context_fn=_selective_checkpoint_context_fn,
-        preserve_rng_state=preserve_rng_state,
-    )
-
-
-def apply_activation_checkpointing(
-    module: torch.nn.Module,
-    config: config_dict.ConfigDict,
-) -> None:
-    mode = activation_checkpoint_mode(config)
-    if mode == "none":
-        return
-    preserve_rng_state = bool(
-        _config_get(config, "activation_checkpoint_preserve_rng_state", True)
-    )
-    model, _ = split_pretrain_module(module)
-    wrapped = 0
-    for blocks in _pair_mixer_lists(model):
-        for index, block in enumerate(blocks):
-            blocks[index] = _checkpoint_block(
-                block,
-                mode=mode,
-                preserve_rng_state=preserve_rng_state,
-            )
-            wrapped += 1
-    logging.info("Applied %s activation checkpointing to %d PairMixer blocks.", mode, wrapped)
 
 
 def compile_forward(

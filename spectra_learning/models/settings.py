@@ -48,8 +48,6 @@ class PeakSetJEPASettings:
     pairmixer_pair_dim: int | None = None
     pairmixer_pair_feature_hidden_dim: int = 128
     pairmixer_dropout: float = 0.0
-    pairmixer_triangle_mediator_rank: int = 0
-    pairmixer_use_commuted_low_rank_triangle: bool = False
     pairmixer_use_pair_bias_attention: bool = False
     pairmixer_mz_scale: float = PEAK_MZ_MAX
     pairmixer_precursor_mz_scale: float = PEAK_MZ_MAX
@@ -171,8 +169,6 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "pairmixer_pair_dim": _optional_int,
     "pairmixer_pair_feature_hidden_dim": int,
     "pairmixer_dropout": float,
-    "pairmixer_triangle_mediator_rank": int,
-    "pairmixer_use_commuted_low_rank_triangle": bool,
     "pairmixer_use_pair_bias_attention": bool,
     "pairmixer_mz_scale": float,
     "pairmixer_precursor_mz_scale": float,

@@ -22,7 +22,6 @@ from spectra_learning.data.gems.datamodule import GemsNativeDataModule
 from spectra_learning.models.common_jax import Array, batch_to_jax
 from spectra_learning.models.factory_jax import build_model_from_config
 from spectra_learning.models.model_jax import PeakSetJEPAJax
-from spectra_learning.training.checkpointing import training_checkpoint_paths
 from spectra_learning.training.checkpointing_jax import (
     build_jax_checkpoint_manager,
     restore_jax_training_state,
@@ -141,18 +140,7 @@ def build_jax_optimizer(
     *,
     total_steps: int | None = None,
 ) -> nnx.Optimizer:
-    grad_accum_steps = int(_config_get(config, "gradient_accumulation_steps", 1))
     optimizer = build_jax_optax_transform(config, total_steps=total_steps)
-    use_multistep = (
-        bool(_config_get(config, "jax_optax_multistep_accumulation", False))
-        and _jax_data_parallel_devices(config) == 1
-    )
-    if use_multistep:
-        optimizer = optax.MultiSteps(
-            optimizer,
-            grad_accum_steps,
-            use_grad_mean=True,
-        ).gradient_transformation()
     return nnx.Optimizer(model, optimizer, wrt=trainable_param_filter)
 
 
@@ -514,115 +502,11 @@ def jax_train_step(
     return metrics
 
 
-@nnx.jit
-def jax_multistep_train_step(
-    model: PeakSetJEPAJax,
-    optimizer: nnx.Optimizer,
-    batch: dict[str, Array],
-) -> tuple[dict[str, Array], Array]:
-    def loss_fn(model: PeakSetJEPAJax):
-        metrics = model(batch)
-        return metrics["loss"], metrics
-
-    (_loss, metrics), grads = nnx.value_and_grad(
-        loss_fn,
-        has_aux=True,
-        argnums=nnx.DiffState(0, trainable_param_filter),
-    )(model)
-    optimizer.update(model, grads)
-    return metrics, optimizer.step[...]
-
-
-@nnx.jit
-def jax_local_grad_step(
-    model: PeakSetJEPAJax,
-    batch: dict[str, Array],
-) -> nnx.State:
-    def loss_fn(model: PeakSetJEPAJax):
-        return model(batch, loss_only=True)["loss"]
-
-    return nnx.grad(
-        loss_fn,
-        argnums=nnx.DiffState(0, trainable_param_filter),
-    )(model)
-
-
-@nnx.jit
-def jax_accumulate_local_grads(
-    model: PeakSetJEPAJax,
-    batch: dict[str, Array],
-    accumulated_grads: nnx.State,
-) -> nnx.State:
-    grads = jax_local_grad_step(model, batch)
-    return jax.tree.map(lambda lhs, rhs: lhs + rhs, accumulated_grads, grads)
-
-
-@nnx.jit
-def jax_apply_accumulated_train_step(
-    model: PeakSetJEPAJax,
-    optimizer: nnx.Optimizer,
-    batch: dict[str, Array],
-    accumulated_grads: nnx.State,
-    accumulation_scale: Array,
-) -> tuple[dict[str, Array], Array]:
-    def loss_fn(model: PeakSetJEPAJax):
-        return model(batch, loss_only=True)["loss"]
-
-    loss, grads = nnx.value_and_grad(
-        loss_fn,
-        argnums=nnx.DiffState(0, trainable_param_filter),
-    )(model)
-    grads = jax.tree.map(
-        lambda lhs, rhs: (lhs + rhs) * accumulation_scale,
-        accumulated_grads,
-        grads,
-    )
-    optimizer.update(model, grads)
-    return {"loss": loss}, optimizer.step[...]
-
-
-@nnx.jit(donate_argnums=(0, 1))
-def jax_accumulated_train_step(
-    model: PeakSetJEPAJax,
-    optimizer: nnx.Optimizer,
-    batch: dict[str, Array],
-) -> tuple[dict[str, Array], Array]:
-    metrics, grads = _accumulated_metrics_and_grads(model, batch)
-    optimizer.update(model, grads)
-    return metrics, optimizer.step[...]
-
-
 def jax_sharded_grad_step(
     model: PeakSetJEPAJax,
     batch: dict[str, Array],
 ) -> tuple[tuple[Array, dict[str, Array]], nnx.State]:
     return _jax_sharded_grad_step_fn(jax.device_count())(model, batch)
-
-
-def jax_sharded_grad_step_grads_only(
-    model: PeakSetJEPAJax,
-    batch: dict[str, Array],
-) -> nnx.State:
-    return _jax_sharded_grad_step_grads_only_fn(jax.device_count())(model, batch)
-
-
-def jax_sharded_local_grad_step(
-    model: PeakSetJEPAJax,
-    batch: dict[str, Array],
-) -> nnx.State:
-    return _jax_sharded_local_grad_step_fn(jax.device_count())(model, batch)
-
-
-def jax_sharded_accumulate_local_grads(
-    model: PeakSetJEPAJax,
-    batch: dict[str, Array],
-    accumulated_grads: nnx.State,
-) -> nnx.State:
-    return _jax_sharded_accumulate_local_grads_fn(jax.device_count())(
-        model,
-        batch,
-        accumulated_grads,
-    )
 
 
 def jax_sharded_apply_grads(
@@ -631,34 +515,6 @@ def jax_sharded_apply_grads(
     grads: nnx.State,
 ) -> Array:
     return _jax_sharded_apply_grads_fn(jax.device_count())(model, optimizer, grads)
-
-
-def jax_sharded_apply_accumulated_train_step(
-    model: PeakSetJEPAJax,
-    optimizer: nnx.Optimizer,
-    batch: dict[str, Array],
-    accumulated_grads: nnx.State,
-    accumulation_scale: Array,
-) -> tuple[dict[str, Array], Array]:
-    return _jax_sharded_apply_accumulated_train_step_fn(jax.device_count())(
-        model,
-        optimizer,
-        batch,
-        accumulated_grads,
-        accumulation_scale,
-    )
-
-
-def jax_sharded_accumulated_train_step(
-    model: PeakSetJEPAJax,
-    optimizer: nnx.Optimizer,
-    batch: dict[str, Array],
-) -> tuple[dict[str, Array], Array]:
-    return _jax_sharded_accumulated_train_step_fn(jax.device_count())(
-        model,
-        optimizer,
-        batch,
-    )
 
 
 @cache
@@ -698,90 +554,6 @@ def _jax_sharded_grad_step_fn(device_count: int):
 
 
 @cache
-def _jax_sharded_grad_step_grads_only_fn(device_count: int):
-    data_mesh = _jax_data_mesh_for_device_count(device_count)
-
-    @nnx.jit
-    @nnx.shard_map(
-        mesh=data_mesh,
-        in_specs=(P(), P(JAX_DATA_AXIS)),
-        out_specs=P(),
-        axis_names={JAX_DATA_AXIS},
-        check_vma=False,
-    )
-    def grad_step_grads_only(
-        model: PeakSetJEPAJax,
-        batch: dict[str, Array],
-    ) -> nnx.State:
-        def loss_fn(model: PeakSetJEPAJax):
-            return model(batch, loss_only=True)["loss"]
-
-        grads = nnx.grad(
-            loss_fn,
-            argnums=nnx.DiffState(0, trainable_param_filter),
-        )(model)
-        return jax.tree.map(lambda value: jax.lax.pmean(value, JAX_DATA_AXIS), grads)
-
-    return grad_step_grads_only
-
-
-@cache
-def _jax_sharded_local_grad_step_fn(device_count: int):
-    data_mesh = _jax_data_mesh_for_device_count(device_count)
-
-    @nnx.jit
-    @nnx.shard_map(
-        mesh=data_mesh,
-        in_specs=(P(), P(JAX_DATA_AXIS)),
-        out_specs=P(),
-        axis_names={JAX_DATA_AXIS},
-        check_vma=False,
-    )
-    def local_grad_step(
-        model: PeakSetJEPAJax,
-        batch: dict[str, Array],
-    ) -> nnx.State:
-        def loss_fn(model: PeakSetJEPAJax):
-            return model(batch, loss_only=True)["loss"]
-
-        return nnx.grad(
-            loss_fn,
-            argnums=nnx.DiffState(0, trainable_param_filter),
-        )(model)
-
-    return local_grad_step
-
-
-@cache
-def _jax_sharded_accumulate_local_grads_fn(device_count: int):
-    data_mesh = _jax_data_mesh_for_device_count(device_count)
-
-    @nnx.jit
-    @nnx.shard_map(
-        mesh=data_mesh,
-        in_specs=(P(), P(JAX_DATA_AXIS), P()),
-        out_specs=P(),
-        axis_names={JAX_DATA_AXIS},
-        check_vma=False,
-    )
-    def accumulate_local_grads(
-        model: PeakSetJEPAJax,
-        batch: dict[str, Array],
-        accumulated_grads: nnx.State,
-    ) -> nnx.State:
-        def loss_fn(model: PeakSetJEPAJax):
-            return model(batch, loss_only=True)["loss"]
-
-        grads = nnx.grad(
-            loss_fn,
-            argnums=nnx.DiffState(0, trainable_param_filter),
-        )(model)
-        return jax.tree.map(lambda lhs, rhs: lhs + rhs, accumulated_grads, grads)
-
-    return accumulate_local_grads
-
-
-@cache
 def _jax_sharded_apply_grads_fn(device_count: int):
     data_mesh = _jax_data_mesh_for_device_count(device_count)
 
@@ -801,119 +573,6 @@ def _jax_sharded_apply_grads_fn(device_count: int):
         return optimizer.step[...]
 
     return apply_grads
-
-
-@cache
-def _jax_sharded_apply_accumulated_train_step_fn(device_count: int):
-    data_mesh = _jax_data_mesh_for_device_count(device_count)
-
-    @nnx.jit
-    @nnx.shard_map(
-        mesh=data_mesh,
-        in_specs=(P(), P(), P(JAX_DATA_AXIS), P(), P()),
-        out_specs=(P(), P()),
-        axis_names={JAX_DATA_AXIS},
-        check_vma=False,
-    )
-    def apply_accumulated_train_step(
-        model: PeakSetJEPAJax,
-        optimizer: nnx.Optimizer,
-        batch: dict[str, Array],
-        accumulated_grads: nnx.State,
-        accumulation_scale: Array,
-    ) -> tuple[dict[str, Array], Array]:
-        def loss_fn(model: PeakSetJEPAJax):
-            return model(batch, loss_only=True)["loss"]
-
-        loss, grads = nnx.value_and_grad(
-            loss_fn,
-            argnums=nnx.DiffState(0, trainable_param_filter),
-        )(model)
-        grads = jax.tree.map(
-            lambda lhs, rhs: (lhs + rhs) * accumulation_scale,
-            accumulated_grads,
-            grads,
-        )
-        grads = jax.tree.map(lambda value: jax.lax.pmean(value, JAX_DATA_AXIS), grads)
-        metrics = {"loss": jax.lax.pmean(loss, JAX_DATA_AXIS)}
-        optimizer.update(model, grads)
-        return metrics, optimizer.step[...]
-
-    return apply_accumulated_train_step
-
-
-@cache
-def _jax_sharded_accumulated_train_step_fn(device_count: int):
-    data_mesh = _jax_data_mesh_for_device_count(device_count)
-
-    @nnx.jit(donate_argnums=(0, 1))
-    @nnx.shard_map(
-        mesh=data_mesh,
-        in_specs=(P(), P(), P(None, JAX_DATA_AXIS)),
-        out_specs=(P(), P()),
-        axis_names={JAX_DATA_AXIS},
-        check_vma=False,
-    )
-    def accumulated_train_step(
-        model: PeakSetJEPAJax,
-        optimizer: nnx.Optimizer,
-        batch: dict[str, Array],
-    ) -> tuple[dict[str, Array], Array]:
-        metrics, grads = _accumulated_metrics_and_grads(model, batch)
-        metrics = jax.tree.map(
-            lambda value: jax.lax.pmean(value, JAX_DATA_AXIS),
-            metrics,
-        )
-        grads = jax.tree.map(lambda value: jax.lax.pmean(value, JAX_DATA_AXIS), grads)
-        optimizer.update(model, grads)
-        return metrics, optimizer.step[...]
-
-    return accumulated_train_step
-
-
-def _accumulated_metrics_and_grads(
-    model: PeakSetJEPAJax,
-    batch: dict[str, Array],
-) -> tuple[dict[str, Array], nnx.State]:
-    graphdef, trainable_params, static_state = nnx.split(
-        model,
-        trainable_param_filter,
-        ...,
-    )
-
-    def loss_fn(params: nnx.State, micro_batch: dict[str, Array]):
-        functional_model = nnx.merge(graphdef, params, static_state)
-        return functional_model(micro_batch, loss_only=True)["loss"]
-
-    def micro_batch_grad(micro_batch: dict[str, Array]):
-        return jax.value_and_grad(loss_fn)(
-            trainable_params,
-            micro_batch,
-        )
-
-    first_batch = jax.tree.map(lambda value: value[0], batch)
-    remaining_batches = jax.tree.map(lambda value: value[1:], batch)
-    loss, grads = micro_batch_grad(first_batch)
-
-    def scan_body(carry: tuple[nnx.State, Array], micro_batch):
-        grad_accumulator, loss_accumulator = carry
-        micro_loss, micro_grads = micro_batch_grad(micro_batch)
-        grad_accumulator = jax.tree.map(
-            lambda lhs, rhs: lhs + rhs,
-            grad_accumulator,
-            micro_grads,
-        )
-        return (grad_accumulator, loss_accumulator + micro_loss), None
-
-    (grads, loss), _ = jax.lax.scan(
-        scan_body,
-        (grads, loss),
-        remaining_batches,
-    )
-    num_micro_batches = float(jax.tree.leaves(batch)[0].shape[0])
-    grads = jax.tree.map(lambda value: value / num_micro_batches, grads)
-    loss = loss / num_micro_batches
-    return {"loss": loss}, grads
 
 
 def init_pure_optax_train_state(
@@ -939,7 +598,6 @@ def make_pure_accumulated_train_step(
     optimizer: optax.GradientTransformation,
     *,
     sharded: bool,
-    scan_zero_init: bool = False,
     data_mesh: Mesh | None = None,
 ):
     def accumulated_metrics_and_grads(
@@ -966,19 +624,6 @@ def make_pure_accumulated_train_step(
                 micro_grads,
             )
             return (grad_accumulator, loss_accumulator + micro_loss), None
-
-        if scan_zero_init:
-            grads = jax.tree.map(jnp.zeros_like, trainable_params)
-            loss = jnp.asarray(0.0, dtype=jnp.float32)
-            (grads, loss), _ = jax.lax.scan(
-                scan_body,
-                (grads, loss),
-                batch,
-            )
-            num_micro_batches = float(jax.tree.leaves(batch)[0].shape[0])
-            grads = jax.tree.map(lambda value: value / num_micro_batches, grads)
-            loss = loss / num_micro_batches
-            return {"loss": loss}, grads
 
         first_batch = jax.tree.map(lambda value: value[0], batch)
         remaining_batches = jax.tree.map(lambda value: value[1:], batch)
@@ -1097,18 +742,12 @@ def train_and_evaluate_jax(
     )
     resume_step = checkpoint_manager.latest_step()
     if resume_step is None:
-        checkpoints = training_checkpoint_paths(checkpoint_dir)
-        if checkpoints:
-            model.load_torch_checkpoint(checkpoints[-1])
-        else:
-            initialize_jax_model_from_torch_seed(config, model)
-    optimizer = build_jax_optimizer(config, model, total_steps=total_steps)
+        initialize_jax_model_from_torch_seed(config, model)
     logger = build_logger(config, local_workdir) if is_main_process else MetricLogger()
     metrics = _run_jax_training_loop(
         config=config,
         datamodule=datamodule,
         model=model,
-        optimizer=optimizer,
         logger=logger,
         total_steps=total_steps,
         checkpoint_manager=checkpoint_manager,
@@ -1163,7 +802,6 @@ def _run_jax_training_loop(
     config: config_dict.ConfigDict,
     datamodule: GemsNativeDataModule,
     model: PeakSetJEPAJax,
-    optimizer: nnx.Optimizer,
     logger: MetricLogger,
     total_steps: int,
     checkpoint_manager: Any,
@@ -1172,50 +810,11 @@ def _run_jax_training_loop(
     log_every_n_steps = int(_config_get(config, "log_every_n_steps", 50))
     warmup_steps = int(_config_get(config, "throughput_warmup_steps", 0))
     grad_accum_steps = int(_config_get(config, "gradient_accumulation_steps", 1))
+    if model.use_ema_teacher:
+        raise ValueError("JAX training uses pure Optax and does not support EMA teachers.")
     data_parallel_devices = _jax_data_parallel_devices(config)
     data_mesh = _jax_data_mesh_for_device_count(data_parallel_devices)
     use_sharded_step = data_parallel_devices > 1
-    sharded_grad_step = _jax_sharded_grad_step_fn(data_parallel_devices)
-    sharded_grad_step_grads_only = _jax_sharded_grad_step_grads_only_fn(
-        data_parallel_devices
-    )
-    sharded_local_grad_step = _jax_sharded_local_grad_step_fn(data_parallel_devices)
-    sharded_accumulate_local_grads = _jax_sharded_accumulate_local_grads_fn(
-        data_parallel_devices
-    )
-    sharded_apply_grads = _jax_sharded_apply_grads_fn(data_parallel_devices)
-    sharded_apply_accumulated_train_step = (
-        _jax_sharded_apply_accumulated_train_step_fn(data_parallel_devices)
-    )
-    sharded_accumulated_train_step = _jax_sharded_accumulated_train_step_fn(
-        data_parallel_devices
-    )
-    use_optax_multistep = (
-        bool(
-            _config_get(
-                config,
-                "jax_optax_multistep_accumulation",
-                False,
-            )
-        )
-        and grad_accum_steps > 1
-        and not use_sharded_step
-    )
-    use_compiled_accumulation = grad_accum_steps > 1 and not use_optax_multistep
-    use_scan_accumulation = (
-        bool(_config_get(config, "jax_scan_accumulation", False))
-        and use_compiled_accumulation
-    )
-    use_device_accumulation = (
-        bool(_config_get(config, "jax_device_accumulation", True))
-        and use_compiled_accumulation
-        and not use_scan_accumulation
-    )
-    use_pure_optax_step = (
-        bool(_config_get(config, "jax_pure_optax_step", False))
-        and use_scan_accumulation
-        and not model.use_ema_teacher
-    )
     pure_trainable_params = None
     pure_static_state = None
     pure_opt_state = None
@@ -1230,128 +829,118 @@ def _run_jax_training_loop(
         config,
         context_encoder_pack_tokens,
     )
-    if use_pure_optax_step:
-        scan_zero_init = bool(_config_get(config, "jax_scan_zero_init", False))
-        if context_encoder_pack_choices:
-            model.mae_context_encoder_pack_tokens = 0
+    if context_encoder_pack_choices:
+        model.mae_context_encoder_pack_tokens = 0
+        (
+            pure_full_graphdef,
+            _full_trainable_params,
+            pure_full_static_state,
+            _full_opt_state,
+            _full_optimizer,
+        ) = init_pure_optax_train_state(
+            config,
+            model,
+            total_steps=total_steps,
+        )
+        model.mae_context_encoder_pack_tokens = context_encoder_pack_tokens
+        pure_optimizer = None
+        pack_train_states = []
+        for pack_tokens in context_encoder_pack_choices:
+            model.mae_context_encoder_pack_tokens = pack_tokens
             (
-                pure_full_graphdef,
-                _full_trainable_params,
-                pure_full_static_state,
-                _full_opt_state,
-                _full_optimizer,
+                pack_graphdef,
+                pack_trainable_params,
+                pack_static_state,
+                pack_opt_state,
+                pack_optimizer,
             ) = init_pure_optax_train_state(
                 config,
                 model,
                 total_steps=total_steps,
             )
-            model.mae_context_encoder_pack_tokens = context_encoder_pack_tokens
-            pure_optimizer = None
-            pack_train_states = []
-            for pack_tokens in context_encoder_pack_choices:
-                model.mae_context_encoder_pack_tokens = pack_tokens
-                (
+            if pure_trainable_params is None:
+                pure_trainable_params = pack_trainable_params
+                pure_static_state = pack_static_state
+                pure_opt_state = pack_opt_state
+                pure_optimizer = pack_optimizer
+            pack_train_states.append(
+                (pack_tokens, pack_static_state, pack_graphdef)
+            )
+        model.mae_context_encoder_pack_tokens = context_encoder_pack_tokens
+        pure_pack_train_steps = [
+            (
+                pack_tokens,
+                pack_static_state,
+                make_pure_accumulated_train_step(
                     pack_graphdef,
-                    pack_trainable_params,
-                    pack_static_state,
-                    pack_opt_state,
-                    pack_optimizer,
-                ) = init_pure_optax_train_state(
-                    config,
-                    model,
-                    total_steps=total_steps,
-                )
-                if pure_trainable_params is None:
-                    pure_trainable_params = pack_trainable_params
-                    pure_static_state = pack_static_state
-                    pure_opt_state = pack_opt_state
-                    pure_optimizer = pack_optimizer
-                pack_train_states.append(
-                    (pack_tokens, pack_static_state, pack_graphdef)
-                )
-            model.mae_context_encoder_pack_tokens = context_encoder_pack_tokens
-            pure_pack_train_steps = [
-                (
-                    pack_tokens,
-                    pack_static_state,
-                    make_pure_accumulated_train_step(
-                        pack_graphdef,
-                        pure_optimizer,
-                        sharded=use_sharded_step,
-                        scan_zero_init=scan_zero_init,
-                        data_mesh=data_mesh,
-                    ),
-                )
-                for pack_tokens, pack_static_state, pack_graphdef in pack_train_states
-            ]
-        else:
+                    pure_optimizer,
+                    sharded=use_sharded_step,
+                    data_mesh=data_mesh,
+                ),
+            )
+            for pack_tokens, pack_static_state, pack_graphdef in pack_train_states
+        ]
+    else:
+        (
+            pure_graphdef,
+            pure_trainable_params,
+            pure_static_state,
+            pure_opt_state,
+            pure_optimizer,
+        ) = init_pure_optax_train_state(
+            config,
+            model,
+            total_steps=total_steps,
+        )
+    if not pure_pack_train_steps:
+        pure_train_step = make_pure_accumulated_train_step(
+            pure_graphdef,
+            pure_optimizer,
+            sharded=use_sharded_step,
+            data_mesh=data_mesh,
+        )
+    if context_encoder_pack_choices:
+        pure_full_train_step = make_pure_accumulated_train_step(
+            pure_full_graphdef,
+            pure_optimizer,
+            sharded=use_sharded_step,
+            data_mesh=data_mesh,
+        )
+    if use_sharded_step:
+        # Commit the training state to the data mesh once so precompile and
+        # every training step share one input-sharding signature; otherwise
+        # the first step per variant sees uncommitted arrays and recompiles.
+        pure_trainable_params = _replicate_tree_on_data_mesh(
+            pure_trainable_params,
+            data_mesh,
+        )
+        pure_opt_state = _replicate_tree_on_data_mesh(pure_opt_state, data_mesh)
+        pure_static_state = _replicate_tree_on_data_mesh(
+            pure_static_state,
+            data_mesh,
+        )
+        if pure_full_static_state is not None:
+            pure_full_static_state = _replicate_tree_on_data_mesh(
+                pure_full_static_state,
+                data_mesh,
+            )
+        pure_pack_train_steps = [
             (
-                pure_graphdef,
-                pure_trainable_params,
-                pure_static_state,
-                pure_opt_state,
-                pure_optimizer,
-            ) = init_pure_optax_train_state(
-                config,
-                model,
-                total_steps=total_steps,
+                pack_tokens,
+                _replicate_tree_on_data_mesh(pack_static_state, data_mesh),
+                pack_train_step,
             )
-        if not pure_pack_train_steps:
-            pure_train_step = make_pure_accumulated_train_step(
-                pure_graphdef,
-                pure_optimizer,
-                sharded=use_sharded_step,
-                scan_zero_init=scan_zero_init,
-                data_mesh=data_mesh,
+            for pack_tokens, pack_static_state, pack_train_step in (
+                pure_pack_train_steps
             )
-        if context_encoder_pack_choices:
-            pure_full_train_step = make_pure_accumulated_train_step(
-                pure_full_graphdef,
-                pure_optimizer,
-                sharded=use_sharded_step,
-                scan_zero_init=scan_zero_init,
-                data_mesh=data_mesh,
-            )
-        if use_sharded_step:
-            # Commit the training state to the data mesh once so precompile and
-            # every training step share one input-sharding signature; otherwise
-            # the first step per variant sees uncommitted arrays and recompiles.
-            pure_trainable_params = _replicate_tree_on_data_mesh(
-                pure_trainable_params,
-                data_mesh,
-            )
-            pure_opt_state = _replicate_tree_on_data_mesh(pure_opt_state, data_mesh)
-            pure_static_state = _replicate_tree_on_data_mesh(
-                pure_static_state,
-                data_mesh,
-            )
-            if pure_full_static_state is not None:
-                pure_full_static_state = _replicate_tree_on_data_mesh(
-                    pure_full_static_state,
-                    data_mesh,
-                )
-            pure_pack_train_steps = [
-                (
-                    pack_tokens,
-                    _replicate_tree_on_data_mesh(pack_static_state, data_mesh),
-                    pack_train_step,
-                )
-                for pack_tokens, pack_static_state, pack_train_step in (
-                    pure_pack_train_steps
-                )
-            ]
+        ]
     checkpoint_every_steps = int(_config_get(config, "checkpoint_every_steps", 0))
 
     def jax_checkpoint_state() -> dict[str, Any]:
-        if use_pure_optax_step:
-            return {
-                "trainable_params": pure_trainable_params,
-                "static_state": pure_static_state,
-                "opt_state": pure_opt_state,
-            }
         return {
-            "model": nnx.as_pure(nnx.state(model)),
-            "optimizer": nnx.as_pure(nnx.state(optimizer)),
+            "trainable_params": pure_trainable_params,
+            "static_state": pure_static_state,
+            "opt_state": pure_opt_state,
         }
 
     def save_checkpoint(step: int) -> None:
@@ -1369,23 +958,19 @@ def _run_jax_training_loop(
             int(resume_step),
             jax_checkpoint_state(),
         )
-        if use_pure_optax_step:
-            pure_trainable_params = restored["trainable_params"]
-            pure_static_state = restored["static_state"]
-            pure_opt_state = restored["opt_state"]
-            # Pack variants only differ in graphdef; their static states are
-            # numerically identical, so they all share the restored tree.
-            if pure_full_static_state is not None:
-                pure_full_static_state = pure_static_state
-            pure_pack_train_steps = [
-                (pack_tokens, pure_static_state, pack_train_step)
-                for pack_tokens, _pack_static_state, pack_train_step in (
-                    pure_pack_train_steps
-                )
-            ]
-        else:
-            nnx.update(model, restored["model"])
-            nnx.update(optimizer, restored["optimizer"])
+        pure_trainable_params = restored["trainable_params"]
+        pure_static_state = restored["static_state"]
+        pure_opt_state = restored["opt_state"]
+        # Pack variants only differ in graphdef; their static states are
+        # numerically identical, so they all share the restored tree.
+        if pure_full_static_state is not None:
+            pure_full_static_state = pure_static_state
+        pure_pack_train_steps = [
+            (pack_tokens, pure_static_state, pack_train_step)
+            for pack_tokens, _pack_static_state, pack_train_step in (
+                pure_pack_train_steps
+            )
+        ]
         start_step = int(resume_step)
     timing_barriers = bool(_config_get(config, "jax_timing_barriers", False))
     compile_stall_threshold_seconds = float(
@@ -1403,8 +988,6 @@ def _run_jax_training_loop(
         config=config,
         datamodule=datamodule,
         grad_accum_steps=grad_accum_steps,
-        use_scan_accumulation=use_scan_accumulation,
-        use_pure_optax_step=use_pure_optax_step,
         use_sharded_step=use_sharded_step,
         data_mesh=data_mesh,
         pure_trainable_params=pure_trainable_params,
@@ -1414,9 +997,6 @@ def _run_jax_training_loop(
         pure_pack_train_steps=pure_pack_train_steps,
         pure_full_static_state=pure_full_static_state,
         pure_full_train_step=pure_full_train_step,
-        model=model,
-        optimizer=optimizer,
-        sharded_accumulated_train_step=sharded_accumulated_train_step,
     )
     timing = {
         "dataloader_seconds": 0.0,
@@ -1430,8 +1010,6 @@ def _run_jax_training_loop(
     loop_epochs = max(1, math.ceil(float(config.num_epochs)))
     global_step = start_step
     start_epoch = min(start_step // datamodule.train_steps, loop_epochs - 1)
-    accumulation_step = 0
-    accumulated_grads = None
     last_metrics: dict[str, Array] = {}
     train_start = time.perf_counter()
     measured_start: float | None = None
@@ -1462,169 +1040,41 @@ def _run_jax_training_loop(
             disable=jax.process_index() != 0,
         )
         while global_step < total_steps:
-            if use_scan_accumulation:
-                dataloader_elapsed = 0.0
-                transfer_elapsed = 0.0
-                max_context_count = 0
-                micro_batches = []
-                for _ in range(grad_accum_steps):
-                    dataloader_start = time.perf_counter()
-                    try:
-                        torch_batch = next(loader_iter)
-                    except StopIteration:
-                        break
-                    dataloader_elapsed += time.perf_counter() - dataloader_start
-                    if pure_full_train_step is not None:
-                        active_context = (
-                            torch_batch["context_mask"] & torch_batch["peak_valid_mask"]
-                        )
-                        if isinstance(active_context, np.ndarray):
-                            context_count = int(active_context.sum(axis=1).max())
-                        else:
-                            context_count = int(active_context.sum(dim=1).max().item())
-                        max_context_count = max(max_context_count, int(context_count))
-                    transfer_start = time.perf_counter()
-                    micro_batches.append(torch_batch_to_jax(torch_batch))
-                    if timing_barriers:
-                        jax.block_until_ready(micro_batches[-1])
-                    transfer_elapsed += time.perf_counter() - transfer_start
-                if len(micro_batches) < grad_accum_steps:
+            dataloader_elapsed = 0.0
+            transfer_elapsed = 0.0
+            max_context_count = 0
+            micro_batches = []
+            for _ in range(grad_accum_steps):
+                dataloader_start = time.perf_counter()
+                try:
+                    torch_batch = next(loader_iter)
+                except StopIteration:
                     break
-                batch = _stack_micro_batches(micro_batches)
-                if use_sharded_step:
-                    batch = _put_batch_on_data_mesh(batch, data_mesh, batch_axis=1)
-                timing_enabled = measured_start is not None
-                if timing_enabled:
-                    timing["dataloader_seconds"] += dataloader_elapsed
-                    timing["transfer_seconds"] += transfer_elapsed
-                    timing["measured_microbatches"] += float(grad_accum_steps)
-                if measured_start is None and global_step >= warmup_steps:
-                    jax.effects_barrier()
-                    measured_start = time.perf_counter()
-                    timing_enabled = True
-                if (
-                    profile_dir
-                    and not profile_started
-                    and global_step >= profile_start_step
-                ):
-                    jax.effects_barrier()
-                    jax.profiler.start_trace(profile_dir)
-                    profile_started = True
-                    profile_active = True
-                step_start = time.perf_counter()
-                if use_pure_optax_step:
-                    if pure_pack_train_steps:
-                        selected_train_step = pure_full_train_step
-                        selected_static_state = pure_full_static_state
-                        used_context_full_fallback = True
-                        selected_pack_tokens = 0
-                        for (
-                            pack_tokens,
-                            pack_static_state,
-                            pack_train_step,
-                        ) in pure_pack_train_steps:
-                            if max_context_count <= pack_tokens:
-                                selected_train_step = pack_train_step
-                                selected_static_state = pack_static_state
-                                selected_pack_tokens = pack_tokens
-                                used_context_full_fallback = False
-                                break
+                dataloader_elapsed += time.perf_counter() - dataloader_start
+                if pure_full_train_step is not None:
+                    active_context = (
+                        torch_batch["context_mask"] & torch_batch["peak_valid_mask"]
+                    )
+                    if isinstance(active_context, np.ndarray):
+                        context_count = int(active_context.sum(axis=1).max())
                     else:
-                        selected_train_step = pure_train_step
-                        selected_static_state = pure_static_state
-                        used_context_full_fallback = False
-                        selected_pack_tokens = 0
-                    if pure_full_train_step is not None:
-                        if used_context_full_fallback:
-                            context_encoder_full_fallback_steps += 1
-                            if timing_enabled:
-                                measured_context_encoder_full_fallback_steps += 1
-                        else:
-                            context_encoder_packed_steps += 1
-                            if selected_pack_tokens:
-                                context_encoder_pack_steps_by_size[
-                                    selected_pack_tokens
-                                ] += 1
-                            if timing_enabled:
-                                measured_context_encoder_packed_steps += 1
-                                if selected_pack_tokens:
-                                    measured_context_encoder_pack_steps_by_size[
-                                        selected_pack_tokens
-                                    ] += 1
-                    pure_trainable_params, pure_opt_state, metrics = selected_train_step(
-                        pure_trainable_params,
-                        selected_static_state,
-                        pure_opt_state,
-                        batch,
-                    )
-                    if timing_barriers:
-                        jax.block_until_ready(
-                            (pure_trainable_params, pure_opt_state, metrics)
-                        )
-                else:
-                    metrics, apply_token = (
-                        sharded_accumulated_train_step(model, optimizer, batch)
-                        if use_sharded_step
-                        else jax_accumulated_train_step(model, optimizer, batch)
-                    )
-                    if timing_barriers:
-                        jax.block_until_ready((metrics, apply_token))
-                step_elapsed = time.perf_counter() - step_start
-                _raise_on_jax_compile_stall(
-                    step_elapsed,
-                    threshold_seconds=compile_stall_threshold_seconds,
-                    global_step=global_step,
-                    branch="scan_accumulation",
-                )
-                if timing_enabled:
-                    timing["compiled_step_seconds"] += step_elapsed
-                if not use_pure_optax_step:
-                    ema_momentum = model.update_ema_teacher(global_step + 1, total_steps)
-                    if ema_momentum is not None:
-                        metrics["ema_teacher_momentum"] = jnp.asarray(ema_momentum)
-                last_metrics = metrics
-                global_step += 1
-                if measured_start is not None:
-                    measured_steps += 1
-                pbar.update(1)
-                _log_jax_train_metrics(
-                    config,
-                    logger,
-                    pbar,
-                    metrics,
-                    epoch=epoch,
-                    global_step=global_step,
-                    total_steps=total_steps,
-                    every_n_steps=log_every_n_steps,
-                )
-                maybe_save_checkpoint(global_step)
-                if profile_active and global_step >= profile_end_step:
-                    jax.effects_barrier()
-                    jax.profiler.stop_trace()
-                    profile_active = False
-                continue
-            dataloader_start = time.perf_counter()
-            try:
-                torch_batch = next(loader_iter)
-            except StopIteration:
+                        context_count = int(active_context.sum(dim=1).max().item())
+                    max_context_count = max(max_context_count, int(context_count))
+                transfer_start = time.perf_counter()
+                micro_batches.append(torch_batch_to_jax(torch_batch))
+                if timing_barriers:
+                    jax.block_until_ready(micro_batches[-1])
+                transfer_elapsed += time.perf_counter() - transfer_start
+            if len(micro_batches) < grad_accum_steps:
                 break
-            dataloader_elapsed = time.perf_counter() - dataloader_start
-            if global_step >= total_steps:
-                break
+            batch = _stack_micro_batches(micro_batches)
+            if use_sharded_step:
+                batch = _put_batch_on_data_mesh(batch, data_mesh, batch_axis=1)
             timing_enabled = measured_start is not None
             if timing_enabled:
                 timing["dataloader_seconds"] += dataloader_elapsed
-                timing["measured_microbatches"] += 1.0
-            transfer_start = time.perf_counter()
-            batch = torch_batch_to_jax(
-                torch_batch,
-                data_mesh=data_mesh if use_sharded_step else None,
-            )
-            if timing_barriers:
-                jax.block_until_ready(batch)
-            transfer_elapsed = time.perf_counter() - transfer_start
-            if timing_enabled:
                 timing["transfer_seconds"] += transfer_elapsed
+                timing["measured_microbatches"] += float(grad_accum_steps)
             if measured_start is None and global_step >= warmup_steps:
                 jax.effects_barrier()
                 measured_start = time.perf_counter()
@@ -1638,225 +1088,62 @@ def _run_jax_training_loop(
                 jax.profiler.start_trace(profile_dir)
                 profile_started = True
                 profile_active = True
-            if use_optax_multistep:
-                step_start = time.perf_counter()
-                metrics, apply_token = jax_multistep_train_step(
-                    model,
-                    optimizer,
-                    batch,
-                )
-                if timing_barriers:
-                    jax.block_until_ready((metrics, apply_token))
-                step_elapsed = time.perf_counter() - step_start
-                _raise_on_jax_compile_stall(
-                    step_elapsed,
-                    threshold_seconds=compile_stall_threshold_seconds,
-                    global_step=global_step,
-                    branch="optax_multistep",
-                )
-                if timing_enabled:
-                    timing["grad_seconds"] += step_elapsed
-                accumulation_step += 1
-                if accumulation_step % grad_accum_steps != 0:
-                    continue
-                accumulation_step = 0
-                ema_momentum = model.update_ema_teacher(global_step + 1, total_steps)
-                if ema_momentum is not None:
-                    metrics["ema_teacher_momentum"] = jnp.asarray(ema_momentum)
-                last_metrics = metrics
-                global_step += 1
-                if measured_start is not None:
-                    measured_steps += 1
-                pbar.update(1)
-                _log_jax_train_metrics(
-                    config,
-                    logger,
-                    pbar,
-                    metrics,
-                    epoch=epoch,
-                    global_step=global_step,
-                    total_steps=total_steps,
-                    every_n_steps=log_every_n_steps,
-                )
-                maybe_save_checkpoint(global_step)
-                if profile_active and global_step >= profile_end_step:
-                    jax.effects_barrier()
-                    jax.profiler.stop_trace()
-                    profile_active = False
-                continue
-            next_micro_step_is_boundary = (
-                (accumulation_step + 1) % grad_accum_steps == 0
-            )
-            if use_device_accumulation:
-                step_start = time.perf_counter()
-                if next_micro_step_is_boundary:
-                    scale = jnp.asarray(1.0 / float(grad_accum_steps), dtype=jnp.float32)
-                    metrics, apply_token = (
-                        sharded_apply_accumulated_train_step(
-                            model,
-                            optimizer,
-                            batch,
-                            accumulated_grads,
-                            scale,
-                        )
-                        if use_sharded_step
-                        else jax_apply_accumulated_train_step(
-                            model,
-                            optimizer,
-                            batch,
-                            accumulated_grads,
-                            scale,
-                        )
-                    )
-                    if timing_barriers:
-                        jax.block_until_ready((metrics, apply_token))
-                    step_elapsed = time.perf_counter() - step_start
-                    _raise_on_jax_compile_stall(
-                        step_elapsed,
-                        threshold_seconds=compile_stall_threshold_seconds,
-                        global_step=global_step,
-                        branch="device_accumulation_apply",
-                    )
+
+            if pure_pack_train_steps:
+                selected_train_step = pure_full_train_step
+                selected_static_state = pure_full_static_state
+                used_context_full_fallback = True
+                selected_pack_tokens = 0
+                for (
+                    pack_tokens,
+                    pack_static_state,
+                    pack_train_step,
+                ) in pure_pack_train_steps:
+                    if max_context_count <= pack_tokens:
+                        selected_train_step = pack_train_step
+                        selected_static_state = pack_static_state
+                        selected_pack_tokens = pack_tokens
+                        used_context_full_fallback = False
+                        break
+            else:
+                selected_train_step = pure_train_step
+                selected_static_state = pure_static_state
+                used_context_full_fallback = False
+                selected_pack_tokens = 0
+            if pure_full_train_step is not None:
+                if used_context_full_fallback:
+                    context_encoder_full_fallback_steps += 1
                     if timing_enabled:
-                        timing["compiled_step_seconds"] += step_elapsed
-                    ema_momentum = model.update_ema_teacher(
-                        global_step + 1,
-                        total_steps,
-                    )
-                    if ema_momentum is not None:
-                        metrics["ema_teacher_momentum"] = jnp.asarray(ema_momentum)
-                    accumulated_grads = None
-                    accumulation_step = 0
-                    last_metrics = metrics
-                    global_step += 1
-                    if measured_start is not None:
-                        measured_steps += 1
-                    pbar.update(1)
-                    _log_jax_train_metrics(
-                        config,
-                        logger,
-                        pbar,
-                        metrics,
-                        epoch=epoch,
-                        global_step=global_step,
-                        total_steps=total_steps,
-                        every_n_steps=log_every_n_steps,
-                    )
-                    maybe_save_checkpoint(global_step)
-                    if profile_active and global_step >= profile_end_step:
-                        jax.effects_barrier()
-                        jax.profiler.stop_trace()
-                        profile_active = False
-                    continue
-                accumulated_grads = (
-                    (
-                        sharded_local_grad_step(model, batch)
-                        if use_sharded_step
-                        else jax_local_grad_step(model, batch)
-                    )
-                    if accumulated_grads is None
-                    else (
-                        sharded_accumulate_local_grads(
-                            model,
-                            batch,
-                            accumulated_grads,
-                        )
-                        if use_sharded_step
-                        else jax_accumulate_local_grads(
-                            model,
-                            batch,
-                            accumulated_grads,
-                        )
-                    )
-                )
-                if timing_barriers:
-                    jax.block_until_ready(accumulated_grads)
-                step_elapsed = time.perf_counter() - step_start
-                _raise_on_jax_compile_stall(
-                    step_elapsed,
-                    threshold_seconds=compile_stall_threshold_seconds,
-                    global_step=global_step,
-                    branch="device_accumulation_grad",
-                )
-                if timing_enabled:
-                    timing["grad_seconds"] += step_elapsed
-                accumulation_step += 1
-                continue
-            grad_start = time.perf_counter()
-            metrics = None
-            if use_sharded_step and not next_micro_step_is_boundary:
-                grads = sharded_grad_step_grads_only(model, batch)
-                if timing_barriers:
-                    jax.block_until_ready(grads)
-            else:
-                (_loss, metrics), grads = (
-                    sharded_grad_step(model, batch)
-                    if use_sharded_step
-                    else jax_grad_step(model, batch)
-                )
-                if timing_barriers:
-                    jax.block_until_ready((metrics, grads))
+                        measured_context_encoder_full_fallback_steps += 1
+                else:
+                    context_encoder_packed_steps += 1
+                    if selected_pack_tokens:
+                        context_encoder_pack_steps_by_size[selected_pack_tokens] += 1
+                    if timing_enabled:
+                        measured_context_encoder_packed_steps += 1
+                        if selected_pack_tokens:
+                            measured_context_encoder_pack_steps_by_size[
+                                selected_pack_tokens
+                            ] += 1
+
+            step_start = time.perf_counter()
+            pure_trainable_params, pure_opt_state, metrics = selected_train_step(
+                pure_trainable_params,
+                selected_static_state,
+                pure_opt_state,
+                batch,
+            )
             if timing_barriers:
-                jax.block_until_ready(grads)
-            grad_elapsed = time.perf_counter() - grad_start
+                jax.block_until_ready((pure_trainable_params, pure_opt_state, metrics))
+            step_elapsed = time.perf_counter() - step_start
             _raise_on_jax_compile_stall(
-                grad_elapsed,
+                step_elapsed,
                 threshold_seconds=compile_stall_threshold_seconds,
                 global_step=global_step,
-                branch="grad",
+                branch="pure_optax_scan",
             )
             if timing_enabled:
-                timing["grad_seconds"] += grad_elapsed
-            accumulated_grads = (
-                grads
-                if accumulated_grads is None
-                else _timed_tree_map(
-                    lambda lhs, rhs: lhs + rhs,
-                    accumulated_grads,
-                    grads,
-                )
-            )
-            if timing_barriers:
-                jax.block_until_ready(accumulated_grads)
-            accumulate_elapsed = time.perf_counter() - grad_start - grad_elapsed
-            if timing_enabled:
-                timing["accumulate_seconds"] += accumulate_elapsed
-            accumulation_step += 1
-            if accumulation_step % grad_accum_steps != 0:
-                continue
-            if grad_accum_steps > 1:
-                accumulate_start = time.perf_counter()
-                accumulated_grads = jax.tree.map(
-                    lambda grad: grad / float(grad_accum_steps),
-                    accumulated_grads,
-                )
-                if timing_barriers:
-                    jax.block_until_ready(accumulated_grads)
-                if timing_enabled:
-                    timing["accumulate_seconds"] += (
-                        time.perf_counter() - accumulate_start
-                    )
-            apply_start = time.perf_counter()
-            if use_sharded_step:
-                apply_token = sharded_apply_grads(model, optimizer, accumulated_grads)
-            else:
-                apply_token = jax_apply_grads(model, optimizer, accumulated_grads)
-            if timing_barriers:
-                jax.block_until_ready(apply_token)
-            apply_elapsed = time.perf_counter() - apply_start
-            _raise_on_jax_compile_stall(
-                apply_elapsed,
-                threshold_seconds=compile_stall_threshold_seconds,
-                global_step=global_step,
-                branch="apply_grads",
-            )
-            if timing_enabled:
-                timing["apply_seconds"] += apply_elapsed
-            ema_momentum = model.update_ema_teacher(global_step + 1, total_steps)
-            if ema_momentum is not None:
-                metrics["ema_teacher_momentum"] = jnp.asarray(ema_momentum)
-            accumulated_grads = None
-            accumulation_step = 0
+                timing["compiled_step_seconds"] += step_elapsed
             last_metrics = metrics
             global_step += 1
             if measured_start is not None:
@@ -1880,9 +1167,8 @@ def _run_jax_training_loop(
         pbar.close()
         if global_step >= total_steps:
             break
-    if use_pure_optax_step:
-        jax.block_until_ready(pure_trainable_params)
-        nnx.update(model, pure_trainable_params)
+    jax.block_until_ready(pure_trainable_params)
+    nnx.update(model, pure_trainable_params)
     jax.effects_barrier()
     if profile_active:
         jax.profiler.stop_trace()
@@ -2004,8 +1290,6 @@ def _precompile_jax_training_steps(
     config: config_dict.ConfigDict,
     datamodule: GemsNativeDataModule,
     grad_accum_steps: int,
-    use_scan_accumulation: bool,
-    use_pure_optax_step: bool,
     use_sharded_step: bool,
     data_mesh: Mesh,
     pure_trainable_params: nnx.State | None,
@@ -2015,9 +1299,6 @@ def _precompile_jax_training_steps(
     pure_pack_train_steps: list[tuple[int, nnx.State, Any]],
     pure_full_static_state: nnx.State | None,
     pure_full_train_step: Any | None,
-    model: PeakSetJEPAJax,
-    optimizer: nnx.Optimizer,
-    sharded_accumulated_train_step: Any,
 ) -> dict[str, float]:
     if not bool(_config_get(config, "jax_precompile_train_steps", True)):
         return {
@@ -2027,15 +1308,6 @@ def _precompile_jax_training_steps(
             "run/precompile_pack_variants": 0.0,
             "run/precompile_full_fallback": 0.0,
         }
-    if not use_scan_accumulation:
-        return {
-            "run/precompile_seconds": 0.0,
-            "run/precompile_train_steps": 0.0,
-            "run/precompile_repetitions": 0.0,
-            "run/precompile_pack_variants": 0.0,
-            "run/precompile_full_fallback": 0.0,
-        }
-
     compile_start = time.perf_counter()
     precompile_repetitions = int(_config_get(config, "jax_precompile_repetitions", 1))
     loader_iter = iter(datamodule.train_loader_for_epoch(0))
@@ -2049,30 +1321,29 @@ def _precompile_jax_training_steps(
     train_step_count = 0
     pack_variant_count = 0
     full_fallback_count = 0
-    if use_pure_optax_step:
-        step_specs = []
-        for pack_tokens, static_state, train_step in pure_pack_train_steps:
-            step_specs.append(
-                (static_state, train_step, _limit_context_count(batch, pack_tokens))
+    step_specs = []
+    for pack_tokens, static_state, train_step in pure_pack_train_steps:
+        step_specs.append(
+            (static_state, train_step, _limit_context_count(batch, pack_tokens))
+        )
+        pack_variant_count += 1
+    if pure_full_train_step is not None:
+        step_specs.append((pure_full_static_state, pure_full_train_step, batch))
+        full_fallback_count += 1
+    if pure_train_step is not None:
+        step_specs.append((pure_static_state, pure_train_step, batch))
+    for static_state, train_step, compile_batch in step_specs:
+        compile_params = _clone_jax_tree(pure_trainable_params)
+        compile_opt_state = _clone_jax_tree(pure_opt_state)
+        for _ in range(precompile_repetitions):
+            compile_params, compile_opt_state, metrics = train_step(
+                compile_params,
+                static_state,
+                compile_opt_state,
+                compile_batch,
             )
-            pack_variant_count += 1
-        if pure_full_train_step is not None:
-            step_specs.append((pure_full_static_state, pure_full_train_step, batch))
-            full_fallback_count += 1
-        if pure_train_step is not None:
-            step_specs.append((pure_static_state, pure_train_step, batch))
-        for static_state, train_step, compile_batch in step_specs:
-            compile_params = _clone_jax_tree(pure_trainable_params)
-            compile_opt_state = _clone_jax_tree(pure_opt_state)
-            for _ in range(precompile_repetitions):
-                compile_params, compile_opt_state, metrics = train_step(
-                    compile_params,
-                    static_state,
-                    compile_opt_state,
-                    compile_batch,
-                )
-                jax.block_until_ready((compile_params, compile_opt_state, metrics))
-                train_step_count += 1
+            jax.block_until_ready((compile_params, compile_opt_state, metrics))
+            train_step_count += 1
     return {
         "run/precompile_seconds": time.perf_counter() - compile_start,
         "run/precompile_train_steps": float(train_step_count),
@@ -2135,10 +1406,6 @@ def _jax_data_parallel_devices(config: Any) -> int:
     if isinstance(requested, str):
         return jax.device_count() if requested.lower() == "all" else int(requested)
     return int(requested)
-
-
-def _timed_tree_map(fn: Any, *trees: Any) -> Any:
-    return jax.tree.map(fn, *trees)
 
 
 def _stack_micro_batches(batches: list[dict[str, Array]]) -> dict[str, Array]:

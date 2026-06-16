@@ -51,7 +51,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.predictor_dim = 128
     cfg.predictor_dropout = 0.1
     cfg.predictor_apply_final_norm = True
-    cfg.predictor_use_rope = False
     cfg.masked_latent_predictor_num_layers = 4
     cfg.masked_latent_predictor_num_heads = 8
     cfg.target_projector_dim = -1
@@ -88,7 +87,6 @@ def get_config() -> config_dict.ConfigDict:
 
     # Pooling
     cfg.covariance_pooling_dim = 64
-    cfg.train_covariance_pooling = False
 
     # EMA teacher
     cfg.use_ema_teacher = False
@@ -110,7 +108,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataloader_pin_memory = True
 
     # MSG probe
-    cfg.probe_dataset = "nist-murcko"
     cfg.msg_probe_early_stopping = True
     cfg.msg_probe_early_stopping_min_delta = 0.0001
     cfg.msg_probe_early_stopping_min_epochs = 20
@@ -138,7 +135,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.grad_clip_norm = 1
     cfg.optimizer = "adamw"
     cfg.optimizer_fused = True
-    cfg.adamw_lr = None
 
     # Logging
     cfg.enable_wandb = True

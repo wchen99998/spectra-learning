@@ -1161,6 +1161,10 @@ class MsgProbeMetricTests(unittest.TestCase):
             msg_probe_metric_higher_is_better("msg_probe/test/auc_maccs_mean")
         )
 
+    def test_select_metric_rejects_probe_dataset(self):
+        with self.assertRaisesRegex(ValueError, "probe_dataset"):
+            resolve_msg_probe_select_metric({"probe_dataset": "nist-murcko"})
+
     def test_fingerprint_rejects_fingerprint_type_alias(self):
         cfg = {"msg_probe_fingerprint_type": "morgan"}
 
@@ -1431,13 +1435,11 @@ class ProbeStepCountTests(unittest.TestCase):
 class ProbeConfigTests(unittest.TestCase):
     def test_nist_murcko_probe_repeat_defaults_to_one(self):
         cfg = config_dict.ConfigDict()
-        cfg.probe_dataset = "nist-murcko"
 
         self.assertEqual(resolve_msg_probe_num_repeats(cfg), 1)
 
     def test_nist_murcko_probe_repeat_override_is_used(self):
         cfg = config_dict.ConfigDict()
-        cfg.probe_dataset = "nist-murcko"
         cfg.nist_murcko_probe_num_repeats = 3
 
         self.assertEqual(resolve_msg_probe_num_repeats(cfg), 3)

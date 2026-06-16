@@ -143,8 +143,6 @@ def _config(artifact_dir: Path) -> config_dict.ConfigDict:
     cfg.jepa_num_target_blocks = 1
     cfg.predictor_dim = 16
     cfg.contrastive_covariance_dim = 4
-    cfg.contrastive_projection_hidden_dim = 16
-    cfg.contrastive_projection_dim = 8
     cfg.contrastive_online_probe_hidden_dim = 16
     cfg.contrastive_temperature = 0.2
     cfg.contrastive_loss_weight = 1.0

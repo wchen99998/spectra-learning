@@ -578,11 +578,6 @@ def test_train_and_evaluate_jax_logs_final_metrics_on_main_process(
         assert kwargs["logger"] is logger
         return {"run/final_global_step": 3.0, "train/loss": 1.5}
 
-    def fake_build_jax_optimizer(config, model, *, total_steps):
-        del config, model
-        assert total_steps == 3
-        return object()
-
     cfg = config_dict.ConfigDict()
     cfg.seed = 7
     cfg.num_epochs = 1
@@ -607,13 +602,11 @@ def test_train_and_evaluate_jax_logs_final_metrics_on_main_process(
     monkeypatch.setattr(pretrain_jax, "storage_mkdir", lambda path: None)
     monkeypatch.setattr(pretrain_jax, "GemsNativeDataModule", FakeDataModule)
     monkeypatch.setattr(pretrain_jax, "build_model_from_config", lambda config: object())
-    monkeypatch.setattr(pretrain_jax, "training_checkpoint_paths", lambda path: [])
     monkeypatch.setattr(
         pretrain_jax,
         "initialize_jax_model_from_torch_seed",
         lambda config, model: None,
     )
-    monkeypatch.setattr(pretrain_jax, "build_jax_optimizer", fake_build_jax_optimizer)
     monkeypatch.setattr(pretrain_jax, "build_logger", lambda config, workdir: logger)
     monkeypatch.setattr(
         pretrain_jax,
@@ -692,16 +685,10 @@ def test_train_and_evaluate_jax_skips_logger_on_worker_process(
     monkeypatch.setattr(pretrain_jax, "storage_mkdir", lambda path: None)
     monkeypatch.setattr(pretrain_jax, "GemsNativeDataModule", FakeDataModule)
     monkeypatch.setattr(pretrain_jax, "build_model_from_config", lambda config: object())
-    monkeypatch.setattr(pretrain_jax, "training_checkpoint_paths", lambda path: [])
     monkeypatch.setattr(
         pretrain_jax,
         "initialize_jax_model_from_torch_seed",
         lambda config, model: None,
-    )
-    monkeypatch.setattr(
-        pretrain_jax,
-        "build_jax_optimizer",
-        lambda config, model, *, total_steps: object(),
     )
     monkeypatch.setattr(
         pretrain_jax,

@@ -40,8 +40,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.feature_mlp_hidden_dim = 1024
     cfg.pairmixer_pair_dim = 384
     cfg.pairmixer_pair_feature_hidden_dim = 768
-    cfg.pairmixer_triangle_mediator_rank = 0
-    cfg.pairmixer_use_commuted_low_rank_triangle = False
     cfg.pairmixer_use_pair_bias_attention = True
     cfg.pairmixer_use_fourier_features = True
     cfg.pairmixer_fourier_num_freqs = 16
@@ -55,7 +53,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.predictor_dim = 640
     cfg.predictor_dropout = 0.1
     cfg.predictor_apply_final_norm = True
-    cfg.predictor_use_rope = False
     cfg.mae_context_encoder_pack_tokens = 20
     cfg.mae_context_encoder_pack_token_choices = (20, 24, 27, 28)
     cfg.masked_latent_predictor_num_layers = 3
@@ -97,7 +94,6 @@ def get_config() -> config_dict.ConfigDict:
 
     # Pooling
     cfg.covariance_pooling_dim = 64
-    cfg.train_covariance_pooling = False
 
     # Contrastive NIST Murcko training
     cfg.contrastive_temperature = 0.1
@@ -106,8 +102,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.online_probe_loss_weight = 1.0
     cfg.contrastive_batch_size = 128
     cfg.contrastive_covariance_dim = 64
-    cfg.contrastive_projection_dim = 256
-    cfg.contrastive_projection_hidden_dim = 1024
     cfg.contrastive_online_probe_hidden_dim = 1024
     cfg.contrastive_pairs_per_epoch = 30_000
     cfg.contrastive_val_pairs_per_epoch = 10_000
@@ -129,9 +123,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.activation_checkpoint_every_n_layers = 1
     cfg.activation_checkpoint_modules = ("encoder", "predictor")
     cfg.activation_checkpoint_preserve_rng_state = True
-    cfg.jax_scan_accumulation = True
-    cfg.jax_pure_optax_step = True
-    cfg.jax_scan_zero_init = True
     cfg.jax_mesh_devices = "all"
     cfg.jax_precompile_train_steps = True
     cfg.jax_precompile_repetitions = 1
@@ -149,7 +140,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataloader_pin_memory = True
 
     # MSG probe
-    cfg.probe_dataset = "nist-murcko"
     cfg.msg_probe_early_stopping = True
     cfg.msg_probe_early_stopping_min_delta = 0.0001
     cfg.msg_probe_early_stopping_min_epochs = 20
@@ -177,7 +167,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.grad_clip_norm = 0.
     cfg.optimizer = "adamw"
     cfg.optimizer_fused = True
-    cfg.adamw_lr = None
 
     # Logging
     cfg.enable_wandb = True

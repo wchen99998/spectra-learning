@@ -246,65 +246,6 @@ class TriangleMultiplicativeUpdate(nn.Module):
         return update * pair_mask
 
 
-class CommutedLowRankTriangle(nn.Module):
-    def __init__(
-        self,
-        pair_dim: int,
-        *,
-        hidden_dim: int,
-        num_mediators: int,
-        rank: int,
-        direction: str,
-        norm_eps: float,
-        keep_out_gate: bool = True,
-    ) -> None:
-        super().__init__()
-        self.rank = rank
-        self.direction = direction
-        self.keep_out_gate = keep_out_gate
-        self.norm_in = _build_norm(pair_dim, eps=norm_eps)
-        self.q = nn.Parameter(
-            torch.randn(num_mediators, rank) / math.sqrt(num_mediators)
-        )
-        self.left_proj = nn.Linear(pair_dim, hidden_dim)
-        self.right_proj = nn.Linear(pair_dim, hidden_dim)
-        self.left_gate = nn.Linear(pair_dim, hidden_dim)
-        self.right_gate = nn.Linear(pair_dim, hidden_dim)
-        self.out_gate = nn.Linear(pair_dim, hidden_dim) if keep_out_gate else None
-        self.norm_out = _build_norm(hidden_dim, eps=norm_eps)
-        self.p_out = nn.Linear(hidden_dim, pair_dim)
-        _init_linear(self.left_proj)
-        _init_linear(self.right_proj)
-        _init_linear(self.left_gate, gate=True)
-        _init_linear(self.right_gate, gate=True)
-        if self.out_gate is not None:
-            _init_linear(self.out_gate, gate=True)
-        _init_linear(self.p_out)
-
-    def forward(
-        self,
-        x: Float[Tensor, "batch peaks peaks pair"],
-        mask: Bool[Tensor, "batch peaks peaks"],
-    ) -> Float[Tensor, "batch peaks peaks pair"]:
-        pair_mask = mask.unsqueeze(-1).to(dtype=x.dtype)
-        x_norm = self.norm_in(x)
-        x_masked = x_norm * pair_mask
-        q = self.q.softmax(dim=0).to(dtype=x.dtype)
-        if self.direction == "outgoing":
-            x_comp = torch.einsum("bikc,km->bimc", x_masked, q)
-        else:
-            x_comp = torch.einsum("bkic,km->bimc", x_masked, q)
-        left = self.left_proj(x_comp)
-        right = self.right_proj(x_comp)
-        left = left * torch.sigmoid(self.left_gate(x_comp))
-        right = right * torch.sigmoid(self.right_gate(x_comp))
-        update = torch.einsum("bimh,bjmh->bijh", left, right)
-        update = self.norm_out(update)
-        if self.out_gate is not None:
-            update = update * torch.sigmoid(self.out_gate(x_norm))
-        return self.p_out(update) * pair_mask
-
-
 class TriangleAttention(nn.Module):
     def __init__(
         self,
@@ -456,41 +397,20 @@ class PairMixerBlock(nn.Module):
         attention_mlp_multiple: float,
         norm_eps: float,
         dropout: float,
-        triangle_mediator_rank: int = 0,
-        use_commuted_low_rank_triangle: bool = False,
-        max_mediator_tokens: int = 0,
         use_pair_bias_attention: bool = False,
     ) -> None:
         super().__init__()
         self.use_pair_bias_attention = use_pair_bias_attention
-        if use_commuted_low_rank_triangle and triangle_mediator_rank > 0:
-            self.tri_mul_out = CommutedLowRankTriangle(
-                pair_dim,
-                hidden_dim=pair_dim,
-                num_mediators=max_mediator_tokens,
-                rank=triangle_mediator_rank,
-                direction="outgoing",
-                norm_eps=norm_eps,
-            )
-            self.tri_mul_in = CommutedLowRankTriangle(
-                pair_dim,
-                hidden_dim=pair_dim,
-                num_mediators=max_mediator_tokens,
-                rank=triangle_mediator_rank,
-                direction="incoming",
-                norm_eps=norm_eps,
-            )
-        else:
-            self.tri_mul_out = TriangleMultiplicativeUpdate(
-                pair_dim,
-                direction="outgoing",
-                norm_eps=norm_eps,
-            )
-            self.tri_mul_in = TriangleMultiplicativeUpdate(
-                pair_dim,
-                direction="incoming",
-                norm_eps=norm_eps,
-            )
+        self.tri_mul_out = TriangleMultiplicativeUpdate(
+            pair_dim,
+            direction="outgoing",
+            norm_eps=norm_eps,
+        )
+        self.tri_mul_in = TriangleMultiplicativeUpdate(
+            pair_dim,
+            direction="incoming",
+            norm_eps=norm_eps,
+        )
         self.pair_transition_norm = _build_norm(
             pair_dim,
             eps=norm_eps,

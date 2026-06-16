@@ -89,7 +89,6 @@ class MassSpecProbeMurckoDataTests(unittest.TestCase):
             _write_fake_combined_murcko_probe_artifacts(tmp_path / "probe-cache")
             cfg = config_dict.ConfigDict()
             cfg.artifact_dir = str(tmp_path / "probe-cache")
-            cfg.probe_dataset = "massspec"
             cfg.batch_size = 2048
             cfg.msg_probe_batch_size = 256
             cfg.shuffle_buffer = 4
@@ -102,98 +101,11 @@ class MassSpecProbeMurckoDataTests(unittest.TestCase):
 
         self.assertEqual(probe_data.batch_size, 256)
 
-    def test_probe_data_ignores_legacy_dataset_choice_for_nist_murcko(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            cfg = config_dict.ConfigDict()
-            cfg.artifact_dir = str(tmp_path / "probe-cache")
-            cfg.probe_dataset = "nist-full"
-            cfg.batch_size = 2
-            cfg.max_precursor_mz = 1000.0
-            cfg.min_peak_intensity = 1e-4
-            cfg.peak_ordering = "mz"
-            cfg.num_peaks = 4
-            cfg.nist_murcko_probe_repo_id = "owner/nist-murcko"
-            cfg.nist_murcko_probe_revision = "unit-test"
-
-            def fake_snapshot_download(*, local_dir, **kwargs):
-                _write_fake_combined_murcko_probe_artifacts(Path(local_dir))
-                return str(local_dir)
-
-            with mock.patch.object(
-                murcko_data,
-                "snapshot_download",
-                side_effect=fake_snapshot_download,
-            ) as download_mock:
-                probe_data = massspec_probe_data.MassSpecProbeData.from_config(cfg)
-
-        self.assertEqual(probe_data.info["massspec_train_size"], 2)
-        self.assertEqual(
-            probe_data.train_files,
-            [
-                str(
-                    tmp_path
-                    / "probe-cache"
-                    / "nist_murcko_probe"
-                    / "train.parquet"
-                )
-            ],
-        )
-        self.assertEqual(
-            probe_data.test_files,
-            [
-                str(
-                    tmp_path
-                    / "probe-cache"
-                    / "mcebio_murcko_probe"
-                    / "all.parquet"
-                )
-            ],
-        )
-        _, kwargs = download_mock.call_args
-        self.assertEqual(kwargs["repo_id"], "owner/nist-murcko")
-        self.assertEqual(kwargs["revision"], "unit-test")
-        self.assertEqual(kwargs["repo_type"], "dataset")
-        self.assertEqual(
-            kwargs["allow_patterns"],
-            [
-                "nist_murcko_probe/metadata.json",
-                "nist_murcko_probe/train.parquet",
-                "nist_murcko_probe/val.parquet",
-                "mcebio_murcko_probe/metadata.json",
-                "mcebio_murcko_probe/all.parquet",
-            ],
-        )
-
-    def test_probe_data_uses_local_nist_murcko_even_with_legacy_dataset_choice(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            _write_fake_combined_murcko_probe_artifacts(tmp_path / "probe-cache")
-
-            cfg = config_dict.ConfigDict()
-            cfg.artifact_dir = str(tmp_path / "probe-cache")
-            cfg.probe_dataset = "nist-full"
-            cfg.batch_size = 2
-            cfg.max_precursor_mz = 1000.0
-            cfg.min_peak_intensity = 1e-4
-            cfg.peak_ordering = "mz"
-            cfg.num_peaks = 4
-
-            with mock.patch.object(
-                murcko_data,
-                "snapshot_download",
-            ) as download_mock:
-                probe_data = massspec_probe_data.MassSpecProbeData.from_config(cfg)
-
-        self.assertEqual(probe_data.info["massspec_test_size"], 1)
-        download_mock.assert_not_called()
-
     def test_probe_data_supports_nist_murcko_dataset(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             cfg = config_dict.ConfigDict()
             cfg.artifact_dir = str(tmp_path / "probe-cache")
-            cfg.probe_dataset = "nist-murcko"
             cfg.batch_size = 2
             cfg.max_precursor_mz = 1000.0
             cfg.min_peak_intensity = 1e-4
@@ -250,7 +162,6 @@ class MassSpecProbeMurckoDataTests(unittest.TestCase):
             tmp_path = Path(tmp)
             cfg = config_dict.ConfigDict()
             cfg.artifact_dir = str(tmp_path / "probe-cache")
-            cfg.probe_dataset = "nist-murcko"
             cfg.batch_size = 2
             cfg.max_precursor_mz = 1000.0
             cfg.min_peak_intensity = 1e-4
@@ -300,7 +211,6 @@ class MassSpecProbeMurckoDataTests(unittest.TestCase):
 
             cfg = config_dict.ConfigDict()
             cfg.artifact_dir = str(tmp_path / "probe-cache")
-            cfg.probe_dataset = "nist-murcko"
             cfg.batch_size = 2
             cfg.max_precursor_mz = 1000.0
             cfg.min_peak_intensity = 1e-4
@@ -343,7 +253,6 @@ class MassSpecProbeMurckoDataTests(unittest.TestCase):
 
             cfg = config_dict.ConfigDict()
             cfg.artifact_dir = str(tmp_path / "probe-cache")
-            cfg.probe_dataset = "nist-murcko"
             cfg.batch_size = 2
             cfg.max_precursor_mz = 1000.0
             cfg.min_peak_intensity = 1e-4
@@ -444,7 +353,6 @@ class MassSpecProbeMurckoDataTests(unittest.TestCase):
 
             cfg = config_dict.ConfigDict()
             cfg.artifact_dir = str(tmp_path / "probe-cache")
-            cfg.probe_dataset = "nist-murcko"
             cfg.batch_size = 2
             cfg.max_precursor_mz = 1000.0
             cfg.min_peak_intensity = 1e-4
@@ -481,7 +389,6 @@ class MassSpecProbeMurckoDataTests(unittest.TestCase):
 
             cfg = config_dict.ConfigDict()
             cfg.artifact_dir = str(tmp_path / "probe-cache")
-            cfg.probe_dataset = "nist-murcko"
             cfg.batch_size = 2
             cfg.max_precursor_mz = 1000.0
             cfg.min_peak_intensity = 1e-4

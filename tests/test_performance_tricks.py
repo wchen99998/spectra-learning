@@ -1,13 +1,12 @@
 import torch
+import pytest
 
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.training.activation_checkpointing import (
-    apply_activation_checkpointing as apply_pretrain_activation_checkpointing,
+    apply_activation_checkpointing,
 )
 from spectra_learning.training.modules import PretrainModule
 from spectra_learning.training.performance import (
-    apply_activation_checkpointing,
-    activation_checkpoint_mode,
     compile_forward,
     register_bf16_adamw_state_hook,
 )
@@ -46,23 +45,25 @@ def test_activation_checkpointing_preserves_state_dict_keys():
 
 
 def test_activation_checkpointing_accepts_canonical_modes():
-    assert activation_checkpoint_mode({"activation_checkpoint_mode": "selective"}) == "selective"
-    assert activation_checkpoint_mode({"activation_checkpoint_mode": "full"}) == "full"
+    for mode in ("selective", "full"):
+        module = _tiny_pretrain_module()
+
+        apply_activation_checkpointing(
+            module,
+            {
+                "activation_checkpoint_mode": mode,
+                "activation_checkpoint_preserve_rng_state": True,
+            },
+        )
+
+        assert hasattr(module.model.encoder.blocks[0], "_checkpoint_wrapped_module")
+        assert hasattr(module.model.masked_latent_predictor[0], "_checkpoint_wrapped_module")
 
 
-def test_pretrain_activation_checkpointing_accepts_canonical_modes():
+def test_activation_checkpointing_rejects_unknown_mode():
     module = _tiny_pretrain_module()
-
-    apply_pretrain_activation_checkpointing(
-        module,
-        {
-            "activation_checkpoint_mode": "selective",
-            "activation_checkpoint_preserve_rng_state": True,
-        },
-    )
-
-    assert hasattr(module.model.encoder.blocks[0], "_checkpoint_wrapped_module")
-    assert hasattr(module.model.masked_latent_predictor[0], "_checkpoint_wrapped_module")
+    with pytest.raises(ValueError, match="activation_checkpoint_mode"):
+        apply_activation_checkpointing(module, {"activation_checkpoint_mode": "old"})
 
 
 

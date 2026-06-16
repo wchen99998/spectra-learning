@@ -192,10 +192,6 @@ def _build_peak_set_encoder(cfg: PeakSetJEPASettings) -> PeakSetEncoder:
         pair_dim=cfg.pairmixer_pair_dim,
         pair_feature_hidden_dim=cfg.pairmixer_pair_feature_hidden_dim,
         pairmixer_dropout=cfg.pairmixer_dropout,
-        pairmixer_triangle_mediator_rank=cfg.pairmixer_triangle_mediator_rank,
-        pairmixer_use_commuted_low_rank_triangle=(
-            cfg.pairmixer_use_commuted_low_rank_triangle
-        ),
         pairmixer_use_pair_bias_attention=cfg.pairmixer_use_pair_bias_attention,
         pairmixer_mz_scale=cfg.pairmixer_mz_scale,
         pairmixer_precursor_mz_scale=cfg.pairmixer_precursor_mz_scale,
@@ -297,11 +293,6 @@ def _build_predictor(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
                 attention_mlp_multiple=cfg.attention_mlp_multiple,
                 norm_eps=model.norm_eps,
                 dropout=cfg.predictor_dropout,
-                triangle_mediator_rank=cfg.pairmixer_triangle_mediator_rank,
-                use_commuted_low_rank_triangle=(
-                    cfg.pairmixer_use_commuted_low_rank_triangle
-                ),
-                max_mediator_tokens=model.num_predictor_input_tokens,
                 use_pair_bias_attention=cfg.pairmixer_use_pair_bias_attention,
             )
             for _ in range(cfg.masked_latent_predictor_num_layers)

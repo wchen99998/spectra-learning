@@ -1238,12 +1238,7 @@ class PeakSetJEPAJax(nnx.Module):
         assign_param(self.pair_mask_token, state_dict["pair_mask_token"])
         self.encoder.load_torch_state_dict(state_dict, "encoder")
         if self.teacher_encoder is not None:
-            teacher_prefix = (
-                "teacher_encoder"
-                if any(key.startswith("teacher_encoder.") for key in state_dict)
-                else "encoder"
-            )
-            self.teacher_encoder.load_torch_state_dict(state_dict, teacher_prefix)
+            self.teacher_encoder.load_torch_state_dict(state_dict, "teacher_encoder")
         if isinstance(self.encoder_to_predictor_proj, Linear):
             self.encoder_to_predictor_proj.load_torch_state_dict(
                 state_dict,
@@ -1276,14 +1271,9 @@ class PeakSetJEPAJax(nnx.Module):
         if isinstance(self.target_projector, TargetProjector):
             self.target_projector.load_torch_state_dict(state_dict, "target_projector")
         if self.teacher_target_projector is not None:
-            teacher_projector_prefix = (
-                "teacher_target_projector"
-                if any(key.startswith("teacher_target_projector.") for key in state_dict)
-                else "target_projector"
-            )
             self.teacher_target_projector.load_torch_state_dict(
                 state_dict,
-                teacher_projector_prefix,
+                "teacher_target_projector",
             )
         if self.jepa_mae_mz_head is not None:
             self.jepa_mae_mz_head.load_torch_state_dict(state_dict, "jepa_mae_mz_head")
