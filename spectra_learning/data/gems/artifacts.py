@@ -59,13 +59,17 @@ def ensure_base_gems_artifact(
     repo_subdir: str = "",
     distributed_world_size: int = 1,
     distributed_rank: int = 0,
+    distributed_local_rank: int | None = None,
 ) -> tuple[Path, dict]:
+    distributed_local_rank = (
+        distributed_rank if distributed_local_rank is None else distributed_local_rank
+    )
     repo_subdir = repo_subdir.strip("/")
     artifact_dir = gems_base_dir / repo_subdir if repo_subdir else gems_base_dir
     download_dir = gems_base_dir if repo_subdir else artifact_dir
     prefix = f"{repo_subdir}/" if repo_subdir else ""
     coordinated = _coordinate_distributed_io(distributed_world_size)
-    if coordinated and distributed_rank != 0:
+    if coordinated and distributed_local_rank != 0:
         torch.distributed.barrier()
         metadata = load_gems_native_metadata(artifact_dir)
         validate_gems_native_artifact(artifact_dir, metadata)
@@ -107,6 +111,7 @@ def resolve_gems_artifact(
     repo_subdir: str = "",
     distributed_world_size: int = 1,
     distributed_rank: int = 0,
+    distributed_local_rank: int | None = None,
 ) -> tuple[Path, dict]:
     base_artifact_dir, base_metadata = ensure_base_gems_artifact(
         gems_base_dir=gems_base_dir,
@@ -115,6 +120,7 @@ def resolve_gems_artifact(
         repo_subdir=repo_subdir,
         distributed_world_size=distributed_world_size,
         distributed_rank=distributed_rank,
+        distributed_local_rank=distributed_local_rank,
     )
     _validate_gems_native_metadata(
         base_metadata,

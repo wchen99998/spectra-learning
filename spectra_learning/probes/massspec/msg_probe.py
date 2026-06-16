@@ -74,6 +74,10 @@ def _distributed_rank(distributed: DistributedContext | None) -> int:
     return distributed.rank if distributed is not None else 0
 
 
+def _distributed_local_rank(distributed: DistributedContext | None) -> int:
+    return distributed.local_rank if distributed is not None else 0
+
+
 def _all_gather_object(value: object) -> list[object]:
     gathered: list[object] = [None for _ in range(dist.get_world_size())]
     dist.all_gather_object(gathered, value)
@@ -1243,6 +1247,7 @@ def _run_msg_probe_once(
         config,
         distributed_world_size=_distributed_world_size(distributed),
         distributed_rank=_distributed_rank(distributed),
+        distributed_local_rank=_distributed_local_rank(distributed),
     )
     variants = msg_probe_variants_from_config(config)
     use_pair_features = any(_uses_pair_features(variant) for variant in variants)

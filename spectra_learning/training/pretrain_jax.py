@@ -810,6 +810,7 @@ def train_and_evaluate_jax(
         seed=int(config.seed),
         distributed_world_size=jax.process_count(),
         distributed_rank=jax.process_index(),
+        distributed_local_rank=0,
     )
     total_steps = _total_training_steps(config, datamodule)
     model = build_model_from_config(config)

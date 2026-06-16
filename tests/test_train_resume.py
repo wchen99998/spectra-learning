@@ -654,6 +654,7 @@ def test_train_and_evaluate_jax_logs_final_metrics_on_main_process(
 
     assert datamodule_kwargs["distributed_world_size"] == 2
     assert datamodule_kwargs["distributed_rank"] == 0
+    assert datamodule_kwargs["distributed_local_rank"] == 0
     assert results["run/jax_process_count"] == 2.0
     assert results["run/jax_data_parallel_devices"] == 8.0
     assert results["run/device_microbatch_size"] == 4.0

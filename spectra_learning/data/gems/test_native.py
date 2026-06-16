@@ -642,6 +642,59 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
         barrier_mock.assert_called_once()
         self.assertEqual(datamodule.info["train_size"], 2)
 
+    def test_datamodule_local_rank_zero_downloads_on_nonzero_global_rank(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_hdf5 = tmp_path / "GeMS_A.hdf5"
+            _write_fake_gems_hdf5(source_hdf5)
+            cfg = self._make_config(tmp_path)
+            cfg.batch_size = 4
+            artifact_dir = Path(cfg.artifact_dir) / "gems"
+            download_calls = []
+
+            def fake_snapshot_download(**kwargs):
+                download_calls.append(kwargs)
+                self._build_native_artifact(
+                    source_hdf5=source_hdf5,
+                    output_dir=artifact_dir,
+                    cfg=cfg,
+                )
+                return str(kwargs["local_dir"])
+
+            with (
+                mock.patch.object(
+                    gems_artifacts,
+                    "snapshot_download",
+                    side_effect=fake_snapshot_download,
+                ),
+                mock.patch.object(
+                    gems_artifacts.torch.distributed,
+                    "is_available",
+                    return_value=True,
+                ),
+                mock.patch.object(
+                    gems_artifacts.torch.distributed,
+                    "is_initialized",
+                    return_value=True,
+                ),
+                mock.patch.object(
+                    gems_artifacts.torch.distributed,
+                    "barrier",
+                    return_value=None,
+                ) as barrier_mock,
+            ):
+                datamodule = gems.GemsNativeDataModule(
+                    cfg,
+                    seed=42,
+                    distributed_world_size=4,
+                    distributed_rank=2,
+                    distributed_local_rank=0,
+                )
+
+        self.assertEqual(len(download_calls), 1)
+        barrier_mock.assert_called_once()
+        self.assertEqual(datamodule.info["train_size"], 2)
+
     def test_datamodule_rejects_legacy_gems_cache_without_download(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

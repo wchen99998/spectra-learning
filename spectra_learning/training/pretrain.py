@@ -154,6 +154,7 @@ def train_and_evaluate(
         seed=int(config.seed),
         distributed_world_size=distributed.world_size,
         distributed_rank=distributed.rank,
+        distributed_local_rank=distributed.local_rank,
     )
     total_steps = total_training_steps(config, datamodule)
     loop_epochs = max(1, math.ceil(float(config.num_epochs)))

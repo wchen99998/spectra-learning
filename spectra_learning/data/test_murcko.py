@@ -608,6 +608,52 @@ def test_murcko_rank_one_waits_for_download(monkeypatch, tmp_path: Path):
     assert metadata["test_size"] == 2
 
 
+def test_murcko_local_rank_zero_downloads_on_nonzero_global_rank(
+    monkeypatch,
+    tmp_path: Path,
+):
+    source_root = tmp_path / "source_repo"
+    nist_source = source_root / "nist_murcko_probe"
+    mcebio_source = source_root / "mcebio_murcko_probe"
+    _write_split(nist_source / "train.parquet", [True, False])
+    _write_split(nist_source / "val.parquet", [False])
+    _write_split(mcebio_source / "all.parquet", [False, True])
+    (nist_source / "metadata.json").write_text(
+        '{"train_files":["train.parquet"],"train_lengths":[2],"train_size":2,'
+        '"val_files":["val.parquet"],"val_lengths":[1],"val_size":1}'
+    )
+    (mcebio_source / "metadata.json").write_text(
+        '{"all_files":["all.parquet"],"all_lengths":[2],"all_size":2}'
+    )
+
+    rank2_cache = tmp_path / "rank2_cache"
+    download_calls = []
+
+    def rank2_snapshot_download(**kwargs):
+        download_calls.append(kwargs)
+        shutil.copytree(source_root, rank2_cache, dirs_exist_ok=True)
+        return str(kwargs["local_dir"])
+
+    monkeypatch.setattr(murcko, "snapshot_download", rank2_snapshot_download)
+    monkeypatch.setattr(murcko.torch.distributed, "is_available", lambda: True)
+    monkeypatch.setattr(murcko.torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(murcko.torch.distributed, "barrier", lambda: None)
+
+    metadata = murcko.ensure_murcko_fluorine_data_downloaded(
+        rank2_cache,
+        repo_id="unit/repo",
+        revision="main",
+        train_subdir="nist_murcko_probe",
+        test_subdir="mcebio_murcko_probe",
+        distributed_world_size=4,
+        distributed_rank=2,
+        distributed_local_rank=0,
+    )
+
+    assert len(download_calls) == 1
+    assert metadata["test_size"] == 2
+
+
 def test_build_nist_murcko_artifact_from_mgf(tmp_path: Path):
     mgf_path = tmp_path / "source.mgf"
     mgf_path.write_text(

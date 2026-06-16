@@ -214,7 +214,7 @@ def _coordinate_distributed_download(distributed_world_size: int) -> bool:
     )
 
 
-def _snapshot_download_rank_zero(
+def _snapshot_download_local_rank_zero(
     *,
     repo_id: str,
     repo_type: str,
@@ -222,10 +222,10 @@ def _snapshot_download_rank_zero(
     local_dir: Path,
     allow_patterns: list[str],
     distributed_world_size: int,
-    distributed_rank: int,
+    distributed_local_rank: int,
 ) -> None:
     coordinated = _coordinate_distributed_download(distributed_world_size)
-    if not coordinated or distributed_rank == 0:
+    if not coordinated or distributed_local_rank == 0:
         snapshot_download(
             repo_id=repo_id,
             repo_type=repo_type,
@@ -260,7 +260,11 @@ def ensure_nist_murcko_probe_downloaded(
     include_dreams: bool = False,
     distributed_world_size: int = 1,
     distributed_rank: int = 0,
+    distributed_local_rank: int | None = None,
 ) -> dict[str, Any]:
+    distributed_local_rank = (
+        distributed_rank if distributed_local_rank is None else distributed_local_rank
+    )
     cached = _probe_metadata_valid(
         output_dir,
         NIST_MURCKO_METADATA_VERSION,
@@ -301,14 +305,14 @@ def ensure_nist_murcko_probe_downloaded(
         allow_patterns.append(f"{subdir}/auxiliary/morgan/*")
     if include_dreams:
         allow_patterns.append(f"{subdir}/auxiliary/dreams/*")
-    _snapshot_download_rank_zero(
+    _snapshot_download_local_rank_zero(
         repo_id=repo_id,
         repo_type="dataset",
         revision=revision,
         local_dir=output_dir.parent,
         allow_patterns=allow_patterns,
         distributed_world_size=distributed_world_size,
-        distributed_rank=distributed_rank,
+        distributed_local_rank=distributed_local_rank,
     )
     metadata = _probe_metadata_valid(
         output_dir,
@@ -335,7 +339,11 @@ def ensure_mcebio_murcko_probe_downloaded(
     include_dreams: bool = False,
     distributed_world_size: int = 1,
     distributed_rank: int = 0,
+    distributed_local_rank: int | None = None,
 ) -> dict[str, Any]:
+    distributed_local_rank = (
+        distributed_rank if distributed_local_rank is None else distributed_local_rank
+    )
     subdir = subdir.strip("/")
     cache_dir.mkdir(parents=True, exist_ok=True)
     allow_patterns = [
@@ -369,14 +377,14 @@ def ensure_mcebio_murcko_probe_downloaded(
         )
     )
     if needs_download:
-        _snapshot_download_rank_zero(
+        _snapshot_download_local_rank_zero(
             repo_id=repo_id,
             repo_type="dataset",
             revision=revision,
             local_dir=cache_dir,
             allow_patterns=allow_patterns,
             distributed_world_size=distributed_world_size,
-            distributed_rank=distributed_rank,
+            distributed_local_rank=distributed_local_rank,
         )
     elif _coordinate_distributed_download(distributed_world_size):
         torch.distributed.barrier()
@@ -509,7 +517,11 @@ def ensure_murcko_fluorine_data_downloaded(
     include_dreams: bool = False,
     distributed_world_size: int = 1,
     distributed_rank: int = 0,
+    distributed_local_rank: int | None = None,
 ) -> dict[str, Any]:
+    distributed_local_rank = (
+        distributed_rank if distributed_local_rank is None else distributed_local_rank
+    )
     train_subdir = train_subdir.strip("/")
     test_subdir = test_subdir.strip("/")
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -578,14 +590,14 @@ def ensure_murcko_fluorine_data_downloaded(
         )
     )
     if needs_download:
-        _snapshot_download_rank_zero(
+        _snapshot_download_local_rank_zero(
             repo_id=repo_id,
             repo_type="dataset",
             revision=revision,
             local_dir=cache_dir,
             allow_patterns=allow_patterns,
             distributed_world_size=distributed_world_size,
-            distributed_rank=distributed_rank,
+            distributed_local_rank=distributed_local_rank,
         )
     elif _coordinate_distributed_download(distributed_world_size):
         torch.distributed.barrier()
@@ -720,6 +732,7 @@ def build_murcko_fluorine_data(
     include_dreams: bool = False,
     distributed_world_size: int = 1,
     distributed_rank: int = 0,
+    distributed_local_rank: int | None = None,
 ) -> MurckoFluorineData:
     metadata = ensure_murcko_fluorine_data_downloaded(
         cache_dir,
@@ -730,6 +743,7 @@ def build_murcko_fluorine_data(
         include_dreams=include_dreams,
         distributed_world_size=distributed_world_size,
         distributed_rank=distributed_rank,
+        distributed_local_rank=distributed_local_rank,
     )
     return MurckoFluorineData(
         metadata=metadata,

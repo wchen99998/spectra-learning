@@ -327,14 +327,18 @@ def ensure_septic_shock_artifact_downloaded(
     subdir: str = SEPTIC_SHOCK_DEFAULT_HF_SUBDIR,
     distributed_world_size: int = 1,
     distributed_rank: int = 0,
+    distributed_local_rank: int | None = None,
 ) -> tuple[Path, dict[str, Any]]:
+    distributed_local_rank = (
+        distributed_rank if distributed_local_rank is None else distributed_local_rank
+    )
     cache_dir = cache_dir.expanduser().resolve()
     subdir = subdir.strip("/")
     artifact_dir = cache_dir / subdir if subdir else cache_dir
     metadata_path = artifact_dir / "metadata.json"
     coordinated = _coordinate_distributed_download(distributed_world_size)
     if not metadata_path.exists():
-        if not coordinated or distributed_rank == 0:
+        if not coordinated or distributed_local_rank == 0:
             allow_patterns = (
                 [
                     f"{subdir}/metadata.json",
@@ -837,6 +841,7 @@ def build_septic_shock_data(
     hf_subdir: str = SEPTIC_SHOCK_DEFAULT_HF_SUBDIR,
     distributed_world_size: int = 1,
     distributed_rank: int = 0,
+    distributed_local_rank: int | None = None,
 ) -> SepticShockData:
     cache_dir = cache_dir.expanduser().resolve()
     if prepare:
@@ -853,6 +858,7 @@ def build_septic_shock_data(
             subdir=hf_subdir,
             distributed_world_size=distributed_world_size,
             distributed_rank=distributed_rank,
+            distributed_local_rank=distributed_local_rank,
         )
     else:
         metadata = load_septic_shock_metadata(cache_dir)

@@ -65,6 +65,7 @@ class GemsNativeDataModule:
     gems_base_dir: Path
     distributed_world_size: int
     distributed_rank: int
+    distributed_local_rank: int
     gems_dir: Path
     gems_metadata: dict[str, Any]
     info: dict[str, Any]
@@ -111,13 +112,18 @@ class GemsNativeDataModule:
         *,
         distributed_world_size: int = 1,
         distributed_rank: int = 0,
+        distributed_local_rank: int | None = None,
     ) -> None:
+        distributed_local_rank = (
+            distributed_rank if distributed_local_rank is None else distributed_local_rank
+        )
         self.config = GemsDataConfig.from_config(config)
         self.seed = seed
         self.output_dir = self.config.artifact_dir
         self.gems_base_dir = self.output_dir / "gems"
         self.distributed_world_size = distributed_world_size
         self.distributed_rank = distributed_rank
+        self.distributed_local_rank = distributed_local_rank
         if not self.config.gems_native_repo_id:
             raise ValueError("GeMS configs must set gems_native_repo_id")
         self.gems_dir, self.gems_metadata = resolve_gems_artifact(
@@ -128,6 +134,7 @@ class GemsNativeDataModule:
             repo_subdir=self.config.gems_native_hf_subdir,
             distributed_world_size=distributed_world_size,
             distributed_rank=distributed_rank,
+            distributed_local_rank=distributed_local_rank,
         )
         self._set_public_config_attrs()
         self._set_distributed_batch_attrs()

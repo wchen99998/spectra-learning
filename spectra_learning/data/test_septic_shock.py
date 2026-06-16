@@ -387,6 +387,75 @@ def test_build_septic_shock_data_downloads_hf_subdir(monkeypatch, tmp_path: Path
     assert torch.allclose(batch["peak_mz"][0], torch.tensor([0.025, 0.05]))
 
 
+def test_septic_shock_local_rank_zero_downloads_on_nonzero_global_rank(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source_repo"
+    artifact_dir = source_root / "septic"
+    spectra = np.zeros((1, 2, 128), dtype=np.float32)
+    for split in ("train", "val", "test"):
+        shard_dir = artifact_dir / split / "shard-00000-of-00001"
+        shard_dir.mkdir(parents=True, exist_ok=True)
+        split_spectra = spectra if split == "train" else spectra[:0]
+        np.save(shard_dir / "spectra.npy", split_spectra)
+        np.save(
+            shard_dir / "precursor_mz_raw.npy",
+            np.asarray([100.0], dtype=np.float32)
+            if split == "train"
+            else np.asarray([], dtype=np.float32),
+        )
+        np.save(
+            shard_dir / "sample_index.npy",
+            np.asarray([0], dtype=np.int64)
+            if split == "train"
+            else np.asarray([], dtype=np.int64),
+        )
+    (artifact_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "metadata_version": septic_shock.SEPTIC_SHOCK_METADATA_VERSION,
+                "task": septic_shock.SEPTIC_SHOCK_TASK,
+                "artifact_format": septic_shock.SEPTIC_SHOCK_ARTIFACT_FORMAT,
+                "num_peaks_input": 128,
+                "train_shards": ["shard-00000-of-00001"],
+                "train_scan_lengths": [1],
+                "train_num_scans": 1,
+                "val_shards": ["shard-00000-of-00001"],
+                "val_scan_lengths": [0],
+                "val_num_scans": 0,
+                "test_shards": ["shard-00000-of-00001"],
+                "test_scan_lengths": [0],
+                "test_num_scans": 0,
+            }
+        )
+    )
+    calls = []
+
+    def fake_snapshot_download(*, local_dir, **kwargs):
+        calls.append(kwargs)
+        shutil.copytree(source_root, local_dir, dirs_exist_ok=True)
+        return str(local_dir)
+
+    monkeypatch.setattr(septic_shock, "snapshot_download", fake_snapshot_download)
+    monkeypatch.setattr(septic_shock.torch.distributed, "is_available", lambda: True)
+    monkeypatch.setattr(septic_shock.torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(septic_shock.torch.distributed, "barrier", lambda: None)
+
+    artifact_path, metadata = septic_shock.ensure_septic_shock_artifact_downloaded(
+        tmp_path / "cache",
+        repo_id="unit/septic",
+        subdir="septic",
+        distributed_world_size=4,
+        distributed_rank=2,
+        distributed_local_rank=0,
+    )
+
+    assert artifact_path == tmp_path / "cache" / "septic"
+    assert len(calls) == 1
+    assert metadata["train_num_scans"] == 1
+
+
 def test_septic_shock_hf_artifact_rejects_invalid_metadata_without_download(
     monkeypatch,
     tmp_path: Path,

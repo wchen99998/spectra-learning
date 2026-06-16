@@ -756,6 +756,7 @@ def build_fluorine_data(
     revision: str,
     distributed_world_size: int = 1,
     distributed_rank: int = 0,
+    distributed_local_rank: int | None = None,
 ) -> FluorineData:
     return build_murcko_fluorine_data(
         cache_dir=cache_dir,
@@ -790,6 +791,7 @@ def build_fluorine_data(
         test_subdir=HF_TEST_SUBDIR,
         distributed_world_size=distributed_world_size,
         distributed_rank=distributed_rank,
+        distributed_local_rank=distributed_local_rank,
     )
 
 
@@ -994,6 +996,7 @@ def train_or_load_finetuned(
 ) -> dict[str, Any]:
     distributed_world_size = distributed.world_size if distributed is not None else 1
     distributed_rank = distributed.rank if distributed is not None else 0
+    distributed_local_rank = distributed.local_rank if distributed is not None else 0
     is_main = distributed is None or distributed.is_main
     requested_hparams = {
         "hidden_dim": int(hidden_dim),
@@ -1031,6 +1034,7 @@ def train_or_load_finetuned(
         revision=revision,
         distributed_world_size=distributed_world_size,
         distributed_rank=distributed_rank,
+        distributed_local_rank=distributed_local_rank,
     )
     train_loader = _make_loader(
         data,
@@ -1323,6 +1327,7 @@ def train_or_load_lora(
 ) -> dict[str, Any]:
     distributed_world_size = distributed.world_size if distributed is not None else 1
     distributed_rank = distributed.rank if distributed is not None else 0
+    distributed_local_rank = distributed.local_rank if distributed is not None else 0
     is_main = distributed is None or distributed.is_main
     requested_hparams = {
         "hidden_dim": int(hidden_dim),
@@ -1360,6 +1365,7 @@ def train_or_load_lora(
         revision=revision,
         distributed_world_size=distributed_world_size,
         distributed_rank=distributed_rank,
+        distributed_local_rank=distributed_local_rank,
     )
     train_loader = _make_loader(
         data,

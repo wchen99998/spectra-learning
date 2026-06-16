@@ -1518,6 +1518,7 @@ def train_contrastive(
         config,
         distributed_world_size=distributed.world_size,
         distributed_rank=distributed.rank,
+        distributed_local_rank=distributed.local_rank,
     )
     train_split = _load_contrastive_split(
         probe_data.train_files,

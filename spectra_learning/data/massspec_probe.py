@@ -1231,6 +1231,7 @@ class MassSpecProbeData(NamedTuple):
         *,
         distributed_world_size: int = 1,
         distributed_rank: int = 0,
+        distributed_local_rank: int | None = None,
     ) -> "MassSpecProbeData":
         validate_msg_probe_config(config)
         artifact_root = (
@@ -1278,6 +1279,7 @@ class MassSpecProbeData(NamedTuple):
             include_dreams=include_dreams,
             distributed_world_size=distributed_world_size,
             distributed_rank=distributed_rank,
+            distributed_local_rank=distributed_local_rank,
         )
         mcebio_metadata = ensure_mcebio_murcko_probe_downloaded(
             artifact_root,
@@ -1290,6 +1292,7 @@ class MassSpecProbeData(NamedTuple):
             include_dreams=include_dreams,
             distributed_world_size=distributed_world_size,
             distributed_rank=distributed_rank,
+            distributed_local_rank=distributed_local_rank,
         )
         adduct_vocab = _merge_vocabularies(
             nist_metadata.get("adduct_vocab", {"unknown": 0}),
