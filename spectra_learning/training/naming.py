@@ -71,10 +71,6 @@ def _optimization_parts(config: Any) -> list[str]:
 
 def _target_parts(config: Any) -> list[str]:
     parts: list[str] = []
-    mode = str(config.get("training_mode", "jepa")).lower()
-    target_layers = config.get("jepa_target_layers", None)
-    if mode == "jepa" and target_layers:
-        parts.append(f"tgt{'_'.join(str(x) for x in target_layers)}")
     target_projector_dim = config.get("target_projector_dim", None)
     model_dim = int(config.get("model_dim", 0))
     if target_projector_dim is not None and int(target_projector_dim) < 0:

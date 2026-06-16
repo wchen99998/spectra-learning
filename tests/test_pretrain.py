@@ -376,7 +376,7 @@ class PairMixerEncoderTests(unittest.TestCase):
         )
 
         with torch.no_grad():
-            _, _, pair = model.encoder.forward_with_block_outputs(
+            _, pair = model.encoder.forward_with_pair(
                 peak_mz,
                 peak_intensity,
                 valid_mask=valid_mask,
@@ -454,11 +454,8 @@ class BlockJEPATests(unittest.TestCase):
         metrics = model.forward_augmented(batch)
         self.assertTrue(torch.isfinite(metrics["loss"]).item())
 
-    def test_target_projector_maps_multilayer_targets_to_model_dim(self):
-        model = self._build_model(
-            encoder_num_layers=2,
-            jepa_target_layers=[1, 2],
-        )
+    def test_target_projector_maps_teacher_targets_to_model_dim(self):
+        model = self._build_model(encoder_num_layers=2)
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
 
         metrics, collapse_data = model.forward_augmented(
@@ -481,7 +478,6 @@ class BlockJEPATests(unittest.TestCase):
     def test_target_projector_can_be_disabled(self):
         model = self._build_model(
             encoder_num_layers=2,
-            jepa_target_layers=[1, 2],
             target_projector_dim=-1,
         )
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
@@ -556,10 +552,7 @@ class BlockJEPATests(unittest.TestCase):
         self.assertFalse(teacher_targets.requires_grad)
 
     def test_compute_teacher_targets_returns_full_spectrum_once(self):
-        model = self._build_model(
-            masked_token_loss_weight=1.0,
-            jepa_target_layers=[1],
-        )
+        model = self._build_model(masked_token_loss_weight=1.0)
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
         expected = model._compute_jepa_teacher_targets(
             batch["peak_mz"],
@@ -581,10 +574,7 @@ class BlockJEPATests(unittest.TestCase):
         self.assertTrue(pooled_targets.requires_grad)
 
     def test_forward_augmented_uses_full_spectrum_teacher_targets(self):
-        model = self._build_model(
-            masked_token_loss_weight=1.0,
-            jepa_target_layers=[1],
-        )
+        model = self._build_model(masked_token_loss_weight=1.0)
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
         peak_mz = batch["peak_mz"]
         peak_intensity = batch["peak_intensity"]
@@ -597,7 +587,7 @@ class BlockJEPATests(unittest.TestCase):
             peak_intensity,
             peak_valid_mask,
         )
-        context_encoded, _, context_pair = model.encoder.forward_with_block_outputs(
+        context_encoded, context_pair = model.encoder.forward_with_pair(
             peak_mz,
             peak_intensity,
             valid_mask=peak_valid_mask,
@@ -1064,7 +1054,6 @@ class BlockJEPATests(unittest.TestCase):
                 training_mode="mae_teacher_jepa",
                 frozen_teacher_config_path=teacher_config_path,
                 encoder_num_layers=1,
-                jepa_target_layers=[1, 2],
                 jepa_target_normalization="zscore",
                 target_projector_dim=-1,
             )
@@ -1072,7 +1061,6 @@ class BlockJEPATests(unittest.TestCase):
         self.assertEqual(model.model_dim, 32)
         self.assertEqual(model.teacher_model_dim, 24)
         self.assertEqual(model.teacher_encoder_num_layers, 2)
-        self.assertEqual(model.jepa_target_layers, [2])
         self.assertEqual(model.jepa_target_dim, 24)
         self.assertEqual(model.jepa_target_group_dim, 24)
         self.assertEqual(model.masked_latent_readout.out_features, 24)
@@ -1122,8 +1110,8 @@ class BlockJEPATests(unittest.TestCase):
 
         with mock.patch.object(
             model.encoder,
-            "forward_with_block_outputs",
-            wraps=model.encoder.forward_with_block_outputs,
+            "forward_with_pair",
+            wraps=model.encoder.forward_with_pair,
         ) as encoder_forward:
             metrics = model.forward_augmented(batch)
 
@@ -1142,13 +1130,13 @@ class BlockJEPATests(unittest.TestCase):
         with (
             mock.patch.object(
                 teacher_encoder,
-                "forward_with_block_outputs",
-                wraps=teacher_encoder.forward_with_block_outputs,
+                "forward_with_pair",
+                wraps=teacher_encoder.forward_with_pair,
             ) as teacher_forward,
             mock.patch.object(
                 model.encoder,
-                "forward_with_block_outputs",
-                wraps=model.encoder.forward_with_block_outputs,
+                "forward_with_pair",
+                wraps=model.encoder.forward_with_pair,
             ) as student_forward,
         ):
             loss = model.forward_augmented(batch)["loss"]
@@ -1268,7 +1256,6 @@ class BlockJEPATests(unittest.TestCase):
     def test_train_step_updates_ema_teacher_with_disabled_target_projector(self):
         model = self._build_model(
             encoder_num_layers=2,
-            jepa_target_layers=[1, 2],
             masked_token_loss_weight=1.0,
             target_projector_dim=-1,
             use_ema_teacher=True,
@@ -1559,7 +1546,7 @@ class BlockJEPATests(unittest.TestCase):
                 load_pretrained_weights(loaded, path)
 
     def test_load_pretrained_weights_rejects_missing_masked_latent_readout(self):
-        model = self._build_model(jepa_target_layers=[1])
+        model = self._build_model()
         with tempfile.TemporaryDirectory() as tmpdir:
             path = f"{tmpdir}/ckpt.pt"
             old_state = {
@@ -1568,7 +1555,7 @@ class BlockJEPATests(unittest.TestCase):
                 if not k.startswith(("masked_latent_readout.", "target_projector."))
             }
             torch.save({"model": old_state}, path)
-            loaded = self._build_model(jepa_target_layers=[1])
+            loaded = self._build_model()
             with self.assertRaisesRegex(RuntimeError, "Missing key"):
                 load_pretrained_weights(loaded, path)
 

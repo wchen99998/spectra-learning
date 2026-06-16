@@ -205,8 +205,8 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
                 if autocast_dtype is not None
                 else torch.inference_mode()
             ):
-                peak_embeddings, _, pair_embeddings = (
-                    module.model.encoder.forward_with_block_outputs(
+                peak_embeddings, pair_embeddings = (
+                    module.model.encoder.forward_with_pair(
                         batch["peak_mz"],
                         batch["peak_intensity"],
                         valid_mask=batch["peak_valid_mask"],

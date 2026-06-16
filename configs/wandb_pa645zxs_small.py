@@ -30,8 +30,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_mae_loss_weight = 0.0
     cfg.mae_loss_weight = 1.0
     cfg.collapse_metrics_every_n_steps = 0
-    if "jepa_target_layers" in cfg:
-        del cfg["jepa_target_layers"]
 
     cfg.msg_probe_every_n_steps = 0.3
     cfg.val_every_n_steps = cfg.msg_probe_every_n_steps

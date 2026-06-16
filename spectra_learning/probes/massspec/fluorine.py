@@ -662,7 +662,7 @@ def _build_checkpoint_feature_factory(
     def encode_single_pair(
         batch: dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        peak_embeddings, _, pair_embeddings = model.encoder.forward_with_block_outputs(
+        peak_embeddings, pair_embeddings = model.encoder.forward_with_pair(
             batch["peak_mz"],
             batch["peak_intensity"],
             valid_mask=batch["peak_valid_mask"],
@@ -856,7 +856,7 @@ class FluorineFinetuneModule(torch.nn.Module):
         if self.pooling == "single_pair_covariance":
             if self.freeze_encoder:
                 with torch.no_grad():
-                    peak_embeddings, _, pair_embeddings = self.encoder.forward_with_block_outputs(
+                    peak_embeddings, pair_embeddings = self.encoder.forward_with_pair(
                         batch["peak_mz"],
                         batch["peak_intensity"],
                         valid_mask=batch["peak_valid_mask"],
@@ -864,7 +864,7 @@ class FluorineFinetuneModule(torch.nn.Module):
                     )
                     peak_embeddings = _peak_tokens_only(peak_embeddings, batch["peak_valid_mask"])
             else:
-                peak_embeddings, _, pair_embeddings = self.encoder.forward_with_block_outputs(
+                peak_embeddings, pair_embeddings = self.encoder.forward_with_pair(
                     batch["peak_mz"],
                     batch["peak_intensity"],
                     valid_mask=batch["peak_valid_mask"],

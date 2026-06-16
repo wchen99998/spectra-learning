@@ -192,7 +192,7 @@ class ForwardMixin:
             target_masks,
         )
 
-        context_encoded, _, context_pair = self.encoder.forward_with_block_outputs(
+        context_encoded, context_pair = self.encoder.forward_with_pair(
             context_mz,
             context_intensity,
             valid_mask=peak_valid_mask,

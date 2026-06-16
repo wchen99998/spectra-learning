@@ -21,7 +21,6 @@ def _build_model(
     encoder_apply_final_norm: bool = True,
     predictor_apply_final_norm: bool = True,
     jepa_target_normalization: str = "none",
-    jepa_target_layers: list[int] | None = None,
     jepa_mae_loss_weight: float = 0.0,
     predictor_dim: int | None = None,
     masked_token_input_mode: str = "latent_token",
@@ -42,7 +41,6 @@ def _build_model(
         masked_token_loss_weight=1.0,
         masked_latent_predictor_num_layers=predictor_layers,
         jepa_target_normalization=jepa_target_normalization,
-        jepa_target_layers=jepa_target_layers,
         jepa_mae_loss_weight=jepa_mae_loss_weight,
         masked_token_input_mode=masked_token_input_mode,
         masked_mz_sentinel=masked_mz_sentinel,
@@ -716,11 +714,8 @@ def test_mz_sentinel_mode_value_objective_predicts_mz_only():
 
 
 @torch.no_grad()
-def test_multilayer_targets_widen_teacher_and_predictor_outputs():
-    model = _build_model(
-        num_target_blocks=2,
-        jepa_target_layers=[1, 2],
-    )
+def test_teacher_and_predictor_outputs_use_final_encoder_dim():
+    model = _build_model(num_target_blocks=2)
     batch = _make_batch()
     peak_mz = batch["peak_mz"]
     peak_intensity = batch["peak_intensity"]
@@ -734,7 +729,7 @@ def test_multilayer_targets_widen_teacher_and_predictor_outputs():
         peak_intensity,
         peak_valid_mask,
     )
-    assert teacher_target_features.shape == (B, N, 2 * model.model_dim)
+    assert teacher_target_features.shape == (B, N, model.model_dim)
     teacher_targets = model._compute_jepa_teacher_targets(
         peak_mz,
         peak_intensity,
@@ -742,7 +737,7 @@ def test_multilayer_targets_widen_teacher_and_predictor_outputs():
     )
     assert teacher_targets.shape == (B, N, model.target_projector_dim)
 
-    context_encoded, _, context_pair = model.encoder.forward_with_block_outputs(
+    context_encoded, context_pair = model.encoder.forward_with_pair(
         peak_mz,
         peak_intensity,
         valid_mask=peak_valid_mask,
@@ -769,7 +764,7 @@ def test_multilayer_targets_widen_teacher_and_predictor_outputs():
         context_pair,
         predictor_visible_mask,
     )
-    assert predictor_output_features.shape == (B, N + 1, 2 * model.model_dim)
+    assert predictor_output_features.shape == (B, N + 1, model.model_dim)
     predictor_output = model.predict_masked_targets(
         predictor_input,
         context_pair,
@@ -788,7 +783,7 @@ def test_multilayer_targets_widen_teacher_and_predictor_outputs():
         B,
         K,
         N,
-        2 * model.model_dim,
+        model.model_dim,
     )
     assert predictor_output_by_view.shape == (B, K, N, model.target_projector_dim)
 
@@ -809,7 +804,7 @@ def test_masked_prediction_loss_uses_target_tokens_only():
     context_mask = batch["context_mask"] & peak_valid_mask
     target_masks = batch["target_masks"] & peak_valid_mask.unsqueeze(1)
 
-    context_encoded, _, context_pair = model.encoder.forward_with_block_outputs(
+    context_encoded, context_pair = model.encoder.forward_with_pair(
         peak_mz,
         peak_intensity,
         valid_mask=peak_valid_mask,
@@ -853,7 +848,7 @@ def test_masked_prediction_loss_can_zscore_teacher_targets():
     context_mask = batch["context_mask"] & peak_valid_mask
     target_masks = batch["target_masks"] & peak_valid_mask.unsqueeze(1)
 
-    context_encoded, _, context_pair = model.encoder.forward_with_block_outputs(
+    context_encoded, context_pair = model.encoder.forward_with_pair(
         peak_mz,
         peak_intensity,
         valid_mask=peak_valid_mask,
@@ -882,73 +877,10 @@ def test_masked_prediction_loss_can_zscore_teacher_targets():
 
 
 @torch.no_grad()
-def test_multilayer_zscore_normalizes_final_target_slice():
-    model = _build_model(
-        predictor_layers=2,
-        jepa_target_normalization="zscore",
-        jepa_target_layers=[1, 2],
-    )
-    x = torch.randn(2, 3, 2 * model.model_dim)
-
-    normalized = model._apply_jepa_target_normalization(x)
-    normalized = normalized.reshape(2, 3, 2, model.model_dim)
-
-    assert torch.allclose(
-        normalized[:, :, 0].mean(dim=-1),
-        torch.zeros(2, 3),
-        atol=1e-5,
-        rtol=1e-5,
-    )
-    assert torch.allclose(
-        normalized[:, :, 0].std(dim=-1, unbiased=False),
-        torch.ones(2, 3),
-        atol=1e-4,
-        rtol=1e-4,
-    )
-    assert torch.allclose(
-        normalized[:, :, 1].mean(dim=-1),
-        torch.zeros(2, 3),
-        atol=1e-5,
-        rtol=1e-5,
-    )
-    assert torch.allclose(
-        normalized[:, :, 1].std(dim=-1, unbiased=False),
-        torch.ones(2, 3),
-        atol=1e-4,
-        rtol=1e-4,
-    )
-
-
-@torch.no_grad()
 def test_single_layer_zscore_normalizes_final_target_slice():
     model = _build_model(
         predictor_layers=2,
         jepa_target_normalization="zscore",
-    )
-    x = torch.randn(2, 3, model.model_dim)
-
-    normalized = model._apply_jepa_target_normalization(x)
-
-    assert torch.allclose(
-        normalized.mean(dim=-1),
-        torch.zeros(2, 3),
-        atol=1e-5,
-        rtol=1e-5,
-    )
-    assert torch.allclose(
-        normalized.std(dim=-1, unbiased=False),
-        torch.ones(2, 3),
-        atol=1e-4,
-        rtol=1e-4,
-    )
-
-
-@torch.no_grad()
-def test_single_layer_zscore_normalizes_non_final_target_slice():
-    model = _build_model(
-        predictor_layers=2,
-        jepa_target_normalization="zscore",
-        jepa_target_layers=[1],
     )
     x = torch.randn(2, 3, model.model_dim)
 
@@ -992,7 +924,7 @@ def test_positions_outside_union_do_not_change_context_conditioning_with_fixed_t
         peak_valid_mask = batch["peak_valid_mask"]
         context_mask = batch["context_mask"] & peak_valid_mask
         target_masks = batch["target_masks"] & peak_valid_mask.unsqueeze(1)
-        context_encoded, _, context_pair = model.encoder.forward_with_block_outputs(
+        context_encoded, context_pair = model.encoder.forward_with_pair(
             peak_mz,
             peak_intensity,
             valid_mask=peak_valid_mask,

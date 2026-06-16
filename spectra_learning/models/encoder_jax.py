@@ -135,18 +135,16 @@ class PeakSetEncoder(nnx.Module):
         cls_mask = jnp.ones_like(peak_mask[:, :1])
         return jnp.concatenate([peak_mask, cls_mask], axis=1)
 
-    def forward_with_block_outputs(
+    def forward_with_pair(
         self,
         peak_mz: Array,
         peak_intensity: Array,
         *,
         valid_mask: Array | None = None,
         visible_mask: Array | None = None,
-        block_indices: list[int] | tuple[int, ...] = (),
         precursor_mz: Array | None = None,
         deterministic: bool = True,
-    ) -> tuple[Array, list[Array], Array]:
-        block_indices = tuple(idx for idx in block_indices)
+    ) -> tuple[Array, Array]:
         peak_valid_mask = (
             jnp.ones_like(peak_mz, dtype=jnp.bool_) if valid_mask is None else valid_mask
         )
@@ -164,8 +162,6 @@ class PeakSetEncoder(nnx.Module):
         x = self._append_cls_token(x)
         z = self._append_cls_pair_tokens(z)
         token_visible_mask = self._append_cls_mask(peak_visible_mask)
-        selected = set(block_indices)
-        selected_peak_outputs: dict[int, Array] = {}
         for block_idx, block in enumerate(self.blocks, start=1):
             if should_activation_checkpoint(
                 mode=self.activation_checkpoint_mode,
@@ -188,37 +184,13 @@ class PeakSetEncoder(nnx.Module):
                     token_visible_mask,
                     deterministic=deterministic,
                 )
-            if block_idx in selected and block_idx != self.num_layers:
-                selected_peak_outputs[block_idx] = x
         if self.final_norm is not None:
             x = self.final_norm(x)
         if self.final_pair_norm is not None:
             z = self.final_pair_norm(z)
         pair_visible_mask = token_visible_mask[:, :, None] & token_visible_mask[:, None, :]
         z = z * pair_visible_mask[..., None].astype(z.dtype)
-        if self.num_layers in selected:
-            selected_peak_outputs[self.num_layers] = x
-        return x, [selected_peak_outputs[idx] for idx in block_indices], z
-
-    def forward_peak_block_outputs(
-        self,
-        peak_mz: Array,
-        peak_intensity: Array,
-        *,
-        valid_mask: Array | None = None,
-        visible_mask: Array | None = None,
-        block_indices: list[int] | tuple[int, ...] = (),
-        precursor_mz: Array | None = None,
-    ) -> list[Array]:
-        _, peak_block_outputs, _ = self.forward_with_block_outputs(
-            peak_mz,
-            peak_intensity,
-            valid_mask=valid_mask,
-            visible_mask=visible_mask,
-            block_indices=block_indices,
-            precursor_mz=precursor_mz,
-        )
-        return peak_block_outputs
+        return x, z
 
     def __call__(
         self,
@@ -229,7 +201,7 @@ class PeakSetEncoder(nnx.Module):
         visible_mask: Array | None = None,
         precursor_mz: Array | None = None,
     ) -> Array:
-        output, _, _ = self.forward_with_block_outputs(
+        output, _ = self.forward_with_pair(
             peak_mz,
             peak_intensity,
             valid_mask=valid_mask,

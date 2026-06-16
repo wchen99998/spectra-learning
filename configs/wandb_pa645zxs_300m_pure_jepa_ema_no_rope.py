@@ -52,7 +52,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_token_loss_weight = 1
     cfg.jepa_mae_loss_weight = 0.0
     cfg.mae_loss_weight = 0.0
-    cfg.jepa_target_layers = [20]
     cfg.jepa_target_normalization = "none"
     cfg.jepa_mask_strategy = ["intensity_aware", "ragged"]
     cfg.jepa_num_target_blocks = 1

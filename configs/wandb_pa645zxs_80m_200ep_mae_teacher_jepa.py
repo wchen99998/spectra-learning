@@ -19,7 +19,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.val_every_n_steps = cfg.msg_probe_every_n_steps
     cfg.val_num_steps = 64
 
-    cfg.jepa_target_layers = [9, 14, 21, 25]
     cfg.jepa_mask_strategy = "all"
     cfg.jepa_context_fraction = 0.35
     cfg.jepa_target_fraction = 0.2

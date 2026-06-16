@@ -65,7 +65,6 @@ def get_config() -> config_dict.ConfigDict:
     # JEPA masking and targets
     cfg.jepa_num_target_blocks = 3
     cfg.jepa_mask_strategy = "intensity_aware"
-    cfg.jepa_target_layers = [5, 8, 12, 14]
     cfg.jepa_target_normalization = "none"
     cfg.masked_token_loss_weight = 1
     for key, value in aware_mixed.items():

@@ -102,13 +102,7 @@ class PeakSetJEPAJax(nnx.Module):
             if frozen_teacher_cfg is not None
             else self.predictor_pair_dim
         )
-        self.jepa_target_layers = (
-            [self.teacher_encoder_num_layers]
-            if self.training_mode == "mae_teacher_jepa" or cfg.jepa_target_layers is None
-            else [int(layer_idx) for layer_idx in cfg.jepa_target_layers]
-        )
-        self.num_jepa_target_layers = len(self.jepa_target_layers)
-        self.jepa_target_dim = self.num_jepa_target_layers * self.teacher_model_dim
+        self.jepa_target_dim = self.teacher_model_dim
         raw_target_projector_dim = (
             self.teacher_model_dim if cfg.target_projector_dim is None else cfg.target_projector_dim
         )
@@ -544,7 +538,7 @@ class PeakSetJEPAJax(nnx.Module):
         precursor_mz: Array | None,
     ) -> tuple[Array, Array]:
         def full_encoder(_):
-            context_encoded, _, context_pair = self.encoder.forward_with_block_outputs(
+            context_encoded, context_pair = self.encoder.forward_with_pair(
                 context_mz,
                 context_intensity,
                 valid_mask=peak_valid_mask,
@@ -587,7 +581,7 @@ class PeakSetJEPAJax(nnx.Module):
             packed_indices,
             axis=1,
         )
-        packed_encoded, _, packed_pair = self.encoder.forward_with_block_outputs(
+        packed_encoded, packed_pair = self.encoder.forward_with_pair(
             packed_mz,
             packed_intensity,
             valid_mask=packed_mask,
@@ -741,18 +735,14 @@ class PeakSetJEPAJax(nnx.Module):
         precursor_mz: Array | None = None,
     ) -> Array:
         teacher_encoder = self.teacher_encoder if self.teacher_encoder is not None else self.encoder
-        teacher_peak_outputs = teacher_encoder.forward_peak_block_outputs(
+        teacher_encoded, _ = teacher_encoder.forward_with_pair(
             peak_mz,
             peak_intensity,
             valid_mask=peak_valid_mask,
             visible_mask=peak_valid_mask,
-            block_indices=self.jepa_target_layers,
             precursor_mz=precursor_mz,
         )
-        return jnp.concatenate(
-            [output[:, : peak_mz.shape[1]] for output in teacher_peak_outputs],
-            axis=-1,
-        )
+        return teacher_encoded[:, : peak_mz.shape[1]]
 
     def compute_teacher_targets(self, augmented_batch: dict[str, Array | torch.Tensor]) -> Array:
         batch = (
@@ -788,52 +778,40 @@ class PeakSetJEPAJax(nnx.Module):
             target_masks,
         )
         if self.teacher_encoder is not None:
-            teacher_encoded, teacher_peak_outputs, teacher_pair = (
-                self.teacher_encoder.forward_with_block_outputs(
-                    peak_mz,
-                    peak_intensity,
-                    valid_mask=peak_valid_mask,
-                    visible_mask=peak_valid_mask,
-                    block_indices=self.jepa_target_layers,
-                    precursor_mz=precursor_mz,
-                )
+            teacher_encoded, teacher_pair = self.teacher_encoder.forward_with_pair(
+                peak_mz,
+                peak_intensity,
+                valid_mask=peak_valid_mask,
+                visible_mask=peak_valid_mask,
+                precursor_mz=precursor_mz,
             )
-            context_encoded, _, context_pair = self.encoder.forward_with_block_outputs(
+            context_encoded, context_pair = self.encoder.forward_with_pair(
                 context_mz,
                 context_intensity,
                 valid_mask=peak_valid_mask,
                 visible_mask=context_visible_mask,
                 precursor_mz=precursor_mz,
             )
-            teacher_target_features = jnp.concatenate(teacher_peak_outputs, axis=-1)
             return (
-                teacher_target_features[:, : peak_mz.shape[1]],
+                teacher_encoded[:, : peak_mz.shape[1]],
                 teacher_encoded,
                 teacher_pair[:, : peak_mz.shape[1], : peak_mz.shape[1]],
                 context_encoded,
                 context_pair,
             )
-        encoded, teacher_peak_outputs, pair = self.encoder.forward_with_block_outputs(
+        encoded, pair = self.encoder.forward_with_pair(
             jnp.concatenate([peak_mz, context_mz], axis=0),
             jnp.concatenate([peak_intensity, context_intensity], axis=0),
             valid_mask=jnp.concatenate([peak_valid_mask, peak_valid_mask], axis=0),
             visible_mask=jnp.concatenate([peak_valid_mask, context_visible_mask], axis=0),
-            block_indices=self.jepa_target_layers,
             precursor_mz=(
                 None
                 if precursor_mz is None
                 else jnp.concatenate([precursor_mz, precursor_mz], axis=0)
             ),
         )
-        teacher_target_features = jnp.concatenate(
-            [
-                peak_output[:batch_size, : peak_mz.shape[1]]
-                for peak_output in teacher_peak_outputs
-            ],
-            axis=-1,
-        )
         return (
-            teacher_target_features,
+            encoded[:batch_size, : peak_mz.shape[1]],
             encoded[:batch_size],
             pair[:batch_size, : peak_mz.shape[1], : peak_mz.shape[1]],
             encoded[batch_size:],

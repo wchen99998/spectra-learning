@@ -268,7 +268,7 @@ def test_contrastive_loss_uses_normalized_pooler_output(monkeypatch):
     )
 
     class FakeEncoder(torch.nn.Module):
-        def forward_with_block_outputs(
+        def forward_with_pair(
             self,
             peak_mz,
             peak_intensity,
@@ -279,7 +279,7 @@ def test_contrastive_loss_uses_normalized_pooler_output(monkeypatch):
             batch_size, num_peaks = peak_mz.shape
             peak_embeddings = peak_mz.new_zeros(batch_size, num_peaks, 3)
             pair_embeddings = peak_mz.new_zeros(batch_size, num_peaks, num_peaks, 2)
-            return peak_embeddings, (), pair_embeddings
+            return peak_embeddings, pair_embeddings
 
     class FakeModel(torch.nn.Module):
         def __init__(self) -> None:
@@ -337,7 +337,7 @@ def test_encoder_anchor_loss_compares_student_to_teacher_pooler_output():
             super().__init__()
             self.value = value
 
-        def forward_with_block_outputs(
+        def forward_with_pair(
             self,
             peak_mz,
             peak_intensity,
@@ -348,7 +348,7 @@ def test_encoder_anchor_loss_compares_student_to_teacher_pooler_output():
             batch_size, num_peaks = peak_mz.shape
             peak_embeddings = peak_mz.new_full((batch_size, num_peaks, 1), self.value)
             pair_embeddings = peak_mz.new_zeros(batch_size, num_peaks, num_peaks, 1)
-            return peak_embeddings, (), pair_embeddings
+            return peak_embeddings, pair_embeddings
 
     class FakeModel(torch.nn.Module):
         def __init__(self, value: float) -> None:

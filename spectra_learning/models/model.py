@@ -30,8 +30,6 @@ class PeakSetJEPA(
     encoder_num_layers: int
     norm_eps: float
     jepa_num_target_blocks: int
-    jepa_target_layers: list[int]
-    num_jepa_target_layers: int
     jepa_target_dim: int
     use_target_projector: bool
     target_projector_dim: int

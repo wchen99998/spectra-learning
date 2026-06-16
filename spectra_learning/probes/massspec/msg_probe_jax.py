@@ -699,7 +699,7 @@ def _extract_features(
     use_pair_features: bool,
 ) -> JaxFeatures:
     if use_pair_features:
-        embeddings, _, pair_embeddings = model.encoder.forward_with_block_outputs(
+        embeddings, pair_embeddings = model.encoder.forward_with_pair(
             batch["peak_mz"],
             batch["peak_intensity"],
             valid_mask=batch["peak_valid_mask"],

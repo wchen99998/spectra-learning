@@ -160,19 +160,14 @@ class TargetProjectionMixin:
                 if self.teacher_encoder is not None
                 else self.encoder
             )
-            teacher_peak_outputs = teacher_encoder.forward_peak_block_outputs(
+            teacher_encoded, _ = teacher_encoder.forward_with_pair(
                 peak_mz,
                 peak_intensity,
                 valid_mask=peak_valid_mask,
                 visible_mask=peak_valid_mask,
-                block_indices=self.jepa_target_layers,
                 precursor_mz=precursor_mz,
             )
-            # teacher_peak_outputs: target_layers * [B, N, D] -> [B, N, L*D]
-            return torch.cat(
-                [output[:, : peak_mz.shape[1]] for output in teacher_peak_outputs],
-                dim=-1,
-            )
+            return teacher_encoded[:, : peak_mz.shape[1]]
 
     def _compute_jepa_teacher_targets(
         self: Any,
@@ -248,52 +243,40 @@ class TargetProjectionMixin:
         )
         if self.teacher_encoder is not None:
             with torch.no_grad(), _active_autocast_context(peak_mz.device.type):
-                teacher_encoded, teacher_peak_outputs, teacher_pair = (
-                    self.teacher_encoder.forward_with_block_outputs(
-                        peak_mz,
-                        peak_intensity,
-                        valid_mask=peak_valid_mask,
-                        visible_mask=peak_valid_mask,
-                        block_indices=self.jepa_target_layers,
-                        precursor_mz=precursor_mz,
-                    )
+                teacher_encoded, teacher_pair = self.teacher_encoder.forward_with_pair(
+                    peak_mz,
+                    peak_intensity,
+                    valid_mask=peak_valid_mask,
+                    visible_mask=peak_valid_mask,
+                    precursor_mz=precursor_mz,
                 )
-            context_encoded, _, context_pair = self.encoder.forward_with_block_outputs(
+            context_encoded, context_pair = self.encoder.forward_with_pair(
                 context_mz,
                 context_intensity,
                 valid_mask=peak_valid_mask,
                 visible_mask=context_visible_mask,
                 precursor_mz=precursor_mz,
             )
-            teacher_target_features = torch.cat(teacher_peak_outputs, dim=-1)
             return (
-                teacher_target_features[:, : peak_mz.shape[1]],
+                teacher_encoded[:, : peak_mz.shape[1]],
                 teacher_encoded,
                 teacher_pair[:, : peak_mz.shape[1], : peak_mz.shape[1]],
                 context_encoded,
                 context_pair,
             )
-        encoded, teacher_peak_outputs, pair = self.encoder.forward_with_block_outputs(
+        encoded, pair = self.encoder.forward_with_pair(
             torch.cat([peak_mz, context_mz], dim=0),
             torch.cat([peak_intensity, context_intensity], dim=0),
             valid_mask=torch.cat([peak_valid_mask, peak_valid_mask], dim=0),
             visible_mask=torch.cat([peak_valid_mask, context_visible_mask], dim=0),
-            block_indices=self.jepa_target_layers,
             precursor_mz=(
                 None
                 if precursor_mz is None
                 else torch.cat([precursor_mz, precursor_mz], dim=0)
             ),
-            )
-        teacher_target_features = torch.cat(
-            [
-                peak_output[:batch_size, : peak_mz.shape[1]]
-                for peak_output in teacher_peak_outputs
-            ],
-            dim=-1,
         )
         return (
-            teacher_target_features,
+            encoded[:batch_size, : peak_mz.shape[1]],
             encoded[:batch_size],
             pair[:batch_size, : peak_mz.shape[1], : peak_mz.shape[1]],
             encoded[batch_size:],

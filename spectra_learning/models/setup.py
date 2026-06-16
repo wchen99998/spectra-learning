@@ -91,24 +91,7 @@ def _configure_targets(
         else model.predictor_pair_dim
     )
     model.jepa_target_group_dim = model.teacher_model_dim
-    if model.training_mode == "mae_teacher_jepa":
-        model.jepa_target_layers = [model.teacher_encoder_num_layers]
-    else:
-        model.jepa_target_layers = (
-            [model.teacher_encoder_num_layers]
-            if cfg.jepa_target_layers is None
-            else [layer_idx for layer_idx in cfg.jepa_target_layers]
-        )
-    if not model.jepa_target_layers:
-        raise ValueError("jepa_target_layers must not be empty")
-    if (
-        min(model.jepa_target_layers) < 1
-        or max(model.jepa_target_layers) > model.teacher_encoder_num_layers
-    ):
-        raise ValueError("jepa_target_layers must be within teacher encoder depth")
-
-    model.num_jepa_target_layers = len(model.jepa_target_layers)
-    model.jepa_target_dim = model.num_jepa_target_layers * model.teacher_model_dim
+    model.jepa_target_dim = model.teacher_model_dim
     raw_target_projector_dim = (
         model.teacher_model_dim
         if cfg.target_projector_dim is None

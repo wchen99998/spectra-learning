@@ -338,7 +338,7 @@ def test_jax_bf16_autocast_uses_bf16_activations_and_fp32_loss():
     jax_model = PeakSetJEPAJax(**kwargs)
     batch = torch_batch_to_jax(_real_pattern_batch("contiguous"))
 
-    encoded, _, pair = jax_model.encoder.forward_with_block_outputs(
+    encoded, pair = jax_model.encoder.forward_with_pair(
         batch["peak_mz"],
         batch["peak_intensity"],
         valid_mask=batch["peak_valid_mask"],

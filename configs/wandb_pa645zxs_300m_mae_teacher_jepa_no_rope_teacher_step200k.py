@@ -43,7 +43,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.val_num_steps = 64
     cfg.max_duration_hours = 23.5
 
-    cfg.jepa_target_layers = [5, 8, 12, 14]
     cfg.jepa_target_normalization = "none"
 
     cfg.run_name_suffix = "mae-teacher-jepa-300m-no-rope-teacher-step200k-23h"

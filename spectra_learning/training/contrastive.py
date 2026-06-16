@@ -802,7 +802,7 @@ class ContrastiveTrainingModule(torch.nn.Module):
                 parameter.requires_grad_(False)
 
     def _pooled_features(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
-        peak_embeddings, _, pair_embeddings = self.model.encoder.forward_with_block_outputs(
+        peak_embeddings, pair_embeddings = self.model.encoder.forward_with_pair(
             batch["peak_mz"],
             batch["peak_intensity"],
             valid_mask=batch["peak_valid_mask"],
@@ -915,8 +915,8 @@ class ContrastiveTrainingModule(torch.nn.Module):
         anchor_loss = pooled.new_zeros(())
         if self.teacher_model is not None and self.encoder_anchor_loss_weight > 0:
             with torch.no_grad():
-                teacher_peak_embeddings, _, teacher_pair_embeddings = (
-                    self.teacher_model.encoder.forward_with_block_outputs(
+                teacher_peak_embeddings, teacher_pair_embeddings = (
+                    self.teacher_model.encoder.forward_with_pair(
                         batch["peak_mz"],
                         batch["peak_intensity"],
                         valid_mask=batch["peak_valid_mask"],
