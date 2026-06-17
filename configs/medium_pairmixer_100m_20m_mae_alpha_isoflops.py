@@ -173,7 +173,7 @@ def get_config() -> config_dict.ConfigDict:
 
     # Logging
     cfg.enable_wandb = True
-    cfg.wandb_project = "jepa-debugging"
+    cfg.wandb_project = "jepa-finalrun"
     cfg.run_name_suffix = "mae-100m-20m-alpha-isoflops-100k-bs1024-ga2"
 
     return cfg

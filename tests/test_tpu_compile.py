@@ -21,6 +21,11 @@ def test_ct6e_standard_8t_target_is_single_host_v6e_8():
     assert target.process_count == 1
 
 
+def test_tpu_xla_flags_exclude_unsupported_overlap_tc_option():
+    assert "xla_tpu_overlap_compute_collective_tc" not in JAX_TPU_XLA_FLAGS
+    assert "xla_tpu_overlap_compute_collective_tc" not in jax_tpu_xla_flags_string()
+
+
 def test_v6e_8_alias_prefers_single_host_8t_layout():
     target = tpu_compile.resolve_tpu_compile_target("v6e-8")
 
@@ -281,7 +286,6 @@ def test_jax_tpu_xla_flags_are_global_defaults():
         "--xla_tpu_enable_async_collective_fusion=true",
         "--xla_tpu_enable_async_collective_fusion_fuse_all_reduce=true",
         "--xla_tpu_enable_async_collective_fusion_multiple_steps=true",
-        "--xla_tpu_overlap_compute_collective_tc=true",
         "--xla_enable_async_all_reduce=true",
         "--xla_tpu_use_minor_sharding_for_major_trivial_input=true",
         "--xla_tpu_relayout_group_size_threshold_for_reduce_scatter=1",

@@ -21,16 +21,219 @@ from spectra_learning.config import load_config
 
 
 REPO_ROOT = Path(__file__).resolve().parent
-DEFAULT_TASK_YAML = REPO_ROOT / "skypilot" / "100m_muon_v6e_kueue.yaml"
-DEFAULT_CONFIG = "configs/medium_pairmixer_100m_20m_mae_beta_isoflops_muon.py"
-DEFAULT_BUCKET = "gs://metal-repeater-411410-spectra-checkpoints"
 DEFAULT_PROJECT = "metal-repeater-411410"
 DEFAULT_INFRA = "k8s/skypilot-training"
+DEFAULT_TASK_NAME = "spectra-100m-muon-v6e-kueue"
+DEFAULT_IMAGE_ID = "docker:python:3.12-bookworm"
+DEFAULT_CPUS = 64
+DEFAULT_MEMORY_GB = 256
 KNOWN_NODE_POOLS = {
     "2x4": "skypilot-v6e-4t-flex",
     "4x4": "skypilot-v6e-16-flex",
     "8x8": "skypilot-v6e-64-flex",
 }
+TASK_SETUP = """\
+set -euo pipefail
+python --version
+python -m pip install --upgrade pip
+python -m pip install uv
+uv --version
+uv sync --frozen --no-dev
+.venv/bin/python - <<'PY'
+import importlib.metadata as md
+
+print("jax", md.version("jax"))
+print("jaxlib", md.version("jaxlib"))
+print("libtpu", md.version("libtpu"))
+print("wandb", md.version("wandb"))
+PY
+"""
+TASK_RUN = """\
+set -euo pipefail
+: "${SPECTRA_CONFIG:?SPECTRA_CONFIG must be set}"
+: "${SPECTRA_WORKDIR:?SPECTRA_WORKDIR must be set}"
+: "${SPECTRA_RUN_ID:?SPECTRA_RUN_ID must be set}"
+: "${SPECTRA_TRAINING_MAX_STEPS:?SPECTRA_TRAINING_MAX_STEPS must be set}"
+: "${SPECTRA_JAX_CACHE_DIR:?SPECTRA_JAX_CACHE_DIR must be set}"
+: "${SPECTRA_AOT_CACHE_GCS:?SPECTRA_AOT_CACHE_GCS must be set}"
+: "${SPECTRA_AOT_OVERRIDES_JSON:?SPECTRA_AOT_OVERRIDES_JSON must be set}"
+: "${SPECTRA_TRAIN_OVERRIDES_JSON:?SPECTRA_TRAIN_OVERRIDES_JSON must be set}"
+: "${SPECTRA_JAX_PRECOMPILE_TRAIN_STEPS:?SPECTRA_JAX_PRECOMPILE_TRAIN_STEPS must be set}"
+: "${HF_TOKEN:?HF_TOKEN must be set via --secret}"
+: "${WANDB_API_KEY:?WANDB_API_KEY must be set via --secret}"
+export HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-${HF_TOKEN}}"
+
+rm -f "${HOME}/.config/gcloud/application_default_credentials.json"
+unset GOOGLE_APPLICATION_CREDENTIALS
+unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE
+JAX_CACHE_DIR="$(.venv/bin/python - <<'PY'
+import os
+from pathlib import Path
+
+print(Path(os.environ["SPECTRA_JAX_CACHE_DIR"]).expanduser().resolve())
+PY
+)"
+export JAX_CACHE_DIR
+mkdir -p "${HF_HOME}" "${WANDB_DIR}" "${JAX_CACHE_DIR}"
+
+sync_jax_aot_cache_back() {
+  status=$?
+  trap - EXIT
+  if [[ "${SKYPILOT_NODE_RANK}" == "0" ]]; then
+    set +e
+    echo "Syncing JAX AOT cache back to ${SPECTRA_AOT_CACHE_GCS}"
+    .venv/bin/python scripts/jax_aot_cache.py upload \\
+      --cache-dir "${JAX_CACHE_DIR}" \\
+      --gcs-uri "${SPECTRA_AOT_CACHE_GCS}"
+    sync_status=$?
+    if [[ "${sync_status}" -ne 0 ]]; then
+      echo "JAX AOT cache upload failed with status ${sync_status}; preserving training exit status ${status}." >&2
+    fi
+    set -e
+  fi
+  exit "${status}"
+}
+trap sync_jax_aot_cache_back EXIT
+
+COORDINATOR_IP="$(printf '%s\\n' "${SKYPILOT_NODE_IPS}" | sed -n '1p')"
+TPU_WORKER_HOSTNAMES="$(printf '%s\\n' "${SKYPILOT_NODE_IPS}" | paste -sd, -)"
+TPU_PROCESS_ADDRESSES="$(printf '%s\\n' "${SKYPILOT_NODE_IPS}" | sed 's/$/:8471/' | paste -sd, -)"
+export JAX_DISTRIBUTED_INITIALIZE=1
+export JAX_COORDINATOR_ADDRESS="${COORDINATOR_IP}:12345"
+export JAX_NUM_PROCESSES="${SKYPILOT_NUM_NODES}"
+export JAX_PROCESS_ID="${SKYPILOT_NODE_RANK}"
+export JAX_PLATFORMS=tpu
+export TPU_WORKER_ID="${SKYPILOT_NODE_RANK}"
+export TPU_WORKER_HOSTNAMES
+export TPU_PROCESS_ADDRESSES
+export TPU_PROCESS_PORT=8471
+export TF_CPP_MIN_LOG_LEVEL=0
+
+echo "Hydrating JAX AOT cache from ${SPECTRA_AOT_CACHE_GCS}"
+.venv/bin/python - <<'PY'
+import os
+from pathlib import Path
+
+from google.cloud import storage
+
+cache_dir = Path(os.environ["JAX_CACHE_DIR"])
+uri = os.environ["SPECTRA_AOT_CACHE_GCS"].rstrip("/")
+if not uri.startswith("gs://"):
+    raise SystemExit(f"SPECTRA_AOT_CACHE_GCS must be a gs:// URI, got {uri!r}")
+
+bucket_name, _, prefix = uri[5:].partition("/")
+if not bucket_name or not prefix:
+    raise SystemExit(f"SPECTRA_AOT_CACHE_GCS must include bucket and prefix, got {uri!r}")
+
+cache_dir.mkdir(parents=True, exist_ok=True)
+client = storage.Client(project=os.environ.get("GOOGLE_CLOUD_PROJECT") or None)
+downloaded = 0
+skipped = 0
+total_bytes = 0
+found = False
+for blob in client.list_blobs(bucket_name, prefix=f"{prefix}/"):
+    rel = blob.name[len(prefix) + 1 :]
+    if not rel or rel.endswith("/"):
+        continue
+    found = True
+    target = cache_dir / rel
+    size = int(blob.size or 0)
+    if target.exists() and target.stat().st_size == size:
+        skipped += 1
+        continue
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp_target = target.with_name(f".{target.name}.tmp")
+    blob.download_to_filename(tmp_target)
+    os.replace(tmp_target, target)
+    downloaded += 1
+    total_bytes += size
+
+if found:
+    print(
+        "AOT cache hydrated: "
+        f"downloaded={downloaded} skipped={skipped} bytes={total_bytes}"
+    )
+else:
+    print(f"No AOT cache objects found at {uri}; in-job precompile remains eligible.")
+PY
+
+METRICS_JSON="${SPECTRA_WORKDIR%/}/${SPECTRA_METRICS_JSON#/}"
+OVERRIDES_JSON="$(.venv/bin/python - <<'PY'
+import json
+import os
+import subprocess
+import sys
+
+
+def parse_precompile_train_steps(value: str, cache_dir: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized == "auto":
+        ready = subprocess.run(
+            [
+                sys.executable,
+                "scripts/jax_aot_cache.py",
+                "ready",
+                "--cache-dir",
+                cache_dir,
+                "--config",
+                os.environ["SPECTRA_CONFIG"],
+                "--overrides-json",
+                os.environ["SPECTRA_AOT_OVERRIDES_JSON"],
+            ],
+            check=False,
+        )
+        return ready.returncode != 0
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise SystemExit(
+        "SPECTRA_JAX_PRECOMPILE_TRAIN_STEPS must be auto, true, or false; "
+        f"got {value!r}"
+    )
+
+
+jax_precompile_train_steps = parse_precompile_train_steps(
+    os.environ["SPECTRA_JAX_PRECOMPILE_TRAIN_STEPS"],
+    os.environ["JAX_CACHE_DIR"],
+)
+print(
+    f"JAX in-job precompile train steps: {jax_precompile_train_steps}",
+    file=sys.stderr,
+)
+
+overrides = json.loads(os.environ["SPECTRA_TRAIN_OVERRIDES_JSON"])
+overrides["jax_precompile_train_steps"] = jax_precompile_train_steps
+print(json.dumps(overrides, sort_keys=True, separators=(",", ":")))
+PY
+)"
+
+echo "SkyPilot node rank ${SKYPILOT_NODE_RANK}/${SKYPILOT_NUM_NODES}"
+echo "Coordinator ${JAX_COORDINATOR_ADDRESS}"
+echo "TPU worker ${TPU_WORKER_ID}: ${TPU_WORKER_HOSTNAMES}"
+echo "Workdir ${SPECTRA_WORKDIR}"
+echo "JAX cache ${JAX_CACHE_DIR}"
+.venv/bin/python train.py \\
+  --config "${SPECTRA_CONFIG}" \\
+  --workdir "${SPECTRA_WORKDIR}" \\
+  --training-max-steps "${SPECTRA_TRAINING_MAX_STEPS}" \\
+  --overrides-json "${OVERRIDES_JSON}" \\
+  --metrics-json "${METRICS_JSON}"
+"""
+
+
+class LiteralString(str):
+    pass
+
+
+def _literal_string_representer(
+    dumper: yaml.SafeDumper,
+    data: LiteralString,
+) -> yaml.nodes.ScalarNode:
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
+
+
+yaml.SafeDumper.add_representer(LiteralString, _literal_string_representer)
 
 
 @dataclass(frozen=True)
@@ -74,16 +277,22 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
     parser = argparse.ArgumentParser(
         description="Submit Spectra JAX training to SkyPilot/GKE/Kueue."
     )
-    parser.add_argument("--task-yaml", default=str(DEFAULT_TASK_YAML))
-    parser.add_argument("--config", default=DEFAULT_CONFIG)
-    parser.add_argument("--topology", default="4x4", help="TPU v6e topology, e.g. 2x4, 4x4, 8x8.")
+    parser.add_argument("--config", required=True, help="Training config path.")
+    parser.add_argument(
+        "--workdir",
+        required=True,
+        help="Training output directory, usually a gs:// checkpoint URI.",
+    )
+    parser.add_argument(
+        "--topology",
+        default="4x4",
+        help="TPU v6e topology, e.g. 2x4, 4x4, 8x8.",
+    )
     parser.add_argument("--node-pool", default="")
     parser.add_argument("--accelerator", default="tpu-v6e-4")
     parser.add_argument("--chips-per-node", type=int, default=4)
     parser.add_argument("--cluster", default="")
     parser.add_argument("--run-id", default="")
-    parser.add_argument("--workdir", default="")
-    parser.add_argument("--bucket", default=DEFAULT_BUCKET)
     parser.add_argument("--training-max-steps", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=None)
@@ -106,13 +315,21 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
     parser.add_argument("--force-precompile-aot", action="store_true")
     parser.add_argument("--down", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--yes", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--dry-run", "--dryrun", dest="dry_run", action="store_true")
     parser.add_argument("--task-output-dir", default="tmp/skypilot_tasks")
+    parser.add_argument("--task-name", default=DEFAULT_TASK_NAME)
+    parser.add_argument("--image-id", default=DEFAULT_IMAGE_ID)
+    parser.add_argument("--cpus", type=int, default=DEFAULT_CPUS)
+    parser.add_argument("--memory", type=int, default=DEFAULT_MEMORY_GB)
     parser.add_argument("--project", default=DEFAULT_PROJECT)
     parser.add_argument("--infra", default=DEFAULT_INFRA)
     parser.add_argument("--metrics-json", default="metrics/final.json")
     parser.add_argument("--queue-tag", default="flex-start")
     args, sky_args = parser.parse_known_args(argv)
+    if not args.config.strip():
+        parser.error("--config cannot be empty")
+    if not args.workdir.strip():
+        parser.error("--workdir cannot be empty")
     if sky_args and sky_args[0] == "--":
         sky_args = sky_args[1:]
     return args, sky_args
@@ -277,29 +494,58 @@ def build_train_overrides(
 
 def build_task(
     *,
-    template_path: Path,
     topology: TopologySpec,
     envs: dict[str, str],
     infra: str,
+    task_name: str = DEFAULT_TASK_NAME,
+    image_id: str = DEFAULT_IMAGE_ID,
+    cpus: int = DEFAULT_CPUS,
+    memory: int = DEFAULT_MEMORY_GB,
 ) -> dict[str, Any]:
-    task = yaml.safe_load(template_path.read_text())
-    task["num_nodes"] = topology.num_nodes
-    resources = task.setdefault("resources", {})
-    resources["infra"] = infra
-    resources["accelerators"] = topology.accelerator
-    resources.setdefault("accelerator_args", {})["tpu_vm"] = False
-    task_envs = task.setdefault("envs", {})
-    task_envs.update(envs)
-    spec = (
-        task.setdefault("config", {})
-        .setdefault("kubernetes", {})
-        .setdefault("pod_config", {})
-        .setdefault("spec", {})
-    )
-    node_selector = spec.setdefault("nodeSelector", {})
-    node_selector["cloud.google.com/gke-nodepool"] = topology.node_pool
-    node_selector["cloud.google.com/gke-tpu-topology"] = topology.topology
-    return task
+    return {
+        "name": task_name,
+        "workdir": ".",
+        "num_nodes": topology.num_nodes,
+        "resources": {
+            "infra": infra,
+            "image_id": image_id,
+            "accelerators": topology.accelerator,
+            "accelerator_args": {
+                "tpu_vm": False,
+            },
+            "cpus": cpus,
+            "memory": memory,
+        },
+        "envs": dict(envs),
+        "setup": LiteralString(TASK_SETUP),
+        "run": LiteralString(TASK_RUN),
+        "config": {
+            "kubernetes": {
+                "pod_config": {
+                    "spec": {
+                        "nodeSelector": {
+                            "cloud.google.com/gke-nodepool": topology.node_pool,
+                            "cloud.google.com/gke-tpu-topology": topology.topology,
+                        },
+                        "tolerations": [
+                            {
+                                "key": "google.com/tpu",
+                                "operator": "Equal",
+                                "value": "present",
+                                "effect": "NoSchedule",
+                            },
+                            {
+                                "key": "cloud.google.com/gke-queued",
+                                "operator": "Equal",
+                                "value": "true",
+                                "effect": "NoSchedule",
+                            },
+                        ],
+                    }
+                }
+            }
+        },
+    }
 
 
 def run_command(
@@ -425,17 +671,58 @@ def prepare_aot_cache(
         logging.warning("AOT cache is not ready; in-job precompile remains eligible.")
 
 
+def render_task_yaml(task: dict[str, Any]) -> str:
+    return yaml.safe_dump(task, sort_keys=False)
+
+
 def write_task_file(task: dict[str, Any], output_dir: Path, run_id: str) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{run_id}.yaml"
-    path.write_text(yaml.safe_dump(task, sort_keys=False))
+    path.write_text(render_task_yaml(task))
     return path
+
+
+def print_dry_run_assets(
+    *,
+    task_path: Path,
+    task: dict[str, Any],
+    aot_overrides_json: str,
+    train_overrides_json: str,
+    sky_command: list[str],
+) -> None:
+    print("===== SkyPilot Task Path =====")
+    print(task_path)
+    print()
+    print("===== SkyPilot Task YAML =====")
+    print(render_task_yaml(task).rstrip())
+    print()
+    print("===== AOT Overrides JSON =====")
+    print(aot_overrides_json)
+    print()
+    print("===== Train Overrides JSON =====")
+    print(train_overrides_json)
+    print()
+    print("===== SkyPilot Command =====")
+    print(shlex.join(sky_command))
 
 
 def default_cluster_name(topology: TopologySpec) -> str:
     if topology.topology == "2x4":
         return "spectra-100m-muon-v6e"
     return f"spectra-100m-muon-v6e-{topology.topology}"
+
+
+def default_aot_cache_gcs(workdir: str, cache_key: str) -> str:
+    normalized = workdir.rstrip("/")
+    if not normalized.startswith("gs://"):
+        raise ValueError(
+            "cannot derive --aot-cache-gcs from a non-GCS --workdir; "
+            "pass --aot-cache-gcs explicitly"
+        )
+    bucket_name, _, _prefix = normalized[5:].partition("/")
+    if not bucket_name:
+        raise ValueError("--workdir must include a GCS bucket")
+    return f"gs://{bucket_name}/skypilot-aot-cache/{cache_key}"
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -498,7 +785,7 @@ def main(argv: list[str] | None = None) -> None:
         f"100m-muon-{topology.slug}-b{batch_size}-accum{grad_accum}-"
         f"{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}"
     )
-    workdir = args.workdir or f"{args.bucket.rstrip('/')}/skypilot/{run_id}"
+    workdir = args.workdir.rstrip("/")
     cluster = args.cluster or default_cluster_name(topology)
     cache_key = f"100m_muon_{topology.slug}_b{batch_size}_accum{grad_accum}"
     aot_cache_dir = args.aot_cache_dir or f"artifacts/jax_compile_cache/{cache_key}"
@@ -506,9 +793,10 @@ def main(argv: list[str] | None = None) -> None:
     aot_summary_json = args.aot_summary_json or (
         f"artifacts/tpu_compile/{cache_key}-{aot_variant.replace(':', '-')}.json"
     )
-    aot_cache_gcs = args.aot_cache_gcs or (
-        f"{args.bucket.rstrip('/')}/skypilot-aot-cache/{cache_key}"
-    )
+    try:
+        aot_cache_gcs = args.aot_cache_gcs or default_aot_cache_gcs(workdir, cache_key)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     aot_overrides = {
         "training_max_steps": int(training_max_steps),
         "jax_mesh_devices": str(jax_mesh_devices),
@@ -534,17 +822,21 @@ def main(argv: list[str] | None = None) -> None:
     )
     logging.info("Run ID: %s", run_id)
     logging.info("Workdir: %s", workdir)
+    logging.info("AOT cache GCS: %s", aot_cache_gcs)
 
     launch_env = dict(os.environ)
-    hf_token = read_hf_token(launch_env)
-    wandb_key = read_wandb_api_key(launch_env)
-    launch_env["HF_TOKEN"] = hf_token
-    launch_env["HUGGING_FACE_HUB_TOKEN"] = launch_env.get(
-        "HUGGING_FACE_HUB_TOKEN",
-        hf_token,
-    )
-    launch_env["WANDB_API_KEY"] = wandb_key
-    logging.info("Loaded HF_TOKEN and WANDB_API_KEY for SkyPilot secrets.")
+    if args.dry_run:
+        logging.info("Dry run requested; skipping HF_TOKEN/WANDB_API_KEY lookup.")
+    else:
+        hf_token = read_hf_token(launch_env)
+        wandb_key = read_wandb_api_key(launch_env)
+        launch_env["HF_TOKEN"] = hf_token
+        launch_env["HUGGING_FACE_HUB_TOKEN"] = launch_env.get(
+            "HUGGING_FACE_HUB_TOKEN",
+            hf_token,
+        )
+        launch_env["WANDB_API_KEY"] = wandb_key
+        logging.info("Loaded HF_TOKEN and WANDB_API_KEY for SkyPilot secrets.")
 
     if args.dry_run:
         logging.info("Dry run requested; skipping AOT readiness, compile, and upload.")
@@ -580,6 +872,7 @@ def main(argv: list[str] | None = None) -> None:
         dataloader_num_workers=dataloader_num_workers,
         queue_tag=args.queue_tag,
     )
+    train_overrides_json = json_compact(train_overrides)
     task_envs = {
         "SPECTRA_CONFIG": args.config,
         "SPECTRA_RUN_ID": run_id,
@@ -589,7 +882,7 @@ def main(argv: list[str] | None = None) -> None:
         "SPECTRA_JAX_CACHE_DIR": aot_cache_dir,
         "SPECTRA_AOT_CACHE_GCS": aot_cache_gcs,
         "SPECTRA_AOT_OVERRIDES_JSON": aot_overrides_json,
-        "SPECTRA_TRAIN_OVERRIDES_JSON": json_compact(train_overrides),
+        "SPECTRA_TRAIN_OVERRIDES_JSON": train_overrides_json,
         "SPECTRA_JAX_PRECOMPILE_TRAIN_STEPS": args.jax_precompile_train_steps,
         "JAX_INITIALIZATION_TIMEOUT": "3600",
         "HF_HOME": "/tmp/huggingface",
@@ -601,10 +894,13 @@ def main(argv: list[str] | None = None) -> None:
         "CLOUDSDK_CORE_PROJECT": args.project,
     }
     task = build_task(
-        template_path=Path(args.task_yaml),
         topology=topology,
         envs=task_envs,
         infra=args.infra,
+        task_name=args.task_name,
+        image_id=args.image_id,
+        cpus=args.cpus,
+        memory=args.memory,
     )
     task_path = write_task_file(task, REPO_ROOT / args.task_output_dir, run_id)
     logging.info("Wrote SkyPilot task: %s", task_path)
@@ -625,6 +921,13 @@ def main(argv: list[str] | None = None) -> None:
     cmd.extend(sky_args)
     logging.info("SkyPilot command: %s", shlex.join(cmd))
     if args.dry_run:
+        print_dry_run_assets(
+            task_path=task_path,
+            task=task,
+            aot_overrides_json=aot_overrides_json,
+            train_overrides_json=train_overrides_json,
+            sky_command=cmd,
+        )
         logging.info("Dry run requested; not launching SkyPilot.")
         return
     run_command(cmd, cwd=REPO_ROOT, env=launch_env)
