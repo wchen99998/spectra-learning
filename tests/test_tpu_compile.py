@@ -104,8 +104,7 @@ def test_runtime_precompile_uses_selected_default_pack_variant():
     calls = []
 
     class FakeDataModule:
-        def train_loader_for_epoch(self, epoch):
-            del epoch
+        def train_loader_for_precompile(self):
             batch = {
                 "peak_valid_mask": np.ones((2, 31), dtype=bool),
                 "context_mask": np.ones((2, 31), dtype=bool),

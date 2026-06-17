@@ -13,6 +13,7 @@ import numpy as np
 import optax
 from flax import nnx
 from jax.experimental import multihost_utils
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from ml_collections import config_dict
 
 from spectra_learning.config.msg_probe import validate_msg_probe_config
@@ -41,12 +42,14 @@ JaxFeatures = Array | tuple[Array, Array]
 JaxProbeParams = dict[str, Any]
 EpochState = dict[str, Any]
 PendingPrediction = tuple[dict[str, Array], np.ndarray, dict[str, np.ndarray]]
+JAX_PROBE_DATA_AXIS = "data"
 
 
 def run_msg_probe_jax(
     *,
     config: config_dict.ConfigDict,
     model: PeakSetJEPAJax,
+    data_mesh: Mesh | None = None,
     on_epoch_end: Callable[[dict[str, float]], None] | None = None,
 ) -> dict[str, Any]:
     def run_once(
@@ -56,6 +59,7 @@ def run_msg_probe_jax(
         return _run_msg_probe_once_jax(
             config=config,
             model=model,
+            data_mesh=data_mesh,
             on_epoch_end=repeat_on_epoch_end,
             repeat_index=repeat_index,
         )
@@ -72,6 +76,7 @@ def _run_msg_probe_once_jax(
     *,
     config: config_dict.ConfigDict,
     model: PeakSetJEPAJax,
+    data_mesh: Mesh | None,
     on_epoch_end: Callable[[dict[str, float]], None] | None,
     repeat_index: int,
 ) -> dict[str, Any]:
@@ -241,6 +246,7 @@ def _run_msg_probe_once_jax(
             distributed_world_size=_distributed_world_size_jax(),
             distributed_rank=_distributed_rank_jax(),
             pad_distributed=True,
+            data_mesh=data_mesh,
         ):
             features = _extract_features(model, batch, use_pair_features=use_pair_features)
             step_batch = _probe_step_batch(batch, task_spec)
@@ -280,6 +286,7 @@ def _run_msg_probe_once_jax(
             max_samples=max_val_samples if early_stopping else max_test_samples,
             distributed_world_size=_distributed_world_size_jax(),
             distributed_rank=_distributed_rank_jax(),
+            data_mesh=data_mesh,
         ):
             features = _extract_features(model, batch, use_pair_features=use_pair_features)
             step_batch = _probe_step_batch(batch, task_spec)
@@ -378,10 +385,11 @@ def _run_msg_probe_once_jax(
             seed=test_seed_base,
             peak_ordering=peak_ordering,
             drop_remainder=False,
-            max_samples=max_test_samples,
-            distributed_world_size=_distributed_world_size_jax(),
-            distributed_rank=_distributed_rank_jax(),
-        ):
+                max_samples=max_test_samples,
+                distributed_world_size=_distributed_world_size_jax(),
+                distributed_rank=_distributed_rank_jax(),
+                data_mesh=data_mesh,
+            ):
             features = _extract_features(model, batch, use_pair_features=use_pair_features)
             step_batch = _probe_step_batch(batch, task_spec)
             for variant in variants:
@@ -435,6 +443,7 @@ def _run_msg_probe_once_jax(
         max_samples=max_mcebio_test_samples,
         distributed_world_size=_distributed_world_size_jax(),
         distributed_rank=_distributed_rank_jax(),
+        data_mesh=data_mesh,
     ):
         features = _extract_features(model, batch, use_pair_features=use_pair_features)
         step_batch = _probe_step_batch(batch, task_spec)
@@ -493,6 +502,7 @@ def iter_massspec_probe_jax(
     pad_distributed: bool = False,
     distributed_world_size: int = 1,
     distributed_rank: int = 0,
+    data_mesh: Mesh | None = None,
 ) -> Iterator[JaxBatch]:
     dataset = probe_data.build_dataset(
         split,
@@ -504,7 +514,7 @@ def iter_massspec_probe_jax(
         pad_distributed=pad_distributed,
         distributed_world_size=distributed_world_size,
         distributed_rank=distributed_rank,
-        output_format="jax",
+        output_format="numpy" if data_mesh is not None else "jax",
     )
     size = int(probe_data.info[f"{split}_size"])
     if max_samples is not None:
@@ -517,7 +527,51 @@ def iter_massspec_probe_jax(
         if take != int(batch["peak_mz"].shape[0]):
             batch = _slice_batch(batch, take)
         seen += take
-        yield batch
+        yield _probe_batch_to_jax(batch, data_mesh=data_mesh)
+
+
+def _probe_batch_to_jax(
+    batch: dict[str, Any],
+    *,
+    data_mesh: Mesh | None,
+) -> dict[str, Any]:
+    return {
+        key: _probe_value_to_jax(value, data_mesh=data_mesh)
+        for key, value in batch.items()
+    }
+
+
+def _probe_value_to_jax(value: Any, *, data_mesh: Mesh | None) -> Any:
+    if isinstance(value, np.ndarray | np.generic):
+        return _probe_array_to_jax(value, data_mesh=data_mesh)
+    if isinstance(value, dict):
+        return {
+            key: _probe_value_to_jax(item, data_mesh=data_mesh)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        if all(isinstance(item, str) for item in value):
+            return value
+        return [_probe_value_to_jax(item, data_mesh=data_mesh) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_probe_value_to_jax(item, data_mesh=data_mesh) for item in value)
+    return value
+
+
+def _probe_array_to_jax(value: np.ndarray | np.generic, *, data_mesh: Mesh | None) -> Array:
+    host_value = np.asarray(value)
+    if data_mesh is None or host_value.ndim == 0:
+        return jnp.asarray(host_value)
+    local_shard_count = min(jax.local_device_count(), int(np.asarray(data_mesh.devices).size))
+    if local_shard_count <= 1 or int(host_value.shape[0]) % local_shard_count != 0:
+        return jnp.asarray(host_value)
+    sharding = NamedSharding(
+        data_mesh,
+        P(JAX_PROBE_DATA_AXIS, *((None,) * (host_value.ndim - 1))),
+    )
+    if jax.process_count() > 1:
+        return jax.make_array_from_process_local_data(sharding, host_value)
+    return jax.device_put(host_value, sharding)
 
 
 def probe_steps_per_epoch_jax(

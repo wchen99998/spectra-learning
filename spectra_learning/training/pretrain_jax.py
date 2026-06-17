@@ -1119,6 +1119,7 @@ def _run_jax_training_loop(
         "validation_seconds": 0.0,
         "msg_probe_seconds": 0.0,
         "model_update_seconds": 0.0,
+        "profile_seconds": 0.0,
     }
     measured_non_train_timing = {name: 0.0 for name in non_train_timing}
 
@@ -1213,8 +1214,13 @@ def _run_jax_training_loop(
                 and not profile_started
                 and global_step >= profile_start_step
             ):
+                phase_start = time.perf_counter()
                 jax.effects_barrier()
                 jax.profiler.start_trace(profile_dir)
+                add_non_train_timing(
+                    "profile_seconds",
+                    time.perf_counter() - phase_start,
+                )
                 profile_started = True
                 profile_active = True
 
@@ -1338,8 +1344,13 @@ def _run_jax_training_loop(
                     time.perf_counter() - phase_start,
                 )
             if profile_active and global_step >= profile_end_step:
+                phase_start = time.perf_counter()
                 jax.effects_barrier()
                 jax.profiler.stop_trace()
+                add_non_train_timing(
+                    "profile_seconds",
+                    time.perf_counter() - phase_start,
+                )
                 profile_active = False
         pbar.close()
         _shutdown_torch_loader_iterator(loader_iter)
@@ -1356,7 +1367,12 @@ def _run_jax_training_loop(
     )
     post_model_update_time = time.perf_counter()
     if profile_active:
+        phase_start = time.perf_counter()
         jax.profiler.stop_trace()
+        add_non_train_timing(
+            "profile_seconds",
+            time.perf_counter() - phase_start,
+        )
     measured_wall_elapsed = (
         post_model_update_time - measured_start if measured_start is not None else 0.0
     )
@@ -1566,8 +1582,18 @@ def run_and_log_msg_probe_jax(
     logger: MetricLogger,
     variants: tuple[str, ...],
     global_step: int,
+    data_mesh: Mesh | None = None,
 ) -> dict[str, float]:
-    probe_metrics = run_msg_probe_jax(config=config, model=model)
+    probe_data_mesh = (
+        data_mesh
+        if bool(_config_get(config, "jax_msg_probe_shard_batches", False))
+        else None
+    )
+    probe_metrics = run_msg_probe_jax(
+        config=config,
+        model=model,
+        data_mesh=probe_data_mesh,
+    )
     if jax.process_index() != 0:
         return probe_metrics
     log_msg_probe_metrics(
@@ -1612,6 +1638,7 @@ def _run_distributed_msg_probe_jax(
             logger=logger,
             variants=variants,
             global_step=global_step,
+            data_mesh=data_mesh,
         )
     multihost_utils.sync_global_devices(
         f"spectra_learning_jax_msg_probe_{global_step}"
@@ -1644,7 +1671,7 @@ def _precompile_jax_training_steps(
         }
     compile_start = time.perf_counter()
     precompile_repetitions = int(_config_get(config, "jax_precompile_repetitions", 1))
-    loader_iter = iter(datamodule.train_loader_for_epoch(0))
+    loader_iter = iter(datamodule.train_loader_for_precompile())
     micro_batches = [next(loader_iter) for _ in range(grad_accum_steps)]
     batch = numpy_batch_to_jax(
         _stack_micro_batches(micro_batches),

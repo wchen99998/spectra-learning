@@ -26,6 +26,11 @@ class GemsMemmapDataset(Dataset):
         np.cumsum(lengths, out=self._starts[1:])
         self._arrays: list[dict[str, np.ndarray]] | None = None
 
+    def __getstate__(self) -> dict[str, Any]:
+        state = self.__dict__.copy()
+        state["_arrays"] = None
+        return state
+
     def __len__(self) -> int:
         return int(self._starts[-1])
 

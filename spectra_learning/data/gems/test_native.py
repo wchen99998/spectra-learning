@@ -1,4 +1,5 @@
 import json
+import pickle
 import sys
 import tempfile
 import unittest
@@ -1225,6 +1226,25 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 ids.extend(round(float(v) * 1000.0) for v in batch["precursor_mz"].tolist())
 
         self.assertEqual(ids, list(range(9)))
+
+    def test_memmap_dataset_pickle_drops_cached_arrays(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            entries = _write_fake_native_shards(tmp_path / "train", [3, 2])
+            dataset = gems.GemsMemmapDataset(cast(list[dict[str, Any]], entries))
+            expected = dataset[2]
+            self.assertIsNotNone(dataset._arrays)
+
+            restored = pickle.loads(pickle.dumps(dataset))
+
+            self.assertIsNone(restored._arrays)
+            actual = restored[2]
+            np.testing.assert_array_equal(actual["spectra"], expected["spectra"])
+            self.assertEqual(
+                float(actual["precursor_mz_raw"]),
+                float(expected["precursor_mz_raw"]),
+            )
+            self.assertIsNotNone(restored._arrays)
 
     def test_memmap_loader_persistent_workers_repeat_cleanly(self):
         with tempfile.TemporaryDirectory() as tmp:

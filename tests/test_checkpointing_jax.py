@@ -361,6 +361,7 @@ def test_jax_training_loop_logs_validation_and_online_probe(monkeypatch, tmp_pat
     cfg.checkpoint_every_steps = 1000
     cfg.log_every_n_steps = 0
     cfg.jax_precompile_train_steps = False
+    cfg.jax_msg_probe_shard_batches = True
     cfg.val_every_n_steps = 2
     cfg.val_num_steps = 1
     cfg.msg_probe_every_n_steps = 2
@@ -369,8 +370,8 @@ def test_jax_training_loop_logs_validation_and_online_probe(monkeypatch, tmp_pat
 
     probe_calls = []
 
-    def fake_run_msg_probe_jax(*, config, model):
-        probe_calls.append((config, model))
+    def fake_run_msg_probe_jax(*, config, model, data_mesh=None):
+        probe_calls.append((config, model, data_mesh))
         pretrain_jax.time.sleep(0.01)
         return {"msg_probe/mean/test/auc_maccs_mean": 0.5}
 
@@ -393,6 +394,7 @@ def test_jax_training_loop_logs_validation_and_online_probe(monkeypatch, tmp_pat
     manager.close()
 
     assert len(probe_calls) == 1
+    assert probe_calls[0][2] is not None
     assert metrics["run/final_global_step"] == 2.0
     assert metrics["run/wall_elapsed_seconds"] >= metrics["run/train_elapsed_seconds"]
     assert metrics["run/wall_samples_per_second"] <= metrics["run/samples_per_second"]

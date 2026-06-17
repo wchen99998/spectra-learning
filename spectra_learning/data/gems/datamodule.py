@@ -235,16 +235,20 @@ class GemsNativeDataModule:
         drop_last: bool,
         start_batch: int = 0,
         epoch: int = 0,
+        num_workers: int | None = None,
     ) -> DataLoader:
         generator = torch.Generator()
         generator.manual_seed(seed)
+        resolved_num_workers = (
+            self.dataloader_num_workers if num_workers is None else num_workers
+        )
         start_index = (
             start_batch * self.batch_size * self.gradient_accumulation_steps
         )
         loader_kwargs: dict[str, Any] = {
             "dataset": dataset,
             "batch_size": self.batch_size,
-            "num_workers": self.dataloader_num_workers,
+            "num_workers": resolved_num_workers,
             "pin_memory": self.dataloader_pin_memory,
             "drop_last": drop_last,
             "collate_fn": self._collator(augment=augment),
@@ -270,7 +274,7 @@ class GemsNativeDataModule:
             )
         else:
             loader_kwargs["shuffle"] = shuffle
-        if self.dataloader_num_workers > 0:
+        if resolved_num_workers > 0:
             loader_kwargs["persistent_workers"] = self.dataloader_persistent_workers
             loader_kwargs["prefetch_factor"] = self.dataloader_prefetch_factor
             if self.dataloader_multiprocessing_context:
@@ -333,4 +337,14 @@ class GemsNativeDataModule:
             drop_last=self.drop_remainder,
             start_batch=start_batch,
             epoch=epoch,
+        )
+
+    def train_loader_for_precompile(self) -> DataLoader:
+        return self._make_loader(
+            dataset=self._get_dataset("train"),
+            augment=True,
+            shuffle=False,
+            seed=self.seed,
+            drop_last=self.drop_remainder,
+            num_workers=0,
         )
