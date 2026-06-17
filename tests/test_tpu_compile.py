@@ -1,5 +1,6 @@
 import os
 
+import jax.numpy as jnp
 from ml_collections import config_dict
 import numpy as np
 
@@ -34,6 +35,95 @@ def test_v6e_8_multihost_alias_keeps_four_chip_vm_layout():
     assert target.name == "ct6e-standard-4t-v6e-8"
     assert target.chips_per_host_bounds == (2, 2, 1)
     assert target.process_count == 2
+
+
+def test_dynamic_v6e_2x4_multihost_target_matches_default_launcher():
+    target = tpu_compile.resolve_tpu_compile_target("v6e-2x4-multihost")
+
+    assert target.name == "ct6e-standard-4t-v6e-2x4"
+    assert target.topology_name == "v6e:2x4"
+    assert target.chips_per_host_bounds == (2, 2, 1)
+    assert target.devices_per_slice == 8
+    assert target.vm_count == 2
+    assert target.process_count == 2
+
+
+def test_dynamic_v6e_4x4_multihost_target_uses_four_hosts():
+    target = tpu_compile.resolve_tpu_compile_target("v6e-4x4-multihost")
+
+    assert target.name == "ct6e-standard-4t-v6e-4x4"
+    assert target.topology_name == "v6e:4x4"
+    assert target.chips_per_host_bounds == (2, 2, 1)
+    assert target.devices_per_slice == 16
+    assert target.vm_count == 4
+    assert target.process_count == 4
+
+
+def test_dynamic_v6e_8x8_multihost_target_uses_sixteen_hosts():
+    target = tpu_compile.resolve_tpu_compile_target("v6e-8x8-multihost")
+
+    assert target.name == "ct6e-standard-4t-v6e-8x8"
+    assert target.topology_name == "v6e:8x8"
+    assert target.chips_per_host_bounds == (2, 2, 1)
+    assert target.devices_per_slice == 64
+    assert target.vm_count == 16
+    assert target.process_count == 16
+
+
+def test_abstract_long_run_batches_match_4x4_topology():
+    cfg = config_dict.ConfigDict()
+    cfg.batch_size = 4096
+    cfg.gradient_accumulation_steps = 4
+    cfg.num_peaks = 31
+    cfg.jepa_num_target_blocks = 1
+    target = tpu_compile.resolve_tpu_compile_target("v6e-4x4-multihost")
+    mesh = tpu_compile.build_tpu_compile_mesh(target)
+
+    train_batch = tpu_compile.abstract_train_batch(cfg, target=target, data_mesh=mesh)
+    eval_batch = tpu_compile.abstract_eval_batch(cfg, target=target, data_mesh=mesh)
+
+    assert train_batch["peak_mz"].shape == (4, 256, 31)
+    assert train_batch["target_masks"].shape == (4, 256, 1, 31)
+    assert eval_batch["peak_mz"].shape == (256, 31)
+    assert eval_batch["target_masks"].shape == (256, 1, 31)
+
+
+def test_abstract_msg_probe_batch_uses_global_probe_batch_per_process():
+    cfg = config_dict.ConfigDict()
+    cfg.batch_size = 4096
+    cfg.msg_probe_batch_size = 512
+    cfg.num_peaks = 31
+    cfg.model_dim = 640
+    cfg.pairmixer_pair_dim = 256
+    cfg.msg_probe_fingerprint = "maccs"
+    target = tpu_compile.resolve_tpu_compile_target("v6e-4x4-multihost")
+
+    batch = tpu_compile.abstract_msg_probe_batch(cfg, target=target)
+    task_spec = tpu_compile.abstract_msg_probe_task_spec(cfg)
+    step_batch = tpu_compile.abstract_msg_probe_step_batch(
+        cfg,
+        task_spec,
+        target=target,
+    )
+    features = tpu_compile.abstract_msg_probe_features(
+        cfg,
+        probe_batch_size=128,
+        use_pair_features=True,
+    )
+
+    assert batch["peak_mz"].shape == (128, 31)
+    assert batch["probe_maccs"].shape == (128, 166)
+    assert batch["probe_maccs"].dtype == jnp.int32
+    assert set(step_batch) == {
+        "peak_valid_mask",
+        "probe_valid_mol",
+        "probe_fluorine",
+        "probe_sulfur",
+        "probe_maccs",
+    }
+    single, pair = features
+    assert single.shape == (128, 32, 640)
+    assert pair.shape == (128, 32, 32, 256)
 
 
 def test_target_microbatch_size_uses_single_host_process_count():

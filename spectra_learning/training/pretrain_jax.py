@@ -23,7 +23,10 @@ from spectra_learning.data.gems.datamodule import GemsNativeDataModule
 from spectra_learning.models.common_jax import Array
 from spectra_learning.models.factory_jax import build_model_from_config
 from spectra_learning.models.model_jax import PeakSetJEPAJax
-from spectra_learning.probes.massspec.msg_probe_jax import run_msg_probe_jax
+from spectra_learning.probes.massspec.msg_probe_jax import (
+    precompile_msg_probe_jax,
+    run_msg_probe_jax,
+)
 from spectra_learning.probes.massspec.msg_settings import (
     msg_probe_variants_from_config,
     resolve_msg_probe_fingerprint,
@@ -31,6 +34,7 @@ from spectra_learning.probes.massspec.msg_settings import (
 from spectra_learning.training.cadence import (
     msg_probe_interval,
     should_run_at_step,
+    should_run_at_step_or_final,
     validation_interval,
     validation_steps,
 )
@@ -1104,6 +1108,13 @@ def _run_jax_training_loop(
         pure_pack_train_steps=pure_pack_train_steps,
         pure_full_static_state=pure_full_static_state,
         pure_full_train_step=pure_full_train_step,
+        pure_eval_step=pure_eval_step,
+        pure_eval_static_state=(
+            pure_full_static_state
+            if pure_full_static_state is not None
+            else pure_static_state
+        ),
+        model=model,
     )
     timing = {
         "dataloader_seconds": 0.0,
@@ -1328,7 +1339,14 @@ def _run_jax_training_loop(
                     "validation_seconds",
                     time.perf_counter() - phase_start,
                 )
-            if should_run_at_step(msg_probe_every_n_steps, global_step):
+            if should_run_at_step_or_final(
+                msg_probe_every_n_steps,
+                global_step,
+                total_steps=total_steps,
+                run_at_final_step=bool(
+                    _config_get(config, "msg_probe_at_final_step", False)
+                ),
+            ):
                 phase_start = time.perf_counter()
                 last_msg_probe_metrics = _run_distributed_msg_probe_jax(
                     config=config,
@@ -1660,11 +1678,18 @@ def _precompile_jax_training_steps(
     pure_pack_train_steps: list[tuple[int, nnx.State, Any]],
     pure_full_static_state: nnx.State | None,
     pure_full_train_step: Any | None,
+    pure_eval_step: Any | None = None,
+    pure_eval_static_state: nnx.State | None = None,
+    model: PeakSetJEPAJax | None = None,
 ) -> dict[str, float]:
     if not bool(_config_get(config, "jax_precompile_train_steps", True)):
         return {
             "run/precompile_seconds": 0.0,
             "run/precompile_train_steps": 0.0,
+            "run/precompile_eval_steps": 0.0,
+            "run/precompile_msg_probe_features": 0.0,
+            "run/precompile_msg_probe_train_steps": 0.0,
+            "run/precompile_msg_probe_predict_steps": 0.0,
             "run/precompile_repetitions": 0.0,
             "run/precompile_pack_variants": 0.0,
             "run/precompile_full_fallback": 0.0,
@@ -1719,9 +1744,52 @@ def _precompile_jax_training_steps(
             )
             jax.block_until_ready((compile_params, compile_opt_state, metrics))
             train_step_count += 1
+    eval_step_count = 0
+    if bool(_config_get(config, "jax_precompile_eval_steps", False)):
+        if pure_eval_step is None or pure_eval_static_state is None:
+            raise ValueError("jax_precompile_eval_steps requires pure_eval_step")
+        val_batch = numpy_batch_to_jax(
+            next(iter(datamodule.val_loader_for_eval(augment=True))),
+            data_mesh=data_mesh if use_sharded_step else None,
+            batch_axis=0,
+        )
+        eval_metrics = pure_eval_step(
+            pure_trainable_params,
+            pure_eval_static_state,
+            val_batch,
+        )
+        jax.block_until_ready(eval_metrics)
+        eval_step_count = 1
+    msg_probe_counts = {
+        "features": 0.0,
+        "train_steps": 0.0,
+        "predict_steps": 0.0,
+    }
+    if bool(_config_get(config, "jax_precompile_msg_probe", False)):
+        if model is None:
+            raise ValueError("jax_precompile_msg_probe requires model")
+        nnx.update(model, pure_trainable_params)
+        probe_data_mesh = (
+            data_mesh
+            if bool(_config_get(config, "jax_msg_probe_shard_batches", False))
+            else None
+        )
+        msg_probe_counts = precompile_msg_probe_jax(
+            config=config,
+            model=model,
+            data_mesh=probe_data_mesh,
+        )
     return {
         "run/precompile_seconds": time.perf_counter() - compile_start,
         "run/precompile_train_steps": float(train_step_count),
+        "run/precompile_eval_steps": float(eval_step_count),
+        "run/precompile_msg_probe_features": float(msg_probe_counts["features"]),
+        "run/precompile_msg_probe_train_steps": float(
+            msg_probe_counts["train_steps"]
+        ),
+        "run/precompile_msg_probe_predict_steps": float(
+            msg_probe_counts["predict_steps"]
+        ),
         "run/precompile_repetitions": float(precompile_repetitions),
         "run/precompile_pack_variants": float(pack_variant_count),
         "run/precompile_full_fallback": float(full_fallback_count),

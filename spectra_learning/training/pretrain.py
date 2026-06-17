@@ -73,6 +73,7 @@ from spectra_learning.training.activation_checkpointing import apply_activation_
 from spectra_learning.training.cadence import (
     msg_probe_interval as resolve_msg_probe_interval,
     should_run_at_step,
+    should_run_at_step_or_final,
     validation_interval,
     validation_steps,
 )
@@ -501,7 +502,14 @@ def run_training_loop(
                         last_validation_metrics,
                         global_step=global_step,
                     )
-            if should_run_at_step(msg_probe_every_n_steps, global_step):
+            if should_run_at_step_or_final(
+                msg_probe_every_n_steps,
+                global_step,
+                total_steps=total_steps,
+                run_at_final_step=bool(
+                    _config_get(config, "msg_probe_at_final_step", False)
+                ),
+            ):
                 base_model, _ = split_pretrain_module(unwrap_model(model))
                 last_msg_probe_metrics = dict(
                     run_and_log_msg_probe(

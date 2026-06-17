@@ -11,8 +11,8 @@ from typing import Any
 
 
 MANIFEST_NAME = ".spectra_aot_manifest.json"
-MANIFEST_VERSION = 1
-TRAIN_STEP_CACHE_GLOB = "jit_pure_sharded_accumulated_train_step-*-cache"
+MANIFEST_VERSION = 2
+CACHE_FILE_GLOB = "jit_*-cache"
 
 
 def _repo_root() -> Path:
@@ -82,17 +82,17 @@ def fingerprint_payload(*, config: str, overrides_json: str) -> dict[str, Any]:
     }
 
 
-def train_step_cache_files(cache_dir: Path) -> list[Path]:
+def cache_files(cache_dir: Path, pattern: str = CACHE_FILE_GLOB) -> list[Path]:
     if not cache_dir.is_dir():
         return []
     return sorted(
         path
-        for path in cache_dir.glob(TRAIN_STEP_CACHE_GLOB)
-        if path.is_file() and path.stat().st_size > 1024 * 1024
+        for path in cache_dir.glob(pattern)
+        if path.is_file() and path.stat().st_size > 0
     )
 
 
-def expected_train_step_cache_count(summary_json: str | None) -> int | None:
+def expected_cache_counts(summary_json: str | None) -> dict[str, int] | None:
     if not summary_json:
         return None
     path = Path(summary_json)
@@ -101,7 +101,15 @@ def expected_train_step_cache_count(summary_json: str | None) -> int | None:
     payload = json.loads(path.read_text())
     if not isinstance(payload, list) or not payload:
         return None
-    return len(payload)
+    counts: dict[str, int] = {}
+    for entry in payload:
+        if not isinstance(entry, dict):
+            return None
+        cache_glob = entry.get("cache_glob")
+        if not isinstance(cache_glob, str) or not cache_glob:
+            return None
+        counts[cache_glob] = counts.get(cache_glob, 0) + 1
+    return counts
 
 
 def manifest_path(cache_dir: Path) -> Path:
@@ -130,15 +138,24 @@ def is_ready(
         return False, "cache manifest version mismatch"
     if manifest.get("digest") != current["digest"]:
         return False, "cache manifest digest does not match current sources/config"
-    expected = expected_train_step_cache_count(summary_json)
+    expected = expected_cache_counts(summary_json)
     if expected is None:
-        expected = int(manifest.get("expected_train_step_cache_count", 0))
-    if expected <= 0:
-        return False, "missing expected train-step cache count"
-    actual = len(train_step_cache_files(cache_dir))
-    if actual < expected:
-        return False, f"found {actual} train-step cache files, expected {expected}"
-    return True, f"cache ready with {actual} train-step cache files"
+        raw_expected = manifest.get("expected_cache_counts", {})
+        expected = {
+            str(pattern): int(count)
+            for pattern, count in raw_expected.items()
+        }
+    if not expected:
+        return False, "missing expected cache counts"
+    observed: dict[str, int] = {}
+    for pattern, count in expected.items():
+        if count <= 0:
+            return False, f"invalid expected cache count for {pattern}: {count}"
+        actual = len(cache_files(cache_dir, pattern))
+        observed[pattern] = actual
+        if actual < count:
+            return False, f"found {actual} cache files for {pattern}, expected {count}"
+    return True, f"cache ready with counts {observed}"
 
 
 def write_manifest(
@@ -148,7 +165,7 @@ def write_manifest(
     overrides_json: str,
     summary_json: str,
 ) -> dict[str, Any]:
-    expected = expected_train_step_cache_count(summary_json)
+    expected = expected_cache_counts(summary_json)
     if expected is None:
         raise SystemExit(f"summary JSON is missing or invalid: {summary_json}")
     current = fingerprint_payload(config=config, overrides_json=overrides_json)
@@ -156,8 +173,11 @@ def write_manifest(
     manifest = {
         **current,
         "created_at_utc": datetime.now(UTC).isoformat(),
-        "expected_train_step_cache_count": expected,
-        "train_step_cache_count": len(train_step_cache_files(cache_dir)),
+        "expected_cache_counts": expected,
+        "cache_counts": {
+            pattern: len(cache_files(cache_dir, pattern))
+            for pattern in expected
+        },
     }
     manifest_path(cache_dir).write_text(json.dumps(manifest, indent=2, sort_keys=True))
     return manifest
@@ -169,7 +189,7 @@ def _must_upload(path: Path, *, cache_dir: Path, force: bool) -> bool:
     rel = path.relative_to(cache_dir).as_posix()
     if rel == MANIFEST_NAME:
         return True
-    return path.match(TRAIN_STEP_CACHE_GLOB)
+    return path.match(CACHE_FILE_GLOB)
 
 
 def upload_cache(*, cache_dir: Path, gcs_uri: str, force: bool = False) -> dict[str, int]:

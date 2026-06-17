@@ -72,6 +72,164 @@ def run_msg_probe_jax(
     )
 
 
+def precompile_msg_probe_jax(
+    *,
+    config: config_dict.ConfigDict,
+    model: PeakSetJEPAJax,
+    data_mesh: Mesh | None = None,
+) -> dict[str, float]:
+    fingerprint_task = resolve_msg_probe_fingerprint(config)
+    probe_data = MassSpecProbeData.from_config(
+        config,
+        distributed_world_size=_distributed_world_size_jax(),
+        distributed_rank=_distributed_rank_jax(),
+        distributed_local_rank=0,
+    )
+    variants = msg_probe_variants_from_config(config)
+    use_pair_features = any(_uses_pair_features(variant) for variant in variants)
+    peak_ordering = str(_config_get(config, "peak_ordering", "intensity"))
+    max_samples = int(_config_get(config, "msg_probe_batch_size", probe_data.batch_size))
+    train_seed = int(config.seed) + 1_100_000
+    val_seed = int(config.seed) + 1_110_000
+    train_targets = _collect_split_targets_jax(
+        probe_data=probe_data,
+        split="massspec_train",
+        peak_ordering=peak_ordering,
+        seed=train_seed,
+        fingerprint_task=fingerprint_task,
+        max_samples=max_samples,
+    )
+    val_targets = _collect_split_targets_jax(
+        probe_data=probe_data,
+        split="massspec_val",
+        peak_ordering=peak_ordering,
+        seed=val_seed,
+        fingerprint_task=fingerprint_task,
+        max_samples=max_samples,
+    )
+    task_spec = _build_task_spec_jax(
+        train_targets=train_targets,
+        test_targets=val_targets,
+        fingerprint_task=fingerprint_task,
+        single_pair_covariance_include_diagonal=bool(
+            _config_get(
+                config,
+                "msg_probe_single_pair_covariance_include_diagonal",
+                False,
+            )
+        ),
+    )
+    steps_per_epoch = probe_steps_per_epoch_jax(
+        probe_data,
+        split="massspec_train",
+        drop_remainder=False,
+        max_samples=max_samples,
+        distributed_world_size=_distributed_world_size_jax(),
+    )
+    schedule = _probe_lr_schedule(
+        base_lr=float(_config_get(config, "msg_probe_learning_rate", 1e-3)),
+        total_steps=max(1, steps_per_epoch),
+        warmup_steps=_resolve_probe_warmup_steps(config, steps_per_epoch),
+    )
+    optimizer = optax.adamw(
+        learning_rate=schedule,
+        weight_decay=float(_config_get(config, "msg_probe_weight_decay", 1e-2)),
+    )
+    key = jax.random.PRNGKey(int(config.seed) + 300_000)
+    params_by_variant: dict[str, JaxProbeParams] = {}
+    opt_state_by_variant: dict[str, optax.OptState] = {}
+    for variant in variants:
+        key, init_key = jax.random.split(key)
+        params_by_variant[variant] = _init_probe_params(
+            init_key,
+            variant=variant,
+            config=config,
+            task_spec=task_spec,
+        )
+        opt_state_by_variant[variant] = optimizer.init(params_by_variant[variant])
+    train_step_by_variant = {
+        variant: _make_jitted_probe_train_step(
+            optimizer=optimizer,
+            variant=variant,
+            task_spec=task_spec,
+            distributed=_is_distributed_jax(),
+        )
+        for variant in variants
+    }
+    predict_step_by_variant = {
+        variant: _make_jitted_probe_predict_step(
+            variant=variant,
+            task_spec=task_spec,
+        )
+        for variant in variants
+    }
+    train_batch = next(
+        iter_massspec_probe_jax(
+            probe_data=probe_data,
+            split="massspec_train",
+            seed=train_seed,
+            peak_ordering=peak_ordering,
+            drop_remainder=False,
+            max_samples=max_samples,
+            distributed_world_size=_distributed_world_size_jax(),
+            distributed_rank=_distributed_rank_jax(),
+            pad_distributed=True,
+            data_mesh=data_mesh,
+        )
+    )
+    train_features = _extract_features(
+        model,
+        train_batch,
+        use_pair_features=use_pair_features,
+    )
+    train_step_batch = _probe_step_batch(train_batch, task_spec)
+    compiled_train_steps = 0
+    for variant in variants:
+        params, opt_state, logits = train_step_by_variant[variant](
+            params_by_variant[variant],
+            opt_state_by_variant[variant],
+            batch=train_step_batch,
+            features=train_features,
+        )
+        jax.block_until_ready((params, opt_state, logits))
+        params_by_variant[variant] = params
+        opt_state_by_variant[variant] = opt_state
+        compiled_train_steps += 1
+    eval_batch = next(
+        iter_massspec_probe_jax(
+            probe_data=probe_data,
+            split="massspec_val",
+            seed=val_seed,
+            peak_ordering=peak_ordering,
+            drop_remainder=False,
+            max_samples=max_samples,
+            distributed_world_size=_distributed_world_size_jax(),
+            distributed_rank=_distributed_rank_jax(),
+            data_mesh=data_mesh,
+        )
+    )
+    eval_features = _extract_features(
+        model,
+        eval_batch,
+        use_pair_features=use_pair_features,
+    )
+    eval_step_batch = _probe_step_batch(eval_batch, task_spec)
+    compiled_predict_steps = 0
+    for variant in variants:
+        logits = predict_step_by_variant[variant](
+            params_by_variant[variant],
+            eval_step_batch,
+            eval_features,
+        )
+        jax.block_until_ready(logits)
+        compiled_predict_steps += 1
+    return {
+        "features": 2.0,
+        "train_steps": float(compiled_train_steps),
+        "predict_steps": float(compiled_predict_steps),
+    }
+
+
 def _run_msg_probe_once_jax(
     *,
     config: config_dict.ConfigDict,
@@ -860,6 +1018,10 @@ def _make_jitted_probe_train_step(
             grads = _mean_tree_across_processes(grads)
             return apply_step(params, opt_state, grads, batch, features)
 
+        train_step._jitted_compile_fns = (  # type: ignore[attr-defined]
+            ("probe_grad", grad_step),
+            ("probe_apply", apply_step),
+        )
         return train_step
 
     @jax.jit
@@ -897,7 +1059,12 @@ def _make_jitted_probe_train_step(
     ) -> tuple[JaxProbeParams, optax.OptState, dict[str, Array]]:
         return local_train_step(params, opt_state, batch, features)
 
+    train_step._jitted_compile_fns = (("probe_train", local_train_step),)  # type: ignore[attr-defined]
     return train_step
+
+
+def jitted_probe_train_step_compile_fns(train_step: Any) -> tuple[tuple[str, Any], ...]:
+    return tuple(getattr(train_step, "_jitted_compile_fns", ()))
 
 
 def _make_jitted_probe_predict_step(

@@ -30,6 +30,18 @@ def should_run_at_step(interval: int, global_step: int) -> bool:
     return interval > 0 and global_step % interval == 0
 
 
+def should_run_at_step_or_final(
+    interval: int,
+    global_step: int,
+    *,
+    total_steps: int,
+    run_at_final_step: bool,
+) -> bool:
+    if should_run_at_step(interval, global_step):
+        return True
+    return bool(run_at_final_step and interval > 0 and global_step == total_steps)
+
+
 def msg_probe_interval(config: Any, datamodule: Any, total_steps: int) -> int:
     return resolve_step_interval(
         config,
