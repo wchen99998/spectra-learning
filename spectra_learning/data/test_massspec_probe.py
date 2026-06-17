@@ -451,6 +451,59 @@ class MassSpecProbeMurckoDataTests(unittest.TestCase):
         self.assertIn("mcebio_murcko_probe/all.parquet", probe_data.mcebio_test_files[0])
         self.assertIn("nist_murcko_probe/test.parquet", probe_data.test_files[0])
 
+    def test_probe_dataset_distributed_eval_does_not_pad_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            _write_fake_combined_murcko_probe_artifacts(tmp_path / "probe-cache")
+
+            cfg = config_dict.ConfigDict()
+            cfg.artifact_dir = str(tmp_path / "probe-cache")
+            cfg.batch_size = 2
+            cfg.max_precursor_mz = 1000.0
+            cfg.min_peak_intensity = 1e-4
+            cfg.peak_ordering = "mz"
+            cfg.num_peaks = 4
+
+            probe_data = massspec_probe_data.MassSpecProbeData.from_config(cfg)
+            rank0 = list(
+                probe_data.build_dataset(
+                    "massspec_test",
+                    seed=0,
+                    peak_ordering="mz",
+                    shuffle=False,
+                    drop_remainder=False,
+                    distributed_world_size=2,
+                    distributed_rank=0,
+                )
+            )
+            rank1 = list(
+                probe_data.build_dataset(
+                    "massspec_test",
+                    seed=0,
+                    peak_ordering="mz",
+                    shuffle=False,
+                    drop_remainder=False,
+                    distributed_world_size=2,
+                    distributed_rank=1,
+                )
+            )
+            padded_rank1 = list(
+                probe_data.build_dataset(
+                    "massspec_test",
+                    seed=0,
+                    peak_ordering="mz",
+                    shuffle=False,
+                    drop_remainder=False,
+                    distributed_world_size=2,
+                    distributed_rank=1,
+                    pad_distributed=True,
+                )
+            )
+
+        self.assertEqual([batch["smiles"] for batch in rank0], [["c1ccccc1"]])
+        self.assertEqual(rank1, [])
+        self.assertEqual([batch["smiles"] for batch in padded_rank1], [["c1ccccc1"]])
+
     def test_indexed_probe_dataset_can_return_jax_batches(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

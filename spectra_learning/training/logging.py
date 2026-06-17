@@ -192,6 +192,10 @@ def _serialise_metrics(
         if isinstance(value, torch.Tensor):
             value = value.detach().cpu()
             serialised[key] = value.item() if value.ndim == 0 else value.tolist()
+        elif isinstance(value, np.generic):
+            serialised[key] = value.item()
+        elif isinstance(value, np.ndarray):
+            serialised[key] = value.item() if value.ndim == 0 else value.tolist()
         else:
             serialised[key] = value
     return serialised

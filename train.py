@@ -5,6 +5,7 @@ import os
 
 from spectra_learning.training.pretrain import train_and_evaluate
 from spectra_learning.training.api import load_config
+from spectra_learning.training.logging import _serialise_metrics
 from spectra_learning.training.storage import normalize_storage_path, write_text
 
 
@@ -47,7 +48,7 @@ def main() -> None:
     if args.metrics_json and process_index == 0:
         write_text(
             normalize_storage_path(args.metrics_json),
-            json.dumps(results, indent=2, sort_keys=True),
+            json.dumps(_serialise_metrics(results), indent=2, sort_keys=True),
         )
 
 

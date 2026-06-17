@@ -8,6 +8,7 @@ import torch
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from ml_collections import config_dict
+from types import SimpleNamespace
 
 from spectra_learning.data.gems.collate import GemsBatchCollator
 from spectra_learning.models.model_jax import PeakSetJEPAJax
@@ -113,6 +114,10 @@ class _FakeDataModule:
 
     @property
     def val_loader(self):
+        return [self._val_batch]
+
+    def val_loader_for_eval(self, *, augment: bool):
+        del augment
         return [self._val_batch]
 
 
@@ -366,6 +371,7 @@ def test_jax_training_loop_logs_validation_and_online_probe(monkeypatch, tmp_pat
 
     def fake_run_msg_probe_jax(*, config, model):
         probe_calls.append((config, model))
+        pretrain_jax.time.sleep(0.01)
         return {"msg_probe/mean/test/auc_maccs_mean": 0.5}
 
     monkeypatch.setattr(pretrain_jax, "run_msg_probe_jax", fake_run_msg_probe_jax)
@@ -388,6 +394,13 @@ def test_jax_training_loop_logs_validation_and_online_probe(monkeypatch, tmp_pat
 
     assert len(probe_calls) == 1
     assert metrics["run/final_global_step"] == 2.0
+    assert metrics["run/wall_elapsed_seconds"] >= metrics["run/train_elapsed_seconds"]
+    assert metrics["run/wall_samples_per_second"] <= metrics["run/samples_per_second"]
+    assert metrics["run/measured_wall_elapsed_seconds"] >= metrics["run/measured_elapsed_seconds"]
+    assert metrics["run/measured_wall_samples_per_second"] <= metrics["run/measured_samples_per_second"]
+    assert metrics["run/msg_probe_seconds"] >= 0.01
+    assert metrics["run/non_train_elapsed_seconds"] >= metrics["run/msg_probe_seconds"]
+    assert metrics["run/measured_non_train_elapsed_seconds"] >= metrics["run/msg_probe_seconds"]
     assert np.isfinite(metrics["val/loss"])
     assert metrics["msg_probe/mean/test/auc_maccs_mean"] == 0.5
     assert any(step == 2 and "val/loss" in payload for payload, step in logger.logs)
@@ -432,8 +445,13 @@ def test_run_msg_probe_jax_uses_jax_dataset_and_optimizer(monkeypatch):
 
     class FakeMassSpecProbeData:
         @staticmethod
-        def from_config(config):
+        def from_config(config, **kwargs):
             assert config is cfg
+            assert kwargs == {
+                "distributed_world_size": 1,
+                "distributed_rank": 0,
+                "distributed_local_rank": 0,
+            }
             return fake_probe_data
 
     kwargs = _tiny_mae_kwargs()
@@ -479,3 +497,166 @@ def test_run_msg_probe_jax_uses_jax_dataset_and_optimizer(monkeypatch):
         "massspec_test",
         "massspec_mcebio_test",
     ]
+
+
+def test_msg_probe_jax_distributed_helpers_shard_steps_and_merge_states(monkeypatch):
+    from spectra_learning.probes.massspec import msg_probe_jax
+
+    probe_data = SimpleNamespace(
+        batch_size=4,
+        info={"massspec_train_size": 5},
+    )
+    assert (
+        msg_probe_jax.probe_steps_per_epoch_jax(
+            probe_data,
+            split="massspec_train",
+            drop_remainder=False,
+            distributed_world_size=2,
+        )
+        == 2
+    )
+
+    task_spec = msg_probe_jax.MsgProbeTaskSpec(
+        regression_tasks=(),
+        binary_tasks=("fluorine",),
+        maccs_bits=2,
+        regression_means={},
+        regression_stds={},
+        fingerprint_task="maccs",
+    )
+    local_states = {
+        "mean": {
+            "count": 1,
+            "predictions": {
+                "fluorine": [np.asarray([0.25], dtype=np.float32)],
+                "maccs": [np.asarray([[0.1, 0.9]], dtype=np.float32)],
+            },
+            "targets": {
+                "fluorine": [np.asarray([0.0], dtype=np.float32)],
+                "maccs": [np.asarray([[0, 1]], dtype=np.int32)],
+            },
+        },
+    }
+    other_states = {
+        "mean": {
+            "count": 1,
+            "predictions": {
+                "fluorine": [np.asarray([0.75], dtype=np.float32)],
+                "maccs": [np.asarray([[0.8, 0.2]], dtype=np.float32)],
+            },
+            "targets": {
+                "fluorine": [np.asarray([1.0], dtype=np.float32)],
+                "maccs": [np.asarray([[1, 0]], dtype=np.int32)],
+            },
+        },
+    }
+
+    monkeypatch.setattr(msg_probe_jax.jax, "process_count", lambda: 2)
+    monkeypatch.setattr(
+        msg_probe_jax,
+        "_all_gather_object_jax",
+        lambda value: [value, other_states],
+    )
+
+    gathered = msg_probe_jax._gather_variant_states_jax(local_states, task_spec)
+
+    assert gathered["mean"]["count"] == 2
+    np.testing.assert_array_equal(
+        np.concatenate(gathered["mean"]["targets"]["fluorine"]),
+        np.asarray([0.0, 1.0], dtype=np.float32),
+    )
+
+
+def test_msg_probe_jax_mean_tree_averages_host_local_leaves(monkeypatch):
+    from spectra_learning.probes.massspec import msg_probe_jax
+
+    calls = []
+
+    def fake_process_allgather(value, *, tiled=False):
+        calls.append(tiled)
+        return np.stack(
+            [
+                np.asarray(value),
+                np.asarray(value) + 2.0,
+            ],
+            axis=0,
+        )
+
+    monkeypatch.setattr(msg_probe_jax.jax, "process_count", lambda: 2)
+    monkeypatch.setattr(
+        msg_probe_jax.multihost_utils,
+        "process_allgather",
+        fake_process_allgather,
+    )
+
+    averaged = msg_probe_jax._mean_tree_across_processes(
+        {"weight": jnp.asarray([1.0, 3.0])}
+    )
+
+    assert calls == [False]
+    np.testing.assert_allclose(np.asarray(averaged["weight"]), np.asarray([2.0, 4.0]))
+
+
+def test_msg_probe_jax_mean_tree_keeps_global_sharded_leaf_shape(monkeypatch):
+    from spectra_learning.probes.massspec import msg_probe_jax
+
+    calls = []
+    local_leaf = jnp.asarray([[1.0, 3.0], [5.0, 7.0]])
+    gathered_leaf = np.asarray(local_leaf)
+
+    def fake_process_allgather(value, *, tiled=False):
+        calls.append(tiled)
+        assert value is local_leaf
+        return gathered_leaf
+
+    monkeypatch.setattr(msg_probe_jax.jax, "process_count", lambda: 2)
+    monkeypatch.setattr(
+        msg_probe_jax,
+        "_is_global_non_fully_addressable_array",
+        lambda value: value is local_leaf,
+    )
+    monkeypatch.setattr(
+        msg_probe_jax.multihost_utils,
+        "process_allgather",
+        fake_process_allgather,
+    )
+
+    averaged = msg_probe_jax._mean_tree_across_processes({"weight": local_leaf})
+
+    assert calls == [True]
+    np.testing.assert_allclose(np.asarray(averaged["weight"]), gathered_leaf)
+
+
+def test_msg_probe_jax_single_pair_covariance_params_are_differentiable():
+    from spectra_learning.probes.massspec import msg_probe_jax
+
+    cfg = config_dict.ConfigDict(
+        {
+            "model_dim": 4,
+            "pairmixer_pair_dim": 6,
+            "covariance_pooling_dim": 3,
+            "msg_probe_mlp_hidden_dim": 4,
+            "msg_probe_mlp_num_layers": 1,
+            "msg_probe_single_pair_covariance_include_diagonal": False,
+        }
+    )
+    task_spec = msg_probe_jax.MsgProbeTaskSpec(
+        regression_tasks=("mol_weight",),
+        binary_tasks=("fluorine",),
+        maccs_bits=2,
+        regression_means={"mol_weight": 100.0},
+        regression_stds={"mol_weight": 10.0},
+        fingerprint_task="maccs",
+        single_pair_covariance_include_diagonal=False,
+    )
+
+    params = msg_probe_jax._init_probe_params(
+        jax.random.PRNGKey(0),
+        variant="single_pair_covariance",
+        config=cfg,
+        task_spec=task_spec,
+    )
+
+    assert jax.tree.leaves(params)
+    for leaf in jax.tree.leaves(params):
+        assert jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.inexact)

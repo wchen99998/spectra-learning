@@ -17,6 +17,7 @@ class MsgProbeTaskSpec(NamedTuple):
     regression_stds: dict[str, float]
     fingerprint_task: str = "maccs"
     binary_tasks: tuple[str, ...] = ()
+    single_pair_covariance_include_diagonal: bool = False
 
 
 class MsgProbeSplitTargets(NamedTuple):

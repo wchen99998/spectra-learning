@@ -312,14 +312,17 @@ class GemsNativeDataModule:
     @property
     def val_loader(self) -> DataLoader:
         if self._val_loader is None:
-            self._val_loader = self._make_loader(
-                dataset=self._get_dataset("validation"),
-                augment=False,
-                shuffle=False,
-                seed=self.seed,
-                drop_last=False,
-            )
+            self._val_loader = self.val_loader_for_eval(augment=False)
         return self._val_loader
+
+    def val_loader_for_eval(self, *, augment: bool) -> DataLoader:
+        return self._make_loader(
+            dataset=self._get_dataset("validation"),
+            augment=augment,
+            shuffle=False,
+            seed=self.seed,
+            drop_last=False,
+        )
 
     def train_loader_for_epoch(self, epoch: int, start_batch: int = 0) -> DataLoader:
         return self._make_loader(

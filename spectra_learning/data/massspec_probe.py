@@ -1573,13 +1573,23 @@ class MassSpecProbeData(NamedTuple):
             shuffle=shuffle,
             seed=seed,
         )
+        sampler_world_size = distributed_world_size
+        sampler_rank = distributed_rank
+        if distributed_world_size > 1 and not pad_distributed:
+            indices = list(range(distributed_rank, len(dataset), distributed_world_size))
+            if hasattr(dataset, "subset"):
+                dataset = dataset.subset(indices)
+            else:
+                dataset = Subset(dataset, indices)
+            sampler_world_size = 1
+            sampler_rank = 0
         sampler, loader_shuffle = loader_sampler(
             dataset,
             shuffle=shuffle,
             seed=seed,
             drop_last=drop_remainder,
-            distributed_world_size=distributed_world_size,
-            distributed_rank=distributed_rank,
+            distributed_world_size=sampler_world_size,
+            distributed_rank=sampler_rank,
         )
         generator = torch.Generator()
         generator.manual_seed(seed)

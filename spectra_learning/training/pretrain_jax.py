@@ -829,6 +829,9 @@ def train_and_evaluate_jax(
     checkpoint_manager = build_jax_checkpoint_manager(
         checkpoint_dir,
         max_to_keep=int(_config_get(config, "jax_checkpoint_max_to_keep", 5)),
+        enable_async_checkpointing=bool(
+            _config_get(config, "jax_enable_async_checkpointing", True)
+        ),
     )
     resume_step = checkpoint_manager.latest_step()
     if resume_step is None:
@@ -1111,6 +1114,24 @@ def _run_jax_training_loop(
         "compiled_step_seconds": 0.0,
         "measured_microbatches": 0.0,
     }
+    non_train_timing = {
+        "checkpoint_seconds": 0.0,
+        "validation_seconds": 0.0,
+        "msg_probe_seconds": 0.0,
+        "model_update_seconds": 0.0,
+    }
+    measured_non_train_timing = {name: 0.0 for name in non_train_timing}
+
+    def add_non_train_timing(
+        name: str,
+        elapsed: float,
+        *,
+        include_measured: bool = True,
+    ) -> None:
+        non_train_timing[name] += elapsed
+        if include_measured and measured_start is not None:
+            measured_non_train_timing[name] += elapsed
+
     loop_epochs = max(1, math.ceil(float(config.num_epochs)))
     global_step = start_step
     start_epoch = min(start_step // datamodule.train_steps, loop_epochs - 1)
@@ -1198,6 +1219,8 @@ def _run_jax_training_loop(
                 profile_active = True
 
             if pure_pack_train_steps:
+                max_context_count = _process_global_max_int(max_context_count)
+            if pure_pack_train_steps:
                 selected_train_step = pure_full_train_step
                 selected_static_state = pure_full_static_state
                 used_context_full_fallback = True
@@ -1267,8 +1290,14 @@ def _run_jax_training_loop(
                 total_steps=total_steps,
                 every_n_steps=log_every_n_steps,
             )
+            phase_start = time.perf_counter()
             maybe_save_checkpoint(global_step)
+            add_non_train_timing(
+                "checkpoint_seconds",
+                time.perf_counter() - phase_start,
+            )
             if should_run_at_step(val_every_n_steps, global_step):
+                phase_start = time.perf_counter()
                 eval_static_state = (
                     pure_full_static_state
                     if pure_full_static_state is not None
@@ -1289,64 +1318,120 @@ def _run_jax_training_loop(
                     last_validation_metrics,
                     global_step=global_step,
                 )
+                add_non_train_timing(
+                    "validation_seconds",
+                    time.perf_counter() - phase_start,
+                )
             if should_run_at_step(msg_probe_every_n_steps, global_step):
-                if jax.process_index() == 0:
-                    jax.block_until_ready(pure_trainable_params)
-                    nnx.update(model, pure_trainable_params)
-                    last_msg_probe_metrics = run_and_log_msg_probe_jax(
-                        config=config,
-                        model=model,
-                        logger=logger,
-                        variants=msg_probe_variants,
-                        global_step=global_step,
-                    )
-                multihost_utils.sync_global_devices(
-                    f"spectra_learning_jax_msg_probe_{global_step}"
+                phase_start = time.perf_counter()
+                last_msg_probe_metrics = _run_distributed_msg_probe_jax(
+                    config=config,
+                    model=model,
+                    logger=logger,
+                    variants=msg_probe_variants,
+                    global_step=global_step,
+                    trainable_params=pure_trainable_params,
+                    data_mesh=data_mesh,
+                )
+                add_non_train_timing(
+                    "msg_probe_seconds",
+                    time.perf_counter() - phase_start,
                 )
             if profile_active and global_step >= profile_end_step:
                 jax.effects_barrier()
                 jax.profiler.stop_trace()
                 profile_active = False
         pbar.close()
+        _shutdown_torch_loader_iterator(loader_iter)
+        del loader_iter, loader
         if global_step >= total_steps:
             break
     jax.block_until_ready(pure_trainable_params)
+    phase_start = time.perf_counter()
     nnx.update(model, pure_trainable_params)
     jax.effects_barrier()
+    add_non_train_timing(
+        "model_update_seconds",
+        time.perf_counter() - phase_start,
+    )
+    post_model_update_time = time.perf_counter()
     if profile_active:
         jax.profiler.stop_trace()
-    elapsed = time.perf_counter() - train_start
-    measured_elapsed = (
-        time.perf_counter() - measured_start if measured_start is not None else 0.0
+    measured_wall_elapsed = (
+        post_model_update_time - measured_start if measured_start is not None else 0.0
     )
+    measured_non_train_elapsed = sum(measured_non_train_timing.values())
+    measured_train_elapsed = max(measured_wall_elapsed - measured_non_train_elapsed, 0.0)
     if global_step > start_step and checkpoint_manager.latest_step() != global_step:
+        phase_start = time.perf_counter()
         save_checkpoint(global_step)
+        add_non_train_timing(
+            "checkpoint_seconds",
+            time.perf_counter() - phase_start,
+            include_measured=False,
+        )
     checkpoint_manager.wait_until_finished()
-    global_batch_size = int(datamodule.global_batch_size)
-    loss = (
-        float(jax.device_get(last_metrics["loss"]))
-        if jax.process_index() == 0 and last_metrics
-        else float("nan")
+    wall_elapsed = time.perf_counter() - train_start
+    train_elapsed = max(
+        wall_elapsed
+        - sum(non_train_timing.values()),
+        0.0,
     )
+    global_batch_size = int(datamodule.global_batch_size)
+    loss = float("nan")
+    if last_metrics:
+        host_loss = float(np.asarray(jax.device_get(last_metrics["loss"])))
+        if jax.process_index() == 0:
+            loss = host_loss
     result = {
         "run/final_global_step": float(global_step),
-        "run/train_elapsed_seconds": elapsed,
-        "run/steps_per_second": float(global_step) / elapsed if elapsed > 0 else 0.0,
+        "run/wall_elapsed_seconds": wall_elapsed,
+        "run/train_elapsed_seconds": train_elapsed,
+        "run/non_train_elapsed_seconds": sum(non_train_timing.values()),
+        "run/steps_per_second": (
+            float(global_step) / train_elapsed if train_elapsed > 0 else 0.0
+        ),
         "run/samples_per_second": (
-            float(global_step) * global_batch_size / elapsed if elapsed > 0 else 0.0
+            float(global_step) * global_batch_size / train_elapsed
+            if train_elapsed > 0
+            else 0.0
+        ),
+        "run/wall_steps_per_second": (
+            float(global_step) / wall_elapsed if wall_elapsed > 0 else 0.0
+        ),
+        "run/wall_samples_per_second": (
+            float(global_step) * global_batch_size / wall_elapsed
+            if wall_elapsed > 0
+            else 0.0
         ),
         "run/measured_steps": float(measured_steps),
-        "run/measured_elapsed_seconds": measured_elapsed,
+        "run/measured_wall_elapsed_seconds": measured_wall_elapsed,
+        "run/measured_non_train_elapsed_seconds": measured_non_train_elapsed,
+        "run/measured_elapsed_seconds": measured_train_elapsed,
         "run/measured_steps_per_second": (
-            float(measured_steps) / measured_elapsed if measured_elapsed > 0 else 0.0
+            float(measured_steps) / measured_train_elapsed
+            if measured_train_elapsed > 0
+            else 0.0
         ),
         "run/measured_samples_per_second": (
-            float(measured_steps) * global_batch_size / measured_elapsed
-            if measured_elapsed > 0
+            float(measured_steps) * global_batch_size / measured_train_elapsed
+            if measured_train_elapsed > 0
+            else 0.0
+        ),
+        "run/measured_wall_steps_per_second": (
+            float(measured_steps) / measured_wall_elapsed
+            if measured_wall_elapsed > 0
+            else 0.0
+        ),
+        "run/measured_wall_samples_per_second": (
+            float(measured_steps) * global_batch_size / measured_wall_elapsed
+            if measured_wall_elapsed > 0
             else 0.0
         ),
         "train/loss": loss,
     }
+    for name, value in non_train_timing.items():
+        result[f"run/{name}"] = value
     result.update(last_validation_metrics)
     result.update(last_msg_probe_metrics)
     result.update(precompile_metrics)
@@ -1409,16 +1494,14 @@ def _log_jax_train_metrics(
     total_steps: int,
     every_n_steps: int,
 ) -> None:
-    if (
-        every_n_steps <= 0
-        or global_step % every_n_steps != 0
-        or jax.process_index() != 0
-    ):
+    if every_n_steps <= 0 or global_step % every_n_steps != 0:
         return
     host_metrics = {
         f"train/{key}": float(np.asarray(value))
         for key, value in jax.device_get(metrics).items()
     }
+    if jax.process_index() != 0:
+        return
     pbar.set_postfix(loss=f"{host_metrics['train/loss']:.4f}", step=global_step)
     host_metrics["train/learning_rate"] = _scheduled_jax_learning_rate(
         config,
@@ -1442,7 +1525,7 @@ def _evaluate_jax_validation_loss(
 ) -> dict[str, float]:
     totals: dict[str, float] = {}
     steps = 0
-    for torch_batch in datamodule.val_loader:
+    for torch_batch in datamodule.val_loader_for_eval(augment=True):
         if steps >= max_steps:
             break
         batch = numpy_batch_to_jax(
@@ -1485,6 +1568,8 @@ def run_and_log_msg_probe_jax(
     global_step: int,
 ) -> dict[str, float]:
     probe_metrics = run_msg_probe_jax(config=config, model=model)
+    if jax.process_index() != 0:
+        return probe_metrics
     log_msg_probe_metrics(
         logger,
         probe_metrics,
@@ -1507,6 +1592,31 @@ def run_and_log_msg_probe_jax(
                 probe_metrics[f"{prefix}/test/auc_{fingerprint_task}_mean"],
             )
     return probe_metrics
+
+
+def _run_distributed_msg_probe_jax(
+    *,
+    config: config_dict.ConfigDict,
+    model: PeakSetJEPAJax,
+    logger: MetricLogger,
+    variants: tuple[str, ...],
+    global_step: int,
+    trainable_params: Any,
+    data_mesh: Mesh,
+) -> dict[str, float]:
+    nnx.update(model, trainable_params)
+    with jax.set_mesh(data_mesh):
+        probe_metrics = run_and_log_msg_probe_jax(
+            config=config,
+            model=model,
+            logger=logger,
+            variants=variants,
+            global_step=global_step,
+        )
+    multihost_utils.sync_global_devices(
+        f"spectra_learning_jax_msg_probe_{global_step}"
+    )
+    return probe_metrics if jax.process_index() == 0 else {}
 
 
 def _precompile_jax_training_steps(
@@ -1694,6 +1804,19 @@ def _stack_micro_batch_values(*values: Any) -> Any:
     if isinstance(first, np.ndarray):
         return np.stack(values)
     return jnp.stack(values)
+
+
+def _process_global_max_int(value: int) -> int:
+    if jax.process_count() <= 1:
+        return int(value)
+    gathered = multihost_utils.process_allgather(np.asarray(value, dtype=np.int32))
+    return int(np.asarray(gathered).max())
+
+
+def _shutdown_torch_loader_iterator(loader_iter: Any) -> None:
+    shutdown_workers = getattr(loader_iter, "_shutdown_workers", None)
+    if callable(shutdown_workers):
+        shutdown_workers()
 
 
 def _context_encoder_pack_choices(config: Any, default_pack_tokens: int) -> tuple[int, ...]:

@@ -6,6 +6,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import fsspec
+import numpy as np
 import pytest
 import torch
 from ml_collections import config_dict
@@ -257,31 +258,34 @@ def test_jax_backend_applies_tpu_flags_before_dispatch(monkeypatch, tmp_path):
     assert calls == ["flags", "train"]
 
 
-def test_jax_train_metrics_logging_skips_non_main_without_device_get(monkeypatch):
+def test_jax_train_metrics_logging_materializes_non_main_without_logging(monkeypatch):
     from spectra_learning.training import pretrain_jax
 
     cfg = config_dict.ConfigDict()
     logger = _FakeLogger()
     pbar = _FakePbar()
+    device_get_calls = 0
+
+    def fake_device_get(value):
+        nonlocal device_get_calls
+        device_get_calls += 1
+        return value
 
     monkeypatch.setattr(pretrain_jax.jax, "process_index", lambda: 1)
-    monkeypatch.setattr(
-        pretrain_jax.jax,
-        "device_get",
-        lambda value: pytest.fail("non-main process materialized metrics"),
-    )
+    monkeypatch.setattr(pretrain_jax.jax, "device_get", fake_device_get)
 
     pretrain_jax._log_jax_train_metrics(
         cfg,
         logger,
         pbar,
-        {"loss": object()},
+        {"loss": pretrain_jax.np.asarray(1.25)},
         epoch=0,
         global_step=10,
         total_steps=100,
         every_n_steps=10,
     )
 
+    assert device_get_calls == 1
     assert logger.logs == []
     assert pbar.postfix is None
 
@@ -334,6 +338,179 @@ def test_jax_train_metrics_logging_materializes_once_on_main(monkeypatch):
     assert logger.logs[0][0]["train/learning_rate"] == pytest.approx(expected_lr)
     assert logger.logs[0][0]["epoch"] == 2.0
     assert logger.logs[0][0]["global_step"] == 10.0
+
+
+def test_jax_context_pack_selection_uses_global_process_max(monkeypatch):
+    from spectra_learning.training import pretrain_jax
+
+    calls = []
+
+    def fake_process_allgather(value):
+        calls.append(value)
+        return pretrain_jax.np.asarray([int(value), 28], dtype=pretrain_jax.np.int32)
+
+    monkeypatch.setattr(pretrain_jax.jax, "process_count", lambda: 2)
+    monkeypatch.setattr(
+        pretrain_jax.multihost_utils,
+        "process_allgather",
+        fake_process_allgather,
+    )
+
+    assert pretrain_jax._process_global_max_int(20) == 28
+    assert len(calls) == 1
+
+
+def test_distributed_jax_msg_probe_runs_on_all_processes_and_returns_only_main(
+    monkeypatch,
+):
+    from spectra_learning.training import pretrain_jax
+
+    current_rank = {"value": 0}
+    updated_models = []
+    probe_ranks = []
+    barriers = []
+    mesh_contexts = []
+
+    class FakeMeshContext:
+        def __init__(self, mesh):
+            self.mesh = mesh
+
+        def __enter__(self):
+            mesh_contexts.append((current_rank["value"], "enter", self.mesh))
+
+        def __exit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            mesh_contexts.append((current_rank["value"], "exit", self.mesh))
+
+    def fake_run_and_log(**kwargs):
+        del kwargs
+        probe_ranks.append(current_rank["value"])
+        return {"msg_probe/mean/test/auc_maccs_mean": 0.75 + current_rank["value"]}
+
+    monkeypatch.setattr(
+        pretrain_jax.jax,
+        "process_index",
+        lambda: current_rank["value"],
+    )
+    monkeypatch.setattr(
+        pretrain_jax.jax,
+        "block_until_ready",
+        lambda value: pytest.fail("probe wrapper should defer explicit JAX sync"),
+    )
+    monkeypatch.setattr(
+        pretrain_jax.nnx,
+        "update",
+        lambda model, params: updated_models.append((model, params)),
+    )
+    monkeypatch.setattr(
+        pretrain_jax,
+        "run_and_log_msg_probe_jax",
+        fake_run_and_log,
+    )
+    monkeypatch.setattr(
+        pretrain_jax.multihost_utils,
+        "sync_global_devices",
+        lambda name: barriers.append((current_rank["value"], name)),
+    )
+    monkeypatch.setattr(
+        pretrain_jax.jax,
+        "set_mesh",
+        lambda mesh: FakeMeshContext(mesh),
+    )
+
+    outputs = []
+    for rank in (0, 1):
+        current_rank["value"] = rank
+        outputs.append(
+            pretrain_jax._run_distributed_msg_probe_jax(
+                config=config_dict.ConfigDict(),
+                model="model",
+                logger=_FakeLogger(),
+                variants=("mean",),
+                global_step=100,
+                trainable_params=f"params-{rank}",
+                data_mesh="mesh",
+            )
+        )
+
+    assert probe_ranks == [0, 1]
+    assert updated_models == [("model", "params-0"), ("model", "params-1")]
+    assert barriers == [
+        (0, "spectra_learning_jax_msg_probe_100"),
+        (1, "spectra_learning_jax_msg_probe_100"),
+    ]
+    assert mesh_contexts == [
+        (0, "enter", "mesh"),
+        (0, "exit", "mesh"),
+        (1, "enter", "mesh"),
+        (1, "exit", "mesh"),
+    ]
+    assert outputs == [
+        {"msg_probe/mean/test/auc_maccs_mean": 0.75},
+        {},
+    ]
+
+
+def test_run_and_log_jax_msg_probe_skips_logging_on_non_main(monkeypatch):
+    from spectra_learning.training import pretrain_jax
+
+    log_calls = []
+
+    monkeypatch.setattr(pretrain_jax.jax, "process_index", lambda: 1)
+    monkeypatch.setattr(
+        pretrain_jax,
+        "run_msg_probe_jax",
+        lambda **kwargs: {"msg_probe/mean/test/auc_maccs_mean": 0.75},
+    )
+    monkeypatch.setattr(
+        pretrain_jax,
+        "log_msg_probe_metrics",
+        lambda *args, **kwargs: log_calls.append((args, kwargs)),
+    )
+
+    metrics = pretrain_jax.run_and_log_msg_probe_jax(
+        config=config_dict.ConfigDict({"enable_wandb": True}),
+        model="model",
+        logger=_FakeLogger(),
+        variants=("mean",),
+        global_step=100,
+    )
+
+    assert metrics == {"msg_probe/mean/test/auc_maccs_mean": 0.75}
+    assert log_calls == []
+
+
+def test_jax_validation_loss_uses_augmented_validation_loader(monkeypatch):
+    from spectra_learning.training import pretrain_jax
+
+    calls = []
+
+    class FakeDataModule:
+        def val_loader_for_eval(self, *, augment: bool):
+            calls.append(augment)
+            return [
+                {"peak_mz": pretrain_jax.np.asarray([2.0])},
+                {"peak_mz": pretrain_jax.np.asarray([4.0])},
+            ]
+
+    def fake_eval_step(trainable_params, static_state, batch):
+        del trainable_params, static_state
+        return {"loss": batch["peak_mz"].mean()}
+
+    monkeypatch.setattr(pretrain_jax.jax, "device_get", lambda value: value)
+
+    metrics = pretrain_jax._evaluate_jax_validation_loss(
+        datamodule=FakeDataModule(),
+        trainable_params={},
+        static_state={},
+        eval_step=fake_eval_step,
+        max_steps=2,
+        use_sharded_step=False,
+        data_mesh=None,
+    )
+
+    assert calls == [True]
+    assert metrics["val/loss"] == pytest.approx(3.0)
 
 
 def test_jax_optax_transform_uses_learning_rate_schedule(monkeypatch):
@@ -624,7 +801,9 @@ def test_train_and_evaluate_jax_logs_final_metrics_on_main_process(
     monkeypatch.setattr(
         pretrain_jax,
         "build_jax_checkpoint_manager",
-        lambda checkpoint_dir, *, max_to_keep: _FakeCheckpointManager(),
+        lambda checkpoint_dir, *, max_to_keep, enable_async_checkpointing: (
+            _FakeCheckpointManager()
+        ),
     )
     monkeypatch.setattr(pretrain_jax.jax, "process_index", lambda: 0)
     monkeypatch.setattr(pretrain_jax.jax, "process_count", lambda: 2)
@@ -708,7 +887,9 @@ def test_train_and_evaluate_jax_skips_logger_on_worker_process(
     monkeypatch.setattr(
         pretrain_jax,
         "build_jax_checkpoint_manager",
-        lambda checkpoint_dir, *, max_to_keep: _FakeCheckpointManager(),
+        lambda checkpoint_dir, *, max_to_keep, enable_async_checkpointing: (
+            _FakeCheckpointManager()
+        ),
     )
     monkeypatch.setattr(pretrain_jax.jax, "process_index", lambda: 1)
     monkeypatch.setattr(pretrain_jax.jax, "process_count", lambda: 2)
@@ -2034,6 +2215,51 @@ def test_serialise_metrics_expands_pr_curves_for_wandb(monkeypatch):
         "curve/image": "image:sulfur",
         "curve/native": "native:sulfur",
     }
+
+
+def test_train_main_writes_json_safe_probe_metrics(monkeypatch, tmp_path: Path):
+    import train as train_script
+
+    curve = PrecisionRecallCurve(
+        label="sulfur",
+        targets=np.asarray([0, 1]),
+        probabilities=np.asarray([0.2, 0.8]),
+        title="sulfur pr",
+    )
+    metrics_path = tmp_path / "metrics.json"
+    cfg = config_dict.ConfigDict()
+
+    monkeypatch.setattr(train_script, "load_config", lambda path: cfg)
+    monkeypatch.setattr(
+        train_script,
+        "train_and_evaluate",
+        lambda config, workdir: {
+            "run/jax_process_index": 0.0,
+            "metric": np.float32(1.25),
+            "vector": np.asarray([1.0, 2.0]),
+            "msg_probe/mean/test/pr_curve_sulfur": curve,
+        },
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train.py",
+            "--config",
+            "config.py",
+            "--workdir",
+            str(tmp_path / "work"),
+            "--metrics-json",
+            str(metrics_path),
+        ],
+    )
+
+    train_script.main()
+
+    payload = json.loads(metrics_path.read_text())
+    assert payload["metric"] == pytest.approx(1.25)
+    assert payload["vector"] == [1.0, 2.0]
+    assert "msg_probe/mean/test/pr_curve_sulfur" not in payload
 
 
 def test_log_msg_probe_metrics_uses_custom_global_step_for_wandb():

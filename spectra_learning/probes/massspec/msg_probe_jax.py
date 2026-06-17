@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import math
+import pickle
+import time
 from collections.abc import Callable, Iterator
 from typing import Any
 
@@ -9,15 +11,19 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+from flax import nnx
+from jax.experimental import multihost_utils
 from ml_collections import config_dict
 
 from spectra_learning.config.msg_probe import validate_msg_probe_config
+from spectra_learning.data.loading import local_batch_size
 from spectra_learning.data.massspec_probe import MassSpecProbeData
 from spectra_learning.models.common_jax import Array
 from spectra_learning.models.model_jax import PeakSetJEPAJax
 from spectra_learning.probes.massspec.msg_settings import (
     BINARY_PROBE_TASKS,
     MACCS_TASK,
+    PROBE_FINGERPRINT_BITS,
     REGRESSION_PROBE_TASKS,
     MsgProbeSplitTargets,
     MsgProbeTaskSpec,
@@ -34,6 +40,7 @@ JaxBatch = dict[str, Any]
 JaxFeatures = Array | tuple[Array, Array]
 JaxProbeParams = dict[str, Any]
 EpochState = dict[str, Any]
+PendingPrediction = tuple[dict[str, Array], np.ndarray, dict[str, np.ndarray]]
 
 
 def run_msg_probe_jax(
@@ -83,19 +90,52 @@ def _run_msg_probe_once_jax(
         _config_get(config, "msg_probe_early_stopping_min_epochs", 1)
     )
     fingerprint_task = resolve_msg_probe_fingerprint(config)
-    probe_data = MassSpecProbeData.from_config(config)
+    probe_data = MassSpecProbeData.from_config(
+        config,
+        distributed_world_size=_distributed_world_size_jax(),
+        distributed_rank=_distributed_rank_jax(),
+        distributed_local_rank=0,
+    )
     variants = msg_probe_variants_from_config(config)
     use_pair_features = any(_uses_pair_features(variant) for variant in variants)
+    max_train_samples = _optional_positive_int(
+        config,
+        "jax_msg_probe_max_train_samples",
+    )
+    max_val_samples = _optional_positive_int(
+        config,
+        "jax_msg_probe_max_val_samples",
+    )
+    max_test_samples = _optional_positive_int(
+        config,
+        "jax_msg_probe_max_test_samples",
+    )
+    max_mcebio_test_samples = _optional_positive_int(
+        config,
+        "jax_msg_probe_max_mcebio_test_samples",
+    )
     seed_offset = 100_000 * repeat_index
     train_seed_base = int(config.seed) + 1_100_000 + seed_offset
     test_seed_base = int(config.seed) + 1_200_000 + seed_offset
 
+    phase_timing = {
+        "target_collection_seconds": 0.0,
+        "train_epoch_seconds": 0.0,
+        "eval_epoch_seconds": 0.0,
+        "score_epoch_seconds": 0.0,
+        "final_test_seconds": 0.0,
+        "mcebio_seconds": 0.0,
+        "final_score_seconds": 0.0,
+    }
+    probe_start = time.perf_counter()
+    phase_start = time.perf_counter()
     train_targets = _collect_split_targets_jax(
         probe_data=probe_data,
         split="massspec_train",
         peak_ordering=peak_ordering,
         seed=train_seed_base,
         fingerprint_task=fingerprint_task,
+        max_samples=max_train_samples,
     )
     val_targets = _collect_split_targets_jax(
         probe_data=probe_data,
@@ -103,6 +143,7 @@ def _run_msg_probe_once_jax(
         peak_ordering=peak_ordering,
         seed=train_seed_base + 10_000,
         fingerprint_task=fingerprint_task,
+        max_samples=max_val_samples,
     )
     selection_targets = (
         val_targets
@@ -113,17 +154,28 @@ def _run_msg_probe_once_jax(
             peak_ordering=peak_ordering,
             seed=test_seed_base,
             fingerprint_task=fingerprint_task,
+            max_samples=max_test_samples,
         )
     )
+    phase_timing["target_collection_seconds"] += time.perf_counter() - phase_start
     task_spec = _build_task_spec_jax(
         train_targets=train_targets,
         test_targets=selection_targets,
         fingerprint_task=fingerprint_task,
+        single_pair_covariance_include_diagonal=bool(
+            _config_get(
+                config,
+                "msg_probe_single_pair_covariance_include_diagonal",
+                False,
+            )
+        ),
     )
     steps_per_epoch = probe_steps_per_epoch_jax(
         probe_data,
         split="massspec_train",
         drop_remainder=False,
+        max_samples=max_train_samples,
+        distributed_world_size=_distributed_world_size_jax(),
     )
     warmup_steps = _resolve_probe_warmup_steps(config, steps_per_epoch)
     schedule = _probe_lr_schedule(
@@ -158,69 +210,95 @@ def _run_msg_probe_once_jax(
         for variant in variants
     }
     epochs_without_improvement = {variant: 0 for variant in variants}
+    train_step_by_variant = {
+        variant: _make_jitted_probe_train_step(
+            optimizer=optimizer,
+            variant=variant,
+            task_spec=task_spec,
+            distributed=_is_distributed_jax(),
+        )
+        for variant in variants
+    }
+    predict_step_by_variant = {
+        variant: _make_jitted_probe_predict_step(
+            variant=variant,
+            task_spec=task_spec,
+        )
+        for variant in variants
+    }
 
     for epoch_idx in range(num_probe_epochs):
         train_states = {variant: _new_epoch_state(task_spec) for variant in variants}
+        train_pending = {variant: [] for variant in variants}
+        phase_start = time.perf_counter()
         for batch in iter_massspec_probe_jax(
             probe_data=probe_data,
             split="massspec_train",
             seed=train_seed_base + epoch_idx,
             peak_ordering=peak_ordering,
             drop_remainder=False,
-            pad_distributed=False,
+            max_samples=max_train_samples,
+            distributed_world_size=_distributed_world_size_jax(),
+            distributed_rank=_distributed_rank_jax(),
+            pad_distributed=True,
         ):
             features = _extract_features(model, batch, use_pair_features=use_pair_features)
+            step_batch = _probe_step_batch(batch, task_spec)
             for variant in variants:
-                params, opt_state = _jax_probe_train_step(
+                params, opt_state, logits = train_step_by_variant[variant](
                     params_by_variant[variant],
                     opt_state_by_variant[variant],
-                    optimizer,
-                    variant=variant,
-                    task_spec=task_spec,
-                    batch=batch,
+                    batch=step_batch,
                     features=features,
                 )
                 params_by_variant[variant] = params
                 opt_state_by_variant[variant] = opt_state
-                _update_epoch_state_from_predictions(
-                    train_states[variant],
-                    _probe_predictions(
-                        params,
-                        variant=variant,
-                        task_spec=task_spec,
-                        batch=batch,
-                        features=features,
-                    ),
-                    task_spec,
+                _append_pending_prediction(
+                    train_pending[variant],
+                    logits=logits,
+                    batch=batch,
+                    task_spec=task_spec,
                 )
+        _flush_variant_prediction_queues(train_pending, train_states, task_spec)
+        phase_timing["train_epoch_seconds"] += time.perf_counter() - phase_start
+        train_states = _gather_variant_states_jax(train_states, task_spec)
 
         eval_states = {
             variant: _new_epoch_state(task_spec)
             for variant in variants
         }
+        eval_pending = {variant: [] for variant in variants}
         eval_split = "massspec_val" if early_stopping else "massspec_test"
         eval_seed = train_seed_base + 10_000 if early_stopping else test_seed_base
+        phase_start = time.perf_counter()
         for batch in iter_massspec_probe_jax(
             probe_data=probe_data,
             split=eval_split,
             seed=eval_seed,
             peak_ordering=peak_ordering,
             drop_remainder=False,
+            max_samples=max_val_samples if early_stopping else max_test_samples,
+            distributed_world_size=_distributed_world_size_jax(),
+            distributed_rank=_distributed_rank_jax(),
         ):
             features = _extract_features(model, batch, use_pair_features=use_pair_features)
+            step_batch = _probe_step_batch(batch, task_spec)
             for variant in variants:
-                _update_epoch_state_from_predictions(
-                    eval_states[variant],
-                    _probe_predictions(
+                _append_pending_prediction(
+                    eval_pending[variant],
+                    logits=predict_step_by_variant[variant](
                         params_by_variant[variant],
-                        variant=variant,
-                        task_spec=task_spec,
-                        batch=batch,
-                        features=features,
+                        step_batch,
+                        features,
                     ),
-                    task_spec,
+                    batch=batch,
+                    task_spec=task_spec,
                 )
+        _flush_variant_prediction_queues(eval_pending, eval_states, task_spec)
+        phase_timing["eval_epoch_seconds"] += time.perf_counter() - phase_start
+        eval_states = _gather_variant_states_jax(eval_states, task_spec)
 
+        phase_start = time.perf_counter()
         epoch_metrics: dict[str, float] = {}
         for variant in variants:
             variant_prefix = f"msg_probe/{variant}"
@@ -260,16 +338,18 @@ def _run_msg_probe_once_jax(
                 epochs_without_improvement[variant] = 0
             else:
                 epochs_without_improvement[variant] += 1
-            _log_epoch_metrics(
-                variant=variant,
-                epoch_idx=epoch_idx,
-                num_probe_epochs=num_probe_epochs,
-                fingerprint_task=fingerprint_task,
-                metrics=variant_metrics,
-                early_stopping=early_stopping,
-            )
-        if on_epoch_end is not None:
+            if _is_main_process_jax():
+                _log_epoch_metrics(
+                    variant=variant,
+                    epoch_idx=epoch_idx,
+                    num_probe_epochs=num_probe_epochs,
+                    fingerprint_task=fingerprint_task,
+                    metrics=variant_metrics,
+                    early_stopping=early_stopping,
+                )
+        if on_epoch_end is not None and _is_main_process_jax():
             on_epoch_end(epoch_metrics)
+        phase_timing["score_epoch_seconds"] += time.perf_counter() - phase_start
         if (
             early_stopping
             and epoch_idx + 1 >= early_stopping_min_epochs
@@ -278,38 +358,48 @@ def _run_msg_probe_once_jax(
                 for variant in variants
             )
         ):
-            log.info(
-                "JAX MSG probe early stopping at epoch %d/%d after %d epochs without validation improvement",
-                epoch_idx + 1,
-                num_probe_epochs,
-                early_stopping_patience,
-            )
+            if _is_main_process_jax():
+                log.info(
+                    "JAX MSG probe early stopping at epoch %d/%d after %d epochs without validation improvement",
+                    epoch_idx + 1,
+                    num_probe_epochs,
+                    early_stopping_patience,
+                )
             break
 
     final_test_metrics_by_variant: dict[str, dict[str, Any]] = {}
     if early_stopping:
         final_states = {variant: _new_epoch_state(task_spec) for variant in variants}
+        final_pending = {variant: [] for variant in variants}
+        phase_start = time.perf_counter()
         for batch in iter_massspec_probe_jax(
             probe_data=probe_data,
             split="massspec_test",
             seed=test_seed_base,
             peak_ordering=peak_ordering,
             drop_remainder=False,
+            max_samples=max_test_samples,
+            distributed_world_size=_distributed_world_size_jax(),
+            distributed_rank=_distributed_rank_jax(),
         ):
             features = _extract_features(model, batch, use_pair_features=use_pair_features)
+            step_batch = _probe_step_batch(batch, task_spec)
             for variant in variants:
                 params = best_params_by_variant.get(variant, params_by_variant[variant])
-                _update_epoch_state_from_predictions(
-                    final_states[variant],
-                    _probe_predictions(
+                _append_pending_prediction(
+                    final_pending[variant],
+                    logits=predict_step_by_variant[variant](
                         params,
-                        variant=variant,
-                        task_spec=task_spec,
-                        batch=batch,
-                        features=features,
+                        step_batch,
+                        features,
                     ),
-                    task_spec,
+                    batch=batch,
+                    task_spec=task_spec,
                 )
+        _flush_variant_prediction_queues(final_pending, final_states, task_spec)
+        phase_timing["final_test_seconds"] += time.perf_counter() - phase_start
+        final_states = _gather_variant_states_jax(final_states, task_spec)
+        phase_start = time.perf_counter()
         final_test_metrics_by_variant = {
             variant: _score_epoch_state(
                 prefix=f"msg_probe/{variant}/test",
@@ -319,7 +409,9 @@ def _run_msg_probe_once_jax(
             )
             for variant, state in final_states.items()
         }
+        phase_timing["final_score_seconds"] += time.perf_counter() - phase_start
     else:
+        phase_start = time.perf_counter()
         final_test_metrics_by_variant = {
             variant: _score_epoch_state(
                 prefix=f"msg_probe/{variant}/test",
@@ -329,29 +421,39 @@ def _run_msg_probe_once_jax(
             )
             for variant, state in best_test_state_by_variant.items()
         }
+        phase_timing["final_score_seconds"] += time.perf_counter() - phase_start
 
     mcebio_states = {variant: _new_epoch_state(task_spec) for variant in variants}
+    mcebio_pending = {variant: [] for variant in variants}
+    phase_start = time.perf_counter()
     for batch in iter_massspec_probe_jax(
         probe_data=probe_data,
         split="massspec_mcebio_test",
         seed=test_seed_base + 75_000,
         peak_ordering=peak_ordering,
         drop_remainder=False,
+        max_samples=max_mcebio_test_samples,
+        distributed_world_size=_distributed_world_size_jax(),
+        distributed_rank=_distributed_rank_jax(),
     ):
         features = _extract_features(model, batch, use_pair_features=use_pair_features)
+        step_batch = _probe_step_batch(batch, task_spec)
         for variant in variants:
             params = best_params_by_variant.get(variant, params_by_variant[variant])
-            _update_epoch_state_from_predictions(
-                mcebio_states[variant],
-                _probe_predictions(
+            _append_pending_prediction(
+                mcebio_pending[variant],
+                logits=predict_step_by_variant[variant](
                     params,
-                    variant=variant,
-                    task_spec=task_spec,
-                    batch=batch,
-                    features=features,
+                    step_batch,
+                    features,
                 ),
-                task_spec,
+                batch=batch,
+                task_spec=task_spec,
             )
+    _flush_variant_prediction_queues(mcebio_pending, mcebio_states, task_spec)
+    phase_timing["mcebio_seconds"] += time.perf_counter() - phase_start
+    mcebio_states = _gather_variant_states_jax(mcebio_states, task_spec)
+    phase_start = time.perf_counter()
     mcebio_sulfur_metrics_by_variant = {
         variant: _sulfur_metric_subset(
             _score_epoch_state(
@@ -363,6 +465,7 @@ def _run_msg_probe_once_jax(
         )
         for variant, state in mcebio_states.items()
     }
+    phase_timing["final_score_seconds"] += time.perf_counter() - phase_start
 
     best_metrics: dict[str, Any] = {}
     for variant in variants:
@@ -372,6 +475,9 @@ def _run_msg_probe_once_jax(
         variant_metrics.update(final_test_metrics_by_variant.get(variant, {}))
         variant_metrics.update(mcebio_sulfur_metrics_by_variant.get(variant, {}))
         best_metrics.update(variant_metrics)
+    best_metrics["msg_probe/jax_wall_seconds"] = time.perf_counter() - probe_start
+    for name, value in phase_timing.items():
+        best_metrics[f"msg_probe/jax_{name}"] = value
     return best_metrics
 
 
@@ -385,6 +491,8 @@ def iter_massspec_probe_jax(
     max_samples: int | None = None,
     sample_randomly: bool = False,
     pad_distributed: bool = False,
+    distributed_world_size: int = 1,
+    distributed_rank: int = 0,
 ) -> Iterator[JaxBatch]:
     dataset = probe_data.build_dataset(
         split,
@@ -394,6 +502,8 @@ def iter_massspec_probe_jax(
         drop_remainder=drop_remainder,
         max_samples=max_samples,
         pad_distributed=pad_distributed,
+        distributed_world_size=distributed_world_size,
+        distributed_rank=distributed_rank,
         output_format="jax",
     )
     size = int(probe_data.info[f"{split}_size"])
@@ -416,11 +526,15 @@ def probe_steps_per_epoch_jax(
     split: str,
     drop_remainder: bool,
     max_samples: int | None = None,
+    distributed_world_size: int = 1,
 ) -> int:
     size = int(probe_data.info[f"{split}_size"])
     if max_samples is not None:
         size = min(size, max_samples)
-    return size // probe_data.batch_size if drop_remainder else math.ceil(size / probe_data.batch_size)
+    if distributed_world_size > 1:
+        size = math.ceil(size / distributed_world_size)
+    batch_size = local_batch_size(int(probe_data.batch_size), distributed_world_size)
+    return size // batch_size if drop_remainder else math.ceil(size / batch_size)
 
 
 def _collect_split_targets_jax(
@@ -445,6 +559,8 @@ def _collect_split_targets_jax(
         drop_remainder=False,
         max_samples=max_samples,
         sample_randomly=sample_randomly,
+        distributed_world_size=_distributed_world_size_jax(),
+        distributed_rank=_distributed_rank_jax(),
     ):
         valid_mask = np.asarray(batch["probe_valid_mol"]).astype(bool, copy=False)
         if not valid_mask.any():
@@ -468,7 +584,7 @@ def _collect_split_targets_jax(
         if fingerprints
         else int(probe_data.info.get(f"probe_{fingerprint_task}_bits", 0))
     )
-    return MsgProbeSplitTargets(
+    targets = MsgProbeSplitTargets(
         regression=cat(regression, np.float32),
         binary=cat(binary, np.float32),
         maccs=(
@@ -477,6 +593,136 @@ def _collect_split_targets_jax(
             else np.empty((0, fingerprint_bits), dtype=np.int32)
         ),
     )
+    if _is_distributed_jax():
+        targets = _merge_split_targets_jax(
+            _all_gather_object_jax(targets),
+            fingerprint_task=fingerprint_task,
+        )
+    return targets
+
+
+def _is_distributed_jax() -> bool:
+    return _distributed_world_size_jax() > 1
+
+
+def _is_main_process_jax() -> bool:
+    return _distributed_rank_jax() == 0
+
+
+def _distributed_world_size_jax() -> int:
+    return int(jax.process_count())
+
+
+def _distributed_rank_jax() -> int:
+    return int(jax.process_index())
+
+
+def _all_gather_object_jax(value: object) -> list[object]:
+    if not _is_distributed_jax():
+        return [value]
+    payload = pickle.dumps(value)
+    local_length = np.asarray(len(payload), dtype=np.int32)
+    lengths = np.asarray(multihost_utils.process_allgather(local_length)).reshape(-1)
+    max_length = int(lengths.max()) if lengths.size else 0
+    local_buffer = np.zeros(max_length, dtype=np.uint8)
+    if payload:
+        local_buffer[: len(payload)] = np.frombuffer(payload, dtype=np.uint8)
+    gathered = np.asarray(multihost_utils.process_allgather(local_buffer)).reshape(
+        -1,
+        max_length,
+    )
+    return [
+        pickle.loads(bytes(buffer[: int(length)]))
+        for buffer, length in zip(gathered, lengths, strict=True)
+    ]
+
+
+def _merge_split_targets_jax(
+    targets_by_rank: list[object],
+    *,
+    fingerprint_task: str,
+) -> MsgProbeSplitTargets:
+    targets = [
+        target
+        for target in targets_by_rank
+        if isinstance(target, MsgProbeSplitTargets)
+    ]
+
+    def merge_named_arrays(
+        attr: str,
+        names: tuple[str, ...],
+        dtype: Any,
+    ) -> dict[str, np.ndarray]:
+        return {
+            name: (
+                np.concatenate(
+                    [getattr(target, attr)[name] for target in targets],
+                    axis=0,
+                ).astype(dtype, copy=False)
+                if targets
+                else np.empty(0, dtype=dtype)
+            )
+            for name in names
+        }
+
+    fingerprint_bits = (
+        int(targets[0].maccs.shape[1])
+        if targets
+        else int(PROBE_FINGERPRINT_BITS[fingerprint_task])
+    )
+    return MsgProbeSplitTargets(
+        regression=merge_named_arrays("regression", REGRESSION_PROBE_TASKS, np.float32),
+        binary=merge_named_arrays("binary", BINARY_PROBE_TASKS, np.float32),
+        maccs=(
+            np.concatenate([target.maccs for target in targets], axis=0).astype(
+                np.int32,
+                copy=False,
+            )
+            if targets
+            else np.empty((0, fingerprint_bits), dtype=np.int32)
+        ),
+    )
+
+
+def _merge_epoch_states_jax(
+    states: list[EpochState],
+    task_spec: MsgProbeTaskSpec,
+) -> EpochState:
+    merged = _new_epoch_state(task_spec)
+    merged["count"] = sum(int(state["count"]) for state in states)
+    merged_predictions = merged["predictions"]
+    merged_targets = merged["targets"]
+    for state in states:
+        predictions = state["predictions"]
+        targets = state["targets"]
+        for name in _probe_prediction_names(task_spec):
+            merged_predictions[name].extend(predictions[name])
+            merged_targets[name].extend(targets[name])
+    return merged
+
+
+def _gather_variant_states_jax(
+    states: dict[str, EpochState],
+    task_spec: MsgProbeTaskSpec,
+) -> dict[str, EpochState]:
+    if not _is_distributed_jax():
+        return states
+    gathered = [
+        rank_states
+        for rank_states in _all_gather_object_jax(states)
+        if isinstance(rank_states, dict)
+    ]
+    return {
+        variant: _merge_epoch_states_jax(
+            [
+                rank_states[variant]
+                for rank_states in gathered
+                if variant in rank_states
+            ],
+            task_spec,
+        )
+        for variant in states
+    }
 
 
 def _build_task_spec_jax(
@@ -484,6 +730,7 @@ def _build_task_spec_jax(
     train_targets: MsgProbeSplitTargets,
     test_targets: MsgProbeSplitTargets,
     fingerprint_task: str,
+    single_pair_covariance_include_diagonal: bool = False,
 ) -> MsgProbeTaskSpec:
     del test_targets
     regression_means, regression_stds = {}, {}
@@ -498,29 +745,154 @@ def _build_task_spec_jax(
         regression_means=regression_means,
         regression_stds=regression_stds,
         fingerprint_task=fingerprint_task,
+        single_pair_covariance_include_diagonal=(
+            single_pair_covariance_include_diagonal
+        ),
     )
 
 
-def _jax_probe_train_step(
-    params: JaxProbeParams,
-    opt_state: optax.OptState,
+def _make_jitted_probe_train_step(
+    *,
     optimizer: optax.GradientTransformation,
+    variant: str,
+    task_spec: MsgProbeTaskSpec,
+    distributed: bool,
+):
+    if distributed:
+
+        @jax.jit
+        def grad_step(
+            params: JaxProbeParams,
+            batch: dict[str, Array],
+            features: JaxFeatures,
+        ) -> JaxProbeParams:
+            loss, grads = jax.value_and_grad(_probe_loss)(
+                params,
+                variant=variant,
+                task_spec=task_spec,
+                batch=batch,
+                features=features,
+            )
+            del loss
+            return grads
+
+        @jax.jit
+        def apply_step(
+            params: JaxProbeParams,
+            opt_state: optax.OptState,
+            grads: JaxProbeParams,
+            batch: dict[str, Array],
+            features: JaxFeatures,
+        ) -> tuple[JaxProbeParams, optax.OptState, dict[str, Array]]:
+            updates, opt_state = optimizer.update(grads, opt_state, params)
+            params = optax.apply_updates(params, updates)
+            logits = _probe_logits(
+                params,
+                variant=variant,
+                task_spec=task_spec,
+                features=features,
+                valid_mask=batch["peak_valid_mask"],
+            )
+            return params, opt_state, logits
+
+        def train_step(
+            params: JaxProbeParams,
+            opt_state: optax.OptState,
+            *,
+            batch: dict[str, Array],
+            features: JaxFeatures,
+        ) -> tuple[JaxProbeParams, optax.OptState, dict[str, Array]]:
+            grads = grad_step(params, batch, features)
+            grads = _mean_tree_across_processes(grads)
+            return apply_step(params, opt_state, grads, batch, features)
+
+        return train_step
+
+    @jax.jit
+    def local_train_step(
+        params: JaxProbeParams,
+        opt_state: optax.OptState,
+        batch: dict[str, Array],
+        features: JaxFeatures,
+    ) -> tuple[JaxProbeParams, optax.OptState, dict[str, Array]]:
+        loss, grads = jax.value_and_grad(_probe_loss)(
+            params,
+            variant=variant,
+            task_spec=task_spec,
+            batch=batch,
+            features=features,
+        )
+        del loss
+        updates, opt_state = optimizer.update(grads, opt_state, params)
+        params = optax.apply_updates(params, updates)
+        logits = _probe_logits(
+            params,
+            variant=variant,
+            task_spec=task_spec,
+            features=features,
+            valid_mask=batch["peak_valid_mask"],
+        )
+        return params, opt_state, logits
+
+    def train_step(
+        params: JaxProbeParams,
+        opt_state: optax.OptState,
+        *,
+        batch: dict[str, Array],
+        features: JaxFeatures,
+    ) -> tuple[JaxProbeParams, optax.OptState, dict[str, Array]]:
+        return local_train_step(params, opt_state, batch, features)
+
+    return train_step
+
+
+def _make_jitted_probe_predict_step(
     *,
     variant: str,
     task_spec: MsgProbeTaskSpec,
-    batch: JaxBatch,
-    features: JaxFeatures,
-) -> tuple[JaxProbeParams, optax.OptState]:
-    loss, grads = jax.value_and_grad(_probe_loss)(
-        params,
-        variant=variant,
-        task_spec=task_spec,
-        batch=batch,
-        features=features,
-    )
-    del loss
-    updates, opt_state = optimizer.update(grads, opt_state, params)
-    return optax.apply_updates(params, updates), opt_state
+):
+    @jax.jit
+    def predict_step(
+        params: JaxProbeParams,
+        batch: dict[str, Array],
+        features: JaxFeatures,
+    ) -> dict[str, Array]:
+        return _probe_logits(
+            params,
+            variant=variant,
+            task_spec=task_spec,
+            features=features,
+            valid_mask=batch["peak_valid_mask"],
+        )
+
+    return predict_step
+
+
+def _probe_step_batch(batch: JaxBatch, task_spec: MsgProbeTaskSpec) -> dict[str, Array]:
+    keys = ["peak_valid_mask", "probe_valid_mol"]
+    keys.extend(f"probe_{name}" for name in task_spec.regression_tasks)
+    keys.extend(f"probe_{name}" for name in task_spec.binary_tasks)
+    if task_spec.maccs_bits > 0:
+        keys.append(f"probe_{task_spec.fingerprint_task}")
+    return {key: batch[key] for key in keys}
+
+
+def _mean_tree_across_processes(tree: Any) -> Any:
+    if not _is_distributed_jax():
+        return tree
+
+    def gather_mean(value: Any) -> Array:
+        if _is_global_non_fully_addressable_array(value):
+            gathered = multihost_utils.process_allgather(value, tiled=True)
+            return jax.device_put(jnp.asarray(gathered), value.sharding)
+        gathered = multihost_utils.process_allgather(value)
+        return jnp.mean(jnp.asarray(gathered), axis=0)
+
+    return jax.tree.map(gather_mean, tree)
+
+
+def _is_global_non_fully_addressable_array(value: Any) -> bool:
+    return isinstance(value, jax.Array) and not value.is_fully_addressable
 
 
 def _probe_loss(
@@ -580,25 +952,116 @@ def _probe_predictions(
     batch: JaxBatch,
     features: JaxFeatures,
 ) -> dict[str, Any]:
+    logits = _probe_logits(
+        params,
+        variant=variant,
+        task_spec=task_spec,
+        features=features,
+        valid_mask=batch["peak_valid_mask"],
+    )
+    return _probe_predictions_from_logits(
+        logits,
+        task_spec=task_spec,
+        batch=batch,
+    )
+
+
+def _append_pending_prediction(
+    pending: list[PendingPrediction],
+    *,
+    logits: dict[str, Array],
+    batch: JaxBatch,
+    task_spec: MsgProbeTaskSpec,
+) -> None:
     valid_mask = np.asarray(batch["probe_valid_mol"]).astype(bool, copy=False)
+    if not valid_mask.any():
+        return
+    pending.append(
+        (
+            logits,
+            valid_mask,
+            _probe_targets_from_batch(
+                batch,
+                valid_mask=valid_mask,
+                task_spec=task_spec,
+            ),
+        )
+    )
+
+
+def _flush_variant_prediction_queues(
+    queues: dict[str, list[PendingPrediction]],
+    states: dict[str, EpochState],
+    task_spec: MsgProbeTaskSpec,
+) -> None:
+    for variant, pending in queues.items():
+        _flush_pending_predictions(states[variant], pending, task_spec)
+
+
+def _flush_pending_predictions(
+    epoch_state: EpochState,
+    pending: list[PendingPrediction],
+    task_spec: MsgProbeTaskSpec,
+) -> None:
+    if not pending:
+        return
+    host_logits = jax.device_get([logits for logits, _, _ in pending])
+    for (logits, valid_mask, targets), host_logit in zip(
+        pending,
+        host_logits,
+        strict=True,
+    ):
+        del logits
+        _update_epoch_state_from_predictions(
+            epoch_state,
+            _probe_predictions_from_host_logits(
+                host_logit,
+                valid_mask=valid_mask,
+                target_values=targets,
+                task_spec=task_spec,
+            ),
+            task_spec,
+        )
+    pending.clear()
+
+
+def _probe_predictions_from_logits(
+    logits: dict[str, Array],
+    *,
+    task_spec: MsgProbeTaskSpec,
+    batch: JaxBatch,
+) -> dict[str, Any]:
+    valid_mask = np.asarray(batch["probe_valid_mol"]).astype(bool, copy=False)
+    if not valid_mask.any():
+        return {"batch_size": 0, "predictions": {}, "targets": {}}
+    targets = _probe_targets_from_batch(
+        batch,
+        valid_mask=valid_mask,
+        task_spec=task_spec,
+    )
+    return _probe_predictions_from_host_logits(
+        jax.device_get(logits),
+        valid_mask=valid_mask,
+        target_values=targets,
+        task_spec=task_spec,
+    )
+
+
+def _probe_predictions_from_host_logits(
+    logits: dict[str, np.ndarray],
+    *,
+    valid_mask: np.ndarray,
+    target_values: dict[str, np.ndarray],
+    task_spec: MsgProbeTaskSpec,
+) -> dict[str, Any]:
     batch_size = int(np.count_nonzero(valid_mask))
     if batch_size == 0:
         return {"batch_size": 0, "predictions": {}, "targets": {}}
-    logits = jax.device_get(
-        _probe_logits(
-            params,
-            variant=variant,
-            task_spec=task_spec,
-            features=features,
-            valid_mask=batch["peak_valid_mask"],
-        )
-    )
     predictions, targets = {}, {}
     joint_logits = (
         logits[task_spec.fingerprint_task] if task_spec.maccs_bits > 0 else None
     )
     for regression_idx, name in enumerate(task_spec.regression_tasks):
-        target = np.asarray(batch[f"probe_{name}"], dtype=np.float32)[valid_mask]
         mean = task_spec.regression_means[name]
         std = task_spec.regression_stds[name]
         pred = (
@@ -607,28 +1070,54 @@ def _probe_predictions(
             else np.asarray(joint_logits)[:, regression_idx]
         )
         predictions[name] = pred[valid_mask] * std + mean
-        targets[name] = target
+    for name in task_spec.regression_tasks:
+        targets[name] = target_values[name]
     for name in task_spec.binary_tasks:
-        pred = np.asarray(jax.nn.sigmoid(logits[name].squeeze(-1)))
+        pred = _sigmoid_numpy(np.asarray(logits[name]).squeeze(-1))
         predictions[name] = pred[valid_mask]
-        targets[name] = np.asarray(batch[f"probe_{name}"], dtype=np.float32)[valid_mask]
+        targets[name] = target_values[name]
     if task_spec.maccs_bits > 0:
-        pred = np.asarray(
-            jax.nn.sigmoid(
-                joint_logits[:, len(task_spec.regression_tasks):]
-            )
+        assert joint_logits is not None
+        pred = _sigmoid_numpy(
+            np.asarray(joint_logits)[:, len(task_spec.regression_tasks):]
         )
         fingerprint_task = task_spec.fingerprint_task
         predictions[fingerprint_task] = pred[valid_mask]
-        targets[fingerprint_task] = np.asarray(
-            batch[f"probe_{fingerprint_task}"],
-            dtype=np.float32,
-        )[valid_mask]
+        targets[fingerprint_task] = target_values[fingerprint_task]
     return {
         "batch_size": batch_size,
         "predictions": predictions,
         "targets": targets,
     }
+
+
+def _probe_targets_from_batch(
+    batch: JaxBatch,
+    *,
+    valid_mask: np.ndarray,
+    task_spec: MsgProbeTaskSpec,
+) -> dict[str, np.ndarray]:
+    targets = {
+        name: np.asarray(batch[f"probe_{name}"], dtype=np.float32)[valid_mask]
+        for name in task_spec.regression_tasks
+    }
+    targets.update(
+        {
+            name: np.asarray(batch[f"probe_{name}"], dtype=np.float32)[valid_mask]
+            for name in task_spec.binary_tasks
+        }
+    )
+    if task_spec.maccs_bits > 0:
+        fingerprint_task = task_spec.fingerprint_task
+        targets[fingerprint_task] = np.asarray(
+            batch[f"probe_{fingerprint_task}"],
+            dtype=np.float32,
+        )[valid_mask]
+    return targets
+
+
+def _sigmoid_numpy(value: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-value))
 
 
 def _probe_logits(
@@ -642,6 +1131,7 @@ def _probe_logits(
     pooled = _pool_features(
         params.get("pooler", {}),
         variant=variant,
+        task_spec=task_spec,
         features=features,
         valid_mask=valid_mask,
     )
@@ -655,6 +1145,7 @@ def _pool_features(
     params: dict[str, Array],
     *,
     variant: str,
+    task_spec: MsgProbeTaskSpec,
     features: JaxFeatures,
     valid_mask: Array,
 ) -> Array:
@@ -682,6 +1173,7 @@ def _pool_features(
             valid_mask,
             pair_embeddings,
             params=params,
+            include_diagonal=task_spec.single_pair_covariance_include_diagonal,
         )
     raise ValueError(f"Unsupported JAX MSG probe variant: {variant!r}")
 
@@ -714,6 +1206,7 @@ def _single_pair_covariance_pool(
     pair_embeddings: Array,
     *,
     params: dict[str, Array],
+    include_diagonal: bool,
 ) -> Array:
     token_mask = valid_mask
     num_tokens = token_mask.shape[1]
@@ -725,7 +1218,7 @@ def _single_pair_covariance_pool(
     )
     pair_embeddings = pair_embeddings[:, :num_tokens, :num_tokens]
     pair_mask = token_mask[:, :, None] & token_mask[:, None, :]
-    if not bool(params["include_diagonal"]):
+    if not include_diagonal:
         diagonal = jnp.eye(num_tokens, dtype=bool)[None]
         pair_mask = pair_mask & ~diagonal
     pair_mask_f = pair_mask[..., None].astype(jnp.float32)
@@ -742,25 +1235,59 @@ def _single_pair_covariance_pool(
     return jnp.matmul(pooled, params["output_w"]) + params["output_b"]
 
 
+@nnx.jit
+def _extract_pair_features_jitted(
+    model: PeakSetJEPAJax,
+    peak_mz: Array,
+    peak_intensity: Array,
+    peak_valid_mask: Array,
+    precursor_mz: Array | None,
+) -> tuple[Array, Array]:
+    return model.encoder.forward_with_pair(
+        peak_mz,
+        peak_intensity,
+        valid_mask=peak_valid_mask,
+        precursor_mz=precursor_mz,
+    )
+
+
+@nnx.jit
+def _extract_single_features_jitted(
+    model: PeakSetJEPAJax,
+    peak_mz: Array,
+    peak_intensity: Array,
+    peak_valid_mask: Array,
+    precursor_mz: Array | None,
+) -> Array:
+    return model.encoder(
+        peak_mz,
+        peak_intensity,
+        valid_mask=peak_valid_mask,
+        precursor_mz=precursor_mz,
+    )
+
+
 def _extract_features(
     model: PeakSetJEPAJax,
     batch: JaxBatch,
     *,
     use_pair_features: bool,
 ) -> JaxFeatures:
+    precursor_mz = batch.get("precursor_mz", None)
     if use_pair_features:
-        embeddings, pair_embeddings = model.encoder.forward_with_pair(
+        return _extract_pair_features_jitted(
+            model,
             batch["peak_mz"],
             batch["peak_intensity"],
-            valid_mask=batch["peak_valid_mask"],
-            precursor_mz=batch.get("precursor_mz", None),
+            batch["peak_valid_mask"],
+            precursor_mz,
         )
-        return embeddings, pair_embeddings
-    return model.encoder(
+    return _extract_single_features_jitted(
+        model,
         batch["peak_mz"],
         batch["peak_intensity"],
-        valid_mask=batch["peak_valid_mask"],
-        precursor_mz=batch.get("precursor_mz", None),
+        batch["peak_valid_mask"],
+        precursor_mz,
     )
 
 
@@ -828,15 +1355,6 @@ def _init_pooler(
             "pair_right": _xavier(keys[3], pair_dim, compressed_dim),
             "output_w": _xavier(keys[4], 2 * output_dim, output_dim),
             "output_b": jnp.zeros((output_dim,), dtype=jnp.float32),
-            "include_diagonal": jnp.asarray(
-                bool(
-                    _config_get(
-                        config,
-                        "msg_probe_single_pair_covariance_include_diagonal",
-                        False,
-                    )
-                )
-            ),
         }, output_dim
     raise ValueError(f"Unsupported JAX MSG probe variant: {variant!r}")
 
@@ -1285,3 +1803,11 @@ def _config_get(config: Any, key: str, default: Any) -> Any:
     if hasattr(config, "get"):
         return config.get(key, default)
     return getattr(config, key, default)
+
+
+def _optional_positive_int(config: Any, key: str) -> int | None:
+    raw = _config_get(config, key, None)
+    if raw is None:
+        return None
+    value = int(raw)
+    return value if value > 0 else None
