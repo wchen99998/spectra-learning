@@ -39,7 +39,7 @@ python --version
 python -m pip install --upgrade pip
 python -m pip install uv
 uv --version
-uv sync --frozen --no-dev
+uv sync --frozen --no-dev --extra tpu
 .venv/bin/python - <<'PY'
 import importlib.metadata as md
 

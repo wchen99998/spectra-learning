@@ -14,18 +14,29 @@ dependencies = [
     "ml-collections>=1.1.0",
     "rdkit>=2025.3.3",
     "scikit-learn>=1.8.0",
-    "torch==2.12.0; sys_platform == 'linux'",
-    "jax[tpu]>=0.10.1; sys_platform == 'linux'",
-    "optax>=0.2.8",
     "tqdm>=4.66.4",
     "wandb==0.27.0",
     "jaxtyping>=0.3.10",
     "fsspec>=2026.1.0",
     "gcsfs>=2026.1.0",
-    "flax>=0.12.7",
-    "orbax-checkpoint>=0.12.0",
     "pyteomics>=5.0",
     "lxml>=6.0.0",
+]
+
+[project.optional-dependencies]
+cuda = [
+    "torch==2.12.0; sys_platform == 'linux'",
+    "jax[cuda13,tpu]>=0.10.1; sys_platform == 'linux'",
+    "flax>=0.12.7",
+    "optax>=0.2.8",
+    "orbax-checkpoint>=0.12.0",
+]
+tpu = [
+    "torch==2.12.0; sys_platform == 'linux'",
+    "jax[tpu]>=0.10.1; sys_platform == 'linux'",
+    "flax>=0.12.7",
+    "optax>=0.2.8",
+    "orbax-checkpoint>=0.12.0",
 ]
 
 [[tool.uv.index]]
@@ -33,8 +44,24 @@ name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 [tool.uv.sources]
-torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'linux'" }]
+torch = [
+    { index = "pytorch-cu130", extra = "cuda" },
+    { index = "pytorch-cpu", extra = "tpu" },
+]
+
+[tool.uv]
+conflicts = [
+    [
+        { extra = "cuda" },
+        { extra = "tpu" },
+    ],
+]
 
 [dependency-groups]
 dev = [
