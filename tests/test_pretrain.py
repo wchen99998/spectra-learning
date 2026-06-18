@@ -8,6 +8,10 @@ import torch
 
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pairmixer import PairFeatureEmbedder
+from spectra_learning.models.induced_pair import (
+    InducedPairState,
+    induced_pair_distogram_logits,
+)
 from spectra_learning.models.peak_features import FourierFeatures, PeakFeatureEmbedder
 from spectra_learning.training.optimization import is_weight_decay_target
 from spectra_learning.training.modules import PretrainModule
@@ -42,19 +46,6 @@ def _make_batch(
     if include_precursor:
         batch["precursor_mz"] = torch.rand(batch_size) * 500 + 100
     return batch
-
-
-class _RecordingLinear(torch.nn.Linear):
-    input_shapes: list[tuple[int, ...]]
-
-    def __init__(self, source: torch.nn.Linear) -> None:
-        super().__init__(source.in_features, source.out_features)
-        self.load_state_dict(source.state_dict())
-        self.input_shapes = []
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        self.input_shapes.append(tuple(input.shape))
-        return super().forward(input)
 
 
 class _NoSyncRecordingModule(torch.nn.Module):
@@ -717,6 +708,130 @@ class BlockJEPATests(unittest.TestCase):
         self.assertEqual(logits.shape[-1], 4)
         torch.testing.assert_close(logits[:, :, 1, 2], logits[:, :, 2, 1])
 
+    def test_induced_distogram_logits_match_dense_decontraction(self):
+        model = self._build_model(
+            pairmixer_block_type="induced",
+            induced_pair_num_inducing=3,
+            distogram_loss_weight=1.0,
+            jepa_mae_mz_bin_size=250.0,
+        )
+        assignment = torch.softmax(torch.randn(2, 1, 4, 3), dim=-1)
+        latent_pair = torch.randn(2, 1, 3, 3, model.predictor_pair_dim)
+        state = InducedPairState(
+            torch.randn(2, 1, 3, model.predictor_dim),
+            latent_pair,
+            assignment,
+        )
+        latent_logits = model.distogram_head(latent_pair)
+
+        logits = induced_pair_distogram_logits(state, model.distogram_head)
+        expected = torch.einsum(
+            "...ia,...abk,...jb->...ijk",
+            assignment,
+            latent_logits,
+            assignment,
+        )
+
+        torch.testing.assert_close(logits, expected)
+
+    def test_induced_pair_forward_uses_compact_predictor_pair_state(self):
+        model = self._build_model(
+            pairmixer_block_type="induced",
+            induced_pair_num_inducing=3,
+            masked_token_loss_weight=1.0,
+            distogram_loss_weight=0.25,
+            latent_pair_loss_weight=0.0,
+        )
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+
+        predictor_features, predictor_output, predictor_pair = (
+            model._predict_augmented_target_outputs(
+                *model._encode_augmented_teacher_and_context(
+                    batch["peak_mz"],
+                    batch["peak_intensity"],
+                    batch["peak_valid_mask"],
+                    batch["context_mask"],
+                    batch["target_masks"],
+                    precursor_mz=batch.get("precursor_mz", None),
+                )[3:],
+                batch["context_mask"],
+                batch["target_masks"],
+            )
+        )
+        metrics = model.forward_augmented(batch)
+
+        self.assertIsInstance(predictor_pair, InducedPairState)
+        self.assertEqual(predictor_pair.pair.shape[-3:-1], (3, 3))
+        self.assertEqual(predictor_pair.assignment.shape[-2], batch["peak_mz"].shape[1])
+        target_assignment_sum = predictor_pair.assignment[batch["target_masks"]].sum(dim=-1)
+        torch.testing.assert_close(
+            target_assignment_sum,
+            torch.ones_like(target_assignment_sum),
+            atol=1e-5,
+            rtol=1e-5,
+        )
+        self.assertTrue(torch.isfinite(predictor_features).all().item())
+        self.assertTrue(torch.isfinite(predictor_output).all().item())
+        self.assertTrue(torch.isfinite(metrics["loss"]).item())
+
+    def test_induced_distogram_loss_uses_standard_masked_ce(self):
+        model = self._build_model(
+            pairmixer_block_type="induced",
+            induced_pair_num_inducing=3,
+            distogram_loss_weight=0.25,
+            jepa_mae_mz_bin_size=250.0,
+        )
+        batch = _make_batch(
+            batch_size=2,
+            num_peaks=6,
+            num_targets=model.jepa_num_target_blocks,
+        )
+        predictor_pair = InducedPairState(
+            torch.randn(
+                2,
+                model.jepa_num_target_blocks,
+                3,
+                model.predictor_dim,
+            ),
+            torch.randn(
+                2,
+                model.jepa_num_target_blocks,
+                3,
+                3,
+                model.predictor_pair_dim,
+            ),
+            torch.softmax(
+                torch.randn(2, model.jepa_num_target_blocks, 6, 3),
+                dim=-1,
+            ),
+        )
+        predictor_visible_masks = (
+            batch["context_mask"].unsqueeze(1) | batch["target_masks"]
+        )
+        logits = model._distogram_logits(predictor_pair)
+        targets = model._distogram_targets(batch["peak_mz"]).unsqueeze(1).expand(
+            logits.shape[0],
+            logits.shape[1],
+            logits.shape[2],
+            logits.shape[3],
+        )
+        pair_mask = model._distogram_pair_mask(
+            batch["target_masks"],
+            predictor_visible_masks,
+        )
+        expected_loss = model._masked_ce_loss(logits, targets, pair_mask)
+
+        term, metrics = model._distogram_metrics(
+            predictor_pair,
+            batch["peak_mz"],
+            batch["target_masks"],
+            predictor_visible_masks,
+            predictor_pair.pair,
+        )
+
+        torch.testing.assert_close(metrics["distogram_loss"], expected_loss)
+        torch.testing.assert_close(term, expected_loss * 0.25)
+
     def test_distogram_loss_matches_full_logit_masked_ce(self):
         model = self._build_model(
             distogram_loss_weight=0.25,
@@ -761,42 +876,6 @@ class BlockJEPATests(unittest.TestCase):
 
         torch.testing.assert_close(metrics["distogram_loss"], expected_loss)
         torch.testing.assert_close(term, expected_loss * 0.25)
-
-    def test_distogram_head_uses_static_chunk_shape(self):
-        model = self._build_model(
-            distogram_loss_weight=1.0,
-            distogram_loss_chunk_size=17,
-        )
-        recording_head = _RecordingLinear(cast(torch.nn.Linear, model.distogram_head))
-        model.distogram_head = recording_head
-        batch = _make_batch(
-            batch_size=2,
-            num_peaks=6,
-            num_targets=model.jepa_num_target_blocks,
-        )
-        predictor_pair = torch.randn(
-            2,
-            model.jepa_num_target_blocks,
-            6,
-            6,
-            model.predictor_pair_dim,
-        )
-        predictor_visible_masks = (
-            batch["context_mask"].unsqueeze(1) | batch["target_masks"]
-        )
-
-        model._distogram_metrics(
-            predictor_pair,
-            batch["peak_mz"],
-            batch["target_masks"],
-            predictor_visible_masks,
-            predictor_pair,
-        )
-
-        self.assertEqual(
-            set(recording_head.input_shapes),
-            {(17, model.predictor_pair_dim)},
-        )
 
     def test_distogram_loss_contributes_to_loss(self):
         model = self._build_model(

@@ -28,7 +28,6 @@ class PeakSetJEPASettings:
     distogram_loss_weight: float = 0.0
     latent_pair_loss_weight: float = 0.0
     distogram_mz_max: float = PEAK_MZ_MAX
-    distogram_loss_chunk_size: int = 4096
     jepa_mae_mz_bin_size: float = 2.5
     jepa_mae_intensity_bin_size: float = 0.1
     jepa_mae_mz_max: float = PEAK_MZ_MAX
@@ -44,7 +43,9 @@ class PeakSetJEPASettings:
     encoder_use_position_embedding: bool = True
     encoder_apply_final_norm: bool = True
     encoder_apply_final_pair_norm: bool = False
+    pairmixer_block_type: str = "dense"
     pairmixer_pair_dim: int | None = None
+    induced_pair_num_inducing: int = 8
     pairmixer_pair_feature_hidden_dim: int = 128
     pairmixer_dropout: float = 0.0
     pairmixer_use_pair_bias_attention: bool = False
@@ -144,7 +145,6 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "distogram_loss_weight": float,
     "latent_pair_loss_weight": float,
     "distogram_mz_max": float,
-    "distogram_loss_chunk_size": int,
     "jepa_mae_mz_bin_size": float,
     "jepa_mae_intensity_bin_size": float,
     "jepa_mae_mz_max": float,
@@ -160,7 +160,9 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "encoder_use_position_embedding": bool,
     "encoder_apply_final_norm": bool,
     "encoder_apply_final_pair_norm": bool,
+    "pairmixer_block_type": str,
     "pairmixer_pair_dim": _optional_int,
+    "induced_pair_num_inducing": int,
     "pairmixer_pair_feature_hidden_dim": int,
     "pairmixer_dropout": float,
     "pairmixer_use_pair_bias_attention": bool,

@@ -13,6 +13,7 @@ from ml_collections import config_dict
 from torch.utils.data import DataLoader
 
 from spectra_learning.data.gems.collate import GemsBatchCollator
+from spectra_learning.models.induced_pair_jax import InducedPairState
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.model_jax import PeakSetJEPAJax
 from spectra_learning.training.checkpointing import save_torch_checkpoint
@@ -76,6 +77,17 @@ def _tiny_mae_kwargs() -> dict[str, object]:
         "target_projector_dim": -1,
         "jepa_mae_mz_bin_size": 100.0,
         "jepa_mae_intensity_bin_size": 0.5,
+    }
+
+
+def _small_induced_mae_kwargs() -> dict[str, object]:
+    return {
+        **_small_mae_kwargs(),
+        "pairmixer_block_type": "induced",
+        "induced_pair_num_inducing": 3,
+        "pairmixer_pair_dim": 8,
+        "pairmixer_use_pair_bias_attention": True,
+        "latent_pair_loss_weight": 0.0,
     }
 
 
@@ -230,6 +242,21 @@ def test_initialize_jax_model_from_torch_seed_matches_pytorch_forward():
     _assert_metrics_close(torch_metrics, jax_metrics)
 
 
+def test_jax_induced_pair_mae_matches_pytorch_on_real_collated_batch():
+    torch.manual_seed(9)
+    kwargs = _small_induced_mae_kwargs()
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    jax_model = PeakSetJEPAJax(**kwargs)
+    jax_model.load_torch_state_dict(torch_model.state_dict())
+    batch = _real_pattern_batch("contiguous")
+
+    with torch.no_grad():
+        torch_metrics = torch_model(batch)
+    jax_metrics = jax_model(_jax_batch(batch))
+
+    _assert_metrics_close(torch_metrics, jax_metrics, atol=4e-5)
+
+
 def test_jax_model_loads_plain_pytorch_checkpoint_and_matches_output():
     torch.manual_seed(11)
     kwargs = _small_mae_kwargs()
@@ -278,6 +305,143 @@ def test_jax_mae_packed_context_encoder_matches_full_encoder():
     packed_metrics = packed_model(jax_batch)
 
     _assert_jax_metrics_close(full_metrics, packed_metrics, atol=5e-4)
+
+
+def test_jax_induced_pair_packed_context_encoder_matches_full_encoder():
+    torch.manual_seed(14)
+    kwargs = {
+        **_small_induced_mae_kwargs(),
+        "encoder_use_position_embedding": False,
+    }
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    full_model = PeakSetJEPAJax(**kwargs)
+    packed_model = PeakSetJEPAJax(
+        **kwargs,
+        mae_context_encoder_pack_tokens=3,
+    )
+    full_model.load_torch_state_dict(torch_model.state_dict())
+    packed_model.load_torch_state_dict(torch_model.state_dict())
+    batch = _real_pattern_batch("contiguous")
+
+    jax_batch = _jax_batch(batch)
+    full_metrics = full_model(jax_batch)
+    packed_metrics = packed_model(jax_batch)
+
+    _assert_jax_metrics_close(full_metrics, packed_metrics, atol=6e-4)
+
+
+def test_jax_induced_pair_packed_context_state_matches_full_encoder():
+    torch.manual_seed(15)
+    kwargs = {
+        **_small_induced_mae_kwargs(),
+        "encoder_use_position_embedding": False,
+    }
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    full_model = PeakSetJEPAJax(**kwargs)
+    packed_model = PeakSetJEPAJax(**kwargs, mae_context_encoder_pack_tokens=3)
+    full_model.load_torch_state_dict(torch_model.state_dict())
+    packed_model.load_torch_state_dict(torch_model.state_dict())
+    batch = _jax_batch(_real_pattern_batch("contiguous"))
+    context_mask = batch["context_mask"] & batch["peak_valid_mask"]
+    target_masks = batch["target_masks"] & batch["peak_valid_mask"][:, None, :]
+    context_mz, context_intensity, context_visible_mask = (
+        full_model._context_encoder_inputs(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            context_mask,
+            target_masks,
+        )
+    )
+
+    full_encoded, full_pair = full_model._encode_mae_context(
+        context_mz,
+        context_intensity,
+        batch["peak_valid_mask"],
+        context_visible_mask,
+        batch.get("precursor_mz", None),
+    )
+    packed_encoded, packed_pair = packed_model._encode_mae_context(
+        context_mz,
+        context_intensity,
+        batch["peak_valid_mask"],
+        context_visible_mask,
+        batch.get("precursor_mz", None),
+    )
+
+    assert isinstance(full_pair, InducedPairState)
+    assert isinstance(packed_pair, InducedPairState)
+    token_visible_mask = jnp.concatenate(
+        [context_visible_mask, jnp.ones_like(context_visible_mask[:, :1])],
+        axis=1,
+    )
+    np.testing.assert_allclose(
+        np.asarray(packed_encoded * token_visible_mask[..., None]),
+        np.asarray(full_encoded * token_visible_mask[..., None]),
+        rtol=1e-5,
+        atol=6e-4,
+    )
+    np.testing.assert_allclose(
+        np.asarray(packed_pair.inducing),
+        np.asarray(full_pair.inducing),
+        rtol=1e-5,
+        atol=6e-4,
+    )
+    np.testing.assert_allclose(
+        np.asarray(packed_pair.pair),
+        np.asarray(full_pair.pair),
+        rtol=1e-5,
+        atol=6e-4,
+    )
+    np.testing.assert_allclose(
+        np.asarray(packed_pair.assignment),
+        np.asarray(full_pair.assignment),
+        rtol=1e-5,
+        atol=6e-4,
+    )
+
+
+def test_jax_induced_pair_packed_scatter_preserves_latent_state_and_scatter_assignments():
+    model = PeakSetJEPAJax(**_small_induced_mae_kwargs())
+    packed_encoded = jnp.arange(2 * 4 * 5, dtype=jnp.float32).reshape(2, 4, 5)
+    inducing = jnp.arange(2 * 3 * 4, dtype=jnp.float32).reshape(2, 3, 4)
+    latent_pair = jnp.arange(2 * 3 * 3 * 2, dtype=jnp.float32).reshape(2, 3, 3, 2)
+    assignment = jnp.arange(2 * 4 * 3, dtype=jnp.float32).reshape(2, 4, 3)
+    packed_pair = InducedPairState(inducing, latent_pair, assignment)
+    packed_indices = jnp.asarray([[2, 0, 4], [1, 3, 0]], dtype=jnp.int32)
+    packed_mask = jnp.asarray([[True, False, True], [True, True, False]])
+
+    encoded, pair = model._scatter_packed_mae_context(
+        packed_encoded,
+        packed_pair,
+        packed_indices,
+        packed_mask,
+        num_peaks=5,
+    )
+
+    assert isinstance(pair, InducedPairState)
+    expected_encoded = np.zeros((2, 6, 5), dtype=np.float32)
+    expected_assignment = np.zeros((2, 6, 3), dtype=np.float32)
+    packed_encoded_np = np.asarray(packed_encoded)
+    assignment_np = np.asarray(assignment)
+    for batch_idx in range(2):
+        for packed_idx in range(3):
+            if bool(np.asarray(packed_mask)[batch_idx, packed_idx]):
+                peak_idx = int(np.asarray(packed_indices)[batch_idx, packed_idx])
+                expected_encoded[batch_idx, peak_idx] = packed_encoded_np[
+                    batch_idx,
+                    packed_idx,
+                ]
+                expected_assignment[batch_idx, peak_idx] = assignment_np[
+                    batch_idx,
+                    packed_idx,
+                ]
+        expected_encoded[batch_idx, 5] = packed_encoded_np[batch_idx, 3]
+        expected_assignment[batch_idx, 5] = assignment_np[batch_idx, 3]
+
+    np.testing.assert_allclose(np.asarray(encoded), expected_encoded)
+    np.testing.assert_allclose(np.asarray(pair.assignment), expected_assignment)
+    np.testing.assert_allclose(np.asarray(pair.inducing), np.asarray(inducing))
+    np.testing.assert_allclose(np.asarray(pair.pair), np.asarray(latent_pair))
 
 
 def test_jax_optax_train_step_updates_loaded_pytorch_weights():

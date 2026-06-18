@@ -7,6 +7,16 @@ import torch.nn.functional as F
 from jaxtyping import Bool, Float, Int
 from torch import Tensor, nn
 
+from spectra_learning.models.induced_pair import (
+    InducedPairState,
+    induced_pair_distogram_logits,
+    induced_pair_expand_views,
+    induced_pair_flatten_views,
+    induced_pair_slice_tokens,
+    induced_pair_to_dense_pair,
+    induced_pair_unflatten_views,
+)
+
 
 def _zero_scalar_like(value: Tensor) -> Tensor:
     return value.reshape(-1)[0] * 0.0
@@ -57,34 +67,6 @@ class ObjectiveMixin:
         per_token = _cross_entropy_from_logits(logits, targets)
         weights = valid_mask.float()
         return (per_token * weights).sum() / weights.sum().clamp_min(1.0)
-
-    def _chunked_masked_linear_ce_loss(
-        self: Any,
-        inputs: Float[Tensor, "... dim"],
-        head: nn.Linear,
-        targets: Int[Tensor, "..."],
-        valid_mask: Bool[Tensor, "..."],
-        chunk_size: int,
-    ) -> Float[Tensor, ""]:
-        flat_inputs = inputs.reshape(-1, inputs.shape[-1])
-        flat_targets = targets.reshape(-1)
-        flat_weights = valid_mask.reshape(-1).float()
-        weight_sum = flat_weights.sum().clamp_min(1.0)
-        padding = (-flat_inputs.shape[0]) % chunk_size
-        if padding:
-            flat_inputs = F.pad(flat_inputs, (0, 0, 0, padding))
-            flat_targets = F.pad(flat_targets, (0, padding))
-            flat_weights = F.pad(flat_weights, (0, padding))
-
-        loss_sum = flat_inputs.new_zeros((), dtype=torch.float32)
-        for start in range(0, flat_inputs.shape[0], chunk_size):
-            stop = start + chunk_size
-            per_pair = _cross_entropy_from_logits(
-                head(flat_inputs[start:stop]).float(),
-                flat_targets[start:stop],
-            )
-            loss_sum = loss_sum + (per_pair * flat_weights[start:stop]).sum()
-        return loss_sum / weight_sum
 
     def _jepa_mae_value_prediction_loss(
         self: Any,
@@ -152,13 +134,13 @@ class ObjectiveMixin:
     def _predict_augmented_target_outputs(
         self: Any,
         context_emb: Float[Tensor, "batch tokens dim"],
-        context_pair: Float[Tensor, "batch tokens tokens pair"],
+        context_pair: Float[Tensor, "batch tokens tokens pair"] | InducedPairState,
         context_mask: Bool[Tensor, "batch peaks"],
         target_masks: Bool[Tensor, "batch views peaks"],
     ) -> tuple[
         Float[Tensor, "batch views peaks target_dim"],
         Float[Tensor, "batch views peaks target_dim"],
-        Float[Tensor, "batch views peaks peaks pair"],
+        Float[Tensor, "batch views peaks peaks pair"] | InducedPairState,
     ]:
         batch_size, num_target_blocks, num_peaks = target_masks.shape
         context_mask_by_view = context_mask.unsqueeze(1)
@@ -191,6 +173,43 @@ class ObjectiveMixin:
             ],
             dim=2,
         )
+        if isinstance(context_pair, InducedPairState):
+            flat_predictor_input = predictor_input.reshape(
+                batch_size * num_target_blocks,
+                predictor_input.shape[2],
+                -1,
+            )
+            flat_predictor_visible_mask = predictor_visible_mask.reshape(
+                batch_size * num_target_blocks,
+                num_peaks + 1,
+            )
+            flat_predictor_pair = induced_pair_flatten_views(
+                induced_pair_expand_views(context_pair, num_target_blocks)
+            )
+            predictor_features, predictor_pair = (
+                self.predict_masked_target_features_with_pair(
+                    flat_predictor_input,
+                    flat_predictor_pair,
+                    flat_predictor_visible_mask,
+                )
+            )
+            predictor_features = predictor_features.reshape(
+                batch_size,
+                num_target_blocks,
+                predictor_input.shape[2],
+                -1,
+            )
+            predictor_features = predictor_features[:, :, :num_peaks]
+            predictor_pair = induced_pair_slice_tokens(
+                induced_pair_unflatten_views(
+                    predictor_pair,
+                    batch_size,
+                    num_target_blocks,
+                ),
+                num_peaks,
+            )
+            predictor_output = self.project_targets(predictor_features)
+            return predictor_features, predictor_output, predictor_pair
         predictor_pair = context_pair.unsqueeze(1).expand(
             -1,
             num_target_blocks,
@@ -330,14 +349,19 @@ class ObjectiveMixin:
 
     def _distogram_logits(
         self: Any,
-        predictor_pair: Float[Tensor, "batch views peaks peaks pair"],
+        predictor_pair: Float[Tensor, "batch views peaks peaks pair"] | InducedPairState,
     ) -> Float[Tensor, "batch views peaks peaks bins"]:
+        if isinstance(predictor_pair, InducedPairState):
+            return induced_pair_distogram_logits(
+                predictor_pair,
+                cast(nn.Linear, self.distogram_head),
+            )
         sym_pair = predictor_pair + predictor_pair.transpose(2, 3)
         return cast(nn.Linear, self.distogram_head)(sym_pair)
 
     def _distogram_metrics(
         self: Any,
-        predictor_pair: Float[Tensor, "batch views peaks peaks pair"],
+        predictor_pair: Float[Tensor, "batch views peaks peaks pair"] | InducedPairState,
         peak_mz: Float[Tensor, "batch peaks"],
         target_masks: Bool[Tensor, "batch views peaks"],
         predictor_visible_masks: Bool[Tensor, "batch views peaks"],
@@ -346,19 +370,17 @@ class ObjectiveMixin:
         if self.distogram_loss_weight <= 0:
             return _zero_scalar_like(reference), {}
         pair_mask = self._distogram_pair_mask(target_masks, predictor_visible_masks)
-        sym_pair = predictor_pair + predictor_pair.transpose(2, 3)
+        logits = self._distogram_logits(predictor_pair)
         targets = self._distogram_targets(peak_mz).unsqueeze(1).expand(
-            sym_pair.shape[0],
-            sym_pair.shape[1],
-            sym_pair.shape[2],
-            sym_pair.shape[3],
+            logits.shape[0],
+            logits.shape[1],
+            logits.shape[2],
+            logits.shape[3],
         )
-        distogram_loss = self._chunked_masked_linear_ce_loss(
-            sym_pair,
-            cast(nn.Linear, self.distogram_head),
+        distogram_loss = self._masked_ce_loss(
+            logits,
             targets,
             pair_mask,
-            self.distogram_loss_chunk_size,
         )
         term = distogram_loss.to(dtype=reference.dtype) * self.distogram_loss_weight
         return term, {
@@ -377,6 +399,10 @@ class ObjectiveMixin:
         if self.latent_pair_loss_weight <= 0:
             return _zero_scalar_like(reference), {}
         pair_mask = self._target_pair_mask(target_masks, predictor_visible_masks)
+        if isinstance(predictor_pair, InducedPairState):
+            predictor_pair = induced_pair_to_dense_pair(predictor_pair)
+        if isinstance(teacher_pair, InducedPairState):
+            teacher_pair = induced_pair_to_dense_pair(teacher_pair)
         predicted_pair = self.masked_pair_readout(predictor_pair)
         with torch.no_grad():
             teacher_pair_targets = teacher_pair.detach()

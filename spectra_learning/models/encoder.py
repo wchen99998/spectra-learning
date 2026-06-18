@@ -7,6 +7,7 @@ from spectra_learning.models.common import (
     _build_frozen_position_embedding,
     _merge_visible_mask,
 )
+from spectra_learning.models.induced_pair import InducedPairBlock, InducedPairState
 from spectra_learning.models.pairmixer import PairFeatureEmbedder, PairMixerBlock
 from spectra_learning.models.peak_features import PeakFeatureEmbedder
 
@@ -25,7 +26,9 @@ class PeakSetEncoder(nn.Module):
         apply_final_pair_norm: bool = False,
         num_peaks: int = 64,
         use_position_embedding: bool = True,
+        pairmixer_block_type: str = "dense",
         pair_dim: int | None = None,
+        induced_pair_num_inducing: int = 8,
         pair_feature_hidden_dim: int = 128,
         pairmixer_dropout: float = 0.0,
         pairmixer_use_pair_bias_attention: bool = False,
@@ -41,6 +44,8 @@ class PeakSetEncoder(nn.Module):
         super().__init__()
         self.num_layers = num_layers
         self.use_position_embedding = use_position_embedding
+        self.pairmixer_block_type = pairmixer_block_type.lower()
+        self.use_induced_pair = self.pairmixer_block_type == "induced"
         self.embedder = embedder
         self.position_embedding = _build_frozen_position_embedding(
             num_peaks,
@@ -48,29 +53,40 @@ class PeakSetEncoder(nn.Module):
         )
         pair_dim = model_dim if pair_dim is None else pair_dim
         self.cls_token = nn.Parameter(torch.empty(model_dim))
-        self.cls_to_peak_pair_token = nn.Parameter(torch.empty(pair_dim))
-        self.peak_to_cls_pair_token = nn.Parameter(torch.empty(pair_dim))
-        self.cls_cls_pair_token = nn.Parameter(torch.empty(pair_dim))
         nn.init.normal_(self.cls_token, std=0.02)
-        nn.init.normal_(self.cls_to_peak_pair_token, std=0.02)
-        nn.init.normal_(self.peak_to_cls_pair_token, std=0.02)
-        nn.init.normal_(self.cls_cls_pair_token, std=0.02)
-        self.pair_embedder = PairFeatureEmbedder(
-            single_dim=model_dim,
-            pair_dim=pair_dim,
-            hidden_dim=pair_feature_hidden_dim,
-            mz_scale=pairmixer_mz_scale,
-            precursor_mz_scale=pairmixer_precursor_mz_scale,
-            use_fourier_features=pairmixer_use_fourier_features,
-            fourier_num_freqs=pairmixer_fourier_num_freqs,
-            fourier_x_min=pairmixer_fourier_x_min,
-            fourier_x_max=pairmixer_fourier_x_max,
-            relative_fourier_x_min=pairmixer_relative_fourier_x_min,
-            relative_fourier_x_max=pairmixer_relative_fourier_x_max,
-        )
+        if self.use_induced_pair:
+            self.inducing_token = nn.Parameter(
+                torch.empty(induced_pair_num_inducing, model_dim)
+            )
+            self.latent_pair_token = nn.Parameter(
+                torch.empty(induced_pair_num_inducing, induced_pair_num_inducing, pair_dim)
+            )
+            nn.init.normal_(self.inducing_token, std=0.02)
+            nn.init.normal_(self.latent_pair_token, std=0.02)
+        else:
+            self.cls_to_peak_pair_token = nn.Parameter(torch.empty(pair_dim))
+            self.peak_to_cls_pair_token = nn.Parameter(torch.empty(pair_dim))
+            self.cls_cls_pair_token = nn.Parameter(torch.empty(pair_dim))
+            nn.init.normal_(self.cls_to_peak_pair_token, std=0.02)
+            nn.init.normal_(self.peak_to_cls_pair_token, std=0.02)
+            nn.init.normal_(self.cls_cls_pair_token, std=0.02)
+            self.pair_embedder = PairFeatureEmbedder(
+                single_dim=model_dim,
+                pair_dim=pair_dim,
+                hidden_dim=pair_feature_hidden_dim,
+                mz_scale=pairmixer_mz_scale,
+                precursor_mz_scale=pairmixer_precursor_mz_scale,
+                use_fourier_features=pairmixer_use_fourier_features,
+                fourier_num_freqs=pairmixer_fourier_num_freqs,
+                fourier_x_min=pairmixer_fourier_x_min,
+                fourier_x_max=pairmixer_fourier_x_max,
+                relative_fourier_x_min=pairmixer_relative_fourier_x_min,
+                relative_fourier_x_max=pairmixer_relative_fourier_x_max,
+            )
+        block_cls = InducedPairBlock if self.use_induced_pair else PairMixerBlock
         self.blocks = nn.ModuleList(
             [
-                PairMixerBlock(
+                block_cls(
                     single_dim=model_dim,
                     pair_dim=pair_dim,
                     num_heads=num_heads,
@@ -135,6 +151,61 @@ class PeakSetEncoder(nn.Module):
         cls_mask = torch.ones_like(peak_mask[:, :1])
         return torch.cat([peak_mask, cls_mask], dim=1)
 
+    def _initial_induced_pair_state(
+        self,
+        x: Float[Tensor, "batch tokens dim"],
+    ) -> InducedPairState:
+        batch_size = x.shape[0]
+        inducing = self.inducing_token.to(dtype=x.dtype).view(
+            1,
+            self.inducing_token.shape[0],
+            -1,
+        ).expand(batch_size, -1, -1)
+        pair = self.latent_pair_token.to(dtype=x.dtype).view(
+            1,
+            self.latent_pair_token.shape[0],
+            self.latent_pair_token.shape[1],
+            -1,
+        ).expand(batch_size, -1, -1, -1)
+        assignment = x.new_zeros(batch_size, x.shape[1], self.inducing_token.shape[0])
+        return InducedPairState(inducing, pair, assignment)
+
+    def _forward_with_induced_pair(
+        self,
+        peak_mz: Float[Tensor, "batch peaks"],
+        peak_intensity: Float[Tensor, "batch peaks"],
+        valid_mask: Bool[Tensor, "batch peaks"] | None = None,
+        visible_mask: Bool[Tensor, "batch peaks"] | None = None,
+    ) -> tuple[
+        Float[Tensor, "batch tokens dim"],
+        InducedPairState,
+    ]:
+        peak_valid_mask = (
+            torch.ones_like(peak_mz, dtype=torch.bool)
+            if valid_mask is None
+            else valid_mask
+        )
+        peak_visible_mask = _merge_visible_mask(peak_valid_mask, visible_mask)
+        if peak_visible_mask is None:
+            peak_visible_mask = peak_valid_mask
+        x = self._add_positions(self.embedder(peak_mz, peak_intensity))
+        x = self._append_cls_token(x)
+        token_visible_mask = self._append_cls_mask(peak_visible_mask)
+        state = self._initial_induced_pair_state(x)
+        for block in self.blocks:
+            x, state = block(
+                x,
+                state,
+                token_visible_mask,
+                token_visible_mask,
+            )
+        x = self.final_norm(x)
+        pair = self.final_pair_norm(state.pair)
+        assignment = state.assignment * token_visible_mask.unsqueeze(-1).to(
+            dtype=state.assignment.dtype
+        )
+        return x, InducedPairState(state.inducing, pair, assignment)
+
     def forward_with_pair(
         self,
         peak_mz: Float[Tensor, "batch peaks"],
@@ -144,8 +215,15 @@ class PeakSetEncoder(nn.Module):
         precursor_mz: Float[Tensor, "batch"] | None = None,
     ) -> tuple[
         Float[Tensor, "batch tokens dim"],
-        Float[Tensor, "batch tokens tokens pair"],
+        Float[Tensor, "batch tokens tokens pair"] | InducedPairState,
     ]:
+        if self.use_induced_pair:
+            return self._forward_with_induced_pair(
+                peak_mz,
+                peak_intensity,
+                valid_mask=valid_mask,
+                visible_mask=visible_mask,
+            )
         peak_valid_mask = (
             torch.ones_like(peak_mz, dtype=torch.bool)
             if valid_mask is None

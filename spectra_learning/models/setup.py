@@ -14,6 +14,7 @@ from spectra_learning.models.common import (
 )
 from spectra_learning.models.transformer import _build_norm
 from spectra_learning.models.encoder import PeakSetEncoder
+from spectra_learning.models.induced_pair import InducedPairBlock
 from spectra_learning.models.pairmixer import PairMixerBlock
 from spectra_learning.models.peak_features import PeakFeatureEmbedder
 from spectra_learning.models.settings import PeakSetJEPASettings
@@ -27,6 +28,7 @@ SUPPORTED_TARGET_NORMALIZATIONS = {"none", "zscore"}
 SUPPORTED_LATENT_PAIR_TARGET_NORMALIZATIONS = {"none", "layernorm"}
 SUPPORTED_EMA_SCHEDULES = {"constant", "linear", "cosine", "slow-fast-slow"}
 SUPPORTED_MASKED_TOKEN_INPUT_MODES = {"latent_token", "mz_sentinel"}
+SUPPORTED_PAIRMIXER_BLOCK_TYPES = {"dense", "induced"}
 
 
 def configure_peak_set_model(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
@@ -65,6 +67,9 @@ def _configure_dimensions(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
     model.predictor_pair_dim = (
         cfg.pairmixer_pair_dim if cfg.pairmixer_pair_dim is not None else model.model_dim
     )
+    model.pairmixer_block_type = cfg.pairmixer_block_type.lower()
+    if model.pairmixer_block_type not in SUPPORTED_PAIRMIXER_BLOCK_TYPES:
+        raise ValueError("pairmixer_block_type must be one of ('dense', 'induced')")
     model.encoder_num_layers = cfg.encoder_num_layers
     model.norm_eps = cfg.norm_eps
 
@@ -135,7 +140,6 @@ def _configure_losses(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
             "latent_pair_target_normalization must be one of ('none', 'layernorm')"
         )
     model.distogram_mz_max = cfg.distogram_mz_max
-    model.distogram_loss_chunk_size = cfg.distogram_loss_chunk_size
     model.jepa_mae_mz_bin_size = cfg.jepa_mae_mz_bin_size
     model.jepa_mae_intensity_bin_size = cfg.jepa_mae_intensity_bin_size
     model.jepa_mae_mz_max = cfg.jepa_mae_mz_max
@@ -172,7 +176,9 @@ def _build_peak_set_encoder(cfg: PeakSetJEPASettings) -> PeakSetEncoder:
         apply_final_norm=cfg.encoder_apply_final_norm,
         apply_final_pair_norm=cfg.encoder_apply_final_pair_norm,
         num_peaks=_num_peak_tokens(cfg),
+        pairmixer_block_type=cfg.pairmixer_block_type.lower(),
         pair_dim=cfg.pairmixer_pair_dim,
+        induced_pair_num_inducing=cfg.induced_pair_num_inducing,
         pair_feature_hidden_dim=cfg.pairmixer_pair_feature_hidden_dim,
         pairmixer_dropout=cfg.pairmixer_dropout,
         pairmixer_use_pair_bias_attention=cfg.pairmixer_use_pair_bias_attention,
@@ -267,9 +273,12 @@ def _build_predictor(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
         model.predictor_pair_dim,
     )
 
+    predictor_block_cls = (
+        InducedPairBlock if model.pairmixer_block_type == "induced" else PairMixerBlock
+    )
     model.masked_latent_predictor = nn.ModuleList(
         [
-            PairMixerBlock(
+            predictor_block_cls(
                 single_dim=model.predictor_dim,
                 pair_dim=model.predictor_pair_dim,
                 num_heads=cfg.masked_latent_predictor_num_heads,

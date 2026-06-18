@@ -304,6 +304,37 @@ class MsgSequenceProbeTests(unittest.TestCase):
         )
         torch.testing.assert_close(pooled, expected)
 
+    def test_single_pair_covariance_pool_uses_latent_pairs_when_pair_grid_is_compact(self):
+        pool = MsgSinglePairCovariancePool(
+            single_dim=2,
+            pair_dim=2,
+            compressed_dim=2,
+        )
+        with torch.no_grad():
+            pool.single_pool.left_proj.weight.copy_(torch.eye(2))
+            pool.single_pool.right_proj.weight.copy_(torch.eye(2))
+            pool.pair_left_proj.weight.copy_(torch.eye(2))
+            pool.pair_right_proj.weight.copy_(torch.eye(2))
+            pool.output_proj.weight.zero_()
+            pool.output_proj.bias.zero_()
+            pool.output_proj.weight[:, 4:].copy_(torch.eye(4))
+
+        peak_embeddings = torch.randn(1, 4, 2)
+        latent_pair_embeddings = torch.zeros(1, 2, 2, 2)
+        latent_pair_embeddings[0, 0, 0] = torch.tensor([100.0, 100.0])
+        latent_pair_embeddings[0, 1, 1] = torch.tensor([100.0, 100.0])
+        latent_pair_embeddings[0, 0, 1] = torch.tensor([1.0, 2.0])
+        latent_pair_embeddings[0, 1, 0] = torch.tensor([3.0, 4.0])
+        valid_mask = torch.tensor([[True, True, True]])
+
+        pooled = pool(peak_embeddings, valid_mask, latent_pair_embeddings)
+
+        expected = torch.nn.functional.layer_norm(
+            torch.tensor([[5.0, 7.0, 7.0, 10.0]]),
+            (4,),
+        )
+        torch.testing.assert_close(pooled, expected)
+
     def test_pma_pool_returns_fixed_size_vectors(self):
         pool = MsgPmaPool(input_dim=4, num_seeds=3, num_heads=2)
         peak_embeddings = torch.randn(2, 5, 4)
@@ -343,6 +374,27 @@ class MsgSequenceProbeTests(unittest.TestCase):
 
         self.assertEqual(pooled.shape, (2, 2 * 3 * 4))
         self.assertTrue(torch.isfinite(pooled).all().item())
+
+    def test_single_pair_pma_pool_accepts_compact_latent_pair_tokens(self):
+        pool = MsgSinglePairPmaPool(
+            single_dim=4,
+            pair_dim=6,
+            latent_dim=4,
+            num_tokens=3,
+            num_heads=2,
+            num_blocks=2,
+            hidden_dim=8,
+            norm_eps=1e-5,
+        )
+        peak_embeddings = torch.randn(2, 5, 4)
+        latent_pair_embeddings = torch.randn(2, 2, 2, 6)
+        valid_mask = torch.ones(2, 5, dtype=torch.bool)
+
+        pooled = pool(peak_embeddings, valid_mask, latent_pair_embeddings)
+
+        self.assertEqual(pooled.shape, (2, 2 * 3 * 4))
+        self.assertTrue(torch.isfinite(pooled).all().item())
+
 
     def test_cls_pool_concatenates_single_cls_and_pair_cls(self):
         pool = MsgSinglePairClsPool()

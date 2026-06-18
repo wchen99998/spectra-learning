@@ -26,6 +26,7 @@ class PeakSetJEPA(
     model_dim: int
     predictor_dim: int
     predictor_pair_dim: int
+    pairmixer_block_type: str
     teacher_pair_dim: int
     encoder_num_layers: int
     norm_eps: float
@@ -44,7 +45,6 @@ class PeakSetJEPA(
     latent_pair_target_normalization: str
     distogram_num_bins: int
     distogram_mz_max: float
-    distogram_loss_chunk_size: int
     jepa_mae_mz_bin_size: float
     jepa_mae_intensity_bin_size: float
     jepa_mae_mz_max: float

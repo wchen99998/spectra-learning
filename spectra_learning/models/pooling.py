@@ -142,13 +142,23 @@ class SinglePairCovariancePool(nn.Module):
     ) -> Float[Tensor, "batch compressed compressed"]:
         token_mask = self._token_mask(valid_mask)
         num_tokens = token_mask.shape[1]
-        pair_embeddings = pair_embeddings[:, :num_tokens, :num_tokens]
         batch_size = pair_embeddings.shape[0]
-        pair_mask = token_mask.unsqueeze(2) & token_mask.unsqueeze(1)
+        if pair_embeddings.shape[1] >= num_tokens and pair_embeddings.shape[2] >= num_tokens:
+            pair_embeddings = pair_embeddings[:, :num_tokens, :num_tokens]
+            pair_mask = token_mask.unsqueeze(2) & token_mask.unsqueeze(1)
+        else:
+            num_tokens = pair_embeddings.shape[1]
+            pair_mask = torch.ones(
+                batch_size,
+                num_tokens,
+                num_tokens,
+                device=pair_embeddings.device,
+                dtype=torch.bool,
+            )
         if not self.include_diagonal:
             diagonal = torch.eye(
                 num_tokens,
-                device=valid_mask.device,
+                device=pair_embeddings.device,
                 dtype=torch.bool,
             ).view(1, num_tokens, num_tokens)
             pair_mask = pair_mask & ~diagonal

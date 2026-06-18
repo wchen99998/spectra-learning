@@ -26,6 +26,7 @@ from spectra_learning.data.spectra import (
     preprocess_peak_batch_torch,
 )
 from spectra_learning.data.loading import local_batch_size
+from spectra_learning.models.induced_pair import InducedPairState
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pooling import SinglePairCovariancePool
 from spectra_learning.data.massspec_probe import MassSpecProbeData
@@ -808,6 +809,8 @@ class ContrastiveTrainingModule(torch.nn.Module):
             valid_mask=batch["peak_valid_mask"],
             precursor_mz=batch.get("precursor_mz", None),
         )
+        if isinstance(pair_embeddings, InducedPairState):
+            pair_embeddings = pair_embeddings.pair
         return self.pooler(
             peak_embeddings.float(),
             batch["peak_valid_mask"].to(dtype=torch.bool),
@@ -923,6 +926,8 @@ class ContrastiveTrainingModule(torch.nn.Module):
                         precursor_mz=batch.get("precursor_mz", None),
                     )
                 )
+                if isinstance(teacher_pair_embeddings, InducedPairState):
+                    teacher_pair_embeddings = teacher_pair_embeddings.pair
                 teacher_pooled = self.pooler(
                     teacher_peak_embeddings.float(),
                     batch["peak_valid_mask"].to(dtype=torch.bool),

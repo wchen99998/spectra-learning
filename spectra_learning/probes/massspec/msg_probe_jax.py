@@ -20,6 +20,7 @@ from spectra_learning.config.msg_probe import validate_msg_probe_config
 from spectra_learning.data.loading import local_batch_size
 from spectra_learning.data.massspec_probe import MassSpecProbeData
 from spectra_learning.models.common_jax import Array
+from spectra_learning.models.induced_pair_jax import InducedPairState
 from spectra_learning.models.model_jax import PeakSetJEPAJax
 from spectra_learning.probes.massspec.msg_settings import (
     BINARY_PROBE_TASKS,
@@ -1486,8 +1487,15 @@ def _single_pair_covariance_pool(
         left=params["single_left"],
         right=params["single_right"],
     )
-    pair_embeddings = pair_embeddings[:, :num_tokens, :num_tokens]
-    pair_mask = token_mask[:, :, None] & token_mask[:, None, :]
+    if pair_embeddings.shape[1] >= num_tokens and pair_embeddings.shape[2] >= num_tokens:
+        pair_embeddings = pair_embeddings[:, :num_tokens, :num_tokens]
+        pair_mask = token_mask[:, :, None] & token_mask[:, None, :]
+    else:
+        num_tokens = pair_embeddings.shape[1]
+        pair_mask = jnp.ones(
+            (pair_embeddings.shape[0], num_tokens, num_tokens),
+            dtype=jnp.bool_,
+        )
     if not include_diagonal:
         diagonal = jnp.eye(num_tokens, dtype=bool)[None]
         pair_mask = pair_mask & ~diagonal
@@ -1513,12 +1521,15 @@ def _extract_pair_features_jitted(
     peak_valid_mask: Array,
     precursor_mz: Array | None,
 ) -> tuple[Array, Array]:
-    return model.encoder.forward_with_pair(
+    single, pair = model.encoder.forward_with_pair(
         peak_mz,
         peak_intensity,
         valid_mask=peak_valid_mask,
         precursor_mz=precursor_mz,
     )
+    if isinstance(pair, InducedPairState):
+        pair = pair.pair
+    return single, pair
 
 
 @nnx.jit

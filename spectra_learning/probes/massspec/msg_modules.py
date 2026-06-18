@@ -297,15 +297,26 @@ class MsgSinglePairPmaPool(torch.nn.Module):
         num_tokens = token_mask.shape[1]
         dtype = self.single_encoder.seed_vectors.dtype
         peak_embeddings = peak_embeddings[:, :num_tokens].to(dtype=dtype)
-        pair_embeddings = pair_embeddings[:, :num_tokens, :num_tokens].to(dtype=dtype)
+        pair_embeddings = pair_embeddings.to(dtype=dtype)
         batch_size, _, _, pair_dim = pair_embeddings.shape
-        pair_mask = token_mask.unsqueeze(2) & token_mask.unsqueeze(1)
+        if pair_embeddings.shape[1] >= num_tokens and pair_embeddings.shape[2] >= num_tokens:
+            pair_embeddings = pair_embeddings[:, :num_tokens, :num_tokens]
+            pair_mask = token_mask.unsqueeze(2) & token_mask.unsqueeze(1)
+        else:
+            pair_tokens = pair_embeddings.shape[1]
+            pair_mask = torch.ones(
+                batch_size,
+                pair_tokens,
+                pair_tokens,
+                device=pair_embeddings.device,
+                dtype=torch.bool,
+            )
         pair_memory = pair_embeddings.reshape(
             batch_size,
-            num_tokens * num_tokens,
+            pair_embeddings.shape[1] * pair_embeddings.shape[2],
             pair_dim,
         )
-        pair_memory_mask = pair_mask.reshape(batch_size, num_tokens * num_tokens)
+        pair_memory_mask = pair_mask.reshape(batch_size, -1)
         tokens = torch.cat(
             [
                 self.single_encoder(peak_embeddings, token_mask),

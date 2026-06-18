@@ -14,6 +14,7 @@ from torch.nn.parallel import DistributedDataParallel
 
 from spectra_learning.data.gems.conversion import numpy_batch_to_torch
 from spectra_learning.data.loading import local_batch_size
+from spectra_learning.models.induced_pair import InducedPairState
 from spectra_learning.models.pooling import CovariancePool
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.data.massspec_probe import MassSpecProbeData
@@ -1263,6 +1264,8 @@ def _run_msg_probe_once(
                 valid_mask=batch["peak_valid_mask"],
                 precursor_mz=batch.get("precursor_mz", None),
             )
+            if isinstance(pair_embeddings, InducedPairState):
+                pair_embeddings = pair_embeddings.pair
             return embeddings, pair_embeddings
         return model.encoder(
             batch["peak_mz"],
