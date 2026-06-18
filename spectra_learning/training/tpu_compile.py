@@ -50,7 +50,6 @@ from spectra_learning.training.pretrain_jax import (
     make_pure_accumulated_train_step,
     make_pure_eval_step,
 )
-from spectra_learning.training.jax_runtime_flags import jax_tpu_xla_flags_string
 
 
 @dataclass(frozen=True)
@@ -152,6 +151,19 @@ class CompileSummary:
     executable_file: str
 
 
+@dataclass(frozen=True)
+class LoweredCompileResult:
+    compiled: Any | None
+    compile_seconds: float
+    reused_persistent_cache: bool
+
+
+OFFLINE_TOPOLOGY_CACHE_HIT_ERROR = (
+    "PjRtCompiler must be constructed with a Client to call "
+    "DeserializeLoadedExecutable"
+)
+
+
 def resolve_tpu_compile_target(name: str, *, num_slices: int = 1) -> TpuCompileTarget:
     target = TPU_COMPILE_TARGETS.get(name.lower()) or _dynamic_v6e_multihost_target(name)
     if target is None:
@@ -212,9 +224,7 @@ def compile_jax_train_steps_for_tpu(
     compiler_options: dict[str, str] | None = None,
 ) -> list[CompileSummary]:
     configure_jax_runtime(config)
-    compile_options = parse_compiler_options(jax_tpu_xla_flags_string())
-    if compiler_options:
-        compile_options.update(compiler_options)
+    compile_options = build_compiler_options(compiler_options)
     data_mesh = build_tpu_compile_mesh(target)
     variants = compile_variants(config, variant_selector)
     summaries: list[CompileSummary] = []
@@ -223,6 +233,7 @@ def compile_jax_train_steps_for_tpu(
         output_path.mkdir(parents=True, exist_ok=True)
 
     for variant in variants:
+        cache_glob = "jit_pure_sharded_accumulated_train_step-*-cache"
         print(
             f"Preparing abstract train state for {variant.name}...",
             file=sys.stderr,
@@ -254,37 +265,42 @@ def compile_jax_train_steps_for_tpu(
                 static_state,
                 opt_state,
                 batch,
-            )
+        )
         lower_seconds = time.perf_counter() - lower_start
         print(f"Compiling {variant.name}...", file=sys.stderr, flush=True)
-        compile_start = time.perf_counter()
-        compiled = lowered.compile(compiler_options=compile_options)
-        compile_seconds = time.perf_counter() - compile_start
+        compile_result = compile_lowered_or_reuse_persistent_cache(
+            lowered,
+            compile_options,
+            label=variant.name,
+        )
+        compiled = compile_result.compiled
         print(
-            f"Compiled {variant.name}: abstract={abstract_state_seconds:.2f}s "
-            f"lower={lower_seconds:.2f}s compile={compile_seconds:.2f}s",
+            f"Finished {variant.name}: abstract={abstract_state_seconds:.2f}s "
+            f"lower={lower_seconds:.2f}s compile={compile_result.compile_seconds:.2f}s "
+            f"status={'cache-hit' if compile_result.reused_persistent_cache else 'compiled'}",
             file=sys.stderr,
             flush=True,
         )
         executable_file = ""
         if output_path is not None:
             executable_file = str(output_path / f"{variant.name}.compiled")
-            serialized, _, _ = serialize(compiled)
-            Path(executable_file).write_bytes(serialized)
-        summaries.append(
-            CompileSummary(
-                kind="train",
-                target=asdict(target),
-                variant=variant.name,
-                cache_glob="jit_pure_sharded_accumulated_train_step-*-cache",
-                abstract_state_seconds=abstract_state_seconds,
-                lower_seconds=lower_seconds,
-                compile_seconds=compile_seconds,
-                memory_analysis=_memory_analysis_dict(compiled.memory_analysis()),
-                cost_analysis=_cost_analysis_summary(compiled.cost_analysis()),
-                executable_file=executable_file,
-            )
+            if compiled is not None:
+                write_serialized_executable(compiled, Path(executable_file))
+            elif not _nonempty_file(Path(executable_file)):
+                executable_file = ""
+        summary = CompileSummary(
+            kind="train",
+            target=asdict(target),
+            variant=variant.name,
+            cache_glob=cache_glob,
+            abstract_state_seconds=abstract_state_seconds,
+            lower_seconds=lower_seconds,
+            compile_seconds=compile_result.compile_seconds,
+            memory_analysis=compiled_memory_analysis(compiled),
+            cost_analysis=compiled_cost_analysis(compiled),
+            executable_file=executable_file,
         )
+        summaries.append(summary)
     if bool(_config_get(config, "jax_precompile_eval_steps", False)):
         summaries.append(
             compile_jax_eval_step_for_tpu(
@@ -315,6 +331,7 @@ def compile_jax_eval_step_for_tpu(
     output_dir: Path | None,
     compiler_options: dict[str, str],
 ) -> CompileSummary:
+    cache_glob = "jit_pure_sharded_eval_step-*-cache"
     print("Preparing abstract eval state...", file=sys.stderr, flush=True)
     abstract_start = time.perf_counter()
     graphdef, trainable_params, static_state, _opt_state, _optimizer = (
@@ -334,26 +351,32 @@ def compile_jax_eval_step_for_tpu(
         lowered = eval_step.lower(trainable_params, static_state, batch)
     lower_seconds = time.perf_counter() - lower_start
     print("Compiling eval...", file=sys.stderr, flush=True)
-    compile_start = time.perf_counter()
-    compiled = lowered.compile(compiler_options=compiler_options)
-    compile_seconds = time.perf_counter() - compile_start
+    compile_result = compile_lowered_or_reuse_persistent_cache(
+        lowered,
+        compiler_options,
+        label="eval",
+    )
+    compiled = compile_result.compiled
     executable_file = ""
     if output_dir is not None:
         executable_file = str(output_dir / "eval.compiled")
-        serialized, _, _ = serialize(compiled)
-        Path(executable_file).write_bytes(serialized)
-    return CompileSummary(
+        if compiled is not None:
+            write_serialized_executable(compiled, Path(executable_file))
+        elif not _nonempty_file(Path(executable_file)):
+            executable_file = ""
+    summary = CompileSummary(
         kind="eval",
         target=asdict(target),
         variant="full",
-        cache_glob="jit_pure_sharded_eval_step-*-cache",
+        cache_glob=cache_glob,
         abstract_state_seconds=abstract_state_seconds,
         lower_seconds=lower_seconds,
-        compile_seconds=compile_seconds,
-        memory_analysis=_memory_analysis_dict(compiled.memory_analysis()),
-        cost_analysis=_cost_analysis_summary(compiled.cost_analysis()),
+        compile_seconds=compile_result.compile_seconds,
+        memory_analysis=compiled_memory_analysis(compiled),
+        cost_analysis=compiled_cost_analysis(compiled),
         executable_file=executable_file,
     )
+    return summary
 
 
 def compile_jax_msg_probe_for_tpu(
@@ -455,6 +478,12 @@ def compile_jax_msg_probe_feature_step(
     output_dir: Path | None,
     compiler_options: dict[str, str],
 ) -> CompileSummary:
+    variant = "pair" if use_pair_features else "single"
+    cache_glob = (
+        "jit__extract_pair_features_jitted-*-cache"
+        if use_pair_features
+        else "jit__extract_single_features_jitted-*-cache"
+    )
     print("Preparing abstract MSG probe feature extractor...", file=sys.stderr, flush=True)
     abstract_start = time.perf_counter()
     model = nnx.eval_shape(lambda: build_model_from_config(config))
@@ -475,31 +504,33 @@ def compile_jax_msg_probe_feature_step(
     )
     lower_seconds = time.perf_counter() - lower_start
     print("Compiling MSG probe feature extractor...", file=sys.stderr, flush=True)
-    compile_start = time.perf_counter()
-    compiled = lowered.compile(compiler_options=compiler_options)
-    compile_seconds = time.perf_counter() - compile_start
+    compile_result = compile_lowered_or_reuse_persistent_cache(
+        lowered,
+        compiler_options,
+        label="MSG probe feature extractor",
+    )
+    compiled = compile_result.compiled
     executable_file = ""
     if output_dir is not None:
         stem = "msg_probe_pair_features" if use_pair_features else "msg_probe_features"
         executable_file = str(output_dir / f"{stem}.compiled")
-        serialized, _, _ = serialize(compiled)
-        Path(executable_file).write_bytes(serialized)
-    return CompileSummary(
+        if compiled is not None:
+            write_serialized_executable(compiled, Path(executable_file))
+        elif not _nonempty_file(Path(executable_file)):
+            executable_file = ""
+    summary = CompileSummary(
         kind="msg_probe_features",
         target=asdict(target),
-        variant="pair" if use_pair_features else "single",
-        cache_glob=(
-            "jit__extract_pair_features_jitted-*-cache"
-            if use_pair_features
-            else "jit__extract_single_features_jitted-*-cache"
-        ),
+        variant=variant,
+        cache_glob=cache_glob,
         abstract_state_seconds=abstract_state_seconds,
         lower_seconds=lower_seconds,
-        compile_seconds=compile_seconds,
-        memory_analysis=_memory_analysis_dict(compiled.memory_analysis()),
-        cost_analysis=_cost_analysis_summary(compiled.cost_analysis()),
+        compile_seconds=compile_result.compile_seconds,
+        memory_analysis=compiled_memory_analysis(compiled),
+        cost_analysis=compiled_cost_analysis(compiled),
         executable_file=executable_file,
     )
+    return summary
 
 
 def compile_jitted_probe_component(
@@ -518,26 +549,32 @@ def compile_jitted_probe_component(
     lowered = component.lower(*args)
     lower_seconds = time.perf_counter() - lower_start
     print(f"Compiling {kind}[{variant}]...", file=sys.stderr, flush=True)
-    compile_start = time.perf_counter()
-    compiled = lowered.compile(compiler_options=compiler_options)
-    compile_seconds = time.perf_counter() - compile_start
+    compile_result = compile_lowered_or_reuse_persistent_cache(
+        lowered,
+        compiler_options,
+        label=f"{kind}[{variant}]",
+    )
+    compiled = compile_result.compiled
     executable_file = ""
     if output_dir is not None:
         executable_file = str(output_dir / f"{kind}-{variant}.compiled")
-        serialized, _, _ = serialize(compiled)
-        Path(executable_file).write_bytes(serialized)
-    return CompileSummary(
+        if compiled is not None:
+            write_serialized_executable(compiled, Path(executable_file))
+        elif not _nonempty_file(Path(executable_file)):
+            executable_file = ""
+    summary = CompileSummary(
         kind=kind,
         target=asdict(target),
         variant=variant,
         cache_glob=cache_glob,
         abstract_state_seconds=0.0,
         lower_seconds=lower_seconds,
-        compile_seconds=compile_seconds,
-        memory_analysis=_memory_analysis_dict(compiled.memory_analysis()),
-        cost_analysis=_cost_analysis_summary(compiled.cost_analysis()),
+        compile_seconds=compile_result.compile_seconds,
+        memory_analysis=compiled_memory_analysis(compiled),
+        cost_analysis=compiled_cost_analysis(compiled),
         executable_file=executable_file,
     )
+    return summary
 
 
 def abstract_train_batch(
@@ -746,6 +783,87 @@ def parse_compiler_options(flags: str) -> dict[str, str]:
         assert key not in options
         options[key] = value
     return options
+
+
+def build_compiler_options(
+    compiler_options: dict[str, str] | None,
+) -> dict[str, str]:
+    return dict(compiler_options or {})
+
+
+def compile_lowered_or_reuse_persistent_cache(
+    lowered: Any,
+    compiler_options: dict[str, str],
+    *,
+    label: str,
+) -> LoweredCompileResult:
+    previous_raise_cache_errors = bool(jax.config.jax_raise_persistent_cache_errors)
+    jax.config.update("jax_raise_persistent_cache_errors", True)
+    compile_start = time.perf_counter()
+    try:
+        compiled = lowered.compile(compiler_options=compiler_options)
+    except Exception as exc:
+        compile_seconds = time.perf_counter() - compile_start
+        if _is_offline_topology_cache_hit_error(exc):
+            print(
+                f"Reusing JAX persistent cache entry for {label}; "
+                "offline topology compiler cannot deserialize it without a TPU Client.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return LoweredCompileResult(
+                compiled=None,
+                compile_seconds=compile_seconds,
+                reused_persistent_cache=True,
+            )
+        raise
+    finally:
+        jax.config.update(
+            "jax_raise_persistent_cache_errors",
+            previous_raise_cache_errors,
+        )
+    compile_seconds = time.perf_counter() - compile_start
+    return LoweredCompileResult(
+        compiled=compiled,
+        compile_seconds=compile_seconds,
+        reused_persistent_cache=False,
+    )
+
+
+def _is_offline_topology_cache_hit_error(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if OFFLINE_TOPOLOGY_CACHE_HIT_ERROR in str(current):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def serializable_compiled_object(compiled: Any) -> Any:
+    return getattr(compiled, "compiled", compiled)
+
+
+def write_serialized_executable(compiled: Any, path: Path) -> None:
+    serialized, _, _ = serialize(serializable_compiled_object(compiled))
+    path.write_bytes(serialized)
+
+
+def compiled_memory_analysis(compiled: Any | None) -> dict[str, int] | None:
+    if compiled is None:
+        return None
+    return _memory_analysis_dict(compiled.memory_analysis())
+
+
+def compiled_cost_analysis(compiled: Any | None) -> dict[str, float] | None:
+    if compiled is None:
+        return None
+    return _cost_analysis_summary(compiled.cost_analysis())
+
+
+def _nonempty_file(path: Path) -> bool:
+    return path.is_file() and path.stat().st_size > 0
 
 
 def _abstract_pure_train_state(

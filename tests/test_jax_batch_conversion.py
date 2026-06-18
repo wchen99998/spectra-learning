@@ -45,6 +45,7 @@ def test_stacked_micro_batches_stay_on_host_until_jax_conversion() -> None:
 def test_process_local_mesh_conversion_passes_host_data_to_jax(monkeypatch) -> None:
     from spectra_learning.training import pretrain_jax
 
+    pretrain_jax._jax_data_mesh_for_device_count.cache_clear()
     calls = []
 
     def fake_make_array_from_process_local_data(sharding, local_data):
@@ -72,6 +73,44 @@ def test_process_local_mesh_conversion_passes_host_data_to_jax(monkeypatch) -> N
     assert converted["peak_mz"] is batch["peak_mz"]
     assert len(calls) == 2
     assert all(isinstance(local_data, np.ndarray) for _, local_data in calls)
+
+
+def test_multihost_data_mesh_groups_devices_by_process(monkeypatch) -> None:
+    from spectra_learning.training import pretrain_jax
+
+    class FakeDevice:
+        def __init__(self, process_index: int, device_id: int):
+            self.process_index = process_index
+            self.id = device_id
+
+    devices = [
+        FakeDevice(0, 0),
+        FakeDevice(1, 1),
+        FakeDevice(2, 2),
+        FakeDevice(3, 3),
+        FakeDevice(0, 4),
+        FakeDevice(1, 5),
+        FakeDevice(2, 6),
+        FakeDevice(3, 7),
+    ]
+
+    monkeypatch.setattr(pretrain_jax.jax, "device_count", lambda: len(devices))
+    monkeypatch.setattr(pretrain_jax.jax, "process_count", lambda: 4)
+    monkeypatch.setattr(pretrain_jax.jax, "devices", lambda: devices)
+    pretrain_jax._jax_data_mesh_for_device_count.cache_clear()
+
+    mesh = pretrain_jax._jax_data_mesh_for_device_count(len(devices))
+
+    assert [device.process_index for device in mesh.devices] == [
+        0,
+        0,
+        1,
+        1,
+        2,
+        2,
+        3,
+        3,
+    ]
 
 
 def test_process_local_data_sharding_with_simulated_multi_process() -> None:

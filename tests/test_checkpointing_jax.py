@@ -501,6 +501,68 @@ def test_run_msg_probe_jax_uses_jax_dataset_and_optimizer(monkeypatch):
     ]
 
 
+def test_msg_probe_jax_masks_distributed_sampler_padding_rows():
+    from spectra_learning.probes.massspec import msg_probe_jax
+
+    def batch(value: float) -> dict[str, np.ndarray]:
+        return {
+            "peak_mz": np.asarray([[value, 0.0, 0.0]], dtype=np.float32),
+            "peak_intensity": np.asarray([[1.0, 0.0, 0.0]], dtype=np.float32),
+            "peak_valid_mask": np.asarray([[True, False, False]], dtype=bool),
+            "probe_valid_mol": np.asarray([True], dtype=bool),
+            "probe_fluorine": np.asarray([0.0], dtype=np.float32),
+            "probe_sulfur": np.asarray([1.0], dtype=np.float32),
+            "probe_maccs": np.asarray([[1, 0]], dtype=np.int32),
+        }
+
+    class FakeProbeData:
+        batch_size = 4
+
+        def __init__(self, size: int, batches: list[dict[str, np.ndarray]]) -> None:
+            self.info = {"massspec_mcebio_test_size": size}
+            self.batches = batches
+            self.calls = []
+
+        def build_dataset(self, split: str, **kwargs):
+            self.calls.append((split, kwargs))
+            return self.batches
+
+    probe_data = FakeProbeData(5, [batch(1.0), batch(2.0)])
+    batches = list(
+        msg_probe_jax.iter_massspec_probe_jax(
+            probe_data=probe_data,
+            split="massspec_mcebio_test",
+            seed=7,
+            peak_ordering="mz",
+            drop_remainder=False,
+            distributed_world_size=4,
+            distributed_rank=1,
+        )
+    )
+
+    assert probe_data.calls[0][1]["pad_distributed"] is True
+    assert [np.asarray(item["probe_valid_mol"]).tolist() for item in batches] == [
+        [True],
+        [False],
+    ]
+
+    empty_rank_data = FakeProbeData(3, [batch(3.0)])
+    empty_rank_batches = list(
+        msg_probe_jax.iter_massspec_probe_jax(
+            probe_data=empty_rank_data,
+            split="massspec_mcebio_test",
+            seed=7,
+            peak_ordering="mz",
+            drop_remainder=False,
+            distributed_world_size=4,
+            distributed_rank=3,
+        )
+    )
+
+    assert len(empty_rank_batches) == 1
+    assert np.asarray(empty_rank_batches[0]["probe_valid_mol"]).tolist() == [False]
+
+
 def test_msg_probe_jax_distributed_helpers_shard_steps_and_merge_states(monkeypatch):
     from spectra_learning.probes.massspec import msg_probe_jax
 

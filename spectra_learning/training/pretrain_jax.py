@@ -502,9 +502,27 @@ def _jax_data_mesh(config: Any | None = None) -> Mesh:
 @cache
 def _jax_data_mesh_for_device_count(device_count: int) -> Mesh:
     devices = (
-        None if device_count == jax.device_count() else jax.devices()[:device_count]
+        jax.devices()
+        if device_count == jax.device_count()
+        else jax.devices()[:device_count]
     )
-    return jax.make_mesh((device_count,), (JAX_DATA_AXIS,), devices=devices)
+    if jax.process_count() == 1:
+        return jax.make_mesh((device_count,), (JAX_DATA_AXIS,), devices=devices)
+    mesh_devices = _host_contiguous_mesh_devices(devices)
+    return Mesh(mesh_devices.reshape((device_count,)), (JAX_DATA_AXIS,))
+
+
+def _host_contiguous_mesh_devices(devices: list[Any]) -> np.ndarray:
+    indexed_devices = enumerate(devices)
+    return np.asarray(
+        [
+            device
+            for _index, device in sorted(
+                indexed_devices,
+                key=lambda item: (item[1].process_index, item[0]),
+            )
+        ]
+    )
 
 
 @nnx.jit

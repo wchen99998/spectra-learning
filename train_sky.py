@@ -18,6 +18,7 @@ from typing import Any
 import yaml
 
 from spectra_learning.config import load_config
+from spectra_learning.training.jax_runtime_flags import jax_tpu_xla_flags_string
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -609,7 +610,24 @@ def prepare_aot_cache(
         if ready and not force_precompile:
             logging.info("Reusing existing AOT cache: %s", cache_dir)
         else:
+            if force_precompile:
+                logging.info("Force precompile requested for AOT cache: %s", cache_dir)
+            else:
+                logging.info(
+                    "AOT cache manifest is not ready; invoking compile driver. "
+                    "The compile driver lets JAX derive content-keyed persistent "
+                    "cache hits from matching lowered computations and skips local "
+                    "topology recompilation when the only cache-read failure is "
+                    "missing TPU-client deserialization. Cache dir: %s",
+                    cache_dir,
+                )
             logging.info("Precompiling AOT cache: target=%s variant=%s", target, variant)
+            compile_env = dict(os.environ)
+            compile_env["LIBTPU_INIT_ARGS"] = jax_tpu_xla_flags_string()
+            logging.info(
+                "AOT compile LIBTPU_INIT_ARGS: %s",
+                compile_env["LIBTPU_INIT_ARGS"],
+            )
             run_command(
                 [
                     sys.executable,
@@ -630,6 +648,7 @@ def prepare_aot_cache(
                     overrides_json,
                 ],
                 cwd=REPO_ROOT,
+                env=compile_env,
             )
             run_command(
                 [
@@ -885,6 +904,7 @@ def main(argv: list[str] | None = None) -> None:
         "SPECTRA_TRAIN_OVERRIDES_JSON": train_overrides_json,
         "SPECTRA_JAX_PRECOMPILE_TRAIN_STEPS": args.jax_precompile_train_steps,
         "JAX_INITIALIZATION_TIMEOUT": "3600",
+        "LIBTPU_INIT_ARGS": jax_tpu_xla_flags_string(),
         "HF_HOME": "/tmp/huggingface",
         "WANDB_DIR": "/tmp/wandb",
         "UV_CACHE_DIR": "/tmp/uv-cache",

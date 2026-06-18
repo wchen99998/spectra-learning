@@ -1,8 +1,10 @@
 import os
+from types import SimpleNamespace
 
 import jax.numpy as jnp
 from ml_collections import config_dict
 import numpy as np
+import pytest
 
 from spectra_learning.training import tpu_compile
 from spectra_learning.training.jax_runtime_flags import (
@@ -21,9 +23,87 @@ def test_ct6e_standard_8t_target_is_single_host_v6e_8():
     assert target.process_count == 1
 
 
-def test_tpu_xla_flags_exclude_unsupported_overlap_tc_option():
-    assert "xla_tpu_overlap_compute_collective_tc" not in JAX_TPU_XLA_FLAGS
-    assert "xla_tpu_overlap_compute_collective_tc" not in jax_tpu_xla_flags_string()
+def test_default_compiler_options_do_not_import_libtpu_runtime_flags():
+    options = tpu_compile.build_compiler_options(None)
+
+    assert options == {}
+    assert "xla_enable_async_all_reduce" not in options
+    assert "xla_tpu_overlap_compute_collective_tc" not in options
+
+
+def test_explicit_compiler_options_are_preserved():
+    assert tpu_compile.build_compiler_options(
+        {"xla_tpu_num_sparse_cores_for_gather_offloading": "1"}
+    ) == {"xla_tpu_num_sparse_cores_for_gather_offloading": "1"}
+
+
+def test_serializable_compiled_object_unwraps_nnx_compiled_wrapper():
+    inner = object()
+    wrapped = SimpleNamespace(compiled=inner)
+
+    assert tpu_compile.serializable_compiled_object(wrapped) is inner
+    assert tpu_compile.serializable_compiled_object(inner) is inner
+
+
+def test_compile_lowered_reuses_offline_topology_cache_hit():
+    class FakeLowered:
+        def compile(self, *, compiler_options):
+            assert compiler_options == {"x": "1"}
+            raise RuntimeError(tpu_compile.OFFLINE_TOPOLOGY_CACHE_HIT_ERROR)
+
+    tpu_compile.jax.config.update("jax_raise_persistent_cache_errors", False)
+
+    result = tpu_compile.compile_lowered_or_reuse_persistent_cache(
+        FakeLowered(),
+        {"x": "1"},
+        label="pack20",
+    )
+
+    assert result.compiled is None
+    assert result.reused_persistent_cache is True
+    assert result.compile_seconds >= 0.0
+    assert tpu_compile.jax.config.jax_raise_persistent_cache_errors is False
+
+
+def test_compile_lowered_returns_compiled_object_and_restores_existing_cache_error_mode():
+    compiled = object()
+
+    class FakeLowered:
+        def compile(self, *, compiler_options):
+            assert compiler_options == {}
+            return compiled
+
+    tpu_compile.jax.config.update("jax_raise_persistent_cache_errors", True)
+    try:
+        result = tpu_compile.compile_lowered_or_reuse_persistent_cache(
+            FakeLowered(),
+            {},
+            label="pack20",
+        )
+
+        assert result.compiled is compiled
+        assert result.reused_persistent_cache is False
+        assert tpu_compile.jax.config.jax_raise_persistent_cache_errors is True
+    finally:
+        tpu_compile.jax.config.update("jax_raise_persistent_cache_errors", False)
+
+
+def test_compile_lowered_reraises_other_persistent_cache_errors():
+    class FakeLowered:
+        def compile(self, *, compiler_options):
+            del compiler_options
+            raise RuntimeError("cache entry failed checksum")
+
+    tpu_compile.jax.config.update("jax_raise_persistent_cache_errors", False)
+
+    with pytest.raises(RuntimeError, match="failed checksum"):
+        tpu_compile.compile_lowered_or_reuse_persistent_cache(
+            FakeLowered(),
+            {},
+            label="pack20",
+        )
+
+    assert tpu_compile.jax.config.jax_raise_persistent_cache_errors is False
 
 
 def test_v6e_8_alias_prefers_single_host_8t_layout():

@@ -669,7 +669,7 @@ def iter_massspec_probe_jax(
         shuffle=(split == "massspec_train") or sample_randomly,
         drop_remainder=drop_remainder,
         max_samples=max_samples,
-        pad_distributed=pad_distributed,
+        pad_distributed=pad_distributed or distributed_world_size > 1,
         distributed_world_size=distributed_world_size,
         distributed_rank=distributed_rank,
         output_format="numpy" if data_mesh is not None else "jax",
@@ -677,15 +677,60 @@ def iter_massspec_probe_jax(
     size = int(probe_data.info[f"{split}_size"])
     if max_samples is not None:
         size = min(size, max_samples)
+    sampler_local_size = size
+    valid_local_size = size
+    if distributed_world_size > 1:
+        sampler_local_size = (
+            size // distributed_world_size
+            if drop_remainder
+            else math.ceil(size / distributed_world_size)
+        )
+        valid_local_size = (
+            sampler_local_size
+            if drop_remainder
+            else _distributed_probe_shard_size(
+                size,
+                world_size=distributed_world_size,
+                rank=distributed_rank,
+            )
+        )
     seen = 0
+    valid_seen = 0
     for batch in dataset:
-        if seen >= size:
+        if seen >= sampler_local_size:
             break
-        take = min(int(batch["peak_mz"].shape[0]), size - seen)
+        take = min(int(batch["peak_mz"].shape[0]), sampler_local_size - seen)
         if take != int(batch["peak_mz"].shape[0]):
             batch = _slice_batch(batch, take)
+        valid_take = min(take, max(valid_local_size - valid_seen, 0))
+        if valid_take < take:
+            batch = _mask_probe_padding_rows(batch, valid_take)
         seen += take
+        valid_seen += valid_take
         yield _probe_batch_to_jax(batch, data_mesh=data_mesh)
+
+
+def _distributed_probe_shard_size(
+    size: int,
+    *,
+    world_size: int,
+    rank: int,
+) -> int:
+    if rank >= size:
+        return 0
+    return (size - 1 - rank) // world_size + 1
+
+
+def _mask_probe_padding_rows(batch: JaxBatch, valid_take: int) -> JaxBatch:
+    masked = dict(batch)
+    valid_mol = batch["probe_valid_mol"]
+    if isinstance(valid_mol, np.ndarray):
+        valid_mol = valid_mol.copy()
+        valid_mol[valid_take:] = False
+    else:
+        valid_mol = valid_mol.at[valid_take:].set(False)
+    masked["probe_valid_mol"] = valid_mol
+    return masked
 
 
 def _probe_batch_to_jax(
@@ -744,7 +789,11 @@ def probe_steps_per_epoch_jax(
     if max_samples is not None:
         size = min(size, max_samples)
     if distributed_world_size > 1:
-        size = math.ceil(size / distributed_world_size)
+        size = (
+            size // distributed_world_size
+            if drop_remainder
+            else math.ceil(size / distributed_world_size)
+        )
     batch_size = local_batch_size(int(probe_data.batch_size), distributed_world_size)
     return size // batch_size if drop_remainder else math.ceil(size / batch_size)
 

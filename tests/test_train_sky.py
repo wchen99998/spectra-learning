@@ -188,6 +188,8 @@ def test_dryrun_prints_generated_assets_without_token_lookup(
     assert f"SPECTRA_CONFIG: {MUON_CONFIG}" in output
     assert "SPECTRA_WORKDIR:" in output
     assert "SPECTRA_TRAIN_OVERRIDES_JSON:" in output
+    assert "LIBTPU_INIT_ARGS:" in output
+    assert "xla_enable_async_all_reduce" in output
     assert "===== AOT Overrides JSON =====" in output
     assert '"jax_mesh_devices":"16"' in output
     assert "===== SkyPilot Command =====" in output
