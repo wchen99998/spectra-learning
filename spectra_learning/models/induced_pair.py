@@ -17,6 +17,26 @@ class InducedPairState(NamedTuple):
     assignment: Float[Tensor, "*batch tokens inducing"]
 
 
+class TokenInducingAssignment(nn.Module):
+    def __init__(self, dim: int) -> None:
+        super().__init__()
+        self.dim = dim
+        self.wq = nn.Linear(dim, dim, bias=False)
+        self.wk = nn.Linear(dim, dim, bias=False)
+        nn.init.xavier_normal_(self.wq.weight)
+        nn.init.xavier_normal_(self.wk.weight)
+
+    def forward(
+        self,
+        token: Float[Tensor, "batch tokens dim"],
+        inducing: Float[Tensor, "batch inducing dim"],
+    ) -> Float[Tensor, "batch tokens inducing"]:
+        q = self.wq(token)
+        k = self.wk(inducing)
+        scores = torch.einsum("bid,bad->bia", q, k) * (1.0 / math.sqrt(self.dim))
+        return torch.softmax(scores.float(), dim=-1).to(dtype=q.dtype)
+
+
 class CrossAttentionWithWeights(nn.Module):
     def __init__(self, dim: int, num_heads: int) -> None:
         super().__init__()
@@ -210,6 +230,7 @@ def induced_pair_distogram_logits(
     state: InducedPairState,
     head: nn.Linear,
 ) -> Tensor:
-    latent_logits = head(state.pair)
+    sym_pair = state.pair + state.pair.transpose(-3, -2)
+    latent_logits = head(sym_pair)
     left = torch.einsum("...ia,...abk->...ibk", state.assignment, latent_logits)
     return torch.einsum("...ibk,...jb->...ijk", left, state.assignment)

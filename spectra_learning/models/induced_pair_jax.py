@@ -18,6 +18,41 @@ class InducedPairState(NamedTuple):
     assignment: Array
 
 
+class TokenInducingAssignment(nnx.Module):
+    def __init__(
+        self,
+        dim: int,
+        *,
+        compute_dtype: object = jnp.float32,
+    ) -> None:
+        self.dim = dim
+        self.compute_dtype = compute_dtype
+        self.matmul_precision = (
+            jax.lax.Precision.DEFAULT if compute_dtype == jnp.bfloat16 else None
+        )
+        self.wq = Linear(dim, dim, bias=False, compute_dtype=compute_dtype)
+        self.wk = Linear(dim, dim, bias=False, compute_dtype=compute_dtype)
+
+    def __call__(self, token: Array, inducing: Array) -> Array:
+        q = self.wq(token)
+        k = self.wk(inducing)
+        scores = jnp.einsum(
+            "bid,bad->bia",
+            q,
+            k,
+            precision=self.matmul_precision,
+        ) / math.sqrt(self.dim)
+        return jax.nn.softmax(scores.astype(jnp.float32), axis=-1).astype(q.dtype)
+
+    def load_torch_state_dict(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        prefix: str,
+    ) -> None:
+        self.wq.load_torch_state_dict(state_dict, f"{prefix}.wq")
+        self.wk.load_torch_state_dict(state_dict, f"{prefix}.wk")
+
+
 class CrossAttentionWithWeights(nnx.Module):
     def __init__(
         self,
@@ -265,6 +300,7 @@ def induced_pair_to_dense_pair(state: InducedPairState) -> Array:
 
 
 def induced_pair_distogram_logits(state: InducedPairState, head) -> Array:
-    latent_logits = head(state.pair)
+    sym_pair = state.pair + jnp.swapaxes(state.pair, -3, -2)
+    latent_logits = head(sym_pair)
     left = jnp.einsum("...ia,...abk->...ibk", state.assignment, latent_logits)
     return jnp.einsum("...ibk,...jb->...ijk", left, state.assignment)

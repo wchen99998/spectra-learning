@@ -397,6 +397,112 @@ class PairMixerEncoderTests(unittest.TestCase):
         )
         torch.testing.assert_close(pair[~pair_mask], torch.zeros_like(pair[~pair_mask]))
 
+    def test_induced_pair_initialization_uses_dense_pair_features(self):
+        model = self._build_model(
+            encoder_num_layers=0,
+            pairmixer_block_type="induced",
+            induced_pair_num_inducing=3,
+            pairmixer_pair_dim=16,
+        )
+        model.eval()
+        peak_mz = torch.tensor([[0.10, 0.20, 0.35, 0.50, 0.65, 0.80]])
+        peak_intensity = torch.tensor([[1.0, 0.7, 0.5, 0.2, 0.1, 0.05]])
+        valid_mask = torch.ones_like(peak_mz, dtype=torch.bool)
+        changed_mz = peak_mz.clone()
+        changed_mz[:, 1] = 0.45
+
+        with torch.no_grad():
+            _, base_pair = model.encoder.forward_with_pair(
+                peak_mz,
+                peak_intensity,
+                valid_mask=valid_mask,
+                visible_mask=valid_mask,
+            )
+            _, changed_pair = model.encoder.forward_with_pair(
+                changed_mz,
+                peak_intensity,
+                valid_mask=valid_mask,
+                visible_mask=valid_mask,
+            )
+
+        self.assertIsInstance(base_pair, InducedPairState)
+        self.assertIsInstance(changed_pair, InducedPairState)
+        self.assertGreater(
+            (base_pair.pair - changed_pair.pair).abs().max().item(),
+            1e-5,
+        )
+
+    def test_induced_pair_initialization_uses_visible_mask_for_dense_pairs(self):
+        model = self._build_model(
+            encoder_num_layers=0,
+            pairmixer_block_type="induced",
+            induced_pair_num_inducing=3,
+            pairmixer_pair_dim=16,
+        )
+        model.eval()
+        peak_mz = torch.tensor([[0.10, 0.20, 0.35, 0.50, 0.65, 0.80]])
+        peak_intensity = torch.tensor([[1.0, 0.7, 0.5, 0.2, 0.1, 0.05]])
+        valid_mask = torch.ones_like(peak_mz, dtype=torch.bool)
+        visible_mask = torch.tensor([[True, True, True, False, False, False]])
+        changed_mz = peak_mz.clone()
+        changed_intensity = peak_intensity.clone()
+        changed_mz[:, 3:] = torch.tensor([[0.90, 0.95, 0.99]])
+        changed_intensity[:, 3:] = torch.tensor([[0.9, 0.8, 0.7]])
+
+        with torch.no_grad():
+            _, base_pair = model.encoder.forward_with_pair(
+                peak_mz,
+                peak_intensity,
+                valid_mask=valid_mask,
+                visible_mask=visible_mask,
+            )
+            _, changed_pair = model.encoder.forward_with_pair(
+                changed_mz,
+                changed_intensity,
+                valid_mask=valid_mask,
+                visible_mask=visible_mask,
+            )
+
+        self.assertIsInstance(base_pair, InducedPairState)
+        self.assertIsInstance(changed_pair, InducedPairState)
+        torch.testing.assert_close(base_pair.pair, changed_pair.pair)
+        torch.testing.assert_close(base_pair.assignment, changed_pair.assignment)
+
+    def test_induced_pair_initialization_uses_precursor_mz(self):
+        model = self._build_model(
+            encoder_num_layers=0,
+            pairmixer_block_type="induced",
+            induced_pair_num_inducing=3,
+            pairmixer_pair_dim=16,
+        )
+        model.eval()
+        peak_mz = torch.tensor([[0.10, 0.20, 0.35, 0.50, 0.65, 0.80]])
+        peak_intensity = torch.tensor([[1.0, 0.7, 0.5, 0.2, 0.1, 0.05]])
+        valid_mask = torch.ones_like(peak_mz, dtype=torch.bool)
+
+        with torch.no_grad():
+            _, low_precursor_pair = model.encoder.forward_with_pair(
+                peak_mz,
+                peak_intensity,
+                valid_mask=valid_mask,
+                visible_mask=valid_mask,
+                precursor_mz=torch.tensor([0.9]),
+            )
+            _, high_precursor_pair = model.encoder.forward_with_pair(
+                peak_mz,
+                peak_intensity,
+                valid_mask=valid_mask,
+                visible_mask=valid_mask,
+                precursor_mz=torch.tensor([1.3]),
+            )
+
+        self.assertIsInstance(low_precursor_pair, InducedPairState)
+        self.assertIsInstance(high_precursor_pair, InducedPairState)
+        self.assertGreater(
+            (low_precursor_pair.pair - high_precursor_pair.pair).abs().max().item(),
+            1e-5,
+        )
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for compile test")
     def test_cuda_pairmixer_works_with_torch_compile(self):
         model = self._build_model(
@@ -722,7 +828,7 @@ class BlockJEPATests(unittest.TestCase):
             latent_pair,
             assignment,
         )
-        latent_logits = model.distogram_head(latent_pair)
+        latent_logits = model.distogram_head(latent_pair + latent_pair.transpose(-3, -2))
 
         logits = induced_pair_distogram_logits(state, model.distogram_head)
         expected = torch.einsum(
