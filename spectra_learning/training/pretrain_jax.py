@@ -848,9 +848,12 @@ def train_and_evaluate_jax(
     if is_main_process:
         storage_mkdir(checkpoint_dir)
     multihost_utils.sync_global_devices("spectra_learning_jax_checkpoint_dir_ready")
+    jax_checkpoint_max_to_keep = _config_get(config, "jax_checkpoint_max_to_keep", 5)
+    if jax_checkpoint_max_to_keep is not None:
+        jax_checkpoint_max_to_keep = int(jax_checkpoint_max_to_keep)
     checkpoint_manager = build_jax_checkpoint_manager(
         checkpoint_dir,
-        max_to_keep=int(_config_get(config, "jax_checkpoint_max_to_keep", 5)),
+        max_to_keep=jax_checkpoint_max_to_keep,
         enable_async_checkpointing=bool(
             _config_get(config, "jax_enable_async_checkpointing", True)
         ),

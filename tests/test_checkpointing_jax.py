@@ -156,6 +156,19 @@ def test_jax_checkpoint_roundtrip_preserves_values_and_sharding(tmp_path):
         np.testing.assert_array_equal(np.asarray(expected), np.asarray(actual))
 
 
+def test_jax_checkpoint_manager_keeps_all_steps_when_max_to_keep_is_none(tmp_path):
+    manager = build_jax_checkpoint_manager(
+        tmp_path / "checkpoints",
+        max_to_keep=None,
+        enable_async_checkpointing=False,
+    )
+    for step in (1, 2, 3):
+        save_jax_training_state(manager, step, {"value": jnp.asarray(step)})
+
+    assert manager.all_steps() == [1, 2, 3]
+    manager.close()
+
+
 def test_jax_checkpoint_roundtrip_restores_model_and_optimizer_state(tmp_path):
     kwargs = _tiny_mae_kwargs()
     cfg = config_dict.ConfigDict(kwargs)
@@ -219,6 +232,7 @@ def test_jax_training_loop_saves_periodically_and_resumes(tmp_path):
     cfg.learning_rate = 1e-3
     cfg.checkpoint_every_steps = 2
     cfg.log_every_n_steps = 0
+    cfg.jax_precompile_train_steps = False
     cfg.msg_probe_every_n_steps = -1
     batch = _tiny_numpy_batch()
 
@@ -286,6 +300,7 @@ def test_jax_training_loop_pure_optax_saves_and_resumes(tmp_path):
     cfg.gradient_accumulation_steps = 2
     cfg.checkpoint_every_steps = 2
     cfg.log_every_n_steps = 0
+    cfg.jax_precompile_train_steps = False
     cfg.msg_probe_every_n_steps = -1
     batch = _tiny_numpy_batch()
 

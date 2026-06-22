@@ -244,6 +244,7 @@ def test_dryrun_prints_generated_assets_without_token_lookup(
     assert "xla_enable_async_all_reduce" in output
     assert "===== AOT Overrides JSON =====" in output
     assert '"jax_mesh_devices":"16"' in output
+    assert '"jax_checkpoint_max_to_keep":null' in output
     assert "===== SkyPilot Command =====" in output
     assert "sky launch" in output
     assert "--cluster spectra-dryrun-assets" in output

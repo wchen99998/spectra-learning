@@ -8,11 +8,13 @@ import logging
 import math
 import os
 import shutil
+import time
 from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable, NamedTuple, cast
+from typing import Any, Iterable, Mapping, NamedTuple, cast
 
 import numpy as np
 import pyarrow as pa
@@ -54,19 +56,102 @@ _MORGAN_GENERATOR = rdFingerprintGenerator.GetMorganGenerator(
 )
 
 DEFAULT_NIST_MGF_URI = "gs://main-novogaia-bucket/MS/Datasets_with_structure/nist20/hr_msms_nist.mgf"
+DEFAULT_LOCAL_NIST_MGF_PATH = Path("data/raw/hr_msms_nist.mgf")
 DEFAULT_MCEBIO_MGF_PATH = Path(
     "data/massive_msv000094528/source/20240411_mcebio_library_pos_all_lib_MS2.mgf"
 )
 NIST_MURCKO_METADATA_VERSION = 2
 NIST_MURCKO_HF_REPO = MSMS_EVALUATION_HF_REPO
+NIST_DISJOINT_PROBE_RETRIEVAL_HF_REPO = (
+    "wchen99998/msms_nist_disjoint_probe_retrieval_20260622"
+)
 NIST_MURCKO_PREPARED_SUBDIR = "nist_murcko_probe"
 MCEBIO_MURCKO_PREPARED_SUBDIR = "mcebio_murcko_probe"
+NIST_DISJOINT_ONLINE_PROBE_SUBDIR = "nist_100k_online_probe"
+NIST_DISJOINT_RETRIEVAL_POOL_SUBDIR = "nist_retrieval_pool"
+NIST_10PPM_RETRIEVAL_SUBDIR = "nist_same_inchi14_10ppm_retrieval"
+NIST_MCES_RETRIEVAL_SUBDIR = "nist_mces_analog_retrieval"
 NIST_MURCKO_ARTIFACT_FORMAT = "nist_murcko_parquet_v2"
+NIST_DISJOINT_PROBE_RETRIEVAL_ARTIFACT_FORMAT = (
+    "nist_disjoint_probe_retrieval_collection_v1"
+)
 RAW_SUBDIR = "raw"
 SPLITS = ("train", "val", "test")
 STANDALONE_SPLIT = "all"
+
+
+def _write_nist_disjoint_probe_retrieval_readme(
+    path: Path,
+    *,
+    metadata: Mapping[str, Any],
+) -> None:
+    """Write the Hugging Face dataset card for the fixed benchmark artifact."""
+    online = metadata["online_probe"]
+    retrieval = metadata["retrieval_pool"]
+    same_inchi = metadata["same_inchi14_10ppm"]
+    mces = metadata["mces_analog"]
+    disjointness = metadata["disjointness"]
+    text = f"""---
+pretty_name: NIST MS/MS Murcko-Disjoint Probe and Retrieval Benchmark
+task_categories:
+- feature-extraction
+tags:
+- mass-spectrometry
+- msms
+- nist
+- murcko
+- molecular-retrieval
+---
+
+# NIST MS/MS Murcko-Disjoint Probe and Retrieval Benchmark
+
+This dataset packages one fixed online-probe task and two fixed retrieval-task
+pair tables derived from the raw NIST high-resolution MS/MS MGF staged in
+`{metadata["source_raw_file"]}`.
+
+## Layout
+
+- `{online["subdir"]}/`: train/val/test Parquets built from an exact
+  {online["selected_spectra_before_split_processing"]:,}-spectrum sample without
+  replacement, then processed by the existing online-probe Murcko split logic.
+  Produced rows: train={online["train_size"]:,}, val={online["val_size"]:,},
+  test={online["test_size"]:,}.
+- `{retrieval["subdir"]}/all.parquet`: the retrieval spectrum pool after
+  excluding every Murcko histogram key selected for the online probe.
+  Rows: {retrieval["all_size"]:,}.
+- `{same_inchi["subdir"]}/pairs.parquet`: balanced 10 ppm same-InChI14 AUROC
+  pairs. Positive pairs: {same_inchi["positive_pairs"]:,}. Negative pairs:
+  {same_inchi["negative_pairs"]:,}.
+- `{mces["subdir"]}/pairs.parquet`: MCES analog-search pairs with precomputed
+  MCES distances and binary labels for thresholds 0 through
+  {mces["mces_threshold"]}. Pairs: {mces["num_pairs"]:,}.
+
+## Disjointness
+
+The online-probe and retrieval-pool spectra are disjoint by Murcko histogram,
+not merely by row id. Selected online-probe Murcko histogram keys:
+{disjointness["online_probe_selected_murcko_hist_keys"]:,}. Retrieval-pool
+Murcko histogram keys: {disjointness["retrieval_pool_murcko_hist_keys"]:,}.
+The recorded overlap count is
+{disjointness["online_probe_retrieval_murcko_hist_overlap"]}.
+
+See `metadata.json` and each subdirectory `metadata.json` for the full schema,
+sampling parameters, and pair-generation metadata. Downstream use of the staged
+NIST source data should comply with the original NIST terms.
+"""
+    path.write_text(text, encoding="utf-8")
 DEFAULT_NIST_ALLOWED_ADDUCTS = ("[M+H]+",)
 DEFAULT_NIST_SPLIT_SIZE_CAPS = {"train": 100_000, "val": 25_000, "test": 25_000}
+DEFAULT_ONLINE_PROBE_SAMPLE_SIZE = 100_000
+DEFAULT_10PPM_RETRIEVAL_PAIRS_PER_CLASS = 100_000
+DEFAULT_10PPM_RETRIEVAL_PPM = 10.0
+DEFAULT_MCES_RETRIEVAL_PAIRS = 1_000
+DEFAULT_MCES_RETRIEVAL_BIN_SIZE = 0.025
+DEFAULT_RETRIEVAL_ADDUCT = "[M+H]+"
+MCES_THRESHOLD = 7
+MCES_REPORTED_THRESHOLDS = tuple(range(MCES_THRESHOLD + 1))
+SAME_INCHI_10PPM_PAIR_SAMPLING = "same_inchi14_10ppm_balanced_binary_pairs_v1"
+MCES_ANALOG_PAIR_SAMPLING = "morgan_tanimoto_balanced_mces_pairs_v1"
 SPECTRAL_LSH_MZ_BIN_WIDTH = 0.05
 SPECTRAL_LSH_INTENSITY_BINS = 10
 SPECTRAL_LSH_NUM_HASHES = 32
@@ -133,6 +218,7 @@ class DatasetSpec:
 
 @dataclass(frozen=True)
 class FirstPassRow:
+    spectrum_index: int
     canonical_smiles: str
     murcko_hist_key: str
     murcko_hist_json: str
@@ -142,6 +228,19 @@ class FirstPassRow:
 class FullRow:
     row: dict[str, Any]
     morgan: np.ndarray
+
+
+@dataclass(frozen=True)
+class RetrievalPoolRow:
+    """Minimal row metadata needed to write fixed retrieval pair artifacts."""
+
+    row_index: int
+    spectrum_index: int
+    canonical_smiles: str
+    precursor_mz: float
+    adduct: str
+    inchi14: str
+    murcko_hist_key: str
 
 
 class MurckoFluorineData(NamedTuple):
@@ -1317,10 +1416,21 @@ def _mol_from_record(record: dict[str, Any]) -> tuple[Chem.Mol, str] | None:
     return mol, canonical
 
 
+@lru_cache(maxsize=500_000)
+def _inchi14_from_smiles(smiles: str) -> str:
+    mol = Chem.MolFromSmiles(str(smiles))
+    if mol is None:
+        raise ValueError(f"Invalid SMILES in retrieval pool: {smiles!r}")
+    inchikey = Chem.MolToInchiKey(mol)
+    if not inchikey:
+        raise ValueError(f"Could not compute InChIKey for retrieval-pool SMILES {smiles!r}")
+    return inchikey.split("-")[0]
+
+
 def _first_pass_task(
     payload: tuple[int, dict[str, Any], float, float, tuple[str, ...] | None],
 ) -> FirstPassRow | None:
-    _, record, min_precursor_mz, max_precursor_mz, allowed_adducts = payload
+    spectrum_index, record, min_precursor_mz, max_precursor_mz, allowed_adducts = payload
     if not _record_matches_adducts(record, allowed_adducts):
         return None
     precursor = _precursor_mz(record)
@@ -1334,6 +1444,7 @@ def _first_pass_task(
     mol, canonical = mol_payload
     hist = _murcko_hist(mol)
     return FirstPassRow(
+        spectrum_index=int(spectrum_index),
         canonical_smiles=canonical,
         murcko_hist_key=_hist_key(hist),
         murcko_hist_json=json.dumps(hist, sort_keys=True),
@@ -1711,6 +1822,762 @@ def _normalize_split_size_caps(
     return caps
 
 
+def _select_disjoint_probe_indices(
+    rows: list[FirstPassRow],
+    *,
+    target_size: int,
+    seed: int,
+) -> tuple[set[int], set[str], dict[str, Any]]:
+    """Select exact probe spectra and reserve their Murcko histograms.
+
+    The selected spectra are sampled without replacement from a set of Murcko
+    histogram keys chosen with the same related-histogram grouping used by the
+    existing Murcko split. Any non-selected spectra sharing those histogram keys
+    are deliberately excluded from the retrieval pool so the pool is chemically
+    disjoint from the online-probe sample by Murcko histogram.
+    """
+    if target_size <= 0:
+        raise ValueError(f"target_size must be positive, got {target_size}.")
+    if len(rows) < target_size:
+        raise ValueError(
+            f"Cannot sample {target_size} probe spectra from only {len(rows)} eligible rows."
+        )
+
+    hist_by_key: dict[str, dict[str, int]] = {}
+    hist_counts: dict[str, int] = defaultdict(int)
+    spectrum_indices_by_hist: dict[str, list[int]] = defaultdict(list)
+    for row in rows:
+        hist_by_key[row.murcko_hist_key] = json.loads(row.murcko_hist_json)
+        hist_counts[row.murcko_hist_key] += 1
+        spectrum_indices_by_hist[row.murcko_hist_key].append(int(row.spectrum_index))
+
+    available = set(hist_counts)
+    if len(available) < 2:
+        raise ValueError(
+            "Disjoint probe/retrieval construction requires at least two Murcko histogram keys."
+        )
+    selected_hist_keys = _select_holdout_hist_keys(
+        available_keys=available,
+        hist_counts=hist_counts,
+        hist_by_key=hist_by_key,
+        target_size=target_size,
+        seed=seed,
+        min_remaining_keys=1,
+    )
+    if not selected_hist_keys:
+        raise ValueError("Failed to select any Murcko histogram keys for the probe sample.")
+
+    candidate_indices = np.asarray(
+        sorted(
+            spectrum_index
+            for key in selected_hist_keys
+            for spectrum_index in spectrum_indices_by_hist[key]
+        ),
+        dtype=np.int64,
+    )
+    if len(candidate_indices) < target_size:
+        raise ValueError(
+            "Selected Murcko histogram keys contain too few spectra for the requested "
+            f"probe sample: {len(candidate_indices)} < {target_size}."
+        )
+
+    rng = np.random.default_rng(seed + 101)
+    selected_positions = rng.choice(
+        np.arange(len(candidate_indices), dtype=np.int64),
+        size=target_size,
+        replace=False,
+    )
+    selected_indices = {int(value) for value in candidate_indices[selected_positions]}
+    retrieval_hist_keys = available - selected_hist_keys
+    retrieval_candidate_count = sum(hist_counts[key] for key in retrieval_hist_keys)
+    selected_hist_candidate_count = int(len(candidate_indices))
+    metadata = {
+        "sampling": "murcko_hist_disjoint_without_replacement_v1",
+        "seed": int(seed),
+        "target_spectra": int(target_size),
+        "selected_spectra": int(len(selected_indices)),
+        "total_eligible_spectra": int(len(rows)),
+        "total_murcko_hist_keys": int(len(available)),
+        "selected_murcko_hist_keys": int(len(selected_hist_keys)),
+        "retrieval_murcko_hist_keys": int(len(retrieval_hist_keys)),
+        "selected_hist_candidate_spectra": selected_hist_candidate_count,
+        "retrieval_candidate_spectra": int(retrieval_candidate_count),
+        "dropped_selected_hist_spectra": int(selected_hist_candidate_count - target_size),
+        "murcko_hist_disjoint_from_retrieval": True,
+        "selected_murcko_hist_key_values": sorted(selected_hist_keys),
+    }
+    return selected_indices, selected_hist_keys, metadata
+
+
+def _build_subset_murcko_mgf_dataset(
+    *,
+    mgf_path: Path,
+    output_dir: Path,
+    source_uri: str,
+    fold_by_smiles: dict[str, str],
+    split_metadata: dict[str, Any],
+    active_splits: tuple[str, ...],
+    min_precursor_mz: float,
+    max_precursor_mz: float,
+    num_peaks_input: int,
+    num_workers: int,
+    batch_size: int,
+    parquet_batch_size: int,
+    allowed_adducts: tuple[str, ...] | None,
+    split_size_caps: dict[str, int] | None = None,
+    spectral_lsh_threshold: float = 0.90,
+    include_spectrum_indices: set[int] | None = None,
+    include_murcko_hist_keys: set[str] | None = None,
+    extra_metadata: dict[str, Any] | None = None,
+    collect_retrieval_rows: bool = False,
+) -> tuple[dict[str, Any], list[RetrievalPoolRow]]:
+    unique_smiles_by_split = _unique_smiles_by_split(fold_by_smiles, active_splits)
+    normalized_split_size_caps = _normalize_split_size_caps(
+        split_size_caps,
+        unique_smiles_by_split,
+        active_splits,
+    )
+    lsh_thinner = (
+        SpectralLshThinner(
+            splits=active_splits,
+            threshold=spectral_lsh_threshold,
+            split_size_caps=normalized_split_size_caps,
+            unique_smiles_by_split=unique_smiles_by_split,
+        )
+        if normalized_split_size_caps is not None
+        else None
+    )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    writers: dict[str, pq.ParquetWriter] = {}
+    buffers = {split: [] for split in active_splits}
+    morgan_buffers = {split: [] for split in active_splits}
+    morgan_files: dict[str, list[str]] = {split: [] for split in active_splits}
+    morgan_lengths: dict[str, list[int]] = {split: [] for split in active_splits}
+    split_counts: Counter[str] = Counter()
+    pre_lsh_split_counts: Counter[str] = Counter()
+    fluorine_counts: Counter[str] = Counter()
+    sulfur_counts: Counter[str] = Counter()
+    adducts: set[str] = set()
+    instruments: set[str] = set()
+    retrieval_rows: list[RetrievalPoolRow] = []
+    retrieval_row_index = 0
+
+    try:
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            for batch in _batched_mgf_tasks(
+                mgf_path,
+                min_precursor_mz=min_precursor_mz,
+                max_precursor_mz=max_precursor_mz,
+                batch_size=batch_size,
+            ):
+                full_batch = [
+                    (
+                        spectrum_index,
+                        record,
+                        min_mz,
+                        max_mz,
+                        num_peaks_input,
+                        allowed_adducts,
+                    )
+                    for spectrum_index, record, min_mz, max_mz in batch
+                    if include_spectrum_indices is None
+                    or int(spectrum_index) in include_spectrum_indices
+                ]
+                if not full_batch:
+                    continue
+                for item in tqdm(
+                    executor.map(
+                        _full_pass_task,
+                        full_batch,
+                        chunksize=max(1, batch_size // num_workers),
+                    ),
+                    total=len(full_batch),
+                    desc=f"{mgf_path.name} write subset",
+                    leave=False,
+                ):
+                    if item is None:
+                        continue
+                    row = item.row
+                    if (
+                        include_murcko_hist_keys is not None
+                        and row["murcko_hist_key"] not in include_murcko_hist_keys
+                    ):
+                        continue
+                    split = fold_by_smiles.get(row["canonical_smiles"])
+                    if split not in active_splits:
+                        continue
+                    row["fold"] = split
+                    if lsh_thinner is None:
+                        pre_lsh_split_counts[split] += 1
+                    elif not lsh_thinner.keep(split, row):
+                        continue
+                    if collect_retrieval_rows:
+                        retrieval_rows.append(
+                            RetrievalPoolRow(
+                                row_index=retrieval_row_index,
+                                spectrum_index=int(row["spectrum_index"]),
+                                canonical_smiles=str(row["canonical_smiles"]),
+                                precursor_mz=float(row["precursor_mz"]),
+                                adduct=str(row["adduct"]),
+                                inchi14=_inchi14_from_smiles(str(row["canonical_smiles"])),
+                                murcko_hist_key=str(row["murcko_hist_key"]),
+                            )
+                        )
+                        retrieval_row_index += 1
+                    buffers[split].append(row)
+                    morgan_buffers[split].append(item.morgan)
+                    split_counts[split] += 1
+                    fluorine_counts[split] += int(row["has_fluorine"])
+                    sulfur_counts[split] += int(row["has_sulfur"])
+                    adducts.add(str(row["adduct"]))
+                    instruments.add(str(row["instrument_type"]))
+                    if len(buffers[split]) >= parquet_batch_size:
+                        _flush_split(
+                            split=split,
+                            output_dir=output_dir,
+                            rows=buffers[split],
+                            morgans=morgan_buffers[split],
+                            writers=writers,
+                            morgan_files=morgan_files,
+                            morgan_lengths=morgan_lengths,
+                        )
+        for split in active_splits:
+            _flush_split(
+                split=split,
+                output_dir=output_dir,
+                rows=buffers[split],
+                morgans=morgan_buffers[split],
+                writers=writers,
+                morgan_files=morgan_files,
+                morgan_lengths=morgan_lengths,
+            )
+    finally:
+        for writer in writers.values():
+            writer.close()
+
+    adduct_vocab = {value: idx for idx, value in enumerate(sorted(adducts))}
+    instrument_type_vocab = {value: idx for idx, value in enumerate(sorted(instruments))}
+    if lsh_thinner is not None:
+        pre_lsh_split_counts = lsh_thinner.pre_lsh_counts
+        lsh_removed_counts = lsh_thinner.removed_counts
+    else:
+        lsh_removed_counts = Counter()
+    metadata: dict[str, Any] = {
+        "metadata_version": NIST_MURCKO_METADATA_VERSION,
+        "artifact_format": NIST_MURCKO_ARTIFACT_FORMAT,
+        "storage_format": "parquet",
+        "source_uri": source_uri,
+        "source_raw_file": f"{RAW_SUBDIR}/{mgf_path.name}",
+        "splits": list(active_splits),
+        "num_peaks_input": num_peaks_input,
+        "min_precursor_mz": min_precursor_mz,
+        "max_precursor_mz": max_precursor_mz,
+        "allowed_adducts": list(allowed_adducts) if allowed_adducts is not None else None,
+        "adduct_vocab": adduct_vocab,
+        "instrument_type_vocab": instrument_type_vocab,
+        "dreams_dim": 0,
+        "chemical_property_columns": list(CHEMICAL_PROPERTY_COLUMNS),
+        "probe_regression_target_keys": list(REGRESSION_TARGET_KEYS),
+        "probe_maccs_bits": MACCS_FINGERPRINT_BITS,
+        "probe_maccs_column": "maccs_166",
+        "probe_morgan_bits": MORGAN_PROBE_FINGERPRINT_BITS,
+        "probe_morgan_radius": MORGAN_PROBE_FINGERPRINT_RADIUS,
+        "morgan_auxiliary_available": True,
+        "morgan_auxiliary_files": morgan_files,
+        "morgan_auxiliary_lengths": morgan_lengths,
+        "pairwise_alignment_available": False,
+        "pairwise_alignment_num_pairs": 0,
+        "pairwise_alignment_num_endpoints": 0,
+        "spectral_lsh_enabled": lsh_thinner is not None,
+        "spectral_lsh_threshold": spectral_lsh_threshold,
+        "split_size_caps": normalized_split_size_caps,
+        "pre_lsh_split_sizes": {
+            split: pre_lsh_split_counts[split] for split in active_splits
+        },
+        "lsh_removed_by_split": {
+            split: lsh_removed_counts[split] for split in active_splits
+        },
+        "unique_smiles_by_split": {
+            split: len(unique_smiles_by_split[split]) for split in active_splits
+        },
+    }
+    metadata.update(split_metadata)
+    if extra_metadata is not None:
+        metadata.update(extra_metadata)
+    for split in active_splits:
+        metadata[f"{split}_files"] = [f"{split}.parquet"] if split_counts[split] else []
+        metadata[f"{split}_lengths"] = [split_counts[split]] if split_counts[split] else []
+        metadata[f"{split}_size"] = split_counts[split]
+        metadata[f"{split}_positive"] = fluorine_counts[split]
+        metadata[f"{split}_sulfur_positive"] = sulfur_counts[split]
+
+    (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True))
+    return metadata, retrieval_rows
+
+
+def _sample_mz_window_balanced_inchi_pairs(
+    precursor_mz: np.ndarray,
+    inchi14: list[str],
+    *,
+    pairs_per_class: int,
+    ppm: float,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Sample fixed 10 ppm same-InChI positives and hard negatives.
+
+    Positives share the same InChIKey first block. Negatives have different
+    first blocks but are still inside the same precursor-m/z tolerance, making
+    them the hard negatives used for the AUROC retrieval task.
+    """
+    precursor_mz = np.asarray(precursor_mz, dtype=np.float64)
+    if len(precursor_mz) != len(inchi14):
+        raise ValueError(f"precursor/InChI length mismatch: {len(precursor_mz)} vs {len(inchi14)}")
+    if pairs_per_class < 0:
+        raise ValueError(f"pairs_per_class must be non-negative, got {pairs_per_class}.")
+    if ppm <= 0.0:
+        raise ValueError(f"ppm must be positive, got {ppm}.")
+
+    rng = np.random.default_rng(seed)
+    finite_rows = np.flatnonzero(np.isfinite(precursor_mz) & (precursor_mz > 0.0)).astype(np.int64)
+    order = finite_rows[np.argsort(precursor_mz[finite_rows], kind="mergesort")]
+    sorted_mz = precursor_mz[order]
+    key_arr = np.asarray(inchi14, dtype=object)
+
+    positive_groups: dict[str, list[tuple[int, int]]] = {}
+    negative_groups: dict[str, list[tuple[int, int]]] = {}
+    for sorted_pos, anchor in enumerate(order):
+        anchor = int(anchor)
+        mz = float(sorted_mz[sorted_pos])
+        delta = mz * ppm * 1e-6
+        hi = np.searchsorted(sorted_mz, mz + delta, side="right")
+        for candidate in order[sorted_pos + 1 : hi]:
+            candidate = int(candidate)
+            pair = _ordered_pair(anchor, int(candidate))
+            if key_arr[anchor] == key_arr[candidate]:
+                positive_groups.setdefault(str(key_arr[anchor]), []).append(pair)
+            else:
+                negative_groups.setdefault(str(key_arr[anchor]), []).append(pair)
+                negative_groups.setdefault(str(key_arr[candidate]), []).append(pair)
+
+    metadata: dict[str, Any] = {
+        "sampling": SAME_INCHI_10PPM_PAIR_SAMPLING,
+        "target_pairs_per_class": int(pairs_per_class),
+        "ppm": float(ppm),
+        "finite_precursor_mz_spectra": int(len(order)),
+        "positive_candidate_pairs": int(sum(len(pairs) for pairs in positive_groups.values())),
+        "negative_candidate_pairs_before_dedup": int(sum(len(pairs) for pairs in negative_groups.values())),
+        "negative_candidate_pairs": int(
+            len({pair for pairs in negative_groups.values() for pair in pairs})
+        ),
+        "positive_inchi14_groups": int(len(positive_groups)),
+        "negative_inchi14_groups": int(len(negative_groups)),
+    }
+    if pairs_per_class == 0:
+        metadata.update(
+            {
+                "final_pairs": 0,
+                "positive_pairs": 0,
+                "negative_pairs": 0,
+                "duplicate_pairs": 0,
+            }
+        )
+        return np.empty((0, 2), dtype=np.int64), np.empty(0, dtype=np.int8), metadata
+
+    positive_pairs, positive_selected_groups = _sample_pair_groups_round_robin(
+        positive_groups,
+        target_pairs=pairs_per_class,
+        rng=rng,
+    )
+    negative_pairs, negative_selected_groups = _sample_pair_groups_round_robin(
+        negative_groups,
+        target_pairs=pairs_per_class,
+        rng=rng,
+    )
+    pairs = np.concatenate([positive_pairs, negative_pairs], axis=0)
+    labels = np.concatenate(
+        [
+            np.ones(len(positive_pairs), dtype=np.int8),
+            np.zeros(len(negative_pairs), dtype=np.int8),
+        ],
+        axis=0,
+    )
+    duplicate_pairs = len(pairs) - len({_ordered_pair(int(i), int(j)) for i, j in pairs})
+    metadata.update(
+        {
+            "final_pairs": int(len(pairs)),
+            "positive_pairs": int(len(positive_pairs)),
+            "negative_pairs": int(len(negative_pairs)),
+            "selected_positive_inchi14_groups": int(len(positive_selected_groups)),
+            "selected_negative_inchi14_groups": int(len(negative_selected_groups)),
+            "duplicate_pairs": int(duplicate_pairs),
+        }
+    )
+    if len(positive_pairs) != pairs_per_class or len(negative_pairs) != pairs_per_class:
+        raise ValueError(
+            "Could not satisfy 10 ppm same-InChI balanced pair target: "
+            f"requested {pairs_per_class} per class, selected {len(positive_pairs)} "
+            f"positives and {len(negative_pairs)} negatives."
+        )
+    if duplicate_pairs:
+        raise ValueError(f"10 ppm same-InChI sampler selected {duplicate_pairs} duplicate pairs.")
+    return pairs, labels, metadata
+
+
+def _sample_pair_groups_round_robin(
+    groups: dict[str, list[tuple[int, int]]],
+    *,
+    target_pairs: int,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, set[str]]:
+    key_order = sorted(groups)
+    if not key_order:
+        return np.empty((0, 2), dtype=np.int64), set()
+    key_order = [key_order[int(i)] for i in rng.permutation(len(key_order))]
+    shuffled_groups: dict[str, list[tuple[int, int]]] = {}
+    for key in key_order:
+        pair_list = groups[key]
+        shuffled_groups[key] = [pair_list[int(i)] for i in rng.permutation(len(pair_list))]
+
+    cursors = {key: 0 for key in key_order}
+    active_keys = list(key_order)
+    selected: list[tuple[int, int]] = []
+    selected_groups: set[str] = set()
+    used_pairs: set[tuple[int, int]] = set()
+    while len(selected) < target_pairs and active_keys:
+        made_progress = False
+        for key in list(active_keys):
+            pairs = shuffled_groups[key]
+            pair = None
+            while cursors[key] < len(pairs):
+                candidate_pair = pairs[cursors[key]]
+                cursors[key] += 1
+                if candidate_pair not in used_pairs:
+                    pair = candidate_pair
+                    break
+            if pair is None:
+                active_keys.remove(key)
+                continue
+            selected.append(pair)
+            selected_groups.add(key)
+            used_pairs.add(pair)
+            made_progress = True
+            if len(selected) == target_pairs:
+                break
+        if not made_progress:
+            break
+    return np.asarray(selected, dtype=np.int64).reshape(-1, 2), selected_groups
+
+
+def _ordered_pair(i: int, j: int) -> tuple[int, int]:
+    i = int(i)
+    j = int(j)
+    return (i, j) if i < j else (j, i)
+
+
+def _retrieval_pair_base_columns(
+    rows: list[RetrievalPoolRow],
+    pairs: np.ndarray,
+) -> dict[str, pa.Array]:
+    left = pairs[:, 0].astype(np.int64, copy=False) if len(pairs) else np.empty(0, dtype=np.int64)
+    right = pairs[:, 1].astype(np.int64, copy=False) if len(pairs) else np.empty(0, dtype=np.int64)
+    left_rows = [rows[int(idx)] for idx in left]
+    right_rows = [rows[int(idx)] for idx in right]
+    return {
+        "pair_index": pa.array(np.arange(len(pairs), dtype=np.int64), type=pa.int64()),
+        "left_row": pa.array(left, type=pa.int64()),
+        "right_row": pa.array(right, type=pa.int64()),
+        "left_spectrum_index": pa.array([row.spectrum_index for row in left_rows], type=pa.int64()),
+        "right_spectrum_index": pa.array([row.spectrum_index for row in right_rows], type=pa.int64()),
+        "left_smiles": pa.array([row.canonical_smiles for row in left_rows], type=pa.string()),
+        "right_smiles": pa.array([row.canonical_smiles for row in right_rows], type=pa.string()),
+        "left_inchi14": pa.array([row.inchi14 for row in left_rows], type=pa.string()),
+        "right_inchi14": pa.array([row.inchi14 for row in right_rows], type=pa.string()),
+        "left_precursor_mz": pa.array([row.precursor_mz for row in left_rows], type=pa.float32()),
+        "right_precursor_mz": pa.array([row.precursor_mz for row in right_rows], type=pa.float32()),
+    }
+
+
+def _write_same_inchi_retrieval_dataset(
+    *,
+    output_dir: Path,
+    retrieval_rows: list[RetrievalPoolRow],
+    pairs_per_class: int,
+    ppm: float,
+    adduct: str,
+    seed: int,
+    retrieval_pool_subdir: str,
+) -> dict[str, Any]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    selected_rows = [row for row in retrieval_rows if row.adduct == adduct]
+    selection = np.asarray([row.row_index for row in selected_rows], dtype=np.int64)
+    precursor = np.asarray([row.precursor_mz for row in selected_rows], dtype=np.float64)
+    inchi14 = [row.inchi14 for row in selected_rows]
+    local_pairs, labels, sampling_metadata = _sample_mz_window_balanced_inchi_pairs(
+        precursor,
+        inchi14,
+        pairs_per_class=pairs_per_class,
+        ppm=ppm,
+        seed=seed,
+    )
+    pairs = selection[local_pairs] if len(local_pairs) else local_pairs
+    columns = _retrieval_pair_base_columns(retrieval_rows, pairs)
+    columns["label"] = pa.array(labels.astype(np.int8, copy=False), type=pa.int8())
+    pq.write_table(pa.table(columns), output_dir / "pairs.parquet", compression="zstd")
+    metadata = {
+        "metadata_version": 1,
+        "artifact_format": "same_inchi14_10ppm_retrieval_pairs_v1",
+        "retrieval_pool_subdir": retrieval_pool_subdir,
+        "pairs_file": "pairs.parquet",
+        "selection_adduct": adduct,
+        "num_selected_spectra": int(len(selection)),
+        "num_pairs": int(len(labels)),
+        "positive_pairs": int(labels.sum()) if len(labels) else 0,
+        "negative_pairs": int((labels == 0).sum()) if len(labels) else 0,
+        "sampling_metadata": sampling_metadata,
+    }
+    (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True))
+    return metadata
+
+
+def _sample_balanced_morgan_pairs_for_retrieval(
+    retrieval_rows: list[RetrievalPoolRow],
+    *,
+    num_pairs: int,
+    bin_size: float,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    if num_pairs <= 0:
+        metadata = {
+            "sampling": MCES_ANALOG_PAIR_SAMPLING,
+            "target_pairs": int(num_pairs),
+            "final_pairs": 0,
+            "bin_size": float(bin_size),
+            "num_bins": 0,
+        }
+        return np.empty((0, 2), dtype=np.int64), np.empty(0, dtype=np.float32), metadata
+    if not (0.0 < bin_size <= 1.0):
+        raise ValueError(f"bin_size must be in (0, 1], got {bin_size}.")
+    n_bins_float = 1.0 / bin_size
+    n_bins = int(round(n_bins_float))
+    if not np.isclose(n_bins_float, n_bins):
+        raise ValueError(f"bin_size must evenly divide 1.0, got {bin_size}.")
+    target_per_bin = num_pairs // n_bins
+    if target_per_bin < 1:
+        raise ValueError(
+            f"num_pairs={num_pairs} is too small for {n_bins} Tanimoto bins; "
+            f"request at least {n_bins} pairs or use a wider bin."
+        )
+    target_pairs = target_per_bin * n_bins
+
+    rng = np.random.default_rng(seed)
+    row_groups: dict[str, list[int]] = defaultdict(list)
+    for row in retrieval_rows:
+        row_groups[row.canonical_smiles].append(int(row.row_index))
+    canonical_smiles = sorted(row_groups)
+    if len(canonical_smiles) < 2:
+        raise ValueError("MCES retrieval pair sampling requires at least two unique SMILES.")
+    representative_rows = np.asarray(
+        [
+            row_groups[smiles][int(rng.integers(0, len(row_groups[smiles])))]
+            for smiles in canonical_smiles
+        ],
+        dtype=np.int64,
+    )
+    fps = [
+        _MORGAN_GENERATOR.GetFingerprint(Chem.MolFromSmiles(smiles))
+        for smiles in canonical_smiles
+    ]
+    all_rep = np.arange(len(fps), dtype=np.int64)
+    pairs_by_bin: list[list[tuple[int, int, float]]] = [[] for _ in range(n_bins)]
+    used_pairs: set[tuple[int, int]] = set()
+
+    for i in rng.permutation(len(fps)):
+        i = int(i)
+        sims = np.asarray(DataStructs.BulkTanimotoSimilarity(fps[i], fps), dtype=np.float32)
+        bin_ids = np.ceil(sims / bin_size).astype(np.int16) - 1
+        for bin_idx in range(n_bins):
+            need = target_per_bin - len(pairs_by_bin[bin_idx])
+            if need <= 0:
+                continue
+            candidates = all_rep[(bin_ids == bin_idx) & (all_rep != i)]
+            if not candidates.size:
+                continue
+            candidates = candidates[rng.permutation(len(candidates))]
+            for candidate in candidates:
+                pair = _ordered_pair(i, int(candidate))
+                if pair in used_pairs:
+                    continue
+                used_pairs.add(pair)
+                pairs_by_bin[bin_idx].append((pair[0], pair[1], float(sims[int(candidate)])))
+                need -= 1
+                if need == 0:
+                    break
+        if all(len(bucket) >= target_per_bin for bucket in pairs_by_bin):
+            break
+
+    if any(len(bucket) < target_per_bin for bucket in pairs_by_bin):
+        counts = [len(bucket) for bucket in pairs_by_bin]
+        raise ValueError(
+            "Could not satisfy balanced Morgan-Tanimoto MCES pair sampling target. "
+            f"Need {target_per_bin} per bin, got {counts}."
+        )
+
+    rep_pairs = [pair for bucket in pairs_by_bin for pair in bucket[:target_per_bin]]
+    pairs = np.asarray(
+        [
+            [representative_rows[left], representative_rows[right]]
+            for left, right, _ in rep_pairs
+        ],
+        dtype=np.int64,
+    )
+    tanimoto = np.asarray([score for _, _, score in rep_pairs], dtype=np.float32)
+    metadata = {
+        "sampling": MCES_ANALOG_PAIR_SAMPLING,
+        "seed": int(seed),
+        "target_pairs": int(num_pairs),
+        "final_pairs": int(len(pairs)),
+        "bin_size": float(bin_size),
+        "num_bins": int(n_bins),
+        "target_pairs_per_bin": int(target_per_bin),
+        "bin_counts": [int(len(bucket[:target_per_bin])) for bucket in pairs_by_bin],
+        "unique_smiles": int(len(canonical_smiles)),
+        "representative_spectra": int(len(representative_rows)),
+        "morgan_bits": int(MORGAN_PROBE_FINGERPRINT_BITS),
+        "morgan_radius": int(MORGAN_PROBE_FINGERPRINT_RADIUS),
+    }
+    return pairs, tanimoto, metadata
+
+
+def _compute_mces_values(
+    retrieval_rows: list[RetrievalPoolRow],
+    pairs: np.ndarray,
+    *,
+    workers: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if workers <= 0:
+        raise ValueError(f"mces_workers must be positive, got {workers}.")
+    if len(pairs) == 0:
+        return (
+            np.empty(0, dtype=np.float32),
+            np.empty(0, dtype=np.float32),
+            np.empty(0, dtype=np.int16),
+        )
+    jobs = [
+        (
+            pair_idx,
+            retrieval_rows[int(left)].canonical_smiles,
+            retrieval_rows[int(right)].canonical_smiles,
+        )
+        for pair_idx, (left, right) in enumerate(pairs)
+    ]
+    values = np.empty(len(jobs), dtype=np.float32)
+    seconds = np.empty(len(jobs), dtype=np.float32)
+    modes = np.empty(len(jobs), dtype=np.int16)
+    if workers == 1:
+        results = map(_compute_mces_one, jobs)
+    else:
+        max_workers = min(workers, len(jobs))
+        chunksize = max(1, len(jobs) // (max_workers * 4))
+        executor = ProcessPoolExecutor(max_workers=max_workers)
+        results = executor.map(_compute_mces_one, jobs, chunksize=chunksize)
+    try:
+        for pair_idx, value, elapsed, mode in results:
+            values[pair_idx] = value
+            seconds[pair_idx] = elapsed
+            modes[pair_idx] = mode
+    finally:
+        if workers != 1:
+            executor.shutdown(wait=True)
+    return values, seconds, modes
+
+
+def _compute_mces_one(job: tuple[int, str, str]) -> tuple[int, float, float, int]:
+    try:
+        from myopic_mces.myopic_mces import MCES
+        from pulp.apis.coin_api import pulp_cbc_path
+    except ImportError as exc:
+        raise ImportError(
+            "MCES retrieval artifact generation requires myopic-mces and pulp. "
+            "Install those packages or run this builder in the spectra-benchmarking environment."
+        ) from exc
+
+    pair_idx, left_smiles, right_smiles = job
+    start = time.perf_counter()
+    _idx, value, elapsed, mode = MCES(
+        left_smiles,
+        right_smiles,
+        threshold=MCES_THRESHOLD,
+        i=pair_idx,
+        solver="COIN_CMD",
+        solver_options={"msg": False, "path": pulp_cbc_path},
+        catch_errors=False,
+    )
+    mode_value = mode.value if hasattr(mode, "value") else mode
+    return pair_idx, float(value), float(elapsed or (time.perf_counter() - start)), int(mode_value)
+
+
+def _write_mces_retrieval_dataset(
+    *,
+    output_dir: Path,
+    retrieval_rows: list[RetrievalPoolRow],
+    num_pairs: int,
+    bin_size: float,
+    seed: int,
+    workers: int,
+    retrieval_pool_subdir: str,
+) -> dict[str, Any]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pairs, tanimoto, sampling_metadata = _sample_balanced_morgan_pairs_for_retrieval(
+        retrieval_rows,
+        num_pairs=num_pairs,
+        bin_size=bin_size,
+        seed=seed,
+    )
+    mces_values, mces_seconds, mces_modes = _compute_mces_values(
+        retrieval_rows,
+        pairs,
+        workers=workers,
+    )
+    if np.any(~np.isfinite(mces_values)):
+        bad = int(np.flatnonzero(~np.isfinite(mces_values))[0])
+        raise ValueError(f"MCES returned a non-finite distance at pair {bad}.")
+    if np.any(mces_values < 0):
+        bad = int(np.flatnonzero(mces_values < 0)[0])
+        raise ValueError(f"MCES returned a negative distance at pair {bad}: {mces_values[bad]}")
+
+    columns = _retrieval_pair_base_columns(retrieval_rows, pairs)
+    columns["morgan_tanimoto"] = pa.array(tanimoto.astype(np.float32, copy=False), type=pa.float32())
+    columns["mces"] = pa.array(mces_values.astype(np.float32, copy=False), type=pa.float32())
+    columns["mces_seconds"] = pa.array(mces_seconds.astype(np.float32, copy=False), type=pa.float32())
+    columns["mces_compute_mode"] = pa.array(mces_modes.astype(np.int16, copy=False), type=pa.int16())
+    for threshold in MCES_REPORTED_THRESHOLDS:
+        columns[f"mces_le_{threshold}"] = pa.array(
+            (mces_values <= threshold).astype(np.int8),
+            type=pa.int8(),
+        )
+    pq.write_table(pa.table(columns), output_dir / "pairs.parquet", compression="zstd")
+    metadata = {
+        "metadata_version": 1,
+        "artifact_format": "mces_analog_retrieval_pairs_v1",
+        "retrieval_pool_subdir": retrieval_pool_subdir,
+        "pairs_file": "pairs.parquet",
+        "num_pairs": int(len(pairs)),
+        "mces_threshold": int(MCES_THRESHOLD),
+        "reported_thresholds": [int(value) for value in MCES_REPORTED_THRESHOLDS],
+        "num_workers": int(workers),
+        "compute_mode_counts": {
+            str(int(mode)): int(count)
+            for mode, count in zip(*np.unique(mces_modes, return_counts=True), strict=True)
+        },
+        "mean_seconds_per_pair": float(np.mean(mces_seconds)) if len(mces_seconds) else 0.0,
+        "max_seconds_per_pair": float(np.max(mces_seconds)) if len(mces_seconds) else 0.0,
+        "sampling_metadata": sampling_metadata,
+    }
+    (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True))
+    return metadata
+
+
 def build_murcko_mgf_dataset(
     *,
     mgf_path: Path,
@@ -2076,6 +2943,252 @@ def prepare_murcko_mgf_collection(
     return top_metadata
 
 
+def prepare_nist_disjoint_probe_retrieval_collection(
+    *,
+    nist_mgf: str = str(DEFAULT_LOCAL_NIST_MGF_PATH),
+    online_probe_subdir: str = NIST_DISJOINT_ONLINE_PROBE_SUBDIR,
+    retrieval_pool_subdir: str = NIST_DISJOINT_RETRIEVAL_POOL_SUBDIR,
+    same_inchi_subdir: str = NIST_10PPM_RETRIEVAL_SUBDIR,
+    mces_subdir: str = NIST_MCES_RETRIEVAL_SUBDIR,
+    gcs_credentials: Path | None = None,
+    work_dir: Path,
+    hf_repo_id: str = NIST_DISJOINT_PROBE_RETRIEVAL_HF_REPO,
+    hf_revision: str = "main",
+    hf_private: bool = False,
+    upload: bool = True,
+    online_probe_size: int = DEFAULT_ONLINE_PROBE_SAMPLE_SIZE,
+    val_frac: float = 0.10,
+    test_frac: float = 0.10,
+    seed: int = 42,
+    min_precursor_mz: float = 1.0,
+    max_precursor_mz: float = 1000.0,
+    num_peaks_input: int = NUM_PEAKS_INPUT,
+    num_workers: int = os.cpu_count() or 1,
+    batch_size: int = 2048,
+    parquet_batch_size: int = 50_000,
+    allowed_adducts: tuple[str, ...] | None = DEFAULT_NIST_ALLOWED_ADDUCTS,
+    online_split_size_caps: dict[str, int] | None = DEFAULT_NIST_SPLIT_SIZE_CAPS,
+    spectral_lsh_threshold: float = 0.90,
+    same_inchi_pairs_per_class: int = DEFAULT_10PPM_RETRIEVAL_PAIRS_PER_CLASS,
+    same_inchi_ppm: float = DEFAULT_10PPM_RETRIEVAL_PPM,
+    same_inchi_adduct: str = DEFAULT_RETRIEVAL_ADDUCT,
+    mces_pairs: int = DEFAULT_MCES_RETRIEVAL_PAIRS,
+    mces_tanimoto_bin_size: float = DEFAULT_MCES_RETRIEVAL_BIN_SIZE,
+    mces_workers: int = os.cpu_count() or 1,
+) -> dict[str, Any]:
+    """Build the fixed NIST benchmark collection requested for probing/retrieval.
+
+    The collection has three task artifacts:
+
+    - an online-probe Murcko split built from an exact 100k spectrum sample;
+    - a fixed 10 ppm same-InChI binary retrieval pair table from the remaining
+      Murcko-disjoint spectra;
+    - a fixed MCES analog-search pair table with precomputed MCES distances.
+
+    The latter two retrieval pair tables intentionally may reuse spectra and
+    may overlap each other. The only enforced disjointness is between the
+    online-probe Murcko histogram keys and the retrieval pool histogram keys.
+    """
+    work_dir = work_dir.expanduser().resolve()
+    staging_root = work_dir / "artifact"
+    raw_dir = staging_root / RAW_SUBDIR
+    if staging_root.exists():
+        shutil.rmtree(staging_root)
+    staging_root.mkdir(parents=True, exist_ok=True)
+
+    raw_mgf = _stage_raw_mgf(nist_mgf, raw_dir, gcs_credentials)
+    first_rows = _first_pass(
+        raw_mgf,
+        min_precursor_mz=min_precursor_mz,
+        max_precursor_mz=max_precursor_mz,
+        allowed_adducts=allowed_adducts,
+        num_workers=num_workers,
+        batch_size=batch_size,
+    )
+    probe_indices, probe_hist_keys, probe_selection_metadata = _select_disjoint_probe_indices(
+        first_rows,
+        target_size=online_probe_size,
+        seed=seed,
+    )
+    probe_first_rows = [
+        row for row in first_rows if int(row.spectrum_index) in probe_indices
+    ]
+    retrieval_hist_keys = {
+        row.murcko_hist_key for row in first_rows if row.murcko_hist_key not in probe_hist_keys
+    }
+    retrieval_first_rows = [
+        row for row in first_rows if row.murcko_hist_key in retrieval_hist_keys
+    ]
+    if len(probe_first_rows) != online_probe_size:
+        raise ValueError(
+            f"Internal probe selection mismatch: expected {online_probe_size}, got {len(probe_first_rows)}."
+        )
+    if not retrieval_first_rows:
+        raise ValueError("Murcko-disjoint retrieval pool is empty.")
+
+    probe_fold_by_smiles, probe_split_metadata = _build_fold_map(
+        probe_first_rows,
+        val_frac=val_frac,
+        test_frac=test_frac,
+        seed=seed,
+    )
+    online_metadata, _ = _build_subset_murcko_mgf_dataset(
+        mgf_path=raw_mgf,
+        output_dir=staging_root / online_probe_subdir.strip("/"),
+        source_uri=nist_mgf,
+        fold_by_smiles=probe_fold_by_smiles,
+        split_metadata=probe_split_metadata,
+        active_splits=SPLITS,
+        min_precursor_mz=min_precursor_mz,
+        max_precursor_mz=max_precursor_mz,
+        num_peaks_input=num_peaks_input,
+        num_workers=num_workers,
+        batch_size=batch_size,
+        parquet_batch_size=parquet_batch_size,
+        allowed_adducts=allowed_adducts,
+        split_size_caps=online_split_size_caps,
+        spectral_lsh_threshold=spectral_lsh_threshold,
+        include_spectrum_indices=probe_indices,
+        extra_metadata={
+            "subset_role": "online_probe",
+            "selection_without_replacement": True,
+            "online_probe_selection": probe_selection_metadata,
+        },
+    )
+
+    retrieval_fold_by_smiles, retrieval_split_metadata = _build_single_split_fold_map(
+        retrieval_first_rows,
+        split=STANDALONE_SPLIT,
+    )
+    retrieval_metadata, retrieval_rows = _build_subset_murcko_mgf_dataset(
+        mgf_path=raw_mgf,
+        output_dir=staging_root / retrieval_pool_subdir.strip("/"),
+        source_uri=nist_mgf,
+        fold_by_smiles=retrieval_fold_by_smiles,
+        split_metadata=retrieval_split_metadata,
+        active_splits=(STANDALONE_SPLIT,),
+        min_precursor_mz=min_precursor_mz,
+        max_precursor_mz=max_precursor_mz,
+        num_peaks_input=num_peaks_input,
+        num_workers=num_workers,
+        batch_size=batch_size,
+        parquet_batch_size=parquet_batch_size,
+        allowed_adducts=allowed_adducts,
+        split_size_caps=None,
+        spectral_lsh_threshold=spectral_lsh_threshold,
+        include_murcko_hist_keys=retrieval_hist_keys,
+        extra_metadata={
+            "subset_role": "retrieval_pool",
+            "murcko_hist_disjoint_from_online_probe": True,
+            "excluded_online_probe_murcko_hist_keys": len(probe_hist_keys),
+        },
+        collect_retrieval_rows=True,
+    )
+
+    retrieval_pool_hist_keys = {row.murcko_hist_key for row in retrieval_rows}
+    overlap = probe_hist_keys & retrieval_pool_hist_keys
+    if overlap:
+        raise ValueError(
+            "Retrieval pool is not Murcko-disjoint from online probe; overlapping keys: "
+            + ", ".join(sorted(overlap)[:8])
+        )
+
+    same_inchi_metadata = _write_same_inchi_retrieval_dataset(
+        output_dir=staging_root / same_inchi_subdir.strip("/"),
+        retrieval_rows=retrieval_rows,
+        pairs_per_class=same_inchi_pairs_per_class,
+        ppm=same_inchi_ppm,
+        adduct=same_inchi_adduct,
+        seed=seed + 11,
+        retrieval_pool_subdir=retrieval_pool_subdir.strip("/"),
+    )
+    mces_metadata = _write_mces_retrieval_dataset(
+        output_dir=staging_root / mces_subdir.strip("/"),
+        retrieval_rows=retrieval_rows,
+        num_pairs=mces_pairs,
+        bin_size=mces_tanimoto_bin_size,
+        seed=seed + 23,
+        workers=mces_workers,
+        retrieval_pool_subdir=retrieval_pool_subdir.strip("/"),
+    )
+
+    top_metadata: dict[str, Any] = {
+        "metadata_version": 1,
+        "artifact_format": NIST_DISJOINT_PROBE_RETRIEVAL_ARTIFACT_FORMAT,
+        "hf_repo_id": hf_repo_id,
+        "hf_revision": hf_revision,
+        "source_uri": nist_mgf,
+        "source_raw_file": f"{RAW_SUBDIR}/{raw_mgf.name}",
+        "seed": int(seed),
+        "allowed_adducts": list(allowed_adducts) if allowed_adducts is not None else None,
+        "min_precursor_mz": float(min_precursor_mz),
+        "max_precursor_mz": float(max_precursor_mz),
+        "online_probe": {
+            "subdir": online_probe_subdir.strip("/"),
+            "train_size": int(online_metadata.get("train_size", 0)),
+            "val_size": int(online_metadata.get("val_size", 0)),
+            "test_size": int(online_metadata.get("test_size", 0)),
+            "selected_spectra_before_split_processing": int(online_probe_size),
+        },
+        "retrieval_pool": {
+            "subdir": retrieval_pool_subdir.strip("/"),
+            "all_size": int(retrieval_metadata.get("all_size", 0)),
+            "murcko_hist_keys": int(len(retrieval_pool_hist_keys)),
+        },
+        "same_inchi14_10ppm": {
+            "subdir": same_inchi_subdir.strip("/"),
+            "num_pairs": int(same_inchi_metadata["num_pairs"]),
+            "positive_pairs": int(same_inchi_metadata["positive_pairs"]),
+            "negative_pairs": int(same_inchi_metadata["negative_pairs"]),
+            "ppm": float(same_inchi_ppm),
+            "selection_adduct": same_inchi_adduct,
+        },
+        "mces_analog": {
+            "subdir": mces_subdir.strip("/"),
+            "num_pairs": int(mces_metadata["num_pairs"]),
+            "mces_threshold": int(MCES_THRESHOLD),
+            "num_workers": int(mces_metadata.get("num_workers", mces_workers)),
+        },
+        "disjointness": {
+            "online_probe_selected_murcko_hist_keys": int(len(probe_hist_keys)),
+            "retrieval_pool_murcko_hist_keys": int(len(retrieval_pool_hist_keys)),
+            "online_probe_retrieval_murcko_hist_overlap": int(len(overlap)),
+            "selected_murcko_hist_key_values": sorted(probe_hist_keys),
+        },
+    }
+    (staging_root / "metadata.json").write_text(
+        json.dumps(top_metadata, indent=2, sort_keys=True)
+    )
+    _write_nist_disjoint_probe_retrieval_readme(
+        staging_root / "README.md",
+        metadata=top_metadata,
+    )
+
+    if upload:
+        api = HfApi()
+        api.create_repo(
+            hf_repo_id,
+            repo_type="dataset",
+            exist_ok=True,
+            private=hf_private,
+        )
+        log.info("Uploading %s -> %s", staging_root, hf_repo_id)
+        api.upload_large_folder(
+            repo_id=hf_repo_id,
+            folder_path=staging_root,
+            repo_type="dataset",
+            revision=hf_revision,
+        )
+        log.info(
+            "Uploaded disjoint NIST probe/retrieval collection to https://huggingface.co/datasets/%s",
+            hf_repo_id,
+        )
+    else:
+        log.info("upload disabled; staged dataset left at %s", staging_root)
+    top_metadata["artifact_dir"] = str(staging_root)
+    return top_metadata
+
+
 def main() -> None:
     from rdkit import RDLogger
 
@@ -2138,7 +3251,78 @@ def main() -> None:
     parser.add_argument("--dreams-n-highest-peaks", type=int, default=100)
     parser.add_argument("--dreams-batch-size", type=int, default=256)
     parser.add_argument("--dreams-device", default=None)
+    parser.add_argument(
+        "--build-disjoint-probe-retrieval",
+        action="store_true",
+        help=(
+            "Build the fixed NIST collection with a 100k Murcko-disjoint online "
+            "probe sample, a retrieval pool, 10 ppm pair labels, and MCES pairs."
+        ),
+    )
+    parser.add_argument("--online-probe-subdir", default=NIST_DISJOINT_ONLINE_PROBE_SUBDIR)
+    parser.add_argument("--retrieval-pool-subdir", default=NIST_DISJOINT_RETRIEVAL_POOL_SUBDIR)
+    parser.add_argument("--same-inchi-subdir", default=NIST_10PPM_RETRIEVAL_SUBDIR)
+    parser.add_argument("--mces-subdir", default=NIST_MCES_RETRIEVAL_SUBDIR)
+    parser.add_argument("--online-probe-size", type=int, default=DEFAULT_ONLINE_PROBE_SAMPLE_SIZE)
+    parser.add_argument(
+        "--same-inchi-pairs-per-class",
+        type=int,
+        default=DEFAULT_10PPM_RETRIEVAL_PAIRS_PER_CLASS,
+    )
+    parser.add_argument("--same-inchi-ppm", type=float, default=DEFAULT_10PPM_RETRIEVAL_PPM)
+    parser.add_argument("--same-inchi-adduct", default=DEFAULT_RETRIEVAL_ADDUCT)
+    parser.add_argument("--mces-pairs", type=int, default=DEFAULT_MCES_RETRIEVAL_PAIRS)
+    parser.add_argument(
+        "--mces-tanimoto-bin-size",
+        type=float,
+        default=DEFAULT_MCES_RETRIEVAL_BIN_SIZE,
+    )
+    parser.add_argument("--mces-workers", type=int, default=os.cpu_count() or 1)
     args = parser.parse_args()
+    allowed_adducts = (
+        tuple(args.nist_allowed_adducts) if args.nist_allowed_adducts else None
+    )
+    if args.build_disjoint_probe_retrieval:
+        nist_mgf = args.nist_mgf
+        if nist_mgf == DEFAULT_NIST_MGF_URI:
+            nist_mgf = str(DEFAULT_LOCAL_NIST_MGF_PATH)
+        prepare_nist_disjoint_probe_retrieval_collection(
+            nist_mgf=nist_mgf,
+            online_probe_subdir=args.online_probe_subdir,
+            retrieval_pool_subdir=args.retrieval_pool_subdir,
+            same_inchi_subdir=args.same_inchi_subdir,
+            mces_subdir=args.mces_subdir,
+            gcs_credentials=args.gcs_credentials,
+            work_dir=args.work_dir,
+            hf_repo_id=args.hf_repo_id,
+            hf_revision=args.hf_revision,
+            hf_private=args.hf_private,
+            upload=not args.skip_upload,
+            online_probe_size=args.online_probe_size,
+            val_frac=args.val_frac,
+            test_frac=args.test_frac,
+            seed=args.seed,
+            min_precursor_mz=args.min_precursor_mz,
+            max_precursor_mz=args.max_precursor_mz,
+            num_peaks_input=args.num_peaks_input,
+            num_workers=args.num_workers,
+            batch_size=args.batch_size,
+            parquet_batch_size=args.parquet_batch_size,
+            allowed_adducts=allowed_adducts,
+            online_split_size_caps={
+                "train": args.nist_target_train_size,
+                "val": args.nist_target_val_size,
+                "test": args.nist_target_test_size,
+            },
+            spectral_lsh_threshold=args.spectral_lsh_threshold,
+            same_inchi_pairs_per_class=args.same_inchi_pairs_per_class,
+            same_inchi_ppm=args.same_inchi_ppm,
+            same_inchi_adduct=args.same_inchi_adduct,
+            mces_pairs=args.mces_pairs,
+            mces_tanimoto_bin_size=args.mces_tanimoto_bin_size,
+            mces_workers=args.mces_workers,
+        )
+        return
     prepare_murcko_mgf_collection(
         nist_mgf=args.nist_mgf,
         mcebio_mgf=args.mcebio_mgf,
@@ -2159,9 +3343,7 @@ def main() -> None:
         num_workers=args.num_workers,
         batch_size=args.batch_size,
         parquet_batch_size=args.parquet_batch_size,
-        nist_allowed_adducts=(
-            tuple(args.nist_allowed_adducts) if args.nist_allowed_adducts else None
-        ),
+        nist_allowed_adducts=allowed_adducts,
         nist_split_size_caps={
             "train": args.nist_target_train_size,
             "val": args.nist_target_val_size,

@@ -1211,6 +1211,99 @@ def test_prepare_murcko_mgf_collection_builds_dreams_before_upload(
     assert metadata["dreams_auxiliary_built"]
 
 
+def test_prepare_nist_disjoint_probe_retrieval_collection_writes_fixed_tasks(
+    monkeypatch,
+    tmp_path: Path,
+):
+    mgf_path = tmp_path / "nist.mgf"
+    mgf_path.write_text(
+        "\n".join(
+            _mgf_block(
+                "probe-phenol-a",
+                pepmass=150.0,
+                smiles="c1ccccc1O",
+                adduct="[M+H]+",
+                peaks=[(50.0, 100.0), (60.0, 50.0)],
+            )
+            + _mgf_block(
+                "probe-phenol-b",
+                pepmass=150.0005,
+                smiles="Oc1ccccc1",
+                adduct="[M+H]+",
+                peaks=[(51.0, 100.0), (61.0, 50.0)],
+            )
+            + _mgf_block(
+                "retrieval-ethanol-a",
+                pepmass=100.0000,
+                smiles="CCO",
+                adduct="[M+H]+",
+                peaks=[(10.0, 100.0), (20.0, 50.0)],
+            )
+            + _mgf_block(
+                "retrieval-ethanol-b",
+                pepmass=100.0005,
+                smiles="OCC",
+                adduct="[M+H]+",
+                peaks=[(11.0, 100.0), (21.0, 50.0)],
+            )
+            + _mgf_block(
+                "retrieval-ethylamine",
+                pepmass=100.0008,
+                smiles="CCN",
+                adduct="[M+H]+",
+                peaks=[(12.0, 100.0), (22.0, 50.0)],
+            )
+        )
+    )
+
+    def fake_mces_values(retrieval_rows, pairs, *, workers):
+        return (
+            np.asarray([2.0 for _ in range(len(pairs))], dtype=np.float32),
+            np.asarray([0.01 for _ in range(len(pairs))], dtype=np.float32),
+            np.zeros(len(pairs), dtype=np.int16),
+        )
+
+    monkeypatch.setattr(murcko, "_compute_mces_values", fake_mces_values)
+
+    metadata = murcko.prepare_nist_disjoint_probe_retrieval_collection(
+        nist_mgf=str(mgf_path),
+        work_dir=tmp_path / "work",
+        upload=False,
+        online_probe_size=2,
+        val_frac=0.2,
+        test_frac=0.2,
+        num_workers=1,
+        batch_size=2,
+        parquet_batch_size=2,
+        online_split_size_caps=None,
+        same_inchi_pairs_per_class=1,
+        mces_pairs=1,
+        mces_tanimoto_bin_size=1.0,
+        mces_workers=1,
+    )
+
+    artifact_dir = Path(metadata["artifact_dir"])
+    assert metadata["artifact_format"] == murcko.NIST_DISJOINT_PROBE_RETRIEVAL_ARTIFACT_FORMAT
+    assert metadata["online_probe"]["selected_spectra_before_split_processing"] == 2
+    assert metadata["retrieval_pool"]["all_size"] == 3
+    assert metadata["disjointness"]["online_probe_retrieval_murcko_hist_overlap"] == 0
+
+    same_pairs = pq.read_table(
+        artifact_dir / murcko.NIST_10PPM_RETRIEVAL_SUBDIR / "pairs.parquet"
+    ).to_pydict()
+    assert same_pairs["label"] == [1, 0]
+    assert same_pairs["left_row"][0] != same_pairs["right_row"][0]
+    assert same_pairs["left_inchi14"][0] == same_pairs["right_inchi14"][0]
+    assert same_pairs["left_inchi14"][1] != same_pairs["right_inchi14"][1]
+
+    mces_pairs = pq.read_table(
+        artifact_dir / murcko.NIST_MCES_RETRIEVAL_SUBDIR / "pairs.parquet"
+    ).to_pydict()
+    assert mces_pairs["mces"] == [2.0]
+    assert mces_pairs["mces_le_2"] == [1]
+    assert mces_pairs["mces_le_1"] == [0]
+
+
 def test_murcko_fluorine_loader_can_return_jax_batches(tmp_path: Path):
     root = tmp_path / "cache"
     nist = root / "nist_murcko_probe"

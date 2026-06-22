@@ -184,6 +184,120 @@ class MassSpecProbeMurckoDataTests(unittest.TestCase):
             ],
         )
 
+    def test_probe_data_supports_disjoint_nist_probe_repo_with_default_mcebio_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cfg = config_dict.ConfigDict()
+            cfg.artifact_dir = str(tmp_path / "probe-cache")
+            cfg.batch_size = 2
+            cfg.max_precursor_mz = 1000.0
+            cfg.min_peak_intensity = 1e-4
+            cfg.peak_ordering = "mz"
+            cfg.num_peaks = 4
+            cfg.nist_murcko_probe_repo_id = (
+                "wchen99998/msms_nist_disjoint_probe_retrieval_20260622"
+            )
+            cfg.nist_murcko_probe_revision = "new-nist-rev"
+            cfg.nist_murcko_probe_hf_subdir = "nist_100k_online_probe"
+
+            download_calls = []
+
+            def fake_snapshot_download(
+                *,
+                local_dir,
+                repo_id,
+                revision,
+                allow_patterns,
+                **kwargs,
+            ):
+                download_calls.append(
+                    {
+                        "repo_id": repo_id,
+                        "revision": revision,
+                        "allow_patterns": list(allow_patterns),
+                    }
+                )
+                local_root = Path(local_dir)
+                first_pattern = allow_patterns[0]
+                if first_pattern.startswith("nist_100k_online_probe/"):
+                    _write_fake_nist_murcko_probe_artifact(
+                        local_root / "nist_100k_online_probe"
+                    )
+                elif first_pattern.startswith("mcebio_murcko_probe/"):
+                    _write_fake_mcebio_murcko_probe_artifact(
+                        local_root / murcko_data.MCEBIO_MURCKO_PREPARED_SUBDIR
+                    )
+                else:
+                    raise AssertionError(f"unexpected allow_patterns: {allow_patterns}")
+                return str(local_dir)
+
+            with mock.patch.object(
+                murcko_data,
+                "snapshot_download",
+                side_effect=fake_snapshot_download,
+            ):
+                probe_data = massspec_probe_data.MassSpecProbeData.from_config(cfg)
+
+        self.assertEqual(probe_data.info["massspec_train_size"], 2)
+        self.assertEqual(probe_data.info["massspec_mcebio_test_size"], 1)
+        self.assertEqual(
+            probe_data.info["massspec_nist_repo_id"],
+            "wchen99998/msms_nist_disjoint_probe_retrieval_20260622",
+        )
+        self.assertEqual(
+            probe_data.info["massspec_nist_subdir"],
+            "nist_100k_online_probe",
+        )
+        self.assertEqual(
+            probe_data.info["massspec_mcebio_repo_id"],
+            murcko_data.NIST_MURCKO_HF_REPO,
+        )
+        self.assertEqual(
+            probe_data.train_files,
+            [
+                str(
+                    tmp_path
+                    / "probe-cache"
+                    / "nist_100k_online_probe"
+                    / "train.parquet"
+                )
+            ],
+        )
+        self.assertEqual(
+            probe_data.mcebio_test_files,
+            [
+                str(
+                    tmp_path
+                    / "probe-cache"
+                    / "mcebio_murcko_probe"
+                    / "all.parquet"
+                )
+            ],
+        )
+        self.assertEqual(
+            download_calls,
+            [
+                {
+                    "repo_id": "wchen99998/msms_nist_disjoint_probe_retrieval_20260622",
+                    "revision": "new-nist-rev",
+                    "allow_patterns": [
+                        "nist_100k_online_probe/metadata.json",
+                        "nist_100k_online_probe/train.parquet",
+                        "nist_100k_online_probe/val.parquet",
+                        "nist_100k_online_probe/test.parquet",
+                    ],
+                },
+                {
+                    "repo_id": murcko_data.NIST_MURCKO_HF_REPO,
+                    "revision": "main",
+                    "allow_patterns": [
+                        "mcebio_murcko_probe/metadata.json",
+                        "mcebio_murcko_probe/all.parquet",
+                    ],
+                },
+            ],
+        )
+
     def test_probe_data_downloads_nist_murcko_dreams_auxiliary_when_requested(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

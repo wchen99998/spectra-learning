@@ -1266,14 +1266,22 @@ class MassSpecProbeData(NamedTuple):
                 MCEBIO_MURCKO_PREPARED_SUBDIR,
             )
         ).strip("/")
+        nist_repo_id = str(
+            _config_get(config, "nist_murcko_probe_repo_id", NIST_MURCKO_HF_REPO)
+        )
+        nist_revision = str(_config_get(config, "nist_murcko_probe_revision", "main"))
+        mcebio_repo_id = str(
+            _config_get(config, "mcebio_murcko_probe_repo_id", NIST_MURCKO_HF_REPO)
+        )
+        mcebio_revision = str(
+            _config_get(config, "mcebio_murcko_probe_revision", "main")
+        )
         nist_dir = artifact_root / murcko_subdir
         nist_metadata = ensure_nist_murcko_probe_downloaded(
             nist_dir,
             max_precursor_mz=max_precursor_mz,
-            repo_id=str(
-                _config_get(config, "nist_murcko_probe_repo_id", NIST_MURCKO_HF_REPO)
-            ),
-            revision=str(_config_get(config, "nist_murcko_probe_revision", "main")),
+            repo_id=nist_repo_id,
+            revision=nist_revision,
             subdir=murcko_subdir,
             include_morgan=include_morgan,
             include_dreams=include_dreams,
@@ -1283,10 +1291,8 @@ class MassSpecProbeData(NamedTuple):
         )
         mcebio_metadata = ensure_mcebio_murcko_probe_downloaded(
             artifact_root,
-            repo_id=str(
-                _config_get(config, "nist_murcko_probe_repo_id", NIST_MURCKO_HF_REPO)
-            ),
-            revision=str(_config_get(config, "nist_murcko_probe_revision", "main")),
+            repo_id=mcebio_repo_id,
+            revision=mcebio_revision,
             subdir=mcebio_subdir,
             include_morgan=include_morgan_probe,
             include_dreams=include_dreams,
@@ -1335,6 +1341,12 @@ class MassSpecProbeData(NamedTuple):
             "massspec_test_size": int(nist_metadata.get("test_size", 0)),
             "massspec_mcebio_test_size": int(mcebio_metadata.get("all_size", 0)),
             "massspec_metadata_version": int(nist_metadata.get("metadata_version", 0)),
+            "massspec_nist_repo_id": nist_repo_id,
+            "massspec_nist_revision": nist_revision,
+            "massspec_nist_subdir": murcko_subdir,
+            "massspec_mcebio_repo_id": mcebio_repo_id,
+            "massspec_mcebio_revision": mcebio_revision,
+            "massspec_mcebio_subdir": mcebio_subdir,
             "massspec_adduct_vocab": adduct_vocab,
             "massspec_instrument_type_vocab": instrument_type_vocab,
             "massspec_adduct_vocab_size": len(adduct_vocab),

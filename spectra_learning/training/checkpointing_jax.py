@@ -15,7 +15,7 @@ def jax_checkpoint_dir(checkpoint_dir: StoragePath) -> str:
 def build_jax_checkpoint_manager(
     checkpoint_dir: StoragePath,
     *,
-    max_to_keep: int = 5,
+    max_to_keep: int | None = 5,
     enable_async_checkpointing: bool = True,
 ) -> ocp.CheckpointManager:
     options = ocp.CheckpointManagerOptions(

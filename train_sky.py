@@ -503,6 +503,7 @@ def build_train_overrides(
         "jax_precompile_eval_steps": True,
         "jax_precompile_msg_probe": True,
         "jax_enable_async_checkpointing": False,
+        "jax_checkpoint_max_to_keep": None,
         "wandb_kwargs": {
             "name": run_id,
             "tags": [
