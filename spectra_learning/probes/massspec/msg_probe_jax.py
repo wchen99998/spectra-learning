@@ -1244,8 +1244,9 @@ def _append_pending_prediction(
     batch: JaxBatch,
     task_spec: MsgProbeTaskSpec,
 ) -> None:
-    valid_mask = np.asarray(batch["probe_valid_mol"]).astype(bool, copy=False)
+    valid_mask = _host_local_array(batch["probe_valid_mol"]).astype(bool, copy=False)
     if not valid_mask.any():
+        jax.block_until_ready(logits)
         return
     pending.append(
         (
@@ -1276,7 +1277,7 @@ def _flush_pending_predictions(
 ) -> None:
     if not pending:
         return
-    host_logits = jax.device_get([logits for logits, _, _ in pending])
+    host_logits = [_host_local_tree(logits) for logits, _, _ in pending]
     for (logits, valid_mask, targets), host_logit in zip(
         pending,
         host_logits,
@@ -1302,7 +1303,7 @@ def _probe_predictions_from_logits(
     task_spec: MsgProbeTaskSpec,
     batch: JaxBatch,
 ) -> dict[str, Any]:
-    valid_mask = np.asarray(batch["probe_valid_mol"]).astype(bool, copy=False)
+    valid_mask = _host_local_array(batch["probe_valid_mol"]).astype(bool, copy=False)
     if not valid_mask.any():
         return {"batch_size": 0, "predictions": {}, "targets": {}}
     targets = _probe_targets_from_batch(
@@ -1311,7 +1312,7 @@ def _probe_predictions_from_logits(
         task_spec=task_spec,
     )
     return _probe_predictions_from_host_logits(
-        jax.device_get(logits),
+        _host_local_tree(logits),
         valid_mask=valid_mask,
         target_values=targets,
         task_spec=task_spec,
@@ -1369,22 +1370,40 @@ def _probe_targets_from_batch(
     task_spec: MsgProbeTaskSpec,
 ) -> dict[str, np.ndarray]:
     targets = {
-        name: np.asarray(batch[f"probe_{name}"], dtype=np.float32)[valid_mask]
+        name: _host_local_array(batch[f"probe_{name}"]).astype(np.float32, copy=False)[
+            valid_mask
+        ]
         for name in task_spec.regression_tasks
     }
     targets.update(
         {
-            name: np.asarray(batch[f"probe_{name}"], dtype=np.float32)[valid_mask]
+            name: _host_local_array(batch[f"probe_{name}"]).astype(
+                np.float32,
+                copy=False,
+            )[valid_mask]
             for name in task_spec.binary_tasks
         }
     )
     if task_spec.maccs_bits > 0:
         fingerprint_task = task_spec.fingerprint_task
-        targets[fingerprint_task] = np.asarray(
-            batch[f"probe_{fingerprint_task}"],
-            dtype=np.float32,
-        )[valid_mask]
+        targets[fingerprint_task] = _host_local_array(
+            batch[f"probe_{fingerprint_task}"]
+        ).astype(np.float32, copy=False)[valid_mask]
     return targets
+
+
+def _host_local_tree(tree: Any) -> Any:
+    return jax.tree.map(_host_local_array, tree)
+
+
+def _host_local_array(value: Any) -> np.ndarray:
+    if _is_global_non_fully_addressable_array(value):
+        shards = sorted(
+            value.addressable_shards,
+            key=lambda shard: shard.index[0].start or 0,
+        )
+        return np.concatenate([np.asarray(shard.data) for shard in shards], axis=0)
+    return np.asarray(jax.device_get(value))
 
 
 def _sigmoid_numpy(value: np.ndarray) -> np.ndarray:

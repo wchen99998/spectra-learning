@@ -119,6 +119,33 @@ def _small_jepa_kwargs(**overrides: object) -> dict[str, object]:
     return kwargs
 
 
+def test_jax_native_encoder_token_init_breaks_inducing_symmetry():
+    model = PeakSetJEPAJax(**_small_induced_mae_kwargs())
+    encoder = model.encoder
+
+    cls_token = np.asarray(encoder.cls_token[...])
+    inducing_token = np.asarray(encoder.inducing_token[...])
+    latent_pair_token = np.asarray(encoder.latent_pair_token[...])
+
+    assert not np.allclose(cls_token, 0.0)
+    assert not np.allclose(inducing_token, 0.0)
+    assert not np.allclose(latent_pair_token, 0.0)
+    assert not np.allclose(inducing_token[0], inducing_token[1])
+    assert not np.allclose(latent_pair_token[0], latent_pair_token[1])
+
+
+def test_jax_native_dense_encoder_cls_pair_tokens_are_random_initialized():
+    model = PeakSetJEPAJax(**_small_mae_kwargs())
+    encoder = model.encoder
+
+    for name in (
+        "cls_to_peak_pair_token",
+        "peak_to_cls_pair_token",
+        "cls_cls_pair_token",
+    ):
+        assert not np.allclose(np.asarray(getattr(encoder, name)[...]), 0.0), name
+
+
 def _sample(mz: list[float], intensity: list[float], precursor_mz: float) -> dict[str, torch.Tensor]:
     spectra = torch.zeros(2, 128, dtype=torch.float32)
     spectra[0, : len(mz)] = torch.tensor(mz, dtype=torch.float32)

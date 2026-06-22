@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import hashlib
 import json
 import logging
 import netrc
@@ -26,13 +27,11 @@ DEFAULT_PROJECT = "metal-repeater-411410"
 DEFAULT_INFRA = "k8s/skypilot-training"
 DEFAULT_TASK_NAME = "spectra-100m-muon-v6e-kueue"
 DEFAULT_IMAGE_ID = "docker:python:3.12-bookworm"
+DEFAULT_KUEUE_LOCAL_QUEUE = "skypilot-v6e-nap"
 DEFAULT_CPUS = 64
 DEFAULT_MEMORY_GB = 256
-KNOWN_NODE_POOLS = {
-    "2x4": "skypilot-v6e-4t-flex",
-    "4x4": "skypilot-v6e-16-flex",
-    "8x8": "skypilot-v6e-64-flex",
-}
+MAX_SKY_CLUSTER_NAME_LENGTH = 63
+SUPPORTED_NAP_TOPOLOGIES = {"4x4"}
 TASK_SETUP = """\
 set -euo pipefail
 python --version
@@ -258,7 +257,6 @@ class TopologySpec:
     total_chips: int
     num_nodes: int
     chips_per_node: int
-    node_pool: str
     accelerator: str
 
     @property
@@ -287,12 +285,23 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
     parser.add_argument(
         "--topology",
         default="4x4",
-        help="TPU v6e topology, e.g. 2x4, 4x4, 8x8.",
+        help="TPU v6e topology. The default NAP queue is currently configured for 4x4.",
     )
-    parser.add_argument("--node-pool", default="")
     parser.add_argument("--accelerator", default="tpu-v6e-4")
     parser.add_argument("--chips-per-node", type=int, default=4)
-    parser.add_argument("--cluster", default="")
+    parser.add_argument(
+        "--kueue-local-queue",
+        default=DEFAULT_KUEUE_LOCAL_QUEUE,
+        help="Kueue LocalQueue name used by SkyPilot for the Kubernetes task.",
+    )
+    parser.add_argument(
+        "--cluster",
+        default="",
+        help=(
+            "SkyPilot cluster name. Defaults to a run-specific cluster derived "
+            "from --run-id; pass this only when intentionally reusing a cluster."
+        ),
+    )
     parser.add_argument("--run-id", default="")
     parser.add_argument("--training-max-steps", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
@@ -326,6 +335,22 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
     parser.add_argument("--infra", default=DEFAULT_INFRA)
     parser.add_argument("--metrics-json", default="metrics/final.json")
     parser.add_argument("--queue-tag", default="flex-start")
+    parser.add_argument(
+        "--provision-timeout-seconds",
+        type=int,
+        default=3600,
+        help="SkyPilot Kubernetes provisioning timeout. Prevents infinite pending pods.",
+    )
+    parser.add_argument(
+        "--flex-start-max-run-duration",
+        "--dws-max-run-duration",
+        dest="flex_start_max_run_duration",
+        default="",
+        help=(
+            "Maximum DWS flex-start node runtime, e.g. 6h, 1d, or 10080m. "
+            "Plain numbers are treated as minutes by SkyPilot."
+        ),
+    )
     args, sky_args = parser.parse_known_args(argv)
     if not args.config.strip():
         parser.error("--config cannot be empty")
@@ -339,14 +364,13 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
 def resolve_topology(
     topology: str,
     *,
-    node_pool: str = "",
     chips_per_node: int = 4,
     accelerator: str = "tpu-v6e-4",
 ) -> TopologySpec:
     normalized = topology.lower().replace("v6e:", "").strip()
     parts = normalized.split("x")
     if len(parts) != 2 or not all(part.isdigit() for part in parts):
-        raise ValueError(f"topology must look like 2x4, 4x4, or 8x8; got {topology!r}")
+        raise ValueError(f"topology must look like 4x4; got {topology!r}")
     dims = tuple(int(part) for part in parts)
     total_chips = dims[0] * dims[1]
     if total_chips <= 0:
@@ -358,21 +382,24 @@ def resolve_topology(
             f"topology {normalized} has {total_chips} chips, not divisible by "
             f"chips_per_node={chips_per_node}"
         )
-    resolved_node_pool = node_pool or KNOWN_NODE_POOLS.get(normalized)
-    if not resolved_node_pool:
+    if normalized not in SUPPORTED_NAP_TOPOLOGIES:
         raise ValueError(
-            f"no default node pool is known for topology {normalized!r}; "
-            "pass --node-pool explicitly after creating a matching GKE TPU node pool "
-            "and Kueue ResourceFlavor"
+            f"topology {normalized!r} is not configured for the default NAP Kueue; "
+            "add a matching ResourceFlavor before enabling it here"
         )
     return TopologySpec(
         topology=normalized,
         total_chips=total_chips,
         num_nodes=total_chips // chips_per_node,
         chips_per_node=chips_per_node,
-        node_pool=resolved_node_pool,
         accelerator=accelerator,
     )
+
+
+def gke_tpu_accelerator_label(accelerator: str) -> str:
+    if accelerator.startswith("tpu-v6e-"):
+        return "tpu-v6e-slice"
+    raise ValueError(f"unsupported GKE TPU accelerator selector for {accelerator!r}")
 
 
 def read_hf_token(env: dict[str, str] | None = None) -> str:
@@ -502,7 +529,46 @@ def build_task(
     image_id: str = DEFAULT_IMAGE_ID,
     cpus: int = DEFAULT_CPUS,
     memory: int = DEFAULT_MEMORY_GB,
+    kueue_local_queue: str = DEFAULT_KUEUE_LOCAL_QUEUE,
+    flex_start_max_run_duration: str = "",
+    provision_timeout_seconds: int = 3600,
 ) -> dict[str, Any]:
+    kubernetes_config: dict[str, Any] = {
+        "provision_timeout": int(provision_timeout_seconds),
+        "kueue": {
+            "local_queue_name": kueue_local_queue,
+        },
+        "pod_config": {
+            "spec": {
+                "nodeSelector": {
+                    "cloud.google.com/gke-flex-start": "true",
+                    "cloud.google.com/gke-tpu-accelerator": gke_tpu_accelerator_label(
+                        topology.accelerator
+                    ),
+                    "cloud.google.com/gke-tpu-topology": topology.topology,
+                },
+                "tolerations": [
+                    {
+                        "key": "google.com/tpu",
+                        "operator": "Equal",
+                        "value": "present",
+                        "effect": "NoSchedule",
+                    },
+                    {
+                        "key": "cloud.google.com/gke-queued",
+                        "operator": "Equal",
+                        "value": "true",
+                        "effect": "NoSchedule",
+                    },
+                ],
+            }
+        }
+    }
+    if flex_start_max_run_duration:
+        kubernetes_config["dws"] = {
+            "enabled": True,
+            "max_run_duration": flex_start_max_run_duration,
+        }
     return {
         "name": task_name,
         "workdir": ".",
@@ -521,30 +587,7 @@ def build_task(
         "setup": LiteralString(TASK_SETUP),
         "run": LiteralString(TASK_RUN),
         "config": {
-            "kubernetes": {
-                "pod_config": {
-                    "spec": {
-                        "nodeSelector": {
-                            "cloud.google.com/gke-nodepool": topology.node_pool,
-                            "cloud.google.com/gke-tpu-topology": topology.topology,
-                        },
-                        "tolerations": [
-                            {
-                                "key": "google.com/tpu",
-                                "operator": "Equal",
-                                "value": "present",
-                                "effect": "NoSchedule",
-                            },
-                            {
-                                "key": "cloud.google.com/gke-queued",
-                                "operator": "Equal",
-                                "value": "true",
-                                "effect": "NoSchedule",
-                            },
-                        ],
-                    }
-                }
-            }
+            "kubernetes": kubernetes_config,
         },
     }
 
@@ -561,6 +604,34 @@ def run_command(
     if check and result.returncode != 0:
         raise SystemExit(result.returncode)
     return result
+
+
+def run_sky_launch_with_teardown(
+    *,
+    launch_cmd: list[str],
+    sky_bin: str,
+    cluster: str,
+    cwd: Path,
+    env: dict[str, str],
+    down: bool,
+    yes: bool,
+) -> None:
+    launch_returncode = 130
+    down_result: subprocess.CompletedProcess[str] | None = None
+    try:
+        launch_result = run_command(launch_cmd, cwd=cwd, env=env, check=False)
+        launch_returncode = launch_result.returncode
+    finally:
+        if down:
+            down_cmd = [sky_bin, "down"]
+            if yes:
+                down_cmd.append("--yes")
+            down_cmd.append(cluster)
+            down_result = run_command(down_cmd, cwd=cwd, env=env, check=False)
+    if launch_returncode != 0:
+        raise SystemExit(launch_returncode)
+    if down_result is not None and down_result.returncode != 0:
+        raise SystemExit(down_result.returncode)
 
 
 def aot_cache_ready(
@@ -725,10 +796,31 @@ def print_dry_run_assets(
     print(shlex.join(sky_command))
 
 
-def default_cluster_name(topology: TopologySpec) -> str:
-    if topology.topology == "2x4":
-        return "spectra-100m-muon-v6e"
-    return f"spectra-100m-muon-v6e-{topology.topology}"
+def cluster_name_slug(value: str) -> str:
+    chars = []
+    previous_dash = False
+    for char in value.lower():
+        is_ascii_alnum = ("a" <= char <= "z") or ("0" <= char <= "9")
+        if is_ascii_alnum:
+            chars.append(char)
+            previous_dash = False
+        elif not previous_dash:
+            chars.append("-")
+            previous_dash = True
+    return "".join(chars).strip("-")
+
+
+def default_cluster_name(run_id: str) -> str:
+    prefix = "spectra"
+    suffix = cluster_name_slug(run_id)
+    cluster = f"{prefix}-{suffix}"
+    if len(cluster) <= MAX_SKY_CLUSTER_NAME_LENGTH:
+        return cluster
+
+    digest = hashlib.sha1(suffix.encode()).hexdigest()[:8]
+    suffix_length = MAX_SKY_CLUSTER_NAME_LENGTH - len(prefix) - len(digest) - 2
+    shortened_suffix = suffix[:suffix_length].rstrip("-")
+    return f"{prefix}-{shortened_suffix}-{digest}"
 
 
 def default_aot_cache_gcs(workdir: str, cache_key: str) -> str:
@@ -744,15 +836,20 @@ def default_aot_cache_gcs(workdir: str, cache_key: str) -> str:
     return f"gs://{bucket_name}/skypilot-aot-cache/{cache_key}"
 
 
+def sky_args_request_async(sky_args: list[str]) -> bool:
+    return "--async" in sky_args
+
+
 def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
     args, sky_args = parse_args(argv)
+    if args.down and sky_args_request_async(sky_args):
+        raise SystemExit("sky --async cannot be combined with train_sky.py --down")
     topology = resolve_topology(
         args.topology,
-        node_pool=args.node_pool,
         chips_per_node=args.chips_per_node,
         accelerator=args.accelerator,
     )
@@ -805,7 +902,7 @@ def main(argv: list[str] | None = None) -> None:
         f"{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}"
     )
     workdir = args.workdir.rstrip("/")
-    cluster = args.cluster or default_cluster_name(topology)
+    cluster = args.cluster or default_cluster_name(run_id)
     cache_key = f"100m_muon_{topology.slug}_b{batch_size}_accum{grad_accum}"
     aot_cache_dir = args.aot_cache_dir or f"artifacts/jax_compile_cache/{cache_key}"
     aot_output_dir = args.aot_output_dir or f"artifacts/tpu_compile/{cache_key}"
@@ -825,12 +922,12 @@ def main(argv: list[str] | None = None) -> None:
     aot_overrides_json = json_compact(aot_overrides)
 
     logging.info(
-        "Topology: topology=%s nodes=%d chips=%d node_pool=%s accelerator=%s",
+        "Topology: topology=%s nodes=%d chips=%d accelerator=%s kueue=%s",
         topology.topology,
         topology.num_nodes,
         topology.total_chips,
-        topology.node_pool,
         topology.accelerator,
+        args.kueue_local_queue,
     )
     logging.info(
         "Training shape: mesh=%s batch=%d grad_accum=%d steps=%d",
@@ -921,6 +1018,9 @@ def main(argv: list[str] | None = None) -> None:
         image_id=args.image_id,
         cpus=args.cpus,
         memory=args.memory,
+        kueue_local_queue=args.kueue_local_queue,
+        flex_start_max_run_duration=args.flex_start_max_run_duration,
+        provision_timeout_seconds=args.provision_timeout_seconds,
     )
     task_path = write_task_file(task, REPO_ROOT / args.task_output_dir, run_id)
     logging.info("Wrote SkyPilot task: %s", task_path)
@@ -934,8 +1034,6 @@ def main(argv: list[str] | None = None) -> None:
     cmd = [sky_bin, "launch", str(task_path), "--cluster", cluster]
     for secret in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "WANDB_API_KEY"):
         cmd.extend(["--secret", secret])
-    if args.down:
-        cmd.append("--down")
     if args.yes:
         cmd.append("--yes")
     cmd.extend(sky_args)
@@ -950,7 +1048,15 @@ def main(argv: list[str] | None = None) -> None:
         )
         logging.info("Dry run requested; not launching SkyPilot.")
         return
-    run_command(cmd, cwd=REPO_ROOT, env=launch_env)
+    run_sky_launch_with_teardown(
+        launch_cmd=cmd,
+        sky_bin=sky_bin,
+        cluster=cluster,
+        cwd=REPO_ROOT,
+        env=launch_env,
+        down=args.down,
+        yes=args.yes,
+    )
 
 
 if __name__ == "__main__":

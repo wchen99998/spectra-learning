@@ -18,6 +18,10 @@ from spectra_learning.models.pairmixer_jax import PairFeatureEmbedder, PairMixer
 from spectra_learning.models.peak_features_jax import PeakFeatureEmbedder
 
 
+def _normal_token_param(rngs: nnx.Rngs, shape: tuple[int, ...]) -> nnx.Param:
+    return nnx.Param(rngs.params.normal(shape, dtype=jnp.float32) * 0.02)
+
+
 class PeakSetEncoder(nnx.Module):
     def __init__(
         self,
@@ -49,8 +53,10 @@ class PeakSetEncoder(nnx.Module):
         activation_checkpoint_mode: str = "none",
         activation_checkpoint_every_n_layers: int = 1,
         activation_checkpoint_modules: tuple[str, ...] = ("encoder", "predictor"),
+        rngs: nnx.Rngs | None = None,
         compute_dtype: object = jnp.float32,
     ) -> None:
+        rngs = nnx.Rngs(0) if rngs is None else rngs
         self.num_layers = num_layers
         self.use_position_embedding = use_position_embedding
         self.pairmixer_block_type = pairmixer_block_type.lower()
@@ -61,25 +67,20 @@ class PeakSetEncoder(nnx.Module):
         self.embedder = embedder
         self.position_embedding = build_frozen_position_embedding(num_peaks, model_dim)
         pair_dim = model_dim if pair_dim is None else pair_dim
-        self.cls_token = nnx.Param(jnp.zeros((model_dim,), dtype=jnp.float32))
+        self.cls_token = _normal_token_param(rngs, (model_dim,))
         if self.use_induced_pair:
-            self.inducing_token = nnx.Param(
-                jnp.zeros((induced_pair_num_inducing, model_dim), dtype=jnp.float32)
+            self.inducing_token = _normal_token_param(
+                rngs,
+                (induced_pair_num_inducing, model_dim),
             )
-            self.latent_pair_token = nnx.Param(
-                jnp.zeros(
-                    (induced_pair_num_inducing, induced_pair_num_inducing, pair_dim),
-                    dtype=jnp.float32,
-                )
+            self.latent_pair_token = _normal_token_param(
+                rngs,
+                (induced_pair_num_inducing, induced_pair_num_inducing, pair_dim),
             )
         else:
-            self.cls_to_peak_pair_token = nnx.Param(
-                jnp.zeros((pair_dim,), dtype=jnp.float32)
-            )
-            self.peak_to_cls_pair_token = nnx.Param(
-                jnp.zeros((pair_dim,), dtype=jnp.float32)
-            )
-            self.cls_cls_pair_token = nnx.Param(jnp.zeros((pair_dim,), dtype=jnp.float32))
+            self.cls_to_peak_pair_token = _normal_token_param(rngs, (pair_dim,))
+            self.peak_to_cls_pair_token = _normal_token_param(rngs, (pair_dim,))
+            self.cls_cls_pair_token = _normal_token_param(rngs, (pair_dim,))
             self.pair_embedder = PairFeatureEmbedder(
                 single_dim=model_dim,
                 pair_dim=pair_dim,

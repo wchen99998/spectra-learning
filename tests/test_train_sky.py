@@ -1,4 +1,6 @@
+import json
 import math
+import os
 
 import pytest
 
@@ -30,7 +32,10 @@ def test_launcher_shape_comes_from_explicit_muon_long_run_config():
     assert args.config == MUON_CONFIG
     assert args.workdir == MUON_WORKDIR
     assert args.topology == "4x4"
+    assert args.kueue_local_queue == "skypilot-v6e-nap"
     assert args.training_max_steps is None
+    assert args.flex_start_max_run_duration == ""
+    assert args.provision_timeout_seconds == 3600
     assert defaults.training_max_steps == 250_000
     assert defaults.batch_size == 4096
     assert defaults.gradient_accumulation_steps == 4
@@ -55,6 +60,21 @@ def test_dryrun_alias_maps_to_dry_run_flag():
     assert args.dry_run is True
 
 
+def test_flex_start_max_run_duration_aliases_map_to_same_arg():
+    args, _sky_args = train_sky.parse_args(
+        [
+            "--config",
+            MUON_CONFIG,
+            "--workdir",
+            MUON_WORKDIR,
+            "--dws-max-run-duration",
+            "6h",
+        ]
+    )
+
+    assert args.flex_start_max_run_duration == "6h"
+
+
 def test_muon_long_run_config_scales_lr_and_probe_schedule():
     cfg = load_config(MUON_CONFIG)
 
@@ -74,30 +94,20 @@ def test_muon_long_run_config_scales_lr_and_probe_schedule():
     assert cfg.jax_precompile_variant == "all"
 
 
-def test_resolve_topology_4x4_maps_to_16_chip_pool():
+def test_resolve_topology_4x4_maps_to_16_chips():
     topology = train_sky.resolve_topology("4x4")
 
     assert topology.topology == "4x4"
     assert topology.total_chips == 16
     assert topology.num_nodes == 4
     assert topology.chips_per_node == 4
-    assert topology.node_pool == "skypilot-v6e-16-flex"
     assert topology.jax_mesh_devices == "16"
     assert topology.aot_target == "v6e-4x4-multihost"
 
 
-def test_resolve_topology_rejects_unknown_pool_without_override():
-    with pytest.raises(ValueError, match="no default node pool"):
+def test_resolve_topology_rejects_topology_without_nap_flavor():
+    with pytest.raises(ValueError, match="not configured for the default NAP Kueue"):
         train_sky.resolve_topology("4x8")
-
-
-def test_resolve_topology_accepts_explicit_unknown_pool():
-    topology = train_sky.resolve_topology("4x8", node_pool="custom-v6e-32-flex")
-
-    assert topology.total_chips == 32
-    assert topology.num_nodes == 8
-    assert topology.node_pool == "custom-v6e-32-flex"
-    assert topology.aot_target == "v6e-4x8-multihost"
 
 
 def test_build_task_constructs_topology_resources_and_env():
@@ -120,9 +130,15 @@ def test_build_task_constructs_topology_resources_and_env():
     assert task["envs"]["SPECTRA_TRAINING_MAX_STEPS"] == "100"
     assert "SPECTRA_TRAIN_OVERRIDES_JSON must be set" in task["run"]
     assert '"jax_mesh_devices": "16"' not in task["run"]
+    assert task["config"]["kubernetes"]["kueue"] == {
+        "local_queue_name": "skypilot-v6e-nap",
+    }
+    assert task["config"]["kubernetes"]["provision_timeout"] == 3600
     node_selector = task["config"]["kubernetes"]["pod_config"]["spec"]["nodeSelector"]
-    assert node_selector["cloud.google.com/gke-nodepool"] == "skypilot-v6e-16-flex"
+    assert node_selector["cloud.google.com/gke-flex-start"] == "true"
+    assert node_selector["cloud.google.com/gke-tpu-accelerator"] == "tpu-v6e-slice"
     assert node_selector["cloud.google.com/gke-tpu-topology"] == "4x4"
+    assert "cloud.google.com/gke-nodepool" not in node_selector
     tolerations = task["config"]["kubernetes"]["pod_config"]["spec"]["tolerations"]
     assert {
         "key": "cloud.google.com/gke-queued",
@@ -130,6 +146,37 @@ def test_build_task_constructs_topology_resources_and_env():
         "value": "true",
         "effect": "NoSchedule",
     } in tolerations
+    assert "dws" not in task["config"]["kubernetes"]
+
+
+def test_build_task_sets_flex_start_max_run_duration():
+    task = train_sky.build_task(
+        topology=train_sky.resolve_topology("4x4"),
+        envs={"SPECTRA_RUN_ID": "new", "SPECTRA_TRAINING_MAX_STEPS": "100"},
+        infra="k8s/skypilot-training",
+        flex_start_max_run_duration="6h",
+    )
+
+    assert task["config"]["kubernetes"]["dws"] == {
+        "enabled": True,
+        "max_run_duration": "6h",
+    }
+
+
+def test_default_cluster_name_uses_run_id():
+    assert (
+        train_sky.default_cluster_name("16-induced-pair-48-peaks-test-run")
+        == "spectra-16-induced-pair-48-peaks-test-run"
+    )
+
+
+def test_default_cluster_name_bounds_long_run_id():
+    cluster = train_sky.default_cluster_name(
+        "100m-muon-v6e4x4-b4096-accum4-extra-long-experiment-name-20260618-155229"
+    )
+
+    assert len(cluster) <= train_sky.MAX_SKY_CLUSTER_NAME_LENGTH
+    assert cluster.startswith("spectra-100m-muon-v6e4x4")
 
 
 def test_default_aot_cache_gcs_uses_explicit_workdir_bucket():
@@ -185,6 +232,11 @@ def test_dryrun_prints_generated_assets_without_token_lookup(
     assert str(task_path) in output
     assert "===== SkyPilot Task YAML =====" in output
     assert "name: spectra-100m-muon-v6e-kueue" in output
+    assert "local_queue_name: skypilot-v6e-nap" in output
+    assert "provision_timeout: 3600" in output
+    assert "cloud.google.com/gke-flex-start: 'true'" in output
+    assert "cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice" in output
+    assert "cloud.google.com/gke-nodepool" not in output
     assert f"SPECTRA_CONFIG: {MUON_CONFIG}" in output
     assert "SPECTRA_WORKDIR:" in output
     assert "SPECTRA_TRAIN_OVERRIDES_JSON:" in output
@@ -194,3 +246,144 @@ def test_dryrun_prints_generated_assets_without_token_lookup(
     assert '"jax_mesh_devices":"16"' in output
     assert "===== SkyPilot Command =====" in output
     assert "sky launch" in output
+    assert "--cluster spectra-dryrun-assets" in output
+    assert "--down" not in output
+
+
+def test_launch_failure_runs_explicit_sky_down_and_preserves_exit_code(
+    tmp_path,
+    monkeypatch,
+):
+    command_log = _install_fake_sky(tmp_path, monkeypatch, launch_returncode=17)
+    monkeypatch.setattr(train_sky, "prepare_aot_cache", lambda **_kwargs: None)
+    monkeypatch.setenv("HF_TOKEN", "hf-token")
+    monkeypatch.setenv("WANDB_API_KEY", "wandb-token")
+
+    with pytest.raises(SystemExit) as exc:
+        train_sky.main(
+            [
+                "--run-id",
+                "fake-fail",
+                "--config",
+                MUON_CONFIG,
+                "--workdir",
+                f"{MUON_WORKDIR}-fake-fail",
+                "--task-output-dir",
+                str(tmp_path / "tasks"),
+                "--no-precompile-aot",
+                "--no-sync-aot-cache-to-gcs",
+            ]
+        )
+
+    commands = _read_fake_sky_commands(command_log)
+    assert exc.value.code == 17
+    assert commands[0][0] == "launch"
+    assert "--down" not in commands[0]
+    assert commands[1] == ["down", "--yes", "spectra-fake-fail"]
+
+
+def test_successful_launch_runs_explicit_sky_down(tmp_path, monkeypatch):
+    command_log = _install_fake_sky(tmp_path, monkeypatch, launch_returncode=0)
+    monkeypatch.setattr(train_sky, "prepare_aot_cache", lambda **_kwargs: None)
+    monkeypatch.setenv("HF_TOKEN", "hf-token")
+    monkeypatch.setenv("WANDB_API_KEY", "wandb-token")
+
+    train_sky.main(
+        [
+            "--run-id",
+            "fake-success",
+            "--config",
+            MUON_CONFIG,
+            "--workdir",
+            f"{MUON_WORKDIR}-fake-success",
+            "--task-output-dir",
+            str(tmp_path / "tasks"),
+            "--no-precompile-aot",
+            "--no-sync-aot-cache-to-gcs",
+        ]
+    )
+
+    commands = _read_fake_sky_commands(command_log)
+    assert commands[0][0] == "launch"
+    assert "--down" not in commands[0]
+    assert commands[1] == ["down", "--yes", "spectra-fake-success"]
+
+
+def test_no_down_skips_explicit_sky_down(tmp_path, monkeypatch):
+    command_log = _install_fake_sky(tmp_path, monkeypatch, launch_returncode=0)
+    monkeypatch.setattr(train_sky, "prepare_aot_cache", lambda **_kwargs: None)
+    monkeypatch.setenv("HF_TOKEN", "hf-token")
+    monkeypatch.setenv("WANDB_API_KEY", "wandb-token")
+
+    train_sky.main(
+        [
+            "--no-down",
+            "--run-id",
+            "fake-keep",
+            "--config",
+            MUON_CONFIG,
+            "--workdir",
+            f"{MUON_WORKDIR}-fake-keep",
+            "--task-output-dir",
+            str(tmp_path / "tasks"),
+            "--no-precompile-aot",
+            "--no-sync-aot-cache-to-gcs",
+        ]
+    )
+
+    commands = _read_fake_sky_commands(command_log)
+    assert len(commands) == 1
+    assert commands[0][0] == "launch"
+
+
+def test_down_rejects_async_launch():
+    with pytest.raises(SystemExit, match="--async"):
+        train_sky.main(
+            [
+                "--run-id",
+                "fake-async",
+                "--config",
+                MUON_CONFIG,
+                "--workdir",
+                f"{MUON_WORKDIR}-fake-async",
+                "--",
+                "--async",
+            ]
+        )
+
+
+def _install_fake_sky(
+    tmp_path,
+    monkeypatch,
+    *,
+    launch_returncode: int,
+):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    command_log = tmp_path / "sky-commands.jsonl"
+    sky_path = bin_dir / "sky"
+    sky_path.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import sys
+
+with open(os.environ["FAKE_SKY_COMMAND_LOG"], "a") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\\n")
+
+if len(sys.argv) > 1 and sys.argv[1] == "launch":
+    raise SystemExit(int(os.environ["FAKE_SKY_LAUNCH_RETURNCODE"]))
+if len(sys.argv) > 1 and sys.argv[1] == "down":
+    raise SystemExit(int(os.environ.get("FAKE_SKY_DOWN_RETURNCODE", "0")))
+raise SystemExit(2)
+"""
+    )
+    sky_path.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("FAKE_SKY_COMMAND_LOG", str(command_log))
+    monkeypatch.setenv("FAKE_SKY_LAUNCH_RETURNCODE", str(launch_returncode))
+    return command_log
+
+
+def _read_fake_sky_commands(command_log):
+    return [json.loads(line) for line in command_log.read_text().splitlines()]
