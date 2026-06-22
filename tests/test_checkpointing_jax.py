@@ -43,7 +43,6 @@ def _tiny_mae_kwargs() -> dict[str, object]:
         "num_peaks": 3,
         "jepa_num_target_blocks": 1,
         "distogram_loss_weight": 0.0,
-        "pairmixer_use_pair_bias_attention": False,
         "predictor_dropout": 0.0,
         "target_projector_dim": -1,
         "jepa_mae_mz_bin_size": 100.0,

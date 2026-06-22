@@ -83,12 +83,13 @@ class PeakSetJEPAJax(nnx.Module):
         self.pairmixer_block_type = cfg.pairmixer_block_type.lower()
         if self.pairmixer_block_type not in {
             "dense",
+            "bi-dense",
             "induced",
             "triangle_mediator",
         }:
             raise ValueError(
                 "pairmixer_block_type must be one of "
-                "('dense', 'induced', 'triangle_mediator')"
+                "('dense', 'bi-dense', 'induced', 'triangle_mediator')"
             )
         self.pairmixer_triangle_mediator_num_mediators = (
             cfg.pairmixer_triangle_mediator_num_mediators
@@ -211,7 +212,6 @@ class PeakSetJEPAJax(nnx.Module):
                     attention_mlp_multiple=cfg.attention_mlp_multiple,
                     norm_eps=self.norm_eps,
                     dropout=cfg.predictor_dropout,
-                    use_pair_bias_attention=cfg.pairmixer_use_pair_bias_attention,
                     compute_dtype=self.compute_dtype,
                 )
             else:
@@ -222,13 +222,13 @@ class PeakSetJEPAJax(nnx.Module):
                     attention_mlp_multiple=cfg.attention_mlp_multiple,
                     norm_eps=self.norm_eps,
                     dropout=cfg.predictor_dropout,
-                    use_pair_bias_attention=cfg.pairmixer_use_pair_bias_attention,
                     triangle_mediator_num_mediators=(
                         self.pairmixer_triangle_mediator_num_mediators
                         if self.pairmixer_block_type == "triangle_mediator"
                         else None
                     ),
                     triangle_mediator_eps=self.pairmixer_triangle_mediator_eps,
+                    use_single_to_pair_update=self.pairmixer_block_type == "bi-dense",
                     compute_dtype=self.compute_dtype,
                 )
             predictor_blocks.append(block)
@@ -332,7 +332,6 @@ class PeakSetJEPAJax(nnx.Module):
             pairmixer_triangle_mediator_eps=cfg.pairmixer_triangle_mediator_eps,
             pair_feature_hidden_dim=cfg.pairmixer_pair_feature_hidden_dim,
             pairmixer_dropout=cfg.pairmixer_dropout,
-            pairmixer_use_pair_bias_attention=cfg.pairmixer_use_pair_bias_attention,
             pairmixer_mz_scale=cfg.pairmixer_mz_scale,
             pairmixer_precursor_mz_scale=cfg.pairmixer_precursor_mz_scale,
             pairmixer_use_fourier_features=cfg.pairmixer_use_fourier_features,

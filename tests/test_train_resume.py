@@ -274,20 +274,52 @@ def test_jax_train_metrics_logging_materializes_non_main_without_logging(monkeyp
     monkeypatch.setattr(pretrain_jax.jax, "process_index", lambda: 1)
     monkeypatch.setattr(pretrain_jax.jax, "device_get", fake_device_get)
 
+    staged = pretrain_jax._StagedJaxTrainMetrics(
+        metrics={"loss": pretrain_jax.np.asarray(1.25)},
+        epoch=0,
+        global_step=10,
+        total_steps=100,
+    )
     pretrain_jax._log_jax_train_metrics(
         cfg,
         logger,
         pbar,
-        {"loss": pretrain_jax.np.asarray(1.25)},
-        epoch=0,
-        global_step=10,
-        total_steps=100,
-        every_n_steps=10,
+        staged,
     )
 
     assert device_get_calls == 1
     assert logger.logs == []
     assert pbar.postfix is None
+
+
+def test_jax_train_metrics_staging_copies_to_host_async(monkeypatch):
+    from spectra_learning.training import pretrain_jax
+
+    metrics = {"loss": pretrain_jax.np.asarray(1.25)}
+    copy_calls = []
+
+    def fake_copy_to_host_async(value):
+        copy_calls.append(value)
+        return value
+
+    monkeypatch.setattr(
+        pretrain_jax.jax,
+        "copy_to_host_async",
+        fake_copy_to_host_async,
+    )
+
+    staged = pretrain_jax._stage_jax_train_metrics(
+        metrics,
+        epoch=2,
+        global_step=10,
+        total_steps=100,
+    )
+
+    assert copy_calls == [metrics]
+    assert staged.metrics is metrics
+    assert staged.epoch == 2
+    assert staged.global_step == 10
+    assert staged.total_steps == 100
 
 
 def test_jax_train_metrics_logging_materializes_once_on_main(monkeypatch):
@@ -309,18 +341,20 @@ def test_jax_train_metrics_logging_materializes_once_on_main(monkeypatch):
     monkeypatch.setattr(pretrain_jax.jax, "process_index", lambda: 0)
     monkeypatch.setattr(pretrain_jax.jax, "device_get", fake_device_get)
 
-    pretrain_jax._log_jax_train_metrics(
-        cfg,
-        logger,
-        pbar,
-        {
+    staged = pretrain_jax._StagedJaxTrainMetrics(
+        metrics={
             "loss": pretrain_jax.np.asarray(1.25),
             "ema_teacher_momentum": pretrain_jax.np.asarray(0.99),
         },
         epoch=2,
         global_step=10,
         total_steps=100,
-        every_n_steps=10,
+    )
+    pretrain_jax._log_jax_train_metrics(
+        cfg,
+        logger,
+        pbar,
+        staged,
     )
 
     expected_lr = learning_rate_at_step(

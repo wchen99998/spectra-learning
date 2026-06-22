@@ -28,7 +28,7 @@ SUPPORTED_TARGET_NORMALIZATIONS = {"none", "zscore"}
 SUPPORTED_LATENT_PAIR_TARGET_NORMALIZATIONS = {"none", "layernorm"}
 SUPPORTED_EMA_SCHEDULES = {"constant", "linear", "cosine", "slow-fast-slow"}
 SUPPORTED_MASKED_TOKEN_INPUT_MODES = {"latent_token", "mz_sentinel"}
-SUPPORTED_PAIRMIXER_BLOCK_TYPES = {"dense", "induced", "triangle_mediator"}
+SUPPORTED_PAIRMIXER_BLOCK_TYPES = {"dense", "bi-dense", "induced", "triangle_mediator"}
 
 
 def configure_peak_set_model(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
@@ -71,7 +71,7 @@ def _configure_dimensions(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
     if model.pairmixer_block_type not in SUPPORTED_PAIRMIXER_BLOCK_TYPES:
         raise ValueError(
             "pairmixer_block_type must be one of "
-            "('dense', 'induced', 'triangle_mediator')"
+            "('dense', 'bi-dense', 'induced', 'triangle_mediator')"
         )
     model.pairmixer_triangle_mediator_num_mediators = (
         cfg.pairmixer_triangle_mediator_num_mediators
@@ -192,7 +192,6 @@ def _build_peak_set_encoder(cfg: PeakSetJEPASettings) -> PeakSetEncoder:
         pairmixer_triangle_mediator_eps=cfg.pairmixer_triangle_mediator_eps,
         pair_feature_hidden_dim=cfg.pairmixer_pair_feature_hidden_dim,
         pairmixer_dropout=cfg.pairmixer_dropout,
-        pairmixer_use_pair_bias_attention=cfg.pairmixer_use_pair_bias_attention,
         pairmixer_mz_scale=cfg.pairmixer_mz_scale,
         pairmixer_precursor_mz_scale=cfg.pairmixer_precursor_mz_scale,
         pairmixer_use_fourier_features=cfg.pairmixer_use_fourier_features,
@@ -294,7 +293,6 @@ def _build_predictor(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
                 attention_mlp_multiple=cfg.attention_mlp_multiple,
                 norm_eps=model.norm_eps,
                 dropout=cfg.predictor_dropout,
-                use_pair_bias_attention=cfg.pairmixer_use_pair_bias_attention,
             )
         else:
             block = PairMixerBlock(
@@ -304,13 +302,13 @@ def _build_predictor(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
                 attention_mlp_multiple=cfg.attention_mlp_multiple,
                 norm_eps=model.norm_eps,
                 dropout=cfg.predictor_dropout,
-                use_pair_bias_attention=cfg.pairmixer_use_pair_bias_attention,
                 triangle_mediator_num_mediators=(
                     model.pairmixer_triangle_mediator_num_mediators
                     if model.pairmixer_block_type == "triangle_mediator"
                     else None
                 ),
                 triangle_mediator_eps=model.pairmixer_triangle_mediator_eps,
+                use_single_to_pair_update=model.pairmixer_block_type == "bi-dense",
             )
         predictor_blocks.append(block)
     model.masked_latent_predictor = nn.ModuleList(predictor_blocks)

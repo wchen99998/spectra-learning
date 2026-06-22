@@ -18,7 +18,7 @@ from spectra_learning.models.common_jax import (
     silu,
 )
 from spectra_learning.models.peak_features_jax import FourierFeatures
-from spectra_learning.models.transformer_jax import Attention, FeedForward
+from spectra_learning.models.transformer_jax import FeedForward
 
 
 COMMON_MASS_DIFFERENCES_DA = (
@@ -489,6 +489,44 @@ class AttentionPairBias(nnx.Module):
         self.o.load_torch_state_dict(state_dict, f"{prefix}.o")
 
 
+class GatedSingleToPairUpdate(nnx.Module):
+    def __init__(
+        self,
+        *,
+        single_dim: int,
+        pair_dim: int,
+        norm_eps: float,
+        compute_dtype: object = jnp.float32,
+    ) -> None:
+        self.single_norm = LayerNorm(single_dim, eps=norm_eps)
+        self.pair_norm = LayerNorm(pair_dim, eps=norm_eps)
+        self.left = Linear(single_dim, pair_dim, compute_dtype=compute_dtype)
+        self.right = Linear(single_dim, pair_dim, compute_dtype=compute_dtype)
+        self.out = Linear(pair_dim, pair_dim, compute_dtype=compute_dtype)
+        self.gate = Linear(pair_dim, pair_dim, compute_dtype=compute_dtype)
+
+    def __call__(self, single: Array, pair: Array, pair_mask_value: Array) -> Array:
+        single_norm = self.single_norm(single)
+        left = self.left(single_norm)[:, :, None, :]
+        right = self.right(single_norm)[:, None, :, :]
+        update = self.out(left * right)
+        gate = jax.nn.sigmoid(self.gate(self.pair_norm(pair)))
+        update = gate * update
+        return update * pair_mask_value[..., None].astype(update.dtype)
+
+    def load_torch_state_dict(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        prefix: str,
+    ) -> None:
+        self.single_norm.load_torch_state_dict(state_dict, f"{prefix}.single_norm")
+        self.pair_norm.load_torch_state_dict(state_dict, f"{prefix}.pair_norm")
+        self.left.load_torch_state_dict(state_dict, f"{prefix}.left")
+        self.right.load_torch_state_dict(state_dict, f"{prefix}.right")
+        self.out.load_torch_state_dict(state_dict, f"{prefix}.out")
+        self.gate.load_torch_state_dict(state_dict, f"{prefix}.gate")
+
+
 class PairMixerBlock(nnx.Module):
     def __init__(
         self,
@@ -499,14 +537,14 @@ class PairMixerBlock(nnx.Module):
         attention_mlp_multiple: float,
         norm_eps: float,
         dropout: float,
-        use_pair_bias_attention: bool = False,
         triangle_mediator_num_mediators: int | None = None,
         triangle_mediator_eps: float = 1e-4,
+        use_single_to_pair_update: bool = False,
         compute_dtype: object = jnp.float32,
     ) -> None:
         self.dropout = dropout
-        self.use_pair_bias_attention = use_pair_bias_attention
         self.use_triangle_mediator = triangle_mediator_num_mediators is not None
+        self.use_single_to_pair_update = use_single_to_pair_update
         if self.use_triangle_mediator:
             self.triangle_mediator_assignment = LearnedTriangleMediatorAssignment(
                 single_dim,
@@ -547,21 +585,20 @@ class PairMixerBlock(nnx.Module):
             hidden_dim=math.ceil(pair_dim * attention_mlp_multiple),
             compute_dtype=compute_dtype,
         )
-        if self.use_pair_bias_attention:
-            self.single_attention = AttentionPairBias(
+        if self.use_single_to_pair_update:
+            self.single_to_pair_update = GatedSingleToPairUpdate(
                 single_dim=single_dim,
                 pair_dim=pair_dim,
-                num_heads=num_heads,
                 norm_eps=norm_eps,
                 compute_dtype=compute_dtype,
             )
-        else:
-            self.single_attention_norm = LayerNorm(single_dim, eps=norm_eps)
-            self.single_attention = Attention(
-                single_dim,
-                num_heads,
-                compute_dtype=compute_dtype,
-            )
+        self.single_attention = AttentionPairBias(
+            single_dim=single_dim,
+            pair_dim=pair_dim,
+            num_heads=num_heads,
+            norm_eps=norm_eps,
+            compute_dtype=compute_dtype,
+        )
         self.single_transition_norm = LayerNorm(single_dim, eps=norm_eps)
         self.single_transition = FeedForward(
             single_dim,
@@ -600,18 +637,19 @@ class PairMixerBlock(nnx.Module):
             pair = pair + self.tri_mul_in(pair, peak_mask, pair_mask_value)
         pair = pair + self.pair_transition(self.pair_transition_norm(pair))
         pair = pair * pair_mask_value[..., None].astype(pair.dtype)
-        if self.use_pair_bias_attention:
-            attention_update = self.single_attention(
+        if self.use_single_to_pair_update:
+            pair = pair + self.single_to_pair_update(
                 single,
                 pair,
-                token_mask,
-                peak_mask.shape[1],
+                pair_mask_value,
             )
-        else:
-            attention_update = self.single_attention(
-                self.single_attention_norm(single),
-                attn_mask=token_mask[:, None, None, :],
-            )
+            pair = pair * pair_mask_value[..., None].astype(pair.dtype)
+        attention_update = self.single_attention(
+            single,
+            pair,
+            token_mask,
+            peak_mask.shape[1],
+        )
         single = single + attention_update
         single = single + self.single_transition(self.single_transition_norm(single))
         return single, pair
@@ -636,20 +674,15 @@ class PairMixerBlock(nnx.Module):
             state_dict,
             f"{prefix}.pair_transition",
         )
-        if self.use_pair_bias_attention:
-            self.single_attention.load_torch_state_dict(
+        if self.use_single_to_pair_update:
+            self.single_to_pair_update.load_torch_state_dict(
                 state_dict,
-                f"{prefix}.single_attention",
+                f"{prefix}.single_to_pair_update",
             )
-        else:
-            self.single_attention_norm.load_torch_state_dict(
-                state_dict,
-                f"{prefix}.single_attention_norm",
-            )
-            self.single_attention.load_torch_state_dict(
-                state_dict,
-                f"{prefix}.single_attention",
-            )
+        self.single_attention.load_torch_state_dict(
+            state_dict,
+            f"{prefix}.single_attention",
+        )
         self.single_transition_norm.load_torch_state_dict(
             state_dict,
             f"{prefix}.single_transition_norm",

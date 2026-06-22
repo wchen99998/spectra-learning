@@ -140,7 +140,6 @@ class InducedPairBlock(nnx.Module):
         attention_mlp_multiple: float,
         norm_eps: float,
         dropout: float,
-        use_pair_bias_attention: bool = False,
         compute_dtype: object = jnp.float32,
     ) -> None:
         del dropout
@@ -158,7 +157,6 @@ class InducedPairBlock(nnx.Module):
             attention_mlp_multiple=attention_mlp_multiple,
             norm_eps=norm_eps,
             dropout=0.0,
-            use_pair_bias_attention=use_pair_bias_attention,
             compute_dtype=compute_dtype,
         )
         self.single_update_norm = LayerNorm(single_dim, eps=norm_eps)

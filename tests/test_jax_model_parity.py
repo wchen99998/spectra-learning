@@ -49,7 +49,6 @@ def _small_mae_kwargs() -> dict[str, object]:
         "num_peaks": 5,
         "jepa_num_target_blocks": 1,
         "distogram_loss_weight": 1.0,
-        "pairmixer_use_pair_bias_attention": True,
         "predictor_dropout": 0.0,
         "target_projector_dim": -1,
     }
@@ -72,7 +71,6 @@ def _tiny_mae_kwargs() -> dict[str, object]:
         "num_peaks": 3,
         "jepa_num_target_blocks": 1,
         "distogram_loss_weight": 0.0,
-        "pairmixer_use_pair_bias_attention": False,
         "predictor_dropout": 0.0,
         "target_projector_dim": -1,
         "jepa_mae_mz_bin_size": 100.0,
@@ -86,7 +84,6 @@ def _small_induced_mae_kwargs() -> dict[str, object]:
         "pairmixer_block_type": "induced",
         "induced_pair_num_inducing": 3,
         "pairmixer_pair_dim": 8,
-        "pairmixer_use_pair_bias_attention": True,
         "latent_pair_loss_weight": 0.0,
     }
 
@@ -97,6 +94,13 @@ def _small_triangle_mediator_mae_kwargs() -> dict[str, object]:
         "pairmixer_block_type": "triangle_mediator",
         "pairmixer_triangle_mediator_num_mediators": 3,
         "pairmixer_triangle_mediator_eps": 1e-4,
+    }
+
+
+def _small_bi_dense_mae_kwargs() -> dict[str, object]:
+    return {
+        **_small_mae_kwargs(),
+        "pairmixer_block_type": "bi-dense",
     }
 
 
@@ -120,7 +124,6 @@ def _small_jepa_kwargs(**overrides: object) -> dict[str, object]:
         "distogram_loss_weight": 1.0,
         "latent_pair_loss_weight": 1.0,
         "latent_pair_target_normalization": "layernorm",
-        "pairmixer_use_pair_bias_attention": True,
         "predictor_dropout": 0.0,
         "target_projector_dim": -1,
     }
@@ -271,6 +274,21 @@ def test_initialize_jax_model_from_torch_seed_matches_pytorch_forward():
     initialize_jax_model_from_torch_seed(cfg, jax_model)
 
     batch = _real_pattern_batch("contiguous")
+    with torch.no_grad():
+        torch_metrics = torch_model(batch)
+    jax_metrics = jax_model(_jax_batch(batch))
+
+    _assert_metrics_close(torch_metrics, jax_metrics)
+
+
+def test_jax_bi_dense_mae_matches_pytorch_on_real_collated_batch():
+    torch.manual_seed(8)
+    kwargs = _small_bi_dense_mae_kwargs()
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    jax_model = PeakSetJEPAJax(**kwargs)
+    jax_model.load_torch_state_dict(torch_model.state_dict())
+    batch = _real_pattern_batch("contiguous")
+
     with torch.no_grad():
         torch_metrics = torch_model(batch)
     jax_metrics = jax_model(_jax_batch(batch))
@@ -640,6 +658,8 @@ def test_jax_pure_optax_accumulated_train_step_matches_manual_accumulation():
     nnx.update(pure_model, trainable_params)
 
     assert np.isfinite(np.asarray(metrics["loss"]))
+    assert "mae_loss" in metrics
+    assert "distogram_loss" in metrics
     np.testing.assert_allclose(
         np.asarray(pure_model.jepa_mae_mz_head.weight[...]),
         np.asarray(manual_model.jepa_mae_mz_head.weight[...]),
@@ -919,7 +939,6 @@ def test_jax_mae_teacher_jepa_matches_pytorch_with_teacher_config():
                 "    cfg.pairmixer_fourier_num_freqs = 2\n"
                 "    cfg.pairmixer_pair_dim = 10\n"
                 "    cfg.pairmixer_pair_feature_hidden_dim = 8\n"
-                "    cfg.pairmixer_use_pair_bias_attention = True\n"
                 "    cfg.num_peaks = 5\n"
                 "    cfg.jepa_num_target_blocks = 1\n"
                 "    cfg.target_projector_dim = -1\n"

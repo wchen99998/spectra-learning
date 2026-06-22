@@ -339,8 +339,8 @@ def test_encoder_and_predictor_final_norms_are_non_affine():
     predictor_block = model.masked_latent_predictor[0]
     assert isinstance(encoder_block, PairMixerBlock)
     assert isinstance(predictor_block, PairMixerBlock)
-    assert list(encoder_block.single_attention_norm.parameters())
-    assert list(predictor_block.single_attention_norm.parameters())
+    assert list(encoder_block.single_attention.single_norm.parameters())
+    assert list(predictor_block.single_attention.single_norm.parameters())
 
     encoder = PeakSetEncoder(
         model_dim=32,
@@ -353,7 +353,7 @@ def test_encoder_and_predictor_final_norms_are_non_affine():
     assert list(encoder.final_norm.parameters()) == []
 
 
-def test_backbone_uses_pairmixer_without_pair_bias_attention():
+def test_backbone_uses_pairmixer_with_pair_bias_attention_by_construction():
     model = _build_model()
     block = model.encoder.blocks[0]
 
@@ -361,18 +361,18 @@ def test_backbone_uses_pairmixer_without_pair_bias_attention():
     assert not hasattr(block, "refresh_pair")
     assert not hasattr(block, "tri_att_start")
     assert not hasattr(block, "tri_att_end")
-    assert not hasattr(block.single_attention, "pair_bias")
+    assert isinstance(block.single_attention, AttentionPairBias)
+    assert not hasattr(block, "single_attention_norm")
 
 
 @torch.no_grad()
-def test_pairmixer_can_use_pair_bias_attention():
+def test_pairmixer_uses_pair_bias_attention_by_construction():
     model = PeakSetJEPA(
         model_dim=32,
         encoder_num_layers=2,
         encoder_num_heads=4,
         num_peaks=6,
         feature_mlp_hidden_dim=32,
-        pairmixer_use_pair_bias_attention=True,
     )
     block = model.encoder.blocks[0]
     predictor_block = model.masked_latent_predictor[0]
@@ -394,12 +394,42 @@ def test_pairmixer_can_use_pair_bias_attention():
     assert encoded.shape == (2, 7, 32)
 
 
-def test_pairmixer_pair_bias_attention_setting_is_configurable():
+def test_bi_dense_block_type_is_configurable():
     settings = PeakSetJEPASettings.from_config(
-        {"pairmixer_use_pair_bias_attention": True}
+        {"pairmixer_block_type": "bi-dense"}
     )
 
-    assert settings.pairmixer_use_pair_bias_attention
+    assert settings.pairmixer_block_type == "bi-dense"
+
+
+@torch.no_grad()
+def test_bi_dense_pairmixer_adds_gated_single_to_pair_update():
+    model = PeakSetJEPA(
+        model_dim=32,
+        encoder_num_layers=2,
+        encoder_num_heads=4,
+        num_peaks=6,
+        feature_mlp_hidden_dim=32,
+        pairmixer_block_type="bi-dense",
+    )
+    block = model.encoder.blocks[0]
+    predictor_block = model.masked_latent_predictor[0]
+    batch = _make_batch()
+
+    encoded, pair = model.encoder.forward_with_pair(
+        batch["peak_mz"],
+        batch["peak_intensity"],
+        valid_mask=batch["peak_valid_mask"],
+        visible_mask=batch["peak_valid_mask"],
+    )
+
+    assert isinstance(block, PairMixerBlock)
+    assert isinstance(block.single_attention, AttentionPairBias)
+    assert hasattr(block, "single_to_pair_update")
+    assert isinstance(predictor_block, PairMixerBlock)
+    assert hasattr(predictor_block, "single_to_pair_update")
+    assert encoded.shape == (2, 7, 32)
+    assert pair.shape == (2, 7, 7, 32)
 
 
 @torch.no_grad()
@@ -412,7 +442,6 @@ def test_triangle_mediator_pairmixer_uses_dense_pair_state():
         feature_mlp_hidden_dim=32,
         pairmixer_block_type="triangle_mediator",
         pairmixer_triangle_mediator_num_mediators=3,
-        pairmixer_use_pair_bias_attention=True,
     )
     block = model.encoder.blocks[0]
     predictor_block = model.masked_latent_predictor[0]
@@ -501,7 +530,7 @@ def test_triangle_attention_is_retained_for_pair_features():
         torch.zeros_like(end_out[~pair_mask]),
     )
 
-def test_predictor_uses_pairmixer_without_pair_bias_attention():
+def test_predictor_uses_pairmixer_with_pair_bias_attention():
     model = PeakSetJEPA(
         model_dim=32,
         encoder_num_layers=2,
@@ -515,6 +544,7 @@ def test_predictor_uses_pairmixer_without_pair_bias_attention():
 
     for block in model.masked_latent_predictor:
         assert isinstance(block, PairMixerBlock)
+        assert isinstance(block.single_attention, AttentionPairBias)
         assert not hasattr(block, "refresh_pair")
         assert not hasattr(block, "tri_att_start")
         assert not hasattr(block, "tri_att_end")

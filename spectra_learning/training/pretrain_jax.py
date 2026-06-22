@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import time
+from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,14 @@ from spectra_learning.training.storage import (
 
 
 JAX_DATA_AXIS = "data"
+
+
+@dataclass(frozen=True)
+class _StagedJaxTrainMetrics:
+    metrics: dict[str, Array]
+    epoch: int
+    global_step: int
+    total_steps: int
 
 
 def trainable_param_filter(path: tuple[object, ...], value: object) -> bool:
@@ -675,37 +684,43 @@ def make_pure_accumulated_train_step(
     ) -> tuple[dict[str, Array], nnx.State]:
         def loss_fn(params: nnx.State, micro_batch: dict[str, Array]):
             functional_model = nnx.merge(graphdef, params, static_state)
-            return functional_model(micro_batch, loss_only=True)["loss"]
+            metrics = functional_model(micro_batch)
+            return metrics["loss"], metrics
 
         def micro_batch_grad(micro_batch: dict[str, Array]):
-            return jax.value_and_grad(loss_fn)(
+            return jax.value_and_grad(loss_fn, has_aux=True)(
                 trainable_params,
                 micro_batch,
             )
 
-        def scan_body(carry: tuple[nnx.State, Array], micro_batch):
-            grad_accumulator, loss_accumulator = carry
-            micro_loss, micro_grads = micro_batch_grad(micro_batch)
+        def scan_body(carry: tuple[nnx.State, dict[str, Array]], micro_batch):
+            grad_accumulator, metric_accumulator = carry
+            (_micro_loss, micro_metrics), micro_grads = micro_batch_grad(micro_batch)
             grad_accumulator = jax.tree.map(
                 lambda lhs, rhs: lhs + rhs,
                 grad_accumulator,
                 micro_grads,
             )
-            return (grad_accumulator, loss_accumulator + micro_loss), None
+            metric_accumulator = jax.tree.map(
+                lambda lhs, rhs: lhs + rhs,
+                metric_accumulator,
+                micro_metrics,
+            )
+            return (grad_accumulator, metric_accumulator), None
 
         first_batch = jax.tree.map(lambda value: value[0], batch)
         remaining_batches = jax.tree.map(lambda value: value[1:], batch)
-        loss, grads = micro_batch_grad(first_batch)
+        (_loss, metrics), grads = micro_batch_grad(first_batch)
 
-        (grads, loss), _ = jax.lax.scan(
+        (grads, metrics), _ = jax.lax.scan(
             scan_body,
-            (grads, loss),
+            (grads, metrics),
             remaining_batches,
         )
         num_micro_batches = float(jax.tree.leaves(batch)[0].shape[0])
         grads = jax.tree.map(lambda value: value / num_micro_batches, grads)
-        loss = loss / num_micro_batches
-        return {"loss": loss}, grads
+        metrics = jax.tree.map(lambda value: value / num_micro_batches, metrics)
+        return metrics, grads
 
     if sharded:
         data_mesh = _jax_data_mesh() if data_mesh is None else data_mesh
@@ -1169,6 +1184,7 @@ def _run_jax_training_loop(
     global_step = start_step
     start_epoch = min(start_step // datamodule.train_steps, loop_epochs - 1)
     last_metrics: dict[str, Array] = {}
+    pending_train_metrics: _StagedJaxTrainMetrics | None = None
     last_validation_metrics: dict[str, float] = {}
     last_msg_probe_metrics: dict[str, float] = {}
     train_start = time.perf_counter()
@@ -1318,16 +1334,15 @@ def _run_jax_training_loop(
             if measured_start is not None:
                 measured_steps += 1
             pbar.update(1)
-            _log_jax_train_metrics(
-                config,
-                logger,
-                pbar,
-                metrics,
-                epoch=epoch,
-                global_step=global_step,
-                total_steps=total_steps,
-                every_n_steps=log_every_n_steps,
-            )
+            _log_jax_train_metrics(config, logger, pbar, pending_train_metrics)
+            pending_train_metrics = None
+            if _should_log_jax_train_metrics(global_step, log_every_n_steps):
+                pending_train_metrics = _stage_jax_train_metrics(
+                    metrics,
+                    epoch=epoch,
+                    global_step=global_step,
+                    total_steps=total_steps,
+                )
             phase_start = time.perf_counter()
             maybe_save_checkpoint(global_step)
             add_non_train_timing(
@@ -1391,6 +1406,11 @@ def _run_jax_training_loop(
                     time.perf_counter() - phase_start,
                 )
                 profile_active = False
+        if pending_train_metrics is not None and (
+            global_step >= total_steps or epoch == loop_epochs - 1
+        ):
+            _log_jax_train_metrics(config, logger, pbar, pending_train_metrics)
+            pending_train_metrics = None
         pbar.close()
         _shutdown_torch_loader_iterator(loader_iter)
         del loader_iter, loader
@@ -1433,11 +1453,11 @@ def _run_jax_training_loop(
         0.0,
     )
     global_batch_size = int(datamodule.global_batch_size)
-    loss = float("nan")
+    train_metrics: dict[str, float] = {"train/loss": float("nan")}
     if last_metrics:
-        host_loss = float(np.asarray(jax.device_get(last_metrics["loss"])))
+        host_train_metrics = _jax_metrics_to_host(last_metrics, prefix="train/")
         if jax.process_index() == 0:
-            loss = host_loss
+            train_metrics = host_train_metrics
     result = {
         "run/final_global_step": float(global_step),
         "run/wall_elapsed_seconds": wall_elapsed,
@@ -1483,7 +1503,7 @@ def _run_jax_training_loop(
             if measured_wall_elapsed > 0
             else 0.0
         ),
-        "train/loss": loss,
+        **train_metrics,
     }
     for name, value in non_train_timing.items():
         result[f"run/{name}"] = value
@@ -1542,30 +1562,55 @@ def _log_jax_train_metrics(
     config: config_dict.ConfigDict,
     logger: MetricLogger,
     pbar: tqdm,
+    staged: _StagedJaxTrainMetrics | None,
+) -> None:
+    if staged is None:
+        return
+    host_metrics = _jax_metrics_to_host(staged.metrics, prefix="train/")
+    if jax.process_index() != 0:
+        return
+    pbar.set_postfix(
+        loss=f"{host_metrics['train/loss']:.4f}",
+        step=staged.global_step,
+    )
+    host_metrics["train/learning_rate"] = _scheduled_jax_learning_rate(
+        config,
+        global_step=staged.global_step,
+        total_steps=staged.total_steps,
+    )
+    host_metrics["epoch"] = float(staged.epoch)
+    host_metrics["global_step"] = float(staged.global_step)
+    logger.log_metrics(host_metrics, step=staged.global_step)
+
+
+def _should_log_jax_train_metrics(global_step: int, every_n_steps: int) -> bool:
+    return every_n_steps > 0 and global_step % every_n_steps == 0
+
+
+def _stage_jax_train_metrics(
     metrics: dict[str, Array],
     *,
     epoch: int,
     global_step: int,
     total_steps: int,
-    every_n_steps: int,
-) -> None:
-    if every_n_steps <= 0 or global_step % every_n_steps != 0:
-        return
-    host_metrics = {
-        f"train/{key}": float(np.asarray(value))
-        for key, value in jax.device_get(metrics).items()
-    }
-    if jax.process_index() != 0:
-        return
-    pbar.set_postfix(loss=f"{host_metrics['train/loss']:.4f}", step=global_step)
-    host_metrics["train/learning_rate"] = _scheduled_jax_learning_rate(
-        config,
+) -> _StagedJaxTrainMetrics:
+    return _StagedJaxTrainMetrics(
+        metrics=jax.copy_to_host_async(metrics),
+        epoch=epoch,
         global_step=global_step,
         total_steps=total_steps,
     )
-    host_metrics["epoch"] = float(epoch)
-    host_metrics["global_step"] = float(global_step)
-    logger.log_metrics(host_metrics, step=global_step)
+
+
+def _jax_metrics_to_host(
+    metrics: dict[str, Array],
+    *,
+    prefix: str = "",
+) -> dict[str, float]:
+    return {
+        f"{prefix}{key}": float(np.asarray(value))
+        for key, value in jax.device_get(metrics).items()
+    }
 
 
 def _evaluate_jax_validation_loss(

@@ -47,7 +47,6 @@ class PeakSetEncoder(nnx.Module):
         pairmixer_triangle_mediator_eps: float = 1e-4,
         pair_feature_hidden_dim: int = 128,
         pairmixer_dropout: float = 0.0,
-        pairmixer_use_pair_bias_attention: bool = False,
         pairmixer_mz_scale: float = 1000.0,
         pairmixer_precursor_mz_scale: float = 1000.0,
         pairmixer_use_fourier_features: bool = True,
@@ -67,6 +66,7 @@ class PeakSetEncoder(nnx.Module):
         self.use_position_embedding = use_position_embedding
         self.pairmixer_block_type = pairmixer_block_type.lower()
         self.use_induced_pair = self.pairmixer_block_type == "induced"
+        self.use_bi_dense = self.pairmixer_block_type == "bi-dense"
         self.use_triangle_mediator = self.pairmixer_block_type == "triangle_mediator"
         self.activation_checkpoint_mode = activation_checkpoint_mode.lower()
         self.activation_checkpoint_every_n_layers = activation_checkpoint_every_n_layers
@@ -119,7 +119,6 @@ class PeakSetEncoder(nnx.Module):
                     attention_mlp_multiple=attention_mlp_multiple,
                     norm_eps=norm_eps,
                     dropout=pairmixer_dropout,
-                    use_pair_bias_attention=pairmixer_use_pair_bias_attention,
                     compute_dtype=compute_dtype,
                 )
             else:
@@ -130,13 +129,13 @@ class PeakSetEncoder(nnx.Module):
                     attention_mlp_multiple=attention_mlp_multiple,
                     norm_eps=norm_eps,
                     dropout=pairmixer_dropout,
-                    use_pair_bias_attention=pairmixer_use_pair_bias_attention,
                     triangle_mediator_num_mediators=(
                         pairmixer_triangle_mediator_num_mediators
                         if self.use_triangle_mediator
                         else None
                     ),
                     triangle_mediator_eps=pairmixer_triangle_mediator_eps,
+                    use_single_to_pair_update=self.use_bi_dense,
                     compute_dtype=compute_dtype,
                 )
             blocks.append(block)

@@ -99,7 +99,6 @@ class InducedPairBlock(nn.Module):
         attention_mlp_multiple: float,
         norm_eps: float,
         dropout: float,
-        use_pair_bias_attention: bool = False,
     ) -> None:
         super().__init__()
         self.inducing_aggregate_norm = _build_norm(single_dim, eps=norm_eps)
@@ -112,7 +111,6 @@ class InducedPairBlock(nn.Module):
             attention_mlp_multiple=attention_mlp_multiple,
             norm_eps=norm_eps,
             dropout=dropout,
-            use_pair_bias_attention=use_pair_bias_attention,
         )
         self.single_update_norm = _build_norm(single_dim, eps=norm_eps)
         self.inducing_update_norm = _build_norm(single_dim, eps=norm_eps)
