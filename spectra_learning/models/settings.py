@@ -46,6 +46,8 @@ class PeakSetJEPASettings:
     pairmixer_block_type: str = "dense"
     pairmixer_pair_dim: int | None = None
     induced_pair_num_inducing: int = 8
+    pairmixer_triangle_mediator_num_mediators: int = 8
+    pairmixer_triangle_mediator_eps: float = 1e-4
     pairmixer_pair_feature_hidden_dim: int = 128
     pairmixer_dropout: float = 0.0
     pairmixer_use_pair_bias_attention: bool = False
@@ -163,6 +165,8 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "pairmixer_block_type": str,
     "pairmixer_pair_dim": _optional_int,
     "induced_pair_num_inducing": int,
+    "pairmixer_triangle_mediator_num_mediators": int,
+    "pairmixer_triangle_mediator_eps": float,
     "pairmixer_pair_feature_hidden_dim": int,
     "pairmixer_dropout": float,
     "pairmixer_use_pair_bias_attention": bool,

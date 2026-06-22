@@ -12,6 +12,7 @@ from spectra_learning.models.common_jax import (
     Array,
     LayerNorm,
     Linear,
+    assign_param,
     pair_mask,
     scaled_dot_product_attention,
     silu,
@@ -256,6 +257,160 @@ class TriangleMultiplicativeUpdate(nnx.Module):
         self.g_out.load_torch_state_dict(state_dict, f"{prefix}.g_out")
 
 
+class LearnedTriangleMediatorAssignment(nnx.Module):
+    def __init__(
+        self,
+        single_dim: int,
+        num_mediators: int,
+        *,
+        norm_eps: float,
+        compute_dtype: object = jnp.float32,
+    ) -> None:
+        self.single_dim = single_dim
+        self.num_mediators = num_mediators
+        self.compute_dtype = compute_dtype
+        self.matmul_precision = (
+            jax.lax.Precision.DEFAULT if compute_dtype == jnp.bfloat16 else None
+        )
+        self.mediator_token = nnx.Param(
+            jnp.zeros((num_mediators, single_dim), dtype=jnp.float32)
+        )
+        self.norm = LayerNorm(single_dim, eps=norm_eps)
+        self.wq = Linear(single_dim, single_dim, bias=False, compute_dtype=compute_dtype)
+        self.wk = Linear(single_dim, single_dim, bias=False, compute_dtype=compute_dtype)
+
+    def __call__(self, single: Array) -> Array:
+        batch_size = single.shape[0]
+        q = self.wq(self.norm(single))
+        mediator = jnp.broadcast_to(
+            self.mediator_token[...].astype(single.dtype),
+            (batch_size, self.num_mediators, self.single_dim),
+        )
+        k = self.wk(mediator)
+        scores = jnp.einsum(
+            "bid,bmd->bim",
+            q,
+            k,
+            precision=self.matmul_precision,
+        ) / math.sqrt(self.single_dim)
+        return jax.nn.softmax(scores.astype(jnp.float32), axis=-1).astype(q.dtype)
+
+    def load_torch_state_dict(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        prefix: str,
+    ) -> None:
+        assign_param(self.mediator_token, state_dict[f"{prefix}.mediator_token"])
+        self.norm.load_torch_state_dict(state_dict, f"{prefix}.norm")
+        self.wq.load_torch_state_dict(state_dict, f"{prefix}.wq")
+        self.wk.load_torch_state_dict(state_dict, f"{prefix}.wk")
+
+
+class MediatedTriangleMultiplicativeUpdate(nnx.Module):
+    def __init__(
+        self,
+        pair_dim: int,
+        *,
+        direction: str,
+        norm_eps: float,
+        mediator_eps: float,
+        compute_dtype: object = jnp.float32,
+    ) -> None:
+        self.direction = direction
+        self.mediator_eps = mediator_eps
+        self.compute_dtype = compute_dtype
+        self.matmul_precision = (
+            jax.lax.Precision.DEFAULT if compute_dtype == jnp.bfloat16 else None
+        )
+        self.norm_in = LayerNorm(pair_dim, eps=norm_eps)
+        self.p_in = Linear(pair_dim, 2 * pair_dim, compute_dtype=compute_dtype)
+        self.g_in = Linear(pair_dim, 2 * pair_dim, compute_dtype=compute_dtype)
+        self.norm_out = LayerNorm(pair_dim, eps=norm_eps)
+        self.p_out = Linear(pair_dim, pair_dim, compute_dtype=compute_dtype)
+        self.g_out = Linear(pair_dim, pair_dim, compute_dtype=compute_dtype)
+
+    def _metric(self, mediator_assignment: Array, token_mask: Array) -> tuple[Array, Array]:
+        mediator = mediator_assignment * token_mask[..., None].astype(
+            mediator_assignment.dtype
+        )
+        mediator_float = mediator.astype(jnp.float32)
+        gram = jnp.einsum(
+            "bkm,bkn->bmn",
+            mediator_float,
+            mediator_float,
+            precision=self.matmul_precision,
+        )
+        eye = jnp.eye(gram.shape[-1], dtype=jnp.float32)[None, :, :]
+        metric = jnp.linalg.inv(gram + self.mediator_eps * eye)
+        return mediator, metric.astype(mediator.dtype)
+
+    def __call__(
+        self,
+        x: Array,
+        token_mask: Array,
+        mask: Array,
+        mediator_assignment: Array,
+    ) -> Array:
+        pair_mask_f = mask[..., None].astype(x.dtype)
+        mediator, metric = self._metric(mediator_assignment, token_mask)
+        x_norm = self.norm_in(x)
+        projected = self.p_in(x_norm) * jax.nn.sigmoid(self.g_in(x_norm))
+        a, b = jnp.split(projected, 2, axis=-1)
+        if self.direction == "outgoing":
+            a_landmark = jnp.einsum(
+                "bikc,bkm->bimc",
+                a,
+                mediator,
+                precision=self.matmul_precision,
+            )
+            b_landmark = jnp.einsum(
+                "bjkc,bkm->bjmc",
+                b,
+                mediator,
+                precision=self.matmul_precision,
+            )
+        else:
+            a_landmark = jnp.einsum(
+                "bkic,bkm->bimc",
+                a,
+                mediator,
+                precision=self.matmul_precision,
+            )
+            b_landmark = jnp.einsum(
+                "bkjc,bkm->bjmc",
+                b,
+                mediator,
+                precision=self.matmul_precision,
+            )
+        a_landmark = jnp.einsum(
+            "bimc,bmn->binc",
+            a_landmark,
+            metric,
+            precision=self.matmul_precision,
+        )
+        update = jnp.einsum(
+            "binc,bjnc->bijc",
+            a_landmark,
+            b_landmark,
+            precision=self.matmul_precision,
+        )
+        update = self.p_out(self.norm_out(update))
+        update = update * jax.nn.sigmoid(self.g_out(x_norm))
+        return update * pair_mask_f
+
+    def load_torch_state_dict(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        prefix: str,
+    ) -> None:
+        self.norm_in.load_torch_state_dict(state_dict, f"{prefix}.norm_in")
+        self.p_in.load_torch_state_dict(state_dict, f"{prefix}.p_in")
+        self.g_in.load_torch_state_dict(state_dict, f"{prefix}.g_in")
+        self.norm_out.load_torch_state_dict(state_dict, f"{prefix}.norm_out")
+        self.p_out.load_torch_state_dict(state_dict, f"{prefix}.p_out")
+        self.g_out.load_torch_state_dict(state_dict, f"{prefix}.g_out")
+
+
 class AttentionPairBias(nnx.Module):
     def __init__(
         self,
@@ -345,22 +500,47 @@ class PairMixerBlock(nnx.Module):
         norm_eps: float,
         dropout: float,
         use_pair_bias_attention: bool = False,
+        triangle_mediator_num_mediators: int | None = None,
+        triangle_mediator_eps: float = 1e-4,
         compute_dtype: object = jnp.float32,
     ) -> None:
         self.dropout = dropout
         self.use_pair_bias_attention = use_pair_bias_attention
-        self.tri_mul_out = TriangleMultiplicativeUpdate(
-            pair_dim,
-            direction="outgoing",
-            norm_eps=norm_eps,
-            compute_dtype=compute_dtype,
-        )
-        self.tri_mul_in = TriangleMultiplicativeUpdate(
-            pair_dim,
-            direction="incoming",
-            norm_eps=norm_eps,
-            compute_dtype=compute_dtype,
-        )
+        self.use_triangle_mediator = triangle_mediator_num_mediators is not None
+        if self.use_triangle_mediator:
+            self.triangle_mediator_assignment = LearnedTriangleMediatorAssignment(
+                single_dim,
+                triangle_mediator_num_mediators,
+                norm_eps=norm_eps,
+                compute_dtype=compute_dtype,
+            )
+            self.tri_mul_out = MediatedTriangleMultiplicativeUpdate(
+                pair_dim,
+                direction="outgoing",
+                norm_eps=norm_eps,
+                mediator_eps=triangle_mediator_eps,
+                compute_dtype=compute_dtype,
+            )
+            self.tri_mul_in = MediatedTriangleMultiplicativeUpdate(
+                pair_dim,
+                direction="incoming",
+                norm_eps=norm_eps,
+                mediator_eps=triangle_mediator_eps,
+                compute_dtype=compute_dtype,
+            )
+        else:
+            self.tri_mul_out = TriangleMultiplicativeUpdate(
+                pair_dim,
+                direction="outgoing",
+                norm_eps=norm_eps,
+                compute_dtype=compute_dtype,
+            )
+            self.tri_mul_in = TriangleMultiplicativeUpdate(
+                pair_dim,
+                direction="incoming",
+                norm_eps=norm_eps,
+                compute_dtype=compute_dtype,
+            )
         self.pair_transition_norm = LayerNorm(pair_dim, eps=norm_eps)
         self.pair_transition = FeedForward(
             pair_dim,
@@ -401,8 +581,23 @@ class PairMixerBlock(nnx.Module):
     ) -> tuple[Array, Array]:
         del rng
         pair_mask_value = pair_mask(peak_mask)
-        pair = pair + self.tri_mul_out(pair, peak_mask, pair_mask_value)
-        pair = pair + self.tri_mul_in(pair, peak_mask, pair_mask_value)
+        if self.use_triangle_mediator:
+            mediator_assignment = self.triangle_mediator_assignment(single)
+            pair = pair + self.tri_mul_out(
+                pair,
+                peak_mask,
+                pair_mask_value,
+                mediator_assignment,
+            )
+            pair = pair + self.tri_mul_in(
+                pair,
+                peak_mask,
+                pair_mask_value,
+                mediator_assignment,
+            )
+        else:
+            pair = pair + self.tri_mul_out(pair, peak_mask, pair_mask_value)
+            pair = pair + self.tri_mul_in(pair, peak_mask, pair_mask_value)
         pair = pair + self.pair_transition(self.pair_transition_norm(pair))
         pair = pair * pair_mask_value[..., None].astype(pair.dtype)
         if self.use_pair_bias_attention:
@@ -426,6 +621,11 @@ class PairMixerBlock(nnx.Module):
         state_dict: dict[str, torch.Tensor],
         prefix: str,
     ) -> None:
+        if self.use_triangle_mediator:
+            self.triangle_mediator_assignment.load_torch_state_dict(
+                state_dict,
+                f"{prefix}.triangle_mediator_assignment",
+            )
         self.tri_mul_out.load_torch_state_dict(state_dict, f"{prefix}.tri_mul_out")
         self.tri_mul_in.load_torch_state_dict(state_dict, f"{prefix}.tri_mul_in")
         self.pair_transition_norm.load_torch_state_dict(

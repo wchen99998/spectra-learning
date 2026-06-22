@@ -91,6 +91,15 @@ def _small_induced_mae_kwargs() -> dict[str, object]:
     }
 
 
+def _small_triangle_mediator_mae_kwargs() -> dict[str, object]:
+    return {
+        **_small_mae_kwargs(),
+        "pairmixer_block_type": "triangle_mediator",
+        "pairmixer_triangle_mediator_num_mediators": 3,
+        "pairmixer_triangle_mediator_eps": 1e-4,
+    }
+
+
 def _small_jepa_kwargs(**overrides: object) -> dict[str, object]:
     kwargs: dict[str, object] = {
         "training_mode": "jepa",
@@ -282,6 +291,21 @@ def test_jax_induced_pair_mae_matches_pytorch_on_real_collated_batch():
     jax_metrics = jax_model(_jax_batch(batch))
 
     _assert_metrics_close(torch_metrics, jax_metrics, atol=4e-5)
+
+
+def test_jax_triangle_mediator_mae_matches_pytorch_on_real_collated_batch():
+    torch.manual_seed(10)
+    kwargs = _small_triangle_mediator_mae_kwargs()
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    jax_model = PeakSetJEPAJax(**kwargs)
+    jax_model.load_torch_state_dict(torch_model.state_dict())
+    batch = _real_pattern_batch("contiguous")
+
+    with torch.no_grad():
+        torch_metrics = torch_model(batch)
+    jax_metrics = jax_model(_jax_batch(batch))
+
+    _assert_metrics_close(torch_metrics, jax_metrics, atol=5e-5)
 
 
 def test_jax_model_loads_plain_pytorch_checkpoint_and_matches_output():

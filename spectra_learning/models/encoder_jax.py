@@ -43,6 +43,8 @@ class PeakSetEncoder(nnx.Module):
         pairmixer_block_type: str = "dense",
         pair_dim: int | None = None,
         induced_pair_num_inducing: int = 8,
+        pairmixer_triangle_mediator_num_mediators: int = 8,
+        pairmixer_triangle_mediator_eps: float = 1e-4,
         pair_feature_hidden_dim: int = 128,
         pairmixer_dropout: float = 0.0,
         pairmixer_use_pair_bias_attention: bool = False,
@@ -65,6 +67,7 @@ class PeakSetEncoder(nnx.Module):
         self.use_position_embedding = use_position_embedding
         self.pairmixer_block_type = pairmixer_block_type.lower()
         self.use_induced_pair = self.pairmixer_block_type == "induced"
+        self.use_triangle_mediator = self.pairmixer_block_type == "triangle_mediator"
         self.activation_checkpoint_mode = activation_checkpoint_mode.lower()
         self.activation_checkpoint_every_n_layers = activation_checkpoint_every_n_layers
         self.activation_checkpoint_modules = activation_checkpoint_modules
@@ -106,10 +109,10 @@ class PeakSetEncoder(nnx.Module):
             relative_fourier_x_max=pairmixer_relative_fourier_x_max,
             compute_dtype=compute_dtype,
         )
-        block_cls = InducedPairBlock if self.use_induced_pair else PairMixerBlock
-        self.blocks = nnx.List(
-            [
-                block_cls(
+        blocks = []
+        for _ in range(num_layers):
+            if self.use_induced_pair:
+                block = InducedPairBlock(
                     single_dim=model_dim,
                     pair_dim=pair_dim,
                     num_heads=num_heads,
@@ -119,9 +122,25 @@ class PeakSetEncoder(nnx.Module):
                     use_pair_bias_attention=pairmixer_use_pair_bias_attention,
                     compute_dtype=compute_dtype,
                 )
-                for _ in range(num_layers)
-            ]
-        )
+            else:
+                block = PairMixerBlock(
+                    single_dim=model_dim,
+                    pair_dim=pair_dim,
+                    num_heads=num_heads,
+                    attention_mlp_multiple=attention_mlp_multiple,
+                    norm_eps=norm_eps,
+                    dropout=pairmixer_dropout,
+                    use_pair_bias_attention=pairmixer_use_pair_bias_attention,
+                    triangle_mediator_num_mediators=(
+                        pairmixer_triangle_mediator_num_mediators
+                        if self.use_triangle_mediator
+                        else None
+                    ),
+                    triangle_mediator_eps=pairmixer_triangle_mediator_eps,
+                    compute_dtype=compute_dtype,
+                )
+            blocks.append(block)
+        self.blocks = nnx.List(blocks)
         self.final_norm = (
             LayerNorm(model_dim, eps=norm_eps, affine=False)
             if apply_final_norm

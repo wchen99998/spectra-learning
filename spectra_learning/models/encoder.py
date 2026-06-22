@@ -33,6 +33,8 @@ class PeakSetEncoder(nn.Module):
         pairmixer_block_type: str = "dense",
         pair_dim: int | None = None,
         induced_pair_num_inducing: int = 8,
+        pairmixer_triangle_mediator_num_mediators: int = 8,
+        pairmixer_triangle_mediator_eps: float = 1e-4,
         pair_feature_hidden_dim: int = 128,
         pairmixer_dropout: float = 0.0,
         pairmixer_use_pair_bias_attention: bool = False,
@@ -50,6 +52,7 @@ class PeakSetEncoder(nn.Module):
         self.use_position_embedding = use_position_embedding
         self.pairmixer_block_type = pairmixer_block_type.lower()
         self.use_induced_pair = self.pairmixer_block_type == "induced"
+        self.use_triangle_mediator = self.pairmixer_block_type == "triangle_mediator"
         self.embedder = embedder
         self.position_embedding = _build_frozen_position_embedding(
             num_peaks,
@@ -88,10 +91,10 @@ class PeakSetEncoder(nn.Module):
             relative_fourier_x_min=pairmixer_relative_fourier_x_min,
             relative_fourier_x_max=pairmixer_relative_fourier_x_max,
         )
-        block_cls = InducedPairBlock if self.use_induced_pair else PairMixerBlock
-        self.blocks = nn.ModuleList(
-            [
-                block_cls(
+        blocks = []
+        for _ in range(self.num_layers):
+            if self.use_induced_pair:
+                block = InducedPairBlock(
                     single_dim=model_dim,
                     pair_dim=pair_dim,
                     num_heads=num_heads,
@@ -100,9 +103,24 @@ class PeakSetEncoder(nn.Module):
                     dropout=pairmixer_dropout,
                     use_pair_bias_attention=pairmixer_use_pair_bias_attention,
                 )
-                for _ in range(self.num_layers)
-            ]
-        )
+            else:
+                block = PairMixerBlock(
+                    single_dim=model_dim,
+                    pair_dim=pair_dim,
+                    num_heads=num_heads,
+                    attention_mlp_multiple=attention_mlp_multiple,
+                    norm_eps=norm_eps,
+                    dropout=pairmixer_dropout,
+                    use_pair_bias_attention=pairmixer_use_pair_bias_attention,
+                    triangle_mediator_num_mediators=(
+                        pairmixer_triangle_mediator_num_mediators
+                        if self.use_triangle_mediator
+                        else None
+                    ),
+                    triangle_mediator_eps=pairmixer_triangle_mediator_eps,
+                )
+            blocks.append(block)
+        self.blocks = nn.ModuleList(blocks)
         self.final_norm = (
             _build_norm(model_dim, eps=norm_eps, affine=False)
             if apply_final_norm

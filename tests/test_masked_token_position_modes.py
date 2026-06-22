@@ -6,8 +6,10 @@ from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pairmixer import (
     AttentionPairBias,
+    MediatedTriangleMultiplicativeUpdate,
     PairMixerBlock,
     TriangleAttention,
+    TriangleMultiplicativeUpdate,
 )
 from spectra_learning.models.peak_features import PeakFeatureEmbedder
 from spectra_learning.models.settings import PeakSetJEPASettings
@@ -398,6 +400,67 @@ def test_pairmixer_pair_bias_attention_setting_is_configurable():
     )
 
     assert settings.pairmixer_use_pair_bias_attention
+
+
+@torch.no_grad()
+def test_triangle_mediator_pairmixer_uses_dense_pair_state():
+    model = PeakSetJEPA(
+        model_dim=32,
+        encoder_num_layers=2,
+        encoder_num_heads=4,
+        num_peaks=6,
+        feature_mlp_hidden_dim=32,
+        pairmixer_block_type="triangle_mediator",
+        pairmixer_triangle_mediator_num_mediators=3,
+        pairmixer_use_pair_bias_attention=True,
+    )
+    block = model.encoder.blocks[0]
+    predictor_block = model.masked_latent_predictor[0]
+    batch = _make_batch()
+
+    encoded, pair = model.encoder.forward_with_pair(
+        batch["peak_mz"],
+        batch["peak_intensity"],
+        valid_mask=batch["peak_valid_mask"],
+        visible_mask=batch["peak_valid_mask"],
+    )
+
+    assert isinstance(block, PairMixerBlock)
+    assert block.use_triangle_mediator
+    assert block.triangle_mediator_assignment.num_mediators == 3
+    assert isinstance(predictor_block, PairMixerBlock)
+    assert predictor_block.use_triangle_mediator
+    assert isinstance(pair, torch.Tensor)
+    assert encoded.shape == (2, 7, 32)
+    assert pair.shape == (2, 7, 7, 32)
+
+
+@torch.no_grad()
+def test_mediated_triangle_matches_dense_with_identity_mediator():
+    torch.manual_seed(17)
+    x = torch.randn(2, 4, 4, 6)
+    token_mask = torch.ones(2, 4, dtype=torch.bool)
+    pair_mask = token_mask.unsqueeze(2) & token_mask.unsqueeze(1)
+    mediator_assignment = torch.eye(4).expand(2, -1, -1)
+
+    for direction in ("outgoing", "incoming"):
+        dense = TriangleMultiplicativeUpdate(
+            6,
+            direction=direction,
+            norm_eps=1e-5,
+        )
+        mediated = MediatedTriangleMultiplicativeUpdate(
+            6,
+            direction=direction,
+            norm_eps=1e-5,
+            mediator_eps=0.0,
+        )
+        mediated.load_state_dict(dense.state_dict())
+
+        expected = dense(x, pair_mask)
+        actual = mediated(x, token_mask, pair_mask, mediator_assignment)
+
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
 
 
 @torch.no_grad()

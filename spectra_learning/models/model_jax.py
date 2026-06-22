@@ -81,8 +81,19 @@ class PeakSetJEPAJax(nnx.Module):
             cfg.pairmixer_pair_dim if cfg.pairmixer_pair_dim is not None else cfg.model_dim
         )
         self.pairmixer_block_type = cfg.pairmixer_block_type.lower()
-        if self.pairmixer_block_type not in {"dense", "induced"}:
-            raise ValueError("pairmixer_block_type must be one of ('dense', 'induced')")
+        if self.pairmixer_block_type not in {
+            "dense",
+            "induced",
+            "triangle_mediator",
+        }:
+            raise ValueError(
+                "pairmixer_block_type must be one of "
+                "('dense', 'induced', 'triangle_mediator')"
+            )
+        self.pairmixer_triangle_mediator_num_mediators = (
+            cfg.pairmixer_triangle_mediator_num_mediators
+        )
+        self.pairmixer_triangle_mediator_eps = cfg.pairmixer_triangle_mediator_eps
         self.encoder_num_layers = cfg.encoder_num_layers
         self.norm_eps = cfg.norm_eps
         self.jepa_num_target_blocks = cfg.jepa_num_target_blocks
@@ -190,12 +201,10 @@ class PeakSetJEPAJax(nnx.Module):
             self.num_predictor_input_tokens,
             self.predictor_pair_dim,
         )
-        predictor_block_cls = (
-            InducedPairBlock if self.pairmixer_block_type == "induced" else PairMixerBlock
-        )
-        self.masked_latent_predictor = nnx.List(
-            [
-                predictor_block_cls(
+        predictor_blocks = []
+        for _ in range(cfg.masked_latent_predictor_num_layers):
+            if self.pairmixer_block_type == "induced":
+                block = InducedPairBlock(
                     single_dim=self.predictor_dim,
                     pair_dim=self.predictor_pair_dim,
                     num_heads=cfg.masked_latent_predictor_num_heads,
@@ -205,9 +214,25 @@ class PeakSetJEPAJax(nnx.Module):
                     use_pair_bias_attention=cfg.pairmixer_use_pair_bias_attention,
                     compute_dtype=self.compute_dtype,
                 )
-                for _ in range(cfg.masked_latent_predictor_num_layers)
-            ]
-        )
+            else:
+                block = PairMixerBlock(
+                    single_dim=self.predictor_dim,
+                    pair_dim=self.predictor_pair_dim,
+                    num_heads=cfg.masked_latent_predictor_num_heads,
+                    attention_mlp_multiple=cfg.attention_mlp_multiple,
+                    norm_eps=self.norm_eps,
+                    dropout=cfg.predictor_dropout,
+                    use_pair_bias_attention=cfg.pairmixer_use_pair_bias_attention,
+                    triangle_mediator_num_mediators=(
+                        self.pairmixer_triangle_mediator_num_mediators
+                        if self.pairmixer_block_type == "triangle_mediator"
+                        else None
+                    ),
+                    triangle_mediator_eps=self.pairmixer_triangle_mediator_eps,
+                    compute_dtype=self.compute_dtype,
+                )
+            predictor_blocks.append(block)
+        self.masked_latent_predictor = nnx.List(predictor_blocks)
         self.predictor_final_norm = (
             LayerNorm(self.predictor_dim, eps=self.norm_eps, affine=False)
             if cfg.predictor_apply_final_norm
@@ -301,6 +326,10 @@ class PeakSetJEPAJax(nnx.Module):
             pairmixer_block_type=self.pairmixer_block_type,
             pair_dim=cfg.pairmixer_pair_dim,
             induced_pair_num_inducing=cfg.induced_pair_num_inducing,
+            pairmixer_triangle_mediator_num_mediators=(
+                cfg.pairmixer_triangle_mediator_num_mediators
+            ),
+            pairmixer_triangle_mediator_eps=cfg.pairmixer_triangle_mediator_eps,
             pair_feature_hidden_dim=cfg.pairmixer_pair_feature_hidden_dim,
             pairmixer_dropout=cfg.pairmixer_dropout,
             pairmixer_use_pair_bias_attention=cfg.pairmixer_use_pair_bias_attention,
