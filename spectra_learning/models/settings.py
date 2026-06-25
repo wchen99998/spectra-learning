@@ -48,6 +48,7 @@ class PeakSetJEPASettings:
     induced_pair_num_inducing: int = 8
     pairmixer_triangle_mediator_num_mediators: int = 8
     pairmixer_triangle_mediator_eps: float = 1e-4
+    pairmixer_induced_triangle_num_mediators: int = 8
     pairmixer_pair_feature_hidden_dim: int = 128
     pairmixer_dropout: float = 0.0
     pairmixer_mz_scale: float = PEAK_MZ_MAX
@@ -166,6 +167,7 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "induced_pair_num_inducing": int,
     "pairmixer_triangle_mediator_num_mediators": int,
     "pairmixer_triangle_mediator_eps": float,
+    "pairmixer_induced_triangle_num_mediators": int,
     "pairmixer_pair_feature_hidden_dim": int,
     "pairmixer_dropout": float,
     "pairmixer_mz_scale": float,

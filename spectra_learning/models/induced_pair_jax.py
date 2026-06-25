@@ -24,14 +24,16 @@ class TokenInducingAssignment(nnx.Module):
         dim: int,
         *,
         compute_dtype: object = jnp.float32,
+        rngs: nnx.Rngs | None = None,
     ) -> None:
+        rngs = nnx.Rngs(0) if rngs is None else rngs
         self.dim = dim
         self.compute_dtype = compute_dtype
         self.matmul_precision = (
             jax.lax.Precision.DEFAULT if compute_dtype == jnp.bfloat16 else None
         )
-        self.wq = Linear(dim, dim, bias=False, compute_dtype=compute_dtype)
-        self.wk = Linear(dim, dim, bias=False, compute_dtype=compute_dtype)
+        self.wq = Linear(dim, dim, bias=False, compute_dtype=compute_dtype, rngs=rngs)
+        self.wk = Linear(dim, dim, bias=False, compute_dtype=compute_dtype, rngs=rngs)
 
     def __call__(self, token: Array, inducing: Array) -> Array:
         q = self.wq(token)
@@ -60,7 +62,9 @@ class CrossAttentionWithWeights(nnx.Module):
         num_heads: int,
         *,
         compute_dtype: object = jnp.float32,
+        rngs: nnx.Rngs | None = None,
     ) -> None:
+        rngs = nnx.Rngs(0) if rngs is None else rngs
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -68,9 +72,15 @@ class CrossAttentionWithWeights(nnx.Module):
         self.matmul_precision = (
             jax.lax.Precision.DEFAULT if compute_dtype == jnp.bfloat16 else None
         )
-        self.wq = Linear(dim, dim, bias=False, compute_dtype=compute_dtype)
-        self.wkv = Linear(dim, 2 * dim, bias=False, compute_dtype=compute_dtype)
-        self.wo = Linear(dim, dim, bias=False, compute_dtype=compute_dtype)
+        self.wq = Linear(dim, dim, bias=False, compute_dtype=compute_dtype, rngs=rngs)
+        self.wkv = Linear(
+            dim,
+            2 * dim,
+            bias=False,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        )
+        self.wo = Linear(dim, dim, bias=False, compute_dtype=compute_dtype, rngs=rngs)
 
     def __call__(
         self,
@@ -141,7 +151,9 @@ class InducedPairBlock(nnx.Module):
         norm_eps: float,
         dropout: float,
         compute_dtype: object = jnp.float32,
+        rngs: nnx.Rngs | None = None,
     ) -> None:
+        rngs = nnx.Rngs(0) if rngs is None else rngs
         del dropout
         self.inducing_aggregate_norm = LayerNorm(single_dim, eps=norm_eps)
         self.single_aggregate_norm = LayerNorm(single_dim, eps=norm_eps)
@@ -149,6 +161,7 @@ class InducedPairBlock(nnx.Module):
             single_dim,
             num_heads,
             compute_dtype=compute_dtype,
+            rngs=rngs,
         )
         self.latent_pair_mixer = PairMixerBlock(
             single_dim=single_dim,
@@ -158,6 +171,7 @@ class InducedPairBlock(nnx.Module):
             norm_eps=norm_eps,
             dropout=0.0,
             compute_dtype=compute_dtype,
+            rngs=rngs,
         )
         self.single_update_norm = LayerNorm(single_dim, eps=norm_eps)
         self.inducing_update_norm = LayerNorm(single_dim, eps=norm_eps)
@@ -165,6 +179,7 @@ class InducedPairBlock(nnx.Module):
             single_dim,
             num_heads,
             compute_dtype=compute_dtype,
+            rngs=rngs,
         )
 
     def __call__(

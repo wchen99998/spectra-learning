@@ -28,7 +28,13 @@ SUPPORTED_TARGET_NORMALIZATIONS = {"none", "zscore"}
 SUPPORTED_LATENT_PAIR_TARGET_NORMALIZATIONS = {"none", "layernorm"}
 SUPPORTED_EMA_SCHEDULES = {"constant", "linear", "cosine", "slow-fast-slow"}
 SUPPORTED_MASKED_TOKEN_INPUT_MODES = {"latent_token", "mz_sentinel"}
-SUPPORTED_PAIRMIXER_BLOCK_TYPES = {"dense", "bi-dense", "induced", "triangle_mediator"}
+SUPPORTED_PAIRMIXER_BLOCK_TYPES = {
+    "dense",
+    "bi-dense",
+    "induced",
+    "triangle_mediator",
+    "induced_triangle",
+}
 
 
 def configure_peak_set_model(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
@@ -71,12 +77,15 @@ def _configure_dimensions(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
     if model.pairmixer_block_type not in SUPPORTED_PAIRMIXER_BLOCK_TYPES:
         raise ValueError(
             "pairmixer_block_type must be one of "
-            "('dense', 'bi-dense', 'induced', 'triangle_mediator')"
+            "('dense', 'bi-dense', 'induced', 'triangle_mediator', 'induced_triangle')"
         )
     model.pairmixer_triangle_mediator_num_mediators = (
         cfg.pairmixer_triangle_mediator_num_mediators
     )
     model.pairmixer_triangle_mediator_eps = cfg.pairmixer_triangle_mediator_eps
+    model.pairmixer_induced_triangle_num_mediators = (
+        cfg.pairmixer_induced_triangle_num_mediators
+    )
     model.encoder_num_layers = cfg.encoder_num_layers
     model.norm_eps = cfg.norm_eps
 
@@ -190,6 +199,9 @@ def _build_peak_set_encoder(cfg: PeakSetJEPASettings) -> PeakSetEncoder:
             cfg.pairmixer_triangle_mediator_num_mediators
         ),
         pairmixer_triangle_mediator_eps=cfg.pairmixer_triangle_mediator_eps,
+        pairmixer_induced_triangle_num_mediators=(
+            cfg.pairmixer_induced_triangle_num_mediators
+        ),
         pair_feature_hidden_dim=cfg.pairmixer_pair_feature_hidden_dim,
         pairmixer_dropout=cfg.pairmixer_dropout,
         pairmixer_mz_scale=cfg.pairmixer_mz_scale,
@@ -308,6 +320,11 @@ def _build_predictor(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
                     else None
                 ),
                 triangle_mediator_eps=model.pairmixer_triangle_mediator_eps,
+                induced_triangle_num_mediators=(
+                    model.pairmixer_induced_triangle_num_mediators
+                    if model.pairmixer_block_type == "induced_triangle"
+                    else None
+                ),
                 use_single_to_pair_update=model.pairmixer_block_type == "bi-dense",
             )
         predictor_blocks.append(block)

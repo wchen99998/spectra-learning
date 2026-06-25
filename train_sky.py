@@ -323,7 +323,7 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
     parser.add_argument("--precompile-aot", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--sync-aot-cache-to-gcs", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--force-precompile-aot", action="store_true")
-    parser.add_argument("--down", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--down", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--yes", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dry-run", "--dryrun", dest="dry_run", action="store_true")
     parser.add_argument("--task-output-dir", default="tmp/skypilot_tasks")

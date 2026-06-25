@@ -46,8 +46,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pairmixer_pair_feature_hidden_dim = 512
     cfg.jepa_intensity_aware_context_fraction = 0.35
     cfg.peak_filtering = "grouped"
-    cfg.pairmixer_block_type = "dense"
-    cfg.num_peaks = 47
+    cfg.pairmixer_block_type = "bi-dense"
+    cfg.num_peaks = 31
     cfg.num_epochs = 20
     cfg.dataloader_num_workers = 32
     cfg.grouped_peak_shoulder_da = 0.02
@@ -55,8 +55,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_every_n_steps = 100_000
     cfg.msg_probe_at_final_step = True
     cfg.nist_murcko_probe_num_repeats = 1
-    cfg.val_every_n_steps = 25_000
-    cfg.val_num_steps = 1_000
+    cfg.val_every_n_steps = 10_000
+    cfg.val_num_steps = 500
     cfg.run_name_suffix = "mae-100m-20m-beta-isoflops-250k-bs4096-ga4-muon-matchrms-lr4p24e-4-pack20-fullcompile-selective-probe1x100k-final-val1k25k"
 
     return cfg

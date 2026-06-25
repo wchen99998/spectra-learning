@@ -352,6 +352,113 @@ class MediatedTriangleMultiplicativeUpdate(nn.Module):
         return update * pair_mask
 
 
+class InducedTriangleAttention(nn.Module):
+    def __init__(
+        self,
+        pair_dim: int,
+        *,
+        num_heads: int,
+        ending: bool,
+        norm_eps: float,
+    ) -> None:
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = pair_dim // num_heads
+        self.ending = ending
+        self.norm = _build_norm(pair_dim, eps=norm_eps)
+        self.left = nn.Linear(pair_dim, pair_dim)
+        self.right = nn.Linear(pair_dim, pair_dim)
+        self.triangle = nn.Linear(3 * pair_dim, pair_dim)
+        self.q = nn.Linear(pair_dim, pair_dim, bias=False)
+        self.k = nn.Linear(pair_dim, pair_dim, bias=False)
+        self.v = nn.Linear(pair_dim, pair_dim, bias=False)
+        self.g = nn.Linear(pair_dim, pair_dim)
+        self.o = nn.Linear(pair_dim, pair_dim)
+        _init_linear(self.left)
+        _init_linear(self.right)
+        _init_linear(self.triangle)
+        _init_linear(self.q)
+        _init_linear(self.k)
+        _init_linear(self.v)
+        _init_linear(self.g, gate=True)
+        _init_linear(self.o)
+
+    def _start_attention(
+        self,
+        x: Float[Tensor, "batch peaks peaks pair"],
+        peak_mask: Bool[Tensor, "batch peaks"],
+        pair_mask: Bool[Tensor, "batch peaks peaks"],
+        mediator_assignment: Float[Tensor, "batch peaks mediators"],
+    ) -> Float[Tensor, "batch peaks peaks pair"]:
+        batch_size, num_peaks, _, pair_dim = x.shape
+        num_mediators = mediator_assignment.shape[-1]
+        pair_mask_value = pair_mask.unsqueeze(-1).to(dtype=x.dtype)
+        mediator = mediator_assignment * peak_mask.unsqueeze(-1).to(
+            dtype=mediator_assignment.dtype
+        )
+        x_norm = self.norm(x)
+        left = self.left(x_norm) * pair_mask_value
+        right = self.right(x_norm) * pair_mask_value
+        left = torch.einsum("bikp,bka->biap", left, mediator)
+        right = torch.einsum("bjkp,bka->bjap", right, mediator)
+        center = x_norm.unsqueeze(3).expand(-1, -1, -1, num_mediators, -1)
+        left = left.unsqueeze(2).expand(-1, -1, num_peaks, -1, -1)
+        right = right.unsqueeze(1).expand(-1, num_peaks, -1, -1, -1)
+        triangle = F.silu(self.triangle(torch.cat([center, left, right], dim=-1)))
+        q = self.q(x_norm).reshape(
+            batch_size,
+            num_peaks,
+            num_peaks,
+            self.num_heads,
+            self.head_dim,
+        )
+        k = self.k(triangle).reshape(
+            batch_size,
+            num_peaks,
+            num_peaks,
+            num_mediators,
+            self.num_heads,
+            self.head_dim,
+        )
+        v = self.v(triangle).reshape(
+            batch_size,
+            num_peaks,
+            num_peaks,
+            num_mediators,
+            self.num_heads,
+            self.head_dim,
+        )
+        scores = torch.einsum("bijhd,bijahd->bijha", q, k) * (
+            1.0 / math.sqrt(self.head_dim)
+        )
+        attn = torch.softmax(scores.float(), dim=-1).to(dtype=v.dtype)
+        out = torch.einsum("bijha,bijahd->bijhd", attn, v).reshape(
+            batch_size,
+            num_peaks,
+            num_peaks,
+            pair_dim,
+        )
+        out = out * torch.sigmoid(self.g(x_norm))
+        out = self.o(out)
+        return out * pair_mask_value
+
+    def forward(
+        self,
+        x: Float[Tensor, "batch peaks peaks pair"],
+        peak_mask: Bool[Tensor, "batch peaks"],
+        pair_mask: Bool[Tensor, "batch peaks peaks"],
+        mediator_assignment: Float[Tensor, "batch peaks mediators"],
+    ) -> Float[Tensor, "batch peaks peaks pair"]:
+        if self.ending:
+            return self._start_attention(
+                x.transpose(1, 2),
+                peak_mask,
+                pair_mask.transpose(1, 2),
+                mediator_assignment,
+            ).transpose(1, 2)
+        return self._start_attention(x, peak_mask, pair_mask, mediator_assignment)
+
+
 class TriangleAttention(nn.Module):
     def __init__(
         self,
@@ -540,10 +647,12 @@ class PairMixerBlock(nn.Module):
         dropout: float,
         triangle_mediator_num_mediators: int | None = None,
         triangle_mediator_eps: float = 1e-4,
+        induced_triangle_num_mediators: int | None = None,
         use_single_to_pair_update: bool = False,
     ) -> None:
         super().__init__()
         self.use_triangle_mediator = triangle_mediator_num_mediators is not None
+        self.use_induced_triangle = induced_triangle_num_mediators is not None
         self.use_single_to_pair_update = use_single_to_pair_update
         if self.use_triangle_mediator:
             self.triangle_mediator_assignment = LearnedTriangleMediatorAssignment(
@@ -572,6 +681,24 @@ class PairMixerBlock(nn.Module):
             self.tri_mul_in = TriangleMultiplicativeUpdate(
                 pair_dim,
                 direction="incoming",
+                norm_eps=norm_eps,
+            )
+        if self.use_induced_triangle:
+            self.induced_triangle_assignment = LearnedTriangleMediatorAssignment(
+                single_dim,
+                induced_triangle_num_mediators,
+                norm_eps=norm_eps,
+            )
+            self.induced_tri_att_start = InducedTriangleAttention(
+                pair_dim,
+                num_heads=num_heads,
+                ending=False,
+                norm_eps=norm_eps,
+            )
+            self.induced_tri_att_end = InducedTriangleAttention(
+                pair_dim,
+                num_heads=num_heads,
+                ending=True,
                 norm_eps=norm_eps,
             )
         self.pair_transition_norm = _build_norm(
@@ -626,6 +753,24 @@ class PairMixerBlock(nn.Module):
         else:
             pair = pair + self.drop(self.tri_mul_out(pair, pair_mask))
             pair = pair + self.drop(self.tri_mul_in(pair, pair_mask))
+        if self.use_induced_triangle:
+            mediator_assignment = self.induced_triangle_assignment(single)
+            pair = pair + self.drop(
+                self.induced_tri_att_start(
+                    pair,
+                    peak_mask,
+                    pair_mask,
+                    mediator_assignment,
+                )
+            )
+            pair = pair + self.drop(
+                self.induced_tri_att_end(
+                    pair,
+                    peak_mask,
+                    pair_mask,
+                    mediator_assignment,
+                )
+            )
         pair = pair + self.drop(self.pair_transition(self.pair_transition_norm(pair)))
         pair = pair * pair_mask.unsqueeze(-1).to(dtype=pair.dtype)
         if self.use_single_to_pair_update:

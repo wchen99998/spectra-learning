@@ -54,7 +54,9 @@ class PairFeatureEmbedder(nnx.Module):
         relative_fourier_x_min: float = 1e-3,
         relative_fourier_x_max: float = 1.0,
         compute_dtype: object = jnp.float32,
+        rngs: nnx.Rngs | None = None,
     ) -> None:
+        rngs = nnx.Rngs(0) if rngs is None else rngs
         self.mz_scale = mz_scale
         self.precursor_mz_scale = precursor_mz_scale
         self.sigma_ppm = sigma_ppm
@@ -76,14 +78,19 @@ class PairFeatureEmbedder(nnx.Module):
             raw_dim += self.relative_pair_fourier.num_features()
         self.raw_proj = nnx.List(
             [
-                Linear(raw_dim, hidden_dim, compute_dtype=compute_dtype),
-                Linear(hidden_dim, pair_dim, compute_dtype=compute_dtype),
+                Linear(raw_dim, hidden_dim, compute_dtype=compute_dtype, rngs=rngs),
+                Linear(hidden_dim, pair_dim, compute_dtype=compute_dtype, rngs=rngs),
             ]
         )
         self.single_pair_proj = nnx.List(
             [
-                Linear(4 * single_dim, hidden_dim, compute_dtype=compute_dtype),
-                Linear(hidden_dim, pair_dim, compute_dtype=compute_dtype),
+                Linear(
+                    4 * single_dim,
+                    hidden_dim,
+                    compute_dtype=compute_dtype,
+                    rngs=rngs,
+                ),
+                Linear(hidden_dim, pair_dim, compute_dtype=compute_dtype, rngs=rngs),
             ]
         )
 
@@ -213,15 +220,29 @@ class TriangleMultiplicativeUpdate(nnx.Module):
         direction: str,
         norm_eps: float,
         compute_dtype: object = jnp.float32,
+        rngs: nnx.Rngs | None = None,
     ) -> None:
+        rngs = nnx.Rngs(0) if rngs is None else rngs
         self.direction = direction
         self.compute_dtype = compute_dtype
         self.norm_in = LayerNorm(pair_dim, eps=norm_eps)
-        self.p_in = Linear(pair_dim, 2 * pair_dim, compute_dtype=compute_dtype)
-        self.g_in = Linear(pair_dim, 2 * pair_dim, compute_dtype=compute_dtype)
+        self.p_in = Linear(pair_dim, 2 * pair_dim, compute_dtype=compute_dtype, rngs=rngs)
+        self.g_in = Linear(
+            pair_dim,
+            2 * pair_dim,
+            compute_dtype=compute_dtype,
+            init="gate",
+            rngs=rngs,
+        )
         self.norm_out = LayerNorm(pair_dim, eps=norm_eps)
-        self.p_out = Linear(pair_dim, pair_dim, compute_dtype=compute_dtype)
-        self.g_out = Linear(pair_dim, pair_dim, compute_dtype=compute_dtype)
+        self.p_out = Linear(pair_dim, pair_dim, compute_dtype=compute_dtype, rngs=rngs)
+        self.g_out = Linear(
+            pair_dim,
+            pair_dim,
+            compute_dtype=compute_dtype,
+            init="gate",
+            rngs=rngs,
+        )
 
     def __call__(self, x: Array, token_mask: Array, mask: Array) -> Array:
         pair_mask_f = mask[..., None].astype(x.dtype)
@@ -265,7 +286,9 @@ class LearnedTriangleMediatorAssignment(nnx.Module):
         *,
         norm_eps: float,
         compute_dtype: object = jnp.float32,
+        rngs: nnx.Rngs | None = None,
     ) -> None:
+        rngs = nnx.Rngs(0) if rngs is None else rngs
         self.single_dim = single_dim
         self.num_mediators = num_mediators
         self.compute_dtype = compute_dtype
@@ -273,11 +296,23 @@ class LearnedTriangleMediatorAssignment(nnx.Module):
             jax.lax.Precision.DEFAULT if compute_dtype == jnp.bfloat16 else None
         )
         self.mediator_token = nnx.Param(
-            jnp.zeros((num_mediators, single_dim), dtype=jnp.float32)
+            rngs.params.normal((num_mediators, single_dim), dtype=jnp.float32) * 0.02
         )
         self.norm = LayerNorm(single_dim, eps=norm_eps)
-        self.wq = Linear(single_dim, single_dim, bias=False, compute_dtype=compute_dtype)
-        self.wk = Linear(single_dim, single_dim, bias=False, compute_dtype=compute_dtype)
+        self.wq = Linear(
+            single_dim,
+            single_dim,
+            bias=False,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        )
+        self.wk = Linear(
+            single_dim,
+            single_dim,
+            bias=False,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        )
 
     def __call__(self, single: Array) -> Array:
         batch_size = single.shape[0]
@@ -315,7 +350,9 @@ class MediatedTriangleMultiplicativeUpdate(nnx.Module):
         norm_eps: float,
         mediator_eps: float,
         compute_dtype: object = jnp.float32,
+        rngs: nnx.Rngs | None = None,
     ) -> None:
+        rngs = nnx.Rngs(0) if rngs is None else rngs
         self.direction = direction
         self.mediator_eps = mediator_eps
         self.compute_dtype = compute_dtype
@@ -323,11 +360,23 @@ class MediatedTriangleMultiplicativeUpdate(nnx.Module):
             jax.lax.Precision.DEFAULT if compute_dtype == jnp.bfloat16 else None
         )
         self.norm_in = LayerNorm(pair_dim, eps=norm_eps)
-        self.p_in = Linear(pair_dim, 2 * pair_dim, compute_dtype=compute_dtype)
-        self.g_in = Linear(pair_dim, 2 * pair_dim, compute_dtype=compute_dtype)
+        self.p_in = Linear(pair_dim, 2 * pair_dim, compute_dtype=compute_dtype, rngs=rngs)
+        self.g_in = Linear(
+            pair_dim,
+            2 * pair_dim,
+            compute_dtype=compute_dtype,
+            init="gate",
+            rngs=rngs,
+        )
         self.norm_out = LayerNorm(pair_dim, eps=norm_eps)
-        self.p_out = Linear(pair_dim, pair_dim, compute_dtype=compute_dtype)
-        self.g_out = Linear(pair_dim, pair_dim, compute_dtype=compute_dtype)
+        self.p_out = Linear(pair_dim, pair_dim, compute_dtype=compute_dtype, rngs=rngs)
+        self.g_out = Linear(
+            pair_dim,
+            pair_dim,
+            compute_dtype=compute_dtype,
+            init="gate",
+            rngs=rngs,
+        )
 
     def _metric(self, mediator_assignment: Array, token_mask: Array) -> tuple[Array, Array]:
         mediator = mediator_assignment * token_mask[..., None].astype(
@@ -411,6 +460,181 @@ class MediatedTriangleMultiplicativeUpdate(nnx.Module):
         self.g_out.load_torch_state_dict(state_dict, f"{prefix}.g_out")
 
 
+class InducedTriangleAttention(nnx.Module):
+    def __init__(
+        self,
+        pair_dim: int,
+        *,
+        num_heads: int,
+        ending: bool,
+        norm_eps: float,
+        compute_dtype: object = jnp.float32,
+        rngs: nnx.Rngs | None = None,
+    ) -> None:
+        rngs = nnx.Rngs(0) if rngs is None else rngs
+        self.num_heads = num_heads
+        self.head_dim = pair_dim // num_heads
+        self.ending = ending
+        self.compute_dtype = compute_dtype
+        self.matmul_precision = (
+            jax.lax.Precision.DEFAULT if compute_dtype == jnp.bfloat16 else None
+        )
+        self.norm = LayerNorm(pair_dim, eps=norm_eps)
+        self.left = Linear(pair_dim, pair_dim, compute_dtype=compute_dtype, rngs=rngs)
+        self.right = Linear(pair_dim, pair_dim, compute_dtype=compute_dtype, rngs=rngs)
+        self.triangle = Linear(
+            3 * pair_dim,
+            pair_dim,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        )
+        self.q = Linear(
+            pair_dim,
+            pair_dim,
+            bias=False,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        )
+        self.k = Linear(
+            pair_dim,
+            pair_dim,
+            bias=False,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        )
+        self.v = Linear(
+            pair_dim,
+            pair_dim,
+            bias=False,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        )
+        self.g = Linear(
+            pair_dim,
+            pair_dim,
+            compute_dtype=compute_dtype,
+            init="gate",
+            rngs=rngs,
+        )
+        self.o = Linear(pair_dim, pair_dim, compute_dtype=compute_dtype, rngs=rngs)
+
+    def _start_attention(
+        self,
+        x: Array,
+        token_mask: Array,
+        mask: Array,
+        mediator_assignment: Array,
+    ) -> Array:
+        batch_size, num_tokens, _, pair_dim = x.shape
+        num_mediators = mediator_assignment.shape[-1]
+        pair_mask_value = mask[..., None].astype(x.dtype)
+        mediator = mediator_assignment * token_mask[..., None].astype(
+            mediator_assignment.dtype
+        )
+        x_norm = self.norm(x)
+        left = self.left(x_norm) * pair_mask_value
+        right = self.right(x_norm) * pair_mask_value
+        left = jnp.einsum(
+            "bikp,bka->biap",
+            left,
+            mediator,
+            precision=self.matmul_precision,
+        )
+        right = jnp.einsum(
+            "bjkp,bka->bjap",
+            right,
+            mediator,
+            precision=self.matmul_precision,
+        )
+        center = jnp.broadcast_to(
+            x_norm[:, :, :, None, :],
+            (batch_size, num_tokens, num_tokens, num_mediators, pair_dim),
+        )
+        left = jnp.broadcast_to(
+            left[:, :, None, :, :],
+            (batch_size, num_tokens, num_tokens, num_mediators, pair_dim),
+        )
+        right = jnp.broadcast_to(
+            right[:, None, :, :, :],
+            (batch_size, num_tokens, num_tokens, num_mediators, pair_dim),
+        )
+        triangle = silu(self.triangle(jnp.concatenate([center, left, right], axis=-1)))
+        q = self.q(x_norm).reshape(
+            batch_size,
+            num_tokens,
+            num_tokens,
+            self.num_heads,
+            self.head_dim,
+        )
+        k = self.k(triangle).reshape(
+            batch_size,
+            num_tokens,
+            num_tokens,
+            num_mediators,
+            self.num_heads,
+            self.head_dim,
+        )
+        v = self.v(triangle).reshape(
+            batch_size,
+            num_tokens,
+            num_tokens,
+            num_mediators,
+            self.num_heads,
+            self.head_dim,
+        )
+        scores = jnp.einsum(
+            "bijhd,bijahd->bijha",
+            q,
+            k,
+            precision=self.matmul_precision,
+        ) / math.sqrt(self.head_dim)
+        attn = jax.nn.softmax(scores.astype(jnp.float32), axis=-1).astype(v.dtype)
+        out = jnp.einsum(
+            "bijha,bijahd->bijhd",
+            attn,
+            v,
+            precision=self.matmul_precision,
+        ).reshape(batch_size, num_tokens, num_tokens, pair_dim)
+        out = out * jax.nn.sigmoid(self.g(x_norm))
+        out = self.o(out)
+        return out * pair_mask_value
+
+    def __call__(
+        self,
+        x: Array,
+        token_mask: Array,
+        mask: Array,
+        mediator_assignment: Array,
+    ) -> Array:
+        if self.ending:
+            return jnp.swapaxes(
+                self._start_attention(
+                    jnp.swapaxes(x, 1, 2),
+                    token_mask,
+                    jnp.swapaxes(mask, 1, 2),
+                    mediator_assignment,
+                ),
+                1,
+                2,
+            )
+        return self._start_attention(x, token_mask, mask, mediator_assignment)
+
+    def load_torch_state_dict(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        prefix: str,
+    ) -> None:
+        self.norm.load_torch_state_dict(state_dict, f"{prefix}.norm")
+        self.left.load_torch_state_dict(state_dict, f"{prefix}.left")
+        self.right.load_torch_state_dict(state_dict, f"{prefix}.right")
+        self.triangle.load_torch_state_dict(state_dict, f"{prefix}.triangle")
+        self.q.load_torch_state_dict(state_dict, f"{prefix}.q")
+        self.k.load_torch_state_dict(state_dict, f"{prefix}.k")
+        self.v.load_torch_state_dict(state_dict, f"{prefix}.v")
+        self.g.load_torch_state_dict(state_dict, f"{prefix}.g")
+        self.o.load_torch_state_dict(state_dict, f"{prefix}.o")
+
+
 class AttentionPairBias(nnx.Module):
     def __init__(
         self,
@@ -420,7 +644,9 @@ class AttentionPairBias(nnx.Module):
         num_heads: int,
         norm_eps: float,
         compute_dtype: object = jnp.float32,
+        rngs: nnx.Rngs | None = None,
     ) -> None:
+        rngs = nnx.Rngs(0) if rngs is None else rngs
         self.num_heads = num_heads
         self.head_dim = single_dim // num_heads
         self.single_norm = LayerNorm(single_dim, eps=norm_eps)
@@ -430,15 +656,23 @@ class AttentionPairBias(nnx.Module):
             3 * single_dim,
             bias=False,
             compute_dtype=compute_dtype,
+            rngs=rngs,
         )
         self.pair_bias = Linear(
             pair_dim,
             num_heads,
             bias=False,
             compute_dtype=compute_dtype,
+            rngs=rngs,
         )
-        self.g = Linear(single_dim, single_dim, compute_dtype=compute_dtype)
-        self.o = Linear(single_dim, single_dim, compute_dtype=compute_dtype)
+        self.g = Linear(
+            single_dim,
+            single_dim,
+            compute_dtype=compute_dtype,
+            init="gate",
+            rngs=rngs,
+        )
+        self.o = Linear(single_dim, single_dim, compute_dtype=compute_dtype, rngs=rngs)
 
     def __call__(
         self,
@@ -497,13 +731,21 @@ class GatedSingleToPairUpdate(nnx.Module):
         pair_dim: int,
         norm_eps: float,
         compute_dtype: object = jnp.float32,
+        rngs: nnx.Rngs | None = None,
     ) -> None:
+        rngs = nnx.Rngs(0) if rngs is None else rngs
         self.single_norm = LayerNorm(single_dim, eps=norm_eps)
         self.pair_norm = LayerNorm(pair_dim, eps=norm_eps)
-        self.left = Linear(single_dim, pair_dim, compute_dtype=compute_dtype)
-        self.right = Linear(single_dim, pair_dim, compute_dtype=compute_dtype)
-        self.out = Linear(pair_dim, pair_dim, compute_dtype=compute_dtype)
-        self.gate = Linear(pair_dim, pair_dim, compute_dtype=compute_dtype)
+        self.left = Linear(single_dim, pair_dim, compute_dtype=compute_dtype, rngs=rngs)
+        self.right = Linear(single_dim, pair_dim, compute_dtype=compute_dtype, rngs=rngs)
+        self.out = Linear(pair_dim, pair_dim, compute_dtype=compute_dtype, rngs=rngs)
+        self.gate = Linear(
+            pair_dim,
+            pair_dim,
+            compute_dtype=compute_dtype,
+            init="gate",
+            rngs=rngs,
+        )
 
     def __call__(self, single: Array, pair: Array, pair_mask_value: Array) -> Array:
         single_norm = self.single_norm(single)
@@ -539,11 +781,15 @@ class PairMixerBlock(nnx.Module):
         dropout: float,
         triangle_mediator_num_mediators: int | None = None,
         triangle_mediator_eps: float = 1e-4,
+        induced_triangle_num_mediators: int | None = None,
         use_single_to_pair_update: bool = False,
         compute_dtype: object = jnp.float32,
+        rngs: nnx.Rngs | None = None,
     ) -> None:
+        rngs = nnx.Rngs(0) if rngs is None else rngs
         self.dropout = dropout
         self.use_triangle_mediator = triangle_mediator_num_mediators is not None
+        self.use_induced_triangle = induced_triangle_num_mediators is not None
         self.use_single_to_pair_update = use_single_to_pair_update
         if self.use_triangle_mediator:
             self.triangle_mediator_assignment = LearnedTriangleMediatorAssignment(
@@ -551,6 +797,7 @@ class PairMixerBlock(nnx.Module):
                 triangle_mediator_num_mediators,
                 norm_eps=norm_eps,
                 compute_dtype=compute_dtype,
+                rngs=rngs,
             )
             self.tri_mul_out = MediatedTriangleMultiplicativeUpdate(
                 pair_dim,
@@ -558,6 +805,7 @@ class PairMixerBlock(nnx.Module):
                 norm_eps=norm_eps,
                 mediator_eps=triangle_mediator_eps,
                 compute_dtype=compute_dtype,
+                rngs=rngs,
             )
             self.tri_mul_in = MediatedTriangleMultiplicativeUpdate(
                 pair_dim,
@@ -565,6 +813,7 @@ class PairMixerBlock(nnx.Module):
                 norm_eps=norm_eps,
                 mediator_eps=triangle_mediator_eps,
                 compute_dtype=compute_dtype,
+                rngs=rngs,
             )
         else:
             self.tri_mul_out = TriangleMultiplicativeUpdate(
@@ -572,18 +821,45 @@ class PairMixerBlock(nnx.Module):
                 direction="outgoing",
                 norm_eps=norm_eps,
                 compute_dtype=compute_dtype,
+                rngs=rngs,
             )
             self.tri_mul_in = TriangleMultiplicativeUpdate(
                 pair_dim,
                 direction="incoming",
                 norm_eps=norm_eps,
                 compute_dtype=compute_dtype,
+                rngs=rngs,
+            )
+        if self.use_induced_triangle:
+            self.induced_triangle_assignment = LearnedTriangleMediatorAssignment(
+                single_dim,
+                induced_triangle_num_mediators,
+                norm_eps=norm_eps,
+                compute_dtype=compute_dtype,
+                rngs=rngs,
+            )
+            self.induced_tri_att_start = InducedTriangleAttention(
+                pair_dim,
+                num_heads=num_heads,
+                ending=False,
+                norm_eps=norm_eps,
+                compute_dtype=compute_dtype,
+                rngs=rngs,
+            )
+            self.induced_tri_att_end = InducedTriangleAttention(
+                pair_dim,
+                num_heads=num_heads,
+                ending=True,
+                norm_eps=norm_eps,
+                compute_dtype=compute_dtype,
+                rngs=rngs,
             )
         self.pair_transition_norm = LayerNorm(pair_dim, eps=norm_eps)
         self.pair_transition = FeedForward(
             pair_dim,
             hidden_dim=math.ceil(pair_dim * attention_mlp_multiple),
             compute_dtype=compute_dtype,
+            rngs=rngs,
         )
         if self.use_single_to_pair_update:
             self.single_to_pair_update = GatedSingleToPairUpdate(
@@ -591,6 +867,7 @@ class PairMixerBlock(nnx.Module):
                 pair_dim=pair_dim,
                 norm_eps=norm_eps,
                 compute_dtype=compute_dtype,
+                rngs=rngs,
             )
         self.single_attention = AttentionPairBias(
             single_dim=single_dim,
@@ -598,12 +875,14 @@ class PairMixerBlock(nnx.Module):
             num_heads=num_heads,
             norm_eps=norm_eps,
             compute_dtype=compute_dtype,
+            rngs=rngs,
         )
         self.single_transition_norm = LayerNorm(single_dim, eps=norm_eps)
         self.single_transition = FeedForward(
             single_dim,
             hidden_dim=math.ceil(single_dim * attention_mlp_multiple),
             compute_dtype=compute_dtype,
+            rngs=rngs,
         )
 
     def __call__(
@@ -635,6 +914,20 @@ class PairMixerBlock(nnx.Module):
         else:
             pair = pair + self.tri_mul_out(pair, peak_mask, pair_mask_value)
             pair = pair + self.tri_mul_in(pair, peak_mask, pair_mask_value)
+        if self.use_induced_triangle:
+            mediator_assignment = self.induced_triangle_assignment(single)
+            pair = pair + self.induced_tri_att_start(
+                pair,
+                peak_mask,
+                pair_mask_value,
+                mediator_assignment,
+            )
+            pair = pair + self.induced_tri_att_end(
+                pair,
+                peak_mask,
+                pair_mask_value,
+                mediator_assignment,
+            )
         pair = pair + self.pair_transition(self.pair_transition_norm(pair))
         pair = pair * pair_mask_value[..., None].astype(pair.dtype)
         if self.use_single_to_pair_update:
@@ -664,8 +957,22 @@ class PairMixerBlock(nnx.Module):
                 state_dict,
                 f"{prefix}.triangle_mediator_assignment",
             )
+        if self.use_induced_triangle:
+            self.induced_triangle_assignment.load_torch_state_dict(
+                state_dict,
+                f"{prefix}.induced_triangle_assignment",
+            )
         self.tri_mul_out.load_torch_state_dict(state_dict, f"{prefix}.tri_mul_out")
         self.tri_mul_in.load_torch_state_dict(state_dict, f"{prefix}.tri_mul_in")
+        if self.use_induced_triangle:
+            self.induced_tri_att_start.load_torch_state_dict(
+                state_dict,
+                f"{prefix}.induced_tri_att_start",
+            )
+            self.induced_tri_att_end.load_torch_state_dict(
+                state_dict,
+                f"{prefix}.induced_tri_att_end",
+            )
         self.pair_transition_norm.load_torch_state_dict(
             state_dict,
             f"{prefix}.pair_transition_norm",

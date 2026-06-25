@@ -263,6 +263,7 @@ def test_launch_failure_runs_explicit_sky_down_and_preserves_exit_code(
     with pytest.raises(SystemExit) as exc:
         train_sky.main(
             [
+                "--down",
                 "--run-id",
                 "fake-fail",
                 "--config",
@@ -291,6 +292,7 @@ def test_successful_launch_runs_explicit_sky_down(tmp_path, monkeypatch):
 
     train_sky.main(
         [
+            "--down",
             "--run-id",
             "fake-success",
             "--config",
@@ -310,7 +312,7 @@ def test_successful_launch_runs_explicit_sky_down(tmp_path, monkeypatch):
     assert commands[1] == ["down", "--yes", "spectra-fake-success"]
 
 
-def test_no_down_skips_explicit_sky_down(tmp_path, monkeypatch):
+def test_default_skips_explicit_sky_down(tmp_path, monkeypatch):
     command_log = _install_fake_sky(tmp_path, monkeypatch, launch_returncode=0)
     monkeypatch.setattr(train_sky, "prepare_aot_cache", lambda **_kwargs: None)
     monkeypatch.setenv("HF_TOKEN", "hf-token")
@@ -318,7 +320,6 @@ def test_no_down_skips_explicit_sky_down(tmp_path, monkeypatch):
 
     train_sky.main(
         [
-            "--no-down",
             "--run-id",
             "fake-keep",
             "--config",
@@ -341,6 +342,7 @@ def test_down_rejects_async_launch():
     with pytest.raises(SystemExit, match="--async"):
         train_sky.main(
             [
+                "--down",
                 "--run-id",
                 "fake-async",
                 "--config",

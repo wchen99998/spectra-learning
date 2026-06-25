@@ -6,6 +6,7 @@ from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pairmixer import (
     AttentionPairBias,
+    InducedTriangleAttention,
     MediatedTriangleMultiplicativeUpdate,
     PairMixerBlock,
     TriangleAttention,
@@ -402,6 +403,18 @@ def test_bi_dense_block_type_is_configurable():
     assert settings.pairmixer_block_type == "bi-dense"
 
 
+def test_induced_triangle_block_type_is_configurable():
+    settings = PeakSetJEPASettings.from_config(
+        {
+            "pairmixer_block_type": "induced_triangle",
+            "pairmixer_induced_triangle_num_mediators": 5,
+        }
+    )
+
+    assert settings.pairmixer_block_type == "induced_triangle"
+    assert settings.pairmixer_induced_triangle_num_mediators == 5
+
+
 @torch.no_grad()
 def test_bi_dense_pairmixer_adds_gated_single_to_pair_update():
     model = PeakSetJEPA(
@@ -428,6 +441,43 @@ def test_bi_dense_pairmixer_adds_gated_single_to_pair_update():
     assert hasattr(block, "single_to_pair_update")
     assert isinstance(predictor_block, PairMixerBlock)
     assert hasattr(predictor_block, "single_to_pair_update")
+    assert encoded.shape == (2, 7, 32)
+    assert pair.shape == (2, 7, 7, 32)
+
+
+@torch.no_grad()
+def test_induced_triangle_pairmixer_uses_dense_pair_state():
+    model = PeakSetJEPA(
+        model_dim=32,
+        encoder_num_layers=2,
+        encoder_num_heads=4,
+        num_peaks=6,
+        feature_mlp_hidden_dim=32,
+        pairmixer_block_type="induced_triangle",
+        pairmixer_induced_triangle_num_mediators=3,
+    )
+    block = model.encoder.blocks[0]
+    predictor_block = model.masked_latent_predictor[0]
+    batch = _make_batch()
+
+    encoded, pair = model.encoder.forward_with_pair(
+        batch["peak_mz"],
+        batch["peak_intensity"],
+        valid_mask=batch["peak_valid_mask"],
+        visible_mask=batch["peak_valid_mask"],
+    )
+
+    assert isinstance(block, PairMixerBlock)
+    assert isinstance(block.tri_mul_out, TriangleMultiplicativeUpdate)
+    assert isinstance(block.tri_mul_in, TriangleMultiplicativeUpdate)
+    assert block.use_induced_triangle
+    assert not block.use_triangle_mediator
+    assert block.induced_triangle_assignment.num_mediators == 3
+    assert isinstance(block.induced_tri_att_start, InducedTriangleAttention)
+    assert isinstance(block.induced_tri_att_end, InducedTriangleAttention)
+    assert isinstance(predictor_block, PairMixerBlock)
+    assert predictor_block.use_induced_triangle
+    assert isinstance(pair, torch.Tensor)
     assert encoded.shape == (2, 7, 32)
     assert pair.shape == (2, 7, 7, 32)
 
@@ -529,6 +579,47 @@ def test_triangle_attention_is_retained_for_pair_features():
         end_out[~pair_mask],
         torch.zeros_like(end_out[~pair_mask]),
     )
+
+
+@torch.no_grad()
+def test_induced_triangle_attention_masks_pair_features():
+    pair = torch.randn(2, 5, 5, 16)
+    peak_mask = torch.tensor(
+        [
+            [True, True, True, False, False],
+            [True, True, True, True, False],
+        ]
+    )
+    pair_mask = peak_mask.unsqueeze(2) & peak_mask.unsqueeze(1)
+    mediator_assignment = torch.softmax(torch.randn(2, 5, 3), dim=-1)
+
+    start = InducedTriangleAttention(
+        16,
+        num_heads=4,
+        ending=False,
+        norm_eps=1e-5,
+    )
+    end = InducedTriangleAttention(
+        16,
+        num_heads=4,
+        ending=True,
+        norm_eps=1e-5,
+    )
+
+    start_out = start(pair, peak_mask, pair_mask, mediator_assignment)
+    end_out = end(pair, peak_mask, pair_mask, mediator_assignment)
+
+    assert start_out.shape == pair.shape
+    assert end_out.shape == pair.shape
+    torch.testing.assert_close(
+        start_out[~pair_mask],
+        torch.zeros_like(start_out[~pair_mask]),
+    )
+    torch.testing.assert_close(
+        end_out[~pair_mask],
+        torch.zeros_like(end_out[~pair_mask]),
+    )
+
 
 def test_predictor_uses_pairmixer_with_pair_bias_attention():
     model = PeakSetJEPA(

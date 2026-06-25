@@ -45,6 +45,7 @@ class PeakSetEncoder(nnx.Module):
         induced_pair_num_inducing: int = 8,
         pairmixer_triangle_mediator_num_mediators: int = 8,
         pairmixer_triangle_mediator_eps: float = 1e-4,
+        pairmixer_induced_triangle_num_mediators: int = 8,
         pair_feature_hidden_dim: int = 128,
         pairmixer_dropout: float = 0.0,
         pairmixer_mz_scale: float = 1000.0,
@@ -68,6 +69,7 @@ class PeakSetEncoder(nnx.Module):
         self.use_induced_pair = self.pairmixer_block_type == "induced"
         self.use_bi_dense = self.pairmixer_block_type == "bi-dense"
         self.use_triangle_mediator = self.pairmixer_block_type == "triangle_mediator"
+        self.use_induced_triangle = self.pairmixer_block_type == "induced_triangle"
         self.activation_checkpoint_mode = activation_checkpoint_mode.lower()
         self.activation_checkpoint_every_n_layers = activation_checkpoint_every_n_layers
         self.activation_checkpoint_modules = activation_checkpoint_modules
@@ -87,10 +89,12 @@ class PeakSetEncoder(nnx.Module):
             self.initial_left_assignment = TokenInducingAssignment(
                 model_dim,
                 compute_dtype=compute_dtype,
+                rngs=rngs,
             )
             self.initial_right_assignment = TokenInducingAssignment(
                 model_dim,
                 compute_dtype=compute_dtype,
+                rngs=rngs,
             )
         self.cls_to_peak_pair_token = _normal_token_param(rngs, (pair_dim,))
         self.peak_to_cls_pair_token = _normal_token_param(rngs, (pair_dim,))
@@ -108,6 +112,7 @@ class PeakSetEncoder(nnx.Module):
             relative_fourier_x_min=pairmixer_relative_fourier_x_min,
             relative_fourier_x_max=pairmixer_relative_fourier_x_max,
             compute_dtype=compute_dtype,
+            rngs=rngs,
         )
         blocks = []
         for _ in range(num_layers):
@@ -120,6 +125,7 @@ class PeakSetEncoder(nnx.Module):
                     norm_eps=norm_eps,
                     dropout=pairmixer_dropout,
                     compute_dtype=compute_dtype,
+                    rngs=rngs,
                 )
             else:
                 block = PairMixerBlock(
@@ -135,8 +141,14 @@ class PeakSetEncoder(nnx.Module):
                         else None
                     ),
                     triangle_mediator_eps=pairmixer_triangle_mediator_eps,
+                    induced_triangle_num_mediators=(
+                        pairmixer_induced_triangle_num_mediators
+                        if self.use_induced_triangle
+                        else None
+                    ),
                     use_single_to_pair_update=self.use_bi_dense,
                     compute_dtype=compute_dtype,
+                    rngs=rngs,
                 )
             blocks.append(block)
         self.blocks = nnx.List(blocks)

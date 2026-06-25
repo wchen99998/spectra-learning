@@ -58,7 +58,9 @@ class PeakFeatureEmbedder(nnx.Module):
         fourier_input_scale: float = PEAK_MZ_MAX,
         use_fourier_features: bool = True,
         compute_dtype: object = jnp.float32,
+        rngs: nnx.Rngs | None = None,
     ) -> None:
+        rngs = nnx.Rngs(0) if rngs is None else rngs
         self.use_fourier_features = use_fourier_features
         self.fourier_input_scale = fourier_input_scale
         fourier_hidden_dim = (
@@ -78,11 +80,12 @@ class PeakFeatureEmbedder(nnx.Module):
                 fourier_dim,
                 fourier_mlp_num_layers,
                 compute_dtype=compute_dtype,
+                rngs=rngs,
             )
             self.raw_ffn = nnx.List(
                 [
-                    Linear(3, hidden_dim, compute_dtype=compute_dtype),
-                    Linear(hidden_dim, raw_dim, compute_dtype=compute_dtype),
+                    Linear(3, hidden_dim, compute_dtype=compute_dtype, rngs=rngs),
+                    Linear(hidden_dim, raw_dim, compute_dtype=compute_dtype, rngs=rngs),
                 ]
             )
         else:
@@ -92,8 +95,14 @@ class PeakFeatureEmbedder(nnx.Module):
                 model_dim,
                 fourier_mlp_num_layers,
                 compute_dtype=compute_dtype,
+                rngs=rngs,
             )
-        self.output_proj = Linear(model_dim, model_dim, compute_dtype=compute_dtype)
+        self.output_proj = Linear(
+            model_dim,
+            model_dim,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        )
 
     def _prepare_fourier_mz(self, peak_mz: Array) -> Array:
         return peak_mz[..., None] * self.fourier_input_scale

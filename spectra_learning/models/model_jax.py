@@ -49,9 +49,11 @@ class TargetProjector(nnx.Module):
         out_dim: int,
         *,
         compute_dtype: object = jnp.float32,
+        rngs: nnx.Rngs | None = None,
     ) -> None:
-        self.linear0 = Linear(in_dim, in_dim, compute_dtype=compute_dtype)
-        self.linear2 = Linear(in_dim, out_dim, compute_dtype=compute_dtype)
+        rngs = nnx.Rngs(0) if rngs is None else rngs
+        self.linear0 = Linear(in_dim, in_dim, compute_dtype=compute_dtype, rngs=rngs)
+        self.linear2 = Linear(in_dim, out_dim, compute_dtype=compute_dtype, rngs=rngs)
 
     def __call__(self, x: Array) -> Array:
         return self.linear2(gelu(self.linear0(x)))
@@ -69,8 +71,11 @@ class PeakSetJEPAJax(nnx.Module):
     def __init__(
         self,
         settings: PeakSetJEPASettings | None = None,
+        *,
+        rngs: nnx.Rngs | None = None,
         **overrides: Any,
     ) -> None:
+        rngs = nnx.Rngs(0) if rngs is None else rngs
         cfg = PeakSetJEPASettings.create(settings, **overrides)
         frozen_teacher_cfg = _load_frozen_teacher_settings(cfg)
         self.settings = cfg
@@ -86,15 +91,19 @@ class PeakSetJEPAJax(nnx.Module):
             "bi-dense",
             "induced",
             "triangle_mediator",
+            "induced_triangle",
         }:
             raise ValueError(
                 "pairmixer_block_type must be one of "
-                "('dense', 'bi-dense', 'induced', 'triangle_mediator')"
+                "('dense', 'bi-dense', 'induced', 'triangle_mediator', 'induced_triangle')"
             )
         self.pairmixer_triangle_mediator_num_mediators = (
             cfg.pairmixer_triangle_mediator_num_mediators
         )
         self.pairmixer_triangle_mediator_eps = cfg.pairmixer_triangle_mediator_eps
+        self.pairmixer_induced_triangle_num_mediators = (
+            cfg.pairmixer_induced_triangle_num_mediators
+        )
         self.encoder_num_layers = cfg.encoder_num_layers
         self.norm_eps = cfg.norm_eps
         self.jepa_num_target_blocks = cfg.jepa_num_target_blocks
@@ -174,15 +183,17 @@ class PeakSetJEPAJax(nnx.Module):
         self.mae_context_encoder_pack_tokens = cfg.mae_context_encoder_pack_tokens
         self.compute_dtype = resolve_jax_compute_dtype(cfg.autocast_dtype)
 
-        self.encoder = self._build_encoder(cfg)
+        self.encoder = self._build_encoder(cfg, rngs)
         self.teacher_encoder = (
-            self._build_encoder(frozen_teacher_cfg or cfg)
+            self._build_encoder(frozen_teacher_cfg or cfg, rngs)
             if self.use_ema_teacher or self.use_frozen_teacher
             else None
         )
-        self.latent_mask_token = nnx.Param(jnp.zeros((self.model_dim,), dtype=jnp.float32))
+        self.latent_mask_token = nnx.Param(
+            rngs.params.normal((self.model_dim,), dtype=jnp.float32) * 0.02
+        )
         self.pair_mask_token = nnx.Param(
-            jnp.zeros((self.predictor_pair_dim,), dtype=jnp.float32)
+            rngs.params.normal((self.predictor_pair_dim,), dtype=jnp.float32) * 0.02
         )
         self.encoder_to_predictor_proj = (
             Linear(
@@ -190,6 +201,7 @@ class PeakSetJEPAJax(nnx.Module):
                 self.predictor_dim,
                 bias=False,
                 compute_dtype=self.compute_dtype,
+                rngs=rngs,
             )
             if self.predictor_dim != self.model_dim
             else Identity()
@@ -213,6 +225,7 @@ class PeakSetJEPAJax(nnx.Module):
                     norm_eps=self.norm_eps,
                     dropout=cfg.predictor_dropout,
                     compute_dtype=self.compute_dtype,
+                    rngs=rngs,
                 )
             else:
                 block = PairMixerBlock(
@@ -228,8 +241,14 @@ class PeakSetJEPAJax(nnx.Module):
                         else None
                     ),
                     triangle_mediator_eps=self.pairmixer_triangle_mediator_eps,
+                    induced_triangle_num_mediators=(
+                        self.pairmixer_induced_triangle_num_mediators
+                        if self.pairmixer_block_type == "induced_triangle"
+                        else None
+                    ),
                     use_single_to_pair_update=self.pairmixer_block_type == "bi-dense",
                     compute_dtype=self.compute_dtype,
+                    rngs=rngs,
                 )
             predictor_blocks.append(block)
         self.masked_latent_predictor = nnx.List(predictor_blocks)
@@ -242,12 +261,14 @@ class PeakSetJEPAJax(nnx.Module):
             self.predictor_dim,
             self.jepa_target_dim,
             compute_dtype=self.compute_dtype,
+            rngs=rngs,
         )
         self.masked_pair_readout = (
             Linear(
                 self.predictor_pair_dim,
                 self.teacher_pair_dim,
                 compute_dtype=self.compute_dtype,
+                rngs=rngs,
             )
             if self.latent_pair_loss_weight > 0
             and self.predictor_pair_dim != self.teacher_pair_dim
@@ -258,6 +279,7 @@ class PeakSetJEPAJax(nnx.Module):
                 self.jepa_target_dim,
                 self.target_projector_dim,
                 compute_dtype=self.compute_dtype,
+                rngs=rngs,
             )
             if self.use_target_projector
             else Identity()
@@ -267,6 +289,7 @@ class PeakSetJEPAJax(nnx.Module):
                 self.jepa_target_dim,
                 self.target_projector_dim,
                 compute_dtype=self.compute_dtype,
+                rngs=rngs,
             )
             if (self.use_ema_teacher or self.use_frozen_teacher)
             and self.use_target_projector
@@ -277,6 +300,7 @@ class PeakSetJEPAJax(nnx.Module):
                 self.target_projector_dim,
                 self.jepa_mae_num_mz_bins,
                 compute_dtype=self.compute_dtype,
+                rngs=rngs,
             )
             if self.jepa_mae_loss_weight > 0 or self.training_mode == "mae"
             else None
@@ -286,6 +310,7 @@ class PeakSetJEPAJax(nnx.Module):
                 self.target_projector_dim,
                 self.jepa_mae_num_intensity_bins,
                 compute_dtype=self.compute_dtype,
+                rngs=rngs,
             )
             if self.jepa_mae_loss_weight > 0 or self.training_mode == "mae"
             else None
@@ -295,12 +320,13 @@ class PeakSetJEPAJax(nnx.Module):
                 self.predictor_pair_dim,
                 self.distogram_num_bins,
                 compute_dtype=self.compute_dtype,
+                rngs=rngs,
             )
             if self.distogram_loss_weight > 0
             else None
         )
 
-    def _build_encoder(self, cfg: PeakSetJEPASettings) -> PeakSetEncoder:
+    def _build_encoder(self, cfg: PeakSetJEPASettings, rngs: nnx.Rngs) -> PeakSetEncoder:
         return PeakSetEncoder(
             model_dim=cfg.model_dim,
             embedder=PeakFeatureEmbedder(
@@ -314,6 +340,7 @@ class PeakSetJEPAJax(nnx.Module):
                 fourier_input_scale=cfg.encoder_fourier_input_scale,
                 use_fourier_features=cfg.encoder_use_fourier_features,
                 compute_dtype=self.compute_dtype,
+                rngs=rngs,
             ),
             num_layers=cfg.encoder_num_layers,
             num_heads=cfg.encoder_num_heads,
@@ -330,6 +357,9 @@ class PeakSetJEPAJax(nnx.Module):
                 cfg.pairmixer_triangle_mediator_num_mediators
             ),
             pairmixer_triangle_mediator_eps=cfg.pairmixer_triangle_mediator_eps,
+            pairmixer_induced_triangle_num_mediators=(
+                cfg.pairmixer_induced_triangle_num_mediators
+            ),
             pair_feature_hidden_dim=cfg.pairmixer_pair_feature_hidden_dim,
             pairmixer_dropout=cfg.pairmixer_dropout,
             pairmixer_mz_scale=cfg.pairmixer_mz_scale,
@@ -346,6 +376,7 @@ class PeakSetJEPAJax(nnx.Module):
             ),
             activation_checkpoint_modules=cfg.activation_checkpoint_modules,
             compute_dtype=self.compute_dtype,
+            rngs=rngs,
         )
 
     def __call__(

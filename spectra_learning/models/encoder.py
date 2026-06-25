@@ -35,6 +35,7 @@ class PeakSetEncoder(nn.Module):
         induced_pair_num_inducing: int = 8,
         pairmixer_triangle_mediator_num_mediators: int = 8,
         pairmixer_triangle_mediator_eps: float = 1e-4,
+        pairmixer_induced_triangle_num_mediators: int = 8,
         pair_feature_hidden_dim: int = 128,
         pairmixer_dropout: float = 0.0,
         pairmixer_mz_scale: float = 1000.0,
@@ -53,6 +54,7 @@ class PeakSetEncoder(nn.Module):
         self.use_induced_pair = self.pairmixer_block_type == "induced"
         self.use_bi_dense = self.pairmixer_block_type == "bi-dense"
         self.use_triangle_mediator = self.pairmixer_block_type == "triangle_mediator"
+        self.use_induced_triangle = self.pairmixer_block_type == "induced_triangle"
         self.embedder = embedder
         self.position_embedding = _build_frozen_position_embedding(
             num_peaks,
@@ -116,6 +118,11 @@ class PeakSetEncoder(nn.Module):
                         else None
                     ),
                     triangle_mediator_eps=pairmixer_triangle_mediator_eps,
+                    induced_triangle_num_mediators=(
+                        pairmixer_induced_triangle_num_mediators
+                        if self.use_induced_triangle
+                        else None
+                    ),
                     use_single_to_pair_update=self.use_bi_dense,
                 )
             blocks.append(block)

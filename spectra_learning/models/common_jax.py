@@ -72,16 +72,43 @@ class Linear(nnx.Module):
         *,
         bias: bool = True,
         compute_dtype: Any = jnp.float32,
+        init: str = "xavier_normal",
+        rngs: nnx.Rngs | None = None,
     ) -> None:
+        rngs = nnx.Rngs(0) if rngs is None else rngs
         self.compute_dtype = compute_dtype
         self.matmul_precision = (
             jax.lax.Precision.DEFAULT
             if compute_dtype == jnp.bfloat16
             else None
         )
-        self.weight = nnx.Param(jnp.zeros((out_features, in_features), dtype=jnp.float32))
+        weight_shape = (out_features, in_features)
+        if init in {"gate", "zeros"}:
+            weight = jnp.zeros(weight_shape, dtype=jnp.float32)
+        elif init == "trunc_normal_fan_in":
+            weight = (
+                jax.random.truncated_normal(
+                    rngs.params(),
+                    -2.0,
+                    2.0,
+                    weight_shape,
+                    dtype=jnp.float32,
+                )
+                / math.sqrt(in_features)
+            )
+        else:
+            weight = rngs.params.normal(weight_shape, dtype=jnp.float32) * math.sqrt(
+                2.0 / (in_features + out_features)
+            )
+        self.weight = nnx.Param(weight)
         self.bias = (
-            nnx.Param(jnp.zeros((out_features,), dtype=jnp.float32)) if bias else None
+            nnx.Param(
+                jnp.ones((out_features,), dtype=jnp.float32)
+                if init == "gate"
+                else jnp.zeros((out_features,), dtype=jnp.float32)
+            )
+            if bias
+            else None
         )
 
     def __call__(self, x: Array) -> Array:
@@ -162,7 +189,9 @@ class MLP(nnx.Module):
         num_layers: int,
         *,
         compute_dtype: Any = jnp.float32,
+        rngs: nnx.Rngs | None = None,
     ) -> None:
+        rngs = nnx.Rngs(0) if rngs is None else rngs
         assert num_layers >= 2
         dims = [input_dim, *([hidden_dim] * (num_layers - 1)), output_dim]
         self.layers = nnx.List(
@@ -171,6 +200,7 @@ class MLP(nnx.Module):
                     dims[idx],
                     dims[idx + 1],
                     compute_dtype=compute_dtype,
+                    rngs=rngs,
                 )
                 for idx in range(num_layers)
             ]
