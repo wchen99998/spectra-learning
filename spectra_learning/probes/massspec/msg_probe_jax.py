@@ -44,6 +44,7 @@ JaxProbeParams = dict[str, Any]
 EpochState = dict[str, Any]
 PendingPrediction = tuple[dict[str, Array], np.ndarray, dict[str, np.ndarray]]
 JAX_PROBE_DATA_AXIS = "data"
+MAX_PENDING_PREDICTIONS = 4
 
 
 def run_msg_probe_jax(
@@ -424,6 +425,11 @@ def _run_msg_probe_once_jax(
                     batch=batch,
                     task_spec=task_spec,
                 )
+                _flush_pending_predictions_if_full(
+                    train_states[variant],
+                    train_pending[variant],
+                    task_spec,
+                )
         _flush_variant_prediction_queues(train_pending, train_states, task_spec)
         phase_timing["train_epoch_seconds"] += time.perf_counter() - phase_start
         train_states = _gather_variant_states_jax(train_states, task_spec)
@@ -459,6 +465,11 @@ def _run_msg_probe_once_jax(
                     ),
                     batch=batch,
                     task_spec=task_spec,
+                )
+                _flush_pending_predictions_if_full(
+                    eval_states[variant],
+                    eval_pending[variant],
+                    task_spec,
                 )
         _flush_variant_prediction_queues(eval_pending, eval_states, task_spec)
         phase_timing["eval_epoch_seconds"] += time.perf_counter() - phase_start
@@ -563,6 +574,11 @@ def _run_msg_probe_once_jax(
                     batch=batch,
                     task_spec=task_spec,
                 )
+                _flush_pending_predictions_if_full(
+                    final_states[variant],
+                    final_pending[variant],
+                    task_spec,
+                )
         _flush_variant_prediction_queues(final_pending, final_states, task_spec)
         phase_timing["final_test_seconds"] += time.perf_counter() - phase_start
         final_states = _gather_variant_states_jax(final_states, task_spec)
@@ -617,6 +633,11 @@ def _run_msg_probe_once_jax(
                 ),
                 batch=batch,
                 task_spec=task_spec,
+            )
+            _flush_pending_predictions_if_full(
+                mcebio_states[variant],
+                mcebio_pending[variant],
+                task_spec,
             )
     _flush_variant_prediction_queues(mcebio_pending, mcebio_states, task_spec)
     phase_timing["mcebio_seconds"] += time.perf_counter() - phase_start
@@ -1248,6 +1269,7 @@ def _append_pending_prediction(
     if not valid_mask.any():
         jax.block_until_ready(logits)
         return
+    _copy_tree_to_host_async(logits)
     pending.append(
         (
             logits,
@@ -1270,31 +1292,43 @@ def _flush_variant_prediction_queues(
         _flush_pending_predictions(states[variant], pending, task_spec)
 
 
-def _flush_pending_predictions(
+def _flush_pending_predictions_if_full(
+    epoch_state: EpochState,
+    pending: list[PendingPrediction],
+    task_spec: MsgProbeTaskSpec,
+) -> None:
+    if len(pending) >= MAX_PENDING_PREDICTIONS:
+        _flush_oldest_pending_prediction(epoch_state, pending, task_spec)
+
+
+def _flush_oldest_pending_prediction(
     epoch_state: EpochState,
     pending: list[PendingPrediction],
     task_spec: MsgProbeTaskSpec,
 ) -> None:
     if not pending:
         return
-    host_logits = [_host_local_tree(logits) for logits, _, _ in pending]
-    for (logits, valid_mask, targets), host_logit in zip(
-        pending,
-        host_logits,
-        strict=True,
-    ):
-        del logits
-        _update_epoch_state_from_predictions(
-            epoch_state,
-            _probe_predictions_from_host_logits(
-                host_logit,
-                valid_mask=valid_mask,
-                target_values=targets,
-                task_spec=task_spec,
-            ),
-            task_spec,
-        )
-    pending.clear()
+    logits, valid_mask, targets = pending.pop(0)
+    host_logit = _host_local_tree(logits)
+    _update_epoch_state_from_predictions(
+        epoch_state,
+        _probe_predictions_from_host_logits(
+            host_logit,
+            valid_mask=valid_mask,
+            target_values=targets,
+            task_spec=task_spec,
+        ),
+        task_spec,
+    )
+
+
+def _flush_pending_predictions(
+    epoch_state: EpochState,
+    pending: list[PendingPrediction],
+    task_spec: MsgProbeTaskSpec,
+) -> None:
+    while pending:
+        _flush_oldest_pending_prediction(epoch_state, pending, task_spec)
 
 
 def _probe_predictions_from_logits(
@@ -1394,6 +1428,19 @@ def _probe_targets_from_batch(
 
 def _host_local_tree(tree: Any) -> Any:
     return jax.tree.map(_host_local_array, tree)
+
+
+def _copy_tree_to_host_async(tree: Any) -> None:
+    jax.tree.map(_copy_array_to_host_async, tree)
+
+
+def _copy_array_to_host_async(value: Any) -> None:
+    if _is_global_non_fully_addressable_array(value):
+        for shard in value.addressable_shards:
+            shard.data.copy_to_host_async()
+        return
+    if isinstance(value, jax.Array):
+        value.copy_to_host_async()
 
 
 def _host_local_array(value: Any) -> np.ndarray:

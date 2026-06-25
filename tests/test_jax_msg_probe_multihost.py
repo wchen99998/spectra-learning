@@ -32,16 +32,28 @@ def test_msg_probe_jax_runs_with_simulated_multihost_sharded_batches() -> None:
 
         from spectra_learning.probes.massspec import msg_probe_jax
 
+        bounded_flush_count = 0
+        original_flush_if_full = msg_probe_jax._flush_pending_predictions_if_full
+
+        def counting_flush_if_full(epoch_state, pending, task_spec):
+            global bounded_flush_count
+            before = len(pending)
+            original_flush_if_full(epoch_state, pending, task_spec)
+            if before >= msg_probe_jax.MAX_PENDING_PREDICTIONS:
+                bounded_flush_count += 1
+
+        msg_probe_jax._flush_pending_predictions_if_full = counting_flush_if_full
+
         regression_names = tuple(msg_probe_jax.REGRESSION_PROBE_TASKS)
         binary_names = tuple(msg_probe_jax.BINARY_PROBE_TASKS)
 
         class FakeProbeData:
             batch_size = 4
             info = {
-                "massspec_train_size": 3,
-                "massspec_val_size": 3,
-                "massspec_test_size": 3,
-                "massspec_mcebio_test_size": 1,
+                "massspec_train_size": 16,
+                "massspec_val_size": 16,
+                "massspec_test_size": 16,
+                "massspec_mcebio_test_size": 16,
                 "probe_maccs_bits": 2,
             }
 
@@ -129,6 +141,7 @@ def test_msg_probe_jax_runs_with_simulated_multihost_sharded_batches() -> None:
                     "process_id": jax.process_index(),
                     "process_count": jax.process_count(),
                     "metric_count": len(metrics),
+                    "bounded_flush_count": bounded_flush_count,
                     "has_mcebio": (
                         "msg_probe/mean/mcebio_sulfur_test/auc_sulfur" in metrics
                     ),
@@ -165,6 +178,7 @@ def test_msg_probe_jax_runs_with_simulated_multihost_sharded_batches() -> None:
     assert [record["process_id"] for record in records] == [0, 1]
     assert all(record["process_count"] == 2 for record in records)
     assert all(record["metric_count"] > 0 for record in records)
+    assert all(record["bounded_flush_count"] > 0 for record in records)
     assert all(record["has_mcebio"] for record in records)
 
 
