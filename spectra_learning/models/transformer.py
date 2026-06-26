@@ -170,6 +170,30 @@ class FeedForward(nn.Module):
         return self.w2(F.silu(self.w1(x)))
 
 
+class SwiGLUFeedForward(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        *,
+        hidden_dim: int | None = None,
+    ):
+        super().__init__()
+
+        hidden_dim = hidden_dim or 4 * dim
+        hidden_dim = 4 * math.ceil(hidden_dim / 4)
+
+        self.fc1 = nn.Linear(dim, hidden_dim, bias=False)
+        self.fc2 = nn.Linear(dim, hidden_dim, bias=False)
+        self.fc3 = nn.Linear(hidden_dim, dim, bias=False)
+
+        nn.init.trunc_normal_(self.fc1.weight, std=1.0 / math.sqrt(dim))
+        nn.init.trunc_normal_(self.fc2.weight, std=1.0 / math.sqrt(dim))
+        nn.init.zeros_(self.fc3.weight)
+
+    def forward(self, x: Float[Tensor, "*batch dim"]) -> Float[Tensor, "*batch dim"]:
+        return self.fc3(F.silu(self.fc1(x)) * self.fc2(x))
+
+
 class TransformerBlock(nn.Module):
     def __init__(
         self,

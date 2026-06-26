@@ -17,7 +17,7 @@ from spectra_learning.models.common_jax import (
     silu,
 )
 from spectra_learning.models.peak_features_jax import FourierFeatures
-from spectra_learning.models.transformer_jax import FeedForward
+from spectra_learning.models.transformer_jax import SwiGLUFeedForward
 
 
 COMMON_MASS_DIFFERENCES_DA = (
@@ -443,7 +443,7 @@ class PairMixerBlock(nnx.Module):
             rngs=rngs,
         )
         self.pair_transition_norm = LayerNorm(pair_dim, eps=norm_eps)
-        self.pair_transition = FeedForward(
+        self.pair_transition = SwiGLUFeedForward(
             pair_dim,
             hidden_dim=math.ceil(pair_dim * attention_mlp_multiple),
             compute_dtype=compute_dtype,
@@ -466,7 +466,7 @@ class PairMixerBlock(nnx.Module):
             rngs=rngs,
         )
         self.single_transition_norm = LayerNorm(single_dim, eps=norm_eps)
-        self.single_transition = FeedForward(
+        self.single_transition = SwiGLUFeedForward(
             single_dim,
             hidden_dim=math.ceil(single_dim * attention_mlp_multiple),
             compute_dtype=compute_dtype,

@@ -7,6 +7,7 @@ from spectra_learning.models.transformer import (
     Attention,
     CrossAttention,
     FeedForward,
+    SwiGLUFeedForward,
     TransformerBlock,
     create_visible_attention_mask,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "PeakSetJEPA",
     "PeakSetJEPASettings",
     "SinglePairCovariancePool",
+    "SwiGLUFeedForward",
     "TransformerBlock",
     "create_visible_attention_mask",
 ]

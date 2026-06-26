@@ -12,6 +12,7 @@ from spectra_learning.models.pairmixer import (
 )
 from spectra_learning.models.peak_features import PeakFeatureEmbedder
 from spectra_learning.models.settings import PeakSetJEPASettings
+from spectra_learning.models.transformer import SwiGLUFeedForward
 
 
 def _build_model(
@@ -437,6 +438,10 @@ def test_bi_dense_pairmixer_adds_gated_single_to_pair_update():
 
     assert isinstance(block, PairMixerBlock)
     assert isinstance(block.single_attention, AttentionPairBias)
+    assert isinstance(block.pair_transition, SwiGLUFeedForward)
+    assert isinstance(block.single_transition, SwiGLUFeedForward)
+    assert torch.count_nonzero(block.pair_transition.fc3.weight) == 0
+    assert torch.count_nonzero(block.single_transition.fc3.weight) == 0
     assert hasattr(block, "single_to_pair_update")
     assert isinstance(predictor_block, PairMixerBlock)
     assert hasattr(predictor_block, "single_to_pair_update")

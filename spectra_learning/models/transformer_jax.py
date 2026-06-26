@@ -134,6 +134,56 @@ class FeedForward(nnx.Module):
         self.w2.load_torch_state_dict(state_dict, f"{prefix}.w2")
 
 
+class SwiGLUFeedForward(nnx.Module):
+    def __init__(
+        self,
+        dim: int,
+        *,
+        hidden_dim: int | None = None,
+        compute_dtype: object = jnp.float32,
+        rngs: nnx.Rngs | None = None,
+    ) -> None:
+        rngs = nnx.Rngs(0) if rngs is None else rngs
+        hidden_dim = hidden_dim or 4 * dim
+        hidden_dim = 4 * math.ceil(hidden_dim / 4)
+        self.fc1 = Linear(
+            dim,
+            hidden_dim,
+            bias=False,
+            compute_dtype=compute_dtype,
+            init="trunc_normal_fan_in",
+            rngs=rngs,
+        )
+        self.fc2 = Linear(
+            dim,
+            hidden_dim,
+            bias=False,
+            compute_dtype=compute_dtype,
+            init="trunc_normal_fan_in",
+            rngs=rngs,
+        )
+        self.fc3 = Linear(
+            hidden_dim,
+            dim,
+            bias=False,
+            compute_dtype=compute_dtype,
+            init="zeros",
+            rngs=rngs,
+        )
+
+    def __call__(self, x: Array) -> Array:
+        return self.fc3(silu(self.fc1(x)) * self.fc2(x))
+
+    def load_torch_state_dict(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        prefix: str,
+    ) -> None:
+        self.fc1.load_torch_state_dict(state_dict, f"{prefix}.fc1")
+        self.fc2.load_torch_state_dict(state_dict, f"{prefix}.fc2")
+        self.fc3.load_torch_state_dict(state_dict, f"{prefix}.fc3")
+
+
 class TransformerBlock(nnx.Module):
     def __init__(
         self,

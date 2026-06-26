@@ -9,7 +9,7 @@ from torch import Tensor, nn
 
 from spectra_learning.data.spectra import PEAK_MZ_MAX
 from spectra_learning.models.peak_features import FourierFeatures
-from spectra_learning.models.transformer import FeedForward, _build_norm
+from spectra_learning.models.transformer import SwiGLUFeedForward, _build_norm
 
 
 COMMON_MASS_DIFFERENCES_DA = (
@@ -450,7 +450,7 @@ class PairMixerBlock(nn.Module):
             pair_dim,
             eps=norm_eps,
         )
-        self.pair_transition = FeedForward(
+        self.pair_transition = SwiGLUFeedForward(
             pair_dim,
             hidden_dim=math.ceil(pair_dim * attention_mlp_multiple),
         )
@@ -470,7 +470,7 @@ class PairMixerBlock(nn.Module):
             single_dim,
             eps=norm_eps,
         )
-        self.single_transition = FeedForward(
+        self.single_transition = SwiGLUFeedForward(
             single_dim,
             hidden_dim=math.ceil(single_dim * attention_mlp_multiple),
         )

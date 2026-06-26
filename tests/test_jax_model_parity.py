@@ -280,7 +280,13 @@ def test_jax_native_bi_dense_pairmixer_uses_torch_style_initialization():
     single_out, pair_out = block(single, pair, mask, mask)
 
     assert not np.allclose(np.asarray(block.tri_mul_out.p_in.weight[...]), 0.0)
+    assert not np.allclose(np.asarray(block.pair_transition.fc1.weight[...]), 0.0)
+    assert not np.allclose(np.asarray(block.pair_transition.fc2.weight[...]), 0.0)
     assert not np.allclose(np.asarray(block.single_to_pair_update.left.weight[...]), 0.0)
+    np.testing.assert_allclose(
+        np.asarray(block.pair_transition.fc3.weight[...]),
+        0.0,
+    )
     np.testing.assert_allclose(
         np.asarray(block.tri_mul_out.g_in.weight[...]),
         0.0,
