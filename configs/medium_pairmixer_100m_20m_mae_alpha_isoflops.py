@@ -123,9 +123,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.activation_checkpoint_modules = ("encoder", "predictor")
     cfg.activation_checkpoint_preserve_rng_state = True
     cfg.jax_mesh_devices = "all"
-    cfg.jax_precompile_train_steps = True
-    cfg.jax_precompile_repetitions = 1
-    cfg.jax_precompile_variant = "all"
     cfg.jax_compile_stall_threshold_seconds = 0.0
     cfg.jax_log_compiles = False
     cfg.jax_explain_cache_misses = False

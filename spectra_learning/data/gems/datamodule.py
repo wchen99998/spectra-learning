@@ -338,13 +338,3 @@ class GemsNativeDataModule:
             start_batch=start_batch,
             epoch=epoch,
         )
-
-    def train_loader_for_precompile(self) -> DataLoader:
-        return self._make_loader(
-            dataset=self._get_dataset("train"),
-            augment=True,
-            shuffle=False,
-            seed=self.seed,
-            drop_last=self.drop_remainder,
-            num_workers=0,
-        )

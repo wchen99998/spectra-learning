@@ -24,10 +24,7 @@ from spectra_learning.data.gems.datamodule import GemsNativeDataModule
 from spectra_learning.models.common_jax import Array
 from spectra_learning.models.factory_jax import build_model_from_config
 from spectra_learning.models.model_jax import PeakSetJEPAJax
-from spectra_learning.probes.massspec.msg_probe_jax import (
-    precompile_msg_probe_jax,
-    run_msg_probe_jax,
-)
+from spectra_learning.probes.massspec.msg_probe_jax import run_msg_probe_jax
 from spectra_learning.probes.massspec.msg_settings import (
     msg_probe_variants_from_config,
 )
@@ -1049,9 +1046,8 @@ def _run_jax_training_loop(
         data_mesh=data_mesh,
     )
     if use_sharded_step:
-        # Commit the training state to the data mesh once so precompile and
-        # every training step share one input-sharding signature; otherwise
-        # the first step per variant sees uncommitted arrays and recompiles.
+        # Commit the training state to the data mesh once so every training
+        # step uses the same input-sharding signature.
         pure_trainable_params = _replicate_tree_on_data_mesh(
             pure_trainable_params,
             data_mesh,
@@ -1130,27 +1126,6 @@ def _run_jax_training_loop(
     )
     profile_started = False
     profile_active = False
-    precompile_metrics = _precompile_jax_training_steps(
-        config=config,
-        datamodule=datamodule,
-        grad_accum_steps=grad_accum_steps,
-        use_sharded_step=use_sharded_step,
-        data_mesh=data_mesh,
-        pure_trainable_params=pure_trainable_params,
-        pure_opt_state=pure_opt_state,
-        pure_static_state=pure_static_state,
-        pure_train_step=pure_train_step,
-        pure_pack_train_steps=pure_pack_train_steps,
-        pure_full_static_state=pure_full_static_state,
-        pure_full_train_step=pure_full_train_step,
-        pure_eval_step=pure_eval_step,
-        pure_eval_static_state=(
-            pure_full_static_state
-            if pure_full_static_state is not None
-            else pure_static_state
-        ),
-        model=model,
-    )
     timing = {
         "dataloader_seconds": 0.0,
         "transfer_seconds": 0.0,
@@ -1508,7 +1483,6 @@ def _run_jax_training_loop(
         result[f"run/{name}"] = value
     result.update(last_validation_metrics)
     result.update(last_msg_probe_metrics)
-    result.update(precompile_metrics)
     if context_encoder_pack_choices:
         result.update(
             {
@@ -1728,178 +1702,6 @@ def _run_distributed_msg_probe_jax(
     return probe_metrics if jax.process_index() == 0 else {}
 
 
-def _precompile_jax_training_steps(
-    *,
-    config: config_dict.ConfigDict,
-    datamodule: GemsNativeDataModule,
-    grad_accum_steps: int,
-    use_sharded_step: bool,
-    data_mesh: Mesh,
-    pure_trainable_params: nnx.State | None,
-    pure_opt_state: Any | None,
-    pure_static_state: nnx.State | None,
-    pure_train_step: Any | None,
-    pure_pack_train_steps: list[tuple[int, nnx.State, Any]],
-    pure_full_static_state: nnx.State | None,
-    pure_full_train_step: Any | None,
-    pure_eval_step: Any | None = None,
-    pure_eval_static_state: nnx.State | None = None,
-    model: PeakSetJEPAJax | None = None,
-) -> dict[str, float]:
-    if not bool(_config_get(config, "jax_precompile_train_steps", True)):
-        return {
-            "run/precompile_seconds": 0.0,
-            "run/precompile_train_steps": 0.0,
-            "run/precompile_eval_steps": 0.0,
-            "run/precompile_msg_probe_features": 0.0,
-            "run/precompile_msg_probe_train_steps": 0.0,
-            "run/precompile_msg_probe_predict_steps": 0.0,
-            "run/precompile_repetitions": 0.0,
-            "run/precompile_pack_variants": 0.0,
-            "run/precompile_full_fallback": 0.0,
-        }
-    compile_start = time.perf_counter()
-    precompile_repetitions = int(_config_get(config, "jax_precompile_repetitions", 1))
-    loader_iter = iter(datamodule.train_loader_for_precompile())
-    micro_batches = [next(loader_iter) for _ in range(grad_accum_steps)]
-    batch = numpy_batch_to_jax(
-        _stack_micro_batches(micro_batches),
-        data_mesh=data_mesh if use_sharded_step else None,
-        batch_axis=1,
-    )
-
-    train_step_count = 0
-    pack_variant_count = 0
-    full_fallback_count = 0
-    step_specs = []
-    variant_selector = str(_config_get(config, "jax_precompile_variant", "default"))
-    pack_train_steps = {
-        pack_tokens: (static_state, train_step)
-        for pack_tokens, static_state, train_step in pure_pack_train_steps
-    }
-    pack_choices = tuple(pack_tokens for pack_tokens, _, _ in pure_pack_train_steps)
-    variants = _jax_train_step_compile_variants(
-        pack_choices,
-        selector=variant_selector,
-        has_default_train_step=pure_train_step is not None,
-        has_full_fallback=pure_full_train_step is not None,
-    )
-    for _variant_name, pack_tokens, full_fallback in variants:
-        if full_fallback:
-            step_specs.append((pure_full_static_state, pure_full_train_step, batch))
-            full_fallback_count += 1
-        elif pack_tokens is None:
-            step_specs.append((pure_static_state, pure_train_step, batch))
-        else:
-            static_state, train_step = pack_train_steps[pack_tokens]
-            step_specs.append(
-                (static_state, train_step, _limit_context_count(batch, pack_tokens))
-            )
-            pack_variant_count += 1
-    for static_state, train_step, compile_batch in step_specs:
-        compile_params = _clone_jax_tree(pure_trainable_params)
-        compile_opt_state = _clone_jax_tree(pure_opt_state)
-        for _ in range(precompile_repetitions):
-            compile_params, compile_opt_state, metrics = train_step(
-                compile_params,
-                static_state,
-                compile_opt_state,
-                compile_batch,
-            )
-            jax.block_until_ready((compile_params, compile_opt_state, metrics))
-            train_step_count += 1
-    eval_step_count = 0
-    if bool(_config_get(config, "jax_precompile_eval_steps", False)):
-        if pure_eval_step is None or pure_eval_static_state is None:
-            raise ValueError("jax_precompile_eval_steps requires pure_eval_step")
-        val_batch = numpy_batch_to_jax(
-            next(iter(datamodule.val_loader_for_eval(augment=True))),
-            data_mesh=data_mesh if use_sharded_step else None,
-            batch_axis=0,
-        )
-        eval_metrics = pure_eval_step(
-            pure_trainable_params,
-            pure_eval_static_state,
-            val_batch,
-        )
-        jax.block_until_ready(eval_metrics)
-        eval_step_count = 1
-    msg_probe_counts = {
-        "features": 0.0,
-        "train_steps": 0.0,
-        "predict_steps": 0.0,
-    }
-    if bool(_config_get(config, "jax_precompile_msg_probe", False)):
-        if model is None:
-            raise ValueError("jax_precompile_msg_probe requires model")
-        nnx.update(model, pure_trainable_params)
-        probe_data_mesh = (
-            data_mesh
-            if bool(_config_get(config, "jax_msg_probe_shard_batches", False))
-            else None
-        )
-        msg_probe_counts = precompile_msg_probe_jax(
-            config=config,
-            model=model,
-            data_mesh=probe_data_mesh,
-            online_maccs_only=True,
-        )
-    return {
-        "run/precompile_seconds": time.perf_counter() - compile_start,
-        "run/precompile_train_steps": float(train_step_count),
-        "run/precompile_eval_steps": float(eval_step_count),
-        "run/precompile_msg_probe_features": float(msg_probe_counts["features"]),
-        "run/precompile_msg_probe_train_steps": float(
-            msg_probe_counts["train_steps"]
-        ),
-        "run/precompile_msg_probe_predict_steps": float(
-            msg_probe_counts["predict_steps"]
-        ),
-        "run/precompile_repetitions": float(precompile_repetitions),
-        "run/precompile_pack_variants": float(pack_variant_count),
-        "run/precompile_full_fallback": float(full_fallback_count),
-    }
-
-
-def _jax_train_step_compile_variants(
-    pack_choices: tuple[int, ...],
-    *,
-    selector: str,
-    has_default_train_step: bool,
-    has_full_fallback: bool,
-) -> tuple[tuple[str, int | None, bool], ...]:
-    selector = selector.lower()
-    if selector == "default":
-        if pack_choices:
-            pack_tokens = pack_choices[0]
-            return ((f"pack{pack_tokens}", pack_tokens, False),)
-        assert has_default_train_step
-        return (("default", None, False),)
-    if selector == "largest-pack":
-        assert pack_choices
-        pack_tokens = pack_choices[-1]
-        return ((f"pack{pack_tokens}", pack_tokens, False),)
-    if selector == "full":
-        assert has_full_fallback
-        return (("full", 0, True),)
-    if selector == "all":
-        variants = tuple(
-            (f"pack{pack_tokens}", pack_tokens, False)
-            for pack_tokens in pack_choices
-        )
-        if has_full_fallback:
-            variants = (*variants, ("full", 0, True))
-        if variants:
-            return variants
-        assert has_default_train_step
-        return (("default", None, False),)
-    if selector.startswith("pack:"):
-        pack_tokens = int(selector.split(":", 1)[1])
-        assert pack_tokens in pack_choices
-        return ((f"pack{pack_tokens}", pack_tokens, False),)
-    raise ValueError(f"Unknown JAX train-step compile variant selector: {selector}")
-
-
 def _raise_on_jax_compile_stall(
     elapsed_seconds: float,
     *,
@@ -1917,16 +1719,10 @@ def _raise_on_jax_compile_stall(
     )
 
 
-def _clone_jax_tree(tree: Any) -> Any:
-    return jax.tree.map(
-        lambda value: jnp.array(value, copy=True)
-        if isinstance(value, jax.Array)
-        else value,
-        tree,
-    )
-
-
-def _limit_context_count(batch: dict[str, Array], max_context_count: int) -> dict[str, Array]:
+def _limit_context_count(
+    batch: dict[str, Array],
+    max_context_count: int,
+) -> dict[str, Array]:
     peak_valid_mask = batch["peak_valid_mask"]
     valid_rank = jnp.cumsum(peak_valid_mask.astype(jnp.int32), axis=-1)
     return {

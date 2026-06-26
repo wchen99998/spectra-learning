@@ -37,13 +37,12 @@ def test_launcher_shape_comes_from_explicit_muon_long_run_config():
     assert args.flex_start_max_run_duration == ""
     assert args.provision_timeout_seconds == 3600
     assert defaults.training_max_steps == 250_000
-    assert defaults.batch_size == 4096
+    assert defaults.batch_size == 2048
     assert defaults.gradient_accumulation_steps == 4
     assert defaults.msg_probe_every_n_steps == 100_000
-    assert defaults.val_every_n_steps == 25_000
-    assert defaults.val_num_steps == 1_000
-    assert defaults.dataloader_num_workers == 12
-    assert defaults.aot_variant == "all"
+    assert defaults.val_every_n_steps == 10_000
+    assert defaults.val_num_steps == 500
+    assert defaults.dataloader_num_workers == 32
 
 
 def test_dryrun_alias_maps_to_dry_run_flag():
@@ -79,7 +78,7 @@ def test_muon_long_run_config_scales_lr_and_probe_schedule():
     cfg = load_config(MUON_CONFIG)
 
     assert cfg.training_max_steps == 250_000
-    assert cfg.batch_size == 4096
+    assert cfg.batch_size == 2048
     assert cfg.jax_mesh_devices == "16"
     assert cfg.learning_rate == pytest.approx(3e-4 * math.sqrt(2.0))
     assert cfg.min_learning_rate == pytest.approx(3e-5 * math.sqrt(2.0))
@@ -87,11 +86,8 @@ def test_muon_long_run_config_scales_lr_and_probe_schedule():
     assert cfg.muon_adam_min_learning_rate == cfg.min_learning_rate
     assert cfg.msg_probe_every_n_steps == 100_000
     assert cfg.msg_probe_at_final_step is True
-    assert cfg.val_every_n_steps == 25_000
-    assert cfg.val_num_steps == 1_000
-    assert cfg.jax_precompile_eval_steps is True
-    assert cfg.jax_precompile_msg_probe is True
-    assert cfg.jax_precompile_variant == "all"
+    assert cfg.val_every_n_steps == 10_000
+    assert cfg.val_num_steps == 500
 
 
 def test_resolve_topology_4x4_maps_to_16_chips():
@@ -102,7 +98,6 @@ def test_resolve_topology_4x4_maps_to_16_chips():
     assert topology.num_nodes == 4
     assert topology.chips_per_node == 4
     assert topology.jax_mesh_devices == "16"
-    assert topology.aot_target == "v6e-4x4-multihost"
 
 
 def test_resolve_topology_rejects_topology_without_nap_flavor():
@@ -129,6 +124,11 @@ def test_build_task_constructs_topology_resources_and_env():
     assert task["envs"]["SPECTRA_RUN_ID"] == "new"
     assert task["envs"]["SPECTRA_TRAINING_MAX_STEPS"] == "100"
     assert "SPECTRA_TRAIN_OVERRIDES_JSON must be set" in task["run"]
+    assert 'export JAX_COMPILATION_CACHE_DIR="${JAX_CACHE_DIR}"' in task["run"]
+    assert 'echo "JAX compilation cache ${JAX_COMPILATION_CACHE_DIR}"' in task["run"]
+    assert 'overrides["jax_compilation_cache_dir"] = os.environ["JAX_CACHE_DIR"]' in task["run"]
+    assert "SPECTRA_AOT" not in task["run"]
+    assert "precompile" not in task["run"].lower()
     assert '"jax_mesh_devices": "16"' not in task["run"]
     assert task["config"]["kubernetes"]["kueue"] == {
         "local_queue_name": "skypilot-v6e-nap",
@@ -179,21 +179,6 @@ def test_default_cluster_name_bounds_long_run_id():
     assert cluster.startswith("spectra-100m-muon-v6e4x4")
 
 
-def test_default_aot_cache_gcs_uses_explicit_workdir_bucket():
-    assert (
-        train_sky.default_aot_cache_gcs(
-            "gs://checkpoint-bucket/skypilot/run-1",
-            "cache-key",
-        )
-        == "gs://checkpoint-bucket/skypilot-aot-cache/cache-key"
-    )
-
-
-def test_default_aot_cache_gcs_requires_gcs_workdir():
-    with pytest.raises(ValueError, match="non-GCS --workdir"):
-        train_sky.default_aot_cache_gcs("/tmp/run-1", "cache-key")
-
-
 def test_token_readers_use_environment_first():
     assert train_sky.read_hf_token({"HF_TOKEN": " hf-token "}) == "hf-token"
     assert train_sky.read_wandb_api_key({"WANDB_API_KEY": " wandb-token "}) == "wandb-token"
@@ -240,11 +225,12 @@ def test_dryrun_prints_generated_assets_without_token_lookup(
     assert f"SPECTRA_CONFIG: {MUON_CONFIG}" in output
     assert "SPECTRA_WORKDIR:" in output
     assert "SPECTRA_TRAIN_OVERRIDES_JSON:" in output
+    assert "SPECTRA_AOT" not in output
     assert "LIBTPU_INIT_ARGS:" in output
     assert "xla_enable_async_all_reduce" in output
-    assert "===== AOT Overrides JSON =====" in output
     assert '"jax_mesh_devices":"16"' in output
     assert '"jax_checkpoint_max_to_keep":null' in output
+    assert "precompile" not in output.lower()
     assert "===== SkyPilot Command =====" in output
     assert "sky launch" in output
     assert "--cluster spectra-dryrun-assets" in output
@@ -256,7 +242,6 @@ def test_launch_failure_runs_explicit_sky_down_and_preserves_exit_code(
     monkeypatch,
 ):
     command_log = _install_fake_sky(tmp_path, monkeypatch, launch_returncode=17)
-    monkeypatch.setattr(train_sky, "prepare_aot_cache", lambda **_kwargs: None)
     monkeypatch.setenv("HF_TOKEN", "hf-token")
     monkeypatch.setenv("WANDB_API_KEY", "wandb-token")
 
@@ -272,8 +257,6 @@ def test_launch_failure_runs_explicit_sky_down_and_preserves_exit_code(
                 f"{MUON_WORKDIR}-fake-fail",
                 "--task-output-dir",
                 str(tmp_path / "tasks"),
-                "--no-precompile-aot",
-                "--no-sync-aot-cache-to-gcs",
             ]
         )
 
@@ -286,7 +269,6 @@ def test_launch_failure_runs_explicit_sky_down_and_preserves_exit_code(
 
 def test_successful_launch_runs_explicit_sky_down(tmp_path, monkeypatch):
     command_log = _install_fake_sky(tmp_path, monkeypatch, launch_returncode=0)
-    monkeypatch.setattr(train_sky, "prepare_aot_cache", lambda **_kwargs: None)
     monkeypatch.setenv("HF_TOKEN", "hf-token")
     monkeypatch.setenv("WANDB_API_KEY", "wandb-token")
 
@@ -301,8 +283,6 @@ def test_successful_launch_runs_explicit_sky_down(tmp_path, monkeypatch):
             f"{MUON_WORKDIR}-fake-success",
             "--task-output-dir",
             str(tmp_path / "tasks"),
-            "--no-precompile-aot",
-            "--no-sync-aot-cache-to-gcs",
         ]
     )
 
@@ -314,7 +294,6 @@ def test_successful_launch_runs_explicit_sky_down(tmp_path, monkeypatch):
 
 def test_default_skips_explicit_sky_down(tmp_path, monkeypatch):
     command_log = _install_fake_sky(tmp_path, monkeypatch, launch_returncode=0)
-    monkeypatch.setattr(train_sky, "prepare_aot_cache", lambda **_kwargs: None)
     monkeypatch.setenv("HF_TOKEN", "hf-token")
     monkeypatch.setenv("WANDB_API_KEY", "wandb-token")
 
@@ -328,8 +307,6 @@ def test_default_skips_explicit_sky_down(tmp_path, monkeypatch):
             f"{MUON_WORKDIR}-fake-keep",
             "--task-output-dir",
             str(tmp_path / "tasks"),
-            "--no-precompile-aot",
-            "--no-sync-aot-cache-to-gcs",
         ]
     )
 

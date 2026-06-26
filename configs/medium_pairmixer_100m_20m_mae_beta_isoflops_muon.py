@@ -35,9 +35,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.gradient_accumulation_steps = 4
     cfg.jax_mesh_devices = "16"
     cfg.activation_checkpoint_mode = "selective"
-    cfg.jax_precompile_variant = "all"
-    cfg.jax_precompile_eval_steps = True
-    cfg.jax_precompile_msg_probe = True
     cfg.mae_context_encoder_pack_tokens = 0
     cfg.mae_context_encoder_pack_token_choices = ()
     # cfg.mae_context_encoder_pack_tokens = 20
@@ -57,6 +54,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.nist_murcko_probe_num_repeats = 1
     cfg.val_every_n_steps = 10_000
     cfg.val_num_steps = 500
-    cfg.run_name_suffix = "mae-100m-20m-beta-isoflops-250k-bs4096-ga4-muon-matchrms-lr4p24e-4-pack20-fullcompile-selective-probe1x100k-final-val1k25k"
+    cfg.run_name_suffix = (
+        "mae-100m-20m-beta-isoflops-250k-bs2048-ga4-muon-matchrms-"
+        "lr4p24e-4-default-fullctx-selective-probe1x100k-final-val500x10k"
+    )
 
     return cfg

@@ -13,71 +13,17 @@ srun --ntasks-per-node=1 --gpus-per-node=8 --cpus-per-task=64 --kill-on-bad-exit
 For contrastive training, set `TRAIN_SCRIPT=train_contrastive.py`. Extra training
 script arguments can be appended after the launcher command.
 
-## JAX TPU Train-Step AOT Compile
+## JAX TPU Runtime Compilation
 
-Compile the JAX train step for a single-host v6e-8 VM without attaching to a TPU:
+There is no separate JAX TPU compile step. `train_sky.py` launches training
+directly, and JAX compiles the train, eval, and MSG-probe functions on their
+first real call inside the TPU allocation.
 
-```bash
-.venv/bin/python scripts/compile_jax_train_step.py \
-    --config configs/medium_pairmixer_100m_20m_mae_alpha_isoflops.py \
-    --target ct6e-standard-8t \
-    --variant all \
-    --compilation-cache-dir artifacts/jax_compile_cache/v6e8-alpha \
-    --summary-json artifacts/tpu_compile/v6e8-alpha-all.json
-```
-
-`ct6e-standard-8t` maps to topology `v6e:2x4`, 8 TPU chips, 1 slice, and 1 VM
-with `chips_per_host_bounds=(2, 4, 1)`. The alpha config sets
-`jax_precompile_variant = "all"` so both AOT compilation and TPU warm-up compile
-all real train-step variants: `pack20`, `pack24`, `pack28`, and the
-full-context fallback. Use `--variant pack:20` only for targeted compile-time
-experiments on one shape. Keep `jax_compilation_cache_dir` pointed at the same
-cache directory on TPU runs to reuse the AOT-compiled executables during warm-up.
-The current TPU flag set intentionally excludes
-`xla_tpu_overlap_compute_collective_tc`; this installed JAX/libtpu stack rejects
-that key as an invalid compile option during AOT compilation.
-The launcher sets the same `LIBTPU_INIT_ARGS` runtime environment for local AOT
-compile and SkyPilot training pods. Do not pass the whole `LIBTPU_INIT_ARGS`
-string as JAX `compiler_options`; those are a narrower compile-only API and will
-reject runtime-only keys such as `xla_enable_async_all_reduce`.
-
-For the SkyPilot `100m_muon` GKE run, the launcher uses the multi-host
-v6e-16 cache at:
-
-```text
-artifacts/jax_compile_cache/100m_muon_v6e4x4_b4096_accum4
-gs://metal-repeater-411410-spectra-checkpoints/skypilot-aot-cache/100m_muon_v6e4x4_b4096_accum4
-```
-
-`train_sky.py` validates the cache with `scripts/jax_aot_cache.py ready` before
-compiling. Readiness is based on a manifest fingerprint over the
-compile-relevant sources, config, and override JSON plus expected cache counts
-for train, eval, and MSG-probe JIT entries from the AOT summary. If the
-manifest and cache entries already match, it logs `Reusing existing AOT cache`
-and does not run the AOT compiler again unless `--force-precompile-aot` is set.
-When a local cache is ready, the launcher uploads it to GCS so the SkyPilot pods
-can hydrate the cache after `uv sync`.
-
-If a previous local AOT run crashed after writing some cache entries but before
-writing the final manifest, the launcher still invokes the compile driver. That
-does not mean every executable is rebuilt from scratch. The compile driver still
-lowers each function so JAX can derive the current content key. During
-`lowered.compile()`, it temporarily turns persistent-cache read errors into
-exceptions; when the only failure is the local topology compiler's expected
-`DeserializeLoadedExecutable` no-client error, the unit is treated as a
-content-keyed cache hit and the expensive compile is skipped. Normal misses
-still compile, and other cache errors still fail. The serialized `.compiled`
-files in `artifacts/tpu_compile/` are diagnostics and are not used as the
-compatibility oracle.
-
-The SkyPilot job sets `SPECTRA_JAX_PRECOMPILE_TRAIN_STEPS=auto`. In auto mode,
-the pod runs the same manifest-backed readiness check after hydrating
-`JAX_CACHE_DIR`; if the cache is ready, in-job train/eval/probe precompile is
-disabled. This keeps expensive compile work out of the TPU allocation when the
-cache is already available. The rank-0 pod uploads the warmed cache back to GCS
-on exit, including the manifest and JIT cache entries. `.skyignore` excludes
-local `artifacts/`, so the large cache is not copied through SkyPilot workdir
-sync.
+The SkyPilot task still enables JAX's normal persistent compilation cache under
+`/tmp/spectra-jax-cache/$CACHE_KEY` inside each pod. That cache is local to the
+job and is not hydrated from or uploaded to GCS by the launcher. Old local
+compile-cache outputs are stale experiment artifacts and are no longer consumed
+by the current training path.
 
 ## SkyPilot GKE TPU Validation
 
@@ -97,102 +43,94 @@ Launch it from this repository with an explicit config and workdir:
 
 ```bash
 CONFIG=configs/medium_pairmixer_100m_20m_mae_beta_isoflops_muon.py
-RUN_ID=100m-muon-v6e4x4-b4096-accum4-$(date -u +%Y%m%d-%H%M%S)
+RUN_ID=100m-muon-v6e4x4-b2048-accum4-$(date -u +%Y%m%d-%H%M%S)
 WORKDIR=gs://metal-repeater-411410-spectra-checkpoints/skypilot/${RUN_ID}
 
 .venv/bin/python train_sky.py \
+    --run-id "${RUN_ID}" \
     --config "${CONFIG}" \
     --workdir "${WORKDIR}"
 ```
 
-Inspect the generated SkyPilot YAML, AOT override JSON, training override JSON,
-and `sky launch` command without checking secrets or launching:
+Inspect the generated SkyPilot YAML, training override JSON, and `sky launch`
+command without checking secrets or launching:
 
 ```bash
 .venv/bin/python train_sky.py \
     --dryrun \
+    --run-id "${RUN_ID}" \
     --config "${CONFIG}" \
     --workdir "${WORKDIR}"
 ```
 
 The launcher creates a unique run id like
-`100m-muon-v6e4x4-b4096-accum4-YYYYMMDD-HHMMSS` if `--run-id` is omitted. It
+`100m-muon-v6e4x4-b2048-accum4-YYYYMMDD-HHMMSS` if `--run-id` is omitted. It
 does not choose a config or checkpoint bucket silently: `--config` and
-`--workdir` are required. If `--aot-cache-gcs` is omitted, the launcher derives
-`gs://$WORKDIR_BUCKET/skypilot-aot-cache/$CACHE_KEY` from the explicit GCS
-workdir. It loads `HF_TOKEN` from the environment or
+`--workdir` are required. It loads `HF_TOKEN` from the environment or
 `~/.cache/huggingface/token`, loads `WANDB_API_KEY` from the environment,
 `.netrc`, or local W&B settings, and passes both tokens to SkyPilot as secrets.
+The default SkyPilot cluster is run-specific, normally `spectra-$RUN_ID`, so a
+second run with a different run id requests a separate Kueue/DWS allocation
+instead of queueing behind jobs in the same SkyPilot logical cluster. Pass
+`--cluster` only when intentionally submitting another job to an existing
+SkyPilot cluster.
+For DWS flex-start runs, pass `--flex-start-max-run-duration 6h` to set the
+maximum node allocation runtime. Values use SkyPilot's duration syntax such as
+`30m`, `6h`, or `1d`; plain numbers are minutes.
+
+The default queue is `default/skypilot-v6e-nap`, defined in
+`infra/gke/kueue-v6e-nap.yaml`. Apply it after Kueue/DWS is installed:
+
+```bash
+kubectl apply -f infra/gke/kueue-v6e-nap.yaml
+```
 
 The SkyPilot task uses:
 
 ```text
-Cluster:      spectra-100m-muon-v6e-4x4
-Queue:        default/skypilot-v6e-flex
+Cluster:      spectra-$RUN_ID by default, or the explicit --cluster value
+Queue:        default/skypilot-v6e-nap
 Nodes:        4
 Per node:     tpu-v6e-4, 64 CPU, 256 GB memory
-GKE pool:     skypilot-v6e-16-flex
+GKE pool:     auto-provisioned 4x4 DWS flex-start pool
 TPU topology: 4x4
 Config:       configs/medium_pairmixer_100m_20m_mae_beta_isoflops_muon.py
 Steps:        250000
 JAX mesh:     16 devices
-Batch:        4096 global, 4 gradient accumulation steps
+Batch:        2048 global, 4 gradient accumulation steps
 LR:           3e-4 * sqrt(2), min LR 3e-5 * sqrt(2)
-Eval:         1000 steps every 25000 steps
+Eval:         500 steps every 10000 steps
 MSG probe:    every 100000 steps plus final step
-AOT variant:  all, compiling pack20 and full-context fallback
 ```
 
-The explicit `cloud.google.com/gke-tpu-topology: "4x4"` selector is required.
-SkyPilot maps `tpu-v6e-4` to `2x2` by default, but this GKE pool is a four-host
-`ct6e-standard-4t` slice with four chips per host and sixteen chips total.
-The task also sets `tpu_vm: false`; without that, SkyPilot treats the task as a
-TPU VM-style launch and requests the wrong number of Kubernetes nodes.
-
-The default launcher topology is `4x4`. To run the old 8-chip validation shape
-explicitly:
-
-```bash
-RUN_ID=100m-muon-v6e2x4-b2048-accum4-smoke-$(date -u +%Y%m%d-%H%M%S)
-.venv/bin/python train_sky.py \
-    --config "${CONFIG}" \
-    --workdir "gs://metal-repeater-411410-spectra-checkpoints/skypilot/${RUN_ID}" \
-    --topology 2x4 \
-    --batch-size 2048 \
-    --training-max-steps 100
-```
-
-To run the 64-chip pool:
-
-```bash
-RUN_ID=100m-muon-v6e8x8-b4096-accum4-$(date -u +%Y%m%d-%H%M%S)
-.venv/bin/python train_sky.py \
-    --config "${CONFIG}" \
-    --workdir "gs://metal-repeater-411410-spectra-checkpoints/skypilot/${RUN_ID}" \
-    --topology 8x8
-```
-
-This uses 16 SkyPilot nodes with `tpu-v6e-4` per node and switches the pod
-selector to:
+The generated pod selector is:
 
 ```yaml
-cloud.google.com/gke-nodepool: skypilot-v6e-64-flex
-cloud.google.com/gke-tpu-topology: "8x8"
+cloud.google.com/gke-flex-start: "true"
+cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+cloud.google.com/gke-tpu-topology: "4x4"
 ```
 
-The supported fixed-topology pools are `2x4` (8 chips / 2 hosts), `4x4`
-(16 chips / 4 hosts), and `8x8` (64 chips / 16 hosts). GKE multi-host TPU
-node pools bind the machine type and topology at creation time; use
-`--node-pool` only after creating the matching GKE node pool and Kueue
-ResourceFlavor.
+For the default run, the topology value is `"4x4"`. Do not add
+`cloud.google.com/gke-nodepool`; pinning to an existing gang-mode node pool
+makes a second concurrent 4-node job try to scale that same Managed Instance
+Group from 4 to 8, which GKE rejects because the target size must equal the gang
+size. The NAP queue lets GKE create a separate 4x4 flex-start node pool for each
+admitted run, bounded by the cluster's node auto-provisioning TPU quota.
+
+The launcher currently enables only the 4x4 NAP flavor. Add another
+ResourceFlavor and queue capacity before enabling other topologies in
+`train_sky.py`.
 
 Useful status commands:
 
 ```bash
 sky status
+kubectl get localqueue -A
+kubectl get clusterqueue,resourceflavor
 kubectl get provisioningrequests,workloads,pods -n default -o wide
 kubectl describe provisioningrequest -n default
-sky logs spectra-100m-muon-v6e-4x4
+sky logs "spectra-${RUN_ID}"
 ```
 
 The task writes final metrics to:
@@ -244,17 +182,9 @@ Probe AUC:    test maccs mean 0.6799528126185893, fluorine 0.6543289438035205, s
 
 Notes from validation:
 
-- The job hydrated the GCS AOT cache and printed
-  `JAX in-job precompile train steps: False`; it did not run the local AOT
-  precompile path inside the TPU allocation.
-- The runtime warmed additional persistent-cache entries at shape transitions
-  and uploaded them on exit. The GCS cache now contains eight train-step cache
-  executables for this `jax_mesh_devices=8`, `batch_size=1024`,
-  `gradient_accumulation_steps=4` shape.
 - Training ran 100 steps on two `tpu-v6e-4` hosts with eight v6e chips total.
   Final metrics report `run/jax_process_count=2`,
-  `run/jax_data_parallel_devices=8`, `run/device_microbatch_size=32`, and
-  `run/precompile_seconds=0.0`.
+  `run/jax_data_parallel_devices=8`, and `run/device_microbatch_size=32`.
 - Orbax async checkpointing is disabled in the SkyPilot smoke config because a
   previous run failed during async shutdown. The successful run used synchronous
   checkpointing and wrote both process shards to GCS.
@@ -291,13 +221,10 @@ Additional `test-tpu` debug notes from 2026-06-17:
   `gradient_accumulation_steps=4` steps almost always fell back to full context.
   Set `jepa_intensity_aware_context_fraction=0.35` with
   `mae_context_encoder_pack_token_choices=[20]` to keep the run on pack-20.
-- Runtime precompile now uses `train_loader_for_precompile()` with no shuffle and
-  no workers, so it no longer spends minutes in a full-dataset `torch.randperm`
-  just to fetch one compile batch.
 - `GemsMemmapDataset` drops cached memmap arrays when pickled. This prevents
-  forkserver DataLoader workers from serializing parent-opened memmaps after
-  precompile; before this fix a single worker reached about 45 GB RSS before the
-  training loop started.
+  forkserver DataLoader workers from serializing parent-opened memmaps; before
+  this fix a single worker reached about 45 GB RSS before the training loop
+  started.
 - On `test-tpu` with 8 local v6e devices, pack-20 plus
   `jepa_intensity_aware_context_fraction=0.35` measured about 3.3k samples/s
   after warmup. Xprof showed train-step executions around 294 ms and collectives
@@ -331,9 +258,9 @@ Additional `test-tpu` debug notes from 2026-06-17:
   `save_only_these_names(...)` policy over checkpoint-tagged projection and MLP
   tensors, while this repo's `selective` maps to the generic JAX
   `jax.checkpoint_policies.dots_saveable` policy.
-- AOT memory analysis on direct `test-tpu` for the current 100M Muon pack-20
-  shape showed `full` remat saves memory, but only helps throughput if it
-  enables a larger batch that `selective` cannot fit:
+- Direct `test-tpu` memory analysis for the current 100M Muon pack-20 shape
+  showed `full` remat saves memory, but only helps throughput if it enables a
+  larger batch that `selective` cannot fit:
 
   | Mode | Batch | XLA total memory | XLA temp memory | Savings vs `selective` |
   | --- | ---: | ---: | ---: | ---: |

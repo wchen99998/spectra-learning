@@ -231,7 +231,6 @@ def test_jax_training_loop_saves_periodically_and_resumes(tmp_path):
     cfg.learning_rate = 1e-3
     cfg.checkpoint_every_steps = 2
     cfg.log_every_n_steps = 0
-    cfg.jax_precompile_train_steps = False
     cfg.msg_probe_every_n_steps = -1
     batch = _tiny_numpy_batch()
 
@@ -299,7 +298,6 @@ def test_jax_training_loop_pure_optax_saves_and_resumes(tmp_path):
     cfg.gradient_accumulation_steps = 2
     cfg.checkpoint_every_steps = 2
     cfg.log_every_n_steps = 0
-    cfg.jax_precompile_train_steps = False
     cfg.msg_probe_every_n_steps = -1
     batch = _tiny_numpy_batch()
 
@@ -374,7 +372,6 @@ def test_jax_training_loop_logs_validation_and_online_probe(monkeypatch, tmp_pat
     cfg.learning_rate = 1e-3
     cfg.checkpoint_every_steps = 1000
     cfg.log_every_n_steps = 0
-    cfg.jax_precompile_train_steps = False
     cfg.jax_msg_probe_shard_batches = True
     cfg.val_every_n_steps = 2
     cfg.val_num_steps = 1

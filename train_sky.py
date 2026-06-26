@@ -10,7 +10,6 @@ import os
 import shlex
 import shutil
 import subprocess
-import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -55,10 +54,7 @@ set -euo pipefail
 : "${SPECTRA_RUN_ID:?SPECTRA_RUN_ID must be set}"
 : "${SPECTRA_TRAINING_MAX_STEPS:?SPECTRA_TRAINING_MAX_STEPS must be set}"
 : "${SPECTRA_JAX_CACHE_DIR:?SPECTRA_JAX_CACHE_DIR must be set}"
-: "${SPECTRA_AOT_CACHE_GCS:?SPECTRA_AOT_CACHE_GCS must be set}"
-: "${SPECTRA_AOT_OVERRIDES_JSON:?SPECTRA_AOT_OVERRIDES_JSON must be set}"
 : "${SPECTRA_TRAIN_OVERRIDES_JSON:?SPECTRA_TRAIN_OVERRIDES_JSON must be set}"
-: "${SPECTRA_JAX_PRECOMPILE_TRAIN_STEPS:?SPECTRA_JAX_PRECOMPILE_TRAIN_STEPS must be set}"
 : "${HF_TOKEN:?HF_TOKEN must be set via --secret}"
 : "${WANDB_API_KEY:?WANDB_API_KEY must be set via --secret}"
 export HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-${HF_TOKEN}}"
@@ -74,26 +70,11 @@ print(Path(os.environ["SPECTRA_JAX_CACHE_DIR"]).expanduser().resolve())
 PY
 )"
 export JAX_CACHE_DIR
+export JAX_COMPILATION_CACHE_DIR="${JAX_CACHE_DIR}"
+export JAX_ENABLE_COMPILATION_CACHE=true
+export JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS=0
+export JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES=0
 mkdir -p "${HF_HOME}" "${WANDB_DIR}" "${JAX_CACHE_DIR}"
-
-sync_jax_aot_cache_back() {
-  status=$?
-  trap - EXIT
-  if [[ "${SKYPILOT_NODE_RANK}" == "0" ]]; then
-    set +e
-    echo "Syncing JAX AOT cache back to ${SPECTRA_AOT_CACHE_GCS}"
-    .venv/bin/python scripts/jax_aot_cache.py upload \\
-      --cache-dir "${JAX_CACHE_DIR}" \\
-      --gcs-uri "${SPECTRA_AOT_CACHE_GCS}"
-    sync_status=$?
-    if [[ "${sync_status}" -ne 0 ]]; then
-      echo "JAX AOT cache upload failed with status ${sync_status}; preserving training exit status ${status}." >&2
-    fi
-    set -e
-  fi
-  exit "${status}"
-}
-trap sync_jax_aot_cache_back EXIT
 
 COORDINATOR_IP="$(printf '%s\\n' "${SKYPILOT_NODE_IPS}" | sed -n '1p')"
 TPU_WORKER_HOSTNAMES="$(printf '%s\\n' "${SKYPILOT_NODE_IPS}" | paste -sd, -)"
@@ -109,101 +90,16 @@ export TPU_PROCESS_ADDRESSES
 export TPU_PROCESS_PORT=8471
 export TF_CPP_MIN_LOG_LEVEL=0
 
-echo "Hydrating JAX AOT cache from ${SPECTRA_AOT_CACHE_GCS}"
-.venv/bin/python - <<'PY'
-import os
-from pathlib import Path
-
-from google.cloud import storage
-
-cache_dir = Path(os.environ["JAX_CACHE_DIR"])
-uri = os.environ["SPECTRA_AOT_CACHE_GCS"].rstrip("/")
-if not uri.startswith("gs://"):
-    raise SystemExit(f"SPECTRA_AOT_CACHE_GCS must be a gs:// URI, got {uri!r}")
-
-bucket_name, _, prefix = uri[5:].partition("/")
-if not bucket_name or not prefix:
-    raise SystemExit(f"SPECTRA_AOT_CACHE_GCS must include bucket and prefix, got {uri!r}")
-
-cache_dir.mkdir(parents=True, exist_ok=True)
-client = storage.Client(project=os.environ.get("GOOGLE_CLOUD_PROJECT") or None)
-downloaded = 0
-skipped = 0
-total_bytes = 0
-found = False
-for blob in client.list_blobs(bucket_name, prefix=f"{prefix}/"):
-    rel = blob.name[len(prefix) + 1 :]
-    if not rel or rel.endswith("/"):
-        continue
-    found = True
-    target = cache_dir / rel
-    size = int(blob.size or 0)
-    if target.exists() and target.stat().st_size == size:
-        skipped += 1
-        continue
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp_target = target.with_name(f".{target.name}.tmp")
-    blob.download_to_filename(tmp_target)
-    os.replace(tmp_target, target)
-    downloaded += 1
-    total_bytes += size
-
-if found:
-    print(
-        "AOT cache hydrated: "
-        f"downloaded={downloaded} skipped={skipped} bytes={total_bytes}"
-    )
-else:
-    print(f"No AOT cache objects found at {uri}; in-job precompile remains eligible.")
-PY
-
 METRICS_JSON="${SPECTRA_WORKDIR%/}/${SPECTRA_METRICS_JSON#/}"
 OVERRIDES_JSON="$(.venv/bin/python - <<'PY'
 import json
 import os
-import subprocess
-import sys
-
-
-def parse_precompile_train_steps(value: str, cache_dir: str) -> bool:
-    normalized = value.strip().lower()
-    if normalized == "auto":
-        ready = subprocess.run(
-            [
-                sys.executable,
-                "scripts/jax_aot_cache.py",
-                "ready",
-                "--cache-dir",
-                cache_dir,
-                "--config",
-                os.environ["SPECTRA_CONFIG"],
-                "--overrides-json",
-                os.environ["SPECTRA_AOT_OVERRIDES_JSON"],
-            ],
-            check=False,
-        )
-        return ready.returncode != 0
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    raise SystemExit(
-        "SPECTRA_JAX_PRECOMPILE_TRAIN_STEPS must be auto, true, or false; "
-        f"got {value!r}"
-    )
-
-
-jax_precompile_train_steps = parse_precompile_train_steps(
-    os.environ["SPECTRA_JAX_PRECOMPILE_TRAIN_STEPS"],
-    os.environ["JAX_CACHE_DIR"],
-)
-print(
-    f"JAX in-job precompile train steps: {jax_precompile_train_steps}",
-    file=sys.stderr,
-)
 
 overrides = json.loads(os.environ["SPECTRA_TRAIN_OVERRIDES_JSON"])
-overrides["jax_precompile_train_steps"] = jax_precompile_train_steps
+overrides["jax_compilation_cache_dir"] = os.environ["JAX_CACHE_DIR"]
+overrides["jax_enable_compilation_cache"] = True
+overrides["jax_persistent_cache_min_compile_time_secs"] = 0.0
+overrides["jax_persistent_cache_min_entry_size_bytes"] = 0
 print(json.dumps(overrides, sort_keys=True, separators=(",", ":")))
 PY
 )"
@@ -213,6 +109,7 @@ echo "Coordinator ${JAX_COORDINATOR_ADDRESS}"
 echo "TPU worker ${TPU_WORKER_ID}: ${TPU_WORKER_HOSTNAMES}"
 echo "Workdir ${SPECTRA_WORKDIR}"
 echo "JAX cache ${JAX_CACHE_DIR}"
+echo "JAX compilation cache ${JAX_COMPILATION_CACHE_DIR}"
 .venv/bin/python train.py \\
   --config "${SPECTRA_CONFIG}" \\
   --workdir "${SPECTRA_WORKDIR}" \\
@@ -248,7 +145,6 @@ class ConfigDefaults:
     msg_probe_every_n_steps: float
     val_every_n_steps: float
     val_num_steps: int
-    aot_variant: str
 
 
 @dataclass(frozen=True)
@@ -262,10 +158,6 @@ class TopologySpec:
     @property
     def jax_mesh_devices(self) -> str:
         return str(self.total_chips)
-
-    @property
-    def aot_target(self) -> str:
-        return f"v6e-{self.topology}-multihost"
 
     @property
     def slug(self) -> str:
@@ -314,15 +206,7 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
     parser.add_argument("--log-every-n-steps", type=int, default=None)
     parser.add_argument("--throughput-warmup-steps", type=int, default=None)
     parser.add_argument("--dataloader-num-workers", type=int, default=None)
-    parser.add_argument("--aot-cache-dir", default="")
-    parser.add_argument("--aot-output-dir", default="")
-    parser.add_argument("--aot-summary-json", default="")
-    parser.add_argument("--aot-cache-gcs", default="")
-    parser.add_argument("--aot-variant", default="")
-    parser.add_argument("--jax-precompile-train-steps", default="auto")
-    parser.add_argument("--precompile-aot", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--sync-aot-cache-to-gcs", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--force-precompile-aot", action="store_true")
+    parser.add_argument("--jax-cache-dir", default="")
     parser.add_argument("--down", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--yes", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dry-run", "--dryrun", dest="dry_run", action="store_true")
@@ -459,7 +343,6 @@ def load_config_defaults(config_path: str) -> ConfigDefaults:
         msg_probe_every_n_steps=float(getattr(cfg, "msg_probe_every_n_steps", 0.0)),
         val_every_n_steps=float(getattr(cfg, "val_every_n_steps", 0.0)),
         val_num_steps=int(getattr(cfg, "val_num_steps", 64)),
-        aot_variant=str(getattr(cfg, "jax_precompile_variant", "default")),
     )
 
 
@@ -471,7 +354,6 @@ def build_train_overrides(
     batch_size: int,
     gradient_accumulation_steps: int,
     jax_cache_dir: str,
-    jax_precompile_train_steps: str | bool,
     msg_probe_every_n_steps: float,
     val_every_n_steps: float,
     val_num_steps: int,
@@ -499,9 +381,6 @@ def build_train_overrides(
         "jax_enable_compilation_cache": True,
         "jax_persistent_cache_min_compile_time_secs": 0.0,
         "jax_persistent_cache_min_entry_size_bytes": 0,
-        "jax_precompile_train_steps": jax_precompile_train_steps,
-        "jax_precompile_eval_steps": True,
-        "jax_precompile_msg_probe": True,
         "jax_enable_async_checkpointing": False,
         "jax_checkpoint_max_to_keep": None,
         "wandb_kwargs": {
@@ -635,133 +514,6 @@ def run_sky_launch_with_teardown(
         raise SystemExit(down_result.returncode)
 
 
-def aot_cache_ready(
-    *,
-    cache_dir: str,
-    config_path: str,
-    overrides_json: str,
-    summary_json: str,
-) -> bool:
-    cmd = [
-        sys.executable,
-        "scripts/jax_aot_cache.py",
-        "ready",
-        "--cache-dir",
-        cache_dir,
-        "--config",
-        config_path,
-        "--overrides-json",
-        overrides_json,
-        "--summary-json",
-        summary_json,
-    ]
-    return run_command(cmd, cwd=REPO_ROOT, check=False).returncode == 0
-
-
-def prepare_aot_cache(
-    *,
-    config_path: str,
-    target: str,
-    variant: str,
-    cache_dir: str,
-    output_dir: str,
-    summary_json: str,
-    overrides_json: str,
-    cache_gcs: str,
-    precompile: bool,
-    force_precompile: bool,
-    sync_to_gcs: bool,
-) -> None:
-    ready = aot_cache_ready(
-        cache_dir=cache_dir,
-        config_path=config_path,
-        overrides_json=overrides_json,
-        summary_json=summary_json,
-    )
-    if precompile:
-        if ready and not force_precompile:
-            logging.info("Reusing existing AOT cache: %s", cache_dir)
-        else:
-            if force_precompile:
-                logging.info("Force precompile requested for AOT cache: %s", cache_dir)
-            else:
-                logging.info(
-                    "AOT cache manifest is not ready; invoking compile driver. "
-                    "The compile driver lets JAX derive content-keyed persistent "
-                    "cache hits from matching lowered computations and skips local "
-                    "topology recompilation when the only cache-read failure is "
-                    "missing TPU-client deserialization. Cache dir: %s",
-                    cache_dir,
-                )
-            logging.info("Precompiling AOT cache: target=%s variant=%s", target, variant)
-            compile_env = dict(os.environ)
-            compile_env["LIBTPU_INIT_ARGS"] = jax_tpu_xla_flags_string()
-            logging.info(
-                "AOT compile LIBTPU_INIT_ARGS: %s",
-                compile_env["LIBTPU_INIT_ARGS"],
-            )
-            run_command(
-                [
-                    sys.executable,
-                    "scripts/compile_jax_train_step.py",
-                    "--config",
-                    config_path,
-                    "--target",
-                    target,
-                    "--variant",
-                    variant,
-                    "--output-dir",
-                    output_dir,
-                    "--compilation-cache-dir",
-                    cache_dir,
-                    "--summary-json",
-                    summary_json,
-                    "--overrides-json",
-                    overrides_json,
-                ],
-                cwd=REPO_ROOT,
-                env=compile_env,
-            )
-            run_command(
-                [
-                    sys.executable,
-                    "scripts/jax_aot_cache.py",
-                    "write-manifest",
-                    "--cache-dir",
-                    cache_dir,
-                    "--config",
-                    config_path,
-                    "--overrides-json",
-                    overrides_json,
-                    "--summary-json",
-                    summary_json,
-                ],
-                cwd=REPO_ROOT,
-            )
-    ready = aot_cache_ready(
-        cache_dir=cache_dir,
-        config_path=config_path,
-        overrides_json=overrides_json,
-        summary_json=summary_json,
-    )
-    if ready and sync_to_gcs:
-        logging.info("Uploading AOT cache to %s", cache_gcs)
-        run_command(
-            [
-                sys.executable,
-                "scripts/jax_aot_cache.py",
-                "upload",
-                "--cache-dir",
-                cache_dir,
-                "--gcs-uri",
-                cache_gcs,
-            ],
-            cwd=REPO_ROOT,
-        )
-    elif not ready:
-        logging.warning("AOT cache is not ready; in-job precompile remains eligible.")
-
-
 def render_task_yaml(task: dict[str, Any]) -> str:
     return yaml.safe_dump(task, sort_keys=False)
 
@@ -777,7 +529,6 @@ def print_dry_run_assets(
     *,
     task_path: Path,
     task: dict[str, Any],
-    aot_overrides_json: str,
     train_overrides_json: str,
     sky_command: list[str],
 ) -> None:
@@ -786,9 +537,6 @@ def print_dry_run_assets(
     print()
     print("===== SkyPilot Task YAML =====")
     print(render_task_yaml(task).rstrip())
-    print()
-    print("===== AOT Overrides JSON =====")
-    print(aot_overrides_json)
     print()
     print("===== Train Overrides JSON =====")
     print(train_overrides_json)
@@ -824,19 +572,6 @@ def default_cluster_name(run_id: str) -> str:
     return f"{prefix}-{shortened_suffix}-{digest}"
 
 
-def default_aot_cache_gcs(workdir: str, cache_key: str) -> str:
-    normalized = workdir.rstrip("/")
-    if not normalized.startswith("gs://"):
-        raise ValueError(
-            "cannot derive --aot-cache-gcs from a non-GCS --workdir; "
-            "pass --aot-cache-gcs explicitly"
-        )
-    bucket_name, _, _prefix = normalized[5:].partition("/")
-    if not bucket_name:
-        raise ValueError("--workdir must include a GCS bucket")
-    return f"gs://{bucket_name}/skypilot-aot-cache/{cache_key}"
-
-
 def sky_args_request_async(sky_args: list[str]) -> bool:
     return "--async" in sky_args
 
@@ -862,7 +597,6 @@ def main(argv: list[str] | None = None) -> None:
         or config_defaults.gradient_accumulation_steps
     )
     jax_mesh_devices = args.jax_mesh_devices or topology.jax_mesh_devices
-    aot_variant = args.aot_variant or config_defaults.aot_variant
     checkpoint_every_steps = (
         args.checkpoint_every_steps
         if args.checkpoint_every_steps is not None
@@ -905,22 +639,7 @@ def main(argv: list[str] | None = None) -> None:
     workdir = args.workdir.rstrip("/")
     cluster = args.cluster or default_cluster_name(run_id)
     cache_key = f"100m_muon_{topology.slug}_b{batch_size}_accum{grad_accum}"
-    aot_cache_dir = args.aot_cache_dir or f"artifacts/jax_compile_cache/{cache_key}"
-    aot_output_dir = args.aot_output_dir or f"artifacts/tpu_compile/{cache_key}"
-    aot_summary_json = args.aot_summary_json or (
-        f"artifacts/tpu_compile/{cache_key}-{aot_variant.replace(':', '-')}.json"
-    )
-    try:
-        aot_cache_gcs = args.aot_cache_gcs or default_aot_cache_gcs(workdir, cache_key)
-    except ValueError as exc:
-        raise SystemExit(str(exc)) from exc
-    aot_overrides = {
-        "training_max_steps": int(training_max_steps),
-        "jax_mesh_devices": str(jax_mesh_devices),
-        "batch_size": int(batch_size),
-        "gradient_accumulation_steps": int(grad_accum),
-    }
-    aot_overrides_json = json_compact(aot_overrides)
+    jax_cache_dir = args.jax_cache_dir or f"/tmp/spectra-jax-cache/{cache_key}"
 
     logging.info(
         "Topology: topology=%s nodes=%d chips=%d accelerator=%s kueue=%s",
@@ -939,7 +658,6 @@ def main(argv: list[str] | None = None) -> None:
     )
     logging.info("Run ID: %s", run_id)
     logging.info("Workdir: %s", workdir)
-    logging.info("AOT cache GCS: %s", aot_cache_gcs)
 
     launch_env = dict(os.environ)
     if args.dry_run:
@@ -955,31 +673,13 @@ def main(argv: list[str] | None = None) -> None:
         launch_env["WANDB_API_KEY"] = wandb_key
         logging.info("Loaded HF_TOKEN and WANDB_API_KEY for SkyPilot secrets.")
 
-    if args.dry_run:
-        logging.info("Dry run requested; skipping AOT readiness, compile, and upload.")
-    else:
-        prepare_aot_cache(
-            config_path=args.config,
-            target=topology.aot_target,
-            variant=aot_variant,
-            cache_dir=aot_cache_dir,
-            output_dir=aot_output_dir,
-            summary_json=aot_summary_json,
-            overrides_json=aot_overrides_json,
-            cache_gcs=aot_cache_gcs,
-            precompile=args.precompile_aot,
-            force_precompile=args.force_precompile_aot,
-            sync_to_gcs=args.sync_aot_cache_to_gcs,
-        )
-
     train_overrides = build_train_overrides(
         run_id=run_id,
         training_max_steps=training_max_steps,
         jax_mesh_devices=str(jax_mesh_devices),
         batch_size=batch_size,
         gradient_accumulation_steps=grad_accum,
-        jax_cache_dir=aot_cache_dir,
-        jax_precompile_train_steps=args.jax_precompile_train_steps,
+        jax_cache_dir=jax_cache_dir,
         msg_probe_every_n_steps=msg_probe_every_n_steps,
         val_every_n_steps=val_every_n_steps,
         val_num_steps=val_num_steps,
@@ -996,11 +696,8 @@ def main(argv: list[str] | None = None) -> None:
         "SPECTRA_WORKDIR": workdir,
         "SPECTRA_TRAINING_MAX_STEPS": str(training_max_steps),
         "SPECTRA_METRICS_JSON": args.metrics_json,
-        "SPECTRA_JAX_CACHE_DIR": aot_cache_dir,
-        "SPECTRA_AOT_CACHE_GCS": aot_cache_gcs,
-        "SPECTRA_AOT_OVERRIDES_JSON": aot_overrides_json,
+        "SPECTRA_JAX_CACHE_DIR": jax_cache_dir,
         "SPECTRA_TRAIN_OVERRIDES_JSON": train_overrides_json,
-        "SPECTRA_JAX_PRECOMPILE_TRAIN_STEPS": args.jax_precompile_train_steps,
         "JAX_INITIALIZATION_TIMEOUT": "3600",
         "LIBTPU_INIT_ARGS": jax_tpu_xla_flags_string(),
         "HF_HOME": "/tmp/huggingface",
@@ -1043,7 +740,6 @@ def main(argv: list[str] | None = None) -> None:
         print_dry_run_assets(
             task_path=task_path,
             task=task,
-            aot_overrides_json=aot_overrides_json,
             train_overrides_json=train_overrides_json,
             sky_command=cmd,
         )
