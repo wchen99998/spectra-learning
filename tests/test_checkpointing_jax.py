@@ -384,7 +384,14 @@ def test_jax_training_loop_logs_validation_and_online_probe(monkeypatch, tmp_pat
 
     probe_calls = []
 
-    def fake_run_msg_probe_jax(*, config, model, data_mesh=None):
+    def fake_run_msg_probe_jax(
+        *,
+        config,
+        model,
+        data_mesh=None,
+        online_maccs_only=False,
+    ):
+        assert online_maccs_only is True
         probe_calls.append((config, model, data_mesh))
         pretrain_jax.time.sleep(0.01)
         return {"msg_probe/mean/test/auc_maccs_mean": 0.5}

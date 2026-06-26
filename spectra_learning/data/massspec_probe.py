@@ -1232,6 +1232,8 @@ class MassSpecProbeData(NamedTuple):
         distributed_world_size: int = 1,
         distributed_rank: int = 0,
         distributed_local_rank: int | None = None,
+        include_mcebio: bool = True,
+        maccs_only: bool = False,
     ) -> "MassSpecProbeData":
         validate_msg_probe_config(config)
         artifact_root = (
@@ -1242,14 +1244,17 @@ class MassSpecProbeData(NamedTuple):
         max_precursor_mz = float(
             _config_get(config, "max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
         )
-        msg_probe_fingerprint = str(
-            _config_get(config, "msg_probe_fingerprint", "maccs")
-        ).lower()
+        msg_probe_fingerprint = (
+            "maccs"
+            if maccs_only
+            else str(_config_get(config, "msg_probe_fingerprint", "maccs")).lower()
+        )
         include_morgan_probe = msg_probe_fingerprint == "morgan"
-        include_morgan = include_morgan_probe or int(
-            _config_get(config, "msg_probe_pairwise_alignment_num_pairs", 0)
-        ) > 0
-        include_dreams = bool(
+        include_morgan = (not maccs_only) and (
+            include_morgan_probe
+            or int(_config_get(config, "msg_probe_pairwise_alignment_num_pairs", 0)) > 0
+        )
+        include_dreams = (not maccs_only) and bool(
             _config_get(config, "nist_murcko_probe_include_dreams_auxiliary", False)
         )
         murcko_subdir = str(
@@ -1259,23 +1264,10 @@ class MassSpecProbeData(NamedTuple):
                 NIST_MURCKO_PREPARED_SUBDIR,
             )
         ).strip("/")
-        mcebio_subdir = str(
-            _config_get(
-                config,
-                "mcebio_murcko_probe_hf_subdir",
-                MCEBIO_MURCKO_PREPARED_SUBDIR,
-            )
-        ).strip("/")
         nist_repo_id = str(
             _config_get(config, "nist_murcko_probe_repo_id", NIST_MURCKO_HF_REPO)
         )
         nist_revision = str(_config_get(config, "nist_murcko_probe_revision", "main"))
-        mcebio_repo_id = str(
-            _config_get(config, "mcebio_murcko_probe_repo_id", NIST_MURCKO_HF_REPO)
-        )
-        mcebio_revision = str(
-            _config_get(config, "mcebio_murcko_probe_revision", "main")
-        )
         nist_dir = artifact_root / murcko_subdir
         nist_metadata = ensure_nist_murcko_probe_downloaded(
             nist_dir,
@@ -1289,17 +1281,35 @@ class MassSpecProbeData(NamedTuple):
             distributed_rank=distributed_rank,
             distributed_local_rank=distributed_local_rank,
         )
-        mcebio_metadata = ensure_mcebio_murcko_probe_downloaded(
-            artifact_root,
-            repo_id=mcebio_repo_id,
-            revision=mcebio_revision,
-            subdir=mcebio_subdir,
-            include_morgan=include_morgan_probe,
-            include_dreams=include_dreams,
-            distributed_world_size=distributed_world_size,
-            distributed_rank=distributed_rank,
-            distributed_local_rank=distributed_local_rank,
-        )
+        mcebio_subdir = ""
+        mcebio_repo_id = ""
+        mcebio_revision = ""
+        mcebio_metadata: dict[str, Any] = {}
+        if include_mcebio:
+            mcebio_subdir = str(
+                _config_get(
+                    config,
+                    "mcebio_murcko_probe_hf_subdir",
+                    MCEBIO_MURCKO_PREPARED_SUBDIR,
+                )
+            ).strip("/")
+            mcebio_repo_id = str(
+                _config_get(config, "mcebio_murcko_probe_repo_id", NIST_MURCKO_HF_REPO)
+            )
+            mcebio_revision = str(
+                _config_get(config, "mcebio_murcko_probe_revision", "main")
+            )
+            mcebio_metadata = ensure_mcebio_murcko_probe_downloaded(
+                artifact_root,
+                repo_id=mcebio_repo_id,
+                revision=mcebio_revision,
+                subdir=mcebio_subdir,
+                include_morgan=include_morgan_probe,
+                include_dreams=include_dreams,
+                distributed_world_size=distributed_world_size,
+                distributed_rank=distributed_rank,
+                distributed_local_rank=distributed_local_rank,
+            )
         adduct_vocab = _merge_vocabularies(
             nist_metadata.get("adduct_vocab", {"unknown": 0}),
             mcebio_metadata.get("adduct_vocab", {"unknown": 0}),
@@ -1356,34 +1366,52 @@ class MassSpecProbeData(NamedTuple):
             "probe_morgan_bits": int(nist_metadata.get("probe_morgan_bits", 0))
             if include_morgan
             else 0,
-            "probe_morgan_radius": int(nist_metadata.get("probe_morgan_radius", 0)),
+            "probe_morgan_radius": int(nist_metadata.get("probe_morgan_radius", 0))
+            if include_morgan
+            else 0,
             "pairwise_alignment_available": bool(
-                nist_metadata.get("pairwise_alignment_available", False)
+                include_morgan
+                and nist_metadata.get("pairwise_alignment_available", False)
             ),
-            "pairwise_alignment_num_pairs": int(
-                nist_metadata.get("pairwise_alignment_num_pairs", 0)
+            "pairwise_alignment_num_pairs": (
+                int(nist_metadata.get("pairwise_alignment_num_pairs", 0))
+                if include_morgan
+                else 0
             ),
-            "pairwise_alignment_num_endpoints": int(
-                nist_metadata.get("pairwise_alignment_num_endpoints", 0)
+            "pairwise_alignment_num_endpoints": (
+                int(nist_metadata.get("pairwise_alignment_num_endpoints", 0))
+                if include_morgan
+                else 0
             ),
             "dreams_auxiliary_available": bool(
                 include_dreams
                 and nist_metadata.get("dreams_auxiliary_available", False)
-                and mcebio_metadata.get("dreams_auxiliary_available", False)
+                and (
+                    not include_mcebio
+                    or mcebio_metadata.get("dreams_auxiliary_available", False)
+                )
             ),
             "dreams_valid_counts": nist_metadata.get("dreams_valid_counts", {}),
             "dreams_invalid_counts": nist_metadata.get("dreams_invalid_counts", {}),
         }
-        pairwise_file = str(nist_metadata.get("pairwise_alignment_file", ""))
+        pairwise_file = (
+            str(nist_metadata.get("pairwise_alignment_file", ""))
+            if include_morgan
+            else ""
+        )
         pairwise_alignment_path = str(nist_dir / pairwise_file) if pairwise_file else ""
         if storage_format == "parquet":
             train_files = [str(nist_dir / name) for name in nist_metadata["train_files"]]
             val_files = [str(nist_dir / name) for name in nist_metadata["val_files"]]
             test_files = [str(nist_dir / name) for name in nist_metadata["test_files"]]
-            mcebio_test_files = [
-                str(artifact_root / mcebio_subdir / name)
-                for name in mcebio_metadata["all_files"]
-            ]
+            mcebio_test_files = (
+                [
+                    str(artifact_root / mcebio_subdir / name)
+                    for name in mcebio_metadata["all_files"]
+                ]
+                if include_mcebio
+                else []
+            )
         else:
             train_files = [
                 str(nist_dir / "train" / name) for name in nist_metadata["train_files"]
@@ -1392,10 +1420,14 @@ class MassSpecProbeData(NamedTuple):
             test_files = [
                 str(nist_dir / "test" / name) for name in nist_metadata["test_files"]
             ]
-            mcebio_test_files = [
-                str(artifact_root / mcebio_subdir / name)
-                for name in mcebio_metadata["all_files"]
-            ]
+            mcebio_test_files = (
+                [
+                    str(artifact_root / mcebio_subdir / name)
+                    for name in mcebio_metadata["all_files"]
+                ]
+                if include_mcebio
+                else []
+            )
         return cls(
             info=info,
             storage_format=storage_format,
@@ -1424,7 +1456,9 @@ class MassSpecProbeData(NamedTuple):
                 str(nist_dir / name) for name in dreams_files.get("test", [])
             ],
             mcebio_test_files=mcebio_test_files,
-            mcebio_test_lengths=[int(v) for v in mcebio_metadata["all_lengths"]],
+            mcebio_test_lengths=[
+                int(v) for v in mcebio_metadata.get("all_lengths", [])
+            ],
             mcebio_test_morgan_files=[
                 str(artifact_root / mcebio_subdir / name)
                 for name in mcebio_morgan_files

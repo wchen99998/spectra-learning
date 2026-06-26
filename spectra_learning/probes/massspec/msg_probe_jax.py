@@ -52,6 +52,7 @@ def run_msg_probe_jax(
     model: PeakSetJEPAJax,
     data_mesh: Mesh | None = None,
     on_epoch_end: Callable[[dict[str, float]], None] | None = None,
+    online_maccs_only: bool = False,
 ) -> dict[str, Any]:
     def run_once(
         repeat_index: int,
@@ -63,6 +64,7 @@ def run_msg_probe_jax(
             data_mesh=data_mesh,
             on_epoch_end=repeat_on_epoch_end,
             repeat_index=repeat_index,
+            online_maccs_only=online_maccs_only,
         )
 
     return _run_repeated_probe_jax(
@@ -78,14 +80,22 @@ def precompile_msg_probe_jax(
     config: config_dict.ConfigDict,
     model: PeakSetJEPAJax,
     data_mesh: Mesh | None = None,
+    online_maccs_only: bool = False,
 ) -> dict[str, float]:
-    fingerprint_task = resolve_msg_probe_fingerprint(config)
-    probe_data = MassSpecProbeData.from_config(
-        config,
-        distributed_world_size=_distributed_world_size_jax(),
-        distributed_rank=_distributed_rank_jax(),
-        distributed_local_rank=0,
+    fingerprint_task = (
+        MACCS_TASK if online_maccs_only else resolve_msg_probe_fingerprint(config)
     )
+    regression_tasks = () if online_maccs_only else REGRESSION_PROBE_TASKS
+    binary_tasks = () if online_maccs_only else BINARY_PROBE_TASKS
+    probe_data_kwargs = {
+        "distributed_world_size": _distributed_world_size_jax(),
+        "distributed_rank": _distributed_rank_jax(),
+        "distributed_local_rank": 0,
+    }
+    if online_maccs_only:
+        probe_data_kwargs["include_mcebio"] = False
+        probe_data_kwargs["maccs_only"] = True
+    probe_data = MassSpecProbeData.from_config(config, **probe_data_kwargs)
     variants = msg_probe_variants_from_config(config)
     use_pair_features = any(_uses_pair_features(variant) for variant in variants)
     peak_ordering = str(_config_get(config, "peak_ordering", "intensity"))
@@ -98,6 +108,8 @@ def precompile_msg_probe_jax(
         peak_ordering=peak_ordering,
         seed=train_seed,
         fingerprint_task=fingerprint_task,
+        regression_tasks=regression_tasks,
+        binary_tasks=binary_tasks,
         max_samples=max_samples,
     )
     val_targets = _collect_split_targets_jax(
@@ -106,12 +118,16 @@ def precompile_msg_probe_jax(
         peak_ordering=peak_ordering,
         seed=val_seed,
         fingerprint_task=fingerprint_task,
+        regression_tasks=regression_tasks,
+        binary_tasks=binary_tasks,
         max_samples=max_samples,
     )
     task_spec = _build_task_spec_jax(
         train_targets=train_targets,
         test_targets=val_targets,
         fingerprint_task=fingerprint_task,
+        regression_tasks=regression_tasks,
+        binary_tasks=binary_tasks,
         single_pair_covariance_include_diagonal=bool(
             _config_get(
                 config,
@@ -238,6 +254,7 @@ def _run_msg_probe_once_jax(
     data_mesh: Mesh | None,
     on_epoch_end: Callable[[dict[str, float]], None] | None,
     repeat_index: int,
+    online_maccs_only: bool = False,
 ) -> dict[str, Any]:
     num_probe_epochs = int(_config_get(config, "msg_probe_num_epochs", 5))
     probe_lr = float(_config_get(config, "msg_probe_learning_rate", 1e-3))
@@ -253,13 +270,20 @@ def _run_msg_probe_once_jax(
     early_stopping_min_epochs = int(
         _config_get(config, "msg_probe_early_stopping_min_epochs", 1)
     )
-    fingerprint_task = resolve_msg_probe_fingerprint(config)
-    probe_data = MassSpecProbeData.from_config(
-        config,
-        distributed_world_size=_distributed_world_size_jax(),
-        distributed_rank=_distributed_rank_jax(),
-        distributed_local_rank=0,
+    fingerprint_task = (
+        MACCS_TASK if online_maccs_only else resolve_msg_probe_fingerprint(config)
     )
+    regression_tasks = () if online_maccs_only else REGRESSION_PROBE_TASKS
+    binary_tasks = () if online_maccs_only else BINARY_PROBE_TASKS
+    probe_data_kwargs = {
+        "distributed_world_size": _distributed_world_size_jax(),
+        "distributed_rank": _distributed_rank_jax(),
+        "distributed_local_rank": 0,
+    }
+    if online_maccs_only:
+        probe_data_kwargs["include_mcebio"] = False
+        probe_data_kwargs["maccs_only"] = True
+    probe_data = MassSpecProbeData.from_config(config, **probe_data_kwargs)
     variants = msg_probe_variants_from_config(config)
     use_pair_features = any(_uses_pair_features(variant) for variant in variants)
     max_train_samples = _optional_positive_int(
@@ -299,6 +323,8 @@ def _run_msg_probe_once_jax(
         peak_ordering=peak_ordering,
         seed=train_seed_base,
         fingerprint_task=fingerprint_task,
+        regression_tasks=regression_tasks,
+        binary_tasks=binary_tasks,
         max_samples=max_train_samples,
     )
     val_targets = _collect_split_targets_jax(
@@ -307,6 +333,8 @@ def _run_msg_probe_once_jax(
         peak_ordering=peak_ordering,
         seed=train_seed_base + 10_000,
         fingerprint_task=fingerprint_task,
+        regression_tasks=regression_tasks,
+        binary_tasks=binary_tasks,
         max_samples=max_val_samples,
     )
     selection_targets = (
@@ -318,6 +346,8 @@ def _run_msg_probe_once_jax(
             peak_ordering=peak_ordering,
             seed=test_seed_base,
             fingerprint_task=fingerprint_task,
+            regression_tasks=regression_tasks,
+            binary_tasks=binary_tasks,
             max_samples=max_test_samples,
         )
     )
@@ -326,6 +356,8 @@ def _run_msg_probe_once_jax(
         train_targets=train_targets,
         test_targets=selection_targets,
         fingerprint_task=fingerprint_task,
+        regression_tasks=regression_tasks,
+        binary_tasks=binary_tasks,
         single_pair_covariance_include_diagonal=bool(
             _config_get(
                 config,
@@ -364,7 +396,11 @@ def _run_msg_probe_once_jax(
         )
         opt_state_by_variant[variant] = optimizer.init(params_by_variant[variant])
 
-    select_metric = resolve_msg_probe_select_metric_jax(config)
+    select_metric = (
+        "msg_probe/test/auc_maccs_mean"
+        if online_maccs_only
+        else resolve_msg_probe_select_metric_jax(config)
+    )
     higher_is_better = msg_probe_metric_higher_is_better(select_metric)
     best_metrics_by_variant: dict[str, dict[str, Any]] = {}
     best_params_by_variant: dict[str, JaxProbeParams] = {}
@@ -407,7 +443,11 @@ def _run_msg_probe_once_jax(
             pad_distributed=True,
             data_mesh=data_mesh,
         ):
-            features = _extract_features(model, batch, use_pair_features=use_pair_features)
+            features = _extract_features(
+                model,
+                batch,
+                use_pair_features=use_pair_features,
+            )
             step_batch = _probe_step_batch(batch, task_spec)
             for variant in variants:
                 params, opt_state, logits = train_step_by_variant[variant](
@@ -605,55 +645,57 @@ def _run_msg_probe_once_jax(
         }
         phase_timing["final_score_seconds"] += time.perf_counter() - phase_start
 
-    mcebio_states = {variant: _new_epoch_state(task_spec) for variant in variants}
-    mcebio_pending = {variant: [] for variant in variants}
-    phase_start = time.perf_counter()
-    for batch in iter_massspec_probe_jax(
-        probe_data=probe_data,
-        split="massspec_mcebio_test",
-        seed=test_seed_base + 75_000,
-        peak_ordering=peak_ordering,
-        drop_remainder=False,
-        max_samples=max_mcebio_test_samples,
-        distributed_world_size=_distributed_world_size_jax(),
-        distributed_rank=_distributed_rank_jax(),
-        data_mesh=data_mesh,
-    ):
-        features = _extract_features(model, batch, use_pair_features=use_pair_features)
-        step_batch = _probe_step_batch(batch, task_spec)
-        for variant in variants:
-            params = best_params_by_variant.get(variant, params_by_variant[variant])
-            _append_pending_prediction(
-                mcebio_pending[variant],
-                logits=predict_step_by_variant[variant](
-                    params,
-                    step_batch,
-                    features,
-                ),
-                batch=batch,
-                task_spec=task_spec,
+    mcebio_sulfur_metrics_by_variant = {}
+    if not online_maccs_only:
+        mcebio_states = {variant: _new_epoch_state(task_spec) for variant in variants}
+        mcebio_pending = {variant: [] for variant in variants}
+        phase_start = time.perf_counter()
+        for batch in iter_massspec_probe_jax(
+            probe_data=probe_data,
+            split="massspec_mcebio_test",
+            seed=test_seed_base + 75_000,
+            peak_ordering=peak_ordering,
+            drop_remainder=False,
+            max_samples=max_mcebio_test_samples,
+            distributed_world_size=_distributed_world_size_jax(),
+            distributed_rank=_distributed_rank_jax(),
+            data_mesh=data_mesh,
+        ):
+            features = _extract_features(model, batch, use_pair_features=use_pair_features)
+            step_batch = _probe_step_batch(batch, task_spec)
+            for variant in variants:
+                params = best_params_by_variant.get(variant, params_by_variant[variant])
+                _append_pending_prediction(
+                    mcebio_pending[variant],
+                    logits=predict_step_by_variant[variant](
+                        params,
+                        step_batch,
+                        features,
+                    ),
+                    batch=batch,
+                    task_spec=task_spec,
+                )
+                _flush_pending_predictions_if_full(
+                    mcebio_states[variant],
+                    mcebio_pending[variant],
+                    task_spec,
+                )
+        _flush_variant_prediction_queues(mcebio_pending, mcebio_states, task_spec)
+        phase_timing["mcebio_seconds"] += time.perf_counter() - phase_start
+        mcebio_states = _gather_variant_states_jax(mcebio_states, task_spec)
+        phase_start = time.perf_counter()
+        mcebio_sulfur_metrics_by_variant = {
+            variant: _sulfur_metric_subset(
+                _score_epoch_state(
+                    prefix=f"msg_probe/{variant}/mcebio_sulfur_test",
+                    epoch_state=state,
+                    task_spec=task_spec,
+                    include_pr_curves=True,
+                )
             )
-            _flush_pending_predictions_if_full(
-                mcebio_states[variant],
-                mcebio_pending[variant],
-                task_spec,
-            )
-    _flush_variant_prediction_queues(mcebio_pending, mcebio_states, task_spec)
-    phase_timing["mcebio_seconds"] += time.perf_counter() - phase_start
-    mcebio_states = _gather_variant_states_jax(mcebio_states, task_spec)
-    phase_start = time.perf_counter()
-    mcebio_sulfur_metrics_by_variant = {
-        variant: _sulfur_metric_subset(
-            _score_epoch_state(
-                prefix=f"msg_probe/{variant}/mcebio_sulfur_test",
-                epoch_state=state,
-                task_spec=task_spec,
-                include_pr_curves=True,
-            )
-        )
-        for variant, state in mcebio_states.items()
-    }
-    phase_timing["final_score_seconds"] += time.perf_counter() - phase_start
+            for variant, state in mcebio_states.items()
+        }
+        phase_timing["final_score_seconds"] += time.perf_counter() - phase_start
 
     best_metrics: dict[str, Any] = {}
     for variant in variants:
@@ -828,9 +870,11 @@ def _collect_split_targets_jax(
     max_samples: int | None = None,
     sample_randomly: bool = False,
     fingerprint_task: str = MACCS_TASK,
+    regression_tasks: tuple[str, ...] = REGRESSION_PROBE_TASKS,
+    binary_tasks: tuple[str, ...] = BINARY_PROBE_TASKS,
 ) -> MsgProbeSplitTargets:
-    regression = {name: [] for name in REGRESSION_PROBE_TASKS}
-    binary = {name: [] for name in BINARY_PROBE_TASKS}
+    regression = {name: [] for name in regression_tasks}
+    binary = {name: [] for name in binary_tasks}
     fingerprints = []
     fingerprint_key = f"probe_{fingerprint_task}"
     for batch in iter_massspec_probe_jax(
@@ -847,9 +891,9 @@ def _collect_split_targets_jax(
         valid_mask = np.asarray(batch["probe_valid_mol"]).astype(bool, copy=False)
         if not valid_mask.any():
             continue
-        for name in REGRESSION_PROBE_TASKS:
+        for name in regression_tasks:
             regression[name].append(np.asarray(batch[f"probe_{name}"])[valid_mask])
-        for name in BINARY_PROBE_TASKS:
+        for name in binary_tasks:
             binary[name].append(np.asarray(batch[f"probe_{name}"])[valid_mask])
         fingerprints.append(np.asarray(batch[fingerprint_key])[valid_mask])
 
@@ -879,6 +923,8 @@ def _collect_split_targets_jax(
         targets = _merge_split_targets_jax(
             _all_gather_object_jax(targets),
             fingerprint_task=fingerprint_task,
+            regression_tasks=regression_tasks,
+            binary_tasks=binary_tasks,
         )
     return targets
 
@@ -923,6 +969,8 @@ def _merge_split_targets_jax(
     targets_by_rank: list[object],
     *,
     fingerprint_task: str,
+    regression_tasks: tuple[str, ...] = REGRESSION_PROBE_TASKS,
+    binary_tasks: tuple[str, ...] = BINARY_PROBE_TASKS,
 ) -> MsgProbeSplitTargets:
     targets = [
         target
@@ -953,8 +1001,8 @@ def _merge_split_targets_jax(
         else int(PROBE_FINGERPRINT_BITS[fingerprint_task])
     )
     return MsgProbeSplitTargets(
-        regression=merge_named_arrays("regression", REGRESSION_PROBE_TASKS, np.float32),
-        binary=merge_named_arrays("binary", BINARY_PROBE_TASKS, np.float32),
+        regression=merge_named_arrays("regression", regression_tasks, np.float32),
+        binary=merge_named_arrays("binary", binary_tasks, np.float32),
         maccs=(
             np.concatenate([target.maccs for target in targets], axis=0).astype(
                 np.int32,
@@ -1012,17 +1060,19 @@ def _build_task_spec_jax(
     train_targets: MsgProbeSplitTargets,
     test_targets: MsgProbeSplitTargets,
     fingerprint_task: str,
+    regression_tasks: tuple[str, ...] = REGRESSION_PROBE_TASKS,
+    binary_tasks: tuple[str, ...] = BINARY_PROBE_TASKS,
     single_pair_covariance_include_diagonal: bool = False,
 ) -> MsgProbeTaskSpec:
     del test_targets
     regression_means, regression_stds = {}, {}
-    for name in REGRESSION_PROBE_TASKS:
+    for name in regression_tasks:
         values = train_targets.regression[name].astype(np.float32)
         regression_means[name] = float(values.mean())
         regression_stds[name] = float(np.clip(values.std(), 1e-8, None))
     return MsgProbeTaskSpec(
-        regression_tasks=REGRESSION_PROBE_TASKS,
-        binary_tasks=BINARY_PROBE_TASKS,
+        regression_tasks=regression_tasks,
+        binary_tasks=binary_tasks,
         maccs_bits=int(train_targets.maccs.shape[1]),
         regression_means=regression_means,
         regression_stds=regression_stds,

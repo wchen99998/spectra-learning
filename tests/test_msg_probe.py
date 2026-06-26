@@ -1535,9 +1535,9 @@ class ProbeConfigTests(unittest.TestCase):
         self.assertEqual(resolve_msg_probe_pairwise_alignment_num_pairs(cfg), 20_000)
 
     def test_morgan_probe_config_targets_4096_radius2_and_alignment(self):
-        from configs.wandb_pa645zxs_morgan import get_config
-
-        cfg = get_config()
+        cfg = config_dict.ConfigDict()
+        cfg.msg_probe_fingerprint = "morgan"
+        cfg.msg_probe_pairwise_alignment_num_pairs = 20_000
 
         self.assertEqual(resolve_msg_probe_fingerprint(cfg), "morgan")
         self.assertEqual(
@@ -1676,6 +1676,75 @@ class MsgProbeRunTests(unittest.TestCase):
         self.assertNotIn("msg_probe/mean/test/auc_maccs_mean", curve[0])
         self.assertNotIn("msg_probe/mean/test/pr_curve_fluorine", curve[0])
 
+    def test_online_msg_probe_uses_nist_murcko_maccs_only(self):
+        cfg = config_dict.ConfigDict()
+        cfg.seed = 11
+        cfg.model_dim = 4
+        cfg.msg_probe_variants = ("mean",)
+        cfg.msg_probe_mlp_hidden_dim = 8
+        cfg.msg_probe_num_epochs = 1
+        cfg.msg_probe_learning_rate = 1e-3
+        cfg.msg_probe_weight_decay = 0.0
+        cfg.msg_probe_warmup_steps = 0
+        cfg.msg_probe_early_stopping = False
+        cfg.msg_probe_fingerprint = "morgan"
+        cfg.msg_probe_pairwise_alignment_num_pairs = 20_000
+
+        probe_data = _SplitDummyDataModule(
+            batches_by_split={
+                "massspec_train": [self._probe_batch(1.0)],
+                "massspec_val": [self._probe_batch(1.5)],
+                "massspec_test": [self._probe_batch(2.0)],
+            },
+            info={
+                "massspec_train_size": 4,
+                "massspec_val_size": 4,
+                "massspec_test_size": 4,
+                "massspec_mcebio_test_size": 0,
+                "probe_morgan_bits": 0,
+            },
+            batch_size=4,
+        )
+
+        class DummyEncoder(torch.nn.Module):
+            def forward(
+                self,
+                peak_mz,
+                peak_intensity,
+                *,
+                valid_mask,
+                precursor_mz=None,
+            ):
+                values = peak_mz + peak_intensity
+                return values.unsqueeze(-1).repeat(1, 1, cfg.model_dim)
+
+        class DummyModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.encoder = DummyEncoder()
+
+        with mock.patch(
+            "spectra_learning.probes.massspec.msg_probe.MassSpecProbeData.from_config",
+            return_value=probe_data,
+        ) as from_config:
+            metrics = _run_msg_probe_once(
+                config=cfg,
+                model=DummyModel(),
+                device=torch.device("cpu"),
+                online_maccs_only=True,
+            )
+
+        self.assertFalse(
+            any(call["split"] == "massspec_mcebio_test" for call in probe_data.calls)
+        )
+        self.assertTrue(from_config.call_args.kwargs["maccs_only"])
+        self.assertFalse(from_config.call_args.kwargs["include_mcebio"])
+        self.assertIn("msg_probe/mean/test/auc_maccs_mean", metrics)
+        self.assertNotIn("msg_probe/mean/test/auc_fluorine", metrics)
+        self.assertNotIn("msg_probe/mean/test/auc_sulfur", metrics)
+        self.assertNotIn("msg_probe/mean/test/mae_mol_weight", metrics)
+        self.assertNotIn("msg_probe/mean/mcebio_sulfur_test/auc_sulfur", metrics)
+
 
 class RepeatedProbeTests(unittest.TestCase):
     @staticmethod
@@ -1718,7 +1787,9 @@ class RepeatedProbeTests(unittest.TestCase):
             plot_dir,
             plot_step,
             distributed,
+            online_maccs_only=False,
         ):
+            self.assertFalse(online_maccs_only)
             metrics, curve = repeat_payloads[repeat_index]
             for epoch_metrics in curve:
                 if on_epoch_end is not None:

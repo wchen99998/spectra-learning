@@ -30,7 +30,6 @@ from spectra_learning.probes.massspec.msg_probe_jax import (
 )
 from spectra_learning.probes.massspec.msg_settings import (
     msg_probe_variants_from_config,
-    resolve_msg_probe_fingerprint,
 )
 from spectra_learning.training.cadence import (
     msg_probe_interval,
@@ -1677,6 +1676,7 @@ def run_and_log_msg_probe_jax(
         config=config,
         model=model,
         data_mesh=probe_data_mesh,
+        online_maccs_only=True,
     )
     if jax.process_index() != 0:
         return probe_metrics
@@ -1686,13 +1686,11 @@ def run_and_log_msg_probe_jax(
         global_step,
         enable_wandb=bool(_config_get(config, "enable_wandb", False)),
     )
-    fingerprint_task: str | None = None
+    fingerprint_task = "maccs"
     for variant in variants:
         prefix = f"msg_probe/{variant}"
         epoch_key = f"{prefix}/epoch"
         if epoch_key in probe_metrics:
-            if fingerprint_task is None:
-                fingerprint_task = resolve_msg_probe_fingerprint(config)
             logging.info(
                 "step=%d msg_probe[%s] best_epoch=%.2f test_auc_%s_mean=%.4f",
                 global_step,
@@ -1844,6 +1842,7 @@ def _precompile_jax_training_steps(
             config=config,
             model=model,
             data_mesh=probe_data_mesh,
+            online_maccs_only=True,
         )
     return {
         "run/precompile_seconds": time.perf_counter() - compile_start,

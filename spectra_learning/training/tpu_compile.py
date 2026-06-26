@@ -32,13 +32,10 @@ from spectra_learning.probes.massspec.msg_probe_jax import (
     jitted_probe_train_step_compile_fns,
 )
 from spectra_learning.probes.massspec.msg_settings import (
-    BINARY_PROBE_TASKS,
-    PROBE_FINGERPRINT_BITS,
-    REGRESSION_PROBE_TASKS,
     MsgProbeTaskSpec,
     msg_probe_variants_from_config,
-    resolve_msg_probe_fingerprint,
 )
+from spectra_learning.data.massspec_targets import MACCS_FINGERPRINT_BITS
 from spectra_learning.training.pretrain_jax import (
     JAX_DATA_AXIS,
     _config_get,
@@ -669,14 +666,13 @@ def abstract_eval_batch(
 
 
 def abstract_msg_probe_task_spec(config: Any) -> MsgProbeTaskSpec:
-    fingerprint_task = resolve_msg_probe_fingerprint(config)
     return MsgProbeTaskSpec(
-        regression_tasks=REGRESSION_PROBE_TASKS,
-        binary_tasks=BINARY_PROBE_TASKS,
-        maccs_bits=PROBE_FINGERPRINT_BITS[fingerprint_task],
-        regression_means={name: 0.0 for name in REGRESSION_PROBE_TASKS},
-        regression_stds={name: 1.0 for name in REGRESSION_PROBE_TASKS},
-        fingerprint_task=fingerprint_task,
+        regression_tasks=(),
+        binary_tasks=(),
+        maccs_bits=MACCS_FINGERPRINT_BITS,
+        regression_means={},
+        regression_stds={},
+        fingerprint_task="maccs",
         single_pair_covariance_include_diagonal=bool(
             _config_get(
                 config,
@@ -705,23 +701,17 @@ def abstract_msg_probe_batch(
 ) -> dict[str, jax.ShapeDtypeStruct]:
     batch_size = target_probe_batch_size(config, target)
     num_peaks = int(_config_get(config, "num_peaks", 60))
-    fingerprint_task = resolve_msg_probe_fingerprint(config)
-    fingerprint_bits = PROBE_FINGERPRINT_BITS[fingerprint_task]
     batch: dict[str, jax.ShapeDtypeStruct] = {
         "peak_mz": jax.ShapeDtypeStruct((batch_size, num_peaks), jnp.float32),
         "peak_intensity": jax.ShapeDtypeStruct((batch_size, num_peaks), jnp.float32),
         "peak_valid_mask": jax.ShapeDtypeStruct((batch_size, num_peaks), jnp.bool_),
         "precursor_mz": jax.ShapeDtypeStruct((batch_size,), jnp.float32),
         "probe_valid_mol": jax.ShapeDtypeStruct((batch_size,), jnp.bool_),
-        f"probe_{fingerprint_task}": jax.ShapeDtypeStruct(
-            (batch_size, fingerprint_bits),
+        "probe_maccs": jax.ShapeDtypeStruct(
+            (batch_size, MACCS_FINGERPRINT_BITS),
             jnp.int32,
         ),
     }
-    for name in REGRESSION_PROBE_TASKS:
-        batch[f"probe_{name}"] = jax.ShapeDtypeStruct((batch_size,), jnp.float32)
-    for name in BINARY_PROBE_TASKS:
-        batch[f"probe_{name}"] = jax.ShapeDtypeStruct((batch_size,), jnp.float32)
     return batch
 
 

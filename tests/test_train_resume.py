@@ -1670,7 +1670,16 @@ def test_training_loop_runs_distributed_online_probe_and_logs_on_main(monkeypatc
     def fake_train_step_impl(*args, **kwargs):
         return {"loss": torch.tensor(1.0)}
 
-    def fake_run_msg_probe(*, config, model, device, distributed, covariance_pooler=None):
+    def fake_run_msg_probe(
+        *,
+        config,
+        model,
+        device,
+        distributed,
+        covariance_pooler=None,
+        online_maccs_only=False,
+    ):
+        assert online_maccs_only is True
         probe_calls.append((model, device))
         return {"msg_probe/mean/test/auc_maccs_mean": 0.75}
 

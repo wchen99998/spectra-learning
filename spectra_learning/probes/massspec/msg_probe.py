@@ -181,10 +181,12 @@ def _collect_split_targets(
     max_samples: int | None = None,
     sample_randomly: bool = False,
     fingerprint_task: str = _MACCS_TASK,
+    regression_tasks: tuple[str, ...] = _REGRESSION_PROBE_TASKS,
+    binary_tasks: tuple[str, ...] = _BINARY_PROBE_TASKS,
     distributed: DistributedContext | None = None,
 ) -> MsgProbeSplitTargets:
-    regression = {name: [] for name in _REGRESSION_PROBE_TASKS}
-    binary = {name: [] for name in _BINARY_PROBE_TASKS}
+    regression = {name: [] for name in regression_tasks}
+    binary = {name: [] for name in binary_tasks}
     maccs = []
     fingerprint_key = f"probe_{fingerprint_task}"
     for batch in iter_massspec_probe(
@@ -203,11 +205,11 @@ def _collect_split_targets(
         )
         if not valid_mask.any():
             continue
-        for name in _REGRESSION_PROBE_TASKS:
+        for name in regression_tasks:
             regression[name].append(
                 batch[f"probe_{name}"][valid_mask].detach().cpu().numpy()
             )
-        for name in _BINARY_PROBE_TASKS:
+        for name in binary_tasks:
             binary[name].append(
                 batch[f"probe_{name}"][valid_mask].detach().cpu().numpy()
             )
@@ -233,6 +235,8 @@ def _collect_split_targets(
         targets = _merge_split_targets(
             _all_gather_object(targets),
             fingerprint_task=fingerprint_task,
+            regression_tasks=regression_tasks,
+            binary_tasks=binary_tasks,
         )
     return targets
 
@@ -241,6 +245,8 @@ def _merge_split_targets(
     targets_by_rank: list[object],
     *,
     fingerprint_task: str,
+    regression_tasks: tuple[str, ...] = _REGRESSION_PROBE_TASKS,
+    binary_tasks: tuple[str, ...] = _BINARY_PROBE_TASKS,
 ) -> MsgProbeSplitTargets:
     targets = [target for target in targets_by_rank if isinstance(target, MsgProbeSplitTargets)]
     regression = {
@@ -252,7 +258,7 @@ def _merge_split_targets(
             if targets
             else np.empty(0, dtype=np.float32)
         )
-        for name in _REGRESSION_PROBE_TASKS
+        for name in regression_tasks
     }
     binary = {
         name: (
@@ -263,7 +269,7 @@ def _merge_split_targets(
             if targets
             else np.empty(0, dtype=np.float32)
         )
-        for name in _BINARY_PROBE_TASKS
+        for name in binary_tasks
     }
     maccs = (
         np.concatenate([target.maccs for target in targets], axis=0)
@@ -278,15 +284,17 @@ def _build_task_spec(
     train_targets: MsgProbeSplitTargets,
     test_targets: MsgProbeSplitTargets,
     fingerprint_task: str = _MACCS_TASK,
+    regression_tasks: tuple[str, ...] = _REGRESSION_PROBE_TASKS,
+    binary_tasks: tuple[str, ...] = _BINARY_PROBE_TASKS,
 ) -> MsgProbeTaskSpec:
     regression_means, regression_stds = {}, {}
-    for name in _REGRESSION_PROBE_TASKS:
+    for name in regression_tasks:
         values = train_targets.regression[name].astype(np.float32)
         regression_means[name] = float(values.mean())
         regression_stds[name] = float(np.clip(values.std(), 1e-8, None))
     return MsgProbeTaskSpec(
-        regression_tasks=_REGRESSION_PROBE_TASKS,
-        binary_tasks=_BINARY_PROBE_TASKS,
+        regression_tasks=regression_tasks,
+        binary_tasks=binary_tasks,
         maccs_bits=int(train_targets.maccs.shape[1]),
         regression_means=regression_means,
         regression_stds=regression_stds,
@@ -1223,6 +1231,7 @@ def _run_msg_probe_once(
     plot_dir: Path | None = None,
     plot_step: int | None = None,
     distributed: DistributedContext | None = None,
+    online_maccs_only: bool = False,
 ) -> dict[str, Any]:
     num_probe_epochs = int(_config_get(config, "msg_probe_num_epochs", 5))
     probe_lr = float(_config_get(config, "msg_probe_learning_rate", 1e-3))
@@ -1242,13 +1251,20 @@ def _run_msg_probe_once(
         _config_get(config, "msg_probe_early_stopping_min_epochs", 1)
     )
     peak_ordering = str(_config_get(config, "peak_ordering", "intensity"))
-    fingerprint_task = resolve_msg_probe_fingerprint(config)
-    probe_data = MassSpecProbeData.from_config(
-        config,
-        distributed_world_size=_distributed_world_size(distributed),
-        distributed_rank=_distributed_rank(distributed),
-        distributed_local_rank=_distributed_local_rank(distributed),
+    fingerprint_task = (
+        _MACCS_TASK if online_maccs_only else resolve_msg_probe_fingerprint(config)
     )
+    regression_tasks = () if online_maccs_only else _REGRESSION_PROBE_TASKS
+    binary_tasks = () if online_maccs_only else _BINARY_PROBE_TASKS
+    probe_data_kwargs = {
+        "distributed_world_size": _distributed_world_size(distributed),
+        "distributed_rank": _distributed_rank(distributed),
+        "distributed_local_rank": _distributed_local_rank(distributed),
+    }
+    if online_maccs_only:
+        probe_data_kwargs["include_mcebio"] = False
+        probe_data_kwargs["maccs_only"] = True
+    probe_data = MassSpecProbeData.from_config(config, **probe_data_kwargs)
     variants = msg_probe_variants_from_config(config)
     use_pair_features = any(_uses_pair_features(variant) for variant in variants)
 
@@ -1280,6 +1296,8 @@ def _run_msg_probe_once(
         peak_ordering=peak_ordering,
         seed=train_seed_base,
         fingerprint_task=fingerprint_task,
+        regression_tasks=regression_tasks,
+        binary_tasks=binary_tasks,
         distributed=distributed,
     )
     val_targets = _collect_split_targets(
@@ -1288,6 +1306,8 @@ def _run_msg_probe_once(
         peak_ordering=peak_ordering,
         seed=train_seed_base + 10_000,
         fingerprint_task=fingerprint_task,
+        regression_tasks=regression_tasks,
+        binary_tasks=binary_tasks,
         distributed=distributed,
     )
     selection_targets = val_targets if early_stopping else _collect_split_targets(
@@ -1296,12 +1316,16 @@ def _run_msg_probe_once(
         peak_ordering=peak_ordering,
         seed=test_seed_base,
         fingerprint_task=fingerprint_task,
+        regression_tasks=regression_tasks,
+        binary_tasks=binary_tasks,
         distributed=distributed,
     )
     task_spec = _build_task_spec(
         train_targets=train_targets,
         test_targets=selection_targets,
         fingerprint_task=fingerprint_task,
+        regression_tasks=regression_tasks,
+        binary_tasks=binary_tasks,
     )
     was_training = model.training
     model.eval()
@@ -1358,7 +1382,11 @@ def _run_msg_probe_once(
             for k, v in batch.items()
         })
 
-    select_metric = resolve_msg_probe_select_metric(config)
+    select_metric = (
+        "msg_probe/test/auc_maccs_mean"
+        if online_maccs_only
+        else resolve_msg_probe_select_metric(config)
+    )
     higher_is_better = msg_probe_metric_higher_is_better(select_metric)
     best_metrics_by_variant: dict[str, dict[str, Any]] = {}
     best_test_state_by_variant: dict[str, EpochState] = {}
@@ -1607,30 +1635,34 @@ def _run_msg_probe_once(
             )
             for variant, state in best_test_state_by_variant.items()
         }
-    mcebio_sulfur_metrics_by_variant = {
-        variant: _sulfur_metric_subset(
-            _score_epoch_state(
-                prefix=f"msg_probe/{variant}/mcebio_sulfur_test",
-                epoch_state=state,
-                task_spec=task_spec,
-                include_pr_curves=True,
+    mcebio_sulfur_metrics_by_variant = (
+        {}
+        if online_maccs_only
+        else {
+            variant: _sulfur_metric_subset(
+                _score_epoch_state(
+                    prefix=f"msg_probe/{variant}/mcebio_sulfur_test",
+                    epoch_state=state,
+                    task_spec=task_spec,
+                    include_pr_curves=True,
+                )
             )
-        )
-        for variant, state in _evaluate_sequence_probe_split(
-            probe_data=probe_data,
-            probes=probes,
-            task_spec=task_spec,
-            feature_extractor=feature_extractor,
-            move_batch=move_batch,
-            split="massspec_mcebio_test",
-            seed=test_seed_base + 75_000,
-            peak_ordering=peak_ordering,
-            max_samples=None,
-            sample_randomly=False,
-            device=device,
-            distributed=distributed,
-        ).items()
-    }
+            for variant, state in _evaluate_sequence_probe_split(
+                probe_data=probe_data,
+                probes=probes,
+                task_spec=task_spec,
+                feature_extractor=feature_extractor,
+                move_batch=move_batch,
+                split="massspec_mcebio_test",
+                seed=test_seed_base + 75_000,
+                peak_ordering=peak_ordering,
+                max_samples=None,
+                sample_randomly=False,
+                device=device,
+                distributed=distributed,
+            ).items()
+        }
+    )
     best_metrics: dict[str, Any] = {}
     for variant in variants:
         variant_metrics = dict(best_metrics_by_variant.get(variant, {}))
@@ -1664,26 +1696,27 @@ def _run_msg_probe_once(
     alignment_pooler = covariance_pooler
     if alignment_pooler is None and "covariance" in probes:
         alignment_pooler = probes["covariance"].pooler
-    best_metrics.update(
-        _run_covariance_morgan_pairwise_alignment(
-            config=config,
-            probe_data=probe_data,
-            model=model,
-            covariance_pooler=alignment_pooler,
-            feature_extractor=feature_extractor,
-            move_batch=move_batch,
-            device=device,
-            split="massspec_test",
-            peak_ordering=peak_ordering,
-            seed=test_seed_base + 50_000,
-            max_samples=None,
-            sample_randomly=False,
-            plot_dir=plot_dir,
-            plot_step=plot_step,
-            repeat_index=repeat_index,
-            distributed=distributed,
+    if not online_maccs_only:
+        best_metrics.update(
+            _run_covariance_morgan_pairwise_alignment(
+                config=config,
+                probe_data=probe_data,
+                model=model,
+                covariance_pooler=alignment_pooler,
+                feature_extractor=feature_extractor,
+                move_batch=move_batch,
+                device=device,
+                split="massspec_test",
+                peak_ordering=peak_ordering,
+                seed=test_seed_base + 50_000,
+                max_samples=None,
+                sample_randomly=False,
+                plot_dir=plot_dir,
+                plot_step=plot_step,
+                repeat_index=repeat_index,
+                distributed=distributed,
+            )
         )
-    )
     if was_training:
         model.train()
     return best_metrics
@@ -1699,6 +1732,7 @@ def run_msg_probe(
     plot_dir: Path | None = None,
     plot_step: int | None = None,
     distributed: DistributedContext | None = None,
+    online_maccs_only: bool = False,
 ) -> dict[str, Any]:
     def run_once(
         repeat_index: int,
@@ -1714,6 +1748,7 @@ def run_msg_probe(
             plot_dir=plot_dir,
             plot_step=plot_step,
             distributed=distributed,
+            online_maccs_only=online_maccs_only,
         )
 
     metrics = _run_repeated_probe(

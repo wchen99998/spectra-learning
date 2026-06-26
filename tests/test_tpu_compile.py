@@ -180,7 +180,6 @@ def test_abstract_msg_probe_batch_uses_global_probe_batch_per_process():
     cfg.num_peaks = 31
     cfg.model_dim = 640
     cfg.pairmixer_pair_dim = 256
-    cfg.msg_probe_fingerprint = "maccs"
     target = tpu_compile.resolve_tpu_compile_target("v6e-4x4-multihost")
 
     batch = tpu_compile.abstract_msg_probe_batch(cfg, target=target)
@@ -202,8 +201,6 @@ def test_abstract_msg_probe_batch_uses_global_probe_batch_per_process():
     assert set(step_batch) == {
         "peak_valid_mask",
         "probe_valid_mol",
-        "probe_fluorine",
-        "probe_sulfur",
         "probe_maccs",
     }
     single, pair = features

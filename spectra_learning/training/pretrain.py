@@ -56,7 +56,6 @@ from spectra_learning.training.storage import (
 from spectra_learning.training.steps import train_step_impl
 from spectra_learning.probes.massspec.msg_probe import (
     msg_probe_variants_from_config,
-    resolve_msg_probe_fingerprint,
     run_msg_probe,
 )
 from spectra_learning.models.model import PeakSetJEPA
@@ -818,6 +817,7 @@ def run_and_log_msg_probe(
         model=model,
         device=device,
         distributed=distributed,
+        online_maccs_only=True,
     )
     if distributed.is_main:
         log_msg_probe_metrics(
@@ -826,7 +826,7 @@ def run_and_log_msg_probe(
             global_step,
             enable_wandb=bool(_config_get(config, "enable_wandb", False)),
         )
-        fingerprint_task = resolve_msg_probe_fingerprint(config)
+        fingerprint_task = "maccs"
         for variant in variants:
             prefix = f"msg_probe/{variant}"
             epoch_key = f"{prefix}/epoch"
