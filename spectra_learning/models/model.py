@@ -27,9 +27,6 @@ class PeakSetJEPA(
     predictor_dim: int
     predictor_pair_dim: int
     pairmixer_block_type: str
-    pairmixer_triangle_mediator_num_mediators: int
-    pairmixer_triangle_mediator_eps: float
-    pairmixer_induced_triangle_num_mediators: int
     teacher_pair_dim: int
     encoder_num_layers: int
     norm_eps: float

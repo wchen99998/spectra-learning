@@ -13,11 +13,6 @@ from spectra_learning.models.common_jax import (
     merge_visible_mask,
     should_activation_checkpoint,
 )
-from spectra_learning.models.induced_pair_jax import (
-    InducedPairBlock,
-    InducedPairState,
-    TokenInducingAssignment,
-)
 from spectra_learning.models.pairmixer_jax import PairFeatureEmbedder, PairMixerBlock
 from spectra_learning.models.peak_features_jax import PeakFeatureEmbedder
 
@@ -42,10 +37,6 @@ class PeakSetEncoder(nnx.Module):
         use_position_embedding: bool = True,
         pairmixer_block_type: str = "dense",
         pair_dim: int | None = None,
-        induced_pair_num_inducing: int = 8,
-        pairmixer_triangle_mediator_num_mediators: int = 8,
-        pairmixer_triangle_mediator_eps: float = 1e-4,
-        pairmixer_induced_triangle_num_mediators: int = 8,
         pair_feature_hidden_dim: int = 128,
         pairmixer_dropout: float = 0.0,
         pairmixer_mz_scale: float = 1000.0,
@@ -66,10 +57,9 @@ class PeakSetEncoder(nnx.Module):
         self.num_layers = num_layers
         self.use_position_embedding = use_position_embedding
         self.pairmixer_block_type = pairmixer_block_type.lower()
-        self.use_induced_pair = self.pairmixer_block_type == "induced"
+        if self.pairmixer_block_type not in {"dense", "bi-dense"}:
+            raise ValueError("pairmixer_block_type must be one of ('dense', 'bi-dense')")
         self.use_bi_dense = self.pairmixer_block_type == "bi-dense"
-        self.use_triangle_mediator = self.pairmixer_block_type == "triangle_mediator"
-        self.use_induced_triangle = self.pairmixer_block_type == "induced_triangle"
         self.activation_checkpoint_mode = activation_checkpoint_mode.lower()
         self.activation_checkpoint_every_n_layers = activation_checkpoint_every_n_layers
         self.activation_checkpoint_modules = activation_checkpoint_modules
@@ -77,25 +67,6 @@ class PeakSetEncoder(nnx.Module):
         self.position_embedding = build_frozen_position_embedding(num_peaks, model_dim)
         pair_dim = model_dim if pair_dim is None else pair_dim
         self.cls_token = _normal_token_param(rngs, (model_dim,))
-        if self.use_induced_pair:
-            self.inducing_token = _normal_token_param(
-                rngs,
-                (induced_pair_num_inducing, model_dim),
-            )
-            self.latent_pair_token = _normal_token_param(
-                rngs,
-                (induced_pair_num_inducing, induced_pair_num_inducing, pair_dim),
-            )
-            self.initial_left_assignment = TokenInducingAssignment(
-                model_dim,
-                compute_dtype=compute_dtype,
-                rngs=rngs,
-            )
-            self.initial_right_assignment = TokenInducingAssignment(
-                model_dim,
-                compute_dtype=compute_dtype,
-                rngs=rngs,
-            )
         self.cls_to_peak_pair_token = _normal_token_param(rngs, (pair_dim,))
         self.peak_to_cls_pair_token = _normal_token_param(rngs, (pair_dim,))
         self.cls_cls_pair_token = _normal_token_param(rngs, (pair_dim,))
@@ -116,40 +87,17 @@ class PeakSetEncoder(nnx.Module):
         )
         blocks = []
         for _ in range(num_layers):
-            if self.use_induced_pair:
-                block = InducedPairBlock(
-                    single_dim=model_dim,
-                    pair_dim=pair_dim,
-                    num_heads=num_heads,
-                    attention_mlp_multiple=attention_mlp_multiple,
-                    norm_eps=norm_eps,
-                    dropout=pairmixer_dropout,
-                    compute_dtype=compute_dtype,
-                    rngs=rngs,
-                )
-            else:
-                block = PairMixerBlock(
-                    single_dim=model_dim,
-                    pair_dim=pair_dim,
-                    num_heads=num_heads,
-                    attention_mlp_multiple=attention_mlp_multiple,
-                    norm_eps=norm_eps,
-                    dropout=pairmixer_dropout,
-                    triangle_mediator_num_mediators=(
-                        pairmixer_triangle_mediator_num_mediators
-                        if self.use_triangle_mediator
-                        else None
-                    ),
-                    triangle_mediator_eps=pairmixer_triangle_mediator_eps,
-                    induced_triangle_num_mediators=(
-                        pairmixer_induced_triangle_num_mediators
-                        if self.use_induced_triangle
-                        else None
-                    ),
-                    use_single_to_pair_update=self.use_bi_dense,
-                    compute_dtype=compute_dtype,
-                    rngs=rngs,
-                )
+            block = PairMixerBlock(
+                single_dim=model_dim,
+                pair_dim=pair_dim,
+                num_heads=num_heads,
+                attention_mlp_multiple=attention_mlp_multiple,
+                norm_eps=norm_eps,
+                dropout=pairmixer_dropout,
+                use_single_to_pair_update=self.use_bi_dense,
+                compute_dtype=compute_dtype,
+                rngs=rngs,
+            )
             blocks.append(block)
         self.blocks = nnx.List(blocks)
         self.final_norm = (
@@ -198,128 +146,6 @@ class PeakSetEncoder(nnx.Module):
         cls_mask = jnp.ones_like(peak_mask[:, :1])
         return jnp.concatenate([peak_mask, cls_mask], axis=1)
 
-    def _initial_inducing_tokens(self, x: Array) -> Array:
-        batch_size = x.shape[0]
-        return jnp.broadcast_to(
-            self.inducing_token[...].astype(x.dtype),
-            (batch_size, self.inducing_token[...].shape[0], self.inducing_token[...].shape[1]),
-        )
-
-    def _compress_induced_pair(
-        self,
-        pair: Array,
-        left_assignment: Array,
-        right_assignment: Array,
-        token_visible_mask: Array,
-    ) -> Array:
-        pair_mask = token_visible_mask[:, :, None] & token_visible_mask[:, None, :]
-        pair_mask_f = pair_mask[..., None].astype(pair.dtype)
-        latent_pair = jnp.einsum(
-            "bia,bijp,bjc->bacp",
-            left_assignment,
-            pair * pair_mask_f,
-            right_assignment,
-        )
-        denom = jnp.einsum(
-            "bia,bij,bjc->bac",
-            left_assignment,
-            pair_mask.astype(left_assignment.dtype),
-            right_assignment,
-        )
-        denom = jnp.maximum(denom, jnp.asarray(1e-6, dtype=denom.dtype))
-        return latent_pair / denom[..., None].astype(latent_pair.dtype)
-
-    def _initial_induced_pair_state(
-        self,
-        x: Array,
-        dense_pair: Array,
-        token_visible_mask: Array,
-    ) -> InducedPairState:
-        inducing = self._initial_inducing_tokens(x)
-        left_assignment = self.initial_left_assignment(x, inducing)
-        right_assignment = self.initial_right_assignment(x, inducing)
-        token_mask_f = token_visible_mask[..., None].astype(left_assignment.dtype)
-        left_assignment = left_assignment * token_mask_f
-        right_assignment = right_assignment * token_mask_f.astype(right_assignment.dtype)
-        pair = self._compress_induced_pair(
-            dense_pair,
-            left_assignment,
-            right_assignment,
-            token_visible_mask,
-        )
-        latent_pair_token = jnp.broadcast_to(
-            self.latent_pair_token[...].astype(pair.dtype),
-            (
-                pair.shape[0],
-                self.latent_pair_token[...].shape[0],
-                self.latent_pair_token[...].shape[1],
-                self.latent_pair_token[...].shape[2],
-            ),
-        )
-        pair = pair + latent_pair_token
-        assignment = 0.5 * (left_assignment + right_assignment)
-        return InducedPairState(inducing, pair, assignment)
-
-    def _forward_with_induced_pair(
-        self,
-        peak_mz: Array,
-        peak_intensity: Array,
-        *,
-        valid_mask: Array | None = None,
-        visible_mask: Array | None = None,
-        precursor_mz: Array | None = None,
-        deterministic: bool = True,
-    ) -> tuple[Array, InducedPairState]:
-        peak_valid_mask = (
-            jnp.ones_like(peak_mz, dtype=jnp.bool_) if valid_mask is None else valid_mask
-        )
-        peak_visible_mask = merge_visible_mask(peak_valid_mask, visible_mask)
-        if peak_visible_mask is None:
-            peak_visible_mask = peak_valid_mask
-        x = self._add_positions(self.embedder(peak_mz, peak_intensity))
-        z = self.pair_embedder(
-            peak_mz,
-            peak_intensity,
-            x,
-            peak_visible_mask,
-            precursor_mz=precursor_mz,
-        )
-        x = self._append_cls_token(x)
-        z = self._append_cls_pair_tokens(z)
-        token_visible_mask = self._append_cls_mask(peak_visible_mask)
-        state = self._initial_induced_pair_state(x, z, token_visible_mask)
-        for block_idx, block in enumerate(self.blocks, start=1):
-            if should_activation_checkpoint(
-                mode=self.activation_checkpoint_mode,
-                modules=self.activation_checkpoint_modules,
-                module="encoder",
-                block_idx=block_idx,
-                every_n=self.activation_checkpoint_every_n_layers,
-            ):
-                x, state = nnx.remat(
-                    _call_pair_mixer_block,
-                    policy=activation_checkpoint_policy(
-                        self.activation_checkpoint_mode
-                    ),
-                )(block, x, state, token_visible_mask, token_visible_mask)
-            else:
-                x, state = block(
-                    x,
-                    state,
-                    token_visible_mask,
-                    token_visible_mask,
-                    deterministic=deterministic,
-                )
-        if self.final_norm is not None:
-            x = self.final_norm(x)
-        pair = state.pair
-        if self.final_pair_norm is not None:
-            pair = self.final_pair_norm(pair)
-        assignment = state.assignment * token_visible_mask[..., None].astype(
-            state.assignment.dtype
-        )
-        return x, InducedPairState(state.inducing, pair, assignment)
-
     def forward_with_pair(
         self,
         peak_mz: Array,
@@ -329,16 +155,7 @@ class PeakSetEncoder(nnx.Module):
         visible_mask: Array | None = None,
         precursor_mz: Array | None = None,
         deterministic: bool = True,
-    ) -> tuple[Array, Array | InducedPairState]:
-        if self.use_induced_pair:
-            return self._forward_with_induced_pair(
-                peak_mz,
-                peak_intensity,
-                valid_mask=valid_mask,
-                visible_mask=visible_mask,
-                precursor_mz=precursor_mz,
-                deterministic=deterministic,
-            )
+    ) -> tuple[Array, Array]:
         peak_valid_mask = (
             jnp.ones_like(peak_mz, dtype=jnp.bool_) if valid_mask is None else valid_mask
         )
@@ -415,20 +232,6 @@ class PeakSetEncoder(nnx.Module):
             state_dict,
             f"{prefix}.position_embedding",
         )
-        if self.use_induced_pair:
-            assign_param(self.inducing_token, state_dict[f"{prefix}.inducing_token"])
-            assign_param(
-                self.latent_pair_token,
-                state_dict[f"{prefix}.latent_pair_token"],
-            )
-            self.initial_left_assignment.load_torch_state_dict(
-                state_dict,
-                f"{prefix}.initial_left_assignment",
-            )
-            self.initial_right_assignment.load_torch_state_dict(
-                state_dict,
-                f"{prefix}.initial_right_assignment",
-            )
         assign_param(
             self.cls_to_peak_pair_token,
             state_dict[f"{prefix}.cls_to_peak_pair_token"],

@@ -24,18 +24,6 @@ from spectra_learning.models.common_jax import (
     should_activation_checkpoint,
 )
 from spectra_learning.models.encoder_jax import PeakSetEncoder
-from spectra_learning.models.induced_pair_jax import (
-    InducedPairBlock,
-    InducedPairState,
-    induced_pair_batch_slice,
-    induced_pair_distogram_logits,
-    induced_pair_expand_views,
-    induced_pair_flatten_views,
-    induced_pair_slice_tokens,
-    induced_pair_to_dense_pair,
-    induced_pair_unflatten_views,
-    mask_induced_pair_assignment,
-)
 from spectra_learning.models.pairmixer_jax import PairMixerBlock
 from spectra_learning.models.peak_features_jax import PeakFeatureEmbedder
 from spectra_learning.models.settings import PeakSetJEPASettings
@@ -89,21 +77,11 @@ class PeakSetJEPAJax(nnx.Module):
         if self.pairmixer_block_type not in {
             "dense",
             "bi-dense",
-            "induced",
-            "triangle_mediator",
-            "induced_triangle",
         }:
             raise ValueError(
                 "pairmixer_block_type must be one of "
-                "('dense', 'bi-dense', 'induced', 'triangle_mediator', 'induced_triangle')"
+                "('dense', 'bi-dense')"
             )
-        self.pairmixer_triangle_mediator_num_mediators = (
-            cfg.pairmixer_triangle_mediator_num_mediators
-        )
-        self.pairmixer_triangle_mediator_eps = cfg.pairmixer_triangle_mediator_eps
-        self.pairmixer_induced_triangle_num_mediators = (
-            cfg.pairmixer_induced_triangle_num_mediators
-        )
         self.encoder_num_layers = cfg.encoder_num_layers
         self.norm_eps = cfg.norm_eps
         self.jepa_num_target_blocks = cfg.jepa_num_target_blocks
@@ -216,40 +194,17 @@ class PeakSetJEPAJax(nnx.Module):
         )
         predictor_blocks = []
         for _ in range(cfg.masked_latent_predictor_num_layers):
-            if self.pairmixer_block_type == "induced":
-                block = InducedPairBlock(
-                    single_dim=self.predictor_dim,
-                    pair_dim=self.predictor_pair_dim,
-                    num_heads=cfg.masked_latent_predictor_num_heads,
-                    attention_mlp_multiple=cfg.attention_mlp_multiple,
-                    norm_eps=self.norm_eps,
-                    dropout=cfg.predictor_dropout,
-                    compute_dtype=self.compute_dtype,
-                    rngs=rngs,
-                )
-            else:
-                block = PairMixerBlock(
-                    single_dim=self.predictor_dim,
-                    pair_dim=self.predictor_pair_dim,
-                    num_heads=cfg.masked_latent_predictor_num_heads,
-                    attention_mlp_multiple=cfg.attention_mlp_multiple,
-                    norm_eps=self.norm_eps,
-                    dropout=cfg.predictor_dropout,
-                    triangle_mediator_num_mediators=(
-                        self.pairmixer_triangle_mediator_num_mediators
-                        if self.pairmixer_block_type == "triangle_mediator"
-                        else None
-                    ),
-                    triangle_mediator_eps=self.pairmixer_triangle_mediator_eps,
-                    induced_triangle_num_mediators=(
-                        self.pairmixer_induced_triangle_num_mediators
-                        if self.pairmixer_block_type == "induced_triangle"
-                        else None
-                    ),
-                    use_single_to_pair_update=self.pairmixer_block_type == "bi-dense",
-                    compute_dtype=self.compute_dtype,
-                    rngs=rngs,
-                )
+            block = PairMixerBlock(
+                single_dim=self.predictor_dim,
+                pair_dim=self.predictor_pair_dim,
+                num_heads=cfg.masked_latent_predictor_num_heads,
+                attention_mlp_multiple=cfg.attention_mlp_multiple,
+                norm_eps=self.norm_eps,
+                dropout=cfg.predictor_dropout,
+                use_single_to_pair_update=self.pairmixer_block_type == "bi-dense",
+                compute_dtype=self.compute_dtype,
+                rngs=rngs,
+            )
             predictor_blocks.append(block)
         self.masked_latent_predictor = nnx.List(predictor_blocks)
         self.predictor_final_norm = (
@@ -352,14 +307,6 @@ class PeakSetJEPAJax(nnx.Module):
             num_peaks=cfg.num_peaks,
             pairmixer_block_type=self.pairmixer_block_type,
             pair_dim=cfg.pairmixer_pair_dim,
-            induced_pair_num_inducing=cfg.induced_pair_num_inducing,
-            pairmixer_triangle_mediator_num_mediators=(
-                cfg.pairmixer_triangle_mediator_num_mediators
-            ),
-            pairmixer_triangle_mediator_eps=cfg.pairmixer_triangle_mediator_eps,
-            pairmixer_induced_triangle_num_mediators=(
-                cfg.pairmixer_induced_triangle_num_mediators
-            ),
             pair_feature_hidden_dim=cfg.pairmixer_pair_feature_hidden_dim,
             pairmixer_dropout=cfg.pairmixer_dropout,
             pairmixer_mz_scale=cfg.pairmixer_mz_scale,
@@ -694,27 +641,6 @@ class PeakSetJEPAJax(nnx.Module):
         )
 
         num_tokens = num_peaks + 1
-        if isinstance(packed_pair, InducedPairState):
-            full_assignment = jnp.zeros(
-                (batch_size, num_peaks + 1, packed_pair.assignment.shape[-1]),
-                dtype=packed_pair.assignment.dtype,
-            )
-            full_assignment = full_assignment.at[
-                batch_indices[:, None],
-                packed_indices,
-            ].add(
-                packed_pair.assignment[:, :pack_tokens]
-                * packed_mask[..., None].astype(packed_pair.assignment.dtype)
-            )
-            full_assignment = full_assignment.at[:, num_peaks].set(
-                packed_pair.assignment[:, pack_tokens]
-            )
-            return context_encoded, InducedPairState(
-                packed_pair.inducing,
-                packed_pair.pair,
-                full_assignment,
-            )
-
         pair_dim = packed_pair.shape[-1]
         full_pair = jnp.zeros(
             (batch_size, num_tokens, num_tokens, pair_dim),
@@ -749,9 +675,7 @@ class PeakSetJEPAJax(nnx.Module):
         positions = jnp.arange(x.shape[1])
         return x + self.predictor_position_embedding(positions).astype(x.dtype)
 
-    def _add_predictor_pair_positions(self, pair: Array | InducedPairState) -> Array | InducedPairState:
-        if isinstance(pair, InducedPairState):
-            return pair
+    def _add_predictor_pair_positions(self, pair: Array) -> Array:
         num_tokens = pair.shape[1]
         positions = jnp.arange(num_tokens * num_tokens)
         encoding = self.predictor_pair_position_embedding(positions)
@@ -761,9 +685,9 @@ class PeakSetJEPAJax(nnx.Module):
     def _predict_masked_latents_and_pair(
         self,
         x: Array,
-        pair: Array | InducedPairState,
+        pair: Array,
         visible_mask: Array,
-    ) -> tuple[Array, Array | InducedPairState]:
+    ) -> tuple[Array, Array]:
         x = self._add_predictor_positions(x)
         x = self.encoder_to_predictor_proj(x)
         pair = self._add_predictor_pair_positions(pair)
@@ -785,9 +709,6 @@ class PeakSetJEPAJax(nnx.Module):
                 x, pair = block(x, pair, visible_mask, visible_mask)
         if self.predictor_final_norm is not None:
             x = self.predictor_final_norm(x)
-        if isinstance(pair, InducedPairState):
-            pair = mask_induced_pair_assignment(pair, visible_mask)
-            return x, pair
         pair_visible_mask = visible_mask[:, :, None] & visible_mask[:, None, :]
         pair = pair * pair_visible_mask[..., None].astype(pair.dtype)
         return x, pair
@@ -795,9 +716,9 @@ class PeakSetJEPAJax(nnx.Module):
     def predict_masked_target_features_with_pair(
         self,
         x: Array,
-        pair: Array | InducedPairState,
+        pair: Array,
         visible_mask: Array,
-    ) -> tuple[Array, Array | InducedPairState]:
+    ) -> tuple[Array, Array]:
         x, pair = self._predict_masked_latents_and_pair(x, pair, visible_mask)
         return self.masked_latent_readout(x), pair
 
@@ -888,11 +809,7 @@ class PeakSetJEPAJax(nnx.Module):
             return (
                 teacher_encoded[:, : peak_mz.shape[1]],
                 teacher_encoded,
-                (
-                    induced_pair_slice_tokens(teacher_pair, peak_mz.shape[1])
-                    if isinstance(teacher_pair, InducedPairState)
-                    else teacher_pair[:, : peak_mz.shape[1], : peak_mz.shape[1]]
-                ),
+                teacher_pair[:, : peak_mz.shape[1], : peak_mz.shape[1]],
                 context_encoded,
                 context_pair,
             )
@@ -910,20 +827,9 @@ class PeakSetJEPAJax(nnx.Module):
         return (
             encoded[:batch_size, : peak_mz.shape[1]],
             encoded[:batch_size],
-            (
-                induced_pair_slice_tokens(
-                    induced_pair_batch_slice(pair, slice(0, batch_size)),
-                    peak_mz.shape[1],
-                )
-                if isinstance(pair, InducedPairState)
-                else pair[:batch_size, : peak_mz.shape[1], : peak_mz.shape[1]]
-            ),
+            pair[:batch_size, : peak_mz.shape[1], : peak_mz.shape[1]],
             encoded[batch_size:],
-            (
-                induced_pair_batch_slice(pair, slice(batch_size, None))
-                if isinstance(pair, InducedPairState)
-                else pair[batch_size:]
-            ),
+            pair[batch_size:],
         )
 
     def _predict_augmented_target_outputs(
@@ -971,40 +877,6 @@ class PeakSetJEPAJax(nnx.Module):
             ],
             axis=2,
         )
-        if isinstance(context_pair, InducedPairState):
-            flat_visible_mask = predictor_visible_mask.reshape(
-                batch_size * num_target_blocks,
-                num_peaks + 1,
-            )
-            flat_predictor_input = predictor_input.reshape(
-                batch_size * num_target_blocks,
-                predictor_input.shape[2],
-                predictor_input.shape[-1],
-            )
-            flat_predictor_pair = induced_pair_flatten_views(
-                induced_pair_expand_views(context_pair, num_target_blocks)
-            )
-            predictor_features, predictor_pair = self.predict_masked_target_features_with_pair(
-                flat_predictor_input,
-                flat_predictor_pair,
-                flat_visible_mask,
-            )
-            predictor_features = predictor_features.reshape(
-                batch_size,
-                num_target_blocks,
-                predictor_input.shape[2],
-                -1,
-            )[:, :, :num_peaks]
-            predictor_pair = induced_pair_slice_tokens(
-                induced_pair_unflatten_views(
-                    predictor_pair,
-                    batch_size,
-                    num_target_blocks,
-                ),
-                num_peaks,
-            )
-            predictor_output = self.project_targets(predictor_features)
-            return predictor_features, predictor_output, predictor_pair
         predictor_pair = jnp.broadcast_to(
             context_pair[:, None],
             (
@@ -1244,11 +1116,8 @@ class PeakSetJEPAJax(nnx.Module):
             return reference.reshape(-1)[0] * 0.0, {}
         assert self.distogram_head is not None
         pair_mask = self._target_pair_mask(target_masks, predictor_visible_masks)
-        if isinstance(predictor_pair, InducedPairState):
-            logits = induced_pair_distogram_logits(predictor_pair, self.distogram_head)
-        else:
-            sym_pair = predictor_pair + jnp.swapaxes(predictor_pair, 2, 3)
-            logits = self.distogram_head(sym_pair)
+        sym_pair = predictor_pair + jnp.swapaxes(predictor_pair, 2, 3)
+        logits = self.distogram_head(sym_pair)
         targets = jnp.broadcast_to(
             self._distogram_targets(peak_mz)[:, None],
             logits.shape[:-1],
@@ -1270,10 +1139,6 @@ class PeakSetJEPAJax(nnx.Module):
         if self.latent_pair_loss_weight <= 0:
             return reference.reshape(-1)[0] * 0.0, {}
         pair_mask = self._target_pair_mask(target_masks, predictor_visible_masks)
-        if isinstance(predictor_pair, InducedPairState):
-            predictor_pair = induced_pair_to_dense_pair(predictor_pair)
-        if isinstance(teacher_pair, InducedPairState):
-            teacher_pair = induced_pair_to_dense_pair(teacher_pair)
         predicted_pair = self.masked_pair_readout(predictor_pair)
         teacher_pair_targets = jax.lax.stop_gradient(teacher_pair)
         if self.latent_pair_target_normalization == "layernorm":

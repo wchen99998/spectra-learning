@@ -165,8 +165,8 @@ def test_build_task_sets_flex_start_max_run_duration():
 
 def test_default_cluster_name_uses_run_id():
     assert (
-        train_sky.default_cluster_name("16-induced-pair-48-peaks-test-run")
-        == "spectra-16-induced-pair-48-peaks-test-run"
+        train_sky.default_cluster_name("16-pair-48-peaks-test-run")
+        == "spectra-16-pair-48-peaks-test-run"
     )
 
 

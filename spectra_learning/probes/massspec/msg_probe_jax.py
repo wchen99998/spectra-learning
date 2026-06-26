@@ -20,7 +20,6 @@ from spectra_learning.config.msg_probe import validate_msg_probe_config
 from spectra_learning.data.loading import local_batch_size
 from spectra_learning.data.massspec_probe import MassSpecProbeData
 from spectra_learning.models.common_jax import Array
-from spectra_learning.models.induced_pair_jax import InducedPairState
 from spectra_learning.models.model_jax import PeakSetJEPAJax
 from spectra_learning.probes.massspec.msg_settings import (
     BINARY_PROBE_TASKS,
@@ -1593,8 +1592,6 @@ def _extract_pair_features_jitted(
         valid_mask=peak_valid_mask,
         precursor_mz=precursor_mz,
     )
-    if isinstance(pair, InducedPairState):
-        pair = pair.pair
     return single, pair
 
 

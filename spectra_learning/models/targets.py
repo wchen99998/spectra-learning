@@ -7,12 +7,6 @@ from jaxtyping import Bool, Float
 from torch import Tensor
 
 from spectra_learning.models.common import _active_autocast_context
-from spectra_learning.models.induced_pair import (
-    InducedPairState,
-    induced_pair_batch_slice,
-    induced_pair_slice_tokens,
-    mask_induced_pair_assignment,
-)
 
 
 class TargetProjectionMixin:
@@ -46,10 +40,8 @@ class TargetProjectionMixin:
 
     def _add_predictor_pair_positions(
         self: Any,
-        pair: Float[Tensor, "batch tokens tokens pair"] | InducedPairState,
-    ) -> Float[Tensor, "batch tokens tokens pair"] | InducedPairState:
-        if isinstance(pair, InducedPairState):
-            return pair
+        pair: Float[Tensor, "batch tokens tokens pair"],
+    ) -> Float[Tensor, "batch tokens tokens pair"]:
         num_tokens = pair.shape[1]
         positions = torch.arange(num_tokens * num_tokens, device=pair.device)
         position_encoding = self.predictor_pair_position_embedding(positions)
@@ -72,25 +64,15 @@ class TargetProjectionMixin:
     def _predict_masked_latents_and_pair(
         self: Any,
         x: Float[Tensor, "batch tokens dim"],
-        pair: Float[Tensor, "batch tokens tokens pair"] | InducedPairState,
+        pair: Float[Tensor, "batch tokens tokens pair"],
         visible_mask: Bool[Tensor, "batch tokens"],
     ) -> tuple[
         Float[Tensor, "batch tokens dim"],
-        Float[Tensor, "batch tokens tokens pair"] | InducedPairState,
+        Float[Tensor, "batch tokens tokens pair"],
     ]:
         x = self._add_predictor_positions(x)
         x = self.encoder_to_predictor_proj(x)
         pair = self._add_predictor_pair_positions(pair)
-        if isinstance(pair, InducedPairState):
-            for block in self.masked_latent_predictor:
-                x, pair = block(
-                    x,
-                    pair,
-                    visible_mask,
-                    visible_mask,
-                )
-            x = self.predictor_final_norm(x)
-            return x, mask_induced_pair_assignment(pair, visible_mask)
         if len(self.masked_latent_predictor) > 0:
             for block in self.masked_latent_predictor:
                 x, pair = block(
@@ -138,11 +120,11 @@ class TargetProjectionMixin:
     def predict_masked_target_features_with_pair(
         self: Any,
         x: Float[Tensor, "batch tokens dim"],
-        pair: Float[Tensor, "batch tokens tokens pair"] | InducedPairState,
+        pair: Float[Tensor, "batch tokens tokens pair"],
         visible_mask: Bool[Tensor, "batch tokens"],
     ) -> tuple[
         Float[Tensor, "batch tokens target_dim"],
-        Float[Tensor, "batch tokens tokens pair"] | InducedPairState,
+        Float[Tensor, "batch tokens tokens pair"],
     ]:
         x, pair = self._predict_masked_latents_and_pair(
             x,
@@ -248,9 +230,9 @@ class TargetProjectionMixin:
     ) -> tuple[
         Float[Tensor, "batch peaks target_dim"],
         Float[Tensor, "batch tokens dim"],
-        Float[Tensor, "batch peaks peaks pair"] | InducedPairState,
+        Float[Tensor, "batch peaks peaks pair"],
         Float[Tensor, "batch tokens dim"],
-        Float[Tensor, "batch tokens tokens pair"] | InducedPairState,
+        Float[Tensor, "batch tokens tokens pair"],
     ]:
         batch_size = peak_mz.shape[0]
         context_mz, context_intensity, context_visible_mask = self._context_encoder_inputs(
@@ -278,11 +260,7 @@ class TargetProjectionMixin:
             return (
                 teacher_encoded[:, : peak_mz.shape[1]],
                 teacher_encoded,
-                (
-                    induced_pair_slice_tokens(teacher_pair, peak_mz.shape[1])
-                    if isinstance(teacher_pair, InducedPairState)
-                    else teacher_pair[:, : peak_mz.shape[1], : peak_mz.shape[1]]
-                ),
+                teacher_pair[:, : peak_mz.shape[1], : peak_mz.shape[1]],
                 context_encoded,
                 context_pair,
             )
@@ -300,20 +278,9 @@ class TargetProjectionMixin:
         return (
             encoded[:batch_size, : peak_mz.shape[1]],
             encoded[:batch_size],
-            (
-                induced_pair_slice_tokens(
-                    induced_pair_batch_slice(pair, slice(0, batch_size)),
-                    peak_mz.shape[1],
-                )
-                if isinstance(pair, InducedPairState)
-                else pair[:batch_size, : peak_mz.shape[1], : peak_mz.shape[1]]
-            ),
+            pair[:batch_size, : peak_mz.shape[1], : peak_mz.shape[1]],
             encoded[batch_size:],
-            (
-                induced_pair_batch_slice(pair, slice(batch_size, None))
-                if isinstance(pair, InducedPairState)
-                else pair[batch_size:]
-            ),
+            pair[batch_size:],
         )
 
     def _compute_pooled_teacher_peak_targets(
