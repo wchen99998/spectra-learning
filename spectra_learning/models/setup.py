@@ -30,6 +30,7 @@ SUPPORTED_MASKED_TOKEN_INPUT_MODES = {"latent_token", "mz_sentinel"}
 SUPPORTED_PAIRMIXER_BLOCK_TYPES = {
     "dense",
     "bi-dense",
+    "fastmixer",
 }
 
 
@@ -73,7 +74,7 @@ def _configure_dimensions(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
     if model.pairmixer_block_type not in SUPPORTED_PAIRMIXER_BLOCK_TYPES:
         raise ValueError(
             "pairmixer_block_type must be one of "
-            "('dense', 'bi-dense')"
+            "('dense', 'bi-dense', 'fastmixer')"
         )
     model.encoder_num_layers = cfg.encoder_num_layers
     model.norm_eps = cfg.norm_eps
@@ -285,7 +286,9 @@ def _build_predictor(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
             attention_mlp_multiple=cfg.attention_mlp_multiple,
             norm_eps=model.norm_eps,
             dropout=cfg.predictor_dropout,
-            use_single_to_pair_update=model.pairmixer_block_type == "bi-dense",
+            use_single_to_pair_update=(
+                model.pairmixer_block_type in {"bi-dense", "fastmixer"}
+            ),
         )
         predictor_blocks.append(block)
     model.masked_latent_predictor = nn.ModuleList(predictor_blocks)

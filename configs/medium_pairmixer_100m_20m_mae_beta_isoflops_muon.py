@@ -41,9 +41,13 @@ def get_config() -> config_dict.ConfigDict:
     # cfg.mae_context_encoder_pack_token_choices = (20,)
     cfg.pairmixer_pair_dim = 256
     cfg.pairmixer_pair_feature_hidden_dim = 512
-    cfg.jepa_intensity_aware_context_fraction = 0.35
+    cfg.jepa_mask_strategy = ["random"]
+    cfg.jepa_context_fraction = 0.35
+    cfg.jepa_target_fraction = 0.25
     cfg.peak_filtering = "grouped"
-    cfg.pairmixer_block_type = "bi-dense"
+    cfg.pairmixer_block_type = "FastMixer"
+    # round(31 * 0.35) context + round(31 * 0.25) target + 1 CLS.
+    cfg.pairmixer_fast_max_visible_tokens = 20
     cfg.num_peaks = 31
     cfg.num_epochs = 20
     cfg.dataloader_num_workers = 32

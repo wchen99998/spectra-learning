@@ -47,6 +47,7 @@ class PeakSetEncoder(nnx.Module):
         pairmixer_fourier_x_max: float = 1000.0,
         pairmixer_relative_fourier_x_min: float = 1e-3,
         pairmixer_relative_fourier_x_max: float = 1.0,
+        pairmixer_fast_max_visible_tokens: int | None = None,
         activation_checkpoint_mode: str = "none",
         activation_checkpoint_every_n_layers: int = 1,
         activation_checkpoint_modules: tuple[str, ...] = ("encoder", "predictor"),
@@ -57,9 +58,14 @@ class PeakSetEncoder(nnx.Module):
         self.num_layers = num_layers
         self.use_position_embedding = use_position_embedding
         self.pairmixer_block_type = pairmixer_block_type.lower()
-        if self.pairmixer_block_type not in {"dense", "bi-dense"}:
-            raise ValueError("pairmixer_block_type must be one of ('dense', 'bi-dense')")
-        self.use_bi_dense = self.pairmixer_block_type == "bi-dense"
+        if self.pairmixer_block_type not in {"dense", "bi-dense", "fastmixer"}:
+            raise ValueError(
+                "pairmixer_block_type must be one of "
+                "('dense', 'bi-dense', 'fastmixer')"
+            )
+        self.use_bi_dense = self.pairmixer_block_type in {"bi-dense", "fastmixer"}
+        self.use_fastmixer = self.pairmixer_block_type == "fastmixer"
+        self.pairmixer_fast_max_visible_tokens = pairmixer_fast_max_visible_tokens
         self.activation_checkpoint_mode = activation_checkpoint_mode.lower()
         self.activation_checkpoint_every_n_layers = activation_checkpoint_every_n_layers
         self.activation_checkpoint_modules = activation_checkpoint_modules
@@ -95,6 +101,8 @@ class PeakSetEncoder(nnx.Module):
                 norm_eps=norm_eps,
                 dropout=pairmixer_dropout,
                 use_single_to_pair_update=self.use_bi_dense,
+                use_fastmixer=self.use_fastmixer,
+                fastmixer_max_visible_tokens=self.pairmixer_fast_max_visible_tokens,
                 compute_dtype=compute_dtype,
                 rngs=rngs,
             )

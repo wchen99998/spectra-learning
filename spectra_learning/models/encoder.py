@@ -42,9 +42,12 @@ class PeakSetEncoder(nn.Module):
         self.num_layers = num_layers
         self.use_position_embedding = use_position_embedding
         self.pairmixer_block_type = pairmixer_block_type.lower()
-        if self.pairmixer_block_type not in {"dense", "bi-dense"}:
-            raise ValueError("pairmixer_block_type must be one of ('dense', 'bi-dense')")
-        self.use_bi_dense = self.pairmixer_block_type == "bi-dense"
+        if self.pairmixer_block_type not in {"dense", "bi-dense", "fastmixer"}:
+            raise ValueError(
+                "pairmixer_block_type must be one of "
+                "('dense', 'bi-dense', 'fastmixer')"
+            )
+        self.use_bi_dense = self.pairmixer_block_type in {"bi-dense", "fastmixer"}
         self.embedder = embedder
         self.position_embedding = _build_frozen_position_embedding(
             num_peaks,

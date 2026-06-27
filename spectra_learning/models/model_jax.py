@@ -77,11 +77,14 @@ class PeakSetJEPAJax(nnx.Module):
         if self.pairmixer_block_type not in {
             "dense",
             "bi-dense",
+            "fastmixer",
         }:
             raise ValueError(
                 "pairmixer_block_type must be one of "
-                "('dense', 'bi-dense')"
+                "('dense', 'bi-dense', 'fastmixer')"
             )
+        self.use_fastmixer = self.pairmixer_block_type == "fastmixer"
+        self.pairmixer_fast_max_visible_tokens = cfg.pairmixer_fast_max_visible_tokens
         self.encoder_num_layers = cfg.encoder_num_layers
         self.norm_eps = cfg.norm_eps
         self.jepa_num_target_blocks = cfg.jepa_num_target_blocks
@@ -201,7 +204,11 @@ class PeakSetJEPAJax(nnx.Module):
                 attention_mlp_multiple=cfg.attention_mlp_multiple,
                 norm_eps=self.norm_eps,
                 dropout=cfg.predictor_dropout,
-                use_single_to_pair_update=self.pairmixer_block_type == "bi-dense",
+                use_single_to_pair_update=(
+                    self.pairmixer_block_type in {"bi-dense", "fastmixer"}
+                ),
+                use_fastmixer=self.use_fastmixer,
+                fastmixer_max_visible_tokens=self.pairmixer_fast_max_visible_tokens,
                 compute_dtype=self.compute_dtype,
                 rngs=rngs,
             )
@@ -317,6 +324,7 @@ class PeakSetJEPAJax(nnx.Module):
             pairmixer_fourier_x_max=cfg.pairmixer_fourier_x_max,
             pairmixer_relative_fourier_x_min=cfg.pairmixer_relative_fourier_x_min,
             pairmixer_relative_fourier_x_max=cfg.pairmixer_relative_fourier_x_max,
+            pairmixer_fast_max_visible_tokens=cfg.pairmixer_fast_max_visible_tokens,
             activation_checkpoint_mode=cfg.activation_checkpoint_mode,
             activation_checkpoint_every_n_layers=(
                 cfg.activation_checkpoint_every_n_layers
