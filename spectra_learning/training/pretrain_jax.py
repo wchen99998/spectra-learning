@@ -20,7 +20,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from ml_collections import config_dict
 from tqdm import tqdm
 
-from spectra_learning.data.gems.datamodule import GemsNativeDataModule
+from spectra_learning.data.gems.datamodule import GemsDataModule
 from spectra_learning.models.common_jax import Array
 from spectra_learning.models.factory_jax import build_model_from_config
 from spectra_learning.models.model_jax import PeakSetJEPAJax
@@ -846,7 +846,7 @@ def train_and_evaluate_jax(
             _config_get(config, "dataloader_multiprocessing_context", "forkserver")
             or "forkserver"
         )
-    datamodule = GemsNativeDataModule(
+    datamodule = GemsDataModule(
         config,
         seed=int(config.seed),
         distributed_world_size=jax.process_count(),
@@ -929,7 +929,7 @@ def initialize_jax_model_from_torch_seed(
 def _run_jax_training_loop(
     *,
     config: config_dict.ConfigDict,
-    datamodule: GemsNativeDataModule,
+    datamodule: GemsDataModule,
     model: PeakSetJEPAJax,
     logger: MetricLogger,
     total_steps: int,
@@ -1588,7 +1588,7 @@ def _jax_metrics_to_host(
 
 def _evaluate_jax_validation_loss(
     *,
-    datamodule: GemsNativeDataModule,
+    datamodule: GemsDataModule,
     trainable_params: nnx.State,
     static_state: nnx.State,
     eval_step: Any,
@@ -1733,7 +1733,7 @@ def _limit_context_count(
 
 def _total_training_steps(
     config: config_dict.ConfigDict,
-    datamodule: GemsNativeDataModule,
+    datamodule: GemsDataModule,
 ) -> int:
     total_steps = max(1, int(float(config.num_epochs) * datamodule.train_steps))
     training_max_steps = _config_get(config, "training_max_steps", None)

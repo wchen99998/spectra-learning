@@ -11,7 +11,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from spectra_learning.config.loading import load_config
-from spectra_learning.data.gems.datamodule import GemsNativeDataModule
+from spectra_learning.data.gems.datamodule import GemsDataModule
 
 
 def _config_get(config: Any, key: str, default: Any) -> Any:
@@ -29,11 +29,11 @@ def _configure(args: argparse.Namespace, workers: int):
     config.grouped_peak_shoulder_da = args.grouped_peak_shoulder_da
     config.grouped_peak_isotope_charges = tuple(args.grouped_peak_isotope_charges)
     config.dataloader_output_format = "numpy" if args.backend in {"jax", "numpy"} else "torch"
+    if workers > 0:
+        config.dataloader_multiprocessing_context = args.multiprocessing_context
     if args.backend == "jax":
         config.dataloader_pin_memory = False
         config.dataloader_persistent_workers = False
-        if workers > 0:
-            config.dataloader_multiprocessing_context = args.multiprocessing_context
     return config
 
 
@@ -52,7 +52,7 @@ def _run_once(args: argparse.Namespace, workers: int, repeat: int) -> float:
 
         from spectra_learning.training.pretrain_jax import numpy_batch_to_jax
 
-    datamodule = GemsNativeDataModule(config, seed=int(_config_get(config, "seed", 0)) + repeat)
+    datamodule = GemsDataModule(config, seed=int(_config_get(config, "seed", 0)) + repeat)
     loader = datamodule.train_loader_for_epoch(repeat)
     iterator = iter(loader)
     if args.backend == "jax":

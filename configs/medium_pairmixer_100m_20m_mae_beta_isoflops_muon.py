@@ -55,7 +55,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.val_every_n_steps = 10_000
     cfg.val_num_steps = 500
     cfg.run_name_suffix = (
-        "mae-100m-20m-beta-isoflops-250k-bs2048-ga4-muon-matchrms-"
+        "mae-massive100m-20m-beta-isoflops-250k-bs2048-ga4-muon-matchrms-"
         "lr4p24e-4-default-fullctx-selective-probe1x100k-final-val500x10k"
     )
 

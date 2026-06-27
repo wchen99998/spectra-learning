@@ -5,8 +5,8 @@ from spectra_learning.data.gems.conversion import (
     format_batch,
     numpy_batch_to_torch,
 )
-from spectra_learning.data.gems.datamodule import GemsNativeDataModule
-from spectra_learning.data.gems.dataset import GemsMemmapDataset
+from spectra_learning.data.gems.datamodule import GemsDataModule
+from spectra_learning.data.gems.hdf5 import GemsHdf5ShardDataset
 from spectra_learning.data.gems.masking import (
     DEFAULT_JEPA_MASK_LENGTHS,
     DEFAULT_JEPA_MASK_STRATEGY,
@@ -24,8 +24,8 @@ from spectra_learning.data.gems.visualization import visualize_real_mask_strateg
 __all__ = [
     "GemsBatchCollator",
     "GemsDataConfig",
-    "GemsMemmapDataset",
-    "GemsNativeDataModule",
+    "GemsDataModule",
+    "GemsHdf5ShardDataset",
     "batch_to_jax",
     "batch_to_numpy",
     "format_batch",

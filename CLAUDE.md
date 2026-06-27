@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-PyTorch-based deep learning framework for pretraining JEPA-style models on continuous mass spectrometry peak sets. The pipeline ingests raw peak lists from GeMS and MassSpecGym datasets, preprocesses them into native shard artifacts, and trains a masked latent prediction model with teacher targets. During training, a periodic MSG linear probe evaluates learned representations on molecular property regression and MACCS fingerprint prediction.
+PyTorch-based deep learning framework for pretraining JEPA-style models on continuous mass spectrometry peak sets. The pipeline streams HDF5 MassIVE shards and MassSpecGym datasets, preprocesses raw peaks in collators, and trains a masked latent prediction model with teacher targets. During training, a periodic MSG linear probe evaluates learned representations on molecular property regression and MACCS fingerprint prediction.
 
 ## Commands
 
@@ -35,7 +35,7 @@ python input_pipeline.py configs/gems_a_dataset.py
 ### Training Flow
 
 `train.py:train_and_evaluate` orchestrates the full pipeline:
-1. Data flows from `GemsNativeDataModule`, which loads native GeMS shard artifacts and applies peak preprocessing on the fly.
+1. Data flows from `GemsDataModule`, which resolves the HDF5 shard manifest and applies peak preprocessing on the fly.
 2. The training collator produces masked-context JEPA batches with `peak_*`, `context_mask`, and `target_masks`.
 3. The compiled forward pass (`torch.compile` with `reduce-overhead` + CUDA graphs) runs the batch through encoder -> masked latent predictor -> JEPA losses.
 4. During training, `run_msg_probe` trains fixed linear probes on frozen mean-pooled readouts.
@@ -69,7 +69,7 @@ Training batches contain:
 
 ### Data Pipeline (`spectra_learning/data/gems/`)
 
-Native-shard based with auto-download from HuggingFace. `GemsNativeDataModule` memmaps raw peak spectra, preprocesses peaks in the PyTorch collator, and builds DataLoaders directly.
+HDF5-shard based with auto-download from HuggingFace. `GemsDataModule` uses h5py as the HDF5 dataset backend, then owns the PyTorch `DataLoader`, chunk-aware batch sampling, distributed rank partitioning, resume offset, and peak preprocessing policy.
 
 ## Code Style
 

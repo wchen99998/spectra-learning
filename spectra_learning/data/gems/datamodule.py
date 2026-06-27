@@ -1,64 +1,22 @@
-import math
-from collections.abc import Iterator, Sized
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
-import torch
 from ml_collections import config_dict
 from torch.utils.data import DataLoader, Sampler
-from torch.utils.data.distributed import DistributedSampler
 
-from spectra_learning.data.gems.artifacts import resolve_gems_artifact
+from spectra_learning.data.gems.artifacts import resolve_gems_hdf5_manifest
 from spectra_learning.data.gems.collate import GemsBatchCollator
-from spectra_learning.data.gems.dataset import GemsMemmapDataset
+from spectra_learning.data.gems.hdf5 import GemsHdf5ShardDataset
+from spectra_learning.data.gems.sampling import (
+    ChunkedDistributedBatchSampler,
+    LimitBatchSampler,
+    OffsetBatchSampler,
+)
 from spectra_learning.data.gems.settings import GemsDataConfig
 from spectra_learning.data.spectra import PEAK_MZ_MAX, PEAK_MZ_MIN
 
 
-class _OffsetSampler(Sampler[int]):
-    def __init__(
-        self,
-        sampler: Sampler[int],
-        *,
-        start_index: int,
-    ) -> None:
-        self.sampler = sampler
-        self.start_index = start_index
-
-    def __iter__(self) -> Iterator[int]:
-        for position, idx in enumerate(self.sampler):
-            if position >= self.start_index:
-                yield idx
-
-    def __len__(self) -> int:
-        return len(cast(Sized, self.sampler)) - self.start_index
-
-
-class _ShuffledSampler(Sampler[int]):
-    def __init__(
-        self,
-        dataset: GemsMemmapDataset,
-        *,
-        shuffle: bool,
-        generator: torch.Generator,
-    ) -> None:
-        self.dataset = dataset
-        self.shuffle = shuffle
-        self.generator = generator
-
-    def __iter__(self) -> Iterator[int]:
-        if self.shuffle:
-            order = torch.randperm(len(self.dataset), generator=self.generator)
-            for idx in order:
-                yield int(idx)
-            return
-        yield from range(len(self.dataset))
-
-    def __len__(self) -> int:
-        return len(self.dataset)
-
-
-class GemsNativeDataModule:
+class GemsDataModule:
     config: GemsDataConfig
     seed: int
     output_dir: Path
@@ -67,7 +25,7 @@ class GemsNativeDataModule:
     distributed_rank: int
     distributed_local_rank: int
     gems_dir: Path
-    gems_metadata: dict[str, Any]
+    gems_manifest: Path
     info: dict[str, Any]
     train_steps: int
     global_batch_size: int
@@ -102,8 +60,6 @@ class GemsNativeDataModule:
     gems_validation_shards: list[str]
     gems_train_files: list[str]
     gems_validation_files: list[str]
-    _train_entries: list[dict[str, Any]]
-    _val_entries: list[dict[str, Any]]
 
     def __init__(
         self,
@@ -124,25 +80,25 @@ class GemsNativeDataModule:
         self.distributed_world_size = distributed_world_size
         self.distributed_rank = distributed_rank
         self.distributed_local_rank = distributed_local_rank
-        if not self.config.gems_native_repo_id:
-            raise ValueError("GeMS configs must set gems_native_repo_id")
-        self.gems_dir, self.gems_metadata = resolve_gems_artifact(
+        self.gems_manifest = resolve_gems_hdf5_manifest(
             gems_base_dir=self.gems_base_dir,
-            repo_id=self.config.gems_native_repo_id,
-            revision=self.config.gems_native_revision,
-            max_precursor_mz=self.config.max_precursor_mz,
-            repo_subdir=self.config.gems_native_hf_subdir,
+            repo_id=self.config.gems_hdf5_repo_id,
+            revision=self.config.gems_hdf5_revision,
+            manifest_filename=self.config.gems_hdf5_manifest,
             distributed_world_size=distributed_world_size,
             distributed_rank=distributed_rank,
             distributed_local_rank=distributed_local_rank,
         )
+        self.gems_dir = self.gems_manifest.parent
         self._set_public_config_attrs()
         self._set_distributed_batch_attrs()
-        self._set_shard_entries()
+        self._dataset = self._build_dataset()
+        self.gems_train_shards = list(self._dataset.paths)
+        self.gems_validation_shards = list(self._dataset.paths)
+        self.gems_train_files = list(self.gems_train_shards)
+        self.gems_validation_files = list(self.gems_validation_shards)
         self.info = self._info()
         self.train_steps = self._train_steps()
-        self._train_dataset: GemsMemmapDataset | None = None
-        self._val_dataset: GemsMemmapDataset | None = None
         self._train_loader: DataLoader | None = None
         self._val_loader: DataLoader | None = None
 
@@ -165,36 +121,20 @@ class GemsNativeDataModule:
                 self.dataloader_num_workers // self.distributed_world_size,
             )
 
-    def _set_shard_entries(self) -> None:
-        self.gems_train_shards = [
-            str(self.gems_dir / "train" / name)
-            for name in self.gems_metadata["train_shards"]
-        ]
-        self.gems_validation_shards = [
-            str(self.gems_dir / "validation" / name)
-            for name in self.gems_metadata["validation_shards"]
-        ]
-        self.gems_train_files = list(self.gems_train_shards)
-        self.gems_validation_files = list(self.gems_validation_shards)
-        self._train_entries = self._entries("train", self.gems_train_shards)
-        self._val_entries = self._entries("validation", self.gems_validation_shards)
-
-    def _entries(self, split: str, shard_paths: list[str]) -> list[dict[str, Any]]:
-        return [
-            {"dir": path, "length": int(length)}
-            for path, length in zip(
-                shard_paths,
-                self.gems_metadata[f"{split}_lengths"],
-                strict=True,
-            )
-        ]
+    def _build_dataset(self) -> GemsHdf5ShardDataset:
+        return GemsHdf5ShardDataset(
+            self.gems_manifest,
+            spectrum_dataset=self.config.gems_hdf5_spectrum_dataset,
+            precursor_dataset=self.config.gems_hdf5_precursor_dataset,
+        )
 
     def _info(self) -> dict[str, Any]:
         return {
             "artifact_dir": str(self.output_dir),
             "gems_dir": str(self.gems_dir),
-            "train_size": int(self.gems_metadata["train_size"]),
-            "validation_size": int(self.gems_metadata["validation_size"]),
+            "gems_manifest": str(self.gems_manifest),
+            "train_size": len(self._dataset),
+            "validation_size": len(self._dataset),
             "num_peaks": self.num_peaks_output,
             "max_precursor_mz": self.max_precursor_mz,
             "peak_mz_min": PEAK_MZ_MIN,
@@ -205,30 +145,59 @@ class GemsNativeDataModule:
         }
 
     def _train_steps(self) -> int:
-        train_size = int(self.info["train_size"])
-        if self.drop_remainder:
-            return train_size // self.global_batch_size
-        return math.ceil(train_size / self.global_batch_size)
-
-    def _get_dataset(self, split: str) -> GemsMemmapDataset:
-        if split == "train":
-            if self._train_dataset is None:
-                self._train_dataset = GemsMemmapDataset(
-                    self._train_entries,
-                    return_numpy=True,
+        micro_batches = min(
+            len(
+                self._make_batch_sampler(
+                    shuffle=True,
+                    seed=self.seed,
+                    drop_last=self.drop_remainder,
+                    epoch=0,
+                    rank=rank,
                 )
-            return self._train_dataset
-        if self._val_dataset is None:
-            self._val_dataset = GemsMemmapDataset(
-                self._val_entries,
-                return_numpy=True,
             )
-        return self._val_dataset
+            for rank in range(self.distributed_world_size)
+        )
+        return micro_batches // self.gradient_accumulation_steps
+
+    def _get_dataset(self, split: str) -> GemsHdf5ShardDataset:
+        return self._dataset
+
+    def _dataset_segments(self) -> list[tuple[int, int, int]]:
+        return [
+            (
+                int(start),
+                int(info["length"]),
+                int(info["spectrum_chunk"][0] or 1),
+            )
+            for start, info in zip(self._dataset.starts, self._dataset.infos, strict=True)
+        ]
+
+    def _make_batch_sampler(
+        self,
+        *,
+        shuffle: bool,
+        seed: int,
+        drop_last: bool,
+        epoch: int,
+        rank: int | None = None,
+    ) -> Sampler[list[int]]:
+        rank = self.distributed_rank if rank is None else rank
+        sampler = ChunkedDistributedBatchSampler(
+            self._dataset_segments(),
+            batch_size=self.batch_size,
+            rows_per_block=self.config.gems_hdf5_rows_per_block or None,
+            shuffle=shuffle,
+            seed=seed,
+            drop_last=drop_last,
+            world_size=self.distributed_world_size,
+            rank=rank,
+        )
+        sampler.set_epoch(epoch)
+        return sampler
 
     def _make_loader(
         self,
         *,
-        dataset: GemsMemmapDataset,
         augment: bool,
         shuffle: bool,
         seed: int,
@@ -236,44 +205,39 @@ class GemsNativeDataModule:
         start_batch: int = 0,
         epoch: int = 0,
         num_workers: int | None = None,
+        max_batches: int | None = None,
     ) -> DataLoader:
-        generator = torch.Generator()
-        generator.manual_seed(seed)
         resolved_num_workers = (
             self.dataloader_num_workers if num_workers is None else num_workers
         )
-        start_index = (
-            start_batch * self.batch_size * self.gradient_accumulation_steps
+        batch_sampler = self._make_batch_sampler(
+            shuffle=shuffle,
+            seed=seed,
+            drop_last=drop_last,
+            epoch=epoch,
         )
-        loader_kwargs: dict[str, Any] = {
-            "dataset": dataset,
-            "batch_size": self.batch_size,
-            "num_workers": resolved_num_workers,
-            "pin_memory": self.dataloader_pin_memory,
-            "drop_last": drop_last,
-            "collate_fn": self._collator(augment=augment),
-            "generator": generator,
-        }
-        if self.distributed_world_size > 1:
-            sampler = DistributedSampler(
-                dataset,
-                shuffle=shuffle,
-                num_replicas=self.distributed_world_size,
-                rank=self.distributed_rank,
-                seed=self.seed,
+        start_index = start_batch * self.batch_size * self.gradient_accumulation_steps
+        if start_index:
+            batch_sampler = OffsetBatchSampler(
+                batch_sampler,
+                start_index=start_index,
+                batch_size=self.batch_size,
                 drop_last=drop_last,
             )
-            sampler.set_epoch(epoch)
-            if start_index:
-                sampler = _OffsetSampler(sampler, start_index=start_index)
-            loader_kwargs["sampler"] = sampler
-        elif start_index:
-            loader_kwargs["sampler"] = _OffsetSampler(
-                _ShuffledSampler(dataset, shuffle=shuffle, generator=generator),
-                start_index=start_index,
+        if max_batches is not None:
+            batch_sampler = LimitBatchSampler(
+                batch_sampler,
+                max_batches=max_batches,
             )
-        else:
-            loader_kwargs["shuffle"] = shuffle
+        if resolved_num_workers > 0:
+            self._dataset.close()
+        loader_kwargs: dict[str, Any] = {
+            "dataset": self._dataset,
+            "batch_sampler": batch_sampler,
+            "num_workers": resolved_num_workers,
+            "pin_memory": self.dataloader_pin_memory,
+            "collate_fn": self._collator(augment=augment),
+        }
         if resolved_num_workers > 0:
             loader_kwargs["persistent_workers"] = self.dataloader_persistent_workers
             loader_kwargs["prefetch_factor"] = self.dataloader_prefetch_factor
@@ -321,7 +285,6 @@ class GemsNativeDataModule:
 
     def val_loader_for_eval(self, *, augment: bool) -> DataLoader:
         return self._make_loader(
-            dataset=self._get_dataset("validation"),
             augment=augment,
             shuffle=False,
             seed=self.seed,
@@ -329,12 +292,16 @@ class GemsNativeDataModule:
         )
 
     def train_loader_for_epoch(self, epoch: int, start_batch: int = 0) -> DataLoader:
+        max_batches = max(
+            0,
+            (self.train_steps - start_batch) * self.gradient_accumulation_steps,
+        )
         return self._make_loader(
-            dataset=self._get_dataset("train"),
             augment=True,
             shuffle=True,
-            seed=self.seed + epoch,
+            seed=self.seed,
             drop_last=self.drop_remainder,
             start_batch=start_batch,
             epoch=epoch,
+            max_batches=max_batches,
         )

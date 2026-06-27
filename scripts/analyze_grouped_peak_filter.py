@@ -10,6 +10,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from spectra_learning.data.gems.hdf5 import GemsHdf5ShardDataset
 from spectra_learning.data.spectra import (
     DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
     DEFAULT_GROUPED_PEAK_SHOULDER_DA,
@@ -45,49 +46,34 @@ SIRIUS_ISOTOPE_RANGES = (
 )
 
 
-def _load_metadata(artifact_dir: Path) -> dict[str, Any]:
-    with (artifact_dir / "metadata.json").open() as handle:
-        return json.load(handle)
+def _resolve_manifest(path: Path) -> Path:
+    if path.suffix == ".json":
+        return path
+    return path / "fdataloader_shards.json"
 
 
-def _sample_indices(lengths: list[int], sample_rows: int, seed: int) -> np.ndarray:
-    total = int(sum(lengths))
+def _sample_indices(total: int, sample_rows: int, seed: int) -> np.ndarray:
     count = min(sample_rows, total)
     return np.sort(np.random.default_rng(seed).choice(total, size=count, replace=False))
 
 
 def _iter_sampled_spectra(
-    artifact_dir: Path,
-    split: str,
+    manifest_or_dir: Path,
     sample_rows: int,
     seed: int,
 ):
-    metadata = _load_metadata(artifact_dir)
-    shard_key = "train_shards" if split == "train" else "validation_shards"
-    length_key = "train_lengths" if split == "train" else "validation_lengths"
-    shards = metadata[shard_key]
-    lengths = [int(length) for length in metadata[length_key]]
-    sample_idx = _sample_indices(lengths, sample_rows, seed)
-    starts = np.cumsum([0, *lengths])
-    for shard_id, shard_name in enumerate(shards):
-        start = starts[shard_id]
-        end = starts[shard_id + 1]
-        mask = (sample_idx >= start) & (sample_idx < end)
-        if not mask.any():
-            continue
-        local_rows = sample_idx[mask] - start
-        shard_dir = artifact_dir / split / shard_name
-        spectra = np.load(shard_dir / "spectra.npy", mmap_mode="r")
-        precursor_mz = np.load(shard_dir / "precursor_mz_raw.npy", mmap_mode="r")
-        selected = spectra[local_rows]
-        selected_precursor = precursor_mz[local_rows]
-        for row_id, row, precursor in zip(
-            local_rows.tolist(),
-            selected,
-            selected_precursor,
-            strict=True,
-        ):
-            yield shard_name, int(row_id), row, float(precursor)
+    manifest_path = _resolve_manifest(manifest_or_dir)
+    dataset = GemsHdf5ShardDataset(
+        manifest_path,
+        spectrum_dataset="spectrum",
+        precursor_dataset="precursor_mz",
+    )
+    sample_idx = _sample_indices(len(dataset), sample_rows, seed)
+    for row_id in sample_idx.tolist():
+        sample = dataset[int(row_id)]
+        yield manifest_path.name, int(row_id), sample["spectra"], float(
+            sample["precursor_mz_raw"]
+        )
 
 
 def _find(parent: list[int], x: int) -> int:
@@ -283,7 +269,6 @@ def _group_rows(
 def analyze(
     *,
     artifact_dir: Path,
-    split: str,
     sample_rows: int,
     seed: int,
     num_peaks: int,
@@ -333,7 +318,6 @@ def analyze(
 
     for shard_name, row_id, spectrum, precursor_mz in _iter_sampled_spectra(
         artifact_dir,
-        split,
         sample_rows,
         seed,
     ):
@@ -463,7 +447,6 @@ def analyze(
     selected_groups = scalar["selected_groups"]
     summary = {
         "artifact_dir": str(artifact_dir),
-        "split": split,
         "sample_rows_requested": sample_rows,
         "sample_rows_analyzed": rows,
         "seed": seed,
@@ -531,7 +514,7 @@ def _default_output_path(args: argparse.Namespace) -> Path:
     charges = "-".join(str(charge) for charge in args.isotope_charges)
     return (
         DEFAULT_OUTPUT_DIR
-        / f"{dataset}_{args.split}_n{args.num_peaks}_rows{args.sample_rows}"
+        / f"{dataset}_n{args.num_peaks}_rows{args.sample_rows}"
         f"_shoulder{args.shoulder_da:g}_{args.isotope_mode}"
         f"_z{charges}_iso{args.isotope_tol_da:g}_{args.group_score}.json"
     )
@@ -587,10 +570,9 @@ def _print_summary(summary: dict[str, Any]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Analyze grouped peak filtering on GeMS native artifacts."
+        description="Analyze grouped peak filtering on HDF5 shards."
     )
     parser.add_argument("--artifact-dir", type=Path, required=True)
-    parser.add_argument("--split", default="train", choices=("train", "validation"))
     parser.add_argument("--sample-rows", type=int, default=20_000)
     parser.add_argument("--seed", type=int, default=66)
     parser.add_argument("--num-peaks", type=int, required=True)
@@ -625,7 +607,6 @@ def main() -> None:
 
     summary = analyze(
         artifact_dir=args.artifact_dir,
-        split=args.split,
         sample_rows=args.sample_rows,
         seed=args.seed,
         num_peaks=args.num_peaks,

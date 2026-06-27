@@ -16,7 +16,7 @@ import torch._inductor.config as inductor_config
 from ml_collections import config_dict
 from tqdm import tqdm
 
-from spectra_learning.data.gems.datamodule import GemsNativeDataModule
+from spectra_learning.data.gems.datamodule import GemsDataModule
 from spectra_learning.training.batch import BatchPrefetcher
 from spectra_learning.training.checkpointing import (
     AsyncCheckpointWriter,
@@ -149,7 +149,7 @@ def train_and_evaluate(
         storage_mkdir(workdir)
     barrier(distributed)
     seed_all(int(config.seed))
-    datamodule = GemsNativeDataModule(
+    datamodule = GemsDataModule(
         config,
         seed=int(config.seed),
         distributed_world_size=distributed.world_size,
@@ -627,7 +627,7 @@ def make_torch_profiler(
 
 def total_training_steps(
     config: config_dict.ConfigDict,
-    datamodule: GemsNativeDataModule,
+    datamodule: GemsDataModule,
 ) -> int:
     total_steps = max(1, int(float(config.num_epochs) * datamodule.train_steps))
     training_max_steps = _config_get(config, "training_max_steps", None)
@@ -790,7 +790,7 @@ def learning_rate_metrics(
 
 def msg_probe_interval(
     config: config_dict.ConfigDict,
-    datamodule: GemsNativeDataModule,
+    datamodule: GemsDataModule,
     total_steps: int,
 ) -> int:
     return resolve_msg_probe_interval(config, datamodule, total_steps)

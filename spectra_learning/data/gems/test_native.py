@@ -1,63 +1,24 @@
 import json
-import pickle
-import sys
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Any, TypedDict, cast
+from typing import Any
 from unittest import mock
 
 import h5py
 import numpy as np
 import torch
 from ml_collections import config_dict
-from torch.utils.data import DataLoader
 
 import spectra_learning.data.gems as gems
 import spectra_learning.data.gems.artifacts as gems_artifacts
 import spectra_learning.data.massspec_probe as massspec_probe_data
-from spectra_learning.data.gems.native import (
-    GEMS_A10_SOURCE_FILENAME,
-    GEMS_B_SOURCE_FILENAME,
-    GEMS_NATIVE_METADATA_VERSION,
-    GEMS_SOURCE_REPO_ID,
-    build_gems_native_artifact,
-    main as prepare_gems_main,
-    prepare_gems_native_dataset,
-)
-from spectra_learning.data.gems.arrays import (
-    CANONICAL_NUM_SHARDS,
-)
+from spectra_learning.data.gems.sampling import ChunkedDistributedBatchSampler
 from spectra_learning.data.massspec_targets import (
     build_maccs_targets_for_rows,
     build_morgan_targets_for_rows,
     build_probe_targets_for_rows,
 )
-from spectra_learning.data.repositories import GEMS_NATIVE_HF_REPO
-
-
-class _NativeShardEntry(TypedDict):
-    dir: str
-    length: int
-
-
-def _write_fake_gems_hdf5(path: Path) -> None:
-    spectra = np.zeros((4, 2, 128), dtype=np.float32)
-    spectra[0, 0, :4] = [100.0, 120.0, 140.0, 160.0]
-    spectra[0, 1, :4] = [1.0, 0.8, 0.6, 0.4]
-    spectra[1, 0, :3] = [200.0, 220.0, 240.0]
-    spectra[1, 1, :3] = [0.9, 0.7, 0.5]
-    spectra[2, 0, :2] = [300.0, 320.0]
-    spectra[2, 1, :2] = [0.6, 0.3]
-    spectra[3, 0, :5] = [400.0, 420.0, 440.0, 460.0, 480.0]
-    spectra[3, 1, :5] = [1.0, 0.9, 0.8, 0.7, 0.6]
-    retention = np.asarray([10.0, 20.0, -1.0, 40.0], dtype=np.float32)
-    precursor = np.asarray([500.0, 600.0, 700.0, 800.0], dtype=np.float32)
-
-    with h5py.File(path, "w") as f:
-        f.create_dataset("spectrum", data=spectra)
-        f.create_dataset("RT", data=retention)
-        f.create_dataset("precursor_mz", data=precursor)
 
 
 def _write_fake_nist_hdf5(path: Path) -> dict[str, np.ndarray]:
@@ -99,21 +60,59 @@ def _write_fake_nist_hdf5(path: Path) -> dict[str, np.ndarray]:
     }
 
 
-def _write_fake_native_shards(root: Path, lengths: list[int], num_peaks: int = 4) -> list[_NativeShardEntry]:
-    entries: list[_NativeShardEntry] = []
+def _write_fake_hdf5_shards(root: Path, lengths: list[int]) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    manifest: dict[str, list[dict[str, object]]] = {"shards": []}
     start = 0
     for shard_idx, length in enumerate(lengths):
-        shard_dir = root / f"shard-{shard_idx:05d}"
-        shard_dir.mkdir(parents=True, exist_ok=True)
-        spectra = np.zeros((length, 2, 128), dtype=np.float32)
-        precursor_mz_raw = np.arange(start, start + length, dtype=np.float32)
-        spectra[:, 0, 0] = precursor_mz_raw + 1000.0
+        shard_name = f"shard_{shard_idx:05d}.hdf5"
+        shard_path = root / shard_name
+        precursor = np.arange(start, start + length, dtype=np.float32)
+        spectra = np.zeros((length, 2, 128), dtype=np.float64)
+        spectra[:, 0, 0] = precursor + 100.0
         spectra[:, 1, 0] = 1.0
-        np.save(shard_dir / "spectra.npy", spectra)
-        np.save(shard_dir / "precursor_mz_raw.npy", precursor_mz_raw)
-        entries.append({"dir": str(shard_dir), "length": length})
+        with h5py.File(shard_path, "w") as f:
+            f.create_dataset("spectrum", data=spectra, chunks=(1, 2, 128))
+            f.create_dataset("precursor_mz", data=precursor, chunks=(1,))
+        manifest["shards"].append({"path": shard_name, "rows": length})
         start += length
-    return entries
+    manifest_path = root / "fdataloader_shards.json"
+    manifest_path.write_text(json.dumps(manifest))
+    return manifest_path
+
+
+class GemsSamplingTests(unittest.TestCase):
+    def test_chunked_sampler_partitions_shard_blocks_by_rank(self):
+        segments = [(0, 5, 2), (5, 4, 2)]
+        rank0 = list(
+            ChunkedDistributedBatchSampler(
+                segments,
+                batch_size=2,
+                rows_per_block=4,
+                shuffle=False,
+                seed=123,
+                drop_last=False,
+                world_size=2,
+                rank=0,
+            )
+        )
+        rank1 = list(
+            ChunkedDistributedBatchSampler(
+                segments,
+                batch_size=2,
+                rows_per_block=4,
+                shuffle=False,
+                seed=123,
+                drop_last=False,
+                world_size=2,
+                rank=1,
+            )
+        )
+
+        self.assertEqual(rank0, [[0, 1], [2, 3], [5, 6], [7, 8]])
+        self.assertEqual(rank1, [[4]])
+        combined = [index for batch in rank0 + rank1 for index in batch]
+        self.assertEqual(sorted(combined), list(range(9)))
 
 
 def _write_fake_nist_full_probe_artifact(
@@ -149,289 +148,13 @@ def _write_fake_nist_full_probe_artifact(
     (root / "metadata.json").write_text(json.dumps(metadata))
     return metadata
 
-
-class GeMSNativeArtifactTests(unittest.TestCase):
-    def test_build_gems_native_artifact_writes_expected_layout(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            hdf5_path = tmp_path / "GeMS_A.hdf5"
-            artifact_dir = tmp_path / "artifact"
-            _write_fake_gems_hdf5(hdf5_path)
-
-            metadata = build_gems_native_artifact(
-                hdf5_path=hdf5_path,
-                output_dir=artifact_dir,
-                num_workers=1,
-                source_path=str(hdf5_path),
-            )
-
-            self.assertEqual(
-                metadata["gems_native_metadata_version"],
-                GEMS_NATIVE_METADATA_VERSION,
-            )
-            self.assertEqual(metadata["num_shards"], CANONICAL_NUM_SHARDS)
-            self.assertEqual(metadata["train_size"] + metadata["validation_size"], 3)
-            self.assertTrue((artifact_dir / "metadata.json").exists())
-            for name in metadata["train_shards"]:
-                self.assertTrue((artifact_dir / "train" / name).exists())
-            for name in metadata["validation_shards"]:
-                self.assertTrue((artifact_dir / "validation" / name).exists())
-
-            shard_dir = artifact_dir / "train" / metadata["train_shards"][0]
-            spectra = np.load(shard_dir / "spectra.npy")
-            precursor_mz_raw = np.load(shard_dir / "precursor_mz_raw.npy")
-
-            self.assertEqual(tuple(spectra.shape), (1, 2, 128))
-            self.assertEqual(tuple(precursor_mz_raw.shape), (1,))
-
-    def test_build_gems_native_artifact_filters_large_precursor(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            hdf5_path = tmp_path / "GeMS_A.hdf5"
-            artifact_dir = tmp_path / "artifact"
-            _write_fake_gems_hdf5(hdf5_path)
-
-            metadata = build_gems_native_artifact(
-                hdf5_path=hdf5_path,
-                output_dir=artifact_dir,
-                max_precursor_mz=650.0,
-                num_workers=1,
-                source_path=str(hdf5_path),
-            )
-
-            self.assertEqual(metadata["train_size"] + metadata["validation_size"], 2)
-            self.assertEqual(metadata["max_precursor_mz"], 650.0)
-
-    def test_prepare_gems_native_module_builds_and_uploads(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            hdf5_path = tmp_path / "GeMS_A.hdf5"
-            _write_fake_gems_hdf5(hdf5_path)
-
-            with (
-                mock.patch("spectra_learning.data.gems.native.HfApi") as api_cls,
-                mock.patch.object(
-                    sys,
-                    "argv",
-                    [
-                        "python -m spectra_learning.data.gems.native",
-                        "--source-hdf5-path",
-                        str(hdf5_path),
-                        "--hf-repo-id",
-                        "cjim8889/test-gems-native",
-                        "--work-dir",
-                        str(tmp_path / "work"),
-                        "--hf-revision",
-                        "main",
-                        "--num-workers",
-                        "1",
-                    ],
-                ),
-            ):
-                api = api_cls.return_value
-                prepare_gems_main()
-
-            artifact_dir = tmp_path / "work" / "artifact"
-            self.assertTrue((artifact_dir / "metadata.json").exists())
-            metadata = json.loads((artifact_dir / "metadata.json").read_text())
-            self.assertEqual(metadata["raw_hdf5_path"], "")
-            self.assertFalse((artifact_dir / "raw" / "GeMS_A.hdf5").exists())
-            api.create_repo.assert_called_once_with(
-                "cjim8889/test-gems-native",
-                repo_type="dataset",
-                exist_ok=True,
-            )
-            api.upload_large_folder.assert_called_once()
-            _, kwargs = api.upload_large_folder.call_args
-            self.assertEqual(kwargs["repo_id"], "cjim8889/test-gems-native")
-            self.assertEqual(Path(kwargs["folder_path"]), artifact_dir)
-            self.assertEqual(kwargs["repo_type"], "dataset")
-            self.assertEqual(kwargs["revision"], "main")
-            self.assertEqual(kwargs["num_workers"], 8)
-
-    def test_prepare_gems_native_dataset_uploads_into_hf_subdir(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            hdf5_path = tmp_path / "GeMS_A.hdf5"
-            _write_fake_gems_hdf5(hdf5_path)
-
-            with mock.patch("spectra_learning.data.gems.native.HfApi") as api_cls:
-                api = api_cls.return_value
-                metadata = prepare_gems_native_dataset(
-                    work_dir=tmp_path / "work",
-                    hf_repo_id="cjim8889/test-gems-native",
-                    hf_subdir="gems_a10_native",
-                    source_hdf5_path=hdf5_path,
-                    source_url="https://example.test/GeMS_A.hdf5",
-                    num_workers=1,
-                )
-
-            artifact_root = tmp_path / "work" / "artifact"
-            artifact_dir = artifact_root / "gems_a10_native"
-            self.assertTrue((artifact_dir / "metadata.json").exists())
-            self.assertEqual(metadata["hf_subdir"], "gems_a10_native")
-            self.assertEqual(metadata["raw_hdf5_path"], "")
-            self.assertEqual(metadata["source_url"], "https://example.test/GeMS_A.hdf5")
-            self.assertFalse((artifact_dir / "raw" / "GeMS_A.hdf5").exists())
-            api.upload_large_folder.assert_called_once()
-            _, kwargs = api.upload_large_folder.call_args
-            self.assertEqual(Path(kwargs["folder_path"]), artifact_root)
-
-    def test_prepare_gems_native_module_downloads_gems_a10_hf_source(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            hdf5_path = tmp_path / "GeMS_A10.hdf5"
-            _write_fake_gems_hdf5(hdf5_path)
-
-            with (
-                mock.patch("spectra_learning.data.gems.native.HfApi") as api_cls,
-                mock.patch(
-                    "spectra_learning.data.gems.native.hf_hub_download",
-                    return_value=str(hdf5_path),
-                ) as download_mock,
-                mock.patch.object(
-                    sys,
-                    "argv",
-                    [
-                        "python -m spectra_learning.data.gems.native",
-                        "--source-gems-a10",
-                        "--hf-repo-id",
-                        GEMS_NATIVE_HF_REPO,
-                        "--hf-subdir",
-                        "gems_a10_native",
-                        "--work-dir",
-                        str(tmp_path / "work"),
-                        "--num-workers",
-                        "1",
-                    ],
-                ),
-            ):
-                api = api_cls.return_value
-                prepare_gems_main()
-
-            artifact_dir = tmp_path / "work" / "artifact" / "gems_a10_native"
-            metadata = json.loads((artifact_dir / "metadata.json").read_text())
-            self.assertEqual(metadata["hf_subdir"], "gems_a10_native")
-            self.assertEqual(metadata["raw_hdf5_path"], "")
-            self.assertFalse((artifact_dir / "raw" / "GeMS_A10.hdf5").exists())
-            self.assertEqual(metadata["source_hdf5_path"], "")
-            self.assertEqual(
-                metadata["source_url"],
-                f"https://huggingface.co/datasets/{GEMS_SOURCE_REPO_ID}/resolve/main/{GEMS_A10_SOURCE_FILENAME}",
-            )
-            download_mock.assert_called_once_with(
-                repo_id=GEMS_SOURCE_REPO_ID,
-                filename=GEMS_A10_SOURCE_FILENAME,
-                repo_type="dataset",
-                revision="main",
-                local_dir=(tmp_path / "work").resolve() / "source",
-            )
-            api.create_repo.assert_called_once_with(
-                GEMS_NATIVE_HF_REPO,
-                repo_type="dataset",
-                exist_ok=True,
-            )
-
-    def test_prepare_gems_native_dataset_can_include_raw_hdf5(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            hdf5_path = tmp_path / "GeMS_A.hdf5"
-            _write_fake_gems_hdf5(hdf5_path)
-
-            with mock.patch("spectra_learning.data.gems.native.HfApi"):
-                metadata = prepare_gems_native_dataset(
-                    work_dir=tmp_path / "work",
-                    hf_repo_id="cjim8889/test-gems-native",
-                    hf_subdir="gems_a10_native",
-                    source_hdf5_path=hdf5_path,
-                    num_workers=1,
-                    include_raw=True,
-                )
-
-            artifact_dir = tmp_path / "work" / "artifact" / "gems_a10_native"
-            self.assertEqual(metadata["raw_hdf5_path"], "raw/GeMS_A.hdf5")
-            self.assertTrue((artifact_dir / "raw" / "GeMS_A.hdf5").exists())
-
-    def test_prepare_gems_native_module_downloads_hf_source(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            hdf5_path = tmp_path / "GeMS_B.hdf5"
-            _write_fake_gems_hdf5(hdf5_path)
-
-            with (
-                mock.patch("spectra_learning.data.gems.native.HfApi") as api_cls,
-                mock.patch(
-                    "spectra_learning.data.gems.native.hf_hub_download",
-                    return_value=str(hdf5_path),
-                ) as download_mock,
-                mock.patch.object(
-                    sys,
-                    "argv",
-                    [
-                        "python -m spectra_learning.data.gems.native",
-                        "--source-gems-b",
-                        "--hf-repo-id",
-                        GEMS_NATIVE_HF_REPO,
-                        "--hf-subdir",
-                        "gems_b_native",
-                        "--work-dir",
-                        str(tmp_path / "work"),
-                        "--num-workers",
-                        "1",
-                    ],
-                ),
-            ):
-                api = api_cls.return_value
-                prepare_gems_main()
-
-            artifact_dir = tmp_path / "work" / "artifact" / "gems_b_native"
-            metadata = json.loads((artifact_dir / "metadata.json").read_text())
-            self.assertEqual(metadata["hf_subdir"], "gems_b_native")
-            self.assertEqual(metadata["raw_hdf5_path"], "")
-            self.assertFalse((artifact_dir / "raw" / "GeMS_B.hdf5").exists())
-            self.assertEqual(metadata["source_hdf5_path"], "")
-            self.assertEqual(
-                metadata["source_url"],
-                f"https://huggingface.co/datasets/{GEMS_SOURCE_REPO_ID}/resolve/main/{GEMS_B_SOURCE_FILENAME}",
-            )
-            download_mock.assert_called_once_with(
-                repo_id=GEMS_SOURCE_REPO_ID,
-                filename=GEMS_B_SOURCE_FILENAME,
-                repo_type="dataset",
-                revision="main",
-                local_dir=(tmp_path / "work").resolve() / "source",
-            )
-            api.create_repo.assert_called_once_with(
-                GEMS_NATIVE_HF_REPO,
-                repo_type="dataset",
-                exist_ok=True,
-            )
-
-    def test_build_gems_native_artifact_supports_parallel_shard_writes(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            hdf5_path = tmp_path / "GeMS_A.hdf5"
-            artifact_dir = tmp_path / "artifact"
-            _write_fake_gems_hdf5(hdf5_path)
-
-            metadata = build_gems_native_artifact(
-                hdf5_path=hdf5_path,
-                output_dir=artifact_dir,
-                num_workers=2,
-                source_path=str(hdf5_path),
-            )
-
-            self.assertEqual(metadata["train_size"] + metadata["validation_size"], 3)
-            for name in metadata["train_shards"]:
-                self.assertTrue((artifact_dir / "train" / name).exists())
-
-
 class GeMSRuntimeDownloadTests(unittest.TestCase):
     def _make_config(self, tmp_path: Path) -> config_dict.ConfigDict:
         cfg = config_dict.ConfigDict()
         cfg.artifact_dir = str(tmp_path / "cache")
-        cfg.gems_native_repo_id = "cjim8889/gems-a-native"
-        cfg.gems_native_revision = "unit-test"
+        cfg.gems_hdf5_repo_id = "unit/hdf5-gems"
+        cfg.gems_hdf5_revision = "unit-test"
+        cfg.gems_hdf5_manifest = "fdataloader_shards.json"
         cfg.batch_size = 2
         cfg.shuffle_buffer = 4
         cfg.drop_remainder = False
@@ -445,36 +168,19 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
         cfg.jepa_context_fraction = 0.5
         cfg.jepa_target_fraction = 0.5
         cfg.jepa_block_min_len = 1
+        cfg.dataloader_num_workers = 0
         return cfg
 
-    def _build_native_artifact(
-        self,
-        *,
-        source_hdf5: Path,
-        output_dir: Path,
-        cfg: config_dict.ConfigDict,
-    ) -> None:
-        build_gems_native_artifact(
-            hdf5_path=source_hdf5,
-            output_dir=output_dir,
-            max_precursor_mz=float(cfg.max_precursor_mz),
-            num_workers=1,
-            source_path=str(source_hdf5),
-        )
+    def _artifact_dir(self, cfg: config_dict.ConfigDict) -> Path:
+        return Path(cfg.artifact_dir) / "gems" / "unit--hdf5-gems"
 
-    def test_datamodule_downloads_gems_artifact_and_builds_train_dataset(self):
+    def test_datamodule_downloads_hdf5_shards_and_builds_train_loader(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            source_hdf5 = tmp_path / "GeMS_A.hdf5"
-            _write_fake_gems_hdf5(source_hdf5)
             cfg = self._make_config(tmp_path)
 
             def fake_snapshot_download(*, local_dir, **kwargs):
-                self._build_native_artifact(
-                    source_hdf5=source_hdf5,
-                    output_dir=Path(local_dir),
-                    cfg=cfg,
-                )
+                _write_fake_hdf5_shards(Path(local_dir), [3, 2])
                 return str(local_dir)
 
             with (
@@ -482,11 +188,11 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                     side_effect=fake_snapshot_download,
                 ) as download_mock,
             ):
-                datamodule = gems.GemsNativeDataModule(cfg, seed=42)
+                datamodule = gems.GemsDataModule(cfg, seed=42)
                 batch = next(iter(datamodule.train_loader_for_epoch(0)))
 
-            self.assertEqual(datamodule.info["train_size"], 2)
-            self.assertEqual(datamodule.info["validation_size"], 1)
+            self.assertEqual(datamodule.info["train_size"], 5)
+            self.assertEqual(datamodule.info["validation_size"], 5)
             self.assertEqual(datamodule.info["num_peaks"], 64)
             self.assertNotIn("massspec_train_size", datamodule.info)
             self.assertTrue(
@@ -498,70 +204,45 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             self.assertEqual(tuple(batch["peak_mz"].shape), (2, 64))
             self.assertEqual(tuple(batch["target_masks"].shape), (2, 1, 64))
             _, kwargs = download_mock.call_args
-            self.assertEqual(kwargs["repo_id"], "cjim8889/gems-a-native")
+            self.assertEqual(kwargs["repo_id"], "unit/hdf5-gems")
             self.assertEqual(kwargs["revision"], "unit-test")
             self.assertEqual(kwargs["repo_type"], "dataset")
+            self.assertEqual(
+                kwargs["allow_patterns"],
+                ["fdataloader_shards.json", "*.hdf5", "*.h5"],
+            )
 
-    def test_datamodule_downloads_gems_artifact_from_hf_subdir(self):
+    def test_datamodule_uses_local_hdf5_cache_without_download(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            source_hdf5 = tmp_path / "GeMS_A.hdf5"
-            _write_fake_gems_hdf5(source_hdf5)
             cfg = self._make_config(tmp_path)
-            cfg.gems_native_hf_subdir = "gems_a10_native"
-
-            def fake_snapshot_download(*, local_dir, **kwargs):
-                self._build_native_artifact(
-                    source_hdf5=source_hdf5,
-                    output_dir=Path(local_dir) / "gems_a10_native",
-                    cfg=cfg,
-                )
-                return str(local_dir)
+            _write_fake_hdf5_shards(self._artifact_dir(cfg), [3, 2])
 
             with mock.patch.object(
                 gems_artifacts,
                 "snapshot_download",
-                side_effect=fake_snapshot_download,
             ) as download_mock:
-                datamodule = gems.GemsNativeDataModule(cfg, seed=42)
+                datamodule = gems.GemsDataModule(cfg, seed=42)
                 batch = next(iter(datamodule.train_loader_for_epoch(0)))
 
-            self.assertEqual(
-                datamodule.gems_dir,
-                Path(cfg.artifact_dir) / "gems" / "gems_a10_native",
-            )
             self.assertIn("peak_mz", batch)
-            _, kwargs = download_mock.call_args
-            self.assertEqual(
-                kwargs["allow_patterns"],
-                [
-                    "gems_a10_native/metadata.json",
-                    "gems_a10_native/train/*",
-                    "gems_a10_native/validation/*",
-                ],
-            )
+            download_mock.assert_not_called()
+            self.assertEqual(datamodule.gems_dir, self._artifact_dir(cfg))
 
     def test_datamodule_keeps_num_peaks(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            source_hdf5 = tmp_path / "GeMS_A.hdf5"
-            _write_fake_gems_hdf5(source_hdf5)
             cfg = self._make_config(tmp_path)
             cfg.num_peaks = 4
-            cfg.dataloader_num_workers = 0
 
             def fake_snapshot_download(*, local_dir, **kwargs):
-                self._build_native_artifact(
-                    source_hdf5=source_hdf5,
-                    output_dir=Path(local_dir),
-                    cfg=cfg,
-                )
+                _write_fake_hdf5_shards(Path(local_dir), [3, 2])
                 return str(local_dir)
 
             with mock.patch.object(gems_artifacts, "snapshot_download",
                 side_effect=fake_snapshot_download,
             ):
-                datamodule = gems.GemsNativeDataModule(cfg, seed=42)
+                datamodule = gems.GemsDataModule(cfg, seed=42)
                 batch = next(iter(datamodule.train_loader_for_epoch(0)))
 
         self.assertEqual(cfg.num_peaks, 4)
@@ -569,34 +250,10 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
         self.assertEqual(tuple(batch["peak_mz"].shape), (2, 4))
         self.assertEqual(tuple(batch["target_masks"].shape), (2, 1, 4))
 
-    def test_datamodule_uses_local_gems_cache_without_download(self):
+    def test_datamodule_rank_one_waits_for_hdf5_download(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            source_hdf5 = tmp_path / "GeMS_A.hdf5"
-            _write_fake_gems_hdf5(source_hdf5)
             cfg = self._make_config(tmp_path)
-
-            artifact_dir = Path(cfg.artifact_dir) / "gems"
-            self._build_native_artifact(
-                source_hdf5=source_hdf5,
-                output_dir=artifact_dir,
-                cfg=cfg,
-            )
-
-            with mock.patch.object(gems_artifacts, "snapshot_download") as download_mock:
-                datamodule = gems.GemsNativeDataModule(cfg, seed=42)
-                batch = next(iter(datamodule.train_loader_for_epoch(0)))
-
-            self.assertIn("peak_mz", batch)
-            download_mock.assert_not_called()
-
-    def test_datamodule_rank_one_waits_for_gems_download(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            source_hdf5 = tmp_path / "GeMS_A.hdf5"
-            _write_fake_gems_hdf5(source_hdf5)
-            cfg = self._make_config(tmp_path)
-            artifact_dir = Path(cfg.artifact_dir) / "gems"
             download_calls = []
 
             def fake_snapshot_download(**kwargs):
@@ -604,11 +261,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 return str(kwargs["local_dir"])
 
             def fake_barrier():
-                self._build_native_artifact(
-                    source_hdf5=source_hdf5,
-                    output_dir=artifact_dir,
-                    cfg=cfg,
-                )
+                _write_fake_hdf5_shards(self._artifact_dir(cfg), [3, 2])
 
             with (
                 mock.patch.object(
@@ -632,7 +285,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                     side_effect=fake_barrier,
                 ) as barrier_mock,
             ):
-                datamodule = gems.GemsNativeDataModule(
+                datamodule = gems.GemsDataModule(
                     cfg,
                     seed=42,
                     distributed_world_size=2,
@@ -641,25 +294,18 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
 
         self.assertEqual(download_calls, [])
         barrier_mock.assert_called_once()
-        self.assertEqual(datamodule.info["train_size"], 2)
+        self.assertEqual(datamodule.info["train_size"], 5)
 
     def test_datamodule_local_rank_zero_downloads_on_nonzero_global_rank(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            source_hdf5 = tmp_path / "GeMS_A.hdf5"
-            _write_fake_gems_hdf5(source_hdf5)
             cfg = self._make_config(tmp_path)
             cfg.batch_size = 4
-            artifact_dir = Path(cfg.artifact_dir) / "gems"
             download_calls = []
 
             def fake_snapshot_download(**kwargs):
                 download_calls.append(kwargs)
-                self._build_native_artifact(
-                    source_hdf5=source_hdf5,
-                    output_dir=artifact_dir,
-                    cfg=cfg,
-                )
+                _write_fake_hdf5_shards(Path(kwargs["local_dir"]), [3, 2])
                 return str(kwargs["local_dir"])
 
             with (
@@ -684,7 +330,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                     return_value=None,
                 ) as barrier_mock,
             ):
-                datamodule = gems.GemsNativeDataModule(
+                datamodule = gems.GemsDataModule(
                     cfg,
                     seed=42,
                     distributed_world_size=4,
@@ -694,177 +340,32 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
 
         self.assertEqual(len(download_calls), 1)
         barrier_mock.assert_called_once()
-        self.assertEqual(datamodule.info["train_size"], 2)
+        self.assertEqual(datamodule.info["train_size"], 5)
 
-    def test_datamodule_rejects_legacy_gems_cache_without_download(self):
+    def test_hdf5_loader_respects_persistent_workers_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            cfg = self._make_config(tmp_path)
-
-            artifact_dir = Path(cfg.artifact_dir) / "gems"
-            artifact_dir.mkdir(parents=True, exist_ok=True)
-            (artifact_dir / "metadata.json").write_text(
-                json.dumps({"gems_metadata_version": 1})
-            )
-
-            with mock.patch.object(gems_artifacts, "snapshot_download") as download_mock:
-                with self.assertRaisesRegex(ValueError, "Delete the artifact directory"):
-                    gems.GemsNativeDataModule(cfg, seed=42)
-
-            download_mock.assert_not_called()
-
-    def test_datamodule_reuses_same_raw_artifact_for_peak_filter_overrides(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            source_hdf5 = tmp_path / "GeMS_A.hdf5"
-            _write_fake_gems_hdf5(source_hdf5)
-            cfg = self._make_config(tmp_path)
-            cfg.peak_drop_min_intensity = 1e-3
-            cfg.precursor_peak_exclusion_window_da = 5.0
-
-            def fake_snapshot_download(*, local_dir, **kwargs):
-                self._build_native_artifact(
-                    source_hdf5=source_hdf5,
-                    output_dir=Path(local_dir),
-                    cfg=cfg,
-                )
-                return str(local_dir)
-
-            with mock.patch.object(gems_artifacts, "snapshot_download",
-                side_effect=fake_snapshot_download,
-            ):
-                datamodule = gems.GemsNativeDataModule(cfg, seed=42)
-
-            self.assertNotIn("gems_variants", str(datamodule.gems_dir))
-            self.assertEqual(datamodule.gems_dir, Path(cfg.artifact_dir) / "gems")
-
-    def test_datamodule_rejects_precursor_mz_mismatch_without_variant_build(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            source_hdf5 = tmp_path / "GeMS_A.hdf5"
-            _write_fake_gems_hdf5(source_hdf5)
-            cfg = self._make_config(tmp_path)
-            cfg.gems_native_hf_subdir = "gems_a10_native"
-            cfg.max_precursor_mz = 650.0
-            download_calls = []
-
-            def fake_snapshot_download(*, local_dir, **kwargs):
-                download_calls.append(kwargs)
-                artifact_dir = Path(local_dir) / "gems_a10_native"
-                base_cfg = self._make_config(tmp_path)
-                self._build_native_artifact(
-                    source_hdf5=source_hdf5,
-                    output_dir=artifact_dir,
-                    cfg=base_cfg,
-                )
-                metadata_path = artifact_dir / "metadata.json"
-                metadata = json.loads(metadata_path.read_text())
-                metadata["source_hdf5_path"] = ""
-                metadata["source_url"] = None
-                metadata["raw_hdf5_path"] = f"raw/{source_hdf5.name}"
-                metadata_path.write_text(json.dumps(metadata))
-                return str(local_dir)
-
-            with mock.patch.object(
-                gems_artifacts,
-                "snapshot_download",
-                side_effect=fake_snapshot_download,
-            ):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "preprocessing mismatch",
-                ):
-                    gems.GemsNativeDataModule(cfg, seed=42)
-
-        self.assertEqual(
-            [call["allow_patterns"] for call in download_calls],
-            [
-                [
-                    "gems_a10_native/metadata.json",
-                    "gems_a10_native/train/*",
-                    "gems_a10_native/validation/*",
-                ],
-            ],
-        )
-
-    def test_datamodule_rank_one_rejects_precursor_mz_mismatch_without_variant(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            source_hdf5 = tmp_path / "GeMS_A.hdf5"
-            _write_fake_gems_hdf5(source_hdf5)
-            base_cfg = self._make_config(tmp_path)
-            artifact_dir = Path(base_cfg.artifact_dir) / "gems"
-            self._build_native_artifact(
-                source_hdf5=source_hdf5,
-                output_dir=artifact_dir,
-                cfg=base_cfg,
-            )
-
-            cfg = self._make_config(tmp_path)
-            cfg.max_precursor_mz = 650.0
-
-            with (
-                mock.patch.object(
-                    gems_artifacts.torch.distributed,
-                    "is_available",
-                    return_value=True,
-                ),
-                mock.patch.object(
-                    gems_artifacts.torch.distributed,
-                    "is_initialized",
-                    return_value=True,
-                ),
-                mock.patch.object(
-                    gems_artifacts.torch.distributed,
-                    "barrier",
-                    return_value=None,
-                ) as barrier_mock,
-            ):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "preprocessing mismatch",
-                ):
-                    gems.GemsNativeDataModule(
-                        cfg,
-                        seed=42,
-                        distributed_world_size=2,
-                        distributed_rank=1,
-                    )
-
-        barrier_mock.assert_called_once()
-
-    def test_native_loader_respects_persistent_workers_config(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            source_hdf5 = tmp_path / "GeMS_A.hdf5"
-            _write_fake_gems_hdf5(source_hdf5)
             cfg = self._make_config(tmp_path)
             cfg.dataloader_num_workers = 1
             cfg.dataloader_persistent_workers = True
             cfg.dataloader_prefetch_factor = 2
 
             def fake_snapshot_download(*, local_dir, **kwargs):
-                self._build_native_artifact(
-                    source_hdf5=source_hdf5,
-                    output_dir=Path(local_dir),
-                    cfg=cfg,
-                )
+                _write_fake_hdf5_shards(Path(local_dir), [3, 2])
                 return str(local_dir)
 
             with mock.patch.object(gems_artifacts, "snapshot_download",
                 side_effect=fake_snapshot_download,
             ):
-                datamodule = gems.GemsNativeDataModule(cfg, seed=42)
+                datamodule = gems.GemsDataModule(cfg, seed=42)
                 loader = datamodule.train_loader_for_epoch(0)
 
             self.assertEqual(loader.num_workers, 1)
             self.assertTrue(loader.persistent_workers)
 
-    def test_native_loader_reaches_second_epoch_with_persistent_workers(self):
+    def test_hdf5_loader_reaches_second_epoch_with_persistent_workers(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            source_hdf5 = tmp_path / "GeMS_A.hdf5"
-            _write_fake_gems_hdf5(source_hdf5)
             cfg = self._make_config(tmp_path)
             cfg.batch_size = 1
             cfg.dataloader_num_workers = 1
@@ -872,17 +373,13 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             cfg.dataloader_prefetch_factor = 2
 
             def fake_snapshot_download(*, local_dir, **kwargs):
-                self._build_native_artifact(
-                    source_hdf5=source_hdf5,
-                    output_dir=Path(local_dir),
-                    cfg=cfg,
-                )
+                _write_fake_hdf5_shards(Path(local_dir), [3, 2])
                 return str(local_dir)
 
             with mock.patch.object(gems_artifacts, "snapshot_download",
                 side_effect=fake_snapshot_download,
             ):
-                datamodule = gems.GemsNativeDataModule(cfg, seed=42)
+                datamodule = gems.GemsDataModule(cfg, seed=42)
                 loader0 = datamodule.train_loader_for_epoch(0)
                 epoch0_batches = list(loader0)
                 del loader0
@@ -899,42 +396,9 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             tmp_path = Path(tmp)
             cfg = self._make_config(tmp_path)
             cfg.batch_size = 1
-            cfg.dataloader_num_workers = 0
+            _write_fake_hdf5_shards(self._artifact_dir(cfg), [5, 4])
 
-            artifact_dir = Path(cfg.artifact_dir) / "gems"
-            train_entries = _write_fake_native_shards(
-                artifact_dir / "train",
-                [5, 4],
-                num_peaks=int(cfg.num_peaks),
-            )
-            val_entries = _write_fake_native_shards(
-                artifact_dir / "validation",
-                [3],
-                num_peaks=int(cfg.num_peaks),
-            )
-            metadata = {
-                "gems_native_metadata_version": GEMS_NATIVE_METADATA_VERSION,
-                "num_peaks_input": 128,
-                "artifact_format": "raw_peaklist_v1",
-                "max_precursor_mz": float(cfg.max_precursor_mz),
-                "train_shards": [Path(entry["dir"]).name for entry in train_entries],
-                "train_lengths": [entry["length"] for entry in train_entries],
-                "validation_shards": [
-                    Path(entry["dir"]).name for entry in val_entries
-                ],
-                "validation_lengths": [entry["length"] for entry in val_entries],
-                "train_size": 9,
-                "validation_size": 3,
-                "validation_fraction": 0.25,
-                "split_seed": 42,
-                "num_shards": len(train_entries),
-                "source_hdf5_path": "unit-test",
-                "source_url": None,
-            }
-            artifact_dir.mkdir(parents=True, exist_ok=True)
-            (artifact_dir / "metadata.json").write_text(json.dumps(metadata))
-
-            datamodule = gems.GemsNativeDataModule(cfg, seed=42)
+            datamodule = gems.GemsDataModule(cfg, seed=42)
             train_dataset = datamodule._get_dataset("train")
             expected_ids = sorted(
                 float(train_dataset[idx]["precursor_mz_raw"])
@@ -959,42 +423,9 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             tmp_path = Path(tmp)
             cfg = self._make_config(tmp_path)
             cfg.batch_size = 2
-            cfg.dataloader_num_workers = 0
+            _write_fake_hdf5_shards(self._artifact_dir(cfg), [5, 4])
 
-            artifact_dir = Path(cfg.artifact_dir) / "gems"
-            train_entries = _write_fake_native_shards(
-                artifact_dir / "train",
-                [5, 4],
-                num_peaks=int(cfg.num_peaks),
-            )
-            val_entries = _write_fake_native_shards(
-                artifact_dir / "validation",
-                [3],
-                num_peaks=int(cfg.num_peaks),
-            )
-            metadata = {
-                "gems_native_metadata_version": GEMS_NATIVE_METADATA_VERSION,
-                "num_peaks_input": 128,
-                "artifact_format": "raw_peaklist_v1",
-                "max_precursor_mz": float(cfg.max_precursor_mz),
-                "train_shards": [Path(entry["dir"]).name for entry in train_entries],
-                "train_lengths": [entry["length"] for entry in train_entries],
-                "validation_shards": [
-                    Path(entry["dir"]).name for entry in val_entries
-                ],
-                "validation_lengths": [entry["length"] for entry in val_entries],
-                "train_size": 9,
-                "validation_size": 3,
-                "validation_fraction": 0.25,
-                "split_seed": 42,
-                "num_shards": len(train_entries),
-                "source_hdf5_path": "unit-test",
-                "source_url": None,
-            }
-            artifact_dir.mkdir(parents=True, exist_ok=True)
-            (artifact_dir / "metadata.json").write_text(json.dumps(metadata))
-
-            datamodule = gems.GemsNativeDataModule(cfg, seed=42)
+            datamodule = gems.GemsDataModule(cfg, seed=42)
             full_ids = [
                 round(float(value) * 1000.0, 6)
                 for batch in datamodule.train_loader_for_epoch(0)
@@ -1007,8 +438,8 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 for value in batch["precursor_mz"]
             ]
 
-        self.assertEqual(offset_ids, full_ids[4:])
-        self.assertEqual(len(offset_loader), datamodule.train_steps - 2)
+            self.assertEqual(offset_ids, full_ids[4:])
+            self.assertEqual(len(offset_loader), datamodule.train_steps - 2)
 
     def test_distributed_train_loader_splits_fixed_global_batch(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1017,42 +448,10 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             cfg.batch_size = 4
             cfg.drop_remainder = True
             cfg.dataloader_num_workers = 4
-
-            artifact_dir = Path(cfg.artifact_dir) / "gems"
-            train_entries = _write_fake_native_shards(
-                artifact_dir / "train",
-                [8],
-                num_peaks=int(cfg.num_peaks),
-            )
-            val_entries = _write_fake_native_shards(
-                artifact_dir / "validation",
-                [2],
-                num_peaks=int(cfg.num_peaks),
-            )
-            metadata = {
-                "gems_native_metadata_version": GEMS_NATIVE_METADATA_VERSION,
-                "num_peaks_input": 128,
-                "artifact_format": "raw_peaklist_v1",
-                "max_precursor_mz": float(cfg.max_precursor_mz),
-                "train_shards": [Path(entry["dir"]).name for entry in train_entries],
-                "train_lengths": [entry["length"] for entry in train_entries],
-                "validation_shards": [
-                    Path(entry["dir"]).name for entry in val_entries
-                ],
-                "validation_lengths": [entry["length"] for entry in val_entries],
-                "train_size": 8,
-                "validation_size": 2,
-                "validation_fraction": 0.2,
-                "split_seed": 42,
-                "num_shards": len(train_entries),
-                "source_hdf5_path": "unit-test",
-                "source_url": None,
-            }
-            artifact_dir.mkdir(parents=True, exist_ok=True)
-            (artifact_dir / "metadata.json").write_text(json.dumps(metadata))
+            _write_fake_hdf5_shards(self._artifact_dir(cfg), [8])
 
             rank_modules = [
-                gems.GemsNativeDataModule(
+                gems.GemsDataModule(
                     cfg,
                     seed=42,
                     distributed_world_size=2,
@@ -1100,49 +499,17 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             sorted(value for batches in rank_batches for value in batches[1]),
         )
 
-    def test_distributed_train_loader_keeps_global_steps_for_uneven_epoch(self):
+    def test_distributed_train_loader_truncates_uneven_tail_without_duplicates(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             cfg = self._make_config(tmp_path)
             cfg.batch_size = 4
             cfg.drop_remainder = False
             cfg.dataloader_num_workers = 0
-
-            artifact_dir = Path(cfg.artifact_dir) / "gems"
-            train_entries = _write_fake_native_shards(
-                artifact_dir / "train",
-                [9],
-                num_peaks=int(cfg.num_peaks),
-            )
-            val_entries = _write_fake_native_shards(
-                artifact_dir / "validation",
-                [2],
-                num_peaks=int(cfg.num_peaks),
-            )
-            metadata = {
-                "gems_native_metadata_version": GEMS_NATIVE_METADATA_VERSION,
-                "num_peaks_input": 128,
-                "artifact_format": "raw_peaklist_v1",
-                "max_precursor_mz": float(cfg.max_precursor_mz),
-                "train_shards": [Path(entry["dir"]).name for entry in train_entries],
-                "train_lengths": [entry["length"] for entry in train_entries],
-                "validation_shards": [
-                    Path(entry["dir"]).name for entry in val_entries
-                ],
-                "validation_lengths": [entry["length"] for entry in val_entries],
-                "train_size": 9,
-                "validation_size": 2,
-                "validation_fraction": 0.2,
-                "split_seed": 42,
-                "num_shards": len(train_entries),
-                "source_hdf5_path": "unit-test",
-                "source_url": None,
-            }
-            artifact_dir.mkdir(parents=True, exist_ok=True)
-            (artifact_dir / "metadata.json").write_text(json.dumps(metadata))
+            _write_fake_hdf5_shards(self._artifact_dir(cfg), [9])
 
             rank_modules = [
-                gems.GemsNativeDataModule(
+                gems.GemsDataModule(
                     cfg,
                     seed=123,
                     distributed_world_size=2,
@@ -1168,11 +535,11 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
         for datamodule in rank_modules:
             self.assertEqual(datamodule.global_batch_size, 4)
             self.assertEqual(datamodule.batch_size, 2)
-            self.assertEqual(datamodule.train_steps, 3)
-        self.assertEqual([len(batches) for batches in rank_batches], [3, 3])
+            self.assertEqual(datamodule.train_steps, 2)
+        self.assertEqual([len(batches) for batches in rank_batches], [2, 2])
         self.assertEqual(
             [[len(batch) for batch in batches] for batches in rank_batches],
-            [[2, 2, 1], [2, 2, 1]],
+            [[2, 2], [2, 2]],
         )
         combined = [
             value
@@ -1180,115 +547,10 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             for batch in batches
             for value in batch
         ]
-        self.assertEqual(sorted(set(combined)), list(range(9)))
-        self.assertEqual(len(combined), 10)
-        self.assertEqual(len(combined) - len(set(combined)), 1)
-        self.assertEqual([len(batches) for batches in offset_rank_batches], [1, 1])
-        self.assertEqual(
-            sorted(
-                value
-                for batches in offset_rank_batches
-                for batch in batches
-                for value in batch
-            ),
-            sorted(value for batches in rank_batches for value in batches[2]),
-        )
-
-    def test_memmap_loader_multi_worker_covers_each_sample_once(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            entries = _write_fake_native_shards(tmp_path / "train", [3, 2, 4])
-            dataset = gems.GemsMemmapDataset(cast(list[dict[str, Any]], entries))
-            loader = DataLoader(
-                dataset,
-                batch_size=2,
-                shuffle=False,
-                num_workers=4,
-                persistent_workers=True,
-                prefetch_factor=2,
-                collate_fn=gems.GemsBatchCollator(
-                    augment=False,
-                    num_target_blocks=1,
-                    context_fraction=0.5,
-                    target_fraction=0.5,
-                    block_min_len=1,
-                    num_peaks=4,
-                    max_precursor_mz=1000.0,
-                    min_peak_intensity=1e-4,
-                    peak_drop_min_intensity=1e-4,
-                    peak_ordering="mz",
-                    precursor_peak_exclusion_window_da=0.0,
-                ),
-            )
-
-            ids = []
-            for batch in loader:
-                ids.extend(round(float(v) * 1000.0) for v in batch["precursor_mz"].tolist())
-
-        self.assertEqual(ids, list(range(9)))
-
-    def test_memmap_dataset_pickle_drops_cached_arrays(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            entries = _write_fake_native_shards(tmp_path / "train", [3, 2])
-            dataset = gems.GemsMemmapDataset(cast(list[dict[str, Any]], entries))
-            expected = dataset[2]
-            self.assertIsNotNone(dataset._arrays)
-
-            restored = pickle.loads(pickle.dumps(dataset))
-
-            self.assertIsNone(restored._arrays)
-            actual = restored[2]
-            np.testing.assert_array_equal(actual["spectra"], expected["spectra"])
-            self.assertEqual(
-                float(actual["precursor_mz_raw"]),
-                float(expected["precursor_mz_raw"]),
-            )
-            self.assertIsNotNone(restored._arrays)
-
-    def test_memmap_loader_persistent_workers_repeat_cleanly(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            entries = _write_fake_native_shards(tmp_path / "train", [3, 2, 4])
-            dataset = gems.GemsMemmapDataset(cast(list[dict[str, Any]], entries))
-            loader = DataLoader(
-                dataset,
-                batch_size=2,
-                shuffle=False,
-                num_workers=4,
-                persistent_workers=True,
-                prefetch_factor=2,
-                collate_fn=gems.GemsBatchCollator(
-                    augment=False,
-                    num_target_blocks=1,
-                    context_fraction=0.5,
-                    target_fraction=0.5,
-                    block_min_len=1,
-                    num_peaks=4,
-                    max_precursor_mz=1000.0,
-                    min_peak_intensity=1e-4,
-                    peak_drop_min_intensity=1e-4,
-                    peak_ordering="mz",
-                    precursor_peak_exclusion_window_da=0.0,
-                ),
-            )
-
-            first_pass = []
-            second_pass = []
-            for batch in loader:
-                first_pass.extend(round(float(v) * 1000.0) for v in batch["precursor_mz"].tolist())
-            for batch in loader:
-                second_pass.extend(round(float(v) * 1000.0) for v in batch["precursor_mz"].tolist())
-
-        self.assertEqual(first_pass, list(range(9)))
-        self.assertEqual(second_pass, list(range(9)))
-
-    def test_missing_gems_repo_id_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg = self._make_config(Path(tmp))
-            cfg.gems_native_repo_id = ""
-            with self.assertRaisesRegex(ValueError, "gems_native_repo_id"):
-                gems.GemsNativeDataModule(cfg, seed=42)
+        self.assertEqual(len(combined), 8)
+        self.assertEqual(len(set(combined)), 8)
+        self.assertLessEqual(set(combined), set(range(9)))
+        self.assertEqual([len(batches) for batches in offset_rank_batches], [0, 0])
 
 
 class MassSpecPreprocessTests(unittest.TestCase):

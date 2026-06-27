@@ -221,10 +221,10 @@ Additional `test-tpu` debug notes from 2026-06-17:
   `gradient_accumulation_steps=4` steps almost always fell back to full context.
   Set `jepa_intensity_aware_context_fraction=0.35` with
   `mae_context_encoder_pack_token_choices=[20]` to keep the run on pack-20.
-- `GemsMemmapDataset` drops cached memmap arrays when pickled. This prevents
-  forkserver DataLoader workers from serializing parent-opened memmaps; before
-  this fix a single worker reached about 45 GB RSS before the training loop
-  started.
+- GeMS pretraining now reads HDF5 shards through
+  `GemsDataModule`; h5py is the HDF5 dataset backend, while the
+  PyTorch datamodule owns chunk-aware sampling, rank partitioning, and
+  DataLoader worker process settings.
 - On `test-tpu` with 8 local v6e devices, pack-20 plus
   `jepa_intensity_aware_context_fraction=0.35` measured about 3.3k samples/s
   after warmup. Xprof showed train-step executions around 294 ms and collectives

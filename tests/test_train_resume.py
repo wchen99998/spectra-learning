@@ -849,7 +849,7 @@ def test_train_and_evaluate_jax_logs_final_metrics_on_main_process(
         lambda name: None,
     )
     monkeypatch.setattr(pretrain_jax, "storage_mkdir", lambda path: None)
-    monkeypatch.setattr(pretrain_jax, "GemsNativeDataModule", FakeDataModule)
+    monkeypatch.setattr(pretrain_jax, "GemsDataModule", FakeDataModule)
     monkeypatch.setattr(pretrain_jax, "build_model_from_config", lambda config: object())
     monkeypatch.setattr(
         pretrain_jax,
@@ -935,7 +935,7 @@ def test_train_and_evaluate_jax_skips_logger_on_worker_process(
         lambda name: None,
     )
     monkeypatch.setattr(pretrain_jax, "storage_mkdir", lambda path: None)
-    monkeypatch.setattr(pretrain_jax, "GemsNativeDataModule", FakeDataModule)
+    monkeypatch.setattr(pretrain_jax, "GemsDataModule", FakeDataModule)
     monkeypatch.setattr(pretrain_jax, "build_model_from_config", lambda config: object())
     monkeypatch.setattr(
         pretrain_jax,

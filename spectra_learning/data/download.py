@@ -4,7 +4,7 @@ import argparse
 import logging
 from pathlib import Path
 
-from spectra_learning.data.gems.datamodule import GemsNativeDataModule
+from spectra_learning.data.gems.datamodule import GemsDataModule
 from spectra_learning.data.massspec_probe import MassSpecProbeData
 from spectra_learning.training.api import load_config
 
@@ -58,7 +58,7 @@ def download_data_artifacts(
         config.nist_murcko_probe_include_dreams_auxiliary = True
 
     if not skip_gems:
-        gems = GemsNativeDataModule(config, seed=int(config.seed))
+        gems = GemsDataModule(config, seed=int(config.seed))
         print(f"GeMS artifact: {gems.gems_dir}")
         print(f"GeMS train shards: {len(gems.gems_train_shards)}")
         print(f"GeMS validation shards: {len(gems.gems_validation_shards)}")

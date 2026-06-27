@@ -5,9 +5,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg = config_dict.ConfigDict()
 
     # Dataset
-    cfg.artifact_dir = "data/gems_artifacts_alpha"
-    cfg.gems_native_repo_id = "cjim8889/gems_native_20260615"
-    cfg.gems_native_hf_subdir = "gems_a10_native"
+    cfg.artifact_dir = "data/massive_v1_ms2_100m_stratified_x16"
+    cfg.gems_hdf5_repo_id = "novogaia/massive-v1-ms2-100m-stratified-x16"
+    cfg.gems_hdf5_manifest = "fdataloader_shards.json"
     cfg.nist_murcko_probe_repo_id = "cjim8889/msms_evaluation_100ktrain_20260615"
     cfg.nist_murcko_probe_revision = "main"
     cfg.nist_murcko_probe_num_repeats = 1
@@ -170,6 +170,6 @@ def get_config() -> config_dict.ConfigDict:
     # Logging
     cfg.enable_wandb = True
     cfg.wandb_project = "jepa-finalrun"
-    cfg.run_name_suffix = "mae-100m-20m-alpha-isoflops-100k-bs1024-ga2"
+    cfg.run_name_suffix = "mae-massive100m-20m-alpha-isoflops-100k-bs1024-ga2"
 
     return cfg

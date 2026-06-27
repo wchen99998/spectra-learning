@@ -7,7 +7,7 @@ import torch
 from ml_collections import config_dict
 
 from spectra_learning.data.gems.collate import GemsBatchCollator
-from spectra_learning.data.gems.datamodule import GemsNativeDataModule
+from spectra_learning.data.gems.datamodule import GemsDataModule
 from spectra_learning.data.gems.masking import (
     JEPA_MASK_STRATEGIES,
     _normalize_mask_strategy_name,
@@ -48,7 +48,7 @@ def _format_block_ranges(ranges: list[tuple[int, int]]) -> str:
     return "[" + ", ".join(f"({start}, {end})" for start, end in ranges) + "]"
 
 
-def _make_visualization_collator_kwargs(datamodule: GemsNativeDataModule) -> dict[str, Any]:
+def _make_visualization_collator_kwargs(datamodule: GemsDataModule) -> dict[str, Any]:
     return {
         "num_target_blocks": datamodule.jepa_num_target_blocks,
         "context_fraction": datamodule.jepa_context_fraction,
@@ -102,7 +102,7 @@ def _load_real_mask_visualization_batches(
     from spectra_learning.training.api import load_config
 
     config = load_config(Path(config_path).expanduser().resolve())
-    datamodule = GemsNativeDataModule(config, seed=seed)
+    datamodule = GemsDataModule(config, seed=seed)
     dataset = datamodule._get_dataset(split)
     sample_indices = [start_index + offset for offset in range(num_samples)]
     samples = [dataset[index] for index in sample_indices]

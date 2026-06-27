@@ -17,6 +17,8 @@ from spectra_learning.data.spectra import (
 
 DEFAULT_BATCH_SIZE = 512
 DEFAULT_ARTIFACT_DIR = Path("data/gems_artifacts")
+DEFAULT_GEMS_HDF5_REPO_ID = "novogaia/massive-v1-ms2-100m-stratified-x16"
+DEFAULT_GEMS_HDF5_MANIFEST = "fdataloader_shards.json"
 NUM_PEAKS_OUTPUT = 60
 GEMS_METADATA_FILENAME = "metadata.json"
 
@@ -34,9 +36,12 @@ def _config_mask_strategy(value: Any) -> str | tuple[str, ...]:
 @dataclass(frozen=True)
 class GemsDataConfig:
     artifact_dir: Path
-    gems_native_repo_id: str
-    gems_native_hf_subdir: str
-    gems_native_revision: str
+    gems_hdf5_repo_id: str
+    gems_hdf5_revision: str
+    gems_hdf5_manifest: str
+    gems_hdf5_spectrum_dataset: str
+    gems_hdf5_precursor_dataset: str
+    gems_hdf5_rows_per_block: int
     batch_size: int
     gradient_accumulation_steps: int
     drop_remainder: bool
@@ -82,13 +87,32 @@ class GemsDataConfig:
         dataloader_num_workers = int(_config_get(config, "dataloader_num_workers", 1))
         return cls(
             artifact_dir=artifact_dir,
-            gems_native_repo_id=str(
-                _config_get(config, "gems_native_repo_id", "")
+            gems_hdf5_repo_id=str(
+                _config_get(
+                    config,
+                    "gems_hdf5_repo_id",
+                    DEFAULT_GEMS_HDF5_REPO_ID,
+                )
             ).strip(),
-            gems_native_hf_subdir=str(
-                _config_get(config, "gems_native_hf_subdir", "")
-            ).strip("/"),
-            gems_native_revision=str(_config_get(config, "gems_native_revision", "main")),
+            gems_hdf5_revision=str(
+                _config_get(config, "gems_hdf5_revision", "main")
+            ),
+            gems_hdf5_manifest=str(
+                _config_get(
+                    config,
+                    "gems_hdf5_manifest",
+                    DEFAULT_GEMS_HDF5_MANIFEST,
+                )
+            ),
+            gems_hdf5_spectrum_dataset=str(
+                _config_get(config, "gems_hdf5_spectrum_dataset", "spectrum")
+            ),
+            gems_hdf5_precursor_dataset=str(
+                _config_get(config, "gems_hdf5_precursor_dataset", "precursor_mz")
+            ),
+            gems_hdf5_rows_per_block=int(
+                _config_get(config, "gems_hdf5_rows_per_block", 0)
+            ),
             batch_size=int(_config_get(config, "batch_size", DEFAULT_BATCH_SIZE)),
             gradient_accumulation_steps=int(
                 _config_get(config, "gradient_accumulation_steps", 1)
