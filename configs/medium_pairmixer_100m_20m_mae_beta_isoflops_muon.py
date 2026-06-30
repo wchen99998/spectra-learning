@@ -42,7 +42,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.val_num_steps = 500
     cfg.run_name_suffix = (
         "mae-massive100m-20m-beta-isoflops-1e19-bs2048-ga4-muon-matchrms-"
-        "lr4p24e-4-default-fullctx-selective-probe1x100k-final-val500x10k"
+        "lr4p24e-4-shouldermax-isoatomic-random-fullctx-selective-"
+        "probe1x100k-final-val500x10k"
     )
 
     return cfg

@@ -214,6 +214,7 @@ class GemsBatchCollator:
                 mask_lengths=self.mask_lengths,
                 mask_round_from=self.mask_round_from,
                 allow_target_overlap=self.allow_target_overlap,
+                peak_group_id=batch.get("peak_group_id"),
             )
 
         return context_mask, target_masks
@@ -252,6 +253,7 @@ class GemsBatchCollator:
             mask_lengths=self.mask_lengths,
             mask_round_from=self.mask_round_from,
             allow_target_overlap=self.allow_target_overlap,
+            peak_group_id=batch.get("peak_group_id"),
         )
 
     def _sample_mixed_strategy_masks(

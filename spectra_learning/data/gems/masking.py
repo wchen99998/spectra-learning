@@ -95,7 +95,13 @@ def _sample_contiguous_mask_1d_torch(
     if active_count == 0:
         return torch.zeros_like(active_positions)
     count = min(mask_count, active_count)
-    start = int(torch.randint(active_count - count + 1, (), device=active_positions.device).item())
+    start = int(
+        torch.randint(
+            active_count - count + 1,
+            (),
+            device=active_positions.device,
+        ).item()
+    )
     compressed_positions = torch.cumsum(active_positions.to(torch.int64), dim=0)
     compressed_positions = compressed_positions - active_positions.to(torch.int64)
     mask = (compressed_positions >= start) & (compressed_positions < start + count)
@@ -106,7 +112,20 @@ def _sample_random_mask_1d_torch(
     active_positions: torch.Tensor,
     *,
     mask_count: int,
+    group_id: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    if group_id is not None:
+        active_group_ids = torch.unique(group_id[active_positions & (group_id >= 0)])
+        count = min(mask_count, active_group_ids.numel())
+        selected_group_ids = active_group_ids[
+            torch.randperm(active_group_ids.numel(), device=active_positions.device)[
+                :count
+            ]
+        ]
+        return (
+            (group_id.unsqueeze(0) == selected_group_ids.unsqueeze(1)).any(dim=0)
+            & active_positions
+        )
     active_indices = torch.nonzero(active_positions, as_tuple=False).squeeze(-1)
     count = min(mask_count, active_indices.numel())
     selected = active_indices[
@@ -117,6 +136,15 @@ def _sample_random_mask_1d_torch(
     mask = torch.zeros_like(active_positions)
     mask[selected] = True
     return mask
+
+
+def _active_unit_count(
+    active_positions: torch.Tensor,
+    group_id: torch.Tensor | None,
+) -> int:
+    if group_id is None:
+        return int(active_positions.sum().item())
+    return int(torch.unique(group_id[active_positions & (group_id >= 0)]).numel())
 
 
 def _fit_mask_to_count(
@@ -205,15 +233,21 @@ def _sample_row_mask(
     mask_count: int,
     mask_lengths: tuple[int, ...],
     mask_round_from: int,
+    group_id: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    active_count = int(row_valid.sum().item())
+    group_id = group_id if strategy == "random" else None
+    active_count = _active_unit_count(row_valid, group_id)
     count = min(mask_count, active_count)
     if count == 0:
         return torch.zeros_like(row_valid)
     if strategy == "contiguous":
         mask = _sample_contiguous_mask_1d_torch(row_valid, mask_count=count)
     elif strategy == "random":
-        mask = _sample_random_mask_1d_torch(row_valid, mask_count=count)
+        return _sample_random_mask_1d_torch(
+            row_valid,
+            mask_count=count,
+            group_id=group_id,
+        )
     else:
         mask = _sample_ragged_block_mask_1d_torch(
             row_valid,
@@ -233,11 +267,28 @@ def _reserve_target_capacity(
     row_valid: torch.Tensor,
     *,
     reserve_count: int,
+    group_id: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    available = int((row_valid & ~row_context).sum().item())
-    needed = min(reserve_count, int(row_valid.sum().item())) - available
+    available = _active_unit_count(row_valid & ~row_context, group_id)
+    needed = min(reserve_count, _active_unit_count(row_valid, group_id)) - available
     if needed <= 0:
         return row_context
+    if group_id is not None:
+        context_group_ids = torch.unique(group_id[row_context & (group_id >= 0)])
+        drop_group_ids = context_group_ids[
+            torch.randperm(context_group_ids.numel(), device=row_context.device)[
+                :needed
+            ]
+        ]
+        out = row_context.clone()
+        out[
+            (
+                group_id.unsqueeze(0)
+                == drop_group_ids.to(group_id.device).unsqueeze(1)
+            ).any(dim=0)
+            & row_context
+        ] = False
+        return out
     context_indices = torch.nonzero(row_context, as_tuple=False).squeeze(-1)
     drop = context_indices[
         torch.randperm(context_indices.numel(), device=row_context.device)[:needed]
@@ -257,12 +308,13 @@ def _sample_target_rows(
     mask_lengths: tuple[int, ...],
     mask_round_from: int,
     allow_target_overlap: bool,
+    group_id: torch.Tensor | None = None,
 ) -> None:
     available = valid_target_positions.clone()
     if not bool(available.any()):
         return
     for block_idx in range(target_masks.shape[1]):
-        block_count = min(target_len, int(available.sum().item()))
+        block_count = min(target_len, _active_unit_count(available, group_id))
         if block_count == 0:
             return
         target_masks[row_idx, block_idx] = _sample_row_mask(
@@ -271,6 +323,7 @@ def _sample_target_rows(
             mask_count=block_count,
             mask_lengths=mask_lengths,
             mask_round_from=mask_round_from,
+            group_id=group_id,
         )
         if not allow_target_overlap:
             available = available & ~target_masks[row_idx, block_idx]
@@ -289,6 +342,7 @@ def _sample_block_masks_torch(
     mask_lengths: tuple[int, ...] = DEFAULT_JEPA_MASK_LENGTHS,
     mask_round_from: int = len(DEFAULT_JEPA_MASK_LENGTHS),
     allow_target_overlap: bool = False,
+    peak_group_id: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     strategy_pool = _resolve_block_mask_strategy_pool(mask_strategy)
     lengths = tuple(length for length in mask_lengths)
@@ -313,14 +367,19 @@ def _sample_block_masks_torch(
     )
     for row_idx in range(batch_size):
         row_valid = peak_valid_mask[row_idx]
-        valid_count = int(row_valid.sum().item())
-        if valid_count == 0:
-            continue
         row_strategy = (
             all_row_strategies[row_idx]
             if all_row_strategies is not None
             else strategy_pool[0]
         )
+        row_group_id = (
+            peak_group_id[row_idx]
+            if peak_group_id is not None and row_strategy == "random"
+            else None
+        )
+        valid_count = _active_unit_count(row_valid, row_group_id)
+        if valid_count == 0:
+            continue
         context_len, target_len = jepa_mask_lengths_for_valid_count(
             valid_count,
             num_target_blocks=num_target_blocks,
@@ -335,11 +394,13 @@ def _sample_block_masks_torch(
             mask_count=context_len,
             mask_lengths=lengths,
             mask_round_from=round_from,
+            group_id=row_group_id,
         )
         row_context = _reserve_target_capacity(
             row_context,
             row_valid,
             reserve_count=num_target_blocks * block_min_len,
+            group_id=row_group_id,
         )
         context_mask[row_idx] = row_context
         if num_target_blocks > 0 and target_len > 0:
@@ -352,5 +413,6 @@ def _sample_block_masks_torch(
                 mask_lengths=lengths,
                 mask_round_from=round_from,
                 allow_target_overlap=allow_target_overlap,
+                group_id=row_group_id,
             )
     return context_mask, target_masks

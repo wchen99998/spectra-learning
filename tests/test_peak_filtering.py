@@ -8,6 +8,7 @@ from spectra_learning.data.spectra import (
     ASSUMED_PRECURSOR_CHARGE,
     COLLISION_ENERGY_MAX,
     DEFAULT_GROUPED_PEAK_SHOULDER_DA,
+    PEAK_GROUP_PADDING_ID,
     PEAK_FILTERING_GROUPED,
     PEAK_FILTERING_TOP_INTENSITY,
     PEAK_MZ_MAX,
@@ -65,9 +66,13 @@ def test_grouped_peak_filtering_keeps_group_representatives_torch() -> None:
     )
     assert torch.allclose(
         grouped_mz * PEAK_MZ_MAX,
-        torch.tensor([100.0, 150.0, 300.0, 400.0]),
+        torch.tensor([100.0, 101.002, 150.0, 151.0]),
         atol=1e-4,
     )
+    grouped_group_id = grouped["peak_group_id"][0, grouped["peak_valid_mask"][0]]
+    assert torch.equal(grouped_group_id, torch.tensor([0, 0, 1, 1], dtype=torch.int32))
+    padding_group_id = grouped["peak_group_id"][0, ~grouped["peak_valid_mask"][0]]
+    assert (padding_group_id == PEAK_GROUP_PADDING_ID).all()
 
 
 def test_grouped_peak_filtering_keeps_group_representatives_numpy() -> None:
@@ -90,9 +95,11 @@ def test_grouped_peak_filtering_keeps_group_representatives_numpy() -> None:
     grouped_mz = grouped["peak_mz"][0, grouped["peak_valid_mask"][0]]
     assert np.allclose(
         grouped_mz * PEAK_MZ_MAX,
-        np.asarray([100.0, 150.0, 300.0, 400.0], dtype=np.float32),
+        np.asarray([100.0, 101.002, 150.0, 151.0], dtype=np.float32),
         atol=1e-4,
     )
+    grouped_group_id = grouped["peak_group_id"][0, grouped["peak_valid_mask"][0]]
+    assert np.array_equal(grouped_group_id, np.asarray([0, 0, 1, 1], dtype=np.int32))
 
 
 def test_gems_data_config_reads_grouped_peak_filtering_fields() -> None:
@@ -147,6 +154,7 @@ def test_gems_collator_can_return_numpy_batch() -> None:
     batch = collator(samples)
 
     assert isinstance(batch["peak_mz"], np.ndarray)
+    assert isinstance(batch["peak_group_id"], np.ndarray)
     assert isinstance(batch["context_mask"], np.ndarray)
     assert isinstance(batch["target_masks"], np.ndarray)
     assert batch["peak_mz"].shape == (1, 4)

@@ -15,6 +15,7 @@ PEAK_FILTERING_GROUPED = "grouped"
 DEFAULT_PEAK_FILTERING = PEAK_FILTERING_TOP_INTENSITY
 DEFAULT_GROUPED_PEAK_SHOULDER_DA = 0.05
 DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES = (1, 2, 3)
+PEAK_GROUP_PADDING_ID = -1
 COLLISION_ENERGY_MAX = 100.0
 PRECURSOR_CHARGE_MAX = 21.0
 ASSUMED_PRECURSOR_CHARGE = 1.0
@@ -62,11 +63,20 @@ def _union_group_parent(parent: list[int], a: int, b: int) -> None:
         parent[root_b] = root_a
 
 
-def _group_peak_indices_numpy(
+def _groups_from_parent_numpy(parent: list[int]) -> list[np.ndarray]:
+    groups_by_root: dict[int, list[int]] = {}
+    for i in range(len(parent)):
+        root = _find_group_parent(parent, i)
+        if root not in groups_by_root:
+            groups_by_root[root] = []
+        groups_by_root[root].append(i)
+    return [np.asarray(indices, dtype=np.int64) for indices in groups_by_root.values()]
+
+
+def _group_shoulder_peak_indices_numpy(
     mz: np.ndarray,
     *,
     shoulder_da: float,
-    isotope_charges: tuple[int, ...],
 ) -> list[np.ndarray]:
     parent = list(range(len(mz)))
     search = mz.searchsorted
@@ -74,6 +84,17 @@ def _group_peak_indices_numpy(
         shoulder_end = int(search(value + shoulder_da, side="right"))
         for j in range(i + 1, shoulder_end):
             _union_group_parent(parent, i, j)
+    return _groups_from_parent_numpy(parent)
+
+
+def _group_isotope_peak_indices_numpy(
+    mz: np.ndarray,
+    *,
+    isotope_charges: tuple[int, ...],
+) -> list[np.ndarray]:
+    parent = list(range(len(mz)))
+    search = mz.searchsorted
+    for i, value in enumerate(mz):
         for charge in isotope_charges:
             if charge > 1 and value / charge < 100.0:
                 continue
@@ -86,14 +107,23 @@ def _group_peak_indices_numpy(
                     break
                 for j in range(start, hi):
                     _union_group_parent(parent, i, j)
+    return _groups_from_parent_numpy(parent)
 
-    groups_by_root: dict[int, list[int]] = {}
-    for i in range(len(mz)):
-        root = _find_group_parent(parent, i)
-        if root not in groups_by_root:
-            groups_by_root[root] = []
-        groups_by_root[root].append(i)
-    return [np.asarray(indices, dtype=np.int64) for indices in groups_by_root.values()]
+
+def _collapse_shoulder_peaks_numpy(
+    mz: np.ndarray,
+    intensity: np.ndarray,
+    *,
+    shoulder_da: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    groups = _group_shoulder_peak_indices_numpy(mz, shoulder_da=shoulder_da)
+    representatives = np.asarray(
+        [group[intensity[group].argmax()] for group in groups],
+        dtype=np.int64,
+    )
+    order = np.argsort(mz[representatives], kind="stable")
+    representatives = representatives[order]
+    return mz[representatives], intensity[representatives]
 
 
 def _select_top_intensity_numpy(
@@ -101,7 +131,7 @@ def _select_top_intensity_numpy(
     intensity: np.ndarray,
     *,
     num_peaks: int,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     if mz.shape[1] > num_peaks:
         topk_idx = np.argpartition(-intensity, kth=num_peaks - 1, axis=1)[:, :num_peaks]
         rows = np.arange(mz.shape[0])[:, None]
@@ -114,7 +144,12 @@ def _select_top_intensity_numpy(
         pad = num_peaks - mz.shape[1]
         mz = np.pad(mz, ((0, 0), (0, pad)))
         intensity = np.pad(intensity, ((0, 0), (0, pad)))
-    return mz, intensity
+    group_id = np.broadcast_to(
+        np.arange(mz.shape[1], dtype=np.int32),
+        mz.shape,
+    ).copy()
+    group_id = np.where(intensity > 0, group_id, PEAK_GROUP_PADDING_ID)
+    return mz, intensity, group_id
 
 
 def _select_grouped_peaks_numpy(
@@ -124,9 +159,14 @@ def _select_grouped_peaks_numpy(
     num_peaks: int,
     shoulder_da: float,
     isotope_charges: tuple[int, ...],
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     selected_mz = np.zeros((mz.shape[0], num_peaks), dtype=mz.dtype)
     selected_intensity = np.zeros((intensity.shape[0], num_peaks), dtype=intensity.dtype)
+    selected_group_id = np.full(
+        (mz.shape[0], num_peaks),
+        PEAK_GROUP_PADDING_ID,
+        dtype=np.int32,
+    )
     for row_idx in range(mz.shape[0]):
         valid = intensity[row_idx] > 0
         row_mz = mz[row_idx, valid]
@@ -136,29 +176,51 @@ def _select_grouped_peaks_numpy(
         mz_order = np.argsort(row_mz, kind="stable")
         row_mz = row_mz[mz_order]
         row_intensity = row_intensity[mz_order]
-        groups = _group_peak_indices_numpy(
+        row_mz, row_intensity = _collapse_shoulder_peaks_numpy(
             row_mz,
+            row_intensity,
             shoulder_da=shoulder_da,
+        )
+        groups = _group_isotope_peak_indices_numpy(
+            row_mz,
             isotope_charges=isotope_charges,
         )
-        representatives = np.asarray(
-            [group[row_intensity[group].argmax()] for group in groups],
-            dtype=np.int64,
+        group_scores = np.asarray(
+            [row_intensity[group].max() for group in groups],
+            dtype=row_intensity.dtype,
         )
-        order = np.argsort(-row_intensity[representatives], kind="stable")
-        representatives = representatives[order[:num_peaks]]
-        selected_mz[row_idx, : representatives.size] = row_mz[representatives]
-        selected_intensity[row_idx, : representatives.size] = row_intensity[
-            representatives
-        ]
-    return selected_mz, selected_intensity
+        group_order = np.argsort(-group_scores, kind="stable")
+        offset = 0
+        output_group_id = 0
+        for group_idx in group_order:
+            group = groups[int(group_idx)]
+            if offset + group.size > num_peaks:
+                continue
+            order = np.argsort(row_mz[group], kind="stable")
+            peak_indices = group[order]
+            end = offset + peak_indices.size
+            selected_mz[row_idx, offset:end] = row_mz[peak_indices]
+            selected_intensity[row_idx, offset:end] = row_intensity[peak_indices]
+            selected_group_id[row_idx, offset:end] = output_group_id
+            offset = end
+            output_group_id += 1
+    return selected_mz, selected_intensity, selected_group_id
 
 
-def _group_peak_indices_torch(
+def _groups_from_parent_torch(parent: list[int]) -> list[list[int]]:
+    groups_by_root: dict[int, list[int]] = {}
+    for i in range(len(parent)):
+        root = _find_group_parent(parent, i)
+        if root not in groups_by_root:
+            groups_by_root[root] = []
+        groups_by_root[root].append(i)
+    return list(groups_by_root.values())
+
+
+def _group_shoulder_peak_indices_torch(
     mz: torch.Tensor,
     *,
     shoulder_da: float,
-    isotope_charges: tuple[int, ...],
 ) -> list[list[int]]:
     parent = list(range(mz.numel()))
     for i in range(mz.numel()):
@@ -168,6 +230,17 @@ def _group_peak_indices_torch(
         )
         for j in range(i + 1, shoulder_end):
             _union_group_parent(parent, i, j)
+    return _groups_from_parent_torch(parent)
+
+
+def _group_isotope_peak_indices_torch(
+    mz: torch.Tensor,
+    *,
+    isotope_charges: tuple[int, ...],
+) -> list[list[int]]:
+    parent = list(range(mz.numel()))
+    for i in range(mz.numel()):
+        value = float(mz[i])
         for charge in isotope_charges:
             if charge > 1 and value / charge < 100.0:
                 continue
@@ -192,14 +265,24 @@ def _group_peak_indices_torch(
                 pattern_edges.extend(range(max(i + 1, lo), hi))
             for j in pattern_edges:
                 _union_group_parent(parent, i, j)
+    return _groups_from_parent_torch(parent)
 
-    groups_by_root: dict[int, list[int]] = {}
-    for i in range(mz.numel()):
-        root = _find_group_parent(parent, i)
-        if root not in groups_by_root:
-            groups_by_root[root] = []
-        groups_by_root[root].append(i)
-    return list(groups_by_root.values())
+
+def _collapse_shoulder_peaks_torch(
+    mz: torch.Tensor,
+    intensity: torch.Tensor,
+    *,
+    shoulder_da: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    groups = _group_shoulder_peak_indices_torch(mz, shoulder_da=shoulder_da)
+    representatives = []
+    for group in groups:
+        group_idx = torch.tensor(group, dtype=torch.long, device=mz.device)
+        representatives.append(group_idx[torch.argmax(intensity[group_idx])])
+    representative_idx = torch.stack(representatives)
+    order = torch.argsort(mz[representative_idx], stable=True)
+    representative_idx = representative_idx[order]
+    return mz[representative_idx], intensity[representative_idx]
 
 
 def _select_top_intensity_torch(
@@ -207,7 +290,7 @@ def _select_top_intensity_torch(
     intensity: torch.Tensor,
     *,
     num_peaks: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if mz.shape[1] > num_peaks:
         intensity, topk_idx = torch.topk(intensity, k=num_peaks, dim=1, sorted=True)
         mz = torch.gather(mz, 1, topk_idx)
@@ -215,7 +298,16 @@ def _select_top_intensity_torch(
         pad = num_peaks - mz.shape[1]
         mz = F.pad(mz, (0, pad))
         intensity = F.pad(intensity, (0, pad))
-    return mz, intensity
+    group_id = torch.arange(num_peaks, dtype=torch.int32, device=mz.device).expand(
+        mz.shape[0],
+        num_peaks,
+    )
+    group_id = torch.where(
+        intensity > 0,
+        group_id,
+        torch.full_like(group_id, PEAK_GROUP_PADDING_ID),
+    )
+    return mz, intensity, group_id
 
 
 def _select_grouped_peaks_torch(
@@ -225,7 +317,7 @@ def _select_grouped_peaks_torch(
     num_peaks: int,
     shoulder_da: float,
     isotope_charges: tuple[int, ...],
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     selected_mz = torch.zeros(
         mz.shape[0],
         num_peaks,
@@ -238,6 +330,12 @@ def _select_grouped_peaks_torch(
         dtype=intensity.dtype,
         device=intensity.device,
     )
+    selected_group_id = torch.full(
+        (mz.shape[0], num_peaks),
+        PEAK_GROUP_PADDING_ID,
+        dtype=torch.int32,
+        device=mz.device,
+    )
     for row_idx in range(mz.shape[0]):
         valid = intensity[row_idx] > 0
         row_mz = mz[row_idx, valid]
@@ -247,25 +345,38 @@ def _select_grouped_peaks_torch(
         mz_order = torch.argsort(row_mz, stable=True)
         row_mz = row_mz[mz_order]
         row_intensity = row_intensity[mz_order]
-        groups = _group_peak_indices_torch(
+        row_mz, row_intensity = _collapse_shoulder_peaks_torch(
             row_mz,
+            row_intensity,
             shoulder_da=shoulder_da,
+        )
+        groups = _group_isotope_peak_indices_torch(
+            row_mz,
             isotope_charges=isotope_charges,
         )
-        representatives = []
+        group_scores = []
         for group in groups:
             group_idx = torch.tensor(group, dtype=torch.long, device=mz.device)
-            representative = group_idx[torch.argmax(row_intensity[group_idx])]
-            representatives.append(representative)
-        representative_idx = torch.stack(representatives)
-        group_scores = row_intensity[representative_idx]
-        order = torch.argsort(group_scores, descending=True, stable=True)[:num_peaks]
-        representative_idx = representative_idx[order]
-        selected_mz[row_idx, : representative_idx.numel()] = row_mz[representative_idx]
-        selected_intensity[row_idx, : representative_idx.numel()] = row_intensity[
-            representative_idx
-        ]
-    return selected_mz, selected_intensity
+            group_scores.append(row_intensity[group_idx].max())
+        group_score_tensor = torch.stack(group_scores)
+        group_order = torch.argsort(group_score_tensor, descending=True, stable=True)
+        offset = 0
+        output_group_id = 0
+        for group_idx in group_order.tolist():
+            group = groups[int(group_idx)]
+            group_size = len(group)
+            if offset + group_size > num_peaks:
+                continue
+            group_idx_tensor = torch.tensor(group, dtype=torch.long, device=mz.device)
+            order = torch.argsort(row_mz[group_idx_tensor], stable=True)
+            peak_indices = group_idx_tensor[order]
+            end = offset + group_size
+            selected_mz[row_idx, offset:end] = row_mz[peak_indices]
+            selected_intensity[row_idx, offset:end] = row_intensity[peak_indices]
+            selected_group_id[row_idx, offset:end] = output_group_id
+            offset = end
+            output_group_id += 1
+    return selected_mz, selected_intensity, selected_group_id
 
 
 def preprocess_peak_batch_numpy(
@@ -301,7 +412,7 @@ def preprocess_peak_batch_numpy(
     intensity = np.where(keep, intensity, 0.0)
 
     if peak_filtering == PEAK_FILTERING_GROUPED:
-        mz, intensity = _select_grouped_peaks_numpy(
+        mz, intensity, group_id = _select_grouped_peaks_numpy(
             mz,
             intensity,
             num_peaks=num_peaks,
@@ -309,7 +420,7 @@ def preprocess_peak_batch_numpy(
             isotope_charges=grouped_peak_isotope_charges,
         )
     else:
-        mz, intensity = _select_top_intensity_numpy(
+        mz, intensity, group_id = _select_top_intensity_numpy(
             mz,
             intensity,
             num_peaks=num_peaks,
@@ -327,8 +438,10 @@ def preprocess_peak_batch_numpy(
     mz = np.take_along_axis(mz, order, axis=1)
     intensity = np.take_along_axis(intensity, order, axis=1)
     valid = np.take_along_axis(valid, order, axis=1)
+    group_id = np.take_along_axis(group_id, order, axis=1)
     mz = np.where(valid, mz, 0.0)
     intensity = np.where(valid, intensity, 0.0)
+    group_id = np.where(valid, group_id, PEAK_GROUP_PADDING_ID)
     precursor = (
         np.clip(precursor_mz, 0.0, max_precursor_mz).astype(np.float32)
         / max_precursor_mz
@@ -337,6 +450,7 @@ def preprocess_peak_batch_numpy(
         "peak_mz": (mz / PEAK_MZ_MAX).astype(np.float32),
         "peak_intensity": intensity.astype(np.float32),
         "peak_valid_mask": valid.astype(bool, copy=False),
+        "peak_group_id": group_id.astype(np.int32, copy=False),
         "precursor_mz": precursor,
     }
 
@@ -373,7 +487,7 @@ def preprocess_peak_batch_torch(
     intensity = torch.where(keep, intensity, torch.zeros_like(intensity))
 
     if peak_filtering == PEAK_FILTERING_GROUPED:
-        mz, intensity = _select_grouped_peaks_torch(
+        mz, intensity, group_id = _select_grouped_peaks_torch(
             mz,
             intensity,
             num_peaks=num_peaks,
@@ -381,7 +495,7 @@ def preprocess_peak_batch_torch(
             isotope_charges=grouped_peak_isotope_charges,
         )
     else:
-        mz, intensity = _select_top_intensity_torch(
+        mz, intensity, group_id = _select_top_intensity_torch(
             mz,
             intensity,
             num_peaks=num_peaks,
@@ -401,12 +515,19 @@ def preprocess_peak_batch_torch(
     mz = torch.gather(mz, 1, order)
     intensity = torch.gather(intensity, 1, order)
     valid = torch.gather(valid, 1, order)
+    group_id = torch.gather(group_id, 1, order)
     mz = torch.where(valid, mz, torch.zeros_like(mz))
     intensity = torch.where(valid, intensity, torch.zeros_like(intensity))
+    group_id = torch.where(
+        valid,
+        group_id,
+        torch.full_like(group_id, PEAK_GROUP_PADDING_ID),
+    )
     precursor = torch.clamp(precursor_mz, 0.0, max_precursor_mz) / max_precursor_mz
     return {
         "peak_mz": mz / PEAK_MZ_MAX,
         "peak_intensity": intensity,
         "peak_valid_mask": valid,
+        "peak_group_id": group_id,
         "precursor_mz": precursor,
     }
