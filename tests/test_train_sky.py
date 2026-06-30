@@ -36,7 +36,7 @@ def test_launcher_shape_comes_from_explicit_muon_long_run_config():
     assert args.training_max_steps is None
     assert args.flex_start_max_run_duration == ""
     assert args.provision_timeout_seconds == 3600
-    assert defaults.training_max_steps == 250_000
+    assert defaults.training_max_steps == 4_768_876
     assert defaults.batch_size == 2048
     assert defaults.gradient_accumulation_steps == 4
     assert defaults.msg_probe_every_n_steps == 100_000
@@ -77,7 +77,8 @@ def test_flex_start_max_run_duration_aliases_map_to_same_arg():
 def test_muon_long_run_config_scales_lr_and_probe_schedule():
     cfg = load_config(MUON_CONFIG)
 
-    assert cfg.training_max_steps == 250_000
+    assert cfg.training_max_steps == 4_768_876
+    assert cfg.num_epochs == 98
     assert cfg.batch_size == 2048
     assert cfg.jax_mesh_devices == "16"
     assert cfg.learning_rate == pytest.approx(3e-4 * math.sqrt(2.0))

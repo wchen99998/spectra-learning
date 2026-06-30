@@ -10,27 +10,11 @@ def get_config() -> config_dict.ConfigDict:
     cfg = get_beta_config()
 
     cfg.device_backend = "jax"
-    cfg.optimizer = "muon"
+    cfg.optimizer = "adamw"
     lr_scale = math.sqrt(2.0)
-    cfg.training_max_steps = 250_000
-    cfg.learning_rate = 3e-04 * lr_scale
-    cfg.min_learning_rate = 3e-05 * lr_scale
-    cfg.muon_beta = 0.95
-    cfg.muon_ns_steps = 5
-    cfg.muon_ns_coeffs = (3.4445, -4.7750, 2.0315)
-    cfg.muon_eps = 1e-08
-    cfg.muon_mu_dtype = "float32"
-    cfg.muon_nesterov = True
-    cfg.muon_adaptive = False
-    cfg.muon_preconditioning = "frobenius"
-    cfg.muon_adjust_lr_fn = "match_rms_adamw"
-    cfg.muon_adam_learning_rate = cfg.learning_rate
-    cfg.muon_adam_min_learning_rate = cfg.min_learning_rate
-    cfg.muon_adam_b1 = 0.9
-    cfg.muon_adam_b2 = cfg.b2
-    cfg.muon_adam_eps_root = 0.0
-    cfg.muon_adam_weight_decay = 0.0
-    cfg.muon_consistent_rms = 0.2
+    cfg.training_max_steps = 4_000_000
+    cfg.learning_rate = 6e-04
+    cfg.min_learning_rate = 6e-05
     cfg.batch_size = 2048
     cfg.gradient_accumulation_steps = 4
     cfg.jax_mesh_devices = "16"
@@ -49,7 +33,7 @@ def get_config() -> config_dict.ConfigDict:
     # round(31 * 0.35) context + round(31 * 0.25) target + 1 CLS.
     cfg.pairmixer_fast_max_visible_tokens = 20
     cfg.num_peaks = 31
-    cfg.num_epochs = 20
+    cfg.num_epochs = 98
     cfg.dataloader_num_workers = 32
     cfg.grouped_peak_shoulder_da = 0.02
     cfg.grouped_peak_isotope_charges = (1, 2, 3)
@@ -59,7 +43,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.val_every_n_steps = 10_000
     cfg.val_num_steps = 500
     cfg.run_name_suffix = (
-        "mae-massive100m-20m-beta-isoflops-250k-bs2048-ga4-muon-matchrms-"
+        "mae-massive100m-20m-beta-isoflops-1e19-bs2048-ga4-muon-matchrms-"
         "lr4p24e-4-default-fullctx-selective-probe1x100k-final-val500x10k"
     )
 

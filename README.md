@@ -1,3 +1,38 @@
+## NIST Disjoint Probe/Retrieval Dataset
+
+Build the fixed raw-NIST benchmark collection from
+`data/raw/hr_msms_nist.mgf` with one command:
+
+```bash
+uv run python -m spectra_learning.data.murcko \
+    --build-disjoint-probe-retrieval \
+    --nist-mgf data/raw/hr_msms_nist.mgf \
+    --work-dir data/prepared/nist_disjoint_probe_retrieval_20260622 \
+    --hf-repo-id wchen99998/msms_nist_disjoint_probe_retrieval_20260622
+```
+
+Use `--skip-upload` for a local dry run. The staged Hugging Face folder contains
+`nist_100k_online_probe/` with train/val/test Parquets, `nist_retrieval_pool/`
+with the Murcko-histogram-disjoint retrieval spectra, and fixed pair tables in
+`nist_same_inchi14_10ppm_retrieval/` and `nist_mces_analog_retrieval/`.
+Top-level `metadata.json` records the 100k without-replacement probe selection,
+the selected Murcko histogram keys, and the zero-overlap check against the
+retrieval pool.
+
+Use the new online-probe split with the existing MSG probe loader by pointing
+the NIST probe repo/subdirectory at the new dataset. The MCEBIO sulfur test set
+continues to load from the established evaluation repo by default:
+
+```python
+cfg.nist_murcko_probe_repo_id = "wchen99998/msms_nist_disjoint_probe_retrieval_20260622"
+cfg.nist_murcko_probe_hf_subdir = "nist_100k_online_probe"
+cfg.nist_murcko_probe_include_dreams_auxiliary = False
+```
+
+If the MCEBIO artifact also lives somewhere else, set
+`cfg.mcebio_murcko_probe_repo_id`, `cfg.mcebio_murcko_probe_revision`, and
+`cfg.mcebio_murcko_probe_hf_subdir` explicitly.
+
 ## SLURM Multi-Node Training
 
 Use one SLURM task per node, and let that task launch one `torchrun` worker per
