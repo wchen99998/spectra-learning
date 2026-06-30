@@ -166,7 +166,7 @@ def _sample_all_mask_strategies_torch(
     return strategies[: batch_size]
 
 
-def _target_lengths(
+def jepa_mask_lengths_for_valid_count(
     valid_count: int,
     *,
     num_target_blocks: int,
@@ -321,7 +321,7 @@ def _sample_block_masks_torch(
             if all_row_strategies is not None
             else strategy_pool[0]
         )
-        context_len, target_len = _target_lengths(
+        context_len, target_len = jepa_mask_lengths_for_valid_count(
             valid_count,
             num_target_blocks=num_target_blocks,
             context_fraction=context_fraction,

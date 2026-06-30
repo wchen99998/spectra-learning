@@ -405,13 +405,15 @@ def test_bi_dense_block_type_is_configurable():
 def test_fastmixer_block_type_is_configurable():
     settings = PeakSetJEPASettings.from_config(
         {
+            "training_mode": "mae",
+            "num_peaks": 5,
+            "jepa_num_target_blocks": 1,
             "pairmixer_block_type": "FastMixer",
-            "pairmixer_fast_max_visible_tokens": 5,
         }
     )
 
     assert settings.pairmixer_block_type == "FastMixer"
-    assert settings.pairmixer_fast_max_visible_tokens == 5
+    assert settings.pairmixer_fast_max_visible_tokens == 4
 
 
 @torch.no_grad()

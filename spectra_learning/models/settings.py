@@ -5,6 +5,9 @@ from dataclasses import dataclass, fields, replace
 from typing import Any
 
 from spectra_learning.data.spectra import PEAK_MZ_MAX
+from spectra_learning.models.fastmixer_capacity import (
+    resolve_pairmixer_fast_max_visible_tokens,
+)
 
 
 @dataclass(slots=True)
@@ -80,6 +83,9 @@ class PeakSetJEPASettings:
         _apply_derived_defaults(values, config)
         for name, cast in SETTING_CASTS.items():
             values[name] = cast(_config_get(config, name, values[name]))
+        values["pairmixer_fast_max_visible_tokens"] = (
+            resolve_pairmixer_fast_max_visible_tokens(config)
+        )
         return cls(**values)
 
     @classmethod
@@ -171,7 +177,6 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "pairmixer_fourier_x_max": float,
     "pairmixer_relative_fourier_x_min": float,
     "pairmixer_relative_fourier_x_max": float,
-    "pairmixer_fast_max_visible_tokens": _optional_int,
     "predictor_apply_final_norm": bool,
     "mae_context_encoder_pack_tokens": int,
     "num_peaks": int,

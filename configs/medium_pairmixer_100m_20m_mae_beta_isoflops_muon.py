@@ -30,8 +30,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_target_fraction = 0.25
     cfg.peak_filtering = "grouped"
     cfg.pairmixer_block_type = "FastMixer"
-    # round(31 * 0.35) context + round(31 * 0.25) target + 1 CLS.
-    cfg.pairmixer_fast_max_visible_tokens = 20
     cfg.num_peaks = 31
     cfg.num_epochs = 98
     cfg.dataloader_num_workers = 32

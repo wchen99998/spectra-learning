@@ -20,6 +20,9 @@ from spectra_learning.config.msg_probe import validate_msg_probe_config
 from spectra_learning.data.loading import local_batch_size
 from spectra_learning.data.massspec_probe import MassSpecProbeData
 from spectra_learning.models.common_jax import Array
+from spectra_learning.models.fastmixer_capacity import (
+    pairmixer_fast_full_visible_tokens,
+)
 from spectra_learning.models.model_jax import PeakSetJEPAJax
 from spectra_learning.probes.massspec.msg_settings import (
     BINARY_PROBE_TASKS,
@@ -114,6 +117,7 @@ def _run_msg_probe_once_jax(
     probe_data = MassSpecProbeData.from_config(config, **probe_data_kwargs)
     variants = msg_probe_variants_from_config(config)
     use_pair_features = any(_uses_pair_features(variant) for variant in variants)
+    feature_model = _full_visible_fastmixer_probe_model(config, model)
     max_train_samples = _optional_positive_int(
         config,
         "jax_msg_probe_max_train_samples",
@@ -272,7 +276,7 @@ def _run_msg_probe_once_jax(
             data_mesh=data_mesh,
         ):
             features = _extract_features(
-                model,
+                feature_model,
                 batch,
                 use_pair_features=use_pair_features,
             )
@@ -320,7 +324,11 @@ def _run_msg_probe_once_jax(
             distributed_rank=_distributed_rank_jax(),
             data_mesh=data_mesh,
         ):
-            features = _extract_features(model, batch, use_pair_features=use_pair_features)
+            features = _extract_features(
+                feature_model,
+                batch,
+                use_pair_features=use_pair_features,
+            )
             step_batch = _probe_step_batch(batch, task_spec)
             for variant in variants:
                 _append_pending_prediction(
@@ -427,7 +435,11 @@ def _run_msg_probe_once_jax(
                 distributed_rank=_distributed_rank_jax(),
                 data_mesh=data_mesh,
             ):
-            features = _extract_features(model, batch, use_pair_features=use_pair_features)
+            features = _extract_features(
+                feature_model,
+                batch,
+                use_pair_features=use_pair_features,
+            )
             step_batch = _probe_step_batch(batch, task_spec)
             for variant in variants:
                 params = best_params_by_variant.get(variant, params_by_variant[variant])
@@ -489,7 +501,11 @@ def _run_msg_probe_once_jax(
             distributed_rank=_distributed_rank_jax(),
             data_mesh=data_mesh,
         ):
-            features = _extract_features(model, batch, use_pair_features=use_pair_features)
+            features = _extract_features(
+                feature_model,
+                batch,
+                use_pair_features=use_pair_features,
+            )
             step_batch = _probe_step_batch(batch, task_spec)
             for variant in variants:
                 params = best_params_by_variant.get(variant, params_by_variant[variant])
@@ -1454,6 +1470,24 @@ def _single_pair_covariance_pool(
     pair = (pair_covariance / denom[:, None]).reshape(batch_size, -1)
     pooled = jnp.concatenate([_layer_norm(single), _layer_norm(pair)], axis=-1)
     return jnp.matmul(pooled, params["output_w"]) + params["output_b"]
+
+
+def _full_visible_fastmixer_probe_model(
+    config: config_dict.ConfigDict,
+    model: PeakSetJEPAJax,
+) -> PeakSetJEPAJax:
+    if not model.use_fastmixer:
+        return model
+    full_visible_tokens = pairmixer_fast_full_visible_tokens(config)
+    if model.pairmixer_fast_max_visible_tokens == full_visible_tokens:
+        return model
+    probe_model = PeakSetJEPAJax(
+        model.settings,
+        pairmixer_fast_max_visible_tokens=full_visible_tokens,
+        rngs=nnx.Rngs(int(_config_get(config, "seed", 0))),
+    )
+    nnx.update(probe_model, nnx.as_pure(nnx.state(model, nnx.Param)))
+    return probe_model
 
 
 @nnx.jit

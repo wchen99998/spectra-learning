@@ -82,6 +82,7 @@ def _swiglu_with_preferred_acc(feed_forward: SwiGLUFeedForward, x: Array) -> Arr
 
 def _active_indices(token_mask: Array, max_active_tokens: int) -> tuple[Array, Array]:
     batch_size, num_tokens = token_mask.shape
+    compact_len = min(max_active_tokens, num_tokens)
     position = jnp.arange(num_tokens, dtype=jnp.int32)
     mask_f = token_mask.astype(jnp.float32)
     inv_mask_f = (~token_mask).astype(jnp.float32)
@@ -96,8 +97,8 @@ def _active_indices(token_mask: Array, max_active_tokens: int) -> tuple[Array, A
     position_idx = jnp.broadcast_to(position[None, :], (batch_size, num_tokens))
     idx_full = jnp.zeros((batch_size, num_tokens), dtype=jnp.int32)
     idx_full = idx_full.at[batch_idx, slot].set(position_idx)
-    idx = idx_full[:, :max_active_tokens]
-    compact_position = jnp.arange(max_active_tokens, dtype=jnp.int32)
+    idx = idx_full[:, :compact_len]
+    compact_position = jnp.arange(compact_len, dtype=jnp.int32)
     compact_mask = compact_position[None, :] < active_count[:, None]
     return idx, compact_mask
 
