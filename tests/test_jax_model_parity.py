@@ -328,6 +328,33 @@ def test_jax_fastmixer_matches_bi_dense_on_fixed_random_masks(transition_type: s
     _assert_jax_metrics_close(dense_metrics, fast_metrics)
 
 
+@pytest.mark.parametrize("transition_type", ("swiglu", "feedforward"))
+def test_jax_fastmixer_dense_matches_dense_on_fixed_random_masks(transition_type: str):
+    torch.manual_seed(10)
+    dense_kwargs = {
+        **_small_mae_kwargs(),
+        "pairmixer_block_type": "dense",
+        "pairmixer_transition_type": transition_type,
+    }
+    fast_kwargs = {
+        **dense_kwargs,
+        "pairmixer_block_type": "FastMixer-Dense",
+        "pairmixer_fast_max_visible_tokens": 5,
+    }
+    torch_model = PeakSetJEPA(**dense_kwargs).eval()
+    dense_model = PeakSetJEPAJax(**dense_kwargs)
+    fast_model = PeakSetJEPAJax(**fast_kwargs)
+    state_dict = torch_model.state_dict()
+    dense_model.load_torch_state_dict(state_dict)
+    fast_model.load_torch_state_dict(state_dict)
+    batch = _real_pattern_batch("random")
+
+    dense_metrics = dense_model(_jax_batch(batch))
+    fast_metrics = fast_model(_jax_batch(batch))
+
+    _assert_jax_metrics_close(dense_metrics, fast_metrics)
+
+
 def test_jax_native_bi_dense_pairmixer_uses_torch_style_initialization():
     block = JaxPairMixerBlock(
         single_dim=8,

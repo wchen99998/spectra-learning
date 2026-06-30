@@ -66,13 +66,21 @@ class PeakSetEncoder(nnx.Module):
         self.num_layers = num_layers
         self.use_position_embedding = use_position_embedding
         self.pairmixer_block_type = pairmixer_block_type.lower()
-        if self.pairmixer_block_type not in {"dense", "bi-dense", "fastmixer"}:
+        if self.pairmixer_block_type not in {
+            "dense",
+            "bi-dense",
+            "fastmixer",
+            "fastmixer-dense",
+        }:
             raise ValueError(
                 "pairmixer_block_type must be one of "
-                "('dense', 'bi-dense', 'fastmixer')"
+                "('dense', 'bi-dense', 'fastmixer', 'fastmixer-dense')"
             )
         self.use_bi_dense = self.pairmixer_block_type in {"bi-dense", "fastmixer"}
-        self.use_fastmixer = self.pairmixer_block_type == "fastmixer"
+        self.use_fastmixer = self.pairmixer_block_type in {
+            "fastmixer",
+            "fastmixer-dense",
+        }
         self.pairmixer_fast_max_visible_tokens = pairmixer_fast_max_visible_tokens
         self.activation_checkpoint_mode = activation_checkpoint_mode.lower()
         self.activation_checkpoint_every_n_layers = activation_checkpoint_every_n_layers

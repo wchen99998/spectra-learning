@@ -85,12 +85,16 @@ class PeakSetJEPAJax(nnx.Module):
             "dense",
             "bi-dense",
             "fastmixer",
+            "fastmixer-dense",
         }:
             raise ValueError(
                 "pairmixer_block_type must be one of "
-                "('dense', 'bi-dense', 'fastmixer')"
+                "('dense', 'bi-dense', 'fastmixer', 'fastmixer-dense')"
             )
-        self.use_fastmixer = self.pairmixer_block_type == "fastmixer"
+        self.use_fastmixer = self.pairmixer_block_type in {
+            "fastmixer",
+            "fastmixer-dense",
+        }
         self.pairmixer_fast_max_visible_tokens = cfg.pairmixer_fast_max_visible_tokens
         self.pairmixer_transition_type = cfg.pairmixer_transition_type.lower()
         if self.pairmixer_transition_type not in SUPPORTED_PAIRMIXER_TRANSITION_TYPES:

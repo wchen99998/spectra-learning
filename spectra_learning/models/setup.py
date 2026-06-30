@@ -31,6 +31,7 @@ SUPPORTED_PAIRMIXER_BLOCK_TYPES = {
     "dense",
     "bi-dense",
     "fastmixer",
+    "fastmixer-dense",
 }
 SUPPORTED_PAIRMIXER_TRANSITION_TYPES = {"swiglu", "feedforward"}
 
@@ -75,7 +76,7 @@ def _configure_dimensions(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
     if model.pairmixer_block_type not in SUPPORTED_PAIRMIXER_BLOCK_TYPES:
         raise ValueError(
             "pairmixer_block_type must be one of "
-            "('dense', 'bi-dense', 'fastmixer')"
+            "('dense', 'bi-dense', 'fastmixer', 'fastmixer-dense')"
         )
     model.pairmixer_transition_type = cfg.pairmixer_transition_type.lower()
     if model.pairmixer_transition_type not in SUPPORTED_PAIRMIXER_TRANSITION_TYPES:

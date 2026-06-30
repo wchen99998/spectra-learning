@@ -93,6 +93,6 @@ def resolve_pairmixer_fast_max_visible_tokens(
             "pairmixer_fast_max_visible_tokens is derived from the data config; "
             "remove it from experiment configs"
         )
-    if block_type != "fastmixer":
+    if block_type not in {"fastmixer", "fastmixer-dense"}:
         return None
     return pairmixer_fast_required_visible_tokens(config, mode=mode)

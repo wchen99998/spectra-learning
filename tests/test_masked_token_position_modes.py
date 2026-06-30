@@ -416,6 +416,20 @@ def test_fastmixer_block_type_is_configurable():
     assert settings.pairmixer_fast_max_visible_tokens == 4
 
 
+def test_fastmixer_dense_block_type_is_configurable():
+    settings = PeakSetJEPASettings.from_config(
+        {
+            "training_mode": "mae",
+            "num_peaks": 5,
+            "jepa_num_target_blocks": 1,
+            "pairmixer_block_type": "FastMixer-Dense",
+        }
+    )
+
+    assert settings.pairmixer_block_type == "FastMixer-Dense"
+    assert settings.pairmixer_fast_max_visible_tokens == 4
+
+
 def test_pairmixer_transition_type_is_configurable():
     default_settings = PeakSetJEPASettings.from_config({})
     feedforward_settings = PeakSetJEPASettings.from_config(
@@ -454,6 +468,27 @@ def test_fastmixer_builds_bi_dense_parameter_contract():
     assert hasattr(block, "single_to_pair_update")
     assert isinstance(predictor_block, PairMixerBlock)
     assert hasattr(predictor_block, "single_to_pair_update")
+
+
+@torch.no_grad()
+def test_fastmixer_dense_builds_dense_parameter_contract():
+    model = PeakSetJEPA(
+        model_dim=32,
+        encoder_num_layers=1,
+        encoder_num_heads=4,
+        num_peaks=6,
+        feature_mlp_hidden_dim=32,
+        pairmixer_block_type="FastMixer-Dense",
+        pairmixer_fast_max_visible_tokens=5,
+    )
+
+    block = model.encoder.blocks[0]
+    predictor_block = model.masked_latent_predictor[0]
+
+    assert isinstance(block, PairMixerBlock)
+    assert not hasattr(block, "single_to_pair_update")
+    assert isinstance(predictor_block, PairMixerBlock)
+    assert not hasattr(predictor_block, "single_to_pair_update")
 
 
 def test_triangle_variant_block_types_are_not_supported():

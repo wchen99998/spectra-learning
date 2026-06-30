@@ -26,6 +26,13 @@ def test_muon_config_auto_fastmixer_capacity_matches_mask_pipeline():
     assert PeakSetJEPASettings.from_config(cfg).pairmixer_fast_max_visible_tokens == 20
 
 
+def test_fastmixer_dense_auto_capacity_matches_fastmixer():
+    cfg = get_config()
+    cfg.pairmixer_block_type = "FastMixer-Dense"
+
+    assert PeakSetJEPASettings.from_config(cfg).pairmixer_fast_max_visible_tokens == 20
+
+
 def test_fastmixer_capacity_rejects_explicit_config_cap():
     cfg = get_config()
     cfg.pairmixer_fast_max_visible_tokens = 19
