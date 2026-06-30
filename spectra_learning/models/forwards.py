@@ -6,6 +6,8 @@ import torch
 from jaxtyping import Bool, Float
 from torch import Tensor
 
+from spectra_learning.models.spectrum_metadata import torch_spectrum_metadata_from_batch
+
 
 class ForwardMixin:
     @staticmethod
@@ -57,6 +59,7 @@ class ForwardMixin:
         peak_intensity = augmented_batch["peak_intensity"]
         peak_valid_mask = augmented_batch["peak_valid_mask"]
         precursor_mz = augmented_batch.get("precursor_mz", None)
+        spectrum_metadata = torch_spectrum_metadata_from_batch(augmented_batch)
         context_mask = augmented_batch["context_mask"] & peak_valid_mask
         target_masks = augmented_batch["target_masks"] & peak_valid_mask.unsqueeze(1)
         (
@@ -72,6 +75,7 @@ class ForwardMixin:
             context_mask,
             target_masks,
             precursor_mz=precursor_mz,
+            spectrum_metadata=spectrum_metadata,
         )
         predictor_output_features, predictor_output, predictor_pair = (
             self._predict_augmented_target_outputs(
@@ -182,6 +186,7 @@ class ForwardMixin:
         peak_intensity = augmented_batch["peak_intensity"]
         peak_valid_mask = augmented_batch["peak_valid_mask"]
         precursor_mz = augmented_batch.get("precursor_mz", None)
+        spectrum_metadata = torch_spectrum_metadata_from_batch(augmented_batch)
         context_mask = augmented_batch["context_mask"] & peak_valid_mask
         target_masks = augmented_batch["target_masks"] & peak_valid_mask.unsqueeze(1)
 
@@ -198,6 +203,7 @@ class ForwardMixin:
             valid_mask=peak_valid_mask,
             visible_mask=context_visible_mask,
             precursor_mz=precursor_mz,
+            spectrum_metadata=spectrum_metadata,
         )
         predictor_output_features, predictor_output, predictor_pair = (
             self._predict_augmented_target_outputs(
@@ -250,5 +256,6 @@ class ForwardMixin:
             valid_mask=valid,
             visible_mask=valid,
             precursor_mz=batch.get("precursor_mz", None),
+            spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
         )
         return self.pool(encoded, valid)

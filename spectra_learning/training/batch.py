@@ -11,6 +11,8 @@ TRAIN_BATCH_KEYS = frozenset(
         "context_mask",
         "target_masks",
         "precursor_mz",
+        "collision_energy",
+        "charge",
     }
 )
 

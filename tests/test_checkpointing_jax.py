@@ -57,13 +57,15 @@ def _zeros_like_with_sharding(value: jax.Array) -> jax.Array:
 def _tiny_numpy_batch() -> dict[str, np.ndarray]:
     torch.manual_seed(123)
 
-    def sample(mz, intensity, precursor_mz):
+    def sample(mz, intensity, precursor_mz, collision_energy, charge):
         spectra = np.zeros((2, 128), dtype=np.float32)
         spectra[0, : len(mz)] = np.asarray(mz, dtype=np.float32)
         spectra[1, : len(intensity)] = np.asarray(intensity, dtype=np.float32)
         return {
             "spectra": spectra,
             "precursor_mz_raw": np.asarray(precursor_mz, dtype=np.float32),
+            "collision_energy": np.asarray(collision_energy, dtype=np.float32),
+            "charge": np.asarray(charge, dtype=np.float32),
         }
 
     collator = GemsBatchCollator(
@@ -85,8 +87,8 @@ def _tiny_numpy_batch() -> dict[str, np.ndarray]:
     )
     return collator(
         [
-            sample([100.0, 125.0, 150.0], [1.0, 0.8, 0.4], 500.0),
-            sample([220.0, 240.0, 300.0], [0.9, 0.3, 0.2], 620.0),
+            sample([100.0, 125.0, 150.0], [1.0, 0.8, 0.4], 500.0, 20.0, 1.0),
+            sample([220.0, 240.0, 300.0], [0.9, 0.3, 0.2], 620.0, 40.0, 2.0),
         ]
     )
 

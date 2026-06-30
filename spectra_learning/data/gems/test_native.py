@@ -68,12 +68,16 @@ def _write_fake_hdf5_shards(root: Path, lengths: list[int]) -> Path:
         shard_name = f"shard_{shard_idx:05d}.hdf5"
         shard_path = root / shard_name
         precursor = np.arange(start, start + length, dtype=np.float32)
+        collision_energy = 10.0 + (precursor % 90.0)
+        charge = 1.0 + (precursor % 4.0)
         spectra = np.zeros((length, 2, 128), dtype=np.float64)
         spectra[:, 0, 0] = precursor + 100.0
         spectra[:, 1, 0] = 1.0
         with h5py.File(shard_path, "w") as f:
             f.create_dataset("spectrum", data=spectra, chunks=(1, 2, 128))
             f.create_dataset("precursor_mz", data=precursor, chunks=(1,))
+            f.create_dataset("collision_energy", data=collision_energy, chunks=(1,))
+            f.create_dataset("charge", data=charge, chunks=(1,))
         manifest["shards"].append({"path": shard_name, "rows": length})
         start += length
     manifest_path = root / "fdataloader_shards.json"

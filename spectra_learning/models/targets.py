@@ -7,6 +7,7 @@ from jaxtyping import Bool, Float
 from torch import Tensor
 
 from spectra_learning.models.common import _active_autocast_context
+from spectra_learning.models.spectrum_metadata import torch_spectrum_metadata_from_batch
 
 
 class TargetProjectionMixin:
@@ -153,6 +154,7 @@ class TargetProjectionMixin:
         peak_intensity: Float[Tensor, "batch peaks"],
         peak_valid_mask: Bool[Tensor, "batch peaks"],
         precursor_mz: Float[Tensor, "batch"] | None = None,
+        spectrum_metadata: Float[Tensor, "batch metadata"] | None = None,
     ) -> Float[Tensor, "batch peaks target_dim"]:
         with _active_autocast_context(peak_mz.device.type):
             teacher_encoder = (
@@ -166,6 +168,7 @@ class TargetProjectionMixin:
                 valid_mask=peak_valid_mask,
                 visible_mask=peak_valid_mask,
                 precursor_mz=precursor_mz,
+                spectrum_metadata=spectrum_metadata,
             )
             return teacher_encoded[:, : peak_mz.shape[1]]
 
@@ -175,6 +178,7 @@ class TargetProjectionMixin:
         peak_intensity: Float[Tensor, "batch peaks"],
         peak_valid_mask: Bool[Tensor, "batch peaks"],
         precursor_mz: Float[Tensor, "batch"] | None = None,
+        spectrum_metadata: Float[Tensor, "batch metadata"] | None = None,
     ) -> Float[Tensor, "batch peaks target_dim"]:
         with torch.no_grad():
             teacher_target_features = self._compute_jepa_teacher_target_features(
@@ -182,6 +186,7 @@ class TargetProjectionMixin:
                 peak_intensity,
                 peak_valid_mask,
                 precursor_mz=precursor_mz,
+                spectrum_metadata=spectrum_metadata,
             )
             return self.project_teacher_targets(
                 self._apply_jepa_target_normalization(teacher_target_features)
@@ -217,6 +222,7 @@ class TargetProjectionMixin:
             augmented_batch["peak_intensity"],
             augmented_batch["peak_valid_mask"],
             precursor_mz=augmented_batch.get("precursor_mz", None),
+            spectrum_metadata=torch_spectrum_metadata_from_batch(augmented_batch),
         )
 
     def _encode_augmented_teacher_and_context(
@@ -227,6 +233,7 @@ class TargetProjectionMixin:
         context_mask: Bool[Tensor, "batch peaks"],
         target_masks: Bool[Tensor, "batch views peaks"],
         precursor_mz: Float[Tensor, "batch"] | None = None,
+        spectrum_metadata: Float[Tensor, "batch metadata"] | None = None,
     ) -> tuple[
         Float[Tensor, "batch peaks target_dim"],
         Float[Tensor, "batch tokens dim"],
@@ -249,6 +256,7 @@ class TargetProjectionMixin:
                     valid_mask=peak_valid_mask,
                     visible_mask=peak_valid_mask,
                     precursor_mz=precursor_mz,
+                    spectrum_metadata=spectrum_metadata,
                 )
             context_encoded, context_pair = self.encoder.forward_with_pair(
                 context_mz,
@@ -256,6 +264,7 @@ class TargetProjectionMixin:
                 valid_mask=peak_valid_mask,
                 visible_mask=context_visible_mask,
                 precursor_mz=precursor_mz,
+                spectrum_metadata=spectrum_metadata,
             )
             return (
                 teacher_encoded[:, : peak_mz.shape[1]],
@@ -274,6 +283,11 @@ class TargetProjectionMixin:
                 if precursor_mz is None
                 else torch.cat([precursor_mz, precursor_mz], dim=0)
             ),
+            spectrum_metadata=(
+                None
+                if spectrum_metadata is None
+                else torch.cat([spectrum_metadata, spectrum_metadata], dim=0)
+            ),
         )
         return (
             encoded[:batch_size, : peak_mz.shape[1]],
@@ -290,6 +304,7 @@ class TargetProjectionMixin:
         peak_valid_mask: Bool[Tensor, "batch peaks"],
         visible_mask: Bool[Tensor, "batch peaks"] | None = None,
         precursor_mz: Float[Tensor, "batch"] | None = None,
+        spectrum_metadata: Float[Tensor, "batch metadata"] | None = None,
     ) -> Float[Tensor, "batch dim"]:
         if visible_mask is None:
             visible_mask = peak_valid_mask
@@ -305,5 +320,6 @@ class TargetProjectionMixin:
                 valid_mask=peak_valid_mask,
                 visible_mask=visible_mask,
                 precursor_mz=precursor_mz,
+                spectrum_metadata=spectrum_metadata,
             )
         return self.pool(teacher_encoded, visible_mask)

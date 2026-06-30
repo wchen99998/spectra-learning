@@ -19,6 +19,7 @@ from spectra_learning.data.gems.intensity_aware import (
     sample_intensity_aware_masks_torch,
 )
 from spectra_learning.data.spectra import (
+    COLLISION_ENERGY_MAX,
     DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
     DEFAULT_GROUPED_PEAK_SHOULDER_DA,
     DEFAULT_PEAK_FILTERING,
@@ -114,6 +115,7 @@ class GemsBatchCollator:
             grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
             grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
         )
+        self._add_numpy_spectrum_metadata(batch, samples)
         return {key: torch.from_numpy(value) for key, value in batch.items()}
 
     def _preprocess_torch(
@@ -125,7 +127,7 @@ class GemsBatchCollator:
             [sample["precursor_mz_raw"] for sample in samples],
             dim=0,
         )
-        return preprocess_peak_batch_torch(
+        batch = preprocess_peak_batch_torch(
             spectra[:, 0, :],
             spectra[:, 1, :],
             precursor_mz_raw,
@@ -139,6 +141,42 @@ class GemsBatchCollator:
             grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
             grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
         )
+        self._add_torch_spectrum_metadata(batch, samples)
+        return batch
+
+    def _add_numpy_spectrum_metadata(
+        self,
+        batch: dict[str, np.ndarray],
+        samples: list[dict[str, Any]],
+    ) -> None:
+        collision_energy = np.asarray(
+            [sample["collision_energy"] for sample in samples],
+            dtype=np.float32,
+        )
+        batch["collision_energy"] = (
+            np.clip(collision_energy, 0.0, COLLISION_ENERGY_MAX)
+            / COLLISION_ENERGY_MAX
+        ).astype(np.float32)
+        batch["charge"] = np.asarray(
+            [sample["charge"] for sample in samples],
+            dtype=np.float32,
+        )
+
+    def _add_torch_spectrum_metadata(
+        self,
+        batch: dict[str, torch.Tensor],
+        samples: list[dict[str, Any]],
+    ) -> None:
+        collision_energy = torch.stack(
+            [torch.as_tensor(sample["collision_energy"]) for sample in samples],
+        ).to(dtype=torch.float32)
+        batch["collision_energy"] = collision_energy.clamp(
+            0.0,
+            COLLISION_ENERGY_MAX,
+        ) / COLLISION_ENERGY_MAX
+        batch["charge"] = torch.stack(
+            [torch.as_tensor(sample["charge"]) for sample in samples],
+        ).to(dtype=torch.float32)
 
     def _ensure_nonempty(self, batch: dict[str, torch.Tensor]) -> None:
         no_valid = ~batch["peak_valid_mask"].any(dim=1)

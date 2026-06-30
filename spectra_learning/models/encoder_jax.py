@@ -7,6 +7,7 @@ from flax import nnx
 from spectra_learning.models.common_jax import (
     Array,
     LayerNorm,
+    Linear,
     activation_checkpoint_policy,
     assign_param,
     build_frozen_position_embedding,
@@ -70,6 +71,13 @@ class PeakSetEncoder(nnx.Module):
         self.activation_checkpoint_every_n_layers = activation_checkpoint_every_n_layers
         self.activation_checkpoint_modules = activation_checkpoint_modules
         self.embedder = embedder
+        self.metadata_proj = Linear(
+            2,
+            model_dim,
+            bias=False,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        )
         self.position_embedding = build_frozen_position_embedding(num_peaks, model_dim)
         pair_dim = model_dim if pair_dim is None else pair_dim
         self.cls_token = _normal_token_param(rngs, (model_dim,))
@@ -125,9 +133,20 @@ class PeakSetEncoder(nnx.Module):
         positions = jnp.arange(x.shape[1])
         return x + self.position_embedding(positions).astype(x.dtype)
 
-    def _append_cls_token(self, x: Array) -> Array:
+    def _append_cls_token(
+        self,
+        x: Array,
+        metadata_embedding: Array | None = None,
+    ) -> Array:
         cls = jnp.broadcast_to(self.cls_token[...], (x.shape[0], 1, x.shape[-1]))
+        if metadata_embedding is not None:
+            cls = cls + metadata_embedding[:, None, :].astype(cls.dtype)
         return jnp.concatenate([x, cls.astype(x.dtype)], axis=1)
+
+    def _metadata_embedding(self, spectrum_metadata: Array | None, dtype: object) -> Array | None:
+        if spectrum_metadata is None:
+            return None
+        return self.metadata_proj(spectrum_metadata.astype(dtype))
 
     def _append_cls_pair_tokens(self, pair: Array) -> Array:
         batch_size, num_peaks, _, pair_dim = pair.shape
@@ -162,6 +181,7 @@ class PeakSetEncoder(nnx.Module):
         valid_mask: Array | None = None,
         visible_mask: Array | None = None,
         precursor_mz: Array | None = None,
+        spectrum_metadata: Array | None = None,
         deterministic: bool = True,
     ) -> tuple[Array, Array]:
         peak_valid_mask = (
@@ -170,7 +190,11 @@ class PeakSetEncoder(nnx.Module):
         peak_visible_mask = merge_visible_mask(peak_valid_mask, visible_mask)
         if peak_visible_mask is None:
             peak_visible_mask = peak_valid_mask
-        x = self._add_positions(self.embedder(peak_mz, peak_intensity))
+        x = self.embedder(peak_mz, peak_intensity)
+        metadata_embedding = self._metadata_embedding(spectrum_metadata, x.dtype)
+        if metadata_embedding is not None:
+            x = x + metadata_embedding[:, None, :].astype(x.dtype)
+        x = self._add_positions(x)
         z = self.pair_embedder(
             peak_mz,
             peak_intensity,
@@ -178,7 +202,7 @@ class PeakSetEncoder(nnx.Module):
             peak_visible_mask,
             precursor_mz=precursor_mz,
         )
-        x = self._append_cls_token(x)
+        x = self._append_cls_token(x, metadata_embedding)
         z = self._append_cls_pair_tokens(z)
         token_visible_mask = self._append_cls_mask(peak_visible_mask)
         for block_idx, block in enumerate(self.blocks, start=1):
@@ -219,6 +243,7 @@ class PeakSetEncoder(nnx.Module):
         valid_mask: Array | None = None,
         visible_mask: Array | None = None,
         precursor_mz: Array | None = None,
+        spectrum_metadata: Array | None = None,
     ) -> Array:
         output, _ = self.forward_with_pair(
             peak_mz,
@@ -226,6 +251,7 @@ class PeakSetEncoder(nnx.Module):
             valid_mask=valid_mask,
             visible_mask=visible_mask,
             precursor_mz=precursor_mz,
+            spectrum_metadata=spectrum_metadata,
         )
         return output
 
@@ -236,6 +262,7 @@ class PeakSetEncoder(nnx.Module):
     ) -> None:
         assign_param(self.cls_token, state_dict[f"{prefix}.cls_token"])
         self.embedder.load_torch_state_dict(state_dict, f"{prefix}.embedder")
+        self.metadata_proj.load_torch_state_dict(state_dict, f"{prefix}.metadata_proj")
         self.position_embedding.load_torch_state_dict(
             state_dict,
             f"{prefix}.position_embedding",

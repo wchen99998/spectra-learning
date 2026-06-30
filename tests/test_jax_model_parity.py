@@ -124,13 +124,21 @@ def test_jax_native_dense_encoder_cls_pair_tokens_are_random_initialized():
         assert not np.allclose(np.asarray(getattr(encoder, name)[...]), 0.0), name
 
 
-def _sample(mz: list[float], intensity: list[float], precursor_mz: float) -> dict[str, torch.Tensor]:
+def _sample(
+    mz: list[float],
+    intensity: list[float],
+    precursor_mz: float,
+    collision_energy: float,
+    charge: float,
+) -> dict[str, torch.Tensor]:
     spectra = torch.zeros(2, 128, dtype=torch.float32)
     spectra[0, : len(mz)] = torch.tensor(mz, dtype=torch.float32)
     spectra[1, : len(intensity)] = torch.tensor(intensity, dtype=torch.float32)
     return {
         "spectra": spectra,
         "precursor_mz_raw": torch.tensor(precursor_mz, dtype=torch.float32),
+        "collision_energy": torch.tensor(collision_energy, dtype=torch.float32),
+        "charge": torch.tensor(charge, dtype=torch.float32),
     }
 
 
@@ -141,9 +149,21 @@ def _real_pattern_batch(
 ) -> dict[str, torch.Tensor]:
     torch.manual_seed(123)
     samples = [
-        _sample([100.0, 125.0, 150.0, 175.0, 200.0], [1.0, 0.8, 0.4, 0.2, 0.1], 500.0),
-        _sample([220.0, 240.0, 300.0], [0.9, 0.3, 0.2], 620.0),
-        _sample([80.0, 81.0, 120.0, 180.0, 260.0, 400.0], [0.5, 1.0, 0.7, 0.4, 0.2, 0.1], 700.0),
+        _sample(
+            [100.0, 125.0, 150.0, 175.0, 200.0],
+            [1.0, 0.8, 0.4, 0.2, 0.1],
+            500.0,
+            20.0,
+            1.0,
+        ),
+        _sample([220.0, 240.0, 300.0], [0.9, 0.3, 0.2], 620.0, 35.0, 2.0),
+        _sample(
+            [80.0, 81.0, 120.0, 180.0, 260.0, 400.0],
+            [0.5, 1.0, 0.7, 0.4, 0.2, 0.1],
+            700.0,
+            60.0,
+            3.0,
+        ),
     ]
     collator = GemsBatchCollator(
         augment=True,

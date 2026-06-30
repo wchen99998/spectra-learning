@@ -23,6 +23,16 @@ def _toy_spectra() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return valid, intensity, mz_da
 
 
+def _spectrum_metadata(
+    collision_energy: float,
+    charge: float,
+) -> dict[str, torch.Tensor]:
+    return {
+        "collision_energy": torch.tensor(collision_energy, dtype=torch.float32),
+        "charge": torch.tensor(charge, dtype=torch.float32),
+    }
+
+
 def test_mixed_reliability_weights_preserve_requested_epsilon_mix() -> None:
     reliability = torch.tensor([0.1, 0.3, 0.6], dtype=torch.float32)
     beta = 0.85
@@ -129,6 +139,7 @@ def test_gems_batch_collator_generates_intensity_aware_masks() -> None:
                 dtype=torch.float32,
             ),
             "precursor_mz_raw": torch.tensor(500.0, dtype=torch.float32),
+            **_spectrum_metadata(20.0, 1.0),
         },
         {
             "spectra": torch.tensor(
@@ -139,6 +150,7 @@ def test_gems_batch_collator_generates_intensity_aware_masks() -> None:
                 dtype=torch.float32,
             ),
             "precursor_mz_raw": torch.tensor(600.0, dtype=torch.float32),
+            **_spectrum_metadata(40.0, 2.0),
         },
     ]
 

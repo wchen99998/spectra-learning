@@ -12,6 +12,8 @@ from spectra_learning.data import murcko as murcko_data
 from spectra_learning.data.massspec_targets import MACCS_FINGERPRINT_BITS
 from spectra_learning.training import contrastive as contrastive_training
 from spectra_learning.training.contrastive import (
+    ContrastiveBatchCollator,
+    ContrastiveOnlineBatchCollator,
     NistMurckoContrastivePairs,
     _load_contrastive_split,
     train_contrastive,
@@ -217,6 +219,54 @@ def test_dreams_triplets_use_mass_matched_different_compound_negative():
             )
             <= 0.05
         )
+
+
+def test_contrastive_collators_normalize_collision_energy() -> None:
+    split = contrastive_training.ContrastiveSplit(
+        spectra=np.asarray(
+            [
+                [[100.0, 120.0, 0.0], [1.0, 0.5, 0.0]],
+                [[110.0, 130.0, 0.0], [0.8, 0.4, 0.0]],
+                [[140.0, 160.0, 0.0], [0.7, 0.3, 0.0]],
+            ],
+            dtype=np.float32,
+        ),
+        precursor_mz=np.asarray([500.0, 520.0, 540.0], dtype=np.float32),
+        smiles=np.asarray(["CCO", "CCO", "CCN"]),
+        collision_energy=np.asarray([20.0, 150.0, -5.0], dtype=np.float32),
+        collision_energy_present=np.ones(3, dtype=np.int32),
+        probe_maccs=np.zeros((3, MACCS_FINGERPRINT_BITS), dtype=np.int8),
+    )
+    collator_kwargs = {
+        "num_peaks": 2,
+        "max_precursor_mz": 1000.0,
+        "min_peak_intensity": 0.0,
+        "peak_drop_min_intensity": 0.0,
+        "peak_ordering": "mz",
+        "precursor_peak_exclusion_window_da": 0.0,
+    }
+
+    pair_batch = ContrastiveBatchCollator(split, **collator_kwargs)(
+        [{"left_idx": 0, "right_idx": 1, "compound_id": 0}]
+    )
+    online_batch = ContrastiveOnlineBatchCollator(split, **collator_kwargs)([0, 2])
+
+    torch.testing.assert_close(
+        pair_batch["collision_energy"],
+        torch.tensor([0.2, 1.0], dtype=torch.float32),
+    )
+    torch.testing.assert_close(
+        pair_batch["charge"],
+        torch.tensor([1.0, 1.0], dtype=torch.float32),
+    )
+    torch.testing.assert_close(
+        online_batch["collision_energy"],
+        torch.tensor([0.2, 0.0], dtype=torch.float32),
+    )
+    torch.testing.assert_close(
+        online_batch["charge"],
+        torch.tensor([1.0, 1.0], dtype=torch.float32),
+    )
 
 
 def test_contrastive_smoke_training_writes_frozen_pooler_checkpoint(tmp_path: Path):

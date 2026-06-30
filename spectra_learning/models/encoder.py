@@ -49,6 +49,8 @@ class PeakSetEncoder(nn.Module):
             )
         self.use_bi_dense = self.pairmixer_block_type in {"bi-dense", "fastmixer"}
         self.embedder = embedder
+        self.metadata_proj = nn.Linear(2, model_dim, bias=False)
+        nn.init.xavier_normal_(self.metadata_proj.weight)
         self.position_embedding = _build_frozen_position_embedding(
             num_peaks,
             model_dim,
@@ -111,10 +113,22 @@ class PeakSetEncoder(nn.Module):
     def _append_cls_token(
         self,
         x: Float[Tensor, "batch peaks dim"],
+        metadata_embedding: Float[Tensor, "batch dim"] | None = None,
     ) -> Float[Tensor, "batch tokens dim"]:
         cls = self.cls_token.view(1, 1, -1).expand(x.shape[0], 1, -1)
         cls = cls.to(dtype=x.dtype) + x[:, :1] * 0.0
+        if metadata_embedding is not None:
+            cls = cls + metadata_embedding.unsqueeze(1).to(dtype=x.dtype)
         return torch.cat([x, cls], dim=1)
+
+    def _metadata_embedding(
+        self,
+        spectrum_metadata: Float[Tensor, "batch metadata"] | None,
+        dtype: torch.dtype,
+    ) -> Float[Tensor, "batch dim"] | None:
+        if spectrum_metadata is None:
+            return None
+        return self.metadata_proj(spectrum_metadata.to(dtype=dtype))
 
     def _append_cls_pair_tokens(
         self,
@@ -148,6 +162,7 @@ class PeakSetEncoder(nn.Module):
         valid_mask: Bool[Tensor, "batch peaks"] | None = None,
         visible_mask: Bool[Tensor, "batch peaks"] | None = None,
         precursor_mz: Float[Tensor, "batch"] | None = None,
+        spectrum_metadata: Float[Tensor, "batch metadata"] | None = None,
     ) -> tuple[
         Float[Tensor, "batch tokens dim"],
         Float[Tensor, "batch tokens tokens pair"],
@@ -160,7 +175,11 @@ class PeakSetEncoder(nn.Module):
         peak_visible_mask = _merge_visible_mask(peak_valid_mask, visible_mask)
         if peak_visible_mask is None:
             peak_visible_mask = peak_valid_mask
-        x = self._add_positions(self.embedder(peak_mz, peak_intensity))
+        x = self.embedder(peak_mz, peak_intensity)
+        metadata_embedding = self._metadata_embedding(spectrum_metadata, x.dtype)
+        if metadata_embedding is not None:
+            x = x + metadata_embedding.unsqueeze(1).to(dtype=x.dtype)
+        x = self._add_positions(x)
         # x: [B, N, D], z: [B, N, N, P], masks: [B, N]
         z = self.pair_embedder(
             peak_mz,
@@ -169,7 +188,7 @@ class PeakSetEncoder(nn.Module):
             peak_visible_mask,
             precursor_mz=precursor_mz,
         )
-        x = self._append_cls_token(x)
+        x = self._append_cls_token(x, metadata_embedding)
         z = self._append_cls_pair_tokens(z)
         token_visible_mask = self._append_cls_mask(peak_visible_mask)
         for block in self.blocks:
@@ -192,6 +211,7 @@ class PeakSetEncoder(nn.Module):
         valid_mask: Bool[Tensor, "batch peaks"] | None = None,
         visible_mask: Bool[Tensor, "batch peaks"] | None = None,
         precursor_mz: Float[Tensor, "batch"] | None = None,
+        spectrum_metadata: Float[Tensor, "batch metadata"] | None = None,
     ) -> Float[Tensor, "batch tokens dim"]:
         output, _ = self.forward_with_pair(
             peak_mz,
@@ -199,5 +219,6 @@ class PeakSetEncoder(nn.Module):
             valid_mask=valid_mask,
             visible_mask=visible_mask,
             precursor_mz=precursor_mz,
+            spectrum_metadata=spectrum_metadata,
         )
         return output

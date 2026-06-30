@@ -5,13 +5,27 @@ from ml_collections import config_dict
 from spectra_learning.data.gems.collate import GemsBatchCollator
 from spectra_learning.data.gems.settings import GemsDataConfig
 from spectra_learning.data.spectra import (
+    ASSUMED_PRECURSOR_CHARGE,
+    COLLISION_ENERGY_MAX,
     DEFAULT_GROUPED_PEAK_SHOULDER_DA,
     PEAK_FILTERING_GROUPED,
     PEAK_FILTERING_TOP_INTENSITY,
     PEAK_MZ_MAX,
+    PRECURSOR_CHARGE_MAX,
     preprocess_peak_batch_numpy,
     preprocess_peak_batch_torch,
 )
+from spectra_learning.models.spectrum_metadata import torch_spectrum_metadata_from_batch
+
+
+def _numpy_spectrum_metadata(
+    collision_energy: float,
+    charge: float,
+) -> dict[str, np.float32]:
+    return {
+        "collision_energy": np.float32(collision_energy),
+        "charge": np.float32(charge),
+    }
 
 
 def test_grouped_peak_filtering_keeps_group_representatives_torch() -> None:
@@ -126,6 +140,7 @@ def test_gems_collator_can_return_numpy_batch() -> None:
                 dtype=np.float32,
             ),
             "precursor_mz_raw": np.float32(500.0),
+            **_numpy_spectrum_metadata(20.0, 2.0),
         }
     ]
 
@@ -136,3 +151,49 @@ def test_gems_collator_can_return_numpy_batch() -> None:
     assert isinstance(batch["target_masks"], np.ndarray)
     assert batch["peak_mz"].shape == (1, 4)
     assert batch["context_mask"].dtype == bool
+
+
+def test_gems_collator_normalizes_spectrum_metadata() -> None:
+    collator = GemsBatchCollator(
+        augment=False,
+        num_target_blocks=1,
+        context_fraction=0.5,
+        target_fraction=0.5,
+        block_min_len=1,
+        num_peaks=4,
+        max_precursor_mz=1000.0,
+        min_peak_intensity=0.0,
+        peak_drop_min_intensity=0.0,
+        peak_ordering="mz",
+        precursor_peak_exclusion_window_da=0.0,
+    )
+    spectra = torch.zeros(2, 128, dtype=torch.float32)
+    spectra[0, :2] = torch.tensor([100.0, 120.0])
+    spectra[1, :2] = torch.tensor([1.0, 0.5])
+
+    batch = collator(
+        [
+            {
+                "spectra": spectra,
+                "precursor_mz_raw": torch.tensor(500.0, dtype=torch.float32),
+                "collision_energy": torch.tensor(150.0, dtype=torch.float32),
+                "charge": torch.tensor(21.0, dtype=torch.float32),
+            }
+        ]
+    )
+
+    torch.testing.assert_close(
+        batch["collision_energy"],
+        torch.tensor([1.0], dtype=torch.float32),
+    )
+    torch.testing.assert_close(
+        batch["charge"],
+        torch.tensor([21.0], dtype=torch.float32),
+    )
+    torch.testing.assert_close(
+        torch_spectrum_metadata_from_batch(batch),
+        torch.tensor([[1.0, 1.0]], dtype=torch.float32),
+    )
+    assert COLLISION_ENERGY_MAX == 100.0
+    assert PRECURSOR_CHARGE_MAX == 21.0
+    assert ASSUMED_PRECURSOR_CHARGE == 1.0

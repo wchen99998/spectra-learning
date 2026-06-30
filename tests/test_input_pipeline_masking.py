@@ -10,6 +10,16 @@ import spectra_learning.data.gems.collate as gems_collate
 from spectra_learning.data.gems.settings import GemsDataConfig
 
 
+def _spectrum_metadata(
+    collision_energy: float,
+    charge: float,
+) -> dict[str, torch.Tensor]:
+    return {
+        "collision_energy": torch.tensor(collision_energy, dtype=torch.float32),
+        "charge": torch.tensor(charge, dtype=torch.float32),
+    }
+
+
 def test_sample_ragged_block_mask_uses_full_block_length() -> None:
     active_positions = torch.tensor(
         [True, True, True, True, True, False],
@@ -362,6 +372,7 @@ def test_gems_batch_collator_generates_ragged_context_and_target_masks() -> None
                 dtype=torch.float32,
             ),
             "precursor_mz_raw": torch.tensor(500.0, dtype=torch.float32),
+            **_spectrum_metadata(20.0, 1.0),
         },
         {
             "spectra": torch.tensor(
@@ -372,6 +383,7 @@ def test_gems_batch_collator_generates_ragged_context_and_target_masks() -> None
                 dtype=torch.float32,
             ),
             "precursor_mz_raw": torch.tensor(600.0, dtype=torch.float32),
+            **_spectrum_metadata(40.0, 2.0),
         },
     ]
 
@@ -414,6 +426,7 @@ def test_gems_batch_collator_combines_intensity_aware_and_block_strategy_rows() 
                 dtype=torch.float32,
             ),
             "precursor_mz_raw": torch.tensor(500.0, dtype=torch.float32),
+            **_spectrum_metadata(20.0, 1.0),
         },
         {
             "spectra": torch.tensor(
@@ -424,6 +437,7 @@ def test_gems_batch_collator_combines_intensity_aware_and_block_strategy_rows() 
                 dtype=torch.float32,
             ),
             "precursor_mz_raw": torch.tensor(600.0, dtype=torch.float32),
+            **_spectrum_metadata(40.0, 2.0),
         },
     ]
     intensity_context = torch.tensor(
@@ -503,6 +517,7 @@ def test_gems_batch_collator_all_strategy_uses_peak_slots_directly() -> None:
                 dtype=torch.float32,
             ),
             "precursor_mz_raw": torch.tensor(500.0, dtype=torch.float32),
+            **_spectrum_metadata(20.0, 1.0),
         },
         {
             "spectra": torch.tensor(
@@ -513,6 +528,7 @@ def test_gems_batch_collator_all_strategy_uses_peak_slots_directly() -> None:
                 dtype=torch.float32,
             ),
             "precursor_mz_raw": torch.tensor(600.0, dtype=torch.float32),
+            **_spectrum_metadata(40.0, 2.0),
         },
     ]
 

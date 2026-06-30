@@ -17,6 +17,8 @@ from torch.distributed.nn import functional as dist_nn
 from tqdm import tqdm
 
 from spectra_learning.data.spectra import (
+    ASSUMED_PRECURSOR_CHARGE,
+    COLLISION_ENERGY_MAX,
     DEFAULT_MAX_PRECURSOR_MZ,
     DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
     DEFAULT_GROUPED_PEAK_SHOULDER_DA,
@@ -179,6 +181,16 @@ class ContrastiveBatchCollator:
         )
         batch["compound_id"] = compound_ids
         batch["positive_index"] = positive_index
+        batch["collision_energy"] = (
+            torch.from_numpy(self.split.collision_energy[indices].copy())
+            .to(torch.float32)
+            .clamp(0.0, COLLISION_ENERGY_MAX)
+            / COLLISION_ENERGY_MAX
+        )
+        batch["charge"] = torch.full_like(
+            batch["collision_energy"],
+            ASSUMED_PRECURSOR_CHARGE,
+        )
         batch.update(batch_indices)
         batch["probe_maccs"] = torch.from_numpy(self.split.probe_maccs[indices].copy()).to(
             torch.float32
@@ -286,6 +298,16 @@ class ContrastiveOnlineBatchCollator:
         batch["probe_maccs"] = torch.from_numpy(
             self.split.probe_maccs[row_indices].copy()
         ).to(torch.float32)
+        batch["collision_energy"] = (
+            torch.from_numpy(self.split.collision_energy[row_indices].copy())
+            .to(torch.float32)
+            .clamp(0.0, COLLISION_ENERGY_MAX)
+            / COLLISION_ENERGY_MAX
+        )
+        batch["charge"] = torch.full_like(
+            batch["collision_energy"],
+            ASSUMED_PRECURSOR_CHARGE,
+        )
         return batch
 
 

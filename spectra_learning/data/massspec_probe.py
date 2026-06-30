@@ -36,6 +36,8 @@ from spectra_learning.data.murcko import (
     ensure_nist_murcko_probe_downloaded,
 )
 from spectra_learning.data.spectra import (
+    ASSUMED_PRECURSOR_CHARGE,
+    COLLISION_ENERGY_MAX,
     DEFAULT_MAX_PRECURSOR_MZ,
     DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
     DEFAULT_GROUPED_PEAK_SHOULDER_DA,
@@ -1080,6 +1082,10 @@ class _ProbeBatchCollator:
         batch["collision_energy"] = torch.tensor(
             [float(sample["collision_energy"]) for sample in samples],
             dtype=torch.float32,
+        ).clamp(0.0, COLLISION_ENERGY_MAX) / COLLISION_ENERGY_MAX
+        batch["charge"] = torch.full_like(
+            batch["collision_energy"],
+            ASSUMED_PRECURSOR_CHARGE,
         )
         batch["collision_energy_present"] = torch.tensor(
             [int(sample["collision_energy_present"]) for sample in samples],

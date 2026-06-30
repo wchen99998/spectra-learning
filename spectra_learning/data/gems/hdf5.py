@@ -7,6 +7,11 @@ from typing import Any
 import h5py
 import numpy as np
 
+GEMS_SPECTRUM_METADATA_DATASETS = {
+    "collision_energy": "collision_energy",
+    "charge": "charge",
+}
+
 
 class GemsHdf5ShardDataset:
     def __init__(
@@ -23,6 +28,7 @@ class GemsHdf5ShardDataset:
         self.files: list[h5py.File] | None = None
         self.spectra: list[h5py.Dataset] | None = None
         self.precursors: list[h5py.Dataset] | None = None
+        self.metadata: dict[str, list[h5py.Dataset]] | None = None
         self.starts: list[int] = []
         self.stops: list[int] = []
         self.infos: list[dict[str, Any]] = []
@@ -61,6 +67,7 @@ class GemsHdf5ShardDataset:
         state["files"] = None
         state["spectra"] = None
         state["precursors"] = None
+        state["metadata"] = None
         return state
 
     def _ensure_open(self) -> None:
@@ -68,6 +75,10 @@ class GemsHdf5ShardDataset:
             self.files = [h5py.File(path, "r") for path in self.paths]
             self.spectra = [file[self.spectrum_dataset] for file in self.files]
             self.precursors = [file[self.precursor_dataset] for file in self.files]
+            self.metadata = {
+                key: [file[dataset] for file in self.files]
+                for key, dataset in GEMS_SPECTRUM_METADATA_DATASETS.items()
+            }
 
     def close(self) -> None:
         if self.files is not None:
@@ -76,6 +87,7 @@ class GemsHdf5ShardDataset:
         self.files = None
         self.spectra = None
         self.precursors = None
+        self.metadata = None
 
     def __len__(self) -> int:
         return self.length
@@ -84,22 +96,31 @@ class GemsHdf5ShardDataset:
         return self.__getitems__([index])[0]
 
     def __getitems__(self, indices: list[int]) -> list[dict[str, Any]]:
-        spectra, precursor = self.read_raw_batch(indices)
+        spectra, precursor, metadata = self.read_raw_batch(indices)
         return [
             {
                 "spectra": spectra[position],
                 "precursor_mz_raw": precursor[position],
+                **{
+                    key: values[position]
+                    for key, values in metadata.items()
+                },
                 "index": int(index),
             }
             for position, index in enumerate(indices)
         ]
 
-    def read_raw_batch(self, indices: list[int]) -> tuple[np.ndarray, np.ndarray]:
+    def read_raw_batch(
+        self,
+        indices: list[int],
+    ) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
         self._ensure_open()
         spectra_datasets = self.spectra
         precursor_datasets = self.precursors
+        metadata_datasets = self.metadata
         assert spectra_datasets is not None
         assert precursor_datasets is not None
+        assert metadata_datasets is not None
 
         indices_np = np.asarray(indices, dtype=np.int64)
         spectra_out = np.empty(
@@ -107,6 +128,10 @@ class GemsHdf5ShardDataset:
             dtype=np.float32,
         )
         precursor_out = np.empty((len(indices_np),), dtype=np.float32)
+        metadata_out = {
+            key: np.empty((len(indices_np),), dtype=np.float32)
+            for key in metadata_datasets
+        }
         order = np.argsort(indices_np, kind="stable")
         sorted_indices = indices_np[order]
         shard_ids = np.searchsorted(np.asarray(self.stops), sorted_indices, side="right")
@@ -129,21 +154,25 @@ class GemsHdf5ShardDataset:
             self._read_shard_pairs(
                 spectra_datasets[shard],
                 precursor_datasets[shard],
+                {key: datasets[shard] for key, datasets in metadata_datasets.items()},
                 local_pairs,
                 spectra_out,
                 precursor_out,
+                metadata_out,
             )
             position = next_position
 
-        return spectra_out, precursor_out
+        return spectra_out, precursor_out, metadata_out
 
     def _read_shard_pairs(
         self,
         spectra_dataset: h5py.Dataset,
         precursor_dataset: h5py.Dataset,
+        metadata_datasets: dict[str, h5py.Dataset],
         local_pairs: list[tuple[int, int]],
         spectra_out: np.ndarray,
         precursor_out: np.ndarray,
+        metadata_out: dict[str, np.ndarray],
     ) -> None:
         local_pairs.sort(key=lambda item: item[1])
         run_position = 0
@@ -164,8 +193,14 @@ class GemsHdf5ShardDataset:
                 copy=False,
             )
             precursor = precursor_dataset[run_start : previous + 1]
+            metadata = {
+                key: dataset[run_start : previous + 1].astype(np.float32, copy=False)
+                for key, dataset in metadata_datasets.items()
+            }
             for local_position, (output_position, _) in enumerate(
                 local_pairs[pair_start:run_position]
             ):
                 spectra_out[output_position] = spectra[local_position]
                 precursor_out[output_position] = precursor[local_position]
+                for key, values in metadata.items():
+                    metadata_out[key][output_position] = values[local_position]
