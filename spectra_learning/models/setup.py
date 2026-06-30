@@ -32,6 +32,7 @@ SUPPORTED_PAIRMIXER_BLOCK_TYPES = {
     "bi-dense",
     "fastmixer",
 }
+SUPPORTED_PAIRMIXER_TRANSITION_TYPES = {"swiglu", "feedforward"}
 
 
 def configure_peak_set_model(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
@@ -75,6 +76,11 @@ def _configure_dimensions(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
         raise ValueError(
             "pairmixer_block_type must be one of "
             "('dense', 'bi-dense', 'fastmixer')"
+        )
+    model.pairmixer_transition_type = cfg.pairmixer_transition_type.lower()
+    if model.pairmixer_transition_type not in SUPPORTED_PAIRMIXER_TRANSITION_TYPES:
+        raise ValueError(
+            "pairmixer_transition_type must be one of ('swiglu', 'feedforward')"
         )
     model.encoder_num_layers = cfg.encoder_num_layers
     model.norm_eps = cfg.norm_eps
@@ -183,6 +189,7 @@ def _build_peak_set_encoder(cfg: PeakSetJEPASettings) -> PeakSetEncoder:
         apply_final_pair_norm=cfg.encoder_apply_final_pair_norm,
         num_peaks=_num_peak_tokens(cfg),
         pairmixer_block_type=cfg.pairmixer_block_type.lower(),
+        pairmixer_transition_type=cfg.pairmixer_transition_type.lower(),
         pair_dim=cfg.pairmixer_pair_dim,
         pair_feature_hidden_dim=cfg.pairmixer_pair_feature_hidden_dim,
         pairmixer_dropout=cfg.pairmixer_dropout,
@@ -289,6 +296,7 @@ def _build_predictor(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
             use_single_to_pair_update=(
                 model.pairmixer_block_type in {"bi-dense", "fastmixer"}
             ),
+            transition_type=model.pairmixer_transition_type,
         )
         predictor_blocks.append(block)
     model.masked_latent_predictor = nn.ModuleList(predictor_blocks)

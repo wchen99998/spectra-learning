@@ -103,9 +103,13 @@ LORA_ENCODER_TARGET_SUFFIXES = (
     "single_transition.fc1",
     "single_transition.fc2",
     "single_transition.fc3",
+    "single_transition.w1",
+    "single_transition.w2",
     "pair_transition.fc1",
     "pair_transition.fc2",
     "pair_transition.fc3",
+    "pair_transition.w1",
+    "pair_transition.w2",
 )
 
 

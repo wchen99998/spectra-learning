@@ -26,6 +26,7 @@ class PeakSetEncoder(nn.Module):
         num_peaks: int = 64,
         use_position_embedding: bool = True,
         pairmixer_block_type: str = "dense",
+        pairmixer_transition_type: str = "swiglu",
         pair_dim: int | None = None,
         pair_feature_hidden_dim: int = 128,
         pairmixer_dropout: float = 0.0,
@@ -87,6 +88,7 @@ class PeakSetEncoder(nn.Module):
                 norm_eps=norm_eps,
                 dropout=pairmixer_dropout,
                 use_single_to_pair_update=self.use_bi_dense,
+                transition_type=pairmixer_transition_type,
             )
             blocks.append(block)
         self.blocks = nn.ModuleList(blocks)

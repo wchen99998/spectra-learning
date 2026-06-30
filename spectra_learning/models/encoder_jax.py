@@ -43,6 +43,7 @@ class PeakSetEncoder(nnx.Module):
         num_peaks: int = 64,
         use_position_embedding: bool = True,
         pairmixer_block_type: str = "dense",
+        pairmixer_transition_type: str = "swiglu",
         pair_dim: int | None = None,
         pair_feature_hidden_dim: int = 128,
         pairmixer_dropout: float = 0.0,
@@ -117,6 +118,7 @@ class PeakSetEncoder(nnx.Module):
                 use_single_to_pair_update=self.use_bi_dense,
                 use_fastmixer=self.use_fastmixer,
                 fastmixer_max_visible_tokens=self.pairmixer_fast_max_visible_tokens,
+                transition_type=pairmixer_transition_type,
                 compute_dtype=compute_dtype,
                 rngs=rngs,
             )

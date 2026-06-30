@@ -26,6 +26,7 @@ from spectra_learning.models.common_jax import (
 from spectra_learning.models.encoder_jax import PeakSetEncoder
 from spectra_learning.models.pairmixer_jax import (
     PairMixerBlock,
+    SUPPORTED_PAIRMIXER_TRANSITION_TYPES,
     _active_indices,
     _gather_pair,
     _scatter_pair,
@@ -91,6 +92,11 @@ class PeakSetJEPAJax(nnx.Module):
             )
         self.use_fastmixer = self.pairmixer_block_type == "fastmixer"
         self.pairmixer_fast_max_visible_tokens = cfg.pairmixer_fast_max_visible_tokens
+        self.pairmixer_transition_type = cfg.pairmixer_transition_type.lower()
+        if self.pairmixer_transition_type not in SUPPORTED_PAIRMIXER_TRANSITION_TYPES:
+            raise ValueError(
+                "pairmixer_transition_type must be one of ('swiglu', 'feedforward')"
+            )
         self.encoder_num_layers = cfg.encoder_num_layers
         self.norm_eps = cfg.norm_eps
         self.jepa_num_target_blocks = cfg.jepa_num_target_blocks
@@ -214,6 +220,7 @@ class PeakSetJEPAJax(nnx.Module):
                 ),
                 use_fastmixer=self.use_fastmixer,
                 fastmixer_max_visible_tokens=self.pairmixer_fast_max_visible_tokens,
+                transition_type=self.pairmixer_transition_type,
                 compute_dtype=self.compute_dtype,
                 rngs=rngs,
             )
@@ -318,6 +325,7 @@ class PeakSetJEPAJax(nnx.Module):
             apply_final_pair_norm=cfg.encoder_apply_final_pair_norm,
             num_peaks=cfg.num_peaks,
             pairmixer_block_type=self.pairmixer_block_type,
+            pairmixer_transition_type=cfg.pairmixer_transition_type.lower(),
             pair_dim=cfg.pairmixer_pair_dim,
             pair_feature_hidden_dim=cfg.pairmixer_pair_feature_hidden_dim,
             pairmixer_dropout=cfg.pairmixer_dropout,

@@ -17,7 +17,7 @@ from spectra_learning.models.common_jax import (
     silu,
 )
 from spectra_learning.models.peak_features_jax import FourierFeatures
-from spectra_learning.models.transformer_jax import SwiGLUFeedForward
+from spectra_learning.models.transformer_jax import FeedForward, SwiGLUFeedForward
 
 
 COMMON_MASS_DIFFERENCES_DA = (
@@ -34,6 +34,8 @@ COMMON_MASS_DIFFERENCES_DA = (
     129.042593,
     147.068414,
 )
+
+SUPPORTED_PAIRMIXER_TRANSITION_TYPES = {"swiglu", "feedforward"}
 
 
 def _preferred_acc_dtype(dtype: object) -> object | None:
@@ -77,6 +79,49 @@ def _swiglu_with_preferred_acc(feed_forward: SwiGLUFeedForward, x: Array) -> Arr
         feed_forward.fc3,
         silu(_linear_with_preferred_acc(feed_forward.fc1, x))
         * _linear_with_preferred_acc(feed_forward.fc2, x),
+    )
+
+
+def _feedforward_with_preferred_acc(feed_forward: FeedForward, x: Array) -> Array:
+    return _linear_with_preferred_acc(
+        feed_forward.w2,
+        silu(_linear_with_preferred_acc(feed_forward.w1, x)),
+    )
+
+
+def _transition_with_preferred_acc(
+    feed_forward: FeedForward | SwiGLUFeedForward,
+    x: Array,
+) -> Array:
+    if isinstance(feed_forward, SwiGLUFeedForward):
+        return _swiglu_with_preferred_acc(feed_forward, x)
+    return _feedforward_with_preferred_acc(feed_forward, x)
+
+
+def _build_pairmixer_transition(
+    dim: int,
+    *,
+    hidden_dim: int,
+    transition_type: str,
+    compute_dtype: object,
+    rngs: nnx.Rngs,
+) -> FeedForward | SwiGLUFeedForward:
+    if transition_type == "swiglu":
+        return SwiGLUFeedForward(
+            dim,
+            hidden_dim=hidden_dim,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        )
+    if transition_type == "feedforward":
+        return FeedForward(
+            dim,
+            hidden_dim=hidden_dim,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        )
+    raise ValueError(
+        "pairmixer_transition_type must be one of ('swiglu', 'feedforward')"
     )
 
 
@@ -563,6 +608,7 @@ class PairMixerBlock(nnx.Module):
         use_single_to_pair_update: bool = False,
         use_fastmixer: bool = False,
         fastmixer_max_visible_tokens: int | None = None,
+        transition_type: str = "swiglu",
         compute_dtype: object = jnp.float32,
         rngs: nnx.Rngs | None = None,
     ) -> None:
@@ -570,6 +616,11 @@ class PairMixerBlock(nnx.Module):
         self.dropout = dropout
         self.use_single_to_pair_update = use_single_to_pair_update
         self.use_fastmixer = use_fastmixer
+        self.transition_type = transition_type.lower()
+        if self.transition_type not in SUPPORTED_PAIRMIXER_TRANSITION_TYPES:
+            raise ValueError(
+                "pairmixer_transition_type must be one of ('swiglu', 'feedforward')"
+            )
         self.fastmixer_max_visible_tokens = (
             0
             if fastmixer_max_visible_tokens is None
@@ -592,9 +643,10 @@ class PairMixerBlock(nnx.Module):
             rngs=rngs,
         )
         self.pair_transition_norm = LayerNorm(pair_dim, eps=norm_eps)
-        self.pair_transition = SwiGLUFeedForward(
+        self.pair_transition = _build_pairmixer_transition(
             pair_dim,
             hidden_dim=math.ceil(pair_dim * attention_mlp_multiple),
+            transition_type=self.transition_type,
             compute_dtype=compute_dtype,
             rngs=rngs,
         )
@@ -615,9 +667,10 @@ class PairMixerBlock(nnx.Module):
             rngs=rngs,
         )
         self.single_transition_norm = LayerNorm(single_dim, eps=norm_eps)
-        self.single_transition = SwiGLUFeedForward(
+        self.single_transition = _build_pairmixer_transition(
             single_dim,
             hidden_dim=math.ceil(single_dim * attention_mlp_multiple),
+            transition_type=self.transition_type,
             compute_dtype=compute_dtype,
             rngs=rngs,
         )
@@ -710,7 +763,7 @@ class PairMixerBlock(nnx.Module):
             compact_token_mask,
             pair_mask_compact,
         )
-        pair_compact = pair_compact + _swiglu_with_preferred_acc(
+        pair_compact = pair_compact + _transition_with_preferred_acc(
             self.pair_transition,
             self.pair_transition_norm(pair_compact),
         )
@@ -733,7 +786,7 @@ class PairMixerBlock(nnx.Module):
             idx,
             token_mask,
         )
-        single = single + _swiglu_with_preferred_acc(
+        single = single + _transition_with_preferred_acc(
             self.single_transition,
             self.single_transition_norm(single),
         )

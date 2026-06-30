@@ -16,6 +16,7 @@ from spectra_learning.data.gems.collate import GemsBatchCollator
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.model_jax import PeakSetJEPAJax
 from spectra_learning.models.pairmixer_jax import PairMixerBlock as JaxPairMixerBlock
+from spectra_learning.models.transformer_jax import FeedForward as JaxFeedForward
 from spectra_learning.training.checkpointing import save_torch_checkpoint
 from spectra_learning.training.pretrain_jax import (
     build_jax_optimizer,
@@ -282,11 +283,31 @@ def test_jax_bi_dense_mae_matches_pytorch_on_real_collated_batch():
     _assert_metrics_close(torch_metrics, jax_metrics)
 
 
-def test_jax_fastmixer_matches_bi_dense_on_fixed_random_masks():
+def test_jax_feedforward_pairmixer_matches_pytorch_on_real_collated_batch():
+    torch.manual_seed(18)
+    kwargs = {
+        **_small_bi_dense_mae_kwargs(),
+        "pairmixer_transition_type": "feedforward",
+    }
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    jax_model = PeakSetJEPAJax(**kwargs)
+    jax_model.load_torch_state_dict(torch_model.state_dict())
+    batch = _real_pattern_batch("contiguous")
+
+    with torch.no_grad():
+        torch_metrics = torch_model(batch)
+    jax_metrics = jax_model(_jax_batch(batch))
+
+    _assert_metrics_close(torch_metrics, jax_metrics)
+
+
+@pytest.mark.parametrize("transition_type", ("swiglu", "feedforward"))
+def test_jax_fastmixer_matches_bi_dense_on_fixed_random_masks(transition_type: str):
     torch.manual_seed(9)
     dense_kwargs = {
         **_small_bi_dense_mae_kwargs(),
         "pairmixer_block_type": "bi-dense",
+        "pairmixer_transition_type": transition_type,
     }
     fast_kwargs = {
         **dense_kwargs,
@@ -344,6 +365,32 @@ def test_jax_native_bi_dense_pairmixer_uses_torch_style_initialization():
         np.asarray(block.single_to_pair_update.gate.bias[...]),
         1.0,
     )
+    assert not np.allclose(np.asarray(single_out), np.asarray(single))
+    assert not np.allclose(np.asarray(pair_out), np.asarray(pair))
+
+
+def test_jax_native_feedforward_pairmixer_uses_previous_transition_modules():
+    block = JaxPairMixerBlock(
+        single_dim=8,
+        pair_dim=6,
+        num_heads=2,
+        attention_mlp_multiple=2.0,
+        norm_eps=1e-5,
+        dropout=0.0,
+        use_single_to_pair_update=True,
+        transition_type="feedforward",
+        rngs=nnx.Rngs(123),
+    )
+    single = jnp.arange(2 * 4 * 8, dtype=jnp.float32).reshape(2, 4, 8) / 17.0
+    pair = jnp.arange(2 * 4 * 4 * 6, dtype=jnp.float32).reshape(2, 4, 4, 6) / 19.0
+    mask = jnp.ones((2, 4), dtype=jnp.bool_)
+
+    single_out, pair_out = block(single, pair, mask, mask)
+
+    assert isinstance(block.pair_transition, JaxFeedForward)
+    assert isinstance(block.single_transition, JaxFeedForward)
+    assert not np.allclose(np.asarray(block.pair_transition.w1.weight[...]), 0.0)
+    assert not np.allclose(np.asarray(block.pair_transition.w2.weight[...]), 0.0)
     assert not np.allclose(np.asarray(single_out), np.asarray(single))
     assert not np.allclose(np.asarray(pair_out), np.asarray(pair))
 

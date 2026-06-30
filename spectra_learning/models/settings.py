@@ -53,6 +53,7 @@ class PeakSetJEPASettings:
     encoder_apply_final_norm: bool = True
     encoder_apply_final_pair_norm: bool = False
     pairmixer_block_type: str = "dense"
+    pairmixer_transition_type: str = "swiglu"
     pairmixer_pair_dim: int | None = None
     pairmixer_pair_feature_hidden_dim: int = 128
     pairmixer_dropout: float = 0.0
@@ -180,6 +181,7 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "encoder_apply_final_norm": bool,
     "encoder_apply_final_pair_norm": bool,
     "pairmixer_block_type": str,
+    "pairmixer_transition_type": str,
     "pairmixer_pair_dim": _optional_int,
     "pairmixer_pair_feature_hidden_dim": int,
     "pairmixer_dropout": float,

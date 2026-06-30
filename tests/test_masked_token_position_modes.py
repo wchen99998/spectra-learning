@@ -12,7 +12,7 @@ from spectra_learning.models.pairmixer import (
 )
 from spectra_learning.models.peak_features import PeakFeatureEmbedder
 from spectra_learning.models.settings import PeakSetJEPASettings
-from spectra_learning.models.transformer import SwiGLUFeedForward
+from spectra_learning.models.transformer import FeedForward, SwiGLUFeedForward
 
 
 def _build_model(
@@ -416,6 +416,16 @@ def test_fastmixer_block_type_is_configurable():
     assert settings.pairmixer_fast_max_visible_tokens == 4
 
 
+def test_pairmixer_transition_type_is_configurable():
+    default_settings = PeakSetJEPASettings.from_config({})
+    feedforward_settings = PeakSetJEPASettings.from_config(
+        {"pairmixer_transition_type": "feedforward"}
+    )
+
+    assert default_settings.pairmixer_transition_type == "swiglu"
+    assert feedforward_settings.pairmixer_transition_type == "feedforward"
+
+
 def test_mae_context_encoder_pack_settings_are_removed():
     for key in (
         "mae_context_encoder_pack_tokens",
@@ -491,6 +501,50 @@ def test_bi_dense_pairmixer_adds_gated_single_to_pair_update():
     assert hasattr(predictor_block, "single_to_pair_update")
     assert encoded.shape == (2, 7, 32)
     assert pair.shape == (2, 7, 7, 32)
+
+
+@torch.no_grad()
+def test_pairmixer_feedforward_transition_type_restores_previous_modules():
+    model = PeakSetJEPA(
+        model_dim=32,
+        encoder_num_layers=2,
+        encoder_num_heads=4,
+        num_peaks=6,
+        feature_mlp_hidden_dim=32,
+        pairmixer_block_type="bi-dense",
+        pairmixer_transition_type="feedforward",
+    )
+    block = model.encoder.blocks[0]
+    predictor_block = model.masked_latent_predictor[0]
+    batch = _make_batch()
+
+    encoded, pair = model.encoder.forward_with_pair(
+        batch["peak_mz"],
+        batch["peak_intensity"],
+        valid_mask=batch["peak_valid_mask"],
+        visible_mask=batch["peak_valid_mask"],
+    )
+
+    assert isinstance(block.pair_transition, FeedForward)
+    assert isinstance(block.single_transition, FeedForward)
+    assert isinstance(predictor_block.pair_transition, FeedForward)
+    assert isinstance(predictor_block.single_transition, FeedForward)
+    assert hasattr(block.pair_transition, "w1")
+    assert hasattr(block.pair_transition, "w2")
+    assert encoded.shape == (2, 7, 32)
+    assert pair.shape == (2, 7, 7, 32)
+
+
+def test_pairmixer_transition_type_rejects_unknown_value():
+    with pytest.raises(ValueError, match="pairmixer_transition_type"):
+        PeakSetJEPA(
+            model_dim=32,
+            encoder_num_layers=1,
+            encoder_num_heads=4,
+            num_peaks=6,
+            feature_mlp_hidden_dim=32,
+            pairmixer_transition_type="gelu",
+        )
 
 
 @torch.no_grad()

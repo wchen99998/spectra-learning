@@ -9,7 +9,11 @@ from torch import Tensor, nn
 
 from spectra_learning.data.spectra import PEAK_MZ_MAX
 from spectra_learning.models.peak_features import FourierFeatures
-from spectra_learning.models.transformer import SwiGLUFeedForward, _build_norm
+from spectra_learning.models.transformer import (
+    FeedForward,
+    SwiGLUFeedForward,
+    _build_norm,
+)
 
 
 COMMON_MASS_DIFFERENCES_DA = (
@@ -27,6 +31,8 @@ COMMON_MASS_DIFFERENCES_DA = (
     147.068414,
 )
 
+SUPPORTED_PAIRMIXER_TRANSITION_TYPES = {"swiglu", "feedforward"}
+
 
 def _init_linear(linear: nn.Linear, *, gate: bool = False) -> None:
     if gate:
@@ -43,6 +49,21 @@ def _pair_mask(
     peak_mask: Bool[Tensor, "batch peaks"],
 ) -> Bool[Tensor, "batch peaks peaks"]:
     return peak_mask.unsqueeze(2) & peak_mask.unsqueeze(1)
+
+
+def _build_pairmixer_transition(
+    dim: int,
+    *,
+    hidden_dim: int,
+    transition_type: str,
+) -> nn.Module:
+    if transition_type == "swiglu":
+        return SwiGLUFeedForward(dim, hidden_dim=hidden_dim)
+    if transition_type == "feedforward":
+        return FeedForward(dim, hidden_dim=hidden_dim)
+    raise ValueError(
+        "pairmixer_transition_type must be one of ('swiglu', 'feedforward')"
+    )
 
 
 class PairFeatureEmbedder(nn.Module):
@@ -433,9 +454,15 @@ class PairMixerBlock(nn.Module):
         norm_eps: float,
         dropout: float,
         use_single_to_pair_update: bool = False,
+        transition_type: str = "swiglu",
     ) -> None:
         super().__init__()
         self.use_single_to_pair_update = use_single_to_pair_update
+        self.transition_type = transition_type.lower()
+        if self.transition_type not in SUPPORTED_PAIRMIXER_TRANSITION_TYPES:
+            raise ValueError(
+                "pairmixer_transition_type must be one of ('swiglu', 'feedforward')"
+            )
         self.tri_mul_out = TriangleMultiplicativeUpdate(
             pair_dim,
             direction="outgoing",
@@ -450,9 +477,10 @@ class PairMixerBlock(nn.Module):
             pair_dim,
             eps=norm_eps,
         )
-        self.pair_transition = SwiGLUFeedForward(
+        self.pair_transition = _build_pairmixer_transition(
             pair_dim,
             hidden_dim=math.ceil(pair_dim * attention_mlp_multiple),
+            transition_type=self.transition_type,
         )
         if self.use_single_to_pair_update:
             self.single_to_pair_update = GatedSingleToPairUpdate(
@@ -470,9 +498,10 @@ class PairMixerBlock(nn.Module):
             single_dim,
             eps=norm_eps,
         )
-        self.single_transition = SwiGLUFeedForward(
+        self.single_transition = _build_pairmixer_transition(
             single_dim,
             hidden_dim=math.ceil(single_dim * attention_mlp_multiple),
+            transition_type=self.transition_type,
         )
         self.drop = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
 
