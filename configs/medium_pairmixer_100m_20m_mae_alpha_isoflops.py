@@ -52,8 +52,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.predictor_dim = 640
     cfg.predictor_dropout = 0.1
     cfg.predictor_apply_final_norm = True
-    cfg.mae_context_encoder_pack_tokens = 20
-    cfg.mae_context_encoder_pack_token_choices = (20, 24, 28)
     cfg.masked_latent_predictor_num_layers = 3
     cfg.masked_latent_predictor_num_heads = 10
     cfg.target_projector_dim = -1

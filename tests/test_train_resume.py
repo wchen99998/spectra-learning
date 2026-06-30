@@ -374,26 +374,6 @@ def test_jax_train_metrics_logging_materializes_once_on_main(monkeypatch):
     assert logger.logs[0][0]["global_step"] == 10.0
 
 
-def test_jax_context_pack_selection_uses_global_process_max(monkeypatch):
-    from spectra_learning.training import pretrain_jax
-
-    calls = []
-
-    def fake_process_allgather(value):
-        calls.append(value)
-        return pretrain_jax.np.asarray([int(value), 28], dtype=pretrain_jax.np.int32)
-
-    monkeypatch.setattr(pretrain_jax.jax, "process_count", lambda: 2)
-    monkeypatch.setattr(
-        pretrain_jax.multihost_utils,
-        "process_allgather",
-        fake_process_allgather,
-    )
-
-    assert pretrain_jax._process_global_max_int(20) == 28
-    assert len(calls) == 1
-
-
 def test_distributed_jax_msg_probe_runs_on_all_processes_and_returns_only_main(
     monkeypatch,
 ):

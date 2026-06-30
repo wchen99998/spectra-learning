@@ -416,6 +416,15 @@ def test_fastmixer_block_type_is_configurable():
     assert settings.pairmixer_fast_max_visible_tokens == 4
 
 
+def test_mae_context_encoder_pack_settings_are_removed():
+    for key in (
+        "mae_context_encoder_pack_tokens",
+        "mae_context_encoder_pack_token_choices",
+    ):
+        with pytest.raises(ValueError, match=f"{key} has been removed"):
+            PeakSetJEPASettings.from_config({key: 1})
+
+
 @torch.no_grad()
 def test_fastmixer_builds_bi_dense_parameter_contract():
     model = PeakSetJEPA(

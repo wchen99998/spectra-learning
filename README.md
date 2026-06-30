@@ -249,22 +249,12 @@ Notes from validation:
 
 Additional `test-tpu` debug notes from 2026-06-17:
 
-- For the 100M Muon config, `mae_context_encoder_pack_tokens=20` only uses the
-  packed encoder branch when every sample in the optimizer step has at most 20
-  visible context peaks. The default intensity-aware mask uses its own
-  mass-based context setting, so real `batch_size=1024`,
-  `gradient_accumulation_steps=4` steps almost always fell back to full context.
-  Set `jepa_intensity_aware_context_fraction=0.35` with
-  `mae_context_encoder_pack_token_choices=[20]` to keep the run on pack-20.
+- The packed MAE context encoder branch has been removed. JAX MAE training now
+  uses one full-context encoder path.
 - GeMS pretraining now reads HDF5 shards through
   `GemsDataModule`; h5py is the HDF5 dataset backend, while the
   PyTorch datamodule owns chunk-aware sampling, rank partitioning, and
   DataLoader worker process settings.
-- On `test-tpu` with 8 local v6e devices, pack-20 plus
-  `jepa_intensity_aware_context_fraction=0.35` measured about 3.3k samples/s
-  after warmup. Xprof showed train-step executions around 294 ms and collectives
-  were not the dominant cost; there was no obvious unnecessary global barrier in
-  the training step.
 - JAX profile export can take close to a minute. The training loop now records
   `run/profile_seconds` as non-training time so profiling does not pollute
   measured training throughput.
@@ -293,27 +283,6 @@ Additional `test-tpu` debug notes from 2026-06-17:
   `save_only_these_names(...)` policy over checkpoint-tagged projection and MLP
   tensors, while this repo's `selective` maps to the generic JAX
   `jax.checkpoint_policies.dots_saveable` policy.
-- Direct `test-tpu` memory analysis for the current 100M Muon pack-20 shape
-  showed `full` remat saves memory, but only helps throughput if it enables a
-  larger batch that `selective` cannot fit:
-
-  | Mode | Batch | XLA total memory | XLA temp memory | Savings vs `selective` |
-  | --- | ---: | ---: | ---: | ---: |
-  | `selective` | 1024 | 5.99 GiB | 5.03 GiB | baseline |
-  | `full` | 1024 | 3.34 GiB | 2.38 GiB | 2.65 GiB / 44.2% |
-  | `selective` | 2048 | 9.24 GiB | 8.28 GiB | baseline |
-  | `full` | 2048 | 4.12 GiB | 3.16 GiB | 5.12 GiB / 55.4% |
-
-- The batch-2048 direct TPU throughput tests used
-  `jax_mesh_devices=8`, `gradient_accumulation_steps=4`,
-  `mae_context_encoder_pack_token_choices=[20]`,
-  `jepa_intensity_aware_context_fraction=0.35`, no validation, no probe, and
-  no periodic checkpoint. `selective` measured 5275 samples/s
-  (`2.576` steps/s) after warmup; `full` measured 4810 samples/s
-  (`2.349` steps/s). Dataloader time was about 0.0017 s/step, so the slowdown
-  is remat recompute rather than input starvation. Prefer batch-2048
-  `selective` while it fits; use `full` only to buy HBM for a larger batch or
-  memory-constrained experiment.
 - Matching xprof traces over five post-warmup batch-2048 steps confirmed the
   remat cost. `selective` measured 5354 samples/s and about 122 TFLOP/step in
   traced leaf ops; `full` measured 4998 samples/s and about 217 TFLOP/step.

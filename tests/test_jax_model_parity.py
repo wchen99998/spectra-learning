@@ -378,26 +378,6 @@ def test_jax_model_loads_plain_pytorch_checkpoint_and_matches_output():
     _assert_metrics_close(torch_metrics, jax_metrics)
 
 
-def test_jax_mae_packed_context_encoder_matches_full_encoder():
-    torch.manual_seed(13)
-    kwargs = {**_small_mae_kwargs(), "encoder_use_position_embedding": False}
-    torch_model = PeakSetJEPA(**kwargs).eval()
-    full_model = PeakSetJEPAJax(**kwargs)
-    packed_model = PeakSetJEPAJax(
-        **kwargs,
-        mae_context_encoder_pack_tokens=3,
-    )
-    full_model.load_torch_state_dict(torch_model.state_dict())
-    packed_model.load_torch_state_dict(torch_model.state_dict())
-    batch = _real_pattern_batch("contiguous")
-
-    jax_batch = _jax_batch(batch)
-    full_metrics = full_model(jax_batch)
-    packed_metrics = packed_model(jax_batch)
-
-    _assert_jax_metrics_close(full_metrics, packed_metrics, atol=5e-4)
-
-
 def test_jax_optax_train_step_updates_loaded_pytorch_weights():
     torch.manual_seed(17)
     kwargs = _small_mae_kwargs()

@@ -10,6 +10,12 @@ from spectra_learning.models.fastmixer_capacity import (
 )
 
 
+REMOVED_SETTING_KEYS = (
+    "mae_context_encoder_pack_tokens",
+    "mae_context_encoder_pack_token_choices",
+)
+
+
 @dataclass(slots=True)
 class PeakSetJEPASettings:
     training_mode: str = "jepa"
@@ -60,7 +66,6 @@ class PeakSetJEPASettings:
     pairmixer_relative_fourier_x_max: float = 1.0
     pairmixer_fast_max_visible_tokens: int | None = None
     predictor_apply_final_norm: bool = True
-    mae_context_encoder_pack_tokens: int = 0
     num_peaks: int = 64
     predictor_dim: int | None = None
     target_projector_dim: int | None = None
@@ -79,6 +84,9 @@ class PeakSetJEPASettings:
 
     @classmethod
     def from_config(cls, config: Any) -> "PeakSetJEPASettings":
+        for key in REMOVED_SETTING_KEYS:
+            if _config_has(config, key):
+                raise ValueError(f"{key} has been removed from PeakSetJEPASettings")
         values = _default_values(cls())
         _apply_derived_defaults(values, config)
         for name, cast in SETTING_CASTS.items():
@@ -120,6 +128,12 @@ def _config_get(config: Any, key: str, default: Any) -> Any:
     if hasattr(config, "get"):
         return config.get(key, default)
     return getattr(config, key, default)
+
+
+def _config_has(config: Any, key: str) -> bool:
+    if hasattr(config, "__contains__"):
+        return key in config
+    return hasattr(config, key)
 
 
 def _optional_int(value: Any) -> int | None:
@@ -178,7 +192,6 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "pairmixer_relative_fourier_x_min": float,
     "pairmixer_relative_fourier_x_max": float,
     "predictor_apply_final_norm": bool,
-    "mae_context_encoder_pack_tokens": int,
     "num_peaks": int,
     "predictor_dim": _optional_int,
     "target_projector_dim": _optional_int,

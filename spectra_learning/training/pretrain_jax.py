@@ -944,104 +944,25 @@ def _run_jax_training_loop(
     data_parallel_devices = _jax_data_parallel_devices(config)
     data_mesh = _jax_data_mesh_for_device_count(data_parallel_devices)
     use_sharded_step = data_parallel_devices > 1
-    pure_graphdef = None
-    pure_full_graphdef = None
-    pure_trainable_params = None
-    pure_static_state = None
-    pure_opt_state = None
-    pure_train_step = None
-    pure_full_static_state = None
-    pure_full_train_step = None
-    pure_pack_train_steps = []
-    context_encoder_pack_tokens = int(
-        getattr(model, "mae_context_encoder_pack_tokens", 0)
-    )
-    context_encoder_pack_choices = _context_encoder_pack_choices(
+    (
+        pure_graphdef,
+        pure_trainable_params,
+        pure_static_state,
+        pure_opt_state,
+        pure_optimizer,
+    ) = init_pure_optax_train_state(
         config,
-        context_encoder_pack_tokens,
+        model,
+        total_steps=total_steps,
     )
-    if context_encoder_pack_choices:
-        model.mae_context_encoder_pack_tokens = 0
-        (
-            pure_full_graphdef,
-            _full_trainable_params,
-            pure_full_static_state,
-            _full_opt_state,
-            _full_optimizer,
-        ) = init_pure_optax_train_state(
-            config,
-            model,
-            total_steps=total_steps,
-        )
-        model.mae_context_encoder_pack_tokens = context_encoder_pack_tokens
-        pure_optimizer = None
-        pack_train_states = []
-        for pack_tokens in context_encoder_pack_choices:
-            model.mae_context_encoder_pack_tokens = pack_tokens
-            (
-                pack_graphdef,
-                pack_trainable_params,
-                pack_static_state,
-                pack_opt_state,
-                pack_optimizer,
-            ) = init_pure_optax_train_state(
-                config,
-                model,
-                total_steps=total_steps,
-            )
-            if pure_trainable_params is None:
-                pure_trainable_params = pack_trainable_params
-                pure_static_state = pack_static_state
-                pure_opt_state = pack_opt_state
-                pure_optimizer = pack_optimizer
-            pack_train_states.append(
-                (pack_tokens, pack_static_state, pack_graphdef)
-            )
-        model.mae_context_encoder_pack_tokens = context_encoder_pack_tokens
-        pure_pack_train_steps = [
-            (
-                pack_tokens,
-                pack_static_state,
-                make_pure_accumulated_train_step(
-                    pack_graphdef,
-                    pure_optimizer,
-                    sharded=use_sharded_step,
-                    data_mesh=data_mesh,
-                ),
-            )
-            for pack_tokens, pack_static_state, pack_graphdef in pack_train_states
-        ]
-    else:
-        (
-            pure_graphdef,
-            pure_trainable_params,
-            pure_static_state,
-            pure_opt_state,
-            pure_optimizer,
-        ) = init_pure_optax_train_state(
-            config,
-            model,
-            total_steps=total_steps,
-        )
-    if not pure_pack_train_steps:
-        pure_train_step = make_pure_accumulated_train_step(
-            pure_graphdef,
-            pure_optimizer,
-            sharded=use_sharded_step,
-            data_mesh=data_mesh,
-        )
-    if context_encoder_pack_choices:
-        pure_full_train_step = make_pure_accumulated_train_step(
-            pure_full_graphdef,
-            pure_optimizer,
-            sharded=use_sharded_step,
-            data_mesh=data_mesh,
-        )
-    eval_graphdef = (
-        pure_full_graphdef if pure_full_graphdef is not None else pure_graphdef
+    pure_train_step = make_pure_accumulated_train_step(
+        pure_graphdef,
+        pure_optimizer,
+        sharded=use_sharded_step,
+        data_mesh=data_mesh,
     )
     pure_eval_step = make_pure_eval_step(
-        eval_graphdef,
+        pure_graphdef,
         sharded=use_sharded_step,
         data_mesh=data_mesh,
     )
@@ -1057,21 +978,6 @@ def _run_jax_training_loop(
             pure_static_state,
             data_mesh,
         )
-        if pure_full_static_state is not None:
-            pure_full_static_state = _replicate_tree_on_data_mesh(
-                pure_full_static_state,
-                data_mesh,
-            )
-        pure_pack_train_steps = [
-            (
-                pack_tokens,
-                _replicate_tree_on_data_mesh(pack_static_state, data_mesh),
-                pack_train_step,
-            )
-            for pack_tokens, pack_static_state, pack_train_step in (
-                pure_pack_train_steps
-            )
-        ]
     checkpoint_every_steps = int(_config_get(config, "checkpoint_every_steps", 0))
     val_every_n_steps = validation_interval(config, datamodule, total_steps)
     val_num_steps = validation_steps(config)
@@ -1103,16 +1009,6 @@ def _run_jax_training_loop(
         pure_trainable_params = restored["trainable_params"]
         pure_static_state = restored["static_state"]
         pure_opt_state = restored["opt_state"]
-        # Pack variants only differ in graphdef; their static states are
-        # numerically identical, so they all share the restored tree.
-        if pure_full_static_state is not None:
-            pure_full_static_state = pure_static_state
-        pure_pack_train_steps = [
-            (pack_tokens, pure_static_state, pack_train_step)
-            for pack_tokens, _pack_static_state, pack_train_step in (
-                pure_pack_train_steps
-            )
-        ]
         start_step = int(resume_step)
     timing_barriers = bool(_config_get(config, "jax_timing_barriers", False))
     compile_stall_threshold_seconds = float(
@@ -1164,16 +1060,6 @@ def _run_jax_training_loop(
     train_start = time.perf_counter()
     measured_start: float | None = None
     measured_steps = 0
-    context_encoder_packed_steps = 0
-    context_encoder_full_fallback_steps = 0
-    measured_context_encoder_packed_steps = 0
-    measured_context_encoder_full_fallback_steps = 0
-    context_encoder_pack_steps_by_size = {
-        pack: 0 for pack in context_encoder_pack_choices
-    }
-    measured_context_encoder_pack_steps_by_size = {
-        pack: 0 for pack in context_encoder_pack_choices
-    }
     for epoch in range(start_epoch, loop_epochs):
         epoch_start_batch = (
             global_step - epoch * datamodule.train_steps if epoch == start_epoch else 0
@@ -1192,7 +1078,6 @@ def _run_jax_training_loop(
         while global_step < total_steps:
             dataloader_elapsed = 0.0
             transfer_elapsed = 0.0
-            max_context_count = 0
             micro_batches = []
             for _ in range(grad_accum_steps):
                 dataloader_start = time.perf_counter()
@@ -1201,15 +1086,6 @@ def _run_jax_training_loop(
                 except StopIteration:
                     break
                 dataloader_elapsed += time.perf_counter() - dataloader_start
-                if pure_full_train_step is not None:
-                    active_context = (
-                        torch_batch["context_mask"] & torch_batch["peak_valid_mask"]
-                    )
-                    if isinstance(active_context, np.ndarray):
-                        context_count = int(active_context.sum(axis=1).max())
-                    else:
-                        context_count = int(active_context.sum(dim=1).max().item())
-                    max_context_count = max(max_context_count, int(context_count))
                 transfer_start = time.perf_counter()
                 micro_batches.append(torch_batch)
                 transfer_elapsed += time.perf_counter() - transfer_start
@@ -1246,49 +1122,10 @@ def _run_jax_training_loop(
                 profile_started = True
                 profile_active = True
 
-            if pure_pack_train_steps:
-                max_context_count = _process_global_max_int(max_context_count)
-            if pure_pack_train_steps:
-                selected_train_step = pure_full_train_step
-                selected_static_state = pure_full_static_state
-                used_context_full_fallback = True
-                selected_pack_tokens = 0
-                for (
-                    pack_tokens,
-                    pack_static_state,
-                    pack_train_step,
-                ) in pure_pack_train_steps:
-                    if max_context_count <= pack_tokens:
-                        selected_train_step = pack_train_step
-                        selected_static_state = pack_static_state
-                        selected_pack_tokens = pack_tokens
-                        used_context_full_fallback = False
-                        break
-            else:
-                selected_train_step = pure_train_step
-                selected_static_state = pure_static_state
-                used_context_full_fallback = False
-                selected_pack_tokens = 0
-            if pure_full_train_step is not None:
-                if used_context_full_fallback:
-                    context_encoder_full_fallback_steps += 1
-                    if timing_enabled:
-                        measured_context_encoder_full_fallback_steps += 1
-                else:
-                    context_encoder_packed_steps += 1
-                    if selected_pack_tokens:
-                        context_encoder_pack_steps_by_size[selected_pack_tokens] += 1
-                    if timing_enabled:
-                        measured_context_encoder_packed_steps += 1
-                        if selected_pack_tokens:
-                            measured_context_encoder_pack_steps_by_size[
-                                selected_pack_tokens
-                            ] += 1
-
             step_start = time.perf_counter()
-            pure_trainable_params, pure_opt_state, metrics = selected_train_step(
+            pure_trainable_params, pure_opt_state, metrics = pure_train_step(
                 pure_trainable_params,
-                selected_static_state,
+                pure_static_state,
                 pure_opt_state,
                 batch,
             )
@@ -1325,15 +1162,10 @@ def _run_jax_training_loop(
             )
             if should_run_at_step(val_every_n_steps, global_step):
                 phase_start = time.perf_counter()
-                eval_static_state = (
-                    pure_full_static_state
-                    if pure_full_static_state is not None
-                    else pure_static_state
-                )
                 last_validation_metrics = _evaluate_jax_validation_loss(
                     datamodule=datamodule,
                     trainable_params=pure_trainable_params,
-                    static_state=eval_static_state,
+                    static_state=pure_static_state,
                     eval_step=pure_eval_step,
                     max_steps=val_num_steps,
                     use_sharded_step=use_sharded_step,
@@ -1483,27 +1315,6 @@ def _run_jax_training_loop(
         result[f"run/{name}"] = value
     result.update(last_validation_metrics)
     result.update(last_msg_probe_metrics)
-    if context_encoder_pack_choices:
-        result.update(
-            {
-                "run/context_encoder_pack_tokens": float(context_encoder_pack_tokens),
-                "run/context_encoder_packed_steps": float(context_encoder_packed_steps),
-                "run/context_encoder_full_fallback_steps": float(
-                    context_encoder_full_fallback_steps
-                ),
-                "run/measured_context_encoder_packed_steps": float(
-                    measured_context_encoder_packed_steps
-                ),
-                "run/measured_context_encoder_full_fallback_steps": float(
-                    measured_context_encoder_full_fallback_steps
-                ),
-            }
-        )
-        for pack_tokens, count in context_encoder_pack_steps_by_size.items():
-            result[f"run/context_encoder_pack_{pack_tokens}_steps"] = float(count)
-            result[f"run/measured_context_encoder_pack_{pack_tokens}_steps"] = float(
-                measured_context_encoder_pack_steps_by_size[pack_tokens]
-            )
     for name, value in timing.items():
         result[f"run/profile_{name}"] = value
     if timing["measured_microbatches"] > 0:
@@ -1719,18 +1530,6 @@ def _raise_on_jax_compile_stall(
     )
 
 
-def _limit_context_count(
-    batch: dict[str, Array],
-    max_context_count: int,
-) -> dict[str, Array]:
-    peak_valid_mask = batch["peak_valid_mask"]
-    valid_rank = jnp.cumsum(peak_valid_mask.astype(jnp.int32), axis=-1)
-    return {
-        **batch,
-        "context_mask": peak_valid_mask & (valid_rank <= max_context_count),
-    }
-
-
 def _total_training_steps(
     config: config_dict.ConfigDict,
     datamodule: GemsDataModule,
@@ -1762,28 +1561,10 @@ def _stack_micro_batch_values(*values: Any) -> Any:
     return jnp.stack(values)
 
 
-def _process_global_max_int(value: int) -> int:
-    if jax.process_count() <= 1:
-        return int(value)
-    gathered = multihost_utils.process_allgather(np.asarray(value, dtype=np.int32))
-    return int(np.asarray(gathered).max())
-
-
 def _shutdown_torch_loader_iterator(loader_iter: Any) -> None:
     shutdown_workers = getattr(loader_iter, "_shutdown_workers", None)
     if callable(shutdown_workers):
         shutdown_workers()
-
-
-def _context_encoder_pack_choices(config: Any, default_pack_tokens: int) -> tuple[int, ...]:
-    raw_choices = _config_get(config, "mae_context_encoder_pack_token_choices", ())
-    if isinstance(raw_choices, str):
-        choices = [int(value) for value in raw_choices.split(",") if value]
-    else:
-        choices = [int(value) for value in raw_choices]
-    if default_pack_tokens > 0:
-        choices.append(default_pack_tokens)
-    return tuple(sorted({choice for choice in choices if choice > 0}))
 
 
 def _env_enabled(name: str) -> bool:

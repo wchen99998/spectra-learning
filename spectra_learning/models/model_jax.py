@@ -167,7 +167,6 @@ class PeakSetJEPAJax(nnx.Module):
         self.activation_checkpoint_mode = cfg.activation_checkpoint_mode.lower()
         self.activation_checkpoint_every_n_layers = cfg.activation_checkpoint_every_n_layers
         self.activation_checkpoint_modules = cfg.activation_checkpoint_modules
-        self.mae_context_encoder_pack_tokens = cfg.mae_context_encoder_pack_tokens
         self.compute_dtype = resolve_jax_compute_dtype(cfg.autocast_dtype)
 
         self.encoder = self._build_encoder(cfg, rngs)
@@ -575,124 +574,14 @@ class PeakSetJEPAJax(nnx.Module):
         precursor_mz: Array | None,
         spectrum_metadata: Array | None,
     ) -> tuple[Array, Array]:
-        def full_encoder(_):
-            context_encoded, context_pair = self.encoder.forward_with_pair(
-                context_mz,
-                context_intensity,
-                valid_mask=peak_valid_mask,
-                visible_mask=context_visible_mask,
-                precursor_mz=precursor_mz,
-                spectrum_metadata=spectrum_metadata,
-            )
-            return context_encoded, context_pair
-
-        pack_tokens = self.mae_context_encoder_pack_tokens
-        if pack_tokens <= 0 or self.encoder.use_position_embedding:
-            return full_encoder(None)
-        return self._encode_packed_mae_context(
+        return self.encoder.forward_with_pair(
             context_mz,
             context_intensity,
-            context_visible_mask,
-            precursor_mz,
-            spectrum_metadata,
-            pack_tokens,
-        )
-
-    def _encode_packed_mae_context(
-        self,
-        context_mz: Array,
-        context_intensity: Array,
-        context_visible_mask: Array,
-        precursor_mz: Array | None,
-        spectrum_metadata: Array | None,
-        pack_tokens: int,
-    ) -> tuple[Array, Array]:
-        num_peaks = context_mz.shape[1]
-        positions = jnp.arange(num_peaks, dtype=jnp.int32)
-        sort_key = jnp.where(
-            context_visible_mask,
-            positions[None, :],
-            positions[None, :] + num_peaks,
-        )
-        packed_indices = jnp.argsort(sort_key, axis=1)[:, :pack_tokens]
-        packed_mask = jnp.take_along_axis(context_visible_mask, packed_indices, axis=1)
-        packed_mz = jnp.take_along_axis(context_mz, packed_indices, axis=1)
-        packed_intensity = jnp.take_along_axis(
-            context_intensity,
-            packed_indices,
-            axis=1,
-        )
-        packed_encoded, packed_pair = self.encoder.forward_with_pair(
-            packed_mz,
-            packed_intensity,
-            valid_mask=packed_mask,
-            visible_mask=packed_mask,
+            valid_mask=peak_valid_mask,
+            visible_mask=context_visible_mask,
             precursor_mz=precursor_mz,
             spectrum_metadata=spectrum_metadata,
         )
-        return self._scatter_packed_mae_context(
-            packed_encoded,
-            packed_pair,
-            packed_indices,
-            packed_mask,
-            num_peaks,
-        )
-
-    def _scatter_packed_mae_context(
-        self,
-        packed_encoded: Array,
-        packed_pair: Array,
-        packed_indices: Array,
-        packed_mask: Array,
-        num_peaks: int,
-    ) -> tuple[Array, Array]:
-        batch_size, pack_tokens = packed_indices.shape
-        batch_indices = jnp.arange(batch_size)
-        peak_values = packed_encoded[:, :pack_tokens] * packed_mask[..., None].astype(
-            packed_encoded.dtype
-        )
-        full_peak = jnp.zeros(
-            (batch_size, num_peaks, packed_encoded.shape[-1]),
-            dtype=packed_encoded.dtype,
-        )
-        full_peak = full_peak.at[batch_indices[:, None], packed_indices].add(
-            peak_values
-        )
-        context_encoded = jnp.concatenate(
-            [full_peak, packed_encoded[:, pack_tokens : pack_tokens + 1]],
-            axis=1,
-        )
-
-        num_tokens = num_peaks + 1
-        pair_dim = packed_pair.shape[-1]
-        full_pair = jnp.zeros(
-            (batch_size, num_tokens, num_tokens, pair_dim),
-            dtype=packed_pair.dtype,
-        )
-        pair_mask = (
-            packed_mask[:, :, None] & packed_mask[:, None, :]
-        )[..., None].astype(packed_pair.dtype)
-        peak_pair = packed_pair[:, :pack_tokens, :pack_tokens] * pair_mask
-        full_pair = full_pair.at[
-            batch_indices[:, None, None],
-            packed_indices[:, :, None],
-            packed_indices[:, None, :],
-        ].add(peak_pair)
-        mask_f = packed_mask[..., None].astype(packed_pair.dtype)
-        full_pair = full_pair.at[
-            batch_indices[:, None],
-            packed_indices,
-            num_peaks,
-        ].add(packed_pair[:, :pack_tokens, pack_tokens] * mask_f)
-        full_pair = full_pair.at[
-            batch_indices[:, None],
-            num_peaks,
-            packed_indices,
-        ].add(packed_pair[:, pack_tokens, :pack_tokens] * mask_f)
-        full_pair = full_pair.at[batch_indices, num_peaks, num_peaks].set(
-            packed_pair[:, pack_tokens, pack_tokens]
-        )
-        return context_encoded, full_pair
 
     def _add_predictor_positions(self, x: Array) -> Array:
         positions = jnp.arange(x.shape[1])

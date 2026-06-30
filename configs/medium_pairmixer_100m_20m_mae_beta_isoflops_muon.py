@@ -19,10 +19,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.gradient_accumulation_steps = 4
     cfg.jax_mesh_devices = "16"
     cfg.activation_checkpoint_mode = "selective"
-    cfg.mae_context_encoder_pack_tokens = 0
-    cfg.mae_context_encoder_pack_token_choices = ()
-    # cfg.mae_context_encoder_pack_tokens = 20
-    # cfg.mae_context_encoder_pack_token_choices = (20,)
     cfg.pairmixer_pair_dim = 256
     cfg.pairmixer_pair_feature_hidden_dim = 512
     cfg.jepa_mask_strategy = ["random"]
