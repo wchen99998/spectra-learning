@@ -676,8 +676,26 @@ class PairMixerBlock(nnx.Module):
             peak_mask,
             self.fastmixer_max_visible_tokens,
         )
-        single_compact = _gather_single(single, idx)
         pair_compact = _gather_pair(pair, idx)
+        single, pair_compact = self.fastmixer_compact_call(
+            single,
+            pair_compact,
+            idx,
+            compact_token_mask,
+            token_mask,
+        )
+        pair = _scatter_pair(pair_compact, idx, pair.shape)
+        return single, pair
+
+    def fastmixer_compact_call(
+        self,
+        single: Array,
+        pair_compact: Array,
+        idx: Array,
+        compact_token_mask: Array,
+        token_mask: Array,
+    ) -> tuple[Array, Array]:
+        single_compact = _gather_single(single, idx)
         pair_mask_compact = compact_token_mask[:, :, None] & compact_token_mask[:, None, :]
 
         pair_compact = pair_compact + self._fast_triangle_update(
@@ -719,8 +737,7 @@ class PairMixerBlock(nnx.Module):
             self.single_transition,
             self.single_transition_norm(single),
         )
-        pair = _scatter_pair(pair_compact, idx, pair.shape)
-        return single, pair
+        return single, pair_compact
 
     def _fast_triangle_update(
         self,

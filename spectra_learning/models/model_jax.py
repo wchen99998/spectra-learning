@@ -24,7 +24,12 @@ from spectra_learning.models.common_jax import (
     should_activation_checkpoint,
 )
 from spectra_learning.models.encoder_jax import PeakSetEncoder
-from spectra_learning.models.pairmixer_jax import PairMixerBlock
+from spectra_learning.models.pairmixer_jax import (
+    PairMixerBlock,
+    _active_indices,
+    _gather_pair,
+    _scatter_pair,
+)
 from spectra_learning.models.peak_features_jax import PeakFeatureEmbedder
 from spectra_learning.models.settings import PeakSetJEPASettings
 from spectra_learning.models.spectrum_metadata import jax_spectrum_metadata_from_batch
@@ -709,6 +714,47 @@ class PeakSetJEPAJax(nnx.Module):
         x = self._add_predictor_positions(x)
         x = self.encoder_to_predictor_proj(x)
         pair = self._add_predictor_pair_positions(pair)
+        if self.use_fastmixer:
+            x, pair = self._predict_masked_latents_and_pair_fastmixer(
+                x,
+                pair,
+                visible_mask,
+            )
+        else:
+            for block_idx, block in enumerate(self.masked_latent_predictor, start=1):
+                if should_activation_checkpoint(
+                    mode=self.activation_checkpoint_mode,
+                    modules=self.activation_checkpoint_modules,
+                    module="predictor",
+                    block_idx=block_idx,
+                    every_n=self.activation_checkpoint_every_n_layers,
+                ):
+                    x, pair = nnx.remat(
+                        _call_pair_mixer_block,
+                        policy=activation_checkpoint_policy(
+                            self.activation_checkpoint_mode
+                        ),
+                    )(block, x, pair, visible_mask, visible_mask)
+                else:
+                    x, pair = block(x, pair, visible_mask, visible_mask)
+        if self.predictor_final_norm is not None:
+            x = self.predictor_final_norm(x)
+        pair_visible_mask = visible_mask[:, :, None] & visible_mask[:, None, :]
+        pair = pair * pair_visible_mask[..., None].astype(pair.dtype)
+        return x, pair
+
+    def _predict_masked_latents_and_pair_fastmixer(
+        self,
+        x: Array,
+        pair: Array,
+        visible_mask: Array,
+    ) -> tuple[Array, Array]:
+        idx, compact_token_mask = _active_indices(
+            visible_mask,
+            self.pairmixer_fast_max_visible_tokens,
+        )
+        dense_pair_shape = pair.shape
+        pair = _gather_pair(pair, idx)
         for block_idx, block in enumerate(self.masked_latent_predictor, start=1):
             if should_activation_checkpoint(
                 mode=self.activation_checkpoint_mode,
@@ -718,18 +764,20 @@ class PeakSetJEPAJax(nnx.Module):
                 every_n=self.activation_checkpoint_every_n_layers,
             ):
                 x, pair = nnx.remat(
-                    _call_pair_mixer_block,
+                    _call_fast_pair_mixer_block,
                     policy=activation_checkpoint_policy(
                         self.activation_checkpoint_mode
                     ),
-                )(block, x, pair, visible_mask, visible_mask)
+                )(block, x, pair, idx, compact_token_mask, visible_mask)
             else:
-                x, pair = block(x, pair, visible_mask, visible_mask)
-        if self.predictor_final_norm is not None:
-            x = self.predictor_final_norm(x)
-        pair_visible_mask = visible_mask[:, :, None] & visible_mask[:, None, :]
-        pair = pair * pair_visible_mask[..., None].astype(pair.dtype)
-        return x, pair
+                x, pair = block.fastmixer_compact_call(
+                    x,
+                    pair,
+                    idx,
+                    compact_token_mask,
+                    visible_mask,
+                )
+        return x, _scatter_pair(pair, idx, dense_pair_shape)
 
     def predict_masked_target_features_with_pair(
         self,
@@ -1322,6 +1370,23 @@ def _call_pair_mixer_block(
     token_mask: Array,
 ) -> tuple[Array, Array]:
     return block(single, pair, peak_mask, token_mask, deterministic=True)
+
+
+def _call_fast_pair_mixer_block(
+    block: PairMixerBlock,
+    single: Array,
+    pair: Array,
+    idx: Array,
+    compact_token_mask: Array,
+    token_mask: Array,
+) -> tuple[Array, Array]:
+    return block.fastmixer_compact_call(
+        single,
+        pair,
+        idx,
+        compact_token_mask,
+        token_mask,
+    )
 
 
 def _copy_param_state(target: nnx.Module, source: nnx.Module) -> None:

@@ -460,6 +460,55 @@ def test_jax_activation_checkpointing_matches_uncheckpointed_update(mode: str):
     )
 
 
+def test_jax_fastmixer_activation_checkpointing_matches_uncheckpointed_update():
+    torch.manual_seed(19)
+    kwargs = {
+        **_small_bi_dense_mae_kwargs(),
+        "encoder_num_layers": 2,
+        "masked_latent_predictor_num_layers": 2,
+        "pairmixer_block_type": "FastMixer",
+        "pairmixer_fast_max_visible_tokens": 6,
+    }
+    torch_model = PeakSetJEPA(
+        **{**kwargs, "pairmixer_block_type": "bi-dense"}
+    ).eval()
+    base_model = PeakSetJEPAJax(**kwargs)
+    checkpointed_model = PeakSetJEPAJax(
+        **{
+            **kwargs,
+            "activation_checkpoint_mode": "selective",
+            "activation_checkpoint_every_n_layers": 1,
+            "activation_checkpoint_modules": ("encoder", "predictor"),
+        }
+    )
+    base_model.load_torch_state_dict(torch_model.state_dict())
+    checkpointed_model.load_torch_state_dict(torch_model.state_dict())
+    optimizer_config = {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95}
+    base_optimizer = build_jax_optimizer(optimizer_config, base_model)
+    checkpointed_optimizer = build_jax_optimizer(optimizer_config, checkpointed_model)
+    batch = _jax_batch(_real_pattern_batch("random"))
+
+    base_metrics = jax_train_step(base_model, base_optimizer, batch)
+    checkpointed_metrics = jax_train_step(
+        checkpointed_model,
+        checkpointed_optimizer,
+        batch,
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(checkpointed_metrics["loss"]),
+        np.asarray(base_metrics["loss"]),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        np.asarray(checkpointed_model.jepa_mae_mz_head.weight[...]),
+        np.asarray(base_model.jepa_mae_mz_head.weight[...]),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
 def test_jax_bf16_autocast_uses_bf16_activations_and_fp32_loss():
     kwargs = {**_small_mae_kwargs(), "autocast_dtype": "bf16"}
     jax_model = PeakSetJEPAJax(**kwargs)
