@@ -87,7 +87,10 @@ class PeakSetJEPASettings:
     def from_config(cls, config: Any) -> "PeakSetJEPASettings":
         for key in REMOVED_SETTING_KEYS:
             if _config_has(config, key):
-                raise ValueError(f"{key} has been removed from PeakSetJEPASettings")
+                raise ValueError(
+                    f"{key} has been removed from PeakSetJEPASettings; remove it "
+                    "from experiment configs. JAX MAE uses the full context encoder."
+                )
         values = _default_values(cls())
         _apply_derived_defaults(values, config)
         for name, cast in SETTING_CASTS.items():
