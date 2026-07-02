@@ -29,6 +29,7 @@ from spectra_learning.models.pairmixer_jax import (
     SUPPORTED_PAIRMIXER_TRANSITION_TYPES,
     _active_indices,
     _gather_pair,
+    _remap_encoder_to_predictor,
     _scatter_pair,
 )
 from spectra_learning.models.peak_features_jax import PeakFeatureEmbedder
@@ -96,6 +97,11 @@ class PeakSetJEPAJax(nnx.Module):
             "fastmixer-dense",
         }
         self.pairmixer_fast_max_visible_tokens = cfg.pairmixer_fast_max_visible_tokens
+        self.pairmixer_fast_encoder_max_visible_tokens = (
+            cfg.pairmixer_fast_encoder_max_visible_tokens
+            if cfg.pairmixer_fast_encoder_max_visible_tokens is not None
+            else cfg.pairmixer_fast_max_visible_tokens
+        )
         self.pairmixer_transition_type = cfg.pairmixer_transition_type.lower()
         if self.pairmixer_transition_type not in SUPPORTED_PAIRMIXER_TRANSITION_TYPES:
             raise ValueError(
@@ -504,6 +510,12 @@ class PeakSetJEPAJax(nnx.Module):
         return_collapse_data: bool = False,
         loss_only: bool = False,
     ) -> dict[str, Array] | tuple[dict[str, Array], dict[str, Array]]:
+        if self.use_fastmixer:
+            return self._forward_mae_fastmixer_compact(
+                augmented_batch,
+                return_collapse_data=return_collapse_data,
+                loss_only=loss_only,
+            )
         peak_mz = augmented_batch["peak_mz"]
         peak_intensity = augmented_batch["peak_intensity"]
         peak_valid_mask = augmented_batch["peak_valid_mask"]
@@ -548,6 +560,97 @@ class PeakSetJEPAJax(nnx.Module):
             target_masks,
             predictor_visible_masks,
             predictor_output,
+        )
+        loss = mae_term + distogram_term
+        if loss_only:
+            return {"loss": loss}
+        valid_peak_count = jnp.maximum(peak_valid_mask.astype(jnp.float32).sum(), 1.0)
+        metrics = {
+            "loss": loss,
+            "context_fraction": context_mask.astype(jnp.float32).sum() / valid_peak_count,
+        }
+        metrics.update(self._target_mask_metrics(target_masks, valid_peak_count))
+        metrics.update(mae_metrics)
+        metrics.update(distogram_metrics)
+        if return_collapse_data:
+            return metrics, {}
+        return metrics
+
+    def _forward_mae_fastmixer_compact(
+        self,
+        augmented_batch: dict[str, Array],
+        *,
+        return_collapse_data: bool = False,
+        loss_only: bool = False,
+    ) -> dict[str, Array] | tuple[dict[str, Array], dict[str, Array]]:
+        peak_mz = augmented_batch["peak_mz"]
+        peak_intensity = augmented_batch["peak_intensity"]
+        peak_valid_mask = augmented_batch["peak_valid_mask"]
+        precursor_mz = augmented_batch.get("precursor_mz", None)
+        spectrum_metadata = jax_spectrum_metadata_from_batch(augmented_batch)
+        context_mask = augmented_batch["context_mask"] & peak_valid_mask
+        target_masks = augmented_batch["target_masks"] & peak_valid_mask[:, None, :]
+        context_mz, context_intensity, context_visible_mask = self._context_encoder_inputs(
+            peak_mz,
+            peak_intensity,
+            context_mask,
+            target_masks,
+        )
+        (
+            context_encoded_compact,
+            context_pair_compact,
+            enc_idx,
+            enc_compact_mask,
+        ) = self.encoder.forward_with_pair_compact(
+            context_mz,
+            context_intensity,
+            valid_mask=peak_valid_mask,
+            visible_mask=context_visible_mask,
+            max_visible_tokens=self.pairmixer_fast_encoder_max_visible_tokens,
+            precursor_mz=precursor_mz,
+            spectrum_metadata=spectrum_metadata,
+        )
+        (
+            predictor_output_compact,
+            predictor_pair_compact,
+            pred_idx,
+            pred_compact_mask,
+            target_slot,
+        ) = self._predict_augmented_target_outputs_fastmixer_compact(
+            context_encoded_compact,
+            context_pair_compact,
+            enc_idx,
+            enc_compact_mask,
+            context_mask,
+            target_masks,
+        )
+        flat_peak_mz, flat_peak_intensity = self._flatten_peak_values_for_target_views(
+            peak_mz,
+            peak_intensity,
+            target_masks.shape[1],
+        )
+        peak_idx = jnp.minimum(pred_idx, peak_mz.shape[1] - 1)
+        peak_mz_compact = jnp.take_along_axis(flat_peak_mz, peak_idx, axis=1)
+        peak_intensity_compact = jnp.take_along_axis(
+            flat_peak_intensity,
+            peak_idx,
+            axis=1,
+        )
+        mae_term, mae_metrics = self._mae_metrics_compact(
+            predictor_output_compact,
+            peak_mz_compact,
+            peak_intensity_compact,
+            target_slot,
+            reference=context_encoded_compact,
+            compute_accuracy=not loss_only,
+        )
+        distogram_term, distogram_metrics = self._distogram_metrics_compact(
+            predictor_pair_compact,
+            pred_idx,
+            pred_compact_mask,
+            target_slot,
+            peak_mz_compact,
+            reference=predictor_output_compact,
         )
         loss = mae_term + distogram_term
         if loss_only:
@@ -932,6 +1035,175 @@ class PeakSetJEPAJax(nnx.Module):
         predictor_output = self.project_targets(predictor_features)
         return predictor_features, predictor_output, predictor_pair
 
+    @staticmethod
+    def _flatten_peak_values_for_target_views(
+        peak_mz: Array,
+        peak_intensity: Array,
+        num_target_blocks: int,
+    ) -> tuple[Array, Array]:
+        batch_size, num_peaks = peak_mz.shape
+        view_shape = (batch_size, num_target_blocks, num_peaks)
+        return (
+            jnp.broadcast_to(peak_mz[:, None], view_shape).reshape(
+                batch_size * num_target_blocks,
+                num_peaks,
+            ),
+            jnp.broadcast_to(peak_intensity[:, None], view_shape).reshape(
+                batch_size * num_target_blocks,
+                num_peaks,
+            ),
+        )
+
+    def _predict_augmented_target_outputs_fastmixer_compact(
+        self,
+        context_emb_compact: Array,
+        context_pair_compact: Array,
+        enc_idx: Array,
+        enc_compact_mask: Array,
+        context_mask: Array,
+        target_masks: Array,
+    ) -> tuple[Array, Array, Array, Array, Array]:
+        batch_size, num_target_blocks, num_peaks = target_masks.shape
+        flat_batch_size = batch_size * num_target_blocks
+        compact_encoder_tokens = context_emb_compact.shape[1]
+
+        flat_context_emb = jnp.broadcast_to(
+            context_emb_compact[:, None],
+            (
+                batch_size,
+                num_target_blocks,
+                compact_encoder_tokens,
+                context_emb_compact.shape[-1],
+            ),
+        ).reshape(flat_batch_size, compact_encoder_tokens, context_emb_compact.shape[-1])
+        flat_context_pair = jnp.broadcast_to(
+            context_pair_compact[:, None],
+            (
+                batch_size,
+                num_target_blocks,
+                compact_encoder_tokens,
+                compact_encoder_tokens,
+                context_pair_compact.shape[-1],
+            ),
+        ).reshape(
+            flat_batch_size,
+            compact_encoder_tokens,
+            compact_encoder_tokens,
+            context_pair_compact.shape[-1],
+        )
+        flat_enc_idx = jnp.broadcast_to(
+            enc_idx[:, None],
+            (batch_size, num_target_blocks, compact_encoder_tokens),
+        ).reshape(flat_batch_size, compact_encoder_tokens)
+        flat_enc_compact_mask = jnp.broadcast_to(
+            enc_compact_mask[:, None],
+            (batch_size, num_target_blocks, compact_encoder_tokens),
+        ).reshape(flat_batch_size, compact_encoder_tokens)
+        flat_context_mask = jnp.broadcast_to(
+            context_mask[:, None],
+            (batch_size, num_target_blocks, num_peaks),
+        ).reshape(flat_batch_size, num_peaks)
+        flat_target_masks = target_masks.reshape(flat_batch_size, num_peaks)
+
+        predictor_visible_peak_mask = flat_context_mask | flat_target_masks
+        visible_mask = jnp.concatenate(
+            [
+                predictor_visible_peak_mask,
+                jnp.ones((flat_batch_size, 1), dtype=jnp.bool_),
+            ],
+            axis=1,
+        )
+        pred_idx, pred_compact_mask = _active_indices(
+            visible_mask,
+            self.pairmixer_fast_max_visible_tokens,
+        )
+
+        single_compact, pair_compact = _remap_encoder_to_predictor(
+            flat_context_emb,
+            flat_context_pair,
+            flat_enc_idx,
+            flat_enc_compact_mask,
+            pred_idx,
+            pred_compact_mask,
+            num_tokens=self.num_predictor_input_tokens,
+        )
+
+        peak_idx = jnp.minimum(pred_idx, num_peaks - 1)
+        pred_is_peak = pred_idx < num_peaks
+        target_slot = (
+            pred_compact_mask
+            & pred_is_peak
+            & jnp.take_along_axis(flat_target_masks, peak_idx, axis=1)
+        )
+
+        latent_mask_token = self.latent_mask_token[None, None, :].astype(
+            single_compact.dtype
+        )
+        single_compact = jnp.where(
+            target_slot[..., None],
+            latent_mask_token,
+            single_compact,
+        )
+        single_compact = single_compact + self.predictor_position_embedding(
+            pred_idx,
+        ).astype(single_compact.dtype)
+        single_compact = self.encoder_to_predictor_proj(single_compact)
+        single_compact = single_compact * pred_compact_mask[..., None].astype(
+            single_compact.dtype
+        )
+
+        target_pair_slot = target_slot[:, :, None] | target_slot[:, None, :]
+        pred_pair_mask = pred_compact_mask[:, :, None] & pred_compact_mask[:, None, :]
+        pair_compact = jnp.where(
+            target_pair_slot[..., None],
+            self.pair_mask_token[None, None, None, :].astype(pair_compact.dtype),
+            pair_compact,
+        )
+        pair_positions = (
+            pred_idx[:, :, None] * self.num_predictor_input_tokens
+            + pred_idx[:, None, :]
+        )
+        pair_compact = pair_compact + self.predictor_pair_position_embedding(
+            pair_positions,
+        ).astype(pair_compact.dtype)
+        pair_compact = pair_compact * pred_pair_mask[..., None].astype(pair_compact.dtype)
+
+        for block_idx, block in enumerate(self.masked_latent_predictor, start=1):
+            if should_activation_checkpoint(
+                mode=self.activation_checkpoint_mode,
+                modules=self.activation_checkpoint_modules,
+                module="predictor",
+                block_idx=block_idx,
+                every_n=self.activation_checkpoint_every_n_layers,
+            ):
+                single_compact, pair_compact = nnx.remat(
+                    _call_fast_pair_mixer_block_compact_only,
+                    policy=activation_checkpoint_policy(
+                        self.activation_checkpoint_mode
+                    ),
+                )(block, single_compact, pair_compact, pred_compact_mask)
+            else:
+                single_compact, pair_compact = block.fastmixer_compact_only_call(
+                    single_compact,
+                    pair_compact,
+                    pred_compact_mask,
+                )
+
+        if self.predictor_final_norm is not None:
+            single_compact = self.predictor_final_norm(single_compact)
+        single_compact = single_compact * pred_compact_mask[..., None].astype(
+            single_compact.dtype
+        )
+        predictor_features_compact = self.masked_latent_readout(single_compact)
+        predictor_output_compact = self.project_targets(predictor_features_compact)
+        return (
+            predictor_output_compact,
+            pair_compact,
+            pred_idx,
+            pred_compact_mask,
+            target_slot,
+        )
+
     def _embedding_loss(self, prediction: Array, target: Array) -> Array:
         return jnp.square(prediction.astype(jnp.float32) - target.astype(jnp.float32)).mean(
             axis=-1
@@ -1045,6 +1317,81 @@ class PeakSetJEPAJax(nnx.Module):
             "mae_intensity_accuracy": intensity_accuracy,
         }
 
+    def _mae_metrics_compact(
+        self,
+        predictor_output_compact: Array,
+        peak_mz_compact: Array,
+        peak_intensity_compact: Array,
+        target_slot: Array,
+        reference: Array,
+        *,
+        compute_accuracy: bool = True,
+    ) -> tuple[Array, dict[str, Array]]:
+        del reference
+        assert self.jepa_mae_mz_head is not None
+        mz_target, intensity_target = self._jepa_mae_targets(
+            peak_mz_compact,
+            peak_intensity_compact,
+        )
+        if compute_accuracy:
+            mz_logits = self.jepa_mae_mz_head(predictor_output_compact)
+            mz_loss = _masked_ce_loss_from_logits(mz_logits, mz_target, target_slot)
+            target_weights = target_slot.astype(jnp.float32)
+            mz_accuracy = (
+                (
+                    (jnp.argmax(mz_logits, axis=-1) == mz_target).astype(jnp.float32)
+                    * target_weights
+                ).sum()
+                / jnp.maximum(target_weights.sum(), 1.0)
+            )
+        else:
+            mz_loss = _linear_head_masked_ce_loss(
+                self.jepa_mae_mz_head,
+                predictor_output_compact,
+                mz_target,
+                target_slot,
+            )
+            mz_accuracy = mz_loss * 0.0
+
+        zero = mz_loss * 0.0
+        if self.masked_token_input_mode == "mz_sentinel":
+            value_loss = mz_loss
+            intensity_loss = zero
+            intensity_accuracy = zero
+        else:
+            assert self.jepa_mae_intensity_head is not None
+            intensity_logits = self.jepa_mae_intensity_head(predictor_output_compact)
+            intensity_loss = _masked_ce_loss_from_logits(
+                intensity_logits,
+                intensity_target,
+                target_slot,
+            )
+            value_loss = mz_loss + intensity_loss
+            if compute_accuracy:
+                target_weights = target_slot.astype(jnp.float32)
+                intensity_accuracy = (
+                    (
+                        (
+                            jnp.argmax(intensity_logits, axis=-1)
+                            == intensity_target
+                        ).astype(jnp.float32)
+                        * target_weights
+                    ).sum()
+                    / jnp.maximum(target_weights.sum(), 1.0)
+                )
+            else:
+                intensity_accuracy = zero
+
+        term = value_loss * self.mae_loss_weight
+        return term, {
+            "mae_loss": value_loss,
+            "mae_term": term,
+            "mae_mz_loss": mz_loss,
+            "mae_intensity_loss": intensity_loss,
+            "mae_mz_accuracy": mz_accuracy,
+            "mae_intensity_accuracy": intensity_accuracy,
+        }
+
     def _jepa_mae_metrics(
         self,
         predictor_output: Array,
@@ -1103,6 +1450,51 @@ class PeakSetJEPAJax(nnx.Module):
         per_pair = _cross_entropy_from_logits(logits, targets)
         weights = pair_mask.astype(jnp.float32)
         distogram_loss = (per_pair * weights).sum() / jnp.maximum(weights.sum(), 1.0)
+        term = distogram_loss * self.distogram_loss_weight
+        return term, {"distogram_loss": distogram_loss, "distogram_term": term}
+
+    def _distogram_metrics_compact(
+        self,
+        predictor_pair_compact: Array,
+        pred_idx: Array,
+        pred_compact_mask: Array,
+        target_slot: Array,
+        peak_mz_compact: Array,
+        reference: Array,
+    ) -> tuple[Array, dict[str, Array]]:
+        if self.distogram_loss_weight <= 0:
+            return reference.reshape(-1)[0] * 0.0, {}
+        assert self.distogram_head is not None
+        ui, uj = jnp.triu_indices(predictor_pair_compact.shape[1], k=1)
+        mz_i = peak_mz_compact[:, ui].astype(jnp.float32) * self.distogram_mz_max
+        mz_j = peak_mz_compact[:, uj].astype(jnp.float32) * self.distogram_mz_max
+        distogram_target = jnp.clip(
+            jnp.floor(jnp.abs(mz_i - mz_j) / self.jepa_mae_mz_bin_size).astype(
+                jnp.int32
+            ),
+            0,
+            self.distogram_num_bins - 1,
+        )
+        pred_is_peak = pred_idx < self.num_peak_tokens
+        visible_i = pred_compact_mask[:, ui] & pred_is_peak[:, ui]
+        visible_j = pred_compact_mask[:, uj] & pred_is_peak[:, uj]
+        target_either = target_slot[:, ui] | target_slot[:, uj]
+        distinct = pred_idx[:, ui] != pred_idx[:, uj]
+        upper_pair_mask = target_either & visible_i & visible_j & distinct
+        sym_pair_rows = (
+            predictor_pair_compact[:, ui, uj, :]
+            + predictor_pair_compact[:, uj, ui, :]
+        )
+        loss_rows, weight_rows = _linear_head_masked_ce_rows(
+            self.distogram_head,
+            sym_pair_rows,
+            distogram_target,
+            upper_pair_mask,
+        )
+        distogram_loss = (
+            2.0 * loss_rows.sum()
+            / jnp.maximum(2.0 * weight_rows.sum(), 1.0)
+        )
         term = distogram_loss * self.distogram_loss_weight
         return term, {"distogram_loss": distogram_loss, "distogram_term": term}
 
@@ -1263,6 +1655,42 @@ def _cross_entropy_from_logits(logits: Array, targets: Array) -> Array:
     return -(jax.nn.log_softmax(logits, axis=-1) * target_one_hot).sum(axis=-1)
 
 
+def _masked_ce_loss_from_logits(
+    logits: Array,
+    targets: Array,
+    valid_mask: Array,
+) -> Array:
+    per_token = _cross_entropy_from_logits(logits, targets)
+    weights = valid_mask.astype(jnp.float32)
+    return (per_token * weights).sum() / jnp.maximum(weights.sum(), 1.0)
+
+
+def _linear_head_masked_ce_loss(
+    linear: Linear,
+    x: Array,
+    targets: Array,
+    valid_mask: Array,
+) -> Array:
+    loss_rows, weight_rows = _linear_head_masked_ce_rows(
+        linear,
+        x,
+        targets,
+        valid_mask,
+    )
+    return loss_rows.sum() / jnp.maximum(weight_rows.sum(), 1.0)
+
+
+def _linear_head_masked_ce_rows(
+    linear: Linear,
+    x: Array,
+    targets: Array,
+    valid_mask: Array,
+) -> tuple[Array, Array]:
+    logits = linear(x)
+    weights = valid_mask.astype(jnp.float32)
+    return _cross_entropy_from_logits(logits, targets) * weights, weights
+
+
 def _call_pair_mixer_block(
     block: PairMixerBlock,
     single: Array,
@@ -1287,6 +1715,19 @@ def _call_fast_pair_mixer_block(
         idx,
         compact_token_mask,
         token_mask,
+    )
+
+
+def _call_fast_pair_mixer_block_compact_only(
+    block: PairMixerBlock,
+    single: Array,
+    pair: Array,
+    compact_token_mask: Array,
+) -> tuple[Array, Array]:
+    return block.fastmixer_compact_only_call(
+        single,
+        pair,
+        compact_token_mask,
     )
 
 

@@ -31,13 +31,14 @@ def _mask_strategy_names(value: Any) -> tuple[str, ...]:
     return tuple(str(item).strip().lower() for item in values if str(item).strip())
 
 
-def pairmixer_fast_mae_visible_tokens(config: Any) -> int:
+def _mae_encoder_predictor_visible_tokens(config: Any) -> tuple[int, int]:
     num_peaks = int(_config_get(config, "num_peaks", 64))
     strategies = _mask_strategy_names(
         _config_get(config, "jepa_mask_strategy", "contiguous")
     )
     if "all" in strategies or "intensity_aware" in strategies:
-        return pairmixer_fast_full_visible_tokens(config)
+        full_visible = pairmixer_fast_full_visible_tokens(config)
+        return full_visible, full_visible
     num_target_blocks = int(_config_get(config, "jepa_num_target_blocks", 2))
     context_fraction = float(_config_get(config, "jepa_context_fraction", 0.5))
     target_fraction = float(_config_get(config, "jepa_target_fraction", 0.25))
@@ -47,7 +48,8 @@ def pairmixer_fast_mae_visible_tokens(config: Any) -> int:
         _config_get(config, "masked_token_input_mode", "latent_token")
     ).lower()
 
-    max_visible = 1
+    encoder_max_visible = 1
+    predictor_max_visible = 1
     for valid_count in range(1, num_peaks + 1):
         context_len, target_len = jepa_mask_lengths_for_valid_count(
             valid_count,
@@ -65,8 +67,19 @@ def pairmixer_fast_mae_visible_tokens(config: Any) -> int:
             )
             encoder_visible = context_len + target_union_len + 1
         predictor_visible = context_len + target_len + 1
-        max_visible = max(max_visible, encoder_visible, predictor_visible)
-    return max_visible
+        encoder_max_visible = max(encoder_max_visible, encoder_visible)
+        predictor_max_visible = max(predictor_max_visible, predictor_visible)
+    return encoder_max_visible, predictor_max_visible
+
+
+def pairmixer_fast_mae_encoder_visible_tokens(config: Any) -> int:
+    encoder_visible, _ = _mae_encoder_predictor_visible_tokens(config)
+    return encoder_visible
+
+
+def pairmixer_fast_mae_visible_tokens(config: Any) -> int:
+    encoder_visible, predictor_visible = _mae_encoder_predictor_visible_tokens(config)
+    return max(encoder_visible, predictor_visible)
 
 
 def pairmixer_fast_required_visible_tokens(
@@ -96,3 +109,19 @@ def resolve_pairmixer_fast_max_visible_tokens(
     if block_type not in {"fastmixer", "fastmixer-dense"}:
         return None
     return pairmixer_fast_required_visible_tokens(config, mode=mode)
+
+
+def resolve_pairmixer_fast_encoder_max_visible_tokens(
+    config: Any,
+    *,
+    mode: str = "train",
+) -> int | None:
+    block_type = str(_config_get(config, "pairmixer_block_type", "dense")).lower()
+    if block_type not in {"fastmixer", "fastmixer-dense"}:
+        return None
+    if mode != "train":
+        return pairmixer_fast_required_visible_tokens(config, mode=mode)
+    training_mode = str(_config_get(config, "training_mode", "jepa")).lower()
+    if training_mode == "mae":
+        return pairmixer_fast_mae_encoder_visible_tokens(config)
+    return pairmixer_fast_full_visible_tokens(config)

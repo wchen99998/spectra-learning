@@ -413,6 +413,7 @@ def test_fastmixer_block_type_is_configurable():
     )
 
     assert settings.pairmixer_block_type == "FastMixer"
+    assert settings.pairmixer_fast_encoder_max_visible_tokens == 3
     assert settings.pairmixer_fast_max_visible_tokens == 4
 
 
@@ -427,6 +428,7 @@ def test_fastmixer_dense_block_type_is_configurable():
     )
 
     assert settings.pairmixer_block_type == "FastMixer-Dense"
+    assert settings.pairmixer_fast_encoder_max_visible_tokens == 3
     assert settings.pairmixer_fast_max_visible_tokens == 4
 
 

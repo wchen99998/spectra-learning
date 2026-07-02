@@ -6,6 +6,7 @@ from typing import Any
 
 from spectra_learning.data.spectra import PEAK_MZ_MAX
 from spectra_learning.models.fastmixer_capacity import (
+    resolve_pairmixer_fast_encoder_max_visible_tokens,
     resolve_pairmixer_fast_max_visible_tokens,
 )
 
@@ -66,6 +67,7 @@ class PeakSetJEPASettings:
     pairmixer_relative_fourier_x_min: float = 1e-3
     pairmixer_relative_fourier_x_max: float = 1.0
     pairmixer_fast_max_visible_tokens: int | None = None
+    pairmixer_fast_encoder_max_visible_tokens: int | None = None
     predictor_apply_final_norm: bool = True
     num_peaks: int = 64
     predictor_dim: int | None = None
@@ -97,6 +99,9 @@ class PeakSetJEPASettings:
             values[name] = cast(_config_get(config, name, values[name]))
         values["pairmixer_fast_max_visible_tokens"] = (
             resolve_pairmixer_fast_max_visible_tokens(config)
+        )
+        values["pairmixer_fast_encoder_max_visible_tokens"] = (
+            resolve_pairmixer_fast_encoder_max_visible_tokens(config)
         )
         return cls(**values)
 

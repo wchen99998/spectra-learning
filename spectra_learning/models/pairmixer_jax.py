@@ -152,30 +152,47 @@ def _selector_from_idx(idx: Array, num_tokens: int, dtype: object) -> Array:
     return jax.nn.one_hot(idx, num_tokens, dtype=dtype)
 
 
+def _flat_indexed_gather_rows(
+    data_2d: Array,
+    flat_idx: Array,
+    out_shape: tuple[int, ...],
+) -> Array:
+    return data_2d[flat_idx.reshape(-1), :].reshape(out_shape)
+
+
 def _gather_single(single: Array, idx: Array) -> Array:
-    return jnp.take_along_axis(single, idx[..., None], axis=1)
+    batch_size, num_tokens, dim = single.shape
+    compact_len = idx.shape[1]
+    batch_offsets = (
+        jnp.arange(batch_size, dtype=jnp.int32)[:, None]
+        * jnp.asarray(num_tokens, dtype=jnp.int32)
+    )
+    flat_idx = batch_offsets + idx.astype(jnp.int32)
+    return _flat_indexed_gather_rows(
+        single.reshape(batch_size * num_tokens, dim),
+        flat_idx,
+        (batch_size, compact_len, dim),
+    )
 
 
 def _gather_pair(pair: Array, idx: Array) -> Array:
-    num_tokens = pair.shape[1]
-    selector = _selector_from_idx(idx, num_tokens, pair.dtype)
-    precision = _dot_precision(pair.dtype)
-    acc_dtype = _preferred_acc_dtype(pair.dtype)
-    tmp = jnp.einsum(
-        "bki,bijc->bkjc",
-        selector,
-        pair,
-        precision=precision,
-        preferred_element_type=acc_dtype,
-    ).astype(pair.dtype)
-    out = jnp.einsum(
-        "bkjc,blj->bklc",
-        tmp,
-        selector,
-        precision=precision,
-        preferred_element_type=acc_dtype,
+    batch_size, num_tokens, _, pair_dim = pair.shape
+    compact_len = idx.shape[1]
+    batch_offsets = (
+        jnp.arange(batch_size, dtype=jnp.int32)[:, None, None]
+        * jnp.asarray(num_tokens * num_tokens, dtype=jnp.int32)
     )
-    return out.astype(pair.dtype)
+    flat_idx = (
+        batch_offsets
+        + idx[:, :, None].astype(jnp.int32)
+        * jnp.asarray(num_tokens, dtype=jnp.int32)
+        + idx[:, None, :].astype(jnp.int32)
+    )
+    return _flat_indexed_gather_rows(
+        pair.reshape(batch_size * num_tokens * num_tokens, pair_dim),
+        flat_idx,
+        (batch_size, compact_len, compact_len, pair_dim),
+    )
 
 
 def _scatter_pair(pair_compact: Array, idx: Array, out_shape: tuple[int, ...]) -> Array:
@@ -218,6 +235,65 @@ def _scatter_compact_pair_bias(delta: Array, idx: Array, num_tokens: int) -> Arr
         precision=precision,
         preferred_element_type=acc_dtype,
     )
+
+
+def _remap_encoder_to_predictor(
+    enc_single_compact: Array,
+    enc_pair_compact: Array,
+    enc_idx: Array,
+    enc_compact_mask: Array,
+    pred_idx: Array,
+    pred_compact_mask: Array,
+    *,
+    num_tokens: int,
+) -> tuple[Array, Array]:
+    batch_size, enc_len, single_dim = enc_single_compact.shape
+    pred_len = pred_idx.shape[1]
+    pair_dim = enc_pair_compact.shape[-1]
+    sentinel = jnp.asarray(enc_len, dtype=jnp.int32)
+
+    batch_ids = jnp.broadcast_to(
+        jnp.arange(batch_size, dtype=jnp.int32)[:, None],
+        enc_idx.shape,
+    )
+    slot_ids = jnp.broadcast_to(
+        jnp.arange(enc_len, dtype=jnp.int32)[None, :],
+        enc_idx.shape,
+    )
+    pos_to_slot = jnp.full((batch_size, num_tokens), sentinel, dtype=jnp.int32)
+    updates = jnp.where(enc_compact_mask, slot_ids, sentinel)
+    pos_to_slot = pos_to_slot.at[batch_ids, enc_idx.astype(jnp.int32)].set(updates)
+
+    pred_slot = jnp.take_along_axis(pos_to_slot, pred_idx.astype(jnp.int32), axis=1)
+    found = (pred_slot != sentinel) & pred_compact_mask
+    pred_slot_safe = jnp.minimum(pred_slot, enc_len - 1)
+
+    single_flat_idx = (
+        jnp.arange(batch_size, dtype=jnp.int32)[:, None]
+        * jnp.asarray(enc_len, dtype=jnp.int32)
+        + pred_slot_safe
+    )
+    context_single = _flat_indexed_gather_rows(
+        enc_single_compact.reshape(batch_size * enc_len, single_dim),
+        single_flat_idx,
+        (batch_size, pred_len, single_dim),
+    )
+    context_single = context_single * found[..., None].astype(context_single.dtype)
+
+    pair_flat_idx = (
+        jnp.arange(batch_size, dtype=jnp.int32)[:, None, None]
+        * jnp.asarray(enc_len * enc_len, dtype=jnp.int32)
+        + pred_slot_safe[:, :, None] * jnp.asarray(enc_len, dtype=jnp.int32)
+        + pred_slot_safe[:, None, :]
+    )
+    context_pair = _flat_indexed_gather_rows(
+        enc_pair_compact.reshape(batch_size * enc_len * enc_len, pair_dim),
+        pair_flat_idx,
+        (batch_size, pred_len, pred_len, pair_dim),
+    )
+    pair_found = found[:, :, None] & found[:, None, :]
+    context_pair = context_pair * pair_found[..., None].astype(context_pair.dtype)
+    return context_single, context_pair
 
 
 class PairFeatureEmbedder(nnx.Module):
@@ -792,6 +868,57 @@ class PairMixerBlock(nnx.Module):
         )
         return single, pair_compact
 
+    def fastmixer_compact_only_call(
+        self,
+        single_compact: Array,
+        pair_compact: Array,
+        compact_token_mask: Array,
+    ) -> tuple[Array, Array]:
+        pair_mask_compact = compact_token_mask[:, :, None] & compact_token_mask[:, None, :]
+
+        pair_compact = pair_compact + self._fast_triangle_update(
+            self.tri_mul_out,
+            pair_compact,
+            compact_token_mask,
+            pair_mask_compact,
+        )
+        pair_compact = pair_compact + self._fast_triangle_update(
+            self.tri_mul_in,
+            pair_compact,
+            compact_token_mask,
+            pair_mask_compact,
+        )
+        pair_compact = pair_compact + _transition_with_preferred_acc(
+            self.pair_transition,
+            self.pair_transition_norm(pair_compact),
+        )
+        pair_compact = pair_compact * pair_mask_compact[..., None].astype(
+            pair_compact.dtype
+        )
+        if self.use_single_to_pair_update:
+            pair_compact = pair_compact + self._fast_single_to_pair_update(
+                single_compact,
+                pair_compact,
+                pair_mask_compact,
+            )
+            pair_compact = pair_compact * pair_mask_compact[..., None].astype(
+                pair_compact.dtype
+            )
+
+        single_compact = single_compact + self._fast_attention_pair_bias_compact(
+            single_compact,
+            pair_compact,
+            compact_token_mask,
+        )
+        single_compact = single_compact + _transition_with_preferred_acc(
+            self.single_transition,
+            self.single_transition_norm(single_compact),
+        )
+        single_compact = single_compact * compact_token_mask[..., None].astype(
+            single_compact.dtype
+        )
+        return single_compact, pair_compact
+
     def _fast_triangle_update(
         self,
         module: TriangleMultiplicativeUpdate,
@@ -906,6 +1033,62 @@ class PairMixerBlock(nnx.Module):
         out = jnp.swapaxes(out, 1, 2).reshape(batch_size, num_tokens, single_dim)
         out = out * jax.nn.sigmoid(_linear_with_preferred_acc(module.g, single_norm))
         return _linear_with_preferred_acc(module.o, out)
+
+    def _fast_attention_pair_bias_compact(
+        self,
+        single_compact: Array,
+        pair_compact: Array,
+        compact_token_mask: Array,
+    ) -> Array:
+        module = self.single_attention
+        batch_size, num_tokens, single_dim = single_compact.shape
+        single_norm = module.single_norm(single_compact)
+        qkv = _linear_with_preferred_acc(module.qkv, single_norm).reshape(
+            batch_size,
+            num_tokens,
+            3,
+            module.num_heads,
+            module.head_dim,
+        )
+        q, k, v = jnp.moveaxis(qkv, 2, 0)
+        q = jnp.swapaxes(q, 1, 2)
+        k = jnp.swapaxes(k, 1, 2)
+        v = jnp.swapaxes(v, 1, 2)
+
+        pair_bias = _linear_with_preferred_acc(
+            module.pair_bias,
+            module.pair_norm(pair_compact),
+        )
+        attn_bias = jnp.transpose(pair_bias, (0, 3, 1, 2))
+        attn_bias = jnp.where(
+            compact_token_mask[:, None, None, :],
+            attn_bias.astype(jnp.float32),
+            jnp.asarray(-jnp.inf, dtype=jnp.float32),
+        )
+
+        scores = (
+            jnp.einsum(
+                "...qd,...kd->...qk",
+                q,
+                k,
+                precision=_dot_precision(q.dtype),
+                preferred_element_type=_preferred_acc_dtype(q.dtype),
+            ).astype(jnp.float32)
+            / math.sqrt(module.head_dim)
+        )
+        scores = scores + attn_bias
+        attn = jax.nn.softmax(scores, axis=-1).astype(v.dtype)
+        out = jnp.einsum(
+            "...qk,...kd->...qd",
+            attn,
+            v,
+            precision=_dot_precision(v.dtype),
+            preferred_element_type=_preferred_acc_dtype(v.dtype),
+        ).astype(v.dtype)
+        out = jnp.swapaxes(out, 1, 2).reshape(batch_size, num_tokens, single_dim)
+        out = out * jax.nn.sigmoid(_linear_with_preferred_acc(module.g, single_norm))
+        out = _linear_with_preferred_acc(module.o, out)
+        return out * compact_token_mask[..., None].astype(out.dtype)
 
     def load_torch_state_dict(
         self,

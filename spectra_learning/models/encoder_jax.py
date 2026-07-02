@@ -18,6 +18,7 @@ from spectra_learning.models.pairmixer_jax import (
     PairFeatureEmbedder,
     PairMixerBlock,
     _active_indices,
+    _gather_single,
     _gather_pair,
     _scatter_pair,
 )
@@ -258,6 +259,53 @@ class PeakSetEncoder(nnx.Module):
         z = z * pair_visible_mask[..., None].astype(z.dtype)
         return x, z
 
+    def forward_with_pair_compact(
+        self,
+        peak_mz: Array,
+        peak_intensity: Array,
+        *,
+        valid_mask: Array | None = None,
+        visible_mask: Array | None = None,
+        max_visible_tokens: int | None = None,
+        precursor_mz: Array | None = None,
+        spectrum_metadata: Array | None = None,
+    ) -> tuple[Array, Array, Array, Array]:
+        peak_valid_mask = (
+            jnp.ones_like(peak_mz, dtype=jnp.bool_) if valid_mask is None else valid_mask
+        )
+        peak_visible_mask = merge_visible_mask(peak_valid_mask, visible_mask)
+        if peak_visible_mask is None:
+            peak_visible_mask = peak_valid_mask
+        x = self.embedder(peak_mz, peak_intensity)
+        metadata_embedding = self._metadata_embedding(spectrum_metadata, x.dtype)
+        if metadata_embedding is not None:
+            x = x + metadata_embedding[:, None, :].astype(x.dtype)
+        x = self._add_positions(x)
+        z = self.pair_embedder(
+            peak_mz,
+            peak_intensity,
+            x,
+            peak_visible_mask,
+            precursor_mz=precursor_mz,
+        )
+        x = self._append_cls_token(x, metadata_embedding)
+        z = self._append_cls_pair_tokens(z)
+        token_visible_mask = self._append_cls_mask(peak_visible_mask)
+        x, z, idx, compact_token_mask = self._forward_fastmixer_blocks_compact(
+            x,
+            z,
+            token_visible_mask,
+            max_visible_tokens=max_visible_tokens,
+        )
+        if self.final_norm is not None:
+            x = self.final_norm(x)
+        x = x * compact_token_mask[..., None].astype(x.dtype)
+        if self.final_pair_norm is not None:
+            z = self.final_pair_norm(z)
+        pair_visible_mask = compact_token_mask[:, :, None] & compact_token_mask[:, None, :]
+        z = z * pair_visible_mask[..., None].astype(z.dtype)
+        return x, z, idx, compact_token_mask
+
     def _forward_fastmixer_blocks(
         self,
         x: Array,
@@ -295,6 +343,48 @@ class PeakSetEncoder(nnx.Module):
         if self.final_pair_norm is not None:
             z = self.final_pair_norm(z)
         return x, _scatter_pair(z, idx, dense_pair_shape)
+
+    def _forward_fastmixer_blocks_compact(
+        self,
+        x: Array,
+        z: Array,
+        token_visible_mask: Array,
+        *,
+        max_visible_tokens: int | None = None,
+    ) -> tuple[Array, Array, Array, Array]:
+        fast_max_visible_tokens = (
+            self.pairmixer_fast_max_visible_tokens
+            if max_visible_tokens is None
+            else max_visible_tokens
+        )
+        idx, compact_token_mask = _active_indices(
+            token_visible_mask,
+            fast_max_visible_tokens,
+        )
+        x = _gather_single(x, idx)
+        x = x * compact_token_mask[..., None].astype(x.dtype)
+        z = _gather_pair(z, idx)
+        for block_idx, block in enumerate(self.blocks, start=1):
+            if should_activation_checkpoint(
+                mode=self.activation_checkpoint_mode,
+                modules=self.activation_checkpoint_modules,
+                module="encoder",
+                block_idx=block_idx,
+                every_n=self.activation_checkpoint_every_n_layers,
+            ):
+                x, z = nnx.remat(
+                    _call_fast_pair_mixer_block_compact_only,
+                    policy=activation_checkpoint_policy(
+                        self.activation_checkpoint_mode
+                    ),
+                )(block, x, z, compact_token_mask)
+            else:
+                x, z = block.fastmixer_compact_only_call(
+                    x,
+                    z,
+                    compact_token_mask,
+                )
+        return x, z, idx, compact_token_mask
 
     def __call__(
         self,
@@ -379,4 +469,17 @@ def _call_fast_pair_mixer_block(
         idx,
         compact_token_mask,
         token_mask,
+    )
+
+
+def _call_fast_pair_mixer_block_compact_only(
+    block: PairMixerBlock,
+    single: Array,
+    pair: Array,
+    compact_token_mask: Array,
+) -> tuple[Array, Array]:
+    return block.fastmixer_compact_only_call(
+        single,
+        pair,
+        compact_token_mask,
     )

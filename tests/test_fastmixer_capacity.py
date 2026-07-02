@@ -4,8 +4,12 @@ import jax.numpy as jnp
 from flax import nnx
 from ml_collections import config_dict
 
+from configs.medium_pairmixer_100m_20m_mae_beta_isoflops_adamw import (
+    get_config as get_adamw_config,
+)
 from configs.medium_pairmixer_100m_20m_mae_beta_isoflops_muon import get_config
 from spectra_learning.models.fastmixer_capacity import (
+    pairmixer_fast_mae_encoder_visible_tokens,
     pairmixer_fast_full_visible_tokens,
     pairmixer_fast_mae_visible_tokens,
 )
@@ -21,9 +25,22 @@ def test_muon_config_auto_fastmixer_capacity_matches_mask_pipeline():
     cfg = get_config()
 
     assert "pairmixer_fast_max_visible_tokens" not in cfg
+    assert pairmixer_fast_mae_encoder_visible_tokens(cfg) == 12
     assert pairmixer_fast_mae_visible_tokens(cfg) == 20
     assert pairmixer_fast_full_visible_tokens(cfg) == 32
-    assert PeakSetJEPASettings.from_config(cfg).pairmixer_fast_max_visible_tokens == 20
+    settings = PeakSetJEPASettings.from_config(cfg)
+    assert settings.pairmixer_fast_encoder_max_visible_tokens == 12
+    assert settings.pairmixer_fast_max_visible_tokens == 20
+
+
+def test_adamw_config_uses_fastest_e2e_encoder_and_predictor_caps():
+    cfg = get_adamw_config()
+
+    assert pairmixer_fast_mae_encoder_visible_tokens(cfg) == 17
+    assert pairmixer_fast_mae_visible_tokens(cfg) == 29
+    settings = PeakSetJEPASettings.from_config(cfg)
+    assert settings.pairmixer_fast_encoder_max_visible_tokens == 17
+    assert settings.pairmixer_fast_max_visible_tokens == 29
 
 
 def test_fastmixer_dense_auto_capacity_matches_fastmixer():
