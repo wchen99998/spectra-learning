@@ -20,21 +20,6 @@ from spectra_learning.models.peak_features_jax import FourierFeatures
 from spectra_learning.models.transformer_jax import FeedForward, SwiGLUFeedForward
 
 
-COMMON_MASS_DIFFERENCES_DA = (
-    1.003355,
-    17.026549,
-    18.010565,
-    28.031300,
-    44.026215,
-    57.021464,
-    71.037114,
-    97.052764,
-    99.068414,
-    113.084064,
-    129.042593,
-    147.068414,
-)
-
 SUPPORTED_PAIRMIXER_TRANSITION_TYPES = {"swiglu", "feedforward"}
 
 
@@ -305,7 +290,6 @@ class PairFeatureEmbedder(nnx.Module):
         hidden_dim: int,
         mz_scale: float = PEAK_MZ_MAX,
         precursor_mz_scale: float = PEAK_MZ_MAX,
-        sigma_ppm: float = 20.0,
         use_fourier_features: bool = True,
         fourier_num_freqs: int = 16,
         fourier_x_min: float = 1e-2,
@@ -318,10 +302,8 @@ class PairFeatureEmbedder(nnx.Module):
         rngs = nnx.Rngs(0) if rngs is None else rngs
         self.mz_scale = mz_scale
         self.precursor_mz_scale = precursor_mz_scale
-        self.sigma_ppm = sigma_ppm
         self.use_fourier_features = use_fourier_features
-        self.mass_differences = jnp.asarray(COMMON_MASS_DIFFERENCES_DA, dtype=jnp.float32)
-        raw_dim = 14 + len(COMMON_MASS_DIFFERENCES_DA)
+        raw_dim = 14
         if self.use_fourier_features:
             self.pair_fourier = FourierFeatures(
                 x_min=fourier_x_min,
@@ -394,8 +376,6 @@ class PairFeatureEmbedder(nnx.Module):
         abs_d = jnp.abs(d)
         relative_d = d / reference_mass
         complement = mz_i + mz_j - reference_mass
-        ppm = 1e6 * (abs_d[..., None] - self.mass_differences) / self.mass_differences
-        radial = jnp.exp(-0.5 * jnp.square(ppm / self.sigma_ppm))
 
         intensity_i = intensity[:, :, None]
         intensity_j = intensity[:, None, :]
@@ -415,7 +395,6 @@ class PairFeatureEmbedder(nnx.Module):
             jnp.sign(d)[..., None],
             jnp.broadcast_to(diag, d.shape)[..., None],
             (d > 0).astype(peak_mz.dtype)[..., None],
-            radial,
         ]
         if self.use_fourier_features:
             raw_parts.extend(

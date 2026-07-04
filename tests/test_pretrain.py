@@ -281,13 +281,14 @@ class PairMixerEncoderTests(unittest.TestCase):
         handle.remove()
 
         raw = captured["raw_input"]
-        scalar_dim = 14 + embedder.mass_differences.numel()
+        scalar_dim = 14
         pair_fourier_dim = 3 * embedder.pair_fourier.num_features()
         relative_fourier_dim = embedder.relative_pair_fourier.num_features()
         self.assertEqual(
             raw.shape[-1],
             scalar_dim + pair_fourier_dim + relative_fourier_dim,
         )
+        self.assertFalse(hasattr(embedder, "mass_differences"))
 
         raw_pair = raw[0, 0, 1]
         torch.testing.assert_close(

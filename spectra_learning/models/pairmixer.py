@@ -16,21 +16,6 @@ from spectra_learning.models.transformer import (
 )
 
 
-COMMON_MASS_DIFFERENCES_DA = (
-    1.003355,
-    17.026549,
-    18.010565,
-    28.031300,
-    44.026215,
-    57.021464,
-    71.037114,
-    97.052764,
-    99.068414,
-    113.084064,
-    129.042593,
-    147.068414,
-)
-
 SUPPORTED_PAIRMIXER_TRANSITION_TYPES = {"swiglu", "feedforward"}
 
 
@@ -75,7 +60,6 @@ class PairFeatureEmbedder(nn.Module):
         hidden_dim: int,
         mz_scale: float = PEAK_MZ_MAX,
         precursor_mz_scale: float = PEAK_MZ_MAX,
-        sigma_ppm: float = 20.0,
         use_fourier_features: bool = True,
         fourier_num_freqs: int = 16,
         fourier_x_min: float = 1e-2,
@@ -86,14 +70,8 @@ class PairFeatureEmbedder(nn.Module):
         super().__init__()
         self.mz_scale = mz_scale
         self.precursor_mz_scale = precursor_mz_scale
-        self.sigma_ppm = sigma_ppm
         self.use_fourier_features = use_fourier_features
-        self.register_buffer(
-            "mass_differences",
-            torch.tensor(COMMON_MASS_DIFFERENCES_DA, dtype=torch.float32),
-            persistent=False,
-        )
-        raw_dim = 14 + len(COMMON_MASS_DIFFERENCES_DA)
+        raw_dim = 14
         if self.use_fourier_features:
             self.pair_fourier = FourierFeatures(
                 x_min=fourier_x_min,
@@ -165,10 +143,6 @@ class PairFeatureEmbedder(nn.Module):
             abs_d = d.abs()
             relative_d = d / reference_mass
             complement = mz_i + mz_j - reference_mass
-            mass_diffs = self.mass_differences.to(device=peak_mz.device)
-            # radial: [B, N, N, num_common_mass_differences]
-            ppm = 1e6 * (abs_d.unsqueeze(-1) - mass_diffs) / mass_diffs
-            radial = torch.exp(-0.5 * (ppm / self.sigma_ppm).square())
 
             intensity_i = intensity.unsqueeze(2)
             intensity_j = intensity.unsqueeze(1)
@@ -192,7 +166,6 @@ class PairFeatureEmbedder(nn.Module):
                 torch.sign(d).unsqueeze(-1),
                 diag.expand_as(d).unsqueeze(-1),
                 (d > 0).to(dtype=peak_mz.dtype).unsqueeze(-1),
-                radial,
             ]
             if self.use_fourier_features:
                 raw_parts.extend(
