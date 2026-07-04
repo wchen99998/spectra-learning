@@ -1328,6 +1328,55 @@ def test_training_loop_resumes_with_offset_loader(monkeypatch, tmp_path: Path):
     assert metrics["run/final_global_step"] == 5.0
 
 
+def test_training_loop_requests_fresh_loader_for_each_epoch(monkeypatch, tmp_path: Path):
+    cfg = config_dict.ConfigDict()
+    cfg.autocast_dtype = "bf16"
+    cfg.log_every_n_steps = 0
+    cfg.collapse_metrics_every_n_steps = 0
+    cfg.checkpoint_every_steps = 1000
+    cfg.msg_probe_every_n_steps = -1
+    cfg.device_prefetch_size = 1
+
+    class FakeDataModule:
+        train_steps = 2
+        global_batch_size = 1
+
+        def __init__(self) -> None:
+            self.calls = []
+
+        def train_loader_for_epoch(self, epoch: int, start_batch: int = 0):
+            self.calls.append((epoch, start_batch))
+            return [
+                {"peak_mz": torch.tensor([float(epoch * self.train_steps + step)])}
+                for step in range(start_batch, self.train_steps)
+            ]
+
+    def fake_train_step_impl(*args, **kwargs):
+        return {"loss": torch.tensor(1.0)}
+
+    datamodule = FakeDataModule()
+    monkeypatch.setattr(pretrain, "train_step_impl", fake_train_step_impl)
+
+    metrics = pretrain.run_training_loop(
+        config=cfg,
+        datamodule=datamodule,
+        model=torch.nn.Linear(1, 1),
+        optimizers=[],
+        schedulers=[],
+        logger=SimpleNamespace(experiment=None, log_metrics=lambda *args, **kwargs: None),
+        checkpoint_dir=tmp_path,
+        start_epoch=0,
+        loop_epochs=2,
+        resume_offset=0,
+        global_step=0,
+        total_steps=4,
+        device=torch.device("cpu"),
+    )
+
+    assert datamodule.calls == [(0, 0), (1, 0)]
+    assert metrics["run/final_global_step"] == 4.0
+
+
 def test_training_loop_counts_optimizer_steps_with_gradient_accumulation(
     monkeypatch,
     tmp_path: Path,

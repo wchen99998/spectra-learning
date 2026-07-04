@@ -23,21 +23,59 @@ from spectra_learning.training.jax_runtime_flags import jax_tpu_xla_flags_string
 
 REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_PROJECT = "metal-repeater-411410"
-DEFAULT_INFRA = "k8s/skypilot-training"
-DEFAULT_TASK_NAME = "spectra-100m-muon-v6e-kueue"
-DEFAULT_IMAGE_ID = "docker:python:3.12-bookworm"
-DEFAULT_KUEUE_LOCAL_QUEUE = "skypilot-v6e-nap"
-DEFAULT_CPUS = 64
-DEFAULT_MEMORY_GB = 256
-MAX_SKY_CLUSTER_NAME_LENGTH = 63
-SUPPORTED_NAP_TOPOLOGIES = {"4x4"}
+DEFAULT_INFRA = "gcp/us-east5"
+DEFAULT_TASK_NAME = "spectra-v6e-mig-dws"
+DEFAULT_VM_IMAGE_ID = (
+    "projects/ubuntu-os-accelerator-images/global/images/"
+    "ubuntu-accel-2204-amd64-tpu-v5e-v5p-v6e-v20260623"
+)
+DEFAULT_PYTHON_VERSION = "3.12.11"
+DEFAULT_SKY_BIN = "/home/wuhao/skypilot/.venv/bin/sky"
+CT6E_TOPOLOGY_BY_CHIPS = {
+    8: "2x4",
+    16: "4x4",
+    32: "4x8",
+    64: "8x8",
+    128: "8x16",
+    256: "16x16",
+}
+SUPPORTED_CT6E_CHIPS = set(CT6E_TOPOLOGY_BY_CHIPS)
+DEFAULT_CHIPS = 32
+DEFAULT_TOPOLOGY = CT6E_TOPOLOGY_BY_CHIPS[DEFAULT_CHIPS]
+DEFAULT_CHIPS_PER_NODE = 4
+CT6E_INSTANCE_TYPES_BY_CHIPS_PER_NODE = {
+    1: "ct6e-standard-1t",
+    4: "ct6e-standard-4t",
+    8: "ct6e-standard-8t",
+}
+DEFAULT_DWS_RUN_DURATION_SECONDS = 604800
+MIN_DWS_RUN_DURATION_SECONDS = 600
+MAX_DWS_RUN_DURATION_SECONDS = 604800
+DEFAULT_PROVISION_TIMEOUT_SECONDS = 3600
+MAX_SKY_JOB_NAME_LENGTH = 63
+DWS_FLEX_START_FIX_PR = "https://github.com/skypilot-org/skypilot/pull/9608"
 TASK_SETUP = """\
 set -euo pipefail
-python --version
-python -m pip install --upgrade pip
-python -m pip install uv
+sudo env DEBIAN_FRONTEND=noninteractive apt-get update
+sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \\
+  build-essential \\
+  ca-certificates \\
+  curl \\
+  git \\
+  libgomp1 \\
+  libsm6 \\
+  libxext6 \\
+  libxrender1 \\
+  pkg-config \\
+  xz-utils
+export PATH="${HOME}/.local/bin:${PATH}"
+if ! command -v uv >/dev/null 2>&1; then
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+fi
 uv --version
-uv sync --frozen --no-dev --extra tpu
+uv python install __SPECTRA_PYTHON_VERSION__
+uv sync --python __SPECTRA_PYTHON_VERSION__ --frozen --no-dev --extra tpu
+.venv/bin/python --version
 .venv/bin/python - <<'PY'
 import importlib.metadata as md
 
@@ -46,7 +84,7 @@ print("jaxlib", md.version("jaxlib"))
 print("libtpu", md.version("libtpu"))
 print("wandb", md.version("wandb"))
 PY
-"""
+""".replace("__SPECTRA_PYTHON_VERSION__", DEFAULT_PYTHON_VERSION)
 TASK_RUN = """\
 set -euo pipefail
 : "${SPECTRA_CONFIG:?SPECTRA_CONFIG must be set}"
@@ -143,6 +181,7 @@ class ConfigDefaults:
     throughput_warmup_steps: int
     dataloader_num_workers: int
     msg_probe_every_n_steps: float
+    msg_probe_at_final_step: bool
     val_every_n_steps: float
     val_num_steps: int
 
@@ -153,7 +192,7 @@ class TopologySpec:
     total_chips: int
     num_nodes: int
     chips_per_node: int
-    accelerator: str
+    instance_type: str
 
     @property
     def jax_mesh_devices(self) -> str:
@@ -164,9 +203,33 @@ class TopologySpec:
         return f"v6e{self.topology}"
 
 
+def parse_duration_seconds(value: str) -> int:
+    text = value.strip().lower()
+    unit = text[-1] if text[-1].isalpha() else "s"
+    amount = text[:-1] if unit != "s" else text.removesuffix("s")
+    if unit not in {"s", "m", "h", "d"}:
+        raise argparse.ArgumentTypeError("duration unit must be one of s, m, h, d")
+    seconds = int(amount) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+    if not MIN_DWS_RUN_DURATION_SECONDS <= seconds <= MAX_DWS_RUN_DURATION_SECONDS:
+        raise argparse.ArgumentTypeError(
+            "DWS run duration must be between 600 seconds and 7 days"
+        )
+    return seconds
+
+
+def topology_for_chips(chips: int) -> str:
+    try:
+        return CT6E_TOPOLOGY_BY_CHIPS[int(chips)]
+    except KeyError:
+        raise ValueError(
+            f"chips={chips} is unsupported; supported CT6e MIG sizes are "
+            f"{sorted(SUPPORTED_CT6E_CHIPS)}"
+        ) from None
+
+
 def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser(
-        description="Submit Spectra JAX training to SkyPilot/GKE/Kueue."
+        description="Submit Spectra JAX training to SkyPilot GCP DWS TPU VMs."
     )
     parser.add_argument("--config", required=True, help="Training config path.")
     parser.add_argument(
@@ -176,23 +239,37 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
     )
     parser.add_argument(
         "--topology",
-        default="4x4",
-        help="TPU v6e topology. The default NAP queue is currently configured for 4x4.",
-    )
-    parser.add_argument("--accelerator", default="tpu-v6e-4")
-    parser.add_argument("--chips-per-node", type=int, default=4)
-    parser.add_argument(
-        "--kueue-local-queue",
-        default=DEFAULT_KUEUE_LOCAL_QUEUE,
-        help="Kueue LocalQueue name used by SkyPilot for the Kubernetes task.",
-    )
-    parser.add_argument(
-        "--cluster",
         default="",
         help=(
-            "SkyPilot cluster name. Defaults to a run-specific cluster derived "
-            "from --run-id; pass this only when intentionally reusing a cluster."
+            "TPU v6e topology, such as 4x8, or a chip-count shorthand such "
+            "as 32. Defaults from --chips."
         ),
+    )
+    parser.add_argument(
+        "--chips",
+        "--chip-count",
+        dest="chips",
+        type=int,
+        choices=sorted(SUPPORTED_CT6E_CHIPS),
+        default=None,
+        help=(
+            "TPU v6e chip count. Defaults to 32. Maps to supported CT6e "
+            "topologies."
+        ),
+    )
+    parser.add_argument(
+        "--instance-type",
+        default="",
+        help=(
+            "SkyPilot GCE machine type override. Defaults to ct6e-standard-"
+            "${chips_per_node}t."
+        ),
+    )
+    parser.add_argument("--chips-per-node", type=int, default=DEFAULT_CHIPS_PER_NODE)
+    parser.add_argument(
+        "--job-name",
+        default="",
+        help="SkyPilot managed job name. Defaults to a run-specific name.",
     )
     parser.add_argument("--run-id", default="")
     parser.add_argument("--training-max-steps", type=int, default=None)
@@ -200,6 +277,11 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
     parser.add_argument("--gradient-accumulation-steps", type=int, default=None)
     parser.add_argument("--jax-mesh-devices", default="")
     parser.add_argument("--msg-probe-every-n-steps", type=float, default=None)
+    parser.add_argument(
+        "--msg-probe-at-final-step",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     parser.add_argument("--val-every-n-steps", type=float, default=None)
     parser.add_argument("--val-num-steps", type=int, default=None)
     parser.add_argument("--checkpoint-every-steps", type=int, default=None)
@@ -207,14 +289,26 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
     parser.add_argument("--throughput-warmup-steps", type=int, default=None)
     parser.add_argument("--dataloader-num-workers", type=int, default=None)
     parser.add_argument("--jax-cache-dir", default="")
-    parser.add_argument("--down", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--yes", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dry-run", "--dryrun", dest="dry_run", action="store_true")
+    parser.add_argument(
+        "--stream-logs",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Stream managed-job logs after submitting the SkyPilot job.",
+    )
+    parser.add_argument(
+        "--detach-run",
+        dest="stream_logs",
+        action="store_false",
+        help="Submit the managed job and return without streaming logs.",
+    )
     parser.add_argument("--task-output-dir", default="tmp/skypilot_tasks")
     parser.add_argument("--task-name", default=DEFAULT_TASK_NAME)
-    parser.add_argument("--image-id", default=DEFAULT_IMAGE_ID)
-    parser.add_argument("--cpus", type=int, default=DEFAULT_CPUS)
-    parser.add_argument("--memory", type=int, default=DEFAULT_MEMORY_GB)
+    parser.add_argument("--vm-image-id", default=DEFAULT_VM_IMAGE_ID)
+    parser.add_argument("--sky-bin", default=DEFAULT_SKY_BIN)
+    parser.add_argument("--cpus", default="")
+    parser.add_argument("--memory", default="")
     parser.add_argument("--project", default=DEFAULT_PROJECT)
     parser.add_argument("--infra", default=DEFAULT_INFRA)
     parser.add_argument("--metrics-json", default="metrics/final.json")
@@ -222,17 +316,20 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
     parser.add_argument(
         "--provision-timeout-seconds",
         type=int,
-        default=3600,
-        help="SkyPilot Kubernetes provisioning timeout. Prevents infinite pending pods.",
+        default=DEFAULT_PROVISION_TIMEOUT_SECONDS,
+        help="SkyPilot GCP DWS provisioning timeout in seconds.",
     )
     parser.add_argument(
+        "--dws-run-duration",
+        "--flex-start-run-duration",
         "--flex-start-max-run-duration",
         "--dws-max-run-duration",
-        dest="flex_start_max_run_duration",
-        default="",
+        dest="dws_run_duration_seconds",
+        type=parse_duration_seconds,
+        default=DEFAULT_DWS_RUN_DURATION_SECONDS,
         help=(
-            "Maximum DWS flex-start node runtime, e.g. 6h, 1d, or 10080m. "
-            "Plain numbers are treated as minutes by SkyPilot."
+            "DWS Flex-start VM runtime. Accepts seconds or s/m/h/d suffixes; "
+            "GCP requires 600-604800 seconds."
         ),
     )
     args, sky_args = parser.parse_known_args(argv)
@@ -246,15 +343,29 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
 
 
 def resolve_topology(
-    topology: str,
+    topology: str = "",
     *,
-    chips_per_node: int = 4,
-    accelerator: str = "tpu-v6e-4",
+    chips: int | None = None,
+    chips_per_node: int = DEFAULT_CHIPS_PER_NODE,
+    instance_type: str = "",
 ) -> TopologySpec:
     normalized = topology.lower().replace("v6e:", "").strip()
+    if normalized:
+        if normalized.isdigit():
+            chip_count = int(normalized)
+            normalized = topology_for_chips(chip_count)
+        elif chips is not None:
+            expected = topology_for_chips(chips)
+            if normalized != expected:
+                raise ValueError(
+                    f"--chips={chips} maps to topology {expected}, but "
+                    f"--topology={topology!r} was also provided"
+                )
+    else:
+        normalized = topology_for_chips(DEFAULT_CHIPS if chips is None else chips)
     parts = normalized.split("x")
     if len(parts) != 2 or not all(part.isdigit() for part in parts):
-        raise ValueError(f"topology must look like 4x4; got {topology!r}")
+        raise ValueError(f"topology must look like 4x8; got {topology!r}")
     dims = tuple(int(part) for part in parts)
     total_chips = dims[0] * dims[1]
     if total_chips <= 0:
@@ -266,24 +377,30 @@ def resolve_topology(
             f"topology {normalized} has {total_chips} chips, not divisible by "
             f"chips_per_node={chips_per_node}"
         )
-    if normalized not in SUPPORTED_NAP_TOPOLOGIES:
+    if total_chips not in SUPPORTED_CT6E_CHIPS:
         raise ValueError(
-            f"topology {normalized!r} is not configured for the default NAP Kueue; "
-            "add a matching ResourceFlavor before enabling it here"
+            f"topology {normalized!r} has {total_chips} chips; supported CT6e "
+            f"MIG sizes are {sorted(SUPPORTED_CT6E_CHIPS)}"
+        )
+    if chips is not None and total_chips != chips:
+        raise ValueError(
+            f"--chips={chips} conflicts with topology {normalized!r}, which "
+            f"has {total_chips} chips"
+        )
+    derived_instance_type = CT6E_INSTANCE_TYPES_BY_CHIPS_PER_NODE.get(chips_per_node)
+    if derived_instance_type is None and not instance_type:
+        raise ValueError(
+            f"chips_per_node={chips_per_node} has no default CT6e machine type; "
+            f"use one of {sorted(CT6E_INSTANCE_TYPES_BY_CHIPS_PER_NODE)} or pass "
+            "--instance-type"
         )
     return TopologySpec(
         topology=normalized,
         total_chips=total_chips,
         num_nodes=total_chips // chips_per_node,
         chips_per_node=chips_per_node,
-        accelerator=accelerator,
+        instance_type=instance_type or str(derived_instance_type),
     )
-
-
-def gke_tpu_accelerator_label(accelerator: str) -> str:
-    if accelerator.startswith("tpu-v6e-"):
-        return "tpu-v6e-slice"
-    raise ValueError(f"unsupported GKE TPU accelerator selector for {accelerator!r}")
 
 
 def read_hf_token(env: dict[str, str] | None = None) -> str:
@@ -329,6 +446,10 @@ def json_compact(payload: dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
+def config_slug(config_path: str) -> str:
+    return name_slug(Path(config_path).stem)
+
+
 def load_config_defaults(config_path: str) -> ConfigDefaults:
     cfg = load_config(config_path)
     training_max_steps = int(getattr(cfg, "training_max_steps"))
@@ -341,6 +462,7 @@ def load_config_defaults(config_path: str) -> ConfigDefaults:
         throughput_warmup_steps=int(getattr(cfg, "throughput_warmup_steps", 25)),
         dataloader_num_workers=int(getattr(cfg, "dataloader_num_workers", 0)),
         msg_probe_every_n_steps=float(getattr(cfg, "msg_probe_every_n_steps", 0.0)),
+        msg_probe_at_final_step=bool(getattr(cfg, "msg_probe_at_final_step", False)),
         val_every_n_steps=float(getattr(cfg, "val_every_n_steps", 0.0)),
         val_num_steps=int(getattr(cfg, "val_num_steps", 64)),
     )
@@ -355,6 +477,7 @@ def build_train_overrides(
     gradient_accumulation_steps: int,
     jax_cache_dir: str,
     msg_probe_every_n_steps: float,
+    msg_probe_at_final_step: bool,
     val_every_n_steps: float,
     val_num_steps: int,
     checkpoint_every_steps: int,
@@ -362,11 +485,12 @@ def build_train_overrides(
     throughput_warmup_steps: int,
     dataloader_num_workers: int,
     queue_tag: str,
+    experiment_tag: str,
 ) -> dict[str, Any]:
     return {
         "training_max_steps": int(training_max_steps),
         "msg_probe_every_n_steps": msg_probe_every_n_steps,
-        "msg_probe_at_final_step": True,
+        "msg_probe_at_final_step": bool(msg_probe_at_final_step),
         "val_every_n_steps": val_every_n_steps,
         "val_num_steps": int(val_num_steps),
         "checkpoint_every_steps": int(checkpoint_every_steps),
@@ -387,14 +511,14 @@ def build_train_overrides(
             "name": run_id,
             "tags": [
                 "skypilot",
-                "gke",
-                "kueue",
+                "gcp",
+                "dws",
                 queue_tag,
                 "tpu-v6e",
-                "100m_muon",
+                experiment_tag,
             ],
             "notes": (
-                "SkyPilot GKE Kueue/DWS TPU v6e run launched by train_sky.py."
+                "SkyPilot GCP DWS TPU v6e run launched by train_sky.py."
             ),
         },
     }
@@ -406,70 +530,44 @@ def build_task(
     envs: dict[str, str],
     infra: str,
     task_name: str = DEFAULT_TASK_NAME,
-    image_id: str = DEFAULT_IMAGE_ID,
-    cpus: int = DEFAULT_CPUS,
-    memory: int = DEFAULT_MEMORY_GB,
-    kueue_local_queue: str = DEFAULT_KUEUE_LOCAL_QUEUE,
-    flex_start_max_run_duration: str = "",
-    provision_timeout_seconds: int = 3600,
+    vm_image_id: str = DEFAULT_VM_IMAGE_ID,
+    cpus: str = "",
+    memory: str = "",
+    dws_run_duration_seconds: int = DEFAULT_DWS_RUN_DURATION_SECONDS,
+    provision_timeout_seconds: int = DEFAULT_PROVISION_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    kubernetes_config: dict[str, Any] = {
-        "provision_timeout": int(provision_timeout_seconds),
-        "kueue": {
-            "local_queue_name": kueue_local_queue,
-        },
-        "pod_config": {
-            "spec": {
-                "nodeSelector": {
-                    "cloud.google.com/gke-flex-start": "true",
-                    "cloud.google.com/gke-tpu-accelerator": gke_tpu_accelerator_label(
-                        topology.accelerator
-                    ),
-                    "cloud.google.com/gke-tpu-topology": topology.topology,
-                },
-                "tolerations": [
-                    {
-                        "key": "google.com/tpu",
-                        "operator": "Equal",
-                        "value": "present",
-                        "effect": "NoSchedule",
-                    },
-                    {
-                        "key": "cloud.google.com/gke-queued",
-                        "operator": "Equal",
-                        "value": "true",
-                        "effect": "NoSchedule",
-                    },
-                ],
-            }
-        }
+    image_id: dict[str, str] = {
+        "us-east5": vm_image_id,
     }
-    if flex_start_max_run_duration:
-        kubernetes_config["dws"] = {
-            "enabled": True,
-            "max_run_duration": flex_start_max_run_duration,
-        }
-    return {
+    resources: dict[str, Any] = {
+        "infra": infra,
+        "image_id": image_id,
+        "instance_type": topology.instance_type,
+    }
+    if cpus:
+        resources["cpus"] = cpus
+    if memory:
+        resources["memory"] = memory
+    task: dict[str, Any] = {
         "name": task_name,
         "workdir": ".",
         "num_nodes": topology.num_nodes,
-        "resources": {
-            "infra": infra,
-            "image_id": image_id,
-            "accelerators": topology.accelerator,
-            "accelerator_args": {
-                "tpu_vm": False,
-            },
-            "cpus": cpus,
-            "memory": memory,
-        },
+        "resources": resources,
         "envs": dict(envs),
         "setup": LiteralString(TASK_SETUP),
         "run": LiteralString(TASK_RUN),
         "config": {
-            "kubernetes": kubernetes_config,
+            "gcp": {
+                "managed_instance_group": {
+                    "run_duration": int(dws_run_duration_seconds),
+                    "provision_timeout": int(provision_timeout_seconds),
+                    "accelerator_topology": topology.topology,
+                    "accelerator_topology_mode": "AUTO_CONNECT",
+                },
+            },
         },
     }
+    return task
 
 
 def run_command(
@@ -484,34 +582,6 @@ def run_command(
     if check and result.returncode != 0:
         raise SystemExit(result.returncode)
     return result
-
-
-def run_sky_launch_with_teardown(
-    *,
-    launch_cmd: list[str],
-    sky_bin: str,
-    cluster: str,
-    cwd: Path,
-    env: dict[str, str],
-    down: bool,
-    yes: bool,
-) -> None:
-    launch_returncode = 130
-    down_result: subprocess.CompletedProcess[str] | None = None
-    try:
-        launch_result = run_command(launch_cmd, cwd=cwd, env=env, check=False)
-        launch_returncode = launch_result.returncode
-    finally:
-        if down:
-            down_cmd = [sky_bin, "down"]
-            if yes:
-                down_cmd.append("--yes")
-            down_cmd.append(cluster)
-            down_result = run_command(down_cmd, cwd=cwd, env=env, check=False)
-    if launch_returncode != 0:
-        raise SystemExit(launch_returncode)
-    if down_result is not None and down_result.returncode != 0:
-        raise SystemExit(down_result.returncode)
 
 
 def render_task_yaml(task: dict[str, Any]) -> str:
@@ -530,7 +600,8 @@ def print_dry_run_assets(
     task_path: Path,
     task: dict[str, Any],
     train_overrides_json: str,
-    sky_command: list[str],
+    launch_command: list[str],
+    logs_command: list[str] | None,
 ) -> None:
     print("===== SkyPilot Task Path =====")
     print(task_path)
@@ -541,11 +612,15 @@ def print_dry_run_assets(
     print("===== Train Overrides JSON =====")
     print(train_overrides_json)
     print()
-    print("===== SkyPilot Command =====")
-    print(shlex.join(sky_command))
+    print("===== SkyPilot Launch Command =====")
+    print(shlex.join(launch_command))
+    if logs_command is not None:
+        print()
+        print("===== SkyPilot Logs Command =====")
+        print(shlex.join(logs_command))
 
 
-def cluster_name_slug(value: str) -> str:
+def name_slug(value: str) -> str:
     chars = []
     previous_dash = False
     for char in value.lower():
@@ -559,21 +634,39 @@ def cluster_name_slug(value: str) -> str:
     return "".join(chars).strip("-")
 
 
-def default_cluster_name(run_id: str) -> str:
+def default_job_name(run_id: str) -> str:
     prefix = "spectra"
-    suffix = cluster_name_slug(run_id)
-    cluster = f"{prefix}-{suffix}"
-    if len(cluster) <= MAX_SKY_CLUSTER_NAME_LENGTH:
-        return cluster
+    suffix = name_slug(run_id)
+    job_name = f"{prefix}-{suffix}"
+    if len(job_name) <= MAX_SKY_JOB_NAME_LENGTH:
+        return job_name
 
     digest = hashlib.sha1(suffix.encode()).hexdigest()[:8]
-    suffix_length = MAX_SKY_CLUSTER_NAME_LENGTH - len(prefix) - len(digest) - 2
+    suffix_length = MAX_SKY_JOB_NAME_LENGTH - len(prefix) - len(digest) - 2
     shortened_suffix = suffix[:suffix_length].rstrip("-")
     return f"{prefix}-{shortened_suffix}-{digest}"
 
 
-def sky_args_request_async(sky_args: list[str]) -> bool:
-    return "--async" in sky_args
+def build_sky_jobs_launch_command(
+    *,
+    sky_bin: str,
+    job_name: str,
+    task_path: Path,
+    yes: bool,
+    sky_args: list[str],
+) -> list[str]:
+    cmd = [sky_bin, "jobs", "launch", "--detach-run", "--name", job_name]
+    for secret in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "WANDB_API_KEY"):
+        cmd.extend(["--secret", secret])
+    if yes:
+        cmd.append("--yes")
+    cmd.extend(sky_args)
+    cmd.append(str(task_path))
+    return cmd
+
+
+def build_sky_jobs_logs_command(*, sky_bin: str, job_name: str) -> list[str]:
+    return [sky_bin, "jobs", "logs", "-n", job_name]
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -582,12 +675,11 @@ def main(argv: list[str] | None = None) -> None:
         format="%(asctime)s %(levelname)s %(message)s",
     )
     args, sky_args = parse_args(argv)
-    if args.down and sky_args_request_async(sky_args):
-        raise SystemExit("sky --async cannot be combined with train_sky.py --down")
     topology = resolve_topology(
         args.topology,
+        chips=args.chips,
         chips_per_node=args.chips_per_node,
-        accelerator=args.accelerator,
+        instance_type=args.instance_type,
     )
     config_defaults = load_config_defaults(args.config)
     training_max_steps = args.training_max_steps or config_defaults.training_max_steps
@@ -606,6 +698,11 @@ def main(argv: list[str] | None = None) -> None:
         args.msg_probe_every_n_steps
         if args.msg_probe_every_n_steps is not None
         else config_defaults.msg_probe_every_n_steps
+    )
+    msg_probe_at_final_step = (
+        args.msg_probe_at_final_step
+        if args.msg_probe_at_final_step is not None
+        else config_defaults.msg_probe_at_final_step
     )
     val_every_n_steps = (
         args.val_every_n_steps
@@ -632,22 +729,29 @@ def main(argv: list[str] | None = None) -> None:
         if args.dataloader_num_workers is not None
         else config_defaults.dataloader_num_workers
     )
+    experiment_slug = config_slug(args.config)
+    experiment_tag = experiment_slug.replace("-", "_")
     run_id = args.run_id or (
-        f"100m-muon-{topology.slug}-b{batch_size}-accum{grad_accum}-"
-        f"{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}"
-    )
+        f"{experiment_slug}-{topology.slug}-b{batch_size}-accum{grad_accum}-"
+        f"{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}")
     workdir = args.workdir.rstrip("/")
-    cluster = args.cluster or default_cluster_name(run_id)
-    cache_key = f"100m_muon_{topology.slug}_b{batch_size}_accum{grad_accum}"
+    job_name = args.job_name or default_job_name(run_id)
+    cache_key = f"{experiment_tag}_{topology.slug}_b{batch_size}_accum{grad_accum}"
     jax_cache_dir = args.jax_cache_dir or f"/tmp/spectra-jax-cache/{cache_key}"
 
     logging.info(
-        "Topology: topology=%s nodes=%d chips=%d accelerator=%s kueue=%s",
+        "Topology: topology=%s hosts=%d chips=%d instance_type=%s",
         topology.topology,
         topology.num_nodes,
         topology.total_chips,
-        topology.accelerator,
-        args.kueue_local_queue,
+        topology.instance_type,
+    )
+    logging.warning(
+        "GCP DWS uses SkyPilot gcp.managed_instance_group with Flex-start "
+        "MIGs. Use the vendored SkyPilot build at %s; upstream builds may not "
+        "support CT6e TPU workload-policy MIGs yet. Related PR: %s",
+        args.sky_bin,
+        DWS_FLEX_START_FIX_PR,
     )
     logging.info(
         "Training shape: mesh=%s batch=%d grad_accum=%d steps=%d",
@@ -681,6 +785,7 @@ def main(argv: list[str] | None = None) -> None:
         gradient_accumulation_steps=grad_accum,
         jax_cache_dir=jax_cache_dir,
         msg_probe_every_n_steps=msg_probe_every_n_steps,
+        msg_probe_at_final_step=msg_probe_at_final_step,
         val_every_n_steps=val_every_n_steps,
         val_num_steps=val_num_steps,
         checkpoint_every_steps=checkpoint_every_steps,
@@ -688,6 +793,7 @@ def main(argv: list[str] | None = None) -> None:
         throughput_warmup_steps=throughput_warmup_steps,
         dataloader_num_workers=dataloader_num_workers,
         queue_tag=args.queue_tag,
+        experiment_tag=experiment_tag,
     )
     train_overrides_json = json_compact(train_overrides)
     task_envs = {
@@ -713,47 +819,50 @@ def main(argv: list[str] | None = None) -> None:
         envs=task_envs,
         infra=args.infra,
         task_name=args.task_name,
-        image_id=args.image_id,
+        vm_image_id=args.vm_image_id,
         cpus=args.cpus,
         memory=args.memory,
-        kueue_local_queue=args.kueue_local_queue,
-        flex_start_max_run_duration=args.flex_start_max_run_duration,
+        dws_run_duration_seconds=args.dws_run_duration_seconds,
         provision_timeout_seconds=args.provision_timeout_seconds,
     )
     task_path = write_task_file(task, REPO_ROOT / args.task_output_dir, run_id)
     logging.info("Wrote SkyPilot task: %s", task_path)
 
-    sky_bin = shutil.which("sky")
-    if sky_bin is None:
-        if args.dry_run:
-            sky_bin = "sky"
-        else:
-            raise SystemExit("sky executable not found; install SkyPilot before launching.")
-    cmd = [sky_bin, "launch", str(task_path), "--cluster", cluster]
-    for secret in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "WANDB_API_KEY"):
-        cmd.extend(["--secret", secret])
-    if args.yes:
-        cmd.append("--yes")
-    cmd.extend(sky_args)
-    logging.info("SkyPilot command: %s", shlex.join(cmd))
+    sky_bin = args.sky_bin
+    if not args.dry_run:
+        if os.sep in sky_bin:
+            if not Path(sky_bin).is_file():
+                raise SystemExit(f"SkyPilot executable not found: {sky_bin}")
+        elif shutil.which(sky_bin) is None:
+            raise SystemExit(f"SkyPilot executable not found on PATH: {sky_bin}")
+    launch_cmd = build_sky_jobs_launch_command(
+        sky_bin=sky_bin,
+        job_name=job_name,
+        task_path=task_path,
+        yes=args.yes,
+        sky_args=sky_args,
+    )
+    logs_cmd = (
+        build_sky_jobs_logs_command(sky_bin=sky_bin, job_name=job_name)
+        if args.stream_logs
+        else None
+    )
+    logging.info("SkyPilot launch command: %s", shlex.join(launch_cmd))
+    if logs_cmd is not None:
+        logging.info("SkyPilot logs command: %s", shlex.join(logs_cmd))
     if args.dry_run:
         print_dry_run_assets(
             task_path=task_path,
             task=task,
             train_overrides_json=train_overrides_json,
-            sky_command=cmd,
+            launch_command=launch_cmd,
+            logs_command=logs_cmd,
         )
         logging.info("Dry run requested; not launching SkyPilot.")
         return
-    run_sky_launch_with_teardown(
-        launch_cmd=cmd,
-        sky_bin=sky_bin,
-        cluster=cluster,
-        cwd=REPO_ROOT,
-        env=launch_env,
-        down=args.down,
-        yes=args.yes,
-    )
+    run_command(launch_cmd, cwd=REPO_ROOT, env=launch_env)
+    if logs_cmd is not None:
+        run_command(logs_cmd, cwd=REPO_ROOT, env=launch_env)
 
 
 if __name__ == "__main__":

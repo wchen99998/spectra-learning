@@ -395,7 +395,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             self.assertIn("context_mask", batch1)
             self.assertEqual(tuple(batch1["peak_mz"].shape), (1, 64))
 
-    def test_train_loader_shuffles_without_replacement(self):
+    def test_train_loader_shuffles_each_epoch_without_replacement(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             cfg = self._make_config(tmp_path)
@@ -421,6 +421,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
         self.assertEqual(sorted(epoch1_ids), expected_ids)
         self.assertEqual(len(set(epoch0_ids)), len(expected_ids))
         self.assertEqual(len(set(epoch1_ids)), len(expected_ids))
+        self.assertNotEqual(epoch0_ids, epoch1_ids)
 
     def test_train_loader_start_batch_matches_epoch_suffix(self):
         with tempfile.TemporaryDirectory() as tmp:

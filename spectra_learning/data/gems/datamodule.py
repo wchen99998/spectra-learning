@@ -99,7 +99,6 @@ class GemsDataModule:
         self.gems_validation_files = list(self.gems_validation_shards)
         self.info = self._info()
         self.train_steps = self._train_steps()
-        self._train_loader: DataLoader | None = None
         self._val_loader: DataLoader | None = None
 
     def _set_public_config_attrs(self) -> None:
@@ -270,12 +269,6 @@ class GemsDataModule:
             grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
             output_format=self.dataloader_output_format,
         )
-
-    @property
-    def train_loader(self) -> DataLoader:
-        if self._train_loader is None:
-            self._train_loader = self.train_loader_for_epoch(0)
-        return self._train_loader
 
     @property
     def val_loader(self) -> DataLoader:
