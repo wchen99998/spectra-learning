@@ -87,17 +87,13 @@ def _objective_parts(config: Any) -> list[str]:
         parts.append(f"maew{float(config.get('mae_loss_weight', 1.0)):.0e}")
         parts.append(f"mzbin{float(config.get('jepa_mae_mz_bin_size', 2.5)):g}")
         has_mz_bin_part = True
-        parts.append(
-            f"intbin{float(config.get('jepa_mae_intensity_bin_size', 0.1)):g}"
-        )
+        parts.extend(_intensity_objective_parts(config))
     elif (jepa_mae_loss_weight := float(config.get("jepa_mae_loss_weight", 0.0))) > 0:
         parts.append("jepamae")
         parts.append(f"maew{jepa_mae_loss_weight:.0e}")
         parts.append(f"mzbin{float(config.get('jepa_mae_mz_bin_size', 2.5)):g}")
         has_mz_bin_part = True
-        parts.append(
-            f"intbin{float(config.get('jepa_mae_intensity_bin_size', 0.1)):g}"
-        )
+        parts.extend(_intensity_objective_parts(config))
     if (distogram_loss_weight := float(config.get("distogram_loss_weight", 0.0))) > 0:
         parts.append("disto")
         parts.append(f"distow{distogram_loss_weight:.0e}")
@@ -108,6 +104,16 @@ def _objective_parts(config: Any) -> list[str]:
     ) > 0:
         parts.append("latentpair")
         parts.append(f"pairw{latent_pair_loss_weight:.0e}")
+    return parts
+
+
+def _intensity_objective_parts(config: Any) -> list[str]:
+    intensity_weight = float(config.get("mae_intensity_loss_weight", 1.0))
+    if intensity_weight <= 0.0:
+        return ["nointensity"]
+    parts = [f"intbin{float(config.get('jepa_mae_intensity_bin_size', 0.1)):g}"]
+    if intensity_weight != 1.0:
+        parts.append(f"intw{intensity_weight:.0e}")
     return parts
 
 

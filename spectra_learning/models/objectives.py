@@ -82,8 +82,11 @@ class ObjectiveMixin:
         mz_accuracy = (
             (mz_logits.argmax(dim=-1) == mz_target).float() * target_weights.float()
         ).sum() / target_weights.float().sum().clamp_min(1.0)
-        if self.masked_token_input_mode == "mz_sentinel":
-            zero = mz_loss * 0.0
+        zero = mz_loss * 0.0
+        if (
+            self.masked_token_input_mode == "mz_sentinel"
+            or self.mae_intensity_loss_weight <= 0.0
+        ):
             return mz_loss, mz_loss, zero, mz_accuracy, zero
 
         intensity_logits = cast(nn.Linear, self.jepa_mae_intensity_head)(
@@ -94,7 +97,7 @@ class ObjectiveMixin:
             intensity_target,
             target_masks,
         )
-        value_loss = mz_loss + intensity_loss
+        value_loss = mz_loss + intensity_loss * self.mae_intensity_loss_weight
         intensity_accuracy = (
             (intensity_logits.argmax(dim=-1) == intensity_target).float()
             * target_weights.float()

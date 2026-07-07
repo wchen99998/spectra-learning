@@ -44,6 +44,20 @@ def test_mae_mode_names_primary_binned_objective() -> None:
     assert parts == ["maew5e-01", "mzbin2.5", "intbin0.1"]
 
 
+def test_mae_mode_names_disabled_intensity_objective() -> None:
+    parts = _objective_parts(
+        {
+            "training_mode": "mae",
+            "mae_loss_weight": 0.5,
+            "jepa_mae_mz_bin_size": 2.5,
+            "jepa_mae_intensity_bin_size": 0.1,
+            "mae_intensity_loss_weight": 0.0,
+        }
+    )
+
+    assert parts == ["maew5e-01", "mzbin2.5", "nointensity"]
+
+
 def test_distogram_objective_uses_shared_mz_bin_name() -> None:
     parts = _objective_parts(
         {

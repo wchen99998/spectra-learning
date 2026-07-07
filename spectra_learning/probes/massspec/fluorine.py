@@ -46,6 +46,7 @@ from spectra_learning.models.lora import (
 )
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pooling import CovariancePool, SinglePairCovariancePool
+from spectra_learning.models.spectrum_metadata import torch_spectrum_metadata_from_batch
 from spectra_learning.data.murcko import (
     MCEBIO_MURCKO_PREPARED_SUBDIR,
     NIST_MURCKO_HF_REPO,
@@ -76,6 +77,8 @@ from spectra_learning.training.storage import (
     local_cache_path,
     normalize_storage_path,
     read_text,
+    storage_join,
+    storage_name,
     storage_exists,
     storage_mkdir,
     storage_parent,
@@ -661,6 +664,7 @@ def _build_checkpoint_feature_factory(
             batch["peak_intensity"],
             valid_mask=batch["peak_valid_mask"],
             precursor_mz=batch.get("precursor_mz", None),
+            spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
         )
         return _peak_tokens_only(embeddings, batch["peak_valid_mask"])
 
@@ -673,6 +677,7 @@ def _build_checkpoint_feature_factory(
             batch["peak_intensity"],
             valid_mask=batch["peak_valid_mask"],
             precursor_mz=batch.get("precursor_mz", None),
+            spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
         )
         return _peak_tokens_only(peak_embeddings, batch["peak_valid_mask"]), pair_embeddings
 
@@ -869,6 +874,7 @@ class FluorineFinetuneModule(torch.nn.Module):
                         batch["peak_intensity"],
                         valid_mask=batch["peak_valid_mask"],
                         precursor_mz=batch.get("precursor_mz", None),
+                        spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
                     )
                     peak_embeddings = _peak_tokens_only(peak_embeddings, batch["peak_valid_mask"])
             else:
@@ -877,6 +883,7 @@ class FluorineFinetuneModule(torch.nn.Module):
                     batch["peak_intensity"],
                     valid_mask=batch["peak_valid_mask"],
                     precursor_mz=batch.get("precursor_mz", None),
+                    spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
                 )
                 peak_embeddings = _peak_tokens_only(peak_embeddings, batch["peak_valid_mask"])
             features = self.pooler(
@@ -892,6 +899,7 @@ class FluorineFinetuneModule(torch.nn.Module):
                         batch["peak_intensity"],
                         valid_mask=batch["peak_valid_mask"],
                         precursor_mz=batch.get("precursor_mz", None),
+                        spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
                     )
                     peak_embeddings = _peak_tokens_only(encoded, batch["peak_valid_mask"])
             else:
@@ -900,6 +908,7 @@ class FluorineFinetuneModule(torch.nn.Module):
                     batch["peak_intensity"],
                     valid_mask=batch["peak_valid_mask"],
                     precursor_mz=batch.get("precursor_mz", None),
+                    spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
                 )
                 peak_embeddings = _peak_tokens_only(encoded, batch["peak_valid_mask"])
             features = self.pooler(
@@ -2226,6 +2235,770 @@ def parse_device_ids(raw: str | None) -> list[int] | None:
     return [int(item) for item in raw.split(",") if item]
 
 
+def _resolve_jax_checkpoint_dir_and_step(
+    checkpoint: StoragePath | None,
+    workdir: StoragePath | None,
+    checkpoint_step: int | None,
+) -> tuple[StoragePath, int | None]:
+    if checkpoint is not None:
+        checkpoint_path = normalize_storage_path(checkpoint)
+        name = storage_name(checkpoint_path)
+        if name.isdigit():
+            step = int(name)
+            if checkpoint_step is not None and checkpoint_step != step:
+                raise ValueError(
+                    f"--jax-checkpoint-step={checkpoint_step} does not match checkpoint path step {step}"
+                )
+            return storage_parent(storage_parent(checkpoint_path)), step
+        return checkpoint_path, checkpoint_step
+    if workdir is None:
+        raise ValueError("checkpoint or workdir is required")
+    return storage_join(normalize_storage_path(workdir), "checkpoints"), checkpoint_step
+
+
+def _jax_tree_to_numpy(tree: Any) -> Any:
+    import jax
+    import numpy as np
+
+    return jax.tree.map(lambda value: np.asarray(jax.device_get(value)), tree)
+
+
+def run_probe_jax(args: argparse.Namespace) -> dict[str, Any]:
+    import jax
+    import jax.numpy as jnp
+    import optax
+    from flax import nnx
+
+    from spectra_learning.models.model_jax import PeakSetJEPAJax
+    from spectra_learning.models.settings import PeakSetJEPASettings
+    from spectra_learning.models.spectrum_metadata import jax_spectrum_metadata_from_batch
+    from spectra_learning.probes.massspec.msg_probe_jax import (
+        _feature_pair,
+        _feature_single,
+        _full_visible_fastmixer_probe_model,
+        _host_local_array,
+        _init_mlp,
+        _init_pooler,
+        _pool_features,
+        _probe_value_to_jax,
+    )
+    from spectra_learning.probes.massspec.msg_settings import MsgProbeTaskSpec
+    from spectra_learning.training.checkpointing_jax import (
+        build_jax_checkpoint_manager,
+        restore_jax_training_state,
+    )
+    from spectra_learning.training.pretrain_jax import (
+        _jax_data_mesh_for_device_count,
+        _replicate_tree_on_data_mesh,
+        init_pure_optax_train_state,
+    )
+
+    config_path = args.config.expanduser().resolve()
+    checkpoint_config = load_config(config_path)
+    jax_device_count = jax.device_count()
+    checkpoint_config.jax_mesh_devices = str(jax_device_count)
+    checkpoint_dir, checkpoint_step = _resolve_jax_checkpoint_dir_and_step(
+        args.checkpoint,
+        getattr(args, "workdir", None),
+        getattr(args, "jax_checkpoint_step", None),
+    )
+    checkpoint_manager = build_jax_checkpoint_manager(
+        checkpoint_dir,
+        max_to_keep=None,
+        enable_async_checkpointing=False,
+    )
+    restore_step = (
+        int(checkpoint_step)
+        if checkpoint_step is not None
+        else checkpoint_manager.latest_step()
+    )
+    if restore_step is None:
+        raise FileNotFoundError(f"no JAX checkpoint found under {checkpoint_dir}")
+    settings = PeakSetJEPASettings.from_config(checkpoint_config)
+    model = PeakSetJEPAJax(settings, rngs=nnx.Rngs(int(checkpoint_config.seed)))
+    (
+        graphdef,
+        trainable_params,
+        static_state,
+        opt_state,
+        _optimizer,
+    ) = init_pure_optax_train_state(
+        checkpoint_config,
+        model,
+        total_steps=int(checkpoint_config.training_max_steps),
+    )
+    data_mesh = _jax_data_mesh_for_device_count(jax_device_count)
+    trainable_params = _replicate_tree_on_data_mesh(trainable_params, data_mesh)
+    static_state = _replicate_tree_on_data_mesh(static_state, data_mesh)
+    opt_state = _replicate_tree_on_data_mesh(opt_state, data_mesh)
+    restored = restore_jax_training_state(
+        checkpoint_manager,
+        restore_step,
+        {
+            "trainable_params": trainable_params,
+            "static_state": static_state,
+            "opt_state": opt_state,
+        },
+    )
+    model = nnx.merge(
+        graphdef,
+        restored["trainable_params"],
+        restored["static_state"],
+    )
+    model = _full_visible_fastmixer_probe_model(checkpoint_config, model)
+
+    cache_dir = args.cache_dir.expanduser().resolve()
+    output_prefix = (
+        normalize_storage_path(args.output_prefix)
+        if getattr(args, "output_prefix", None) is not None
+        else default_output_prefix("probe").resolve()
+    )
+    head_state_path = (
+        normalize_storage_path(args.output_state)
+        if getattr(args, "output_state", None)
+        else default_state_path("probe").resolve()
+    )
+    data = build_murcko_fluorine_data(
+        cache_dir=cache_dir,
+        batch_size=int(args.batch_size),
+        num_peaks=int(
+            args.num_peaks
+            if args.num_peaks is not None
+            else _config_get(checkpoint_config, "num_peaks", 60)
+        ),
+        max_precursor_mz=float(
+            _config_get(checkpoint_config, "max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
+        ),
+        min_peak_intensity=float(
+            _config_get(
+                checkpoint_config,
+                "min_peak_intensity",
+                DEFAULT_MIN_PEAK_INTENSITY,
+            )
+        ),
+        peak_drop_min_intensity=float(
+            _config_get(
+                checkpoint_config,
+                "peak_drop_min_intensity",
+                _config_get(
+                    checkpoint_config,
+                    "min_peak_intensity",
+                    DEFAULT_MIN_PEAK_INTENSITY,
+                ),
+            )
+        ),
+        peak_ordering=str(
+            args.peak_ordering
+            if args.peak_ordering
+            else _config_get(checkpoint_config, "peak_ordering", "intensity")
+        ),
+        precursor_peak_exclusion_window_da=float(
+            _config_get(checkpoint_config, "precursor_peak_exclusion_window_da", 0.0)
+        ),
+        peak_filtering=str(
+            _config_get(checkpoint_config, "peak_filtering", DEFAULT_PEAK_FILTERING)
+        ),
+        grouped_peak_shoulder_da=float(
+            _config_get(
+                checkpoint_config,
+                "grouped_peak_shoulder_da",
+                DEFAULT_GROUPED_PEAK_SHOULDER_DA,
+            )
+        ),
+        grouped_peak_isotope_charges=tuple(
+            int(charge)
+            for charge in _config_get(
+                checkpoint_config,
+                "grouped_peak_isotope_charges",
+                DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
+            )
+        ),
+        repo_id=HF_REPO_ID,
+        revision=args.revision,
+        train_subdir=HF_TRAIN_SUBDIR,
+        test_subdir=HF_TEST_SUBDIR,
+    )
+    task_spec = MsgProbeTaskSpec(
+        regression_tasks=(),
+        maccs_bits=0,
+        regression_means={},
+        regression_stds={},
+        binary_tasks=("fluorine",),
+    )
+    variant = args.pooling
+    use_pair_features = variant == "single_pair_covariance"
+
+    @nnx.jit
+    def extract_single_features(
+        feature_model: PeakSetJEPAJax,
+        peak_mz: Any,
+        peak_intensity: Any,
+        peak_valid_mask: Any,
+        precursor_mz: Any,
+        spectrum_metadata: Any,
+    ) -> Any:
+        return feature_model.encoder(
+            peak_mz,
+            peak_intensity,
+            valid_mask=peak_valid_mask,
+            precursor_mz=precursor_mz,
+            spectrum_metadata=spectrum_metadata,
+        )
+
+    @nnx.jit
+    def extract_pair_features(
+        feature_model: PeakSetJEPAJax,
+        peak_mz: Any,
+        peak_intensity: Any,
+        peak_valid_mask: Any,
+        precursor_mz: Any,
+        spectrum_metadata: Any,
+    ) -> tuple[Any, Any]:
+        return feature_model.encoder.forward_with_pair(
+            peak_mz,
+            peak_intensity,
+            valid_mask=peak_valid_mask,
+            precursor_mz=precursor_mz,
+            spectrum_metadata=spectrum_metadata,
+        )
+
+    def iter_split(split: str, *, shuffle: bool, seed: int, max_samples: int | None):
+        loader = build_murcko_fluorine_loader(
+            data,
+            split,
+            shuffle=shuffle,
+            seed=seed,
+            max_samples=max_samples,
+            dreams_only=False,
+            num_workers=int(args.num_workers),
+            output_format="numpy",
+        )
+        for batch in loader:
+            yield {
+                key: _probe_value_to_jax(value, data_mesh=None)
+                for key, value in batch.items()
+            }
+
+    def extract_features(batch: dict[str, Any]) -> Any:
+        precursor_mz = batch.get("precursor_mz", None)
+        spectrum_metadata = jax_spectrum_metadata_from_batch(batch)
+        if use_pair_features:
+            features = extract_pair_features(
+                model,
+                batch["peak_mz"],
+                batch["peak_intensity"],
+                batch["peak_valid_mask"],
+                precursor_mz,
+                spectrum_metadata,
+            )
+            return (
+                _feature_single(features)[:, : batch["peak_valid_mask"].shape[1]],
+                _feature_pair(features),
+            )
+        features = extract_single_features(
+            model,
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            batch["peak_valid_mask"],
+            precursor_mz,
+            spectrum_metadata,
+        )
+        return features[:, : batch["peak_valid_mask"].shape[1]]
+
+    def cache_split(
+        split: str,
+        *,
+        seed: int,
+        max_samples: int | None,
+    ) -> dict[str, np.ndarray]:
+        feature_chunks, mask_chunks, label_chunks, row_chunks = [], [], [], []
+        for batch in tqdm(
+            iter_split(
+                split,
+                shuffle=False,
+                seed=seed,
+                max_samples=max_samples,
+            ),
+            desc=f"cache jax {split} features",
+            unit="batch",
+            dynamic_ncols=True,
+            mininterval=5.0,
+        ):
+            features = extract_features(batch)
+            feature_chunks.append(
+                _host_local_array(features).astype(np.float32, copy=False)
+            )
+            mask_chunks.append(
+                _host_local_array(batch["peak_valid_mask"]).astype(bool, copy=False)
+            )
+            label_chunks.append(
+                _host_local_array(batch["label"]).astype(np.float32, copy=False)
+            )
+            row_chunks.append(
+                _host_local_array(batch["row_idx"]).astype(np.int64, copy=False)
+            )
+        return {
+            "features": np.concatenate(feature_chunks, axis=0),
+            "peak_valid_mask": np.concatenate(mask_chunks, axis=0),
+            "label": np.concatenate(label_chunks, axis=0),
+            "row_idx": np.concatenate(row_chunks, axis=0),
+        }
+
+    def iter_cached_split(
+        cache: dict[str, np.ndarray],
+        *,
+        shuffle: bool,
+        seed: int,
+    ):
+        indices = np.arange(cache["label"].shape[0])
+        if shuffle:
+            rng = np.random.default_rng(seed)
+            rng.shuffle(indices)
+        batch_size = int(args.batch_size)
+        for start in range(0, indices.shape[0], batch_size):
+            batch_indices = indices[start : start + batch_size]
+            yield {
+                key: _probe_value_to_jax(value[batch_indices], data_mesh=None)
+                for key, value in cache.items()
+            }
+
+    def init_params(key: Any, params: TrialParams) -> tuple[dict[str, Any], int]:
+        pool_key, head_key = jax.random.split(key)
+        pooler, input_dim = _init_pooler(
+            pool_key,
+            variant=variant,
+            config=checkpoint_config,
+            model_dim=int(checkpoint_config.model_dim),
+        )
+        return {
+            "pooler": pooler,
+            "head": _init_mlp(
+                head_key,
+                input_dim=input_dim,
+                hidden_dim=int(params.hidden_dim),
+                output_dim=1,
+                num_layers=3,
+            ),
+        }, input_dim
+
+    def mlp_apply(
+        layers: list[dict[str, Any]],
+        x: Any,
+        *,
+        dropout: float,
+        rng: Any,
+        training: bool,
+    ) -> Any:
+        for idx, layer in enumerate(layers):
+            x = jnp.matmul(x, layer["w"]) + layer["b"]
+            if idx == len(layers) - 1:
+                continue
+            x = jax.nn.silu(x)
+            if training:
+                rng, layer_key = jax.random.split(rng)
+                keep_prob = 1.0 - dropout
+                keep = jax.random.bernoulli(layer_key, keep_prob, x.shape)
+                x = jnp.where(keep, x / keep_prob, 0.0)
+        return x
+
+    def logits_from_params(
+        params: dict[str, Any],
+        features: Any,
+        valid_mask: Any,
+        *,
+        dropout: float = 0.0,
+        rng: Any = None,
+        training: bool = False,
+    ) -> Any:
+        pooled = _pool_features(
+            params["pooler"],
+            variant=variant,
+            task_spec=task_spec,
+            features=features,
+            valid_mask=valid_mask,
+        )
+        if rng is None:
+            rng = jax.random.PRNGKey(0)
+        return mlp_apply(
+            params["head"],
+            pooled,
+            dropout=dropout,
+            rng=rng,
+            training=training,
+        ).squeeze(-1)
+
+    def focal_loss(
+        logits: Any,
+        targets: Any,
+        *,
+        focal_alpha: float,
+        focal_gamma: float,
+    ) -> Any:
+        targets = targets.astype(jnp.float32)
+        bce = optax.sigmoid_binary_cross_entropy(logits, targets)
+        prob = jax.nn.sigmoid(logits)
+        p_t = prob * targets + (1.0 - prob) * (1.0 - targets)
+        alpha_t = focal_alpha * targets + (1.0 - focal_alpha) * (1.0 - targets)
+        return jnp.mean(alpha_t * jnp.power(1.0 - p_t, focal_gamma) * bce)
+
+    def make_train_step(optimizer: Any):
+        @jax.jit
+        def train_step(
+            params: dict[str, Any],
+            state: Any,
+            rng: Any,
+            batch: dict[str, Any],
+            features: Any,
+            focal_alpha: float,
+            focal_gamma: float,
+            dropout: float,
+        ) -> tuple[dict[str, Any], Any, Any, Any]:
+            rng, dropout_key = jax.random.split(rng)
+
+            def loss_fn(probe_params: dict[str, Any]) -> Any:
+                return focal_loss(
+                    logits_from_params(
+                        probe_params,
+                        features,
+                        batch["peak_valid_mask"],
+                        dropout=dropout,
+                        rng=dropout_key,
+                        training=True,
+                    ),
+                    batch["label"],
+                    focal_alpha=focal_alpha,
+                    focal_gamma=focal_gamma,
+                )
+
+            loss, grads = jax.value_and_grad(loss_fn)(params)
+            updates, state = optimizer.update(grads, state, params)
+            params = optax.apply_updates(params, updates)
+            return params, state, rng, loss
+
+        return train_step
+
+    @jax.jit
+    def predict_step(
+        params: dict[str, Any],
+        batch: dict[str, Any],
+        features: Any,
+    ) -> Any:
+        return logits_from_params(params, features, batch["peak_valid_mask"])
+
+    def prediction_arrays(
+        params: dict[str, Any],
+        split: str,
+        *,
+        seed: int,
+        max_samples: int | None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        targets, logits, row_indices = [], [], []
+        iterator = (
+            iter_cached_split(cached_splits[split], shuffle=False, seed=seed)
+            if cached_splits is not None
+            else iter_split(
+                split,
+                shuffle=False,
+                seed=seed,
+                max_samples=max_samples,
+            )
+        )
+        for batch in iterator:
+            features = (
+                batch["features"]
+                if cached_splits is not None
+                else extract_features(batch)
+            )
+            batch_logits = predict_step(params, batch, features)
+            logits.append(_host_local_array(batch_logits))
+            targets.append(_host_local_array(batch["label"]))
+            row_indices.append(_host_local_array(batch["row_idx"]))
+        return (
+            np.concatenate(targets, axis=0),
+            np.concatenate(logits, axis=0),
+            np.concatenate(row_indices, axis=0),
+        )
+
+    metadata = data.metadata
+    train_positive = float(metadata["train_positive"])
+    train_size = float(metadata["train_size"])
+    focal_alpha = (
+        1.0 - train_positive / train_size
+        if args.focal_alpha == "auto"
+        else float(args.focal_alpha)
+    )
+    trial_params = [
+        TrialParams(hidden_dim=hidden, learning_rate=lr, weight_decay=wd, dropout=dropout)
+        for hidden, lr, wd, dropout in itertools.product(
+            _parse_int_grid(args.hidden_dims),
+            _parse_float_grid(args.learning_rates),
+            _parse_float_grid(args.weight_decays),
+            _parse_float_grid(args.dropouts),
+        )
+    ]
+    select_metric = f"val/{args.select_metric}"
+    higher_is_better = args.select_metric not in {"loss"}
+    cached_splits: dict[str, dict[str, np.ndarray]] | None = None
+    if variant == "covariance":
+        cached_splits = {
+            "train": cache_split(
+                "train",
+                seed=int(args.seed),
+                max_samples=args.max_train_samples,
+            ),
+            "val": cache_split(
+                "val",
+                seed=int(args.seed) + 10_000,
+                max_samples=args.max_val_samples,
+            ),
+            "test": cache_split(
+                "test",
+                seed=int(args.seed) + 20_000,
+                max_samples=args.max_test_samples,
+            ),
+        }
+    results: list[TrialResult] = []
+    best_params_by_trial: list[dict[str, Any]] = []
+    input_dim = 0
+    for trial_idx, params in enumerate(trial_params):
+        key = jax.random.PRNGKey(int(args.seed) + trial_idx)
+        probe_params, input_dim = init_params(key, params)
+        optimizer = optax.adamw(
+            learning_rate=float(params.learning_rate),
+            weight_decay=float(params.weight_decay),
+        )
+        opt_state = optimizer.init(probe_params)
+        train_step = make_train_step(optimizer)
+        train_rng = jax.random.PRNGKey(int(args.seed) + 10_000 * (trial_idx + 1))
+        best_value = -float("inf") if higher_is_better else float("inf")
+        best_epoch = 0
+        best_val: dict[str, float] = {}
+        best_probe_params = probe_params
+        history: list[dict[str, Any]] = []
+        epochs_without_improvement = 0
+        for epoch_idx in range(int(args.epochs)):
+            running_loss = 0.0
+            seen = 0
+            train_iterator = (
+                iter_cached_split(
+                    cached_splits["train"],
+                    shuffle=True,
+                    seed=int(args.seed) + epoch_idx,
+                )
+                if cached_splits is not None
+                else iter_split(
+                    "train",
+                    shuffle=True,
+                    seed=int(args.seed) + epoch_idx,
+                    max_samples=args.max_train_samples,
+                )
+            )
+            pbar = tqdm(
+                train_iterator,
+                desc=f"jax probe trial {trial_idx + 1}/{len(trial_params)} epoch {epoch_idx + 1}/{args.epochs}",
+                unit="batch",
+                dynamic_ncols=True,
+                mininterval=5.0,
+            )
+            for batch in pbar:
+                features = (
+                    batch["features"]
+                    if cached_splits is not None
+                    else extract_features(batch)
+                )
+                probe_params, opt_state, train_rng, loss = train_step(
+                    probe_params,
+                    opt_state,
+                    train_rng,
+                    batch,
+                    features,
+                    float(focal_alpha),
+                    float(args.focal_gamma),
+                    float(params.dropout),
+                )
+                batch_size = int(_host_local_array(batch["label"]).shape[0])
+                running_loss += float(jax.device_get(loss)) * batch_size
+                seen += batch_size
+                pbar.set_postfix(loss=f"{running_loss / float(seen):.5f}")
+            val_targets, val_logits, _ = prediction_arrays(
+                probe_params,
+                "val",
+                seed=int(args.seed) + 10_000,
+                max_samples=args.max_val_samples,
+            )
+            val_metrics = _metric_dict(val_targets, val_logits, "val")
+            history.append(
+                {
+                    "epoch": epoch_idx + 1,
+                    "train_loss": running_loss / float(seen),
+                    "val": val_metrics,
+                }
+            )
+            current_value = _select_metric_value(val_metrics, select_metric)
+            improved = (
+                current_value > best_value
+                if higher_is_better
+                else current_value < best_value
+            )
+            if improved:
+                best_value = current_value
+                best_epoch = epoch_idx + 1
+                best_val = dict(val_metrics)
+                best_probe_params = jax.tree.map(lambda value: jnp.array(value), probe_params)
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+            log.info(
+                "jax probe trial hidden=%d lr=%.3g wd=%.3g dropout=%.2f epoch=%d/%d val_ap=%.4f val_auc=%.4f",
+                params.hidden_dim,
+                params.learning_rate,
+                params.weight_decay,
+                params.dropout,
+                epoch_idx + 1,
+                args.epochs,
+                val_metrics["val/average_precision"],
+                val_metrics["val/roc_auc"],
+            )
+            if epochs_without_improvement >= int(args.patience):
+                break
+        results.append(
+            TrialResult(
+                params=params,
+                best_epoch=best_epoch,
+                best_val=best_val,
+                classifier_state={},
+                pooler_state=None,
+                history=history,
+            )
+        )
+        best_params_by_trial.append(best_probe_params)
+    best_idx = max(
+        range(len(results)),
+        key=lambda idx: _select_metric_value(results[idx].best_val, select_metric),
+    )
+    if not higher_is_better:
+        best_idx = min(
+            range(len(results)),
+            key=lambda idx: _select_metric_value(results[idx].best_val, select_metric),
+        )
+    best = results[best_idx]
+    best_probe_params = best_params_by_trial[best_idx]
+    test_targets, test_logits, test_row_indices_np = prediction_arrays(
+        best_probe_params,
+        "test",
+        seed=int(args.seed) + 20_000,
+        max_samples=args.max_test_samples,
+    )
+    test_metrics = _metric_dict(test_targets, test_logits, "test")
+    checkpoint_path = storage_join(
+        storage_join(checkpoint_dir, "orbax"),
+        str(restore_step),
+    )
+    payload: dict[str, Any] = {
+        "backend": "jax",
+        "repo_id": HF_REPO_ID,
+        "revision": args.revision,
+        "train_subdir": HF_TRAIN_SUBDIR,
+        "test_subdir": HF_TEST_SUBDIR,
+        "cache_dir": str(cache_dir),
+        "pooling": args.pooling,
+        "input_dim": input_dim,
+        "train_size": int(metadata["train_size"]),
+        "train_positive": int(metadata["train_positive"]),
+        "val_size": int(metadata["val_size"]),
+        "test_size": int(metadata["test_size"]),
+        "focal_alpha": focal_alpha,
+        "focal_gamma": float(args.focal_gamma),
+        "best_hparams": best.params._asdict(),
+        "best_epoch": best.best_epoch,
+        "best_val": best.best_val,
+        "test": test_metrics,
+        "test_pr_curve": _precision_recall_curve_dict(test_targets, test_logits),
+        "trials": [
+            {
+                "hparams": result.params._asdict(),
+                "best_epoch": result.best_epoch,
+                "best_val": result.best_val,
+            }
+            for result in results
+        ],
+    }
+    head_state = {
+        "mode": "probe",
+        "backend": "jax",
+        "complete": True,
+        "config_path": str(config_path),
+        "checkpoint_path": str(checkpoint_path),
+        "input_dim": int(input_dim),
+        "covariance_dim": int(_config_get(checkpoint_config, "covariance_pooling_dim", 32)),
+        "pooling": args.pooling,
+        "pair_dim": int(
+            _config_get(checkpoint_config, "pairmixer_pair_dim", checkpoint_config.model_dim)
+        ),
+        "jax_params": _jax_tree_to_numpy(best_probe_params),
+        "pooler_state": None,
+        "classifier_state": {},
+        "best_epoch": int(best.best_epoch),
+        "best_val": best.best_val,
+        "test": test_metrics,
+        "history": best.history,
+        "hparams": best.params._asdict(),
+        "focal_alpha": focal_alpha,
+        "focal_gamma": float(args.focal_gamma),
+        "finetune_cache_dir": str(cache_dir),
+        "device_ids": list(range(jax_device_count)),
+        "train_size": int(metadata["train_size"]),
+        "train_positive": int(metadata["train_positive"]),
+        "val_size": int(metadata["val_size"]),
+        "val_positive": int(metadata["val_positive"]),
+        "max_train_samples": args.max_train_samples,
+        "max_val_samples": args.max_val_samples,
+    }
+    save_torch_checkpoint(head_state, head_state_path)
+    summary = write_standard_fluorine_outputs(
+        output_prefix=output_prefix,
+        config_path=config_path,
+        checkpoint_path=checkpoint_path,
+        head_state_path=head_state_path,
+        data=data,
+        targets=test_targets,
+        logits=test_logits,
+        row_indices=test_row_indices_np,
+        head_state=head_state,
+    )
+    summary["backend"] = "jax"
+    if args.comparison_dir is not None:
+        comparison = write_dreams_comparison(
+            output_prefix=output_prefix,
+            comparison_dir=args.comparison_dir.expanduser().resolve(),
+            summary=summary,
+            previous_ours_prefix=None,
+        )
+        summary["comparison"] = comparison
+    curve_dirs: list[StoragePath] = [storage_parent(output_prefix)]
+    if args.comparison_dir is not None:
+        curve_dirs.append(args.comparison_dir.expanduser().resolve())
+    summary["all_pr_curves"] = write_all_pr_curve_comparison(
+        output_prefix=output_prefix,
+        curve_dirs=curve_dirs,
+    )
+    write_text(
+        storage_with_suffix(output_prefix, ".summary.json"),
+        json.dumps(summary, indent=2, sort_keys=True),
+    )
+    payload["standard_outputs"] = {
+        "summary": str(storage_with_suffix(output_prefix, ".summary.json")),
+        "state": str(head_state_path),
+        "output_prefix": str(output_prefix),
+    }
+    if args.output_json:
+        write_text(
+            normalize_storage_path(args.output_json),
+            json.dumps(payload, indent=2, sort_keys=True),
+        )
+    return payload
+
+
 def run_probe(args: argparse.Namespace) -> dict[str, Any]:
     device = torch.device(args.device)
     checkpoint_path = resolve_checkpoint_path(args.checkpoint, getattr(args, "workdir", None))
@@ -2590,6 +3363,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     mode = str(getattr(args, "mode", "probe"))
     torch.manual_seed(int(args.seed))
     if mode == "probe":
+        backend = str(getattr(args, "backend", "auto")).lower()
+        if backend == "auto":
+            config = load_config(args.config.expanduser().resolve())
+            backend = (
+                "jax"
+                if str(_config_get(config, "device_backend", "torch")).lower() == "jax"
+                else "torch"
+            )
+        if backend == "jax":
+            return run_probe_jax(args)
         return run_probe(args)
 
     distributed = init_distributed_from_env()

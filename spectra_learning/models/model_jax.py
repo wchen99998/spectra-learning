@@ -167,6 +167,7 @@ class PeakSetJEPAJax(nnx.Module):
         self.distogram_mz_max = cfg.distogram_mz_max
         self.jepa_mae_mz_bin_size = cfg.jepa_mae_mz_bin_size
         self.jepa_mae_intensity_bin_size = cfg.jepa_mae_intensity_bin_size
+        self.mae_intensity_loss_weight = cfg.mae_intensity_loss_weight
         self.jepa_mae_mz_max = cfg.jepa_mae_mz_max
         self.jepa_mae_intensity_max = cfg.jepa_mae_intensity_max
         self.jepa_mae_num_mz_bins = math.ceil(
@@ -296,7 +297,10 @@ class PeakSetJEPAJax(nnx.Module):
                 compute_dtype=self.compute_dtype,
                 rngs=rngs,
             )
-            if self.jepa_mae_loss_weight > 0 or self.training_mode == "mae"
+            if (
+                (self.jepa_mae_loss_weight > 0 or self.training_mode == "mae")
+                and self.mae_intensity_loss_weight > 0.0
+            )
             else None
         )
         self.distogram_head = (
@@ -1266,7 +1270,10 @@ class PeakSetJEPAJax(nnx.Module):
                 ).sum()
                 / jnp.maximum(target_weights.sum(), 1.0)
             )
-        if self.masked_token_input_mode == "mz_sentinel":
+        if (
+            self.masked_token_input_mode == "mz_sentinel"
+            or self.mae_intensity_loss_weight <= 0.0
+        ):
             return mz_loss, mz_loss, zero, mz_accuracy, zero
         assert self.jepa_mae_intensity_head is not None
         intensity_logits = self.jepa_mae_intensity_head(predicted_latents)
@@ -1275,7 +1282,7 @@ class PeakSetJEPAJax(nnx.Module):
             intensity_target,
             target_masks,
         )
-        value_loss = mz_loss + intensity_loss
+        value_loss = mz_loss + intensity_loss * self.mae_intensity_loss_weight
         intensity_accuracy = zero
         if compute_accuracy:
             intensity_accuracy = (
@@ -1354,7 +1361,10 @@ class PeakSetJEPAJax(nnx.Module):
             mz_accuracy = mz_loss * 0.0
 
         zero = mz_loss * 0.0
-        if self.masked_token_input_mode == "mz_sentinel":
+        if (
+            self.masked_token_input_mode == "mz_sentinel"
+            or self.mae_intensity_loss_weight <= 0.0
+        ):
             value_loss = mz_loss
             intensity_loss = zero
             intensity_accuracy = zero
@@ -1366,7 +1376,7 @@ class PeakSetJEPAJax(nnx.Module):
                 intensity_target,
                 target_slot,
             )
-            value_loss = mz_loss + intensity_loss
+            value_loss = mz_loss + intensity_loss * self.mae_intensity_loss_weight
             if compute_accuracy:
                 target_weights = target_slot.astype(jnp.float32)
                 intensity_accuracy = (

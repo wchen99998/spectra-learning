@@ -155,6 +155,7 @@ def _configure_losses(model: PeakSetJEPA, cfg: PeakSetJEPASettings) -> None:
     model.distogram_mz_max = cfg.distogram_mz_max
     model.jepa_mae_mz_bin_size = cfg.jepa_mae_mz_bin_size
     model.jepa_mae_intensity_bin_size = cfg.jepa_mae_intensity_bin_size
+    model.mae_intensity_loss_weight = cfg.mae_intensity_loss_weight
     model.jepa_mae_mz_max = cfg.jepa_mae_mz_max
     model.jepa_mae_intensity_max = cfg.jepa_mae_intensity_max
     model.jepa_mae_num_mz_bins = math.ceil(
@@ -365,15 +366,19 @@ def _build_jepa_mae_heads(model: PeakSetJEPA) -> None:
         model.target_projector_dim,
         model.jepa_mae_num_mz_bins,
     )
+    nn.init.xavier_normal_(jepa_mae_mz_head.weight)
+    nn.init.zeros_(jepa_mae_mz_head.bias)
+    model.jepa_mae_mz_head = jepa_mae_mz_head
+    if model.mae_intensity_loss_weight <= 0.0:
+        model.jepa_mae_intensity_head = None
+        return
+
     jepa_mae_intensity_head = nn.Linear(
         model.target_projector_dim,
         model.jepa_mae_num_intensity_bins,
     )
-    nn.init.xavier_normal_(jepa_mae_mz_head.weight)
-    nn.init.zeros_(jepa_mae_mz_head.bias)
     nn.init.xavier_normal_(jepa_mae_intensity_head.weight)
     nn.init.zeros_(jepa_mae_intensity_head.bias)
-    model.jepa_mae_mz_head = jepa_mae_mz_head
     model.jepa_mae_intensity_head = jepa_mae_intensity_head
 
 

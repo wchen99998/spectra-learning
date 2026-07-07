@@ -942,6 +942,27 @@ class BlockJEPATests(unittest.TestCase):
         torch.testing.assert_close(metrics["mae_term"], metrics["mae_loss"] * 0.5)
         torch.testing.assert_close(metrics["loss"], metrics["mae_term"])
 
+    def test_mae_intensity_loss_weight_zero_removes_intensity_head(self):
+        model = self._build_model(
+            training_mode="mae",
+            mae_intensity_loss_weight=0.0,
+        )
+        self.assertIsNotNone(model.jepa_mae_mz_head)
+        self.assertIsNone(model.jepa_mae_intensity_head)
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+
+        metrics = model.forward_augmented(batch)
+
+        torch.testing.assert_close(metrics["mae_loss"], metrics["mae_mz_loss"])
+        torch.testing.assert_close(
+            metrics["mae_intensity_loss"],
+            torch.zeros_like(metrics["mae_intensity_loss"]),
+        )
+        torch.testing.assert_close(
+            metrics["mae_intensity_accuracy"],
+            torch.zeros_like(metrics["mae_intensity_accuracy"]),
+        )
+
     def test_mae_training_mode_disables_ema_teacher(self):
         model = self._build_model(
             training_mode="mae",

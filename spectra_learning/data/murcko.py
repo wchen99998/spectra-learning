@@ -43,6 +43,7 @@ from spectra_learning.data.massspec_targets import (
 )
 from spectra_learning.data.mgf import _to_float, iter_mgf
 from spectra_learning.data.spectra import (
+    ASSUMED_PRECURSOR_CHARGE,
     DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
     DEFAULT_GROUPED_PEAK_SHOULDER_DA,
     DEFAULT_PEAK_FILTERING,
@@ -907,6 +908,12 @@ class _MurckoFluorineParquetDataset(Dataset):
                 rows["spectrum_intensity"],
             ),
             "precursor_mz_raw": np.asarray(rows["precursor_mz"], dtype=np.float32),
+            "collision_energy": np.asarray(rows["collision_energy"], dtype=np.float32),
+            "charge": np.full(
+                len(rows["precursor_mz"]),
+                ASSUMED_PRECURSOR_CHARGE,
+                dtype=np.float32,
+            ),
             "label": np.asarray(rows["has_fluorine"], dtype=np.float32),
         }
         if "dreams_embedding" in rows:
@@ -962,6 +969,8 @@ class _MurckoFluorineParquetDataset(Dataset):
         sample = {
             "spectra": arrays["spectra"][local_idx].copy(),
             "precursor_mz_raw": np.float32(arrays["precursor_mz_raw"][local_idx]),
+            "collision_energy": np.float32(arrays["collision_energy"][local_idx]),
+            "charge": np.float32(arrays["charge"][local_idx]),
             "label": np.float32(arrays["label"][local_idx]),
             "row_idx": np.int64(index),
         }

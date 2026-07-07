@@ -30,6 +30,7 @@ def _write_split(path: Path, labels: list[bool]) -> None:
                 type=pa.list_(pa.float32()),
             ),
             "precursor_mz": pa.array([100.0 for _ in labels], type=pa.float64()),
+            "collision_energy": pa.array([10.0 for _ in labels], type=pa.float32()),
             "has_fluorine": pa.array(labels, type=pa.bool_()),
         }
     )

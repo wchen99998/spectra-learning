@@ -34,16 +34,17 @@ def test_launcher_shape_comes_from_explicit_muon_long_run_config():
     assert args.workdir == MUON_WORKDIR
     assert args.topology == ""
     assert args.chips is None
-    assert args.infra == "gcp/us-east5"
+    assert args.region == "us-south1"
+    assert args.infra == "gcp/us-south1"
     assert args.instance_type == ""
     assert args.vm_image_id == train_sky.DEFAULT_VM_IMAGE_ID
-    assert args.docker_image == "python:3.12-bookworm"
     assert args.sky_bin == train_sky.DEFAULT_SKY_BIN
     assert args.cpus == ""
     assert args.memory == ""
+    assert args.stream_logs is True
     assert args.training_max_steps is None
     assert args.dws_run_duration_seconds == train_sky.DEFAULT_DWS_RUN_DURATION_SECONDS
-    assert args.provision_timeout_seconds == 3600
+    assert args.provision_timeout_seconds == train_sky.DEFAULT_PROVISION_TIMEOUT_SECONDS
     assert defaults.training_max_steps == 4_000_000
     assert defaults.batch_size == 2048
     assert defaults.gradient_accumulation_steps == 4
@@ -52,6 +53,71 @@ def test_launcher_shape_comes_from_explicit_muon_long_run_config():
     assert defaults.val_num_steps == 500
     assert defaults.dataloader_num_workers == 32
     assert defaults.msg_probe_at_final_step is True
+
+
+def test_region_flag_sets_gcp_infra():
+    args, sky_args = train_sky.parse_args(
+        [
+            "--config",
+            MUON_CONFIG,
+            "--workdir",
+            MUON_WORKDIR,
+            "--region",
+            "asia-northeast1",
+        ]
+    )
+
+    assert sky_args == []
+    assert args.region == "asia-northeast1"
+    assert args.infra == "gcp/asia-northeast1"
+
+
+def test_region_flag_accepts_gcp_prefix():
+    args, _sky_args = train_sky.parse_args(
+        [
+            "--config",
+            MUON_CONFIG,
+            "--workdir",
+            MUON_WORKDIR,
+            "--region",
+            "gcp/us-south1",
+        ]
+    )
+
+    assert args.region == "us-south1"
+    assert args.infra == "gcp/us-south1"
+
+
+def test_infra_flag_sets_region_from_infra():
+    args, _sky_args = train_sky.parse_args(
+        [
+            "--config",
+            MUON_CONFIG,
+            "--workdir",
+            MUON_WORKDIR,
+            "--infra",
+            "gcp/us-east5",
+        ]
+    )
+
+    assert args.region == "us-east5"
+    assert args.infra == "gcp/us-east5"
+
+
+def test_region_rejects_conflicting_infra():
+    with pytest.raises(SystemExit):
+        train_sky.parse_args(
+            [
+                "--config",
+                MUON_CONFIG,
+                "--workdir",
+                MUON_WORKDIR,
+                "--region",
+                "us-south1",
+                "--infra",
+                "gcp/us-east5",
+            ]
+        )
 
 
 def test_dryrun_alias_maps_to_dry_run_flag():
@@ -66,6 +132,21 @@ def test_dryrun_alias_maps_to_dry_run_flag():
     )
 
     assert args.dry_run is True
+
+
+def test_detach_run_submits_without_log_streaming():
+    args, sky_args = train_sky.parse_args(
+        [
+            "--config",
+            MUON_CONFIG,
+            "--workdir",
+            MUON_WORKDIR,
+            "--detach-run",
+        ]
+    )
+
+    assert sky_args == []
+    assert args.stream_logs is False
 
 
 @pytest.mark.parametrize(
@@ -91,6 +172,40 @@ def test_dws_run_duration_parses_seconds_and_suffixes(value, seconds):
     )
 
     assert args.dws_run_duration_seconds == seconds
+
+
+def test_dws_provision_timeout_defaults_to_bounded_wait():
+    args, _sky_args = train_sky.parse_args(
+        [
+            "--config",
+            MUON_CONFIG,
+            "--workdir",
+            MUON_WORKDIR,
+            "--dws-max-run-duration",
+            "2d",
+        ]
+    )
+
+    assert args.dws_run_duration_seconds == 172800
+    assert args.provision_timeout_seconds == train_sky.DEFAULT_PROVISION_TIMEOUT_SECONDS
+
+
+def test_dws_provision_timeout_can_be_overridden():
+    args, _sky_args = train_sky.parse_args(
+        [
+            "--config",
+            MUON_CONFIG,
+            "--workdir",
+            MUON_WORKDIR,
+            "--dws-max-run-duration",
+            "2d",
+            "--dws-provision-timeout",
+            "6h",
+        ]
+    )
+
+    assert args.dws_run_duration_seconds == 172800
+    assert args.provision_timeout_seconds == 21600
 
 
 def test_muon_long_run_config_training_shape_and_probe_schedule():
@@ -160,30 +275,39 @@ def test_build_task_constructs_direct_gcp_dws_resources_and_env():
     task = train_sky.build_task(
         topology=train_sky.resolve_topology("4x8"),
         envs={"SPECTRA_RUN_ID": "new", "SPECTRA_TRAINING_MAX_STEPS": "100"},
-        infra="gcp",
+        infra="gcp/us-south1",
     )
 
     assert task["name"] == "spectra-v6e-mig-dws"
     assert task["workdir"] == "."
     assert task["num_nodes"] == 8
-    assert task["resources"]["infra"] == "gcp"
+    assert task["resources"]["infra"] == "gcp/us-south1"
     assert task["resources"]["image_id"] == {
-        "us-east5": train_sky.DEFAULT_VM_IMAGE_ID,
-        "docker": "python:3.12-bookworm",
+        "us-south1": train_sky.DEFAULT_VM_IMAGE_ID,
     }
     assert task["resources"]["instance_type"] == "ct6e-standard-4t"
     assert "accelerators" not in task["resources"]
     assert "accelerator_args" not in task["resources"]
     assert "cpus" not in task["resources"]
     assert "memory" not in task["resources"]
+    assert task["config"]["gcp"]["remote_identity"] == "SERVICE_ACCOUNT"
     assert task["config"]["gcp"]["managed_instance_group"] == {
         "run_duration": 604800,
-        "provision_timeout": 3600,
+        "provision_timeout": train_sky.DEFAULT_PROVISION_TIMEOUT_SECONDS,
         "accelerator_topology": "4x8",
         "accelerator_topology_mode": "AUTO_CONNECT",
     }
     assert task["envs"]["SPECTRA_RUN_ID"] == "new"
     assert task["envs"]["SPECTRA_TRAINING_MAX_STEPS"] == "100"
+    assert "apt-get install -y" in task["setup"]
+    assert "libgomp1" in task["setup"]
+    assert "curl -LsSf https://astral.sh/uv/install.sh | sh" in task["setup"]
+    assert f"uv python install {train_sky.DEFAULT_PYTHON_VERSION}" in task["setup"]
+    assert (
+        f"uv sync --python {train_sky.DEFAULT_PYTHON_VERSION} "
+        "--frozen --no-dev --extra tpu"
+    ) in task["setup"]
+    assert "python -m pip" not in task["setup"]
     assert "SPECTRA_TRAIN_OVERRIDES_JSON must be set" in task["run"]
     assert 'export JAX_COMPILATION_CACHE_DIR="${JAX_CACHE_DIR}"' in task["run"]
     assert 'echo "JAX compilation cache ${JAX_COMPILATION_CACHE_DIR}"' in task["run"]
@@ -201,24 +325,12 @@ def test_build_task_sets_dws_run_duration():
     )
 
     assert task["resources"]["instance_type"] == "ct6e-standard-4t"
+    assert task["config"]["gcp"]["remote_identity"] == "SERVICE_ACCOUNT"
     assert task["config"]["gcp"]["managed_instance_group"] == {
         "run_duration": 21600,
-        "provision_timeout": 3600,
+        "provision_timeout": train_sky.DEFAULT_PROVISION_TIMEOUT_SECONDS,
         "accelerator_topology": "4x8",
         "accelerator_topology_mode": "AUTO_CONNECT",
-    }
-
-
-def test_build_task_omits_docker_image_when_empty():
-    task = train_sky.build_task(
-        topology=train_sky.resolve_topology("2x4"),
-        envs={"SPECTRA_RUN_ID": "new", "SPECTRA_TRAINING_MAX_STEPS": "100"},
-        infra="gcp",
-        docker_image="",
-    )
-
-    assert task["resources"]["image_id"] == {
-        "us-east5": train_sky.DEFAULT_VM_IMAGE_ID,
     }
 
 
@@ -290,10 +402,15 @@ def test_dryrun_prints_generated_assets_without_token_lookup(
     assert "===== SkyPilot Task YAML =====" in output
     assert "name: spectra-v6e-mig-dws" in output
     assert "num_nodes: 8" in output
-    assert "infra: gcp/us-east5" in output
+    assert "infra: gcp/us-south1" in output
     assert "instance_type: ct6e-standard-4t" in output
     assert "projects/ubuntu-os-accelerator-images/global/images/" in output
-    assert "docker: python:3.12-bookworm" in output
+    assert "docker:" not in output
+    assert f"uv python install {train_sky.DEFAULT_PYTHON_VERSION}" in output
+    assert (
+        f"uv sync --python {train_sky.DEFAULT_PYTHON_VERSION} "
+        "--frozen --no-dev --extra tpu"
+    ) in output
     assert "accelerators:" not in output
     assert "accelerator_args:" not in output
     assert "runtime_version:" not in output
@@ -301,8 +418,9 @@ def test_dryrun_prints_generated_assets_without_token_lookup(
     assert "cpus:" not in output
     assert "memory:" not in output
     assert "managed_instance_group:" in output
+    assert "remote_identity: SERVICE_ACCOUNT" in output
     assert "run_duration: 604800" in output
-    assert "provision_timeout: 3600" in output
+    assert f"provision_timeout: {train_sky.DEFAULT_PROVISION_TIMEOUT_SECONDS}" in output
     assert "accelerator_topology: 4x8" in output
     assert "accelerator_topology_mode: AUTO_CONNECT" in output
     assert "kubernetes:" not in output
@@ -318,9 +436,12 @@ def test_dryrun_prints_generated_assets_without_token_lookup(
     assert '"msg_probe_at_final_step":true' in output
     assert '"jax_checkpoint_max_to_keep":null' in output
     assert "precompile" not in output.lower()
-    assert "===== SkyPilot Command =====" in output
+    assert "===== SkyPilot Launch Command =====" in output
     assert "sky jobs launch" in output
+    assert "--detach-run --name spectra-dryrun-assets" in output
     assert "--name spectra-dryrun-assets" in output
+    assert "===== SkyPilot Logs Command =====" in output
+    assert "sky jobs logs -n spectra-dryrun-assets" in output
 
 
 def test_dryrun_allows_64_chip_count(
@@ -417,6 +538,7 @@ def test_launch_failure_preserves_exit_code_without_wrapper_down(tmp_path, monke
         [
             "jobs",
             "launch",
+            "--detach-run",
             "--name",
             "spectra-fake-fail",
             "--secret",
@@ -431,7 +553,51 @@ def test_launch_failure_preserves_exit_code_without_wrapper_down(tmp_path, monke
     ]
 
 
-def test_skypilot_managed_job_flags_pass_through(tmp_path, monkeypatch):
+def test_successful_submit_streams_managed_job_logs(tmp_path, monkeypatch):
+    command_log = _install_fake_sky(tmp_path, monkeypatch, jobs_launch_returncode=0)
+    monkeypatch.setenv("HF_TOKEN", "hf-token")
+    monkeypatch.setenv("WANDB_API_KEY", "wandb-token")
+
+    train_sky.main(
+        [
+            "--run-id",
+            "fake-stream",
+            "--config",
+            MUON_CONFIG,
+            "--workdir",
+            f"{MUON_WORKDIR}-fake-stream",
+            "--sky-bin",
+            "sky",
+            "--task-output-dir",
+            str(tmp_path / "tasks"),
+        ]
+    )
+
+    commands = _read_fake_sky_commands(command_log)
+    assert commands == [
+        [
+            "jobs",
+            "launch",
+            "--detach-run",
+            "--name",
+            "spectra-fake-stream",
+            "--secret",
+            "HF_TOKEN",
+            "--secret",
+            "HUGGING_FACE_HUB_TOKEN",
+            "--secret",
+            "WANDB_API_KEY",
+            "--yes",
+            str(tmp_path / "tasks" / "fake-stream.yaml"),
+        ],
+        ["jobs", "logs", "-n", "spectra-fake-stream"],
+    ]
+
+
+def test_skypilot_managed_job_flags_pass_through_without_log_streaming(
+    tmp_path,
+    monkeypatch,
+):
     command_log = _install_fake_sky(tmp_path, monkeypatch, jobs_launch_returncode=0)
     monkeypatch.setenv("HF_TOKEN", "hf-token")
     monkeypatch.setenv("WANDB_API_KEY", "wandb-token")
@@ -456,9 +622,8 @@ def test_skypilot_managed_job_flags_pass_through(tmp_path, monkeypatch):
 
     commands = _read_fake_sky_commands(command_log)
     assert len(commands) == 1
-    assert commands[0][:3] == ["jobs", "launch", "--name"]
-    assert commands[0][-4:] == [
-        "--detach-run",
+    assert commands[0][:4] == ["jobs", "launch", "--detach-run", "--name"]
+    assert commands[0][-3:] == [
         "--job-recovery",
         "none",
         str(tmp_path / "tasks" / "fake-managed.yaml"),
@@ -470,6 +635,7 @@ def _install_fake_sky(
     monkeypatch,
     *,
     jobs_launch_returncode: int,
+    jobs_logs_returncode: int = 0,
 ):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -486,6 +652,8 @@ with open(os.environ["FAKE_SKY_COMMAND_LOG"], "a") as f:
 
 if len(sys.argv) > 2 and sys.argv[1:3] == ["jobs", "launch"]:
     raise SystemExit(int(os.environ["FAKE_SKY_JOBS_LAUNCH_RETURNCODE"]))
+if len(sys.argv) > 2 and sys.argv[1:3] == ["jobs", "logs"]:
+    raise SystemExit(int(os.environ["FAKE_SKY_JOBS_LOGS_RETURNCODE"]))
 raise SystemExit(2)
 """
     )
@@ -493,6 +661,7 @@ raise SystemExit(2)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setenv("FAKE_SKY_COMMAND_LOG", str(command_log))
     monkeypatch.setenv("FAKE_SKY_JOBS_LAUNCH_RETURNCODE", str(jobs_launch_returncode))
+    monkeypatch.setenv("FAKE_SKY_JOBS_LOGS_RETURNCODE", str(jobs_logs_returncode))
     return command_log
 
 

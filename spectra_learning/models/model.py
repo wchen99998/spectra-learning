@@ -48,6 +48,7 @@ class PeakSetJEPA(
     distogram_mz_max: float
     jepa_mae_mz_bin_size: float
     jepa_mae_intensity_bin_size: float
+    mae_intensity_loss_weight: float
     jepa_mae_mz_max: float
     jepa_mae_intensity_max: float
     jepa_mae_num_mz_bins: int

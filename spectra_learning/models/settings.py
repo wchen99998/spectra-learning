@@ -40,6 +40,7 @@ class PeakSetJEPASettings:
     distogram_mz_max: float = PEAK_MZ_MAX
     jepa_mae_mz_bin_size: float = 2.5
     jepa_mae_intensity_bin_size: float = 0.1
+    mae_intensity_loss_weight: float = 1.0
     jepa_mae_mz_max: float = PEAK_MZ_MAX
     jepa_mae_intensity_max: float = 1.0
     jepa_target_normalization: str = "none"
@@ -175,6 +176,7 @@ SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
     "distogram_mz_max": float,
     "jepa_mae_mz_bin_size": float,
     "jepa_mae_intensity_bin_size": float,
+    "mae_intensity_loss_weight": float,
     "jepa_mae_mz_max": float,
     "jepa_mae_intensity_max": float,
     "jepa_target_normalization": str,

@@ -81,6 +81,82 @@ def trainable_param_filter(path: tuple[object, ...], value: object) -> bool:
     return path[-1] != "b"
 
 
+def collect_jax_param_metrics(model: PeakSetJEPAJax) -> dict[str, float]:
+    params = nnx.state(model, nnx.Param)
+    trainable_params = nnx.state(model, trainable_param_filter)
+    total_by_module = _jax_param_counts_by_module(params)
+    trainable_by_module = _jax_param_counts_by_module(trainable_params)
+    total = sum(total_by_module.values())
+    trainable = sum(trainable_by_module.values())
+    logging.info(
+        "Model parameters: total=%s trainable=%s non_trainable=%s",
+        f"{total:,}",
+        f"{trainable:,}",
+        f"{total - trainable:,}",
+    )
+    metrics: dict[str, float] = {
+        "model/params_total": float(total),
+        "model/params_trainable": float(trainable),
+        "model/params_non_trainable": float(total - trainable),
+    }
+    for module_name in sorted(total_by_module):
+        module_total = total_by_module[module_name]
+        module_trainable = trainable_by_module.get(module_name, 0)
+        logging.info(
+            "  [%s] total=%s trainable=%s",
+            module_name,
+            f"{module_total:,}",
+            f"{module_trainable:,}",
+        )
+        metrics[f"model/params_total/{module_name}"] = float(module_total)
+        metrics[f"model/params_trainable/{module_name}"] = float(module_trainable)
+    return metrics
+
+
+def _jax_param_counts_by_module(state: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for path, value in jax.tree_util.tree_flatten_with_path(state)[0]:
+        module_name = str(_tree_path_key(path[0])) if path else "<root>"
+        counts[module_name] = counts.get(module_name, 0) + int(value.size)
+    return counts
+
+
+def _jax_tree_numel(tree: Any) -> int:
+    return sum(int(value.size) for value in jax.tree.leaves(tree))
+
+
+def _jax_tree_l2(tree: Any) -> Array:
+    total = sum(
+        (
+            jnp.sum(jnp.square(value.astype(jnp.float32)))
+            for value in jax.tree.leaves(tree)
+        ),
+        jnp.asarray(0.0, dtype=jnp.float32),
+    )
+    return jnp.sqrt(total)
+
+
+def _jax_update_scale_metrics(
+    params: Any,
+    grads: Any,
+    updates: Any,
+) -> dict[str, Array]:
+    num_params = jnp.asarray(float(_jax_tree_numel(params)), dtype=jnp.float32)
+    param_l2 = _jax_tree_l2(params)
+    grad_l2 = _jax_tree_l2(grads)
+    update_l2 = _jax_tree_l2(updates)
+    denom = jnp.sqrt(num_params)
+    return {
+        "param_l2": param_l2,
+        "param_rms": param_l2 / denom,
+        "grad_l2": grad_l2,
+        "grad_rms": grad_l2 / denom,
+        "update_l2": update_l2,
+        "update_rms": update_l2 / denom,
+        "update_to_param_l2": update_l2 / param_l2,
+    }
+
+
 def configure_jax_runtime(config: Any) -> None:
     configure_jax_tpu_xla_flags()
     if bool(_config_get(config, "jax_log_compiles", False)) or _env_enabled(
@@ -672,6 +748,7 @@ def make_pure_accumulated_train_step(
     *,
     sharded: bool,
     data_mesh: Mesh | None = None,
+    log_update_stats: bool = False,
 ):
     def accumulated_metrics_and_grads(
         trainable_params: nnx.State,
@@ -753,6 +830,11 @@ def make_pure_accumulated_train_step(
                 opt_state,
                 trainable_params,
             )
+            if log_update_stats:
+                metrics = {
+                    **metrics,
+                    **_jax_update_scale_metrics(trainable_params, grads, updates),
+                }
             trainable_params = optax.apply_updates(trainable_params, updates)
             return trainable_params, opt_state, metrics
 
@@ -775,6 +857,11 @@ def make_pure_accumulated_train_step(
             opt_state,
             trainable_params,
         )
+        if log_update_stats:
+            metrics = {
+                **metrics,
+                **_jax_update_scale_metrics(trainable_params, grads, updates),
+            }
         trainable_params = optax.apply_updates(trainable_params, updates)
         return trainable_params, opt_state, metrics
 
@@ -873,6 +960,13 @@ def train_and_evaluate_jax(
     if resume_step is None:
         initialize_jax_model_from_torch_seed(config, model)
     logger = build_logger(config, local_workdir) if is_main_process else MetricLogger()
+    param_metrics = collect_jax_param_metrics(model)
+    if is_main_process:
+        param_metrics_step = int(resume_step or 0)
+        logger.log_metrics(
+            {"global_step": float(param_metrics_step), **param_metrics},
+            step=param_metrics_step,
+        )
     metrics = _run_jax_training_loop(
         config=config,
         datamodule=datamodule,
@@ -902,7 +996,7 @@ def train_and_evaluate_jax(
         ),
         "run/device_backend": "jax",
     }
-    results = {**metrics, **run_metrics}
+    results = {**metrics, **run_metrics, **param_metrics}
     if is_main_process:
         final_global_step = int(metrics["run/final_global_step"])
         logger.log_metrics(
@@ -960,6 +1054,7 @@ def _run_jax_training_loop(
         pure_optimizer,
         sharded=use_sharded_step,
         data_mesh=data_mesh,
+        log_update_stats=bool(_config_get(config, "jax_log_update_stats", False)),
     )
     pure_eval_step = make_pure_eval_step(
         pure_graphdef,

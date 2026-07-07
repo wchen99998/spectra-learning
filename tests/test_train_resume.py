@@ -805,6 +805,11 @@ def test_train_and_evaluate_jax_logs_final_metrics_on_main_process(
         assert kwargs["logger"] is logger
         return {"run/final_global_step": 3.0, "train/loss": 1.5}
 
+    param_metrics = {
+        "model/params_total": 123.0,
+        "model/params_trainable": 120.0,
+        "model/params_non_trainable": 3.0,
+    }
     cfg = config_dict.ConfigDict()
     cfg.seed = 7
     cfg.num_epochs = 1
@@ -836,6 +841,11 @@ def test_train_and_evaluate_jax_logs_final_metrics_on_main_process(
         "initialize_jax_model_from_torch_seed",
         lambda config, model: None,
     )
+    monkeypatch.setattr(
+        pretrain_jax,
+        "collect_jax_param_metrics",
+        lambda model: param_metrics,
+    )
     monkeypatch.setattr(pretrain_jax, "build_logger", lambda config, workdir: logger)
     monkeypatch.setattr(
         pretrain_jax,
@@ -854,6 +864,13 @@ def test_train_and_evaluate_jax_logs_final_metrics_on_main_process(
     assert logger.logs == [
         (
             {
+                "global_step": 0.0,
+                **param_metrics,
+            },
+            0,
+        ),
+        (
+            {
                 "global_step": 3.0,
                 "run/final_global_step": 3.0,
                 "train/loss": 1.5,
@@ -867,6 +884,7 @@ def test_train_and_evaluate_jax_logs_final_metrics_on_main_process(
                 "run/device_microbatch_size": 4.0,
                 "run/gradient_accumulation_steps": 1.0,
                 "run/device_backend": "jax",
+                **param_metrics,
             },
             3,
         )
@@ -921,6 +939,11 @@ def test_train_and_evaluate_jax_skips_logger_on_worker_process(
         pretrain_jax,
         "initialize_jax_model_from_torch_seed",
         lambda config, model: None,
+    )
+    monkeypatch.setattr(
+        pretrain_jax,
+        "collect_jax_param_metrics",
+        lambda model: {"model/params_total": 123.0},
     )
     monkeypatch.setattr(
         pretrain_jax,
@@ -2212,6 +2235,7 @@ def test_wandb_logger_defines_msg_probe_global_step(monkeypatch, tmp_path: Path)
         (("val/*",), {"step_metric": "global_step"}),
         (("msg_probe/*",), {"step_metric": "global_step"}),
         (("run/*",), {"step_metric": "global_step"}),
+        (("model/*",), {"step_metric": "global_step"}),
     ]
 
 

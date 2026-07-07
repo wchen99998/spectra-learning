@@ -249,6 +249,53 @@ def test_jax_mae_matches_pytorch_on_real_collated_batch(mask_strategy: str):
     _assert_metrics_close(torch_metrics, jax_metrics)
 
 
+def test_jax_mae_without_intensity_head_matches_pytorch():
+    torch.manual_seed(29)
+    kwargs = {**_small_mae_kwargs(), "mae_intensity_loss_weight": 0.0}
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    jax_model = PeakSetJEPAJax(**kwargs)
+    assert torch_model.jepa_mae_intensity_head is None
+    assert jax_model.jepa_mae_intensity_head is None
+    jax_model.load_torch_state_dict(torch_model.state_dict())
+    batch = _real_pattern_batch("contiguous")
+
+    with torch.no_grad():
+        torch_metrics = torch_model(batch)
+    jax_metrics = jax_model(_jax_batch(batch))
+
+    _assert_metrics_close(torch_metrics, jax_metrics)
+    assert float(torch_metrics["mae_intensity_loss"]) == 0.0
+    assert float(jax_metrics["mae_intensity_loss"]) == 0.0
+    torch.testing.assert_close(torch_metrics["mae_loss"], torch_metrics["mae_mz_loss"])
+    np.testing.assert_allclose(
+        np.asarray(jax_metrics["mae_loss"]),
+        np.asarray(jax_metrics["mae_mz_loss"]),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_jax_fastmixer_compact_mae_without_intensity_head():
+    kwargs = {
+        **_small_bi_dense_mae_kwargs(),
+        "pairmixer_block_type": "FastMixer",
+        "pairmixer_fast_max_visible_tokens": 6,
+        "mae_intensity_loss_weight": 0.0,
+    }
+    model = PeakSetJEPAJax(**kwargs)
+    assert model.jepa_mae_intensity_head is None
+    metrics = model(_jax_batch(_real_pattern_batch("random")))
+
+    assert float(metrics["mae_intensity_loss"]) == 0.0
+    assert float(metrics["mae_intensity_accuracy"]) == 0.0
+    np.testing.assert_allclose(
+        np.asarray(metrics["mae_loss"]),
+        np.asarray(metrics["mae_mz_loss"]),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
 def test_initialize_jax_model_from_torch_seed_matches_pytorch_forward():
     seed = 123
     kwargs = _small_mae_kwargs()
@@ -654,6 +701,42 @@ def test_jax_pure_optax_accumulated_train_step_matches_manual_accumulation():
         rtol=1e-6,
         atol=1e-6,
     )
+
+
+def test_jax_pure_optax_train_step_logs_update_stats():
+    kwargs = _tiny_mae_kwargs()
+    model = PeakSetJEPAJax(**kwargs)
+    optimizer_config = {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95}
+    graphdef, trainable_params, static_state, opt_state, optimizer = (
+        init_pure_optax_train_state(optimizer_config, model)
+    )
+    pure_train_step = make_pure_accumulated_train_step(
+        graphdef,
+        optimizer,
+        sharded=False,
+        log_update_stats=True,
+    )
+    batch = _jax_batch(_real_pattern_batch("random", num_peaks=3))
+    accumulated_batch = jax.tree.map(lambda value: value[None], batch)
+
+    _trainable_params, _opt_state, metrics = pure_train_step(
+        trainable_params,
+        static_state,
+        opt_state,
+        accumulated_batch,
+    )
+
+    for key in (
+        "param_l2",
+        "param_rms",
+        "grad_l2",
+        "grad_rms",
+        "update_l2",
+        "update_rms",
+        "update_to_param_l2",
+    ):
+        assert key in metrics
+        assert np.isfinite(np.asarray(metrics[key]))
 
 
 @pytest.mark.skipif(
