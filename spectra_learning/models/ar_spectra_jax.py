@@ -23,6 +23,7 @@ from spectra_learning.models.common_jax import (
     resolve_jax_compute_dtype,
     scaled_dot_product_attention,
 )
+from spectra_learning.models.causal_attention_pallas import pallas_causal_attention
 
 
 def _config_get(config: config_dict.ConfigDict, key: str, default: Any) -> Any:
@@ -42,6 +43,7 @@ class SpectraARTransformerJaxConfig:
     rope_base: float = 10_000.0
     attention_kernel: str = "xla"
     splash_block_size: int = 128
+    gelu_approximation: str = "exact"
     compute_dtype: object = jnp.bfloat16
 
     @classmethod
@@ -62,6 +64,9 @@ class SpectraARTransformerJaxConfig:
             rope_base=float(_config_get(config, "ar_rope_base", 10_000.0)),
             attention_kernel=str(_config_get(config, "ar_attention_kernel", "xla")),
             splash_block_size=int(_config_get(config, "ar_splash_block_size", 128)),
+            gelu_approximation=str(
+                _config_get(config, "ar_gelu_approximation", "exact")
+            ),
             compute_dtype=resolve_jax_compute_dtype(
                 str(_config_get(config, "autocast_dtype", "bf16"))
             ),
@@ -99,6 +104,18 @@ class RotaryEmbeddingJax(nnx.Module):
             tensor.shape
         )
 
+    def split_half(self, tensor: Array) -> Array:
+        seq_len = tensor.shape[1]
+        half_dim = tensor.shape[-1] // 2
+        cos = self.cos[:seq_len].astype(jnp.float32)[None, :, None, :]
+        sin = self.sin[:seq_len].astype(jnp.float32)[None, :, None, :]
+        even = tensor[..., :half_dim].astype(jnp.float32)
+        odd = tensor[..., half_dim:].astype(jnp.float32)
+        return jnp.concatenate(
+            (even * cos - odd * sin, even * sin + odd * cos),
+            axis=-1,
+        ).astype(tensor.dtype)
+
 
 class SpectraARCausalSelfAttentionJax(nnx.Module):
     def __init__(
@@ -135,7 +152,24 @@ class SpectraARCausalSelfAttentionJax(nnx.Module):
 
     def __call__(self, hidden: Array) -> Array:
         batch_size, seq_len, model_dim = hidden.shape
-        qkv = self.qkv(hidden).reshape(
+        if self.attention_kernel == "pallas":
+            qkv_weight = pack_qk_projection_rows(
+                self.qkv.weight[...],
+                num_heads=self.num_heads,
+                query_scale=1.0 / math.sqrt(self.head_dim),
+            )
+            qkv = jnp.matmul(
+                hidden.astype(self.qkv.compute_dtype),
+                jnp.swapaxes(
+                    qkv_weight.astype(self.qkv.compute_dtype),
+                    -1,
+                    -2,
+                ),
+                precision=self.qkv.matmul_precision,
+            )
+        else:
+            qkv = self.qkv(hidden)
+        qkv = qkv.reshape(
             batch_size,
             seq_len,
             3,
@@ -143,9 +177,23 @@ class SpectraARCausalSelfAttentionJax(nnx.Module):
             self.head_dim,
         )
         query, key, value = jnp.moveaxis(qkv, 2, 0)
-        query = self.rope(query)
-        key = self.rope(key)
-        if self.attention_kernel == "splash":
+        if self.attention_kernel == "pallas":
+            query = self.rope.split_half(query)
+            key = self.rope.split_half(key)
+            attended = jnp.swapaxes(
+                pallas_causal_attention(
+                    jnp.swapaxes(query, 1, 2),
+                    jnp.swapaxes(key, 1, 2),
+                    jnp.swapaxes(value, 1, 2),
+                    block_size=self.splash_block_size,
+                    query_is_scaled=True,
+                ),
+                1,
+                2,
+            )
+        elif self.attention_kernel == "splash":
+            query = self.rope(query)
+            key = self.rope(key)
             attended = splash_causal_attention(
                 query,
                 key,
@@ -153,6 +201,8 @@ class SpectraARCausalSelfAttentionJax(nnx.Module):
                 block_size=self.splash_block_size,
             )
         else:
+            query = self.rope(query)
+            key = self.rope(key)
             attended = jnp.swapaxes(
                 scaled_dot_product_attention(
                     jnp.swapaxes(query, 1, 2),
@@ -166,6 +216,35 @@ class SpectraARCausalSelfAttentionJax(nnx.Module):
             )
         attended = attended.reshape(batch_size, seq_len, model_dim)
         return self.out_proj(attended)
+
+
+def pack_qk_projection_rows(
+    weight: Array,
+    *,
+    num_heads: int,
+    query_scale: float = 1.0,
+) -> Array:
+    """Store Q/K output rows as split-half RoPE coordinates; leave V unchanged."""
+    output_dim, model_dim = weight.shape
+    head_dim = model_dim // num_heads
+    half_dim = head_dim // 2
+    qkv = weight.reshape(3, num_heads, head_dim, model_dim)
+
+    def pack(rows):
+        pairs = rows.reshape(num_heads, half_dim, 2, model_dim)
+        return jnp.concatenate((pairs[:, :, 0, :], pairs[:, :, 1, :]), axis=1)
+
+    return jnp.stack(
+        (
+            pack(qkv[0]) * jnp.float32(query_scale),
+            pack(qkv[1]),
+            qkv[2],
+        ),
+        axis=0,
+    ).reshape(
+        output_dim,
+        model_dim,
+    )
 
 
 class SpectraARTransformerBlockJax(nnx.Module):
@@ -191,10 +270,19 @@ class SpectraARTransformerBlockJax(nnx.Module):
             compute_dtype=config.compute_dtype,
             rngs=rngs,
         )
+        self.gelu_approximation = config.gelu_approximation
 
     def __call__(self, hidden: Array) -> Array:
         hidden = hidden + self.attention(self.attention_norm(hidden))
-        hidden = hidden + self.ffn1(gelu(self.ffn0(self.ffn_norm(hidden))))
+        ffn_hidden = self.ffn0(self.ffn_norm(hidden))
+        if self.gelu_approximation == "quick":
+            ffn_dtype = ffn_hidden.dtype
+            ffn_hidden = ffn_hidden.astype(jnp.float32)
+            ffn_hidden = ffn_hidden * jax.nn.sigmoid(jnp.float32(1.702) * ffn_hidden)
+            ffn_hidden = ffn_hidden.astype(ffn_dtype)
+        else:
+            ffn_hidden = gelu(ffn_hidden)
+        hidden = hidden + self.ffn1(ffn_hidden)
         return hidden
 
 
@@ -277,12 +365,13 @@ class SpectraARTransformerJax(nnx.Module):
         labels = batch["target_token_ids"].astype(jnp.int32)
         target_kinds = batch["target_token_kinds"].astype(jnp.int32)
         loss_mask = batch["target_loss_mask"].astype(jnp.bool_)
-        log_probs = jax.nn.log_softmax(logits.astype(jnp.float32), axis=-1)
-        token_loss = -jnp.take_along_axis(
-            log_probs,
+        logits_float = logits.astype(jnp.float32)
+        target_logits = jnp.take_along_axis(
+            logits_float,
             labels[..., None],
             axis=-1,
         )[..., 0]
+        token_loss = jax.nn.logsumexp(logits_float, axis=-1) - target_logits
         denominator = jnp.maximum(jnp.sum(loss_mask), 1)
         predictions = jnp.argmax(logits, axis=-1).astype(labels.dtype)
         correct = predictions == labels
@@ -329,6 +418,9 @@ def splash_causal_attention(
     query = _pad_sequence_axis(query, padded_seq_len)
     key = _pad_sequence_axis(key, padded_seq_len)
     value = _pad_sequence_axis(value, padded_seq_len)
+    query = (
+        query.astype(jnp.float32) * jnp.float32(1.0 / math.sqrt(query.shape[-1]))
+    ).astype(query.dtype)
     kernel = _splash_causal_kernel(num_heads, padded_seq_len, block_size)
 
     def apply_one(query_row: Array, key_row: Array, value_row: Array) -> Array:

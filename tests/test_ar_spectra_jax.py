@@ -3,6 +3,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 import torch
 
 import train
@@ -10,10 +11,13 @@ from spectra_learning.data.ar_spectra import SpectraARTokenizer, SpectraARTokeni
 from spectra_learning.data.spectra import DEFAULT_MAX_PRECURSOR_MZ, PEAK_MZ_MAX
 import spectra_learning.models.ar_spectra_jax as ar_spectra_jax
 from spectra_learning.models.ar_spectra_jax import (
+    RotaryEmbeddingJax,
     SpectraARCausalSelfAttentionJax,
     SpectraARTransformerJax,
     SpectraARTransformerJaxConfig,
+    pack_qk_projection_rows,
 )
+from spectra_learning.models.causal_attention_pallas import pallas_causal_attention
 from spectra_learning.models.common_jax import scaled_dot_product_attention
 
 
@@ -54,6 +58,111 @@ def test_jax_scaled_dot_product_attention_matches_manual_causal_attention() -> N
     expected = jnp.einsum("...qk,...kd->...qd", jax.nn.softmax(scores, axis=-1), v)
 
     np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), atol=1e-5)
+
+
+def test_packed_qk_projection_matches_interleaved_rope_coordinates() -> None:
+    model_dim = 16
+    num_heads = 2
+    head_dim = model_dim // num_heads
+    hidden = jax.random.normal(jax.random.key(1), (2, 5, model_dim))
+    weight = jax.random.normal(jax.random.key(2), (3 * model_dim, model_dim))
+    query_scale = 0.5
+    projected = jnp.matmul(hidden, weight.T).reshape(
+        2,
+        5,
+        3,
+        num_heads,
+        head_dim,
+    )
+    packed_projected = jnp.matmul(
+        hidden,
+        pack_qk_projection_rows(
+            weight,
+            num_heads=num_heads,
+            query_scale=query_scale,
+        ).T,
+    ).reshape(2, 5, 3, num_heads, head_dim)
+    rope = RotaryEmbeddingJax(head_dim, 5, base=10_000.0)
+
+    for index, scale in ((0, query_scale), (1, 1.0)):
+        interleaved = rope(projected[:, :, index] * scale)
+        expected_split = jnp.concatenate(
+            (interleaved[..., 0::2], interleaved[..., 1::2]),
+            axis=-1,
+        )
+        actual_split = rope.split_half(packed_projected[:, :, index])
+        np.testing.assert_allclose(
+            np.asarray(actual_split),
+            np.asarray(expected_split),
+            atol=2e-5,
+            rtol=2e-5,
+        )
+    np.testing.assert_allclose(
+        np.asarray(packed_projected[:, :, 2]),
+        np.asarray(projected[:, :, 2]),
+        atol=2e-5,
+        rtol=2e-5,
+    )
+
+
+@pytest.mark.skipif(jax.default_backend() != "tpu", reason="Pallas TPU kernel")
+@pytest.mark.parametrize("sequence_length", (128, 136))
+def test_pallas_causal_attention_forward_and_backward_match_xla(
+    sequence_length: int,
+) -> None:
+    shape = (1, 8, sequence_length, 128)
+    query, key, value, output_gradient = (
+        jax.random.normal(subkey, shape, dtype=jnp.bfloat16)
+        for subkey in jax.random.split(jax.random.key(3), 4)
+    )
+
+    def loss(attention, query, key, value):
+        output = attention(query, key, value)
+        objective = jnp.sum(
+            output.astype(jnp.float32) * output_gradient.astype(jnp.float32)
+        )
+        return objective, output
+
+    pallas_fn = jax.jit(
+        jax.value_and_grad(
+            lambda q, k, v: loss(pallas_causal_attention, q, k, v),
+            argnums=(0, 1, 2),
+            has_aux=True,
+        )
+    )
+    xla_fn = jax.jit(
+        jax.value_and_grad(
+            lambda q, k, v: loss(
+                lambda query, key, value: scaled_dot_product_attention(
+                    query,
+                    key,
+                    value,
+                    is_causal=True,
+                ),
+                q,
+                k,
+                v,
+            ),
+            argnums=(0, 1, 2),
+            has_aux=True,
+        )
+    )
+    (_pallas_loss, pallas_output), pallas_grads = pallas_fn(query, key, value)
+    (_xla_loss, xla_output), xla_grads = xla_fn(query, key, value)
+
+    for actual, expected in zip(
+        (pallas_output, *pallas_grads),
+        (xla_output, *xla_grads),
+        strict=True,
+    ):
+        actual_np = np.asarray(actual, dtype=np.float32)
+        assert np.isfinite(actual_np).all()
+        np.testing.assert_allclose(
+            actual_np,
+            np.asarray(expected, dtype=np.float32),
+            atol=4e-2,
+            rtol=3e-2,
+        )
 
 
 def test_jax_ar_splash_attention_flattens_sequence_before_heads(monkeypatch) -> None:
