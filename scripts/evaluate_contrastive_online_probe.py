@@ -22,7 +22,8 @@ from spectra_learning.data.spectra import (
 )
 from spectra_learning.data.massspec_probe import MassSpecProbeData
 from spectra_learning.data.massspec_targets import MACCS_FINGERPRINT_BITS
-from spectra_learning.training.api import load_config, parse_autocast_dtype
+from spectra_learning.config import load_config
+from spectra_learning.training.api import parse_autocast_dtype
 from spectra_learning.training.checkpointing import (
     load_resume_covariance_pooler_state,
     load_resume_model_state,
@@ -116,9 +117,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> dict[str, float]:
     args = parse_args(argv)
-    config = load_config(args.config)
-    config.update(json.loads(args.overrides_json))
-    config.training_mode = "contrastive"
+    config = load_config(
+        args.config,
+        {**json.loads(args.overrides_json), "training_mode": "contrastive"},
+    )
 
     probe_data = MassSpecProbeData.from_config(config)
     module = build_contrastive_module(

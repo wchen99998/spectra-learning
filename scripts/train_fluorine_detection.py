@@ -37,9 +37,15 @@ def parse_args() -> argparse.Namespace:
         choices=("probe", "finetune", "lora"),
         default="probe",
     )
-    parser.add_argument("--config", type=Path, default=Path("configs/wandb_pa645zxs_small.py"))
+    parser.add_argument(
+        "--backend",
+        choices=("auto", "torch", "jax"),
+        default="auto",
+    )
+    parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--workdir", default=None)
     parser.add_argument("--checkpoint", default=None)
+    parser.add_argument("--jax-checkpoint-step", type=int, default=None)
     parser.add_argument(
         "--pooling",
         choices=("covariance", "single_pair_covariance"),

@@ -10,7 +10,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from spectra_learning.config.loading import load_config
+from spectra_learning.config import load_config
 from spectra_learning.data.gems.datamodule import GemsDataModule
 
 
@@ -21,20 +21,23 @@ def _config_get(config: Any, key: str, default: Any) -> Any:
 
 
 def _configure(args: argparse.Namespace, workers: int):
-    config = load_config(args.config)
-    config.dataloader_num_workers = workers
-    config.dataloader_prefetch_factor = args.prefetch_factor
-    config.dataloader_persistent_workers = workers > 0
-    config.peak_filtering = args.peak_filtering
-    config.grouped_peak_shoulder_da = args.grouped_peak_shoulder_da
-    config.grouped_peak_isotope_charges = tuple(args.grouped_peak_isotope_charges)
-    config.dataloader_output_format = "numpy" if args.backend in {"jax", "numpy"} else "torch"
+    overrides = {
+        "dataloader_num_workers": workers,
+        "dataloader_prefetch_factor": args.prefetch_factor,
+        "dataloader_persistent_workers": workers > 0,
+        "peak_filtering": args.peak_filtering,
+        "grouped_peak_shoulder_da": args.grouped_peak_shoulder_da,
+        "grouped_peak_isotope_charges": tuple(args.grouped_peak_isotope_charges),
+        "dataloader_output_format": (
+            "numpy" if args.backend in {"jax", "numpy"} else "torch"
+        ),
+    }
     if workers > 0:
-        config.dataloader_multiprocessing_context = args.multiprocessing_context
+        overrides["dataloader_multiprocessing_context"] = args.multiprocessing_context
     if args.backend == "jax":
-        config.dataloader_pin_memory = False
-        config.dataloader_persistent_workers = False
-    return config
+        overrides["dataloader_pin_memory"] = False
+        overrides["dataloader_persistent_workers"] = False
+    return load_config(args.config, overrides)
 
 
 def _consume_torch(batch: dict[str, Any]) -> None:

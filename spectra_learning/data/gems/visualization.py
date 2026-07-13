@@ -99,7 +99,7 @@ def _load_real_mask_visualization_batches(
     dict[str, dict[str, torch.Tensor]],
     list[int],
 ]:
-    from spectra_learning.training.api import load_config
+    from spectra_learning.config import load_config
 
     config = load_config(Path(config_path).expanduser().resolve())
     datamodule = GemsDataModule(config, seed=seed)

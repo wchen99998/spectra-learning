@@ -17,13 +17,15 @@ from typing import Any
 
 import yaml
 
-from spectra_learning.config import load_config
+from spectra_learning.config import config_to_dict, load_config
 from spectra_learning.training.jax_runtime_flags import jax_tpu_xla_flags_string
 
 
 REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_PROJECT = "metal-repeater-411410"
-DEFAULT_INFRA = "gcp/us-east5"
+DEFAULT_REGION = "us-south1"
+DEFAULT_INFRA = f"gcp/{DEFAULT_REGION}"
+DEFAULT_GCP_IMAGE_REGION = "us-east5"
 DEFAULT_TASK_NAME = "spectra-v6e-mig-dws"
 DEFAULT_VM_IMAGE_ID = (
     "projects/ubuntu-os-accelerator-images/global/images/"
@@ -32,6 +34,7 @@ DEFAULT_VM_IMAGE_ID = (
 DEFAULT_PYTHON_VERSION = "3.12.11"
 DEFAULT_SKY_BIN = "/home/wuhao/skypilot/.venv/bin/sky"
 CT6E_TOPOLOGY_BY_CHIPS = {
+    4: "2x2",
     8: "2x4",
     16: "4x4",
     32: "4x8",
@@ -51,7 +54,7 @@ CT6E_INSTANCE_TYPES_BY_CHIPS_PER_NODE = {
 DEFAULT_DWS_RUN_DURATION_SECONDS = 604800
 MIN_DWS_RUN_DURATION_SECONDS = 600
 MAX_DWS_RUN_DURATION_SECONDS = 604800
-DEFAULT_PROVISION_TIMEOUT_SECONDS = 3600
+DEFAULT_PROVISION_TIMEOUT_SECONDS = 900
 MAX_SKY_JOB_NAME_LENGTH = 63
 DWS_FLEX_START_FIX_PR = "https://github.com/skypilot-org/skypilot/pull/9608"
 TASK_SETUP = """\
@@ -90,9 +93,8 @@ set -euo pipefail
 : "${SPECTRA_CONFIG:?SPECTRA_CONFIG must be set}"
 : "${SPECTRA_WORKDIR:?SPECTRA_WORKDIR must be set}"
 : "${SPECTRA_RUN_ID:?SPECTRA_RUN_ID must be set}"
-: "${SPECTRA_TRAINING_MAX_STEPS:?SPECTRA_TRAINING_MAX_STEPS must be set}"
 : "${SPECTRA_JAX_CACHE_DIR:?SPECTRA_JAX_CACHE_DIR must be set}"
-: "${SPECTRA_TRAIN_OVERRIDES_JSON:?SPECTRA_TRAIN_OVERRIDES_JSON must be set}"
+: "${SPECTRA_CONFIG_JSON:?SPECTRA_CONFIG_JSON must be set}"
 : "${HF_TOKEN:?HF_TOKEN must be set via --secret}"
 : "${WANDB_API_KEY:?WANDB_API_KEY must be set via --secret}"
 export HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-${HF_TOKEN}}"
@@ -129,16 +131,13 @@ export TPU_PROCESS_PORT=8471
 export TF_CPP_MIN_LOG_LEVEL=0
 
 METRICS_JSON="${SPECTRA_WORKDIR%/}/${SPECTRA_METRICS_JSON#/}"
-OVERRIDES_JSON="$(.venv/bin/python - <<'PY'
+CONFIG_JSON="$(.venv/bin/python - <<'PY'
 import json
 import os
 
-overrides = json.loads(os.environ["SPECTRA_TRAIN_OVERRIDES_JSON"])
-overrides["jax_compilation_cache_dir"] = os.environ["JAX_CACHE_DIR"]
-overrides["jax_enable_compilation_cache"] = True
-overrides["jax_persistent_cache_min_compile_time_secs"] = 0.0
-overrides["jax_persistent_cache_min_entry_size_bytes"] = 0
-print(json.dumps(overrides, sort_keys=True, separators=(",", ":")))
+config = json.loads(os.environ["SPECTRA_CONFIG_JSON"])
+config["jax_compilation_cache_dir"] = os.environ["JAX_CACHE_DIR"]
+print(json.dumps(config, sort_keys=True, separators=(",", ":")))
 PY
 )"
 
@@ -151,8 +150,7 @@ echo "JAX compilation cache ${JAX_COMPILATION_CACHE_DIR}"
 .venv/bin/python train.py \\
   --config "${SPECTRA_CONFIG}" \\
   --workdir "${SPECTRA_WORKDIR}" \\
-  --training-max-steps "${SPECTRA_TRAINING_MAX_STEPS}" \\
-  --overrides-json "${OVERRIDES_JSON}" \\
+  --overrides-json "${CONFIG_JSON}" \\
   --metrics-json "${METRICS_JSON}"
 """
 
@@ -169,21 +167,6 @@ def _literal_string_representer(
 
 
 yaml.SafeDumper.add_representer(LiteralString, _literal_string_representer)
-
-
-@dataclass(frozen=True)
-class ConfigDefaults:
-    batch_size: int
-    gradient_accumulation_steps: int
-    training_max_steps: int
-    checkpoint_every_steps: int
-    log_every_n_steps: int
-    throughput_warmup_steps: int
-    dataloader_num_workers: int
-    msg_probe_every_n_steps: float
-    msg_probe_at_final_step: bool
-    val_every_n_steps: float
-    val_num_steps: int
 
 
 @dataclass(frozen=True)
@@ -272,22 +255,12 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
         help="SkyPilot managed job name. Defaults to a run-specific name.",
     )
     parser.add_argument("--run-id", default="")
-    parser.add_argument("--training-max-steps", type=int, default=None)
-    parser.add_argument("--batch-size", type=int, default=None)
-    parser.add_argument("--gradient-accumulation-steps", type=int, default=None)
-    parser.add_argument("--jax-mesh-devices", default="")
-    parser.add_argument("--msg-probe-every-n-steps", type=float, default=None)
     parser.add_argument(
-        "--msg-probe-at-final-step",
-        action=argparse.BooleanOptionalAction,
-        default=None,
+        "--override",
+        action="append",
+        default=[],
+        help="Top-level config override as KEY=JSON_VALUE. May be repeated.",
     )
-    parser.add_argument("--val-every-n-steps", type=float, default=None)
-    parser.add_argument("--val-num-steps", type=int, default=None)
-    parser.add_argument("--checkpoint-every-steps", type=int, default=None)
-    parser.add_argument("--log-every-n-steps", type=int, default=None)
-    parser.add_argument("--throughput-warmup-steps", type=int, default=None)
-    parser.add_argument("--dataloader-num-workers", type=int, default=None)
     parser.add_argument("--jax-cache-dir", default="")
     parser.add_argument("--yes", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--dry-run", "--dryrun", dest="dry_run", action="store_true")
@@ -310,14 +283,28 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
     parser.add_argument("--cpus", default="")
     parser.add_argument("--memory", default="")
     parser.add_argument("--project", default=DEFAULT_PROJECT)
-    parser.add_argument("--infra", default=DEFAULT_INFRA)
+    parser.add_argument(
+        "--region",
+        default="",
+        help=(
+            "GCP region for SkyPilot resources. Defaults to us-south1. "
+            "Equivalent to --infra gcp/<region>."
+        ),
+    )
+    parser.add_argument("--infra", default="")
     parser.add_argument("--metrics-json", default="metrics/final.json")
     parser.add_argument("--queue-tag", default="flex-start")
     parser.add_argument(
         "--provision-timeout-seconds",
-        type=int,
+        "--dws-provision-timeout",
+        "--flex-start-provision-timeout",
+        dest="provision_timeout_seconds",
+        type=parse_duration_seconds,
         default=DEFAULT_PROVISION_TIMEOUT_SECONDS,
-        help="SkyPilot GCP DWS provisioning timeout in seconds.",
+        help=(
+            "SkyPilot GCP DWS provisioning wait. Defaults to 15 minutes. "
+            "Accepts seconds or s/m/h/d suffixes."
+        ),
     )
     parser.add_argument(
         "--dws-run-duration",
@@ -337,9 +324,45 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
         parser.error("--config cannot be empty")
     if not args.workdir.strip():
         parser.error("--workdir cannot be empty")
+    args.region, args.infra = resolve_region_and_infra(
+        region=args.region,
+        infra=args.infra,
+        parser=parser,
+    )
     if sky_args and sky_args[0] == "--":
         sky_args = sky_args[1:]
     return args, sky_args
+
+
+def resolve_region_and_infra(
+    *,
+    region: str,
+    infra: str,
+    parser: argparse.ArgumentParser,
+) -> tuple[str, str]:
+    raw_region = region.strip()
+    region = normalize_gcp_region(raw_region) if raw_region else ""
+    if raw_region and not region:
+        parser.error("--region cannot be empty")
+    infra = infra.strip()
+    if not region and not infra:
+        return DEFAULT_REGION, DEFAULT_INFRA
+    if region and not infra:
+        return region, f"gcp/{region}"
+    if not region:
+        return gcp_image_region_from_infra(infra), infra
+    expected_infra = f"gcp/{region}"
+    if infra != expected_infra:
+        parser.error(f"--region {region} conflicts with --infra {infra}")
+    return region, infra
+
+
+def normalize_gcp_region(region: str) -> str:
+    region = region.strip()
+    prefix = "gcp/"
+    if region.startswith(prefix):
+        region = region[len(prefix) :].strip()
+    return region
 
 
 def resolve_topology(
@@ -446,61 +469,29 @@ def json_compact(payload: dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
+def parse_config_overrides(items: list[str]) -> dict[str, Any]:
+    overrides: dict[str, Any] = {}
+    for item in items:
+        key, value = item.split("=", 1)
+        overrides[key] = json.loads(value)
+    return overrides
+
+
 def config_slug(config_path: str) -> str:
     return name_slug(Path(config_path).stem)
-
-
-def load_config_defaults(config_path: str) -> ConfigDefaults:
-    cfg = load_config(config_path)
-    training_max_steps = int(getattr(cfg, "training_max_steps"))
-    return ConfigDefaults(
-        batch_size=int(getattr(cfg, "batch_size")),
-        gradient_accumulation_steps=int(getattr(cfg, "gradient_accumulation_steps", 1)),
-        training_max_steps=training_max_steps,
-        checkpoint_every_steps=int(getattr(cfg, "checkpoint_every_steps", training_max_steps)),
-        log_every_n_steps=int(getattr(cfg, "log_every_n_steps", 250)),
-        throughput_warmup_steps=int(getattr(cfg, "throughput_warmup_steps", 25)),
-        dataloader_num_workers=int(getattr(cfg, "dataloader_num_workers", 0)),
-        msg_probe_every_n_steps=float(getattr(cfg, "msg_probe_every_n_steps", 0.0)),
-        msg_probe_at_final_step=bool(getattr(cfg, "msg_probe_at_final_step", False)),
-        val_every_n_steps=float(getattr(cfg, "val_every_n_steps", 0.0)),
-        val_num_steps=int(getattr(cfg, "val_num_steps", 64)),
-    )
 
 
 def build_train_overrides(
     *,
     run_id: str,
-    training_max_steps: int,
     jax_mesh_devices: str,
-    batch_size: int,
-    gradient_accumulation_steps: int,
     jax_cache_dir: str,
-    msg_probe_every_n_steps: float,
-    msg_probe_at_final_step: bool,
-    val_every_n_steps: float,
-    val_num_steps: int,
-    checkpoint_every_steps: int,
-    log_every_n_steps: int,
-    throughput_warmup_steps: int,
-    dataloader_num_workers: int,
     queue_tag: str,
     experiment_tag: str,
 ) -> dict[str, Any]:
     return {
-        "training_max_steps": int(training_max_steps),
-        "msg_probe_every_n_steps": msg_probe_every_n_steps,
-        "msg_probe_at_final_step": bool(msg_probe_at_final_step),
-        "val_every_n_steps": val_every_n_steps,
-        "val_num_steps": int(val_num_steps),
-        "checkpoint_every_steps": int(checkpoint_every_steps),
-        "log_every_n_steps": int(log_every_n_steps),
-        "throughput_warmup_steps": int(throughput_warmup_steps),
-        "dataloader_num_workers": int(dataloader_num_workers),
         "jax_distributed_initialize": True,
         "jax_mesh_devices": str(jax_mesh_devices),
-        "batch_size": int(batch_size),
-        "gradient_accumulation_steps": int(gradient_accumulation_steps),
         "jax_compilation_cache_dir": jax_cache_dir,
         "jax_enable_compilation_cache": True,
         "jax_persistent_cache_min_compile_time_secs": 0.0,
@@ -534,10 +525,13 @@ def build_task(
     cpus: str = "",
     memory: str = "",
     dws_run_duration_seconds: int = DEFAULT_DWS_RUN_DURATION_SECONDS,
-    provision_timeout_seconds: int = DEFAULT_PROVISION_TIMEOUT_SECONDS,
+    provision_timeout_seconds: int | None = None,
 ) -> dict[str, Any]:
+    if provision_timeout_seconds is None:
+        provision_timeout_seconds = DEFAULT_PROVISION_TIMEOUT_SECONDS
+    image_region = gcp_image_region_from_infra(infra)
     image_id: dict[str, str] = {
-        "us-east5": vm_image_id,
+        image_region: vm_image_id,
     }
     resources: dict[str, Any] = {
         "infra": infra,
@@ -558,6 +552,7 @@ def build_task(
         "run": LiteralString(TASK_RUN),
         "config": {
             "gcp": {
+                "remote_identity": "SERVICE_ACCOUNT",
                 "managed_instance_group": {
                     "run_duration": int(dws_run_duration_seconds),
                     "provision_timeout": int(provision_timeout_seconds),
@@ -568,6 +563,13 @@ def build_task(
         },
     }
     return task
+
+
+def gcp_image_region_from_infra(infra: str) -> str:
+    prefix = "gcp/"
+    if infra.startswith(prefix) and infra[len(prefix) :].strip():
+        return infra[len(prefix) :].strip()
+    return DEFAULT_GCP_IMAGE_REGION
 
 
 def run_command(
@@ -599,7 +601,7 @@ def print_dry_run_assets(
     *,
     task_path: Path,
     task: dict[str, Any],
-    train_overrides_json: str,
+    config_json: str,
     launch_command: list[str],
     logs_command: list[str] | None,
 ) -> None:
@@ -609,8 +611,8 @@ def print_dry_run_assets(
     print("===== SkyPilot Task YAML =====")
     print(render_task_yaml(task).rstrip())
     print()
-    print("===== Train Overrides JSON =====")
-    print(train_overrides_json)
+    print("===== Resolved Config JSON =====")
+    print(config_json)
     print()
     print("===== SkyPilot Launch Command =====")
     print(shlex.join(launch_command))
@@ -681,54 +683,10 @@ def main(argv: list[str] | None = None) -> None:
         chips_per_node=args.chips_per_node,
         instance_type=args.instance_type,
     )
-    config_defaults = load_config_defaults(args.config)
-    training_max_steps = args.training_max_steps or config_defaults.training_max_steps
-    batch_size = args.batch_size or config_defaults.batch_size
-    grad_accum = (
-        args.gradient_accumulation_steps
-        or config_defaults.gradient_accumulation_steps
-    )
-    jax_mesh_devices = args.jax_mesh_devices or topology.jax_mesh_devices
-    checkpoint_every_steps = (
-        args.checkpoint_every_steps
-        if args.checkpoint_every_steps is not None
-        else config_defaults.checkpoint_every_steps
-    )
-    msg_probe_every_n_steps = (
-        args.msg_probe_every_n_steps
-        if args.msg_probe_every_n_steps is not None
-        else config_defaults.msg_probe_every_n_steps
-    )
-    msg_probe_at_final_step = (
-        args.msg_probe_at_final_step
-        if args.msg_probe_at_final_step is not None
-        else config_defaults.msg_probe_at_final_step
-    )
-    val_every_n_steps = (
-        args.val_every_n_steps
-        if args.val_every_n_steps is not None
-        else config_defaults.val_every_n_steps
-    )
-    val_num_steps = (
-        args.val_num_steps
-        if args.val_num_steps is not None
-        else config_defaults.val_num_steps
-    )
-    log_every_n_steps = (
-        args.log_every_n_steps
-        if args.log_every_n_steps is not None
-        else config_defaults.log_every_n_steps
-    )
-    throughput_warmup_steps = (
-        args.throughput_warmup_steps
-        if args.throughput_warmup_steps is not None
-        else config_defaults.throughput_warmup_steps
-    )
-    dataloader_num_workers = (
-        args.dataloader_num_workers
-        if args.dataloader_num_workers is not None
-        else config_defaults.dataloader_num_workers
-    )
+    user_overrides = parse_config_overrides(args.override)
+    config = load_config(args.config, user_overrides)
+    batch_size = int(config.batch_size)
+    grad_accum = int(config.gradient_accumulation_steps)
     experiment_slug = config_slug(args.config)
     experiment_tag = experiment_slug.replace("-", "_")
     run_id = args.run_id or (
@@ -738,6 +696,16 @@ def main(argv: list[str] | None = None) -> None:
     job_name = args.job_name or default_job_name(run_id)
     cache_key = f"{experiment_tag}_{topology.slug}_b{batch_size}_accum{grad_accum}"
     jax_cache_dir = args.jax_cache_dir or f"/tmp/spectra-jax-cache/{cache_key}"
+    overrides = build_train_overrides(
+        run_id=run_id,
+        jax_mesh_devices=topology.jax_mesh_devices,
+        jax_cache_dir=jax_cache_dir,
+        queue_tag=args.queue_tag,
+        experiment_tag=experiment_tag,
+    )
+    overrides.update(user_overrides)
+    config = load_config(args.config, overrides)
+    config_json = json_compact(config_to_dict(config))
 
     logging.info(
         "Topology: topology=%s hosts=%d chips=%d instance_type=%s",
@@ -755,10 +723,10 @@ def main(argv: list[str] | None = None) -> None:
     )
     logging.info(
         "Training shape: mesh=%s batch=%d grad_accum=%d steps=%d",
-        jax_mesh_devices,
-        batch_size,
-        grad_accum,
-        training_max_steps,
+        config.jax_mesh_devices,
+        config.batch_size,
+        config.gradient_accumulation_steps,
+        config.training_max_steps,
     )
     logging.info("Run ID: %s", run_id)
     logging.info("Workdir: %s", workdir)
@@ -777,33 +745,13 @@ def main(argv: list[str] | None = None) -> None:
         launch_env["WANDB_API_KEY"] = wandb_key
         logging.info("Loaded HF_TOKEN and WANDB_API_KEY for SkyPilot secrets.")
 
-    train_overrides = build_train_overrides(
-        run_id=run_id,
-        training_max_steps=training_max_steps,
-        jax_mesh_devices=str(jax_mesh_devices),
-        batch_size=batch_size,
-        gradient_accumulation_steps=grad_accum,
-        jax_cache_dir=jax_cache_dir,
-        msg_probe_every_n_steps=msg_probe_every_n_steps,
-        msg_probe_at_final_step=msg_probe_at_final_step,
-        val_every_n_steps=val_every_n_steps,
-        val_num_steps=val_num_steps,
-        checkpoint_every_steps=checkpoint_every_steps,
-        log_every_n_steps=log_every_n_steps,
-        throughput_warmup_steps=throughput_warmup_steps,
-        dataloader_num_workers=dataloader_num_workers,
-        queue_tag=args.queue_tag,
-        experiment_tag=experiment_tag,
-    )
-    train_overrides_json = json_compact(train_overrides)
     task_envs = {
         "SPECTRA_CONFIG": args.config,
         "SPECTRA_RUN_ID": run_id,
         "SPECTRA_WORKDIR": workdir,
-        "SPECTRA_TRAINING_MAX_STEPS": str(training_max_steps),
         "SPECTRA_METRICS_JSON": args.metrics_json,
         "SPECTRA_JAX_CACHE_DIR": jax_cache_dir,
-        "SPECTRA_TRAIN_OVERRIDES_JSON": train_overrides_json,
+        "SPECTRA_CONFIG_JSON": config_json,
         "JAX_INITIALIZATION_TIMEOUT": "3600",
         "LIBTPU_INIT_ARGS": jax_tpu_xla_flags_string(),
         "HF_HOME": "/tmp/huggingface",
@@ -854,7 +802,7 @@ def main(argv: list[str] | None = None) -> None:
         print_dry_run_assets(
             task_path=task_path,
             task=task,
-            train_overrides_json=train_overrides_json,
+            config_json=config_json,
             launch_command=launch_cmd,
             logs_command=logs_cmd,
         )

@@ -52,6 +52,7 @@ from spectra_learning.training.checkpointing import (
     save_torch_checkpoint,
     training_checkpoint_paths,
 )
+from spectra_learning.training.configuration import save_config
 from spectra_learning.training.distributed import (
     DistributedContext,
     barrier,
@@ -1525,6 +1526,8 @@ def train_contrastive(
     config: config_dict.ConfigDict,
     workdir: str | Path,
 ) -> dict[str, object]:
+    if str(config.training_mode).lower() != "contrastive":
+        raise ValueError("contrastive training requires training_mode='contrastive'")
     distributed = init_distributed_from_env()
     workdir = normalize_storage_path(workdir)
     local_workdir = local_scratch_dir(workdir)
@@ -1534,7 +1537,8 @@ def train_contrastive(
     barrier(distributed)
     torch.manual_seed(int(config.seed))
     np.random.seed(int(config.seed))
-    config.training_mode = "contrastive"
+    if distributed.is_main:
+        save_config(config, workdir)
 
     probe_data = MassSpecProbeData.from_config(
         config,

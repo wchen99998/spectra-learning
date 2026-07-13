@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from spectra_learning.config.loading import load_config
+from spectra_learning.config import load_config
 from spectra_learning.probes.massspec.checkpoint_probe import (
     DEFAULT_STANDALONE_WANDB_PROJECT,
     run_checkpoint_msg_probe,
@@ -50,8 +50,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> dict[str, object]:
     args = parse_args(argv)
-    config = load_config(args.config)
-    config.update(json.loads(args.overrides_json))
+    config = load_config(args.config, json.loads(args.overrides_json))
 
     global_step = args.global_step
     if global_step is None:

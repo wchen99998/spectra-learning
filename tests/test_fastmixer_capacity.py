@@ -4,10 +4,7 @@ import jax.numpy as jnp
 from flax import nnx
 from ml_collections import config_dict
 
-from configs.medium_pairmixer_100m_20m_mae_beta_isoflops_adamw import (
-    get_config as get_adamw_config,
-)
-from configs.medium_pairmixer_100m_20m_mae_beta_isoflops_muon import get_config
+from spectra_learning.config import load_config
 from spectra_learning.models.fastmixer_capacity import (
     pairmixer_fast_mae_encoder_visible_tokens,
     pairmixer_fast_full_visible_tokens,
@@ -21,33 +18,27 @@ from spectra_learning.probes.massspec.msg_probe_jax import (
 )
 
 
-def test_muon_config_auto_fastmixer_capacity_matches_mask_pipeline():
+def get_config():
+    return load_config("configs/100m_pairmixer_dense_adamw.py")
+
+
+def test_current_config_auto_fastmixer_capacity_matches_mask_pipeline():
     cfg = get_config()
 
     assert "pairmixer_fast_max_visible_tokens" not in cfg
-    assert pairmixer_fast_mae_encoder_visible_tokens(cfg) == 12
-    assert pairmixer_fast_mae_visible_tokens(cfg) == 20
-    assert pairmixer_fast_full_visible_tokens(cfg) == 32
-    settings = PeakSetJEPASettings.from_config(cfg)
-    assert settings.pairmixer_fast_encoder_max_visible_tokens == 12
-    assert settings.pairmixer_fast_max_visible_tokens == 20
-
-
-def test_adamw_config_uses_fastest_e2e_encoder_and_predictor_caps():
-    cfg = get_adamw_config()
-
     assert pairmixer_fast_mae_encoder_visible_tokens(cfg) == 17
-    assert pairmixer_fast_mae_visible_tokens(cfg) == 29
+    assert pairmixer_fast_mae_visible_tokens(cfg) == 41
+    assert pairmixer_fast_full_visible_tokens(cfg) == 48
     settings = PeakSetJEPASettings.from_config(cfg)
     assert settings.pairmixer_fast_encoder_max_visible_tokens == 17
-    assert settings.pairmixer_fast_max_visible_tokens == 29
+    assert settings.pairmixer_fast_max_visible_tokens == 41
 
 
 def test_fastmixer_dense_auto_capacity_matches_fastmixer():
     cfg = get_config()
     cfg.pairmixer_block_type = "FastMixer-Dense"
 
-    assert PeakSetJEPASettings.from_config(cfg).pairmixer_fast_max_visible_tokens == 20
+    assert PeakSetJEPASettings.from_config(cfg).pairmixer_fast_max_visible_tokens == 41
 
 
 def test_fastmixer_capacity_rejects_explicit_config_cap():
@@ -70,8 +61,8 @@ def test_intensity_aware_auto_capacity_falls_back_to_full_visible():
     cfg = get_config()
     cfg.jepa_mask_strategy = ["intensity_aware"]
 
-    assert pairmixer_fast_mae_visible_tokens(cfg) == 32
-    assert PeakSetJEPASettings.from_config(cfg).pairmixer_fast_max_visible_tokens == 32
+    assert pairmixer_fast_mae_visible_tokens(cfg) == 48
+    assert PeakSetJEPASettings.from_config(cfg).pairmixer_fast_max_visible_tokens == 48
 
 
 def test_active_indices_clamps_over_cap_to_sequence_length():

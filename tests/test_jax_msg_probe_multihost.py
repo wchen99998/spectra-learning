@@ -128,11 +128,14 @@ def test_msg_probe_jax_runs_with_simulated_multihost_sharded_batches() -> None:
         cfg.peak_ordering = "mz"
         cfg.msg_probe_batch_size = 4
 
+        class FakeModel:
+            use_fastmixer = False
+
         data_mesh = Mesh(np.asarray(jax.devices()), ("data",))
         with jax.set_mesh(data_mesh):
             metrics = msg_probe_jax.run_msg_probe_jax(
                 config=cfg,
-                model=object(),
+                model=FakeModel(),
                 data_mesh=data_mesh,
             )
         print(

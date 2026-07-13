@@ -39,7 +39,7 @@ Use one SLURM task per node, and let that task launch one `torchrun` worker per
 GPU on the node:
 
 ```bash
-CONFIG=configs/wandb_pa645zxs_small.py \
+CONFIG=configs/100m_pairmixer_dense_adamw.py \
 WORKDIR=/path/to/experiments/run_name \
 srun --ntasks-per-node=1 --gpus-per-node=8 --cpus-per-task=64 --kill-on-bad-exit=1 \
     scripts/srun_torchrun_train.sh
@@ -55,30 +55,30 @@ directly, and JAX compiles the train, eval, and MSG-probe functions on their
 first real call inside the TPU allocation.
 
 The SkyPilot task still enables JAX's normal persistent compilation cache under
-`/tmp/spectra-jax-cache/$CACHE_KEY` inside each pod. That cache is local to the
+`/tmp/spectra-jax-cache/$CACHE_KEY` inside each VM. That cache is local to the
 job and is not hydrated from or uploaded to GCS by the launcher. Old local
 compile-cache outputs are stale experiment artifacts and are no longer consumed
 by the current training path.
 
-## SkyPilot GKE TPU Validation
+## SkyPilot GCP DWS TPU Launch
 
-Use the local SkyPilot client to submit this task to GKE. Do not deploy
-SkyPilot itself as a service on the training cluster for this workflow; the
-cluster should run only the workload pods that SkyPilot creates. Local SkyPilot
-keeps kube context selection, Kueue/DWS submission, secret injection, log
-streaming, and teardown in the operator environment while the pods use the
-cluster's Workload Identity service account for checkpoint bucket access.
+Use the vendored SkyPilot client to submit this task directly to GCP. This
+launcher does not target a GKE cluster, Kueue queue, or Kubernetes
+ProvisioningRequest. Local SkyPilot handles direct GCP provisioning, secret
+injection, workdir sync, managed-job log streaming, and managed-job lifecycle
+cleanup.
 
 `train_sky.py` generates the SkyPilot YAML under `tmp/skypilot_tasks/` from the
-explicit config, workdir, topology, and training overrides. Do not maintain a
-separate checked-in SkyPilot task YAML for this run; that creates a second
-source of truth for batch size, mesh size, probe cadence, and cache settings.
+explicit config, workdir, topology, and optional `--override KEY=JSON_VALUE`
+arguments. Training values live in the experiment config; the launcher only
+adds infrastructure settings such as the TPU mesh and JAX cache. Do not
+maintain a separate checked-in SkyPilot task YAML for a run.
 
 Launch it from this repository with an explicit config and workdir:
 
 ```bash
-CONFIG=configs/medium_pairmixer_100m_20m_mae_beta_isoflops_muon.py
-RUN_ID=100m-muon-v6e4x4-b2048-accum4-$(date -u +%Y%m%d-%H%M%S)
+CONFIG=configs/300m_pairmixer_dense_adamw.py
+RUN_ID=300m-adamw-v6e4x8-b2048-accum4-$(date -u +%Y%m%d-%H%M%S)
 WORKDIR=gs://metal-repeater-411410-spectra-checkpoints/skypilot/${RUN_ID}
 
 .venv/bin/python train_sky.py \
@@ -87,85 +87,101 @@ WORKDIR=gs://metal-repeater-411410-spectra-checkpoints/skypilot/${RUN_ID}
     --workdir "${WORKDIR}"
 ```
 
-Inspect the generated SkyPilot YAML, training override JSON, and `sky launch`
-command without checking secrets or launching:
+Inspect the generated SkyPilot YAML, resolved config JSON, `sky jobs launch`
+command, and `sky jobs logs` command without checking secrets or launching:
 
 ```bash
 .venv/bin/python train_sky.py \
     --dryrun \
+    --chips 64 \
     --run-id "${RUN_ID}" \
     --config "${CONFIG}" \
     --workdir "${WORKDIR}"
 ```
 
 The launcher creates a unique run id like
-`100m-muon-v6e4x4-b2048-accum4-YYYYMMDD-HHMMSS` if `--run-id` is omitted. It
+`300m-pairmixer-dense-adamw-v6e4x8-b2048-accum4-YYYYMMDD-HHMMSS` if `--run-id` is omitted. It
 does not choose a config or checkpoint bucket silently: `--config` and
 `--workdir` are required. It loads `HF_TOKEN` from the environment or
 `~/.cache/huggingface/token`, loads `WANDB_API_KEY` from the environment,
 `.netrc`, or local W&B settings, and passes both tokens to SkyPilot as secrets.
-The default SkyPilot cluster is run-specific, normally `spectra-$RUN_ID`, so a
-second run with a different run id requests a separate Kueue/DWS allocation
-instead of queueing behind jobs in the same SkyPilot logical cluster. Pass
-`--cluster` only when intentionally submitting another job to an existing
-SkyPilot cluster.
-For DWS flex-start runs, pass `--flex-start-max-run-duration 6h` to set the
-maximum node allocation runtime. Values use SkyPilot's duration syntax such as
-`30m`, `6h`, or `1d`; plain numbers are minutes.
+The default SkyPilot managed job name is run-specific, normally
+`spectra-$RUN_ID`, so a second run with a different run id requests a separate
+DWS allocation. Pass `--job-name` only when intentionally overriding the
+managed job name.
+The generated YAML uses GCE TPU v6e machine types with
+`config.gcp.managed_instance_group`, so provisioning goes through GCE MIG
+Flex-start DWS. CT6e runs use a TPU workload policy, a regional MIG, and a bulk
+target size for the full topology; they do not use the generic MIG resize
+request path. The default `--sky-bin` is the vendored SkyPilot executable at
+`/home/wuhao/skypilot/.venv/bin/sky`; keep using that build until the CT6e
+workload-policy MIG support lands in the upstream SkyPilot release you install.
+If `sky status -u` shows an existing `sky-jobs-controller-*` created by an older
+SkyPilot build, cancel any in-progress managed jobs and recreate that controller
+before launching CT6e runs. Otherwise the managed-job controller can keep using
+the old provisioning code even though the local launcher uses the vendored CLI.
 
-The default queue is `default/skypilot-v6e-nap`, defined in
-`infra/gke/kueue-v6e-nap.yaml`. Apply it after Kueue/DWS is installed:
+SkyPilot managed-job flags are passed through to `sky jobs launch`. To submit
+and return immediately instead of running `sky jobs logs -n "$JOB_NAME"` from
+the launcher, launch with:
 
 ```bash
-kubectl apply -f infra/gke/kueue-v6e-nap.yaml
+.venv/bin/python train_sky.py \
+    --run-id "${RUN_ID}" \
+    --config "${CONFIG}" \
+    --workdir "${WORKDIR}" \
+    --detach-run
 ```
+
+By default the launcher submits with `sky jobs launch --detach-run` and then
+streams logs with `sky jobs logs -n "$JOB_NAME"`. The managed job owns resource
+teardown after completion or failure; `train_sky.py` does not run `sky down`.
 
 The SkyPilot task uses:
 
 ```text
-Cluster:      spectra-$RUN_ID by default, or the explicit --cluster value
-Queue:        default/skypilot-v6e-nap
-Nodes:        4
-Per node:     tpu-v6e-4, 64 CPU, 256 GB memory
-GKE pool:     auto-provisioned 4x4 DWS flex-start pool
-TPU topology: 4x4
-Config:       configs/medium_pairmixer_100m_20m_mae_beta_isoflops_muon.py
-Steps:        250000
-JAX mesh:     16 devices
+Job:          spectra-$RUN_ID by default, or the explicit --job-name value
+Infra:        gcp/us-south1
+Instance:     ct6e-standard-4t for the default 4 chips per node
+Hosts:        8 GCE VMs for the default 4x8 / 32-chip topology
+Provisioning: GCE regional MIG Flex-start DWS with 7d run/provision wait duration
+TPU topology: 4x8
+Config:       configs/300m_pairmixer_dense_adamw.py
+Steps:        2000000
+JAX mesh:     32 devices
 Batch:        2048 global, 4 gradient accumulation steps
-LR:           3e-4 * sqrt(2), min LR 3e-5 * sqrt(2)
+LR:           6e-4, min LR 6e-6
 Eval:         500 steps every 10000 steps
-MSG probe:    every 100000 steps plus final step
+MSG probe:    disabled
 ```
 
-The generated pod selector is:
+Use `--chips` to select a supported CT6e topology. The default is `--chips 32`.
+The launcher maps chip counts to topology, then derives the number of GCE VMs
+from topology and `--chips-per-node`:
 
-```yaml
-cloud.google.com/gke-flex-start: "true"
-cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
-cloud.google.com/gke-tpu-topology: "4x4"
+```text
+8 chips   -> 2x4   -> 2 ct6e-standard-4t VMs
+16 chips  -> 4x4   -> 4 ct6e-standard-4t VMs
+32 chips  -> 4x8   -> 8 ct6e-standard-4t VMs
+64 chips  -> 8x8   -> 16 ct6e-standard-4t VMs
+128 chips -> 8x16  -> 32 ct6e-standard-4t VMs
+256 chips -> 16x16 -> 64 ct6e-standard-4t VMs
 ```
 
-For the default run, the topology value is `"4x4"`. Do not add
-`cloud.google.com/gke-nodepool`; pinning to an existing gang-mode node pool
-makes a second concurrent 4-node job try to scale that same Managed Instance
-Group from 4 to 8, which GKE rejects because the target size must equal the gang
-size. The NAP queue lets GKE create a separate 4x4 flex-start node pool for each
-admitted run, bounded by the cluster's node auto-provisioning TPU quota.
-
-The launcher currently enables only the 4x4 NAP flavor. Add another
-ResourceFlavor and queue capacity before enabling other topologies in
-`train_sky.py`.
+Pass `--topology 8x8` only when deliberately selecting a topology by name, and
+pass `--instance-type` only when deliberately overriding the derived CT6e
+machine type.
 
 Useful status commands:
 
 ```bash
 sky status
-kubectl get localqueue -A
-kubectl get clusterqueue,resourceflavor
-kubectl get provisioningrequests,workloads,pods -n default -o wide
-kubectl describe provisioningrequest -n default
-sky logs "spectra-${RUN_ID}"
+sky jobs queue
+sky jobs logs -n "spectra-${RUN_ID}"
+sky jobs logs JOB_ID
+sky jobs cancel JOB_ID
+gcloud compute instances list --filter="name~spectra AND zone:(us-east5-*)"
+gcloud compute instance-groups managed list --filter="name~sky-mig-spectra"
 ```
 
 The task writes final metrics to:
@@ -175,7 +191,9 @@ gs://metal-repeater-411410-spectra-checkpoints/skypilot/$RUN_ID/metrics/final.js
 ```
 
 It also logs to W&B under the config's project with tags:
-`skypilot`, `gke`, `kueue`, `flex-start`, `tpu-v6e`, and `100m_muon`.
+`skypilot`, `gcp`, `dws`, `flex-start`, `tpu-v6e`, and the config filename
+slug such as `300m_pairmixer_dense_adamw`. The resolved config is written to
+`$WORKDIR/config.json`; W&B is initialized from the same serialized dictionary.
 
 Conservative retry contract if a run fails after TPU allocation:
 

@@ -23,6 +23,7 @@ experiments/
 
 results/
 outputs/
+runs/
 
 5m_30/
 checkpoints/
@@ -33,3 +34,9 @@ report/
 artifacts/
 profiles/
 tmp/
+
+# Generated checkpoints and local code bundles
+*.pt
+*.pth
+*.ckpt
+singlefile

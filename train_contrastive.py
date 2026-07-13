@@ -3,7 +3,7 @@ import json
 import logging
 import os
 
-from spectra_learning.training.api import load_config
+from spectra_learning.config import load_config
 from spectra_learning.training.contrastive import train_contrastive
 from spectra_learning.training.storage import normalize_storage_path, write_text
 
@@ -17,12 +17,6 @@ def parse_args() -> argparse.Namespace:
         "--init-checkpoint",
         default="",
         help="Optional checkpoint used to initialize model weights before training.",
-    )
-    parser.add_argument(
-        "--training-max-steps",
-        type=int,
-        default=None,
-        help="Optional cap on training optimizer steps.",
     )
     parser.add_argument(
         "--overrides-json",
@@ -40,13 +34,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     args = parse_args()
-    config = load_config(args.config)
-    config.update(json.loads(args.overrides_json))
-    config.training_mode = "contrastive"
+    overrides = {
+        **json.loads(args.overrides_json),
+        "training_task": "contrastive",
+        "training_mode": "contrastive",
+    }
     if args.init_checkpoint:
-        config.contrastive_init_checkpoint_path = args.init_checkpoint
-    if args.training_max_steps is not None:
-        config.training_max_steps = int(args.training_max_steps)
+        overrides["contrastive_init_checkpoint_path"] = args.init_checkpoint
+    config = load_config(args.config, overrides)
     results = train_contrastive(
         config,
         workdir=normalize_storage_path(args.workdir),

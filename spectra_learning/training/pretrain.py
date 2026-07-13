@@ -37,6 +37,7 @@ from spectra_learning.training.distributed import (
     unwrap_model,
     wrap_distributed_model,
 )
+from spectra_learning.training.configuration import save_config
 from spectra_learning.training.logging import MetricLogger, log_msg_probe_metrics
 from spectra_learning.training.jax_runtime_flags import configure_jax_tpu_xla_flags
 from spectra_learning.training.modules import PretrainModule, split_pretrain_module
@@ -197,7 +198,6 @@ def train_and_evaluate(
     checkpoint_dir = storage_join(workdir, "checkpoints")
     if distributed.is_main:
         storage_mkdir(checkpoint_dir)
-    logger = build_logger(config, local_workdir) if distributed.is_main else MetricLogger()
     optimizers, schedulers = build_optimizers(
         config,
         train_module,
@@ -215,6 +215,11 @@ def train_and_evaluate(
         steps_per_epoch=datamodule.train_steps,
         device=device,
     )
+    if distributed.is_main:
+        save_config(config, workdir)
+        logger = build_logger(config, local_workdir)
+    else:
+        logger = MetricLogger()
     compile_forward(train_module, config)
     train_model = wrap_distributed_model(
         train_module,

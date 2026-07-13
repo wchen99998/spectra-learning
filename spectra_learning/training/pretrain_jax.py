@@ -40,6 +40,7 @@ from spectra_learning.training.checkpointing_jax import (
     restore_jax_training_state,
     save_jax_training_state,
 )
+from spectra_learning.training.configuration import save_config
 from spectra_learning.training.jax_runtime_flags import configure_jax_tpu_xla_flags
 from spectra_learning.training.logging import (
     MetricLogger,
@@ -538,6 +539,7 @@ def _put_batch_array_on_data_mesh(
     *,
     batch_axis: int,
 ) -> Array:
+    value = _host_array_for_jax_process_local_data(value)
     spec = P(
         *([None] * batch_axis),
         JAX_DATA_AXIS,
@@ -549,9 +551,19 @@ def _put_batch_array_on_data_mesh(
     return jax.device_put(_numpy_array_to_jax(value), sharding)
 
 
+def _host_array_for_jax_process_local_data(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().numpy()
+    if isinstance(value, jax.Array):
+        return np.asarray(value)
+    return value
+
+
 def _numpy_array_to_jax(value: Any) -> Array:
     if isinstance(value, jax.Array):
         return value
+    if isinstance(value, torch.Tensor):
+        return jnp.asarray(value.detach().cpu().numpy())
     assert isinstance(value, np.ndarray | np.generic)
     return jnp.asarray(value)
 
@@ -933,6 +945,8 @@ def train_and_evaluate_jax(
             _config_get(config, "dataloader_multiprocessing_context", "forkserver")
             or "forkserver"
         )
+    if is_main_process:
+        save_config(config, workdir)
     datamodule = GemsDataModule(
         config,
         seed=int(config.seed),
@@ -1653,6 +1667,8 @@ def _stack_micro_batch_values(*values: Any) -> Any:
     first = values[0]
     if isinstance(first, np.ndarray):
         return np.stack(values)
+    if isinstance(first, torch.Tensor):
+        return np.stack([value.detach().cpu().numpy() for value in values])
     return jnp.stack(values)
 
 

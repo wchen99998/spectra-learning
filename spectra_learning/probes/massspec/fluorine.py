@@ -29,7 +29,7 @@ from sklearn.metrics import (
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
-from spectra_learning.config.loading import load_config
+from spectra_learning.config import load_config
 from spectra_learning.data.spectra import (
     DEFAULT_MAX_PRECURSOR_MZ,
     DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,

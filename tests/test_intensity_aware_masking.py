@@ -1,5 +1,3 @@
-import importlib
-
 import torch
 
 import spectra_learning.data.gems as gems
@@ -163,23 +161,3 @@ def test_gems_batch_collator_generates_intensity_aware_masks() -> None:
     assert not (batch["target_masks"] & ~batch["peak_valid_mask"].unsqueeze(1)).any()
     assert not (batch["target_masks"] & batch["context_mask"].unsqueeze(1)).any()
     assert (batch["target_masks"].sum(dim=1) <= 1).all()
-
-
-def test_wandb_pa645_config_uses_intensity_aware_mixed_params() -> None:
-    module = importlib.import_module("configs.wandb_pa645zxs")
-    cfg = module.get_config()
-
-    assert cfg.jepa_mask_strategy == "intensity_aware"
-    assert cfg.run_name_suffix == "ema-teacher-intensity-aware-mixed"
-    for key in (
-        "jepa_block_min_len",
-        "jepa_context_fraction",
-        "jepa_context_fraction_range",
-        "jepa_target_fraction",
-        "jepa_target_fraction_range",
-        "jepa_mask_lengths",
-        "jepa_mask_round_from",
-    ):
-        assert key not in cfg
-    for key, value in module.aware_mixed.items():
-        assert getattr(cfg, f"jepa_intensity_aware_{key}") == value

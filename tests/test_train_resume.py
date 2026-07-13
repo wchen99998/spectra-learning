@@ -11,6 +11,7 @@ import pytest
 import torch
 from ml_collections import config_dict
 
+from spectra_learning.config import config_to_dict
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pooling import CovariancePool
 from spectra_learning.training.checkpointing import (
@@ -1882,9 +1883,9 @@ def test_run_msg_probe_evaluation_logs_supplied_model_to_standalone_wandb(
     monkeypatch,
     tmp_path: Path,
 ):
-    from configs.medium_pairmixer_100m_20m_mae_beta_isoflops_muon import get_config
+    from spectra_learning.config import load_config
 
-    cfg = get_config()
+    cfg = load_config("configs/100m_pairmixer_dense_adamw.py")
     fake_model = torch.nn.Linear(1, 1)
     run_calls = []
 
@@ -1965,8 +1966,9 @@ def test_run_checkpoint_msg_probe_script_infers_step_and_applies_overrides(monke
     cfg.msg_probe_num_epochs = 100
     calls = []
 
-    def fake_load_config(path):
+    def fake_load_config(path, overrides):
         assert path == Path("configs/base.py")
+        cfg.update(overrides)
         return cfg
 
     def fake_load_torch_checkpoint(path, *, map_location, weights_only):
@@ -2228,6 +2230,7 @@ def test_wandb_logger_defines_msg_probe_global_step(monkeypatch, tmp_path: Path)
 
     assert logger.experiment is fake_run
     assert init_calls[0]["project"] == "test-project"
+    assert init_calls[0]["config"] == config_to_dict(cfg)
     assert "settings" not in init_calls[0]
     assert fake_run.definitions == [
         (("global_step",), {}),
@@ -2325,7 +2328,7 @@ def test_train_main_writes_json_safe_probe_metrics(monkeypatch, tmp_path: Path):
     metrics_path = tmp_path / "metrics.json"
     cfg = config_dict.ConfigDict()
 
-    monkeypatch.setattr(train_script, "load_config", lambda path: cfg)
+    monkeypatch.setattr(train_script, "load_config", lambda path, overrides: cfg)
     monkeypatch.setattr(
         train_script,
         "train_and_evaluate",

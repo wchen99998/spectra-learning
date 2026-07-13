@@ -14,7 +14,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from spectra_learning.config.loading import load_config
+from spectra_learning.config import load_config
 from spectra_learning.data.mgf import _to_float, iter_mgf
 from spectra_learning.data.spectra import (
     DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,

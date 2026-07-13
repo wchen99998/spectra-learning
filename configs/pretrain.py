@@ -1,13 +1,22 @@
 from ml_collections import config_dict
 
+from spectra_learning.config.defaults import runtime_config
+
 
 def get_config() -> config_dict.ConfigDict:
-    cfg = config_dict.ConfigDict()
+    """Return the canonical peak-set pretraining defaults."""
+    cfg = runtime_config()
+
+    cfg.training_task = "pretrain"
 
     # Dataset
     cfg.artifact_dir = "data/massive_v1_ms2_100m_stratified_x16"
     cfg.gems_hdf5_repo_id = "novogaia/massive-v1-ms2-100m-stratified-x16"
+    cfg.gems_hdf5_revision = "main"
     cfg.gems_hdf5_manifest = "fdataloader_shards.json"
+    cfg.gems_hdf5_spectrum_dataset = "spectrum"
+    cfg.gems_hdf5_precursor_dataset = "precursor_mz"
+    cfg.gems_hdf5_rows_per_block = 0
     cfg.nist_murcko_probe_repo_id = "cjim8889/msms_evaluation_100ktrain_20260615"
     cfg.nist_murcko_probe_revision = "main"
     cfg.nist_murcko_probe_num_repeats = 1
@@ -19,7 +28,11 @@ def get_config() -> config_dict.ConfigDict:
     cfg.min_peak_intensity = 0.0001
     cfg.peak_drop_min_intensity = 0.0001
     cfg.precursor_peak_exclusion_window_da = 0
+    cfg.peak_filtering = "top_intensity"
+    cfg.grouped_peak_shoulder_da = 0.05
+    cfg.grouped_peak_isotope_charges = (1, 2, 3)
     cfg.peak_ordering = "mz"
+    cfg.peak_mz_max = 1000
     cfg.seed = 66
 
     # Encoder
@@ -40,6 +53,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.feature_mlp_hidden_dim = 1024
     cfg.pairmixer_pair_dim = 384
     cfg.pairmixer_pair_feature_hidden_dim = 768
+    cfg.pairmixer_dropout = 0.0
+    cfg.pairmixer_mz_scale = 1000
+    cfg.pairmixer_precursor_mz_scale = 1000
     cfg.pairmixer_use_fourier_features = True
     cfg.pairmixer_fourier_num_freqs = 16
     cfg.pairmixer_fourier_x_min = 0.01
@@ -47,6 +63,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pairmixer_relative_fourier_x_min = 0.001
     cfg.pairmixer_relative_fourier_x_max = 1.0
     cfg.attention_mlp_multiple = 4
+    cfg.norm_eps = 1e-5
 
     # Masked latent predictor
     cfg.predictor_dim = 640
@@ -56,6 +73,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_latent_predictor_num_heads = 10
     cfg.target_projector_dim = -1
     cfg.masked_token_input_mode = "latent_token"
+    cfg.masked_mz_sentinel = -1.0
 
     # MAE masking and reconstruction objectives
     cfg.training_mode = "mae"
@@ -72,9 +90,15 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_mae_loss_weight = 0.0
     cfg.mae_loss_weight = 1.0
     cfg.distogram_loss_weight = 1.0
+    cfg.distogram_mz_max = 1000
     cfg.latent_pair_loss_weight = 0.0
     cfg.latent_pair_target_normalization = "none"
     cfg.jepa_mae_mz_bin_size = 0.5
+    cfg.jepa_mae_intensity_bin_size = 0.1
+    cfg.jepa_mae_mz_max = 1000
+    cfg.jepa_mae_intensity_max = 1.0
+    cfg.mae_intensity_loss_weight = 1.0
+    cfg.jepa_allow_target_overlap = False
     cfg.jepa_intensity_aware_tau = 0.5
     cfg.jepa_intensity_aware_alpha = 0.75
     cfg.jepa_intensity_aware_beta_context = 0.85
@@ -108,8 +132,11 @@ def get_config() -> config_dict.ConfigDict:
 
     # EMA teacher
     cfg.ema_teacher_momentum_start = 0.996
+    cfg.ema_teacher_momentum_mid = None
     cfg.ema_teacher_momentum_final = 0.99925
+    cfg.ema_teacher_schedule_peak_fraction = 0.35
     cfg.ema_teacher_schedule = "cosine"
+    cfg.frozen_teacher_config_path = None
 
     # Training
     cfg.num_epochs = 8
@@ -120,10 +147,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.activation_checkpoint_every_n_layers = 1
     cfg.activation_checkpoint_modules = ("encoder", "predictor")
     cfg.activation_checkpoint_preserve_rng_state = True
-    cfg.jax_mesh_devices = "all"
-    cfg.jax_compile_stall_threshold_seconds = 0.0
-    cfg.jax_log_compiles = False
-    cfg.jax_explain_cache_misses = False
     cfg.device_prefetch_size = 8
     cfg.throughput_warmup_steps = 25
     cfg.log_every_n_steps = 250
@@ -133,6 +156,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataloader_prefetch_factor = 2
     cfg.dataloader_persistent_workers = True
     cfg.dataloader_pin_memory = True
+    cfg.dataloader_multiprocessing_context = ""
+    cfg.dataloader_output_format = "torch"
 
     # MSG probe
     cfg.msg_probe_early_stopping = True
@@ -154,11 +179,15 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_warmup_steps = 0
     cfg.msg_probe_weight_decay = 0
     cfg.msg_probe_batch_size = 512
+    cfg.msg_probe_fingerprint = "maccs"
+    cfg.msg_probe_num_repeats = None
+    cfg.msg_probe_pairwise_alignment_num_pairs = 0
 
     # Optimizer
     cfg.learning_rate = 4e-04
     cfg.min_learning_rate = 4e-05
     cfg.warmup_steps = 3_000
+    cfg.jax_profile_start_step = cfg.get_ref("warmup_steps")
     cfg.weight_decay = 0.05
     cfg.b2 = 0.95
     cfg.grad_clip_norm = 0.
@@ -168,6 +197,6 @@ def get_config() -> config_dict.ConfigDict:
     # Logging
     cfg.enable_wandb = True
     cfg.wandb_project = "jepa-finalrun"
-    cfg.run_name_suffix = "mae-massive100m-20m-alpha-isoflops-100k-bs1024-ga2"
+    cfg.run_name_suffix = "pretrain"
 
     return cfg

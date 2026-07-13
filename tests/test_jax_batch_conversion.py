@@ -6,6 +6,7 @@ import subprocess
 import sys
 import textwrap
 import time
+import torch
 
 
 def test_numpy_batch_converts_to_jax() -> None:
@@ -71,6 +72,40 @@ def test_process_local_mesh_conversion_passes_host_data_to_jax(monkeypatch) -> N
     )
 
     assert converted["peak_mz"] is batch["peak_mz"]
+    assert len(calls) == 2
+    assert all(isinstance(local_data, np.ndarray) for _, local_data in calls)
+
+
+def test_process_local_mesh_conversion_accepts_torch_tensors(monkeypatch) -> None:
+    from spectra_learning.training import pretrain_jax
+
+    pretrain_jax._jax_data_mesh_for_device_count.cache_clear()
+    calls = []
+
+    def fake_make_array_from_process_local_data(sharding, local_data):
+        calls.append((sharding, local_data))
+        return local_data
+
+    monkeypatch.setattr(pretrain_jax.jax, "process_count", lambda: 2)
+    monkeypatch.setattr(
+        pretrain_jax.jax,
+        "make_array_from_process_local_data",
+        fake_make_array_from_process_local_data,
+    )
+    data_mesh = pretrain_jax._jax_data_mesh_for_device_count(1)
+    batch = {
+        "input_token_ids": torch.zeros((256, 392), dtype=torch.long),
+        "target_loss_mask": torch.ones((256, 392), dtype=torch.bool),
+    }
+
+    converted = pretrain_jax.numpy_batch_to_jax(
+        batch,
+        data_mesh=data_mesh,
+        batch_axis=0,
+    )
+
+    assert converted["input_token_ids"].dtype == np.int64
+    assert converted["target_loss_mask"].dtype == np.bool_
     assert len(calls) == 2
     assert all(isinstance(local_data, np.ndarray) for _, local_data in calls)
 

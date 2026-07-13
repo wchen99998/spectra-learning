@@ -117,6 +117,7 @@ def _config(artifact_dir: Path) -> config_dict.ConfigDict:
     cfg.nist_murcko_probe_repo_id = "unused/local"
     cfg.nist_murcko_probe_revision = "main"
     cfg.seed = 7
+    cfg.training_mode = "contrastive"
     cfg.batch_size = 4
     cfg.contrastive_batch_size = 4
     cfg.contrastive_pairs_per_epoch = 2
@@ -278,6 +279,8 @@ def test_contrastive_smoke_training_writes_frozen_pooler_checkpoint(tmp_path: Pa
     results = train_contrastive(_config(artifact_dir), workdir)
 
     assert results["run/final_global_step"] == 1.0
+    saved_config = json.loads((workdir / "config.json").read_text())
+    assert saved_config["training_mode"] == "contrastive"
     last_path = workdir / "checkpoints" / "last.pt"
     pooler_path = covariance_pooler_checkpoint_path(last_path)
     assert last_path.exists()

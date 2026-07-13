@@ -315,18 +315,20 @@ def scaled_dot_product_attention(
     v: Array,
     *,
     attn_mask: Array | None = None,
+    is_causal: bool = False,
+    implementation: str | None = "xla",
 ) -> Array:
-    precision = jax.lax.Precision.DEFAULT if q.dtype == jnp.bfloat16 else None
-    scores = jnp.einsum(
-        "...qd,...kd->...qk",
-        q,
-        k,
-        precision=precision,
-    ) / math.sqrt(q.shape[-1])
+    query = jnp.swapaxes(q, -3, -2)
+    key = jnp.swapaxes(k, -3, -2)
+    value = jnp.swapaxes(v, -3, -2)
+    kwargs: dict[str, Any] = {
+        "is_causal": is_causal,
+        "implementation": implementation,
+    }
     if attn_mask is not None:
         if attn_mask.dtype == jnp.bool_:
-            scores = jnp.where(attn_mask, scores, jnp.asarray(-jnp.inf, scores.dtype))
+            kwargs["mask"] = attn_mask
         else:
-            scores = scores + attn_mask
-    attn = jax.nn.softmax(scores.astype(jnp.float32), axis=-1).astype(v.dtype)
-    return jnp.einsum("...qk,...kd->...qd", attn, v, precision=precision)
+            kwargs["bias"] = attn_mask
+    out = jax.nn.dot_product_attention(query, key, value, **kwargs)
+    return jnp.swapaxes(out, -3, -2)

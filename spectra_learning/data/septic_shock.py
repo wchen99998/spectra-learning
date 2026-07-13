@@ -791,6 +791,8 @@ class SepticShockCollator:
             {
                 "spectra": sample["spectra"][scan_idx],
                 "precursor_mz_raw": sample["precursor_mz_raw"][scan_idx],
+                "collision_energy": np.float32(0.0),
+                "charge": np.float32(1.0),
             }
             for sample in samples
             for scan_idx in range(int(sample["spectra"].shape[0]))

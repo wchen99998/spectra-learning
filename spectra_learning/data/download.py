@@ -6,7 +6,7 @@ from pathlib import Path
 
 from spectra_learning.data.gems.datamodule import GemsDataModule
 from spectra_learning.data.massspec_probe import MassSpecProbeData
-from spectra_learning.training.api import load_config
+from spectra_learning.config import load_config
 
 
 def parse_args() -> argparse.Namespace:
@@ -22,7 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=Path,
-        default=Path("configs/medium_pairmixer_encoder.py"),
+        required=True,
         help="Config whose dataset repo IDs and preprocessing settings should be used.",
     )
     parser.add_argument("--skip-gems", action="store_true")
@@ -49,13 +49,14 @@ def download_data_artifacts(
     include_morgan: bool = False,
     include_dreams: bool = False,
 ) -> None:
-    config = load_config(config_path)
-    config.artifact_dir = str(artifact_dir.expanduser().resolve())
-
+    overrides: dict[str, object] = {
+        "artifact_dir": str(artifact_dir.expanduser().resolve())
+    }
     if include_morgan:
-        config.msg_probe_fingerprint = "morgan"
+        overrides["msg_probe_fingerprint"] = "morgan"
     if include_dreams:
-        config.nist_murcko_probe_include_dreams_auxiliary = True
+        overrides["nist_murcko_probe_include_dreams_auxiliary"] = True
+    config = load_config(config_path, overrides)
 
     if not skip_gems:
         gems = GemsDataModule(config, seed=int(config.seed))

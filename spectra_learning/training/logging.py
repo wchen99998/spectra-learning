@@ -1,6 +1,5 @@
 import csv
 import os
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -8,11 +7,13 @@ import numpy as np
 import torch
 from ml_collections import config_dict
 
+from spectra_learning.config import config_to_dict
 from spectra_learning.probes.massspec.pr_curves import (
     PrecisionRecallCurve,
     precision_recall_points,
 )
 from spectra_learning.training.naming import auto_run_name
+from spectra_learning.training.configuration import finalize_config
 
 
 def _build_wandb_init_kwargs(config: Any | None) -> dict[str, Any]:
@@ -38,36 +39,7 @@ def _use_wandb_shared_mode(config: Any | None) -> bool:
     return bool(config.get("wandb_shared_mode", False))
 
 
-def _to_serialisable_config(value: Any) -> Any:
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return value
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="ignore")
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, np.ndarray):
-        return value.item() if value.ndim == 0 else value.tolist()
-    if isinstance(value, Mapping):
-        return {str(k): _to_serialisable_config(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_to_serialisable_config(v) for v in value]
-    return str(value)
-
-
-def _config_to_wandb_dict(config: Any | None) -> dict[str, Any]:
-    if config is None:
-        return {}
-    if callable(getattr(config, "to_dict", None)):
-        return dict(_to_serialisable_config(config.to_dict()))
-    if isinstance(config, Mapping):
-        return dict(_to_serialisable_config(config))
-    return dict(_to_serialisable_config(vars(config)))
-
-
 class MetricLogger:
-    def log_hyperparams(self, params: dict[str, Any]) -> None:
-        pass
-
     def log_metrics(self, metrics: dict[str, Any], step: int | None = None) -> None:
         pass
 
@@ -80,6 +52,7 @@ class WandbMetricLogger(MetricLogger):
     def __init__(self, config: config_dict.ConfigDict, workdir: Path) -> None:
         import wandb
 
+        finalize_config(config)
         wandb_kwargs = _build_wandb_init_kwargs(config)
         if _use_wandb_shared_mode(config):
             primary = bool(config.get("wandb_shared_primary", True))
@@ -101,7 +74,7 @@ class WandbMetricLogger(MetricLogger):
         self._run = wandb.init(
             project=config.get("wandb_project", "md4"),
             dir=str(workdir),
-            config=_config_to_wandb_dict(config),
+            config=config_to_dict(config),
             **wandb_kwargs,
         )
         self._run.define_metric("global_step")
@@ -114,9 +87,6 @@ class WandbMetricLogger(MetricLogger):
     @property
     def experiment(self) -> Any:
         return self._run
-
-    def log_hyperparams(self, params: dict[str, Any]) -> None:
-        self._run.config.update(params, allow_val_change=True)
 
     def log_metrics(self, metrics: dict[str, Any], step: int | None = None) -> None:
         self._run.log(
@@ -204,9 +174,7 @@ def _serialise_metrics(
 
 def build_logger(config: config_dict.ConfigDict, workdir: Path) -> MetricLogger:
     if config.get("enable_wandb", False):
-        logger = WandbMetricLogger(config, workdir)
-        logger.log_hyperparams(_config_to_wandb_dict(config))
-        return logger
+        return WandbMetricLogger(config, workdir)
     return CSVMetricLogger(workdir)
 
 

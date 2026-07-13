@@ -1786,8 +1786,9 @@ def _run_dreams_probe_once(
     )
     peak_ordering = str(_config_get(config, "peak_ordering", "intensity"))
     fingerprint_task = resolve_msg_probe_fingerprint(config)
-    config.nist_murcko_probe_include_dreams_auxiliary = True
-    probe_data = MassSpecProbeData.from_config(config)
+    data_config = config.copy_and_resolve_references()
+    data_config.nist_murcko_probe_include_dreams_auxiliary = True
+    probe_data = MassSpecProbeData.from_config(data_config)
 
     dreams_dim = probe_data.dreams_dim
     if dreams_dim == 0:

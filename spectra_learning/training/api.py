@@ -1,4 +1,3 @@
-from spectra_learning.config import load_config
 from spectra_learning.models.factory import build_model_from_config
 from spectra_learning.training.checkpointing import latest_ckpt_path, load_pretrained_weights
 from spectra_learning.training.checkpointing import load_frozen_teacher_weights
@@ -26,7 +25,6 @@ __all__ = [
     "estimate_training_flops_per_sample",
     "latest_ckpt_path",
     "load_frozen_teacher_weights",
-    "load_config",
     "load_pretrained_weights",
     "parse_autocast_dtype",
     "trainable_parameter_count",

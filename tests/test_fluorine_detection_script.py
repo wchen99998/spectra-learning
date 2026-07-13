@@ -139,6 +139,8 @@ def test_cli_accepts_lora_mode(monkeypatch):
             "train_fluorine_detection.py",
             "--mode",
             "lora",
+            "--config",
+            "configs/100m_pairmixer_dense_adamw.py",
             "--autocast-dtype",
             "bf16",
         ],
