@@ -135,7 +135,6 @@ class MassSpecProbeMurckoDataTests(unittest.TestCase):
         self.assertEqual(probe_data.info["massspec_test_size"], 1)
         self.assertEqual(probe_data.info["massspec_mcebio_test_size"], 1)
         self.assertEqual(probe_data.dreams_dim, 0)
-        self.assertEqual(probe_data.storage_format, "parquet")
         self.assertFalse(probe_data.info["pairwise_alignment_available"])
         self.assertEqual(
             probe_data.train_files,
@@ -463,24 +462,21 @@ class MassSpecProbeMurckoDataTests(unittest.TestCase):
         self.assertEqual(barrier_mock.call_count, 2)
         self.assertEqual(probe_data.info["massspec_train_size"], 2)
 
-    def test_nist_full_download_rejects_invalid_metadata_without_download(self):
+    def test_nist_murcko_download_rejects_non_parquet_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            output_dir = tmp_path / "nist-full"
-            output_dir.mkdir()
-            (output_dir / "metadata.json").write_text(
-                json.dumps({"metadata_version": 0, "max_precursor_mz": 1000.0})
-            )
+            output_dir = Path(tmp) / "nist-murcko"
+            metadata = _write_fake_nist_murcko_probe_artifact(output_dir)
+            metadata["storage_format"] = "native"
+            (output_dir / "metadata.json").write_text(json.dumps(metadata))
 
             with mock.patch.object(
-                massspec_probe_data,
+                murcko_data,
                 "snapshot_download",
             ) as download_mock:
-                with self.assertRaisesRegex(ValueError, "Delete the artifact directory"):
-                    massspec_probe_data.ensure_nist_full_probe_downloaded(
+                with self.assertRaisesRegex(ValueError, "storage_format must be parquet"):
+                    murcko_data.ensure_nist_murcko_probe_downloaded(
                         output_dir,
                         max_precursor_mz=1000.0,
-                        repo_id="owner/nist-full",
                     )
 
             download_mock.assert_not_called()

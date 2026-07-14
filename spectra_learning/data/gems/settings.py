@@ -23,10 +23,6 @@ NUM_PEAKS_OUTPUT = 60
 GEMS_METADATA_FILENAME = "metadata.json"
 
 
-def _config_get(config: config_dict.ConfigDict, key: str, default: Any) -> Any:
-    return config.get(key, default)
-
-
 def _config_mask_strategy(value: Any) -> str | tuple[str, ...]:
     if isinstance(value, str):
         return value
@@ -73,125 +69,119 @@ class GemsDataConfig:
     @classmethod
     def from_config(cls, config: config_dict.ConfigDict) -> "GemsDataConfig":
         artifact_dir = (
-            Path(_config_get(config, "artifact_dir", str(DEFAULT_ARTIFACT_DIR)))
+            Path(config.get("artifact_dir", str(DEFAULT_ARTIFACT_DIR)))
             .expanduser()
             .resolve()
         )
         min_peak_intensity = float(
-            _config_get(config, "min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)
+            config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)
         )
         jepa_mask_lengths = tuple(
             int(length)
-            for length in _config_get(config, "jepa_mask_lengths", (1, 2, 4, 8, 16))
+            for length in config.get("jepa_mask_lengths", (1, 2, 4, 8, 16))
         )
-        dataloader_num_workers = int(_config_get(config, "dataloader_num_workers", 1))
+        dataloader_num_workers = int(config.get("dataloader_num_workers", 1))
         return cls(
             artifact_dir=artifact_dir,
             gems_hdf5_repo_id=str(
-                _config_get(
-                    config,
+                config.get(
                     "gems_hdf5_repo_id",
                     DEFAULT_GEMS_HDF5_REPO_ID,
                 )
             ).strip(),
             gems_hdf5_revision=str(
-                _config_get(config, "gems_hdf5_revision", "main")
+                config.get("gems_hdf5_revision", "main")
             ),
             gems_hdf5_manifest=str(
-                _config_get(
-                    config,
+                config.get(
                     "gems_hdf5_manifest",
                     DEFAULT_GEMS_HDF5_MANIFEST,
                 )
             ),
             gems_hdf5_spectrum_dataset=str(
-                _config_get(config, "gems_hdf5_spectrum_dataset", "spectrum")
+                config.get("gems_hdf5_spectrum_dataset", "spectrum")
             ),
             gems_hdf5_precursor_dataset=str(
-                _config_get(config, "gems_hdf5_precursor_dataset", "precursor_mz")
+                config.get("gems_hdf5_precursor_dataset", "precursor_mz")
             ),
             gems_hdf5_rows_per_block=int(
-                _config_get(config, "gems_hdf5_rows_per_block", 0)
+                config.get("gems_hdf5_rows_per_block", 0)
             ),
-            batch_size=int(_config_get(config, "batch_size", DEFAULT_BATCH_SIZE)),
+            batch_size=int(config.get("batch_size", DEFAULT_BATCH_SIZE)),
             gradient_accumulation_steps=int(
-                _config_get(config, "gradient_accumulation_steps", 1)
+                config.get("gradient_accumulation_steps", 1)
             ),
-            drop_remainder=bool(_config_get(config, "drop_remainder", True)),
+            drop_remainder=bool(config.get("drop_remainder", True)),
             max_precursor_mz=float(
-                _config_get(config, "max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
+                config.get("max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
             ),
             min_peak_intensity=min_peak_intensity,
             peak_drop_min_intensity=float(
-                _config_get(config, "peak_drop_min_intensity", min_peak_intensity)
+                config.get("peak_drop_min_intensity", min_peak_intensity)
             ),
             peak_filtering=str(
-                _config_get(config, "peak_filtering", DEFAULT_PEAK_FILTERING)
+                config.get("peak_filtering", DEFAULT_PEAK_FILTERING)
             ),
             grouped_peak_shoulder_da=float(
-                _config_get(
-                    config,
+                config.get(
                     "grouped_peak_shoulder_da",
                     DEFAULT_GROUPED_PEAK_SHOULDER_DA,
                 )
             ),
             grouped_peak_isotope_charges=tuple(
                 int(charge)
-                for charge in _config_get(
-                    config,
+                for charge in config.get(
                     "grouped_peak_isotope_charges",
                     DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
                 )
             ),
-            peak_ordering=str(_config_get(config, "peak_ordering", "mz")),
+            peak_ordering=str(config.get("peak_ordering", "mz")),
             precursor_peak_exclusion_window_da=float(
-                _config_get(
-                    config,
+                config.get(
                     "precursor_peak_exclusion_window_da",
                     DEFAULT_PRECURSOR_PEAK_EXCLUSION_WINDOW_DA,
                 )
             ),
-            jepa_num_target_blocks=int(_config_get(config, "jepa_num_target_blocks", 2)),
+            jepa_num_target_blocks=int(config.get("jepa_num_target_blocks", 2)),
             jepa_context_fraction=float(
-                _config_get(config, "jepa_context_fraction", 0.5)
+                config.get("jepa_context_fraction", 0.5)
             ),
             jepa_target_fraction=float(
-                _config_get(config, "jepa_target_fraction", 0.25)
+                config.get("jepa_target_fraction", 0.25)
             ),
-            jepa_block_min_len=int(_config_get(config, "jepa_block_min_len", 1)),
+            jepa_block_min_len=int(config.get("jepa_block_min_len", 1)),
             jepa_mask_strategy=_config_mask_strategy(
-                _config_get(config, "jepa_mask_strategy", "contiguous")
+                config.get("jepa_mask_strategy", "contiguous")
             ),
             jepa_mask_lengths=jepa_mask_lengths,
             jepa_mask_round_from=int(
-                _config_get(config, "jepa_mask_round_from", len(jepa_mask_lengths))
+                config.get("jepa_mask_round_from", len(jepa_mask_lengths))
             ),
             jepa_intensity_aware_mask_config={
-                key: float(_config_get(config, f"jepa_intensity_aware_{key}", value))
+                key: float(config.get(f"jepa_intensity_aware_{key}", value))
                 for key, value in AWARE_MIXED_MASK_CONFIG.items()
             },
             jepa_allow_target_overlap=bool(
-                _config_get(config, "jepa_allow_target_overlap", False)
+                config.get("jepa_allow_target_overlap", False)
             ),
-            num_peaks=int(_config_get(config, "num_peaks", NUM_PEAKS_OUTPUT)),
+            num_peaks=int(config.get("num_peaks", NUM_PEAKS_OUTPUT)),
             dataloader_pin_memory=bool(
-                _config_get(config, "dataloader_pin_memory", torch.cuda.is_available())
+                config.get("dataloader_pin_memory", torch.cuda.is_available())
             ),
             dataloader_num_workers=dataloader_num_workers,
             dataloader_prefetch_factor=int(
-                _config_get(config, "dataloader_prefetch_factor", 2)
+                config.get("dataloader_prefetch_factor", 2)
             ),
             dataloader_persistent_workers=bool(
-                _config_get(
-                    config,
+                config.get(
                     "dataloader_persistent_workers",
                     dataloader_num_workers > 0,
                 )
             ),
             dataloader_multiprocessing_context=str(
-                _config_get(config, "dataloader_multiprocessing_context", "")
+                config.get("dataloader_multiprocessing_context", "")
             ),
             dataloader_output_format=str(
-                _config_get(config, "dataloader_output_format", "torch")
+                config.get("dataloader_output_format", "torch")
             ),
         )

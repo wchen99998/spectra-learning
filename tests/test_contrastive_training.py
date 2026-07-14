@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from ml_collections import config_dict
 
+import train
 from spectra_learning.data import murcko as murcko_data
 from spectra_learning.data.massspec_targets import MACCS_FINGERPRINT_BITS
 from spectra_learning.training import contrastive as contrastive_training
@@ -19,6 +20,20 @@ from spectra_learning.training.contrastive import (
     train_contrastive,
 )
 from spectra_learning.training.checkpointing import covariance_pooler_checkpoint_path
+
+
+def test_train_routes_contrastive_task(monkeypatch, tmp_path: Path) -> None:
+    calls = []
+
+    def fake_train(config, workdir):
+        calls.append((config, workdir))
+        return {"run/training_task": "contrastive"}
+
+    monkeypatch.setattr(contrastive_training, "train_contrastive", fake_train)
+    config = {"training_task": "contrastive"}
+
+    assert train._train(config, tmp_path)["run/training_task"] == "contrastive"
+    assert calls == [(config, tmp_path)]
 
 
 def _write_split(root: Path, split: str, rows: list[tuple[str, float]]) -> None:

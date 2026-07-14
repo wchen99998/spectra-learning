@@ -41,12 +41,12 @@ def _optimizer_settings(
     device: torch.device,
 ) -> dict:
     is_cuda = device.type == "cuda"
-    fused_cfg = _config_get(config, "optimizer_fused", None)
+    fused_cfg = config.get("optimizer_fused", None)
     return {
         "base_lr": float(config.learning_rate),
-        "warmup_steps": int(_config_get(config, "warmup_steps", 0)),
-        "min_learning_rate": _config_get(config, "min_learning_rate", None),
-        "b2": float(_config_get(config, "b2", 0.999)),
+        "warmup_steps": int(config.get("warmup_steps", 0)),
+        "min_learning_rate": config.get("min_learning_rate", None),
+        "b2": float(config.get("b2", 0.999)),
         "weight_decay": float(config.weight_decay),
         "fused": is_cuda if fused_cfg is None else bool(fused_cfg) and is_cuda,
     }
@@ -97,7 +97,3 @@ def _build_single_adamw_optimizer(
         settings["min_learning_rate"],
     )
     return [optimizer], [scheduler]
-
-
-def _config_get(config: config_dict.ConfigDict, key: str, default: Any) -> Any:
-    return config.get(key, default)

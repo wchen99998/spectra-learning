@@ -10,31 +10,33 @@ PyTorch-based deep learning framework for pretraining JEPA-style models on conti
 
 ### Training
 ```bash
-python train.py --config configs/gems_a_50_mask.py --workdir experiments/my_run
+.venv/bin/python train.py --config configs/pretrain.py --workdir experiments/my_run
 ```
 
 ### Running tests
 ```bash
 # All tests
-python -m pytest tests/
+.venv/bin/python -m pytest
 
 # Single test file
-python -m pytest tests/test_pretrain.py
+.venv/bin/python -m pytest tests/test_pretrain.py
 
 # Single test class or method
-python -m pytest tests/test_pretrain.py::BlockJEPATests::test_forward_loss_is_finite
+.venv/bin/python -m pytest tests/test_pretrain.py::BlockJEPATests::test_forward_loss_is_finite
 ```
 
 ### Data preparation (standalone)
 ```bash
-python input_pipeline.py configs/gems_a_dataset.py
+.venv/bin/python -m spectra_learning.data.download \
+    --config configs/pretrain.py \
+    --artifact-dir data/artifacts
 ```
 
 ## Architecture
 
 ### Training Flow
 
-`train.py:train_and_evaluate` orchestrates the full pipeline:
+`train.py:_train` dispatches to the configured training task:
 1. Data flows from `GemsDataModule`, which resolves the HDF5 shard manifest and applies peak preprocessing on the fly.
 2. The training collator produces masked-context JEPA batches with `peak_*`, `context_mask`, and `target_masks`.
 3. The compiled forward pass (`torch.compile` with `reduce-overhead` + CUDA graphs) runs the batch through encoder -> masked latent predictor -> JEPA losses.
@@ -45,9 +47,9 @@ python input_pipeline.py configs/gems_a_dataset.py
 - **PeakSetEncoder**: raw scalar peak features (`mz`, `intensity`, `log1p(intensity)`) -> Fourier/MLP embedder -> PairMixer blocks with pair features -> LayerNorm.
 - **Targets / Predictor**: shared encoder target states supervise masked-token prediction; predictor maps visible context tokens to target-space latents.
 
-### Masked Training Batch (`input_pipeline.py`)
+### Masked Training Batch (`spectra_learning/data/gems/collate.py`)
 
-`input_pipeline.py` applies runtime preprocessing to raw 128-peak spectra:
+`GemsBatchCollator` applies runtime preprocessing to raw 128-peak spectra:
 - precursor m/z filtering
 - minimum intensity filtering
 - optional precursor-window exclusion
@@ -65,7 +67,9 @@ Training batches contain:
 
 ### Configuration System
 
-`ml_collections.ConfigDict` configs in `configs/`. Each config file is self-contained and loaded dynamically via importlib. Key config: `configs/gems_a_50_mask.py`.
+`ml_collections.ConfigDict` configs live in `configs/` and are loaded dynamically.
+The canonical pretraining base is `configs/pretrain.py`; current scale-specific
+configs derive from it.
 
 ### Data Pipeline (`spectra_learning/data/gems/`)
 
@@ -88,5 +92,5 @@ HDF5-shard based with auto-download from HuggingFace. `GemsDataModule` uses h5py
 
 ## Key Dependencies
 
-- PyTorch 2.11.0 (CUDA 13.0)
+- PyTorch 2.12.0 (CUDA 13.0)
 - ml-collections, rdkit, wandb, huggingface_hub

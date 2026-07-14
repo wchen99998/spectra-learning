@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
+from ml_collections import config_dict
 import numpy as np
 import pytest
 import torch
@@ -44,17 +46,15 @@ def test_fluorine_outputs_support_fsspec_prefix(monkeypatch, tmp_path: Path):
         precursor_peak_exclusion_window_da=0.0,
     )
     head_state = {
-        "mode": "lora",
+        "mode": "probe",
         "best_epoch": 1,
         "best_val": {"val/average_precision": 0.5, "val/roc_auc": 0.75},
         "test": None,
         "hparams": {"hidden_dim": 8, "dropout": 0.1},
         "pooling": "covariance",
         "pair_dim": 4,
-        "device_ids": [],
         "focal_alpha": 0.5,
         "focal_gamma": 2.0,
-        "finetune_cache_dir": str(tmp_path),
         "train_size": 8,
         "train_positive": 4,
         "val_size": 4,
@@ -85,6 +85,9 @@ def test_fluorine_outputs_support_fsspec_prefix(monkeypatch, tmp_path: Path):
     )
 
     assert summary["metrics"]["average_precision"] > 0.0
+    assert "metrics_prefixed" not in summary
+    assert "device_ids" not in summary["head"]
+    assert "finetune_cache_dir" not in summary["head"]
     assert storage_exists("memory://fluorine-unit/run.summary.json")
     assert storage_exists("memory://fluorine-unit/run.pr_curve.csv")
     assert storage_exists("memory://fluorine-unit/run.pr_curve.png")
@@ -159,6 +162,194 @@ def test_cli_accepts_lora_mode(monkeypatch):
     assert args.autocast_dtype == "bf16"
 
 
+class _StopAfterLoaderConstruction(Exception):
+    pass
+
+
+@pytest.mark.parametrize("trainer_name", ["train_or_load_finetuned", "train_or_load_lora"])
+@pytest.mark.parametrize("eval_test_every_epoch", [False, True])
+def test_adaptation_trainers_only_build_test_loader_for_per_epoch_evaluation(
+    monkeypatch,
+    tmp_path: Path,
+    trainer_name: str,
+    eval_test_every_epoch: bool,
+):
+    loader_splits = []
+
+    monkeypatch.setattr(fluorine, "build_fluorine_data", lambda **_kwargs: object())
+
+    def fake_make_loader(_data, split, **_kwargs):
+        loader_splits.append(split)
+        return []
+
+    def stop_after_loaders(**_kwargs):
+        raise _StopAfterLoaderConstruction
+
+    monkeypatch.setattr(fluorine, "_make_loader", fake_make_loader)
+    monkeypatch.setattr(fluorine, "CovariancePool", stop_after_loaders)
+    kwargs = {
+        "state_path": tmp_path / f"{trainer_name}.pt",
+        "model": object(),
+        "config": config_dict.ConfigDict(
+            {"model_dim": 4, "covariance_pooling_dim": 2}
+        ),
+        "config_path": tmp_path / "config.py",
+        "checkpoint_path": tmp_path / "checkpoint.pt",
+        "cache_dir": tmp_path,
+        "device": torch.device("cpu"),
+        "batch_size": 2,
+        "num_workers": 0,
+        "seed": 0,
+        "epochs": 1,
+        "patience": 1,
+        "weight_decay": 0.0,
+        "autocast_dtype": None,
+        "hidden_dim": 4,
+        "dropout": 0.0,
+        "revision": "main",
+        "max_train_samples": None,
+        "max_val_samples": None,
+        "max_test_samples": None,
+        "pooling": "covariance",
+        "eval_test_every_epoch": eval_test_every_epoch,
+    }
+    if trainer_name == "train_or_load_finetuned":
+        kwargs.update(
+            {
+                "model_learning_rate": 1e-4,
+                "pooler_learning_rate": 1e-4,
+                "head_learning_rate": 1e-4,
+                "focal_alpha": "auto",
+                "focal_gamma": 2.0,
+                "select_metric": "average_precision",
+            }
+        )
+    else:
+        kwargs.update(
+            {
+                "lora_rank": 2,
+                "lora_alpha": 4.0,
+                "lora_dropout": 0.0,
+                "lora_learning_rate": 1e-4,
+                "head_learning_rate": 1e-4,
+            }
+        )
+
+    with pytest.raises(_StopAfterLoaderConstruction):
+        getattr(fluorine, trainer_name)(**kwargs)
+
+    assert loader_splits == (
+        ["train", "val", "test"]
+        if eval_test_every_epoch
+        else ["train", "val"]
+    )
+
+
+def test_run_persists_single_canonical_final_test_evaluation(monkeypatch, tmp_path: Path):
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    head_state_path = tmp_path / "head.pt"
+    output_prefix = tmp_path / "fluorine"
+    config = config_dict.ConfigDict({"model_dim": 4, "autocast_dtype": "none"})
+    model = torch.nn.Module()
+    head_state = {
+        "mode": "finetune",
+        "complete": True,
+        "test": None,
+    }
+    evaluation_calls = 0
+
+    monkeypatch.setattr(
+        fluorine,
+        "init_distributed_from_env",
+        lambda: SimpleNamespace(is_distributed=False, is_main=True),
+    )
+    monkeypatch.setattr(
+        fluorine,
+        "resolve_checkpoint_path",
+        lambda _checkpoint, _workdir: checkpoint_path,
+    )
+    monkeypatch.setattr(
+        fluorine,
+        "_load_checkpoint_model",
+        lambda _config_path, _checkpoint_path, _device: (config, model),
+    )
+    monkeypatch.setattr(
+        fluorine,
+        "train_or_load_finetuned",
+        lambda **_kwargs: head_state,
+    )
+    monkeypatch.setattr(
+        fluorine,
+        "build_fluorine_data",
+        lambda **_kwargs: SimpleNamespace(
+            metadata={"test_size": 2, "test_positive": 1}
+        ),
+    )
+
+    def fake_evaluate(**_kwargs):
+        nonlocal evaluation_calls
+        evaluation_calls += 1
+        return (
+            np.asarray([0.0, 1.0]),
+            np.asarray([-1.0, 1.0]),
+            np.asarray([0, 1]),
+        )
+
+    def fake_write_outputs(**kwargs):
+        assert kwargs["head_state"]["test"]["test/average_precision"] == 1.0
+        persisted_state = torch.load(head_state_path, weights_only=False)
+        assert persisted_state["test"]["test/average_precision"] == 1.0
+        return {"mode": "finetune", "metrics": {"average_precision": 1.0}}
+
+    monkeypatch.setattr(fluorine, "evaluate_fluorine_test_split", fake_evaluate)
+    monkeypatch.setattr(fluorine, "write_standard_fluorine_outputs", fake_write_outputs)
+    monkeypatch.setattr(
+        fluorine,
+        "write_all_pr_curve_comparison",
+        lambda **_kwargs: {"curves": []},
+    )
+    args = SimpleNamespace(
+        mode="finetune",
+        seed=0,
+        device="cpu",
+        checkpoint=checkpoint_path,
+        workdir=None,
+        config=tmp_path / "config.py",
+        head_state=head_state_path,
+        output_prefix=output_prefix,
+        autocast_dtype="none",
+        epochs=1,
+        patience=1,
+        finetune_cache_dir=tmp_path,
+        batch_size=2,
+        num_workers=0,
+        finetune_model_lr=1e-4,
+        finetune_pooler_lr=1e-4,
+        finetune_head_lr=1e-4,
+        finetune_weight_decay=0.0,
+        focal_alpha="auto",
+        focal_gamma=2.0,
+        hidden_dim=4,
+        dropout=0.0,
+        revision="main",
+        max_train_samples=None,
+        max_val_samples=None,
+        max_test_samples=None,
+        pooling="covariance",
+        select_metric="average_precision",
+        eval_test_every_epoch=False,
+        comparison_dir=None,
+        previous_ours_prefix=None,
+        output_json=None,
+    )
+
+    fluorine.run(args)
+
+    saved_state = torch.load(head_state_path, weights_only=False)
+    assert evaluation_calls == 1
+    assert saved_state["test"]["test/average_precision"] == 1.0
+
+
 def test_lora_cached_state_injects_adapters_without_full_model_state(tmp_path: Path):
     source = _FakeFluorineModel()
     lora_config = fluorine._lora_config(rank=2, alpha=4.0, dropout=0.0)
@@ -223,7 +414,6 @@ def test_lora_cached_state_injects_adapters_without_full_model_state(tmp_path: P
         max_val_samples=None,
         max_test_samples=None,
         pooling="covariance",
-        device_ids=None,
     )
 
     block = model.encoder.blocks[0]
@@ -285,5 +475,4 @@ def test_lora_cached_state_requires_pooling_field(tmp_path: Path):
             max_val_samples=None,
             max_test_samples=None,
             pooling="covariance",
-            device_ids=None,
         )

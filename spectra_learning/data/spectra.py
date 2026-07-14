@@ -49,6 +49,29 @@ _SIRIUS_ISOTOPE_RANGES_DA = (
 )
 
 
+def spectra_from_peak_lists(
+    mz_lists: list[list[float]],
+    intensity_lists: list[list[float]],
+) -> np.ndarray:
+    spectra = np.zeros((len(mz_lists), 2, NUM_PEAKS_INPUT), dtype=np.float32)
+    for row, (mz, intensity) in enumerate(
+        zip(mz_lists, intensity_lists, strict=True)
+    ):
+        num_peaks = min(len(mz), NUM_PEAKS_INPUT)
+        spectra[row, 0, :num_peaks] = np.asarray(mz[:num_peaks], dtype=np.float32)
+        spectra[row, 1, :num_peaks] = np.asarray(
+            intensity[:num_peaks],
+            dtype=np.float32,
+        )
+    max_intensity = spectra[:, 1].max(axis=1, keepdims=True)
+    np.divide(
+        spectra[:, 1],
+        np.maximum(max_intensity, 1e-8),
+        out=spectra[:, 1],
+    )
+    return spectra
+
+
 def _find_group_parent(parent: list[int], x: int) -> int:
     while parent[x] != x:
         parent[x] = parent[parent[x]]
@@ -207,84 +230,6 @@ def _select_grouped_peaks_numpy(
     return selected_mz, selected_intensity, selected_group_id
 
 
-def _groups_from_parent_torch(parent: list[int]) -> list[list[int]]:
-    groups_by_root: dict[int, list[int]] = {}
-    for i in range(len(parent)):
-        root = _find_group_parent(parent, i)
-        if root not in groups_by_root:
-            groups_by_root[root] = []
-        groups_by_root[root].append(i)
-    return list(groups_by_root.values())
-
-
-def _group_shoulder_peak_indices_torch(
-    mz: torch.Tensor,
-    *,
-    shoulder_da: float,
-) -> list[list[int]]:
-    parent = list(range(mz.numel()))
-    for i in range(mz.numel()):
-        value = float(mz[i])
-        shoulder_end = int(
-            torch.searchsorted(mz, value + shoulder_da, right=True).item()
-        )
-        for j in range(i + 1, shoulder_end):
-            _union_group_parent(parent, i, j)
-    return _groups_from_parent_torch(parent)
-
-
-def _group_isotope_peak_indices_torch(
-    mz: torch.Tensor,
-    *,
-    isotope_charges: tuple[int, ...],
-) -> list[list[int]]:
-    parent = list(range(mz.numel()))
-    for i in range(mz.numel()):
-        value = float(mz[i])
-        for charge in isotope_charges:
-            if charge > 1 and value / charge < 100.0:
-                continue
-            pattern_edges: list[int] = []
-            for lo_delta, hi_delta in _SIRIUS_ISOTOPE_RANGES_DA:
-                lo = int(
-                    torch.searchsorted(
-                        mz,
-                        value + lo_delta / charge,
-                        right=False,
-                    ).item()
-                )
-                hi = int(
-                    torch.searchsorted(
-                        mz,
-                        value + hi_delta / charge,
-                        right=True,
-                    ).item()
-                )
-                if hi <= max(i + 1, lo):
-                    break
-                pattern_edges.extend(range(max(i + 1, lo), hi))
-            for j in pattern_edges:
-                _union_group_parent(parent, i, j)
-    return _groups_from_parent_torch(parent)
-
-
-def _collapse_shoulder_peaks_torch(
-    mz: torch.Tensor,
-    intensity: torch.Tensor,
-    *,
-    shoulder_da: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    groups = _group_shoulder_peak_indices_torch(mz, shoulder_da=shoulder_da)
-    representatives = []
-    for group in groups:
-        group_idx = torch.tensor(group, dtype=torch.long, device=mz.device)
-        representatives.append(group_idx[torch.argmax(intensity[group_idx])])
-    representative_idx = torch.stack(representatives)
-    order = torch.argsort(mz[representative_idx], stable=True)
-    representative_idx = representative_idx[order]
-    return mz[representative_idx], intensity[representative_idx]
-
-
 def _select_top_intensity_torch(
     mz: torch.Tensor,
     intensity: torch.Tensor,
@@ -318,65 +263,24 @@ def _select_grouped_peaks_torch(
     shoulder_da: float,
     isotope_charges: tuple[int, ...],
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    selected_mz = torch.zeros(
-        mz.shape[0],
-        num_peaks,
-        dtype=mz.dtype,
-        device=mz.device,
+    assert mz.device.type == "cpu" and intensity.device.type == "cpu", (
+        "grouped peak filtering runs on CPU before device transfer"
     )
-    selected_intensity = torch.zeros(
-        intensity.shape[0],
-        num_peaks,
-        dtype=intensity.dtype,
-        device=intensity.device,
+    assert mz.dtype == torch.float32 and intensity.dtype == torch.float32, (
+        "grouped peak filtering expects float32 spectra"
     )
-    selected_group_id = torch.full(
-        (mz.shape[0], num_peaks),
-        PEAK_GROUP_PADDING_ID,
-        dtype=torch.int32,
-        device=mz.device,
+    selected_mz, selected_intensity, selected_group_id = _select_grouped_peaks_numpy(
+        mz.numpy(),
+        intensity.numpy(),
+        num_peaks=num_peaks,
+        shoulder_da=shoulder_da,
+        isotope_charges=isotope_charges,
     )
-    for row_idx in range(mz.shape[0]):
-        valid = intensity[row_idx] > 0
-        row_mz = mz[row_idx, valid]
-        row_intensity = intensity[row_idx, valid]
-        if row_mz.numel() == 0:
-            continue
-        mz_order = torch.argsort(row_mz, stable=True)
-        row_mz = row_mz[mz_order]
-        row_intensity = row_intensity[mz_order]
-        row_mz, row_intensity = _collapse_shoulder_peaks_torch(
-            row_mz,
-            row_intensity,
-            shoulder_da=shoulder_da,
-        )
-        groups = _group_isotope_peak_indices_torch(
-            row_mz,
-            isotope_charges=isotope_charges,
-        )
-        group_scores = []
-        for group in groups:
-            group_idx = torch.tensor(group, dtype=torch.long, device=mz.device)
-            group_scores.append(row_intensity[group_idx].max())
-        group_score_tensor = torch.stack(group_scores)
-        group_order = torch.argsort(group_score_tensor, descending=True, stable=True)
-        offset = 0
-        output_group_id = 0
-        for group_idx in group_order.tolist():
-            group = groups[int(group_idx)]
-            group_size = len(group)
-            if offset + group_size > num_peaks:
-                continue
-            group_idx_tensor = torch.tensor(group, dtype=torch.long, device=mz.device)
-            order = torch.argsort(row_mz[group_idx_tensor], stable=True)
-            peak_indices = group_idx_tensor[order]
-            end = offset + group_size
-            selected_mz[row_idx, offset:end] = row_mz[peak_indices]
-            selected_intensity[row_idx, offset:end] = row_intensity[peak_indices]
-            selected_group_id[row_idx, offset:end] = output_group_id
-            offset = end
-            output_group_id += 1
-    return selected_mz, selected_intensity, selected_group_id
+    return (
+        torch.from_numpy(selected_mz),
+        torch.from_numpy(selected_intensity),
+        torch.from_numpy(selected_group_id),
+    )
 
 
 def preprocess_peak_batch_numpy(

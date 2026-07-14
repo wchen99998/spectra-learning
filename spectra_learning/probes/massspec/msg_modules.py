@@ -1,23 +1,26 @@
-from typing import Any
-
 import torch
 from ml_collections import config_dict
 
-from spectra_learning.models.pooling import CovariancePool, SinglePairCovariancePool
+from spectra_learning.models.pooling import (
+    CovariancePool,
+    SinglePairCovariancePool,
+    token_mask_with_optional_cls,
+)
 from spectra_learning.models.transformer import (
     CrossAttention,
     FeedForward,
     TransformerBlock,
     _build_norm,
 )
+from spectra_learning.probes.massspec.msg_probe_common import (
+    probe_prediction_names as _probe_prediction_names,
+    probe_task_names as _probe_task_names,
+    probe_task_output_dims as _probe_task_output_dims,
+)
 from spectra_learning.probes.massspec.msg_settings import (
     MsgProbeTaskSpec,
     build_msg_probe_inputs,
 )
-
-
-def _config_get(config: config_dict.ConfigDict, key: str, default: Any) -> Any:
-    return config.get(key, default)
 
 
 class MsgLinearProbe(torch.nn.Module):
@@ -276,24 +279,16 @@ class MsgSinglePairPmaPool(torch.nn.Module):
     def output_dim(self) -> int:
         return 2 * self.num_tokens * self.latent_dim
 
-    def _token_mask(self, valid_mask: torch.Tensor) -> torch.Tensor:
-        if not self.include_cls_token:
-            return valid_mask
-        cls_mask = torch.ones(
-            valid_mask.shape[0],
-            1,
-            device=valid_mask.device,
-            dtype=torch.bool,
-        )
-        return torch.cat([valid_mask, cls_mask], dim=1)
-
     def forward(
         self,
         peak_embeddings: torch.Tensor,
         valid_mask: torch.Tensor,
         pair_embeddings: torch.Tensor,
     ) -> torch.Tensor:
-        token_mask = self._token_mask(valid_mask)
+        token_mask = token_mask_with_optional_cls(
+            valid_mask,
+            include_cls_token=self.include_cls_token,
+        )
         num_tokens = token_mask.shape[1]
         dtype = self.single_encoder.seed_vectors.dtype
         peak_embeddings = peak_embeddings[:, :num_tokens].to(dtype=dtype)
@@ -471,12 +466,12 @@ def build_msg_sequence_probe(
     covariance_pooler: torch.nn.Module | None = None,
 ) -> torch.nn.Module:
     model_dim = int(config.model_dim)
-    hidden_dim = int(_config_get(config, "msg_probe_mlp_hidden_dim", model_dim))
-    num_layers = int(_config_get(config, "msg_probe_mlp_num_layers", 2))
+    hidden_dim = int(config.get("msg_probe_mlp_hidden_dim", model_dim))
+    num_layers = int(config.get("msg_probe_mlp_num_layers", 2))
     task_names = _probe_task_names(task_spec)
     task_output_dims = _probe_task_output_dims(task_spec)
     if variant == "cls":
-        pair_dim = int(_config_get(config, "pairmixer_pair_dim", model_dim))
+        pair_dim = int(config.get("pairmixer_pair_dim", model_dim))
         return MsgSinglePairClsProbe(
             pooler=MsgSinglePairClsPool(),
             pooled_dim=model_dim + pair_dim,
@@ -487,14 +482,13 @@ def build_msg_sequence_probe(
         )
     if _is_single_pair_covariance_variant(variant):
         if covariance_pooler is None:
-            compressed_dim = int(_config_get(config, "covariance_pooling_dim", 32))
+            compressed_dim = int(config.get("covariance_pooling_dim", 32))
             pooler = MsgSinglePairCovariancePool(
                 single_dim=model_dim,
-                pair_dim=int(_config_get(config, "pairmixer_pair_dim", model_dim)),
+                pair_dim=int(config.get("pairmixer_pair_dim", model_dim)),
                 compressed_dim=compressed_dim,
                 include_diagonal=bool(
-                    _config_get(
-                        config,
+                    config.get(
                         "msg_probe_single_pair_covariance_include_diagonal",
                         False,
                     )
@@ -504,7 +498,7 @@ def build_msg_sequence_probe(
         else:
             pooler = (
                 FrozenPooler(covariance_pooler)
-                if bool(_config_get(config, "msg_probe_freeze_supplied_pooler", True))
+                if bool(config.get("msg_probe_freeze_supplied_pooler", True))
                 else covariance_pooler
             )
             pooled_dim = covariance_pooler.output_dim
@@ -517,16 +511,14 @@ def build_msg_sequence_probe(
             task_output_dims=task_output_dims,
         )
     if _is_single_pair_pma_variant(variant):
-        pair_dim = int(_config_get(config, "pairmixer_pair_dim", model_dim))
-        num_tokens = int(_config_get(config, "msg_probe_single_pair_pma_num_tokens", 8))
+        pair_dim = int(config.get("pairmixer_pair_dim", model_dim))
+        num_tokens = int(config.get("msg_probe_single_pair_pma_num_tokens", 8))
         num_heads = int(
-            _config_get(
-                config,
+            config.get(
                 "msg_probe_single_pair_pma_num_heads",
-                _config_get(
-                    config,
+                config.get(
                     "msg_probe_pma_num_heads",
-                    _config_get(config, "encoder_num_heads", 8),
+                    config.get("encoder_num_heads", 8),
                 ),
             )
         )
@@ -539,9 +531,9 @@ def build_msg_sequence_probe(
             num_heads=num_heads,
             num_blocks=num_blocks,
             hidden_dim=hidden_dim,
-            norm_eps=float(_config_get(config, "norm_eps", 1e-5)),
+            norm_eps=float(config.get("norm_eps", 1e-5)),
             include_cls_token=bool(
-                _config_get(config, "msg_probe_single_pair_pma_include_cls_token", False)
+                config.get("msg_probe_single_pair_pma_include_cls_token", False)
             ),
         )
         return MsgSinglePairLinearProbe(
@@ -606,29 +598,6 @@ def _init_probe_output(linear: torch.nn.Module) -> None:
         torch.nn.init.zeros_(linear.bias)
 
 
-def _probe_task_names(task_spec: MsgProbeTaskSpec) -> tuple[str, ...]:
-    task_names = task_spec.regression_tasks + task_spec.binary_tasks
-    if task_spec.maccs_bits > 0:
-        task_names += (task_spec.fingerprint_task,)
-    return task_names
-
-
-def _probe_prediction_names(task_spec: MsgProbeTaskSpec) -> tuple[str, ...]:
-    task_names = task_spec.regression_tasks + task_spec.binary_tasks
-    if task_spec.maccs_bits > 0:
-        task_names += (task_spec.fingerprint_task,)
-    return task_names
-
-
-def _probe_task_output_dims(task_spec: MsgProbeTaskSpec) -> dict[str, int]:
-    output_dims: dict[str, int] = {}
-    if task_spec.maccs_bits > 0:
-        output_dims[task_spec.fingerprint_task] = (
-            len(task_spec.regression_tasks) + task_spec.maccs_bits
-        )
-    return output_dims
-
-
 def _is_single_pair_pma_variant(variant: str) -> bool:
     return variant == "single_pair_pma" or variant.startswith("single_pair_pma_")
 
@@ -653,7 +622,7 @@ def _single_pair_pma_num_blocks(
     if variant.startswith(prefix):
         suffix = variant[len(prefix):].removesuffix("blocks").removesuffix("block")
         return int(suffix)
-    return int(_config_get(config, "msg_probe_single_pair_pma_num_blocks", 2))
+    return int(config.get("msg_probe_single_pair_pma_num_blocks", 2))
 
 
 def _build_pooler(
@@ -671,12 +640,11 @@ def _build_pooler(
         return (
             MsgPmaPool(
                 input_dim=model_dim,
-                num_seeds=int(_config_get(config, "msg_probe_pma_num_seeds", 4)),
+                num_seeds=int(config.get("msg_probe_pma_num_seeds", 4)),
                 num_heads=int(
-                    _config_get(
-                        config,
+                    config.get(
                         "msg_probe_pma_num_heads",
-                        _config_get(config, "encoder_num_heads", 8),
+                        config.get("encoder_num_heads", 8),
                     )
                 ),
             ),
@@ -691,7 +659,7 @@ def _build_covariance_pooler(
     covariance_pooler: CovariancePool | None,
 ) -> tuple[torch.nn.Module, int]:
     if covariance_pooler is None:
-        compressed_dim = int(_config_get(config, "covariance_pooling_dim", 32))
+        compressed_dim = int(config.get("covariance_pooling_dim", 32))
         return (
             MsgCovariancePool(input_dim=model_dim, compressed_dim=compressed_dim),
             compressed_dim * compressed_dim,
@@ -699,7 +667,7 @@ def _build_covariance_pooler(
     compressed_dim = covariance_pooler.left_proj.out_features
     pooler = (
         FrozenPooler(covariance_pooler)
-        if bool(_config_get(config, "msg_probe_freeze_supplied_pooler", True))
+        if bool(config.get("msg_probe_freeze_supplied_pooler", True))
         else covariance_pooler
     )
     return pooler, compressed_dim * compressed_dim

@@ -16,7 +16,6 @@ from jax.experimental import multihost_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from ml_collections import config_dict
 
-from spectra_learning.config.msg_probe import validate_msg_probe_config
 from spectra_learning.data.loading import local_batch_size
 from spectra_learning.data.massspec_probe import MassSpecProbeData
 from spectra_learning.models.common_jax import Array
@@ -24,6 +23,21 @@ from spectra_learning.models.fastmixer_capacity import (
     pairmixer_fast_full_visible_tokens,
 )
 from spectra_learning.models.model_jax import PeakSetJEPAJax
+from spectra_learning.probes.massspec.msg_probe_common import (
+    EpochState,
+    merge_epoch_states as _merge_epoch_states,
+    msg_probe_metric_higher_is_better,
+    msg_probe_variant_metric_key as _msg_probe_variant_metric_key,
+    new_epoch_state as _new_epoch_state,
+    probe_prediction_names as _probe_prediction_names,
+    probe_task_names as _probe_task_names,
+    probe_task_output_dims as _probe_task_output_dims,
+    resolve_msg_probe_select_metric as resolve_msg_probe_select_metric_jax,
+    resolve_probe_warmup_steps as _resolve_probe_warmup_steps,
+    run_repeated_probe as _run_repeated_probe_jax,
+    score_epoch_state as _score_epoch_state,
+    sulfur_metric_subset as _sulfur_metric_subset,
+)
 from spectra_learning.probes.massspec.msg_settings import (
     BINARY_PROBE_TASKS,
     MACCS_TASK,
@@ -35,7 +49,6 @@ from spectra_learning.probes.massspec.msg_settings import (
     resolve_msg_probe_fingerprint,
     resolve_msg_probe_num_repeats,
 )
-from spectra_learning.probes.massspec.pr_curves import build_precision_recall_curve
 
 
 log = logging.getLogger(__name__)
@@ -43,7 +56,6 @@ log = logging.getLogger(__name__)
 JaxBatch = dict[str, Any]
 JaxFeatures = Array | tuple[Array, Array]
 JaxProbeParams = dict[str, Any]
-EpochState = dict[str, Any]
 PendingPrediction = tuple[dict[str, Array], np.ndarray, dict[str, np.ndarray]]
 JAX_PROBE_DATA_AXIS = "data"
 MAX_PENDING_PREDICTIONS = 4
@@ -87,19 +99,19 @@ def _run_msg_probe_once_jax(
     repeat_index: int,
     online_maccs_only: bool = False,
 ) -> dict[str, Any]:
-    num_probe_epochs = int(_config_get(config, "msg_probe_num_epochs", 5))
-    probe_lr = float(_config_get(config, "msg_probe_learning_rate", 1e-3))
-    probe_weight_decay = float(_config_get(config, "msg_probe_weight_decay", 1e-2))
-    peak_ordering = str(_config_get(config, "peak_ordering", "intensity"))
-    early_stopping = bool(_config_get(config, "msg_probe_early_stopping", False))
+    num_probe_epochs = int(config.get("msg_probe_num_epochs", 5))
+    probe_lr = float(config.get("msg_probe_learning_rate", 1e-3))
+    probe_weight_decay = float(config.get("msg_probe_weight_decay", 1e-2))
+    peak_ordering = str(config.get("peak_ordering", "intensity"))
+    early_stopping = bool(config.get("msg_probe_early_stopping", False))
     early_stopping_patience = int(
-        _config_get(config, "msg_probe_early_stopping_patience", 10)
+        config.get("msg_probe_early_stopping_patience", 10)
     )
     early_stopping_min_delta = float(
-        _config_get(config, "msg_probe_early_stopping_min_delta", 0.0)
+        config.get("msg_probe_early_stopping_min_delta", 0.0)
     )
     early_stopping_min_epochs = int(
-        _config_get(config, "msg_probe_early_stopping_min_epochs", 1)
+        config.get("msg_probe_early_stopping_min_epochs", 1)
     )
     fingerprint_task = (
         MACCS_TASK if online_maccs_only else resolve_msg_probe_fingerprint(config)
@@ -191,8 +203,7 @@ def _run_msg_probe_once_jax(
         regression_tasks=regression_tasks,
         binary_tasks=binary_tasks,
         single_pair_covariance_include_diagonal=bool(
-            _config_get(
-                config,
+            config.get(
                 "msg_probe_single_pair_covariance_include_diagonal",
                 False,
             )
@@ -858,23 +869,6 @@ def _merge_split_targets_jax(
     )
 
 
-def _merge_epoch_states_jax(
-    states: list[EpochState],
-    task_spec: MsgProbeTaskSpec,
-) -> EpochState:
-    merged = _new_epoch_state(task_spec)
-    merged["count"] = sum(int(state["count"]) for state in states)
-    merged_predictions = merged["predictions"]
-    merged_targets = merged["targets"]
-    for state in states:
-        predictions = state["predictions"]
-        targets = state["targets"]
-        for name in _probe_prediction_names(task_spec):
-            merged_predictions[name].extend(predictions[name])
-            merged_targets[name].extend(targets[name])
-    return merged
-
-
 def _gather_variant_states_jax(
     states: dict[str, EpochState],
     task_spec: MsgProbeTaskSpec,
@@ -887,7 +881,7 @@ def _gather_variant_states_jax(
         if isinstance(rank_states, dict)
     ]
     return {
-        variant: _merge_epoch_states_jax(
+        variant: _merge_epoch_states(
             [
                 rank_states[variant]
                 for rank_states in gathered
@@ -982,10 +976,6 @@ def _make_jitted_probe_train_step(
             grads = _mean_tree_across_processes(grads)
             return apply_step(params, opt_state, grads, batch, features)
 
-        train_step._jitted_compile_fns = (  # type: ignore[attr-defined]
-            ("probe_grad", grad_step),
-            ("probe_apply", apply_step),
-        )
         return train_step
 
     @jax.jit
@@ -1023,12 +1013,7 @@ def _make_jitted_probe_train_step(
     ) -> tuple[JaxProbeParams, optax.OptState, dict[str, Array]]:
         return local_train_step(params, opt_state, batch, features)
 
-    train_step._jitted_compile_fns = (("probe_train", local_train_step),)  # type: ignore[attr-defined]
     return train_step
-
-
-def jitted_probe_train_step_compile_fns(train_step: Any) -> tuple[tuple[str, Any], ...]:
-    return tuple(getattr(train_step, "_jitted_compile_fns", ()))
 
 
 def _make_jitted_probe_predict_step(
@@ -1129,28 +1114,6 @@ def _probe_loss(
     return jnp.stack(losses).mean()
 
 
-def _probe_predictions(
-    params: JaxProbeParams,
-    *,
-    variant: str,
-    task_spec: MsgProbeTaskSpec,
-    batch: JaxBatch,
-    features: JaxFeatures,
-) -> dict[str, Any]:
-    logits = _probe_logits(
-        params,
-        variant=variant,
-        task_spec=task_spec,
-        features=features,
-        valid_mask=batch["peak_valid_mask"],
-    )
-    return _probe_predictions_from_logits(
-        logits,
-        task_spec=task_spec,
-        batch=batch,
-    )
-
-
 def _append_pending_prediction(
     pending: list[PendingPrediction],
     *,
@@ -1222,28 +1185,6 @@ def _flush_pending_predictions(
 ) -> None:
     while pending:
         _flush_oldest_pending_prediction(epoch_state, pending, task_spec)
-
-
-def _probe_predictions_from_logits(
-    logits: dict[str, Array],
-    *,
-    task_spec: MsgProbeTaskSpec,
-    batch: JaxBatch,
-) -> dict[str, Any]:
-    valid_mask = _host_local_array(batch["probe_valid_mol"]).astype(bool, copy=False)
-    if not valid_mask.any():
-        return {"batch_size": 0, "predictions": {}, "targets": {}}
-    targets = _probe_targets_from_batch(
-        batch,
-        valid_mask=valid_mask,
-        task_spec=task_spec,
-    )
-    return _probe_predictions_from_host_logits(
-        _host_local_tree(logits),
-        valid_mask=valid_mask,
-        target_values=targets,
-        task_spec=task_spec,
-    )
 
 
 def _probe_predictions_from_host_logits(
@@ -1484,7 +1425,7 @@ def _full_visible_fastmixer_probe_model(
     probe_model = PeakSetJEPAJax(
         model.settings,
         pairmixer_fast_max_visible_tokens=full_visible_tokens,
-        rngs=nnx.Rngs(int(_config_get(config, "seed", 0))),
+        rngs=nnx.Rngs(int(config.get("seed", 0))),
     )
     nnx.update(probe_model, nnx.as_pure(nnx.state(model, nnx.Param)))
     return probe_model
@@ -1555,8 +1496,8 @@ def _init_probe_params(
     task_spec: MsgProbeTaskSpec,
 ) -> JaxProbeParams:
     model_dim = int(config.model_dim)
-    hidden_dim = int(_config_get(config, "msg_probe_mlp_hidden_dim", model_dim))
-    num_layers = int(_config_get(config, "msg_probe_mlp_num_layers", 2))
+    hidden_dim = int(config.get("msg_probe_mlp_hidden_dim", model_dim))
+    num_layers = int(config.get("msg_probe_mlp_num_layers", 2))
     key, pool_key, heads_key = jax.random.split(key, 3)
     pooler, pooled_dim = _init_pooler(
         pool_key,
@@ -1590,18 +1531,18 @@ def _init_pooler(
     if variant == "mean":
         return {}, model_dim
     if variant == "covariance":
-        compressed_dim = int(_config_get(config, "covariance_pooling_dim", 32))
+        compressed_dim = int(config.get("covariance_pooling_dim", 32))
         left_key, right_key = jax.random.split(key)
         return {
             "left": _xavier(left_key, model_dim, compressed_dim),
             "right": _xavier(right_key, model_dim, compressed_dim),
         }, compressed_dim * compressed_dim
     if variant == "cls":
-        pair_dim = int(_config_get(config, "pairmixer_pair_dim", model_dim))
+        pair_dim = int(config.get("pairmixer_pair_dim", model_dim))
         return {}, model_dim + pair_dim
     if _is_single_pair_covariance_variant(variant):
-        compressed_dim = int(_config_get(config, "covariance_pooling_dim", 32))
-        pair_dim = int(_config_get(config, "pairmixer_pair_dim", model_dim))
+        compressed_dim = int(config.get("covariance_pooling_dim", 32))
+        pair_dim = int(config.get("pairmixer_pair_dim", model_dim))
         keys = jax.random.split(key, 5)
         output_dim = compressed_dim * compressed_dim
         return {
@@ -1666,15 +1607,6 @@ def _xavier(key: Array, input_dim: int, output_dim: int) -> Array:
     )
 
 
-def _new_epoch_state(task_spec: MsgProbeTaskSpec) -> EpochState:
-    task_names = _probe_prediction_names(task_spec)
-    return {
-        "count": 0,
-        "predictions": {name: [] for name in task_names},
-        "targets": {name: [] for name in task_names},
-    }
-
-
 def _update_epoch_state_from_predictions(
     epoch_state: EpochState,
     result: dict[str, Any],
@@ -1687,250 +1619,6 @@ def _update_epoch_state_from_predictions(
     for name in _probe_prediction_names(task_spec):
         epoch_state["predictions"][name].append(result["predictions"][name])
         epoch_state["targets"][name].append(result["targets"][name])
-
-
-def _score_epoch_state(
-    *,
-    prefix: str,
-    epoch_state: EpochState,
-    task_spec: MsgProbeTaskSpec,
-    include_pr_curves: bool = False,
-) -> dict[str, Any]:
-    count = int(epoch_state["count"])
-    metrics: dict[str, Any] = {f"{prefix}/samples": float(count)}
-    regression_r2_values, regression_mae_values = [], []
-    predictions = epoch_state["predictions"]
-    targets = epoch_state["targets"]
-    for name in task_spec.regression_tasks:
-        pred = np.concatenate(predictions[name], axis=0)
-        target = np.concatenate(targets[name], axis=0)
-        metrics[f"{prefix}/r2_{name}"] = _r2_score(target, pred)
-        metrics[f"{prefix}/mae_{name}"] = float(np.mean(np.abs(target - pred)))
-        regression_r2_values.append(metrics[f"{prefix}/r2_{name}"])
-        regression_mae_values.append(metrics[f"{prefix}/mae_{name}"])
-    for name in task_spec.binary_tasks:
-        pred = np.concatenate(predictions[name], axis=0).astype(np.float64)
-        target = np.concatenate(targets[name], axis=0).astype(np.float64)
-        metrics.update(_binary_metrics(prefix, name, pred, target))
-        if include_pr_curves and name in ("fluorine", "sulfur"):
-            metrics[f"{prefix}/pr_curve_{name}"] = build_precision_recall_curve(
-                prefix=prefix,
-                name=name,
-                pred=pred,
-                target=target,
-            )
-    if task_spec.maccs_bits > 0:
-        fingerprint_task = task_spec.fingerprint_task
-        pred = np.concatenate(predictions[fingerprint_task], axis=0)
-        target = np.concatenate(targets[fingerprint_task], axis=0)
-        metrics.update(_fingerprint_metrics(prefix, fingerprint_task, pred, target))
-    if regression_r2_values:
-        metrics[f"{prefix}/r2_mean"] = float(np.mean(regression_r2_values))
-        metrics[f"{prefix}/mae_mean"] = float(np.mean(regression_mae_values))
-    return metrics
-
-
-def _sulfur_metric_subset(metrics: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: value
-        for key, value in metrics.items()
-        if key.endswith("/samples") or key.rsplit("/", 1)[-1].endswith("_sulfur")
-    }
-
-
-def _binary_metrics(
-    prefix: str,
-    name: str,
-    pred: np.ndarray,
-    target: np.ndarray,
-) -> dict[str, float]:
-    positives = float(target.sum())
-    negatives = float(target.shape[0]) - positives
-    if positives > 0 and negatives > 0:
-        order = np.argsort(pred)
-        target_ordered = target[order]
-        negatives_before = np.cumsum(1.0 - target_ordered)
-        auc = float((target_ordered * negatives_before).sum() / (positives * negatives))
-        target_descending = target_ordered[::-1]
-        true_positives_at_rank = np.cumsum(target_descending)
-        ranks = np.arange(1, target_descending.shape[0] + 1, dtype=np.float64)
-        average_precision = float(
-            (target_descending * true_positives_at_rank / ranks).sum() / positives
-        )
-    else:
-        auc = float("nan")
-        average_precision = float("nan")
-    predicted = pred >= 0.5
-    target_bits = target > 0
-    true_positives = float(np.count_nonzero(predicted & target_bits))
-    predicted_positives = float(np.count_nonzero(predicted))
-    return {
-        f"{prefix}/positive_{name}": positives,
-        f"{prefix}/auc_{name}": auc,
-        f"{prefix}/average_precision_{name}": average_precision,
-        f"{prefix}/recall_{name}": (
-            true_positives / positives if positives > 0 else float("nan")
-        ),
-        f"{prefix}/precision_{name}": (
-            true_positives / predicted_positives
-            if predicted_positives > 0
-            else float("nan")
-        ),
-    }
-
-
-def _fingerprint_metrics(
-    prefix: str,
-    fingerprint_task: str,
-    pred: np.ndarray,
-    target: np.ndarray,
-) -> dict[str, float]:
-    positives = target.sum(axis=0)
-    valid_metric_mask = (positives > 0) & (positives < target.shape[0])
-    if np.count_nonzero(valid_metric_mask) > 0:
-        valid_target = target[:, valid_metric_mask].astype(np.float64)
-        valid_pred = pred[:, valid_metric_mask].astype(np.float64)
-        valid_positives = positives[valid_metric_mask].astype(np.float64)
-        valid_negatives = float(target.shape[0]) - valid_positives
-        ascending = np.argsort(valid_pred, axis=0)
-        target_ascending = np.take_along_axis(valid_target, ascending, axis=0)
-        negatives_before = np.cumsum(1.0 - target_ascending, axis=0)
-        auc_values = (
-            (target_ascending * negatives_before).sum(axis=0)
-            / (valid_positives * valid_negatives)
-        )
-        target_descending = target_ascending[::-1]
-        true_positives_at_rank = np.cumsum(target_descending, axis=0)
-        ranks = np.arange(1, target_descending.shape[0] + 1, dtype=np.float64)[:, None]
-        average_precision_values = (
-            (target_descending * true_positives_at_rank / ranks).sum(axis=0)
-            / valid_positives
-        )
-    else:
-        auc_values = np.asarray([], dtype=np.float64)
-        average_precision_values = np.asarray([], dtype=np.float64)
-    positive_mask = positives > 0
-    bit_pred = pred >= 0.5
-    target_bits = target > 0
-    true_positives = (bit_pred & target_bits).sum(axis=0)
-    predicted_positives = bit_pred.sum(axis=0)
-    recall_values = true_positives[positive_mask] / positives[positive_mask]
-    precision_values = np.divide(
-        true_positives[positive_mask],
-        predicted_positives[positive_mask],
-        out=np.zeros_like(true_positives[positive_mask], dtype=np.float64),
-        where=predicted_positives[positive_mask] > 0,
-    )
-    intersection = np.count_nonzero(bit_pred & target_bits, axis=1)
-    union = np.count_nonzero(bit_pred | target_bits, axis=1)
-    tanimoto_values = intersection / np.maximum(union, 1)
-    dot = np.sum(pred * target, axis=1)
-    cosine_values = dot / np.maximum(
-        np.linalg.norm(pred, axis=1) * np.linalg.norm(target, axis=1),
-        1e-12,
-    )
-    return {
-        f"{prefix}/num_{fingerprint_task}_auc_bits": float(len(auc_values)),
-        f"{prefix}/num_{fingerprint_task}_average_precision_bits": float(
-            len(average_precision_values)
-        ),
-        f"{prefix}/num_{fingerprint_task}_recall_bits": float(len(recall_values)),
-        f"{prefix}/num_{fingerprint_task}_precision_bits": float(len(precision_values)),
-        f"{prefix}/auc_{fingerprint_task}_mean": (
-            float(np.mean(auc_values)) if len(auc_values) else float("nan")
-        ),
-        f"{prefix}/average_precision_{fingerprint_task}_mean": (
-            float(np.mean(average_precision_values))
-            if len(average_precision_values)
-            else float("nan")
-        ),
-        f"{prefix}/recall_{fingerprint_task}_mean": (
-            float(np.mean(recall_values)) if len(recall_values) else float("nan")
-        ),
-        f"{prefix}/precision_{fingerprint_task}_mean": (
-            float(np.mean(precision_values)) if len(precision_values) else float("nan")
-        ),
-        f"{prefix}/tanimoto_{fingerprint_task}_mean": float(np.mean(tanimoto_values)),
-        f"{prefix}/cosine_{fingerprint_task}_mean": float(np.mean(cosine_values)),
-    }
-
-
-def _run_repeated_probe_jax(
-    *,
-    repeat_count: int,
-    metric_prefix: str,
-    run_once: Callable[
-        [int, Callable[[dict[str, float]], None] | None],
-        dict[str, Any],
-    ],
-    on_epoch_end: Callable[[dict[str, float]], None] | None = None,
-) -> dict[str, Any]:
-    if repeat_count == 1:
-        metrics = dict(run_once(0, on_epoch_end))
-        if metrics:
-            metrics[f"{metric_prefix}/repeats"] = 1.0
-        return metrics
-
-    repeat_metrics: list[dict[str, Any]] = []
-    repeat_curves: list[list[dict[str, float]]] = []
-    for repeat_idx in range(repeat_count):
-        repeat_curve: list[dict[str, float]] = []
-        metrics = run_once(repeat_idx, repeat_curve.append)
-        if metrics:
-            repeat_metrics.append(metrics)
-        if repeat_curve:
-            repeat_curves.append(repeat_curve)
-    averaged_metrics = _average_metric_dicts(repeat_metrics)
-    if averaged_metrics:
-        averaged_metrics[f"{metric_prefix}/repeats"] = float(repeat_count)
-    if on_epoch_end is not None and repeat_curves:
-        num_epochs = max(len(curve) for curve in repeat_curves)
-        for epoch_idx in range(num_epochs):
-            epoch_metrics = _average_metric_dicts(
-                [curve[epoch_idx] for curve in repeat_curves if epoch_idx < len(curve)]
-            )
-            if epoch_metrics:
-                on_epoch_end(epoch_metrics)
-    return averaged_metrics
-
-
-def resolve_msg_probe_select_metric_jax(config: Any) -> str:
-    validate_msg_probe_config(config)
-    return str(_config_get(config, "msg_probe_select_metric", "msg_probe/test/auc_fluorine"))
-
-
-def msg_probe_metric_higher_is_better(metric_key: str) -> bool:
-    return "/mae_" not in metric_key
-
-
-def _probe_task_names(task_spec: MsgProbeTaskSpec) -> tuple[str, ...]:
-    task_names = task_spec.regression_tasks + task_spec.binary_tasks
-    if task_spec.maccs_bits > 0:
-        task_names += (task_spec.fingerprint_task,)
-    return task_names
-
-
-def _probe_prediction_names(task_spec: MsgProbeTaskSpec) -> tuple[str, ...]:
-    return _probe_task_names(task_spec)
-
-
-def _probe_task_output_dims(task_spec: MsgProbeTaskSpec) -> dict[str, int]:
-    if task_spec.maccs_bits <= 0:
-        return {}
-    return {
-        task_spec.fingerprint_task: (
-            len(task_spec.regression_tasks) + task_spec.maccs_bits
-        )
-    }
-
-
-def _msg_probe_variant_metric_key(variant: str, metric_key: str) -> str:
-    variant_prefix = f"msg_probe/{variant}/"
-    if metric_key.startswith(variant_prefix):
-        return metric_key
-    if metric_key.startswith("msg_probe/"):
-        return variant_prefix + metric_key[len("msg_probe/"):]
-    return metric_key
 
 
 def _uses_pair_features(variant: str) -> bool:
@@ -1980,37 +1668,6 @@ def _probe_lr_schedule(
     return schedule
 
 
-def _resolve_probe_warmup_steps(config: Any, steps_per_epoch: int) -> int:
-    warmup_epochs = _config_get(config, "msg_probe_warmup_epochs", None)
-    if warmup_epochs is not None:
-        return int(round(float(warmup_epochs) * steps_per_epoch))
-    return int(_config_get(config, "msg_probe_warmup_steps", 100))
-
-
-def _average_metric_dicts(metric_dicts: list[dict[str, Any]]) -> dict[str, Any]:
-    totals: dict[str, float] = {}
-    counts: dict[str, int] = {}
-    artifacts: dict[str, Any] = {}
-    for metrics in metric_dicts:
-        for key, value in metrics.items():
-            if not isinstance(value, (int, float, np.number)):
-                artifacts.setdefault(key, value)
-                continue
-            totals[key] = totals.get(key, 0.0) + value
-            counts[key] = counts.get(key, 0) + 1
-    return {
-        **{key: totals[key] / counts[key] for key in totals},
-        **artifacts,
-    }
-
-
-def _r2_score(target: np.ndarray, pred: np.ndarray) -> float:
-    residual = float(np.sum(np.square(target - pred)))
-    centered = target - float(np.mean(target))
-    total = float(np.sum(np.square(centered)))
-    return 1.0 - residual / total if total > 0 else float("nan")
-
-
 def _log_epoch_metrics(
     *,
     variant: str,
@@ -2055,14 +1712,8 @@ def _clone_tree(tree: Any) -> Any:
     )
 
 
-def _config_get(config: Any, key: str, default: Any) -> Any:
-    if hasattr(config, "get"):
-        return config.get(key, default)
-    return getattr(config, key, default)
-
-
 def _optional_positive_int(config: Any, key: str) -> int | None:
-    raw = _config_get(config, key, None)
+    raw = config.get(key, None)
     if raw is None:
         return None
     value = int(raw)

@@ -39,20 +39,48 @@ Use one SLURM task per node, and let that task launch one `torchrun` worker per
 GPU on the node:
 
 ```bash
-CONFIG=configs/100m_pairmixer_dense_adamw.py \
-WORKDIR=/path/to/experiments/run_name \
-srun --ntasks-per-node=1 --gpus-per-node=8 --cpus-per-task=64 --kill-on-bad-exit=1 \
-    scripts/srun_torchrun_train.sh
+export CONFIG=configs/100m_pairmixer_dense_adamw.py
+export WORKDIR=/path/to/experiments/run_name
+export GPUS_PER_NODE=8
+export PROJECT_DIR="${PROJECT_DIR:-${SLURM_SUBMIT_DIR}}"
+export MASTER_ADDR="$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)"
+export MASTER_PORT="${MASTER_PORT:-29500}"
+
+srun --ntasks="${SLURM_NNODES}" --ntasks-per-node=1 --kill-on-bad-exit=1 \
+    bash -lc '
+        cd "${PROJECT_DIR}"
+        .venv/bin/python -m torch.distributed.run \
+            --nnodes="${SLURM_NNODES}" \
+            --nproc-per-node="${GPUS_PER_NODE}" \
+            --node-rank="${SLURM_NODEID}" \
+            --master-addr="${MASTER_ADDR}" \
+            --master-port="${MASTER_PORT}" \
+            train.py --config "${CONFIG}" --workdir "${WORKDIR}"
+    '
 ```
 
-For contrastive training, set `TRAIN_SCRIPT=train_contrastive.py`. Extra training
-script arguments can be appended after the launcher command.
+For contrastive training, use the same entrypoint and select the task through
+the config:
+
+```bash
+.venv/bin/python train.py \
+    --config configs/pretrain.py \
+    --workdir /path/to/workdir \
+    --overrides-json '{"training_task":"contrastive","training_mode":"contrastive"}'
+```
 
 ## JAX TPU Runtime Compilation
 
 There is no separate JAX TPU compile step. `train_sky.py` launches training
 directly, and JAX compiles the train, eval, and MSG-probe functions on their
 first real call inside the TPU allocation.
+
+JAX checkpoints use one composite Orbax format containing the training state
+and a JSON training contract. MAE checkpoints bind the complete effective
+configuration; AR checkpoints additionally record derived tokenizer, dataset,
+preprocessing, model, optimizer, and sampling/training values. Restore refuses
+any contract mismatch. Metadata-free checkpoints from the previous format are
+intentionally not resumable; start a new workdir for the current format.
 
 The SkyPilot task still enables JAX's normal persistent compilation cache under
 `/tmp/spectra-jax-cache/$CACHE_KEY` inside each VM. That cache is local to the
@@ -180,7 +208,7 @@ sky jobs queue
 sky jobs logs -n "spectra-${RUN_ID}"
 sky jobs logs JOB_ID
 sky jobs cancel JOB_ID
-gcloud compute instances list --filter="name~spectra AND zone:(us-east5-*)"
+gcloud compute instances list --filter="name~spectra AND zone:(us-south1-*)"
 gcloud compute instance-groups managed list --filter="name~sky-mig-spectra"
 ```
 

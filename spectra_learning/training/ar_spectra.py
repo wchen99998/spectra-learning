@@ -21,10 +21,6 @@ from spectra_learning.training.configuration import save_config
 from spectra_learning.training.logging import MetricLogger, build_logger
 
 
-def _config_get(config: config_dict.ConfigDict, key: str, default: Any) -> Any:
-    return config.get(key, default)
-
-
 @dataclass(frozen=True)
 class ARDistributedContext:
     world_size: int
@@ -40,7 +36,7 @@ def init_ar_distributed(config: config_dict.ConfigDict) -> ARDistributedContext:
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("RANK", "0"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    device_name = str(_config_get(config, "device", "auto")).lower()
+    device_name = str(config.get("device", "auto")).lower()
     if device_name == "auto":
         device_name = "cuda" if torch.cuda.is_available() else "cpu"
     use_cuda = device_name.startswith("cuda") and torch.cuda.is_available()
@@ -104,7 +100,7 @@ def train_and_evaluate_ar_spectra(
     if distributed.is_main:
         workdir.mkdir(parents=True, exist_ok=True)
         save_config(config, workdir)
-    seed = int(_config_get(config, "seed", 0))
+    seed = int(config.get("seed", 0))
     seed_all(seed + distributed.rank)
 
     device = distributed.device
@@ -128,27 +124,27 @@ def train_and_evaluate_ar_spectra(
         model = DistributedDataParallel(base_model, **ddp_kwargs)
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=float(_config_get(config, "learning_rate", 3e-4)),
+        lr=float(config.get("learning_rate", 3e-4)),
         betas=(
-            float(_config_get(config, "b1", 0.9)),
-            float(_config_get(config, "b2", 0.95)),
+            float(config.get("b1", 0.9)),
+            float(config.get("b2", 0.95)),
         ),
-        weight_decay=float(_config_get(config, "weight_decay", 0.01)),
+        weight_decay=float(config.get("weight_decay", 0.01)),
     )
     gradient_accumulation_steps = int(
-        _config_get(config, "gradient_accumulation_steps", 1)
+        config.get("gradient_accumulation_steps", 1)
     )
     total_steps = min(
-        int(_config_get(config, "training_max_steps", datamodule.train_steps)),
-        max(1, math.ceil(float(_config_get(config, "num_epochs", 1.0))))
+        int(config.get("training_max_steps", datamodule.train_steps)),
+        max(1, math.ceil(float(config.get("num_epochs", 1.0))))
         * datamodule.train_steps,
     )
-    log_every_n_steps = int(_config_get(config, "log_every_n_steps", 20))
-    val_every_n_steps = int(_config_get(config, "val_every_n_steps", 0))
-    val_num_steps = int(_config_get(config, "val_num_steps", 20))
-    checkpoint_every_n_steps = int(_config_get(config, "checkpoint_every_n_steps", 0))
-    grad_clip_norm = float(_config_get(config, "grad_clip_norm", 1.0))
-    autocast_dtype = str(_config_get(config, "autocast_dtype", "bf16")).lower()
+    log_every_n_steps = int(config.get("log_every_n_steps", 20))
+    val_every_n_steps = int(config.get("val_every_n_steps", 0))
+    val_num_steps = int(config.get("val_num_steps", 20))
+    checkpoint_every_n_steps = int(config.get("checkpoint_every_n_steps", 0))
+    grad_clip_norm = float(config.get("grad_clip_norm", 1.0))
+    autocast_dtype = str(config.get("autocast_dtype", "bf16")).lower()
     logger = build_logger(config, workdir) if distributed.is_main else MetricLogger()
 
     if distributed.is_main:
@@ -164,7 +160,7 @@ def train_and_evaluate_ar_spectra(
     global_step = 0
     last_metrics: dict[str, float] = {}
     optimizer.zero_grad(set_to_none=True)
-    loop_epochs = max(1, math.ceil(float(_config_get(config, "num_epochs", 1.0))))
+    loop_epochs = max(1, math.ceil(float(config.get("num_epochs", 1.0))))
     for epoch in range(loop_epochs):
         for micro_step, batch in enumerate(datamodule.train_loader_for_epoch(epoch)):
             model.train()

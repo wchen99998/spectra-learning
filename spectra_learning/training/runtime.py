@@ -4,10 +4,6 @@ import torch
 from ml_collections import config_dict
 
 
-def _config_get(config: config_dict.ConfigDict, key: str, default: object) -> object:
-    return config.get(key, default)
-
-
 def parse_autocast_dtype(value: object) -> torch.dtype | None:
     name = str(value).lower()
     if name in {"bf16", "bfloat16"}:
@@ -73,10 +69,10 @@ def estimate_training_flops_per_sample(
     config: config_dict.ConfigDict,
     model: torch.nn.Module,
 ) -> float:
-    configured = _config_get(config, "training_flops_per_sample", None)
+    configured = config.get("training_flops_per_sample", None)
     if configured is not None:
         return float(configured)
-    multiplier = float(_config_get(config, "training_flops_per_parameter", 6.0))
+    multiplier = float(config.get("training_flops_per_parameter", 6.0))
     return multiplier * float(trainable_parameter_count(model))
 
 
@@ -85,7 +81,7 @@ def estimate_training_flops_per_optimizer_step(
     model: torch.nn.Module,
     global_batch_size: int,
 ) -> float:
-    configured = _config_get(config, "training_flops_per_optimizer_step", None)
+    configured = config.get("training_flops_per_optimizer_step", None)
     if configured is not None:
         return float(configured)
     return estimate_training_flops_per_sample(config, model) * float(global_batch_size)

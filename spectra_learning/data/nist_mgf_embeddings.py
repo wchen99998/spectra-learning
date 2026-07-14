@@ -62,12 +62,6 @@ METADATA_COLUMNS = (
 )
 
 
-def _config_get(config: Any, key: str, default: Any) -> Any:
-    if hasattr(config, "get"):
-        return config.get(key, default)
-    return getattr(config, key, default)
-
-
 def _load_checkpoint_for_encoder(
     model: PeakSetJEPA,
     checkpoint_path: StoragePath,
@@ -154,25 +148,25 @@ def train_covariance_pooler(
     weight_decay: float,
     seed: int,
 ) -> tuple[CovariancePool, torch.nn.Module, dict[str, Any]]:
-    compressed_dim = int(_config_get(config, "covariance_pooling_dim", 64))
+    compressed_dim = int(config.get("covariance_pooling_dim", 64))
     probe_data = MassSpecProbeData.from_config(config)
     maccs_bits = int(probe_data.info["probe_maccs_bits"])
     pooler = CovariancePool(
-        input_dim=int(_config_get(config, "model_dim", model.model_dim)),
+        input_dim=int(config.get("model_dim", model.model_dim)),
         compressed_dim=compressed_dim,
     ).to(device)
     maccs_head = _build_maccs_head(
         input_dim=compressed_dim * compressed_dim,
         output_dim=maccs_bits,
-        hidden_dim=int(_config_get(config, "msg_probe_mlp_hidden_dim", model.model_dim)),
-        num_layers=int(_config_get(config, "msg_probe_mlp_num_layers", 2)),
+        hidden_dim=int(config.get("msg_probe_mlp_hidden_dim", model.model_dim)),
+        num_layers=int(config.get("msg_probe_mlp_num_layers", 2)),
     ).to(device)
     optimizer = torch.optim.AdamW(
         [*pooler.parameters(), *maccs_head.parameters()],
         lr=learning_rate,
         weight_decay=weight_decay,
     )
-    peak_ordering = str(_config_get(config, "peak_ordering", "mz"))
+    peak_ordering = str(config.get("peak_ordering", "mz"))
     losses: list[float] = []
     samples_seen = 0
     model.eval()
@@ -277,45 +271,42 @@ def _preprocess_mgf_batch(
 ) -> dict[str, torch.Tensor]:
     mz, intensity, precursor = _pack_peak_batch(records)
     batch = preprocess_peak_batch_torch(
-        mz.to(device),
-        intensity.to(device),
-        precursor.to(device),
-        num_peaks=int(_config_get(config, "num_peaks", 64)),
+        mz,
+        intensity,
+        precursor,
+        num_peaks=int(config.get("num_peaks", 64)),
         peak_drop_min_intensity=float(
-            _config_get(
-                config,
+            config.get(
                 "peak_drop_min_intensity",
-                _config_get(config, "min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY),
+                config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY),
             )
         ),
-        peak_ordering=str(_config_get(config, "peak_ordering", "mz")),
+        peak_ordering=str(config.get("peak_ordering", "mz")),
         max_precursor_mz=float(
-            _config_get(config, "max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
+            config.get("max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
         ),
         precursor_peak_exclusion_window_da=float(
-            _config_get(config, "precursor_peak_exclusion_window_da", 0.0)
+            config.get("precursor_peak_exclusion_window_da", 0.0)
         ),
         min_peak_intensity=float(
-            _config_get(config, "min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)
+            config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)
         ),
-        peak_filtering=str(_config_get(config, "peak_filtering", DEFAULT_PEAK_FILTERING)),
+        peak_filtering=str(config.get("peak_filtering", DEFAULT_PEAK_FILTERING)),
         grouped_peak_shoulder_da=float(
-            _config_get(
-                config,
+            config.get(
                 "grouped_peak_shoulder_da",
                 DEFAULT_GROUPED_PEAK_SHOULDER_DA,
             )
         ),
         grouped_peak_isotope_charges=tuple(
             int(charge)
-            for charge in _config_get(
-                config,
+            for charge in config.get(
                 "grouped_peak_isotope_charges",
                 DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
             )
         ),
     )
-    return batch
+    return {key: value.to(device) for key, value in batch.items()}
 
 
 def _embedding_array(embeddings: np.ndarray) -> pa.FixedSizeListArray:
@@ -490,7 +481,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pooler-max-train-samples", type=int, default=None)
     parser.add_argument("--pooler-lr", type=float, default=1e-3)
     parser.add_argument("--pooler-weight-decay", type=float, default=0.0)
-    parser.add_argument("--rows-per-file", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--max-spectra", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
     return parser.parse_args()
@@ -508,17 +498,16 @@ def main() -> None:
         args.batch_size
         if args.batch_size is not None
         else int(
-            _config_get(
-                config,
+            config.get(
                 "msg_probe_batch_size",
-                _config_get(config, "batch_size", 256),
+                config.get("batch_size", 256),
             )
         )
     )
     pooler_epochs = (
         args.pooler_epochs
         if args.pooler_epochs is not None
-        else int(_config_get(config, "msg_probe_num_epochs", 1))
+        else int(config.get("msg_probe_num_epochs", 1))
     )
     pooler_checkpoint = args.pooler_checkpoint or (
         args.output_dir / "covariance_pooler.pt"

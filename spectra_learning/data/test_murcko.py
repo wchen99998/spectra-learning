@@ -348,6 +348,7 @@ def test_murcko_fluorine_cache_and_loader_use_shared_peak_preprocessing(
     (nist_source / "metadata.json").write_text(
         """
         {
+          "storage_format": "parquet",
           "train_files": ["train.parquet"],
           "train_lengths": [4],
           "train_size": 4,
@@ -374,6 +375,7 @@ def test_murcko_fluorine_cache_and_loader_use_shared_peak_preprocessing(
     (mcebio_source / "metadata.json").write_text(
         """
         {
+          "storage_format": "parquet",
           "all_files": ["all.parquet"],
           "all_lengths": [2],
           "all_size": 2,
@@ -413,6 +415,9 @@ def test_murcko_fluorine_cache_and_loader_use_shared_peak_preprocessing(
     assert metadata["test_positive"] == 1
     assert metadata["adduct_vocab"] == {"[M+H-H2O]+": 0, "[M+H]+": 1}
     assert metadata["instrument_type_vocab"] == {"Orbitrap": 0, "Q-TOF": 1}
+    assert "probe_morgan_bits" not in metadata
+    assert "morgan_auxiliary_available" not in metadata
+    assert "train_morgan_files" not in metadata
     assert not metadata["dreams_auxiliary_available"]
     assert "train_dreams_files" not in metadata
     assert "test_dreams_files" not in metadata
@@ -466,6 +471,7 @@ def test_murcko_fluorine_loader_reads_dreams_auxiliary(monkeypatch, tmp_path: Pa
     (nist_source / "metadata.json").write_text(
         """
         {
+          "storage_format": "parquet",
           "train_files": ["train.parquet"],
           "train_lengths": [2],
           "train_size": 2,
@@ -490,6 +496,7 @@ def test_murcko_fluorine_loader_reads_dreams_auxiliary(monkeypatch, tmp_path: Pa
     (mcebio_source / "metadata.json").write_text(
         """
         {
+          "storage_format": "parquet",
           "all_files": ["all.parquet"],
           "all_lengths": [2],
           "all_size": 2,
@@ -573,11 +580,13 @@ def test_murcko_rank_one_waits_for_download(monkeypatch, tmp_path: Path):
     _write_split(nist_source / "val.parquet", [False])
     _write_split(mcebio_source / "all.parquet", [False, True])
     (nist_source / "metadata.json").write_text(
-        '{"train_files":["train.parquet"],"train_lengths":[2],"train_size":2,'
+        '{"storage_format":"parquet","train_files":["train.parquet"],'
+        '"train_lengths":[2],"train_size":2,'
         '"val_files":["val.parquet"],"val_lengths":[1],"val_size":1}'
     )
     (mcebio_source / "metadata.json").write_text(
-        '{"all_files":["all.parquet"],"all_lengths":[2],"all_size":2}'
+        '{"storage_format":"parquet","all_files":["all.parquet"],'
+        '"all_lengths":[2],"all_size":2}'
     )
 
     rank1_cache = tmp_path / "rank1_cache"
@@ -620,11 +629,13 @@ def test_murcko_local_rank_zero_downloads_on_nonzero_global_rank(
     _write_split(nist_source / "val.parquet", [False])
     _write_split(mcebio_source / "all.parquet", [False, True])
     (nist_source / "metadata.json").write_text(
-        '{"train_files":["train.parquet"],"train_lengths":[2],"train_size":2,'
+        '{"storage_format":"parquet","train_files":["train.parquet"],'
+        '"train_lengths":[2],"train_size":2,'
         '"val_files":["val.parquet"],"val_lengths":[1],"val_size":1}'
     )
     (mcebio_source / "metadata.json").write_text(
-        '{"all_files":["all.parquet"],"all_lengths":[2],"all_size":2}'
+        '{"storage_format":"parquet","all_files":["all.parquet"],'
+        '"all_lengths":[2],"all_size":2}'
     )
 
     rank2_cache = tmp_path / "rank2_cache"
@@ -1317,6 +1328,7 @@ def test_murcko_fluorine_loader_can_return_jax_batches(tmp_path: Path):
     (nist / "metadata.json").write_text(
         """
         {
+          "storage_format": "parquet",
           "train_files": ["train.parquet"],
           "train_lengths": [2],
           "train_size": 2,
@@ -1339,6 +1351,7 @@ def test_murcko_fluorine_loader_can_return_jax_batches(tmp_path: Path):
     (mcebio / "metadata.json").write_text(
         """
         {
+          "storage_format": "parquet",
           "all_files": ["all.parquet"],
           "all_lengths": [2],
           "all_size": 2,

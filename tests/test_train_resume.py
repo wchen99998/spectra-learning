@@ -1,6 +1,6 @@
-import tempfile
 import json
 import sys
+import tempfile
 import threading
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -12,6 +12,7 @@ import torch
 from ml_collections import config_dict
 
 from spectra_learning.config import config_to_dict
+from spectra_learning.models.factory import build_model_from_config
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pooling import CovariancePool
 from spectra_learning.training.checkpointing import (
@@ -28,27 +29,23 @@ from spectra_learning.training.checkpointing import (
 from spectra_learning.training import pretrain
 from spectra_learning.training import checkpointing as checkpointing_module
 from spectra_learning.probes.massspec import checkpoint_probe
-from spectra_learning.training.modules import PretrainModule
+from spectra_learning.probes.massspec.pr_curves import PrecisionRecallCurve
 from spectra_learning.training.optimization import (
     build_optimizers,
     is_weight_decay_target,
 )
-from spectra_learning.training.runtime import (
-    cumulative_training_flops,
-    estimate_training_flops_per_optimizer_step,
-)
 from spectra_learning.training.schedules import learning_rate_at_step
-from spectra_learning.training.api import (
-    _build_wandb_init_kwargs,
-    build_grad_scaler,
-    build_model_from_config,
-    parse_autocast_dtype,
-)
-from spectra_learning.probes.massspec.pr_curves import PrecisionRecallCurve
 from spectra_learning.training.logging import (
     WandbMetricLogger,
+    _build_wandb_init_kwargs,
     _serialise_metrics,
     log_msg_probe_metrics,
+)
+from spectra_learning.training.runtime import (
+    build_grad_scaler,
+    cumulative_training_flops,
+    estimate_training_flops_per_optimizer_step,
+    parse_autocast_dtype,
 )
 
 
@@ -126,9 +123,13 @@ class _FakePbar:
 class _FakeLogger:
     def __init__(self) -> None:
         self.logs = []
+        self.finished = False
 
     def log_metrics(self, metrics, step=None) -> None:
         self.logs.append((dict(metrics), step))
+
+    def finish(self) -> None:
+        self.finished = True
 
 
 class _FakeCheckpointManager:
@@ -522,6 +523,7 @@ def test_jax_validation_loss_uses_augmented_validation_loader(monkeypatch):
         max_steps=2,
         use_sharded_step=False,
         data_mesh=None,
+        metric_reduction="mean",
     )
 
     assert calls == [True]
@@ -542,6 +544,7 @@ def test_jax_optax_transform_uses_learning_rate_schedule(monkeypatch):
     cfg.learning_rate = 0.004
     cfg.min_learning_rate = 0.0004
     cfg.warmup_steps = 20
+    cfg.b1 = 0.8
     cfg.b2 = 0.95
     cfg.weight_decay = 0.1
 
@@ -552,8 +555,56 @@ def test_jax_optax_transform_uses_learning_rate_schedule(monkeypatch):
     assert transform is sentinel
     assert callable(calls[0]["learning_rate"])
     assert callable(calls[0]["mask"])
+    assert calls[0]["b1"] == pytest.approx(0.8)
     assert calls[0]["b2"] == pytest.approx(0.95)
     assert calls[0]["weight_decay"] == pytest.approx(0.1)
+
+
+def test_jax_optax_transform_applies_global_norm_clipping(monkeypatch):
+    from spectra_learning.training import pretrain_jax
+
+    adamw_transform = object()
+    clip_transform = object()
+    chained_transform = object()
+    adamw_calls = []
+    clip_calls = []
+    chain_calls = []
+
+    def fake_adamw(**kwargs):
+        adamw_calls.append(kwargs)
+        return adamw_transform
+
+    def fake_clip_by_global_norm(max_norm):
+        clip_calls.append(max_norm)
+        return clip_transform
+
+    def fake_chain(*transforms):
+        chain_calls.append(transforms)
+        return chained_transform
+
+    monkeypatch.setattr(pretrain_jax.optax, "adamw", fake_adamw)
+    monkeypatch.setattr(
+        pretrain_jax.optax,
+        "clip_by_global_norm",
+        fake_clip_by_global_norm,
+    )
+    monkeypatch.setattr(pretrain_jax.optax, "chain", fake_chain)
+    cfg = config_dict.ConfigDict(
+        {
+            "learning_rate": 3e-4,
+            "b1": 0.85,
+            "b2": 0.95,
+            "weight_decay": 0.01,
+            "grad_clip_norm": 1.0,
+        }
+    )
+
+    transform = pretrain_jax.build_jax_optax_transform(cfg, total_steps=100)
+
+    assert transform is chained_transform
+    assert clip_calls == [1.0]
+    assert chain_calls == [(clip_transform, adamw_transform)]
+    assert adamw_calls[0]["b1"] == pytest.approx(0.85)
 
 
 def test_jax_optax_transform_supports_muon(monkeypatch):
@@ -836,7 +887,11 @@ def test_train_and_evaluate_jax_logs_final_metrics_on_main_process(
     )
     monkeypatch.setattr(pretrain_jax, "storage_mkdir", lambda path: None)
     monkeypatch.setattr(pretrain_jax, "GemsDataModule", FakeDataModule)
-    monkeypatch.setattr(pretrain_jax, "build_model_from_config", lambda config: object())
+    monkeypatch.setattr(
+        pretrain_jax,
+        "build_model_from_config",
+        lambda config: SimpleNamespace(use_ema_teacher=False),
+    )
     monkeypatch.setattr(
         pretrain_jax,
         "initialize_jax_model_from_torch_seed",
@@ -859,6 +914,9 @@ def test_train_and_evaluate_jax_logs_final_metrics_on_main_process(
     assert datamodule_kwargs["distributed_world_size"] == 2
     assert datamodule_kwargs["distributed_rank"] == 0
     assert datamodule_kwargs["distributed_local_rank"] == 0
+    assert cfg.dataloader_pin_memory is False
+    assert cfg.dataloader_persistent_workers is False
+    assert cfg.dataloader_output_format == "numpy"
     assert results["run/jax_process_count"] == 2.0
     assert results["run/jax_data_parallel_devices"] == 8.0
     assert results["run/device_microbatch_size"] == 4.0
@@ -885,11 +943,13 @@ def test_train_and_evaluate_jax_logs_final_metrics_on_main_process(
                 "run/device_microbatch_size": 4.0,
                 "run/gradient_accumulation_steps": 1.0,
                 "run/device_backend": "jax",
+                "run/training_task": "pretrain",
                 **param_metrics,
             },
             3,
         )
     ]
+    assert logger.finished is True
 
 
 def test_train_and_evaluate_jax_skips_logger_on_worker_process(
@@ -935,7 +995,11 @@ def test_train_and_evaluate_jax_skips_logger_on_worker_process(
     )
     monkeypatch.setattr(pretrain_jax, "storage_mkdir", lambda path: None)
     monkeypatch.setattr(pretrain_jax, "GemsDataModule", FakeDataModule)
-    monkeypatch.setattr(pretrain_jax, "build_model_from_config", lambda config: object())
+    monkeypatch.setattr(
+        pretrain_jax,
+        "build_model_from_config",
+        lambda config: SimpleNamespace(use_ema_teacher=False),
+    )
     monkeypatch.setattr(
         pretrain_jax,
         "initialize_jax_model_from_torch_seed",
@@ -2099,11 +2163,9 @@ def test_build_optimizers_do_not_include_standalone_covariance_pooler():
         input_dim=model.model_dim,
         compressed_dim=4,
     )
-    module = PretrainModule(model)
-
     optimizers, _ = build_optimizers(
         cfg,
-        module,
+        model,
         total_steps=10,
         device=torch.device("cpu"),
     )
@@ -2202,9 +2264,13 @@ def test_wandb_logger_defines_msg_probe_global_step(monkeypatch, tmp_path: Path)
         def __init__(self) -> None:
             self.config = SimpleNamespace(update=lambda *args, **kwargs: None)
             self.definitions = []
+            self.finished = False
 
         def define_metric(self, *args, **kwargs) -> None:
             self.definitions.append((args, kwargs))
+
+        def finish(self) -> None:
+            self.finished = True
 
     fake_run = FakeRun()
     init_calls = []
@@ -2227,10 +2293,12 @@ def test_wandb_logger_defines_msg_probe_global_step(monkeypatch, tmp_path: Path)
     cfg.wandb_project = "test-project"
 
     logger = WandbMetricLogger(cfg, tmp_path)
+    logger.finish()
 
     assert logger.experiment is fake_run
     assert init_calls[0]["project"] == "test-project"
     assert init_calls[0]["config"] == config_to_dict(cfg)
+    assert fake_run.finished is True
     assert "settings" not in init_calls[0]
     assert fake_run.definitions == [
         (("global_step",), {}),

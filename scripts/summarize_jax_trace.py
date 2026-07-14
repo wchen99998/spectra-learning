@@ -7,10 +7,6 @@ from pathlib import Path
 
 TPU_V6E_BF16_PEAK_FLOPS = 918e12
 CONTAINER_HLO_CATEGORIES = {"while", "conditional"}
-SOURCE_ALIASES = {
-    "spectra_learning/models/pairformer.py": "spectra_learning/models/pairmixer.py",
-    "spectra_learning/models/pairformer_jax.py": "spectra_learning/models/pairmixer_jax.py",
-}
 WRAPPER_SOURCE_FILES = {"spectra_learning/models/common_jax.py"}
 
 
@@ -40,10 +36,7 @@ def _as_int(value: object) -> int:
 
 def _trim_source_line(source_line: str) -> str:
     cwd = str(Path.cwd())
-    source_line = source_line.replace(cwd + "/", "")
-    for old, new in SOURCE_ALIASES.items():
-        source_line = source_line.replace(old, new)
-    return source_line
+    return source_line.replace(cwd + "/", "")
 
 
 def _source_key(source_stack: str) -> str:

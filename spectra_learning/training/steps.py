@@ -4,8 +4,8 @@ from typing import Any, Literal, cast, overload
 import torch
 
 from spectra_learning.models.diagnostics import _collapse_diagnostics
+from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.training.distributed import unwrap_model
-from spectra_learning.training.modules import PretrainModule
 from spectra_learning.training.schedules import LRSchedulerLike
 
 
@@ -106,10 +106,10 @@ def train_step_impl(
         )
     if not optimizer_step:
         return metrics
-    pretrain_module = cast(PretrainModule, unwrap_model(model))
+    base_model = cast(PeakSetJEPA, unwrap_model(model))
     ema_momentum = None
     if not step_skipped:
-        ema_momentum = pretrain_module.update_ema_teacher(global_step + 1, total_steps)
+        ema_momentum = base_model.update_ema_teacher(global_step + 1, total_steps)
         for scheduler in schedulers:
             scheduler.step()
     if ema_momentum is not None:

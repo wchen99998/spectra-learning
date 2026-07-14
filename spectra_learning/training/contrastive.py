@@ -16,6 +16,9 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.distributed.nn import functional as dist_nn
 from tqdm import tqdm
 
+from spectra_learning.data.loading import local_batch_size
+from spectra_learning.data.massspec_probe import MassSpecProbeData
+from spectra_learning.data.massspec_targets import MACCS_FINGERPRINT_BITS
 from spectra_learning.data.spectra import (
     ASSUMED_PRECURSOR_CHARGE,
     COLLISION_ENERGY_MAX,
@@ -24,23 +27,12 @@ from spectra_learning.data.spectra import (
     DEFAULT_GROUPED_PEAK_SHOULDER_DA,
     DEFAULT_MIN_PEAK_INTENSITY,
     DEFAULT_PEAK_FILTERING,
-    NUM_PEAKS_INPUT,
     preprocess_peak_batch_torch,
+    spectra_from_peak_lists,
 )
-from spectra_learning.data.loading import local_batch_size
+from spectra_learning.models.factory import build_model_from_config
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pooling import SinglePairCovariancePool
-from spectra_learning.data.massspec_probe import MassSpecProbeData
-from spectra_learning.data.massspec_targets import MACCS_FINGERPRINT_BITS
-from spectra_learning.training.api import (
-    build_grad_scaler,
-    build_logger,
-    build_model_from_config,
-    collect_and_log_param_metrics,
-    cumulative_training_flops,
-    estimate_training_flops_per_optimizer_step,
-    parse_autocast_dtype,
-)
 from spectra_learning.training.checkpointing import (
     covariance_pooler_checkpoint_path,
     load_grad_scaler_state,
@@ -62,7 +54,15 @@ from spectra_learning.training.distributed import (
     unwrap_model,
     wrap_distributed_model,
 )
+from spectra_learning.training.logging import build_logger
 from spectra_learning.training.optimization import build_optimizers, is_weight_decay_target
+from spectra_learning.training.runtime import (
+    build_grad_scaler,
+    collect_and_log_param_metrics,
+    cumulative_training_flops,
+    estimate_training_flops_per_optimizer_step,
+    parse_autocast_dtype,
+)
 from spectra_learning.training.schedules import LRSchedulerLike, make_cosine_schedule
 from spectra_learning.training.storage import (
     StoragePath,
@@ -74,10 +74,6 @@ from spectra_learning.training.storage import (
 )
 
 log = logging.getLogger(__name__)
-
-
-def _config_get(config: config_dict.ConfigDict, key: str, default: Any) -> Any:
-    return config.get(key, default)
 
 
 class ContrastiveSplit(NamedTuple):
@@ -462,20 +458,6 @@ class NistMurckoContrastivePairs(Dataset):
         return with_negatives
 
 
-def _fixed_spectra_from_lists(
-    mz_lists: list[list[float]],
-    intensity_lists: list[list[float]],
-) -> np.ndarray:
-    spectra = np.zeros((len(mz_lists), 2, NUM_PEAKS_INPUT), dtype=np.float32)
-    for idx, (mz, intensity) in enumerate(zip(mz_lists, intensity_lists, strict=True)):
-        n = min(len(mz), NUM_PEAKS_INPUT)
-        spectra[idx, 0, :n] = np.asarray(mz[:n], dtype=np.float32)
-        spectra[idx, 1, :n] = np.asarray(intensity[:n], dtype=np.float32)
-    max_intensity = spectra[:, 1].max(axis=1, keepdims=True)
-    spectra[:, 1] = spectra[:, 1] / np.maximum(max_intensity, 1e-8)
-    return spectra
-
-
 def _load_contrastive_split(
     files: list[str],
     *,
@@ -511,7 +493,7 @@ def _load_contrastive_split(
         intensity for chunk in chunks for intensity in chunk["spectrum_intensity"]
     ]
     return ContrastiveSplit(
-        spectra=_fixed_spectra_from_lists(mz_lists, intensity_lists),
+        spectra=spectra_from_peak_lists(mz_lists, intensity_lists),
         precursor_mz=np.concatenate(
             [np.asarray(chunk["precursor_mz"], dtype=np.float32) for chunk in chunks],
             axis=0,
@@ -569,7 +551,7 @@ def build_contrastive_loader(
         pairs_per_epoch=pairs_per_epoch,
         seed=seed,
         negative_mass_tolerance_da=_optional_float(
-            _config_get(config, "contrastive_triplet_negative_mass_tolerance_da", None)
+            config.get("contrastive_triplet_negative_mass_tolerance_da", None)
         ),
     )
     assert dataset.eligible
@@ -589,7 +571,7 @@ def build_contrastive_loader(
         if distributed.is_distributed
         else None
     )
-    num_workers = int(_config_get(config, "dataloader_num_workers", 0))
+    num_workers = int(config.get("dataloader_num_workers", 0))
     loader_kwargs = {
         "dataset": dataset,
         "batch_size": local_pairs_per_batch,
@@ -597,41 +579,38 @@ def build_contrastive_loader(
         "sampler": sampler,
         "drop_last": (split_name == "train"),
         "num_workers": num_workers,
-        "pin_memory": bool(_config_get(config, "dataloader_pin_memory", False)),
+        "pin_memory": bool(config.get("dataloader_pin_memory", False)),
         "collate_fn": ContrastiveBatchCollator(
             split,
-            num_peaks=int(_config_get(config, "num_peaks", 60)),
+            num_peaks=int(config.get("num_peaks", 60)),
             max_precursor_mz=float(
-                _config_get(config, "max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
+                config.get("max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
             ),
             min_peak_intensity=float(
-                _config_get(config, "min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)
+                config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)
             ),
             peak_drop_min_intensity=float(
-                _config_get(
-                    config,
+                config.get(
                     "peak_drop_min_intensity",
-                    _config_get(config, "min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY),
+                    config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY),
                 )
             ),
-            peak_ordering=str(_config_get(config, "peak_ordering", "mz")),
+            peak_ordering=str(config.get("peak_ordering", "mz")),
             precursor_peak_exclusion_window_da=float(
-                _config_get(config, "precursor_peak_exclusion_window_da", 0.0)
+                config.get("precursor_peak_exclusion_window_da", 0.0)
             ),
             peak_filtering=str(
-                _config_get(config, "peak_filtering", DEFAULT_PEAK_FILTERING)
+                config.get("peak_filtering", DEFAULT_PEAK_FILTERING)
             ),
             grouped_peak_shoulder_da=float(
-                _config_get(
-                    config,
+                config.get(
                     "grouped_peak_shoulder_da",
                     DEFAULT_GROUPED_PEAK_SHOULDER_DA,
                 )
             ),
             grouped_peak_isotope_charges=tuple(
                 int(charge)
-                for charge in _config_get(
-                    config,
+                for charge in config.get(
                     "grouped_peak_isotope_charges",
                     DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
                 )
@@ -640,10 +619,10 @@ def build_contrastive_loader(
     }
     if num_workers > 0:
         loader_kwargs["persistent_workers"] = bool(
-            _config_get(config, "dataloader_persistent_workers", False)
+            config.get("dataloader_persistent_workers", False)
         )
         loader_kwargs["prefetch_factor"] = int(
-            _config_get(config, "dataloader_prefetch_factor", 2)
+            config.get("dataloader_prefetch_factor", 2)
         )
     return DataLoader(
         **loader_kwargs,
@@ -665,7 +644,7 @@ def build_contrastive_online_loader(
     )
     dataset = ContrastiveOnlineDataset(split)
     sample_weight_power = float(
-        _config_get(config, "contrastive_online_sample_weight_power", 0.0)
+        config.get("contrastive_online_sample_weight_power", 0.0)
     )
     if split_name == "train" and sample_weight_power > 0:
         sampler = WeightedOnlineSampler(
@@ -688,7 +667,7 @@ def build_contrastive_online_loader(
             if distributed.is_distributed
             else None
         )
-    num_workers = int(_config_get(config, "dataloader_num_workers", 0))
+    num_workers = int(config.get("dataloader_num_workers", 0))
     loader_kwargs = {
         "dataset": dataset,
         "batch_size": per_rank_batch_size,
@@ -696,41 +675,38 @@ def build_contrastive_online_loader(
         "sampler": sampler,
         "drop_last": (split_name == "train"),
         "num_workers": num_workers,
-        "pin_memory": bool(_config_get(config, "dataloader_pin_memory", False)),
+        "pin_memory": bool(config.get("dataloader_pin_memory", False)),
         "collate_fn": ContrastiveOnlineBatchCollator(
             split,
-            num_peaks=int(_config_get(config, "num_peaks", 60)),
+            num_peaks=int(config.get("num_peaks", 60)),
             max_precursor_mz=float(
-                _config_get(config, "max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
+                config.get("max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
             ),
             min_peak_intensity=float(
-                _config_get(config, "min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)
+                config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)
             ),
             peak_drop_min_intensity=float(
-                _config_get(
-                    config,
+                config.get(
                     "peak_drop_min_intensity",
-                    _config_get(config, "min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY),
+                    config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY),
                 )
             ),
-            peak_ordering=str(_config_get(config, "peak_ordering", "mz")),
+            peak_ordering=str(config.get("peak_ordering", "mz")),
             precursor_peak_exclusion_window_da=float(
-                _config_get(config, "precursor_peak_exclusion_window_da", 0.0)
+                config.get("precursor_peak_exclusion_window_da", 0.0)
             ),
             peak_filtering=str(
-                _config_get(config, "peak_filtering", DEFAULT_PEAK_FILTERING)
+                config.get("peak_filtering", DEFAULT_PEAK_FILTERING)
             ),
             grouped_peak_shoulder_da=float(
-                _config_get(
-                    config,
+                config.get(
                     "grouped_peak_shoulder_da",
                     DEFAULT_GROUPED_PEAK_SHOULDER_DA,
                 )
             ),
             grouped_peak_isotope_charges=tuple(
                 int(charge)
-                for charge in _config_get(
-                    config,
+                for charge in config.get(
                     "grouped_peak_isotope_charges",
                     DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
                 )
@@ -739,10 +715,10 @@ def build_contrastive_online_loader(
     }
     if num_workers > 0:
         loader_kwargs["persistent_workers"] = bool(
-            _config_get(config, "dataloader_persistent_workers", False)
+            config.get("dataloader_persistent_workers", False)
         )
         loader_kwargs["prefetch_factor"] = int(
-            _config_get(config, "dataloader_prefetch_factor", 2)
+            config.get("dataloader_prefetch_factor", 2)
         )
     return DataLoader(**loader_kwargs)
 
@@ -1388,24 +1364,24 @@ def build_contrastive_module(
     maccs_pos_weight: torch.Tensor | None = None,
 ) -> ContrastiveTrainingModule:
     model = build_model_from_config(config)
-    compressed_dim = int(_config_get(config, "contrastive_covariance_dim", _config_get(config, "covariance_pooling_dim", 32)))
+    compressed_dim = int(config.get("contrastive_covariance_dim", config.get("covariance_pooling_dim", 32)))
     pooler = SinglePairCovariancePool(
         single_dim=int(config.model_dim),
-        pair_dim=int(_config_get(config, "pairmixer_pair_dim", config.model_dim)),
+        pair_dim=int(config.get("pairmixer_pair_dim", config.model_dim)),
         compressed_dim=compressed_dim,
         include_diagonal=bool(
-            _config_get(config, "contrastive_single_pair_include_diagonal", False)
+            config.get("contrastive_single_pair_include_diagonal", False)
         ),
     )
     pooled_dim = compressed_dim * compressed_dim
     online_probe = OnlineProbeHead(
         input_dim=pooled_dim,
-        hidden_dim=int(_config_get(config, "contrastive_online_probe_hidden_dim", config.model_dim)),
+        hidden_dim=int(config.get("contrastive_online_probe_hidden_dim", config.model_dim)),
         output_dim=MACCS_FINGERPRINT_BITS,
     )
     teacher_model = (
         build_model_from_config(config)
-        if float(_config_get(config, "contrastive_encoder_anchor_loss_weight", 0.0)) > 0
+        if float(config.get("contrastive_encoder_anchor_loss_weight", 0.0)) > 0
         else None
     )
     return ContrastiveTrainingModule(
@@ -1413,44 +1389,43 @@ def build_contrastive_module(
         pooler=pooler,
         online_probe=online_probe,
         teacher_model=teacher_model,
-        temperature=float(_config_get(config, "contrastive_temperature", 0.1)),
-        loss_type=str(_config_get(config, "contrastive_loss_type", "info_nce")),
-        triplet_margin=float(_config_get(config, "contrastive_triplet_margin", 0.2)),
+        temperature=float(config.get("contrastive_temperature", 0.1)),
+        loss_type=str(config.get("contrastive_loss_type", "info_nce")),
+        triplet_margin=float(config.get("contrastive_triplet_margin", 0.2)),
         triplet_negative_max_maccs_tanimoto=_optional_float(
-            _config_get(config, "contrastive_triplet_negative_max_maccs_tanimoto", None)
+            config.get("contrastive_triplet_negative_max_maccs_tanimoto", None)
         ),
         triplet_hard_fraction=_optional_float(
-            _config_get(config, "contrastive_triplet_hard_fraction", None)
+            config.get("contrastive_triplet_hard_fraction", None)
         ),
         info_nce_negatives=_optional_int(
-            _config_get(config, "contrastive_info_nce_negatives", None)
+            config.get("contrastive_info_nce_negatives", None)
         ),
         info_nce_negative_max_maccs_tanimoto=_optional_float(
-            _config_get(
-                config,
+            config.get(
                 "contrastive_info_nce_negative_max_maccs_tanimoto",
                 None,
             )
         ),
         fingerprint_target_temperature=float(
-            _config_get(config, "contrastive_fingerprint_target_temperature", 0.1)
+            config.get("contrastive_fingerprint_target_temperature", 0.1)
         ),
-        contrastive_loss_weight=float(_config_get(config, "contrastive_loss_weight", 1.0)),
-        online_probe_loss_weight=float(_config_get(config, "online_probe_loss_weight", 1.0)),
+        contrastive_loss_weight=float(config.get("contrastive_loss_weight", 1.0)),
+        online_probe_loss_weight=float(config.get("online_probe_loss_weight", 1.0)),
         encoder_anchor_loss_weight=float(
-            _config_get(config, "contrastive_encoder_anchor_loss_weight", 0.0)
+            config.get("contrastive_encoder_anchor_loss_weight", 0.0)
         ),
         online_maccs_loss_type=str(
-            _config_get(config, "contrastive_online_maccs_loss_type", "bce")
+            config.get("contrastive_online_maccs_loss_type", "bce")
         ),
         online_maccs_loss_weight=float(
-            _config_get(config, "contrastive_online_maccs_loss_weight", 1.0)
+            config.get("contrastive_online_maccs_loss_weight", 1.0)
         ),
         online_auc_loss_weight=float(
-            _config_get(config, "contrastive_online_auc_loss_weight", 0.5)
+            config.get("contrastive_online_auc_loss_weight", 0.5)
         ),
         online_auc_hard_fraction=_optional_float(
-            _config_get(config, "contrastive_online_auc_hard_fraction", None)
+            config.get("contrastive_online_auc_hard_fraction", None)
         ),
         maccs_pos_weight=maccs_pos_weight,
     )
@@ -1463,19 +1438,19 @@ def build_contrastive_optimizers(
     device: torch.device,
 ) -> tuple[list[torch.optim.Optimizer], list[LRSchedulerLike]]:
     model_lr = _optional_float(
-        _config_get(config, "contrastive_model_learning_rate", None)
+        config.get("contrastive_model_learning_rate", None)
     )
     pooler_lr = _optional_float(
-        _config_get(config, "contrastive_pooler_learning_rate", None)
+        config.get("contrastive_pooler_learning_rate", None)
     )
     online_probe_lr = _optional_float(
-        _config_get(config, "contrastive_online_probe_learning_rate", None)
+        config.get("contrastive_online_probe_learning_rate", None)
     )
     if model_lr is None and pooler_lr is None and online_probe_lr is None:
         return build_optimizers(config, module, total_steps, device)
 
     base_lr = float(config.learning_rate)
-    fused_cfg = _config_get(config, "optimizer_fused", None)
+    fused_cfg = config.get("optimizer_fused", None)
     fused = (
         device.type == "cuda"
         if fused_cfg is None
@@ -1510,14 +1485,14 @@ def build_contrastive_optimizers(
     optimizer = torch.optim.AdamW(
         param_groups,
         lr=base_lr,
-        betas=(0.9, float(_config_get(config, "b2", 0.999))),
+        betas=(0.9, float(config.get("b2", 0.999))),
         fused=fused,
     )
     scheduler = make_cosine_schedule(
         optimizer,
         total_steps,
-        int(_config_get(config, "warmup_steps", 0)),
-        _config_get(config, "min_learning_rate", None),
+        int(config.get("warmup_steps", 0)),
+        config.get("min_learning_rate", None),
     )
     return [optimizer], [scheduler]
 
@@ -1549,21 +1524,21 @@ def train_contrastive(
     train_split = _load_contrastive_split(
         probe_data.train_files,
         max_samples=_optional_int(
-            _config_get(config, "contrastive_max_train_samples", None)
+            config.get("contrastive_max_train_samples", None)
         ),
     )
     val_split = _load_contrastive_split(
         probe_data.val_files,
         max_samples=_optional_int(
-            _config_get(config, "contrastive_max_val_samples", None)
+            config.get("contrastive_max_val_samples", None)
         ),
     )
     maccs_pos_weight = _maccs_pos_weight(train_split)
 
-    global_spectra_batch_size = int(_config_get(config, "contrastive_batch_size", config.batch_size))
+    global_spectra_batch_size = int(config.get("contrastive_batch_size", config.batch_size))
     spectra_per_pair = (
         3
-        if _config_get(config, "contrastive_triplet_negative_mass_tolerance_da", None)
+        if config.get("contrastive_triplet_negative_mass_tolerance_da", None)
         is not None
         else 2
     )
@@ -1572,15 +1547,13 @@ def train_contrastive(
         global_pairs_per_batch -= global_pairs_per_batch % distributed.world_size
         global_pairs_per_batch = max(distributed.world_size, global_pairs_per_batch)
     train_pairs_per_epoch = int(
-        _config_get(
-            config,
+        config.get(
             "contrastive_pairs_per_epoch",
             len(train_split.smiles),
         )
     )
     val_pairs_per_epoch = int(
-        _config_get(
-            config,
+        config.get(
             "contrastive_val_pairs_per_epoch",
             min(len(val_split.smiles), 8192),
         )
@@ -1609,12 +1582,12 @@ def train_contrastive(
             train_split,
             split_name="train",
             global_batch_size=int(
-                _config_get(config, "contrastive_online_batch_size", global_spectra_batch_size)
+                config.get("contrastive_online_batch_size", global_spectra_batch_size)
             ),
             seed=int(config.seed) + 20_000,
             distributed=distributed,
         )
-        if bool(_config_get(config, "contrastive_online_full_train", False))
+        if bool(config.get("contrastive_online_full_train", False))
         else None
     )
     total_steps = total_contrastive_steps(config, train_loader)
@@ -1622,7 +1595,7 @@ def train_contrastive(
         config,
         maccs_pos_weight=maccs_pos_weight,
     )
-    init_checkpoint = _config_get(config, "contrastive_init_checkpoint_path", "")
+    init_checkpoint = config.get("contrastive_init_checkpoint_path", "")
     if init_checkpoint:
         load_pretrained_weights(
             module.model,
@@ -1633,7 +1606,7 @@ def train_contrastive(
                 module.teacher_model,
                 normalize_storage_path(init_checkpoint),
             )
-    full_init_checkpoint = _config_get(config, "contrastive_init_full_checkpoint_path", "")
+    full_init_checkpoint = config.get("contrastive_init_full_checkpoint_path", "")
     if full_init_checkpoint:
         full_init_path = normalize_storage_path(full_init_checkpoint)
         full_init = load_torch_checkpoint(
@@ -1662,7 +1635,7 @@ def train_contrastive(
         param_metrics["model/flops_per_sample_estimate"] = (
             flops_per_optimizer_step / float(global_spectra_batch_size)
         )
-    autocast_dtype = parse_autocast_dtype(_config_get(config, "autocast_dtype", "bf16"))
+    autocast_dtype = parse_autocast_dtype(config.get("autocast_dtype", "bf16"))
     grad_scaler = build_grad_scaler(autocast_dtype, distributed.device)
     optimizers, schedulers = build_contrastive_optimizers(
         config,
@@ -1685,14 +1658,14 @@ def train_contrastive(
     )
     if distributed.is_main and logger is not None:
         logger.log_metrics(param_metrics, step=global_step)
-    compile_mode = str(_config_get(config, "contrastive_compile_mode", "none"))
+    compile_mode = str(config.get("contrastive_compile_mode", "none"))
     if compile_mode.lower() != "none":
         module.compile(mode=compile_mode, fullgraph=False)
     train_model = wrap_distributed_model(
         module,
         distributed,
-        static_graph=bool(_config_get(config, "ddp_static_graph", True)),
-        find_unused_parameters=bool(_config_get(config, "ddp_find_unused_parameters", False)),
+        static_graph=bool(config.get("ddp_static_graph", True)),
+        find_unused_parameters=bool(config.get("ddp_find_unused_parameters", False)),
     )
     results = run_contrastive_loop(
         config=config,
@@ -1722,7 +1695,7 @@ def total_contrastive_steps(
     train_loader: DataLoader,
 ) -> int:
     steps = max(1, int(math.ceil(float(config.num_epochs) * len(train_loader))))
-    max_steps = _config_get(config, "training_max_steps", None)
+    max_steps = config.get("training_max_steps", None)
     if max_steps is None:
         return steps
     return min(steps, max(1, int(max_steps)))
@@ -1748,15 +1721,15 @@ def run_contrastive_loop(
     distributed: DistributedContext,
     flops_per_optimizer_step: float | None = None,
 ) -> dict[str, object]:
-    log_every_n_steps = int(_config_get(config, "log_every_n_steps", 50))
-    val_every_n_steps = int(_config_get(config, "contrastive_val_every_n_steps", 0))
+    log_every_n_steps = int(config.get("log_every_n_steps", 50))
+    val_every_n_steps = int(config.get("contrastive_val_every_n_steps", 0))
     checkpoint_every_steps = int(config.checkpoint_every_steps)
-    grad_clip_norm = _optional_float(_config_get(config, "grad_clip_norm", None))
+    grad_clip_norm = _optional_float(config.get("grad_clip_norm", None))
     if flops_per_optimizer_step is None:
         flops_per_optimizer_step = estimate_training_flops_per_optimizer_step(
             config,
             unwrap_model(model),
-            int(_config_get(config, "contrastive_batch_size", config.batch_size)),
+            int(config.get("contrastive_batch_size", config.batch_size)),
         )
     loop_epochs = max(1, math.ceil(float(config.num_epochs)))
     start_time = time.perf_counter()

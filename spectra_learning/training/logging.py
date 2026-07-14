@@ -43,6 +43,9 @@ class MetricLogger:
     def log_metrics(self, metrics: dict[str, Any], step: int | None = None) -> None:
         pass
 
+    def finish(self) -> None:
+        pass
+
     @property
     def experiment(self) -> Any:
         return None
@@ -93,6 +96,9 @@ class WandbMetricLogger(MetricLogger):
             _serialise_metrics(metrics, enable_wandb_artifacts=True),
             step=step,
         )
+
+    def finish(self) -> None:
+        self._run.finish()
 
 
 class CSVMetricLogger(MetricLogger):

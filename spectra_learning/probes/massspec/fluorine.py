@@ -116,12 +116,6 @@ LORA_ENCODER_TARGET_SUFFIXES = (
 )
 
 
-def _config_get(config: Any, key: str, default: Any) -> Any:
-    if hasattr(config, "get"):
-        return config.get(key, default)
-    return getattr(config, key, default)
-
-
 class TrialParams(NamedTuple):
     hidden_dim: int
     learning_rate: float
@@ -399,7 +393,6 @@ def _train_cached_trial(
     focal_alpha: float,
     focal_gamma: float,
     select_metric: str,
-    higher_is_better: bool,
     patience: int,
     progress_output_prefix: StoragePath | None = None,
 ) -> TrialResult:
@@ -414,7 +407,7 @@ def _train_cached_trial(
         weight_decay=params.weight_decay,
     )
 
-    best_value = -float("inf") if higher_is_better else float("inf")
+    best_value = -float("inf")
     best_epoch = 0
     best_val: dict[str, float] = {}
     best_classifier_state: dict[str, torch.Tensor] = {}
@@ -459,11 +452,7 @@ def _train_cached_trial(
                 history=history,
             )
         current_value = _select_metric_value(val_metrics, select_metric)
-        improved = (
-            current_value > best_value
-            if higher_is_better
-            else current_value < best_value
-        )
+        improved = current_value > best_value
         if improved:
             best_value = current_value
             best_epoch = epoch_idx + 1
@@ -506,7 +495,6 @@ def _train_trial(
     focal_alpha: float,
     focal_gamma: float,
     select_metric: str,
-    higher_is_better: bool,
     patience: int,
     build_feature_fn: Callable[[bool], tuple[Callable[[dict[str, torch.Tensor]], torch.Tensor], torch.nn.Module | None]],
     progress_output_prefix: StoragePath | None = None,
@@ -526,7 +514,7 @@ def _train_trial(
         weight_decay=params.weight_decay,
     )
 
-    best_value = -float("inf") if higher_is_better else float("inf")
+    best_value = -float("inf")
     best_epoch: int = 0
     best_val: dict[str, float] = {}
     best_classifier_state: dict[str, torch.Tensor] = {}
@@ -575,11 +563,7 @@ def _train_trial(
                 history=history,
             )
         current_value = _select_metric_value(val_metrics, select_metric)
-        improved = (
-            current_value > best_value
-            if higher_is_better
-            else current_value < best_value
-        )
+        improved = current_value > best_value
         if improved:
             best_value = current_value
             best_epoch = epoch_idx + 1
@@ -650,7 +634,7 @@ def _build_checkpoint_feature_factory(
     compressed_dim = (
         covariance_dim
         if covariance_dim is not None
-        else int(_config_get(config, "covariance_pooling_dim", 32))
+        else int(config.get("covariance_pooling_dim", 32))
     )
     if not train_covariance_pooler and pooling == "covariance":
         checkpoint_pooler = cast(CovariancePool, cast(Any, model).covariance_pooler)
@@ -685,7 +669,7 @@ def _build_checkpoint_feature_factory(
         if pooling == "single_pair_covariance":
             pooler = SinglePairCovariancePool(
                 single_dim=int(config.model_dim),
-                pair_dim=int(_config_get(config, "pairmixer_pair_dim", config.model_dim)),
+                pair_dim=int(config.get("pairmixer_pair_dim", config.model_dim)),
                 compressed_dim=compressed_dim,
             ).to(device)
             if not train_covariance_pooler:
@@ -856,61 +840,37 @@ class FluorineFinetuneModule(torch.nn.Module):
         pooler: torch.nn.Module,
         classifier: MLPClassifier,
         pooling: str,
-        freeze_encoder: bool = False,
     ) -> None:
         super().__init__()
         self.encoder = encoder
         self.pooler = pooler
         self.classifier = classifier
         self.pooling = pooling
-        self.freeze_encoder = freeze_encoder
 
     def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         if self.pooling == "single_pair_covariance":
-            if self.freeze_encoder:
-                with torch.no_grad():
-                    peak_embeddings, pair_embeddings = self.encoder.forward_with_pair(
-                        batch["peak_mz"],
-                        batch["peak_intensity"],
-                        valid_mask=batch["peak_valid_mask"],
-                        precursor_mz=batch.get("precursor_mz", None),
-                        spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
-                    )
-                    peak_embeddings = _peak_tokens_only(peak_embeddings, batch["peak_valid_mask"])
-            else:
-                peak_embeddings, pair_embeddings = self.encoder.forward_with_pair(
-                    batch["peak_mz"],
-                    batch["peak_intensity"],
-                    valid_mask=batch["peak_valid_mask"],
-                    precursor_mz=batch.get("precursor_mz", None),
-                    spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
-                )
-                peak_embeddings = _peak_tokens_only(peak_embeddings, batch["peak_valid_mask"])
+            peak_embeddings, pair_embeddings = self.encoder.forward_with_pair(
+                batch["peak_mz"],
+                batch["peak_intensity"],
+                valid_mask=batch["peak_valid_mask"],
+                precursor_mz=batch.get("precursor_mz", None),
+                spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
+            )
+            peak_embeddings = _peak_tokens_only(peak_embeddings, batch["peak_valid_mask"])
             features = self.pooler(
                 peak_embeddings.float(),
                 batch["peak_valid_mask"].to(dtype=torch.bool),
                 pair_embeddings.float(),
             )
         else:
-            if self.freeze_encoder:
-                with torch.no_grad():
-                    encoded = self.encoder(
-                        batch["peak_mz"],
-                        batch["peak_intensity"],
-                        valid_mask=batch["peak_valid_mask"],
-                        precursor_mz=batch.get("precursor_mz", None),
-                        spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
-                    )
-                    peak_embeddings = _peak_tokens_only(encoded, batch["peak_valid_mask"])
-            else:
-                encoded = self.encoder(
-                    batch["peak_mz"],
-                    batch["peak_intensity"],
-                    valid_mask=batch["peak_valid_mask"],
-                    precursor_mz=batch.get("precursor_mz", None),
-                    spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
-                )
-                peak_embeddings = _peak_tokens_only(encoded, batch["peak_valid_mask"])
+            encoded = self.encoder(
+                batch["peak_mz"],
+                batch["peak_intensity"],
+                valid_mask=batch["peak_valid_mask"],
+                precursor_mz=batch.get("precursor_mz", None),
+                spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
+            )
+            peak_embeddings = _peak_tokens_only(encoded, batch["peak_valid_mask"])
             features = self.pooler(
                 peak_embeddings.float(),
                 batch["peak_valid_mask"].to(dtype=torch.bool),
@@ -918,15 +878,8 @@ class FluorineFinetuneModule(torch.nn.Module):
         return self.classifier(features)
 
 
-def _wrap_data_parallel(
-    module: torch.nn.Module,
-    device_ids: list[int] | None,
-) -> torch.nn.Module:
-    return module
-
-
 def compile_fluorine_module(module: torch.nn.Module, config: Any) -> None:
-    compile_mode = str(_config_get(config, "compile_mode", "none"))
+    compile_mode = str(config.get("compile_mode", "none"))
     if compile_mode.lower() == "none":
         return
     inductor_config.shape_padding = not compile_mode.startswith("max-autotune")
@@ -947,7 +900,7 @@ def _autocast_dtype_name(dtype: torch.dtype | None) -> str:
 
 
 def _resolve_autocast_dtype(config: Any, raw: str | None) -> torch.dtype | None:
-    value = _config_get(config, "autocast_dtype", "bf16") if raw is None else raw
+    value = config.get("autocast_dtype", "bf16") if raw is None else raw
     return parse_autocast_dtype(value)
 
 
@@ -1003,7 +956,6 @@ def train_or_load_finetuned(
     max_val_samples: int | None,
     max_test_samples: int | None,
     pooling: str,
-    device_ids: list[int] | None,
     select_metric: str,
     progress_output_prefix: StoragePath | None = None,
     eval_test_every_epoch: bool = False,
@@ -1071,14 +1023,18 @@ def train_or_load_finetuned(
         dreams_only=False,
         num_workers=num_workers,
     )
-    test_loader = _make_loader(
-        data,
-        "test",
-        shuffle=False,
-        seed=seed + 20_000,
-        max_samples=max_test_samples,
-        dreams_only=False,
-        num_workers=num_workers,
+    test_loader = (
+        _make_loader(
+            data,
+            "test",
+            shuffle=False,
+            seed=seed + 20_000,
+            max_samples=max_test_samples,
+            dreams_only=False,
+            num_workers=num_workers,
+        )
+        if eval_test_every_epoch
+        else None
     )
     covariance_dim = int(config.get("covariance_pooling_dim", 64))
     input_dim = covariance_dim * covariance_dim
@@ -1118,7 +1074,6 @@ def train_or_load_finetuned(
             distributed,
             static_graph=True,
         )
-    finetune_module = _wrap_data_parallel(finetune_module, device_ids)
     optimizer = torch.optim.AdamW(
         [
             {
@@ -1157,7 +1112,6 @@ def train_or_load_finetuned(
 
     def make_state(
         *,
-        test_metrics: dict[str, float] | None,
         complete: bool,
     ) -> dict[str, Any]:
         return {
@@ -1174,14 +1128,12 @@ def train_or_load_finetuned(
             "classifier_state": best_classifier_state,
             "best_epoch": int(best_epoch),
             "best_val": best_val,
-            "test": test_metrics,
+            "test": None,
             "history": history,
             "hparams": requested_hparams,
             "autocast_dtype": _autocast_dtype_name(autocast_dtype),
             "focal_alpha": focal_alpha_value,
             "focal_gamma": focal_gamma,
-            "finetune_cache_dir": str(cache_dir),
-            "device_ids": device_ids if device_ids is not None else [],
             "distributed_world_size": distributed_world_size,
             "train_size": int(data.metadata["train_size"]),
             "train_positive": int(data.metadata["train_positive"]),
@@ -1274,7 +1226,7 @@ def train_or_load_finetuned(
             epochs_without_improvement = 0
             if is_main:
                 state_path.parent.mkdir(parents=True, exist_ok=True)
-                torch.save(make_state(test_metrics=None, complete=False), best_state_path)
+                torch.save(make_state(complete=False), best_state_path)
         else:
             epochs_without_improvement += 1
         if is_main:
@@ -1292,15 +1244,8 @@ def train_or_load_finetuned(
     model.load_state_dict(best_model_state)
     pooler.load_state_dict(best_pooler_state)
     classifier.load_state_dict(best_classifier_state)
-    test_targets, test_logits = predict_finetuned(
-        finetune_module=finetune_module,
-        loader=test_loader,
-        device=device,
-        autocast_dtype=autocast_dtype,
-    )
-    test_metrics = _metric_dict(test_targets, test_logits, "test")
 
-    state = make_state(test_metrics=test_metrics, complete=True)
+    state = make_state(complete=True)
     if is_main:
         state_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(state, state_path)
@@ -1335,7 +1280,6 @@ def train_or_load_lora(
     max_val_samples: int | None,
     max_test_samples: int | None,
     pooling: str,
-    device_ids: list[int] | None,
     progress_output_prefix: StoragePath | None = None,
     eval_test_every_epoch: bool = False,
     distributed: DistributedContext | None = None,
@@ -1402,14 +1346,18 @@ def train_or_load_lora(
         dreams_only=False,
         num_workers=num_workers,
     )
-    test_loader = _make_loader(
-        data,
-        "test",
-        shuffle=False,
-        seed=seed + 20_000,
-        max_samples=max_test_samples,
-        dreams_only=False,
-        num_workers=num_workers,
+    test_loader = (
+        _make_loader(
+            data,
+            "test",
+            shuffle=False,
+            seed=seed + 20_000,
+            max_samples=max_test_samples,
+            dreams_only=False,
+            num_workers=num_workers,
+        )
+        if eval_test_every_epoch
+        else None
     )
     covariance_dim = int(config.get("covariance_pooling_dim", 64))
     input_dim = covariance_dim * covariance_dim
@@ -1450,7 +1398,6 @@ def train_or_load_lora(
             distributed,
             static_graph=True,
         )
-    finetune_module = _wrap_data_parallel(finetune_module, device_ids)
     optimizer = torch.optim.AdamW(
         [
             {
@@ -1483,7 +1430,6 @@ def train_or_load_lora(
 
     def make_state(
         *,
-        test_metrics: dict[str, float] | None,
         complete: bool,
     ) -> dict[str, Any]:
         return {
@@ -1501,14 +1447,12 @@ def train_or_load_lora(
             "classifier_state": best_classifier_state,
             "best_epoch": int(best_epoch),
             "best_val": best_val,
-            "test": test_metrics,
+            "test": None,
             "history": history,
             "hparams": requested_hparams,
             "autocast_dtype": _autocast_dtype_name(autocast_dtype),
             "focal_alpha": focal_alpha,
             "focal_gamma": focal_gamma,
-            "finetune_cache_dir": str(cache_dir),
-            "device_ids": device_ids if device_ids is not None else [],
             "train_size": int(data.metadata["train_size"]),
             "train_positive": int(data.metadata["train_positive"]),
             "val_size": int(data.metadata["val_size"]),
@@ -1600,7 +1544,7 @@ def train_or_load_lora(
             epochs_without_improvement = 0
             if is_main:
                 state_path.parent.mkdir(parents=True, exist_ok=True)
-                torch.save(make_state(test_metrics=None, complete=False), best_state_path)
+                torch.save(make_state(complete=False), best_state_path)
         else:
             epochs_without_improvement += 1
         if is_main:
@@ -1618,15 +1562,8 @@ def train_or_load_lora(
     load_lora_state_dict(model.encoder, best_lora_state)
     pooler.load_state_dict(best_pooler_state)
     classifier.load_state_dict(best_classifier_state)
-    test_targets, test_logits = predict_finetuned(
-        finetune_module=finetune_module,
-        loader=test_loader,
-        device=device,
-        autocast_dtype=autocast_dtype,
-    )
-    test_metrics = _metric_dict(test_targets, test_logits, "test")
 
-    state = make_state(test_metrics=test_metrics, complete=True)
+    state = make_state(complete=True)
     if is_main:
         state_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(state, state_path)
@@ -1645,7 +1582,6 @@ def evaluate_fluorine_test_split(
     num_workers: int,
     max_test_samples: int | None,
     autocast_dtype: torch.dtype | None,
-    device_ids: list[int] | None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     covariance_dim = int(head_state["covariance_dim"])
     pooling = str(head_state["pooling"])
@@ -1678,7 +1614,6 @@ def evaluate_fluorine_test_split(
         classifier=classifier,
         pooling=pooling,
     ).to(device)
-    finetune_module = _wrap_data_parallel(finetune_module, device_ids)
     finetune_module.eval()
 
     eval_data = data._replace(batch_size=batch_size)
@@ -1711,17 +1646,8 @@ def evaluate_fluorine_test_split(
     )
 
 
-def sigmoid(logits: np.ndarray) -> np.ndarray:
-    probs = np.empty_like(logits, dtype=np.float64)
-    positive = logits >= 0
-    probs[positive] = 1.0 / (1.0 + np.exp(-logits[positive]))
-    exp_logits = np.exp(logits[~positive])
-    probs[~positive] = exp_logits / (1.0 + exp_logits)
-    return probs
-
-
 def summarize_metrics(targets: np.ndarray, logits: np.ndarray) -> dict[str, float]:
-    probs = sigmoid(logits)
+    probs = _sigmoid_logits(logits)
     pred = probs >= 0.5
     precision, recall, thresholds = precision_recall_curve(targets, probs)
     threshold_precision = precision[:-1]
@@ -1869,10 +1795,9 @@ def write_standard_fluorine_outputs(
     head_state: dict[str, Any],
 ) -> dict[str, Any]:
     storage_mkdir(storage_parent(output_prefix))
-    probs = sigmoid(logits)
+    probs = _sigmoid_logits(logits)
     precision, recall, thresholds = precision_recall_curve(targets, probs)
     metrics = summarize_metrics(targets, logits)
-    train_cache_metrics = _metric_dict(targets, logits, "mcebio")
     history = list(head_state["history"])
     training_curve_plot = write_training_curve_plot(
         output_prefix=output_prefix,
@@ -1891,7 +1816,6 @@ def write_standard_fluorine_outputs(
         "checkpoint_path": str(checkpoint_path),
         "head_state_path": str(head_state_path),
         "metrics": metrics,
-        "metrics_prefixed": train_cache_metrics,
         "head": {
             "best_epoch": head_state["best_epoch"],
             "best_val": head_state["best_val"],
@@ -1899,10 +1823,8 @@ def write_standard_fluorine_outputs(
             "hparams": head_state["hparams"],
             "pooling": head_state["pooling"],
             "pair_dim": head_state["pair_dim"],
-            "device_ids": head_state["device_ids"],
             "focal_alpha": head_state["focal_alpha"],
             "focal_gamma": head_state["focal_gamma"],
-            "finetune_cache_dir": head_state["finetune_cache_dir"],
             "train_size": head_state["train_size"],
             "train_positive": head_state["train_positive"],
             "val_size": head_state["val_size"],
@@ -2229,12 +2151,6 @@ def default_output_prefix(mode: str) -> Path:
     return Path("results/fluorine_detection_probe")
 
 
-def parse_device_ids(raw: str | None) -> list[int] | None:
-    if raw is None or raw == "":
-        return None
-    return [int(item) for item in raw.split(",") if item]
-
-
 def _resolve_jax_checkpoint_dir_and_step(
     checkpoint: StoragePath | None,
     workdir: StoragePath | None,
@@ -2285,16 +2201,24 @@ def run_probe_jax(args: argparse.Namespace) -> dict[str, Any]:
     from spectra_learning.probes.massspec.msg_settings import MsgProbeTaskSpec
     from spectra_learning.training.checkpointing_jax import (
         build_jax_checkpoint_manager,
+        jax_training_checkpoint_metadata,
         restore_jax_training_state,
     )
     from spectra_learning.training.pretrain_jax import (
         _jax_data_mesh_for_device_count,
         _replicate_tree_on_data_mesh,
         init_pure_optax_train_state,
+        jax_config_checkpoint_contract,
+        prepare_jax_training_config,
     )
 
     config_path = args.config.expanduser().resolve()
     checkpoint_config = load_config(config_path)
+    prepare_jax_training_config(checkpoint_config)
+    checkpoint_metadata = jax_training_checkpoint_metadata(
+        "pretrain",
+        jax_config_checkpoint_contract(checkpoint_config),
+    )
     jax_device_count = jax.device_count()
     checkpoint_config.jax_mesh_devices = str(jax_device_count)
     checkpoint_dir, checkpoint_step = _resolve_jax_checkpoint_dir_and_step(
@@ -2339,6 +2263,7 @@ def run_probe_jax(args: argparse.Namespace) -> dict[str, Any]:
             "static_state": static_state,
             "opt_state": opt_state,
         },
+        expected_metadata=checkpoint_metadata,
     )
     model = nnx.merge(
         graphdef,
@@ -2364,24 +2289,21 @@ def run_probe_jax(args: argparse.Namespace) -> dict[str, Any]:
         num_peaks=int(
             args.num_peaks
             if args.num_peaks is not None
-            else _config_get(checkpoint_config, "num_peaks", 60)
+            else checkpoint_config.get("num_peaks", 60)
         ),
         max_precursor_mz=float(
-            _config_get(checkpoint_config, "max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
+            checkpoint_config.get("max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
         ),
         min_peak_intensity=float(
-            _config_get(
-                checkpoint_config,
+            checkpoint_config.get(
                 "min_peak_intensity",
                 DEFAULT_MIN_PEAK_INTENSITY,
             )
         ),
         peak_drop_min_intensity=float(
-            _config_get(
-                checkpoint_config,
+            checkpoint_config.get(
                 "peak_drop_min_intensity",
-                _config_get(
-                    checkpoint_config,
+                checkpoint_config.get(
                     "min_peak_intensity",
                     DEFAULT_MIN_PEAK_INTENSITY,
                 ),
@@ -2390,25 +2312,23 @@ def run_probe_jax(args: argparse.Namespace) -> dict[str, Any]:
         peak_ordering=str(
             args.peak_ordering
             if args.peak_ordering
-            else _config_get(checkpoint_config, "peak_ordering", "intensity")
+            else checkpoint_config.get("peak_ordering", "intensity")
         ),
         precursor_peak_exclusion_window_da=float(
-            _config_get(checkpoint_config, "precursor_peak_exclusion_window_da", 0.0)
+            checkpoint_config.get("precursor_peak_exclusion_window_da", 0.0)
         ),
         peak_filtering=str(
-            _config_get(checkpoint_config, "peak_filtering", DEFAULT_PEAK_FILTERING)
+            checkpoint_config.get("peak_filtering", DEFAULT_PEAK_FILTERING)
         ),
         grouped_peak_shoulder_da=float(
-            _config_get(
-                checkpoint_config,
+            checkpoint_config.get(
                 "grouped_peak_shoulder_da",
                 DEFAULT_GROUPED_PEAK_SHOULDER_DA,
             )
         ),
         grouped_peak_isotope_charges=tuple(
             int(charge)
-            for charge in _config_get(
-                checkpoint_config,
+            for charge in checkpoint_config.get(
                 "grouped_peak_isotope_charges",
                 DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
             )
@@ -2737,7 +2657,6 @@ def run_probe_jax(args: argparse.Namespace) -> dict[str, Any]:
         )
     ]
     select_metric = f"val/{args.select_metric}"
-    higher_is_better = args.select_metric not in {"loss"}
     cached_splits: dict[str, dict[str, np.ndarray]] | None = None
     if variant == "covariance":
         cached_splits = {
@@ -2770,7 +2689,7 @@ def run_probe_jax(args: argparse.Namespace) -> dict[str, Any]:
         opt_state = optimizer.init(probe_params)
         train_step = make_train_step(optimizer)
         train_rng = jax.random.PRNGKey(int(args.seed) + 10_000 * (trial_idx + 1))
-        best_value = -float("inf") if higher_is_better else float("inf")
+        best_value = -float("inf")
         best_epoch = 0
         best_val: dict[str, float] = {}
         best_probe_params = probe_params
@@ -2835,11 +2754,7 @@ def run_probe_jax(args: argparse.Namespace) -> dict[str, Any]:
                 }
             )
             current_value = _select_metric_value(val_metrics, select_metric)
-            improved = (
-                current_value > best_value
-                if higher_is_better
-                else current_value < best_value
-            )
+            improved = current_value > best_value
             if improved:
                 best_value = current_value
                 best_epoch = epoch_idx + 1
@@ -2876,11 +2791,6 @@ def run_probe_jax(args: argparse.Namespace) -> dict[str, Any]:
         range(len(results)),
         key=lambda idx: _select_metric_value(results[idx].best_val, select_metric),
     )
-    if not higher_is_better:
-        best_idx = min(
-            range(len(results)),
-            key=lambda idx: _select_metric_value(results[idx].best_val, select_metric),
-        )
     best = results[best_idx]
     best_probe_params = best_params_by_trial[best_idx]
     test_targets, test_logits, test_row_indices_np = prediction_arrays(
@@ -2930,10 +2840,10 @@ def run_probe_jax(args: argparse.Namespace) -> dict[str, Any]:
         "config_path": str(config_path),
         "checkpoint_path": str(checkpoint_path),
         "input_dim": int(input_dim),
-        "covariance_dim": int(_config_get(checkpoint_config, "covariance_pooling_dim", 32)),
+        "covariance_dim": int(checkpoint_config.get("covariance_pooling_dim", 32)),
         "pooling": args.pooling,
         "pair_dim": int(
-            _config_get(checkpoint_config, "pairmixer_pair_dim", checkpoint_config.model_dim)
+            checkpoint_config.get("pairmixer_pair_dim", checkpoint_config.model_dim)
         ),
         "jax_params": _jax_tree_to_numpy(best_probe_params),
         "pooler_state": None,
@@ -2945,8 +2855,6 @@ def run_probe_jax(args: argparse.Namespace) -> dict[str, Any]:
         "hparams": best.params._asdict(),
         "focal_alpha": focal_alpha,
         "focal_gamma": float(args.focal_gamma),
-        "finetune_cache_dir": str(cache_dir),
-        "device_ids": list(range(jax_device_count)),
         "train_size": int(metadata["train_size"]),
         "train_positive": int(metadata["train_positive"]),
         "val_size": int(metadata["val_size"]),
@@ -3025,24 +2933,21 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         num_peaks=int(
             args.num_peaks
             if args.num_peaks is not None
-            else _config_get(checkpoint_config, "num_peaks", 60)
+            else checkpoint_config.get("num_peaks", 60)
         ),
         max_precursor_mz=float(
-            _config_get(checkpoint_config, "max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
+            checkpoint_config.get("max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
         ),
         min_peak_intensity=float(
-            _config_get(
-                checkpoint_config,
+            checkpoint_config.get(
                 "min_peak_intensity",
                 DEFAULT_MIN_PEAK_INTENSITY,
             )
         ),
         peak_drop_min_intensity=float(
-            _config_get(
-                checkpoint_config,
+            checkpoint_config.get(
                 "peak_drop_min_intensity",
-                _config_get(
-                    checkpoint_config,
+                checkpoint_config.get(
                     "min_peak_intensity",
                     DEFAULT_MIN_PEAK_INTENSITY,
                 ),
@@ -3051,25 +2956,23 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         peak_ordering=str(
             args.peak_ordering
             if args.peak_ordering
-            else _config_get(checkpoint_config, "peak_ordering", "intensity")
+            else checkpoint_config.get("peak_ordering", "intensity")
         ),
         precursor_peak_exclusion_window_da=float(
-            _config_get(checkpoint_config, "precursor_peak_exclusion_window_da", 0.0)
+            checkpoint_config.get("precursor_peak_exclusion_window_da", 0.0)
         ),
         peak_filtering=str(
-            _config_get(checkpoint_config, "peak_filtering", DEFAULT_PEAK_FILTERING)
+            checkpoint_config.get("peak_filtering", DEFAULT_PEAK_FILTERING)
         ),
         grouped_peak_shoulder_da=float(
-            _config_get(
-                checkpoint_config,
+            checkpoint_config.get(
                 "grouped_peak_shoulder_da",
                 DEFAULT_GROUPED_PEAK_SHOULDER_DA,
             )
         ),
         grouped_peak_isotope_charges=tuple(
             int(charge)
-            for charge in _config_get(
-                checkpoint_config,
+            for charge in checkpoint_config.get(
                 "grouped_peak_isotope_charges",
                 DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
             )
@@ -3131,7 +3034,6 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         )
     ]
     select_metric = f"val/{args.select_metric}"
-    higher_is_better = args.select_metric not in {"loss"}
     progress_output_prefix = output_prefix if len(trial_params) == 1 else None
 
     if bool(args.train_covariance_pooler):
@@ -3146,7 +3048,6 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 focal_alpha=focal_alpha,
                 focal_gamma=args.focal_gamma,
                 select_metric=select_metric,
-                higher_is_better=higher_is_better,
                 patience=args.patience,
                 build_feature_fn=build_feature_fn,
                 progress_output_prefix=progress_output_prefix,
@@ -3157,11 +3058,6 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             results,
             key=lambda result: _select_metric_value(result.best_val, select_metric),
         )
-        if not higher_is_better:
-            best = min(
-                results,
-                key=lambda result: _select_metric_value(result.best_val, select_metric),
-            )
         classifier, feature_fn = _instantiate_best_model(
             result=best,
             input_dim=input_dim,
@@ -3226,7 +3122,6 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 focal_alpha=focal_alpha,
                 focal_gamma=args.focal_gamma,
                 select_metric=select_metric,
-                higher_is_better=higher_is_better,
                 patience=args.patience,
                 progress_output_prefix=progress_output_prefix,
             )
@@ -3236,11 +3131,6 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             results,
             key=lambda result: _select_metric_value(result.best_val, select_metric),
         )
-        if not higher_is_better:
-            best = min(
-                results,
-                key=lambda result: _select_metric_value(result.best_val, select_metric),
-            )
         classifier = MLPClassifier(
             input_dim=input_dim,
             hidden_dim=best.params.hidden_dim,
@@ -3293,11 +3183,11 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         "covariance_dim": int(
             args.covariance_dim
             if args.covariance_dim is not None
-            else _config_get(checkpoint_config, "covariance_pooling_dim", 32)
+            else checkpoint_config.get("covariance_pooling_dim", 32)
         ),
         "pooling": args.pooling,
         "pair_dim": int(
-            _config_get(checkpoint_config, "pairmixer_pair_dim", checkpoint_config.model_dim)
+            checkpoint_config.get("pairmixer_pair_dim", checkpoint_config.model_dim)
         ),
         "pooler_state": _tensor_state_to_cpu(best.pooler_state),
         "classifier_state": _tensor_state_to_cpu(best.classifier_state),
@@ -3368,7 +3258,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             config = load_config(args.config.expanduser().resolve())
             backend = (
                 "jax"
-                if str(_config_get(config, "device_backend", "torch")).lower() == "jax"
+                if str(config.get("device_backend", "torch")).lower() == "jax"
                 else "torch"
             )
         if backend == "jax":
@@ -3377,7 +3267,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     distributed = init_distributed_from_env()
     device = distributed.device if distributed.is_distributed else torch.device(args.device)
-    device_ids = parse_device_ids(getattr(args, "device_ids", None))
     checkpoint_path = resolve_checkpoint_path(args.checkpoint, getattr(args, "workdir", None))
     config, model = _load_checkpoint_model(
         args.config.expanduser().resolve(),
@@ -3429,7 +3318,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             max_val_samples=args.max_val_samples,
             max_test_samples=args.max_test_samples,
             pooling=args.pooling,
-            device_ids=device_ids,
             select_metric=args.select_metric,
             progress_output_prefix=output_prefix,
             eval_test_every_epoch=bool(getattr(args, "eval_test_every_epoch", False)),
@@ -3463,7 +3351,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             max_val_samples=args.max_val_samples,
             max_test_samples=args.max_test_samples,
             pooling=args.pooling,
-            device_ids=device_ids,
             progress_output_prefix=output_prefix,
             eval_test_every_epoch=bool(getattr(args, "eval_test_every_epoch", False)),
             distributed=distributed,
@@ -3497,8 +3384,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         num_workers=args.num_workers,
         max_test_samples=args.max_test_samples,
         autocast_dtype=autocast_dtype,
-        device_ids=device_ids,
     )
+    head_state["test"] = _metric_dict(targets, logits, "test")
+    torch.save(head_state, head_state_path)
     summary = write_standard_fluorine_outputs(
         output_prefix=output_prefix,
         config_path=args.config.expanduser().resolve(),

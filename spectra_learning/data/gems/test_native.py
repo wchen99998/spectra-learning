@@ -2,7 +2,6 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Any
 from unittest import mock
 
 import h5py
@@ -14,50 +13,6 @@ import spectra_learning.data.gems as gems
 import spectra_learning.data.gems.artifacts as gems_artifacts
 import spectra_learning.data.massspec_probe as massspec_probe_data
 from spectra_learning.data.gems.sampling import ChunkedDistributedBatchSampler
-from spectra_learning.data.massspec_targets import (
-    build_maccs_targets_for_rows,
-    build_morgan_targets_for_rows,
-    build_probe_targets_for_rows,
-)
-
-
-def _write_fake_nist_hdf5(path: Path) -> dict[str, np.ndarray]:
-    smiles = np.asarray(["CCO", "CCN", "c1ccccc1O", "CCC"], dtype=object)
-    adduct = np.asarray(["[M+H]+", "[M+Na]+", "[M+H]+", "[M+K]+"], dtype=object)
-    precursor = np.asarray([111.0, 222.0, 333.0, 1500.0], dtype=np.float32)
-    dreams = np.asarray(
-        [
-            [1.0, 10.0],
-            [2.0, 20.0],
-            [3.0, 30.0],
-            [4.0, 40.0],
-        ],
-        dtype=np.float32,
-    )
-    spectra = np.zeros((4, 2, 128), dtype=np.float32)
-    spectra[0, 0, :3] = [10.0, 11.0, 12.0]
-    spectra[0, 1, :3] = [2.0, 6.0, 3.0]
-    spectra[1, 0, :3] = [20.0, 21.0, 22.0]
-    spectra[1, 1, :3] = [7.0, 1.0, 2.0]
-    spectra[2, 0, :3] = [30.0, 31.0, 32.0]
-    spectra[2, 1, :3] = [4.0, 8.0, 2.0]
-    spectra[3, 0, :3] = [40.0, 41.0, 42.0]
-    spectra[3, 1, :3] = [5.0, 9.0, 1.0]
-
-    with h5py.File(path, "w") as f:
-        f.create_dataset("spectrum", data=spectra)
-        f.create_dataset("precursor_mz", data=precursor)
-        f.create_dataset("smiles", data=smiles, dtype=h5py.string_dtype("utf-8"))
-        f.create_dataset("adduct", data=adduct, dtype=h5py.string_dtype("utf-8"))
-        f.create_dataset("DreaMS_embedding", data=dreams)
-
-    return {
-        "spectra": spectra,
-        "precursor": precursor,
-        "smiles": smiles.astype(str),
-        "adduct": adduct.astype(str),
-        "dreams": dreams,
-    }
 
 
 def _write_fake_hdf5_shards(root: Path, lengths: list[int]) -> Path:
@@ -118,39 +73,6 @@ class GemsSamplingTests(unittest.TestCase):
         combined = [index for batch in rank0 + rank1 for index in batch]
         self.assertEqual(sorted(combined), list(range(9)))
 
-
-def _write_fake_nist_full_probe_artifact(
-    root: Path,
-    *,
-    max_precursor_mz: float = 1000.0,
-) -> dict[str, object]:
-    split_lengths = {
-        "train": [8],
-        "val": [4],
-        "test": [2],
-    }
-    metadata: dict[str, object] = {
-        "metadata_version": massspec_probe_data.NIST_FULL_METADATA_VERSION,
-        "artifact_format": massspec_probe_data.NIST_FULL_ARTIFACT_FORMAT,
-        "max_precursor_mz": max_precursor_mz,
-        "adduct_vocab": {"unknown": 0},
-        "instrument_type_vocab": {"unknown": 0},
-        "dreams_dim": 0,
-        "probe_maccs_bits": 166,
-    }
-    for split_name, lengths in split_lengths.items():
-        shard_names = []
-        split_dir = root / split_name
-        for shard_idx in range(len(lengths)):
-            shard_name = f"shard-{shard_idx:05d}-of-{len(lengths):05d}"
-            (split_dir / shard_name).mkdir(parents=True, exist_ok=True)
-            shard_names.append(shard_name)
-        metadata[f"{split_name}_files"] = shard_names
-        metadata[f"{split_name}_lengths"] = lengths
-        metadata[f"{split_name}_size"] = sum(lengths)
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "metadata.json").write_text(json.dumps(metadata))
-    return metadata
 
 class GeMSRuntimeDownloadTests(unittest.TestCase):
     def _make_config(self, tmp_path: Path) -> config_dict.ConfigDict:
@@ -559,131 +481,6 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
 
 
 class MassSpecPreprocessTests(unittest.TestCase):
-    def test_nist_full_artifact_preserves_row_alignment(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            hdf5_path = tmp_path / "nist_full.hdf5"
-            raw = _write_fake_nist_hdf5(hdf5_path)
-            artifact_dir = tmp_path / "artifact"
-
-            metadata = massspec_probe_data.build_nist_full_probe_artifact(
-                hdf5_path,
-                artifact_dir,
-                max_precursor_mz=1000.0,
-                num_shards=4,
-            )
-            self.assertEqual(metadata["instrument_type_vocab"], {"unknown": 0})
-
-            kept_mask = raw["precursor"] <= 1000.0
-            kept_smiles = raw["smiles"][kept_mask]
-            kept_adduct = raw["adduct"][kept_mask]
-            kept_precursor = raw["precursor"][kept_mask]
-            kept_dreams = raw["dreams"][kept_mask]
-            kept_spectra = massspec_probe_data._normalize_spectra_intensity(
-                raw["spectra"][kept_mask].copy()
-            )
-            fingerprints = massspec_probe_data._compute_morgan_fingerprints(kept_smiles)
-            probe_props, _, probe_valid = build_probe_targets_for_rows(kept_smiles)
-            probe_maccs, probe_maccs_valid = build_maccs_targets_for_rows(kept_smiles)
-            probe_morgan, probe_morgan_valid = build_morgan_targets_for_rows(kept_smiles)
-            probe_valid &= probe_maccs_valid & probe_morgan_valid
-            expected_by_smiles: dict[str, dict[str, Any]] = {
-                str(smiles): {
-                    "spectra": kept_spectra[row_idx],
-                    "precursor": float(kept_precursor[row_idx]),
-                    "dreams_embedding": kept_dreams[row_idx],
-                    "fingerprint": fingerprints[row_idx],
-                    "probe_maccs": probe_maccs[row_idx],
-                    "probe_morgan": probe_morgan[row_idx],
-                    "probe_valid_mol": bool(probe_valid[row_idx]),
-                    "adduct": str(kept_adduct[row_idx]),
-                    **{
-                        name: float(values[row_idx])
-                        for name, values in probe_props.items()
-                    },
-                }
-                for row_idx, smiles in enumerate(kept_smiles.tolist())
-            }
-            shard_entries = []
-            for split_name in ("train", "val", "test"):
-                shard_entries.extend(
-                    {
-                        "dir": artifact_dir / split_name / shard_name,
-                        "length": int(shard_length),
-                    }
-                    for shard_name, shard_length in zip(
-                        metadata[f"{split_name}_files"],
-                        metadata[f"{split_name}_lengths"],
-                        strict=True,
-                    )
-                )
-            dataset = massspec_probe_data._ProbeMemmapDataset(shard_entries)
-
-            seen_smiles: list[str] = []
-            for row_idx in range(len(dataset)):
-                sample = dataset[row_idx]
-                smiles = str(sample["smiles"])
-                seen_smiles.append(smiles)
-                expected = expected_by_smiles[smiles]
-                np.testing.assert_allclose(
-                    np.asarray(sample["spectra"]),
-                    expected["spectra"],
-                    atol=1e-6,
-                )
-                self.assertEqual(float(sample["precursor_mz_raw"]), expected["precursor"])
-                np.testing.assert_array_equal(
-                    np.asarray(sample["dreams_embedding"]),
-                    expected["dreams_embedding"],
-                )
-                np.testing.assert_array_equal(
-                    np.asarray(sample["fingerprint"]),
-                    expected["fingerprint"],
-                )
-                np.testing.assert_array_equal(
-                    np.asarray(sample["probe_maccs"]),
-                    expected["probe_maccs"],
-                )
-                np.testing.assert_array_equal(
-                    np.asarray(sample["probe_morgan"]),
-                    expected["probe_morgan"],
-                )
-                self.assertEqual(
-                    bool(sample["probe_valid_mol"]),
-                    expected["probe_valid_mol"],
-                )
-                self.assertEqual(
-                    int(sample["adduct_id"]),
-                    metadata["adduct_vocab"][expected["adduct"]],
-                )
-                self.assertEqual(int(sample["instrument_type_id"]), 0)
-                for name in massspec_probe_data.REGRESSION_TARGET_KEYS:
-                    self.assertAlmostEqual(
-                        float(sample[f"probe_{name}"]),
-                        expected[name],
-                        places=5,
-                    )
-
-        self.assertCountEqual(seen_smiles, kept_smiles.tolist())
-        self.assertNotIn("CCC", seen_smiles)
-
-    def test_balanced_morgan_pair_sampler_writes_fixed_pair_payload(self):
-        payload = massspec_probe_data._sample_balanced_morgan_pairs(
-            np.asarray(["CC", "CCC", "CCCC", "CCO", "CCCO", "CCCCO"], dtype=str),
-            np.ones(6, dtype=bool),
-            num_pairs=4,
-            bin_size=0.5,
-            seed=1,
-        )
-
-        self.assertIsNotNone(payload)
-        assert payload is not None
-        self.assertEqual(payload["tanimoto"].shape, (4,))
-        self.assertEqual(payload["bin_counts"].tolist(), [2, 2])
-        self.assertEqual(
-            payload["left_endpoint"].shape,
-            payload["right_endpoint"].shape,
-        )
-
     def test_probe_collator_applies_peak_and_precursor_window_filters(self):
         collator = massspec_probe_data._ProbeBatchCollator(
             num_peaks=8,
@@ -803,70 +600,6 @@ class MassSpecPreprocessTests(unittest.TestCase):
         self.assertEqual(tuple(batch["peak_mz"].shape), (2, 4))
         self.assertEqual(batch["peak_valid_mask"].sum().item(), 8)
 
-    def test_process_massspec_probe_filters_large_precursor(self):
-        spectra = np.zeros((4, 2, 128), dtype=np.float32)
-        precursor = np.asarray([500.0, 1200.0, 750.0, 900.0], dtype=np.float32)
-        fold = np.asarray(["train", "train", "val", "test"], dtype=object)
-        smiles = np.asarray(["CCO", "CCC", "CCN", "CCCl"], dtype=object)
-        adduct = np.asarray(["[M+H]+"] * 4, dtype=object)
-        instrument = np.asarray(["Orbitrap"] * 4, dtype=object)
-        collision_energy = np.asarray([10.0, 20.0, 30.0, 40.0], dtype=np.float32)
-        collision_energy_present = np.asarray([1, 1, 1, 1], dtype=np.int32)
-
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            fake_tsv = tmp_path / "MassSpecGym.tsv"
-            fake_tsv.write_text("unused\n")
-
-            with (
-                mock.patch.object(
-                    massspec_probe_data, "_download_hf_file", return_value=fake_tsv
-                ),
-                mock.patch.object(
-                    massspec_probe_data,
-                    "_load_massspec_tsv",
-                    return_value={
-                        "spectra": spectra,
-                        "precursor": precursor,
-                        "fold": fold,
-                        "smiles": smiles,
-                        "adduct": adduct,
-                        "instrument_type": instrument,
-                        "collision_energy": collision_energy,
-                        "collision_energy_present": collision_energy_present,
-                    },
-                ),
-            ):
-                metadata = massspec_probe_data.ensure_massspec_probe_prepared(
-                    tmp_path / "massspec_probe",
-                    max_precursor_mz=1000.0,
-                    num_shards=4,
-                )
-            shard_dir = (
-                tmp_path / "massspec_probe" / "train" / metadata["train_files"][0]
-            )
-            probe_mol_weight = np.load(shard_dir / "probe_mol_weight.npy")
-            probe_logp = np.load(shard_dir / "probe_logp.npy")
-            probe_num_heavy_atoms = np.load(shard_dir / "probe_num_heavy_atoms.npy")
-            probe_num_rings = np.load(shard_dir / "probe_num_rings.npy")
-            probe_maccs = np.load(shard_dir / "probe_maccs.npy")
-            probe_morgan = np.load(shard_dir / "probe_morgan.npy")
-            probe_valid_mol = np.load(shard_dir / "probe_valid_mol.npy")
-
-        self.assertEqual(metadata["train_size"], 1)
-        self.assertEqual(metadata["val_size"], 1)
-        self.assertEqual(metadata["test_size"], 1)
-        self.assertEqual(metadata["max_precursor_mz"], 1000.0)
-        self.assertEqual(metadata["probe_maccs_bits"], 166)
-        self.assertEqual(metadata["probe_morgan_bits"], 4096)
-        self.assertEqual(metadata["probe_morgan_radius"], 2)
-        self.assertEqual(probe_mol_weight.shape, (1,))
-        self.assertEqual(probe_logp.shape, (1,))
-        self.assertEqual(probe_num_heavy_atoms.shape, (1,))
-        self.assertEqual(probe_num_rings.shape, (1,))
-        self.assertEqual(probe_maccs.shape, (1, 166))
-        self.assertEqual(probe_morgan.shape, (1, 4096))
-        self.assertEqual(probe_valid_mol.shape, (1,))
 
 if __name__ == "__main__":
     unittest.main()

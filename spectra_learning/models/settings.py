@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass, fields, replace
 from typing import Any
 
@@ -89,15 +88,16 @@ class PeakSetJEPASettings:
     @classmethod
     def from_config(cls, config: Any) -> "PeakSetJEPASettings":
         for key in REMOVED_SETTING_KEYS:
-            if _config_has(config, key):
+            if key in config:
                 raise ValueError(
                     f"{key} has been removed from PeakSetJEPASettings; remove it "
                     "from experiment configs. JAX MAE uses the full context encoder."
                 )
         values = _default_values(cls())
         _apply_derived_defaults(values, config)
-        for name, cast in SETTING_CASTS.items():
-            values[name] = cast(_config_get(config, name, values[name]))
+        values = {
+            name: config.get(name, default) for name, default in values.items()
+        }
         values["pairmixer_fast_max_visible_tokens"] = (
             resolve_pairmixer_fast_max_visible_tokens(config)
         )
@@ -124,99 +124,11 @@ def _default_values(settings: PeakSetJEPASettings) -> dict[str, Any]:
 
 
 def _apply_derived_defaults(values: dict[str, Any], config: Any) -> None:
-    peak_mz_max = float(_config_get(config, "peak_mz_max", PEAK_MZ_MAX))
-    precursor_mz_max = float(_config_get(config, "max_precursor_mz", peak_mz_max))
+    peak_mz_max = config.get("peak_mz_max", PEAK_MZ_MAX)
+    precursor_mz_max = config.get("max_precursor_mz", peak_mz_max)
     values["encoder_fourier_input_scale"] = peak_mz_max
     values["jepa_mae_mz_max"] = peak_mz_max
     values["distogram_mz_max"] = peak_mz_max
     values["pairmixer_mz_scale"] = peak_mz_max
     values["pairmixer_precursor_mz_scale"] = precursor_mz_max
     values["pairmixer_fourier_x_max"] = peak_mz_max
-
-
-def _config_get(config: Any, key: str, default: Any) -> Any:
-    if hasattr(config, "get"):
-        return config.get(key, default)
-    return getattr(config, key, default)
-
-
-def _config_has(config: Any, key: str) -> bool:
-    if hasattr(config, "__contains__"):
-        return key in config
-    return hasattr(config, key)
-
-
-def _optional_int(value: Any) -> int | None:
-    return None if value is None else int(value)
-
-
-def _optional_float(value: Any) -> float | None:
-    return None if value is None else float(value)
-
-
-SETTING_CASTS: dict[str, Callable[[Any], Any]] = {
-    "training_mode": str,
-    "model_dim": int,
-    "encoder_num_layers": int,
-    "encoder_num_heads": int,
-    "attention_mlp_multiple": float,
-    "feature_mlp_hidden_dim": int,
-    "encoder_fourier_mlp_hidden_dim": _optional_int,
-    "encoder_fourier_mlp_num_layers": int,
-    "encoder_fourier_x_min": float,
-    "encoder_fourier_x_max": float,
-    "encoder_fourier_num_freqs": int,
-    "encoder_fourier_input_scale": float,
-    "encoder_use_fourier_features": bool,
-    "masked_token_loss_weight": float,
-    "mae_loss_weight": float,
-    "jepa_mae_loss_weight": float,
-    "distogram_loss_weight": float,
-    "latent_pair_loss_weight": float,
-    "distogram_mz_max": float,
-    "jepa_mae_mz_bin_size": float,
-    "jepa_mae_intensity_bin_size": float,
-    "mae_intensity_loss_weight": float,
-    "jepa_mae_mz_max": float,
-    "jepa_mae_intensity_max": float,
-    "jepa_target_normalization": str,
-    "latent_pair_target_normalization": str,
-    "masked_token_input_mode": str,
-    "masked_mz_sentinel": float,
-    "masked_latent_predictor_num_layers": int,
-    "masked_latent_predictor_num_heads": int,
-    "jepa_num_target_blocks": int,
-    "norm_eps": float,
-    "encoder_use_position_embedding": bool,
-    "encoder_apply_final_norm": bool,
-    "encoder_apply_final_pair_norm": bool,
-    "pairmixer_block_type": str,
-    "pairmixer_transition_type": str,
-    "pairmixer_pair_dim": _optional_int,
-    "pairmixer_pair_feature_hidden_dim": int,
-    "pairmixer_dropout": float,
-    "pairmixer_mz_scale": float,
-    "pairmixer_precursor_mz_scale": float,
-    "pairmixer_use_fourier_features": bool,
-    "pairmixer_fourier_num_freqs": int,
-    "pairmixer_fourier_x_min": float,
-    "pairmixer_fourier_x_max": float,
-    "pairmixer_relative_fourier_x_min": float,
-    "pairmixer_relative_fourier_x_max": float,
-    "predictor_apply_final_norm": bool,
-    "num_peaks": int,
-    "predictor_dim": _optional_int,
-    "target_projector_dim": _optional_int,
-    "predictor_dropout": float,
-    "use_ema_teacher": bool,
-    "frozen_teacher_config_path": lambda value: None if value is None else str(value),
-    "ema_teacher_momentum_start": float,
-    "ema_teacher_momentum_mid": _optional_float,
-    "ema_teacher_momentum_final": _optional_float,
-    "ema_teacher_schedule_peak_fraction": float,
-    "ema_teacher_schedule": str,
-    "activation_checkpoint_mode": str,
-    "activation_checkpoint_every_n_layers": int,
-    "activation_checkpoint_modules": tuple,
-    "autocast_dtype": str,
-}

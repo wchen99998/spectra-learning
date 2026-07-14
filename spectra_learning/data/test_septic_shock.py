@@ -127,8 +127,7 @@ def test_septic_shock_split_counts_match_plan() -> None:
     }
 
 
-def test_read_mzxml_sample_spectra_xml_fallback(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(septic_shock, "USE_PYTEOMICS_MZXML", False)
+def test_read_mzxml_sample_spectra(tmp_path: Path) -> None:
     path = tmp_path / "sample.mzXML"
     _write_mzxml(
         path,
@@ -149,8 +148,7 @@ def test_read_mzxml_sample_spectra_xml_fallback(monkeypatch, tmp_path: Path) -> 
     assert torch.allclose(torch.from_numpy(precursor_mz), torch.tensor([250.0]))
 
 
-def test_septic_shock_loader_preserves_sample_grouping(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(septic_shock, "USE_PYTEOMICS_MZXML", False)
+def test_septic_shock_loader_preserves_sample_grouping(tmp_path: Path) -> None:
     root = tmp_path / "septic"
     _write_mzxml(
         root / "raw" / "mzxml" / "1.mzXML",
@@ -240,8 +238,7 @@ def test_septic_shock_loader_preserves_sample_grouping(monkeypatch, tmp_path: Pa
     assert tuple(distributed_batch["label"].shape) == (1,)
 
 
-def test_build_peaklist_artifact_uses_project_loader(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(septic_shock, "USE_PYTEOMICS_MZXML", False)
+def test_build_peaklist_artifact_uses_project_loader(tmp_path: Path) -> None:
     cache_dir = tmp_path / "cache"
     samples = []
     for i in range(124):

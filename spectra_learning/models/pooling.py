@@ -5,6 +5,22 @@ from jaxtyping import Bool, Float
 from torch import Tensor, nn
 
 
+def token_mask_with_optional_cls(
+    valid_mask: Bool[Tensor, "batch peaks"],
+    *,
+    include_cls_token: bool,
+) -> Bool[Tensor, "batch tokens"]:
+    if not include_cls_token:
+        return valid_mask
+    cls_mask = torch.ones(
+        valid_mask.shape[0],
+        1,
+        device=valid_mask.device,
+        dtype=torch.bool,
+    )
+    return torch.cat([valid_mask, cls_mask], dim=1)
+
+
 class CovariancePool(nn.Module):
     def __init__(
         self,
@@ -121,26 +137,15 @@ class SinglePairCovariancePool(nn.Module):
     def output_dim(self) -> int:
         return self.compressed_dim * self.compressed_dim
 
-    def _token_mask(
-        self,
-        valid_mask: Bool[Tensor, "batch peaks"],
-    ) -> Bool[Tensor, "batch tokens"]:
-        if not self.include_cls_token:
-            return valid_mask
-        cls_mask = torch.ones(
-            valid_mask.shape[0],
-            1,
-            device=valid_mask.device,
-            dtype=torch.bool,
-        )
-        return torch.cat([valid_mask, cls_mask], dim=1)
-
     def pair_covariance_matrix(
         self,
         pair_embeddings: Float[Tensor, "batch peaks peaks pair"],
         valid_mask: Bool[Tensor, "batch peaks"],
     ) -> Float[Tensor, "batch compressed compressed"]:
-        token_mask = self._token_mask(valid_mask)
+        token_mask = token_mask_with_optional_cls(
+            valid_mask,
+            include_cls_token=self.include_cls_token,
+        )
         num_tokens = token_mask.shape[1]
         batch_size = pair_embeddings.shape[0]
         if pair_embeddings.shape[1] >= num_tokens and pair_embeddings.shape[2] >= num_tokens:
@@ -178,7 +183,10 @@ class SinglePairCovariancePool(nn.Module):
         pair_embeddings: Float[Tensor, "batch peaks peaks pair"],
     ) -> Float[Tensor, "batch flattened_covariance"]:
         with torch.autocast(device_type=peak_embeddings.device.type, enabled=False):
-            token_mask = self._token_mask(valid_mask)
+            token_mask = token_mask_with_optional_cls(
+                valid_mask,
+                include_cls_token=self.include_cls_token,
+            )
             single_covariance = self.single_pool.covariance_matrix(
                 peak_embeddings[:, : token_mask.shape[1]].float(),
                 token_mask,

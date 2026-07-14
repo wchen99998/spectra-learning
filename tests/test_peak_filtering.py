@@ -15,6 +15,7 @@ from spectra_learning.data.spectra import (
     PRECURSOR_CHARGE_MAX,
     preprocess_peak_batch_numpy,
     preprocess_peak_batch_torch,
+    spectra_from_peak_lists,
 )
 from spectra_learning.models.spectrum_metadata import torch_spectrum_metadata_from_batch
 
@@ -100,6 +101,72 @@ def test_grouped_peak_filtering_keeps_group_representatives_numpy() -> None:
     )
     grouped_group_id = grouped["peak_group_id"][0, grouped["peak_valid_mask"][0]]
     assert np.array_equal(grouped_group_id, np.asarray([0, 0, 1, 1], dtype=np.int32))
+
+
+def test_numpy_and_torch_peak_preprocessing_randomized_parity() -> None:
+    rng = np.random.default_rng(3491)
+    for peak_filtering in (
+        PEAK_FILTERING_TOP_INTENSITY,
+        PEAK_FILTERING_GROUPED,
+    ):
+        for peak_ordering in ("mz", "intensity"):
+            for input_peaks in (9, 41):
+                mz = rng.uniform(-20.0, 1100.0, (7, input_peaks)).astype(np.float32)
+                intensity = rng.uniform(-0.1, 1.5, (7, input_peaks)).astype(
+                    np.float32
+                )
+                precursor_mz = rng.uniform(50.0, 1050.0, 7).astype(np.float32)
+                bases = rng.uniform(120.0, 700.0, 7).astype(np.float32)
+                mz[:, :4] = np.stack(
+                    [bases, bases + 0.03, bases + 1.002, bases + 2.004],
+                    axis=1,
+                )
+                intensity[:, :4] = rng.uniform(0.1, 1.5, (7, 4))
+                spectra = np.stack([mz, intensity], axis=1)
+                kwargs = {
+                    "num_peaks": 16,
+                    "peak_drop_min_intensity": 0.08,
+                    "peak_ordering": peak_ordering,
+                    "max_precursor_mz": 1000.0,
+                    "precursor_peak_exclusion_window_da": 0.1,
+                    "min_peak_intensity": 0.05,
+                    "peak_filtering": peak_filtering,
+                    "grouped_peak_shoulder_da": 0.05,
+                    "grouped_peak_isotope_charges": (1, 2, 3),
+                }
+
+                numpy_batch = preprocess_peak_batch_numpy(
+                    spectra,
+                    precursor_mz,
+                    **kwargs,
+                )
+                torch_batch = preprocess_peak_batch_torch(
+                    torch.from_numpy(mz),
+                    torch.from_numpy(intensity),
+                    torch.from_numpy(precursor_mz),
+                    **kwargs,
+                )
+
+                for key, expected in numpy_batch.items():
+                    actual = torch_batch[key].numpy()
+                    if np.issubdtype(expected.dtype, np.floating):
+                        np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-7)
+                    else:
+                        np.testing.assert_array_equal(actual, expected)
+
+
+def test_spectra_from_peak_lists_pads_truncates_and_normalizes() -> None:
+    spectra = spectra_from_peak_lists(
+        [[100.0, 200.0], list(np.arange(200, dtype=np.float32))],
+        [[2.0, 1.0], list(np.arange(200, dtype=np.float32))],
+    )
+
+    assert spectra.shape == (2, 2, 128)
+    assert spectra.dtype == np.float32
+    np.testing.assert_array_equal(spectra[0, 0, :3], [100.0, 200.0, 0.0])
+    np.testing.assert_allclose(spectra[0, 1, :3], [1.0, 0.5, 0.0])
+    assert spectra[1, 0, -1] == 127.0
+    assert spectra[1, 1, -1] == 1.0
 
 
 def test_gems_data_config_reads_grouped_peak_filtering_fields() -> None:

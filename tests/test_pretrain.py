@@ -10,9 +10,8 @@ from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pairmixer import PairFeatureEmbedder
 from spectra_learning.models.peak_features import FourierFeatures, PeakFeatureEmbedder
 from spectra_learning.training.optimization import is_weight_decay_target
-from spectra_learning.training.modules import PretrainModule
 from spectra_learning.training.steps import train_step_impl
-from spectra_learning.training.api import (
+from spectra_learning.training.checkpointing import (
     load_frozen_teacher_weights,
     load_pretrained_weights,
 )

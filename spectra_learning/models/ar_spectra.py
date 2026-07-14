@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -13,10 +12,6 @@ from spectra_learning.data.ar_spectra import (
     SpectraARTokenKind,
     SpectraARTokenizer,
 )
-
-
-def _config_get(config: config_dict.ConfigDict, key: str, default: Any) -> Any:
-    return config.get(key, default)
 
 
 @dataclass(frozen=True)
@@ -43,12 +38,12 @@ class SpectraARTransformerConfig:
             num_token_kinds=tokenizer.num_token_kinds,
             max_sequence_length=tokenizer.sequence_length,
             pad_token_id=tokenizer.pad_token_id,
-            model_dim=int(_config_get(config, "ar_model_dim", 384)),
-            num_layers=int(_config_get(config, "ar_num_layers", 6)),
-            num_heads=int(_config_get(config, "ar_num_heads", 8)),
-            mlp_multiple=float(_config_get(config, "ar_mlp_multiple", 4.0)),
-            dropout=float(_config_get(config, "ar_dropout", 0.1)),
-            rope_base=float(_config_get(config, "ar_rope_base", 10_000.0)),
+            model_dim=int(config.get("ar_model_dim", 384)),
+            num_layers=int(config.get("ar_num_layers", 6)),
+            num_heads=int(config.get("ar_num_heads", 8)),
+            mlp_multiple=float(config.get("ar_mlp_multiple", 4.0)),
+            dropout=float(config.get("ar_dropout", 0.1)),
+            rope_base=float(config.get("ar_rope_base", 10_000.0)),
         )
 
 

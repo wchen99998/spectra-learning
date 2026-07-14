@@ -256,45 +256,6 @@ def save_checkpoint(
     )
 
 
-def save_probe_checkpoint(
-    path: Path | str,
-    model: PeakSetJEPA,
-    global_step: int,
-    epoch: int,
-    loss: float,
-    wandb_run_id: str | None = None,
-    covariance_pooler: torch.nn.Module | None = None,
-) -> None:
-    pooler_path = (
-        covariance_pooler_checkpoint_path(path)
-        if covariance_pooler is not None
-        else None
-    )
-    _write_torch_checkpoint(
-        {
-            "model": model.state_dict(),
-            "global_step": global_step,
-            "epoch": epoch,
-            "loss": loss,
-            "wandb_run_id": wandb_run_id,
-            "covariance_pooler_checkpoint": (
-                storage_name(pooler_path) if pooler_path is not None else None
-            ),
-        },
-        path,
-    )
-    if covariance_pooler is not None:
-        pooler_save_path = covariance_pooler_checkpoint_path(path)
-        _write_torch_checkpoint(
-            {
-                "pooler": covariance_pooler.state_dict(),
-                "global_step": global_step,
-                "epoch": epoch,
-            },
-            pooler_save_path,
-        )
-
-
 def prune_checkpoints(checkpoint_dir: StoragePath, keep_top_k: int = 5) -> None:
     pts = sorted(
         (

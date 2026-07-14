@@ -27,7 +27,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.val_every_n_steps = 500.0
     cfg.val_num_steps = 50
     cfg.checkpoint_every_steps = 1000
-    cfg.checkpoint_every_n_steps = 1000
     cfg.msg_probe_every_n_steps = -1.0
     cfg.msg_probe_at_final_step = False
     cfg.jax_mesh_devices = "32"
@@ -51,11 +50,11 @@ def get_config() -> config_dict.ConfigDict:
     cfg.gradient_accumulation_steps = 1
     cfg.drop_remainder = True
     cfg.dataloader_num_workers = 8
-    cfg.dataloader_pin_memory = True
+    cfg.dataloader_pin_memory = False
     cfg.dataloader_prefetch_factor = 2
-    cfg.dataloader_persistent_workers = True
-    cfg.dataloader_multiprocessing_context = ""
-    cfg.dataloader_output_format = "torch"
+    cfg.dataloader_persistent_workers = False
+    cfg.dataloader_multiprocessing_context = "forkserver"
+    cfg.dataloader_output_format = "numpy"
 
     cfg.num_peaks = 128
     cfg.max_precursor_mz = 1000.0
@@ -80,7 +79,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.ar_num_layers = 8
     cfg.ar_num_heads = 8
     cfg.ar_mlp_multiple = 4.0
-    cfg.ar_dropout = 0.0
     cfg.ar_rope_base = 10_000.0
     cfg.ar_attention_kernel = "pallas"
     cfg.ar_splash_block_size = 128

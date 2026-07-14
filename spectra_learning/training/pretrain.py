@@ -17,7 +17,22 @@ from ml_collections import config_dict
 from tqdm import tqdm
 
 from spectra_learning.data.gems.datamodule import GemsDataModule
+from spectra_learning.models.factory import build_model_from_config
+from spectra_learning.models.model import PeakSetJEPA
+from spectra_learning.probes.massspec.msg_probe import (
+    msg_probe_variants_from_config,
+    run_msg_probe,
+)
+from spectra_learning.training.activation_checkpointing import apply_activation_checkpointing
 from spectra_learning.training.batch import BatchPrefetcher
+from spectra_learning.training.cadence import (
+    msg_probe_interval as resolve_msg_probe_interval,
+    should_run_at_step,
+    should_run_at_step_or_final,
+    total_training_steps,
+    validation_interval,
+    validation_steps,
+)
 from spectra_learning.training.checkpointing import (
     AsyncCheckpointWriter,
     load_frozen_teacher_weights,
@@ -38,13 +53,23 @@ from spectra_learning.training.distributed import (
     wrap_distributed_model,
 )
 from spectra_learning.training.configuration import save_config
-from spectra_learning.training.logging import MetricLogger, log_msg_probe_metrics
+from spectra_learning.training.logging import (
+    MetricLogger,
+    build_logger,
+    log_msg_probe_metrics,
+)
 from spectra_learning.training.jax_runtime_flags import configure_jax_tpu_xla_flags
-from spectra_learning.training.modules import PretrainModule, split_pretrain_module
 from spectra_learning.training.optimization import build_optimizers
 from spectra_learning.training.performance import (
     compile_forward as compile_training_forward,
     register_bf16_adamw_state_hooks,
+)
+from spectra_learning.training.runtime import (
+    build_grad_scaler,
+    collect_and_log_param_metrics,
+    cumulative_training_flops,
+    estimate_training_flops_per_optimizer_step,
+    parse_autocast_dtype,
 )
 from spectra_learning.training.schedules import LRSchedulerLike
 from spectra_learning.training.storage import (
@@ -55,28 +80,6 @@ from spectra_learning.training.storage import (
     storage_mkdir,
 )
 from spectra_learning.training.steps import train_step_impl
-from spectra_learning.probes.massspec.msg_probe import (
-    msg_probe_variants_from_config,
-    run_msg_probe,
-)
-from spectra_learning.models.model import PeakSetJEPA
-from spectra_learning.training.api import (
-    build_grad_scaler,
-    build_logger,
-    build_model_from_config,
-    collect_and_log_param_metrics,
-    cumulative_training_flops,
-    estimate_training_flops_per_optimizer_step,
-    parse_autocast_dtype,
-)
-from spectra_learning.training.activation_checkpointing import apply_activation_checkpointing
-from spectra_learning.training.cadence import (
-    msg_probe_interval as resolve_msg_probe_interval,
-    should_run_at_step,
-    should_run_at_step_or_final,
-    validation_interval,
-    validation_steps,
-)
 
 warnings.filterwarnings("ignore", message="Profiler function.*will be ignored")
 torch.set_float32_matmul_precision("high")
@@ -88,20 +91,16 @@ inductor_config.shape_padding = True
 _STOP_REQUESTED = False
 
 
-def _config_get(config: config_dict.ConfigDict, key: str, default: Any) -> Any:
-    return config.get(key, default)
-
-
 def _use_jax_backend(config: config_dict.ConfigDict) -> bool:
-    return str(_config_get(config, "device_backend", "auto")).lower() == "jax"
+    return str(config.get("device_backend", "auto")).lower() == "jax"
 
 
 def gradient_accumulation_steps(config: config_dict.ConfigDict) -> int:
-    return int(_config_get(config, "gradient_accumulation_steps", 1))
+    return int(config.get("gradient_accumulation_steps", 1))
 
 
 def effective_compile_mode(config: config_dict.ConfigDict) -> str:
-    compile_mode = str(_config_get(config, "compile_mode", "max-autotune"))
+    compile_mode = str(config.get("compile_mode", "max-autotune"))
     if (
         compile_mode.lower() == "max-autotune"
         and gradient_accumulation_steps(config) > 1
@@ -142,7 +141,7 @@ def train_and_evaluate(
 
         return train_and_evaluate_jax(config, workdir)
     install_stop_signal_handlers()
-    distributed = init_distributed_from_env(_config_get(config, "device_backend", "auto"))
+    distributed = init_distributed_from_env(config.get("device_backend", "auto"))
     workdir = normalize_storage_path(workdir)
     local_workdir = local_scratch_dir(workdir)
     if distributed.is_main:
@@ -174,13 +173,12 @@ def train_and_evaluate(
     clear_cuda_cache(device)
     model = build_model_from_config(config)
     initialize_frozen_teacher(config, model, distributed)
-    train_module = PretrainModule(model)
     model_param_metrics = (
-        collect_and_log_param_metrics(train_module) if distributed.is_main else {}
+        collect_and_log_param_metrics(model) if distributed.is_main else {}
     )
     flops_per_optimizer_step = estimate_training_flops_per_optimizer_step(
         config,
-        train_module,
+        model,
         datamodule.global_batch_size,
     )
     if distributed.is_main:
@@ -190,17 +188,17 @@ def train_and_evaluate(
         model_param_metrics["model/flops_per_sample_estimate"] = (
             flops_per_optimizer_step / float(datamodule.global_batch_size)
         )
-    train_module.to(device).train()
-    apply_activation_checkpointing(train_module, config)
-    autocast_dtype = parse_autocast_dtype(_config_get(config, "autocast_dtype", "bf16"))
-    grad_clip_norm = optional_float(_config_get(config, "grad_clip_norm", None))
+    model.to(device).train()
+    apply_activation_checkpointing(model, config)
+    autocast_dtype = parse_autocast_dtype(config.get("autocast_dtype", "bf16"))
+    grad_clip_norm = optional_float(config.get("grad_clip_norm", None))
     grad_scaler = build_grad_scaler(autocast_dtype, device)
     checkpoint_dir = storage_join(workdir, "checkpoints")
     if distributed.is_main:
         storage_mkdir(checkpoint_dir)
     optimizers, schedulers = build_optimizers(
         config,
-        train_module,
+        model,
         total_steps,
         device,
     )
@@ -220,19 +218,18 @@ def train_and_evaluate(
         logger = build_logger(config, local_workdir)
     else:
         logger = MetricLogger()
-    compile_forward(train_module, config)
+    compile_forward(model, config)
     train_model = wrap_distributed_model(
-        train_module,
+        model,
         distributed,
         static_graph=bool(
-            _config_get(
-                config,
+            config.get(
                 "ddp_static_graph",
                 gradient_accumulation_steps(config) == 1,
             )
         ),
         find_unused_parameters=bool(
-            _config_get(config, "ddp_find_unused_parameters", False)
+            config.get("ddp_find_unused_parameters", False)
         ),
     )
     if distributed.is_main:
@@ -260,7 +257,7 @@ def train_and_evaluate(
     )
     final_global_step = int(cast(float, last_msg_probe_metrics["run/final_global_step"]))
     if distributed.is_main:
-        base_model, _ = split_pretrain_module(unwrap_model(train_model))
+        base_model = cast(PeakSetJEPA, unwrap_model(train_model))
         checkpoint_writer.save_checkpoint(
             storage_join(checkpoint_dir, "last.pt"),
             base_model,
@@ -292,7 +289,7 @@ def initialize_frozen_teacher(
     model: PeakSetJEPA,
     distributed: DistributedContext,
 ) -> None:
-    if str(_config_get(config, "training_mode", "jepa")).lower() != "mae_teacher_jepa":
+    if str(config.get("training_mode", "jepa")).lower() != "mae_teacher_jepa":
         return
     checkpoint_path = str(config.frozen_teacher_checkpoint_path)
     if distributed.is_main:
@@ -330,7 +327,7 @@ def run_training_loop(
         )
     if autocast_dtype is None:
         autocast_dtype = parse_autocast_dtype(
-            _config_get(config, "autocast_dtype", "bf16")
+            config.get("autocast_dtype", "bf16")
         )
     if grad_scaler is None:
         grad_scaler = build_grad_scaler(autocast_dtype, device)
@@ -343,18 +340,18 @@ def run_training_loop(
             unwrap_model(model),
             int(datamodule.global_batch_size),
         )
-    log_every_n_steps = int(_config_get(config, "log_every_n_steps", 50))
+    log_every_n_steps = int(config.get("log_every_n_steps", 50))
     collapse_every_n_steps = int(
-        _config_get(config, "collapse_metrics_every_n_steps", log_every_n_steps)
+        config.get("collapse_metrics_every_n_steps", log_every_n_steps)
     )
     checkpoint_every_steps = int(config.checkpoint_every_steps)
-    grad_clip_norm = optional_float(_config_get(config, "grad_clip_norm", None))
+    grad_clip_norm = optional_float(config.get("grad_clip_norm", None))
     grad_accum_steps = gradient_accumulation_steps(config)
     msg_probe_every_n_steps = msg_probe_interval(config, datamodule, total_steps)
     val_every_n_steps = validation_interval(config, datamodule, total_steps)
     val_num_steps = validation_steps(config)
     msg_probe_variants = msg_probe_variants_from_config(config)
-    device_prefetch_size = int(_config_get(config, "device_prefetch_size", 1))
+    device_prefetch_size = int(config.get("device_prefetch_size", 1))
     deadline = training_deadline(config)
     wandb_run = getattr(logger, "experiment", None)
     last_msg_probe_metrics: dict[str, object] = {}
@@ -363,7 +360,7 @@ def run_training_loop(
     stopped_for_signal = False
     initial_global_step = global_step
     training_start_time = time.perf_counter()
-    throughput_warmup_steps = int(_config_get(config, "throughput_warmup_steps", 0))
+    throughput_warmup_steps = int(config.get("throughput_warmup_steps", 0))
     measured_start_time: float | None = None
     measured_steps = 0
     profiler = make_torch_profiler(config, distributed, device)
@@ -470,7 +467,7 @@ def run_training_loop(
                 )
             if global_step % checkpoint_every_steps == 0:
                 if distributed.is_main:
-                    base_model, _ = split_pretrain_module(unwrap_model(model))
+                    base_model = cast(PeakSetJEPA, unwrap_model(model))
                     checkpoint_writer.save_checkpoint(
                         storage_join(checkpoint_dir, f"step-{global_step:08d}.pt"),
                         base_model,
@@ -511,10 +508,10 @@ def run_training_loop(
                 global_step,
                 total_steps=total_steps,
                 run_at_final_step=bool(
-                    _config_get(config, "msg_probe_at_final_step", False)
+                    config.get("msg_probe_at_final_step", False)
                 ),
             ):
-                base_model, _ = split_pretrain_module(unwrap_model(model))
+                base_model = cast(PeakSetJEPA, unwrap_model(model))
                 last_msg_probe_metrics = dict(
                     run_and_log_msg_probe(
                         config,
@@ -605,7 +602,7 @@ def make_torch_profiler(
     distributed: DistributedContext,
     device: torch.device,
 ) -> torch.profiler.profile | None:
-    profile_dir = str(_config_get(config, "torch_profile_dir", "") or "")
+    profile_dir = str(config.get("torch_profile_dir", "") or "")
     if not profile_dir:
         return None
     activities = [torch.profiler.ProfilerActivity.CPU]
@@ -614,31 +611,20 @@ def make_torch_profiler(
     return torch.profiler.profile(
         activities=activities,
         schedule=torch.profiler.schedule(
-            wait=int(_config_get(config, "torch_profile_wait_steps", 1)),
-            warmup=int(_config_get(config, "torch_profile_warmup_steps", 1)),
-            active=int(_config_get(config, "torch_profile_active_steps", 3)),
-            repeat=int(_config_get(config, "torch_profile_repeat", 1)),
+            wait=int(config.get("torch_profile_wait_steps", 1)),
+            warmup=int(config.get("torch_profile_warmup_steps", 1)),
+            active=int(config.get("torch_profile_active_steps", 3)),
+            repeat=int(config.get("torch_profile_repeat", 1)),
         ),
         on_trace_ready=torch.profiler.tensorboard_trace_handler(
             profile_dir,
             worker_name=f"rank{distributed.rank}",
         ),
-        record_shapes=bool(_config_get(config, "torch_profile_record_shapes", False)),
-        profile_memory=bool(_config_get(config, "torch_profile_memory", False)),
-        with_stack=bool(_config_get(config, "torch_profile_with_stack", False)),
-        with_flops=bool(_config_get(config, "torch_profile_with_flops", False)),
+        record_shapes=bool(config.get("torch_profile_record_shapes", False)),
+        profile_memory=bool(config.get("torch_profile_memory", False)),
+        with_stack=bool(config.get("torch_profile_with_stack", False)),
+        with_flops=bool(config.get("torch_profile_with_flops", False)),
     )
-
-
-def total_training_steps(
-    config: config_dict.ConfigDict,
-    datamodule: GemsDataModule,
-) -> int:
-    total_steps = max(1, int(float(config.num_epochs) * datamodule.train_steps))
-    training_max_steps = _config_get(config, "training_max_steps", None)
-    if training_max_steps is None:
-        return total_steps
-    return min(total_steps, max(1, int(training_max_steps)))
 
 
 def restore_training_state(
@@ -677,15 +663,15 @@ def restore_training_state(
 
 
 def compile_forward(model: torch.nn.Module, config: config_dict.ConfigDict) -> None:
-    requested_compile_mode = str(_config_get(config, "compile_mode", "max-autotune"))
+    requested_compile_mode = str(config.get("compile_mode", "max-autotune"))
     compile_mode = effective_compile_mode(config)
     if compile_mode.lower() == "none":
         return
     inductor_config.shape_padding = not compile_mode.startswith("max-autotune")
     inductor_config.triton.cudagraph_skip_dynamic_graphs = bool(
-        _config_get(config, "cudagraph_skip_dynamic_graphs", False)
+        config.get("cudagraph_skip_dynamic_graphs", False)
     )
-    cudagraph_trees = _config_get(config, "cudagraph_trees", None)
+    cudagraph_trees = config.get("cudagraph_trees", None)
     if cudagraph_trees is not None:
         inductor_config.triton.cudagraph_trees = bool(cudagraph_trees)
     if inductor_config.triton.cudagraph_skip_dynamic_graphs:
@@ -829,7 +815,7 @@ def run_and_log_msg_probe(
             logger,
             probe_metrics,
             global_step,
-            enable_wandb=bool(_config_get(config, "enable_wandb", False)),
+            enable_wandb=bool(config.get("enable_wandb", False)),
         )
         fingerprint_task = "maccs"
         for variant in variants:
@@ -848,7 +834,7 @@ def run_and_log_msg_probe(
 
 
 def training_deadline(config: config_dict.ConfigDict) -> float | None:
-    max_duration_hours = _config_get(config, "max_duration_hours", None)
+    max_duration_hours = config.get("max_duration_hours", None)
     if max_duration_hours is None:
         return None
     logging.info("Training wall-clock budget: %.2f hours", float(max_duration_hours))

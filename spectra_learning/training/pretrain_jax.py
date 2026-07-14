@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Literal
 
 import jax
 import jax.numpy as jnp
@@ -20,6 +20,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from ml_collections import config_dict
 from tqdm import tqdm
 
+from spectra_learning.config import config_to_dict
 from spectra_learning.data.gems.datamodule import GemsDataModule
 from spectra_learning.models.common_jax import Array
 from spectra_learning.models.factory_jax import build_model_from_config
@@ -32,15 +33,17 @@ from spectra_learning.training.cadence import (
     msg_probe_interval,
     should_run_at_step,
     should_run_at_step_or_final,
+    total_training_steps,
     validation_interval,
     validation_steps,
 )
 from spectra_learning.training.checkpointing_jax import (
     build_jax_checkpoint_manager,
+    jax_training_checkpoint_metadata,
     restore_jax_training_state,
     save_jax_training_state,
 )
-from spectra_learning.training.configuration import save_config
+from spectra_learning.training.configuration import finalize_config, save_config
 from spectra_learning.training.jax_runtime_flags import configure_jax_tpu_xla_flags
 from spectra_learning.training.logging import (
     MetricLogger,
@@ -57,6 +60,24 @@ from spectra_learning.training.storage import (
 
 
 JAX_DATA_AXIS = "data"
+JaxMetricReduction = Literal["mean", "token_weighted"]
+
+
+@dataclass(frozen=True)
+class JaxTrainingTask:
+    name: str
+    build_datamodule: Callable[[config_dict.ConfigDict, int, int], Any]
+    build_model: Callable[[config_dict.ConfigDict, Any], Any]
+    checkpoint_contract: Callable[
+        [config_dict.ConfigDict, Any, int],
+        dict[str, Any],
+    ]
+    metric_reduction: JaxMetricReduction = "mean"
+    enable_msg_probe: bool = False
+    initialize_model: Callable[[config_dict.ConfigDict, Any], None] | None = None
+    validate_model: Callable[[Any], None] | None = None
+    run_metadata: Callable[[Any], dict[str, object]] | None = None
+    log_start: Callable[[Any, int], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -82,7 +103,7 @@ def trainable_param_filter(path: tuple[object, ...], value: object) -> bool:
     return path[-1] != "b"
 
 
-def collect_jax_param_metrics(model: PeakSetJEPAJax) -> dict[str, float]:
+def collect_jax_param_metrics(model: Any) -> dict[str, float]:
     params = nnx.state(model, nnx.Param)
     trainable_params = nnx.state(model, trainable_param_filter)
     total_by_module = _jax_param_counts_by_module(params)
@@ -160,32 +181,28 @@ def _jax_update_scale_metrics(
 
 def configure_jax_runtime(config: Any) -> None:
     configure_jax_tpu_xla_flags()
-    if bool(_config_get(config, "jax_log_compiles", False)) or _env_enabled(
+    if bool(config.get("jax_log_compiles", False)) or _env_enabled(
         "JAX_LOG_COMPILES"
     ):
         jax.config.update("jax_log_compiles", True)
-    if bool(_config_get(config, "jax_explain_cache_misses", False)) or _env_enabled(
+    if bool(config.get("jax_explain_cache_misses", False)) or _env_enabled(
         "JAX_EXPLAIN_CACHE_MISSES"
     ):
         jax.config.update("jax_explain_cache_misses", True)
-    compilation_cache_dir = str(_config_get(config, "jax_compilation_cache_dir", ""))
+    compilation_cache_dir = str(config.get("jax_compilation_cache_dir", ""))
     if compilation_cache_dir:
         jax.config.update("jax_compilation_cache_dir", compilation_cache_dir)
         jax.config.update(
             "jax_enable_compilation_cache",
-            bool(_config_get(config, "jax_enable_compilation_cache", True)),
+            bool(config.get("jax_enable_compilation_cache", True)),
         )
-    min_compile_time = _config_get(
-        config, "jax_persistent_cache_min_compile_time_secs", None
-    )
+    min_compile_time = config.get("jax_persistent_cache_min_compile_time_secs", None)
     if min_compile_time is not None:
         jax.config.update(
             "jax_persistent_cache_min_compile_time_secs",
             float(min_compile_time),
         )
-    min_entry_size = _config_get(
-        config, "jax_persistent_cache_min_entry_size_bytes", None
-    )
+    min_entry_size = config.get("jax_persistent_cache_min_entry_size_bytes", None)
     if min_entry_size is not None:
         jax.config.update(
             "jax_persistent_cache_min_entry_size_bytes",
@@ -196,7 +213,7 @@ def configure_jax_runtime(config: Any) -> None:
 def initialize_jax_distributed(config: Any) -> None:
     if jax.distributed.is_initialized():
         return
-    enabled = bool(_config_get(config, "jax_distributed_initialize", False)) or any(
+    enabled = bool(config.get("jax_distributed_initialize", False)) or any(
         os.environ.get(key)
         for key in (
             "JAX_DISTRIBUTED_INITIALIZE",
@@ -260,7 +277,7 @@ def initialize_jax_distributed(config: Any) -> None:
 
 def build_jax_optimizer(
     config: Any,
-    model: PeakSetJEPAJax,
+    model: Any,
     *,
     total_steps: int | None = None,
 ) -> nnx.Optimizer:
@@ -273,10 +290,15 @@ def build_jax_optax_transform(
     *,
     total_steps: int | None = None,
 ) -> optax.GradientTransformation:
-    optimizer = str(_config_get(config, "optimizer", "adamw")).lower()
+    optimizer = str(config.get("optimizer", "adamw")).lower()
     if optimizer == "muon":
-        return _jax_muon_transform(config, total_steps=total_steps)
-    return _jax_adamw_transform(config, total_steps=total_steps)
+        transform = _jax_muon_transform(config, total_steps=total_steps)
+    else:
+        transform = _jax_adamw_transform(config, total_steps=total_steps)
+    grad_clip_norm = float(config.get("grad_clip_norm", 0.0))
+    if grad_clip_norm > 0.0:
+        return optax.chain(optax.clip_by_global_norm(grad_clip_norm), transform)
+    return transform
 
 
 def _jax_adamw_transform(
@@ -286,8 +308,9 @@ def _jax_adamw_transform(
 ) -> optax.GradientTransformation:
     return optax.adamw(
         learning_rate=_jax_learning_rate_schedule(config, total_steps=total_steps),
-        b2=float(_config_get(config, "b2", 0.999)),
-        weight_decay=float(_config_get(config, "weight_decay", 0.0)),
+        b1=float(config.get("b1", 0.9)),
+        b2=float(config.get("b2", 0.999)),
+        weight_decay=float(config.get("weight_decay", 0.0)),
         mask=_jax_weight_decay_mask,
     )
 
@@ -300,22 +323,22 @@ def _jax_muon_transform(
     return _jax_split_qkv_transform(
         optax.contrib.muon(
             learning_rate=_jax_learning_rate_schedule(config, total_steps=total_steps),
-            ns_coeffs=_config_get(config, "muon_ns_coeffs", (3.4445, -4.7750, 2.0315)),
-            ns_steps=int(_config_get(config, "muon_ns_steps", 5)),
-            beta=float(_config_get(config, "muon_beta", 0.95)),
-            eps=float(_config_get(config, "muon_eps", 1e-8)),
-            weight_decay=float(_config_get(config, "weight_decay", 0.0)),
+            ns_coeffs=config.get("muon_ns_coeffs", (3.4445, -4.7750, 2.0315)),
+            ns_steps=int(config.get("muon_ns_steps", 5)),
+            beta=float(config.get("muon_beta", 0.95)),
+            eps=float(config.get("muon_eps", 1e-8)),
+            weight_decay=float(config.get("weight_decay", 0.0)),
             weight_decay_mask=_jax_weight_decay_mask,
-            mu_dtype=_config_get(config, "muon_mu_dtype", None),
-            nesterov=bool(_config_get(config, "muon_nesterov", True)),
-            adaptive=bool(_config_get(config, "muon_adaptive", False)),
-            preconditioning=str(_config_get(config, "muon_preconditioning", "frobenius")),
-            adam_b1=float(_config_get(config, "muon_adam_b1", 0.9)),
+            mu_dtype=config.get("muon_mu_dtype", None),
+            nesterov=bool(config.get("muon_nesterov", True)),
+            adaptive=bool(config.get("muon_adaptive", False)),
+            preconditioning=str(config.get("muon_preconditioning", "frobenius")),
+            adam_b1=float(config.get("muon_adam_b1", 0.9)),
             adam_b2=float(
-                _config_get(config, "muon_adam_b2", _config_get(config, "b2", 0.999))
+                config.get("muon_adam_b2", config.get("b2", 0.999))
             ),
-            adam_eps_root=float(_config_get(config, "muon_adam_eps_root", 0.0)),
-            adam_weight_decay=float(_config_get(config, "muon_adam_weight_decay", 0.0)),
+            adam_eps_root=float(config.get("muon_adam_eps_root", 0.0)),
+            adam_weight_decay=float(config.get("muon_adam_weight_decay", 0.0)),
             adam_learning_rate=_jax_muon_adam_learning_rate_schedule(
                 config,
                 total_steps=total_steps,
@@ -331,22 +354,22 @@ def _jax_muon_adam_learning_rate_schedule(
     *,
     total_steps: int | None = None,
 ):
-    adam_learning_rate = _config_get(config, "muon_adam_learning_rate", None)
+    adam_learning_rate = config.get("muon_adam_learning_rate", None)
     if adam_learning_rate is None:
         return None
     return _jax_learning_rate_schedule(
         config,
         total_steps=total_steps,
         base_lr=float(adam_learning_rate),
-        min_lr=_config_get(config, "muon_adam_min_learning_rate", None),
+        min_lr=config.get("muon_adam_min_learning_rate", None),
     )
 
 
 def _jax_muon_consistent_rms(config: Any) -> float | None:
-    adjust_lr_fn = str(_config_get(config, "muon_adjust_lr_fn", "") or "").lower()
+    adjust_lr_fn = str(config.get("muon_adjust_lr_fn", "") or "").lower()
     if adjust_lr_fn == "match_rms_adamw":
         return 0.2
-    return _config_get(config, "muon_consistent_rms", None)
+    return config.get("muon_consistent_rms", None)
 
 
 def _jax_learning_rate_schedule(
@@ -357,12 +380,12 @@ def _jax_learning_rate_schedule(
     min_lr: Any = None,
 ):
     if base_lr is None:
-        base_lr = float(_config_get(config, "learning_rate", 1e-3))
+        base_lr = float(config.get("learning_rate", 1e-3))
         if min_lr is None:
-            min_lr = _config_get(config, "min_learning_rate", None)
+            min_lr = config.get("min_learning_rate", None)
     else:
         base_lr = float(base_lr)
-    warmup_steps = int(_config_get(config, "warmup_steps", 0))
+    warmup_steps = int(config.get("warmup_steps", 0))
     return _jax_cosine_learning_rate_schedule(
         config,
         total_steps=total_steps,
@@ -381,7 +404,7 @@ def _jax_cosine_learning_rate_schedule(
     min_lr: Any,
 ):
     min_lr = float(min_lr) if min_lr is not None else 0.1 * base_lr
-    raw_total_steps = total_steps or _config_get(config, "training_max_steps", None)
+    raw_total_steps = total_steps or config.get("training_max_steps", None)
     if raw_total_steps is None:
         return base_lr
     total_steps = int(raw_total_steps)
@@ -410,10 +433,10 @@ def _scheduled_jax_learning_rate(
 ) -> float:
     return learning_rate_at_step(
         global_step,
-        base_lr=float(_config_get(config, "learning_rate", 1e-3)),
+        base_lr=float(config.get("learning_rate", 1e-3)),
         total_steps=total_steps,
-        warmup_steps=int(_config_get(config, "warmup_steps", 0)),
-        min_learning_rate=_config_get(config, "min_learning_rate", None),
+        warmup_steps=int(config.get("warmup_steps", 0)),
+        min_learning_rate=config.get("min_learning_rate", None),
     )
 
 
@@ -738,7 +761,7 @@ def _jax_sharded_apply_grads_fn(device_count: int):
 
 def init_pure_optax_train_state(
     config: Any,
-    model: PeakSetJEPAJax,
+    model: Any,
     *,
     total_steps: int | None = None,
 ) -> tuple[Any, nnx.State, nnx.State, Any, optax.GradientTransformation]:
@@ -761,16 +784,20 @@ def make_pure_accumulated_train_step(
     sharded: bool,
     data_mesh: Mesh | None = None,
     log_update_stats: bool = False,
+    metric_reduction: JaxMetricReduction = "mean",
 ):
     def accumulated_metrics_and_grads(
         trainable_params: nnx.State,
         static_state: nnx.State,
         batch: dict[str, Array],
-    ) -> tuple[dict[str, Array], nnx.State]:
+    ) -> tuple[dict[str, Array], nnx.State, Array]:
         def loss_fn(params: nnx.State, micro_batch: dict[str, Array]):
             functional_model = nnx.merge(graphdef, params, static_state)
             metrics = functional_model(micro_batch)
-            return metrics["loss"], metrics
+            loss = metrics["loss"]
+            if metric_reduction == "token_weighted":
+                loss = loss * metrics["target_tokens"]
+            return loss, metrics
 
         def micro_batch_grad(micro_batch: dict[str, Array]):
             return jax.value_and_grad(loss_fn, has_aux=True)(
@@ -778,34 +805,50 @@ def make_pure_accumulated_train_step(
                 micro_batch,
             )
 
-        def scan_body(carry: tuple[nnx.State, dict[str, Array]], micro_batch):
-            grad_accumulator, metric_accumulator = carry
+        def scan_body(
+            carry: tuple[nnx.State, dict[str, Array], Array],
+            micro_batch: dict[str, Array],
+        ):
+            grad_accumulator, metric_accumulator, grad_denominator = carry
             (_micro_loss, micro_metrics), micro_grads = micro_batch_grad(micro_batch)
             grad_accumulator = jax.tree.map(
                 lambda lhs, rhs: lhs + rhs,
                 grad_accumulator,
                 micro_grads,
             )
+            micro_metric_totals = _jax_metric_totals(
+                micro_metrics,
+                metric_reduction=metric_reduction,
+            )
             metric_accumulator = jax.tree.map(
                 lambda lhs, rhs: lhs + rhs,
                 metric_accumulator,
-                micro_metrics,
+                micro_metric_totals,
             )
-            return (grad_accumulator, metric_accumulator), None
+            grad_denominator = grad_denominator + _jax_gradient_denominator(
+                micro_metrics,
+                metric_reduction=metric_reduction,
+            )
+            return (grad_accumulator, metric_accumulator, grad_denominator), None
 
         first_batch = jax.tree.map(lambda value: value[0], batch)
         remaining_batches = jax.tree.map(lambda value: value[1:], batch)
         (_loss, metrics), grads = micro_batch_grad(first_batch)
+        metric_totals = _jax_metric_totals(
+            metrics,
+            metric_reduction=metric_reduction,
+        )
+        grad_denominator = _jax_gradient_denominator(
+            metrics,
+            metric_reduction=metric_reduction,
+        )
 
-        (grads, metrics), _ = jax.lax.scan(
+        (grads, metric_totals, grad_denominator), _ = jax.lax.scan(
             scan_body,
-            (grads, metrics),
+            (grads, metric_totals, grad_denominator),
             remaining_batches,
         )
-        num_micro_batches = float(jax.tree.leaves(batch)[0].shape[0])
-        grads = jax.tree.map(lambda value: value / num_micro_batches, grads)
-        metrics = jax.tree.map(lambda value: value / num_micro_batches, metrics)
-        return metrics, grads
+        return metric_totals, grads, grad_denominator
 
     if sharded:
         data_mesh = _jax_data_mesh() if data_mesh is None else data_mesh
@@ -824,18 +867,28 @@ def make_pure_accumulated_train_step(
             opt_state: Any,
             batch: dict[str, Array],
         ) -> tuple[nnx.State, Any, dict[str, Array]]:
-            metrics, grads = accumulated_metrics_and_grads(
+            metric_totals, grads, grad_denominator = accumulated_metrics_and_grads(
                 trainable_params,
                 static_state,
                 batch,
             )
-            metrics = jax.tree.map(
-                lambda value: jax.lax.pmean(value, JAX_DATA_AXIS),
-                metrics,
+            metric_totals = jax.tree.map(
+                lambda value: jax.lax.psum(value, JAX_DATA_AXIS),
+                metric_totals,
             )
             grads = jax.tree.map(
-                lambda value: jax.lax.pmean(value, JAX_DATA_AXIS),
+                lambda value: jax.lax.psum(value, JAX_DATA_AXIS),
                 grads,
+            )
+            grad_denominator = jax.lax.psum(grad_denominator, JAX_DATA_AXIS)
+            grads = jax.tree.map(
+                lambda value: value / jnp.maximum(grad_denominator, 1.0),
+                grads,
+            )
+            metrics = _finalize_jax_metric_totals(
+                metric_totals,
+                metric_reduction=metric_reduction,
+                mean_denominator=grad_denominator,
             )
             updates, opt_state = optimizer.update(
                 grads,
@@ -859,10 +912,19 @@ def make_pure_accumulated_train_step(
         opt_state: Any,
         batch: dict[str, Array],
     ) -> tuple[nnx.State, Any, dict[str, Array]]:
-        metrics, grads = accumulated_metrics_and_grads(
+        metric_totals, grads, grad_denominator = accumulated_metrics_and_grads(
             trainable_params,
             static_state,
             batch,
+        )
+        grads = jax.tree.map(
+            lambda value: value / jnp.maximum(grad_denominator, 1.0),
+            grads,
+        )
+        metrics = _finalize_jax_metric_totals(
+            metric_totals,
+            metric_reduction=metric_reduction,
+            mean_denominator=grad_denominator,
         )
         updates, opt_state = optimizer.update(
             grads,
@@ -885,6 +947,7 @@ def make_pure_eval_step(
     *,
     sharded: bool,
     data_mesh: Mesh | None = None,
+    metric_reduction: JaxMetricReduction = "mean",
 ):
     if sharded:
         data_mesh = _jax_data_mesh() if data_mesh is None else data_mesh
@@ -904,6 +967,15 @@ def make_pure_eval_step(
         ) -> dict[str, Array]:
             functional_model = nnx.merge(graphdef, trainable_params, static_state)
             metrics = functional_model(batch)
+            if metric_reduction == "token_weighted":
+                metric_totals = _jax_metric_totals(
+                    metrics,
+                    metric_reduction=metric_reduction,
+                )
+                return jax.tree.map(
+                    lambda value: jax.lax.psum(value, JAX_DATA_AXIS),
+                    metric_totals,
+                )
             return jax.tree.map(
                 lambda value: jax.lax.pmean(value, JAX_DATA_AXIS),
                 metrics,
@@ -918,14 +990,90 @@ def make_pure_eval_step(
         batch: dict[str, Array],
     ) -> dict[str, Array]:
         functional_model = nnx.merge(graphdef, trainable_params, static_state)
-        return functional_model(batch)
+        metrics = functional_model(batch)
+        return _jax_metric_totals(metrics, metric_reduction=metric_reduction)
 
     return pure_eval_step
+
+
+def _jax_metric_totals(
+    metrics: dict[str, Array],
+    *,
+    metric_reduction: JaxMetricReduction,
+) -> dict[str, Array]:
+    if metric_reduction == "mean":
+        return metrics
+    totals = {}
+    for key, value in metrics.items():
+        if key == "target_tokens" or key.startswith("target_tokens/"):
+            totals[key] = value
+            continue
+        weight_key = _jax_token_metric_weight_key(key)
+        totals[key] = value * metrics[weight_key]
+    return totals
+
+
+def _finalize_jax_metric_totals(
+    totals: dict[str, Array],
+    *,
+    metric_reduction: JaxMetricReduction,
+    mean_denominator: Array | float,
+) -> dict[str, Array]:
+    if metric_reduction == "mean":
+        denominator = jnp.maximum(jnp.asarray(mean_denominator), 1.0)
+        return jax.tree.map(lambda value: value / denominator, totals)
+    metrics = {}
+    for key, value in totals.items():
+        if key == "target_tokens" or key.startswith("target_tokens/"):
+            metrics[key] = value
+            continue
+        weight_key = _jax_token_metric_weight_key(key)
+        metrics[key] = value / jnp.maximum(totals[weight_key], 1.0)
+    return metrics
+
+
+def _jax_gradient_denominator(
+    metrics: dict[str, Array],
+    *,
+    metric_reduction: JaxMetricReduction,
+) -> Array:
+    if metric_reduction == "token_weighted":
+        return metrics["target_tokens"].astype(jnp.float32)
+    return jnp.ones((), dtype=jnp.float32)
+
+
+def _jax_token_metric_weight_key(key: str) -> str:
+    if key in {"loss", "token_accuracy"}:
+        return "target_tokens"
+    metric_name, separator, suffix = key.partition("/")
+    if separator and metric_name in {"loss", "token_accuracy"}:
+        return f"target_tokens/{suffix}"
+    raise ValueError(f"Token-weighted JAX metric has no target-token count: {key}")
 
 
 def train_and_evaluate_jax(
     config: config_dict.ConfigDict,
     workdir: str | Path,
+) -> dict[str, object]:
+    task = JaxTrainingTask(
+        name="pretrain",
+        build_datamodule=_build_pretrain_jax_datamodule,
+        build_model=lambda task_config, _datamodule: build_model_from_config(task_config),
+        checkpoint_contract=lambda task_config, _datamodule, _total_steps: (
+            jax_config_checkpoint_contract(task_config)
+        ),
+        enable_msg_probe=True,
+        initialize_model=initialize_jax_model_from_torch_seed,
+        validate_model=_validate_pretrain_jax_model,
+    )
+    return train_and_evaluate_jax_task(config, workdir, task=task)
+
+
+def train_and_evaluate_jax_task(
+    config: config_dict.ConfigDict,
+    workdir: str | Path,
+    *,
+    task: JaxTrainingTask,
 ) -> dict[str, object]:
     configure_jax_runtime(config)
     initialize_jax_distributed(config)
@@ -935,47 +1083,55 @@ def train_and_evaluate_jax(
     is_main_process = jax.process_index() == 0
     if is_main_process:
         storage_mkdir(workdir)
-    multihost_utils.sync_global_devices("spectra_learning_jax_workdir_ready")
+    multihost_utils.sync_global_devices(
+        f"spectra_learning_jax_{task.name}_workdir_ready"
+    )
     torch.manual_seed(int(config.seed))
-    config.dataloader_pin_memory = False
-    config.dataloader_persistent_workers = False
-    config.dataloader_output_format = "numpy"
-    if int(_config_get(config, "dataloader_num_workers", 0)) > 0:
-        config.dataloader_multiprocessing_context = str(
-            _config_get(config, "dataloader_multiprocessing_context", "forkserver")
-            or "forkserver"
-        )
+    prepare_jax_training_config(config)
+    _validate_jax_task_probe_config(config, task)
     if is_main_process:
         save_config(config, workdir)
-    datamodule = GemsDataModule(
+    datamodule = task.build_datamodule(
         config,
-        seed=int(config.seed),
-        distributed_world_size=jax.process_count(),
-        distributed_rank=jax.process_index(),
-        distributed_local_rank=0,
+        jax.process_count(),
+        jax.process_index(),
     )
-    total_steps = _total_training_steps(config, datamodule)
-    model = build_model_from_config(config)
+    total_steps = total_training_steps(config, datamodule)
+    model = task.build_model(config, datamodule)
+    if task.validate_model is not None:
+        task.validate_model(model)
+    task_contract = task.checkpoint_contract(config, datamodule, total_steps)
+    checkpoint_metadata = jax_training_checkpoint_metadata(task.name, task_contract)
     checkpoint_dir = storage_join(workdir, "checkpoints")
     if is_main_process:
         storage_mkdir(checkpoint_dir)
-    multihost_utils.sync_global_devices("spectra_learning_jax_checkpoint_dir_ready")
-    jax_checkpoint_max_to_keep = _config_get(config, "jax_checkpoint_max_to_keep", 5)
+    multihost_utils.sync_global_devices(
+        f"spectra_learning_jax_{task.name}_checkpoint_dir_ready"
+    )
+    jax_checkpoint_max_to_keep = config.get("jax_checkpoint_max_to_keep", 5)
     if jax_checkpoint_max_to_keep is not None:
         jax_checkpoint_max_to_keep = int(jax_checkpoint_max_to_keep)
     checkpoint_manager = build_jax_checkpoint_manager(
         checkpoint_dir,
         max_to_keep=jax_checkpoint_max_to_keep,
         enable_async_checkpointing=bool(
-            _config_get(config, "jax_enable_async_checkpointing", True)
+            config.get("jax_enable_async_checkpointing", True)
         ),
     )
     resume_step = checkpoint_manager.latest_step()
-    if resume_step is None:
-        initialize_jax_model_from_torch_seed(config, model)
+    if resume_step is None and task.initialize_model is not None:
+        task.initialize_model(config, model)
     logger = build_logger(config, local_workdir) if is_main_process else MetricLogger()
     param_metrics = collect_jax_param_metrics(model)
     if is_main_process:
+        if task.log_start is not None:
+            task.log_start(datamodule, total_steps)
+        logging.info(
+            "Training JAX task %s for %d optimizer steps on %d process(es).",
+            task.name,
+            total_steps,
+            jax.process_count(),
+        )
         param_metrics_step = int(resume_step or 0)
         logger.log_metrics(
             {"global_step": float(param_metrics_step), **param_metrics},
@@ -989,6 +1145,9 @@ def train_and_evaluate_jax(
         total_steps=total_steps,
         checkpoint_manager=checkpoint_manager,
         resume_step=resume_step,
+        checkpoint_metadata=checkpoint_metadata,
+        metric_reduction=task.metric_reduction,
+        enable_msg_probe=task.enable_msg_probe,
     )
     checkpoint_manager.close()
     data_parallel_devices = _jax_data_parallel_devices(config)
@@ -1006,10 +1165,13 @@ def train_and_evaluate_jax(
             else datamodule.batch_size // jax.local_device_count()
         ),
         "run/gradient_accumulation_steps": float(
-            int(_config_get(config, "gradient_accumulation_steps", 1))
+            int(config.get("gradient_accumulation_steps", 1))
         ),
         "run/device_backend": "jax",
+        "run/training_task": task.name,
     }
+    if task.run_metadata is not None:
+        run_metrics.update(task.run_metadata(datamodule))
     results = {**metrics, **run_metrics, **param_metrics}
     if is_main_process:
         final_global_step = int(metrics["run/final_global_step"])
@@ -1017,7 +1179,62 @@ def train_and_evaluate_jax(
             {"global_step": float(final_global_step), **results},
             step=final_global_step,
         )
+        logger.finish()
     return results
+
+
+def prepare_jax_training_config(config: config_dict.ConfigDict) -> None:
+    config.dataloader_pin_memory = False
+    config.dataloader_persistent_workers = False
+    config.dataloader_output_format = "numpy"
+    if int(config.get("dataloader_num_workers", 0)) > 0:
+        config.dataloader_multiprocessing_context = str(
+            config.get("dataloader_multiprocessing_context", "forkserver")
+            or "forkserver"
+        )
+    finalize_config(config)
+
+
+def jax_config_checkpoint_contract(
+    config: config_dict.ConfigDict,
+) -> dict[str, Any]:
+    effective_config = config_to_dict(config)
+    effective_config.pop("config_path", None)
+    return {"config": effective_config}
+
+
+def _build_pretrain_jax_datamodule(
+    config: config_dict.ConfigDict,
+    process_count: int,
+    process_index: int,
+) -> GemsDataModule:
+    return GemsDataModule(
+        config,
+        seed=int(config.seed),
+        distributed_world_size=process_count,
+        distributed_rank=process_index,
+        distributed_local_rank=0,
+    )
+
+
+def _validate_pretrain_jax_model(model: Any) -> None:
+    if model.use_ema_teacher:
+        raise ValueError("JAX training uses pure Optax and does not support EMA teachers.")
+
+
+def _validate_jax_task_probe_config(
+    config: config_dict.ConfigDict,
+    task: JaxTrainingTask,
+) -> None:
+    if task.enable_msg_probe:
+        return
+    probe_interval = float(config.get("msg_probe_every_n_steps", -1.0))
+    probe_at_final = bool(config.get("msg_probe_at_final_step", False))
+    if probe_interval >= 0.0 or probe_at_final:
+        raise ValueError(
+            f"JAX task {task.name!r} does not support the MSG probe; "
+            "set msg_probe_every_n_steps=-1 and msg_probe_at_final_step=False."
+        )
 
 
 def initialize_jax_model_from_torch_seed(
@@ -1037,18 +1254,19 @@ def initialize_jax_model_from_torch_seed(
 def _run_jax_training_loop(
     *,
     config: config_dict.ConfigDict,
-    datamodule: GemsDataModule,
-    model: PeakSetJEPAJax,
+    datamodule: Any,
+    model: Any,
     logger: MetricLogger,
     total_steps: int,
     checkpoint_manager: Any,
     resume_step: int | None,
+    checkpoint_metadata: dict[str, Any],
+    metric_reduction: JaxMetricReduction,
+    enable_msg_probe: bool,
 ) -> dict[str, object]:
-    log_every_n_steps = int(_config_get(config, "log_every_n_steps", 50))
-    warmup_steps = int(_config_get(config, "throughput_warmup_steps", 0))
-    grad_accum_steps = int(_config_get(config, "gradient_accumulation_steps", 1))
-    if model.use_ema_teacher:
-        raise ValueError("JAX training uses pure Optax and does not support EMA teachers.")
+    log_every_n_steps = int(config.get("log_every_n_steps", 50))
+    warmup_steps = int(config.get("throughput_warmup_steps", 0))
+    grad_accum_steps = int(config.get("gradient_accumulation_steps", 1))
     data_parallel_devices = _jax_data_parallel_devices(config)
     data_mesh = _jax_data_mesh_for_device_count(data_parallel_devices)
     use_sharded_step = data_parallel_devices > 1
@@ -1068,12 +1286,14 @@ def _run_jax_training_loop(
         pure_optimizer,
         sharded=use_sharded_step,
         data_mesh=data_mesh,
-        log_update_stats=bool(_config_get(config, "jax_log_update_stats", False)),
+        log_update_stats=bool(config.get("jax_log_update_stats", False)),
+        metric_reduction=metric_reduction,
     )
     pure_eval_step = make_pure_eval_step(
         pure_graphdef,
         sharded=use_sharded_step,
         data_mesh=data_mesh,
+        metric_reduction=metric_reduction,
     )
     if use_sharded_step:
         # Commit the training state to the data mesh once so every training
@@ -1087,11 +1307,15 @@ def _run_jax_training_loop(
             pure_static_state,
             data_mesh,
         )
-    checkpoint_every_steps = int(_config_get(config, "checkpoint_every_steps", 0))
+    checkpoint_every_steps = int(config.get("checkpoint_every_steps", 0))
     val_every_n_steps = validation_interval(config, datamodule, total_steps)
     val_num_steps = validation_steps(config)
-    msg_probe_every_n_steps = msg_probe_interval(config, datamodule, total_steps)
-    msg_probe_variants = msg_probe_variants_from_config(config)
+    msg_probe_every_n_steps = (
+        msg_probe_interval(config, datamodule, total_steps) if enable_msg_probe else -1
+    )
+    msg_probe_variants = (
+        msg_probe_variants_from_config(config) if enable_msg_probe else ()
+    )
 
     def jax_checkpoint_state() -> dict[str, Any]:
         return {
@@ -1101,7 +1325,12 @@ def _run_jax_training_loop(
         }
 
     def save_checkpoint(step: int) -> None:
-        save_jax_training_state(checkpoint_manager, step, jax_checkpoint_state())
+        save_jax_training_state(
+            checkpoint_manager,
+            step,
+            jax_checkpoint_state(),
+            metadata=checkpoint_metadata,
+        )
 
     def maybe_save_checkpoint(step: int) -> None:
         if checkpoint_every_steps <= 0 or step % checkpoint_every_steps != 0:
@@ -1114,18 +1343,19 @@ def _run_jax_training_loop(
             checkpoint_manager,
             int(resume_step),
             jax_checkpoint_state(),
+            expected_metadata=checkpoint_metadata,
         )
         pure_trainable_params = restored["trainable_params"]
         pure_static_state = restored["static_state"]
         pure_opt_state = restored["opt_state"]
         start_step = int(resume_step)
-    timing_barriers = bool(_config_get(config, "jax_timing_barriers", False))
+    timing_barriers = bool(config.get("jax_timing_barriers", False))
     compile_stall_threshold_seconds = float(
-        _config_get(config, "jax_compile_stall_threshold_seconds", 0.0)
+        config.get("jax_compile_stall_threshold_seconds", 0.0)
     )
-    profile_dir = str(_config_get(config, "jax_profile_dir", ""))
-    profile_start_step = int(_config_get(config, "jax_profile_start_step", warmup_steps))
-    profile_steps = int(_config_get(config, "jax_profile_steps", 0))
+    profile_dir = str(config.get("jax_profile_dir", ""))
+    profile_start_step = int(config.get("jax_profile_start_step", warmup_steps))
+    profile_steps = int(config.get("jax_profile_steps", 0))
     profile_end_step = (
         profile_start_step + profile_steps if profile_steps > 0 else total_steps
     )
@@ -1279,6 +1509,7 @@ def _run_jax_training_loop(
                     max_steps=val_num_steps,
                     use_sharded_step=use_sharded_step,
                     data_mesh=data_mesh,
+                    metric_reduction=metric_reduction,
                 )
                 _log_jax_validation_metrics(
                     logger,
@@ -1295,7 +1526,7 @@ def _run_jax_training_loop(
                 global_step,
                 total_steps=total_steps,
                 run_at_final_step=bool(
-                    _config_get(config, "msg_probe_at_final_step", False)
+                    config.get("msg_probe_at_final_step", False)
                 ),
             ):
                 phase_start = time.perf_counter()
@@ -1508,13 +1739,14 @@ def _jax_metrics_to_host(
 
 def _evaluate_jax_validation_loss(
     *,
-    datamodule: GemsDataModule,
+    datamodule: Any,
     trainable_params: nnx.State,
     static_state: nnx.State,
     eval_step: Any,
     max_steps: int,
     use_sharded_step: bool,
     data_mesh: Mesh,
+    metric_reduction: JaxMetricReduction,
 ) -> dict[str, float]:
     totals: dict[str, float] = {}
     steps = 0
@@ -1530,7 +1762,24 @@ def _evaluate_jax_validation_loss(
         for key, value in metrics.items():
             totals[key] = totals.get(key, 0.0) + float(np.asarray(value))
         steps += 1
-    return {f"val/{key}": value / float(steps) for key, value in totals.items()}
+    if metric_reduction == "mean":
+        metrics = {key: value / float(steps) for key, value in totals.items()}
+    else:
+        metrics = _finalize_token_metric_totals_host(totals)
+    return {f"val/{key}": value for key, value in metrics.items()}
+
+
+def _finalize_token_metric_totals_host(
+    totals: dict[str, float],
+) -> dict[str, float]:
+    metrics = {}
+    for key, value in totals.items():
+        if key == "target_tokens" or key.startswith("target_tokens/"):
+            metrics[key] = value
+            continue
+        weight_key = _jax_token_metric_weight_key(key)
+        metrics[key] = value / max(totals[weight_key], 1.0)
+    return metrics
 
 
 def _log_jax_validation_metrics(
@@ -1563,7 +1812,7 @@ def run_and_log_msg_probe_jax(
 ) -> dict[str, float]:
     probe_data_mesh = (
         data_mesh
-        if bool(_config_get(config, "jax_msg_probe_shard_batches", False))
+        if bool(config.get("jax_msg_probe_shard_batches", False))
         else None
     )
     probe_metrics = run_msg_probe_jax(
@@ -1578,7 +1827,7 @@ def run_and_log_msg_probe_jax(
         logger,
         probe_metrics,
         global_step,
-        enable_wandb=bool(_config_get(config, "enable_wandb", False)),
+        enable_wandb=bool(config.get("enable_wandb", False)),
     )
     fingerprint_task = "maccs"
     for variant in variants:
@@ -1639,19 +1888,8 @@ def _raise_on_jax_compile_stall(
     )
 
 
-def _total_training_steps(
-    config: config_dict.ConfigDict,
-    datamodule: GemsDataModule,
-) -> int:
-    total_steps = max(1, int(float(config.num_epochs) * datamodule.train_steps))
-    training_max_steps = _config_get(config, "training_max_steps", None)
-    if training_max_steps is None:
-        return total_steps
-    return min(total_steps, max(1, int(training_max_steps)))
-
-
 def _jax_data_parallel_devices(config: Any) -> int:
-    requested = _config_get(config, "jax_mesh_devices", None)
+    requested = config.get("jax_mesh_devices", None)
     if requested is None:
         return jax.device_count()
     if isinstance(requested, str):
@@ -1682,19 +1920,13 @@ def _env_enabled(name: str) -> bool:
     return os.environ.get(name, "").lower() in {"1", "true", "yes", "on"}
 
 
-def _config_get(config: Any, key: str, default: Any) -> Any:
-    if hasattr(config, "get"):
-        return config.get(key, default)
-    return getattr(config, key, default)
-
-
 def _config_or_env(
     config: Any,
     key: str,
     env_keys: tuple[str, ...],
     default: Any = "",
 ) -> Any:
-    value = _config_get(config, key, None)
+    value = config.get(key, None)
     if value not in (None, ""):
         return value
     for env_key in env_keys:

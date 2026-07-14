@@ -3,6 +3,14 @@ from __future__ import annotations
 from typing import Any
 
 
+def total_training_steps(config: Any, datamodule: Any) -> int:
+    total_steps = max(1, int(float(config.num_epochs) * datamodule.train_steps))
+    training_max_steps = config.get("training_max_steps", None)
+    if training_max_steps is None:
+        return total_steps
+    return min(total_steps, max(1, int(training_max_steps)))
+
+
 def resolve_step_interval(
     config: Any,
     datamodule: Any,
@@ -11,7 +19,7 @@ def resolve_step_interval(
     *,
     default: float,
 ) -> int:
-    raw = float(_config_get(config, key, default))
+    raw = float(config.get(key, default))
     if raw < 0:
         return int(raw)
     if raw == 0:
@@ -19,7 +27,7 @@ def resolve_step_interval(
     if 0 < raw <= 1:
         reference_steps = (
             total_steps
-            if float(_config_get(config, "num_epochs", 1)) < 1
+            if float(config.get("num_epochs", 1)) < 1
             else int(datamodule.train_steps)
         )
         return max(1, int(raw * reference_steps))
@@ -63,10 +71,4 @@ def validation_interval(config: Any, datamodule: Any, total_steps: int) -> int:
 
 
 def validation_steps(config: Any) -> int:
-    return int(_config_get(config, "val_num_steps", 64))
-
-
-def _config_get(config: Any, key: str, default: Any) -> Any:
-    if hasattr(config, "get"):
-        return config.get(key, default)
-    return getattr(config, key, default)
+    return int(config.get("val_num_steps", 64))

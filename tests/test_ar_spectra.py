@@ -1,6 +1,7 @@
 import math
 
 import numpy as np
+import pytest
 import torch
 
 from spectra_learning.data.ar_spectra import (
@@ -342,3 +343,57 @@ def test_ar_gems_collator_tokenizes_raw_spectra_samples() -> None:
         SpectraARTokenKind.FRAGMENT_MZ_LEVEL_0,
     )
     assert math.isclose(first_coarse * tokenizer.config.mz_bin_widths[0], 750.0)
+
+
+def test_ar_gems_collator_emits_numpy_batches_for_jax() -> None:
+    tokenizer = SpectraARTokenizer(SpectraARTokenizerConfig(max_num_peaks=3))
+    collator = SpectraARGemsBatchCollator(
+        tokenizer=tokenizer,
+        num_peaks=3,
+        max_precursor_mz=DEFAULT_MAX_PRECURSOR_MZ,
+        min_peak_intensity=DEFAULT_MIN_PEAK_INTENSITY,
+        peak_drop_min_intensity=DEFAULT_MIN_PEAK_INTENSITY,
+        peak_ordering="mz",
+        precursor_peak_exclusion_window_da=0.0,
+        output_format="numpy",
+    )
+    sample = {
+        "spectra": np.asarray(
+            [[100.0, 750.0, 300.0], [0.2, 1.0, 0.4]],
+            dtype=np.float32,
+        ),
+        "precursor_mz_raw": np.float32(800.0),
+        "collision_energy": np.float32(35.0),
+        "charge": np.float32(1.0),
+    }
+
+    tokenized = collator([sample])
+
+    assert tokenized
+    assert all(isinstance(value, np.ndarray) for value in tokenized.values())
+
+
+def test_ar_gems_collator_rejects_unknown_output_format() -> None:
+    tokenizer = SpectraARTokenizer(SpectraARTokenizerConfig(max_num_peaks=3))
+    collator = SpectraARGemsBatchCollator(
+        tokenizer=tokenizer,
+        num_peaks=3,
+        max_precursor_mz=DEFAULT_MAX_PRECURSOR_MZ,
+        min_peak_intensity=DEFAULT_MIN_PEAK_INTENSITY,
+        peak_drop_min_intensity=DEFAULT_MIN_PEAK_INTENSITY,
+        peak_ordering="mz",
+        precursor_peak_exclusion_window_da=0.0,
+        output_format="unknown",
+    )
+    sample = {
+        "spectra": np.asarray(
+            [[100.0, 750.0, 300.0], [0.2, 1.0, 0.4]],
+            dtype=np.float32,
+        ),
+        "precursor_mz_raw": np.float32(800.0),
+        "collision_energy": np.float32(35.0),
+        "charge": np.float32(1.0),
+    }
+
+    with pytest.raises(ValueError, match="Unknown dataloader output format"):
+        collator([sample])

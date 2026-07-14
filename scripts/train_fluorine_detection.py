@@ -11,15 +11,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import torch
 
 from spectra_learning.probes.massspec.fluorine import (
-    FluorineData,
-    HF_REPO_ID,
-    HF_TEST_SUBDIR,
-    HF_TRAIN_SUBDIR,
-    MLPClassifier,
-    TrialParams,
-    TrialResult,
-    _make_loader,
-    binary_focal_loss_with_logits,
     default_state_path,
     run,
 )
@@ -75,7 +66,6 @@ def parse_args() -> argparse.Namespace:
         default=Path("results/fluorine_detection_probe"),
     )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--device-ids", default=None)
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--num-peaks", type=int, default=None)

@@ -5,15 +5,14 @@ from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.training.activation_checkpointing import (
     apply_activation_checkpointing,
 )
-from spectra_learning.training.modules import PretrainModule
 from spectra_learning.training.performance import (
     compile_forward,
     register_bf16_adamw_state_hook,
 )
 
 
-def _tiny_pretrain_module() -> PretrainModule:
-    model = PeakSetJEPA(
+def _tiny_model() -> PeakSetJEPA:
+    return PeakSetJEPA(
         model_dim=32,
         encoder_num_layers=2,
         encoder_num_heads=4,
@@ -26,81 +25,80 @@ def _tiny_pretrain_module() -> PretrainModule:
         pairmixer_pair_dim=32,
         pairmixer_pair_feature_hidden_dim=16,
     )
-    return PretrainModule(model)
 
 
 def test_activation_checkpointing_preserves_state_dict_keys():
-    module = _tiny_pretrain_module()
-    before = set(module.state_dict())
+    model = _tiny_model()
+    before = set(model.state_dict())
 
     apply_activation_checkpointing(
-        module,
+        model,
         {
             "activation_checkpoint_mode": "full",
             "activation_checkpoint_preserve_rng_state": True,
         },
     )
 
-    assert set(module.state_dict()) == before
+    assert set(model.state_dict()) == before
 
 
 def test_activation_checkpointing_accepts_canonical_modes():
     for mode in ("selective", "full"):
-        module = _tiny_pretrain_module()
+        model = _tiny_model()
 
         apply_activation_checkpointing(
-            module,
+            model,
             {
                 "activation_checkpoint_mode": mode,
                 "activation_checkpoint_preserve_rng_state": True,
             },
         )
 
-        assert hasattr(module.model.encoder.blocks[0], "_checkpoint_wrapped_module")
-        assert hasattr(module.model.masked_latent_predictor[0], "_checkpoint_wrapped_module")
+        assert hasattr(model.encoder.blocks[0], "_checkpoint_wrapped_module")
+        assert hasattr(model.masked_latent_predictor[0], "_checkpoint_wrapped_module")
 
 
 def test_activation_checkpointing_rejects_unknown_mode():
-    module = _tiny_pretrain_module()
+    model = _tiny_model()
     with pytest.raises(ValueError, match="activation_checkpoint_mode"):
-        apply_activation_checkpointing(module, {"activation_checkpoint_mode": "old"})
+        apply_activation_checkpointing(model, {"activation_checkpoint_mode": "old"})
 
 
 
 def test_activation_checkpointing_works_with_default_full_module_compile():
-    module = _tiny_pretrain_module()
+    model = _tiny_model()
 
     apply_activation_checkpointing(
-        module,
+        model,
         {
             "activation_checkpoint_mode": "full",
             "activation_checkpoint_preserve_rng_state": True,
         },
     )
     compile_forward(
-        module,
+        model,
         {
             "compile_mode": "max-autotune",
         },
     )
 
-    assert module._compiled_call_impl is not None
+    assert model._compiled_call_impl is not None
 
 
 def test_block_compile_compiles_pair_mixer_blocks_only():
-    module = _tiny_pretrain_module()
-    assert module._compiled_call_impl is None
+    model = _tiny_model()
+    assert model._compiled_call_impl is None
 
     compile_forward(
-        module,
+        model,
         {
             "compile_mode": "max-autotune",
             "compile_scope": "blocks",
         },
     )
 
-    assert module._compiled_call_impl is None
-    blocks = [*module.model.encoder.blocks, *module.model.masked_latent_predictor]
+    assert model._compiled_call_impl is None
+    blocks = [*model.encoder.blocks, *model.masked_latent_predictor]
     assert all(block._compiled_call_impl is not None for block in blocks)
 
 

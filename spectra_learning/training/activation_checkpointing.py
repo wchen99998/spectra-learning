@@ -15,27 +15,25 @@ from torch.utils.checkpoint import (
 )
 
 from spectra_learning.models.model import PeakSetJEPA
-from spectra_learning.training.modules import PretrainModule
 
 
 AC_MODES = {"none", "full", "selective"}
 
 
-def apply_activation_checkpointing(module: nn.Module, config: Any) -> None:
-    mode = str(_config_get(config, "activation_checkpoint_mode", "none")).lower()
+def apply_activation_checkpointing(model: PeakSetJEPA, config: Any) -> None:
+    mode = str(config.get("activation_checkpoint_mode", "none")).lower()
     if mode not in AC_MODES:
         raise ValueError(
             "activation_checkpoint_mode must be one of none, full, selective"
         )
     if mode == "none":
         return
-    model = _base_model(module)
-    every_n = int(_config_get(config, "activation_checkpoint_every_n_layers", 1))
+    every_n = int(config.get("activation_checkpoint_every_n_layers", 1))
     preserve_rng_state = bool(
-        _config_get(config, "activation_checkpoint_preserve_rng_state", True)
+        config.get("activation_checkpoint_preserve_rng_state", True)
     )
     targets = tuple(
-        _config_get(config, "activation_checkpoint_modules", ("encoder", "predictor"))
+        config.get("activation_checkpoint_modules", ("encoder", "predictor"))
     )
     if "encoder" in targets:
         _wrap_blocks(
@@ -51,12 +49,6 @@ def apply_activation_checkpointing(module: nn.Module, config: Any) -> None:
             every_n=every_n,
             preserve_rng_state=preserve_rng_state,
         )
-
-
-def _base_model(module: nn.Module) -> PeakSetJEPA:
-    if isinstance(module, PretrainModule):
-        return module.model
-    return module  # type: ignore[return-value]
 
 
 def _wrap_blocks(
@@ -119,9 +111,3 @@ def _ops_to_save() -> set:
         aten._scaled_dot_product_efficient_attention.default,
         aten._scaled_dot_product_attention_math.default,
     }
-
-
-def _config_get(config: Any, key: str, default: Any) -> Any:
-    if hasattr(config, "get"):
-        return config.get(key, default)
-    return getattr(config, key, default)

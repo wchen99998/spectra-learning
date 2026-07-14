@@ -53,6 +53,19 @@ def test_current_pretraining_config_records_model_and_data_defaults() -> None:
     assert data_keys - set(config) == {"jepa_intensity_aware_mask_config"}
 
 
+def test_model_settings_copy_typed_config_values_without_coercion() -> None:
+    config = {
+        "attention_mlp_multiple": 3,
+        "activation_checkpoint_modules": ("encoder",),
+    }
+
+    settings = PeakSetJEPASettings.from_config(config)
+
+    assert type(settings.attention_mlp_multiple) is int
+    assert settings.attention_mlp_multiple == config["attention_mlp_multiple"]
+    assert settings.activation_checkpoint_modules == ("encoder",)
+
+
 def test_saved_config_uses_the_canonical_serialization(tmp_path: Path) -> None:
     config = config_dict.ConfigDict()
     config.path = tmp_path

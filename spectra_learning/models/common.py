@@ -1,14 +1,10 @@
 import math
 from contextlib import nullcontext
-from typing import cast
 
 import torch
 import torch.nn.functional as F
 from jaxtyping import Bool, Float
 from torch import Tensor, nn
-
-from spectra_learning.models.transformer import TransformerBlock
-
 
 def _active_autocast_context(device_type: str):
     if torch.is_autocast_enabled(device_type):
@@ -17,48 +13,6 @@ def _active_autocast_context(device_type: str):
             dtype=torch.get_autocast_dtype(device_type),
         )
     return nullcontext()
-
-
-def _apply_depth_scaled_init(blocks: nn.ModuleList, num_layers: int) -> None:
-    """Scale residual output projections by 1/sqrt(2*num_layers) (GPT-2 style).
-
-    In pre-norm transformers each residual addition contributes ~unit variance,
-    so after 2*L sub-layers the activation norm grows by sqrt(2*L).  Scaling
-    the output projections (wo in attention, w2 in FFN) keeps the total
-    variance growth O(1) regardless of depth.
-    """
-    if num_layers <= 0:
-        return
-    scale = 1.0 / math.sqrt(2.0 * num_layers)
-    for module in blocks:
-        block = cast(TransformerBlock, module)
-        block.attention.wo.weight.data.mul_(scale)
-        block.feed_forward.w2.weight.data.mul_(scale)
-
-
-def _build_non_causal_blocks(
-    *,
-    dim: int,
-    num_layers: int,
-    num_heads: int,
-    num_kv_heads: int | None,
-    attention_mlp_multiple: float,
-    norm_eps: float = 1e-5,
-    dropout: float = 0.0,
-) -> nn.ModuleList:
-    block_kwargs = dict(
-        dim=dim,
-        n_heads=num_heads,
-        n_kv_heads=num_heads if num_kv_heads is None else num_kv_heads,
-        norm_eps=norm_eps,
-        hidden_dim=math.ceil(dim * attention_mlp_multiple),
-        dropout=dropout,
-    )
-    blocks = nn.ModuleList(
-        [TransformerBlock(**block_kwargs) for _ in range(num_layers)]
-    )
-    _apply_depth_scaled_init(blocks, num_layers)
-    return blocks
 
 
 def _build_sincos_position_table(
@@ -123,11 +77,3 @@ def _merge_visible_mask(
     if visible_mask is not None and valid_mask is not None:
         return visible_mask & valid_mask
     return visible_mask if visible_mask is not None else valid_mask
-
-
-def _masked_mean_pool(
-    embeddings: Float[Tensor, "batch peaks dim"],
-    valid_mask: Bool[Tensor, "batch peaks"],
-) -> Float[Tensor, "batch dim"]:
-    mask = valid_mask.unsqueeze(-1).to(dtype=embeddings.dtype)
-    return (embeddings * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)

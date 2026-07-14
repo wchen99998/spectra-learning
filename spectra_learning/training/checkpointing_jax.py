@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import jax
@@ -29,22 +30,64 @@ def save_jax_training_state(
     manager: ocp.CheckpointManager,
     step: int,
     state: Any,
+    *,
+    metadata: dict[str, Any],
 ) -> None:
-    manager.save(step, args=ocp.args.StandardSave(state))
+    manager.save(
+        step,
+        args=ocp.args.Composite(
+            state=ocp.args.StandardSave(state),
+            metadata=ocp.args.JsonSave(_canonical_metadata(metadata)),
+        ),
+    )
 
 
 def restore_jax_training_state(
     manager: ocp.CheckpointManager,
     step: int,
     state: Any,
+    *,
+    expected_metadata: dict[str, Any],
 ) -> Any:
     # Restore against abstract targets that carry the live shardings so every
     # array lands back on its original mesh layout on every host.
     target = jax.tree.map(_abstract_value, state)
-    return manager.restore(step, args=ocp.args.StandardRestore(target))
+    restored = manager.restore(
+        step,
+        args=ocp.args.Composite(
+            state=ocp.args.StandardRestore(target),
+            metadata=ocp.args.JsonRestore(),
+        ),
+    )
+    expected_metadata = _canonical_metadata(expected_metadata)
+    if restored.metadata != expected_metadata:
+        raise ValueError(
+            "JAX checkpoint training contract mismatch: "
+            f"expected={json.dumps(expected_metadata, sort_keys=True)} "
+            f"actual={json.dumps(restored.metadata, sort_keys=True)}. "
+            "Start a new workdir for the current training contract."
+        )
+    return restored.state
+
+
+def jax_training_checkpoint_metadata(
+    training_task: str,
+    task_contract: dict[str, Any],
+) -> dict[str, Any]:
+    return _canonical_metadata(
+        {
+            "format_version": 1,
+            "training_task": training_task,
+            "task_contract": task_contract,
+        }
+    )
 
 
 def _abstract_value(value: Any) -> Any:
     if isinstance(value, jax.Array):
         return jax.ShapeDtypeStruct(value.shape, value.dtype, sharding=value.sharding)
     return value
+
+
+def _canonical_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    return json.loads(json.dumps(metadata, sort_keys=True))

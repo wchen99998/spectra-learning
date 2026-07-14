@@ -1,7 +1,6 @@
 from typing import Any, NamedTuple
 
 import numpy as np
-from ml_collections import config_dict
 
 from spectra_learning.data.massspec_targets import (
     MACCS_FINGERPRINT_BITS,
@@ -49,16 +48,10 @@ PROBE_FINGERPRINT_BITS = {
     MACCS_TASK: MACCS_FINGERPRINT_BITS,
     MORGAN_TASK: MORGAN_PROBE_FINGERPRINT_BITS,
 }
-def _config_get(config: Any, key: str, default: Any) -> Any:
-    if hasattr(config, "get"):
-        return config.get(key, default)
-    return getattr(config, key, default)
-
-
 def msg_probe_variants_from_config(
     config: Any,
 ) -> tuple[str, ...]:
-    raw_variants = _config_get(config, "msg_probe_variants", ("mean", "covariance", "pma"))
+    raw_variants = config.get("msg_probe_variants", ("mean", "covariance", "pma"))
     if isinstance(raw_variants, str):
         return (raw_variants.lower(),)
     return tuple(str(variant).lower() for variant in raw_variants)
@@ -68,16 +61,15 @@ def resolve_msg_probe_fingerprint(
     config: Any,
 ) -> str:
     validate_msg_probe_config(config)
-    return str(_config_get(config, "msg_probe_fingerprint", MACCS_TASK)).lower()
+    return str(config.get("msg_probe_fingerprint", MACCS_TASK)).lower()
 
 
 def resolve_msg_probe_num_repeats(
     config: Any,
 ) -> int:
-    raw_repeats = _config_get(config, "msg_probe_num_repeats", None)
+    raw_repeats = config.get("msg_probe_num_repeats", None)
     if raw_repeats is None:
-        raw_repeats = _config_get(
-            config,
+        raw_repeats = config.get(
             "nist_murcko_probe_num_repeats",
             1,
         )
@@ -87,4 +79,4 @@ def resolve_msg_probe_num_repeats(
 def resolve_msg_probe_pairwise_alignment_num_pairs(
     config: Any,
 ) -> int:
-    return int(_config_get(config, "msg_probe_pairwise_alignment_num_pairs", 0))
+    return int(config.get("msg_probe_pairwise_alignment_num_pairs", 0))

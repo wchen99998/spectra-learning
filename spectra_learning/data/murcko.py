@@ -48,6 +48,7 @@ from spectra_learning.data.spectra import (
     DEFAULT_GROUPED_PEAK_SHOULDER_DA,
     DEFAULT_PEAK_FILTERING,
     NUM_PEAKS_INPUT,
+    spectra_from_peak_lists,
 )
 
 log = logging.getLogger(__name__)
@@ -277,7 +278,8 @@ def _probe_metadata_valid(
         for key, value in expected_metadata.items():
             if metadata.get(key) != value:
                 _raise_invalid_murcko_artifact(output_dir, f"{key} mismatch")
-    storage_format = str(metadata.get("storage_format", "native"))
+    if metadata.get("storage_format") != "parquet":
+        _raise_invalid_murcko_artifact(output_dir, "storage_format must be parquet")
     for split in ("train", "val", "test"):
         filenames = metadata.get(f"{split}_files", [])
         if not filenames:
@@ -285,16 +287,7 @@ def _probe_metadata_valid(
                 output_dir,
                 f"missing {split}_files metadata",
             )
-        if storage_format == "parquet":
-            if not all(
-                (output_dir / name).exists()
-                for name in filenames
-            ):
-                _raise_invalid_murcko_artifact(output_dir, f"missing {split} files")
-        elif not all(
-            (output_dir / split / name).exists()
-            for name in filenames
-        ):
+        if not all((output_dir / name).exists() for name in filenames):
             _raise_invalid_murcko_artifact(output_dir, f"missing {split} files")
     return metadata
 
@@ -523,6 +516,11 @@ def _read_murcko_subdir_metadata(
     if not metadata_path.exists():
         return None
     metadata = json.loads(metadata_path.read_text())
+    if metadata.get("storage_format") != "parquet":
+        _raise_invalid_murcko_artifact(
+            cache_dir / subdir,
+            "storage_format must be parquet",
+        )
     for split in required_splits:
         filenames = metadata.get(f"{split}_files", [])
         if not filenames:
@@ -545,7 +543,6 @@ def _murcko_fluorine_split_metadata(
     subdir: str,
     source_split: str,
     target_split: str,
-    include_morgan: bool,
     include_dreams: bool,
 ) -> dict[str, Any]:
     metadata = {
@@ -558,18 +555,6 @@ def _murcko_fluorine_split_metadata(
         f"{target_split}_size": int(source_metadata[f"{source_split}_size"]),
         f"{target_split}_positive": int(source_metadata.get(f"{source_split}_positive", 0)),
     }
-    morgan_files = source_metadata.get("morgan_auxiliary_files", {}).get(source_split, [])
-    if include_morgan and morgan_files:
-        metadata[f"{target_split}_morgan_files"] = [
-            f"{subdir}/{filename}" for filename in morgan_files
-        ]
-        metadata[f"{target_split}_morgan_lengths"] = [
-            int(value)
-            for value in source_metadata.get("morgan_auxiliary_lengths", {}).get(
-                source_split,
-                [],
-            )
-        ]
     dreams_files = source_metadata.get("dreams_auxiliary_files", {}).get(source_split, [])
     if include_dreams and dreams_files:
         metadata[f"{target_split}_dreams_files"] = [
@@ -601,7 +586,7 @@ def _murcko_subdir_auxiliary_available(
     )
 
 
-def _merge_vocabularies(*vocabs: dict[str, int]) -> dict[str, int]:
+def merge_vocabularies(*vocabs: dict[str, int]) -> dict[str, int]:
     values = sorted({value for vocab in vocabs for value in vocab})
     return {value: idx for idx, value in enumerate(values)}
 
@@ -613,7 +598,6 @@ def ensure_murcko_fluorine_data_downloaded(
     revision: str = "main",
     train_subdir: str = NIST_MURCKO_PREPARED_SUBDIR,
     test_subdir: str = MCEBIO_MURCKO_PREPARED_SUBDIR,
-    include_morgan: bool = False,
     include_dreams: bool = False,
     distributed_world_size: int = 1,
     distributed_rank: int = 0,
@@ -632,13 +616,6 @@ def ensure_murcko_fluorine_data_downloaded(
         f"{test_subdir}/metadata.json",
         f"{test_subdir}/all.parquet",
     ]
-    if include_morgan:
-        allow_patterns.extend(
-            [
-                f"{train_subdir}/auxiliary/morgan/*",
-                f"{test_subdir}/auxiliary/morgan/*",
-            ]
-        )
     if include_dreams:
         allow_patterns.extend(
             [
@@ -657,22 +634,6 @@ def ensure_murcko_fluorine_data_downloaded(
         required_splits=("all",),
     )
     needs_download = train_cached is None or test_cached is None or (
-        include_morgan
-        and (
-            not _murcko_subdir_auxiliary_available(
-                cache_dir,
-                train_subdir,
-                train_cached,
-                "morgan",
-            )
-            or not _murcko_subdir_auxiliary_available(
-                cache_dir,
-                test_subdir,
-                test_cached,
-                "morgan",
-            )
-        )
-    ) or (
         include_dreams
         and (
             not _murcko_subdir_auxiliary_available(
@@ -717,21 +678,6 @@ def ensure_murcko_fluorine_data_downloaded(
             required_splits=("all",),
         ),
     )
-    if include_morgan:
-        if not _murcko_subdir_auxiliary_available(
-            cache_dir,
-            train_subdir,
-            train_metadata,
-            "morgan",
-        ):
-            raise FileNotFoundError(f"Missing NIST Murcko Morgan auxiliary files in {cache_dir / train_subdir}")
-        if not _murcko_subdir_auxiliary_available(
-            cache_dir,
-            test_subdir,
-            test_metadata,
-            "morgan",
-        ):
-            raise FileNotFoundError(f"Missing MCEBIO Morgan auxiliary files in {cache_dir / test_subdir}")
     if include_dreams:
         if not _murcko_subdir_auxiliary_available(
             cache_dir,
@@ -754,22 +700,15 @@ def ensure_murcko_fluorine_data_downloaded(
         "revision": revision,
         "train_subdir": train_subdir,
         "test_subdir": test_subdir,
-        "adduct_vocab": _merge_vocabularies(
+        "adduct_vocab": merge_vocabularies(
             train_metadata.get("adduct_vocab", {"unknown": 0}),
             test_metadata.get("adduct_vocab", {"unknown": 0}),
         ),
-        "instrument_type_vocab": _merge_vocabularies(
+        "instrument_type_vocab": merge_vocabularies(
             train_metadata.get("instrument_type_vocab", {"unknown": 0}),
             test_metadata.get("instrument_type_vocab", {"unknown": 0}),
         ),
         "probe_maccs_bits": int(train_metadata.get("probe_maccs_bits", MACCS_FINGERPRINT_BITS)),
-        "probe_morgan_bits": int(train_metadata.get("probe_morgan_bits", MORGAN_PROBE_FINGERPRINT_BITS)) if include_morgan else 0,
-        "probe_morgan_radius": int(train_metadata.get("probe_morgan_radius", MORGAN_PROBE_FINGERPRINT_RADIUS)),
-        "morgan_auxiliary_available": bool(
-            include_morgan
-            and train_metadata.get("morgan_auxiliary_available", False)
-            and test_metadata.get("morgan_auxiliary_available", False)
-        ),
         "dreams_dim": int(train_metadata.get("dreams_dim", 0)),
         "dreams_auxiliary_available": bool(
             include_dreams
@@ -783,7 +722,6 @@ def ensure_murcko_fluorine_data_downloaded(
             subdir=train_subdir,
             source_split="train",
             target_split="train",
-            include_morgan=include_morgan,
             include_dreams=include_dreams,
         )
     )
@@ -793,7 +731,6 @@ def ensure_murcko_fluorine_data_downloaded(
             subdir=train_subdir,
             source_split="val",
             target_split="val",
-            include_morgan=include_morgan,
             include_dreams=include_dreams,
         )
     )
@@ -803,7 +740,6 @@ def ensure_murcko_fluorine_data_downloaded(
             subdir=test_subdir,
             source_split="all",
             target_split="test",
-            include_morgan=include_morgan,
             include_dreams=include_dreams,
         )
     )
@@ -861,24 +797,6 @@ def build_murcko_fluorine_data(
     )
 
 
-def _normalize_spectra_intensity(spectra: np.ndarray) -> np.ndarray:
-    max_int = spectra[:, 1].max(axis=1, keepdims=True)
-    np.divide(spectra[:, 1], np.maximum(max_int, 1e-8), out=spectra[:, 1])
-    return spectra
-
-
-def _spectra_from_peak_lists(
-    mz_lists: list[list[float]],
-    intensity_lists: list[list[float]],
-) -> np.ndarray:
-    spectra = np.zeros((len(mz_lists), 2, NUM_PEAKS_INPUT), dtype=np.float32)
-    for i, (mz, intensity) in enumerate(zip(mz_lists, intensity_lists, strict=True)):
-        n = min(len(mz), NUM_PEAKS_INPUT)
-        spectra[i, 0, :n] = np.asarray(mz[:n], dtype=np.float32)
-        spectra[i, 1, :n] = np.asarray(intensity[:n], dtype=np.float32)
-    return _normalize_spectra_intensity(spectra)
-
-
 class _MurckoFluorineParquetDataset(Dataset):
     def __init__(self, entries: list[dict[str, Any]]) -> None:
         self._entries = [
@@ -903,7 +821,7 @@ class _MurckoFluorineParquetDataset(Dataset):
         table = pq.read_table(Path(entry["path"]))
         rows = table.to_pydict()
         arrays: dict[str, np.ndarray] = {
-            "spectra": _spectra_from_peak_lists(
+            "spectra": spectra_from_peak_lists(
                 rows["spectrum_mz"],
                 rows["spectrum_intensity"],
             ),
@@ -1918,7 +1836,7 @@ def _select_disjoint_probe_indices(
     return selected_indices, selected_hist_keys, metadata
 
 
-def _build_subset_murcko_mgf_dataset(
+def _write_murcko_mgf_dataset(
     *,
     mgf_path: Path,
     output_dir: Path,
@@ -2002,7 +1920,7 @@ def _build_subset_murcko_mgf_dataset(
                         chunksize=max(1, batch_size // num_workers),
                     ),
                     total=len(full_batch),
-                    desc=f"{mgf_path.name} write subset",
+                    desc=f"{mgf_path.name} write dataset",
                     leave=False,
                 ):
                     if item is None:
@@ -2013,7 +1931,7 @@ def _build_subset_murcko_mgf_dataset(
                         and row["murcko_hist_key"] not in include_murcko_hist_keys
                     ):
                         continue
-                    split = fold_by_smiles.get(row["canonical_smiles"])
+                    split = fold_by_smiles[row["canonical_smiles"]]
                     if split not in active_splits:
                         continue
                     row["fold"] = split
@@ -2627,160 +2545,27 @@ def build_murcko_mgf_dataset(
             split=single_split,
         )
     active_splits = (single_split,) if single_split is not None else SPLITS
-    unique_smiles_by_split = _unique_smiles_by_split(fold_by_smiles, active_splits)
-    normalized_split_size_caps = _normalize_split_size_caps(
-        split_size_caps,
-        unique_smiles_by_split,
-        active_splits,
+    metadata, _ = _write_murcko_mgf_dataset(
+        mgf_path=mgf_path,
+        output_dir=output_dir,
+        source_uri=source_uri,
+        fold_by_smiles=fold_by_smiles,
+        split_metadata=split_metadata,
+        active_splits=active_splits,
+        min_precursor_mz=min_precursor_mz,
+        max_precursor_mz=max_precursor_mz,
+        num_peaks_input=num_peaks_input,
+        num_workers=num_workers,
+        batch_size=batch_size,
+        parquet_batch_size=parquet_batch_size,
+        allowed_adducts=allowed_adducts,
+        split_size_caps=split_size_caps,
+        spectral_lsh_threshold=spectral_lsh_threshold,
+        include_spectrum_indices=None,
+        include_murcko_hist_keys=None,
+        extra_metadata=None,
+        collect_retrieval_rows=False,
     )
-    lsh_thinner = (
-        SpectralLshThinner(
-            splits=active_splits,
-            threshold=spectral_lsh_threshold,
-            split_size_caps=normalized_split_size_caps,
-            unique_smiles_by_split=unique_smiles_by_split,
-        )
-        if normalized_split_size_caps is not None
-        else None
-    )
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    writers: dict[str, pq.ParquetWriter] = {}
-    buffers = {split: [] for split in active_splits}
-    morgan_buffers = {split: [] for split in active_splits}
-    morgan_files: dict[str, list[str]] = {split: [] for split in active_splits}
-    morgan_lengths: dict[str, list[int]] = {split: [] for split in active_splits}
-    split_counts: Counter[str] = Counter()
-    pre_lsh_split_counts: Counter[str] = Counter()
-    fluorine_counts: Counter[str] = Counter()
-    sulfur_counts: Counter[str] = Counter()
-    adducts: set[str] = set()
-    instruments: set[str] = set()
-
-    try:
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            for batch in _batched_mgf_tasks(
-                mgf_path,
-                min_precursor_mz=min_precursor_mz,
-                max_precursor_mz=max_precursor_mz,
-                batch_size=batch_size,
-            ):
-                full_batch = [
-                    (
-                        spectrum_index,
-                        record,
-                        min_mz,
-                        max_mz,
-                        num_peaks_input,
-                        allowed_adducts,
-                    )
-                    for spectrum_index, record, min_mz, max_mz in batch
-                ]
-                for item in tqdm(
-                    executor.map(
-                        _full_pass_task,
-                        full_batch,
-                        chunksize=max(1, batch_size // num_workers),
-                    ),
-                    total=len(full_batch),
-                    desc=f"{mgf_path.name} write splits",
-                    leave=False,
-                ):
-                    if item is None:
-                        continue
-                    row = item.row
-                    split = fold_by_smiles[row["canonical_smiles"]]
-                    row["fold"] = split
-                    if lsh_thinner is None:
-                        pre_lsh_split_counts[split] += 1
-                    elif not lsh_thinner.keep(split, row):
-                        continue
-                    buffers[split].append(row)
-                    morgan_buffers[split].append(item.morgan)
-                    split_counts[split] += 1
-                    fluorine_counts[split] += int(row["has_fluorine"])
-                    sulfur_counts[split] += int(row["has_sulfur"])
-                    adducts.add(str(row["adduct"]))
-                    instruments.add(str(row["instrument_type"]))
-                    if len(buffers[split]) >= parquet_batch_size:
-                        _flush_split(
-                            split=split,
-                            output_dir=output_dir,
-                            rows=buffers[split],
-                            morgans=morgan_buffers[split],
-                            writers=writers,
-                            morgan_files=morgan_files,
-                            morgan_lengths=morgan_lengths,
-                        )
-        for split in active_splits:
-            _flush_split(
-                split=split,
-                output_dir=output_dir,
-                rows=buffers[split],
-                morgans=morgan_buffers[split],
-                writers=writers,
-                morgan_files=morgan_files,
-                morgan_lengths=morgan_lengths,
-            )
-    finally:
-        for writer in writers.values():
-            writer.close()
-
-    adduct_vocab = {value: idx for idx, value in enumerate(sorted(adducts))}
-    instrument_type_vocab = {value: idx for idx, value in enumerate(sorted(instruments))}
-    if lsh_thinner is not None:
-        pre_lsh_split_counts = lsh_thinner.pre_lsh_counts
-        lsh_removed_counts = lsh_thinner.removed_counts
-    else:
-        lsh_removed_counts = Counter()
-    metadata: dict[str, Any] = {
-        "metadata_version": NIST_MURCKO_METADATA_VERSION,
-        "artifact_format": NIST_MURCKO_ARTIFACT_FORMAT,
-        "storage_format": "parquet",
-        "source_uri": source_uri,
-        "source_raw_file": f"{RAW_SUBDIR}/{mgf_path.name}",
-        "splits": list(active_splits),
-        "num_peaks_input": num_peaks_input,
-        "min_precursor_mz": min_precursor_mz,
-        "max_precursor_mz": max_precursor_mz,
-        "allowed_adducts": list(allowed_adducts) if allowed_adducts is not None else None,
-        "adduct_vocab": adduct_vocab,
-        "instrument_type_vocab": instrument_type_vocab,
-        "dreams_dim": 0,
-        "chemical_property_columns": list(CHEMICAL_PROPERTY_COLUMNS),
-        "probe_regression_target_keys": list(REGRESSION_TARGET_KEYS),
-        "probe_maccs_bits": MACCS_FINGERPRINT_BITS,
-        "probe_maccs_column": "maccs_166",
-        "probe_morgan_bits": MORGAN_PROBE_FINGERPRINT_BITS,
-        "probe_morgan_radius": MORGAN_PROBE_FINGERPRINT_RADIUS,
-        "morgan_auxiliary_available": True,
-        "morgan_auxiliary_files": morgan_files,
-        "morgan_auxiliary_lengths": morgan_lengths,
-        "pairwise_alignment_available": False,
-        "pairwise_alignment_num_pairs": 0,
-        "pairwise_alignment_num_endpoints": 0,
-        "spectral_lsh_enabled": lsh_thinner is not None,
-        "spectral_lsh_threshold": spectral_lsh_threshold,
-        "split_size_caps": normalized_split_size_caps,
-        "pre_lsh_split_sizes": {
-            split: pre_lsh_split_counts[split] for split in active_splits
-        },
-        "lsh_removed_by_split": {
-            split: lsh_removed_counts[split] for split in active_splits
-        },
-        "unique_smiles_by_split": {
-            split: len(unique_smiles_by_split[split]) for split in active_splits
-        },
-    }
-    metadata.update(split_metadata)
-    for split in active_splits:
-        metadata[f"{split}_files"] = [f"{split}.parquet"] if split_counts[split] else []
-        metadata[f"{split}_lengths"] = [split_counts[split]] if split_counts[split] else []
-        metadata[f"{split}_size"] = split_counts[split]
-        metadata[f"{split}_positive"] = fluorine_counts[split]
-        metadata[f"{split}_sulfur_positive"] = sulfur_counts[split]
-
-    (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True))
     log.info(
         "%s: %s",
         output_dir.name,
@@ -3041,7 +2826,7 @@ def prepare_nist_disjoint_probe_retrieval_collection(
         test_frac=test_frac,
         seed=seed,
     )
-    online_metadata, _ = _build_subset_murcko_mgf_dataset(
+    online_metadata, _ = _write_murcko_mgf_dataset(
         mgf_path=raw_mgf,
         output_dir=staging_root / online_probe_subdir.strip("/"),
         source_uri=nist_mgf,
@@ -3069,7 +2854,7 @@ def prepare_nist_disjoint_probe_retrieval_collection(
         retrieval_first_rows,
         split=STANDALONE_SPLIT,
     )
-    retrieval_metadata, retrieval_rows = _build_subset_murcko_mgf_dataset(
+    retrieval_metadata, retrieval_rows = _write_murcko_mgf_dataset(
         mgf_path=raw_mgf,
         output_dir=staging_root / retrieval_pool_subdir.strip("/"),
         source_uri=nist_mgf,

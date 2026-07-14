@@ -9,6 +9,7 @@ import torch
 from ml_collections import config_dict
 
 from spectra_learning.data.gems.collate import GemsBatchCollator
+from spectra_learning.data.gems.conversion import format_batch
 from spectra_learning.data.gems.datamodule import GemsDataModule
 from spectra_learning.data.spectra import (
     COLLISION_ENERGY_MAX,
@@ -53,10 +54,6 @@ SPECTRA_AR_TARGET_KINDS = (
 )
 
 
-def _config_get(config: config_dict.ConfigDict, key: str, default: Any) -> Any:
-    return config.get(key, default)
-
-
 @dataclass(frozen=True)
 class SpectraARTokenizerConfig:
     max_num_peaks: int = 128
@@ -75,31 +72,29 @@ class SpectraARTokenizerConfig:
     ) -> "SpectraARTokenizerConfig":
         return cls(
             max_num_peaks=int(
-                _config_get(config, "ar_max_num_peaks", _config_get(config, "num_peaks", 128))
+                config.get("ar_max_num_peaks", config.get("num_peaks", 128))
             ),
-            mz_max=float(_config_get(config, "ar_mz_max", PEAK_MZ_MAX)),
+            mz_max=float(config.get("ar_mz_max", PEAK_MZ_MAX)),
             precursor_mz_max=float(
-                _config_get(
-                    config,
+                config.get(
                     "ar_precursor_mz_max",
-                    _config_get(config, "max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ),
+                    config.get("max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ),
                 )
             ),
             mz_bin_widths=tuple(
                 float(width)
-                for width in _config_get(
-                    config,
+                for width in config.get(
                     "ar_mz_bin_widths",
                     (50.0, 25.0, 5.0, 1.0),
                 )
             ),
-            residual_bins=int(_config_get(config, "ar_residual_bins", 100)),
-            intensity_bins=int(_config_get(config, "ar_intensity_bins", 101)),
+            residual_bins=int(config.get("ar_residual_bins", 100)),
+            intensity_bins=int(config.get("ar_intensity_bins", 101)),
             collision_energy_bins=int(
-                _config_get(config, "ar_collision_energy_bins", 101)
+                config.get("ar_collision_energy_bins", 101)
             ),
             charge_bins=int(
-                _config_get(config, "ar_charge_bins", int(PRECURSOR_CHARGE_MAX) + 1)
+                config.get("ar_charge_bins", int(PRECURSOR_CHARGE_MAX) + 1)
             ),
         )
 
@@ -543,8 +538,10 @@ class SpectraARGemsBatchCollator:
         grouped_peak_isotope_charges: tuple[int, ...] = (
             DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES
         ),
+        output_format: str = "torch",
     ) -> None:
         self.tokenizer = tokenizer
+        self.output_format = output_format
         self.peak_collator = GemsBatchCollator(
             augment=False,
             num_target_blocks=1,
@@ -563,8 +560,12 @@ class SpectraARGemsBatchCollator:
             output_format="torch",
         )
 
-    def __call__(self, samples: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-        return self.tokenizer.tokenize_batch(self.peak_collator(samples))
+    def __call__(
+        self,
+        samples: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        batch = self.tokenizer.tokenize_batch(self.peak_collator(samples))
+        return format_batch(batch, self.output_format)
 
 
 class SpectraARGemsDataModule(GemsDataModule):
@@ -618,4 +619,5 @@ class SpectraARGemsDataModule(GemsDataModule):
             peak_filtering=self.peak_filtering,
             grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
             grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
+            output_format=self.dataloader_output_format,
         )

@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import pytest
 import torch
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
@@ -14,6 +15,7 @@ from spectra_learning.data.gems.collate import GemsBatchCollator
 from spectra_learning.models.model_jax import PeakSetJEPAJax
 from spectra_learning.training.checkpointing_jax import (
     build_jax_checkpoint_manager,
+    jax_training_checkpoint_metadata,
     restore_jax_training_state,
     save_jax_training_state,
 )
@@ -24,6 +26,9 @@ from spectra_learning.training.pretrain_jax import (
     init_pure_optax_train_state,
     initialize_jax_model_from_torch_seed,
 )
+
+
+CHECKPOINT_METADATA = jax_training_checkpoint_metadata("test", {})
 
 
 def _tiny_mae_kwargs() -> dict[str, object]:
@@ -141,13 +146,18 @@ def test_jax_checkpoint_roundtrip_preserves_values_and_sharding(tmp_path):
     state = {"trainable_params": params, "opt_state": opt_state}
 
     manager = build_jax_checkpoint_manager(tmp_path / "checkpoints", max_to_keep=2)
-    save_jax_training_state(manager, 10, state)
+    save_jax_training_state(manager, 10, state, metadata=CHECKPOINT_METADATA)
     manager.close()
 
     reopened = build_jax_checkpoint_manager(tmp_path / "checkpoints", max_to_keep=2)
     assert reopened.latest_step() == 10
     template = jax.tree.map(_zeros_like_with_sharding, state)
-    restored = restore_jax_training_state(reopened, 10, template)
+    restored = restore_jax_training_state(
+        reopened,
+        10,
+        template,
+        expected_metadata=CHECKPOINT_METADATA,
+    )
     reopened.close()
 
     assert restored["trainable_params"]["weight"].sharding == replicated
@@ -164,10 +174,49 @@ def test_jax_checkpoint_manager_keeps_all_steps_when_max_to_keep_is_none(tmp_pat
         enable_async_checkpointing=False,
     )
     for step in (1, 2, 3):
-        save_jax_training_state(manager, step, {"value": jnp.asarray(step)})
+        save_jax_training_state(
+            manager,
+            step,
+            {"value": jnp.asarray(step)},
+            metadata=CHECKPOINT_METADATA,
+        )
 
     assert manager.all_steps() == [1, 2, 3]
     manager.close()
+
+
+def test_jax_checkpoint_restore_rejects_training_contract_mismatch(tmp_path):
+    state = {"value": jnp.asarray(1.0)}
+    manager = build_jax_checkpoint_manager(
+        tmp_path / "checkpoints",
+        enable_async_checkpointing=False,
+    )
+    save_jax_training_state(
+        manager,
+        1,
+        state,
+        metadata=jax_training_checkpoint_metadata(
+            "ar_spectra",
+            {"tokenizer": {"mz_bin_widths": [50.0, 25.0, 5.0, 1.0]}},
+        ),
+    )
+    manager.close()
+
+    reopened = build_jax_checkpoint_manager(
+        tmp_path / "checkpoints",
+        enable_async_checkpointing=False,
+    )
+    with pytest.raises(ValueError, match="training contract mismatch"):
+        restore_jax_training_state(
+            reopened,
+            1,
+            state,
+            expected_metadata=jax_training_checkpoint_metadata(
+                "ar_spectra",
+                {"tokenizer": {"mz_bin_widths": [10.0, 1.0]}},
+            ),
+        )
+    reopened.close()
 
 
 def test_jax_checkpoint_roundtrip_restores_model_and_optimizer_state(tmp_path):
@@ -194,6 +243,7 @@ def test_jax_checkpoint_roundtrip_restores_model_and_optimizer_state(tmp_path):
             "model": nnx.as_pure(nnx.state(source_model)),
             "optimizer": nnx.as_pure(nnx.state(source_optimizer)),
         },
+        metadata=CHECKPOINT_METADATA,
     )
     manager.close()
 
@@ -210,6 +260,7 @@ def test_jax_checkpoint_roundtrip_restores_model_and_optimizer_state(tmp_path):
             "model": nnx.as_pure(nnx.state(target_model)),
             "optimizer": nnx.as_pure(nnx.state(target_optimizer)),
         },
+        expected_metadata=CHECKPOINT_METADATA,
     )
     reopened.close()
     nnx.update(target_model, restored["model"])
@@ -248,6 +299,9 @@ def test_jax_training_loop_saves_periodically_and_resumes(tmp_path):
         total_steps=3,
         checkpoint_manager=manager,
         resume_step=None,
+        checkpoint_metadata=CHECKPOINT_METADATA,
+        metric_reduction="mean",
+        enable_msg_probe=False,
     )
     assert metrics["run/final_global_step"] == 3.0
     assert sorted(manager.all_steps()) == [2, 3]
@@ -265,6 +319,9 @@ def test_jax_training_loop_saves_periodically_and_resumes(tmp_path):
         total_steps=4,
         checkpoint_manager=resumed_manager,
         resume_step=resumed_manager.latest_step(),
+        checkpoint_metadata=CHECKPOINT_METADATA,
+        metric_reduction="mean",
+        enable_msg_probe=False,
     )
     assert resumed_metrics["run/final_global_step"] == 4.0
     assert resumed_datamodule.loader_calls[-1] == (1, 1)
@@ -281,6 +338,7 @@ def test_jax_training_loop_saves_periodically_and_resumes(tmp_path):
             "static_state": static_state,
             "opt_state": opt_state,
         },
+        expected_metadata=CHECKPOINT_METADATA,
     )
     resumed_manager.close()
     for expected, actual in zip(
@@ -315,6 +373,9 @@ def test_jax_training_loop_pure_optax_saves_and_resumes(tmp_path):
         total_steps=3,
         checkpoint_manager=manager,
         resume_step=None,
+        checkpoint_metadata=CHECKPOINT_METADATA,
+        metric_reduction="mean",
+        enable_msg_probe=False,
     )
     assert metrics["run/final_global_step"] == 3.0
     assert sorted(manager.all_steps()) == [2, 3]
@@ -336,6 +397,9 @@ def test_jax_training_loop_pure_optax_saves_and_resumes(tmp_path):
         total_steps=4,
         checkpoint_manager=resumed_manager,
         resume_step=resumed_manager.latest_step(),
+        checkpoint_metadata=CHECKPOINT_METADATA,
+        metric_reduction="mean",
+        enable_msg_probe=False,
     )
     assert resumed_metrics["run/final_global_step"] == 4.0
     assert resumed_datamodule.loader_calls[-1] == (1, 1)
@@ -354,6 +418,7 @@ def test_jax_training_loop_pure_optax_saves_and_resumes(tmp_path):
             "static_state": static_state,
             "opt_state": opt_state,
         },
+        expected_metadata=CHECKPOINT_METADATA,
     )
     resumed_manager.close()
     for expected, actual in zip(
@@ -410,6 +475,9 @@ def test_jax_training_loop_logs_validation_and_online_probe(monkeypatch, tmp_pat
         total_steps=2,
         checkpoint_manager=manager,
         resume_step=None,
+        checkpoint_metadata=CHECKPOINT_METADATA,
+        metric_reduction="mean",
+        enable_msg_probe=True,
     )
     manager.close()
 

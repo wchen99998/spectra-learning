@@ -14,12 +14,6 @@ from spectra_learning.config import load_config
 from spectra_learning.data.gems.datamodule import GemsDataModule
 
 
-def _config_get(config: Any, key: str, default: Any) -> Any:
-    if hasattr(config, "get"):
-        return config.get(key, default)
-    return getattr(config, key, default)
-
-
 def _configure(args: argparse.Namespace, workers: int):
     overrides = {
         "dataloader_num_workers": workers,
@@ -55,7 +49,7 @@ def _run_once(args: argparse.Namespace, workers: int, repeat: int) -> float:
 
         from spectra_learning.training.pretrain_jax import numpy_batch_to_jax
 
-    datamodule = GemsDataModule(config, seed=int(_config_get(config, "seed", 0)) + repeat)
+    datamodule = GemsDataModule(config, seed=int(config.get("seed", 0)) + repeat)
     loader = datamodule.train_loader_for_epoch(repeat)
     iterator = iter(loader)
     if args.backend == "jax":

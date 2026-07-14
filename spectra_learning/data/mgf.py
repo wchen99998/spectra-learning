@@ -4,7 +4,7 @@ offline NIST full probe artifact builder.
 The probe expects, at minimum, these datasets:
 
 ``spectrum``       : (N, 2, 128) float — row 0 = m/z, row 1 = intensity (raw;
-                     the probe re-normalizes via ``_normalize_spectra_intensity``)
+                     data loaders normalize each spectrum by its maximum)
 ``precursor_mz``   : (N,)        float
 ``smiles``         : (N,)        variable-length strings
 ``adduct``         : (N,)        variable-length strings

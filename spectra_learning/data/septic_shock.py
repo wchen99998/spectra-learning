@@ -1,22 +1,20 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
 import json
 import re
 import shutil
 import urllib.request
 import zipfile
-import zlib
 from collections import Counter
 from pathlib import Path
 from typing import Any, NamedTuple
-import xml.etree.ElementTree as ET
 
 import numpy as np
 import torch
 from huggingface_hub import HfApi, snapshot_download
+from pyteomics import mzxml
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Dataset
 
@@ -68,8 +66,6 @@ SEPTIC_SHOCK_ARTIFACT_FORMAT = "raw_peaklist_v1"
 SEPTIC_SHOCK_TASK = "septic_shock_st003189"
 SEPTIC_SHOCK_DEFAULT_HF_REPO_ID = MSMS_EVALUATION_HF_REPO
 SEPTIC_SHOCK_DEFAULT_HF_SUBDIR = "septic_shock_st003189_raw_peaklist_v1"
-
-USE_PYTEOMICS_MZXML = True
 
 
 class SepticShockData(NamedTuple):
@@ -511,52 +507,6 @@ def build_septic_shock_peaklist_artifact(
     return metadata
 
 
-def _strip_namespace(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1]
-
-
-def _decode_mzxml_peaks(peaks: ET.Element) -> tuple[np.ndarray, np.ndarray]:
-    precision = int(peaks.attrib.get("precision", "32"))
-    dtype = ">f4" if precision == 32 else ">f8"
-    payload = base64.b64decode((peaks.text or "").strip())
-    if peaks.attrib.get("compressionType", "none") == "zlib":
-        payload = zlib.decompress(payload)
-    values = np.frombuffer(payload, dtype=dtype).astype(np.float32)
-    pairs = values.reshape(-1, 2)
-    pair_order = peaks.attrib.get("pairOrder", "m/z-int")
-    if pair_order == "int-m/z":
-        return pairs[:, 1], pairs[:, 0]
-    return pairs[:, 0], pairs[:, 1]
-
-
-def _precursor_from_xml_scan(scan: ET.Element) -> float:
-    for child in scan:
-        if _strip_namespace(child.tag) == "precursorMz":
-            return float((child.text or "0").strip())
-    return 0.0
-
-
-def _read_mzxml_scan_arrays_xml(
-    path: Path,
-    *,
-    ms_level: int | None,
-) -> list[tuple[np.ndarray, np.ndarray, float]]:
-    root = ET.parse(path).getroot()
-    scans: list[tuple[np.ndarray, np.ndarray, float]] = []
-    for scan in root.iter():
-        if _strip_namespace(scan.tag) != "scan":
-            continue
-        scan_ms_level = int(scan.attrib.get("msLevel", "1"))
-        if ms_level is not None and scan_ms_level != ms_level:
-            continue
-        peaks = next(
-            child for child in scan if _strip_namespace(child.tag) == "peaks"
-        )
-        mz, intensity = _decode_mzxml_peaks(peaks)
-        scans.append((mz, intensity, _precursor_from_xml_scan(scan)))
-    return scans
-
-
 def _scan_precursor_mz(scan: dict[str, Any]) -> float:
     precursor = scan.get("precursorMz", [])
     if isinstance(precursor, list) and precursor:
@@ -567,13 +517,11 @@ def _scan_precursor_mz(scan: dict[str, Any]) -> float:
     return 0.0
 
 
-def _read_mzxml_scan_arrays_pyteomics(
+def _read_mzxml_scan_arrays(
     path: Path,
     *,
     ms_level: int | None,
 ) -> list[tuple[np.ndarray, np.ndarray, float]]:
-    from pyteomics import mzxml
-
     scans: list[tuple[np.ndarray, np.ndarray, float]] = []
     for scan in mzxml.read(str(path)):
         scan_ms_level = int(scan.get("msLevel", scan.get("ms level", 1)))
@@ -587,19 +535,6 @@ def _read_mzxml_scan_arrays_pyteomics(
             )
         )
     return scans
-
-
-def _read_mzxml_scan_arrays(
-    path: Path,
-    *,
-    ms_level: int | None,
-) -> list[tuple[np.ndarray, np.ndarray, float]]:
-    if USE_PYTEOMICS_MZXML:
-        import importlib.util
-
-        if importlib.util.find_spec("pyteomics") is not None:
-            return _read_mzxml_scan_arrays_pyteomics(path, ms_level=ms_level)
-    return _read_mzxml_scan_arrays_xml(path, ms_level=ms_level)
 
 
 def _spectra_from_scan_arrays(

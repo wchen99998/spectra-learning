@@ -3,7 +3,6 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from functools import cache
-from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -24,10 +23,6 @@ from spectra_learning.models.common_jax import (
     scaled_dot_product_attention,
 )
 from spectra_learning.models.causal_attention_pallas import pallas_causal_attention
-
-
-def _config_get(config: config_dict.ConfigDict, key: str, default: Any) -> Any:
-    return config.get(key, default)
 
 
 @dataclass(frozen=True)
@@ -57,18 +52,18 @@ class SpectraARTransformerJaxConfig:
             num_token_kinds=tokenizer.num_token_kinds,
             max_sequence_length=tokenizer.sequence_length,
             pad_token_id=tokenizer.pad_token_id,
-            model_dim=int(_config_get(config, "ar_model_dim", 1024)),
-            num_layers=int(_config_get(config, "ar_num_layers", 8)),
-            num_heads=int(_config_get(config, "ar_num_heads", 8)),
-            mlp_multiple=float(_config_get(config, "ar_mlp_multiple", 4.0)),
-            rope_base=float(_config_get(config, "ar_rope_base", 10_000.0)),
-            attention_kernel=str(_config_get(config, "ar_attention_kernel", "xla")),
-            splash_block_size=int(_config_get(config, "ar_splash_block_size", 128)),
+            model_dim=int(config.get("ar_model_dim", 1024)),
+            num_layers=int(config.get("ar_num_layers", 8)),
+            num_heads=int(config.get("ar_num_heads", 8)),
+            mlp_multiple=float(config.get("ar_mlp_multiple", 4.0)),
+            rope_base=float(config.get("ar_rope_base", 10_000.0)),
+            attention_kernel=str(config.get("ar_attention_kernel", "xla")),
+            splash_block_size=int(config.get("ar_splash_block_size", 128)),
             gelu_approximation=str(
-                _config_get(config, "ar_gelu_approximation", "exact")
+                config.get("ar_gelu_approximation", "exact")
             ),
             compute_dtype=resolve_jax_compute_dtype(
-                str(_config_get(config, "autocast_dtype", "bf16"))
+                str(config.get("autocast_dtype", "bf16"))
             ),
         )
 
@@ -297,7 +292,6 @@ class SpectraARTransformerJax(nnx.Module):
         self.config = config
         self.pad_token_id = config.pad_token_id
         self.compute_dtype = config.compute_dtype
-        self.use_ema_teacher = False
         self.token_embedding = Embedding(config.vocab_size, config.model_dim)
         self.kind_embedding = Embedding(config.num_token_kinds, config.model_dim)
         self.token_embedding.weight[...] = (
@@ -399,7 +393,7 @@ def build_spectra_ar_model_jax_from_config(
     config: config_dict.ConfigDict,
     tokenizer: SpectraARTokenizer,
 ) -> SpectraARTransformerJax:
-    seed = int(_config_get(config, "seed", 0))
+    seed = int(config.get("seed", 0))
     return SpectraARTransformerJax(
         SpectraARTransformerJaxConfig.from_config(config, tokenizer),
         rngs=nnx.Rngs(seed),
