@@ -184,11 +184,19 @@ def test_packed_qk_projection_matches_interleaved_rope_coordinates() -> None:
 
 
 @pytest.mark.skipif(jax.default_backend() != "tpu", reason="Pallas TPU kernel")
-@pytest.mark.parametrize("sequence_length", (128, 136))
+@pytest.mark.parametrize(
+    "shape",
+    (
+        (1, 8, 128, 128),
+        (1, 8, 136, 128),
+        (1, 14, 136, 128),
+        (4, 14, 776, 128),
+    ),
+    ids=("full-block", "tail", "padded-head-group", "300m"),
+)
 def test_pallas_causal_attention_forward_and_backward_match_xla(
-    sequence_length: int,
+    shape: tuple[int, int, int, int],
 ) -> None:
-    shape = (1, 8, sequence_length, 128)
     query, key, value, output_gradient = (
         jax.random.normal(subkey, shape, dtype=jnp.bfloat16)
         for subkey in jax.random.split(jax.random.key(3), 4)

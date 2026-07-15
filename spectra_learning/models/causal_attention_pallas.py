@@ -22,17 +22,52 @@ def pallas_causal_attention(
 ) -> Array:
     """Causal attention with a fused Pallas forward and explicit backward."""
     batch_size, num_heads, sequence_length, head_dim = query.shape
-    group_size = math.gcd(batch_size * num_heads, batch_head_group)
+    num_batch_heads = batch_size * num_heads
+    group_size = math.gcd(num_batch_heads, batch_head_group)
+    kernel_batch_size = batch_size
+    kernel_num_heads = num_heads
+
+    # Mosaic requires this block dimension to span the axis or be divisible by 8.
+    if group_size % 8 and group_size != num_batch_heads:
+        padded_num_batch_heads = 8 * math.ceil(num_batch_heads / 8)
+        batch_head_padding = padded_num_batch_heads - num_batch_heads
+        padding = ((0, batch_head_padding), (0, 0), (0, 0))
+        query = jnp.pad(
+            query.reshape(num_batch_heads, sequence_length, head_dim),
+            padding,
+        )[None, ...]
+        key = jnp.pad(
+            key.reshape(num_batch_heads, sequence_length, head_dim),
+            padding,
+        )[None, ...]
+        value = jnp.pad(
+            value.reshape(num_batch_heads, sequence_length, head_dim),
+            padding,
+        )[None, ...]
+        kernel_batch_size = 1
+        kernel_num_heads = padded_num_batch_heads
+        group_size = 8
+
     kernel = _pallas_causal_attention_kernel(
-        batch_size,
-        num_heads,
+        kernel_batch_size,
+        kernel_num_heads,
         sequence_length,
         head_dim,
         block_size,
         group_size,
         query_is_scaled,
     )
-    return kernel(query, key, value)
+    output = kernel(query, key, value)
+    return output.reshape(
+        kernel_batch_size * kernel_num_heads,
+        sequence_length,
+        head_dim,
+    )[:num_batch_heads].reshape(
+        batch_size,
+        num_heads,
+        sequence_length,
+        head_dim,
+    )
 
 
 @cache

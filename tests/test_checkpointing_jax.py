@@ -282,6 +282,7 @@ def test_jax_training_loop_saves_periodically_and_resumes(tmp_path):
     cfg.seed = 5
     cfg.num_epochs = 2
     cfg.learning_rate = 1e-3
+    cfg.jax_mesh_devices = "1"
     cfg.checkpoint_every_steps = 2
     cfg.log_every_n_steps = 0
     cfg.msg_probe_every_n_steps = -1
@@ -355,6 +356,7 @@ def test_jax_training_loop_pure_optax_saves_and_resumes(tmp_path):
     cfg.seed = 5
     cfg.num_epochs = 2
     cfg.learning_rate = 1e-3
+    cfg.jax_mesh_devices = "1"
     cfg.gradient_accumulation_steps = 2
     cfg.checkpoint_every_steps = 2
     cfg.log_every_n_steps = 0
@@ -437,6 +439,7 @@ def test_jax_training_loop_logs_validation_and_online_probe(monkeypatch, tmp_pat
     cfg.seed = 5
     cfg.num_epochs = 1
     cfg.learning_rate = 1e-3
+    cfg.jax_mesh_devices = "1"
     cfg.checkpoint_every_steps = 1000
     cfg.log_every_n_steps = 0
     cfg.jax_msg_probe_shard_batches = True
