@@ -113,11 +113,18 @@ def test_msg_probe_interval_negative_disables_probe():
 
 
 class _FakePbar:
-    def __init__(self) -> None:
+    def __init__(self, *args, **kwargs) -> None:
+        del args, kwargs
         self.postfix = None
 
     def set_postfix(self, **kwargs) -> None:
         self.postfix = kwargs
+
+    def update(self, steps: int) -> None:
+        del steps
+
+    def close(self) -> None:
+        pass
 
 
 class _FakeLogger:
@@ -1518,6 +1525,250 @@ def test_training_loop_counts_optimizer_steps_with_gradient_accumulation(
 
     assert accumulation_steps == [0, 1, 2, 3]
     assert metrics["run/final_global_step"] == 2.0
+
+
+def test_training_loop_preserves_optimizer_boundary_event_order(
+    monkeypatch,
+    tmp_path: Path,
+):
+    cfg = config_dict.ConfigDict()
+    cfg.autocast_dtype = "bf16"
+    cfg.log_every_n_steps = 0
+    cfg.collapse_metrics_every_n_steps = 0
+    cfg.checkpoint_every_steps = 1
+    cfg.msg_probe_every_n_steps = 1
+    cfg.msg_probe_variants = ["mean"]
+    cfg.val_every_n_steps = 1
+    cfg.val_num_steps = 1
+    cfg.device_prefetch_size = 1
+    cfg.throughput_warmup_steps = 1000
+    cfg.gradient_accumulation_steps = 2
+
+    class FakeDataModule:
+        train_steps = 1
+        global_batch_size = 2
+
+        def train_loader_for_epoch(self, epoch: int, start_batch: int = 0):
+            del epoch, start_batch
+            return [
+                {"peak_mz": torch.tensor([0.0])},
+                {"peak_mz": torch.tensor([1.0])},
+            ]
+
+    events = []
+
+    class FakeProfiler:
+        def start(self) -> None:
+            events.append("profiler_start")
+
+        def step(self) -> None:
+            events.append("profiler_step")
+
+        def stop(self) -> None:
+            events.append("profiler_stop")
+
+    class FakeCheckpointWriter:
+        def save_checkpoint(self, *args, **kwargs) -> None:
+            del args, kwargs
+            events.append("checkpoint")
+
+        def log_completed_failures(self) -> None:
+            events.append("checkpoint_failure_poll")
+
+        def close(self) -> None:
+            raise AssertionError("the loop does not own this writer")
+
+    def fake_train_step_impl(*args, **kwargs):
+        del args
+        accumulation_step = int(kwargs["accumulation_step"])
+        events.append(f"microbatch_{accumulation_step}")
+        return {
+            "loss": torch.tensor(1.0),
+            "optimizer_step": torch.tensor(float(accumulation_step == 1)),
+        }
+
+    def fake_validation(**kwargs):
+        del kwargs
+        events.append("validation")
+        return {"loss": torch.tensor(2.0)}
+
+    def fake_probe(*args, **kwargs):
+        del args, kwargs
+        events.append("probe")
+        return {"msg_probe/mean/test/auc_maccs_mean": 0.75}
+
+    barrier_events = iter(
+        ["checkpoint_barrier", "probe_barrier", "final_barrier"]
+    )
+
+    monkeypatch.setattr(pretrain, "tqdm", _FakePbar)
+    monkeypatch.setattr(pretrain, "train_step_impl", fake_train_step_impl)
+    monkeypatch.setattr(
+        pretrain,
+        "make_torch_profiler",
+        lambda *args, **kwargs: FakeProfiler(),
+    )
+    monkeypatch.setattr(pretrain, "evaluate_validation_loss", fake_validation)
+    monkeypatch.setattr(pretrain, "run_and_log_msg_probe", fake_probe)
+    monkeypatch.setattr(
+        pretrain,
+        "barrier",
+        lambda distributed: events.append(next(barrier_events)),
+    )
+    monkeypatch.setattr(
+        pretrain,
+        "synchronize_device",
+        lambda device: events.append("final_sync"),
+    )
+
+    metrics = pretrain.run_training_loop(
+        config=cfg,
+        datamodule=FakeDataModule(),
+        model=torch.nn.Linear(1, 1),
+        optimizers=[],
+        schedulers=[],
+        logger=_FakeLogger(),
+        checkpoint_dir=tmp_path,
+        start_epoch=0,
+        loop_epochs=1,
+        resume_offset=0,
+        global_step=0,
+        total_steps=1,
+        device=torch.device("cpu"),
+        checkpoint_writer=FakeCheckpointWriter(),
+        flops_per_optimizer_step=1.0,
+    )
+
+    assert events == [
+        "profiler_start",
+        "microbatch_0",
+        "microbatch_1",
+        "profiler_step",
+        "checkpoint",
+        "checkpoint_barrier",
+        "validation",
+        "probe",
+        "probe_barrier",
+        "checkpoint_failure_poll",
+        "final_sync",
+        "final_barrier",
+        "profiler_stop",
+    ]
+    assert metrics["run/final_global_step"] == 1.0
+    assert metrics["val/loss"] == 2.0
+    assert metrics["msg_probe/mean/test/auc_maccs_mean"] == 0.75
+
+
+def test_training_loop_measures_resumed_steps_after_optimizer_warmup(
+    monkeypatch,
+    tmp_path: Path,
+):
+    cfg = config_dict.ConfigDict()
+    cfg.autocast_dtype = "bf16"
+    cfg.log_every_n_steps = 0
+    cfg.collapse_metrics_every_n_steps = 0
+    cfg.checkpoint_every_steps = 1000
+    cfg.msg_probe_every_n_steps = -1
+    cfg.device_prefetch_size = 1
+    cfg.throughput_warmup_steps = 1
+    cfg.gradient_accumulation_steps = 2
+
+    class FakeDataModule:
+        train_steps = 4
+        global_batch_size = 8
+
+        def __init__(self) -> None:
+            self.calls = []
+
+        def train_loader_for_epoch(self, epoch: int, start_batch: int = 0):
+            self.calls.append((epoch, start_batch))
+            return [
+                {"peak_mz": torch.tensor([float(step)])}
+                for step in range(4)
+            ]
+
+    class FakeCheckpointWriter:
+        def save_checkpoint(self, *args, **kwargs) -> None:
+            del args, kwargs
+            raise AssertionError("no checkpoint is due")
+
+        def log_completed_failures(self) -> None:
+            pass
+
+        def close(self) -> None:
+            raise AssertionError("the loop does not own this writer")
+
+    timeline = []
+
+    def fake_train_step_impl(*args, **kwargs):
+        del args
+        accumulation_step = int(kwargs["accumulation_step"])
+        timeline.append(f"microbatch_{accumulation_step}")
+        return {
+            "loss": torch.tensor(1.0),
+            "optimizer_step": torch.tensor(
+                float((accumulation_step + 1) % 2 == 0)
+            ),
+        }
+
+    clock = iter([100.0, 110.0, 140.0, 140.0])
+    datamodule = FakeDataModule()
+    monkeypatch.setattr(pretrain, "tqdm", _FakePbar)
+    monkeypatch.setattr(pretrain, "train_step_impl", fake_train_step_impl)
+    monkeypatch.setattr(pretrain, "make_torch_profiler", lambda *args: None)
+    monkeypatch.setattr(
+        pretrain,
+        "time",
+        SimpleNamespace(perf_counter=lambda: next(clock)),
+    )
+    monkeypatch.setattr(
+        pretrain,
+        "synchronize_device",
+        lambda device: timeline.append("sync"),
+    )
+    monkeypatch.setattr(
+        pretrain,
+        "barrier",
+        lambda distributed: timeline.append("barrier"),
+    )
+
+    metrics = pretrain.run_training_loop(
+        config=cfg,
+        datamodule=datamodule,
+        model=torch.nn.Linear(1, 1),
+        optimizers=[],
+        schedulers=[],
+        logger=_FakeLogger(),
+        checkpoint_dir=tmp_path,
+        start_epoch=1,
+        loop_epochs=2,
+        resume_offset=1,
+        global_step=5,
+        total_steps=7,
+        device=torch.device("cpu"),
+        checkpoint_writer=FakeCheckpointWriter(),
+        flops_per_optimizer_step=1.0,
+    )
+
+    assert datamodule.calls == [(1, 1)]
+    assert timeline == [
+        "microbatch_0",
+        "microbatch_1",
+        "sync",
+        "barrier",
+        "microbatch_2",
+        "microbatch_3",
+        "sync",
+        "barrier",
+    ]
+    assert metrics["run/final_global_step"] == 7.0
+    assert metrics["run/train_elapsed_seconds"] == 40.0
+    assert metrics["run/steps_per_second"] == pytest.approx(2.0 / 40.0)
+    assert metrics["run/samples_per_second"] == pytest.approx(16.0 / 40.0)
+    assert metrics["run/measured_steps"] == 1.0
+    assert metrics["run/measured_elapsed_seconds"] == 30.0
+    assert metrics["run/measured_steps_per_second"] == pytest.approx(1.0 / 30.0)
+    assert metrics["run/measured_samples_per_second"] == pytest.approx(8.0 / 30.0)
 
 
 def test_training_loop_continues_while_checkpoint_save_is_pending(monkeypatch, tmp_path: Path):

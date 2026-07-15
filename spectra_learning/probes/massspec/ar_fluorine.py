@@ -4,7 +4,7 @@ import argparse
 import copy
 import json
 import logging
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -213,6 +213,467 @@ def _input_dim(model: SpectraARTransformer) -> int:
     return int(model.config.model_dim)
 
 
+@dataclass(frozen=True)
+class _ARFluorineInputs:
+    mode: str
+    state_path: Path
+    model: SpectraARTransformer
+    tokenizer: SpectraARTokenizer
+    config: Any
+    config_path: Path
+    checkpoint_path: StoragePath
+    cache_dir: Path
+    device: torch.device
+    batch_size: int
+    num_workers: int
+    seed: int
+    epochs: int
+    patience: int
+    model_learning_rate: float
+    lora_rank: int
+    lora_alpha: float
+    lora_dropout: float
+    lora_learning_rate: float
+    head_learning_rate: float
+    weight_decay: float
+    autocast_dtype: torch.dtype | None
+    revision: str
+    max_train_samples: int | None
+    max_val_samples: int | None
+    max_test_samples: int | None
+    select_metric: str
+    progress_output_prefix: StoragePath | None
+    eval_test_every_epoch: bool
+
+
+@dataclass(frozen=True)
+class _ARFluorineLoaders:
+    data: Any
+    train: Any
+    val: Any
+    test: Any
+
+
+@dataclass(frozen=True)
+class _ARFluorineRuntime:
+    input_dim: int
+    classifier: FluorineLabelTokenHead
+    module: SpectraARFluorineModule
+    optimizer: torch.optim.Optimizer
+    lora_config: dict[str, Any] | None
+    focal_alpha: float
+    focal_gamma: float
+    use_autocast: bool
+    grad_scaler: torch.amp.GradScaler
+    best_state_path: Path
+    requested_hparams: dict[str, Any]
+
+
+@dataclass
+class _ARFluorineTrainingState:
+    best_value: float = -float("inf")
+    best_epoch: int = 0
+    best_val: dict[str, float] = field(default_factory=dict)
+    best_lora_state: dict[str, torch.Tensor] = field(default_factory=dict)
+    best_model_state: dict[str, torch.Tensor] = field(default_factory=dict)
+    best_classifier_state: dict[str, torch.Tensor] = field(default_factory=dict)
+    history: list[dict[str, Any]] = field(default_factory=list)
+    epochs_without_improvement: int = 0
+
+
+def _build_ar_fluorine_loaders(
+    inputs: _ARFluorineInputs,
+) -> _ARFluorineLoaders:
+    data = build_fluorine_data(
+        config=inputs.config,
+        cache_dir=inputs.cache_dir,
+        batch_size=inputs.batch_size,
+        revision=inputs.revision,
+    )
+    train_loader = _make_loader(
+        data,
+        "train",
+        shuffle=True,
+        seed=inputs.seed,
+        max_samples=inputs.max_train_samples,
+        num_workers=inputs.num_workers,
+    )
+    val_loader = _make_loader(
+        data,
+        "val",
+        shuffle=False,
+        seed=inputs.seed + 10_000,
+        max_samples=inputs.max_val_samples,
+        num_workers=inputs.num_workers,
+    )
+    test_loader = _make_loader(
+        data,
+        "test",
+        shuffle=False,
+        seed=inputs.seed + 20_000,
+        max_samples=inputs.max_test_samples,
+        num_workers=inputs.num_workers,
+    )
+    return _ARFluorineLoaders(data, train_loader, val_loader, test_loader)
+
+
+def _ar_fluorine_requested_hparams(
+    inputs: _ARFluorineInputs,
+) -> dict[str, Any]:
+    hparams = {
+        "head_type": "eos_label_tokens",
+        "model_learning_rate": float(inputs.model_learning_rate),
+        "head_learning_rate": float(inputs.head_learning_rate),
+        "weight_decay": float(inputs.weight_decay),
+        "autocast_dtype": _autocast_dtype_name(inputs.autocast_dtype),
+        "epochs": int(inputs.epochs),
+        "patience": int(inputs.patience),
+        "select_metric": inputs.select_metric,
+    }
+    if inputs.mode == "lora":
+        hparams.update(
+            {
+                "lora_rank": int(inputs.lora_rank),
+                "lora_alpha": float(inputs.lora_alpha),
+                "lora_dropout": float(inputs.lora_dropout),
+                "lora_learning_rate": float(inputs.lora_learning_rate),
+            }
+        )
+    return hparams
+
+
+def _initialize_ar_fluorine_runtime(
+    inputs: _ARFluorineInputs,
+    loaders: _ARFluorineLoaders,
+) -> _ARFluorineRuntime:
+    input_dim = _input_dim(inputs.model)
+    classifier = FluorineLabelTokenHead(input_dim=input_dim).to(inputs.device)
+    module = SpectraARFluorineModule(
+        model=inputs.model,
+        tokenizer=inputs.tokenizer,
+        classifier=classifier,
+    ).to(inputs.device)
+    if inputs.mode == "lora":
+        inputs.model.requires_grad_(False)
+        lora_config: dict[str, Any] | None = _lora_config(
+            rank=inputs.lora_rank,
+            alpha=inputs.lora_alpha,
+            dropout=inputs.lora_dropout,
+        )
+        applied_modules = apply_ar_fluorine_lora(inputs.model, lora_config)
+        inputs.model.to(inputs.device)
+        lora_config = {
+            **lora_config,
+            "applied_modules": list(applied_modules),
+        }
+        model_param_group = {
+            "params": list(lora_parameters(inputs.model)),
+            "lr": inputs.lora_learning_rate,
+            "weight_decay": inputs.weight_decay,
+        }
+    else:
+        inputs.model.requires_grad_(True)
+        lora_config = None
+        model_param_group = {
+            "params": inputs.model.parameters(),
+            "lr": inputs.model_learning_rate,
+            "weight_decay": inputs.weight_decay,
+        }
+    optimizer = torch.optim.AdamW(
+        [
+            model_param_group,
+            {
+                "params": classifier.parameters(),
+                "lr": inputs.head_learning_rate,
+                "weight_decay": inputs.weight_decay,
+            },
+        ]
+    )
+    focal_alpha = 1.0 - float(loaders.data.metadata["train_positive"]) / float(
+        loaders.data.metadata["train_size"]
+    )
+    focal_gamma = 2.0
+    use_autocast = (
+        inputs.device.type == "cuda" and inputs.autocast_dtype is not None
+    )
+    grad_scaler = build_grad_scaler(inputs.autocast_dtype, inputs.device)
+    best_state_path = inputs.state_path.with_name(
+        f"{inputs.state_path.stem}.best.pt"
+    )
+    requested_hparams = _ar_fluorine_requested_hparams(inputs)
+    return _ARFluorineRuntime(
+        input_dim=input_dim,
+        classifier=classifier,
+        module=module,
+        optimizer=optimizer,
+        lora_config=lora_config,
+        focal_alpha=focal_alpha,
+        focal_gamma=focal_gamma,
+        use_autocast=use_autocast,
+        grad_scaler=grad_scaler,
+        best_state_path=best_state_path,
+        requested_hparams=requested_hparams,
+    )
+
+
+def _train_ar_fluorine_epoch(
+    inputs: _ARFluorineInputs,
+    loaders: _ARFluorineLoaders,
+    runtime: _ARFluorineRuntime,
+    epoch_idx: int,
+) -> tuple[float, int]:
+    runtime.module.train()
+    running_loss = 0.0
+    seen = 0
+    pbar = tqdm(
+        loaders.train,
+        desc=f"ar {inputs.mode} epoch {epoch_idx + 1}/{inputs.epochs}",
+        unit="batch",
+        dynamic_ncols=True,
+        mininterval=5.0,
+    )
+    for batch in pbar:
+        labels = batch["label"].to(inputs.device, non_blocking=True)
+        runtime.optimizer.zero_grad(set_to_none=True)
+        with torch.autocast(
+            device_type=inputs.device.type,
+            dtype=(
+                inputs.autocast_dtype
+                if inputs.autocast_dtype is not None
+                else torch.bfloat16
+            ),
+            enabled=runtime.use_autocast,
+        ):
+            logits = runtime.module(batch)
+            loss = binary_focal_loss_with_logits(
+                logits.float(),
+                labels,
+                alpha=runtime.focal_alpha,
+                gamma=runtime.focal_gamma,
+            )
+        if runtime.grad_scaler.is_enabled():
+            runtime.grad_scaler.scale(loss).backward()
+            runtime.grad_scaler.step(runtime.optimizer)
+            runtime.grad_scaler.update()
+        else:
+            loss.backward()
+            runtime.optimizer.step()
+        running_loss += float(loss.detach().cpu()) * int(labels.shape[0])
+        seen += int(labels.shape[0])
+        pbar.set_postfix(loss=f"{running_loss / float(seen):.5f}")
+    return running_loss, seen
+
+
+def _evaluate_ar_fluorine_epoch(
+    inputs: _ARFluorineInputs,
+    loaders: _ARFluorineLoaders,
+    runtime: _ARFluorineRuntime,
+    epoch_idx: int,
+    running_loss: float,
+    seen: int,
+) -> tuple[dict[str, float], dict[str, Any]]:
+    val_targets, val_logits, _ = predict_ar_fluorine(
+        module=runtime.module,
+        loader=loaders.val,
+        device=inputs.device,
+        autocast_dtype=inputs.autocast_dtype,
+    )
+    val_metrics = _metric_dict(val_targets, val_logits, "val")
+    history_row: dict[str, Any] = {
+        "epoch": epoch_idx + 1,
+        "train_loss": running_loss / float(seen),
+        "val": val_metrics,
+    }
+    if inputs.eval_test_every_epoch:
+        test_targets, test_logits, _ = predict_ar_fluorine(
+            module=runtime.module,
+            loader=loaders.test,
+            device=inputs.device,
+            autocast_dtype=inputs.autocast_dtype,
+        )
+        history_row["test"] = _metric_dict(
+            test_targets,
+            test_logits,
+            "test",
+        )
+    return val_metrics, history_row
+
+
+def _make_ar_fluorine_state(
+    inputs: _ARFluorineInputs,
+    loaders: _ARFluorineLoaders,
+    runtime: _ARFluorineRuntime,
+    training: _ARFluorineTrainingState,
+    *,
+    test_metrics: dict[str, float] | None,
+    complete: bool,
+) -> dict[str, Any]:
+    state = {
+        "mode": f"ar_{inputs.mode}",
+        "complete": complete,
+        "config_path": str(inputs.config_path),
+        "checkpoint_path": str(inputs.checkpoint_path),
+        "input_dim": int(runtime.input_dim),
+        "model_dim": int(inputs.model.config.model_dim),
+        "pooling": "eos",
+        "pair_dim": int(inputs.model.config.model_dim),
+        "classifier_state": training.best_classifier_state,
+        "best_epoch": int(training.best_epoch),
+        "best_val": training.best_val,
+        "test": test_metrics,
+        "history": training.history,
+        "hparams": runtime.requested_hparams,
+        "autocast_dtype": _autocast_dtype_name(inputs.autocast_dtype),
+        "focal_alpha": runtime.focal_alpha,
+        "focal_gamma": runtime.focal_gamma,
+        "finetune_cache_dir": str(inputs.cache_dir),
+        "device_ids": (
+            [inputs.device.index] if inputs.device.type == "cuda" else []
+        ),
+        "train_size": int(loaders.data.metadata["train_size"]),
+        "train_positive": int(loaders.data.metadata["train_positive"]),
+        "val_size": int(loaders.data.metadata["val_size"]),
+        "val_positive": int(loaders.data.metadata["val_positive"]),
+        "max_train_samples": inputs.max_train_samples,
+        "max_val_samples": inputs.max_val_samples,
+        "tokenizer_config": asdict(inputs.tokenizer.config),
+    }
+    if inputs.mode == "lora":
+        state["lora_config"] = runtime.lora_config
+        state["lora_state"] = training.best_lora_state
+    else:
+        state["model_state"] = training.best_model_state
+    return state
+
+
+def _record_ar_fluorine_epoch(
+    inputs: _ARFluorineInputs,
+    loaders: _ARFluorineLoaders,
+    runtime: _ARFluorineRuntime,
+    training: _ARFluorineTrainingState,
+    epoch_idx: int,
+    running_loss: float,
+    seen: int,
+    val_metrics: dict[str, float],
+    history_row: dict[str, Any],
+) -> bool:
+    training.history.append(history_row)
+    if inputs.progress_output_prefix is not None:
+        write_training_history_outputs(
+            output_prefix=inputs.progress_output_prefix,
+            history=training.history,
+        )
+    current_value = val_metrics[f"val/{inputs.select_metric}"]
+    if current_value > training.best_value:
+        training.best_value = current_value
+        training.best_epoch = epoch_idx + 1
+        training.best_val = dict(val_metrics)
+        if inputs.mode == "lora":
+            training.best_lora_state = lora_state_dict(inputs.model)
+        else:
+            training.best_model_state = _module_state_to_cpu(inputs.model)
+        training.best_classifier_state = copy.deepcopy(
+            _module_state_to_cpu(runtime.classifier)
+        )
+        training.epochs_without_improvement = 0
+        inputs.state_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            _make_ar_fluorine_state(
+                inputs,
+                loaders,
+                runtime,
+                training,
+                test_metrics=None,
+                complete=False,
+            ),
+            runtime.best_state_path,
+        )
+    else:
+        training.epochs_without_improvement += 1
+    log.info(
+        "ar_%s epoch=%d/%d train_loss=%.5f val_ap=%.4f val_auc=%.4f",
+        inputs.mode,
+        epoch_idx + 1,
+        inputs.epochs,
+        running_loss / float(seen),
+        val_metrics["val/average_precision"],
+        val_metrics["val/roc_auc"],
+    )
+    return training.epochs_without_improvement >= inputs.patience
+
+
+def _restore_and_evaluate_ar_fluorine(
+    inputs: _ARFluorineInputs,
+    loaders: _ARFluorineLoaders,
+    runtime: _ARFluorineRuntime,
+    training: _ARFluorineTrainingState,
+) -> tuple[dict[str, Any], Any, np.ndarray, np.ndarray, np.ndarray]:
+    if inputs.mode == "lora":
+        load_lora_state_dict(inputs.model, training.best_lora_state)
+    else:
+        inputs.model.load_state_dict(training.best_model_state)
+    runtime.classifier.load_state_dict(training.best_classifier_state)
+    test_targets, test_logits, test_row_indices = predict_ar_fluorine(
+        module=runtime.module,
+        loader=loaders.test,
+        device=inputs.device,
+        autocast_dtype=inputs.autocast_dtype,
+    )
+    test_metrics = _metric_dict(test_targets, test_logits, "test")
+    state = _make_ar_fluorine_state(
+        inputs,
+        loaders,
+        runtime,
+        training,
+        test_metrics=test_metrics,
+        complete=True,
+    )
+    inputs.state_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(state, inputs.state_path)
+    return state, loaders.data, test_targets, test_logits, test_row_indices
+
+
+def _run_ar_fluorine_training(
+    inputs: _ARFluorineInputs,
+) -> tuple[dict[str, Any], Any, np.ndarray, np.ndarray, np.ndarray]:
+    loaders = _build_ar_fluorine_loaders(inputs)
+    runtime = _initialize_ar_fluorine_runtime(inputs, loaders)
+    training = _ARFluorineTrainingState()
+    for epoch_idx in range(inputs.epochs):
+        running_loss, seen = _train_ar_fluorine_epoch(
+            inputs,
+            loaders,
+            runtime,
+            epoch_idx,
+        )
+        val_metrics, history_row = _evaluate_ar_fluorine_epoch(
+            inputs,
+            loaders,
+            runtime,
+            epoch_idx,
+            running_loss,
+            seen,
+        )
+        if _record_ar_fluorine_epoch(
+            inputs,
+            loaders,
+            runtime,
+            training,
+            epoch_idx,
+            running_loss,
+            seen,
+            val_metrics,
+            history_row,
+        ):
+            break
+    return _restore_and_evaluate_ar_fluorine(
+        inputs,
+        loaders,
+        runtime,
+        training,
+    )
+
+
 def train_ar_fluorine(
     *,
     mode: str,
@@ -245,263 +706,39 @@ def train_ar_fluorine(
     progress_output_prefix: StoragePath | None,
     eval_test_every_epoch: bool,
 ) -> tuple[dict[str, Any], Any, np.ndarray, np.ndarray, np.ndarray]:
-    data = build_fluorine_data(
-        config=config,
-        cache_dir=cache_dir,
-        batch_size=batch_size,
-        revision=revision,
-    )
-    train_loader = _make_loader(
-        data,
-        "train",
-        shuffle=True,
-        seed=seed,
-        max_samples=max_train_samples,
-        num_workers=num_workers,
-    )
-    val_loader = _make_loader(
-        data,
-        "val",
-        shuffle=False,
-        seed=seed + 10_000,
-        max_samples=max_val_samples,
-        num_workers=num_workers,
-    )
-    test_loader = _make_loader(
-        data,
-        "test",
-        shuffle=False,
-        seed=seed + 20_000,
-        max_samples=max_test_samples,
-        num_workers=num_workers,
-    )
-
-    input_dim = _input_dim(model)
-    classifier = FluorineLabelTokenHead(input_dim=input_dim).to(device)
-    finetune_module = SpectraARFluorineModule(
-        model=model,
-        tokenizer=tokenizer,
-        classifier=classifier,
-    ).to(device)
-    if mode == "lora":
-        model.requires_grad_(False)
-        lora_config: dict[str, Any] | None = _lora_config(
-            rank=lora_rank,
-            alpha=lora_alpha,
-            dropout=lora_dropout,
-        )
-        applied_modules = apply_ar_fluorine_lora(model, lora_config)
-        model.to(device)
-        lora_config = {**lora_config, "applied_modules": list(applied_modules)}
-        model_param_group = {
-            "params": list(lora_parameters(model)),
-            "lr": lora_learning_rate,
-            "weight_decay": weight_decay,
-        }
-    else:
-        model.requires_grad_(True)
-        lora_config = None
-        model_param_group = {
-            "params": model.parameters(),
-            "lr": model_learning_rate,
-            "weight_decay": weight_decay,
-        }
-    optimizer = torch.optim.AdamW(
-        [
-            model_param_group,
-            {
-                "params": classifier.parameters(),
-                "lr": head_learning_rate,
-                "weight_decay": weight_decay,
-            },
-        ]
-    )
-    focal_alpha = 1.0 - float(data.metadata["train_positive"]) / float(
-        data.metadata["train_size"]
-    )
-    focal_gamma = 2.0
-    best_value = -float("inf")
-    best_epoch = 0
-    best_val: dict[str, float] = {}
-    best_lora_state: dict[str, torch.Tensor] = {}
-    best_model_state: dict[str, torch.Tensor] = {}
-    best_classifier_state: dict[str, torch.Tensor] = {}
-    history: list[dict[str, Any]] = []
-    epochs_without_improvement = 0
-    use_autocast = device.type == "cuda" and autocast_dtype is not None
-    grad_scaler = build_grad_scaler(autocast_dtype, device)
-    best_state_path = state_path.with_name(f"{state_path.stem}.best.pt")
-
-    requested_hparams = {
-        "head_type": "eos_label_tokens",
-        "model_learning_rate": float(model_learning_rate),
-        "head_learning_rate": float(head_learning_rate),
-        "weight_decay": float(weight_decay),
-        "autocast_dtype": _autocast_dtype_name(autocast_dtype),
-        "epochs": int(epochs),
-        "patience": int(patience),
-        "select_metric": select_metric,
-    }
-    if mode == "lora":
-        requested_hparams.update(
-            {
-                "lora_rank": int(lora_rank),
-                "lora_alpha": float(lora_alpha),
-                "lora_dropout": float(lora_dropout),
-                "lora_learning_rate": float(lora_learning_rate),
-            }
-        )
-
-    def make_state(
-        *,
-        test_metrics: dict[str, float] | None,
-        complete: bool,
-    ) -> dict[str, Any]:
-        state = {
-            "mode": f"ar_{mode}",
-            "complete": complete,
-            "config_path": str(config_path),
-            "checkpoint_path": str(checkpoint_path),
-            "input_dim": int(input_dim),
-            "model_dim": int(model.config.model_dim),
-            "pooling": "eos",
-            "pair_dim": int(model.config.model_dim),
-            "classifier_state": best_classifier_state,
-            "best_epoch": int(best_epoch),
-            "best_val": best_val,
-            "test": test_metrics,
-            "history": history,
-            "hparams": requested_hparams,
-            "autocast_dtype": _autocast_dtype_name(autocast_dtype),
-            "focal_alpha": focal_alpha,
-            "focal_gamma": focal_gamma,
-            "finetune_cache_dir": str(cache_dir),
-            "device_ids": [device.index] if device.type == "cuda" else [],
-            "train_size": int(data.metadata["train_size"]),
-            "train_positive": int(data.metadata["train_positive"]),
-            "val_size": int(data.metadata["val_size"]),
-            "val_positive": int(data.metadata["val_positive"]),
-            "max_train_samples": max_train_samples,
-            "max_val_samples": max_val_samples,
-            "tokenizer_config": asdict(tokenizer.config),
-        }
-        if mode == "lora":
-            state["lora_config"] = lora_config
-            state["lora_state"] = best_lora_state
-        else:
-            state["model_state"] = best_model_state
-        return state
-
-    for epoch_idx in range(epochs):
-        finetune_module.train()
-        running_loss = 0.0
-        seen = 0
-        pbar = tqdm(
-            train_loader,
-            desc=f"ar {mode} epoch {epoch_idx + 1}/{epochs}",
-            unit="batch",
-            dynamic_ncols=True,
-            mininterval=5.0,
-        )
-        for batch in pbar:
-            labels = batch["label"].to(device, non_blocking=True)
-            optimizer.zero_grad(set_to_none=True)
-            with torch.autocast(
-                device_type=device.type,
-                dtype=autocast_dtype if autocast_dtype is not None else torch.bfloat16,
-                enabled=use_autocast,
-            ):
-                logits = finetune_module(batch)
-                loss = binary_focal_loss_with_logits(
-                    logits.float(),
-                    labels,
-                    alpha=focal_alpha,
-                    gamma=focal_gamma,
-                )
-            if grad_scaler.is_enabled():
-                grad_scaler.scale(loss).backward()
-                grad_scaler.step(optimizer)
-                grad_scaler.update()
-            else:
-                loss.backward()
-                optimizer.step()
-            running_loss += float(loss.detach().cpu()) * int(labels.shape[0])
-            seen += int(labels.shape[0])
-            pbar.set_postfix(loss=f"{running_loss / float(seen):.5f}")
-
-        val_targets, val_logits, _ = predict_ar_fluorine(
-            module=finetune_module,
-            loader=val_loader,
+    return _run_ar_fluorine_training(
+        _ARFluorineInputs(
+            mode=mode,
+            state_path=state_path,
+            model=model,
+            tokenizer=tokenizer,
+            config=config,
+            config_path=config_path,
+            checkpoint_path=checkpoint_path,
+            cache_dir=cache_dir,
             device=device,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            seed=seed,
+            epochs=epochs,
+            patience=patience,
+            model_learning_rate=model_learning_rate,
+            lora_rank=lora_rank,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            lora_learning_rate=lora_learning_rate,
+            head_learning_rate=head_learning_rate,
+            weight_decay=weight_decay,
             autocast_dtype=autocast_dtype,
+            revision=revision,
+            max_train_samples=max_train_samples,
+            max_val_samples=max_val_samples,
+            max_test_samples=max_test_samples,
+            select_metric=select_metric,
+            progress_output_prefix=progress_output_prefix,
+            eval_test_every_epoch=eval_test_every_epoch,
         )
-        val_metrics = _metric_dict(val_targets, val_logits, "val")
-        history_row: dict[str, Any] = {
-            "epoch": epoch_idx + 1,
-            "train_loss": running_loss / float(seen),
-            "val": val_metrics,
-        }
-        if eval_test_every_epoch:
-            epoch_test_targets, epoch_test_logits, _ = predict_ar_fluorine(
-                module=finetune_module,
-                loader=test_loader,
-                device=device,
-                autocast_dtype=autocast_dtype,
-            )
-            history_row["test"] = _metric_dict(
-                epoch_test_targets,
-                epoch_test_logits,
-                "test",
-            )
-        history.append(history_row)
-        if progress_output_prefix is not None:
-            write_training_history_outputs(
-                output_prefix=progress_output_prefix,
-                history=history,
-            )
-        current_value = val_metrics[f"val/{select_metric}"]
-        if current_value > best_value:
-            best_value = current_value
-            best_epoch = epoch_idx + 1
-            best_val = dict(val_metrics)
-            if mode == "lora":
-                best_lora_state = lora_state_dict(model)
-            else:
-                best_model_state = _module_state_to_cpu(model)
-            best_classifier_state = copy.deepcopy(_module_state_to_cpu(classifier))
-            epochs_without_improvement = 0
-            state_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save(make_state(test_metrics=None, complete=False), best_state_path)
-        else:
-            epochs_without_improvement += 1
-        log.info(
-            "ar_%s epoch=%d/%d train_loss=%.5f val_ap=%.4f val_auc=%.4f",
-            mode,
-            epoch_idx + 1,
-            epochs,
-            running_loss / float(seen),
-            val_metrics["val/average_precision"],
-            val_metrics["val/roc_auc"],
-        )
-        if epochs_without_improvement >= patience:
-            break
-
-    if mode == "lora":
-        load_lora_state_dict(model, best_lora_state)
-    else:
-        model.load_state_dict(best_model_state)
-    classifier.load_state_dict(best_classifier_state)
-    test_targets, test_logits, test_row_indices = predict_ar_fluorine(
-        module=finetune_module,
-        loader=test_loader,
-        device=device,
-        autocast_dtype=autocast_dtype,
     )
-    test_metrics = _metric_dict(test_targets, test_logits, "test")
-    state = make_state(test_metrics=test_metrics, complete=True)
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(state, state_path)
-    return state, data, test_targets, test_logits, test_row_indices
 
 
 def _resolve_device(raw: str) -> torch.device:

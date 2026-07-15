@@ -6,6 +6,7 @@ import signal
 import time
 import warnings
 from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -297,6 +298,437 @@ def initialize_frozen_teacher(
     load_frozen_teacher_weights(model, checkpoint_path)
 
 
+@dataclass(frozen=True)
+class _TorchTrainingLoopInputs:
+    config: config_dict.ConfigDict
+    datamodule: Any
+    model: torch.nn.Module
+    optimizers: list[torch.optim.Optimizer]
+    schedulers: list[LRSchedulerLike]
+    logger: Any
+    checkpoint_dir: StoragePath
+    start_epoch: int
+    loop_epochs: int
+    resume_offset: int
+    global_step: int
+    total_steps: int
+    device: torch.device
+    autocast_dtype: torch.dtype | None
+    grad_scaler: torch.amp.GradScaler | None
+    distributed: DistributedContext | None
+    checkpoint_writer: AsyncCheckpointWriter | None
+    flops_per_optimizer_step: float | None
+
+
+class _TorchTrainingLoop:
+    def __init__(self, inputs: _TorchTrainingLoopInputs) -> None:
+        self.config = inputs.config
+        self.datamodule = inputs.datamodule
+        self.model = inputs.model
+        self.optimizers = inputs.optimizers
+        self.schedulers = inputs.schedulers
+        self.logger = inputs.logger
+        self.checkpoint_dir = inputs.checkpoint_dir
+        self.start_epoch = inputs.start_epoch
+        self.loop_epochs = inputs.loop_epochs
+        self.resume_offset = inputs.resume_offset
+        self.global_step = inputs.global_step
+        self.total_steps = inputs.total_steps
+        self.device = inputs.device
+
+        self.distributed = inputs.distributed
+        if self.distributed is None:
+            self.distributed = DistributedContext(
+                rank=0,
+                local_rank=0,
+                world_size=1,
+                device=self.device,
+            )
+        self.autocast_dtype = inputs.autocast_dtype
+        if self.autocast_dtype is None:
+            self.autocast_dtype = parse_autocast_dtype(
+                self.config.get("autocast_dtype", "bf16")
+            )
+        self.grad_scaler = inputs.grad_scaler
+        if self.grad_scaler is None:
+            self.grad_scaler = build_grad_scaler(
+                self.autocast_dtype,
+                self.device,
+            )
+        self.owns_checkpoint_writer = inputs.checkpoint_writer is None
+        self.checkpoint_writer = inputs.checkpoint_writer
+        if self.checkpoint_writer is None:
+            self.checkpoint_writer = AsyncCheckpointWriter()
+        self.flops_per_optimizer_step = inputs.flops_per_optimizer_step
+        if self.flops_per_optimizer_step is None:
+            self.flops_per_optimizer_step = (
+                estimate_training_flops_per_optimizer_step(
+                    self.config,
+                    unwrap_model(self.model),
+                    int(self.datamodule.global_batch_size),
+                )
+            )
+
+        self.log_every_n_steps = int(self.config.get("log_every_n_steps", 50))
+        self.collapse_every_n_steps = int(
+            self.config.get(
+                "collapse_metrics_every_n_steps",
+                self.log_every_n_steps,
+            )
+        )
+        self.checkpoint_every_steps = int(self.config.checkpoint_every_steps)
+        self.grad_clip_norm = optional_float(
+            self.config.get("grad_clip_norm", None)
+        )
+        self.grad_accum_steps = gradient_accumulation_steps(self.config)
+        self.msg_probe_every_n_steps = msg_probe_interval(
+            self.config,
+            self.datamodule,
+            self.total_steps,
+        )
+        self.val_every_n_steps = validation_interval(
+            self.config,
+            self.datamodule,
+            self.total_steps,
+        )
+        self.val_num_steps = validation_steps(self.config)
+        self.msg_probe_variants = msg_probe_variants_from_config(self.config)
+        self.device_prefetch_size = int(
+            self.config.get("device_prefetch_size", 1)
+        )
+        self.deadline = training_deadline(self.config)
+        self.wandb_run = getattr(self.logger, "experiment", None)
+        self.last_msg_probe_metrics: dict[str, object] = {}
+        self.last_validation_metrics: dict[str, object] = {}
+        self.stopped_for_time_limit = False
+        self.stopped_for_signal = False
+        self.initial_global_step = self.global_step
+        self.training_start_time = 0.0
+        self.throughput_warmup_steps = 0
+        self.measured_start_time: float | None = None
+        self.measured_steps = 0
+        self.profiler: Any = None
+
+    def run(self) -> dict[str, object]:
+        self.training_start_time = time.perf_counter()
+        self.throughput_warmup_steps = int(
+            self.config.get("throughput_warmup_steps", 0)
+        )
+        self.profiler = make_torch_profiler(
+            self.config,
+            self.distributed,
+            self.device,
+        )
+        if self.profiler is not None:
+            self.profiler.start()
+        for epoch in range(self.start_epoch, self.loop_epochs):
+            self._run_epoch(epoch)
+            if (
+                self.stopped_for_time_limit
+                or self.stopped_for_signal
+                or self.global_step >= self.total_steps
+            ):
+                break
+        return self._finish()
+
+    def _run_epoch(self, epoch: int) -> None:
+        if self.distributed.is_main:
+            logging.info(
+                "Starting epoch %d at global_step=%d",
+                epoch,
+                self.global_step,
+            )
+        epoch_resume_offset = (
+            self.resume_offset if epoch == self.start_epoch else 0
+        )
+        if self.distributed.is_main and epoch_resume_offset:
+            logging.info(
+                "Resuming epoch %d from batch offset %d.",
+                epoch,
+                epoch_resume_offset,
+            )
+        train_loader = self.datamodule.train_loader_for_epoch(
+            epoch,
+            start_batch=epoch_resume_offset,
+        )
+        prefetcher = BatchPrefetcher(
+            iter(train_loader),
+            self.device,
+            prefetch_size=self.device_prefetch_size,
+        )
+        pbar = tqdm(
+            total=min(
+                self.datamodule.train_steps - epoch_resume_offset,
+                self.total_steps - self.global_step,
+            ),
+            desc=f"Epoch {epoch}",
+            unit="step",
+            disable=not self.distributed.is_main,
+        )
+        accumulation_step = 0
+        while (
+            self.global_step < self.total_steps
+            and (batch := prefetcher.next()) is not None
+        ):
+            if self._stop_requested():
+                break
+            self._start_measurement_if_ready()
+            metrics = self._train_microbatch(batch, accumulation_step)
+            accumulation_step += 1
+            optimizer_step = bool(
+                float(
+                    metrics.get(
+                        "optimizer_step",
+                        metrics["loss"].new_tensor(1.0),
+                    )
+                )
+            )
+            if optimizer_step:
+                self._finish_optimizer_step(metrics, epoch, pbar)
+        pbar.close()
+        if self.distributed.is_main:
+            logging.info(
+                "Finished epoch %d at global_step=%d",
+                epoch,
+                self.global_step,
+            )
+
+    def _stop_requested(self) -> bool:
+        if stop_requested_on_any_rank(self.distributed):
+            if self.distributed.is_main:
+                logging.info(
+                    "Received stop request at global_step=%d.",
+                    self.global_step,
+                )
+            self.stopped_for_signal = True
+            return True
+        if self.deadline is not None and any_rank(
+            time.perf_counter() >= self.deadline,
+            self.distributed,
+        ):
+            if self.distributed.is_main:
+                logging.info(
+                    "Reached max_duration_hours at global_step=%d.",
+                    self.global_step,
+                )
+            self.stopped_for_time_limit = True
+            return True
+        return False
+
+    def _start_measurement_if_ready(self) -> None:
+        if self.measured_start_time is not None or (
+            self.global_step - self.initial_global_step
+        ) < self.throughput_warmup_steps:
+            return
+        synchronize_device(self.device)
+        barrier(self.distributed)
+        self.measured_start_time = time.perf_counter()
+
+    def _train_microbatch(
+        self,
+        batch: Any,
+        accumulation_step: int,
+    ) -> dict[str, torch.Tensor]:
+        next_micro_step_is_boundary = (
+            (accumulation_step + 1) % self.grad_accum_steps == 0
+        )
+        return train_step_impl(
+            self.model,
+            batch,
+            self.optimizers,
+            self.schedulers,
+            self.autocast_dtype,
+            self.grad_clip_norm,
+            grad_scaler=self.grad_scaler,
+            compute_collapse_metrics=(
+                next_micro_step_is_boundary
+                and self.collapse_every_n_steps > 0
+                and (self.global_step + 1) % self.collapse_every_n_steps == 0
+            ),
+            global_step=self.global_step,
+            total_steps=self.total_steps,
+            gradient_accumulation_steps=self.grad_accum_steps,
+            accumulation_step=accumulation_step,
+        )
+
+    def _finish_optimizer_step(
+        self,
+        metrics: dict[str, torch.Tensor],
+        epoch: int,
+        pbar: Any,
+    ) -> None:
+        self.global_step += 1
+        if self.profiler is not None:
+            self.profiler.step()
+        if self.measured_start_time is not None:
+            self.measured_steps += 1
+        pbar.update(1)
+        self._log_train_step(metrics, epoch, pbar)
+        self._save_periodic_checkpoint(metrics)
+        self._run_validation_if_due(pbar)
+        self._run_msg_probe_if_due()
+        if self.distributed.is_main:
+            self.checkpoint_writer.log_completed_failures()
+
+    def _log_train_step(
+        self,
+        metrics: dict[str, torch.Tensor],
+        epoch: int,
+        pbar: Any,
+    ) -> None:
+        should_log = (
+            self.log_every_n_steps > 0
+            and self.global_step % self.log_every_n_steps == 0
+        )
+        log_metrics = (
+            reduce_metric_tensors(metrics, self.distributed)
+            if should_log
+            else metrics
+        )
+        if self.distributed.is_main:
+            log_train_metrics(
+                self.config,
+                self.logger,
+                pbar,
+                log_metrics,
+                self.optimizers,
+                epoch=epoch,
+                global_step=self.global_step,
+                every_n_steps=self.log_every_n_steps,
+                flops_per_optimizer_step=self.flops_per_optimizer_step,
+            )
+
+    def _save_periodic_checkpoint(
+        self,
+        metrics: dict[str, torch.Tensor],
+    ) -> None:
+        if self.global_step % self.checkpoint_every_steps != 0:
+            return
+        if self.distributed.is_main:
+            base_model = cast(PeakSetJEPA, unwrap_model(self.model))
+            self.checkpoint_writer.save_checkpoint(
+                storage_join(
+                    self.checkpoint_dir,
+                    f"step-{self.global_step:08d}.pt",
+                ),
+                base_model,
+                self.optimizers,
+                self.schedulers,
+                self.global_step,
+                self.global_step // self.datamodule.train_steps,
+                float(metrics["loss"]),
+                getattr(self.wandb_run, "id", None),
+                grad_scaler=self.grad_scaler,
+                prune_checkpoint_dir=self.checkpoint_dir,
+                keep_top_k=15,
+            )
+        barrier(self.distributed)
+
+    def _run_validation_if_due(self, pbar: Any) -> None:
+        if not should_run_at_step(
+            self.val_every_n_steps,
+            self.global_step,
+        ):
+            return
+        val_metrics = evaluate_validation_loss(
+            datamodule=self.datamodule,
+            model=self.model,
+            device=self.device,
+            autocast_dtype=self.autocast_dtype,
+            distributed=self.distributed,
+            max_steps=self.val_num_steps,
+            prefetch_size=self.device_prefetch_size,
+        )
+        self.last_validation_metrics = {
+            f"val/{key}": float(value.detach())
+            for key, value in val_metrics.items()
+        }
+        if self.distributed.is_main:
+            log_validation_metrics(
+                self.logger,
+                pbar,
+                self.last_validation_metrics,
+                global_step=self.global_step,
+            )
+
+    def _run_msg_probe_if_due(self) -> None:
+        if not should_run_at_step_or_final(
+            self.msg_probe_every_n_steps,
+            self.global_step,
+            total_steps=self.total_steps,
+            run_at_final_step=bool(
+                self.config.get("msg_probe_at_final_step", False)
+            ),
+        ):
+            return
+        base_model = cast(PeakSetJEPA, unwrap_model(self.model))
+        self.last_msg_probe_metrics = dict(
+            run_and_log_msg_probe(
+                self.config,
+                base_model,
+                self.device,
+                self.logger,
+                self.msg_probe_variants,
+                self.global_step,
+                self.distributed,
+            )
+        )
+        barrier(self.distributed)
+
+    def _finish(self) -> dict[str, object]:
+        synchronize_device(self.device)
+        barrier(self.distributed)
+        if self.profiler is not None:
+            self.profiler.stop()
+        training_elapsed = time.perf_counter() - self.training_start_time
+        measured_elapsed = (
+            time.perf_counter() - self.measured_start_time
+            if self.measured_start_time is not None
+            else 0.0
+        )
+        result = self._build_result(training_elapsed, measured_elapsed)
+        if self.owns_checkpoint_writer:
+            self.checkpoint_writer.close()
+        return result
+
+    def _build_result(
+        self,
+        training_elapsed: float,
+        measured_elapsed: float,
+    ) -> dict[str, object]:
+        global_batch_size = int(self.datamodule.global_batch_size)
+        result = self.last_msg_probe_metrics
+        result["run/stopped_for_time_limit"] = float(
+            self.stopped_for_time_limit
+        )
+        result["run/stopped_for_signal"] = float(self.stopped_for_signal)
+        result.update(self.last_validation_metrics)
+        result["run/final_global_step"] = float(self.global_step)
+        result["run/train_elapsed_seconds"] = training_elapsed
+        completed_steps = float(self.global_step - self.initial_global_step)
+        result["run/steps_per_second"] = (
+            completed_steps / training_elapsed if training_elapsed > 0 else 0.0
+        )
+        result["run/samples_per_second"] = (
+            completed_steps * global_batch_size / training_elapsed
+            if training_elapsed > 0
+            else 0.0
+        )
+        result["run/measured_steps"] = float(self.measured_steps)
+        result["run/measured_elapsed_seconds"] = measured_elapsed
+        result["run/measured_steps_per_second"] = (
+            float(self.measured_steps) / measured_elapsed
+            if measured_elapsed > 0
+            else 0.0
+        )
+        result["run/measured_samples_per_second"] = (
+            float(self.measured_steps) * global_batch_size / measured_elapsed
+            if measured_elapsed > 0
+            else 0.0
+        )
+        return result
+
+
 def run_training_loop(
     *,
     config: config_dict.ConfigDict,
@@ -318,260 +750,28 @@ def run_training_loop(
     checkpoint_writer: AsyncCheckpointWriter | None = None,
     flops_per_optimizer_step: float | None = None,
 ) -> dict[str, object]:
-    if distributed is None:
-        distributed = DistributedContext(
-            rank=0,
-            local_rank=0,
-            world_size=1,
+    return _TorchTrainingLoop(
+        _TorchTrainingLoopInputs(
+            config=config,
+            datamodule=datamodule,
+            model=model,
+            optimizers=optimizers,
+            schedulers=schedulers,
+            logger=logger,
+            checkpoint_dir=checkpoint_dir,
+            start_epoch=start_epoch,
+            loop_epochs=loop_epochs,
+            resume_offset=resume_offset,
+            global_step=global_step,
+            total_steps=total_steps,
             device=device,
+            autocast_dtype=autocast_dtype,
+            grad_scaler=grad_scaler,
+            distributed=distributed,
+            checkpoint_writer=checkpoint_writer,
+            flops_per_optimizer_step=flops_per_optimizer_step,
         )
-    if autocast_dtype is None:
-        autocast_dtype = parse_autocast_dtype(
-            config.get("autocast_dtype", "bf16")
-        )
-    if grad_scaler is None:
-        grad_scaler = build_grad_scaler(autocast_dtype, device)
-    owns_checkpoint_writer = checkpoint_writer is None
-    if checkpoint_writer is None:
-        checkpoint_writer = AsyncCheckpointWriter()
-    if flops_per_optimizer_step is None:
-        flops_per_optimizer_step = estimate_training_flops_per_optimizer_step(
-            config,
-            unwrap_model(model),
-            int(datamodule.global_batch_size),
-        )
-    log_every_n_steps = int(config.get("log_every_n_steps", 50))
-    collapse_every_n_steps = int(
-        config.get("collapse_metrics_every_n_steps", log_every_n_steps)
-    )
-    checkpoint_every_steps = int(config.checkpoint_every_steps)
-    grad_clip_norm = optional_float(config.get("grad_clip_norm", None))
-    grad_accum_steps = gradient_accumulation_steps(config)
-    msg_probe_every_n_steps = msg_probe_interval(config, datamodule, total_steps)
-    val_every_n_steps = validation_interval(config, datamodule, total_steps)
-    val_num_steps = validation_steps(config)
-    msg_probe_variants = msg_probe_variants_from_config(config)
-    device_prefetch_size = int(config.get("device_prefetch_size", 1))
-    deadline = training_deadline(config)
-    wandb_run = getattr(logger, "experiment", None)
-    last_msg_probe_metrics: dict[str, object] = {}
-    last_validation_metrics: dict[str, object] = {}
-    stopped_for_time_limit = False
-    stopped_for_signal = False
-    initial_global_step = global_step
-    training_start_time = time.perf_counter()
-    throughput_warmup_steps = int(config.get("throughput_warmup_steps", 0))
-    measured_start_time: float | None = None
-    measured_steps = 0
-    profiler = make_torch_profiler(config, distributed, device)
-    if profiler is not None:
-        profiler.start()
-    for epoch in range(start_epoch, loop_epochs):
-        if distributed.is_main:
-            logging.info("Starting epoch %d at global_step=%d", epoch, global_step)
-        epoch_resume_offset = resume_offset if epoch == start_epoch else 0
-        if distributed.is_main and epoch_resume_offset:
-            logging.info(
-                "Resuming epoch %d from batch offset %d.",
-                epoch,
-                epoch_resume_offset,
-            )
-        train_loader = datamodule.train_loader_for_epoch(
-            epoch,
-            start_batch=epoch_resume_offset,
-        )
-        prefetcher = BatchPrefetcher(
-            iter(train_loader),
-            device,
-            prefetch_size=device_prefetch_size,
-        )
-        epoch_steps = min(
-            datamodule.train_steps - epoch_resume_offset,
-            total_steps - global_step,
-        )
-        pbar = tqdm(
-            total=epoch_steps,
-            desc=f"Epoch {epoch}",
-            unit="step",
-            disable=not distributed.is_main,
-        )
-        accumulation_step = 0
-        while global_step < total_steps and (batch := prefetcher.next()) is not None:
-            if stop_requested_on_any_rank(distributed):
-                if distributed.is_main:
-                    logging.info("Received stop request at global_step=%d.", global_step)
-                stopped_for_signal = True
-                break
-            if deadline is not None and any_rank(
-                time.perf_counter() >= deadline,
-                distributed,
-            ):
-                if distributed.is_main:
-                    logging.info("Reached max_duration_hours at global_step=%d.", global_step)
-                stopped_for_time_limit = True
-                break
-            if measured_start_time is None and (
-                global_step - initial_global_step
-            ) >= throughput_warmup_steps:
-                synchronize_device(device)
-                barrier(distributed)
-                measured_start_time = time.perf_counter()
-            next_micro_step_is_boundary = (
-                (accumulation_step + 1) % grad_accum_steps == 0
-            )
-            metrics = train_step_impl(
-                model,
-                batch,
-                optimizers,
-                schedulers,
-                autocast_dtype,
-                grad_clip_norm,
-                grad_scaler=grad_scaler,
-                compute_collapse_metrics=(
-                    next_micro_step_is_boundary
-                    and collapse_every_n_steps > 0
-                    and (global_step + 1) % collapse_every_n_steps == 0
-                ),
-                global_step=global_step,
-                total_steps=total_steps,
-                gradient_accumulation_steps=grad_accum_steps,
-                accumulation_step=accumulation_step,
-            )
-            accumulation_step += 1
-            optimizer_step = bool(
-                float(metrics.get("optimizer_step", metrics["loss"].new_tensor(1.0)))
-            )
-            if not optimizer_step:
-                continue
-            global_step += 1
-            if profiler is not None:
-                profiler.step()
-            if measured_start_time is not None:
-                measured_steps += 1
-            pbar.update(1)
-            should_log = log_every_n_steps > 0 and global_step % log_every_n_steps == 0
-            log_metrics = (
-                reduce_metric_tensors(metrics, distributed) if should_log else metrics
-            )
-            if distributed.is_main:
-                log_train_metrics(
-                    config,
-                    logger,
-                    pbar,
-                    log_metrics,
-                    optimizers,
-                    epoch=epoch,
-                    global_step=global_step,
-                    every_n_steps=log_every_n_steps,
-                    flops_per_optimizer_step=flops_per_optimizer_step,
-                )
-            if global_step % checkpoint_every_steps == 0:
-                if distributed.is_main:
-                    base_model = cast(PeakSetJEPA, unwrap_model(model))
-                    checkpoint_writer.save_checkpoint(
-                        storage_join(checkpoint_dir, f"step-{global_step:08d}.pt"),
-                        base_model,
-                        optimizers,
-                        schedulers,
-                        global_step,
-                        global_step // datamodule.train_steps,
-                        float(metrics["loss"]),
-                        getattr(wandb_run, "id", None),
-                        grad_scaler=grad_scaler,
-                        prune_checkpoint_dir=checkpoint_dir,
-                        keep_top_k=15,
-                    )
-                barrier(distributed)
-            if should_run_at_step(val_every_n_steps, global_step):
-                val_metrics = evaluate_validation_loss(
-                    datamodule=datamodule,
-                    model=model,
-                    device=device,
-                    autocast_dtype=autocast_dtype,
-                    distributed=distributed,
-                    max_steps=val_num_steps,
-                    prefetch_size=device_prefetch_size,
-                )
-                last_validation_metrics = {
-                    f"val/{key}": float(value.detach())
-                    for key, value in val_metrics.items()
-                }
-                if distributed.is_main:
-                    log_validation_metrics(
-                        logger,
-                        pbar,
-                        last_validation_metrics,
-                        global_step=global_step,
-                    )
-            if should_run_at_step_or_final(
-                msg_probe_every_n_steps,
-                global_step,
-                total_steps=total_steps,
-                run_at_final_step=bool(
-                    config.get("msg_probe_at_final_step", False)
-                ),
-            ):
-                base_model = cast(PeakSetJEPA, unwrap_model(model))
-                last_msg_probe_metrics = dict(
-                    run_and_log_msg_probe(
-                        config,
-                        base_model,
-                        device,
-                        logger,
-                        msg_probe_variants,
-                        global_step,
-                        distributed,
-                    )
-                )
-                barrier(distributed)
-            if distributed.is_main:
-                checkpoint_writer.log_completed_failures()
-        pbar.close()
-        if distributed.is_main:
-            logging.info("Finished epoch %d at global_step=%d", epoch, global_step)
-        if stopped_for_time_limit or stopped_for_signal or global_step >= total_steps:
-            break
-    synchronize_device(device)
-    barrier(distributed)
-    if profiler is not None:
-        profiler.stop()
-    training_elapsed = time.perf_counter() - training_start_time
-    measured_elapsed = (
-        time.perf_counter() - measured_start_time
-        if measured_start_time is not None
-        else 0.0
-    )
-    global_batch_size = int(datamodule.global_batch_size)
-    last_msg_probe_metrics["run/stopped_for_time_limit"] = float(stopped_for_time_limit)
-    last_msg_probe_metrics["run/stopped_for_signal"] = float(stopped_for_signal)
-    last_msg_probe_metrics.update(last_validation_metrics)
-    last_msg_probe_metrics["run/final_global_step"] = float(global_step)
-    last_msg_probe_metrics["run/train_elapsed_seconds"] = training_elapsed
-    last_msg_probe_metrics["run/steps_per_second"] = (
-        float(global_step - initial_global_step) / training_elapsed
-        if training_elapsed > 0
-        else 0.0
-    )
-    last_msg_probe_metrics["run/samples_per_second"] = (
-        float(global_step - initial_global_step) * global_batch_size / training_elapsed
-        if training_elapsed > 0
-        else 0.0
-    )
-    last_msg_probe_metrics["run/measured_steps"] = float(measured_steps)
-    last_msg_probe_metrics["run/measured_elapsed_seconds"] = measured_elapsed
-    last_msg_probe_metrics["run/measured_steps_per_second"] = (
-        float(measured_steps) / measured_elapsed
-        if measured_elapsed > 0
-        else 0.0
-    )
-    last_msg_probe_metrics["run/measured_samples_per_second"] = (
-        float(measured_steps) * global_batch_size / measured_elapsed
-        if measured_elapsed > 0
-        else 0.0
-    )
-    if owns_checkpoint_writer:
-        checkpoint_writer.close()
-    return last_msg_probe_metrics
+    ).run()
 
 
 def seed_all(seed: int) -> None:

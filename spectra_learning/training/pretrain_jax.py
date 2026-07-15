@@ -88,6 +88,20 @@ class _StagedJaxTrainMetrics:
     total_steps: int
 
 
+@dataclass
+class _JaxTrainState:
+    trainable_params: Any
+    static_state: Any
+    opt_state: Any
+
+    def checkpoint_state(self) -> dict[str, Any]:
+        return {
+            "trainable_params": self.trainable_params,
+            "static_state": self.static_state,
+            "opt_state": self.opt_state,
+        }
+
+
 def trainable_param_filter(path: tuple[object, ...], value: object) -> bool:
     if not isinstance(value, nnx.Param):
         return False
@@ -1251,6 +1265,547 @@ def initialize_jax_model_from_torch_seed(
     model.load_torch_state_dict(torch_model.state_dict())
 
 
+_JAX_PROFILE_TIMING_NAMES = (
+    "dataloader_seconds",
+    "transfer_seconds",
+    "grad_seconds",
+    "accumulate_seconds",
+    "apply_seconds",
+    "compiled_step_seconds",
+)
+
+
+class _JaxTrainingLoop:
+    def __init__(
+        self,
+        *,
+        config: config_dict.ConfigDict,
+        datamodule: Any,
+        model: Any,
+        logger: MetricLogger,
+        total_steps: int,
+        checkpoint_manager: Any,
+        resume_step: int | None,
+        checkpoint_metadata: dict[str, Any],
+        metric_reduction: JaxMetricReduction,
+        enable_msg_probe: bool,
+    ) -> None:
+        self.config = config
+        self.datamodule = datamodule
+        self.model = model
+        self.logger = logger
+        self.total_steps = total_steps
+        self.checkpoint_manager = checkpoint_manager
+        self.checkpoint_metadata = checkpoint_metadata
+        self.metric_reduction = metric_reduction
+
+        self.log_every_n_steps = int(config.get("log_every_n_steps", 50))
+        self.warmup_steps = int(config.get("throughput_warmup_steps", 0))
+        self.grad_accum_steps = int(config.get("gradient_accumulation_steps", 1))
+        data_parallel_devices = _jax_data_parallel_devices(config)
+        self.data_mesh = _jax_data_mesh_for_device_count(data_parallel_devices)
+        self.use_sharded_step = data_parallel_devices > 1
+        self.state, self.train_step, self.eval_step = self._initialize_train_state()
+
+        self.checkpoint_every_steps = int(config.get("checkpoint_every_steps", 0))
+        self.val_every_n_steps = validation_interval(config, datamodule, total_steps)
+        self.val_num_steps = validation_steps(config)
+        self.msg_probe_every_n_steps = (
+            msg_probe_interval(config, datamodule, total_steps)
+            if enable_msg_probe
+            else -1
+        )
+        self.msg_probe_variants = (
+            msg_probe_variants_from_config(config) if enable_msg_probe else ()
+        )
+        self.start_step = self._restore_checkpoint(resume_step)
+        self.global_step = self.start_step
+
+        self.timing_barriers = bool(config.get("jax_timing_barriers", False))
+        self.compile_stall_threshold_seconds = float(
+            config.get("jax_compile_stall_threshold_seconds", 0.0)
+        )
+        self.profile_dir = str(config.get("jax_profile_dir", ""))
+        self.profile_start_step = int(
+            config.get("jax_profile_start_step", self.warmup_steps)
+        )
+        profile_steps = int(config.get("jax_profile_steps", 0))
+        self.profile_end_step = (
+            self.profile_start_step + profile_steps
+            if profile_steps > 0
+            else total_steps
+        )
+        self.profile_started = False
+        self.profile_active = False
+
+        self.timing = {name: 0.0 for name in _JAX_PROFILE_TIMING_NAMES}
+        self.timing["measured_microbatches"] = 0.0
+        self.non_train_timing = {
+            "checkpoint_seconds": 0.0,
+            "validation_seconds": 0.0,
+            "msg_probe_seconds": 0.0,
+            "model_update_seconds": 0.0,
+            "profile_seconds": 0.0,
+        }
+        self.measured_non_train_timing = {
+            name: 0.0 for name in self.non_train_timing
+        }
+        self.train_start = 0.0
+        self.measured_start: float | None = None
+        self.measured_steps = 0
+        self.last_metrics: dict[str, Array] = {}
+        self.pending_train_metrics: _StagedJaxTrainMetrics | None = None
+        self.last_validation_metrics: dict[str, float] = {}
+        self.last_msg_probe_metrics: dict[str, float] = {}
+
+    def _initialize_train_state(
+        self,
+    ) -> tuple[_JaxTrainState, Callable[..., Any], Callable[..., Any]]:
+        graphdef, params, static_state, opt_state, optimizer = (
+            init_pure_optax_train_state(
+                self.config,
+                self.model,
+                total_steps=self.total_steps,
+            )
+        )
+        train_step = make_pure_accumulated_train_step(
+            graphdef,
+            optimizer,
+            sharded=self.use_sharded_step,
+            data_mesh=self.data_mesh,
+            log_update_stats=bool(self.config.get("jax_log_update_stats", False)),
+            metric_reduction=self.metric_reduction,
+        )
+        eval_step = make_pure_eval_step(
+            graphdef,
+            sharded=self.use_sharded_step,
+            data_mesh=self.data_mesh,
+            metric_reduction=self.metric_reduction,
+        )
+        state = _JaxTrainState(params, static_state, opt_state)
+        if self.use_sharded_step:
+            params = _replicate_tree_on_data_mesh(
+                state.trainable_params,
+                self.data_mesh,
+            )
+            opt_state = _replicate_tree_on_data_mesh(
+                state.opt_state,
+                self.data_mesh,
+            )
+            static_state = _replicate_tree_on_data_mesh(
+                state.static_state,
+                self.data_mesh,
+            )
+            state = _JaxTrainState(
+                params,
+                static_state,
+                opt_state,
+            )
+        return state, train_step, eval_step
+
+    def _restore_checkpoint(self, resume_step: int | None) -> int:
+        if resume_step is None:
+            return 0
+        restored = restore_jax_training_state(
+            self.checkpoint_manager,
+            int(resume_step),
+            self.state.checkpoint_state(),
+            expected_metadata=self.checkpoint_metadata,
+        )
+        self.state = _JaxTrainState(
+            restored["trainable_params"],
+            restored["static_state"],
+            restored["opt_state"],
+        )
+        return int(resume_step)
+
+    def run(self) -> dict[str, object]:
+        loop_epochs = max(1, math.ceil(float(self.config.num_epochs)))
+        start_epoch = min(
+            self.start_step // self.datamodule.train_steps,
+            loop_epochs - 1,
+        )
+        self.train_start = time.perf_counter()
+        for epoch in range(start_epoch, loop_epochs):
+            self._run_epoch(epoch, start_epoch=start_epoch, loop_epochs=loop_epochs)
+            if self.global_step >= self.total_steps:
+                break
+        return self._finish()
+
+    def _run_epoch(self, epoch: int, *, start_epoch: int, loop_epochs: int) -> None:
+        epoch_start_batch = (
+            self.global_step - epoch * self.datamodule.train_steps
+            if epoch == start_epoch
+            else 0
+        )
+        loader = self.datamodule.train_loader_for_epoch(
+            epoch,
+            start_batch=epoch_start_batch,
+        )
+        loader_iter = iter(loader)
+        pbar = tqdm(
+            total=min(
+                self.datamodule.train_steps - epoch_start_batch,
+                self.total_steps - self.global_step,
+            ),
+            desc=f"Epoch {epoch}",
+            unit="step",
+            disable=jax.process_index() != 0,
+        )
+        while self.global_step < self.total_steps:
+            batch = self._next_accumulated_batch(loader_iter)
+            if batch is None:
+                break
+            self._start_measurement_if_ready()
+            self._start_profile_if_ready()
+            metrics = self._train_batch(batch)
+            pbar.update(1)
+            self._log_or_stage_train_metrics(metrics, epoch=epoch, pbar=pbar)
+            self._run_scheduled_work(pbar)
+        if self.pending_train_metrics is not None and (
+            self.global_step >= self.total_steps or epoch == loop_epochs - 1
+        ):
+            _log_jax_train_metrics(
+                self.config,
+                self.logger,
+                pbar,
+                self.pending_train_metrics,
+            )
+            self.pending_train_metrics = None
+        pbar.close()
+        _shutdown_torch_loader_iterator(loader_iter)
+        del loader_iter, loader
+
+    def _next_accumulated_batch(self, loader_iter: Any) -> dict[str, Any] | None:
+        dataloader_elapsed = 0.0
+        transfer_elapsed = 0.0
+        micro_batches = []
+        for _ in range(self.grad_accum_steps):
+            dataloader_start = time.perf_counter()
+            try:
+                torch_batch = next(loader_iter)
+            except StopIteration:
+                break
+            dataloader_elapsed += time.perf_counter() - dataloader_start
+            transfer_start = time.perf_counter()
+            micro_batches.append(torch_batch)
+            transfer_elapsed += time.perf_counter() - transfer_start
+        if len(micro_batches) < self.grad_accum_steps:
+            return None
+        batch = numpy_batch_to_jax(
+            _stack_micro_batches(micro_batches),
+            data_mesh=self.data_mesh if self.use_sharded_step else None,
+            batch_axis=1,
+        )
+        if self.timing_barriers:
+            jax.block_until_ready(batch)
+        if self.measured_start is not None:
+            self.timing["dataloader_seconds"] += dataloader_elapsed
+            self.timing["transfer_seconds"] += transfer_elapsed
+            self.timing["measured_microbatches"] += float(self.grad_accum_steps)
+        return batch
+
+    def _start_measurement_if_ready(self) -> None:
+        if self.measured_start is not None or self.global_step < self.warmup_steps:
+            return
+        jax.effects_barrier()
+        self.measured_start = time.perf_counter()
+
+    def _start_profile_if_ready(self) -> None:
+        if (
+            not self.profile_dir
+            or self.profile_started
+            or self.global_step < self.profile_start_step
+        ):
+            return
+        phase_start = time.perf_counter()
+        jax.effects_barrier()
+        jax.profiler.start_trace(self.profile_dir)
+        self._add_non_train_timing(
+            "profile_seconds",
+            time.perf_counter() - phase_start,
+        )
+        self.profile_started = True
+        self.profile_active = True
+
+    def _train_batch(self, batch: dict[str, Any]) -> dict[str, Array]:
+        step_start = time.perf_counter()
+        params, opt_state, metrics = self.train_step(
+            self.state.trainable_params,
+            self.state.static_state,
+            self.state.opt_state,
+            batch,
+        )
+        self.state.trainable_params = params
+        self.state.opt_state = opt_state
+        if self.timing_barriers:
+            jax.block_until_ready((params, opt_state, metrics))
+        step_elapsed = time.perf_counter() - step_start
+        _raise_on_jax_compile_stall(
+            step_elapsed,
+            threshold_seconds=self.compile_stall_threshold_seconds,
+            global_step=self.global_step,
+            branch="pure_optax_scan",
+        )
+        if self.measured_start is not None:
+            self.timing["compiled_step_seconds"] += step_elapsed
+            self.measured_steps += 1
+        self.last_metrics = metrics
+        self.global_step += 1
+        return metrics
+
+    def _log_or_stage_train_metrics(
+        self,
+        metrics: dict[str, Array],
+        *,
+        epoch: int,
+        pbar: tqdm,
+    ) -> None:
+        _log_jax_train_metrics(
+            self.config,
+            self.logger,
+            pbar,
+            self.pending_train_metrics,
+        )
+        self.pending_train_metrics = None
+        if _should_log_jax_train_metrics(
+            self.global_step,
+            self.log_every_n_steps,
+        ):
+            self.pending_train_metrics = _stage_jax_train_metrics(
+                metrics,
+                epoch=epoch,
+                global_step=self.global_step,
+                total_steps=self.total_steps,
+            )
+
+    def _run_scheduled_work(self, pbar: tqdm) -> None:
+        phase_start = time.perf_counter()
+        self._save_periodic_checkpoint()
+        self._add_non_train_timing(
+            "checkpoint_seconds",
+            time.perf_counter() - phase_start,
+        )
+        self._run_validation_if_due(pbar)
+        self._run_msg_probe_if_due()
+        if self.profile_active and self.global_step >= self.profile_end_step:
+            self._stop_profile()
+
+    def _save_checkpoint(self, step: int) -> None:
+        save_jax_training_state(
+            self.checkpoint_manager,
+            step,
+            self.state.checkpoint_state(),
+            metadata=self.checkpoint_metadata,
+        )
+
+    def _save_periodic_checkpoint(self) -> None:
+        if (
+            self.checkpoint_every_steps > 0
+            and self.global_step % self.checkpoint_every_steps == 0
+        ):
+            self._save_checkpoint(self.global_step)
+
+    def _run_validation_if_due(self, pbar: tqdm) -> None:
+        if not should_run_at_step(self.val_every_n_steps, self.global_step):
+            return
+        phase_start = time.perf_counter()
+        self.last_validation_metrics = _evaluate_jax_validation_loss(
+            datamodule=self.datamodule,
+            trainable_params=self.state.trainable_params,
+            static_state=self.state.static_state,
+            eval_step=self.eval_step,
+            max_steps=self.val_num_steps,
+            use_sharded_step=self.use_sharded_step,
+            data_mesh=self.data_mesh,
+            metric_reduction=self.metric_reduction,
+        )
+        _log_jax_validation_metrics(
+            self.logger,
+            pbar,
+            self.last_validation_metrics,
+            global_step=self.global_step,
+        )
+        self._add_non_train_timing(
+            "validation_seconds",
+            time.perf_counter() - phase_start,
+        )
+
+    def _run_msg_probe_if_due(self) -> None:
+        if not should_run_at_step_or_final(
+            self.msg_probe_every_n_steps,
+            self.global_step,
+            total_steps=self.total_steps,
+            run_at_final_step=bool(self.config.get("msg_probe_at_final_step", False)),
+        ):
+            return
+        phase_start = time.perf_counter()
+        self.last_msg_probe_metrics = _run_distributed_msg_probe_jax(
+            config=self.config,
+            model=self.model,
+            logger=self.logger,
+            variants=self.msg_probe_variants,
+            global_step=self.global_step,
+            trainable_params=self.state.trainable_params,
+            data_mesh=self.data_mesh,
+        )
+        self._add_non_train_timing(
+            "msg_probe_seconds",
+            time.perf_counter() - phase_start,
+        )
+
+    def _stop_profile(self, *, synchronize: bool = True) -> None:
+        phase_start = time.perf_counter()
+        if synchronize:
+            jax.effects_barrier()
+        jax.profiler.stop_trace()
+        self._add_non_train_timing(
+            "profile_seconds",
+            time.perf_counter() - phase_start,
+        )
+        self.profile_active = False
+
+    def _add_non_train_timing(
+        self,
+        name: str,
+        elapsed: float,
+        *,
+        include_measured: bool = True,
+    ) -> None:
+        self.non_train_timing[name] += elapsed
+        if include_measured and self.measured_start is not None:
+            self.measured_non_train_timing[name] += elapsed
+
+    def _finish(self) -> dict[str, object]:
+        jax.block_until_ready(self.state.trainable_params)
+        phase_start = time.perf_counter()
+        nnx.update(self.model, self.state.trainable_params)
+        jax.effects_barrier()
+        self._add_non_train_timing(
+            "model_update_seconds",
+            time.perf_counter() - phase_start,
+        )
+        post_model_update_time = time.perf_counter()
+        if self.profile_active:
+            self._stop_profile(synchronize=False)
+        measured_wall_elapsed = (
+            post_model_update_time - self.measured_start
+            if self.measured_start is not None
+            else 0.0
+        )
+        measured_non_train_elapsed = sum(self.measured_non_train_timing.values())
+        measured_train_elapsed = max(
+            measured_wall_elapsed - measured_non_train_elapsed,
+            0.0,
+        )
+        if (
+            self.global_step > self.start_step
+            and self.checkpoint_manager.latest_step() != self.global_step
+        ):
+            phase_start = time.perf_counter()
+            self._save_checkpoint(self.global_step)
+            self._add_non_train_timing(
+                "checkpoint_seconds",
+                time.perf_counter() - phase_start,
+                include_measured=False,
+            )
+        self.checkpoint_manager.wait_until_finished()
+        wall_elapsed = time.perf_counter() - self.train_start
+        train_elapsed = max(wall_elapsed - sum(self.non_train_timing.values()), 0.0)
+        return self._build_result(
+            wall_elapsed=wall_elapsed,
+            train_elapsed=train_elapsed,
+            measured_wall_elapsed=measured_wall_elapsed,
+            measured_non_train_elapsed=measured_non_train_elapsed,
+            measured_train_elapsed=measured_train_elapsed,
+        )
+
+    def _build_result(
+        self,
+        *,
+        wall_elapsed: float,
+        train_elapsed: float,
+        measured_wall_elapsed: float,
+        measured_non_train_elapsed: float,
+        measured_train_elapsed: float,
+    ) -> dict[str, object]:
+        global_batch_size = int(self.datamodule.global_batch_size)
+        train_metrics: dict[str, float] = {"train/loss": float("nan")}
+        if self.last_metrics:
+            host_metrics = _jax_metrics_to_host(self.last_metrics, prefix="train/")
+            if jax.process_index() == 0:
+                train_metrics = host_metrics
+        result: dict[str, object] = {
+            "run/final_global_step": float(self.global_step),
+            "run/wall_elapsed_seconds": wall_elapsed,
+            "run/train_elapsed_seconds": train_elapsed,
+            "run/non_train_elapsed_seconds": sum(self.non_train_timing.values()),
+            "run/steps_per_second": _rate(self.global_step, train_elapsed),
+            "run/samples_per_second": _rate(
+                self.global_step * global_batch_size,
+                train_elapsed,
+            ),
+            "run/wall_steps_per_second": _rate(self.global_step, wall_elapsed),
+            "run/wall_samples_per_second": _rate(
+                self.global_step * global_batch_size,
+                wall_elapsed,
+            ),
+            "run/measured_steps": float(self.measured_steps),
+            "run/measured_wall_elapsed_seconds": measured_wall_elapsed,
+            "run/measured_non_train_elapsed_seconds": measured_non_train_elapsed,
+            "run/measured_elapsed_seconds": measured_train_elapsed,
+            "run/measured_steps_per_second": _rate(
+                self.measured_steps,
+                measured_train_elapsed,
+            ),
+            "run/measured_samples_per_second": _rate(
+                self.measured_steps * global_batch_size,
+                measured_train_elapsed,
+            ),
+            "run/measured_wall_steps_per_second": _rate(
+                self.measured_steps,
+                measured_wall_elapsed,
+            ),
+            "run/measured_wall_samples_per_second": _rate(
+                self.measured_steps * global_batch_size,
+                measured_wall_elapsed,
+            ),
+            **train_metrics,
+        }
+        result.update(
+            {f"run/{name}": value for name, value in self.non_train_timing.items()}
+        )
+        result.update(self.last_validation_metrics)
+        result.update(self.last_msg_probe_metrics)
+        result.update(
+            {f"run/profile_{name}": value for name, value in self.timing.items()}
+        )
+        measured_microbatches = self.timing["measured_microbatches"]
+        if measured_microbatches > 0:
+            result.update(
+                {
+                    f"run/profile_{name}_per_microbatch": (
+                        self.timing[name] / measured_microbatches
+                    )
+                    for name in _JAX_PROFILE_TIMING_NAMES
+                }
+            )
+        if self.measured_steps > 0:
+            result.update(
+                {
+                    f"run/profile_{name}_per_step": (
+                        self.timing[name] / self.measured_steps
+                    )
+                    for name in _JAX_PROFILE_TIMING_NAMES
+                }
+            )
+        return result
+
+
+def _rate(count: int, elapsed: float) -> float:
+    return float(count) / elapsed if elapsed > 0 else 0.0
+
+
 def _run_jax_training_loop(
     *,
     config: config_dict.ConfigDict,
@@ -1264,422 +1819,18 @@ def _run_jax_training_loop(
     metric_reduction: JaxMetricReduction,
     enable_msg_probe: bool,
 ) -> dict[str, object]:
-    log_every_n_steps = int(config.get("log_every_n_steps", 50))
-    warmup_steps = int(config.get("throughput_warmup_steps", 0))
-    grad_accum_steps = int(config.get("gradient_accumulation_steps", 1))
-    data_parallel_devices = _jax_data_parallel_devices(config)
-    data_mesh = _jax_data_mesh_for_device_count(data_parallel_devices)
-    use_sharded_step = data_parallel_devices > 1
-    (
-        pure_graphdef,
-        pure_trainable_params,
-        pure_static_state,
-        pure_opt_state,
-        pure_optimizer,
-    ) = init_pure_optax_train_state(
-        config,
-        model,
+    return _JaxTrainingLoop(
+        config=config,
+        datamodule=datamodule,
+        model=model,
+        logger=logger,
         total_steps=total_steps,
-    )
-    pure_train_step = make_pure_accumulated_train_step(
-        pure_graphdef,
-        pure_optimizer,
-        sharded=use_sharded_step,
-        data_mesh=data_mesh,
-        log_update_stats=bool(config.get("jax_log_update_stats", False)),
+        checkpoint_manager=checkpoint_manager,
+        resume_step=resume_step,
+        checkpoint_metadata=checkpoint_metadata,
         metric_reduction=metric_reduction,
-    )
-    pure_eval_step = make_pure_eval_step(
-        pure_graphdef,
-        sharded=use_sharded_step,
-        data_mesh=data_mesh,
-        metric_reduction=metric_reduction,
-    )
-    if use_sharded_step:
-        # Commit the training state to the data mesh once so every training
-        # step uses the same input-sharding signature.
-        pure_trainable_params = _replicate_tree_on_data_mesh(
-            pure_trainable_params,
-            data_mesh,
-        )
-        pure_opt_state = _replicate_tree_on_data_mesh(pure_opt_state, data_mesh)
-        pure_static_state = _replicate_tree_on_data_mesh(
-            pure_static_state,
-            data_mesh,
-        )
-    checkpoint_every_steps = int(config.get("checkpoint_every_steps", 0))
-    val_every_n_steps = validation_interval(config, datamodule, total_steps)
-    val_num_steps = validation_steps(config)
-    msg_probe_every_n_steps = (
-        msg_probe_interval(config, datamodule, total_steps) if enable_msg_probe else -1
-    )
-    msg_probe_variants = (
-        msg_probe_variants_from_config(config) if enable_msg_probe else ()
-    )
-
-    def jax_checkpoint_state() -> dict[str, Any]:
-        return {
-            "trainable_params": pure_trainable_params,
-            "static_state": pure_static_state,
-            "opt_state": pure_opt_state,
-        }
-
-    def save_checkpoint(step: int) -> None:
-        save_jax_training_state(
-            checkpoint_manager,
-            step,
-            jax_checkpoint_state(),
-            metadata=checkpoint_metadata,
-        )
-
-    def maybe_save_checkpoint(step: int) -> None:
-        if checkpoint_every_steps <= 0 or step % checkpoint_every_steps != 0:
-            return
-        save_checkpoint(step)
-
-    start_step = 0
-    if resume_step is not None:
-        restored = restore_jax_training_state(
-            checkpoint_manager,
-            int(resume_step),
-            jax_checkpoint_state(),
-            expected_metadata=checkpoint_metadata,
-        )
-        pure_trainable_params = restored["trainable_params"]
-        pure_static_state = restored["static_state"]
-        pure_opt_state = restored["opt_state"]
-        start_step = int(resume_step)
-    timing_barriers = bool(config.get("jax_timing_barriers", False))
-    compile_stall_threshold_seconds = float(
-        config.get("jax_compile_stall_threshold_seconds", 0.0)
-    )
-    profile_dir = str(config.get("jax_profile_dir", ""))
-    profile_start_step = int(config.get("jax_profile_start_step", warmup_steps))
-    profile_steps = int(config.get("jax_profile_steps", 0))
-    profile_end_step = (
-        profile_start_step + profile_steps if profile_steps > 0 else total_steps
-    )
-    profile_started = False
-    profile_active = False
-    timing = {
-        "dataloader_seconds": 0.0,
-        "transfer_seconds": 0.0,
-        "grad_seconds": 0.0,
-        "accumulate_seconds": 0.0,
-        "apply_seconds": 0.0,
-        "compiled_step_seconds": 0.0,
-        "measured_microbatches": 0.0,
-    }
-    non_train_timing = {
-        "checkpoint_seconds": 0.0,
-        "validation_seconds": 0.0,
-        "msg_probe_seconds": 0.0,
-        "model_update_seconds": 0.0,
-        "profile_seconds": 0.0,
-    }
-    measured_non_train_timing = {name: 0.0 for name in non_train_timing}
-
-    def add_non_train_timing(
-        name: str,
-        elapsed: float,
-        *,
-        include_measured: bool = True,
-    ) -> None:
-        non_train_timing[name] += elapsed
-        if include_measured and measured_start is not None:
-            measured_non_train_timing[name] += elapsed
-
-    loop_epochs = max(1, math.ceil(float(config.num_epochs)))
-    global_step = start_step
-    start_epoch = min(start_step // datamodule.train_steps, loop_epochs - 1)
-    last_metrics: dict[str, Array] = {}
-    pending_train_metrics: _StagedJaxTrainMetrics | None = None
-    last_validation_metrics: dict[str, float] = {}
-    last_msg_probe_metrics: dict[str, float] = {}
-    train_start = time.perf_counter()
-    measured_start: float | None = None
-    measured_steps = 0
-    for epoch in range(start_epoch, loop_epochs):
-        epoch_start_batch = (
-            global_step - epoch * datamodule.train_steps if epoch == start_epoch else 0
-        )
-        loader = datamodule.train_loader_for_epoch(epoch, start_batch=epoch_start_batch)
-        loader_iter = iter(loader)
-        pbar = tqdm(
-            total=min(
-                datamodule.train_steps - epoch_start_batch,
-                total_steps - global_step,
-            ),
-            desc=f"Epoch {epoch}",
-            unit="step",
-            disable=jax.process_index() != 0,
-        )
-        while global_step < total_steps:
-            dataloader_elapsed = 0.0
-            transfer_elapsed = 0.0
-            micro_batches = []
-            for _ in range(grad_accum_steps):
-                dataloader_start = time.perf_counter()
-                try:
-                    torch_batch = next(loader_iter)
-                except StopIteration:
-                    break
-                dataloader_elapsed += time.perf_counter() - dataloader_start
-                transfer_start = time.perf_counter()
-                micro_batches.append(torch_batch)
-                transfer_elapsed += time.perf_counter() - transfer_start
-            if len(micro_batches) < grad_accum_steps:
-                break
-            batch = numpy_batch_to_jax(
-                _stack_micro_batches(micro_batches),
-                data_mesh=data_mesh if use_sharded_step else None,
-                batch_axis=1,
-            )
-            if timing_barriers:
-                jax.block_until_ready(batch)
-            timing_enabled = measured_start is not None
-            if timing_enabled:
-                timing["dataloader_seconds"] += dataloader_elapsed
-                timing["transfer_seconds"] += transfer_elapsed
-                timing["measured_microbatches"] += float(grad_accum_steps)
-            if measured_start is None and global_step >= warmup_steps:
-                jax.effects_barrier()
-                measured_start = time.perf_counter()
-                timing_enabled = True
-            if (
-                profile_dir
-                and not profile_started
-                and global_step >= profile_start_step
-            ):
-                phase_start = time.perf_counter()
-                jax.effects_barrier()
-                jax.profiler.start_trace(profile_dir)
-                add_non_train_timing(
-                    "profile_seconds",
-                    time.perf_counter() - phase_start,
-                )
-                profile_started = True
-                profile_active = True
-
-            step_start = time.perf_counter()
-            pure_trainable_params, pure_opt_state, metrics = pure_train_step(
-                pure_trainable_params,
-                pure_static_state,
-                pure_opt_state,
-                batch,
-            )
-            if timing_barriers:
-                jax.block_until_ready((pure_trainable_params, pure_opt_state, metrics))
-            step_elapsed = time.perf_counter() - step_start
-            _raise_on_jax_compile_stall(
-                step_elapsed,
-                threshold_seconds=compile_stall_threshold_seconds,
-                global_step=global_step,
-                branch="pure_optax_scan",
-            )
-            if timing_enabled:
-                timing["compiled_step_seconds"] += step_elapsed
-            last_metrics = metrics
-            global_step += 1
-            if measured_start is not None:
-                measured_steps += 1
-            pbar.update(1)
-            _log_jax_train_metrics(config, logger, pbar, pending_train_metrics)
-            pending_train_metrics = None
-            if _should_log_jax_train_metrics(global_step, log_every_n_steps):
-                pending_train_metrics = _stage_jax_train_metrics(
-                    metrics,
-                    epoch=epoch,
-                    global_step=global_step,
-                    total_steps=total_steps,
-                )
-            phase_start = time.perf_counter()
-            maybe_save_checkpoint(global_step)
-            add_non_train_timing(
-                "checkpoint_seconds",
-                time.perf_counter() - phase_start,
-            )
-            if should_run_at_step(val_every_n_steps, global_step):
-                phase_start = time.perf_counter()
-                last_validation_metrics = _evaluate_jax_validation_loss(
-                    datamodule=datamodule,
-                    trainable_params=pure_trainable_params,
-                    static_state=pure_static_state,
-                    eval_step=pure_eval_step,
-                    max_steps=val_num_steps,
-                    use_sharded_step=use_sharded_step,
-                    data_mesh=data_mesh,
-                    metric_reduction=metric_reduction,
-                )
-                _log_jax_validation_metrics(
-                    logger,
-                    pbar,
-                    last_validation_metrics,
-                    global_step=global_step,
-                )
-                add_non_train_timing(
-                    "validation_seconds",
-                    time.perf_counter() - phase_start,
-                )
-            if should_run_at_step_or_final(
-                msg_probe_every_n_steps,
-                global_step,
-                total_steps=total_steps,
-                run_at_final_step=bool(
-                    config.get("msg_probe_at_final_step", False)
-                ),
-            ):
-                phase_start = time.perf_counter()
-                last_msg_probe_metrics = _run_distributed_msg_probe_jax(
-                    config=config,
-                    model=model,
-                    logger=logger,
-                    variants=msg_probe_variants,
-                    global_step=global_step,
-                    trainable_params=pure_trainable_params,
-                    data_mesh=data_mesh,
-                )
-                add_non_train_timing(
-                    "msg_probe_seconds",
-                    time.perf_counter() - phase_start,
-                )
-            if profile_active and global_step >= profile_end_step:
-                phase_start = time.perf_counter()
-                jax.effects_barrier()
-                jax.profiler.stop_trace()
-                add_non_train_timing(
-                    "profile_seconds",
-                    time.perf_counter() - phase_start,
-                )
-                profile_active = False
-        if pending_train_metrics is not None and (
-            global_step >= total_steps or epoch == loop_epochs - 1
-        ):
-            _log_jax_train_metrics(config, logger, pbar, pending_train_metrics)
-            pending_train_metrics = None
-        pbar.close()
-        _shutdown_torch_loader_iterator(loader_iter)
-        del loader_iter, loader
-        if global_step >= total_steps:
-            break
-    jax.block_until_ready(pure_trainable_params)
-    phase_start = time.perf_counter()
-    nnx.update(model, pure_trainable_params)
-    jax.effects_barrier()
-    add_non_train_timing(
-        "model_update_seconds",
-        time.perf_counter() - phase_start,
-    )
-    post_model_update_time = time.perf_counter()
-    if profile_active:
-        phase_start = time.perf_counter()
-        jax.profiler.stop_trace()
-        add_non_train_timing(
-            "profile_seconds",
-            time.perf_counter() - phase_start,
-        )
-    measured_wall_elapsed = (
-        post_model_update_time - measured_start if measured_start is not None else 0.0
-    )
-    measured_non_train_elapsed = sum(measured_non_train_timing.values())
-    measured_train_elapsed = max(measured_wall_elapsed - measured_non_train_elapsed, 0.0)
-    if global_step > start_step and checkpoint_manager.latest_step() != global_step:
-        phase_start = time.perf_counter()
-        save_checkpoint(global_step)
-        add_non_train_timing(
-            "checkpoint_seconds",
-            time.perf_counter() - phase_start,
-            include_measured=False,
-        )
-    checkpoint_manager.wait_until_finished()
-    wall_elapsed = time.perf_counter() - train_start
-    train_elapsed = max(
-        wall_elapsed
-        - sum(non_train_timing.values()),
-        0.0,
-    )
-    global_batch_size = int(datamodule.global_batch_size)
-    train_metrics: dict[str, float] = {"train/loss": float("nan")}
-    if last_metrics:
-        host_train_metrics = _jax_metrics_to_host(last_metrics, prefix="train/")
-        if jax.process_index() == 0:
-            train_metrics = host_train_metrics
-    result = {
-        "run/final_global_step": float(global_step),
-        "run/wall_elapsed_seconds": wall_elapsed,
-        "run/train_elapsed_seconds": train_elapsed,
-        "run/non_train_elapsed_seconds": sum(non_train_timing.values()),
-        "run/steps_per_second": (
-            float(global_step) / train_elapsed if train_elapsed > 0 else 0.0
-        ),
-        "run/samples_per_second": (
-            float(global_step) * global_batch_size / train_elapsed
-            if train_elapsed > 0
-            else 0.0
-        ),
-        "run/wall_steps_per_second": (
-            float(global_step) / wall_elapsed if wall_elapsed > 0 else 0.0
-        ),
-        "run/wall_samples_per_second": (
-            float(global_step) * global_batch_size / wall_elapsed
-            if wall_elapsed > 0
-            else 0.0
-        ),
-        "run/measured_steps": float(measured_steps),
-        "run/measured_wall_elapsed_seconds": measured_wall_elapsed,
-        "run/measured_non_train_elapsed_seconds": measured_non_train_elapsed,
-        "run/measured_elapsed_seconds": measured_train_elapsed,
-        "run/measured_steps_per_second": (
-            float(measured_steps) / measured_train_elapsed
-            if measured_train_elapsed > 0
-            else 0.0
-        ),
-        "run/measured_samples_per_second": (
-            float(measured_steps) * global_batch_size / measured_train_elapsed
-            if measured_train_elapsed > 0
-            else 0.0
-        ),
-        "run/measured_wall_steps_per_second": (
-            float(measured_steps) / measured_wall_elapsed
-            if measured_wall_elapsed > 0
-            else 0.0
-        ),
-        "run/measured_wall_samples_per_second": (
-            float(measured_steps) * global_batch_size / measured_wall_elapsed
-            if measured_wall_elapsed > 0
-            else 0.0
-        ),
-        **train_metrics,
-    }
-    for name, value in non_train_timing.items():
-        result[f"run/{name}"] = value
-    result.update(last_validation_metrics)
-    result.update(last_msg_probe_metrics)
-    for name, value in timing.items():
-        result[f"run/profile_{name}"] = value
-    if timing["measured_microbatches"] > 0:
-        for name in (
-            "dataloader_seconds",
-            "transfer_seconds",
-            "grad_seconds",
-            "accumulate_seconds",
-            "apply_seconds",
-            "compiled_step_seconds",
-        ):
-            result[f"run/profile_{name}_per_microbatch"] = (
-                timing[name] / timing["measured_microbatches"]
-            )
-    if measured_steps > 0:
-        for name in (
-            "dataloader_seconds",
-            "transfer_seconds",
-            "grad_seconds",
-            "accumulate_seconds",
-            "apply_seconds",
-            "compiled_step_seconds",
-        ):
-            result[f"run/profile_{name}_per_step"] = timing[name] / measured_steps
-    return result
+        enable_msg_probe=enable_msg_probe,
+    ).run()
 
 
 def _log_jax_train_metrics(

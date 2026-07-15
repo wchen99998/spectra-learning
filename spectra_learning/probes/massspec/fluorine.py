@@ -8,7 +8,7 @@ import itertools
 import json
 import logging
 from pathlib import Path
-from typing import Any, Callable, NamedTuple, cast
+from typing import Any, Callable, Iterator, NamedTuple, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -928,6 +928,342 @@ def predict_finetuned(
     return np.concatenate(targets, axis=0), np.concatenate(logits, axis=0)
 
 
+class _AdaptationLoaders(NamedTuple):
+    data: FluorineData
+    train: DataLoader
+    val: DataLoader
+    test: DataLoader | None
+
+
+class _AdaptationTrainingResult(NamedTuple):
+    best_epoch: int
+    best_val: dict[str, float]
+    best_state: dict[str, dict[str, torch.Tensor]]
+    history: list[dict[str, Any]]
+
+
+def _load_cached_adaptation_state(
+    *,
+    state_path: Path,
+    device: torch.device,
+    mode: str,
+    config_path: Path,
+    checkpoint_path: Path,
+    pooling: str,
+    requested_hparams: dict[str, Any],
+    max_train_samples: int | None,
+    max_val_samples: int | None,
+) -> dict[str, Any] | None:
+    if not state_path.exists():
+        return None
+    state = torch.load(state_path, map_location=device)
+    state_hparams = state["hparams"]
+    if (
+        state["mode"] == mode
+        and state["config_path"] == str(config_path)
+        and state["checkpoint_path"] == str(checkpoint_path)
+        and state["pooling"] == pooling
+        and all(state_hparams.get(key) == value for key, value in requested_hparams.items())
+        and state["max_train_samples"] == max_train_samples
+        and state["max_val_samples"] == max_val_samples
+    ):
+        return state
+    return None
+
+
+def _build_adaptation_loaders(
+    *,
+    config: Any,
+    cache_dir: Path,
+    batch_size: int,
+    revision: str,
+    seed: int,
+    max_train_samples: int | None,
+    max_val_samples: int | None,
+    max_test_samples: int | None,
+    num_workers: int,
+    eval_test_every_epoch: bool,
+    distributed_world_size: int,
+    distributed_rank: int,
+    distributed_local_rank: int,
+) -> _AdaptationLoaders:
+    data = build_fluorine_data(
+        config=config,
+        cache_dir=cache_dir,
+        batch_size=batch_size,
+        revision=revision,
+        distributed_world_size=distributed_world_size,
+        distributed_rank=distributed_rank,
+        distributed_local_rank=distributed_local_rank,
+    )
+    train_loader = _make_loader(
+        data,
+        "train",
+        shuffle=True,
+        seed=seed,
+        max_samples=max_train_samples,
+        dreams_only=False,
+        num_workers=num_workers,
+        distributed_world_size=distributed_world_size,
+        distributed_rank=distributed_rank,
+    )
+    val_loader = _make_loader(
+        data,
+        "val",
+        shuffle=False,
+        seed=seed + 10_000,
+        max_samples=max_val_samples,
+        dreams_only=False,
+        num_workers=num_workers,
+    )
+    test_loader = None
+    if eval_test_every_epoch:
+        test_loader = _make_loader(
+            data,
+            "test",
+            shuffle=False,
+            seed=seed + 20_000,
+            max_samples=max_test_samples,
+            dreams_only=False,
+            num_workers=num_workers,
+        )
+    return _AdaptationLoaders(data, train_loader, val_loader, test_loader)
+
+
+def _build_adaptation_pooler(
+    *,
+    config: Any,
+    pooling: str,
+    device: torch.device,
+) -> tuple[torch.nn.Module, int, int]:
+    covariance_dim = int(config.get("covariance_pooling_dim", 64))
+    input_dim = covariance_dim * covariance_dim
+    if pooling == "single_pair_covariance":
+        pooler: torch.nn.Module = SinglePairCovariancePool(
+            single_dim=int(config.model_dim),
+            pair_dim=int(config.get("pairmixer_pair_dim", config.model_dim)),
+            compressed_dim=covariance_dim,
+        ).to(device)
+    else:
+        pooler = CovariancePool(
+            input_dim=int(config.model_dim),
+            compressed_dim=covariance_dim,
+        ).to(device)
+    return pooler, covariance_dim, input_dim
+
+
+def _adaptation_state(
+    *,
+    metadata: dict[str, Any],
+    result: _AdaptationTrainingResult,
+    complete: bool,
+) -> dict[str, Any]:
+    state = {"mode": metadata["mode"], "complete": complete}
+    state.update(metadata)
+    state.update(result.best_state)
+    state.update(
+        best_epoch=int(result.best_epoch),
+        best_val=result.best_val,
+        test=None,
+        history=result.history,
+    )
+    return state
+
+
+def _train_adaptation_epoch(
+    *,
+    mode: str,
+    epoch_idx: int,
+    epochs: int,
+    finetune_module: torch.nn.Module,
+    train_loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    autocast_dtype: torch.dtype | None,
+    focal_alpha: float,
+    focal_gamma: float,
+    grad_scaler: Any,
+    is_main: bool,
+) -> float:
+    sampler = getattr(train_loader, "sampler", None)
+    if hasattr(sampler, "set_epoch"):
+        sampler.set_epoch(epoch_idx)
+    finetune_module.train()
+    running_loss = 0.0
+    seen = 0
+    pbar = tqdm(
+        train_loader,
+        desc=f"{mode} epoch {epoch_idx + 1}/{epochs}",
+        unit="batch",
+        dynamic_ncols=True,
+        mininterval=5.0,
+        disable=not is_main,
+    )
+    for batch in pbar:
+        batch = _move_batch(batch, device)
+        optimizer.zero_grad(set_to_none=True)
+        with torch.autocast(
+            device_type=device.type,
+            dtype=autocast_dtype if autocast_dtype is not None else torch.bfloat16,
+            enabled=device.type == "cuda" and autocast_dtype is not None,
+        ):
+            logits = finetune_module(batch)
+            loss = binary_focal_loss_with_logits(
+                logits.float(),
+                batch["label"],
+                alpha=focal_alpha,
+                gamma=focal_gamma,
+            )
+        if grad_scaler.is_enabled():
+            grad_scaler.scale(loss).backward()
+            grad_scaler.step(optimizer)
+            grad_scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
+        batch_size = int(batch["label"].shape[0])
+        running_loss += float(loss.detach().cpu()) * batch_size
+        seen += batch_size
+        if is_main:
+            pbar.set_postfix(loss=f"{running_loss / float(seen):.5f}")
+    return running_loss / float(seen)
+
+
+def _evaluate_adaptation_epoch(
+    *,
+    epoch: int,
+    train_loss: float,
+    finetune_module: torch.nn.Module,
+    val_loader: DataLoader,
+    test_loader: DataLoader | None,
+    device: torch.device,
+    autocast_dtype: torch.dtype | None,
+    eval_test_every_epoch: bool,
+) -> tuple[dict[str, float], dict[str, Any]]:
+    val_targets, val_logits = predict_finetuned(
+        finetune_module=finetune_module,
+        loader=val_loader,
+        device=device,
+        autocast_dtype=autocast_dtype,
+    )
+    val_metrics = _metric_dict(val_targets, val_logits, "val")
+    history_row: dict[str, Any] = {
+        "epoch": epoch,
+        "train_loss": train_loss,
+        "val": val_metrics,
+    }
+    if eval_test_every_epoch:
+        test_targets, test_logits = predict_finetuned(
+            finetune_module=finetune_module,
+            loader=cast(DataLoader, test_loader),
+            device=device,
+            autocast_dtype=autocast_dtype,
+        )
+        history_row["test"] = _metric_dict(test_targets, test_logits, "test")
+    return val_metrics, history_row
+
+
+def _run_adaptation_epochs(
+    *,
+    mode: str,
+    state_path: Path,
+    state_metadata: dict[str, Any],
+    capture_best_state: Callable[[], dict[str, dict[str, torch.Tensor]]],
+    finetune_module: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    loaders: _AdaptationLoaders,
+    device: torch.device,
+    autocast_dtype: torch.dtype | None,
+    focal_alpha: float,
+    focal_gamma: float,
+    select_metric: str,
+    epochs: int,
+    patience: int,
+    progress_output_prefix: StoragePath | None,
+    eval_test_every_epoch: bool,
+    is_main: bool,
+) -> _AdaptationTrainingResult:
+    best_value = -float("inf")
+    best_epoch = 0
+    best_val: dict[str, float] = {}
+    best_state: dict[str, dict[str, torch.Tensor]] = {}
+    history: list[dict[str, Any]] = []
+    epochs_without_improvement = 0
+    grad_scaler = build_grad_scaler(autocast_dtype, device)
+    best_state_path = state_path.with_name(f"{state_path.stem}.best.pt")
+
+    for epoch_idx in range(epochs):
+        train_loss = _train_adaptation_epoch(
+            mode=mode,
+            epoch_idx=epoch_idx,
+            epochs=epochs,
+            finetune_module=finetune_module,
+            train_loader=loaders.train,
+            optimizer=optimizer,
+            device=device,
+            autocast_dtype=autocast_dtype,
+            focal_alpha=focal_alpha,
+            focal_gamma=focal_gamma,
+            grad_scaler=grad_scaler,
+            is_main=is_main,
+        )
+        val_metrics, history_row = _evaluate_adaptation_epoch(
+            epoch=epoch_idx + 1,
+            train_loss=train_loss,
+            finetune_module=finetune_module,
+            val_loader=loaders.val,
+            test_loader=loaders.test,
+            device=device,
+            autocast_dtype=autocast_dtype,
+            eval_test_every_epoch=eval_test_every_epoch,
+        )
+        history.append(history_row)
+        if is_main and progress_output_prefix is not None:
+            write_training_history_outputs(
+                output_prefix=progress_output_prefix,
+                history=history,
+            )
+        current_value = val_metrics[f"val/{select_metric}"]
+        if current_value > best_value:
+            best_value = current_value
+            best_epoch = epoch_idx + 1
+            best_val = dict(val_metrics)
+            best_state = capture_best_state()
+            epochs_without_improvement = 0
+            if is_main:
+                result = _AdaptationTrainingResult(
+                    best_epoch,
+                    best_val,
+                    best_state,
+                    history,
+                )
+                state_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(
+                    _adaptation_state(
+                        metadata=state_metadata,
+                        result=result,
+                        complete=False,
+                    ),
+                    best_state_path,
+                )
+        else:
+            epochs_without_improvement += 1
+        if is_main:
+            log.info(
+                "%s epoch=%d/%d train_loss=%.5f val_ap=%.4f val_auc=%.4f",
+                mode,
+                epoch_idx + 1,
+                epochs,
+                train_loss,
+                val_metrics["val/average_precision"],
+                val_metrics["val/roc_auc"],
+            )
+        if epochs_without_improvement >= patience:
+            break
+
+    return _AdaptationTrainingResult(best_epoch, best_val, best_state, history)
+
+
 def train_or_load_finetuned(
     *,
     state_path: Path,
@@ -979,76 +1315,41 @@ def train_or_load_finetuned(
         "focal_alpha": focal_alpha,
         "focal_gamma": float(focal_gamma),
     }
-    if state_path.exists():
-        state = torch.load(state_path, map_location=device)
-        state_hparams = state["hparams"]
-        if (
-            state["mode"] == "finetune"
-            and state["config_path"] == str(config_path)
-            and state["checkpoint_path"] == str(checkpoint_path)
-            and state["pooling"] == pooling
-            and all(state_hparams.get(key) == value for key, value in requested_hparams.items())
-            and state["max_train_samples"] == max_train_samples
-            and state["max_val_samples"] == max_val_samples
-        ):
-            model.load_state_dict(state["model_state"])
-            return state
+    state = _load_cached_adaptation_state(
+        state_path=state_path,
+        device=device,
+        mode="finetune",
+        config_path=config_path,
+        checkpoint_path=checkpoint_path,
+        pooling=pooling,
+        requested_hparams=requested_hparams,
+        max_train_samples=max_train_samples,
+        max_val_samples=max_val_samples,
+    )
+    if state is not None:
+        model.load_state_dict(state["model_state"])
+        return state
 
-    data = build_fluorine_data(
+    loaders = _build_adaptation_loaders(
         config=config,
         cache_dir=cache_dir,
         batch_size=batch_size,
         revision=revision,
+        seed=seed,
+        max_train_samples=max_train_samples,
+        max_val_samples=max_val_samples,
+        max_test_samples=max_test_samples,
+        num_workers=num_workers,
+        eval_test_every_epoch=eval_test_every_epoch,
         distributed_world_size=distributed_world_size,
         distributed_rank=distributed_rank,
         distributed_local_rank=distributed_local_rank,
     )
-    train_loader = _make_loader(
-        data,
-        "train",
-        shuffle=True,
-        seed=seed,
-        max_samples=max_train_samples,
-        dreams_only=False,
-        num_workers=num_workers,
-        distributed_world_size=distributed_world_size,
-        distributed_rank=distributed_rank,
+    pooler, covariance_dim, input_dim = _build_adaptation_pooler(
+        config=config,
+        pooling=pooling,
+        device=device,
     )
-    val_loader = _make_loader(
-        data,
-        "val",
-        shuffle=False,
-        seed=seed + 10_000,
-        max_samples=max_val_samples,
-        dreams_only=False,
-        num_workers=num_workers,
-    )
-    test_loader = (
-        _make_loader(
-            data,
-            "test",
-            shuffle=False,
-            seed=seed + 20_000,
-            max_samples=max_test_samples,
-            dreams_only=False,
-            num_workers=num_workers,
-        )
-        if eval_test_every_epoch
-        else None
-    )
-    covariance_dim = int(config.get("covariance_pooling_dim", 64))
-    input_dim = covariance_dim * covariance_dim
-    if pooling == "single_pair_covariance":
-        pooler: torch.nn.Module = SinglePairCovariancePool(
-            single_dim=int(config.model_dim),
-            pair_dim=int(config.get("pairmixer_pair_dim", config.model_dim)),
-            compressed_dim=covariance_dim,
-        ).to(device)
-    else:
-        pooler = CovariancePool(
-            input_dim=int(config.model_dim),
-            compressed_dim=covariance_dim,
-        ).to(device)
     checkpoint = load_torch_checkpoint(
         checkpoint_path,
         map_location="cpu",
@@ -1094,158 +1395,64 @@ def train_or_load_finetuned(
         ]
     )
     focal_alpha_value = (
-        1.0 - float(data.metadata["train_positive"]) / float(data.metadata["train_size"])
+        1.0
+        - float(loaders.data.metadata["train_positive"])
+        / float(loaders.data.metadata["train_size"])
         if focal_alpha == "auto"
         else float(focal_alpha)
     )
-    best_value = -float("inf")
-    best_epoch = 0
-    best_val: dict[str, float] = {}
-    best_model_state: dict[str, torch.Tensor] = {}
-    best_pooler_state: dict[str, torch.Tensor] = {}
-    best_classifier_state: dict[str, torch.Tensor] = {}
-    history: list[dict[str, Any]] = []
-    epochs_without_improvement = 0
-    use_autocast = device.type == "cuda" and autocast_dtype is not None
-    grad_scaler = build_grad_scaler(autocast_dtype, device)
-    best_state_path = state_path.with_name(f"{state_path.stem}.best.pt")
+    state_metadata = {
+        "mode": "finetune",
+        "config_path": str(config_path),
+        "checkpoint_path": str(checkpoint_path),
+        "input_dim": int(input_dim),
+        "covariance_dim": int(covariance_dim),
+        "pooling": pooling,
+        "pair_dim": int(config.get("pairmixer_pair_dim", config.model_dim)),
+        "hparams": requested_hparams,
+        "autocast_dtype": _autocast_dtype_name(autocast_dtype),
+        "focal_alpha": focal_alpha_value,
+        "focal_gamma": focal_gamma,
+        "distributed_world_size": distributed_world_size,
+        "train_size": int(loaders.data.metadata["train_size"]),
+        "train_positive": int(loaders.data.metadata["train_positive"]),
+        "val_size": int(loaders.data.metadata["val_size"]),
+        "val_positive": int(loaders.data.metadata["val_positive"]),
+        "max_train_samples": max_train_samples,
+        "max_val_samples": max_val_samples,
+    }
 
-    def make_state(
-        *,
-        complete: bool,
-    ) -> dict[str, Any]:
+    def capture_best_state() -> dict[str, dict[str, torch.Tensor]]:
         return {
-            "mode": "finetune",
-            "complete": complete,
-            "config_path": str(config_path),
-            "checkpoint_path": str(checkpoint_path),
-            "input_dim": int(input_dim),
-            "covariance_dim": int(covariance_dim),
-            "pooling": pooling,
-            "pair_dim": int(config.get("pairmixer_pair_dim", config.model_dim)),
-            "model_state": best_model_state,
-            "pooler_state": best_pooler_state,
-            "classifier_state": best_classifier_state,
-            "best_epoch": int(best_epoch),
-            "best_val": best_val,
-            "test": None,
-            "history": history,
-            "hparams": requested_hparams,
-            "autocast_dtype": _autocast_dtype_name(autocast_dtype),
-            "focal_alpha": focal_alpha_value,
-            "focal_gamma": focal_gamma,
-            "distributed_world_size": distributed_world_size,
-            "train_size": int(data.metadata["train_size"]),
-            "train_positive": int(data.metadata["train_positive"]),
-            "val_size": int(data.metadata["val_size"]),
-            "val_positive": int(data.metadata["val_positive"]),
-            "max_train_samples": max_train_samples,
-            "max_val_samples": max_val_samples,
+            "model_state": _module_state_to_cpu(model),
+            "pooler_state": _module_state_to_cpu(pooler),
+            "classifier_state": _module_state_to_cpu(classifier),
         }
 
-    for epoch_idx in range(epochs):
-        sampler = getattr(train_loader, "sampler", None)
-        if hasattr(sampler, "set_epoch"):
-            sampler.set_epoch(epoch_idx)
-        finetune_module.train()
-        running_loss = 0.0
-        seen = 0
-        pbar = tqdm(
-            train_loader,
-            desc=f"finetune epoch {epoch_idx + 1}/{epochs}",
-            unit="batch",
-            dynamic_ncols=True,
-            mininterval=5.0,
-            disable=not is_main,
-        )
-        for batch in pbar:
-            batch = _move_batch(batch, device)
-            optimizer.zero_grad(set_to_none=True)
-            with torch.autocast(
-                device_type=device.type,
-                dtype=autocast_dtype if autocast_dtype is not None else torch.bfloat16,
-                enabled=use_autocast,
-            ):
-                logits = finetune_module(batch)
-                loss = binary_focal_loss_with_logits(
-                    logits.float(),
-                    batch["label"],
-                    alpha=focal_alpha_value,
-                    gamma=focal_gamma,
-                )
-            if grad_scaler.is_enabled():
-                grad_scaler.scale(loss).backward()
-                grad_scaler.step(optimizer)
-                grad_scaler.update()
-            else:
-                loss.backward()
-                optimizer.step()
-            running_loss += float(loss.detach().cpu()) * int(batch["label"].shape[0])
-            seen += int(batch["label"].shape[0])
-            if is_main:
-                pbar.set_postfix(loss=f"{running_loss / float(seen):.5f}")
+    result = _run_adaptation_epochs(
+        mode="finetune",
+        state_path=state_path,
+        state_metadata=state_metadata,
+        capture_best_state=capture_best_state,
+        finetune_module=finetune_module,
+        optimizer=optimizer,
+        loaders=loaders,
+        device=device,
+        autocast_dtype=autocast_dtype,
+        focal_alpha=focal_alpha_value,
+        focal_gamma=focal_gamma,
+        select_metric=select_metric,
+        epochs=epochs,
+        patience=patience,
+        progress_output_prefix=progress_output_prefix,
+        eval_test_every_epoch=eval_test_every_epoch,
+        is_main=is_main,
+    )
+    model.load_state_dict(result.best_state["model_state"])
+    pooler.load_state_dict(result.best_state["pooler_state"])
+    classifier.load_state_dict(result.best_state["classifier_state"])
 
-        val_targets, val_logits = predict_finetuned(
-            finetune_module=finetune_module,
-            loader=val_loader,
-            device=device,
-            autocast_dtype=autocast_dtype,
-        )
-        val_metrics = _metric_dict(val_targets, val_logits, "val")
-        history_row: dict[str, Any] = {
-            "epoch": epoch_idx + 1,
-            "train_loss": running_loss / float(seen),
-            "val": val_metrics,
-        }
-        if eval_test_every_epoch:
-            epoch_test_targets, epoch_test_logits = predict_finetuned(
-                finetune_module=finetune_module,
-                loader=test_loader,
-                device=device,
-                autocast_dtype=autocast_dtype,
-            )
-            history_row["test"] = _metric_dict(
-                epoch_test_targets,
-                epoch_test_logits,
-                "test",
-            )
-        history.append(history_row)
-        if is_main and progress_output_prefix is not None:
-            write_training_history_outputs(
-                output_prefix=progress_output_prefix,
-                history=history,
-            )
-        current_value = val_metrics[f"val/{select_metric}"]
-        if current_value > best_value:
-            best_value = current_value
-            best_epoch = epoch_idx + 1
-            best_val = dict(val_metrics)
-            best_model_state = _module_state_to_cpu(model)
-            best_pooler_state = _module_state_to_cpu(pooler)
-            best_classifier_state = _module_state_to_cpu(classifier)
-            epochs_without_improvement = 0
-            if is_main:
-                state_path.parent.mkdir(parents=True, exist_ok=True)
-                torch.save(make_state(complete=False), best_state_path)
-        else:
-            epochs_without_improvement += 1
-        if is_main:
-            log.info(
-                "finetune epoch=%d/%d train_loss=%.5f val_ap=%.4f val_auc=%.4f",
-                epoch_idx + 1,
-                epochs,
-                running_loss / float(seen),
-                val_metrics["val/average_precision"],
-                val_metrics["val/roc_auc"],
-            )
-        if epochs_without_improvement >= patience:
-            break
-
-    model.load_state_dict(best_model_state)
-    pooler.load_state_dict(best_pooler_state)
-    classifier.load_state_dict(best_classifier_state)
-
-    state = make_state(complete=True)
+    state = _adaptation_state(metadata=state_metadata, result=result, complete=True)
     if is_main:
         state_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(state, state_path)
@@ -1301,77 +1508,42 @@ def train_or_load_lora(
         "epochs": int(epochs),
         "patience": int(patience),
     }
-    if state_path.exists():
-        state = torch.load(state_path, map_location=device)
-        state_hparams = state["hparams"]
-        if (
-            state["mode"] == "lora"
-            and state["config_path"] == str(config_path)
-            and state["checkpoint_path"] == str(checkpoint_path)
-            and state["pooling"] == pooling
-            and all(state_hparams.get(key) == value for key, value in requested_hparams.items())
-            and state["max_train_samples"] == max_train_samples
-            and state["max_val_samples"] == max_val_samples
-        ):
-            model.encoder.requires_grad_(False)
-            load_fluorine_lora_state(model.encoder, state)
-            return state
+    state = _load_cached_adaptation_state(
+        state_path=state_path,
+        device=device,
+        mode="lora",
+        config_path=config_path,
+        checkpoint_path=checkpoint_path,
+        pooling=pooling,
+        requested_hparams=requested_hparams,
+        max_train_samples=max_train_samples,
+        max_val_samples=max_val_samples,
+    )
+    if state is not None:
+        model.encoder.requires_grad_(False)
+        load_fluorine_lora_state(model.encoder, state)
+        return state
 
-    data = build_fluorine_data(
+    loaders = _build_adaptation_loaders(
         config=config,
         cache_dir=cache_dir,
         batch_size=batch_size,
         revision=revision,
+        seed=seed,
+        max_train_samples=max_train_samples,
+        max_val_samples=max_val_samples,
+        max_test_samples=max_test_samples,
+        num_workers=num_workers,
+        eval_test_every_epoch=eval_test_every_epoch,
         distributed_world_size=distributed_world_size,
         distributed_rank=distributed_rank,
         distributed_local_rank=distributed_local_rank,
     )
-    train_loader = _make_loader(
-        data,
-        "train",
-        shuffle=True,
-        seed=seed,
-        max_samples=max_train_samples,
-        dreams_only=False,
-        num_workers=num_workers,
-        distributed_world_size=distributed_world_size,
-        distributed_rank=distributed_rank,
+    pooler, covariance_dim, input_dim = _build_adaptation_pooler(
+        config=config,
+        pooling=pooling,
+        device=device,
     )
-    val_loader = _make_loader(
-        data,
-        "val",
-        shuffle=False,
-        seed=seed + 10_000,
-        max_samples=max_val_samples,
-        dreams_only=False,
-        num_workers=num_workers,
-    )
-    test_loader = (
-        _make_loader(
-            data,
-            "test",
-            shuffle=False,
-            seed=seed + 20_000,
-            max_samples=max_test_samples,
-            dreams_only=False,
-            num_workers=num_workers,
-        )
-        if eval_test_every_epoch
-        else None
-    )
-    covariance_dim = int(config.get("covariance_pooling_dim", 64))
-    input_dim = covariance_dim * covariance_dim
-    if pooling == "single_pair_covariance":
-        pooler: torch.nn.Module = SinglePairCovariancePool(
-            single_dim=int(config.model_dim),
-            pair_dim=int(config.get("pairmixer_pair_dim", config.model_dim)),
-            compressed_dim=covariance_dim,
-        ).to(device)
-    else:
-        pooler = CovariancePool(
-            input_dim=int(config.model_dim),
-            compressed_dim=covariance_dim,
-        ).to(device)
     classifier = MLPClassifier(
         input_dim=input_dim,
         hidden_dim=hidden_dim,
@@ -1412,158 +1584,62 @@ def train_or_load_lora(
             },
         ]
     )
-    focal_alpha = 1.0 - float(data.metadata["train_positive"]) / float(
-        data.metadata["train_size"]
+    focal_alpha = 1.0 - float(loaders.data.metadata["train_positive"]) / float(
+        loaders.data.metadata["train_size"]
     )
     focal_gamma = 2.0
-    best_value = -float("inf")
-    best_epoch = 0
-    best_val: dict[str, float] = {}
-    best_lora_state: dict[str, torch.Tensor] = {}
-    best_pooler_state: dict[str, torch.Tensor] = {}
-    best_classifier_state: dict[str, torch.Tensor] = {}
-    history: list[dict[str, Any]] = []
-    epochs_without_improvement = 0
-    use_autocast = device.type == "cuda" and autocast_dtype is not None
-    grad_scaler = build_grad_scaler(autocast_dtype, device)
-    best_state_path = state_path.with_name(f"{state_path.stem}.best.pt")
+    state_metadata = {
+        "mode": "lora",
+        "config_path": str(config_path),
+        "checkpoint_path": str(checkpoint_path),
+        "input_dim": int(input_dim),
+        "covariance_dim": int(covariance_dim),
+        "pooling": pooling,
+        "pair_dim": int(config.get("pairmixer_pair_dim", config.model_dim)),
+        "lora_config": lora_config,
+        "hparams": requested_hparams,
+        "autocast_dtype": _autocast_dtype_name(autocast_dtype),
+        "focal_alpha": focal_alpha,
+        "focal_gamma": focal_gamma,
+        "train_size": int(loaders.data.metadata["train_size"]),
+        "train_positive": int(loaders.data.metadata["train_positive"]),
+        "val_size": int(loaders.data.metadata["val_size"]),
+        "val_positive": int(loaders.data.metadata["val_positive"]),
+        "max_train_samples": max_train_samples,
+        "max_val_samples": max_val_samples,
+    }
 
-    def make_state(
-        *,
-        complete: bool,
-    ) -> dict[str, Any]:
+    def capture_best_state() -> dict[str, dict[str, torch.Tensor]]:
         return {
-            "mode": "lora",
-            "complete": complete,
-            "config_path": str(config_path),
-            "checkpoint_path": str(checkpoint_path),
-            "input_dim": int(input_dim),
-            "covariance_dim": int(covariance_dim),
-            "pooling": pooling,
-            "pair_dim": int(config.get("pairmixer_pair_dim", config.model_dim)),
-            "lora_config": lora_config,
-            "lora_state": best_lora_state,
-            "pooler_state": best_pooler_state,
-            "classifier_state": best_classifier_state,
-            "best_epoch": int(best_epoch),
-            "best_val": best_val,
-            "test": None,
-            "history": history,
-            "hparams": requested_hparams,
-            "autocast_dtype": _autocast_dtype_name(autocast_dtype),
-            "focal_alpha": focal_alpha,
-            "focal_gamma": focal_gamma,
-            "train_size": int(data.metadata["train_size"]),
-            "train_positive": int(data.metadata["train_positive"]),
-            "val_size": int(data.metadata["val_size"]),
-            "val_positive": int(data.metadata["val_positive"]),
-            "max_train_samples": max_train_samples,
-            "max_val_samples": max_val_samples,
+            "lora_state": lora_state_dict(model.encoder),
+            "pooler_state": _module_state_to_cpu(pooler),
+            "classifier_state": _module_state_to_cpu(classifier),
         }
 
-    for epoch_idx in range(epochs):
-        sampler = getattr(train_loader, "sampler", None)
-        if hasattr(sampler, "set_epoch"):
-            sampler.set_epoch(epoch_idx)
-        finetune_module.train()
-        running_loss = 0.0
-        seen = 0
-        pbar = tqdm(
-            train_loader,
-            desc=f"lora epoch {epoch_idx + 1}/{epochs}",
-            unit="batch",
-            dynamic_ncols=True,
-            mininterval=5.0,
-            disable=not is_main,
-        )
-        for batch in pbar:
-            batch = _move_batch(batch, device)
-            optimizer.zero_grad(set_to_none=True)
-            with torch.autocast(
-                device_type=device.type,
-                dtype=autocast_dtype if autocast_dtype is not None else torch.bfloat16,
-                enabled=use_autocast,
-            ):
-                logits = finetune_module(batch)
-                loss = binary_focal_loss_with_logits(
-                    logits.float(),
-                    batch["label"],
-                    alpha=focal_alpha,
-                    gamma=focal_gamma,
-                )
-            if grad_scaler.is_enabled():
-                grad_scaler.scale(loss).backward()
-                grad_scaler.step(optimizer)
-                grad_scaler.update()
-            else:
-                loss.backward()
-                optimizer.step()
-            running_loss += float(loss.detach().cpu()) * int(batch["label"].shape[0])
-            seen += int(batch["label"].shape[0])
-            if is_main:
-                pbar.set_postfix(loss=f"{running_loss / float(seen):.5f}")
+    result = _run_adaptation_epochs(
+        mode="lora",
+        state_path=state_path,
+        state_metadata=state_metadata,
+        capture_best_state=capture_best_state,
+        finetune_module=finetune_module,
+        optimizer=optimizer,
+        loaders=loaders,
+        device=device,
+        autocast_dtype=autocast_dtype,
+        focal_alpha=focal_alpha,
+        focal_gamma=focal_gamma,
+        select_metric="average_precision",
+        epochs=epochs,
+        patience=patience,
+        progress_output_prefix=progress_output_prefix,
+        eval_test_every_epoch=eval_test_every_epoch,
+        is_main=is_main,
+    )
+    load_lora_state_dict(model.encoder, result.best_state["lora_state"])
+    pooler.load_state_dict(result.best_state["pooler_state"])
+    classifier.load_state_dict(result.best_state["classifier_state"])
 
-        val_targets, val_logits = predict_finetuned(
-            finetune_module=finetune_module,
-            loader=val_loader,
-            device=device,
-            autocast_dtype=autocast_dtype,
-        )
-        val_metrics = _metric_dict(val_targets, val_logits, "val")
-        history_row: dict[str, Any] = {
-            "epoch": epoch_idx + 1,
-            "train_loss": running_loss / float(seen),
-            "val": val_metrics,
-        }
-        if eval_test_every_epoch:
-            epoch_test_targets, epoch_test_logits = predict_finetuned(
-                finetune_module=finetune_module,
-                loader=test_loader,
-                device=device,
-                autocast_dtype=autocast_dtype,
-            )
-            history_row["test"] = _metric_dict(
-                epoch_test_targets,
-                epoch_test_logits,
-                "test",
-            )
-        history.append(history_row)
-        if is_main and progress_output_prefix is not None:
-            write_training_history_outputs(
-                output_prefix=progress_output_prefix,
-                history=history,
-            )
-        current_value = val_metrics["val/average_precision"]
-        if current_value > best_value:
-            best_value = current_value
-            best_epoch = epoch_idx + 1
-            best_val = dict(val_metrics)
-            best_lora_state = lora_state_dict(model.encoder)
-            best_pooler_state = _module_state_to_cpu(pooler)
-            best_classifier_state = _module_state_to_cpu(classifier)
-            epochs_without_improvement = 0
-            if is_main:
-                state_path.parent.mkdir(parents=True, exist_ok=True)
-                torch.save(make_state(complete=False), best_state_path)
-        else:
-            epochs_without_improvement += 1
-        if is_main:
-            log.info(
-                "lora epoch=%d/%d train_loss=%.5f val_ap=%.4f val_auc=%.4f",
-                epoch_idx + 1,
-                epochs,
-                running_loss / float(seen),
-                val_metrics["val/average_precision"],
-                val_metrics["val/roc_auc"],
-            )
-        if epochs_without_improvement >= patience:
-            break
-
-    load_lora_state_dict(model.encoder, best_lora_state)
-    pooler.load_state_dict(best_pooler_state)
-    classifier.load_state_dict(best_classifier_state)
-
-    state = make_state(complete=True)
+    state = _adaptation_state(metadata=state_metadata, result=result, complete=True)
     if is_main:
         state_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(state, state_path)
@@ -2179,99 +2255,13 @@ def _jax_tree_to_numpy(tree: Any) -> Any:
     return jax.tree.map(lambda value: np.asarray(jax.device_get(value)), tree)
 
 
-def run_probe_jax(args: argparse.Namespace) -> dict[str, Any]:
-    import jax
-    import jax.numpy as jnp
-    import optax
-    from flax import nnx
+class _FluorineProbePaths(NamedTuple):
+    cache_dir: Path
+    output_prefix: StoragePath
+    head_state_path: StoragePath
 
-    from spectra_learning.models.model_jax import PeakSetJEPAJax
-    from spectra_learning.models.settings import PeakSetJEPASettings
-    from spectra_learning.models.spectrum_metadata import jax_spectrum_metadata_from_batch
-    from spectra_learning.probes.massspec.msg_probe_jax import (
-        _feature_pair,
-        _feature_single,
-        _full_visible_fastmixer_probe_model,
-        _host_local_array,
-        _init_mlp,
-        _init_pooler,
-        _pool_features,
-        _probe_value_to_jax,
-    )
-    from spectra_learning.probes.massspec.msg_settings import MsgProbeTaskSpec
-    from spectra_learning.training.checkpointing_jax import (
-        build_jax_checkpoint_manager,
-        jax_training_checkpoint_metadata,
-        restore_jax_training_state,
-    )
-    from spectra_learning.training.pretrain_jax import (
-        _jax_data_mesh_for_device_count,
-        _replicate_tree_on_data_mesh,
-        init_pure_optax_train_state,
-        jax_config_checkpoint_contract,
-        prepare_jax_training_config,
-    )
 
-    config_path = args.config.expanduser().resolve()
-    checkpoint_config = load_config(config_path)
-    prepare_jax_training_config(checkpoint_config)
-    checkpoint_metadata = jax_training_checkpoint_metadata(
-        "pretrain",
-        jax_config_checkpoint_contract(checkpoint_config),
-    )
-    jax_device_count = jax.device_count()
-    checkpoint_config.jax_mesh_devices = str(jax_device_count)
-    checkpoint_dir, checkpoint_step = _resolve_jax_checkpoint_dir_and_step(
-        args.checkpoint,
-        getattr(args, "workdir", None),
-        getattr(args, "jax_checkpoint_step", None),
-    )
-    checkpoint_manager = build_jax_checkpoint_manager(
-        checkpoint_dir,
-        max_to_keep=None,
-        enable_async_checkpointing=False,
-    )
-    restore_step = (
-        int(checkpoint_step)
-        if checkpoint_step is not None
-        else checkpoint_manager.latest_step()
-    )
-    if restore_step is None:
-        raise FileNotFoundError(f"no JAX checkpoint found under {checkpoint_dir}")
-    settings = PeakSetJEPASettings.from_config(checkpoint_config)
-    model = PeakSetJEPAJax(settings, rngs=nnx.Rngs(int(checkpoint_config.seed)))
-    (
-        graphdef,
-        trainable_params,
-        static_state,
-        opt_state,
-        _optimizer,
-    ) = init_pure_optax_train_state(
-        checkpoint_config,
-        model,
-        total_steps=int(checkpoint_config.training_max_steps),
-    )
-    data_mesh = _jax_data_mesh_for_device_count(jax_device_count)
-    trainable_params = _replicate_tree_on_data_mesh(trainable_params, data_mesh)
-    static_state = _replicate_tree_on_data_mesh(static_state, data_mesh)
-    opt_state = _replicate_tree_on_data_mesh(opt_state, data_mesh)
-    restored = restore_jax_training_state(
-        checkpoint_manager,
-        restore_step,
-        {
-            "trainable_params": trainable_params,
-            "static_state": static_state,
-            "opt_state": opt_state,
-        },
-        expected_metadata=checkpoint_metadata,
-    )
-    model = nnx.merge(
-        graphdef,
-        restored["trainable_params"],
-        restored["static_state"],
-    )
-    model = _full_visible_fastmixer_probe_model(checkpoint_config, model)
-
+def _resolve_fluorine_probe_paths(args: argparse.Namespace) -> _FluorineProbePaths:
     cache_dir = args.cache_dir.expanduser().resolve()
     output_prefix = (
         normalize_storage_path(args.output_prefix)
@@ -2283,7 +2273,16 @@ def run_probe_jax(args: argparse.Namespace) -> dict[str, Any]:
         if getattr(args, "output_state", None)
         else default_state_path("probe").resolve()
     )
-    data = build_murcko_fluorine_data(
+    return _FluorineProbePaths(cache_dir, output_prefix, head_state_path)
+
+
+def _build_fluorine_probe_data(
+    *,
+    args: argparse.Namespace,
+    checkpoint_config: Any,
+    cache_dir: Path,
+) -> FluorineData:
+    return build_murcko_fluorine_data(
         cache_dir=cache_dir,
         batch_size=int(args.batch_size),
         num_peaks=int(
@@ -2338,6 +2337,220 @@ def run_probe_jax(args: argparse.Namespace) -> dict[str, Any]:
         train_subdir=HF_TRAIN_SUBDIR,
         test_subdir=HF_TEST_SUBDIR,
     )
+
+
+def _write_fluorine_probe_artifacts(
+    *,
+    args: argparse.Namespace,
+    payload: dict[str, Any],
+    head_state: dict[str, Any],
+    paths: _FluorineProbePaths,
+    config_path: Path,
+    checkpoint_path: StoragePath,
+    data: FluorineData,
+    targets: np.ndarray,
+    logits: np.ndarray,
+    row_indices: np.ndarray,
+    summary_backend: str | None = None,
+) -> dict[str, Any]:
+    save_torch_checkpoint(head_state, paths.head_state_path)
+    summary = write_standard_fluorine_outputs(
+        output_prefix=paths.output_prefix,
+        config_path=config_path,
+        checkpoint_path=checkpoint_path,
+        head_state_path=paths.head_state_path,
+        data=data,
+        targets=targets,
+        logits=logits,
+        row_indices=row_indices,
+        head_state=head_state,
+    )
+    if summary_backend is not None:
+        summary["backend"] = summary_backend
+    if args.comparison_dir is not None:
+        comparison = write_dreams_comparison(
+            output_prefix=paths.output_prefix,
+            comparison_dir=args.comparison_dir.expanduser().resolve(),
+            summary=summary,
+            previous_ours_prefix=None,
+        )
+        summary["comparison"] = comparison
+    curve_dirs: list[StoragePath] = [storage_parent(paths.output_prefix)]
+    if args.comparison_dir is not None:
+        curve_dirs.append(args.comparison_dir.expanduser().resolve())
+    summary["all_pr_curves"] = write_all_pr_curve_comparison(
+        output_prefix=paths.output_prefix,
+        curve_dirs=curve_dirs,
+    )
+    summary_path = storage_with_suffix(paths.output_prefix, ".summary.json")
+    write_text(summary_path, json.dumps(summary, indent=2, sort_keys=True))
+    payload["standard_outputs"] = {
+        "summary": str(summary_path),
+        "state": str(paths.head_state_path),
+        "output_prefix": str(paths.output_prefix),
+    }
+    if args.output_json:
+        write_text(
+            normalize_storage_path(args.output_json),
+            json.dumps(payload, indent=2, sort_keys=True),
+        )
+    return payload
+
+
+class _JaxFluorineCheckpoint(NamedTuple):
+    config_path: Path
+    config: Any
+    checkpoint_dir: StoragePath
+    restore_step: int
+    model: Any
+    data_mesh: Any
+    manager: Any
+
+
+def _restore_jax_fluorine_checkpoint(
+    args: argparse.Namespace,
+) -> _JaxFluorineCheckpoint:
+    import jax
+    from flax import nnx
+
+    from spectra_learning.models.model_jax import PeakSetJEPAJax
+    from spectra_learning.models.settings import PeakSetJEPASettings
+    from spectra_learning.probes.massspec.msg_probe_jax import (
+        _full_visible_fastmixer_probe_model,
+    )
+    from spectra_learning.training.checkpointing_jax import (
+        build_jax_checkpoint_manager,
+        jax_training_checkpoint_metadata,
+        restore_jax_training_state,
+    )
+    from spectra_learning.training.pretrain_jax import (
+        _jax_data_mesh_for_device_count,
+        _replicate_tree_on_data_mesh,
+        init_pure_optax_train_state,
+        jax_config_checkpoint_contract,
+        prepare_jax_training_config,
+    )
+
+    config_path = args.config.expanduser().resolve()
+    config = load_config(config_path)
+    prepare_jax_training_config(config)
+    checkpoint_metadata = jax_training_checkpoint_metadata(
+        "pretrain",
+        jax_config_checkpoint_contract(config),
+    )
+    jax_device_count = jax.device_count()
+    config.jax_mesh_devices = str(jax_device_count)
+    checkpoint_dir, checkpoint_step = _resolve_jax_checkpoint_dir_and_step(
+        args.checkpoint,
+        getattr(args, "workdir", None),
+        getattr(args, "jax_checkpoint_step", None),
+    )
+    manager = build_jax_checkpoint_manager(
+        checkpoint_dir,
+        max_to_keep=None,
+        enable_async_checkpointing=False,
+    )
+    restore_step = (
+        int(checkpoint_step) if checkpoint_step is not None else manager.latest_step()
+    )
+    if restore_step is None:
+        raise FileNotFoundError(f"no JAX checkpoint found under {checkpoint_dir}")
+    settings = PeakSetJEPASettings.from_config(config)
+    model = PeakSetJEPAJax(settings, rngs=nnx.Rngs(int(config.seed)))
+    graphdef, trainable_params, static_state, opt_state, _ = init_pure_optax_train_state(
+        config,
+        model,
+        total_steps=int(config.training_max_steps),
+    )
+    data_mesh = _jax_data_mesh_for_device_count(jax_device_count)
+    trainable_params = _replicate_tree_on_data_mesh(trainable_params, data_mesh)
+    static_state = _replicate_tree_on_data_mesh(static_state, data_mesh)
+    opt_state = _replicate_tree_on_data_mesh(opt_state, data_mesh)
+    restored = restore_jax_training_state(
+        manager,
+        restore_step,
+        {
+            "trainable_params": trainable_params,
+            "static_state": static_state,
+            "opt_state": opt_state,
+        },
+        expected_metadata=checkpoint_metadata,
+    )
+    model = nnx.merge(
+        graphdef,
+        restored["trainable_params"],
+        restored["static_state"],
+    )
+    model = _full_visible_fastmixer_probe_model(config, model)
+    return _JaxFluorineCheckpoint(
+        config_path,
+        config,
+        checkpoint_dir,
+        int(restore_step),
+        model,
+        data_mesh,
+        manager,
+    )
+
+
+def _extract_jax_fluorine_single_features(
+    feature_model: Any,
+    peak_mz: Any,
+    peak_intensity: Any,
+    peak_valid_mask: Any,
+    precursor_mz: Any,
+    spectrum_metadata: Any,
+) -> Any:
+    return feature_model.encoder(
+        peak_mz,
+        peak_intensity,
+        valid_mask=peak_valid_mask,
+        precursor_mz=precursor_mz,
+        spectrum_metadata=spectrum_metadata,
+    )
+
+
+def _extract_jax_fluorine_pair_features(
+    feature_model: Any,
+    peak_mz: Any,
+    peak_intensity: Any,
+    peak_valid_mask: Any,
+    precursor_mz: Any,
+    spectrum_metadata: Any,
+) -> tuple[Any, Any]:
+    return feature_model.encoder.forward_with_pair(
+        peak_mz,
+        peak_intensity,
+        valid_mask=peak_valid_mask,
+        precursor_mz=precursor_mz,
+        spectrum_metadata=spectrum_metadata,
+    )
+
+
+class _JaxFluorineRuntime(NamedTuple):
+    args: argparse.Namespace
+    config: Any
+    model: Any
+    data: FluorineData
+    data_mesh: Any
+    variant: str
+    task_spec: Any
+    extract_single: Callable[..., Any]
+    extract_pair: Callable[..., Any]
+    predict_step: Callable[..., Any]
+
+
+def _make_jax_fluorine_runtime(
+    *,
+    args: argparse.Namespace,
+    checkpoint: _JaxFluorineCheckpoint,
+    data: FluorineData,
+) -> _JaxFluorineRuntime:
+    from flax import nnx
+
+    from spectra_learning.probes.massspec.msg_settings import MsgProbeTaskSpec
+
+    variant = args.pooling
     task_spec = MsgProbeTaskSpec(
         regression_tasks=(),
         maccs_bits=0,
@@ -2345,257 +2558,339 @@ def run_probe_jax(args: argparse.Namespace) -> dict[str, Any]:
         regression_stds={},
         binary_tasks=("fluorine",),
     )
-    variant = args.pooling
-    use_pair_features = variant == "single_pair_covariance"
+    predict_step = _make_jax_fluorine_predict_step(variant, task_spec)
+    return _JaxFluorineRuntime(
+        args,
+        checkpoint.config,
+        checkpoint.model,
+        data,
+        checkpoint.data_mesh,
+        variant,
+        task_spec,
+        nnx.jit(_extract_jax_fluorine_single_features),
+        nnx.jit(_extract_jax_fluorine_pair_features),
+        predict_step,
+    )
 
-    @nnx.jit
-    def extract_single_features(
-        feature_model: PeakSetJEPAJax,
-        peak_mz: Any,
-        peak_intensity: Any,
-        peak_valid_mask: Any,
-        precursor_mz: Any,
-        spectrum_metadata: Any,
-    ) -> Any:
-        return feature_model.encoder(
-            peak_mz,
-            peak_intensity,
-            valid_mask=peak_valid_mask,
-            precursor_mz=precursor_mz,
-            spectrum_metadata=spectrum_metadata,
-        )
 
-    @nnx.jit
-    def extract_pair_features(
-        feature_model: PeakSetJEPAJax,
-        peak_mz: Any,
-        peak_intensity: Any,
-        peak_valid_mask: Any,
-        precursor_mz: Any,
-        spectrum_metadata: Any,
-    ) -> tuple[Any, Any]:
-        return feature_model.encoder.forward_with_pair(
-            peak_mz,
-            peak_intensity,
-            valid_mask=peak_valid_mask,
-            precursor_mz=precursor_mz,
-            spectrum_metadata=spectrum_metadata,
-        )
+def _iter_jax_fluorine_split(
+    runtime: _JaxFluorineRuntime,
+    split: str,
+    *,
+    shuffle: bool,
+    seed: int,
+    max_samples: int | None,
+) -> Iterator[dict[str, Any]]:
+    from spectra_learning.probes.massspec.msg_probe_jax import _probe_value_to_jax
 
-    def iter_split(split: str, *, shuffle: bool, seed: int, max_samples: int | None):
-        loader = build_murcko_fluorine_loader(
-            data,
-            split,
-            shuffle=shuffle,
-            seed=seed,
-            max_samples=max_samples,
-            dreams_only=False,
-            num_workers=int(args.num_workers),
-            output_format="numpy",
-        )
-        for batch in loader:
-            yield {
-                key: _probe_value_to_jax(value, data_mesh=None)
-                for key, value in batch.items()
-            }
+    loader = build_murcko_fluorine_loader(
+        runtime.data,
+        split,
+        shuffle=shuffle,
+        seed=seed,
+        max_samples=max_samples,
+        dreams_only=False,
+        num_workers=int(runtime.args.num_workers),
+        output_format="numpy",
+    )
+    for batch in loader:
+        yield {
+            key: _probe_value_to_jax(value, data_mesh=None)
+            for key, value in batch.items()
+        }
 
-    def extract_features(batch: dict[str, Any]) -> Any:
-        precursor_mz = batch.get("precursor_mz", None)
-        spectrum_metadata = jax_spectrum_metadata_from_batch(batch)
-        if use_pair_features:
-            features = extract_pair_features(
-                model,
-                batch["peak_mz"],
-                batch["peak_intensity"],
-                batch["peak_valid_mask"],
-                precursor_mz,
-                spectrum_metadata,
-            )
-            return (
-                _feature_single(features)[:, : batch["peak_valid_mask"].shape[1]],
-                _feature_pair(features),
-            )
-        features = extract_single_features(
-            model,
+
+def _extract_jax_fluorine_features(
+    runtime: _JaxFluorineRuntime,
+    batch: dict[str, Any],
+) -> Any:
+    from spectra_learning.models.spectrum_metadata import (
+        jax_spectrum_metadata_from_batch,
+    )
+    from spectra_learning.probes.massspec.msg_probe_jax import (
+        _feature_pair,
+        _feature_single,
+    )
+
+    precursor_mz = batch.get("precursor_mz", None)
+    spectrum_metadata = jax_spectrum_metadata_from_batch(batch)
+    if runtime.variant == "single_pair_covariance":
+        features = runtime.extract_pair(
+            runtime.model,
             batch["peak_mz"],
             batch["peak_intensity"],
             batch["peak_valid_mask"],
             precursor_mz,
             spectrum_metadata,
         )
-        return features[:, : batch["peak_valid_mask"].shape[1]]
+        return (
+            _feature_single(features)[:, : batch["peak_valid_mask"].shape[1]],
+            _feature_pair(features),
+        )
+    features = runtime.extract_single(
+        runtime.model,
+        batch["peak_mz"],
+        batch["peak_intensity"],
+        batch["peak_valid_mask"],
+        precursor_mz,
+        spectrum_metadata,
+    )
+    return features[:, : batch["peak_valid_mask"].shape[1]]
 
-    def cache_split(
-        split: str,
-        *,
-        seed: int,
-        max_samples: int | None,
-    ) -> dict[str, np.ndarray]:
-        feature_chunks, mask_chunks, label_chunks, row_chunks = [], [], [], []
-        for batch in tqdm(
-            iter_split(
-                split,
-                shuffle=False,
-                seed=seed,
-                max_samples=max_samples,
-            ),
-            desc=f"cache jax {split} features",
-            unit="batch",
-            dynamic_ncols=True,
-            mininterval=5.0,
-        ):
-            features = extract_features(batch)
-            feature_chunks.append(
-                _host_local_array(features).astype(np.float32, copy=False)
+
+def _cache_jax_fluorine_split(
+    runtime: _JaxFluorineRuntime,
+    split: str,
+    *,
+    seed: int,
+    max_samples: int | None,
+) -> dict[str, np.ndarray]:
+    from spectra_learning.probes.massspec.msg_probe_jax import _host_local_array
+
+    feature_chunks, mask_chunks, label_chunks, row_chunks = [], [], [], []
+    iterator = _iter_jax_fluorine_split(
+        runtime,
+        split,
+        shuffle=False,
+        seed=seed,
+        max_samples=max_samples,
+    )
+    for batch in tqdm(
+        iterator,
+        desc=f"cache jax {split} features",
+        unit="batch",
+        dynamic_ncols=True,
+        mininterval=5.0,
+    ):
+        feature_chunks.append(
+            _host_local_array(_extract_jax_fluorine_features(runtime, batch)).astype(
+                np.float32,
+                copy=False,
             )
-            mask_chunks.append(
-                _host_local_array(batch["peak_valid_mask"]).astype(bool, copy=False)
-            )
-            label_chunks.append(
-                _host_local_array(batch["label"]).astype(np.float32, copy=False)
-            )
-            row_chunks.append(
-                _host_local_array(batch["row_idx"]).astype(np.int64, copy=False)
-            )
-        return {
-            "features": np.concatenate(feature_chunks, axis=0),
-            "peak_valid_mask": np.concatenate(mask_chunks, axis=0),
-            "label": np.concatenate(label_chunks, axis=0),
-            "row_idx": np.concatenate(row_chunks, axis=0),
+        )
+        mask_chunks.append(
+            _host_local_array(batch["peak_valid_mask"]).astype(bool, copy=False)
+        )
+        label_chunks.append(
+            _host_local_array(batch["label"]).astype(np.float32, copy=False)
+        )
+        row_chunks.append(
+            _host_local_array(batch["row_idx"]).astype(np.int64, copy=False)
+        )
+    return {
+        "features": np.concatenate(feature_chunks, axis=0),
+        "peak_valid_mask": np.concatenate(mask_chunks, axis=0),
+        "label": np.concatenate(label_chunks, axis=0),
+        "row_idx": np.concatenate(row_chunks, axis=0),
+    }
+
+
+def _iter_cached_jax_fluorine_split(
+    cache: dict[str, np.ndarray],
+    *,
+    batch_size: int,
+    shuffle: bool,
+    seed: int,
+) -> Iterator[dict[str, Any]]:
+    from spectra_learning.probes.massspec.msg_probe_jax import _probe_value_to_jax
+
+    indices = np.arange(cache["label"].shape[0])
+    if shuffle:
+        rng = np.random.default_rng(seed)
+        rng.shuffle(indices)
+    for start in range(0, indices.shape[0], batch_size):
+        batch_indices = indices[start : start + batch_size]
+        yield {
+            key: _probe_value_to_jax(value[batch_indices], data_mesh=None)
+            for key, value in cache.items()
         }
 
-    def iter_cached_split(
-        cache: dict[str, np.ndarray],
-        *,
-        shuffle: bool,
-        seed: int,
-    ):
-        indices = np.arange(cache["label"].shape[0])
-        if shuffle:
-            rng = np.random.default_rng(seed)
-            rng.shuffle(indices)
-        batch_size = int(args.batch_size)
-        for start in range(0, indices.shape[0], batch_size):
-            batch_indices = indices[start : start + batch_size]
-            yield {
-                key: _probe_value_to_jax(value[batch_indices], data_mesh=None)
-                for key, value in cache.items()
-            }
 
-    def init_params(key: Any, params: TrialParams) -> tuple[dict[str, Any], int]:
-        pool_key, head_key = jax.random.split(key)
-        pooler, input_dim = _init_pooler(
-            pool_key,
-            variant=variant,
-            config=checkpoint_config,
-            model_dim=int(checkpoint_config.model_dim),
+def _iter_jax_fluorine_batches(
+    runtime: _JaxFluorineRuntime,
+    cached_splits: dict[str, dict[str, np.ndarray]] | None,
+    split: str,
+    *,
+    shuffle: bool,
+    seed: int,
+    max_samples: int | None,
+) -> Iterator[dict[str, Any]]:
+    if cached_splits is not None:
+        yield from _iter_cached_jax_fluorine_split(
+            cached_splits[split],
+            batch_size=int(runtime.args.batch_size),
+            shuffle=shuffle,
+            seed=seed,
         )
-        return {
-            "pooler": pooler,
-            "head": _init_mlp(
-                head_key,
-                input_dim=input_dim,
-                hidden_dim=int(params.hidden_dim),
-                output_dim=1,
-                num_layers=3,
-            ),
-        }, input_dim
+    else:
+        yield from _iter_jax_fluorine_split(
+            runtime,
+            split,
+            shuffle=shuffle,
+            seed=seed,
+            max_samples=max_samples,
+        )
 
-    def mlp_apply(
-        layers: list[dict[str, Any]],
-        x: Any,
-        *,
-        dropout: float,
-        rng: Any,
-        training: bool,
-    ) -> Any:
-        for idx, layer in enumerate(layers):
-            x = jnp.matmul(x, layer["w"]) + layer["b"]
-            if idx == len(layers) - 1:
-                continue
-            x = jax.nn.silu(x)
-            if training:
-                rng, layer_key = jax.random.split(rng)
-                keep_prob = 1.0 - dropout
-                keep = jax.random.bernoulli(layer_key, keep_prob, x.shape)
-                x = jnp.where(keep, x / keep_prob, 0.0)
-        return x
 
-    def logits_from_params(
+def _init_jax_fluorine_probe_params(
+    key: Any,
+    params: TrialParams,
+    *,
+    variant: str,
+    config: Any,
+) -> tuple[dict[str, Any], int]:
+    import jax
+
+    from spectra_learning.probes.massspec.msg_probe_jax import _init_mlp, _init_pooler
+
+    pool_key, head_key = jax.random.split(key)
+    pooler, input_dim = _init_pooler(
+        pool_key,
+        variant=variant,
+        config=config,
+        model_dim=int(config.model_dim),
+    )
+    return {
+        "pooler": pooler,
+        "head": _init_mlp(
+            head_key,
+            input_dim=input_dim,
+            hidden_dim=int(params.hidden_dim),
+            output_dim=1,
+            num_layers=3,
+        ),
+    }, input_dim
+
+
+def _jax_fluorine_mlp_apply(
+    layers: list[dict[str, Any]],
+    x: Any,
+    *,
+    dropout: float,
+    rng: Any,
+    training: bool,
+) -> Any:
+    import jax
+    import jax.numpy as jnp
+
+    for idx, layer in enumerate(layers):
+        x = jnp.matmul(x, layer["w"]) + layer["b"]
+        if idx == len(layers) - 1:
+            continue
+        x = jax.nn.silu(x)
+        if training:
+            rng, layer_key = jax.random.split(rng)
+            keep_prob = 1.0 - dropout
+            keep = jax.random.bernoulli(layer_key, keep_prob, x.shape)
+            x = jnp.where(keep, x / keep_prob, 0.0)
+    return x
+
+
+def _jax_fluorine_logits(
+    params: dict[str, Any],
+    features: Any,
+    valid_mask: Any,
+    *,
+    variant: str,
+    task_spec: Any,
+    dropout: float = 0.0,
+    rng: Any = None,
+    training: bool = False,
+) -> Any:
+    import jax
+
+    from spectra_learning.probes.massspec.msg_probe_jax import _pool_features
+
+    pooled = _pool_features(
+        params["pooler"],
+        variant=variant,
+        task_spec=task_spec,
+        features=features,
+        valid_mask=valid_mask,
+    )
+    if rng is None:
+        rng = jax.random.PRNGKey(0)
+    return _jax_fluorine_mlp_apply(
+        params["head"],
+        pooled,
+        dropout=dropout,
+        rng=rng,
+        training=training,
+    ).squeeze(-1)
+
+
+def _jax_fluorine_focal_loss(
+    logits: Any,
+    targets: Any,
+    *,
+    focal_alpha: float,
+    focal_gamma: float,
+) -> Any:
+    import jax
+    import jax.numpy as jnp
+    import optax
+
+    targets = targets.astype(jnp.float32)
+    bce = optax.sigmoid_binary_cross_entropy(logits, targets)
+    prob = jax.nn.sigmoid(logits)
+    p_t = prob * targets + (1.0 - prob) * (1.0 - targets)
+    alpha_t = focal_alpha * targets + (1.0 - focal_alpha) * (1.0 - targets)
+    return jnp.mean(alpha_t * jnp.power(1.0 - p_t, focal_gamma) * bce)
+
+
+def _make_jax_fluorine_train_step(
+    optimizer: Any,
+    *,
+    variant: str,
+    task_spec: Any,
+) -> Callable[..., Any]:
+    import jax
+    import optax
+
+    @jax.jit
+    def train_step(
         params: dict[str, Any],
+        state: Any,
+        rng: Any,
+        batch: dict[str, Any],
         features: Any,
-        valid_mask: Any,
-        *,
-        dropout: float = 0.0,
-        rng: Any = None,
-        training: bool = False,
-    ) -> Any:
-        pooled = _pool_features(
-            params["pooler"],
-            variant=variant,
-            task_spec=task_spec,
-            features=features,
-            valid_mask=valid_mask,
-        )
-        if rng is None:
-            rng = jax.random.PRNGKey(0)
-        return mlp_apply(
-            params["head"],
-            pooled,
-            dropout=dropout,
-            rng=rng,
-            training=training,
-        ).squeeze(-1)
-
-    def focal_loss(
-        logits: Any,
-        targets: Any,
-        *,
         focal_alpha: float,
         focal_gamma: float,
-    ) -> Any:
-        targets = targets.astype(jnp.float32)
-        bce = optax.sigmoid_binary_cross_entropy(logits, targets)
-        prob = jax.nn.sigmoid(logits)
-        p_t = prob * targets + (1.0 - prob) * (1.0 - targets)
-        alpha_t = focal_alpha * targets + (1.0 - focal_alpha) * (1.0 - targets)
-        return jnp.mean(alpha_t * jnp.power(1.0 - p_t, focal_gamma) * bce)
+        dropout: float,
+    ) -> tuple[dict[str, Any], Any, Any, Any]:
+        rng, dropout_key = jax.random.split(rng)
 
-    def make_train_step(optimizer: Any):
-        @jax.jit
-        def train_step(
-            params: dict[str, Any],
-            state: Any,
-            rng: Any,
-            batch: dict[str, Any],
-            features: Any,
-            focal_alpha: float,
-            focal_gamma: float,
-            dropout: float,
-        ) -> tuple[dict[str, Any], Any, Any, Any]:
-            rng, dropout_key = jax.random.split(rng)
+        def loss_fn(probe_params: dict[str, Any]) -> Any:
+            logits = _jax_fluorine_logits(
+                probe_params,
+                features,
+                batch["peak_valid_mask"],
+                variant=variant,
+                task_spec=task_spec,
+                dropout=dropout,
+                rng=dropout_key,
+                training=True,
+            )
+            return _jax_fluorine_focal_loss(
+                logits,
+                batch["label"],
+                focal_alpha=focal_alpha,
+                focal_gamma=focal_gamma,
+            )
 
-            def loss_fn(probe_params: dict[str, Any]) -> Any:
-                return focal_loss(
-                    logits_from_params(
-                        probe_params,
-                        features,
-                        batch["peak_valid_mask"],
-                        dropout=dropout,
-                        rng=dropout_key,
-                        training=True,
-                    ),
-                    batch["label"],
-                    focal_alpha=focal_alpha,
-                    focal_gamma=focal_gamma,
-                )
+        loss, grads = jax.value_and_grad(loss_fn)(params)
+        updates, state = optimizer.update(grads, state, params)
+        params = optax.apply_updates(params, updates)
+        return params, state, rng, loss
 
-            loss, grads = jax.value_and_grad(loss_fn)(params)
-            updates, state = optimizer.update(grads, state, params)
-            params = optax.apply_updates(params, updates)
-            return params, state, rng, loss
+    return train_step
 
-        return train_step
+
+def _make_jax_fluorine_predict_step(
+    variant: str,
+    task_spec: Any,
+) -> Callable[..., Any]:
+    import jax
 
     @jax.jit
     def predict_step(
@@ -2603,51 +2898,271 @@ def run_probe_jax(args: argparse.Namespace) -> dict[str, Any]:
         batch: dict[str, Any],
         features: Any,
     ) -> Any:
-        return logits_from_params(params, features, batch["peak_valid_mask"])
-
-    def prediction_arrays(
-        params: dict[str, Any],
-        split: str,
-        *,
-        seed: int,
-        max_samples: int | None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        targets, logits, row_indices = [], [], []
-        iterator = (
-            iter_cached_split(cached_splits[split], shuffle=False, seed=seed)
-            if cached_splits is not None
-            else iter_split(
-                split,
-                shuffle=False,
-                seed=seed,
-                max_samples=max_samples,
-            )
-        )
-        for batch in iterator:
-            features = (
-                batch["features"]
-                if cached_splits is not None
-                else extract_features(batch)
-            )
-            batch_logits = predict_step(params, batch, features)
-            logits.append(_host_local_array(batch_logits))
-            targets.append(_host_local_array(batch["label"]))
-            row_indices.append(_host_local_array(batch["row_idx"]))
-        return (
-            np.concatenate(targets, axis=0),
-            np.concatenate(logits, axis=0),
-            np.concatenate(row_indices, axis=0),
+        return _jax_fluorine_logits(
+            params,
+            features,
+            batch["peak_valid_mask"],
+            variant=variant,
+            task_spec=task_spec,
         )
 
-    metadata = data.metadata
-    train_positive = float(metadata["train_positive"])
-    train_size = float(metadata["train_size"])
-    focal_alpha = (
-        1.0 - train_positive / train_size
-        if args.focal_alpha == "auto"
-        else float(args.focal_alpha)
+    return predict_step
+
+
+def _predict_jax_fluorine_arrays(
+    runtime: _JaxFluorineRuntime,
+    cached_splits: dict[str, dict[str, np.ndarray]] | None,
+    params: dict[str, Any],
+    split: str,
+    *,
+    seed: int,
+    max_samples: int | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    from spectra_learning.probes.massspec.msg_probe_jax import _host_local_array
+
+    targets, logits, row_indices = [], [], []
+    iterator = _iter_jax_fluorine_batches(
+        runtime,
+        cached_splits,
+        split,
+        shuffle=False,
+        seed=seed,
+        max_samples=max_samples,
     )
-    trial_params = [
+    for batch in iterator:
+        features = (
+            batch["features"]
+            if cached_splits is not None
+            else _extract_jax_fluorine_features(runtime, batch)
+        )
+        batch_logits = runtime.predict_step(params, batch, features)
+        logits.append(_host_local_array(batch_logits))
+        targets.append(_host_local_array(batch["label"]))
+        row_indices.append(_host_local_array(batch["row_idx"]))
+    return (
+        np.concatenate(targets, axis=0),
+        np.concatenate(logits, axis=0),
+        np.concatenate(row_indices, axis=0),
+    )
+
+
+class _JaxFluorineEpochResult(NamedTuple):
+    params: dict[str, Any]
+    opt_state: Any
+    train_rng: Any
+    train_loss: float
+    val_metrics: dict[str, float]
+
+
+def _run_jax_fluorine_epoch(
+    *,
+    runtime: _JaxFluorineRuntime,
+    cached_splits: dict[str, dict[str, np.ndarray]] | None,
+    train_step: Callable[..., Any],
+    params: dict[str, Any],
+    opt_state: Any,
+    train_rng: Any,
+    trial_idx: int,
+    trial_count: int,
+    epoch_idx: int,
+    focal_alpha: float,
+    focal_gamma: float,
+    dropout: float,
+) -> _JaxFluorineEpochResult:
+    import jax
+
+    from spectra_learning.probes.massspec.msg_probe_jax import _host_local_array
+
+    seed = int(runtime.args.seed)
+    train_iterator = _iter_jax_fluorine_batches(
+        runtime,
+        cached_splits,
+        "train",
+        shuffle=True,
+        seed=seed + epoch_idx,
+        max_samples=runtime.args.max_train_samples,
+    )
+    running_loss = 0.0
+    seen = 0
+    pbar = tqdm(
+        train_iterator,
+        desc=(
+            f"jax probe trial {trial_idx + 1}/{trial_count} "
+            f"epoch {epoch_idx + 1}/{runtime.args.epochs}"
+        ),
+        unit="batch",
+        dynamic_ncols=True,
+        mininterval=5.0,
+    )
+    for batch in pbar:
+        features = (
+            batch["features"]
+            if cached_splits is not None
+            else _extract_jax_fluorine_features(runtime, batch)
+        )
+        params, opt_state, train_rng, loss = train_step(
+            params,
+            opt_state,
+            train_rng,
+            batch,
+            features,
+            float(focal_alpha),
+            float(focal_gamma),
+            float(dropout),
+        )
+        batch_size = int(_host_local_array(batch["label"]).shape[0])
+        running_loss += float(jax.device_get(loss)) * batch_size
+        seen += batch_size
+        pbar.set_postfix(loss=f"{running_loss / float(seen):.5f}")
+    val_targets, val_logits, _ = _predict_jax_fluorine_arrays(
+        runtime,
+        cached_splits,
+        params,
+        "val",
+        seed=seed + 10_000,
+        max_samples=runtime.args.max_val_samples,
+    )
+    return _JaxFluorineEpochResult(
+        params,
+        opt_state,
+        train_rng,
+        running_loss / float(seen),
+        _metric_dict(val_targets, val_logits, "val"),
+    )
+
+
+def _run_jax_fluorine_trial(
+    *,
+    runtime: _JaxFluorineRuntime,
+    cached_splits: dict[str, dict[str, np.ndarray]] | None,
+    params: TrialParams,
+    trial_idx: int,
+    trial_count: int,
+    focal_alpha: float,
+    select_metric: str,
+) -> tuple[TrialResult, dict[str, Any], int]:
+    import jax
+    import jax.numpy as jnp
+    import optax
+
+    key = jax.random.PRNGKey(int(runtime.args.seed) + trial_idx)
+    probe_params, input_dim = _init_jax_fluorine_probe_params(
+        key,
+        params,
+        variant=runtime.variant,
+        config=runtime.config,
+    )
+    optimizer = optax.adamw(
+        learning_rate=float(params.learning_rate),
+        weight_decay=float(params.weight_decay),
+    )
+    opt_state = optimizer.init(probe_params)
+    train_step = _make_jax_fluorine_train_step(
+        optimizer,
+        variant=runtime.variant,
+        task_spec=runtime.task_spec,
+    )
+    train_rng = jax.random.PRNGKey(
+        int(runtime.args.seed) + 10_000 * (trial_idx + 1)
+    )
+    best_value = -float("inf")
+    best_epoch = 0
+    best_val: dict[str, float] = {}
+    best_probe_params = probe_params
+    history: list[dict[str, Any]] = []
+    epochs_without_improvement = 0
+    for epoch_idx in range(int(runtime.args.epochs)):
+        epoch = _run_jax_fluorine_epoch(
+            runtime=runtime,
+            cached_splits=cached_splits,
+            train_step=train_step,
+            params=probe_params,
+            opt_state=opt_state,
+            train_rng=train_rng,
+            trial_idx=trial_idx,
+            trial_count=trial_count,
+            epoch_idx=epoch_idx,
+            focal_alpha=focal_alpha,
+            focal_gamma=float(runtime.args.focal_gamma),
+            dropout=float(params.dropout),
+        )
+        probe_params = epoch.params
+        opt_state = epoch.opt_state
+        train_rng = epoch.train_rng
+        history.append(
+            {
+                "epoch": epoch_idx + 1,
+                "train_loss": epoch.train_loss,
+                "val": epoch.val_metrics,
+            }
+        )
+        current_value = _select_metric_value(epoch.val_metrics, select_metric)
+        if current_value > best_value:
+            best_value = current_value
+            best_epoch = epoch_idx + 1
+            best_val = dict(epoch.val_metrics)
+            best_probe_params = jax.tree.map(lambda value: jnp.array(value), probe_params)
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+        log.info(
+            "jax probe trial hidden=%d lr=%.3g wd=%.3g dropout=%.2f epoch=%d/%d val_ap=%.4f val_auc=%.4f",
+            params.hidden_dim,
+            params.learning_rate,
+            params.weight_decay,
+            params.dropout,
+            epoch_idx + 1,
+            runtime.args.epochs,
+            epoch.val_metrics["val/average_precision"],
+            epoch.val_metrics["val/roc_auc"],
+        )
+        if epochs_without_improvement >= int(runtime.args.patience):
+            break
+    result = TrialResult(
+        params=params,
+        best_epoch=best_epoch,
+        best_val=best_val,
+        classifier_state={},
+        pooler_state=None,
+        history=history,
+    )
+    return result, best_probe_params, input_dim
+
+
+def _run_jax_fluorine_trials(
+    *,
+    runtime: _JaxFluorineRuntime,
+    cached_splits: dict[str, dict[str, np.ndarray]] | None,
+    trial_params: list[TrialParams],
+    focal_alpha: float,
+    select_metric: str,
+) -> tuple[list[TrialResult], list[dict[str, Any]], int]:
+    results: list[TrialResult] = []
+    best_params_by_trial: list[dict[str, Any]] = []
+    input_dim = 0
+    for trial_idx, params in enumerate(trial_params):
+        result, best_params, input_dim = _run_jax_fluorine_trial(
+            runtime=runtime,
+            cached_splits=cached_splits,
+            params=params,
+            trial_idx=trial_idx,
+            trial_count=len(trial_params),
+            focal_alpha=focal_alpha,
+            select_metric=select_metric,
+        )
+        results.append(result)
+        best_params_by_trial.append(best_params)
+    return results, best_params_by_trial, input_dim
+
+
+def _fluorine_probe_focal_alpha(metadata: dict[str, Any], raw_alpha: str) -> float:
+    if raw_alpha != "auto":
+        return float(raw_alpha)
+    return 1.0 - float(metadata["train_positive"]) / float(metadata["train_size"])
+
+
+def _fluorine_probe_trial_params(args: argparse.Namespace) -> list[TrialParams]:
+    return [
         TrialParams(hidden_dim=hidden, learning_rate=lr, weight_decay=wd, dropout=dropout)
         for hidden, lr, wd, dropout in itertools.product(
             _parse_int_grid(args.hidden_dims),
@@ -2656,153 +3171,27 @@ def run_probe_jax(args: argparse.Namespace) -> dict[str, Any]:
             _parse_float_grid(args.dropouts),
         )
     ]
-    select_metric = f"val/{args.select_metric}"
-    cached_splits: dict[str, dict[str, np.ndarray]] | None = None
-    if variant == "covariance":
-        cached_splits = {
-            "train": cache_split(
-                "train",
-                seed=int(args.seed),
-                max_samples=args.max_train_samples,
-            ),
-            "val": cache_split(
-                "val",
-                seed=int(args.seed) + 10_000,
-                max_samples=args.max_val_samples,
-            ),
-            "test": cache_split(
-                "test",
-                seed=int(args.seed) + 20_000,
-                max_samples=args.max_test_samples,
-            ),
-        }
-    results: list[TrialResult] = []
-    best_params_by_trial: list[dict[str, Any]] = []
-    input_dim = 0
-    for trial_idx, params in enumerate(trial_params):
-        key = jax.random.PRNGKey(int(args.seed) + trial_idx)
-        probe_params, input_dim = init_params(key, params)
-        optimizer = optax.adamw(
-            learning_rate=float(params.learning_rate),
-            weight_decay=float(params.weight_decay),
-        )
-        opt_state = optimizer.init(probe_params)
-        train_step = make_train_step(optimizer)
-        train_rng = jax.random.PRNGKey(int(args.seed) + 10_000 * (trial_idx + 1))
-        best_value = -float("inf")
-        best_epoch = 0
-        best_val: dict[str, float] = {}
-        best_probe_params = probe_params
-        history: list[dict[str, Any]] = []
-        epochs_without_improvement = 0
-        for epoch_idx in range(int(args.epochs)):
-            running_loss = 0.0
-            seen = 0
-            train_iterator = (
-                iter_cached_split(
-                    cached_splits["train"],
-                    shuffle=True,
-                    seed=int(args.seed) + epoch_idx,
-                )
-                if cached_splits is not None
-                else iter_split(
-                    "train",
-                    shuffle=True,
-                    seed=int(args.seed) + epoch_idx,
-                    max_samples=args.max_train_samples,
-                )
-            )
-            pbar = tqdm(
-                train_iterator,
-                desc=f"jax probe trial {trial_idx + 1}/{len(trial_params)} epoch {epoch_idx + 1}/{args.epochs}",
-                unit="batch",
-                dynamic_ncols=True,
-                mininterval=5.0,
-            )
-            for batch in pbar:
-                features = (
-                    batch["features"]
-                    if cached_splits is not None
-                    else extract_features(batch)
-                )
-                probe_params, opt_state, train_rng, loss = train_step(
-                    probe_params,
-                    opt_state,
-                    train_rng,
-                    batch,
-                    features,
-                    float(focal_alpha),
-                    float(args.focal_gamma),
-                    float(params.dropout),
-                )
-                batch_size = int(_host_local_array(batch["label"]).shape[0])
-                running_loss += float(jax.device_get(loss)) * batch_size
-                seen += batch_size
-                pbar.set_postfix(loss=f"{running_loss / float(seen):.5f}")
-            val_targets, val_logits, _ = prediction_arrays(
-                probe_params,
-                "val",
-                seed=int(args.seed) + 10_000,
-                max_samples=args.max_val_samples,
-            )
-            val_metrics = _metric_dict(val_targets, val_logits, "val")
-            history.append(
-                {
-                    "epoch": epoch_idx + 1,
-                    "train_loss": running_loss / float(seen),
-                    "val": val_metrics,
-                }
-            )
-            current_value = _select_metric_value(val_metrics, select_metric)
-            improved = current_value > best_value
-            if improved:
-                best_value = current_value
-                best_epoch = epoch_idx + 1
-                best_val = dict(val_metrics)
-                best_probe_params = jax.tree.map(lambda value: jnp.array(value), probe_params)
-                epochs_without_improvement = 0
-            else:
-                epochs_without_improvement += 1
-            log.info(
-                "jax probe trial hidden=%d lr=%.3g wd=%.3g dropout=%.2f epoch=%d/%d val_ap=%.4f val_auc=%.4f",
-                params.hidden_dim,
-                params.learning_rate,
-                params.weight_decay,
-                params.dropout,
-                epoch_idx + 1,
-                args.epochs,
-                val_metrics["val/average_precision"],
-                val_metrics["val/roc_auc"],
-            )
-            if epochs_without_improvement >= int(args.patience):
-                break
-        results.append(
-            TrialResult(
-                params=params,
-                best_epoch=best_epoch,
-                best_val=best_val,
-                classifier_state={},
-                pooler_state=None,
-                history=history,
-            )
-        )
-        best_params_by_trial.append(best_probe_params)
-    best_idx = max(
-        range(len(results)),
-        key=lambda idx: _select_metric_value(results[idx].best_val, select_metric),
-    )
-    best = results[best_idx]
-    best_probe_params = best_params_by_trial[best_idx]
-    test_targets, test_logits, test_row_indices_np = prediction_arrays(
-        best_probe_params,
-        "test",
-        seed=int(args.seed) + 20_000,
-        max_samples=args.max_test_samples,
-    )
-    test_metrics = _metric_dict(test_targets, test_logits, "test")
+
+
+def _build_jax_fluorine_state_and_payload(
+    *,
+    args: argparse.Namespace,
+    checkpoint: _JaxFluorineCheckpoint,
+    paths: _FluorineProbePaths,
+    data: FluorineData,
+    input_dim: int,
+    focal_alpha: float,
+    results: list[TrialResult],
+    best: TrialResult,
+    best_probe_params: dict[str, Any],
+    test_targets: np.ndarray,
+    test_logits: np.ndarray,
+    test_metrics: dict[str, float],
+) -> tuple[dict[str, Any], dict[str, Any], StoragePath]:
+    metadata = data.metadata
     checkpoint_path = storage_join(
-        storage_join(checkpoint_dir, "orbax"),
-        str(restore_step),
+        storage_join(checkpoint.checkpoint_dir, "orbax"),
+        str(checkpoint.restore_step),
     )
     payload: dict[str, Any] = {
         "backend": "jax",
@@ -2810,7 +3199,7 @@ def run_probe_jax(args: argparse.Namespace) -> dict[str, Any]:
         "revision": args.revision,
         "train_subdir": HF_TRAIN_SUBDIR,
         "test_subdir": HF_TEST_SUBDIR,
-        "cache_dir": str(cache_dir),
+        "cache_dir": str(paths.cache_dir),
         "pooling": args.pooling,
         "input_dim": input_dim,
         "train_size": int(metadata["train_size"]),
@@ -2837,13 +3226,13 @@ def run_probe_jax(args: argparse.Namespace) -> dict[str, Any]:
         "mode": "probe",
         "backend": "jax",
         "complete": True,
-        "config_path": str(config_path),
+        "config_path": str(checkpoint.config_path),
         "checkpoint_path": str(checkpoint_path),
         "input_dim": int(input_dim),
-        "covariance_dim": int(checkpoint_config.get("covariance_pooling_dim", 32)),
+        "covariance_dim": int(checkpoint.config.get("covariance_pooling_dim", 32)),
         "pooling": args.pooling,
         "pair_dim": int(
-            checkpoint_config.get("pairmixer_pair_dim", checkpoint_config.model_dim)
+            checkpoint.config.get("pairmixer_pair_dim", checkpoint.config.model_dim)
         ),
         "jax_params": _jax_tree_to_numpy(best_probe_params),
         "pooler_state": None,
@@ -2862,49 +3251,98 @@ def run_probe_jax(args: argparse.Namespace) -> dict[str, Any]:
         "max_train_samples": args.max_train_samples,
         "max_val_samples": args.max_val_samples,
     }
-    save_torch_checkpoint(head_state, head_state_path)
-    summary = write_standard_fluorine_outputs(
-        output_prefix=output_prefix,
-        config_path=config_path,
+    return payload, head_state, checkpoint_path
+
+
+def run_probe_jax(args: argparse.Namespace) -> dict[str, Any]:
+    checkpoint = _restore_jax_fluorine_checkpoint(args)
+    paths = _resolve_fluorine_probe_paths(args)
+    data = _build_fluorine_probe_data(
+        args=args,
+        checkpoint_config=checkpoint.config,
+        cache_dir=paths.cache_dir,
+    )
+    runtime = _make_jax_fluorine_runtime(
+        args=args,
+        checkpoint=checkpoint,
+        data=data,
+    )
+
+    metadata = data.metadata
+    focal_alpha = _fluorine_probe_focal_alpha(metadata, args.focal_alpha)
+    trial_params = _fluorine_probe_trial_params(args)
+    select_metric = f"val/{args.select_metric}"
+    cached_splits: dict[str, dict[str, np.ndarray]] | None = None
+    if runtime.variant == "covariance":
+        cached_splits = {
+            "train": _cache_jax_fluorine_split(
+                runtime,
+                "train",
+                seed=int(args.seed),
+                max_samples=args.max_train_samples,
+            ),
+            "val": _cache_jax_fluorine_split(
+                runtime,
+                "val",
+                seed=int(args.seed) + 10_000,
+                max_samples=args.max_val_samples,
+            ),
+            "test": _cache_jax_fluorine_split(
+                runtime,
+                "test",
+                seed=int(args.seed) + 20_000,
+                max_samples=args.max_test_samples,
+            ),
+        }
+    results, best_params_by_trial, input_dim = _run_jax_fluorine_trials(
+        runtime=runtime,
+        cached_splits=cached_splits,
+        trial_params=trial_params,
+        focal_alpha=focal_alpha,
+        select_metric=select_metric,
+    )
+    best_idx = max(
+        range(len(results)),
+        key=lambda idx: _select_metric_value(results[idx].best_val, select_metric),
+    )
+    best = results[best_idx]
+    best_probe_params = best_params_by_trial[best_idx]
+    test_targets, test_logits, test_row_indices = _predict_jax_fluorine_arrays(
+        runtime,
+        cached_splits,
+        best_probe_params,
+        "test",
+        seed=int(args.seed) + 20_000,
+        max_samples=args.max_test_samples,
+    )
+    test_metrics = _metric_dict(test_targets, test_logits, "test")
+    payload, head_state, checkpoint_path = _build_jax_fluorine_state_and_payload(
+        args=args,
+        checkpoint=checkpoint,
+        paths=paths,
+        data=data,
+        input_dim=input_dim,
+        focal_alpha=focal_alpha,
+        results=results,
+        best=best,
+        best_probe_params=best_probe_params,
+        test_targets=test_targets,
+        test_logits=test_logits,
+        test_metrics=test_metrics,
+    )
+    return _write_fluorine_probe_artifacts(
+        args=args,
+        payload=payload,
+        head_state=head_state,
+        paths=paths,
+        config_path=checkpoint.config_path,
         checkpoint_path=checkpoint_path,
-        head_state_path=head_state_path,
         data=data,
         targets=test_targets,
         logits=test_logits,
-        row_indices=test_row_indices_np,
-        head_state=head_state,
+        row_indices=test_row_indices,
+        summary_backend="jax",
     )
-    summary["backend"] = "jax"
-    if args.comparison_dir is not None:
-        comparison = write_dreams_comparison(
-            output_prefix=output_prefix,
-            comparison_dir=args.comparison_dir.expanduser().resolve(),
-            summary=summary,
-            previous_ours_prefix=None,
-        )
-        summary["comparison"] = comparison
-    curve_dirs: list[StoragePath] = [storage_parent(output_prefix)]
-    if args.comparison_dir is not None:
-        curve_dirs.append(args.comparison_dir.expanduser().resolve())
-    summary["all_pr_curves"] = write_all_pr_curve_comparison(
-        output_prefix=output_prefix,
-        curve_dirs=curve_dirs,
-    )
-    write_text(
-        storage_with_suffix(output_prefix, ".summary.json"),
-        json.dumps(summary, indent=2, sort_keys=True),
-    )
-    payload["standard_outputs"] = {
-        "summary": str(storage_with_suffix(output_prefix, ".summary.json")),
-        "state": str(head_state_path),
-        "output_prefix": str(output_prefix),
-    }
-    if args.output_json:
-        write_text(
-            normalize_storage_path(args.output_json),
-            json.dumps(payload, indent=2, sort_keys=True),
-        )
-    return payload
 
 
 def run_probe(args: argparse.Namespace) -> dict[str, Any]:
@@ -2916,71 +3354,11 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         checkpoint_path,
         device,
     )
-    cache_dir = args.cache_dir.expanduser().resolve()
-    output_prefix = (
-        normalize_storage_path(args.output_prefix)
-        if getattr(args, "output_prefix", None) is not None
-        else default_output_prefix("probe").resolve()
-    )
-    head_state_path = (
-        normalize_storage_path(args.output_state)
-        if getattr(args, "output_state", None)
-        else default_state_path("probe").resolve()
-    )
-    data = build_murcko_fluorine_data(
-        cache_dir=cache_dir,
-        batch_size=int(args.batch_size),
-        num_peaks=int(
-            args.num_peaks
-            if args.num_peaks is not None
-            else checkpoint_config.get("num_peaks", 60)
-        ),
-        max_precursor_mz=float(
-            checkpoint_config.get("max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
-        ),
-        min_peak_intensity=float(
-            checkpoint_config.get(
-                "min_peak_intensity",
-                DEFAULT_MIN_PEAK_INTENSITY,
-            )
-        ),
-        peak_drop_min_intensity=float(
-            checkpoint_config.get(
-                "peak_drop_min_intensity",
-                checkpoint_config.get(
-                    "min_peak_intensity",
-                    DEFAULT_MIN_PEAK_INTENSITY,
-                ),
-            )
-        ),
-        peak_ordering=str(
-            args.peak_ordering
-            if args.peak_ordering
-            else checkpoint_config.get("peak_ordering", "intensity")
-        ),
-        precursor_peak_exclusion_window_da=float(
-            checkpoint_config.get("precursor_peak_exclusion_window_da", 0.0)
-        ),
-        peak_filtering=str(
-            checkpoint_config.get("peak_filtering", DEFAULT_PEAK_FILTERING)
-        ),
-        grouped_peak_shoulder_da=float(
-            checkpoint_config.get(
-                "grouped_peak_shoulder_da",
-                DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-            )
-        ),
-        grouped_peak_isotope_charges=tuple(
-            int(charge)
-            for charge in checkpoint_config.get(
-                "grouped_peak_isotope_charges",
-                DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
-            )
-        ),
-        repo_id=HF_REPO_ID,
-        revision=args.revision,
-        train_subdir=HF_TRAIN_SUBDIR,
-        test_subdir=HF_TEST_SUBDIR,
+    paths = _resolve_fluorine_probe_paths(args)
+    data = _build_fluorine_probe_data(
+        args=args,
+        checkpoint_config=checkpoint_config,
+        cache_dir=paths.cache_dir,
     )
     metadata = data.metadata
     train_loader = _make_loader(
@@ -3034,7 +3412,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         )
     ]
     select_metric = f"val/{args.select_metric}"
-    progress_output_prefix = output_prefix if len(trial_params) == 1 else None
+    progress_output_prefix = paths.output_prefix if len(trial_params) == 1 else None
 
     if bool(args.train_covariance_pooler):
         results = [
@@ -3151,7 +3529,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         "revision": args.revision,
         "train_subdir": HF_TRAIN_SUBDIR,
         "test_subdir": HF_TEST_SUBDIR,
-        "cache_dir": str(cache_dir),
+        "cache_dir": str(paths.cache_dir),
         "pooling": args.pooling,
         "input_dim": input_dim,
         "train_size": int(metadata["train_size"]),
@@ -3205,48 +3583,18 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         "max_train_samples": args.max_train_samples,
         "max_val_samples": args.max_val_samples,
     }
-    save_torch_checkpoint(head_state, head_state_path)
-    summary = write_standard_fluorine_outputs(
-        output_prefix=output_prefix,
+    return _write_fluorine_probe_artifacts(
+        args=args,
+        payload=payload,
+        head_state=head_state,
+        paths=paths,
         config_path=config_path,
         checkpoint_path=checkpoint_path,
-        head_state_path=head_state_path,
         data=data,
         targets=test_targets,
         logits=test_logits,
         row_indices=test_row_indices_np,
-        head_state=head_state,
     )
-    if args.comparison_dir is not None:
-        comparison = write_dreams_comparison(
-            output_prefix=output_prefix,
-            comparison_dir=args.comparison_dir.expanduser().resolve(),
-            summary=summary,
-            previous_ours_prefix=None,
-        )
-        summary["comparison"] = comparison
-    curve_dirs: list[StoragePath] = [storage_parent(output_prefix)]
-    if args.comparison_dir is not None:
-        curve_dirs.append(args.comparison_dir.expanduser().resolve())
-    summary["all_pr_curves"] = write_all_pr_curve_comparison(
-        output_prefix=output_prefix,
-        curve_dirs=curve_dirs,
-    )
-    write_text(
-        storage_with_suffix(output_prefix, ".summary.json"),
-        json.dumps(summary, indent=2, sort_keys=True),
-    )
-    payload["standard_outputs"] = {
-        "summary": str(storage_with_suffix(output_prefix, ".summary.json")),
-        "state": str(head_state_path),
-        "output_prefix": str(output_prefix),
-    }
-    if args.output_json:
-        write_text(
-            normalize_storage_path(args.output_json),
-            json.dumps(payload, indent=2, sort_keys=True),
-        )
-    return payload
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:

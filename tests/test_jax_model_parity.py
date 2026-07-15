@@ -19,6 +19,8 @@ from spectra_learning.models.pairmixer_jax import PairMixerBlock as JaxPairMixer
 from spectra_learning.models.transformer_jax import FeedForward as JaxFeedForward
 from spectra_learning.training.checkpointing import save_torch_checkpoint
 from spectra_learning.training.pretrain_jax import (
+    _jax_data_mesh_for_device_count,
+    _replicate_tree_on_data_mesh,
     build_jax_optimizer,
     jax_apply_grads,
     jax_grad_step,
@@ -753,12 +755,17 @@ def test_jax_sharded_accumulated_grad_step_updates_on_all_devices():
         {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95},
         jax_model,
     )
-    batch = _jax_batch(
-        _real_pattern_batch_size(
-            "contiguous",
-            jax.device_count(),
-            num_peaks=int(kwargs["num_peaks"]),
-        )
+    data_mesh = _jax_data_mesh_for_device_count(jax.device_count())
+    batch = numpy_batch_to_jax(
+        _numpy_batch(
+            _real_pattern_batch_size(
+                "contiguous",
+                jax.local_device_count(),
+                num_peaks=int(kwargs["num_peaks"]),
+            )
+        ),
+        data_mesh=data_mesh,
+        batch_axis=0,
     )
     before = np.asarray(jax_model.jepa_mae_mz_head.weight[...])
 
@@ -782,24 +789,33 @@ def test_jax_sharded_pure_optax_accumulated_train_step_updates_on_all_devices():
     torch_model = PeakSetJEPA(**kwargs).eval()
     jax_model = PeakSetJEPAJax(**kwargs)
     jax_model.load_torch_state_dict(torch_model.state_dict())
-    batch = _jax_batch(
+    batch = _numpy_batch(
         _real_pattern_batch_size(
             "contiguous",
-            jax.device_count(),
+            jax.local_device_count(),
             num_peaks=int(kwargs["num_peaks"]),
         )
     )
-    accumulated_batch = jax.tree.map(lambda value: jnp.stack([value, value]), batch)
+    data_mesh = _jax_data_mesh_for_device_count(jax.device_count())
+    accumulated_batch = numpy_batch_to_jax(
+        jax.tree.map(lambda value: np.stack([value, value]), batch),
+        data_mesh=data_mesh,
+        batch_axis=1,
+    )
     graphdef, trainable_params, static_state, opt_state, optimizer = (
         init_pure_optax_train_state(
             {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95},
             jax_model,
         )
     )
+    trainable_params = _replicate_tree_on_data_mesh(trainable_params, data_mesh)
+    opt_state = _replicate_tree_on_data_mesh(opt_state, data_mesh)
+    static_state = _replicate_tree_on_data_mesh(static_state, data_mesh)
     pure_train_step = make_pure_accumulated_train_step(
         graphdef,
         optimizer,
         sharded=True,
+        data_mesh=data_mesh,
     )
     before = np.asarray(jax_model.jepa_mae_mz_head.weight[...])
 

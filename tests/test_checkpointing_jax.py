@@ -503,7 +503,39 @@ def test_jax_training_loop_logs_validation_and_online_probe(monkeypatch, tmp_pat
     )
 
 
-def test_run_msg_probe_jax_uses_jax_dataset_and_optimizer(monkeypatch):
+@pytest.mark.parametrize(
+    ("early_stopping", "expected_splits"),
+    (
+        (
+            False,
+            [
+                "massspec_train",
+                "massspec_val",
+                "massspec_test",
+                "massspec_train",
+                "massspec_test",
+                "massspec_mcebio_test",
+            ],
+        ),
+        (
+            True,
+            [
+                "massspec_train",
+                "massspec_val",
+                "massspec_train",
+                "massspec_val",
+                "massspec_test",
+                "massspec_mcebio_test",
+            ],
+        ),
+    ),
+    ids=("test-selected", "validation-selected"),
+)
+def test_run_msg_probe_jax_uses_jax_dataset_and_optimizer(
+    monkeypatch,
+    early_stopping,
+    expected_splits,
+):
     from spectra_learning.probes.massspec import msg_probe_jax
 
     def to_jax_batch(batch: dict[str, np.ndarray]) -> dict[str, object]:
@@ -557,7 +589,7 @@ def test_run_msg_probe_jax_uses_jax_dataset_and_optimizer(monkeypatch):
     cfg.msg_probe_warmup_steps = 0
     cfg.msg_probe_mlp_hidden_dim = 4
     cfg.msg_probe_variants = ["mean"]
-    cfg.msg_probe_early_stopping = False
+    cfg.msg_probe_early_stopping = early_stopping
     cfg.msg_probe_num_repeats = 1
     cfg.peak_ordering = "mz"
     fake_probe_data = FakeProbeData(to_jax_batch(_tiny_numpy_batch()))
@@ -575,6 +607,8 @@ def test_run_msg_probe_jax_uses_jax_dataset_and_optimizer(monkeypatch):
     assert "torch" not in msg_probe_jax.__dict__
     assert metrics["msg_probe/repeats"] == 1.0
     assert metrics["msg_probe/mean/epoch"] == 1.0
+    if early_stopping:
+        assert "msg_probe/mean/val/auc_fluorine" in metrics
     assert "msg_probe/mean/test/auc_fluorine" in metrics
     assert "msg_probe/mean/test/pr_curve_fluorine" in metrics
     assert "msg_probe/mean/test/pr_curve_sulfur" in metrics
@@ -582,14 +616,7 @@ def test_run_msg_probe_jax_uses_jax_dataset_and_optimizer(monkeypatch):
     assert "msg_probe/mean/mcebio_sulfur_test/pr_curve_sulfur" in metrics
     assert "msg_probe/mean/mcebio_sulfur_test/auc_fluorine" not in metrics
     assert "msg_probe/mean/mcebio_sulfur_test/pr_curve_fluorine" not in metrics
-    assert [call[0] for call in fake_probe_data.calls] == [
-        "massspec_train",
-        "massspec_val",
-        "massspec_test",
-        "massspec_train",
-        "massspec_test",
-        "massspec_mcebio_test",
-    ]
+    assert [call[0] for call in fake_probe_data.calls] == expected_splits
 
 
 def test_msg_probe_jax_masks_distributed_sampler_padding_rows():

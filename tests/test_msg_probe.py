@@ -47,9 +47,12 @@ from spectra_learning.probes.massspec.msg_probe import (
     _probe_step,
     _resolve_probe_warmup_steps,
     _compute_pairwise_similarity_alignment_for_indices,
+    _evaluate_linear_probe_split,
     _plot_pairwise_similarity_alignment,
+    _run_dreams_probe_once,
     _run_msg_probe_once,
     _score_epoch_state,
+    _sequence_probe_step,
     _update_epoch_state,
     msg_probe_metric_higher_is_better,
     iter_massspec_probe,
@@ -116,10 +119,11 @@ class _DummyDataModule:
 
 
 class _SplitDummyDataModule:
-    def __init__(self, batches_by_split, info, batch_size):
+    def __init__(self, batches_by_split, info, batch_size, dreams_dim=0):
         self._batches_by_split = batches_by_split
         self.info = info
         self.batch_size = batch_size
+        self.dreams_dim = dreams_dim
         self.calls = []
 
     def build_dataset(
@@ -149,6 +153,29 @@ class _SplitDummyDataModule:
             }
         )
         return _DummyDataset(self._batches_by_split[split])
+
+
+class _DummyMsgEncoder(torch.nn.Module):
+    def __init__(self, model_dim: int):
+        super().__init__()
+        self.model_dim = model_dim
+
+    def forward(
+        self,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+        *,
+        valid_mask: torch.Tensor,
+        precursor_mz: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        values = peak_mz + peak_intensity
+        return values.unsqueeze(-1).repeat(1, 1, self.model_dim)
+
+
+class _DummyMsgModel(torch.nn.Module):
+    def __init__(self, model_dim: int):
+        super().__init__()
+        self.encoder = _DummyMsgEncoder(model_dim)
 
 
 class MsgLinearProbeTests(unittest.TestCase):
@@ -904,6 +931,57 @@ class MsgProbeStepTests(unittest.TestCase):
         self.assertEqual(result["predictions"]["sulfur"].shape, (2,))
         self.assertEqual(result["predictions"]["maccs"].shape, (2, 4))
 
+    def test_sequence_probe_step_keeps_distributed_empty_batch_in_backward(self):
+        config = config_dict.ConfigDict()
+        config.model_dim = 3
+        config.msg_probe_mlp_hidden_dim = 4
+        task_spec = MsgProbeTaskSpec(
+            regression_tasks=(),
+            maccs_bits=2,
+            regression_means={},
+            regression_stds={},
+        )
+        probe = _build_msg_sequence_probe(
+            "mean",
+            config=config,
+            task_spec=task_spec,
+        )
+        batch = {
+            "peak_valid_mask": torch.tensor(
+                [[True, True], [True, False]], dtype=torch.bool
+            ),
+            "probe_valid_mol": torch.zeros(2, dtype=torch.bool),
+            "probe_maccs": torch.zeros((2, 2), dtype=torch.int32),
+        }
+        features = torch.randn(2, 2, 3)
+
+        self.assertIsNone(
+            _sequence_probe_step(
+                probe,
+                batch,
+                features,
+                task_spec=task_spec,
+                device=torch.device("cpu"),
+            )
+        )
+        result = _sequence_probe_step(
+            probe,
+            batch,
+            features,
+            task_spec=task_spec,
+            device=torch.device("cpu"),
+            allow_empty=True,
+        )
+
+        assert result is not None
+        self.assertEqual(result["batch_size"], 0)
+        self.assertEqual(result["predictions"], {})
+        self.assertEqual(result["targets"], {})
+        result["loss_total"].backward()
+        for parameter in probe.parameters():
+            assert parameter.grad is not None
+            self.assertEqual(torch.count_nonzero(parameter.grad).item(), 0)
+
 
 class MsgProbeTaskSpecTests(unittest.TestCase):
     def test_task_spec_uses_one_fingerprint_head_for_maccs_bits(self):
@@ -1583,21 +1661,24 @@ class MsgProbeRunTests(unittest.TestCase):
             ),
         }
 
-    def test_validation_selected_msg_probe_evaluates_test_once_after_selection(self):
+    @staticmethod
+    def _config(*, num_epochs: int, early_stopping: bool) -> config_dict.ConfigDict:
         cfg = config_dict.ConfigDict()
         cfg.seed = 11
         cfg.model_dim = 4
         cfg.msg_probe_variants = ("mean",)
         cfg.msg_probe_mlp_hidden_dim = 8
-        cfg.msg_probe_num_epochs = 2
+        cfg.msg_probe_num_epochs = num_epochs
         cfg.msg_probe_learning_rate = 1e-3
         cfg.msg_probe_weight_decay = 0.0
         cfg.msg_probe_warmup_steps = 0
-        cfg.msg_probe_early_stopping = True
+        cfg.msg_probe_early_stopping = early_stopping
         cfg.msg_probe_early_stopping_patience = 10
         cfg.msg_probe_pairwise_alignment_num_pairs = 0
+        return cfg
 
-        probe_data = _SplitDummyDataModule(
+    def _probe_data(self) -> _SplitDummyDataModule:
+        return _SplitDummyDataModule(
             batches_by_split={
                 "massspec_train": [self._probe_batch(1.0)],
                 "massspec_val": [self._probe_batch(1.5)],
@@ -1614,23 +1695,11 @@ class MsgProbeRunTests(unittest.TestCase):
             batch_size=4,
         )
 
-        class DummyEncoder(torch.nn.Module):
-            def forward(
-                self,
-                peak_mz,
-                peak_intensity,
-                *,
-                valid_mask,
-                precursor_mz=None,
-            ):
-                values = peak_mz + peak_intensity
-                return values.unsqueeze(-1).repeat(1, 1, cfg.model_dim)
-
-        class DummyModel(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.encoder = DummyEncoder()
-
+    def test_validation_selected_msg_probe_evaluates_test_once_after_selection(self):
+        cfg = self._config(num_epochs=2, early_stopping=True)
+        probe_data = self._probe_data()
+        model = _DummyMsgModel(int(cfg.model_dim))
+        model.train()
         curve: list[dict[str, float]] = []
         with mock.patch(
             "spectra_learning.probes.massspec.msg_probe.MassSpecProbeData.from_config",
@@ -1638,11 +1707,12 @@ class MsgProbeRunTests(unittest.TestCase):
         ):
             metrics = _run_msg_probe_once(
                 config=cfg,
-                model=DummyModel(),
+                model=model,
                 device=torch.device("cpu"),
                 on_epoch_end=curve.append,
             )
 
+        self.assertTrue(model.training)
         test_calls = [
             call for call in probe_data.calls if call["split"] == "massspec_test"
         ]
@@ -1676,52 +1746,53 @@ class MsgProbeRunTests(unittest.TestCase):
         self.assertNotIn("msg_probe/mean/test/auc_maccs_mean", curve[0])
         self.assertNotIn("msg_probe/mean/test/pr_curve_fluorine", curve[0])
 
-    def test_online_msg_probe_uses_nist_murcko_maccs_only(self):
-        cfg = config_dict.ConfigDict()
-        cfg.seed = 11
-        cfg.model_dim = 4
-        cfg.msg_probe_variants = ("mean",)
-        cfg.msg_probe_mlp_hidden_dim = 8
-        cfg.msg_probe_num_epochs = 1
-        cfg.msg_probe_learning_rate = 1e-3
-        cfg.msg_probe_weight_decay = 0.0
-        cfg.msg_probe_warmup_steps = 0
-        cfg.msg_probe_early_stopping = False
-        cfg.msg_probe_fingerprint = "morgan"
-        cfg.msg_probe_pairwise_alignment_num_pairs = 20_000
+    def test_test_selected_msg_probe_reuses_epoch_test_state(self):
+        cfg = self._config(num_epochs=2, early_stopping=False)
+        probe_data = self._probe_data()
+        model = _DummyMsgModel(int(cfg.model_dim))
+        model.eval()
+        curve: list[dict[str, float]] = []
 
-        probe_data = _SplitDummyDataModule(
-            batches_by_split={
-                "massspec_train": [self._probe_batch(1.0)],
-                "massspec_val": [self._probe_batch(1.5)],
-                "massspec_test": [self._probe_batch(2.0)],
-            },
-            info={
-                "massspec_train_size": 4,
-                "massspec_val_size": 4,
-                "massspec_test_size": 4,
-                "massspec_mcebio_test_size": 0,
-                "probe_morgan_bits": 0,
-            },
-            batch_size=4,
+        with mock.patch(
+            "spectra_learning.probes.massspec.msg_probe.MassSpecProbeData.from_config",
+            return_value=probe_data,
+        ):
+            metrics = _run_msg_probe_once(
+                config=cfg,
+                model=model,
+                device=torch.device("cpu"),
+                on_epoch_end=curve.append,
+            )
+
+        self.assertFalse(model.training)
+        self.assertEqual(
+            [call["split"] for call in probe_data.calls],
+            [
+                "massspec_train",
+                "massspec_val",
+                "massspec_test",
+                "massspec_train",
+                "massspec_test",
+                "massspec_train",
+                "massspec_test",
+                "massspec_mcebio_test",
+            ],
+        )
+        self.assertEqual(len(curve), 2)
+        for epoch_metrics in curve:
+            self.assertIn("msg_probe/mean/test/auc_maccs_mean", epoch_metrics)
+            self.assertNotIn("msg_probe/mean/val/auc_maccs_mean", epoch_metrics)
+            self.assertNotIn("msg_probe/mean/test/pr_curve_fluorine", epoch_metrics)
+        self.assertIsInstance(
+            metrics["msg_probe/mean/test/pr_curve_fluorine"],
+            PrecisionRecallCurve,
         )
 
-        class DummyEncoder(torch.nn.Module):
-            def forward(
-                self,
-                peak_mz,
-                peak_intensity,
-                *,
-                valid_mask,
-                precursor_mz=None,
-            ):
-                values = peak_mz + peak_intensity
-                return values.unsqueeze(-1).repeat(1, 1, cfg.model_dim)
-
-        class DummyModel(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.encoder = DummyEncoder()
+    def test_online_msg_probe_uses_nist_murcko_maccs_only(self):
+        cfg = self._config(num_epochs=1, early_stopping=False)
+        cfg.msg_probe_fingerprint = "morgan"
+        cfg.msg_probe_pairwise_alignment_num_pairs = 20_000
+        probe_data = self._probe_data()
 
         with mock.patch(
             "spectra_learning.probes.massspec.msg_probe.MassSpecProbeData.from_config",
@@ -1729,7 +1800,7 @@ class MsgProbeRunTests(unittest.TestCase):
         ) as from_config:
             metrics = _run_msg_probe_once(
                 config=cfg,
-                model=DummyModel(),
+                model=_DummyMsgModel(int(cfg.model_dim)),
                 device=torch.device("cpu"),
                 online_maccs_only=True,
             )
@@ -1744,6 +1815,179 @@ class MsgProbeRunTests(unittest.TestCase):
         self.assertNotIn("msg_probe/mean/test/auc_sulfur", metrics)
         self.assertNotIn("msg_probe/mean/test/mae_mol_weight", metrics)
         self.assertNotIn("msg_probe/mean/mcebio_sulfur_test/auc_sulfur", metrics)
+
+
+class DreamsProbeRunTests(unittest.TestCase):
+    @staticmethod
+    def _config(*, num_epochs: int, early_stopping: bool) -> config_dict.ConfigDict:
+        cfg = MsgProbeRunTests._config(
+            num_epochs=num_epochs,
+            early_stopping=early_stopping,
+        )
+        cfg.msg_probe_learning_rate = 5e-2
+        return cfg
+
+    @staticmethod
+    def _probe_data() -> _SplitDummyDataModule:
+        batches = {}
+        for split, scale in (
+            ("massspec_train", 1.0),
+            ("massspec_val", 1.5),
+            ("massspec_test", 2.0),
+        ):
+            batch = MsgProbeRunTests._probe_batch(scale)
+            batch["dreams_embedding"] = np.asarray(
+                [
+                    [1.0, 0.0, 0.5],
+                    [0.0, 1.0, 0.5],
+                    [1.0, 0.5, 0.0],
+                    [0.5, 1.0, 0.0],
+                ],
+                dtype=np.float32,
+            ) * scale
+            batches[split] = [batch]
+        return _SplitDummyDataModule(
+            batches_by_split=batches,
+            info={
+                "massspec_train_size": 4,
+                "massspec_val_size": 4,
+                "massspec_test_size": 4,
+                "probe_morgan_bits": 0,
+            },
+            batch_size=4,
+            dreams_dim=3,
+        )
+
+    def test_test_selected_probe_reuses_epoch_test_metrics(self):
+        cfg = self._config(num_epochs=2, early_stopping=False)
+        probe_data = self._probe_data()
+        curve: list[dict[str, float]] = []
+
+        with (
+            mock.patch(
+                "spectra_learning.probes.massspec.msg_probe.MassSpecProbeData.from_config",
+                return_value=probe_data,
+            ),
+            mock.patch(
+                "spectra_learning.probes.massspec.msg_probe.torch.compile",
+                side_effect=lambda fn: fn,
+            ),
+        ):
+            metrics = _run_dreams_probe_once(
+                config=cfg,
+                device=torch.device("cpu"),
+                on_epoch_end=curve.append,
+            )
+
+        self.assertEqual(
+            [(call["split"], call["seed"]) for call in probe_data.calls],
+            [
+                ("massspec_train", 1_100_011),
+                ("massspec_val", 1_110_011),
+                ("massspec_test", 1_200_011),
+                ("massspec_train", 1_100_011),
+                ("massspec_test", 1_200_011),
+                ("massspec_val", 1_110_011),
+                ("massspec_train", 1_100_012),
+                ("massspec_test", 1_200_011),
+                ("massspec_val", 1_110_011),
+            ],
+        )
+        self.assertEqual(len(curve), 2)
+        self.assertTrue(
+            all("dreams_probe/test/auc_fluorine" in epoch for epoch in curve)
+        )
+        selected_idx = max(
+            range(len(curve)),
+            key=lambda idx: curve[idx]["dreams_probe/test/auc_fluorine"],
+        )
+        self.assertEqual(metrics["dreams_probe_epoch"], float(selected_idx + 1))
+        self.assertEqual(
+            metrics["dreams_probe/test/auc_fluorine"],
+            curve[selected_idx]["dreams_probe/test/auc_fluorine"],
+        )
+
+    def test_validation_selected_probe_restores_best_state_for_final_test(self):
+        cfg = self._config(num_epochs=5, early_stopping=True)
+        cfg.msg_probe_early_stopping_patience = 1
+        cfg.msg_probe_early_stopping_min_delta = 2.0
+        cfg.msg_probe_early_stopping_min_epochs = 1
+        probe_data = self._probe_data()
+        curve: list[dict[str, float]] = []
+        evaluated_states: list[tuple[str, dict[str, torch.Tensor]]] = []
+
+        def evaluate_with_state(**kwargs):
+            evaluated_states.append(
+                (
+                    kwargs["split"],
+                    {
+                        name: value.detach().clone()
+                        for name, value in kwargs["probe"].state_dict().items()
+                    },
+                )
+            )
+            return _evaluate_linear_probe_split(**kwargs)
+
+        with (
+            mock.patch(
+                "spectra_learning.probes.massspec.msg_probe.MassSpecProbeData.from_config",
+                return_value=probe_data,
+            ),
+            mock.patch(
+                "spectra_learning.probes.massspec.msg_probe.torch.compile",
+                side_effect=lambda fn: fn,
+            ),
+            mock.patch(
+                "spectra_learning.probes.massspec.msg_probe._evaluate_linear_probe_split",
+                side_effect=evaluate_with_state,
+            ),
+        ):
+            metrics = _run_dreams_probe_once(
+                config=cfg,
+                device=torch.device("cpu"),
+                on_epoch_end=curve.append,
+            )
+
+        self.assertEqual(
+            [(call["split"], call["seed"]) for call in probe_data.calls],
+            [
+                ("massspec_train", 1_100_011),
+                ("massspec_val", 1_110_011),
+                ("massspec_train", 1_100_011),
+                ("massspec_val", 1_110_011),
+                ("massspec_train", 1_100_012),
+                ("massspec_val", 1_110_011),
+                ("massspec_test", 1_200_011),
+            ],
+        )
+        self.assertEqual(
+            [split for split, _ in evaluated_states],
+            ["massspec_val", "massspec_val", "massspec_test"],
+        )
+        first_state = evaluated_states[0][1]
+        second_state = evaluated_states[1][1]
+        final_state = evaluated_states[2][1]
+        self.assertTrue(
+            any(
+                not torch.equal(first_state[name], second_state[name])
+                for name in first_state
+            )
+        )
+        self.assertTrue(
+            all(
+                torch.equal(first_state[name], final_state[name])
+                for name in first_state
+            )
+        )
+        self.assertEqual(len(curve), 2)
+        self.assertTrue(
+            all("dreams_probe/val/auc_fluorine" in epoch for epoch in curve)
+        )
+        self.assertTrue(
+            all("dreams_probe/test/auc_fluorine" not in epoch for epoch in curve)
+        )
+        self.assertEqual(metrics["dreams_probe_epoch"], 1.0)
+        self.assertIn("dreams_probe/test/auc_fluorine", metrics)
 
 
 class RepeatedProbeTests(unittest.TestCase):

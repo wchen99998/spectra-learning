@@ -132,6 +132,92 @@ class _FakeFluorineModel(torch.nn.Module):
         self.encoder = _FakeFluorineEncoder()
 
 
+class _TinyFluorineEncoder(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.single_attention = torch.nn.Module()
+        self.single_attention.wo = torch.nn.Linear(2, 2, bias=False)
+
+    def forward(
+        self,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+        *,
+        valid_mask: torch.Tensor,
+        precursor_mz: torch.Tensor | None = None,
+        spectrum_metadata: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.single_attention.wo(
+            torch.stack((peak_mz, peak_intensity), dim=-1)
+        )
+
+
+class _TinyFluorineModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.encoder = _TinyFluorineEncoder()
+
+
+def _tiny_fluorine_batch() -> dict[str, torch.Tensor]:
+    return {
+        "peak_mz": torch.tensor([[0.1, 0.2], [0.8, 0.9]]),
+        "peak_intensity": torch.tensor([[0.2, 0.3], [0.7, 0.8]]),
+        "peak_valid_mask": torch.ones(2, 2, dtype=torch.bool),
+        "label": torch.tensor([0.0, 1.0]),
+    }
+
+
+def _adaptation_trainer_kwargs(
+    *,
+    trainer_name: str,
+    tmp_path: Path,
+    model: torch.nn.Module,
+    config: config_dict.ConfigDict,
+) -> dict[str, object]:
+    kwargs: dict[str, object] = {
+        "state_path": tmp_path / f"{trainer_name}.pt",
+        "model": model,
+        "config": config,
+        "config_path": tmp_path / "config.py",
+        "checkpoint_path": tmp_path / "checkpoint.pt",
+        "cache_dir": tmp_path,
+        "device": torch.device("cpu"),
+        "batch_size": 2,
+        "num_workers": 0,
+        "seed": 7,
+        "epochs": 1,
+        "patience": 1,
+        "weight_decay": 0.0,
+        "autocast_dtype": None,
+        "hidden_dim": 2,
+        "dropout": 0.0,
+        "revision": "main",
+        "max_train_samples": None,
+        "max_val_samples": None,
+        "max_test_samples": None,
+        "pooling": "covariance",
+        "eval_test_every_epoch": True,
+    }
+    if trainer_name == "train_or_load_finetuned":
+        kwargs.update(
+            model_learning_rate=1e-2,
+            pooler_learning_rate=1e-2,
+            head_learning_rate=1e-2,
+            focal_alpha="auto",
+            focal_gamma=2.0,
+            select_metric="average_precision",
+        )
+    else:
+        kwargs.update(
+            lora_rank=1,
+            lora_alpha=1.0,
+            lora_dropout=0.0,
+            lora_learning_rate=1e-2,
+            head_learning_rate=1e-2,
+        )
+    return kwargs
+
+
 def test_cli_accepts_lora_mode(monkeypatch):
     from scripts import train_fluorine_detection
 
@@ -243,6 +329,136 @@ def test_adaptation_trainers_only_build_test_loader_for_per_epoch_evaluation(
         if eval_test_every_epoch
         else ["train", "val"]
     )
+
+
+@pytest.mark.parametrize(
+    "trainer_name",
+    ["train_or_load_finetuned", "train_or_load_lora"],
+)
+def test_adaptation_trainers_complete_one_epoch_and_reload_best_state(
+    monkeypatch,
+    tmp_path: Path,
+    trainer_name: str,
+):
+    torch.manual_seed(0)
+    model = _TinyFluorineModel()
+    config = config_dict.ConfigDict(
+        {"model_dim": 2, "covariance_pooling_dim": 1, "compile_mode": "none"}
+    )
+    data = SimpleNamespace(
+        metadata={
+            "train_size": 2,
+            "train_positive": 1,
+            "val_size": 2,
+            "val_positive": 1,
+        }
+    )
+    loader_calls = []
+
+    def fake_make_loader(_data, split, **kwargs):
+        loader_calls.append((split, kwargs))
+        return [_tiny_fluorine_batch()]
+
+    monkeypatch.setattr(fluorine, "build_fluorine_data", lambda **_kwargs: data)
+    monkeypatch.setattr(fluorine, "_make_loader", fake_make_loader)
+    if trainer_name == "train_or_load_finetuned":
+        monkeypatch.setattr(fluorine, "load_torch_checkpoint", lambda *_args, **_kwargs: {})
+        monkeypatch.setattr(
+            fluorine,
+            "load_resume_covariance_pooler_state",
+            lambda *_args, **_kwargs: None,
+        )
+
+    kwargs = _adaptation_trainer_kwargs(
+        trainer_name=trainer_name,
+        tmp_path=tmp_path,
+        model=model,
+        config=config,
+    )
+    state = getattr(fluorine, trainer_name)(**kwargs)
+
+    assert [(split, call["shuffle"], call["seed"]) for split, call in loader_calls] == [
+        ("train", True, 7),
+        ("val", False, 10_007),
+        ("test", False, 20_007),
+    ]
+    state_path = kwargs["state_path"]
+    assert isinstance(state_path, Path)
+    saved_state = torch.load(state_path, weights_only=False)
+    best_state = torch.load(
+        state_path.with_name(f"{state_path.stem}.best.pt"),
+        weights_only=False,
+    )
+    assert state["complete"] is True
+    assert saved_state["complete"] is True
+    assert best_state["complete"] is False
+    assert saved_state.keys() == state.keys()
+    assert best_state.keys() == state.keys()
+    assert state["best_epoch"] == 1
+    assert len(state["history"]) == 1
+    assert state["best_val"] == state["history"][0]["val"]
+    assert "test/average_precision" in state["history"][0]["test"]
+    assert {
+        key: tuple(value.shape) for key, value in state["pooler_state"].items()
+    } == {"left_proj.weight": (1, 2), "right_proj.weight": (1, 2)}
+    assert {
+        key: tuple(value.shape) for key, value in state["classifier_state"].items()
+    } == {
+        "net.0.weight": (2, 1),
+        "net.0.bias": (2,),
+        "net.3.weight": (2, 2),
+        "net.3.bias": (2,),
+        "net.6.weight": (1, 2),
+        "net.6.bias": (1,),
+    }
+
+    if trainer_name == "train_or_load_finetuned":
+        assert "lora_state" not in state
+        assert state["distributed_world_size"] == 1
+        state_key = "model_state"
+        expected_state = state[state_key]
+        assert {key: tuple(value.shape) for key, value in expected_state.items()} == {
+            "encoder.single_attention.wo.weight": (2, 2)
+        }
+        actual_state = model.state_dict()
+    else:
+        assert "model_state" not in state
+        assert "distributed_world_size" not in state
+        assert state["lora_config"]["applied_modules"] == ["single_attention.wo"]
+        state_key = "lora_state"
+        expected_state = state[state_key]
+        assert {key: tuple(value.shape) for key, value in expected_state.items()} == {
+            "single_attention.wo.lora_a.weight": (1, 2),
+            "single_attention.wo.lora_b.weight": (2, 1),
+        }
+        actual_state = lora_state_dict(model.encoder)
+    for key, value in expected_state.items():
+        assert torch.equal(actual_state[key], value)
+        assert torch.equal(saved_state[state_key][key], value)
+        assert torch.equal(best_state[state_key][key], value)
+
+    restored_model = _TinyFluorineModel()
+    kwargs["model"] = restored_model
+    monkeypatch.setattr(
+        fluorine,
+        "build_fluorine_data",
+        lambda **_kwargs: pytest.fail("cached state rebuilt fluorine data"),
+    )
+    monkeypatch.setattr(
+        fluorine,
+        "_make_loader",
+        lambda *_args, **_kwargs: pytest.fail("cached state rebuilt loaders"),
+    )
+    cached_state = getattr(fluorine, trainer_name)(**kwargs)
+
+    assert cached_state["best_epoch"] == 1
+    if trainer_name == "train_or_load_finetuned":
+        restored_state = restored_model.state_dict()
+    else:
+        assert isinstance(restored_model.encoder.single_attention.wo, LoRALinear)
+        restored_state = lora_state_dict(restored_model.encoder)
+    for key, value in expected_state.items():
+        assert torch.equal(restored_state[key], value)
 
 
 def test_run_persists_single_canonical_final_test_evaluation(monkeypatch, tmp_path: Path):
