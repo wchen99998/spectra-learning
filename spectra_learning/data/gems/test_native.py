@@ -368,6 +368,36 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             self.assertEqual(offset_ids, full_ids[4:])
             self.assertEqual(len(offset_loader), datamodule.train_steps - 2)
 
+    def test_accumulation_change_preserves_global_batch_offset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cfg = self._make_config(tmp_path)
+            cfg.batch_size = 8
+            cfg.gradient_accumulation_steps = 1
+            cfg.gems_hdf5_rows_per_block = 8
+            cfg.drop_remainder = True
+            _write_fake_hdf5_shards(self._artifact_dir(cfg), [16])
+
+            datamodule = gems.GemsDataModule(cfg, seed=42)
+            full_ids = [
+                round(float(value) * 1000.0, 6)
+                for batch in datamodule.train_loader_for_epoch(0)
+                for value in batch["precursor_mz"]
+            ]
+            datamodule.set_gradient_accumulation_steps(2)
+            offset_loader = datamodule.train_loader_for_epoch(0, start_batch=1)
+            offset_ids = [
+                round(float(value) * 1000.0, 6)
+                for batch in offset_loader
+                for value in batch["precursor_mz"]
+            ]
+
+            self.assertEqual(datamodule.global_batch_size, 8)
+            self.assertEqual(datamodule.batch_size, 4)
+            self.assertEqual(datamodule.train_steps, 2)
+            self.assertEqual(len(offset_loader), 2)
+            self.assertEqual(offset_ids, full_ids[8:])
+
     def test_distributed_train_loader_splits_fixed_global_batch(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

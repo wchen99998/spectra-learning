@@ -231,6 +231,8 @@ class PeakSetJEPAJax(nnx.Module):
                 ),
                 use_fastmixer=self.use_fastmixer,
                 fastmixer_max_visible_tokens=self.pairmixer_fast_max_visible_tokens,
+                projection_kernel=cfg.pairmixer_predictor_projection_kernel,
+                kernel_role="predictor",
                 transition_type=self.pairmixer_transition_type,
                 compute_dtype=self.compute_dtype,
                 rngs=rngs,
@@ -351,7 +353,10 @@ class PeakSetJEPAJax(nnx.Module):
             pairmixer_fourier_x_max=cfg.pairmixer_fourier_x_max,
             pairmixer_relative_fourier_x_min=cfg.pairmixer_relative_fourier_x_min,
             pairmixer_relative_fourier_x_max=cfg.pairmixer_relative_fourier_x_max,
-            pairmixer_fast_max_visible_tokens=cfg.pairmixer_fast_max_visible_tokens,
+            pairmixer_projection_kernel=cfg.pairmixer_encoder_projection_kernel,
+            pairmixer_fast_max_visible_tokens=(
+                self.pairmixer_fast_encoder_max_visible_tokens
+            ),
             activation_checkpoint_mode=cfg.activation_checkpoint_mode,
             activation_checkpoint_every_n_layers=(
                 cfg.activation_checkpoint_every_n_layers
@@ -360,6 +365,29 @@ class PeakSetJEPAJax(nnx.Module):
             compute_dtype=self.compute_dtype,
             rngs=rngs,
         )
+
+    def set_fastmixer_capacities(
+        self,
+        encoder_tokens: int,
+        predictor_tokens: int,
+    ) -> None:
+        self.pairmixer_fast_encoder_max_visible_tokens = encoder_tokens
+        self.pairmixer_fast_max_visible_tokens = predictor_tokens
+        self.encoder.pairmixer_fast_max_visible_tokens = encoder_tokens
+        for block in self.encoder.blocks:
+            block.fastmixer_max_visible_tokens = encoder_tokens
+        for block in self.masked_latent_predictor:
+            block.fastmixer_max_visible_tokens = predictor_tokens
+
+    def set_pairmixer_projection_kernels(
+        self,
+        encoder_kernel: str,
+        predictor_kernel: str,
+    ) -> None:
+        for block in self.encoder.blocks:
+            block.projection_kernel = encoder_kernel
+        for block in self.masked_latent_predictor:
+            block.projection_kernel = predictor_kernel
 
     def __call__(
         self,

@@ -22,8 +22,16 @@ from tqdm import tqdm
 
 from spectra_learning.config import config_to_dict
 from spectra_learning.data.gems.datamodule import GemsDataModule
+from spectra_learning.data.gems.mask_schedule import (
+    jepa_mask_stage_index,
+    jepa_mask_stages,
+)
 from spectra_learning.models.common_jax import Array
 from spectra_learning.models.factory_jax import build_model_from_config
+from spectra_learning.models.fastmixer_capacity import (
+    pairmixer_fast_stage_capacities,
+    pairmixer_stage_projection_kernels,
+)
 from spectra_learning.models.model_jax import PeakSetJEPAJax
 from spectra_learning.probes.massspec.msg_probe_jax import run_msg_probe_jax
 from spectra_learning.probes.massspec.msg_settings import (
@@ -320,13 +328,42 @@ def _jax_adamw_transform(
     *,
     total_steps: int | None = None,
 ) -> optax.GradientTransformation:
+    learning_rate = _jax_learning_rate_schedule(config, total_steps=total_steps)
+    b1 = float(config.get("b1", 0.9))
+    b2 = float(config.get("b2", 0.999))
+    weight_decay = float(config.get("weight_decay", 0.0))
+    optimizer_state_dtype = str(
+        config.get("optimizer_state_dtype", "fp32")
+    ).lower()
+    if optimizer_state_dtype in {"bf16", "bfloat16"}:
+        return optax.chain(
+            _jax_scale_by_adam_bf16_states(b1=b1, b2=b2),
+            optax.add_decayed_weights(weight_decay, mask=_jax_weight_decay_mask),
+            optax.scale_by_learning_rate(learning_rate),
+        )
     return optax.adamw(
-        learning_rate=_jax_learning_rate_schedule(config, total_steps=total_steps),
-        b1=float(config.get("b1", 0.9)),
-        b2=float(config.get("b2", 0.999)),
-        weight_decay=float(config.get("weight_decay", 0.0)),
+        learning_rate=learning_rate,
+        b1=b1,
+        b2=b2,
+        weight_decay=weight_decay,
         mask=_jax_weight_decay_mask,
     )
+
+
+def _jax_scale_by_adam_bf16_states(
+    *,
+    b1: float,
+    b2: float,
+) -> optax.GradientTransformation:
+    adam = optax.scale_by_adam(b1=b1, b2=b2, mu_dtype=jnp.bfloat16)
+
+    def init_fn(params):
+        state = adam.init(params)
+        # Optax casts each updated nu back to the dtype of state.nu.
+        nu = jax.tree.map(lambda value: value.astype(jnp.bfloat16), state.nu)
+        return state._replace(nu=nu)
+
+    return optax.GradientTransformation(init_fn, adam.update)
 
 
 def _jax_muon_transform(
@@ -1179,7 +1216,7 @@ def train_and_evaluate_jax_task(
             else datamodule.batch_size // jax.local_device_count()
         ),
         "run/gradient_accumulation_steps": float(
-            int(config.get("gradient_accumulation_steps", 1))
+            datamodule.gradient_accumulation_steps
         ),
         "run/device_backend": "jax",
         "run/training_task": task.name,
@@ -1302,10 +1339,28 @@ class _JaxTrainingLoop:
         self.log_every_n_steps = int(config.get("log_every_n_steps", 50))
         self.warmup_steps = int(config.get("throughput_warmup_steps", 0))
         self.grad_accum_steps = int(config.get("gradient_accumulation_steps", 1))
+        self.use_mask_schedule = (
+            isinstance(model, PeakSetJEPAJax)
+            and "jepa_context_fraction_schedule" in config
+        )
+        self.mask_stages = jepa_mask_stages(config) if self.use_mask_schedule else ()
+        self.mask_capacities = (
+            pairmixer_fast_stage_capacities(config)
+            if self.use_mask_schedule
+            else ()
+        )
+        self.mask_projection_kernels = (
+            pairmixer_stage_projection_kernels(config)
+            if self.use_mask_schedule
+            else ()
+        )
+        self.mask_stage_index = -1 if self.use_mask_schedule else 0
         data_parallel_devices = _jax_data_parallel_devices(config)
         self.data_mesh = _jax_data_mesh_for_device_count(data_parallel_devices)
         self.use_sharded_step = data_parallel_devices > 1
-        self.state, self.train_step, self.eval_step = self._initialize_train_state()
+        self.state, self.train_steps, self.eval_steps = self._initialize_train_state()
+        self.train_step = self.train_steps[0]
+        self.eval_step = self.eval_steps[0]
 
         self.checkpoint_every_steps = int(config.get("checkpoint_every_steps", 0))
         self.val_every_n_steps = validation_interval(config, datamodule, total_steps)
@@ -1320,6 +1375,7 @@ class _JaxTrainingLoop:
         )
         self.start_step = self._restore_checkpoint(resume_step)
         self.global_step = self.start_step
+        self._activate_mask_stage(self.global_step)
 
         self.timing_barriers = bool(config.get("jax_timing_barriers", False))
         self.compile_stall_threshold_seconds = float(
@@ -1360,7 +1416,11 @@ class _JaxTrainingLoop:
 
     def _initialize_train_state(
         self,
-    ) -> tuple[_JaxTrainState, Callable[..., Any], Callable[..., Any]]:
+    ) -> tuple[
+        _JaxTrainState,
+        tuple[Callable[..., Any], ...],
+        tuple[Callable[..., Any], ...],
+    ]:
         graphdef, params, static_state, opt_state, optimizer = (
             init_pure_optax_train_state(
                 self.config,
@@ -1368,20 +1428,64 @@ class _JaxTrainingLoop:
                 total_steps=self.total_steps,
             )
         )
-        train_step = make_pure_accumulated_train_step(
-            graphdef,
-            optimizer,
-            sharded=self.use_sharded_step,
-            data_mesh=self.data_mesh,
-            log_update_stats=bool(self.config.get("jax_log_update_stats", False)),
-            metric_reduction=self.metric_reduction,
-        )
-        eval_step = make_pure_eval_step(
-            graphdef,
-            sharded=self.use_sharded_step,
-            data_mesh=self.data_mesh,
-            metric_reduction=self.metric_reduction,
-        )
+
+        def make_steps(
+            stage_graphdef: Any,
+        ) -> tuple[Callable[..., Any], Callable[..., Any]]:
+            return (
+                make_pure_accumulated_train_step(
+                    stage_graphdef,
+                    optimizer,
+                    sharded=self.use_sharded_step,
+                    data_mesh=self.data_mesh,
+                    log_update_stats=bool(
+                        self.config.get("jax_log_update_stats", False)
+                    ),
+                    metric_reduction=self.metric_reduction,
+                ),
+                make_pure_eval_step(
+                    stage_graphdef,
+                    sharded=self.use_sharded_step,
+                    data_mesh=self.data_mesh,
+                    metric_reduction=self.metric_reduction,
+                ),
+            )
+
+        if not self.use_mask_schedule:
+            train_step, eval_step = make_steps(graphdef)
+            train_steps = [train_step]
+            eval_steps = [eval_step]
+        else:
+            train_steps = []
+            eval_steps = []
+        for capacity, kernels in zip(
+            self.mask_capacities,
+            self.mask_projection_kernels,
+            strict=True,
+        ):
+            encoder_tokens, predictor_tokens = capacity
+            encoder_kernel, predictor_kernel = kernels
+            self.model.set_fastmixer_capacities(
+                encoder_tokens,
+                predictor_tokens,
+            )
+            self.model.set_pairmixer_projection_kernels(
+                encoder_kernel,
+                predictor_kernel,
+            )
+            stage_graphdef, _, _ = nnx.split(
+                self.model,
+                trainable_param_filter,
+                ...,
+            )
+            train_step, eval_step = make_steps(stage_graphdef)
+            train_steps.append(train_step)
+            eval_steps.append(eval_step)
+        if self.use_mask_schedule:
+            self.model.set_fastmixer_capacities(*self.mask_capacities[0])
+            self.model.set_pairmixer_projection_kernels(
+                *self.mask_projection_kernels[0]
+            )
         state = _JaxTrainState(params, static_state, opt_state)
         if self.use_sharded_step:
             params = _replicate_tree_on_data_mesh(
@@ -1401,7 +1505,56 @@ class _JaxTrainingLoop:
                 static_state,
                 opt_state,
             )
-        return state, train_step, eval_step
+        return state, tuple(train_steps), tuple(eval_steps)
+
+    def _activate_mask_stage(self, global_step: int) -> bool:
+        if not self.use_mask_schedule:
+            return False
+        stage_index = jepa_mask_stage_index(
+            self.config,
+            global_step,
+            self.total_steps,
+        )
+        if stage_index == self.mask_stage_index:
+            return False
+        stage = self.mask_stages[stage_index]
+        encoder_tokens, predictor_tokens = self.mask_capacities[stage_index]
+        encoder_kernel, predictor_kernel = self.mask_projection_kernels[
+            stage_index
+        ]
+        self.datamodule.set_mask_fractions(
+            stage.context_fraction,
+            stage.target_fraction,
+        )
+        self.datamodule.set_gradient_accumulation_steps(
+            stage.gradient_accumulation_steps
+        )
+        self.grad_accum_steps = stage.gradient_accumulation_steps
+        self.model.set_fastmixer_capacities(
+            encoder_tokens,
+            predictor_tokens,
+        )
+        self.model.set_pairmixer_projection_kernels(
+            encoder_kernel,
+            predictor_kernel,
+        )
+        self.train_step = self.train_steps[stage_index]
+        self.eval_step = self.eval_steps[stage_index]
+        self.mask_stage_index = stage_index
+        logging.info(
+            "MAE mask stage %d: context_fraction=%.2f target_fraction=%.2f "
+            "encoder_tokens=%d predictor_tokens=%d accumulation_steps=%d "
+            "encoder_kernel=%s predictor_kernel=%s",
+            stage_index + 1,
+            stage.context_fraction,
+            stage.target_fraction,
+            encoder_tokens,
+            predictor_tokens,
+            stage.gradient_accumulation_steps,
+            encoder_kernel,
+            predictor_kernel,
+        )
+        return True
 
     def _restore_checkpoint(self, resume_step: int | None) -> int:
         if resume_step is None:
@@ -1443,6 +1596,7 @@ class _JaxTrainingLoop:
             start_batch=epoch_start_batch,
         )
         loader_iter = iter(loader)
+        loader_stage_index = self.mask_stage_index
         pbar = tqdm(
             total=min(
                 self.datamodule.train_steps - epoch_start_batch,
@@ -1453,6 +1607,18 @@ class _JaxTrainingLoop:
             disable=jax.process_index() != 0,
         )
         while self.global_step < self.total_steps:
+            if loader_stage_index != self.mask_stage_index:
+                _shutdown_torch_loader_iterator(loader_iter)
+                del loader_iter, loader
+                current_epoch_batch = (
+                    self.global_step - epoch * self.datamodule.train_steps
+                )
+                loader = self.datamodule.train_loader_for_epoch(
+                    epoch,
+                    start_batch=current_epoch_batch,
+                )
+                loader_iter = iter(loader)
+                loader_stage_index = self.mask_stage_index
             batch = self._next_accumulated_batch(loader_iter)
             if batch is None:
                 break
@@ -1461,6 +1627,7 @@ class _JaxTrainingLoop:
             metrics = self._train_batch(batch)
             pbar.update(1)
             self._log_or_stage_train_metrics(metrics, epoch=epoch, pbar=pbar)
+            self._activate_mask_stage(self.global_step)
             self._run_scheduled_work(pbar)
         if self.pending_train_metrics is not None and (
             self.global_step >= self.total_steps or epoch == loop_epochs - 1

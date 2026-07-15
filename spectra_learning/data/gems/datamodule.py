@@ -270,6 +270,23 @@ class GemsDataModule:
             output_format=self.dataloader_output_format,
         )
 
+    def set_mask_fractions(
+        self,
+        context_fraction: float,
+        target_fraction: float,
+    ) -> None:
+        self.jepa_context_fraction = context_fraction
+        self.jepa_target_fraction = target_fraction
+        self._val_loader = None
+
+    def set_gradient_accumulation_steps(self, steps: int) -> None:
+        self.gradient_accumulation_steps = steps
+        self.batch_size = self.global_batch_size // (
+            self.distributed_world_size * steps
+        )
+        self.train_steps = self._train_steps()
+        self._val_loader = None
+
     @property
     def val_loader(self) -> DataLoader:
         if self._val_loader is None:

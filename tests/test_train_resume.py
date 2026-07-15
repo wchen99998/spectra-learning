@@ -567,6 +567,54 @@ def test_jax_optax_transform_uses_learning_rate_schedule(monkeypatch):
     assert calls[0]["weight_decay"] == pytest.approx(0.1)
 
 
+@pytest.mark.parametrize(
+    ("state_dtype", "expected_dtype"),
+    [
+        (None, "float32"),
+        ("bf16", "bfloat16"),
+        ("bfloat16", "bfloat16"),
+    ],
+)
+def test_jax_adamw_optimizer_state_dtype(state_dtype, expected_dtype):
+    import jax
+    import jax.numpy as jnp
+
+    from spectra_learning.training import pretrain_jax
+
+    cfg = config_dict.ConfigDict(
+        {
+            "learning_rate": 6e-4,
+            "b1": 0.9,
+            "b2": 0.95,
+            "weight_decay": 0.01,
+        }
+    )
+    if state_dtype is not None:
+        cfg.optimizer_state_dtype = state_dtype
+    params = {
+        "weight": jnp.ones((4, 4), dtype=jnp.float32),
+        "bias": jnp.ones((4,), dtype=jnp.float32),
+    }
+    grads = jax.tree.map(jnp.ones_like, params)
+    transform = pretrain_jax.build_jax_optax_transform(cfg)
+    state = transform.init(params)
+
+    updates, next_state = jax.jit(transform.update)(grads, state, params)
+    adam_state = next_state[0]
+
+    assert {str(value.dtype) for value in jax.tree.leaves(adam_state.mu)} == {
+        expected_dtype
+    }
+    assert {str(value.dtype) for value in jax.tree.leaves(adam_state.nu)} == {
+        expected_dtype
+    }
+    assert {str(value.dtype) for value in jax.tree.leaves(updates)} == {"float32"}
+    assert {
+        str(value.dtype)
+        for value in jax.tree.leaves(pretrain_jax.optax.apply_updates(params, updates))
+    } == {"float32"}
+
+
 def test_jax_optax_transform_applies_global_norm_clipping(monkeypatch):
     from spectra_learning.training import pretrain_jax
 

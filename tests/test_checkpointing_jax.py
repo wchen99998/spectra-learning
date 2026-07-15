@@ -3,7 +3,6 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
-import optax
 import pytest
 import torch
 from flax import nnx
@@ -13,6 +12,7 @@ from types import SimpleNamespace
 
 from spectra_learning.data.gems.collate import GemsBatchCollator
 from spectra_learning.models.model_jax import PeakSetJEPAJax
+from spectra_learning.models.settings import PeakSetJEPASettings
 from spectra_learning.training.checkpointing_jax import (
     build_jax_checkpoint_manager,
     jax_training_checkpoint_metadata,
@@ -22,6 +22,7 @@ from spectra_learning.training.checkpointing_jax import (
 from spectra_learning.training.logging import MetricLogger
 from spectra_learning.training.pretrain_jax import (
     _run_jax_training_loop,
+    build_jax_optax_transform,
     build_jax_optimizer,
     init_pure_optax_train_state,
     initialize_jax_model_from_torch_seed,
@@ -112,7 +113,10 @@ class _FakeDataModule:
         self.train_steps = train_steps
         self.global_batch_size = int(batch["peak_mz"].shape[0])
         self.batch_size = self.global_batch_size
+        self.gradient_accumulation_steps = 1
         self.loader_calls: list[tuple[int, int]] = []
+        self.mask_fraction_calls: list[tuple[float, float]] = []
+        self.accumulation_calls: list[int] = []
 
     def train_loader_for_epoch(self, epoch: int, start_batch: int = 0):
         self.loader_calls.append((epoch, start_batch))
@@ -125,6 +129,18 @@ class _FakeDataModule:
     def val_loader_for_eval(self, *, augment: bool):
         del augment
         return [self._val_batch]
+
+    def set_mask_fractions(
+        self,
+        context_fraction: float,
+        target_fraction: float,
+    ) -> None:
+        self.mask_fraction_calls.append((context_fraction, target_fraction))
+
+    def set_gradient_accumulation_steps(self, steps: int) -> None:
+        self._accum = steps
+        self.gradient_accumulation_steps = steps
+        self.accumulation_calls.append(steps)
 
 
 class _RecordingLogger(MetricLogger):
@@ -142,7 +158,14 @@ def test_jax_checkpoint_roundtrip_preserves_values_and_sharding(tmp_path):
         "weight": jax.device_put(jnp.arange(8.0).reshape(2, 4), replicated),
         "blocks": {0: jnp.full((3,), 2.5)},
     }
-    opt_state = optax.adamw(1e-3).init(params)
+    optimizer = build_jax_optax_transform(
+        {
+            "learning_rate": 1e-3,
+            "weight_decay": 0.0,
+            "optimizer_state_dtype": "bf16",
+        }
+    )
+    opt_state = optimizer.init(params)
     state = {"trainable_params": params, "opt_state": opt_state}
 
     manager = build_jax_checkpoint_manager(tmp_path / "checkpoints", max_to_keep=2)
@@ -165,6 +188,13 @@ def test_jax_checkpoint_roundtrip_preserves_values_and_sharding(tmp_path):
     restored_leaves = jax.tree.leaves(restored)
     for expected, actual in zip(expected_leaves, restored_leaves, strict=True):
         np.testing.assert_array_equal(np.asarray(expected), np.asarray(actual))
+    adam_state = restored["opt_state"][0]
+    assert {value.dtype for value in jax.tree.leaves(adam_state.mu)} == {
+        jnp.dtype(jnp.bfloat16)
+    }
+    assert {value.dtype for value in jax.tree.leaves(adam_state.nu)} == {
+        jnp.dtype(jnp.bfloat16)
+    }
 
 
 def test_jax_checkpoint_manager_keeps_all_steps_when_max_to_keep_is_none(tmp_path):
@@ -429,6 +459,56 @@ def test_jax_training_loop_pure_optax_saves_and_resumes(tmp_path):
         strict=True,
     ):
         np.testing.assert_array_equal(np.asarray(expected), np.asarray(actual))
+
+
+def test_jax_training_loop_switches_mask_stage_graphs_and_loaders(tmp_path):
+    kwargs = {
+        **_tiny_mae_kwargs(),
+        "pairmixer_block_type": "fastmixer-dense",
+    }
+    cfg = config_dict.ConfigDict(kwargs)
+    cfg.seed = 5
+    cfg.num_epochs = 1
+    cfg.learning_rate = 1e-3
+    cfg.jax_mesh_devices = "1"
+    cfg.gradient_accumulation_steps = 1
+    cfg.checkpoint_every_steps = 0
+    cfg.log_every_n_steps = 0
+    cfg.msg_probe_every_n_steps = -1
+    cfg.jepa_mask_strategy = ["random"]
+    cfg.jepa_context_fraction = 0.35
+    cfg.jepa_target_fraction = 0.50
+    cfg.jepa_context_fraction_schedule = (0.35, 0.55, 0.75)
+    cfg.jepa_target_fraction_schedule = (0.50, 0.30, 0.10)
+    cfg.jepa_mask_schedule_step_fractions = (1 / 3, 2 / 3)
+    cfg.gradient_accumulation_steps_schedule = (1, 2, 4)
+    batch = _tiny_numpy_batch()
+
+    model = PeakSetJEPAJax(PeakSetJEPASettings.from_config(cfg))
+    datamodule = _FakeDataModule(batch, train_steps=3)
+    manager = build_jax_checkpoint_manager(tmp_path / "checkpoints")
+    metrics = _run_jax_training_loop(
+        config=cfg,
+        datamodule=datamodule,
+        model=model,
+        logger=MetricLogger(),
+        total_steps=3,
+        checkpoint_manager=manager,
+        resume_step=None,
+        checkpoint_metadata=CHECKPOINT_METADATA,
+        metric_reduction="mean",
+        enable_msg_probe=False,
+    )
+    manager.close()
+
+    assert metrics["run/final_global_step"] == 3.0
+    assert datamodule.mask_fraction_calls == [
+        (0.35, 0.50),
+        (0.55, 0.30),
+        (0.75, 0.10),
+    ]
+    assert datamodule.loader_calls == [(0, 0), (0, 1), (0, 2)]
+    assert datamodule.accumulation_calls == [1, 2, 4]
 
 
 def test_jax_training_loop_logs_validation_and_online_probe(monkeypatch, tmp_path):

@@ -17,6 +17,7 @@ from spectra_learning.models.common_jax import (
     silu,
 )
 from spectra_learning.models.peak_features_jax import FourierFeatures
+from spectra_learning.models.pairmixer_pallas import triangle_input_projections
 from spectra_learning.models.transformer_jax import FeedForward, SwiGLUFeedForward
 
 
@@ -663,6 +664,8 @@ class PairMixerBlock(nnx.Module):
         use_single_to_pair_update: bool = False,
         use_fastmixer: bool = False,
         fastmixer_max_visible_tokens: int | None = None,
+        projection_kernel: str = "xla",
+        kernel_role: str = "pairmixer",
         transition_type: str = "swiglu",
         compute_dtype: object = jnp.float32,
         rngs: nnx.Rngs | None = None,
@@ -671,6 +674,8 @@ class PairMixerBlock(nnx.Module):
         self.dropout = dropout
         self.use_single_to_pair_update = use_single_to_pair_update
         self.use_fastmixer = use_fastmixer
+        self.projection_kernel = projection_kernel.lower()
+        self.kernel_role = kernel_role
         self.transition_type = transition_type.lower()
         if self.transition_type not in SUPPORTED_PAIRMIXER_TRANSITION_TYPES:
             raise ValueError(
@@ -906,11 +911,29 @@ class PairMixerBlock(nnx.Module):
         mask: Array,
     ) -> Array:
         pair_mask_f = mask[..., None].astype(pair.dtype)
-        x_norm = module.norm_in(pair)
-        projected = _linear_with_preferred_acc(
-            module.p_in,
-            x_norm,
-        ) * jax.nn.sigmoid(_linear_with_preferred_acc(module.g_in, x_norm))
+        if self.projection_kernel == "pallas":
+            projected, output_gate = triangle_input_projections(
+                pair,
+                module.norm_in.weight[...],
+                module.norm_in.bias[...],
+                module.p_in.weight[...],
+                module.p_in.bias[...],
+                module.g_in.weight[...],
+                module.g_in.bias[...],
+                module.g_out.weight[...],
+                module.g_out.bias[...],
+                norm_eps=module.norm_in.eps,
+                kernel_role=f"{self.kernel_role}_{module.direction}",
+            )
+        else:
+            x_norm = module.norm_in(pair)
+            projected = _linear_with_preferred_acc(
+                module.p_in,
+                x_norm,
+            ) * jax.nn.sigmoid(_linear_with_preferred_acc(module.g_in, x_norm))
+            output_gate = jax.nn.sigmoid(
+                _linear_with_preferred_acc(module.g_out, x_norm)
+            )
         a, b = jnp.split(projected, 2, axis=-1)
         if module.direction == "outgoing":
             a = a * token_mask[:, None, :, None].astype(a.dtype)
@@ -925,7 +948,7 @@ class PairMixerBlock(nnx.Module):
                 axis=1,
             )
         update = _linear_with_preferred_acc(module.p_out, module.norm_out(update))
-        update = update * jax.nn.sigmoid(_linear_with_preferred_acc(module.g_out, x_norm))
+        update = update * output_gate
         return update * pair_mask_f
 
     def _fast_single_to_pair_update(

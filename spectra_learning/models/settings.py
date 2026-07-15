@@ -66,6 +66,8 @@ class PeakSetJEPASettings:
     pairmixer_fourier_x_max: float = PEAK_MZ_MAX
     pairmixer_relative_fourier_x_min: float = 1e-3
     pairmixer_relative_fourier_x_max: float = 1.0
+    pairmixer_encoder_projection_kernel: str = "xla"
+    pairmixer_predictor_projection_kernel: str = "xla"
     pairmixer_fast_max_visible_tokens: int | None = None
     pairmixer_fast_encoder_max_visible_tokens: int | None = None
     predictor_apply_final_norm: bool = True

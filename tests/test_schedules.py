@@ -1,7 +1,13 @@
 import unittest
 
 import torch
+from ml_collections import config_dict
 
+from spectra_learning.data.gems.mask_schedule import (
+    jepa_mask_stage,
+    jepa_mask_stage_index,
+    jepa_mask_stages,
+)
 from spectra_learning.training.schedules import (
     learning_rate_at_step,
     make_cosine_schedule,
@@ -49,6 +55,54 @@ class WarmupCosineScheduleTests(unittest.TestCase):
 
         with self.assertRaisesRegex(KeyError, "eta_mins"):
             scheduler.load_state_dict(legacy_state)
+
+
+class JepaMaskScheduleTests(unittest.TestCase):
+    def setUp(self):
+        self.config = config_dict.ConfigDict(
+            {
+                "jepa_context_fraction": 0.35,
+                "jepa_target_fraction": 0.50,
+                "jepa_context_fraction_schedule": (0.35, 0.55, 0.75),
+                "jepa_target_fraction_schedule": (0.50, 0.30, 0.10),
+                "jepa_mask_schedule_step_fractions": (1 / 3, 2 / 3),
+                "gradient_accumulation_steps_schedule": (4, 8, 8),
+            }
+        )
+
+    def test_three_stage_fractions(self):
+        stages = jepa_mask_stages(self.config)
+
+        self.assertEqual(
+            [(stage.context_fraction, stage.target_fraction) for stage in stages],
+            [(0.35, 0.50), (0.55, 0.30), (0.75, 0.10)],
+        )
+        self.assertEqual(
+            [stage.gradient_accumulation_steps for stage in stages],
+            [4, 8, 8],
+        )
+
+    def test_stage_boundaries_round_up(self):
+        self.assertEqual(
+            [
+                jepa_mask_stage_index(self.config, step, 100)
+                for step in (0, 33, 34, 66, 67, 99)
+            ],
+            [0, 0, 1, 1, 2, 2],
+        )
+        stage = jepa_mask_stage(self.config, 67, 100)
+        self.assertEqual((stage.context_fraction, stage.target_fraction), (0.75, 0.10))
+
+    def test_explicit_step_boundaries_take_precedence(self):
+        self.config.jepa_mask_schedule_steps = (10, 80)
+
+        self.assertEqual(
+            [
+                jepa_mask_stage_index(self.config, step, 100)
+                for step in (0, 9, 10, 79, 80, 99)
+            ],
+            [0, 0, 1, 1, 2, 2],
+        )
 
 
 if __name__ == "__main__":

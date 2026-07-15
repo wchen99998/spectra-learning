@@ -8,7 +8,10 @@ from spectra_learning.config import load_config
 from spectra_learning.models.fastmixer_capacity import (
     pairmixer_fast_mae_encoder_visible_tokens,
     pairmixer_fast_full_visible_tokens,
+    pairmixer_fast_mae_stage_visible_tokens,
     pairmixer_fast_mae_visible_tokens,
+    pairmixer_fast_stage_capacities,
+    pairmixer_stage_projection_kernels,
 )
 from spectra_learning.models.model_jax import PeakSetJEPAJax
 from spectra_learning.models.pairmixer_jax import _active_indices
@@ -39,6 +42,87 @@ def test_fastmixer_dense_auto_capacity_matches_fastmixer():
     cfg.pairmixer_block_type = "FastMixer-Dense"
 
     assert PeakSetJEPASettings.from_config(cfg).pairmixer_fast_max_visible_tokens == 41
+
+
+def test_1b_pallas_schedule_uses_three_encoder_shapes_and_one_predictor_shape():
+    cfg = load_config("configs/1b_pairmixer_dense_adamw.py")
+
+    assert cfg.optimizer_state_dtype == "bf16"
+    assert pairmixer_fast_mae_stage_visible_tokens(cfg) == (
+        (17, 41),
+        (27, 41),
+        (36, 41),
+    )
+    assert pairmixer_fast_stage_capacities(cfg) == (
+        (17, 41),
+        (27, 41),
+        (36, 41),
+    )
+    assert tuple(cfg.gradient_accumulation_steps_schedule) == (4, 8, 8)
+    assert tuple(cfg.pairmixer_encoder_projection_kernel_schedule) == (
+        "xla",
+        "xla",
+        "pallas",
+    )
+    assert tuple(cfg.pairmixer_predictor_projection_kernel_schedule) == (
+        "pallas",
+        "xla",
+        "xla",
+    )
+    assert pairmixer_stage_projection_kernels(cfg) == (
+        ("xla", "pallas"),
+        ("xla", "xla"),
+        ("pallas", "xla"),
+    )
+    settings = PeakSetJEPASettings.from_config(cfg)
+    assert settings.pairmixer_fast_encoder_max_visible_tokens == 17
+    assert settings.pairmixer_fast_max_visible_tokens == 41
+    assert settings.pairmixer_encoder_projection_kernel == "xla"
+    assert settings.pairmixer_predictor_projection_kernel == "pallas"
+
+
+def test_encoder_and_predictor_blocks_keep_separate_kernel_capacities():
+    model = PeakSetJEPAJax(
+        training_mode="mae",
+        model_dim=8,
+        encoder_num_layers=1,
+        encoder_num_heads=1,
+        feature_mlp_hidden_dim=8,
+        encoder_use_fourier_features=False,
+        pairmixer_pair_dim=8,
+        pairmixer_pair_feature_hidden_dim=8,
+        pairmixer_use_fourier_features=False,
+        pairmixer_block_type="fastmixer-dense",
+        pairmixer_encoder_projection_kernel="pallas",
+        pairmixer_predictor_projection_kernel="pallas",
+        pairmixer_fast_encoder_max_visible_tokens=17,
+        pairmixer_fast_max_visible_tokens=41,
+        masked_latent_predictor_num_layers=1,
+        masked_latent_predictor_num_heads=1,
+        num_peaks=47,
+        jepa_num_target_blocks=1,
+        distogram_loss_weight=0.0,
+        target_projector_dim=-1,
+    )
+
+    encoder_block = model.encoder.blocks[0]
+    predictor_block = model.masked_latent_predictor[0]
+    assert encoder_block.kernel_role == "encoder"
+    assert predictor_block.kernel_role == "predictor"
+    assert encoder_block.projection_kernel == "pallas"
+    assert predictor_block.projection_kernel == "pallas"
+    assert encoder_block.fastmixer_max_visible_tokens == 17
+    assert predictor_block.fastmixer_max_visible_tokens == 41
+
+    model.set_fastmixer_capacities(27, 41)
+
+    assert encoder_block.fastmixer_max_visible_tokens == 27
+    assert predictor_block.fastmixer_max_visible_tokens == 41
+
+    model.set_pairmixer_projection_kernels("pallas", "xla")
+
+    assert encoder_block.projection_kernel == "pallas"
+    assert predictor_block.projection_kernel == "xla"
 
 
 def test_fastmixer_capacity_rejects_explicit_config_cap():

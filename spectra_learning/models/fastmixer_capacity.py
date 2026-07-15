@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from spectra_learning.data.gems.mask_schedule import jepa_mask_stages
 from spectra_learning.data.gems.masking import jepa_mask_lengths_for_valid_count
 
 
@@ -19,7 +20,12 @@ def _mask_strategy_names(value: Any) -> tuple[str, ...]:
     return tuple(str(item).strip().lower() for item in values if str(item).strip())
 
 
-def _mae_encoder_predictor_visible_tokens(config: Any) -> tuple[int, int]:
+def _mae_encoder_predictor_visible_tokens(
+    config: Any,
+    *,
+    context_fraction: float | None = None,
+    target_fraction: float | None = None,
+) -> tuple[int, int]:
     num_peaks = int(config.get("num_peaks", 64))
     strategies = _mask_strategy_names(
         config.get("jepa_mask_strategy", "contiguous")
@@ -28,8 +34,16 @@ def _mae_encoder_predictor_visible_tokens(config: Any) -> tuple[int, int]:
         full_visible = pairmixer_fast_full_visible_tokens(config)
         return full_visible, full_visible
     num_target_blocks = int(config.get("jepa_num_target_blocks", 2))
-    context_fraction = float(config.get("jepa_context_fraction", 0.5))
-    target_fraction = float(config.get("jepa_target_fraction", 0.25))
+    context_fraction = (
+        float(config.get("jepa_context_fraction", 0.5))
+        if context_fraction is None
+        else context_fraction
+    )
+    target_fraction = (
+        float(config.get("jepa_target_fraction", 0.25))
+        if target_fraction is None
+        else target_fraction
+    )
     block_min_len = int(config.get("jepa_block_min_len", 1))
     allow_target_overlap = bool(config.get("jepa_allow_target_overlap", False))
     masked_token_input_mode = str(
@@ -58,6 +72,53 @@ def _mae_encoder_predictor_visible_tokens(config: Any) -> tuple[int, int]:
         encoder_max_visible = max(encoder_max_visible, encoder_visible)
         predictor_max_visible = max(predictor_max_visible, predictor_visible)
     return encoder_max_visible, predictor_max_visible
+
+
+def pairmixer_fast_mae_stage_visible_tokens(
+    config: Any,
+) -> tuple[tuple[int, int], ...]:
+    return tuple(
+        _mae_encoder_predictor_visible_tokens(
+            config,
+            context_fraction=stage.context_fraction,
+            target_fraction=stage.target_fraction,
+        )
+        for stage in jepa_mask_stages(config)
+    )
+
+
+def pairmixer_fast_stage_capacities(
+    config: Any,
+) -> tuple[tuple[int, int], ...]:
+    return pairmixer_fast_mae_stage_visible_tokens(config)
+
+
+def pairmixer_stage_projection_kernels(
+    config: Any,
+) -> tuple[tuple[str, str], ...]:
+    stage_count = len(jepa_mask_stages(config))
+    encoder_kernel = str(
+        config.get("pairmixer_encoder_projection_kernel", "xla")
+    )
+    predictor_kernel = str(
+        config.get("pairmixer_predictor_projection_kernel", "xla")
+    )
+    encoder_kernels = config.get(
+        "pairmixer_encoder_projection_kernel_schedule",
+        (encoder_kernel,) * stage_count,
+    )
+    predictor_kernels = config.get(
+        "pairmixer_predictor_projection_kernel_schedule",
+        (predictor_kernel,) * stage_count,
+    )
+    return tuple(
+        (str(encoder), str(predictor))
+        for encoder, predictor in zip(
+            encoder_kernels,
+            predictor_kernels,
+            strict=True,
+        )
+    )
 
 
 def pairmixer_fast_mae_encoder_visible_tokens(config: Any) -> int:
