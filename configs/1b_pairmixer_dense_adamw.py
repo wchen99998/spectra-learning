@@ -31,7 +31,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_context_fraction_schedule = (0.35, 0.55, 0.75)
     cfg.jepa_target_fraction_schedule = (0.50, 0.30, 0.10)
     cfg.jepa_mask_schedule_steps = (666_667, 1_333_334)
-    cfg.gradient_accumulation_steps_schedule = (4, 8, 8)
+    cfg.gradient_accumulation_steps = 8
+    cfg.gradient_accumulation_steps_schedule = (8, 8, 8)
 
     cfg.predictor_dim = 1536
     cfg.masked_latent_predictor_num_layers = 5
@@ -39,7 +40,7 @@ def get_config() -> config_dict.ConfigDict:
 
     cfg.run_name_suffix = (
         "mae-massive1b-200m-v6e-d1536-p640-l25-h12-nomassprior-"
-        "feat3072-fmlp3072-pred1536-l5-h12-bs2048-ga4-8-8-adamw-bf16state-lr6e-4-"
+        "feat3072-fmlp3072-pred1536-l5-h12-bs2048-ga8-adamw-bf16state-lr6e-4-"
         "random-mask65-45-25-target50-30-10-splitkernels-intensityorder-fullctx-"
         "noac-noprobe-val500x10k"
     )

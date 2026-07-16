@@ -58,7 +58,8 @@ def test_1b_pallas_schedule_uses_three_encoder_shapes_and_one_predictor_shape():
         (27, 41),
         (36, 41),
     )
-    assert tuple(cfg.gradient_accumulation_steps_schedule) == (4, 8, 8)
+    assert cfg.gradient_accumulation_steps == 8
+    assert tuple(cfg.gradient_accumulation_steps_schedule) == (8, 8, 8)
     assert tuple(cfg.pairmixer_encoder_projection_kernel_schedule) == (
         "xla",
         "xla",
