@@ -95,16 +95,16 @@ def test_latent_pair_objective_is_named_when_enabled() -> None:
     assert parts == ["latentpair", "pairw5e-01"]
 
 
-def test_architecture_parts_name_discrete_mz_embedding() -> None:
+def test_architecture_parts_name_token_mz_embedding() -> None:
     parts = _architecture_parts(
         {
-            "encoder_mz_embedding": "discrete",
-            "encoder_discrete_mz_bin_size": 0.02,
-            "encoder_discrete_mz_embedding_dim": 70,
+            "encoder_mz_embedding": "token",
+            "encoder_mz_token_bin_size": 0.02,
+            "encoder_mz_token_embedding_dim": 77,
             "encoder_fourier_mlp_num_layers": 4,
             "encoder_fourier_mlp_hidden_dim": 64,
         }
     )
 
-    assert "mzdisc0.02x70" in parts
+    assert "mztok0.02x77" in parts
     assert "fmlp4x64" in parts

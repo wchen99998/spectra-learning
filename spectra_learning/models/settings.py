@@ -13,6 +13,9 @@ from spectra_learning.models.fastmixer_capacity import (
 
 
 REMOVED_SETTING_KEYS = (
+    "encoder_discrete_mz_bin_size",
+    "encoder_discrete_mz_coarse_bin_size",
+    "encoder_discrete_mz_embedding_dim",
     "encoder_fourier_input_scale",
     "encoder_use_fourier_features",
     "mae_context_encoder_pack_tokens",
@@ -66,9 +69,8 @@ class PeakSetJEPASettings:
     encoder_fourier_num_freqs: int = 256
     encoder_mz_scale: float = PEAK_MZ_MAX
     encoder_mz_embedding: str = "fourier"
-    encoder_discrete_mz_bin_size: float = 0.02
-    encoder_discrete_mz_coarse_bin_size: float = 1.0
-    encoder_discrete_mz_embedding_dim: int = 70
+    encoder_mz_token_bin_size: float = 0.02
+    encoder_mz_token_embedding_dim: int = 77
     masked_token_loss_weight: float = 0.0
     mae_loss_weight: float = 1.0
     jepa_mae_loss_weight: float = 0.0

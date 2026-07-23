@@ -45,9 +45,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_apply_final_pair_norm = True
     cfg.encoder_mz_embedding = "fourier"
     cfg.encoder_mz_scale = 1000
-    cfg.encoder_discrete_mz_bin_size = 0.02
-    cfg.encoder_discrete_mz_coarse_bin_size = 1.0
-    cfg.encoder_discrete_mz_embedding_dim = 70
+    cfg.encoder_mz_token_bin_size = 0.02
+    cfg.encoder_mz_token_embedding_dim = 77
     cfg.encoder_fourier_mlp_hidden_dim = 1280
     cfg.encoder_fourier_mlp_num_layers = 4
     cfg.encoder_fourier_num_freqs = 64

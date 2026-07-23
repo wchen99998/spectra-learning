@@ -281,9 +281,8 @@ class PeakSetJEPA(nn.Module):
             fourier_num_freqs=cfg.encoder_fourier_num_freqs,
             mz_scale=cfg.encoder_mz_scale,
             mz_embedding=cfg.encoder_mz_embedding,
-            discrete_bin_size=cfg.encoder_discrete_mz_bin_size,
-            discrete_coarse_bin_size=cfg.encoder_discrete_mz_coarse_bin_size,
-            discrete_embedding_dim=cfg.encoder_discrete_mz_embedding_dim,
+            token_bin_size=cfg.encoder_mz_token_bin_size,
+            token_embedding_dim=cfg.encoder_mz_token_embedding_dim,
         )
 
     def _build_teacher(

@@ -39,11 +39,11 @@ def _model_size_part(config: Any) -> str:
 
 def _architecture_parts(config: Any) -> list[str]:
     parts: list[str] = []
-    if str(config.get("encoder_mz_embedding", "fourier")).lower() == "discrete":
+    if str(config.get("encoder_mz_embedding", "fourier")).lower() == "token":
         parts.append(
-            "mzdisc"
-            f"{float(config.get('encoder_discrete_mz_bin_size', 0.02)):g}"
-            f"x{int(config.get('encoder_discrete_mz_embedding_dim', 70))}"
+            "mztok"
+            f"{float(config.get('encoder_mz_token_bin_size', 0.02)):g}"
+            f"x{int(config.get('encoder_mz_token_embedding_dim', 77))}"
         )
     fourier_mlp_layers = int(config.get("encoder_fourier_mlp_num_layers", 2))
     fourier_mlp_hidden = config.get("encoder_fourier_mlp_hidden_dim", None)

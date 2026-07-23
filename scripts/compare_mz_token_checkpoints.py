@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
         description="Paired validation comparison for two MAE checkpoints."
     )
     parser.add_argument("--fourier-run", type=Path, required=True)
-    parser.add_argument("--discrete-run", type=Path, required=True)
+    parser.add_argument("--token-run", type=Path, required=True)
     parser.add_argument("--max-steps", type=int, default=512)
     parser.add_argument("--prefetch-size", type=int, default=4)
     parser.add_argument("--output", type=Path, required=True)
@@ -79,21 +79,21 @@ def _autocast_context(device: torch.device, dtype: torch.dtype | None):
 
 def _paired_statistics(
     totals: torch.Tensor,
-    observations: int,
+    batches: int,
 ) -> dict[str, dict[str, float]]:
     result = {}
     for index, metric in enumerate(DEFAULT_METRICS):
-        fourier_sum, discrete_sum, delta_sum, delta_square_sum = totals[index]
-        delta_mean = delta_sum / observations
+        fourier_sum, token_sum, delta_sum, delta_square_sum = totals[index]
+        delta_mean = delta_sum / batches
         delta_variance = (
-            (delta_square_sum - delta_sum.square() / observations)
-            / (observations - 1)
+            (delta_square_sum - delta_sum.square() / batches)
+            / (batches - 1)
         ).clamp_min(0.0)
-        delta_sem = torch.sqrt(delta_variance / observations)
+        delta_sem = torch.sqrt(delta_variance / batches)
         result[metric] = {
-            "fourier_mean": float(fourier_sum / observations),
-            "discrete_mean": float(discrete_sum / observations),
-            "discrete_minus_fourier": float(delta_mean),
+            "fourier_mean": float(fourier_sum / batches),
+            "token_mean": float(token_sum / batches),
+            "token_minus_fourier": float(delta_mean),
             "paired_sem": float(delta_sem),
             "paired_ci95_low": float(delta_mean - 1.96 * delta_sem),
             "paired_ci95_high": float(delta_mean + 1.96 * delta_sem),
@@ -104,7 +104,9 @@ def _paired_statistics(
 def compare(args: argparse.Namespace) -> dict[str, Any]:
     distributed = init_distributed_from_env()
     fourier_config = _load_config(args.fourier_run)
-    discrete_config = _load_config(args.discrete_run)
+    token_config = _load_config(args.token_run)
+    assert fourier_config.jepa_mae_mz_bin_size == token_config.jepa_mae_mz_bin_size
+    assert fourier_config.jepa_mae_mz_max == token_config.jepa_mae_mz_max
     seed_all(int(fourier_config.seed))
     datamodule = GemsDataModule(
         fourier_config,
@@ -114,7 +116,7 @@ def compare(args: argparse.Namespace) -> dict[str, Any]:
         distributed_local_rank=distributed.local_rank,
     )
     fourier = _load_model(args.fourier_run, fourier_config, distributed.device)
-    discrete = _load_model(args.discrete_run, discrete_config, distributed.device)
+    token = _load_model(args.token_run, token_config, distributed.device)
     autocast_dtype = parse_autocast_dtype(
         fourier_config.get("autocast_dtype", "bf16")
     )
@@ -129,6 +131,7 @@ def compare(args: argparse.Namespace) -> dict[str, Any]:
         device=distributed.device,
     )
     local_steps = 0
+    local_spectra = 0
     with torch.no_grad():
         while (
             local_steps < args.max_steps
@@ -136,31 +139,39 @@ def compare(args: argparse.Namespace) -> dict[str, Any]:
         ):
             with _autocast_context(distributed.device, autocast_dtype):
                 fourier_metrics = fourier(batch)
-                discrete_metrics = discrete(batch)
+                token_metrics = token(batch)
             for index, metric in enumerate(DEFAULT_METRICS):
                 fourier_value = fourier_metrics[metric].double()
-                discrete_value = discrete_metrics[metric].double()
-                delta = discrete_value - fourier_value
+                token_value = token_metrics[metric].double()
+                delta = token_value - fourier_value
                 totals[index, 0] += fourier_value
-                totals[index, 1] += discrete_value
+                totals[index, 1] += token_value
                 totals[index, 2] += delta
                 totals[index, 3] += delta.square()
             local_steps += 1
+            local_spectra += batch["peak_mz"].shape[0]
 
-    observations = torch.tensor(
-        local_steps,
+    counts = torch.tensor(
+        [local_steps, local_spectra],
         dtype=torch.int64,
         device=distributed.device,
     )
     if distributed.is_distributed:
         torch_dist.all_reduce(totals, op=torch_dist.ReduceOp.SUM)
-        torch_dist.all_reduce(observations, op=torch_dist.ReduceOp.SUM)
+        torch_dist.all_reduce(counts, op=torch_dist.ReduceOp.SUM)
+    batches, spectra = (int(value) for value in counts)
     result = {
-        "delta_definition": "discrete - fourier; negative favors discrete",
+        "delta_definition": "token - fourier",
+        "metric_directions": {
+            "losses": "negative favors token",
+            "accuracies": "positive favors token",
+        },
+        "mz_target_bin_size_da": float(fourier_config.jepa_mae_mz_bin_size),
         "world_size": distributed.world_size,
         "local_steps": local_steps,
-        "observations": int(observations),
-        "metrics": _paired_statistics(totals, int(observations)),
+        "batches": batches,
+        "spectra": spectra,
+        "metrics": _paired_statistics(totals, batches),
     }
     if distributed.is_main:
         args.output.parent.mkdir(parents=True, exist_ok=True)

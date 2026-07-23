@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from math import ceil, isclose, log10
+from math import ceil, log10
 
 import torch
 from jaxtyping import Float
@@ -9,7 +9,7 @@ from torch import Tensor, nn
 from spectra_learning.data.spectra import PEAK_MZ_MAX
 
 
-MZ_EMBEDDING_MODES = {"fourier", "discrete"}
+MZ_EMBEDDING_MODES = {"fourier", "token"}
 
 
 class FourierFeatures(nn.Module):
@@ -43,69 +43,41 @@ class FourierFeatures(nn.Module):
         return 2 * self.b.shape[1]
 
 
-class DiscretizedMzFeatures(nn.Module):
+class MzTokenEmbedding(nn.Module):
     def __init__(
         self,
         *,
         mz_scale: float,
         bin_size: float,
-        coarse_bin_size: float,
         embedding_dim: int,
     ) -> None:
         super().__init__()
         assert mz_scale > 0.0
         assert bin_size > 0.0
-        assert coarse_bin_size > bin_size
-        assert isclose(
-            coarse_bin_size / bin_size,
-            round(coarse_bin_size / bin_size),
-        )
 
         self.mz_scale = mz_scale
         self.bin_size = bin_size
-        self.coarse_bin_size = coarse_bin_size
-        self.num_fine_bins = round(coarse_bin_size / bin_size)
-        self.coarse_embedding = nn.Embedding(
-            ceil(mz_scale / coarse_bin_size) + 1,
-            embedding_dim,
-        )
-        self.fine_embedding = nn.Embedding(self.num_fine_bins, embedding_dim)
-        nn.init.normal_(self.coarse_embedding.weight, std=0.5)
-        nn.init.normal_(self.fine_embedding.weight, std=0.5)
+        self.num_tokens = ceil(mz_scale / bin_size)
+        self.embedding = nn.Embedding(self.num_tokens, embedding_dim)
+        nn.init.normal_(self.embedding.weight, std=0.02)
 
-    def _indices(
+    def token_ids(
         self,
         peak_mz: Float[Tensor, "*batch"],
-    ) -> tuple[Tensor, Tensor]:
-        mz_da = (peak_mz * self.mz_scale).clamp(0.0, self.mz_scale)
-        coarse = torch.floor(mz_da / self.coarse_bin_size).long()
-        residual = mz_da - coarse * self.coarse_bin_size
-        fine = torch.floor(residual / self.bin_size + 0.5).long()
-        coarse = coarse + torch.div(
-            fine,
-            self.num_fine_bins,
-            rounding_mode="floor",
-        )
-        fine = fine.remainder(self.num_fine_bins)
-        return coarse, fine
-
-    def quantized_mz(
-        self,
-        peak_mz: Float[Tensor, "*batch"],
-    ) -> Float[Tensor, "*batch"]:
-        coarse, fine = self._indices(peak_mz)
-        mz_da = coarse * self.coarse_bin_size + fine * self.bin_size
-        return mz_da.to(dtype=peak_mz.dtype) / self.mz_scale
+    ) -> Tensor:
+        token_ids = torch.floor(
+            peak_mz * self.mz_scale / self.bin_size
+        ).long()
+        return token_ids.clamp(0, self.num_tokens - 1)
 
     def forward(
         self,
         peak_mz: Float[Tensor, "*batch"],
     ) -> Float[Tensor, "*batch features"]:
-        coarse, fine = self._indices(peak_mz)
-        return self.coarse_embedding(coarse) + self.fine_embedding(fine)
+        return self.embedding(self.token_ids(peak_mz))
 
     def num_features(self) -> int:
-        return self.coarse_embedding.embedding_dim
+        return self.embedding.embedding_dim
 
 
 def _build_mlp(
@@ -130,7 +102,7 @@ def _init_mlp(module: nn.Sequential) -> None:
 
 
 class PeakFeatureEmbedder(nn.Module):
-    mz_features: FourierFeatures | DiscretizedMzFeatures
+    mz_features: FourierFeatures | MzTokenEmbedding
     mz_ffn: nn.Sequential
     raw_ffn: nn.Sequential
     output_proj: nn.Linear
@@ -147,15 +119,14 @@ class PeakFeatureEmbedder(nn.Module):
         fourier_num_freqs: int = 256,
         mz_scale: float = PEAK_MZ_MAX,
         mz_embedding: str = "fourier",
-        discrete_bin_size: float = 0.02,
-        discrete_coarse_bin_size: float = 1.0,
-        discrete_embedding_dim: int = 70,
+        token_bin_size: float = 0.02,
+        token_embedding_dim: int = 77,
     ) -> None:
         super().__init__()
         self.mz_embedding = mz_embedding.lower()
         if self.mz_embedding not in MZ_EMBEDDING_MODES:
             raise ValueError(
-                "mz_embedding must be one of ('fourier', 'discrete')"
+                "mz_embedding must be one of ('fourier', 'token')"
             )
         fourier_hidden_dim = (
             hidden_dim if fourier_mlp_hidden_dim is None else fourier_mlp_hidden_dim
@@ -173,19 +144,21 @@ class PeakFeatureEmbedder(nn.Module):
                     x_max=fourier_x_max,
                     num_freqs=fourier_num_freqs,
                 )
-            else:
-                self.mz_features = DiscretizedMzFeatures(
-                    mz_scale=mz_scale,
-                    bin_size=discrete_bin_size,
-                    coarse_bin_size=discrete_coarse_bin_size,
-                    embedding_dim=discrete_embedding_dim,
+                self.mz_ffn = _build_mlp(
+                    self.mz_features.num_features(),
+                    fourier_hidden_dim,
+                    mz_dim,
+                    fourier_mlp_num_layers,
                 )
-            self.mz_ffn = _build_mlp(
-                self.mz_features.num_features(),
-                fourier_hidden_dim,
-                mz_dim,
-                fourier_mlp_num_layers,
-            )
+            else:
+                self.mz_features = MzTokenEmbedding(
+                    mz_scale=mz_scale,
+                    bin_size=token_bin_size,
+                    embedding_dim=token_embedding_dim,
+                )
+                self.mz_ffn = nn.Sequential(
+                    nn.Linear(self.mz_features.num_features(), mz_dim)
+                )
             _init_mlp(self.mz_ffn)
         self.raw_ffn = nn.Sequential(
             nn.Linear(3, hidden_dim),
@@ -213,11 +186,13 @@ class PeakFeatureEmbedder(nn.Module):
         with torch.autocast(device_type=peak_mz.device.type, enabled=False):
             peak_mz = peak_mz.float()
             peak_intensity = peak_intensity.float()
-            embedded_mz = peak_mz
-            if self.mz_embedding == "discrete":
-                embedded_mz = self.mz_features.quantized_mz(peak_mz)
+            raw_mz = (
+                peak_mz
+                if self.mz_embedding == "fourier"
+                else torch.zeros_like(peak_mz)
+            )
             # mz/intensity/log_intensity: [B, N, 1]; raw: [B, N, D_raw]
-            mz = embedded_mz.unsqueeze(-1)
+            mz = raw_mz.unsqueeze(-1)
             intensity = peak_intensity.unsqueeze(-1)
             log_intensity = torch.log1p(peak_intensity).unsqueeze(-1)
             raw = self.raw_ffn(torch.cat([mz, intensity, log_intensity], dim=-1))
