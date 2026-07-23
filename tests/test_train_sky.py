@@ -34,10 +34,8 @@ def test_launcher_shape_comes_from_explicit_current_run_config():
     assert args.workdir == TRAIN_WORKDIR
     assert args.topology == ""
     assert args.chips is None
-    assert args.region == "us-east5"
-    assert args.infra == "gcp/us-east5"
-    assert args.instance_type == ""
-    assert args.vm_image_id == train_sky.DEFAULT_VM_IMAGE_ID
+    assert args.region == "us-central1"
+    assert args.infra == "gcp/us-central1"
     assert args.sky_bin == train_sky.DEFAULT_SKY_BIN
     assert args.cpus == ""
     assert args.memory == ""
@@ -205,7 +203,7 @@ def test_dws_run_duration_parses_seconds_and_suffixes(value, seconds):
     assert args.dws_run_duration_seconds == seconds
 
 
-def test_dws_provision_timeout_defaults_to_bounded_wait():
+def test_dws_provision_timeout_defaults_to_effectively_unbounded_wait():
     args, _sky_args = train_sky.parse_args(
         [
             "--config",
@@ -219,6 +217,7 @@ def test_dws_provision_timeout_defaults_to_bounded_wait():
 
     assert args.dws_run_duration_seconds == 172800
     assert args.provision_timeout_seconds == train_sky.DEFAULT_PROVISION_TIMEOUT_SECONDS
+    assert args.provision_timeout_seconds == 2_147_483_647
 
 
 def test_dws_provision_timeout_can_be_overridden():
@@ -265,13 +264,16 @@ def test_dense_adamw_config_uses_32_chips_and_disables_online_probe():
 @pytest.mark.parametrize(
     ("chips", "topology_name", "num_nodes"),
     [
-        (4, "2x2", 1),
-        (8, "2x4", 2),
-        (16, "4x4", 4),
-        (32, "4x8", 8),
-        (64, "8x8", 16),
-        (128, "8x16", 32),
-        (256, "16x16", 64),
+        (4, "2x2x1", 1),
+        (8, "2x2x2", 2),
+        (16, "2x2x4", 4),
+        (32, "2x4x4", 8),
+        (64, "4x4x4", 16),
+        (128, "4x4x8", 32),
+        (256, "4x8x8", 64),
+        (512, "8x8x8", 128),
+        (1024, "8x8x16", 256),
+        (2048, "8x16x16", 512),
     ],
 )
 def test_resolve_topology_maps_supported_chip_counts(chips, topology_name, num_nodes):
@@ -281,52 +283,51 @@ def test_resolve_topology_maps_supported_chip_counts(chips, topology_name, num_n
     assert topology.total_chips == chips
     assert topology.num_nodes == num_nodes
     assert topology.chips_per_node == 4
-    assert topology.instance_type == "ct6e-standard-4t"
-    assert topology.jax_mesh_devices == str(chips)
+    assert topology.instance_type == "tpu7x-standard-4t"
+    assert topology.jax_mesh_devices == str(2 * chips)
 
 
 def test_resolve_topology_accepts_explicit_topology_and_chip_count_shorthand():
-    assert train_sky.resolve_topology("8x8").total_chips == 64
-    assert train_sky.resolve_topology("64").topology == "8x8"
-    assert train_sky.resolve_topology("v6e:64").topology == "8x8"
+    assert train_sky.resolve_topology("4x4x4").total_chips == 64
+    assert train_sky.resolve_topology("64").topology == "4x4x4"
+    assert train_sky.resolve_topology("v7x:64").topology == "4x4x4"
+    assert train_sky.resolve_topology("tpu7x:64").topology == "4x4x4"
 
 
 def test_resolve_topology_rejects_conflicting_topology_and_chips():
     with pytest.raises(ValueError, match="maps to topology"):
-        train_sky.resolve_topology("4x8", chips=64)
+        train_sky.resolve_topology("2x4x4", chips=64)
 
 
 def test_resolve_topology_rejects_unsupported_direct_tpu_size():
-    with pytest.raises(ValueError, match="supported CT6e MIG sizes"):
-        train_sky.resolve_topology("8x12")
-    with pytest.raises(ValueError, match="supported CT6e MIG sizes"):
+    with pytest.raises(ValueError, match="supported TPU7x topologies"):
+        train_sky.resolve_topology("1x4x4")
+    with pytest.raises(ValueError, match="supported TPU7x MIG sizes"):
         train_sky.resolve_topology(chips=12)
 
 
 def test_build_task_constructs_direct_gcp_dws_resources_and_env():
     task = train_sky.build_task(
-        topology=train_sky.resolve_topology("4x8"),
+        topology=train_sky.resolve_topology("2x2x4"),
         envs={"SPECTRA_RUN_ID": "new", "SPECTRA_CONFIG_JSON": "{}"},
-        infra="gcp/us-south1",
+        infra="gcp/us-central1",
     )
 
-    assert task["name"] == "spectra-v6e-mig-dws"
+    assert task["name"] == "spectra-tpu7x-mig-dws"
     assert task["workdir"] == "."
-    assert task["num_nodes"] == 8
-    assert task["resources"]["infra"] == "gcp/us-south1"
-    assert task["resources"]["image_id"] == {
-        "us-south1": train_sky.DEFAULT_VM_IMAGE_ID,
-    }
-    assert task["resources"]["instance_type"] == "ct6e-standard-4t"
+    assert task["num_nodes"] == 4
+    assert task["resources"]["infra"] == "gcp/us-central1"
+    assert "image_id" not in task["resources"]
+    assert task["resources"]["instance_type"] == "tpu7x-standard-4t"
     assert "accelerators" not in task["resources"]
     assert "accelerator_args" not in task["resources"]
     assert "cpus" not in task["resources"]
     assert "memory" not in task["resources"]
     assert "remote_identity" not in task["config"]["gcp"]
     assert task["config"]["gcp"]["managed_instance_group"] == {
-        "run_duration": 604800,
+        "run_duration": 172800,
         "provision_timeout": train_sky.DEFAULT_PROVISION_TIMEOUT_SECONDS,
-        "accelerator_topology": "4x8",
+        "accelerator_topology": "2x2x4",
         "accelerator_topology_mode": "AUTO_CONNECT",
     }
     assert task["envs"]["SPECTRA_RUN_ID"] == "new"
@@ -351,25 +352,25 @@ def test_build_task_constructs_direct_gcp_dws_resources_and_env():
 
 def test_build_task_sets_dws_run_duration():
     task = train_sky.build_task(
-        topology=train_sky.resolve_topology("4x8"),
+        topology=train_sky.resolve_topology("2x2x4"),
         envs={"SPECTRA_RUN_ID": "new", "SPECTRA_CONFIG_JSON": "{}"},
         infra="gcp",
         dws_run_duration_seconds=21600,
     )
 
-    assert task["resources"]["instance_type"] == "ct6e-standard-4t"
+    assert task["resources"]["instance_type"] == "tpu7x-standard-4t"
     assert "remote_identity" not in task["config"]["gcp"]
     assert task["config"]["gcp"]["managed_instance_group"] == {
         "run_duration": 21600,
         "provision_timeout": train_sky.DEFAULT_PROVISION_TIMEOUT_SECONDS,
-        "accelerator_topology": "4x8",
+        "accelerator_topology": "2x2x4",
         "accelerator_topology_mode": "AUTO_CONNECT",
     }
 
 
 def test_build_task_adds_optional_direct_vm_resource_constraints():
     task = train_sky.build_task(
-        topology=train_sky.resolve_topology("4x8"),
+        topology=train_sky.resolve_topology("2x2x4"),
         envs={"SPECTRA_RUN_ID": "new", "SPECTRA_CONFIG_JSON": "{}"},
         infra="gcp",
         cpus="64+",
@@ -433,11 +434,11 @@ def test_dryrun_prints_generated_assets_without_token_lookup(
     assert "===== SkyPilot Task Path =====" in output
     assert str(task_path) in output
     assert "===== SkyPilot Task YAML =====" in output
-    assert "name: spectra-v6e-mig-dws" in output
-    assert "num_nodes: 8" in output
-    assert "infra: gcp/us-east5" in output
-    assert "instance_type: ct6e-standard-4t" in output
-    assert "projects/ubuntu-os-accelerator-images/global/images/" in output
+    assert "name: spectra-tpu7x-mig-dws" in output
+    assert "num_nodes: 2" in output
+    assert "infra: gcp/us-central1" in output
+    assert "instance_type: tpu7x-standard-4t" in output
+    assert "image_id:" not in output
     assert "docker:" not in output
     assert f"uv python install {train_sky.DEFAULT_PYTHON_VERSION}" in output
     assert (
@@ -453,9 +454,9 @@ def test_dryrun_prints_generated_assets_without_token_lookup(
     assert "managed_instance_group:" in output
     assert "remote_identity: SERVICE_ACCOUNT" not in output
     assert "--config gcp.remote_identity=SERVICE_ACCOUNT" in output
-    assert "run_duration: 604800" in output
+    assert "run_duration: 172800" in output
     assert f"provision_timeout: {train_sky.DEFAULT_PROVISION_TIMEOUT_SECONDS}" in output
-    assert "accelerator_topology: 4x8" in output
+    assert "accelerator_topology: 2x2x2" in output
     assert "accelerator_topology_mode: AUTO_CONNECT" in output
     assert "kubernetes:" not in output
     assert "kueue" not in output.lower()
@@ -466,7 +467,7 @@ def test_dryrun_prints_generated_assets_without_token_lookup(
     assert "SPECTRA_AOT" not in output
     assert "LIBTPU_INIT_ARGS:" in output
     assert "xla_enable_async_all_reduce" in output
-    assert '"jax_mesh_devices":"32"' in output
+    assert '"jax_mesh_devices":"16"' in output
     assert '"msg_probe_at_final_step":false' in output
     assert '"jax_checkpoint_max_to_keep":5' in output
     assert f'"id":"{run_id}"' in output
@@ -510,10 +511,10 @@ def test_dryrun_allows_64_chip_count(
     )
 
     output = capsys.readouterr().out
-    assert "instance_type: ct6e-standard-4t" in output
+    assert "instance_type: tpu7x-standard-4t" in output
     assert "num_nodes: 16" in output
-    assert "accelerator_topology: 8x8" in output
-    assert '"jax_mesh_devices":"64"' in output
+    assert "accelerator_topology: 4x4x4" in output
+    assert '"jax_mesh_devices":"128"' in output
 
 
 def test_dryrun_preserves_dense_adamw_disabled_probe(
@@ -543,7 +544,7 @@ def test_dryrun_preserves_dense_adamw_disabled_probe(
     )
 
     output = capsys.readouterr().out
-    assert '"jax_mesh_devices":"32"' in output
+    assert '"jax_mesh_devices":"16"' in output
     assert '"msg_probe_every_n_steps":-1.0' in output
     assert '"msg_probe_at_final_step":false' in output
 
@@ -580,7 +581,7 @@ def test_dryrun_includes_explicit_json_overrides(
     )
 
     output = capsys.readouterr().out
-    assert "accelerator_topology: 2x2" in output
+    assert "accelerator_topology: 2x2x1" in output
     assert '"ar_attention_kernel":"xla"' in output
     assert '"ar_attention_block_size":64' in output
 

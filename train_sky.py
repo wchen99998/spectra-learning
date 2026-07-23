@@ -24,40 +24,33 @@ from spectra_learning.training.routing import resolve_training_route
 
 REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_PROJECT = "metal-repeater-411410"
-DEFAULT_REGION = "us-east5"
+DEFAULT_REGION = "us-central1"
 DEFAULT_INFRA = f"gcp/{DEFAULT_REGION}"
-DEFAULT_GCP_IMAGE_REGION = "us-east5"
-DEFAULT_TASK_NAME = "spectra-v6e-mig-dws"
-DEFAULT_VM_IMAGE_ID = (
-    "projects/ubuntu-os-accelerator-images/global/images/"
-    "ubuntu-accel-2204-amd64-tpu-v5e-v5p-v6e-v20260623"
-)
+DEFAULT_TASK_NAME = "spectra-tpu7x-mig-dws"
 DEFAULT_PYTHON_VERSION = "3.12.11"
 DEFAULT_SKY_BIN = "/home/wuhao/skypilot/.venv/bin/sky"
-CT6E_TOPOLOGY_BY_CHIPS = {
-    4: "2x2",
-    8: "2x4",
-    16: "4x4",
-    32: "4x8",
-    64: "8x8",
-    128: "8x16",
-    256: "16x16",
+TPU7X_TOPOLOGY_BY_CHIPS = {
+    4: "2x2x1",
+    8: "2x2x2",
+    16: "2x2x4",
+    32: "2x4x4",
+    64: "4x4x4",
+    128: "4x4x8",
+    256: "4x8x8",
+    512: "8x8x8",
+    1024: "8x8x16",
+    2048: "8x16x16",
 }
-SUPPORTED_CT6E_CHIPS = set(CT6E_TOPOLOGY_BY_CHIPS)
-DEFAULT_CHIPS = 32
-DEFAULT_TOPOLOGY = CT6E_TOPOLOGY_BY_CHIPS[DEFAULT_CHIPS]
+SUPPORTED_TPU7X_CHIPS = set(TPU7X_TOPOLOGY_BY_CHIPS)
+DEFAULT_CHIPS = 8
+DEFAULT_TOPOLOGY = TPU7X_TOPOLOGY_BY_CHIPS[DEFAULT_CHIPS]
 DEFAULT_CHIPS_PER_NODE = 4
-CT6E_INSTANCE_TYPES_BY_CHIPS_PER_NODE = {
-    1: "ct6e-standard-1t",
-    4: "ct6e-standard-4t",
-    8: "ct6e-standard-8t",
-}
-DEFAULT_DWS_RUN_DURATION_SECONDS = 604800
+DEFAULT_INSTANCE_TYPE = "tpu7x-standard-4t"
+DEFAULT_DWS_RUN_DURATION_SECONDS = 172800
 MIN_DWS_RUN_DURATION_SECONDS = 600
 MAX_DWS_RUN_DURATION_SECONDS = 604800
-DEFAULT_PROVISION_TIMEOUT_SECONDS = 900
+DEFAULT_PROVISION_TIMEOUT_SECONDS = 2_147_483_647
 MAX_SKY_JOB_NAME_LENGTH = 63
-DWS_FLEX_START_FIX_PR = "https://github.com/skypilot-org/skypilot/pull/9608"
 TASK_SETUP = """\
 set -euo pipefail
 sudo env DEBIAN_FRONTEND=noninteractive apt-get update
@@ -180,11 +173,11 @@ class TopologySpec:
 
     @property
     def jax_mesh_devices(self) -> str:
-        return str(self.total_chips)
+        return str(2 * self.total_chips)
 
     @property
     def slug(self) -> str:
-        return f"v6e{self.topology}"
+        return f"v7x{self.topology}"
 
 
 def parse_duration_seconds(value: str) -> int:
@@ -193,7 +186,11 @@ def parse_duration_seconds(value: str) -> int:
     amount = text[:-1] if unit != "s" else text.removesuffix("s")
     if unit not in {"s", "m", "h", "d"}:
         raise argparse.ArgumentTypeError("duration unit must be one of s, m, h, d")
-    seconds = int(amount) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+    return int(amount) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+
+
+def parse_dws_run_duration_seconds(value: str) -> int:
+    seconds = parse_duration_seconds(value)
     if not MIN_DWS_RUN_DURATION_SECONDS <= seconds <= MAX_DWS_RUN_DURATION_SECONDS:
         raise argparse.ArgumentTypeError(
             "DWS run duration must be between 600 seconds and 7 days"
@@ -201,13 +198,20 @@ def parse_duration_seconds(value: str) -> int:
     return seconds
 
 
+def parse_provision_timeout_seconds(value: str) -> int:
+    seconds = parse_duration_seconds(value)
+    if seconds <= 0:
+        raise argparse.ArgumentTypeError("provision timeout must be positive")
+    return seconds
+
+
 def topology_for_chips(chips: int) -> str:
     try:
-        return CT6E_TOPOLOGY_BY_CHIPS[int(chips)]
+        return TPU7X_TOPOLOGY_BY_CHIPS[int(chips)]
     except KeyError:
         raise ValueError(
-            f"chips={chips} is unsupported; supported CT6e MIG sizes are "
-            f"{sorted(SUPPORTED_CT6E_CHIPS)}"
+            f"chips={chips} is unsupported; supported TPU7x MIG sizes are "
+            f"{sorted(SUPPORTED_TPU7X_CHIPS)}"
         ) from None
 
 
@@ -225,8 +229,8 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
         "--topology",
         default="",
         help=(
-            "TPU v6e topology, such as 4x8, or a chip-count shorthand such "
-            "as 32. Defaults from --chips."
+            "TPU7x topology, such as 2x2x4, or a chip-count shorthand such "
+            "as 16. Defaults from --chips."
         ),
     )
     parser.add_argument(
@@ -234,22 +238,13 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
         "--chip-count",
         dest="chips",
         type=int,
-        choices=sorted(SUPPORTED_CT6E_CHIPS),
+        choices=sorted(SUPPORTED_TPU7X_CHIPS),
         default=None,
         help=(
-            "TPU v6e chip count. Defaults to 32. Maps to supported CT6e "
+            "TPU7x chip count. Defaults to 16. Maps to supported TPU7x "
             "topologies."
         ),
     )
-    parser.add_argument(
-        "--instance-type",
-        default="",
-        help=(
-            "SkyPilot GCE machine type override. Defaults to ct6e-standard-"
-            "${chips_per_node}t."
-        ),
-    )
-    parser.add_argument("--chips-per-node", type=int, default=DEFAULT_CHIPS_PER_NODE)
     parser.add_argument(
         "--job-name",
         default="",
@@ -279,7 +274,6 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
     )
     parser.add_argument("--task-output-dir", default="tmp/skypilot_tasks")
     parser.add_argument("--task-name", default=DEFAULT_TASK_NAME)
-    parser.add_argument("--vm-image-id", default=DEFAULT_VM_IMAGE_ID)
     parser.add_argument("--sky-bin", default=DEFAULT_SKY_BIN)
     parser.add_argument("--cpus", default="")
     parser.add_argument("--memory", default="")
@@ -300,11 +294,11 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
         "--dws-provision-timeout",
         "--flex-start-provision-timeout",
         dest="provision_timeout_seconds",
-        type=parse_duration_seconds,
+        type=parse_provision_timeout_seconds,
         default=DEFAULT_PROVISION_TIMEOUT_SECONDS,
         help=(
-            "SkyPilot GCP DWS provisioning wait. Defaults to 15 minutes. "
-            "Accepts seconds or s/m/h/d suffixes."
+            "SkyPilot GCP DWS provisioning wait. Defaults to an effectively "
+            "unbounded wait; accepts seconds or s/m/h/d suffixes."
         ),
     )
     parser.add_argument(
@@ -313,7 +307,7 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
         "--flex-start-max-run-duration",
         "--dws-max-run-duration",
         dest="dws_run_duration_seconds",
-        type=parse_duration_seconds,
+        type=parse_dws_run_duration_seconds,
         default=DEFAULT_DWS_RUN_DURATION_SECONDS,
         help=(
             "DWS Flex-start VM runtime. Accepts seconds or s/m/h/d suffixes; "
@@ -351,7 +345,7 @@ def resolve_region_and_infra(
     if region and not infra:
         return region, f"gcp/{region}"
     if not region:
-        return gcp_image_region_from_infra(infra), infra
+        return gcp_region_from_infra(infra), infra
     expected_infra = f"gcp/{region}"
     if infra != expected_infra:
         parser.error(f"--region {region} conflicts with --infra {infra}")
@@ -370,10 +364,10 @@ def resolve_topology(
     topology: str = "",
     *,
     chips: int | None = None,
-    chips_per_node: int = DEFAULT_CHIPS_PER_NODE,
-    instance_type: str = "",
 ) -> TopologySpec:
-    normalized = topology.lower().replace("v6e:", "").strip()
+    normalized = (
+        topology.lower().removeprefix("tpu7x:").removeprefix("v7x:").strip()
+    )
     if normalized:
         if normalized.isdigit():
             chip_count = int(normalized)
@@ -388,42 +382,30 @@ def resolve_topology(
     else:
         normalized = topology_for_chips(DEFAULT_CHIPS if chips is None else chips)
     parts = normalized.split("x")
-    if len(parts) != 2 or not all(part.isdigit() for part in parts):
-        raise ValueError(f"topology must look like 4x8; got {topology!r}")
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        raise ValueError(f"topology must look like 2x2x4; got {topology!r}")
     dims = tuple(int(part) for part in parts)
     total_chips = dims[0] * dims[1]
+    total_chips *= dims[2]
     if total_chips <= 0:
         raise ValueError(f"topology must contain positive dimensions; got {topology!r}")
-    if chips_per_node <= 0:
-        raise ValueError("chips_per_node must be positive")
-    if total_chips % chips_per_node != 0:
+    expected_topology = TPU7X_TOPOLOGY_BY_CHIPS.get(total_chips)
+    if expected_topology != normalized:
         raise ValueError(
-            f"topology {normalized} has {total_chips} chips, not divisible by "
-            f"chips_per_node={chips_per_node}"
-        )
-    if total_chips not in SUPPORTED_CT6E_CHIPS:
-        raise ValueError(
-            f"topology {normalized!r} has {total_chips} chips; supported CT6e "
-            f"MIG sizes are {sorted(SUPPORTED_CT6E_CHIPS)}"
+            f"topology {normalized!r} is unsupported; supported TPU7x "
+            f"topologies are {list(TPU7X_TOPOLOGY_BY_CHIPS.values())}"
         )
     if chips is not None and total_chips != chips:
         raise ValueError(
             f"--chips={chips} conflicts with topology {normalized!r}, which "
             f"has {total_chips} chips"
         )
-    derived_instance_type = CT6E_INSTANCE_TYPES_BY_CHIPS_PER_NODE.get(chips_per_node)
-    if derived_instance_type is None and not instance_type:
-        raise ValueError(
-            f"chips_per_node={chips_per_node} has no default CT6e machine type; "
-            f"use one of {sorted(CT6E_INSTANCE_TYPES_BY_CHIPS_PER_NODE)} or pass "
-            "--instance-type"
-        )
     return TopologySpec(
         topology=normalized,
         total_chips=total_chips,
-        num_nodes=total_chips // chips_per_node,
-        chips_per_node=chips_per_node,
-        instance_type=instance_type or str(derived_instance_type),
+        num_nodes=total_chips // DEFAULT_CHIPS_PER_NODE,
+        chips_per_node=DEFAULT_CHIPS_PER_NODE,
+        instance_type=DEFAULT_INSTANCE_TYPE,
     )
 
 
@@ -508,11 +490,11 @@ def build_train_overrides(
                 "gcp",
                 "dws",
                 queue_tag,
-                "tpu-v6e",
+                "tpu-v7x",
                 experiment_tag,
             ],
             "notes": (
-                "SkyPilot GCP DWS TPU v6e run launched by train_sky.py."
+                "SkyPilot GCP DWS TPU7x run launched by train_sky.py."
             ),
         },
     }
@@ -524,7 +506,6 @@ def build_task(
     envs: dict[str, str],
     infra: str,
     task_name: str = DEFAULT_TASK_NAME,
-    vm_image_id: str = DEFAULT_VM_IMAGE_ID,
     cpus: str = "",
     memory: str = "",
     dws_run_duration_seconds: int = DEFAULT_DWS_RUN_DURATION_SECONDS,
@@ -532,13 +513,8 @@ def build_task(
 ) -> dict[str, Any]:
     if provision_timeout_seconds is None:
         provision_timeout_seconds = DEFAULT_PROVISION_TIMEOUT_SECONDS
-    image_region = gcp_image_region_from_infra(infra)
-    image_id: dict[str, str] = {
-        image_region: vm_image_id,
-    }
     resources: dict[str, Any] = {
         "infra": infra,
-        "image_id": image_id,
         "instance_type": topology.instance_type,
     }
     if cpus:
@@ -567,11 +543,11 @@ def build_task(
     return task
 
 
-def gcp_image_region_from_infra(infra: str) -> str:
+def gcp_region_from_infra(infra: str) -> str:
     prefix = "gcp/"
     if infra.startswith(prefix) and infra[len(prefix) :].strip():
         return infra[len(prefix) :].strip()
-    return DEFAULT_GCP_IMAGE_REGION
+    return DEFAULT_REGION
 
 
 def run_command(
@@ -683,8 +659,6 @@ def main(argv: list[str] | None = None) -> None:
     topology = resolve_topology(
         args.topology,
         chips=args.chips,
-        chips_per_node=args.chips_per_node,
-        instance_type=args.instance_type,
     )
     user_overrides = parse_config_overrides(args.override)
     config = load_config(args.config, user_overrides)
@@ -722,10 +696,9 @@ def main(argv: list[str] | None = None) -> None:
     )
     logging.warning(
         "GCP DWS uses SkyPilot gcp.managed_instance_group with Flex-start "
-        "MIGs. Use the vendored SkyPilot build at %s; upstream builds may not "
-        "support CT6e TPU workload-policy MIGs yet. Related PR: %s",
+        "MIGs. Use the vendored SkyPilot build at %s; it contains the TPU7x "
+        "Compute Engine workload-policy support required by this launcher.",
         args.sky_bin,
-        DWS_FLEX_START_FIX_PR,
     )
     logging.info(
         "Training shape: mesh=%s batch=%d grad_accum=%d steps=%d",
@@ -773,7 +746,6 @@ def main(argv: list[str] | None = None) -> None:
         envs=task_envs,
         infra=args.infra,
         task_name=args.task_name,
-        vm_image_id=args.vm_image_id,
         cpus=args.cpus,
         memory=args.memory,
         dws_run_duration_seconds=args.dws_run_duration_seconds,

@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12.11"
 dependencies = [
     "huggingface-hub>=0.33.2",
-    "numpy>=2.0.0",
+    "numpy>=2.1.0",
     "pyarrow>=16.0.0",
     "google-cloud-storage>=2.14.0",
     "h5py>=3.11.0",
@@ -28,14 +28,14 @@ dependencies = [
 [project.optional-dependencies]
 cuda = [
     "torch==2.12.0; sys_platform == 'linux'",
-    "jax[cuda13,tpu]>=0.10.1; sys_platform == 'linux'",
+    "jax[cuda13]>=0.11.0; sys_platform == 'linux'",
     "flax>=0.12.7",
     "optax>=0.2.8",
     "orbax-checkpoint>=0.12.0",
 ]
 tpu = [
     "torch==2.12.0; sys_platform == 'linux'",
-    "jax[tpu]>=0.10.1; sys_platform == 'linux'",
+    "jax[tpu]>=0.11.0; sys_platform == 'linux'",
     "flax>=0.12.7",
     "optax>=0.2.8",
     "orbax-checkpoint>=0.12.0",
@@ -58,6 +58,10 @@ torch = [
 ]
 
 [tool.uv]
+constraint-dependencies = [
+    "jax>=0.11.0",
+    "jaxlib>=0.11.0",
+]
 conflicts = [
     [
         { extra = "cuda" },

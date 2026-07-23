@@ -115,11 +115,13 @@ maintain a separate checked-in SkyPilot task YAML for a run.
 Launch it from this repository with an explicit config and workdir:
 
 ```bash
-CONFIG=configs/300m_pairmixer_dense_adamw.py
-RUN_ID=300m-adamw-v6e4x8-b2048-accum4-$(date -u +%Y%m%d-%H%M%S)
+CONFIG=configs/3b_pairmixer_dense_adamw.py
+RUN_ID=3b-adamw-v7x2x2x2-b2048-ga16-32-32-$(date -u +%Y%m%d-%H%M%S)
 WORKDIR=gs://metal-repeater-411410-spectra-checkpoints/skypilot/${RUN_ID}
 
 .venv/bin/python train_sky.py \
+    --chips 8 \
+    --dws-run-duration 2d \
     --run-id "${RUN_ID}" \
     --config "${CONFIG}" \
     --workdir "${WORKDIR}"
@@ -131,14 +133,14 @@ command, and `sky jobs logs` command without checking secrets or launching:
 ```bash
 .venv/bin/python train_sky.py \
     --dryrun \
-    --chips 64 \
+    --chips 8 \
     --run-id "${RUN_ID}" \
     --config "${CONFIG}" \
     --workdir "${WORKDIR}"
 ```
 
 The launcher creates a unique run id like
-`300m-pairmixer-dense-adamw-v6e4x8-b2048-accum4-YYYYMMDD-HHMMSS` if `--run-id` is omitted. It
+`3b-pairmixer-dense-adamw-v7x2x2x2-b2048-accum16-YYYYMMDD-HHMMSS` if `--run-id` is omitted. It
 does not choose a config or checkpoint bucket silently: `--config` and
 `--workdir` are required. It loads `HF_TOKEN` from the environment or
 `~/.cache/huggingface/token`, loads `WANDB_API_KEY` from the environment,
@@ -147,16 +149,17 @@ The default SkyPilot managed job name is run-specific, normally
 `spectra-$RUN_ID`, so a second run with a different run id requests a separate
 DWS allocation. Pass `--job-name` only when intentionally overriding the
 managed job name.
-The generated YAML uses GCE TPU v6e machine types with
+The generated YAML uses the GCE `tpu7x-standard-4t` machine type with
 `config.gcp.managed_instance_group`, so provisioning goes through GCE MIG
-Flex-start DWS. CT6e runs use a TPU workload policy, a regional MIG, and a bulk
-target size for the full topology; they do not use the generic MIG resize
-request path. The default `--sky-bin` is the vendored SkyPilot executable at
-`/home/wuhao/skypilot/.venv/bin/sky`; keep using that build until the CT6e
-workload-policy MIG support lands in the upstream SkyPilot release you install.
+Flex-start DWS. TPU7x runs use a TPU workload policy, a regional MIG, and a
+bulk target size for the full topology; they do not use the generic MIG resize
+request path. Flex-start is restricted to `us-central1-c`, so the launcher
+targets `gcp/us-central1`. The default `--sky-bin` is the vendored SkyPilot
+executable at `/home/wuhao/skypilot/.venv/bin/sky`; that build contains the
+Compute Engine TPU7x workload-policy support required by this launcher.
 If `sky status -u` shows an existing `sky-jobs-controller-*` created by an older
 SkyPilot build, cancel any in-progress managed jobs and recreate that controller
-before launching CT6e runs. Otherwise the managed-job controller can keep using
+before launching TPU7x runs. Otherwise the managed-job controller can keep using
 the old provisioning code even though the local launcher uses the vendored CLI.
 
 SkyPilot managed-job flags are passed through to `sky jobs launch`. To submit
@@ -179,36 +182,36 @@ The SkyPilot task uses:
 
 ```text
 Job:          spectra-$RUN_ID by default, or the explicit --job-name value
-Infra:        gcp/us-south1
-Instance:     ct6e-standard-4t for the default 4 chips per node
-Hosts:        8 GCE VMs for the default 4x8 / 32-chip topology
-Provisioning: GCE regional MIG Flex-start DWS with 7d run/provision wait duration
-TPU topology: 4x8
-Config:       configs/300m_pairmixer_dense_adamw.py
+Infra:        gcp/us-central1 (Flex-start allocates in us-central1-c)
+Instance:     tpu7x-standard-4t, 4 physical chips per VM
+Hosts:        2 GCE VMs for the default 2x2x2 / 8-chip topology
+Provisioning: GCE regional MIG Flex-start DWS; queue until capacity or cancellation
+Run duration: 2 days after capacity is allocated
+TPU topology: 2x2x2
+Config:       configs/3b_pairmixer_dense_adamw.py
 Steps:        2000000
-JAX mesh:     32 devices
-Batch:        2048 global, 4 gradient accumulation steps
+Parameters:   3.0025B encoder + 0.3063B predictor side = 3.3088B total
+JAX mesh:     16 devices (two TensorCore devices per physical TPU7x chip)
+Batch:        2048 global, 16/32/32 gradient accumulation schedule
 LR:           6e-4, min LR 6e-6
 Eval:         500 steps every 10000 steps
 MSG probe:    disabled
 ```
 
-Use `--chips` to select a supported CT6e topology. The default is `--chips 32`.
-The launcher maps chip counts to topology, then derives the number of GCE VMs
-from topology and `--chips-per-node`:
+Use `--chips` to select a supported TPU7x topology. The default is `--chips 8`.
+Every TPU7x VM has four physical chips, and every chip exposes two JAX devices:
 
 ```text
-8 chips   -> 2x4   -> 2 ct6e-standard-4t VMs
-16 chips  -> 4x4   -> 4 ct6e-standard-4t VMs
-32 chips  -> 4x8   -> 8 ct6e-standard-4t VMs
-64 chips  -> 8x8   -> 16 ct6e-standard-4t VMs
-128 chips -> 8x16  -> 32 ct6e-standard-4t VMs
-256 chips -> 16x16 -> 64 ct6e-standard-4t VMs
+4 chips   -> 2x2x1 -> 1 tpu7x-standard-4t VM  -> 8 JAX devices
+8 chips   -> 2x2x2 -> 2 tpu7x-standard-4t VMs -> 16 JAX devices
+16 chips  -> 2x2x4 -> 4 tpu7x-standard-4t VMs -> 32 JAX devices
+32 chips  -> 2x4x4 -> 8 tpu7x-standard-4t VMs -> 64 JAX devices
+64 chips  -> 4x4x4 -> 16 tpu7x-standard-4t VMs -> 128 JAX devices
+128 chips -> 4x4x8 -> 32 tpu7x-standard-4t VMs -> 256 JAX devices
+256 chips -> 4x8x8 -> 64 tpu7x-standard-4t VMs -> 512 JAX devices
 ```
 
-Pass `--topology 8x8` only when deliberately selecting a topology by name, and
-pass `--instance-type` only when deliberately overriding the derived CT6e
-machine type.
+Pass `--topology 2x2x2` only when deliberately selecting a topology by name.
 
 Useful status commands:
 
@@ -218,7 +221,7 @@ sky jobs queue
 sky jobs logs -n "spectra-${RUN_ID}"
 sky jobs logs JOB_ID
 sky jobs cancel JOB_ID
-gcloud compute instances list --filter="name~spectra AND zone:(us-south1-*)"
+gcloud compute instances list --filter="name~spectra AND zone:(us-central1-*)"
 gcloud compute instance-groups managed list --filter="name~sky-mig-spectra"
 ```
 
@@ -229,9 +232,11 @@ gs://metal-repeater-411410-spectra-checkpoints/skypilot/$RUN_ID/metrics/final.js
 ```
 
 It also logs to W&B under the config's project with tags:
-`skypilot`, `gcp`, `dws`, `flex-start`, `tpu-v6e`, and the config filename
-slug such as `300m_pairmixer_dense_adamw`. The resolved config is written to
+`skypilot`, `gcp`, `dws`, `flex-start`, `tpu-v7x`, and the config filename
+slug such as `3b_pairmixer_dense_adamw`. The resolved config is written to
 `$WORKDIR/config.json`; W&B is initialized from the same serialized dictionary.
+
+### Historical v6e validation
 
 Conservative retry contract if a run fails after TPU allocation:
 
