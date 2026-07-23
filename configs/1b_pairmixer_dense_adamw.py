@@ -18,7 +18,7 @@ def get_config() -> config_dict.ConfigDict:
 
     cfg.jepa_context_fraction_schedule = (0.35, 0.55, 0.75)
     cfg.jepa_target_fraction_schedule = (0.50, 0.30, 0.10)
-    cfg.jepa_mask_schedule_steps = (666_667, 1_333_334)
+    cfg.jepa_mask_schedule_steps = (250_000, 350_000)
     cfg.gradient_accumulation_steps = 8
     cfg.gradient_accumulation_steps_schedule = (8, 16, 16)
     cfg.activation_checkpoint_mode = "none"

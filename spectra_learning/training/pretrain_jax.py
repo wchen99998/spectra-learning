@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import logging
 import math
 import os
@@ -46,6 +47,7 @@ from spectra_learning.training.cadence import (
 from spectra_learning.training.checkpointing_jax import (
     build_jax_checkpoint_manager,
     jax_training_checkpoint_metadata,
+    restore_frozen_teacher_encoder,
     restore_jax_training_state,
     save_jax_training_state,
 )
@@ -982,7 +984,7 @@ def train_and_evaluate_jax(
             jax_config_checkpoint_contract(task_config)
         ),
         enable_msg_probe=True,
-        initialize_model=initialize_jax_model_from_torch_seed,
+        initialize_model=initialize_jax_pretrain_model,
         validate_model=_validate_pretrain_jax_model,
     )
     return train_and_evaluate_jax_task(config, workdir, task=task)
@@ -1174,6 +1176,15 @@ def initialize_jax_model_from_torch_seed(
     model.load_torch_state_dict(torch_model.state_dict())
 
 
+def initialize_jax_pretrain_model(
+    config: config_dict.ConfigDict,
+    model: PeakSetJEPAJax,
+) -> None:
+    if model.use_frozen_teacher:
+        return
+    initialize_jax_model_from_torch_seed(config, model)
+
+
 _JAX_PROFILE_TIMING_NAMES = (
     "dataloader_seconds",
     "transfer_seconds",
@@ -1240,6 +1251,7 @@ class _JaxTrainingLoop:
         self.checkpoint_manager = checkpoint_manager
         self.checkpoint_metadata = checkpoint_metadata
         self.metric_reduction = metric_reduction
+        self.resume_step = resume_step
 
         self.log_every_n_steps = int(config.get("log_every_n_steps", 50))
         self.warmup_steps = int(config.get("throughput_warmup_steps", 0))
@@ -1282,6 +1294,11 @@ class _JaxTrainingLoop:
             msg_probe_variants_from_config(config) if enable_msg_probe else ()
         )
         self.start_step = self._restore_checkpoint(resume_step)
+        nnx.update(
+            self.model,
+            self.state.trainable_params,
+            self.state.static_state,
+        )
         self.global_step = self.start_step
         self._activate_mask_stage(self.global_step)
 
@@ -1367,11 +1384,7 @@ class _JaxTrainingLoop:
             train_steps = []
             eval_steps = []
         for capacity in self.mask_capacities:
-            encoder_tokens, predictor_tokens = capacity
-            self.model.set_fastmixer_capacities(
-                encoder_tokens,
-                predictor_tokens,
-            )
+            self.model.set_fastmixer_capacities(*capacity)
             stage_graphdef, _, _ = nnx.split(
                 self.model,
                 trainable_param_filter,
@@ -1401,6 +1414,20 @@ class _JaxTrainingLoop:
                 static_state,
                 opt_state,
             )
+        if self.resume_step is None and isinstance(self.model, PeakSetJEPAJax):
+            if self.model.use_frozen_teacher:
+                teacher_checkpoint = self.config.frozen_teacher_checkpoint_path
+                state.static_state["teacher_encoder"] = (
+                    restore_frozen_teacher_encoder(
+                        teacher_checkpoint,
+                        state.static_state["teacher_encoder"],
+                    )
+                )
+                if jax.process_index() == 0:
+                    logging.info(
+                        "Restored frozen JAX teacher encoder from %s",
+                        teacher_checkpoint,
+                    )
         return state, tuple(train_steps), tuple(eval_steps)
 
     def _activate_mask_stage(self, global_step: int) -> bool:
@@ -1413,8 +1440,19 @@ class _JaxTrainingLoop:
         )
         if stage_index == self.mask_stage_index:
             return False
+        if self.mask_stage_index >= 0:
+            jax.effects_barrier()
+            self.train_steps[self.mask_stage_index].clear_cache()
+            self.eval_steps[self.mask_stage_index].clear_cache()
+            gc.collect()
+            logging.info(
+                "Released JAX executable cache for MAE mask stage %d",
+                self.mask_stage_index + 1,
+            )
         stage = self.mask_stages[stage_index]
-        encoder_tokens, predictor_tokens = self.mask_capacities[stage_index]
+        encoder_tokens, predictor_tokens, target_tokens = self.mask_capacities[
+            stage_index
+        ]
         self.datamodule.set_mask_fractions(
             stage.context_fraction,
             stage.target_fraction,
@@ -1426,18 +1464,21 @@ class _JaxTrainingLoop:
         self.model.set_fastmixer_capacities(
             encoder_tokens,
             predictor_tokens,
+            target_tokens,
         )
         self.train_step = self.train_steps[stage_index]
         self.eval_step = self.eval_steps[stage_index]
         self.mask_stage_index = stage_index
         logging.info(
             "MAE mask stage %d: context_fraction=%.2f target_fraction=%.2f "
-            "encoder_tokens=%d predictor_tokens=%d accumulation_steps=%d",
+            "encoder_tokens=%d predictor_tokens=%d target_tokens=%d "
+            "accumulation_steps=%d",
             stage_index + 1,
             stage.context_fraction,
             stage.target_fraction,
             encoder_tokens,
             predictor_tokens,
+            target_tokens,
             stage.gradient_accumulation_steps,
         )
         return True

@@ -427,6 +427,56 @@ def test_jax_fastmixer_dense_matches_dense_on_fixed_random_masks(transition_type
     _assert_jax_metrics_close(dense_metrics, fast_metrics)
 
 
+def test_jax_fastmixer_target_only_compact_path_matches_dense_loss_and_gradients():
+    torch.manual_seed(11)
+    dense_kwargs = _small_jepa_kwargs(
+        training_mode="mae_teacher_jepa",
+        pairmixer_block_type="dense",
+        target_projector_dim=-1,
+        jepa_mae_loss_weight=0.0,
+        distogram_loss_weight=0.0,
+        latent_pair_loss_weight=0.0,
+    )
+    fast_kwargs = {
+        **dense_kwargs,
+        "pairmixer_block_type": "FastMixer-Dense",
+        "pairmixer_fast_encoder_max_visible_tokens": 4,
+        "pairmixer_fast_max_visible_tokens": 6,
+    }
+    torch_model = PeakSetJEPA(**dense_kwargs).eval()
+    dense_model = PeakSetJEPAJax(**dense_kwargs)
+    fast_model = PeakSetJEPAJax(**fast_kwargs)
+    state_dict = torch_model.state_dict()
+    dense_model.load_torch_state_dict(state_dict)
+    fast_model.load_torch_state_dict(state_dict)
+    fast_model.set_fastmixer_capacities(4, 6, 5)
+    batch = _jax_batch(_real_pattern_batch("random"))
+
+    dense_metrics = dense_model(batch)
+    fast_metrics = fast_model(batch)
+
+    _assert_jax_metrics_close(dense_metrics, fast_metrics)
+
+    def loss_fn(model: PeakSetJEPAJax) -> jax.Array:
+        return model(batch, loss_only=True)["loss"]
+
+    grad_fn = nnx.grad(
+        loss_fn,
+        argnums=nnx.DiffState(0, trainable_param_filter),
+    )
+    dense_grads = dict(nnx.to_flat_state(nnx.as_pure(grad_fn(dense_model))))
+    fast_grads = dict(nnx.to_flat_state(nnx.as_pure(grad_fn(fast_model))))
+    assert fast_grads.keys() == dense_grads.keys()
+    for path in dense_grads:
+        np.testing.assert_allclose(
+            np.asarray(fast_grads[path]),
+            np.asarray(dense_grads[path]),
+            rtol=2e-5,
+            atol=2e-5,
+            err_msg=".".join(str(part) for part in path),
+        )
+
+
 def test_jax_native_bi_dense_pairmixer_uses_torch_style_initialization():
     block = JaxPairMixerBlock(
         single_dim=8,

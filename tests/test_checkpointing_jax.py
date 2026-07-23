@@ -16,6 +16,7 @@ from spectra_learning.models.settings import PeakSetJEPASettings
 from spectra_learning.training.checkpointing_jax import (
     build_jax_checkpoint_manager,
     jax_training_checkpoint_metadata,
+    restore_frozen_teacher_encoder,
     restore_jax_training_state,
     save_jax_training_state,
 )
@@ -26,6 +27,7 @@ from spectra_learning.training.pretrain_jax import (
     build_jax_optax_transform,
     init_pure_optax_train_state,
     initialize_jax_model_from_torch_seed,
+    trainable_param_filter,
 )
 
 
@@ -218,6 +220,70 @@ def test_jax_checkpoint_roundtrip_preserves_values_and_sharding(tmp_path):
     }
 
 
+def test_jax_checkpoint_restore_releases_template_before_loading():
+    template = {"value": jnp.ones((4,), dtype=jnp.float32)}
+
+    class _RestoreManager:
+        def restore(self, step, *, args):
+            del step, args
+            assert template["value"].is_deleted()
+            return SimpleNamespace(
+                state={"value": jnp.zeros((4,), dtype=jnp.float32)},
+                metadata=CHECKPOINT_METADATA,
+            )
+
+    restored = restore_jax_training_state(
+        _RestoreManager(),
+        1,
+        template,
+        expected_metadata=CHECKPOINT_METADATA,
+    )
+
+    np.testing.assert_array_equal(restored["value"], np.zeros((4,)))
+
+
+def test_restore_frozen_teacher_encoder_from_native_jax_checkpoint(tmp_path):
+    source = PeakSetJEPAJax(**_tiny_mae_kwargs(), rngs=nnx.Rngs(7))
+    _, source_trainable, source_static = nnx.split(
+        source,
+        trainable_param_filter,
+        ...,
+    )
+    manager = build_jax_checkpoint_manager(
+        tmp_path / "source",
+        enable_async_checkpointing=False,
+    )
+    save_jax_training_state(
+        manager,
+        300_000,
+        {
+            "trainable_params": nnx.as_pure(source_trainable),
+            "static_state": nnx.as_pure(source_static),
+            "opt_state": {},
+        },
+        metadata=CHECKPOINT_METADATA,
+    )
+    manager.close()
+
+    target = PeakSetJEPAJax(**_tiny_mae_kwargs(), rngs=nnx.Rngs(19))
+    target_state = nnx.as_pure(nnx.state(target.encoder))
+    restored = restore_frozen_teacher_encoder(
+        tmp_path / "source" / "orbax" / "300000",
+        target_state,
+    )
+
+    expected = dict(nnx.to_flat_state(nnx.as_pure(nnx.state(source.encoder))))
+    actual = dict(nnx.to_flat_state(restored))
+    target_values = dict(nnx.to_flat_state(target_state))
+    assert actual.keys() == expected.keys()
+    for path in expected:
+        np.testing.assert_array_equal(
+            np.asarray(actual[path]),
+            np.asarray(expected[path]),
+        )
+        assert actual[path].sharding == target_values[path].sharding
+
+
 def test_jax_checkpoint_manager_keeps_all_steps_when_max_to_keep_is_none(tmp_path):
     manager = build_jax_checkpoint_manager(
         tmp_path / "checkpoints",
@@ -325,6 +391,7 @@ def test_jax_training_loop_saves_periodically_and_resumes(tmp_path):
     _graphdef, trainable_params, static_state, opt_state, _opt = (
         init_pure_optax_train_state(cfg, model, total_steps=4)
     )
+    expected_trainable_params = jax.tree.map(np.asarray, trainable_params)
     restored = restore_jax_training_state(
         resumed_manager,
         3,
@@ -337,7 +404,7 @@ def test_jax_training_loop_saves_periodically_and_resumes(tmp_path):
     )
     resumed_manager.close()
     for expected, actual in zip(
-        jax.tree.leaves(trainable_params),
+        jax.tree.leaves(expected_trainable_params),
         jax.tree.leaves(restored["trainable_params"]),
         strict=True,
     ):
@@ -466,6 +533,7 @@ def test_jax_training_loop_pure_optax_saves_and_resumes(tmp_path):
     _graphdef, trainable_params, static_state, opt_state, _opt = (
         init_pure_optax_train_state(cfg, model, total_steps=4)
     )
+    expected_trainable_params = jax.tree.map(np.asarray, trainable_params)
     restored = restore_jax_training_state(
         resumed_manager,
         3,
@@ -478,7 +546,7 @@ def test_jax_training_loop_pure_optax_saves_and_resumes(tmp_path):
     )
     resumed_manager.close()
     for expected, actual in zip(
-        jax.tree.leaves(trainable_params),
+        jax.tree.leaves(expected_trainable_params),
         jax.tree.leaves(restored["trainable_params"]),
         strict=True,
     ):

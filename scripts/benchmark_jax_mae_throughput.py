@@ -18,6 +18,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--artifact-dir", type=Path, required=True)
+    parser.add_argument("--frozen-teacher-checkpoint", type=str, default=None)
     parser.add_argument("--stage", type=int, choices=(1, 2, 3), default=1)
     parser.add_argument(
         "--activation-checkpoint-mode",
@@ -45,7 +46,12 @@ def main() -> None:
     from spectra_learning.data.gems.datamodule import GemsDataModule
     from spectra_learning.data.gems.mask_schedule import jepa_mask_stages
     from spectra_learning.models.factory_jax import build_model_from_config
-    from spectra_learning.models.settings import PeakSetJEPASettings
+    from spectra_learning.models.fastmixer_capacity import (
+        pairmixer_fast_stage_capacities,
+    )
+    from spectra_learning.training.checkpointing_jax import (
+        restore_frozen_teacher_encoder,
+    )
     from spectra_learning.training.pretrain_jax import (
         _jax_data_mesh,
         _replicate_tree_on_data_mesh,
@@ -84,8 +90,15 @@ def main() -> None:
         )
     if args.activation_checkpoint_mode is not None:
         overrides["activation_checkpoint_mode"] = args.activation_checkpoint_mode
+    if args.frozen_teacher_checkpoint is not None:
+        overrides["frozen_teacher_checkpoint_path"] = (
+            args.frozen_teacher_checkpoint
+        )
     config = load_config(args.config, overrides)
     stage = jepa_mask_stages(config)[args.stage - 1]
+    encoder_tokens, predictor_tokens, target_tokens = (
+        pairmixer_fast_stage_capacities(config)[args.stage - 1]
+    )
     config.jepa_context_fraction = stage.context_fraction
     config.jepa_target_fraction = stage.target_fraction
     if args.gradient_accumulation_steps is None:
@@ -95,10 +108,14 @@ def main() -> None:
 
     torch.manual_seed(args.mask_seed)
     datamodule = GemsDataModule(config, seed=int(config.seed))
-    settings = PeakSetJEPASettings.from_config(config)
 
     build_start = time.perf_counter()
     model = build_model_from_config(config)
+    model.set_fastmixer_capacities(
+        encoder_tokens,
+        predictor_tokens,
+        target_tokens,
+    )
     params = nnx.state(model, nnx.Param)
     parameter_count = sum(int(value.size) for value in jax.tree.leaves(params))
     build_seconds = time.perf_counter() - build_start
@@ -114,6 +131,12 @@ def main() -> None:
     trainable_params = _replicate_tree_on_data_mesh(trainable_params, data_mesh)
     static_state = _replicate_tree_on_data_mesh(static_state, data_mesh)
     opt_state = _replicate_tree_on_data_mesh(opt_state, data_mesh)
+    if model.use_frozen_teacher:
+        static_state["teacher_encoder"] = restore_frozen_teacher_encoder(
+            config.frozen_teacher_checkpoint_path,
+            static_state["teacher_encoder"],
+        )
+    nnx.update(model, trainable_params, static_state)
     train_step = make_pure_accumulated_train_step(
         graphdef,
         optimizer,
@@ -216,8 +239,9 @@ def main() -> None:
         "stage": args.stage,
         "context_fraction": stage.context_fraction,
         "target_fraction": stage.target_fraction,
-        "encoder_tokens": settings.pairmixer_fast_encoder_max_visible_tokens,
-        "predictor_tokens": settings.pairmixer_fast_max_visible_tokens,
+        "encoder_tokens": encoder_tokens,
+        "predictor_tokens": predictor_tokens,
+        "target_tokens": target_tokens,
         "parameter_count": parameter_count,
         "global_batch_size": datamodule.global_batch_size,
         "microbatch_size": datamodule.batch_size,

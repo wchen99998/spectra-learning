@@ -137,6 +137,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.ema_teacher_schedule_peak_fraction = 0.35
     cfg.ema_teacher_schedule = "cosine"
     cfg.frozen_teacher_config_path = None
+    cfg.frozen_teacher_checkpoint_path = None
 
     # Training
     cfg.num_epochs = 8

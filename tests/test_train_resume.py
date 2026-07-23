@@ -977,7 +977,10 @@ def test_train_and_evaluate_jax_logs_final_metrics_on_main_process(
     monkeypatch.setattr(
         pretrain_jax,
         "build_model_from_config",
-        lambda config: SimpleNamespace(use_ema_teacher=False),
+        lambda config: SimpleNamespace(
+            use_ema_teacher=False,
+            use_frozen_teacher=False,
+        ),
     )
     monkeypatch.setattr(
         pretrain_jax,
@@ -1086,7 +1089,10 @@ def test_train_and_evaluate_jax_skips_logger_on_worker_process(
     monkeypatch.setattr(
         pretrain_jax,
         "build_model_from_config",
-        lambda config: SimpleNamespace(use_ema_teacher=False),
+        lambda config: SimpleNamespace(
+            use_ema_teacher=False,
+            use_frozen_teacher=False,
+        ),
     )
     monkeypatch.setattr(
         pretrain_jax,

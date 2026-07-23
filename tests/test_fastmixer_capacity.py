@@ -57,9 +57,9 @@ def test_1b_mae_schedule_uses_three_compact_shapes():
         (36, 41),
     )
     assert pairmixer_fast_stage_capacities(cfg) == (
-        (17, 41),
-        (27, 41),
-        (36, 41),
+        (17, 41, 24),
+        (27, 41, 14),
+        (36, 41, 5),
     )
     assert cfg.gradient_accumulation_steps == 8
     assert tuple(cfg.gradient_accumulation_steps_schedule) == (8, 16, 16)
@@ -96,10 +96,11 @@ def test_encoder_and_predictor_blocks_keep_separate_fastmixer_capacities():
     assert encoder_block.fastmixer_max_visible_tokens == 17
     assert predictor_block.fastmixer_max_visible_tokens == 41
 
-    model.set_fastmixer_capacities(27, 41)
+    model.set_fastmixer_capacities(27, 41, 14)
 
     assert encoder_block.fastmixer_max_visible_tokens == 27
     assert predictor_block.fastmixer_max_visible_tokens == 41
+    assert model.pairmixer_fast_target_max_visible_tokens == 14
 
 
 def test_pairmixer_has_one_projection_path():

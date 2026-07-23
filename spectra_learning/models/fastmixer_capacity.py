@@ -20,19 +20,19 @@ def _mask_strategy_names(value: Any) -> tuple[str, ...]:
     return tuple(str(item).strip().lower() for item in values if str(item).strip())
 
 
-def _mae_encoder_predictor_visible_tokens(
+def _mae_fast_capacities(
     config: Any,
     *,
     context_fraction: float | None = None,
     target_fraction: float | None = None,
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     num_peaks = int(config.get("num_peaks", 64))
     strategies = _mask_strategy_names(
         config.get("jepa_mask_strategy", "contiguous")
     )
     if "all" in strategies or "intensity_aware" in strategies:
         full_visible = pairmixer_fast_full_visible_tokens(config)
-        return full_visible, full_visible
+        return full_visible, full_visible, num_peaks
     num_target_blocks = int(config.get("jepa_num_target_blocks", 2))
     context_fraction = (
         float(config.get("jepa_context_fraction", 0.5))
@@ -52,6 +52,7 @@ def _mae_encoder_predictor_visible_tokens(
 
     encoder_max_visible = 1
     predictor_max_visible = 1
+    target_max_visible = 1
     for valid_count in range(1, num_peaks + 1):
         context_len, target_len = jepa_mask_lengths_for_valid_count(
             valid_count,
@@ -71,7 +72,22 @@ def _mae_encoder_predictor_visible_tokens(
         predictor_visible = context_len + target_len + 1
         encoder_max_visible = max(encoder_max_visible, encoder_visible)
         predictor_max_visible = max(predictor_max_visible, predictor_visible)
-    return encoder_max_visible, predictor_max_visible
+        target_max_visible = max(target_max_visible, target_len)
+    return encoder_max_visible, predictor_max_visible, target_max_visible
+
+
+def _mae_encoder_predictor_visible_tokens(
+    config: Any,
+    *,
+    context_fraction: float | None = None,
+    target_fraction: float | None = None,
+) -> tuple[int, int]:
+    encoder_tokens, predictor_tokens, _ = _mae_fast_capacities(
+        config,
+        context_fraction=context_fraction,
+        target_fraction=target_fraction,
+    )
+    return encoder_tokens, predictor_tokens
 
 
 def pairmixer_fast_mae_stage_visible_tokens(
@@ -89,8 +105,15 @@ def pairmixer_fast_mae_stage_visible_tokens(
 
 def pairmixer_fast_stage_capacities(
     config: Any,
-) -> tuple[tuple[int, int], ...]:
-    return pairmixer_fast_mae_stage_visible_tokens(config)
+) -> tuple[tuple[int, int, int], ...]:
+    return tuple(
+        _mae_fast_capacities(
+            config,
+            context_fraction=stage.context_fraction,
+            target_fraction=stage.target_fraction,
+        )
+        for stage in jepa_mask_stages(config)
+    )
 
 
 def pairmixer_fast_mae_encoder_visible_tokens(config: Any) -> int:

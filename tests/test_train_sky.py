@@ -34,8 +34,8 @@ def test_launcher_shape_comes_from_explicit_current_run_config():
     assert args.workdir == TRAIN_WORKDIR
     assert args.topology == ""
     assert args.chips is None
-    assert args.region == "us-south1"
-    assert args.infra == "gcp/us-south1"
+    assert args.region == "us-east5"
+    assert args.infra == "gcp/us-east5"
     assert args.instance_type == ""
     assert args.vm_image_id == train_sky.DEFAULT_VM_IMAGE_ID
     assert args.sky_bin == train_sky.DEFAULT_SKY_BIN
@@ -322,7 +322,7 @@ def test_build_task_constructs_direct_gcp_dws_resources_and_env():
     assert "accelerator_args" not in task["resources"]
     assert "cpus" not in task["resources"]
     assert "memory" not in task["resources"]
-    assert task["config"]["gcp"]["remote_identity"] == "SERVICE_ACCOUNT"
+    assert "remote_identity" not in task["config"]["gcp"]
     assert task["config"]["gcp"]["managed_instance_group"] == {
         "run_duration": 604800,
         "provision_timeout": train_sky.DEFAULT_PROVISION_TIMEOUT_SECONDS,
@@ -358,7 +358,7 @@ def test_build_task_sets_dws_run_duration():
     )
 
     assert task["resources"]["instance_type"] == "ct6e-standard-4t"
-    assert task["config"]["gcp"]["remote_identity"] == "SERVICE_ACCOUNT"
+    assert "remote_identity" not in task["config"]["gcp"]
     assert task["config"]["gcp"]["managed_instance_group"] == {
         "run_duration": 21600,
         "provision_timeout": train_sky.DEFAULT_PROVISION_TIMEOUT_SECONDS,
@@ -435,7 +435,7 @@ def test_dryrun_prints_generated_assets_without_token_lookup(
     assert "===== SkyPilot Task YAML =====" in output
     assert "name: spectra-v6e-mig-dws" in output
     assert "num_nodes: 8" in output
-    assert "infra: gcp/us-south1" in output
+    assert "infra: gcp/us-east5" in output
     assert "instance_type: ct6e-standard-4t" in output
     assert "projects/ubuntu-os-accelerator-images/global/images/" in output
     assert "docker:" not in output
@@ -451,7 +451,8 @@ def test_dryrun_prints_generated_assets_without_token_lookup(
     assert "cpus:" not in output
     assert "memory:" not in output
     assert "managed_instance_group:" in output
-    assert "remote_identity: SERVICE_ACCOUNT" in output
+    assert "remote_identity: SERVICE_ACCOUNT" not in output
+    assert "--config gcp.remote_identity=SERVICE_ACCOUNT" in output
     assert "run_duration: 604800" in output
     assert f"provision_timeout: {train_sky.DEFAULT_PROVISION_TIMEOUT_SECONDS}" in output
     assert "accelerator_topology: 4x8" in output
@@ -467,7 +468,10 @@ def test_dryrun_prints_generated_assets_without_token_lookup(
     assert "xla_enable_async_all_reduce" in output
     assert '"jax_mesh_devices":"32"' in output
     assert '"msg_probe_at_final_step":false' in output
-    assert '"jax_checkpoint_max_to_keep":null' in output
+    assert '"jax_checkpoint_max_to_keep":5' in output
+    assert f'"id":"{run_id}"' in output
+    assert '"resume":"allow"' in output
+    assert '"wandb_resume_from_env":false' in output
     assert "precompile" not in output.lower()
     assert "===== SkyPilot Launch Command =====" in output
     assert "sky jobs launch" in output
@@ -611,6 +615,8 @@ def test_launch_failure_preserves_exit_code_without_wrapper_down(tmp_path, monke
             "--detach-run",
             "--name",
             "spectra-fake-fail",
+            "--config",
+            "gcp.remote_identity=SERVICE_ACCOUNT",
             "--secret",
             "HF_TOKEN",
             "--secret",
@@ -651,6 +657,8 @@ def test_successful_submit_streams_managed_job_logs(tmp_path, monkeypatch):
             "--detach-run",
             "--name",
             "spectra-fake-stream",
+            "--config",
+            "gcp.remote_identity=SERVICE_ACCOUNT",
             "--secret",
             "HF_TOKEN",
             "--secret",

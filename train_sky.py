@@ -24,7 +24,7 @@ from spectra_learning.training.routing import resolve_training_route
 
 REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_PROJECT = "metal-repeater-411410"
-DEFAULT_REGION = "us-south1"
+DEFAULT_REGION = "us-east5"
 DEFAULT_INFRA = f"gcp/{DEFAULT_REGION}"
 DEFAULT_GCP_IMAGE_REGION = "us-east5"
 DEFAULT_TASK_NAME = "spectra-v6e-mig-dws"
@@ -288,7 +288,7 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
         "--region",
         default="",
         help=(
-            "GCP region for SkyPilot resources. Defaults to us-south1. "
+            f"GCP region for SkyPilot resources. Defaults to {DEFAULT_REGION}. "
             "Equivalent to --infra gcp/<region>."
         ),
     )
@@ -498,9 +498,11 @@ def build_train_overrides(
         "jax_persistent_cache_min_compile_time_secs": 0.0,
         "jax_persistent_cache_min_entry_size_bytes": 0,
         "jax_enable_async_checkpointing": False,
-        "jax_checkpoint_max_to_keep": None,
+        "wandb_resume_from_env": False,
         "wandb_kwargs": {
+            "id": run_id,
             "name": run_id,
+            "resume": "allow",
             "tags": [
                 "skypilot",
                 "gcp",
@@ -553,7 +555,6 @@ def build_task(
         "run": LiteralString(TASK_RUN),
         "config": {
             "gcp": {
-                "remote_identity": "SERVICE_ACCOUNT",
                 "managed_instance_group": {
                     "run_duration": int(dws_run_duration_seconds),
                     "provision_timeout": int(provision_timeout_seconds),
@@ -659,6 +660,7 @@ def build_sky_jobs_launch_command(
     sky_args: list[str],
 ) -> list[str]:
     cmd = [sky_bin, "jobs", "launch", "--detach-run", "--name", job_name]
+    cmd.extend(["--config", "gcp.remote_identity=SERVICE_ACCOUNT"])
     for secret in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "WANDB_API_KEY"):
         cmd.extend(["--secret", secret])
     if yes:
