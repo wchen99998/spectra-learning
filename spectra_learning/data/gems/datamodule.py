@@ -290,7 +290,7 @@ class GemsDataModule:
     @property
     def val_loader(self) -> DataLoader:
         if self._val_loader is None:
-            self._val_loader = self.val_loader_for_eval(augment=False)
+            self._val_loader = self.val_loader_for_eval(augment=True)
         return self._val_loader
 
     def val_loader_for_eval(self, *, augment: bool) -> DataLoader:

@@ -67,6 +67,14 @@ def any_rank(value: bool, context: DistributedContext) -> bool:
     return bool(flag.item())
 
 
+def max_across_ranks(value: float, context: DistributedContext) -> float:
+    if not context.is_distributed or context.backend != "torch":
+        return value
+    scalar = torch.tensor(value, device=context.device)
+    dist.all_reduce(scalar, op=dist.ReduceOp.MAX)
+    return float(scalar.item())
+
+
 def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
     if isinstance(model, DistributedDataParallel):
         return model.module

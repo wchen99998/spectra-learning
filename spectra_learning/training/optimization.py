@@ -1,5 +1,3 @@
-from typing import Any
-
 import torch
 from ml_collections import config_dict
 
@@ -9,31 +7,19 @@ from spectra_learning.training.schedules import (
 )
 
 
-def is_weight_decay_target(name: str, param: Any) -> bool:
-    return param.ndim >= 2 and name.endswith("weight")
-
-
-def build_adamw_param_groups(
-    decay_params: list[torch.nn.Parameter],
-    no_decay_params: list[torch.nn.Parameter],
-    weight_decay: float,
-) -> list[dict]:
-    param_groups = []
-    if no_decay_params:
-        param_groups.append({"params": no_decay_params, "weight_decay": 0.0})
-    if decay_params:
-        param_groups.append({"params": decay_params, "weight_decay": weight_decay})
-    return param_groups
-
-
 def build_optimizers(
     config: config_dict.ConfigDict,
     model: torch.nn.Module,
     total_steps: int,
     device: torch.device,
 ) -> tuple[list[torch.optim.Optimizer], list[LRSchedulerLike]]:
+    optimizer_name = str(config.get("optimizer", "adam")).lower()
+    if optimizer_name != "adam":
+        raise ValueError("PyTorch training requires optimizer='adam'")
+    if float(config.get("weight_decay", 0.0)) != 0.0:
+        raise ValueError("Plain Adam requires weight_decay=0")
     settings = _optimizer_settings(config, device)
-    return _build_single_adamw_optimizer(model, total_steps, settings)
+    return _build_single_adam_optimizer(model, total_steps, settings)
 
 
 def _optimizer_settings(
@@ -47,45 +33,33 @@ def _optimizer_settings(
         "warmup_steps": int(config.get("warmup_steps", 0)),
         "min_learning_rate": config.get("min_learning_rate", None),
         "b2": float(config.get("b2", 0.999)),
-        "weight_decay": float(config.weight_decay),
         "fused": is_cuda if fused_cfg is None else bool(fused_cfg) and is_cuda,
     }
 
 
-def _adamw(
-    param_groups: list[dict],
+def _adam(
+    parameters: list[torch.nn.Parameter],
     *,
     lr: float,
     b2: float,
     fused: bool,
-) -> torch.optim.AdamW:
-    return torch.optim.AdamW(
-        param_groups,
+) -> torch.optim.Adam:
+    return torch.optim.Adam(
+        parameters,
         lr=lr,
         betas=(0.9, b2),
         fused=fused,
     )
 
 
-def _build_single_adamw_optimizer(
+def _build_single_adam_optimizer(
     model: torch.nn.Module,
     total_steps: int,
     settings: dict,
 ) -> tuple[list[torch.optim.Optimizer], list[LRSchedulerLike]]:
-    decay_params = []
-    no_decay_params = []
-    for name, param in model.named_parameters():
-        if param.requires_grad and is_weight_decay_target(name, param):
-            decay_params.append(param)
-        elif param.requires_grad:
-            no_decay_params.append(param)
-    param_groups = build_adamw_param_groups(
-        decay_params,
-        no_decay_params,
-        settings["weight_decay"],
-    )
-    optimizer = _adamw(
-        param_groups,
+    parameters = [param for param in model.parameters() if param.requires_grad]
+    optimizer = _adam(
+        parameters,
         lr=settings["base_lr"],
         b2=settings["b2"],
         fused=settings["fused"],

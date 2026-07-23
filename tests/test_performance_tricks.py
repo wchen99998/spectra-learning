@@ -7,7 +7,7 @@ from spectra_learning.training.activation_checkpointing import (
 )
 from spectra_learning.training.performance import (
     compile_forward,
-    register_bf16_adamw_state_hook,
+    register_bf16_adam_state_hook,
 )
 
 
@@ -102,10 +102,10 @@ def test_block_compile_compiles_pair_mixer_blocks_only():
     assert all(block._compiled_call_impl is not None for block in blocks)
 
 
-def test_bf16_adamw_state_hook_uses_fp32_for_non_fused_optimizer():
+def test_bf16_adam_state_hook_uses_fp32_for_non_fused_optimizer():
     param = torch.nn.Parameter(torch.ones(4))
-    optimizer = torch.optim.AdamW([param], lr=1e-3, fused=False)
-    register_bf16_adamw_state_hook(optimizer)
+    optimizer = torch.optim.Adam([param], lr=1e-3, fused=False)
+    register_bf16_adam_state_hook(optimizer)
 
     param.sum().backward()
     optimizer.step()
@@ -114,12 +114,12 @@ def test_bf16_adamw_state_hook_uses_fp32_for_non_fused_optimizer():
     assert optimizer.state[param]["exp_avg_sq"].dtype == torch.float32
 
 
-def test_bf16_adamw_state_hook_uses_bf16_for_fused_cuda_optimizer():
+def test_bf16_adam_state_hook_uses_bf16_for_fused_cuda_optimizer():
     if not torch.cuda.is_available():
         return
     param = torch.nn.Parameter(torch.ones(4, device="cuda"))
-    optimizer = torch.optim.AdamW([param], lr=1e-3, fused=True)
-    register_bf16_adamw_state_hook(optimizer)
+    optimizer = torch.optim.Adam([param], lr=1e-3, fused=True)
+    register_bf16_adam_state_hook(optimizer)
 
     param.sum().backward()
     optimizer.step()

@@ -13,6 +13,8 @@ from spectra_learning.models.fastmixer_capacity import (
 
 
 REMOVED_SETTING_KEYS = (
+    "encoder_fourier_input_scale",
+    "encoder_use_fourier_features",
     "mae_context_encoder_pack_tokens",
     "mae_context_encoder_pack_token_choices",
     "pairmixer_encoder_projection_kernel",
@@ -62,8 +64,11 @@ class PeakSetJEPASettings:
     encoder_fourier_x_min: float = 3e-3
     encoder_fourier_x_max: float = 1000.0
     encoder_fourier_num_freqs: int = 256
-    encoder_fourier_input_scale: float = PEAK_MZ_MAX
-    encoder_use_fourier_features: bool = True
+    encoder_mz_scale: float = PEAK_MZ_MAX
+    encoder_mz_embedding: str = "fourier"
+    encoder_discrete_mz_bin_size: float = 0.02
+    encoder_discrete_mz_coarse_bin_size: float = 1.0
+    encoder_discrete_mz_embedding_dim: int = 70
     masked_token_loss_weight: float = 0.0
     mae_loss_weight: float = 1.0
     jepa_mae_loss_weight: float = 0.0
@@ -171,7 +176,7 @@ def _default_values(settings: PeakSetJEPASettings) -> dict[str, Any]:
 def _apply_derived_defaults(values: dict[str, Any], config: Any) -> None:
     peak_mz_max = config.get("peak_mz_max", PEAK_MZ_MAX)
     precursor_mz_max = config.get("max_precursor_mz", peak_mz_max)
-    values["encoder_fourier_input_scale"] = peak_mz_max
+    values["encoder_mz_scale"] = peak_mz_max
     values["jepa_mae_mz_max"] = peak_mz_max
     values["distogram_mz_max"] = peak_mz_max
     values["pairmixer_mz_scale"] = peak_mz_max

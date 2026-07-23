@@ -182,7 +182,10 @@ def _config(artifact_dir: Path) -> config_dict.ConfigDict:
     cfg.encoder_num_heads = 4
     cfg.encoder_use_position_embedding = False
     cfg.encoder_apply_final_norm = True
-    cfg.encoder_use_fourier_features = False
+    cfg.encoder_mz_embedding = "fourier"
+    cfg.encoder_fourier_num_freqs = 1
+    cfg.encoder_fourier_mlp_hidden_dim = 16
+    cfg.encoder_fourier_mlp_num_layers = 2
     cfg.feature_mlp_hidden_dim = 16
     cfg.pairmixer_pair_dim = 16
     cfg.pairmixer_pair_feature_hidden_dim = 16
@@ -201,7 +204,7 @@ def _config(artifact_dir: Path) -> config_dict.ConfigDict:
     cfg.warmup_steps = 0
     cfg.weight_decay = 0.0
     cfg.b2 = 0.99
-    cfg.optimizer = "adamw"
+    cfg.optimizer = "adam"
     cfg.optimizer_fused = False
     cfg.grad_clip_norm = 1.0
     cfg.autocast_dtype = "none"

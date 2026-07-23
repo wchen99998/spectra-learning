@@ -45,7 +45,7 @@ def compile_forward(
     logging.info("Compiled %d PairMixer blocks with torch.compile mode=%s.", compiled, compile_mode)
 
 
-def register_bf16_adamw_state_hook(optimizer: torch.optim.Optimizer) -> None:
+def register_bf16_adam_state_hook(optimizer: torch.optim.Optimizer) -> None:
     def _bf16_state_init_hook(
         optimizer: torch.optim.Optimizer,
         args: tuple,
@@ -79,7 +79,7 @@ def register_bf16_adamw_state_hook(optimizer: torch.optim.Optimizer) -> None:
     optimizer.register_step_pre_hook(_bf16_state_init_hook)
 
 
-def register_bf16_adamw_state_hooks(
+def register_bf16_adam_state_hooks(
     optimizers: Iterable[torch.optim.Optimizer],
     config: config_dict.ConfigDict,
 ) -> None:
@@ -87,5 +87,5 @@ def register_bf16_adamw_state_hooks(
     if state_dtype not in {"bf16", "bfloat16"}:
         return
     for optimizer in optimizers:
-        register_bf16_adamw_state_hook(optimizer)
-    logging.info("Registered bf16 AdamW optimizer-state hooks.")
+        register_bf16_adam_state_hook(optimizer)
+    logging.info("Registered bf16 Adam optimizer-state hooks.")

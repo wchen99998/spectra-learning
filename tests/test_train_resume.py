@@ -31,7 +31,6 @@ from spectra_learning.probes.massspec import checkpoint_probe
 from spectra_learning.probes.massspec.pr_curves import PrecisionRecallCurve
 from spectra_learning.training.optimization import (
     build_optimizers,
-    is_weight_decay_target,
 )
 from spectra_learning.training.schedules import learning_rate_at_step
 from spectra_learning.training.logging import (
@@ -84,8 +83,8 @@ def _optimizer_config(**overrides) -> config_dict.ConfigDict:
     cfg.min_learning_rate = 1e-4
     cfg.warmup_steps = 0
     cfg.b2 = 0.999
-    cfg.weight_decay = 0.01
-    cfg.optimizer = "adamw"
+    cfg.weight_decay = 0.0
+    cfg.optimizer = "adam"
     cfg.optimizer_fused = False
     cfg.update(overrides)
     return cfg
@@ -2433,7 +2432,7 @@ def test_run_checkpoint_msg_probe_script_infers_step_and_applies_overrides(monke
     assert run_kwargs["wandb_project"] == script.DEFAULT_STANDALONE_WANDB_PROJECT
 
 
-def test_build_optimizers_uses_single_adamw_optimizer_by_default():
+def test_build_optimizers_uses_single_adam_optimizer_by_default():
     model = _small_model()
     cfg = _optimizer_config()
 
@@ -2530,7 +2529,7 @@ def test_build_optimizers_do_not_include_standalone_covariance_pooler():
     assert pooler_param_ids.isdisjoint(optimizer_param_ids)
 
 
-def test_build_optimizers_uses_single_adamw_optimizer():
+def test_build_optimizers_uses_single_plain_adam_optimizer():
     model = _small_model()
     cfg = _optimizer_config()
 
@@ -2548,9 +2547,28 @@ def test_build_optimizers_uses_single_adamw_optimizer():
 
     assert len(optimizers) == 1
     assert len(schedulers) == 1
-    assert isinstance(optimizer, torch.optim.AdamW)
+    assert isinstance(optimizer, torch.optim.Adam)
     assert optimized_param_ids == trainable_param_ids
-    assert {group["weight_decay"] for group in optimizer.param_groups} == {0.0, 0.01}
+    assert {group["weight_decay"] for group in optimizer.param_groups} == {0.0}
+
+
+def test_build_optimizers_rejects_adamw_and_weight_decay():
+    model = _small_model()
+
+    with pytest.raises(ValueError, match="optimizer='adam'"):
+        build_optimizers(
+            _optimizer_config(optimizer="adamw"),
+            model,
+            total_steps=10,
+            device=torch.device("cpu"),
+        )
+    with pytest.raises(ValueError, match="weight_decay=0"):
+        build_optimizers(
+            _optimizer_config(weight_decay=0.01),
+            model,
+            total_steps=10,
+            device=torch.device("cpu"),
+        )
 
 
 def test_load_resume_model_state_rejects_removed_cls_predictor_keys():
@@ -2855,22 +2873,6 @@ def test_build_wandb_init_kwargs_can_ignore_resume_env(monkeypatch):
     assert kwargs == {"name": "fresh-standalone-run"}
 
 
-def test_is_weight_decay_target_matches_pretrain_expectation():
-    model = _small_model()
-    assert is_weight_decay_target(
-        "encoder.embedder.output_proj.weight",
-        model.encoder.embedder.output_proj.weight,
-    )
-    assert is_weight_decay_target(
-        "encoder.embedder.fourier_ffn.0.weight",
-        model.encoder.embedder.fourier_ffn[0].weight,
-    )
-    assert not is_weight_decay_target(
-        "encoder.embedder.mz_fourier.b",
-        model.encoder.embedder.mz_fourier.b,
-    )
-
-
 def test_jepa_mae_mz_scale_follows_peak_mz_preprocessing_scale():
     cfg = config_dict.ConfigDict()
     cfg.model_dim = 32
@@ -2880,7 +2882,7 @@ def test_jepa_mae_mz_scale_follows_peak_mz_preprocessing_scale():
     cfg.feature_mlp_hidden_dim = 16
     cfg.num_peaks = 8
     cfg.peak_mz_max = 750.0
-    cfg.encoder_fourier_input_scale = 1000.0
+    cfg.encoder_mz_scale = 1000.0
     cfg.max_precursor_mz = 2000.0
     cfg.jepa_mae_loss_weight = 1.0
     cfg.jepa_mae_mz_bin_size = 2.5
@@ -2898,7 +2900,7 @@ def test_jepa_mae_mz_scale_follows_peak_mz_preprocessing_scale():
     )
 
 
-def test_config_can_disable_encoder_fourier_features():
+def test_config_can_select_discrete_mz_embedding():
     cfg = config_dict.ConfigDict()
     cfg.model_dim = 32
     cfg.encoder_num_layers = 1
@@ -2906,19 +2908,22 @@ def test_config_can_disable_encoder_fourier_features():
     cfg.attention_mlp_multiple = 2.0
     cfg.feature_mlp_hidden_dim = 16
     cfg.num_peaks = 8
-    cfg.encoder_use_fourier_features = False
+    cfg.encoder_mz_embedding = "discrete"
+    cfg.encoder_discrete_mz_bin_size = 0.02
+    cfg.encoder_discrete_mz_coarse_bin_size = 1.0
+    cfg.encoder_discrete_mz_embedding_dim = 8
     cfg.encoder_fourier_mlp_hidden_dim = 64
     cfg.encoder_fourier_mlp_num_layers = 4
 
     model = build_model_from_config(cfg)
 
-    assert not model.encoder.embedder.use_fourier_features
-    assert not hasattr(model.encoder.embedder, "mz_fourier")
-    raw_layers = [
+    assert model.encoder.embedder.mz_embedding == "discrete"
+    mz_layers = [
         layer
-        for layer in model.encoder.embedder.raw_ffn
+        for layer in model.encoder.embedder.mz_ffn
         if isinstance(layer, torch.nn.Linear)
     ]
-    assert len(raw_layers) == 4
-    assert raw_layers[0].out_features == 64
-    assert raw_layers[-1].out_features == model.model_dim
+    assert len(mz_layers) == 4
+    assert mz_layers[0].in_features == 8
+    assert mz_layers[0].out_features == 64
+    assert mz_layers[-1].out_features == model.model_dim // 2

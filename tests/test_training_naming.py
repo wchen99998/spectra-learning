@@ -95,14 +95,16 @@ def test_latent_pair_objective_is_named_when_enabled() -> None:
     assert parts == ["latentpair", "pairw5e-01"]
 
 
-def test_architecture_parts_name_disabled_fourier_features() -> None:
+def test_architecture_parts_name_discrete_mz_embedding() -> None:
     parts = _architecture_parts(
         {
-            "encoder_use_fourier_features": False,
+            "encoder_mz_embedding": "discrete",
+            "encoder_discrete_mz_bin_size": 0.02,
+            "encoder_discrete_mz_embedding_dim": 70,
             "encoder_fourier_mlp_num_layers": 4,
             "encoder_fourier_mlp_hidden_dim": 64,
         }
     )
 
-    assert "no-fourier" in parts
+    assert "mzdisc0.02x70" in parts
     assert "fmlp4x64" in parts

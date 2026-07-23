@@ -1,15 +1,17 @@
 import math
 import tempfile
 import unittest
-from typing import cast
 from unittest import mock
 
 import torch
 
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pairmixer import PairFeatureEmbedder
-from spectra_learning.models.peak_features import FourierFeatures, PeakFeatureEmbedder
-from spectra_learning.training.optimization import is_weight_decay_target
+from spectra_learning.models.peak_features import (
+    DiscretizedMzFeatures,
+    FourierFeatures,
+    PeakFeatureEmbedder,
+)
 from spectra_learning.training.steps import train_step_impl
 from spectra_learning.training.checkpointing import (
     load_frozen_teacher_weights,
@@ -108,7 +110,7 @@ class FourierFeatureTests(unittest.TestCase):
             fourier_x_min=3e-3,
             fourier_x_max=1000.0,
             fourier_num_freqs=8,
-            fourier_input_scale=750.0,
+            mz_scale=750.0,
         )
         normalized_peak_mz = torch.tensor([[0.5]], dtype=torch.float32)
         prepared = embedder._prepare_fourier_mz(normalized_peak_mz)
@@ -129,34 +131,49 @@ class FourierFeatureTests(unittest.TestCase):
             fourier_num_freqs=8,
         )
         linear_layers = [
-            layer for layer in embedder.fourier_ffn if isinstance(layer, torch.nn.Linear)
+            layer for layer in embedder.mz_ffn if isinstance(layer, torch.nn.Linear)
         ]
         self.assertEqual(len(linear_layers), 4)
         self.assertEqual(linear_layers[0].in_features, 16)
         self.assertEqual(linear_layers[0].out_features, 64)
         self.assertEqual(linear_layers[-1].out_features, 16)
 
-    def test_peak_embedder_without_fourier_uses_full_capacity_raw_mlp(self):
+    def test_discrete_mz_features_quantize_coarse_and_residual_bins(self):
+        features = DiscretizedMzFeatures(
+            mz_scale=1000.0,
+            bin_size=0.02,
+            coarse_bin_size=1.0,
+            embedding_dim=70,
+        )
+        peak_mz = torch.tensor([[0.100011, 0.100019, 0.100991]])
+
+        quantized = features.quantized_mz(peak_mz)
+
+        torch.testing.assert_close(
+            quantized,
+            torch.tensor([[0.10002, 0.10002, 0.10100]]),
+        )
+        self.assertEqual(features(peak_mz).shape, (1, 3, 70))
+
+    def test_peak_embedder_discrete_branch_uses_same_capacity_mlp(self):
         embedder = PeakFeatureEmbedder(
             model_dim=32,
             hidden_dim=16,
             fourier_mlp_hidden_dim=64,
             fourier_mlp_num_layers=4,
-            fourier_x_min=3e-3,
-            fourier_x_max=1000.0,
-            fourier_num_freqs=8,
-            use_fourier_features=False,
+            mz_embedding="discrete",
+            discrete_bin_size=0.02,
+            discrete_coarse_bin_size=1.0,
+            discrete_embedding_dim=8,
         )
 
-        self.assertFalse(hasattr(embedder, "mz_fourier"))
-        self.assertFalse(hasattr(embedder, "fourier_ffn"))
         linear_layers = [
-            layer for layer in embedder.raw_ffn if isinstance(layer, torch.nn.Linear)
+            layer for layer in embedder.mz_ffn if isinstance(layer, torch.nn.Linear)
         ]
         self.assertEqual(len(linear_layers), 4)
-        self.assertEqual(linear_layers[0].in_features, 3)
+        self.assertEqual(linear_layers[0].in_features, 8)
         self.assertEqual(linear_layers[0].out_features, 64)
-        self.assertEqual(linear_layers[-1].out_features, 32)
+        self.assertEqual(linear_layers[-1].out_features, 16)
 
         peak_mz = torch.rand(2, 5)
         peak_intensity = torch.rand(2, 5)
@@ -1540,25 +1557,35 @@ class BlockJEPATests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Missing key"):
                 load_pretrained_weights(loaded, path)
 
-    def test_weight_decay_targets_all_2d_weights(self):
-        model = self._build_model()
-        self.assertTrue(
-            is_weight_decay_target(
-                "encoder.embedder.output_proj.weight",
-                model.encoder.embedder.output_proj.weight,
-            )
+    def test_embedding_ablation_keeps_shared_initialization_identical(self):
+        torch.manual_seed(7)
+        fourier = PeakFeatureEmbedder(
+            model_dim=32,
+            hidden_dim=16,
+            fourier_mlp_hidden_dim=64,
+            fourier_mlp_num_layers=4,
+            fourier_num_freqs=8,
+            mz_embedding="fourier",
         )
-        self.assertTrue(
-            is_weight_decay_target(
-                "encoder.embedder.fourier_ffn.0.weight",
-                cast(torch.nn.Linear, model.encoder.embedder.fourier_ffn[0]).weight,
-            )
+        torch.manual_seed(7)
+        discrete = PeakFeatureEmbedder(
+            model_dim=32,
+            hidden_dim=16,
+            fourier_mlp_hidden_dim=64,
+            fourier_mlp_num_layers=4,
+            mz_embedding="discrete",
+            discrete_embedding_dim=8,
         )
-        self.assertFalse(
-            is_weight_decay_target(
-                "encoder.embedder.mz_fourier.b",
-                model.encoder.embedder.mz_fourier.b,
-            )
+
+        for fourier_param, discrete_param in zip(
+            fourier.raw_ffn.parameters(),
+            discrete.raw_ffn.parameters(),
+            strict=True,
+        ):
+            torch.testing.assert_close(fourier_param, discrete_param)
+        torch.testing.assert_close(
+            fourier.output_proj.weight,
+            discrete.output_proj.weight,
         )
 
 

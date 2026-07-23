@@ -1000,7 +1000,7 @@ def test_jax_optimizer_excludes_frozen_teacher_and_buffer_params():
     before_teacher = np.asarray(jax_model.teacher_target_projector.linear0.weight[...])
     before_encoder_teacher = np.asarray(jax_model.teacher_encoder.cls_token[...])
     before_position = np.asarray(jax_model.encoder.position_embedding.weight[...])
-    before_fourier = np.asarray(jax_model.encoder.embedder.mz_fourier.b[...])
+    before_fourier = np.asarray(jax_model.encoder.embedder.mz_features.b[...])
 
     metrics = _run_canonical_train_step(jax_model, optimizer_config, batch)
 
@@ -1008,7 +1008,7 @@ def test_jax_optimizer_excludes_frozen_teacher_and_buffer_params():
     after_teacher = np.asarray(jax_model.teacher_target_projector.linear0.weight[...])
     after_encoder_teacher = np.asarray(jax_model.teacher_encoder.cls_token[...])
     after_position = np.asarray(jax_model.encoder.position_embedding.weight[...])
-    after_fourier = np.asarray(jax_model.encoder.embedder.mz_fourier.b[...])
+    after_fourier = np.asarray(jax_model.encoder.embedder.mz_features.b[...])
     assert np.isfinite(np.asarray(metrics["loss"]))
     assert not np.allclose(before_student, after_student)
     np.testing.assert_array_equal(after_teacher, before_teacher)

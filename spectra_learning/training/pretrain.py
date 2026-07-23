@@ -49,6 +49,7 @@ from spectra_learning.training.distributed import (
     barrier,
     cleanup_distributed,
     init_distributed_from_env,
+    max_across_ranks,
     reduce_metric_tensors,
     unwrap_model,
     wrap_distributed_model,
@@ -62,7 +63,7 @@ from spectra_learning.training.logging import (
 from spectra_learning.training.optimization import build_optimizers
 from spectra_learning.training.performance import (
     compile_forward as compile_training_forward,
-    register_bf16_adamw_state_hooks,
+    register_bf16_adam_state_hooks,
 )
 from spectra_learning.training.runtime import (
     build_grad_scaler,
@@ -193,7 +194,7 @@ def train_and_evaluate(
         total_steps,
         device,
     )
-    register_bf16_adamw_state_hooks(optimizers, config)
+    register_bf16_adam_state_hooks(optimizers, config)
     start_epoch, global_step, resume_offset = restore_training_state(
         config=config,
         checkpoint_dir=checkpoint_dir,
@@ -397,9 +398,13 @@ class _TorchTrainingLoop:
         self.throughput_warmup_steps = 0
         self.measured_start_time: float | None = None
         self.measured_steps = 0
+        self.validation_seconds = 0.0
+        self.msg_probe_seconds = 0.0
         self.profiler: Any = None
 
     def run(self) -> dict[str, object]:
+        if self.device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(self.device)
         self.training_start_time = time.perf_counter()
         self.throughput_warmup_steps = int(
             self.config.get("throughput_warmup_steps", 0)
@@ -453,7 +458,10 @@ class _TorchTrainingLoop:
             ),
             desc=f"Epoch {epoch}",
             unit="step",
-            disable=not self.distributed.is_main,
+            disable=(
+                not self.distributed.is_main
+                or bool(self.config.get("disable_progress_bar", False))
+            ),
         )
         accumulation_step = 0
         while (
@@ -620,6 +628,9 @@ class _TorchTrainingLoop:
             self.global_step,
         ):
             return
+        if self.device.type == "cuda":
+            synchronize_device(self.device)
+        started = time.perf_counter()
         val_metrics = evaluate_validation_loss(
             datamodule=self.datamodule,
             model=self.model,
@@ -629,6 +640,9 @@ class _TorchTrainingLoop:
             max_steps=self.val_num_steps,
             prefetch_size=self.device_prefetch_size,
         )
+        if self.device.type == "cuda":
+            synchronize_device(self.device)
+        self.validation_seconds += time.perf_counter() - started
         self.last_validation_metrics = {
             f"val/{key}": float(value.detach())
             for key, value in val_metrics.items()
@@ -651,6 +665,9 @@ class _TorchTrainingLoop:
             ),
         ):
             return
+        if self.device.type == "cuda":
+            synchronize_device(self.device)
+        started = time.perf_counter()
         base_model = cast(PeakSetJEPA, unwrap_model(self.model))
         self.last_msg_probe_metrics = dict(
             run_and_log_msg_probe(
@@ -663,7 +680,10 @@ class _TorchTrainingLoop:
                 self.distributed,
             )
         )
+        if self.device.type == "cuda":
+            synchronize_device(self.device)
         barrier(self.distributed)
+        self.msg_probe_seconds += time.perf_counter() - started
 
     def _finish(self) -> dict[str, object]:
         synchronize_device(self.device)
@@ -706,6 +726,13 @@ class _TorchTrainingLoop:
         )
         result["run/measured_steps"] = float(self.measured_steps)
         result["run/measured_elapsed_seconds"] = measured_elapsed
+        measured_training_seconds = max(
+            0.0,
+            measured_elapsed - self.validation_seconds - self.msg_probe_seconds,
+        )
+        result["run/validation_seconds"] = self.validation_seconds
+        result["run/msg_probe_seconds"] = self.msg_probe_seconds
+        result["run/measured_training_seconds"] = measured_training_seconds
         result["run/measured_steps_per_second"] = (
             float(self.measured_steps) / measured_elapsed
             if measured_elapsed > 0
@@ -716,6 +743,27 @@ class _TorchTrainingLoop:
             if measured_elapsed > 0
             else 0.0
         )
+        result["run/measured_training_steps_per_second"] = (
+            float(self.measured_steps) / measured_training_seconds
+            if measured_training_seconds > 0
+            else 0.0
+        )
+        result["run/measured_training_samples_per_second"] = (
+            float(self.measured_steps) * global_batch_size / measured_training_seconds
+            if measured_training_seconds > 0
+            else 0.0
+        )
+        if self.device.type == "cuda":
+            peak_allocated = max_across_ranks(
+                float(torch.cuda.max_memory_allocated(self.device)),
+                self.distributed,
+            )
+            peak_reserved = max_across_ranks(
+                float(torch.cuda.max_memory_reserved(self.device)),
+                self.distributed,
+            )
+            result["run/peak_cuda_memory_allocated_bytes"] = peak_allocated
+            result["run/peak_cuda_memory_reserved_bytes"] = peak_reserved
         return result
 
 

@@ -6,6 +6,7 @@ from ml_collections import config_dict
 import spectra_learning.data.gems.masking as gems_masking
 import spectra_learning.data.gems.visualization as gems_visualization
 from spectra_learning.data.gems.collate import GemsBatchCollator
+from spectra_learning.data.gems.datamodule import GemsDataModule
 import spectra_learning.data.gems.collate as gems_collate
 from spectra_learning.data.gems.settings import GemsDataConfig
 
@@ -638,3 +639,19 @@ def test_mask_block_ranges_in_active_order_compresses_context_gap() -> None:
         mask,
         active_positions,
     ) == [(0, 3)]
+
+
+def test_validation_loader_samples_mae_masks() -> None:
+    datamodule = GemsDataModule.__new__(GemsDataModule)
+    datamodule._val_loader = None
+    sentinel = object()
+    calls = []
+
+    def val_loader_for_eval(*, augment: bool):
+        calls.append(augment)
+        return sentinel
+
+    datamodule.val_loader_for_eval = val_loader_for_eval
+
+    assert datamodule.val_loader is sentinel
+    assert calls == [True]

@@ -43,8 +43,11 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_use_position_embedding = False
     cfg.encoder_apply_final_norm = True
     cfg.encoder_apply_final_pair_norm = True
-    cfg.encoder_use_fourier_features = True
-    cfg.encoder_fourier_input_scale = 1000
+    cfg.encoder_mz_embedding = "fourier"
+    cfg.encoder_mz_scale = 1000
+    cfg.encoder_discrete_mz_bin_size = 0.02
+    cfg.encoder_discrete_mz_coarse_bin_size = 1.0
+    cfg.encoder_discrete_mz_embedding_dim = 70
     cfg.encoder_fourier_mlp_hidden_dim = 1280
     cfg.encoder_fourier_mlp_num_layers = 4
     cfg.encoder_fourier_num_freqs = 64
@@ -189,10 +192,10 @@ def get_config() -> config_dict.ConfigDict:
     cfg.min_learning_rate = 4e-05
     cfg.warmup_steps = 3_000
     cfg.jax_profile_start_step = cfg.get_ref("warmup_steps")
-    cfg.weight_decay = 0.05
+    cfg.weight_decay = 0.0
     cfg.b2 = 0.95
     cfg.grad_clip_norm = 0.
-    cfg.optimizer = "adamw"
+    cfg.optimizer = "adam"
     cfg.optimizer_fused = True
 
     # Logging
