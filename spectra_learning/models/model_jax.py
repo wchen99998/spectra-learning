@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-from pathlib import Path
 from typing import Any
 
 import jax
@@ -9,7 +8,6 @@ import jax.numpy as jnp
 import torch
 from flax import nnx
 
-from spectra_learning.config import load_config
 from spectra_learning.models.common_jax import (
     Array,
     Identity,
@@ -33,9 +31,12 @@ from spectra_learning.models.pairmixer_jax import (
     _scatter_pair,
 )
 from spectra_learning.models.peak_features_jax import PeakFeatureEmbedder
-from spectra_learning.models.settings import PeakSetJEPASettings
+from spectra_learning.models.settings import (
+    PeakSetJEPASettings,
+    ema_teacher_momentum_at as resolve_ema_teacher_momentum,
+    load_frozen_teacher_settings,
+)
 from spectra_learning.models.spectrum_metadata import jax_spectrum_metadata_from_batch
-from spectra_learning.training.checkpointing import load_torch_checkpoint
 
 
 class TargetProjector(nnx.Module):
@@ -73,7 +74,7 @@ class PeakSetJEPAJax(nnx.Module):
     ) -> None:
         rngs = nnx.Rngs(0) if rngs is None else rngs
         cfg = PeakSetJEPASettings.create(settings, **overrides)
-        frozen_teacher_cfg = _load_frozen_teacher_settings(cfg)
+        frozen_teacher_cfg = load_frozen_teacher_settings(cfg)
         self.settings = cfg
         self.training_mode = cfg.training_mode.lower()
         self.model_dim = cfg.model_dim
@@ -231,8 +232,6 @@ class PeakSetJEPAJax(nnx.Module):
                 ),
                 use_fastmixer=self.use_fastmixer,
                 fastmixer_max_visible_tokens=self.pairmixer_fast_max_visible_tokens,
-                projection_kernel=cfg.pairmixer_predictor_projection_kernel,
-                kernel_role="predictor",
                 transition_type=self.pairmixer_transition_type,
                 compute_dtype=self.compute_dtype,
                 rngs=rngs,
@@ -353,7 +352,6 @@ class PeakSetJEPAJax(nnx.Module):
             pairmixer_fourier_x_max=cfg.pairmixer_fourier_x_max,
             pairmixer_relative_fourier_x_min=cfg.pairmixer_relative_fourier_x_min,
             pairmixer_relative_fourier_x_max=cfg.pairmixer_relative_fourier_x_max,
-            pairmixer_projection_kernel=cfg.pairmixer_encoder_projection_kernel,
             pairmixer_fast_max_visible_tokens=(
                 self.pairmixer_fast_encoder_max_visible_tokens
             ),
@@ -378,16 +376,6 @@ class PeakSetJEPAJax(nnx.Module):
             block.fastmixer_max_visible_tokens = encoder_tokens
         for block in self.masked_latent_predictor:
             block.fastmixer_max_visible_tokens = predictor_tokens
-
-    def set_pairmixer_projection_kernels(
-        self,
-        encoder_kernel: str,
-        predictor_kernel: str,
-    ) -> None:
-        for block in self.encoder.blocks:
-            block.projection_kernel = encoder_kernel
-        for block in self.masked_latent_predictor:
-            block.projection_kernel = predictor_kernel
 
     def __call__(
         self,
@@ -1266,11 +1254,6 @@ class PeakSetJEPAJax(nnx.Module):
             jnp.clip(intensity_target, 0, self.jepa_mae_num_intensity_bins - 1),
         )
 
-    def _masked_ce_loss(self, logits: Array, targets: Array, valid_mask: Array) -> Array:
-        per_token = _cross_entropy_from_logits(logits, targets)
-        weights = valid_mask.astype(jnp.float32)
-        return (per_token * weights).sum() / jnp.maximum(weights.sum(), 1.0)
-
     def _jepa_mae_value_prediction_loss(
         self,
         predicted_latents: Array,
@@ -1286,7 +1269,7 @@ class PeakSetJEPAJax(nnx.Module):
         view_shape = mz_logits.shape[:3]
         mz_target = jnp.broadcast_to(mz_target[:, None, :], view_shape)
         intensity_target = jnp.broadcast_to(intensity_target[:, None, :], view_shape)
-        mz_loss = self._masked_ce_loss(mz_logits, mz_target, target_masks)
+        mz_loss = _masked_ce_loss_from_logits(mz_logits, mz_target, target_masks)
         target_weights = target_masks.astype(jnp.float32)
         zero = mz_loss * 0.0
         mz_accuracy = zero
@@ -1305,7 +1288,7 @@ class PeakSetJEPAJax(nnx.Module):
             return mz_loss, mz_loss, zero, mz_accuracy, zero
         assert self.jepa_mae_intensity_head is not None
         intensity_logits = self.jepa_mae_intensity_head(predicted_latents)
-        intensity_loss = self._masked_ce_loss(
+        intensity_loss = _masked_ce_loss_from_logits(
             intensity_logits,
             intensity_target,
             target_masks,
@@ -1588,26 +1571,14 @@ class PeakSetJEPAJax(nnx.Module):
         return self.pool(encoded, batch["peak_valid_mask"])
 
     def ema_teacher_momentum_at(self, step: int, total_steps: int) -> float:
-        if self.ema_teacher_schedule == "constant":
-            return self.ema_teacher_momentum_start
-        progress = min(1.0, max(0.0, float(step) / float(max(1, total_steps))))
-        if self.ema_teacher_schedule == "slow-fast-slow":
-            peak = min(1.0, max(1e-6, self.ema_teacher_schedule_peak_fraction))
-            if progress <= peak:
-                phase = progress / peak
-                eased = 0.5 - 0.5 * math.cos(math.pi * phase)
-                return self.ema_teacher_momentum_start + eased * (
-                    self.ema_teacher_momentum_mid - self.ema_teacher_momentum_start
-                )
-            phase = (progress - peak) / max(1e-6, 1.0 - peak)
-            eased = 0.5 - 0.5 * math.cos(math.pi * phase)
-            return self.ema_teacher_momentum_mid + eased * (
-                self.ema_teacher_momentum_final - self.ema_teacher_momentum_mid
-            )
-        if self.ema_teacher_schedule == "cosine":
-            progress = 0.5 - 0.5 * math.cos(math.pi * progress)
-        return self.ema_teacher_momentum_start + progress * (
-            self.ema_teacher_momentum_final - self.ema_teacher_momentum_start
+        return resolve_ema_teacher_momentum(
+            schedule=self.ema_teacher_schedule,
+            start=self.ema_teacher_momentum_start,
+            mid=self.ema_teacher_momentum_mid,
+            final=self.ema_teacher_momentum_final,
+            peak_fraction=self.ema_teacher_schedule_peak_fraction,
+            step=step,
+            total_steps=total_steps,
         )
 
     def sync_ema_teacher(self) -> None:
@@ -1680,11 +1651,6 @@ class PeakSetJEPAJax(nnx.Module):
             )
         if self.distogram_head is not None:
             self.distogram_head.load_torch_state_dict(state_dict, "distogram_head")
-
-    def load_torch_checkpoint(self, checkpoint_path: str | Path) -> None:
-        ckpt = load_torch_checkpoint(checkpoint_path, map_location="cpu", weights_only=True)
-        self.load_torch_state_dict(ckpt["model"])
-
 
 def _cross_entropy_from_logits(logits: Array, targets: Array) -> Array:
     logits = logits.astype(jnp.float32)
@@ -1788,16 +1754,6 @@ def _ema_update_module(
         student_state,
     )
     nnx.update(teacher, updated)
-
-
-def _load_frozen_teacher_settings(
-    cfg: PeakSetJEPASettings,
-) -> PeakSetJEPASettings | None:
-    if cfg.training_mode.lower() != "mae_teacher_jepa":
-        return None
-    if cfg.frozen_teacher_config_path is None:
-        return None
-    return PeakSetJEPASettings.from_config(load_config(cfg.frozen_teacher_config_path))
 
 
 def _pair_dim(cfg: PeakSetJEPASettings) -> int:

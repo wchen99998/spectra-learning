@@ -55,7 +55,7 @@ from spectra_learning.training.distributed import (
     wrap_distributed_model,
 )
 from spectra_learning.training.logging import build_logger
-from spectra_learning.training.optimization import build_optimizers, is_weight_decay_target
+from spectra_learning.training.optimization import build_optimizers
 from spectra_learning.training.runtime import (
     build_grad_scaler,
     collect_and_log_param_metrics,
@@ -63,7 +63,7 @@ from spectra_learning.training.runtime import (
     estimate_training_flops_per_optimizer_step,
     parse_autocast_dtype,
 )
-from spectra_learning.training.schedules import LRSchedulerLike, make_cosine_schedule
+from spectra_learning.training.schedules import LRSchedulerLike
 from spectra_learning.training.storage import (
     StoragePath,
     local_scratch_dir,
@@ -85,7 +85,7 @@ class ContrastiveSplit(NamedTuple):
     probe_maccs: np.ndarray
 
 
-class ContrastiveBatchCollator:
+class _ContrastivePeakCollator:
     def __init__(
         self,
         split: ContrastiveSplit,
@@ -113,6 +113,40 @@ class ContrastiveBatchCollator:
         self.grouped_peak_shoulder_da = grouped_peak_shoulder_da
         self.grouped_peak_isotope_charges = grouped_peak_isotope_charges
 
+    def _collate_rows(self, row_indices: np.ndarray) -> dict[str, torch.Tensor]:
+        spectra = torch.from_numpy(self.split.spectra[row_indices].copy())
+        precursor_raw = torch.from_numpy(self.split.precursor_mz[row_indices].copy())
+        batch = preprocess_peak_batch_torch(
+            spectra[:, 0, :],
+            spectra[:, 1, :],
+            precursor_raw,
+            num_peaks=self.num_peaks,
+            peak_drop_min_intensity=self.peak_drop_min_intensity,
+            peak_ordering=self.peak_ordering,
+            max_precursor_mz=self.max_precursor_mz,
+            precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
+            min_peak_intensity=self.min_peak_intensity,
+            peak_filtering=self.peak_filtering,
+            grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
+            grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
+        )
+        batch["probe_maccs"] = torch.from_numpy(
+            self.split.probe_maccs[row_indices].copy()
+        ).to(torch.float32)
+        batch["collision_energy"] = (
+            torch.from_numpy(self.split.collision_energy[row_indices].copy())
+            .to(torch.float32)
+            .clamp(0.0, COLLISION_ENERGY_MAX)
+            / COLLISION_ENERGY_MAX
+        )
+        batch["charge"] = torch.full_like(
+            batch["collision_energy"],
+            ASSUMED_PRECURSOR_CHARGE,
+        )
+        return batch
+
+
+class ContrastiveBatchCollator(_ContrastivePeakCollator):
     def __call__(self, pairs: list[dict[str, int]]) -> dict[str, torch.Tensor]:
         has_explicit_negative = "negative_idx" in pairs[0]
         if has_explicit_negative:
@@ -160,38 +194,10 @@ class ContrastiveBatchCollator:
             )
             positive_index = torch.arange(len(indices), dtype=torch.long) ^ 1
             batch_indices = {}
-        spectra = torch.from_numpy(self.split.spectra[indices].copy())
-        precursor_raw = torch.from_numpy(self.split.precursor_mz[indices].copy())
-        batch = preprocess_peak_batch_torch(
-            spectra[:, 0, :],
-            spectra[:, 1, :],
-            precursor_raw,
-            num_peaks=self.num_peaks,
-            peak_drop_min_intensity=self.peak_drop_min_intensity,
-            peak_ordering=self.peak_ordering,
-            max_precursor_mz=self.max_precursor_mz,
-            precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
-            min_peak_intensity=self.min_peak_intensity,
-            peak_filtering=self.peak_filtering,
-            grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
-            grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
-        )
+        batch = self._collate_rows(indices)
         batch["compound_id"] = compound_ids
         batch["positive_index"] = positive_index
-        batch["collision_energy"] = (
-            torch.from_numpy(self.split.collision_energy[indices].copy())
-            .to(torch.float32)
-            .clamp(0.0, COLLISION_ENERGY_MAX)
-            / COLLISION_ENERGY_MAX
-        )
-        batch["charge"] = torch.full_like(
-            batch["collision_energy"],
-            ASSUMED_PRECURSOR_CHARGE,
-        )
         batch.update(batch_indices)
-        batch["probe_maccs"] = torch.from_numpy(self.split.probe_maccs[indices].copy()).to(
-            torch.float32
-        )
         return batch
 
 
@@ -246,66 +252,10 @@ class WeightedOnlineSampler(Sampler[int]):
         self.epoch = epoch
 
 
-class ContrastiveOnlineBatchCollator:
-    def __init__(
-        self,
-        split: ContrastiveSplit,
-        *,
-        num_peaks: int,
-        max_precursor_mz: float,
-        min_peak_intensity: float,
-        peak_drop_min_intensity: float,
-        peak_ordering: str,
-        precursor_peak_exclusion_window_da: float,
-        peak_filtering: str = DEFAULT_PEAK_FILTERING,
-        grouped_peak_shoulder_da: float = DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-        grouped_peak_isotope_charges: tuple[int, ...] = (
-            DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES
-        ),
-    ) -> None:
-        self.split = split
-        self.num_peaks = num_peaks
-        self.max_precursor_mz = max_precursor_mz
-        self.min_peak_intensity = min_peak_intensity
-        self.peak_drop_min_intensity = peak_drop_min_intensity
-        self.peak_ordering = peak_ordering
-        self.precursor_peak_exclusion_window_da = precursor_peak_exclusion_window_da
-        self.peak_filtering = peak_filtering
-        self.grouped_peak_shoulder_da = grouped_peak_shoulder_da
-        self.grouped_peak_isotope_charges = grouped_peak_isotope_charges
-
+class ContrastiveOnlineBatchCollator(_ContrastivePeakCollator):
     def __call__(self, indices: list[int]) -> dict[str, torch.Tensor]:
         row_indices = np.asarray(indices, dtype=np.int64)
-        spectra = torch.from_numpy(self.split.spectra[row_indices].copy())
-        precursor_raw = torch.from_numpy(self.split.precursor_mz[row_indices].copy())
-        batch = preprocess_peak_batch_torch(
-            spectra[:, 0, :],
-            spectra[:, 1, :],
-            precursor_raw,
-            num_peaks=self.num_peaks,
-            peak_drop_min_intensity=self.peak_drop_min_intensity,
-            peak_ordering=self.peak_ordering,
-            max_precursor_mz=self.max_precursor_mz,
-            precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
-            min_peak_intensity=self.min_peak_intensity,
-            peak_filtering=self.peak_filtering,
-            grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
-            grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
-        )
-        batch["probe_maccs"] = torch.from_numpy(
-            self.split.probe_maccs[row_indices].copy()
-        ).to(torch.float32)
-        batch["collision_energy"] = (
-            torch.from_numpy(self.split.collision_energy[row_indices].copy())
-            .to(torch.float32)
-            .clamp(0.0, COLLISION_ENERGY_MAX)
-            / COLLISION_ENERGY_MAX
-        )
-        batch["charge"] = torch.full_like(
-            batch["collision_energy"],
-            ASSUMED_PRECURSOR_CHARGE,
-        )
-        return batch
+        return self._collate_rows(row_indices)
 
 
 class GatheredContrastiveBatch(NamedTuple):
@@ -1431,76 +1381,18 @@ def build_contrastive_module(
     )
 
 
-def build_contrastive_optimizers(
-    config: config_dict.ConfigDict,
-    module: ContrastiveTrainingModule,
-    total_steps: int,
-    device: torch.device,
-) -> tuple[list[torch.optim.Optimizer], list[LRSchedulerLike]]:
-    model_lr = _optional_float(
-        config.get("contrastive_model_learning_rate", None)
-    )
-    pooler_lr = _optional_float(
-        config.get("contrastive_pooler_learning_rate", None)
-    )
-    online_probe_lr = _optional_float(
-        config.get("contrastive_online_probe_learning_rate", None)
-    )
-    if model_lr is None and pooler_lr is None and online_probe_lr is None:
-        return build_optimizers(config, module, total_steps, device)
-
-    base_lr = float(config.learning_rate)
-    fused_cfg = config.get("optimizer_fused", None)
-    fused = (
-        device.type == "cuda"
-        if fused_cfg is None
-        else bool(fused_cfg) and device.type == "cuda"
-    )
-    param_groups = []
-    for submodule, lr in (
-        (module.model, base_lr if model_lr is None else model_lr),
-        (module.pooler, base_lr if pooler_lr is None else pooler_lr),
-        (module.online_probe, base_lr if online_probe_lr is None else online_probe_lr),
-    ):
-        decay_params = []
-        no_decay_params = []
-        for name, param in submodule.named_parameters():
-            if param.requires_grad and is_weight_decay_target(name, param):
-                decay_params.append(param)
-            elif param.requires_grad:
-                no_decay_params.append(param)
-        if no_decay_params:
-            param_groups.append(
-                {"params": no_decay_params, "weight_decay": 0.0, "lr": lr}
-            )
-        if decay_params:
-            param_groups.append(
-                {
-                    "params": decay_params,
-                    "weight_decay": float(config.weight_decay),
-                    "lr": lr,
-                }
-            )
-
-    optimizer = torch.optim.AdamW(
-        param_groups,
-        lr=base_lr,
-        betas=(0.9, float(config.get("b2", 0.999))),
-        fused=fused,
-    )
-    scheduler = make_cosine_schedule(
-        optimizer,
-        total_steps,
-        int(config.get("warmup_steps", 0)),
-        config.get("min_learning_rate", None),
-    )
-    return [optimizer], [scheduler]
-
-
 def train_contrastive(
     config: config_dict.ConfigDict,
     workdir: str | Path,
 ) -> dict[str, object]:
+    for key in (
+        "contrastive_model_learning_rate",
+        "contrastive_pooler_learning_rate",
+        "contrastive_online_probe_learning_rate",
+        "contrastive_init_full_checkpoint_path",
+    ):
+        if key in config:
+            raise ValueError(f"{key} has been removed from contrastive training")
     if str(config.training_mode).lower() != "contrastive":
         raise ValueError("contrastive training requires training_mode='contrastive'")
     distributed = init_distributed_from_env()
@@ -1606,19 +1498,6 @@ def train_contrastive(
                 module.teacher_model,
                 normalize_storage_path(init_checkpoint),
             )
-    full_init_checkpoint = config.get("contrastive_init_full_checkpoint_path", "")
-    if full_init_checkpoint:
-        full_init_path = normalize_storage_path(full_init_checkpoint)
-        full_init = load_torch_checkpoint(
-            full_init_path,
-            map_location="cpu",
-            weights_only=True,
-        )
-        load_resume_model_state(module.model, full_init["model"])
-        load_resume_covariance_pooler_state(module.pooler, full_init_path, full_init)
-        module.online_probe.load_state_dict(full_init["online_probe"])
-        if module.teacher_model is not None:
-            load_resume_model_state(module.teacher_model, full_init["model"])
     module.to(distributed.device).train()
     if module.teacher_model is not None:
         module.teacher_model.eval()
@@ -1637,7 +1516,7 @@ def train_contrastive(
         )
     autocast_dtype = parse_autocast_dtype(config.get("autocast_dtype", "bf16"))
     grad_scaler = build_grad_scaler(autocast_dtype, distributed.device)
-    optimizers, schedulers = build_contrastive_optimizers(
+    optimizers, schedulers = build_optimizers(
         config,
         module,
         total_steps,

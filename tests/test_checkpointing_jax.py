@@ -21,15 +21,36 @@ from spectra_learning.training.checkpointing_jax import (
 )
 from spectra_learning.training.logging import MetricLogger
 from spectra_learning.training.pretrain_jax import (
+    _jax_process_bool_broadcast,
     _run_jax_training_loop,
     build_jax_optax_transform,
-    build_jax_optimizer,
     init_pure_optax_train_state,
     initialize_jax_model_from_torch_seed,
 )
 
 
 CHECKPOINT_METADATA = jax_training_checkpoint_metadata("test", {})
+
+
+class _FakeDistributedClient:
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+
+    def key_value_set(self, key: str, value: str) -> None:
+        self.values[key] = value
+
+    def blocking_key_value_get(self, key: str, timeout_in_ms: int) -> str:
+        assert timeout_in_ms == 60_000
+        return self.values[key]
+
+
+def test_jax_training_rejects_removed_probe_sharding_path() -> None:
+    from spectra_learning.training.pretrain_jax import prepare_jax_training_config
+
+    config = config_dict.ConfigDict({"jax_msg_probe_shard_batches": True})
+
+    with pytest.raises(ValueError, match="jax_msg_probe_shard_batches has been removed"):
+        prepare_jax_training_config(config)
 
 
 def _tiny_mae_kwargs() -> dict[str, object]:
@@ -249,63 +270,6 @@ def test_jax_checkpoint_restore_rejects_training_contract_mismatch(tmp_path):
     reopened.close()
 
 
-def test_jax_checkpoint_roundtrip_restores_model_and_optimizer_state(tmp_path):
-    kwargs = _tiny_mae_kwargs()
-    cfg = config_dict.ConfigDict(kwargs)
-    cfg.learning_rate = 1e-3
-    cfg.weight_decay = 0.0
-    cfg.seed = 11
-
-    source_model = PeakSetJEPAJax(**kwargs)
-    initialize_jax_model_from_torch_seed(cfg, source_model)
-    source_optimizer = build_jax_optimizer(cfg, source_model)
-    bumped = jax.tree.map(
-        lambda value: value + jnp.ones((), dtype=value.dtype),
-        nnx.as_pure(nnx.state(source_optimizer)),
-    )
-    nnx.update(source_optimizer, bumped)
-
-    manager = build_jax_checkpoint_manager(tmp_path / "checkpoints")
-    save_jax_training_state(
-        manager,
-        3,
-        {
-            "model": nnx.as_pure(nnx.state(source_model)),
-            "optimizer": nnx.as_pure(nnx.state(source_optimizer)),
-        },
-        metadata=CHECKPOINT_METADATA,
-    )
-    manager.close()
-
-    cfg.seed = 99
-    target_model = PeakSetJEPAJax(**kwargs)
-    initialize_jax_model_from_torch_seed(cfg, target_model)
-    target_optimizer = build_jax_optimizer(cfg, target_model)
-    reopened = build_jax_checkpoint_manager(tmp_path / "checkpoints")
-    assert reopened.latest_step() == 3
-    restored = restore_jax_training_state(
-        reopened,
-        3,
-        {
-            "model": nnx.as_pure(nnx.state(target_model)),
-            "optimizer": nnx.as_pure(nnx.state(target_optimizer)),
-        },
-        expected_metadata=CHECKPOINT_METADATA,
-    )
-    reopened.close()
-    nnx.update(target_model, restored["model"])
-    nnx.update(target_optimizer, restored["optimizer"])
-
-    source_leaves = jax.tree.leaves(nnx.as_pure(nnx.state(source_model)))
-    target_leaves = jax.tree.leaves(nnx.as_pure(nnx.state(target_model)))
-    for expected, actual in zip(source_leaves, target_leaves, strict=True):
-        np.testing.assert_array_equal(np.asarray(expected), np.asarray(actual))
-    source_opt_leaves = jax.tree.leaves(nnx.as_pure(nnx.state(source_optimizer)))
-    target_opt_leaves = jax.tree.leaves(nnx.as_pure(nnx.state(target_optimizer)))
-    for expected, actual in zip(source_opt_leaves, target_opt_leaves, strict=True):
-        np.testing.assert_array_equal(np.asarray(expected), np.asarray(actual))
-
-
 def test_jax_training_loop_saves_periodically_and_resumes(tmp_path):
     kwargs = _tiny_mae_kwargs()
     cfg = config_dict.ConfigDict(kwargs)
@@ -378,6 +342,66 @@ def test_jax_training_loop_saves_periodically_and_resumes(tmp_path):
         strict=True,
     ):
         np.testing.assert_array_equal(np.asarray(expected), np.asarray(actual))
+
+
+def test_jax_training_loop_honors_wall_clock_budget(monkeypatch, tmp_path):
+    from spectra_learning.training import pretrain_jax
+
+    kwargs = _tiny_mae_kwargs()
+    cfg = config_dict.ConfigDict(kwargs)
+    cfg.seed = 5
+    cfg.num_epochs = 1
+    cfg.learning_rate = 1e-3
+    cfg.jax_mesh_devices = "1"
+    cfg.checkpoint_every_steps = 0
+    cfg.log_every_n_steps = 0
+    cfg.msg_probe_every_n_steps = -1
+    cfg.max_duration_hours = 1.0
+    cfg.jax_time_limit_check_every_steps = 1
+    wall_times = iter((100.0, 100.0, 4000.0))
+    monkeypatch.setattr(pretrain_jax, "_jax_wall_time", lambda: next(wall_times))
+    batch = _tiny_numpy_batch()
+
+    model = PeakSetJEPAJax(**kwargs)
+    initialize_jax_model_from_torch_seed(cfg, model)
+    datamodule = _FakeDataModule(batch, train_steps=3)
+    manager = build_jax_checkpoint_manager(tmp_path / "checkpoints")
+    metrics = _run_jax_training_loop(
+        config=cfg,
+        datamodule=datamodule,
+        model=model,
+        logger=MetricLogger(),
+        total_steps=3,
+        checkpoint_manager=manager,
+        resume_step=None,
+        checkpoint_metadata=CHECKPOINT_METADATA,
+        metric_reduction="mean",
+        enable_msg_probe=False,
+    )
+
+    assert metrics["run/final_global_step"] == 1.0
+    assert metrics["run/stopped_for_time_limit"] == 1.0
+    assert manager.latest_step() == 1
+    manager.close()
+
+
+def test_jax_process_bool_broadcast_uses_distributed_runtime(monkeypatch):
+    from spectra_learning.training import pretrain_jax
+
+    client = _FakeDistributedClient()
+    monkeypatch.setattr(pretrain_jax.jax, "process_count", lambda: 2)
+    monkeypatch.setattr(pretrain_jax.jax, "process_index", lambda: 0)
+    monkeypatch.setattr(
+        pretrain_jax.jax_distributed.global_state,
+        "client",
+        client,
+    )
+
+    assert _jax_process_bool_broadcast(True, key="stop_100") is True
+    assert client.values == {"stop_100": "1"}
+
+    monkeypatch.setattr(pretrain_jax.jax, "process_index", lambda: 1)
+    assert _jax_process_bool_broadcast(False, key="stop_100") is True
 
 
 def test_jax_training_loop_pure_optax_saves_and_resumes(tmp_path):
@@ -522,7 +546,6 @@ def test_jax_training_loop_logs_validation_and_online_probe(monkeypatch, tmp_pat
     cfg.jax_mesh_devices = "1"
     cfg.checkpoint_every_steps = 1000
     cfg.log_every_n_steps = 0
-    cfg.jax_msg_probe_shard_batches = True
     cfg.val_every_n_steps = 2
     cfg.val_num_steps = 1
     cfg.msg_probe_every_n_steps = 2
@@ -565,7 +588,7 @@ def test_jax_training_loop_logs_validation_and_online_probe(monkeypatch, tmp_pat
     manager.close()
 
     assert len(probe_calls) == 1
-    assert probe_calls[0][2] is not None
+    assert probe_calls[0][2] is None
     assert metrics["run/final_global_step"] == 2.0
     assert metrics["run/wall_elapsed_seconds"] >= metrics["run/train_elapsed_seconds"]
     assert metrics["run/wall_samples_per_second"] <= metrics["run/samples_per_second"]

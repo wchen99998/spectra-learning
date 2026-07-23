@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, fields, replace
 from typing import Any
 
+from spectra_learning.config import load_config
 from spectra_learning.data.spectra import PEAK_MZ_MAX
 from spectra_learning.models.fastmixer_capacity import (
     resolve_pairmixer_fast_encoder_max_visible_tokens,
@@ -13,7 +15,38 @@ from spectra_learning.models.fastmixer_capacity import (
 REMOVED_SETTING_KEYS = (
     "mae_context_encoder_pack_tokens",
     "mae_context_encoder_pack_token_choices",
+    "pairmixer_encoder_projection_kernel",
+    "pairmixer_predictor_projection_kernel",
+    "pairmixer_encoder_projection_kernel_schedule",
+    "pairmixer_predictor_projection_kernel_schedule",
 )
+
+
+def ema_teacher_momentum_at(
+    *,
+    schedule: str,
+    start: float,
+    mid: float,
+    final: float,
+    peak_fraction: float,
+    step: int,
+    total_steps: int,
+) -> float:
+    if schedule == "constant":
+        return start
+    progress = min(1.0, max(0.0, float(step) / float(max(1, total_steps))))
+    if schedule == "slow-fast-slow":
+        peak = min(1.0, max(1e-6, peak_fraction))
+        if progress <= peak:
+            phase = progress / peak
+            eased = 0.5 - 0.5 * math.cos(math.pi * phase)
+            return start + eased * (mid - start)
+        phase = (progress - peak) / max(1e-6, 1.0 - peak)
+        eased = 0.5 - 0.5 * math.cos(math.pi * phase)
+        return mid + eased * (final - mid)
+    if schedule == "cosine":
+        progress = 0.5 - 0.5 * math.cos(math.pi * progress)
+    return start + progress * (final - start)
 
 
 @dataclass(slots=True)
@@ -66,8 +99,6 @@ class PeakSetJEPASettings:
     pairmixer_fourier_x_max: float = PEAK_MZ_MAX
     pairmixer_relative_fourier_x_min: float = 1e-3
     pairmixer_relative_fourier_x_max: float = 1.0
-    pairmixer_encoder_projection_kernel: str = "xla"
-    pairmixer_predictor_projection_kernel: str = "xla"
     pairmixer_fast_max_visible_tokens: int | None = None
     pairmixer_fast_encoder_max_visible_tokens: int | None = None
     predictor_apply_final_norm: bool = True
@@ -93,7 +124,7 @@ class PeakSetJEPASettings:
             if key in config:
                 raise ValueError(
                     f"{key} has been removed from PeakSetJEPASettings; remove it "
-                    "from experiment configs. JAX MAE uses the full context encoder."
+                    "from experiment configs."
                 )
         values = _default_values(cls())
         _apply_derived_defaults(values, config)
@@ -119,6 +150,18 @@ class PeakSetJEPASettings:
         if not overrides:
             return settings
         return replace(settings, **overrides)
+
+
+def load_frozen_teacher_settings(
+    settings: PeakSetJEPASettings,
+) -> PeakSetJEPASettings | None:
+    if settings.training_mode.lower() != "mae_teacher_jepa":
+        return None
+    if settings.frozen_teacher_config_path is None:
+        return None
+    return PeakSetJEPASettings.from_config(
+        load_config(settings.frozen_teacher_config_path)
+    )
 
 
 def _default_values(settings: PeakSetJEPASettings) -> dict[str, Any]:

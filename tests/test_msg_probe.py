@@ -9,19 +9,15 @@ import torch
 from ml_collections import config_dict
 from sklearn.metrics import average_precision_score, roc_auc_score
 
-from spectra_learning.models.pooling import CovariancePool
+from spectra_learning.models.pooling import CovariancePool, SinglePairCovariancePool
 from spectra_learning.probes.massspec.msg_modules import (
     FrozenPooler,
-    MsgCovariancePool,
     MsgLinearProbe,
     MsgMeanPool,
     MsgPmaPool,
     MsgSequenceProbe,
     MsgSinglePairClsPool,
-    MsgSinglePairClsProbe,
-    MsgSinglePairCovariancePool,
-    MsgSinglePairCovarianceProbe,
-    MsgSinglePairLinearProbe,
+    MsgSinglePairProbe,
     MsgSinglePairPmaPool,
     _probe_task_names,
     _probe_task_output_dims,
@@ -257,7 +253,7 @@ class MsgSequenceProbeTests(unittest.TestCase):
         )
 
     def test_covariance_pool_matches_masked_second_moment(self):
-        pool = MsgCovariancePool(input_dim=2, compressed_dim=2)
+        pool = CovariancePool(input_dim=2, compressed_dim=2)
         with torch.no_grad():
             pool.left_proj.weight.copy_(torch.eye(2))
             pool.right_proj.weight.copy_(torch.eye(2))
@@ -286,7 +282,7 @@ class MsgSequenceProbeTests(unittest.TestCase):
         self.assertTrue(torch.allclose(pooled, expected))
 
     def test_covariance_pool_ignores_cls_token(self):
-        pool = MsgCovariancePool(input_dim=2, compressed_dim=2)
+        pool = CovariancePool(input_dim=2, compressed_dim=2)
         with torch.no_grad():
             pool.left_proj.weight.copy_(torch.eye(2))
             pool.right_proj.weight.copy_(torch.eye(2))
@@ -299,7 +295,7 @@ class MsgSequenceProbeTests(unittest.TestCase):
         torch.testing.assert_close(pooled, torch.tensor([[5.0, 7.0, 7.0, 10.0]]))
 
     def test_single_pair_covariance_pool_uses_off_diagonal_pair_second_moment(self):
-        pool = MsgSinglePairCovariancePool(
+        pool = SinglePairCovariancePool(
             single_dim=2,
             pair_dim=2,
             compressed_dim=2,
@@ -332,7 +328,7 @@ class MsgSequenceProbeTests(unittest.TestCase):
         torch.testing.assert_close(pooled, expected)
 
     def test_single_pair_covariance_pool_uses_latent_pairs_when_pair_grid_is_compact(self):
-        pool = MsgSinglePairCovariancePool(
+        pool = SinglePairCovariancePool(
             single_dim=2,
             pair_dim=2,
             compressed_dim=2,
@@ -464,7 +460,7 @@ class MsgSequenceProbeTests(unittest.TestCase):
         logits = probe(peak_embeddings, valid_mask, pair_embeddings)
 
         self.assertTrue(_uses_pair_features("cls"))
-        self.assertIsInstance(probe, MsgSinglePairClsProbe)
+        self.assertIsInstance(probe, MsgSinglePairProbe)
         head = cast(torch.nn.Sequential, probe.heads.heads["maccs"])
         first_head = cast(torch.nn.Linear, head[0])
         self.assertEqual(first_head.in_features, 10)
@@ -494,7 +490,7 @@ class MsgSequenceProbeTests(unittest.TestCase):
 
         logits = probe(peak_embeddings, valid_mask, pair_embeddings)
 
-        self.assertIsInstance(probe, MsgSinglePairLinearProbe)
+        self.assertIsInstance(probe, MsgSinglePairProbe)
         self.assertEqual(len(probe.pooler.single_encoder.blocks), 2)
         self.assertIsInstance(probe.heads.heads["maccs"], torch.nn.Linear)
         self.assertEqual(logits["maccs"].shape, (3, 5))
@@ -523,7 +519,7 @@ class MsgSequenceProbeTests(unittest.TestCase):
 
         logits = probe(peak_embeddings, valid_mask, pair_embeddings)
 
-        self.assertIsInstance(probe, MsgSinglePairCovarianceProbe)
+        self.assertIsInstance(probe, MsgSinglePairProbe)
         self.assertEqual(probe.pooler.output_dim, 3 * 3)
         head = cast(torch.nn.Sequential, probe.heads.heads["maccs"])
         first_head = cast(torch.nn.Linear, head[0])
@@ -543,7 +539,7 @@ class MsgSequenceProbeTests(unittest.TestCase):
             regression_stds={"mol_weight": 1.0},
             fingerprint_task="maccs",
         )
-        trained_pooler = MsgSinglePairCovariancePool(
+        trained_pooler = SinglePairCovariancePool(
             single_dim=4,
             pair_dim=6,
             compressed_dim=3,
@@ -582,7 +578,7 @@ class MsgSequenceProbeTests(unittest.TestCase):
             regression_stds={"mol_weight": 1.0},
             fingerprint_task="maccs",
         )
-        trained_pooler = MsgSinglePairCovariancePool(
+        trained_pooler = SinglePairCovariancePool(
             single_dim=4,
             pair_dim=6,
             compressed_dim=3,
@@ -618,7 +614,7 @@ class MsgSequenceProbeTests(unittest.TestCase):
                 task_output_dims={"maccs": 7},
             ),
             MsgSequenceProbe(
-                pooler=MsgCovariancePool(input_dim=4, compressed_dim=3),
+                pooler=CovariancePool(input_dim=4, compressed_dim=3),
                 pooled_dim=9,
                 hidden_dim=8,
                 task_names=("maccs",),
@@ -707,7 +703,7 @@ class MsgSequenceProbeTests(unittest.TestCase):
         )
         optimizer = torch.optim.AdamW(probe.parameters(), lr=1e-3)
 
-        self.assertIsInstance(probe.pooler, MsgCovariancePool)
+        self.assertIsInstance(probe.pooler, CovariancePool)
         self.assertEqual(probe.pooler.left_proj.out_features, 2)
         self.assertTrue(all(param.requires_grad for param in probe.pooler.parameters()))
         probe_param_ids = {id(param) for param in probe.parameters()}

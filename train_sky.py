@@ -19,6 +19,7 @@ import yaml
 
 from spectra_learning.config import config_to_dict, load_config
 from spectra_learning.training.jax_runtime_flags import jax_tpu_xla_flags_string
+from spectra_learning.training.routing import resolve_training_route
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -685,6 +686,9 @@ def main(argv: list[str] | None = None) -> None:
     )
     user_overrides = parse_config_overrides(args.override)
     config = load_config(args.config, user_overrides)
+    _task, backend = resolve_training_route(config)
+    if backend != "jax":
+        raise ValueError("train_sky.py requires device_backend='jax'")
     batch_size = int(config.batch_size)
     grad_accum = int(config.gradient_accumulation_steps)
     experiment_slug = config_slug(args.config)

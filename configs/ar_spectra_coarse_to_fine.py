@@ -81,7 +81,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.ar_mlp_multiple = 4.0
     cfg.ar_rope_base = 10_000.0
     cfg.ar_attention_kernel = "pallas"
-    cfg.ar_splash_block_size = 128
+    cfg.ar_attention_block_size = 128
     cfg.ar_gelu_approximation = "quick"
 
     return cfg

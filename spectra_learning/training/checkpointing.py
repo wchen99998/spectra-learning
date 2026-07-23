@@ -75,8 +75,6 @@ def _training_checkpoint_state(
     wandb_run_id: str | None,
     covariance_pooler: torch.nn.Module | None,
     grad_scaler: torch.amp.GradScaler | None,
-    *,
-    snapshot: bool,
 ) -> tuple[dict[str, Any], StoragePath | None, dict[str, Any] | None]:
     pooler_path = (
         covariance_pooler_checkpoint_path(path)
@@ -105,9 +103,7 @@ def _training_checkpoint_state(
         if covariance_pooler is not None
         else None
     )
-    if snapshot:
-        return _snapshot_value(state), pooler_path, _snapshot_value(pooler_state)
-    return state, pooler_path, pooler_state
+    return _snapshot_value(state), pooler_path, _snapshot_value(pooler_state)
 
 
 def _write_torch_checkpoint(state: dict[str, Any], path: StoragePath) -> None:
@@ -186,7 +182,6 @@ class AsyncCheckpointWriter:
             wandb_run_id,
             covariance_pooler,
             grad_scaler,
-            snapshot=True,
         )
         future = self._executor.submit(
             _write_training_checkpoint_job,
@@ -219,41 +214,6 @@ class AsyncCheckpointWriter:
 
     def _log_future_result(self, future: Future[None]) -> None:
         future.result()
-
-
-def save_checkpoint(
-    path: Path | str,
-    model: PeakSetJEPA,
-    optimizers: list[torch.optim.Optimizer],
-    schedulers: list[LRSchedulerLike],
-    global_step: int,
-    epoch: int,
-    loss: float,
-    wandb_run_id: str | None = None,
-    covariance_pooler: torch.nn.Module | None = None,
-    grad_scaler: torch.amp.GradScaler | None = None,
-) -> None:
-    state, pooler_path, pooler_state = _training_checkpoint_state(
-        path,
-        model,
-        optimizers,
-        schedulers,
-        global_step,
-        epoch,
-        loss,
-        wandb_run_id,
-        covariance_pooler,
-        grad_scaler,
-        snapshot=False,
-    )
-    _write_training_checkpoint_job(
-        path,
-        state,
-        pooler_path,
-        pooler_state,
-        None,
-        None,
-    )
 
 
 def prune_checkpoints(checkpoint_dir: StoragePath, keep_top_k: int = 5) -> None:

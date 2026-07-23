@@ -4,37 +4,40 @@ import logging
 import os
 
 from spectra_learning.config import load_config
-from spectra_learning.training.pretrain import train_and_evaluate
+from spectra_learning.training.jax_runtime_flags import configure_jax_tpu_xla_flags
 from spectra_learning.training.logging import _serialise_metrics
+from spectra_learning.training.routing import resolve_training_route
 from spectra_learning.training.storage import normalize_storage_path, write_text
 
 
 def _train(config, workdir):
-    task = str(config.get("training_task", "pretrain")).lower()
+    task, backend = resolve_training_route(config)
     if task == "pretrain":
+        if backend == "jax":
+            configure_jax_tpu_xla_flags()
+            from spectra_learning.training.pretrain_jax import train_and_evaluate_jax
+
+            return train_and_evaluate_jax(config, workdir)
+        from spectra_learning.training.pretrain import train_and_evaluate
+
         return train_and_evaluate(config, workdir=workdir)
     if task == "contrastive":
         from spectra_learning.training.contrastive import train_contrastive
 
         return train_contrastive(config, workdir=workdir)
-    if task == "ar_spectra":
-        if str(config.get("device_backend", "auto")).lower() == "jax":
-            from spectra_learning.training.ar_spectra_jax import (
-                train_and_evaluate_ar_spectra_jax,
-            )
+    configure_jax_tpu_xla_flags()
+    from spectra_learning.training.ar_spectra_jax import (
+        train_and_evaluate_ar_spectra_jax,
+    )
 
-            return train_and_evaluate_ar_spectra_jax(config, workdir)
-        from spectra_learning.training.ar_spectra import train_and_evaluate_ar_spectra
-
-        return train_and_evaluate_ar_spectra(config, workdir)
-    raise ValueError(f"Unknown training_task: {task}")
+    return train_and_evaluate_ar_spectra_jax(config, workdir)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train peak-set JEPA model.")
     parser.add_argument("--config", required=True, help="Path to config file.")
     parser.add_argument("--workdir", required=True, help="Output directory.")
-    parser.add_argument("--local_rank", type=int, default=0)
+    parser.add_argument("--local-rank", type=int, default=0)
     parser.add_argument(
         "--overrides-json",
         default="{}",

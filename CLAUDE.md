@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-PyTorch-based deep learning framework for pretraining JEPA-style models on continuous mass spectrometry peak sets. The pipeline streams HDF5 MassIVE shards and MassSpecGym datasets, preprocesses raw peaks in collators, and trains a masked latent prediction model with teacher targets. During training, a periodic MSG linear probe evaluates learned representations on molecular property regression and MACCS fingerprint prediction.
+PyTorch/JAX codebase for pretraining JEPA-style models on continuous mass spectrometry peak sets. The pipeline streams HDF5 MassIVE shards and MassSpecGym datasets, preprocesses raw peaks in collators, and trains a masked latent prediction model with teacher targets. During training, a periodic MSG linear probe evaluates learned representations on molecular property regression and MACCS fingerprint prediction.
 
 ## Commands
 
@@ -36,7 +36,13 @@ PyTorch-based deep learning framework for pretraining JEPA-style models on conti
 
 ### Training Flow
 
-`train.py:_train` dispatches to the configured training task:
+`train.py:_train` is the canonical training dispatcher. Pretraining supports
+PyTorch and JAX, contrastive training is PyTorch-only, and AR training is
+JAX-only. `train_sky.py` only provisions JAX TPU infrastructure and delegates
+the actual run to `train.py`.
+
+For PyTorch pretraining:
+
 1. Data flows from `GemsDataModule`, which resolves the HDF5 shard manifest and applies peak preprocessing on the fly.
 2. The training collator produces masked-context JEPA batches with `peak_*`, `context_mask`, and `target_masks`.
 3. The compiled forward pass (`torch.compile` with `reduce-overhead` + CUDA graphs) runs the batch through encoder -> masked latent predictor -> JEPA losses.

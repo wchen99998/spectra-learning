@@ -92,14 +92,6 @@ class MsgMeanPool(torch.nn.Module):
         return build_msg_probe_inputs(peak_embeddings, valid_mask)
 
 
-class MsgCovariancePool(CovariancePool):
-    pass
-
-
-class MsgSinglePairCovariancePool(SinglePairCovariancePool):
-    pass
-
-
 class FrozenPooler(torch.nn.Module):
     _pooler: torch.nn.Module
 
@@ -369,84 +361,16 @@ class MsgSequenceProbe(torch.nn.Module):
         return self.heads(self.pooler(peak_embeddings, valid_mask))
 
 
-class MsgSinglePairLinearProbe(torch.nn.Module):
+class MsgSinglePairProbe(torch.nn.Module):
     def __init__(
         self,
         *,
-        pooler: MsgSinglePairPmaPool,
-        pooled_dim: int,
-        task_names: tuple[str, ...],
-        task_output_dims: dict[str, int] | None = None,
+        pooler: torch.nn.Module,
+        heads: MsgLinearProbe | MsgProbeHeads,
     ) -> None:
         super().__init__()
         self.pooler = pooler
-        self.heads = MsgLinearProbe(
-            input_dim=pooled_dim,
-            task_names=task_names,
-            task_output_dims=task_output_dims,
-        )
-
-    def forward(
-        self,
-        peak_embeddings: torch.Tensor,
-        valid_mask: torch.Tensor,
-        pair_embeddings: torch.Tensor | None = None,
-    ) -> dict[str, torch.Tensor]:
-        assert pair_embeddings is not None
-        return self.heads(self.pooler(peak_embeddings, valid_mask, pair_embeddings))
-
-
-class MsgSinglePairCovarianceProbe(torch.nn.Module):
-    def __init__(
-        self,
-        *,
-        pooler: MsgSinglePairCovariancePool,
-        pooled_dim: int,
-        hidden_dim: int,
-        num_layers: int = 2,
-        task_names: tuple[str, ...],
-        task_output_dims: dict[str, int] | None = None,
-    ) -> None:
-        super().__init__()
-        self.pooler = pooler
-        self.heads = MsgProbeHeads(
-            input_dim=pooled_dim,
-            hidden_dim=hidden_dim,
-            num_layers=num_layers,
-            task_names=task_names,
-            task_output_dims=task_output_dims,
-        )
-
-    def forward(
-        self,
-        peak_embeddings: torch.Tensor,
-        valid_mask: torch.Tensor,
-        pair_embeddings: torch.Tensor | None = None,
-    ) -> dict[str, torch.Tensor]:
-        assert pair_embeddings is not None
-        return self.heads(self.pooler(peak_embeddings, valid_mask, pair_embeddings))
-
-
-class MsgSinglePairClsProbe(torch.nn.Module):
-    def __init__(
-        self,
-        *,
-        pooler: MsgSinglePairClsPool,
-        pooled_dim: int,
-        hidden_dim: int,
-        num_layers: int = 2,
-        task_names: tuple[str, ...],
-        task_output_dims: dict[str, int] | None = None,
-    ) -> None:
-        super().__init__()
-        self.pooler = pooler
-        self.heads = MsgProbeHeads(
-            input_dim=pooled_dim,
-            hidden_dim=hidden_dim,
-            num_layers=num_layers,
-            task_names=task_names,
-            task_output_dims=task_output_dims,
-        )
+        self.heads = heads
 
     def forward(
         self,
@@ -472,18 +396,21 @@ def build_msg_sequence_probe(
     task_output_dims = _probe_task_output_dims(task_spec)
     if variant == "cls":
         pair_dim = int(config.get("pairmixer_pair_dim", model_dim))
-        return MsgSinglePairClsProbe(
+        pooled_dim = model_dim + pair_dim
+        return MsgSinglePairProbe(
             pooler=MsgSinglePairClsPool(),
-            pooled_dim=model_dim + pair_dim,
-            hidden_dim=hidden_dim,
-            num_layers=num_layers,
-            task_names=task_names,
-            task_output_dims=task_output_dims,
+            heads=MsgProbeHeads(
+                input_dim=pooled_dim,
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                task_names=task_names,
+                task_output_dims=task_output_dims,
+            ),
         )
     if _is_single_pair_covariance_variant(variant):
         if covariance_pooler is None:
             compressed_dim = int(config.get("covariance_pooling_dim", 32))
-            pooler = MsgSinglePairCovariancePool(
+            pooler = SinglePairCovariancePool(
                 single_dim=model_dim,
                 pair_dim=int(config.get("pairmixer_pair_dim", model_dim)),
                 compressed_dim=compressed_dim,
@@ -502,13 +429,15 @@ def build_msg_sequence_probe(
                 else covariance_pooler
             )
             pooled_dim = covariance_pooler.output_dim
-        return MsgSinglePairCovarianceProbe(
+        return MsgSinglePairProbe(
             pooler=pooler,
-            pooled_dim=pooled_dim,
-            hidden_dim=hidden_dim,
-            num_layers=num_layers,
-            task_names=task_names,
-            task_output_dims=task_output_dims,
+            heads=MsgProbeHeads(
+                input_dim=pooled_dim,
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                task_names=task_names,
+                task_output_dims=task_output_dims,
+            ),
         )
     if _is_single_pair_pma_variant(variant):
         pair_dim = int(config.get("pairmixer_pair_dim", model_dim))
@@ -536,11 +465,13 @@ def build_msg_sequence_probe(
                 config.get("msg_probe_single_pair_pma_include_cls_token", False)
             ),
         )
-        return MsgSinglePairLinearProbe(
+        return MsgSinglePairProbe(
             pooler=pooler,
-            pooled_dim=pooler.output_dim,
-            task_names=task_names,
-            task_output_dims=task_output_dims,
+            heads=MsgLinearProbe(
+                input_dim=pooler.output_dim,
+                task_names=task_names,
+                task_output_dims=task_output_dims,
+            ),
         )
     pooler, pooled_dim = _build_pooler(
         variant,
@@ -661,7 +592,7 @@ def _build_covariance_pooler(
     if covariance_pooler is None:
         compressed_dim = int(config.get("covariance_pooling_dim", 32))
         return (
-            MsgCovariancePool(input_dim=model_dim, compressed_dim=compressed_dim),
+            CovariancePool(input_dim=model_dim, compressed_dim=compressed_dim),
             compressed_dim * compressed_dim,
         )
     compressed_dim = covariance_pooler.left_proj.out_features

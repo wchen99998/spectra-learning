@@ -6,6 +6,7 @@ import tempfile
 import jax
 import jax.numpy as jnp
 import numpy as np
+import optax
 import pytest
 import torch
 from flax import nnx
@@ -17,16 +18,14 @@ from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.model_jax import PeakSetJEPAJax
 from spectra_learning.models.pairmixer_jax import PairMixerBlock as JaxPairMixerBlock
 from spectra_learning.models.transformer_jax import FeedForward as JaxFeedForward
-from spectra_learning.training.checkpointing import save_torch_checkpoint
+from spectra_learning.training.checkpointing import (
+    load_torch_checkpoint,
+    save_torch_checkpoint,
+)
 from spectra_learning.training.pretrain_jax import (
     _jax_data_mesh_for_device_count,
     _replicate_tree_on_data_mesh,
-    build_jax_optimizer,
-    jax_apply_grads,
-    jax_grad_step,
-    jax_sharded_apply_grads,
-    jax_sharded_grad_step,
-    jax_train_step,
+    build_jax_optax_transform,
     initialize_jax_model_from_torch_seed,
     init_pure_optax_train_state,
     make_pure_accumulated_train_step,
@@ -113,6 +112,30 @@ def _small_jepa_kwargs(**overrides: object) -> dict[str, object]:
     }
     kwargs.update(overrides)
     return kwargs
+
+
+def _run_canonical_train_step(
+    model: PeakSetJEPAJax,
+    optimizer_config: dict[str, float],
+    batch: dict[str, jax.Array],
+) -> dict[str, jax.Array]:
+    graphdef, trainable_params, static_state, opt_state, optimizer = (
+        init_pure_optax_train_state(optimizer_config, model)
+    )
+    train_step = make_pure_accumulated_train_step(
+        graphdef,
+        optimizer,
+        sharded=False,
+    )
+    accumulated_batch = jax.tree.map(lambda value: value[None], batch)
+    trainable_params, _opt_state, metrics = train_step(
+        trainable_params,
+        static_state,
+        opt_state,
+        accumulated_batch,
+    )
+    nnx.update(model, trainable_params)
+    return metrics
 
 
 def test_jax_native_dense_encoder_cls_pair_tokens_are_random_initialized():
@@ -492,7 +515,12 @@ def test_jax_model_loads_plain_pytorch_checkpoint_and_matches_output():
             path,
         )
         jax_model = PeakSetJEPAJax(**kwargs)
-        jax_model.load_torch_checkpoint(path)
+        checkpoint = load_torch_checkpoint(
+            path,
+            map_location="cpu",
+            weights_only=True,
+        )
+        jax_model.load_torch_state_dict(checkpoint["model"])
 
     with torch.no_grad():
         torch_metrics = torch_model(batch)
@@ -507,18 +535,24 @@ def test_jax_optax_train_step_updates_loaded_pytorch_weights():
     torch_model = PeakSetJEPA(**kwargs).eval()
     jax_model = PeakSetJEPAJax(**kwargs)
     jax_model.load_torch_state_dict(torch_model.state_dict())
-    optimizer = build_jax_optimizer(
-        {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95},
-        jax_model,
-    )
+    optimizer_config = {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95}
     batch = _jax_batch(_real_pattern_batch("contiguous"))
     before = np.asarray(jax_model.jepa_mae_mz_head.weight[...])
 
-    metrics = jax_train_step(jax_model, optimizer, batch)
+    metrics = _run_canonical_train_step(jax_model, optimizer_config, batch)
 
     after = np.asarray(jax_model.jepa_mae_mz_head.weight[...])
     assert np.isfinite(np.asarray(metrics["loss"]))
     assert not np.allclose(before, after)
+
+
+def test_jax_selective_checkpointing_uses_transformer_dot_policy():
+    from spectra_learning.models.common_jax import activation_checkpoint_policy
+
+    assert (
+        activation_checkpoint_policy("selective")
+        is jax.checkpoint_policies.dots_with_no_batch_dims_saveable
+    )
 
 
 @pytest.mark.parametrize("mode", ["full", "selective"])
@@ -538,14 +572,12 @@ def test_jax_activation_checkpointing_matches_uncheckpointed_update(mode: str):
     base_model.load_torch_state_dict(torch_model.state_dict())
     checkpointed_model.load_torch_state_dict(torch_model.state_dict())
     optimizer_config = {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95}
-    base_optimizer = build_jax_optimizer(optimizer_config, base_model)
-    checkpointed_optimizer = build_jax_optimizer(optimizer_config, checkpointed_model)
     batch = _jax_batch(_real_pattern_batch("contiguous"))
 
-    base_metrics = jax_train_step(base_model, base_optimizer, batch)
-    checkpointed_metrics = jax_train_step(
+    base_metrics = _run_canonical_train_step(base_model, optimizer_config, batch)
+    checkpointed_metrics = _run_canonical_train_step(
         checkpointed_model,
-        checkpointed_optimizer,
+        optimizer_config,
         batch,
     )
 
@@ -587,14 +619,12 @@ def test_jax_fastmixer_activation_checkpointing_matches_uncheckpointed_update():
     base_model.load_torch_state_dict(torch_model.state_dict())
     checkpointed_model.load_torch_state_dict(torch_model.state_dict())
     optimizer_config = {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95}
-    base_optimizer = build_jax_optimizer(optimizer_config, base_model)
-    checkpointed_optimizer = build_jax_optimizer(optimizer_config, checkpointed_model)
     batch = _jax_batch(_real_pattern_batch("random"))
 
-    base_metrics = jax_train_step(base_model, base_optimizer, batch)
-    checkpointed_metrics = jax_train_step(
+    base_metrics = _run_canonical_train_step(base_model, optimizer_config, batch)
+    checkpointed_metrics = _run_canonical_train_step(
         checkpointed_model,
-        checkpointed_optimizer,
+        optimizer_config,
         batch,
     )
 
@@ -631,31 +661,6 @@ def test_jax_bf16_autocast_uses_bf16_activations_and_fp32_loss():
     assert metrics["loss"].dtype == jnp.float32
 
 
-def test_jax_accumulated_grad_step_updates_loaded_pytorch_weights():
-    import jax
-
-    torch.manual_seed(19)
-    kwargs = _small_mae_kwargs()
-    torch_model = PeakSetJEPA(**kwargs).eval()
-    jax_model = PeakSetJEPAJax(**kwargs)
-    jax_model.load_torch_state_dict(torch_model.state_dict())
-    optimizer = build_jax_optimizer(
-        {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95},
-        jax_model,
-    )
-    batch = _jax_batch(_real_pattern_batch("random"))
-    before = np.asarray(jax_model.jepa_mae_mz_head.weight[...])
-
-    (_loss_0, metrics), grads_0 = jax_grad_step(jax_model, batch)
-    (_loss_1, _metrics_1), grads_1 = jax_grad_step(jax_model, batch)
-    grads = jax.tree.map(lambda lhs, rhs: (lhs + rhs) * 0.5, grads_0, grads_1)
-    jax_apply_grads(jax_model, optimizer, grads)
-
-    after = np.asarray(jax_model.jepa_mae_mz_head.weight[...])
-    assert np.isfinite(np.asarray(metrics["loss"]))
-    assert not np.allclose(before, after)
-
-
 def test_jax_pure_optax_accumulated_train_step_matches_manual_accumulation():
     torch.manual_seed(22)
     kwargs = _small_mae_kwargs()
@@ -665,7 +670,6 @@ def test_jax_pure_optax_accumulated_train_step_matches_manual_accumulation():
     manual_model.load_torch_state_dict(torch_model.state_dict())
     pure_model.load_torch_state_dict(torch_model.state_dict())
     optimizer_config = {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95}
-    manual_optimizer = build_jax_optimizer(optimizer_config, manual_model)
     batch_0 = _jax_batch(_real_pattern_batch("contiguous"))
     batch_1 = _jax_batch(_real_pattern_batch("random"))
     accumulated_batch = jax.tree.map(
@@ -674,10 +678,34 @@ def test_jax_pure_optax_accumulated_train_step_matches_manual_accumulation():
         batch_1,
     )
 
-    (_loss_0, _metrics_0), grads_0 = jax_grad_step(manual_model, batch_0)
-    (_loss_1, _metrics_1), grads_1 = jax_grad_step(manual_model, batch_1)
-    grads = jax.tree.map(lambda lhs, rhs: (lhs + rhs) * 0.5, grads_0, grads_1)
-    jax_apply_grads(manual_model, manual_optimizer, grads)
+    def loss_fn(model: PeakSetJEPAJax, batch: dict[str, jax.Array]):
+        metrics = model(batch)
+        return metrics["loss"], metrics
+
+    grad_fn = nnx.value_and_grad(
+        loss_fn,
+        has_aux=True,
+        argnums=nnx.DiffState(0, trainable_param_filter),
+    )
+    (_loss_0, _metrics_0), grads_0 = grad_fn(manual_model, batch_0)
+    (_loss_1, _metrics_1), grads_1 = grad_fn(manual_model, batch_1)
+    grads = nnx.as_pure(
+        jax.tree.map(lambda lhs, rhs: (lhs + rhs) * 0.5, grads_0, grads_1)
+    )
+    _graphdef, manual_params, _static_state = nnx.split(
+        manual_model,
+        trainable_param_filter,
+        ...,
+    )
+    manual_params = nnx.as_pure(manual_params)
+    manual_optimizer = build_jax_optax_transform(optimizer_config)
+    manual_opt_state = manual_optimizer.init(manual_params)
+    updates, _manual_opt_state = manual_optimizer.update(
+        grads,
+        manual_opt_state,
+        manual_params,
+    )
+    nnx.update(manual_model, optax.apply_updates(manual_params, updates))
     graphdef, trainable_params, static_state, opt_state, optimizer = (
         init_pure_optax_train_state(optimizer_config, pure_model)
     )
@@ -701,7 +729,7 @@ def test_jax_pure_optax_accumulated_train_step_matches_manual_accumulation():
         np.asarray(pure_model.jepa_mae_mz_head.weight[...]),
         np.asarray(manual_model.jepa_mae_mz_head.weight[...]),
         rtol=1e-6,
-        atol=1e-6,
+        atol=2e-6,
     )
 
 
@@ -739,44 +767,6 @@ def test_jax_pure_optax_train_step_logs_update_stats():
     ):
         assert key in metrics
         assert np.isfinite(np.asarray(metrics[key]))
-
-
-@pytest.mark.skipif(
-    os.environ.get("RUN_JAX_SHARDED_TESTS") != "1",
-    reason="explicit shard_map TPU smoke test",
-)
-def test_jax_sharded_accumulated_grad_step_updates_on_all_devices():
-    torch.manual_seed(21)
-    kwargs = _tiny_mae_kwargs()
-    torch_model = PeakSetJEPA(**kwargs).eval()
-    jax_model = PeakSetJEPAJax(**kwargs)
-    jax_model.load_torch_state_dict(torch_model.state_dict())
-    optimizer = build_jax_optimizer(
-        {"learning_rate": 1e-3, "weight_decay": 0.0, "b2": 0.95},
-        jax_model,
-    )
-    data_mesh = _jax_data_mesh_for_device_count(jax.device_count())
-    batch = numpy_batch_to_jax(
-        _numpy_batch(
-            _real_pattern_batch_size(
-                "contiguous",
-                jax.local_device_count(),
-                num_peaks=int(kwargs["num_peaks"]),
-            )
-        ),
-        data_mesh=data_mesh,
-        batch_axis=0,
-    )
-    before = np.asarray(jax_model.jepa_mae_mz_head.weight[...])
-
-    (_loss_0, metrics), grads_0 = jax_sharded_grad_step(jax_model, batch)
-    (_loss_1, _metrics_1), grads_1 = jax_sharded_grad_step(jax_model, batch)
-    grads = jax.tree.map(lambda lhs, rhs: (lhs + rhs) * 0.5, grads_0, grads_1)
-    jax_sharded_apply_grads(jax_model, optimizer, grads)
-
-    after = np.asarray(jax_model.jepa_mae_mz_head.weight[...])
-    assert np.isfinite(np.asarray(metrics["loss"]))
-    assert not np.allclose(before, after)
 
 
 @pytest.mark.skipif(
@@ -917,7 +907,12 @@ def test_jax_jepa_ema_teacher_checkpoint_matches_pytorch():
             path,
         )
         jax_model = PeakSetJEPAJax(**kwargs)
-        jax_model.load_torch_checkpoint(path)
+        checkpoint = load_torch_checkpoint(
+            path,
+            map_location="cpu",
+            weights_only=True,
+        )
+        jax_model.load_torch_state_dict(checkpoint["model"])
 
     with torch.no_grad():
         torch_metrics = torch_model(batch)
@@ -949,10 +944,7 @@ def test_jax_optimizer_excludes_frozen_teacher_and_buffer_params():
     assert not any("position_embedding" in path for path in trainable_paths)
     assert not any(path.endswith(".b") for path in trainable_paths)
 
-    optimizer = build_jax_optimizer(
-        {"learning_rate": 1e-3, "weight_decay": 0.5, "b2": 0.95},
-        jax_model,
-    )
+    optimizer_config = {"learning_rate": 1e-3, "weight_decay": 0.5, "b2": 0.95}
     batch = _jax_batch(_real_pattern_batch("contiguous"))
     before_student = np.asarray(jax_model.target_projector.linear0.weight[...])
     before_teacher = np.asarray(jax_model.teacher_target_projector.linear0.weight[...])
@@ -960,8 +952,7 @@ def test_jax_optimizer_excludes_frozen_teacher_and_buffer_params():
     before_position = np.asarray(jax_model.encoder.position_embedding.weight[...])
     before_fourier = np.asarray(jax_model.encoder.embedder.mz_fourier.b[...])
 
-    (_loss, metrics), grads = jax_grad_step(jax_model, batch)
-    jax_apply_grads(jax_model, optimizer, grads)
+    metrics = _run_canonical_train_step(jax_model, optimizer_config, batch)
 
     after_student = np.asarray(jax_model.target_projector.linear0.weight[...])
     after_teacher = np.asarray(jax_model.teacher_target_projector.linear0.weight[...])

@@ -33,13 +33,23 @@ If the MCEBIO artifact also lives somewhere else, set
 `cfg.mcebio_murcko_probe_repo_id`, `cfg.mcebio_murcko_probe_revision`, and
 `cfg.mcebio_murcko_probe_hf_subdir` explicitly.
 
+## Training Entry Points
+
+`train.py` is the only model-training dispatcher. It supports PyTorch or JAX
+pretraining, PyTorch contrastive training, and JAX AR training. Unsupported
+task/backend combinations fail before a trainer is imported.
+
+`train_sky.py` is an infrastructure launcher for JAX TPU jobs, not a second
+training implementation. It validates the same task/backend contract and the
+generated task delegates to `train.py`.
+
 ## SLURM Multi-Node Training
 
 Use one SLURM task per node, and let that task launch one `torchrun` worker per
 GPU on the node:
 
 ```bash
-export CONFIG=configs/100m_pairmixer_dense_adamw.py
+export CONFIG=configs/pretrain.py
 export WORKDIR=/path/to/experiments/run_name
 export GPUS_PER_NODE=8
 export PROJECT_DIR="${PROJECT_DIR:-${SLURM_SUBMIT_DIR}}"
@@ -317,18 +327,13 @@ Additional `test-tpu` debug notes from 2026-06-17:
   25k test, and 47,933 MCEBio splits, the default 100-epoch probe can still take
   hours even after JIT caching. Reducing probe epochs/samples or changing the
   probe variant is the safe near-term way to keep debug runs short.
-- An experimental `jax_msg_probe_shard_batches=True` path places probe batches
-  on the training data mesh, but it is off by default. A naive sharded run hit a
-  PairMixer sharding mismatch in feature concatenation between `P("data", ...)`
-  and replicated intermediates, so the default remains the known-good unsharded
-  probe batch placement.
 - MaxText's remat tuning guide orders policies by speed versus HBM: `minimal`
   is near the high-HBM/low-recompute end, while `full` is the aggressive
   low-HBM/high-recompute end. MaxText `minimal` is not equivalent to this
   repo's `selective`: MaxText uses a name-based
   `save_only_these_names(...)` policy over checkpoint-tagged projection and MLP
-  tensors, while this repo's `selective` maps to the generic JAX
-  `jax.checkpoint_policies.dots_saveable` policy.
+  tensors, while this repo's `selective` maps to JAX's
+  `jax.checkpoint_policies.dots_with_no_batch_dims_saveable` policy.
 - Matching xprof traces over five post-warmup batch-2048 steps confirmed the
   remat cost. `selective` measured 5354 samples/s and about 122 TFLOP/step in
   traced leaf ops; `full` measured 4998 samples/s and about 217 TFLOP/step.

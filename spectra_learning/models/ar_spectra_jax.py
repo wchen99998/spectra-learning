@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from functools import cache
 
 import jax
 import jax.numpy as jnp
@@ -37,7 +36,7 @@ class SpectraARTransformerJaxConfig:
     mlp_multiple: float = 4.0
     rope_base: float = 10_000.0
     attention_kernel: str = "xla"
-    splash_block_size: int = 128
+    attention_block_size: int = 128
     gelu_approximation: str = "exact"
     compute_dtype: object = jnp.bfloat16
 
@@ -47,6 +46,15 @@ class SpectraARTransformerJaxConfig:
         config: config_dict.ConfigDict,
         tokenizer: SpectraARTokenizer,
     ) -> "SpectraARTransformerJaxConfig":
+        if "ar_splash_block_size" in config:
+            raise ValueError(
+                "ar_splash_block_size has been removed; use ar_attention_block_size"
+            )
+        attention_kernel = str(config.get("ar_attention_kernel", "xla"))
+        if attention_kernel == "splash":
+            raise ValueError(
+                "ar_attention_kernel='splash' has been removed; use 'pallas' or 'xla'"
+            )
         return cls(
             vocab_size=tokenizer.vocab_size,
             num_token_kinds=tokenizer.num_token_kinds,
@@ -57,8 +65,8 @@ class SpectraARTransformerJaxConfig:
             num_heads=int(config.get("ar_num_heads", 8)),
             mlp_multiple=float(config.get("ar_mlp_multiple", 4.0)),
             rope_base=float(config.get("ar_rope_base", 10_000.0)),
-            attention_kernel=str(config.get("ar_attention_kernel", "xla")),
-            splash_block_size=int(config.get("ar_splash_block_size", 128)),
+            attention_kernel=attention_kernel,
+            attention_block_size=int(config.get("ar_attention_block_size", 128)),
             gelu_approximation=str(
                 config.get("ar_gelu_approximation", "exact")
             ),
@@ -124,7 +132,7 @@ class SpectraARCausalSelfAttentionJax(nnx.Module):
         self.head_dim = config.model_dim // config.num_heads
         assert self.head_dim % 2 == 0
         self.attention_kernel = config.attention_kernel
-        self.splash_block_size = config.splash_block_size
+        self.attention_block_size = config.attention_block_size
         self.qkv = Linear(
             config.model_dim,
             3 * config.model_dim,
@@ -180,20 +188,11 @@ class SpectraARCausalSelfAttentionJax(nnx.Module):
                     jnp.swapaxes(query, 1, 2),
                     jnp.swapaxes(key, 1, 2),
                     jnp.swapaxes(value, 1, 2),
-                    block_size=self.splash_block_size,
+                    block_size=self.attention_block_size,
                     query_is_scaled=True,
                 ),
                 1,
                 2,
-            )
-        elif self.attention_kernel == "splash":
-            query = self.rope(query)
-            key = self.rope(key)
-            attended = splash_causal_attention(
-                query,
-                key,
-                value,
-                block_size=self.splash_block_size,
             )
         else:
             query = self.rope(query)
@@ -398,66 +397,3 @@ def build_spectra_ar_model_jax_from_config(
         SpectraARTransformerJaxConfig.from_config(config, tokenizer),
         rngs=nnx.Rngs(seed),
     )
-
-
-def splash_causal_attention(
-    query: Array,
-    key: Array,
-    value: Array,
-    *,
-    block_size: int,
-) -> Array:
-    batch_size, seq_len, num_heads, _head_dim = query.shape
-    padded_seq_len = _ceil_multiple(seq_len, block_size)
-    query = _pad_sequence_axis(query, padded_seq_len)
-    key = _pad_sequence_axis(key, padded_seq_len)
-    value = _pad_sequence_axis(value, padded_seq_len)
-    query = (
-        query.astype(jnp.float32) * jnp.float32(1.0 / math.sqrt(query.shape[-1]))
-    ).astype(query.dtype)
-    kernel = _splash_causal_kernel(num_heads, padded_seq_len, block_size)
-
-    def apply_one(query_row: Array, key_row: Array, value_row: Array) -> Array:
-        out = kernel(
-            jnp.swapaxes(query_row, 0, 1),
-            jnp.swapaxes(key_row, 0, 1),
-            jnp.swapaxes(value_row, 0, 1),
-        )
-        return jnp.swapaxes(out, 0, 1)
-
-    out = jax.vmap(apply_one)(query, key, value)
-    return out[:, :seq_len, :, :]
-
-
-@cache
-def _splash_causal_kernel(num_heads: int, seq_len: int, block_size: int):
-    from jax.experimental.pallas.ops.tpu.splash_attention import (
-        splash_attention_kernel as splash,
-    )
-    from jax.experimental.pallas.ops.tpu.splash_attention import (
-        splash_attention_mask as mask_lib,
-    )
-
-    mask = mask_lib.MultiHeadMask(
-        tuple(mask_lib.CausalMask((seq_len, seq_len)) for _ in range(num_heads))
-    )
-    block_sizes = splash.BlockSizes(
-        block_q=block_size,
-        block_kv=block_size,
-        block_kv_compute=block_size,
-        block_q_dkv=block_size,
-        block_kv_dkv=block_size,
-        block_kv_dkv_compute=block_size,
-        block_q_dq=block_size,
-        block_kv_dq=block_size,
-    )
-    return splash.make_splash_mha_single_device(mask, block_sizes=block_sizes)
-
-
-def _ceil_multiple(value: int, multiple: int) -> int:
-    return multiple * int(math.ceil(value / multiple))
-
-
-def _pad_sequence_axis(value: Array, padded_seq_len: int) -> Array:
-    pad_len = padded_seq_len - value.shape[1]
-    return jnp.pad(value, ((0, 0), (0, pad_len), (0, 0), (0, 0)))

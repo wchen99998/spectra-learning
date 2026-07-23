@@ -93,34 +93,6 @@ def pairmixer_fast_stage_capacities(
     return pairmixer_fast_mae_stage_visible_tokens(config)
 
 
-def pairmixer_stage_projection_kernels(
-    config: Any,
-) -> tuple[tuple[str, str], ...]:
-    stage_count = len(jepa_mask_stages(config))
-    encoder_kernel = str(
-        config.get("pairmixer_encoder_projection_kernel", "xla")
-    )
-    predictor_kernel = str(
-        config.get("pairmixer_predictor_projection_kernel", "xla")
-    )
-    encoder_kernels = config.get(
-        "pairmixer_encoder_projection_kernel_schedule",
-        (encoder_kernel,) * stage_count,
-    )
-    predictor_kernels = config.get(
-        "pairmixer_predictor_projection_kernel_schedule",
-        (predictor_kernel,) * stage_count,
-    )
-    return tuple(
-        (str(encoder), str(predictor))
-        for encoder, predictor in zip(
-            encoder_kernels,
-            predictor_kernels,
-            strict=True,
-        )
-    )
-
-
 def pairmixer_fast_mae_encoder_visible_tokens(config: Any) -> int:
     encoder_visible, _ = _mae_encoder_predictor_visible_tokens(config)
     return encoder_visible

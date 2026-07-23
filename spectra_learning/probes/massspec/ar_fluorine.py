@@ -22,6 +22,7 @@ from spectra_learning.models.lora import (
     load_lora_state_dict,
     lora_parameters,
     lora_state_dict,
+    module_state_to_cpu,
 )
 from spectra_learning.probes.massspec.fluorine import (
     _autocast_dtype_name,
@@ -47,13 +48,6 @@ AR_LORA_TARGET_SUFFIXES = (
     "ffn.0",
     "ffn.3",
 )
-
-
-def _module_state_to_cpu(module: torch.nn.Module) -> dict[str, torch.Tensor]:
-    return {
-        key: value.detach().cpu().clone()
-        for key, value in module.state_dict().items()
-    }
 
 
 def _move_tokenized_to_device(
@@ -571,9 +565,9 @@ def _record_ar_fluorine_epoch(
         if inputs.mode == "lora":
             training.best_lora_state = lora_state_dict(inputs.model)
         else:
-            training.best_model_state = _module_state_to_cpu(inputs.model)
+            training.best_model_state = module_state_to_cpu(inputs.model)
         training.best_classifier_state = copy.deepcopy(
-            _module_state_to_cpu(runtime.classifier)
+            module_state_to_cpu(runtime.classifier)
         )
         training.epochs_without_improvement = 0
         inputs.state_path.parent.mkdir(parents=True, exist_ok=True)

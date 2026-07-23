@@ -19,7 +19,6 @@ from spectra_learning.models.ar_spectra import (
     SpectraARTransformer,
     SpectraARTransformerConfig,
 )
-from spectra_learning.training.ar_spectra import evaluate_ar_spectra
 
 
 def _batch() -> dict[str, torch.Tensor]:
@@ -274,37 +273,6 @@ def test_causal_attention_does_not_read_future_tokens() -> None:
     changed_logits = model(changed)["logits"]
 
     assert torch.allclose(logits[:, :-1], changed_logits[:, :-1], atol=1e-6)
-
-
-def test_validation_reports_per_kind_loss_and_accuracy() -> None:
-    tokenizer = SpectraARTokenizer(SpectraARTokenizerConfig(max_num_peaks=4))
-    tokenized = tokenizer.tokenize_batch(_batch())
-    model = SpectraARTransformer(
-        SpectraARTransformerConfig(
-            vocab_size=tokenizer.vocab_size,
-            num_token_kinds=tokenizer.num_token_kinds,
-            max_sequence_length=tokenizer.sequence_length - 1,
-            pad_token_id=tokenizer.pad_token_id,
-            model_dim=32,
-            num_layers=1,
-            num_heads=4,
-            mlp_multiple=2.0,
-            dropout=0.0,
-        )
-    )
-
-    metrics = evaluate_ar_spectra(
-        model,
-        [tokenized],
-        torch.device("cpu"),
-        max_steps=1,
-        autocast_dtype="fp32",
-    )
-
-    assert "val/loss/fragment_mz_level_0" in metrics
-    assert "val/token_accuracy/fragment_mz_level_0" in metrics
-    assert "val/target_tokens/fragment_mz_level_0" in metrics
-    assert metrics["val/target_tokens/fragment_mz_level_0"] == 3
 
 
 def test_ar_gems_collator_tokenizes_raw_spectra_samples() -> None:

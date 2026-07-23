@@ -23,7 +23,7 @@ class DistributedContext:
         return self.rank == 0
 
 
-def init_distributed_from_env(device_backend: object = "auto") -> DistributedContext:
+def init_distributed_from_env() -> DistributedContext:
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("RANK", "0"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))

@@ -59,7 +59,6 @@ from spectra_learning.training.logging import (
     build_logger,
     log_msg_probe_metrics,
 )
-from spectra_learning.training.jax_runtime_flags import configure_jax_tpu_xla_flags
 from spectra_learning.training.optimization import build_optimizers
 from spectra_learning.training.performance import (
     compile_forward as compile_training_forward,
@@ -90,10 +89,6 @@ inductor_config.epilogue_fusion = True
 inductor_config.shape_padding = True
 
 _STOP_REQUESTED = False
-
-
-def _use_jax_backend(config: config_dict.ConfigDict) -> bool:
-    return str(config.get("device_backend", "auto")).lower() == "jax"
 
 
 def gradient_accumulation_steps(config: config_dict.ConfigDict) -> int:
@@ -136,13 +131,8 @@ def train_and_evaluate(
     config: config_dict.ConfigDict,
     workdir: str | Path,
 ) -> dict[str, object]:
-    if _use_jax_backend(config):
-        configure_jax_tpu_xla_flags()
-        from spectra_learning.training.pretrain_jax import train_and_evaluate_jax
-
-        return train_and_evaluate_jax(config, workdir)
     install_stop_signal_handlers()
-    distributed = init_distributed_from_env(config.get("device_backend", "auto"))
+    distributed = init_distributed_from_env()
     workdir = normalize_storage_path(workdir)
     local_workdir = local_scratch_dir(workdir)
     if distributed.is_main:

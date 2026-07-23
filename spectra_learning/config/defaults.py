@@ -16,7 +16,6 @@ def runtime_config() -> config_dict.ConfigDict:
             "jax_log_compiles": False,
             "jax_log_update_stats": False,
             "jax_mesh_devices": "all",
-            "jax_msg_probe_shard_batches": False,
             "jax_persistent_cache_min_compile_time_secs": None,
             "jax_persistent_cache_min_entry_size_bytes": None,
             "jax_profile_dir": "",

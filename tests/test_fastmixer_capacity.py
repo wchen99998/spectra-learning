@@ -1,3 +1,6 @@
+import importlib.util
+import inspect
+
 import numpy as np
 import pytest
 import jax.numpy as jnp
@@ -5,16 +8,16 @@ from flax import nnx
 from ml_collections import config_dict
 
 from spectra_learning.config import load_config
+from spectra_learning.models import fastmixer_capacity
 from spectra_learning.models.fastmixer_capacity import (
     pairmixer_fast_mae_encoder_visible_tokens,
     pairmixer_fast_full_visible_tokens,
     pairmixer_fast_mae_stage_visible_tokens,
     pairmixer_fast_mae_visible_tokens,
     pairmixer_fast_stage_capacities,
-    pairmixer_stage_projection_kernels,
 )
 from spectra_learning.models.model_jax import PeakSetJEPAJax
-from spectra_learning.models.pairmixer_jax import _active_indices
+from spectra_learning.models.pairmixer_jax import PairMixerBlock, _active_indices
 from spectra_learning.models.settings import PeakSetJEPASettings
 from spectra_learning.probes.massspec.msg_probe_jax import (
     _full_visible_fastmixer_probe_model,
@@ -44,7 +47,7 @@ def test_fastmixer_dense_auto_capacity_matches_fastmixer():
     assert PeakSetJEPASettings.from_config(cfg).pairmixer_fast_max_visible_tokens == 41
 
 
-def test_1b_pallas_schedule_uses_three_encoder_shapes_and_one_predictor_shape():
+def test_1b_mae_schedule_uses_three_compact_shapes():
     cfg = load_config("configs/1b_pairmixer_dense_adamw.py")
 
     assert cfg.optimizer_state_dtype == "bf16"
@@ -58,30 +61,15 @@ def test_1b_pallas_schedule_uses_three_encoder_shapes_and_one_predictor_shape():
         (27, 41),
         (36, 41),
     )
-    assert tuple(cfg.gradient_accumulation_steps_schedule) == (4, 8, 8)
-    assert tuple(cfg.pairmixer_encoder_projection_kernel_schedule) == (
-        "xla",
-        "xla",
-        "pallas",
-    )
-    assert tuple(cfg.pairmixer_predictor_projection_kernel_schedule) == (
-        "pallas",
-        "xla",
-        "xla",
-    )
-    assert pairmixer_stage_projection_kernels(cfg) == (
-        ("xla", "pallas"),
-        ("xla", "xla"),
-        ("pallas", "xla"),
-    )
+    assert cfg.gradient_accumulation_steps == 8
+    assert tuple(cfg.gradient_accumulation_steps_schedule) == (8, 16, 16)
+    assert cfg.activation_checkpoint_mode == "none"
     settings = PeakSetJEPASettings.from_config(cfg)
     assert settings.pairmixer_fast_encoder_max_visible_tokens == 17
     assert settings.pairmixer_fast_max_visible_tokens == 41
-    assert settings.pairmixer_encoder_projection_kernel == "xla"
-    assert settings.pairmixer_predictor_projection_kernel == "pallas"
 
 
-def test_encoder_and_predictor_blocks_keep_separate_kernel_capacities():
+def test_encoder_and_predictor_blocks_keep_separate_fastmixer_capacities():
     model = PeakSetJEPAJax(
         training_mode="mae",
         model_dim=8,
@@ -93,8 +81,6 @@ def test_encoder_and_predictor_blocks_keep_separate_kernel_capacities():
         pairmixer_pair_feature_hidden_dim=8,
         pairmixer_use_fourier_features=False,
         pairmixer_block_type="fastmixer-dense",
-        pairmixer_encoder_projection_kernel="pallas",
-        pairmixer_predictor_projection_kernel="pallas",
         pairmixer_fast_encoder_max_visible_tokens=17,
         pairmixer_fast_max_visible_tokens=41,
         masked_latent_predictor_num_layers=1,
@@ -107,10 +93,6 @@ def test_encoder_and_predictor_blocks_keep_separate_kernel_capacities():
 
     encoder_block = model.encoder.blocks[0]
     predictor_block = model.masked_latent_predictor[0]
-    assert encoder_block.kernel_role == "encoder"
-    assert predictor_block.kernel_role == "predictor"
-    assert encoder_block.projection_kernel == "pallas"
-    assert predictor_block.projection_kernel == "pallas"
     assert encoder_block.fastmixer_max_visible_tokens == 17
     assert predictor_block.fastmixer_max_visible_tokens == 41
 
@@ -119,10 +101,38 @@ def test_encoder_and_predictor_blocks_keep_separate_kernel_capacities():
     assert encoder_block.fastmixer_max_visible_tokens == 27
     assert predictor_block.fastmixer_max_visible_tokens == 41
 
-    model.set_pairmixer_projection_kernels("pallas", "xla")
 
-    assert encoder_block.projection_kernel == "pallas"
-    assert predictor_block.projection_kernel == "xla"
+def test_pairmixer_has_one_projection_path():
+    cfg = load_config("configs/1b_pairmixer_dense_adamw.py")
+
+    assert importlib.util.find_spec("spectra_learning.models.pairmixer_pallas") is None
+    assert "projection_kernel" not in inspect.signature(PairMixerBlock).parameters
+    assert not any(
+        "projection_kernel" in name
+        for name in PeakSetJEPASettings.__dataclass_fields__
+    )
+    assert not hasattr(
+        fastmixer_capacity,
+        "pairmixer_stage_projection_kernels",
+    )
+    assert not hasattr(PeakSetJEPAJax, "set_pairmixer_projection_kernels")
+    assert not any("projection_kernel" in key for key in cfg)
+
+
+@pytest.mark.parametrize(
+    "removed_key",
+    (
+        "pairmixer_encoder_projection_kernel",
+        "pairmixer_predictor_projection_kernel",
+        "pairmixer_encoder_projection_kernel_schedule",
+        "pairmixer_predictor_projection_kernel_schedule",
+    ),
+)
+def test_pairmixer_rejects_removed_projection_settings(removed_key):
+    cfg = config_dict.ConfigDict({removed_key: "pallas"})
+
+    with pytest.raises(ValueError, match=f"{removed_key} has been removed"):
+        PeakSetJEPASettings.from_config(cfg)
 
 
 def test_fastmixer_capacity_rejects_explicit_config_cap():

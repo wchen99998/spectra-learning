@@ -24,7 +24,6 @@ from spectra_learning.training.checkpointing import (
     load_grad_scaler_state,
     load_resume_covariance_pooler_state,
     load_resume_model_state,
-    save_checkpoint,
 )
 from spectra_learning.training import pretrain
 from spectra_learning.training import checkpointing as checkpointing_module
@@ -230,14 +229,11 @@ def test_compile_forward_enables_shape_padding_for_reduce_overhead():
         pretrain.inductor_config.shape_padding = original
 
 
-def test_jax_device_backend_uses_native_jax():
-    assert pretrain._use_jax_backend({"device_backend": "jax"})
-    assert not pretrain._use_jax_backend({"device_backend": "auto"})
-    assert not pretrain._use_jax_backend({"device_backend": "torch"})
-
-
 def test_jax_backend_applies_tpu_flags_before_dispatch(monkeypatch, tmp_path):
+    import train as train_script
+
     cfg = config_dict.ConfigDict()
+    cfg.training_task = "pretrain"
     cfg.device_backend = "jax"
     calls = []
 
@@ -253,7 +249,7 @@ def test_jax_backend_applies_tpu_flags_before_dispatch(monkeypatch, tmp_path):
     fake_pretrain_jax = ModuleType("spectra_learning.training.pretrain_jax")
     fake_pretrain_jax.train_and_evaluate_jax = fake_train_and_evaluate_jax
     monkeypatch.setattr(
-        pretrain,
+        train_script,
         "configure_jax_tpu_xla_flags",
         fake_configure_jax_tpu_xla_flags,
     )
@@ -263,8 +259,43 @@ def test_jax_backend_applies_tpu_flags_before_dispatch(monkeypatch, tmp_path):
         fake_pretrain_jax,
     )
 
-    assert pretrain.train_and_evaluate(cfg, tmp_path) == {"run/device_backend": "jax"}
+    assert train_script._train(cfg, tmp_path) == {"run/device_backend": "jax"}
     assert calls == ["flags", "train"]
+
+
+def test_train_routes_torch_pretraining(monkeypatch, tmp_path):
+    import train as train_script
+
+    cfg = config_dict.ConfigDict(
+        {
+            "training_task": "pretrain",
+            "device_backend": "torch",
+        }
+    )
+    calls = []
+
+    def fake_train(config, workdir):
+        calls.append((config, workdir))
+        return {"run/device_backend": "torch"}
+
+    monkeypatch.setattr(pretrain, "train_and_evaluate", fake_train)
+
+    assert train_script._train(cfg, tmp_path) == {"run/device_backend": "torch"}
+    assert calls == [(cfg, tmp_path)]
+
+
+def test_train_rejects_unknown_training_task(tmp_path):
+    import train as train_script
+
+    with pytest.raises(ValueError, match="Unknown training_task: mystery"):
+        train_script._train({"training_task": "mystery"}, tmp_path)
+
+
+def test_train_rejects_unknown_device_backend(tmp_path):
+    import train as train_script
+
+    with pytest.raises(ValueError, match="Unknown device_backend: jxa"):
+        train_script._train({"device_backend": "jxa"}, tmp_path)
 
 
 def test_jax_train_metrics_logging_materializes_non_main_without_logging(monkeypatch):
@@ -903,6 +934,7 @@ def test_train_and_evaluate_jax_logs_final_metrics_on_main_process(
         train_steps = 3
         global_batch_size = 32
         batch_size = 16
+        gradient_accumulation_steps = 1
 
         def __init__(self, config, **kwargs) -> None:
             del config
@@ -1017,6 +1049,7 @@ def test_train_and_evaluate_jax_skips_logger_on_worker_process(
         train_steps = 3
         global_batch_size = 32
         batch_size = 16
+        gradient_accumulation_steps = 1
 
         def __init__(self, config, **kwargs) -> None:
             del config, kwargs
@@ -1082,7 +1115,7 @@ def test_train_and_evaluate_jax_skips_logger_on_worker_process(
     assert results["run/jax_process_count"] == 2.0
 
 
-def test_save_checkpoint_persists_optimizer_state():
+def test_checkpoint_writer_persists_optimizer_state():
     model = _small_model()
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
 
@@ -1093,7 +1126,8 @@ def test_save_checkpoint_persists_optimizer_state():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         path = f"{tmpdir}/resume.pt"
-        save_checkpoint(
+        writer = AsyncCheckpointWriter()
+        writer.save_checkpoint(
             path=path,
             model=model,
             optimizers=[optimizer],
@@ -1103,6 +1137,7 @@ def test_save_checkpoint_persists_optimizer_state():
             loss=float(loss.detach()),
             wandb_run_id="wandb-run-123",
         )
+        writer.close()
         ckpt = torch.load(path, map_location="cpu", weights_only=True)
 
     saved_optimizer = ckpt["optimizers"][0]
@@ -1116,7 +1151,7 @@ def test_fp16_autocast_parses_with_cpu_scaler_disabled():
     assert not build_grad_scaler(torch.float16, torch.device("cpu")).is_enabled()
 
 
-def test_save_checkpoint_persists_grad_scaler_state():
+def test_checkpoint_writer_persists_grad_scaler_state():
     model = _small_model()
     grad_scaler = torch.amp.GradScaler(
         device="cpu",
@@ -1126,7 +1161,8 @@ def test_save_checkpoint_persists_grad_scaler_state():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         path = f"{tmpdir}/resume.pt"
-        save_checkpoint(
+        writer = AsyncCheckpointWriter()
+        writer.save_checkpoint(
             path=path,
             model=model,
             optimizers=[],
@@ -1136,6 +1172,7 @@ def test_save_checkpoint_persists_grad_scaler_state():
             loss=0.5,
             grad_scaler=grad_scaler,
         )
+        writer.close()
         ckpt = torch.load(path, map_location="cpu", weights_only=True)
         restored = torch.amp.GradScaler(device="cpu", enabled=True)
         load_grad_scaler_state(restored, ckpt["grad_scaler"])
@@ -1144,7 +1181,7 @@ def test_save_checkpoint_persists_grad_scaler_state():
     assert restored.state_dict()["scale"] == 16.0
 
 
-def test_save_checkpoint_writes_covariance_pooler_sibling_pt():
+def test_checkpoint_writer_writes_covariance_pooler_sibling_pt():
     model = _small_model()
     pooler = CovariancePool(input_dim=model.model_dim, compressed_dim=4)
     optimizer = torch.optim.AdamW(
@@ -1154,7 +1191,8 @@ def test_save_checkpoint_writes_covariance_pooler_sibling_pt():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "step-00000012.pt"
-        save_checkpoint(
+        writer = AsyncCheckpointWriter()
+        writer.save_checkpoint(
             path=path,
             model=model,
             covariance_pooler=pooler,
@@ -1164,6 +1202,7 @@ def test_save_checkpoint_writes_covariance_pooler_sibling_pt():
             epoch=1,
             loss=0.5,
         )
+        writer.close()
         ckpt = torch.load(path, map_location="cpu", weights_only=True)
         pooler_path = covariance_pooler_checkpoint_path(path)
         pooler_ckpt = torch.load(pooler_path, map_location="cpu", weights_only=True)
@@ -1175,12 +1214,13 @@ def test_save_checkpoint_writes_covariance_pooler_sibling_pt():
     assert pooler_ckpt["global_step"] == 12
 
 
-def test_save_checkpoint_writes_fsspec_uri_checkpoint():
+def test_checkpoint_writer_writes_fsspec_uri_checkpoint():
     _clear_memory_fs("/spectra-remote-save")
     model = _small_model()
     path = "memory://spectra-remote-save/run/checkpoints/step-00000012.pt"
 
-    save_checkpoint(
+    writer = AsyncCheckpointWriter()
+    writer.save_checkpoint(
         path=path,
         model=model,
         optimizers=[],
@@ -1190,6 +1230,7 @@ def test_save_checkpoint_writes_fsspec_uri_checkpoint():
         loss=0.5,
         wandb_run_id="wandb-run-123",
     )
+    writer.close()
     ckpt = load_torch_checkpoint(path, map_location="cpu", weights_only=True)
 
     assert ckpt["global_step"] == 12
@@ -1202,7 +1243,8 @@ def test_remote_covariance_pooler_checkpoint_uses_sibling_uri():
     pooler = CovariancePool(input_dim=model.model_dim, compressed_dim=4)
     path = "memory://spectra-remote-pooler/run/checkpoints/step-00000012.pt"
 
-    save_checkpoint(
+    writer = AsyncCheckpointWriter()
+    writer.save_checkpoint(
         path=path,
         model=model,
         covariance_pooler=pooler,
@@ -1212,6 +1254,7 @@ def test_remote_covariance_pooler_checkpoint_uses_sibling_uri():
         epoch=1,
         loss=0.5,
     )
+    writer.close()
     ckpt = load_torch_checkpoint(path, map_location="cpu", weights_only=True)
     pooler_path = covariance_pooler_checkpoint_path(path)
     pooler_ckpt = load_torch_checkpoint(
@@ -1334,7 +1377,8 @@ def test_load_resume_covariance_pooler_state_reads_sibling_pt():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "step-00000012.pt"
-        save_checkpoint(
+        writer = AsyncCheckpointWriter()
+        writer.save_checkpoint(
             path=path,
             model=model,
             covariance_pooler=pooler,
@@ -1344,6 +1388,7 @@ def test_load_resume_covariance_pooler_state_reads_sibling_pt():
             epoch=1,
             loss=0.5,
         )
+        writer.close()
         ckpt = torch.load(path, map_location="cpu", weights_only=True)
         restored = CovariancePool(input_dim=model.model_dim, compressed_dim=4)
         load_resume_covariance_pooler_state(restored, path, ckpt)
@@ -2177,7 +2222,8 @@ def test_run_checkpoint_msg_probe_loads_checkpoint_and_logs_metrics(monkeypatch,
     cfg.seed = 3
     model = build_model_from_config(cfg)
     checkpoint_path = tmp_path / "checkpoint.pt"
-    save_checkpoint(
+    writer = AsyncCheckpointWriter()
+    writer.save_checkpoint(
         checkpoint_path,
         model,
         optimizers=[],
@@ -2187,6 +2233,7 @@ def test_run_checkpoint_msg_probe_loads_checkpoint_and_logs_metrics(monkeypatch,
         loss=0.1,
         wandb_run_id="wandb-run-1",
     )
+    writer.close()
     calls = []
     logger_configs = []
     logger_logs = []
@@ -2698,7 +2745,7 @@ def test_train_main_writes_json_safe_probe_metrics(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(train_script, "load_config", lambda path, overrides: cfg)
     monkeypatch.setattr(
         train_script,
-        "train_and_evaluate",
+        "_train",
         lambda config, workdir: {
             "run/jax_process_index": 0.0,
             "metric": np.float32(1.25),

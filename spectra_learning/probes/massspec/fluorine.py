@@ -43,6 +43,7 @@ from spectra_learning.models.lora import (
     load_lora_state_dict,
     lora_parameters,
     lora_state_dict,
+    module_state_to_cpu,
 )
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pooling import CovariancePool, SinglePairCovariancePool
@@ -790,13 +791,6 @@ def build_fluorine_data(
     )
 
 
-def _module_state_to_cpu(module: torch.nn.Module) -> dict[str, torch.Tensor]:
-    return {
-        key: value.detach().cpu().clone()
-        for key, value in module.state_dict().items()
-    }
-
-
 def _lora_config(
     *,
     rank: int,
@@ -1424,9 +1418,9 @@ def train_or_load_finetuned(
 
     def capture_best_state() -> dict[str, dict[str, torch.Tensor]]:
         return {
-            "model_state": _module_state_to_cpu(model),
-            "pooler_state": _module_state_to_cpu(pooler),
-            "classifier_state": _module_state_to_cpu(classifier),
+            "model_state": module_state_to_cpu(model),
+            "pooler_state": module_state_to_cpu(pooler),
+            "classifier_state": module_state_to_cpu(classifier),
         }
 
     result = _run_adaptation_epochs(
@@ -1612,8 +1606,8 @@ def train_or_load_lora(
     def capture_best_state() -> dict[str, dict[str, torch.Tensor]]:
         return {
             "lora_state": lora_state_dict(model.encoder),
-            "pooler_state": _module_state_to_cpu(pooler),
-            "classifier_state": _module_state_to_cpu(classifier),
+            "pooler_state": module_state_to_cpu(pooler),
+            "classifier_state": module_state_to_cpu(classifier),
         }
 
     result = _run_adaptation_epochs(

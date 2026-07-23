@@ -101,7 +101,7 @@ def _ar_jax_checkpoint_contract(
             "mlp_multiple": float(config.ar_mlp_multiple),
             "rope_base": float(config.ar_rope_base),
             "attention_kernel": str(config.ar_attention_kernel),
-            "splash_block_size": int(config.ar_splash_block_size),
+            "attention_block_size": int(config.ar_attention_block_size),
             "gelu_approximation": str(config.ar_gelu_approximation),
             "compute_dtype": str(config.autocast_dtype),
         },

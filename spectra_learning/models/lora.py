@@ -70,10 +70,17 @@ def lora_parameters(module: nn.Module) -> Iterator[nn.Parameter]:
             yield from child.adapter_parameters()
 
 
-def lora_state_dict(module: nn.Module) -> dict[str, torch.Tensor]:
+def module_state_to_cpu(module: nn.Module) -> dict[str, torch.Tensor]:
     return {
         key: value.detach().cpu().clone()
         for key, value in module.state_dict().items()
+    }
+
+
+def lora_state_dict(module: nn.Module) -> dict[str, torch.Tensor]:
+    return {
+        key: value
+        for key, value in module_state_to_cpu(module).items()
         if ".lora_a." in key
         or ".lora_b." in key
         or key.startswith("lora_a.")

@@ -20,18 +20,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--artifact-dir", type=Path, required=True)
     parser.add_argument("--stage", type=int, choices=(1, 2, 3), default=1)
     parser.add_argument(
-        "--projection-kernel",
-        choices=("xla", "pallas"),
-        default=None,
-    )
-    parser.add_argument(
-        "--encoder-projection-kernel",
-        choices=("xla", "pallas"),
-        default=None,
-    )
-    parser.add_argument(
-        "--predictor-projection-kernel",
-        choices=("xla", "pallas"),
+        "--activation-checkpoint-mode",
+        choices=("none", "full", "selective"),
         default=None,
     )
     parser.add_argument("--global-batch-size", type=int, default=64)
@@ -55,12 +45,12 @@ def main() -> None:
     from spectra_learning.data.gems.datamodule import GemsDataModule
     from spectra_learning.data.gems.mask_schedule import jepa_mask_stages
     from spectra_learning.models.factory_jax import build_model_from_config
-    from spectra_learning.models.fastmixer_capacity import (
-        pairmixer_stage_projection_kernels,
-    )
     from spectra_learning.models.settings import PeakSetJEPASettings
     from spectra_learning.training.pretrain_jax import (
+        _jax_data_mesh,
+        _replicate_tree_on_data_mesh,
         _stack_micro_batches,
+        configure_jax_runtime,
         init_pure_optax_train_state,
         make_pure_accumulated_train_step,
         numpy_batch_to_jax,
@@ -70,7 +60,7 @@ def main() -> None:
     overrides = {
         "artifact_dir": str(args.artifact_dir),
         "batch_size": args.global_batch_size,
-        "jax_mesh_devices": "1",
+        "jax_mesh_devices": "all",
         "dataloader_num_workers": args.workers,
         "dataloader_persistent_workers": False,
         "dataloader_pin_memory": False,
@@ -92,25 +82,16 @@ def main() -> None:
         overrides["gradient_accumulation_steps"] = (
             args.gradient_accumulation_steps
         )
+    if args.activation_checkpoint_mode is not None:
+        overrides["activation_checkpoint_mode"] = args.activation_checkpoint_mode
     config = load_config(args.config, overrides)
     stage = jepa_mask_stages(config)[args.stage - 1]
     config.jepa_context_fraction = stage.context_fraction
     config.jepa_target_fraction = stage.target_fraction
     if args.gradient_accumulation_steps is None:
         config.gradient_accumulation_steps = stage.gradient_accumulation_steps
-    encoder_kernel, predictor_kernel = pairmixer_stage_projection_kernels(config)[
-        args.stage - 1
-    ]
-    if args.projection_kernel is not None:
-        encoder_kernel = args.projection_kernel
-        predictor_kernel = args.projection_kernel
-    if args.encoder_projection_kernel is not None:
-        encoder_kernel = args.encoder_projection_kernel
-    if args.predictor_projection_kernel is not None:
-        predictor_kernel = args.predictor_projection_kernel
-    config.pairmixer_encoder_projection_kernel = encoder_kernel
-    config.pairmixer_predictor_projection_kernel = predictor_kernel
     prepare_jax_training_config(config)
+    configure_jax_runtime(config)
 
     torch.manual_seed(args.mask_seed)
     datamodule = GemsDataModule(config, seed=int(config.seed))
@@ -129,10 +110,15 @@ def main() -> None:
             total_steps=args.warmup_steps + args.timed_steps,
         )
     )
+    data_mesh = _jax_data_mesh(config)
+    trainable_params = _replicate_tree_on_data_mesh(trainable_params, data_mesh)
+    static_state = _replicate_tree_on_data_mesh(static_state, data_mesh)
+    opt_state = _replicate_tree_on_data_mesh(opt_state, data_mesh)
     train_step = make_pure_accumulated_train_step(
         graphdef,
         optimizer,
-        sharded=False,
+        sharded=True,
+        data_mesh=data_mesh,
         metric_reduction="mean",
     )
 
@@ -147,6 +133,7 @@ def main() -> None:
         return (
             numpy_batch_to_jax(
                 _stack_micro_batches(micro_batches),
+                data_mesh=data_mesh,
                 batch_axis=1,
             ),
             micro_batches,
@@ -157,6 +144,9 @@ def main() -> None:
     valid_counts = []
     context_counts = []
     target_counts = []
+    compiled_train_step = None
+    compile_seconds = 0.0
+    compiled_memory = {}
     compile_and_first_step_seconds = 0.0
     total_benchmark_steps = args.warmup_steps + args.timed_steps
     for step_index in range(total_benchmark_steps):
@@ -167,8 +157,36 @@ def main() -> None:
             target_counts.extend(
                 micro_batch["target_masks"].sum(axis=(1, 2)).tolist()
             )
+        if compiled_train_step is None:
+            compile_start = time.perf_counter()
+            compiled_train_step = train_step.lower(
+                trainable_params,
+                static_state,
+                opt_state,
+                batch,
+            ).compile()
+            compile_seconds = time.perf_counter() - compile_start
+            memory = compiled_train_step.memory_analysis()
+            if memory is not None:
+                compiled_memory = {
+                    "temp_size_in_bytes": memory.temp_size_in_bytes,
+                    "argument_size_in_bytes": memory.argument_size_in_bytes,
+                    "output_size_in_bytes": memory.output_size_in_bytes,
+                    "alias_size_in_bytes": memory.alias_size_in_bytes,
+                }
+                compiled_memory["total_size_in_bytes"] = (
+                    memory.temp_size_in_bytes
+                    + memory.argument_size_in_bytes
+                    + memory.output_size_in_bytes
+                    - memory.alias_size_in_bytes
+                )
+            print(
+                "COMPILED_MEMORY "
+                + json.dumps(compiled_memory, sort_keys=True),
+                flush=True,
+            )
         step_start = time.perf_counter()
-        trainable_params, opt_state, metrics = train_step(
+        trainable_params, opt_state, metrics = compiled_train_step(
             trainable_params,
             static_state,
             opt_state,
@@ -177,7 +195,7 @@ def main() -> None:
         jax.block_until_ready((trainable_params, opt_state, metrics))
         step_seconds = time.perf_counter() - step_start
         if step_index == 0:
-            compile_and_first_step_seconds = step_seconds
+            compile_and_first_step_seconds = compile_seconds + step_seconds
         if step_index >= args.warmup_steps:
             elapsed.append(step_seconds)
             losses.append(float(metrics["loss"]))
@@ -192,27 +210,26 @@ def main() -> None:
     result = {
         "config": str(args.config),
         "artifact_dir": str(args.artifact_dir),
-        "device": str(jax.devices()[0]),
+        "devices": [str(device) for device in jax.devices()],
+        "mesh_devices": data_mesh.size,
         "jax_version": jax.__version__,
         "stage": args.stage,
         "context_fraction": stage.context_fraction,
         "target_fraction": stage.target_fraction,
-        "encoder_projection_kernel": (
-            settings.pairmixer_encoder_projection_kernel
-        ),
-        "predictor_projection_kernel": (
-            settings.pairmixer_predictor_projection_kernel
-        ),
         "encoder_tokens": settings.pairmixer_fast_encoder_max_visible_tokens,
         "predictor_tokens": settings.pairmixer_fast_max_visible_tokens,
         "parameter_count": parameter_count,
         "global_batch_size": datamodule.global_batch_size,
         "microbatch_size": datamodule.batch_size,
         "gradient_accumulation_steps": int(config.gradient_accumulation_steps),
+        "activation_checkpoint_mode": config.activation_checkpoint_mode,
         "warmup_steps": args.warmup_steps,
         "timed_steps": args.timed_steps,
         "samples": samples,
         "build_seconds": build_seconds,
+        "compile_seconds": compile_seconds,
+        "compiled_memory": compiled_memory,
+        "first_step_seconds": compile_and_first_step_seconds - compile_seconds,
         "compile_and_first_step_seconds": compile_and_first_step_seconds,
         "total_seconds": sum(elapsed),
         "mean_step_seconds": statistics.mean(elapsed),

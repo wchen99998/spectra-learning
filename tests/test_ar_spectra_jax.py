@@ -251,42 +251,6 @@ def test_pallas_causal_attention_forward_and_backward_match_xla(
         )
 
 
-def test_jax_ar_splash_attention_flattens_sequence_before_heads(monkeypatch) -> None:
-    def fake_splash_attention(query, key, value, *, block_size):
-        del key, value, block_size
-        return query
-
-    monkeypatch.setattr(
-        ar_spectra_jax,
-        "splash_causal_attention",
-        fake_splash_attention,
-    )
-    config = SpectraARTransformerJaxConfig(
-        vocab_size=16,
-        num_token_kinds=4,
-        max_sequence_length=3,
-        pad_token_id=0,
-        model_dim=4,
-        num_layers=1,
-        num_heads=2,
-        mlp_multiple=2.0,
-        attention_kernel="splash",
-        compute_dtype=jnp.float32,
-    )
-    attention = SpectraARCausalSelfAttentionJax(config, rngs=ar_spectra_jax.nnx.Rngs(0))
-    attention.qkv.weight[...] = jnp.concatenate(
-        [jnp.eye(4, dtype=jnp.float32)] * 3,
-        axis=0,
-    )
-    attention.out_proj.weight[...] = jnp.eye(4, dtype=jnp.float32)
-    hidden = jnp.arange(12, dtype=jnp.float32).reshape(1, 3, 4)
-
-    actual = attention(hidden)
-    expected = attention.rope(hidden.reshape(1, 3, 2, 2)).reshape(1, 3, 4)
-
-    np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), atol=1e-6)
-
-
 def test_jax_ar_transformer_forward_returns_finite_loss() -> None:
     tokenizer = SpectraARTokenizer(SpectraARTokenizerConfig(max_num_peaks=4))
     tokenized = tokenizer.tokenize_batch(_batch())
@@ -321,6 +285,21 @@ def test_jax_ar_transformer_forward_returns_finite_loss() -> None:
     assert np.isfinite(np.asarray(train_output["loss"]))
     assert float(np.asarray(train_output["target_tokens"])) == 19.0
     assert "token_accuracy/fragment_mz_level_0" in train_output
+
+
+@pytest.mark.parametrize(
+    "removed_setting",
+    (
+        {"ar_splash_block_size": 128},
+        {"ar_attention_kernel": "splash"},
+    ),
+)
+def test_jax_ar_config_rejects_removed_splash_path(removed_setting) -> None:
+    tokenizer = SpectraARTokenizer(SpectraARTokenizerConfig(max_num_peaks=4))
+    config = config_dict.ConfigDict(removed_setting)
+
+    with pytest.raises(ValueError, match="has been removed"):
+        SpectraARTransformerJaxConfig.from_config(config, tokenizer)
 
 
 def test_jax_token_weighted_train_and_validation_reduce_by_target_tokens() -> None:
@@ -509,6 +488,9 @@ def test_jax_ar_training_loop_logs_validates_checkpoints_and_resumes(tmp_path) -
 def test_train_routes_ar_spectra_jax_backend(monkeypatch, tmp_path) -> None:
     calls = []
 
+    def fake_configure_jax_tpu_xla_flags():
+        calls.append("flags")
+
     def fake_train(config, workdir):
         calls.append((config, workdir))
         return {"run/device_backend": "jax", "run/training_task": "ar_spectra"}
@@ -520,13 +502,29 @@ def test_train_routes_ar_spectra_jax_backend(monkeypatch, tmp_path) -> None:
         "train_and_evaluate_ar_spectra_jax",
         fake_train,
     )
+    monkeypatch.setattr(
+        train,
+        "configure_jax_tpu_xla_flags",
+        fake_configure_jax_tpu_xla_flags,
+    )
     cfg = {
         "training_task": "ar_spectra",
         "device_backend": "jax",
     }
 
     assert train._train(cfg, tmp_path)["run/training_task"] == "ar_spectra"
-    assert calls == [(cfg, tmp_path)]
+    assert calls == ["flags", (cfg, tmp_path)]
+
+
+def test_train_rejects_non_jax_ar_backend(tmp_path) -> None:
+    with pytest.raises(ValueError, match="requires device_backend='jax'"):
+        train._train(
+            {
+                "training_task": "ar_spectra",
+                "device_backend": "torch",
+            },
+            tmp_path,
+        )
 
 
 def test_ar_jax_entrypoint_uses_canonical_jax_task_lifecycle(

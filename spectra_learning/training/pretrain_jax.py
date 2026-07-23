@@ -15,6 +15,7 @@ import numpy as np
 import optax
 import torch
 from flax import nnx
+from jax._src import distributed as jax_distributed
 from jax.experimental import multihost_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from ml_collections import config_dict
@@ -28,10 +29,7 @@ from spectra_learning.data.gems.mask_schedule import (
 )
 from spectra_learning.models.common_jax import Array
 from spectra_learning.models.factory_jax import build_model_from_config
-from spectra_learning.models.fastmixer_capacity import (
-    pairmixer_fast_stage_capacities,
-    pairmixer_stage_projection_kernels,
-)
+from spectra_learning.models.fastmixer_capacity import pairmixer_fast_stage_capacities
 from spectra_learning.models.model_jax import PeakSetJEPAJax
 from spectra_learning.probes.massspec.msg_probe_jax import run_msg_probe_jax
 from spectra_learning.probes.massspec.msg_settings import (
@@ -52,7 +50,6 @@ from spectra_learning.training.checkpointing_jax import (
     save_jax_training_state,
 )
 from spectra_learning.training.configuration import finalize_config, save_config
-from spectra_learning.training.jax_runtime_flags import configure_jax_tpu_xla_flags
 from spectra_learning.training.logging import (
     MetricLogger,
     build_logger,
@@ -202,7 +199,6 @@ def _jax_update_scale_metrics(
 
 
 def configure_jax_runtime(config: Any) -> None:
-    configure_jax_tpu_xla_flags()
     if bool(config.get("jax_log_compiles", False)) or _env_enabled(
         "JAX_LOG_COMPILES"
     ):
@@ -295,16 +291,6 @@ def initialize_jax_distributed(config: Any) -> None:
         if value is not None
     }
     jax.distributed.initialize(**kwargs)
-
-
-def build_jax_optimizer(
-    config: Any,
-    model: Any,
-    *,
-    total_steps: int | None = None,
-) -> nnx.Optimizer:
-    optimizer = build_jax_optax_transform(config, total_steps=total_steps)
-    return nnx.Optimizer(model, optimizer, wrt=trainable_param_filter)
 
 
 def build_jax_optax_transform(
@@ -690,124 +676,6 @@ def _host_contiguous_mesh_devices(devices: list[Any]) -> np.ndarray:
             )
         ]
     )
-
-
-@nnx.jit
-def jax_grad_step(
-    model: PeakSetJEPAJax,
-    batch: dict[str, Array],
-) -> tuple[tuple[Array, dict[str, Array]], nnx.State]:
-    def loss_fn(model: PeakSetJEPAJax):
-        metrics = model(batch)
-        return metrics["loss"], metrics
-
-    return nnx.value_and_grad(
-        loss_fn,
-        has_aux=True,
-        argnums=nnx.DiffState(0, trainable_param_filter),
-    )(model)
-
-
-@nnx.jit
-def jax_apply_grads(
-    model: PeakSetJEPAJax,
-    optimizer: nnx.Optimizer,
-    grads: nnx.State,
-) -> Array:
-    optimizer.update(model, grads)
-    return optimizer.step[...]
-
-
-@nnx.jit
-def jax_train_step(
-    model: PeakSetJEPAJax,
-    optimizer: nnx.Optimizer,
-    batch: dict[str, Array],
-) -> dict[str, Array]:
-    def loss_fn(model: PeakSetJEPAJax):
-        metrics = model(batch)
-        return metrics["loss"], metrics
-
-    (_loss, metrics), grads = nnx.value_and_grad(
-        loss_fn,
-        has_aux=True,
-        argnums=nnx.DiffState(0, trainable_param_filter),
-    )(model)
-    optimizer.update(model, grads)
-    return metrics
-
-
-def jax_sharded_grad_step(
-    model: PeakSetJEPAJax,
-    batch: dict[str, Array],
-) -> tuple[tuple[Array, dict[str, Array]], nnx.State]:
-    return _jax_sharded_grad_step_fn(jax.device_count())(model, batch)
-
-
-def jax_sharded_apply_grads(
-    model: PeakSetJEPAJax,
-    optimizer: nnx.Optimizer,
-    grads: nnx.State,
-) -> Array:
-    return _jax_sharded_apply_grads_fn(jax.device_count())(model, optimizer, grads)
-
-
-@cache
-def _jax_sharded_grad_step_fn(device_count: int):
-    data_mesh = _jax_data_mesh_for_device_count(device_count)
-
-    @nnx.jit
-    @nnx.shard_map(
-        mesh=data_mesh,
-        in_specs=(P(), P(JAX_DATA_AXIS)),
-        out_specs=(P(), P()),
-        axis_names={JAX_DATA_AXIS},
-        check_vma=False,
-    )
-    def grad_step(
-        model: PeakSetJEPAJax,
-        batch: dict[str, Array],
-    ) -> tuple[tuple[Array, dict[str, Array]], nnx.State]:
-        def loss_fn(model: PeakSetJEPAJax):
-            metrics = model(batch)
-            return metrics["loss"], metrics
-
-        (loss, metrics), grads = nnx.value_and_grad(
-            loss_fn,
-            has_aux=True,
-            argnums=nnx.DiffState(0, trainable_param_filter),
-        )(model)
-        loss = jax.lax.pmean(loss, JAX_DATA_AXIS)
-        metrics = jax.tree.map(
-            lambda value: jax.lax.pmean(value, JAX_DATA_AXIS),
-            metrics,
-        )
-        grads = jax.tree.map(lambda value: jax.lax.pmean(value, JAX_DATA_AXIS), grads)
-        return (loss, metrics), grads
-
-    return grad_step
-
-
-@cache
-def _jax_sharded_apply_grads_fn(device_count: int):
-    data_mesh = _jax_data_mesh_for_device_count(device_count)
-
-    @nnx.jit
-    @nnx.shard_map(
-        mesh=data_mesh,
-        in_specs=(P(), P(), P()),
-        out_specs=P(),
-        axis_names={JAX_DATA_AXIS},
-    )
-    def apply_grads(
-        model: PeakSetJEPAJax,
-        optimizer: nnx.Optimizer,
-        grads: nnx.State,
-    ) -> Array:
-        optimizer.update(model, grads)
-        return optimizer.step[...]
-
-    return apply_grads
 
 
 def init_pure_optax_train_state(
@@ -1235,6 +1103,10 @@ def train_and_evaluate_jax_task(
 
 
 def prepare_jax_training_config(config: config_dict.ConfigDict) -> None:
+    if "jax_msg_probe_shard_batches" in config:
+        raise ValueError(
+            "jax_msg_probe_shard_batches has been removed; MSG probe batches are unsharded"
+        )
     config.dataloader_pin_memory = False
     config.dataloader_persistent_workers = False
     config.dataloader_output_format = "numpy"
@@ -1310,6 +1182,39 @@ _JAX_PROFILE_TIMING_NAMES = (
     "apply_seconds",
     "compiled_step_seconds",
 )
+_JAX_TIME_LIMIT_CHECK_EVERY_STEPS = 100
+_JAX_TIME_LIMIT_BROADCAST_TIMEOUT_MS = 60_000
+
+
+def _jax_wall_time() -> float:
+    return time.time()
+
+
+def _jax_training_deadline(config: config_dict.ConfigDict) -> float | None:
+    max_duration_hours = config.get("max_duration_hours", None)
+    if max_duration_hours is None:
+        return None
+    if jax.process_index() == 0:
+        logging.info(
+            "Training wall-clock budget: %.2f hours",
+            float(max_duration_hours),
+        )
+    return _jax_wall_time() + float(max_duration_hours) * 3600.0
+
+
+def _jax_process_bool_broadcast(value: bool, *, key: str) -> bool:
+    if jax.process_count() == 1:
+        return value
+    client = jax_distributed.global_state.client
+    if jax.process_index() == 0:
+        client.key_value_set(key, "1" if value else "0")
+    return (
+        client.blocking_key_value_get(
+            key,
+            _JAX_TIME_LIMIT_BROADCAST_TIMEOUT_MS,
+        )
+        == "1"
+    )
 
 
 class _JaxTrainingLoop:
@@ -1339,6 +1244,14 @@ class _JaxTrainingLoop:
         self.log_every_n_steps = int(config.get("log_every_n_steps", 50))
         self.warmup_steps = int(config.get("throughput_warmup_steps", 0))
         self.grad_accum_steps = int(config.get("gradient_accumulation_steps", 1))
+        self.deadline = _jax_training_deadline(config)
+        self.time_limit_check_every_steps = int(
+            config.get(
+                "jax_time_limit_check_every_steps",
+                _JAX_TIME_LIMIT_CHECK_EVERY_STEPS,
+            )
+        )
+        self.stopped_for_time_limit = False
         self.use_mask_schedule = (
             isinstance(model, PeakSetJEPAJax)
             and "jepa_context_fraction_schedule" in config
@@ -1346,11 +1259,6 @@ class _JaxTrainingLoop:
         self.mask_stages = jepa_mask_stages(config) if self.use_mask_schedule else ()
         self.mask_capacities = (
             pairmixer_fast_stage_capacities(config)
-            if self.use_mask_schedule
-            else ()
-        )
-        self.mask_projection_kernels = (
-            pairmixer_stage_projection_kernels(config)
             if self.use_mask_schedule
             else ()
         )
@@ -1458,20 +1366,11 @@ class _JaxTrainingLoop:
         else:
             train_steps = []
             eval_steps = []
-        for capacity, kernels in zip(
-            self.mask_capacities,
-            self.mask_projection_kernels,
-            strict=True,
-        ):
+        for capacity in self.mask_capacities:
             encoder_tokens, predictor_tokens = capacity
-            encoder_kernel, predictor_kernel = kernels
             self.model.set_fastmixer_capacities(
                 encoder_tokens,
                 predictor_tokens,
-            )
-            self.model.set_pairmixer_projection_kernels(
-                encoder_kernel,
-                predictor_kernel,
             )
             stage_graphdef, _, _ = nnx.split(
                 self.model,
@@ -1483,9 +1382,6 @@ class _JaxTrainingLoop:
             eval_steps.append(eval_step)
         if self.use_mask_schedule:
             self.model.set_fastmixer_capacities(*self.mask_capacities[0])
-            self.model.set_pairmixer_projection_kernels(
-                *self.mask_projection_kernels[0]
-            )
         state = _JaxTrainState(params, static_state, opt_state)
         if self.use_sharded_step:
             params = _replicate_tree_on_data_mesh(
@@ -1519,9 +1415,6 @@ class _JaxTrainingLoop:
             return False
         stage = self.mask_stages[stage_index]
         encoder_tokens, predictor_tokens = self.mask_capacities[stage_index]
-        encoder_kernel, predictor_kernel = self.mask_projection_kernels[
-            stage_index
-        ]
         self.datamodule.set_mask_fractions(
             stage.context_fraction,
             stage.target_fraction,
@@ -1534,25 +1427,18 @@ class _JaxTrainingLoop:
             encoder_tokens,
             predictor_tokens,
         )
-        self.model.set_pairmixer_projection_kernels(
-            encoder_kernel,
-            predictor_kernel,
-        )
         self.train_step = self.train_steps[stage_index]
         self.eval_step = self.eval_steps[stage_index]
         self.mask_stage_index = stage_index
         logging.info(
             "MAE mask stage %d: context_fraction=%.2f target_fraction=%.2f "
-            "encoder_tokens=%d predictor_tokens=%d accumulation_steps=%d "
-            "encoder_kernel=%s predictor_kernel=%s",
+            "encoder_tokens=%d predictor_tokens=%d accumulation_steps=%d",
             stage_index + 1,
             stage.context_fraction,
             stage.target_fraction,
             encoder_tokens,
             predictor_tokens,
             stage.gradient_accumulation_steps,
-            encoder_kernel,
-            predictor_kernel,
         )
         return True
 
@@ -1581,7 +1467,7 @@ class _JaxTrainingLoop:
         self.train_start = time.perf_counter()
         for epoch in range(start_epoch, loop_epochs):
             self._run_epoch(epoch, start_epoch=start_epoch, loop_epochs=loop_epochs)
-            if self.global_step >= self.total_steps:
+            if self.stopped_for_time_limit or self.global_step >= self.total_steps:
                 break
         return self._finish()
 
@@ -1607,6 +1493,8 @@ class _JaxTrainingLoop:
             disable=jax.process_index() != 0,
         )
         while self.global_step < self.total_steps:
+            if self._time_limit_reached():
+                break
             if loader_stage_index != self.mask_stage_index:
                 _shutdown_torch_loader_iterator(loader_iter)
                 del loader_iter, loader
@@ -1630,7 +1518,9 @@ class _JaxTrainingLoop:
             self._activate_mask_stage(self.global_step)
             self._run_scheduled_work(pbar)
         if self.pending_train_metrics is not None and (
-            self.global_step >= self.total_steps or epoch == loop_epochs - 1
+            self.stopped_for_time_limit
+            or self.global_step >= self.total_steps
+            or epoch == loop_epochs - 1
         ):
             _log_jax_train_metrics(
                 self.config,
@@ -1642,6 +1532,31 @@ class _JaxTrainingLoop:
         pbar.close()
         _shutdown_torch_loader_iterator(loader_iter)
         del loader_iter, loader
+
+    def _time_limit_reached(self) -> bool:
+        if self.deadline is None:
+            return False
+        should_check = (
+            self.global_step == self.start_step
+            or self.global_step % self.time_limit_check_every_steps == 0
+        )
+        if not should_check:
+            return False
+        source_reached = (
+            jax.process_index() == 0 and _jax_wall_time() >= self.deadline
+        )
+        if not _jax_process_bool_broadcast(
+            source_reached,
+            key=f"spectra_time_limit_{self.global_step}",
+        ):
+            return False
+        if jax.process_index() == 0:
+            logging.info(
+                "Reached max_duration_hours at global_step=%d.",
+                self.global_step,
+            )
+        self.stopped_for_time_limit = True
+        return True
 
     def _next_accumulated_batch(self, loader_iter: Any) -> dict[str, Any] | None:
         dataloader_elapsed = 0.0
@@ -1904,6 +1819,7 @@ class _JaxTrainingLoop:
                 train_metrics = host_metrics
         result: dict[str, object] = {
             "run/final_global_step": float(self.global_step),
+            "run/stopped_for_time_limit": float(self.stopped_for_time_limit),
             "run/wall_elapsed_seconds": wall_elapsed,
             "run/train_elapsed_seconds": train_elapsed,
             "run/non_train_elapsed_seconds": sum(self.non_train_timing.values()),
@@ -2126,17 +2042,11 @@ def run_and_log_msg_probe_jax(
     logger: MetricLogger,
     variants: tuple[str, ...],
     global_step: int,
-    data_mesh: Mesh | None = None,
 ) -> dict[str, float]:
-    probe_data_mesh = (
-        data_mesh
-        if bool(config.get("jax_msg_probe_shard_batches", False))
-        else None
-    )
     probe_metrics = run_msg_probe_jax(
         config=config,
         model=model,
-        data_mesh=probe_data_mesh,
+        data_mesh=None,
         online_maccs_only=True,
     )
     if jax.process_index() != 0:
@@ -2181,7 +2091,6 @@ def _run_distributed_msg_probe_jax(
             logger=logger,
             variants=variants,
             global_step=global_step,
-            data_mesh=data_mesh,
         )
     multihost_utils.sync_global_devices(
         f"spectra_learning_jax_msg_probe_{global_step}"

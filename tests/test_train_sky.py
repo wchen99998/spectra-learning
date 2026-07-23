@@ -133,6 +133,38 @@ def test_dryrun_alias_maps_to_dry_run_flag():
     assert args.dry_run is True
 
 
+def test_sky_launcher_rejects_non_jax_training_config(tmp_path):
+    with pytest.raises(ValueError, match="requires device_backend='jax'"):
+        train_sky.main(
+            [
+                "--dryrun",
+                "--config",
+                "configs/pretrain.py",
+                "--workdir",
+                f"{TRAIN_WORKDIR}-torch",
+                "--task-output-dir",
+                str(tmp_path),
+            ]
+        )
+
+
+def test_sky_launcher_rejects_unsupported_jax_task(tmp_path):
+    with pytest.raises(ValueError, match="does not support device_backend='jax'"):
+        train_sky.main(
+            [
+                "--dryrun",
+                "--config",
+                TRAIN_CONFIG,
+                "--workdir",
+                f"{TRAIN_WORKDIR}-contrastive",
+                "--task-output-dir",
+                str(tmp_path),
+                "--override",
+                'training_task="contrastive"',
+            ]
+        )
+
+
 def test_detach_run_submits_without_log_streaming():
     args, sky_args = train_sky.parse_args(
         [
@@ -312,6 +344,7 @@ def test_build_task_constructs_direct_gcp_dws_resources_and_env():
     assert 'export JAX_COMPILATION_CACHE_DIR="${JAX_CACHE_DIR}"' in task["run"]
     assert 'echo "JAX compilation cache ${JAX_COMPILATION_CACHE_DIR}"' in task["run"]
     assert 'config["jax_compilation_cache_dir"] = os.environ["JAX_CACHE_DIR"]' in task["run"]
+    assert ".venv/bin/python train.py" in task["run"]
     assert "SPECTRA_AOT" not in task["run"]
     assert "precompile" not in task["run"].lower()
 
@@ -536,16 +569,16 @@ def test_dryrun_includes_explicit_json_overrides(
             "--chips",
             "4",
             "--override",
-            'ar_attention_kernel="splash"',
+            'ar_attention_kernel="xla"',
             "--override",
-            "ar_splash_block_size=128",
+            "ar_attention_block_size=64",
         ]
     )
 
     output = capsys.readouterr().out
     assert "accelerator_topology: 2x2" in output
-    assert '"ar_attention_kernel":"splash"' in output
-    assert '"ar_splash_block_size":128' in output
+    assert '"ar_attention_kernel":"xla"' in output
+    assert '"ar_attention_block_size":64' in output
 
 
 def test_launch_failure_preserves_exit_code_without_wrapper_down(tmp_path, monkeypatch):

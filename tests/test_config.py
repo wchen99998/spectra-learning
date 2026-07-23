@@ -23,6 +23,8 @@ def test_load_config_applies_overrides() -> None:
     assert config.training_max_steps == 12
     assert config.config_path == "configs/ar_spectra_coarse_to_fine.py"
     assert config.ar_attention_kernel == "pallas"
+    assert config.ar_attention_block_size == 128
+    assert "ar_splash_block_size" not in config
     assert config.ar_gelu_approximation == "quick"
     assert config.wandb_kwargs.to_dict() == {
         "name": "test-run",

@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 import torch
 import torch.nn.functional as F
 from ml_collections import config_dict
@@ -34,6 +35,36 @@ def test_train_routes_contrastive_task(monkeypatch, tmp_path: Path) -> None:
 
     assert train._train(config, tmp_path)["run/training_task"] == "contrastive"
     assert calls == [(config, tmp_path)]
+
+
+def test_train_rejects_jax_contrastive_backend(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="does not support device_backend='jax'"):
+        train._train(
+            {
+                "training_task": "contrastive",
+                "device_backend": "jax",
+            },
+            tmp_path,
+        )
+
+
+@pytest.mark.parametrize(
+    "removed_key",
+    (
+        "contrastive_model_learning_rate",
+        "contrastive_pooler_learning_rate",
+        "contrastive_online_probe_learning_rate",
+        "contrastive_init_full_checkpoint_path",
+    ),
+)
+def test_contrastive_training_rejects_removed_alternate_paths(
+    removed_key: str,
+    tmp_path: Path,
+) -> None:
+    config = config_dict.ConfigDict({removed_key: 1e-3})
+
+    with pytest.raises(ValueError, match=f"{removed_key} has been removed"):
+        train_contrastive(config, tmp_path)
 
 
 def _write_split(root: Path, split: str, rows: list[tuple[str, float]]) -> None:

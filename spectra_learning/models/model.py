@@ -10,7 +10,6 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 from torch import nn
 
-from spectra_learning.config import load_config
 from spectra_learning.models.common import (
     _active_autocast_context,
     _build_frozen_2d_position_embedding,
@@ -19,7 +18,11 @@ from spectra_learning.models.common import (
 from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.pairmixer import PairMixerBlock
 from spectra_learning.models.peak_features import PeakFeatureEmbedder
-from spectra_learning.models.settings import PeakSetJEPASettings
+from spectra_learning.models.settings import (
+    PeakSetJEPASettings,
+    ema_teacher_momentum_at as resolve_ema_teacher_momentum,
+    load_frozen_teacher_settings,
+)
 from spectra_learning.models.spectrum_metadata import torch_spectrum_metadata_from_batch
 from spectra_learning.models.transformer import _build_norm
 
@@ -105,7 +108,7 @@ class PeakSetJEPA(nn.Module):
     ) -> None:
         super().__init__()
         cfg = PeakSetJEPASettings.create(settings, **overrides)
-        frozen_teacher_cfg = self._load_frozen_teacher_settings(cfg)
+        frozen_teacher_cfg = load_frozen_teacher_settings(cfg)
         self._configure_dimensions(cfg)
         self._configure_targets(cfg, frozen_teacher_cfg)
         self._configure_losses(cfg)
@@ -115,16 +118,6 @@ class PeakSetJEPA(nn.Module):
         self._build_target_projectors()
         self._build_jepa_mae_heads()
         self._build_distogram_head()
-
-    @staticmethod
-    def _load_frozen_teacher_settings(
-        cfg: PeakSetJEPASettings,
-    ) -> PeakSetJEPASettings | None:
-        if cfg.training_mode.lower() != "mae_teacher_jepa":
-            return None
-        if cfg.frozen_teacher_config_path is None:
-            return None
-        return PeakSetJEPASettings.from_config(load_config(cfg.frozen_teacher_config_path))
 
     def _configure_dimensions(self, cfg: PeakSetJEPASettings) -> None:
         self.training_mode = cfg.training_mode.lower()
@@ -469,26 +462,14 @@ class PeakSetJEPA(nn.Module):
         step: int,
         total_steps: int,
     ) -> float:
-        if self.ema_teacher_schedule == "constant":
-            return self.ema_teacher_momentum_start
-        progress = min(1.0, max(0.0, float(step) / float(max(1, total_steps))))
-        if self.ema_teacher_schedule == "slow-fast-slow":
-            peak = min(1.0, max(1e-6, self.ema_teacher_schedule_peak_fraction))
-            if progress <= peak:
-                phase = progress / peak
-                eased = 0.5 - 0.5 * math.cos(math.pi * phase)
-                return self.ema_teacher_momentum_start + eased * (
-                    self.ema_teacher_momentum_mid - self.ema_teacher_momentum_start
-                )
-            phase = (progress - peak) / max(1e-6, 1.0 - peak)
-            eased = 0.5 - 0.5 * math.cos(math.pi * phase)
-            return self.ema_teacher_momentum_mid + eased * (
-                self.ema_teacher_momentum_final - self.ema_teacher_momentum_mid
-            )
-        if self.ema_teacher_schedule == "cosine":
-            progress = 0.5 - 0.5 * math.cos(math.pi * progress)
-        return self.ema_teacher_momentum_start + progress * (
-            self.ema_teacher_momentum_final - self.ema_teacher_momentum_start
+        return resolve_ema_teacher_momentum(
+            schedule=self.ema_teacher_schedule,
+            start=self.ema_teacher_momentum_start,
+            mid=self.ema_teacher_momentum_mid,
+            final=self.ema_teacher_momentum_final,
+            peak_fraction=self.ema_teacher_schedule_peak_fraction,
+            step=step,
+            total_steps=total_steps,
         )
 
     @torch.no_grad()

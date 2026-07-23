@@ -27,10 +27,6 @@ def torch_to_jax(value: torch.Tensor | np.ndarray | Any) -> Array:
     return jnp.asarray(value)
 
 
-def batch_to_jax(batch: dict[str, Any]) -> dict[str, Array]:
-    return {key: torch_to_jax(value) for key, value in batch.items()}
-
-
 def assign_param(param: nnx.Param, value: torch.Tensor | np.ndarray | Any) -> None:
     param[...] = torch_to_jax(value)
 
@@ -49,7 +45,7 @@ def gelu(x: Array) -> Array:
 
 def activation_checkpoint_policy(mode: str):
     if mode == "selective":
-        return jax.checkpoint_policies.dots_saveable
+        return jax.checkpoint_policies.dots_with_no_batch_dims_saveable
     return None
 
 
