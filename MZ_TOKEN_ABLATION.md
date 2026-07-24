@@ -17,6 +17,8 @@ of this ablation. It did not improve the requested m/z metric or total loss.
 ## What was compared
 
 The experiment changes only the per-peak m/z input representation.
+The complete equations, dimensions, target construction, and live 100K
+comparison protocol are documented in `MZ_EMBEDDER_MATHEMATICS.md`.
 
 - **Fourier:** 64 fixed log-spaced frequencies, giving 128 sin/cos features,
   followed by a four-layer m/z MLP with hidden width 896. The shared raw
