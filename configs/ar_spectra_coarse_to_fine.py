@@ -40,11 +40,18 @@ def get_config() -> config_dict.ConfigDict:
 
     cfg.artifact_dir = "data/massive_v1_ms2_100m_stratified_x16"
     cfg.gems_hdf5_repo_id = "novogaia/massive-v1-ms2-100m-stratified-x16"
-    cfg.gems_hdf5_revision = "main"
+    cfg.gems_hdf5_revision = "7ff47061cbde23e4cdd113378dcfb489e86b32c4"
     cfg.gems_hdf5_manifest = "fdataloader_shards.json"
     cfg.gems_hdf5_spectrum_dataset = "spectrum"
     cfg.gems_hdf5_precursor_dataset = "precursor_mz"
+    cfg.gems_hdf5_retention_time_dataset = "RT"
+    cfg.gems_hdf5_ms_level_dataset = "MS level"
     cfg.gems_hdf5_rows_per_block = 0
+    cfg.nist_murcko_probe_repo_id = (
+        "wchen99998/msms_nist_disjoint_probe_retrieval_20260622"
+    )
+    cfg.nist_murcko_probe_revision = "f5b51db72caa9205240d344882a9f4baec10d9b3"
+    cfg.nist_murcko_probe_hf_subdir = "nist_100k_online_probe"
 
     cfg.batch_size = 2048
     cfg.gradient_accumulation_steps = 1
@@ -67,8 +74,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.precursor_peak_exclusion_window_da = 0.0
 
     cfg.ar_max_num_peaks = 128
-    cfg.ar_mz_max = 1000.0
-    cfg.ar_precursor_mz_max = 1000.0
     cfg.ar_mz_bin_widths = (50.0, 25.0, 5.0, 1.0)
     cfg.ar_residual_bins = 100
     cfg.ar_intensity_bins = 101

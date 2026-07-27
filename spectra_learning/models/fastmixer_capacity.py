@@ -4,10 +4,11 @@ from typing import Any
 
 from spectra_learning.data.gems.mask_schedule import jepa_mask_stages
 from spectra_learning.data.gems.masking import jepa_mask_lengths_for_valid_count
+from spectra_learning.data.spectra import DEFAULT_NUM_PEAKS
 
 
 def pairmixer_fast_full_visible_tokens(config: Any) -> int:
-    return int(config.get("num_peaks", 64)) + 1
+    return int(config.get("num_peaks", DEFAULT_NUM_PEAKS)) + 1
 
 
 def _mask_strategy_names(value: Any) -> tuple[str, ...]:
@@ -26,7 +27,7 @@ def _mae_fast_capacities(
     context_fraction: float | None = None,
     target_fraction: float | None = None,
 ) -> tuple[int, int, int]:
-    num_peaks = int(config.get("num_peaks", 64))
+    num_peaks = int(config.get("num_peaks", DEFAULT_NUM_PEAKS))
     strategies = _mask_strategy_names(
         config.get("jepa_mask_strategy", "contiguous")
     )

@@ -17,6 +17,7 @@ from jax.experimental import multihost_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from ml_collections import config_dict
 
+from spectra_learning.data.contracts import peak_preprocessing_contract
 from spectra_learning.data.loading import local_batch_size
 from spectra_learning.data.massspec_probe import MassSpecProbeData
 from spectra_learning.models.common_jax import Array
@@ -24,6 +25,7 @@ from spectra_learning.models.fastmixer_capacity import (
     pairmixer_fast_full_visible_tokens,
 )
 from spectra_learning.models.model_jax import PeakSetJEPAJax
+from spectra_learning.models.spectrum_metadata import jax_spectrum_metadata_from_batch
 from spectra_learning.probes.massspec.msg_probe_common import (
     EpochState,
     merge_epoch_states as _merge_epoch_states,
@@ -37,7 +39,6 @@ from spectra_learning.probes.massspec.msg_probe_common import (
     resolve_probe_warmup_steps as _resolve_probe_warmup_steps,
     run_repeated_probe as _run_repeated_probe_jax,
     score_epoch_state as _score_epoch_state,
-    sulfur_metric_subset as _sulfur_metric_subset,
 )
 from spectra_learning.probes.massspec.msg_settings import (
     BINARY_PROBE_TASKS,
@@ -83,7 +84,6 @@ class _JaxMsgProbeSetup:
     max_train_samples: int | None
     max_val_samples: int | None
     max_test_samples: int | None
-    max_mcebio_test_samples: int | None
     train_seed_base: int
     test_seed_base: int
     probe_seed: int
@@ -101,7 +101,6 @@ class _JaxMsgProbeTrainingState:
     higher_is_better: bool
     best_metrics_by_variant: dict[str, dict[str, Any]]
     best_params_by_variant: dict[str, JaxProbeParams]
-    best_test_state_by_variant: dict[str, EpochState]
     best_metric_values: dict[str, float]
     epochs_without_improvement: dict[str, int]
 
@@ -198,15 +197,13 @@ def _collect_msg_probe_task_spec_jax(
     probe_data: MassSpecProbeData,
     peak_ordering: str,
     train_seed_base: int,
-    test_seed_base: int,
     fingerprint_task: str,
     regression_tasks: tuple[str, ...],
     binary_tasks: tuple[str, ...],
-    early_stopping: bool,
     max_train_samples: int | None,
     max_val_samples: int | None,
-    max_test_samples: int | None,
 ) -> tuple[MsgProbeTaskSpec, float]:
+    del max_val_samples
     phase_start = time.perf_counter()
     train_targets = _collect_split_targets_jax(
         probe_data=probe_data,
@@ -218,34 +215,10 @@ def _collect_msg_probe_task_spec_jax(
         binary_tasks=binary_tasks,
         max_samples=max_train_samples,
     )
-    val_targets = _collect_split_targets_jax(
-        probe_data=probe_data,
-        split="massspec_val",
-        peak_ordering=peak_ordering,
-        seed=train_seed_base + 10_000,
-        fingerprint_task=fingerprint_task,
-        regression_tasks=regression_tasks,
-        binary_tasks=binary_tasks,
-        max_samples=max_val_samples,
-    )
-    selection_targets = (
-        val_targets
-        if early_stopping
-        else _collect_split_targets_jax(
-            probe_data=probe_data,
-            split="massspec_test",
-            peak_ordering=peak_ordering,
-            seed=test_seed_base,
-            fingerprint_task=fingerprint_task,
-            regression_tasks=regression_tasks,
-            binary_tasks=binary_tasks,
-            max_samples=max_test_samples,
-        )
-    )
     elapsed = time.perf_counter() - phase_start
     task_spec = _build_task_spec_jax(
         train_targets=train_targets,
-        test_targets=selection_targets,
+        test_targets=train_targets,
         fingerprint_task=fingerprint_task,
         regression_tasks=regression_tasks,
         binary_tasks=binary_tasks,
@@ -270,7 +243,6 @@ def _setup_msg_probe_jax(
     num_probe_epochs = int(config.get("msg_probe_num_epochs", 5))
     probe_lr = float(config.get("msg_probe_learning_rate", 1e-3))
     probe_weight_decay = float(config.get("msg_probe_weight_decay", 1e-2))
-    peak_ordering = str(config.get("peak_ordering", "intensity"))
     early_stopping = bool(config.get("msg_probe_early_stopping", False))
     early_stopping_patience = int(
         config.get("msg_probe_early_stopping_patience", 10)
@@ -292,9 +264,9 @@ def _setup_msg_probe_jax(
         "distributed_local_rank": 0,
     }
     if online_maccs_only:
-        probe_data_kwargs["include_mcebio"] = False
         probe_data_kwargs["maccs_only"] = True
     probe_data = MassSpecProbeData.from_config(config, **probe_data_kwargs)
+    peak_ordering = peak_preprocessing_contract(config)["peak_ordering"]
     variants = msg_probe_variants_from_config(config)
     use_pair_features = any(_uses_pair_features(variant) for variant in variants)
     feature_model = _full_visible_fastmixer_probe_model(config, model)
@@ -303,9 +275,6 @@ def _setup_msg_probe_jax(
     )
     max_val_samples = _optional_positive_int(config, "jax_msg_probe_max_val_samples")
     max_test_samples = _optional_positive_int(config, "jax_msg_probe_max_test_samples")
-    max_mcebio_test_samples = _optional_positive_int(
-        config, "jax_msg_probe_max_mcebio_test_samples"
-    )
     seed_offset = 100_000 * repeat_index
     train_seed_base = int(config.seed) + 1_100_000 + seed_offset
     test_seed_base = int(config.seed) + 1_200_000 + seed_offset
@@ -315,7 +284,6 @@ def _setup_msg_probe_jax(
         "eval_epoch_seconds": 0.0,
         "score_epoch_seconds": 0.0,
         "final_test_seconds": 0.0,
-        "mcebio_seconds": 0.0,
         "final_score_seconds": 0.0,
     }
     probe_start = time.perf_counter()
@@ -324,14 +292,11 @@ def _setup_msg_probe_jax(
         probe_data=probe_data,
         peak_ordering=peak_ordering,
         train_seed_base=train_seed_base,
-        test_seed_base=test_seed_base,
         fingerprint_task=fingerprint_task,
         regression_tasks=regression_tasks,
         binary_tasks=binary_tasks,
-        early_stopping=early_stopping,
         max_train_samples=max_train_samples,
         max_val_samples=max_val_samples,
-        max_test_samples=max_test_samples,
     )
     phase_timing["target_collection_seconds"] += target_elapsed
     setup = _JaxMsgProbeSetup(
@@ -352,7 +317,6 @@ def _setup_msg_probe_jax(
         max_train_samples=max_train_samples,
         max_val_samples=max_val_samples,
         max_test_samples=max_test_samples,
-        max_mcebio_test_samples=max_mcebio_test_samples,
         train_seed_base=train_seed_base,
         test_seed_base=test_seed_base,
         probe_seed=int(config.seed) + 300_000 + seed_offset,
@@ -423,7 +387,6 @@ def _initialize_msg_probe_training_jax(
         higher_is_better=higher_is_better,
         best_metrics_by_variant={},
         best_params_by_variant={},
-        best_test_state_by_variant={},
         best_metric_values={
             variant: -float("inf") if higher_is_better else float("inf")
             for variant in setup.variants
@@ -485,24 +448,16 @@ def _train_and_evaluate_msg_probe_epoch_jax(
     train_elapsed = time.perf_counter() - phase_start
     train_states = _gather_variant_states_jax(train_states, setup.task_spec)
 
-    eval_split = "massspec_val" if setup.early_stopping else "massspec_test"
-    eval_seed = (
-        setup.train_seed_base + 10_000
-        if setup.early_stopping
-        else setup.test_seed_base
-    )
     eval_states, eval_elapsed = _evaluate_probe_split_jax(
         probe_data=setup.probe_data,
         feature_model=setup.feature_model,
         task_spec=setup.task_spec,
         params_by_variant=state.params_by_variant,
         predict_step_by_variant=state.predict_step_by_variant,
-        split=eval_split,
-        seed=eval_seed,
+        split="massspec_val",
+        seed=setup.train_seed_base + 10_000,
         peak_ordering=setup.peak_ordering,
-        max_samples=(
-            setup.max_val_samples if setup.early_stopping else setup.max_test_samples
-        ),
+        max_samples=setup.max_val_samples,
         use_pair_features=setup.use_pair_features,
         data_mesh=setup.data_mesh,
     )
@@ -523,7 +478,6 @@ def _score_msg_probe_epoch_jax(
     epoch_metrics: dict[str, float] = {}
     for variant in setup.variants:
         variant_prefix = f"msg_probe/{variant}"
-        eval_name = "val" if setup.early_stopping else "test"
         variant_metrics = {
             **_score_epoch_state(
                 prefix=f"{variant_prefix}/train",
@@ -531,7 +485,7 @@ def _score_msg_probe_epoch_jax(
                 task_spec=setup.task_spec,
             ),
             **_score_epoch_state(
-                prefix=f"{variant_prefix}/{eval_name}",
+                prefix=f"{variant_prefix}/val",
                 epoch_state=eval_states[variant],
                 task_spec=setup.task_spec,
             ),
@@ -543,9 +497,7 @@ def _score_msg_probe_epoch_jax(
         epoch_metrics.update(variant_metrics)
         variant_select_metric = _msg_probe_variant_metric_key(
             variant, state.select_metric
-        )
-        if setup.early_stopping:
-            variant_select_metric = variant_select_metric.replace("/test/", "/val/")
+        ).replace("/test/", "/val/")
         current_value = variant_metrics[variant_select_metric]
         previous_best = state.best_metric_values[variant]
         is_better = (
@@ -559,8 +511,6 @@ def _score_msg_probe_epoch_jax(
             state.best_params_by_variant[variant] = _clone_tree(
                 state.params_by_variant[variant]
             )
-            if not setup.early_stopping:
-                state.best_test_state_by_variant[variant] = eval_states[variant]
             state.epochs_without_improvement[variant] = 0
         else:
             state.epochs_without_improvement[variant] += 1
@@ -571,7 +521,6 @@ def _score_msg_probe_epoch_jax(
                 num_probe_epochs=setup.num_probe_epochs,
                 fingerprint_task=setup.fingerprint_task,
                 metrics=variant_metrics,
-                early_stopping=setup.early_stopping,
             )
     if on_epoch_end is not None and _is_main_process_jax():
         on_epoch_end(epoch_metrics)
@@ -595,91 +544,39 @@ def _finalize_msg_probe_jax(
     phase_timing: dict[str, float],
     probe_start: float,
 ) -> dict[str, Any]:
-    final_test_metrics_by_variant: dict[str, dict[str, Any]] = {}
-    if setup.early_stopping:
-        phase_start = time.perf_counter()
-        selected_params_by_variant = {
-            variant: state.best_params_by_variant.get(
-                variant, state.params_by_variant[variant]
-            )
-            for variant in setup.variants
-        }
-        final_states, _ = _evaluate_probe_split_jax(
-            probe_data=setup.probe_data,
-            feature_model=setup.feature_model,
-            task_spec=setup.task_spec,
-            params_by_variant=selected_params_by_variant,
-            predict_step_by_variant=state.predict_step_by_variant,
-            split="massspec_test",
-            seed=setup.test_seed_base,
-            peak_ordering=setup.peak_ordering,
-            max_samples=setup.max_test_samples,
-            use_pair_features=setup.use_pair_features,
-            data_mesh=setup.data_mesh,
+    phase_start = time.perf_counter()
+    selected_params_by_variant = {
+        variant: state.best_params_by_variant.get(
+            variant, state.params_by_variant[variant]
         )
-        phase_timing["final_test_seconds"] += time.perf_counter() - phase_start
-        final_states = _gather_variant_states_jax(final_states, setup.task_spec)
-        phase_start = time.perf_counter()
-        final_test_metrics_by_variant = {
-            variant: _score_epoch_state(
-                prefix=f"msg_probe/{variant}/test",
-                epoch_state=epoch_state,
-                task_spec=setup.task_spec,
-                include_pr_curves=True,
-            )
-            for variant, epoch_state in final_states.items()
-        }
-        phase_timing["final_score_seconds"] += time.perf_counter() - phase_start
-    else:
-        phase_start = time.perf_counter()
-        final_test_metrics_by_variant = {
-            variant: _score_epoch_state(
-                prefix=f"msg_probe/{variant}/test",
-                epoch_state=epoch_state,
-                task_spec=setup.task_spec,
-                include_pr_curves=True,
-            )
-            for variant, epoch_state in state.best_test_state_by_variant.items()
-        }
-        phase_timing["final_score_seconds"] += time.perf_counter() - phase_start
-
-    mcebio_sulfur_metrics_by_variant = {}
-    if not setup.online_maccs_only:
-        phase_start = time.perf_counter()
-        selected_params_by_variant = {
-            variant: state.best_params_by_variant.get(
-                variant, state.params_by_variant[variant]
-            )
-            for variant in setup.variants
-        }
-        mcebio_states, _ = _evaluate_probe_split_jax(
-            probe_data=setup.probe_data,
-            feature_model=setup.feature_model,
+        for variant in setup.variants
+    }
+    final_states, _ = _evaluate_probe_split_jax(
+        probe_data=setup.probe_data,
+        feature_model=setup.feature_model,
+        task_spec=setup.task_spec,
+        params_by_variant=selected_params_by_variant,
+        predict_step_by_variant=state.predict_step_by_variant,
+        split="massspec_test",
+        seed=setup.test_seed_base,
+        peak_ordering=setup.peak_ordering,
+        max_samples=setup.max_test_samples,
+        use_pair_features=setup.use_pair_features,
+        data_mesh=setup.data_mesh,
+    )
+    phase_timing["final_test_seconds"] += time.perf_counter() - phase_start
+    final_states = _gather_variant_states_jax(final_states, setup.task_spec)
+    phase_start = time.perf_counter()
+    final_test_metrics_by_variant = {
+        variant: _score_epoch_state(
+            prefix=f"msg_probe/{variant}/test",
+            epoch_state=epoch_state,
             task_spec=setup.task_spec,
-            params_by_variant=selected_params_by_variant,
-            predict_step_by_variant=state.predict_step_by_variant,
-            split="massspec_mcebio_test",
-            seed=setup.test_seed_base + 75_000,
-            peak_ordering=setup.peak_ordering,
-            max_samples=setup.max_mcebio_test_samples,
-            use_pair_features=setup.use_pair_features,
-            data_mesh=setup.data_mesh,
+            include_pr_curves=True,
         )
-        phase_timing["mcebio_seconds"] += time.perf_counter() - phase_start
-        mcebio_states = _gather_variant_states_jax(mcebio_states, setup.task_spec)
-        phase_start = time.perf_counter()
-        mcebio_sulfur_metrics_by_variant = {
-            variant: _sulfur_metric_subset(
-                _score_epoch_state(
-                    prefix=f"msg_probe/{variant}/mcebio_sulfur_test",
-                    epoch_state=epoch_state,
-                    task_spec=setup.task_spec,
-                    include_pr_curves=True,
-                )
-            )
-            for variant, epoch_state in mcebio_states.items()
-        }
-        phase_timing["final_score_seconds"] += time.perf_counter() - phase_start
+        for variant, epoch_state in final_states.items()
+    }
+    phase_timing["final_score_seconds"] += time.perf_counter() - phase_start
 
     best_metrics: dict[str, Any] = {}
     for variant in setup.variants:
@@ -687,7 +584,6 @@ def _finalize_msg_probe_jax(
         if not variant_metrics:
             continue
         variant_metrics.update(final_test_metrics_by_variant.get(variant, {}))
-        variant_metrics.update(mcebio_sulfur_metrics_by_variant.get(variant, {}))
         best_metrics.update(variant_metrics)
     best_metrics["msg_probe/jax_wall_seconds"] = time.perf_counter() - probe_start
     for name, value in phase_timing.items():
@@ -1619,12 +1515,14 @@ def _extract_pair_features_jitted(
     peak_intensity: Array,
     peak_valid_mask: Array,
     precursor_mz: Array | None,
+    spectrum_metadata: Array | None,
 ) -> tuple[Array, Array]:
     single, pair = model.encoder.forward_with_pair(
         peak_mz,
         peak_intensity,
         valid_mask=peak_valid_mask,
         precursor_mz=precursor_mz,
+        spectrum_metadata=spectrum_metadata,
     )
     return single, pair
 
@@ -1636,12 +1534,14 @@ def _extract_single_features_jitted(
     peak_intensity: Array,
     peak_valid_mask: Array,
     precursor_mz: Array | None,
+    spectrum_metadata: Array | None,
 ) -> Array:
     return model.encoder(
         peak_mz,
         peak_intensity,
         valid_mask=peak_valid_mask,
         precursor_mz=precursor_mz,
+        spectrum_metadata=spectrum_metadata,
     )
 
 
@@ -1652,6 +1552,7 @@ def _extract_features(
     use_pair_features: bool,
 ) -> JaxFeatures:
     precursor_mz = batch.get("precursor_mz", None)
+    spectrum_metadata = jax_spectrum_metadata_from_batch(batch)
     if use_pair_features:
         return _extract_pair_features_jitted(
             model,
@@ -1659,6 +1560,7 @@ def _extract_features(
             batch["peak_intensity"],
             batch["peak_valid_mask"],
             precursor_mz,
+            spectrum_metadata,
         )
     return _extract_single_features_jitted(
         model,
@@ -1666,6 +1568,7 @@ def _extract_features(
         batch["peak_intensity"],
         batch["peak_valid_mask"],
         precursor_mz,
+        spectrum_metadata,
     )
 
 
@@ -1856,9 +1759,8 @@ def _log_epoch_metrics(
     num_probe_epochs: int,
     fingerprint_task: str,
     metrics: dict[str, float],
-    early_stopping: bool,
 ) -> None:
-    split = "val" if early_stopping else "test"
+    split = "val"
     prefix = f"msg_probe/{variant}"
     log.info(
         "JAX MSG probe [%s] epoch %d/%d train_samples=%d %s_auc_%s_mean=%.4f",

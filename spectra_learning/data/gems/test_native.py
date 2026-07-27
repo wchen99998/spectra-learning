@@ -1,3 +1,4 @@
+import hashlib
 import json
 import tempfile
 import unittest
@@ -12,25 +13,53 @@ from ml_collections import config_dict
 import spectra_learning.data.gems as gems
 import spectra_learning.data.gems.artifacts as gems_artifacts
 import spectra_learning.data.massspec_probe as massspec_probe_data
+from spectra_learning.data.gems.hdf5 import (
+    GEMS_SPLIT_CHUNK_ROWS,
+    GEMS_SPLIT_MODULUS,
+)
 from spectra_learning.data.gems.sampling import ChunkedDistributedBatchSampler
 
 
-def _write_fake_hdf5_shards(root: Path, lengths: list[int]) -> Path:
+def _write_fake_hdf5_shards(
+    root: Path,
+    lengths: list[int],
+    *,
+    precursor_mz: np.ndarray | None = None,
+    retention_time: np.ndarray | None = None,
+    ms_level: np.ndarray | None = None,
+) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     manifest: dict[str, list[dict[str, object]]] = {"shards": []}
     start = 0
     for shard_idx, length in enumerate(lengths):
         shard_name = f"shard_{shard_idx:05d}.hdf5"
         shard_path = root / shard_name
-        precursor = np.arange(start, start + length, dtype=np.float32)
-        collision_energy = 10.0 + (precursor % 90.0)
-        charge = 1.0 + (precursor % 4.0)
+        row_indices = np.arange(start, start + length, dtype=np.float32)
+        precursor = (
+            row_indices + 1.0
+            if precursor_mz is None
+            else precursor_mz[start : start + length]
+        )
+        shard_retention_time = (
+            np.ones(length, dtype=np.float32)
+            if retention_time is None
+            else retention_time[start : start + length]
+        )
+        shard_ms_level = (
+            np.full(length, 2, dtype=np.int8)
+            if ms_level is None
+            else ms_level[start : start + length]
+        )
+        collision_energy = 10.0 + (row_indices % 90.0)
+        charge = 1.0 + (row_indices % 4.0)
         spectra = np.zeros((length, 2, 128), dtype=np.float64)
         spectra[:, 0, 0] = precursor + 100.0
         spectra[:, 1, 0] = 1.0
         with h5py.File(shard_path, "w") as f:
             f.create_dataset("spectrum", data=spectra, chunks=(1, 2, 128))
             f.create_dataset("precursor_mz", data=precursor, chunks=(1,))
+            f.create_dataset("RT", data=shard_retention_time, chunks=(1,))
+            f.create_dataset("MS level", data=shard_ms_level, chunks=(1,))
             f.create_dataset("collision_energy", data=collision_energy, chunks=(1,))
             f.create_dataset("charge", data=charge, chunks=(1,))
         manifest["shards"].append({"path": shard_name, "rows": length})
@@ -73,6 +102,23 @@ class GemsSamplingTests(unittest.TestCase):
         combined = [index for batch in rank0 + rank1 for index in batch]
         self.assertEqual(sorted(combined), list(range(9)))
 
+    def test_shuffled_sampler_length_matches_every_rank_and_epoch(self):
+        segments = [(0, 1025, 256)]
+        for epoch in range(4):
+            for rank in range(2):
+                sampler = ChunkedDistributedBatchSampler(
+                    segments,
+                    batch_size=512,
+                    rows_per_block=512,
+                    shuffle=True,
+                    seed=42,
+                    drop_last=True,
+                    world_size=2,
+                    rank=rank,
+                )
+                sampler.set_epoch(epoch)
+                self.assertEqual(len(list(sampler)), len(sampler))
+
 
 class GeMSRuntimeDownloadTests(unittest.TestCase):
     def _make_config(self, tmp_path: Path) -> config_dict.ConfigDict:
@@ -98,7 +144,11 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
         return cfg
 
     def _artifact_dir(self, cfg: config_dict.ConfigDict) -> Path:
-        return Path(cfg.artifact_dir) / "gems" / "unit--hdf5-gems"
+        return (
+            Path(cfg.artifact_dir)
+            / "gems"
+            / "unit--hdf5-gems--unit-test"
+        )
 
     def test_datamodule_downloads_hdf5_shards_and_builds_train_loader(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -118,8 +168,17 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
                 batch = next(iter(datamodule.train_loader_for_epoch(0)))
 
             self.assertEqual(datamodule.info["train_size"], 5)
-            self.assertEqual(datamodule.info["validation_size"], 5)
+            self.assertEqual(datamodule.info["validation_size"], 0)
+            self.assertEqual(datamodule.info["num_peaks_input"], 128)
             self.assertEqual(datamodule.info["num_peaks"], 64)
+            self.assertEqual(
+                datamodule.info["gems_hdf5_revision"],
+                "unit-test",
+            )
+            self.assertEqual(
+                datamodule.info["gems_manifest_sha256"],
+                hashlib.sha256(datamodule.gems_manifest.read_bytes()).hexdigest(),
+            )
             self.assertNotIn("massspec_train_size", datamodule.info)
             self.assertTrue(
                 all(Path(path).exists() for path in datamodule.gems_train_shards)
@@ -154,6 +213,168 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             self.assertIn("peak_mz", batch)
             download_mock.assert_not_called()
             self.assertEqual(datamodule.gems_dir, self._artifact_dir(cfg))
+
+    def test_datamodule_rejects_noncanonical_spectrum_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cfg = self._make_config(tmp_path)
+            artifact_dir = self._artifact_dir(cfg)
+            _write_fake_hdf5_shards(artifact_dir, [3])
+            with h5py.File(artifact_dir / "shard_00000.hdf5", "a") as file:
+                del file["spectrum"]
+                file.create_dataset(
+                    "spectrum",
+                    data=np.zeros((3, 128, 2), dtype=np.float32),
+                )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Invalid GeMS spectrum shape",
+            ):
+                gems.GemsDataModule(cfg, seed=42)
+
+    def test_train_validation_views_are_disjoint_and_cover_the_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cfg = self._make_config(tmp_path)
+            source_size = GEMS_SPLIT_CHUNK_ROWS * GEMS_SPLIT_MODULUS + 80
+            cfg.max_precursor_mz = float(source_size)
+            _write_fake_hdf5_shards(
+                self._artifact_dir(cfg),
+                [source_size // 2, source_size - source_size // 2],
+            )
+
+            datamodule = gems.GemsDataModule(cfg, seed=42)
+            train = datamodule._get_dataset("train")
+            validation = datamodule._get_dataset("validation")
+            train_indices = set(
+                train.source_indices(np.arange(len(train))).tolist()
+            )
+            validation_indices = set(
+                validation.source_indices(np.arange(len(validation))).tolist()
+            )
+
+            self.assertFalse(train_indices & validation_indices)
+            self.assertEqual(
+                train_indices | validation_indices,
+                set(range(source_size)),
+            )
+            self.assertEqual(len(validation), GEMS_SPLIT_CHUNK_ROWS)
+            self.assertEqual(
+                datamodule.info["train_size"] + datamodule.info["validation_size"],
+                source_size,
+            )
+            self.assertEqual(
+                datamodule.info["gems_split"]["version"],
+                "global_chunk_modulo_v1",
+            )
+
+    def test_train_and_validation_exclude_ineligible_source_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cfg = self._make_config(tmp_path)
+            source_size = GEMS_SPLIT_CHUNK_ROWS * GEMS_SPLIT_MODULUS
+            precursor = np.full(source_size, 100.0, dtype=np.float32)
+            retention_time = np.ones(source_size, dtype=np.float32)
+            ms_level = np.full(source_size, 2.0, dtype=np.float32)
+            invalid = {
+                1,
+                2,
+                3,
+                4,
+                5,
+                GEMS_SPLIT_CHUNK_ROWS * 18 + 1,
+                GEMS_SPLIT_CHUNK_ROWS * 18 + 2,
+                GEMS_SPLIT_CHUNK_ROWS * 18 + 3,
+                GEMS_SPLIT_CHUNK_ROWS * 18 + 4,
+            }
+            precursor[1] = np.nan
+            precursor[2] = cfg.max_precursor_mz + 1
+            retention_time[3] = 0
+            ms_level[4] = 3
+            precursor[5] = 0.5
+            precursor[GEMS_SPLIT_CHUNK_ROWS * 18 + 1] = np.inf
+            retention_time[GEMS_SPLIT_CHUNK_ROWS * 18 + 2] = np.nan
+            ms_level[GEMS_SPLIT_CHUNK_ROWS * 18 + 3] = np.nan
+            precursor[GEMS_SPLIT_CHUNK_ROWS * 18 + 4] = 0.0
+            _write_fake_hdf5_shards(
+                self._artifact_dir(cfg),
+                [source_size // 2, source_size - source_size // 2],
+                precursor_mz=precursor,
+                retention_time=retention_time,
+                ms_level=ms_level,
+            )
+
+            datamodule = gems.GemsDataModule(cfg, seed=42)
+            train = datamodule._get_dataset("train")
+            validation = datamodule._get_dataset("validation")
+            train_indices = set(
+                train.source_indices(np.arange(len(train))).tolist()
+            )
+            validation_indices = set(
+                validation.source_indices(np.arange(len(validation))).tolist()
+            )
+
+            self.assertFalse(train_indices & validation_indices)
+            self.assertEqual(
+                train_indices | validation_indices,
+                set(range(source_size)) - invalid,
+            )
+            self.assertEqual(
+                datamodule.info["gems_eligibility"],
+                {
+                    "version": "bounded_precursor_rt_ms2_v3",
+                    "rule": (
+                        "isfinite(ms_level) and ms_level == 2 and "
+                        "isfinite(precursor_mz) and min_precursor_mz <= "
+                        "precursor_mz and precursor_mz <= "
+                        "max_precursor_mz and isfinite(retention_time) and "
+                        "retention_time > 0"
+                    ),
+                    "ms_level_dataset": "MS level",
+                    "required_ms_level": 2,
+                    "precursor_dataset": "precursor_mz",
+                    "spectrum_dataset": "spectrum",
+                    "spectrum_trailing_shape": [2, 128],
+                    "retention_time_dataset": "RT",
+                    "min_precursor_mz": 1.0,
+                    "max_precursor_mz": 1000.0,
+                    "source_count": source_size,
+                    "eligible_count": source_size - len(invalid),
+                    "excluded_count": len(invalid),
+                    "train_source_count": source_size - GEMS_SPLIT_CHUNK_ROWS,
+                    "train_eligible_count": (
+                        source_size - GEMS_SPLIT_CHUNK_ROWS - 5
+                    ),
+                    "train_excluded_count": 5,
+                    "validation_source_count": GEMS_SPLIT_CHUNK_ROWS,
+                    "validation_eligible_count": GEMS_SPLIT_CHUNK_ROWS - 4,
+                    "validation_excluded_count": 4,
+                },
+            )
+
+    def test_validation_sampler_is_deterministic_and_not_source_ordered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cfg = self._make_config(tmp_path)
+            cfg.batch_size = 16
+            source_size = GEMS_SPLIT_CHUNK_ROWS * GEMS_SPLIT_MODULUS
+            _write_fake_hdf5_shards(
+                self._artifact_dir(cfg),
+                [source_size],
+                precursor_mz=np.full(source_size, 100.0, dtype=np.float32),
+            )
+
+            datamodule = gems.GemsDataModule(cfg, seed=999)
+            first = next(
+                iter(datamodule.val_loader_for_eval(augment=False).batch_sampler)
+            )
+            second = next(
+                iter(datamodule.val_loader_for_eval(augment=False).batch_sampler)
+            )
+
+            self.assertEqual(first, second)
+            self.assertNotEqual(first, list(range(len(first))))
 
     def test_datamodule_keeps_num_peaks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -443,7 +664,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             self.assertFalse(set(rank_batches[0][step]) & set(rank_batches[1][step]))
         self.assertEqual(
             sorted(value for batches in rank_batches for batch in batches for value in batch),
-            list(range(8)),
+            list(range(1, 9)),
         )
         self.assertEqual([len(batches) for batches in offset_rank_batches], [1, 1])
         self.assertEqual(
@@ -537,6 +758,7 @@ class MassSpecPreprocessTests(unittest.TestCase):
                     "instrument_type_id": 0,
                     "collision_energy": 0.0,
                     "collision_energy_present": 0,
+                    "charge": 1.0,
                     "probe_valid_mol": True,
                     "probe_maccs": torch.zeros(166, dtype=torch.int32),
                     "probe_morgan": torch.zeros(4096, dtype=torch.int32),
@@ -554,6 +776,7 @@ class MassSpecPreprocessTests(unittest.TestCase):
                     "instrument_type_id": 0,
                     "collision_energy": 0.0,
                     "collision_energy_present": 0,
+                    "charge": 1.0,
                     "probe_valid_mol": True,
                     "probe_maccs": torch.zeros(166, dtype=torch.int32),
                     "probe_morgan": torch.zeros(4096, dtype=torch.int32),
@@ -615,6 +838,7 @@ class MassSpecPreprocessTests(unittest.TestCase):
                     "instrument_type_id": 0,
                     "collision_energy": 0.0,
                     "collision_energy_present": 0,
+                    "charge": 1.0,
                     "probe_valid_mol": True,
                     "probe_maccs": torch.zeros(166, dtype=torch.int32),
                     "probe_morgan": torch.zeros(4096, dtype=torch.int32),

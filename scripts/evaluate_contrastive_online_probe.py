@@ -12,12 +12,11 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from spectra_learning.data.spectra import (
-    DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
-    DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-    DEFAULT_MAX_PRECURSOR_MZ,
-    DEFAULT_MIN_PEAK_INTENSITY,
-    DEFAULT_PEAK_FILTERING,
+from spectra_learning.data.contracts import (
+    data_provenance_contract,
+    peak_preprocessing_contract,
+    validate_data_provenance_contract,
+    validate_peak_preprocessing_contract,
 )
 from spectra_learning.data.massspec_probe import MassSpecProbeData
 from spectra_learning.data.massspec_targets import MACCS_FINGERPRINT_BITS
@@ -33,6 +32,7 @@ from spectra_learning.training.contrastive import (
     ContrastiveOnlineBatchCollator,
     ContrastiveOnlineDataset,
     _load_contrastive_split,
+    _peak_collator_kwargs,
     build_contrastive_module,
 )
 from spectra_learning.training.storage import normalize_storage_path, write_text
@@ -72,6 +72,8 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
         map_location="cpu",
         weights_only=True,
     )
+    validate_peak_preprocessing_contract(checkpoint, config)
+    validate_data_provenance_contract(checkpoint, probe_data.info)
     load_resume_model_state(module.model, checkpoint["model"])
     load_resume_covariance_pooler_state(module.pooler, checkpoint_path, checkpoint)
     module.online_probe.load_state_dict(checkpoint["online_probe"])
@@ -94,39 +96,9 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
         pin_memory=bool(config.get("dataloader_pin_memory", False)),
         collate_fn=ContrastiveOnlineBatchCollator(
             split,
-            num_peaks=int(config.get("num_peaks", 60)),
-            max_precursor_mz=float(
-                config.get("max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
-            ),
-            min_peak_intensity=float(
-                config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)
-            ),
-            peak_drop_min_intensity=float(
-                config.get(
-                    "peak_drop_min_intensity",
-                    config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY),
-                )
-            ),
-            peak_ordering=str(config.get("peak_ordering", "mz")),
-            precursor_peak_exclusion_window_da=float(
-                config.get("precursor_peak_exclusion_window_da", 0.0)
-            ),
-            peak_filtering=str(config.get("peak_filtering", DEFAULT_PEAK_FILTERING)),
-            grouped_peak_shoulder_da=float(
-                config.get(
-                    "grouped_peak_shoulder_da",
-                    DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-                )
-            ),
-            grouped_peak_isotope_charges=tuple(
-                int(charge)
-                for charge in config.get(
-                        "grouped_peak_isotope_charges",
-                        DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
-                    )
-                ),
-            ),
-        )
+            **_peak_collator_kwargs(config),
+        ),
+    )
 
     logits_by_batch = []
     targets_by_batch = []
@@ -145,19 +117,7 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
                 if autocast_dtype is not None
                 else torch.inference_mode()
             ):
-                peak_embeddings, pair_embeddings = (
-                    module.model.encoder.forward_with_pair(
-                        batch["peak_mz"],
-                        batch["peak_intensity"],
-                        valid_mask=batch["peak_valid_mask"],
-                        precursor_mz=batch.get("precursor_mz", None),
-                    )
-                )
-                pooled = module.pooler(
-                    peak_embeddings.float(),
-                    batch["peak_valid_mask"].to(dtype=torch.bool),
-                    pair_embeddings.float(),
-                )
+                pooled = module._pooled_features(batch)
                 logits = module.online_probe(pooled)
             logits_by_batch.append(logits.float().cpu().numpy())
             targets_by_batch.append(batch["probe_maccs"].cpu().numpy())
@@ -176,11 +136,18 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
     metrics["contrastive_online_probe/global_step"] = float(checkpoint["global_step"])
     metrics["contrastive_online_probe/samples"] = float(targets.shape[0])
     metrics["contrastive_online_probe/maccs_bits"] = float(MACCS_FINGERPRINT_BITS)
-    print(json.dumps(metrics, indent=2, sort_keys=True))
+    output = {
+        "metrics": metrics,
+        "split": args.split,
+        "checkpoint_data_provenance": checkpoint["data_provenance"],
+        "evaluation_data_provenance": data_provenance_contract(probe_data.info),
+        "peak_preprocessing": peak_preprocessing_contract(config),
+    }
+    print(json.dumps(output, indent=2, sort_keys=True))
     if args.metrics_json:
         write_text(
             normalize_storage_path(args.metrics_json),
-            json.dumps(metrics, indent=2, sort_keys=True),
+            json.dumps(output, indent=2, sort_keys=True),
         )
     if args.logits_npz:
         np.savez_compressed(

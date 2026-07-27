@@ -8,6 +8,7 @@ from typing import Any
 import torch
 from ml_collections import config_dict
 
+from spectra_learning.data.contracts import peak_preprocessing_contract
 from spectra_learning.data.gems.collate import GemsBatchCollator
 from spectra_learning.data.gems.conversion import format_batch
 from spectra_learning.data.gems.datamodule import GemsDataModule
@@ -53,6 +54,11 @@ SPECTRA_AR_TARGET_KINDS = (
     SpectraARTokenKind.INTENSITY,
 )
 
+_REMOVED_AR_PREPROCESSING_KEYS = (
+    "ar_mz_max",
+    "ar_precursor_mz_max",
+)
+
 
 @dataclass(frozen=True)
 class SpectraARTokenizerConfig:
@@ -70,17 +76,22 @@ class SpectraARTokenizerConfig:
         cls,
         config: config_dict.ConfigDict,
     ) -> "SpectraARTokenizerConfig":
+        for key in _REMOVED_AR_PREPROCESSING_KEYS:
+            if key in config:
+                raise ValueError(
+                    f"{key} has been removed; AR tokenization uses the shared "
+                    "peak preprocessing scales."
+                )
+        preprocessing = peak_preprocessing_contract(config)
         return cls(
             max_num_peaks=int(
-                config.get("ar_max_num_peaks", config.get("num_peaks", 128))
-            ),
-            mz_max=float(config.get("ar_mz_max", PEAK_MZ_MAX)),
-            precursor_mz_max=float(
                 config.get(
-                    "ar_precursor_mz_max",
-                    config.get("max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ),
+                    "ar_max_num_peaks",
+                    preprocessing["num_peaks"],
                 )
             ),
+            mz_max=PEAK_MZ_MAX,
+            precursor_mz_max=preprocessing["max_precursor_mz"],
             mz_bin_widths=tuple(
                 float(width)
                 for width in config.get(

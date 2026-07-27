@@ -11,6 +11,7 @@ from ml_collections import config_dict
 
 import train
 from spectra_learning.data import murcko as murcko_data
+from spectra_learning.data.massspec_probe import massspec_source_cache_dir
 from spectra_learning.data.massspec_targets import MACCS_FINGERPRINT_BITS
 from spectra_learning.training import contrastive as contrastive_training
 from spectra_learning.training.contrastive import (
@@ -111,7 +112,9 @@ def _write_artifact(root: Path) -> None:
         "metadata_version": murcko_data.NIST_MURCKO_METADATA_VERSION,
         "artifact_format": murcko_data.NIST_MURCKO_ARTIFACT_FORMAT,
         "storage_format": "parquet",
+        "min_precursor_mz": 1.0,
         "max_precursor_mz": 1000.0,
+        "num_peaks_input": 128,
         "adduct_vocab": {"[M+H]+": 0},
         "instrument_type_vocab": {"Q-TOF": 0},
         "dreams_dim": 0,
@@ -130,36 +133,10 @@ def _write_artifact(root: Path) -> None:
     (root / "metadata.json").write_text(json.dumps(metadata))
 
 
-def _write_mcebio_artifact(root: Path) -> None:
-    root.mkdir(parents=True)
-    rows = [("CCS", 10.0), ("CCS", 20.0)]
-    _write_split(root, "all", rows)
-    metadata = {
-        "metadata_version": murcko_data.NIST_MURCKO_METADATA_VERSION,
-        "artifact_format": murcko_data.NIST_MURCKO_ARTIFACT_FORMAT,
-        "storage_format": "parquet",
-        "max_precursor_mz": 1000.0,
-        "adduct_vocab": {"[M+H]+": 0},
-        "instrument_type_vocab": {"Q-TOF": 0},
-        "dreams_dim": 0,
-        "probe_maccs_bits": 166,
-        "probe_morgan_bits": 4096,
-        "probe_morgan_radius": 2,
-        "pairwise_alignment_available": False,
-        "pairwise_alignment_num_pairs": 0,
-        "pairwise_alignment_num_endpoints": 0,
-        "all_files": ["all.parquet"],
-        "all_lengths": [len(rows)],
-        "all_size": len(rows),
-        "all_positive": 0,
-    }
-    (root / "metadata.json").write_text(json.dumps(metadata))
-
-
 def _config(artifact_dir: Path) -> config_dict.ConfigDict:
     cfg = config_dict.ConfigDict()
     cfg.artifact_dir = str(artifact_dir)
-    cfg.nist_murcko_probe_hf_subdir = "nist_murcko_probe"
+    cfg.nist_murcko_probe_hf_subdir = murcko_data.NIST_MURCKO_PREPARED_SUBDIR
     cfg.nist_murcko_probe_repo_id = "unused/local"
     cfg.nist_murcko_probe_revision = "main"
     cfg.seed = 7
@@ -321,8 +298,12 @@ def test_contrastive_collators_normalize_collision_energy() -> None:
 
 def test_contrastive_smoke_training_writes_frozen_pooler_checkpoint(tmp_path: Path):
     artifact_dir = tmp_path / "artifacts"
-    _write_artifact(artifact_dir / "nist_murcko_probe")
-    _write_mcebio_artifact(artifact_dir / "mcebio_murcko_probe")
+    source_dir = massspec_source_cache_dir(
+        artifact_dir,
+        "unused/local",
+        "main",
+    )
+    _write_artifact(source_dir / murcko_data.NIST_MURCKO_PREPARED_SUBDIR)
     workdir = tmp_path / "work"
 
     results = train_contrastive(_config(artifact_dir), workdir)
@@ -377,6 +358,7 @@ def test_contrastive_loss_uses_normalized_pooler_output(monkeypatch):
             *,
             valid_mask,
             precursor_mz,
+            spectrum_metadata=None,
         ):
             batch_size, num_peaks = peak_mz.shape
             peak_embeddings = peak_mz.new_zeros(batch_size, num_peaks, 3)
@@ -446,6 +428,7 @@ def test_encoder_anchor_loss_compares_student_to_teacher_pooler_output():
             *,
             valid_mask,
             precursor_mz,
+            spectrum_metadata=None,
         ):
             batch_size, num_peaks = peak_mz.shape
             peak_embeddings = peak_mz.new_full((batch_size, num_peaks, 1), self.value)

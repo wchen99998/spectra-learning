@@ -14,7 +14,7 @@ class FourierFeatures(nnx.Module):
     def __init__(
         self,
         x_min: float = 3e-3,
-        x_max: float = 1000.0,
+        x_max: float = PEAK_MZ_MAX,
         *,
         num_freqs: int = 256,
     ) -> None:
@@ -53,7 +53,7 @@ class PeakFeatureEmbedder(nnx.Module):
         fourier_mlp_hidden_dim: int | None = None,
         fourier_mlp_num_layers: int = 2,
         fourier_x_min: float = 3e-3,
-        fourier_x_max: float = 1000.0,
+        fourier_x_max: float = PEAK_MZ_MAX,
         fourier_num_freqs: int = 256,
         mz_scale: float = PEAK_MZ_MAX,
         mz_embedding: str = "fourier",

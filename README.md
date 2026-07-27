@@ -19,19 +19,15 @@ Top-level `metadata.json` records the 100k without-replacement probe selection,
 the selected Murcko histogram keys, and the zero-overlap check against the
 retrieval pool.
 
-Use the new online-probe split with the existing MSG probe loader by pointing
-the NIST probe repo/subdirectory at the new dataset. The MCEBIO sulfur test set
-continues to load from the established evaluation repo by default:
+Use the online-probe split with the MSG probe loader by pinning the NIST
+dataset revision:
 
 ```python
 cfg.nist_murcko_probe_repo_id = "wchen99998/msms_nist_disjoint_probe_retrieval_20260622"
+cfg.nist_murcko_probe_revision = "f5b51db72caa9205240d344882a9f4baec10d9b3"
 cfg.nist_murcko_probe_hf_subdir = "nist_100k_online_probe"
 cfg.nist_murcko_probe_include_dreams_auxiliary = False
 ```
-
-If the MCEBIO artifact also lives somewhere else, set
-`cfg.mcebio_murcko_probe_repo_id`, `cfg.mcebio_murcko_probe_revision`, and
-`cfg.mcebio_murcko_probe_hf_subdir` explicitly.
 
 ## Training Entry Points
 
@@ -288,8 +284,6 @@ Notes from validation:
   JAX probe ran distributed on both processes, early-stopped at epoch 20/100,
   selected best epoch 3 by the configured validation metric, gathered final
   predictions to process 0, and uploaded W&B metrics and curves.
-- MCEBIO sulfur final-probe metrics were also uploaded:
-  `samples=47934`, `auc_sulfur=0.6712209004068627`.
 - `dataloader_num_workers=0` is used for the smoke run so SkyPilot teardown is
   not held open by orphaned dataloader worker processes.
 - Final validation must use the augmented validation loader so JAX receives
@@ -322,16 +316,11 @@ Additional `test-tpu` debug notes from 2026-06-17:
 - Cadence semantics: `msg_probe_every_n_steps=1` means one epoch because values
   in `(0, 1]` are fractional epoch intervals. Use `msg_probe_every_n_steps=0` to
   run the probe at the final training step of a capped smoke run.
-- A capped JAX MSG probe with 1024 train samples, 512 test samples, 512 MCEBio
-  samples, two epochs, and `single_pair_covariance` took about 194 s on the
-  first invocation because it compiled probe feature extraction and wrote the
-  persistent cache. The cached rerun took about 15.5 s total, with
-  `msg_probe/jax_train_epoch_seconds` about 10.9 s.
 - The current `single_pair_covariance` full probe still recomputes encoder and
   trainable covariance-pooler features every probe epoch. With the 100k train,
-  25k test, and 47,933 MCEBio splits, the default 100-epoch probe can still take
-  hours even after JIT caching. Reducing probe epochs/samples or changing the
-  probe variant is the safe near-term way to keep debug runs short.
+  25k test splits, the default 100-epoch probe can still take hours even after
+  JIT caching. Reducing probe epochs/samples or changing the probe variant is
+  the safe near-term way to keep debug runs short.
 - MaxText's remat tuning guide orders policies by speed versus HBM: `minimal`
   is near the high-HBM/low-recompute end, while `full` is the aggressive
   low-HBM/high-recompute end. MaxText `minimal` is not equivalent to this

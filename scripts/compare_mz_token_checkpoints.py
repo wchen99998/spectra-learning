@@ -13,6 +13,11 @@ from ml_collections import config_dict
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from spectra_learning.data.contracts import (
+    peak_preprocessing_contract,
+    validate_data_provenance_contract,
+    validate_peak_preprocessing_contract,
+)
 from spectra_learning.data.gems.datamodule import GemsDataModule
 from spectra_learning.models.factory import build_model_from_config
 from spectra_learning.training.batch import BatchPrefetcher
@@ -58,6 +63,7 @@ def _load_model(
     run_dir: Path,
     config: config_dict.ConfigDict,
     device: torch.device,
+    data_provenance: dict[str, Any],
 ) -> torch.nn.Module:
     model = build_model_from_config(config)
     checkpoint = load_torch_checkpoint(
@@ -65,6 +71,8 @@ def _load_model(
         map_location="cpu",
         weights_only=True,
     )
+    validate_peak_preprocessing_contract(checkpoint, config)
+    validate_data_provenance_contract(checkpoint, data_provenance)
     load_resume_model_state(model, checkpoint["model"])
     model.to(device).eval()
     compile_forward(model, config)
@@ -107,6 +115,10 @@ def compare(args: argparse.Namespace) -> dict[str, Any]:
     token_config = _load_config(args.token_run)
     assert fourier_config.jepa_mae_mz_bin_size == token_config.jepa_mae_mz_bin_size
     assert fourier_config.jepa_mae_mz_max == token_config.jepa_mae_mz_max
+    if peak_preprocessing_contract(fourier_config) != peak_preprocessing_contract(
+        token_config
+    ):
+        raise ValueError("Compared checkpoints use different peak preprocessing")
     seed_all(int(fourier_config.seed))
     datamodule = GemsDataModule(
         fourier_config,
@@ -115,8 +127,18 @@ def compare(args: argparse.Namespace) -> dict[str, Any]:
         distributed_rank=distributed.rank,
         distributed_local_rank=distributed.local_rank,
     )
-    fourier = _load_model(args.fourier_run, fourier_config, distributed.device)
-    token = _load_model(args.token_run, token_config, distributed.device)
+    fourier = _load_model(
+        args.fourier_run,
+        fourier_config,
+        distributed.device,
+        datamodule.info,
+    )
+    token = _load_model(
+        args.token_run,
+        token_config,
+        distributed.device,
+        datamodule.info,
+    )
     autocast_dtype = parse_autocast_dtype(
         fourier_config.get("autocast_dtype", "bf16")
     )

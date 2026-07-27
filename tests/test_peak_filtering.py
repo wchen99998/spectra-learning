@@ -1,9 +1,11 @@
 import numpy as np
+import pytest
 import torch
 from ml_collections import config_dict
 
 from spectra_learning.data.gems.collate import GemsBatchCollator
 from spectra_learning.data.gems.settings import GemsDataConfig
+from spectra_learning.data.contracts import peak_preprocessing_contract
 from spectra_learning.data.spectra import (
     ASSUMED_PRECURSOR_CHARGE,
     COLLISION_ENERGY_MAX,
@@ -28,6 +30,43 @@ def _numpy_spectrum_metadata(
         "collision_energy": np.float32(collision_energy),
         "charge": np.float32(charge),
     }
+
+
+@pytest.mark.parametrize(
+    "config",
+    (
+        {"peak_filtering": "typo"},
+        {"peak_ordering": "typo"},
+    ),
+)
+def test_peak_preprocessing_contract_rejects_unknown_modes(config) -> None:
+    with pytest.raises(ValueError, match="Unknown peak_"):
+        peak_preprocessing_contract(config)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"peak_filtering": "typo"},
+        {"peak_ordering": "typo"},
+    ),
+)
+def test_peak_preprocessor_rejects_unknown_modes(overrides) -> None:
+    kwargs = {
+        "num_peaks": 1,
+        "peak_drop_min_intensity": 0.0,
+        "peak_ordering": "mz",
+        "max_precursor_mz": 1000.0,
+        "peak_filtering": PEAK_FILTERING_TOP_INTENSITY,
+        **overrides,
+    }
+    with pytest.raises(ValueError, match="Unknown peak_"):
+        preprocess_peak_batch_torch(
+            torch.tensor([[100.0]]),
+            torch.tensor([[1.0]]),
+            torch.tensor([200.0]),
+            **kwargs,
+        )
 
 
 def test_grouped_peak_filtering_keeps_group_representatives_torch() -> None:
@@ -155,6 +194,87 @@ def test_numpy_and_torch_peak_preprocessing_randomized_parity() -> None:
                         np.testing.assert_array_equal(actual, expected)
 
 
+def test_peak_preprocessing_uses_relative_intensity_thresholds() -> None:
+    raw = np.zeros((1, 2, 128), dtype=np.float32)
+    raw[0, 0, :3] = [100.0, 200.0, 300.0]
+    raw[0, 1, :3] = [1_000_000.0, 200.0, 10.0]
+    normalized = spectra_from_peak_lists(
+        [[100.0, 200.0, 300.0]],
+        [[1_000_000.0, 200.0, 10.0]],
+    )
+    precursor_mz = np.asarray([500.0], dtype=np.float32)
+    kwargs = {
+        "num_peaks": 3,
+        "peak_drop_min_intensity": 1e-4,
+        "peak_ordering": "mz",
+        "max_precursor_mz": 1000.0,
+        "min_peak_intensity": 1e-4,
+    }
+
+    raw_numpy = preprocess_peak_batch_numpy(raw, precursor_mz, **kwargs)
+    normalized_numpy = preprocess_peak_batch_numpy(normalized, precursor_mz, **kwargs)
+    raw_torch = preprocess_peak_batch_torch(
+        torch.from_numpy(raw[:, 0]),
+        torch.from_numpy(raw[:, 1]),
+        torch.from_numpy(precursor_mz),
+        **kwargs,
+    )
+    normalized_torch = preprocess_peak_batch_torch(
+        torch.from_numpy(normalized[:, 0]),
+        torch.from_numpy(normalized[:, 1]),
+        torch.from_numpy(precursor_mz),
+        **kwargs,
+    )
+
+    for key, expected in raw_numpy.items():
+        for actual in (
+            normalized_numpy[key],
+            raw_torch[key].numpy(),
+            normalized_torch[key].numpy(),
+        ):
+            if np.issubdtype(expected.dtype, np.floating):
+                np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-7)
+            else:
+                np.testing.assert_array_equal(actual, expected)
+    np.testing.assert_array_equal(
+        raw_numpy["peak_valid_mask"],
+        [[True, True, False]],
+    )
+
+
+def test_peak_preprocessing_marks_zero_placeholder_valid() -> None:
+    spectra = np.zeros((1, 2, 3), dtype=np.float32)
+    spectra[0, 0] = [100.0, 200.0, 300.0]
+    precursor_mz = np.asarray([500.0], dtype=np.float32)
+    kwargs = {
+        "num_peaks": 3,
+        "peak_drop_min_intensity": 1e-4,
+        "peak_ordering": "mz",
+        "max_precursor_mz": 1000.0,
+    }
+
+    numpy_batch = preprocess_peak_batch_numpy(spectra, precursor_mz, **kwargs)
+    torch_batch = preprocess_peak_batch_torch(
+        torch.from_numpy(spectra[:, 0]),
+        torch.from_numpy(spectra[:, 1]),
+        torch.from_numpy(precursor_mz),
+        **kwargs,
+    )
+
+    for key, expected in numpy_batch.items():
+        np.testing.assert_array_equal(torch_batch[key].numpy(), expected)
+    np.testing.assert_array_equal(
+        numpy_batch["peak_valid_mask"],
+        [[True, False, False]],
+    )
+    np.testing.assert_array_equal(numpy_batch["peak_mz"], np.zeros((1, 3)))
+    np.testing.assert_array_equal(numpy_batch["peak_intensity"], np.zeros((1, 3)))
+    np.testing.assert_array_equal(
+        numpy_batch["peak_group_id"],
+        np.full((1, 3), PEAK_GROUP_PADDING_ID),
+    )
+
+
 def test_spectra_from_peak_lists_pads_truncates_and_normalizes() -> None:
     spectra = spectra_from_peak_lists(
         [[100.0, 200.0], list(np.arange(200, dtype=np.float32))],
@@ -272,3 +392,38 @@ def test_gems_collator_normalizes_spectrum_metadata() -> None:
     assert COLLISION_ENERGY_MAX == 100.0
     assert PRECURSOR_CHARGE_MAX == 21.0
     assert ASSUMED_PRECURSOR_CHARGE == 1.0
+
+
+def test_gems_collator_canonicalizes_precursor_charge() -> None:
+    collator = GemsBatchCollator(
+        augment=False,
+        num_target_blocks=1,
+        context_fraction=0.5,
+        target_fraction=0.5,
+        block_min_len=1,
+        num_peaks=2,
+        max_precursor_mz=1000.0,
+        min_peak_intensity=0.0,
+        peak_drop_min_intensity=0.0,
+        peak_ordering="mz",
+        precursor_peak_exclusion_window_da=0.0,
+    )
+    spectra = torch.zeros(2, 128, dtype=torch.float32)
+    spectra[0, 0] = 100.0
+    spectra[1, 0] = 1.0
+    samples = [
+        {
+            "spectra": spectra.clone(),
+            "precursor_mz_raw": torch.tensor(500.0),
+            "collision_energy": torch.tensor(35.0),
+            "charge": torch.tensor(charge),
+        }
+        for charge in (0.0, -2.0, float("nan"))
+    ]
+
+    batch = collator(samples)
+
+    torch.testing.assert_close(
+        batch["charge"],
+        torch.tensor([1.0, 2.0, 1.0]),
+    )

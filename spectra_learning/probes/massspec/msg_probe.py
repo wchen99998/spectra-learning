@@ -12,10 +12,12 @@ import torch.nn.functional as F
 from ml_collections import config_dict
 from torch.nn.parallel import DistributedDataParallel
 
+from spectra_learning.data.contracts import peak_preprocessing_contract
 from spectra_learning.data.gems.conversion import numpy_batch_to_torch
 from spectra_learning.data.loading import local_batch_size
 from spectra_learning.models.pooling import CovariancePool
 from spectra_learning.models.model import PeakSetJEPA
+from spectra_learning.models.spectrum_metadata import torch_spectrum_metadata_from_batch
 from spectra_learning.data.massspec_probe import MassSpecProbeData
 from spectra_learning.probes.massspec.msg_modules import (
     MsgLinearProbe,
@@ -35,7 +37,6 @@ from spectra_learning.probes.massspec.msg_probe_common import (
     resolve_probe_warmup_steps as _resolve_probe_warmup_steps,
     run_repeated_probe as _run_repeated_probe,
     score_epoch_state as _score_epoch_state,
-    sulfur_metric_subset as _sulfur_metric_subset,
 )
 from spectra_learning.probes.massspec.msg_settings import (
     MACCS_TASK as _MACCS_TASK,
@@ -968,7 +969,6 @@ class _MsgProbeTrainingState:
     select_metric: str
     higher_is_better: bool
     best_metrics_by_variant: dict[str, dict[str, Any]]
-    best_test_state_by_variant: dict[str, EpochState]
     best_metric_values: dict[str, float]
     best_state_by_variant: dict[str, dict[str, torch.Tensor]]
     epochs_without_improvement: dict[str, int]
@@ -987,6 +987,7 @@ def _make_msg_probe_feature_extractor(
                 batch["peak_intensity"],
                 valid_mask=batch["peak_valid_mask"],
                 precursor_mz=batch.get("precursor_mz", None),
+                spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
             )
             return embeddings, pair_embeddings
         return model.encoder(
@@ -994,6 +995,7 @@ def _make_msg_probe_feature_extractor(
             batch["peak_intensity"],
             valid_mask=batch["peak_valid_mask"],
             precursor_mz=batch.get("precursor_mz", None),
+            spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
         )
 
     return feature_extractor
@@ -1025,6 +1027,7 @@ def _collect_msg_probe_task_spec(
     early_stopping: bool,
     distributed: DistributedContext | None,
 ) -> MsgProbeTaskSpec:
+    del test_seed_base, early_stopping
     train_targets = _collect_split_targets(
         probe_data=probe_data,
         split="massspec_train",
@@ -1035,31 +1038,9 @@ def _collect_msg_probe_task_spec(
         binary_tasks=binary_tasks,
         distributed=distributed,
     )
-    val_targets = _collect_split_targets(
-        probe_data=probe_data,
-        split="massspec_val",
-        peak_ordering=peak_ordering,
-        seed=train_seed_base + 10_000,
-        fingerprint_task=fingerprint_task,
-        regression_tasks=regression_tasks,
-        binary_tasks=binary_tasks,
-        distributed=distributed,
-    )
-    selection_targets = val_targets
-    if not early_stopping:
-        selection_targets = _collect_split_targets(
-            probe_data=probe_data,
-            split="massspec_test",
-            peak_ordering=peak_ordering,
-            seed=test_seed_base,
-            fingerprint_task=fingerprint_task,
-            regression_tasks=regression_tasks,
-            binary_tasks=binary_tasks,
-            distributed=distributed,
-        )
     return _build_task_spec(
         train_targets=train_targets,
-        test_targets=selection_targets,
+        test_targets=train_targets,
         fingerprint_task=fingerprint_task,
         regression_tasks=regression_tasks,
         binary_tasks=binary_tasks,
@@ -1074,6 +1055,7 @@ def _setup_msg_probe(
     repeat_index: int,
     distributed: DistributedContext | None,
     online_maccs_only: bool,
+    on_probe_data: Callable[[MassSpecProbeData], None] | None = None,
 ) -> _MsgProbeSetup:
     num_epochs = int(config.get("msg_probe_num_epochs", 5))
     learning_rate = float(config.get("msg_probe_learning_rate", 1e-3))
@@ -1092,7 +1074,6 @@ def _setup_msg_probe(
     early_stopping_min_epochs = int(
         config.get("msg_probe_early_stopping_min_epochs", 1)
     )
-    peak_ordering = str(config.get("peak_ordering", "intensity"))
     fingerprint_task = (
         _MACCS_TASK if online_maccs_only else resolve_msg_probe_fingerprint(config)
     )
@@ -1104,9 +1085,11 @@ def _setup_msg_probe(
         "distributed_local_rank": _distributed_local_rank(distributed),
     }
     if online_maccs_only:
-        probe_data_kwargs["include_mcebio"] = False
         probe_data_kwargs["maccs_only"] = True
     probe_data = MassSpecProbeData.from_config(config, **probe_data_kwargs)
+    if on_probe_data is not None:
+        on_probe_data(probe_data)
+    peak_ordering = peak_preprocessing_contract(config)["peak_ordering"]
     variants = msg_probe_variants_from_config(config)
     feature_extractor = _make_msg_probe_feature_extractor(
         model,
@@ -1216,7 +1199,6 @@ def _initialize_msg_probe_training(
         select_metric=select_metric,
         higher_is_better=higher_is_better,
         best_metrics_by_variant={},
-        best_test_state_by_variant={},
         best_metric_values={
             variant: -float("inf") if higher_is_better else float("inf")
             for variant in setup.variants
@@ -1279,20 +1261,14 @@ def _train_and_evaluate_msg_probe_epoch(
     )
     for probe in state.probes.values():
         probe.eval()
-    eval_split = "massspec_val" if setup.early_stopping else "massspec_test"
-    eval_seed = (
-        setup.train_seed_base + 10_000
-        if setup.early_stopping
-        else setup.test_seed_base
-    )
     eval_states = _evaluate_sequence_probe_split(
         probe_data=setup.probe_data,
         probes=state.probes,
         task_spec=setup.task_spec,
         feature_extractor=setup.feature_extractor,
         move_batch=setup.move_batch,
-        split=eval_split,
-        seed=eval_seed,
+        split="massspec_val",
+        seed=setup.train_seed_base + 10_000,
         peak_ordering=setup.peak_ordering,
         max_samples=None,
         sample_randomly=False,
@@ -1306,10 +1282,9 @@ def _msg_probe_selection_metric_key(
     variant: str,
     *,
     select_metric: str,
-    early_stopping: bool,
 ) -> str:
     key = _msg_probe_variant_metric_key(variant, select_metric)
-    return key.replace("/test/", "/val/") if early_stopping else key
+    return key.replace("/test/", "/val/")
 
 
 def _log_msg_probe_epoch_metrics(
@@ -1320,32 +1295,31 @@ def _log_msg_probe_epoch_metrics(
     epoch_idx: int,
 ) -> None:
     variant_prefix = f"msg_probe/{variant}"
-    eval_name = "val" if setup.early_stopping else "test"
     log.info(
         "MSG probe [%s] epoch %d/%d train_samples=%d %s_auc_%s_mean=%.4f %s_average_precision_%s_mean=%.4f %s_recall_%s_mean=%.4f %s_precision_%s_mean=%.4f %s_bits=%d",
         variant,
         epoch_idx + 1,
         setup.num_epochs,
         int(variant_metrics[f"{variant_prefix}/train/samples"]),
-        eval_name,
+        "val",
         setup.fingerprint_task,
         variant_metrics[
-            f"{variant_prefix}/{eval_name}/auc_{setup.fingerprint_task}_mean"
+            f"{variant_prefix}/val/auc_{setup.fingerprint_task}_mean"
         ],
-        eval_name,
+        "val",
         setup.fingerprint_task,
         variant_metrics[
-            f"{variant_prefix}/{eval_name}/average_precision_{setup.fingerprint_task}_mean"
+            f"{variant_prefix}/val/average_precision_{setup.fingerprint_task}_mean"
         ],
-        eval_name,
+        "val",
         setup.fingerprint_task,
         variant_metrics[
-            f"{variant_prefix}/{eval_name}/recall_{setup.fingerprint_task}_mean"
+            f"{variant_prefix}/val/recall_{setup.fingerprint_task}_mean"
         ],
-        eval_name,
+        "val",
         setup.fingerprint_task,
         variant_metrics[
-            f"{variant_prefix}/{eval_name}/precision_{setup.fingerprint_task}_mean"
+            f"{variant_prefix}/val/precision_{setup.fingerprint_task}_mean"
         ],
         setup.fingerprint_task,
         int(variant_metrics[f"{variant_prefix}/num_{setup.fingerprint_task}_bits"]),
@@ -1361,7 +1335,6 @@ def _score_msg_probe_epoch(
     epoch_idx: int,
     on_epoch_end: Callable[[dict[str, float]], None] | None,
 ) -> bool:
-    eval_name = "val" if setup.early_stopping else "test"
     epoch_metrics: dict[str, float] = {}
     for variant in setup.variants:
         variant_prefix = f"msg_probe/{variant}"
@@ -1372,7 +1345,7 @@ def _score_msg_probe_epoch(
                 task_spec=setup.task_spec,
             ),
             **_score_epoch_state(
-                prefix=f"{variant_prefix}/{eval_name}",
+                prefix=f"{variant_prefix}/val",
                 epoch_state=eval_states[variant],
                 task_spec=setup.task_spec,
             ),
@@ -1385,7 +1358,6 @@ def _score_msg_probe_epoch(
         select_metric = _msg_probe_selection_metric_key(
             variant,
             select_metric=state.select_metric,
-            early_stopping=setup.early_stopping,
         )
         current_value = variant_metrics[select_metric]
         previous_best = state.best_metric_values[variant]
@@ -1400,8 +1372,6 @@ def _score_msg_probe_epoch(
             state.best_state_by_variant[variant] = copy.deepcopy(
                 state.probes[variant].state_dict()
             )
-            if not setup.early_stopping:
-                state.best_test_state_by_variant[variant] = eval_states[variant]
             state.epochs_without_improvement[variant] = 0
         else:
             state.epochs_without_improvement[variant] += 1
@@ -1444,78 +1414,39 @@ def _restore_best_msg_probe_states(
             )
 
 
-def _evaluate_final_msg_probe_splits(
+def _evaluate_final_msg_probe_split(
     *,
     setup: _MsgProbeSetup,
     state: _MsgProbeTrainingState,
-) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    if setup.early_stopping:
-        selected_probes = {
-            variant: state.probes[variant]
-            for variant in setup.variants
-            if variant in state.best_state_by_variant
-        }
-        final_test_states = _evaluate_sequence_probe_split(
-            probe_data=setup.probe_data,
-            probes=selected_probes,
-            task_spec=setup.task_spec,
-            feature_extractor=setup.feature_extractor,
-            move_batch=setup.move_batch,
-            split="massspec_test",
-            seed=setup.test_seed_base,
-            peak_ordering=setup.peak_ordering,
-            max_samples=None,
-            sample_randomly=False,
-            device=setup.device,
-            distributed=setup.distributed,
-        )
-        final_test_metrics = {
-            variant: _score_epoch_state(
-                prefix=f"msg_probe/{variant}/test",
-                epoch_state=epoch_state,
-                task_spec=setup.task_spec,
-                include_pr_curves=True,
-            )
-            for variant, epoch_state in final_test_states.items()
-        }
-    else:
-        final_test_metrics = {
-            variant: _score_epoch_state(
-                prefix=f"msg_probe/{variant}/test",
-                epoch_state=epoch_state,
-                task_spec=setup.task_spec,
-                include_pr_curves=True,
-            )
-            for variant, epoch_state in state.best_test_state_by_variant.items()
-        }
-    if setup.online_maccs_only:
-        return final_test_metrics, {}
-    mcebio_states = _evaluate_sequence_probe_split(
+) -> dict[str, dict[str, Any]]:
+    selected_probes = {
+        variant: state.probes[variant]
+        for variant in setup.variants
+        if variant in state.best_state_by_variant
+    }
+    final_test_states = _evaluate_sequence_probe_split(
         probe_data=setup.probe_data,
-        probes=state.probes,
+        probes=selected_probes,
         task_spec=setup.task_spec,
         feature_extractor=setup.feature_extractor,
         move_batch=setup.move_batch,
-        split="massspec_mcebio_test",
-        seed=setup.test_seed_base + 75_000,
+        split="massspec_test",
+        seed=setup.test_seed_base,
         peak_ordering=setup.peak_ordering,
         max_samples=None,
         sample_randomly=False,
         device=setup.device,
         distributed=setup.distributed,
     )
-    mcebio_metrics = {
-        variant: _sulfur_metric_subset(
-            _score_epoch_state(
-                prefix=f"msg_probe/{variant}/mcebio_sulfur_test",
-                epoch_state=epoch_state,
-                task_spec=setup.task_spec,
-                include_pr_curves=True,
-            )
+    return {
+        variant: _score_epoch_state(
+            prefix=f"msg_probe/{variant}/test",
+            epoch_state=epoch_state,
+            task_spec=setup.task_spec,
+            include_pr_curves=True,
         )
-        for variant, epoch_state in mcebio_states.items()
+        for variant, epoch_state in final_test_states.items()
     }
-    return final_test_metrics, mcebio_metrics
 
 
 def _merge_msg_probe_best_metrics(
@@ -1523,7 +1454,6 @@ def _merge_msg_probe_best_metrics(
     setup: _MsgProbeSetup,
     state: _MsgProbeTrainingState,
     final_test_metrics: dict[str, dict[str, Any]],
-    mcebio_metrics: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     best_metrics: dict[str, Any] = {}
     for variant in setup.variants:
@@ -1531,13 +1461,11 @@ def _merge_msg_probe_best_metrics(
         if not variant_metrics:
             continue
         variant_metrics.update(final_test_metrics.get(variant, {}))
-        variant_metrics.update(mcebio_metrics.get(variant, {}))
         best_metrics.update(variant_metrics)
         variant_prefix = f"msg_probe/{variant}"
         select_metric = _msg_probe_selection_metric_key(
             variant,
             select_metric=state.select_metric,
-            early_stopping=setup.early_stopping,
         )
         if _is_main(setup.distributed):
             log.info(
@@ -1578,7 +1506,7 @@ def _finalize_msg_probe_once(
     repeat_index: int,
 ) -> dict[str, Any]:
     _restore_best_msg_probe_states(setup, state)
-    final_test_metrics, mcebio_metrics = _evaluate_final_msg_probe_splits(
+    final_test_metrics = _evaluate_final_msg_probe_split(
         setup=setup,
         state=state,
     )
@@ -1586,7 +1514,6 @@ def _finalize_msg_probe_once(
         setup=setup,
         state=state,
         final_test_metrics=final_test_metrics,
-        mcebio_metrics=mcebio_metrics,
     )
     alignment_pooler = covariance_pooler
     if alignment_pooler is None and "covariance" in state.probes:
@@ -1627,6 +1554,7 @@ def _run_msg_probe_once(
     plot_step: int | None = None,
     distributed: DistributedContext | None = None,
     online_maccs_only: bool = False,
+    on_probe_data: Callable[[MassSpecProbeData], None] | None = None,
 ) -> dict[str, Any]:
     setup = _setup_msg_probe(
         config=config,
@@ -1635,6 +1563,7 @@ def _run_msg_probe_once(
         repeat_index=repeat_index,
         distributed=distributed,
         online_maccs_only=online_maccs_only,
+        on_probe_data=on_probe_data,
     )
     was_training = model.training
     model.eval()
@@ -1685,6 +1614,7 @@ def run_msg_probe(
     plot_step: int | None = None,
     distributed: DistributedContext | None = None,
     online_maccs_only: bool = False,
+    on_probe_data: Callable[[MassSpecProbeData], None] | None = None,
 ) -> dict[str, Any]:
     def run_once(
         repeat_index: int,
@@ -1701,6 +1631,7 @@ def run_msg_probe(
             plot_step=plot_step,
             distributed=distributed,
             online_maccs_only=online_maccs_only,
+            on_probe_data=on_probe_data,
         )
 
     metrics = _run_repeated_probe(
@@ -1776,11 +1707,11 @@ def _setup_dreams_probe(
     early_stopping_min_epochs = int(
         config.get("msg_probe_early_stopping_min_epochs", 1)
     )
-    peak_ordering = str(config.get("peak_ordering", "intensity"))
     fingerprint_task = resolve_msg_probe_fingerprint(config)
     data_config = config.copy_and_resolve_references()
     data_config.nist_murcko_probe_include_dreams_auxiliary = True
     probe_data = MassSpecProbeData.from_config(data_config)
+    peak_ordering = peak_preprocessing_contract(data_config)["peak_ordering"]
     dreams_dim = probe_data.dreams_dim
     if dreams_dim == 0:
         log.warning("No DreaMS embeddings in probe data; skipping Dreams probe")
@@ -1862,10 +1793,10 @@ def _initialize_dreams_probe_training(
         "msg_probe/",
         "dreams_probe/",
     )
-    if setup.early_stopping:
-        select_metric = select_metric.replace("/test/", "/val/")
-    else:
-        select_metric = select_metric.replace("/mean/", "/")
+    select_metric = select_metric.replace("/test/", "/val/").replace(
+        "/mean/",
+        "/",
+    )
     higher_is_better = msg_probe_metric_higher_is_better(select_metric)
     return _DreamsProbeTrainingState(
         probe=probe,
@@ -1888,7 +1819,7 @@ def _train_and_evaluate_dreams_probe_epoch(
     setup: _DreamsProbeSetup,
     state: _DreamsProbeTrainingState,
     epoch_idx: int,
-) -> tuple[EpochState, EpochState, EpochState]:
+) -> tuple[EpochState, EpochState]:
     state.probe.train()
     train_state = _new_epoch_state(setup.task_spec)
     train_iterator = iter_massspec_probe(
@@ -1920,23 +1851,6 @@ def _train_and_evaluate_dreams_probe_epoch(
         state.scheduler.step()
         _update_epoch_state(train_state, result, setup.task_spec)
     state.probe.eval()
-    if setup.early_stopping:
-        test_state = _new_epoch_state(setup.task_spec)
-    else:
-        test_state = _evaluate_linear_probe_split(
-            probe_data=setup.probe_data,
-            probe=state.probe,
-            compiled_probe_step=state.compiled_probe_step,
-            task_spec=setup.task_spec,
-            feature_extractor=setup.feature_extractor,
-            move_batch=setup.move_batch,
-            split="massspec_test",
-            seed=setup.test_seed_base,
-            peak_ordering=setup.peak_ordering,
-            max_samples=None,
-            sample_randomly=False,
-            device=setup.device,
-        )
     val_state = _evaluate_linear_probe_split(
         probe_data=setup.probe_data,
         probe=state.probe,
@@ -1951,7 +1865,7 @@ def _train_and_evaluate_dreams_probe_epoch(
         sample_randomly=False,
         device=setup.device,
     )
-    return train_state, val_state, test_state
+    return train_state, val_state
 
 
 def _log_dreams_probe_epoch_metrics(
@@ -1960,49 +1874,22 @@ def _log_dreams_probe_epoch_metrics(
     epoch_metrics: dict[str, float],
     epoch_idx: int,
 ) -> None:
-    if setup.early_stopping:
-        log.info(
-            "DreaMS probe epoch %d/%d train_samples=%d val_auc_%s_mean=%.4f val_average_precision_%s_mean=%.4f val_recall_%s_mean=%.4f val_precision_%s_mean=%.4f %s_bits=%d",
-            epoch_idx + 1,
-            setup.num_epochs,
-            int(epoch_metrics["dreams_probe/train/samples"]),
-            setup.fingerprint_task,
-            epoch_metrics[f"dreams_probe/val/auc_{setup.fingerprint_task}_mean"],
-            setup.fingerprint_task,
-            epoch_metrics[
-                f"dreams_probe/val/average_precision_{setup.fingerprint_task}_mean"
-            ],
-            setup.fingerprint_task,
-            epoch_metrics[f"dreams_probe/val/recall_{setup.fingerprint_task}_mean"],
-            setup.fingerprint_task,
-            epoch_metrics[
-                f"dreams_probe/val/precision_{setup.fingerprint_task}_mean"
-            ],
-            setup.fingerprint_task,
-            int(epoch_metrics[f"dreams_probe/num_{setup.fingerprint_task}_bits"]),
-        )
-        return
     log.info(
-        "DreaMS probe epoch %d/%d train_samples=%d val_auc_%s_mean=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f %s_bits=%d",
+        "DreaMS probe epoch %d/%d train_samples=%d val_auc_%s_mean=%.4f val_average_precision_%s_mean=%.4f val_recall_%s_mean=%.4f val_precision_%s_mean=%.4f %s_bits=%d",
         epoch_idx + 1,
         setup.num_epochs,
         int(epoch_metrics["dreams_probe/train/samples"]),
         setup.fingerprint_task,
-        epoch_metrics.get(
-            f"dreams_probe/val/auc_{setup.fingerprint_task}_mean",
-            float("nan"),
-        ),
-        setup.fingerprint_task,
-        epoch_metrics[f"dreams_probe/test/auc_{setup.fingerprint_task}_mean"],
+        epoch_metrics[f"dreams_probe/val/auc_{setup.fingerprint_task}_mean"],
         setup.fingerprint_task,
         epoch_metrics[
-            f"dreams_probe/test/average_precision_{setup.fingerprint_task}_mean"
+            f"dreams_probe/val/average_precision_{setup.fingerprint_task}_mean"
         ],
         setup.fingerprint_task,
-        epoch_metrics[f"dreams_probe/test/recall_{setup.fingerprint_task}_mean"],
+        epoch_metrics[f"dreams_probe/val/recall_{setup.fingerprint_task}_mean"],
         setup.fingerprint_task,
         epoch_metrics[
-            f"dreams_probe/test/precision_{setup.fingerprint_task}_mean"
+            f"dreams_probe/val/precision_{setup.fingerprint_task}_mean"
         ],
         setup.fingerprint_task,
         int(epoch_metrics[f"dreams_probe/num_{setup.fingerprint_task}_bits"]),
@@ -2015,7 +1902,6 @@ def _score_dreams_probe_epoch(
     state: _DreamsProbeTrainingState,
     train_state: EpochState,
     val_state: EpochState,
-    test_state: EpochState,
     epoch_idx: int,
     on_epoch_end: Callable[[dict[str, float]], None] | None,
 ) -> bool:
@@ -2029,15 +1915,6 @@ def _score_dreams_probe_epoch(
             prefix="dreams_probe/val",
             epoch_state=val_state,
             task_spec=setup.task_spec,
-        ),
-        **(
-            {}
-            if setup.early_stopping
-            else _score_epoch_state(
-                prefix="dreams_probe/test",
-                epoch_state=test_state,
-                task_spec=setup.task_spec,
-            )
         ),
         f"dreams_probe/num_{setup.fingerprint_task}_bits": float(
             setup.task_spec.maccs_bits
@@ -2086,29 +1963,28 @@ def _finalize_dreams_probe_once(
 ) -> dict[str, float]:
     if not state.best_metrics:
         return state.best_metrics
-    if setup.early_stopping:
-        state.probe.load_state_dict(state.best_state)
-        test_state = _evaluate_linear_probe_split(
-            probe_data=setup.probe_data,
-            probe=state.probe,
-            compiled_probe_step=state.compiled_probe_step,
+    state.probe.load_state_dict(state.best_state)
+    test_state = _evaluate_linear_probe_split(
+        probe_data=setup.probe_data,
+        probe=state.probe,
+        compiled_probe_step=state.compiled_probe_step,
+        task_spec=setup.task_spec,
+        feature_extractor=setup.feature_extractor,
+        move_batch=setup.move_batch,
+        split="massspec_test",
+        seed=setup.test_seed_base,
+        peak_ordering=setup.peak_ordering,
+        max_samples=None,
+        sample_randomly=False,
+        device=setup.device,
+    )
+    state.best_metrics.update(
+        _score_epoch_state(
+            prefix="dreams_probe/test",
+            epoch_state=test_state,
             task_spec=setup.task_spec,
-            feature_extractor=setup.feature_extractor,
-            move_batch=setup.move_batch,
-            split="massspec_test",
-            seed=setup.test_seed_base,
-            peak_ordering=setup.peak_ordering,
-            max_samples=None,
-            sample_randomly=False,
-            device=setup.device,
         )
-        state.best_metrics.update(
-            _score_epoch_state(
-                prefix="dreams_probe/test",
-                epoch_state=test_state,
-                task_spec=setup.task_spec,
-            )
-        )
+    )
     log.info(
         "DreaMS probe best epoch %d: %s=%.4f test_auc_%s_mean=%.4f test_average_precision_%s_mean=%.4f test_recall_%s_mean=%.4f test_precision_%s_mean=%.4f",
         int(state.best_metrics["dreams_probe_epoch"]),
@@ -2151,7 +2027,7 @@ def _run_dreams_probe_once(
         setup=setup,
     )
     for epoch_idx in range(setup.num_epochs):
-        train_state, val_state, test_state = _train_and_evaluate_dreams_probe_epoch(
+        train_state, val_state = _train_and_evaluate_dreams_probe_epoch(
             setup=setup,
             state=state,
             epoch_idx=epoch_idx,
@@ -2161,7 +2037,6 @@ def _run_dreams_probe_once(
             state=state,
             train_state=train_state,
             val_state=val_state,
-            test_state=test_state,
             epoch_idx=epoch_idx,
             on_epoch_end=on_epoch_end,
         )

@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -6,14 +7,28 @@ from torch.utils.data import DataLoader, Sampler
 
 from spectra_learning.data.gems.artifacts import resolve_gems_hdf5_manifest
 from spectra_learning.data.gems.collate import GemsBatchCollator
-from spectra_learning.data.gems.hdf5 import GemsHdf5ShardDataset
+from spectra_learning.data.gems.hdf5 import (
+    GEMS_ELIGIBILITY_VERSION,
+    GEMS_REQUIRED_MS_LEVEL,
+    GEMS_SPLIT_CHUNK_ROWS,
+    GEMS_SPLIT_MODULUS,
+    GEMS_SPLIT_SEED,
+    GEMS_SPLIT_VERSION,
+    GEMS_VALIDATION_REMAINDER,
+    GemsHdf5Eligibility,
+    GemsHdf5ShardDataset,
+)
 from spectra_learning.data.gems.sampling import (
     ChunkedDistributedBatchSampler,
     LimitBatchSampler,
     OffsetBatchSampler,
 )
 from spectra_learning.data.gems.settings import GemsDataConfig
-from spectra_learning.data.spectra import PEAK_MZ_MAX, PEAK_MZ_MIN
+from spectra_learning.data.spectra import (
+    NUM_PEAKS_INPUT,
+    PEAK_MZ_MAX,
+    PEAK_MZ_MIN,
+)
 
 
 class GemsDataModule:
@@ -32,6 +47,7 @@ class GemsDataModule:
     batch_size: int
     gradient_accumulation_steps: int
     drop_remainder: bool
+    min_precursor_mz: float
     max_precursor_mz: float
     min_peak_intensity: float
     peak_drop_min_intensity: float
@@ -92,9 +108,16 @@ class GemsDataModule:
         self.gems_dir = self.gems_manifest.parent
         self._set_public_config_attrs()
         self._set_distributed_batch_attrs()
-        self._dataset = self._build_dataset()
-        self.gems_train_shards = list(self._dataset.paths)
-        self.gems_validation_shards = list(self._dataset.paths)
+        train_dataset = self._build_dataset("train")
+        self._datasets = {
+            "train": train_dataset,
+            "validation": self._build_dataset(
+                "validation",
+                eligibility=train_dataset.eligibility,
+            ),
+        }
+        self.gems_train_shards = list(self._datasets["train"].paths)
+        self.gems_validation_shards = list(self._datasets["validation"].paths)
         self.gems_train_files = list(self.gems_train_shards)
         self.gems_validation_files = list(self.gems_validation_shards)
         self.info = self._info()
@@ -120,11 +143,24 @@ class GemsDataModule:
                 self.dataloader_num_workers // self.distributed_world_size,
             )
 
-    def _build_dataset(self) -> GemsHdf5ShardDataset:
+    def _build_dataset(
+        self,
+        split: str,
+        *,
+        eligibility: GemsHdf5Eligibility | None = None,
+    ) -> GemsHdf5ShardDataset:
         return GemsHdf5ShardDataset(
             self.gems_manifest,
             spectrum_dataset=self.config.gems_hdf5_spectrum_dataset,
             precursor_dataset=self.config.gems_hdf5_precursor_dataset,
+            retention_time_dataset=(
+                self.config.gems_hdf5_retention_time_dataset
+            ),
+            ms_level_dataset=self.config.gems_hdf5_ms_level_dataset,
+            min_precursor_mz=self.config.min_precursor_mz,
+            max_precursor_mz=self.config.max_precursor_mz,
+            split=split,
+            eligibility=eligibility,
         )
 
     def _info(self) -> dict[str, Any]:
@@ -132,9 +168,75 @@ class GemsDataModule:
             "artifact_dir": str(self.output_dir),
             "gems_dir": str(self.gems_dir),
             "gems_manifest": str(self.gems_manifest),
-            "train_size": len(self._dataset),
-            "validation_size": len(self._dataset),
+            "gems_manifest_sha256": hashlib.sha256(
+                self.gems_manifest.read_bytes()
+            ).hexdigest(),
+            "gems_hdf5_repo_id": self.config.gems_hdf5_repo_id,
+            "gems_hdf5_revision": self.config.gems_hdf5_revision,
+            "gems_split": {
+                "version": GEMS_SPLIT_VERSION,
+                "source_order": "manifest_shards_then_rows",
+                "source_chunk_rows": GEMS_SPLIT_CHUNK_ROWS,
+                "validation_rule": (
+                    "(global_chunk_id + seed) % modulus == validation_remainder"
+                ),
+                "modulus": GEMS_SPLIT_MODULUS,
+                "seed": GEMS_SPLIT_SEED,
+                "validation_remainder": GEMS_VALIDATION_REMAINDER,
+                "validation_shuffle_seed": GEMS_SPLIT_SEED,
+            },
+            "source_size": self._datasets["train"].source_length,
+            "gems_eligibility": {
+                "version": GEMS_ELIGIBILITY_VERSION,
+                "rule": (
+                    "isfinite(ms_level) and ms_level == 2 and "
+                    "isfinite(precursor_mz) and min_precursor_mz <= "
+                    "precursor_mz and precursor_mz <= "
+                    "max_precursor_mz and isfinite(retention_time) and "
+                    "retention_time > 0"
+                ),
+                "ms_level_dataset": self.config.gems_hdf5_ms_level_dataset,
+                "required_ms_level": GEMS_REQUIRED_MS_LEVEL,
+                "precursor_dataset": self.config.gems_hdf5_precursor_dataset,
+                "spectrum_dataset": self.config.gems_hdf5_spectrum_dataset,
+                "spectrum_trailing_shape": [2, NUM_PEAKS_INPUT],
+                "retention_time_dataset": (
+                    self.config.gems_hdf5_retention_time_dataset
+                ),
+                "min_precursor_mz": self.min_precursor_mz,
+                "max_precursor_mz": self.max_precursor_mz,
+                "source_count": self._datasets["train"].source_length,
+                "eligible_count": (
+                    self._datasets["train"].eligibility.eligible_count
+                ),
+                "excluded_count": (
+                    self._datasets["train"].source_length
+                    - self._datasets["train"].eligibility.eligible_count
+                ),
+                "train_source_count": (
+                    self._datasets["train"].split_source_length
+                ),
+                "train_eligible_count": len(self._datasets["train"]),
+                "train_excluded_count": (
+                    self._datasets["train"].split_source_length
+                    - len(self._datasets["train"])
+                ),
+                "validation_source_count": (
+                    self._datasets["validation"].split_source_length
+                ),
+                "validation_eligible_count": len(
+                    self._datasets["validation"]
+                ),
+                "validation_excluded_count": (
+                    self._datasets["validation"].split_source_length
+                    - len(self._datasets["validation"])
+                ),
+            },
+            "train_size": len(self._datasets["train"]),
+            "validation_size": len(self._datasets["validation"]),
+            "num_peaks_input": NUM_PEAKS_INPUT,
             "num_peaks": self.num_peaks_output,
+            "min_precursor_mz": self.min_precursor_mz,
             "max_precursor_mz": self.max_precursor_mz,
             "peak_mz_min": PEAK_MZ_MIN,
             "peak_mz_max": PEAK_MZ_MAX,
@@ -144,32 +246,35 @@ class GemsDataModule:
         }
 
     def _train_steps(self) -> int:
-        micro_batches = min(
-            len(
-                self._make_batch_sampler(
-                    shuffle=True,
-                    seed=self.seed,
-                    drop_last=self.drop_remainder,
-                    epoch=0,
-                    rank=rank,
-                )
+        samplers = [
+            self._make_batch_sampler(
+                shuffle=True,
+                seed=self.seed,
+                drop_last=self.drop_remainder,
+                epoch=0,
+                rank=rank,
+                split="train",
             )
             for rank in range(self.distributed_world_size)
+        ]
+        micro_batches = min(
+            sampler.full_batch_count
+            if self.distributed_world_size > 1
+            else len(sampler)
+            for sampler in samplers
         )
         return micro_batches // self.gradient_accumulation_steps
 
     def _get_dataset(self, split: str) -> GemsHdf5ShardDataset:
-        return self._dataset
+        return self._datasets[split]
 
-    def _dataset_segments(self) -> list[tuple[int, int, int]]:
-        return [
-            (
-                int(start),
-                int(info["length"]),
-                int(info["spectrum_chunk"][0] or 1),
-            )
-            for start, info in zip(self._dataset.starts, self._dataset.infos, strict=True)
-        ]
+    def _dataset_segments(self, split: str) -> list[tuple[int, int, int]]:
+        dataset = self._get_dataset(split)
+        chunk_rows = min(
+            int(info["spectrum_chunk"][0] or 1)
+            for info in dataset.infos
+        )
+        return [(0, len(dataset), chunk_rows)]
 
     def _make_batch_sampler(
         self,
@@ -178,11 +283,12 @@ class GemsDataModule:
         seed: int,
         drop_last: bool,
         epoch: int,
+        split: str,
         rank: int | None = None,
-    ) -> Sampler[list[int]]:
+    ) -> ChunkedDistributedBatchSampler:
         rank = self.distributed_rank if rank is None else rank
         sampler = ChunkedDistributedBatchSampler(
-            self._dataset_segments(),
+            self._dataset_segments(split),
             batch_size=self.batch_size,
             rows_per_block=self.config.gems_hdf5_rows_per_block or None,
             shuffle=shuffle,
@@ -205,6 +311,7 @@ class GemsDataModule:
         epoch: int = 0,
         num_workers: int | None = None,
         max_batches: int | None = None,
+        split: str,
     ) -> DataLoader:
         resolved_num_workers = (
             self.dataloader_num_workers if num_workers is None else num_workers
@@ -214,6 +321,7 @@ class GemsDataModule:
             seed=seed,
             drop_last=drop_last,
             epoch=epoch,
+            split=split,
         )
         start_index = start_batch * self.batch_size * self.gradient_accumulation_steps
         if start_index:
@@ -228,10 +336,11 @@ class GemsDataModule:
                 batch_sampler,
                 max_batches=max_batches,
             )
+        dataset = self._get_dataset(split)
         if resolved_num_workers > 0:
-            self._dataset.close()
+            dataset.close()
         loader_kwargs: dict[str, Any] = {
-            "dataset": self._dataset,
+            "dataset": dataset,
             "batch_sampler": batch_sampler,
             "num_workers": resolved_num_workers,
             "pin_memory": self.dataloader_pin_memory,
@@ -296,9 +405,10 @@ class GemsDataModule:
     def val_loader_for_eval(self, *, augment: bool) -> DataLoader:
         return self._make_loader(
             augment=augment,
-            shuffle=False,
-            seed=self.seed,
+            shuffle=True,
+            seed=GEMS_SPLIT_SEED,
             drop_last=False,
+            split="validation",
         )
 
     def train_loader_for_epoch(self, epoch: int, start_batch: int = 0) -> DataLoader:
@@ -314,4 +424,5 @@ class GemsDataModule:
             start_batch=start_batch,
             epoch=epoch,
             max_batches=max_batches,
+            split="train",
         )

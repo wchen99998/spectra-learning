@@ -581,6 +581,7 @@ def test_ar_jax_checkpoint_contract_tracks_tokenizer_semantics() -> None:
     def datamodule(tokenizer_config):
         return SimpleNamespace(
             ar_tokenizer_config=tokenizer_config,
+            info={"source": "unit-test"},
             num_peaks_output=128,
             max_precursor_mz=1000.0,
             min_peak_intensity=1e-4,

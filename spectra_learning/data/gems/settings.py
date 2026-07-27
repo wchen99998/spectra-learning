@@ -5,21 +5,16 @@ from typing import Any
 import torch
 from ml_collections import config_dict
 
+from spectra_learning.data.contracts import peak_preprocessing_contract
 from spectra_learning.data.gems.intensity_aware import AWARE_MIXED_MASK_CONFIG
-from spectra_learning.data.spectra import (
-    DEFAULT_MAX_PRECURSOR_MZ,
-    DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
-    DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-    DEFAULT_MIN_PEAK_INTENSITY,
-    DEFAULT_PEAK_FILTERING,
-    DEFAULT_PRECURSOR_PEAK_EXCLUSION_WINDOW_DA,
-)
+from spectra_learning.data.spectra import DEFAULT_NUM_PEAKS
 
 DEFAULT_BATCH_SIZE = 512
 DEFAULT_ARTIFACT_DIR = Path("data/gems_artifacts")
 DEFAULT_GEMS_HDF5_REPO_ID = "novogaia/massive-v1-ms2-100m-stratified-x16"
+DEFAULT_GEMS_HDF5_REVISION = "7ff47061cbde23e4cdd113378dcfb489e86b32c4"
 DEFAULT_GEMS_HDF5_MANIFEST = "fdataloader_shards.json"
-NUM_PEAKS_OUTPUT = 60
+NUM_PEAKS_OUTPUT = DEFAULT_NUM_PEAKS
 GEMS_METADATA_FILENAME = "metadata.json"
 
 
@@ -37,10 +32,13 @@ class GemsDataConfig:
     gems_hdf5_manifest: str
     gems_hdf5_spectrum_dataset: str
     gems_hdf5_precursor_dataset: str
+    gems_hdf5_retention_time_dataset: str
+    gems_hdf5_ms_level_dataset: str
     gems_hdf5_rows_per_block: int
     batch_size: int
     gradient_accumulation_steps: int
     drop_remainder: bool
+    min_precursor_mz: float
     max_precursor_mz: float
     min_peak_intensity: float
     peak_drop_min_intensity: float
@@ -73,9 +71,7 @@ class GemsDataConfig:
             .expanduser()
             .resolve()
         )
-        min_peak_intensity = float(
-            config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)
-        )
+        preprocessing = peak_preprocessing_contract(config)
         jepa_mask_lengths = tuple(
             int(length)
             for length in config.get("jepa_mask_lengths", (1, 2, 4, 8, 16))
@@ -90,7 +86,10 @@ class GemsDataConfig:
                 )
             ).strip(),
             gems_hdf5_revision=str(
-                config.get("gems_hdf5_revision", "main")
+                config.get(
+                    "gems_hdf5_revision",
+                    DEFAULT_GEMS_HDF5_REVISION,
+                )
             ),
             gems_hdf5_manifest=str(
                 config.get(
@@ -104,6 +103,12 @@ class GemsDataConfig:
             gems_hdf5_precursor_dataset=str(
                 config.get("gems_hdf5_precursor_dataset", "precursor_mz")
             ),
+            gems_hdf5_retention_time_dataset=str(
+                config.get("gems_hdf5_retention_time_dataset", "RT")
+            ),
+            gems_hdf5_ms_level_dataset=str(
+                config.get("gems_hdf5_ms_level_dataset", "MS level")
+            ),
             gems_hdf5_rows_per_block=int(
                 config.get("gems_hdf5_rows_per_block", 0)
             ),
@@ -112,36 +117,19 @@ class GemsDataConfig:
                 config.get("gradient_accumulation_steps", 1)
             ),
             drop_remainder=bool(config.get("drop_remainder", True)),
-            max_precursor_mz=float(
-                config.get("max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
-            ),
-            min_peak_intensity=min_peak_intensity,
-            peak_drop_min_intensity=float(
-                config.get("peak_drop_min_intensity", min_peak_intensity)
-            ),
-            peak_filtering=str(
-                config.get("peak_filtering", DEFAULT_PEAK_FILTERING)
-            ),
-            grouped_peak_shoulder_da=float(
-                config.get(
-                    "grouped_peak_shoulder_da",
-                    DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-                )
-            ),
+            min_precursor_mz=preprocessing["min_precursor_mz"],
+            max_precursor_mz=preprocessing["max_precursor_mz"],
+            min_peak_intensity=preprocessing["min_peak_intensity"],
+            peak_drop_min_intensity=preprocessing["peak_drop_min_intensity"],
+            peak_filtering=preprocessing["peak_filtering"],
+            grouped_peak_shoulder_da=preprocessing["grouped_peak_shoulder_da"],
             grouped_peak_isotope_charges=tuple(
-                int(charge)
-                for charge in config.get(
-                    "grouped_peak_isotope_charges",
-                    DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
-                )
+                preprocessing["grouped_peak_isotope_charges"]
             ),
-            peak_ordering=str(config.get("peak_ordering", "mz")),
-            precursor_peak_exclusion_window_da=float(
-                config.get(
-                    "precursor_peak_exclusion_window_da",
-                    DEFAULT_PRECURSOR_PEAK_EXCLUSION_WINDOW_DA,
-                )
-            ),
+            peak_ordering=preprocessing["peak_ordering"],
+            precursor_peak_exclusion_window_da=preprocessing[
+                "precursor_peak_exclusion_window_da"
+            ],
             jepa_num_target_blocks=int(config.get("jepa_num_target_blocks", 2)),
             jepa_context_fraction=float(
                 config.get("jepa_context_fraction", 0.5)
@@ -164,7 +152,7 @@ class GemsDataConfig:
             jepa_allow_target_overlap=bool(
                 config.get("jepa_allow_target_overlap", False)
             ),
-            num_peaks=int(config.get("num_peaks", NUM_PEAKS_OUTPUT)),
+            num_peaks=preprocessing["num_peaks"],
             dataloader_pin_memory=bool(
                 config.get("dataloader_pin_memory", torch.cuda.is_available())
             ),

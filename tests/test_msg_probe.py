@@ -163,6 +163,7 @@ class _DummyMsgEncoder(torch.nn.Module):
         *,
         valid_mask: torch.Tensor,
         precursor_mz: torch.Tensor | None = None,
+        spectrum_metadata: torch.Tensor | None = None,
     ) -> torch.Tensor:
         values = peak_mz + peak_intensity
         return values.unsqueeze(-1).repeat(1, 1, self.model_dim)
@@ -1679,13 +1680,11 @@ class MsgProbeRunTests(unittest.TestCase):
                 "massspec_train": [self._probe_batch(1.0)],
                 "massspec_val": [self._probe_batch(1.5)],
                 "massspec_test": [self._probe_batch(2.0)],
-                "massspec_mcebio_test": [self._probe_batch(2.5)],
             },
             info={
                 "massspec_train_size": 4,
                 "massspec_val_size": 4,
                 "massspec_test_size": 4,
-                "massspec_mcebio_test_size": 4,
                 "probe_morgan_bits": 0,
             },
             batch_size=4,
@@ -1712,13 +1711,7 @@ class MsgProbeRunTests(unittest.TestCase):
         test_calls = [
             call for call in probe_data.calls if call["split"] == "massspec_test"
         ]
-        mcebio_test_calls = [
-            call
-            for call in probe_data.calls
-            if call["split"] == "massspec_mcebio_test"
-        ]
         self.assertEqual(len(test_calls), 1)
-        self.assertEqual(len(mcebio_test_calls), 1)
         self.assertIn("msg_probe/mean/test/auc_fluorine", metrics)
         self.assertIn("msg_probe/mean/test/auc_sulfur", metrics)
         self.assertIsInstance(
@@ -1730,19 +1723,12 @@ class MsgProbeRunTests(unittest.TestCase):
             PrecisionRecallCurve,
         )
         self.assertIn("msg_probe/mean/test/auc_maccs_mean", metrics)
-        self.assertIn("msg_probe/mean/mcebio_sulfur_test/auc_sulfur", metrics)
-        self.assertIsInstance(
-            metrics["msg_probe/mean/mcebio_sulfur_test/pr_curve_sulfur"],
-            PrecisionRecallCurve,
-        )
-        self.assertNotIn("msg_probe/mean/mcebio_sulfur_test/auc_fluorine", metrics)
-        self.assertNotIn("msg_probe/mean/mcebio_sulfur_test/pr_curve_fluorine", metrics)
         self.assertIn("msg_probe/mean/val/auc_maccs_mean", metrics)
         self.assertIn("msg_probe/mean/val/auc_maccs_mean", curve[0])
         self.assertNotIn("msg_probe/mean/test/auc_maccs_mean", curve[0])
         self.assertNotIn("msg_probe/mean/test/pr_curve_fluorine", curve[0])
 
-    def test_test_selected_msg_probe_reuses_epoch_test_state(self):
+    def test_full_epoch_run_still_selects_on_validation(self):
         cfg = self._config(num_epochs=2, early_stopping=False)
         probe_data = self._probe_data()
         model = _DummyMsgModel(int(cfg.model_dim))
@@ -1765,19 +1751,17 @@ class MsgProbeRunTests(unittest.TestCase):
             [call["split"] for call in probe_data.calls],
             [
                 "massspec_train",
+                "massspec_train",
+                "massspec_val",
+                "massspec_train",
                 "massspec_val",
                 "massspec_test",
-                "massspec_train",
-                "massspec_test",
-                "massspec_train",
-                "massspec_test",
-                "massspec_mcebio_test",
             ],
         )
         self.assertEqual(len(curve), 2)
         for epoch_metrics in curve:
-            self.assertIn("msg_probe/mean/test/auc_maccs_mean", epoch_metrics)
-            self.assertNotIn("msg_probe/mean/val/auc_maccs_mean", epoch_metrics)
+            self.assertIn("msg_probe/mean/val/auc_maccs_mean", epoch_metrics)
+            self.assertNotIn("msg_probe/mean/test/auc_maccs_mean", epoch_metrics)
             self.assertNotIn("msg_probe/mean/test/pr_curve_fluorine", epoch_metrics)
         self.assertIsInstance(
             metrics["msg_probe/mean/test/pr_curve_fluorine"],
@@ -1801,16 +1785,11 @@ class MsgProbeRunTests(unittest.TestCase):
                 online_maccs_only=True,
             )
 
-        self.assertFalse(
-            any(call["split"] == "massspec_mcebio_test" for call in probe_data.calls)
-        )
         self.assertTrue(from_config.call_args.kwargs["maccs_only"])
-        self.assertFalse(from_config.call_args.kwargs["include_mcebio"])
         self.assertIn("msg_probe/mean/test/auc_maccs_mean", metrics)
         self.assertNotIn("msg_probe/mean/test/auc_fluorine", metrics)
         self.assertNotIn("msg_probe/mean/test/auc_sulfur", metrics)
         self.assertNotIn("msg_probe/mean/test/mae_mol_weight", metrics)
-        self.assertNotIn("msg_probe/mean/mcebio_sulfur_test/auc_sulfur", metrics)
 
 
 class DreamsProbeRunTests(unittest.TestCase):
@@ -1854,7 +1833,7 @@ class DreamsProbeRunTests(unittest.TestCase):
             dreams_dim=3,
         )
 
-    def test_test_selected_probe_reuses_epoch_test_metrics(self):
+    def test_full_epoch_dreams_run_still_selects_on_validation(self):
         cfg = self._config(num_epochs=2, early_stopping=False)
         probe_data = self._probe_data()
         curve: list[dict[str, float]] = []
@@ -1879,29 +1858,23 @@ class DreamsProbeRunTests(unittest.TestCase):
             [(call["split"], call["seed"]) for call in probe_data.calls],
             [
                 ("massspec_train", 1_100_011),
-                ("massspec_val", 1_110_011),
-                ("massspec_test", 1_200_011),
                 ("massspec_train", 1_100_011),
-                ("massspec_test", 1_200_011),
                 ("massspec_val", 1_110_011),
                 ("massspec_train", 1_100_012),
-                ("massspec_test", 1_200_011),
                 ("massspec_val", 1_110_011),
+                ("massspec_test", 1_200_011),
             ],
         )
         self.assertEqual(len(curve), 2)
         self.assertTrue(
-            all("dreams_probe/test/auc_fluorine" in epoch for epoch in curve)
+            all("dreams_probe/val/auc_fluorine" in epoch for epoch in curve)
         )
         selected_idx = max(
             range(len(curve)),
-            key=lambda idx: curve[idx]["dreams_probe/test/auc_fluorine"],
+            key=lambda idx: curve[idx]["dreams_probe/val/auc_fluorine"],
         )
         self.assertEqual(metrics["dreams_probe_epoch"], float(selected_idx + 1))
-        self.assertEqual(
-            metrics["dreams_probe/test/auc_fluorine"],
-            curve[selected_idx]["dreams_probe/test/auc_fluorine"],
-        )
+        self.assertIn("dreams_probe/test/auc_fluorine", metrics)
 
     def test_validation_selected_probe_restores_best_state_for_final_test(self):
         cfg = self._config(num_epochs=5, early_stopping=True)
@@ -1948,7 +1921,6 @@ class DreamsProbeRunTests(unittest.TestCase):
             [(call["split"], call["seed"]) for call in probe_data.calls],
             [
                 ("massspec_train", 1_100_011),
-                ("massspec_val", 1_110_011),
                 ("massspec_train", 1_100_011),
                 ("massspec_val", 1_110_011),
                 ("massspec_train", 1_100_012),
@@ -2028,8 +2000,10 @@ class RepeatedProbeTests(unittest.TestCase):
             plot_step,
             distributed,
             online_maccs_only=False,
+            on_probe_data=None,
         ):
             self.assertFalse(online_maccs_only)
+            self.assertIsNone(on_probe_data)
             metrics, curve = repeat_payloads[repeat_index]
             for epoch_metrics in curve:
                 if on_epoch_end is not None:

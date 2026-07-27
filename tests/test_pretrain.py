@@ -5,6 +5,7 @@ from unittest import mock
 
 import torch
 
+from spectra_learning.data.contracts import peak_preprocessing_contract
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pairmixer import PairFeatureEmbedder
 from spectra_learning.models.peak_features import (
@@ -17,6 +18,13 @@ from spectra_learning.training.checkpointing import (
     load_frozen_teacher_weights,
     load_pretrained_weights,
 )
+
+
+def _checkpoint_state(**state) -> dict:
+    return {
+        **state,
+        "peak_preprocessing": peak_preprocessing_contract({}),
+    }
 
 
 def _make_batch(
@@ -1485,9 +1493,9 @@ class BlockJEPATests(unittest.TestCase):
         model = self._build_model()
         with tempfile.TemporaryDirectory() as tmpdir:
             path = f"{tmpdir}/ckpt.pt"
-            torch.save({"model": model.state_dict()}, path)
+            torch.save(_checkpoint_state(model=model.state_dict()), path)
             loaded = self._build_model()
-            load_pretrained_weights(loaded, path)
+            load_pretrained_weights(loaded, path, config={})
             for key, value in model.state_dict().items():
                 self.assertTrue(torch.equal(value, loaded.state_dict()[key]), key)
 
@@ -1495,10 +1503,10 @@ class BlockJEPATests(unittest.TestCase):
         model = self._build_model()
         with tempfile.TemporaryDirectory() as tmpdir:
             path = f"{tmpdir}/ckpt.pt"
-            torch.save({"state_dict": model.state_dict()}, path)
+            torch.save(_checkpoint_state(state_dict=model.state_dict()), path)
             loaded = self._build_model()
             with self.assertRaisesRegex(KeyError, "model"):
-                load_pretrained_weights(loaded, path)
+                load_pretrained_weights(loaded, path, config={})
 
     def test_load_frozen_teacher_weights_uses_mae_encoder_only(self):
         source = self._build_model(training_mode="mae")
@@ -1507,11 +1515,11 @@ class BlockJEPATests(unittest.TestCase):
                 param.fill_(0.123)
         with tempfile.TemporaryDirectory() as tmpdir:
             path = f"{tmpdir}/mae.pt"
-            torch.save({"model": source.state_dict()}, path)
+            torch.save(_checkpoint_state(model=source.state_dict()), path)
             loaded = self._build_model(training_mode="mae_teacher_jepa")
             before_student = next(loaded.encoder.parameters()).detach().clone()
 
-            load_frozen_teacher_weights(loaded, path)
+            load_frozen_teacher_weights(loaded, path, config={})
 
             source_encoder_param = next(source.encoder.parameters()).detach()
             loaded_teacher_encoder = loaded.teacher_encoder
@@ -1541,10 +1549,10 @@ class BlockJEPATests(unittest.TestCase):
                     )
                 )
             }
-            torch.save({"model": old_state}, path)
+            torch.save(_checkpoint_state(model=old_state), path)
             loaded = self._build_model()
             with self.assertRaisesRegex(RuntimeError, "Missing key"):
-                load_pretrained_weights(loaded, path)
+                load_pretrained_weights(loaded, path, config={})
 
     def test_load_pretrained_weights_rejects_missing_masked_latent_readout(self):
         model = self._build_model()
@@ -1555,19 +1563,41 @@ class BlockJEPATests(unittest.TestCase):
                 for k, v in model.state_dict().items()
                 if not k.startswith(("masked_latent_readout.", "target_projector."))
             }
-            torch.save({"model": old_state}, path)
+            torch.save(_checkpoint_state(model=old_state), path)
             loaded = self._build_model()
             with self.assertRaisesRegex(RuntimeError, "Missing key"):
-                load_pretrained_weights(loaded, path)
+                load_pretrained_weights(loaded, path, config={})
 
     def test_load_pretrained_weights_rejects_missing_ema_teacher(self):
         model = self._build_model()
         with tempfile.TemporaryDirectory() as tmpdir:
             path = f"{tmpdir}/ckpt.pt"
-            torch.save({"model": model.state_dict()}, path)
+            torch.save(_checkpoint_state(model=model.state_dict()), path)
             loaded = self._build_model(use_ema_teacher=True)
             with self.assertRaisesRegex(RuntimeError, "Missing key"):
-                load_pretrained_weights(loaded, path)
+                load_pretrained_weights(loaded, path, config={})
+
+    def test_load_pretrained_weights_rejects_missing_contract(self):
+        model = self._build_model()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/ckpt.pt"
+            torch.save({"model": model.state_dict()}, path)
+
+            with self.assertRaisesRegex(KeyError, "peak_preprocessing"):
+                load_pretrained_weights(self._build_model(), path, config={})
+
+    def test_load_frozen_teacher_weights_rejects_mismatched_contract(self):
+        source = self._build_model(training_mode="mae")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/mae.pt"
+            torch.save(_checkpoint_state(model=source.state_dict()), path)
+
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                load_frozen_teacher_weights(
+                    self._build_model(training_mode="mae_teacher_jepa"),
+                    path,
+                    config={"num_peaks": 8},
+                )
 
     def test_token_ablation_keeps_shared_initialization_identical(self):
         torch.manual_seed(7)

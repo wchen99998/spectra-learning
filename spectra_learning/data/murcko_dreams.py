@@ -7,6 +7,7 @@ import importlib
 import json
 import logging
 import shutil
+import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
@@ -19,8 +20,8 @@ from huggingface_hub import HfApi
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from spectra_learning.data.mgf import file_source_manifest
 from spectra_learning.data.murcko import (
-    MCEBIO_MURCKO_PREPARED_SUBDIR,
     NIST_MURCKO_PREPARED_SUBDIR,
 )
 
@@ -29,7 +30,7 @@ DEFAULT_DREAMS_ROOT = Path("/home/wuhao/Dreams")
 DEFAULT_DREAMS_CHECKPOINT = (
     DEFAULT_DREAMS_ROOT / "dreams/models/pretrained/embedding_model.ckpt"
 )
-DEFAULT_SUBDIRS = (NIST_MURCKO_PREPARED_SUBDIR, MCEBIO_MURCKO_PREPARED_SUBDIR)
+DEFAULT_SUBDIRS = (NIST_MURCKO_PREPARED_SUBDIR,)
 DEFAULT_N_HIGHEST_PEAKS = 100
 DEFAULT_BATCH_SIZE = 256
 
@@ -45,7 +46,7 @@ def _parse_args() -> argparse.Namespace:
         "--subdir",
         action="append",
         default=None,
-        help="Prepared dataset subdir to process. Defaults to NIST and MCEBIO.",
+        help="Prepared dataset subdir to process. Defaults to NIST.",
     )
     parser.add_argument("--dreams-root", type=Path, default=DEFAULT_DREAMS_ROOT)
     parser.add_argument("--checkpoint", type=Path, default=DEFAULT_DREAMS_CHECKPOINT)
@@ -64,6 +65,16 @@ def _parse_args() -> argparse.Namespace:
 
 def _install_dreams_path(dreams_root: Path) -> None:
     sys.path.insert(0, str(dreams_root.expanduser().resolve()))
+
+
+def _git_head_commit(source_root: Path) -> str | None:
+    result = subprocess.run(
+        ["git", "-C", str(source_root.expanduser().resolve()), "rev-parse", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
 
 
 def _parse_charge(row: dict[str, Any]) -> int | None:
@@ -125,7 +136,9 @@ def _compute_embeddings(
     spectra = [_row_spectrum(row) for row in rows]
     precursors = [float(row["precursor_mz"]) for row in rows]
     dataset = du.RawSpectraDataset(spectra, precursors, spec_preproc)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, drop_last=False)
+    dataloader = DataLoader(
+        dataset, batch_size=batch_size, shuffle=False, drop_last=False
+    )
     predictions = []
     for batch in tqdm(dataloader, desc="DreaMS embeddings", leave=False):
         spectrum = batch[spectrum_key].to(device=model.device, dtype=model.dtype)
@@ -241,8 +254,17 @@ def _update_top_metadata(
         if dataset_metadata.get("subdir") == subdir:
             dataset_metadata["dreams_dim"] = metadata["dreams_dim"]
             dataset_metadata["dreams_auxiliary_available"] = True
+            dataset_metadata["dreams_auxiliary_format"] = metadata[
+                "dreams_auxiliary_format"
+            ]
+            dataset_metadata["dreams_checkpoint"] = metadata["dreams_checkpoint"]
+            dataset_metadata["dreams_source_git_commit"] = metadata[
+                "dreams_source_git_commit"
+            ]
             dataset_metadata["dreams_valid_counts"] = metadata["dreams_valid_counts"]
-            dataset_metadata["dreams_invalid_counts"] = metadata["dreams_invalid_counts"]
+            dataset_metadata["dreams_invalid_counts"] = metadata[
+                "dreams_invalid_counts"
+            ]
     metadata_path.write_text(json.dumps(top_metadata, indent=2, sort_keys=True))
     return metadata_path
 
@@ -256,7 +278,8 @@ def _build_subdir(
     dformat: Any,
     batch_size: int,
     n_highest_peaks: int,
-    checkpoint: Path,
+    checkpoint_source: dict[str, Any],
+    dreams_source_git_commit: str | None,
 ) -> list[Path]:
     subdir = subdir.strip("/")
     subdir_path = artifact_dir / subdir
@@ -274,15 +297,17 @@ def _build_subdir(
     dreams_problem_counts: dict[str, dict[str, int]] = {}
     for split in _split_names(metadata):
         log.info("%s/%s: building DreaMS auxiliary", subdir, split)
-        files, lengths, valid_count, invalid_count, problems, paths = _write_split_auxiliary(
-            subdir_path=subdir_path,
-            split=split,
-            filenames=[str(name) for name in metadata[f"{split}_files"]],
-            model=model,
-            spec_preproc=spec_preproc,
-            dformat=dformat,
-            batch_size=batch_size,
-            n_highest_peaks=n_highest_peaks,
+        files, lengths, valid_count, invalid_count, problems, _paths = (
+            _write_split_auxiliary(
+                subdir_path=subdir_path,
+                split=split,
+                filenames=[str(name) for name in metadata[f"{split}_files"]],
+                model=model,
+                spec_preproc=spec_preproc,
+                dformat=dformat,
+                batch_size=batch_size,
+                n_highest_peaks=n_highest_peaks,
+            )
         )
         dreams_files[split] = files
         dreams_lengths[split] = lengths
@@ -304,7 +329,8 @@ def _build_subdir(
             "dreams_invalid_counts": dreams_invalid_counts,
             "dreams_validation_problem_counts": dreams_problem_counts,
             "dreams_embedding_model": "embedding_model.ckpt",
-            "dreams_checkpoint": str(checkpoint.expanduser().resolve()),
+            "dreams_checkpoint": checkpoint_source,
+            "dreams_source_git_commit": dreams_source_git_commit,
             "dreams_data_format": "DataFormatA",
             "dreams_n_highest_peaks": int(n_highest_peaks),
         }
@@ -360,6 +386,9 @@ def build_murcko_dreams_auxiliary(
 ) -> list[Path]:
     _install_dreams_path(dreams_root)
     artifact_dir = artifact_dir.expanduser().resolve()
+    checkpoint = checkpoint.expanduser().resolve()
+    checkpoint_source = file_source_manifest(checkpoint)
+    dreams_source_git_commit = _git_head_commit(dreams_root)
     subdirs = subdirs if subdirs is not None else list(DEFAULT_SUBDIRS)
     model, spec_preproc, dformat = _load_model(
         checkpoint,
@@ -377,7 +406,8 @@ def build_murcko_dreams_auxiliary(
                 dformat=dformat,
                 batch_size=batch_size,
                 n_highest_peaks=n_highest_peaks,
-                checkpoint=checkpoint,
+                checkpoint_source=checkpoint_source,
+                dreams_source_git_commit=dreams_source_git_commit,
             )
         )
     if upload:

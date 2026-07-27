@@ -119,7 +119,6 @@ def _training_kwargs(
         "head_learning_rate": 1e-2,
         "weight_decay": 0.0,
         "autocast_dtype": None,
-        "revision": "main",
         "max_train_samples": None,
         "max_val_samples": None,
         "max_test_samples": None,
@@ -448,6 +447,7 @@ def test_ar_fluorine_loads_model_shape_from_checkpoint_config(tmp_path) -> None:
             "model": model.state_dict(),
             "global_step": 1,
             "config": {
+                "num_peaks": 4,
                 "ar_model_dim": 32,
                 "ar_num_layers": 2,
                 "ar_num_heads": 4,

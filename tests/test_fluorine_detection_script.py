@@ -32,7 +32,15 @@ def test_fluorine_outputs_support_fsspec_prefix(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("SPECTRA_SCRATCH_DIR", str(tmp_path / "scratch"))
     output_prefix = "memory://fluorine-unit/run"
     data = fluorine.FluorineData(
-        metadata={"test_size": 4, "test_positive": 2},
+        metadata={
+            "nist_repo_id": "owner/nist",
+            "nist_revision": "nist-sha",
+            "nist_subdir": "nist",
+            "nist_source_dir": str(tmp_path / "nist"),
+            "peak_preprocessing": {"version": 1},
+            "test_size": 4,
+            "test_positive": 2,
+        },
         root=tmp_path,
         batch_size=2,
         num_peaks=2,
@@ -95,6 +103,89 @@ def test_fluorine_outputs_support_fsspec_prefix(monkeypatch, tmp_path: Path):
     assert len(all_curves["curves"]) == 1
     saved = json.loads(read_text("memory://fluorine-unit/run.all_pr_curves.summary.json"))
     assert saved["curves"][0]["name"] == "run"
+
+
+def test_checkpoint_probe_data_uses_checkpoint_sources_and_preprocessing(
+    monkeypatch,
+    tmp_path: Path,
+):
+    cache_dir = tmp_path / "cache"
+    captured = {}
+
+    def fake_from_config(config, **_kwargs):
+        captured["config"] = config
+        info = {
+            "massspec_metadata_version": 1,
+            "massspec_nist_repo_id": config.nist_murcko_probe_repo_id,
+            "massspec_nist_revision": config.nist_murcko_probe_revision,
+            "massspec_nist_subdir": config.nist_murcko_probe_hf_subdir,
+            "massspec_nist_source_dir": str(cache_dir / "nist-source"),
+            "massspec_train_size": 2,
+            "massspec_train_positive": 1,
+            "massspec_val_size": 1,
+            "massspec_val_positive": 0,
+            "massspec_test_size": 1,
+            "massspec_test_positive": 1,
+            "massspec_peak_preprocessing": {"version": 1},
+        }
+        return SimpleNamespace(
+            info=info,
+            train_files=[str(cache_dir / "nist-source/train.parquet")],
+            train_lengths=[2],
+            val_files=[str(cache_dir / "nist-source/val.parquet")],
+            val_lengths=[1],
+            test_files=[str(cache_dir / "nist-source/test.parquet")],
+            test_lengths=[1],
+            num_peaks=config.num_peaks,
+            max_precursor_mz=config.max_precursor_mz,
+            min_peak_intensity=config.min_peak_intensity,
+            peak_drop_min_intensity=config.peak_drop_min_intensity,
+            peak_filtering=config.peak_filtering,
+            grouped_peak_shoulder_da=config.grouped_peak_shoulder_da,
+            grouped_peak_isotope_charges=tuple(
+                config.grouped_peak_isotope_charges
+            ),
+            peak_ordering=config.peak_ordering,
+            precursor_peak_exclusion_window_da=(
+                config.precursor_peak_exclusion_window_da
+            ),
+        )
+
+    monkeypatch.setattr(
+        fluorine,
+        "MassSpecProbeData",
+        SimpleNamespace(from_config=fake_from_config),
+    )
+    checkpoint_config = config_dict.ConfigDict(
+        {
+            "nist_murcko_probe_repo_id": "owner/nist",
+            "nist_murcko_probe_revision": "nist-sha",
+            "nist_murcko_probe_hf_subdir": "nist",
+            "num_peaks": 17,
+            "max_precursor_mz": 900.0,
+            "min_peak_intensity": 0.01,
+            "peak_drop_min_intensity": 0.02,
+            "peak_filtering": "top_intensity",
+            "grouped_peak_shoulder_da": 0.03,
+            "grouped_peak_isotope_charges": (1, 2),
+            "peak_ordering": "mz",
+            "precursor_peak_exclusion_window_da": 1.5,
+        }
+    )
+    args = SimpleNamespace(
+        batch_size=8,
+    )
+
+    data = fluorine._build_fluorine_probe_data(
+        args=args,
+        checkpoint_config=checkpoint_config,
+        cache_dir=cache_dir,
+    )
+
+    assert captured["config"].artifact_dir == str(cache_dir.resolve())
+    assert data.num_peaks == 17
+    assert data.peak_ordering == "mz"
+    assert data.metadata["nist_revision"] == "nist-sha"
 
 
 def test_autocast_dtype_resolves_from_config_and_cli():
@@ -167,6 +258,99 @@ def _tiny_fluorine_batch() -> dict[str, torch.Tensor]:
     }
 
 
+def _source_checkpoint_contract() -> dict[str, object]:
+    return {
+        "backend": "torch",
+        "global_step": 7,
+        "model_sha256": "model-sha",
+        "covariance_pooler_sha256": None,
+        "model_settings": {"model_dim": 2},
+        "peak_preprocessing": {"version": 1},
+        "data_provenance": {"gems_revision": "gems-sha"},
+    }
+
+
+def _adaptation_data_metadata() -> dict[str, object]:
+    return {
+        "train_size": 2,
+        "train_positive": 1,
+        "val_size": 2,
+        "val_positive": 1,
+        "data_provenance": {
+            "massspec_nist_revision": "nist-sha",
+        },
+        "peak_preprocessing": {"version": 1},
+    }
+
+
+def test_torch_source_checkpoint_contract_tracks_model_content(tmp_path: Path):
+    checkpoint = {
+        "global_step": 7,
+        "model": {"weight": torch.tensor([1.0, 2.0])},
+        "covariance_pooler_checkpoint": None,
+        "peak_preprocessing": {"version": 1},
+        "data_provenance": {"gems_revision": "gems-sha"},
+    }
+    config = config_dict.ConfigDict({"model_dim": 2})
+
+    baseline = fluorine._torch_source_checkpoint_contract(
+        config=config,
+        checkpoint_path=tmp_path / "checkpoint.pt",
+        checkpoint=checkpoint,
+    )
+    checkpoint["model"]["weight"][0] = 3.0
+    changed = fluorine._torch_source_checkpoint_contract(
+        config=config,
+        checkpoint_path=tmp_path / "checkpoint.pt",
+        checkpoint=checkpoint,
+    )
+
+    assert baseline["model_sha256"] != changed["model_sha256"]
+
+
+@pytest.mark.parametrize("changed_part", ["source_checkpoint", "evaluation_data"])
+def test_cached_adaptation_state_rejects_stale_contract(
+    tmp_path: Path,
+    changed_part: str,
+):
+    state_path = tmp_path / "state.pt"
+    current_contract = fluorine._fluorine_state_contract(
+        source_checkpoint=_source_checkpoint_contract(),
+        data=SimpleNamespace(metadata=_adaptation_data_metadata()),
+    )
+    torch.save(
+        {
+            "complete": True,
+            "mode": "lora",
+            "pooling": "covariance",
+            "hparams": {},
+            "max_train_samples": None,
+            "max_val_samples": None,
+            "state_contract": current_contract,
+        },
+        state_path,
+    )
+    changed_contract = json.loads(json.dumps(current_contract))
+    if changed_part == "source_checkpoint":
+        changed_contract["source_checkpoint"]["model_sha256"] = "changed"
+    else:
+        changed_contract["evaluation_data_provenance"][
+            "massspec_nist_revision"
+        ] = "changed"
+
+    with pytest.raises(ValueError, match="training contract"):
+        fluorine._load_cached_adaptation_state(
+            state_path=state_path,
+            device=torch.device("cpu"),
+            mode="lora",
+            pooling="covariance",
+            requested_hparams={},
+            max_train_samples=None,
+            max_val_samples=None,
+            state_contract=changed_contract,
+        )
+
+
 def _adaptation_trainer_kwargs(
     *,
     trainer_name: str,
@@ -180,6 +364,7 @@ def _adaptation_trainer_kwargs(
         "config": config,
         "config_path": tmp_path / "config.py",
         "checkpoint_path": tmp_path / "checkpoint.pt",
+        "source_checkpoint_contract": _source_checkpoint_contract(),
         "cache_dir": tmp_path,
         "device": torch.device("cpu"),
         "batch_size": 2,
@@ -191,7 +376,6 @@ def _adaptation_trainer_kwargs(
         "autocast_dtype": None,
         "hidden_dim": 2,
         "dropout": 0.0,
-        "revision": "main",
         "max_train_samples": None,
         "max_val_samples": None,
         "max_test_samples": None,
@@ -262,7 +446,11 @@ def test_adaptation_trainers_only_build_test_loader_for_per_epoch_evaluation(
 ):
     loader_splits = []
 
-    monkeypatch.setattr(fluorine, "build_fluorine_data", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        fluorine,
+        "build_fluorine_data",
+        lambda **_kwargs: SimpleNamespace(metadata=_adaptation_data_metadata()),
+    )
 
     def fake_make_loader(_data, split, **_kwargs):
         loader_splits.append(split)
@@ -281,6 +469,7 @@ def test_adaptation_trainers_only_build_test_loader_for_per_epoch_evaluation(
         ),
         "config_path": tmp_path / "config.py",
         "checkpoint_path": tmp_path / "checkpoint.pt",
+        "source_checkpoint_contract": _source_checkpoint_contract(),
         "cache_dir": tmp_path,
         "device": torch.device("cpu"),
         "batch_size": 2,
@@ -292,7 +481,6 @@ def test_adaptation_trainers_only_build_test_loader_for_per_epoch_evaluation(
         "autocast_dtype": None,
         "hidden_dim": 4,
         "dropout": 0.0,
-        "revision": "main",
         "max_train_samples": None,
         "max_val_samples": None,
         "max_test_samples": None,
@@ -345,14 +533,7 @@ def test_adaptation_trainers_complete_one_epoch_and_reload_best_state(
     config = config_dict.ConfigDict(
         {"model_dim": 2, "covariance_pooling_dim": 1, "compile_mode": "none"}
     )
-    data = SimpleNamespace(
-        metadata={
-            "train_size": 2,
-            "train_positive": 1,
-            "val_size": 2,
-            "val_positive": 1,
-        }
-    )
+    data = SimpleNamespace(metadata=_adaptation_data_metadata())
     loader_calls = []
 
     def fake_make_loader(_data, split, **kwargs):
@@ -442,7 +623,7 @@ def test_adaptation_trainers_complete_one_epoch_and_reload_best_state(
     monkeypatch.setattr(
         fluorine,
         "build_fluorine_data",
-        lambda **_kwargs: pytest.fail("cached state rebuilt fluorine data"),
+        lambda **_kwargs: data,
     )
     monkeypatch.setattr(
         fluorine,
@@ -487,7 +668,11 @@ def test_run_persists_single_canonical_final_test_evaluation(monkeypatch, tmp_pa
     monkeypatch.setattr(
         fluorine,
         "_load_checkpoint_model",
-        lambda _config_path, _checkpoint_path, _device: (config, model),
+        lambda _config_path, _checkpoint_path, _device: (
+            config,
+            model,
+            _source_checkpoint_contract(),
+        ),
     )
     monkeypatch.setattr(
         fluorine,
@@ -547,7 +732,6 @@ def test_run_persists_single_canonical_final_test_evaluation(monkeypatch, tmp_pa
         focal_gamma=2.0,
         hidden_dim=4,
         dropout=0.0,
-        revision="main",
         max_train_samples=None,
         max_val_samples=None,
         max_test_samples=None,
@@ -566,7 +750,10 @@ def test_run_persists_single_canonical_final_test_evaluation(monkeypatch, tmp_pa
     assert saved_state["test"]["test/average_precision"] == 1.0
 
 
-def test_lora_cached_state_injects_adapters_without_full_model_state(tmp_path: Path):
+def test_lora_cached_state_injects_adapters_without_full_model_state(
+    monkeypatch,
+    tmp_path: Path,
+):
     source = _FakeFluorineModel()
     lora_config = fluorine._lora_config(rank=2, alpha=4.0, dropout=0.0)
     fluorine.apply_fluorine_lora(source.encoder, lora_config)
@@ -587,13 +774,26 @@ def test_lora_cached_state_injects_adapters_without_full_model_state(tmp_path: P
     config_path = tmp_path / "config.py"
     checkpoint_path = tmp_path / "checkpoint.pt"
     state_path = tmp_path / "lora_state.pt"
+    data = SimpleNamespace(metadata=_adaptation_data_metadata())
+    source_checkpoint_contract = _source_checkpoint_contract()
+    state_contract = fluorine._fluorine_state_contract(
+        source_checkpoint=source_checkpoint_contract,
+        data=data,
+    )
+    monkeypatch.setattr(
+        fluorine,
+        "build_fluorine_data",
+        lambda **_kwargs: data,
+    )
     torch.save(
         {
             "mode": "lora",
+            "complete": True,
             "config_path": str(config_path),
             "checkpoint_path": str(checkpoint_path),
             "pooling": "covariance",
             "hparams": hparams,
+            "state_contract": state_contract,
             "lora_config": lora_config,
             "lora_state": lora_state,
             "max_train_samples": None,
@@ -609,6 +809,7 @@ def test_lora_cached_state_injects_adapters_without_full_model_state(tmp_path: P
         config={},
         config_path=config_path,
         checkpoint_path=checkpoint_path,
+        source_checkpoint_contract=source_checkpoint_contract,
         cache_dir=tmp_path,
         device=torch.device("cpu"),
         batch_size=1,
@@ -625,7 +826,6 @@ def test_lora_cached_state_injects_adapters_without_full_model_state(tmp_path: P
         autocast_dtype=torch.bfloat16,
         hidden_dim=8,
         dropout=0.1,
-        revision="main",
         max_train_samples=None,
         max_val_samples=None,
         max_test_samples=None,
@@ -647,10 +847,15 @@ def test_lora_cached_state_injects_adapters_without_full_model_state(tmp_path: P
     assert isinstance(block.embed, torch.nn.Linear)
 
 
-def test_lora_cached_state_requires_pooling_field(tmp_path: Path):
+def test_lora_cached_state_requires_current_contract(monkeypatch, tmp_path: Path):
     config_path = tmp_path / "config.py"
     checkpoint_path = tmp_path / "checkpoint.pt"
     state_path = tmp_path / "lora_state.pt"
+    monkeypatch.setattr(
+        fluorine,
+        "build_fluorine_data",
+        lambda **_kwargs: SimpleNamespace(metadata=_adaptation_data_metadata()),
+    )
     torch.save(
         {
             "mode": "lora",
@@ -663,13 +868,14 @@ def test_lora_cached_state_requires_pooling_field(tmp_path: Path):
         state_path,
     )
 
-    with pytest.raises(KeyError, match="pooling"):
+    with pytest.raises(ValueError, match="training contract"):
         fluorine.train_or_load_lora(
             state_path=state_path,
             model=_FakeFluorineModel(),
             config={},
             config_path=config_path,
             checkpoint_path=checkpoint_path,
+            source_checkpoint_contract=_source_checkpoint_contract(),
             cache_dir=tmp_path,
             device=torch.device("cpu"),
             batch_size=1,
@@ -686,7 +892,6 @@ def test_lora_cached_state_requires_pooling_field(tmp_path: Path):
             autocast_dtype=torch.bfloat16,
             hidden_dim=8,
             dropout=0.1,
-            revision="main",
             max_train_samples=None,
             max_val_samples=None,
             max_test_samples=None,

@@ -1,11 +1,13 @@
 from pathlib import Path
 from typing import Any, NamedTuple, cast
+from urllib.parse import quote
 
 import numpy as np
 import torch
 from ml_collections import config_dict
 from torch.utils.data import DataLoader, Dataset, Subset
 
+from spectra_learning.data.contracts import peak_preprocessing_contract
 from spectra_learning.data.gems.conversion import batch_to_numpy, format_batch
 from spectra_learning.data.loading import (
     loader_sampler,
@@ -14,21 +16,18 @@ from spectra_learning.data.loading import (
 )
 from spectra_learning.data.massspec_targets import REGRESSION_TARGET_KEYS
 from spectra_learning.data.murcko import (
-    MCEBIO_MURCKO_PREPARED_SUBDIR,
     NIST_MURCKO_HF_REPO,
+    NIST_MURCKO_HF_REVISION,
     NIST_MURCKO_PREPARED_SUBDIR,
-    ensure_mcebio_murcko_probe_downloaded,
     ensure_nist_murcko_probe_downloaded,
-    merge_vocabularies,
+    precursor_charge_from_metadata_json,
 )
 from spectra_learning.data.spectra import (
-    ASSUMED_PRECURSOR_CHARGE,
     COLLISION_ENERGY_MAX,
-    DEFAULT_MAX_PRECURSOR_MZ,
     DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
     DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-    DEFAULT_MIN_PEAK_INTENSITY,
     DEFAULT_PEAK_FILTERING,
+    canonicalize_precursor_charge_torch,
     preprocess_peak_batch_numpy,
     preprocess_peak_batch_torch,
     spectra_from_peak_lists,
@@ -38,9 +37,20 @@ from spectra_learning.config.msg_probe import validate_msg_probe_config
 _DEFAULT_BATCH_SIZE = 512
 _DEFAULT_SHUFFLE_BUFFER = 10_000
 _DEFAULT_ARTIFACT_DIR = Path("data/gems_artifacts")
-_DEFAULT_PRECURSOR_PEAK_EXCLUSION_WINDOW_DA = 0.0
-_NUM_PEAKS_OUTPUT = 60
 _FINGERPRINT_BITS = 1024
+
+
+def massspec_source_cache_dir(
+    artifact_root: Path,
+    repo_id: str,
+    revision: str,
+) -> Path:
+    return (
+        artifact_root
+        / "huggingface"
+        / f"repo={quote(repo_id, safe='')}"
+        / f"revision={quote(revision, safe='')}"
+    )
 
 
 class _ProbeParquetDataset(Dataset):
@@ -143,6 +153,13 @@ class _ProbeParquetDataset(Dataset):
             "collision_energy_present": np.asarray(
                 rows["collision_energy_present"],
                 dtype=np.int32,
+            ),
+            "charge": np.asarray(
+                [
+                    precursor_charge_from_metadata_json(value)
+                    for value in rows["metadata_json"]
+                ],
+                dtype=np.float32,
             ),
             "probe_valid_mol": np.ones(n, dtype=bool),
             "probe_maccs": np.asarray(rows["maccs_166"], dtype=np.int8),
@@ -285,9 +302,11 @@ class _ProbeBatchCollator:
             [float(sample["collision_energy"]) for sample in samples],
             dtype=torch.float32,
         ).clamp(0.0, COLLISION_ENERGY_MAX) / COLLISION_ENERGY_MAX
-        batch["charge"] = torch.full_like(
-            batch["collision_energy"],
-            ASSUMED_PRECURSOR_CHARGE,
+        batch["charge"] = canonicalize_precursor_charge_torch(
+            torch.tensor(
+                [float(sample["charge"]) for sample in samples],
+                dtype=torch.float32,
+            )
         )
         batch["collision_energy_present"] = torch.tensor(
             [int(sample["collision_energy_present"]) for sample in samples],
@@ -413,10 +432,6 @@ class MassSpecProbeData(NamedTuple):
     test_lengths: list[int]
     test_morgan_files: list[str]
     test_dreams_files: list[str]
-    mcebio_test_files: list[str]
-    mcebio_test_lengths: list[int]
-    mcebio_test_morgan_files: list[str]
-    mcebio_test_dreams_files: list[str]
     batch_size: int
     shuffle_buffer: int
     max_precursor_mz: float
@@ -439,7 +454,6 @@ class MassSpecProbeData(NamedTuple):
         distributed_world_size: int = 1,
         distributed_rank: int = 0,
         distributed_local_rank: int | None = None,
-        include_mcebio: bool = True,
         maccs_only: bool = False,
     ) -> "MassSpecProbeData":
         validate_msg_probe_config(config)
@@ -448,9 +462,9 @@ class MassSpecProbeData(NamedTuple):
             .expanduser()
             .resolve()
         )
-        max_precursor_mz = float(
-            config.get("max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
-        )
+        preprocessing = peak_preprocessing_contract(config)
+        min_precursor_mz = float(preprocessing["min_precursor_mz"])
+        max_precursor_mz = float(preprocessing["max_precursor_mz"])
         msg_probe_fingerprint = (
             "maccs"
             if maccs_only
@@ -473,10 +487,21 @@ class MassSpecProbeData(NamedTuple):
         nist_repo_id = str(
             config.get("nist_murcko_probe_repo_id", NIST_MURCKO_HF_REPO)
         )
-        nist_revision = str(config.get("nist_murcko_probe_revision", "main"))
-        nist_dir = artifact_root / murcko_subdir
+        nist_revision = str(
+            config.get(
+                "nist_murcko_probe_revision",
+                NIST_MURCKO_HF_REVISION,
+            )
+        )
+        nist_cache_dir = massspec_source_cache_dir(
+            artifact_root,
+            nist_repo_id,
+            nist_revision,
+        )
+        nist_dir = nist_cache_dir / murcko_subdir
         nist_metadata = ensure_nist_murcko_probe_downloaded(
             nist_dir,
+            min_precursor_mz=min_precursor_mz,
             max_precursor_mz=max_precursor_mz,
             repo_id=nist_repo_id,
             revision=nist_revision,
@@ -487,41 +512,9 @@ class MassSpecProbeData(NamedTuple):
             distributed_rank=distributed_rank,
             distributed_local_rank=distributed_local_rank,
         )
-        mcebio_subdir = ""
-        mcebio_repo_id = ""
-        mcebio_revision = ""
-        mcebio_metadata: dict[str, Any] = {}
-        if include_mcebio:
-            mcebio_subdir = str(
-                config.get(
-                    "mcebio_murcko_probe_hf_subdir",
-                    MCEBIO_MURCKO_PREPARED_SUBDIR,
-                )
-            ).strip("/")
-            mcebio_repo_id = str(
-                config.get("mcebio_murcko_probe_repo_id", NIST_MURCKO_HF_REPO)
-            )
-            mcebio_revision = str(
-                config.get("mcebio_murcko_probe_revision", "main")
-            )
-            mcebio_metadata = ensure_mcebio_murcko_probe_downloaded(
-                artifact_root,
-                repo_id=mcebio_repo_id,
-                revision=mcebio_revision,
-                subdir=mcebio_subdir,
-                include_morgan=include_morgan_probe,
-                include_dreams=include_dreams,
-                distributed_world_size=distributed_world_size,
-                distributed_rank=distributed_rank,
-                distributed_local_rank=distributed_local_rank,
-            )
-        adduct_vocab = merge_vocabularies(
-            nist_metadata.get("adduct_vocab", {"unknown": 0}),
-            mcebio_metadata.get("adduct_vocab", {"unknown": 0}),
-        )
-        instrument_type_vocab = merge_vocabularies(
-            nist_metadata.get("instrument_type_vocab", {"unknown": 0}),
-            mcebio_metadata.get("instrument_type_vocab", {"unknown": 0}),
+        adduct_vocab = dict(nist_metadata.get("adduct_vocab", {"unknown": 0}))
+        instrument_type_vocab = dict(
+            nist_metadata.get("instrument_type_vocab", {"unknown": 0})
         )
         morgan_files = (
             {
@@ -531,11 +524,6 @@ class MassSpecProbeData(NamedTuple):
             if include_morgan
             else {}
         )
-        mcebio_morgan_files = (
-            mcebio_metadata.get("morgan_auxiliary_files", {}).get("all", [])
-            if include_morgan_probe
-            else []
-        )
         dreams_files = (
             {
                 split: nist_metadata.get("dreams_auxiliary_files", {}).get(split, [])
@@ -544,23 +532,25 @@ class MassSpecProbeData(NamedTuple):
             if include_dreams
             else {}
         )
-        mcebio_dreams_files = (
-            mcebio_metadata.get("dreams_auxiliary_files", {}).get("all", [])
-            if include_dreams
-            else []
-        )
+        train_files = [str(nist_dir / name) for name in nist_metadata["train_files"]]
+        val_files = [str(nist_dir / name) for name in nist_metadata["val_files"]]
+        test_files = [str(nist_dir / name) for name in nist_metadata["test_files"]]
         info = {
             "massspec_train_size": int(nist_metadata.get("train_size", 0)),
             "massspec_val_size": int(nist_metadata.get("val_size", 0)),
             "massspec_test_size": int(nist_metadata.get("test_size", 0)),
-            "massspec_mcebio_test_size": int(mcebio_metadata.get("all_size", 0)),
             "massspec_metadata_version": int(nist_metadata.get("metadata_version", 0)),
             "massspec_nist_repo_id": nist_repo_id,
             "massspec_nist_revision": nist_revision,
             "massspec_nist_subdir": murcko_subdir,
-            "massspec_mcebio_repo_id": mcebio_repo_id,
-            "massspec_mcebio_revision": mcebio_revision,
-            "massspec_mcebio_subdir": mcebio_subdir,
+            "massspec_nist_cache_dir": str(nist_cache_dir),
+            "massspec_nist_source_dir": str(nist_dir),
+            "massspec_train_positive": int(
+                nist_metadata.get("train_positive", 0)
+            ),
+            "massspec_val_positive": int(nist_metadata.get("val_positive", 0)),
+            "massspec_test_positive": int(nist_metadata.get("test_positive", 0)),
+            "massspec_peak_preprocessing": preprocessing,
             "massspec_adduct_vocab": adduct_vocab,
             "massspec_instrument_type_vocab": instrument_type_vocab,
             "massspec_adduct_vocab_size": len(adduct_vocab),
@@ -590,10 +580,6 @@ class MassSpecProbeData(NamedTuple):
             "dreams_auxiliary_available": bool(
                 include_dreams
                 and nist_metadata.get("dreams_auxiliary_available", False)
-                and (
-                    not include_mcebio
-                    or mcebio_metadata.get("dreams_auxiliary_available", False)
-                )
             ),
             "dreams_valid_counts": nist_metadata.get("dreams_valid_counts", {}),
             "dreams_invalid_counts": nist_metadata.get("dreams_invalid_counts", {}),
@@ -604,17 +590,6 @@ class MassSpecProbeData(NamedTuple):
             else ""
         )
         pairwise_alignment_path = str(nist_dir / pairwise_file) if pairwise_file else ""
-        train_files = [str(nist_dir / name) for name in nist_metadata["train_files"]]
-        val_files = [str(nist_dir / name) for name in nist_metadata["val_files"]]
-        test_files = [str(nist_dir / name) for name in nist_metadata["test_files"]]
-        mcebio_test_files = (
-            [
-                str(artifact_root / mcebio_subdir / name)
-                for name in mcebio_metadata["all_files"]
-            ]
-            if include_mcebio
-            else []
-        )
         return cls(
             info=info,
             train_files=train_files,
@@ -641,18 +616,6 @@ class MassSpecProbeData(NamedTuple):
             test_dreams_files=[
                 str(nist_dir / name) for name in dreams_files.get("test", [])
             ],
-            mcebio_test_files=mcebio_test_files,
-            mcebio_test_lengths=[
-                int(v) for v in mcebio_metadata.get("all_lengths", [])
-            ],
-            mcebio_test_morgan_files=[
-                str(artifact_root / mcebio_subdir / name)
-                for name in mcebio_morgan_files
-            ],
-            mcebio_test_dreams_files=[
-                str(artifact_root / mcebio_subdir / name)
-                for name in mcebio_dreams_files
-            ],
             batch_size=int(
                 config.get(
                     "msg_probe_batch_size",
@@ -663,39 +626,23 @@ class MassSpecProbeData(NamedTuple):
                 config.get("shuffle_buffer", _DEFAULT_SHUFFLE_BUFFER)
             ),
             max_precursor_mz=max_precursor_mz,
-            min_peak_intensity=float(
-                config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)
-            ),
+            min_peak_intensity=float(preprocessing["min_peak_intensity"]),
             peak_drop_min_intensity=float(
-                config.get(
-                    "peak_drop_min_intensity",
-                    config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY),
-                )
+                preprocessing["peak_drop_min_intensity"]
             ),
-            peak_filtering=str(
-                config.get("peak_filtering", DEFAULT_PEAK_FILTERING)
-            ),
+            peak_filtering=str(preprocessing["peak_filtering"]),
             grouped_peak_shoulder_da=float(
-                config.get(
-                    "grouped_peak_shoulder_da",
-                    DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-                )
+                preprocessing["grouped_peak_shoulder_da"]
             ),
             grouped_peak_isotope_charges=tuple(
                 int(charge)
-                for charge in config.get(
-                    "grouped_peak_isotope_charges",
-                    DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
-                )
+                for charge in preprocessing["grouped_peak_isotope_charges"]
             ),
-            peak_ordering=str(config.get("peak_ordering", "mz")),
-            num_peaks=int(config.get("num_peaks", _NUM_PEAKS_OUTPUT)),
+            peak_ordering=str(preprocessing["peak_ordering"]),
+            num_peaks=int(preprocessing["num_peaks"]),
             dreams_dim=int(nist_metadata.get("dreams_dim", 0)),
             precursor_peak_exclusion_window_da=float(
-                config.get(
-                    "precursor_peak_exclusion_window_da",
-                    _DEFAULT_PRECURSOR_PEAK_EXCLUSION_WINDOW_DA,
-                )
+                preprocessing["precursor_peak_exclusion_window_da"]
             ),
             pairwise_alignment_path=pairwise_alignment_path,
         )
@@ -715,11 +662,15 @@ class MassSpecProbeData(NamedTuple):
         pad_distributed: bool = False,
         output_format: str = "torch",
     ):
+        if peak_ordering not in (None, self.peak_ordering):
+            raise ValueError(
+                "MassSpec peak ordering must match the checkpoint preprocessing "
+                f"contract: requested={peak_ordering}, expected={self.peak_ordering}"
+            )
         split_files = {
             "massspec_train": self.train_files,
             "massspec_val": self.val_files,
             "massspec_test": self.test_files,
-            "massspec_mcebio_test": self.mcebio_test_files,
             "train": self.train_files,
             "val": self.val_files,
             "test": self.test_files,
@@ -729,7 +680,6 @@ class MassSpecProbeData(NamedTuple):
             "massspec_train": self.train_lengths,
             "massspec_val": self.val_lengths,
             "massspec_test": self.test_lengths,
-            "massspec_mcebio_test": self.mcebio_test_lengths,
             "train": self.train_lengths,
             "val": self.val_lengths,
             "test": self.test_lengths,
@@ -739,9 +689,6 @@ class MassSpecProbeData(NamedTuple):
             "massspec_train": [self.train_morgan_files] if self.train_files else [],
             "massspec_val": [self.val_morgan_files] if self.val_files else [],
             "massspec_test": [self.test_morgan_files] if self.test_files else [],
-            "massspec_mcebio_test": (
-                [self.mcebio_test_morgan_files] if self.mcebio_test_files else []
-            ),
             "train": [self.train_morgan_files] if self.train_files else [],
             "val": [self.val_morgan_files] if self.val_files else [],
             "test": [self.test_morgan_files] if self.test_files else [],
@@ -755,9 +702,6 @@ class MassSpecProbeData(NamedTuple):
             "massspec_train": [self.train_dreams_files] if self.train_files else [],
             "massspec_val": [self.val_dreams_files] if self.val_files else [],
             "massspec_test": [self.test_dreams_files] if self.test_files else [],
-            "massspec_mcebio_test": (
-                [self.mcebio_test_dreams_files] if self.mcebio_test_files else []
-            ),
             "train": [self.train_dreams_files] if self.train_files else [],
             "val": [self.val_dreams_files] if self.val_files else [],
             "test": [self.test_dreams_files] if self.test_files else [],
@@ -825,7 +769,7 @@ class MassSpecProbeData(NamedTuple):
                 max_precursor_mz=self.max_precursor_mz,
                 min_peak_intensity=self.min_peak_intensity,
                 peak_drop_min_intensity=self.peak_drop_min_intensity,
-                peak_ordering=peak_ordering or self.peak_ordering,
+                peak_ordering=self.peak_ordering,
                 precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
                 peak_filtering=self.peak_filtering,
                 grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
@@ -846,11 +790,15 @@ class MassSpecProbeData(NamedTuple):
         distributed_world_size: int = 1,
         output_format: str = "torch",
     ):
+        if peak_ordering not in (None, self.peak_ordering):
+            raise ValueError(
+                "MassSpec peak ordering must match the checkpoint preprocessing "
+                f"contract: requested={peak_ordering}, expected={self.peak_ordering}"
+            )
         split_files = {
             "massspec_train": self.train_files,
             "massspec_val": self.val_files,
             "massspec_test": self.test_files,
-            "massspec_mcebio_test": self.mcebio_test_files,
             "train": self.train_files,
             "val": self.val_files,
             "test": self.test_files,
@@ -860,7 +808,6 @@ class MassSpecProbeData(NamedTuple):
             "massspec_train": self.train_lengths,
             "massspec_val": self.val_lengths,
             "massspec_test": self.test_lengths,
-            "massspec_mcebio_test": self.mcebio_test_lengths,
             "train": self.train_lengths,
             "val": self.val_lengths,
             "test": self.test_lengths,
@@ -870,9 +817,6 @@ class MassSpecProbeData(NamedTuple):
             "massspec_train": [self.train_morgan_files] if self.train_files else [],
             "massspec_val": [self.val_morgan_files] if self.val_files else [],
             "massspec_test": [self.test_morgan_files] if self.test_files else [],
-            "massspec_mcebio_test": (
-                [self.mcebio_test_morgan_files] if self.mcebio_test_files else []
-            ),
             "train": [self.train_morgan_files] if self.train_files else [],
             "val": [self.val_morgan_files] if self.val_files else [],
             "test": [self.test_morgan_files] if self.test_files else [],
@@ -886,9 +830,6 @@ class MassSpecProbeData(NamedTuple):
             "massspec_train": [self.train_dreams_files] if self.train_files else [],
             "massspec_val": [self.val_dreams_files] if self.val_files else [],
             "massspec_test": [self.test_dreams_files] if self.test_files else [],
-            "massspec_mcebio_test": (
-                [self.mcebio_test_dreams_files] if self.mcebio_test_files else []
-            ),
             "train": [self.train_dreams_files] if self.train_files else [],
             "val": [self.val_dreams_files] if self.val_files else [],
             "test": [self.test_dreams_files] if self.test_files else [],
@@ -929,7 +870,7 @@ class MassSpecProbeData(NamedTuple):
                 max_precursor_mz=self.max_precursor_mz,
                 min_peak_intensity=self.min_peak_intensity,
                 peak_drop_min_intensity=self.peak_drop_min_intensity,
-                peak_ordering=peak_ordering or self.peak_ordering,
+                peak_ordering=self.peak_ordering,
                 precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
                 peak_filtering=self.peak_filtering,
                 grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,

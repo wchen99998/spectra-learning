@@ -49,10 +49,19 @@ def test_current_pretraining_config_records_model_and_data_defaults() -> None:
     data_keys = set(asdict(GemsDataConfig.from_config(config)))
 
     assert model_keys - set(config) == {
+        "distogram_mz_max",
+        "encoder_mz_scale",
+        "jepa_mae_mz_max",
         "pairmixer_fast_encoder_max_visible_tokens",
         "pairmixer_fast_max_visible_tokens",
+        "pairmixer_fourier_x_max",
+        "pairmixer_mz_scale",
+        "pairmixer_precursor_mz_scale",
     }
-    assert data_keys - set(config) == {"jepa_intensity_aware_mask_config"}
+    assert data_keys - set(config) == {
+        "jepa_intensity_aware_mask_config",
+        "min_precursor_mz",
+    }
 
 
 def test_model_settings_copy_typed_config_values_without_coercion() -> None:

@@ -230,14 +230,6 @@ def fingerprint_metrics(
     }
 
 
-def sulfur_metric_subset(metrics: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: value
-        for key, value in metrics.items()
-        if key.endswith("/samples") or key.rsplit("/", 1)[-1].endswith("_sulfur")
-    }
-
-
 def resolve_probe_warmup_steps(config: Any, steps_per_epoch: int) -> int:
     warmup_epochs = config.get("msg_probe_warmup_epochs", None)
     if warmup_epochs is not None:

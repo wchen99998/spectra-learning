@@ -45,14 +45,14 @@ class ChunkedDistributedBatchSampler(Sampler[list[int]]):
         self.epoch = epoch
 
     def __iter__(self) -> Iterator[list[int]]:
-        blocks = list(self.blocks)
+        blocks = list(self.blocks[self.rank :: self.world_size])
         generator = torch.Generator()
         generator.manual_seed(self.seed + self.epoch)
         if self.shuffle:
             order = torch.randperm(len(blocks), generator=generator).tolist()
             blocks = [blocks[index] for index in order]
-        blocks = blocks[self.rank :: self.world_size]
 
+        partial_batches: list[list[int]] = []
         for block_start, block_stop in blocks:
             rows = list(range(block_start, block_stop))
             if self.shuffle:
@@ -60,8 +60,20 @@ class ChunkedDistributedBatchSampler(Sampler[list[int]]):
                 rows = [rows[index] for index in order]
             for offset in range(0, len(rows), self.batch_size):
                 batch = rows[offset : offset + self.batch_size]
-                if len(batch) == self.batch_size or not self.drop_last:
+                if len(batch) == self.batch_size:
                     yield batch
+                elif not self.drop_last:
+                    partial_batches.append(batch)
+        yield from partial_batches
+
+    @property
+    def full_batch_count(self) -> int:
+        return sum(
+            (block_stop - block_start) // self.batch_size
+            for block_start, block_stop in self.blocks[
+                self.rank :: self.world_size
+            ]
+        )
 
     def __len__(self) -> int:
         batches = 0

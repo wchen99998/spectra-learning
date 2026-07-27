@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import torch
 import torch.nn.functional as F
 
 NUM_PEAKS_INPUT = 128
+DEFAULT_NUM_PEAKS = 60
 PEAK_MZ_MIN = 20.0
 PEAK_MZ_MAX = 1000.0
 DEFAULT_MIN_PEAK_INTENSITY = 1e-4
+DEFAULT_MIN_PRECURSOR_MZ = 1.0
 DEFAULT_MAX_PRECURSOR_MZ = 1000.0
 DEFAULT_PRECURSOR_PEAK_EXCLUSION_WINDOW_DA = 0.0
 PEAK_FILTERING_TOP_INTENSITY = "top_intensity"
@@ -23,6 +27,7 @@ SPECTRUM_METADATA_KEYS = (
     "collision_energy",
     "charge",
 )
+_PRECURSOR_CHARGE_PATTERN = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)")
 
 _SIRIUS_MZ_ISOTOPE_ERROR_DA = 0.002
 _SIRIUS_ISOTOPE_RANGES_DA = (
@@ -47,6 +52,34 @@ _SIRIUS_ISOTOPE_RANGES_DA = (
         5.01572941 + _SIRIUS_MZ_ISOTOPE_ERROR_DA,
     ),
 )
+
+
+def canonicalize_precursor_charge_numpy(charge: np.ndarray) -> np.ndarray:
+    charge = np.abs(charge.astype(np.float32, copy=False))
+    return np.where(
+        np.isfinite(charge) & (charge > 0.0),
+        charge,
+        np.float32(ASSUMED_PRECURSOR_CHARGE),
+    )
+
+
+def canonicalize_precursor_charge_torch(charge: torch.Tensor) -> torch.Tensor:
+    charge = charge.to(dtype=torch.float32).abs()
+    return torch.where(
+        torch.isfinite(charge) & (charge > 0.0),
+        charge,
+        torch.full_like(charge, ASSUMED_PRECURSOR_CHARGE),
+    )
+
+
+def parse_precursor_charge(value: object) -> float:
+    match = _PRECURSOR_CHARGE_PATTERN.search(str(value))
+    charge = abs(float(match.group())) if match is not None else ASSUMED_PRECURSOR_CHARGE
+    return (
+        charge
+        if np.isfinite(charge) and charge > 0.0
+        else ASSUMED_PRECURSOR_CHARGE
+    )
 
 
 def spectra_from_peak_lists(
@@ -301,8 +334,14 @@ def preprocess_peak_batch_numpy(
         DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES
     ),
 ) -> dict[str, np.ndarray]:
+    if peak_filtering not in {PEAK_FILTERING_TOP_INTENSITY, PEAK_FILTERING_GROUPED}:
+        raise ValueError(f"Unknown peak_filtering: {peak_filtering}")
+    if peak_ordering not in {"mz", "intensity"}:
+        raise ValueError(f"Unknown peak_ordering: {peak_ordering}")
     mz = spectra[:, 0, :].astype(np.float32, copy=False)
     intensity = spectra[:, 1, :].astype(np.float32, copy=False)
+    input_max_intensity = np.maximum(intensity.max(axis=1, keepdims=True), 1e-8)
+    intensity = intensity / input_max_intensity
     intensity_threshold = max(min_peak_intensity, peak_drop_min_intensity)
     window = precursor_peak_exclusion_window_da
     precursor_upper = precursor_mz[:, None] - window
@@ -346,6 +385,7 @@ def preprocess_peak_batch_numpy(
     mz = np.where(valid, mz, 0.0)
     intensity = np.where(valid, intensity, 0.0)
     group_id = np.where(valid, group_id, PEAK_GROUP_PADDING_ID)
+    valid[:, 0] |= ~valid.any(axis=1)
     precursor = (
         np.clip(precursor_mz, 0.0, max_precursor_mz).astype(np.float32)
         / max_precursor_mz
@@ -378,6 +418,15 @@ def preprocess_peak_batch_torch(
         DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES
     ),
 ) -> dict[str, torch.Tensor]:
+    if peak_filtering not in {PEAK_FILTERING_TOP_INTENSITY, PEAK_FILTERING_GROUPED}:
+        raise ValueError(f"Unknown peak_filtering: {peak_filtering}")
+    if peak_ordering not in {"mz", "intensity"}:
+        raise ValueError(f"Unknown peak_ordering: {peak_ordering}")
+    input_max_intensity = torch.clamp(
+        intensity.amax(dim=1, keepdim=True),
+        min=1e-8,
+    )
+    intensity = intensity / input_max_intensity
     intensity_threshold = max(min_peak_intensity, peak_drop_min_intensity)
     window = precursor_peak_exclusion_window_da
     precursor_upper = precursor_mz[:, None] - window
@@ -427,6 +476,7 @@ def preprocess_peak_batch_torch(
         group_id,
         torch.full_like(group_id, PEAK_GROUP_PADDING_ID),
     )
+    valid[:, 0] |= ~valid.any(dim=1)
     precursor = torch.clamp(precursor_mz, 0.0, max_precursor_mz) / max_precursor_mz
     return {
         "peak_mz": mz / PEAK_MZ_MAX,

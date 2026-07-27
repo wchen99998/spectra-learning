@@ -97,9 +97,17 @@ def load_ar_checkpoint_model(
         weights_only=True,
     )
     config = checkpoint["config"]
-    tokenizer = SpectraARTokenizer(
-        SpectraARTokenizerConfig(**checkpoint["tokenizer_config"])
-    )
+    tokenizer_values = dict(checkpoint["tokenizer_config"])
+    tokenizer_values["mz_bin_widths"] = tuple(tokenizer_values["mz_bin_widths"])
+    tokenizer_config = SpectraARTokenizerConfig(**tokenizer_values)
+    expected_tokenizer_config = SpectraARTokenizerConfig.from_config(config)
+    if tokenizer_config != expected_tokenizer_config:
+        raise ValueError(
+            "AR checkpoint tokenizer preprocessing does not match its config: "
+            f"checkpoint={asdict(tokenizer_config)}, "
+            f"config={asdict(expected_tokenizer_config)}"
+        )
+    tokenizer = SpectraARTokenizer(tokenizer_config)
     model = SpectraARTransformer(
         SpectraARTransformerConfig.from_config(config, tokenizer)
     )
@@ -231,7 +239,6 @@ class _ARFluorineInputs:
     head_learning_rate: float
     weight_decay: float
     autocast_dtype: torch.dtype | None
-    revision: str
     max_train_samples: int | None
     max_val_samples: int | None
     max_test_samples: int | None
@@ -282,7 +289,6 @@ def _build_ar_fluorine_loaders(
         config=inputs.config,
         cache_dir=inputs.cache_dir,
         batch_size=inputs.batch_size,
-        revision=inputs.revision,
     )
     train_loader = _make_loader(
         data,
@@ -692,7 +698,6 @@ def train_ar_fluorine(
     head_learning_rate: float,
     weight_decay: float,
     autocast_dtype: torch.dtype | None,
-    revision: str,
     max_train_samples: int | None,
     max_val_samples: int | None,
     max_test_samples: int | None,
@@ -724,7 +729,6 @@ def train_ar_fluorine(
             head_learning_rate=head_learning_rate,
             weight_decay=weight_decay,
             autocast_dtype=autocast_dtype,
-            revision=revision,
             max_train_samples=max_train_samples,
             max_val_samples=max_val_samples,
             max_test_samples=max_test_samples,
@@ -742,7 +746,7 @@ def _resolve_device(raw: str) -> torch.device:
 
 
 def _default_output_prefix(global_step: int, mode: str) -> Path:
-    return Path("results") / f"ar_fluorine_{mode}_step_{global_step}" / "mcebio"
+    return Path("results") / f"ar_fluorine_{mode}_step_{global_step}" / "nist"
 
 
 def _default_state_path(output_prefix: StoragePath, mode: str) -> Path:
@@ -791,7 +795,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         head_learning_rate=args.head_learning_rate,
         weight_decay=args.weight_decay,
         autocast_dtype=autocast_dtype,
-        revision=args.revision,
         max_train_samples=args.max_train_samples,
         max_val_samples=args.max_val_samples,
         max_test_samples=args.max_test_samples,
@@ -830,7 +833,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description=(
             "Fine-tune the AR spectra checkpoint with an EOS label-token "
             "fluorine head on NIST Murcko, using either LoRA adapters or full "
-            "model fine-tuning, then evaluate MCEBIO Murcko."
+            "model fine-tuning, then evaluate the NIST Murcko test split."
         )
     )
     parser.add_argument("--config", type=Path, default=Path("configs/ar_spectra_coarse_to_fine.py"))
@@ -842,7 +845,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output-prefix", default=None)
     parser.add_argument("--state-path", type=Path, default=None)
-    parser.add_argument("--revision", default="main")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--num-workers", type=int, default=0)

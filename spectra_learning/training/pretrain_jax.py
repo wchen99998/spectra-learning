@@ -22,6 +22,10 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from ml_collections import config_dict
 from tqdm import tqdm
 
+from spectra_learning.data.contracts import (
+    data_provenance_contract,
+    peak_preprocessing_contract,
+)
 from spectra_learning.config import config_to_dict
 from spectra_learning.data.gems.datamodule import GemsDataModule
 from spectra_learning.data.gems.mask_schedule import (
@@ -980,9 +984,7 @@ def train_and_evaluate_jax(
         name="pretrain",
         build_datamodule=_build_pretrain_jax_datamodule,
         build_model=lambda task_config, _datamodule: build_model_from_config(task_config),
-        checkpoint_contract=lambda task_config, _datamodule, _total_steps: (
-            jax_config_checkpoint_contract(task_config)
-        ),
+        checkpoint_contract=_pretrain_jax_checkpoint_contract,
         enable_msg_probe=True,
         initialize_model=initialize_jax_pretrain_model,
         validate_model=_validate_pretrain_jax_model,
@@ -1140,6 +1142,18 @@ def _build_pretrain_jax_datamodule(
         distributed_rank=process_index,
         distributed_local_rank=0,
     )
+
+
+def _pretrain_jax_checkpoint_contract(
+    config: config_dict.ConfigDict,
+    datamodule: GemsDataModule,
+    _total_steps: int,
+) -> dict[str, Any]:
+    return {
+        **jax_config_checkpoint_contract(config),
+        "peak_preprocessing": peak_preprocessing_contract(config),
+        "data_provenance": data_provenance_contract(datamodule.info),
+    }
 
 
 def _validate_pretrain_jax_model(model: Any) -> None:

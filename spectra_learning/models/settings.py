@@ -5,7 +5,7 @@ from dataclasses import dataclass, fields, replace
 from typing import Any
 
 from spectra_learning.config import load_config
-from spectra_learning.data.spectra import PEAK_MZ_MAX
+from spectra_learning.data.spectra import DEFAULT_NUM_PEAKS, PEAK_MZ_MAX
 from spectra_learning.models.fastmixer_capacity import (
     resolve_pairmixer_fast_encoder_max_visible_tokens,
     resolve_pairmixer_fast_max_visible_tokens,
@@ -17,10 +17,17 @@ REMOVED_SETTING_KEYS = (
     "encoder_discrete_mz_coarse_bin_size",
     "encoder_discrete_mz_embedding_dim",
     "encoder_fourier_input_scale",
+    "encoder_mz_scale",
     "encoder_use_fourier_features",
+    "distogram_mz_max",
+    "jepa_mae_mz_max",
     "mae_context_encoder_pack_tokens",
     "mae_context_encoder_pack_token_choices",
+    "peak_mz_max",
     "pairmixer_encoder_projection_kernel",
+    "pairmixer_fourier_x_max",
+    "pairmixer_mz_scale",
+    "pairmixer_precursor_mz_scale",
     "pairmixer_predictor_projection_kernel",
     "pairmixer_encoder_projection_kernel_schedule",
     "pairmixer_predictor_projection_kernel_schedule",
@@ -65,7 +72,7 @@ class PeakSetJEPASettings:
     encoder_fourier_mlp_hidden_dim: int | None = None
     encoder_fourier_mlp_num_layers: int = 2
     encoder_fourier_x_min: float = 3e-3
-    encoder_fourier_x_max: float = 1000.0
+    encoder_fourier_x_max: float = PEAK_MZ_MAX
     encoder_fourier_num_freqs: int = 256
     encoder_mz_scale: float = PEAK_MZ_MAX
     encoder_mz_embedding: str = "fourier"
@@ -109,7 +116,7 @@ class PeakSetJEPASettings:
     pairmixer_fast_max_visible_tokens: int | None = None
     pairmixer_fast_encoder_max_visible_tokens: int | None = None
     predictor_apply_final_norm: bool = True
-    num_peaks: int = 64
+    num_peaks: int = DEFAULT_NUM_PEAKS
     predictor_dim: int | None = None
     target_projector_dim: int | None = None
     predictor_dropout: float = 0.0
@@ -176,11 +183,10 @@ def _default_values(settings: PeakSetJEPASettings) -> dict[str, Any]:
 
 
 def _apply_derived_defaults(values: dict[str, Any], config: Any) -> None:
-    peak_mz_max = config.get("peak_mz_max", PEAK_MZ_MAX)
-    precursor_mz_max = config.get("max_precursor_mz", peak_mz_max)
-    values["encoder_mz_scale"] = peak_mz_max
-    values["jepa_mae_mz_max"] = peak_mz_max
-    values["distogram_mz_max"] = peak_mz_max
-    values["pairmixer_mz_scale"] = peak_mz_max
+    precursor_mz_max = config.get("max_precursor_mz", PEAK_MZ_MAX)
+    values["encoder_mz_scale"] = PEAK_MZ_MAX
+    values["jepa_mae_mz_max"] = PEAK_MZ_MAX
+    values["distogram_mz_max"] = PEAK_MZ_MAX
+    values["pairmixer_mz_scale"] = PEAK_MZ_MAX
     values["pairmixer_precursor_mz_scale"] = precursor_mz_max
-    values["pairmixer_fourier_x_max"] = peak_mz_max
+    values["pairmixer_fourier_x_max"] = PEAK_MZ_MAX

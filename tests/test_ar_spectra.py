@@ -21,6 +21,19 @@ from spectra_learning.models.ar_spectra import (
 )
 
 
+@pytest.mark.parametrize("key", ("ar_mz_max", "ar_precursor_mz_max"))
+def test_ar_tokenizer_rejects_independent_preprocessing_scales(key: str) -> None:
+    with pytest.raises(ValueError, match=f"{key} has been removed"):
+        SpectraARTokenizerConfig.from_config({key: 750.0})
+
+
+def test_ar_tokenizer_uses_shared_preprocessing_scales() -> None:
+    config = SpectraARTokenizerConfig.from_config({"max_precursor_mz": 2000.0})
+
+    assert config.mz_max == PEAK_MZ_MAX
+    assert config.precursor_mz_max == 2000.0
+
+
 def _batch() -> dict[str, torch.Tensor]:
     return {
         "peak_mz": torch.tensor(

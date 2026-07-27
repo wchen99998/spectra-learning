@@ -16,21 +16,38 @@ intensity, validate SMILES via RDKit, and write a GZIP-compressed HDF5.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import h5py
 import numpy as np
 from rdkit import Chem
 from tqdm import tqdm
 
+from spectra_learning.data.spectra import (
+    DEFAULT_MAX_PRECURSOR_MZ,
+    DEFAULT_MIN_PRECURSOR_MZ,
+    NUM_PEAKS_INPUT,
+)
+
 log = logging.getLogger(__name__)
 
-_NUM_PEAKS_INPUT = 128
-_DEFAULT_MAX_PRECURSOR_MZ = 1000.0
-_DEFAULT_MIN_PRECURSOR_MZ = 1.0
+
+def file_source_manifest(path: Path) -> dict[str, Any]:
+    path = path.expanduser().resolve()
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        while chunk := file.read(1024 * 1024):
+            digest.update(chunk)
+    return {
+        "path": str(path),
+        "bytes": path.stat().st_size,
+        "sha256": digest.hexdigest(),
+    }
 
 
 def _to_float(value: str | None) -> float:
@@ -128,13 +145,14 @@ def build_nist_probe_hdf5(
     mgf_path: Path,
     output_path: Path,
     *,
-    num_peaks_input: int = _NUM_PEAKS_INPUT,
-    max_precursor_mz: float = _DEFAULT_MAX_PRECURSOR_MZ,
-    min_precursor_mz: float = _DEFAULT_MIN_PRECURSOR_MZ,
+    num_peaks_input: int = NUM_PEAKS_INPUT,
+    max_precursor_mz: float = DEFAULT_MAX_PRECURSOR_MZ,
+    min_precursor_mz: float = DEFAULT_MIN_PRECURSOR_MZ,
     compression: str | None = "gzip",
     compression_opts: int | None = 4,
 ) -> dict[str, Any]:
     """Parse ``mgf_path`` and write an HDF5 in the DreaMS-Atlas NIST20 schema."""
+    source = file_source_manifest(mgf_path)
     spectra_parts: list[np.ndarray] = []
     precursor_parts: list[float] = []
     smiles_parts: list[str] = []
@@ -160,7 +178,12 @@ def build_nist_probe_hdf5(
     n_kept = len(spectra_parts)
     if n_kept == 0:
         raise ValueError(f"No usable spectra in {mgf_path}")
-    log.info("Parsed %d MGF records, kept %d (%.1f%%)", n_raw, n_kept, 100.0 * n_kept / max(1, n_raw))
+    log.info(
+        "Parsed %d MGF records, kept %d (%.1f%%)",
+        n_raw,
+        n_kept,
+        100.0 * n_kept / max(1, n_raw),
+    )
 
     spectrum = np.stack(spectra_parts, axis=0)
     precursor_mz = np.asarray(precursor_parts, dtype=np.float32)
@@ -179,8 +202,11 @@ def build_nist_probe_hdf5(
         fh.create_dataset("precursor_mz", data=precursor_mz, **kw)
         fh.create_dataset("smiles", data=smiles_arr, dtype=str_dtype, **kw)
         fh.create_dataset("adduct", data=adduct_arr, dtype=str_dtype, **kw)
-        fh.attrs["source"] = mgf_path.name
+        fh.attrs["source_path"] = source["path"]
+        fh.attrs["source_bytes"] = source["bytes"]
+        fh.attrs["source_sha256"] = source["sha256"]
         fh.attrs["num_peaks_input"] = num_peaks_input
+        fh.attrs["min_precursor_mz"] = min_precursor_mz
         fh.attrs["max_precursor_mz"] = max_precursor_mz
 
     log.info(
@@ -194,4 +220,8 @@ def build_nist_probe_hdf5(
         "num_spectra": n_kept,
         "num_raw": n_raw,
         "size_bytes": output_path.stat().st_size,
+        "source": source,
+        "num_peaks_input": num_peaks_input,
+        "min_precursor_mz": min_precursor_mz,
+        "max_precursor_mz": max_precursor_mz,
     }

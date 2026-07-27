@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import copy
 import csv
+from dataclasses import asdict
+import hashlib
 import io
 import itertools
 import json
@@ -30,13 +32,11 @@ from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
 from spectra_learning.config import load_config
-from spectra_learning.data.spectra import (
-    DEFAULT_MAX_PRECURSOR_MZ,
-    DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
-    DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-    DEFAULT_MIN_PEAK_INTENSITY,
-    DEFAULT_PEAK_FILTERING,
+from spectra_learning.data.contracts import (
+    data_provenance_contract,
+    validate_peak_preprocessing_contract,
 )
+from spectra_learning.data.massspec_probe import MassSpecProbeData
 from spectra_learning.models.factory import build_model_from_config
 from spectra_learning.models.lora import (
     apply_lora_to_linear_modules,
@@ -47,18 +47,14 @@ from spectra_learning.models.lora import (
 )
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pooling import CovariancePool, SinglePairCovariancePool
+from spectra_learning.models.settings import PeakSetJEPASettings
 from spectra_learning.models.spectrum_metadata import torch_spectrum_metadata_from_batch
 from spectra_learning.data.murcko import (
-    MCEBIO_MURCKO_PREPARED_SUBDIR,
-    NIST_MURCKO_HF_REPO,
-    NIST_MURCKO_PREPARED_SUBDIR,
     MurckoFluorineData as FluorineData,
-    build_murcko_fluorine_data,
     build_murcko_fluorine_loader,
 )
 from spectra_learning.training.checkpointing import (
     latest_ckpt_path,
-    load_pretrained_weights,
     load_resume_covariance_pooler_state,
     load_torch_checkpoint,
     save_torch_checkpoint,
@@ -96,9 +92,6 @@ inductor_config.triton.unique_kernel_names = True
 inductor_config.fx_graph_cache = True
 inductor_config.epilogue_fusion = True
 
-HF_REPO_ID = NIST_MURCKO_HF_REPO
-HF_TRAIN_SUBDIR = NIST_MURCKO_PREPARED_SUBDIR
-HF_TEST_SUBDIR = MCEBIO_MURCKO_PREPARED_SUBDIR
 LORA_ENCODER_TARGET_SUFFIXES = (
     "single_attention.wqkv",
     "single_attention.wo",
@@ -115,6 +108,7 @@ LORA_ENCODER_TARGET_SUFFIXES = (
     "pair_transition.w1",
     "pair_transition.w2",
 )
+FLUORINE_STATE_CONTRACT_VERSION = 1
 
 
 class TrialParams(NamedTuple):
@@ -131,6 +125,59 @@ class TrialResult(NamedTuple):
     classifier_state: dict[str, torch.Tensor]
     pooler_state: dict[str, torch.Tensor] | None
     history: list[dict[str, Any]]
+
+
+def _torch_tensor_state_sha256(state: dict[str, torch.Tensor]) -> str:
+    digest = hashlib.sha256()
+    for name in sorted(state):
+        tensor = state[name].detach().cpu().contiguous()
+        header = json.dumps(
+            [name, str(tensor.dtype), list(tensor.shape)],
+            separators=(",", ":"),
+        ).encode()
+        digest.update(len(header).to_bytes(8, "big"))
+        digest.update(header)
+        digest.update(memoryview(tensor.reshape(-1).view(torch.uint8).numpy()))
+    return digest.hexdigest()
+
+
+def _torch_source_checkpoint_contract(
+    *,
+    config: Any,
+    checkpoint_path: StoragePath,
+    checkpoint: dict[str, Any],
+) -> dict[str, Any]:
+    pooler_name = checkpoint["covariance_pooler_checkpoint"]
+    pooler_sha256 = None
+    if pooler_name is not None:
+        pooler_checkpoint = load_torch_checkpoint(
+            storage_join(storage_parent(checkpoint_path), pooler_name),
+            map_location="cpu",
+            weights_only=True,
+        )
+        pooler_sha256 = _torch_tensor_state_sha256(pooler_checkpoint["pooler"])
+    return {
+        "backend": "torch",
+        "global_step": int(checkpoint["global_step"]),
+        "model_sha256": _torch_tensor_state_sha256(checkpoint["model"]),
+        "covariance_pooler_sha256": pooler_sha256,
+        "model_settings": asdict(PeakSetJEPASettings.from_config(config)),
+        "peak_preprocessing": checkpoint["peak_preprocessing"],
+        "data_provenance": checkpoint["data_provenance"],
+    }
+
+
+def _fluorine_state_contract(
+    *,
+    source_checkpoint: dict[str, Any],
+    data: FluorineData,
+) -> dict[str, Any]:
+    return {
+        "version": FLUORINE_STATE_CONTRACT_VERSION,
+        "source_checkpoint": source_checkpoint,
+        "evaluation_data_provenance": data.metadata["data_provenance"],
+        "peak_preprocessing": data.metadata["peak_preprocessing"],
+    }
 
 
 class MLPClassifier(torch.nn.Module):
@@ -612,14 +659,25 @@ def _load_checkpoint_model(
     config_path: Path,
     checkpoint_path: StoragePath,
     device: torch.device,
-) -> tuple[config_dict.ConfigDict, PeakSetJEPA]:
+) -> tuple[config_dict.ConfigDict, PeakSetJEPA, dict[str, Any]]:
     config = load_config(config_path)
     model = build_model_from_config(config)
-    load_pretrained_weights(model, checkpoint_path)
+    checkpoint = load_torch_checkpoint(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=True,
+    )
+    validate_peak_preprocessing_contract(checkpoint, config)
+    model.load_state_dict(checkpoint["model"])
+    source_checkpoint = _torch_source_checkpoint_contract(
+        config=config,
+        checkpoint_path=checkpoint_path,
+        checkpoint=checkpoint,
+    )
     model.to(device)
     model.eval()
     model.requires_grad_(False)
-    return config, model
+    return config, model, source_checkpoint
 
 
 def _build_checkpoint_feature_factory(
@@ -749,45 +807,61 @@ def build_fluorine_data(
     config: Any,
     cache_dir: Path,
     batch_size: int,
-    revision: str,
     distributed_world_size: int = 1,
     distributed_rank: int = 0,
     distributed_local_rank: int | None = None,
 ) -> FluorineData:
-    return build_murcko_fluorine_data(
-        cache_dir=cache_dir,
-        batch_size=batch_size,
-        num_peaks=int(config.get("num_peaks", 64)),
-        max_precursor_mz=float(config.get("max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)),
-        min_peak_intensity=float(config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)),
-        peak_drop_min_intensity=float(
-            config.get(
-                "peak_drop_min_intensity",
-                config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY),
-            )
-        ),
-        peak_ordering=str(config.get("peak_ordering", "mz")),
-        precursor_peak_exclusion_window_da=float(
-            config.get("precursor_peak_exclusion_window_da", 0.0)
-        ),
-        peak_filtering=str(config.get("peak_filtering", DEFAULT_PEAK_FILTERING)),
-        grouped_peak_shoulder_da=float(
-            config.get("grouped_peak_shoulder_da", DEFAULT_GROUPED_PEAK_SHOULDER_DA)
-        ),
-        grouped_peak_isotope_charges=tuple(
-            int(charge)
-            for charge in config.get(
-                "grouped_peak_isotope_charges",
-                DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
-            )
-        ),
-        repo_id=HF_REPO_ID,
-        revision=revision,
-        train_subdir=HF_TRAIN_SUBDIR,
-        test_subdir=HF_TEST_SUBDIR,
+    root = cache_dir.expanduser().resolve()
+    probe_config = config_dict.ConfigDict(config)
+    probe_config.artifact_dir = str(root)
+    probe_data = MassSpecProbeData.from_config(
+        probe_config,
         distributed_world_size=distributed_world_size,
         distributed_rank=distributed_rank,
         distributed_local_rank=distributed_local_rank,
+        maccs_only=True,
+    )
+
+    def relative_paths(paths: list[str]) -> list[str]:
+        return [str(Path(path).relative_to(root)) for path in paths]
+
+    metadata = {
+        "metadata_version": probe_data.info["massspec_metadata_version"],
+        "storage_format": "parquet",
+        "nist_repo_id": probe_data.info["massspec_nist_repo_id"],
+        "nist_revision": probe_data.info["massspec_nist_revision"],
+        "nist_subdir": probe_data.info["massspec_nist_subdir"],
+        "nist_source_dir": probe_data.info["massspec_nist_source_dir"],
+        "peak_preprocessing": probe_data.info["massspec_peak_preprocessing"],
+        "train_files": relative_paths(probe_data.train_files),
+        "train_lengths": probe_data.train_lengths,
+        "train_size": probe_data.info["massspec_train_size"],
+        "train_positive": probe_data.info["massspec_train_positive"],
+        "val_files": relative_paths(probe_data.val_files),
+        "val_lengths": probe_data.val_lengths,
+        "val_size": probe_data.info["massspec_val_size"],
+        "val_positive": probe_data.info["massspec_val_positive"],
+        "test_files": relative_paths(probe_data.test_files),
+        "test_lengths": probe_data.test_lengths,
+        "test_size": probe_data.info["massspec_test_size"],
+        "test_positive": probe_data.info["massspec_test_positive"],
+        "data_provenance": data_provenance_contract(probe_data.info),
+    }
+    return FluorineData(
+        metadata=metadata,
+        root=root,
+        batch_size=batch_size,
+        num_peaks=probe_data.num_peaks,
+        max_precursor_mz=probe_data.max_precursor_mz,
+        min_peak_intensity=probe_data.min_peak_intensity,
+        peak_drop_min_intensity=probe_data.peak_drop_min_intensity,
+        peak_filtering=probe_data.peak_filtering,
+        grouped_peak_shoulder_da=probe_data.grouped_peak_shoulder_da,
+        grouped_peak_isotope_charges=probe_data.grouped_peak_isotope_charges,
+        peak_ordering=probe_data.peak_ordering,
+        precursor_peak_exclusion_window_da=(
+            probe_data.precursor_peak_exclusion_window_da
+        ),
     )
 
 
@@ -941,36 +1015,37 @@ def _load_cached_adaptation_state(
     state_path: Path,
     device: torch.device,
     mode: str,
-    config_path: Path,
-    checkpoint_path: Path,
     pooling: str,
     requested_hparams: dict[str, Any],
     max_train_samples: int | None,
     max_val_samples: int | None,
+    state_contract: dict[str, Any],
 ) -> dict[str, Any] | None:
     if not state_path.exists():
         return None
     state = torch.load(state_path, map_location=device)
-    state_hparams = state["hparams"]
-    if (
-        state["mode"] == mode
-        and state["config_path"] == str(config_path)
-        and state["checkpoint_path"] == str(checkpoint_path)
-        and state["pooling"] == pooling
-        and all(state_hparams.get(key) == value for key, value in requested_hparams.items())
-        and state["max_train_samples"] == max_train_samples
-        and state["max_val_samples"] == max_val_samples
-    ):
-        return state
-    return None
+    expected = {
+        "complete": True,
+        "mode": mode,
+        "pooling": pooling,
+        "hparams": requested_hparams,
+        "max_train_samples": max_train_samples,
+        "max_val_samples": max_val_samples,
+        "state_contract": state_contract,
+    }
+    actual = {key: state.get(key) for key in expected}
+    if actual != expected:
+        raise ValueError(
+            "Cached fluorine adaptation state does not match the requested "
+            f"training contract: expected={expected}, actual={actual}. "
+            "Use a new state path."
+        )
+    return state
 
 
 def _build_adaptation_loaders(
     *,
-    config: Any,
-    cache_dir: Path,
-    batch_size: int,
-    revision: str,
+    data: FluorineData,
     seed: int,
     max_train_samples: int | None,
     max_val_samples: int | None,
@@ -979,17 +1054,7 @@ def _build_adaptation_loaders(
     eval_test_every_epoch: bool,
     distributed_world_size: int,
     distributed_rank: int,
-    distributed_local_rank: int,
 ) -> _AdaptationLoaders:
-    data = build_fluorine_data(
-        config=config,
-        cache_dir=cache_dir,
-        batch_size=batch_size,
-        revision=revision,
-        distributed_world_size=distributed_world_size,
-        distributed_rank=distributed_rank,
-        distributed_local_rank=distributed_local_rank,
-    )
     train_loader = _make_loader(
         data,
         "train",
@@ -1265,6 +1330,7 @@ def train_or_load_finetuned(
     config: Any,
     config_path: Path,
     checkpoint_path: Path,
+    source_checkpoint_contract: dict[str, Any],
     cache_dir: Path,
     device: torch.device,
     batch_size: int,
@@ -1281,7 +1347,6 @@ def train_or_load_finetuned(
     autocast_dtype: torch.dtype | None,
     hidden_dim: int,
     dropout: float,
-    revision: str,
     max_train_samples: int | None,
     max_val_samples: int | None,
     max_test_samples: int | None,
@@ -1309,26 +1374,34 @@ def train_or_load_finetuned(
         "focal_alpha": focal_alpha,
         "focal_gamma": float(focal_gamma),
     }
+    data = build_fluorine_data(
+        config=config,
+        cache_dir=cache_dir,
+        batch_size=batch_size,
+        distributed_world_size=distributed_world_size,
+        distributed_rank=distributed_rank,
+        distributed_local_rank=distributed_local_rank,
+    )
+    state_contract = _fluorine_state_contract(
+        source_checkpoint=source_checkpoint_contract,
+        data=data,
+    )
     state = _load_cached_adaptation_state(
         state_path=state_path,
         device=device,
         mode="finetune",
-        config_path=config_path,
-        checkpoint_path=checkpoint_path,
         pooling=pooling,
         requested_hparams=requested_hparams,
         max_train_samples=max_train_samples,
         max_val_samples=max_val_samples,
+        state_contract=state_contract,
     )
     if state is not None:
         model.load_state_dict(state["model_state"])
         return state
 
     loaders = _build_adaptation_loaders(
-        config=config,
-        cache_dir=cache_dir,
-        batch_size=batch_size,
-        revision=revision,
+        data=data,
         seed=seed,
         max_train_samples=max_train_samples,
         max_val_samples=max_val_samples,
@@ -1337,7 +1410,6 @@ def train_or_load_finetuned(
         eval_test_every_epoch=eval_test_every_epoch,
         distributed_world_size=distributed_world_size,
         distributed_rank=distributed_rank,
-        distributed_local_rank=distributed_local_rank,
     )
     pooler, covariance_dim, input_dim = _build_adaptation_pooler(
         config=config,
@@ -1399,6 +1471,7 @@ def train_or_load_finetuned(
         "mode": "finetune",
         "config_path": str(config_path),
         "checkpoint_path": str(checkpoint_path),
+        "state_contract": state_contract,
         "input_dim": int(input_dim),
         "covariance_dim": int(covariance_dim),
         "pooling": pooling,
@@ -1460,6 +1533,7 @@ def train_or_load_lora(
     config: Any,
     config_path: Path,
     checkpoint_path: Path,
+    source_checkpoint_contract: dict[str, Any],
     cache_dir: Path,
     device: torch.device,
     batch_size: int,
@@ -1476,7 +1550,6 @@ def train_or_load_lora(
     autocast_dtype: torch.dtype | None,
     hidden_dim: int,
     dropout: float,
-    revision: str,
     max_train_samples: int | None,
     max_val_samples: int | None,
     max_test_samples: int | None,
@@ -1502,16 +1575,27 @@ def train_or_load_lora(
         "epochs": int(epochs),
         "patience": int(patience),
     }
+    data = build_fluorine_data(
+        config=config,
+        cache_dir=cache_dir,
+        batch_size=batch_size,
+        distributed_world_size=distributed_world_size,
+        distributed_rank=distributed_rank,
+        distributed_local_rank=distributed_local_rank,
+    )
+    state_contract = _fluorine_state_contract(
+        source_checkpoint=source_checkpoint_contract,
+        data=data,
+    )
     state = _load_cached_adaptation_state(
         state_path=state_path,
         device=device,
         mode="lora",
-        config_path=config_path,
-        checkpoint_path=checkpoint_path,
         pooling=pooling,
         requested_hparams=requested_hparams,
         max_train_samples=max_train_samples,
         max_val_samples=max_val_samples,
+        state_contract=state_contract,
     )
     if state is not None:
         model.encoder.requires_grad_(False)
@@ -1519,10 +1603,7 @@ def train_or_load_lora(
         return state
 
     loaders = _build_adaptation_loaders(
-        config=config,
-        cache_dir=cache_dir,
-        batch_size=batch_size,
-        revision=revision,
+        data=data,
         seed=seed,
         max_train_samples=max_train_samples,
         max_val_samples=max_val_samples,
@@ -1531,7 +1612,6 @@ def train_or_load_lora(
         eval_test_every_epoch=eval_test_every_epoch,
         distributed_world_size=distributed_world_size,
         distributed_rank=distributed_rank,
-        distributed_local_rank=distributed_local_rank,
     )
     pooler, covariance_dim, input_dim = _build_adaptation_pooler(
         config=config,
@@ -1586,6 +1666,7 @@ def train_or_load_lora(
         "mode": "lora",
         "config_path": str(config_path),
         "checkpoint_path": str(checkpoint_path),
+        "state_contract": state_contract,
         "input_dim": int(input_dim),
         "covariance_dim": int(covariance_dim),
         "pooling": pooling,
@@ -1873,12 +1954,20 @@ def write_standard_fluorine_outputs(
         output_prefix=output_prefix,
         history=history,
     )
+    source = {
+        key: data.metadata[key]
+        for key in (
+            "nist_repo_id",
+            "nist_revision",
+            "nist_subdir",
+            "nist_source_dir",
+        )
+    }
     summary = {
         "mode": head_state["mode"],
         "dataset": {
-            "repo_id": HF_REPO_ID,
-            "train_subdir": HF_TRAIN_SUBDIR,
-            "test_subdir": HF_TEST_SUBDIR,
+            **source,
+            "peak_preprocessing": data.metadata["peak_preprocessing"],
             "test_size": int(data.metadata["test_size"]),
             "test_positive": int(data.metadata["test_positive"]),
         },
@@ -1937,7 +2026,7 @@ def write_standard_fluorine_outputs(
     ax.plot(recall, precision, color="#2458a6", linewidth=2.0)
     ax.set_xlabel("Recall")
     ax.set_ylabel("Precision")
-    ax.set_title(f"Fluorine on MCEBIO Murcko test (AP={metrics['average_precision']:.3f})")
+    ax.set_title(f"Fluorine on NIST Murcko test (AP={metrics['average_precision']:.3f})")
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.02)
     ax.grid(True, alpha=0.25)
@@ -1950,11 +2039,13 @@ def write_standard_fluorine_outputs(
         report_path,
         "\n".join(
             [
-                "# Fluorine Evaluation on MCEBIO Murcko Test",
+                "# Fluorine Evaluation on NIST Murcko Test",
                 "",
-                f"- Dataset: `{HF_REPO_ID}`",
-                f"- Train/validation source: `{HF_TRAIN_SUBDIR}`",
-                f"- Test source: `{HF_TEST_SUBDIR}`",
+                (
+                    "- Dataset source: "
+                    f"`{source['nist_repo_id']}@{source['nist_revision']}"
+                    f"/{source['nist_subdir']}`"
+                ),
                 f"- Checkpoint: `{checkpoint_path}`",
                 f"- Evaluation rows: {int(data.metadata['test_size'])}",
                 f"- Positives: {int(data.metadata['test_positive'])}",
@@ -2055,7 +2146,7 @@ def write_all_pr_curve_comparison(
     ax.set_ylim(0.0, 1.02)
     ax.grid(True, alpha=0.25)
     ax.legend(loc="lower left", frameon=False, fontsize=7)
-    ax.set_title("All Fluorine PR Curves on MCEBIO")
+    ax.set_title("All Fluorine PR Curves on NIST")
     fig.tight_layout()
     plot_path = storage_with_suffix(output_prefix, ".all_pr_curves.png")
     _write_figure(plot_path, fig)
@@ -2166,7 +2257,7 @@ def write_dreams_comparison(
     ax.set_ylim(0.0, 1.02)
     ax.grid(True, alpha=0.25)
     ax.legend(loc="lower left", frameon=False, fontsize=8)
-    ax.set_title("Fluorine PR Curves on MCEBIO Murcko Test")
+    ax.set_title("Fluorine PR Curves on NIST Murcko Test")
     fig.tight_layout()
     plot_path = storage_with_suffix(output_prefix, ".vs_dreams_actual_pr_curve.png")
     _write_figure(plot_path, fig)
@@ -2276,60 +2367,10 @@ def _build_fluorine_probe_data(
     checkpoint_config: Any,
     cache_dir: Path,
 ) -> FluorineData:
-    return build_murcko_fluorine_data(
+    return build_fluorine_data(
+        config=checkpoint_config,
         cache_dir=cache_dir,
         batch_size=int(args.batch_size),
-        num_peaks=int(
-            args.num_peaks
-            if args.num_peaks is not None
-            else checkpoint_config.get("num_peaks", 60)
-        ),
-        max_precursor_mz=float(
-            checkpoint_config.get("max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
-        ),
-        min_peak_intensity=float(
-            checkpoint_config.get(
-                "min_peak_intensity",
-                DEFAULT_MIN_PEAK_INTENSITY,
-            )
-        ),
-        peak_drop_min_intensity=float(
-            checkpoint_config.get(
-                "peak_drop_min_intensity",
-                checkpoint_config.get(
-                    "min_peak_intensity",
-                    DEFAULT_MIN_PEAK_INTENSITY,
-                ),
-            )
-        ),
-        peak_ordering=str(
-            args.peak_ordering
-            if args.peak_ordering
-            else checkpoint_config.get("peak_ordering", "intensity")
-        ),
-        precursor_peak_exclusion_window_da=float(
-            checkpoint_config.get("precursor_peak_exclusion_window_da", 0.0)
-        ),
-        peak_filtering=str(
-            checkpoint_config.get("peak_filtering", DEFAULT_PEAK_FILTERING)
-        ),
-        grouped_peak_shoulder_da=float(
-            checkpoint_config.get(
-                "grouped_peak_shoulder_da",
-                DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-            )
-        ),
-        grouped_peak_isotope_charges=tuple(
-            int(charge)
-            for charge in checkpoint_config.get(
-                "grouped_peak_isotope_charges",
-                DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
-            )
-        ),
-        repo_id=HF_REPO_ID,
-        revision=args.revision,
-        train_subdir=HF_TRAIN_SUBDIR,
-        test_subdir=HF_TEST_SUBDIR,
     )
 
 
@@ -2396,6 +2437,7 @@ class _JaxFluorineCheckpoint(NamedTuple):
     config: Any
     checkpoint_dir: StoragePath
     restore_step: int
+    source_checkpoint_contract: dict[str, Any]
     model: Any
     data_mesh: Any
     manager: Any
@@ -2418,19 +2460,29 @@ def _restore_jax_fluorine_checkpoint(
         restore_jax_training_state,
     )
     from spectra_learning.training.pretrain_jax import (
+        _build_pretrain_jax_datamodule,
         _jax_data_mesh_for_device_count,
+        _pretrain_jax_checkpoint_contract,
         _replicate_tree_on_data_mesh,
         init_pure_optax_train_state,
-        jax_config_checkpoint_contract,
         prepare_jax_training_config,
     )
 
     config_path = args.config.expanduser().resolve()
     config = load_config(config_path)
     prepare_jax_training_config(config)
+    source_datamodule = _build_pretrain_jax_datamodule(
+        config,
+        jax.process_count(),
+        jax.process_index(),
+    )
     checkpoint_metadata = jax_training_checkpoint_metadata(
         "pretrain",
-        jax_config_checkpoint_contract(config),
+        _pretrain_jax_checkpoint_contract(
+            config,
+            source_datamodule,
+            int(config.training_max_steps),
+        ),
     )
     jax_device_count = jax.device_count()
     config.jax_mesh_devices = str(jax_device_count)
@@ -2476,11 +2528,22 @@ def _restore_jax_fluorine_checkpoint(
         restored["static_state"],
     )
     model = _full_visible_fastmixer_probe_model(config, model)
+    checkpoint_path = storage_join(
+        storage_join(checkpoint_dir, "orbax"),
+        str(restore_step),
+    )
+    source_checkpoint_contract = {
+        "backend": "jax",
+        "checkpoint_path": str(checkpoint_path),
+        "restore_step": int(restore_step),
+        "checkpoint_metadata": checkpoint_metadata,
+    }
     return _JaxFluorineCheckpoint(
         config_path,
         config,
         checkpoint_dir,
         int(restore_step),
+        source_checkpoint_contract,
         model,
         data_mesh,
         manager,
@@ -3189,10 +3252,16 @@ def _build_jax_fluorine_state_and_payload(
     )
     payload: dict[str, Any] = {
         "backend": "jax",
-        "repo_id": HF_REPO_ID,
-        "revision": args.revision,
-        "train_subdir": HF_TRAIN_SUBDIR,
-        "test_subdir": HF_TEST_SUBDIR,
+        **{
+            key: metadata[key]
+            for key in (
+                "nist_repo_id",
+                "nist_revision",
+                "nist_subdir",
+                "nist_source_dir",
+            )
+        },
+        "peak_preprocessing": metadata["peak_preprocessing"],
         "cache_dir": str(paths.cache_dir),
         "pooling": args.pooling,
         "input_dim": input_dim,
@@ -3222,6 +3291,10 @@ def _build_jax_fluorine_state_and_payload(
         "complete": True,
         "config_path": str(checkpoint.config_path),
         "checkpoint_path": str(checkpoint_path),
+        "state_contract": _fluorine_state_contract(
+            source_checkpoint=checkpoint.source_checkpoint_contract,
+            data=data,
+        ),
         "input_dim": int(input_dim),
         "covariance_dim": int(checkpoint.config.get("covariance_pooling_dim", 32)),
         "pooling": args.pooling,
@@ -3343,7 +3416,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
     device = torch.device(args.device)
     checkpoint_path = resolve_checkpoint_path(args.checkpoint, getattr(args, "workdir", None))
     config_path = args.config.expanduser().resolve()
-    checkpoint_config, model = _load_checkpoint_model(
+    checkpoint_config, model, source_checkpoint_contract = _load_checkpoint_model(
         config_path,
         checkpoint_path,
         device,
@@ -3519,10 +3592,16 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
 
     test_metrics = _metric_dict(test_targets, test_logits, "test")
     payload: dict[str, Any] = {
-        "repo_id": HF_REPO_ID,
-        "revision": args.revision,
-        "train_subdir": HF_TRAIN_SUBDIR,
-        "test_subdir": HF_TEST_SUBDIR,
+        **{
+            key: metadata[key]
+            for key in (
+                "nist_repo_id",
+                "nist_revision",
+                "nist_subdir",
+                "nist_source_dir",
+            )
+        },
+        "peak_preprocessing": metadata["peak_preprocessing"],
         "cache_dir": str(paths.cache_dir),
         "pooling": args.pooling,
         "input_dim": input_dim,
@@ -3551,6 +3630,10 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         "complete": True,
         "config_path": str(config_path),
         "checkpoint_path": str(checkpoint_path),
+        "state_contract": _fluorine_state_contract(
+            source_checkpoint=source_checkpoint_contract,
+            data=data,
+        ),
         "input_dim": int(input_dim),
         "covariance_dim": int(
             args.covariance_dim
@@ -3610,7 +3693,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     distributed = init_distributed_from_env()
     device = distributed.device if distributed.is_distributed else torch.device(args.device)
     checkpoint_path = resolve_checkpoint_path(args.checkpoint, getattr(args, "workdir", None))
-    config, model = _load_checkpoint_model(
+    config, model, source_checkpoint_contract = _load_checkpoint_model(
         args.config.expanduser().resolve(),
         checkpoint_path,
         device,
@@ -3639,6 +3722,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             config=config,
             config_path=args.config.expanduser().resolve(),
             checkpoint_path=checkpoint_path,
+            source_checkpoint_contract=source_checkpoint_contract,
             cache_dir=args.finetune_cache_dir.expanduser().resolve(),
             device=device,
             batch_size=args.batch_size,
@@ -3655,7 +3739,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             autocast_dtype=autocast_dtype,
             hidden_dim=args.hidden_dim,
             dropout=args.dropout,
-            revision=args.revision,
             max_train_samples=args.max_train_samples,
             max_val_samples=args.max_val_samples,
             max_test_samples=args.max_test_samples,
@@ -3672,6 +3755,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             config=config,
             config_path=args.config.expanduser().resolve(),
             checkpoint_path=checkpoint_path,
+            source_checkpoint_contract=source_checkpoint_contract,
             cache_dir=args.finetune_cache_dir.expanduser().resolve(),
             device=device,
             batch_size=args.batch_size,
@@ -3688,7 +3772,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             autocast_dtype=autocast_dtype,
             hidden_dim=args.hidden_dim,
             dropout=args.dropout,
-            revision=args.revision,
             max_train_samples=args.max_train_samples,
             max_val_samples=args.max_val_samples,
             max_test_samples=args.max_test_samples,
@@ -3709,7 +3792,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         config=config,
         cache_dir=args.finetune_cache_dir.expanduser().resolve(),
         batch_size=args.batch_size,
-        revision=args.revision,
     )
     log.info(
         "using fluorine test split size=%d positive=%d",

@@ -20,7 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Train or evaluate fluorine-detection heads on the NIST Murcko "
-            "train/val splits and MCEBIO Murcko test split."
+            "train, validation, and test splits."
         )
     )
     parser.add_argument(
@@ -44,7 +44,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--train-covariance-pooler", action="store_true")
     parser.add_argument("--covariance-dim", type=int, default=None)
-    parser.add_argument("--revision", default="main")
     parser.add_argument(
         "--cache-dir",
         type=Path,
@@ -68,8 +67,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--num-peaks", type=int, default=None)
-    parser.add_argument("--peak-ordering", default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--patience", type=int, default=None)

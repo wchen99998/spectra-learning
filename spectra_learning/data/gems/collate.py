@@ -24,6 +24,8 @@ from spectra_learning.data.spectra import (
     DEFAULT_GROUPED_PEAK_SHOULDER_DA,
     DEFAULT_PEAK_FILTERING,
     PEAK_MZ_MAX,
+    canonicalize_precursor_charge_numpy,
+    canonicalize_precursor_charge_torch,
     preprocess_peak_batch_numpy,
     preprocess_peak_batch_torch,
 )
@@ -83,7 +85,6 @@ class GemsBatchCollator:
 
     def __call__(self, samples: list[dict[str, Any]]) -> dict[str, Any]:
         batch = self._preprocess(samples)
-        self._ensure_nonempty(batch)
         if self.augment:
             batch["context_mask"], batch["target_masks"] = self._sample_masks(batch)
         return format_batch(batch, self.output_format)
@@ -157,9 +158,11 @@ class GemsBatchCollator:
             np.clip(collision_energy, 0.0, COLLISION_ENERGY_MAX)
             / COLLISION_ENERGY_MAX
         ).astype(np.float32)
-        batch["charge"] = np.asarray(
-            [sample["charge"] for sample in samples],
-            dtype=np.float32,
+        batch["charge"] = canonicalize_precursor_charge_numpy(
+            np.asarray(
+                [sample["charge"] for sample in samples],
+                dtype=np.float32,
+            )
         )
 
     def _add_torch_spectrum_metadata(
@@ -174,15 +177,11 @@ class GemsBatchCollator:
             0.0,
             COLLISION_ENERGY_MAX,
         ) / COLLISION_ENERGY_MAX
-        batch["charge"] = torch.stack(
-            [torch.as_tensor(sample["charge"]) for sample in samples],
-        ).to(dtype=torch.float32)
-
-    def _ensure_nonempty(self, batch: dict[str, torch.Tensor]) -> None:
-        no_valid = ~batch["peak_valid_mask"].any(dim=1)
-        if bool(no_valid.any()):
-            batch["peak_valid_mask"] = batch["peak_valid_mask"].clone()
-            batch["peak_valid_mask"][no_valid, 0] = True
+        batch["charge"] = canonicalize_precursor_charge_torch(
+            torch.stack(
+                [torch.as_tensor(sample["charge"]) for sample in samples],
+            )
+        )
 
     def _sample_masks(
         self,

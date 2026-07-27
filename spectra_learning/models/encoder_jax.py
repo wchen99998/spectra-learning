@@ -4,6 +4,7 @@ import jax.numpy as jnp
 import torch
 from flax import nnx
 
+from spectra_learning.data.spectra import DEFAULT_NUM_PEAKS, PEAK_MZ_MAX
 from spectra_learning.models.common_jax import (
     Array,
     LayerNorm,
@@ -41,19 +42,19 @@ class PeakSetEncoder(nnx.Module):
         norm_eps: float = 1e-5,
         apply_final_norm: bool = True,
         apply_final_pair_norm: bool = False,
-        num_peaks: int = 64,
+        num_peaks: int = DEFAULT_NUM_PEAKS,
         use_position_embedding: bool = True,
         pairmixer_block_type: str = "dense",
         pairmixer_transition_type: str = "swiglu",
         pair_dim: int | None = None,
         pair_feature_hidden_dim: int = 128,
         pairmixer_dropout: float = 0.0,
-        pairmixer_mz_scale: float = 1000.0,
-        pairmixer_precursor_mz_scale: float = 1000.0,
+        pairmixer_mz_scale: float = PEAK_MZ_MAX,
+        pairmixer_precursor_mz_scale: float = PEAK_MZ_MAX,
         pairmixer_use_fourier_features: bool = True,
         pairmixer_fourier_num_freqs: int = 16,
         pairmixer_fourier_x_min: float = 1e-2,
-        pairmixer_fourier_x_max: float = 1000.0,
+        pairmixer_fourier_x_max: float = PEAK_MZ_MAX,
         pairmixer_relative_fourier_x_min: float = 1e-3,
         pairmixer_relative_fourier_x_max: float = 1.0,
         pairmixer_fast_max_visible_tokens: int | None = None,

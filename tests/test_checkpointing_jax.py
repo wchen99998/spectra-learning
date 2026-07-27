@@ -681,26 +681,22 @@ def test_jax_training_loop_logs_validation_and_online_probe(monkeypatch, tmp_pat
             False,
             [
                 "massspec_train",
+                "massspec_train",
                 "massspec_val",
                 "massspec_test",
-                "massspec_train",
-                "massspec_test",
-                "massspec_mcebio_test",
             ],
         ),
         (
             True,
             [
                 "massspec_train",
-                "massspec_val",
                 "massspec_train",
                 "massspec_val",
                 "massspec_test",
-                "massspec_mcebio_test",
             ],
         ),
     ),
-    ids=("test-selected", "validation-selected"),
+    ids=("full-epochs", "early-stop"),
 )
 def test_run_msg_probe_jax_uses_jax_dataset_and_optimizer(
     monkeypatch,
@@ -726,7 +722,6 @@ def test_run_msg_probe_jax_uses_jax_dataset_and_optimizer(
             "massspec_train_size": 2,
             "massspec_val_size": 2,
             "massspec_test_size": 2,
-            "massspec_mcebio_test_size": 2,
             "probe_maccs_bits": 2,
         }
 
@@ -778,15 +773,10 @@ def test_run_msg_probe_jax_uses_jax_dataset_and_optimizer(
     assert "torch" not in msg_probe_jax.__dict__
     assert metrics["msg_probe/repeats"] == 1.0
     assert metrics["msg_probe/mean/epoch"] == 1.0
-    if early_stopping:
-        assert "msg_probe/mean/val/auc_fluorine" in metrics
+    assert "msg_probe/mean/val/auc_fluorine" in metrics
     assert "msg_probe/mean/test/auc_fluorine" in metrics
     assert "msg_probe/mean/test/pr_curve_fluorine" in metrics
     assert "msg_probe/mean/test/pr_curve_sulfur" in metrics
-    assert "msg_probe/mean/mcebio_sulfur_test/auc_sulfur" in metrics
-    assert "msg_probe/mean/mcebio_sulfur_test/pr_curve_sulfur" in metrics
-    assert "msg_probe/mean/mcebio_sulfur_test/auc_fluorine" not in metrics
-    assert "msg_probe/mean/mcebio_sulfur_test/pr_curve_fluorine" not in metrics
     assert [call[0] for call in fake_probe_data.calls] == expected_splits
 
 
@@ -808,7 +798,7 @@ def test_msg_probe_jax_masks_distributed_sampler_padding_rows():
         batch_size = 4
 
         def __init__(self, size: int, batches: list[dict[str, np.ndarray]]) -> None:
-            self.info = {"massspec_mcebio_test_size": size}
+            self.info = {"massspec_test_size": size}
             self.batches = batches
             self.calls = []
 
@@ -820,7 +810,7 @@ def test_msg_probe_jax_masks_distributed_sampler_padding_rows():
     batches = list(
         msg_probe_jax.iter_massspec_probe_jax(
             probe_data=probe_data,
-            split="massspec_mcebio_test",
+            split="massspec_test",
             seed=7,
             peak_ordering="mz",
             drop_remainder=False,
@@ -839,7 +829,7 @@ def test_msg_probe_jax_masks_distributed_sampler_padding_rows():
     empty_rank_batches = list(
         msg_probe_jax.iter_massspec_probe_jax(
             probe_data=empty_rank_data,
-            split="massspec_mcebio_test",
+            split="massspec_test",
             seed=7,
             peak_ordering="mz",
             drop_remainder=False,

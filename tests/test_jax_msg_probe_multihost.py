@@ -53,7 +53,6 @@ def test_msg_probe_jax_runs_with_simulated_multihost_sharded_batches() -> None:
                 "massspec_train_size": 16,
                 "massspec_val_size": 16,
                 "massspec_test_size": 16,
-                "massspec_mcebio_test_size": 16,
                 "probe_maccs_bits": 2,
             }
 
@@ -145,9 +144,6 @@ def test_msg_probe_jax_runs_with_simulated_multihost_sharded_batches() -> None:
                     "process_count": jax.process_count(),
                     "metric_count": len(metrics),
                     "bounded_flush_count": bounded_flush_count,
-                    "has_mcebio": (
-                        "msg_probe/mean/mcebio_sulfur_test/auc_sulfur" in metrics
-                    ),
                 }
             ),
             flush=True,
@@ -182,7 +178,6 @@ def test_msg_probe_jax_runs_with_simulated_multihost_sharded_batches() -> None:
     assert all(record["process_count"] == 2 for record in records)
     assert all(record["metric_count"] > 0 for record in records)
     assert all(record["bounded_flush_count"] > 0 for record in records)
-    assert all(record["has_mcebio"] for record in records)
 
 
 def _free_port() -> int:

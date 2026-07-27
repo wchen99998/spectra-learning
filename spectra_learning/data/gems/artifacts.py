@@ -9,8 +9,10 @@ logger = logging.getLogger(__name__)
 HDF5_SHARD_PATTERNS = ["*.hdf5", "*.h5"]
 
 
-def _repo_cache_name(repo_id: str) -> str:
-    return repo_id.replace("/", "--")
+def _repo_cache_name(repo_id: str, revision: str) -> str:
+    return "--".join(
+        (repo_id.replace("/", "--"), revision.replace("/", "--"))
+    )
 
 
 def resolve_gems_hdf5_manifest(
@@ -26,7 +28,7 @@ def resolve_gems_hdf5_manifest(
     distributed_local_rank = (
         distributed_rank if distributed_local_rank is None else distributed_local_rank
     )
-    artifact_dir = gems_base_dir / _repo_cache_name(repo_id)
+    artifact_dir = gems_base_dir / _repo_cache_name(repo_id, revision)
     manifest_path = artifact_dir / manifest_filename
     coordinated = _coordinate_distributed_io(distributed_world_size)
     if coordinated and distributed_local_rank != 0:

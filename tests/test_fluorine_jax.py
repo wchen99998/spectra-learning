@@ -111,6 +111,12 @@ def _probe_config() -> config_dict.ConfigDict:
 def _probe_data() -> SimpleNamespace:
     return SimpleNamespace(
         metadata={
+            "nist_repo_id": "owner/nist",
+            "nist_revision": "nist-sha",
+            "nist_subdir": "nist",
+            "nist_source_dir": "/cache/nist",
+            "peak_preprocessing": {"version": 1},
+            "data_provenance": {"massspec_nist_revision": "nist-sha"},
             "train_size": 4,
             "train_positive": 2,
             "val_size": 4,
@@ -132,7 +138,19 @@ def _patch_probe_runtime(monkeypatch, config, data, feature_model) -> None:
     monkeypatch.setattr(nnx, "jit", lambda function: function)
     monkeypatch.setattr(nnx, "merge", lambda *_args: feature_model)
     monkeypatch.setattr(pretrain_jax, "prepare_jax_training_config", lambda _config: None)
-    monkeypatch.setattr(pretrain_jax, "jax_config_checkpoint_contract", lambda _config: {})
+    monkeypatch.setattr(
+        pretrain_jax,
+        "_build_pretrain_jax_datamodule",
+        lambda *_args, **_kwargs: SimpleNamespace(info={"source": "gems"}),
+    )
+    monkeypatch.setattr(
+        pretrain_jax,
+        "_pretrain_jax_checkpoint_contract",
+        lambda *_args, **_kwargs: {
+            "peak_preprocessing": {"version": 1},
+            "data_provenance": {"source": "gems"},
+        },
+    )
     monkeypatch.setattr(
         pretrain_jax,
         "init_pure_optax_train_state",
@@ -170,7 +188,7 @@ def _patch_probe_runtime(monkeypatch, config, data, feature_model) -> None:
     )
     monkeypatch.setattr(
         fluorine,
-        "build_murcko_fluorine_data",
+        "build_fluorine_data",
         lambda **_kwargs: data,
     )
 
@@ -185,9 +203,6 @@ def _probe_args(tmp_path: Path, **overrides) -> SimpleNamespace:
         "output_prefix": tmp_path / "fluorine-jax",
         "output_state": tmp_path / "fluorine-jax.pt",
         "batch_size": 4,
-        "num_peaks": 2,
-        "peak_ordering": "mz",
-        "revision": "main",
         "num_workers": 0,
         "pooling": "covariance",
         "focal_alpha": "auto",
@@ -208,6 +223,55 @@ def _probe_args(tmp_path: Path, **overrides) -> SimpleNamespace:
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def test_jax_restore_uses_full_pretraining_checkpoint_contract(
+    monkeypatch,
+    tmp_path: Path,
+):
+    config = _probe_config()
+    _patch_probe_runtime(
+        monkeypatch,
+        config,
+        _probe_data(),
+        _TinyJaxFeatureModel(),
+    )
+    restored_metadata = {}
+
+    monkeypatch.setattr(
+        checkpointing_jax,
+        "jax_training_checkpoint_metadata",
+        lambda task, contract: {
+            "training_task": task,
+            "task_contract": contract,
+        },
+    )
+
+    def restore(_manager, _step, target, *, expected_metadata):
+        restored_metadata.update(expected_metadata)
+        return target
+
+    monkeypatch.setattr(
+        checkpointing_jax,
+        "restore_jax_training_state",
+        restore,
+    )
+
+    checkpoint = fluorine._restore_jax_fluorine_checkpoint(
+        _probe_args(tmp_path)
+    )
+
+    assert restored_metadata == {
+        "training_task": "pretrain",
+        "task_contract": {
+            "peak_preprocessing": {"version": 1},
+            "data_provenance": {"source": "gems"},
+        },
+    }
+    assert (
+        checkpoint.source_checkpoint_contract["checkpoint_metadata"]
+        == restored_metadata
+    )
 
 
 def test_run_probe_jax_trains_tiny_trial_and_builds_artifacts(
@@ -283,6 +347,17 @@ def test_run_probe_jax_trains_tiny_trial_and_builds_artifacts(
     assert head_state["backend"] == "jax"
     assert head_state["complete"] is True
     assert head_state["checkpoint_path"] == str(checkpoint_dir / "orbax" / "7")
+    assert head_state["state_contract"] == {
+        "version": fluorine.FLUORINE_STATE_CONTRACT_VERSION,
+        "source_checkpoint": {
+            "backend": "jax",
+            "checkpoint_path": str(checkpoint_dir / "orbax" / "7"),
+            "restore_step": 7,
+            "checkpoint_metadata": {},
+        },
+        "evaluation_data_provenance": data.metadata["data_provenance"],
+        "peak_preprocessing": data.metadata["peak_preprocessing"],
+    }
     assert head_state["best_epoch"] == 1
     assert len(head_state["history"]) == 1
     assert np.isfinite(head_state["history"][0]["train_loss"])

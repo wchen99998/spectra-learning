@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -15,19 +17,22 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from spectra_learning.config import load_config
+from spectra_learning.data.contracts import (
+    peak_preprocessing_contract,
+    validate_peak_preprocessing_contract,
+)
 from spectra_learning.data.mgf import _to_float, iter_mgf
 from spectra_learning.data.spectra import (
-    DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
-    DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-    DEFAULT_MAX_PRECURSOR_MZ,
-    DEFAULT_MIN_PEAK_INTENSITY,
-    DEFAULT_PEAK_FILTERING,
+    ASSUMED_PRECURSOR_CHARGE,
+    COLLISION_ENERGY_MAX,
     NUM_PEAKS_INPUT,
+    canonicalize_precursor_charge_torch,
     preprocess_peak_batch_torch,
 )
 from spectra_learning.models.factory import build_model_from_config
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pooling import CovariancePool
+from spectra_learning.models.spectrum_metadata import torch_spectrum_metadata_from_batch
 from spectra_learning.data.massspec_probe import MassSpecProbeData
 from spectra_learning.probes.massspec.msg_probe import iter_massspec_probe
 from spectra_learning.training.checkpointing import load_torch_checkpoint
@@ -65,17 +70,21 @@ METADATA_COLUMNS = (
 def _load_checkpoint_for_encoder(
     model: PeakSetJEPA,
     checkpoint_path: StoragePath,
+    config: Any,
 ) -> dict[str, Any]:
     checkpoint = load_torch_checkpoint(
         checkpoint_path,
         map_location="cpu",
         weights_only=True,
     )
+    validate_peak_preprocessing_contract(checkpoint, config)
     model.load_state_dict(checkpoint["model"])
     return {
         "global_step": checkpoint["global_step"],
         "epoch": checkpoint["epoch"],
         "loss": checkpoint["loss"],
+        "peak_preprocessing": checkpoint["peak_preprocessing"],
+        "data_provenance": checkpoint["data_provenance"],
     }
 
 
@@ -133,6 +142,7 @@ def _encode_peak_tokens(
             batch["peak_intensity"],
             valid_mask=batch["peak_valid_mask"],
             precursor_mz=batch.get("precursor_mz", None),
+            spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
         )
         return _peak_tokens_only(encoded, batch["peak_valid_mask"])
 
@@ -166,7 +176,7 @@ def train_covariance_pooler(
         lr=learning_rate,
         weight_decay=weight_decay,
     )
-    peak_ordering = str(config.get("peak_ordering", "mz"))
+    peak_ordering = peak_preprocessing_contract(config)["peak_ordering"]
     losses: list[float] = []
     samples_seen = 0
     model.eval()
@@ -238,6 +248,12 @@ def _record_metadata(record: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _metadata_number(record: dict[str, Any], *keys: str) -> float | None:
+    raw = next((str(record[key]) for key in keys if record.get(key)), "")
+    match = re.search(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)", raw)
+    return None if match is None else float(match.group())
+
+
 def _pack_peak_batch(
     records: list[dict[str, Any]],
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -270,41 +286,53 @@ def _preprocess_mgf_batch(
     device: torch.device,
 ) -> dict[str, torch.Tensor]:
     mz, intensity, precursor = _pack_peak_batch(records)
+    preprocessing = peak_preprocessing_contract(config)
+    precursor_valid = (
+        torch.isfinite(precursor)
+        & (precursor >= preprocessing["min_precursor_mz"])
+        & (precursor <= preprocessing["max_precursor_mz"])
+    )
+    if not bool(precursor_valid.all()):
+        raise ValueError(
+            "MGF precursor m/z is outside the checkpoint preprocessing contract"
+        )
     batch = preprocess_peak_batch_torch(
         mz,
         intensity,
         precursor,
-        num_peaks=int(config.get("num_peaks", 64)),
-        peak_drop_min_intensity=float(
-            config.get(
-                "peak_drop_min_intensity",
-                config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY),
-            )
-        ),
-        peak_ordering=str(config.get("peak_ordering", "mz")),
-        max_precursor_mz=float(
-            config.get("max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
-        ),
-        precursor_peak_exclusion_window_da=float(
-            config.get("precursor_peak_exclusion_window_da", 0.0)
-        ),
-        min_peak_intensity=float(
-            config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)
-        ),
-        peak_filtering=str(config.get("peak_filtering", DEFAULT_PEAK_FILTERING)),
-        grouped_peak_shoulder_da=float(
-            config.get(
-                "grouped_peak_shoulder_da",
-                DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-            )
-        ),
+        num_peaks=preprocessing["num_peaks"],
+        peak_drop_min_intensity=preprocessing["peak_drop_min_intensity"],
+        peak_ordering=preprocessing["peak_ordering"],
+        max_precursor_mz=preprocessing["max_precursor_mz"],
+        precursor_peak_exclusion_window_da=preprocessing[
+            "precursor_peak_exclusion_window_da"
+        ],
+        min_peak_intensity=preprocessing["min_peak_intensity"],
+        peak_filtering=preprocessing["peak_filtering"],
+        grouped_peak_shoulder_da=preprocessing["grouped_peak_shoulder_da"],
         grouped_peak_isotope_charges=tuple(
-            int(charge)
-            for charge in config.get(
-                "grouped_peak_isotope_charges",
-                DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
-            )
+            preprocessing["grouped_peak_isotope_charges"]
         ),
+    )
+    batch["collision_energy"] = (
+        torch.tensor(
+            [
+                _metadata_number(record, "collisionenergy", "collision energy") or 0.0
+                for record in records
+            ],
+            dtype=torch.float32,
+        ).clamp(0.0, COLLISION_ENERGY_MAX)
+        / COLLISION_ENERGY_MAX
+    )
+    batch["charge"] = canonicalize_precursor_charge_torch(
+        torch.tensor(
+            [
+                _metadata_number(record, "charge")
+                or ASSUMED_PRECURSOR_CHARGE
+                for record in records
+            ],
+            dtype=torch.float32,
+        )
     )
     return {key: value.to(device) for key, value in batch.items()}
 
@@ -463,6 +491,14 @@ def _default_device() -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        while chunk := file.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -518,6 +554,7 @@ def main() -> None:
     checkpoint_info = _load_checkpoint_for_encoder(
         model,
         normalize_storage_path(args.checkpoint),
+        config,
     )
     model.to(device)
     model.eval()
@@ -561,7 +598,11 @@ def main() -> None:
     manifest = {
         "config_path": str(args.config),
         "checkpoint_path": str(args.checkpoint),
-        "mgf_path": str(args.mgf),
+        "mgf_source": {
+            "path": str(args.mgf),
+            "bytes": args.mgf.stat().st_size,
+            "sha256": _file_sha256(args.mgf),
+        },
         "pooler_checkpoint": str(pooler_checkpoint),
         "batch_size": batch_size,
         "device": str(device),

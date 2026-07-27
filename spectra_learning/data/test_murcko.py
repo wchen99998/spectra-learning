@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -14,7 +15,17 @@ import torch
 from spectra_learning.data import murcko
 
 
+def _source_manifest(path: Path) -> dict[str, object]:
+    contents = path.read_bytes()
+    return {
+        "path": str(path.resolve()),
+        "bytes": len(contents),
+        "sha256": hashlib.sha256(contents).hexdigest(),
+    }
+
+
 def _write_split(path: Path, labels: list[bool]) -> None:
+    identities = [f"{path.parent.name}:{path.stem}:{i}" for i in range(len(labels))]
     table = pa.table(
         {
             "dreams_embedding": pa.array(
@@ -32,6 +43,11 @@ def _write_split(path: Path, labels: list[bool]) -> None:
             "precursor_mz": pa.array([100.0 for _ in labels], type=pa.float64()),
             "collision_energy": pa.array([10.0 for _ in labels], type=pa.float32()),
             "has_fluorine": pa.array(labels, type=pa.bool_()),
+            "canonical_smiles": pa.array(identities, type=pa.string()),
+            "metadata_json": pa.array(
+                [json.dumps({"CHARGE": "1+"}) for _ in labels],
+                type=pa.string(),
+            ),
         }
     )
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -58,6 +74,7 @@ def _write_dreams_auxiliary(root: Path, split: str, length: int, base: float) ->
 def _write_fake_nist_murcko_probe_artifact(
     root: Path,
     *,
+    min_precursor_mz: float = 1.0,
     max_precursor_mz: float = 1000.0,
     include_dreams: bool = False,
 ) -> dict[str, object]:
@@ -76,7 +93,9 @@ def _write_fake_nist_murcko_probe_artifact(
             {
                 "spectrum_index": pa.array(list(range(len(rows))), type=pa.int64()),
                 "fold": pa.array([split_name] * len(rows), type=pa.string()),
-                "precursor_mz": pa.array([precursor for _, precursor, _, _ in rows], type=pa.float32()),
+                "precursor_mz": pa.array(
+                    [precursor for _, precursor, _, _ in rows], type=pa.float32()
+                ),
                 "num_peaks": pa.array([2] * len(rows), type=pa.int32()),
                 "spectrum_mz": pa.array(
                     [[100.0 + idx, 101.0 + idx] for idx, _ in enumerate(rows)],
@@ -86,16 +105,28 @@ def _write_fake_nist_murcko_probe_artifact(
                     [[10.0, 5.0] for _ in rows],
                     type=pa.list_(pa.float32()),
                 ),
-                "smiles": pa.array([smiles for smiles, _, _, _ in rows], type=pa.string()),
-                "canonical_smiles": pa.array([smiles for smiles, _, _, _ in rows], type=pa.string()),
+                "smiles": pa.array(
+                    [smiles for smiles, _, _, _ in rows], type=pa.string()
+                ),
+                "canonical_smiles": pa.array(
+                    [smiles for smiles, _, _, _ in rows], type=pa.string()
+                ),
                 "adduct": pa.array(["[M+H]+"] * len(rows), type=pa.string()),
                 "instrument_type": pa.array(["Q-TOF"] * len(rows), type=pa.string()),
                 "collision_energy": pa.array([10.0] * len(rows), type=pa.float32()),
                 "collision_energy_present": pa.array([1] * len(rows), type=pa.int32()),
-                "has_fluorine": pa.array([has_f for _, _, has_f, _ in rows], type=pa.bool_()),
-                "has_sulfur": pa.array([has_s for _, _, _, has_s in rows], type=pa.bool_()),
-                "mol_weight": pa.array([10.0 + idx for idx, _ in enumerate(rows)], type=pa.float32()),
-                "logp": pa.array([0.1 + idx for idx, _ in enumerate(rows)], type=pa.float32()),
+                "has_fluorine": pa.array(
+                    [has_f for _, _, has_f, _ in rows], type=pa.bool_()
+                ),
+                "has_sulfur": pa.array(
+                    [has_s for _, _, _, has_s in rows], type=pa.bool_()
+                ),
+                "mol_weight": pa.array(
+                    [10.0 + idx for idx, _ in enumerate(rows)], type=pa.float32()
+                ),
+                "logp": pa.array(
+                    [0.1 + idx for idx, _ in enumerate(rows)], type=pa.float32()
+                ),
                 "num_heavy_atoms": pa.array([3.0] * len(rows), type=pa.float32()),
                 "num_rings": pa.array([0.0] * len(rows), type=pa.float32()),
                 "tpsa": pa.array([1.0] * len(rows), type=pa.float32()),
@@ -151,7 +182,9 @@ def _write_fake_nist_murcko_probe_artifact(
         "metadata_version": murcko.NIST_MURCKO_METADATA_VERSION,
         "artifact_format": murcko.NIST_MURCKO_ARTIFACT_FORMAT,
         "storage_format": "parquet",
+        "min_precursor_mz": min_precursor_mz,
         "max_precursor_mz": max_precursor_mz,
+        "num_peaks_input": 128,
         "adduct_vocab": {"[M+H]+": 0},
         "instrument_type_vocab": {"Q-TOF": 0},
         "dreams_dim": 2 if include_dreams else 0,
@@ -215,6 +248,8 @@ def _read_murcko_artifact_rows(
 
 
 def _fluorine_data(metadata: dict[str, Any], root: Path) -> murcko.MurckoFluorineData:
+    for split, files in metadata.get("dreams_auxiliary_files", {}).items():
+        metadata[f"{split}_dreams_files"] = files
     return murcko.MurckoFluorineData(
         metadata=metadata,
         root=root,
@@ -241,7 +276,7 @@ def test_ensure_nist_murcko_downloads_expected_patterns(monkeypatch, tmp_path: P
     monkeypatch.setattr(murcko, "snapshot_download", fake_snapshot_download)
 
     metadata = murcko.ensure_nist_murcko_probe_downloaded(
-        tmp_path / "probe-cache" / "nist_murcko_probe",
+        tmp_path / "probe-cache" / murcko.NIST_MURCKO_PREPARED_SUBDIR,
         max_precursor_mz=1000.0,
         repo_id="owner/nist-murcko",
         revision="unit-test",
@@ -264,7 +299,7 @@ def test_ensure_nist_murcko_downloads_dreams_auxiliary(monkeypatch, tmp_path: Pa
     monkeypatch.setattr(murcko, "snapshot_download", fake_snapshot_download)
 
     metadata = murcko.ensure_nist_murcko_probe_downloaded(
-        tmp_path / "probe-cache" / "nist_murcko_probe",
+        tmp_path / "probe-cache" / murcko.NIST_MURCKO_PREPARED_SUBDIR,
         max_precursor_mz=1000.0,
         repo_id="owner/nist-murcko",
         revision="unit-test",
@@ -273,11 +308,11 @@ def test_ensure_nist_murcko_downloads_dreams_auxiliary(monkeypatch, tmp_path: Pa
 
     assert metadata["dreams_auxiliary_available"]
     assert calls[0]["allow_patterns"] == [
-        "nist_murcko_probe/metadata.json",
-        "nist_murcko_probe/train.parquet",
-        "nist_murcko_probe/val.parquet",
-        "nist_murcko_probe/test.parquet",
-        "nist_murcko_probe/auxiliary/dreams/*",
+        f"{murcko.NIST_MURCKO_PREPARED_SUBDIR}/metadata.json",
+        f"{murcko.NIST_MURCKO_PREPARED_SUBDIR}/train.parquet",
+        f"{murcko.NIST_MURCKO_PREPARED_SUBDIR}/val.parquet",
+        f"{murcko.NIST_MURCKO_PREPARED_SUBDIR}/test.parquet",
+        f"{murcko.NIST_MURCKO_PREPARED_SUBDIR}/auxiliary/dreams/*",
     ]
 
 
@@ -285,7 +320,7 @@ def test_ensure_nist_murcko_rejects_invalid_metadata_without_download(
     monkeypatch,
     tmp_path: Path,
 ):
-    output_dir = tmp_path / "probe-cache" / "nist_murcko_probe"
+    output_dir = tmp_path / "probe-cache" / murcko.NIST_MURCKO_PREPARED_SUBDIR
     output_dir.mkdir(parents=True)
     (output_dir / "metadata.json").write_text(
         json.dumps({"metadata_version": 0, "max_precursor_mz": 1000.0})
@@ -308,13 +343,63 @@ def test_ensure_nist_murcko_rejects_invalid_metadata_without_download(
     assert calls == []
 
 
+def test_ensure_nist_murcko_rejects_mismatched_min_precursor(
+    monkeypatch,
+    tmp_path: Path,
+):
+    output_dir = tmp_path / "probe-cache" / murcko.NIST_MURCKO_PREPARED_SUBDIR
+    _write_fake_nist_murcko_probe_artifact(
+        output_dir,
+        min_precursor_mz=0.0,
+    )
+    calls = []
+    monkeypatch.setattr(
+        murcko,
+        "snapshot_download",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    with pytest.raises(ValueError, match="min_precursor_mz mismatch"):
+        murcko.ensure_nist_murcko_probe_downloaded(
+            output_dir,
+            min_precursor_mz=1.0,
+            max_precursor_mz=1000.0,
+        )
+
+    assert calls == []
+
+
+def test_ensure_nist_murcko_rejects_noncanonical_input_peak_count(
+    monkeypatch,
+    tmp_path: Path,
+):
+    output_dir = tmp_path / "probe-cache" / murcko.NIST_MURCKO_PREPARED_SUBDIR
+    metadata = _write_fake_nist_murcko_probe_artifact(output_dir)
+    metadata["num_peaks_input"] = 64
+    (output_dir / "metadata.json").write_text(json.dumps(metadata))
+    calls = []
+    monkeypatch.setattr(
+        murcko,
+        "snapshot_download",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    with pytest.raises(ValueError, match="num_peaks_input mismatch"):
+        murcko.ensure_nist_murcko_probe_downloaded(
+            output_dir,
+            max_precursor_mz=1000.0,
+        )
+
+    assert calls == []
+
+
 def test_murcko_fluorine_rejects_partial_metadata_without_download(
     monkeypatch,
     tmp_path: Path,
 ):
-    train_dir = tmp_path / "cache" / "nist_murcko_probe"
-    train_dir.mkdir(parents=True)
-    (train_dir / "metadata.json").write_text(
+    output_dir = tmp_path / "cache" / murcko.NIST_MURCKO_PREPARED_SUBDIR
+    output_dir.mkdir(parents=True)
+    (output_dir / "metadata.json").write_text(
         json.dumps(
             {
                 "train_files": ["missing-train.parquet"],
@@ -330,7 +415,10 @@ def test_murcko_fluorine_rejects_partial_metadata_without_download(
     monkeypatch.setattr(murcko, "snapshot_download", fake_snapshot_download)
 
     with pytest.raises(ValueError, match="Delete the artifact directory"):
-        murcko.ensure_murcko_fluorine_data_downloaded(tmp_path / "cache")
+        murcko.ensure_nist_murcko_probe_downloaded(
+            output_dir,
+            max_precursor_mz=1000.0,
+        )
 
     assert calls == []
 
@@ -340,58 +428,35 @@ def test_murcko_fluorine_cache_and_loader_use_shared_peak_preprocessing(
     tmp_path: Path,
 ):
     source_root = tmp_path / "source_repo"
-    nist_source = source_root / "nist_murcko_probe"
-    mcebio_source = source_root / "mcebio_murcko_probe"
+    nist_source = source_root / murcko.NIST_MURCKO_PREPARED_SUBDIR
     _write_split(nist_source / "train.parquet", [True, False, False, True])
     _write_split(nist_source / "val.parquet", [True, False])
-    _write_split(mcebio_source / "all.parquet", [False, True])
+    _write_split(nist_source / "test.parquet", [False, True])
     (nist_source / "metadata.json").write_text(
-        """
-        {
-          "storage_format": "parquet",
-          "train_files": ["train.parquet"],
-          "train_lengths": [4],
-          "train_size": 4,
-          "train_positive": 2,
-          "val_files": ["val.parquet"],
-          "val_lengths": [2],
-          "val_size": 2,
-          "val_positive": 1,
-          "dreams_dim": 2,
-          "dreams_auxiliary_available": true,
-          "dreams_auxiliary_files": {
-            "train": ["auxiliary/dreams/train-part-00000.npz"],
-            "val": ["auxiliary/dreams/val-part-00000.npz"]
-          },
-          "dreams_auxiliary_lengths": {
-            "train": [4],
-            "val": [2]
-          },
-          "adduct_vocab": {"[M+H]+": 0},
-          "instrument_type_vocab": {"Q-TOF": 0}
-        }
-        """
-    )
-    (mcebio_source / "metadata.json").write_text(
-        """
-        {
-          "storage_format": "parquet",
-          "all_files": ["all.parquet"],
-          "all_lengths": [2],
-          "all_size": 2,
-          "all_positive": 1,
-          "dreams_dim": 2,
-          "dreams_auxiliary_available": true,
-          "dreams_auxiliary_files": {
-            "all": ["auxiliary/dreams/all-part-00000.npz"]
-          },
-          "dreams_auxiliary_lengths": {
-            "all": [2]
-          },
-          "adduct_vocab": {"[M+H-H2O]+": 0},
-          "instrument_type_vocab": {"Orbitrap": 0}
-        }
-        """
+        json.dumps(
+            {
+                "metadata_version": murcko.NIST_MURCKO_METADATA_VERSION,
+                "artifact_format": murcko.NIST_MURCKO_ARTIFACT_FORMAT,
+                "storage_format": "parquet",
+                "min_precursor_mz": 1.0,
+                "max_precursor_mz": 1000.0,
+                "num_peaks_input": 128,
+                "train_files": ["train.parquet"],
+                "train_lengths": [4],
+                "train_size": 4,
+                "train_positive": 2,
+                "val_files": ["val.parquet"],
+                "val_lengths": [2],
+                "val_size": 2,
+                "val_positive": 1,
+                "test_files": ["test.parquet"],
+                "test_lengths": [2],
+                "test_size": 2,
+                "test_positive": 1,
+                "adduct_vocab": {"[M+H]+": 0},
+                "instrument_type_vocab": {"Q-TOF": 0},
+            }
+        )
     )
 
     def fake_snapshot_download(**kwargs):
@@ -401,30 +466,27 @@ def test_murcko_fluorine_cache_and_loader_use_shared_peak_preprocessing(
 
     monkeypatch.setattr(murcko, "snapshot_download", fake_snapshot_download)
     cache_dir = tmp_path / "cache"
-    metadata = murcko.ensure_murcko_fluorine_data_downloaded(
-        cache_dir,
+    nist_dir = cache_dir / murcko.NIST_MURCKO_PREPARED_SUBDIR
+    metadata = murcko.ensure_nist_murcko_probe_downloaded(
+        nist_dir,
+        max_precursor_mz=1000.0,
         repo_id="unit/repo",
         revision="main",
-        train_subdir="nist_murcko_probe",
-        test_subdir="mcebio_murcko_probe",
     )
 
     assert metadata["train_size"] == 4
     assert metadata["train_positive"] == 2
     assert metadata["test_size"] == 2
     assert metadata["test_positive"] == 1
-    assert metadata["adduct_vocab"] == {"[M+H-H2O]+": 0, "[M+H]+": 1}
-    assert metadata["instrument_type_vocab"] == {"Orbitrap": 0, "Q-TOF": 1}
+    assert metadata["adduct_vocab"] == {"[M+H]+": 0}
+    assert metadata["instrument_type_vocab"] == {"Q-TOF": 0}
     assert "probe_morgan_bits" not in metadata
     assert "morgan_auxiliary_available" not in metadata
-    assert "train_morgan_files" not in metadata
-    assert not metadata["dreams_auxiliary_available"]
-    assert "train_dreams_files" not in metadata
-    assert "test_dreams_files" not in metadata
-    assert (cache_dir / metadata["train_files"][0]).exists()
-    assert (cache_dir / metadata["test_files"][0]).exists()
+    assert "dreams_auxiliary_available" not in metadata
+    assert (nist_dir / metadata["train_files"][0]).exists()
+    assert (nist_dir / metadata["test_files"][0]).exists()
 
-    data = _fluorine_data(metadata, cache_dir)
+    data = _fluorine_data(metadata, nist_dir)
     batch = next(
         iter(
             murcko.build_murcko_fluorine_loader(
@@ -458,77 +520,15 @@ def test_murcko_fluorine_cache_and_loader_use_shared_peak_preprocessing(
     assert tuple(distributed_batch["label"].shape) == (1,)
 
 
-def test_murcko_fluorine_loader_reads_dreams_auxiliary(monkeypatch, tmp_path: Path):
-    source_root = tmp_path / "source_repo"
-    nist_source = source_root / "nist_murcko_probe"
-    mcebio_source = source_root / "mcebio_murcko_probe"
-    _write_split(nist_source / "train.parquet", [True, False])
-    _write_split(nist_source / "val.parquet", [False])
-    _write_split(mcebio_source / "all.parquet", [False, True])
-    _write_dreams_auxiliary(nist_source, "train", 2, 100.0)
-    _write_dreams_auxiliary(nist_source, "val", 1, 200.0)
-    _write_dreams_auxiliary(mcebio_source, "all", 2, 300.0)
-    (nist_source / "metadata.json").write_text(
-        """
-        {
-          "storage_format": "parquet",
-          "train_files": ["train.parquet"],
-          "train_lengths": [2],
-          "train_size": 2,
-          "train_positive": 1,
-          "val_files": ["val.parquet"],
-          "val_lengths": [1],
-          "val_size": 1,
-          "val_positive": 0,
-          "dreams_dim": 2,
-          "dreams_auxiliary_available": true,
-          "dreams_auxiliary_files": {
-            "train": ["auxiliary/dreams/train-part-00000.npz"],
-            "val": ["auxiliary/dreams/val-part-00000.npz"]
-          },
-          "dreams_auxiliary_lengths": {
-            "train": [2],
-            "val": [1]
-          }
-        }
-        """
-    )
-    (mcebio_source / "metadata.json").write_text(
-        """
-        {
-          "storage_format": "parquet",
-          "all_files": ["all.parquet"],
-          "all_lengths": [2],
-          "all_size": 2,
-          "all_positive": 1,
-          "dreams_dim": 2,
-          "dreams_auxiliary_available": true,
-          "dreams_auxiliary_files": {
-            "all": ["auxiliary/dreams/all-part-00000.npz"]
-          },
-          "dreams_auxiliary_lengths": {
-            "all": [2]
-          }
-        }
-        """
-    )
-
-    def fake_snapshot_download(**kwargs):
-        local_dir = Path(kwargs["local_dir"])
-        shutil.copytree(source_root, local_dir, dirs_exist_ok=True)
-        return str(local_dir)
-
-    monkeypatch.setattr(murcko, "snapshot_download", fake_snapshot_download)
-    cache_dir = tmp_path / "cache"
-    metadata = murcko.ensure_murcko_fluorine_data_downloaded(
-        cache_dir,
-        repo_id="unit/repo",
-        revision="main",
-        train_subdir="nist_murcko_probe",
-        test_subdir="mcebio_murcko_probe",
+def test_murcko_fluorine_loader_reads_dreams_auxiliary(tmp_path: Path):
+    nist_dir = tmp_path / "cache" / murcko.NIST_MURCKO_PREPARED_SUBDIR
+    _write_fake_nist_murcko_probe_artifact(nist_dir, include_dreams=True)
+    metadata = murcko.ensure_nist_murcko_probe_downloaded(
+        nist_dir,
+        max_precursor_mz=1000.0,
         include_dreams=True,
     )
-    data = _fluorine_data(metadata, cache_dir)
+    data = _fluorine_data(metadata, nist_dir)
 
     train_batch = next(
         iter(
@@ -555,12 +555,12 @@ def test_murcko_fluorine_loader_reads_dreams_auxiliary(monkeypatch, tmp_path: Pa
     )
 
     assert metadata["dreams_auxiliary_available"]
-    assert metadata["test_dreams_files"] == [
-        "mcebio_murcko_probe/auxiliary/dreams/all-part-00000.npz"
+    assert metadata["dreams_auxiliary_files"]["test"] == [
+        "auxiliary/dreams/test-part-00000.npz"
     ]
     assert torch.allclose(
         train_batch["dreams_embedding"],
-        torch.tensor([[100.0, 100.5], [101.0, 101.5]]),
+        torch.tensor([[10.0, 10.5], [11.0, 11.5]]),
     )
     assert torch.equal(
         train_batch["dreams_embedding_valid"],
@@ -568,25 +568,14 @@ def test_murcko_fluorine_loader_reads_dreams_auxiliary(monkeypatch, tmp_path: Pa
     )
     assert torch.allclose(
         test_batch["dreams_embedding"],
-        torch.tensor([[300.0, 300.5], [301.0, 301.5]]),
+        torch.tensor([[30.0, 30.5]]),
     )
 
 
 def test_murcko_rank_one_waits_for_download(monkeypatch, tmp_path: Path):
     source_root = tmp_path / "source_repo"
-    nist_source = source_root / "nist_murcko_probe"
-    mcebio_source = source_root / "mcebio_murcko_probe"
-    _write_split(nist_source / "train.parquet", [True, False])
-    _write_split(nist_source / "val.parquet", [False])
-    _write_split(mcebio_source / "all.parquet", [False, True])
-    (nist_source / "metadata.json").write_text(
-        '{"storage_format":"parquet","train_files":["train.parquet"],'
-        '"train_lengths":[2],"train_size":2,'
-        '"val_files":["val.parquet"],"val_lengths":[1],"val_size":1}'
-    )
-    (mcebio_source / "metadata.json").write_text(
-        '{"storage_format":"parquet","all_files":["all.parquet"],'
-        '"all_lengths":[2],"all_size":2}'
+    _write_fake_nist_murcko_probe_artifact(
+        source_root / murcko.NIST_MURCKO_PREPARED_SUBDIR
     )
 
     rank1_cache = tmp_path / "rank1_cache"
@@ -604,18 +593,17 @@ def test_murcko_rank_one_waits_for_download(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(murcko.torch.distributed, "is_initialized", lambda: True)
     monkeypatch.setattr(murcko.torch.distributed, "barrier", rank1_barrier)
 
-    metadata = murcko.ensure_murcko_fluorine_data_downloaded(
-        rank1_cache,
+    metadata = murcko.ensure_nist_murcko_probe_downloaded(
+        rank1_cache / murcko.NIST_MURCKO_PREPARED_SUBDIR,
+        max_precursor_mz=1000.0,
         repo_id="unit/repo",
         revision="main",
-        train_subdir="nist_murcko_probe",
-        test_subdir="mcebio_murcko_probe",
         distributed_world_size=2,
         distributed_rank=1,
     )
 
     assert download_calls == []
-    assert metadata["test_size"] == 2
+    assert metadata["test_size"] == 1
 
 
 def test_murcko_local_rank_zero_downloads_on_nonzero_global_rank(
@@ -623,19 +611,8 @@ def test_murcko_local_rank_zero_downloads_on_nonzero_global_rank(
     tmp_path: Path,
 ):
     source_root = tmp_path / "source_repo"
-    nist_source = source_root / "nist_murcko_probe"
-    mcebio_source = source_root / "mcebio_murcko_probe"
-    _write_split(nist_source / "train.parquet", [True, False])
-    _write_split(nist_source / "val.parquet", [False])
-    _write_split(mcebio_source / "all.parquet", [False, True])
-    (nist_source / "metadata.json").write_text(
-        '{"storage_format":"parquet","train_files":["train.parquet"],'
-        '"train_lengths":[2],"train_size":2,'
-        '"val_files":["val.parquet"],"val_lengths":[1],"val_size":1}'
-    )
-    (mcebio_source / "metadata.json").write_text(
-        '{"storage_format":"parquet","all_files":["all.parquet"],'
-        '"all_lengths":[2],"all_size":2}'
+    _write_fake_nist_murcko_probe_artifact(
+        source_root / murcko.NIST_MURCKO_PREPARED_SUBDIR
     )
 
     rank2_cache = tmp_path / "rank2_cache"
@@ -651,19 +628,18 @@ def test_murcko_local_rank_zero_downloads_on_nonzero_global_rank(
     monkeypatch.setattr(murcko.torch.distributed, "is_initialized", lambda: True)
     monkeypatch.setattr(murcko.torch.distributed, "barrier", lambda: None)
 
-    metadata = murcko.ensure_murcko_fluorine_data_downloaded(
-        rank2_cache,
+    metadata = murcko.ensure_nist_murcko_probe_downloaded(
+        rank2_cache / murcko.NIST_MURCKO_PREPARED_SUBDIR,
+        max_precursor_mz=1000.0,
         repo_id="unit/repo",
         revision="main",
-        train_subdir="nist_murcko_probe",
-        test_subdir="mcebio_murcko_probe",
         distributed_world_size=4,
         distributed_rank=2,
         distributed_local_rank=0,
     )
 
     assert len(download_calls) == 1
-    assert metadata["test_size"] == 2
+    assert metadata["test_size"] == 1
 
 
 def test_build_nist_murcko_artifact_from_mgf(tmp_path: Path):
@@ -724,6 +700,7 @@ def test_build_nist_murcko_artifact_from_mgf(tmp_path: Path):
     assert metadata["artifact_format"] == "nist_murcko_parquet_v2"
     assert metadata["train_size"] + metadata["val_size"] + metadata["test_size"] == 3
     assert metadata["dreams_dim"] == 0
+    assert metadata["source_file"] == _source_manifest(mgf_path)
     split_name = next(
         split for split in ("train", "val", "test") if metadata[f"{split}_files"]
     )
@@ -960,68 +937,7 @@ def test_spectral_lsh_rejects_cap_below_unique_smiles_count(tmp_path: Path):
         )
 
 
-def test_build_mcebio_murcko_artifact_writes_standalone_all_split(tmp_path: Path):
-    mgf_path = tmp_path / "source.mgf"
-    mgf_path.write_text(
-        "\n".join(
-            [
-                "BEGIN IONS",
-                "TITLE=fluoro",
-                "PEPMASS=111.0",
-                "SMILES=CC(F)O",
-                "ADDUCT=[M+H]+",
-                "INSTRUMENT_TYPE=Q-TOF",
-                "Collision energy=12.0",
-                "10 100",
-                "20 50",
-                "END IONS",
-                "BEGIN IONS",
-                "TITLE=plain",
-                "PEPMASS=222.0",
-                "SMILES=CCO",
-                "ADDUCT=[M+H]+",
-                "INSTRUMENT_TYPE=Orbitrap",
-                "Collision energy=24.0",
-                "11 100",
-                "21 50",
-                "END IONS",
-            ]
-        )
-    )
-    artifact_dir = tmp_path / "artifact"
-
-    metadata = murcko.build_murcko_mgf_dataset(
-        mgf_path=mgf_path,
-        output_dir=artifact_dir,
-        source_uri="source.mgf",
-        val_frac=0.2,
-        test_frac=0.2,
-        seed=1,
-        min_precursor_mz=1.0,
-        max_precursor_mz=1000.0,
-        num_peaks_input=128,
-        num_workers=1,
-        batch_size=2,
-        parquet_batch_size=2,
-        single_split="all",
-    )
-
-    assert metadata["splits"] == ["all"]
-    assert metadata["all_size"] == 2
-    assert metadata["all_positive"] == 1
-    assert metadata["all_files"] == ["all.parquet"]
-    assert metadata["adduct_vocab"] == {"[M+H]+": 0}
-    assert metadata["allowed_adducts"] is None
-    assert not metadata["spectral_lsh_enabled"]
-    assert (artifact_dir / "all.parquet").exists()
-
-    rows = _read_murcko_artifact_rows(artifact_dir, metadata)
-    assert {row["fold"] for row in rows} == {"all"}
-    assert {row["instrument_type"] for row in rows} == {"Q-TOF", "Orbitrap"}
-    assert [row["collision_energy"] for row in rows] == [12.0, 24.0]
-
-
-def test_prepare_murcko_mgf_collection_builds_nist_and_mcebio(tmp_path: Path):
+def test_prepare_murcko_mgf_collection_builds_nist(tmp_path: Path):
     nist_mgf = tmp_path / "nist.mgf"
     nist_mgf.write_text(
         "\n".join(
@@ -1055,29 +971,8 @@ def test_prepare_murcko_mgf_collection_builds_nist_and_mcebio(tmp_path: Path):
             )
         )
     )
-    mcebio_mgf = tmp_path / "mcebio.mgf"
-    mcebio_mgf.write_text(
-        "\n".join(
-            _mgf_block(
-                "mcebio-fluoro",
-                pepmass=211.0,
-                smiles="CC(F)N",
-                adduct="[M+H]+",
-                peaks=[(11.0, 100.0), (21.0, 50.0)],
-            )
-            + _mgf_block(
-                "mcebio-plain",
-                pepmass=212.0,
-                smiles="CCN",
-                adduct="[M+H]+",
-                peaks=[(31.0, 100.0), (41.0, 50.0)],
-            )
-        )
-    )
-
     metadata = murcko.prepare_murcko_mgf_collection(
         nist_mgf=str(nist_mgf),
-        mcebio_mgf=str(mcebio_mgf),
         work_dir=tmp_path / "work",
         upload=False,
         val_frac=0.25,
@@ -1090,14 +985,14 @@ def test_prepare_murcko_mgf_collection_builds_nist_and_mcebio(tmp_path: Path):
     artifact_dir = Path(metadata["artifact_dir"])
 
     assert metadata["datasets"]["nist"]["subdir"] == murcko.NIST_MURCKO_PREPARED_SUBDIR
-    assert metadata["datasets"]["mcebio"]["subdir"] == murcko.MCEBIO_MURCKO_PREPARED_SUBDIR
-    assert metadata["datasets"]["mcebio"]["splits"] == ["all"]
-    assert (artifact_dir / murcko.NIST_MURCKO_PREPARED_SUBDIR / "metadata.json").exists()
+    assert metadata["datasets"]["nist"]["splits"] == ["train", "val", "test"]
+    assert metadata["datasets"]["nist"]["source_file"] == _source_manifest(
+        artifact_dir / "raw" / nist_mgf.name
+    )
     assert (
-        artifact_dir / murcko.MCEBIO_MURCKO_PREPARED_SUBDIR / "metadata.json"
+        artifact_dir / murcko.NIST_MURCKO_PREPARED_SUBDIR / "metadata.json"
     ).exists()
     assert (artifact_dir / "raw" / nist_mgf.name).exists()
-    assert (artifact_dir / "raw" / mcebio_mgf.name).exists()
 
 
 def test_prepare_murcko_mgf_collection_builds_dreams_before_upload(
@@ -1139,25 +1034,6 @@ def test_prepare_murcko_mgf_collection_builds_dreams_before_upload(
             )
         )
     )
-    mcebio_mgf = tmp_path / "mcebio.mgf"
-    mcebio_mgf.write_text(
-        "\n".join(
-            _mgf_block(
-                "mcebio-fluoro",
-                pepmass=211.0,
-                smiles="CC(F)N",
-                adduct="[M+H]+",
-                peaks=[(11.0, 100.0), (21.0, 50.0)],
-            )
-            + _mgf_block(
-                "mcebio-plain",
-                pepmass=212.0,
-                smiles="CCN",
-                adduct="[M+H]+",
-                peaks=[(31.0, 100.0), (41.0, 50.0)],
-            )
-        )
-    )
     events = []
 
     def fake_build_dreams_auxiliary(**kwargs):
@@ -1178,14 +1054,17 @@ def test_prepare_murcko_mgf_collection_builds_dreams_before_upload(
             events.append(("create_repo", args, kwargs))
 
         def upload_large_folder(self, **kwargs):
-            metadata = json.loads((Path(kwargs["folder_path"]) / "metadata.json").read_text())
+            metadata = json.loads(
+                (Path(kwargs["folder_path"]) / "metadata.json").read_text()
+            )
             assert metadata["dreams_auxiliary_built"]
             assert metadata["dreams_auxiliary_paths"] == [
-                "nist_murcko_probe/auxiliary/dreams/train-part-00000.npz"
+                f"{murcko.NIST_MURCKO_PREPARED_SUBDIR}"
+                "/auxiliary/dreams/train-part-00000.npz"
             ]
             assert (
                 Path(kwargs["folder_path"])
-                / "nist_murcko_probe"
+                / murcko.NIST_MURCKO_PREPARED_SUBDIR
                 / "auxiliary"
                 / "dreams"
                 / "train-part-00000.npz"
@@ -1201,7 +1080,6 @@ def test_prepare_murcko_mgf_collection_builds_dreams_before_upload(
 
     metadata = murcko.prepare_murcko_mgf_collection(
         nist_mgf=str(nist_mgf),
-        mcebio_mgf=str(mcebio_mgf),
         work_dir=tmp_path / "work",
         upload=True,
         hf_repo_id="unit/repo",
@@ -1295,10 +1173,23 @@ def test_prepare_nist_disjoint_probe_retrieval_collection_writes_fixed_tasks(
     )
 
     artifact_dir = Path(metadata["artifact_dir"])
-    assert metadata["artifact_format"] == murcko.NIST_DISJOINT_PROBE_RETRIEVAL_ARTIFACT_FORMAT
+    assert (
+        metadata["artifact_format"]
+        == murcko.NIST_DISJOINT_PROBE_RETRIEVAL_ARTIFACT_FORMAT
+    )
     assert metadata["online_probe"]["selected_spectra_before_split_processing"] == 2
     assert metadata["retrieval_pool"]["all_size"] == 3
     assert metadata["disjointness"]["online_probe_retrieval_murcko_hist_overlap"] == 0
+    source_file = _source_manifest(artifact_dir / "raw" / mgf_path.name)
+    assert metadata["source_file"] == source_file
+    for subdir in (
+        murcko.NIST_DISJOINT_ONLINE_PROBE_SUBDIR,
+        murcko.NIST_DISJOINT_RETRIEVAL_POOL_SUBDIR,
+    ):
+        subdir_metadata = json.loads(
+            (artifact_dir / subdir / "metadata.json").read_text()
+        )
+        assert subdir_metadata["source_file"] == source_file
 
     same_pairs = pq.read_table(
         artifact_dir / murcko.NIST_10PPM_RETRIEVAL_SUBDIR / "pairs.parquet"
@@ -1317,64 +1208,14 @@ def test_prepare_nist_disjoint_probe_retrieval_collection_writes_fixed_tasks(
 
 
 def test_murcko_fluorine_loader_can_return_jax_batches(tmp_path: Path):
-    root = tmp_path / "cache"
-    nist = root / "nist_murcko_probe"
-    mcebio = root / "mcebio_murcko_probe"
-    _write_split(nist / "train.parquet", [True, False])
-    _write_split(nist / "val.parquet", [False])
-    _write_split(mcebio / "all.parquet", [False, True])
-    _write_dreams_auxiliary(nist, "train", 2, 100.0)
-    _write_dreams_auxiliary(mcebio, "all", 2, 300.0)
-    (nist / "metadata.json").write_text(
-        """
-        {
-          "storage_format": "parquet",
-          "train_files": ["train.parquet"],
-          "train_lengths": [2],
-          "train_size": 2,
-          "train_positive": 1,
-          "val_files": ["val.parquet"],
-          "val_lengths": [1],
-          "val_size": 1,
-          "val_positive": 0,
-          "dreams_dim": 2,
-          "dreams_auxiliary_available": true,
-          "dreams_auxiliary_files": {
-            "train": ["auxiliary/dreams/train-part-00000.npz"]
-          },
-          "dreams_auxiliary_lengths": {
-            "train": [2]
-          }
-        }
-        """
-    )
-    (mcebio / "metadata.json").write_text(
-        """
-        {
-          "storage_format": "parquet",
-          "all_files": ["all.parquet"],
-          "all_lengths": [2],
-          "all_size": 2,
-          "all_positive": 1,
-          "dreams_dim": 2,
-          "dreams_auxiliary_available": true,
-          "dreams_auxiliary_files": {
-            "all": ["auxiliary/dreams/all-part-00000.npz"]
-          },
-          "dreams_auxiliary_lengths": {
-            "all": [2]
-          }
-        }
-        """
-    )
-    metadata = murcko.ensure_murcko_fluorine_data_downloaded(
-        root,
-        repo_id="unit/repo",
-        train_subdir="nist_murcko_probe",
-        test_subdir="mcebio_murcko_probe",
+    nist_dir = tmp_path / "cache" / murcko.NIST_MURCKO_PREPARED_SUBDIR
+    _write_fake_nist_murcko_probe_artifact(nist_dir, include_dreams=True)
+    metadata = murcko.ensure_nist_murcko_probe_downloaded(
+        nist_dir,
+        max_precursor_mz=1000.0,
         include_dreams=True,
     )
-    data = _fluorine_data(metadata, root)
+    data = _fluorine_data(metadata, nist_dir)
 
     batch = next(
         iter(
@@ -1407,4 +1248,4 @@ def test_murcko_fluorine_loader_can_return_jax_batches(tmp_path: Path):
     assert isinstance(batch["label"], jax.Array)
     assert tuple(batch["peak_mz"].shape) == (2, 2)
     assert isinstance(dreams_batch["dreams_embedding"], jax.Array)
-    assert tuple(dreams_batch["dreams_embedding"].shape) == (2, 2)
+    assert tuple(dreams_batch["dreams_embedding"].shape) == (1, 2)

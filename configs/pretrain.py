@@ -12,13 +12,18 @@ def get_config() -> config_dict.ConfigDict:
     # Dataset
     cfg.artifact_dir = "data/massive_v1_ms2_100m_stratified_x16"
     cfg.gems_hdf5_repo_id = "novogaia/massive-v1-ms2-100m-stratified-x16"
-    cfg.gems_hdf5_revision = "main"
+    cfg.gems_hdf5_revision = "7ff47061cbde23e4cdd113378dcfb489e86b32c4"
     cfg.gems_hdf5_manifest = "fdataloader_shards.json"
     cfg.gems_hdf5_spectrum_dataset = "spectrum"
     cfg.gems_hdf5_precursor_dataset = "precursor_mz"
+    cfg.gems_hdf5_retention_time_dataset = "RT"
+    cfg.gems_hdf5_ms_level_dataset = "MS level"
     cfg.gems_hdf5_rows_per_block = 0
-    cfg.nist_murcko_probe_repo_id = "cjim8889/msms_evaluation_100ktrain_20260615"
-    cfg.nist_murcko_probe_revision = "main"
+    cfg.nist_murcko_probe_repo_id = (
+        "wchen99998/msms_nist_disjoint_probe_retrieval_20260622"
+    )
+    cfg.nist_murcko_probe_revision = "f5b51db72caa9205240d344882a9f4baec10d9b3"
+    cfg.nist_murcko_probe_hf_subdir = "nist_100k_online_probe"
     cfg.nist_murcko_probe_num_repeats = 1
     cfg.batch_size = 512
     cfg.gradient_accumulation_steps = 4
@@ -32,7 +37,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.grouped_peak_shoulder_da = 0.05
     cfg.grouped_peak_isotope_charges = (1, 2, 3)
     cfg.peak_ordering = "mz"
-    cfg.peak_mz_max = 1000
     cfg.seed = 66
 
     # Encoder
@@ -44,7 +48,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_apply_final_norm = True
     cfg.encoder_apply_final_pair_norm = True
     cfg.encoder_mz_embedding = "fourier"
-    cfg.encoder_mz_scale = 1000
     cfg.encoder_mz_token_bin_size = 0.02
     cfg.encoder_mz_token_embedding_dim = 77
     cfg.encoder_fourier_mlp_hidden_dim = 1280
@@ -56,12 +59,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pairmixer_pair_dim = 384
     cfg.pairmixer_pair_feature_hidden_dim = 768
     cfg.pairmixer_dropout = 0.0
-    cfg.pairmixer_mz_scale = 1000
-    cfg.pairmixer_precursor_mz_scale = 1000
     cfg.pairmixer_use_fourier_features = True
     cfg.pairmixer_fourier_num_freqs = 16
     cfg.pairmixer_fourier_x_min = 0.01
-    cfg.pairmixer_fourier_x_max = 1000
     cfg.pairmixer_relative_fourier_x_min = 0.001
     cfg.pairmixer_relative_fourier_x_max = 1.0
     cfg.attention_mlp_multiple = 4
@@ -92,12 +92,10 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_mae_loss_weight = 0.0
     cfg.mae_loss_weight = 1.0
     cfg.distogram_loss_weight = 1.0
-    cfg.distogram_mz_max = 1000
     cfg.latent_pair_loss_weight = 0.0
     cfg.latent_pair_target_normalization = "none"
     cfg.jepa_mae_mz_bin_size = 0.5
     cfg.jepa_mae_intensity_bin_size = 0.1
-    cfg.jepa_mae_mz_max = 1000
     cfg.jepa_mae_intensity_max = 1.0
     cfg.mae_intensity_loss_weight = 1.0
     cfg.jepa_allow_target_overlap = False

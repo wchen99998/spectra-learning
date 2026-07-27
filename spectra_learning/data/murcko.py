@@ -14,7 +14,7 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable, Mapping, NamedTuple, cast
+from typing import Any, Iterable, Mapping, NamedTuple
 
 import numpy as np
 import pyarrow as pa
@@ -34,20 +34,21 @@ from spectra_learning.data.loading import (
     local_batch_size,
     subset_for_max_samples,
 )
-from spectra_learning.data.repositories import MSMS_EVALUATION_HF_REPO
 from spectra_learning.data.massspec_targets import (
     MACCS_FINGERPRINT_BITS,
     MORGAN_PROBE_FINGERPRINT_BITS,
     MORGAN_PROBE_FINGERPRINT_RADIUS,
     REGRESSION_TARGET_KEYS,
 )
-from spectra_learning.data.mgf import _to_float, iter_mgf
+from spectra_learning.data.mgf import _to_float, file_source_manifest, iter_mgf
 from spectra_learning.data.spectra import (
-    ASSUMED_PRECURSOR_CHARGE,
     DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
     DEFAULT_GROUPED_PEAK_SHOULDER_DA,
+    DEFAULT_MAX_PRECURSOR_MZ,
+    DEFAULT_MIN_PRECURSOR_MZ,
     DEFAULT_PEAK_FILTERING,
     NUM_PEAKS_INPUT,
+    parse_precursor_charge,
     spectra_from_peak_lists,
 )
 
@@ -57,19 +58,16 @@ _MORGAN_GENERATOR = rdFingerprintGenerator.GetMorganGenerator(
     fpSize=MORGAN_PROBE_FINGERPRINT_BITS,
 )
 
-DEFAULT_NIST_MGF_URI = "gs://main-novogaia-bucket/MS/Datasets_with_structure/nist20/hr_msms_nist.mgf"
+DEFAULT_NIST_MGF_URI = (
+    "gs://main-novogaia-bucket/MS/Datasets_with_structure/nist20/hr_msms_nist.mgf"
+)
 DEFAULT_LOCAL_NIST_MGF_PATH = Path("data/raw/hr_msms_nist.mgf")
-DEFAULT_MCEBIO_MGF_PATH = Path(
-    "data/massive_msv000094528/source/20240411_mcebio_library_pos_all_lib_MS2.mgf"
-)
 NIST_MURCKO_METADATA_VERSION = 2
-NIST_MURCKO_HF_REPO = MSMS_EVALUATION_HF_REPO
-NIST_DISJOINT_PROBE_RETRIEVAL_HF_REPO = (
-    "wchen99998/msms_nist_disjoint_probe_retrieval_20260622"
-)
-NIST_MURCKO_PREPARED_SUBDIR = "nist_murcko_probe"
-MCEBIO_MURCKO_PREPARED_SUBDIR = "mcebio_murcko_probe"
-NIST_DISJOINT_ONLINE_PROBE_SUBDIR = "nist_100k_online_probe"
+NIST_MURCKO_HF_REPO = "wchen99998/msms_nist_disjoint_probe_retrieval_20260622"
+NIST_MURCKO_HF_REVISION = "f5b51db72caa9205240d344882a9f4baec10d9b3"
+NIST_MURCKO_PREPARED_SUBDIR = "nist_100k_online_probe"
+NIST_DISJOINT_PROBE_RETRIEVAL_HF_REPO = NIST_MURCKO_HF_REPO
+NIST_DISJOINT_ONLINE_PROBE_SUBDIR = NIST_MURCKO_PREPARED_SUBDIR
 NIST_DISJOINT_RETRIEVAL_POOL_SUBDIR = "nist_retrieval_pool"
 NIST_10PPM_RETRIEVAL_SUBDIR = "nist_same_inchi14_10ppm_retrieval"
 NIST_MCES_RETRIEVAL_SUBDIR = "nist_mces_analog_retrieval"
@@ -142,6 +140,8 @@ sampling parameters, and pair-generation metadata. Downstream use of the staged
 NIST source data should comply with the original NIST terms.
 """
     path.write_text(text, encoding="utf-8")
+
+
 DEFAULT_NIST_ALLOWED_ADDUCTS = ("[M+H]+",)
 DEFAULT_NIST_SPLIT_SIZE_CAPS = {"train": 100_000, "val": 25_000, "test": 25_000}
 DEFAULT_ONLINE_PROBE_SAMPLE_SIZE = 100_000
@@ -212,13 +212,6 @@ METADATA_COLUMNS = (
 
 
 @dataclass(frozen=True)
-class DatasetSpec:
-    name: str
-    source: str
-    subdir: str
-
-
-@dataclass(frozen=True)
 class FirstPassRow:
     spectrum_index: int
     canonical_smiles: str
@@ -262,22 +255,19 @@ class MurckoFluorineData(NamedTuple):
 
 def _probe_metadata_valid(
     output_dir: Path,
-    expected_version: int,
+    min_precursor_mz: float,
     max_precursor_mz: float,
-    expected_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     metadata_path = output_dir / "metadata.json"
     if not metadata_path.exists():
         return None
     metadata = json.loads(metadata_path.read_text())
-    if int(metadata.get("metadata_version", 0)) != expected_version:
-        _raise_invalid_murcko_artifact(output_dir, "metadata_version mismatch")
-    if float(metadata.get("max_precursor_mz", float("inf"))) != max_precursor_mz:
-        _raise_invalid_murcko_artifact(output_dir, "max_precursor_mz mismatch")
-    if expected_metadata is not None:
-        for key, value in expected_metadata.items():
-            if metadata.get(key) != value:
-                _raise_invalid_murcko_artifact(output_dir, f"{key} mismatch")
+    _validate_murcko_artifact_contract(
+        output_dir,
+        metadata,
+        min_precursor_mz=min_precursor_mz,
+        max_precursor_mz=max_precursor_mz,
+    )
     if metadata.get("storage_format") != "parquet":
         _raise_invalid_murcko_artifact(output_dir, "storage_format must be parquet")
     for split in ("train", "val", "test"):
@@ -290,6 +280,25 @@ def _probe_metadata_valid(
         if not all((output_dir / name).exists() for name in filenames):
             _raise_invalid_murcko_artifact(output_dir, f"missing {split} files")
     return metadata
+
+
+def _validate_murcko_artifact_contract(
+    output_dir: Path,
+    metadata: dict[str, Any],
+    *,
+    min_precursor_mz: float,
+    max_precursor_mz: float,
+) -> None:
+    expected = {
+        "metadata_version": NIST_MURCKO_METADATA_VERSION,
+        "artifact_format": NIST_MURCKO_ARTIFACT_FORMAT,
+        "min_precursor_mz": min_precursor_mz,
+        "max_precursor_mz": max_precursor_mz,
+        "num_peaks_input": NUM_PEAKS_INPUT,
+    }
+    for key, value in expected.items():
+        if metadata.get(key) != value:
+            _raise_invalid_murcko_artifact(output_dir, f"{key} mismatch")
 
 
 def _raise_invalid_murcko_artifact(output_dir: Path, reason: str) -> None:
@@ -346,8 +355,9 @@ def ensure_nist_murcko_probe_downloaded(
     output_dir: Path,
     *,
     max_precursor_mz: float,
+    min_precursor_mz: float = DEFAULT_MIN_PRECURSOR_MZ,
     repo_id: str = NIST_MURCKO_HF_REPO,
-    revision: str = "main",
+    revision: str = NIST_MURCKO_HF_REVISION,
     subdir: str = NIST_MURCKO_PREPARED_SUBDIR,
     include_morgan: bool = False,
     include_dreams: bool = False,
@@ -360,9 +370,8 @@ def ensure_nist_murcko_probe_downloaded(
     )
     cached = _probe_metadata_valid(
         output_dir,
-        NIST_MURCKO_METADATA_VERSION,
+        min_precursor_mz,
         max_precursor_mz,
-        expected_metadata={"artifact_format": NIST_MURCKO_ARTIFACT_FORMAT},
     )
     if cached is not None:
         if include_morgan and not _auxiliary_files_available(
@@ -409,391 +418,30 @@ def ensure_nist_murcko_probe_downloaded(
     )
     metadata = _probe_metadata_valid(
         output_dir,
-        NIST_MURCKO_METADATA_VERSION,
+        min_precursor_mz,
         max_precursor_mz,
-        expected_metadata={"artifact_format": NIST_MURCKO_ARTIFACT_FORMAT},
     )
     if metadata is None:
         raise FileNotFoundError(f"Invalid NIST Murcko probe artifact in {output_dir}")
-    if include_morgan and not _auxiliary_files_available(output_dir, metadata, "morgan"):
-        raise FileNotFoundError(f"Missing NIST Murcko Morgan auxiliary files in {output_dir}")
-    if include_dreams and not _auxiliary_files_available(output_dir, metadata, "dreams"):
-        raise FileNotFoundError(f"Missing NIST Murcko DreaMS auxiliary files in {output_dir}")
-    return metadata
-
-
-def ensure_mcebio_murcko_probe_downloaded(
-    cache_dir: Path,
-    *,
-    repo_id: str = NIST_MURCKO_HF_REPO,
-    revision: str = "main",
-    subdir: str = MCEBIO_MURCKO_PREPARED_SUBDIR,
-    include_morgan: bool = False,
-    include_dreams: bool = False,
-    distributed_world_size: int = 1,
-    distributed_rank: int = 0,
-    distributed_local_rank: int | None = None,
-) -> dict[str, Any]:
-    distributed_local_rank = (
-        distributed_rank if distributed_local_rank is None else distributed_local_rank
-    )
-    subdir = subdir.strip("/")
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    allow_patterns = [
-        f"{subdir}/metadata.json",
-        f"{subdir}/all.parquet",
-    ]
-    if include_morgan:
-        allow_patterns.append(f"{subdir}/auxiliary/morgan/*")
-    if include_dreams:
-        allow_patterns.append(f"{subdir}/auxiliary/dreams/*")
-    cached = _read_murcko_subdir_metadata(
-        cache_dir,
-        subdir,
-        required_splits=("all",),
-    )
-    needs_download = cached is None or (
-        include_morgan
-        and not _murcko_subdir_auxiliary_available(
-            cache_dir,
-            subdir,
-            cached,
-            "morgan",
-        )
-    ) or (
-        include_dreams
-        and not _murcko_subdir_auxiliary_available(
-            cache_dir,
-            subdir,
-            cached,
-            "dreams",
-        )
-    )
-    if needs_download:
-        _snapshot_download_local_rank_zero(
-            repo_id=repo_id,
-            repo_type="dataset",
-            revision=revision,
-            local_dir=cache_dir,
-            allow_patterns=allow_patterns,
-            distributed_world_size=distributed_world_size,
-            distributed_local_rank=distributed_local_rank,
-        )
-    elif _coordinate_distributed_download(distributed_world_size):
-        torch.distributed.barrier()
-    metadata = cast(
-        dict[str, Any],
-        _read_murcko_subdir_metadata(
-            cache_dir,
-            subdir,
-            required_splits=("all",),
-        ),
-    )
-    if include_morgan and not _murcko_subdir_auxiliary_available(
-        cache_dir,
-        subdir,
-        metadata,
-        "morgan",
+    if include_morgan and not _auxiliary_files_available(
+        output_dir, metadata, "morgan"
     ):
-        raise FileNotFoundError(f"Missing MCEBIO Morgan auxiliary files in {cache_dir / subdir}")
-    if include_dreams and not _murcko_subdir_auxiliary_available(
-        cache_dir,
-        subdir,
-        metadata,
-        "dreams",
+        raise FileNotFoundError(
+            f"Missing NIST Murcko Morgan auxiliary files in {output_dir}"
+        )
+    if include_dreams and not _auxiliary_files_available(
+        output_dir, metadata, "dreams"
     ):
-        raise FileNotFoundError(f"Missing MCEBIO DreaMS auxiliary files in {cache_dir / subdir}")
+        raise FileNotFoundError(
+            f"Missing NIST Murcko DreaMS auxiliary files in {output_dir}"
+        )
     return metadata
 
 
-def _read_murcko_subdir_metadata(
-    cache_dir: Path,
-    subdir: str,
-    *,
-    required_splits: tuple[str, ...],
-) -> dict[str, Any] | None:
-    metadata_path = cache_dir / subdir / "metadata.json"
-    if not metadata_path.exists():
-        return None
-    metadata = json.loads(metadata_path.read_text())
-    if metadata.get("storage_format") != "parquet":
-        _raise_invalid_murcko_artifact(
-            cache_dir / subdir,
-            "storage_format must be parquet",
-        )
-    for split in required_splits:
-        filenames = metadata.get(f"{split}_files", [])
-        if not filenames:
-            _raise_invalid_murcko_artifact(
-                cache_dir / subdir,
-                f"missing {split}_files metadata",
-            )
-        for filename in filenames:
-            if not (cache_dir / subdir / filename).exists():
-                _raise_invalid_murcko_artifact(
-                    cache_dir / subdir,
-                    f"missing {filename}",
-                )
-    return metadata
-
-
-def _murcko_fluorine_split_metadata(
-    source_metadata: dict[str, Any],
-    *,
-    subdir: str,
-    source_split: str,
-    target_split: str,
-    include_dreams: bool,
-) -> dict[str, Any]:
-    metadata = {
-        f"{target_split}_files": [
-            f"{subdir}/{filename}" for filename in source_metadata[f"{source_split}_files"]
-        ],
-        f"{target_split}_lengths": [
-            int(value) for value in source_metadata[f"{source_split}_lengths"]
-        ],
-        f"{target_split}_size": int(source_metadata[f"{source_split}_size"]),
-        f"{target_split}_positive": int(source_metadata.get(f"{source_split}_positive", 0)),
-    }
-    dreams_files = source_metadata.get("dreams_auxiliary_files", {}).get(source_split, [])
-    if include_dreams and dreams_files:
-        metadata[f"{target_split}_dreams_files"] = [
-            f"{subdir}/{filename}" for filename in dreams_files
-        ]
-        metadata[f"{target_split}_dreams_lengths"] = [
-            int(value)
-            for value in source_metadata.get("dreams_auxiliary_lengths", {}).get(
-                source_split,
-                [],
-            )
-        ]
-    return metadata
-
-
-def _murcko_subdir_auxiliary_available(
-    cache_dir: Path,
-    subdir: str,
-    metadata: dict[str, Any] | None,
-    auxiliary_name: str,
-) -> bool:
-    if metadata is None:
-        return False
-    if _auxiliary_files_available(cache_dir / subdir, metadata, auxiliary_name):
-        return True
-    _raise_invalid_murcko_artifact(
-        cache_dir / subdir,
-        f"missing {auxiliary_name} auxiliary files",
-    )
-
-
-def merge_vocabularies(*vocabs: dict[str, int]) -> dict[str, int]:
-    values = sorted({value for vocab in vocabs for value in vocab})
-    return {value: idx for idx, value in enumerate(values)}
-
-
-def ensure_murcko_fluorine_data_downloaded(
-    cache_dir: Path,
-    *,
-    repo_id: str = NIST_MURCKO_HF_REPO,
-    revision: str = "main",
-    train_subdir: str = NIST_MURCKO_PREPARED_SUBDIR,
-    test_subdir: str = MCEBIO_MURCKO_PREPARED_SUBDIR,
-    include_dreams: bool = False,
-    distributed_world_size: int = 1,
-    distributed_rank: int = 0,
-    distributed_local_rank: int | None = None,
-) -> dict[str, Any]:
-    distributed_local_rank = (
-        distributed_rank if distributed_local_rank is None else distributed_local_rank
-    )
-    train_subdir = train_subdir.strip("/")
-    test_subdir = test_subdir.strip("/")
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    allow_patterns = [
-        f"{train_subdir}/metadata.json",
-        f"{train_subdir}/train.parquet",
-        f"{train_subdir}/val.parquet",
-        f"{test_subdir}/metadata.json",
-        f"{test_subdir}/all.parquet",
-    ]
-    if include_dreams:
-        allow_patterns.extend(
-            [
-                f"{train_subdir}/auxiliary/dreams/*",
-                f"{test_subdir}/auxiliary/dreams/*",
-            ]
-        )
-    train_cached = _read_murcko_subdir_metadata(
-        cache_dir,
-        train_subdir,
-        required_splits=("train", "val"),
-    )
-    test_cached = _read_murcko_subdir_metadata(
-        cache_dir,
-        test_subdir,
-        required_splits=("all",),
-    )
-    needs_download = train_cached is None or test_cached is None or (
-        include_dreams
-        and (
-            not _murcko_subdir_auxiliary_available(
-                cache_dir,
-                train_subdir,
-                train_cached,
-                "dreams",
-            )
-            or not _murcko_subdir_auxiliary_available(
-                cache_dir,
-                test_subdir,
-                test_cached,
-                "dreams",
-            )
-        )
-    )
-    if needs_download:
-        _snapshot_download_local_rank_zero(
-            repo_id=repo_id,
-            repo_type="dataset",
-            revision=revision,
-            local_dir=cache_dir,
-            allow_patterns=allow_patterns,
-            distributed_world_size=distributed_world_size,
-            distributed_local_rank=distributed_local_rank,
-        )
-    elif _coordinate_distributed_download(distributed_world_size):
-        torch.distributed.barrier()
-    train_metadata = cast(
-        dict[str, Any],
-        _read_murcko_subdir_metadata(
-            cache_dir,
-            train_subdir,
-            required_splits=("train", "val"),
-        ),
-    )
-    test_metadata = cast(
-        dict[str, Any],
-        _read_murcko_subdir_metadata(
-            cache_dir,
-            test_subdir,
-            required_splits=("all",),
-        ),
-    )
-    if include_dreams:
-        if not _murcko_subdir_auxiliary_available(
-            cache_dir,
-            train_subdir,
-            train_metadata,
-            "dreams",
-        ):
-            raise FileNotFoundError(f"Missing NIST Murcko DreaMS auxiliary files in {cache_dir / train_subdir}")
-        if not _murcko_subdir_auxiliary_available(
-            cache_dir,
-            test_subdir,
-            test_metadata,
-            "dreams",
-        ):
-            raise FileNotFoundError(f"Missing MCEBIO DreaMS auxiliary files in {cache_dir / test_subdir}")
-    metadata: dict[str, Any] = {
-        "metadata_version": 1,
-        "storage_format": "parquet",
-        "repo_id": repo_id,
-        "revision": revision,
-        "train_subdir": train_subdir,
-        "test_subdir": test_subdir,
-        "adduct_vocab": merge_vocabularies(
-            train_metadata.get("adduct_vocab", {"unknown": 0}),
-            test_metadata.get("adduct_vocab", {"unknown": 0}),
-        ),
-        "instrument_type_vocab": merge_vocabularies(
-            train_metadata.get("instrument_type_vocab", {"unknown": 0}),
-            test_metadata.get("instrument_type_vocab", {"unknown": 0}),
-        ),
-        "probe_maccs_bits": int(train_metadata.get("probe_maccs_bits", MACCS_FINGERPRINT_BITS)),
-        "dreams_dim": int(train_metadata.get("dreams_dim", 0)),
-        "dreams_auxiliary_available": bool(
-            include_dreams
-            and train_metadata.get("dreams_auxiliary_available", False)
-            and test_metadata.get("dreams_auxiliary_available", False)
-        ),
-    }
-    metadata.update(
-        _murcko_fluorine_split_metadata(
-            train_metadata,
-            subdir=train_subdir,
-            source_split="train",
-            target_split="train",
-            include_dreams=include_dreams,
-        )
-    )
-    metadata.update(
-        _murcko_fluorine_split_metadata(
-            train_metadata,
-            subdir=train_subdir,
-            source_split="val",
-            target_split="val",
-            include_dreams=include_dreams,
-        )
-    )
-    metadata.update(
-        _murcko_fluorine_split_metadata(
-            test_metadata,
-            subdir=test_subdir,
-            source_split="all",
-            target_split="test",
-            include_dreams=include_dreams,
-        )
-    )
-    return metadata
-
-
-def build_murcko_fluorine_data(
-    *,
-    cache_dir: Path,
-    batch_size: int,
-    num_peaks: int,
-    max_precursor_mz: float,
-    min_peak_intensity: float,
-    peak_drop_min_intensity: float,
-    peak_ordering: str,
-    precursor_peak_exclusion_window_da: float,
-    peak_filtering: str = DEFAULT_PEAK_FILTERING,
-    grouped_peak_shoulder_da: float = DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-    grouped_peak_isotope_charges: tuple[int, ...] = (
-        DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES
-    ),
-    repo_id: str = NIST_MURCKO_HF_REPO,
-    revision: str = "main",
-    train_subdir: str = NIST_MURCKO_PREPARED_SUBDIR,
-    test_subdir: str = MCEBIO_MURCKO_PREPARED_SUBDIR,
-    include_dreams: bool = False,
-    distributed_world_size: int = 1,
-    distributed_rank: int = 0,
-    distributed_local_rank: int | None = None,
-) -> MurckoFluorineData:
-    metadata = ensure_murcko_fluorine_data_downloaded(
-        cache_dir,
-        repo_id=repo_id,
-        revision=revision,
-        train_subdir=train_subdir,
-        test_subdir=test_subdir,
-        include_dreams=include_dreams,
-        distributed_world_size=distributed_world_size,
-        distributed_rank=distributed_rank,
-        distributed_local_rank=distributed_local_rank,
-    )
-    return MurckoFluorineData(
-        metadata=metadata,
-        root=cache_dir,
-        batch_size=batch_size,
-        num_peaks=num_peaks,
-        max_precursor_mz=max_precursor_mz,
-        min_peak_intensity=min_peak_intensity,
-        peak_drop_min_intensity=peak_drop_min_intensity,
-        peak_filtering=peak_filtering,
-        grouped_peak_shoulder_da=grouped_peak_shoulder_da,
-        grouped_peak_isotope_charges=grouped_peak_isotope_charges,
-        peak_ordering=peak_ordering,
-        precursor_peak_exclusion_window_da=precursor_peak_exclusion_window_da,
+def precursor_charge_from_metadata_json(metadata_json: str) -> float:
+    metadata = json.loads(metadata_json)
+    return parse_precursor_charge(
+        metadata.get("charge") or metadata.get("CHARGE") or metadata.get("Charge")
     )
 
 
@@ -807,7 +455,9 @@ class _MurckoFluorineParquetDataset(Dataset):
             }
             for entry in entries
         ]
-        lengths = np.asarray([entry["length"] for entry in self._entries], dtype=np.int64)
+        lengths = np.asarray(
+            [entry["length"] for entry in self._entries], dtype=np.int64
+        )
         self._starts = np.zeros(len(lengths) + 1, dtype=np.int64)
         np.cumsum(lengths, out=self._starts[1:])
         self._arrays: list[dict[str, np.ndarray]] | None = None
@@ -827,9 +477,11 @@ class _MurckoFluorineParquetDataset(Dataset):
             ),
             "precursor_mz_raw": np.asarray(rows["precursor_mz"], dtype=np.float32),
             "collision_energy": np.asarray(rows["collision_energy"], dtype=np.float32),
-            "charge": np.full(
-                len(rows["precursor_mz"]),
-                ASSUMED_PRECURSOR_CHARGE,
+            "charge": np.asarray(
+                [
+                    precursor_charge_from_metadata_json(value)
+                    for value in rows["metadata_json"]
+                ],
                 dtype=np.float32,
             ),
             "label": np.asarray(rows["has_fluorine"], dtype=np.float32),
@@ -1018,7 +670,7 @@ def build_murcko_fluorine_loader(
                 split_dreams_files,
                 strict=True,
             )
-        ]
+        ],
     )
     dataset, shuffle = subset_for_max_samples(
         dataset,
@@ -1144,10 +796,14 @@ def _murcko_hist(mol: Chem.Mol) -> dict[str, int]:
 
 
 def _murcko_hists_dist(left: dict[str, int], right: dict[str, int]) -> int:
-    return sum(abs(left.get(key, 0) - right.get(key, 0)) for key in set(left) | set(right))
+    return sum(
+        abs(left.get(key, 0) - right.get(key, 0)) for key in set(left) | set(right)
+    )
 
 
-def _are_sub_hists(left: dict[str, int], right: dict[str, int], k: int = 3, d: int = 4) -> bool:
+def _are_sub_hists(
+    left: dict[str, int], right: dict[str, int], k: int = 3, d: int = 4
+) -> bool:
     if min(sum(left.values()), sum(right.values())) <= k:
         return left == right
     return _murcko_hists_dist(left, right) <= d
@@ -1203,7 +859,9 @@ def _record_matches_adducts(
     return allowed_adducts is None or _record_adduct(record) in allowed_adducts
 
 
-def _top_peaks(record: dict[str, Any], num_peaks_input: int) -> tuple[list[float], list[float]]:
+def _top_peaks(
+    record: dict[str, Any], num_peaks_input: int
+) -> tuple[list[float], list[float]]:
     mz = record["peak_mz"].astype(np.float32, copy=False)
     intensity = record["peak_intensity"].astype(np.float32, copy=False)
     if mz.size > num_peaks_input:
@@ -1211,7 +869,9 @@ def _top_peaks(record: dict[str, Any], num_peaks_input: int) -> tuple[list[float
         keep = keep[np.argsort(mz[keep])]
         mz = mz[keep]
         intensity = intensity[keep]
-    return mz.astype(np.float32, copy=False).tolist(), intensity.astype(np.float32, copy=False).tolist()
+    return mz.astype(np.float32, copy=False).tolist(), intensity.astype(
+        np.float32, copy=False
+    ).tolist()
 
 
 def _maccs_bits(mol: Chem.Mol) -> np.ndarray:
@@ -1244,9 +904,7 @@ def _spectral_tokens(row: dict[str, Any]) -> set[int]:
 
 def _minhash_signature(tokens: set[int]) -> tuple[int, ...]:
     token_array = np.asarray(list(tokens), dtype=np.uint64)
-    hashes = (
-        _SPECTRAL_LSH_A[:, None] * token_array[None, :] + _SPECTRAL_LSH_B[:, None]
-    )
+    hashes = _SPECTRAL_LSH_A[:, None] * token_array[None, :] + _SPECTRAL_LSH_B[:, None]
     hashes %= _SPECTRAL_LSH_PRIME
     return tuple(int(value) for value in hashes.min(axis=1).tolist())
 
@@ -1271,7 +929,9 @@ class SpectralLshThinner:
         self.removed_counts: Counter[str] = Counter()
         self.kept_counts: Counter[str] = Counter()
         self.kept_smiles = {split: set() for split in splits}
-        self.tokens_by_split: dict[str, list[set[int]]] = {split: [] for split in splits}
+        self.tokens_by_split: dict[str, list[set[int]]] = {
+            split: [] for split in splits
+        }
         self.buckets: dict[str, dict[tuple[int, tuple[int, ...]], list[int]]] = {
             split: defaultdict(list) for split in splits
         }
@@ -1350,18 +1010,26 @@ def _inchi14_from_smiles(smiles: str) -> str:
         raise ValueError(f"Invalid SMILES in retrieval pool: {smiles!r}")
     inchikey = Chem.MolToInchiKey(mol)
     if not inchikey:
-        raise ValueError(f"Could not compute InChIKey for retrieval-pool SMILES {smiles!r}")
+        raise ValueError(
+            f"Could not compute InChIKey for retrieval-pool SMILES {smiles!r}"
+        )
     return inchikey.split("-")[0]
 
 
 def _first_pass_task(
     payload: tuple[int, dict[str, Any], float, float, tuple[str, ...] | None],
 ) -> FirstPassRow | None:
-    spectrum_index, record, min_precursor_mz, max_precursor_mz, allowed_adducts = payload
+    spectrum_index, record, min_precursor_mz, max_precursor_mz, allowed_adducts = (
+        payload
+    )
     if not _record_matches_adducts(record, allowed_adducts):
         return None
     precursor = _precursor_mz(record)
-    if not math.isfinite(precursor) or precursor < min_precursor_mz or precursor > max_precursor_mz:
+    if (
+        not math.isfinite(precursor)
+        or precursor < min_precursor_mz
+        or precursor > max_precursor_mz
+    ):
         return None
     if record["peak_mz"].size == 0 or not np.any(record["peak_intensity"] > 0):
         return None
@@ -1381,11 +1049,22 @@ def _first_pass_task(
 def _full_pass_task(
     payload: tuple[int, dict[str, Any], float, float, int, tuple[str, ...] | None],
 ) -> FullRow | None:
-    spectrum_index, record, min_precursor_mz, max_precursor_mz, num_peaks_input, allowed_adducts = payload
+    (
+        spectrum_index,
+        record,
+        min_precursor_mz,
+        max_precursor_mz,
+        num_peaks_input,
+        allowed_adducts,
+    ) = payload
     if not _record_matches_adducts(record, allowed_adducts):
         return None
     precursor = _precursor_mz(record)
-    if not math.isfinite(precursor) or precursor < min_precursor_mz or precursor > max_precursor_mz:
+    if (
+        not math.isfinite(precursor)
+        or precursor < min_precursor_mz
+        or precursor > max_precursor_mz
+    ):
         return None
     if record["peak_mz"].size == 0 or not np.any(record["peak_intensity"] > 0):
         return None
@@ -1459,7 +1138,8 @@ def _select_holdout_hist_keys(
         related = {
             other
             for other in available_keys
-            if other not in selected and _are_sub_hists(hist_by_key[key], hist_by_key[other])
+            if other not in selected
+            and _are_sub_hists(hist_by_key[key], hist_by_key[other])
         }
         if not related:
             related = {key}
@@ -1607,7 +1287,9 @@ def _rows_to_table(rows: list[dict[str, Any]]) -> pa.Table:
         pa.array([row["precursor_mz"] for row in rows], type=pa.float32()),
         pa.array([row["num_peaks"] for row in rows], type=pa.int32()),
         pa.array([row["spectrum_mz"] for row in rows], type=pa.list_(pa.float32())),
-        pa.array([row["spectrum_intensity"] for row in rows], type=pa.list_(pa.float32())),
+        pa.array(
+            [row["spectrum_intensity"] for row in rows], type=pa.list_(pa.float32())
+        ),
         pa.array([row["smiles"] for row in rows], type=pa.string()),
         pa.array([row["canonical_smiles"] for row in rows], type=pa.string()),
         pa.array([row["adduct"] for row in rows], type=pa.string()),
@@ -1623,7 +1305,9 @@ def _rows_to_table(rows: list[dict[str, Any]]) -> pa.Table:
     names.extend(["maccs_166", "murcko_hist_key", "murcko_hist_json", "metadata_json"])
     arrays.extend(
         [
-            _fixed_size_int8_array([row["maccs_166"] for row in rows], MACCS_FINGERPRINT_BITS),
+            _fixed_size_int8_array(
+                [row["maccs_166"] for row in rows], MACCS_FINGERPRINT_BITS
+            ),
             pa.array([row["murcko_hist_key"] for row in rows], type=pa.string()),
             pa.array([row["murcko_hist_json"] for row in rows], type=pa.string()),
             pa.array([row["metadata_json"] for row in rows], type=pa.string()),
@@ -1680,7 +1364,11 @@ def _first_pass(
                 for spectrum_index, record, min_mz, max_mz in batch
             ]
             for row in tqdm(
-                executor.map(_first_pass_task, full_batch, chunksize=max(1, batch_size // num_workers)),
+                executor.map(
+                    _first_pass_task,
+                    full_batch,
+                    chunksize=max(1, batch_size // num_workers),
+                ),
                 total=len(full_batch),
                 desc=f"{mgf_path.name} first pass",
                 leave=False,
@@ -1705,7 +1393,9 @@ def _flush_split(
     table = _rows_to_table(rows)
     parquet_path = output_dir / f"{split}.parquet"
     if split not in writers:
-        writers[split] = pq.ParquetWriter(parquet_path, table.schema, compression="zstd")
+        writers[split] = pq.ParquetWriter(
+            parquet_path, table.schema, compression="zstd"
+        )
     writers[split].write_table(table)
 
     morgan_dir = output_dir / "auxiliary" / "morgan"
@@ -1713,7 +1403,9 @@ def _flush_split(
     filename = f"{split}-part-{len(morgan_files[split]):05d}.npz"
     np.savez_compressed(
         morgan_dir / filename,
-        spectrum_index=np.asarray([row["spectrum_index"] for row in rows], dtype=np.int64),
+        spectrum_index=np.asarray(
+            [row["spectrum_index"] for row in rows], dtype=np.int64
+        ),
         morgan=np.stack(morgans, axis=0).astype(np.int8, copy=False),
     )
     morgan_files[split].append(f"auxiliary/morgan/{filename}")
@@ -1739,7 +1431,11 @@ def _normalize_split_size_caps(
 ) -> dict[str, int] | None:
     if split_size_caps is None:
         return None
-    caps = {split: int(split_size_caps[split]) for split in splits if split in split_size_caps}
+    caps = {
+        split: int(split_size_caps[split])
+        for split in splits
+        if split in split_size_caps
+    }
     for split, cap in caps.items():
         unique_count = len(unique_smiles_by_split[split])
         if cap < unique_count:
@@ -1792,7 +1488,9 @@ def _select_disjoint_probe_indices(
         min_remaining_keys=1,
     )
     if not selected_hist_keys:
-        raise ValueError("Failed to select any Murcko histogram keys for the probe sample.")
+        raise ValueError(
+            "Failed to select any Murcko histogram keys for the probe sample."
+        )
 
     candidate_indices = np.asarray(
         sorted(
@@ -1829,7 +1527,9 @@ def _select_disjoint_probe_indices(
         "retrieval_murcko_hist_keys": int(len(retrieval_hist_keys)),
         "selected_hist_candidate_spectra": selected_hist_candidate_count,
         "retrieval_candidate_spectra": int(retrieval_candidate_count),
-        "dropped_selected_hist_spectra": int(selected_hist_candidate_count - target_size),
+        "dropped_selected_hist_spectra": int(
+            selected_hist_candidate_count - target_size
+        ),
         "murcko_hist_disjoint_from_retrieval": True,
         "selected_murcko_hist_key_values": sorted(selected_hist_keys),
     }
@@ -1841,6 +1541,7 @@ def _write_murcko_mgf_dataset(
     mgf_path: Path,
     output_dir: Path,
     source_uri: str,
+    source_file: dict[str, Any],
     fold_by_smiles: dict[str, str],
     split_metadata: dict[str, Any],
     active_splits: tuple[str, ...],
@@ -1947,7 +1648,9 @@ def _write_murcko_mgf_dataset(
                                 canonical_smiles=str(row["canonical_smiles"]),
                                 precursor_mz=float(row["precursor_mz"]),
                                 adduct=str(row["adduct"]),
-                                inchi14=_inchi14_from_smiles(str(row["canonical_smiles"])),
+                                inchi14=_inchi14_from_smiles(
+                                    str(row["canonical_smiles"])
+                                ),
                                 murcko_hist_key=str(row["murcko_hist_key"]),
                             )
                         )
@@ -1984,7 +1687,9 @@ def _write_murcko_mgf_dataset(
             writer.close()
 
     adduct_vocab = {value: idx for idx, value in enumerate(sorted(adducts))}
-    instrument_type_vocab = {value: idx for idx, value in enumerate(sorted(instruments))}
+    instrument_type_vocab = {
+        value: idx for idx, value in enumerate(sorted(instruments))
+    }
     if lsh_thinner is not None:
         pre_lsh_split_counts = lsh_thinner.pre_lsh_counts
         lsh_removed_counts = lsh_thinner.removed_counts
@@ -1996,11 +1701,14 @@ def _write_murcko_mgf_dataset(
         "storage_format": "parquet",
         "source_uri": source_uri,
         "source_raw_file": f"{RAW_SUBDIR}/{mgf_path.name}",
+        "source_file": source_file,
         "splits": list(active_splits),
         "num_peaks_input": num_peaks_input,
         "min_precursor_mz": min_precursor_mz,
         "max_precursor_mz": max_precursor_mz,
-        "allowed_adducts": list(allowed_adducts) if allowed_adducts is not None else None,
+        "allowed_adducts": list(allowed_adducts)
+        if allowed_adducts is not None
+        else None,
         "adduct_vocab": adduct_vocab,
         "instrument_type_vocab": instrument_type_vocab,
         "dreams_dim": 0,
@@ -2034,12 +1742,16 @@ def _write_murcko_mgf_dataset(
         metadata.update(extra_metadata)
     for split in active_splits:
         metadata[f"{split}_files"] = [f"{split}.parquet"] if split_counts[split] else []
-        metadata[f"{split}_lengths"] = [split_counts[split]] if split_counts[split] else []
+        metadata[f"{split}_lengths"] = (
+            [split_counts[split]] if split_counts[split] else []
+        )
         metadata[f"{split}_size"] = split_counts[split]
         metadata[f"{split}_positive"] = fluorine_counts[split]
         metadata[f"{split}_sulfur_positive"] = sulfur_counts[split]
 
-    (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True))
+    (output_dir / "metadata.json").write_text(
+        json.dumps(metadata, indent=2, sort_keys=True)
+    )
     return metadata, retrieval_rows
 
 
@@ -2059,14 +1771,20 @@ def _sample_mz_window_balanced_inchi_pairs(
     """
     precursor_mz = np.asarray(precursor_mz, dtype=np.float64)
     if len(precursor_mz) != len(inchi14):
-        raise ValueError(f"precursor/InChI length mismatch: {len(precursor_mz)} vs {len(inchi14)}")
+        raise ValueError(
+            f"precursor/InChI length mismatch: {len(precursor_mz)} vs {len(inchi14)}"
+        )
     if pairs_per_class < 0:
-        raise ValueError(f"pairs_per_class must be non-negative, got {pairs_per_class}.")
+        raise ValueError(
+            f"pairs_per_class must be non-negative, got {pairs_per_class}."
+        )
     if ppm <= 0.0:
         raise ValueError(f"ppm must be positive, got {ppm}.")
 
     rng = np.random.default_rng(seed)
-    finite_rows = np.flatnonzero(np.isfinite(precursor_mz) & (precursor_mz > 0.0)).astype(np.int64)
+    finite_rows = np.flatnonzero(
+        np.isfinite(precursor_mz) & (precursor_mz > 0.0)
+    ).astype(np.int64)
     order = finite_rows[np.argsort(precursor_mz[finite_rows], kind="mergesort")]
     sorted_mz = precursor_mz[order]
     key_arr = np.asarray(inchi14, dtype=object)
@@ -2092,8 +1810,12 @@ def _sample_mz_window_balanced_inchi_pairs(
         "target_pairs_per_class": int(pairs_per_class),
         "ppm": float(ppm),
         "finite_precursor_mz_spectra": int(len(order)),
-        "positive_candidate_pairs": int(sum(len(pairs) for pairs in positive_groups.values())),
-        "negative_candidate_pairs_before_dedup": int(sum(len(pairs) for pairs in negative_groups.values())),
+        "positive_candidate_pairs": int(
+            sum(len(pairs) for pairs in positive_groups.values())
+        ),
+        "negative_candidate_pairs_before_dedup": int(
+            sum(len(pairs) for pairs in negative_groups.values())
+        ),
         "negative_candidate_pairs": int(
             len({pair for pairs in negative_groups.values() for pair in pairs})
         ),
@@ -2129,7 +1851,9 @@ def _sample_mz_window_balanced_inchi_pairs(
         ],
         axis=0,
     )
-    duplicate_pairs = len(pairs) - len({_ordered_pair(int(i), int(j)) for i, j in pairs})
+    duplicate_pairs = len(pairs) - len(
+        {_ordered_pair(int(i), int(j)) for i, j in pairs}
+    )
     metadata.update(
         {
             "final_pairs": int(len(pairs)),
@@ -2147,7 +1871,9 @@ def _sample_mz_window_balanced_inchi_pairs(
             f"positives and {len(negative_pairs)} negatives."
         )
     if duplicate_pairs:
-        raise ValueError(f"10 ppm same-InChI sampler selected {duplicate_pairs} duplicate pairs.")
+        raise ValueError(
+            f"10 ppm same-InChI sampler selected {duplicate_pairs} duplicate pairs."
+        )
     return pairs, labels, metadata
 
 
@@ -2164,7 +1890,9 @@ def _sample_pair_groups_round_robin(
     shuffled_groups: dict[str, list[tuple[int, int]]] = {}
     for key in key_order:
         pair_list = groups[key]
-        shuffled_groups[key] = [pair_list[int(i)] for i in rng.permutation(len(pair_list))]
+        shuffled_groups[key] = [
+            pair_list[int(i)] for i in rng.permutation(len(pair_list))
+        ]
 
     cursors = {key: 0 for key in key_order}
     active_keys = list(key_order)
@@ -2206,22 +1934,44 @@ def _retrieval_pair_base_columns(
     rows: list[RetrievalPoolRow],
     pairs: np.ndarray,
 ) -> dict[str, pa.Array]:
-    left = pairs[:, 0].astype(np.int64, copy=False) if len(pairs) else np.empty(0, dtype=np.int64)
-    right = pairs[:, 1].astype(np.int64, copy=False) if len(pairs) else np.empty(0, dtype=np.int64)
+    left = (
+        pairs[:, 0].astype(np.int64, copy=False)
+        if len(pairs)
+        else np.empty(0, dtype=np.int64)
+    )
+    right = (
+        pairs[:, 1].astype(np.int64, copy=False)
+        if len(pairs)
+        else np.empty(0, dtype=np.int64)
+    )
     left_rows = [rows[int(idx)] for idx in left]
     right_rows = [rows[int(idx)] for idx in right]
     return {
         "pair_index": pa.array(np.arange(len(pairs), dtype=np.int64), type=pa.int64()),
         "left_row": pa.array(left, type=pa.int64()),
         "right_row": pa.array(right, type=pa.int64()),
-        "left_spectrum_index": pa.array([row.spectrum_index for row in left_rows], type=pa.int64()),
-        "right_spectrum_index": pa.array([row.spectrum_index for row in right_rows], type=pa.int64()),
-        "left_smiles": pa.array([row.canonical_smiles for row in left_rows], type=pa.string()),
-        "right_smiles": pa.array([row.canonical_smiles for row in right_rows], type=pa.string()),
+        "left_spectrum_index": pa.array(
+            [row.spectrum_index for row in left_rows], type=pa.int64()
+        ),
+        "right_spectrum_index": pa.array(
+            [row.spectrum_index for row in right_rows], type=pa.int64()
+        ),
+        "left_smiles": pa.array(
+            [row.canonical_smiles for row in left_rows], type=pa.string()
+        ),
+        "right_smiles": pa.array(
+            [row.canonical_smiles for row in right_rows], type=pa.string()
+        ),
         "left_inchi14": pa.array([row.inchi14 for row in left_rows], type=pa.string()),
-        "right_inchi14": pa.array([row.inchi14 for row in right_rows], type=pa.string()),
-        "left_precursor_mz": pa.array([row.precursor_mz for row in left_rows], type=pa.float32()),
-        "right_precursor_mz": pa.array([row.precursor_mz for row in right_rows], type=pa.float32()),
+        "right_inchi14": pa.array(
+            [row.inchi14 for row in right_rows], type=pa.string()
+        ),
+        "left_precursor_mz": pa.array(
+            [row.precursor_mz for row in left_rows], type=pa.float32()
+        ),
+        "right_precursor_mz": pa.array(
+            [row.precursor_mz for row in right_rows], type=pa.float32()
+        ),
     }
 
 
@@ -2238,7 +1988,9 @@ def _write_same_inchi_retrieval_dataset(
     output_dir.mkdir(parents=True, exist_ok=True)
     selected_rows = [row for row in retrieval_rows if row.adduct == adduct]
     selection = np.asarray([row.row_index for row in selected_rows], dtype=np.int64)
-    precursor = np.asarray([row.precursor_mz for row in selected_rows], dtype=np.float64)
+    precursor = np.asarray(
+        [row.precursor_mz for row in selected_rows], dtype=np.float64
+    )
     inchi14 = [row.inchi14 for row in selected_rows]
     local_pairs, labels, sampling_metadata = _sample_mz_window_balanced_inchi_pairs(
         precursor,
@@ -2263,7 +2015,9 @@ def _write_same_inchi_retrieval_dataset(
         "negative_pairs": int((labels == 0).sum()) if len(labels) else 0,
         "sampling_metadata": sampling_metadata,
     }
-    (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True))
+    (output_dir / "metadata.json").write_text(
+        json.dumps(metadata, indent=2, sort_keys=True)
+    )
     return metadata
 
 
@@ -2303,7 +2057,9 @@ def _sample_balanced_morgan_pairs_for_retrieval(
         row_groups[row.canonical_smiles].append(int(row.row_index))
     canonical_smiles = sorted(row_groups)
     if len(canonical_smiles) < 2:
-        raise ValueError("MCES retrieval pair sampling requires at least two unique SMILES.")
+        raise ValueError(
+            "MCES retrieval pair sampling requires at least two unique SMILES."
+        )
     representative_rows = np.asarray(
         [
             row_groups[smiles][int(rng.integers(0, len(row_groups[smiles])))]
@@ -2321,7 +2077,9 @@ def _sample_balanced_morgan_pairs_for_retrieval(
 
     for i in rng.permutation(len(fps)):
         i = int(i)
-        sims = np.asarray(DataStructs.BulkTanimotoSimilarity(fps[i], fps), dtype=np.float32)
+        sims = np.asarray(
+            DataStructs.BulkTanimotoSimilarity(fps[i], fps), dtype=np.float32
+        )
         bin_ids = np.ceil(sims / bin_size).astype(np.int16) - 1
         for bin_idx in range(n_bins):
             need = target_per_bin - len(pairs_by_bin[bin_idx])
@@ -2336,7 +2094,9 @@ def _sample_balanced_morgan_pairs_for_retrieval(
                 if pair in used_pairs:
                     continue
                 used_pairs.add(pair)
-                pairs_by_bin[bin_idx].append((pair[0], pair[1], float(sims[int(candidate)])))
+                pairs_by_bin[bin_idx].append(
+                    (pair[0], pair[1], float(sims[int(candidate)]))
+                )
                 need -= 1
                 if need == 0:
                     break
@@ -2441,7 +2201,12 @@ def _compute_mces_one(job: tuple[int, str, str]) -> tuple[int, float, float, int
         catch_errors=False,
     )
     mode_value = mode.value if hasattr(mode, "value") else mode
-    return pair_idx, float(value), float(elapsed or (time.perf_counter() - start)), int(mode_value)
+    return (
+        pair_idx,
+        float(value),
+        float(elapsed or (time.perf_counter() - start)),
+        int(mode_value),
+    )
 
 
 def _write_mces_retrieval_dataset(
@@ -2471,13 +2236,23 @@ def _write_mces_retrieval_dataset(
         raise ValueError(f"MCES returned a non-finite distance at pair {bad}.")
     if np.any(mces_values < 0):
         bad = int(np.flatnonzero(mces_values < 0)[0])
-        raise ValueError(f"MCES returned a negative distance at pair {bad}: {mces_values[bad]}")
+        raise ValueError(
+            f"MCES returned a negative distance at pair {bad}: {mces_values[bad]}"
+        )
 
     columns = _retrieval_pair_base_columns(retrieval_rows, pairs)
-    columns["morgan_tanimoto"] = pa.array(tanimoto.astype(np.float32, copy=False), type=pa.float32())
-    columns["mces"] = pa.array(mces_values.astype(np.float32, copy=False), type=pa.float32())
-    columns["mces_seconds"] = pa.array(mces_seconds.astype(np.float32, copy=False), type=pa.float32())
-    columns["mces_compute_mode"] = pa.array(mces_modes.astype(np.int16, copy=False), type=pa.int16())
+    columns["morgan_tanimoto"] = pa.array(
+        tanimoto.astype(np.float32, copy=False), type=pa.float32()
+    )
+    columns["mces"] = pa.array(
+        mces_values.astype(np.float32, copy=False), type=pa.float32()
+    )
+    columns["mces_seconds"] = pa.array(
+        mces_seconds.astype(np.float32, copy=False), type=pa.float32()
+    )
+    columns["mces_compute_mode"] = pa.array(
+        mces_modes.astype(np.int16, copy=False), type=pa.int16()
+    )
     for threshold in MCES_REPORTED_THRESHOLDS:
         columns[f"mces_le_{threshold}"] = pa.array(
             (mces_values <= threshold).astype(np.int8),
@@ -2495,13 +2270,21 @@ def _write_mces_retrieval_dataset(
         "num_workers": int(workers),
         "compute_mode_counts": {
             str(int(mode)): int(count)
-            for mode, count in zip(*np.unique(mces_modes, return_counts=True), strict=True)
+            for mode, count in zip(
+                *np.unique(mces_modes, return_counts=True), strict=True
+            )
         },
-        "mean_seconds_per_pair": float(np.mean(mces_seconds)) if len(mces_seconds) else 0.0,
-        "max_seconds_per_pair": float(np.max(mces_seconds)) if len(mces_seconds) else 0.0,
+        "mean_seconds_per_pair": float(np.mean(mces_seconds))
+        if len(mces_seconds)
+        else 0.0,
+        "max_seconds_per_pair": float(np.max(mces_seconds))
+        if len(mces_seconds)
+        else 0.0,
         "sampling_metadata": sampling_metadata,
     }
-    (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True))
+    (output_dir / "metadata.json").write_text(
+        json.dumps(metadata, indent=2, sort_keys=True)
+    )
     return metadata
 
 
@@ -2524,6 +2307,7 @@ def build_murcko_mgf_dataset(
     split_size_caps: dict[str, int] | None = None,
     spectral_lsh_threshold: float = 0.90,
 ) -> dict[str, Any]:
+    source_file = file_source_manifest(mgf_path)
     first_rows = _first_pass(
         mgf_path,
         min_precursor_mz=min_precursor_mz,
@@ -2549,6 +2333,7 @@ def build_murcko_mgf_dataset(
         mgf_path=mgf_path,
         output_dir=output_dir,
         source_uri=source_uri,
+        source_file=source_file,
         fold_by_smiles=fold_by_smiles,
         split_metadata=split_metadata,
         active_splits=active_splits,
@@ -2574,37 +2359,10 @@ def build_murcko_mgf_dataset(
     return metadata
 
 
-def _build_dataset_specs(
-    *,
-    nist_mgf: str,
-    mcebio_mgf: str | None,
-    nist_subdir: str,
-    mcebio_subdir: str,
-) -> list[DatasetSpec]:
-    specs = [
-        DatasetSpec(
-            name="nist",
-            source=nist_mgf,
-            subdir=nist_subdir,
-        )
-    ]
-    if mcebio_mgf:
-        specs.append(
-            DatasetSpec(
-                name="mcebio",
-                source=mcebio_mgf,
-                subdir=mcebio_subdir,
-            )
-        )
-    return specs
-
-
 def prepare_murcko_mgf_collection(
     *,
     nist_mgf: str = DEFAULT_NIST_MGF_URI,
-    mcebio_mgf: str | None = str(DEFAULT_MCEBIO_MGF_PATH),
     nist_subdir: str = NIST_MURCKO_PREPARED_SUBDIR,
-    mcebio_subdir: str = MCEBIO_MURCKO_PREPARED_SUBDIR,
     gcs_credentials: Path | None = None,
     work_dir: Path,
     hf_repo_id: str = NIST_MURCKO_HF_REPO,
@@ -2614,8 +2372,8 @@ def prepare_murcko_mgf_collection(
     val_frac: float = 0.10,
     test_frac: float = 0.10,
     seed: int = 42,
-    min_precursor_mz: float = 1.0,
-    max_precursor_mz: float = 1000.0,
+    min_precursor_mz: float = DEFAULT_MIN_PRECURSOR_MZ,
+    max_precursor_mz: float = DEFAULT_MAX_PRECURSOR_MZ,
     num_peaks_input: int = NUM_PEAKS_INPUT,
     num_workers: int = os.cpu_count() or 1,
     batch_size: int = 2048,
@@ -2643,42 +2401,32 @@ def prepare_murcko_mgf_collection(
         "artifact_format": "murcko_mgf_dataset_collection_v1",
         "datasets": {},
     }
-    for spec in _build_dataset_specs(
-        nist_mgf=nist_mgf,
-        mcebio_mgf=mcebio_mgf,
-        nist_subdir=nist_subdir,
-        mcebio_subdir=mcebio_subdir,
-    ):
-        raw_mgf = _stage_raw_mgf(spec.source, raw_dir, gcs_credentials)
-        allowed_adducts = nist_allowed_adducts if spec.name == "nist" else None
-        split_size_caps = nist_split_size_caps if spec.name == "nist" else None
-        metadata = build_murcko_mgf_dataset(
-            mgf_path=raw_mgf,
-            output_dir=staging_root / spec.subdir.strip("/"),
-            source_uri=spec.source,
-            val_frac=val_frac,
-            test_frac=test_frac,
-            seed=seed,
-            min_precursor_mz=min_precursor_mz,
-            max_precursor_mz=max_precursor_mz,
-            num_peaks_input=num_peaks_input,
-            num_workers=num_workers,
-            batch_size=batch_size,
-            parquet_batch_size=parquet_batch_size,
-            single_split=STANDALONE_SPLIT if spec.name == "mcebio" else None,
-            allowed_adducts=allowed_adducts,
-            split_size_caps=split_size_caps,
-            spectral_lsh_threshold=spectral_lsh_threshold,
-        )
-        top_metadata["datasets"][spec.name] = {
-            "subdir": spec.subdir.strip("/"),
-            "source_raw_file": metadata["source_raw_file"],
-            "splits": metadata["splits"],
-        }
-        for split in metadata["splits"]:
-            top_metadata["datasets"][spec.name][f"{split}_size"] = metadata[
-                f"{split}_size"
-            ]
+    raw_mgf = _stage_raw_mgf(nist_mgf, raw_dir, gcs_credentials)
+    metadata = build_murcko_mgf_dataset(
+        mgf_path=raw_mgf,
+        output_dir=staging_root / nist_subdir.strip("/"),
+        source_uri=nist_mgf,
+        val_frac=val_frac,
+        test_frac=test_frac,
+        seed=seed,
+        min_precursor_mz=min_precursor_mz,
+        max_precursor_mz=max_precursor_mz,
+        num_peaks_input=num_peaks_input,
+        num_workers=num_workers,
+        batch_size=batch_size,
+        parquet_batch_size=parquet_batch_size,
+        allowed_adducts=nist_allowed_adducts,
+        split_size_caps=nist_split_size_caps,
+        spectral_lsh_threshold=spectral_lsh_threshold,
+    )
+    top_metadata["datasets"]["nist"] = {
+        "subdir": nist_subdir.strip("/"),
+        "source_raw_file": metadata["source_raw_file"],
+        "source_file": metadata["source_file"],
+        "splits": metadata["splits"],
+    }
+    for split in metadata["splits"]:
+        top_metadata["datasets"]["nist"][f"{split}_size"] = metadata[f"{split}_size"]
     (staging_root / "metadata.json").write_text(
         json.dumps(top_metadata, indent=2, sort_keys=True)
     )
@@ -2754,8 +2502,8 @@ def prepare_nist_disjoint_probe_retrieval_collection(
     val_frac: float = 0.10,
     test_frac: float = 0.10,
     seed: int = 42,
-    min_precursor_mz: float = 1.0,
-    max_precursor_mz: float = 1000.0,
+    min_precursor_mz: float = DEFAULT_MIN_PRECURSOR_MZ,
+    max_precursor_mz: float = DEFAULT_MAX_PRECURSOR_MZ,
     num_peaks_input: int = NUM_PEAKS_INPUT,
     num_workers: int = os.cpu_count() or 1,
     batch_size: int = 2048,
@@ -2791,6 +2539,7 @@ def prepare_nist_disjoint_probe_retrieval_collection(
     staging_root.mkdir(parents=True, exist_ok=True)
 
     raw_mgf = _stage_raw_mgf(nist_mgf, raw_dir, gcs_credentials)
+    source_file = file_source_manifest(raw_mgf)
     first_rows = _first_pass(
         raw_mgf,
         min_precursor_mz=min_precursor_mz,
@@ -2799,16 +2548,20 @@ def prepare_nist_disjoint_probe_retrieval_collection(
         num_workers=num_workers,
         batch_size=batch_size,
     )
-    probe_indices, probe_hist_keys, probe_selection_metadata = _select_disjoint_probe_indices(
-        first_rows,
-        target_size=online_probe_size,
-        seed=seed,
+    probe_indices, probe_hist_keys, probe_selection_metadata = (
+        _select_disjoint_probe_indices(
+            first_rows,
+            target_size=online_probe_size,
+            seed=seed,
+        )
     )
     probe_first_rows = [
         row for row in first_rows if int(row.spectrum_index) in probe_indices
     ]
     retrieval_hist_keys = {
-        row.murcko_hist_key for row in first_rows if row.murcko_hist_key not in probe_hist_keys
+        row.murcko_hist_key
+        for row in first_rows
+        if row.murcko_hist_key not in probe_hist_keys
     }
     retrieval_first_rows = [
         row for row in first_rows if row.murcko_hist_key in retrieval_hist_keys
@@ -2830,6 +2583,7 @@ def prepare_nist_disjoint_probe_retrieval_collection(
         mgf_path=raw_mgf,
         output_dir=staging_root / online_probe_subdir.strip("/"),
         source_uri=nist_mgf,
+        source_file=source_file,
         fold_by_smiles=probe_fold_by_smiles,
         split_metadata=probe_split_metadata,
         active_splits=SPLITS,
@@ -2858,6 +2612,7 @@ def prepare_nist_disjoint_probe_retrieval_collection(
         mgf_path=raw_mgf,
         output_dir=staging_root / retrieval_pool_subdir.strip("/"),
         source_uri=nist_mgf,
+        source_file=source_file,
         fold_by_smiles=retrieval_fold_by_smiles,
         split_metadata=retrieval_split_metadata,
         active_splits=(STANDALONE_SPLIT,),
@@ -2913,8 +2668,11 @@ def prepare_nist_disjoint_probe_retrieval_collection(
         "hf_revision": hf_revision,
         "source_uri": nist_mgf,
         "source_raw_file": f"{RAW_SUBDIR}/{raw_mgf.name}",
+        "source_file": source_file,
         "seed": int(seed),
-        "allowed_adducts": list(allowed_adducts) if allowed_adducts is not None else None,
+        "allowed_adducts": list(allowed_adducts)
+        if allowed_adducts is not None
+        else None,
         "min_precursor_mz": float(min_precursor_mz),
         "max_precursor_mz": float(max_precursor_mz),
         "online_probe": {
@@ -2988,14 +2746,10 @@ def main() -> None:
 
     RDLogger.DisableLog("rdApp.*")
     parser = argparse.ArgumentParser(
-        description=(
-            "Build Murcko-split NIST and standalone MCEBIO Parquet datasets from raw MGF."
-        )
+        description="Build a Murcko-split NIST Parquet dataset from raw MGF."
     )
     parser.add_argument("--nist-mgf", default=DEFAULT_NIST_MGF_URI)
-    parser.add_argument("--mcebio-mgf", default=str(DEFAULT_MCEBIO_MGF_PATH))
     parser.add_argument("--nist-subdir", default=NIST_MURCKO_PREPARED_SUBDIR)
-    parser.add_argument("--mcebio-subdir", default=MCEBIO_MURCKO_PREPARED_SUBDIR)
     parser.add_argument("--gcs-credentials", type=Path, default=None)
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--hf-repo-id", default=NIST_MURCKO_HF_REPO)
@@ -3006,7 +2760,11 @@ def main() -> None:
     parser.add_argument("--test-frac", type=float, default=0.10)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--min-precursor-mz", type=float, default=1.0)
-    parser.add_argument("--max-precursor-mz", type=float, default=1000.0)
+    parser.add_argument(
+        "--max-precursor-mz",
+        type=float,
+        default=DEFAULT_MAX_PRECURSOR_MZ,
+    )
     parser.add_argument("--num-peaks-input", type=int, default=NUM_PEAKS_INPUT)
     parser.add_argument("--num-workers", type=int, default=os.cpu_count() or 1)
     parser.add_argument("--batch-size", type=int, default=2048)
@@ -3040,7 +2798,7 @@ def main() -> None:
         "--dreams-subdir",
         action="append",
         default=None,
-        help="Prepared subdir for DreaMS auxiliary generation. Defaults to NIST and MCEBIO.",
+        help="Prepared dataset subdir to process. Defaults to NIST.",
     )
     parser.add_argument("--dreams-n-highest-peaks", type=int, default=100)
     parser.add_argument("--dreams-batch-size", type=int, default=256)
@@ -3053,17 +2811,25 @@ def main() -> None:
             "probe sample, a retrieval pool, 10 ppm pair labels, and MCES pairs."
         ),
     )
-    parser.add_argument("--online-probe-subdir", default=NIST_DISJOINT_ONLINE_PROBE_SUBDIR)
-    parser.add_argument("--retrieval-pool-subdir", default=NIST_DISJOINT_RETRIEVAL_POOL_SUBDIR)
+    parser.add_argument(
+        "--online-probe-subdir", default=NIST_DISJOINT_ONLINE_PROBE_SUBDIR
+    )
+    parser.add_argument(
+        "--retrieval-pool-subdir", default=NIST_DISJOINT_RETRIEVAL_POOL_SUBDIR
+    )
     parser.add_argument("--same-inchi-subdir", default=NIST_10PPM_RETRIEVAL_SUBDIR)
     parser.add_argument("--mces-subdir", default=NIST_MCES_RETRIEVAL_SUBDIR)
-    parser.add_argument("--online-probe-size", type=int, default=DEFAULT_ONLINE_PROBE_SAMPLE_SIZE)
+    parser.add_argument(
+        "--online-probe-size", type=int, default=DEFAULT_ONLINE_PROBE_SAMPLE_SIZE
+    )
     parser.add_argument(
         "--same-inchi-pairs-per-class",
         type=int,
         default=DEFAULT_10PPM_RETRIEVAL_PAIRS_PER_CLASS,
     )
-    parser.add_argument("--same-inchi-ppm", type=float, default=DEFAULT_10PPM_RETRIEVAL_PPM)
+    parser.add_argument(
+        "--same-inchi-ppm", type=float, default=DEFAULT_10PPM_RETRIEVAL_PPM
+    )
     parser.add_argument("--same-inchi-adduct", default=DEFAULT_RETRIEVAL_ADDUCT)
     parser.add_argument("--mces-pairs", type=int, default=DEFAULT_MCES_RETRIEVAL_PAIRS)
     parser.add_argument(
@@ -3119,9 +2885,7 @@ def main() -> None:
         return
     prepare_murcko_mgf_collection(
         nist_mgf=args.nist_mgf,
-        mcebio_mgf=args.mcebio_mgf,
         nist_subdir=args.nist_subdir,
-        mcebio_subdir=args.mcebio_subdir,
         gcs_credentials=args.gcs_credentials,
         work_dir=args.work_dir,
         hf_repo_id=args.hf_repo_id,

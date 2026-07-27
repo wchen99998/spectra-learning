@@ -7,6 +7,10 @@ from typing import Any
 
 from ml_collections import config_dict
 
+from spectra_learning.data.contracts import (
+    data_provenance_contract,
+    peak_preprocessing_contract,
+)
 from spectra_learning.data.ar_spectra import SpectraARGemsDataModule
 from spectra_learning.models.ar_spectra_jax import build_spectra_ar_model_jax_from_config
 from spectra_learning.training.pretrain_jax import (
@@ -78,22 +82,9 @@ def _ar_jax_checkpoint_contract(
             "spectrum_dataset": str(config.gems_hdf5_spectrum_dataset),
             "precursor_dataset": str(config.gems_hdf5_precursor_dataset),
             "rows_per_block": int(config.gems_hdf5_rows_per_block),
+            "provenance": data_provenance_contract(datamodule.info),
         },
-        "preprocessing": {
-            "num_peaks": int(datamodule.num_peaks_output),
-            "max_precursor_mz": float(datamodule.max_precursor_mz),
-            "min_peak_intensity": float(datamodule.min_peak_intensity),
-            "peak_drop_min_intensity": float(datamodule.peak_drop_min_intensity),
-            "peak_filtering": str(datamodule.peak_filtering),
-            "grouped_peak_shoulder_da": float(datamodule.grouped_peak_shoulder_da),
-            "grouped_peak_isotope_charges": list(
-                datamodule.grouped_peak_isotope_charges
-            ),
-            "peak_ordering": str(datamodule.peak_ordering),
-            "precursor_peak_exclusion_window_da": float(
-                datamodule.precursor_peak_exclusion_window_da
-            ),
-        },
+        "preprocessing": peak_preprocessing_contract(config),
         "model": {
             "model_dim": int(config.ar_model_dim),
             "num_layers": int(config.ar_num_layers),
