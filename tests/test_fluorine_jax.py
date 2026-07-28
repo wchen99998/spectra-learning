@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 from ml_collections import config_dict
 import numpy as np
+import optax
 
 from spectra_learning.models import model_jax, settings
 from spectra_learning.probes.massspec import fluorine, msg_probe_jax
@@ -134,27 +135,31 @@ def _patch_probe_runtime(monkeypatch, config, data, feature_model) -> None:
         "PeakSetJEPASettings",
         SimpleNamespace(from_config=lambda _config: object()),
     )
-    monkeypatch.setattr(model_jax, "PeakSetJEPAJax", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        model_jax,
+        "PeakSetJEPAJax",
+        lambda *_args, **_kwargs: SimpleNamespace(encoder=object()),
+    )
     monkeypatch.setattr(nnx, "jit", lambda function: function)
     monkeypatch.setattr(nnx, "merge", lambda *_args: feature_model)
+    monkeypatch.setattr(nnx, "state", lambda _model: {})
+    monkeypatch.setattr(nnx, "update", lambda _model, _state: None)
     monkeypatch.setattr(pretrain_jax, "prepare_jax_training_config", lambda _config: None)
     monkeypatch.setattr(
         pretrain_jax,
-        "_build_pretrain_jax_datamodule",
-        lambda *_args, **_kwargs: SimpleNamespace(info={"source": "gems"}),
+        "jax_config_checkpoint_contract",
+        lambda _config: {"config": {"model_dim": 2}},
     )
     monkeypatch.setattr(
-        pretrain_jax,
-        "_pretrain_jax_checkpoint_contract",
-        lambda *_args, **_kwargs: {
-            "peak_preprocessing": {"version": 1},
-            "data_provenance": {"source": "gems"},
-        },
-    )
-    monkeypatch.setattr(
-        pretrain_jax,
-        "init_pure_optax_train_state",
-        lambda *_args, **_kwargs: (object(), {}, {}, {}, None),
+        fluorine,
+        "read_text",
+        lambda _path: json.dumps(
+            {
+                "format_version": 1,
+                "training_task": "pretrain",
+                "task_contract": {"config": {"model_dim": 2}},
+            }
+        ),
     )
     monkeypatch.setattr(
         pretrain_jax,
@@ -178,8 +183,8 @@ def _patch_probe_runtime(monkeypatch, config, data, feature_model) -> None:
     )
     monkeypatch.setattr(
         checkpointing_jax,
-        "restore_jax_training_state",
-        lambda _manager, _step, target, **_kwargs: target,
+        "restore_frozen_teacher_encoder",
+        lambda _path, state, **_kwargs: state,
     )
     monkeypatch.setattr(
         msg_probe_jax,
@@ -225,7 +230,7 @@ def _probe_args(tmp_path: Path, **overrides) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
-def test_jax_restore_uses_full_pretraining_checkpoint_contract(
+def test_jax_restore_uses_stored_pretraining_checkpoint_contract(
     monkeypatch,
     tmp_path: Path,
 ):
@@ -236,24 +241,16 @@ def test_jax_restore_uses_full_pretraining_checkpoint_contract(
         _probe_data(),
         _TinyJaxFeatureModel(),
     )
-    restored_metadata = {}
+    restored = {}
+
+    def restore(path, state, *, path_renames):
+        restored["path"] = str(path)
+        restored["path_renames"] = path_renames
+        return state
 
     monkeypatch.setattr(
         checkpointing_jax,
-        "jax_training_checkpoint_metadata",
-        lambda task, contract: {
-            "training_task": task,
-            "task_contract": contract,
-        },
-    )
-
-    def restore(_manager, _step, target, *, expected_metadata):
-        restored_metadata.update(expected_metadata)
-        return target
-
-    monkeypatch.setattr(
-        checkpointing_jax,
-        "restore_jax_training_state",
+        "restore_frozen_teacher_encoder",
         restore,
     )
 
@@ -261,17 +258,18 @@ def test_jax_restore_uses_full_pretraining_checkpoint_contract(
         _probe_args(tmp_path)
     )
 
-    assert restored_metadata == {
-        "training_task": "pretrain",
-        "task_contract": {
-            "peak_preprocessing": {"version": 1},
-            "data_provenance": {"source": "gems"},
+    assert restored == {
+        "path": str(tmp_path / "checkpoints" / "orbax" / "7"),
+        "path_renames": {
+            "fourier_ffn": "mz_ffn",
+            "mz_fourier": "mz_features",
         },
     }
-    assert (
-        checkpoint.source_checkpoint_contract["checkpoint_metadata"]
-        == restored_metadata
-    )
+    assert checkpoint.source_checkpoint_contract["checkpoint_metadata"] == {
+        "format_version": 1,
+        "training_task": "pretrain",
+        "task_contract": {"config": {"model_dim": 2}},
+    }
 
 
 def test_run_probe_jax_trains_tiny_trial_and_builds_artifacts(
@@ -350,11 +348,11 @@ def test_run_probe_jax_trains_tiny_trial_and_builds_artifacts(
     assert head_state["state_contract"] == {
         "version": fluorine.FLUORINE_STATE_CONTRACT_VERSION,
         "source_checkpoint": {
-            "backend": "jax",
-            "checkpoint_path": str(checkpoint_dir / "orbax" / "7"),
-            "restore_step": 7,
-            "checkpoint_metadata": {},
-        },
+                "backend": "jax",
+                "checkpoint_path": str(checkpoint_dir / "orbax" / "7"),
+                "restore_step": 7,
+                "checkpoint_metadata": json.loads(fluorine.read_text("unused")),
+            },
         "evaluation_data_provenance": data.metadata["data_provenance"],
         "peak_preprocessing": data.metadata["peak_preprocessing"],
     }
@@ -465,3 +463,74 @@ def test_run_probe_jax_streams_pair_features_and_keeps_first_strict_best(
     ):
         np.testing.assert_array_equal(tied_leaf, baseline_leaf)
         assert np.isfinite(tied_leaf).all()
+
+
+def test_jax_finetune_step_updates_encoder_and_new_head():
+    class Encoder(nnx.Module):
+        def __init__(self):
+            self.weight = nnx.Param(jnp.eye(2))
+
+        def __call__(
+            self,
+            peak_mz,
+            peak_intensity,
+            *,
+            valid_mask,
+            precursor_mz=None,
+            spectrum_metadata=None,
+        ):
+            return jnp.stack((peak_mz, peak_intensity), axis=-1) @ self.weight
+
+    encoder = Encoder()
+    graphdef, encoder_params, static_state = nnx.split(encoder, nnx.Param, ...)
+    task_spec = msg_probe_jax.MsgProbeTaskSpec(
+        regression_tasks=(),
+        maccs_bits=0,
+        regression_means={},
+        regression_stds={},
+        binary_tasks=("fluorine",),
+    )
+    probe_params, _ = fluorine._init_jax_fluorine_probe_params(
+        jax.random.PRNGKey(3),
+        fluorine.TrialParams(2, 0.01, 0.0, 0.0),
+        variant="covariance",
+        config=_probe_config(),
+    )
+    params = {
+        "encoder": nnx.as_pure(encoder_params),
+        "probe": probe_params,
+    }
+    optimizer = optax.adam(0.01)
+    train_step, _ = fluorine._make_jax_fluorine_finetune_steps(
+        encoder_graphdef=graphdef,
+        encoder_static_state=nnx.as_pure(static_state),
+        optimizer=optimizer,
+        variant="covariance",
+        task_spec=task_spec,
+    )
+    batch = jax.tree.map(jnp.asarray, _tiny_probe_batch())
+    updated, _, loss = train_step(
+        params,
+        optimizer.init(params),
+        batch,
+        0.5,
+        2.0,
+    )
+
+    assert jnp.isfinite(loss)
+    assert any(
+        not np.array_equal(before, after)
+        for before, after in zip(
+            jax.tree.leaves(params["encoder"]),
+            jax.tree.leaves(updated["encoder"]),
+            strict=True,
+        )
+    )
+    assert any(
+        not np.array_equal(before, after)
+        for before, after in zip(
+            jax.tree.leaves(params["probe"]),
+            jax.tree.leaves(updated["probe"]),
+            strict=True,
+        )
+    )

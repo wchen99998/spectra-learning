@@ -19,11 +19,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.gems_hdf5_retention_time_dataset = "RT"
     cfg.gems_hdf5_ms_level_dataset = "MS level"
     cfg.gems_hdf5_rows_per_block = 0
-    cfg.nist_murcko_probe_repo_id = (
-        "wchen99998/msms_nist_disjoint_probe_retrieval_20260622"
-    )
-    cfg.nist_murcko_probe_revision = "f5b51db72caa9205240d344882a9f4baec10d9b3"
-    cfg.nist_murcko_probe_hf_subdir = "nist_100k_online_probe"
     cfg.nist_murcko_probe_num_repeats = 1
     cfg.batch_size = 512
     cfg.gradient_accumulation_steps = 4
@@ -173,7 +168,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.msg_probe_num_epochs = 100
     cfg.msg_probe_pma_num_heads = 8
     cfg.msg_probe_pma_num_seeds = 32
-    cfg.msg_probe_select_metric = "msg_probe/test/auc_fluorine"
+    cfg.msg_probe_select_metric = "msg_probe/val/auc_fluorine"
     cfg.msg_probe_variants = ["single_pair_covariance"]
     cfg.msg_probe_warmup_epochs = 0.5
     cfg.msg_probe_grad_clip_norm = 1.0

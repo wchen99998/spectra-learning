@@ -105,7 +105,7 @@ def test_fluorine_outputs_support_fsspec_prefix(monkeypatch, tmp_path: Path):
     assert saved["curves"][0]["name"] == "run"
 
 
-def test_checkpoint_probe_data_uses_checkpoint_sources_and_preprocessing(
+def test_checkpoint_probe_data_uses_current_sources_and_checkpoint_preprocessing(
     monkeypatch,
     tmp_path: Path,
 ):
@@ -185,7 +185,9 @@ def test_checkpoint_probe_data_uses_checkpoint_sources_and_preprocessing(
     assert captured["config"].artifact_dir == str(cache_dir.resolve())
     assert data.num_peaks == 17
     assert data.peak_ordering == "mz"
-    assert data.metadata["nist_revision"] == "nist-sha"
+    assert data.metadata["nist_repo_id"] == fluorine.NIST_MURCKO_HF_REPO
+    assert data.metadata["nist_revision"] == fluorine.NIST_MURCKO_HF_REVISION
+    assert data.metadata["nist_subdir"] == fluorine.NIST_MURCKO_PREPARED_SUBDIR
 
 
 def test_autocast_dtype_resolves_from_config_and_cli():

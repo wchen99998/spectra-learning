@@ -62,6 +62,10 @@ def test_current_pretraining_config_records_model_and_data_defaults() -> None:
         "jepa_intensity_aware_mask_config",
         "min_precursor_mz",
     }
+    assert "nist_murcko_probe_repo_id" not in config
+    assert "nist_murcko_probe_revision" not in config
+    assert "nist_murcko_probe_hf_subdir" not in config
+    assert config.msg_probe_select_metric == "msg_probe/val/auc_fluorine"
 
 
 def test_model_settings_copy_typed_config_values_without_coercion() -> None:

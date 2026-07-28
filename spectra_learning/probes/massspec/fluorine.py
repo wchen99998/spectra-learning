@@ -51,6 +51,9 @@ from spectra_learning.models.settings import PeakSetJEPASettings
 from spectra_learning.models.spectrum_metadata import torch_spectrum_metadata_from_batch
 from spectra_learning.data.murcko import (
     MurckoFluorineData as FluorineData,
+    NIST_MURCKO_HF_REPO,
+    NIST_MURCKO_HF_REVISION,
+    NIST_MURCKO_PREPARED_SUBDIR,
     build_murcko_fluorine_loader,
 )
 from spectra_learning.training.checkpointing import (
@@ -814,6 +817,9 @@ def build_fluorine_data(
     root = cache_dir.expanduser().resolve()
     probe_config = config_dict.ConfigDict(config)
     probe_config.artifact_dir = str(root)
+    probe_config.nist_murcko_probe_repo_id = NIST_MURCKO_HF_REPO
+    probe_config.nist_murcko_probe_revision = NIST_MURCKO_HF_REVISION
+    probe_config.nist_murcko_probe_hf_subdir = NIST_MURCKO_PREPARED_SUBDIR
     probe_data = MassSpecProbeData.from_config(
         probe_config,
         distributed_world_size=distributed_world_size,
@@ -1978,6 +1984,7 @@ def write_standard_fluorine_outputs(
         "head": {
             "best_epoch": head_state["best_epoch"],
             "best_val": head_state["best_val"],
+            **({"train": head_state["train"]} if "train" in head_state else {}),
             "test": head_state["test"],
             "hparams": head_state["hparams"],
             "pooling": head_state["pooling"],
@@ -2450,40 +2457,28 @@ def _restore_jax_fluorine_checkpoint(
     from flax import nnx
 
     from spectra_learning.models.model_jax import PeakSetJEPAJax
-    from spectra_learning.models.settings import PeakSetJEPASettings
+    from spectra_learning.models.settings import (
+        REMOVED_SETTING_KEYS,
+        PeakSetJEPASettings,
+    )
     from spectra_learning.probes.massspec.msg_probe_jax import (
         _full_visible_fastmixer_probe_model,
     )
     from spectra_learning.training.checkpointing_jax import (
         build_jax_checkpoint_manager,
-        jax_training_checkpoint_metadata,
-        restore_jax_training_state,
+        restore_frozen_teacher_encoder,
     )
     from spectra_learning.training.pretrain_jax import (
-        _build_pretrain_jax_datamodule,
         _jax_data_mesh_for_device_count,
-        _pretrain_jax_checkpoint_contract,
         _replicate_tree_on_data_mesh,
-        init_pure_optax_train_state,
+        jax_config_checkpoint_contract,
         prepare_jax_training_config,
     )
 
     config_path = args.config.expanduser().resolve()
     config = load_config(config_path)
     prepare_jax_training_config(config)
-    source_datamodule = _build_pretrain_jax_datamodule(
-        config,
-        jax.process_count(),
-        jax.process_index(),
-    )
-    checkpoint_metadata = jax_training_checkpoint_metadata(
-        "pretrain",
-        _pretrain_jax_checkpoint_contract(
-            config,
-            source_datamodule,
-            int(config.training_max_steps),
-        ),
-    )
+    expected_config = jax_config_checkpoint_contract(config)["config"]
     jax_device_count = jax.device_count()
     config.jax_mesh_devices = str(jax_device_count)
     checkpoint_dir, checkpoint_step = _resolve_jax_checkpoint_dir_and_step(
@@ -2501,37 +2496,49 @@ def _restore_jax_fluorine_checkpoint(
     )
     if restore_step is None:
         raise FileNotFoundError(f"no JAX checkpoint found under {checkpoint_dir}")
+    checkpoint_metadata = json.loads(
+        read_text(
+            storage_join(
+                storage_join(
+                    storage_join(checkpoint_dir, "orbax"),
+                    str(restore_step),
+                ),
+                "metadata/metadata",
+            )
+        )
+    )
+    if (
+        checkpoint_metadata.get("training_task") != "pretrain"
+        or checkpoint_metadata.get("task_contract", {}).get("config")
+        != expected_config
+    ):
+        raise ValueError(
+            "JAX fluorine checkpoint does not match the pretraining config"
+        )
+    for key in REMOVED_SETTING_KEYS:
+        if key in config:
+            del config[key]
     settings = PeakSetJEPASettings.from_config(config)
     model = PeakSetJEPAJax(settings, rngs=nnx.Rngs(int(config.seed)))
-    graphdef, trainable_params, static_state, opt_state, _ = init_pure_optax_train_state(
-        config,
-        model,
-        total_steps=int(config.training_max_steps),
-    )
     data_mesh = _jax_data_mesh_for_device_count(jax_device_count)
-    trainable_params = _replicate_tree_on_data_mesh(trainable_params, data_mesh)
-    static_state = _replicate_tree_on_data_mesh(static_state, data_mesh)
-    opt_state = _replicate_tree_on_data_mesh(opt_state, data_mesh)
-    restored = restore_jax_training_state(
-        manager,
-        restore_step,
-        {
-            "trainable_params": trainable_params,
-            "static_state": static_state,
-            "opt_state": opt_state,
-        },
-        expected_metadata=checkpoint_metadata,
-    )
-    model = nnx.merge(
-        graphdef,
-        restored["trainable_params"],
-        restored["static_state"],
-    )
-    model = _full_visible_fastmixer_probe_model(config, model)
     checkpoint_path = storage_join(
         storage_join(checkpoint_dir, "orbax"),
         str(restore_step),
     )
+    encoder_state = _replicate_tree_on_data_mesh(
+        nnx.as_pure(nnx.state(model.encoder)),
+        data_mesh,
+    )
+    restored_encoder = restore_frozen_teacher_encoder(
+        checkpoint_path,
+        encoder_state,
+        path_renames={
+            "fourier_ffn": "mz_ffn",
+            "mz_fourier": "mz_features",
+        },
+    )
+    nnx.update(model.encoder, restored_encoder)
+    model = _full_visible_fastmixer_probe_model(config, model)
     source_checkpoint_contract = {
         "backend": "jax",
         "checkpoint_path": str(checkpoint_path),
@@ -2637,6 +2644,7 @@ def _iter_jax_fluorine_split(
     shuffle: bool,
     seed: int,
     max_samples: int | None,
+    drop_last: bool = False,
 ) -> Iterator[dict[str, Any]]:
     from spectra_learning.probes.massspec.msg_probe_jax import _probe_value_to_jax
 
@@ -2647,12 +2655,13 @@ def _iter_jax_fluorine_split(
         seed=seed,
         max_samples=max_samples,
         dreams_only=False,
+        drop_last=drop_last,
         num_workers=int(runtime.args.num_workers),
         output_format="numpy",
     )
     for batch in loader:
         yield {
-            key: _probe_value_to_jax(value, data_mesh=None)
+            key: _probe_value_to_jax(value, data_mesh=runtime.data_mesh)
             for key, value in batch.items()
         }
 
@@ -2964,6 +2973,116 @@ def _make_jax_fluorine_predict_step(
         )
 
     return predict_step
+
+
+def _jax_fluorine_finetune_features(
+    encoder: Any,
+    batch: dict[str, Any],
+    variant: str,
+) -> Any:
+    from spectra_learning.models.spectrum_metadata import (
+        jax_spectrum_metadata_from_batch,
+    )
+
+    kwargs = {
+        "valid_mask": batch["peak_valid_mask"],
+        "precursor_mz": batch.get("precursor_mz"),
+        "spectrum_metadata": jax_spectrum_metadata_from_batch(batch),
+    }
+    if variant in {"cls", "single_pair_covariance"}:
+        return encoder.forward_with_pair(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            **kwargs,
+        )
+    return encoder(
+        batch["peak_mz"],
+        batch["peak_intensity"],
+        **kwargs,
+    )
+
+
+def _make_jax_fluorine_finetune_steps(
+    *,
+    encoder_graphdef: Any,
+    encoder_static_state: Any,
+    optimizer: Any,
+    variant: str,
+    task_spec: Any,
+) -> tuple[Callable[..., Any], Callable[..., Any]]:
+    import jax
+    import optax
+    from flax import nnx
+
+    def logits(params: dict[str, Any], batch: dict[str, Any]) -> Any:
+        encoder = nnx.merge(
+            encoder_graphdef,
+            params["encoder"],
+            encoder_static_state,
+        )
+        features = _jax_fluorine_finetune_features(encoder, batch, variant)
+        return _jax_fluorine_logits(
+            params["probe"],
+            features,
+            batch["peak_valid_mask"],
+            variant=variant,
+            task_spec=task_spec,
+        )
+
+    @jax.jit(donate_argnums=(0, 1))
+    def train_step(
+        params: dict[str, Any],
+        opt_state: Any,
+        batch: dict[str, Any],
+        focal_alpha: float,
+        focal_gamma: float,
+    ) -> tuple[dict[str, Any], Any, Any]:
+        def loss_fn(all_params: dict[str, Any]) -> Any:
+            return _jax_fluorine_focal_loss(
+                logits(all_params, batch),
+                batch["label"],
+                focal_alpha=focal_alpha,
+                focal_gamma=focal_gamma,
+            )
+
+        loss, grads = jax.value_and_grad(loss_fn)(params)
+        updates, opt_state = optimizer.update(grads, opt_state, params)
+        return optax.apply_updates(params, updates), opt_state, loss
+
+    @jax.jit
+    def predict_step(params: dict[str, Any], batch: dict[str, Any]) -> Any:
+        return logits(params, batch)
+
+    return train_step, predict_step
+
+
+def _predict_jax_finetuned_arrays(
+    runtime: _JaxFluorineRuntime,
+    predict_step: Callable[..., Any],
+    params: dict[str, Any],
+    split: str,
+    *,
+    seed: int,
+    max_samples: int | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    from spectra_learning.probes.massspec.msg_probe_jax import _host_local_array
+
+    targets, logits, row_indices = [], [], []
+    for batch in _iter_jax_fluorine_split(
+        runtime,
+        split,
+        shuffle=False,
+        seed=seed,
+        max_samples=max_samples,
+    ):
+        logits.append(_host_local_array(predict_step(params, batch)))
+        targets.append(_host_local_array(batch["label"]))
+        row_indices.append(_host_local_array(batch["row_idx"]))
+    return (
+        np.concatenate(targets),
+        np.concatenate(logits),
+        np.concatenate(row_indices),
+    )
 
 
 def _predict_jax_fluorine_arrays(
@@ -3412,6 +3531,255 @@ def run_probe_jax(args: argparse.Namespace) -> dict[str, Any]:
     )
 
 
+def run_finetune_jax(args: argparse.Namespace) -> dict[str, Any]:
+    import gc
+
+    import jax
+    import jax.numpy as jnp
+    import optax
+    from flax import nnx
+
+    checkpoint = _restore_jax_fluorine_checkpoint(args)
+    paths = _resolve_fluorine_probe_paths(args)._replace(
+        output_prefix=(
+            normalize_storage_path(args.output_prefix)
+            if args.output_prefix is not None
+            else default_output_prefix("finetune").resolve()
+        ),
+        head_state_path=(
+            normalize_storage_path(args.output_state)
+            if args.output_state is not None
+            else default_state_path("finetune").resolve()
+        ),
+    )
+    data = _build_fluorine_probe_data(
+        args=args,
+        checkpoint_config=checkpoint.config,
+        cache_dir=paths.cache_dir,
+    )
+    runtime = _make_jax_fluorine_runtime(
+        args=args,
+        checkpoint=checkpoint,
+        data=data,
+    )
+    encoder_graphdef, encoder_params, encoder_static_state = nnx.split(
+        checkpoint.model.encoder,
+        nnx.Param,
+        ...,
+    )
+    params = {
+        "encoder": nnx.as_pure(encoder_params),
+        "probe": _init_jax_fluorine_probe_params(
+            jax.random.PRNGKey(int(args.seed)),
+            TrialParams(
+                hidden_dim=int(args.hidden_dim),
+                learning_rate=float(args.finetune_head_lr),
+                weight_decay=float(args.finetune_weight_decay),
+                dropout=float(args.dropout),
+            ),
+            variant=runtime.variant,
+            config=runtime.config,
+        )[0],
+    }
+    labels = {
+        "encoder": jax.tree.map(lambda _: "encoder", params["encoder"]),
+        "probe": jax.tree.map(lambda _: "probe", params["probe"]),
+    }
+    optimizer = optax.multi_transform(
+        {
+            "encoder": optax.chain(
+                optax.clip_by_global_norm(1.0),
+                optax.adamw(
+                    float(args.finetune_model_lr),
+                    weight_decay=float(args.finetune_weight_decay),
+                ),
+            ),
+            "probe": optax.chain(
+                optax.clip_by_global_norm(1.0),
+                optax.adamw(
+                    float(args.finetune_head_lr),
+                    weight_decay=float(args.finetune_weight_decay),
+                ),
+            ),
+        },
+        labels,
+    )
+    opt_state = optimizer.init(params)
+    train_step, predict_step = _make_jax_fluorine_finetune_steps(
+        encoder_graphdef=encoder_graphdef,
+        encoder_static_state=nnx.as_pure(encoder_static_state),
+        optimizer=optimizer,
+        variant=runtime.variant,
+        task_spec=runtime.task_spec,
+    )
+    checkpoint = checkpoint._replace(model=None, manager=None)
+    runtime = runtime._replace(model=None)
+    gc.collect()
+
+    metadata = data.metadata
+    focal_alpha = _fluorine_probe_focal_alpha(metadata, args.focal_alpha)
+    select_metric = f"val/{args.select_metric}"
+    best_value = -float("inf")
+    best_epoch = 0
+    best_val: dict[str, float] = {}
+    best_params: Any = None
+    history: list[dict[str, Any]] = []
+    epochs_without_improvement = 0
+    for epoch_idx in range(int(args.epochs)):
+        running_loss = 0.0
+        seen = 0
+        batches = _iter_jax_fluorine_split(
+            runtime,
+            "train",
+            shuffle=True,
+            seed=int(args.seed) + epoch_idx,
+            max_samples=args.max_train_samples,
+            drop_last=True,
+        )
+        pbar = tqdm(
+            batches,
+            desc=f"jax full finetune epoch {epoch_idx + 1}/{args.epochs}",
+            unit="batch",
+            dynamic_ncols=True,
+            mininterval=5.0,
+        )
+        for batch in pbar:
+            params, opt_state, loss = train_step(
+                params,
+                opt_state,
+                batch,
+                float(focal_alpha),
+                float(args.focal_gamma),
+            )
+            batch_size = int(batch["label"].shape[0])
+            seen += batch_size
+            running_loss += float(jax.device_get(loss)) * batch_size
+            pbar.set_postfix(loss=f"{running_loss / seen:.5f}")
+        val_targets, val_logits, _ = _predict_jax_finetuned_arrays(
+            runtime,
+            predict_step,
+            params,
+            "val",
+            seed=int(args.seed) + 10_000,
+            max_samples=args.max_val_samples,
+        )
+        val_metrics = _metric_dict(val_targets, val_logits, "val")
+        history.append(
+            {
+                "epoch": epoch_idx + 1,
+                "train_loss": running_loss / seen,
+                "val": val_metrics,
+            }
+        )
+        value = _select_metric_value(val_metrics, select_metric)
+        if value > best_value:
+            best_value = value
+            best_epoch = epoch_idx + 1
+            best_val = val_metrics
+            best_params = _jax_tree_to_numpy(params)
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+        log.info(
+            "jax full finetune epoch=%d/%d val_ap=%.4f val_auc=%.4f",
+            epoch_idx + 1,
+            args.epochs,
+            val_metrics["val/average_precision"],
+            val_metrics["val/roc_auc"],
+        )
+        if epochs_without_improvement >= int(args.patience):
+            break
+
+    assert best_params is not None
+    params = jax.tree.map(jnp.asarray, best_params)
+    split_results = {}
+    test_rows = None
+    for split, seed, max_samples in (
+        ("train", int(args.seed), args.max_train_samples),
+        ("val", int(args.seed) + 10_000, args.max_val_samples),
+        ("test", int(args.seed) + 20_000, args.max_test_samples),
+    ):
+        targets, logits, rows = _predict_jax_finetuned_arrays(
+            runtime,
+            predict_step,
+            params,
+            split,
+            seed=seed,
+            max_samples=max_samples,
+        )
+        split_results[split] = {
+            "targets": targets,
+            "logits": logits,
+            "metrics": _metric_dict(targets, logits, split),
+        }
+        if split == "test":
+            test_rows = rows
+
+    checkpoint_path = storage_join(
+        storage_join(checkpoint.checkpoint_dir, "orbax"),
+        str(checkpoint.restore_step),
+    )
+    hparams = {
+        "model_learning_rate": float(args.finetune_model_lr),
+        "head_learning_rate": float(args.finetune_head_lr),
+        "weight_decay": float(args.finetune_weight_decay),
+        "hidden_dim": int(args.hidden_dim),
+        "dropout": float(args.dropout),
+    }
+    head_state = {
+        "mode": "finetune",
+        "backend": "jax",
+        "complete": True,
+        "config_path": str(checkpoint.config_path),
+        "checkpoint_path": str(checkpoint_path),
+        "state_contract": _fluorine_state_contract(
+            source_checkpoint=checkpoint.source_checkpoint_contract,
+            data=data,
+        ),
+        "jax_params": best_params,
+        "best_epoch": best_epoch,
+        "best_val": best_val,
+        "train": split_results["train"]["metrics"],
+        "test": split_results["test"]["metrics"],
+        "history": history,
+        "hparams": hparams,
+        "pooling": args.pooling,
+        "pair_dim": int(
+            checkpoint.config.get("pairmixer_pair_dim", checkpoint.config.model_dim)
+        ),
+        "focal_alpha": focal_alpha,
+        "focal_gamma": float(args.focal_gamma),
+        "train_size": int(metadata["train_size"]),
+        "train_positive": int(metadata["train_positive"]),
+        "val_size": int(metadata["val_size"]),
+        "val_positive": int(metadata["val_positive"]),
+    }
+    payload = {
+        "backend": "jax",
+        "mode": "finetune",
+        "checkpoint_path": str(checkpoint_path),
+        "best_epoch": best_epoch,
+        "hparams": hparams,
+        "train": split_results["train"]["metrics"],
+        "val": split_results["val"]["metrics"],
+        "test": split_results["test"]["metrics"],
+    }
+    assert test_rows is not None
+    return _write_fluorine_probe_artifacts(
+        args=args,
+        payload=payload,
+        head_state=head_state,
+        paths=paths,
+        config_path=checkpoint.config_path,
+        checkpoint_path=checkpoint_path,
+        data=data,
+        targets=split_results["test"]["targets"],
+        logits=split_results["test"]["logits"],
+        row_indices=test_rows,
+        summary_backend="jax",
+    )
+
+
 def run_probe(args: argparse.Namespace) -> dict[str, Any]:
     device = torch.device(args.device)
     checkpoint_path = resolve_checkpoint_path(args.checkpoint, getattr(args, "workdir", None))
@@ -3677,17 +4045,21 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
 def run(args: argparse.Namespace) -> dict[str, Any]:
     mode = str(getattr(args, "mode", "probe"))
     torch.manual_seed(int(args.seed))
-    if mode == "probe":
-        backend = str(getattr(args, "backend", "auto")).lower()
-        if backend == "auto":
-            config = load_config(args.config.expanduser().resolve())
-            backend = (
-                "jax"
-                if str(config.get("device_backend", "torch")).lower() == "jax"
-                else "torch"
-            )
-        if backend == "jax":
+    backend = str(getattr(args, "backend", "torch")).lower()
+    if backend == "auto":
+        config = load_config(args.config.expanduser().resolve())
+        backend = (
+            "jax"
+            if str(config.get("device_backend", "torch")).lower() == "jax"
+            else "torch"
+        )
+    if backend == "jax":
+        if mode == "probe":
             return run_probe_jax(args)
+        if mode == "finetune":
+            return run_finetune_jax(args)
+        raise ValueError("JAX fluorine adaptation supports probe and finetune modes")
+    if mode == "probe":
         return run_probe(args)
 
     distributed = init_distributed_from_env()

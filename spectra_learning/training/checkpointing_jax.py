@@ -82,6 +82,8 @@ def restore_jax_training_state(
 def restore_frozen_teacher_encoder(
     checkpoint_path: StoragePath,
     teacher_state: nnx.State,
+    *,
+    path_renames: dict[str, str] | None = None,
 ) -> nnx.State:
     state_path = storage_join(checkpoint_path, "state")
     with ocp.StandardCheckpointer() as checkpointer:
@@ -95,8 +97,13 @@ def restore_frozen_teacher_encoder(
         root: flatten_dict(metadata[root]["encoder"])
         for root in ("trainable_params", "static_state")
     }
+
+    def target_path(path: tuple[Any, ...]) -> tuple[str, ...]:
+        renames = {} if path_renames is None else path_renames
+        return tuple(renames.get(str(part), str(part)) for part in path)
+
     source_paths = {
-        tuple(str(part) for part in path)
+        target_path(path)
         for root_metadata in source_metadata.values()
         for path in root_metadata
     }
@@ -114,7 +121,7 @@ def restore_frozen_teacher_encoder(
         target_leaves = {}
         restore_arg_leaves = {}
         for source_path, leaf_metadata in root_metadata.items():
-            serialized_path = tuple(str(part) for part in source_path)
+            serialized_path = target_path(source_path)
             _, value = teacher_values[serialized_path]
             if (
                 tuple(value.shape) != tuple(leaf_metadata.shape)
@@ -152,7 +159,7 @@ def restore_frozen_teacher_encoder(
     restored_values = {}
     for root in ("trainable_params", "static_state"):
         for source_path, value in flatten_dict(restored[root]["encoder"]).items():
-            restored_values[tuple(str(part) for part in source_path)] = value
+            restored_values[target_path(source_path)] = value
     return nnx.from_flat_state(
         (native_path, restored_values[serialized_path])
         for serialized_path, (native_path, _value) in teacher_values.items()

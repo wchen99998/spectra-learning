@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--jax-checkpoint-step", type=int, default=None)
     parser.add_argument(
         "--pooling",
-        choices=("covariance", "single_pair_covariance"),
+        choices=("cls", "covariance", "single_pair_covariance"),
         default="covariance",
     )
     parser.add_argument("--train-covariance-pooler", action="store_true")

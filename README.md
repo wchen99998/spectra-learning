@@ -19,13 +19,14 @@ Top-level `metadata.json` records the 100k without-replacement probe selection,
 the selected Murcko histogram keys, and the zero-overlap check against the
 retrieval pool.
 
-Use the online-probe split with the MSG probe loader by pinning the NIST
-dataset revision:
+The retrieval-specific online probe above remains paired with that retrieval
+benchmark. Canonical MSG and fluorine validation use the full NIST Murcko
+probe split:
 
 ```python
-cfg.nist_murcko_probe_repo_id = "wchen99998/msms_nist_disjoint_probe_retrieval_20260622"
-cfg.nist_murcko_probe_revision = "f5b51db72caa9205240d344882a9f4baec10d9b3"
-cfg.nist_murcko_probe_hf_subdir = "nist_100k_online_probe"
+cfg.nist_murcko_probe_repo_id = "wchen99998/hr_msms_nist_mcebio_murcko_20260529"
+cfg.nist_murcko_probe_revision = "5fc6712bd9cfff29668c7769af92cace0813b172"
+cfg.nist_murcko_probe_hf_subdir = "nist_murcko_probe"
 cfg.nist_murcko_probe_include_dreams_auxiliary = False
 ```
 

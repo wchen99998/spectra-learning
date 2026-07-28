@@ -1589,14 +1589,14 @@ class ProbeConfigTests(unittest.TestCase):
         cfg = config_dict.ConfigDict()
 
         self.assertEqual(resolve_msg_probe_fingerprint(cfg), "maccs")
-        self.assertEqual(resolve_msg_probe_select_metric(cfg), "msg_probe/test/auc_fluorine")
+        self.assertEqual(resolve_msg_probe_select_metric(cfg), "msg_probe/val/auc_fluorine")
 
     def test_msg_probe_fingerprint_can_select_morgan_metric(self):
         cfg = config_dict.ConfigDict()
         cfg.msg_probe_fingerprint = "morgan"
 
         self.assertEqual(resolve_msg_probe_fingerprint(cfg), "morgan")
-        self.assertEqual(resolve_msg_probe_select_metric(cfg), "msg_probe/test/auc_fluorine")
+        self.assertEqual(resolve_msg_probe_select_metric(cfg), "msg_probe/val/auc_fluorine")
 
     def test_pairwise_alignment_defaults_to_disabled(self):
         cfg = config_dict.ConfigDict()
@@ -1617,7 +1617,7 @@ class ProbeConfigTests(unittest.TestCase):
         self.assertEqual(resolve_msg_probe_fingerprint(cfg), "morgan")
         self.assertEqual(
             resolve_msg_probe_select_metric(cfg),
-            "msg_probe/test/auc_fluorine",
+            "msg_probe/val/auc_fluorine",
         )
         self.assertEqual(MORGAN_PROBE_FINGERPRINT_BITS, 4096)
         self.assertEqual(MORGAN_PROBE_FINGERPRINT_RADIUS, 2)

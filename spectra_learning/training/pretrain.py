@@ -1060,7 +1060,7 @@ def run_and_log_msg_probe(
         model=model,
         device=device,
         distributed=distributed,
-        online_maccs_only=True,
+        online_maccs_only=False,
     )
     if distributed.is_main:
         log_msg_probe_metrics(
@@ -1069,18 +1069,16 @@ def run_and_log_msg_probe(
             global_step,
             enable_wandb=bool(config.get("enable_wandb", False)),
         )
-        fingerprint_task = "maccs"
         for variant in variants:
             prefix = f"msg_probe/{variant}"
             epoch_key = f"{prefix}/epoch"
             if epoch_key in probe_metrics:
                 logging.info(
-                    "step=%d msg_probe[%s] best_epoch=%.2f test_auc_%s_mean=%.4f",
+                    "step=%d msg_probe[%s] best_epoch=%.2f test_auc_fluorine=%.4f",
                     global_step,
                     variant,
                     probe_metrics[epoch_key],
-                    fingerprint_task,
-                    probe_metrics[f"{prefix}/test/auc_{fingerprint_task}_mean"],
+                    probe_metrics[f"{prefix}/test/auc_fluorine"],
                 )
     return probe_metrics
 

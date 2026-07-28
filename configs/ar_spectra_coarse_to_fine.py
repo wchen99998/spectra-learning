@@ -47,12 +47,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.gems_hdf5_retention_time_dataset = "RT"
     cfg.gems_hdf5_ms_level_dataset = "MS level"
     cfg.gems_hdf5_rows_per_block = 0
-    cfg.nist_murcko_probe_repo_id = (
-        "wchen99998/msms_nist_disjoint_probe_retrieval_20260622"
-    )
-    cfg.nist_murcko_probe_revision = "f5b51db72caa9205240d344882a9f4baec10d9b3"
-    cfg.nist_murcko_probe_hf_subdir = "nist_100k_online_probe"
-
     cfg.batch_size = 2048
     cfg.gradient_accumulation_steps = 1
     cfg.drop_remainder = True

@@ -629,10 +629,10 @@ def test_jax_training_loop_logs_validation_and_online_probe(monkeypatch, tmp_pat
         data_mesh=None,
         online_maccs_only=False,
     ):
-        assert online_maccs_only is True
+        assert online_maccs_only is False
         probe_calls.append((config, model, data_mesh))
         pretrain_jax.time.sleep(0.01)
-        return {"msg_probe/mean/test/auc_maccs_mean": 0.5}
+        return {"msg_probe/mean/test/auc_fluorine": 0.5}
 
     monkeypatch.setattr(pretrain_jax, "run_msg_probe_jax", fake_run_msg_probe_jax)
 
@@ -666,10 +666,10 @@ def test_jax_training_loop_logs_validation_and_online_probe(monkeypatch, tmp_pat
     assert metrics["run/non_train_elapsed_seconds"] >= metrics["run/msg_probe_seconds"]
     assert metrics["run/measured_non_train_elapsed_seconds"] >= metrics["run/msg_probe_seconds"]
     assert np.isfinite(metrics["val/loss"])
-    assert metrics["msg_probe/mean/test/auc_maccs_mean"] == 0.5
+    assert metrics["msg_probe/mean/test/auc_fluorine"] == 0.5
     assert any(step == 2 and "val/loss" in payload for payload, step in logger.logs)
     assert any(
-        step == 2 and payload.get("msg_probe/mean/test/auc_maccs_mean") == 0.5
+        step == 2 and payload.get("msg_probe/mean/test/auc_fluorine") == 0.5
         for payload, step in logger.logs
     )
 

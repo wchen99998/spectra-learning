@@ -242,7 +242,7 @@ def resolve_msg_probe_select_metric(config: Any) -> str:
     return str(
         config.get(
             "msg_probe_select_metric",
-            "msg_probe/test/auc_fluorine",
+            "msg_probe/val/auc_fluorine",
         )
     )
 

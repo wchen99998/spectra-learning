@@ -2246,9 +2246,9 @@ def test_training_loop_runs_distributed_online_probe_and_logs_on_main(monkeypatc
         covariance_pooler=None,
         online_maccs_only=False,
     ):
-        assert online_maccs_only is True
+        assert online_maccs_only is False
         probe_calls.append((model, device))
-        return {"msg_probe/mean/test/auc_maccs_mean": 0.75}
+        return {"msg_probe/mean/test/auc_fluorine": 0.75}
 
     def fake_barrier(distributed):
         barriers.append((distributed.rank, distributed.world_size))
@@ -2305,10 +2305,10 @@ def test_training_loop_runs_distributed_online_probe_and_logs_on_main(monkeypatc
     )
 
     assert probe_calls == [(model, device), (model, device)]
-    assert main_logger.logs == [({"msg_probe/mean/test/auc_maccs_mean": 0.75}, 2)]
+    assert main_logger.logs == [({"msg_probe/mean/test/auc_fluorine": 0.75}, 2)]
     assert worker_logger.logs == []
     assert barriers == [(0, 2), (0, 2), (1, 2), (1, 2)]
-    assert main_metrics["msg_probe/mean/test/auc_maccs_mean"] == 0.75
+    assert main_metrics["msg_probe/mean/test/auc_fluorine"] == 0.75
     assert main_metrics["run/final_global_step"] == 2.0
     assert worker_metrics["run/final_global_step"] == 2.0
 
