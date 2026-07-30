@@ -54,6 +54,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pairmixer_pair_dim = 384
     cfg.pairmixer_pair_feature_hidden_dim = 768
     cfg.pairmixer_dropout = 0.0
+    cfg.pairmixer_use_pair_bias = True
     cfg.pairmixer_use_fourier_features = True
     cfg.pairmixer_fourier_num_freqs = 16
     cfg.pairmixer_fourier_x_min = 0.01

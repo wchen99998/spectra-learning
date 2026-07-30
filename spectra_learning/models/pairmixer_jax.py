@@ -10,8 +10,8 @@ from flax import nnx
 from spectra_learning.data.spectra import PEAK_MZ_MAX
 from spectra_learning.models.common_jax import (
     Array,
-    LayerNorm,
     Linear,
+    RMSNorm,
     pair_mask,
     scaled_dot_product_attention,
     silu,
@@ -463,7 +463,7 @@ class TriangleMultiplicativeUpdate(nnx.Module):
         rngs = nnx.Rngs(0) if rngs is None else rngs
         self.direction = direction
         self.compute_dtype = compute_dtype
-        self.norm_in = LayerNorm(pair_dim, eps=norm_eps)
+        self.norm_in = RMSNorm(pair_dim, eps=norm_eps)
         self.p_in = Linear(pair_dim, 2 * pair_dim, compute_dtype=compute_dtype, rngs=rngs)
         self.g_in = Linear(
             pair_dim,
@@ -472,8 +472,14 @@ class TriangleMultiplicativeUpdate(nnx.Module):
             init="gate",
             rngs=rngs,
         )
-        self.norm_out = LayerNorm(pair_dim, eps=norm_eps)
-        self.p_out = Linear(pair_dim, pair_dim, compute_dtype=compute_dtype, rngs=rngs)
+        self.norm_out = RMSNorm(pair_dim, eps=norm_eps)
+        self.p_out = Linear(
+            pair_dim,
+            pair_dim,
+            compute_dtype=compute_dtype,
+            init="zeros",
+            rngs=rngs,
+        )
         self.g_out = Linear(
             pair_dim,
             pair_dim,
@@ -524,14 +530,20 @@ class AttentionPairBias(nnx.Module):
         pair_dim: int,
         num_heads: int,
         norm_eps: float,
+        use_pair_bias: bool = True,
         compute_dtype: object = jnp.float32,
         rngs: nnx.Rngs | None = None,
     ) -> None:
         rngs = nnx.Rngs(0) if rngs is None else rngs
         self.num_heads = num_heads
         self.head_dim = single_dim // num_heads
-        self.single_norm = LayerNorm(single_dim, eps=norm_eps)
-        self.pair_norm = LayerNorm(pair_dim, eps=norm_eps)
+        self.use_pair_bias = use_pair_bias
+        self.single_norm = RMSNorm(single_dim, eps=norm_eps)
+        self.pair_norm = (
+            RMSNorm(pair_dim, eps=norm_eps) if use_pair_bias else None
+        )
+        self.q_norm = RMSNorm(self.head_dim, eps=norm_eps, affine=False)
+        self.k_norm = RMSNorm(self.head_dim, eps=norm_eps, affine=False)
         self.qkv = Linear(
             single_dim,
             3 * single_dim,
@@ -539,12 +551,16 @@ class AttentionPairBias(nnx.Module):
             compute_dtype=compute_dtype,
             rngs=rngs,
         )
-        self.pair_bias = Linear(
-            pair_dim,
-            num_heads,
-            bias=False,
-            compute_dtype=compute_dtype,
-            rngs=rngs,
+        self.pair_bias = (
+            Linear(
+                pair_dim,
+                num_heads,
+                bias=False,
+                compute_dtype=compute_dtype,
+                rngs=rngs,
+            )
+            if use_pair_bias
+            else None
         )
         self.g = Linear(
             single_dim,
@@ -553,7 +569,13 @@ class AttentionPairBias(nnx.Module):
             init="gate",
             rngs=rngs,
         )
-        self.o = Linear(single_dim, single_dim, compute_dtype=compute_dtype, rngs=rngs)
+        self.o = Linear(
+            single_dim,
+            single_dim,
+            compute_dtype=compute_dtype,
+            init="zeros",
+            rngs=rngs,
+        )
 
     def __call__(
         self,
@@ -575,12 +597,23 @@ class AttentionPairBias(nnx.Module):
         q = jnp.swapaxes(q, 1, 2)
         k = jnp.swapaxes(k, 1, 2)
         v = jnp.swapaxes(v, 1, 2)
-        peak_bias = jnp.transpose(self.pair_bias(self.pair_norm(pair)), (0, 3, 1, 2))
-        extra_tokens = num_tokens - num_peak_tokens
-        attn_bias = jnp.pad(
-            peak_bias,
-            ((0, 0), (0, 0), (0, extra_tokens), (0, extra_tokens)),
-        ).astype(jnp.float32)
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+        if self.use_pair_bias:
+            peak_bias = jnp.transpose(
+                self.pair_bias(self.pair_norm(pair)),
+                (0, 3, 1, 2),
+            )
+            extra_tokens = num_tokens - num_peak_tokens
+            attn_bias = jnp.pad(
+                peak_bias,
+                ((0, 0), (0, 0), (0, extra_tokens), (0, extra_tokens)),
+            ).astype(jnp.float32)
+        else:
+            attn_bias = jnp.zeros(
+                (batch_size, 1, 1, num_tokens),
+                dtype=jnp.float32,
+            )
         attn_bias = jnp.where(
             token_mask[:, None, None, :],
             attn_bias,
@@ -597,9 +630,10 @@ class AttentionPairBias(nnx.Module):
         prefix: str,
     ) -> None:
         self.single_norm.load_torch_state_dict(state_dict, f"{prefix}.single_norm")
-        self.pair_norm.load_torch_state_dict(state_dict, f"{prefix}.pair_norm")
         self.qkv.load_torch_state_dict(state_dict, f"{prefix}.qkv")
-        self.pair_bias.load_torch_state_dict(state_dict, f"{prefix}.pair_bias")
+        if self.use_pair_bias:
+            self.pair_norm.load_torch_state_dict(state_dict, f"{prefix}.pair_norm")
+            self.pair_bias.load_torch_state_dict(state_dict, f"{prefix}.pair_bias")
         self.g.load_torch_state_dict(state_dict, f"{prefix}.g")
         self.o.load_torch_state_dict(state_dict, f"{prefix}.o")
 
@@ -615,8 +649,8 @@ class GatedSingleToPairUpdate(nnx.Module):
         rngs: nnx.Rngs | None = None,
     ) -> None:
         rngs = nnx.Rngs(0) if rngs is None else rngs
-        self.single_norm = LayerNorm(single_dim, eps=norm_eps)
-        self.pair_norm = LayerNorm(pair_dim, eps=norm_eps)
+        self.single_norm = RMSNorm(single_dim, eps=norm_eps)
+        self.pair_norm = RMSNorm(pair_dim, eps=norm_eps)
         self.left = Linear(single_dim, pair_dim, compute_dtype=compute_dtype, rngs=rngs)
         self.right = Linear(single_dim, pair_dim, compute_dtype=compute_dtype, rngs=rngs)
         self.out = Linear(pair_dim, pair_dim, compute_dtype=compute_dtype, rngs=rngs)
@@ -661,6 +695,7 @@ class PairMixerBlock(nnx.Module):
         norm_eps: float,
         dropout: float,
         use_single_to_pair_update: bool = False,
+        use_pair_bias: bool = True,
         use_fastmixer: bool = False,
         fastmixer_max_visible_tokens: int | None = None,
         transition_type: str = "swiglu",
@@ -690,6 +725,7 @@ class PairMixerBlock(nnx.Module):
             compute_dtype=compute_dtype,
             rngs=rngs,
         )
+        self.tri_mul_out_post_norm = RMSNorm(pair_dim, eps=norm_eps)
         self.tri_mul_in = TriangleMultiplicativeUpdate(
             pair_dim,
             direction="incoming",
@@ -697,7 +733,8 @@ class PairMixerBlock(nnx.Module):
             compute_dtype=compute_dtype,
             rngs=rngs,
         )
-        self.pair_transition_norm = LayerNorm(pair_dim, eps=norm_eps)
+        self.tri_mul_in_post_norm = RMSNorm(pair_dim, eps=norm_eps)
+        self.pair_transition_norm = RMSNorm(pair_dim, eps=norm_eps)
         self.pair_transition = _build_pairmixer_transition(
             pair_dim,
             hidden_dim=math.ceil(pair_dim * attention_mlp_multiple),
@@ -705,6 +742,7 @@ class PairMixerBlock(nnx.Module):
             compute_dtype=compute_dtype,
             rngs=rngs,
         )
+        self.pair_transition_post_norm = RMSNorm(pair_dim, eps=norm_eps)
         if self.use_single_to_pair_update:
             self.single_to_pair_update = GatedSingleToPairUpdate(
                 single_dim=single_dim,
@@ -713,15 +751,18 @@ class PairMixerBlock(nnx.Module):
                 compute_dtype=compute_dtype,
                 rngs=rngs,
             )
+            self.single_to_pair_post_norm = RMSNorm(pair_dim, eps=norm_eps)
         self.single_attention = AttentionPairBias(
             single_dim=single_dim,
             pair_dim=pair_dim,
             num_heads=num_heads,
             norm_eps=norm_eps,
+            use_pair_bias=use_pair_bias,
             compute_dtype=compute_dtype,
             rngs=rngs,
         )
-        self.single_transition_norm = LayerNorm(single_dim, eps=norm_eps)
+        self.single_attention_post_norm = RMSNorm(single_dim, eps=norm_eps)
+        self.single_transition_norm = RMSNorm(single_dim, eps=norm_eps)
         self.single_transition = _build_pairmixer_transition(
             single_dim,
             hidden_dim=math.ceil(single_dim * attention_mlp_multiple),
@@ -729,6 +770,7 @@ class PairMixerBlock(nnx.Module):
             compute_dtype=compute_dtype,
             rngs=rngs,
         )
+        self.single_transition_post_norm = RMSNorm(single_dim, eps=norm_eps)
 
     def __call__(
         self,
@@ -750,15 +792,23 @@ class PairMixerBlock(nnx.Module):
                 token_mask,
                 pair_mask_value,
             )
-        pair = pair + self.tri_mul_out(pair, peak_mask, pair_mask_value)
-        pair = pair + self.tri_mul_in(pair, peak_mask, pair_mask_value)
-        pair = pair + self.pair_transition(self.pair_transition_norm(pair))
+        pair = pair + self.tri_mul_out_post_norm(
+            self.tri_mul_out(pair, peak_mask, pair_mask_value)
+        )
+        pair = pair + self.tri_mul_in_post_norm(
+            self.tri_mul_in(pair, peak_mask, pair_mask_value)
+        )
+        pair = pair + self.pair_transition_post_norm(
+            self.pair_transition(self.pair_transition_norm(pair))
+        )
         pair = pair * pair_mask_value[..., None].astype(pair.dtype)
         if self.use_single_to_pair_update:
-            pair = pair + self.single_to_pair_update(
-                single,
-                pair,
-                pair_mask_value,
+            pair = pair + self.single_to_pair_post_norm(
+                self.single_to_pair_update(
+                    single,
+                    pair,
+                    pair_mask_value,
+                )
             )
             pair = pair * pair_mask_value[..., None].astype(pair.dtype)
         attention_update = self.single_attention(
@@ -767,8 +817,10 @@ class PairMixerBlock(nnx.Module):
             token_mask,
             peak_mask.shape[1],
         )
-        single = single + attention_update
-        single = single + self.single_transition(self.single_transition_norm(single))
+        single = single + self.single_attention_post_norm(attention_update)
+        single = single + self.single_transition_post_norm(
+            self.single_transition(self.single_transition_norm(single))
+        )
         return single, pair
 
     def _fastmixer_call(
@@ -806,44 +858,56 @@ class PairMixerBlock(nnx.Module):
         single_compact = _gather_single(single, idx)
         pair_mask_compact = compact_token_mask[:, :, None] & compact_token_mask[:, None, :]
 
-        pair_compact = pair_compact + self._fast_triangle_update(
-            self.tri_mul_out,
-            pair_compact,
-            compact_token_mask,
-            pair_mask_compact,
+        pair_compact = pair_compact + self.tri_mul_out_post_norm(
+            self._fast_triangle_update(
+                self.tri_mul_out,
+                pair_compact,
+                compact_token_mask,
+                pair_mask_compact,
+            )
         )
-        pair_compact = pair_compact + self._fast_triangle_update(
-            self.tri_mul_in,
-            pair_compact,
-            compact_token_mask,
-            pair_mask_compact,
+        pair_compact = pair_compact + self.tri_mul_in_post_norm(
+            self._fast_triangle_update(
+                self.tri_mul_in,
+                pair_compact,
+                compact_token_mask,
+                pair_mask_compact,
+            )
         )
-        pair_compact = pair_compact + _transition_with_preferred_acc(
-            self.pair_transition,
-            self.pair_transition_norm(pair_compact),
+        pair_compact = pair_compact + self.pair_transition_post_norm(
+            _transition_with_preferred_acc(
+                self.pair_transition,
+                self.pair_transition_norm(pair_compact),
+            )
         )
         pair_compact = pair_compact * pair_mask_compact[..., None].astype(
             pair_compact.dtype
         )
         if self.use_single_to_pair_update:
-            pair_compact = pair_compact + self._fast_single_to_pair_update(
-                single_compact,
-                pair_compact,
-                pair_mask_compact,
+            pair_compact = pair_compact + self.single_to_pair_post_norm(
+                self._fast_single_to_pair_update(
+                    single_compact,
+                    pair_compact,
+                    pair_mask_compact,
+                )
             )
             pair_compact = pair_compact * pair_mask_compact[..., None].astype(
                 pair_compact.dtype
             )
 
-        single = single + self._fast_attention_pair_bias(
-            single,
-            pair_compact,
-            idx,
-            token_mask,
+        single = single + self.single_attention_post_norm(
+            self._fast_attention_pair_bias(
+                single,
+                pair_compact,
+                idx,
+                token_mask,
+            )
         )
-        single = single + _transition_with_preferred_acc(
-            self.single_transition,
-            self.single_transition_norm(single),
+        single = single + self.single_transition_post_norm(
+            _transition_with_preferred_acc(
+                self.single_transition,
+                self.single_transition_norm(single),
+            )
         )
         return single, pair_compact
 
@@ -855,43 +919,55 @@ class PairMixerBlock(nnx.Module):
     ) -> tuple[Array, Array]:
         pair_mask_compact = compact_token_mask[:, :, None] & compact_token_mask[:, None, :]
 
-        pair_compact = pair_compact + self._fast_triangle_update(
-            self.tri_mul_out,
-            pair_compact,
-            compact_token_mask,
-            pair_mask_compact,
+        pair_compact = pair_compact + self.tri_mul_out_post_norm(
+            self._fast_triangle_update(
+                self.tri_mul_out,
+                pair_compact,
+                compact_token_mask,
+                pair_mask_compact,
+            )
         )
-        pair_compact = pair_compact + self._fast_triangle_update(
-            self.tri_mul_in,
-            pair_compact,
-            compact_token_mask,
-            pair_mask_compact,
+        pair_compact = pair_compact + self.tri_mul_in_post_norm(
+            self._fast_triangle_update(
+                self.tri_mul_in,
+                pair_compact,
+                compact_token_mask,
+                pair_mask_compact,
+            )
         )
-        pair_compact = pair_compact + _transition_with_preferred_acc(
-            self.pair_transition,
-            self.pair_transition_norm(pair_compact),
+        pair_compact = pair_compact + self.pair_transition_post_norm(
+            _transition_with_preferred_acc(
+                self.pair_transition,
+                self.pair_transition_norm(pair_compact),
+            )
         )
         pair_compact = pair_compact * pair_mask_compact[..., None].astype(
             pair_compact.dtype
         )
         if self.use_single_to_pair_update:
-            pair_compact = pair_compact + self._fast_single_to_pair_update(
-                single_compact,
-                pair_compact,
-                pair_mask_compact,
+            pair_compact = pair_compact + self.single_to_pair_post_norm(
+                self._fast_single_to_pair_update(
+                    single_compact,
+                    pair_compact,
+                    pair_mask_compact,
+                )
             )
             pair_compact = pair_compact * pair_mask_compact[..., None].astype(
                 pair_compact.dtype
             )
 
-        single_compact = single_compact + self._fast_attention_pair_bias_compact(
-            single_compact,
-            pair_compact,
-            compact_token_mask,
+        single_compact = single_compact + self.single_attention_post_norm(
+            self._fast_attention_pair_bias_compact(
+                single_compact,
+                pair_compact,
+                compact_token_mask,
+            )
         )
-        single_compact = single_compact + _transition_with_preferred_acc(
-            self.single_transition,
-            self.single_transition_norm(single_compact),
+        single_compact = single_compact + self.single_transition_post_norm(
+            _transition_with_preferred_acc(
+                self.single_transition,
+                self.single_transition_norm(single_compact),
+            )
         )
         single_compact = single_compact * compact_token_mask[..., None].astype(
             single_compact.dtype
@@ -969,27 +1045,25 @@ class PairMixerBlock(nnx.Module):
         q = jnp.swapaxes(q, 1, 2)
         k = jnp.swapaxes(k, 1, 2)
         v = jnp.swapaxes(v, 1, 2)
+        q = module.q_norm(q)
+        k = module.k_norm(k)
 
-        pair_norm_compact = module.pair_norm(pair_compact)
-        pair_bias_compact = _linear_with_preferred_acc(
-            module.pair_bias,
-            pair_norm_compact,
-        )
-        zero_norm = module.pair_norm.bias[...].astype(pair_compact.dtype)
-        zero_bias = _linear_with_preferred_acc(
-            module.pair_bias,
-            zero_norm[None, :],
-        )[0]
-        delta_compact = (
-            pair_bias_compact.astype(jnp.float32)
-            - zero_bias.astype(jnp.float32)[None, None, None, :]
-        ).astype(pair_bias_compact.dtype)
-        delta_dense = _scatter_compact_pair_bias(delta_compact, idx, num_tokens)
-        pair_bias = (
-            delta_dense.astype(jnp.float32)
-            + zero_bias.astype(jnp.float32)[None, None, None, :]
-        )
-        attn_bias = jnp.transpose(pair_bias, (0, 3, 1, 2))
+        if module.use_pair_bias:
+            pair_bias_compact = _linear_with_preferred_acc(
+                module.pair_bias,
+                module.pair_norm(pair_compact),
+            )
+            pair_bias = _scatter_compact_pair_bias(
+                pair_bias_compact,
+                idx,
+                num_tokens,
+            ).astype(jnp.float32)
+            attn_bias = jnp.transpose(pair_bias, (0, 3, 1, 2))
+        else:
+            attn_bias = jnp.zeros(
+                (batch_size, 1, 1, num_tokens),
+                dtype=jnp.float32,
+            )
         attn_bias = jnp.where(
             token_mask[:, None, None, :],
             attn_bias,
@@ -1036,12 +1110,20 @@ class PairMixerBlock(nnx.Module):
         q = jnp.swapaxes(q, 1, 2)
         k = jnp.swapaxes(k, 1, 2)
         v = jnp.swapaxes(v, 1, 2)
+        q = module.q_norm(q)
+        k = module.k_norm(k)
 
-        pair_bias = _linear_with_preferred_acc(
-            module.pair_bias,
-            module.pair_norm(pair_compact),
-        )
-        attn_bias = jnp.transpose(pair_bias, (0, 3, 1, 2))
+        if module.use_pair_bias:
+            pair_bias = _linear_with_preferred_acc(
+                module.pair_bias,
+                module.pair_norm(pair_compact),
+            )
+            attn_bias = jnp.transpose(pair_bias, (0, 3, 1, 2))
+        else:
+            attn_bias = jnp.zeros(
+                (batch_size, 1, 1, num_tokens),
+                dtype=jnp.float32,
+            )
         attn_bias = jnp.where(
             compact_token_mask[:, None, None, :],
             attn_bias.astype(jnp.float32),
@@ -1078,7 +1160,15 @@ class PairMixerBlock(nnx.Module):
         prefix: str,
     ) -> None:
         self.tri_mul_out.load_torch_state_dict(state_dict, f"{prefix}.tri_mul_out")
+        self.tri_mul_out_post_norm.load_torch_state_dict(
+            state_dict,
+            f"{prefix}.tri_mul_out_post_norm",
+        )
         self.tri_mul_in.load_torch_state_dict(state_dict, f"{prefix}.tri_mul_in")
+        self.tri_mul_in_post_norm.load_torch_state_dict(
+            state_dict,
+            f"{prefix}.tri_mul_in_post_norm",
+        )
         self.pair_transition_norm.load_torch_state_dict(
             state_dict,
             f"{prefix}.pair_transition_norm",
@@ -1087,14 +1177,26 @@ class PairMixerBlock(nnx.Module):
             state_dict,
             f"{prefix}.pair_transition",
         )
+        self.pair_transition_post_norm.load_torch_state_dict(
+            state_dict,
+            f"{prefix}.pair_transition_post_norm",
+        )
         if self.use_single_to_pair_update:
             self.single_to_pair_update.load_torch_state_dict(
                 state_dict,
                 f"{prefix}.single_to_pair_update",
             )
+            self.single_to_pair_post_norm.load_torch_state_dict(
+                state_dict,
+                f"{prefix}.single_to_pair_post_norm",
+            )
         self.single_attention.load_torch_state_dict(
             state_dict,
             f"{prefix}.single_attention",
+        )
+        self.single_attention_post_norm.load_torch_state_dict(
+            state_dict,
+            f"{prefix}.single_attention_post_norm",
         )
         self.single_transition_norm.load_torch_state_dict(
             state_dict,
@@ -1103,4 +1205,8 @@ class PairMixerBlock(nnx.Module):
         self.single_transition.load_torch_state_dict(
             state_dict,
             f"{prefix}.single_transition",
+        )
+        self.single_transition_post_norm.load_torch_state_dict(
+            state_dict,
+            f"{prefix}.single_transition_post_norm",
         )

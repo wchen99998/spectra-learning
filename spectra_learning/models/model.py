@@ -24,7 +24,6 @@ from spectra_learning.models.settings import (
     load_frozen_teacher_settings,
 )
 from spectra_learning.models.spectrum_metadata import torch_spectrum_metadata_from_batch
-from spectra_learning.models.transformer import _build_norm
 
 
 def _zero_scalar_like(value: Tensor) -> Tensor:
@@ -259,6 +258,7 @@ class PeakSetJEPA(nn.Module):
             pair_dim=cfg.pairmixer_pair_dim,
             pair_feature_hidden_dim=cfg.pairmixer_pair_feature_hidden_dim,
             pairmixer_dropout=cfg.pairmixer_dropout,
+            pairmixer_use_pair_bias=cfg.pairmixer_use_pair_bias,
             pairmixer_mz_scale=cfg.pairmixer_mz_scale,
             pairmixer_precursor_mz_scale=cfg.pairmixer_precursor_mz_scale,
             pairmixer_use_fourier_features=cfg.pairmixer_use_fourier_features,
@@ -365,15 +365,16 @@ class PeakSetJEPA(nn.Module):
                 use_single_to_pair_update=(
                     self.pairmixer_block_type in {"bi-dense", "fastmixer"}
                 ),
+                use_pair_bias=cfg.pairmixer_use_pair_bias,
                 transition_type=self.pairmixer_transition_type,
             )
             predictor_blocks.append(block)
         self.masked_latent_predictor = nn.ModuleList(predictor_blocks)
         self.predictor_final_norm = (
-            _build_norm(
+            nn.RMSNorm(
                 self.predictor_dim,
                 eps=self.norm_eps,
-                affine=False,
+                elementwise_affine=False,
             )
             if cfg.predictor_apply_final_norm
             else nn.Identity()

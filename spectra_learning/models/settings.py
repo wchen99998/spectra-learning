@@ -105,6 +105,7 @@ class PeakSetJEPASettings:
     pairmixer_pair_dim: int | None = None
     pairmixer_pair_feature_hidden_dim: int = 128
     pairmixer_dropout: float = 0.0
+    pairmixer_use_pair_bias: bool = True
     pairmixer_mz_scale: float = PEAK_MZ_MAX
     pairmixer_precursor_mz_scale: float = PEAK_MZ_MAX
     pairmixer_use_fourier_features: bool = True

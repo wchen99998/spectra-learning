@@ -50,7 +50,9 @@ def test_fastmixer_dense_auto_capacity_matches_fastmixer():
 def test_1b_mae_schedule_uses_three_compact_shapes():
     cfg = load_config("configs/1b_pairmixer_dense_adamw.py")
 
-    assert cfg.optimizer_state_dtype == "bf16"
+    assert cfg.learning_rate == pytest.approx(3e-4)
+    assert cfg.weight_decay == pytest.approx(0.1)
+    assert cfg.optimizer_state_dtype == "fp32"
     assert pairmixer_fast_mae_stage_visible_tokens(cfg) == (
         (17, 41),
         (27, 41),
@@ -64,6 +66,10 @@ def test_1b_mae_schedule_uses_three_compact_shapes():
     assert cfg.gradient_accumulation_steps == 8
     assert tuple(cfg.gradient_accumulation_steps_schedule) == (8, 16, 16)
     assert cfg.activation_checkpoint_mode == "none"
+    assert cfg.max_duration_hours == 95.0
+    assert cfg.mae_loss_weight == 0.7
+    assert cfg.mae_intensity_loss_weight == 0.0
+    assert cfg.distogram_loss_weight == 0.3
     settings = PeakSetJEPASettings.from_config(cfg)
     assert settings.pairmixer_fast_encoder_max_visible_tokens == 17
     assert settings.pairmixer_fast_max_visible_tokens == 41

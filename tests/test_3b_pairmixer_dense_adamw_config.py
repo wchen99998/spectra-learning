@@ -47,7 +47,7 @@ def test_3b_pairmixer_has_three_billion_parameter_encoder_plus_ten_percent() -> 
     encoder_params = counts["encoder"]
     predictor_side_params = sum(counts.values()) - encoder_params
 
-    assert encoder_params == 3_002_501_472
-    assert predictor_side_params == 306_264_746
-    assert sum(counts.values()) == 3_308_766_218
-    assert predictor_side_params / encoder_params == pytest.approx(0.1020032)
+    assert encoder_params == 3_002_431_584
+    assert predictor_side_params == 306_232_224
+    assert sum(counts.values()) == 3_308_663_808
+    assert predictor_side_params / encoder_params == pytest.approx(0.1019947)

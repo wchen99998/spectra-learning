@@ -12,11 +12,14 @@ from spectra_learning.models.peak_features import FourierFeatures
 from spectra_learning.models.transformer import (
     FeedForward,
     SwiGLUFeedForward,
-    _build_norm,
 )
 
 
 SUPPORTED_PAIRMIXER_TRANSITION_TYPES = {"swiglu", "feedforward"}
+
+
+def _build_norm(dim: int, *, eps: float, affine: bool = True) -> nn.Module:
+    return nn.RMSNorm(dim, eps=eps, elementwise_affine=affine)
 
 
 def _init_linear(linear: nn.Linear, *, gate: bool = False) -> None:
@@ -217,7 +220,8 @@ class TriangleMultiplicativeUpdate(nn.Module):
         self.g_out = nn.Linear(pair_dim, pair_dim)
         _init_linear(self.p_in)
         _init_linear(self.g_in, gate=True)
-        _init_linear(self.p_out)
+        nn.init.zeros_(self.p_out.weight)
+        nn.init.zeros_(self.p_out.bias)
         _init_linear(self.g_out, gate=True)
 
     def forward(
@@ -254,6 +258,8 @@ class TriangleAttention(nn.Module):
         self.head_dim = pair_dim // num_heads
         self.ending = ending
         self.norm = _build_norm(pair_dim, eps=norm_eps)
+        self.q_norm = _build_norm(self.head_dim, eps=norm_eps, affine=False)
+        self.k_norm = _build_norm(self.head_dim, eps=norm_eps, affine=False)
         self.qkv = nn.Linear(pair_dim, 3 * pair_dim, bias=False)
         self.bias = nn.Linear(pair_dim, num_heads, bias=False)
         self.g = nn.Linear(pair_dim, pair_dim)
@@ -283,6 +289,8 @@ class TriangleAttention(nn.Module):
         q = q.permute(0, 1, 3, 2, 4)
         k = k.permute(0, 1, 3, 2, 4)
         v = v.permute(0, 1, 3, 2, 4)
+        q = self.q_norm(q)
+        k = self.k_norm(k)
         bias = self.bias(x_norm).permute(0, 3, 1, 2).unsqueeze(1)
         key_mask = peak_mask[:, None, None, None, :].expand(
             batch_size,
@@ -332,20 +340,30 @@ class AttentionPairBias(nn.Module):
         pair_dim: int,
         num_heads: int,
         norm_eps: float,
+        use_pair_bias: bool = True,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = single_dim // num_heads
+        self.use_pair_bias = use_pair_bias
         self.single_norm = _build_norm(single_dim, eps=norm_eps)
-        self.pair_norm = _build_norm(pair_dim, eps=norm_eps)
+        self.pair_norm = (
+            _build_norm(pair_dim, eps=norm_eps) if use_pair_bias else None
+        )
+        self.q_norm = _build_norm(self.head_dim, eps=norm_eps, affine=False)
+        self.k_norm = _build_norm(self.head_dim, eps=norm_eps, affine=False)
         self.qkv = nn.Linear(single_dim, 3 * single_dim, bias=False)
-        self.pair_bias = nn.Linear(pair_dim, num_heads, bias=False)
+        self.pair_bias = (
+            nn.Linear(pair_dim, num_heads, bias=False) if use_pair_bias else None
+        )
         self.g = nn.Linear(single_dim, single_dim)
         self.o = nn.Linear(single_dim, single_dim)
         _init_linear(self.qkv)
-        _init_linear(self.pair_bias)
+        if self.pair_bias is not None:
+            _init_linear(self.pair_bias)
         _init_linear(self.g, gate=True)
-        _init_linear(self.o)
+        nn.init.zeros_(self.o.weight)
+        nn.init.zeros_(self.o.bias)
 
     def forward(
         self,
@@ -367,10 +385,22 @@ class AttentionPairBias(nn.Module):
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
+        q = self.q_norm(q)
+        k = self.k_norm(k)
 
-        peak_bias = self.pair_bias(self.pair_norm(pair)).permute(0, 3, 1, 2)
-        extra_tokens = num_tokens - num_peak_tokens
-        attn_bias = F.pad(peak_bias, (0, extra_tokens, 0, extra_tokens)).float()
+        if self.use_pair_bias:
+            peak_bias = self.pair_bias(self.pair_norm(pair)).permute(0, 3, 1, 2)
+            extra_tokens = num_tokens - num_peak_tokens
+            attn_bias = F.pad(peak_bias, (0, extra_tokens, 0, extra_tokens)).float()
+        else:
+            attn_bias = torch.zeros(
+                batch_size,
+                1,
+                1,
+                num_tokens,
+                device=single.device,
+                dtype=torch.float32,
+            )
         attn_bias = attn_bias.masked_fill(
             ~token_mask[:, None, None, :],
             float("-inf"),
@@ -427,6 +457,7 @@ class PairMixerBlock(nn.Module):
         norm_eps: float,
         dropout: float,
         use_single_to_pair_update: bool = False,
+        use_pair_bias: bool = True,
         transition_type: str = "swiglu",
     ) -> None:
         super().__init__()
@@ -441,11 +472,13 @@ class PairMixerBlock(nn.Module):
             direction="outgoing",
             norm_eps=norm_eps,
         )
+        self.tri_mul_out_post_norm = _build_norm(pair_dim, eps=norm_eps)
         self.tri_mul_in = TriangleMultiplicativeUpdate(
             pair_dim,
             direction="incoming",
             norm_eps=norm_eps,
         )
+        self.tri_mul_in_post_norm = _build_norm(pair_dim, eps=norm_eps)
         self.pair_transition_norm = _build_norm(
             pair_dim,
             eps=norm_eps,
@@ -455,18 +488,22 @@ class PairMixerBlock(nn.Module):
             hidden_dim=math.ceil(pair_dim * attention_mlp_multiple),
             transition_type=self.transition_type,
         )
+        self.pair_transition_post_norm = _build_norm(pair_dim, eps=norm_eps)
         if self.use_single_to_pair_update:
             self.single_to_pair_update = GatedSingleToPairUpdate(
                 single_dim=single_dim,
                 pair_dim=pair_dim,
                 norm_eps=norm_eps,
             )
+            self.single_to_pair_post_norm = _build_norm(pair_dim, eps=norm_eps)
         self.single_attention = AttentionPairBias(
             single_dim=single_dim,
             pair_dim=pair_dim,
             num_heads=num_heads,
             norm_eps=norm_eps,
+            use_pair_bias=use_pair_bias,
         )
+        self.single_attention_post_norm = _build_norm(single_dim, eps=norm_eps)
         self.single_transition_norm = _build_norm(
             single_dim,
             eps=norm_eps,
@@ -476,6 +513,7 @@ class PairMixerBlock(nn.Module):
             hidden_dim=math.ceil(single_dim * attention_mlp_multiple),
             transition_type=self.transition_type,
         )
+        self.single_transition_post_norm = _build_norm(single_dim, eps=norm_eps)
         self.drop = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
 
     def forward(
@@ -489,28 +527,42 @@ class PairMixerBlock(nn.Module):
         Float[Tensor, "batch peaks peaks pair"],
     ]:
         pair_mask = _pair_mask(peak_mask)
-        pair = pair + self.drop(self.tri_mul_out(pair, pair_mask))
-        pair = pair + self.drop(self.tri_mul_in(pair, pair_mask))
-        pair = pair + self.drop(self.pair_transition(self.pair_transition_norm(pair)))
+        pair = pair + self.drop(
+            self.tri_mul_out_post_norm(self.tri_mul_out(pair, pair_mask))
+        )
+        pair = pair + self.drop(
+            self.tri_mul_in_post_norm(self.tri_mul_in(pair, pair_mask))
+        )
+        pair = pair + self.drop(
+            self.pair_transition_post_norm(
+                self.pair_transition(self.pair_transition_norm(pair))
+            )
+        )
         pair = pair * pair_mask.unsqueeze(-1).to(dtype=pair.dtype)
         if self.use_single_to_pair_update:
             pair = pair + self.drop(
-                self.single_to_pair_update(
-                    single,
-                    pair,
-                    pair_mask,
+                self.single_to_pair_post_norm(
+                    self.single_to_pair_update(
+                        single,
+                        pair,
+                        pair_mask,
+                    )
                 )
             )
             pair = pair * pair_mask.unsqueeze(-1).to(dtype=pair.dtype)
         single = single + self.drop(
-            self.single_attention(
-                single,
-                pair,
-                token_mask,
-                peak_mask.shape[1],
+            self.single_attention_post_norm(
+                self.single_attention(
+                    single,
+                    pair,
+                    token_mask,
+                    peak_mask.shape[1],
+                )
             )
         )
         single = single + self.drop(
-            self.single_transition(self.single_transition_norm(single))
+            self.single_transition_post_norm(
+                self.single_transition(self.single_transition_norm(single))
+            )
         )
         return single, pair

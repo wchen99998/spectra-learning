@@ -136,7 +136,9 @@ class LayerNorm(nnx.Module):
         affine: bool = True,
     ) -> None:
         self.eps = eps
-        self.weight = nnx.Param(jnp.ones((dim,), dtype=jnp.float32)) if affine else None
+        self.weight = (
+            nnx.Param(jnp.ones((dim,), dtype=jnp.float32)) if affine else None
+        )
         self.bias = nnx.Param(jnp.zeros((dim,), dtype=jnp.float32)) if affine else None
 
     def __call__(self, x: Array) -> Array:
@@ -157,6 +159,41 @@ class LayerNorm(nnx.Module):
         if self.weight is not None:
             load_param(self.weight, state_dict, f"{prefix}.weight")
             load_param(self.bias, state_dict, f"{prefix}.bias")
+
+
+class RMSNorm(nnx.Module):
+    def __init__(
+        self,
+        dim: int,
+        *,
+        eps: float = 1e-5,
+        affine: bool = True,
+    ) -> None:
+        self.eps = eps
+        self.weight = (
+            nnx.Param(jnp.ones((dim,), dtype=jnp.float32)) if affine else None
+        )
+
+    def __call__(self, x: Array) -> Array:
+        x_float = x.astype(jnp.float32)
+        y = x_float * jax.lax.rsqrt(
+            jnp.mean(jnp.square(x_float), axis=-1, keepdims=True) + self.eps
+        )
+        if self.weight is not None:
+            y = y * self.weight[...]
+        return y.astype(x.dtype)
+
+    def load_torch_state_dict(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        prefix: str,
+    ) -> None:
+        if f"{prefix}.bias" in state_dict:
+            raise ValueError(
+                f"{prefix} is a LayerNorm checkpoint; RMSNorm requires a fresh run"
+            )
+        if self.weight is not None:
+            load_param(self.weight, state_dict, f"{prefix}.weight")
 
 
 class Embedding(nnx.Module):

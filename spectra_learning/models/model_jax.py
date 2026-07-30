@@ -11,8 +11,8 @@ from flax import nnx
 from spectra_learning.models.common_jax import (
     Array,
     Identity,
-    LayerNorm,
     Linear,
+    RMSNorm,
     activation_checkpoint_policy,
     assign_param,
     build_frozen_2d_position_embedding,
@@ -241,6 +241,7 @@ class PeakSetJEPAJax(nnx.Module):
                 use_single_to_pair_update=(
                     self.pairmixer_block_type in {"bi-dense", "fastmixer"}
                 ),
+                use_pair_bias=cfg.pairmixer_use_pair_bias,
                 use_fastmixer=self.use_fastmixer,
                 fastmixer_max_visible_tokens=self.pairmixer_fast_max_visible_tokens,
                 transition_type=self.pairmixer_transition_type,
@@ -250,7 +251,7 @@ class PeakSetJEPAJax(nnx.Module):
             predictor_blocks.append(block)
         self.masked_latent_predictor = nnx.List(predictor_blocks)
         self.predictor_final_norm = (
-            LayerNorm(self.predictor_dim, eps=self.norm_eps, affine=False)
+            RMSNorm(self.predictor_dim, eps=self.norm_eps, affine=False)
             if cfg.predictor_apply_final_norm
             else None
         )
@@ -355,6 +356,7 @@ class PeakSetJEPAJax(nnx.Module):
             pair_dim=cfg.pairmixer_pair_dim,
             pair_feature_hidden_dim=cfg.pairmixer_pair_feature_hidden_dim,
             pairmixer_dropout=cfg.pairmixer_dropout,
+            pairmixer_use_pair_bias=cfg.pairmixer_use_pair_bias,
             pairmixer_mz_scale=cfg.pairmixer_mz_scale,
             pairmixer_precursor_mz_scale=cfg.pairmixer_precursor_mz_scale,
             pairmixer_use_fourier_features=cfg.pairmixer_use_fourier_features,

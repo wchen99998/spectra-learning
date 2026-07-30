@@ -398,14 +398,17 @@ class PairMixerEncoderTests(unittest.TestCase):
                 [True, True, True, False, False, False],
             ]
         )
+        final_pair_norm = model.encoder.final_pair_norm
+        model.encoder.final_pair_norm = torch.nn.Identity()
 
         with torch.no_grad():
-            _, pair = model.encoder.forward_with_pair(
+            _, pair_before_norm = model.encoder.forward_with_pair(
                 peak_mz,
                 peak_intensity,
                 valid_mask=valid_mask,
                 visible_mask=valid_mask,
             )
+            pair = final_pair_norm(pair_before_norm)
 
         token_mask = torch.cat(
             [
@@ -415,18 +418,15 @@ class PairMixerEncoderTests(unittest.TestCase):
             dim=1,
         )
         pair_mask = token_mask.unsqueeze(2) & token_mask.unsqueeze(1)
+        valid_pair_before_norm = pair_before_norm[pair_mask].float()
         valid_pair = pair[pair_mask].float()
         torch.testing.assert_close(
-            valid_pair.mean(dim=-1),
-            torch.zeros_like(valid_pair[..., 0]),
-            atol=1e-5,
-            rtol=1e-5,
-        )
-        torch.testing.assert_close(
-            valid_pair.var(dim=-1, unbiased=False),
-            torch.ones_like(valid_pair[..., 0]),
-            atol=2e-4,
-            rtol=2e-4,
+            valid_pair,
+            valid_pair_before_norm
+            * torch.rsqrt(
+                valid_pair_before_norm.square().mean(dim=-1, keepdim=True)
+                + final_pair_norm.eps
+            ),
         )
         torch.testing.assert_close(pair[~pair_mask], torch.zeros_like(pair[~pair_mask]))
 
@@ -1206,6 +1206,16 @@ class BlockJEPATests(unittest.TestCase):
         optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+        train_step_impl(
+            model,
+            batch,
+            [optimizer],
+            [scheduler],
+            autocast_dtype=None,
+            grad_clip_norm=None,
+            global_step=0,
+            total_steps=4,
+        )
         before_student = next(model.encoder.parameters()).detach().clone()
         teacher_encoder = model.teacher_encoder
         teacher_target_projector = model.teacher_target_projector
@@ -1408,7 +1418,7 @@ class BlockJEPATests(unittest.TestCase):
             enabled=True,
         )
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-        before = next(model.encoder.parameters()).detach().clone()
+        before = next(model.target_projector.parameters()).detach().clone()
 
         metrics = train_step_impl(
             model,
@@ -1420,7 +1430,7 @@ class BlockJEPATests(unittest.TestCase):
             grad_scaler=grad_scaler,
         )
 
-        after = next(model.encoder.parameters()).detach()
+        after = next(model.target_projector.parameters()).detach()
         self.assertIn("grad_scale", metrics)
         self.assertEqual(float(metrics["optimizer_step_skipped"]), 0.0)
         self.assertGreaterEqual(float(metrics["grad_scale"]), 16.0)
@@ -1433,7 +1443,7 @@ class BlockJEPATests(unittest.TestCase):
         optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-        before = next(model.encoder.parameters()).detach().clone()
+        before = next(model.target_projector.parameters()).detach().clone()
 
         first_metrics = train_step_impl(
             model,
@@ -1445,7 +1455,7 @@ class BlockJEPATests(unittest.TestCase):
             gradient_accumulation_steps=2,
             accumulation_step=0,
         )
-        middle = next(model.encoder.parameters()).detach().clone()
+        middle = next(model.target_projector.parameters()).detach().clone()
         second_metrics = train_step_impl(
             model,
             batch,
@@ -1458,7 +1468,7 @@ class BlockJEPATests(unittest.TestCase):
             gradient_accumulation_steps=2,
             accumulation_step=1,
         )
-        after = next(model.encoder.parameters()).detach()
+        after = next(model.target_projector.parameters()).detach()
 
         self.assertEqual(float(first_metrics["optimizer_step"]), 0.0)
         self.assertEqual(float(second_metrics["optimizer_step"]), 1.0)

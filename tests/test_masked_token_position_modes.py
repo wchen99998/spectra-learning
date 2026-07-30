@@ -353,6 +353,65 @@ def test_encoder_and_predictor_final_norms_are_non_affine():
     assert list(encoder.final_norm.parameters()) == []
 
 
+@torch.no_grad()
+def test_pair_attention_is_invariant_to_query_key_scale():
+    attention = AttentionPairBias(
+        single_dim=32,
+        pair_dim=16,
+        num_heads=4,
+        norm_eps=1e-5,
+    ).eval()
+    torch.nn.init.eye_(attention.o.weight)
+    single = torch.randn(2, 6, 32)
+    pair = torch.randn(2, 5, 5, 16)
+    mask = torch.ones(2, 6, dtype=torch.bool)
+
+    expected = attention(single, pair, mask, num_peak_tokens=5)
+    attention.qkv.weight[:64].mul_(100.0)
+    actual = attention(single, pair, mask, num_peak_tokens=5)
+
+    torch.testing.assert_close(actual, expected, atol=1e-4, rtol=1e-4)
+
+
+@torch.no_grad()
+def test_pair_attention_can_disable_pair_bias():
+    attention = AttentionPairBias(
+        single_dim=32,
+        pair_dim=16,
+        num_heads=4,
+        norm_eps=1e-5,
+        use_pair_bias=False,
+    ).eval()
+    torch.nn.init.eye_(attention.o.weight)
+    single = torch.randn(2, 6, 32)
+    mask = torch.ones(2, 6, dtype=torch.bool)
+
+    expected = attention(single, torch.randn(2, 5, 5, 16), mask, 5)
+    actual = attention(single, torch.randn(2, 5, 5, 16), mask, 5)
+
+    assert attention.pair_norm is None
+    assert attention.pair_bias is None
+    torch.testing.assert_close(actual, expected)
+
+
+def test_pairmixer_pair_bias_flag_reaches_encoder_and_predictor():
+    settings = PeakSetJEPASettings.from_config({"pairmixer_use_pair_bias": False})
+    model = PeakSetJEPA(
+        model_dim=32,
+        encoder_num_layers=1,
+        encoder_num_heads=4,
+        masked_latent_predictor_num_layers=1,
+        masked_latent_predictor_num_heads=4,
+        num_peaks=6,
+        feature_mlp_hidden_dim=32,
+        pairmixer_use_pair_bias=False,
+    )
+
+    assert not settings.pairmixer_use_pair_bias
+    assert not model.encoder.blocks[0].single_attention.use_pair_bias
+    assert not model.masked_latent_predictor[0].single_attention.use_pair_bias
+
+
 def test_backbone_uses_pairmixer_with_pair_bias_attention_by_construction():
     model = _build_model()
     block = model.encoder.blocks[0]
@@ -531,6 +590,20 @@ def test_bi_dense_pairmixer_adds_gated_single_to_pair_update():
     assert isinstance(block.single_attention, AttentionPairBias)
     assert isinstance(block.pair_transition, SwiGLUFeedForward)
     assert isinstance(block.single_transition, SwiGLUFeedForward)
+    assert all(
+        isinstance(norm, torch.nn.RMSNorm)
+        for norm in (
+            block.tri_mul_out_post_norm,
+            block.tri_mul_in_post_norm,
+            block.pair_transition_post_norm,
+            block.single_to_pair_post_norm,
+            block.single_attention_post_norm,
+            block.single_transition_post_norm,
+        )
+    )
+    assert torch.count_nonzero(block.tri_mul_out.p_out.weight) == 0
+    assert torch.count_nonzero(block.tri_mul_in.p_out.weight) == 0
+    assert torch.count_nonzero(block.single_attention.o.weight) == 0
     assert torch.count_nonzero(block.pair_transition.fc3.weight) == 0
     assert torch.count_nonzero(block.single_transition.fc3.weight) == 0
     assert hasattr(block, "single_to_pair_update")

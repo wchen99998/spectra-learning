@@ -16,6 +16,7 @@ from torch.utils.data import DataLoader
 from spectra_learning.data.gems.collate import GemsBatchCollator
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.model_jax import PeakSetJEPAJax
+from spectra_learning.models.common_jax import RMSNorm
 from spectra_learning.models.pairmixer_jax import PairMixerBlock as JaxPairMixerBlock
 from spectra_learning.models.transformer_jax import FeedForward as JaxFeedForward
 from spectra_learning.training.checkpointing import (
@@ -136,6 +137,17 @@ def _run_canonical_train_step(
     )
     nnx.update(model, trainable_params)
     return metrics
+
+
+def test_jax_rmsnorm_rejects_layernorm_checkpoint():
+    norm = RMSNorm(4)
+    state_dict = {
+        "norm.weight": torch.ones(4),
+        "norm.bias": torch.zeros(4),
+    }
+
+    with pytest.raises(ValueError, match="RMSNorm requires a fresh run"):
+        norm.load_torch_state_dict(state_dict, "norm")
 
 
 def test_jax_native_dense_encoder_cls_pair_tokens_are_random_initialized():
@@ -298,6 +310,21 @@ def test_jax_mae_without_intensity_head_matches_pytorch():
         rtol=1e-6,
         atol=1e-6,
     )
+
+
+def test_jax_mae_without_pair_bias_matches_pytorch():
+    torch.manual_seed(29)
+    kwargs = {**_small_mae_kwargs(), "pairmixer_use_pair_bias": False}
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    jax_model = PeakSetJEPAJax(**kwargs)
+    jax_model.load_torch_state_dict(torch_model.state_dict())
+    batch = _real_pattern_batch("contiguous")
+
+    with torch.no_grad():
+        torch_metrics = torch_model(batch)
+    jax_metrics = jax_model(_jax_batch(batch))
+
+    _assert_metrics_close(torch_metrics, jax_metrics)
 
 
 def test_jax_fastmixer_compact_mae_without_intensity_head():
@@ -498,8 +525,31 @@ def test_jax_native_bi_dense_pairmixer_uses_torch_style_initialization():
     assert not np.allclose(np.asarray(block.pair_transition.fc1.weight[...]), 0.0)
     assert not np.allclose(np.asarray(block.pair_transition.fc2.weight[...]), 0.0)
     assert not np.allclose(np.asarray(block.single_to_pair_update.left.weight[...]), 0.0)
+    assert all(
+        isinstance(norm, RMSNorm)
+        for norm in (
+            block.tri_mul_out_post_norm,
+            block.tri_mul_in_post_norm,
+            block.pair_transition_post_norm,
+            block.single_to_pair_post_norm,
+            block.single_attention_post_norm,
+            block.single_transition_post_norm,
+        )
+    )
     np.testing.assert_allclose(
         np.asarray(block.pair_transition.fc3.weight[...]),
+        0.0,
+    )
+    np.testing.assert_allclose(
+        np.asarray(block.tri_mul_out.p_out.weight[...]),
+        0.0,
+    )
+    np.testing.assert_allclose(
+        np.asarray(block.tri_mul_in.p_out.weight[...]),
+        0.0,
+    )
+    np.testing.assert_allclose(
+        np.asarray(block.single_attention.o.weight[...]),
         0.0,
     )
     np.testing.assert_allclose(
@@ -514,8 +564,46 @@ def test_jax_native_bi_dense_pairmixer_uses_torch_style_initialization():
         np.asarray(block.single_to_pair_update.gate.bias[...]),
         1.0,
     )
-    assert not np.allclose(np.asarray(single_out), np.asarray(single))
+    np.testing.assert_allclose(np.asarray(single_out), np.asarray(single))
     assert not np.allclose(np.asarray(pair_out), np.asarray(pair))
+
+
+def test_jax_fastmixer_attention_can_disable_pair_bias():
+    block = JaxPairMixerBlock(
+        single_dim=8,
+        pair_dim=6,
+        num_heads=2,
+        attention_mlp_multiple=2.0,
+        norm_eps=1e-5,
+        dropout=0.0,
+        use_pair_bias=False,
+        use_fastmixer=True,
+        fastmixer_max_visible_tokens=4,
+        rngs=nnx.Rngs(123),
+    )
+    block.single_attention.o.weight[...] = jnp.eye(8)
+    single = jnp.arange(2 * 4 * 8, dtype=jnp.float32).reshape(2, 4, 8) / 17.0
+    pair = jnp.arange(2 * 4 * 4 * 6, dtype=jnp.float32).reshape(2, 4, 4, 6) / 19.0
+    mask = jnp.ones((2, 4), dtype=jnp.bool_)
+
+    expected = block._fast_attention_pair_bias_compact(single, pair, mask)
+    actual = block._fast_attention_pair_bias_compact(single, -pair, mask)
+
+    assert block.single_attention.pair_norm is None
+    assert block.single_attention.pair_bias is None
+    np.testing.assert_allclose(np.asarray(actual), np.asarray(expected))
+
+
+def test_jax_model_pair_bias_flag_reaches_encoder_and_predictor():
+    model = PeakSetJEPAJax(
+        **_small_mae_kwargs(),
+        pairmixer_use_pair_bias=False,
+    )
+
+    assert not model.encoder.blocks[0].single_attention.use_pair_bias
+    assert model.encoder.blocks[0].single_attention.pair_bias is None
+    assert not model.masked_latent_predictor[0].single_attention.use_pair_bias
+    assert model.masked_latent_predictor[0].single_attention.pair_bias is None
 
 
 def test_jax_native_feedforward_pairmixer_uses_previous_transition_modules():

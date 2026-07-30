@@ -3,7 +3,6 @@ from jaxtyping import Bool, Float
 from torch import Tensor, nn
 
 from spectra_learning.data.spectra import DEFAULT_NUM_PEAKS, PEAK_MZ_MAX
-from spectra_learning.models.transformer import _build_norm
 from spectra_learning.models.common import (
     _build_frozen_position_embedding,
     _merge_visible_mask,
@@ -31,6 +30,7 @@ class PeakSetEncoder(nn.Module):
         pair_dim: int | None = None,
         pair_feature_hidden_dim: int = 128,
         pairmixer_dropout: float = 0.0,
+        pairmixer_use_pair_bias: bool = True,
         pairmixer_mz_scale: float = PEAK_MZ_MAX,
         pairmixer_precursor_mz_scale: float = PEAK_MZ_MAX,
         pairmixer_use_fourier_features: bool = True,
@@ -94,17 +94,18 @@ class PeakSetEncoder(nn.Module):
                 norm_eps=norm_eps,
                 dropout=pairmixer_dropout,
                 use_single_to_pair_update=self.use_bi_dense,
+                use_pair_bias=pairmixer_use_pair_bias,
                 transition_type=pairmixer_transition_type,
             )
             blocks.append(block)
         self.blocks = nn.ModuleList(blocks)
         self.final_norm = (
-            _build_norm(model_dim, eps=norm_eps, affine=False)
+            nn.RMSNorm(model_dim, eps=norm_eps, elementwise_affine=False)
             if apply_final_norm
             else nn.Identity()
         )
         self.final_pair_norm = (
-            _build_norm(pair_dim, eps=norm_eps, affine=True)
+            nn.RMSNorm(pair_dim, eps=norm_eps)
             if apply_final_pair_norm
             else nn.Identity()
         )
