@@ -111,7 +111,7 @@ LORA_ENCODER_TARGET_SUFFIXES = (
     "pair_transition.w1",
     "pair_transition.w2",
 )
-FLUORINE_STATE_CONTRACT_VERSION = 1
+FLUORINE_STATE_CONTRACT_VERSION = 2
 
 
 class TrialParams(NamedTuple):
@@ -701,7 +701,12 @@ def _build_checkpoint_feature_factory(
     if not train_covariance_pooler and pooling == "covariance":
         checkpoint_pooler = cast(CovariancePool, cast(Any, model).covariance_pooler)
         compressed_dim = checkpoint_pooler.left_proj.out_features
-    input_dim = compressed_dim * compressed_dim
+    input_dim = (
+        int(config.model_dim)
+        + int(config.get("pairmixer_pair_dim", config.model_dim))
+        if pooling == "cls"
+        else compressed_dim * compressed_dim
+    )
 
     @torch.no_grad()
     def encode(batch: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -725,9 +730,24 @@ def _build_checkpoint_feature_factory(
             precursor_mz=batch.get("precursor_mz", None),
             spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
         )
-        return _peak_tokens_only(peak_embeddings, batch["peak_valid_mask"]), pair_embeddings
+        return peak_embeddings, pair_embeddings
 
     def build_feature_fn(training: bool):
+        if pooling == "cls":
+
+            def feature_fn(batch: dict[str, torch.Tensor]) -> torch.Tensor:
+                peak_embeddings, pair_embeddings = encode_single_pair(batch)
+                cls_idx = batch["peak_valid_mask"].shape[1]
+                return torch.cat(
+                    [
+                        peak_embeddings[:, cls_idx].float(),
+                        pair_embeddings[:, cls_idx, cls_idx].float(),
+                    ],
+                    dim=-1,
+                )
+
+            return feature_fn, None
+
         if pooling == "single_pair_covariance":
             pooler = SinglePairCovariancePool(
                 single_dim=int(config.model_dim),
@@ -752,7 +772,10 @@ def _build_checkpoint_feature_factory(
             def feature_fn(batch: dict[str, torch.Tensor]) -> torch.Tensor:
                 peak_embeddings, pair_embeddings = encode_single_pair(batch)
                 return pooler(
-                    peak_embeddings.float(),
+                    _peak_tokens_only(
+                        peak_embeddings,
+                        batch["peak_valid_mask"],
+                    ).float(),
                     batch["peak_valid_mask"].to(dtype=torch.bool),
                     pair_embeddings.float(),
                 )
@@ -911,7 +934,7 @@ class FluorineFinetuneModule(torch.nn.Module):
         self,
         *,
         encoder: torch.nn.Module,
-        pooler: torch.nn.Module,
+        pooler: torch.nn.Module | None,
         classifier: MLPClassifier,
         pooling: str,
     ) -> None:
@@ -922,7 +945,7 @@ class FluorineFinetuneModule(torch.nn.Module):
         self.pooling = pooling
 
     def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
-        if self.pooling == "single_pair_covariance":
+        if self.pooling in {"cls", "single_pair_covariance"}:
             peak_embeddings, pair_embeddings = self.encoder.forward_with_pair(
                 batch["peak_mz"],
                 batch["peak_intensity"],
@@ -930,12 +953,24 @@ class FluorineFinetuneModule(torch.nn.Module):
                 precursor_mz=batch.get("precursor_mz", None),
                 spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
             )
-            peak_embeddings = _peak_tokens_only(peak_embeddings, batch["peak_valid_mask"])
-            features = self.pooler(
-                peak_embeddings.float(),
-                batch["peak_valid_mask"].to(dtype=torch.bool),
-                pair_embeddings.float(),
-            )
+            if self.pooling == "cls":
+                cls_idx = batch["peak_valid_mask"].shape[1]
+                features = torch.cat(
+                    [
+                        peak_embeddings[:, cls_idx].float(),
+                        pair_embeddings[:, cls_idx, cls_idx].float(),
+                    ],
+                    dim=-1,
+                )
+            else:
+                features = cast(torch.nn.Module, self.pooler)(
+                    _peak_tokens_only(
+                        peak_embeddings,
+                        batch["peak_valid_mask"],
+                    ).float(),
+                    batch["peak_valid_mask"].to(dtype=torch.bool),
+                    pair_embeddings.float(),
+                )
         else:
             encoded = self.encoder(
                 batch["peak_mz"],
@@ -945,7 +980,7 @@ class FluorineFinetuneModule(torch.nn.Module):
                 spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
             )
             peak_embeddings = _peak_tokens_only(encoded, batch["peak_valid_mask"])
-            features = self.pooler(
+            features = cast(torch.nn.Module, self.pooler)(
                 peak_embeddings.float(),
                 batch["peak_valid_mask"].to(dtype=torch.bool),
             )
@@ -1012,7 +1047,7 @@ class _AdaptationLoaders(NamedTuple):
 class _AdaptationTrainingResult(NamedTuple):
     best_epoch: int
     best_val: dict[str, float]
-    best_state: dict[str, dict[str, torch.Tensor]]
+    best_state: dict[str, dict[str, torch.Tensor] | None]
     history: list[dict[str, Any]]
 
 
@@ -1100,8 +1135,15 @@ def _build_adaptation_pooler(
     config: Any,
     pooling: str,
     device: torch.device,
-) -> tuple[torch.nn.Module, int, int]:
+) -> tuple[torch.nn.Module | None, int, int]:
     covariance_dim = int(config.get("covariance_pooling_dim", 64))
+    if pooling == "cls":
+        return (
+            None,
+            covariance_dim,
+            int(config.model_dim)
+            + int(config.get("pairmixer_pair_dim", config.model_dim)),
+        )
     input_dim = covariance_dim * covariance_dim
     if pooling == "single_pair_covariance":
         pooler: torch.nn.Module = SinglePairCovariancePool(
@@ -1233,7 +1275,10 @@ def _run_adaptation_epochs(
     mode: str,
     state_path: Path,
     state_metadata: dict[str, Any],
-    capture_best_state: Callable[[], dict[str, dict[str, torch.Tensor]]],
+    capture_best_state: Callable[
+        [],
+        dict[str, dict[str, torch.Tensor] | None],
+    ],
     finetune_module: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     loaders: _AdaptationLoaders,
@@ -1251,7 +1296,7 @@ def _run_adaptation_epochs(
     best_value = -float("inf")
     best_epoch = 0
     best_val: dict[str, float] = {}
-    best_state: dict[str, dict[str, torch.Tensor]] = {}
+    best_state: dict[str, dict[str, torch.Tensor] | None] = {}
     history: list[dict[str, Any]] = []
     epochs_without_improvement = 0
     grad_scaler = build_grad_scaler(autocast_dtype, device)
@@ -1422,12 +1467,13 @@ def train_or_load_finetuned(
         pooling=pooling,
         device=device,
     )
-    checkpoint = load_torch_checkpoint(
-        checkpoint_path,
-        map_location="cpu",
-        weights_only=True,
-    )
-    load_resume_covariance_pooler_state(pooler, checkpoint_path, checkpoint)
+    if pooler is not None:
+        checkpoint = load_torch_checkpoint(
+            checkpoint_path,
+            map_location="cpu",
+            weights_only=True,
+        )
+        load_resume_covariance_pooler_state(pooler, checkpoint_path, checkpoint)
     classifier = MLPClassifier(
         input_dim=input_dim,
         hidden_dim=hidden_dim,
@@ -1447,25 +1493,27 @@ def train_or_load_finetuned(
             distributed,
             static_graph=True,
         )
-    optimizer = torch.optim.AdamW(
-        [
-            {
-                "params": model.encoder.parameters(),
-                "lr": model_learning_rate,
-                "weight_decay": weight_decay,
-            },
+    optimizer_groups = [
+        {
+            "params": model.encoder.parameters(),
+            "lr": model_learning_rate,
+            "weight_decay": weight_decay,
+        },
+        {
+            "params": classifier.parameters(),
+            "lr": head_learning_rate,
+            "weight_decay": weight_decay,
+        },
+    ]
+    if pooler is not None:
+        optimizer_groups.append(
             {
                 "params": pooler.parameters(),
                 "lr": pooler_learning_rate,
                 "weight_decay": weight_decay,
-            },
-            {
-                "params": classifier.parameters(),
-                "lr": head_learning_rate,
-                "weight_decay": weight_decay,
-            },
-        ]
-    )
+            }
+        )
+    optimizer = torch.optim.AdamW(optimizer_groups)
     focal_alpha_value = (
         1.0
         - float(loaders.data.metadata["train_positive"])
@@ -1495,10 +1543,12 @@ def train_or_load_finetuned(
         "max_val_samples": max_val_samples,
     }
 
-    def capture_best_state() -> dict[str, dict[str, torch.Tensor]]:
+    def capture_best_state() -> dict[str, dict[str, torch.Tensor] | None]:
         return {
             "model_state": module_state_to_cpu(model),
-            "pooler_state": module_state_to_cpu(pooler),
+            "pooler_state": (
+                module_state_to_cpu(pooler) if pooler is not None else None
+            ),
             "classifier_state": module_state_to_cpu(classifier),
         }
 
@@ -1522,7 +1572,8 @@ def train_or_load_finetuned(
         is_main=is_main,
     )
     model.load_state_dict(result.best_state["model_state"])
-    pooler.load_state_dict(result.best_state["pooler_state"])
+    if pooler is not None:
+        pooler.load_state_dict(result.best_state["pooler_state"])
     classifier.load_state_dict(result.best_state["classifier_state"])
 
     state = _adaptation_state(metadata=state_metadata, result=result, complete=True)
@@ -1650,6 +1701,9 @@ def train_or_load_lora(
             distributed,
             static_graph=True,
         )
+    head_parameters = list(classifier.parameters())
+    if pooler is not None:
+        head_parameters = list(pooler.parameters()) + head_parameters
     optimizer = torch.optim.AdamW(
         [
             {
@@ -1658,7 +1712,7 @@ def train_or_load_lora(
                 "weight_decay": weight_decay,
             },
             {
-                "params": list(pooler.parameters()) + list(classifier.parameters()),
+                "params": head_parameters,
                 "lr": head_learning_rate,
                 "weight_decay": weight_decay,
             },
@@ -1690,10 +1744,12 @@ def train_or_load_lora(
         "max_val_samples": max_val_samples,
     }
 
-    def capture_best_state() -> dict[str, dict[str, torch.Tensor]]:
+    def capture_best_state() -> dict[str, dict[str, torch.Tensor] | None]:
         return {
             "lora_state": lora_state_dict(model.encoder),
-            "pooler_state": module_state_to_cpu(pooler),
+            "pooler_state": (
+                module_state_to_cpu(pooler) if pooler is not None else None
+            ),
             "classifier_state": module_state_to_cpu(classifier),
         }
 
@@ -1717,7 +1773,8 @@ def train_or_load_lora(
         is_main=is_main,
     )
     load_lora_state_dict(model.encoder, result.best_state["lora_state"])
-    pooler.load_state_dict(result.best_state["pooler_state"])
+    if pooler is not None:
+        pooler.load_state_dict(result.best_state["pooler_state"])
     classifier.load_state_dict(result.best_state["classifier_state"])
 
     state = _adaptation_state(metadata=state_metadata, result=result, complete=True)
@@ -1745,7 +1802,9 @@ def evaluate_fluorine_test_split(
     if head_state["mode"] == "lora":
         model.encoder.requires_grad_(False)
         load_fluorine_lora_state(model.encoder, head_state)
-    if pooling == "single_pair_covariance":
+    if pooling == "cls":
+        pooler = None
+    elif pooling == "single_pair_covariance":
         pooler = SinglePairCovariancePool(
             single_dim=int(config.model_dim),
             pair_dim=int(head_state["pair_dim"]),
@@ -1756,8 +1815,9 @@ def evaluate_fluorine_test_split(
             input_dim=int(config.model_dim),
             compressed_dim=covariance_dim,
         ).to(device)
-    pooler.load_state_dict(head_state["pooler_state"])
-    pooler.eval()
+    if pooler is not None:
+        pooler.load_state_dict(head_state["pooler_state"])
+        pooler.eval()
     classifier = MLPClassifier(
         input_dim=int(head_state["input_dim"]),
         hidden_dim=int(head_state["hparams"]["hidden_dim"]),
@@ -1806,18 +1866,7 @@ def evaluate_fluorine_test_split(
 def summarize_metrics(targets: np.ndarray, logits: np.ndarray) -> dict[str, float]:
     probs = _sigmoid_logits(logits)
     pred = probs >= 0.5
-    precision, recall, thresholds = precision_recall_curve(targets, probs)
-    threshold_precision = precision[:-1]
-    threshold_recall = recall[:-1]
-    f1_values = (
-        2.0
-        * threshold_precision
-        * threshold_recall
-        / np.maximum(threshold_precision + threshold_recall, 1e-12)
-    )
-    best_idx = int(np.argmax(f1_values))
-    high_precision = np.flatnonzero(threshold_precision >= 0.9)
-    metrics = {
+    return {
         "roc_auc": float(roc_auc_score(targets, probs)),
         "average_precision": float(average_precision_score(targets, probs)),
         "accuracy_at_0_5": float(accuracy_score(targets, pred)),
@@ -1825,18 +1874,8 @@ def summarize_metrics(targets: np.ndarray, logits: np.ndarray) -> dict[str, floa
         "f1_at_0_5": float(f1_score(targets, pred, zero_division=0)),
         "precision_at_0_5": float(precision_score(targets, pred, zero_division=0)),
         "recall_at_0_5": float(recall_score(targets, pred, zero_division=0)),
-        "best_f1": float(f1_values[best_idx]),
-        "best_f1_precision": float(threshold_precision[best_idx]),
-        "best_f1_recall": float(threshold_recall[best_idx]),
-        "best_f1_threshold": float(thresholds[best_idx]),
         "positive_rate": float(np.mean(targets)),
     }
-    if len(high_precision):
-        recall_idx = int(high_precision[np.argmax(threshold_recall[high_precision])])
-        metrics["recall_at_precision_ge_0_9"] = float(threshold_recall[recall_idx])
-        metrics["precision_at_precision_ge_0_9"] = float(threshold_precision[recall_idx])
-        metrics["threshold_at_precision_ge_0_9"] = float(thresholds[recall_idx])
-    return metrics
 
 
 def _write_figure(path: StoragePath, fig: plt.Figure) -> None:
@@ -2058,7 +2097,6 @@ def write_standard_fluorine_outputs(
                 f"- Positives: {int(data.metadata['test_positive'])}",
                 f"- Average precision: {metrics['average_precision']:.6f}",
                 f"- ROC AUC: {metrics['roc_auc']:.6f}",
-                f"- Best F1: {metrics['best_f1']:.6f} at threshold {metrics['best_f1_threshold']:.6f}",
                 f"- F1 at 0.5: {metrics['f1_at_0_5']:.6f}",
             ]
         )
@@ -2093,11 +2131,30 @@ def _pr_curve_label(summary: dict[str, Any], pr_curve_path: StoragePath) -> str:
     return f"{label} AP={ap:.3f}"
 
 
+def _fluorine_evaluation_contract(summary: dict[str, Any]) -> dict[str, Any]:
+    dataset = summary.get("dataset", {})
+    return {
+        key: dataset.get(key)
+        for key in (
+            "nist_repo_id",
+            "nist_revision",
+            "nist_subdir",
+            "peak_preprocessing",
+            "test_size",
+            "test_positive",
+        )
+    }
+
+
 def write_all_pr_curve_comparison(
     *,
     output_prefix: StoragePath,
     curve_dirs: list[StoragePath],
 ) -> dict[str, Any]:
+    current_summary = json.loads(
+        read_text(storage_with_suffix(output_prefix, ".summary.json"))
+    )
+    evaluation_contract = _fluorine_evaluation_contract(current_summary)
     entries: list[dict[str, Any]] = []
     seen: set[str] = set()
     for directory in curve_dirs:
@@ -2115,6 +2172,8 @@ def write_all_pr_curve_comparison(
             summary = json.loads(read_text(summary_path))
             metrics = summary.get("metrics", {})
             if "average_precision" not in metrics:
+                continue
+            if _fluorine_evaluation_contract(summary) != evaluation_contract:
                 continue
             recall, precision = read_pr_curve(pr_curve_path)
             entries.append(
@@ -2161,6 +2220,7 @@ def write_all_pr_curve_comparison(
 
     payload = {
         "comparison_plot": str(plot_path),
+        "evaluation_contract": evaluation_contract,
         "curve_dirs": [str(directory) for directory in curve_dirs],
         "curves": [
             {
@@ -2185,6 +2245,7 @@ def write_dreams_comparison(
     summary: dict[str, Any],
     previous_ours_prefix: Path | None,
 ) -> dict[str, Any]:
+    evaluation_contract = _fluorine_evaluation_contract(summary)
     fig, ax = plt.subplots(figsize=(6.4, 5.0), dpi=180)
     colors = {
         "ours_finetune": "#2458a6",
@@ -2214,31 +2275,34 @@ def write_dreams_comparison(
     previous_ours: dict[str, Any] | None = None
     if previous_ours_prefix is not None:
         previous_summary = json.loads(read_text(previous_ours_prefix.with_suffix(".summary.json")))
-        previous_recall, previous_precision = read_pr_curve(
-            previous_ours_prefix.with_suffix(".pr_curve.csv")
-        )
-        ax.plot(
-            previous_recall,
-            previous_precision,
-            color=colors["ours_previous_probe"],
-            linewidth=2.0,
-            linestyle="--",
-            label=(
-                "Ours previous probe "
-                f"(AP={previous_summary['metrics']['average_precision']:.3f})"
-            ),
-        )
-        previous_ours = {
-            "mode": previous_summary.get("mode", "probe"),
-            "summary": str(previous_ours_prefix.with_suffix(".summary.json")),
-            "pr_curve": str(previous_ours_prefix.with_suffix(".pr_curve.csv")),
-            "checkpoint_path": previous_summary["checkpoint_path"],
-            "average_precision": previous_summary["metrics"]["average_precision"],
-        }
+        if _fluorine_evaluation_contract(previous_summary) == evaluation_contract:
+            previous_recall, previous_precision = read_pr_curve(
+                previous_ours_prefix.with_suffix(".pr_curve.csv")
+            )
+            ax.plot(
+                previous_recall,
+                previous_precision,
+                color=colors["ours_previous_probe"],
+                linewidth=2.0,
+                linestyle="--",
+                label=(
+                    "Ours previous probe "
+                    f"(AP={previous_summary['metrics']['average_precision']:.3f})"
+                ),
+            )
+            previous_ours = {
+                "mode": previous_summary.get("mode", "probe"),
+                "summary": str(previous_ours_prefix.with_suffix(".summary.json")),
+                "pr_curve": str(previous_ours_prefix.with_suffix(".pr_curve.csv")),
+                "checkpoint_path": previous_summary["checkpoint_path"],
+                "average_precision": previous_summary["metrics"]["average_precision"],
+            }
 
     compared: list[dict[str, Any]] = []
     for summary_path in sorted(comparison_dir.glob("*.summary.json")):
         other = json.loads(summary_path.read_text())
+        if _fluorine_evaluation_contract(other) != evaluation_contract:
+            continue
         name = str(other["name"])
         pr_path = comparison_dir / f"{name}.pr_curve.csv"
         recall, precision = read_pr_curve(pr_path)
@@ -2272,6 +2336,7 @@ def write_dreams_comparison(
 
     payload = {
         "comparison_plot": str(plot_path),
+        "evaluation_contract": evaluation_contract,
         "ours": {
             "mode": summary["mode"],
             "summary": str(storage_with_suffix(output_prefix, ".summary.json")),
@@ -2342,9 +2407,13 @@ def _resolve_jax_checkpoint_dir_and_step(
 
 def _jax_tree_to_numpy(tree: Any) -> Any:
     import jax
-    import numpy as np
 
-    return jax.tree.map(lambda value: np.asarray(jax.device_get(value)), tree)
+    def to_numpy(value: Any) -> np.ndarray:
+        if isinstance(value, jax.Array) and not value.is_fully_addressable:
+            return np.asarray(value.addressable_data(0))
+        return np.asarray(jax.device_get(value))
+
+    return jax.tree.map(to_numpy, tree)
 
 
 class _FluorineProbePaths(NamedTuple):
@@ -2395,47 +2464,57 @@ def _write_fluorine_probe_artifacts(
     row_indices: np.ndarray,
     summary_backend: str | None = None,
 ) -> dict[str, Any]:
-    save_torch_checkpoint(head_state, paths.head_state_path)
-    summary = write_standard_fluorine_outputs(
-        output_prefix=paths.output_prefix,
-        config_path=config_path,
-        checkpoint_path=checkpoint_path,
-        head_state_path=paths.head_state_path,
-        data=data,
-        targets=targets,
-        logits=logits,
-        row_indices=row_indices,
-        head_state=head_state,
-    )
-    if summary_backend is not None:
-        summary["backend"] = summary_backend
-    if args.comparison_dir is not None:
-        comparison = write_dreams_comparison(
+    is_main = True
+    if summary_backend == "jax":
+        import jax
+
+        is_main = jax.process_index() == 0
+    if is_main:
+        save_torch_checkpoint(head_state, paths.head_state_path)
+        summary = write_standard_fluorine_outputs(
             output_prefix=paths.output_prefix,
-            comparison_dir=args.comparison_dir.expanduser().resolve(),
-            summary=summary,
-            previous_ours_prefix=None,
+            config_path=config_path,
+            checkpoint_path=checkpoint_path,
+            head_state_path=paths.head_state_path,
+            data=data,
+            targets=targets,
+            logits=logits,
+            row_indices=row_indices,
+            head_state=head_state,
         )
-        summary["comparison"] = comparison
-    curve_dirs: list[StoragePath] = [storage_parent(paths.output_prefix)]
-    if args.comparison_dir is not None:
-        curve_dirs.append(args.comparison_dir.expanduser().resolve())
-    summary["all_pr_curves"] = write_all_pr_curve_comparison(
-        output_prefix=paths.output_prefix,
-        curve_dirs=curve_dirs,
-    )
-    summary_path = storage_with_suffix(paths.output_prefix, ".summary.json")
-    write_text(summary_path, json.dumps(summary, indent=2, sort_keys=True))
-    payload["standard_outputs"] = {
-        "summary": str(summary_path),
-        "state": str(paths.head_state_path),
-        "output_prefix": str(paths.output_prefix),
-    }
-    if args.output_json:
-        write_text(
-            normalize_storage_path(args.output_json),
-            json.dumps(payload, indent=2, sort_keys=True),
+        if summary_backend is not None:
+            summary["backend"] = summary_backend
+        if args.comparison_dir is not None:
+            comparison = write_dreams_comparison(
+                output_prefix=paths.output_prefix,
+                comparison_dir=args.comparison_dir.expanduser().resolve(),
+                summary=summary,
+                previous_ours_prefix=None,
+            )
+            summary["comparison"] = comparison
+        curve_dirs: list[StoragePath] = [storage_parent(paths.output_prefix)]
+        if args.comparison_dir is not None:
+            curve_dirs.append(args.comparison_dir.expanduser().resolve())
+        summary["all_pr_curves"] = write_all_pr_curve_comparison(
+            output_prefix=paths.output_prefix,
+            curve_dirs=curve_dirs,
         )
+        summary_path = storage_with_suffix(paths.output_prefix, ".summary.json")
+        write_text(summary_path, json.dumps(summary, indent=2, sort_keys=True))
+        payload["standard_outputs"] = {
+            "summary": str(summary_path),
+            "state": str(paths.head_state_path),
+            "output_prefix": str(paths.output_prefix),
+        }
+        if args.output_json:
+            write_text(
+                normalize_storage_path(args.output_json),
+                json.dumps(payload, indent=2, sort_keys=True),
+            )
+    if summary_backend == "jax":
+        from jax.experimental import multihost_utils
+
+        multihost_utils.sync_global_devices("fluorine_probe_artifacts")
     return payload
 
 
@@ -2646,6 +2725,8 @@ def _iter_jax_fluorine_split(
     max_samples: int | None,
     drop_last: bool = False,
 ) -> Iterator[dict[str, Any]]:
+    import jax
+
     from spectra_learning.probes.massspec.msg_probe_jax import _probe_value_to_jax
 
     loader = build_murcko_fluorine_loader(
@@ -2656,14 +2737,39 @@ def _iter_jax_fluorine_split(
         max_samples=max_samples,
         dreams_only=False,
         drop_last=drop_last,
+        distributed_world_size=jax.process_count(),
+        distributed_rank=jax.process_index(),
         num_workers=int(runtime.args.num_workers),
         output_format="numpy",
     )
     for batch in loader:
+        batch = _pad_jax_fluorine_batch(batch, jax.local_device_count())
         yield {
             key: _probe_value_to_jax(value, data_mesh=runtime.data_mesh)
             for key, value in batch.items()
         }
+
+
+def _pad_jax_fluorine_batch(
+    batch: dict[str, Any],
+    multiple: int,
+) -> dict[str, Any]:
+    size = int(batch["label"].shape[0])
+    padding = (-size) % multiple
+
+    def pad(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: pad(item) for key, item in value.items()}
+        if isinstance(value, np.ndarray) and value.ndim > 0 and value.shape[0] == size:
+            return np.concatenate(
+                [value, np.repeat(value[-1:], padding, axis=0)],
+                axis=0,
+            )
+        return value
+
+    padded = {key: pad(value) for key, value in batch.items()}
+    padded["fluorine_valid"] = np.arange(size + padding) < size
+    return padded
 
 
 def _extract_jax_fluorine_features(
@@ -2680,7 +2786,7 @@ def _extract_jax_fluorine_features(
 
     precursor_mz = batch.get("precursor_mz", None)
     spectrum_metadata = jax_spectrum_metadata_from_batch(batch)
-    if runtime.variant == "single_pair_covariance":
+    if runtime.variant in {"cls", "single_pair_covariance"}:
         features = runtime.extract_pair(
             runtime.model,
             batch["peak_mz"],
@@ -2689,6 +2795,8 @@ def _extract_jax_fluorine_features(
             precursor_mz,
             spectrum_metadata,
         )
+        if runtime.variant == "cls":
+            return features
         return (
             _feature_single(features)[:, : batch["peak_valid_mask"].shape[1]],
             _feature_pair(features),
@@ -2728,20 +2836,21 @@ def _cache_jax_fluorine_split(
         dynamic_ncols=True,
         mininterval=5.0,
     ):
+        valid = _host_local_array(batch["fluorine_valid"]).astype(bool, copy=False)
         feature_chunks.append(
             _host_local_array(_extract_jax_fluorine_features(runtime, batch)).astype(
                 np.float32,
                 copy=False,
-            )
+            )[valid]
         )
         mask_chunks.append(
-            _host_local_array(batch["peak_valid_mask"]).astype(bool, copy=False)
+            _host_local_array(batch["peak_valid_mask"]).astype(bool, copy=False)[valid]
         )
         label_chunks.append(
-            _host_local_array(batch["label"]).astype(np.float32, copy=False)
+            _host_local_array(batch["label"]).astype(np.float32, copy=False)[valid]
         )
         row_chunks.append(
-            _host_local_array(batch["row_idx"]).astype(np.int64, copy=False)
+            _host_local_array(batch["row_idx"]).astype(np.int64, copy=False)[valid]
         )
     return {
         "features": np.concatenate(feature_chunks, axis=0),
@@ -2757,7 +2866,10 @@ def _iter_cached_jax_fluorine_split(
     batch_size: int,
     shuffle: bool,
     seed: int,
+    data_mesh: Any,
 ) -> Iterator[dict[str, Any]]:
+    import jax
+
     from spectra_learning.probes.massspec.msg_probe_jax import _probe_value_to_jax
 
     indices = np.arange(cache["label"].shape[0])
@@ -2766,9 +2878,13 @@ def _iter_cached_jax_fluorine_split(
         rng.shuffle(indices)
     for start in range(0, indices.shape[0], batch_size):
         batch_indices = indices[start : start + batch_size]
+        batch = _pad_jax_fluorine_batch(
+            {key: value[batch_indices] for key, value in cache.items()},
+            jax.local_device_count(),
+        )
         yield {
-            key: _probe_value_to_jax(value[batch_indices], data_mesh=None)
-            for key, value in cache.items()
+            key: _probe_value_to_jax(value, data_mesh=data_mesh)
+            for key, value in batch.items()
         }
 
 
@@ -2787,6 +2903,7 @@ def _iter_jax_fluorine_batches(
             batch_size=int(runtime.args.batch_size),
             shuffle=shuffle,
             seed=seed,
+            data_mesh=runtime.data_mesh,
         )
     else:
         yield from _iter_jax_fluorine_split(
@@ -2888,6 +3005,7 @@ def _jax_fluorine_logits(
 def _jax_fluorine_focal_loss(
     logits: Any,
     targets: Any,
+    valid_mask: Any,
     *,
     focal_alpha: float,
     focal_gamma: float,
@@ -2901,7 +3019,9 @@ def _jax_fluorine_focal_loss(
     prob = jax.nn.sigmoid(logits)
     p_t = prob * targets + (1.0 - prob) * (1.0 - targets)
     alpha_t = focal_alpha * targets + (1.0 - focal_alpha) * (1.0 - targets)
-    return jnp.mean(alpha_t * jnp.power(1.0 - p_t, focal_gamma) * bce)
+    loss = alpha_t * jnp.power(1.0 - p_t, focal_gamma) * bce
+    valid_mask = valid_mask.astype(jnp.float32)
+    return jnp.sum(loss * valid_mask) / jnp.sum(valid_mask)
 
 
 def _make_jax_fluorine_train_step(
@@ -2940,6 +3060,7 @@ def _make_jax_fluorine_train_step(
             return _jax_fluorine_focal_loss(
                 logits,
                 batch["label"],
+                batch["fluorine_valid"],
                 focal_alpha=focal_alpha,
                 focal_gamma=focal_gamma,
             )
@@ -3041,6 +3162,7 @@ def _make_jax_fluorine_finetune_steps(
             return _jax_fluorine_focal_loss(
                 logits(all_params, batch),
                 batch["label"],
+                batch["fluorine_valid"],
                 focal_alpha=focal_alpha,
                 focal_gamma=focal_gamma,
             )
@@ -3054,6 +3176,36 @@ def _make_jax_fluorine_finetune_steps(
         return logits(params, batch)
 
     return train_step, predict_step
+
+
+def _merge_jax_fluorine_predictions(
+    predictions: list[tuple[np.ndarray, np.ndarray, np.ndarray]],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    targets = np.concatenate([item[0] for item in predictions])
+    logits = np.concatenate([item[1] for item in predictions])
+    row_indices = np.concatenate([item[2] for item in predictions])
+    order = np.argsort(row_indices, kind="stable")
+    targets = targets[order]
+    logits = logits[order]
+    row_indices = row_indices[order]
+    keep = np.concatenate(([True], row_indices[1:] != row_indices[:-1]))
+    return targets[keep], logits[keep], row_indices[keep]
+
+
+def _gather_jax_fluorine_predictions(
+    targets: np.ndarray,
+    logits: np.ndarray,
+    row_indices: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    from spectra_learning.probes.massspec.msg_probe_jax import (
+        _all_gather_object_jax,
+    )
+
+    gathered = cast(
+        list[tuple[np.ndarray, np.ndarray, np.ndarray]],
+        _all_gather_object_jax((targets, logits, row_indices)),
+    )
+    return _merge_jax_fluorine_predictions(gathered)
 
 
 def _predict_jax_finetuned_arrays(
@@ -3075,10 +3227,11 @@ def _predict_jax_finetuned_arrays(
         seed=seed,
         max_samples=max_samples,
     ):
-        logits.append(_host_local_array(predict_step(params, batch)))
-        targets.append(_host_local_array(batch["label"]))
-        row_indices.append(_host_local_array(batch["row_idx"]))
-    return (
+        valid = _host_local_array(batch["fluorine_valid"]).astype(bool, copy=False)
+        logits.append(_host_local_array(predict_step(params, batch))[valid])
+        targets.append(_host_local_array(batch["label"])[valid])
+        row_indices.append(_host_local_array(batch["row_idx"])[valid])
+    return _gather_jax_fluorine_predictions(
         np.concatenate(targets),
         np.concatenate(logits),
         np.concatenate(row_indices),
@@ -3112,10 +3265,11 @@ def _predict_jax_fluorine_arrays(
             else _extract_jax_fluorine_features(runtime, batch)
         )
         batch_logits = runtime.predict_step(params, batch, features)
-        logits.append(_host_local_array(batch_logits))
-        targets.append(_host_local_array(batch["label"]))
-        row_indices.append(_host_local_array(batch["row_idx"]))
-    return (
+        valid = _host_local_array(batch["fluorine_valid"]).astype(bool, copy=False)
+        logits.append(_host_local_array(batch_logits)[valid])
+        targets.append(_host_local_array(batch["label"])[valid])
+        row_indices.append(_host_local_array(batch["row_idx"])[valid])
+    return _gather_jax_fluorine_predictions(
         np.concatenate(targets, axis=0),
         np.concatenate(logits, axis=0),
         np.concatenate(row_indices, axis=0),
@@ -3186,7 +3340,9 @@ def _run_jax_fluorine_epoch(
             float(focal_gamma),
             float(dropout),
         )
-        batch_size = int(_host_local_array(batch["label"]).shape[0])
+        batch_size = int(
+            _host_local_array(batch["fluorine_valid"]).astype(bool).sum()
+        )
         running_loss += float(jax.device_get(loss)) * batch_size
         seen += batch_size
         pbar.set_postfix(loss=f"{running_loss / float(seen):.5f}")
@@ -3220,6 +3376,9 @@ def _run_jax_fluorine_trial(
     import jax
     import jax.numpy as jnp
     import optax
+    from spectra_learning.training.pretrain_jax import (
+        _replicate_tree_on_data_mesh,
+    )
 
     key = jax.random.PRNGKey(int(runtime.args.seed) + trial_idx)
     probe_params, input_dim = _init_jax_fluorine_probe_params(
@@ -3227,6 +3386,10 @@ def _run_jax_fluorine_trial(
         params,
         variant=runtime.variant,
         config=runtime.config,
+    )
+    probe_params = _replicate_tree_on_data_mesh(
+        probe_params,
+        runtime.data_mesh,
     )
     optimizer = optax.adamw(
         learning_rate=float(params.learning_rate),
@@ -3238,8 +3401,11 @@ def _run_jax_fluorine_trial(
         variant=runtime.variant,
         task_spec=runtime.task_spec,
     )
-    train_rng = jax.random.PRNGKey(
-        int(runtime.args.seed) + 10_000 * (trial_idx + 1)
+    train_rng = _replicate_tree_on_data_mesh(
+        jax.random.PRNGKey(
+            int(runtime.args.seed) + 10_000 * (trial_idx + 1)
+        ),
+        runtime.data_mesh,
     )
     best_value = -float("inf")
     best_epoch = 0
@@ -3538,6 +3704,10 @@ def run_finetune_jax(args: argparse.Namespace) -> dict[str, Any]:
     import jax.numpy as jnp
     import optax
     from flax import nnx
+    from spectra_learning.probes.massspec.msg_probe_jax import _host_local_array
+    from spectra_learning.training.pretrain_jax import (
+        _replicate_tree_on_data_mesh,
+    )
 
     checkpoint = _restore_jax_fluorine_checkpoint(args)
     paths = _resolve_fluorine_probe_paths(args)._replace(
@@ -3567,19 +3737,23 @@ def run_finetune_jax(args: argparse.Namespace) -> dict[str, Any]:
         nnx.Param,
         ...,
     )
+    probe_params = _init_jax_fluorine_probe_params(
+        jax.random.PRNGKey(int(args.seed)),
+        TrialParams(
+            hidden_dim=int(args.hidden_dim),
+            learning_rate=float(args.finetune_head_lr),
+            weight_decay=float(args.finetune_weight_decay),
+            dropout=float(args.dropout),
+        ),
+        variant=runtime.variant,
+        config=runtime.config,
+    )[0]
     params = {
         "encoder": nnx.as_pure(encoder_params),
-        "probe": _init_jax_fluorine_probe_params(
-            jax.random.PRNGKey(int(args.seed)),
-            TrialParams(
-                hidden_dim=int(args.hidden_dim),
-                learning_rate=float(args.finetune_head_lr),
-                weight_decay=float(args.finetune_weight_decay),
-                dropout=float(args.dropout),
-            ),
-            variant=runtime.variant,
-            config=runtime.config,
-        )[0],
+        "probe": _replicate_tree_on_data_mesh(
+            probe_params,
+            runtime.data_mesh,
+        ),
     }
     labels = {
         "encoder": jax.tree.map(lambda _: "encoder", params["encoder"]),
@@ -3634,7 +3808,6 @@ def run_finetune_jax(args: argparse.Namespace) -> dict[str, Any]:
             shuffle=True,
             seed=int(args.seed) + epoch_idx,
             max_samples=args.max_train_samples,
-            drop_last=True,
         )
         pbar = tqdm(
             batches,
@@ -3651,7 +3824,9 @@ def run_finetune_jax(args: argparse.Namespace) -> dict[str, Any]:
                 float(focal_alpha),
                 float(args.focal_gamma),
             )
-            batch_size = int(batch["label"].shape[0])
+            batch_size = int(
+                _host_local_array(batch["fluorine_valid"]).astype(bool).sum()
+            )
             seen += batch_size
             running_loss += float(jax.device_get(loss)) * batch_size
             pbar.set_postfix(loss=f"{running_loss / seen:.5f}")

@@ -87,12 +87,27 @@ def test_fluorine_outputs_support_fsspec_prefix(monkeypatch, tmp_path: Path):
         row_indices=np.arange(4),
         head_state=head_state,
     )
+    mismatched = json.loads(
+        read_text("memory://fluorine-unit/run.summary.json")
+    )
+    mismatched["name"] = "other-test-split"
+    mismatched["dataset"]["nist_revision"] = "different-sha"
+    fluorine.write_text(
+        "memory://fluorine-unit/other.summary.json",
+        json.dumps(mismatched),
+    )
+    fluorine.write_text(
+        "memory://fluorine-unit/other.pr_curve.csv",
+        "precision,recall,threshold\n1.0,0.0,\n",
+    )
     all_curves = fluorine.write_all_pr_curve_comparison(
         output_prefix=output_prefix,
         curve_dirs=["memory://fluorine-unit"],
     )
 
     assert summary["metrics"]["average_precision"] > 0.0
+    assert "best_f1" not in summary["metrics"]
+    assert "threshold_at_precision_ge_0_9" not in summary["metrics"]
     assert "metrics_prefixed" not in summary
     assert "device_ids" not in summary["head"]
     assert "finetune_cache_dir" not in summary["head"]
@@ -251,6 +266,24 @@ class _TinyFluorineModel(torch.nn.Module):
         self.encoder = _TinyFluorineEncoder()
 
 
+class _TinyClsFluorineEncoder(torch.nn.Module):
+    def forward_with_pair(
+        self,
+        peak_mz: torch.Tensor,
+        peak_intensity: torch.Tensor,
+        *,
+        valid_mask: torch.Tensor,
+        precursor_mz: torch.Tensor | None = None,
+        spectrum_metadata: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_size, num_peaks = peak_mz.shape
+        single = torch.zeros(batch_size, num_peaks + 1, 2)
+        pair = torch.zeros(batch_size, num_peaks + 1, num_peaks + 1, 2)
+        single[:, -1] = torch.tensor([3.0, 4.0])
+        pair[:, -1, -1] = torch.tensor([5.0, 6.0])
+        return single, pair
+
+
 def _tiny_fluorine_batch() -> dict[str, torch.Tensor]:
     return {
         "peak_mz": torch.tensor([[0.1, 0.2], [0.8, 0.9]]),
@@ -258,6 +291,41 @@ def _tiny_fluorine_batch() -> dict[str, torch.Tensor]:
         "peak_valid_mask": torch.ones(2, 2, dtype=torch.bool),
         "label": torch.tensor([0.0, 1.0]),
     }
+
+
+def test_torch_cls_pooling_uses_single_and_pair_cls_features(tmp_path: Path):
+    encoder = _TinyClsFluorineEncoder()
+    model = SimpleNamespace(encoder=encoder)
+    config = config_dict.ConfigDict(
+        {
+            "model_dim": 2,
+            "pairmixer_pair_dim": 2,
+            "covariance_pooling_dim": 1,
+        }
+    )
+    input_dim, build_feature_fn = fluorine._build_checkpoint_feature_factory(
+        model=model,
+        config=config,
+        checkpoint_path=tmp_path / "unused.pt",
+        device=torch.device("cpu"),
+        train_covariance_pooler=True,
+        covariance_dim=None,
+        pooling="cls",
+    )
+    feature_fn, pooler = build_feature_fn(True)
+    expected = torch.tensor([[3.0, 4.0, 5.0, 6.0]]).repeat(2, 1)
+
+    assert input_dim == 4
+    assert pooler is None
+    torch.testing.assert_close(feature_fn(_tiny_fluorine_batch()), expected)
+
+    module = fluorine.FluorineFinetuneModule(
+        encoder=encoder,
+        pooler=None,
+        classifier=torch.nn.Identity(),
+        pooling="cls",
+    )
+    torch.testing.assert_close(module(_tiny_fluorine_batch()), expected)
 
 
 def _source_checkpoint_contract() -> dict[str, object]:

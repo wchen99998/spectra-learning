@@ -91,6 +91,7 @@ def _tiny_probe_batch() -> dict[str, np.ndarray]:
             dtype=np.float32,
         ),
         "peak_valid_mask": np.ones((4, 2), dtype=bool),
+        "fluorine_valid": np.ones(4, dtype=bool),
         "label": np.asarray([0.0, 0.0, 1.0, 1.0], dtype=np.float32),
         "row_idx": np.arange(4, dtype=np.int64),
     }
@@ -463,6 +464,159 @@ def test_run_probe_jax_streams_pair_features_and_keeps_first_strict_best(
     ):
         np.testing.assert_array_equal(tied_leaf, baseline_leaf)
         assert np.isfinite(tied_leaf).all()
+
+
+def test_jax_cls_uses_single_and_pair_cls_features():
+    class Encoder(_TinyJaxPairEncoder):
+        def forward_with_pair(self, *args, **kwargs):
+            single, pair = super().forward_with_pair(*args, **kwargs)
+            single = single.at[:, -1].set(jnp.asarray([3.0, 4.0]))
+            pair = pair.at[:, -1, -1].set(jnp.asarray([5.0, 6.0]))
+            return single, pair
+
+    runtime = SimpleNamespace(
+        variant="cls",
+        model=SimpleNamespace(encoder=Encoder()),
+        extract_pair=fluorine._extract_jax_fluorine_pair_features,
+    )
+    batch = jax.tree.map(jnp.asarray, _tiny_probe_batch())
+    features = fluorine._extract_jax_fluorine_features(runtime, batch)
+    params, input_dim = fluorine._init_jax_fluorine_probe_params(
+        jax.random.PRNGKey(0),
+        fluorine.TrialParams(2, 0.01, 0.0, 0.0),
+        variant="cls",
+        config=_probe_config(),
+    )
+    task_spec = msg_probe_jax.MsgProbeTaskSpec(
+        regression_tasks=(),
+        maccs_bits=0,
+        regression_means={},
+        regression_stds={},
+        binary_tasks=("fluorine",),
+    )
+
+    logits = fluorine._jax_fluorine_logits(
+        params,
+        features,
+        batch["peak_valid_mask"],
+        variant="cls",
+        task_spec=task_spec,
+    )
+
+    assert input_dim == 4
+    assert isinstance(features, tuple)
+    assert np.isfinite(logits).all()
+
+
+def test_jax_fluorine_batch_padding_masks_repeated_rows():
+    batch = {
+        key: value[:3]
+        for key, value in _tiny_probe_batch().items()
+        if key != "fluorine_valid"
+    }
+
+    padded = fluorine._pad_jax_fluorine_batch(batch, 2)
+
+    assert padded["label"].shape == (4,)
+    assert padded["fluorine_valid"].tolist() == [True, True, True, False]
+    assert padded["row_idx"].tolist() == [0, 1, 2, 2]
+
+
+def test_jax_fluorine_prediction_merge_sorts_and_deduplicates_sampler_padding():
+    targets, logits, rows = fluorine._merge_jax_fluorine_predictions(
+        [
+            (
+                np.asarray([1.0, 0.0]),
+                np.asarray([0.8, -0.5]),
+                np.asarray([2, 0]),
+            ),
+            (
+                np.asarray([0.0, 1.0]),
+                np.asarray([-0.2, 0.8]),
+                np.asarray([1, 2]),
+            ),
+        ]
+    )
+
+    assert rows.tolist() == [0, 1, 2]
+    assert targets.tolist() == [0.0, 0.0, 1.0]
+    assert logits.tolist() == [-0.5, -0.2, 0.8]
+
+
+def test_jax_fluorine_loader_uses_process_partition_and_keeps_partial_batch(
+    monkeypatch,
+):
+    captured = {}
+
+    def build_loader(_data, _split, **kwargs):
+        captured.update(kwargs)
+        return [_tiny_probe_batch()]
+
+    monkeypatch.setattr(fluorine, "build_murcko_fluorine_loader", build_loader)
+    monkeypatch.setattr(jax, "process_count", lambda: 2)
+    monkeypatch.setattr(jax, "process_index", lambda: 1)
+    runtime = SimpleNamespace(
+        data=object(),
+        data_mesh=None,
+        args=SimpleNamespace(num_workers=0),
+    )
+
+    batches = list(
+        fluorine._iter_jax_fluorine_split(
+            runtime,
+            "train",
+            shuffle=True,
+            seed=7,
+            max_samples=3,
+        )
+    )
+
+    assert len(batches) == 1
+    assert captured["distributed_world_size"] == 2
+    assert captured["distributed_rank"] == 1
+    assert captured["drop_last"] is False
+
+
+def test_jax_non_main_process_does_not_write_artifacts(monkeypatch, tmp_path: Path):
+    from jax.experimental import multihost_utils
+
+    sync_calls = []
+    monkeypatch.setattr(jax, "process_index", lambda: 1)
+    monkeypatch.setattr(
+        multihost_utils,
+        "sync_global_devices",
+        lambda name: sync_calls.append(name),
+    )
+    monkeypatch.setattr(
+        fluorine,
+        "save_torch_checkpoint",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("non-main process wrote state")
+        ),
+    )
+    payload = {"backend": "jax"}
+
+    result = fluorine._write_fluorine_probe_artifacts(
+        args=SimpleNamespace(comparison_dir=None, output_json=None),
+        payload=payload,
+        head_state={},
+        paths=fluorine._FluorineProbePaths(
+            tmp_path,
+            tmp_path / "output",
+            tmp_path / "state.pt",
+        ),
+        config_path=tmp_path / "config.py",
+        checkpoint_path=tmp_path / "checkpoint",
+        data=_probe_data(),
+        targets=np.asarray([0.0, 1.0]),
+        logits=np.asarray([-1.0, 1.0]),
+        row_indices=np.asarray([0, 1]),
+        summary_backend="jax",
+    )
+
+    assert result is payload
+    assert "standard_outputs" not in result
+    assert sync_calls == ["fluorine_probe_artifacts"]
 
 
 def test_jax_finetune_step_updates_encoder_and_new_head():
