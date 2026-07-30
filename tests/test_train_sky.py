@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -332,7 +333,11 @@ def test_build_task_constructs_direct_gcp_dws_resources_and_env():
     }
     assert task["envs"]["SPECTRA_RUN_ID"] == "new"
     assert task["envs"]["SPECTRA_CONFIG_JSON"] == "{}"
-    assert "apt-get install -y" in task["setup"]
+    assert "for attempt in {1..180}" in task["setup"]
+    assert "-o DPkg::Lock::Timeout=300 -o Acquire::Retries=5" in task["setup"]
+    assert "apt_get update" in task["setup"]
+    assert "apt_get install -y" in task["setup"]
+    subprocess.run(["bash", "-n"], input=task["setup"], text=True, check=True)
     assert "libgomp1" in task["setup"]
     assert "curl -LsSf https://astral.sh/uv/install.sh | sh" in task["setup"]
     assert f"uv python install {train_sky.DEFAULT_PYTHON_VERSION}" in task["setup"]
@@ -465,8 +470,7 @@ def test_dryrun_prints_generated_assets_without_token_lookup(
     assert "SPECTRA_WORKDIR:" in output
     assert "SPECTRA_CONFIG_JSON:" in output
     assert "SPECTRA_AOT" not in output
-    assert "LIBTPU_INIT_ARGS:" in output
-    assert "xla_enable_async_all_reduce" in output
+    assert "LIBTPU_INIT_ARGS:" not in output
     assert '"jax_mesh_devices":"16"' in output
     assert '"msg_probe_at_final_step":false' in output
     assert '"jax_checkpoint_max_to_keep":5' in output

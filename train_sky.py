@@ -18,7 +18,6 @@ from typing import Any
 import yaml
 
 from spectra_learning.config import config_to_dict, load_config
-from spectra_learning.training.jax_runtime_flags import jax_tpu_xla_flags_string
 from spectra_learning.training.routing import resolve_training_route
 
 
@@ -53,8 +52,20 @@ DEFAULT_PROVISION_TIMEOUT_SECONDS = 2_147_483_647
 MAX_SKY_JOB_NAME_LENGTH = 63
 TASK_SETUP = """\
 set -euo pipefail
-sudo env DEBIAN_FRONTEND=noninteractive apt-get update
-sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \\
+apt_get() {
+  local attempt
+  for attempt in {1..180}; do
+    if sudo env DEBIAN_FRONTEND=noninteractive apt-get \\
+      -o DPkg::Lock::Timeout=300 -o Acquire::Retries=5 "$@"; then
+      return
+    fi
+    echo "apt-get failed (attempt ${attempt}/180); retrying in 10 seconds" >&2
+    sleep 10
+  done
+  return 1
+}
+apt_get update
+apt_get install -y \\
   build-essential \\
   ca-certificates \\
   curl \\
@@ -732,7 +743,6 @@ def main(argv: list[str] | None = None) -> None:
         "SPECTRA_JAX_CACHE_DIR": jax_cache_dir,
         "SPECTRA_CONFIG_JSON": config_json,
         "JAX_INITIALIZATION_TIMEOUT": "3600",
-        "LIBTPU_INIT_ARGS": jax_tpu_xla_flags_string(),
         "HF_HOME": "/tmp/huggingface",
         "WANDB_DIR": "/tmp/wandb",
         "UV_CACHE_DIR": "/tmp/uv-cache",

@@ -9,9 +9,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from spectra_learning.training.jax_runtime_flags import configure_jax_tpu_xla_flags
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Benchmark synchronized JAX MAE optimizer-step throughput on real GeMS data."
@@ -36,7 +33,6 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    configure_jax_tpu_xla_flags()
 
     import jax
     import torch

@@ -239,16 +239,13 @@ def test_compile_forward_enables_shape_padding_for_reduce_overhead():
         pretrain.inductor_config.shape_padding = original
 
 
-def test_jax_backend_applies_tpu_flags_before_dispatch(monkeypatch, tmp_path):
+def test_jax_backend_dispatches_to_jax_trainer(monkeypatch, tmp_path):
     import train as train_script
 
     cfg = config_dict.ConfigDict()
     cfg.training_task = "pretrain"
     cfg.device_backend = "jax"
     calls = []
-
-    def fake_configure_jax_tpu_xla_flags():
-        calls.append("flags")
 
     def fake_train_and_evaluate_jax(config, workdir):
         assert config is cfg
@@ -258,11 +255,6 @@ def test_jax_backend_applies_tpu_flags_before_dispatch(monkeypatch, tmp_path):
 
     fake_pretrain_jax = ModuleType("spectra_learning.training.pretrain_jax")
     fake_pretrain_jax.train_and_evaluate_jax = fake_train_and_evaluate_jax
-    monkeypatch.setattr(
-        train_script,
-        "configure_jax_tpu_xla_flags",
-        fake_configure_jax_tpu_xla_flags,
-    )
     monkeypatch.setitem(
         sys.modules,
         "spectra_learning.training.pretrain_jax",
@@ -270,7 +262,7 @@ def test_jax_backend_applies_tpu_flags_before_dispatch(monkeypatch, tmp_path):
     )
 
     assert train_script._train(cfg, tmp_path) == {"run/device_backend": "jax"}
-    assert calls == ["flags", "train"]
+    assert calls == ["train"]
 
 
 def test_train_routes_torch_pretraining(monkeypatch, tmp_path):

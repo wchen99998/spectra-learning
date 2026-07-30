@@ -4,7 +4,6 @@ import logging
 import os
 
 from spectra_learning.config import load_config
-from spectra_learning.training.jax_runtime_flags import configure_jax_tpu_xla_flags
 from spectra_learning.training.logging import _serialise_metrics
 from spectra_learning.training.routing import resolve_training_route
 from spectra_learning.training.storage import normalize_storage_path, write_text
@@ -14,7 +13,6 @@ def _train(config, workdir):
     task, backend = resolve_training_route(config)
     if task == "pretrain":
         if backend == "jax":
-            configure_jax_tpu_xla_flags()
             from spectra_learning.training.pretrain_jax import train_and_evaluate_jax
 
             return train_and_evaluate_jax(config, workdir)
@@ -25,7 +23,6 @@ def _train(config, workdir):
         from spectra_learning.training.contrastive import train_contrastive
 
         return train_contrastive(config, workdir=workdir)
-    configure_jax_tpu_xla_flags()
     from spectra_learning.training.ar_spectra_jax import (
         train_and_evaluate_ar_spectra_jax,
     )

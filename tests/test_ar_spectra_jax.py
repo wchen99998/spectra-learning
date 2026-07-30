@@ -488,9 +488,6 @@ def test_jax_ar_training_loop_logs_validates_checkpoints_and_resumes(tmp_path) -
 def test_train_routes_ar_spectra_jax_backend(monkeypatch, tmp_path) -> None:
     calls = []
 
-    def fake_configure_jax_tpu_xla_flags():
-        calls.append("flags")
-
     def fake_train(config, workdir):
         calls.append((config, workdir))
         return {"run/device_backend": "jax", "run/training_task": "ar_spectra"}
@@ -502,18 +499,13 @@ def test_train_routes_ar_spectra_jax_backend(monkeypatch, tmp_path) -> None:
         "train_and_evaluate_ar_spectra_jax",
         fake_train,
     )
-    monkeypatch.setattr(
-        train,
-        "configure_jax_tpu_xla_flags",
-        fake_configure_jax_tpu_xla_flags,
-    )
     cfg = {
         "training_task": "ar_spectra",
         "device_backend": "jax",
     }
 
     assert train._train(cfg, tmp_path)["run/training_task"] == "ar_spectra"
-    assert calls == ["flags", (cfg, tmp_path)]
+    assert calls == [(cfg, tmp_path)]
 
 
 def test_train_rejects_non_jax_ar_backend(tmp_path) -> None:
