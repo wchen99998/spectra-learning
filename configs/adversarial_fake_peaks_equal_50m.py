@@ -43,7 +43,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.generator_mz_loss_weight = 1.0
     cfg.generator_intensity_loss_weight = 1.0
     cfg.generator_adversarial_loss_weight = 0.25
-    cfg.generator_adversarial_warmup_steps = 2_000
+    cfg.generator_adversarial_warmup_steps = 10_000
 
     cfg.log_every_n_steps = 25
     cfg.checkpoint_every_steps = 1_000
@@ -52,6 +52,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.enable_wandb = True
     cfg.wandb_project = "jepa-adversarial-fake-peaks"
     cfg.wandb_kwargs = {
-        "name": "adversarial-equal50m-balanced-masked-peaks-2xh100-50k"
+        "name": "adversarial-equal50m-balanced-masked-peaks-adv10k-2xh100-50k"
     }
     return cfg
