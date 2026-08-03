@@ -1,17 +1,23 @@
 from ml_collections import config_dict
 
-from configs.fake_peak_discriminator_50m import get_config as get_discriminator_config
+from configs.mz_token_ablation import get_config as get_base_config
 
 
 def get_config() -> config_dict.ConfigDict:
-    cfg = get_discriminator_config()
+    cfg = get_base_config()
 
     cfg.training_task = "adversarial_fake_peak"
-    del cfg.generator_source_checkpoint
-    del cfg.generator_checkpoint_path
-    del cfg.generator_top_k
-    del cfg.generator_temperature
-    del cfg.generator_compile_mode
+    cfg.device_backend = "torch"
+    cfg.encoder_num_layers = 13
+    cfg.batch_size = 512
+    cfg.gradient_accumulation_steps = 8
+    cfg.compile_mode = "none"
+
+    cfg.discriminator_device = "cuda:0"
+    cfg.generator_device = "cuda:1"
+    cfg.fake_peak_detection_loss_weight = 1.0
+    cfg.fake_peak_reconstruction_loss_weight = 1.0
+    cfg.fake_peak_intensity_reconstruction_loss_weight = 1.0
 
     cfg.generator_model = config_dict.ConfigDict(
         {
@@ -44,6 +50,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.generator_adversarial_loss_weight = 1e-4
     cfg.generator_adversarial_warmup_steps = 250
 
+    cfg.checkpoint_every_steps = 500
+    cfg.val_num_steps = 32
     cfg.enable_wandb = True
     cfg.wandb_project = "jepa-adversarial-fake-peaks"
     cfg.wandb_kwargs = {

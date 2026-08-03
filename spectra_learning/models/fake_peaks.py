@@ -61,7 +61,7 @@ class FakePeakDiscriminator(nn.Module):
         mz_logits = predictions["mz_logits"]
         intensity_logits = predictions["intensity_logits"]
         visible = predictions["visible_mask"].bool()
-        detection = batch.get("detection_mask", visible) & visible
+        detection = batch["detection_mask"] & visible
         fake = batch["fake_peak_mask"] & visible
         detection_fake = fake & detection
         detection_real = detection & ~detection_fake

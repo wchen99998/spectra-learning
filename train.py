@@ -23,12 +23,6 @@ def _train(config, workdir):
         from spectra_learning.training.contrastive import train_contrastive
 
         return train_contrastive(config, workdir=workdir)
-    if task == "fake_peak":
-        from spectra_learning.training.fake_peaks import (
-            train_fake_peak_discriminator,
-        )
-
-        return train_fake_peak_discriminator(config, workdir=workdir)
     if task == "adversarial_fake_peak":
         from spectra_learning.training.adversarial_fake_peaks import (
             train_adversarial_fake_peaks,
