@@ -28,9 +28,9 @@ def get_config() -> config_dict.ConfigDict:
             "jepa_mae_loss_weight": 0.0,
             "masked_token_loss_weight": 0.0,
             "target_projector_dim": -1,
-            "encoder_num_layers": 10,
+            "encoder_num_layers": 11,
             "encoder_apply_final_pair_norm": False,
-            "pairmixer_pair_dim": 216,
+            "predictor_dim": 280,
         }
     )
     cfg.learning_rate = 1e-4

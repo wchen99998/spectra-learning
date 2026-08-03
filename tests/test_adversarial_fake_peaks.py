@@ -98,7 +98,7 @@ def test_joint_models_have_requested_parameter_sizes() -> None:
     generator_params = sum(
         parameter.numel() for parameter in generator.parameters()
     )
-    assert generator_params == 51_635_420
+    assert generator_params == 51_494_108
     assert generator.backbone.jepa_mae_mz_head is not None
     assert generator.backbone.jepa_mae_intensity_head is not None
     assert generator.backbone.teacher_encoder is None
