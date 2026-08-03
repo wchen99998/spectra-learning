@@ -68,8 +68,10 @@ def adversarial_weight_at_step(
     config: config_dict.ConfigDict,
     global_step: int,
 ) -> float:
+    start_step = int(config.generator_adversarial_start_step)
     warmup_steps = int(config.generator_adversarial_warmup_steps)
-    progress = 1.0 if warmup_steps == 0 else min(1.0, global_step / warmup_steps)
+    elapsed = max(0, global_step - start_step)
+    progress = 1.0 if warmup_steps == 0 else min(1.0, elapsed / warmup_steps)
     return float(config.generator_adversarial_loss_weight) * progress
 
 
@@ -541,6 +543,7 @@ def _training_contract(
                 "generator_mz_loss_weight",
                 "generator_intensity_loss_weight",
                 "generator_adversarial_loss_weight",
+                "generator_adversarial_start_step",
                 "generator_adversarial_warmup_steps",
             )
         }

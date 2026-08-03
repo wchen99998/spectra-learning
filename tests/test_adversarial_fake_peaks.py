@@ -234,7 +234,8 @@ def test_detached_discriminator_then_frozen_generator_pass() -> None:
 
 def test_microbatch_trains_both_models_and_ramps_adversarial_weight() -> None:
     config = _tiny_config()
-    config.generator_adversarial_warmup_steps = 10
+    config.generator_adversarial_start_step = 4
+    config.generator_adversarial_warmup_steps = 6
     generator = DynamicPeakGenerator(generator_config(config))
     discriminator = FakePeakDiscriminator(config)
 
@@ -250,7 +251,8 @@ def test_microbatch_trains_both_models_and_ramps_adversarial_weight() -> None:
     )
 
     assert adversarial_weight_at_step(config, 0) == 0.0
-    assert adversarial_weight_at_step(config, 5) == 0.125
+    assert adversarial_weight_at_step(config, 4) == 0.0
+    assert adversarial_weight_at_step(config, 7) == 0.125
     assert adversarial_weight_at_step(config, 10) == 0.25
     assert torch.isfinite(metrics["generator/loss"])
     assert torch.isfinite(metrics["discriminator/loss"])
