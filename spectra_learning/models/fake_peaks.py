@@ -61,16 +61,21 @@ class FakePeakDiscriminator(nn.Module):
         mz_logits = predictions["mz_logits"]
         intensity_logits = predictions["intensity_logits"]
         visible = predictions["visible_mask"].bool()
+        detection = batch.get("detection_mask", visible) & visible
         fake = batch["fake_peak_mask"] & visible
-        real = visible & ~fake
-        weights = visible.float()
+        detection_fake = fake & detection
+        detection_real = detection & ~detection_fake
+        detection_weights = detection.float()
 
         detection_per_peak = F.binary_cross_entropy_with_logits(
             fake_logits,
-            fake.float(),
+            detection_fake.float(),
             reduction="none",
         )
-        detection_loss = (detection_per_peak * weights).sum() / weights.sum()
+        detection_count = detection_weights.sum()
+        detection_loss = (
+            detection_per_peak * detection_weights
+        ).sum() / detection_count
         true_mz_bins = torch.floor(
             batch["true_peak_mz"].float() * PEAK_MZ_MAX / self.mz_bin_size
         ).long().clamp(0, self.num_mz_bins - 1)
@@ -105,18 +110,37 @@ class FakePeakDiscriminator(nn.Module):
         )
 
         predicted_fake = fake_logits >= 0
-        target = batch["target_masks"][:, 0] & batch["peak_valid_mask"]
+        detection_fake_count = detection_fake.float().sum().clamp_min(1.0)
+        detection_real_count = detection_real.float().sum().clamp_min(1.0)
+        fake_recall = (
+            predicted_fake & detection_fake
+        ).float().sum() / detection_fake_count
+        real_specificity = (
+            (~predicted_fake) & detection_real
+        ).float().sum() / detection_real_count
+        fake_probability = fake_logits.sigmoid()
         return {
             "loss": loss,
             "detection_loss": detection_loss,
             "reconstruction_loss": reconstruction_loss,
             "mz_reconstruction_loss": mz_reconstruction_loss,
             "intensity_reconstruction_loss": intensity_reconstruction_loss,
-            "detection_accuracy": ((predicted_fake == fake) & visible).float().sum()
-            / weights.sum(),
-            "fake_recall": (predicted_fake & fake).float().sum() / fake_count,
-            "real_specificity": ((~predicted_fake) & real).float().sum()
-            / real.float().sum().clamp_min(1.0),
+            "detection_accuracy": (
+                (predicted_fake == detection_fake) & detection
+            ).float().sum()
+            / detection_count,
+            "detection_balanced_accuracy": 0.5
+            * (fake_recall + real_specificity),
+            "fake_recall": fake_recall,
+            "real_specificity": real_specificity,
+            "fake_fake_probability": (
+                fake_probability * detection_fake.float()
+            ).sum()
+            / detection_fake_count,
+            "real_fake_probability": (
+                fake_probability * detection_real.float()
+            ).sum()
+            / detection_real_count,
             "mz_reconstruction_accuracy": (
                 (mz_logits.argmax(dim=-1) == true_mz_bins) & fake
             ).float().sum()
@@ -125,9 +149,59 @@ class FakePeakDiscriminator(nn.Module):
                 (intensity_logits.argmax(dim=-1) == true_intensity_bins) & fake
             ).float().sum()
             / fake_count,
-            "fake_fraction": fake_weights.sum() / weights.sum(),
+            "fake_fraction": detection_fake.float().sum() / detection_count,
             "generator_exact_bin_accuracy": (
-                target & batch["generator_exact_bin_mask"]
+                fake & batch["generator_exact_bin_mask"]
             ).float().sum()
-            / target.float().sum().clamp_min(1.0),
+            / fake_count,
+        }
+
+
+class DynamicPeakGenerator(nn.Module):
+    def __init__(self, config: config_dict.ConfigDict) -> None:
+        super().__init__()
+        self.backbone = build_model_from_config(config)
+        output_dim = self.backbone.target_projector_dim
+        self.mz_head = nn.Linear(output_dim, 1)
+        self.intensity_head = nn.Linear(output_dim, 1)
+        for head in (self.mz_head, self.intensity_head):
+            nn.init.xavier_normal_(head.weight)
+            nn.init.zeros_(head.bias)
+
+    def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+        peak_valid_mask = batch["peak_valid_mask"]
+        context_mask = batch["context_mask"] & peak_valid_mask
+        target_masks = batch["target_masks"] & peak_valid_mask.unsqueeze(1)
+        context_emb = self.backbone.encoder(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            valid_mask=peak_valid_mask,
+            visible_mask=context_mask,
+            precursor_mz=batch.get("precursor_mz"),
+            spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
+        )
+        _, predictor_output = self.backbone._predict_augmented_target_outputs(
+            context_emb,
+            context_mask,
+            target_masks,
+        )
+        predicted_mz = self.mz_head(predictor_output[:, 0]).squeeze(-1).sigmoid()
+        predicted_intensity = (
+            self.intensity_head(predictor_output[:, 0]).squeeze(-1).sigmoid()
+        )
+        target_mask = target_masks[:, 0]
+        return {
+            "peak_mz": torch.where(
+                target_mask,
+                predicted_mz,
+                batch["peak_mz"],
+            ),
+            "peak_intensity": torch.where(
+                target_mask,
+                predicted_intensity,
+                batch["peak_intensity"],
+            ),
+            "predicted_mz": predicted_mz,
+            "predicted_intensity": predicted_intensity,
+            "target_mask": target_mask,
         }
