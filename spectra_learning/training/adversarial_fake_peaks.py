@@ -290,10 +290,10 @@ def sample_adversarial_pair_masks(
         2.0,
     )
     ranks = scores.argsort(dim=1).argsort(dim=1)
-    eligible = target.sum(dim=1) >= 2
-    fake = target & ranks.eq(0) & eligible.unsqueeze(1)
-    real = target & ranks.eq(1) & eligible.unsqueeze(1)
-    return fake, fake | real
+    pair_count = target.sum(dim=1) // 2
+    fake = target & (ranks < pair_count.unsqueeze(1))
+    detection = target & (ranks < (2 * pair_count).unsqueeze(1))
+    return fake, detection
 
 
 def build_adversarial_mixed_batch(
@@ -546,7 +546,7 @@ def _training_contract(
         }
         | {
             "adversarial_batch": (
-                "one_real_and_one_generated_target_per_spectrum"
+                "balanced_real_and_generated_targets_per_spectrum"
             ),
             "base_peak": "always_context",
             "peak_order": "random_per_microbatch",

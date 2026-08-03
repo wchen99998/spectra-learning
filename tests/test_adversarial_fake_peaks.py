@@ -98,7 +98,7 @@ def test_joint_models_have_requested_parameter_sizes() -> None:
     generator_params = sum(
         parameter.numel() for parameter in generator.parameters()
     )
-    assert generator_params == 51_597_500
+    assert generator_params == 51_635_420
     assert generator.backbone.jepa_mae_mz_head is not None
     assert generator.backbone.jepa_mae_intensity_head is not None
     assert generator.backbone.teacher_encoder is None
@@ -135,11 +135,11 @@ def test_adversarial_batch_mixes_real_and_fake_targets_per_spectrum() -> None:
         mixed["peak_intensity"][~fake],
         mixed["true_peak_intensity"][~fake],
     )
-    assert torch.equal(target.sum(dim=1), torch.full((4,), 2))
-    assert torch.equal(fake.sum(dim=1), torch.ones(4, dtype=torch.long))
-    assert torch.equal((target & ~fake).sum(dim=1), torch.ones(4, dtype=torch.long))
-    assert discriminator_batch["detection_mask"].sum() == 8
-    assert discriminator_batch["fake_peak_mask"].sum() == 4
+    assert torch.equal(target.sum(dim=1), torch.full((4,), 4))
+    assert torch.equal(fake.sum(dim=1), torch.full((4,), 2))
+    assert torch.equal((target & ~fake).sum(dim=1), torch.full((4,), 2))
+    assert discriminator_batch["detection_mask"].sum() == 16
+    assert discriminator_batch["fake_peak_mask"].sum() == 8
     assert discriminator(discriminator_batch)["fake_fraction"] == 0.5
 
 
@@ -178,7 +178,7 @@ def test_peak_shuffle_preserves_aligned_fields() -> None:
     )
 
 
-def test_adversarial_pair_masks_select_one_fake_and_one_real() -> None:
+def test_adversarial_pair_masks_balance_each_spectrum() -> None:
     target = torch.tensor(
         [
             [True, True, False, False],
@@ -189,11 +189,11 @@ def test_adversarial_pair_masks_select_one_fake_and_one_real() -> None:
 
     fake, detection = sample_adversarial_pair_masks(target)
 
-    assert torch.equal(fake.sum(dim=1), torch.ones(3, dtype=torch.long))
-    assert torch.equal(detection.sum(dim=1), torch.full((3,), 2))
+    assert torch.equal(fake.sum(dim=1), torch.tensor([1, 1, 2]))
+    assert torch.equal(detection.sum(dim=1), torch.tensor([2, 2, 4]))
     assert torch.equal(
         (detection & ~fake).sum(dim=1),
-        torch.ones(3, dtype=torch.long),
+        torch.tensor([1, 1, 2]),
     )
 
 

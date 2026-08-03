@@ -12,7 +12,8 @@ def test_equal_adversarial_config_runs_large_batch_for_50k_steps() -> None:
     assert config.batch_size == 1_280
     assert config.gradient_accumulation_steps == 16
     assert config.training_max_steps == 50_000
-    assert config.generator_model.encoder_num_layers == 11
+    assert config.generator_model.encoder_num_layers == 10
+    assert config.generator_model.pairmixer_pair_dim == 216
     assert config.generator_adversarial_loss_weight == 0.25
 
 
