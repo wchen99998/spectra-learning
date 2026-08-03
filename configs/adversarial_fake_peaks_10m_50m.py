@@ -15,7 +15,7 @@ def get_config() -> config_dict.ConfigDict:
 
     cfg.generator_model = config_dict.ConfigDict(
         {
-            "training_mode": "jepa",
+            "training_mode": "mae",
             "use_ema_teacher": False,
             "mae_loss_weight": 0.0,
             "jepa_mae_loss_weight": 0.0,
@@ -33,19 +33,20 @@ def get_config() -> config_dict.ConfigDict:
             "masked_latent_predictor_num_heads": 4,
         }
     )
+    cfg.learning_rate = 1e-4
+    cfg.min_learning_rate = 1e-5
     cfg.generator_learning_rate = 3e-4
     cfg.generator_min_learning_rate = 3e-5
     cfg.generator_warmup_steps = 250
-    cfg.generator_mz_smooth_l1_beta = 0.0005
-    cfg.generator_intensity_smooth_l1_beta = 0.1
+    cfg.generator_gumbel_temperature = 1.0
     cfg.generator_mz_loss_weight = 1.0
     cfg.generator_intensity_loss_weight = 1.0
-    cfg.generator_adversarial_loss_weight = 1e-5
+    cfg.generator_adversarial_loss_weight = 1e-4
     cfg.generator_adversarial_warmup_steps = 250
 
     cfg.enable_wandb = True
     cfg.wandb_project = "jepa-adversarial-fake-peaks"
     cfg.wandb_kwargs = {
-        "name": "adversarial-fake-peaks-g10m-d51m-scratch-2xh100-2p5k"
+        "name": "adversarial-categorical-g10m-d51m-scratch-2xh100-2p5k"
     }
     return cfg

@@ -100,16 +100,22 @@ def _generator_metrics(
     true_mz = source["peak_mz"].float()
     true_intensity = source["peak_intensity"].float()
 
-    mz_per_peak = F.smooth_l1_loss(
-        predicted_mz,
-        true_mz,
-        beta=float(config.generator_mz_smooth_l1_beta),
+    mz_bin_size = float(config.jepa_mae_mz_bin_size)
+    intensity_bin_size = float(config.jepa_mae_intensity_bin_size)
+    true_mz_bins = torch.floor(
+        true_mz * PEAK_MZ_MAX / mz_bin_size
+    ).long().clamp(0, generated["mz_logits"].shape[-1] - 1)
+    true_intensity_bins = torch.floor(
+        true_intensity / intensity_bin_size
+    ).long().clamp(0, generated["intensity_logits"].shape[-1] - 1)
+    mz_per_peak = F.cross_entropy(
+        generated["mz_logits"].transpose(1, 2),
+        true_mz_bins,
         reduction="none",
     )
-    intensity_per_peak = F.smooth_l1_loss(
-        predicted_intensity,
-        true_intensity,
-        beta=float(config.generator_intensity_smooth_l1_beta),
+    intensity_per_peak = F.cross_entropy(
+        generated["intensity_logits"].transpose(1, 2),
+        true_intensity_bins,
         reduction="none",
     )
     mz_loss = (mz_per_peak * weights).sum() / count
@@ -119,20 +125,12 @@ def _generator_metrics(
         + float(config.generator_intensity_loss_weight) * intensity_loss
     )
 
-    mz_bin_size = float(config.jepa_mae_mz_bin_size)
-    intensity_bin_size = float(config.jepa_mae_intensity_bin_size)
     predicted_mz_bins = torch.floor(
         predicted_mz * PEAK_MZ_MAX / mz_bin_size
-    ).long()
-    true_mz_bins = torch.floor(
-        true_mz * PEAK_MZ_MAX / mz_bin_size
     ).long()
     exact_mz = target & predicted_mz_bins.eq(true_mz_bins)
     predicted_intensity_bins = torch.floor(
         predicted_intensity / intensity_bin_size
-    ).long()
-    true_intensity_bins = torch.floor(
-        true_intensity / intensity_bin_size
     ).long()
 
     def moments(value: Tensor) -> tuple[Tensor, Tensor]:
@@ -239,7 +237,7 @@ def _prepare_adversarial_batch(
 ]:
     half_batch = cpu_batch["peak_mz"].shape[0] // 2
     generator_source = _to_device(
-        _slice_batch(cpu_batch, 0, half_batch),
+        cpu_batch,
         generator_device,
     )
     real_source = _to_device(
@@ -252,11 +250,12 @@ def _prepare_adversarial_batch(
         generator_source,
         config,
     )
-    fake_on_generator = build_adversarial_fake_batch(
+    generated_batch = build_adversarial_fake_batch(
         generator_source,
         generated,
         exact_mz,
     )
+    fake_on_generator = _slice_batch(generated_batch, 0, half_batch)
     fake_on_discriminator = _to_device(
         fake_on_generator,
         discriminator_device,
@@ -422,8 +421,7 @@ def _training_contract(
                 "fake_peak_detection_loss_weight",
                 "fake_peak_reconstruction_loss_weight",
                 "fake_peak_intensity_reconstruction_loss_weight",
-                "generator_mz_smooth_l1_beta",
-                "generator_intensity_smooth_l1_beta",
+                "generator_gumbel_temperature",
                 "generator_mz_loss_weight",
                 "generator_intensity_loss_weight",
                 "generator_adversarial_loss_weight",

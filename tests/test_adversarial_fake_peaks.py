@@ -78,9 +78,9 @@ def _batch() -> dict[str, torch.Tensor]:
 def test_joint_models_have_requested_parameter_sizes() -> None:
     config = get_config()
     generator = DynamicPeakGenerator(generator_config(config))
-    assert sum(parameter.numel() for parameter in generator.parameters()) == 9_520_898
-    assert generator.backbone.jepa_mae_mz_head is None
-    assert generator.backbone.jepa_mae_intensity_head is None
+    assert sum(parameter.numel() for parameter in generator.parameters()) == 10_036_954
+    assert generator.backbone.jepa_mae_mz_head is not None
+    assert generator.backbone.jepa_mae_intensity_head is not None
     assert generator.backbone.teacher_encoder is None
 
     discriminator = FakePeakDiscriminator(config)
@@ -137,9 +137,12 @@ def test_detached_discriminator_then_frozen_generator_pass() -> None:
     discriminator.zero_grad(set_to_none=True)
     discriminator.requires_grad_(False)
     adversarial_loss = _generator_adversarial_loss(discriminator, fake)
-    (reconstruction_loss + 1e-5 * adversarial_loss).backward()
-    assert generator.mz_head.weight.grad is not None
-    assert generator.intensity_head.weight.grad is not None
+    (
+        reconstruction_loss
+        + config.generator_adversarial_loss_weight * adversarial_loss
+    ).backward()
+    assert generator.backbone.jepa_mae_mz_head.weight.grad is not None
+    assert generator.backbone.jepa_mae_intensity_head.weight.grad is not None
     assert generator.backbone.latent_mask_token.grad is not None
     assert all(parameter.grad is None for parameter in discriminator.parameters())
 
@@ -162,11 +165,11 @@ def test_microbatch_trains_both_models_and_ramps_adversarial_weight() -> None:
     )
 
     assert adversarial_weight_at_step(config, 0) == 0.0
-    assert adversarial_weight_at_step(config, 5) == 5e-6
-    assert adversarial_weight_at_step(config, 10) == 1e-5
+    assert adversarial_weight_at_step(config, 5) == 5e-5
+    assert adversarial_weight_at_step(config, 10) == 1e-4
     assert torch.isfinite(metrics["generator/loss"])
     assert torch.isfinite(metrics["discriminator/loss"])
-    assert generator.mz_head.weight.grad is not None
+    assert generator.backbone.jepa_mae_mz_head.weight.grad is not None
     assert discriminator.fake_head.weight.grad is not None
 
 

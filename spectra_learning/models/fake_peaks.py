@@ -161,12 +161,9 @@ class DynamicPeakGenerator(nn.Module):
     def __init__(self, config: config_dict.ConfigDict) -> None:
         super().__init__()
         self.backbone = build_model_from_config(config)
-        output_dim = self.backbone.target_projector_dim
-        self.mz_head = nn.Linear(output_dim, 1)
-        self.intensity_head = nn.Linear(output_dim, 1)
-        for head in (self.mz_head, self.intensity_head):
-            nn.init.xavier_normal_(head.weight)
-            nn.init.zeros_(head.bias)
+        self.mz_bin_size = float(config.jepa_mae_mz_bin_size)
+        self.intensity_bin_size = float(config.jepa_mae_intensity_bin_size)
+        self.temperature = float(config.generator_gumbel_temperature)
 
     def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         peak_valid_mask = batch["peak_valid_mask"]
@@ -185,9 +182,42 @@ class DynamicPeakGenerator(nn.Module):
             context_mask,
             target_masks,
         )
-        predicted_mz = self.mz_head(predictor_output[:, 0]).squeeze(-1).sigmoid()
+        mz_head = self.backbone.jepa_mae_mz_head
+        intensity_head = self.backbone.jepa_mae_intensity_head
+        assert mz_head is not None
+        assert intensity_head is not None
+        mz_logits = mz_head(predictor_output[:, 0]).float()
+        intensity_logits = intensity_head(predictor_output[:, 0]).float()
+        sampled_mz_bins = F.gumbel_softmax(
+            mz_logits,
+            tau=self.temperature,
+            hard=True,
+        )
+        sampled_intensity_bins = F.gumbel_softmax(
+            intensity_logits,
+            tau=self.temperature,
+            hard=True,
+        )
+        mz_bins = torch.arange(
+            mz_logits.shape[-1],
+            device=mz_logits.device,
+            dtype=mz_logits.dtype,
+        )
+        intensity_bins = torch.arange(
+            intensity_logits.shape[-1],
+            device=intensity_logits.device,
+            dtype=intensity_logits.dtype,
+        )
+        predicted_mz = (
+            (sampled_mz_bins * mz_bins).sum(dim=-1)
+            + torch.rand_like(batch["peak_mz"])
+        ) * self.mz_bin_size / PEAK_MZ_MAX
         predicted_intensity = (
-            self.intensity_head(predictor_output[:, 0]).squeeze(-1).sigmoid()
+            (sampled_intensity_bins * intensity_bins).sum(dim=-1)
+            + torch.rand_like(batch["peak_intensity"])
+        ) * self.intensity_bin_size
+        predicted_intensity = predicted_intensity.clamp_max(
+            float(self.backbone.jepa_mae_intensity_max)
         )
         target_mask = target_masks[:, 0]
         return {
@@ -203,5 +233,7 @@ class DynamicPeakGenerator(nn.Module):
             ),
             "predicted_mz": predicted_mz,
             "predicted_intensity": predicted_intensity,
+            "mz_logits": mz_logits,
+            "intensity_logits": intensity_logits,
             "target_mask": target_mask,
         }
