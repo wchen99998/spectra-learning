@@ -1,9 +1,19 @@
 import pytest
 import torch
 
-from configs.adversarial_fake_peaks_10m_50m import get_config
+from configs.adversarial_fake_peaks_equal_50m import get_config
 from spectra_learning.models.fake_peaks import FakePeakDiscriminator
 from spectra_learning.training.routing import resolve_training_route
+
+
+def test_equal_adversarial_config_runs_large_batch_for_50k_steps() -> None:
+    config = get_config()
+
+    assert config.batch_size == 1_280
+    assert config.gradient_accumulation_steps == 16
+    assert config.training_max_steps == 50_000
+    assert config.generator_model.encoder_num_layers == 11
+    assert config.generator_adversarial_loss_weight == 0.25
 
 
 def test_adversarial_config_has_no_frozen_generator_fields() -> None:

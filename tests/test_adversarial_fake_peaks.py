@@ -3,7 +3,7 @@ from contextlib import nullcontext
 import torch
 
 import train
-from configs.adversarial_fake_peaks_10m_50m import get_config
+from configs.adversarial_fake_peaks_equal_50m import get_config
 from spectra_learning.models.fake_peaks import (
     DynamicPeakGenerator,
     FakePeakDiscriminator,
@@ -98,7 +98,7 @@ def test_joint_models_have_requested_parameter_sizes() -> None:
     generator_params = sum(
         parameter.numel() for parameter in generator.parameters()
     )
-    assert generator_params == 10_037_468
+    assert generator_params == 51_597_500
     assert generator.backbone.jepa_mae_mz_head is not None
     assert generator.backbone.jepa_mae_intensity_head is not None
     assert generator.backbone.teacher_encoder is None
@@ -110,6 +110,7 @@ def test_joint_models_have_requested_parameter_sizes() -> None:
         parameter.numel() for parameter in discriminator.parameters()
     )
     assert discriminator_params == 51_405_531
+    assert abs(generator_params - discriminator_params) / discriminator_params < 0.01
 
 
 def test_adversarial_batch_mixes_real_and_fake_targets_per_spectrum() -> None:
@@ -249,8 +250,8 @@ def test_microbatch_trains_both_models_and_ramps_adversarial_weight() -> None:
     )
 
     assert adversarial_weight_at_step(config, 0) == 0.0
-    assert adversarial_weight_at_step(config, 5) == 5e-5
-    assert adversarial_weight_at_step(config, 10) == 1e-4
+    assert adversarial_weight_at_step(config, 5) == 0.125
+    assert adversarial_weight_at_step(config, 10) == 0.25
     assert torch.isfinite(metrics["generator/loss"])
     assert torch.isfinite(metrics["discriminator/loss"])
     assert torch.isfinite(metrics["generator/mz_residual_loss"])

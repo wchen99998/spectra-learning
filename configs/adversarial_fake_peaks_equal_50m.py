@@ -9,8 +9,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.training_task = "adversarial_fake_peak"
     cfg.device_backend = "torch"
     cfg.encoder_num_layers = 13
-    cfg.batch_size = 512
-    cfg.gradient_accumulation_steps = 8
+    cfg.batch_size = 1_280
+    cfg.gradient_accumulation_steps = 16
+    cfg.training_max_steps = 50_000
     cfg.compile_mode = "none"
 
     cfg.discriminator_device = "cuda:0"
@@ -27,34 +28,29 @@ def get_config() -> config_dict.ConfigDict:
             "jepa_mae_loss_weight": 0.0,
             "masked_token_loss_weight": 0.0,
             "target_projector_dim": -1,
-            "model_dim": 256,
-            "encoder_num_layers": 5,
-            "encoder_num_heads": 4,
+            "encoder_num_layers": 11,
             "encoder_apply_final_pair_norm": False,
-            "feature_mlp_hidden_dim": 512,
-            "encoder_fourier_mlp_hidden_dim": 512,
-            "pairmixer_pair_dim": 128,
-            "pairmixer_pair_feature_hidden_dim": 256,
-            "predictor_dim": 256,
-            "masked_latent_predictor_num_heads": 4,
         }
     )
     cfg.learning_rate = 1e-4
     cfg.min_learning_rate = 1e-5
+    cfg.warmup_steps = 1_000
     cfg.generator_learning_rate = 3e-4
     cfg.generator_min_learning_rate = 3e-5
-    cfg.generator_warmup_steps = 250
+    cfg.generator_warmup_steps = 2_000
     cfg.generator_gumbel_temperature = 1.0
     cfg.generator_mz_loss_weight = 1.0
     cfg.generator_intensity_loss_weight = 1.0
-    cfg.generator_adversarial_loss_weight = 1e-4
-    cfg.generator_adversarial_warmup_steps = 250
+    cfg.generator_adversarial_loss_weight = 0.25
+    cfg.generator_adversarial_warmup_steps = 2_000
 
-    cfg.checkpoint_every_steps = 500
-    cfg.val_num_steps = 32
+    cfg.log_every_n_steps = 25
+    cfg.checkpoint_every_steps = 1_000
+    cfg.val_every_n_steps = 500
+    cfg.val_num_steps = 64
     cfg.enable_wandb = True
     cfg.wandb_project = "jepa-adversarial-fake-peaks"
     cfg.wandb_kwargs = {
-        "name": "adversarial-categorical-g10m-d51m-scratch-2xh100-2p5k"
+        "name": "adversarial-equal50m-paired-masked-peaks-2xh100-50k"
     }
     return cfg
