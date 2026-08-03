@@ -25,6 +25,7 @@ from spectra_learning.data.spectra import PEAK_MZ_MAX
 from spectra_learning.models.fake_peaks import (
     DynamicPeakGenerator,
     FakePeakDiscriminator,
+    logit_uniform_nll,
 )
 from spectra_learning.models.settings import PeakSetJEPASettings
 from spectra_learning.training.cadence import (
@@ -49,7 +50,7 @@ from spectra_learning.training.storage import (
     storage_mkdir,
 )
 
-ADVERSARIAL_FAKE_PEAK_CHECKPOINT_FORMAT_VERSION = 2
+ADVERSARIAL_FAKE_PEAK_CHECKPOINT_FORMAT_VERSION = 3
 
 
 def generator_config(
@@ -140,15 +141,13 @@ def _generator_metrics(
         true_intensity_bins,
         reduction="none",
     )
-    mz_residual_per_peak = F.binary_cross_entropy_with_logits(
-        generated["mz_residual_logits"],
+    mz_residual_per_peak = logit_uniform_nll(
+        generated["mz_residual_shift"],
         true_mz_residual,
-        reduction="none",
     )
-    intensity_residual_per_peak = F.binary_cross_entropy_with_logits(
-        generated["intensity_residual_logits"],
+    intensity_residual_per_peak = logit_uniform_nll(
+        generated["intensity_residual_shift"],
         true_intensity_residual,
-        reduction="none",
     )
     mz_bin_loss = (mz_bin_per_peak * weights).sum() / count
     intensity_bin_loss = (intensity_bin_per_peak * weights).sum() / count
@@ -182,6 +181,20 @@ def _generator_metrics(
         predicted_intensity
     )
     target_intensity_mean, target_intensity_std = moments(true_intensity)
+    generated_mz_residual_mean, generated_mz_residual_std = moments(
+        generated["mz_residual"]
+    )
+    target_mz_residual_mean, target_mz_residual_std = moments(
+        true_mz_residual
+    )
+    (
+        generated_intensity_residual_mean,
+        generated_intensity_residual_std,
+    ) = moments(generated["intensity_residual"])
+    (
+        target_intensity_residual_mean,
+        target_intensity_residual_std,
+    ) = moments(true_intensity_residual)
     metrics = {
         "reconstruction_loss": reconstruction_loss,
         "mz_loss": mz_loss,
@@ -199,6 +212,18 @@ def _generator_metrics(
             * weights
         ).sum()
         / count,
+        "generated_mz_residual_mean": generated_mz_residual_mean,
+        "generated_mz_residual_std": generated_mz_residual_std,
+        "target_mz_residual_mean": target_mz_residual_mean,
+        "target_mz_residual_std": target_mz_residual_std,
+        "generated_intensity_residual_mean": (
+            generated_intensity_residual_mean
+        ),
+        "generated_intensity_residual_std": (
+            generated_intensity_residual_std
+        ),
+        "target_intensity_residual_mean": target_intensity_residual_mean,
+        "target_intensity_residual_std": target_intensity_residual_std,
         "mz_mae_da": (
             (predicted_mz - true_mz).abs() * PEAK_MZ_MAX * weights
         ).sum()

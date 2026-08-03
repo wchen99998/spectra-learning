@@ -9,6 +9,32 @@ from spectra_learning.data.spectra import PEAK_MZ_MAX
 from spectra_learning.models.factory import build_model_from_config
 from spectra_learning.models.spectrum_metadata import torch_spectrum_metadata_from_batch
 
+LOGIT_UNIFORM_EPS = 1e-6
+
+
+def sample_logit_uniform_residual(shift: Tensor) -> Tensor:
+    uniform = torch.rand_like(shift).clamp(
+        LOGIT_UNIFORM_EPS,
+        1.0 - LOGIT_UNIFORM_EPS,
+    )
+    return torch.sigmoid(torch.logit(uniform) + shift)
+
+
+def logit_uniform_nll(shift: Tensor, target: Tensor) -> Tensor:
+    target_logits = torch.logit(
+        target.float().clamp(
+            LOGIT_UNIFORM_EPS,
+            1.0 - LOGIT_UNIFORM_EPS,
+        )
+    )
+    inverse_logits = target_logits - shift.float()
+    return -(
+        F.logsigmoid(inverse_logits)
+        + F.logsigmoid(-inverse_logits)
+        - F.logsigmoid(target_logits)
+        - F.logsigmoid(-target_logits)
+    )
+
 
 class FakePeakDiscriminator(nn.Module):
     def __init__(self, config: config_dict.ConfigDict) -> None:
@@ -170,7 +196,7 @@ class DynamicPeakGenerator(nn.Module):
             1,
         )
         for head in (self.mz_residual_head, self.intensity_residual_head):
-            nn.init.xavier_normal_(head.weight)
+            nn.init.zeros_(head.weight)
             nn.init.zeros_(head.bias)
 
     def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
@@ -197,14 +223,16 @@ class DynamicPeakGenerator(nn.Module):
         predictor_features = predictor_output[:, 0]
         mz_logits = mz_head(predictor_features).float()
         intensity_logits = intensity_head(predictor_features).float()
-        mz_residual_logits = (
+        mz_residual_shift = (
             self.mz_residual_head(predictor_features).squeeze(-1).float()
         )
-        intensity_residual_logits = (
+        intensity_residual_shift = (
             self.intensity_residual_head(predictor_features).squeeze(-1).float()
         )
-        mz_residual = mz_residual_logits.sigmoid()
-        intensity_residual = intensity_residual_logits.sigmoid()
+        mz_residual = sample_logit_uniform_residual(mz_residual_shift)
+        intensity_residual = sample_logit_uniform_residual(
+            intensity_residual_shift
+        )
         sampled_mz_bins = F.gumbel_softmax(
             mz_logits,
             tau=self.temperature,
@@ -254,8 +282,8 @@ class DynamicPeakGenerator(nn.Module):
             "predicted_intensity": completed_intensity,
             "mz_logits": mz_logits,
             "intensity_logits": intensity_logits,
-            "mz_residual_logits": mz_residual_logits,
-            "intensity_residual_logits": intensity_residual_logits,
+            "mz_residual_shift": mz_residual_shift,
+            "intensity_residual_shift": intensity_residual_shift,
             "mz_residual": mz_residual,
             "intensity_residual": intensity_residual,
             "target_mask": target_mask,

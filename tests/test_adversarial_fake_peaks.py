@@ -7,6 +7,8 @@ from configs.adversarial_fake_peaks_10m_50m import get_config
 from spectra_learning.models.fake_peaks import (
     DynamicPeakGenerator,
     FakePeakDiscriminator,
+    logit_uniform_nll,
+    sample_logit_uniform_residual,
 )
 from spectra_learning.training.adversarial_fake_peaks import (
     ADVERSARIAL_FAKE_PEAK_CHECKPOINT_FORMAT_VERSION,
@@ -88,6 +90,8 @@ def test_joint_models_have_requested_parameter_sizes() -> None:
     assert generator.backbone.jepa_mae_mz_head is not None
     assert generator.backbone.jepa_mae_intensity_head is not None
     assert generator.backbone.teacher_encoder is None
+    assert torch.count_nonzero(generator.mz_residual_head.weight) == 0
+    assert torch.count_nonzero(generator.intensity_residual_head.weight) == 0
 
     discriminator = FakePeakDiscriminator(config)
     assert (
@@ -183,6 +187,22 @@ def test_microbatch_trains_both_models_and_ramps_adversarial_weight() -> None:
     assert torch.isfinite(metrics["generator/intensity_residual_loss"])
     assert torch.isfinite(metrics["generator/mz_residual_mae"])
     assert torch.isfinite(metrics["generator/intensity_residual_mae"])
+    assert torch.isfinite(metrics["generator/generated_mz_residual_mean"])
+    assert torch.isfinite(metrics["generator/generated_mz_residual_std"])
+    assert torch.isfinite(metrics["generator/target_mz_residual_mean"])
+    assert torch.isfinite(metrics["generator/target_mz_residual_std"])
+    assert torch.isfinite(
+        metrics["generator/generated_intensity_residual_mean"]
+    )
+    assert torch.isfinite(
+        metrics["generator/generated_intensity_residual_std"]
+    )
+    assert torch.isfinite(
+        metrics["generator/target_intensity_residual_mean"]
+    )
+    assert torch.isfinite(
+        metrics["generator/target_intensity_residual_std"]
+    )
     assert generator.backbone.jepa_mae_mz_head.weight.grad is not None
     assert generator.mz_residual_head.weight.grad is not None
     assert generator.intensity_residual_head.weight.grad is not None
@@ -226,8 +246,34 @@ def test_clamped_last_intensity_class_keeps_upper_residual() -> None:
     assert residuals.item() == 1.0
 
 
+def test_zero_shift_samples_uniform_residuals() -> None:
+    shift = torch.zeros(65_536)
+    torch.manual_seed(123)
+    expected = torch.rand_like(shift)
+    torch.manual_seed(123)
+
+    residual = sample_logit_uniform_residual(shift)
+
+    assert torch.allclose(residual, expected, atol=1e-6)
+    assert abs(float(residual.mean()) - 0.5) < 0.005
+    assert abs(float(residual.std()) - 12**-0.5) < 0.005
+
+
+def test_logit_uniform_nll_is_exact_and_differentiable() -> None:
+    shift = torch.zeros(4, requires_grad=True)
+    target = torch.tensor([0.0, 0.2, 0.8, 1.0])
+
+    nll = logit_uniform_nll(shift, target)
+
+    assert torch.isfinite(nll).all()
+    assert torch.allclose(nll, torch.zeros_like(nll), atol=1e-6)
+    logit_uniform_nll(shift, torch.full_like(target, 0.2)).mean().backward()
+    assert shift.grad is not None
+    assert torch.all(shift.grad > 0)
+
+
 def test_adversarial_checkpoint_format_is_hard_cut() -> None:
-    assert ADVERSARIAL_FAKE_PEAK_CHECKPOINT_FORMAT_VERSION == 2
+    assert ADVERSARIAL_FAKE_PEAK_CHECKPOINT_FORMAT_VERSION == 3
 
 
 def test_validation_preserves_training_rng() -> None:
