@@ -47,7 +47,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.generator_gumbel_temperature = 1.0
     cfg.generator_mz_loss_weight = 1.0
     cfg.generator_intensity_loss_weight = 1.0
-    cfg.generator_adversarial_loss_weight = 1e-4
+    cfg.generator_adversarial_loss_weight = 2e-4
     cfg.generator_adversarial_warmup_steps = 250
 
     cfg.checkpoint_every_steps = 500

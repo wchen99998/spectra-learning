@@ -169,8 +169,8 @@ def test_microbatch_trains_both_models_and_ramps_adversarial_weight() -> None:
     )
 
     assert adversarial_weight_at_step(config, 0) == 0.0
-    assert adversarial_weight_at_step(config, 5) == 5e-5
-    assert adversarial_weight_at_step(config, 10) == 1e-4
+    assert adversarial_weight_at_step(config, 5) == 1e-4
+    assert adversarial_weight_at_step(config, 10) == 2e-4
     assert torch.isfinite(metrics["generator/loss"])
     assert torch.isfinite(metrics["discriminator/loss"])
     assert generator.backbone.jepa_mae_mz_head.weight.grad is not None
