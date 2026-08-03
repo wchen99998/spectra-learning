@@ -17,8 +17,11 @@ from spectra_learning.training.adversarial_fake_peaks import (
     _generator_adversarial_loss,
     _prepare_adversarial_batch,
     _training_contract,
+    anchor_base_peak_in_context,
     adversarial_weight_at_step,
     generator_config,
+    sample_adversarial_pair_masks,
+    shuffle_peak_order,
     train_adversarial_microbatch,
 )
 from spectra_learning.training.routing import resolve_training_route
@@ -51,8 +54,14 @@ def _batch() -> dict[str, torch.Tensor]:
     batch_size = 4
     num_peaks = 8
     return {
-        "peak_mz": torch.rand(batch_size, num_peaks),
-        "peak_intensity": torch.rand(batch_size, num_peaks),
+        "peak_mz": torch.linspace(0.02, 0.8, num_peaks).repeat(
+            batch_size,
+            1,
+        ),
+        "peak_intensity": torch.linspace(1.0, 0.2, num_peaks).repeat(
+            batch_size,
+            1,
+        ),
         "peak_valid_mask": torch.ones(
             batch_size,
             num_peaks,
@@ -72,7 +81,7 @@ def _batch() -> dict[str, torch.Tensor]:
                         True,
                         True,
                         True,
-                        False,
+                        True,
                         False,
                     ]
                 ]
@@ -86,7 +95,10 @@ def _batch() -> dict[str, torch.Tensor]:
 def test_joint_models_have_requested_parameter_sizes() -> None:
     config = get_config()
     generator = DynamicPeakGenerator(generator_config(config))
-    assert sum(parameter.numel() for parameter in generator.parameters()) == 10_037_468
+    generator_params = sum(
+        parameter.numel() for parameter in generator.parameters()
+    )
+    assert generator_params == 10_037_468
     assert generator.backbone.jepa_mae_mz_head is not None
     assert generator.backbone.jepa_mae_intensity_head is not None
     assert generator.backbone.teacher_encoder is None
@@ -94,17 +106,17 @@ def test_joint_models_have_requested_parameter_sizes() -> None:
     assert torch.count_nonzero(generator.intensity_residual_head.weight) == 0
 
     discriminator = FakePeakDiscriminator(config)
-    assert (
-        sum(parameter.numel() for parameter in discriminator.parameters())
-        == 51_405_531
+    discriminator_params = sum(
+        parameter.numel() for parameter in discriminator.parameters()
     )
+    assert discriminator_params == 51_405_531
 
 
-def test_adversarial_batch_is_balanced_at_target_positions() -> None:
+def test_adversarial_batch_mixes_real_and_fake_targets_per_spectrum() -> None:
     config = _tiny_config()
     generator = DynamicPeakGenerator(generator_config(config))
     discriminator = FakePeakDiscriminator(config)
-    fake, discriminator_batch, _, _ = _prepare_adversarial_batch(
+    mixed, discriminator_batch, _, _ = _prepare_adversarial_batch(
         generator,
         _batch(),
         torch.device("cpu"),
@@ -112,18 +124,76 @@ def test_adversarial_batch_is_balanced_at_target_positions() -> None:
         config,
     )
 
-    target = fake["detection_mask"]
+    target = mixed["detection_mask"]
+    fake = mixed["fake_peak_mask"]
     assert torch.equal(
-        fake["peak_mz"][~target],
-        fake["true_peak_mz"][~target],
+        mixed["peak_mz"][~fake],
+        mixed["true_peak_mz"][~fake],
     )
     assert torch.equal(
-        fake["peak_intensity"].amax(dim=1),
-        torch.ones(fake["peak_intensity"].shape[0]),
+        mixed["peak_intensity"][~fake],
+        mixed["true_peak_intensity"][~fake],
     )
-    assert discriminator_batch["detection_mask"].sum() == 12
-    assert discriminator_batch["fake_peak_mask"].sum() == 6
+    assert torch.equal(target.sum(dim=1), torch.full((4,), 2))
+    assert torch.equal(fake.sum(dim=1), torch.ones(4, dtype=torch.long))
+    assert torch.equal((target & ~fake).sum(dim=1), torch.ones(4, dtype=torch.long))
+    assert discriminator_batch["detection_mask"].sum() == 8
+    assert discriminator_batch["fake_peak_mask"].sum() == 4
     assert discriminator(discriminator_batch)["fake_fraction"] == 0.5
+
+
+def test_base_peak_is_visible_and_never_generated() -> None:
+    anchored = anchor_base_peak_in_context(_batch())
+
+    assert anchored["context_mask"][:, 0].all()
+    assert not anchored["target_masks"][:, :, 0].any()
+
+
+def test_peak_shuffle_preserves_aligned_fields() -> None:
+    batch = _batch()
+    torch.manual_seed(5)
+
+    shuffled = shuffle_peak_order(batch)
+    restore = shuffled["peak_mz"].argsort(dim=1)
+
+    assert not torch.equal(shuffled["peak_mz"], batch["peak_mz"])
+    for key in (
+        "peak_mz",
+        "peak_intensity",
+        "peak_valid_mask",
+        "context_mask",
+    ):
+        assert torch.equal(
+            torch.gather(shuffled[key], 1, restore),
+            batch[key],
+        )
+    assert torch.equal(
+        torch.gather(
+            shuffled["target_masks"],
+            2,
+            restore.unsqueeze(1),
+        ),
+        batch["target_masks"],
+    )
+
+
+def test_adversarial_pair_masks_select_one_fake_and_one_real() -> None:
+    target = torch.tensor(
+        [
+            [True, True, False, False],
+            [True, True, True, False],
+            [True, True, True, True],
+        ]
+    )
+
+    fake, detection = sample_adversarial_pair_masks(target)
+
+    assert torch.equal(fake.sum(dim=1), torch.ones(3, dtype=torch.long))
+    assert torch.equal(detection.sum(dim=1), torch.full((3,), 2))
+    assert torch.equal(
+        (detection & ~fake).sum(dim=1),
+        torch.ones(3, dtype=torch.long),
+    )
 
 
 def test_detached_discriminator_then_frozen_generator_pass() -> None:
@@ -209,16 +279,37 @@ def test_microbatch_trains_both_models_and_ramps_adversarial_weight() -> None:
     assert discriminator.fake_head.weight.grad is not None
 
 
-def test_generator_base_normalizes_completed_intensities() -> None:
+def test_generator_preserves_non_target_intensities() -> None:
     config = _tiny_config()
     generator = DynamicPeakGenerator(generator_config(config))
 
     generated = generator(_batch())
+    target = generated["target_mask"]
 
     assert torch.equal(
-        generated["peak_intensity"].amax(dim=1),
-        torch.ones(generated["peak_intensity"].shape[0]),
+        generated["peak_intensity"][~target],
+        _batch()["peak_intensity"][~target],
     )
+    assert (generated["predicted_mz"][target] >= 0.02).all()
+
+
+def test_forbidden_mz_bins_do_not_poison_padded_slots() -> None:
+    config = _tiny_config()
+    generator = DynamicPeakGenerator(generator_config(config))
+    batch = _batch()
+    batch["peak_mz"][:, -1] = 0.0
+    batch["peak_intensity"][:, -1] = 0.0
+    batch["peak_valid_mask"][:, -1] = False
+
+    _, _, reconstruction_loss, _ = _prepare_adversarial_batch(
+        generator,
+        batch,
+        torch.device("cpu"),
+        torch.device("cpu"),
+        config,
+    )
+
+    assert torch.isfinite(reconstruction_loss)
 
 
 def test_generator_preserves_finite_zero_placeholder() -> None:
@@ -273,7 +364,7 @@ def test_logit_uniform_nll_is_exact_and_differentiable() -> None:
 
 
 def test_adversarial_checkpoint_format_is_hard_cut() -> None:
-    assert ADVERSARIAL_FAKE_PEAK_CHECKPOINT_FORMAT_VERSION == 3
+    assert ADVERSARIAL_FAKE_PEAK_CHECKPOINT_FORMAT_VERSION == 4
 
 
 def test_validation_preserves_training_rng() -> None:

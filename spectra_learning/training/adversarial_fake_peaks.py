@@ -50,7 +50,7 @@ from spectra_learning.training.storage import (
     storage_mkdir,
 )
 
-ADVERSARIAL_FAKE_PEAK_CHECKPOINT_FORMAT_VERSION = 3
+ADVERSARIAL_FAKE_PEAK_CHECKPOINT_FORMAT_VERSION = 4
 
 
 def generator_config(
@@ -86,14 +86,6 @@ def _clamped_class_targets(
     return classes, residuals
 
 
-def _slice_batch(
-    batch: dict[str, Tensor],
-    start: int,
-    end: int,
-) -> dict[str, Tensor]:
-    return {key: value[start:end] for key, value in batch.items()}
-
-
 def _to_device(
     batch: dict[str, Tensor],
     device: torch.device,
@@ -102,6 +94,27 @@ def _to_device(
         key: value.to(device, non_blocking=True)
         for key, value in batch.items()
     }
+
+
+def shuffle_peak_order(
+    batch: dict[str, Tensor],
+) -> dict[str, Tensor]:
+    batch_size, num_peaks = batch["peak_mz"].shape
+    order = torch.rand(
+        batch_size,
+        num_peaks,
+        device=batch["peak_mz"].device,
+    ).argsort(dim=1)
+    result = dict(batch)
+    for key, value in batch.items():
+        if value.ndim >= 2 and value.shape[-1] == num_peaks:
+            index = order.reshape(
+                batch_size,
+                *([1] * (value.ndim - 2)),
+                num_peaks,
+            ).expand_as(value)
+            result[key] = torch.gather(value, -1, index)
+    return result
 
 
 def _generator_metrics(
@@ -133,12 +146,12 @@ def _generator_metrics(
     )
     mz_bin_per_peak = F.cross_entropy(
         generated["mz_logits"].transpose(1, 2),
-        true_mz_bins,
+        true_mz_bins.masked_fill(~target, -100),
         reduction="none",
     )
     intensity_bin_per_peak = F.cross_entropy(
         generated["intensity_logits"].transpose(1, 2),
-        true_intensity_bins,
+        true_intensity_bins.masked_fill(~target, -100),
         reduction="none",
     )
     mz_residual_per_peak = logit_uniform_nll(
@@ -249,54 +262,71 @@ def _generator_metrics(
     return reconstruction_loss, metrics, exact_mz
 
 
-def build_adversarial_fake_batch(
+def anchor_base_peak_in_context(
+    batch: dict[str, Tensor],
+) -> dict[str, Tensor]:
+    base_peak_index = batch["peak_intensity"].masked_fill(
+        ~batch["peak_valid_mask"],
+        -1.0,
+    ).argmax(dim=1, keepdim=True)
+    base_peak_mask = torch.zeros_like(batch["peak_valid_mask"]).scatter(
+        1,
+        base_peak_index,
+        True,
+    )
+    result = dict(batch)
+    result["context_mask"] = batch["context_mask"] | base_peak_mask
+    result["target_masks"] = (
+        batch["target_masks"] & ~base_peak_mask.unsqueeze(1)
+    )
+    return result
+
+
+def sample_adversarial_pair_masks(
+    target: Tensor,
+) -> tuple[Tensor, Tensor]:
+    scores = torch.rand(target.shape, device=target.device).masked_fill(
+        ~target,
+        2.0,
+    )
+    ranks = scores.argsort(dim=1).argsort(dim=1)
+    eligible = target.sum(dim=1) >= 2
+    fake = target & ranks.eq(0) & eligible.unsqueeze(1)
+    real = target & ranks.eq(1) & eligible.unsqueeze(1)
+    return fake, fake | real
+
+
+def build_adversarial_mixed_batch(
     source: dict[str, Tensor],
     generated: dict[str, Tensor],
     exact_mz: Tensor,
+    fake_peak_mask: Tensor,
+    detection_mask: Tensor,
 ) -> dict[str, Tensor]:
     target = generated["target_mask"]
+    fake = target & fake_peak_mask
     result = dict(source)
     result.update(
         {
-            "peak_mz": generated["peak_mz"],
-            "peak_intensity": generated["peak_intensity"],
+            "peak_mz": torch.where(
+                fake,
+                generated["peak_mz"],
+                source["peak_mz"],
+            ),
+            "peak_intensity": torch.where(
+                fake,
+                generated["peak_intensity"],
+                source["peak_intensity"],
+            ),
             "true_peak_mz": source["peak_mz"],
             "true_peak_intensity": source["peak_intensity"],
-            "fake_peak_mask": target,
+            "fake_peak_mask": fake,
             "generator_exact_bin_mask": exact_mz,
-            "detection_mask": target,
-            "student_visible_mask": source["context_mask"] | target,
+            "detection_mask": detection_mask,
+            "student_visible_mask": source["context_mask"] | detection_mask,
         }
     )
     return result
-
-
-def build_adversarial_real_batch(
-    source: dict[str, Tensor],
-) -> dict[str, Tensor]:
-    target = source["target_masks"][:, 0] & source["peak_valid_mask"]
-    result = dict(source)
-    result.update(
-        {
-            "true_peak_mz": source["peak_mz"],
-            "true_peak_intensity": source["peak_intensity"],
-            "fake_peak_mask": torch.zeros_like(target),
-            "generator_exact_bin_mask": torch.zeros_like(target),
-            "detection_mask": target,
-            "student_visible_mask": source["context_mask"] | target,
-        }
-    )
-    return result
-
-
-def _concatenate_batches(
-    fake: dict[str, Tensor],
-    real: dict[str, Tensor],
-) -> dict[str, Tensor]:
-    return {
-        key: torch.cat((fake[key], real[key]), dim=0)
-        for key in fake
-    }
 
 
 def _prepare_adversarial_batch(
@@ -311,14 +341,12 @@ def _prepare_adversarial_batch(
     Tensor,
     dict[str, Tensor],
 ]:
-    half_batch = cpu_batch["peak_mz"].shape[0] // 2
-    generator_source = _to_device(
-        cpu_batch,
-        generator_device,
-    )
-    real_source = _to_device(
-        _slice_batch(cpu_batch, half_batch, 2 * half_batch),
-        discriminator_device,
+    cpu_batch = shuffle_peak_order(cpu_batch)
+    generator_source = anchor_base_peak_in_context(
+        _to_device(
+            cpu_batch,
+            generator_device,
+        )
     )
     generated = generator(generator_source)
     reconstruction_loss, generator_metrics, exact_mz = _generator_metrics(
@@ -326,26 +354,26 @@ def _prepare_adversarial_batch(
         generator_source,
         config,
     )
-    generated_batch = build_adversarial_fake_batch(
+    fake_peak_mask, detection_mask = sample_adversarial_pair_masks(
+        generated["target_mask"]
+    )
+    mixed_batch = build_adversarial_mixed_batch(
         generator_source,
         generated,
         exact_mz,
+        fake_peak_mask,
+        detection_mask,
     )
-    fake_on_generator = _slice_batch(generated_batch, 0, half_batch)
-    fake_on_discriminator = _to_device(
-        fake_on_generator,
+    mixed_on_discriminator = _to_device(
+        mixed_batch,
         discriminator_device,
     )
-    detached_fake = {
+    discriminator_batch = {
         key: value.detach()
-        for key, value in fake_on_discriminator.items()
+        for key, value in mixed_on_discriminator.items()
     }
-    discriminator_batch = _concatenate_batches(
-        detached_fake,
-        build_adversarial_real_batch(real_source),
-    )
     return (
-        fake_on_discriminator,
+        mixed_on_discriminator,
         discriminator_batch,
         reconstruction_loss,
         generator_metrics,
@@ -356,8 +384,8 @@ def _generator_adversarial_loss(
     discriminator: FakePeakDiscriminator,
     fake_batch: dict[str, Tensor],
 ) -> Tensor:
-    predictions = discriminator.predict(fake_batch)
-    target = fake_batch["detection_mask"]
+    predictions = discriminator.detect(fake_batch)
+    target = fake_batch["fake_peak_mask"]
     per_peak = F.softplus(predictions["fake_logits"])
     return (per_peak * target.float()).sum() / target.float().sum()
 
@@ -515,6 +543,13 @@ def _training_contract(
                 "generator_adversarial_loss_weight",
                 "generator_adversarial_warmup_steps",
             )
+        }
+        | {
+            "adversarial_batch": (
+                "one_real_and_one_generated_target_per_spectrum"
+            ),
+            "base_peak": "always_context",
+            "peak_order": "random_per_microbatch",
         },
         "optimization": {
             key: config[key]

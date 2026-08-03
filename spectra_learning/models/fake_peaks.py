@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from ml_collections import config_dict
 from torch import Tensor, nn
 
-from spectra_learning.data.spectra import PEAK_MZ_MAX
+from spectra_learning.data.spectra import PEAK_MZ_MAX, PEAK_MZ_MIN
 from spectra_learning.models.factory import build_model_from_config
 from spectra_learning.models.spectrum_metadata import torch_spectrum_metadata_from_batch
 
@@ -63,7 +63,10 @@ class FakePeakDiscriminator(nn.Module):
             nn.init.xavier_normal_(head.weight)
             nn.init.zeros_(head.bias)
 
-    def predict(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+    def _encode(
+        self,
+        batch: dict[str, Tensor],
+    ) -> tuple[Tensor, Tensor]:
         visible = batch.get("student_visible_mask", batch["peak_valid_mask"])
         visible = visible & batch["peak_valid_mask"]
         encoded = self.encoder(
@@ -74,6 +77,17 @@ class FakePeakDiscriminator(nn.Module):
             precursor_mz=batch.get("precursor_mz"),
             spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
         )[:, : batch["peak_mz"].shape[1]]
+        return encoded, visible
+
+    def detect(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+        encoded, visible = self._encode(batch)
+        return {
+            "fake_logits": self.fake_head(encoded).squeeze(-1).float(),
+            "visible_mask": visible,
+        }
+
+    def predict(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+        encoded, visible = self._encode(batch)
         return {
             "fake_logits": self.fake_head(encoded).squeeze(-1).float(),
             "mz_logits": self.mz_head(encoded).float(),
@@ -188,6 +202,7 @@ class DynamicPeakGenerator(nn.Module):
         super().__init__()
         self.backbone = build_model_from_config(config)
         self.mz_bin_size = float(config.jepa_mae_mz_bin_size)
+        self.min_mz_bin = math.ceil(PEAK_MZ_MIN / self.mz_bin_size)
         self.intensity_bin_size = float(config.jepa_mae_intensity_bin_size)
         self.temperature = float(config.generator_gumbel_temperature)
         self.mz_residual_head = nn.Linear(self.backbone.target_projector_dim, 1)
@@ -222,6 +237,7 @@ class DynamicPeakGenerator(nn.Module):
         assert intensity_head is not None
         predictor_features = predictor_output[:, 0]
         mz_logits = mz_head(predictor_features).float()
+        mz_logits[..., : self.min_mz_bin] = -torch.inf
         intensity_logits = intensity_head(predictor_features).float()
         mz_residual_shift = (
             self.mz_residual_head(predictor_features).squeeze(-1).float()
@@ -266,10 +282,6 @@ class DynamicPeakGenerator(nn.Module):
             target_mask,
             predicted_intensity,
             batch["peak_intensity"],
-        )
-        completed_intensity = completed_intensity / torch.clamp(
-            completed_intensity.amax(dim=1, keepdim=True),
-            min=1e-8,
         )
         return {
             "peak_mz": torch.where(
