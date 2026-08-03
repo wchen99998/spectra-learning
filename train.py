@@ -29,6 +29,12 @@ def _train(config, workdir):
         )
 
         return train_fake_peak_discriminator(config, workdir=workdir)
+    if task == "adversarial_fake_peak":
+        from spectra_learning.training.adversarial_fake_peaks import (
+            train_adversarial_fake_peaks,
+        )
+
+        return train_adversarial_fake_peaks(config, workdir=workdir)
     from spectra_learning.training.ar_spectra_jax import (
         train_and_evaluate_ar_spectra_jax,
     )

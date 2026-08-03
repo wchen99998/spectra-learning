@@ -40,7 +40,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.generator_intensity_smooth_l1_beta = 0.1
     cfg.generator_mz_loss_weight = 1.0
     cfg.generator_intensity_loss_weight = 1.0
-    cfg.generator_adversarial_loss_weight = 1.0
+    cfg.generator_adversarial_loss_weight = 1e-5
     cfg.generator_adversarial_warmup_steps = 250
 
     cfg.enable_wandb = True
