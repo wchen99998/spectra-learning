@@ -164,6 +164,14 @@ class DynamicPeakGenerator(nn.Module):
         self.mz_bin_size = float(config.jepa_mae_mz_bin_size)
         self.intensity_bin_size = float(config.jepa_mae_intensity_bin_size)
         self.temperature = float(config.generator_gumbel_temperature)
+        self.mz_residual_head = nn.Linear(self.backbone.target_projector_dim, 1)
+        self.intensity_residual_head = nn.Linear(
+            self.backbone.target_projector_dim,
+            1,
+        )
+        for head in (self.mz_residual_head, self.intensity_residual_head):
+            nn.init.xavier_normal_(head.weight)
+            nn.init.zeros_(head.bias)
 
     def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         peak_valid_mask = batch["peak_valid_mask"]
@@ -186,8 +194,17 @@ class DynamicPeakGenerator(nn.Module):
         intensity_head = self.backbone.jepa_mae_intensity_head
         assert mz_head is not None
         assert intensity_head is not None
-        mz_logits = mz_head(predictor_output[:, 0]).float()
-        intensity_logits = intensity_head(predictor_output[:, 0]).float()
+        predictor_features = predictor_output[:, 0]
+        mz_logits = mz_head(predictor_features).float()
+        intensity_logits = intensity_head(predictor_features).float()
+        mz_residual_logits = (
+            self.mz_residual_head(predictor_features).squeeze(-1).float()
+        )
+        intensity_residual_logits = (
+            self.intensity_residual_head(predictor_features).squeeze(-1).float()
+        )
+        mz_residual = mz_residual_logits.sigmoid()
+        intensity_residual = intensity_residual_logits.sigmoid()
         sampled_mz_bins = F.gumbel_softmax(
             mz_logits,
             tau=self.temperature,
@@ -210,30 +227,36 @@ class DynamicPeakGenerator(nn.Module):
         )
         predicted_mz = (
             (sampled_mz_bins * mz_bins).sum(dim=-1)
-            + torch.rand_like(batch["peak_mz"])
+            + mz_residual
         ) * self.mz_bin_size / PEAK_MZ_MAX
         predicted_intensity = (
             (sampled_intensity_bins * intensity_bins).sum(dim=-1)
-            + torch.rand_like(batch["peak_intensity"])
+            + intensity_residual
         ) * self.intensity_bin_size
-        predicted_intensity = predicted_intensity.clamp_max(
-            float(self.backbone.jepa_mae_intensity_max)
-        )
         target_mask = target_masks[:, 0]
+        completed_intensity = torch.where(
+            target_mask,
+            predicted_intensity,
+            batch["peak_intensity"],
+        )
+        completed_intensity = completed_intensity / torch.clamp(
+            completed_intensity.amax(dim=1, keepdim=True),
+            min=1e-8,
+        )
         return {
             "peak_mz": torch.where(
                 target_mask,
                 predicted_mz,
                 batch["peak_mz"],
             ),
-            "peak_intensity": torch.where(
-                target_mask,
-                predicted_intensity,
-                batch["peak_intensity"],
-            ),
+            "peak_intensity": completed_intensity,
             "predicted_mz": predicted_mz,
-            "predicted_intensity": predicted_intensity,
+            "predicted_intensity": completed_intensity,
             "mz_logits": mz_logits,
             "intensity_logits": intensity_logits,
+            "mz_residual_logits": mz_residual_logits,
+            "intensity_residual_logits": intensity_residual_logits,
+            "mz_residual": mz_residual,
+            "intensity_residual": intensity_residual,
             "target_mask": target_mask,
         }

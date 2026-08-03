@@ -49,6 +49,8 @@ from spectra_learning.training.storage import (
     storage_mkdir,
 )
 
+ADVERSARIAL_FAKE_PEAK_CHECKPOINT_FORMAT_VERSION = 2
+
 
 def generator_config(
     config: config_dict.ConfigDict,
@@ -68,6 +70,19 @@ def adversarial_weight_at_step(
     warmup_steps = int(config.generator_adversarial_warmup_steps)
     progress = 1.0 if warmup_steps == 0 else min(1.0, global_step / warmup_steps)
     return float(config.generator_adversarial_loss_weight) * progress
+
+
+def _clamped_class_targets(
+    values: Tensor,
+    *,
+    value_scale: float,
+    bin_size: float,
+    num_classes: int,
+) -> tuple[Tensor, Tensor]:
+    scaled = values.float() * value_scale / bin_size
+    classes = torch.floor(scaled).long().clamp(0, num_classes - 1)
+    residuals = (scaled - classes.float()).clamp(0.0, 1.0)
+    return classes, residuals
 
 
 def _slice_batch(
@@ -103,24 +118,46 @@ def _generator_metrics(
 
     mz_bin_size = float(config.jepa_mae_mz_bin_size)
     intensity_bin_size = float(config.jepa_mae_intensity_bin_size)
-    true_mz_bins = torch.floor(
-        true_mz * PEAK_MZ_MAX / mz_bin_size
-    ).long().clamp(0, generated["mz_logits"].shape[-1] - 1)
-    true_intensity_bins = torch.floor(
-        true_intensity / intensity_bin_size
-    ).long().clamp(0, generated["intensity_logits"].shape[-1] - 1)
-    mz_per_peak = F.cross_entropy(
+    true_mz_bins, true_mz_residual = _clamped_class_targets(
+        true_mz,
+        value_scale=PEAK_MZ_MAX,
+        bin_size=mz_bin_size,
+        num_classes=generated["mz_logits"].shape[-1],
+    )
+    true_intensity_bins, true_intensity_residual = _clamped_class_targets(
+        true_intensity,
+        value_scale=1.0,
+        bin_size=intensity_bin_size,
+        num_classes=generated["intensity_logits"].shape[-1],
+    )
+    mz_bin_per_peak = F.cross_entropy(
         generated["mz_logits"].transpose(1, 2),
         true_mz_bins,
         reduction="none",
     )
-    intensity_per_peak = F.cross_entropy(
+    intensity_bin_per_peak = F.cross_entropy(
         generated["intensity_logits"].transpose(1, 2),
         true_intensity_bins,
         reduction="none",
     )
-    mz_loss = (mz_per_peak * weights).sum() / count
-    intensity_loss = (intensity_per_peak * weights).sum() / count
+    mz_residual_per_peak = F.binary_cross_entropy_with_logits(
+        generated["mz_residual_logits"],
+        true_mz_residual,
+        reduction="none",
+    )
+    intensity_residual_per_peak = F.binary_cross_entropy_with_logits(
+        generated["intensity_residual_logits"],
+        true_intensity_residual,
+        reduction="none",
+    )
+    mz_bin_loss = (mz_bin_per_peak * weights).sum() / count
+    intensity_bin_loss = (intensity_bin_per_peak * weights).sum() / count
+    mz_residual_loss = (mz_residual_per_peak * weights).sum() / count
+    intensity_residual_loss = (
+        intensity_residual_per_peak * weights
+    ).sum() / count
+    mz_loss = mz_bin_loss + mz_residual_loss
+    intensity_loss = intensity_bin_loss + intensity_residual_loss
     reconstruction_loss = (
         float(config.generator_mz_loss_weight) * mz_loss
         + float(config.generator_intensity_loss_weight) * intensity_loss
@@ -128,11 +165,11 @@ def _generator_metrics(
 
     predicted_mz_bins = torch.floor(
         predicted_mz * PEAK_MZ_MAX / mz_bin_size
-    ).long()
+    ).long().clamp(0, generated["mz_logits"].shape[-1] - 1)
     exact_mz = target & predicted_mz_bins.eq(true_mz_bins)
     predicted_intensity_bins = torch.floor(
         predicted_intensity / intensity_bin_size
-    ).long()
+    ).long().clamp(0, generated["intensity_logits"].shape[-1] - 1)
 
     def moments(value: Tensor) -> tuple[Tensor, Tensor]:
         mean = (value * weights).sum() / count
@@ -149,6 +186,19 @@ def _generator_metrics(
         "reconstruction_loss": reconstruction_loss,
         "mz_loss": mz_loss,
         "intensity_loss": intensity_loss,
+        "mz_bin_loss": mz_bin_loss,
+        "intensity_bin_loss": intensity_bin_loss,
+        "mz_residual_loss": mz_residual_loss,
+        "intensity_residual_loss": intensity_residual_loss,
+        "mz_residual_mae": (
+            (generated["mz_residual"] - true_mz_residual).abs() * weights
+        ).sum()
+        / count,
+        "intensity_residual_mae": (
+            (generated["intensity_residual"] - true_intensity_residual).abs()
+            * weights
+        ).sum()
+        / count,
         "mz_mae_da": (
             (predicted_mz - true_mz).abs() * PEAK_MZ_MAX * weights
         ).sum()
@@ -505,7 +555,7 @@ def _save_checkpoint(
 ) -> None:
     save_torch_checkpoint(
         {
-            "format_version": 1,
+            "format_version": ADVERSARIAL_FAKE_PEAK_CHECKPOINT_FORMAT_VERSION,
             "training_task": "adversarial_fake_peak",
             "training_contract": training_contract,
             "generator": generator.state_dict(),
@@ -582,7 +632,8 @@ def train_adversarial_fake_peaks(
     if storage_exists(checkpoint_path):
         checkpoint = load_torch_checkpoint(checkpoint_path, map_location="cpu")
         if (
-            checkpoint["format_version"] != 1
+            checkpoint["format_version"]
+            != ADVERSARIAL_FAKE_PEAK_CHECKPOINT_FORMAT_VERSION
             or checkpoint["training_task"] != "adversarial_fake_peak"
         ):
             raise ValueError(

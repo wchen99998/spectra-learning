@@ -9,6 +9,8 @@ from spectra_learning.models.fake_peaks import (
     FakePeakDiscriminator,
 )
 from spectra_learning.training.adversarial_fake_peaks import (
+    ADVERSARIAL_FAKE_PEAK_CHECKPOINT_FORMAT_VERSION,
+    _clamped_class_targets,
     _evaluate,
     _generator_adversarial_loss,
     _prepare_adversarial_batch,
@@ -82,7 +84,7 @@ def _batch() -> dict[str, torch.Tensor]:
 def test_joint_models_have_requested_parameter_sizes() -> None:
     config = get_config()
     generator = DynamicPeakGenerator(generator_config(config))
-    assert sum(parameter.numel() for parameter in generator.parameters()) == 10_036_954
+    assert sum(parameter.numel() for parameter in generator.parameters()) == 10_037_468
     assert generator.backbone.jepa_mae_mz_head is not None
     assert generator.backbone.jepa_mae_intensity_head is not None
     assert generator.backbone.teacher_encoder is None
@@ -112,8 +114,8 @@ def test_adversarial_batch_is_balanced_at_target_positions() -> None:
         fake["true_peak_mz"][~target],
     )
     assert torch.equal(
-        fake["peak_intensity"][~target],
-        fake["true_peak_intensity"][~target],
+        fake["peak_intensity"].amax(dim=1),
+        torch.ones(fake["peak_intensity"].shape[0]),
     )
     assert discriminator_batch["detection_mask"].sum() == 12
     assert discriminator_batch["fake_peak_mask"].sum() == 6
@@ -147,6 +149,10 @@ def test_detached_discriminator_then_frozen_generator_pass() -> None:
     ).backward()
     assert generator.backbone.jepa_mae_mz_head.weight.grad is not None
     assert generator.backbone.jepa_mae_intensity_head.weight.grad is not None
+    assert generator.mz_residual_head.weight.grad is not None
+    assert generator.intensity_residual_head.weight.grad is not None
+    assert generator.mz_residual_head.weight.grad.abs().sum() > 0
+    assert generator.intensity_residual_head.weight.grad.abs().sum() > 0
     assert generator.backbone.latent_mask_token.grad is not None
     assert all(parameter.grad is None for parameter in discriminator.parameters())
 
@@ -169,12 +175,59 @@ def test_microbatch_trains_both_models_and_ramps_adversarial_weight() -> None:
     )
 
     assert adversarial_weight_at_step(config, 0) == 0.0
-    assert adversarial_weight_at_step(config, 5) == 1e-4
-    assert adversarial_weight_at_step(config, 10) == 2e-4
+    assert adversarial_weight_at_step(config, 5) == 5e-5
+    assert adversarial_weight_at_step(config, 10) == 1e-4
     assert torch.isfinite(metrics["generator/loss"])
     assert torch.isfinite(metrics["discriminator/loss"])
+    assert torch.isfinite(metrics["generator/mz_residual_loss"])
+    assert torch.isfinite(metrics["generator/intensity_residual_loss"])
+    assert torch.isfinite(metrics["generator/mz_residual_mae"])
+    assert torch.isfinite(metrics["generator/intensity_residual_mae"])
     assert generator.backbone.jepa_mae_mz_head.weight.grad is not None
+    assert generator.mz_residual_head.weight.grad is not None
+    assert generator.intensity_residual_head.weight.grad is not None
     assert discriminator.fake_head.weight.grad is not None
+
+
+def test_generator_base_normalizes_completed_intensities() -> None:
+    config = _tiny_config()
+    generator = DynamicPeakGenerator(generator_config(config))
+
+    generated = generator(_batch())
+
+    assert torch.equal(
+        generated["peak_intensity"].amax(dim=1),
+        torch.ones(generated["peak_intensity"].shape[0]),
+    )
+
+
+def test_generator_preserves_finite_zero_placeholder() -> None:
+    config = _tiny_config()
+    generator = DynamicPeakGenerator(generator_config(config))
+    batch = _batch()
+    batch["peak_intensity"].zero_()
+    batch["target_masks"].zero_()
+
+    generated = generator(batch)
+
+    assert torch.isfinite(generated["peak_intensity"]).all()
+    assert torch.count_nonzero(generated["peak_intensity"]) == 0
+
+
+def test_clamped_last_intensity_class_keeps_upper_residual() -> None:
+    classes, residuals = _clamped_class_targets(
+        torch.ones(1),
+        value_scale=1.0,
+        bin_size=0.1,
+        num_classes=10,
+    )
+
+    assert classes.item() == 9
+    assert residuals.item() == 1.0
+
+
+def test_adversarial_checkpoint_format_is_hard_cut() -> None:
+    assert ADVERSARIAL_FAKE_PEAK_CHECKPOINT_FORMAT_VERSION == 2
 
 
 def test_validation_preserves_training_rng() -> None:
