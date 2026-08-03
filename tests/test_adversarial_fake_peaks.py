@@ -1,3 +1,5 @@
+from contextlib import nullcontext
+
 import torch
 
 import train
@@ -7,8 +9,10 @@ from spectra_learning.models.fake_peaks import (
     FakePeakDiscriminator,
 )
 from spectra_learning.training.adversarial_fake_peaks import (
+    _evaluate,
     _generator_adversarial_loss,
     _prepare_adversarial_batch,
+    _training_contract,
     adversarial_weight_at_step,
     generator_config,
     train_adversarial_microbatch,
@@ -171,6 +175,91 @@ def test_microbatch_trains_both_models_and_ramps_adversarial_weight() -> None:
     assert torch.isfinite(metrics["discriminator/loss"])
     assert generator.backbone.jepa_mae_mz_head.weight.grad is not None
     assert discriminator.fake_head.weight.grad is not None
+
+
+def test_validation_preserves_training_rng() -> None:
+    config = _tiny_config()
+    generator = DynamicPeakGenerator(generator_config(config))
+    discriminator = FakePeakDiscriminator(config)
+    batch = _batch()
+    torch.manual_seed(123)
+    state = torch.get_rng_state()
+
+    _evaluate(
+        generator,
+        discriminator,
+        [batch],
+        torch.device("cpu"),
+        torch.device("cpu"),
+        config,
+        global_step=1,
+        max_steps=1,
+    )
+
+    assert torch.equal(torch.get_rng_state(), state)
+
+
+def test_validation_forks_both_model_cuda_rngs(monkeypatch) -> None:
+    config = _tiny_config()
+    generator = DynamicPeakGenerator(generator_config(config))
+    discriminator = FakePeakDiscriminator(config)
+    forked_devices = []
+
+    def record_fork_rng(*, devices):
+        forked_devices.extend(devices)
+        return nullcontext()
+
+    monkeypatch.setattr(torch.random, "fork_rng", record_fork_rng)
+    _evaluate(
+        generator,
+        discriminator,
+        [],
+        torch.device("cuda:1"),
+        torch.device("cuda:0"),
+        config,
+        global_step=1,
+        max_steps=0,
+    )
+
+    assert forked_devices == [
+        torch.device("cuda:1"),
+        torch.device("cuda:0"),
+    ]
+
+
+def test_training_contract_tracks_intensity_aware_masking() -> None:
+    config = _tiny_config()
+    contract = _training_contract(config, generator_config(config))
+    config.jepa_intensity_aware_alpha = 0.5
+    changed = _training_contract(config, generator_config(config))
+
+    assert contract != changed
+    assert (
+        contract["masking"]["jepa_intensity_aware_mask_config"]["alpha"]
+        == 0.75
+    )
+    assert (
+        changed["masking"]["jepa_intensity_aware_mask_config"]["alpha"]
+        == 0.5
+    )
+
+
+def test_training_contract_tracks_optimizer_and_data_stream() -> None:
+    config = _tiny_config()
+    contract = _training_contract(config, generator_config(config))
+    config.optimizer_fused = False
+    config.drop_remainder = False
+    config.gems_hdf5_rows_per_block = 4096
+    config.dataloader_num_workers = 3
+    changed = _training_contract(config, generator_config(config))
+
+    assert contract != changed
+    assert changed["optimization"]["optimizer_fused"] is False
+    assert changed["data_stream"] == {
+        "drop_remainder": False,
+        "gems_hdf5_rows_per_block": 4096,
+        "dataloader_num_workers": 3,
+    }
 
 
 def test_adversarial_fake_peak_training_routes_to_torch() -> None:

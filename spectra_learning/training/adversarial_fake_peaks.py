@@ -20,6 +20,7 @@ from spectra_learning.data.contracts import (
     validate_peak_preprocessing_contract,
 )
 from spectra_learning.data.gems.datamodule import GemsDataModule
+from spectra_learning.data.gems.settings import GemsDataConfig
 from spectra_learning.data.spectra import PEAK_MZ_MAX
 from spectra_learning.models.fake_peaks import (
     DynamicPeakGenerator,
@@ -358,49 +359,60 @@ def _evaluate(
     discriminator.eval()
     totals: dict[str, float] = {}
     steps = 0
-    for cpu_batch in islice(batches, max_steps):
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            (
-                fake_batch,
-                discriminator_batch,
-                reconstruction_loss,
-                generator_metrics,
-            ) = _prepare_adversarial_batch(
-                generator,
-                cpu_batch,
-                generator_device,
-                discriminator_device,
-                config,
-            )
-            discriminator_metrics = discriminator(discriminator_batch)
-            adversarial_loss = _generator_adversarial_loss(
-                discriminator,
-                fake_batch,
-            )
-            adversarial_weight = adversarial_weight_at_step(config, global_step)
-            generator_loss = (
-                reconstruction_loss
-                + adversarial_weight * adversarial_loss.to(generator_device)
-            )
-        metrics = {
-            **{
-                f"discriminator/{key}": value
-                for key, value in discriminator_metrics.items()
-            },
-            **{
-                f"generator/{key}": value
-                for key, value in generator_metrics.items()
-            },
-            "generator/adversarial_loss": adversarial_loss,
-            "generator/adversarial_weight": torch.tensor(adversarial_weight),
-            "generator/weighted_adversarial_loss": (
-                adversarial_weight * adversarial_loss
-            ),
-            "generator/loss": generator_loss,
-        }
-        for key, value in metrics.items():
-            totals[key] = totals.get(key, 0.0) + float(value)
-        steps += 1
+    rng_devices = [
+        device
+        for device in (generator_device, discriminator_device)
+        if device.type == "cuda"
+    ]
+    with torch.random.fork_rng(devices=rng_devices):
+        for cpu_batch in islice(batches, max_steps):
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                (
+                    fake_batch,
+                    discriminator_batch,
+                    reconstruction_loss,
+                    generator_metrics,
+                ) = _prepare_adversarial_batch(
+                    generator,
+                    cpu_batch,
+                    generator_device,
+                    discriminator_device,
+                    config,
+                )
+                discriminator_metrics = discriminator(discriminator_batch)
+                adversarial_loss = _generator_adversarial_loss(
+                    discriminator,
+                    fake_batch,
+                )
+                adversarial_weight = adversarial_weight_at_step(
+                    config,
+                    global_step,
+                )
+                generator_loss = (
+                    reconstruction_loss
+                    + adversarial_weight * adversarial_loss.to(generator_device)
+                )
+            metrics = {
+                **{
+                    f"discriminator/{key}": value
+                    for key, value in discriminator_metrics.items()
+                },
+                **{
+                    f"generator/{key}": value
+                    for key, value in generator_metrics.items()
+                },
+                "generator/adversarial_loss": adversarial_loss,
+                "generator/adversarial_weight": torch.tensor(
+                    adversarial_weight
+                ),
+                "generator/weighted_adversarial_loss": (
+                    adversarial_weight * adversarial_loss
+                ),
+                "generator/loss": generator_loss,
+            }
+            for key, value in metrics.items():
+                totals[key] = totals.get(key, 0.0) + float(value)
+            steps += 1
     generator.train()
     discriminator.train()
     return {key: value / steps for key, value in totals.items()}
@@ -410,6 +422,7 @@ def _training_contract(
     config: config_dict.ConfigDict,
     resolved_generator_config: config_dict.ConfigDict,
 ) -> dict[str, Any]:
+    data_config = GemsDataConfig.from_config(config)
     return {
         "discriminator_model": asdict(PeakSetJEPASettings.from_config(config)),
         "generator_model": asdict(
@@ -441,11 +454,18 @@ def _training_contract(
                 "generator_warmup_steps",
                 "b2",
                 "grad_clip_norm",
+                "optimizer_fused",
             )
+        },
+        "data_stream": {
+            "drop_remainder": data_config.drop_remainder,
+            "gems_hdf5_rows_per_block": data_config.gems_hdf5_rows_per_block,
+            "dataloader_num_workers": data_config.dataloader_num_workers,
         },
         "masking": {
             key: config[key]
             for key in (
+                "jepa_num_target_blocks",
                 "jepa_mask_strategy",
                 "jepa_context_fraction",
                 "jepa_target_fraction",
@@ -453,6 +473,11 @@ def _training_contract(
                 "jepa_mask_lengths",
                 "jepa_mask_round_from",
                 "jepa_allow_target_overlap",
+            )
+        }
+        | {
+            "jepa_intensity_aware_mask_config": (
+                data_config.jepa_intensity_aware_mask_config
             )
         },
         "seed": config.seed,
