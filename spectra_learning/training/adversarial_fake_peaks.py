@@ -50,7 +50,7 @@ from spectra_learning.training.storage import (
     storage_mkdir,
 )
 
-ADVERSARIAL_FAKE_PEAK_CHECKPOINT_FORMAT_VERSION = 4
+ADVERSARIAL_FAKE_PEAK_CHECKPOINT_FORMAT_VERSION = 5
 
 
 def generator_config(
@@ -395,13 +395,14 @@ def _generator_adversarial_loss(
 def train_adversarial_microbatch(
     generator: DynamicPeakGenerator,
     discriminator: FakePeakDiscriminator,
+    generator_parameters: tuple[nn.Parameter, ...],
     cpu_batch: dict[str, Tensor],
     generator_device: torch.device,
     discriminator_device: torch.device,
     config: config_dict.ConfigDict,
     global_step: int,
     accumulation_steps: int,
-) -> dict[str, Tensor]:
+) -> tuple[dict[str, Tensor], tuple[Tensor | None, ...]]:
     (
         fake_batch,
         discriminator_batch,
@@ -421,14 +422,22 @@ def train_adversarial_microbatch(
     discriminator.requires_grad_(False)
     adversarial_loss = _generator_adversarial_loss(discriminator, fake_batch)
     adversarial_weight = adversarial_weight_at_step(config, global_step)
-    generator_loss = (
-        reconstruction_loss
-        + adversarial_weight * adversarial_loss.to(generator_device)
+    weighted_adversarial_loss = (
+        adversarial_weight * adversarial_loss.to(generator_device)
     )
-    (generator_loss / accumulation_steps).backward()
+    if adversarial_weight:
+        adversarial_gradients = torch.autograd.grad(
+            weighted_adversarial_loss / accumulation_steps,
+            generator_parameters,
+            retain_graph=True,
+            allow_unused=True,
+        )
+    else:
+        adversarial_gradients = (None,) * len(generator_parameters)
+    (reconstruction_loss / accumulation_steps).backward()
     discriminator.requires_grad_(True)
 
-    return {
+    metrics = {
         **{
             f"discriminator/{key}": value.detach()
             for key, value in discriminator_metrics.items()
@@ -445,8 +454,50 @@ def train_adversarial_microbatch(
         "generator/weighted_adversarial_loss": (
             adversarial_weight * adversarial_loss.detach()
         ),
-        "generator/loss": generator_loss.detach(),
+        "generator/loss": (
+            reconstruction_loss.detach()
+            + weighted_adversarial_loss.detach()
+        ),
     }
+    return metrics, adversarial_gradients
+
+
+def _merge_adversarial_gradients(
+    parameters: tuple[nn.Parameter, ...],
+    adversarial_gradients: list[Tensor | None],
+    max_ratio: float,
+) -> tuple[Tensor, Tensor, Tensor]:
+    reconstruction_norm = nn.utils.get_total_norm(
+        parameter.grad
+        for parameter in parameters
+        if parameter.grad is not None
+    )
+    gradients = [
+        gradient
+        for gradient in adversarial_gradients
+        if gradient is not None
+    ]
+    if not gradients:
+        zero = reconstruction_norm.new_zeros(())
+        return zero, reconstruction_norm.new_ones(()), zero
+
+    adversarial_norm = nn.utils.get_total_norm(gradients)
+    scale = torch.clamp(
+        max_ratio * reconstruction_norm / (adversarial_norm + 1e-6),
+        max=1.0,
+    )
+    scale_value = float(scale)
+    for parameter, gradient in zip(parameters, adversarial_gradients):
+        if gradient is None:
+            continue
+        if parameter.grad is None:
+            parameter.grad = gradient.mul(scale_value)
+        else:
+            parameter.grad.add_(gradient, alpha=scale_value)
+    realized_ratio = (
+        scale * adversarial_norm / reconstruction_norm.clamp_min(1e-6)
+    )
+    return adversarial_norm, scale, realized_ratio
 
 
 @torch.no_grad()
@@ -565,6 +616,7 @@ def _training_contract(
                 "generator_learning_rate",
                 "generator_min_learning_rate",
                 "generator_warmup_steps",
+                "generator_adversarial_grad_max_ratio",
                 "b2",
                 "grad_clip_norm",
                 "optimizer_fused",
@@ -689,6 +741,7 @@ def train_adversarial_fake_peaks(
     generator_scheduler = generator_schedulers[0]
     discriminator_optimizer = discriminator_optimizers[0]
     discriminator_scheduler = discriminator_schedulers[0]
+    generator_parameters = tuple(generator.parameters())
     training_contract = _training_contract(config, resolved_generator_config)
 
     global_step = 0
@@ -793,6 +846,9 @@ def train_adversarial_fake_peaks(
                 break
             generator_optimizer.zero_grad(set_to_none=True)
             discriminator_optimizer.zero_grad(set_to_none=True)
+            adversarial_gradient_totals: list[Tensor | None] = [
+                None
+            ] * len(generator_parameters)
             metric_totals: dict[str, Tensor] = {}
             data_wait_seconds = 0.0
             step_started = time.perf_counter()
@@ -801,9 +857,10 @@ def train_adversarial_fake_peaks(
                 cpu_batch = next(train_batches)
                 data_wait_seconds += time.perf_counter() - data_wait_started
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    metrics = train_adversarial_microbatch(
+                    metrics, adversarial_gradients = train_adversarial_microbatch(
                         generator,
                         discriminator,
+                        generator_parameters,
                         cpu_batch,
                         generator_device,
                         discriminator_device,
@@ -811,6 +868,14 @@ def train_adversarial_fake_peaks(
                         global_step,
                         accumulation_steps,
                     )
+                for index, gradient in enumerate(adversarial_gradients):
+                    if gradient is None:
+                        continue
+                    total = adversarial_gradient_totals[index]
+                    if total is None:
+                        adversarial_gradient_totals[index] = gradient
+                    else:
+                        total.add_(gradient)
                 for key, value in metrics.items():
                     metric_totals[key] = metric_totals.get(
                         key,
@@ -823,8 +888,8 @@ def train_adversarial_fake_peaks(
                     discriminator.parameters(),
                     grad_clip_norm,
                 )
-                generator_grad_norm = nn.utils.clip_grad_norm_(
-                    generator.parameters(),
+                generator_reconstruction_grad_norm = nn.utils.clip_grad_norm_(
+                    generator_parameters,
                     grad_clip_norm,
                 )
             else:
@@ -832,7 +897,33 @@ def train_adversarial_fake_peaks(
                     (),
                     device=discriminator_device,
                 )
-                generator_grad_norm = torch.zeros((), device=generator_device)
+                generator_reconstruction_grad_norm = (
+                    nn.utils.get_total_norm(
+                        parameter.grad
+                        for parameter in generator_parameters
+                        if parameter.grad is not None
+                    )
+                )
+            (
+                generator_adversarial_grad_norm,
+                generator_adversarial_grad_scale,
+                generator_adversarial_grad_ratio,
+            ) = _merge_adversarial_gradients(
+                generator_parameters,
+                adversarial_gradient_totals,
+                float(config.generator_adversarial_grad_max_ratio),
+            )
+            if grad_clip_norm > 0:
+                generator_grad_norm = nn.utils.clip_grad_norm_(
+                    generator_parameters,
+                    grad_clip_norm,
+                )
+            else:
+                generator_grad_norm = nn.utils.get_total_norm(
+                    parameter.grad
+                    for parameter in generator_parameters
+                    if parameter.grad is not None
+                )
             discriminator_optimizer.step()
             generator_optimizer.step()
             discriminator_scheduler.step()
@@ -865,6 +956,18 @@ def train_adversarial_fake_peaks(
                             generator_optimizer.param_groups[0]["lr"]
                         ),
                         "train/generator/grad_norm": float(generator_grad_norm),
+                        "train/generator/reconstruction_grad_norm": float(
+                            generator_reconstruction_grad_norm
+                        ),
+                        "train/generator/adversarial_grad_norm": float(
+                            generator_adversarial_grad_norm
+                        ),
+                        "train/generator/adversarial_grad_scale": float(
+                            generator_adversarial_grad_scale
+                        ),
+                        "train/generator/adversarial_grad_ratio": float(
+                            generator_adversarial_grad_ratio
+                        ),
                         "run/step_seconds": step_seconds,
                         "run/spectra_per_second": (
                             int(config.batch_size) / step_seconds

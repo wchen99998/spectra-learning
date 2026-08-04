@@ -15,6 +15,7 @@ def test_equal_adversarial_config_runs_large_batch_for_50k_steps() -> None:
     assert config.generator_model.encoder_num_layers == 11
     assert config.generator_model.predictor_dim == 280
     assert config.generator_adversarial_loss_weight == 0.25
+    assert config.generator_adversarial_grad_max_ratio == 0.1
 
 
 def test_adversarial_config_has_no_frozen_generator_fields() -> None:

@@ -1,6 +1,7 @@
 from contextlib import nullcontext
 
 import torch
+from torch import nn
 
 import train
 from configs.adversarial_fake_peaks_equal_50m import get_config
@@ -15,6 +16,7 @@ from spectra_learning.training.adversarial_fake_peaks import (
     _clamped_class_targets,
     _evaluate,
     _generator_adversarial_loss,
+    _merge_adversarial_gradients,
     _prepare_adversarial_batch,
     _training_contract,
     anchor_base_peak_in_context,
@@ -239,9 +241,11 @@ def test_microbatch_trains_both_models_and_ramps_adversarial_weight() -> None:
     generator = DynamicPeakGenerator(generator_config(config))
     discriminator = FakePeakDiscriminator(config)
 
-    metrics = train_adversarial_microbatch(
+    generator_parameters = tuple(generator.parameters())
+    metrics, adversarial_gradients = train_adversarial_microbatch(
         generator,
         discriminator,
+        generator_parameters,
         _batch(),
         torch.device("cpu"),
         torch.device("cpu"),
@@ -280,6 +284,33 @@ def test_microbatch_trains_both_models_and_ramps_adversarial_weight() -> None:
     assert generator.mz_residual_head.weight.grad is not None
     assert generator.intensity_residual_head.weight.grad is not None
     assert discriminator.fake_head.weight.grad is not None
+    assert any(
+        gradient is not None and gradient.abs().sum() > 0
+        for gradient in adversarial_gradients
+    )
+
+
+def test_adversarial_gradient_norm_is_capped_relative_to_reconstruction() -> None:
+    first = nn.Parameter(torch.zeros(2))
+    second = nn.Parameter(torch.zeros(1))
+    first.grad = torch.tensor([3.0, 4.0])
+    adversarial = [torch.tensor([30.0, 40.0]), torch.tensor([100.0])]
+
+    raw_norm, scale, realized_ratio = _merge_adversarial_gradients(
+        (first, second),
+        adversarial,
+        max_ratio=0.1,
+    )
+
+    assert torch.allclose(raw_norm, torch.tensor(12_500**0.5))
+    assert torch.allclose(scale, torch.tensor(0.5 / 12_500**0.5))
+    assert torch.allclose(realized_ratio, torch.tensor(0.1))
+    assert torch.allclose(
+        nn.utils.get_total_norm(
+            [first.grad - torch.tensor([3.0, 4.0]), second.grad]
+        ),
+        torch.tensor(0.5),
+    )
 
 
 def test_generator_preserves_non_target_intensities() -> None:
@@ -367,7 +398,7 @@ def test_logit_uniform_nll_is_exact_and_differentiable() -> None:
 
 
 def test_adversarial_checkpoint_format_is_hard_cut() -> None:
-    assert ADVERSARIAL_FAKE_PEAK_CHECKPOINT_FORMAT_VERSION == 4
+    assert ADVERSARIAL_FAKE_PEAK_CHECKPOINT_FORMAT_VERSION == 5
 
 
 def test_validation_preserves_training_rng() -> None:
@@ -441,6 +472,7 @@ def test_training_contract_tracks_optimizer_and_data_stream() -> None:
     config = _tiny_config()
     contract = _training_contract(config, generator_config(config))
     config.optimizer_fused = False
+    config.generator_adversarial_grad_max_ratio = 0.2
     config.drop_remainder = False
     config.gems_hdf5_rows_per_block = 4096
     config.dataloader_num_workers = 3
@@ -448,6 +480,7 @@ def test_training_contract_tracks_optimizer_and_data_stream() -> None:
 
     assert contract != changed
     assert changed["optimization"]["optimizer_fused"] is False
+    assert changed["optimization"]["generator_adversarial_grad_max_ratio"] == 0.2
     assert changed["data_stream"] == {
         "drop_remainder": False,
         "gems_hdf5_rows_per_block": 4096,
