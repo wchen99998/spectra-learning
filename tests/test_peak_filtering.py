@@ -1,19 +1,11 @@
 import numpy as np
 import pytest
 import torch
-from ml_collections import config_dict
 
 from spectra_learning.data.gems.collate import GemsBatchCollator
-from spectra_learning.data.gems.settings import GemsDataConfig
-from spectra_learning.data.contracts import peak_preprocessing_contract
 from spectra_learning.data.spectra import (
     ASSUMED_PRECURSOR_CHARGE,
     COLLISION_ENERGY_MAX,
-    DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-    PEAK_GROUP_PADDING_ID,
-    PEAK_FILTERING_GROUPED,
-    PEAK_FILTERING_TOP_INTENSITY,
-    PEAK_MZ_MAX,
     PRECURSOR_CHARGE_MAX,
     preprocess_peak_batch_numpy,
     preprocess_peak_batch_torch,
@@ -32,33 +24,12 @@ def _numpy_spectrum_metadata(
     }
 
 
-@pytest.mark.parametrize(
-    "config",
-    (
-        {"peak_filtering": "typo"},
-        {"peak_ordering": "typo"},
-    ),
-)
-def test_peak_preprocessing_contract_rejects_unknown_modes(config) -> None:
-    with pytest.raises(ValueError, match="Unknown peak_"):
-        peak_preprocessing_contract(config)
-
-
-@pytest.mark.parametrize(
-    "overrides",
-    (
-        {"peak_filtering": "typo"},
-        {"peak_ordering": "typo"},
-    ),
-)
-def test_peak_preprocessor_rejects_unknown_modes(overrides) -> None:
+def test_peak_preprocessor_rejects_unknown_ordering() -> None:
     kwargs = {
         "num_peaks": 1,
         "peak_drop_min_intensity": 0.0,
-        "peak_ordering": "mz",
+        "peak_ordering": "typo",
         "max_precursor_mz": 1000.0,
-        "peak_filtering": PEAK_FILTERING_TOP_INTENSITY,
-        **overrides,
     }
     with pytest.raises(ValueError, match="Unknown peak_"):
         preprocess_peak_batch_torch(
@@ -69,129 +40,41 @@ def test_peak_preprocessor_rejects_unknown_modes(overrides) -> None:
         )
 
 
-def test_grouped_peak_filtering_keeps_group_representatives_torch() -> None:
-    mz = torch.tensor([[100.0, 100.03, 101.002, 150.0, 151.0, 300.0, 400.0]])
-    intensity = torch.tensor([[1.0, 0.90, 0.95, 0.85, 0.80, 0.70, 0.60]])
-    precursor_mz = torch.tensor([500.0])
-
-    top_intensity = preprocess_peak_batch_torch(
-        mz,
-        intensity,
-        precursor_mz,
-        num_peaks=4,
-        peak_drop_min_intensity=0.0,
-        peak_ordering="mz",
-        max_precursor_mz=1000.0,
-        peak_filtering=PEAK_FILTERING_TOP_INTENSITY,
-    )
-    grouped = preprocess_peak_batch_torch(
-        mz,
-        intensity,
-        precursor_mz,
-        num_peaks=4,
-        peak_drop_min_intensity=0.0,
-        peak_ordering="mz",
-        max_precursor_mz=1000.0,
-        peak_filtering=PEAK_FILTERING_GROUPED,
-        grouped_peak_shoulder_da=0.05,
-        grouped_peak_isotope_charges=(1,),
-    )
-
-    top_mz = top_intensity["peak_mz"][0, top_intensity["peak_valid_mask"][0]]
-    grouped_mz = grouped["peak_mz"][0, grouped["peak_valid_mask"][0]]
-    assert torch.allclose(
-        top_mz * PEAK_MZ_MAX,
-        torch.tensor([100.0, 100.03, 101.002, 150.0]),
-        atol=1e-4,
-    )
-    assert torch.allclose(
-        grouped_mz * PEAK_MZ_MAX,
-        torch.tensor([100.0, 101.002, 150.0, 151.0]),
-        atol=1e-4,
-    )
-    grouped_group_id = grouped["peak_group_id"][0, grouped["peak_valid_mask"][0]]
-    assert torch.equal(grouped_group_id, torch.tensor([0, 0, 1, 1], dtype=torch.int32))
-    padding_group_id = grouped["peak_group_id"][0, ~grouped["peak_valid_mask"][0]]
-    assert (padding_group_id == PEAK_GROUP_PADDING_ID).all()
-
-
-def test_grouped_peak_filtering_keeps_group_representatives_numpy() -> None:
-    spectra = np.zeros((1, 2, 7), dtype=np.float32)
-    spectra[0, 0] = [100.0, 100.03, 101.002, 150.0, 151.0, 300.0, 400.0]
-    spectra[0, 1] = [1.0, 0.90, 0.95, 0.85, 0.80, 0.70, 0.60]
-
-    grouped = preprocess_peak_batch_numpy(
-        spectra,
-        np.asarray([500.0], dtype=np.float32),
-        num_peaks=4,
-        peak_drop_min_intensity=0.0,
-        peak_ordering="mz",
-        max_precursor_mz=1000.0,
-        peak_filtering=PEAK_FILTERING_GROUPED,
-        grouped_peak_shoulder_da=0.05,
-        grouped_peak_isotope_charges=(1,),
-    )
-
-    grouped_mz = grouped["peak_mz"][0, grouped["peak_valid_mask"][0]]
-    assert np.allclose(
-        grouped_mz * PEAK_MZ_MAX,
-        np.asarray([100.0, 101.002, 150.0, 151.0], dtype=np.float32),
-        atol=1e-4,
-    )
-    grouped_group_id = grouped["peak_group_id"][0, grouped["peak_valid_mask"][0]]
-    assert np.array_equal(grouped_group_id, np.asarray([0, 0, 1, 1], dtype=np.int32))
-
-
 def test_numpy_and_torch_peak_preprocessing_randomized_parity() -> None:
     rng = np.random.default_rng(3491)
-    for peak_filtering in (
-        PEAK_FILTERING_TOP_INTENSITY,
-        PEAK_FILTERING_GROUPED,
-    ):
-        for peak_ordering in ("mz", "intensity"):
-            for input_peaks in (9, 41):
-                mz = rng.uniform(-20.0, 1100.0, (7, input_peaks)).astype(np.float32)
-                intensity = rng.uniform(-0.1, 1.5, (7, input_peaks)).astype(
-                    np.float32
-                )
-                precursor_mz = rng.uniform(50.0, 1050.0, 7).astype(np.float32)
-                bases = rng.uniform(120.0, 700.0, 7).astype(np.float32)
-                mz[:, :4] = np.stack(
-                    [bases, bases + 0.03, bases + 1.002, bases + 2.004],
-                    axis=1,
-                )
-                intensity[:, :4] = rng.uniform(0.1, 1.5, (7, 4))
-                spectra = np.stack([mz, intensity], axis=1)
-                kwargs = {
-                    "num_peaks": 16,
-                    "peak_drop_min_intensity": 0.08,
-                    "peak_ordering": peak_ordering,
-                    "max_precursor_mz": 1000.0,
-                    "precursor_peak_exclusion_window_da": 0.1,
-                    "min_peak_intensity": 0.05,
-                    "peak_filtering": peak_filtering,
-                    "grouped_peak_shoulder_da": 0.05,
-                    "grouped_peak_isotope_charges": (1, 2, 3),
-                }
+    for peak_ordering in ("mz", "intensity"):
+        for input_peaks in (9, 41):
+            mz = rng.uniform(-20.0, 1100.0, (7, input_peaks)).astype(np.float32)
+            intensity = rng.uniform(-0.1, 1.5, (7, input_peaks)).astype(np.float32)
+            precursor_mz = rng.uniform(50.0, 1050.0, 7).astype(np.float32)
+            spectra = np.stack([mz, intensity], axis=1)
+            kwargs = {
+                "num_peaks": 16,
+                "peak_drop_min_intensity": 0.08,
+                "peak_ordering": peak_ordering,
+                "max_precursor_mz": 1000.0,
+                "precursor_peak_exclusion_window_da": 0.1,
+                "min_peak_intensity": 0.05,
+            }
 
-                numpy_batch = preprocess_peak_batch_numpy(
-                    spectra,
-                    precursor_mz,
-                    **kwargs,
-                )
-                torch_batch = preprocess_peak_batch_torch(
-                    torch.from_numpy(mz),
-                    torch.from_numpy(intensity),
-                    torch.from_numpy(precursor_mz),
-                    **kwargs,
-                )
+            numpy_batch = preprocess_peak_batch_numpy(
+                spectra,
+                precursor_mz,
+                **kwargs,
+            )
+            torch_batch = preprocess_peak_batch_torch(
+                torch.from_numpy(mz),
+                torch.from_numpy(intensity),
+                torch.from_numpy(precursor_mz),
+                **kwargs,
+            )
 
-                for key, expected in numpy_batch.items():
-                    actual = torch_batch[key].numpy()
-                    if np.issubdtype(expected.dtype, np.floating):
-                        np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-7)
-                    else:
-                        np.testing.assert_array_equal(actual, expected)
+            for key, expected in numpy_batch.items():
+                actual = torch_batch[key].numpy()
+                if np.issubdtype(expected.dtype, np.floating):
+                    np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-7)
+                else:
+                    np.testing.assert_array_equal(actual, expected)
 
 
 def test_peak_preprocessing_uses_relative_intensity_thresholds() -> None:
@@ -269,10 +152,6 @@ def test_peak_preprocessing_marks_zero_placeholder_valid() -> None:
     )
     np.testing.assert_array_equal(numpy_batch["peak_mz"], np.zeros((1, 3)))
     np.testing.assert_array_equal(numpy_batch["peak_intensity"], np.zeros((1, 3)))
-    np.testing.assert_array_equal(
-        numpy_batch["peak_group_id"],
-        np.full((1, 3), PEAK_GROUP_PADDING_ID),
-    )
 
 
 def test_spectra_from_peak_lists_pads_truncates_and_normalizes() -> None:
@@ -289,22 +168,6 @@ def test_spectra_from_peak_lists_pads_truncates_and_normalizes() -> None:
     assert spectra[1, 1, -1] == 1.0
 
 
-def test_gems_data_config_reads_grouped_peak_filtering_fields() -> None:
-    cfg = config_dict.ConfigDict()
-    cfg.peak_filtering = PEAK_FILTERING_GROUPED
-    cfg.grouped_peak_shoulder_da = 0.05
-    cfg.grouped_peak_isotope_charges = (1, 2, 3)
-    cfg.dataloader_output_format = "numpy"
-
-    data_config = GemsDataConfig.from_config(cfg)
-
-    assert DEFAULT_GROUPED_PEAK_SHOULDER_DA == 0.05
-    assert data_config.peak_filtering == PEAK_FILTERING_GROUPED
-    assert data_config.grouped_peak_shoulder_da == 0.05
-    assert data_config.grouped_peak_isotope_charges == (1, 2, 3)
-    assert data_config.dataloader_output_format == "numpy"
-
-
 def test_gems_collator_can_return_numpy_batch() -> None:
     collator = GemsBatchCollator(
         augment=True,
@@ -318,9 +181,6 @@ def test_gems_collator_can_return_numpy_batch() -> None:
         peak_drop_min_intensity=1e-4,
         peak_ordering="mz",
         precursor_peak_exclusion_window_da=0.0,
-        peak_filtering=PEAK_FILTERING_GROUPED,
-        grouped_peak_shoulder_da=0.05,
-        grouped_peak_isotope_charges=(1,),
         mask_strategy="contiguous",
         output_format="numpy",
     )
@@ -341,7 +201,6 @@ def test_gems_collator_can_return_numpy_batch() -> None:
     batch = collator(samples)
 
     assert isinstance(batch["peak_mz"], np.ndarray)
-    assert isinstance(batch["peak_group_id"], np.ndarray)
     assert isinstance(batch["context_mask"], np.ndarray)
     assert isinstance(batch["target_masks"], np.ndarray)
     assert batch["peak_mz"].shape == (1, 4)

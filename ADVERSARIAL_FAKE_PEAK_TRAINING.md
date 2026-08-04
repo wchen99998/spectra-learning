@@ -34,12 +34,13 @@ context peaks are visible but excluded from the detection loss.
 One process controls both GPUs; this is not DDP. The dataset is the pinned
 `novogaia/massive-v1-ms2-100m-stratified-x16` revision
 `7ff47061cbde23e4cdd113378dcfb489e86b32c4`. Preprocessing keeps 47 peak
-slots, drops intensities below \(10^{-4}\), and uses grouped peak filtering
-with a 0.02 Da shoulder and isotope charges 1, 2, and 3. It initially orders
-peaks by intensity. The generator keeps this canonical order because its
-masked target queries use slot-position embeddings. After generation and
-fake/real assignment, the trainer independently shuffles every aligned peak
-field before the discriminator sees the mixed spectrum.
+slots: it normalizes by the base peak, removes peaks outside 20–1,000 Da or
+below relative intensity \(10^{-4}\), keeps the 47 highest-intensity
+survivors, renormalizes, and orders them by descending intensity. The
+generator keeps this canonical order because its masked target queries use
+slot-position embeddings. After generation and fake/real assignment, the
+trainer independently shuffles every aligned peak field before the
+discriminator sees the mixed spectrum.
 
 Both models are randomly initialized. There is no source-model checkpoint,
 frozen generator, or teacher model. Resuming from this run's own checkpoint
@@ -71,9 +72,8 @@ For a microbatch of \(B=80\) spectra, let
   microbatch.
 
 The data mask uses one random target block, context fraction \(0.35\), target
-fraction \(0.50\), and no context/target overlap. With grouped preprocessing,
-the random mask initially samples whole peak groups. For \(n_b\) valid groups,
-the exact configured group counts are
+fraction \(0.50\), and no context/target overlap. For \(n_b\) valid peaks,
+the exact configured peak counts are
 
 \[
 c_b
@@ -93,8 +93,7 @@ t_b
 
 `round` is Python's ties-to-even rounding. After sampling, every valid peak
 tied for maximum intensity is forced into \(C_b\) and removed from \(T_b\),
-so no base peak is generated. That final per-peak edit can split an original
-peak group.
+so no base peak is generated.
 
 ## Generator
 
@@ -253,8 +252,7 @@ q_b=\left\lfloor\frac{|T_b|}{2}\right\rfloor.
 \]
 
 The first \(q_b\) ranked target peak slots form the fake set \(F_b\). The
-first \(2q_b\) form the discriminator detection set \(P_b\). This partition
-is per peak slot, not per peak group. Therefore
+first \(2q_b\) form the discriminator detection set \(P_b\). Therefore
 
 \[
 F_b\subset P_b\subset T_b,
@@ -649,12 +647,13 @@ distributional defects in generated peaks.
 - A local `checkpoints/last.pt` is atomically replaced every 1,000 steps and
   at the final step. Remote storage uploads do not provide the same atomic
   replacement guarantee.
-- Checkpoint format 6 stores both models, both optimizers, both schedulers,
-  global step, CPU and per-GPU RNG states, preprocessing, and data provenance.
+- Checkpoint format 6 stores both models, optimizers, schedulers, the training
+  settings used for resume validation, progress counters, the last loss,
+  the W&B run ID, and CPU and per-GPU RNG states. It stores no separate
+  preprocessing or dataset-provenance metadata.
 - Resume requires an exact stored contract match for model settings,
   objectives, the listed masking and optimization fields, selected data
-  stream fields, and seed. Preprocessing and data provenance are validated
-  separately.
+  stream fields, and seed.
 
 The checkpoint restores model, optimizer, scheduler, CPU RNG, and both CUDA
 RNG states. It does not store DataLoader-worker RNG or iterator state, so a

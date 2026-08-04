@@ -213,57 +213,6 @@ def test_sample_block_masks_random_samples_exact_count_masks() -> None:
     assert not (target_masks & context_mask.unsqueeze(1)).any()
 
 
-def _assert_group_atomic_mask(
-    mask: torch.Tensor,
-    group_id: torch.Tensor,
-    valid: torch.Tensor,
-) -> None:
-    for gid in torch.unique(group_id[valid]):
-        group_positions = valid & (group_id == gid)
-        selected = mask[group_positions]
-        assert bool(selected.all()) or not bool(selected.any())
-
-
-def test_sample_block_masks_random_keeps_peak_groups_atomic() -> None:
-    peak_valid_mask = torch.ones((1, 6), dtype=torch.bool)
-    peak_group_id = torch.tensor([[0, 0, 1, 2, 2, 3]], dtype=torch.int32)
-
-    torch.manual_seed(5)
-    context_mask, target_masks = gems_masking._sample_block_masks_torch(
-        peak_valid_mask,
-        num_target_blocks=2,
-        context_fraction=0.5,
-        target_fraction=0.25,
-        block_min_len=1,
-        mask_strategy="random",
-        peak_group_id=peak_group_id,
-    )
-
-    _assert_group_atomic_mask(
-        context_mask[0],
-        peak_group_id[0],
-        peak_valid_mask[0],
-    )
-    for target_idx in range(target_masks.shape[1]):
-        _assert_group_atomic_mask(
-            target_masks[0, target_idx],
-            peak_group_id[0],
-            peak_valid_mask[0],
-    )
-    assert torch.unique(peak_group_id[0, context_mask[0]]).numel() == 2
-    target_group_counts = torch.tensor(
-        [
-            int(torch.unique(peak_group_id[0, target_masks[0, target_idx]]).numel())
-            for target_idx in range(target_masks.shape[1])
-        ]
-    )
-    assert torch.equal(
-        target_group_counts,
-        torch.ones(target_masks.shape[1], dtype=torch.int64),
-    )
-    assert not (target_masks & context_mask.unsqueeze(1)).any()
-
-
 def test_sample_block_masks_ragged_caps_counts_and_keeps_targets() -> None:
     peak_valid_mask = torch.ones((256, 64), dtype=torch.bool)
 

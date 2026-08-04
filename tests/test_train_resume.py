@@ -12,7 +12,6 @@ import torch
 from ml_collections import config_dict
 
 from spectra_learning.config import config_to_dict
-from spectra_learning.data.contracts import peak_preprocessing_contract
 from spectra_learning.data.spectra import PEAK_MZ_MAX
 from spectra_learning.models.factory import build_model_from_config
 from spectra_learning.models.model import PeakSetJEPA
@@ -69,15 +68,6 @@ def _small_model(**overrides) -> PeakSetJEPA:
     )
     kwargs.update(overrides)
     return PeakSetJEPA(**kwargs)
-
-
-def _checkpoint_metadata(config=None) -> dict:
-    return {
-        "peak_preprocessing": peak_preprocessing_contract(
-            config if config is not None else {}
-        ),
-        "data_provenance": {"source": "unit-test"},
-    }
 
 
 def _optimizer_param_ids(optimizer: torch.optim.Optimizer) -> set[int]:
@@ -1146,15 +1136,12 @@ def test_checkpoint_writer_persists_optimizer_state():
             epoch=1,
             loss=float(loss.detach()),
             wandb_run_id="wandb-run-123",
-            **_checkpoint_metadata(),
         )
         writer.close()
         ckpt = torch.load(path, map_location="cpu", weights_only=True)
 
     saved_optimizer = ckpt["optimizers"][0]
     assert ckpt["wandb_run_id"] == "wandb-run-123"
-    assert ckpt["peak_preprocessing"] == peak_preprocessing_contract({})
-    assert ckpt["data_provenance"] == {"source": "unit-test"}
     assert saved_optimizer["state"]
     assert "scalar_optimizer_state" not in saved_optimizer
 
@@ -1184,7 +1171,6 @@ def test_checkpoint_writer_persists_grad_scaler_state():
             epoch=1,
             loss=0.5,
             grad_scaler=grad_scaler,
-            **_checkpoint_metadata(),
         )
         writer.close()
         ckpt = torch.load(path, map_location="cpu", weights_only=True)
@@ -1215,7 +1201,6 @@ def test_checkpoint_writer_writes_covariance_pooler_sibling_pt():
             global_step=12,
             epoch=1,
             loss=0.5,
-            **_checkpoint_metadata(),
         )
         writer.close()
         ckpt = torch.load(path, map_location="cpu", weights_only=True)
@@ -1244,7 +1229,6 @@ def test_checkpoint_writer_writes_fsspec_uri_checkpoint():
         epoch=1,
         loss=0.5,
         wandb_run_id="wandb-run-123",
-        **_checkpoint_metadata(),
     )
     writer.close()
     ckpt = load_torch_checkpoint(path, map_location="cpu", weights_only=True)
@@ -1269,7 +1253,6 @@ def test_remote_covariance_pooler_checkpoint_uses_sibling_uri():
         global_step=12,
         epoch=1,
         loss=0.5,
-        **_checkpoint_metadata(),
     )
     writer.close()
     ckpt = load_torch_checkpoint(path, map_location="cpu", weights_only=True)
@@ -1315,7 +1298,6 @@ def test_async_checkpoint_writer_returns_before_torch_save_finishes(monkeypatch,
         global_step=12,
         epoch=1,
         loss=0.5,
-        **_checkpoint_metadata(),
     )
 
     assert save_entered.wait(timeout=1.0)
@@ -1346,7 +1328,6 @@ def test_async_checkpoint_writer_raises_background_failures(monkeypatch, tmp_pat
         global_step=12,
         epoch=1,
         loss=0.5,
-        **_checkpoint_metadata(),
     )
     with pytest.raises(OSError, match="upload failed"):
         writer.close()
@@ -1406,7 +1387,6 @@ def test_load_resume_covariance_pooler_state_reads_sibling_pt():
             global_step=12,
             epoch=1,
             loss=0.5,
-            **_checkpoint_metadata(),
         )
         writer.close()
         ckpt = torch.load(path, map_location="cpu", weights_only=True)
@@ -1432,7 +1412,6 @@ def test_restore_training_state_loads_canonical_checkpoint(tmp_path: Path):
             "loss": 0.5,
             "wandb_run_id": "wandb-run-123",
             "covariance_pooler_checkpoint": None,
-            **_checkpoint_metadata(),
         },
         checkpoint_dir / "step-00000003.pt",
     )
@@ -1447,7 +1426,6 @@ def test_restore_training_state_loads_canonical_checkpoint(tmp_path: Path):
         schedulers=[],
         steps_per_epoch=5,
         device=torch.device("cpu"),
-        data_provenance={"source": "unit-test"},
     )
 
     assert (start_epoch, global_step, resume_offset) == (0, 3, 3)
@@ -1458,7 +1436,7 @@ def test_restore_training_state_loads_canonical_checkpoint(tmp_path: Path):
 
 @pytest.mark.parametrize(
     "missing_key",
-    ["grad_scaler", "loss", "peak_preprocessing", "data_provenance"],
+    ["grad_scaler", "loss"],
 )
 def test_restore_training_state_rejects_missing_checkpoint_keys(
     tmp_path: Path,
@@ -1476,7 +1454,6 @@ def test_restore_training_state_rejects_missing_checkpoint_keys(
         "loss": 0.5,
         "wandb_run_id": None,
         "covariance_pooler_checkpoint": None,
-        **_checkpoint_metadata(),
     }
     state.pop(missing_key)
     torch.save(state, checkpoint_dir / "step-00000003.pt")
@@ -1490,75 +1467,6 @@ def test_restore_training_state_rejects_missing_checkpoint_keys(
             schedulers=[],
             steps_per_epoch=5,
             device=torch.device("cpu"),
-            data_provenance={"source": "unit-test"},
-        )
-
-
-def test_restore_training_state_rejects_mismatched_peak_preprocessing(
-    tmp_path: Path,
-):
-    checkpoint_dir = tmp_path / "checkpoints"
-    checkpoint_dir.mkdir()
-    torch.save(
-        {
-            "model": _small_model().state_dict(),
-            "optimizers": [],
-            "schedulers": [],
-            "grad_scaler": None,
-            "global_step": 3,
-            "epoch": 0,
-            "loss": 0.5,
-            "wandb_run_id": None,
-            "covariance_pooler_checkpoint": None,
-            **_checkpoint_metadata(),
-        },
-        checkpoint_dir / "step-00000003.pt",
-    )
-
-    with pytest.raises(ValueError, match="does not match"):
-        pretrain.restore_training_state(
-            config=config_dict.ConfigDict({"num_peaks": 8}),
-            checkpoint_dir=checkpoint_dir,
-            model=_small_model(),
-            optimizers=[],
-            schedulers=[],
-            steps_per_epoch=5,
-            device=torch.device("cpu"),
-            data_provenance={"source": "unit-test"},
-        )
-
-
-def test_restore_training_state_rejects_mismatched_data_provenance(
-    tmp_path: Path,
-):
-    checkpoint_dir = tmp_path / "checkpoints"
-    checkpoint_dir.mkdir()
-    torch.save(
-        {
-            "model": _small_model().state_dict(),
-            "optimizers": [],
-            "schedulers": [],
-            "grad_scaler": None,
-            "global_step": 3,
-            "epoch": 0,
-            "loss": 0.5,
-            "wandb_run_id": None,
-            "covariance_pooler_checkpoint": None,
-            **_checkpoint_metadata(),
-        },
-        checkpoint_dir / "step-00000003.pt",
-    )
-
-    with pytest.raises(ValueError, match="data provenance"):
-        pretrain.restore_training_state(
-            config=config_dict.ConfigDict(),
-            checkpoint_dir=checkpoint_dir,
-            model=_small_model(),
-            optimizers=[],
-            schedulers=[],
-            steps_per_epoch=5,
-            device=torch.device("cpu"),
-            data_provenance={"source": "different-data"},
         )
 
 
@@ -2330,7 +2238,6 @@ def test_run_checkpoint_msg_probe_loads_checkpoint_and_logs_metrics(monkeypatch,
         epoch=1,
         loss=0.1,
         wandb_run_id="wandb-run-1",
-        **_checkpoint_metadata(cfg),
     )
     writer.close()
     calls = []
@@ -2339,7 +2246,6 @@ def test_run_checkpoint_msg_probe_loads_checkpoint_and_logs_metrics(monkeypatch,
 
     def fake_run_msg_probe(**kwargs):
         calls.append(kwargs)
-        kwargs["on_probe_data"](SimpleNamespace(info={"source": "eval-unit-test"}))
         return {
             "msg_probe/mean/test/auc_maccs_mean": 0.5,
             "msg_probe/mean/test/pr_curve_sulfur": PrecisionRecallCurve(
@@ -2388,42 +2294,7 @@ def test_run_checkpoint_msg_probe_loads_checkpoint_and_logs_metrics(monkeypatch,
     )
     assert metrics_json == {
         "metrics": {"msg_probe/mean/test/auc_maccs_mean": 0.5},
-        "checkpoint_data_provenance": {"source": "unit-test"},
-        "evaluation_data_provenance": {"source": "eval-unit-test"},
-        "peak_preprocessing": peak_preprocessing_contract(cfg),
     }
-
-
-@pytest.mark.parametrize(
-    ("checkpoint", "error", "match"),
-    [
-        ({"wandb_run_id": None}, KeyError, "peak_preprocessing"),
-        (
-            {
-                "wandb_run_id": None,
-                "peak_preprocessing": peak_preprocessing_contract({}),
-            },
-            ValueError,
-            "does not match",
-        ),
-    ],
-)
-def test_run_checkpoint_msg_probe_rejects_missing_or_mismatched_contract(
-    tmp_path: Path,
-    checkpoint: dict,
-    error: type[Exception],
-    match: str,
-):
-    checkpoint_path = tmp_path / "checkpoint.pt"
-    torch.save(checkpoint, checkpoint_path)
-
-    with pytest.raises(error, match=match):
-        checkpoint_probe.run_checkpoint_msg_probe(
-            config_json=json.dumps({"num_peaks": 8}),
-            checkpoint_path=checkpoint_path,
-            workdir=tmp_path / "probe",
-            global_step=9,
-        )
 
 
 def test_run_msg_probe_evaluation_logs_supplied_model_to_standalone_wandb(
@@ -2504,9 +2375,6 @@ def test_run_msg_probe_evaluation_logs_supplied_model_to_standalone_wandb(
     )
     assert metrics_json == {
         "metrics": {"msg_probe/mean/test/auc_sulfur": 0.75},
-        "checkpoint_data_provenance": None,
-        "evaluation_data_provenance": {},
-        "peak_preprocessing": peak_preprocessing_contract(cfg),
     }
 
 

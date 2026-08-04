@@ -39,7 +39,6 @@ def test_serialized_config_can_be_replayed_as_overrides() -> None:
     replayed = load_config(path, expected)
 
     assert config_to_dict(replayed) == expected
-    assert isinstance(replayed.grouped_peak_isotope_charges, tuple)
 
 
 def test_current_pretraining_config_records_model_and_data_defaults() -> None:

@@ -32,10 +32,6 @@ from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
 from spectra_learning.config import load_config
-from spectra_learning.data.contracts import (
-    data_provenance_contract,
-    validate_peak_preprocessing_contract,
-)
 from spectra_learning.data.massspec_probe import MassSpecProbeData
 from spectra_learning.models.factory import build_model_from_config
 from spectra_learning.models.lora import (
@@ -165,21 +161,16 @@ def _torch_source_checkpoint_contract(
         "model_sha256": _torch_tensor_state_sha256(checkpoint["model"]),
         "covariance_pooler_sha256": pooler_sha256,
         "model_settings": asdict(PeakSetJEPASettings.from_config(config)),
-        "peak_preprocessing": checkpoint["peak_preprocessing"],
-        "data_provenance": checkpoint["data_provenance"],
     }
 
 
 def _fluorine_state_contract(
     *,
     source_checkpoint: dict[str, Any],
-    data: FluorineData,
 ) -> dict[str, Any]:
     return {
         "version": FLUORINE_STATE_CONTRACT_VERSION,
         "source_checkpoint": source_checkpoint,
-        "evaluation_data_provenance": data.metadata["data_provenance"],
-        "peak_preprocessing": data.metadata["peak_preprocessing"],
     }
 
 
@@ -670,7 +661,6 @@ def _load_checkpoint_model(
         map_location="cpu",
         weights_only=True,
     )
-    validate_peak_preprocessing_contract(checkpoint, config)
     model.load_state_dict(checkpoint["model"])
     source_checkpoint = _torch_source_checkpoint_contract(
         config=config,
@@ -861,7 +851,6 @@ def build_fluorine_data(
         "nist_revision": probe_data.info["massspec_nist_revision"],
         "nist_subdir": probe_data.info["massspec_nist_subdir"],
         "nist_source_dir": probe_data.info["massspec_nist_source_dir"],
-        "peak_preprocessing": probe_data.info["massspec_peak_preprocessing"],
         "train_files": relative_paths(probe_data.train_files),
         "train_lengths": probe_data.train_lengths,
         "train_size": probe_data.info["massspec_train_size"],
@@ -874,7 +863,6 @@ def build_fluorine_data(
         "test_lengths": probe_data.test_lengths,
         "test_size": probe_data.info["massspec_test_size"],
         "test_positive": probe_data.info["massspec_test_positive"],
-        "data_provenance": data_provenance_contract(probe_data.info),
     }
     return FluorineData(
         metadata=metadata,
@@ -884,9 +872,6 @@ def build_fluorine_data(
         max_precursor_mz=probe_data.max_precursor_mz,
         min_peak_intensity=probe_data.min_peak_intensity,
         peak_drop_min_intensity=probe_data.peak_drop_min_intensity,
-        peak_filtering=probe_data.peak_filtering,
-        grouped_peak_shoulder_da=probe_data.grouped_peak_shoulder_da,
-        grouped_peak_isotope_charges=probe_data.grouped_peak_isotope_charges,
         peak_ordering=probe_data.peak_ordering,
         precursor_peak_exclusion_window_da=(
             probe_data.precursor_peak_exclusion_window_da
@@ -1435,7 +1420,6 @@ def train_or_load_finetuned(
     )
     state_contract = _fluorine_state_contract(
         source_checkpoint=source_checkpoint_contract,
-        data=data,
     )
     state = _load_cached_adaptation_state(
         state_path=state_path,
@@ -1642,7 +1626,6 @@ def train_or_load_lora(
     )
     state_contract = _fluorine_state_contract(
         source_checkpoint=source_checkpoint_contract,
-        data=data,
     )
     state = _load_cached_adaptation_state(
         state_path=state_path,
@@ -2012,7 +1995,6 @@ def write_standard_fluorine_outputs(
         "mode": head_state["mode"],
         "dataset": {
             **source,
-            "peak_preprocessing": data.metadata["peak_preprocessing"],
             "test_size": int(data.metadata["test_size"]),
             "test_positive": int(data.metadata["test_positive"]),
         },
@@ -2139,7 +2121,6 @@ def _fluorine_evaluation_contract(summary: dict[str, Any]) -> dict[str, Any]:
             "nist_repo_id",
             "nist_revision",
             "nist_subdir",
-            "peak_preprocessing",
             "test_size",
             "test_positive",
         )
@@ -3546,7 +3527,6 @@ def _build_jax_fluorine_state_and_payload(
                 "nist_source_dir",
             )
         },
-        "peak_preprocessing": metadata["peak_preprocessing"],
         "cache_dir": str(paths.cache_dir),
         "pooling": args.pooling,
         "input_dim": input_dim,
@@ -3578,7 +3558,6 @@ def _build_jax_fluorine_state_and_payload(
         "checkpoint_path": str(checkpoint_path),
         "state_contract": _fluorine_state_contract(
             source_checkpoint=checkpoint.source_checkpoint_contract,
-            data=data,
         ),
         "input_dim": int(input_dim),
         "covariance_dim": int(checkpoint.config.get("covariance_pooling_dim", 32)),
@@ -3909,7 +3888,6 @@ def run_finetune_jax(args: argparse.Namespace) -> dict[str, Any]:
         "checkpoint_path": str(checkpoint_path),
         "state_contract": _fluorine_state_contract(
             source_checkpoint=checkpoint.source_checkpoint_contract,
-            data=data,
         ),
         "jax_params": best_params,
         "best_epoch": best_epoch,
@@ -4144,7 +4122,6 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "nist_source_dir",
             )
         },
-        "peak_preprocessing": metadata["peak_preprocessing"],
         "cache_dir": str(paths.cache_dir),
         "pooling": args.pooling,
         "input_dim": input_dim,
@@ -4175,7 +4152,6 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         "checkpoint_path": str(checkpoint_path),
         "state_contract": _fluorine_state_contract(
             source_checkpoint=source_checkpoint_contract,
-            data=data,
         ),
         "input_dim": int(input_dim),
         "covariance_dim": int(

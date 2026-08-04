@@ -17,7 +17,6 @@ from jax.experimental import multihost_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from ml_collections import config_dict
 
-from spectra_learning.data.contracts import peak_preprocessing_contract
 from spectra_learning.data.loading import local_batch_size
 from spectra_learning.data.massspec_probe import MassSpecProbeData
 from spectra_learning.models.common_jax import Array
@@ -266,7 +265,7 @@ def _setup_msg_probe_jax(
     if online_maccs_only:
         probe_data_kwargs["maccs_only"] = True
     probe_data = MassSpecProbeData.from_config(config, **probe_data_kwargs)
-    peak_ordering = peak_preprocessing_contract(config)["peak_ordering"]
+    peak_ordering = str(config.get("peak_ordering", "mz"))
     variants = msg_probe_variants_from_config(config)
     use_pair_features = any(_uses_pair_features(variant) for variant in variants)
     feature_model = _full_visible_fastmixer_probe_model(config, model)

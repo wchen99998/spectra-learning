@@ -87,7 +87,7 @@ class MassSpecProbeMurckoDataTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 ValueError,
-                "must match the checkpoint preprocessing contract",
+                "must match the configured ordering",
             ):
                 probe_data.build_dataset(
                     "massspec_train",

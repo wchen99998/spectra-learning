@@ -6,12 +6,6 @@ import numpy as np
 import torch
 from ml_collections import config_dict
 
-from spectra_learning.data.contracts import (
-    data_provenance_contract,
-    peak_preprocessing_contract,
-    validate_peak_preprocessing_contract,
-)
-from spectra_learning.data.massspec_probe import MassSpecProbeData
 from spectra_learning.models.factory import build_model_from_config
 from spectra_learning.models.pooling import SinglePairCovariancePool
 from spectra_learning.probes.massspec.msg_probe import run_msg_probe
@@ -51,7 +45,6 @@ def run_checkpoint_msg_probe(
     )
     if checkpoint.get("training_mode", None):
         config.training_mode = checkpoint["training_mode"]
-    validate_peak_preprocessing_contract(checkpoint, config)
     config.source_wandb_run_id = str(checkpoint["wandb_run_id"] or "")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -72,7 +65,6 @@ def run_checkpoint_msg_probe(
         covariance_pooler=covariance_pooler,
         device=device,
         wandb_project=wandb_project,
-        checkpoint_data_provenance=checkpoint["data_provenance"],
     )
 
 
@@ -86,7 +78,6 @@ def run_msg_probe_evaluation(
     covariance_pooler: torch.nn.Module | None = None,
     device: torch.device | None = None,
     wandb_project: str | None = DEFAULT_STANDALONE_WANDB_PROJECT,
-    checkpoint_data_provenance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     workdir = normalize_storage_path(workdir)
     local_workdir = local_scratch_dir(workdir)
@@ -105,17 +96,11 @@ def run_msg_probe_evaluation(
     if covariance_pooler is not None:
         covariance_pooler.to(device).eval()
     logger = build_logger(config, local_workdir)
-    probe_info: dict[str, Any] = {}
-
-    def capture_probe_data(probe_data: MassSpecProbeData) -> None:
-        probe_info.update(probe_data.info)
-
     metrics = run_msg_probe(
         config=config,
         model=model,
         device=device,
         covariance_pooler=covariance_pooler,
-        on_probe_data=capture_probe_data,
     )
     log_msg_probe_metrics(
         logger,
@@ -126,9 +111,6 @@ def run_msg_probe_evaluation(
     metrics_path = storage_join(workdir, f"msg_probe_step-{global_step:08d}.json")
     output = {
         "metrics": _json_metrics(metrics),
-        "checkpoint_data_provenance": checkpoint_data_provenance,
-        "evaluation_data_provenance": data_provenance_contract(probe_info),
-        "peak_preprocessing": peak_preprocessing_contract(config),
     }
     write_text(
         metrics_path,

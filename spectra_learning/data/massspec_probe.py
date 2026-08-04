@@ -7,7 +7,6 @@ import torch
 from ml_collections import config_dict
 from torch.utils.data import DataLoader, Dataset, Subset
 
-from spectra_learning.data.contracts import peak_preprocessing_contract
 from spectra_learning.data.gems.conversion import batch_to_numpy, format_batch
 from spectra_learning.data.loading import (
     loader_sampler,
@@ -24,9 +23,11 @@ from spectra_learning.data.murcko import (
 )
 from spectra_learning.data.spectra import (
     COLLISION_ENERGY_MAX,
-    DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
-    DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-    DEFAULT_PEAK_FILTERING,
+    DEFAULT_MAX_PRECURSOR_MZ,
+    DEFAULT_MIN_PRECURSOR_MZ,
+    DEFAULT_MIN_PEAK_INTENSITY,
+    DEFAULT_NUM_PEAKS,
+    DEFAULT_PRECURSOR_PEAK_EXCLUSION_WINDOW_DA,
     canonicalize_precursor_charge_torch,
     preprocess_peak_batch_numpy,
     preprocess_peak_batch_torch,
@@ -264,11 +265,6 @@ class _ProbeBatchCollator:
         peak_drop_min_intensity: float,
         peak_ordering: str,
         precursor_peak_exclusion_window_da: float,
-        peak_filtering: str = DEFAULT_PEAK_FILTERING,
-        grouped_peak_shoulder_da: float = DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-        grouped_peak_isotope_charges: tuple[int, ...] = (
-            DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES
-        ),
         output_format: str = "torch",
     ) -> None:
         self.num_peaks = num_peaks
@@ -277,9 +273,6 @@ class _ProbeBatchCollator:
         self.peak_drop_min_intensity = peak_drop_min_intensity
         self.peak_ordering = peak_ordering
         self.precursor_peak_exclusion_window_da = precursor_peak_exclusion_window_da
-        self.peak_filtering = peak_filtering
-        self.grouped_peak_shoulder_da = grouped_peak_shoulder_da
-        self.grouped_peak_isotope_charges = grouped_peak_isotope_charges
         self.output_format = output_format
 
     def __call__(self, samples: list[dict[str, Any]]) -> dict[str, Any]:
@@ -377,9 +370,6 @@ class _ProbeBatchCollator:
                 max_precursor_mz=self.max_precursor_mz,
                 precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
                 min_peak_intensity=self.min_peak_intensity,
-                peak_filtering=self.peak_filtering,
-                grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
-                grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
             )
             return {key: torch.from_numpy(value) for key, value in batch.items()}
         spectra = torch.stack([sample["spectra"] for sample in samples], dim=0)
@@ -397,9 +387,6 @@ class _ProbeBatchCollator:
             max_precursor_mz=self.max_precursor_mz,
             precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
             min_peak_intensity=self.min_peak_intensity,
-            peak_filtering=self.peak_filtering,
-            grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
-            grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
         )
 
 
@@ -437,9 +424,6 @@ class MassSpecProbeData(NamedTuple):
     max_precursor_mz: float
     min_peak_intensity: float
     peak_drop_min_intensity: float
-    peak_filtering: str
-    grouped_peak_shoulder_da: float
-    grouped_peak_isotope_charges: tuple[int, ...]
     peak_ordering: str
     num_peaks: int
     dreams_dim: int
@@ -462,9 +446,15 @@ class MassSpecProbeData(NamedTuple):
             .expanduser()
             .resolve()
         )
-        preprocessing = peak_preprocessing_contract(config)
-        min_precursor_mz = float(preprocessing["min_precursor_mz"])
-        max_precursor_mz = float(preprocessing["max_precursor_mz"])
+        min_precursor_mz = float(
+            config.get("min_precursor_mz", DEFAULT_MIN_PRECURSOR_MZ)
+        )
+        max_precursor_mz = float(
+            config.get("max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
+        )
+        min_peak_intensity = float(
+            config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)
+        )
         msg_probe_fingerprint = (
             "maccs"
             if maccs_only
@@ -550,7 +540,6 @@ class MassSpecProbeData(NamedTuple):
             ),
             "massspec_val_positive": int(nist_metadata.get("val_positive", 0)),
             "massspec_test_positive": int(nist_metadata.get("test_positive", 0)),
-            "massspec_peak_preprocessing": preprocessing,
             "massspec_adduct_vocab": adduct_vocab,
             "massspec_instrument_type_vocab": instrument_type_vocab,
             "massspec_adduct_vocab_size": len(adduct_vocab),
@@ -626,23 +615,18 @@ class MassSpecProbeData(NamedTuple):
                 config.get("shuffle_buffer", _DEFAULT_SHUFFLE_BUFFER)
             ),
             max_precursor_mz=max_precursor_mz,
-            min_peak_intensity=float(preprocessing["min_peak_intensity"]),
+            min_peak_intensity=min_peak_intensity,
             peak_drop_min_intensity=float(
-                preprocessing["peak_drop_min_intensity"]
+                config.get("peak_drop_min_intensity", min_peak_intensity)
             ),
-            peak_filtering=str(preprocessing["peak_filtering"]),
-            grouped_peak_shoulder_da=float(
-                preprocessing["grouped_peak_shoulder_da"]
-            ),
-            grouped_peak_isotope_charges=tuple(
-                int(charge)
-                for charge in preprocessing["grouped_peak_isotope_charges"]
-            ),
-            peak_ordering=str(preprocessing["peak_ordering"]),
-            num_peaks=int(preprocessing["num_peaks"]),
+            peak_ordering=str(config.get("peak_ordering", "mz")),
+            num_peaks=int(config.get("num_peaks", DEFAULT_NUM_PEAKS)),
             dreams_dim=int(nist_metadata.get("dreams_dim", 0)),
             precursor_peak_exclusion_window_da=float(
-                preprocessing["precursor_peak_exclusion_window_da"]
+                config.get(
+                    "precursor_peak_exclusion_window_da",
+                    DEFAULT_PRECURSOR_PEAK_EXCLUSION_WINDOW_DA,
+                )
             ),
             pairwise_alignment_path=pairwise_alignment_path,
         )
@@ -664,8 +648,8 @@ class MassSpecProbeData(NamedTuple):
     ):
         if peak_ordering not in (None, self.peak_ordering):
             raise ValueError(
-                "MassSpec peak ordering must match the checkpoint preprocessing "
-                f"contract: requested={peak_ordering}, expected={self.peak_ordering}"
+                "MassSpec peak ordering must match the configured ordering: "
+                f"requested={peak_ordering}, expected={self.peak_ordering}"
             )
         split_files = {
             "massspec_train": self.train_files,
@@ -771,9 +755,6 @@ class MassSpecProbeData(NamedTuple):
                 peak_drop_min_intensity=self.peak_drop_min_intensity,
                 peak_ordering=self.peak_ordering,
                 precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
-                peak_filtering=self.peak_filtering,
-                grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
-                grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
                 output_format=output_format,
             ),
             generator=generator,
@@ -872,9 +853,6 @@ class MassSpecProbeData(NamedTuple):
                 peak_drop_min_intensity=self.peak_drop_min_intensity,
                 peak_ordering=self.peak_ordering,
                 precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
-                peak_filtering=self.peak_filtering,
-                grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
-                grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
                 output_format=output_format,
             ),
         )

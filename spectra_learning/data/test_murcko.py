@@ -258,9 +258,6 @@ def _fluorine_data(metadata: dict[str, Any], root: Path) -> murcko.MurckoFluorin
         max_precursor_mz=1000.0,
         min_peak_intensity=1e-4,
         peak_drop_min_intensity=1e-4,
-        peak_filtering="top_intensity",
-        grouped_peak_shoulder_da=0.05,
-        grouped_peak_isotope_charges=(1, 2, 3),
         peak_ordering="mz",
         precursor_peak_exclusion_window_da=0.0,
     )
@@ -423,7 +420,7 @@ def test_murcko_fluorine_rejects_partial_metadata_without_download(
     assert calls == []
 
 
-def test_murcko_fluorine_cache_and_loader_use_shared_peak_preprocessing(
+def test_murcko_fluorine_cache_and_loader_preprocesses_peaks(
     monkeypatch,
     tmp_path: Path,
 ):

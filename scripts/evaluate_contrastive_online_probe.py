@@ -12,12 +12,6 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from spectra_learning.data.contracts import (
-    data_provenance_contract,
-    peak_preprocessing_contract,
-    validate_data_provenance_contract,
-    validate_peak_preprocessing_contract,
-)
 from spectra_learning.data.massspec_probe import MassSpecProbeData
 from spectra_learning.data.massspec_targets import MACCS_FINGERPRINT_BITS
 from spectra_learning.config import load_config
@@ -72,8 +66,6 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
         map_location="cpu",
         weights_only=True,
     )
-    validate_peak_preprocessing_contract(checkpoint, config)
-    validate_data_provenance_contract(checkpoint, probe_data.info)
     load_resume_model_state(module.model, checkpoint["model"])
     load_resume_covariance_pooler_state(module.pooler, checkpoint_path, checkpoint)
     module.online_probe.load_state_dict(checkpoint["online_probe"])
@@ -139,9 +131,6 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
     output = {
         "metrics": metrics,
         "split": args.split,
-        "checkpoint_data_provenance": checkpoint["data_provenance"],
-        "evaluation_data_provenance": data_provenance_contract(probe_data.info),
-        "peak_preprocessing": peak_preprocessing_contract(config),
     }
     print(json.dumps(output, indent=2, sort_keys=True))
     if args.metrics_json:

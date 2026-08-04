@@ -13,12 +13,6 @@ from ml_collections import config_dict
 from torch import Tensor, nn
 from tqdm import tqdm
 
-from spectra_learning.data.contracts import (
-    data_provenance_contract,
-    peak_preprocessing_contract,
-    validate_data_provenance_contract,
-    validate_peak_preprocessing_contract,
-)
 from spectra_learning.data.gems.datamodule import GemsDataModule
 from spectra_learning.data.gems.settings import GemsDataConfig
 from spectra_learning.data.spectra import PEAK_MZ_MAX
@@ -663,8 +657,6 @@ def _save_checkpoint(
     loss: float,
     total_steps: int,
     steps_per_epoch: int,
-    data_info: dict[str, Any],
-    config: config_dict.ConfigDict,
     training_contract: dict[str, Any],
     wandb_run_id: str | None,
 ) -> None:
@@ -690,8 +682,6 @@ def _save_checkpoint(
             "discriminator_rng_state": torch.cuda.get_rng_state(
                 discriminator_device
             ),
-            "peak_preprocessing": peak_preprocessing_contract(config),
-            "data_provenance": data_provenance_contract(data_info),
         },
         path,
     )
@@ -767,8 +757,6 @@ def train_adversarial_fake_peaks(
             raise ValueError("Checkpoint training length does not match the config.")
         if checkpoint["steps_per_epoch"] != datamodule.train_steps:
             raise ValueError("Checkpoint epoch length does not match the dataset.")
-        validate_peak_preprocessing_contract(checkpoint, config)
-        validate_data_provenance_contract(checkpoint, datamodule.info)
         generator.load_state_dict(checkpoint["generator"])
         discriminator.load_state_dict(checkpoint["discriminator"])
         generator_optimizer.load_state_dict(checkpoint["generator_optimizer"])
@@ -1002,8 +990,6 @@ def train_adversarial_fake_peaks(
                     ),
                     total_steps,
                     datamodule.train_steps,
-                    datamodule.info,
-                    config,
                     training_contract,
                     wandb_run_id,
                 )
@@ -1069,8 +1055,6 @@ def train_adversarial_fake_peaks(
         ),
         total_steps,
         datamodule.train_steps,
-        datamodule.info,
-        config,
         training_contract,
         wandb_run_id,
     )

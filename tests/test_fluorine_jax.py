@@ -117,8 +117,6 @@ def _probe_data() -> SimpleNamespace:
             "nist_revision": "nist-sha",
             "nist_subdir": "nist",
             "nist_source_dir": "/cache/nist",
-            "peak_preprocessing": {"version": 1},
-            "data_provenance": {"massspec_nist_revision": "nist-sha"},
             "train_size": 4,
             "train_positive": 2,
             "val_size": 4,
@@ -354,8 +352,6 @@ def test_run_probe_jax_trains_tiny_trial_and_builds_artifacts(
                 "restore_step": 7,
                 "checkpoint_metadata": json.loads(fluorine.read_text("unused")),
             },
-        "evaluation_data_provenance": data.metadata["data_provenance"],
-        "peak_preprocessing": data.metadata["peak_preprocessing"],
     }
     assert head_state["best_epoch"] == 1
     assert len(head_state["history"]) == 1

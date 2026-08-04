@@ -17,14 +17,15 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from spectra_learning.config import load_config
-from spectra_learning.data.contracts import (
-    peak_preprocessing_contract,
-    validate_peak_preprocessing_contract,
-)
 from spectra_learning.data.mgf import _to_float, iter_mgf
 from spectra_learning.data.spectra import (
     ASSUMED_PRECURSOR_CHARGE,
     COLLISION_ENERGY_MAX,
+    DEFAULT_MAX_PRECURSOR_MZ,
+    DEFAULT_MIN_PRECURSOR_MZ,
+    DEFAULT_MIN_PEAK_INTENSITY,
+    DEFAULT_NUM_PEAKS,
+    DEFAULT_PRECURSOR_PEAK_EXCLUSION_WINDOW_DA,
     NUM_PEAKS_INPUT,
     canonicalize_precursor_charge_torch,
     preprocess_peak_batch_torch,
@@ -70,21 +71,17 @@ METADATA_COLUMNS = (
 def _load_checkpoint_for_encoder(
     model: PeakSetJEPA,
     checkpoint_path: StoragePath,
-    config: Any,
 ) -> dict[str, Any]:
     checkpoint = load_torch_checkpoint(
         checkpoint_path,
         map_location="cpu",
         weights_only=True,
     )
-    validate_peak_preprocessing_contract(checkpoint, config)
     model.load_state_dict(checkpoint["model"])
     return {
         "global_step": checkpoint["global_step"],
         "epoch": checkpoint["epoch"],
         "loss": checkpoint["loss"],
-        "peak_preprocessing": checkpoint["peak_preprocessing"],
-        "data_provenance": checkpoint["data_provenance"],
     }
 
 
@@ -176,7 +173,7 @@ def train_covariance_pooler(
         lr=learning_rate,
         weight_decay=weight_decay,
     )
-    peak_ordering = peak_preprocessing_contract(config)["peak_ordering"]
+    peak_ordering = str(config.get("peak_ordering", "mz"))
     losses: list[float] = []
     samples_seen = 0
     model.eval()
@@ -286,33 +283,41 @@ def _preprocess_mgf_batch(
     device: torch.device,
 ) -> dict[str, torch.Tensor]:
     mz, intensity, precursor = _pack_peak_batch(records)
-    preprocessing = peak_preprocessing_contract(config)
+    min_precursor_mz = float(
+        config.get("min_precursor_mz", DEFAULT_MIN_PRECURSOR_MZ)
+    )
+    max_precursor_mz = float(
+        config.get("max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
+    )
+    min_peak_intensity = float(
+        config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)
+    )
     precursor_valid = (
         torch.isfinite(precursor)
-        & (precursor >= preprocessing["min_precursor_mz"])
-        & (precursor <= preprocessing["max_precursor_mz"])
+        & (precursor >= min_precursor_mz)
+        & (precursor <= max_precursor_mz)
     )
     if not bool(precursor_valid.all()):
         raise ValueError(
-            "MGF precursor m/z is outside the checkpoint preprocessing contract"
+            "MGF precursor m/z is outside the configured range"
         )
     batch = preprocess_peak_batch_torch(
         mz,
         intensity,
         precursor,
-        num_peaks=preprocessing["num_peaks"],
-        peak_drop_min_intensity=preprocessing["peak_drop_min_intensity"],
-        peak_ordering=preprocessing["peak_ordering"],
-        max_precursor_mz=preprocessing["max_precursor_mz"],
-        precursor_peak_exclusion_window_da=preprocessing[
-            "precursor_peak_exclusion_window_da"
-        ],
-        min_peak_intensity=preprocessing["min_peak_intensity"],
-        peak_filtering=preprocessing["peak_filtering"],
-        grouped_peak_shoulder_da=preprocessing["grouped_peak_shoulder_da"],
-        grouped_peak_isotope_charges=tuple(
-            preprocessing["grouped_peak_isotope_charges"]
+        num_peaks=int(config.get("num_peaks", DEFAULT_NUM_PEAKS)),
+        peak_drop_min_intensity=float(
+            config.get("peak_drop_min_intensity", min_peak_intensity)
         ),
+        peak_ordering=str(config.get("peak_ordering", "mz")),
+        max_precursor_mz=max_precursor_mz,
+        precursor_peak_exclusion_window_da=float(
+            config.get(
+                "precursor_peak_exclusion_window_da",
+                DEFAULT_PRECURSOR_PEAK_EXCLUSION_WINDOW_DA,
+            )
+        ),
+        min_peak_intensity=min_peak_intensity,
     )
     batch["collision_energy"] = (
         torch.tensor(
@@ -554,7 +559,6 @@ def main() -> None:
     checkpoint_info = _load_checkpoint_for_encoder(
         model,
         normalize_storage_path(args.checkpoint),
-        config,
     )
     model.to(device)
     model.eval()

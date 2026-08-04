@@ -16,21 +16,16 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.distributed.nn import functional as dist_nn
 from tqdm import tqdm
 
-from spectra_learning.data.contracts import (
-    data_provenance_contract,
-    peak_preprocessing_contract,
-    validate_data_provenance_contract,
-    validate_peak_preprocessing_contract,
-)
 from spectra_learning.data.loading import local_batch_size
 from spectra_learning.data.massspec_probe import MassSpecProbeData
 from spectra_learning.data.massspec_targets import MACCS_FINGERPRINT_BITS
 from spectra_learning.data.spectra import (
     ASSUMED_PRECURSOR_CHARGE,
     COLLISION_ENERGY_MAX,
-    DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
-    DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-    DEFAULT_PEAK_FILTERING,
+    DEFAULT_MAX_PRECURSOR_MZ,
+    DEFAULT_MIN_PEAK_INTENSITY,
+    DEFAULT_NUM_PEAKS,
+    DEFAULT_PRECURSOR_PEAK_EXCLUSION_WINDOW_DA,
     preprocess_peak_batch_torch,
     spectra_from_peak_lists,
 )
@@ -82,20 +77,24 @@ log = logging.getLogger(__name__)
 
 
 def _peak_collator_kwargs(config: Any) -> dict[str, Any]:
-    preprocessing = peak_preprocessing_contract(config)
+    min_peak_intensity = float(
+        config.get("min_peak_intensity", DEFAULT_MIN_PEAK_INTENSITY)
+    )
     return {
-        "num_peaks": preprocessing["num_peaks"],
-        "max_precursor_mz": preprocessing["max_precursor_mz"],
-        "min_peak_intensity": preprocessing["min_peak_intensity"],
-        "peak_drop_min_intensity": preprocessing["peak_drop_min_intensity"],
-        "peak_ordering": preprocessing["peak_ordering"],
-        "precursor_peak_exclusion_window_da": preprocessing[
-            "precursor_peak_exclusion_window_da"
-        ],
-        "peak_filtering": preprocessing["peak_filtering"],
-        "grouped_peak_shoulder_da": preprocessing["grouped_peak_shoulder_da"],
-        "grouped_peak_isotope_charges": tuple(
-            preprocessing["grouped_peak_isotope_charges"]
+        "num_peaks": int(config.get("num_peaks", DEFAULT_NUM_PEAKS)),
+        "max_precursor_mz": float(
+            config.get("max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
+        ),
+        "min_peak_intensity": min_peak_intensity,
+        "peak_drop_min_intensity": float(
+            config.get("peak_drop_min_intensity", min_peak_intensity)
+        ),
+        "peak_ordering": str(config.get("peak_ordering", "mz")),
+        "precursor_peak_exclusion_window_da": float(
+            config.get(
+                "precursor_peak_exclusion_window_da",
+                DEFAULT_PRECURSOR_PEAK_EXCLUSION_WINDOW_DA,
+            )
         ),
     }
 
@@ -120,11 +119,6 @@ class _ContrastivePeakCollator:
         peak_drop_min_intensity: float,
         peak_ordering: str,
         precursor_peak_exclusion_window_da: float,
-        peak_filtering: str = DEFAULT_PEAK_FILTERING,
-        grouped_peak_shoulder_da: float = DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-        grouped_peak_isotope_charges: tuple[int, ...] = (
-            DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES
-        ),
     ) -> None:
         self.split = split
         self.num_peaks = num_peaks
@@ -133,9 +127,6 @@ class _ContrastivePeakCollator:
         self.peak_drop_min_intensity = peak_drop_min_intensity
         self.peak_ordering = peak_ordering
         self.precursor_peak_exclusion_window_da = precursor_peak_exclusion_window_da
-        self.peak_filtering = peak_filtering
-        self.grouped_peak_shoulder_da = grouped_peak_shoulder_da
-        self.grouped_peak_isotope_charges = grouped_peak_isotope_charges
 
     def _collate_rows(self, row_indices: np.ndarray) -> dict[str, torch.Tensor]:
         spectra = torch.from_numpy(self.split.spectra[row_indices].copy())
@@ -150,9 +141,6 @@ class _ContrastivePeakCollator:
             max_precursor_mz=self.max_precursor_mz,
             precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
             min_peak_intensity=self.min_peak_intensity,
-            peak_filtering=self.peak_filtering,
-            grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
-            grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
         )
         batch["probe_maccs"] = torch.from_numpy(
             self.split.probe_maccs[row_indices].copy()
@@ -1454,13 +1442,11 @@ def train_contrastive(
         load_pretrained_weights(
             module.model,
             normalize_storage_path(init_checkpoint),
-            config=config,
         )
         if module.teacher_model is not None:
             load_pretrained_weights(
                 module.teacher_model,
                 normalize_storage_path(init_checkpoint),
-                config=config,
             )
     module.to(distributed.device).train()
     if module.teacher_model is not None:
@@ -1491,7 +1477,6 @@ def train_contrastive(
         storage_mkdir(checkpoint_dir)
     logger = build_logger(config, local_workdir) if distributed.is_main else None
     start_epoch, global_step, resume_offset = restore_contrastive_state(
-        config=config,
         checkpoint_dir=checkpoint_dir,
         module=module,
         optimizers=optimizers,
@@ -1499,7 +1484,6 @@ def train_contrastive(
         grad_scaler=grad_scaler,
         steps_per_epoch=len(train_loader),
         device=distributed.device,
-        data_provenance=dict(probe_data.info),
     )
     if distributed.is_main and logger is not None:
         logger.log_metrics(param_metrics, step=global_step)
@@ -1530,7 +1514,6 @@ def train_contrastive(
         total_steps=total_steps,
         distributed=distributed,
         flops_per_optimizer_step=flops_per_optimizer_step,
-        data_provenance=data_provenance_contract(probe_data.info),
     )
     cleanup_distributed(distributed)
     return {**results, **param_metrics}
@@ -1566,7 +1549,6 @@ def run_contrastive_loop(
     total_steps: int,
     distributed: DistributedContext,
     flops_per_optimizer_step: float | None = None,
-    data_provenance: dict[str, Any],
 ) -> dict[str, object]:
     log_every_n_steps = int(config.get("log_every_n_steps", 50))
     val_every_n_steps = int(config.get("contrastive_val_every_n_steps", 0))
@@ -1667,8 +1649,6 @@ def run_contrastive_loop(
                     )
             if global_step % checkpoint_every_steps == 0:
                 save_contrastive_checkpoint_if_main(
-                    config=config,
-                    data_provenance=data_provenance,
                     checkpoint_dir=checkpoint_dir,
                     model=model,
                     optimizers=optimizers,
@@ -1693,8 +1673,6 @@ def run_contrastive_loop(
         autocast_dtype=autocast_dtype,
     )
     save_contrastive_checkpoint_if_main(
-        config=config,
-        data_provenance=data_provenance,
         checkpoint_dir=checkpoint_dir,
         model=model,
         optimizers=optimizers,
@@ -1802,8 +1780,6 @@ def _move_batch(
 
 def save_contrastive_checkpoint_if_main(
     *,
-    config: config_dict.ConfigDict,
-    data_provenance: dict[str, Any],
     checkpoint_dir: StoragePath,
     model: torch.nn.Module,
     optimizers: list[torch.optim.Optimizer],
@@ -1845,8 +1821,6 @@ def save_contrastive_checkpoint_if_main(
             "loss": loss,
             "wandb_run_id": None,
             "training_mode": "contrastive",
-            "peak_preprocessing": peak_preprocessing_contract(config),
-            "data_provenance": data_provenance,
             "covariance_pooler_checkpoint": storage_name(pooler_path),
         },
         path,
@@ -1855,7 +1829,6 @@ def save_contrastive_checkpoint_if_main(
 
 def restore_contrastive_state(
     *,
-    config: config_dict.ConfigDict,
     checkpoint_dir: StoragePath,
     module: ContrastiveTrainingModule,
     optimizers: list[torch.optim.Optimizer],
@@ -1863,7 +1836,6 @@ def restore_contrastive_state(
     grad_scaler: torch.amp.GradScaler | None,
     steps_per_epoch: int,
     device: torch.device,
-    data_provenance: dict[str, Any],
 ) -> tuple[int, int, int]:
     checkpoints = training_checkpoint_paths(checkpoint_dir)
     if not checkpoints:
@@ -1871,8 +1843,6 @@ def restore_contrastive_state(
     ckpt_path = checkpoints[-1]
     log.info("Resuming contrastive training from %s", ckpt_path)
     ckpt = load_torch_checkpoint(ckpt_path, map_location=device, weights_only=True)
-    validate_peak_preprocessing_contract(ckpt, config)
-    validate_data_provenance_contract(ckpt, data_provenance)
     _ = ckpt["loss"]
     _ = ckpt["wandb_run_id"]
     load_resume_model_state(module.model, ckpt["model"])

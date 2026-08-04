@@ -24,15 +24,12 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_mask_strategy = ["random"]
     cfg.jepa_context_fraction = 0.35
     cfg.jepa_target_fraction = 0.5
-    cfg.peak_filtering = "grouped"
     cfg.peak_ordering = "intensity"
     cfg.pairmixer_block_type = "fastmixer-dense"
     cfg.pairmixer_transition_type = "feedforward"
     cfg.num_peaks = 47
     cfg.num_epochs = 98
     cfg.dataloader_num_workers = 32
-    cfg.grouped_peak_shoulder_da = 0.02
-    cfg.grouped_peak_isotope_charges = (1, 2, 3)
     cfg.msg_probe_every_n_steps = -1
     cfg.msg_probe_at_final_step = False
     cfg.nist_murcko_probe_num_repeats = 1

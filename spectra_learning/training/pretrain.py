@@ -17,12 +17,6 @@ import torch._inductor.config as inductor_config
 from ml_collections import config_dict
 from tqdm import tqdm
 
-from spectra_learning.data.contracts import (
-    data_provenance_contract,
-    peak_preprocessing_contract,
-    validate_data_provenance_contract,
-    validate_peak_preprocessing_contract,
-)
 from spectra_learning.data.gems.datamodule import GemsDataModule
 from spectra_learning.models.factory import build_model_from_config
 from spectra_learning.models.model import PeakSetJEPA
@@ -210,7 +204,6 @@ def train_and_evaluate(
         grad_scaler=grad_scaler,
         steps_per_epoch=datamodule.train_steps,
         device=device,
-        data_provenance=dict(datamodule.info),
     )
     if distributed.is_main:
         save_config(config, workdir)
@@ -266,8 +259,6 @@ def train_and_evaluate(
             final_global_step // datamodule.train_steps,
             float("nan"),
             getattr(logger.experiment, "id", None),
-            peak_preprocessing=peak_preprocessing_contract(config),
-            data_provenance=data_provenance_contract(datamodule.info),
             grad_scaler=grad_scaler,
         )
     checkpoint_writer.close()
@@ -295,7 +286,7 @@ def initialize_frozen_teacher(
     checkpoint_path = str(config.frozen_teacher_checkpoint_path)
     if distributed.is_main:
         logging.info("Loading frozen MAE teacher from %s.", checkpoint_path)
-    load_frozen_teacher_weights(model, checkpoint_path, config=config)
+    load_frozen_teacher_weights(model, checkpoint_path)
 
 
 @dataclass(frozen=True)
@@ -625,8 +616,6 @@ class _TorchTrainingLoop:
                 self.global_step // self.datamodule.train_steps,
                 float(metrics["loss"]),
                 getattr(self.wandb_run, "id", None),
-                peak_preprocessing=peak_preprocessing_contract(self.config),
-                data_provenance=data_provenance_contract(self.datamodule.info),
                 grad_scaler=self.grad_scaler,
                 prune_checkpoint_dir=self.checkpoint_dir,
                 keep_top_k=15,
@@ -885,7 +874,6 @@ def restore_training_state(
     schedulers: list[LRSchedulerLike],
     steps_per_epoch: int,
     device: torch.device,
-    data_provenance: dict[str, Any],
     grad_scaler: torch.amp.GradScaler | None = None,
 ) -> tuple[int, int, int]:
     checkpoints = training_checkpoint_paths(checkpoint_dir)
@@ -894,8 +882,6 @@ def restore_training_state(
     ckpt_path = checkpoints[-1]
     logging.info("Resuming from checkpoint: %s", ckpt_path)
     ckpt = load_torch_checkpoint(ckpt_path, map_location=device, weights_only=True)
-    validate_peak_preprocessing_contract(ckpt, config)
-    validate_data_provenance_contract(ckpt, data_provenance)
     _ = ckpt["loss"]
     resume_wandb_id = ckpt["wandb_run_id"]
     if resume_wandb_id:

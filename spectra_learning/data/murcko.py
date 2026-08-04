@@ -42,11 +42,8 @@ from spectra_learning.data.massspec_targets import (
 )
 from spectra_learning.data.mgf import _to_float, file_source_manifest, iter_mgf
 from spectra_learning.data.spectra import (
-    DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
-    DEFAULT_GROUPED_PEAK_SHOULDER_DA,
     DEFAULT_MAX_PRECURSOR_MZ,
     DEFAULT_MIN_PRECURSOR_MZ,
-    DEFAULT_PEAK_FILTERING,
     NUM_PEAKS_INPUT,
     parse_precursor_charge,
     spectra_from_peak_lists,
@@ -248,9 +245,6 @@ class MurckoFluorineData(NamedTuple):
     max_precursor_mz: float
     min_peak_intensity: float
     peak_drop_min_intensity: float
-    peak_filtering: str
-    grouped_peak_shoulder_da: float
-    grouped_peak_isotope_charges: tuple[int, ...]
     peak_ordering: str
     precursor_peak_exclusion_window_da: float
 
@@ -567,11 +561,6 @@ class _MurckoFluorineCollator:
         precursor_peak_exclusion_window_da: float,
         dreams_only: bool,
         output_format: str,
-        peak_filtering: str = DEFAULT_PEAK_FILTERING,
-        grouped_peak_shoulder_da: float = DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-        grouped_peak_isotope_charges: tuple[int, ...] = (
-            DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES
-        ),
     ) -> None:
         self.dreams_only = dreams_only
         self.output_format = output_format
@@ -587,9 +576,6 @@ class _MurckoFluorineCollator:
             peak_drop_min_intensity=peak_drop_min_intensity,
             peak_ordering=peak_ordering,
             precursor_peak_exclusion_window_da=precursor_peak_exclusion_window_da,
-            peak_filtering=peak_filtering,
-            grouped_peak_shoulder_da=grouped_peak_shoulder_da,
-            grouped_peak_isotope_charges=grouped_peak_isotope_charges,
             output_format="torch",
         )
 
@@ -704,9 +690,6 @@ def build_murcko_fluorine_loader(
             peak_drop_min_intensity=data.peak_drop_min_intensity,
             peak_ordering=data.peak_ordering,
             precursor_peak_exclusion_window_da=data.precursor_peak_exclusion_window_da,
-            peak_filtering=data.peak_filtering,
-            grouped_peak_shoulder_da=data.grouped_peak_shoulder_da,
-            grouped_peak_isotope_charges=data.grouped_peak_isotope_charges,
             dreams_only=dreams_only,
             output_format=output_format,
         ),

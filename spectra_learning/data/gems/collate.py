@@ -20,9 +20,6 @@ from spectra_learning.data.gems.intensity_aware import (
 )
 from spectra_learning.data.spectra import (
     COLLISION_ENERGY_MAX,
-    DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
-    DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-    DEFAULT_PEAK_FILTERING,
     PEAK_MZ_MAX,
     canonicalize_precursor_charge_numpy,
     canonicalize_precursor_charge_torch,
@@ -46,11 +43,6 @@ class GemsBatchCollator:
         peak_drop_min_intensity: float,
         peak_ordering: str,
         precursor_peak_exclusion_window_da: float,
-        peak_filtering: str = DEFAULT_PEAK_FILTERING,
-        grouped_peak_shoulder_da: float = DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-        grouped_peak_isotope_charges: tuple[int, ...] = (
-            DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES
-        ),
         mask_strategy: str | tuple[str, ...] | list[str] = DEFAULT_JEPA_MASK_STRATEGY,
         mask_lengths: tuple[int, ...] = DEFAULT_JEPA_MASK_LENGTHS,
         mask_round_from: int = len(DEFAULT_JEPA_MASK_LENGTHS),
@@ -76,9 +68,6 @@ class GemsBatchCollator:
         self.max_precursor_mz = max_precursor_mz
         self.min_peak_intensity = min_peak_intensity
         self.peak_drop_min_intensity = peak_drop_min_intensity
-        self.peak_filtering = peak_filtering
-        self.grouped_peak_shoulder_da = grouped_peak_shoulder_da
-        self.grouped_peak_isotope_charges = grouped_peak_isotope_charges
         self.peak_ordering = peak_ordering
         self.precursor_peak_exclusion_window_da = precursor_peak_exclusion_window_da
         self.output_format = output_format
@@ -112,9 +101,6 @@ class GemsBatchCollator:
             max_precursor_mz=self.max_precursor_mz,
             precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
             min_peak_intensity=self.min_peak_intensity,
-            peak_filtering=self.peak_filtering,
-            grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
-            grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
         )
         self._add_numpy_spectrum_metadata(batch, samples)
         return {key: torch.from_numpy(value) for key, value in batch.items()}
@@ -138,9 +124,6 @@ class GemsBatchCollator:
             max_precursor_mz=self.max_precursor_mz,
             precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
             min_peak_intensity=self.min_peak_intensity,
-            peak_filtering=self.peak_filtering,
-            grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
-            grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
         )
         self._add_torch_spectrum_metadata(batch, samples)
         return batch
@@ -213,7 +196,6 @@ class GemsBatchCollator:
                 mask_lengths=self.mask_lengths,
                 mask_round_from=self.mask_round_from,
                 allow_target_overlap=self.allow_target_overlap,
-                peak_group_id=batch.get("peak_group_id"),
             )
 
         return context_mask, target_masks
@@ -252,7 +234,6 @@ class GemsBatchCollator:
             mask_lengths=self.mask_lengths,
             mask_round_from=self.mask_round_from,
             allow_target_overlap=self.allow_target_overlap,
-            peak_group_id=batch.get("peak_group_id"),
         )
 
     def _sample_mixed_strategy_masks(

@@ -7,10 +7,6 @@ from typing import Any
 
 from ml_collections import config_dict
 
-from spectra_learning.data.contracts import (
-    data_provenance_contract,
-    peak_preprocessing_contract,
-)
 from spectra_learning.data.ar_spectra import SpectraARGemsDataModule
 from spectra_learning.models.ar_spectra_jax import build_spectra_ar_model_jax_from_config
 from spectra_learning.training.pretrain_jax import (
@@ -82,9 +78,7 @@ def _ar_jax_checkpoint_contract(
             "spectrum_dataset": str(config.gems_hdf5_spectrum_dataset),
             "precursor_dataset": str(config.gems_hdf5_precursor_dataset),
             "rows_per_block": int(config.gems_hdf5_rows_per_block),
-            "provenance": data_provenance_contract(datamodule.info),
         },
-        "preprocessing": peak_preprocessing_contract(config),
         "model": {
             "model_dim": int(config.ar_model_dim),
             "num_layers": int(config.ar_num_layers),

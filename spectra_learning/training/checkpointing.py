@@ -5,7 +5,6 @@ from typing import Any
 
 import torch
 
-from spectra_learning.data.contracts import validate_peak_preprocessing_contract
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.training.schedules import LRSchedulerLike
 from spectra_learning.training.storage import (
@@ -76,8 +75,6 @@ def _training_checkpoint_state(
     wandb_run_id: str | None,
     covariance_pooler: torch.nn.Module | None,
     grad_scaler: torch.amp.GradScaler | None,
-    peak_preprocessing: dict[str, Any],
-    data_provenance: dict[str, Any],
 ) -> tuple[dict[str, Any], StoragePath | None, dict[str, Any] | None]:
     pooler_path = (
         covariance_pooler_checkpoint_path(path)
@@ -93,8 +90,6 @@ def _training_checkpoint_state(
         "epoch": epoch,
         "loss": loss,
         "wandb_run_id": wandb_run_id,
-        "peak_preprocessing": peak_preprocessing,
-        "data_provenance": data_provenance,
         "covariance_pooler_checkpoint": (
             storage_name(pooler_path) if pooler_path is not None else None
         ),
@@ -172,8 +167,6 @@ class AsyncCheckpointWriter:
         loss: float,
         wandb_run_id: str | None = None,
         *,
-        peak_preprocessing: dict[str, Any],
-        data_provenance: dict[str, Any],
         covariance_pooler: torch.nn.Module | None = None,
         grad_scaler: torch.amp.GradScaler | None = None,
         prune_checkpoint_dir: StoragePath | None = None,
@@ -190,8 +183,6 @@ class AsyncCheckpointWriter:
             wandb_run_id,
             covariance_pooler,
             grad_scaler,
-            peak_preprocessing,
-            data_provenance,
         )
         future = self._executor.submit(
             _write_training_checkpoint_job,
@@ -298,26 +289,20 @@ def load_grad_scaler_state(
 def load_pretrained_weights(
     model: PeakSetJEPA,
     checkpoint_path: StoragePath,
-    *,
-    config: Any,
 ) -> None:
     ckpt = load_torch_checkpoint(
         checkpoint_path,
         map_location="cpu",
         weights_only=True,
     )
-    validate_peak_preprocessing_contract(ckpt, config)
     model.load_state_dict(ckpt["model"])
 
 
 def load_frozen_teacher_weights(
     model: PeakSetJEPA,
     checkpoint_path: StoragePath,
-    *,
-    config: Any,
 ) -> None:
     ckpt = load_torch_checkpoint(checkpoint_path, map_location="cpu", weights_only=True)
-    validate_peak_preprocessing_contract(ckpt, config)
     encoder_state = {
         key.removeprefix("encoder."): value
         for key, value in ckpt["model"].items()

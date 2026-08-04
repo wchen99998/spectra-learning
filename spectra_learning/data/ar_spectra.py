@@ -8,17 +8,14 @@ from typing import Any
 import torch
 from ml_collections import config_dict
 
-from spectra_learning.data.contracts import peak_preprocessing_contract
 from spectra_learning.data.gems.collate import GemsBatchCollator
 from spectra_learning.data.gems.conversion import format_batch
 from spectra_learning.data.gems.datamodule import GemsDataModule
 from spectra_learning.data.spectra import (
     COLLISION_ENERGY_MAX,
-    DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES,
-    DEFAULT_GROUPED_PEAK_SHOULDER_DA,
     DEFAULT_MAX_PRECURSOR_MZ,
     DEFAULT_MIN_PEAK_INTENSITY,
-    DEFAULT_PEAK_FILTERING,
+    DEFAULT_NUM_PEAKS,
     DEFAULT_PRECURSOR_PEAK_EXCLUSION_WINDOW_DA,
     PEAK_MZ_MAX,
     PRECURSOR_CHARGE_MAX,
@@ -82,16 +79,17 @@ class SpectraARTokenizerConfig:
                     f"{key} has been removed; AR tokenization uses the shared "
                     "peak preprocessing scales."
                 )
-        preprocessing = peak_preprocessing_contract(config)
         return cls(
             max_num_peaks=int(
                 config.get(
                     "ar_max_num_peaks",
-                    preprocessing["num_peaks"],
+                    config.get("num_peaks", DEFAULT_NUM_PEAKS),
                 )
             ),
             mz_max=PEAK_MZ_MAX,
-            precursor_mz_max=preprocessing["max_precursor_mz"],
+            precursor_mz_max=float(
+                config.get("max_precursor_mz", DEFAULT_MAX_PRECURSOR_MZ)
+            ),
             mz_bin_widths=tuple(
                 float(width)
                 for width in config.get(
@@ -544,11 +542,6 @@ class SpectraARGemsBatchCollator:
         peak_drop_min_intensity: float,
         peak_ordering: str,
         precursor_peak_exclusion_window_da: float,
-        peak_filtering: str = DEFAULT_PEAK_FILTERING,
-        grouped_peak_shoulder_da: float = DEFAULT_GROUPED_PEAK_SHOULDER_DA,
-        grouped_peak_isotope_charges: tuple[int, ...] = (
-            DEFAULT_GROUPED_PEAK_ISOTOPE_CHARGES
-        ),
         output_format: str = "torch",
     ) -> None:
         self.tokenizer = tokenizer
@@ -565,9 +558,6 @@ class SpectraARGemsBatchCollator:
             peak_drop_min_intensity=peak_drop_min_intensity,
             peak_ordering=peak_ordering,
             precursor_peak_exclusion_window_da=precursor_peak_exclusion_window_da,
-            peak_filtering=peak_filtering,
-            grouped_peak_shoulder_da=grouped_peak_shoulder_da,
-            grouped_peak_isotope_charges=grouped_peak_isotope_charges,
             output_format="torch",
         )
 
@@ -627,8 +617,5 @@ class SpectraARGemsDataModule(GemsDataModule):
             peak_drop_min_intensity=self.peak_drop_min_intensity,
             peak_ordering=self.peak_ordering,
             precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
-            peak_filtering=self.peak_filtering,
-            grouped_peak_shoulder_da=self.grouped_peak_shoulder_da,
-            grouped_peak_isotope_charges=self.grouped_peak_isotope_charges,
             output_format=self.dataloader_output_format,
         )

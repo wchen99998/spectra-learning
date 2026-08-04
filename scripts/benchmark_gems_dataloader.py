@@ -19,9 +19,6 @@ def _configure(args: argparse.Namespace, workers: int):
         "dataloader_num_workers": workers,
         "dataloader_prefetch_factor": args.prefetch_factor,
         "dataloader_persistent_workers": workers > 0,
-        "peak_filtering": args.peak_filtering,
-        "grouped_peak_shoulder_da": args.grouped_peak_shoulder_da,
-        "grouped_peak_isotope_charges": tuple(args.grouped_peak_isotope_charges),
         "dataloader_output_format": (
             "numpy" if args.backend in {"jax", "numpy"} else "torch"
         ),
@@ -100,14 +97,6 @@ def main() -> None:
         "--backend",
         choices=("torch", "torch-cuda", "numpy", "jax"),
         default="torch",
-    )
-    parser.add_argument("--peak-filtering", default="grouped")
-    parser.add_argument("--grouped-peak-shoulder-da", type=float, default=0.05)
-    parser.add_argument(
-        "--grouped-peak-isotope-charges",
-        type=int,
-        nargs="+",
-        default=[1, 2, 3],
     )
     parser.add_argument("--workers", type=int, nargs="+", default=[8])
     parser.add_argument("--prefetch-factor", type=int, default=2)

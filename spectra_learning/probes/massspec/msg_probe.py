@@ -12,7 +12,6 @@ import torch.nn.functional as F
 from ml_collections import config_dict
 from torch.nn.parallel import DistributedDataParallel
 
-from spectra_learning.data.contracts import peak_preprocessing_contract
 from spectra_learning.data.gems.conversion import numpy_batch_to_torch
 from spectra_learning.data.loading import local_batch_size
 from spectra_learning.models.pooling import CovariancePool
@@ -1089,7 +1088,7 @@ def _setup_msg_probe(
     probe_data = MassSpecProbeData.from_config(config, **probe_data_kwargs)
     if on_probe_data is not None:
         on_probe_data(probe_data)
-    peak_ordering = peak_preprocessing_contract(config)["peak_ordering"]
+    peak_ordering = str(config.get("peak_ordering", "mz"))
     variants = msg_probe_variants_from_config(config)
     feature_extractor = _make_msg_probe_feature_extractor(
         model,
@@ -1711,7 +1710,7 @@ def _setup_dreams_probe(
     data_config = config.copy_and_resolve_references()
     data_config.nist_murcko_probe_include_dreams_auxiliary = True
     probe_data = MassSpecProbeData.from_config(data_config)
-    peak_ordering = peak_preprocessing_contract(data_config)["peak_ordering"]
+    peak_ordering = str(data_config.get("peak_ordering", "mz"))
     dreams_dim = probe_data.dreams_dim
     if dreams_dim == 0:
         log.warning("No DreaMS embeddings in probe data; skipping Dreams probe")

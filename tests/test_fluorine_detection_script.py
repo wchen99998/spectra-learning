@@ -37,7 +37,6 @@ def test_fluorine_outputs_support_fsspec_prefix(monkeypatch, tmp_path: Path):
             "nist_revision": "nist-sha",
             "nist_subdir": "nist",
             "nist_source_dir": str(tmp_path / "nist"),
-            "peak_preprocessing": {"version": 1},
             "test_size": 4,
             "test_positive": 2,
         },
@@ -47,9 +46,6 @@ def test_fluorine_outputs_support_fsspec_prefix(monkeypatch, tmp_path: Path):
         max_precursor_mz=1000.0,
         min_peak_intensity=1e-4,
         peak_drop_min_intensity=1e-4,
-        peak_filtering="top_intensity",
-        grouped_peak_shoulder_da=0.05,
-        grouped_peak_isotope_charges=(1, 2, 3),
         peak_ordering="mz",
         precursor_peak_exclusion_window_da=0.0,
     )
@@ -141,7 +137,6 @@ def test_checkpoint_probe_data_uses_current_sources_and_checkpoint_preprocessing
             "massspec_val_positive": 0,
             "massspec_test_size": 1,
             "massspec_test_positive": 1,
-            "massspec_peak_preprocessing": {"version": 1},
         }
         return SimpleNamespace(
             info=info,
@@ -155,11 +150,6 @@ def test_checkpoint_probe_data_uses_current_sources_and_checkpoint_preprocessing
             max_precursor_mz=config.max_precursor_mz,
             min_peak_intensity=config.min_peak_intensity,
             peak_drop_min_intensity=config.peak_drop_min_intensity,
-            peak_filtering=config.peak_filtering,
-            grouped_peak_shoulder_da=config.grouped_peak_shoulder_da,
-            grouped_peak_isotope_charges=tuple(
-                config.grouped_peak_isotope_charges
-            ),
             peak_ordering=config.peak_ordering,
             precursor_peak_exclusion_window_da=(
                 config.precursor_peak_exclusion_window_da
@@ -180,9 +170,6 @@ def test_checkpoint_probe_data_uses_current_sources_and_checkpoint_preprocessing
             "max_precursor_mz": 900.0,
             "min_peak_intensity": 0.01,
             "peak_drop_min_intensity": 0.02,
-            "peak_filtering": "top_intensity",
-            "grouped_peak_shoulder_da": 0.03,
-            "grouped_peak_isotope_charges": (1, 2),
             "peak_ordering": "mz",
             "precursor_peak_exclusion_window_da": 1.5,
         }
@@ -335,8 +322,6 @@ def _source_checkpoint_contract() -> dict[str, object]:
         "model_sha256": "model-sha",
         "covariance_pooler_sha256": None,
         "model_settings": {"model_dim": 2},
-        "peak_preprocessing": {"version": 1},
-        "data_provenance": {"gems_revision": "gems-sha"},
     }
 
 
@@ -346,10 +331,6 @@ def _adaptation_data_metadata() -> dict[str, object]:
         "train_positive": 1,
         "val_size": 2,
         "val_positive": 1,
-        "data_provenance": {
-            "massspec_nist_revision": "nist-sha",
-        },
-        "peak_preprocessing": {"version": 1},
     }
 
 
@@ -358,8 +339,6 @@ def test_torch_source_checkpoint_contract_tracks_model_content(tmp_path: Path):
         "global_step": 7,
         "model": {"weight": torch.tensor([1.0, 2.0])},
         "covariance_pooler_checkpoint": None,
-        "peak_preprocessing": {"version": 1},
-        "data_provenance": {"gems_revision": "gems-sha"},
     }
     config = config_dict.ConfigDict({"model_dim": 2})
 
@@ -378,15 +357,10 @@ def test_torch_source_checkpoint_contract_tracks_model_content(tmp_path: Path):
     assert baseline["model_sha256"] != changed["model_sha256"]
 
 
-@pytest.mark.parametrize("changed_part", ["source_checkpoint", "evaluation_data"])
-def test_cached_adaptation_state_rejects_stale_contract(
-    tmp_path: Path,
-    changed_part: str,
-):
+def test_cached_adaptation_state_rejects_stale_contract(tmp_path: Path):
     state_path = tmp_path / "state.pt"
     current_contract = fluorine._fluorine_state_contract(
         source_checkpoint=_source_checkpoint_contract(),
-        data=SimpleNamespace(metadata=_adaptation_data_metadata()),
     )
     torch.save(
         {
@@ -401,12 +375,7 @@ def test_cached_adaptation_state_rejects_stale_contract(
         state_path,
     )
     changed_contract = json.loads(json.dumps(current_contract))
-    if changed_part == "source_checkpoint":
-        changed_contract["source_checkpoint"]["model_sha256"] = "changed"
-    else:
-        changed_contract["evaluation_data_provenance"][
-            "massspec_nist_revision"
-        ] = "changed"
+    changed_contract["source_checkpoint"]["model_sha256"] = "changed"
 
     with pytest.raises(ValueError, match="training contract"):
         fluorine._load_cached_adaptation_state(
@@ -848,7 +817,6 @@ def test_lora_cached_state_injects_adapters_without_full_model_state(
     source_checkpoint_contract = _source_checkpoint_contract()
     state_contract = fluorine._fluorine_state_contract(
         source_checkpoint=source_checkpoint_contract,
-        data=data,
     )
     monkeypatch.setattr(
         fluorine,

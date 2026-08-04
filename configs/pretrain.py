@@ -28,9 +28,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.min_peak_intensity = 0.0001
     cfg.peak_drop_min_intensity = 0.0001
     cfg.precursor_peak_exclusion_window_da = 0
-    cfg.peak_filtering = "top_intensity"
-    cfg.grouped_peak_shoulder_da = 0.05
-    cfg.grouped_peak_isotope_charges = (1, 2, 3)
     cfg.peak_ordering = "mz"
     cfg.seed = 66
 
