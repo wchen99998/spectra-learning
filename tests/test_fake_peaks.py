@@ -64,6 +64,20 @@ def test_discriminator_detects_and_reconstructs_both_peak_values() -> None:
     }
 
     predictions = model.predict(batch)
+    model.eval()
+    baseline_logits = model.detect(batch)["fake_logits"]
+    relabeled = dict(batch)
+    relabeled["detection_mask"] = ~batch["detection_mask"]
+    relabeled["fake_peak_mask"] = ~batch["fake_peak_mask"]
+    relabeled["true_peak_mz"] = torch.rand_like(batch["true_peak_mz"])
+    relabeled["true_peak_intensity"] = torch.rand_like(
+        batch["true_peak_intensity"]
+    )
+    relabeled["target_masks"] = ~batch["target_masks"]
+    relabeled["generator_exact_bin_mask"] = (
+        ~batch["generator_exact_bin_mask"]
+    )
+    relabeled_logits = model.detect(relabeled)["fake_logits"]
     without_detection = dict(batch)
     del without_detection["detection_mask"]
     with pytest.raises(KeyError, match="detection_mask"):
@@ -74,6 +88,7 @@ def test_discriminator_detects_and_reconstructs_both_peak_values() -> None:
     assert predictions["fake_logits"].shape == (2, 4)
     assert predictions["mz_logits"].shape == (2, 4, 2000)
     assert predictions["intensity_logits"].shape == (2, 4, 10)
+    assert torch.equal(baseline_logits, relabeled_logits)
     assert torch.isfinite(metrics["loss"])
     assert model.fake_head.weight.grad is not None
     assert model.mz_head.weight.grad is not None
