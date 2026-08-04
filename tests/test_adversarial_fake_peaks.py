@@ -241,7 +241,11 @@ def test_microbatch_trains_both_models_and_ramps_adversarial_weight() -> None:
     generator = DynamicPeakGenerator(generator_config(config))
     discriminator = FakePeakDiscriminator(config)
 
-    generator_parameters = tuple(generator.parameters())
+    generator_parameters = tuple(
+        parameter
+        for parameter in generator.parameters()
+        if parameter.requires_grad
+    )
     metrics, adversarial_gradients = train_adversarial_microbatch(
         generator,
         discriminator,

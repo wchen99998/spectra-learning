@@ -741,7 +741,11 @@ def train_adversarial_fake_peaks(
     generator_scheduler = generator_schedulers[0]
     discriminator_optimizer = discriminator_optimizers[0]
     discriminator_scheduler = discriminator_schedulers[0]
-    generator_parameters = tuple(generator.parameters())
+    generator_parameters = tuple(
+        parameter
+        for parameter in generator.parameters()
+        if parameter.requires_grad
+    )
     training_contract = _training_contract(config, resolved_generator_config)
 
     global_step = 0
