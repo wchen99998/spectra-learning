@@ -36,8 +36,10 @@ One process controls both GPUs; this is not DDP. The dataset is the pinned
 `7ff47061cbde23e4cdd113378dcfb489e86b32c4`. Preprocessing keeps 47 peak
 slots, drops intensities below \(10^{-4}\), and uses grouped peak filtering
 with a 0.02 Da shoulder and isotope charges 1, 2, and 3. It initially orders
-peaks by intensity. The trainer independently shuffles every aligned peak
-field in every microbatch before either model sees it.
+peaks by intensity. The generator keeps this canonical order because its
+masked target queries use slot-position embeddings. After generation and
+fake/real assignment, the trainer independently shuffles every aligned peak
+field before the discriminator sees the mixed spectrum.
 
 Both models are randomly initialized. There is no source-model checkpoint,
 frozen generator, or teacher model. Resuming from this run's own checkpoint
@@ -89,10 +91,10 @@ t_b
 \right).
 \]
 
-`round` is Python's ties-to-even rounding. After sampling, the most intense
-valid peak is forced into \(C_b\) and removed from \(T_b\), so the base peak
-is always context and never generated. That final per-peak edit can split its
-original peak group.
+`round` is Python's ties-to-even rounding. After sampling, every valid peak
+tied for maximum intensity is forced into \(C_b\) and removed from \(T_b\),
+so no base peak is generated. That final per-peak edit can split an original
+peak group.
 
 ## Generator
 
@@ -575,18 +577,20 @@ saved scheduler state at 50,000.
 
 For each of 16 microbatches:
 
-1. Load 80 spectra and randomly shuffle aligned peak fields.
-2. Force each base peak into context.
-3. Run the generator on `cuda:1` and reconstruct all masked targets.
+1. Load 80 spectra in canonical preprocessed order.
+2. Force every tied maximum-intensity base peak into context.
+3. Run the generator on `cuda:1` and reconstruct the identified masked
+   targets.
 4. Randomly choose balanced fake/real target pairs and build the mixed
    spectrum.
-5. Copy the connected mixed batch to `cuda:0`; detach a second view for the
+5. Randomly shuffle every aligned field in the completed mixed spectrum.
+6. Copy the connected mixed batch to `cuda:0`; detach a second view for the
    discriminator update.
-6. Backpropagate \(\mathcal L_D/16\) through the discriminator only.
-7. Freeze discriminator parameters, compute
+7. Backpropagate \(\mathcal L_D/16\) through the discriminator only.
+8. Freeze discriminator parameters, compute
    \(\nabla[w(s)\mathcal A_G/16]\) when \(w(s)>0\), and store it outside
    `.grad`.
-8. Backpropagate \(\mathcal R_G/16\) into generator `.grad`.
+9. Backpropagate \(\mathcal R_G/16\) into generator `.grad`.
 
 After all 16 microbatches:
 
@@ -611,11 +615,14 @@ The construction removes several cheap signals:
    same target mask and the same source spectrum.
 4. **Loss masking.** Context is visible for consistency judgments but is
    excluded from detection BCE.
-5. **Random peak order.** The original intensity ordering is reshuffled every
-   microbatch, so array position cannot encode the class.
+5. **Random discriminator order without erasing target identity.** The
+   generator receives canonical target slots, then the completed mixed
+   spectrum is reshuffled every microbatch. Array position cannot encode the
+   class, while each generator query still denotes the masked peak it must
+   reconstruct.
 6. **Random pair assignment.** The fake half of the target set is redrawn for
    every microbatch.
-7. **Base-peak anchoring.** The most obvious structural peak is always
+7. **Base-peak anchoring.** Every tied maximum-intensity peak is always
    context, never a generated-label shortcut.
 8. **Joint peak generation.** Both m/z and intensity are replaced together.
 9. **Stochastic outputs.** Hard Gumbel categories and continuous stochastic
@@ -642,7 +649,7 @@ distributional defects in generated peaks.
 - A local `checkpoints/last.pt` is atomically replaced every 1,000 steps and
   at the final step. Remote storage uploads do not provide the same atomic
   replacement guarantee.
-- Checkpoint format 5 stores both models, both optimizers, both schedulers,
+- Checkpoint format 6 stores both models, both optimizers, both schedulers,
   global step, CPU and per-GPU RNG states, preprocessing, and data provenance.
 - Resume requires an exact stored contract match for model settings,
   objectives, the listed masking and optimization fields, selected data
