@@ -1,7 +1,7 @@
 from contextlib import nullcontext
 
 import torch
-from torch import nn
+from torch import Tensor, nn
 
 import train
 from configs.adversarial_fake_peaks_equal_50m import get_config
@@ -145,11 +145,44 @@ def test_adversarial_batch_mixes_real_and_fake_targets_per_spectrum() -> None:
     assert discriminator(discriminator_batch)["fake_fraction"] == 0.5
 
 
-def test_base_peak_is_visible_and_never_generated() -> None:
-    anchored = anchor_base_peak_in_context(_batch())
+def test_generator_keeps_target_identity_before_discriminator_shuffle() -> None:
+    config = _tiny_config()
+    generator = DynamicPeakGenerator(generator_config(config))
+    source = _batch()
+    generator_inputs: list[Tensor] = []
 
-    assert anchored["context_mask"][:, 0].all()
-    assert not anchored["target_masks"][:, :, 0].any()
+    def capture_generator_input(
+        _module: nn.Module,
+        args: tuple[dict[str, Tensor]],
+    ) -> None:
+        generator_inputs.append(args[0]["peak_mz"].clone())
+
+    handle = generator.register_forward_pre_hook(capture_generator_input)
+    torch.manual_seed(5)
+    mixed, _, _, _ = _prepare_adversarial_batch(
+        generator,
+        source,
+        torch.device("cpu"),
+        torch.device("cpu"),
+        config,
+    )
+    handle.remove()
+
+    assert torch.equal(generator_inputs[0], source["peak_mz"])
+    assert not torch.equal(mixed["true_peak_mz"], source["peak_mz"])
+    assert torch.equal(
+        mixed["true_peak_mz"].sort(dim=1).values,
+        source["peak_mz"].sort(dim=1).values,
+    )
+
+
+def test_base_peak_is_visible_and_never_generated() -> None:
+    batch = _batch()
+    batch["peak_intensity"][:, 3] = 1.0
+    anchored = anchor_base_peak_in_context(batch)
+
+    assert anchored["context_mask"][:, [0, 3]].all()
+    assert not anchored["target_masks"][:, :, [0, 3]].any()
 
 
 def test_peak_shuffle_preserves_aligned_fields() -> None:
@@ -402,7 +435,7 @@ def test_logit_uniform_nll_is_exact_and_differentiable() -> None:
 
 
 def test_adversarial_checkpoint_format_is_hard_cut() -> None:
-    assert ADVERSARIAL_FAKE_PEAK_CHECKPOINT_FORMAT_VERSION == 5
+    assert ADVERSARIAL_FAKE_PEAK_CHECKPOINT_FORMAT_VERSION == 6
 
 
 def test_validation_preserves_training_rng() -> None:

@@ -50,7 +50,7 @@ from spectra_learning.training.storage import (
     storage_mkdir,
 )
 
-ADVERSARIAL_FAKE_PEAK_CHECKPOINT_FORMAT_VERSION = 5
+ADVERSARIAL_FAKE_PEAK_CHECKPOINT_FORMAT_VERSION = 6
 
 
 def generator_config(
@@ -267,14 +267,13 @@ def _generator_metrics(
 def anchor_base_peak_in_context(
     batch: dict[str, Tensor],
 ) -> dict[str, Tensor]:
-    base_peak_index = batch["peak_intensity"].masked_fill(
+    base_peak_intensity = batch["peak_intensity"].masked_fill(
         ~batch["peak_valid_mask"],
         -1.0,
-    ).argmax(dim=1, keepdim=True)
-    base_peak_mask = torch.zeros_like(batch["peak_valid_mask"]).scatter(
-        1,
-        base_peak_index,
-        True,
+    ).amax(dim=1, keepdim=True)
+    base_peak_mask = (
+        batch["peak_valid_mask"]
+        & batch["peak_intensity"].eq(base_peak_intensity)
     )
     result = dict(batch)
     result["context_mask"] = batch["context_mask"] | base_peak_mask
@@ -343,7 +342,6 @@ def _prepare_adversarial_batch(
     Tensor,
     dict[str, Tensor],
 ]:
-    cpu_batch = shuffle_peak_order(cpu_batch)
     generator_source = anchor_base_peak_in_context(
         _to_device(
             cpu_batch,
@@ -366,6 +364,7 @@ def _prepare_adversarial_batch(
         fake_peak_mask,
         detection_mask,
     )
+    mixed_batch = shuffle_peak_order(mixed_batch)
     mixed_on_discriminator = _to_device(
         mixed_batch,
         discriminator_device,
@@ -602,8 +601,9 @@ def _training_contract(
             "adversarial_batch": (
                 "balanced_real_and_generated_targets_per_spectrum"
             ),
-            "base_peak": "always_context",
-            "peak_order": "random_per_microbatch",
+            "base_peak": "all_maxima_always_context",
+            "generator_peak_order": "canonical_preprocessed_order",
+            "discriminator_peak_order": "random_after_generation",
         },
         "optimization": {
             key: config[key]
