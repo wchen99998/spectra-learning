@@ -18,14 +18,23 @@ def test_1b_muon_no_cls_matches_control_training_settings() -> None:
     assert config.learning_rate == 3e-4
     assert config.min_learning_rate == 6e-6
     assert config.warmup_steps == 5_000
-    assert config.batch_size == 2_048
+    assert config.batch_size == 4_096
+    assert config.jax_mesh_devices == "64"
+    assert config.batch_size // int(config.jax_mesh_devices) == 64
     assert config.gradient_accumulation_steps == 8
+    assert (
+        config.batch_size
+        // int(config.jax_mesh_devices)
+        // config.gradient_accumulation_steps
+        == 8
+    )
     assert tuple(config.gradient_accumulation_steps_schedule) == (8, 16, 16)
     assert tuple(config.jepa_context_fraction_schedule) == (0.35, 0.55, 0.75)
     assert tuple(config.jepa_target_fraction_schedule) == (0.5, 0.3, 0.1)
     assert tuple(config.jepa_mask_schedule_steps) == (250_000, 350_000)
     assert config.checkpoint_every_steps == 50_000
-    assert config.distogram_loss_weight == 0.0
+    assert config.mae_loss_weight == 0.7
+    assert config.distogram_loss_weight == 0.3
     assert not config.wandb_resume_from_env
     assert config.wandb_resume_id == ""
     assert config.wandb_kwargs.to_dict() == {}

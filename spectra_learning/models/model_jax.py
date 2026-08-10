@@ -154,10 +154,12 @@ class PeakSetJEPAJax(nnx.Module):
         self.jepa_mae_loss_weight = (
             0.0 if self.training_mode == "mae" else cfg.jepa_mae_loss_weight
         )
-        if cfg.distogram_loss_weight > 0 or cfg.latent_pair_loss_weight > 0:
+        if cfg.latent_pair_loss_weight > 0:
             raise ValueError(
-                "pair prediction losses are unavailable with the cross-attention predictor"
+                "latent pair prediction is unavailable with the cross-attention predictor"
             )
+        self.distogram_loss_weight = cfg.distogram_loss_weight
+        self.distogram_mz_max = cfg.distogram_mz_max
         self.jepa_mae_mz_bin_size = cfg.jepa_mae_mz_bin_size
         self.jepa_mae_intensity_bin_size = cfg.jepa_mae_intensity_bin_size
         self.mae_intensity_loss_weight = cfg.mae_intensity_loss_weight
@@ -165,6 +167,9 @@ class PeakSetJEPAJax(nnx.Module):
         self.jepa_mae_intensity_max = cfg.jepa_mae_intensity_max
         self.jepa_mae_num_mz_bins = math.ceil(
             self.jepa_mae_mz_max / self.jepa_mae_mz_bin_size
+        )
+        self.distogram_num_bins = math.ceil(
+            self.distogram_mz_max / self.jepa_mae_mz_bin_size
         )
         self.jepa_mae_num_intensity_bins = math.ceil(
             self.jepa_mae_intensity_max / self.jepa_mae_intensity_bin_size
@@ -280,6 +285,16 @@ class PeakSetJEPAJax(nnx.Module):
                 (self.jepa_mae_loss_weight > 0 or self.training_mode == "mae")
                 and self.mae_intensity_loss_weight > 0.0
             )
+            else None
+        )
+        self.distogram_head = (
+            Linear(
+                self.predictor_dim,
+                self.distogram_num_bins,
+                compute_dtype=self.compute_dtype,
+                rngs=rngs,
+            )
+            if self.distogram_loss_weight > 0
             else None
         )
 
@@ -422,11 +437,12 @@ class PeakSetJEPAJax(nnx.Module):
             precursor_mz=precursor_mz,
             spectrum_metadata=spectrum_metadata,
         )
-        predictor_output_features, predictor_output = (
+        predictor_output_features, predictor_output, distogram_loss = (
             self._predict_augmented_target_outputs(
                 context_emb,
                 context_mask,
                 target_masks,
+                peak_mz,
             )
         )
         teacher_target_features_normalized = self._apply_jepa_target_normalization(
@@ -448,7 +464,11 @@ class PeakSetJEPAJax(nnx.Module):
             target_masks,
             context_emb,
         )
-        loss = masked_prediction_term + jepa_mae_term
+        distogram_term, distogram_metrics = self._distogram_metrics(
+            distogram_loss,
+            predictor_output,
+        )
+        loss = masked_prediction_term + jepa_mae_term + distogram_term
         if loss_only:
             return {"loss": loss}
         valid_peak_count = jnp.maximum(peak_valid_mask.astype(jnp.float32).sum(), 1.0)
@@ -479,6 +499,7 @@ class PeakSetJEPAJax(nnx.Module):
         }
         metrics.update(self._target_mask_metrics(target_masks, valid_peak_count))
         metrics.update(jepa_mae_metrics)
+        metrics.update(distogram_metrics)
         if return_collapse_data:
             return metrics, collapse_data
         return metrics
@@ -528,12 +549,14 @@ class PeakSetJEPAJax(nnx.Module):
             precursor_mz=precursor_mz,
             spectrum_metadata=spectrum_metadata,
         )
-        predictor_targets, target_positions, target_mask = (
+        predictor_targets, target_positions, target_mask, distogram_loss = (
             self._predict_augmented_target_outputs_fastmixer_compact(
                 context_encoded_compact,
                 enc_idx,
                 enc_compact_mask,
+                context_mask,
                 target_masks,
+                peak_mz,
             )
         )
 
@@ -568,7 +591,14 @@ class PeakSetJEPAJax(nnx.Module):
             target_weights.sum(),
             1.0,
         )
-        loss = masked_prediction_loss * self.masked_token_loss_weight
+        masked_prediction_term = (
+            masked_prediction_loss * self.masked_token_loss_weight
+        )
+        distogram_term, distogram_metrics = self._distogram_metrics(
+            distogram_loss,
+            predictor_targets,
+        )
+        loss = masked_prediction_term + distogram_term
         if loss_only:
             return {"loss": loss}
 
@@ -579,11 +609,12 @@ class PeakSetJEPAJax(nnx.Module):
         metrics = {
             "loss": loss,
             "masked_prediction_loss": masked_prediction_loss,
-            "masked_prediction_term": loss,
+            "masked_prediction_term": masked_prediction_term,
             "context_fraction": context_mask.astype(jnp.float32).sum()
             / valid_peak_count,
         }
         metrics.update(self._target_mask_metrics(target_masks, valid_peak_count))
+        metrics.update(distogram_metrics)
         return metrics
 
     def forward_mae(
@@ -620,11 +651,12 @@ class PeakSetJEPAJax(nnx.Module):
             precursor_mz,
             spectrum_metadata,
         )
-        _, predictor_output = (
+        _, predictor_output, distogram_loss = (
             self._predict_augmented_target_outputs(
                 context_encoded,
                 context_mask,
                 target_masks,
+                peak_mz,
             )
         )
         mae_term, mae_metrics = self._mae_metrics(
@@ -635,7 +667,11 @@ class PeakSetJEPAJax(nnx.Module):
             context_encoded,
             compute_accuracy=not loss_only,
         )
-        loss = mae_term
+        distogram_term, distogram_metrics = self._distogram_metrics(
+            distogram_loss,
+            predictor_output,
+        )
+        loss = mae_term + distogram_term
         if loss_only:
             return {"loss": loss}
         valid_peak_count = jnp.maximum(peak_valid_mask.astype(jnp.float32).sum(), 1.0)
@@ -645,6 +681,7 @@ class PeakSetJEPAJax(nnx.Module):
         }
         metrics.update(self._target_mask_metrics(target_masks, valid_peak_count))
         metrics.update(mae_metrics)
+        metrics.update(distogram_metrics)
         if return_collapse_data:
             return metrics, {}
         return metrics
@@ -687,11 +724,14 @@ class PeakSetJEPAJax(nnx.Module):
             predictor_output_compact,
             target_positions,
             target_mask,
+            distogram_loss,
         ) = self._predict_augmented_target_outputs_fastmixer_compact(
             context_encoded_compact,
             enc_idx,
             enc_compact_mask,
+            context_mask,
             target_masks,
+            peak_mz,
         )
         flat_peak_mz, flat_peak_intensity = self._flatten_peak_values_for_target_views(
             peak_mz,
@@ -713,7 +753,11 @@ class PeakSetJEPAJax(nnx.Module):
             reference=context_encoded_compact,
             compute_accuracy=not loss_only,
         )
-        loss = mae_term
+        distogram_term, distogram_metrics = self._distogram_metrics(
+            distogram_loss,
+            predictor_output_compact,
+        )
+        loss = mae_term + distogram_term
         if loss_only:
             return {"loss": loss}
         valid_peak_count = jnp.maximum(peak_valid_mask.astype(jnp.float32).sum(), 1.0)
@@ -723,6 +767,7 @@ class PeakSetJEPAJax(nnx.Module):
         }
         metrics.update(self._target_mask_metrics(target_masks, valid_peak_count))
         metrics.update(mae_metrics)
+        metrics.update(distogram_metrics)
         if return_collapse_data:
             return metrics, {}
         return metrics
@@ -925,7 +970,8 @@ class PeakSetJEPAJax(nnx.Module):
         context_emb: Array,
         context_mask: Array,
         target_masks: Array,
-    ) -> tuple[Array, Array]:
+        peak_mz: Array,
+    ) -> tuple[Array, Array, Array | None]:
         batch_size, num_target_blocks, num_peaks = target_masks.shape
         memory_peak_mask = context_mask
         if self.masked_token_input_mode == "mz_sentinel":
@@ -973,6 +1019,7 @@ class PeakSetJEPAJax(nnx.Module):
             compact_memory_tokens,
         )
         (
+            compact_latents,
             compact_features,
             compact_output,
             target_positions,
@@ -983,6 +1030,26 @@ class PeakSetJEPAJax(nnx.Module):
             flat_memory_mask,
             target_masks.reshape(batch_size * num_target_blocks, num_peaks),
         )
+        distogram_loss = None
+        if self.distogram_loss_weight > 0:
+            flat_context_mask = jnp.broadcast_to(
+                context_mask[:, None],
+                (batch_size, num_target_blocks, num_peaks),
+            ).reshape(batch_size * num_target_blocks, num_peaks)
+            flat_peak_mz = jnp.broadcast_to(
+                peak_mz[:, None],
+                (batch_size, num_target_blocks, num_peaks),
+            ).reshape(batch_size * num_target_blocks, num_peaks)
+            distogram_loss = self._distogram_loss_compact(
+                compact_latents,
+                target_positions,
+                target_mask,
+                flat_memory,
+                flat_memory_positions,
+                flat_memory_mask,
+                flat_context_mask,
+                flat_peak_mz,
+            )
         flat_batch_indices = jnp.broadcast_to(
             jnp.arange(batch_size * num_target_blocks)[:, None],
             target_positions.shape,
@@ -1015,7 +1082,7 @@ class PeakSetJEPAJax(nnx.Module):
             num_peaks,
             -1,
         )
-        return predictor_features, predictor_output
+        return predictor_features, predictor_output, distogram_loss
 
     @staticmethod
     def _flatten_peak_values_for_target_views(
@@ -1042,7 +1109,7 @@ class PeakSetJEPAJax(nnx.Module):
         memory_positions: Array,
         memory_mask: Array,
         target_masks: Array,
-    ) -> tuple[Array, Array, Array, Array]:
+    ) -> tuple[Array, Array, Array, Array, Array]:
         target_positions, target_mask = _active_indices(
             target_masks,
             self.pairmixer_fast_target_max_visible_tokens,
@@ -1066,15 +1133,17 @@ class PeakSetJEPAJax(nnx.Module):
         )
         features = self.masked_latent_readout(latents)
         output = self.project_targets(features)
-        return features, output, target_positions, target_mask
+        return latents, features, output, target_positions, target_mask
 
     def _predict_augmented_target_outputs_fastmixer_compact(
         self,
         context_emb_compact: Array,
         enc_idx: Array,
         enc_compact_mask: Array,
+        context_mask: Array,
         target_masks: Array,
-    ) -> tuple[Array, Array, Array]:
+        peak_mz: Array,
+    ) -> tuple[Array, Array, Array, Array | None]:
         batch_size, num_target_blocks, num_peaks = target_masks.shape
         flat_batch_size = batch_size * num_target_blocks
         compact_encoder_tokens = context_emb_compact.shape[1]
@@ -1105,7 +1174,7 @@ class PeakSetJEPAJax(nnx.Module):
             flat_batch_size,
             compact_encoder_tokens,
         )
-        _, output, target_positions, target_mask = (
+        latents, _, output, target_positions, target_mask = (
             self._predict_compact_target_outputs(
                 flat_memory,
                 flat_memory_positions,
@@ -1113,7 +1182,27 @@ class PeakSetJEPAJax(nnx.Module):
                 target_masks.reshape(flat_batch_size, num_peaks),
             )
         )
-        return output, target_positions, target_mask
+        distogram_loss = None
+        if self.distogram_loss_weight > 0:
+            flat_context_mask = jnp.broadcast_to(
+                context_mask[:, None],
+                (batch_size, num_target_blocks, num_peaks),
+            ).reshape(flat_batch_size, num_peaks)
+            flat_peak_mz = jnp.broadcast_to(
+                peak_mz[:, None],
+                (batch_size, num_target_blocks, num_peaks),
+            ).reshape(flat_batch_size, num_peaks)
+            distogram_loss = self._distogram_loss_compact(
+                latents,
+                target_positions,
+                target_mask,
+                flat_memory,
+                flat_memory_positions,
+                flat_memory_mask,
+                flat_context_mask,
+                flat_peak_mz,
+            )
+        return output, target_positions, target_mask, distogram_loss
 
     def _embedding_loss(self, prediction: Array, target: Array) -> Array:
         return jnp.square(prediction.astype(jnp.float32) - target.astype(jnp.float32)).mean(
@@ -1132,6 +1221,112 @@ class PeakSetJEPAJax(nnx.Module):
             target_weights.sum(),
             1.0,
         )
+
+    def _distogram_targets(self, peak_mz: Array) -> Array:
+        mz_da = peak_mz.astype(jnp.float32) * self.distogram_mz_max
+        pair_distance = jnp.abs(mz_da[:, :, None] - mz_da[:, None, :])
+        return jnp.clip(
+            jnp.floor(pair_distance / self.jepa_mae_mz_bin_size).astype(jnp.int32),
+            0,
+            self.distogram_num_bins - 1,
+        )
+
+    def _distogram_loss_compact(
+        self,
+        target_latents: Array,
+        target_positions: Array,
+        target_mask: Array,
+        memory: Array,
+        memory_positions: Array,
+        memory_mask: Array,
+        context_mask: Array,
+        peak_mz: Array,
+    ) -> Array:
+        assert self.distogram_head is not None
+        context_latents = self.encoder_to_predictor_proj(memory)
+        if self.predictor_final_norm is not None:
+            context_latents = self.predictor_final_norm(context_latents)
+        padded_context_mask = jnp.pad(
+            context_mask,
+            ((0, 0), (0, int(self.encoder_use_cls_token))),
+        )
+        context_slot = (
+            jnp.take_along_axis(
+                padded_context_mask,
+                memory_positions,
+                axis=1,
+            )
+            & memory_mask
+        )
+
+        partner_latents = jnp.concatenate(
+            [context_latents, target_latents],
+            axis=1,
+        )
+        partner_positions = jnp.concatenate(
+            [memory_positions, target_positions],
+            axis=1,
+        )
+        partner_mask = jnp.concatenate([context_slot, target_mask], axis=1)
+        pair_mask = (
+            target_mask[:, :, None]
+            & partner_mask[:, None, :]
+            & (target_positions[:, :, None] != partner_positions[:, None, :])
+        )
+        pair_features = jnp.abs(
+            target_latents[:, :, None, :] - partner_latents[:, None, :, :]
+        )
+        logits = self.distogram_head(pair_features)
+
+        padded_peak_mz = jnp.pad(
+            peak_mz,
+            ((0, 0), (0, int(self.encoder_use_cls_token))),
+        )
+        target_mz = jnp.take_along_axis(
+            padded_peak_mz,
+            target_positions,
+            axis=1,
+        )
+        partner_mz = jnp.take_along_axis(
+            padded_peak_mz,
+            partner_positions,
+            axis=1,
+        )
+        pair_distance = (
+            jnp.abs(target_mz[:, :, None] - partner_mz[:, None, :])
+            * self.distogram_mz_max
+        )
+        targets = jnp.clip(
+            jnp.floor(pair_distance / self.jepa_mae_mz_bin_size).astype(jnp.int32),
+            0,
+            self.distogram_num_bins - 1,
+        )
+
+        # A compact target-context entry represents both directions in the
+        # original symmetric full pair mask. Target-target directions are
+        # already both present in the compact target rows.
+        context_weights = jnp.full(context_slot.shape, 2.0, dtype=jnp.float32)
+        partner_weights = jnp.concatenate(
+            [context_weights, target_mask.astype(jnp.float32)],
+            axis=1,
+        )
+        weights = partner_weights[:, None, :] * pair_mask.astype(jnp.float32)
+        per_pair = _cross_entropy_from_logits(logits, targets)
+        return (per_pair * weights).sum() / jnp.maximum(weights.sum(), 1.0)
+
+    def _distogram_metrics(
+        self,
+        distogram_loss: Array | None,
+        reference: Array,
+    ) -> tuple[Array, dict[str, Array]]:
+        if self.distogram_loss_weight <= 0:
+            return reference.reshape(-1)[0] * 0.0, {}
+        assert distogram_loss is not None
+        term = distogram_loss * self.distogram_loss_weight
+        return term, {
+            "distogram_loss": distogram_loss,
+            "distogram_term": term,
+        }
 
     def _jepa_mae_targets(self, peak_mz: Array, peak_intensity: Array) -> tuple[Array, Array]:
         mz_target = jnp.floor(
@@ -1408,6 +1603,13 @@ class PeakSetJEPAJax(nnx.Module):
                 state_dict,
                 "jepa_mae_intensity_head",
             )
+        if self.distogram_head is not None:
+            self.distogram_head.load_torch_state_dict(
+                state_dict,
+                "distogram_head",
+            )
+
+
 def _cross_entropy_from_logits(logits: Array, targets: Array) -> Array:
     logits = logits.astype(jnp.float32)
     classes = jnp.arange(logits.shape[-1])

@@ -7,6 +7,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg = import_module("configs.300m_pairmixer_dense_adamw").get_config()
 
     cfg.device_backend = "jax"
+    cfg.batch_size = 4096
+    cfg.jax_mesh_devices = "64"
     cfg.dataloader_output_format = "numpy"
     cfg.dataloader_pin_memory = False
     cfg.dataloader_multiprocessing_context = "spawn"
@@ -29,9 +31,9 @@ def get_config() -> config_dict.ConfigDict:
 
     cfg.pairmixer_pair_dim = 640
     cfg.pairmixer_pair_feature_hidden_dim = 1280
-    cfg.mae_loss_weight = 1.0
+    cfg.mae_loss_weight = 0.7
     cfg.mae_intensity_loss_weight = 0.0
-    cfg.distogram_loss_weight = 0.0
+    cfg.distogram_loss_weight = 0.3
 
     cfg.jepa_context_fraction_schedule = (0.35, 0.55, 0.75)
     cfg.jepa_target_fraction_schedule = (0.50, 0.30, 0.10)
@@ -52,8 +54,8 @@ def get_config() -> config_dict.ConfigDict:
 
     cfg.run_name_suffix = (
         "jax-mae-massive-v2-10gb-1b-200m-v6e-d1536-p640-l25-h12-nomassprior-"
-        "feat3072-fmlp3072-xattnrope1536-l5-h12-bs2048-ga8-16-16-"
-        "muon-no-cls-fp32state-lr3e-4-wd1e-1-"
+        "feat3072-fmlp3072-xattnrope1536-l5-h12-bs4096-ga8-16-16-"
+        "mae07-disto03-muon-no-cls-fp32state-lr3e-4-wd1e-1-"
         "random-mask65-45-25-target50-30-10-intensityorder-fullctx-"
         "noac-noprobe-val500x10k"
     )

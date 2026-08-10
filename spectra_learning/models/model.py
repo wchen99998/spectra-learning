@@ -73,6 +73,9 @@ class PeakSetJEPA(nn.Module):
     mae_loss_weight: float
     masked_token_loss_weight: float
     jepa_mae_loss_weight: float
+    distogram_loss_weight: float
+    distogram_mz_max: float
+    distogram_num_bins: int
     jepa_mae_mz_bin_size: float
     jepa_mae_intensity_bin_size: float
     mae_intensity_loss_weight: float
@@ -104,6 +107,7 @@ class PeakSetJEPA(nn.Module):
     teacher_target_projector: nn.Module | None
     jepa_mae_mz_head: nn.Linear | None
     jepa_mae_intensity_head: nn.Linear | None
+    distogram_head: nn.Linear | None
 
     def __init__(
         self,
@@ -121,6 +125,7 @@ class PeakSetJEPA(nn.Module):
         self._build_predictor(cfg)
         self._build_target_projectors()
         self._build_jepa_mae_heads()
+        self._build_distogram_head()
 
     def _configure_dimensions(self, cfg: PeakSetJEPASettings) -> None:
         self.training_mode = cfg.training_mode.lower()
@@ -194,9 +199,9 @@ class PeakSetJEPA(nn.Module):
         self.masked_mz_sentinel = cfg.masked_mz_sentinel
 
     def _configure_losses(self, cfg: PeakSetJEPASettings) -> None:
-        if cfg.distogram_loss_weight > 0 or cfg.latent_pair_loss_weight > 0:
+        if cfg.latent_pair_loss_weight > 0:
             raise ValueError(
-                "pair prediction losses are unavailable with the cross-attention predictor"
+                "latent pair prediction is unavailable with the cross-attention predictor"
             )
         self.mae_loss_weight = cfg.mae_loss_weight
         self.masked_token_loss_weight = (
@@ -205,6 +210,8 @@ class PeakSetJEPA(nn.Module):
         self.jepa_mae_loss_weight = (
             0.0 if self.training_mode == "mae" else cfg.jepa_mae_loss_weight
         )
+        self.distogram_loss_weight = cfg.distogram_loss_weight
+        self.distogram_mz_max = cfg.distogram_mz_max
         self.jepa_mae_mz_bin_size = cfg.jepa_mae_mz_bin_size
         self.jepa_mae_intensity_bin_size = cfg.jepa_mae_intensity_bin_size
         self.mae_intensity_loss_weight = cfg.mae_intensity_loss_weight
@@ -212,6 +219,9 @@ class PeakSetJEPA(nn.Module):
         self.jepa_mae_intensity_max = cfg.jepa_mae_intensity_max
         self.jepa_mae_num_mz_bins = math.ceil(
             self.jepa_mae_mz_max / self.jepa_mae_mz_bin_size
+        )
+        self.distogram_num_bins = math.ceil(
+            self.distogram_mz_max / self.jepa_mae_mz_bin_size
         )
         self.jepa_mae_num_intensity_bins = math.ceil(
             self.jepa_mae_intensity_max / self.jepa_mae_intensity_bin_size
@@ -408,6 +418,18 @@ class PeakSetJEPA(nn.Module):
         nn.init.xavier_normal_(jepa_mae_intensity_head.weight)
         nn.init.zeros_(jepa_mae_intensity_head.bias)
         self.jepa_mae_intensity_head = jepa_mae_intensity_head
+
+    def _build_distogram_head(self) -> None:
+        if self.distogram_loss_weight <= 0:
+            self.distogram_head = None
+            return
+        distogram_head = nn.Linear(
+            self.predictor_dim,
+            self.distogram_num_bins,
+        )
+        nn.init.xavier_normal_(distogram_head.weight)
+        nn.init.zeros_(distogram_head.bias)
+        self.distogram_head = distogram_head
 
     def ema_teacher_momentum_at(
         self,
@@ -839,14 +861,18 @@ class PeakSetJEPA(nn.Module):
         context_emb: Float[Tensor, "batch tokens dim"],
         context_mask: Bool[Tensor, "batch peaks"],
         target_masks: Bool[Tensor, "batch views peaks"],
+        peak_mz: Float[Tensor, "batch peaks"],
     ) -> tuple[
         Float[Tensor, "batch views peaks target_dim"],
         Float[Tensor, "batch views peaks target_dim"],
     ]:
-        predictor_features, predictor_output = self._predict_augmented_target_outputs(
-            context_emb,
-            context_mask,
-            target_masks,
+        predictor_features, predictor_output, _ = (
+            self._predict_augmented_target_outputs(
+                context_emb,
+                context_mask,
+                target_masks,
+                peak_mz,
+            )
         )
         return predictor_features, predictor_output
 
@@ -855,9 +881,11 @@ class PeakSetJEPA(nn.Module):
         context_emb: Float[Tensor, "batch tokens dim"],
         context_mask: Bool[Tensor, "batch peaks"],
         target_masks: Bool[Tensor, "batch views peaks"],
+        peak_mz: Float[Tensor, "batch peaks"],
     ) -> tuple[
         Float[Tensor, "batch views peaks target_dim"],
         Float[Tensor, "batch views peaks target_dim"],
+        Float[Tensor, ""] | None,
     ]:
         batch_size, num_target_blocks, num_peaks = target_masks.shape
         memory_peak_mask = context_mask
@@ -917,7 +945,7 @@ class PeakSetJEPA(nn.Module):
             -1,
         )
         query = query * target_mask.unsqueeze(-1).to(query.dtype)
-        compact_features = self.predict_masked_target_features(
+        compact_latents = self.predict_masked_latents(
             query,
             memory,
             target_positions,
@@ -925,6 +953,29 @@ class PeakSetJEPA(nn.Module):
             target_mask,
             compact_memory_mask,
         )
+        compact_features = self.masked_latent_readout(compact_latents)
+        distogram_loss = None
+        if self.distogram_loss_weight > 0:
+            flat_context_mask = context_mask.unsqueeze(1).expand(
+                -1,
+                num_target_blocks,
+                -1,
+            ).reshape(batch_size * num_target_blocks, num_peaks)
+            flat_peak_mz = peak_mz.unsqueeze(1).expand(
+                -1,
+                num_target_blocks,
+                -1,
+            ).reshape(batch_size * num_target_blocks, num_peaks)
+            distogram_loss = self._distogram_loss_compact(
+                compact_latents,
+                target_positions,
+                target_mask,
+                memory,
+                memory_positions,
+                compact_memory_mask,
+                flat_context_mask,
+                flat_peak_mz,
+            )
         flat_features = compact_features.new_zeros(
             batch_size * num_target_blocks,
             num_peaks,
@@ -941,7 +992,7 @@ class PeakSetJEPA(nn.Module):
             -1,
         )
         predictor_output = self.project_targets(predictor_features)
-        return predictor_features, predictor_output
+        return predictor_features, predictor_output, distogram_loss
 
     def _masked_prediction_loss(
         self,
@@ -952,6 +1003,90 @@ class PeakSetJEPA(nn.Module):
         per_token = self._embedding_loss(predictor_output, teacher_targets.unsqueeze(1))
         target_weights = target_masks.float()
         return (per_token * target_weights).sum() / target_weights.sum().clamp_min(1.0)
+
+    def _distogram_targets(
+        self,
+        peak_mz: Float[Tensor, "batch peaks"],
+    ) -> Int[Tensor, "batch peaks peaks"]:
+        mz_da = peak_mz.float() * self.distogram_mz_max
+        pair_distance = (mz_da.unsqueeze(2) - mz_da.unsqueeze(1)).abs()
+        return torch.floor(pair_distance / self.jepa_mae_mz_bin_size).long().clamp(
+            0,
+            self.distogram_num_bins - 1,
+        )
+
+    def _distogram_loss_compact(
+        self,
+        target_latents: Float[Tensor, "batch targets dim"],
+        target_positions: Int[Tensor, "batch targets"],
+        target_mask: Bool[Tensor, "batch targets"],
+        memory: Float[Tensor, "batch memory model_dim"],
+        memory_positions: Int[Tensor, "batch memory"],
+        memory_mask: Bool[Tensor, "batch memory"],
+        context_mask: Bool[Tensor, "batch peaks"],
+        peak_mz: Float[Tensor, "batch peaks"],
+    ) -> Float[Tensor, ""]:
+        context_latents = self.encoder_to_predictor_proj(memory)
+        context_latents = self.predictor_final_norm(context_latents)
+        padded_context_mask = F.pad(
+            context_mask,
+            (0, int(self.encoder_use_cls_token)),
+        )
+        context_slot = (
+            torch.gather(padded_context_mask, 1, memory_positions) & memory_mask
+        )
+
+        partner_latents = torch.cat([context_latents, target_latents], dim=1)
+        partner_positions = torch.cat([memory_positions, target_positions], dim=1)
+        partner_mask = torch.cat([context_slot, target_mask], dim=1)
+        pair_mask = (
+            target_mask.unsqueeze(2)
+            & partner_mask.unsqueeze(1)
+            & (target_positions.unsqueeze(2) != partner_positions.unsqueeze(1))
+        )
+
+        pair_features = (
+            target_latents.unsqueeze(2) - partner_latents.unsqueeze(1)
+        ).abs()
+        logits = cast(nn.Linear, self.distogram_head)(pair_features)
+
+        padded_peak_mz = F.pad(
+            peak_mz,
+            (0, int(self.encoder_use_cls_token)),
+        )
+        target_mz = torch.gather(padded_peak_mz, 1, target_positions)
+        partner_mz = torch.gather(padded_peak_mz, 1, partner_positions)
+        pair_distance = (
+            target_mz.unsqueeze(2) - partner_mz.unsqueeze(1)
+        ).abs() * self.distogram_mz_max
+        targets = torch.floor(pair_distance / self.jepa_mae_mz_bin_size).long()
+        targets = targets.clamp(0, self.distogram_num_bins - 1)
+
+        # A compact target-context entry represents both directions in the
+        # original symmetric full pair mask. Target-target directions are
+        # already both present in the compact target rows.
+        context_weights = torch.full_like(context_slot, 2.0, dtype=torch.float32)
+        target_weights = target_mask.float()
+        weights = (
+            torch.cat([context_weights, target_weights], dim=1).unsqueeze(1)
+            * pair_mask.float()
+        )
+        per_pair = _cross_entropy_from_logits(logits, targets)
+        return (per_pair * weights).sum() / weights.sum().clamp_min(1.0)
+
+    def _distogram_metrics(
+        self,
+        distogram_loss: Float[Tensor, ""] | None,
+        reference: Float[Tensor, "*batch dim"],
+    ) -> tuple[Float[Tensor, ""], dict[str, Tensor]]:
+        if self.distogram_loss_weight <= 0:
+            return _zero_scalar_like(reference), {}
+        assert distogram_loss is not None
+        term = distogram_loss.to(dtype=reference.dtype) * self.distogram_loss_weight
+        return term, {
+            "distogram_loss": distogram_loss.to(dtype=reference.dtype),
+            "distogram_term": term,
+        }
 
     def _jepa_mae_metrics(
         self,
@@ -1087,11 +1222,12 @@ class PeakSetJEPA(nn.Module):
             precursor_mz=precursor_mz,
             spectrum_metadata=spectrum_metadata,
         )
-        predictor_output_features, predictor_output = (
+        predictor_output_features, predictor_output, distogram_loss = (
             self._predict_augmented_target_outputs(
                 context_emb,
                 context_mask,
                 target_masks,
+                peak_mz,
             )
         )
         teacher_target_features_normalized = self._apply_jepa_target_normalization(
@@ -1115,7 +1251,11 @@ class PeakSetJEPA(nn.Module):
             target_masks,
             context_emb,
         )
-        loss = masked_prediction_term + jepa_mae_term
+        distogram_term, distogram_metrics = self._distogram_metrics(
+            distogram_loss,
+            predictor_output,
+        )
+        loss = masked_prediction_term + jepa_mae_term + distogram_term
         valid_peak_count = peak_valid_mask.float().sum().clamp_min(1.0)
         collapse_data: dict[str, Tensor] = {}
         if return_collapse_data:
@@ -1143,6 +1283,7 @@ class PeakSetJEPA(nn.Module):
         }
         metrics.update(self._target_mask_metrics(target_masks, valid_peak_count))
         metrics.update(jepa_mae_metrics)
+        metrics.update(distogram_metrics)
         if return_collapse_data:
             return metrics, collapse_data
         return metrics
@@ -1192,11 +1333,12 @@ class PeakSetJEPA(nn.Module):
             precursor_mz=precursor_mz,
             spectrum_metadata=spectrum_metadata,
         )
-        _, predictor_output = (
+        _, predictor_output, distogram_loss = (
             self._predict_augmented_target_outputs(
                 context_encoded,
                 context_mask,
                 target_masks,
+                peak_mz,
             )
         )
         mae_term, mae_metrics = self._mae_metrics(
@@ -1206,7 +1348,11 @@ class PeakSetJEPA(nn.Module):
             target_masks,
             context_encoded,
         )
-        loss = mae_term
+        distogram_term, distogram_metrics = self._distogram_metrics(
+            distogram_loss,
+            predictor_output,
+        )
+        loss = mae_term + distogram_term
         valid_peak_count = peak_valid_mask.float().sum().clamp_min(1.0)
         metrics = {
             "loss": loss,
@@ -1214,6 +1360,7 @@ class PeakSetJEPA(nn.Module):
         }
         metrics.update(self._target_mask_metrics(target_masks, valid_peak_count))
         metrics.update(mae_metrics)
+        metrics.update(distogram_metrics)
         if return_collapse_data:
             return metrics, {}
         return metrics

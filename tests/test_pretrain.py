@@ -618,6 +618,7 @@ class BlockJEPATests(unittest.TestCase):
             context_emb,
             context_mask,
             target_masks,
+            peak_mz,
         )
         expected_masked_prediction_loss = (
             model._embedding_loss(predictor_output, teacher_targets.unsqueeze(1))
@@ -685,13 +686,96 @@ class BlockJEPATests(unittest.TestCase):
             + metrics["jepa_mae_term"],
         )
 
-    def test_pair_prediction_losses_are_rejected(self):
-        for override in (
-            {"distogram_loss_weight": 0.25},
-            {"latent_pair_loss_weight": 0.25},
-        ):
-            with self.assertRaisesRegex(ValueError, "cross-attention predictor"):
-                self._build_model(**override)
+    def test_distogram_targets_use_shared_mz_bin_size(self):
+        model = self._build_model(
+            distogram_loss_weight=1.0,
+            jepa_mae_mz_bin_size=250.0,
+        )
+        peak_mz = torch.tensor([[0.0, 0.249, 0.25, 1.0, 1.5]])
+
+        targets = model._distogram_targets(peak_mz)
+
+        self.assertEqual(model.distogram_num_bins, 4)
+        torch.testing.assert_close(
+            targets[0, 0],
+            torch.tensor([0, 0, 1, 3, 3]),
+        )
+
+    def test_distogram_loss_contributes_to_loss(self):
+        model = self._build_model(
+            masked_token_loss_weight=1.0,
+            distogram_loss_weight=0.25,
+        )
+        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
+
+        metrics = model.forward_augmented(batch)
+
+        self.assertGreater(float(metrics["distogram_loss"].detach()), 0.0)
+        torch.testing.assert_close(
+            metrics["distogram_term"],
+            metrics["distogram_loss"] * 0.25,
+        )
+        torch.testing.assert_close(
+            metrics["loss"],
+            metrics["masked_prediction_term"] + metrics["distogram_term"],
+        )
+
+    def test_compact_distogram_loss_matches_full_symmetric_pair_loss(self):
+        model = self._build_model(
+            num_peaks=4,
+            predictor_target_max_tokens=2,
+            distogram_loss_weight=1.0,
+            jepa_mae_mz_bin_size=250.0,
+        )
+        target_latents = torch.randn(1, 2, model.predictor_dim)
+        target_positions = torch.tensor([[1, 3]])
+        target_mask = torch.ones(1, 2, dtype=torch.bool)
+        memory = torch.randn(1, 3, model.model_dim)
+        memory_positions = torch.tensor([[0, 2, 4]])
+        memory_mask = torch.ones(1, 3, dtype=torch.bool)
+        context_mask = torch.tensor([[True, False, True, False]])
+        peak_mz = torch.tensor([[0.1, 0.2, 0.4, 0.8]])
+
+        actual = model._distogram_loss_compact(
+            target_latents,
+            target_positions,
+            target_mask,
+            memory,
+            memory_positions,
+            memory_mask,
+            context_mask,
+            peak_mz,
+        )
+
+        context_latents = model.predictor_final_norm(
+            model.encoder_to_predictor_proj(memory)
+        )
+        token_latents = torch.zeros(1, 4, model.predictor_dim)
+        token_latents[0, 0] = context_latents[0, 0]
+        token_latents[0, 2] = context_latents[0, 1]
+        token_latents[0, 1] = target_latents[0, 0]
+        token_latents[0, 3] = target_latents[0, 1]
+        pair_features = (
+            token_latents.unsqueeze(2) - token_latents.unsqueeze(1)
+        ).abs()
+        logits = model.distogram_head(pair_features)
+        targets = model._distogram_targets(peak_mz)
+        visible_mask = context_mask | torch.tensor(
+            [[False, True, False, True]]
+        )
+        pair_mask = visible_mask.unsqueeze(2) & visible_mask.unsqueeze(1)
+        target_token_mask = torch.tensor([[False, True, False, True]])
+        pair_mask &= (
+            target_token_mask.unsqueeze(2) | target_token_mask.unsqueeze(1)
+        )
+        pair_mask &= ~torch.eye(4, dtype=torch.bool).unsqueeze(0)
+        expected = model._masked_ce_loss(logits, targets, pair_mask)
+
+        torch.testing.assert_close(actual, expected)
+
+    def test_latent_pair_prediction_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "latent pair prediction"):
+            self._build_model(latent_pair_loss_weight=0.25)
 
     def test_mae_training_mode_uses_binned_value_prediction_only(self):
         model = self._build_model(

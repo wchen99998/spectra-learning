@@ -124,7 +124,7 @@ def test_augmented_predictor_packs_memory_and_targets(mode, memory_tokens):
     batch = _batch()
     context_emb = torch.randn(2, 7, model.model_dim)
     captured = {}
-    original = model.predict_masked_target_features
+    original = model.predict_masked_latents
 
     def capture(query, memory, query_positions, memory_positions, query_mask, memory_mask):
         captured.update(
@@ -144,11 +144,12 @@ def test_augmented_predictor_packs_memory_and_targets(mode, memory_tokens):
             memory_mask,
         )
 
-    with mock.patch.object(model, "predict_masked_target_features", side_effect=capture):
+    with mock.patch.object(model, "predict_masked_latents", side_effect=capture):
         model._predict_augmented_targets(
             context_emb,
             batch["context_mask"],
             batch["target_masks"],
+            batch["peak_mz"],
         )
 
     assert captured["query"].shape == (2, 2, model.predictor_dim)
@@ -167,6 +168,7 @@ def test_augmented_output_is_scattered_only_to_targets():
         context_emb,
         batch["context_mask"],
         batch["target_masks"],
+        batch["peak_mz"],
     )
 
     assert features.shape == (2, 1, 6, model.jepa_target_dim)
@@ -185,6 +187,24 @@ def test_mae_forward_reports_finite_loss():
     assert metrics["target_fraction"] > 0
 
 
-def test_pair_prediction_losses_are_rejected():
-    with pytest.raises(ValueError, match="cross-attention predictor"):
-        _model(distogram_loss_weight=0.1)
+def test_distogram_pair_path_is_conditional():
+    model = _model()
+    assert model.distogram_head is None
+
+    with mock.patch.object(
+        model,
+        "_distogram_loss_compact",
+        side_effect=AssertionError("distogram path should be disabled"),
+    ):
+        model.forward_mae(_batch())
+
+    enabled = _model(distogram_loss_weight=0.1)
+    metrics = enabled.forward_mae(_batch())
+
+    assert enabled.distogram_head is not None
+    assert metrics["distogram_loss"] > 0
+
+
+def test_latent_pair_prediction_is_rejected():
+    with pytest.raises(ValueError, match="latent pair prediction"):
+        _model(latent_pair_loss_weight=0.1)

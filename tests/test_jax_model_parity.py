@@ -498,12 +498,17 @@ def test_jax_fastmixer_matches_bi_dense_on_fixed_random_masks(transition_type: s
 
 
 @pytest.mark.parametrize("transition_type", ("swiglu", "feedforward"))
-def test_jax_fastmixer_dense_matches_dense_on_fixed_random_masks(transition_type: str):
+@pytest.mark.parametrize("distogram_loss_weight", (0.0, 0.25))
+def test_jax_fastmixer_dense_matches_dense_on_fixed_random_masks(
+    transition_type: str,
+    distogram_loss_weight: float,
+):
     torch.manual_seed(10)
     dense_kwargs = {
         **_small_mae_kwargs(),
         "pairmixer_block_type": "dense",
         "pairmixer_transition_type": transition_type,
+        "distogram_loss_weight": distogram_loss_weight,
     }
     fast_kwargs = {
         **dense_kwargs,
@@ -524,14 +529,17 @@ def test_jax_fastmixer_dense_matches_dense_on_fixed_random_masks(transition_type
     _assert_jax_metrics_close(dense_metrics, fast_metrics)
 
 
-def test_jax_fastmixer_target_only_compact_path_matches_dense_loss_and_gradients():
+@pytest.mark.parametrize("distogram_loss_weight", (0.0, 0.25))
+def test_jax_fastmixer_target_only_compact_path_matches_dense_loss_and_gradients(
+    distogram_loss_weight: float,
+):
     torch.manual_seed(11)
     dense_kwargs = _small_jepa_kwargs(
         training_mode="mae_teacher_jepa",
         pairmixer_block_type="dense",
         target_projector_dim=-1,
         jepa_mae_loss_weight=0.0,
-        distogram_loss_weight=0.0,
+        distogram_loss_weight=distogram_loss_weight,
         latent_pair_loss_weight=0.0,
     )
     fast_kwargs = {
@@ -1037,7 +1045,7 @@ def test_jax_sharded_pure_optax_accumulated_train_step_updates_on_all_devices():
             _small_jepa_kwargs(
                 masked_token_input_mode="mz_sentinel",
                 jepa_mae_loss_weight=0.5,
-                distogram_loss_weight=0.0,
+                distogram_loss_weight=0.25,
                 latent_pair_loss_weight=0.0,
             ),
             "random",
