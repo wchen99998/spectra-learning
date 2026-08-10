@@ -17,7 +17,6 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pairmixer_pair_feature_hidden_dim = 768
     cfg.activation_checkpoint_mode = "none"
     cfg.peak_ordering = "intensity"
-    cfg.checkpoint_every_steps = 50_000
 
     cfg.predictor_dim = 896
     cfg.masked_latent_predictor_num_layers = 3

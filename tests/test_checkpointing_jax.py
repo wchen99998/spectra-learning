@@ -14,6 +14,7 @@ from spectra_learning.data.gems.collate import GemsBatchCollator
 from spectra_learning.models.model_jax import PeakSetJEPAJax
 from spectra_learning.models.settings import PeakSetJEPASettings
 from spectra_learning.training.checkpointing_jax import (
+    EmergencyCheckpointMonitor,
     build_jax_checkpoint_manager,
     jax_training_checkpoint_metadata,
     restore_frozen_teacher_encoder,
@@ -172,6 +173,32 @@ class _RecordingLogger(MetricLogger):
 
     def log_metrics(self, metrics, step=None) -> None:
         self.logs.append((dict(metrics), step))
+
+
+class _EmergencyAfterFirstStep:
+    reason = "test termination"
+
+    def __init__(self) -> None:
+        self.checks = 0
+        self.waited = False
+
+    @property
+    def requested(self) -> bool:
+        self.checks += 1
+        return self.checks >= 2
+
+    def wait_for_forced_termination(self) -> None:
+        self.waited = True
+
+
+def test_emergency_checkpoint_monitor_records_first_reason():
+    monitor = EmergencyCheckpointMonitor(watch_gce_metadata=False)
+
+    monitor.request("preemption")
+    monitor.request("later signal")
+
+    assert monitor.requested is True
+    assert monitor.reason == "preemption"
 
 
 def test_jax_checkpoint_roundtrip_preserves_values_and_sharding(tmp_path):
@@ -448,6 +475,45 @@ def test_jax_training_loop_honors_wall_clock_budget(monkeypatch, tmp_path):
 
     assert metrics["run/final_global_step"] == 1.0
     assert metrics["run/stopped_for_time_limit"] == 1.0
+    assert manager.latest_step() == 1
+    manager.close()
+
+
+def test_jax_training_loop_writes_emergency_checkpoint_before_waiting(tmp_path):
+    kwargs = _tiny_mae_kwargs()
+    cfg = config_dict.ConfigDict(kwargs)
+    cfg.seed = 5
+    cfg.num_epochs = 1
+    cfg.learning_rate = 1e-3
+    cfg.jax_mesh_devices = "1"
+    cfg.checkpoint_every_steps = 0
+    cfg.log_every_n_steps = 0
+    cfg.msg_probe_every_n_steps = -1
+    batch = _tiny_numpy_batch()
+
+    model = PeakSetJEPAJax(**kwargs)
+    initialize_jax_model_from_torch_seed(cfg, model)
+    datamodule = _FakeDataModule(batch, train_steps=3)
+    manager = build_jax_checkpoint_manager(tmp_path / "checkpoints")
+    emergency = _EmergencyAfterFirstStep()
+
+    metrics = _run_jax_training_loop(
+        config=cfg,
+        datamodule=datamodule,
+        model=model,
+        logger=MetricLogger(),
+        total_steps=3,
+        checkpoint_manager=manager,
+        resume_step=None,
+        checkpoint_metadata=CHECKPOINT_METADATA,
+        metric_reduction="mean",
+        enable_msg_probe=False,
+        emergency_checkpoint=emergency,
+    )
+
+    assert emergency.waited is True
+    assert metrics["run/final_global_step"] == 1.0
+    assert metrics["run/stopped_for_termination"] == 1.0
     assert manager.latest_step() == 1
     manager.close()
 

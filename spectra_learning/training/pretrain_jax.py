@@ -45,6 +45,7 @@ from spectra_learning.training.cadence import (
     validation_steps,
 )
 from spectra_learning.training.checkpointing_jax import (
+    EmergencyCheckpointMonitor,
     build_jax_checkpoint_manager,
     jax_training_checkpoint_metadata,
     restore_frozen_teacher_encoder,
@@ -994,6 +995,22 @@ def train_and_evaluate_jax_task(
     *,
     task: JaxTrainingTask,
 ) -> dict[str, object]:
+    with EmergencyCheckpointMonitor.for_current_environment() as emergency_checkpoint:
+        return _train_and_evaluate_jax_task(
+            config,
+            workdir,
+            task=task,
+            emergency_checkpoint=emergency_checkpoint,
+        )
+
+
+def _train_and_evaluate_jax_task(
+    config: config_dict.ConfigDict,
+    workdir: str | Path,
+    *,
+    task: JaxTrainingTask,
+    emergency_checkpoint: EmergencyCheckpointMonitor,
+) -> dict[str, object]:
     configure_jax_runtime(config)
     initialize_jax_distributed(config)
     workdir = normalize_storage_path(workdir)
@@ -1067,6 +1084,7 @@ def train_and_evaluate_jax_task(
         checkpoint_metadata=checkpoint_metadata,
         metric_reduction=task.metric_reduction,
         enable_msg_probe=task.enable_msg_probe,
+        emergency_checkpoint=emergency_checkpoint,
     )
     checkpoint_manager.close()
     data_parallel_devices = _jax_data_parallel_devices(config)
@@ -1248,6 +1266,7 @@ class _JaxTrainingLoop:
         checkpoint_metadata: dict[str, Any],
         metric_reduction: JaxMetricReduction,
         enable_msg_probe: bool,
+        emergency_checkpoint: EmergencyCheckpointMonitor | None,
     ) -> None:
         self.config = config
         self.datamodule = datamodule
@@ -1258,6 +1277,7 @@ class _JaxTrainingLoop:
         self.checkpoint_metadata = checkpoint_metadata
         self.metric_reduction = metric_reduction
         self.resume_step = resume_step
+        self.emergency_checkpoint = emergency_checkpoint
 
         self.log_every_n_steps = int(config.get("log_every_n_steps", 50))
         self.warmup_steps = int(config.get("throughput_warmup_steps", 0))
@@ -1270,6 +1290,7 @@ class _JaxTrainingLoop:
             )
         )
         self.stopped_for_time_limit = False
+        self.stopped_for_termination = False
         self.use_mask_schedule = (
             isinstance(model, PeakSetJEPAJax)
             and "jepa_context_fraction_schedule" in config
@@ -1506,6 +1527,9 @@ class _JaxTrainingLoop:
         return int(resume_step)
 
     def run(self) -> dict[str, object]:
+        if self._emergency_checkpoint_requested():
+            self._save_emergency_checkpoint_and_wait()
+            return self._finish()
         loop_epochs = max(1, math.ceil(float(self.config.num_epochs)))
         start_epoch = min(
             self.start_step // self.datamodule.train_steps,
@@ -1514,7 +1538,11 @@ class _JaxTrainingLoop:
         self.train_start = time.perf_counter()
         for epoch in range(start_epoch, loop_epochs):
             self._run_epoch(epoch, start_epoch=start_epoch, loop_epochs=loop_epochs)
-            if self.stopped_for_time_limit or self.global_step >= self.total_steps:
+            if (
+                self.stopped_for_time_limit
+                or self.stopped_for_termination
+                or self.global_step >= self.total_steps
+            ):
                 break
         return self._finish()
 
@@ -1561,11 +1589,15 @@ class _JaxTrainingLoop:
             self._start_profile_if_ready()
             metrics = self._train_batch(batch)
             pbar.update(1)
+            if self._emergency_checkpoint_requested():
+                self._save_emergency_checkpoint_and_wait()
+                break
             self._log_or_stage_train_metrics(metrics, epoch=epoch, pbar=pbar)
             self._activate_mask_stage(self.global_step)
             self._run_scheduled_work(pbar)
         if self.pending_train_metrics is not None and (
             self.stopped_for_time_limit
+            or self.stopped_for_termination
             or self.global_step >= self.total_steps
             or epoch == loop_epochs - 1
         ):
@@ -1604,6 +1636,43 @@ class _JaxTrainingLoop:
             )
         self.stopped_for_time_limit = True
         return True
+
+    def _emergency_checkpoint_requested(self) -> bool:
+        if self.emergency_checkpoint is None:
+            return False
+        requested = np.asarray(
+            self.emergency_checkpoint.requested,
+            dtype=np.int32,
+        )
+        if jax.process_count() > 1:
+            requested = multihost_utils.process_allgather(requested)
+        return bool(np.asarray(requested).any())
+
+    def _save_emergency_checkpoint_and_wait(self) -> None:
+        assert self.emergency_checkpoint is not None
+        self.stopped_for_termination = True
+        reason = self.emergency_checkpoint.reason or "another JAX process terminated"
+        if jax.process_index() == 0:
+            logging.warning(
+                "Termination requested at global_step=%d (%s); writing emergency "
+                "checkpoint.",
+                self.global_step,
+                reason,
+            )
+        phase_start = time.perf_counter()
+        if self.checkpoint_manager.latest_step() != self.global_step:
+            self._save_checkpoint(self.global_step)
+        self.checkpoint_manager.wait_until_finished()
+        self._add_non_train_timing(
+            "checkpoint_seconds",
+            time.perf_counter() - phase_start,
+        )
+        if jax.process_index() == 0:
+            logging.warning(
+                "Emergency checkpoint at global_step=%d is durable.",
+                self.global_step,
+            )
+        self.emergency_checkpoint.wait_for_forced_termination()
 
     def _next_accumulated_batch(self, loader_iter: Any) -> dict[str, Any] | None:
         dataloader_elapsed = 0.0
@@ -1867,6 +1936,7 @@ class _JaxTrainingLoop:
         result: dict[str, object] = {
             "run/final_global_step": float(self.global_step),
             "run/stopped_for_time_limit": float(self.stopped_for_time_limit),
+            "run/stopped_for_termination": float(self.stopped_for_termination),
             "run/wall_elapsed_seconds": wall_elapsed,
             "run/train_elapsed_seconds": train_elapsed,
             "run/non_train_elapsed_seconds": sum(self.non_train_timing.values()),
@@ -1948,6 +2018,7 @@ def _run_jax_training_loop(
     checkpoint_metadata: dict[str, Any],
     metric_reduction: JaxMetricReduction,
     enable_msg_probe: bool,
+    emergency_checkpoint: EmergencyCheckpointMonitor | None = None,
 ) -> dict[str, object]:
     return _JaxTrainingLoop(
         config=config,
@@ -1960,6 +2031,7 @@ def _run_jax_training_loop(
         checkpoint_metadata=checkpoint_metadata,
         metric_reduction=metric_reduction,
         enable_msg_probe=enable_msg_probe,
+        emergency_checkpoint=emergency_checkpoint,
     ).run()
 
 

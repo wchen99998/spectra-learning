@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
+import signal
+import threading
 from typing import Any
+from urllib import error, parse, request
 
 import jax
 import numpy as np
@@ -10,6 +15,91 @@ from flax import nnx
 from flax.traverse_util import flatten_dict, unflatten_dict
 
 from spectra_learning.training.storage import StoragePath, storage_join
+
+
+_GCE_METADATA_ROOT = "http://metadata.google.internal/computeMetadata/v1/instance"
+_GCE_METADATA_HEADERS = {"Metadata-Flavor": "Google"}
+
+
+class EmergencyCheckpointMonitor:
+    """Turn VM termination notices into a durable checkpoint request."""
+
+    def __init__(self, *, watch_gce_metadata: bool) -> None:
+        self._watch_gce_metadata = watch_gce_metadata
+        self._requested = threading.Event()
+        self._stopped = threading.Event()
+        self._reason: str | None = None
+        self._previous_sigterm_handler: Any = None
+
+    @classmethod
+    def for_current_environment(cls) -> EmergencyCheckpointMonitor:
+        cluster_info = os.environ.get("SKYPILOT_CLUSTER_INFO")
+        watch_gce_metadata = (
+            cluster_info is not None
+            and json.loads(cluster_info).get("cloud", "").lower() == "gcp"
+        )
+        return cls(watch_gce_metadata=watch_gce_metadata)
+
+    def __enter__(self) -> EmergencyCheckpointMonitor:
+        self._previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, self._handle_sigterm)
+        if self._watch_gce_metadata:
+            for metadata_key in ("preempted", "maintenance-event"):
+                threading.Thread(
+                    target=self._watch_metadata_key,
+                    args=(metadata_key,),
+                    name=f"spectra-{metadata_key}-watcher",
+                    daemon=True,
+                ).start()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+        del exc_type, exc_value, traceback
+        self._stopped.set()
+        signal.signal(signal.SIGTERM, self._previous_sigterm_handler)
+
+    @property
+    def requested(self) -> bool:
+        return self._requested.is_set()
+
+    @property
+    def reason(self) -> str | None:
+        return self._reason
+
+    def request(self, reason: str) -> None:
+        if not self._requested.is_set():
+            self._reason = reason
+            self._requested.set()
+
+    def wait_for_forced_termination(self) -> None:
+        logging.warning(
+            "Emergency checkpoint is durable; waiting for the VM to terminate."
+        )
+        while True:
+            self._stopped.wait(3600)
+
+    def _handle_sigterm(self, signum: int, frame: Any) -> None:
+        del signum, frame
+        self.request("SIGTERM")
+
+    def _watch_metadata_key(self, metadata_key: str) -> None:
+        etag = ""
+        while not self._stopped.is_set() and not self._requested.is_set():
+            query = {"wait_for_change": "true", "timeout_sec": "60"}
+            if etag:
+                query["last_etag"] = etag
+            url = f"{_GCE_METADATA_ROOT}/{metadata_key}?{parse.urlencode(query)}"
+            metadata_request = request.Request(url, headers=_GCE_METADATA_HEADERS)
+            try:
+                with request.urlopen(metadata_request, timeout=65) as response:
+                    value = response.read().decode().strip()
+                    etag = response.headers.get("ETag", "")
+            except (error.URLError, TimeoutError):
+                continue
+            if metadata_key == "preempted" and value == "TRUE":
+                self.request("GCE preemption notice")
+            if metadata_key == "maintenance-event" and value.startswith("TERMINATE"):
+                self.request("GCE host-maintenance notice")
 
 
 def jax_checkpoint_dir(checkpoint_dir: StoragePath) -> str:
