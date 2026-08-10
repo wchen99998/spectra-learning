@@ -19,6 +19,7 @@ from spectra_learning.models.fastmixer_capacity import (
 from spectra_learning.models.model_jax import PeakSetJEPAJax
 from spectra_learning.models.pairmixer_jax import PairMixerBlock, _active_indices
 from spectra_learning.models.settings import PeakSetJEPASettings
+from spectra_learning.models.transformer_jax import CrossAttentionBlock
 from spectra_learning.probes.massspec.msg_probe_jax import (
     _full_visible_fastmixer_probe_model,
 )
@@ -77,12 +78,35 @@ def test_1b_mae_schedule_uses_three_compact_shapes():
     assert tuple(cfg.gradient_accumulation_steps_schedule) == (8, 16, 16)
     assert cfg.activation_checkpoint_mode == "none"
     assert cfg.max_duration_hours == 95.0
-    assert cfg.mae_loss_weight == 0.7
+    assert cfg.mae_loss_weight == 1.0
     assert cfg.mae_intensity_loss_weight == 0.0
-    assert cfg.distogram_loss_weight == 0.3
+    assert cfg.distogram_loss_weight == 0.0
     settings = PeakSetJEPASettings.from_config(cfg)
     assert settings.pairmixer_fast_encoder_max_visible_tokens == 17
     assert settings.pairmixer_fast_max_visible_tokens == 41
+
+
+def test_1b_mae_schedule_without_cls_uses_peak_only_compact_shapes():
+    cfg = load_config(
+        "configs/1b_pairmixer_dense_adamw.py",
+        {"encoder_use_cls_token": False},
+    )
+
+    assert pairmixer_fast_full_visible_tokens(cfg) == 47
+    assert pairmixer_fast_mae_stage_visible_tokens(cfg) == (
+        (16, 40),
+        (26, 40),
+        (35, 40),
+    )
+    assert pairmixer_fast_stage_capacities(cfg) == (
+        (16, 40, 24),
+        (26, 40, 14),
+        (35, 40, 5),
+    )
+    settings = PeakSetJEPASettings.from_config(cfg)
+    assert not settings.encoder_use_cls_token
+    assert settings.pairmixer_fast_encoder_max_visible_tokens == 16
+    assert settings.pairmixer_fast_max_visible_tokens == 40
 
 
 def test_encoder_and_predictor_blocks_keep_separate_fastmixer_capacities():
@@ -93,12 +117,13 @@ def test_encoder_and_predictor_blocks_keep_separate_fastmixer_capacities():
         encoder_num_heads=1,
         feature_mlp_hidden_dim=8,
         encoder_fourier_num_freqs=1,
+        pairmixer_fourier_num_freqs=1,
         pairmixer_pair_dim=8,
         pairmixer_pair_feature_hidden_dim=8,
-        pairmixer_use_fourier_features=False,
         pairmixer_block_type="fastmixer-dense",
         pairmixer_fast_encoder_max_visible_tokens=17,
         pairmixer_fast_max_visible_tokens=41,
+        predictor_target_max_tokens=24,
         masked_latent_predictor_num_layers=1,
         masked_latent_predictor_num_heads=1,
         num_peaks=47,
@@ -110,12 +135,12 @@ def test_encoder_and_predictor_blocks_keep_separate_fastmixer_capacities():
     encoder_block = model.encoder.blocks[0]
     predictor_block = model.masked_latent_predictor[0]
     assert encoder_block.fastmixer_max_visible_tokens == 17
-    assert predictor_block.fastmixer_max_visible_tokens == 41
+    assert isinstance(predictor_block, CrossAttentionBlock)
+    assert model.pairmixer_fast_target_max_visible_tokens == 24
 
     model.set_fastmixer_capacities(27, 41, 14)
 
     assert encoder_block.fastmixer_max_visible_tokens == 27
-    assert predictor_block.fastmixer_max_visible_tokens == 41
     assert model.pairmixer_fast_target_max_visible_tokens == 14
 
 
@@ -195,7 +220,7 @@ def test_jax_msg_probe_uses_full_visible_fastmixer_clone():
         "attention_mlp_multiple": 1.0,
         "feature_mlp_hidden_dim": 4,
         "encoder_fourier_num_freqs": 1,
-        "pairmixer_use_fourier_features": False,
+        "pairmixer_fourier_num_freqs": 1,
         "pairmixer_pair_dim": 4,
         "pairmixer_pair_feature_hidden_dim": 4,
         "masked_latent_predictor_num_layers": 1,
@@ -218,7 +243,7 @@ def test_jax_msg_probe_uses_full_visible_fastmixer_clone():
     assert probe_model is not model
     assert probe_model.pairmixer_fast_max_visible_tokens == 5
     assert probe_model.encoder.blocks[0].fastmixer_max_visible_tokens == 5
-    assert probe_model.masked_latent_predictor[0].fastmixer_max_visible_tokens == 5
+    assert isinstance(probe_model.masked_latent_predictor[0], CrossAttentionBlock)
     np.testing.assert_allclose(
         np.asarray(probe_model.encoder.blocks[0].tri_mul_out.p_in.weight[...]),
         np.asarray(model.encoder.blocks[0].tri_mul_out.p_in.weight[...]),

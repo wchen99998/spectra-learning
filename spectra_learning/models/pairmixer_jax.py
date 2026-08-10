@@ -16,7 +16,7 @@ from spectra_learning.models.common_jax import (
     scaled_dot_product_attention,
     silu,
 )
-from spectra_learning.models.peak_features_jax import FourierFeatures
+from spectra_learning.models.peak_features_jax import FourierFeatures, MzTokenEmbedding
 from spectra_learning.models.transformer_jax import FeedForward, SwiGLUFeedForward
 
 
@@ -290,7 +290,9 @@ class PairFeatureEmbedder(nnx.Module):
         hidden_dim: int,
         mz_scale: float = PEAK_MZ_MAX,
         precursor_mz_scale: float = PEAK_MZ_MAX,
-        use_fourier_features: bool = True,
+        mz_embedding: str = "fourier",
+        token_bin_size: float = 0.1,
+        token_embedding_dim: int = 128,
         fourier_num_freqs: int = 16,
         fourier_x_min: float = 1e-2,
         fourier_x_max: float = PEAK_MZ_MAX,
@@ -302,9 +304,11 @@ class PairFeatureEmbedder(nnx.Module):
         rngs = nnx.Rngs(0) if rngs is None else rngs
         self.mz_scale = mz_scale
         self.precursor_mz_scale = precursor_mz_scale
-        self.use_fourier_features = use_fourier_features
+        self.mz_embedding = mz_embedding.lower()
+        if self.mz_embedding not in {"fourier", "token"}:
+            raise ValueError("mz_embedding must be one of ('fourier', 'token')")
         raw_dim = 14
-        if self.use_fourier_features:
+        if self.mz_embedding == "fourier":
             self.pair_fourier = FourierFeatures(
                 x_min=fourier_x_min,
                 x_max=fourier_x_max,
@@ -317,6 +321,13 @@ class PairFeatureEmbedder(nnx.Module):
             )
             raw_dim += 3 * self.pair_fourier.num_features()
             raw_dim += self.relative_pair_fourier.num_features()
+        else:
+            self.mz_features = MzTokenEmbedding(
+                mz_scale=mz_scale,
+                bin_size=token_bin_size,
+                embedding_dim=token_embedding_dim,
+            )
+            raw_dim += self.mz_features.num_features()
         self.raw_proj = nnx.List(
             [
                 Linear(raw_dim, hidden_dim, compute_dtype=compute_dtype, rngs=rngs),
@@ -365,38 +376,40 @@ class PairFeatureEmbedder(nnx.Module):
         *,
         precursor_mz: Array | None = None,
     ) -> Array:
-        mz_da = peak_mz.astype(jnp.float32) * self.mz_scale
+        peak_mz = peak_mz.astype(jnp.float32)
         intensity = peak_intensity.astype(jnp.float32)
-        reference_mass = self._reference_mass_da(peak_mz, valid_mask, precursor_mz)[
-            :, None, None
-        ]
-        mz_i = mz_da[:, :, None]
-        mz_j = mz_da[:, None, :]
-        d = mz_j - mz_i
-        abs_d = jnp.abs(d)
-        relative_d = d / reference_mass
-        complement = mz_i + mz_j - reference_mass
-
         intensity_i = intensity[:, :, None]
         intensity_j = intensity[:, None, :]
         diag = jnp.eye(peak_mz.shape[1], dtype=peak_mz.dtype)[None, :, :]
-        raw_parts = [
-            d[..., None] / self.mz_scale,
-            abs_d[..., None] / self.mz_scale,
-            relative_d[..., None],
-            complement[..., None] / self.mz_scale,
-            jnp.broadcast_to(mz_i, d.shape)[..., None] / reference_mass[..., None],
-            jnp.broadcast_to(mz_j, d.shape)[..., None] / reference_mass[..., None],
-            jnp.broadcast_to(intensity_i, d.shape)[..., None],
-            jnp.broadcast_to(intensity_j, d.shape)[..., None],
-            jnp.broadcast_to(intensity_i * intensity_j, d.shape)[..., None],
-            jnp.broadcast_to(jnp.log1p(intensity_i), d.shape)[..., None],
-            jnp.broadcast_to(jnp.log1p(intensity_j), d.shape)[..., None],
-            jnp.sign(d)[..., None],
-            jnp.broadcast_to(diag, d.shape)[..., None],
-            (d > 0).astype(peak_mz.dtype)[..., None],
-        ]
-        if self.use_fourier_features:
+        if self.mz_embedding == "fourier":
+            mz_da = peak_mz * self.mz_scale
+            reference_mass = self._reference_mass_da(
+                peak_mz,
+                valid_mask,
+                precursor_mz,
+            )[:, None, None]
+            mz_i = mz_da[:, :, None]
+            mz_j = mz_da[:, None, :]
+            d = mz_j - mz_i
+            abs_d = jnp.abs(d)
+            relative_d = d / reference_mass
+            complement = mz_i + mz_j - reference_mass
+            raw_parts = [
+                d[..., None] / self.mz_scale,
+                abs_d[..., None] / self.mz_scale,
+                relative_d[..., None],
+                complement[..., None] / self.mz_scale,
+                jnp.broadcast_to(mz_i, d.shape)[..., None] / reference_mass[..., None],
+                jnp.broadcast_to(mz_j, d.shape)[..., None] / reference_mass[..., None],
+                jnp.broadcast_to(intensity_i, d.shape)[..., None],
+                jnp.broadcast_to(intensity_j, d.shape)[..., None],
+                jnp.broadcast_to(intensity_i * intensity_j, d.shape)[..., None],
+                jnp.broadcast_to(jnp.log1p(intensity_i), d.shape)[..., None],
+                jnp.broadcast_to(jnp.log1p(intensity_j), d.shape)[..., None],
+                jnp.sign(d)[..., None],
+                jnp.broadcast_to(diag, d.shape)[..., None],
+                (d > 0).astype(peak_mz.dtype)[..., None],
+            ]
             raw_parts.extend(
                 [
                     self._fourier_values(
@@ -409,6 +422,28 @@ class PairFeatureEmbedder(nnx.Module):
                     ),
                 ]
             )
+        else:
+            mz_token = self.mz_features.token_ids(peak_mz)
+            token_delta = mz_token[:, None, :] - mz_token[:, :, None]
+            raw_parts = [
+                jnp.zeros((*token_delta.shape, 6), dtype=peak_mz.dtype),
+                jnp.broadcast_to(intensity_i, token_delta.shape)[..., None],
+                jnp.broadcast_to(intensity_j, token_delta.shape)[..., None],
+                jnp.broadcast_to(
+                    intensity_i * intensity_j,
+                    token_delta.shape,
+                )[..., None],
+                jnp.broadcast_to(jnp.log1p(intensity_i), token_delta.shape)[
+                    ..., None
+                ],
+                jnp.broadcast_to(jnp.log1p(intensity_j), token_delta.shape)[
+                    ..., None
+                ],
+                jnp.sign(token_delta).astype(peak_mz.dtype)[..., None],
+                jnp.broadcast_to(diag, token_delta.shape)[..., None],
+                (token_delta > 0).astype(peak_mz.dtype)[..., None],
+                self.mz_features.embedding(jnp.abs(token_delta)),
+            ]
         raw = jnp.concatenate(raw_parts, axis=-1)
         single_i = single[:, :, None, :]
         single_j = single[:, None, :, :]
@@ -432,12 +467,14 @@ class PairFeatureEmbedder(nnx.Module):
         state_dict: dict[str, torch.Tensor],
         prefix: str,
     ) -> None:
-        if self.use_fourier_features:
+        if self.mz_embedding == "fourier":
             self.pair_fourier.load_torch_state_dict(state_dict, f"{prefix}.pair_fourier")
             self.relative_pair_fourier.load_torch_state_dict(
                 state_dict,
                 f"{prefix}.relative_pair_fourier",
             )
+        else:
+            self.mz_features.load_torch_state_dict(state_dict, f"{prefix}.mz_features")
         self.raw_proj[0].load_torch_state_dict(state_dict, f"{prefix}.raw_proj.0")
         self.raw_proj[1].load_torch_state_dict(state_dict, f"{prefix}.raw_proj.2")
         self.single_pair_proj[0].load_torch_state_dict(

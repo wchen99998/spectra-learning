@@ -607,7 +607,7 @@ class BlockJEPATests(unittest.TestCase):
             peak_intensity,
             peak_valid_mask,
         )
-        context_encoded, context_pair = model.encoder.forward_with_pair(
+        context_encoded = model.encoder(
             peak_mz,
             peak_intensity,
             valid_mask=peak_valid_mask,
@@ -616,7 +616,6 @@ class BlockJEPATests(unittest.TestCase):
         context_emb = context_encoded
         _, predictor_output = model._predict_augmented_targets(
             context_emb,
-            context_pair,
             context_mask,
             target_masks,
         )
@@ -686,265 +685,13 @@ class BlockJEPATests(unittest.TestCase):
             + metrics["jepa_mae_term"],
         )
 
-    def test_distogram_targets_use_shared_mz_bin_size(self):
-        model = self._build_model(
-            distogram_loss_weight=1.0,
-            jepa_mae_mz_bin_size=250.0,
-        )
-        peak_mz = torch.tensor([[0.0, 0.249, 0.25, 1.0, 1.5]])
-
-        targets = model._distogram_targets(peak_mz)
-
-        self.assertEqual(model.distogram_num_bins, 4)
-        torch.testing.assert_close(
-            targets[0, 0],
-            torch.tensor([0, 0, 1, 3, 3]),
-        )
-
-    def test_distogram_pair_mask_uses_pairs_with_either_target_endpoint(self):
-        model = self._build_model(distogram_loss_weight=1.0)
-        target_masks = torch.tensor([[[False, True, False, False]]])
-        predictor_visible_masks = torch.tensor([[[True, True, True, False]]])
-
-        pair_mask = model._distogram_pair_mask(
-            target_masks,
-            predictor_visible_masks,
-        )
-
-        expected = torch.tensor(
-            [
-                [
-                    [
-                        [False, True, False, False],
-                        [True, False, True, False],
-                        [False, True, False, False],
-                        [False, False, False, False],
-                    ]
-                ]
-            ]
-        )
-        torch.testing.assert_close(pair_mask, expected)
-
-    def test_distogram_logits_symmetrise_predictor_pairs(self):
-        model = self._build_model(
-            distogram_loss_weight=1.0,
-            jepa_mae_mz_bin_size=250.0,
-        )
-        predictor_pair = torch.randn(2, 1, 4, 4, model.predictor_pair_dim)
-
-        logits = model._distogram_logits(predictor_pair)
-
-        self.assertEqual(logits.shape[-1], 4)
-        torch.testing.assert_close(logits[:, :, 1, 2], logits[:, :, 2, 1])
-
-    def test_distogram_loss_matches_full_logit_masked_ce(self):
-        model = self._build_model(
-            distogram_loss_weight=0.25,
-            jepa_mae_mz_bin_size=250.0,
-        )
-        batch = _make_batch(
-            batch_size=2,
-            num_peaks=6,
-            num_targets=model.jepa_num_target_blocks,
-        )
-        predictor_pair = torch.randn(
-            2,
-            model.jepa_num_target_blocks,
-            6,
-            6,
-            model.predictor_pair_dim,
-        )
-        predictor_visible_masks = (
-            batch["context_mask"].unsqueeze(1) | batch["target_masks"]
-        )
-
-        full_logits = model._distogram_logits(predictor_pair)
-        targets = model._distogram_targets(batch["peak_mz"]).unsqueeze(1).expand(
-            full_logits.shape[0],
-            full_logits.shape[1],
-            full_logits.shape[2],
-            full_logits.shape[3],
-        )
-        pair_mask = model._distogram_pair_mask(
-            batch["target_masks"],
-            predictor_visible_masks,
-        )
-        expected_loss = model._masked_ce_loss(full_logits, targets, pair_mask)
-
-        term, metrics = model._distogram_metrics(
-            predictor_pair,
-            batch["peak_mz"],
-            batch["target_masks"],
-            predictor_visible_masks,
-            predictor_pair,
-        )
-
-        torch.testing.assert_close(metrics["distogram_loss"], expected_loss)
-        torch.testing.assert_close(term, expected_loss * 0.25)
-
-    def test_distogram_loss_contributes_to_loss(self):
-        model = self._build_model(
-            masked_token_loss_weight=1.0,
-            distogram_loss_weight=0.25,
-        )
-        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-
-        metrics = model.forward_augmented(batch)
-
-        self.assertGreater(float(metrics["distogram_loss"].detach()), 0.0)
-        torch.testing.assert_close(
-            metrics["distogram_term"],
-            metrics["distogram_loss"] * 0.25,
-        )
-        torch.testing.assert_close(
-            metrics["loss"],
-            metrics["masked_prediction_term"] + metrics["distogram_term"],
-        )
-
-    def test_latent_pair_loss_matches_masked_pair_mse(self):
-        model = self._build_model(latent_pair_loss_weight=0.25)
-        batch = _make_batch(
-            batch_size=2,
-            num_peaks=6,
-            num_targets=model.jepa_num_target_blocks,
-        )
-        predictor_pair = torch.randn(
-            2,
-            model.jepa_num_target_blocks,
-            6,
-            6,
-            model.predictor_pair_dim,
-        )
-        teacher_pair = torch.randn(2, 6, 6, model.teacher_pair_dim)
-        predictor_visible_masks = (
-            batch["context_mask"].unsqueeze(1) | batch["target_masks"]
-        )
-        pair_mask = model._target_pair_mask(
-            batch["target_masks"],
-            predictor_visible_masks,
-        )
-        teacher_pair_targets = torch.nn.functional.layer_norm(
-            teacher_pair.float(),
-            (model.teacher_pair_dim,),
-        )
-        teacher_pair_targets = teacher_pair_targets.unsqueeze(1).expand(
-            predictor_pair.shape[0],
-            predictor_pair.shape[1],
-            predictor_pair.shape[2],
-            predictor_pair.shape[3],
-            predictor_pair.shape[4],
-        )
-        expected_loss = (
-            model._embedding_loss(
-                model.masked_pair_readout(predictor_pair),
-                teacher_pair_targets,
-            )
-            * pair_mask.float()
-        ).sum() / pair_mask.float().sum().clamp_min(1.0)
-
-        term, metrics = model._latent_pair_metrics(
-            predictor_pair,
-            teacher_pair,
-            batch["target_masks"],
-            predictor_visible_masks,
-            predictor_pair,
-        )
-
-        torch.testing.assert_close(metrics["latent_pair_loss"], expected_loss)
-        torch.testing.assert_close(term, expected_loss * 0.25)
-
-    def test_latent_pair_loss_can_use_unnormalized_pair_targets(self):
-        model = self._build_model(
-            latent_pair_loss_weight=0.25,
-            latent_pair_target_normalization="none",
-        )
-        batch = _make_batch(
-            batch_size=2,
-            num_peaks=6,
-            num_targets=model.jepa_num_target_blocks,
-        )
-        predictor_pair = torch.randn(
-            2,
-            model.jepa_num_target_blocks,
-            6,
-            6,
-            model.predictor_pair_dim,
-        )
-        teacher_pair = torch.randn(2, 6, 6, model.teacher_pair_dim)
-        predictor_visible_masks = (
-            batch["context_mask"].unsqueeze(1) | batch["target_masks"]
-        )
-        pair_mask = model._target_pair_mask(
-            batch["target_masks"],
-            predictor_visible_masks,
-        )
-        teacher_pair_targets = teacher_pair.unsqueeze(1).expand(
-            predictor_pair.shape[0],
-            predictor_pair.shape[1],
-            predictor_pair.shape[2],
-            predictor_pair.shape[3],
-            predictor_pair.shape[4],
-        )
-        expected_loss = (
-            model._embedding_loss(
-                model.masked_pair_readout(predictor_pair),
-                teacher_pair_targets,
-            )
-            * pair_mask.float()
-        ).sum() / pair_mask.float().sum().clamp_min(1.0)
-
-        term, metrics = model._latent_pair_metrics(
-            predictor_pair,
-            teacher_pair,
-            batch["target_masks"],
-            predictor_visible_masks,
-            predictor_pair,
-        )
-
-        torch.testing.assert_close(metrics["latent_pair_loss"], expected_loss)
-        torch.testing.assert_close(term, expected_loss * 0.25)
-
-    def test_latent_pair_loss_contributes_to_jepa_loss(self):
-        model = self._build_model(
-            masked_token_loss_weight=1.0,
-            latent_pair_loss_weight=0.25,
-        )
-        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-
-        metrics = model.forward_augmented(batch)
-
-        self.assertGreater(float(metrics["latent_pair_loss"].detach()), 0.0)
-        torch.testing.assert_close(
-            metrics["latent_pair_term"],
-            metrics["latent_pair_loss"] * 0.25,
-        )
-        torch.testing.assert_close(
-            metrics["loss"],
-            metrics["masked_prediction_term"] + metrics["latent_pair_term"],
-        )
-
-    def test_latent_pair_loss_supports_collapse_diagnostics(self):
-        model = self._build_model(
-            masked_token_loss_weight=1.0,
-            latent_pair_loss_weight=0.25,
-        )
-        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
-        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-
-        metrics = train_step_impl(
-            model,
-            batch,
-            [optimizer],
-            [scheduler],
-            autocast_dtype=None,
-            grad_clip_norm=None,
-            compute_collapse_metrics=True,
-        )
-
-        self.assertIn("latent_pair_loss", metrics)
-        self.assertIn("repr/token/embedding_norm_p50", metrics)
-        self.assertTrue(torch.isfinite(metrics["loss"]).item())
+    def test_pair_prediction_losses_are_rejected(self):
+        for override in (
+            {"distogram_loss_weight": 0.25},
+            {"latent_pair_loss_weight": 0.25},
+        ):
+            with self.assertRaisesRegex(ValueError, "cross-attention predictor"):
+                self._build_model(**override)
 
     def test_mae_training_mode_uses_binned_value_prediction_only(self):
         model = self._build_model(
@@ -952,7 +699,6 @@ class BlockJEPATests(unittest.TestCase):
             masked_token_loss_weight=1.0,
             jepa_mae_loss_weight=1.0,
             mae_loss_weight=0.5,
-            latent_pair_loss_weight=1.0,
         )
         batch = _make_batch(num_targets=model.jepa_num_target_blocks)
 
@@ -970,7 +716,6 @@ class BlockJEPATests(unittest.TestCase):
         self.assertIn("mae_intensity_accuracy", metrics)
         self.assertNotIn("masked_prediction_loss", metrics)
         self.assertNotIn("jepa_mae_loss", metrics)
-        self.assertNotIn("latent_pair_loss", metrics)
         torch.testing.assert_close(metrics["mae_term"], metrics["mae_loss"] * 0.5)
         torch.testing.assert_close(metrics["loss"], metrics["mae_term"])
 
@@ -1001,14 +746,12 @@ class BlockJEPATests(unittest.TestCase):
             use_ema_teacher=True,
             masked_token_loss_weight=1.0,
             jepa_mae_loss_weight=1.0,
-            latent_pair_loss_weight=1.0,
         )
         self.assertFalse(model.use_ema_teacher)
         self.assertIsNone(model.teacher_encoder)
         self.assertIsNone(model.teacher_target_projector)
         self.assertEqual(model.masked_token_loss_weight, 0.0)
         self.assertEqual(model.jepa_mae_loss_weight, 0.0)
-        self.assertEqual(model.latent_pair_loss_weight, 0.0)
 
     def test_mae_teacher_jepa_mode_uses_frozen_teacher_without_ema(self):
         model = self._build_model(
@@ -1075,38 +818,6 @@ class BlockJEPATests(unittest.TestCase):
         metrics = model.forward_augmented(batch)
 
         self.assertIn("masked_prediction_loss", metrics)
-        self.assertTrue(torch.isfinite(metrics["loss"]).item())
-
-    def test_mae_teacher_jepa_latent_pair_loss_projects_to_teacher_pair_dim(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            teacher_config_path = f"{tmpdir}/teacher_config.py"
-            with open(teacher_config_path, "w") as f:
-                f.write(
-                    "from ml_collections import config_dict\n\n"
-                    "def get_config():\n"
-                    "    cfg = config_dict.ConfigDict()\n"
-                    "    cfg.training_mode = 'mae'\n"
-                    "    cfg.model_dim = 24\n"
-                    "    cfg.encoder_num_layers = 1\n"
-                    "    cfg.encoder_num_heads = 4\n"
-                    "    cfg.feature_mlp_hidden_dim = 16\n"
-                    "    cfg.encoder_fourier_num_freqs = 8\n"
-                    "    cfg.pairmixer_pair_dim = 16\n"
-                    "    return cfg\n"
-                )
-            model = self._build_model(
-                training_mode="mae_teacher_jepa",
-                frozen_teacher_config_path=teacher_config_path,
-                latent_pair_loss_weight=0.25,
-            )
-
-        batch = _make_batch(num_targets=model.jepa_num_target_blocks)
-        metrics = model.forward_augmented(batch)
-
-        self.assertEqual(model.teacher_pair_dim, 16)
-        self.assertIsInstance(model.masked_pair_readout, torch.nn.Linear)
-        self.assertEqual(model.masked_pair_readout.out_features, 16)
-        self.assertIn("latent_pair_loss", metrics)
         self.assertTrue(torch.isfinite(metrics["loss"]).item())
 
     def test_forward_augmented_uses_single_encoder_pass(self):

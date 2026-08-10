@@ -59,6 +59,7 @@ from spectra_learning.training.logging import (
     build_logger,
     log_msg_probe_metrics,
 )
+from spectra_learning.training import muon
 from spectra_learning.training.schedules import learning_rate_at_step
 from spectra_learning.training.storage import (
     local_scratch_dir,
@@ -118,8 +119,6 @@ def trainable_param_filter(path: tuple[object, ...], value: object) -> bool:
         "teacher_encoder",
         "teacher_target_projector",
         "position_embedding",
-        "predictor_position_embedding",
-        "predictor_pair_position_embedding",
     }
     if any(part in frozen_modules for part in path):
         return False
@@ -361,32 +360,16 @@ def _jax_muon_transform(
     *,
     total_steps: int | None = None,
 ) -> optax.GradientTransformation:
-    return _jax_split_qkv_transform(
-        optax.contrib.muon(
-            learning_rate=_jax_learning_rate_schedule(config, total_steps=total_steps),
-            ns_coeffs=config.get("muon_ns_coeffs", (3.4445, -4.7750, 2.0315)),
-            ns_steps=int(config.get("muon_ns_steps", 5)),
-            beta=float(config.get("muon_beta", 0.95)),
-            eps=float(config.get("muon_eps", 1e-8)),
-            weight_decay=float(config.get("weight_decay", 0.0)),
-            weight_decay_mask=_jax_weight_decay_mask,
-            mu_dtype=config.get("muon_mu_dtype", None),
-            nesterov=bool(config.get("muon_nesterov", True)),
-            adaptive=bool(config.get("muon_adaptive", False)),
-            preconditioning=str(config.get("muon_preconditioning", "frobenius")),
-            adam_b1=float(config.get("muon_adam_b1", 0.9)),
-            adam_b2=float(
-                config.get("muon_adam_b2", config.get("b2", 0.999))
-            ),
-            adam_eps_root=float(config.get("muon_adam_eps_root", 0.0)),
-            adam_weight_decay=float(config.get("muon_adam_weight_decay", 0.0)),
-            adam_learning_rate=_jax_muon_adam_learning_rate_schedule(
-                config,
-                total_steps=total_steps,
-            ),
-            muon_weight_dimension_numbers=_jax_muon_weight_dimension_numbers,
-            consistent_rms=_jax_muon_consistent_rms(config),
-        )
+    learning_rate = _jax_learning_rate_schedule(config, total_steps=total_steps)
+    adam_learning_rate = _jax_muon_adam_learning_rate_schedule(
+        config,
+        total_steps=total_steps,
+    )
+    return muon.build_muon_transform(
+        config,
+        learning_rate=learning_rate,
+        adam_learning_rate=adam_learning_rate,
+        weight_decay_mask=_jax_weight_decay_mask,
     )
 
 
@@ -404,13 +387,6 @@ def _jax_muon_adam_learning_rate_schedule(
         base_lr=float(adam_learning_rate),
         min_lr=config.get("muon_adam_min_learning_rate", None),
     )
-
-
-def _jax_muon_consistent_rms(config: Any) -> float | None:
-    adjust_lr_fn = str(config.get("muon_adjust_lr_fn", "") or "").lower()
-    if adjust_lr_fn == "match_rms_adamw":
-        return 0.2
-    return config.get("muon_consistent_rms", None)
 
 
 def _jax_learning_rate_schedule(
@@ -449,19 +425,30 @@ def _jax_cosine_learning_rate_schedule(
     if raw_total_steps is None:
         return base_lr
     total_steps = int(raw_total_steps)
+    schedule_start_step = int(
+        config.get("learning_rate_schedule_start_step", 0)
+    )
+    schedule_steps = max(1, total_steps - schedule_start_step)
+    warmup_start_lr = float(
+        config.get("warmup_start_learning_rate", base_lr * 1e-8)
+    )
 
     def schedule(step):
         step = jnp.asarray(step, dtype=jnp.float32)
-        warmup = base_lr * (1e-8 + (1.0 - 1e-8) * step / max(1, warmup_steps))
+        local_step = jnp.maximum(0.0, step - float(schedule_start_step))
+        warmup = warmup_start_lr + (
+            base_lr - warmup_start_lr
+        ) * local_step / max(1, warmup_steps)
         ratio = jnp.clip(
-            (step - float(warmup_steps)) / float(max(1, total_steps - warmup_steps)),
+            (local_step - float(warmup_steps))
+            / float(max(1, schedule_steps - warmup_steps)),
             0.0,
             1.0,
         )
         decay = min_lr + (base_lr - min_lr) * 0.5 * (1.0 + jnp.cos(jnp.pi * ratio))
         if warmup_steps <= 0:
             return decay
-        return jnp.where(step < warmup_steps, warmup, decay)
+        return jnp.where(local_step < warmup_steps, warmup, decay)
 
     return schedule
 
@@ -478,6 +465,12 @@ def _scheduled_jax_learning_rate(
         total_steps=total_steps,
         warmup_steps=int(config.get("warmup_steps", 0)),
         min_learning_rate=config.get("min_learning_rate", None),
+        schedule_start_step=int(
+            config.get("learning_rate_schedule_start_step", 0)
+        ),
+        warmup_start_learning_rate=config.get(
+            "warmup_start_learning_rate", None
+        ),
     )
 
 
@@ -486,88 +479,6 @@ def _jax_weight_decay_mask(params: Any) -> Any:
         lambda path, value: _tree_path_key(path[-1]) == "weight" and value.ndim >= 2,
         params,
     )
-
-
-def _jax_muon_weight_dimension_numbers(params: Any) -> Any:
-    return jax.tree.map_with_path(
-        lambda path, value: (
-            _jax_muon_weight_dimension_number(path, value)
-            if _tree_path_key(path[-1]) == "weight" and value.ndim >= 2
-            else None
-        ),
-        params,
-    )
-
-
-def _jax_muon_weight_dimension_number(
-    path: tuple[Any, ...],
-    value: Any,
-) -> optax.contrib.MuonDimensionNumbers:
-    if _jax_qkv_weight_path(path) and value.ndim == 3:
-        return optax.contrib.MuonDimensionNumbers(reduction_axis=2, output_axis=1)
-    return optax.contrib.MuonDimensionNumbers(reduction_axis=1, output_axis=0)
-
-
-def _jax_split_qkv_transform(
-    transform: optax.GradientTransformation,
-) -> optax.GradientTransformation:
-    def init_fn(params):
-        return transform.init(_jax_split_qkv_tree(params))
-
-    def update_fn(updates, state, params=None):
-        split_updates = _jax_split_qkv_tree(updates)
-        split_params = None if params is None else _jax_split_qkv_tree(params)
-        split_updates, state = transform.update(split_updates, state, split_params)
-        return _jax_unsplit_qkv_tree(split_updates, updates), state
-
-    return optax.GradientTransformation(init_fn, update_fn)
-
-
-def _jax_split_qkv_tree(tree: Any) -> Any:
-    return jax.tree.map_with_path(_jax_split_qkv_leaf, tree)
-
-
-def _jax_unsplit_qkv_tree(tree: Any, reference: Any) -> Any:
-    return jax.tree.map_with_path(
-        lambda path, value: _jax_unsplit_qkv_leaf(path, value, reference),
-        tree,
-    )
-
-
-def _jax_split_qkv_leaf(path: tuple[Any, ...], value: Any) -> Any:
-    if _jax_split_qkv_leaf_path(path, value):
-        return value.reshape(3, value.shape[0] // 3, value.shape[1])
-    return value
-
-
-def _jax_unsplit_qkv_leaf(path: tuple[Any, ...], value: Any, reference: Any) -> Any:
-    if _jax_split_qkv_leaf_path(path, _jax_tree_get_path(reference, path)):
-        return value.reshape(value.shape[0] * value.shape[1], value.shape[2])
-    return value
-
-
-def _jax_split_qkv_leaf_path(path: tuple[Any, ...], value: Any) -> bool:
-    return (
-        _jax_qkv_weight_path(path)
-        and value.ndim == 2
-        and value.shape[0] % 3 == 0
-    )
-
-
-def _jax_qkv_weight_path(path: tuple[Any, ...]) -> bool:
-    parts = _tree_path_parts(path)
-    return len(parts) >= 2 and parts[-1] == "weight" and parts[-2] in {"qkv", "wqkv"}
-
-
-def _jax_tree_get_path(tree: Any, path: tuple[Any, ...]) -> Any:
-    value = tree
-    for path_entry in path:
-        value = value[_tree_path_key(path_entry)]
-    return value
-
-
-def _tree_path_parts(path: tuple[Any, ...]) -> tuple[str, ...]:
-    return tuple(str(_tree_path_key(path_entry)) for path_entry in path)
 
 
 def _tree_path_key(path_entry: Any) -> Any:
@@ -1142,6 +1053,7 @@ def jax_config_checkpoint_contract(
 ) -> dict[str, Any]:
     effective_config = config_to_dict(config)
     effective_config.pop("config_path", None)
+    effective_config.pop("jax_resume_allowed_config_keys", None)
     return {"config": effective_config}
 
 
@@ -1530,6 +1442,9 @@ class _JaxTrainingLoop:
             int(resume_step),
             self.state.checkpoint_state(),
             expected_metadata=self.checkpoint_metadata,
+            allowed_config_keys=tuple(
+                self.config.get("jax_resume_allowed_config_keys", ())
+            ),
         )
         self.state = _JaxTrainState(
             restored["trainable_params"],

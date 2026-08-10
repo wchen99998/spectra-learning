@@ -141,6 +141,7 @@ def restore_jax_training_state(
     state: Any,
     *,
     expected_metadata: dict[str, Any],
+    allowed_config_keys: tuple[str, ...] = (),
 ) -> Any:
     # Capture shapes and shardings before releasing the initialized state.
     # Otherwise Orbax materializes a second full state on the accelerator and
@@ -159,6 +160,9 @@ def restore_jax_training_state(
     )
     actual_metadata = _canonical_metadata(restored.metadata)
     expected_metadata = _canonical_metadata(expected_metadata)
+    for key in allowed_config_keys:
+        actual_metadata["task_contract"]["config"].pop(key, None)
+        expected_metadata["task_contract"]["config"].pop(key, None)
     if actual_metadata != expected_metadata:
         raise ValueError(
             "JAX checkpoint training contract mismatch: "

@@ -7,8 +7,12 @@ from spectra_learning.data.gems.masking import jepa_mask_lengths_for_valid_count
 from spectra_learning.data.spectra import DEFAULT_NUM_PEAKS
 
 
+def _num_cls_tokens(config: Any) -> int:
+    return int(bool(config.get("encoder_use_cls_token", True)))
+
+
 def pairmixer_fast_full_visible_tokens(config: Any) -> int:
-    return int(config.get("num_peaks", DEFAULT_NUM_PEAKS)) + 1
+    return int(config.get("num_peaks", DEFAULT_NUM_PEAKS)) + _num_cls_tokens(config)
 
 
 def _mask_strategy_names(value: Any) -> tuple[str, ...]:
@@ -50,6 +54,7 @@ def _mae_fast_capacities(
     masked_token_input_mode = str(
         config.get("masked_token_input_mode", "latent_token")
     ).lower()
+    num_cls_tokens = _num_cls_tokens(config)
 
     encoder_max_visible = 1
     predictor_max_visible = 1
@@ -63,14 +68,14 @@ def _mae_fast_capacities(
             block_min_len=block_min_len,
             allow_target_overlap=allow_target_overlap,
         )
-        encoder_visible = context_len + 1
+        encoder_visible = context_len + num_cls_tokens
         if masked_token_input_mode == "mz_sentinel":
             target_union_len = min(
                 max(valid_count - context_len, 0),
                 num_target_blocks * target_len,
             )
-            encoder_visible = context_len + target_union_len + 1
-        predictor_visible = context_len + target_len + 1
+            encoder_visible = context_len + target_union_len + num_cls_tokens
+        predictor_visible = context_len + target_len + num_cls_tokens
         encoder_max_visible = max(encoder_max_visible, encoder_visible)
         predictor_max_visible = max(predictor_max_visible, predictor_visible)
         target_max_visible = max(target_max_visible, target_len)
@@ -115,6 +120,10 @@ def pairmixer_fast_stage_capacities(
         )
         for stage in jepa_mask_stages(config)
     )
+
+
+def predictor_target_max_tokens(config: Any) -> int:
+    return max(capacity[2] for capacity in pairmixer_fast_stage_capacities(config))
 
 
 def pairmixer_fast_mae_encoder_visible_tokens(config: Any) -> int:

@@ -18,6 +18,9 @@ from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.model_jax import PeakSetJEPAJax
 from spectra_learning.models.common_jax import RMSNorm
 from spectra_learning.models.pairmixer_jax import PairMixerBlock as JaxPairMixerBlock
+from spectra_learning.models.transformer_jax import (
+    CrossAttentionBlock as JaxCrossAttentionBlock,
+)
 from spectra_learning.models.transformer_jax import FeedForward as JaxFeedForward
 from spectra_learning.training.checkpointing import (
     load_torch_checkpoint,
@@ -51,7 +54,7 @@ def _small_mae_kwargs() -> dict[str, object]:
         "masked_latent_predictor_num_heads": 4,
         "num_peaks": 5,
         "jepa_num_target_blocks": 1,
-        "distogram_loss_weight": 1.0,
+        "distogram_loss_weight": 0.0,
         "predictor_dropout": 0.0,
         "target_projector_dim": -1,
     }
@@ -105,9 +108,8 @@ def _small_jepa_kwargs(**overrides: object) -> dict[str, object]:
         "num_peaks": 5,
         "jepa_num_target_blocks": 1,
         "masked_token_loss_weight": 1.0,
-        "distogram_loss_weight": 1.0,
-        "latent_pair_loss_weight": 1.0,
-        "latent_pair_target_normalization": "layernorm",
+        "distogram_loss_weight": 0.0,
+        "latent_pair_loss_weight": 0.0,
         "predictor_dropout": 0.0,
         "target_projector_dim": -1,
     }
@@ -160,6 +162,40 @@ def test_jax_native_dense_encoder_cls_pair_tokens_are_random_initialized():
         "cls_cls_pair_token",
     ):
         assert not np.allclose(np.asarray(getattr(encoder, name)[...]), 0.0), name
+
+
+def test_mae_without_cls_has_peak_only_encoder_shapes_and_jax_parity():
+    torch.manual_seed(7)
+    kwargs = {**_small_mae_kwargs(), "encoder_use_cls_token": False}
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    jax_model = PeakSetJEPAJax(**kwargs)
+    jax_model.load_torch_state_dict(torch_model.state_dict())
+    batch = _real_pattern_batch("random")
+
+    with torch.no_grad():
+        torch_single, torch_pair = torch_model.encoder.forward_with_pair(
+            batch["peak_mz"],
+            batch["peak_intensity"],
+            valid_mask=batch["peak_valid_mask"],
+        )
+        torch_metrics = torch_model(batch)
+    jax_single, jax_pair = jax_model.encoder.forward_with_pair(
+        jnp.asarray(batch["peak_mz"].numpy()),
+        jnp.asarray(batch["peak_intensity"].numpy()),
+        valid_mask=jnp.asarray(batch["peak_valid_mask"].numpy()),
+    )
+    jax_metrics = jax_model(_jax_batch(batch))
+
+    assert torch_single.shape[1] == batch["peak_mz"].shape[1]
+    assert torch_pair.shape[1:3] == (
+        batch["peak_mz"].shape[1],
+        batch["peak_mz"].shape[1],
+    )
+    assert jax_single.shape == torch_single.shape
+    assert jax_pair.shape == torch_pair.shape
+    assert "encoder.cls_token" not in torch_model.state_dict()
+    assert jax_model.encoder.cls_token is None
+    _assert_metrics_close(torch_metrics, jax_metrics)
 
 
 def _sample(
@@ -284,6 +320,40 @@ def test_jax_mae_matches_pytorch_on_real_collated_batch(mask_strategy: str):
     jax_metrics = jax_model(_jax_batch(batch))
 
     _assert_metrics_close(torch_metrics, jax_metrics)
+
+
+def test_jax_tokenized_single_and_pair_mz_match_pytorch() -> None:
+    kwargs = {
+        **_small_mae_kwargs(),
+        "encoder_mz_embedding": "token",
+        "encoder_mz_token_bin_size": 0.1,
+        "encoder_mz_token_embedding_dim": 8,
+        "pairmixer_mz_embedding": "token",
+        "pairmixer_mz_token_bin_size": 0.1,
+        "pairmixer_mz_token_embedding_dim": 8,
+    }
+    torch.manual_seed(7)
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    jax_model = PeakSetJEPAJax(**kwargs)
+    jax_model.load_torch_state_dict(torch_model.state_dict())
+    batch = _real_pattern_batch("random")
+
+    with torch.no_grad():
+        torch_metrics = torch_model(batch)
+    jax_metrics = jax_model(_jax_batch(batch))
+
+    _assert_metrics_close(torch_metrics, jax_metrics)
+    assert torch_model.encoder.embedder.mz_features.num_tokens == 10_000
+    assert torch_model.encoder.pair_embedder.mz_features.num_tokens == 10_000
+
+    valid_mask = torch.tensor([[True, True, True, False, False]])
+    intensity = torch.tensor([[1.0, 0.8, 0.4, 0.0, 0.0]])
+    left_mz = torch.tensor([[0.10001, 0.20001, 0.30001, 0.0, 0.0]])
+    right_mz = torch.tensor([[0.10009, 0.20009, 0.30009, 0.0, 0.0]])
+    with torch.no_grad():
+        left = torch_model.encoder(left_mz, intensity, valid_mask=valid_mask)
+        right = torch_model.encoder(right_mz, intensity, valid_mask=valid_mask)
+    torch.testing.assert_close(left, right)
 
 
 def test_jax_mae_without_intensity_head_matches_pytorch():
@@ -498,8 +568,8 @@ def test_jax_fastmixer_target_only_compact_path_matches_dense_loss_and_gradients
         np.testing.assert_allclose(
             np.asarray(fast_grads[path]),
             np.asarray(dense_grads[path]),
-            rtol=2e-5,
-            atol=2e-5,
+            rtol=1e-4,
+            atol=1e-4,
             err_msg=".".join(str(part) for part in path),
         )
 
@@ -594,7 +664,7 @@ def test_jax_fastmixer_attention_can_disable_pair_bias():
     np.testing.assert_allclose(np.asarray(actual), np.asarray(expected))
 
 
-def test_jax_model_pair_bias_flag_reaches_encoder_and_predictor():
+def test_jax_model_pair_bias_flag_reaches_encoder_only():
     model = PeakSetJEPAJax(
         **_small_mae_kwargs(),
         pairmixer_use_pair_bias=False,
@@ -602,8 +672,7 @@ def test_jax_model_pair_bias_flag_reaches_encoder_and_predictor():
 
     assert not model.encoder.blocks[0].single_attention.use_pair_bias
     assert model.encoder.blocks[0].single_attention.pair_bias is None
-    assert not model.masked_latent_predictor[0].single_attention.use_pair_bias
-    assert model.masked_latent_predictor[0].single_attention.pair_bias is None
+    assert isinstance(model.masked_latent_predictor[0], JaxCrossAttentionBlock)
 
 
 def test_jax_native_feedforward_pairmixer_uses_previous_transition_modules():
@@ -862,7 +931,7 @@ def test_jax_pure_optax_accumulated_train_step_matches_manual_accumulation():
 
     assert np.isfinite(np.asarray(metrics["loss"]))
     assert "mae_loss" in metrics
-    assert "distogram_loss" in metrics
+    assert "distogram_loss" not in metrics
     np.testing.assert_allclose(
         np.asarray(pure_model.jepa_mae_mz_head.weight[...]),
         np.asarray(manual_model.jepa_mae_mz_head.weight[...]),

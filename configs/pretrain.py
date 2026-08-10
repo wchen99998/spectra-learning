@@ -54,7 +54,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pairmixer_pair_feature_hidden_dim = 768
     cfg.pairmixer_dropout = 0.0
     cfg.pairmixer_use_pair_bias = True
-    cfg.pairmixer_use_fourier_features = True
+    cfg.pairmixer_mz_embedding = "fourier"
+    cfg.pairmixer_mz_token_bin_size = 0.1
+    cfg.pairmixer_mz_token_embedding_dim = 128
     cfg.pairmixer_fourier_num_freqs = 16
     cfg.pairmixer_fourier_x_min = 0.01
     cfg.pairmixer_relative_fourier_x_min = 0.001
@@ -86,7 +88,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_token_loss_weight = 0.0
     cfg.jepa_mae_loss_weight = 0.0
     cfg.mae_loss_weight = 1.0
-    cfg.distogram_loss_weight = 1.0
+    cfg.distogram_loss_weight = 0.0
     cfg.latent_pair_loss_weight = 0.0
     cfg.latent_pair_target_normalization = "none"
     cfg.jepa_mae_mz_bin_size = 0.5

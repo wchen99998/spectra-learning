@@ -12,14 +12,10 @@ __pycache__/
 /profiles/
 /report/
 /results/
+/runs/
 /tmp/
 /wandb/
 
-*.json
-*.xml
-*.png
-*.pyc
-*.pyo
 *.swp
 
 sa.json

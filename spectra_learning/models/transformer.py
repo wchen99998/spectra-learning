@@ -2,7 +2,7 @@ import math
 
 import torch
 import torch.nn.functional as F
-from jaxtyping import Bool, Float
+from jaxtyping import Bool, Float, Int
 from torch import Tensor, nn
 
 
@@ -103,18 +103,52 @@ class CrossAttention(nn.Module):
         n_heads: int,
         *,
         n_kv_heads: int | None = None,
+        rope_max_sequence_length: int | None = None,
+        rope_base: float = 10_000.0,
     ):
         super().__init__()
         self.dim = dim
         self.n_heads = n_heads
         self.n_kv_heads = n_heads if n_kv_heads is None else n_kv_heads
         self.head_dim = self.dim // self.n_heads
+        assert self.head_dim % 2 == 0
         self.wq = nn.Linear(self.dim, self.n_heads * self.head_dim, bias=False)
         self.wkv = nn.Linear(self.dim, 2 * self.n_kv_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(self.dim, self.dim, bias=False)
         nn.init.xavier_normal_(self.wq.weight)
         nn.init.xavier_normal_(self.wkv.weight)
         nn.init.xavier_normal_(self.wo.weight)
+        if rope_max_sequence_length is not None:
+            inv_freq = 1.0 / (
+                rope_base
+                ** (
+                    torch.arange(0, self.head_dim, 2, dtype=torch.float32)
+                    / self.head_dim
+                )
+            )
+            frequencies = torch.outer(
+                torch.arange(rope_max_sequence_length, dtype=torch.float32),
+                inv_freq,
+            )
+            self.register_buffer("rope_cos", frequencies.cos(), persistent=False)
+            self.register_buffer("rope_sin", frequencies.sin(), persistent=False)
+        else:
+            self.rope_cos = None
+            self.rope_sin = None
+
+    def _apply_rope(
+        self,
+        tensor: Float[Tensor, "batch heads tokens head_dim"],
+        positions: Int[Tensor, "batch tokens"],
+    ) -> Float[Tensor, "batch heads tokens head_dim"]:
+        cos = self.rope_cos[positions].unsqueeze(1).to(dtype=tensor.dtype)
+        sin = self.rope_sin[positions].unsqueeze(1).to(dtype=tensor.dtype)
+        even = tensor[..., 0::2]
+        odd = tensor[..., 1::2]
+        return torch.stack(
+            (even * cos - odd * sin, even * sin + odd * cos),
+            dim=-1,
+        ).flatten(-2)
 
     def forward(
         self,
@@ -122,6 +156,8 @@ class CrossAttention(nn.Module):
         memory: Float[Tensor, "batch memory dim"],
         *,
         memory_mask: Bool[Tensor, "batch memory"] | None = None,
+        query_positions: Int[Tensor, "batch tokens"] | None = None,
+        memory_positions: Int[Tensor, "batch memory"] | None = None,
     ) -> Float[Tensor, "batch tokens dim"]:
         bsz, tgt_len, _ = x.shape
         mem_len = memory.shape[1]
@@ -136,13 +172,16 @@ class CrossAttention(nn.Module):
         q = xq.transpose(1, 2)
         k = xk.transpose(1, 2)
         v = xv.transpose(1, 2)
-        attn_mask = None
-        if memory_mask is not None:
-            attn_mask = memory_mask[:, None, None, :].to(dtype=q.dtype)
-            attn_mask = attn_mask.masked_fill(
-                attn_mask == 0,
-                float("-inf"),
-            ).masked_fill(attn_mask == 1, 0.0)
+        if query_positions is not None:
+            q = self._apply_rope(q, query_positions)
+            k = self._apply_rope(k, memory_positions)
+        if self.n_kv_heads != self.n_heads:
+            repeats = self.n_heads // self.n_kv_heads
+            k = k.repeat_interleave(repeats, dim=1)
+            v = v.repeat_interleave(repeats, dim=1)
+        attn_mask = (
+            None if memory_mask is None else memory_mask[:, None, None, :]
+        )
         attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         attn = attn.transpose(1, 2).contiguous().view(bsz, tgt_len, self.dim)
         return self.wo(attn)
@@ -192,6 +231,51 @@ class SwiGLUFeedForward(nn.Module):
 
     def forward(self, x: Float[Tensor, "*batch dim"]) -> Float[Tensor, "*batch dim"]:
         return self.fc3(F.silu(self.fc1(x)) * self.fc2(x))
+
+
+class CrossAttentionBlock(nn.Module):
+    def __init__(
+        self,
+        *,
+        dim: int,
+        n_heads: int,
+        norm_eps: float,
+        hidden_dim: int,
+        max_sequence_length: int,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.attention = CrossAttention(
+            dim,
+            n_heads,
+            rope_max_sequence_length=max_sequence_length,
+        )
+        self.feed_forward = FeedForward(dim, hidden_dim=hidden_dim)
+        self.query_norm = _build_norm(dim, eps=norm_eps)
+        self.memory_norm = _build_norm(dim, eps=norm_eps)
+        self.ffn_norm = _build_norm(dim, eps=norm_eps)
+        self.drop = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
+
+    def forward(
+        self,
+        query: Float[Tensor, "batch targets dim"],
+        memory: Float[Tensor, "batch memory dim"],
+        query_positions: Int[Tensor, "batch targets"],
+        memory_positions: Int[Tensor, "batch memory"],
+        query_mask: Bool[Tensor, "batch targets"],
+        memory_mask: Bool[Tensor, "batch memory"],
+    ) -> Float[Tensor, "batch targets dim"]:
+        query = query + self.drop(
+            self.attention(
+                self.query_norm(query),
+                self.memory_norm(memory),
+                memory_mask=memory_mask,
+                query_positions=query_positions,
+                memory_positions=memory_positions,
+            )
+        )
+        query = query + self.drop(self.feed_forward(self.ffn_norm(query)))
+        return query * query_mask.unsqueeze(-1).to(query.dtype)
 
 
 class TransformerBlock(nn.Module):

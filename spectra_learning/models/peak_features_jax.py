@@ -1,13 +1,23 @@
 from __future__ import annotations
 
-from math import log10
+from math import ceil, log10
 
 import jax.numpy as jnp
 import torch
 from flax import nnx
 
 from spectra_learning.data.spectra import PEAK_MZ_MAX
-from spectra_learning.models.common_jax import Array, Linear, MLP, load_param, silu
+from spectra_learning.models.common_jax import (
+    Array,
+    Embedding,
+    Linear,
+    MLP,
+    load_param,
+    silu,
+)
+
+
+MZ_EMBEDDING_MODES = {"fourier", "token"}
 
 
 class FourierFeatures(nnx.Module):
@@ -44,6 +54,41 @@ class FourierFeatures(nnx.Module):
         load_param(self.b, state_dict, f"{prefix}.b")
 
 
+class MzTokenEmbedding(nnx.Module):
+    def __init__(
+        self,
+        *,
+        mz_scale: float,
+        bin_size: float,
+        embedding_dim: int,
+    ) -> None:
+        assert mz_scale > 0.0
+        assert bin_size > 0.0
+        self.mz_scale = mz_scale
+        self.bin_size = bin_size
+        self.num_tokens = ceil(mz_scale / bin_size)
+        self.embedding = Embedding(self.num_tokens, embedding_dim)
+
+    def token_ids(self, peak_mz: Array) -> Array:
+        token_ids = jnp.floor(
+            peak_mz * self.mz_scale / self.bin_size
+        ).astype(jnp.int32)
+        return jnp.clip(token_ids, 0, self.num_tokens - 1)
+
+    def __call__(self, peak_mz: Array) -> Array:
+        return self.embedding(self.token_ids(peak_mz))
+
+    def num_features(self) -> int:
+        return self.embedding.weight[...].shape[1]
+
+    def load_torch_state_dict(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        prefix: str,
+    ) -> None:
+        self.embedding.load_torch_state_dict(state_dict, f"{prefix}.embedding")
+
+
 class PeakFeatureEmbedder(nnx.Module):
     def __init__(
         self,
@@ -57,32 +102,47 @@ class PeakFeatureEmbedder(nnx.Module):
         fourier_num_freqs: int = 256,
         mz_scale: float = PEAK_MZ_MAX,
         mz_embedding: str = "fourier",
+        token_bin_size: float = 0.02,
+        token_embedding_dim: int = 77,
         compute_dtype: object = jnp.float32,
         rngs: nnx.Rngs | None = None,
     ) -> None:
         rngs = nnx.Rngs(0) if rngs is None else rngs
         self.mz_embedding = mz_embedding.lower()
-        if self.mz_embedding != "fourier":
-            raise ValueError("JAX training currently requires mz_embedding='fourier'")
+        if self.mz_embedding not in MZ_EMBEDDING_MODES:
+            raise ValueError("mz_embedding must be one of ('fourier', 'token')")
         self.mz_scale = mz_scale
         fourier_hidden_dim = (
             hidden_dim if fourier_mlp_hidden_dim is None else fourier_mlp_hidden_dim
         )
         mz_dim = model_dim // 2
         raw_dim = model_dim - mz_dim
-        self.mz_features = FourierFeatures(
-            x_min=fourier_x_min,
-            x_max=fourier_x_max,
-            num_freqs=fourier_num_freqs,
-        )
-        self.mz_ffn = MLP(
-            self.mz_features.num_features(),
-            fourier_hidden_dim,
-            mz_dim,
-            fourier_mlp_num_layers,
-            compute_dtype=compute_dtype,
-            rngs=rngs,
-        )
+        if self.mz_embedding == "fourier":
+            self.mz_features = FourierFeatures(
+                x_min=fourier_x_min,
+                x_max=fourier_x_max,
+                num_freqs=fourier_num_freqs,
+            )
+            self.mz_ffn = MLP(
+                self.mz_features.num_features(),
+                fourier_hidden_dim,
+                mz_dim,
+                fourier_mlp_num_layers,
+                compute_dtype=compute_dtype,
+                rngs=rngs,
+            )
+        else:
+            self.mz_features = MzTokenEmbedding(
+                mz_scale=mz_scale,
+                bin_size=token_bin_size,
+                embedding_dim=token_embedding_dim,
+            )
+            self.mz_ffn = Linear(
+                self.mz_features.num_features(),
+                mz_dim,
+                compute_dtype=compute_dtype,
+                rngs=rngs,
+            )
         self.raw_ffn = nnx.List(
             [
                 Linear(3, hidden_dim, compute_dtype=compute_dtype, rngs=rngs),
@@ -105,13 +165,17 @@ class PeakFeatureEmbedder(nnx.Module):
     def __call__(self, peak_mz: Array, peak_intensity: Array) -> Array:
         peak_mz = peak_mz.astype(jnp.float32)
         peak_intensity = peak_intensity.astype(jnp.float32)
-        mz = peak_mz[..., None]
+        raw_mz = peak_mz if self.mz_embedding == "fourier" else jnp.zeros_like(peak_mz)
+        mz = raw_mz[..., None]
         intensity = peak_intensity[..., None]
         log_intensity = jnp.log1p(peak_intensity)[..., None]
         raw = self._raw_ffn_call(jnp.concatenate([mz, intensity, log_intensity], axis=-1))
-        mz_embedding = self.mz_ffn(
+        mz_features = (
             self.mz_features(self._prepare_fourier_mz(peak_mz))
+            if self.mz_embedding == "fourier"
+            else self.mz_features(peak_mz)
         )
+        mz_embedding = self.mz_ffn(mz_features)
         return self.output_proj(jnp.concatenate([mz_embedding, raw], axis=-1))
 
     def load_torch_state_dict(
@@ -120,7 +184,12 @@ class PeakFeatureEmbedder(nnx.Module):
         prefix: str,
     ) -> None:
         self.mz_features.load_torch_state_dict(state_dict, f"{prefix}.mz_features")
-        self.mz_ffn.load_torch_state_dict(state_dict, f"{prefix}.mz_ffn")
+        self.mz_ffn.load_torch_state_dict(
+            state_dict,
+            f"{prefix}.mz_ffn"
+            if self.mz_embedding == "fourier"
+            else f"{prefix}.mz_ffn.0",
+        )
         self.raw_ffn[0].load_torch_state_dict(state_dict, f"{prefix}.raw_ffn.0")
         self.raw_ffn[1].load_torch_state_dict(state_dict, f"{prefix}.raw_ffn.2")
         self.output_proj.load_torch_state_dict(state_dict, f"{prefix}.output_proj")

@@ -7,6 +7,7 @@ from typing import Any
 from spectra_learning.config import load_config
 from spectra_learning.data.spectra import DEFAULT_NUM_PEAKS, PEAK_MZ_MAX
 from spectra_learning.models.fastmixer_capacity import (
+    predictor_target_max_tokens,
     resolve_pairmixer_fast_encoder_max_visible_tokens,
     resolve_pairmixer_fast_max_visible_tokens,
 )
@@ -27,6 +28,7 @@ REMOVED_SETTING_KEYS = (
     "pairmixer_encoder_projection_kernel",
     "pairmixer_fourier_x_max",
     "pairmixer_mz_scale",
+    "pairmixer_use_fourier_features",
     "pairmixer_precursor_mz_scale",
     "pairmixer_predictor_projection_kernel",
     "pairmixer_encoder_projection_kernel_schedule",
@@ -97,6 +99,7 @@ class PeakSetJEPASettings:
     masked_latent_predictor_num_heads: int = 8
     jepa_num_target_blocks: int = 2
     norm_eps: float = 1e-5
+    encoder_use_cls_token: bool = True
     encoder_use_position_embedding: bool = True
     encoder_apply_final_norm: bool = True
     encoder_apply_final_pair_norm: bool = False
@@ -108,7 +111,9 @@ class PeakSetJEPASettings:
     pairmixer_use_pair_bias: bool = True
     pairmixer_mz_scale: float = PEAK_MZ_MAX
     pairmixer_precursor_mz_scale: float = PEAK_MZ_MAX
-    pairmixer_use_fourier_features: bool = True
+    pairmixer_mz_embedding: str = "fourier"
+    pairmixer_mz_token_bin_size: float = 0.1
+    pairmixer_mz_token_embedding_dim: int = 128
     pairmixer_fourier_num_freqs: int = 16
     pairmixer_fourier_x_min: float = 1e-2
     pairmixer_fourier_x_max: float = PEAK_MZ_MAX
@@ -119,6 +124,7 @@ class PeakSetJEPASettings:
     predictor_apply_final_norm: bool = True
     num_peaks: int = DEFAULT_NUM_PEAKS
     predictor_dim: int | None = None
+    predictor_target_max_tokens: int | None = None
     target_projector_dim: int | None = None
     predictor_dropout: float = 0.0
     use_ema_teacher: bool = False
@@ -152,6 +158,7 @@ class PeakSetJEPASettings:
         values["pairmixer_fast_encoder_max_visible_tokens"] = (
             resolve_pairmixer_fast_encoder_max_visible_tokens(config)
         )
+        values["predictor_target_max_tokens"] = predictor_target_max_tokens(config)
         return cls(**values)
 
     @classmethod

@@ -26,8 +26,31 @@ DEFAULT_PROJECT = "metal-repeater-411410"
 DEFAULT_REGION = "us-central1"
 DEFAULT_INFRA = f"gcp/{DEFAULT_REGION}"
 DEFAULT_TASK_NAME = "spectra-tpu7x-mig-dws"
+V6E_TASK_NAME = "spectra-v6e-mig-dws"
+V6E_VM_IMAGE_ID = (
+    "projects/ubuntu-os-accelerator-images/global/images/"
+    "ubuntu-accel-2204-amd64-tpu-v5e-v5p-v6e-v20260623"
+)
 DEFAULT_PYTHON_VERSION = "3.12.11"
 DEFAULT_SKY_BIN = "/home/wuhao/skypilot/.venv/bin/sky"
+TPU_V6E_TOPOLOGY_BY_CHIPS = {
+    4: "2x2",
+    8: "2x4",
+    16: "4x4",
+    32: "4x8",
+    64: "8x8",
+    128: "8x16",
+    256: "16x16",
+}
+TPU_V6E_MACHINE_LAYOUT_BY_CHIPS = {
+    4: ("ct6e-standard-4t", 1),
+    8: ("ct6e-standard-8t", 1),
+    16: ("ct6e-standard-4t", 4),
+    32: ("ct6e-standard-4t", 8),
+    64: ("ct6e-standard-4t", 16),
+    128: ("ct6e-standard-4t", 32),
+    256: ("ct6e-standard-4t", 64),
+}
 TPU7X_TOPOLOGY_BY_CHIPS = {
     4: "2x2x1",
     8: "2x2x2",
@@ -40,6 +63,7 @@ TPU7X_TOPOLOGY_BY_CHIPS = {
     1024: "8x8x16",
     2048: "8x16x16",
 }
+SUPPORTED_TPU_V6E_CHIPS = set(TPU_V6E_TOPOLOGY_BY_CHIPS)
 SUPPORTED_TPU7X_CHIPS = set(TPU7X_TOPOLOGY_BY_CHIPS)
 DEFAULT_CHIPS = 8
 DEFAULT_TOPOLOGY = TPU7X_TOPOLOGY_BY_CHIPS[DEFAULT_CHIPS]
@@ -176,6 +200,7 @@ yaml.SafeDumper.add_representer(LiteralString, _literal_string_representer)
 
 @dataclass(frozen=True)
 class TopologySpec:
+    generation: str
     topology: str
     total_chips: int
     num_nodes: int
@@ -184,11 +209,12 @@ class TopologySpec:
 
     @property
     def jax_mesh_devices(self) -> str:
-        return str(2 * self.total_chips)
+        devices = self.total_chips if self.generation == "v6e" else 2 * self.total_chips
+        return str(devices)
 
     @property
     def slug(self) -> str:
-        return f"v7x{self.topology}"
+        return f"{self.generation}{self.topology}"
 
 
 def parse_duration_seconds(value: str) -> int:
@@ -216,13 +242,17 @@ def parse_provision_timeout_seconds(value: str) -> int:
     return seconds
 
 
-def topology_for_chips(chips: int) -> str:
+def topology_for_chips(chips: int, generation: str = "v7x") -> str:
+    topologies = (
+        TPU_V6E_TOPOLOGY_BY_CHIPS if generation == "v6e" else TPU7X_TOPOLOGY_BY_CHIPS
+    )
+    generation_name = "TPU v6e" if generation == "v6e" else "TPU7x"
     try:
-        return TPU7X_TOPOLOGY_BY_CHIPS[int(chips)]
+        return topologies[int(chips)]
     except KeyError:
         raise ValueError(
-            f"chips={chips} is unsupported; supported TPU7x MIG sizes are "
-            f"{sorted(SUPPORTED_TPU7X_CHIPS)}"
+            f"chips={chips} is unsupported; supported {generation_name} MIG sizes are "
+            f"{sorted(topologies)}"
         ) from None
 
 
@@ -240,21 +270,23 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
         "--topology",
         default="",
         help=(
-            "TPU7x topology, such as 2x2x4, or a chip-count shorthand such "
-            "as 16. Defaults from --chips."
+            "TPU topology, such as v6e 4x8 or v7x 2x4x4, or a chip-count "
+            "shorthand such as 32. Defaults from --chips."
         ),
+    )
+    parser.add_argument(
+        "--tpu-generation",
+        choices=("v6e", "v7x"),
+        default="v7x",
     )
     parser.add_argument(
         "--chips",
         "--chip-count",
         dest="chips",
         type=int,
-        choices=sorted(SUPPORTED_TPU7X_CHIPS),
+        choices=sorted(SUPPORTED_TPU_V6E_CHIPS | SUPPORTED_TPU7X_CHIPS),
         default=None,
-        help=(
-            "TPU7x chip count. Defaults to 16. Maps to supported TPU7x "
-            "topologies."
-        ),
+        help="TPU chip count. Maps to a topology for --tpu-generation.",
     )
     parser.add_argument(
         "--job-name",
@@ -375,48 +407,70 @@ def resolve_topology(
     topology: str = "",
     *,
     chips: int | None = None,
+    generation: str = "v7x",
 ) -> TopologySpec:
-    normalized = (
-        topology.lower().removeprefix("tpu7x:").removeprefix("v7x:").strip()
+    topologies = (
+        TPU_V6E_TOPOLOGY_BY_CHIPS if generation == "v6e" else TPU7X_TOPOLOGY_BY_CHIPS
     )
+    prefixes = (
+        ("tpu-v6e:", "tpuv6e:", "v6e:")
+        if generation == "v6e"
+        else ("tpu7x:", "tpu-v7x:", "v7x:")
+    )
+    normalized = topology.lower().strip()
+    for prefix in prefixes:
+        normalized = normalized.removeprefix(prefix)
     if normalized:
         if normalized.isdigit():
             chip_count = int(normalized)
-            normalized = topology_for_chips(chip_count)
+            normalized = topology_for_chips(chip_count, generation)
         elif chips is not None:
-            expected = topology_for_chips(chips)
+            expected = topology_for_chips(chips, generation)
             if normalized != expected:
                 raise ValueError(
                     f"--chips={chips} maps to topology {expected}, but "
                     f"--topology={topology!r} was also provided"
                 )
     else:
-        normalized = topology_for_chips(DEFAULT_CHIPS if chips is None else chips)
+        normalized = topology_for_chips(
+            DEFAULT_CHIPS if chips is None else chips,
+            generation,
+        )
     parts = normalized.split("x")
-    if len(parts) != 3 or not all(part.isdigit() for part in parts):
-        raise ValueError(f"topology must look like 2x2x4; got {topology!r}")
+    dimensions = 2 if generation == "v6e" else 3
+    example = "4x8" if generation == "v6e" else "2x2x4"
+    if len(parts) != dimensions or not all(part.isdigit() for part in parts):
+        raise ValueError(f"topology must look like {example}; got {topology!r}")
     dims = tuple(int(part) for part in parts)
-    total_chips = dims[0] * dims[1]
-    total_chips *= dims[2]
+    total_chips = 1
+    for dimension in dims:
+        total_chips *= dimension
     if total_chips <= 0:
         raise ValueError(f"topology must contain positive dimensions; got {topology!r}")
-    expected_topology = TPU7X_TOPOLOGY_BY_CHIPS.get(total_chips)
+    expected_topology = topologies.get(total_chips)
     if expected_topology != normalized:
+        generation_name = "TPU v6e" if generation == "v6e" else "TPU7x"
         raise ValueError(
-            f"topology {normalized!r} is unsupported; supported TPU7x "
-            f"topologies are {list(TPU7X_TOPOLOGY_BY_CHIPS.values())}"
+            f"topology {normalized!r} is unsupported; supported {generation_name} "
+            f"topologies are {list(topologies.values())}"
         )
     if chips is not None and total_chips != chips:
         raise ValueError(
             f"--chips={chips} conflicts with topology {normalized!r}, which "
             f"has {total_chips} chips"
         )
+    if generation == "v6e":
+        instance_type, num_nodes = TPU_V6E_MACHINE_LAYOUT_BY_CHIPS[total_chips]
+    else:
+        instance_type = DEFAULT_INSTANCE_TYPE
+        num_nodes = total_chips // DEFAULT_CHIPS_PER_NODE
     return TopologySpec(
+        generation=generation,
         topology=normalized,
         total_chips=total_chips,
-        num_nodes=total_chips // DEFAULT_CHIPS_PER_NODE,
-        chips_per_node=DEFAULT_CHIPS_PER_NODE,
-        instance_type=DEFAULT_INSTANCE_TYPE,
+        num_nodes=num_nodes,
+        chips_per_node=total_chips // num_nodes,
+        instance_type=instance_type,
     )
 
 
@@ -482,6 +536,7 @@ def build_train_overrides(
     jax_cache_dir: str,
     queue_tag: str,
     experiment_tag: str,
+    tpu_generation: str = "v7x",
 ) -> dict[str, Any]:
     return {
         "jax_distributed_initialize": True,
@@ -501,11 +556,11 @@ def build_train_overrides(
                 "gcp",
                 "dws",
                 queue_tag,
-                "tpu-v7x",
+                f"tpu-{tpu_generation}",
                 experiment_tag,
             ],
             "notes": (
-                "SkyPilot GCP DWS TPU7x run launched by train_sky.py."
+                f"SkyPilot GCP DWS TPU {tpu_generation} run launched by train_sky.py."
             ),
         },
     }
@@ -528,6 +583,10 @@ def build_task(
         "infra": infra,
         "instance_type": topology.instance_type,
     }
+    if topology.generation == "v6e":
+        resources["image_id"] = {
+            gcp_region_from_infra(infra): V6E_VM_IMAGE_ID,
+        }
     if cpus:
         resources["cpus"] = cpus
     if memory:
@@ -670,6 +729,7 @@ def main(argv: list[str] | None = None) -> None:
     topology = resolve_topology(
         args.topology,
         chips=args.chips,
+        generation=args.tpu_generation,
     )
     user_overrides = parse_config_overrides(args.override)
     config = load_config(args.config, user_overrides)
@@ -693,6 +753,7 @@ def main(argv: list[str] | None = None) -> None:
         jax_cache_dir=jax_cache_dir,
         queue_tag=args.queue_tag,
         experiment_tag=experiment_tag,
+        tpu_generation=topology.generation,
     )
     overrides.update(user_overrides)
     config = load_config(args.config, overrides)
@@ -707,7 +768,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     logging.warning(
         "GCP DWS uses SkyPilot gcp.managed_instance_group with Flex-start "
-        "MIGs. Use the vendored SkyPilot build at %s; it contains the TPU7x "
+        "MIGs. Use the vendored SkyPilot build at %s; it contains the TPU "
         "Compute Engine workload-policy support required by this launcher.",
         args.sky_bin,
     )
@@ -755,7 +816,11 @@ def main(argv: list[str] | None = None) -> None:
         topology=topology,
         envs=task_envs,
         infra=args.infra,
-        task_name=args.task_name,
+        task_name=(
+            V6E_TASK_NAME
+            if topology.generation == "v6e" and args.task_name == DEFAULT_TASK_NAME
+            else args.task_name
+        ),
         cpus=args.cpus,
         memory=args.memory,
         dws_run_duration_seconds=args.dws_run_duration_seconds,

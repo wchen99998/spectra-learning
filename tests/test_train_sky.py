@@ -34,6 +34,7 @@ def test_launcher_shape_comes_from_explicit_current_run_config():
     assert args.config == TRAIN_CONFIG
     assert args.workdir == TRAIN_WORKDIR
     assert args.topology == ""
+    assert args.tpu_generation == "v7x"
     assert args.chips is None
     assert args.region == "us-central1"
     assert args.infra == "gcp/us-central1"
@@ -295,6 +296,32 @@ def test_resolve_topology_accepts_explicit_topology_and_chip_count_shorthand():
     assert train_sky.resolve_topology("tpu7x:64").topology == "4x4x4"
 
 
+@pytest.mark.parametrize(
+    ("chips", "topology_name", "instance_type", "num_nodes", "chips_per_node"),
+    [
+        (4, "2x2", "ct6e-standard-4t", 1, 4),
+        (8, "2x4", "ct6e-standard-8t", 1, 8),
+        (16, "4x4", "ct6e-standard-4t", 4, 4),
+        (32, "4x8", "ct6e-standard-4t", 8, 4),
+        (64, "8x8", "ct6e-standard-4t", 16, 4),
+        (128, "8x16", "ct6e-standard-4t", 32, 4),
+        (256, "16x16", "ct6e-standard-4t", 64, 4),
+    ],
+)
+def test_resolve_v6e_shape(
+    chips, topology_name, instance_type, num_nodes, chips_per_node
+):
+    topology = train_sky.resolve_topology(chips=chips, generation="v6e")
+
+    assert topology.generation == "v6e"
+    assert topology.topology == topology_name
+    assert topology.total_chips == chips
+    assert topology.num_nodes == num_nodes
+    assert topology.chips_per_node == chips_per_node
+    assert topology.instance_type == instance_type
+    assert topology.jax_mesh_devices == str(chips)
+
+
 def test_resolve_topology_rejects_conflicting_topology_and_chips():
     with pytest.raises(ValueError, match="maps to topology"):
         train_sky.resolve_topology("2x4x4", chips=64)
@@ -353,6 +380,40 @@ def test_build_task_constructs_direct_gcp_dws_resources_and_env():
     assert ".venv/bin/python train.py" in task["run"]
     assert "SPECTRA_AOT" not in task["run"]
     assert "precompile" not in task["run"].lower()
+
+
+def test_build_task_constructs_v6e_32_resources():
+    task = train_sky.build_task(
+        topology=train_sky.resolve_topology(chips=32, generation="v6e"),
+        envs={"SPECTRA_RUN_ID": "v6e-32", "SPECTRA_CONFIG_JSON": "{}"},
+        infra="gcp/us-east5",
+        task_name=train_sky.V6E_TASK_NAME,
+    )
+
+    assert task["name"] == "spectra-v6e-mig-dws"
+    assert task["num_nodes"] == 8
+    assert task["resources"]["instance_type"] == "ct6e-standard-4t"
+    assert task["resources"]["image_id"] == {
+        "us-east5": train_sky.V6E_VM_IMAGE_ID
+    }
+    assert task["config"]["gcp"]["managed_instance_group"][
+        "accelerator_topology"
+    ] == "4x8"
+
+
+def test_build_task_constructs_v6e_8_resources():
+    task = train_sky.build_task(
+        topology=train_sky.resolve_topology(chips=8, generation="v6e"),
+        envs={"SPECTRA_RUN_ID": "v6e-8", "SPECTRA_CONFIG_JSON": "{}"},
+        infra="gcp/us-east5",
+        task_name=train_sky.V6E_TASK_NAME,
+    )
+
+    assert task["num_nodes"] == 1
+    assert task["resources"]["instance_type"] == "ct6e-standard-8t"
+    assert task["config"]["gcp"]["managed_instance_group"][
+        "accelerator_topology"
+    ] == "2x4"
 
 
 def test_build_task_sets_dws_run_duration():

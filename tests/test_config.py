@@ -56,6 +56,7 @@ def test_current_pretraining_config_records_model_and_data_defaults() -> None:
         "pairmixer_fourier_x_max",
         "pairmixer_mz_scale",
         "pairmixer_precursor_mz_scale",
+        "predictor_target_max_tokens",
     }
     assert data_keys - set(config) == {
         "jepa_intensity_aware_mask_config",

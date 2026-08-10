@@ -24,6 +24,7 @@ class PeakSetEncoder(nn.Module):
         apply_final_norm: bool = True,
         apply_final_pair_norm: bool = False,
         num_peaks: int = DEFAULT_NUM_PEAKS,
+        use_cls_token: bool = True,
         use_position_embedding: bool = True,
         pairmixer_block_type: str = "dense",
         pairmixer_transition_type: str = "swiglu",
@@ -33,7 +34,9 @@ class PeakSetEncoder(nn.Module):
         pairmixer_use_pair_bias: bool = True,
         pairmixer_mz_scale: float = PEAK_MZ_MAX,
         pairmixer_precursor_mz_scale: float = PEAK_MZ_MAX,
-        pairmixer_use_fourier_features: bool = True,
+        pairmixer_mz_embedding: str = "fourier",
+        pairmixer_mz_token_bin_size: float = 0.1,
+        pairmixer_mz_token_embedding_dim: int = 128,
         pairmixer_fourier_num_freqs: int = 16,
         pairmixer_fourier_x_min: float = 1e-2,
         pairmixer_fourier_x_max: float = PEAK_MZ_MAX,
@@ -42,6 +45,7 @@ class PeakSetEncoder(nn.Module):
     ):
         super().__init__()
         self.num_layers = num_layers
+        self.use_cls_token = use_cls_token
         self.use_position_embedding = use_position_embedding
         self.pairmixer_block_type = pairmixer_block_type.lower()
         if self.pairmixer_block_type not in {
@@ -63,21 +67,29 @@ class PeakSetEncoder(nn.Module):
             model_dim,
         )
         pair_dim = model_dim if pair_dim is None else pair_dim
-        self.cls_token = nn.Parameter(torch.empty(model_dim))
-        nn.init.normal_(self.cls_token, std=0.02)
-        self.cls_to_peak_pair_token = nn.Parameter(torch.empty(pair_dim))
-        self.peak_to_cls_pair_token = nn.Parameter(torch.empty(pair_dim))
-        self.cls_cls_pair_token = nn.Parameter(torch.empty(pair_dim))
-        nn.init.normal_(self.cls_to_peak_pair_token, std=0.02)
-        nn.init.normal_(self.peak_to_cls_pair_token, std=0.02)
-        nn.init.normal_(self.cls_cls_pair_token, std=0.02)
+        if self.use_cls_token:
+            self.cls_token = nn.Parameter(torch.empty(model_dim))
+            nn.init.normal_(self.cls_token, std=0.02)
+            self.cls_to_peak_pair_token = nn.Parameter(torch.empty(pair_dim))
+            self.peak_to_cls_pair_token = nn.Parameter(torch.empty(pair_dim))
+            self.cls_cls_pair_token = nn.Parameter(torch.empty(pair_dim))
+            nn.init.normal_(self.cls_to_peak_pair_token, std=0.02)
+            nn.init.normal_(self.peak_to_cls_pair_token, std=0.02)
+            nn.init.normal_(self.cls_cls_pair_token, std=0.02)
+        else:
+            self.register_parameter("cls_token", None)
+            self.register_parameter("cls_to_peak_pair_token", None)
+            self.register_parameter("peak_to_cls_pair_token", None)
+            self.register_parameter("cls_cls_pair_token", None)
         self.pair_embedder = PairFeatureEmbedder(
             single_dim=model_dim,
             pair_dim=pair_dim,
             hidden_dim=pair_feature_hidden_dim,
             mz_scale=pairmixer_mz_scale,
             precursor_mz_scale=pairmixer_precursor_mz_scale,
-            use_fourier_features=pairmixer_use_fourier_features,
+            mz_embedding=pairmixer_mz_embedding,
+            token_bin_size=pairmixer_mz_token_bin_size,
+            token_embedding_dim=pairmixer_mz_token_embedding_dim,
             fourier_num_freqs=pairmixer_fourier_num_freqs,
             fourier_x_min=pairmixer_fourier_x_min,
             fourier_x_max=pairmixer_fourier_x_max,
@@ -124,6 +136,8 @@ class PeakSetEncoder(nn.Module):
         x: Float[Tensor, "batch peaks dim"],
         metadata_embedding: Float[Tensor, "batch dim"] | None = None,
     ) -> Float[Tensor, "batch tokens dim"]:
+        if not self.use_cls_token:
+            return x
         cls = self.cls_token.view(1, 1, -1).expand(x.shape[0], 1, -1)
         cls = cls.to(dtype=x.dtype) + x[:, :1] * 0.0
         if metadata_embedding is not None:
@@ -143,6 +157,8 @@ class PeakSetEncoder(nn.Module):
         self,
         pair: Float[Tensor, "batch peaks peaks pair"],
     ) -> Float[Tensor, "batch tokens tokens pair"]:
+        if not self.use_cls_token:
+            return pair
         peak_to_cls = self.peak_to_cls_pair_token.view(1, 1, 1, -1).to(
             dtype=pair.dtype
         )
@@ -161,6 +177,8 @@ class PeakSetEncoder(nn.Module):
         self,
         peak_mask: Bool[Tensor, "batch peaks"],
     ) -> Bool[Tensor, "batch tokens"]:
+        if not self.use_cls_token:
+            return peak_mask
         cls_mask = torch.ones_like(peak_mask[:, :1])
         return torch.cat([peak_mask, cls_mask], dim=1)
 

@@ -26,16 +26,28 @@ def learning_rate_at_step(
     total_steps: int,
     warmup_steps: int,
     min_learning_rate: float | None = None,
+    schedule_start_step: int = 0,
+    warmup_start_learning_rate: float | None = None,
 ) -> float:
     min_lr = min_learning_rate if min_learning_rate is not None else 0.1 * base_lr
-    if warmup_steps > 0 and step < warmup_steps:
-        warmup = _WARMUP_START_FACTOR + (
-            1.0 - _WARMUP_START_FACTOR
-        ) * step / warmup_steps
-        return base_lr * warmup
+    warmup_start_lr = (
+        base_lr * _WARMUP_START_FACTOR
+        if warmup_start_learning_rate is None
+        else warmup_start_learning_rate
+    )
+    local_step = max(0, step - schedule_start_step)
+    schedule_steps = max(1, total_steps - schedule_start_step)
+    if warmup_steps > 0 and local_step < warmup_steps:
+        return warmup_start_lr + (
+            base_lr - warmup_start_lr
+        ) * local_step / warmup_steps
     ratio = max(
         0.0,
-        min(1.0, max(0, step - warmup_steps) / max(1, total_steps - warmup_steps)),
+        min(
+            1.0,
+            max(0, local_step - warmup_steps)
+            / max(1, schedule_steps - warmup_steps),
+        ),
     )
     mult = 0.5 * (1.0 + math.cos(math.pi * ratio))
     return min_lr + (base_lr - min_lr) * mult

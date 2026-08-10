@@ -18,7 +18,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pairmixer_pair_dim = 768
     cfg.pairmixer_pair_feature_hidden_dim = 1536
     cfg.mae_loss_weight = 1.0
-    cfg.distogram_loss_weight = 1.0
+    cfg.distogram_loss_weight = 0.0
 
     cfg.predictor_dim = 2560
     cfg.masked_latent_predictor_num_layers = 3

@@ -8,7 +8,7 @@ from jaxtyping import Bool, Float
 from torch import Tensor, nn
 
 from spectra_learning.data.spectra import PEAK_MZ_MAX
-from spectra_learning.models.peak_features import FourierFeatures
+from spectra_learning.models.peak_features import FourierFeatures, MzTokenEmbedding
 from spectra_learning.models.transformer import (
     FeedForward,
     SwiGLUFeedForward,
@@ -63,7 +63,9 @@ class PairFeatureEmbedder(nn.Module):
         hidden_dim: int,
         mz_scale: float = PEAK_MZ_MAX,
         precursor_mz_scale: float = PEAK_MZ_MAX,
-        use_fourier_features: bool = True,
+        mz_embedding: str = "fourier",
+        token_bin_size: float = 0.1,
+        token_embedding_dim: int = 128,
         fourier_num_freqs: int = 16,
         fourier_x_min: float = 1e-2,
         fourier_x_max: float = PEAK_MZ_MAX,
@@ -73,9 +75,11 @@ class PairFeatureEmbedder(nn.Module):
         super().__init__()
         self.mz_scale = mz_scale
         self.precursor_mz_scale = precursor_mz_scale
-        self.use_fourier_features = use_fourier_features
+        self.mz_embedding = mz_embedding.lower()
+        if self.mz_embedding not in {"fourier", "token"}:
+            raise ValueError("mz_embedding must be one of ('fourier', 'token')")
         raw_dim = 14
-        if self.use_fourier_features:
+        if self.mz_embedding == "fourier":
             self.pair_fourier = FourierFeatures(
                 x_min=fourier_x_min,
                 x_max=fourier_x_max,
@@ -88,6 +92,14 @@ class PairFeatureEmbedder(nn.Module):
             )
             raw_dim += 3 * self.pair_fourier.num_features()
             raw_dim += self.relative_pair_fourier.num_features()
+        else:
+            with torch.random.fork_rng(devices=[]):
+                self.mz_features = MzTokenEmbedding(
+                    mz_scale=mz_scale,
+                    bin_size=token_bin_size,
+                    embedding_dim=token_embedding_dim,
+                )
+            raw_dim += self.mz_features.num_features()
         self.raw_proj = nn.Sequential(
             nn.Linear(raw_dim, hidden_dim),
             nn.SiLU(),
@@ -132,21 +144,8 @@ class PairFeatureEmbedder(nn.Module):
         precursor_mz: Float[Tensor, "batch"] | None = None,
     ) -> Float[Tensor, "batch peaks peaks pair"]:
         with torch.autocast(device_type=peak_mz.device.type, enabled=False):
-            mz_da = peak_mz.float() * self.mz_scale
+            peak_mz = peak_mz.float()
             intensity = peak_intensity.float()
-            reference_mass = self._reference_mass_da(
-                peak_mz,
-                valid_mask,
-                precursor_mz,
-            ).view(-1, 1, 1)
-            # mz_i: [B, N, 1], mz_j: [B, 1, N], d/abs_d/relative_d: [B, N, N]
-            mz_i = mz_da.unsqueeze(2)
-            mz_j = mz_da.unsqueeze(1)
-            d = mz_j - mz_i
-            abs_d = d.abs()
-            relative_d = d / reference_mass
-            complement = mz_i + mz_j - reference_mass
-
             intensity_i = intensity.unsqueeze(2)
             intensity_j = intensity.unsqueeze(1)
             diag = torch.eye(
@@ -154,23 +153,35 @@ class PairFeatureEmbedder(nn.Module):
                 device=peak_mz.device,
                 dtype=peak_mz.dtype,
             ).view(1, peak_mz.shape[1], peak_mz.shape[1])
-            raw_parts = [
-                d.unsqueeze(-1) / self.mz_scale,
-                abs_d.unsqueeze(-1) / self.mz_scale,
-                relative_d.unsqueeze(-1),
-                complement.unsqueeze(-1) / self.mz_scale,
-                mz_i.expand_as(d).unsqueeze(-1) / reference_mass.unsqueeze(-1),
-                mz_j.expand_as(d).unsqueeze(-1) / reference_mass.unsqueeze(-1),
-                intensity_i.expand_as(d).unsqueeze(-1),
-                intensity_j.expand_as(d).unsqueeze(-1),
-                (intensity_i * intensity_j).expand_as(d).unsqueeze(-1),
-                torch.log1p(intensity_i).expand_as(d).unsqueeze(-1),
-                torch.log1p(intensity_j).expand_as(d).unsqueeze(-1),
-                torch.sign(d).unsqueeze(-1),
-                diag.expand_as(d).unsqueeze(-1),
-                (d > 0).to(dtype=peak_mz.dtype).unsqueeze(-1),
-            ]
-            if self.use_fourier_features:
+            if self.mz_embedding == "fourier":
+                mz_da = peak_mz * self.mz_scale
+                reference_mass = self._reference_mass_da(
+                    peak_mz,
+                    valid_mask,
+                    precursor_mz,
+                ).view(-1, 1, 1)
+                mz_i = mz_da.unsqueeze(2)
+                mz_j = mz_da.unsqueeze(1)
+                d = mz_j - mz_i
+                abs_d = d.abs()
+                relative_d = d / reference_mass
+                complement = mz_i + mz_j - reference_mass
+                raw_parts = [
+                    d.unsqueeze(-1) / self.mz_scale,
+                    abs_d.unsqueeze(-1) / self.mz_scale,
+                    relative_d.unsqueeze(-1),
+                    complement.unsqueeze(-1) / self.mz_scale,
+                    mz_i.expand_as(d).unsqueeze(-1) / reference_mass.unsqueeze(-1),
+                    mz_j.expand_as(d).unsqueeze(-1) / reference_mass.unsqueeze(-1),
+                    intensity_i.expand_as(d).unsqueeze(-1),
+                    intensity_j.expand_as(d).unsqueeze(-1),
+                    (intensity_i * intensity_j).expand_as(d).unsqueeze(-1),
+                    torch.log1p(intensity_i).expand_as(d).unsqueeze(-1),
+                    torch.log1p(intensity_j).expand_as(d).unsqueeze(-1),
+                    torch.sign(d).unsqueeze(-1),
+                    diag.expand_as(d).unsqueeze(-1),
+                    (d > 0).to(dtype=peak_mz.dtype).unsqueeze(-1),
+                ]
                 raw_parts.extend(
                     [
                         self._fourier_values(
@@ -183,6 +194,25 @@ class PairFeatureEmbedder(nn.Module):
                         ),
                     ]
                 )
+            else:
+                mz_token = self.mz_features.token_ids(peak_mz)
+                token_delta = mz_token.unsqueeze(1) - mz_token.unsqueeze(2)
+                raw_parts = [
+                    torch.zeros(
+                        (*token_delta.shape, 6),
+                        dtype=peak_mz.dtype,
+                        device=peak_mz.device,
+                    ),
+                    intensity_i.expand_as(token_delta).unsqueeze(-1),
+                    intensity_j.expand_as(token_delta).unsqueeze(-1),
+                    (intensity_i * intensity_j).expand_as(token_delta).unsqueeze(-1),
+                    torch.log1p(intensity_i).expand_as(token_delta).unsqueeze(-1),
+                    torch.log1p(intensity_j).expand_as(token_delta).unsqueeze(-1),
+                    torch.sign(token_delta).to(dtype=peak_mz.dtype).unsqueeze(-1),
+                    diag.expand_as(token_delta).unsqueeze(-1),
+                    (token_delta > 0).to(dtype=peak_mz.dtype).unsqueeze(-1),
+                    self.mz_features.embedding(token_delta.abs()),
+                ]
             raw = torch.cat(raw_parts, dim=-1)
             # raw: [B, N, N, pair_raw_features]
         single_i = single.unsqueeze(2)

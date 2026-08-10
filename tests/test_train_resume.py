@@ -685,18 +685,9 @@ def test_jax_optax_transform_applies_global_norm_clipping(monkeypatch):
     assert adamw_calls[0]["b1"] == pytest.approx(0.85)
 
 
-def test_jax_optax_transform_supports_muon(monkeypatch):
+def test_jax_optax_transform_supports_gram_muon():
+    from spectra_learning.training import muon
     from spectra_learning.training import pretrain_jax
-
-    calls = []
-    sentinel = object()
-
-    def fake_muon(**kwargs):
-        calls.append(kwargs)
-        return pretrain_jax.optax.GradientTransformation(
-            lambda params: sentinel,
-            lambda updates, state, params=None: (updates, state),
-        )
 
     cfg = config_dict.ConfigDict()
     cfg.optimizer = "muon"
@@ -707,12 +698,11 @@ def test_jax_optax_transform_supports_muon(monkeypatch):
     cfg.weight_decay = 0.05
     cfg.muon_beta = 0.95
     cfg.muon_ns_steps = 5
-    cfg.muon_ns_coeffs = (3.4445, -4.7750, 2.0315)
+    cfg.muon_ns_coeffs = "polar_express"
     cfg.muon_eps = 1e-8
     cfg.muon_mu_dtype = "float32"
     cfg.muon_nesterov = True
     cfg.muon_adaptive = False
-    cfg.muon_preconditioning = "frobenius"
     cfg.muon_adam_learning_rate = 0.0004
     cfg.muon_adam_min_learning_rate = 0.00004
     cfg.muon_adam_b1 = 0.9
@@ -721,57 +711,178 @@ def test_jax_optax_transform_supports_muon(monkeypatch):
     cfg.muon_adam_weight_decay = 0.0
     cfg.muon_consistent_rms = None
 
-    monkeypatch.setattr(pretrain_jax.optax.contrib, "muon", fake_muon)
-
     transform = pretrain_jax.build_jax_optax_transform(cfg, total_steps=100)
+    params = {
+        "linear": {
+            "weight": pretrain_jax.jnp.ones((512, 128)),
+            "bias": pretrain_jax.jnp.ones((512,)),
+        }
+    }
 
-    assert transform.init({}) is sentinel
-    assert callable(calls[0]["learning_rate"])
-    assert callable(calls[0]["adam_learning_rate"])
-    assert calls[0]["ns_coeffs"] == pytest.approx((3.4445, -4.7750, 2.0315))
-    assert calls[0]["ns_steps"] == 5
-    assert calls[0]["beta"] == pytest.approx(0.95)
-    assert calls[0]["weight_decay"] == pytest.approx(0.05)
-    assert calls[0]["weight_decay_mask"] is pretrain_jax._jax_weight_decay_mask
-    assert calls[0]["muon_weight_dimension_numbers"] is (
-        pretrain_jax._jax_muon_weight_dimension_numbers
+    updates, _ = transform.update(params, transform.init(params), params)
+
+    pretrain_jax.np.testing.assert_allclose(
+        muon._jax_muon_ns_coefficients(cfg),
+        tuple(
+            (a / 1.05, b / 1.05**3, c / 1.05**5)
+            for a, b, c in (
+                (
+                    8.28721201814563,
+                    -23.595886519098837,
+                    17.300387312530933,
+                ),
+                (
+                    4.107059111542203,
+                    -2.9478499167379106,
+                    0.5448431082926601,
+                ),
+                (
+                    3.9486908534822946,
+                    -2.908902115962949,
+                    0.5518191394370137,
+                ),
+                (
+                    3.3184196573706015,
+                    -2.488488024314874,
+                    0.51004894012372,
+                ),
+                (
+                    2.300652019954817,
+                    -1.6689039845747493,
+                    0.4188073119525673,
+                ),
+            )
+        ),
+        rtol=1e-6,
     )
-    assert calls[0]["mu_dtype"] == "float32"
-    assert calls[0]["nesterov"] is True
-    assert calls[0]["adaptive"] is False
-    assert calls[0]["preconditioning"] == "frobenius"
-    assert calls[0]["adam_b1"] == pytest.approx(0.9)
-    assert calls[0]["adam_b2"] == pytest.approx(0.95)
-    assert calls[0]["adam_eps_root"] == pytest.approx(0.0)
-    assert calls[0]["adam_weight_decay"] == pytest.approx(0.0)
-    assert calls[0]["consistent_rms"] is None
+    assert updates["linear"]["weight"].shape == (512, 128)
+    assert updates["linear"]["bias"].shape == (512,)
+    assert pretrain_jax.jnp.all(
+        pretrain_jax.jnp.isfinite(updates["linear"]["weight"])
+    )
 
 
-def test_jax_muon_adjust_lr_match_rms_adamw_maps_to_consistent_rms(monkeypatch):
+def test_jax_gram_muon_keeps_optax_checkpoint_state_tree():
+    from spectra_learning.training import muon
     from spectra_learning.training import pretrain_jax
 
-    calls = []
-
-    def fake_muon(**kwargs):
-        calls.append(kwargs)
-        return pretrain_jax.optax.GradientTransformation(
-            lambda params: None,
-            lambda updates, state, params=None: (updates, state),
+    cfg = config_dict.ConfigDict(
+        {
+            "optimizer": "muon",
+            "learning_rate": 1e-3,
+            "weight_decay": 0.1,
+        }
+    )
+    params = {
+        "attention": {"qkv": {"weight": pretrain_jax.jnp.ones((24, 8))}},
+        "linear": {
+            "weight": pretrain_jax.jnp.ones((8, 8)),
+            "bias": pretrain_jax.jnp.ones((8,)),
+        },
+    }
+    reference = muon._jax_split_qkv_transform(
+        pretrain_jax.optax.contrib.muon(
+            learning_rate=pretrain_jax._jax_learning_rate_schedule(
+                cfg,
+                total_steps=100,
+            ),
+            weight_decay=0.1,
+            weight_decay_mask=pretrain_jax._jax_weight_decay_mask,
+            muon_weight_dimension_numbers=muon._jax_muon_weight_dimension_numbers,
         )
+    ).init(params)
+    actual = pretrain_jax._jax_muon_transform(cfg, total_steps=100).init(params)
+
+    assert pretrain_jax.jax.tree.structure(actual) == pretrain_jax.jax.tree.structure(
+        reference
+    )
+    for expected, value in zip(
+        pretrain_jax.jax.tree.leaves(reference),
+        pretrain_jax.jax.tree.leaves(actual),
+        strict=True,
+    ):
+        pretrain_jax.np.testing.assert_array_equal(value, expected)
+
+
+def test_jax_gram_newton_schulz_matches_standard_in_float32():
+    from spectra_learning.training import muon
+    from spectra_learning.training import pretrain_jax
+
+    coeffs = ((3.4445, -4.7750, 2.0315),) * 5
+    matrices = pretrain_jax.jax.random.normal(
+        pretrain_jax.jax.random.key(0),
+        (1, 8, 32),
+    )
+    matrices /= pretrain_jax.jnp.linalg.norm(
+        matrices,
+        axis=(-2, -1),
+        keepdims=True,
+    )
+
+    standard = muon._jax_standard_newton_schulz(matrices, coeffs)
+    gram = muon._jax_gram_newton_schulz(matrices, coeffs)
+
+    pretrain_jax.np.testing.assert_allclose(gram, standard, rtol=1e-4, atol=1e-5)
+    assert muon._jax_muon_matmul(
+        matrices,
+        matrices.mT,
+        pretrain_jax.jnp.bfloat16,
+    ).dtype == pretrain_jax.jnp.float32
+
+
+def test_jax_polar_express_uses_stable_bf16_gram_tail():
+    from spectra_learning.training import muon
+    from spectra_learning.training import pretrain_jax
+
+    cfg = config_dict.ConfigDict(
+        {"muon_ns_coeffs": "polar_express", "muon_ns_steps": 5}
+    )
+    coeffs = muon._jax_muon_ns_coefficients(cfg)
+    key_u, key_v = pretrain_jax.jax.random.split(
+        pretrain_jax.jax.random.key(1)
+    )
+    u, _ = pretrain_jax.jnp.linalg.qr(
+        pretrain_jax.jax.random.normal(key_u, (8, 8))
+    )
+    v, _ = pretrain_jax.jnp.linalg.qr(
+        pretrain_jax.jax.random.normal(key_v, (32, 8))
+    )
+    singular_values = pretrain_jax.jnp.array(
+        (1.0, 1.0) + (1e-5,) * 6
+    )
+    matrix = (u * singular_values) @ v.T
+    normalized = matrix[None] / (
+        pretrain_jax.jnp.linalg.norm(matrix) + 1e-7
+    )
+    standard = muon._jax_standard_newton_schulz(
+        normalized,
+        coeffs,
+        ns_dtype=pretrain_jax.jnp.bfloat16,
+    )[0]
+    gram = muon._jax_gram_muon_orthogonalize(
+        matrix,
+        ns_coeffs=coeffs,
+        eps=1e-7,
+        gram_min_aspect_ratio=2.0,
+        gram_min_dimension=1,
+        polar_express=True,
+        dimension_numbers=pretrain_jax.optax.contrib.MuonDimensionNumbers(),
+    )
+
+    relative_error = pretrain_jax.jnp.linalg.norm(
+        gram - standard
+    ) / pretrain_jax.jnp.linalg.norm(standard)
+    assert relative_error < 0.05
+    assert pretrain_jax.jnp.all(pretrain_jax.jnp.isfinite(gram))
+
+
+def test_jax_muon_adjust_lr_match_rms_adamw_maps_to_consistent_rms():
+    from spectra_learning.training import muon
 
     cfg = config_dict.ConfigDict()
-    cfg.optimizer = "muon"
-    cfg.learning_rate = 0.0004
-    cfg.min_learning_rate = 0.00004
-    cfg.warmup_steps = 20
-    cfg.weight_decay = 0.05
     cfg.muon_adjust_lr_fn = "match_rms_adamw"
 
-    monkeypatch.setattr(pretrain_jax.optax.contrib, "muon", fake_muon)
-
-    pretrain_jax.build_jax_optax_transform(cfg, total_steps=100)
-
-    assert calls[0]["consistent_rms"] == pytest.approx(0.2)
+    assert muon._jax_muon_consistent_rms(cfg) == pytest.approx(0.2)
 
 
 def test_jax_weight_decay_mask_matches_torch_matrix_weight_rule():
@@ -799,6 +910,7 @@ def test_jax_weight_decay_mask_matches_torch_matrix_weight_rule():
 
 
 def test_jax_muon_weight_dimension_numbers_matches_matrix_weight_rule():
+    from spectra_learning.training import muon
     from spectra_learning.training import pretrain_jax
 
     params = {
@@ -813,7 +925,7 @@ def test_jax_muon_weight_dimension_numbers_matches_matrix_weight_rule():
         "token": pretrain_jax.np.ones((4,)),
     }
 
-    dim_numbers = pretrain_jax._jax_muon_weight_dimension_numbers(params)
+    dim_numbers = muon._jax_muon_weight_dimension_numbers(params)
 
     assert isinstance(
         dim_numbers["linear"]["weight"],
@@ -828,6 +940,7 @@ def test_jax_muon_weight_dimension_numbers_matches_matrix_weight_rule():
 
 
 def test_jax_muon_weight_dimension_numbers_splits_qkv_blocks():
+    from spectra_learning.training import muon
     from spectra_learning.training import pretrain_jax
 
     params = {
@@ -840,7 +953,7 @@ def test_jax_muon_weight_dimension_numbers_splits_qkv_blocks():
         },
     }
 
-    dim_numbers = pretrain_jax._jax_muon_weight_dimension_numbers(params)
+    dim_numbers = muon._jax_muon_weight_dimension_numbers(params)
 
     assert dim_numbers["attention"]["wqkv"]["weight"].reduction_axis == 2
     assert dim_numbers["attention"]["wqkv"]["weight"].output_axis == 1
@@ -851,6 +964,7 @@ def test_jax_muon_weight_dimension_numbers_splits_qkv_blocks():
 
 
 def test_jax_muon_split_qkv_transform_preserves_model_update_shapes():
+    from spectra_learning.training import muon
     from spectra_learning.training import pretrain_jax
 
     calls = {}
@@ -865,7 +979,7 @@ def test_jax_muon_split_qkv_transform_preserves_model_update_shapes():
         calls["param_wqkv_shape"] = params["attention"]["wqkv"]["weight"].shape
         return updates, state
 
-    transform = pretrain_jax._jax_split_qkv_transform(
+    transform = muon._jax_split_qkv_transform(
         pretrain_jax.optax.GradientTransformation(init_fn, update_fn)
     )
     params = {
@@ -911,6 +1025,38 @@ def test_scheduled_jax_learning_rate_matches_torch_schedule():
                 min_learning_rate=0.0004,
             )
         )
+
+
+def test_jax_learning_rate_schedule_supports_warm_restart():
+    from spectra_learning.training import pretrain_jax
+
+    cfg = config_dict.ConfigDict(
+        {
+            "learning_rate": 3e-5,
+            "min_learning_rate": 6e-7,
+            "warmup_steps": 5_000,
+            "learning_rate_schedule_start_step": 300_000,
+            "warmup_start_learning_rate": 6e-6,
+        }
+    )
+    schedule = pretrain_jax._jax_learning_rate_schedule(
+        cfg,
+        total_steps=800_000,
+    )
+
+    expected = {
+        300_000: 6e-6,
+        302_500: 1.8e-5,
+        305_000: 3e-5,
+        800_000: 6e-7,
+    }
+    for step, learning_rate in expected.items():
+        assert float(schedule(step)) == pytest.approx(learning_rate)
+        assert pretrain_jax._scheduled_jax_learning_rate(
+            cfg,
+            global_step=step,
+            total_steps=800_000,
+        ) == pytest.approx(learning_rate)
 
 
 def test_train_and_evaluate_jax_logs_final_metrics_on_main_process(

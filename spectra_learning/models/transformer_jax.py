@@ -93,6 +93,112 @@ class Attention(nnx.Module):
         self.wo.load_torch_state_dict(state_dict, f"{prefix}.wo")
 
 
+class CrossAttention(nnx.Module):
+    def __init__(
+        self,
+        dim: int,
+        n_heads: int,
+        *,
+        max_sequence_length: int,
+        rope_base: float = 10_000.0,
+        compute_dtype: object = jnp.float32,
+        rngs: nnx.Rngs | None = None,
+    ) -> None:
+        rngs = nnx.Rngs(0) if rngs is None else rngs
+        self.dim = dim
+        self.n_heads = n_heads
+        self.head_dim = dim // n_heads
+        assert self.head_dim % 2 == 0
+        self.wq = Linear(
+            dim,
+            dim,
+            bias=False,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        )
+        self.wkv = Linear(
+            dim,
+            2 * dim,
+            bias=False,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        )
+        self.wo = Linear(
+            dim,
+            dim,
+            bias=False,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        )
+        inv_freq = 1.0 / (
+            rope_base
+            ** (
+                jnp.arange(0, self.head_dim, 2, dtype=jnp.float32)
+                / self.head_dim
+            )
+        )
+        frequencies = (
+            jnp.arange(max_sequence_length, dtype=jnp.float32)[:, None]
+            * inv_freq[None, :]
+        )
+        self.rope_cos = jnp.cos(frequencies)
+        self.rope_sin = jnp.sin(frequencies)
+
+    def _apply_rope(self, tensor: Array, positions: Array) -> Array:
+        cos = self.rope_cos[positions][:, None].astype(tensor.dtype)
+        sin = self.rope_sin[positions][:, None].astype(tensor.dtype)
+        even = tensor[..., 0::2]
+        odd = tensor[..., 1::2]
+        return jnp.stack(
+            (even * cos - odd * sin, even * sin + odd * cos),
+            axis=-1,
+        ).reshape(tensor.shape)
+
+    def __call__(
+        self,
+        query: Array,
+        memory: Array,
+        query_positions: Array,
+        memory_positions: Array,
+        memory_mask: Array,
+    ) -> Array:
+        batch_size, target_len, _ = query.shape
+        memory_len = memory.shape[1]
+        q = self.wq(query).reshape(
+            batch_size,
+            target_len,
+            self.n_heads,
+            self.head_dim,
+        )
+        k, v = jnp.split(self.wkv(memory), 2, axis=-1)
+        k = k.reshape(batch_size, memory_len, self.n_heads, self.head_dim)
+        v = v.reshape(batch_size, memory_len, self.n_heads, self.head_dim)
+        q = self._apply_rope(jnp.swapaxes(q, 1, 2), query_positions)
+        k = self._apply_rope(jnp.swapaxes(k, 1, 2), memory_positions)
+        v = jnp.swapaxes(v, 1, 2)
+        attended = scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=memory_mask[:, None, None, :],
+        )
+        attended = jnp.swapaxes(attended, 1, 2).reshape(
+            batch_size,
+            target_len,
+            self.dim,
+        )
+        return self.wo(attended)
+
+    def load_torch_state_dict(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        prefix: str,
+    ) -> None:
+        self.wq.load_torch_state_dict(state_dict, f"{prefix}.wq")
+        self.wkv.load_torch_state_dict(state_dict, f"{prefix}.wkv")
+        self.wo.load_torch_state_dict(state_dict, f"{prefix}.wo")
+
+
 class FeedForward(nnx.Module):
     def __init__(
         self,
@@ -182,6 +288,70 @@ class SwiGLUFeedForward(nnx.Module):
         self.fc1.load_torch_state_dict(state_dict, f"{prefix}.fc1")
         self.fc2.load_torch_state_dict(state_dict, f"{prefix}.fc2")
         self.fc3.load_torch_state_dict(state_dict, f"{prefix}.fc3")
+
+
+class CrossAttentionBlock(nnx.Module):
+    def __init__(
+        self,
+        *,
+        dim: int,
+        n_heads: int,
+        norm_eps: float,
+        hidden_dim: int,
+        max_sequence_length: int,
+        compute_dtype: object = jnp.float32,
+        rngs: nnx.Rngs | None = None,
+    ) -> None:
+        rngs = nnx.Rngs(0) if rngs is None else rngs
+        self.attention = CrossAttention(
+            dim,
+            n_heads,
+            max_sequence_length=max_sequence_length,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        )
+        self.feed_forward = FeedForward(
+            dim,
+            hidden_dim=hidden_dim,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        )
+        self.query_norm = LayerNorm(dim, eps=norm_eps)
+        self.memory_norm = LayerNorm(dim, eps=norm_eps)
+        self.ffn_norm = LayerNorm(dim, eps=norm_eps)
+
+    def __call__(
+        self,
+        query: Array,
+        memory: Array,
+        query_positions: Array,
+        memory_positions: Array,
+        query_mask: Array,
+        memory_mask: Array,
+    ) -> Array:
+        query = query + self.attention(
+            self.query_norm(query),
+            self.memory_norm(memory),
+            query_positions,
+            memory_positions,
+            memory_mask,
+        )
+        query = query + self.feed_forward(self.ffn_norm(query))
+        return query * query_mask[..., None].astype(query.dtype)
+
+    def load_torch_state_dict(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        prefix: str,
+    ) -> None:
+        self.attention.load_torch_state_dict(state_dict, f"{prefix}.attention")
+        self.feed_forward.load_torch_state_dict(
+            state_dict,
+            f"{prefix}.feed_forward",
+        )
+        self.query_norm.load_torch_state_dict(state_dict, f"{prefix}.query_norm")
+        self.memory_norm.load_torch_state_dict(state_dict, f"{prefix}.memory_norm")
+        self.ffn_norm.load_torch_state_dict(state_dict, f"{prefix}.ffn_norm")
 
 
 class TransformerBlock(nnx.Module):

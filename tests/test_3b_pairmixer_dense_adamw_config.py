@@ -35,7 +35,7 @@ def test_3b_pairmixer_shape_is_tpu7x_mxu_aligned() -> None:
     )
 
 
-def test_3b_pairmixer_has_three_billion_parameter_encoder_plus_ten_percent() -> None:
+def test_3b_pairmixer_parameter_count_includes_cross_attention_predictor() -> None:
     config = load_config("configs/3b_pairmixer_dense_adamw.py")
     state = jax.eval_shape(
         lambda: nnx.state(build_model_from_config(config), nnx.Param)
@@ -48,6 +48,6 @@ def test_3b_pairmixer_has_three_billion_parameter_encoder_plus_ten_percent() -> 
     predictor_side_params = sum(counts.values()) - encoder_params
 
     assert encoder_params == 3_002_431_584
-    assert predictor_side_params == 306_232_224
-    assert sum(counts.values()) == 3_308_663_808
-    assert predictor_side_params / encoder_params == pytest.approx(0.1019947)
+    assert predictor_side_params == 247_656_400
+    assert sum(counts.values()) == 3_250_087_984
+    assert predictor_side_params / encoder_params == pytest.approx(0.0824853)

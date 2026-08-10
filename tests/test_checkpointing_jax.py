@@ -363,6 +363,42 @@ def test_jax_checkpoint_restore_rejects_training_contract_mismatch(tmp_path):
     reopened.close()
 
 
+def test_jax_checkpoint_restore_allows_explicit_config_changes(tmp_path):
+    state = {"value": jnp.asarray(1.0)}
+    manager = build_jax_checkpoint_manager(
+        tmp_path / "checkpoints",
+        enable_async_checkpointing=False,
+    )
+    save_jax_training_state(
+        manager,
+        1,
+        state,
+        metadata=jax_training_checkpoint_metadata(
+            "pretrain",
+            {"config": {"learning_rate": 1e-3, "model_dim": 8}},
+        ),
+    )
+    manager.close()
+
+    reopened = build_jax_checkpoint_manager(
+        tmp_path / "checkpoints",
+        enable_async_checkpointing=False,
+    )
+    restored = restore_jax_training_state(
+        reopened,
+        1,
+        {"value": jnp.asarray(0.0)},
+        expected_metadata=jax_training_checkpoint_metadata(
+            "pretrain",
+            {"config": {"learning_rate": 1e-4, "model_dim": 8}},
+        ),
+        allowed_config_keys=("learning_rate",),
+    )
+    reopened.close()
+
+    assert float(restored["value"]) == 1.0
+
+
 def test_jax_training_loop_saves_periodically_and_resumes(tmp_path):
     kwargs = _tiny_mae_kwargs()
     cfg = config_dict.ConfigDict(kwargs)

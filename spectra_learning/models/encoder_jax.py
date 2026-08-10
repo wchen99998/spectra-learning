@@ -43,6 +43,7 @@ class PeakSetEncoder(nnx.Module):
         apply_final_norm: bool = True,
         apply_final_pair_norm: bool = False,
         num_peaks: int = DEFAULT_NUM_PEAKS,
+        use_cls_token: bool = True,
         use_position_embedding: bool = True,
         pairmixer_block_type: str = "dense",
         pairmixer_transition_type: str = "swiglu",
@@ -52,7 +53,9 @@ class PeakSetEncoder(nnx.Module):
         pairmixer_use_pair_bias: bool = True,
         pairmixer_mz_scale: float = PEAK_MZ_MAX,
         pairmixer_precursor_mz_scale: float = PEAK_MZ_MAX,
-        pairmixer_use_fourier_features: bool = True,
+        pairmixer_mz_embedding: str = "fourier",
+        pairmixer_mz_token_bin_size: float = 0.1,
+        pairmixer_mz_token_embedding_dim: int = 128,
         pairmixer_fourier_num_freqs: int = 16,
         pairmixer_fourier_x_min: float = 1e-2,
         pairmixer_fourier_x_max: float = PEAK_MZ_MAX,
@@ -67,6 +70,7 @@ class PeakSetEncoder(nnx.Module):
     ) -> None:
         rngs = nnx.Rngs(0) if rngs is None else rngs
         self.num_layers = num_layers
+        self.use_cls_token = use_cls_token
         self.use_position_embedding = use_position_embedding
         self.pairmixer_block_type = pairmixer_block_type.lower()
         if self.pairmixer_block_type not in {
@@ -98,17 +102,27 @@ class PeakSetEncoder(nnx.Module):
         )
         self.position_embedding = build_frozen_position_embedding(num_peaks, model_dim)
         pair_dim = model_dim if pair_dim is None else pair_dim
-        self.cls_token = _normal_token_param(rngs, (model_dim,))
-        self.cls_to_peak_pair_token = _normal_token_param(rngs, (pair_dim,))
-        self.peak_to_cls_pair_token = _normal_token_param(rngs, (pair_dim,))
-        self.cls_cls_pair_token = _normal_token_param(rngs, (pair_dim,))
+        self.cls_token = (
+            _normal_token_param(rngs, (model_dim,)) if self.use_cls_token else None
+        )
+        self.cls_to_peak_pair_token = (
+            _normal_token_param(rngs, (pair_dim,)) if self.use_cls_token else None
+        )
+        self.peak_to_cls_pair_token = (
+            _normal_token_param(rngs, (pair_dim,)) if self.use_cls_token else None
+        )
+        self.cls_cls_pair_token = (
+            _normal_token_param(rngs, (pair_dim,)) if self.use_cls_token else None
+        )
         self.pair_embedder = PairFeatureEmbedder(
             single_dim=model_dim,
             pair_dim=pair_dim,
             hidden_dim=pair_feature_hidden_dim,
             mz_scale=pairmixer_mz_scale,
             precursor_mz_scale=pairmixer_precursor_mz_scale,
-            use_fourier_features=pairmixer_use_fourier_features,
+            mz_embedding=pairmixer_mz_embedding,
+            token_bin_size=pairmixer_mz_token_bin_size,
+            token_embedding_dim=pairmixer_mz_token_embedding_dim,
             fourier_num_freqs=pairmixer_fourier_num_freqs,
             fourier_x_min=pairmixer_fourier_x_min,
             fourier_x_max=pairmixer_fourier_x_max,
@@ -158,6 +172,8 @@ class PeakSetEncoder(nnx.Module):
         x: Array,
         metadata_embedding: Array | None = None,
     ) -> Array:
+        if not self.use_cls_token:
+            return x
         cls = jnp.broadcast_to(self.cls_token[...], (x.shape[0], 1, x.shape[-1]))
         if metadata_embedding is not None:
             cls = cls + metadata_embedding[:, None, :].astype(cls.dtype)
@@ -169,6 +185,8 @@ class PeakSetEncoder(nnx.Module):
         return self.metadata_proj(spectrum_metadata.astype(dtype))
 
     def _append_cls_pair_tokens(self, pair: Array) -> Array:
+        if not self.use_cls_token:
+            return pair
         batch_size, num_peaks, _, pair_dim = pair.shape
         peak_to_cls = jnp.broadcast_to(
             self.peak_to_cls_pair_token[...],
@@ -190,6 +208,8 @@ class PeakSetEncoder(nnx.Module):
         return jnp.concatenate([with_cls_column, cls_row], axis=1)
 
     def _append_cls_mask(self, peak_mask: Array) -> Array:
+        if not self.use_cls_token:
+            return peak_mask
         cls_mask = jnp.ones_like(peak_mask[:, :1])
         return jnp.concatenate([peak_mask, cls_mask], axis=1)
 
@@ -414,25 +434,27 @@ class PeakSetEncoder(nnx.Module):
         state_dict: dict[str, torch.Tensor],
         prefix: str,
     ) -> None:
-        assign_param(self.cls_token, state_dict[f"{prefix}.cls_token"])
+        if self.use_cls_token:
+            assign_param(self.cls_token, state_dict[f"{prefix}.cls_token"])
         self.embedder.load_torch_state_dict(state_dict, f"{prefix}.embedder")
         self.metadata_proj.load_torch_state_dict(state_dict, f"{prefix}.metadata_proj")
         self.position_embedding.load_torch_state_dict(
             state_dict,
             f"{prefix}.position_embedding",
         )
-        assign_param(
-            self.cls_to_peak_pair_token,
-            state_dict[f"{prefix}.cls_to_peak_pair_token"],
-        )
-        assign_param(
-            self.peak_to_cls_pair_token,
-            state_dict[f"{prefix}.peak_to_cls_pair_token"],
-        )
-        assign_param(
-            self.cls_cls_pair_token,
-            state_dict[f"{prefix}.cls_cls_pair_token"],
-        )
+        if self.use_cls_token:
+            assign_param(
+                self.cls_to_peak_pair_token,
+                state_dict[f"{prefix}.cls_to_peak_pair_token"],
+            )
+            assign_param(
+                self.peak_to_cls_pair_token,
+                state_dict[f"{prefix}.peak_to_cls_pair_token"],
+            )
+            assign_param(
+                self.cls_cls_pair_token,
+                state_dict[f"{prefix}.cls_cls_pair_token"],
+            )
         self.pair_embedder.load_torch_state_dict(
             state_dict,
             f"{prefix}.pair_embedder",
