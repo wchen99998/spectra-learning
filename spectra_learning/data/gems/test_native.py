@@ -29,7 +29,10 @@ def _write_fake_hdf5_shards(
     ms_level: np.ndarray | None = None,
 ) -> Path:
     root.mkdir(parents=True, exist_ok=True)
-    manifest: dict[str, list[dict[str, object]]] = {"shards": []}
+    manifest = {
+        "format": "fdataloader.shards.v1",
+        "shards": [],
+    }
     start = 0
     for shard_idx, length in enumerate(lengths):
         shard_name = f"shard_{shard_idx:05d}.hdf5"
@@ -55,6 +58,8 @@ def _write_fake_hdf5_shards(
         spectra = np.zeros((length, 2, 128), dtype=np.float64)
         spectra[:, 0, 0] = precursor + 100.0
         spectra[:, 1, 0] = 1.0
+        spectra[:, 0, 1] = precursor + 101.0
+        spectra[:, 1, 1] = 0.5
         with h5py.File(shard_path, "w") as f:
             f.create_dataset("spectrum", data=spectra, chunks=(1, 2, 128))
             f.create_dataset("precursor_mz", data=precursor, chunks=(1,))
@@ -118,6 +123,27 @@ class GemsSamplingTests(unittest.TestCase):
                 )
                 sampler.set_epoch(epoch)
                 self.assertEqual(len(list(sampler)), len(sampler))
+
+    def test_shuffled_segments_are_consumed_one_shard_at_a_time(self):
+        sampler = ChunkedDistributedBatchSampler(
+            [(0, 8, 2), (8, 8, 2), (16, 8, 2)],
+            batch_size=2,
+            rows_per_block=4,
+            shuffle=True,
+            seed=42,
+            drop_last=True,
+            world_size=1,
+            rank=0,
+            shuffle_segments=True,
+        )
+        shard_order = [batch[0] // 8 for batch in sampler]
+        transitions = [
+            shard
+            for position, shard in enumerate(shard_order)
+            if position == 0 or shard != shard_order[position - 1]
+        ]
+        self.assertEqual(len(transitions), 3)
+        self.assertEqual(set(transitions), {0, 1, 2})
 
 
 class GeMSRuntimeDownloadTests(unittest.TestCase):
@@ -194,7 +220,7 @@ class GeMSRuntimeDownloadTests(unittest.TestCase):
             self.assertEqual(kwargs["repo_type"], "dataset")
             self.assertEqual(
                 kwargs["allow_patterns"],
-                ["fdataloader_shards.json", "*.hdf5", "*.h5"],
+                ["fdataloader_shards.json"],
             )
 
     def test_datamodule_uses_local_hdf5_cache_without_download(self):

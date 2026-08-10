@@ -23,6 +23,7 @@ from ml_collections import config_dict
 from tqdm import tqdm
 
 from spectra_learning.config import config_to_dict
+from spectra_learning.data.gems.artifacts import MASSIVE_V2_HDF5_FORMAT
 from spectra_learning.data.gems.datamodule import GemsDataModule
 from spectra_learning.data.gems.mask_schedule import (
     jepa_mask_stage_index,
@@ -1160,10 +1161,21 @@ def _build_pretrain_jax_datamodule(
 
 def _pretrain_jax_checkpoint_contract(
     config: config_dict.ConfigDict,
-    _datamodule: GemsDataModule,
+    datamodule: GemsDataModule,
     _total_steps: int,
 ) -> dict[str, Any]:
-    return jax_config_checkpoint_contract(config)
+    contract = jax_config_checkpoint_contract(config)
+    if datamodule.artifact.format == MASSIVE_V2_HDF5_FORMAT:
+        contract["dataset"] = {
+            "format": datamodule.info["gems_hdf5_format"],
+            "repo_id": datamodule.info["gems_hdf5_repo_id"],
+            "revision": datamodule.info["gems_hdf5_revision"],
+            "manifest_sha256": datamodule.info["gems_manifest_sha256"],
+            "shard_plan_sha256": datamodule.info[
+                "gems_shard_plan_sha256"
+            ],
+        }
+    return contract
 
 
 def _validate_pretrain_jax_model(model: Any) -> None:

@@ -10,10 +10,12 @@ def get_config() -> config_dict.ConfigDict:
     cfg.training_task = "pretrain"
 
     # Dataset
-    cfg.artifact_dir = "data/massive_v1_ms2_100m_stratified_x16"
-    cfg.gems_hdf5_repo_id = "novogaia/massive-v1-ms2-100m-stratified-x16"
-    cfg.gems_hdf5_revision = "7ff47061cbde23e4cdd113378dcfb489e86b32c4"
-    cfg.gems_hdf5_manifest = "fdataloader_shards.json"
+    cfg.artifact_dir = "data/massive_v2_ms2_t095_l080_sharded_10gb"
+    cfg.gems_hdf5_repo_id = (
+        "novogaia/massive-v2-ms2-t095-l080-sharded-10gb"
+    )
+    cfg.gems_hdf5_revision = "de80d280d319f0b9a8825956b13d8dc7d9ab1eb1"
+    cfg.gems_hdf5_manifest = "manifest.json"
     cfg.gems_hdf5_spectrum_dataset = "spectrum"
     cfg.gems_hdf5_precursor_dataset = "precursor_mz"
     cfg.gems_hdf5_retention_time_dataset = "RT"

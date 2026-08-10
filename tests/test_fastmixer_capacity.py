@@ -50,6 +50,16 @@ def test_fastmixer_dense_auto_capacity_matches_fastmixer():
 def test_1b_mae_schedule_uses_three_compact_shapes():
     cfg = load_config("configs/1b_pairmixer_dense_adamw.py")
 
+    assert cfg.device_backend == "jax"
+    assert cfg.dataloader_output_format == "numpy"
+    assert cfg.dataloader_pin_memory is False
+    assert cfg.dataloader_multiprocessing_context == "spawn"
+    assert cfg.gems_hdf5_repo_id == (
+        "novogaia/massive-v2-ms2-t095-l080-sharded-10gb"
+    )
+    assert cfg.gems_hdf5_revision == (
+        "de80d280d319f0b9a8825956b13d8dc7d9ab1eb1"
+    )
     assert cfg.learning_rate == pytest.approx(3e-4)
     assert cfg.weight_decay == pytest.approx(0.1)
     assert cfg.optimizer_state_dtype == "fp32"

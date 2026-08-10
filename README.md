@@ -40,6 +40,59 @@ task/backend combinations fail before a trainer is imported.
 training implementation. It validates the same task/backend contract and the
 generated task delegates to `train.py`.
 
+## MassIVE v2 MS2 shards
+
+Pretraining uses a one-time, streaming conversion of
+`novogaia/massive-v2@10c48d8184119829c48651b8a40ea5e0b9015687`.
+Only `*_t0.95_l0.80_grouped.hdf5` files and exact-MS2 rows are retained.
+The converted shards preserve `massive_id`, `file_id`, `group_id`,
+`global_group_id`, and `unique_spectrum_id`, and store the canonical training
+eligibility mask.
+
+The published artifact is
+`novogaia/massive-v2-ms2-t095-l080-sharded-10gb@de80d280d319f0b9a8825956b13d8dc7d9ab1eb1`.
+It contains 65 train shards and 3 validation shards. Shard sizes use a soft
+10 GB target: the actual files range from 8.96 GB to 11.72 GB so existing
+group-safe boundaries are preserved.
+
+Run or resume the source conversion on the large NVMe mount with:
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+HF_XET_CACHE=/mnt/tg-go-nvme/massive-v2-conversion-v2/hf-xet-cache \
+.venv/bin/python -m spectra_learning.data.gems.prepare_massive_v2 \
+  --work-dir /mnt/tg-go-nvme/massive-v2-conversion-v2 \
+  --workers 4 \
+  --upload
+```
+
+Repack the validated source artifact toward the soft byte target with:
+
+```bash
+.venv/bin/python -m spectra_learning.data.gems.repack_massive_v2 \
+  --source-manifest \
+    /mnt/tg-go-nvme/massive-v2-conversion-v2/output/manifest.json \
+  --work-dir /mnt/tg-go-nvme/massive-v2-repack-10gb \
+  --target-bytes 10000000000 \
+  --workers 24 \
+  --upload
+```
+
+Initialization blocks only on `manifest.json`; the first assigned train shard
+starts downloading in the background while model setup continues. The
+manifest assigns whole shards to training hosts deterministically, and reading
+shard N prefetches shard N+1 in the sampler's actual shuffled order. Downloads
+use a process lock, and only one future shard is prefetched. Shuffling keeps
+each shard's blocks together so startup does not fetch the full assignment.
+Grouped entities use
+`(massive_id, global_group_id)` as their corpus-wide identity and never cross
+train/validation or output-shard boundaries.
+
+The old `fdataloader.shards.v1` reader remains temporarily available for
+existing v1 runs through `configs/pretrain_massive_v1.py`. Remove it after one
+complete multi-host v2 training run succeeds and no active resume still points
+at a v1 checkpoint.
+
 ## SLURM Multi-Node Training
 
 Use one SLURM task per node, and let that task launch one `torchrun` worker per

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -8,6 +9,11 @@ from typing import Any, Literal
 import h5py
 import numpy as np
 
+from spectra_learning.data.gems.artifacts import (
+    GemsHdf5Shard,
+    materialize_gems_hdf5_shard,
+    prefetch_gems_hdf5_shard,
+)
 from spectra_learning.data.spectra import NUM_PEAKS_INPUT
 
 GEMS_SPECTRUM_METADATA_DATASETS = {
@@ -388,6 +394,347 @@ class GemsHdf5ShardDataset:
             precursor = precursor_dataset[run_start : previous + 1]
             metadata = {
                 key: dataset[run_start : previous + 1].astype(np.float32, copy=False)
+                for key, dataset in metadata_datasets.items()
+            }
+            for local_position, (output_position, _) in enumerate(
+                local_pairs[pair_start:run_position]
+            ):
+                spectra_out[output_position] = spectra[local_position]
+                precursor_out[output_position] = precursor[local_position]
+                for key, values in metadata.items():
+                    metadata_out[key][output_position] = values[local_position]
+
+
+@dataclass
+class MassiveV2ShardState:
+    spec: GemsHdf5Shard
+    path: str
+    logical_start: int
+    logical_stop: int
+    eligibility_packed: np.ndarray | None = None
+    eligibility_offsets: np.ndarray | None = None
+
+
+class MassiveV2Hdf5ShardDataset:
+    def __init__(
+        self,
+        manifest_path: Path,
+        shards: tuple[GemsHdf5Shard, ...],
+        *,
+        repo_id: str,
+        revision: str,
+        spectrum_dataset: str,
+        precursor_dataset: str,
+        split: Literal["train", "validation"],
+    ) -> None:
+        self.manifest_path = Path(manifest_path)
+        self.repo_id = repo_id
+        self.revision = revision
+        self.spectrum_dataset = spectrum_dataset
+        self.precursor_dataset = precursor_dataset
+        self.split = split
+        self.files: dict[int, h5py.File] = {}
+        self.spectra: dict[int, h5py.Dataset] = {}
+        self.precursors: dict[int, h5py.Dataset] = {}
+        self.metadata: dict[str, dict[int, h5py.Dataset]] = {
+            key: {} for key in GEMS_SPECTRUM_METADATA_DATASETS
+        }
+        self.shard_order: tuple[int, ...] = tuple(range(len(shards)))
+        self.shard_positions = {
+            shard_id: shard_id for shard_id in range(len(shards))
+        }
+        self.prefetch_thread: threading.Thread | None = None
+        self.prefetch_error: BaseException | None = None
+        self.states: list[MassiveV2ShardState] = []
+        self.infos: list[dict[str, Any]] = []
+        logical_offset = 0
+        for spec in shards:
+            path = self.manifest_path.parent / spec.path
+            self.states.append(
+                MassiveV2ShardState(
+                    spec=spec,
+                    path=str(path),
+                    logical_start=logical_offset,
+                    logical_stop=logical_offset + spec.eligible_rows,
+                )
+            )
+            self.infos.append(
+                {
+                    "length": spec.eligible_rows,
+                    "source_rows": spec.rows,
+                    "spectrum_chunk": (
+                        spec.chunk_rows,
+                        2,
+                        NUM_PEAKS_INPUT,
+                    ),
+                }
+            )
+            logical_offset += spec.eligible_rows
+        self.paths = [state.path for state in self.states]
+        self.starts = [state.logical_start for state in self.states]
+        self.stops = [state.logical_stop for state in self.states]
+        self.source_length = sum(state.spec.rows for state in self.states)
+        self.length = logical_offset
+
+    @property
+    def segments(self) -> list[tuple[int, int, int]]:
+        return [
+            (
+                state.logical_start,
+                state.logical_stop - state.logical_start,
+                state.spec.chunk_rows,
+            )
+            for state in self.states
+        ]
+
+    def __getstate__(self) -> dict[str, Any]:
+        state = self.__dict__.copy()
+        state["files"] = {}
+        state["spectra"] = {}
+        state["precursors"] = {}
+        state["metadata"] = {
+            key: {} for key in GEMS_SPECTRUM_METADATA_DATASETS
+        }
+        state["prefetch_thread"] = None
+        state["prefetch_error"] = None
+        return state
+
+    def set_shard_order(self, shard_order: list[int]) -> None:
+        self.shard_order = tuple(shard_order)
+        self.shard_positions = {
+            shard_id: position
+            for position, shard_id in enumerate(self.shard_order)
+        }
+
+    def prefetch_first_shard(self) -> None:
+        if self.shard_order:
+            self._start_prefetch(self.shard_order[0])
+
+    def wait_for_prefetch(self) -> None:
+        if self.prefetch_thread is not None:
+            self.prefetch_thread.join()
+        if self.prefetch_error is not None:
+            raise RuntimeError("GeMS shard prefetch failed") from self.prefetch_error
+
+    def _start_prefetch(self, shard_id: int) -> None:
+        path = Path(self.states[shard_id].path)
+        if path.exists():
+            return
+        if self.prefetch_thread is not None and self.prefetch_thread.is_alive():
+            return
+        self.prefetch_error = None
+        self.prefetch_thread = threading.Thread(
+            target=self._prefetch_shard,
+            args=(shard_id,),
+            daemon=True,
+        )
+        self.prefetch_thread.start()
+
+    def _prefetch_shard(self, shard_id: int) -> None:
+        try:
+            prefetch_gems_hdf5_shard(
+                repo_id=self.repo_id,
+                revision=self.revision,
+                manifest_path=self.manifest_path,
+                shard_path=self.states[shard_id].spec.path,
+            )
+        except BaseException as error:
+            self.prefetch_error = error
+
+    def _prefetch_next_shard(self, shard_id: int) -> None:
+        position = self.shard_positions[shard_id]
+        if position + 1 < len(self.shard_order):
+            self._start_prefetch(self.shard_order[position + 1])
+
+    def _ensure_shard_open(self, shard_id: int) -> None:
+        if shard_id in self.files:
+            return
+        state = self.states[shard_id]
+        path = materialize_gems_hdf5_shard(
+            repo_id=self.repo_id,
+            revision=self.revision,
+            manifest_path=self.manifest_path,
+            shard_path=state.spec.path,
+        )
+        file = h5py.File(path, "r")
+        spectrum = file[self.spectrum_dataset]
+        if tuple(spectrum.shape) != (
+            state.spec.rows,
+            2,
+            NUM_PEAKS_INPUT,
+        ):
+            raise ValueError(
+                f"Invalid GeMS spectrum shape in {path}: expected "
+                f"({state.spec.rows}, 2, {NUM_PEAKS_INPUT}), "
+                f"got {tuple(spectrum.shape)}"
+            )
+        if spectrum.dtype != np.dtype(np.float32):
+            raise ValueError(
+                f"Invalid GeMS spectrum dtype in {path}: expected "
+                f"float32, got {spectrum.dtype}"
+            )
+        eligible = file["training_eligible"][:].astype(np.bool_, copy=False)
+        packed = np.packbits(eligible)
+        padded = np.pad(
+            packed,
+            (0, -len(packed) % _GEMS_SPLIT_CHUNK_BYTES),
+        )
+        counts = _BYTE_POPCOUNT[padded].reshape(
+            -1,
+            _GEMS_SPLIT_CHUNK_BYTES,
+        ).sum(axis=1, dtype=np.uint16)
+        if int(counts.sum(dtype=np.int64)) != state.spec.eligible_rows:
+            raise ValueError(
+                f"GeMS eligible row count mismatch for {path}: "
+                f"manifest={state.spec.eligible_rows}, "
+                f"file={int(counts.sum(dtype=np.int64))}"
+            )
+        state.eligibility_packed = packed
+        state.eligibility_offsets = np.concatenate(
+            (
+                np.zeros(1, dtype=np.int64),
+                np.cumsum(counts, dtype=np.int64),
+            )
+        )
+        self.files[shard_id] = file
+        self.spectra[shard_id] = spectrum
+        self.precursors[shard_id] = file[self.precursor_dataset]
+        for key, dataset in GEMS_SPECTRUM_METADATA_DATASETS.items():
+            self.metadata[key][shard_id] = file[dataset]
+        self._prefetch_next_shard(shard_id)
+
+    def close(self) -> None:
+        for file in self.files.values():
+            file.close()
+        self.files = {}
+        self.spectra = {}
+        self.precursors = {}
+        self.metadata = {
+            key: {} for key in GEMS_SPECTRUM_METADATA_DATASETS
+        }
+
+    def __len__(self) -> int:
+        return self.length
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        return self.__getitems__([index])[0]
+
+    def __getitems__(self, indices: list[int]) -> list[dict[str, Any]]:
+        spectra, precursor, metadata = self.read_raw_batch(indices)
+        return [
+            {
+                "spectra": spectra[position],
+                "precursor_mz_raw": precursor[position],
+                **{
+                    key: values[position]
+                    for key, values in metadata.items()
+                },
+                "index": int(index),
+            }
+            for position, index in enumerate(indices)
+        ]
+
+    def _physical_rows(
+        self,
+        indices: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        stops = np.asarray(self.stops)
+        shard_ids = np.searchsorted(stops, indices, side="right")
+        physical_rows = np.empty_like(indices)
+        for shard_id in np.unique(shard_ids):
+            self._ensure_shard_open(int(shard_id))
+            positions = np.flatnonzero(shard_ids == shard_id)
+            state = self.states[int(shard_id)]
+            assert state.eligibility_offsets is not None
+            assert state.eligibility_packed is not None
+            local_indices = indices[positions] - state.logical_start
+            chunks = np.searchsorted(
+                state.eligibility_offsets,
+                local_indices,
+                side="right",
+            ) - 1
+            ranks = local_indices - state.eligibility_offsets[chunks]
+            for chunk in np.unique(chunks):
+                chunk_positions = np.flatnonzero(chunks == chunk)
+                byte_start = int(chunk) * _GEMS_SPLIT_CHUNK_BYTES
+                valid_offsets = np.flatnonzero(
+                    np.unpackbits(
+                        state.eligibility_packed[
+                            byte_start : byte_start + _GEMS_SPLIT_CHUNK_BYTES
+                        ]
+                    )
+                )
+                physical_rows[positions[chunk_positions]] = (
+                    int(chunk) * GEMS_SPLIT_CHUNK_ROWS
+                    + valid_offsets[ranks[chunk_positions]]
+                )
+        return shard_ids, physical_rows
+
+    def read_raw_batch(
+        self,
+        indices: list[int],
+    ) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
+        indices_np = np.asarray(indices, dtype=np.int64)
+        shard_ids, physical_rows = self._physical_rows(indices_np)
+        spectra_out = np.empty(
+            (len(indices_np), 2, NUM_PEAKS_INPUT),
+            dtype=np.float32,
+        )
+        precursor_out = np.empty((len(indices_np),), dtype=np.float32)
+        metadata_out = {
+            key: np.empty((len(indices_np),), dtype=np.float32)
+            for key in self.metadata
+        }
+        for shard_id in np.unique(shard_ids):
+            positions = np.flatnonzero(shard_ids == shard_id)
+            pairs = [
+                (int(position), int(physical_rows[position]))
+                for position in positions
+            ]
+            self._read_shard_pairs(
+                self.spectra[int(shard_id)],
+                self.precursors[int(shard_id)],
+                {
+                    key: datasets[int(shard_id)]
+                    for key, datasets in self.metadata.items()
+                },
+                pairs,
+                spectra_out,
+                precursor_out,
+                metadata_out,
+            )
+        return spectra_out, precursor_out, metadata_out
+
+    @staticmethod
+    def _read_shard_pairs(
+        spectra_dataset: h5py.Dataset,
+        precursor_dataset: h5py.Dataset,
+        metadata_datasets: dict[str, h5py.Dataset],
+        local_pairs: list[tuple[int, int]],
+        spectra_out: np.ndarray,
+        precursor_out: np.ndarray,
+        metadata_out: dict[str, np.ndarray],
+    ) -> None:
+        local_pairs.sort(key=lambda item: item[1])
+        run_position = 0
+        while run_position < len(local_pairs):
+            pair_start = run_position
+            run_start = local_pairs[run_position][1]
+            previous = run_start
+            run_position += 1
+            while (
+                run_position < len(local_pairs)
+                and local_pairs[run_position][1] == previous + 1
+            ):
+                previous = local_pairs[run_position][1]
+                run_position += 1
+            spectra = spectra_dataset[run_start : previous + 1]
+            precursor = precursor_dataset[run_start : previous + 1]
+            metadata = {
+                key: dataset[run_start : previous + 1].astype(
+                    np.float32,
+                    copy=False,
+                )
                 for key, dataset in metadata_datasets.items()
             }
             for local_position, (output_position, _) in enumerate(

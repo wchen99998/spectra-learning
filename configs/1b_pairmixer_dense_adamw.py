@@ -6,6 +6,16 @@ from ml_collections import config_dict
 def get_config() -> config_dict.ConfigDict:
     cfg = import_module("configs.300m_pairmixer_dense_adamw").get_config()
 
+    cfg.device_backend = "jax"
+    cfg.dataloader_output_format = "numpy"
+    cfg.dataloader_pin_memory = False
+    cfg.dataloader_multiprocessing_context = "spawn"
+    cfg.artifact_dir = "data/massive_v2_ms2_t095_l080_sharded_10gb"
+    cfg.gems_hdf5_repo_id = (
+        "novogaia/massive-v2-ms2-t095-l080-sharded-10gb"
+    )
+    cfg.gems_hdf5_revision = "de80d280d319f0b9a8825956b13d8dc7d9ab1eb1"
+
     cfg.model_dim = 1536
     cfg.encoder_num_layers = 25
     cfg.encoder_num_heads = 12
@@ -34,7 +44,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_latent_predictor_num_heads = 12
 
     cfg.run_name_suffix = (
-        "mae-massive1b-200m-v6e-d1536-p640-l25-h12-nomassprior-"
+        "jax-mae-massive-v2-10gb-1b-200m-v6e-d1536-p640-l25-h12-nomassprior-"
         "feat3072-fmlp3072-pred1536-l5-h12-bs2048-ga8-16-16-adamw-fp32state-"
         "lr3e-4-wd1e-1-"
         "random-mask65-45-25-target50-30-10-intensityorder-fullctx-"

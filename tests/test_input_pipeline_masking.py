@@ -1,5 +1,6 @@
 from unittest import mock
 
+import numpy as np
 import torch
 from ml_collections import config_dict
 
@@ -400,6 +401,47 @@ def test_gems_batch_collator_generates_ragged_context_and_target_masks() -> None
     assert not (
         batch["target_masks"] & batch["context_mask"].unsqueeze(1)
     ).any()
+
+
+def test_gems_batch_collator_excludes_rows_without_context_and_target_peaks() -> None:
+    collator = GemsBatchCollator(
+        augment=True,
+        num_target_blocks=1,
+        context_fraction=0.35,
+        target_fraction=0.5,
+        block_min_len=1,
+        mask_strategy="random",
+        num_peaks=4,
+        max_precursor_mz=1000.0,
+        min_peak_intensity=1e-4,
+        peak_drop_min_intensity=1e-4,
+        peak_ordering="intensity",
+        precursor_peak_exclusion_window_da=0.0,
+    )
+
+    def sample(mz: list[float], intensity: list[float]) -> dict[str, object]:
+        spectra = np.zeros((2, 4), dtype=np.float32)
+        spectra[0, : len(mz)] = mz
+        spectra[1, : len(intensity)] = intensity
+        return {
+            "spectra": spectra,
+            "precursor_mz_raw": np.float32(500.0),
+            "collision_energy": np.float32(20.0),
+            "charge": np.float32(1.0),
+        }
+
+    batch = collator(
+        [
+            sample([], []),
+            sample([100.0], [1.0]),
+            sample([100.0, 150.0, 200.0], [1.0, 0.5, 0.25]),
+        ]
+    )
+
+    assert batch["peak_mz"].shape[0] == 3
+    assert (batch["peak_valid_mask"].sum(dim=1) >= 2).all()
+    assert (batch["context_mask"].sum(dim=1) >= 1).all()
+    assert (batch["target_masks"].sum(dim=2) >= 1).all()
 
 
 def test_gems_batch_collator_combines_intensity_aware_and_block_strategy_rows() -> None:

@@ -18,6 +18,7 @@ class ChunkedDistributedBatchSampler(Sampler[list[int]]):
         drop_last: bool,
         world_size: int,
         rank: int,
+        shuffle_segments: bool = False,
     ) -> None:
         self.batch_size = batch_size
         self.rows_per_block = rows_per_block
@@ -26,7 +27,13 @@ class ChunkedDistributedBatchSampler(Sampler[list[int]]):
         self.drop_last = drop_last
         self.world_size = world_size
         self.rank = rank
-        self.blocks = self._build_blocks(segments)
+        self.shuffle_segments = shuffle_segments
+        self.segment_blocks = [
+            self._build_blocks([segment]) for segment in segments
+        ]
+        self.blocks = [
+            block for blocks in self.segment_blocks for block in blocks
+        ]
         self.epoch = 0
 
     def _build_blocks(self, segments: list[tuple[int, int, int]]) -> list[tuple[int, int]]:
@@ -44,11 +51,35 @@ class ChunkedDistributedBatchSampler(Sampler[list[int]]):
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
 
+    def segment_order(self) -> list[int]:
+        if self.shuffle and self.shuffle_segments:
+            generator = torch.Generator()
+            generator.manual_seed(self.seed + self.epoch)
+            return torch.randperm(
+                len(self.segment_blocks),
+                generator=generator,
+            ).tolist()
+        return list(range(len(self.segment_blocks)))
+
     def __iter__(self) -> Iterator[list[int]]:
-        blocks = list(self.blocks[self.rank :: self.world_size])
         generator = torch.Generator()
         generator.manual_seed(self.seed + self.epoch)
-        if self.shuffle:
+        if self.shuffle and self.shuffle_segments:
+            segment_order = self.segment_order()
+            torch.randperm(len(self.segment_blocks), generator=generator)
+            blocks = []
+            for segment_index in segment_order:
+                segment_blocks = list(self.segment_blocks[segment_index])
+                block_order = torch.randperm(
+                    len(segment_blocks),
+                    generator=generator,
+                ).tolist()
+                blocks.extend(
+                    segment_blocks[index] for index in block_order
+                )
+        else:
+            blocks = list(self.blocks[self.rank :: self.world_size])
+        if self.shuffle and not self.shuffle_segments:
             order = torch.randperm(len(blocks), generator=generator).tolist()
             blocks = [blocks[index] for index in order]
 

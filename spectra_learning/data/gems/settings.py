@@ -16,9 +16,11 @@ from spectra_learning.data.spectra import (
 
 DEFAULT_BATCH_SIZE = 512
 DEFAULT_ARTIFACT_DIR = Path("data/gems_artifacts")
-DEFAULT_GEMS_HDF5_REPO_ID = "novogaia/massive-v1-ms2-100m-stratified-x16"
-DEFAULT_GEMS_HDF5_REVISION = "7ff47061cbde23e4cdd113378dcfb489e86b32c4"
-DEFAULT_GEMS_HDF5_MANIFEST = "fdataloader_shards.json"
+DEFAULT_GEMS_HDF5_REPO_ID = (
+    "novogaia/massive-v2-ms2-t095-l080-sharded-10gb"
+)
+DEFAULT_GEMS_HDF5_REVISION = "de80d280d319f0b9a8825956b13d8dc7d9ab1eb1"
+DEFAULT_GEMS_HDF5_MANIFEST = "manifest.json"
 NUM_PEAKS_OUTPUT = DEFAULT_NUM_PEAKS
 GEMS_METADATA_FILENAME = "metadata.json"
 
@@ -65,6 +67,8 @@ class GemsDataConfig:
     dataloader_persistent_workers: bool
     dataloader_multiprocessing_context: str
     dataloader_output_format: str
+    training_max_steps: int | None
+    val_num_steps: int
 
     @classmethod
     def from_config(cls, config: config_dict.ConfigDict) -> "GemsDataConfig":
@@ -180,4 +184,10 @@ class GemsDataConfig:
             dataloader_output_format=str(
                 config.get("dataloader_output_format", "torch")
             ),
+            training_max_steps=(
+                None
+                if config.get("training_max_steps", None) is None
+                else int(config.training_max_steps)
+            ),
+            val_num_steps=int(config.get("val_num_steps", 64)),
         )

@@ -17,6 +17,7 @@ import torch._inductor.config as inductor_config
 from ml_collections import config_dict
 from tqdm import tqdm
 
+from spectra_learning.data.gems.artifacts import MASSIVE_V2_HDF5_FORMAT
 from spectra_learning.data.gems.datamodule import GemsDataModule
 from spectra_learning.models.factory import build_model_from_config
 from spectra_learning.models.model import PeakSetJEPA
@@ -96,6 +97,20 @@ def gradient_accumulation_steps(config: config_dict.ConfigDict) -> int:
     return int(config.get("gradient_accumulation_steps", 1))
 
 
+def pretrain_checkpoint_dataset_metadata(
+    datamodule: GemsDataModule,
+) -> dict[str, str] | None:
+    if datamodule.artifact.format != MASSIVE_V2_HDF5_FORMAT:
+        return None
+    return {
+        "format": datamodule.info["gems_hdf5_format"],
+        "repo_id": datamodule.info["gems_hdf5_repo_id"],
+        "revision": datamodule.info["gems_hdf5_revision"],
+        "manifest_sha256": datamodule.info["gems_manifest_sha256"],
+        "shard_plan_sha256": datamodule.info["gems_shard_plan_sha256"],
+    }
+
+
 def effective_compile_mode(config: config_dict.ConfigDict) -> str:
     compile_mode = str(config.get("compile_mode", "max-autotune"))
     if (
@@ -148,6 +163,7 @@ def train_and_evaluate(
         distributed_rank=distributed.rank,
         distributed_local_rank=distributed.local_rank,
     )
+    checkpoint_metadata = pretrain_checkpoint_dataset_metadata(datamodule)
     total_steps = total_training_steps(config, datamodule)
     loop_epochs = max(1, math.ceil(float(config.num_epochs)))
     if distributed.is_main:
@@ -204,6 +220,7 @@ def train_and_evaluate(
         grad_scaler=grad_scaler,
         steps_per_epoch=datamodule.train_steps,
         device=device,
+        expected_checkpoint_metadata=checkpoint_metadata,
     )
     if distributed.is_main:
         save_config(config, workdir)
@@ -226,7 +243,9 @@ def train_and_evaluate(
     )
     if distributed.is_main:
         logger.log_metrics(model_param_metrics, step=global_step)
-    checkpoint_writer = AsyncCheckpointWriter()
+    checkpoint_writer = AsyncCheckpointWriter(
+        checkpoint_metadata=checkpoint_metadata,
+    )
     last_msg_probe_metrics = run_training_loop(
         config=config,
         datamodule=datamodule,
@@ -875,6 +894,7 @@ def restore_training_state(
     steps_per_epoch: int,
     device: torch.device,
     grad_scaler: torch.amp.GradScaler | None = None,
+    expected_checkpoint_metadata: dict[str, Any] | None = None,
 ) -> tuple[int, int, int]:
     checkpoints = training_checkpoint_paths(checkpoint_dir)
     if not checkpoints:
@@ -882,6 +902,14 @@ def restore_training_state(
     ckpt_path = checkpoints[-1]
     logging.info("Resuming from checkpoint: %s", ckpt_path)
     ckpt = load_torch_checkpoint(ckpt_path, map_location=device, weights_only=True)
+    if (
+        expected_checkpoint_metadata is not None
+        and ckpt["metadata"] != expected_checkpoint_metadata
+    ):
+        raise ValueError(
+            "Training checkpoint dataset metadata mismatch: "
+            f"expected {expected_checkpoint_metadata}, got {ckpt['metadata']}"
+        )
     _ = ckpt["loss"]
     resume_wandb_id = ckpt["wandb_run_id"]
     if resume_wandb_id:

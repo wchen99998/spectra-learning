@@ -75,8 +75,24 @@ class GemsBatchCollator:
     def __call__(self, samples: list[dict[str, Any]]) -> dict[str, Any]:
         batch = self._preprocess(samples)
         if self.augment:
+            batch = self._replace_rows_without_context_and_targets(batch)
             batch["context_mask"], batch["target_masks"] = self._sample_masks(batch)
         return format_batch(batch, self.output_format)
+
+    def _replace_rows_without_context_and_targets(
+        self,
+        batch: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        minimum_peaks = self.num_target_blocks * self.block_min_len + 1
+        eligible = batch["peak_valid_mask"].sum(dim=1) >= minimum_peaks
+        eligible_rows = torch.nonzero(eligible, as_tuple=False).squeeze(-1)
+        missing_rows = torch.nonzero(~eligible, as_tuple=False).squeeze(-1)
+        row_indices = torch.arange(eligible.shape[0], device=eligible.device)
+        row_indices[missing_rows] = eligible_rows[
+            torch.arange(missing_rows.numel(), device=eligible.device)
+            % eligible_rows.numel()
+        ]
+        return {key: value[row_indices] for key, value in batch.items()}
 
     def _preprocess(self, samples: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
         if isinstance(samples[0]["spectra"], np.ndarray):

@@ -75,6 +75,7 @@ def _training_checkpoint_state(
     wandb_run_id: str | None,
     covariance_pooler: torch.nn.Module | None,
     grad_scaler: torch.amp.GradScaler | None,
+    checkpoint_metadata: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], StoragePath | None, dict[str, Any] | None]:
     pooler_path = (
         covariance_pooler_checkpoint_path(path)
@@ -94,6 +95,8 @@ def _training_checkpoint_state(
             storage_name(pooler_path) if pooler_path is not None else None
         ),
     }
+    if checkpoint_metadata is not None:
+        state["metadata"] = checkpoint_metadata
     pooler_state = (
         {
             "pooler": covariance_pooler.state_dict(),
@@ -149,7 +152,12 @@ def _write_training_checkpoint_job(
 
 
 class AsyncCheckpointWriter:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        checkpoint_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self.checkpoint_metadata = checkpoint_metadata
         self._executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="checkpoint-writer",
@@ -183,6 +191,7 @@ class AsyncCheckpointWriter:
             wandb_run_id,
             covariance_pooler,
             grad_scaler,
+            self.checkpoint_metadata,
         )
         future = self._executor.submit(
             _write_training_checkpoint_job,
