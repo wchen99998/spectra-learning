@@ -1,3 +1,5 @@
+from typing import cast
+
 import torch
 from jaxtyping import Bool, Float
 from torch import Tensor, nn
@@ -7,7 +9,11 @@ from spectra_learning.models.common import (
     _build_frozen_position_embedding,
     _merge_visible_mask,
 )
-from spectra_learning.models.pairmixer import PairFeatureEmbedder, PairMixerBlock
+from spectra_learning.models.pairmixer import (
+    PairFeatureEmbedder,
+    PairMixerBlock,
+    SingleMixerBlock,
+)
 from spectra_learning.models.peak_features import PeakFeatureEmbedder
 
 
@@ -26,6 +32,7 @@ class PeakSetEncoder(nn.Module):
         num_peaks: int = DEFAULT_NUM_PEAKS,
         use_cls_token: bool = True,
         use_position_embedding: bool = True,
+        use_pair_path: bool = True,
         pairmixer_block_type: str = "dense",
         pairmixer_transition_type: str = "swiglu",
         pair_dim: int | None = None,
@@ -47,6 +54,7 @@ class PeakSetEncoder(nn.Module):
         self.num_layers = num_layers
         self.use_cls_token = use_cls_token
         self.use_position_embedding = use_position_embedding
+        self.use_pair_path = use_pair_path
         self.pairmixer_block_type = pairmixer_block_type.lower()
         if self.pairmixer_block_type not in {
             "dense",
@@ -70,6 +78,9 @@ class PeakSetEncoder(nn.Module):
         if self.use_cls_token:
             self.cls_token = nn.Parameter(torch.empty(model_dim))
             nn.init.normal_(self.cls_token, std=0.02)
+        else:
+            self.register_parameter("cls_token", None)
+        if self.use_pair_path and self.use_cls_token:
             self.cls_to_peak_pair_token = nn.Parameter(torch.empty(pair_dim))
             self.peak_to_cls_pair_token = nn.Parameter(torch.empty(pair_dim))
             self.cls_cls_pair_token = nn.Parameter(torch.empty(pair_dim))
@@ -77,37 +88,51 @@ class PeakSetEncoder(nn.Module):
             nn.init.normal_(self.peak_to_cls_pair_token, std=0.02)
             nn.init.normal_(self.cls_cls_pair_token, std=0.02)
         else:
-            self.register_parameter("cls_token", None)
             self.register_parameter("cls_to_peak_pair_token", None)
             self.register_parameter("peak_to_cls_pair_token", None)
             self.register_parameter("cls_cls_pair_token", None)
-        self.pair_embedder = PairFeatureEmbedder(
-            single_dim=model_dim,
-            pair_dim=pair_dim,
-            hidden_dim=pair_feature_hidden_dim,
-            mz_scale=pairmixer_mz_scale,
-            precursor_mz_scale=pairmixer_precursor_mz_scale,
-            mz_embedding=pairmixer_mz_embedding,
-            token_bin_size=pairmixer_mz_token_bin_size,
-            token_embedding_dim=pairmixer_mz_token_embedding_dim,
-            fourier_num_freqs=pairmixer_fourier_num_freqs,
-            fourier_x_min=pairmixer_fourier_x_min,
-            fourier_x_max=pairmixer_fourier_x_max,
-            relative_fourier_x_min=pairmixer_relative_fourier_x_min,
-            relative_fourier_x_max=pairmixer_relative_fourier_x_max,
+        self.pair_embedder = (
+            PairFeatureEmbedder(
+                single_dim=model_dim,
+                pair_dim=pair_dim,
+                hidden_dim=pair_feature_hidden_dim,
+                mz_scale=pairmixer_mz_scale,
+                precursor_mz_scale=pairmixer_precursor_mz_scale,
+                mz_embedding=pairmixer_mz_embedding,
+                token_bin_size=pairmixer_mz_token_bin_size,
+                token_embedding_dim=pairmixer_mz_token_embedding_dim,
+                fourier_num_freqs=pairmixer_fourier_num_freqs,
+                fourier_x_min=pairmixer_fourier_x_min,
+                fourier_x_max=pairmixer_fourier_x_max,
+                relative_fourier_x_min=pairmixer_relative_fourier_x_min,
+                relative_fourier_x_max=pairmixer_relative_fourier_x_max,
+            )
+            if self.use_pair_path
+            else None
         )
         blocks = []
         for _ in range(self.num_layers):
-            block = PairMixerBlock(
-                single_dim=model_dim,
-                pair_dim=pair_dim,
-                num_heads=num_heads,
-                attention_mlp_multiple=attention_mlp_multiple,
-                norm_eps=norm_eps,
-                dropout=pairmixer_dropout,
-                use_single_to_pair_update=self.use_bi_dense,
-                use_pair_bias=pairmixer_use_pair_bias,
-                transition_type=pairmixer_transition_type,
+            block = (
+                PairMixerBlock(
+                    single_dim=model_dim,
+                    pair_dim=pair_dim,
+                    num_heads=num_heads,
+                    attention_mlp_multiple=attention_mlp_multiple,
+                    norm_eps=norm_eps,
+                    dropout=pairmixer_dropout,
+                    use_single_to_pair_update=self.use_bi_dense,
+                    use_pair_bias=pairmixer_use_pair_bias,
+                    transition_type=pairmixer_transition_type,
+                )
+                if self.use_pair_path
+                else SingleMixerBlock(
+                    single_dim=model_dim,
+                    num_heads=num_heads,
+                    attention_mlp_multiple=attention_mlp_multiple,
+                    norm_eps=norm_eps,
+                    dropout=pairmixer_dropout,
+                    transition_type=pairmixer_transition_type,
+                )
             )
             blocks.append(block)
         self.blocks = nn.ModuleList(blocks)
@@ -116,11 +141,14 @@ class PeakSetEncoder(nn.Module):
             if apply_final_norm
             else nn.Identity()
         )
-        self.final_pair_norm = (
-            nn.RMSNorm(pair_dim, eps=norm_eps)
-            if apply_final_pair_norm
-            else nn.Identity()
-        )
+        if self.use_pair_path:
+            self.final_pair_norm = (
+                nn.RMSNorm(pair_dim, eps=norm_eps)
+                if apply_final_pair_norm
+                else nn.Identity()
+            )
+        else:
+            self.final_pair_norm = None
 
     def _add_positions(
         self,
@@ -152,6 +180,32 @@ class PeakSetEncoder(nn.Module):
         if spectrum_metadata is None:
             return None
         return self.metadata_proj(spectrum_metadata.to(dtype=dtype))
+
+    def _embed_peaks(
+        self,
+        peak_mz: Float[Tensor, "batch peaks"],
+        peak_intensity: Float[Tensor, "batch peaks"],
+        valid_mask: Bool[Tensor, "batch peaks"] | None,
+        visible_mask: Bool[Tensor, "batch peaks"] | None,
+        spectrum_metadata: Float[Tensor, "batch metadata"] | None,
+    ) -> tuple[
+        Float[Tensor, "batch peaks dim"],
+        Bool[Tensor, "batch peaks"],
+        Float[Tensor, "batch dim"] | None,
+    ]:
+        peak_valid_mask = (
+            torch.ones_like(peak_mz, dtype=torch.bool)
+            if valid_mask is None
+            else valid_mask
+        )
+        peak_visible_mask = _merge_visible_mask(peak_valid_mask, visible_mask)
+        if peak_visible_mask is None:
+            peak_visible_mask = peak_valid_mask
+        x = self.embedder(peak_mz, peak_intensity)
+        metadata_embedding = self._metadata_embedding(spectrum_metadata, x.dtype)
+        if metadata_embedding is not None:
+            x = x + metadata_embedding.unsqueeze(1).to(dtype=x.dtype)
+        return self._add_positions(x), peak_visible_mask, metadata_embedding
 
     def _append_cls_pair_tokens(
         self,
@@ -194,21 +248,16 @@ class PeakSetEncoder(nn.Module):
         Float[Tensor, "batch tokens dim"],
         Float[Tensor, "batch tokens tokens pair"],
     ]:
-        peak_valid_mask = (
-            torch.ones_like(peak_mz, dtype=torch.bool)
-            if valid_mask is None
-            else valid_mask
+        assert self.use_pair_path
+        x, peak_visible_mask, metadata_embedding = self._embed_peaks(
+            peak_mz,
+            peak_intensity,
+            valid_mask,
+            visible_mask,
+            spectrum_metadata,
         )
-        peak_visible_mask = _merge_visible_mask(peak_valid_mask, visible_mask)
-        if peak_visible_mask is None:
-            peak_visible_mask = peak_valid_mask
-        x = self.embedder(peak_mz, peak_intensity)
-        metadata_embedding = self._metadata_embedding(spectrum_metadata, x.dtype)
-        if metadata_embedding is not None:
-            x = x + metadata_embedding.unsqueeze(1).to(dtype=x.dtype)
-        x = self._add_positions(x)
         # x: [B, N, D], z: [B, N, N, P], masks: [B, N]
-        z = self.pair_embedder(
+        z = cast(PairFeatureEmbedder, self.pair_embedder)(
             peak_mz,
             peak_intensity,
             x,
@@ -219,14 +268,14 @@ class PeakSetEncoder(nn.Module):
         z = self._append_cls_pair_tokens(z)
         token_visible_mask = self._append_cls_mask(peak_visible_mask)
         for block in self.blocks:
-            x, z = block(
+            x, z = cast(PairMixerBlock, block)(
                 x,
                 z,
                 token_visible_mask,
                 token_visible_mask,
             )
         x = self.final_norm(x)
-        z = self.final_pair_norm(z)
+        z = cast(nn.Module, self.final_pair_norm)(z)
         pair_mask = token_visible_mask.unsqueeze(2) & token_visible_mask.unsqueeze(1)
         z = z * pair_mask.unsqueeze(-1).to(dtype=z.dtype)
         return x, z
@@ -240,12 +289,25 @@ class PeakSetEncoder(nn.Module):
         precursor_mz: Float[Tensor, "batch"] | None = None,
         spectrum_metadata: Float[Tensor, "batch metadata"] | None = None,
     ) -> Float[Tensor, "batch tokens dim"]:
-        output, _ = self.forward_with_pair(
+        if self.use_pair_path:
+            output, _ = self.forward_with_pair(
+                peak_mz,
+                peak_intensity,
+                valid_mask=valid_mask,
+                visible_mask=visible_mask,
+                precursor_mz=precursor_mz,
+                spectrum_metadata=spectrum_metadata,
+            )
+            return output
+        output, peak_visible_mask, metadata_embedding = self._embed_peaks(
             peak_mz,
             peak_intensity,
-            valid_mask=valid_mask,
-            visible_mask=visible_mask,
-            precursor_mz=precursor_mz,
-            spectrum_metadata=spectrum_metadata,
+            valid_mask,
+            visible_mask,
+            spectrum_metadata,
         )
-        return output
+        output = self._append_cls_token(output, metadata_embedding)
+        token_visible_mask = self._append_cls_mask(peak_visible_mask)
+        for block in self.blocks:
+            output = cast(SingleMixerBlock, block)(output, token_visible_mask)
+        return self.final_norm(output)

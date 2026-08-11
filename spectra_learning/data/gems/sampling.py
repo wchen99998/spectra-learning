@@ -19,6 +19,7 @@ class ChunkedDistributedBatchSampler(Sampler[list[int]]):
         world_size: int,
         rank: int,
         shuffle_segments: bool = False,
+        partition_batches: bool = False,
     ) -> None:
         self.batch_size = batch_size
         self.rows_per_block = rows_per_block
@@ -28,6 +29,7 @@ class ChunkedDistributedBatchSampler(Sampler[list[int]]):
         self.world_size = world_size
         self.rank = rank
         self.shuffle_segments = shuffle_segments
+        self.partition_batches = partition_batches
         self.segment_blocks = [
             self._build_blocks([segment]) for segment in segments
         ]
@@ -78,12 +80,17 @@ class ChunkedDistributedBatchSampler(Sampler[list[int]]):
                     segment_blocks[index] for index in block_order
                 )
         else:
-            blocks = list(self.blocks[self.rank :: self.world_size])
+            blocks = list(
+                self.blocks
+                if self.partition_batches
+                else self.blocks[self.rank :: self.world_size]
+            )
         if self.shuffle and not self.shuffle_segments:
             order = torch.randperm(len(blocks), generator=generator).tolist()
             blocks = [blocks[index] for index in order]
 
         partial_batches: list[list[int]] = []
+        batch_index = 0
         for block_start, block_stop in blocks:
             rows = list(range(block_start, block_stop))
             if self.shuffle:
@@ -92,28 +99,57 @@ class ChunkedDistributedBatchSampler(Sampler[list[int]]):
             for offset in range(0, len(rows), self.batch_size):
                 batch = rows[offset : offset + self.batch_size]
                 if len(batch) == self.batch_size:
-                    yield batch
+                    if (
+                        not self.partition_batches
+                        or batch_index % self.world_size == self.rank
+                    ):
+                        yield batch
+                    batch_index += 1
                 elif not self.drop_last:
                     partial_batches.append(batch)
-        yield from partial_batches
+        for batch in partial_batches:
+            if (
+                not self.partition_batches
+                or batch_index % self.world_size == self.rank
+            ):
+                yield batch
+            batch_index += 1
+
+    def _partitioned_batch_count(self, total: int) -> int:
+        return max(
+            0,
+            (total + self.world_size - 1 - self.rank) // self.world_size,
+        )
 
     @property
     def full_batch_count(self) -> int:
-        return sum(
+        total = sum(
             (block_stop - block_start) // self.batch_size
-            for block_start, block_stop in self.blocks[
-                self.rank :: self.world_size
-            ]
+            for block_start, block_stop in (
+                self.blocks
+                if self.partition_batches
+                else self.blocks[self.rank :: self.world_size]
+            )
         )
+        if self.partition_batches:
+            return self._partitioned_batch_count(total)
+        return total
 
     def __len__(self) -> int:
+        blocks = (
+            self.blocks
+            if self.partition_batches
+            else self.blocks[self.rank :: self.world_size]
+        )
         batches = 0
-        for block_start, block_stop in self.blocks[self.rank :: self.world_size]:
+        for block_start, block_stop in blocks:
             block_len = block_stop - block_start
             if self.drop_last:
                 batches += block_len // self.batch_size
             else:
                 batches += math.ceil(block_len / self.batch_size)
+        if self.partition_batches:
+            return self._partitioned_batch_count(batches)
         return batches
 
 

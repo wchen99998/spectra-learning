@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from typing import cast
 
 import jax
 import jax.numpy as jnp
@@ -617,7 +618,7 @@ class AttentionPairBias(nnx.Module):
     def __call__(
         self,
         single: Array,
-        pair: Array,
+        pair: Array | None,
         token_mask: Array,
         num_peak_tokens: int,
     ) -> Array:
@@ -637,6 +638,7 @@ class AttentionPairBias(nnx.Module):
         q = self.q_norm(q)
         k = self.k_norm(k)
         if self.use_pair_bias:
+            pair = cast(Array, pair)
             peak_bias = jnp.transpose(
                 self.pair_bias(self.pair_norm(pair)),
                 (0, 3, 1, 2),
@@ -673,6 +675,90 @@ class AttentionPairBias(nnx.Module):
             self.pair_bias.load_torch_state_dict(state_dict, f"{prefix}.pair_bias")
         self.g.load_torch_state_dict(state_dict, f"{prefix}.g")
         self.o.load_torch_state_dict(state_dict, f"{prefix}.o")
+
+
+class SingleMixerBlock(nnx.Module):
+    def __init__(
+        self,
+        *,
+        single_dim: int,
+        num_heads: int,
+        attention_mlp_multiple: float,
+        norm_eps: float,
+        transition_type: str = "swiglu",
+        compute_dtype: object = jnp.float32,
+        rngs: nnx.Rngs | None = None,
+    ) -> None:
+        rngs = nnx.Rngs(0) if rngs is None else rngs
+        self.transition_type = transition_type.lower()
+        if self.transition_type not in SUPPORTED_PAIRMIXER_TRANSITION_TYPES:
+            raise ValueError(
+                "pairmixer_transition_type must be one of ('swiglu', 'feedforward')"
+            )
+        self.single_attention = AttentionPairBias(
+            single_dim=single_dim,
+            pair_dim=single_dim,
+            num_heads=num_heads,
+            norm_eps=norm_eps,
+            use_pair_bias=False,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        )
+        self.single_attention_post_norm = RMSNorm(single_dim, eps=norm_eps)
+        self.single_transition_norm = RMSNorm(single_dim, eps=norm_eps)
+        self.single_transition = _build_pairmixer_transition(
+            single_dim,
+            hidden_dim=math.ceil(single_dim * attention_mlp_multiple),
+            transition_type=self.transition_type,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        )
+        self.single_transition_post_norm = RMSNorm(single_dim, eps=norm_eps)
+
+    def __call__(
+        self,
+        single: Array,
+        token_mask: Array,
+    ) -> Array:
+        attention_update = self.single_attention(
+            single,
+            None,
+            token_mask,
+            token_mask.shape[1],
+        )
+        single = single + self.single_attention_post_norm(attention_update)
+        return single + self.single_transition_post_norm(
+            _transition_with_preferred_acc(
+                self.single_transition,
+                self.single_transition_norm(single),
+            )
+        )
+
+    def load_torch_state_dict(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        prefix: str,
+    ) -> None:
+        self.single_attention.load_torch_state_dict(
+            state_dict,
+            f"{prefix}.single_attention",
+        )
+        self.single_attention_post_norm.load_torch_state_dict(
+            state_dict,
+            f"{prefix}.single_attention_post_norm",
+        )
+        self.single_transition_norm.load_torch_state_dict(
+            state_dict,
+            f"{prefix}.single_transition_norm",
+        )
+        self.single_transition.load_torch_state_dict(
+            state_dict,
+            f"{prefix}.single_transition",
+        )
+        self.single_transition_post_norm.load_torch_state_dict(
+            state_dict,
+            f"{prefix}.single_transition_post_norm",
+        )
 
 
 class GatedSingleToPairUpdate(nnx.Module):

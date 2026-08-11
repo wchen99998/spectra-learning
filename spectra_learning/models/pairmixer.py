@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from typing import cast
 
 import torch
 import torch.nn.functional as F
@@ -398,7 +399,7 @@ class AttentionPairBias(nn.Module):
     def forward(
         self,
         single: Float[Tensor, "batch tokens dim"],
-        pair: Float[Tensor, "batch peaks peaks pair"],
+        pair: Float[Tensor, "batch peaks peaks pair"] | None,
         token_mask: Bool[Tensor, "batch tokens"],
         num_peak_tokens: int,
     ) -> Float[Tensor, "batch tokens dim"]:
@@ -419,6 +420,7 @@ class AttentionPairBias(nn.Module):
         k = self.k_norm(k)
 
         if self.use_pair_bias:
+            pair = cast(Tensor, pair)
             peak_bias = self.pair_bias(self.pair_norm(pair)).permute(0, 3, 1, 2)
             extra_tokens = num_tokens - num_peak_tokens
             attn_bias = F.pad(peak_bias, (0, extra_tokens, 0, extra_tokens)).float()
@@ -439,6 +441,62 @@ class AttentionPairBias(nn.Module):
         out = out.transpose(1, 2).contiguous().view(batch_size, num_tokens, single_dim)
         out = out * torch.sigmoid(self.g(single_norm))
         return self.o(out)
+
+
+class SingleMixerBlock(nn.Module):
+    def __init__(
+        self,
+        *,
+        single_dim: int,
+        num_heads: int,
+        attention_mlp_multiple: float,
+        norm_eps: float,
+        dropout: float,
+        transition_type: str = "swiglu",
+    ) -> None:
+        super().__init__()
+        self.transition_type = transition_type.lower()
+        if self.transition_type not in SUPPORTED_PAIRMIXER_TRANSITION_TYPES:
+            raise ValueError(
+                "pairmixer_transition_type must be one of ('swiglu', 'feedforward')"
+            )
+        self.single_attention = AttentionPairBias(
+            single_dim=single_dim,
+            pair_dim=single_dim,
+            num_heads=num_heads,
+            norm_eps=norm_eps,
+            use_pair_bias=False,
+        )
+        self.single_attention_post_norm = _build_norm(single_dim, eps=norm_eps)
+        self.single_transition_norm = _build_norm(single_dim, eps=norm_eps)
+        self.single_transition = _build_pairmixer_transition(
+            single_dim,
+            hidden_dim=math.ceil(single_dim * attention_mlp_multiple),
+            transition_type=self.transition_type,
+        )
+        self.single_transition_post_norm = _build_norm(single_dim, eps=norm_eps)
+        self.drop = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
+
+    def forward(
+        self,
+        single: Float[Tensor, "batch tokens dim"],
+        token_mask: Bool[Tensor, "batch tokens"],
+    ) -> Float[Tensor, "batch tokens dim"]:
+        single = single + self.drop(
+            self.single_attention_post_norm(
+                self.single_attention(
+                    single,
+                    None,
+                    token_mask,
+                    token_mask.shape[1],
+                )
+            )
+        )
+        return single + self.drop(
+            self.single_transition_post_norm(
+                self.single_transition(self.single_transition_norm(single))
+            )
+        )
 
 
 class GatedSingleToPairUpdate(nn.Module):

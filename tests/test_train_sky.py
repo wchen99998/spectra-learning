@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -101,6 +102,22 @@ def test_infra_flag_sets_region_from_infra():
 
     assert args.region == "us-east5"
     assert args.infra == "gcp/us-east5"
+
+
+def test_infra_flag_sets_region_from_zone_infra():
+    args, _sky_args = train_sky.parse_args(
+        [
+            "--config",
+            TRAIN_CONFIG,
+            "--workdir",
+            TRAIN_WORKDIR,
+            "--infra",
+            "gcp/europe-west4/europe-west4-a",
+        ]
+    )
+
+    assert args.region == "europe-west4"
+    assert args.infra == "gcp/europe-west4/europe-west4-a"
 
 
 def test_region_rejects_conflicting_infra():
@@ -299,6 +316,7 @@ def test_resolve_topology_accepts_explicit_topology_and_chip_count_shorthand():
 @pytest.mark.parametrize(
     ("chips", "topology_name", "instance_type", "num_nodes", "chips_per_node"),
     [
+        (1, "1x1", "ct6e-standard-1t", 1, 1),
         (4, "2x2", "ct6e-standard-4t", 1, 4),
         (8, "2x4", "ct6e-standard-8t", 1, 8),
         (16, "4x4", "ct6e-standard-4t", 4, 4),
@@ -347,6 +365,10 @@ def test_build_task_constructs_direct_gcp_dws_resources_and_env():
     assert task["resources"]["infra"] == "gcp/us-central1"
     assert "image_id" not in task["resources"]
     assert task["resources"]["instance_type"] == "tpu7x-standard-4t"
+    assert task["resources"]["job_recovery"] == {
+        "strategy": "FAILOVER",
+        "max_restarts_on_errors": 1,
+    }
     assert "accelerators" not in task["resources"]
     assert "accelerator_args" not in task["resources"]
     assert "cpus" not in task["resources"]
@@ -378,6 +400,10 @@ def test_build_task_constructs_direct_gcp_dws_resources_and_env():
     assert 'echo "JAX compilation cache ${JAX_COMPILATION_CACHE_DIR}"' in task["run"]
     assert 'config["jax_compilation_cache_dir"] = os.environ["JAX_CACHE_DIR"]' in task["run"]
     assert ".venv/bin/python train.py" in task["run"]
+    assert "setsid .venv/bin/python train.py" in task["run"]
+    assert 'kill -TERM -- "-${TRAIN_PID}"' in task["run"]
+    assert 'kill -KILL -- "-${TRAIN_PID}"' in task["run"]
+    assert 'wait "${TRAIN_PID}"' in task["run"]
     assert "SPECTRA_AOT" not in task["run"]
     assert "precompile" not in task["run"].lower()
 
@@ -414,6 +440,36 @@ def test_build_task_constructs_v6e_8_resources():
     assert task["config"]["gcp"]["managed_instance_group"][
         "accelerator_topology"
     ] == "2x4"
+
+
+def test_build_task_constructs_v6e_resources_in_exact_zone():
+    task = train_sky.build_task(
+        topology=train_sky.resolve_topology(chips=64, generation="v6e"),
+        envs={"SPECTRA_RUN_ID": "v6e-64", "SPECTRA_CONFIG_JSON": "{}"},
+        infra="gcp/europe-west4/europe-west4-a",
+        task_name=train_sky.V6E_TASK_NAME,
+    )
+
+    assert task["num_nodes"] == 16
+    assert task["resources"]["infra"] == "gcp/europe-west4/europe-west4-a"
+    assert task["resources"]["image_id"] == {
+        "europe-west4": train_sky.V6E_VM_IMAGE_ID
+    }
+
+
+def test_build_task_constructs_v6e_1_resources():
+    task = train_sky.build_task(
+        topology=train_sky.resolve_topology(chips=1, generation="v6e"),
+        envs={"SPECTRA_RUN_ID": "v6e-1", "SPECTRA_CONFIG_JSON": "{}"},
+        infra="gcp/us-south1",
+        task_name=train_sky.V6E_TASK_NAME,
+    )
+
+    assert task["num_nodes"] == 1
+    assert task["resources"]["instance_type"] == "ct6e-standard-1t"
+    assert task["config"]["gcp"]["managed_instance_group"][
+        "accelerator_topology"
+    ] == "1x1"
 
 
 def test_build_task_sets_dws_run_duration():
@@ -504,6 +560,9 @@ def test_dryrun_prints_generated_assets_without_token_lookup(
     assert "num_nodes: 2" in output
     assert "infra: gcp/us-central1" in output
     assert "instance_type: tpu7x-standard-4t" in output
+    assert "job_recovery:" in output
+    assert "strategy: FAILOVER" in output
+    assert "max_restarts_on_errors: 1" in output
     assert "image_id:" not in output
     assert "docker:" not in output
     assert f"uv python install {train_sky.DEFAULT_PYTHON_VERSION}" in output
@@ -545,6 +604,72 @@ def test_dryrun_prints_generated_assets_without_token_lookup(
     assert "--name spectra-dryrun-assets" in output
     assert "===== SkyPilot Logs Command =====" in output
     assert "sky jobs logs -n spectra-dryrun-assets" in output
+
+
+def test_task_run_kills_orphans_and_propagates_training_exit_code(
+    tmp_path: Path,
+) -> None:
+    python = tmp_path / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    (tmp_path / "train.py").write_text(
+        """\
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+child_code = '''
+import signal
+import time
+from pathlib import Path
+
+def terminate(*_args):
+    Path("child.terminated").write_text("terminated")
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, terminate)
+Path("child.ready").write_text("ready")
+while True:
+    time.sleep(1)
+'''
+child = subprocess.Popen([sys.executable, "-c", child_code])
+Path("child.pid").write_text(str(child.pid))
+while not Path("child.ready").exists():
+    time.sleep(0.01)
+raise SystemExit(23)
+"""
+    )
+    environment = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "SPECTRA_CONFIG": "config.py",
+        "SPECTRA_WORKDIR": str(tmp_path / "workdir"),
+        "SPECTRA_RUN_ID": "process-group-test",
+        "SPECTRA_JAX_CACHE_DIR": str(tmp_path / "jax-cache"),
+        "SPECTRA_CONFIG_JSON": "{}",
+        "SPECTRA_METRICS_JSON": "metrics.json",
+        "HF_TOKEN": "hf-token",
+        "WANDB_API_KEY": "wandb-key",
+        "HF_HOME": str(tmp_path / "hf"),
+        "WANDB_DIR": str(tmp_path / "wandb"),
+        "SKYPILOT_NODE_IPS": "127.0.0.1",
+        "SKYPILOT_NUM_NODES": "1",
+        "SKYPILOT_NODE_RANK": "0",
+    }
+
+    result = subprocess.run(
+        ["bash", "-c", train_sky.TASK_RUN],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert result.returncode == 23
+    assert (tmp_path / "child.terminated").read_text() == "terminated"
 
 
 def test_dryrun_allows_64_chip_count(

@@ -92,6 +92,10 @@ class PeakSetJEPAJax(nnx.Module):
             "fastmixer-dense",
         }
         self.pairmixer_fast_max_visible_tokens = cfg.pairmixer_fast_max_visible_tokens
+        if self.use_fastmixer and self.pairmixer_fast_max_visible_tokens is None:
+            self.pairmixer_fast_max_visible_tokens = cfg.num_peaks + int(
+                cfg.encoder_use_cls_token
+            )
         self.pairmixer_fast_target_max_visible_tokens = (
             cfg.predictor_target_max_tokens
             if cfg.predictor_target_max_tokens is not None
@@ -100,7 +104,7 @@ class PeakSetJEPAJax(nnx.Module):
         self.pairmixer_fast_encoder_max_visible_tokens = (
             cfg.pairmixer_fast_encoder_max_visible_tokens
             if cfg.pairmixer_fast_encoder_max_visible_tokens is not None
-            else cfg.pairmixer_fast_max_visible_tokens
+            else self.pairmixer_fast_max_visible_tokens
         )
         self.pairmixer_transition_type = cfg.pairmixer_transition_type.lower()
         if self.pairmixer_transition_type not in SUPPORTED_PAIRMIXER_TRANSITION_TYPES:
@@ -199,8 +203,9 @@ class PeakSetJEPAJax(nnx.Module):
             self.teacher_encoder.pairmixer_fast_max_visible_tokens = (
                 teacher_full_tokens
             )
-            for block in self.teacher_encoder.blocks:
-                block.fastmixer_max_visible_tokens = teacher_full_tokens
+            if self.teacher_encoder.use_pair_path:
+                for block in self.teacher_encoder.blocks:
+                    block.fastmixer_max_visible_tokens = teacher_full_tokens
         self.latent_mask_token = nnx.Param(
             rngs.params.normal((self.predictor_dim,), dtype=jnp.float32) * 0.02
         )
@@ -325,6 +330,7 @@ class PeakSetJEPAJax(nnx.Module):
             apply_final_pair_norm=cfg.encoder_apply_final_pair_norm,
             num_peaks=cfg.num_peaks,
             use_cls_token=cfg.encoder_use_cls_token,
+            use_pair_path=cfg.distogram_loss_weight > 0,
             pairmixer_block_type=self.pairmixer_block_type,
             pairmixer_transition_type=cfg.pairmixer_transition_type.lower(),
             pair_dim=cfg.pairmixer_pair_dim,
@@ -363,8 +369,9 @@ class PeakSetJEPAJax(nnx.Module):
         self.pairmixer_fast_max_visible_tokens = predictor_tokens
         self.pairmixer_fast_target_max_visible_tokens = target_tokens
         self.encoder.pairmixer_fast_max_visible_tokens = encoder_tokens
-        for block in self.encoder.blocks:
-            block.fastmixer_max_visible_tokens = encoder_tokens
+        if self.encoder.use_pair_path:
+            for block in self.encoder.blocks:
+                block.fastmixer_max_visible_tokens = encoder_tokens
 
     def __call__(
         self,
@@ -537,10 +544,9 @@ class PeakSetJEPAJax(nnx.Module):
         )
         (
             context_encoded_compact,
-            _,
             enc_idx,
             enc_compact_mask,
-        ) = self.encoder.forward_with_pair_compact(
+        ) = self.encoder.forward_compact(
             context_mz,
             context_intensity,
             valid_mask=peak_valid_mask,
@@ -708,10 +714,9 @@ class PeakSetJEPAJax(nnx.Module):
         )
         (
             context_encoded_compact,
-            _,
             enc_idx,
             enc_compact_mask,
-        ) = self.encoder.forward_with_pair_compact(
+        ) = self.encoder.forward_compact(
             context_mz,
             context_intensity,
             valid_mask=peak_valid_mask,
@@ -881,7 +886,7 @@ class PeakSetJEPAJax(nnx.Module):
         spectrum_metadata: Array | None = None,
     ) -> Array:
         teacher_encoder = self.teacher_encoder if self.teacher_encoder is not None else self.encoder
-        teacher_encoded, _ = teacher_encoder.forward_with_pair(
+        teacher_encoded = teacher_encoder(
             peak_mz,
             peak_intensity,
             valid_mask=peak_valid_mask,

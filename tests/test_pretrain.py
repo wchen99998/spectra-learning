@@ -233,6 +233,7 @@ class PairMixerEncoderTests(unittest.TestCase):
             "num_peaks": 6,
             "jepa_num_target_blocks": 2,
             "masked_token_loss_weight": 1.0,
+            "distogram_loss_weight": 0.25,
             "pairmixer_pair_dim": 32,
             "pairmixer_pair_feature_hidden_dim": 16,
         }
@@ -910,8 +911,8 @@ class BlockJEPATests(unittest.TestCase):
 
         with mock.patch.object(
             model.encoder,
-            "forward_with_pair",
-            wraps=model.encoder.forward_with_pair,
+            "forward",
+            wraps=model.encoder.forward,
         ) as encoder_forward:
             metrics = model.forward_augmented(batch)
 
@@ -930,13 +931,13 @@ class BlockJEPATests(unittest.TestCase):
         with (
             mock.patch.object(
                 teacher_encoder,
-                "forward_with_pair",
-                wraps=teacher_encoder.forward_with_pair,
+                "forward",
+                wraps=teacher_encoder.forward,
             ) as teacher_forward,
             mock.patch.object(
                 model.encoder,
-                "forward_with_pair",
-                wraps=model.encoder.forward_with_pair,
+                "forward",
+                wraps=model.encoder.forward,
             ) as student_forward,
         ):
             loss = model.forward_augmented(batch)["loss"]
@@ -1164,7 +1165,7 @@ class BlockJEPATests(unittest.TestCase):
             batch["peak_mz"].shape[1] + 1,
         )
         self.assertIn("encoder.cls_token", model.state_dict())
-        self.assertIn("encoder.cls_cls_pair_token", model.state_dict())
+        self.assertNotIn("encoder.cls_cls_pair_token", model.state_dict())
 
     def test_backward_populates_encoder_gradients(self):
         model = self._build_model()

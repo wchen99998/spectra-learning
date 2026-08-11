@@ -17,7 +17,10 @@ from spectra_learning.data.gems.collate import GemsBatchCollator
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.model_jax import PeakSetJEPAJax
 from spectra_learning.models.common_jax import RMSNorm
-from spectra_learning.models.pairmixer_jax import PairMixerBlock as JaxPairMixerBlock
+from spectra_learning.models.pairmixer_jax import (
+    PairMixerBlock as JaxPairMixerBlock,
+    SingleMixerBlock as JaxSingleMixerBlock,
+)
 from spectra_learning.models.transformer_jax import (
     CrossAttentionBlock as JaxCrossAttentionBlock,
 )
@@ -88,6 +91,7 @@ def _small_bi_dense_mae_kwargs() -> dict[str, object]:
     return {
         **_small_mae_kwargs(),
         "pairmixer_block_type": "bi-dense",
+        "distogram_loss_weight": 0.25,
     }
 
 
@@ -153,7 +157,9 @@ def test_jax_rmsnorm_rejects_layernorm_checkpoint():
 
 
 def test_jax_native_dense_encoder_cls_pair_tokens_are_random_initialized():
-    model = PeakSetJEPAJax(**_small_mae_kwargs())
+    model = PeakSetJEPAJax(
+        **{**_small_mae_kwargs(), "distogram_loss_weight": 0.25}
+    )
     encoder = model.encoder
 
     for name in (
@@ -164,9 +170,25 @@ def test_jax_native_dense_encoder_cls_pair_tokens_are_random_initialized():
         assert not np.allclose(np.asarray(getattr(encoder, name)[...]), 0.0), name
 
 
+def test_zero_distogram_builds_single_stream_encoder():
+    model = PeakSetJEPAJax(**_small_mae_kwargs())
+    encoder = model.encoder
+
+    assert isinstance(encoder.blocks[0], JaxSingleMixerBlock)
+    assert encoder.pair_embedder is None
+    assert encoder.cls_to_peak_pair_token is None
+    assert encoder.peak_to_cls_pair_token is None
+    assert encoder.cls_cls_pair_token is None
+    assert encoder.final_pair_norm is None
+
+
 def test_mae_without_cls_has_peak_only_encoder_shapes_and_jax_parity():
     torch.manual_seed(7)
-    kwargs = {**_small_mae_kwargs(), "encoder_use_cls_token": False}
+    kwargs = {
+        **_small_mae_kwargs(),
+        "encoder_use_cls_token": False,
+        "distogram_loss_weight": 0.25,
+    }
     torch_model = PeakSetJEPA(**kwargs).eval()
     jax_model = PeakSetJEPAJax(**kwargs)
     jax_model.load_torch_state_dict(torch_model.state_dict())
@@ -331,6 +353,7 @@ def test_jax_tokenized_single_and_pair_mz_match_pytorch() -> None:
         "pairmixer_mz_embedding": "token",
         "pairmixer_mz_token_bin_size": 0.1,
         "pairmixer_mz_token_embedding_dim": 8,
+        "distogram_loss_weight": 0.25,
     }
     torch.manual_seed(7)
     torch_model = PeakSetJEPA(**kwargs).eval()
@@ -384,7 +407,11 @@ def test_jax_mae_without_intensity_head_matches_pytorch():
 
 def test_jax_mae_without_pair_bias_matches_pytorch():
     torch.manual_seed(29)
-    kwargs = {**_small_mae_kwargs(), "pairmixer_use_pair_bias": False}
+    kwargs = {
+        **_small_mae_kwargs(),
+        "pairmixer_use_pair_bias": False,
+        "distogram_loss_weight": 0.25,
+    }
     torch_model = PeakSetJEPA(**kwargs).eval()
     jax_model = PeakSetJEPAJax(**kwargs)
     jax_model.load_torch_state_dict(torch_model.state_dict())
@@ -674,8 +701,11 @@ def test_jax_fastmixer_attention_can_disable_pair_bias():
 
 def test_jax_model_pair_bias_flag_reaches_encoder_only():
     model = PeakSetJEPAJax(
-        **_small_mae_kwargs(),
-        pairmixer_use_pair_bias=False,
+        **{
+            **_small_mae_kwargs(),
+            "pairmixer_use_pair_bias": False,
+            "distogram_loss_weight": 0.25,
+        }
     )
 
     assert not model.encoder.blocks[0].single_attention.use_pair_bias
@@ -858,7 +888,11 @@ def test_jax_fastmixer_activation_checkpointing_matches_uncheckpointed_update():
 
 
 def test_jax_bf16_autocast_uses_bf16_activations_and_fp32_loss():
-    kwargs = {**_small_mae_kwargs(), "autocast_dtype": "bf16"}
+    kwargs = {
+        **_small_mae_kwargs(),
+        "autocast_dtype": "bf16",
+        "distogram_loss_weight": 0.25,
+    }
     jax_model = PeakSetJEPAJax(**kwargs)
     batch = _jax_batch(_real_pattern_batch("contiguous"))
 

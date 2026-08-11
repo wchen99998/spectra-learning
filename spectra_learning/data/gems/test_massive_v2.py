@@ -7,6 +7,7 @@ from unittest import mock
 
 import h5py
 import numpy as np
+import pytest
 from ml_collections import config_dict
 
 import spectra_learning.data.gems as gems
@@ -152,6 +153,42 @@ def _write_artifact(root: Path) -> dict:
     return manifest
 
 
+def _planning_manifest(
+    *,
+    train_shard_count: int = 64,
+    validation_shard_count: int = 3,
+    eligible_rows_per_shard: int = 5_000_000,
+) -> dict:
+    def shards(split: str, count: int) -> list[dict]:
+        return [
+            {
+                "path": f"{split}/shard_{index:05d}.hdf5",
+                "rows": eligible_rows_per_shard,
+                "eligible_rows": eligible_rows_per_shard,
+                "bytes": 1,
+                "sha256": str(index),
+                "chunk_rows": 256,
+            }
+            for index in range(count)
+        ]
+
+    return {
+        "format": MASSIVE_V2_HDF5_FORMAT,
+        "splits": {
+            "train": {
+                "eligible_rows": train_shard_count * eligible_rows_per_shard,
+                "shards": shards("train", train_shard_count),
+            },
+            "validation": {
+                "eligible_rows": (
+                    validation_shard_count * eligible_rows_per_shard
+                ),
+                "shards": shards("validation", validation_shard_count),
+            },
+        },
+    }
+
+
 def _config(tmp_path: Path) -> config_dict.ConfigDict:
     config = config_dict.ConfigDict()
     config.artifact_dir = str(tmp_path / "cache")
@@ -249,7 +286,13 @@ def test_multihost_plan_downloads_only_each_ranks_budgeted_shards(
         assert all(
             Path(path).exists() for path in rank0.gems_train_shards
         )
-        next(iter(rank0.val_loader_for_eval(augment=False)))
+        rank0_validation = rank0.val_loader_for_eval(augment=False)
+        rank1_validation = rank1.val_loader_for_eval(augment=False)
+        assert rank0_validation.batch_sampler.seed == 42
+        assert rank1_validation.batch_sampler.seed == 42
+        assert rank0_validation.batch_sampler.partition_batches
+        assert rank1_validation.batch_sampler.partition_batches
+        next(iter(rank0_validation))
         assert calls[-1] == [
             rank0.artifact.validation_shards(0)[0].path
         ]
@@ -263,6 +306,84 @@ def test_multihost_plan_downloads_only_each_ranks_budgeted_shards(
             rank1.info["gems_shard_plan_sha256"]
         )
         assert "planned_download_bytes" in rank0.info
+
+
+@pytest.mark.parametrize("world_size", (1, 2, 4, 8, 16, 32, 64))
+def test_validation_plan_supplies_every_process_for_any_v6e_topology(
+    world_size: int,
+) -> None:
+    _, validation, _ = gems_artifacts.plan_massive_v2_shards(
+        _planning_manifest(),
+        world_size=world_size,
+        seed=66,
+        global_batch_size=4_096,
+        gradient_accumulation_steps=2,
+        rows_per_block=0,
+        drop_remainder=True,
+        training_max_steps=1,
+        val_num_steps=500,
+    )
+
+    assert len(validation) == world_size
+    assert all(len(assignment) == 1 for assignment in validation)
+    assert len({assignment[0].path for assignment in validation}) == min(
+        world_size,
+        3,
+    )
+    artifact = gems_artifacts.ResolvedGemsHdf5Artifact(
+        format=MASSIVE_V2_HDF5_FORMAT,
+        manifest_path=Path("manifest.json"),
+        manifest={},
+        repo_id="unit/massive-v2",
+        revision="unit-revision",
+        validation_assignments=validation,
+    )
+    partitions = [
+        artifact.validation_sampler_partition(rank)
+        for rank in range(world_size)
+    ]
+    for assignment in set(validation):
+        peers = [
+            rank
+            for rank, rank_assignment in enumerate(validation)
+            if rank_assignment == assignment
+        ]
+        assert [partitions[rank] for rank in peers] == [
+            (len(peers), peer_index)
+            for peer_index in range(len(peers))
+        ]
+        shard = assignment[0]
+        local_batch_size = 4_096 // (world_size * 2)
+        assert gems_artifacts._batch_count(
+            shard.eligible_rows,
+            batch_size=local_batch_size,
+            chunk_rows=shard.chunk_rows,
+            rows_per_block=0,
+            drop_last=True,
+        ) >= len(peers) * 500
+
+
+def test_validation_plan_rejects_too_few_full_batches() -> None:
+    manifest = _planning_manifest()
+    for shard in manifest["splits"]["validation"]["shards"]:
+        shard["rows"] = 128
+        shard["eligible_rows"] = 128
+    manifest["splits"]["validation"]["eligible_rows"] = 3 * 128
+    with pytest.raises(
+        ValueError,
+        match="validation split cannot provide 500 full batches",
+    ):
+        gems_artifacts.plan_massive_v2_shards(
+            manifest,
+            world_size=16,
+            seed=66,
+            global_batch_size=4_096,
+            gradient_accumulation_steps=2,
+            rows_per_block=0,
+            drop_remainder=True,
+            training_max_steps=1,
+            val_num_steps=500,
+        )
 
 
 def test_initial_shard_prefetch_does_not_block_datamodule_init(
@@ -359,9 +480,11 @@ def test_massive_v2_contract_mismatch_fails_fast(tmp_path: Path) -> None:
     manifest = _write_artifact(artifact)
     manifest["eligibility"]["max_precursor_mz"] = 2000.0
     (artifact / "manifest.json").write_text(json.dumps(manifest))
+    config = _config(tmp_path)
+    config.batch_size = 2
 
     try:
-        gems.GemsDataModule(_config(tmp_path), seed=7)
+        gems.GemsDataModule(config, seed=7)
     except ValueError as error:
         assert "eligibility contract mismatch" in str(error)
     else:

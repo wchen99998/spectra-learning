@@ -43,6 +43,17 @@ class ResolvedGemsHdf5Artifact:
     def validation_shards(self, rank: int) -> tuple[GemsHdf5Shard, ...]:
         return self.validation_assignments[rank]
 
+    def validation_sampler_partition(self, rank: int) -> tuple[int, int]:
+        assignment = self.validation_assignments[rank]
+        peers = [
+            peer_rank
+            for peer_rank, peer_assignment in enumerate(
+                self.validation_assignments
+            )
+            if peer_assignment == assignment
+        ]
+        return len(peers), peers.index(rank)
+
 
 def _repo_cache_name(repo_id: str, revision: str) -> str:
     return "--".join(
@@ -138,6 +149,46 @@ def _assign_shards(
     return tuple(tuple(shards) for shards in assignments)
 
 
+def _assign_validation_shards(
+    shards: tuple[GemsHdf5Shard, ...],
+    *,
+    world_size: int,
+    seed: int,
+    batch_size: int,
+    rows_per_block: int,
+    required_batches: int,
+) -> tuple[tuple[GemsHdf5Shard, ...], ...]:
+    ordered = _seeded_shard_order(shards, seed=seed, split="validation")
+    capacities = [
+        _batch_count(
+            shard.eligible_rows,
+            batch_size=batch_size,
+            chunk_rows=shard.chunk_rows,
+            rows_per_block=rows_per_block,
+            drop_last=True,
+        )
+        // required_batches
+        for shard in ordered
+    ]
+    if sum(capacities) < world_size:
+        raise ValueError(
+            "MassIVE v2 validation split cannot provide "
+            f"{required_batches} full batches to every process"
+        )
+
+    assignments: list[tuple[GemsHdf5Shard, ...]] = []
+    group_sizes = [0] * len(ordered)
+    while len(assignments) < world_size:
+        for shard_index, shard in enumerate(ordered):
+            if group_sizes[shard_index] == capacities[shard_index]:
+                continue
+            assignments.append((shard,))
+            group_sizes[shard_index] += 1
+            if len(assignments) == world_size:
+                break
+    return tuple(assignments)
+
+
 def plan_massive_v2_shards(
     manifest: dict[str, Any],
     *,
@@ -188,14 +239,12 @@ def plan_massive_v2_shards(
         drop_last=drop_remainder,
         required_batches=required_train_batches,
     )
-    validation_assignments = _assign_shards(
+    validation_assignments = _assign_validation_shards(
         validation_shards,
         world_size=world_size,
         seed=42,
-        split="validation",
         batch_size=local_batch_size,
         rows_per_block=rows_per_block,
-        drop_last=True,
         required_batches=val_num_steps,
     )
     plan_payload = {
@@ -208,6 +257,7 @@ def plan_massive_v2_shards(
         "drop_remainder": drop_remainder,
         "training_max_steps": training_max_steps,
         "val_num_steps": val_num_steps,
+        "validation_batch_partition": "shard_peer_stride_v1",
         "train": [
             [shard.path for shard in assignment]
             for assignment in train_assignments

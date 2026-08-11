@@ -486,6 +486,16 @@ class GemsDataModule:
     ) -> ChunkedDistributedBatchSampler:
         rank = self.distributed_rank if rank is None else rank
         is_massive_v2 = self.artifact.format == MASSIVE_V2_HDF5_FORMAT
+        partition_batches = is_massive_v2 and split == "validation"
+        if partition_batches:
+            sampler_world_size, sampler_rank = (
+                self.artifact.validation_sampler_partition(rank)
+            )
+        else:
+            sampler_world_size = (
+                1 if is_massive_v2 else self.distributed_world_size
+            )
+            sampler_rank = 0 if is_massive_v2 else rank
         sampler = ChunkedDistributedBatchSampler(
             (
                 self._dataset_segments(split)
@@ -497,9 +507,10 @@ class GemsDataModule:
             shuffle=shuffle,
             seed=seed,
             drop_last=drop_last,
-            world_size=1 if is_massive_v2 else self.distributed_world_size,
-            rank=0 if is_massive_v2 else rank,
+            world_size=sampler_world_size,
+            rank=sampler_rank,
             shuffle_segments=is_massive_v2,
+            partition_batches=partition_batches,
         )
         sampler.set_epoch(epoch)
         if is_massive_v2 and rank == self.distributed_rank:

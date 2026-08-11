@@ -16,7 +16,6 @@ import numpy as np
 import optax
 import torch
 from flax import nnx
-from jax._src import distributed as jax_distributed
 from jax.experimental import multihost_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from ml_collections import config_dict
@@ -1142,7 +1141,6 @@ _JAX_PROFILE_TIMING_NAMES = (
     "compiled_step_seconds",
 )
 _JAX_TIME_LIMIT_CHECK_EVERY_STEPS = 100
-_JAX_TIME_LIMIT_BROADCAST_TIMEOUT_MS = 60_000
 
 
 def _jax_wall_time() -> float:
@@ -1161,19 +1159,14 @@ def _jax_training_deadline(config: config_dict.ConfigDict) -> float | None:
     return _jax_wall_time() + float(max_duration_hours) * 3600.0
 
 
-def _jax_process_bool_broadcast(value: bool, *, key: str) -> bool:
+def _jax_process_bool_broadcast(value: bool) -> bool:
     if jax.process_count() == 1:
         return value
-    client = jax_distributed.global_state.client
-    if jax.process_index() == 0:
-        client.key_value_set(key, "1" if value else "0")
-    return (
-        client.blocking_key_value_get(
-            key,
-            _JAX_TIME_LIMIT_BROADCAST_TIMEOUT_MS,
-        )
-        == "1"
+    broadcast = multihost_utils.broadcast_one_to_all(
+        np.asarray(value, dtype=np.int32),
+        is_source=jax.process_index() == 0,
     )
+    return bool(np.asarray(broadcast).item())
 
 
 class _JaxTrainingLoop:
@@ -1551,10 +1544,7 @@ class _JaxTrainingLoop:
         source_reached = (
             jax.process_index() == 0 and _jax_wall_time() >= self.deadline
         )
-        if not _jax_process_bool_broadcast(
-            source_reached,
-            key=f"spectra_time_limit_{self.global_step}",
-        ):
+        if not _jax_process_bool_broadcast(source_reached):
             return False
         if jax.process_index() == 0:
             logging.info(

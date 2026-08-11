@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from spectra_learning.models.model import PeakSetJEPA
-from spectra_learning.models.pairmixer import PairMixerBlock
+from spectra_learning.models.pairmixer import PairMixerBlock, SingleMixerBlock
 from spectra_learning.models.transformer import CrossAttentionBlock
 
 
@@ -72,7 +72,17 @@ def _predictor_inputs(model: PeakSetJEPA):
 def test_predictor_is_cross_attention_only():
     model = _model()
 
-    assert isinstance(model.encoder.blocks[0], PairMixerBlock)
+    assert isinstance(model.encoder.blocks[0], SingleMixerBlock)
+    assert model.encoder.pair_embedder is None
+    assert model.encoder.cls_to_peak_pair_token is None
+    assert model.encoder.peak_to_cls_pair_token is None
+    assert model.encoder.cls_cls_pair_token is None
+    assert model.encoder.final_pair_norm is None
+    encoder_state = model.encoder.state_dict()
+    assert not any("pair_embedder" in name for name in encoder_state)
+    assert not any("tri_mul" in name for name in encoder_state)
+    assert not any("pair_transition" in name for name in encoder_state)
+    assert not any("pair_bias" in name for name in encoder_state)
     assert all(
         isinstance(block, CrossAttentionBlock)
         for block in model.masked_latent_predictor
@@ -201,6 +211,8 @@ def test_distogram_pair_path_is_conditional():
     enabled = _model(distogram_loss_weight=0.1)
     metrics = enabled.forward_mae(_batch())
 
+    assert isinstance(enabled.encoder.blocks[0], PairMixerBlock)
+    assert enabled.encoder.pair_embedder is not None
     assert enabled.distogram_head is not None
     assert metrics["distogram_loss"] > 0
 

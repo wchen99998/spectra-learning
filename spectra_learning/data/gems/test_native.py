@@ -2,6 +2,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from itertools import combinations, islice
 from pathlib import Path
 from unittest import mock
 
@@ -144,6 +145,69 @@ class GemsSamplingTests(unittest.TestCase):
         ]
         self.assertEqual(len(transitions), 3)
         self.assertEqual(set(transitions), {0, 1, 2})
+
+    def test_batch_partition_has_no_overlap_between_shard_peers(self):
+        batch_size = 4
+        required_batches = 5
+        for group_size in (1, 2, 5, 6, 22):
+            rows = group_size * required_batches * batch_size + 17
+            rank_rows = []
+            for rank in range(group_size):
+                sampler = ChunkedDistributedBatchSampler(
+                    [(0, rows, 2)],
+                    batch_size=batch_size,
+                    rows_per_block=16,
+                    shuffle=True,
+                    seed=42,
+                    drop_last=True,
+                    world_size=group_size,
+                    rank=rank,
+                    shuffle_segments=True,
+                    partition_batches=True,
+                )
+                batches = list(islice(sampler, required_batches))
+                self.assertGreaterEqual(
+                    sampler.full_batch_count,
+                    required_batches,
+                )
+                self.assertEqual(len(batches), required_batches)
+                rank_rows.append(
+                    {row for batch in batches for row in batch}
+                )
+
+            for left, right in combinations(rank_rows, 2):
+                self.assertTrue(left.isdisjoint(right))
+            self.assertEqual(
+                len(set().union(*rank_rows)),
+                group_size * required_batches * batch_size,
+            )
+
+    def test_batch_partition_covers_every_row_once(self):
+        rank_batches = []
+        for rank in range(3):
+            sampler = ChunkedDistributedBatchSampler(
+                [(0, 5, 2), (5, 4, 2)],
+                batch_size=2,
+                rows_per_block=4,
+                shuffle=True,
+                seed=42,
+                drop_last=False,
+                world_size=3,
+                rank=rank,
+                shuffle_segments=True,
+                partition_batches=True,
+            )
+            batches = list(sampler)
+            self.assertEqual(len(batches), len(sampler))
+            rank_batches.append(batches)
+
+        rows = [
+            row
+            for batches in rank_batches
+            for batch in batches
+            for row in batch
+        ]
+        self.assertEqual(sorted(rows), list(range(9)))
 
 
 class GeMSRuntimeDownloadTests(unittest.TestCase):

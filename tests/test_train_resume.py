@@ -12,6 +12,7 @@ import torch
 from ml_collections import config_dict
 
 from spectra_learning.config import config_to_dict
+from spectra_learning.data.gems.artifacts import LEGACY_GEMS_HDF5_FORMAT
 from spectra_learning.data.spectra import PEAK_MZ_MAX
 from spectra_learning.models.factory import build_model_from_config
 from spectra_learning.models.model import PeakSetJEPA
@@ -1073,6 +1074,7 @@ def test_train_and_evaluate_jax_logs_final_metrics_on_main_process(
         global_batch_size = 32
         batch_size = 16
         gradient_accumulation_steps = 1
+        artifact = SimpleNamespace(format=LEGACY_GEMS_HDF5_FORMAT)
         info = {"source": "unit-test"}
 
         def __init__(self, config, **kwargs) -> None:
@@ -1192,6 +1194,7 @@ def test_train_and_evaluate_jax_skips_logger_on_worker_process(
         global_batch_size = 32
         batch_size = 16
         gradient_accumulation_steps = 1
+        artifact = SimpleNamespace(format=LEGACY_GEMS_HDF5_FORMAT)
         info = {"source": "unit-test"}
 
         def __init__(self, config, **kwargs) -> None:
@@ -3052,6 +3055,7 @@ def test_model_mz_scale_uses_canonical_peak_preprocessing_scale():
     cfg.max_precursor_mz = 2000.0
     cfg.jepa_mae_loss_weight = 1.0
     cfg.jepa_mae_mz_bin_size = 2.5
+    cfg.distogram_loss_weight = 1.0
 
     model = build_model_from_config(cfg)
 

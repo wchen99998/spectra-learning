@@ -17,7 +17,11 @@ from spectra_learning.models.fastmixer_capacity import (
     pairmixer_fast_stage_capacities,
 )
 from spectra_learning.models.model_jax import PeakSetJEPAJax
-from spectra_learning.models.pairmixer_jax import PairMixerBlock, _active_indices
+from spectra_learning.models.pairmixer_jax import (
+    PairMixerBlock,
+    SingleMixerBlock,
+    _active_indices,
+)
 from spectra_learning.models.settings import PeakSetJEPASettings
 from spectra_learning.models.transformer_jax import CrossAttentionBlock
 from spectra_learning.probes.massspec.msg_probe_jax import (
@@ -134,14 +138,41 @@ def test_encoder_and_predictor_blocks_keep_separate_fastmixer_capacities():
 
     encoder_block = model.encoder.blocks[0]
     predictor_block = model.masked_latent_predictor[0]
-    assert encoder_block.fastmixer_max_visible_tokens == 17
+    assert isinstance(encoder_block, SingleMixerBlock)
+    assert model.encoder.pair_embedder is None
+    assert model.encoder.pairmixer_fast_max_visible_tokens == 17
     assert isinstance(predictor_block, CrossAttentionBlock)
     assert model.pairmixer_fast_target_max_visible_tokens == 24
 
     model.set_fastmixer_capacities(27, 41, 14)
 
-    assert encoder_block.fastmixer_max_visible_tokens == 27
+    assert model.encoder.pairmixer_fast_max_visible_tokens == 27
     assert model.pairmixer_fast_target_max_visible_tokens == 14
+
+
+def test_direct_fastmixer_model_defaults_to_full_single_stream_capacity():
+    model = PeakSetJEPAJax(
+        training_mode="mae",
+        model_dim=8,
+        encoder_num_layers=1,
+        encoder_num_heads=1,
+        feature_mlp_hidden_dim=8,
+        encoder_fourier_num_freqs=1,
+        pairmixer_fourier_num_freqs=1,
+        pairmixer_pair_dim=8,
+        pairmixer_pair_feature_hidden_dim=8,
+        pairmixer_block_type="fastmixer",
+        masked_latent_predictor_num_layers=1,
+        masked_latent_predictor_num_heads=1,
+        num_peaks=7,
+        jepa_num_target_blocks=1,
+        distogram_loss_weight=0.0,
+        target_projector_dim=-1,
+    )
+
+    assert model.pairmixer_fast_encoder_max_visible_tokens == 8
+    assert model.encoder.pairmixer_fast_max_visible_tokens == 8
+    assert isinstance(model.encoder.blocks[0], SingleMixerBlock)
 
 
 def test_pairmixer_has_one_projection_path():
@@ -242,17 +273,21 @@ def test_jax_msg_probe_uses_full_visible_fastmixer_clone():
 
     assert probe_model is not model
     assert probe_model.pairmixer_fast_max_visible_tokens == 5
-    assert probe_model.encoder.blocks[0].fastmixer_max_visible_tokens == 5
+    assert probe_model.encoder.pairmixer_fast_max_visible_tokens == 5
+    assert isinstance(probe_model.encoder.blocks[0], SingleMixerBlock)
+    assert probe_model.encoder.pair_embedder is None
     assert isinstance(probe_model.masked_latent_predictor[0], CrossAttentionBlock)
     np.testing.assert_allclose(
-        np.asarray(probe_model.encoder.blocks[0].tri_mul_out.p_in.weight[...]),
-        np.asarray(model.encoder.blocks[0].tri_mul_out.p_in.weight[...]),
+        np.asarray(
+            probe_model.encoder.blocks[0].single_attention.qkv.weight[...]
+        ),
+        np.asarray(model.encoder.blocks[0].single_attention.qkv.weight[...]),
     )
 
     peak_mz = jnp.linspace(0.1, 0.4, 4, dtype=jnp.float32)[None, :]
     peak_intensity = jnp.ones((1, 4), dtype=jnp.float32)
     valid_mask = jnp.ones((1, 4), dtype=jnp.bool_)
-    single, pair = probe_model.encoder.forward_with_pair(
+    single = probe_model.encoder(
         peak_mz,
         peak_intensity,
         valid_mask=valid_mask,
@@ -260,4 +295,3 @@ def test_jax_msg_probe_uses_full_visible_fastmixer_clone():
     )
 
     assert single.shape == (1, 5, 4)
-    assert pair.shape == (1, 5, 5, 4)

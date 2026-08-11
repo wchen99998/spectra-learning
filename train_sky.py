@@ -34,6 +34,7 @@ V6E_VM_IMAGE_ID = (
 DEFAULT_PYTHON_VERSION = "3.12.11"
 DEFAULT_SKY_BIN = "/home/wuhao/skypilot/.venv/bin/sky"
 TPU_V6E_TOPOLOGY_BY_CHIPS = {
+    1: "1x1",
     4: "2x2",
     8: "2x4",
     16: "4x4",
@@ -43,6 +44,7 @@ TPU_V6E_TOPOLOGY_BY_CHIPS = {
     256: "16x16",
 }
 TPU_V6E_MACHINE_LAYOUT_BY_CHIPS = {
+    1: ("ct6e-standard-1t", 1),
     4: ("ct6e-standard-4t", 1),
     8: ("ct6e-standard-8t", 1),
     16: ("ct6e-standard-4t", 4),
@@ -70,6 +72,7 @@ DEFAULT_TOPOLOGY = TPU7X_TOPOLOGY_BY_CHIPS[DEFAULT_CHIPS]
 DEFAULT_CHIPS_PER_NODE = 4
 DEFAULT_INSTANCE_TYPE = "tpu7x-standard-4t"
 DEFAULT_DWS_RUN_DURATION_SECONDS = 172800
+DEFAULT_MAX_RESTARTS_ON_ERRORS = 1
 MIN_DWS_RUN_DURATION_SECONDS = 600
 MAX_DWS_RUN_DURATION_SECONDS = 604800
 DEFAULT_PROVISION_TIMEOUT_SECONDS = 2_147_483_647
@@ -176,11 +179,37 @@ echo "TPU worker ${TPU_WORKER_ID}: ${TPU_WORKER_HOSTNAMES}"
 echo "Workdir ${SPECTRA_WORKDIR}"
 echo "JAX cache ${JAX_CACHE_DIR}"
 echo "JAX compilation cache ${JAX_COMPILATION_CACHE_DIR}"
-.venv/bin/python train.py \\
+TRAIN_PID=""
+terminate_training_process_group() {
+  if [[ -z "${TRAIN_PID}" ]]; then
+    return
+  fi
+  kill -TERM -- "-${TRAIN_PID}" 2>/dev/null || true
+  local attempt
+  for attempt in {1..10}; do
+    if ! kill -0 -- "-${TRAIN_PID}" 2>/dev/null; then
+      return
+    fi
+    sleep 1
+  done
+  kill -KILL -- "-${TRAIN_PID}" 2>/dev/null || true
+}
+cleanup_training() {
+  local status=$?
+  trap - EXIT
+  terminate_training_process_group
+  exit "${status}"
+}
+trap cleanup_training EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+setsid .venv/bin/python train.py \\
   --config "${SPECTRA_CONFIG}" \\
   --workdir "${SPECTRA_WORKDIR}" \\
   --overrides-json "${CONFIG_JSON}" \\
-  --metrics-json "${METRICS_JSON}"
+  --metrics-json "${METRICS_JSON}" &
+TRAIN_PID=$!
+wait "${TRAIN_PID}"
 """
 
 
@@ -582,6 +611,10 @@ def build_task(
     resources: dict[str, Any] = {
         "infra": infra,
         "instance_type": topology.instance_type,
+        "job_recovery": {
+            "strategy": "FAILOVER",
+            "max_restarts_on_errors": DEFAULT_MAX_RESTARTS_ON_ERRORS,
+        },
     }
     if topology.generation == "v6e":
         resources["image_id"] = {
@@ -615,8 +648,9 @@ def build_task(
 
 def gcp_region_from_infra(infra: str) -> str:
     prefix = "gcp/"
-    if infra.startswith(prefix) and infra[len(prefix) :].strip():
-        return infra[len(prefix) :].strip()
+    location = infra[len(prefix) :].strip() if infra.startswith(prefix) else ""
+    if location:
+        return location.split("/", 1)[0]
     return DEFAULT_REGION
 
 

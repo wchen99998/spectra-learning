@@ -244,6 +244,7 @@ class PeakSetJEPA(nn.Module):
             apply_final_pair_norm=cfg.encoder_apply_final_pair_norm,
             num_peaks=cfg.num_peaks,
             use_cls_token=cfg.encoder_use_cls_token,
+            use_pair_path=cfg.distogram_loss_weight > 0,
             pairmixer_block_type=cfg.pairmixer_block_type.lower(),
             pairmixer_transition_type=cfg.pairmixer_transition_type.lower(),
             pair_dim=cfg.pairmixer_pair_dim,
@@ -619,7 +620,7 @@ class PeakSetJEPA(nn.Module):
                 if self.teacher_encoder is not None
                 else self.encoder
             )
-            teacher_encoded, _ = teacher_encoder.forward_with_pair(
+            teacher_encoded = teacher_encoder(
                 peak_mz,
                 peak_intensity,
                 valid_mask=peak_valid_mask,

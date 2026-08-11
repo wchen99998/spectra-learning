@@ -35,18 +35,6 @@ from spectra_learning.training.pretrain_jax import (
 CHECKPOINT_METADATA = jax_training_checkpoint_metadata("test", {})
 
 
-class _FakeDistributedClient:
-    def __init__(self) -> None:
-        self.values: dict[str, str] = {}
-
-    def key_value_set(self, key: str, value: str) -> None:
-        self.values[key] = value
-
-    def blocking_key_value_get(self, key: str, timeout_in_ms: int) -> str:
-        assert timeout_in_ms == 60_000
-        return self.values[key]
-
-
 def test_jax_training_rejects_removed_probe_sharding_path() -> None:
     from spectra_learning.training.pretrain_jax import prepare_jax_training_config
 
@@ -554,23 +542,29 @@ def test_jax_training_loop_writes_emergency_checkpoint_before_waiting(tmp_path):
     manager.close()
 
 
-def test_jax_process_bool_broadcast_uses_distributed_runtime(monkeypatch):
+def test_jax_process_bool_broadcast_uses_multihost_collective(monkeypatch):
     from spectra_learning.training import pretrain_jax
 
-    client = _FakeDistributedClient()
+    calls = []
+
+    def fake_broadcast(value, *, is_source):
+        calls.append((int(np.asarray(value).item()), is_source))
+        return np.asarray(1, dtype=np.int32)
+
     monkeypatch.setattr(pretrain_jax.jax, "process_count", lambda: 2)
     monkeypatch.setattr(pretrain_jax.jax, "process_index", lambda: 0)
     monkeypatch.setattr(
-        pretrain_jax.jax_distributed.global_state,
-        "client",
-        client,
+        pretrain_jax.multihost_utils,
+        "broadcast_one_to_all",
+        fake_broadcast,
     )
 
-    assert _jax_process_bool_broadcast(True, key="stop_100") is True
-    assert client.values == {"stop_100": "1"}
+    assert _jax_process_bool_broadcast(True) is True
+    assert calls == [(1, True)]
 
     monkeypatch.setattr(pretrain_jax.jax, "process_index", lambda: 1)
-    assert _jax_process_bool_broadcast(False, key="stop_100") is True
+    assert _jax_process_bool_broadcast(False) is True
+    assert calls == [(1, True), (0, False)]
 
 
 def test_jax_training_loop_pure_optax_saves_and_resumes(tmp_path):
