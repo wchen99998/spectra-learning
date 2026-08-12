@@ -16,22 +16,23 @@ import numpy as np
 from huggingface_hub import HfApi, hf_hub_download
 
 from spectra_learning.data.gems.artifacts import MASSIVE_V2_HDF5_FORMAT
+from spectra_learning.data.gems.eligibility import (
+    MASSIVE_V2_REQUIRED_MS_LEVEL as REQUIRED_MS_LEVEL,
+    massive_v2_eligibility_contract,
+    massive_v2_training_eligibility_numpy,
+)
 
 SOURCE_REPO_ID = "novogaia/massive-v2"
 SOURCE_REVISION = "10c48d8184119829c48651b8a40ea5e0b9015687"
 SOURCE_SUFFIX = "_t0.95_l0.80_grouped.hdf5"
-DESTINATION_REPO_ID = "novogaia/massive-v2-ms2-t095-l080-sharded"
-DEFAULT_WORK_DIR = Path("/mnt/tg-go-nvme/massive-v2-conversion-v2")
+CONVERSION_VERSION = "massive_v2_ms2_usable_peaks_v5"
+DEFAULT_WORK_DIR = Path("/mnt/tg-go-nvme/massive-v2-conversion-v3")
 TARGET_ROWS_PER_SHARD = 2_097_152
 SPECTRUM_CHUNK_ROWS = 256
 SCALAR_CHUNK_ROWS = 4096
 SPLIT_MODULUS = 20
 SPLIT_SEED = 42
 VALIDATION_REMAINDER = 0
-REQUIRED_MS_LEVEL = 2
-MIN_PRECURSOR_MZ = 1.0
-MAX_PRECURSOR_MZ = 1000.0
-MIN_RETENTION_TIME_EXCLUSIVE = 0.0
 FINAL_DATASETS = (
     "spectrum",
     "training_eligible",
@@ -197,12 +198,10 @@ def prepare_source_arrays(
     arrays, source_rows = _read_source_arrays(source_path)
     precursor = arrays["precursor_mz"]
     retention_time = arrays["RT"]
-    eligible = (
-        np.isfinite(precursor)
-        & (precursor >= MIN_PRECURSOR_MZ)
-        & (precursor <= MAX_PRECURSOR_MZ)
-        & np.isfinite(retention_time)
-        & (retention_time > MIN_RETENTION_TIME_EXCLUSIVE)
+    eligible = massive_v2_training_eligibility_numpy(
+        arrays["spectrum"],
+        precursor,
+        retention_time,
     )
     arrays["training_eligible"] = eligible
     validation = np.zeros(len(source_rows), dtype=bool)
@@ -435,6 +434,7 @@ def _state_payload(
     validation_writer: SplitShardWriter,
 ) -> dict[str, Any]:
     return {
+        "conversion_version": CONVERSION_VERSION,
         "next_project_index": next_project_index,
         "train": vars(train_writer.state),
         "validation": vars(validation_writer.state),
@@ -498,12 +498,21 @@ def convert_worker(
     worker_dir.mkdir(parents=True, exist_ok=True)
     result_path = worker_dir / "result.json"
     if result_path.exists():
-        return json.loads(result_path.read_text())
+        result = json.loads(result_path.read_text())
+        if result.get("conversion_version") != CONVERSION_VERSION:
+            raise ValueError(
+                f"Stale conversion result in {result_path}; use a new work dir"
+            )
+        return result
     source_dir = worker_dir / "source"
     source_dir.mkdir(parents=True, exist_ok=True)
     state_path = worker_dir / "state.json"
     stats_path = worker_dir / "stats.json"
     saved = json.loads(state_path.read_text()) if state_path.exists() else {}
+    if saved and saved.get("conversion_version") != CONVERSION_VERSION:
+        raise ValueError(
+            f"Stale conversion state in {state_path}; use a new work dir"
+        )
     stats_by_file = {
         item["source_file"]: item
         for item in (
@@ -574,6 +583,7 @@ def convert_worker(
     train_writer.finish()
     validation_writer.finish()
     result = {
+        "conversion_version": CONVERSION_VERSION,
         "stats": [stats_by_file[name] for name in filenames],
         "train_shards": train_writer.state.completed,
         "validation_shards": validation_writer.state.completed,
@@ -823,6 +833,12 @@ def convert_streaming(
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = output_dir / "manifest.json"
     if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text())
+        if manifest["conversion"].get("version") != CONVERSION_VERSION:
+            raise ValueError(
+                f"Stale conversion artifact in {manifest_path}; "
+                "use a new work dir"
+            )
         return manifest_path
     assignments = [filenames[index::workers] for index in range(workers)]
     if workers == 1:
@@ -929,6 +945,7 @@ def build_manifest(
             "file_count": len(filenames),
         },
         "conversion": {
+            "version": CONVERSION_VERSION,
             "exact_ms_level": REQUIRED_MS_LEVEL,
             "target_rows_per_shard": target_rows,
             "spectrum_dtype": "float32",
@@ -942,15 +959,7 @@ def build_manifest(
             "ms_level": "MS level",
         },
         "row_aligned_datasets": list(FINAL_DATASETS),
-        "eligibility": {
-            "version": "bounded_precursor_rt_ms2_v4",
-            "ms_level": REQUIRED_MS_LEVEL,
-            "min_precursor_mz": MIN_PRECURSOR_MZ,
-            "max_precursor_mz": MAX_PRECURSOR_MZ,
-            "min_retention_time_exclusive": MIN_RETENTION_TIME_EXCLUSIVE,
-            "requires_finite_precursor_mz": True,
-            "requires_finite_retention_time": True,
-        },
+        "eligibility": massive_v2_eligibility_contract(),
         "split": {
             "version": "entity_hash_v1",
             "algorithm": "splitmix64",
@@ -1005,19 +1014,119 @@ revision `{SOURCE_REVISION}`. It includes only source files ending in
 - Train shards: {len(manifest['splits']['train']['shards']):,}
 - Validation shards: {len(manifest['splits']['validation']['shards']):,}
 
-The `training_eligible` column records the canonical finite precursor/RT
-policy documented in `manifest.json`. Assigned same-entity groups are kept
-within one split and one shard. The collision-safe corpus grouping key is
-`(massive_id, global_group_id)`; `global_group_id` alone is only unique
-within one MassIVE project.
+The `training_eligible` column records the canonical precursor, retention-time,
+and usable-spectrum policy documented in `manifest.json`. Every eligible row
+has enough peaks for distinct context and target masks. Assigned same-entity
+groups are kept within one split and one shard. The collision-safe corpus
+grouping key is `(massive_id, global_group_id)`; `global_group_id` alone is
+only unique within one MassIVE project.
 """
 
 
-def validate_artifact(manifest_path: Path) -> None:
+def _validate_artifact_shard(
+    args: tuple[Path, str, dict[str, Any]],
+) -> tuple[str, int, int, dict[bytes, tuple[int, int]]]:
+    artifact_dir, split, shard = args
+    path = artifact_dir / shard["path"]
+    if path.stat().st_size != shard["bytes"]:
+        raise ValueError(f"Shard size mismatch: {path}")
+    if _sha256(path) != shard["sha256"]:
+        raise ValueError(f"Shard checksum mismatch: {path}")
+    with h5py.File(path, "r") as file:
+        lengths = {len(file[name]) for name in FINAL_DATASETS}
+        if lengths != {int(shard["rows"])}:
+            raise ValueError(f"Row alignment mismatch: {path}")
+        spectrum = file["spectrum"]
+        if spectrum.dtype != np.dtype(np.float32) or tuple(
+            spectrum.shape[1:]
+        ) != (2, 128):
+            raise ValueError(f"Spectrum contract mismatch: {path}")
+        levels = file["MS level"][:]
+        if np.any(levels != REQUIRED_MS_LEVEL):
+            raise ValueError(f"Non-MS2 row in {path}")
+        eligible = file["training_eligible"][:]
+        for start in range(0, len(eligible), SCALAR_CHUNK_ROWS):
+            stop = min(start + SCALAR_CHUNK_ROWS, len(eligible))
+            expected_eligible = massive_v2_training_eligibility_numpy(
+                spectrum[start:stop],
+                file["precursor_mz"][start:stop],
+                file["RT"][start:stop],
+            )
+            if not np.array_equal(
+                eligible[start:stop],
+                expected_eligible,
+            ):
+                raise ValueError(f"Eligibility mask mismatch: {path}")
+        eligible_rows = int(eligible.sum())
+        if eligible_rows != int(shard["eligible_rows"]):
+            raise ValueError(f"Eligibility mismatch: {path}")
+        massive_ids = file["massive_id"][:]
+        file_ids = file["file_id"][:].astype(np.int64)
+        group_ids = file["group_id"][:]
+        global_ids = file["global_group_id"][:]
+        assigned = group_ids >= 0
+        expected_global_ids = (
+            file_ids[assigned] * np.int64(1 << 32)
+            + group_ids[assigned].astype(np.int64)
+        )
+        if not np.array_equal(
+            global_ids[assigned],
+            expected_global_ids,
+        ):
+            raise ValueError(f"Invalid global_group_id in {path}")
+        project_bounds: dict[bytes, tuple[int, int]] = {}
+        for massive_id in np.unique(massive_ids[assigned]):
+            project_rows = assigned & (massive_ids == massive_id)
+            project_groups = global_ids[project_rows]
+            if np.any(np.diff(project_groups) < 0):
+                raise ValueError(f"Groups are not contiguous in {path}")
+            project_key = bytes(massive_id)
+            project_bounds[project_key] = (
+                int(project_groups[0]),
+                int(project_groups[-1]),
+            )
+            expected_validation = _validation_mask(
+                project_key,
+                np.zeros(len(project_groups), dtype=np.int64),
+                np.ones(len(project_groups), dtype=np.int32),
+                project_groups,
+            )
+            if np.any(expected_validation != (split == "validation")):
+                raise ValueError(
+                    f"Group assigned to the wrong split in {path}"
+                )
+    return str(shard["path"]), int(shard["rows"]), eligible_rows, project_bounds
+
+
+def validate_artifact(manifest_path: Path, *, workers: int = 1) -> None:
     manifest = json.loads(manifest_path.read_text())
     if manifest["format"] != MASSIVE_V2_HDF5_FORMAT:
         raise ValueError(f"Unknown artifact format in {manifest_path}")
-    seen_paths = set()
+    expected_eligibility = massive_v2_eligibility_contract()
+    if manifest["eligibility"] != expected_eligibility:
+        raise ValueError(
+            "Artifact eligibility contract mismatch: "
+            f"expected {expected_eligibility}, got {manifest['eligibility']}"
+        )
+    tasks: list[tuple[Path, str, dict[str, Any]]] = []
+    seen_paths: set[str] = set()
+    for split in ("train", "validation"):
+        for shard in manifest["splits"][split]["shards"]:
+            if shard["path"] in seen_paths:
+                raise ValueError(f"Duplicate shard path: {shard['path']}")
+            seen_paths.add(shard["path"])
+            tasks.append((manifest_path.parent, split, shard))
+    if workers == 1:
+        results = [_validate_artifact_shard(task) for task in tasks]
+    else:
+        with multiprocessing.get_context("spawn").Pool(workers) as pool:
+            results = pool.map(
+                _validate_artifact_shard,
+                tasks,
+                chunksize=1,
+            )
+
+    result_index = 0
     total_rows = 0
     total_eligible = 0
     last_group_by_split: dict[str, dict[bytes, int]] = {
@@ -1028,84 +1137,18 @@ def validate_artifact(manifest_path: Path) -> None:
         split_rows = 0
         split_eligible = 0
         for shard in manifest["splits"][split]["shards"]:
-            path = manifest_path.parent / shard["path"]
-            if shard["path"] in seen_paths:
-                raise ValueError(f"Duplicate shard path: {shard['path']}")
-            seen_paths.add(shard["path"])
-            if path.stat().st_size != shard["bytes"]:
-                raise ValueError(f"Shard size mismatch: {path}")
-            if _sha256(path) != shard["sha256"]:
-                raise ValueError(f"Shard checksum mismatch: {path}")
-            with h5py.File(path, "r") as file:
-                lengths = {len(file[name]) for name in FINAL_DATASETS}
-                if lengths != {int(shard["rows"])}:
-                    raise ValueError(f"Row alignment mismatch: {path}")
-                spectrum = file["spectrum"]
-                if spectrum.dtype != np.dtype(np.float32) or tuple(
-                    spectrum.shape[1:]
-                ) != (2, 128):
-                    raise ValueError(f"Spectrum contract mismatch: {path}")
-                levels = file["MS level"][:]
-                if np.any(levels != REQUIRED_MS_LEVEL):
-                    raise ValueError(f"Non-MS2 row in {path}")
-                precursor = file["precursor_mz"][:]
-                retention_time = file["RT"][:]
-                eligible = file["training_eligible"][:]
-                expected_eligible = (
-                    np.isfinite(precursor)
-                    & (precursor >= MIN_PRECURSOR_MZ)
-                    & (precursor <= MAX_PRECURSOR_MZ)
-                    & np.isfinite(retention_time)
-                    & (retention_time > MIN_RETENTION_TIME_EXCLUSIVE)
-                )
-                if not np.array_equal(eligible, expected_eligible):
-                    raise ValueError(f"Eligibility mask mismatch: {path}")
-                eligible_rows = int(eligible.sum())
-                if eligible_rows != int(shard["eligible_rows"]):
-                    raise ValueError(f"Eligibility mismatch: {path}")
-                massive_ids = file["massive_id"][:]
-                file_ids = file["file_id"][:].astype(np.int64)
-                group_ids = file["group_id"][:]
-                global_ids = file["global_group_id"][:]
-                assigned = group_ids >= 0
-                expected_global_ids = (
-                    file_ids[assigned] * np.int64(1 << 32)
-                    + group_ids[assigned].astype(np.int64)
-                )
-                if not np.array_equal(
-                    global_ids[assigned],
-                    expected_global_ids,
-                ):
-                    raise ValueError(f"Invalid global_group_id in {path}")
-                for massive_id in np.unique(massive_ids[assigned]):
-                    project_rows = assigned & (massive_ids == massive_id)
-                    project_groups = global_ids[project_rows]
-                    if np.any(np.diff(project_groups) < 0):
-                        raise ValueError(
-                            f"Groups are not contiguous in {path}"
-                        )
-                    project_key = bytes(massive_id)
-                    previous = last_group_by_split[split].get(project_key)
-                    if previous is not None and int(project_groups[0]) <= previous:
-                        raise ValueError(
-                            f"Group crosses shards in {path}: "
-                            f"{project_key!r}/{int(project_groups[0])}"
-                        )
-                    last_group_by_split[split][project_key] = int(
-                        project_groups[-1]
+            path, rows, eligible_rows, project_bounds = results[result_index]
+            result_index += 1
+            for project_key, (first_group, last_group) in project_bounds.items():
+                previous = last_group_by_split[split].get(project_key)
+                if previous is not None and first_group <= previous:
+                    raise ValueError(
+                        f"Group crosses shards in {manifest_path.parent / path}: "
+                        f"{project_key!r}/{first_group}"
                     )
-                    expected_validation = _validation_mask(
-                        project_key,
-                        np.zeros(len(project_groups), dtype=np.int64),
-                        np.ones(len(project_groups), dtype=np.int32),
-                        project_groups,
-                    )
-                    if np.any(expected_validation != (split == "validation")):
-                        raise ValueError(
-                            f"Group assigned to the wrong split in {path}"
-                        )
-            split_rows += int(shard["rows"])
-            split_eligible += int(shard["eligible_rows"])
+                last_group_by_split[split][project_key] = last_group
+            split_rows += rows
+            split_eligible += eligible_rows
         if split_rows != int(manifest["splits"][split]["rows"]):
             raise ValueError(f"{split} row total mismatch")
         if split_eligible != int(
@@ -1132,6 +1175,12 @@ def upload_artifact(output_dir: Path, repo_id: str) -> str:
         repo_id=repo_id,
         repo_type="dataset",
         folder_path=output_dir,
+        allow_patterns=[
+            "README.md",
+            "manifest.json",
+            "train/*.hdf5",
+            "validation/*.hdf5",
+        ],
         num_workers=8,
     )
     return str(api.dataset_info(repo_id).sha)
@@ -1149,11 +1198,6 @@ def parse_args() -> argparse.Namespace:
         default=TARGET_ROWS_PER_SHARD,
     )
     parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--upload", action="store_true")
-    parser.add_argument(
-        "--destination-repo-id",
-        default=DESTINATION_REPO_ID,
-    )
     parser.add_argument(
         "--validate-only",
         type=Path,
@@ -1168,7 +1212,7 @@ def main() -> None:
     )
     args = parse_args()
     if args.validate_only is not None:
-        validate_artifact(args.validate_only)
+        validate_artifact(args.validate_only, workers=args.workers)
         return
     args.work_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = convert_streaming(
@@ -1177,14 +1221,8 @@ def main() -> None:
         target_rows=args.target_rows_per_shard,
         workers=args.workers,
     )
-    validate_artifact(manifest_path)
+    validate_artifact(manifest_path, workers=args.workers)
     remove_regrouping_backups(args.work_dir)
-    if args.upload:
-        revision = upload_artifact(
-            manifest_path.parent,
-            args.destination_repo_id,
-        )
-        print(revision)
 
 
 if __name__ == "__main__":

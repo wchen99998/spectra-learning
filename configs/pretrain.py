@@ -14,7 +14,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.gems_hdf5_repo_id = (
         "novogaia/massive-v2-ms2-t095-l080-sharded-10gb"
     )
-    cfg.gems_hdf5_revision = "de80d280d319f0b9a8825956b13d8dc7d9ab1eb1"
+    cfg.gems_hdf5_revision = "4de48add4e687f6ea561dc6ec74f8984ad8aebe0"
     cfg.gems_hdf5_manifest = "manifest.json"
     cfg.gems_hdf5_spectrum_dataset = "spectrum"
     cfg.gems_hdf5_precursor_dataset = "precursor_mz"

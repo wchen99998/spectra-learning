@@ -286,6 +286,40 @@ It also logs to W&B under the config's project with tags:
 slug such as `3b_pairmixer_dense_adamw`. The resolved config is written to
 `$WORKDIR/config.json`; W&B is initialized from the same serialized dictionary.
 
+### Async v6e checkpoint validation
+
+Async Orbax checkpointing was validated on 2026-08-12 with the standalone
+`configs/1b_singlemixer_dense_muon.py` model on the smallest multi-host v6e
+slice: GKE topology `2x4`, two `ct6e-standard-4t` hosts, four chips per host,
+and eight chips total. The validation used two JAX processes and the full
+940,513,296-parameter model; only the input data and run length were reduced.
+
+```text
+Validation ID: async-ckpt-1b-v6e2x4-gke-20260812-041434
+Evidence:      gs://metal-repeater-411410-spectra-checkpoints/skypilot/async-ckpt-1b-v6e2x4-gke-20260812-041434/validation/
+Checkpoints:   gs://metal-repeater-411410-spectra-checkpoints/skypilot/async-ckpt-1b-v6e2x4-gke-20260812-041434/checkpoints/orbax/
+Topology:      2x4, 2 hosts, 8 v6e chips
+JAX:           2 processes, 8 devices
+Final step:    3, restored by two fresh distributed process launches
+```
+
+All three checkpoints are committed and contain array metadata from
+`process_0` and `process_1`. Their stored sizes are 5,891,455,947,
+6,997,472,233, and 7,006,577,970 bytes. Step 1 copied 3.5 GiB per host from
+device to host in 4.52 seconds and completed its background GCS write in 19.27
+seconds; training advanced during the 14.74-second background phase. Steps 2
+and 3 blocked for 1.13 and 1.47 seconds and committed in 17.03 and 14.44
+seconds. A fresh two-host launch restored step 3 in 17.29 seconds, and an
+independent second launch restored it in 15.46 seconds. Both indexed hosts
+completed both restore launches.
+
+Orbax 0.12 queries bucket metadata when reopening a GCS checkpoint to detect
+hierarchical namespaces. The training service account therefore needs
+`storage.buckets.get` in addition to checkpoint object read, write, and list
+permissions. GKE nodes also need an OAuth scope that permits those IAM grants,
+such as `cloud-platform`. The temporary bucket permission used for this
+validation was removed during cleanup.
+
 ### Historical v6e validation
 
 Conservative retry contract if a run fails after TPU allocation:
@@ -331,9 +365,13 @@ Notes from validation:
 - Training ran 100 steps on two `tpu-v6e-4` hosts with eight v6e chips total.
   Final metrics report `run/jax_process_count=2`,
   `run/jax_data_parallel_devices=8`, and `run/device_microbatch_size=32`.
-- Orbax async checkpointing is disabled in the SkyPilot smoke config because a
-  previous run failed during async shutdown. The successful run used synchronous
-  checkpointing and wrote both process shards to GCS.
+- The successful run used synchronous checkpointing. The preceding async run
+  completed its blocking device-to-host copy in 5.8 seconds for 607.8 MiB per
+  host, then an unrelated validation `KeyError: 'context_mask'` interrupted the
+  process while the background GCS write was still active. Both host shard
+  objects exist, but Orbax does not recognize step 100 as committed. Checkpoint
+  managers now close in a `finally` block so an in-flight write is joined on
+  error.
 - `msg_probe_every_n_steps=0` ran the complete MSG probe at the final step. The
   JAX probe ran distributed on both processes, early-stopped at epoch 20/100,
   selected best epoch 3 by the configured validation metric, gathered final

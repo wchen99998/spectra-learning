@@ -10,6 +10,9 @@ from spectra_learning.data.gems.artifacts import (
     resolve_gems_hdf5_artifact,
 )
 from spectra_learning.data.gems.collate import GemsBatchCollator
+from spectra_learning.data.gems.eligibility import (
+    massive_v2_eligibility_contract,
+)
 from spectra_learning.data.gems.hdf5 import (
     GEMS_ELIGIBILITY_VERSION,
     GEMS_REQUIRED_MS_LEVEL,
@@ -210,19 +213,49 @@ class GemsDataModule:
     def _validate_massive_v2_contract(self) -> None:
         manifest = self.artifact.manifest
         eligibility = manifest["eligibility"]
-        expected_eligibility = {
-            "version": "bounded_precursor_rt_ms2_v4",
-            "ms_level": GEMS_REQUIRED_MS_LEVEL,
-            "min_precursor_mz": self.min_precursor_mz,
-            "max_precursor_mz": self.max_precursor_mz,
-            "min_retention_time_exclusive": 0.0,
-            "requires_finite_precursor_mz": True,
-            "requires_finite_retention_time": True,
-        }
+        expected_eligibility = massive_v2_eligibility_contract()
         if eligibility != expected_eligibility:
             raise ValueError(
                 "MassIVE v2 eligibility contract mismatch: "
                 f"expected {expected_eligibility}, got {eligibility}"
+            )
+        if (
+            self.min_precursor_mz != eligibility["min_precursor_mz"]
+            or self.max_precursor_mz != eligibility["max_precursor_mz"]
+        ):
+            raise ValueError(
+                "MassIVE v2 precursor bounds do not match the artifact "
+                "eligibility contract"
+            )
+        intensity_threshold = max(
+            self.min_peak_intensity,
+            self.peak_drop_min_intensity,
+        )
+        if intensity_threshold > eligibility["min_relative_peak_intensity"]:
+            raise ValueError(
+                "MassIVE v2 runtime peak intensity threshold is stricter "
+                "than the artifact eligibility contract"
+            )
+        if (
+            self.precursor_peak_exclusion_window_da
+            > eligibility["precursor_peak_exclusion_window_da"]
+        ):
+            raise ValueError(
+                "MassIVE v2 runtime precursor exclusion window is stricter "
+                "than the artifact eligibility contract"
+            )
+        minimum_peaks = (
+            self.jepa_num_target_blocks * self.jepa_block_min_len + 1
+        )
+        if minimum_peaks > eligibility["min_usable_peaks"]:
+            raise ValueError(
+                "MassIVE v2 masking requires more usable peaks than the "
+                "artifact eligibility contract guarantees"
+            )
+        if self.num_peaks_output < minimum_peaks:
+            raise ValueError(
+                "Configured output peak count cannot provide all context "
+                "and target masks"
             )
         datasets = manifest["datasets"]
         expected_datasets = {

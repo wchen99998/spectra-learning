@@ -140,11 +140,14 @@ class _FakeLogger:
 
 
 class _FakeCheckpointManager:
+    def __init__(self) -> None:
+        self.closed = False
+
     def latest_step(self) -> int | None:
         return None
 
     def close(self) -> None:
-        pass
+        self.closed = True
 
 
 class _CompileRecorder(torch.nn.Module):
@@ -1060,13 +1063,16 @@ def test_jax_learning_rate_schedule_supports_warm_restart():
         ) == pytest.approx(learning_rate)
 
 
-def test_train_and_evaluate_jax_logs_final_metrics_on_main_process(
+@pytest.mark.parametrize("training_error", [False, True])
+def test_train_and_evaluate_jax_logs_metrics_and_closes_manager_on_main_process(
     monkeypatch,
     tmp_path: Path,
+    training_error: bool,
 ):
     from spectra_learning.training import pretrain_jax
 
     logger = _FakeLogger()
+    checkpoint_manager = _FakeCheckpointManager()
     datamodule_kwargs = {}
 
     class FakeDataModule:
@@ -1083,6 +1089,8 @@ def test_train_and_evaluate_jax_logs_final_metrics_on_main_process(
 
     def fake_run_jax_training_loop(**kwargs):
         assert kwargs["logger"] is logger
+        if training_error:
+            raise RuntimeError("training failed")
         return {"run/final_global_step": 3.0, "train/loss": 1.5}
 
     param_metrics = {
@@ -1101,7 +1109,7 @@ def test_train_and_evaluate_jax_logs_final_metrics_on_main_process(
         pretrain_jax,
         "build_jax_checkpoint_manager",
         lambda checkpoint_dir, *, max_to_keep, enable_async_checkpointing: (
-            _FakeCheckpointManager()
+            checkpoint_manager
         ),
     )
     monkeypatch.setattr(pretrain_jax.jax, "process_index", lambda: 0)
@@ -1139,6 +1147,12 @@ def test_train_and_evaluate_jax_logs_final_metrics_on_main_process(
         "_run_jax_training_loop",
         fake_run_jax_training_loop,
     )
+
+    if training_error:
+        with pytest.raises(RuntimeError, match="training failed"):
+            pretrain_jax.train_and_evaluate_jax(cfg, tmp_path)
+        assert checkpoint_manager.closed is True
+        return
 
     results = pretrain_jax.train_and_evaluate_jax(cfg, tmp_path)
 
@@ -1181,6 +1195,7 @@ def test_train_and_evaluate_jax_logs_final_metrics_on_main_process(
         )
     ]
     assert logger.finished is True
+    assert checkpoint_manager.closed is True
 
 
 def test_train_and_evaluate_jax_skips_logger_on_worker_process(

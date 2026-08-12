@@ -16,9 +16,9 @@ from spectra_learning.data.gems.prepare_massive_v2 import (
 )
 
 DEFAULT_SOURCE_MANIFEST = Path(
-    "/mnt/tg-go-nvme/massive-v2-conversion-v2/output/manifest.json"
+    "/mnt/tg-go-nvme/massive-v2-conversion-v3/output/manifest.json"
 )
-DEFAULT_WORK_DIR = Path("/mnt/tg-go-nvme/massive-v2-repack-10gb")
+DEFAULT_WORK_DIR = Path("/mnt/tg-go-nvme/massive-v2-repack-v3-10gb")
 DEFAULT_DESTINATION_REPO_ID = (
     "novogaia/massive-v2-ms2-t095-l080-sharded-10gb"
 )
@@ -271,7 +271,7 @@ def main() -> None:
         target_bytes=args.target_bytes,
         workers=args.workers,
     )
-    validate_artifact(manifest_path)
+    validate_artifact(manifest_path, workers=args.workers)
     if args.upload:
         print(upload_artifact(manifest_path.parent, args.destination_repo_id))
 

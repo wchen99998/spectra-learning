@@ -13,8 +13,12 @@ from ml_collections import config_dict
 import spectra_learning.data.gems as gems
 import spectra_learning.data.gems.artifacts as gems_artifacts
 import spectra_learning.data.gems.prepare_massive_v2 as converter
+import spectra_learning.data.gems.repair_massive_v2_eligibility as repairer
 import spectra_learning.data.gems.repack_massive_v2 as repacker
 from spectra_learning.data.gems.artifacts import MASSIVE_V2_HDF5_FORMAT
+from spectra_learning.data.gems.eligibility import (
+    massive_v2_eligibility_contract,
+)
 from spectra_learning.data.gems.prepare_massive_v2 import (
     FINAL_DATASETS,
     validate_artifact,
@@ -26,6 +30,7 @@ def _write_shard(path: Path, rows: int, eligible: np.ndarray) -> dict:
     spectrum = np.zeros((rows, 2, 128), dtype=np.float32)
     spectrum[:, 0, :2] = np.arange(rows)[:, None] + (100.0, 101.0)
     spectrum[:, 1, :2] = (1.0, 0.5)
+    spectrum[~eligible] = 0.0
     with h5py.File(path, "w") as file:
         file.create_dataset("spectrum", data=spectrum, chunks=(2, 2, 128))
         file.create_dataset(
@@ -104,15 +109,7 @@ def _write_artifact(root: Path) -> dict:
             "retention_time": "RT",
             "ms_level": "MS level",
         },
-        "eligibility": {
-            "version": "bounded_precursor_rt_ms2_v4",
-            "ms_level": 2,
-            "min_precursor_mz": 1.0,
-            "max_precursor_mz": 1000.0,
-            "min_retention_time_exclusive": 0.0,
-            "requires_finite_precursor_mz": True,
-            "requires_finite_retention_time": True,
-        },
+        "eligibility": massive_v2_eligibility_contract(),
         "split": {
             "version": "entity_hash_v1",
             "algorithm": "splitmix64",
@@ -491,6 +488,48 @@ def test_massive_v2_contract_mismatch_fails_fast(tmp_path: Path) -> None:
         raise AssertionError("Expected a v2 eligibility contract mismatch")
 
 
+def test_repair_recomputes_training_eligibility_from_spectra(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "artifact"
+    manifest = _write_artifact(artifact)
+    manifest["conversion"] = {"exact_ms_level": 2}
+    for split in ("train", "validation"):
+        for shard in manifest["splits"][split]["shards"]:
+            path = artifact / shard["path"]
+            with h5py.File(path, "r+") as file:
+                file["training_eligible"][:] = True
+            shard["eligible_rows"] = shard["rows"]
+            shard["bytes"] = path.stat().st_size
+            shard["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        manifest["splits"][split]["eligible_rows"] = manifest["splits"][
+            split
+        ]["rows"]
+    manifest["eligible_rows"] = manifest["rows"]
+    manifest_path = artifact / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+
+    repairer.repair_local_artifact(
+        manifest_path,
+        workers=1,
+        source_revision="old-revision",
+    )
+
+    repaired = json.loads(manifest_path.read_text())
+    assert repaired["eligibility"] == massive_v2_eligibility_contract()
+    assert repaired["eligible_rows"] == 16
+    assert repaired["conversion"]["eligibility_repaired_from_revision"] == (
+        "old-revision"
+    )
+    with h5py.File(artifact / "train/shard_00000.hdf5") as file:
+        assert file["training_eligible"][:].tolist() == [
+            True,
+            False,
+            True,
+            True,
+        ]
+
+
 def test_converter_keeps_exact_ms2_and_group_metadata_atomic(
     tmp_path: Path,
 ) -> None:
@@ -553,7 +592,7 @@ def test_converter_keeps_exact_ms2_and_group_metadata_atomic(
             work_dir,
             target_rows=3,
         )
-    validate_artifact(manifest_path)
+    validate_artifact(manifest_path, workers=2)
     manifest = json.loads(manifest_path.read_text())
 
     assert manifest["rows"] == 8
@@ -574,6 +613,56 @@ def test_converter_keeps_exact_ms2_and_group_metadata_atomic(
                             set(),
                         ).add(f"{split}/{shard['path']}")
     assert all(len(group_locations) == 1 for group_locations in locations.values())
+
+
+def test_converter_excludes_rows_without_two_usable_peaks(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "spectrum_eligibility.hdf5"
+    rows = 4
+    spectrum = np.zeros((rows, 2, 128), dtype=np.float32)
+    spectrum[0, :, :2] = ((100.0, 200.0), (1.0, 0.5))
+    spectrum[1, :, :1] = ((100.0,), (1.0,))
+    spectrum[2, :, :2] = ((100.0, 200.0), (1.0, 5e-5))
+    spectrum[3, :, :2] = ((19.0, 200.0), (1.0, 0.5))
+    with h5py.File(source, "w") as file:
+        file.create_dataset("spectrum", data=spectrum)
+        file.create_dataset(
+            "MS level",
+            data=np.full(rows, 2, dtype=np.int8),
+        )
+        file.create_dataset("RT", data=np.ones(rows, dtype=np.float32))
+        file.create_dataset(
+            "precursor_mz",
+            data=np.full(rows, 500.0, dtype=np.float32),
+        )
+        file.create_dataset(
+            "collision_energy",
+            data=np.full(rows, 25.0, dtype=np.float32),
+        )
+        file.create_dataset("charge", data=np.ones(rows, dtype=np.int8))
+        file.create_dataset(
+            "massive_id",
+            data=np.full(rows, b"MSV000000001", dtype="S12"),
+        )
+        file.create_dataset("file_id", data=np.zeros(rows, dtype=np.int32))
+        file.create_dataset(
+            "group_id",
+            data=np.full(rows, -1, dtype=np.int32),
+        )
+        file.create_dataset(
+            "global_group_id",
+            data=np.full(rows, -1, dtype=np.int64),
+        )
+        file.create_dataset(
+            "unique_spectrum_id",
+            data=np.asarray([b"a", b"b", b"c", b"d"]),
+        )
+
+    arrays, _, stats = converter.prepare_source_arrays(source)
+
+    assert arrays["training_eligible"].tolist() == [True, False, False, False]
+    assert stats["eligible_rows"] == 1
 
 
 def test_converter_accepts_source_file_without_ms2_rows(

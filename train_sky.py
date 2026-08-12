@@ -574,7 +574,6 @@ def build_train_overrides(
         "jax_enable_compilation_cache": True,
         "jax_persistent_cache_min_compile_time_secs": 0.0,
         "jax_persistent_cache_min_entry_size_bytes": 0,
-        "jax_enable_async_checkpointing": False,
         "wandb_resume_from_env": False,
         "wandb_kwargs": {
             "id": run_id,

@@ -55,6 +55,7 @@ def test_1b_singlemixer_muon_training_settings() -> None:
     assert stages[0].gradient_accumulation_steps == 2
     assert config.max_duration_hours == 47.0
     assert config.checkpoint_every_steps == 50_000
+    assert config.jax_enable_async_checkpointing
     assert not config.wandb_resume_from_env
     assert config.wandb_resume_id == ""
     assert config.wandb_kwargs.to_dict() == {}
@@ -68,7 +69,7 @@ def test_1b_singlemixer_muon_training_settings() -> None:
     )
     assert (
         config.gems_hdf5_revision
-        == "de80d280d319f0b9a8825956b13d8dc7d9ab1eb1"
+        == "4de48add4e687f6ea561dc6ec74f8984ad8aebe0"
     )
     assert "singlemixer" in config.run_name_suffix
     assert "disto" not in config.run_name_suffix

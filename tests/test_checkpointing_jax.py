@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+import json
+import os
+import socket
+import subprocess
+import sys
+import textwrap
+import time
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -233,6 +241,146 @@ def test_jax_checkpoint_roundtrip_preserves_values_and_sharding(tmp_path):
     assert {value.dtype for value in jax.tree.leaves(adam_state.nu)} == {
         jnp.dtype(jnp.bfloat16)
     }
+
+
+def test_async_jax_checkpoint_closes_and_restores_with_two_processes(tmp_path):
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    script = textwrap.dedent(
+        """
+        import json
+        import sys
+
+        import jax
+        import numpy as np
+        from jax.experimental import multihost_utils
+        from jax.sharding import Mesh, PartitionSpec as P
+
+        process_id = int(sys.argv[1])
+        port = sys.argv[2]
+        checkpoint_dir = sys.argv[3]
+        jax.distributed.initialize(
+            f"127.0.0.1:{port}",
+            num_processes=2,
+            process_id=process_id,
+            initialization_timeout=60,
+        )
+
+        from spectra_learning.training.checkpointing_jax import (
+            build_jax_checkpoint_manager,
+            jax_training_checkpoint_metadata,
+            restore_jax_training_state,
+            save_jax_training_state,
+        )
+
+        mesh = Mesh(np.asarray(jax.devices()), ("data",))
+        local_value = np.arange(
+            process_id * 8,
+            (process_id + 1) * 8,
+            dtype=np.float32,
+        ).reshape(4, 2)
+        value = multihost_utils.host_local_array_to_global_array(
+            local_value,
+            mesh,
+            P("data"),
+        )
+        metadata = jax_training_checkpoint_metadata("multihost_test", {})
+        manager = build_jax_checkpoint_manager(
+            checkpoint_dir,
+            max_to_keep=2,
+            enable_async_checkpointing=True,
+        )
+        save_jax_training_state(
+            manager,
+            1,
+            {"value": value},
+            metadata=metadata,
+        )
+        save_was_in_progress = manager.is_saving_in_progress()
+        manager.close()
+
+        manager = build_jax_checkpoint_manager(
+            checkpoint_dir,
+            max_to_keep=2,
+            enable_async_checkpointing=True,
+        )
+        template = multihost_utils.host_local_array_to_global_array(
+            np.zeros_like(local_value),
+            mesh,
+            P("data"),
+        )
+        restored = restore_jax_training_state(
+            manager,
+            1,
+            {"value": template},
+            expected_metadata=metadata,
+        )
+        restored_local = multihost_utils.global_array_to_host_local_array(
+            restored["value"],
+            mesh,
+            P("data"),
+        )
+        np.testing.assert_array_equal(restored_local, local_value)
+        print(
+            json.dumps(
+                {
+                    "process_id": jax.process_index(),
+                    "process_count": jax.process_count(),
+                    "latest_step": manager.latest_step(),
+                    "save_was_in_progress": save_was_in_progress,
+                }
+            ),
+            flush=True,
+        )
+        manager.close()
+        """
+    )
+    env = os.environ.copy()
+    env["JAX_PLATFORMS"] = "cpu"
+    env["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
+    processes = [
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                script,
+                str(process_id),
+                str(port),
+                str(tmp_path / "checkpoints"),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        for process_id in range(2)
+    ]
+    deadline = time.monotonic() + 120
+    outputs = []
+    try:
+        for process in processes:
+            stdout, stderr = process.communicate(
+                timeout=max(1, deadline - time.monotonic())
+            )
+            outputs.append((process.returncode, stdout, stderr))
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+
+    records = []
+    for returncode, stdout, stderr in outputs:
+        assert returncode == 0, stderr
+        records.extend(
+            json.loads(line) for line in stdout.splitlines() if line.startswith("{")
+        )
+    records.sort(key=lambda record: record["process_id"])
+
+    assert [record["process_id"] for record in records] == [0, 1]
+    assert all(record["process_count"] == 2 for record in records)
+    assert all(record["latest_step"] == 1 for record in records)
+    assert any(record["save_was_in_progress"] for record in records)
 
 
 def test_jax_checkpoint_restore_releases_template_before_loading():

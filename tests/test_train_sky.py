@@ -272,6 +272,18 @@ def test_current_run_config_training_shape_and_probe_schedule():
     assert cfg.val_num_steps == 500
 
 
+def test_launcher_leaves_async_checkpointing_to_the_training_config():
+    overrides = train_sky.build_train_overrides(
+        run_id="async-checkpoint-test",
+        jax_mesh_devices="16",
+        jax_cache_dir="/tmp/jax-cache",
+        queue_tag="flex-start",
+        experiment_tag="test",
+    )
+
+    assert "jax_enable_async_checkpointing" not in overrides
+
+
 def test_dense_adamw_config_uses_32_chips_and_disables_online_probe():
     cfg = load_config(DENSE_ADAMW_CONFIG)
 
@@ -592,6 +604,7 @@ def test_dryrun_prints_generated_assets_without_token_lookup(
     assert "SPECTRA_AOT" not in output
     assert "LIBTPU_INIT_ARGS:" not in output
     assert '"jax_mesh_devices":"16"' in output
+    assert '"jax_enable_async_checkpointing":true' in output
     assert '"msg_probe_at_final_step":false' in output
     assert '"jax_checkpoint_max_to_keep":5' in output
     assert f'"id":"{run_id}"' in output

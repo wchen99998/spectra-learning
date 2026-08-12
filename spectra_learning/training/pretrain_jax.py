@@ -965,39 +965,43 @@ def _train_and_evaluate_jax_task(
             config.get("jax_enable_async_checkpointing", True)
         ),
     )
-    resume_step = checkpoint_manager.latest_step()
-    if resume_step is None and task.initialize_model is not None:
-        task.initialize_model(config, model)
-    logger = build_logger(config, local_workdir) if is_main_process else MetricLogger()
-    param_metrics = collect_jax_param_metrics(model)
-    if is_main_process:
-        if task.log_start is not None:
-            task.log_start(datamodule, total_steps)
-        logging.info(
-            "Training JAX task %s for %d optimizer steps on %d process(es).",
-            task.name,
-            total_steps,
-            jax.process_count(),
+    try:
+        resume_step = checkpoint_manager.latest_step()
+        if resume_step is None and task.initialize_model is not None:
+            task.initialize_model(config, model)
+        logger = (
+            build_logger(config, local_workdir) if is_main_process else MetricLogger()
         )
-        param_metrics_step = int(resume_step or 0)
-        logger.log_metrics(
-            {"global_step": float(param_metrics_step), **param_metrics},
-            step=param_metrics_step,
+        param_metrics = collect_jax_param_metrics(model)
+        if is_main_process:
+            if task.log_start is not None:
+                task.log_start(datamodule, total_steps)
+            logging.info(
+                "Training JAX task %s for %d optimizer steps on %d process(es).",
+                task.name,
+                total_steps,
+                jax.process_count(),
+            )
+            param_metrics_step = int(resume_step or 0)
+            logger.log_metrics(
+                {"global_step": float(param_metrics_step), **param_metrics},
+                step=param_metrics_step,
+            )
+        metrics = _run_jax_training_loop(
+            config=config,
+            datamodule=datamodule,
+            model=model,
+            logger=logger,
+            total_steps=total_steps,
+            checkpoint_manager=checkpoint_manager,
+            resume_step=resume_step,
+            checkpoint_metadata=checkpoint_metadata,
+            metric_reduction=task.metric_reduction,
+            enable_msg_probe=task.enable_msg_probe,
+            emergency_checkpoint=emergency_checkpoint,
         )
-    metrics = _run_jax_training_loop(
-        config=config,
-        datamodule=datamodule,
-        model=model,
-        logger=logger,
-        total_steps=total_steps,
-        checkpoint_manager=checkpoint_manager,
-        resume_step=resume_step,
-        checkpoint_metadata=checkpoint_metadata,
-        metric_reduction=task.metric_reduction,
-        enable_msg_probe=task.enable_msg_probe,
-        emergency_checkpoint=emergency_checkpoint,
-    )
-    checkpoint_manager.close()
+    finally:
+        checkpoint_manager.close()
     data_parallel_devices = _jax_data_parallel_devices(config)
     run_metrics = {
         "run/world_size": float(jax.process_count()),

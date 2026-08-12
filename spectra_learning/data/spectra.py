@@ -11,6 +11,7 @@ DEFAULT_NUM_PEAKS = 60
 PEAK_MZ_MIN = 20.0
 PEAK_MZ_MAX = 1000.0
 DEFAULT_MIN_PEAK_INTENSITY = 1e-4
+PEAK_INTENSITY_NORMALIZATION_FLOOR = 1e-8
 DEFAULT_MIN_PRECURSOR_MZ = 1.0
 DEFAULT_MAX_PRECURSOR_MZ = 1000.0
 DEFAULT_PRECURSOR_PEAK_EXCLUSION_WINDOW_DA = 0.0
@@ -112,6 +113,60 @@ def _select_top_intensity_torch(
     return mz, intensity
 
 
+def _normalize_peak_intensity_numpy(intensity: np.ndarray) -> np.ndarray:
+    max_intensity = np.maximum(
+        intensity.max(axis=1, keepdims=True),
+        PEAK_INTENSITY_NORMALIZATION_FLOOR,
+    )
+    return intensity / max_intensity
+
+
+def _usable_peak_mask_numpy(
+    mz: np.ndarray,
+    normalized_intensity: np.ndarray,
+    precursor_mz: np.ndarray,
+    *,
+    min_peak_intensity: float,
+    peak_drop_min_intensity: float,
+    precursor_peak_exclusion_window_da: float,
+) -> np.ndarray:
+    intensity_threshold = max(min_peak_intensity, peak_drop_min_intensity)
+    window = precursor_peak_exclusion_window_da
+    precursor_upper = precursor_mz[:, None] - window
+    return (
+        (mz >= PEAK_MZ_MIN)
+        & (mz <= PEAK_MZ_MAX)
+        & (normalized_intensity >= intensity_threshold)
+        & ((window <= 0.0) | (mz <= precursor_upper))
+    )
+
+
+def usable_peak_counts_numpy(
+    spectra: np.ndarray,
+    precursor_mz: np.ndarray,
+    *,
+    min_peak_intensity: float = DEFAULT_MIN_PEAK_INTENSITY,
+    peak_drop_min_intensity: float = DEFAULT_MIN_PEAK_INTENSITY,
+    precursor_peak_exclusion_window_da: float = (
+        DEFAULT_PRECURSOR_PEAK_EXCLUSION_WINDOW_DA
+    ),
+) -> np.ndarray:
+    mz = spectra[:, 0, :].astype(np.float32, copy=False)
+    intensity = spectra[:, 1, :].astype(np.float32, copy=False)
+    normalized_intensity = _normalize_peak_intensity_numpy(intensity)
+    usable = _usable_peak_mask_numpy(
+        mz,
+        normalized_intensity,
+        precursor_mz,
+        min_peak_intensity=min_peak_intensity,
+        peak_drop_min_intensity=peak_drop_min_intensity,
+        precursor_peak_exclusion_window_da=(
+            precursor_peak_exclusion_window_da
+        ),
+    )
+    return usable.sum(axis=1)
+
+
 def preprocess_peak_batch_numpy(
     spectra: np.ndarray,
     precursor_mz: np.ndarray,
@@ -129,16 +184,16 @@ def preprocess_peak_batch_numpy(
         raise ValueError(f"Unknown peak_ordering: {peak_ordering}")
     mz = spectra[:, 0, :].astype(np.float32, copy=False)
     intensity = spectra[:, 1, :].astype(np.float32, copy=False)
-    input_max_intensity = np.maximum(intensity.max(axis=1, keepdims=True), 1e-8)
-    intensity = intensity / input_max_intensity
-    intensity_threshold = max(min_peak_intensity, peak_drop_min_intensity)
-    window = precursor_peak_exclusion_window_da
-    precursor_upper = precursor_mz[:, None] - window
-    keep = (
-        (mz >= PEAK_MZ_MIN)
-        & (mz <= PEAK_MZ_MAX)
-        & (intensity >= intensity_threshold)
-        & ((window <= 0.0) | (mz <= precursor_upper))
+    intensity = _normalize_peak_intensity_numpy(intensity)
+    keep = _usable_peak_mask_numpy(
+        mz,
+        intensity,
+        precursor_mz,
+        min_peak_intensity=min_peak_intensity,
+        peak_drop_min_intensity=peak_drop_min_intensity,
+        precursor_peak_exclusion_window_da=(
+            precursor_peak_exclusion_window_da
+        ),
     )
     mz = np.where(keep, mz, 0.0)
     intensity = np.where(keep, intensity, 0.0)
@@ -149,7 +204,10 @@ def preprocess_peak_batch_numpy(
         num_peaks=num_peaks,
     )
 
-    max_intensity = np.maximum(intensity.max(axis=1, keepdims=True), 1e-8)
+    max_intensity = np.maximum(
+        intensity.max(axis=1, keepdims=True),
+        PEAK_INTENSITY_NORMALIZATION_FLOOR,
+    )
     intensity = intensity / max_intensity
     valid = intensity > 0
     if peak_ordering == "mz":
@@ -194,7 +252,7 @@ def preprocess_peak_batch_torch(
         raise ValueError(f"Unknown peak_ordering: {peak_ordering}")
     input_max_intensity = torch.clamp(
         intensity.amax(dim=1, keepdim=True),
-        min=1e-8,
+        min=PEAK_INTENSITY_NORMALIZATION_FLOOR,
     )
     intensity = intensity / input_max_intensity
     intensity_threshold = max(min_peak_intensity, peak_drop_min_intensity)
@@ -215,7 +273,10 @@ def preprocess_peak_batch_torch(
         num_peaks=num_peaks,
     )
 
-    max_intensity = torch.clamp(intensity.amax(dim=1, keepdim=True), min=1e-8)
+    max_intensity = torch.clamp(
+        intensity.amax(dim=1, keepdim=True),
+        min=PEAK_INTENSITY_NORMALIZATION_FLOOR,
+    )
     intensity = intensity / max_intensity
     valid = intensity > 0
     if peak_ordering == "mz":

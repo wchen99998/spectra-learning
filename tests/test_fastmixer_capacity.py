@@ -63,7 +63,7 @@ def test_1b_mae_schedule_uses_three_compact_shapes():
         "novogaia/massive-v2-ms2-t095-l080-sharded-10gb"
     )
     assert cfg.gems_hdf5_revision == (
-        "de80d280d319f0b9a8825956b13d8dc7d9ab1eb1"
+        "4de48add4e687f6ea561dc6ec74f8984ad8aebe0"
     )
     assert cfg.learning_rate == pytest.approx(3e-4)
     assert cfg.weight_decay == pytest.approx(0.1)

@@ -87,6 +87,12 @@ class GemsBatchCollator:
         eligible = batch["peak_valid_mask"].sum(dim=1) >= minimum_peaks
         eligible_rows = torch.nonzero(eligible, as_tuple=False).squeeze(-1)
         missing_rows = torch.nonzero(~eligible, as_tuple=False).squeeze(-1)
+        if eligible_rows.numel() == 0:
+            raise ValueError(
+                "Training batch has no spectra with at least "
+                f"{minimum_peaks} usable peaks; the artifact eligibility "
+                "contract is invalid"
+            )
         row_indices = torch.arange(eligible.shape[0], device=eligible.device)
         row_indices[missing_rows] = eligible_rows[
             torch.arange(missing_rows.numel(), device=eligible.device)
