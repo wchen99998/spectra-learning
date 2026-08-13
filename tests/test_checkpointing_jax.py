@@ -535,6 +535,65 @@ def test_jax_checkpoint_restore_allows_explicit_config_changes(tmp_path):
     assert float(restored["value"]) == 1.0
 
 
+def test_jax_checkpoint_restore_allows_explicit_dataset_migration(tmp_path):
+    state = {"value": jnp.asarray(1.0)}
+    manager = build_jax_checkpoint_manager(
+        tmp_path / "checkpoints",
+        enable_async_checkpointing=False,
+    )
+    save_jax_training_state(
+        manager,
+        1,
+        state,
+        metadata=jax_training_checkpoint_metadata(
+            "pretrain",
+            {
+                "config": {"gems_hdf5_revision": "old"},
+                "dataset": {
+                    "format": "massive-v2",
+                    "repo_id": "spectra/massive-v2",
+                    "revision": "old",
+                    "manifest_sha256": "old-manifest",
+                    "shard_plan_sha256": "old-plan",
+                },
+            },
+        ),
+    )
+    manager.close()
+
+    reopened = build_jax_checkpoint_manager(
+        tmp_path / "checkpoints",
+        enable_async_checkpointing=False,
+    )
+    restored = restore_jax_training_state(
+        reopened,
+        1,
+        {"value": jnp.asarray(0.0)},
+        expected_metadata=jax_training_checkpoint_metadata(
+            "pretrain",
+            {
+                "config": {"gems_hdf5_revision": "repaired"},
+                "dataset": {
+                    "format": "massive-v2",
+                    "repo_id": "spectra/massive-v2",
+                    "revision": "repaired",
+                    "manifest_sha256": "repaired-manifest",
+                    "shard_plan_sha256": "repaired-plan",
+                },
+            },
+        ),
+        allowed_config_keys=("gems_hdf5_revision",),
+        allowed_dataset_keys=(
+            "revision",
+            "manifest_sha256",
+            "shard_plan_sha256",
+        ),
+    )
+    reopened.close()
+
+    assert float(restored["value"]) == 1.0
+
+
 def test_jax_training_loop_saves_periodically_and_resumes(tmp_path):
     kwargs = _tiny_mae_kwargs()
     cfg = config_dict.ConfigDict(kwargs)

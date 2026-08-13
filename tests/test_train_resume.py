@@ -1063,6 +1063,33 @@ def test_jax_learning_rate_schedule_supports_warm_restart():
         ) == pytest.approx(learning_rate)
 
 
+def test_jax_datamodule_uses_materialized_gems_rank(monkeypatch):
+    from spectra_learning.training import pretrain_jax
+
+    kwargs = {}
+
+    class FakeDataModule:
+        def __init__(self, config, **data_kwargs):
+            del config
+            kwargs.update(data_kwargs)
+
+    monkeypatch.setenv("SPECTRA_GEMS_RANK", "7")
+    monkeypatch.setattr(pretrain_jax, "GemsDataModule", FakeDataModule)
+
+    pretrain_jax._build_pretrain_jax_datamodule(
+        config_dict.ConfigDict({"seed": 66}),
+        process_count=16,
+        process_index=1,
+    )
+
+    assert kwargs == {
+        "seed": 66,
+        "distributed_world_size": 16,
+        "distributed_rank": 7,
+        "distributed_local_rank": 0,
+    }
+
+
 @pytest.mark.parametrize("training_error", [False, True])
 def test_train_and_evaluate_jax_logs_metrics_and_closes_manager_on_main_process(
     monkeypatch,
@@ -1119,9 +1146,8 @@ def test_train_and_evaluate_jax_logs_metrics_and_closes_manager_on_main_process(
     monkeypatch.setattr(
         pretrain_jax.multihost_utils,
         "sync_global_devices",
-        lambda name: None,
+        lambda name: pytest.fail(f"unexpected startup barrier: {name}"),
     )
-    monkeypatch.setattr(pretrain_jax, "storage_mkdir", lambda path: None)
     monkeypatch.setattr(pretrain_jax, "GemsDataModule", FakeDataModule)
     monkeypatch.setattr(
         pretrain_jax,
@@ -1240,9 +1266,8 @@ def test_train_and_evaluate_jax_skips_logger_on_worker_process(
     monkeypatch.setattr(
         pretrain_jax.multihost_utils,
         "sync_global_devices",
-        lambda name: None,
+        lambda name: pytest.fail(f"unexpected startup barrier: {name}"),
     )
-    monkeypatch.setattr(pretrain_jax, "storage_mkdir", lambda path: None)
     monkeypatch.setattr(pretrain_jax, "GemsDataModule", FakeDataModule)
     monkeypatch.setattr(
         pretrain_jax,
@@ -1260,7 +1285,7 @@ def test_train_and_evaluate_jax_skips_logger_on_worker_process(
     monkeypatch.setattr(
         pretrain_jax,
         "collect_jax_param_metrics",
-        lambda model: {"model/params_total": 123.0},
+        lambda model: pytest.fail("worker process collected parameter metrics"),
     )
     monkeypatch.setattr(
         pretrain_jax,
@@ -1277,6 +1302,7 @@ def test_train_and_evaluate_jax_skips_logger_on_worker_process(
 
     assert results["run/jax_process_index"] == 1.0
     assert results["run/jax_process_count"] == 2.0
+    assert "model/params_total" not in results
 
 
 def test_checkpoint_writer_persists_optimizer_state():

@@ -72,86 +72,41 @@ DEFAULT_TOPOLOGY = TPU7X_TOPOLOGY_BY_CHIPS[DEFAULT_CHIPS]
 DEFAULT_CHIPS_PER_NODE = 4
 DEFAULT_INSTANCE_TYPE = "tpu7x-standard-4t"
 DEFAULT_DWS_RUN_DURATION_SECONDS = 172800
-DEFAULT_MAX_RESTARTS_ON_ERRORS = 1
+DEFAULT_MAX_RESTARTS_ON_ERRORS = 0
 MIN_DWS_RUN_DURATION_SECONDS = 600
 MAX_DWS_RUN_DURATION_SECONDS = 604800
 DEFAULT_PROVISION_TIMEOUT_SECONDS = 2_147_483_647
 MAX_SKY_JOB_NAME_LENGTH = 63
 TASK_SETUP = """\
 set -euo pipefail
-apt_get() {
-  local attempt
-  for attempt in {1..180}; do
-    if sudo env DEBIAN_FRONTEND=noninteractive apt-get \\
-      -o DPkg::Lock::Timeout=300 -o Acquire::Retries=5 "$@"; then
-      return
-    fi
-    echo "apt-get failed (attempt ${attempt}/180); retrying in 10 seconds" >&2
-    sleep 10
-  done
-  return 1
-}
-apt_get update
-apt_get install -y \\
-  build-essential \\
-  ca-certificates \\
-  curl \\
-  git \\
-  libgomp1 \\
-  libsm6 \\
-  libxext6 \\
-  libxrender1 \\
-  pkg-config \\
-  xz-utils
 export PATH="${HOME}/.local/bin:${PATH}"
 if ! command -v uv >/dev/null 2>&1; then
   curl -LsSf https://astral.sh/uv/install.sh | sh
 fi
-uv --version
-uv python install __SPECTRA_PYTHON_VERSION__
 uv sync --python __SPECTRA_PYTHON_VERSION__ --frozen --no-dev --extra tpu
-.venv/bin/python --version
-.venv/bin/python - <<'PY'
-import importlib.metadata as md
-
-print("jax", md.version("jax"))
-print("jaxlib", md.version("jaxlib"))
-print("libtpu", md.version("libtpu"))
-print("wandb", md.version("wandb"))
-PY
+: "${SPECTRA_CONFIG_JSON:?SPECTRA_CONFIG_JSON must be set}"
+: "${HF_TOKEN:?HF_TOKEN must be set via --secret}"
+echo "Materializing assigned GeMS shards for SkyPilot setup node ${SKYPILOT_SETUP_NODE_RANK}/${SKYPILOT_NUM_NODES}"
+timeout --signal=TERM --kill-after=30s 30m \
+  .venv/bin/python -m spectra_learning.data.gems.materialize \
+  --world-size "${SKYPILOT_NUM_NODES}" \
+  --rank "${SKYPILOT_SETUP_NODE_RANK}"
+printf '%s\\n' "${SKYPILOT_SETUP_NODE_RANK}" > /tmp/spectra-gems-rank
 """.replace("__SPECTRA_PYTHON_VERSION__", DEFAULT_PYTHON_VERSION)
 TASK_RUN = """\
 set -euo pipefail
 : "${SPECTRA_CONFIG:?SPECTRA_CONFIG must be set}"
 : "${SPECTRA_WORKDIR:?SPECTRA_WORKDIR must be set}"
-: "${SPECTRA_RUN_ID:?SPECTRA_RUN_ID must be set}"
-: "${SPECTRA_JAX_CACHE_DIR:?SPECTRA_JAX_CACHE_DIR must be set}"
 : "${SPECTRA_CONFIG_JSON:?SPECTRA_CONFIG_JSON must be set}"
-: "${HF_TOKEN:?HF_TOKEN must be set via --secret}"
 : "${WANDB_API_KEY:?WANDB_API_KEY must be set via --secret}"
-export HUGGING_FACE_HUB_TOKEN="${HUGGING_FACE_HUB_TOKEN:-${HF_TOKEN}}"
 
 rm -f "${HOME}/.config/gcloud/application_default_credentials.json"
 unset GOOGLE_APPLICATION_CREDENTIALS
 unset CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE
-JAX_CACHE_DIR="$(.venv/bin/python - <<'PY'
-import os
-from pathlib import Path
-
-print(Path(os.environ["SPECTRA_JAX_CACHE_DIR"]).expanduser().resolve())
-PY
-)"
-export JAX_CACHE_DIR
-export JAX_COMPILATION_CACHE_DIR="${JAX_CACHE_DIR}"
-export JAX_ENABLE_COMPILATION_CACHE=true
-export JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS=0
-export JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES=0
-mkdir -p "${HF_HOME}" "${WANDB_DIR}" "${JAX_CACHE_DIR}"
 
 COORDINATOR_IP="$(printf '%s\\n' "${SKYPILOT_NODE_IPS}" | sed -n '1p')"
 TPU_WORKER_HOSTNAMES="$(printf '%s\\n' "${SKYPILOT_NODE_IPS}" | paste -sd, -)"
 TPU_PROCESS_ADDRESSES="$(printf '%s\\n' "${SKYPILOT_NODE_IPS}" | sed 's/$/:8471/' | paste -sd, -)"
-export JAX_DISTRIBUTED_INITIALIZE=1
 export JAX_COORDINATOR_ADDRESS="${COORDINATOR_IP}:12345"
 export JAX_NUM_PROCESSES="${SKYPILOT_NUM_NODES}"
 export JAX_PROCESS_ID="${SKYPILOT_NODE_RANK}"
@@ -160,25 +115,15 @@ export TPU_WORKER_ID="${SKYPILOT_NODE_RANK}"
 export TPU_WORKER_HOSTNAMES
 export TPU_PROCESS_ADDRESSES
 export TPU_PROCESS_PORT=8471
-export TF_CPP_MIN_LOG_LEVEL=0
+export SPECTRA_GEMS_RANK="${SPECTRA_GEMS_RANK:-$(</tmp/spectra-gems-rank)}"
 
 METRICS_JSON="${SPECTRA_WORKDIR%/}/${SPECTRA_METRICS_JSON#/}"
-CONFIG_JSON="$(.venv/bin/python - <<'PY'
-import json
-import os
-
-config = json.loads(os.environ["SPECTRA_CONFIG_JSON"])
-config["jax_compilation_cache_dir"] = os.environ["JAX_CACHE_DIR"]
-print(json.dumps(config, sort_keys=True, separators=(",", ":")))
-PY
-)"
 
 echo "SkyPilot node rank ${SKYPILOT_NODE_RANK}/${SKYPILOT_NUM_NODES}"
 echo "Coordinator ${JAX_COORDINATOR_ADDRESS}"
 echo "TPU worker ${TPU_WORKER_ID}: ${TPU_WORKER_HOSTNAMES}"
+echo "GeMS data rank ${SPECTRA_GEMS_RANK}/${SKYPILOT_NUM_NODES}"
 echo "Workdir ${SPECTRA_WORKDIR}"
-echo "JAX cache ${JAX_CACHE_DIR}"
-echo "JAX compilation cache ${JAX_COMPILATION_CACHE_DIR}"
 TRAIN_PID=""
 terminate_training_process_group() {
   if [[ -z "${TRAIN_PID}" ]]; then
@@ -206,7 +151,7 @@ trap 'exit 143' TERM
 setsid .venv/bin/python train.py \\
   --config "${SPECTRA_CONFIG}" \\
   --workdir "${SPECTRA_WORKDIR}" \\
-  --overrides-json "${CONFIG_JSON}" \\
+  --overrides-json "${SPECTRA_CONFIG_JSON}" \\
   --metrics-json "${METRICS_JSON}" &
 TRAIN_PID=$!
 wait "${TRAIN_PID}"
@@ -740,7 +685,7 @@ def build_sky_jobs_launch_command(
 ) -> list[str]:
     cmd = [sky_bin, "jobs", "launch", "--detach-run", "--name", job_name]
     cmd.extend(["--config", "gcp.remote_identity=SERVICE_ACCOUNT"])
-    for secret in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "WANDB_API_KEY"):
+    for secret in ("HF_TOKEN", "WANDB_API_KEY"):
         cmd.extend(["--secret", secret])
     if yes:
         cmd.append("--yes")
@@ -822,23 +767,22 @@ def main(argv: list[str] | None = None) -> None:
         hf_token = read_hf_token(launch_env)
         wandb_key = read_wandb_api_key(launch_env)
         launch_env["HF_TOKEN"] = hf_token
-        launch_env["HUGGING_FACE_HUB_TOKEN"] = launch_env.get(
-            "HUGGING_FACE_HUB_TOKEN",
-            hf_token,
-        )
         launch_env["WANDB_API_KEY"] = wandb_key
         logging.info("Loaded HF_TOKEN and WANDB_API_KEY for SkyPilot secrets.")
 
     task_envs = {
         "SPECTRA_CONFIG": args.config,
-        "SPECTRA_RUN_ID": run_id,
         "SPECTRA_WORKDIR": workdir,
         "SPECTRA_METRICS_JSON": args.metrics_json,
-        "SPECTRA_JAX_CACHE_DIR": jax_cache_dir,
         "SPECTRA_CONFIG_JSON": config_json,
         "JAX_INITIALIZATION_TIMEOUT": "3600",
         "HF_HOME": "/tmp/huggingface",
-        "WANDB_DIR": "/tmp/wandb",
+        "HF_HUB_DOWNLOAD_TIMEOUT": "60",
+        "HF_XET_HIGH_PERFORMANCE": "1",
+        "HF_XET_CLIENT_CONNECT_TIMEOUT": "20s",
+        "HF_XET_CLIENT_READ_TIMEOUT": "60s",
+        "HF_XET_CLIENT_RETRY_MAX_ATTEMPTS": "3",
+        "HF_XET_CLIENT_RETRY_MAX_DURATION": "15s",
         "UV_CACHE_DIR": "/tmp/uv-cache",
         "UV_LINK_MODE": "copy",
         "GOOGLE_CLOUD_PROJECT": args.project,

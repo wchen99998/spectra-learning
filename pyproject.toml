@@ -5,6 +5,7 @@ description = "Self-supervised representation learning for mass spectrometry pea
 readme = "README.md"
 requires-python = ">=3.12.11"
 dependencies = [
+    "hf-xet>=1.6.0",
     "huggingface-hub>=0.33.2",
     "numpy>=2.1.0",
     "pyarrow>=16.0.0",

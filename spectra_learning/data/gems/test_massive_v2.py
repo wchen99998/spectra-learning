@@ -12,6 +12,7 @@ from ml_collections import config_dict
 
 import spectra_learning.data.gems as gems
 import spectra_learning.data.gems.artifacts as gems_artifacts
+import spectra_learning.data.gems.materialize as materializer
 import spectra_learning.data.gems.prepare_massive_v2 as converter
 import spectra_learning.data.gems.repair_massive_v2_eligibility as repairer
 import spectra_learning.data.gems.repack_massive_v2 as repacker
@@ -209,6 +210,7 @@ def _config(tmp_path: Path) -> config_dict.ConfigDict:
     config.jepa_target_fraction = 0.5
     config.jepa_block_min_len = 1
     config.dataloader_num_workers = 0
+    config.seed = 7
     return config
 
 
@@ -303,6 +305,46 @@ def test_multihost_plan_downloads_only_each_ranks_budgeted_shards(
             rank1.info["gems_shard_plan_sha256"]
         )
         assert "planned_download_bytes" in rank0.info
+
+
+def test_materialize_rank_shards_downloads_complete_plan(
+    tmp_path: Path,
+) -> None:
+    remote = tmp_path / "remote"
+    _write_artifact(remote)
+    config = _config(tmp_path)
+    config.training_max_steps = 2
+    calls = []
+
+    def snapshot_download(*, local_dir: str | Path, allow_patterns, **_kwargs):
+        local = Path(local_dir)
+        local.mkdir(parents=True, exist_ok=True)
+        calls.append(list(allow_patterns))
+        for pattern in allow_patterns:
+            source = remote / pattern
+            if source.is_file():
+                target = local / pattern
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+        return str(local)
+
+    with mock.patch.object(
+        gems_artifacts,
+        "snapshot_download",
+        side_effect=snapshot_download,
+    ):
+        paths = materializer.materialize_rank_shards(
+            config,
+            world_size=2,
+            rank=0,
+        )
+
+    assert len(paths) == 3
+    assert all(path.is_file() for path in paths)
+    assert calls[0] == ["manifest.json"]
+    assert {call[0] for call in calls[1:]} == {
+        str(path.relative_to(paths[0].parents[1])) for path in paths
+    }
 
 
 @pytest.mark.parametrize("world_size", (1, 2, 4, 8, 16, 32, 64))

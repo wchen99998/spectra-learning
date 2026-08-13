@@ -367,7 +367,7 @@ def test_resolve_topology_rejects_unsupported_direct_tpu_size():
 def test_build_task_constructs_direct_gcp_dws_resources_and_env():
     task = train_sky.build_task(
         topology=train_sky.resolve_topology("2x2x4"),
-        envs={"SPECTRA_RUN_ID": "new", "SPECTRA_CONFIG_JSON": "{}"},
+        envs={"SPECTRA_CONFIG_JSON": "{}"},
         infra="gcp/us-central1",
     )
 
@@ -379,7 +379,7 @@ def test_build_task_constructs_direct_gcp_dws_resources_and_env():
     assert task["resources"]["instance_type"] == "tpu7x-standard-4t"
     assert task["resources"]["job_recovery"] == {
         "strategy": "FAILOVER",
-        "max_restarts_on_errors": 1,
+        "max_restarts_on_errors": 0,
     }
     assert "accelerators" not in task["resources"]
     assert "accelerator_args" not in task["resources"]
@@ -392,25 +392,38 @@ def test_build_task_constructs_direct_gcp_dws_resources_and_env():
         "accelerator_topology": "2x2x4",
         "accelerator_topology_mode": "AUTO_CONNECT",
     }
-    assert task["envs"]["SPECTRA_RUN_ID"] == "new"
     assert task["envs"]["SPECTRA_CONFIG_JSON"] == "{}"
-    assert "for attempt in {1..180}" in task["setup"]
-    assert "-o DPkg::Lock::Timeout=300 -o Acquire::Retries=5" in task["setup"]
-    assert "apt_get update" in task["setup"]
-    assert "apt_get install -y" in task["setup"]
     subprocess.run(["bash", "-n"], input=task["setup"], text=True, check=True)
-    assert "libgomp1" in task["setup"]
+    subprocess.run(["bash", "-n"], input=task["run"], text=True, check=True)
+    assert "apt-get" not in task["setup"]
     assert "curl -LsSf https://astral.sh/uv/install.sh | sh" in task["setup"]
-    assert f"uv python install {train_sky.DEFAULT_PYTHON_VERSION}" in task["setup"]
+    assert "uv --version" not in task["setup"]
+    assert "uv python install" not in task["setup"]
+    assert "importlib.metadata" not in task["setup"]
     assert (
         f"uv sync --python {train_sky.DEFAULT_PYTHON_VERSION} "
         "--frozen --no-dev --extra tpu"
     ) in task["setup"]
     assert "python -m pip" not in task["setup"]
     assert "SPECTRA_CONFIG_JSON must be set" in task["run"]
-    assert 'export JAX_COMPILATION_CACHE_DIR="${JAX_CACHE_DIR}"' in task["run"]
-    assert 'echo "JAX compilation cache ${JAX_COMPILATION_CACHE_DIR}"' in task["run"]
-    assert 'config["jax_compilation_cache_dir"] = os.environ["JAX_CACHE_DIR"]' in task["run"]
+    assert "SPECTRA_JAX_CACHE_DIR" not in task["run"]
+    assert "JAX_COMPILATION_CACHE_DIR" not in task["run"]
+    assert "JAX_DISTRIBUTED_INITIALIZE" not in task["run"]
+    assert 'overrides-json "${SPECTRA_CONFIG_JSON}"' in task["run"]
+    assert "HF_TOKEN" not in task["run"]
+    assert "HUGGING_FACE_HUB_TOKEN" not in task["setup"]
+    assert "spectra_learning.data.gems.materialize" in task["setup"]
+    assert 'rank "${SKYPILOT_SETUP_NODE_RANK}"' in task["setup"]
+    assert (
+        'printf \'%s\\n\' "${SKYPILOT_SETUP_NODE_RANK}" '
+        "> /tmp/spectra-gems-rank"
+    ) in task["setup"]
+    assert "timeout --signal=TERM --kill-after=30s 30m" in task["setup"]
+    assert "spectra_learning.data.gems.materialize" not in task["run"]
+    assert (
+        'SPECTRA_GEMS_RANK="${SPECTRA_GEMS_RANK:-$(</tmp/spectra-gems-rank)}"'
+        in task["run"]
+    )
     assert ".venv/bin/python train.py" in task["run"]
     assert "setsid .venv/bin/python train.py" in task["run"]
     assert 'kill -TERM -- "-${TRAIN_PID}"' in task["run"]
@@ -423,7 +436,7 @@ def test_build_task_constructs_direct_gcp_dws_resources_and_env():
 def test_build_task_constructs_v6e_32_resources():
     task = train_sky.build_task(
         topology=train_sky.resolve_topology(chips=32, generation="v6e"),
-        envs={"SPECTRA_RUN_ID": "v6e-32", "SPECTRA_CONFIG_JSON": "{}"},
+        envs={"SPECTRA_CONFIG_JSON": "{}"},
         infra="gcp/us-east5",
         task_name=train_sky.V6E_TASK_NAME,
     )
@@ -442,7 +455,7 @@ def test_build_task_constructs_v6e_32_resources():
 def test_build_task_constructs_v6e_8_resources():
     task = train_sky.build_task(
         topology=train_sky.resolve_topology(chips=8, generation="v6e"),
-        envs={"SPECTRA_RUN_ID": "v6e-8", "SPECTRA_CONFIG_JSON": "{}"},
+        envs={"SPECTRA_CONFIG_JSON": "{}"},
         infra="gcp/us-east5",
         task_name=train_sky.V6E_TASK_NAME,
     )
@@ -457,7 +470,7 @@ def test_build_task_constructs_v6e_8_resources():
 def test_build_task_constructs_v6e_resources_in_exact_zone():
     task = train_sky.build_task(
         topology=train_sky.resolve_topology(chips=64, generation="v6e"),
-        envs={"SPECTRA_RUN_ID": "v6e-64", "SPECTRA_CONFIG_JSON": "{}"},
+        envs={"SPECTRA_CONFIG_JSON": "{}"},
         infra="gcp/europe-west4/europe-west4-a",
         task_name=train_sky.V6E_TASK_NAME,
     )
@@ -472,7 +485,7 @@ def test_build_task_constructs_v6e_resources_in_exact_zone():
 def test_build_task_constructs_v6e_1_resources():
     task = train_sky.build_task(
         topology=train_sky.resolve_topology(chips=1, generation="v6e"),
-        envs={"SPECTRA_RUN_ID": "v6e-1", "SPECTRA_CONFIG_JSON": "{}"},
+        envs={"SPECTRA_CONFIG_JSON": "{}"},
         infra="gcp/us-south1",
         task_name=train_sky.V6E_TASK_NAME,
     )
@@ -487,7 +500,7 @@ def test_build_task_constructs_v6e_1_resources():
 def test_build_task_sets_dws_run_duration():
     task = train_sky.build_task(
         topology=train_sky.resolve_topology("2x2x4"),
-        envs={"SPECTRA_RUN_ID": "new", "SPECTRA_CONFIG_JSON": "{}"},
+        envs={"SPECTRA_CONFIG_JSON": "{}"},
         infra="gcp",
         dws_run_duration_seconds=21600,
     )
@@ -505,7 +518,7 @@ def test_build_task_sets_dws_run_duration():
 def test_build_task_adds_optional_direct_vm_resource_constraints():
     task = train_sky.build_task(
         topology=train_sky.resolve_topology("2x2x4"),
-        envs={"SPECTRA_RUN_ID": "new", "SPECTRA_CONFIG_JSON": "{}"},
+        envs={"SPECTRA_CONFIG_JSON": "{}"},
         infra="gcp",
         cpus="64+",
         memory="256+",
@@ -574,10 +587,11 @@ def test_dryrun_prints_generated_assets_without_token_lookup(
     assert "instance_type: tpu7x-standard-4t" in output
     assert "job_recovery:" in output
     assert "strategy: FAILOVER" in output
-    assert "max_restarts_on_errors: 1" in output
+    assert "max_restarts_on_errors: 0" in output
     assert "image_id:" not in output
     assert "docker:" not in output
-    assert f"uv python install {train_sky.DEFAULT_PYTHON_VERSION}" in output
+    assert "uv python install" not in output
+    assert "apt-get" not in output
     assert (
         f"uv sync --python {train_sky.DEFAULT_PYTHON_VERSION} "
         "--frozen --no-dev --extra tpu"
@@ -591,6 +605,7 @@ def test_dryrun_prints_generated_assets_without_token_lookup(
     assert "managed_instance_group:" in output
     assert "remote_identity: SERVICE_ACCOUNT" not in output
     assert "--config gcp.remote_identity=SERVICE_ACCOUNT" in output
+    assert "--secret HUGGING_FACE_HUB_TOKEN" not in output
     assert "run_duration: 172800" in output
     assert f"provision_timeout: {train_sky.DEFAULT_PROVISION_TIMEOUT_SECONDS}" in output
     assert "accelerator_topology: 2x2x2" in output
@@ -601,6 +616,13 @@ def test_dryrun_prints_generated_assets_without_token_lookup(
     assert f"SPECTRA_CONFIG: {TRAIN_CONFIG}" in output
     assert "SPECTRA_WORKDIR:" in output
     assert "SPECTRA_CONFIG_JSON:" in output
+    assert "HF_HUB_DOWNLOAD_TIMEOUT: '60'" in output
+    assert "HF_XET_HIGH_PERFORMANCE: '1'" in output
+    assert "HF_XET_CLIENT_CONNECT_TIMEOUT: 20s" in output
+    assert "HF_XET_CLIENT_READ_TIMEOUT: 60s" in output
+    assert "HF_XET_CLIENT_RETRY_MAX_ATTEMPTS: '3'" in output
+    assert "HF_XET_CLIENT_RETRY_MAX_DURATION: 15s" in output
+    assert "HF_HUB_DISABLE_XET" not in output
     assert "SPECTRA_AOT" not in output
     assert "LIBTPU_INIT_ARGS:" not in output
     assert '"jax_mesh_devices":"16"' in output
@@ -658,17 +680,13 @@ raise SystemExit(23)
         "HOME": str(tmp_path / "home"),
         "SPECTRA_CONFIG": "config.py",
         "SPECTRA_WORKDIR": str(tmp_path / "workdir"),
-        "SPECTRA_RUN_ID": "process-group-test",
-        "SPECTRA_JAX_CACHE_DIR": str(tmp_path / "jax-cache"),
         "SPECTRA_CONFIG_JSON": "{}",
         "SPECTRA_METRICS_JSON": "metrics.json",
-        "HF_TOKEN": "hf-token",
         "WANDB_API_KEY": "wandb-key",
-        "HF_HOME": str(tmp_path / "hf"),
-        "WANDB_DIR": str(tmp_path / "wandb"),
         "SKYPILOT_NODE_IPS": "127.0.0.1",
         "SKYPILOT_NUM_NODES": "1",
         "SKYPILOT_NODE_RANK": "0",
+        "SPECTRA_GEMS_RANK": "0",
     }
 
     result = subprocess.run(
@@ -824,8 +842,6 @@ def test_launch_failure_preserves_exit_code_without_wrapper_down(tmp_path, monke
             "--secret",
             "HF_TOKEN",
             "--secret",
-            "HUGGING_FACE_HUB_TOKEN",
-            "--secret",
             "WANDB_API_KEY",
             "--yes",
             str(tmp_path / "tasks" / "fake-fail.yaml"),
@@ -865,8 +881,6 @@ def test_successful_submit_streams_managed_job_logs(tmp_path, monkeypatch):
             "gcp.remote_identity=SERVICE_ACCOUNT",
             "--secret",
             "HF_TOKEN",
-            "--secret",
-            "HUGGING_FACE_HUB_TOKEN",
             "--secret",
             "WANDB_API_KEY",
             "--yes",

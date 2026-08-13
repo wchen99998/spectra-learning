@@ -64,7 +64,6 @@ from spectra_learning.training.storage import (
     local_scratch_dir,
     normalize_storage_path,
     storage_join,
-    storage_mkdir,
 )
 
 
@@ -211,6 +210,10 @@ def configure_jax_runtime(config: Any) -> None:
         jax.config.update("jax_explain_cache_misses", True)
     compilation_cache_dir = str(config.get("jax_compilation_cache_dir", ""))
     if compilation_cache_dir:
+        compilation_cache_dir = str(
+            Path(compilation_cache_dir).expanduser().resolve()
+        )
+        config["jax_compilation_cache_dir"] = compilation_cache_dir
         jax.config.update("jax_compilation_cache_dir", compilation_cache_dir)
         jax.config.update(
             "jax_enable_compilation_cache",
@@ -928,11 +931,6 @@ def _train_and_evaluate_jax_task(
     local_workdir = local_scratch_dir(workdir)
     local_workdir.mkdir(parents=True, exist_ok=True)
     is_main_process = jax.process_index() == 0
-    if is_main_process:
-        storage_mkdir(workdir)
-    multihost_utils.sync_global_devices(
-        f"spectra_learning_jax_{task.name}_workdir_ready"
-    )
     torch.manual_seed(int(config.seed))
     prepare_jax_training_config(config)
     _validate_jax_task_probe_config(config, task)
@@ -950,11 +948,6 @@ def _train_and_evaluate_jax_task(
     task_contract = task.checkpoint_contract(config, datamodule, total_steps)
     checkpoint_metadata = jax_training_checkpoint_metadata(task.name, task_contract)
     checkpoint_dir = storage_join(workdir, "checkpoints")
-    if is_main_process:
-        storage_mkdir(checkpoint_dir)
-    multihost_utils.sync_global_devices(
-        f"spectra_learning_jax_{task.name}_checkpoint_dir_ready"
-    )
     jax_checkpoint_max_to_keep = config.get("jax_checkpoint_max_to_keep", 5)
     if jax_checkpoint_max_to_keep is not None:
         jax_checkpoint_max_to_keep = int(jax_checkpoint_max_to_keep)
@@ -972,7 +965,7 @@ def _train_and_evaluate_jax_task(
         logger = (
             build_logger(config, local_workdir) if is_main_process else MetricLogger()
         )
-        param_metrics = collect_jax_param_metrics(model)
+        param_metrics = collect_jax_param_metrics(model) if is_main_process else {}
         if is_main_process:
             if task.log_start is not None:
                 task.log_start(datamodule, total_steps)
@@ -1057,6 +1050,7 @@ def jax_config_checkpoint_contract(
     effective_config = config_to_dict(config)
     effective_config.pop("config_path", None)
     effective_config.pop("jax_resume_allowed_config_keys", None)
+    effective_config.pop("jax_resume_allowed_dataset_keys", None)
     return {"config": effective_config}
 
 
@@ -1065,11 +1059,12 @@ def _build_pretrain_jax_datamodule(
     process_count: int,
     process_index: int,
 ) -> GemsDataModule:
+    data_rank = int(os.environ.get("SPECTRA_GEMS_RANK", process_index))
     return GemsDataModule(
         config,
         seed=int(config.seed),
         distributed_world_size=process_count,
-        distributed_rank=process_index,
+        distributed_rank=data_rank,
         distributed_local_rank=0,
     )
 
@@ -1441,6 +1436,9 @@ class _JaxTrainingLoop:
             expected_metadata=self.checkpoint_metadata,
             allowed_config_keys=tuple(
                 self.config.get("jax_resume_allowed_config_keys", ())
+            ),
+            allowed_dataset_keys=tuple(
+                self.config.get("jax_resume_allowed_dataset_keys", ())
             ),
         )
         self.state = _JaxTrainState(
