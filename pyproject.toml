@@ -3,42 +3,42 @@ name = "spectra-learning"
 version = "0.1.0"
 description = "Self-supervised representation learning for mass spectrometry peak sets"
 readme = "README.md"
-requires-python = ">=3.12.11"
+requires-python = ">=3.14.7"
 dependencies = [
     "hf-xet>=1.6.0",
-    "huggingface-hub>=0.33.2",
-    "numpy>=2.1.0",
-    "pyarrow>=16.0.0",
-    "google-cloud-storage>=2.14.0",
-    "h5py>=3.11.0",
-    "matplotlib>=3.10.3",
+    "huggingface-hub>=1.27.0",
+    "numpy>=2.5.2",
+    "pyarrow>=25.0.1",
+    "google-cloud-storage>=3.13.1",
+    "h5py>=3.16.0",
+    "matplotlib>=3.11.1",
     "ml-collections>=1.1.0",
-    "rdkit>=2025.3.3",
-    "scikit-learn>=1.8.0",
-    "tqdm>=4.66.4",
-    "wandb==0.27.0",
-    "jaxtyping>=0.3.10",
-    "fsspec>=2026.1.0",
-    "gcsfs>=2026.1.0",
-    "PyYAML>=6.0.0",
-    "myopic-mces>=1.1.1",
-    "pulp>=2.9",
+    "rdkit>=2026.3.5",
+    "scikit-learn>=1.9.0",
+    "tqdm>=4.70.0",
+    "wandb==0.28.2",
+    "jaxtyping>=0.3.11",
+    "fsspec>=2026.7.0",
+    "gcsfs>=2026.7.0",
+    "PyYAML>=6.0.3",
+    "myopic-mces>=1.2.2",
+    "pulp>=3.3.2",
 ]
 
 [project.optional-dependencies]
 cuda = [
-    "torch==2.12.0; sys_platform == 'linux'",
+    "torch==2.13.0; sys_platform == 'linux'",
     "jax[cuda13]>=0.11.0; sys_platform == 'linux'",
-    "flax>=0.12.7",
+    "flax>=0.12.8",
     "optax>=0.2.8",
-    "orbax-checkpoint>=0.12.0",
+    "orbax-checkpoint>=0.12.4",
 ]
 tpu = [
-    "torch==2.12.0; sys_platform == 'linux'",
+    "torch==2.13.0; sys_platform == 'linux'",
     "jax[tpu]>=0.11.0; sys_platform == 'linux'",
-    "flax>=0.12.7",
+    "flax>=0.12.8",
     "optax>=0.2.8",
-    "orbax-checkpoint>=0.12.0",
+    "orbax-checkpoint>=0.12.4",
 ]
 
 [[tool.uv.index]]
@@ -71,7 +71,6 @@ conflicts = [
 
 [dependency-groups]
 dev = [
-    "pyrefly==1.0.0",
-    "pytest>=9.0.3",
-    "types-tqdm>=4.67.3.20260508",
+    "pytest>=9.1.1",
+    "types-tqdm>=4.70.0.20260805",
 ]
