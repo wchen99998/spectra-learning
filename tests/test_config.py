@@ -50,6 +50,8 @@ def test_current_pretraining_config_records_model_and_data_defaults() -> None:
     assert model_keys - set(config) == {
         "distogram_mz_max",
         "encoder_mz_scale",
+        "encoder_use_cls_token",
+        "encoder_use_pair_path",
         "jepa_mae_mz_max",
         "pairmixer_fast_encoder_max_visible_tokens",
         "pairmixer_fast_max_visible_tokens",

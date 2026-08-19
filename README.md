@@ -47,10 +47,12 @@ Pretraining uses a one-time, streaming conversion of
 Only `*_t0.95_l0.80_grouped.hdf5` files and exact-MS2 rows are retained.
 The converted shards preserve `massive_id`, `file_id`, `group_id`,
 `global_group_id`, and `unique_spectrum_id`, and store the canonical training
-eligibility mask.
+eligibility mask. Eligible rows have finite bounded precursor m/z, positive
+finite retention time, and at least two usable peaks after the same m/z and
+relative-intensity filtering used by training.
 
 The published artifact is
-`novogaia/massive-v2-ms2-t095-l080-sharded-10gb@de80d280d319f0b9a8825956b13d8dc7d9ab1eb1`.
+`novogaia/massive-v2-ms2-t095-l080-sharded-10gb@4de48add4e687f6ea561dc6ec74f8984ad8aebe0`.
 It contains 65 train shards and 3 validation shards. Shard sizes use a soft
 10 GB target: the actual files range from 8.96 GB to 11.72 GB so existing
 group-safe boundaries are preserved.
@@ -59,11 +61,10 @@ Run or resume the source conversion on the large NVMe mount with:
 
 ```bash
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-HF_XET_CACHE=/mnt/tg-go-nvme/massive-v2-conversion-v2/hf-xet-cache \
+HF_XET_CACHE=/mnt/tg-go-nvme/massive-v2-conversion-v3/hf-xet-cache \
 .venv/bin/python -m spectra_learning.data.gems.prepare_massive_v2 \
-  --work-dir /mnt/tg-go-nvme/massive-v2-conversion-v2 \
-  --workers 4 \
-  --upload
+  --work-dir /mnt/tg-go-nvme/massive-v2-conversion-v3 \
+  --workers 4
 ```
 
 Repack the validated source artifact toward the soft byte target with:
@@ -71,8 +72,8 @@ Repack the validated source artifact toward the soft byte target with:
 ```bash
 .venv/bin/python -m spectra_learning.data.gems.repack_massive_v2 \
   --source-manifest \
-    /mnt/tg-go-nvme/massive-v2-conversion-v2/output/manifest.json \
-  --work-dir /mnt/tg-go-nvme/massive-v2-repack-10gb \
+    /mnt/tg-go-nvme/massive-v2-conversion-v3/output/manifest.json \
+  --work-dir /mnt/tg-go-nvme/massive-v2-repack-v3-10gb \
   --target-bytes 10000000000 \
   --workers 24 \
   --upload

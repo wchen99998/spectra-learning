@@ -31,7 +31,7 @@ V6E_VM_IMAGE_ID = (
     "projects/ubuntu-os-accelerator-images/global/images/"
     "ubuntu-accel-2204-amd64-tpu-v5e-v5p-v6e-v20260623"
 )
-DEFAULT_PYTHON_VERSION = "3.12.11"
+DEFAULT_PYTHON_VERSION = "3.14.7"
 DEFAULT_SKY_BIN = "/home/wuhao/skypilot/.venv/bin/sky"
 TPU_V6E_TOPOLOGY_BY_CHIPS = {
     1: "1x1",

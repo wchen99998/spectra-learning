@@ -705,6 +705,23 @@ class MassiveV2Hdf5ShardDataset:
             )
         return spectra_out, precursor_out, metadata_out
 
+    def grouped_logical_ranges(
+        self,
+        shard_id: int,
+        *,
+        minimum_size: int,
+        scan_rows: int = GEMS_ELIGIBILITY_SCAN_ROWS,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        self._ensure_shard_open(shard_id)
+        file = self.files[shard_id]
+        state = self.states[shard_id]
+        return _grouped_eligible_ranges(
+            file,
+            logical_start=state.logical_start,
+            minimum_size=minimum_size,
+            scan_rows=scan_rows,
+        )
+
     @staticmethod
     def _read_shard_pairs(
         spectra_dataset: h5py.Dataset,
@@ -744,3 +761,105 @@ class MassiveV2Hdf5ShardDataset:
                 precursor_out[output_position] = precursor[local_position]
                 for key, values in metadata.items():
                     metadata_out[key][output_position] = values[local_position]
+
+
+def _grouped_eligible_ranges(
+    file: h5py.File,
+    *,
+    logical_start: int,
+    minimum_size: int,
+    scan_rows: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    group_id = file["group_id"]
+    global_group_id = file["global_group_id"]
+    massive_id = file["massive_id"]
+    training_eligible = file["training_eligible"]
+    start_parts: list[np.ndarray] = []
+    count_parts: list[np.ndarray] = []
+    eligible_before = 0
+    pending_key: tuple[bytes, int] | None = None
+    pending_start = 0
+    pending_count = 0
+
+    def append_pending() -> None:
+        nonlocal pending_key, pending_start, pending_count
+        if pending_key is not None and pending_count >= minimum_size:
+            start_parts.append(np.asarray([pending_start], dtype=np.int64))
+            count_parts.append(np.asarray([pending_count], dtype=np.int64))
+        pending_key = None
+        pending_count = 0
+
+    for physical_start in range(0, len(group_id), scan_rows):
+        physical_stop = min(physical_start + scan_rows, len(group_id))
+        local_group_id = group_id[physical_start:physical_stop]
+        local_global_group_id = global_group_id[physical_start:physical_stop]
+        local_massive_id = massive_id[physical_start:physical_stop]
+        eligible = training_eligible[physical_start:physical_stop].astype(
+            np.int64,
+            copy=False,
+        )
+        assigned = local_group_id >= 0
+        changes = np.ones(len(assigned), dtype=np.bool_)
+        changes[1:] = (
+            (assigned[1:] != assigned[:-1])
+            | (
+                assigned[1:]
+                & (
+                    (local_global_group_id[1:] != local_global_group_id[:-1])
+                    | (local_massive_id[1:] != local_massive_id[:-1])
+                )
+            )
+        )
+        run_starts = np.flatnonzero(changes)
+        run_stops = np.concatenate(
+            (run_starts[1:], np.asarray([len(assigned)], dtype=np.int64))
+        )
+        eligible_prefix = np.concatenate(
+            (np.zeros(1, dtype=np.int64), np.cumsum(eligible, dtype=np.int64))
+        )
+        run_counts = eligible_prefix[run_stops] - eligible_prefix[run_starts]
+        run_logical_starts = (
+            logical_start + eligible_before + eligible_prefix[run_starts]
+        )
+        run_assigned = assigned[run_starts]
+
+        first_key = (
+            bytes(local_massive_id[run_starts[0]]),
+            int(local_global_group_id[run_starts[0]]),
+        )
+        first_run = 0
+        if pending_key is not None:
+            if run_assigned[0] and first_key == pending_key:
+                pending_count += int(run_counts[0])
+                if len(run_starts) == 1:
+                    eligible_before += int(eligible_prefix[-1])
+                    continue
+                append_pending()
+                first_run = 1
+            else:
+                append_pending()
+
+        last_run = len(run_starts)
+        if run_assigned[-1]:
+            last_run -= 1
+            pending_key = (
+                bytes(local_massive_id[run_starts[-1]]),
+                int(local_global_group_id[run_starts[-1]]),
+            )
+            pending_start = int(run_logical_starts[-1])
+            pending_count = int(run_counts[-1])
+
+        complete = np.arange(first_run, last_run)
+        complete = complete[
+            run_assigned[complete] & (run_counts[complete] >= minimum_size)
+        ]
+        if len(complete):
+            start_parts.append(run_logical_starts[complete].astype(np.int64))
+            count_parts.append(run_counts[complete].astype(np.int64))
+        eligible_before += int(eligible_prefix[-1])
+
+    append_pending()
+    if not start_parts:
+        empty = np.empty(0, dtype=np.int64)
+        return empty, empty
+    return np.concatenate(start_parts), np.concatenate(count_parts)

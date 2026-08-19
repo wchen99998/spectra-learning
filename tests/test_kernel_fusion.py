@@ -73,6 +73,8 @@ def test_encoder_with_visible_mask():
         .to(DEVICE)
         .eval()
     )
+    for block in encoder.blocks:
+        torch.nn.init.xavier_normal_(block.single_attention.o.weight)
     batch = _make_batch()
 
     with torch.no_grad():

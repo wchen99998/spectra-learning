@@ -15,6 +15,7 @@ from spectra_learning.models.encoder import PeakSetEncoder
 from spectra_learning.models.peak_features import PeakFeatureEmbedder
 from spectra_learning.models.settings import (
     PeakSetJEPASettings,
+    encoder_uses_pair_path,
     ema_teacher_momentum_at as resolve_ema_teacher_momentum,
     load_frozen_teacher_settings,
 )
@@ -244,7 +245,7 @@ class PeakSetJEPA(nn.Module):
             apply_final_pair_norm=cfg.encoder_apply_final_pair_norm,
             num_peaks=cfg.num_peaks,
             use_cls_token=cfg.encoder_use_cls_token,
-            use_pair_path=cfg.distogram_loss_weight > 0,
+            use_pair_path=encoder_uses_pair_path(cfg),
             pairmixer_block_type=cfg.pairmixer_block_type.lower(),
             pairmixer_transition_type=cfg.pairmixer_transition_type.lower(),
             pair_dim=cfg.pairmixer_pair_dim,

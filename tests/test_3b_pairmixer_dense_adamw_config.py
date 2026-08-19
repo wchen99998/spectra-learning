@@ -47,7 +47,7 @@ def test_3b_pairmixer_parameter_count_includes_cross_attention_predictor() -> No
     encoder_params = counts["encoder"]
     predictor_side_params = sum(counts.values()) - encoder_params
 
-    assert encoder_params == 3_002_431_584
+    assert encoder_params == 2_629_278_784
     assert predictor_side_params == 247_656_400
-    assert sum(counts.values()) == 3_250_087_984
-    assert predictor_side_params / encoder_params == pytest.approx(0.0824853)
+    assert sum(counts.values()) == 2_876_935_184
+    assert predictor_side_params / encoder_params == pytest.approx(0.0941918)

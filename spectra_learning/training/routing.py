@@ -9,6 +9,7 @@ def resolve_training_route(config: Any) -> tuple[str, str]:
         "contrastive",
         "ar_spectra",
         "adversarial_fake_peak",
+        "grouped_jepa",
     }:
         raise ValueError(f"Unknown training_task: {task}")
     if backend not in {"auto", "torch", "jax"}:
@@ -19,4 +20,6 @@ def resolve_training_route(config: Any) -> tuple[str, str]:
         raise ValueError(f"{task} training requires device_backend='torch'")
     if task == "ar_spectra" and backend != "jax":
         raise ValueError("ar_spectra training requires device_backend='jax'")
+    if task == "grouped_jepa" and backend != "jax":
+        raise ValueError("grouped_jepa training requires device_backend='jax'")
     return task, backend

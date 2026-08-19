@@ -264,6 +264,13 @@ def restore_frozen_teacher_encoder(
     )
 
 
+def restore_jax_encoder_state(
+    checkpoint_path: StoragePath,
+    encoder_state: nnx.State,
+) -> nnx.State:
+    return restore_frozen_teacher_encoder(checkpoint_path, encoder_state)
+
+
 def jax_training_checkpoint_metadata(
     training_task: str,
     task_contract: dict[str, Any],

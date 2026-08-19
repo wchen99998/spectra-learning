@@ -8,7 +8,7 @@ def get_config() -> config_dict.ConfigDict:
 
     cfg.training_task = "adversarial_fake_peak"
     cfg.device_backend = "torch"
-    cfg.encoder_num_layers = 13
+    cfg.encoder_num_layers = 18
     cfg.batch_size = 1_280
     cfg.gradient_accumulation_steps = 16
     cfg.training_max_steps = 50_000
@@ -28,7 +28,7 @@ def get_config() -> config_dict.ConfigDict:
             "jepa_mae_loss_weight": 0.0,
             "masked_token_loss_weight": 0.0,
             "target_projector_dim": -1,
-            "encoder_num_layers": 11,
+            "encoder_num_layers": 17,
             "encoder_apply_final_pair_norm": False,
             "predictor_dim": 280,
         }

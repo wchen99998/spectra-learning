@@ -100,6 +100,7 @@ class PeakSetJEPASettings:
     jepa_num_target_blocks: int = 2
     norm_eps: float = 1e-5
     encoder_use_cls_token: bool = True
+    encoder_use_pair_path: bool | None = None
     encoder_use_position_embedding: bool = True
     encoder_apply_final_norm: bool = True
     encoder_apply_final_pair_norm: bool = False
@@ -183,6 +184,15 @@ def load_frozen_teacher_settings(
         return None
     return PeakSetJEPASettings.from_config(
         load_config(settings.frozen_teacher_config_path)
+    )
+
+
+def encoder_uses_pair_path(settings: PeakSetJEPASettings) -> bool:
+    if settings.encoder_use_pair_path is not None:
+        return settings.encoder_use_pair_path
+    return (
+        settings.distogram_loss_weight > 0
+        or settings.training_mode.lower() == "contrastive"
     )
 
 

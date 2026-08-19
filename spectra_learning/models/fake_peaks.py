@@ -218,7 +218,7 @@ class DynamicPeakGenerator(nn.Module):
         peak_valid_mask = batch["peak_valid_mask"]
         context_mask = batch["context_mask"] & peak_valid_mask
         target_masks = batch["target_masks"] & peak_valid_mask.unsqueeze(1)
-        context_emb, context_pair = self.backbone.encoder.forward_with_pair(
+        context_emb = self.backbone.encoder(
             batch["peak_mz"],
             batch["peak_intensity"],
             valid_mask=peak_valid_mask,
@@ -228,9 +228,9 @@ class DynamicPeakGenerator(nn.Module):
         )
         _, predictor_output, _ = self.backbone._predict_augmented_target_outputs(
             context_emb,
-            context_pair,
             context_mask,
             target_masks,
+            batch["peak_mz"],
         )
         mz_head = self.backbone.jepa_mae_mz_head
         intensity_head = self.backbone.jepa_mae_intensity_head

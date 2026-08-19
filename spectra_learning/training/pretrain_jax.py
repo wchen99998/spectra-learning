@@ -31,6 +31,10 @@ from spectra_learning.data.gems.mask_schedule import (
 from spectra_learning.models.common_jax import Array
 from spectra_learning.models.factory_jax import build_model_from_config
 from spectra_learning.models.fastmixer_capacity import pairmixer_fast_stage_capacities
+from spectra_learning.models.grouped_jepa_jax import (
+    GROUP_JEPA_TEACHER_TARGET_AGE_KEY,
+    GROUP_JEPA_TEACHER_TARGET_KEY,
+)
 from spectra_learning.models.model_jax import PeakSetJEPAJax
 from spectra_learning.probes.massspec.msg_probe_jax import run_msg_probe_jax
 from spectra_learning.probes.massspec.msg_settings import (
@@ -101,13 +105,19 @@ class _JaxTrainState:
     trainable_params: Any
     static_state: Any
     opt_state: Any
+    lookahead_teacher_target: Any | None = None
+    lookahead_target_valid: Any | None = None
 
     def checkpoint_state(self) -> dict[str, Any]:
-        return {
+        state = {
             "trainable_params": self.trainable_params,
             "static_state": self.static_state,
             "opt_state": self.opt_state,
         }
+        if self.lookahead_teacher_target is not None:
+            state["lookahead_teacher_target"] = self.lookahead_teacher_target
+            state["lookahead_target_valid"] = self.lookahead_target_valid
+        return state
 
 
 def trainable_param_filter(path: tuple[object, ...], value: object) -> bool:
@@ -621,6 +631,8 @@ def make_pure_accumulated_train_step(
     data_mesh: Mesh | None = None,
     log_update_stats: bool = False,
     metric_reduction: JaxMetricReduction = "mean",
+    group_jepa_ema_momentum: float | None = None,
+    group_jepa_lookahead: bool = False,
 ):
     def accumulated_metrics_and_grads(
         trainable_params: nnx.State,
@@ -686,63 +698,19 @@ def make_pure_accumulated_train_step(
         )
         return metric_totals, grads, grad_denominator
 
-    if sharded:
-        data_mesh = _jax_data_mesh() if data_mesh is None else data_mesh
-
-        @jax.jit(donate_argnums=(0, 2))
-        @jax.shard_map(
-            mesh=data_mesh,
-            in_specs=(P(), P(), P(), P(None, JAX_DATA_AXIS)),
-            out_specs=(P(), P(), P()),
-            axis_names={JAX_DATA_AXIS},
-            check_vma=False,
+    def accumulated_teacher_targets(
+        trainable_params: nnx.State,
+        static_state: nnx.State,
+        batch: dict[str, Array],
+    ) -> Array:
+        functional_model = nnx.merge(
+            graphdef,
+            trainable_params,
+            static_state,
         )
-        def pure_sharded_accumulated_train_step(
-            trainable_params: nnx.State,
-            static_state: nnx.State,
-            opt_state: Any,
-            batch: dict[str, Array],
-        ) -> tuple[nnx.State, Any, dict[str, Array]]:
-            metric_totals, grads, grad_denominator = accumulated_metrics_and_grads(
-                trainable_params,
-                static_state,
-                batch,
-            )
-            metric_totals = jax.tree.map(
-                lambda value: jax.lax.psum(value, JAX_DATA_AXIS),
-                metric_totals,
-            )
-            grads = jax.tree.map(
-                lambda value: jax.lax.psum(value, JAX_DATA_AXIS),
-                grads,
-            )
-            grad_denominator = jax.lax.psum(grad_denominator, JAX_DATA_AXIS)
-            grads = jax.tree.map(
-                lambda value: value / jnp.maximum(grad_denominator, 1.0),
-                grads,
-            )
-            metrics = _finalize_jax_metric_totals(
-                metric_totals,
-                metric_reduction=metric_reduction,
-                mean_denominator=grad_denominator,
-            )
-            updates, opt_state = optimizer.update(
-                grads,
-                opt_state,
-                trainable_params,
-            )
-            if log_update_stats:
-                metrics = {
-                    **metrics,
-                    **_jax_update_scale_metrics(trainable_params, grads, updates),
-                }
-            trainable_params = optax.apply_updates(trainable_params, updates)
-            return trainable_params, opt_state, metrics
+        return jax.lax.map(functional_model.teacher_target, batch)
 
-        return pure_sharded_accumulated_train_step
-
-    @jax.jit(donate_argnums=(0, 2))
-    def pure_accumulated_train_step(
+    def train_update(
         trainable_params: nnx.State,
         static_state: nnx.State,
         opt_state: Any,
@@ -753,6 +721,19 @@ def make_pure_accumulated_train_step(
             static_state,
             batch,
         )
+        if sharded:
+            metric_totals = jax.tree.map(
+                lambda value: jax.lax.psum(value, JAX_DATA_AXIS),
+                metric_totals,
+            )
+            grads = jax.tree.map(
+                lambda value: jax.lax.psum(value, JAX_DATA_AXIS),
+                grads,
+            )
+            grad_denominator = jax.lax.psum(
+                grad_denominator,
+                JAX_DATA_AXIS,
+            )
         grads = jax.tree.map(
             lambda value: value / jnp.maximum(grad_denominator, 1.0),
             grads,
@@ -775,7 +756,88 @@ def make_pure_accumulated_train_step(
         trainable_params = optax.apply_updates(trainable_params, updates)
         return trainable_params, opt_state, metrics
 
-    return pure_accumulated_train_step
+    if group_jepa_lookahead:
+        assert group_jepa_ema_momentum is not None
+
+        def train_step(
+            trainable_params: nnx.State,
+            static_state: nnx.State,
+            opt_state: Any,
+            batch: dict[str, Array],
+            next_batch: dict[str, Array],
+        ) -> tuple[nnx.State, nnx.State, Any, dict[str, Array], Array]:
+            next_teacher_targets = accumulated_teacher_targets(
+                trainable_params,
+                static_state,
+                next_batch,
+            )
+            trainable_params, opt_state, metrics = train_update(
+                trainable_params,
+                static_state,
+                opt_state,
+                batch,
+            )
+            static_state = _update_grouped_jepa_ema_state(
+                trainable_params,
+                static_state,
+                group_jepa_ema_momentum,
+            )
+            return (
+                trainable_params,
+                static_state,
+                opt_state,
+                metrics,
+                next_teacher_targets,
+            )
+        donate_argnums = (0, 1, 2)
+        in_specs = (
+            P(),
+            P(),
+            P(),
+            P(None, JAX_DATA_AXIS),
+            P(None, JAX_DATA_AXIS),
+        )
+        out_specs = (P(), P(), P(), P(), P(None, JAX_DATA_AXIS))
+    elif group_jepa_ema_momentum is not None:
+
+        def train_step(
+            trainable_params: nnx.State,
+            static_state: nnx.State,
+            opt_state: Any,
+            batch: dict[str, Array],
+        ) -> tuple[nnx.State, nnx.State, Any, dict[str, Array]]:
+            trainable_params, opt_state, metrics = train_update(
+                trainable_params,
+                static_state,
+                opt_state,
+                batch,
+            )
+            static_state = _update_grouped_jepa_ema_state(
+                trainable_params,
+                static_state,
+                group_jepa_ema_momentum,
+            )
+            return trainable_params, static_state, opt_state, metrics
+        donate_argnums = (0, 1, 2)
+        in_specs = (P(), P(), P(), P(None, JAX_DATA_AXIS))
+        out_specs = (P(), P(), P(), P())
+    else:
+        train_step = train_update
+        donate_argnums = (0, 2)
+        in_specs = (P(), P(), P(), P(None, JAX_DATA_AXIS))
+        out_specs = (P(), P(), P())
+
+    if sharded:
+        data_mesh = _jax_data_mesh() if data_mesh is None else data_mesh
+        train_step = jax.shard_map(
+            train_step,
+            mesh=data_mesh,
+            in_specs=in_specs,
+            out_specs=out_specs,
+            axis_names={JAX_DATA_AXIS},
+            check_vma=False,
+        )
+    return jax.jit(train_step, donate_argnums=donate_argnums)
 
 
 def make_pure_eval_step(
@@ -1168,6 +1230,63 @@ def _jax_process_bool_broadcast(value: bool) -> bool:
     return bool(np.asarray(broadcast).item())
 
 
+def _update_grouped_jepa_ema_state(
+    trainable_params: nnx.State,
+    static_state: nnx.State,
+    momentum: float,
+) -> nnx.State:
+    student_encoder = nnx.merge_state(
+        trainable_params["encoder"],
+        static_state["encoder"],
+    )
+    teacher_encoder = jax.tree.map(
+        lambda teacher, student: teacher
+        + (student - teacher) * (1.0 - momentum),
+        static_state["teacher_encoder"],
+        student_encoder,
+    )
+    updated = nnx.map_state(lambda _path, value: value, static_state)
+    updated["teacher_encoder"] = teacher_encoder
+    return updated
+
+
+update_grouped_jepa_ema_state = jax.jit(_update_grouped_jepa_ema_state)
+
+
+def make_grouped_jepa_teacher_target_step(
+    graphdef: Any,
+    *,
+    sharded: bool,
+    data_mesh: Mesh | None = None,
+):
+    def teacher_targets(
+        trainable_params: nnx.State,
+        static_state: nnx.State,
+        batch: dict[str, Array],
+    ) -> Array:
+        functional_model = nnx.merge(
+            graphdef,
+            trainable_params,
+            static_state,
+        )
+        return jax.lax.map(functional_model.teacher_target, batch)
+
+    if not sharded:
+        return jax.jit(teacher_targets)
+
+    data_mesh = _jax_data_mesh() if data_mesh is None else data_mesh
+    return jax.jit(
+        jax.shard_map(
+            teacher_targets,
+            mesh=data_mesh,
+            in_specs=(P(), P(), P(None, JAX_DATA_AXIS)),
+            out_specs=P(None, JAX_DATA_AXIS),
+            axis_names={JAX_DATA_AXIS},
+            check_vma=False,
+        )
+    )
+
+
 class _JaxTrainingLoop:
     def __init__(
         self,
@@ -1221,9 +1340,34 @@ class _JaxTrainingLoop:
         data_parallel_devices = _jax_data_parallel_devices(config)
         self.data_mesh = _jax_data_mesh_for_device_count(data_parallel_devices)
         self.use_sharded_step = data_parallel_devices > 1
-        self.state, self.train_steps, self.eval_steps = self._initialize_train_state()
+        self.group_jepa_ema_momentum = (
+            float(config.group_jepa_ema_momentum)
+            if str(config.get("training_task", "pretrain")).lower()
+            == "grouped_jepa"
+            and bool(config.get("group_jepa_use_ema_teacher", True))
+            else None
+        )
+        self.group_jepa_target_mode = str(
+            config.get("group_jepa_teacher_target_mode", "same_step")
+        ).lower()
+        if self.group_jepa_target_mode not in {"same_step", "lookahead"}:
+            raise ValueError(
+                "group_jepa_teacher_target_mode must be 'same_step' or "
+                f"'lookahead', got {self.group_jepa_target_mode!r}"
+            )
+        self.group_jepa_lookahead = (
+            self.group_jepa_ema_momentum is not None
+            and self.group_jepa_target_mode == "lookahead"
+        )
+        (
+            self.state,
+            self.train_steps,
+            self.eval_steps,
+            self.teacher_target_steps,
+        ) = self._initialize_train_state()
         self.train_step = self.train_steps[0]
         self.eval_step = self.eval_steps[0]
+        self.teacher_target_step = self.teacher_target_steps[0]
 
         self.checkpoint_every_steps = int(config.get("checkpoint_every_steps", 0))
         self.val_every_n_steps = validation_interval(config, datamodule, total_steps)
@@ -1288,6 +1432,7 @@ class _JaxTrainingLoop:
         _JaxTrainState,
         tuple[Callable[..., Any], ...],
         tuple[Callable[..., Any], ...],
+        tuple[Callable[..., Any] | None, ...],
     ]:
         graphdef, params, static_state, opt_state, optimizer = (
             init_pure_optax_train_state(
@@ -1299,7 +1444,11 @@ class _JaxTrainingLoop:
 
         def make_steps(
             stage_graphdef: Any,
-        ) -> tuple[Callable[..., Any], Callable[..., Any]]:
+        ) -> tuple[
+            Callable[..., Any],
+            Callable[..., Any],
+            Callable[..., Any] | None,
+        ]:
             return (
                 make_pure_accumulated_train_step(
                     stage_graphdef,
@@ -1310,6 +1459,8 @@ class _JaxTrainingLoop:
                         self.config.get("jax_log_update_stats", False)
                     ),
                     metric_reduction=self.metric_reduction,
+                    group_jepa_ema_momentum=self.group_jepa_ema_momentum,
+                    group_jepa_lookahead=self.group_jepa_lookahead,
                 ),
                 make_pure_eval_step(
                     stage_graphdef,
@@ -1317,15 +1468,26 @@ class _JaxTrainingLoop:
                     data_mesh=self.data_mesh,
                     metric_reduction=self.metric_reduction,
                 ),
+                (
+                    make_grouped_jepa_teacher_target_step(
+                        stage_graphdef,
+                        sharded=self.use_sharded_step,
+                        data_mesh=self.data_mesh,
+                    )
+                    if self.group_jepa_lookahead
+                    else None
+                ),
             )
 
         if not self.use_mask_schedule:
-            train_step, eval_step = make_steps(graphdef)
+            train_step, eval_step, teacher_target_step = make_steps(graphdef)
             train_steps = [train_step]
             eval_steps = [eval_step]
+            teacher_target_steps = [teacher_target_step]
         else:
             train_steps = []
             eval_steps = []
+            teacher_target_steps = []
         for capacity in self.mask_capacities:
             self.model.set_fastmixer_capacities(*capacity)
             stage_graphdef, _, _ = nnx.split(
@@ -1333,9 +1495,10 @@ class _JaxTrainingLoop:
                 trainable_param_filter,
                 ...,
             )
-            train_step, eval_step = make_steps(stage_graphdef)
+            train_step, eval_step, teacher_target_step = make_steps(stage_graphdef)
             train_steps.append(train_step)
             eval_steps.append(eval_step)
+            teacher_target_steps.append(teacher_target_step)
         if self.use_mask_schedule:
             self.model.set_fastmixer_capacities(*self.mask_capacities[0])
         state = _JaxTrainState(params, static_state, opt_state)
@@ -1357,6 +1520,31 @@ class _JaxTrainingLoop:
                 static_state,
                 opt_state,
             )
+        if self.group_jepa_lookahead:
+            local_target = np.zeros(
+                (
+                    self.grad_accum_steps,
+                    self.datamodule.batch_size,
+                    int(self.config.model_dim),
+                ),
+                dtype=np.float32,
+            )
+            target = (
+                _put_batch_array_on_data_mesh(
+                    local_target,
+                    self.data_mesh,
+                    batch_axis=1,
+                )
+                if self.use_sharded_step
+                else jnp.asarray(local_target)
+            )
+            state.lookahead_teacher_target = target
+            valid = jnp.asarray(False)
+            state.lookahead_target_valid = (
+                _replicate_tree_on_data_mesh(valid, self.data_mesh)
+                if self.use_sharded_step
+                else valid
+            )
         if self.resume_step is None and isinstance(self.model, PeakSetJEPAJax):
             if self.model.use_frozen_teacher:
                 teacher_checkpoint = self.config.frozen_teacher_checkpoint_path
@@ -1371,7 +1559,12 @@ class _JaxTrainingLoop:
                         "Restored frozen JAX teacher encoder from %s",
                         teacher_checkpoint,
                     )
-        return state, tuple(train_steps), tuple(eval_steps)
+        return (
+            state,
+            tuple(train_steps),
+            tuple(eval_steps),
+            tuple(teacher_target_steps),
+        )
 
     def _activate_mask_stage(self, global_step: int) -> bool:
         if not self.use_mask_schedule:
@@ -1387,6 +1580,9 @@ class _JaxTrainingLoop:
             jax.effects_barrier()
             self.train_steps[self.mask_stage_index].clear_cache()
             self.eval_steps[self.mask_stage_index].clear_cache()
+            teacher_target_step = self.teacher_target_steps[self.mask_stage_index]
+            if teacher_target_step is not None:
+                teacher_target_step.clear_cache()
             gc.collect()
             logging.info(
                 "Released JAX executable cache for MAE mask stage %d",
@@ -1411,6 +1607,7 @@ class _JaxTrainingLoop:
         )
         self.train_step = self.train_steps[stage_index]
         self.eval_step = self.eval_steps[stage_index]
+        self.teacher_target_step = self.teacher_target_steps[stage_index]
         self.mask_stage_index = stage_index
         logging.info(
             "MAE mask stage %d: context_fraction=%.2f target_fraction=%.2f "
@@ -1445,6 +1642,8 @@ class _JaxTrainingLoop:
             restored["trainable_params"],
             restored["static_state"],
             restored["opt_state"],
+            restored.get("lookahead_teacher_target"),
+            restored.get("lookahead_target_valid"),
         )
         return int(resume_step)
 
@@ -1489,6 +1688,14 @@ class _JaxTrainingLoop:
             unit="step",
             disable=jax.process_index() != 0,
         )
+        lookahead_batch = None
+        lookahead_target = (
+            self.state.lookahead_teacher_target
+            if self.group_jepa_lookahead
+            and bool(jax.device_get(self.state.lookahead_target_valid))
+            else None
+        )
+        lookahead_target_age = 1 if lookahead_target is not None else None
         while self.global_step < self.total_steps:
             if self._time_limit_reached():
                 break
@@ -1504,12 +1711,70 @@ class _JaxTrainingLoop:
                 )
                 loader_iter = iter(loader)
                 loader_stage_index = self.mask_stage_index
-            batch = self._next_accumulated_batch(loader_iter)
-            if batch is None:
-                break
+                lookahead_batch = None
+                lookahead_target = None
+                lookahead_target_age = None
+            next_lookahead_batch = None
+            if self.group_jepa_lookahead:
+                if lookahead_batch is None:
+                    lookahead_batch = self._next_accumulated_batch(loader_iter)
+                    if lookahead_batch is None:
+                        break
+                    if lookahead_target is None:
+                        lookahead_target = self.teacher_target_step(
+                            self.state.trainable_params,
+                            self.state.static_state,
+                            lookahead_batch,
+                        )
+                        lookahead_target_age = 0
+                batch = {
+                    **lookahead_batch,
+                    GROUP_JEPA_TEACHER_TARGET_KEY: lookahead_target,
+                    GROUP_JEPA_TEACHER_TARGET_AGE_KEY: jnp.full(
+                        lookahead_target.shape[:2],
+                        lookahead_target_age,
+                        dtype=jnp.float32,
+                    ),
+                }
+                if self.global_step + 1 < self.total_steps:
+                    next_lookahead_batch = self._next_accumulated_batch(loader_iter)
+                teacher_batch = (
+                    next_lookahead_batch
+                    if next_lookahead_batch is not None
+                    else lookahead_batch
+                )
+            else:
+                batch = self._next_accumulated_batch(loader_iter)
+                if batch is None:
+                    break
+                teacher_batch = None
             self._start_measurement_if_ready()
             self._start_profile_if_ready()
-            metrics = self._train_batch(batch)
+            metrics, next_lookahead_target = self._train_batch(
+                batch,
+                teacher_batch,
+            )
+            if self.group_jepa_lookahead:
+                lookahead_batch = next_lookahead_batch
+                lookahead_target = (
+                    next_lookahead_target
+                    if next_lookahead_batch is not None
+                    else None
+                )
+                lookahead_target_age = (
+                    1 if next_lookahead_batch is not None else None
+                )
+                self.state.lookahead_teacher_target = (
+                    next_lookahead_target
+                    if next_lookahead_batch is not None
+                    else self.state.lookahead_teacher_target
+                )
+                valid = jnp.asarray(next_lookahead_batch is not None)
+                self.state.lookahead_target_valid = (
+                    _replicate_tree_on_data_mesh(valid, self.data_mesh)
+                    if self.use_sharded_step
+                    else valid
+                )
             pbar.update(1)
             if self._emergency_checkpoint_requested():
                 self._save_emergency_checkpoint_and_wait()
@@ -1645,18 +1910,55 @@ class _JaxTrainingLoop:
         self.profile_started = True
         self.profile_active = True
 
-    def _train_batch(self, batch: dict[str, Any]) -> dict[str, Array]:
+    def _train_batch(
+        self,
+        batch: dict[str, Any],
+        teacher_batch: dict[str, Any] | None,
+    ) -> tuple[dict[str, Array], Array | None]:
         step_start = time.perf_counter()
-        params, opt_state, metrics = self.train_step(
-            self.state.trainable_params,
-            self.state.static_state,
-            self.state.opt_state,
-            batch,
-        )
+        next_teacher_target = None
+        if self.group_jepa_lookahead:
+            (
+                params,
+                static_state,
+                opt_state,
+                metrics,
+                next_teacher_target,
+            ) = self.train_step(
+                self.state.trainable_params,
+                self.state.static_state,
+                self.state.opt_state,
+                batch,
+                teacher_batch,
+            )
+            self.state.static_state = static_state
+        elif self.group_jepa_ema_momentum is not None:
+            params, static_state, opt_state, metrics = self.train_step(
+                self.state.trainable_params,
+                self.state.static_state,
+                self.state.opt_state,
+                batch,
+            )
+            self.state.static_state = static_state
+        else:
+            params, opt_state, metrics = self.train_step(
+                self.state.trainable_params,
+                self.state.static_state,
+                self.state.opt_state,
+                batch,
+            )
         self.state.trainable_params = params
         self.state.opt_state = opt_state
         if self.timing_barriers:
-            jax.block_until_ready((params, opt_state, metrics))
+            jax.block_until_ready(
+                (
+                    params,
+                    self.state.static_state,
+                    opt_state,
+                    metrics,
+                    next_teacher_target,
+                )
+            )
         step_elapsed = time.perf_counter() - step_start
         _raise_on_jax_compile_stall(
             step_elapsed,
@@ -1669,7 +1971,7 @@ class _JaxTrainingLoop:
             self.measured_steps += 1
         self.last_metrics = metrics
         self.global_step += 1
-        return metrics
+        return metrics, next_teacher_target
 
     def _log_or_stage_train_metrics(
         self,

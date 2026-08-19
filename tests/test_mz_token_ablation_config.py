@@ -50,8 +50,8 @@ def test_fourier_and_token_ablation_models_are_parameter_matched() -> None:
     token_count = sum(
         parameter.numel() for parameter in token.parameters() if parameter.requires_grad
     )
-    assert fourier_count == 52_044_810
-    assert token_count == 52_029_610
+    assert fourier_count == 36_786_842
+    assert token_count == 36_771_642
     assert fourier_count - token_count == 15_200
 
     token_parameters = dict(token.named_parameters())

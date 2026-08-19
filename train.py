@@ -23,6 +23,10 @@ def _train(config, workdir):
         from spectra_learning.training.contrastive import train_contrastive
 
         return train_contrastive(config, workdir=workdir)
+    if task == "grouped_jepa":
+        from spectra_learning.training.grouped_jepa import train_grouped_jepa_jax
+
+        return train_grouped_jepa_jax(config, workdir=workdir)
     if task == "adversarial_fake_peak":
         from spectra_learning.training.adversarial_fake_peaks import (
             train_adversarial_fake_peaks,
