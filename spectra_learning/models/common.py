@@ -41,35 +41,6 @@ def _build_frozen_position_embedding(num_positions: int, dim: int) -> nn.Embeddi
     return embedding
 
 
-def _build_2d_sincos_position_table(
-    num_positions: int,
-    dim: int,
-) -> Float[Tensor, "positions positions dim"]:
-    row_dim = dim // 2
-    col_dim = dim - row_dim
-    row = _build_sincos_position_table(num_positions, row_dim)
-    col = _build_sincos_position_table(num_positions, col_dim)
-    row = row[:, None, :].expand(num_positions, num_positions, row_dim)
-    col = col[None, :, :].expand(num_positions, num_positions, col_dim)
-    return torch.cat([row, col], dim=-1)
-
-
-def _build_frozen_2d_position_embedding(
-    num_positions: int,
-    dim: int,
-) -> nn.Embedding:
-    embedding = nn.Embedding(num_positions * num_positions, dim)
-    with torch.no_grad():
-        embedding.weight.copy_(
-            _build_2d_sincos_position_table(num_positions, dim).reshape(
-                num_positions * num_positions,
-                dim,
-            )
-        )
-    embedding.weight.requires_grad_(False)
-    return embedding
-
-
 def _merge_visible_mask(
     valid_mask: Bool[Tensor, "batch peaks"] | None,
     visible_mask: Bool[Tensor, "batch peaks"] | None,

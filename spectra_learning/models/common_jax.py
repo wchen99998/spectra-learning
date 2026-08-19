@@ -303,28 +303,9 @@ def build_sincos_position_table(num_positions: int, dim: int) -> Array:
     return table
 
 
-def build_2d_sincos_position_table(num_positions: int, dim: int) -> Array:
-    row_dim = dim // 2
-    col_dim = dim - row_dim
-    row = build_sincos_position_table(num_positions, row_dim)
-    col = build_sincos_position_table(num_positions, col_dim)
-    row = jnp.broadcast_to(row[:, None, :], (num_positions, num_positions, row_dim))
-    col = jnp.broadcast_to(col[None, :, :], (num_positions, num_positions, col_dim))
-    return jnp.concatenate([row, col], axis=-1)
-
-
 def build_frozen_position_embedding(num_positions: int, dim: int) -> Embedding:
     embedding = Embedding(num_positions, dim)
     embedding.weight[...] = build_sincos_position_table(num_positions, dim)
-    return embedding
-
-
-def build_frozen_2d_position_embedding(num_positions: int, dim: int) -> Embedding:
-    embedding = Embedding(num_positions * num_positions, dim)
-    embedding.weight[...] = build_2d_sincos_position_table(
-        num_positions,
-        dim,
-    ).reshape(num_positions * num_positions, dim)
     return embedding
 
 

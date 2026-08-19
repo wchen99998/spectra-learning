@@ -223,65 +223,6 @@ def _scatter_compact_pair_bias(delta: Array, idx: Array, num_tokens: int) -> Arr
     )
 
 
-def _remap_encoder_to_predictor(
-    enc_single_compact: Array,
-    enc_pair_compact: Array,
-    enc_idx: Array,
-    enc_compact_mask: Array,
-    pred_idx: Array,
-    pred_compact_mask: Array,
-    *,
-    num_tokens: int,
-) -> tuple[Array, Array]:
-    batch_size, enc_len, single_dim = enc_single_compact.shape
-    pred_len = pred_idx.shape[1]
-    pair_dim = enc_pair_compact.shape[-1]
-    sentinel = jnp.asarray(enc_len, dtype=jnp.int32)
-
-    batch_ids = jnp.broadcast_to(
-        jnp.arange(batch_size, dtype=jnp.int32)[:, None],
-        enc_idx.shape,
-    )
-    slot_ids = jnp.broadcast_to(
-        jnp.arange(enc_len, dtype=jnp.int32)[None, :],
-        enc_idx.shape,
-    )
-    pos_to_slot = jnp.full((batch_size, num_tokens), sentinel, dtype=jnp.int32)
-    updates = jnp.where(enc_compact_mask, slot_ids, sentinel)
-    pos_to_slot = pos_to_slot.at[batch_ids, enc_idx.astype(jnp.int32)].set(updates)
-
-    pred_slot = jnp.take_along_axis(pos_to_slot, pred_idx.astype(jnp.int32), axis=1)
-    found = (pred_slot != sentinel) & pred_compact_mask
-    pred_slot_safe = jnp.minimum(pred_slot, enc_len - 1)
-
-    single_flat_idx = (
-        jnp.arange(batch_size, dtype=jnp.int32)[:, None]
-        * jnp.asarray(enc_len, dtype=jnp.int32)
-        + pred_slot_safe
-    )
-    context_single = _flat_indexed_gather_rows(
-        enc_single_compact.reshape(batch_size * enc_len, single_dim),
-        single_flat_idx,
-        (batch_size, pred_len, single_dim),
-    )
-    context_single = context_single * found[..., None].astype(context_single.dtype)
-
-    pair_flat_idx = (
-        jnp.arange(batch_size, dtype=jnp.int32)[:, None, None]
-        * jnp.asarray(enc_len * enc_len, dtype=jnp.int32)
-        + pred_slot_safe[:, :, None] * jnp.asarray(enc_len, dtype=jnp.int32)
-        + pred_slot_safe[:, None, :]
-    )
-    context_pair = _flat_indexed_gather_rows(
-        enc_pair_compact.reshape(batch_size * enc_len * enc_len, pair_dim),
-        pair_flat_idx,
-        (batch_size, pred_len, pred_len, pair_dim),
-    )
-    pair_found = found[:, :, None] & found[:, None, :]
-    context_pair = context_pair * pair_found[..., None].astype(context_pair.dtype)
-    return context_single, context_pair
-
-
 class PairFeatureEmbedder(nnx.Module):
     def __init__(
         self,
