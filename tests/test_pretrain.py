@@ -1337,19 +1337,14 @@ class BlockJEPATests(unittest.TestCase):
                 )
             )
 
-    def test_load_pretrained_weights_rejects_missing_mask_and_position_embeddings(self):
+    def test_load_pretrained_weights_rejects_missing_mask_token(self):
         model = self._build_model()
         with tempfile.TemporaryDirectory() as tmpdir:
             path = f"{tmpdir}/ckpt.pt"
             old_state = {
                 k: v
                 for k, v in model.state_dict().items()
-                if not k.endswith(
-                    (
-                        "position_embedding.weight",
-                        "latent_mask_token",
-                    )
-                )
+                if not k.endswith("latent_mask_token")
             }
             torch.save(_checkpoint_state(model=old_state), path)
             loaded = self._build_model()

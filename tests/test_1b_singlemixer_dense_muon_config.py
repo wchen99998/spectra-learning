@@ -22,11 +22,13 @@ def test_1b_singlemixer_muon_training_settings() -> None:
 
     assert config.optimizer == "muon"
     assert config.encoder_use_cls_token
+    assert config.encoder_use_position_embedding
     assert config.num_peaks == 63
     assert config.num_peaks + int(config.encoder_use_cls_token) == 64
     assert config.distogram_loss_weight == 0.0
     assert config.mae_loss_weight == 1.0
     assert settings.encoder_use_cls_token
+    assert settings.encoder_use_position_embedding
     assert settings.distogram_loss_weight == 0.0
     assert config.training_max_steps == 300_000
     assert config.learning_rate == 3e-4

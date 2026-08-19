@@ -182,6 +182,47 @@ def test_zero_distogram_builds_single_stream_encoder():
     assert encoder.final_pair_norm is None
 
 
+@pytest.mark.parametrize("use_rope", (False, True))
+def test_jax_singlemixer_position_embedding_controls_rope(use_rope: bool):
+    block = JaxSingleMixerBlock(
+        single_dim=8,
+        num_heads=2,
+        attention_mlp_multiple=2.0,
+        norm_eps=1e-5,
+        use_rope=use_rope,
+        rngs=nnx.Rngs(123),
+    )
+    block.single_attention.o.weight[...] = jnp.eye(8)
+    single = jnp.arange(4 * 8, dtype=jnp.float32).reshape(1, 4, 8) / 17.0
+    mask = jnp.ones((1, 4), dtype=jnp.bool_)
+
+    packed = block(single, mask, jnp.array([[0, 1, 2, 3]]))
+    original = block(single, mask, jnp.array([[0, 2, 4, 6]]))
+
+    assert np.allclose(np.asarray(original), np.asarray(packed)) == (not use_rope)
+
+
+def test_jax_encoder_position_embedding_setting_reaches_singlemixer_rope():
+    enabled = PeakSetJEPAJax(
+        **{**_small_mae_kwargs(), "encoder_use_position_embedding": True}
+    )
+    disabled = PeakSetJEPAJax(
+        **{**_small_mae_kwargs(), "encoder_use_position_embedding": False}
+    )
+    pair_disabled = PeakSetJEPAJax(
+        **{
+            **_small_mae_kwargs(),
+            "encoder_use_position_embedding": False,
+            "distogram_loss_weight": 0.25,
+        }
+    )
+
+    assert enabled.encoder.blocks[0].single_attention.use_rope
+    assert not disabled.encoder.blocks[0].single_attention.use_rope
+    assert not pair_disabled.encoder.blocks[0].single_attention.use_rope
+    assert not hasattr(enabled.encoder, "position_embedding")
+
+
 def test_mae_without_cls_has_peak_only_encoder_shapes_and_jax_parity():
     torch.manual_seed(7)
     kwargs = {
@@ -1198,7 +1239,6 @@ def test_jax_optimizer_excludes_frozen_teacher_and_buffer_params():
     before_student = np.asarray(jax_model.target_projector.linear0.weight[...])
     before_teacher = np.asarray(jax_model.teacher_target_projector.linear0.weight[...])
     before_encoder_teacher = np.asarray(jax_model.teacher_encoder.cls_token[...])
-    before_position = np.asarray(jax_model.encoder.position_embedding.weight[...])
     before_fourier = np.asarray(jax_model.encoder.embedder.mz_features.b[...])
 
     metrics = _run_canonical_train_step(jax_model, optimizer_config, batch)
@@ -1206,13 +1246,11 @@ def test_jax_optimizer_excludes_frozen_teacher_and_buffer_params():
     after_student = np.asarray(jax_model.target_projector.linear0.weight[...])
     after_teacher = np.asarray(jax_model.teacher_target_projector.linear0.weight[...])
     after_encoder_teacher = np.asarray(jax_model.teacher_encoder.cls_token[...])
-    after_position = np.asarray(jax_model.encoder.position_embedding.weight[...])
     after_fourier = np.asarray(jax_model.encoder.embedder.mz_features.b[...])
     assert np.isfinite(np.asarray(metrics["loss"]))
     assert not np.allclose(before_student, after_student)
     np.testing.assert_array_equal(after_teacher, before_teacher)
     np.testing.assert_array_equal(after_encoder_teacher, before_encoder_teacher)
-    np.testing.assert_array_equal(after_position, before_position)
     np.testing.assert_array_equal(after_fourier, before_fourier)
 
     momentum = jax_model.update_ema_teacher(step=2, total_steps=4)

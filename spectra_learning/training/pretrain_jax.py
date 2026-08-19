@@ -126,7 +126,6 @@ def trainable_param_filter(path: tuple[object, ...], value: object) -> bool:
     frozen_modules = {
         "teacher_encoder",
         "teacher_target_projector",
-        "position_embedding",
     }
     if any(part in frozen_modules for part in path):
         return False

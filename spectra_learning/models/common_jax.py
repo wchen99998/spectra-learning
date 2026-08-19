@@ -288,27 +288,6 @@ class Sequential(nnx.Module):
                 linear_idx += 2
 
 
-def build_sincos_position_table(num_positions: int, dim: int) -> Array:
-    half_dim = dim // 2
-    positions = jnp.arange(num_positions, dtype=jnp.float32)[:, None]
-    if half_dim == 0:
-        return jnp.zeros((num_positions, dim), dtype=jnp.float32)
-    scales = jnp.exp(
-        -math.log(10000.0) * jnp.arange(half_dim, dtype=jnp.float32) / half_dim
-    )
-    angles = positions * scales[None, :]
-    table = jnp.concatenate([jnp.sin(angles), jnp.cos(angles)], axis=1)
-    if dim % 2 == 1:
-        table = jnp.pad(table, ((0, 0), (0, 1)))
-    return table
-
-
-def build_frozen_position_embedding(num_positions: int, dim: int) -> Embedding:
-    embedding = Embedding(num_positions, dim)
-    embedding.weight[...] = build_sincos_position_table(num_positions, dim)
-    return embedding
-
-
 def merge_visible_mask(valid_mask: Array | None, visible_mask: Array | None) -> Array | None:
     if visible_mask is not None and valid_mask is not None:
         return visible_mask & valid_mask

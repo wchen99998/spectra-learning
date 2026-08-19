@@ -38,7 +38,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.model_dim = 640
     cfg.encoder_num_layers = 15
     cfg.encoder_num_heads = 10
-    cfg.encoder_use_position_embedding = False
+    cfg.encoder_use_position_embedding = True
     cfg.encoder_apply_final_norm = True
     cfg.encoder_apply_final_pair_norm = True
     cfg.encoder_mz_embedding = "fourier"

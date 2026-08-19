@@ -5,10 +5,7 @@ from jaxtyping import Bool, Float
 from torch import Tensor, nn
 
 from spectra_learning.data.spectra import DEFAULT_NUM_PEAKS, PEAK_MZ_MAX
-from spectra_learning.models.common import (
-    _build_frozen_position_embedding,
-    _merge_visible_mask,
-)
+from spectra_learning.models.common import _merge_visible_mask
 from spectra_learning.models.pairmixer import (
     PairFeatureEmbedder,
     PairMixerBlock,
@@ -53,7 +50,6 @@ class PeakSetEncoder(nn.Module):
         super().__init__()
         self.num_layers = num_layers
         self.use_cls_token = use_cls_token
-        self.use_position_embedding = use_position_embedding
         self.use_pair_path = use_pair_path
         self.pairmixer_block_type = pairmixer_block_type.lower()
         if self.pairmixer_block_type not in {
@@ -70,10 +66,6 @@ class PeakSetEncoder(nn.Module):
         self.embedder = embedder
         self.metadata_proj = nn.Linear(2, model_dim, bias=False)
         nn.init.xavier_normal_(self.metadata_proj.weight)
-        self.position_embedding = _build_frozen_position_embedding(
-            num_peaks,
-            model_dim,
-        )
         pair_dim = model_dim if pair_dim is None else pair_dim
         if self.use_cls_token:
             self.cls_token = nn.Parameter(torch.empty(model_dim))
@@ -122,6 +114,7 @@ class PeakSetEncoder(nn.Module):
                     dropout=pairmixer_dropout,
                     use_single_to_pair_update=self.use_bi_dense,
                     use_pair_bias=pairmixer_use_pair_bias,
+                    use_rope=use_position_embedding,
                     transition_type=pairmixer_transition_type,
                 )
                 if self.use_pair_path
@@ -131,6 +124,7 @@ class PeakSetEncoder(nn.Module):
                     attention_mlp_multiple=attention_mlp_multiple,
                     norm_eps=norm_eps,
                     dropout=pairmixer_dropout,
+                    use_rope=use_position_embedding,
                     transition_type=pairmixer_transition_type,
                 )
             )
@@ -149,15 +143,6 @@ class PeakSetEncoder(nn.Module):
             )
         else:
             self.final_pair_norm = None
-
-    def _add_positions(
-        self,
-        x: Float[Tensor, "batch peaks dim"],
-    ) -> Float[Tensor, "batch peaks dim"]:
-        if not self.use_position_embedding:
-            return x
-        positions = torch.arange(x.shape[1], device=x.device)
-        return x + self.position_embedding(positions).to(dtype=x.dtype)
 
     def _append_cls_token(
         self,
@@ -205,7 +190,7 @@ class PeakSetEncoder(nn.Module):
         metadata_embedding = self._metadata_embedding(spectrum_metadata, x.dtype)
         if metadata_embedding is not None:
             x = x + metadata_embedding.unsqueeze(1).to(dtype=x.dtype)
-        return self._add_positions(x), peak_visible_mask, metadata_embedding
+        return x, peak_visible_mask, metadata_embedding
 
     def _append_cls_pair_tokens(
         self,

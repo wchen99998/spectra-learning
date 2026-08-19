@@ -19,6 +19,26 @@ from spectra_learning.models.transformer import (
 SUPPORTED_PAIRMIXER_TRANSITION_TYPES = {"swiglu", "feedforward"}
 
 
+def _apply_rope(tensor: Tensor, positions: Tensor) -> Tensor:
+    head_dim = tensor.shape[-1]
+    inv_freq = 1.0 / (
+        10_000.0
+        ** (
+            torch.arange(0, head_dim, 2, device=tensor.device, dtype=torch.float32)
+            / head_dim
+        )
+    )
+    angles = positions.unsqueeze(-1) * inv_freq
+    cos = angles.cos().unsqueeze(1).to(dtype=tensor.dtype)
+    sin = angles.sin().unsqueeze(1).to(dtype=tensor.dtype)
+    even = tensor[..., 0::2]
+    odd = tensor[..., 1::2]
+    return torch.stack(
+        (even * cos - odd * sin, even * sin + odd * cos),
+        dim=-1,
+    ).flatten(-2)
+
+
 def _build_norm(dim: int, *, eps: float, affine: bool = True) -> nn.Module:
     return nn.RMSNorm(dim, eps=eps, elementwise_affine=affine)
 
@@ -372,11 +392,15 @@ class AttentionPairBias(nn.Module):
         num_heads: int,
         norm_eps: float,
         use_pair_bias: bool = True,
+        use_rope: bool = True,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = single_dim // num_heads
+        if use_rope:
+            assert self.head_dim % 2 == 0
         self.use_pair_bias = use_pair_bias
+        self.use_rope = use_rope
         self.single_norm = _build_norm(single_dim, eps=norm_eps)
         self.pair_norm = (
             _build_norm(pair_dim, eps=norm_eps) if use_pair_bias else None
@@ -402,6 +426,7 @@ class AttentionPairBias(nn.Module):
         pair: Float[Tensor, "batch peaks peaks pair"] | None,
         token_mask: Bool[Tensor, "batch tokens"],
         num_peak_tokens: int,
+        token_positions: Tensor | None = None,
     ) -> Float[Tensor, "batch tokens dim"]:
         batch_size, num_tokens, single_dim = single.shape
         single_norm = self.single_norm(single)
@@ -418,6 +443,14 @@ class AttentionPairBias(nn.Module):
         v = v.transpose(1, 2)
         q = self.q_norm(q)
         k = self.k_norm(k)
+        if self.use_rope:
+            if token_positions is None:
+                token_positions = torch.arange(
+                    num_tokens,
+                    device=single.device,
+                ).expand(batch_size, -1)
+            q = _apply_rope(q, token_positions)
+            k = _apply_rope(k, token_positions)
 
         if self.use_pair_bias:
             pair = cast(Tensor, pair)
@@ -452,6 +485,7 @@ class SingleMixerBlock(nn.Module):
         attention_mlp_multiple: float,
         norm_eps: float,
         dropout: float,
+        use_rope: bool = True,
         transition_type: str = "swiglu",
     ) -> None:
         super().__init__()
@@ -466,6 +500,7 @@ class SingleMixerBlock(nn.Module):
             num_heads=num_heads,
             norm_eps=norm_eps,
             use_pair_bias=False,
+            use_rope=use_rope,
         )
         self.single_attention_post_norm = _build_norm(single_dim, eps=norm_eps)
         self.single_transition_norm = _build_norm(single_dim, eps=norm_eps)
@@ -546,6 +581,7 @@ class PairMixerBlock(nn.Module):
         dropout: float,
         use_single_to_pair_update: bool = False,
         use_pair_bias: bool = True,
+        use_rope: bool = True,
         transition_type: str = "swiglu",
     ) -> None:
         super().__init__()
@@ -590,6 +626,7 @@ class PairMixerBlock(nn.Module):
             num_heads=num_heads,
             norm_eps=norm_eps,
             use_pair_bias=use_pair_bias,
+            use_rope=use_rope,
         )
         self.single_attention_post_norm = _build_norm(single_dim, eps=norm_eps)
         self.single_transition_norm = _build_norm(

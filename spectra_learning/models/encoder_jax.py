@@ -13,7 +13,6 @@ from spectra_learning.models.common_jax import (
     RMSNorm,
     activation_checkpoint_policy,
     assign_param,
-    build_frozen_position_embedding,
     merge_visible_mask,
     should_activation_checkpoint,
 )
@@ -75,7 +74,6 @@ class PeakSetEncoder(nnx.Module):
         rngs = nnx.Rngs(0) if rngs is None else rngs
         self.num_layers = num_layers
         self.use_cls_token = use_cls_token
-        self.use_position_embedding = use_position_embedding
         self.use_pair_path = use_pair_path
         self.pairmixer_block_type = pairmixer_block_type.lower()
         if self.pairmixer_block_type not in {
@@ -105,7 +103,6 @@ class PeakSetEncoder(nnx.Module):
             compute_dtype=compute_dtype,
             rngs=rngs,
         )
-        self.position_embedding = build_frozen_position_embedding(num_peaks, model_dim)
         pair_dim = model_dim if pair_dim is None else pair_dim
         self.cls_token = (
             _normal_token_param(rngs, (model_dim,)) if self.use_cls_token else None
@@ -158,6 +155,7 @@ class PeakSetEncoder(nnx.Module):
                     dropout=pairmixer_dropout,
                     use_single_to_pair_update=self.use_bi_dense,
                     use_pair_bias=pairmixer_use_pair_bias,
+                    use_rope=use_position_embedding,
                     use_fastmixer=self.use_fastmixer,
                     fastmixer_max_visible_tokens=self.pairmixer_fast_max_visible_tokens,
                     transition_type=pairmixer_transition_type,
@@ -170,6 +168,7 @@ class PeakSetEncoder(nnx.Module):
                     num_heads=num_heads,
                     attention_mlp_multiple=attention_mlp_multiple,
                     norm_eps=norm_eps,
+                    use_rope=use_position_embedding,
                     transition_type=pairmixer_transition_type,
                     compute_dtype=compute_dtype,
                     rngs=rngs,
@@ -187,12 +186,6 @@ class PeakSetEncoder(nnx.Module):
             if self.use_pair_path and apply_final_pair_norm
             else None
         )
-
-    def _add_positions(self, x: Array) -> Array:
-        if not self.use_position_embedding:
-            return x
-        positions = jnp.arange(x.shape[1])
-        return x + self.position_embedding(positions).astype(x.dtype)
 
     def _append_cls_token(
         self,
@@ -229,7 +222,7 @@ class PeakSetEncoder(nnx.Module):
         metadata_embedding = self._metadata_embedding(spectrum_metadata, x.dtype)
         if metadata_embedding is not None:
             x = x + metadata_embedding[:, None, :].astype(x.dtype)
-        return self._add_positions(x), peak_visible_mask, metadata_embedding
+        return x, peak_visible_mask, metadata_embedding
 
     def _append_cls_pair_tokens(self, pair: Array) -> Array:
         if not self.use_cls_token:
@@ -412,7 +405,7 @@ class PeakSetEncoder(nnx.Module):
         )
         x = _gather_single(x, idx)
         x = x * compact_token_mask[..., None].astype(x.dtype)
-        x = self._forward_single_blocks(x, compact_token_mask)
+        x = self._forward_single_blocks(x, compact_token_mask, idx)
         if self.final_norm is not None:
             x = self.final_norm(x)
         return (
@@ -425,6 +418,7 @@ class PeakSetEncoder(nnx.Module):
         self,
         x: Array,
         token_visible_mask: Array,
+        token_positions: Array | None = None,
     ) -> Array:
         for block_idx, block in enumerate(self.blocks, start=1):
             if should_activation_checkpoint(
@@ -439,9 +433,13 @@ class PeakSetEncoder(nnx.Module):
                     policy=activation_checkpoint_policy(
                         self.activation_checkpoint_mode
                     ),
-                )(block, x, token_visible_mask)
+                )(block, x, token_visible_mask, token_positions)
             else:
-                x = cast(SingleMixerBlock, block)(x, token_visible_mask)
+                x = cast(SingleMixerBlock, block)(
+                    x,
+                    token_visible_mask,
+                    token_positions,
+                )
         return x
 
     def _forward_fastmixer_blocks(
@@ -515,12 +513,13 @@ class PeakSetEncoder(nnx.Module):
                     policy=activation_checkpoint_policy(
                         self.activation_checkpoint_mode
                     ),
-                )(block, x, z, compact_token_mask)
+                )(block, x, z, compact_token_mask, idx)
             else:
                 x, z = block.fastmixer_compact_only_call(
                     x,
                     z,
                     compact_token_mask,
+                    idx,
                 )
         return x, z, idx, compact_token_mask
 
@@ -567,10 +566,6 @@ class PeakSetEncoder(nnx.Module):
             assign_param(self.cls_token, state_dict[f"{prefix}.cls_token"])
         self.embedder.load_torch_state_dict(state_dict, f"{prefix}.embedder")
         self.metadata_proj.load_torch_state_dict(state_dict, f"{prefix}.metadata_proj")
-        self.position_embedding.load_torch_state_dict(
-            state_dict,
-            f"{prefix}.position_embedding",
-        )
         if self.use_pair_path and self.use_cls_token:
             assign_param(
                 self.cls_to_peak_pair_token,
@@ -614,8 +609,9 @@ def _call_single_mixer_block(
     block: SingleMixerBlock,
     single: Array,
     token_mask: Array,
+    token_positions: Array | None,
 ) -> Array:
-    return block(single, token_mask)
+    return block(single, token_mask, token_positions)
 
 
 def _call_fast_pair_mixer_block(
@@ -640,9 +636,11 @@ def _call_fast_pair_mixer_block_compact_only(
     single: Array,
     pair: Array,
     compact_token_mask: Array,
+    token_positions: Array,
 ) -> tuple[Array, Array]:
     return block.fastmixer_compact_only_call(
         single,
         pair,
         compact_token_mask,
+        token_positions,
     )

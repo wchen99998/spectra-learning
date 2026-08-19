@@ -24,6 +24,23 @@ from spectra_learning.models.transformer_jax import FeedForward, SwiGLUFeedForwa
 SUPPORTED_PAIRMIXER_TRANSITION_TYPES = {"swiglu", "feedforward"}
 
 
+def _apply_rope(tensor: Array, positions: Array) -> Array:
+    head_dim = tensor.shape[-1]
+    inv_freq = 1.0 / (
+        10_000.0
+        ** (jnp.arange(0, head_dim, 2, dtype=jnp.float32) / head_dim)
+    )
+    angles = positions[..., None] * inv_freq
+    cos = jnp.cos(angles)[:, None].astype(tensor.dtype)
+    sin = jnp.sin(angles)[:, None].astype(tensor.dtype)
+    even = tensor[..., 0::2]
+    odd = tensor[..., 1::2]
+    return jnp.stack(
+        (even * cos - odd * sin, even * sin + odd * cos),
+        axis=-1,
+    ).reshape(tensor.shape)
+
+
 def _preferred_acc_dtype(dtype: object) -> object | None:
     dtype = jnp.dtype(dtype)
     if dtype == jnp.bfloat16:
@@ -510,13 +527,17 @@ class AttentionPairBias(nnx.Module):
         num_heads: int,
         norm_eps: float,
         use_pair_bias: bool = True,
+        use_rope: bool = True,
         compute_dtype: object = jnp.float32,
         rngs: nnx.Rngs | None = None,
     ) -> None:
         rngs = nnx.Rngs(0) if rngs is None else rngs
         self.num_heads = num_heads
         self.head_dim = single_dim // num_heads
+        if use_rope:
+            assert self.head_dim % 2 == 0
         self.use_pair_bias = use_pair_bias
+        self.use_rope = use_rope
         self.single_norm = RMSNorm(single_dim, eps=norm_eps)
         self.pair_norm = (
             RMSNorm(pair_dim, eps=norm_eps) if use_pair_bias else None
@@ -562,6 +583,7 @@ class AttentionPairBias(nnx.Module):
         pair: Array | None,
         token_mask: Array,
         num_peak_tokens: int,
+        token_positions: Array | None = None,
     ) -> Array:
         batch_size, num_tokens, single_dim = single.shape
         single_norm = self.single_norm(single)
@@ -578,6 +600,14 @@ class AttentionPairBias(nnx.Module):
         v = jnp.swapaxes(v, 1, 2)
         q = self.q_norm(q)
         k = self.k_norm(k)
+        if self.use_rope:
+            if token_positions is None:
+                token_positions = jnp.broadcast_to(
+                    jnp.arange(num_tokens),
+                    (batch_size, num_tokens),
+                )
+            q = _apply_rope(q, token_positions)
+            k = _apply_rope(k, token_positions)
         if self.use_pair_bias:
             pair = cast(Array, pair)
             peak_bias = jnp.transpose(
@@ -626,6 +656,7 @@ class SingleMixerBlock(nnx.Module):
         num_heads: int,
         attention_mlp_multiple: float,
         norm_eps: float,
+        use_rope: bool = True,
         transition_type: str = "swiglu",
         compute_dtype: object = jnp.float32,
         rngs: nnx.Rngs | None = None,
@@ -642,6 +673,7 @@ class SingleMixerBlock(nnx.Module):
             num_heads=num_heads,
             norm_eps=norm_eps,
             use_pair_bias=False,
+            use_rope=use_rope,
             compute_dtype=compute_dtype,
             rngs=rngs,
         )
@@ -660,12 +692,14 @@ class SingleMixerBlock(nnx.Module):
         self,
         single: Array,
         token_mask: Array,
+        token_positions: Array | None = None,
     ) -> Array:
         attention_update = self.single_attention(
             single,
             None,
             token_mask,
             token_mask.shape[1],
+            token_positions,
         )
         single = single + self.single_attention_post_norm(attention_update)
         return single + self.single_transition_post_norm(
@@ -760,6 +794,7 @@ class PairMixerBlock(nnx.Module):
         dropout: float,
         use_single_to_pair_update: bool = False,
         use_pair_bias: bool = True,
+        use_rope: bool = True,
         use_fastmixer: bool = False,
         fastmixer_max_visible_tokens: int | None = None,
         transition_type: str = "swiglu",
@@ -822,6 +857,7 @@ class PairMixerBlock(nnx.Module):
             num_heads=num_heads,
             norm_eps=norm_eps,
             use_pair_bias=use_pair_bias,
+            use_rope=use_rope,
             compute_dtype=compute_dtype,
             rngs=rngs,
         )
@@ -980,6 +1016,7 @@ class PairMixerBlock(nnx.Module):
         single_compact: Array,
         pair_compact: Array,
         compact_token_mask: Array,
+        token_positions: Array | None = None,
     ) -> tuple[Array, Array]:
         pair_mask_compact = compact_token_mask[:, :, None] & compact_token_mask[:, None, :]
 
@@ -1025,6 +1062,7 @@ class PairMixerBlock(nnx.Module):
                 single_compact,
                 pair_compact,
                 compact_token_mask,
+                token_positions,
             )
         )
         single_compact = single_compact + self.single_transition_post_norm(
@@ -1111,6 +1149,13 @@ class PairMixerBlock(nnx.Module):
         v = jnp.swapaxes(v, 1, 2)
         q = module.q_norm(q)
         k = module.k_norm(k)
+        if module.use_rope:
+            token_positions = jnp.broadcast_to(
+                jnp.arange(num_tokens),
+                (batch_size, num_tokens),
+            )
+            q = _apply_rope(q, token_positions)
+            k = _apply_rope(k, token_positions)
 
         if module.use_pair_bias:
             pair_bias_compact = _linear_with_preferred_acc(
@@ -1159,6 +1204,7 @@ class PairMixerBlock(nnx.Module):
         single_compact: Array,
         pair_compact: Array,
         compact_token_mask: Array,
+        token_positions: Array | None = None,
     ) -> Array:
         module = self.single_attention
         batch_size, num_tokens, single_dim = single_compact.shape
@@ -1176,6 +1222,14 @@ class PairMixerBlock(nnx.Module):
         v = jnp.swapaxes(v, 1, 2)
         q = module.q_norm(q)
         k = module.k_norm(k)
+        if module.use_rope:
+            if token_positions is None:
+                token_positions = jnp.broadcast_to(
+                    jnp.arange(num_tokens),
+                    (batch_size, num_tokens),
+                )
+            q = _apply_rope(q, token_positions)
+            k = _apply_rope(k, token_positions)
 
         if module.use_pair_bias:
             pair_bias = _linear_with_preferred_acc(
