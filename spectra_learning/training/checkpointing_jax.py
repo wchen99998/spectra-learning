@@ -13,6 +13,7 @@ import numpy as np
 import orbax.checkpoint as ocp
 from flax import nnx
 from flax.traverse_util import flatten_dict, unflatten_dict
+from jax.sharding import SingleDeviceSharding
 
 from spectra_learning.training.storage import StoragePath, storage_join
 
@@ -125,14 +126,37 @@ def save_jax_training_state(
     state: Any,
     *,
     metadata: dict[str, Any],
+    reference: dict[str, Any] | None = None,
 ) -> None:
+    items = {
+        "state": ocp.args.StandardSave(state),
+        "metadata": ocp.args.JsonSave(_canonical_metadata(metadata)),
+    }
+    if reference is not None:
+        items["reference"] = ocp.args.StandardSave(reference)
     manager.save(
         step,
-        args=ocp.args.Composite(
-            state=ocp.args.StandardSave(state),
-            metadata=ocp.args.JsonSave(_canonical_metadata(metadata)),
-        ),
+        args=ocp.args.Composite(**items),
     )
+
+
+def load_jax_checkpoint_reference(
+    checkpoint_path: StoragePath,
+) -> dict[str, Any]:
+    reference_path = storage_join(checkpoint_path, "reference")
+    with ocp.StandardCheckpointer() as checkpointer:
+        metadata = checkpointer.metadata(reference_path).item_metadata
+        sharding = SingleDeviceSharding(jax.devices()[0])
+        target = jax.tree.map(
+            lambda item: jax.ShapeDtypeStruct(
+                item.shape,
+                item.dtype,
+                sharding=sharding,
+            ),
+            metadata,
+        )
+        restored = checkpointer.restore(reference_path, target=target)
+    return jax.tree.map(lambda value: np.asarray(value), restored)
 
 
 def restore_jax_training_state(

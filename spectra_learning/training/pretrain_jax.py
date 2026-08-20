@@ -23,19 +23,26 @@ from tqdm import tqdm
 
 from spectra_learning.config import config_to_dict
 from spectra_learning.data.gems.artifacts import MASSIVE_V2_HDF5_FORMAT
+from spectra_learning.data.gems.collate import GemsBatchCollator
 from spectra_learning.data.gems.datamodule import GemsDataModule
 from spectra_learning.data.gems.mask_schedule import (
     jepa_mask_stage_index,
     jepa_mask_stages,
 )
+from spectra_learning.data.gems.settings import GemsDataConfig
+from spectra_learning.data.spectra import NUM_PEAKS_INPUT
 from spectra_learning.models.common_jax import Array
 from spectra_learning.models.factory_jax import build_model_from_config
-from spectra_learning.models.fastmixer_capacity import pairmixer_fast_stage_capacities
+from spectra_learning.models.fastmixer_capacity import (
+    pairmixer_fast_full_visible_tokens,
+    pairmixer_fast_stage_capacities,
+)
 from spectra_learning.models.grouped_jepa_jax import (
     GROUP_JEPA_TEACHER_TARGET_AGE_KEY,
     GROUP_JEPA_TEACHER_TARGET_KEY,
 )
 from spectra_learning.models.model_jax import PeakSetJEPAJax
+from spectra_learning.models.spectrum_metadata import jax_spectrum_metadata_from_batch
 from spectra_learning.probes.massspec.msg_probe_jax import run_msg_probe_jax
 from spectra_learning.probes.massspec.msg_settings import (
     msg_probe_variants_from_config,
@@ -73,6 +80,7 @@ from spectra_learning.training.storage import (
 
 JAX_DATA_AXIS = "data"
 JaxMetricReduction = Literal["mean", "token_weighted"]
+JAX_CHECKPOINT_REFERENCE_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -144,6 +152,129 @@ def trainable_param_filter(path: tuple[object, ...], value: object) -> bool:
     if any(part in frozen_modules for part in path):
         return False
     return path[-1] != "b"
+
+
+def _jax_checkpoint_reference_raw_input() -> dict[str, np.ndarray]:
+    spectra = np.zeros((2, 2, NUM_PEAKS_INPUT), dtype=np.float32)
+    spectra[0, 0, :8] = np.asarray(
+        [10.0, 50.0, 100.0, 150.0, 250.0, 499.95, 750.0, 1001.0],
+        dtype=np.float32,
+    )
+    spectra[0, 1, :8] = np.asarray(
+        [8.0, 10.0, 5.0, 2.5, 1.0, 0.2, 0.01, 4.0],
+        dtype=np.float32,
+    )
+    spectra[1, 0, :8] = np.asarray(
+        [19.9, 25.0, 75.0, 125.0, 300.0, 450.0, 700.0, 999.9],
+        dtype=np.float32,
+    )
+    spectra[1, 1, :8] = np.asarray(
+        [3.0, 0.2, 1.0, 0.5, 0.4, 0.3, 0.2, 0.1],
+        dtype=np.float32,
+    )
+    return {
+        "spectra": spectra,
+        "precursor_mz_raw": np.asarray([500.0, 800.0], dtype=np.float32),
+        "collision_energy": np.asarray([25.0, 40.0], dtype=np.float32),
+        "charge": np.asarray([2.0, -3.0], dtype=np.float32),
+        "precursor_mz_present": np.asarray([1.0, 1.0], dtype=np.float32),
+        "collision_energy_present": np.asarray([1.0, 0.0], dtype=np.float32),
+        "charge_present": np.asarray([1.0, 0.0], dtype=np.float32),
+        "polarity_id": np.asarray([1.0, 2.0], dtype=np.float32),
+        "acquisition_type_id": np.asarray([1.0, 2.0], dtype=np.float32),
+        "isolation_window_lower_offset": np.asarray([0.5, 0.0], dtype=np.float32),
+        "isolation_window_upper_offset": np.asarray([1.0, 0.0], dtype=np.float32),
+        "isolation_window_present": np.asarray([1.0, 0.0], dtype=np.float32),
+        "instrument_family_id": np.asarray([1.0, 2.0], dtype=np.float32),
+        "mass_accuracy": np.asarray([0.2, 0.0], dtype=np.float32),
+        "mass_accuracy_present": np.asarray([1.0, 0.0], dtype=np.float32),
+        "retention_time_fraction": np.asarray([0.25, 0.75], dtype=np.float32),
+        "retention_time_present": np.asarray([1.0, 1.0], dtype=np.float32),
+    }
+
+
+def _jax_checkpoint_reference_inputs(
+    config: config_dict.ConfigDict,
+) -> tuple[dict[str, Array], dict[str, Array]]:
+    raw_input = _jax_checkpoint_reference_raw_input()
+    data_config = GemsDataConfig.from_config(config)
+    samples = [
+        {key: value[row] for key, value in raw_input.items()}
+        for row in range(2)
+    ]
+    batch = GemsBatchCollator(
+        augment=False,
+        num_target_blocks=data_config.jepa_num_target_blocks,
+        context_fraction=data_config.jepa_context_fraction,
+        target_fraction=data_config.jepa_target_fraction,
+        block_min_len=data_config.jepa_block_min_len,
+        mask_strategy=data_config.jepa_mask_strategy,
+        mask_lengths=data_config.jepa_mask_lengths,
+        mask_round_from=data_config.jepa_mask_round_from,
+        intensity_aware_mask_config=data_config.jepa_intensity_aware_mask_config,
+        allow_target_overlap=data_config.jepa_allow_target_overlap,
+        num_peaks=data_config.num_peaks,
+        max_precursor_mz=data_config.max_precursor_mz,
+        min_peak_intensity=data_config.min_peak_intensity,
+        peak_drop_min_intensity=data_config.peak_drop_min_intensity,
+        peak_ordering=data_config.peak_ordering,
+        precursor_peak_exclusion_window_da=(
+            data_config.precursor_peak_exclusion_window_da
+        ),
+        output_format="numpy",
+        spectrum_metadata_schema=data_config.encoder_metadata_schema,
+    )(samples)
+    jax_batch = {key: jnp.asarray(value) for key, value in batch.items()}
+    encoder_input = {
+        key: jax_batch[key]
+        for key in (
+            "peak_mz",
+            "peak_intensity",
+            "peak_valid_mask",
+            "precursor_mz",
+        )
+    }
+    spectrum_metadata = jax_spectrum_metadata_from_batch(
+        jax_batch,
+        data_config.encoder_metadata_schema,
+    )
+    if spectrum_metadata is not None:
+        encoder_input["spectrum_metadata"] = spectrum_metadata
+    return (
+        {key: jnp.asarray(value) for key, value in raw_input.items()},
+        encoder_input,
+    )
+
+
+def _make_jax_checkpoint_reference_step(graphdef: Any) -> Callable[..., Any]:
+    @jax.jit
+    def reference_step(
+        trainable_params: nnx.State,
+        static_state: nnx.State,
+        encoder_input: dict[str, Array],
+    ) -> dict[str, Array]:
+        functional_model = nnx.merge(graphdef, trainable_params, static_state)
+        kwargs = {
+            "valid_mask": encoder_input["peak_valid_mask"],
+            "visible_mask": encoder_input["peak_valid_mask"],
+            "precursor_mz": encoder_input["precursor_mz"],
+            "spectrum_metadata": encoder_input.get("spectrum_metadata"),
+        }
+        if functional_model.encoder.use_pair_path:
+            single, pair = functional_model.encoder.forward_with_pair(
+                encoder_input["peak_mz"],
+                encoder_input["peak_intensity"],
+                **kwargs,
+            )
+            return {"single": single, "pair": pair}
+        single = functional_model.encoder(
+            encoder_input["peak_mz"],
+            encoder_input["peak_intensity"],
+            **kwargs,
+        )
+        return {"single": single}
+
+    return reference_step
 
 
 def collect_jax_param_metrics(model: Any) -> dict[str, float]:
@@ -1372,6 +1503,8 @@ class _JaxTrainingLoop:
             self.group_jepa_ema_momentum is not None
             and self.group_jepa_target_mode == "lookahead"
         )
+        self.checkpoint_reference_inputs: dict[str, Any] | None = None
+        self.checkpoint_reference_step: Callable[..., Any] | None = None
         (
             self.state,
             self.train_steps,
@@ -1454,6 +1587,7 @@ class _JaxTrainingLoop:
                 total_steps=self.total_steps,
             )
         )
+        self._initialize_checkpoint_reference(graphdef)
 
         def make_steps(
             stage_graphdef: Any,
@@ -1577,6 +1711,47 @@ class _JaxTrainingLoop:
             tuple(train_steps),
             tuple(eval_steps),
             tuple(teacher_target_steps),
+        )
+
+    def _initialize_checkpoint_reference(self, graphdef: Any) -> None:
+        if (
+            self.checkpoint_metadata["training_task"] != "pretrain"
+            or not isinstance(self.model, PeakSetJEPAJax)
+        ):
+            return
+        reference_graphdef = graphdef
+        if self.model.use_fastmixer:
+            capacities = (
+                self.model.pairmixer_fast_encoder_max_visible_tokens,
+                self.model.pairmixer_fast_max_visible_tokens,
+                self.model.pairmixer_fast_target_max_visible_tokens,
+            )
+            full_visible_tokens = pairmixer_fast_full_visible_tokens(self.config)
+            self.model.set_fastmixer_capacities(
+                full_visible_tokens,
+                full_visible_tokens,
+                self.model.num_peak_tokens,
+            )
+            reference_graphdef, _, _ = nnx.split(
+                self.model,
+                trainable_param_filter,
+                ...,
+            )
+            self.model.set_fastmixer_capacities(*capacities)
+        raw_input, encoder_input = _jax_checkpoint_reference_inputs(self.config)
+        inputs = {
+            "version": jnp.asarray(
+                JAX_CHECKPOINT_REFERENCE_VERSION,
+                dtype=jnp.int32,
+            ),
+            "raw_input": raw_input,
+            "encoder_input": encoder_input,
+        }
+        if self.use_sharded_step:
+            inputs = _replicate_tree_on_data_mesh(inputs, self.data_mesh)
+        self.checkpoint_reference_inputs = inputs
+        self.checkpoint_reference_step = _make_jax_checkpoint_reference_step(
+            reference_graphdef
         )
 
     def _activate_mask_stage(self, global_step: int) -> bool:
@@ -2028,11 +2203,24 @@ class _JaxTrainingLoop:
             self._stop_profile()
 
     def _save_checkpoint(self, step: int) -> None:
+        reference = None
+        if self.checkpoint_reference_step is not None:
+            assert self.checkpoint_reference_inputs is not None
+            encoder_output = self.checkpoint_reference_step(
+                self.state.trainable_params,
+                self.state.static_state,
+                self.checkpoint_reference_inputs["encoder_input"],
+            )
+            reference = {
+                **self.checkpoint_reference_inputs,
+                "encoder_output": encoder_output,
+            }
         save_jax_training_state(
             self.checkpoint_manager,
             step,
             self.state.checkpoint_state(),
             metadata=self.checkpoint_metadata,
+            reference=reference,
         )
 
     def _save_periodic_checkpoint(self) -> None:

@@ -21,16 +21,19 @@ from types import SimpleNamespace
 from spectra_learning.data.gems.collate import GemsBatchCollator
 from spectra_learning.models.model_jax import PeakSetJEPAJax
 from spectra_learning.models.settings import PeakSetJEPASettings
+from spectra_learning.models.spectrum_metadata import MASSIVE_V2_ACQUISITION_SCHEMA
 from spectra_learning.training.checkpointing_jax import (
     EmergencyCheckpointMonitor,
     build_jax_checkpoint_manager,
     jax_training_checkpoint_metadata,
+    load_jax_checkpoint_reference,
     restore_frozen_teacher_encoder,
     restore_jax_training_state,
     save_jax_training_state,
 )
 from spectra_learning.training.logging import MetricLogger
 from spectra_learning.training.pretrain_jax import (
+    _jax_checkpoint_reference_inputs,
     _jax_process_bool_broadcast,
     _run_jax_training_loop,
     build_jax_optax_transform,
@@ -117,6 +120,23 @@ def _tiny_numpy_batch() -> dict[str, np.ndarray]:
             sample([220.0, 240.0, 300.0], [0.9, 0.3, 0.2], 620.0, 40.0, 2.0),
         ]
     )
+
+
+def _tiny_training_config(**overrides: object) -> config_dict.ConfigDict:
+    config = config_dict.ConfigDict(_tiny_mae_kwargs())
+    config.update(
+        {
+            "seed": 5,
+            "num_epochs": 1,
+            "learning_rate": 1e-3,
+            "jax_mesh_devices": "1",
+            "checkpoint_every_steps": 1,
+            "log_every_n_steps": 0,
+            "msg_probe_every_n_steps": -1,
+            **overrides,
+        }
+    )
+    return config
 
 
 class _FakeDataModule:
@@ -215,7 +235,13 @@ def test_jax_checkpoint_roundtrip_preserves_values_and_sharding(tmp_path):
     state = {"trainable_params": params, "opt_state": opt_state}
 
     manager = build_jax_checkpoint_manager(tmp_path / "checkpoints", max_to_keep=2)
-    save_jax_training_state(manager, 10, state, metadata=CHECKPOINT_METADATA)
+    save_jax_training_state(
+        manager,
+        10,
+        state,
+        metadata=CHECKPOINT_METADATA,
+        reference={"version": jnp.asarray(1, dtype=jnp.int32)},
+    )
     manager.close()
 
     reopened = build_jax_checkpoint_manager(tmp_path / "checkpoints", max_to_keep=2)
@@ -241,6 +267,158 @@ def test_jax_checkpoint_roundtrip_preserves_values_and_sharding(tmp_path):
     assert {value.dtype for value in jax.tree.leaves(adam_state.nu)} == {
         jnp.dtype(jnp.bfloat16)
     }
+
+
+def _direct_encoder_outputs(
+    model: PeakSetJEPAJax,
+    encoder_input: dict[str, np.ndarray],
+) -> dict[str, np.ndarray]:
+    batch = {key: jnp.asarray(value) for key, value in encoder_input.items()}
+
+    @nnx.jit
+    def encode(
+        functional_model: PeakSetJEPAJax,
+        model_input: dict[str, jax.Array],
+    ) -> dict[str, jax.Array]:
+        kwargs = {
+            "valid_mask": model_input["peak_valid_mask"],
+            "visible_mask": model_input["peak_valid_mask"],
+            "precursor_mz": model_input["precursor_mz"],
+            "spectrum_metadata": model_input.get("spectrum_metadata"),
+        }
+        if functional_model.encoder.use_pair_path:
+            single, pair = functional_model.encoder.forward_with_pair(
+                model_input["peak_mz"],
+                model_input["peak_intensity"],
+                **kwargs,
+            )
+            return {"single": single, "pair": pair}
+        single = functional_model.encoder(
+            model_input["peak_mz"],
+            model_input["peak_intensity"],
+            **kwargs,
+        )
+        return {"single": single}
+
+    return jax.tree.map(np.asarray, encode(model, batch))
+
+
+def test_jax_checkpoint_reference_builds_full_acquisition_metadata():
+    config = _tiny_training_config(
+        encoder_metadata_schema=MASSIVE_V2_ACQUISITION_SCHEMA,
+        encoder_metadata_conditioning="adaln_zero",
+        encoder_metadata_condition_dim=4,
+    )
+
+    raw_input, encoder_input = _jax_checkpoint_reference_inputs(config)
+
+    assert raw_input["spectra"].shape == (2, 2, 128)
+    assert encoder_input["spectrum_metadata"].shape == (2, 26)
+    np.testing.assert_array_equal(
+        np.asarray(encoder_input["spectrum_metadata"][:, 1]),
+        np.asarray([1.0, 1.0], dtype=np.float32),
+    )
+
+
+def test_jax_pretrain_checkpoints_store_single_encoder_references(tmp_path):
+    config = _tiny_training_config()
+    batch = _tiny_numpy_batch()
+    model = PeakSetJEPAJax(**_tiny_mae_kwargs())
+    initialize_jax_model_from_torch_seed(config, model)
+    manager = build_jax_checkpoint_manager(
+        tmp_path / "checkpoints",
+        enable_async_checkpointing=False,
+    )
+
+    _run_jax_training_loop(
+        config=config,
+        datamodule=_FakeDataModule(batch, train_steps=2),
+        model=model,
+        logger=MetricLogger(),
+        total_steps=2,
+        checkpoint_manager=manager,
+        resume_step=None,
+        checkpoint_metadata=jax_training_checkpoint_metadata("pretrain", {}),
+        metric_reduction="mean",
+        enable_msg_probe=False,
+    )
+    manager.close()
+
+    first = load_jax_checkpoint_reference(
+        tmp_path / "checkpoints" / "orbax" / "1"
+    )
+    second = load_jax_checkpoint_reference(
+        tmp_path / "checkpoints" / "orbax" / "2"
+    )
+
+    assert int(first["version"]) == 1
+    assert first["raw_input"]["spectra"].shape == (2, 2, 128)
+    assert first["encoder_input"]["peak_mz"].shape == (2, 3)
+    assert set(first["encoder_output"]) == {"single"}
+    assert first["encoder_output"]["single"].shape == (2, 4, 4)
+    np.testing.assert_array_equal(
+        first["raw_input"]["spectra"],
+        second["raw_input"]["spectra"],
+    )
+    assert not np.array_equal(
+        first["encoder_output"]["single"],
+        second["encoder_output"]["single"],
+    )
+    actual = _direct_encoder_outputs(model, second["encoder_input"])
+    np.testing.assert_allclose(
+        second["encoder_output"]["single"],
+        actual["single"],
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+
+def test_jax_pretrain_pair_encoder_reference_stores_pair_output(tmp_path):
+    config = _tiny_training_config(
+        encoder_use_pair_path=True,
+        pairmixer_block_type="fastmixer-dense",
+    )
+    model = PeakSetJEPAJax(PeakSetJEPASettings.from_config(config))
+    assert model.pairmixer_fast_encoder_max_visible_tokens < 4
+    initialize_jax_model_from_torch_seed(config, model)
+    manager = build_jax_checkpoint_manager(
+        tmp_path / "checkpoints",
+        enable_async_checkpointing=False,
+    )
+
+    _run_jax_training_loop(
+        config=config,
+        datamodule=_FakeDataModule(_tiny_numpy_batch(), train_steps=1),
+        model=model,
+        logger=MetricLogger(),
+        total_steps=1,
+        checkpoint_manager=manager,
+        resume_step=None,
+        checkpoint_metadata=jax_training_checkpoint_metadata("pretrain", {}),
+        metric_reduction="mean",
+        enable_msg_probe=False,
+    )
+    manager.close()
+
+    reference = load_jax_checkpoint_reference(
+        tmp_path / "checkpoints" / "orbax" / "1"
+    )
+    assert set(reference["encoder_output"]) == {"single", "pair"}
+    assert reference["encoder_output"]["pair"].shape == (2, 4, 4, 4)
+    model.set_fastmixer_capacities(4, 4, 3)
+    actual = _direct_encoder_outputs(model, reference["encoder_input"])
+    np.testing.assert_allclose(
+        reference["encoder_output"]["single"],
+        actual["single"],
+        rtol=1e-5,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        reference["encoder_output"]["pair"],
+        actual["pair"],
+        rtol=1e-5,
+        atol=1e-6,
+    )
 
 
 def test_async_jax_checkpoint_closes_and_restores_with_two_processes(tmp_path):
@@ -296,6 +474,16 @@ def test_async_jax_checkpoint_closes_and_restores_with_two_processes(tmp_path):
             1,
             {"value": value},
             metadata=metadata,
+            reference={
+                "version": np.asarray(1, dtype=np.int32),
+                "encoder_output": {
+                    "single": multihost_utils.host_local_array_to_global_array(
+                        np.full((2, 3), 7.0, dtype=np.float32),
+                        mesh,
+                        P(),
+                    ),
+                },
+            },
         )
         save_was_in_progress = manager.is_saving_in_progress()
         manager.close()
@@ -382,6 +570,15 @@ def test_async_jax_checkpoint_closes_and_restores_with_two_processes(tmp_path):
     assert all(record["latest_step"] == 1 for record in records)
     assert any(record["save_was_in_progress"] for record in records)
 
+    reference = load_jax_checkpoint_reference(
+        tmp_path / "checkpoints" / "orbax" / "1"
+    )
+    assert int(reference["version"]) == 1
+    np.testing.assert_array_equal(
+        reference["encoder_output"]["single"],
+        np.full((2, 3), 7.0, dtype=np.float32),
+    )
+
 
 def test_jax_checkpoint_restore_releases_template_before_loading():
     template = {"value": jnp.ones((4,), dtype=jnp.float32)}
@@ -463,6 +660,68 @@ def test_jax_checkpoint_manager_keeps_all_steps_when_max_to_keep_is_none(tmp_pat
 
     assert manager.all_steps() == [1, 2, 3]
     manager.close()
+
+
+def test_jax_checkpoint_reference_loads_on_a_different_topology(tmp_path):
+    script = textwrap.dedent(
+        """
+        import sys
+
+        import jax
+        import jax.numpy as jnp
+        import numpy as np
+        from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+
+        from spectra_learning.training.checkpointing_jax import (
+            build_jax_checkpoint_manager,
+            jax_training_checkpoint_metadata,
+            save_jax_training_state,
+        )
+
+        checkpoint_dir = sys.argv[1]
+        mesh = Mesh(np.asarray(jax.devices()), ("data",))
+        replicated = NamedSharding(mesh, P())
+        reference = {
+            "version": jax.device_put(jnp.asarray(1, dtype=jnp.int32), replicated),
+            "encoder_output": {
+                "single": jax.device_put(
+                    jnp.arange(8, dtype=jnp.float32).reshape(2, 4),
+                    replicated,
+                ),
+            },
+        }
+        manager = build_jax_checkpoint_manager(
+            checkpoint_dir,
+            enable_async_checkpointing=False,
+        )
+        save_jax_training_state(
+            manager,
+            1,
+            {"value": jax.device_put(jnp.asarray(2.0), replicated)},
+            metadata=jax_training_checkpoint_metadata("pretrain", {}),
+            reference=reference,
+        )
+        manager.close()
+        """
+    )
+    env = os.environ.copy()
+    env["JAX_PLATFORMS"] = "cpu"
+    env["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
+    subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path / "checkpoints")],
+        env=env,
+        check=True,
+    )
+
+    reference = load_jax_checkpoint_reference(
+        tmp_path / "checkpoints" / "orbax" / "1"
+    )
+
+    assert int(reference["version"]) == 1
+    np.testing.assert_array_equal(
+        reference["encoder_output"]["single"],
+        np.arange(8, dtype=np.float32).reshape(2, 4),
+    )
 
 
 def test_jax_checkpoint_restore_rejects_training_contract_mismatch(tmp_path):
@@ -736,7 +995,7 @@ def test_jax_training_loop_writes_emergency_checkpoint_before_waiting(tmp_path):
         total_steps=3,
         checkpoint_manager=manager,
         resume_step=None,
-        checkpoint_metadata=CHECKPOINT_METADATA,
+        checkpoint_metadata=jax_training_checkpoint_metadata("pretrain", {}),
         metric_reduction="mean",
         enable_msg_probe=False,
         emergency_checkpoint=emergency,
@@ -747,6 +1006,10 @@ def test_jax_training_loop_writes_emergency_checkpoint_before_waiting(tmp_path):
     assert metrics["run/stopped_for_termination"] == 1.0
     assert manager.latest_step() == 1
     manager.close()
+    reference = load_jax_checkpoint_reference(
+        tmp_path / "checkpoints" / "orbax" / "1"
+    )
+    assert set(reference["encoder_output"]) == {"single"}
 
 
 def test_jax_process_bool_broadcast_uses_multihost_collective(monkeypatch):
