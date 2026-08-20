@@ -67,6 +67,8 @@ ACQUISITION_DATASETS = (
     "mass_accuracy_present",
     "retention_time_fraction",
     "retention_time_present",
+    "precursor_intensity_zscore",
+    "precursor_intensity_present",
 )
 ACQUISITION_SOURCE_DATASETS = (
     "acquisition_type",
@@ -74,6 +76,7 @@ ACQUISITION_SOURCE_DATASETS = (
     "window lo",
     "window uo",
     "instrument accuracy est.",
+    "precursor intensity",
 )
 SOURCE_DATASETS = tuple(name for name in FINAL_DATASETS if name != "training_eligible")
 STRING_DATASETS = {"massive_id", "unique_spectrum_id"}
@@ -174,8 +177,9 @@ def download_source(source_dir: Path, filename: str) -> Path:
 def _run_normalization_stats(
     file_ids: np.ndarray,
     retention_time: np.ndarray,
+    precursor_intensity: np.ndarray,
     run_count: int,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     rt_max = np.zeros(run_count, dtype=np.float32)
     positive_rt = np.isfinite(retention_time) & (retention_time > 0)
     np.maximum.at(
@@ -184,7 +188,37 @@ def _run_normalization_stats(
         retention_time[positive_rt],
     )
 
-    return rt_max
+    positive_intensity = np.isfinite(precursor_intensity) & (
+        precursor_intensity > 0
+    )
+    intensity_file_ids = file_ids[positive_intensity]
+    log_intensity = np.log1p(
+        precursor_intensity[positive_intensity]
+    ).astype(np.float64)
+    counts = np.bincount(intensity_file_ids, minlength=run_count)
+    sums = np.bincount(
+        intensity_file_ids,
+        weights=log_intensity,
+        minlength=run_count,
+    )
+    squared_sums = np.bincount(
+        intensity_file_ids,
+        weights=log_intensity * log_intensity,
+        minlength=run_count,
+    )
+    nonempty = counts > 0
+    mean = np.zeros(run_count, dtype=np.float32)
+    std = np.zeros(run_count, dtype=np.float32)
+    mean[nonempty] = (sums[nonempty] / counts[nonempty]).astype(np.float32)
+    variance = np.zeros(run_count, dtype=np.float64)
+    variance[nonempty] = (
+        squared_sums[nonempty] / counts[nonempty]
+        - np.square(sums[nonempty] / counts[nonempty])
+    )
+    std[nonempty] = np.sqrt(np.maximum(variance[nonempty], 0.0)).astype(
+        np.float32
+    )
+    return rt_max, mean, std
 
 
 def _read_source_arrays(path: Path) -> tuple[dict[str, np.ndarray], np.ndarray]:
@@ -209,13 +243,28 @@ def _read_source_arrays(path: Path) -> tuple[dict[str, np.ndarray], np.ndarray]:
             ]
             full_file_ids = file["file_id"][:].astype(np.int64, copy=False)
             full_rt = file["RT"][:].astype(np.float32, copy=False)
-            run_rt_max = _run_normalization_stats(
+            full_intensity = file["precursor intensity"][:].astype(
+                np.float32,
+                copy=False,
+            )
+            (
+                run_rt_max,
+                run_log_intensity_mean,
+                run_log_intensity_std,
+            ) = _run_normalization_stats(
                 full_file_ids,
                 full_rt,
+                full_intensity,
                 len(instrument_names),
             )
             selected_file_ids = arrays["file_id"].astype(np.int64, copy=False)
             arrays["run_rt_max"] = run_rt_max[selected_file_ids]
+            arrays["run_log_intensity_mean"] = run_log_intensity_mean[
+                selected_file_ids
+            ]
+            arrays["run_log_intensity_std"] = run_log_intensity_std[
+                selected_file_ids
+            ]
     arrays["spectrum"] = arrays["spectrum"].astype(np.float32)
     arrays["MS level"] = arrays["MS level"].astype(np.int8, copy=False)
     return arrays, source_rows
@@ -242,10 +291,13 @@ def _add_acquisition_metadata(arrays: dict[str, np.ndarray]) -> None:
     collision = arrays["collision_energy"].astype(np.float32, copy=False)
     charge = arrays["charge"].astype(np.float32, copy=False)
     accuracy = arrays.pop("instrument accuracy est.").astype(np.float32, copy=False)
+    intensity = arrays.pop("precursor intensity").astype(np.float32, copy=False)
     retention_time = arrays["RT"].astype(np.float32, copy=False)
     lower = arrays.pop("window lo").astype(np.float32, copy=False)
     upper = arrays.pop("window uo").astype(np.float32, copy=False)
     run_rt_max = arrays.pop("run_rt_max")
+    run_log_intensity_mean = arrays.pop("run_log_intensity_mean")
+    run_log_intensity_std = arrays.pop("run_log_intensity_std")
 
     arrays["precursor_mz_present"] = _present(precursor, positive=True)
     arrays["collision_energy_present"] = _present(collision, positive=True)
@@ -294,6 +346,21 @@ def _add_acquisition_metadata(arrays: dict[str, np.ndarray]) -> None:
     )
     arrays["retention_time_fraction"] = rt_fraction
     arrays["retention_time_present"] = _present(retention_time, positive=True)
+    intensity_zscore = np.zeros_like(intensity)
+    positive_intensity = (
+        _present(intensity, positive=True) & (run_log_intensity_std > 0)
+    )
+    intensity_zscore[positive_intensity] = np.clip(
+        (
+            np.log1p(intensity[positive_intensity])
+            - run_log_intensity_mean[positive_intensity]
+        )
+        / run_log_intensity_std[positive_intensity],
+        -5.0,
+        5.0,
+    ) / 5.0
+    arrays["precursor_intensity_zscore"] = intensity_zscore
+    arrays["precursor_intensity_present"] = _present(intensity, positive=True)
 
 
 def _write_array_dataset(
@@ -1077,7 +1144,7 @@ def build_manifest(
         row_aligned_datasets.extend(ACQUISITION_DATASETS)
         metadata = {
             "schema": MASSIVE_V2_ACQUISITION_SCHEMA,
-            "condition_dim": 26,
+            "condition_dim": 28,
             "columns": {
                 "precursor_mz": "precursor_mz",
                 **{name: name for name in ACQUISITION_DATASETS},
@@ -1096,6 +1163,7 @@ def build_manifest(
                 "isolation_offsets": "log1p(clip(value, 0, 100)) / log(101)",
                 "mass_accuracy": "(log10(clip(value, 1e-6, 1e-1)) + 6) / 5",
                 "retention_time": "value / max_positive_value_within_file",
+                "precursor_intensity": "clip(zscore(log1p(value)), -5, 5) / 5 within file",
             },
         }
     manifest = {

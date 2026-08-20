@@ -47,6 +47,8 @@ ACQUISITION_METADATA_KEYS = (
     "mass_accuracy_present",
     "retention_time_fraction",
     "retention_time_present",
+    "precursor_intensity_zscore",
+    "precursor_intensity_present",
 )
 
 

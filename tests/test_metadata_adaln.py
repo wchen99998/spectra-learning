@@ -25,6 +25,8 @@ def _metadata_batch() -> dict[str, torch.Tensor]:
         "mass_accuracy_present": torch.ones(2),
         "retention_time_fraction": torch.tensor([0.2, 0.8]),
         "retention_time_present": torch.ones(2),
+        "precursor_intensity_zscore": torch.tensor([-0.2, 0.4]),
+        "precursor_intensity_present": torch.ones(2),
         "polarity_id": torch.tensor([1, 2]),
         "acquisition_type_id": torch.tensor([1, 2]),
         "isolation_window_lower_offset": torch.tensor([0.1, 0.2]),
@@ -51,11 +53,11 @@ def test_massive_v2_condition_vector_and_grouped_dropout() -> None:
     assert metadata.shape == (2, MASSIVE_V2_CONDITION_DIM)
     torch.testing.assert_close(metadata[:, 4], torch.tensor([2 / 21, 1 / 21]))
     dropped = drop_massive_v2_metadata_torch(metadata, 1.0)
-    torch.testing.assert_close(dropped[:, :10], torch.zeros(2, 10))
-    torch.testing.assert_close(dropped[:, 10], torch.ones(2))
-    torch.testing.assert_close(dropped[:, 13], torch.ones(2))
-    torch.testing.assert_close(dropped[:, 16:19], torch.zeros(2, 3))
-    torch.testing.assert_close(dropped[:, 19], torch.ones(2))
+    torch.testing.assert_close(dropped[:, :12], torch.zeros(2, 12))
+    torch.testing.assert_close(dropped[:, 12], torch.ones(2))
+    torch.testing.assert_close(dropped[:, 15], torch.ones(2))
+    torch.testing.assert_close(dropped[:, 18:21], torch.zeros(2, 3))
+    torch.testing.assert_close(dropped[:, 21], torch.ones(2))
 
 
 def _settings() -> PeakSetJEPASettings:

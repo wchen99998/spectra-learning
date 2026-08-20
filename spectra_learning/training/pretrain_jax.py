@@ -120,20 +120,6 @@ class _JaxTrainState:
         return state
 
 
-def _epoch_progress_steps(
-    *,
-    global_step: int,
-    total_steps: int,
-    train_steps: int,
-    epoch: int,
-) -> tuple[int, int]:
-    epoch_start_step = epoch * train_steps
-    return (
-        global_step - epoch_start_step,
-        min(train_steps, total_steps - epoch_start_step),
-    )
-
-
 def trainable_param_filter(path: tuple[object, ...], value: object) -> bool:
     if not isinstance(value, nnx.Param):
         return False
@@ -1692,15 +1678,11 @@ class _JaxTrainingLoop:
         )
         loader_iter = iter(loader)
         loader_stage_index = self.mask_stage_index
-        epoch_progress, epoch_total = _epoch_progress_steps(
-            global_step=self.global_step,
-            total_steps=self.total_steps,
-            train_steps=self.datamodule.train_steps,
-            epoch=epoch,
-        )
         pbar = tqdm(
-            total=epoch_total,
-            initial=epoch_progress,
+            total=min(
+                self.datamodule.train_steps - epoch_start_batch,
+                self.total_steps - self.global_step,
+            ),
             desc=f"Epoch {epoch}",
             unit="step",
             disable=jax.process_index() != 0,

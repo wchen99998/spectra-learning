@@ -29,12 +29,7 @@ def spectrum_metadata_datasets(manifest: dict[str, Any]) -> dict[str, str]:
     return {
         key: dataset
         for key, dataset in metadata["columns"].items()
-        if key
-        not in {
-            "precursor_mz",
-            "precursor_intensity_zscore",
-            "precursor_intensity_present",
-        }
+        if key != "precursor_mz"
     }
 GEMS_SPLIT_VERSION = "global_chunk_modulo_v1"
 GEMS_SPLIT_CHUNK_ROWS = 256

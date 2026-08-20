@@ -34,6 +34,7 @@ def test_project_metadata_normalizes_within_raw_file(tmp_path: Path) -> None:
         file.create_dataset("window lo", data=np.ones(6, dtype=np.float32))
         file.create_dataset("window uo", data=np.full(6, 2, dtype=np.float32))
         file.create_dataset("instrument accuracy est.", data=np.full(6, 1e-4, dtype=np.float32))
+        file.create_dataset("precursor intensity", data=np.asarray([1, 2, 4, 8, 16, 32], dtype=np.float32))
         metadata = file.create_group("metadata")
         metadata.create_dataset("instrument name", data=np.asarray([b"Q Exactive", b"Q-TOF"]))
 
@@ -91,6 +92,7 @@ def test_enrichment_aligns_by_id_and_marks_source_absent_rows_unknown(
         "isolation_window_present",
         "mass_accuracy_present",
         "retention_time_present",
+        "precursor_intensity_present",
     }
     categorical = {"polarity_id", "acquisition_type_id", "instrument_family_id"}
     for index, name in enumerate(ACQUISITION_DATASETS):

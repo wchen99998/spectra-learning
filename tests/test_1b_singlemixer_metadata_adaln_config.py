@@ -44,7 +44,7 @@ def test_metadata_adaln_parameter_count_formula() -> None:
     model_dim = 1_536
     condition_dim = 256
     layers = 25
-    metadata_embedder = 26 * condition_dim + condition_dim
+    metadata_embedder = 28 * condition_dim + condition_dim
     metadata_embedder += condition_dim * condition_dim + condition_dim
     block_modulations = layers * (
         condition_dim * (6 * model_dim) + 6 * model_dim
@@ -60,5 +60,5 @@ def test_metadata_adaln_parameter_count_formula() -> None:
         + metadata_embedder
         + block_modulations
         + final_modulation
-        == 1_000_411_600
+        == 1_000_412_112
     )

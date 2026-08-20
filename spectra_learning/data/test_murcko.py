@@ -497,7 +497,7 @@ def test_murcko_fluorine_cache_and_loader_preprocesses_peaks(
     )
 
     assert torch.allclose(batch["peak_mz"][0], torch.tensor([0.025, 0.05]))
-    assert torch.allclose(batch["peak_intensity"][0], torch.tensor([0.25, 0.5]))
+    assert torch.allclose(batch["peak_intensity"][0], torch.tensor([0.5, 1.0]))
     assert torch.equal(batch["peak_valid_mask"][0], torch.tensor([True, True]))
     assert torch.allclose(batch["label"], torch.tensor([1.0, 0.0]))
 

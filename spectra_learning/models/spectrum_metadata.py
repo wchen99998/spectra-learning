@@ -14,7 +14,7 @@ from spectra_learning.data.spectra import (
 
 
 MASSIVE_V2_ACQUISITION_SCHEMA = "massive_v2_acquisition_v1"
-MASSIVE_V2_CONDITION_DIM = 26
+MASSIVE_V2_CONDITION_DIM = 28
 
 POLARITY_UNKNOWN = 0
 POLARITY_POSITIVE = 1
@@ -141,6 +141,10 @@ def torch_massive_v2_condition_from_batch(
     accuracy_present = _torch_field(batch, "mass_accuracy_present", reference)
     rt = _torch_field(batch, "retention_time_fraction", reference)
     rt_present = _torch_field(batch, "retention_time_present", reference)
+    intensity = _torch_field(batch, "precursor_intensity_zscore", reference)
+    intensity_present = _torch_field(
+        batch, "precursor_intensity_present", reference
+    )
     lower = _torch_field(batch, "isolation_window_lower_offset", reference)
     upper = _torch_field(batch, "isolation_window_upper_offset", reference)
     isolation_present = _torch_field(batch, "isolation_window_present", reference)
@@ -161,6 +165,8 @@ def torch_massive_v2_condition_from_batch(
                     accuracy_present,
                     rt,
                     rt_present,
+                    intensity,
+                    intensity_present,
                 ],
                 dim=-1,
             ),
@@ -241,6 +247,8 @@ def jax_spectrum_metadata_from_batch(
                 field("mass_accuracy_present"),
                 field("retention_time_fraction"),
                 field("retention_time_present"),
+                field("precursor_intensity_zscore"),
+                field("precursor_intensity_present"),
             ],
             axis=-1,
         )
@@ -286,21 +294,21 @@ def drop_massive_v2_metadata_numpy(
 ) -> np.ndarray:
     metadata = metadata.copy()
     batch_size = metadata.shape[0]
-    dropped = np.random.random((batch_size, 8)) < probability
+    dropped = np.random.random((batch_size, 9)) < probability
     for field, (value, present) in enumerate(
-        ((0, 1), (2, 3), (4, 5), (6, 7), (8, 9))
+        ((0, 1), (2, 3), (4, 5), (6, 7), (8, 9), (10, 11))
     ):
         rows = dropped[:, field]
         metadata[rows, value] = 0.0
         metadata[rows, present] = 0.0
     rows = dropped[:, 6]
-    metadata[rows, 10:13] = (1.0, 0.0, 0.0)
+    metadata[rows, 12:15] = (1.0, 0.0, 0.0)
     rows = dropped[:, 7]
-    metadata[rows, 13:16] = (1.0, 0.0, 0.0)
+    metadata[rows, 15:18] = (1.0, 0.0, 0.0)
     rows = dropped[:, 8]
-    metadata[rows, 16:19] = 0.0
+    metadata[rows, 18:21] = 0.0
     instrument_rows = np.random.random(batch_size) < probability
-    metadata[instrument_rows, 19:26] = (1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    metadata[instrument_rows, 21:28] = (1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     return metadata
 
 
@@ -310,18 +318,18 @@ def drop_massive_v2_metadata_torch(
 ) -> torch.Tensor:
     metadata = metadata.clone()
     batch_size = metadata.shape[0]
-    dropped = torch.rand(batch_size, 8, device=metadata.device) < probability
+    dropped = torch.rand(batch_size, 9, device=metadata.device) < probability
     for field, (value, present) in enumerate(
-        ((0, 1), (2, 3), (4, 5), (6, 7), (8, 9))
+        ((0, 1), (2, 3), (4, 5), (6, 7), (8, 9), (10, 11))
     ):
         rows = dropped[:, field]
         metadata[rows, value] = 0.0
         metadata[rows, present] = 0.0
-    metadata[dropped[:, 5], 10:13] = metadata.new_tensor((1.0, 0.0, 0.0))
-    metadata[dropped[:, 6], 13:16] = metadata.new_tensor((1.0, 0.0, 0.0))
-    metadata[dropped[:, 7], 16:19] = 0.0
+    metadata[dropped[:, 6], 12:15] = metadata.new_tensor((1.0, 0.0, 0.0))
+    metadata[dropped[:, 7], 15:18] = metadata.new_tensor((1.0, 0.0, 0.0))
+    metadata[dropped[:, 8], 18:21] = 0.0
     instrument_rows = torch.rand(batch_size, device=metadata.device) < probability
-    metadata[instrument_rows, 19:26] = metadata.new_tensor(
+    metadata[instrument_rows, 21:28] = metadata.new_tensor(
         (1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     )
     return metadata
