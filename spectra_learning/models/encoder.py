@@ -11,6 +11,7 @@ from spectra_learning.models.pairmixer import (
     PairMixerBlock,
     SingleMixerBlock,
 )
+from spectra_learning.models.spectrum_metadata import MASSIVE_V2_CONDITION_DIM
 from spectra_learning.models.peak_features import PeakFeatureEmbedder
 
 
@@ -46,11 +47,16 @@ class PeakSetEncoder(nn.Module):
         pairmixer_fourier_x_max: float = PEAK_MZ_MAX,
         pairmixer_relative_fourier_x_min: float = 1e-3,
         pairmixer_relative_fourier_x_max: float = 1.0,
+        metadata_schema: str | None = None,
+        metadata_conditioning: str = "additive",
+        metadata_condition_dim: int = 256,
     ):
         super().__init__()
         self.num_layers = num_layers
         self.use_cls_token = use_cls_token
         self.use_pair_path = use_pair_path
+        self.metadata_schema = metadata_schema
+        self.metadata_conditioning = metadata_conditioning
         self.pairmixer_block_type = pairmixer_block_type.lower()
         if self.pairmixer_block_type not in {
             "dense",
@@ -64,8 +70,17 @@ class PeakSetEncoder(nn.Module):
             )
         self.use_bi_dense = self.pairmixer_block_type in {"bi-dense", "fastmixer"}
         self.embedder = embedder
-        self.metadata_proj = nn.Linear(2, model_dim, bias=False)
-        nn.init.xavier_normal_(self.metadata_proj.weight)
+        if self.metadata_conditioning == "adaln_zero":
+            self.metadata_embedder = nn.Sequential(
+                nn.Linear(MASSIVE_V2_CONDITION_DIM, metadata_condition_dim),
+                nn.SiLU(),
+                nn.Linear(metadata_condition_dim, metadata_condition_dim),
+            )
+            self.metadata_proj = None
+        else:
+            self.metadata_proj = nn.Linear(2, model_dim, bias=False)
+            nn.init.xavier_normal_(self.metadata_proj.weight)
+            self.metadata_embedder = None
         pair_dim = model_dim if pair_dim is None else pair_dim
         if self.use_cls_token:
             self.cls_token = nn.Parameter(torch.empty(model_dim))
@@ -126,6 +141,11 @@ class PeakSetEncoder(nn.Module):
                     dropout=pairmixer_dropout,
                     use_rope=use_position_embedding,
                     transition_type=pairmixer_transition_type,
+                    condition_dim=(
+                        metadata_condition_dim
+                        if self.metadata_conditioning == "adaln_zero"
+                        else None
+                    ),
                 )
             )
             blocks.append(block)
@@ -135,6 +155,15 @@ class PeakSetEncoder(nn.Module):
             if apply_final_norm
             else nn.Identity()
         )
+        if apply_final_norm and self.metadata_conditioning == "adaln_zero":
+            self.final_adaLN_modulation = nn.Linear(
+                metadata_condition_dim,
+                2 * model_dim,
+            )
+            nn.init.zeros_(self.final_adaLN_modulation.weight)
+            nn.init.zeros_(self.final_adaLN_modulation.bias)
+        else:
+            self.final_adaLN_modulation = None
         if self.use_pair_path:
             self.final_pair_norm = (
                 nn.RMSNorm(pair_dim, eps=norm_eps)
@@ -164,7 +193,20 @@ class PeakSetEncoder(nn.Module):
     ) -> Float[Tensor, "batch dim"] | None:
         if spectrum_metadata is None:
             return None
+        if self.metadata_conditioning == "adaln_zero":
+            return self.metadata_embedder(spectrum_metadata.to(dtype=dtype))
         return self.metadata_proj(spectrum_metadata.to(dtype=dtype))
+
+    def _finalize(
+        self,
+        x: Float[Tensor, "batch tokens dim"],
+        condition: Float[Tensor, "batch condition"] | None,
+    ) -> Float[Tensor, "batch tokens dim"]:
+        x = self.final_norm(x)
+        if self.final_adaLN_modulation is not None:
+            shift, scale = self.final_adaLN_modulation(condition).chunk(2, dim=-1)
+            x = x * (1 + scale[:, None]) + shift[:, None]
+        return x
 
     def _embed_peaks(
         self,
@@ -188,7 +230,7 @@ class PeakSetEncoder(nn.Module):
             peak_visible_mask = peak_valid_mask
         x = self.embedder(peak_mz, peak_intensity)
         metadata_embedding = self._metadata_embedding(spectrum_metadata, x.dtype)
-        if metadata_embedding is not None:
+        if metadata_embedding is not None and self.metadata_conditioning != "adaln_zero":
             x = x + metadata_embedding.unsqueeze(1).to(dtype=x.dtype)
         return x, peak_visible_mask, metadata_embedding
 
@@ -249,7 +291,10 @@ class PeakSetEncoder(nn.Module):
             peak_visible_mask,
             precursor_mz=precursor_mz,
         )
-        x = self._append_cls_token(x, metadata_embedding)
+        x = self._append_cls_token(
+            x,
+            metadata_embedding if self.metadata_conditioning != "adaln_zero" else None,
+        )
         z = self._append_cls_pair_tokens(z)
         token_visible_mask = self._append_cls_mask(peak_visible_mask)
         for block in self.blocks:
@@ -259,7 +304,7 @@ class PeakSetEncoder(nn.Module):
                 token_visible_mask,
                 token_visible_mask,
             )
-        x = self.final_norm(x)
+        x = self._finalize(x, metadata_embedding)
         z = cast(nn.Module, self.final_pair_norm)(z)
         pair_mask = token_visible_mask.unsqueeze(2) & token_visible_mask.unsqueeze(1)
         z = z * pair_mask.unsqueeze(-1).to(dtype=z.dtype)
@@ -291,8 +336,15 @@ class PeakSetEncoder(nn.Module):
             visible_mask,
             spectrum_metadata,
         )
-        output = self._append_cls_token(output, metadata_embedding)
+        output = self._append_cls_token(
+            output,
+            metadata_embedding if self.metadata_conditioning != "adaln_zero" else None,
+        )
         token_visible_mask = self._append_cls_mask(peak_visible_mask)
         for block in self.blocks:
-            output = cast(SingleMixerBlock, block)(output, token_visible_mask)
-        return self.final_norm(output)
+            output = cast(SingleMixerBlock, block)(
+                output,
+                token_visible_mask,
+                metadata_embedding,
+            )
+        return self._finalize(output, metadata_embedding)

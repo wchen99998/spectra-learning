@@ -528,6 +528,8 @@ class AttentionPairBias(nnx.Module):
         norm_eps: float,
         use_pair_bias: bool = True,
         use_rope: bool = True,
+        input_norm_affine: bool = True,
+        zero_output: bool = True,
         compute_dtype: object = jnp.float32,
         rngs: nnx.Rngs | None = None,
     ) -> None:
@@ -538,7 +540,11 @@ class AttentionPairBias(nnx.Module):
             assert self.head_dim % 2 == 0
         self.use_pair_bias = use_pair_bias
         self.use_rope = use_rope
-        self.single_norm = RMSNorm(single_dim, eps=norm_eps)
+        self.single_norm = RMSNorm(
+            single_dim,
+            eps=norm_eps,
+            affine=input_norm_affine,
+        )
         self.pair_norm = (
             RMSNorm(pair_dim, eps=norm_eps) if use_pair_bias else None
         )
@@ -573,7 +579,7 @@ class AttentionPairBias(nnx.Module):
             single_dim,
             single_dim,
             compute_dtype=compute_dtype,
-            init="zeros",
+            init="zeros" if zero_output else "xavier_normal",
             rngs=rngs,
         )
 
@@ -584,9 +590,14 @@ class AttentionPairBias(nnx.Module):
         token_mask: Array,
         num_peak_tokens: int,
         token_positions: Array | None = None,
+        normalized_single: Array | None = None,
     ) -> Array:
         batch_size, num_tokens, single_dim = single.shape
-        single_norm = self.single_norm(single)
+        single_norm = (
+            self.single_norm(single)
+            if normalized_single is None
+            else normalized_single
+        )
         qkv = self.qkv(single_norm).reshape(
             batch_size,
             num_tokens,
@@ -658,11 +669,13 @@ class SingleMixerBlock(nnx.Module):
         norm_eps: float,
         use_rope: bool = True,
         transition_type: str = "swiglu",
+        condition_dim: int | None = None,
         compute_dtype: object = jnp.float32,
         rngs: nnx.Rngs | None = None,
     ) -> None:
         rngs = nnx.Rngs(0) if rngs is None else rngs
         self.transition_type = transition_type.lower()
+        self.condition_dim = condition_dim
         if self.transition_type not in SUPPORTED_PAIRMIXER_TRANSITION_TYPES:
             raise ValueError(
                 "pairmixer_transition_type must be one of ('swiglu', 'feedforward')"
@@ -674,11 +687,17 @@ class SingleMixerBlock(nnx.Module):
             norm_eps=norm_eps,
             use_pair_bias=False,
             use_rope=use_rope,
+            input_norm_affine=condition_dim is None,
+            zero_output=condition_dim is None,
             compute_dtype=compute_dtype,
             rngs=rngs,
         )
         self.single_attention_post_norm = RMSNorm(single_dim, eps=norm_eps)
-        self.single_transition_norm = RMSNorm(single_dim, eps=norm_eps)
+        self.single_transition_norm = RMSNorm(
+            single_dim,
+            eps=norm_eps,
+            affine=condition_dim is None,
+        )
         self.single_transition = _build_pairmixer_transition(
             single_dim,
             hidden_dim=math.ceil(single_dim * attention_mlp_multiple),
@@ -687,13 +706,67 @@ class SingleMixerBlock(nnx.Module):
             rngs=rngs,
         )
         self.single_transition_post_norm = RMSNorm(single_dim, eps=norm_eps)
+        self.adaLN_modulation = (
+            Linear(
+                condition_dim,
+                6 * single_dim,
+                compute_dtype=compute_dtype,
+                init="zeros",
+                rngs=rngs,
+            )
+            if condition_dim is not None
+            else None
+        )
+        if condition_dim is not None and self.transition_type == "swiglu":
+            transition = cast(SwiGLUFeedForward, self.single_transition)
+            transition.fc3.weight[...] = rngs.params.normal(
+                transition.fc3.weight.shape,
+                dtype=jnp.float32,
+            ) / math.sqrt(transition.fc3.weight.shape[1])
 
     def __call__(
         self,
         single: Array,
         token_mask: Array,
         token_positions: Array | None = None,
+        condition: Array | None = None,
     ) -> Array:
+        if self.adaLN_modulation is not None:
+            (
+                attn_shift,
+                attn_scale,
+                attn_gate,
+                mlp_shift,
+                mlp_scale,
+                mlp_gate,
+            ) = jnp.split(self.adaLN_modulation(condition), 6, axis=-1)
+            attention_input = self.single_attention.single_norm(single)
+            attention_input = (
+                attention_input * (1 + attn_scale[:, None])
+                + attn_shift[:, None]
+            )
+            attention_update = self.single_attention(
+                single,
+                None,
+                token_mask,
+                token_mask.shape[1],
+                token_positions,
+                attention_input,
+            )
+            single = single + attn_gate[:, None] * self.single_attention_post_norm(
+                attention_update
+            )
+            transition_input = self.single_transition_norm(single)
+            transition_input = (
+                transition_input * (1 + mlp_scale[:, None]) + mlp_shift[:, None]
+            )
+            transition_update = _transition_with_preferred_acc(
+                self.single_transition,
+                transition_input,
+            )
+            return single + mlp_gate[:, None] * self.single_transition_post_norm(
+                transition_update
+            )
         attention_update = self.single_attention(
             single,
             None,
@@ -734,6 +807,11 @@ class SingleMixerBlock(nnx.Module):
             state_dict,
             f"{prefix}.single_transition_post_norm",
         )
+        if self.adaLN_modulation is not None:
+            self.adaLN_modulation.load_torch_state_dict(
+                state_dict,
+                f"{prefix}.adaLN_modulation",
+            )
 
 
 class GatedSingleToPairUpdate(nnx.Module):

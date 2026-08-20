@@ -114,6 +114,7 @@ class PeakSetJEPAJax(nnx.Module):
             )
         self.encoder_num_layers = cfg.encoder_num_layers
         self.norm_eps = cfg.norm_eps
+        self.encoder_metadata_schema = cfg.encoder_metadata_schema
         self.jepa_num_target_blocks = cfg.jepa_num_target_blocks
         self.use_frozen_teacher = self.training_mode == "mae_teacher_jepa"
         self.use_ema_teacher = cfg.use_ema_teacher and self.training_mode == "jepa"
@@ -348,6 +349,9 @@ class PeakSetJEPAJax(nnx.Module):
             pairmixer_fourier_x_max=cfg.pairmixer_fourier_x_max,
             pairmixer_relative_fourier_x_min=cfg.pairmixer_relative_fourier_x_min,
             pairmixer_relative_fourier_x_max=cfg.pairmixer_relative_fourier_x_max,
+            metadata_schema=cfg.encoder_metadata_schema,
+            metadata_conditioning=cfg.encoder_metadata_conditioning,
+            metadata_condition_dim=cfg.encoder_metadata_condition_dim,
             pairmixer_fast_max_visible_tokens=(
                 self.pairmixer_fast_encoder_max_visible_tokens
             ),
@@ -429,7 +433,9 @@ class PeakSetJEPAJax(nnx.Module):
         peak_intensity = augmented_batch["peak_intensity"]
         peak_valid_mask = augmented_batch["peak_valid_mask"]
         precursor_mz = augmented_batch.get("precursor_mz", None)
-        spectrum_metadata = jax_spectrum_metadata_from_batch(augmented_batch)
+        spectrum_metadata = jax_spectrum_metadata_from_batch(
+            augmented_batch, self.encoder_metadata_schema
+        )
         context_mask = augmented_batch["context_mask"] & peak_valid_mask
         target_masks = augmented_batch["target_masks"] & peak_valid_mask[:, None, :]
         (
@@ -522,7 +528,9 @@ class PeakSetJEPAJax(nnx.Module):
         peak_intensity = augmented_batch["peak_intensity"]
         peak_valid_mask = augmented_batch["peak_valid_mask"]
         precursor_mz = augmented_batch.get("precursor_mz", None)
-        spectrum_metadata = jax_spectrum_metadata_from_batch(augmented_batch)
+        spectrum_metadata = jax_spectrum_metadata_from_batch(
+            augmented_batch, self.encoder_metadata_schema
+        )
         context_mask = augmented_batch["context_mask"] & peak_valid_mask
         target_masks = augmented_batch["target_masks"] & peak_valid_mask[:, None, :]
 
@@ -641,7 +649,9 @@ class PeakSetJEPAJax(nnx.Module):
         peak_intensity = augmented_batch["peak_intensity"]
         peak_valid_mask = augmented_batch["peak_valid_mask"]
         precursor_mz = augmented_batch.get("precursor_mz", None)
-        spectrum_metadata = jax_spectrum_metadata_from_batch(augmented_batch)
+        spectrum_metadata = jax_spectrum_metadata_from_batch(
+            augmented_batch, self.encoder_metadata_schema
+        )
         context_mask = augmented_batch["context_mask"] & peak_valid_mask
         target_masks = augmented_batch["target_masks"] & peak_valid_mask[:, None, :]
         context_mz, context_intensity, context_visible_mask = self._context_encoder_inputs(
@@ -704,7 +714,9 @@ class PeakSetJEPAJax(nnx.Module):
         peak_intensity = augmented_batch["peak_intensity"]
         peak_valid_mask = augmented_batch["peak_valid_mask"]
         precursor_mz = augmented_batch.get("precursor_mz", None)
-        spectrum_metadata = jax_spectrum_metadata_from_batch(augmented_batch)
+        spectrum_metadata = jax_spectrum_metadata_from_batch(
+            augmented_batch, self.encoder_metadata_schema
+        )
         context_mask = augmented_batch["context_mask"] & peak_valid_mask
         target_masks = augmented_batch["target_masks"] & peak_valid_mask[:, None, :]
         context_mz, context_intensity, context_visible_mask = self._context_encoder_inputs(
@@ -903,7 +915,9 @@ class PeakSetJEPAJax(nnx.Module):
             augmented_batch["peak_intensity"],
             augmented_batch["peak_valid_mask"],
             precursor_mz=augmented_batch.get("precursor_mz", None),
-            spectrum_metadata=jax_spectrum_metadata_from_batch(augmented_batch),
+            spectrum_metadata=jax_spectrum_metadata_from_batch(
+                augmented_batch, self.encoder_metadata_schema
+            ),
         )
         return self.project_teacher_targets(
             self._apply_jepa_target_normalization(teacher_target_features)
@@ -1540,7 +1554,9 @@ class PeakSetJEPAJax(nnx.Module):
             valid_mask=batch["peak_valid_mask"],
             visible_mask=batch["peak_valid_mask"],
             precursor_mz=batch.get("precursor_mz", None),
-            spectrum_metadata=jax_spectrum_metadata_from_batch(batch),
+            spectrum_metadata=jax_spectrum_metadata_from_batch(
+                batch, self.encoder_metadata_schema
+            ),
         )
         return self.pool(encoded, batch["peak_valid_mask"])
 

@@ -83,7 +83,7 @@ def test_peak_preprocessing_uses_relative_intensity_thresholds() -> None:
     raw[0, 1, :3] = [1_000_000.0, 200.0, 10.0]
     normalized = spectra_from_peak_lists(
         [[100.0, 200.0, 300.0]],
-        [[1_000_000.0, 200.0, 10.0]],
+        [[1.0, 0.0002, 0.00001]],
     )
     precursor_mz = np.asarray([500.0], dtype=np.float32)
     kwargs = {
@@ -109,16 +109,26 @@ def test_peak_preprocessing_uses_relative_intensity_thresholds() -> None:
         **kwargs,
     )
 
-    for key, expected in raw_numpy.items():
-        for actual in (
-            normalized_numpy[key],
-            raw_torch[key].numpy(),
-            normalized_torch[key].numpy(),
-        ):
+    for expected_batch, actual_batch in (
+        (raw_numpy, raw_torch),
+        (normalized_numpy, normalized_torch),
+    ):
+        for key, expected in expected_batch.items():
+            actual = actual_batch[key].numpy()
             if np.issubdtype(expected.dtype, np.floating):
                 np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-7)
             else:
                 np.testing.assert_array_equal(actual, expected)
+    for key in ("peak_mz", "peak_valid_mask", "precursor_mz"):
+        np.testing.assert_array_equal(raw_numpy[key], normalized_numpy[key])
+    np.testing.assert_array_equal(
+        raw_numpy["peak_intensity"],
+        [[1_000_000.0, 200.0, 0.0]],
+    )
+    np.testing.assert_allclose(
+        normalized_numpy["peak_intensity"],
+        [[1.0, 0.0002, 0.0]],
+    )
     np.testing.assert_array_equal(
         raw_numpy["peak_valid_mask"],
         [[True, True, False]],
@@ -154,7 +164,7 @@ def test_peak_preprocessing_marks_zero_placeholder_valid() -> None:
     np.testing.assert_array_equal(numpy_batch["peak_intensity"], np.zeros((1, 3)))
 
 
-def test_spectra_from_peak_lists_pads_truncates_and_normalizes() -> None:
+def test_spectra_from_peak_lists_pads_truncates_and_preserves_intensity() -> None:
     spectra = spectra_from_peak_lists(
         [[100.0, 200.0], list(np.arange(200, dtype=np.float32))],
         [[2.0, 1.0], list(np.arange(200, dtype=np.float32))],
@@ -163,9 +173,9 @@ def test_spectra_from_peak_lists_pads_truncates_and_normalizes() -> None:
     assert spectra.shape == (2, 2, 128)
     assert spectra.dtype == np.float32
     np.testing.assert_array_equal(spectra[0, 0, :3], [100.0, 200.0, 0.0])
-    np.testing.assert_allclose(spectra[0, 1, :3], [1.0, 0.5, 0.0])
+    np.testing.assert_allclose(spectra[0, 1, :3], [2.0, 1.0, 0.0])
     assert spectra[1, 0, -1] == 127.0
-    assert spectra[1, 1, -1] == 1.0
+    assert spectra[1, 1, -1] == 127.0
 
 
 def test_gems_collator_can_return_numpy_batch() -> None:

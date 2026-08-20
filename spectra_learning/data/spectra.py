@@ -67,12 +67,6 @@ def spectra_from_peak_lists(
             intensity[:num_peaks],
             dtype=np.float32,
         )
-    max_intensity = spectra[:, 1].max(axis=1, keepdims=True)
-    np.divide(
-        spectra[:, 1],
-        np.maximum(max_intensity, 1e-8),
-        out=spectra[:, 1],
-    )
     return spectra
 
 
@@ -184,10 +178,10 @@ def preprocess_peak_batch_numpy(
         raise ValueError(f"Unknown peak_ordering: {peak_ordering}")
     mz = spectra[:, 0, :].astype(np.float32, copy=False)
     intensity = spectra[:, 1, :].astype(np.float32, copy=False)
-    intensity = _normalize_peak_intensity_numpy(intensity)
+    relative_intensity = _normalize_peak_intensity_numpy(intensity)
     keep = _usable_peak_mask_numpy(
         mz,
-        intensity,
+        relative_intensity,
         precursor_mz,
         min_peak_intensity=min_peak_intensity,
         peak_drop_min_intensity=peak_drop_min_intensity,
@@ -204,11 +198,6 @@ def preprocess_peak_batch_numpy(
         num_peaks=num_peaks,
     )
 
-    max_intensity = np.maximum(
-        intensity.max(axis=1, keepdims=True),
-        PEAK_INTENSITY_NORMALIZATION_FLOOR,
-    )
-    intensity = intensity / max_intensity
     valid = intensity > 0
     if peak_ordering == "mz":
         sort_key = np.where(valid, mz, np.inf)
@@ -254,14 +243,14 @@ def preprocess_peak_batch_torch(
         intensity.amax(dim=1, keepdim=True),
         min=PEAK_INTENSITY_NORMALIZATION_FLOOR,
     )
-    intensity = intensity / input_max_intensity
+    relative_intensity = intensity / input_max_intensity
     intensity_threshold = max(min_peak_intensity, peak_drop_min_intensity)
     window = precursor_peak_exclusion_window_da
     precursor_upper = precursor_mz[:, None] - window
     keep = (
         (mz >= PEAK_MZ_MIN)
         & (mz <= PEAK_MZ_MAX)
-        & (intensity >= intensity_threshold)
+        & (relative_intensity >= intensity_threshold)
         & ((window <= 0.0) | (mz <= precursor_upper))
     )
     mz = torch.where(keep, mz, torch.zeros_like(mz))
@@ -273,11 +262,6 @@ def preprocess_peak_batch_torch(
         num_peaks=num_peaks,
     )
 
-    max_intensity = torch.clamp(
-        intensity.amax(dim=1, keepdim=True),
-        min=PEAK_INTENSITY_NORMALIZATION_FLOOR,
-    )
-    intensity = intensity / max_intensity
     valid = intensity > 0
     if peak_ordering == "mz":
         sort_key = torch.where(valid, mz, torch.full_like(mz, float("inf")))

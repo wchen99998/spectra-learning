@@ -69,6 +69,8 @@ class GemsDataConfig:
     dataloader_output_format: str
     training_max_steps: int | None
     val_num_steps: int
+    encoder_metadata_schema: str | None
+    spectrum_metadata_dropout_probability: float
 
     @classmethod
     def from_config(cls, config: config_dict.ConfigDict) -> "GemsDataConfig":
@@ -190,4 +192,8 @@ class GemsDataConfig:
                 else int(config.training_max_steps)
             ),
             val_num_steps=int(config.get("val_num_steps", 64)),
+            encoder_metadata_schema=config.get("encoder_metadata_schema", None),
+            spectrum_metadata_dropout_probability=float(
+                config.get("spectrum_metadata_dropout_probability", 0.0)
+            ),
         )

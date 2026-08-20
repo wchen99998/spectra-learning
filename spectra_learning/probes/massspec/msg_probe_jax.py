@@ -1551,7 +1551,10 @@ def _extract_features(
     use_pair_features: bool,
 ) -> JaxFeatures:
     precursor_mz = batch.get("precursor_mz", None)
-    spectrum_metadata = jax_spectrum_metadata_from_batch(batch)
+    spectrum_metadata = jax_spectrum_metadata_from_batch(
+        batch,
+        getattr(getattr(model, "encoder", None), "metadata_schema", None),
+    )
     if use_pair_features:
         return _extract_pair_features_jitted(
             model,

@@ -212,6 +212,9 @@ class GemsDataModule:
 
     def _validate_massive_v2_contract(self) -> None:
         manifest = self.artifact.manifest
+        if self.encoder_metadata_schema is not None:
+            if manifest["spectrum_metadata"]["schema"] != self.encoder_metadata_schema:
+                raise ValueError("MassIVE v2 spectrum metadata schema mismatch")
         eligibility = manifest["eligibility"]
         expected_eligibility = massive_v2_eligibility_contract()
         if eligibility != expected_eligibility:
@@ -608,7 +611,10 @@ class GemsDataModule:
             "batch_sampler": batch_sampler,
             "num_workers": resolved_num_workers,
             "pin_memory": self.dataloader_pin_memory,
-            "collate_fn": self._collator(augment=augment),
+            "collate_fn": self._collator(
+                augment=augment,
+                metadata_dropout=(split == "train"),
+            ),
         }
         if resolved_num_workers > 0:
             loader_kwargs["persistent_workers"] = self.dataloader_persistent_workers
@@ -619,7 +625,12 @@ class GemsDataModule:
                 )
         return DataLoader(**loader_kwargs)
 
-    def _collator(self, *, augment: bool) -> GemsBatchCollator:
+    def _collator(
+        self,
+        *,
+        augment: bool,
+        metadata_dropout: bool = False,
+    ) -> GemsBatchCollator:
         return GemsBatchCollator(
             augment=augment,
             num_target_blocks=self.jepa_num_target_blocks,
@@ -638,6 +649,12 @@ class GemsDataModule:
             peak_ordering=self.peak_ordering,
             precursor_peak_exclusion_window_da=self.precursor_peak_exclusion_window_da,
             output_format=self.dataloader_output_format,
+            spectrum_metadata_schema=self.encoder_metadata_schema,
+            spectrum_metadata_dropout_probability=(
+                self.spectrum_metadata_dropout_probability
+                if metadata_dropout
+                else 0.0
+            ),
         )
 
     def set_mask_fractions(

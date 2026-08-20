@@ -8,11 +8,13 @@ from pathlib import Path
 from typing import Any
 
 import h5py
+from huggingface_hub import hf_hub_download
 
 from spectra_learning.data.gems.prepare_massive_v2 import (
     dataset_card,
     upload_artifact,
     validate_artifact,
+    validate_replacement_totals,
 )
 
 DEFAULT_SOURCE_MANIFEST = Path(
@@ -22,6 +24,7 @@ DEFAULT_WORK_DIR = Path("/mnt/tg-go-nvme/massive-v2-repack-v3-10gb")
 DEFAULT_DESTINATION_REPO_ID = (
     "novogaia/massive-v2-ms2-t095-l080-sharded-10gb"
 )
+BASELINE_REVISION = "4de48add4e687f6ea561dc6ec74f8984ad8aebe0"
 DEFAULT_TARGET_BYTES = 10_000_000_000
 SPECTRUM_COPY_ROWS = 16_384
 SCALAR_COPY_ROWS = 1_048_576
@@ -273,6 +276,15 @@ def main() -> None:
     )
     validate_artifact(manifest_path, workers=args.workers)
     if args.upload:
+        baseline_manifest = Path(
+            hf_hub_download(
+                args.destination_repo_id,
+                "manifest.json",
+                repo_type="dataset",
+                revision=BASELINE_REVISION,
+            )
+        )
+        validate_replacement_totals(manifest_path, baseline_manifest)
         print(upload_artifact(manifest_path.parent, args.destination_repo_id))
 
 

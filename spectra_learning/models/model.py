@@ -157,6 +157,7 @@ class PeakSetJEPA(nn.Module):
             )
         self.encoder_num_layers = cfg.encoder_num_layers
         self.norm_eps = cfg.norm_eps
+        self.encoder_metadata_schema = cfg.encoder_metadata_schema
 
     def _configure_targets(
         self,
@@ -262,6 +263,9 @@ class PeakSetJEPA(nn.Module):
             pairmixer_fourier_x_max=cfg.pairmixer_fourier_x_max,
             pairmixer_relative_fourier_x_min=cfg.pairmixer_relative_fourier_x_min,
             pairmixer_relative_fourier_x_max=cfg.pairmixer_relative_fourier_x_max,
+            metadata_schema=cfg.encoder_metadata_schema,
+            metadata_conditioning=cfg.encoder_metadata_conditioning,
+            metadata_condition_dim=cfg.encoder_metadata_condition_dim,
         )
 
     @staticmethod
@@ -681,7 +685,9 @@ class PeakSetJEPA(nn.Module):
             augmented_batch["peak_intensity"],
             augmented_batch["peak_valid_mask"],
             precursor_mz=augmented_batch.get("precursor_mz", None),
-            spectrum_metadata=torch_spectrum_metadata_from_batch(augmented_batch),
+            spectrum_metadata=torch_spectrum_metadata_from_batch(
+                augmented_batch, self.encoder_metadata_schema
+            ),
         )
 
     def _encode_augmented_teacher_and_context(
@@ -1208,7 +1214,9 @@ class PeakSetJEPA(nn.Module):
         peak_intensity = augmented_batch["peak_intensity"]
         peak_valid_mask = augmented_batch["peak_valid_mask"]
         precursor_mz = augmented_batch.get("precursor_mz", None)
-        spectrum_metadata = torch_spectrum_metadata_from_batch(augmented_batch)
+        spectrum_metadata = torch_spectrum_metadata_from_batch(
+            augmented_batch, self.encoder_metadata_schema
+        )
         context_mask = augmented_batch["context_mask"] & peak_valid_mask
         target_masks = augmented_batch["target_masks"] & peak_valid_mask.unsqueeze(1)
         (
@@ -1316,7 +1324,9 @@ class PeakSetJEPA(nn.Module):
         peak_intensity = augmented_batch["peak_intensity"]
         peak_valid_mask = augmented_batch["peak_valid_mask"]
         precursor_mz = augmented_batch.get("precursor_mz", None)
-        spectrum_metadata = torch_spectrum_metadata_from_batch(augmented_batch)
+        spectrum_metadata = torch_spectrum_metadata_from_batch(
+            augmented_batch, self.encoder_metadata_schema
+        )
         context_mask = augmented_batch["context_mask"] & peak_valid_mask
         target_masks = augmented_batch["target_masks"] & peak_valid_mask.unsqueeze(1)
 
@@ -1382,7 +1392,9 @@ class PeakSetJEPA(nn.Module):
             valid_mask=valid,
             visible_mask=valid,
             precursor_mz=batch.get("precursor_mz", None),
-            spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
+            spectrum_metadata=torch_spectrum_metadata_from_batch(
+                batch, self.encoder_metadata_schema
+            ),
         )
         return self.pool(encoded, valid)
 

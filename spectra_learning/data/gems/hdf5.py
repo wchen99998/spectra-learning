@@ -20,6 +20,22 @@ GEMS_SPECTRUM_METADATA_DATASETS = {
     "collision_energy": "collision_energy",
     "charge": "charge",
 }
+
+
+def spectrum_metadata_datasets(manifest: dict[str, Any]) -> dict[str, str]:
+    metadata = manifest.get("spectrum_metadata")
+    if metadata is None:
+        return dict(GEMS_SPECTRUM_METADATA_DATASETS)
+    return {
+        key: dataset
+        for key, dataset in metadata["columns"].items()
+        if key
+        not in {
+            "precursor_mz",
+            "precursor_intensity_zscore",
+            "precursor_intensity_present",
+        }
+    }
 GEMS_SPLIT_VERSION = "global_chunk_modulo_v1"
 GEMS_SPLIT_CHUNK_ROWS = 256
 GEMS_SPLIT_MODULUS = 20
@@ -433,11 +449,13 @@ class MassiveV2Hdf5ShardDataset:
         self.spectrum_dataset = spectrum_dataset
         self.precursor_dataset = precursor_dataset
         self.split = split
+        manifest = json.loads(self.manifest_path.read_text())
+        self.metadata_datasets = spectrum_metadata_datasets(manifest)
         self.files: dict[int, h5py.File] = {}
         self.spectra: dict[int, h5py.Dataset] = {}
         self.precursors: dict[int, h5py.Dataset] = {}
         self.metadata: dict[str, dict[int, h5py.Dataset]] = {
-            key: {} for key in GEMS_SPECTRUM_METADATA_DATASETS
+            key: {} for key in self.metadata_datasets
         }
         self.shard_order: tuple[int, ...] = tuple(range(len(shards)))
         self.shard_positions = {
@@ -493,7 +511,7 @@ class MassiveV2Hdf5ShardDataset:
         state["spectra"] = {}
         state["precursors"] = {}
         state["metadata"] = {
-            key: {} for key in GEMS_SPECTRUM_METADATA_DATASETS
+            key: {} for key in self.metadata_datasets
         }
         state["prefetch_thread"] = None
         state["prefetch_error"] = None
@@ -599,7 +617,7 @@ class MassiveV2Hdf5ShardDataset:
         self.files[shard_id] = file
         self.spectra[shard_id] = spectrum
         self.precursors[shard_id] = file[self.precursor_dataset]
-        for key, dataset in GEMS_SPECTRUM_METADATA_DATASETS.items():
+        for key, dataset in self.metadata_datasets.items():
             self.metadata[key][shard_id] = file[dataset]
         self._prefetch_next_shard(shard_id)
 
@@ -610,7 +628,7 @@ class MassiveV2Hdf5ShardDataset:
         self.spectra = {}
         self.precursors = {}
         self.metadata = {
-            key: {} for key in GEMS_SPECTRUM_METADATA_DATASETS
+            key: {} for key in self.metadata_datasets
         }
 
     def __len__(self) -> int:

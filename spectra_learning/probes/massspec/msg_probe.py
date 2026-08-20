@@ -986,7 +986,10 @@ def _make_msg_probe_feature_extractor(
                 batch["peak_intensity"],
                 valid_mask=batch["peak_valid_mask"],
                 precursor_mz=batch.get("precursor_mz", None),
-                spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
+                spectrum_metadata=torch_spectrum_metadata_from_batch(
+                    batch,
+                    getattr(model.encoder, "metadata_schema", None),
+                ),
             )
             return embeddings, pair_embeddings
         return model.encoder(
@@ -994,7 +997,10 @@ def _make_msg_probe_feature_extractor(
             batch["peak_intensity"],
             valid_mask=batch["peak_valid_mask"],
             precursor_mz=batch.get("precursor_mz", None),
-            spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
+            spectrum_metadata=torch_spectrum_metadata_from_batch(
+                batch,
+                getattr(model.encoder, "metadata_schema", None),
+            ),
         )
 
     return feature_extractor

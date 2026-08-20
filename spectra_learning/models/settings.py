@@ -139,6 +139,9 @@ class PeakSetJEPASettings:
     activation_checkpoint_every_n_layers: int = 1
     activation_checkpoint_modules: tuple[str, ...] = ("encoder", "predictor")
     autocast_dtype: str = "none"
+    encoder_metadata_schema: str | None = None
+    encoder_metadata_conditioning: str = "additive"
+    encoder_metadata_condition_dim: int = 256
 
     @classmethod
     def from_config(cls, config: Any) -> "PeakSetJEPASettings":

@@ -13,6 +13,7 @@ TRAIN_BATCH_KEYS = frozenset(
         "precursor_mz",
         "collision_energy",
         "charge",
+        "spectrum_metadata",
     }
 )
 

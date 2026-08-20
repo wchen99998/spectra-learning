@@ -705,7 +705,10 @@ def _build_checkpoint_feature_factory(
             batch["peak_intensity"],
             valid_mask=batch["peak_valid_mask"],
             precursor_mz=batch.get("precursor_mz", None),
-            spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
+            spectrum_metadata=torch_spectrum_metadata_from_batch(
+                batch,
+                getattr(model.encoder, "metadata_schema", None),
+            ),
         )
         return _peak_tokens_only(embeddings, batch["peak_valid_mask"])
 
@@ -718,7 +721,10 @@ def _build_checkpoint_feature_factory(
             batch["peak_intensity"],
             valid_mask=batch["peak_valid_mask"],
             precursor_mz=batch.get("precursor_mz", None),
-            spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
+            spectrum_metadata=torch_spectrum_metadata_from_batch(
+                batch,
+                getattr(model.encoder, "metadata_schema", None),
+            ),
         )
         return peak_embeddings, pair_embeddings
 
@@ -936,7 +942,10 @@ class FluorineFinetuneModule(torch.nn.Module):
                 batch["peak_intensity"],
                 valid_mask=batch["peak_valid_mask"],
                 precursor_mz=batch.get("precursor_mz", None),
-                spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
+                spectrum_metadata=torch_spectrum_metadata_from_batch(
+                    batch,
+                    getattr(self.encoder, "metadata_schema", None),
+                ),
             )
             if self.pooling == "cls":
                 cls_idx = batch["peak_valid_mask"].shape[1]
@@ -962,7 +971,10 @@ class FluorineFinetuneModule(torch.nn.Module):
                 batch["peak_intensity"],
                 valid_mask=batch["peak_valid_mask"],
                 precursor_mz=batch.get("precursor_mz", None),
-                spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
+                spectrum_metadata=torch_spectrum_metadata_from_batch(
+                    batch,
+                    getattr(self.encoder, "metadata_schema", None),
+                ),
             )
             peak_embeddings = _peak_tokens_only(encoded, batch["peak_valid_mask"])
             features = cast(torch.nn.Module, self.pooler)(
@@ -2766,7 +2778,10 @@ def _extract_jax_fluorine_features(
     )
 
     precursor_mz = batch.get("precursor_mz", None)
-    spectrum_metadata = jax_spectrum_metadata_from_batch(batch)
+    spectrum_metadata = jax_spectrum_metadata_from_batch(
+        batch,
+        getattr(runtime.model.encoder, "metadata_schema", None),
+    )
     if runtime.variant in {"cls", "single_pair_covariance"}:
         features = runtime.extract_pair(
             runtime.model,
@@ -3089,7 +3104,10 @@ def _jax_fluorine_finetune_features(
     kwargs = {
         "valid_mask": batch["peak_valid_mask"],
         "precursor_mz": batch.get("precursor_mz"),
-        "spectrum_metadata": jax_spectrum_metadata_from_batch(batch),
+        "spectrum_metadata": jax_spectrum_metadata_from_batch(
+            batch,
+            getattr(encoder, "metadata_schema", None),
+        ),
     }
     if variant in {"cls", "single_pair_covariance"}:
         return encoder.forward_with_pair(

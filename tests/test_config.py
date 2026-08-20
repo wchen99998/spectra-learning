@@ -50,6 +50,9 @@ def test_current_pretraining_config_records_model_and_data_defaults() -> None:
     assert model_keys - set(config) == {
         "distogram_mz_max",
         "encoder_mz_scale",
+        "encoder_metadata_condition_dim",
+        "encoder_metadata_conditioning",
+        "encoder_metadata_schema",
         "encoder_use_cls_token",
         "encoder_use_pair_path",
         "jepa_mae_mz_max",
@@ -61,8 +64,10 @@ def test_current_pretraining_config_records_model_and_data_defaults() -> None:
         "predictor_target_max_tokens",
     }
     assert data_keys - set(config) == {
+        "encoder_metadata_schema",
         "jepa_intensity_aware_mask_config",
         "min_precursor_mz",
+        "spectrum_metadata_dropout_probability",
     }
     assert "nist_murcko_probe_repo_id" not in config
     assert "nist_murcko_probe_revision" not in config

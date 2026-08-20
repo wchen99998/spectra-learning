@@ -26,6 +26,28 @@ from spectra_learning.data.spectra import (
     preprocess_peak_batch_numpy,
     preprocess_peak_batch_torch,
 )
+from spectra_learning.models.spectrum_metadata import (
+    MASSIVE_V2_ACQUISITION_SCHEMA,
+    drop_massive_v2_metadata_torch,
+    torch_massive_v2_condition_from_batch,
+)
+
+
+ACQUISITION_METADATA_KEYS = (
+    "precursor_mz_present",
+    "collision_energy_present",
+    "charge_present",
+    "polarity_id",
+    "acquisition_type_id",
+    "isolation_window_lower_offset",
+    "isolation_window_upper_offset",
+    "isolation_window_present",
+    "instrument_family_id",
+    "mass_accuracy",
+    "mass_accuracy_present",
+    "retention_time_fraction",
+    "retention_time_present",
+)
 
 
 class GemsBatchCollator:
@@ -49,6 +71,8 @@ class GemsBatchCollator:
         intensity_aware_mask_config: dict[str, float] | None = None,
         allow_target_overlap: bool = False,
         output_format: str = "torch",
+        spectrum_metadata_schema: str | None = None,
+        spectrum_metadata_dropout_probability: float = 0.0,
     ) -> None:
         self.augment = augment
         self.num_target_blocks = num_target_blocks
@@ -71,6 +95,10 @@ class GemsBatchCollator:
         self.peak_ordering = peak_ordering
         self.precursor_peak_exclusion_window_da = precursor_peak_exclusion_window_da
         self.output_format = output_format
+        self.spectrum_metadata_schema = spectrum_metadata_schema
+        self.spectrum_metadata_dropout_probability = (
+            spectrum_metadata_dropout_probability
+        )
 
     def __call__(self, samples: list[dict[str, Any]]) -> dict[str, Any]:
         batch = self._preprocess(samples)
@@ -125,7 +153,9 @@ class GemsBatchCollator:
             min_peak_intensity=self.min_peak_intensity,
         )
         self._add_numpy_spectrum_metadata(batch, samples)
-        return {key: torch.from_numpy(value) for key, value in batch.items()}
+        torch_batch = {key: torch.from_numpy(value) for key, value in batch.items()}
+        self._add_condition_vector(torch_batch)
+        return torch_batch
 
     def _preprocess_torch(
         self,
@@ -148,6 +178,7 @@ class GemsBatchCollator:
             min_peak_intensity=self.min_peak_intensity,
         )
         self._add_torch_spectrum_metadata(batch, samples)
+        self._add_condition_vector(batch)
         return batch
 
     def _add_numpy_spectrum_metadata(
@@ -169,6 +200,7 @@ class GemsBatchCollator:
                 dtype=np.float32,
             )
         )
+        self._add_numpy_acquisition_metadata(batch, samples)
 
     def _add_torch_spectrum_metadata(
         self,
@@ -187,6 +219,43 @@ class GemsBatchCollator:
                 [torch.as_tensor(sample["charge"]) for sample in samples],
             )
         )
+        self._add_torch_acquisition_metadata(batch, samples)
+
+    def _add_numpy_acquisition_metadata(
+        self,
+        batch: dict[str, np.ndarray],
+        samples: list[dict[str, Any]],
+    ) -> None:
+        if self.spectrum_metadata_schema != MASSIVE_V2_ACQUISITION_SCHEMA:
+            return
+        for key in ACQUISITION_METADATA_KEYS:
+            batch[key] = np.asarray(
+                [sample[key] for sample in samples],
+                dtype=np.float32,
+            )
+
+    def _add_torch_acquisition_metadata(
+        self,
+        batch: dict[str, torch.Tensor],
+        samples: list[dict[str, Any]],
+    ) -> None:
+        if self.spectrum_metadata_schema != MASSIVE_V2_ACQUISITION_SCHEMA:
+            return
+        for key in ACQUISITION_METADATA_KEYS:
+            batch[key] = torch.stack(
+                [torch.as_tensor(sample[key]) for sample in samples]
+            ).to(dtype=torch.float32)
+
+    def _add_condition_vector(self, batch: dict[str, torch.Tensor]) -> None:
+        if self.spectrum_metadata_schema != MASSIVE_V2_ACQUISITION_SCHEMA:
+            return
+        metadata = torch_massive_v2_condition_from_batch(batch)
+        if self.spectrum_metadata_dropout_probability > 0.0:
+            metadata = drop_massive_v2_metadata_torch(
+                metadata,
+                self.spectrum_metadata_dropout_probability,
+            )
+        batch["spectrum_metadata"] = metadata
 
     def _sample_masks(
         self,

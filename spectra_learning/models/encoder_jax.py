@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import cast
 
+import jax
 import jax.numpy as jnp
 import torch
 from flax import nnx
@@ -26,10 +27,44 @@ from spectra_learning.models.pairmixer_jax import (
     _scatter_pair,
 )
 from spectra_learning.models.peak_features_jax import PeakFeatureEmbedder
+from spectra_learning.models.spectrum_metadata import MASSIVE_V2_CONDITION_DIM
 
 
 def _normal_token_param(rngs: nnx.Rngs, shape: tuple[int, ...]) -> nnx.Param:
     return nnx.Param(rngs.params.normal(shape, dtype=jnp.float32) * 0.02)
+
+
+class MetadataEmbedder(nnx.Module):
+    def __init__(
+        self,
+        condition_dim: int,
+        *,
+        compute_dtype: object,
+        rngs: nnx.Rngs,
+    ) -> None:
+        self.linear0 = Linear(
+            MASSIVE_V2_CONDITION_DIM,
+            condition_dim,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        )
+        self.linear2 = Linear(
+            condition_dim,
+            condition_dim,
+            compute_dtype=compute_dtype,
+            rngs=rngs,
+        )
+
+    def __call__(self, x: Array) -> Array:
+        return self.linear2(jax.nn.silu(self.linear0(x)))
+
+    def load_torch_state_dict(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        prefix: str,
+    ) -> None:
+        self.linear0.load_torch_state_dict(state_dict, f"{prefix}.0")
+        self.linear2.load_torch_state_dict(state_dict, f"{prefix}.2")
 
 
 class PeakSetEncoder(nnx.Module):
@@ -68,6 +103,9 @@ class PeakSetEncoder(nnx.Module):
         activation_checkpoint_mode: str = "none",
         activation_checkpoint_every_n_layers: int = 1,
         activation_checkpoint_modules: tuple[str, ...] = ("encoder", "predictor"),
+        metadata_schema: str | None = None,
+        metadata_conditioning: str = "additive",
+        metadata_condition_dim: int = 256,
         rngs: nnx.Rngs | None = None,
         compute_dtype: object = jnp.float32,
     ) -> None:
@@ -75,6 +113,8 @@ class PeakSetEncoder(nnx.Module):
         self.num_layers = num_layers
         self.use_cls_token = use_cls_token
         self.use_pair_path = use_pair_path
+        self.metadata_schema = metadata_schema
+        self.metadata_conditioning = metadata_conditioning
         self.pairmixer_block_type = pairmixer_block_type.lower()
         if self.pairmixer_block_type not in {
             "dense",
@@ -96,13 +136,22 @@ class PeakSetEncoder(nnx.Module):
         self.activation_checkpoint_every_n_layers = activation_checkpoint_every_n_layers
         self.activation_checkpoint_modules = activation_checkpoint_modules
         self.embedder = embedder
-        self.metadata_proj = Linear(
-            2,
-            model_dim,
-            bias=False,
-            compute_dtype=compute_dtype,
-            rngs=rngs,
-        )
+        if self.metadata_conditioning == "adaln_zero":
+            self.metadata_embedder = MetadataEmbedder(
+                metadata_condition_dim,
+                compute_dtype=compute_dtype,
+                rngs=rngs,
+            )
+            self.metadata_proj = None
+        else:
+            self.metadata_proj = Linear(
+                2,
+                model_dim,
+                bias=False,
+                compute_dtype=compute_dtype,
+                rngs=rngs,
+            )
+            self.metadata_embedder = None
         pair_dim = model_dim if pair_dim is None else pair_dim
         self.cls_token = (
             _normal_token_param(rngs, (model_dim,)) if self.use_cls_token else None
@@ -170,6 +219,11 @@ class PeakSetEncoder(nnx.Module):
                     norm_eps=norm_eps,
                     use_rope=use_position_embedding,
                     transition_type=pairmixer_transition_type,
+                    condition_dim=(
+                        metadata_condition_dim
+                        if self.metadata_conditioning == "adaln_zero"
+                        else None
+                    ),
                     compute_dtype=compute_dtype,
                     rngs=rngs,
                 )
@@ -179,6 +233,17 @@ class PeakSetEncoder(nnx.Module):
         self.final_norm = (
             RMSNorm(model_dim, eps=norm_eps, affine=False)
             if apply_final_norm
+            else None
+        )
+        self.final_adaLN_modulation = (
+            Linear(
+                metadata_condition_dim,
+                2 * model_dim,
+                compute_dtype=compute_dtype,
+                init="zeros",
+                rngs=rngs,
+            )
+            if apply_final_norm and self.metadata_conditioning == "adaln_zero"
             else None
         )
         self.final_pair_norm = (
@@ -202,7 +267,21 @@ class PeakSetEncoder(nnx.Module):
     def _metadata_embedding(self, spectrum_metadata: Array | None, dtype: object) -> Array | None:
         if spectrum_metadata is None:
             return None
+        if self.metadata_conditioning == "adaln_zero":
+            return self.metadata_embedder(spectrum_metadata.astype(dtype))
         return self.metadata_proj(spectrum_metadata.astype(dtype))
+
+    def _finalize(self, x: Array, condition: Array | None) -> Array:
+        if self.final_norm is not None:
+            x = self.final_norm(x)
+        if self.final_adaLN_modulation is not None:
+            shift, scale = jnp.split(
+                self.final_adaLN_modulation(condition),
+                2,
+                axis=-1,
+            )
+            x = x * (1 + scale[:, None]) + shift[:, None]
+        return x
 
     def _embed_peaks(
         self,
@@ -220,7 +299,7 @@ class PeakSetEncoder(nnx.Module):
             peak_visible_mask = peak_valid_mask
         x = self.embedder(peak_mz, peak_intensity)
         metadata_embedding = self._metadata_embedding(spectrum_metadata, x.dtype)
-        if metadata_embedding is not None:
+        if metadata_embedding is not None and self.metadata_conditioning != "adaln_zero":
             x = x + metadata_embedding[:, None, :].astype(x.dtype)
         return x, peak_visible_mask, metadata_embedding
 
@@ -279,7 +358,10 @@ class PeakSetEncoder(nnx.Module):
             peak_visible_mask,
             precursor_mz=precursor_mz,
         )
-        x = self._append_cls_token(x, metadata_embedding)
+        x = self._append_cls_token(
+            x,
+            metadata_embedding if self.metadata_conditioning != "adaln_zero" else None,
+        )
         z = self._append_cls_pair_tokens(z)
         token_visible_mask = self._append_cls_mask(peak_visible_mask)
         if self.use_fastmixer:
@@ -311,8 +393,7 @@ class PeakSetEncoder(nnx.Module):
                         token_visible_mask,
                         deterministic=deterministic,
                     )
-        if self.final_norm is not None:
-            x = self.final_norm(x)
+        x = self._finalize(x, metadata_embedding)
         if self.final_pair_norm is not None and not self.use_fastmixer:
             z = self.final_pair_norm(z)
         pair_visible_mask = token_visible_mask[:, :, None] & token_visible_mask[:, None, :]
@@ -345,7 +426,10 @@ class PeakSetEncoder(nnx.Module):
             peak_visible_mask,
             precursor_mz=precursor_mz,
         )
-        x = self._append_cls_token(x, metadata_embedding)
+        x = self._append_cls_token(
+            x,
+            metadata_embedding if self.metadata_conditioning != "adaln_zero" else None,
+        )
         z = self._append_cls_pair_tokens(z)
         token_visible_mask = self._append_cls_mask(peak_visible_mask)
         x, z, idx, compact_token_mask = self._forward_fastmixer_blocks_compact(
@@ -354,8 +438,7 @@ class PeakSetEncoder(nnx.Module):
             token_visible_mask,
             max_visible_tokens=max_visible_tokens,
         )
-        if self.final_norm is not None:
-            x = self.final_norm(x)
+        x = self._finalize(x, metadata_embedding)
         x = x * compact_token_mask[..., None].astype(x.dtype)
         if self.final_pair_norm is not None:
             z = self.final_pair_norm(z)
@@ -392,7 +475,10 @@ class PeakSetEncoder(nnx.Module):
             visible_mask,
             spectrum_metadata,
         )
-        x = self._append_cls_token(x, metadata_embedding)
+        x = self._append_cls_token(
+            x,
+            metadata_embedding if self.metadata_conditioning != "adaln_zero" else None,
+        )
         token_visible_mask = self._append_cls_mask(peak_visible_mask)
         compact_tokens = (
             self.pairmixer_fast_max_visible_tokens
@@ -405,9 +491,13 @@ class PeakSetEncoder(nnx.Module):
         )
         x = _gather_single(x, idx)
         x = x * compact_token_mask[..., None].astype(x.dtype)
-        x = self._forward_single_blocks(x, compact_token_mask, idx)
-        if self.final_norm is not None:
-            x = self.final_norm(x)
+        x = self._forward_single_blocks(
+            x,
+            compact_token_mask,
+            idx,
+            metadata_embedding,
+        )
+        x = self._finalize(x, metadata_embedding)
         return (
             x * compact_token_mask[..., None].astype(x.dtype),
             idx,
@@ -419,6 +509,7 @@ class PeakSetEncoder(nnx.Module):
         x: Array,
         token_visible_mask: Array,
         token_positions: Array | None = None,
+        condition: Array | None = None,
     ) -> Array:
         for block_idx, block in enumerate(self.blocks, start=1):
             if should_activation_checkpoint(
@@ -433,12 +524,13 @@ class PeakSetEncoder(nnx.Module):
                     policy=activation_checkpoint_policy(
                         self.activation_checkpoint_mode
                     ),
-                )(block, x, token_visible_mask, token_positions)
+                )(block, x, token_visible_mask, token_positions, condition)
             else:
                 x = cast(SingleMixerBlock, block)(
                     x,
                     token_visible_mask,
                     token_positions,
+                    condition,
                 )
         return x
 
@@ -550,12 +642,17 @@ class PeakSetEncoder(nnx.Module):
             visible_mask,
             spectrum_metadata,
         )
-        output = self._append_cls_token(output, metadata_embedding)
+        output = self._append_cls_token(
+            output,
+            metadata_embedding if self.metadata_conditioning != "adaln_zero" else None,
+        )
         token_visible_mask = self._append_cls_mask(peak_visible_mask)
-        output = self._forward_single_blocks(output, token_visible_mask)
-        if self.final_norm is not None:
-            output = self.final_norm(output)
-        return output
+        output = self._forward_single_blocks(
+            output,
+            token_visible_mask,
+            condition=metadata_embedding,
+        )
+        return self._finalize(output, metadata_embedding)
 
     def load_torch_state_dict(
         self,
@@ -565,7 +662,13 @@ class PeakSetEncoder(nnx.Module):
         if self.use_cls_token:
             assign_param(self.cls_token, state_dict[f"{prefix}.cls_token"])
         self.embedder.load_torch_state_dict(state_dict, f"{prefix}.embedder")
-        self.metadata_proj.load_torch_state_dict(state_dict, f"{prefix}.metadata_proj")
+        if self.metadata_conditioning == "adaln_zero":
+            self.metadata_embedder.load_torch_state_dict(
+                state_dict,
+                f"{prefix}.metadata_embedder",
+            )
+        else:
+            self.metadata_proj.load_torch_state_dict(state_dict, f"{prefix}.metadata_proj")
         if self.use_pair_path and self.use_cls_token:
             assign_param(
                 self.cls_to_peak_pair_token,
@@ -588,6 +691,11 @@ class PeakSetEncoder(nnx.Module):
             block.load_torch_state_dict(state_dict, f"{prefix}.blocks.{idx}")
         if self.final_norm is not None:
             self.final_norm.load_torch_state_dict(state_dict, f"{prefix}.final_norm")
+        if self.final_adaLN_modulation is not None:
+            self.final_adaLN_modulation.load_torch_state_dict(
+                state_dict,
+                f"{prefix}.final_adaLN_modulation",
+            )
         if self.final_pair_norm is not None:
             self.final_pair_norm.load_torch_state_dict(
                 state_dict,
@@ -610,8 +718,9 @@ def _call_single_mixer_block(
     single: Array,
     token_mask: Array,
     token_positions: Array | None,
+    condition: Array | None,
 ) -> Array:
-    return block(single, token_mask, token_positions)
+    return block(single, token_mask, token_positions, condition)
 
 
 def _call_fast_pair_mixer_block(

@@ -21,11 +21,17 @@ from spectra_learning.data.gems.eligibility import (
     massive_v2_eligibility_contract,
     massive_v2_training_eligibility_numpy,
 )
+from spectra_learning.models.spectrum_metadata import (
+    INSTRUMENT_FAMILIES,
+    MASSIVE_V2_ACQUISITION_SCHEMA,
+    acquisition_type_id,
+    instrument_family_id,
+)
 
 SOURCE_REPO_ID = "novogaia/massive-v2"
 SOURCE_REVISION = "10c48d8184119829c48651b8a40ea5e0b9015687"
 SOURCE_SUFFIX = "_t0.95_l0.80_grouped.hdf5"
-CONVERSION_VERSION = "massive_v2_ms2_usable_peaks_v5"
+CONVERSION_VERSION = "massive_v2_ms2_acquisition_metadata_v1"
 DEFAULT_WORK_DIR = Path("/mnt/tg-go-nvme/massive-v2-conversion-v3")
 TARGET_ROWS_PER_SHARD = 2_097_152
 SPECTRUM_CHUNK_ROWS = 256
@@ -47,9 +53,29 @@ FINAL_DATASETS = (
     "global_group_id",
     "unique_spectrum_id",
 )
-SOURCE_DATASETS = tuple(
-    name for name in FINAL_DATASETS if name != "training_eligible"
+ACQUISITION_DATASETS = (
+    "precursor_mz_present",
+    "collision_energy_present",
+    "charge_present",
+    "polarity_id",
+    "acquisition_type_id",
+    "isolation_window_lower_offset",
+    "isolation_window_upper_offset",
+    "isolation_window_present",
+    "instrument_family_id",
+    "mass_accuracy",
+    "mass_accuracy_present",
+    "retention_time_fraction",
+    "retention_time_present",
 )
+ACQUISITION_SOURCE_DATASETS = (
+    "acquisition_type",
+    "positive polarity",
+    "window lo",
+    "window uo",
+    "instrument accuracy est.",
+)
+SOURCE_DATASETS = tuple(name for name in FINAL_DATASETS if name != "training_eligible")
 STRING_DATASETS = {"massive_id", "unique_spectrum_id"}
 
 logger = logging.getLogger(__name__)
@@ -145,6 +171,22 @@ def download_source(source_dir: Path, filename: str) -> Path:
     )
 
 
+def _run_normalization_stats(
+    file_ids: np.ndarray,
+    retention_time: np.ndarray,
+    run_count: int,
+) -> np.ndarray:
+    rt_max = np.zeros(run_count, dtype=np.float32)
+    positive_rt = np.isfinite(retention_time) & (retention_time > 0)
+    np.maximum.at(
+        rt_max,
+        file_ids[positive_rt],
+        retention_time[positive_rt],
+    )
+
+    return rt_max
+
+
 def _read_source_arrays(path: Path) -> tuple[dict[str, np.ndarray], np.ndarray]:
     with h5py.File(path, "r") as file:
         missing = sorted(set(SOURCE_DATASETS) - set(file))
@@ -153,13 +195,105 @@ def _read_source_arrays(path: Path) -> tuple[dict[str, np.ndarray], np.ndarray]:
         source_levels = file["MS level"][:]
         selected = source_levels == REQUIRED_MS_LEVEL
         source_rows = np.flatnonzero(selected).astype(np.int64)
-        arrays = {
-            name: file[name][:][selected]
-            for name in SOURCE_DATASETS
-        }
+        arrays = {name: file[name][:][selected] for name in SOURCE_DATASETS}
+        if all(name in file for name in ACQUISITION_SOURCE_DATASETS):
+            arrays.update(
+                {
+                    name: file[name][:][selected]
+                    for name in ACQUISITION_SOURCE_DATASETS
+                }
+            )
+            instrument_names = file["metadata/instrument name"][:]
+            arrays["instrument_name"] = instrument_names[
+                arrays["file_id"].astype(np.int64)
+            ]
+            full_file_ids = file["file_id"][:].astype(np.int64, copy=False)
+            full_rt = file["RT"][:].astype(np.float32, copy=False)
+            run_rt_max = _run_normalization_stats(
+                full_file_ids,
+                full_rt,
+                len(instrument_names),
+            )
+            selected_file_ids = arrays["file_id"].astype(np.int64, copy=False)
+            arrays["run_rt_max"] = run_rt_max[selected_file_ids]
     arrays["spectrum"] = arrays["spectrum"].astype(np.float32)
     arrays["MS level"] = arrays["MS level"].astype(np.int8, copy=False)
     return arrays, source_rows
+
+
+def _present(values: np.ndarray, *, positive: bool = False) -> np.ndarray:
+    present = np.isfinite(values)
+    if positive:
+        present &= values > 0
+    return present
+
+
+def _categorical_ids(values: np.ndarray, mapper: Any) -> np.ndarray:
+    unique, inverse = np.unique(values, return_inverse=True)
+    ids = np.asarray(
+        [mapper(bytes(value).decode()) for value in unique],
+        dtype=np.int8,
+    )
+    return ids[inverse]
+
+
+def _add_acquisition_metadata(arrays: dict[str, np.ndarray]) -> None:
+    precursor = arrays["precursor_mz"].astype(np.float32, copy=False)
+    collision = arrays["collision_energy"].astype(np.float32, copy=False)
+    charge = arrays["charge"].astype(np.float32, copy=False)
+    accuracy = arrays.pop("instrument accuracy est.").astype(np.float32, copy=False)
+    retention_time = arrays["RT"].astype(np.float32, copy=False)
+    lower = arrays.pop("window lo").astype(np.float32, copy=False)
+    upper = arrays.pop("window uo").astype(np.float32, copy=False)
+    run_rt_max = arrays.pop("run_rt_max")
+
+    arrays["precursor_mz_present"] = _present(precursor, positive=True)
+    arrays["collision_energy_present"] = _present(collision, positive=True)
+    arrays["charge_present"] = _present(charge, positive=True)
+    raw_polarity = arrays.pop("positive polarity")
+    arrays["polarity_id"] = np.where(
+        raw_polarity == 1,
+        1,
+        np.where(raw_polarity == 0, 2, 0),
+    ).astype(np.int8)
+    arrays["acquisition_type_id"] = _categorical_ids(
+        arrays.pop("acquisition_type"),
+        acquisition_type_id,
+    )
+    isolation_present = _present(lower) & _present(upper) & (
+        (lower > 0) | (upper > 0)
+    )
+    isolation_scale = np.float32(np.log(101.0))
+    arrays["isolation_window_lower_offset"] = np.where(
+        isolation_present,
+        np.log1p(np.clip(lower, 0.0, 100.0)) / isolation_scale,
+        0.0,
+    ).astype(np.float32)
+    arrays["isolation_window_upper_offset"] = np.where(
+        isolation_present,
+        np.log1p(np.clip(upper, 0.0, 100.0)) / isolation_scale,
+        0.0,
+    ).astype(np.float32)
+    arrays["isolation_window_present"] = isolation_present
+    arrays["instrument_family_id"] = _categorical_ids(
+        arrays.pop("instrument_name"),
+        instrument_family_id,
+    )
+    accuracy_present = _present(accuracy, positive=True)
+    arrays["mass_accuracy"] = np.where(
+        accuracy_present,
+        (np.log10(np.clip(accuracy, 1e-6, 1e-1)) + 6.0) / 5.0,
+        0.0,
+    ).astype(np.float32)
+    arrays["mass_accuracy_present"] = accuracy_present
+
+    rt_fraction = np.zeros_like(retention_time)
+    positive_rt = _present(retention_time, positive=True) & (run_rt_max > 0)
+    rt_fraction[positive_rt] = (
+        retention_time[positive_rt] / run_rt_max[positive_rt]
+    )
+    arrays["retention_time_fraction"] = rt_fraction
+    arrays["retention_time_present"] = _present(retention_time, positive=True)
 
 
 def _write_array_dataset(
@@ -194,8 +328,11 @@ def _write_array_dataset(
 
 def prepare_source_arrays(
     source_path: Path,
-) -> tuple[dict[str, np.ndarray], np.ndarray, dict[str, int]]:
+) -> tuple[dict[str, np.ndarray], np.ndarray, dict[str, Any]]:
     arrays, source_rows = _read_source_arrays(source_path)
+    has_acquisition_metadata = "acquisition_type" in arrays
+    if has_acquisition_metadata:
+        _add_acquisition_metadata(arrays)
     precursor = arrays["precursor_mz"]
     retention_time = arrays["RT"]
     eligible = massive_v2_training_eligibility_numpy(
@@ -233,6 +370,7 @@ def prepare_source_arrays(
         "validation_eligible_rows": int((eligible & validation).sum()),
         "assigned_rows": int(assigned.sum()),
         "assigned_groups": int(assigned_groups),
+        "metadata_schema": MASSIVE_V2_ACQUISITION_SCHEMA if has_acquisition_metadata else "",
     }
     return arrays, validation, stats
 
@@ -317,18 +455,14 @@ class SplitShardWriter:
     def _open_partial(self) -> None:
         path = self._partial_path()
         self.file = h5py.File(path, "a")
-        self.datasets = {
-            name: self.file[name]
-            for name in FINAL_DATASETS
-            if name in self.file
-        }
+        self.datasets = {name: dataset for name, dataset in self.file.items()}
 
     def _ensure_file(self, arrays: dict[str, np.ndarray]) -> None:
         if self.file is not None:
             return
         self.file = h5py.File(self._partial_path(), "w")
         self.datasets = {}
-        for name in FINAL_DATASETS:
+        for name in arrays:
             values = arrays[name][:0]
             self.datasets[name] = _write_array_dataset(
                 self.file,
@@ -936,7 +1070,35 @@ def build_manifest(
     target_rows: int,
 ) -> dict[str, Any]:
     total = lambda key: sum(int(item[key]) for item in prepared_stats)
-    return {
+    metadata_schema = prepared_stats[0].get("metadata_schema", "")
+    row_aligned_datasets = list(FINAL_DATASETS)
+    metadata: dict[str, Any] | None = None
+    if metadata_schema:
+        row_aligned_datasets.extend(ACQUISITION_DATASETS)
+        metadata = {
+            "schema": MASSIVE_V2_ACQUISITION_SCHEMA,
+            "condition_dim": 26,
+            "columns": {
+                "precursor_mz": "precursor_mz",
+                **{name: name for name in ACQUISITION_DATASETS},
+                "collision_energy": "collision_energy",
+                "charge": "charge",
+            },
+            "categorical_vocabularies": {
+                "polarity": ["unknown", "positive", "negative"],
+                "acquisition_type": ["unknown", "dda", "dia"],
+                "instrument_family": list(INSTRUMENT_FAMILIES),
+            },
+            "normalization": {
+                "precursor_mz": "value / 1000",
+                "collision_energy": "value / 100",
+                "charge": "value / 21",
+                "isolation_offsets": "log1p(clip(value, 0, 100)) / log(101)",
+                "mass_accuracy": "(log10(clip(value, 1e-6, 1e-1)) + 6) / 5",
+                "retention_time": "value / max_positive_value_within_file",
+            },
+        }
+    manifest = {
         "format": MASSIVE_V2_HDF5_FORMAT,
         "source": {
             "repo_id": SOURCE_REPO_ID,
@@ -958,7 +1120,7 @@ def build_manifest(
             "retention_time": "RT",
             "ms_level": "MS level",
         },
-        "row_aligned_datasets": list(FINAL_DATASETS),
+        "row_aligned_datasets": row_aligned_datasets,
         "eligibility": massive_v2_eligibility_contract(),
         "split": {
             "version": "entity_hash_v1",
@@ -993,6 +1155,9 @@ def build_manifest(
             },
         },
     }
+    if metadata is not None:
+        manifest["spectrum_metadata"] = metadata
+    return manifest
 
 
 def dataset_card(manifest: dict[str, Any]) -> str:
@@ -1024,16 +1189,16 @@ only unique within one MassIVE project.
 
 
 def _validate_artifact_shard(
-    args: tuple[Path, str, dict[str, Any]],
+    args: tuple[Path, str, dict[str, Any], list[str]],
 ) -> tuple[str, int, int, dict[bytes, tuple[int, int]]]:
-    artifact_dir, split, shard = args
+    artifact_dir, split, shard, row_aligned_datasets = args
     path = artifact_dir / shard["path"]
     if path.stat().st_size != shard["bytes"]:
         raise ValueError(f"Shard size mismatch: {path}")
     if _sha256(path) != shard["sha256"]:
         raise ValueError(f"Shard checksum mismatch: {path}")
     with h5py.File(path, "r") as file:
-        lengths = {len(file[name]) for name in FINAL_DATASETS}
+        lengths = {len(file[name]) for name in row_aligned_datasets}
         if lengths != {int(shard["rows"])}:
             raise ValueError(f"Row alignment mismatch: {path}")
         spectrum = file["spectrum"]
@@ -1108,14 +1273,21 @@ def validate_artifact(manifest_path: Path, *, workers: int = 1) -> None:
             "Artifact eligibility contract mismatch: "
             f"expected {expected_eligibility}, got {manifest['eligibility']}"
         )
-    tasks: list[tuple[Path, str, dict[str, Any]]] = []
+    tasks: list[tuple[Path, str, dict[str, Any], list[str]]] = []
     seen_paths: set[str] = set()
     for split in ("train", "validation"):
         for shard in manifest["splits"][split]["shards"]:
             if shard["path"] in seen_paths:
                 raise ValueError(f"Duplicate shard path: {shard['path']}")
             seen_paths.add(shard["path"])
-            tasks.append((manifest_path.parent, split, shard))
+            tasks.append(
+                (
+                    manifest_path.parent,
+                    split,
+                    shard,
+                    manifest.get("row_aligned_datasets", list(FINAL_DATASETS)),
+                )
+            )
     if workers == 1:
         results = [_validate_artifact_shard(task) for task in tasks]
     else:
@@ -1163,6 +1335,39 @@ def validate_artifact(manifest_path: Path, *, workers: int = 1) -> None:
         raise ValueError("Artifact eligibility total mismatch")
 
 
+def validate_replacement_totals(
+    candidate_manifest_path: Path,
+    baseline_manifest_path: Path,
+) -> None:
+    candidate = json.loads(candidate_manifest_path.read_text())
+    baseline = json.loads(baseline_manifest_path.read_text())
+    keys = (
+        ("rows",),
+        ("eligible_rows",),
+        ("splits", "train", "rows"),
+        ("splits", "train", "eligible_rows"),
+        ("splits", "validation", "rows"),
+        ("splits", "validation", "eligible_rows"),
+    )
+    candidate_totals = {
+        "/".join(key): int(candidate[key[0]])
+        if len(key) == 1
+        else int(candidate[key[0]][key[1]][key[2]])
+        for key in keys
+    }
+    baseline_totals = {
+        "/".join(key): int(baseline[key[0]])
+        if len(key) == 1
+        else int(baseline[key[0]][key[1]][key[2]])
+        for key in keys
+    }
+    if candidate_totals != baseline_totals:
+        raise ValueError(
+            "Replacement artifact totals differ from the immutable baseline: "
+            f"candidate={candidate_totals}, baseline={baseline_totals}"
+        )
+
+
 def upload_artifact(output_dir: Path, repo_id: str) -> str:
     api = HfApi()
     api.create_repo(
@@ -1171,6 +1376,25 @@ def upload_artifact(output_dir: Path, repo_id: str) -> str:
         private=False,
         exist_ok=True,
     )
+    local_shards = {
+        str(path.relative_to(output_dir))
+        for split in ("train", "validation")
+        for path in (output_dir / split).glob("*.hdf5")
+    }
+    stale_shards = [
+        path
+        for path in api.list_repo_files(repo_id, repo_type="dataset")
+        if path.endswith(".hdf5")
+        and path.split("/", 1)[0] in {"train", "validation"}
+        and path not in local_shards
+    ]
+    if stale_shards:
+        api.delete_files(
+            repo_id,
+            stale_shards,
+            repo_type="dataset",
+            commit_message="Remove superseded MassIVE v2 shards",
+        )
     api.upload_large_folder(
         repo_id=repo_id,
         repo_type="dataset",

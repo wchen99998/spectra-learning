@@ -393,6 +393,8 @@ class AttentionPairBias(nn.Module):
         norm_eps: float,
         use_pair_bias: bool = True,
         use_rope: bool = True,
+        input_norm_affine: bool = True,
+        zero_output: bool = True,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
@@ -401,7 +403,11 @@ class AttentionPairBias(nn.Module):
             assert self.head_dim % 2 == 0
         self.use_pair_bias = use_pair_bias
         self.use_rope = use_rope
-        self.single_norm = _build_norm(single_dim, eps=norm_eps)
+        self.single_norm = _build_norm(
+            single_dim,
+            eps=norm_eps,
+            affine=input_norm_affine,
+        )
         self.pair_norm = (
             _build_norm(pair_dim, eps=norm_eps) if use_pair_bias else None
         )
@@ -417,8 +423,11 @@ class AttentionPairBias(nn.Module):
         if self.pair_bias is not None:
             _init_linear(self.pair_bias)
         _init_linear(self.g, gate=True)
-        nn.init.zeros_(self.o.weight)
-        nn.init.zeros_(self.o.bias)
+        if zero_output:
+            nn.init.zeros_(self.o.weight)
+            nn.init.zeros_(self.o.bias)
+        else:
+            _init_linear(self.o)
 
     def forward(
         self,
@@ -427,9 +436,14 @@ class AttentionPairBias(nn.Module):
         token_mask: Bool[Tensor, "batch tokens"],
         num_peak_tokens: int,
         token_positions: Tensor | None = None,
+        normalized_single: Tensor | None = None,
     ) -> Float[Tensor, "batch tokens dim"]:
         batch_size, num_tokens, single_dim = single.shape
-        single_norm = self.single_norm(single)
+        single_norm = (
+            self.single_norm(single)
+            if normalized_single is None
+            else normalized_single
+        )
         qkv = self.qkv(single_norm).view(
             batch_size,
             num_tokens,
@@ -487,9 +501,11 @@ class SingleMixerBlock(nn.Module):
         dropout: float,
         use_rope: bool = True,
         transition_type: str = "swiglu",
+        condition_dim: int | None = None,
     ) -> None:
         super().__init__()
         self.transition_type = transition_type.lower()
+        self.condition_dim = condition_dim
         if self.transition_type not in SUPPORTED_PAIRMIXER_TRANSITION_TYPES:
             raise ValueError(
                 "pairmixer_transition_type must be one of ('swiglu', 'feedforward')"
@@ -501,22 +517,61 @@ class SingleMixerBlock(nn.Module):
             norm_eps=norm_eps,
             use_pair_bias=False,
             use_rope=use_rope,
+            input_norm_affine=condition_dim is None,
+            zero_output=condition_dim is None,
         )
         self.single_attention_post_norm = _build_norm(single_dim, eps=norm_eps)
-        self.single_transition_norm = _build_norm(single_dim, eps=norm_eps)
+        self.single_transition_norm = _build_norm(
+            single_dim,
+            eps=norm_eps,
+            affine=condition_dim is None,
+        )
         self.single_transition = _build_pairmixer_transition(
             single_dim,
             hidden_dim=math.ceil(single_dim * attention_mlp_multiple),
             transition_type=self.transition_type,
         )
         self.single_transition_post_norm = _build_norm(single_dim, eps=norm_eps)
+        if condition_dim is not None:
+            self.adaLN_modulation = nn.Linear(condition_dim, 6 * single_dim)
+            nn.init.zeros_(self.adaLN_modulation.weight)
+            nn.init.zeros_(self.adaLN_modulation.bias)
+            if self.transition_type == "swiglu":
+                nn.init.trunc_normal_(
+                    self.single_transition.fc3.weight,
+                    std=1.0 / math.sqrt(self.single_transition.fc3.in_features),
+                )
         self.drop = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
 
     def forward(
         self,
         single: Float[Tensor, "batch tokens dim"],
         token_mask: Bool[Tensor, "batch tokens"],
+        condition: Float[Tensor, "batch condition"] | None = None,
     ) -> Float[Tensor, "batch tokens dim"]:
+        if self.condition_dim is not None:
+            modulation = self.adaLN_modulation(condition).chunk(6, dim=-1)
+            attn_shift, attn_scale, attn_gate, mlp_shift, mlp_scale, mlp_gate = (
+                modulation
+            )
+            attention_input = self.single_attention.single_norm(single)
+            attention_input = attention_input * (1 + attn_scale[:, None]) + attn_shift[:, None]
+            attention_update = self.single_attention(
+                single,
+                None,
+                token_mask,
+                token_mask.shape[1],
+                normalized_single=attention_input,
+            )
+            single = single + attn_gate[:, None] * self.drop(
+                self.single_attention_post_norm(attention_update)
+            )
+            transition_input = self.single_transition_norm(single)
+            transition_input = transition_input * (1 + mlp_scale[:, None]) + mlp_shift[:, None]
+            transition_update = self.single_transition(transition_input)
+            return single + mlp_gate[:, None] * self.drop(
+                self.single_transition_post_norm(transition_update)
+            )
         single = single + self.drop(
             self.single_attention_post_norm(
                 self.single_attention(
