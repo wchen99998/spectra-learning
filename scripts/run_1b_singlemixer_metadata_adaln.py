@@ -1,4 +1,4 @@
-"""Backfill references for the pre-65f0314 1B metadata-AdaLN checkpoint.
+"""Run the 1B metadata-AdaLN model with its launch-time input contract.
 
 That launch used normalized peak intensities and a 28-field acquisition vector.
 The two precursor-intensity fields were removed while the run was still active,
@@ -36,6 +36,14 @@ from spectra_learning.training.storage import read_text, storage_join
 
 
 LEGACY_METADATA_DIM = 28
+RUN_ID = (
+    "1b-singlemixer-metadata-adaln-mz-v6e4x8-euw4-b2048-500k-"
+    "20260819-125157"
+)
+CHECKPOINT = (
+    "gs://metal-repeater-411410-spectra-checkpoints/skypilot/"
+    f"{RUN_ID}/checkpoints/orbax/150000"
+)
 PRECURSOR_INTENSITY_ZSCORE = jnp.asarray([0.25, -0.5], dtype=jnp.float32)
 PRECURSOR_INTENSITY_PRESENT = jnp.asarray([1.0, 0.0], dtype=jnp.float32)
 
@@ -189,7 +197,7 @@ def run(checkpoint: str, *, save_reference: bool) -> dict[str, Any]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--checkpoint", default=CHECKPOINT)
     parser.add_argument("--save-reference", action="store_true")
     args = parser.parse_args()
     print(

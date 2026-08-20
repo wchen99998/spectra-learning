@@ -1,7 +1,8 @@
 import numpy as np
 
 from spectra_learning.config import load_config
-from scripts.backfill_legacy_jax_checkpoint_reference import (
+from scripts.run_1b_singlemixer_metadata_adaln import (
+    CHECKPOINT,
     LEGACY_METADATA_DIM,
     legacy_reference_inputs,
 )
@@ -29,3 +30,4 @@ def test_legacy_reference_inputs_reproduce_launch_pipeline() -> None:
             axis=-1,
         ),
     )
+    assert CHECKPOINT.endswith("/checkpoints/orbax/150000")
