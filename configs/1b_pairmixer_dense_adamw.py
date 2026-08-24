@@ -44,7 +44,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_latent_predictor_num_heads = 12
 
     cfg.run_name_suffix = (
-        "jax-mae-massive-v2-10gb-1b-200m-v6e-d1536-p640-l25-h12-nomassprior-"
+        "jax-mae-massive-v2-10gb-1b-200m-v6e-d1536-p640-l25-h12-swiglu-nomassprior-"
         "feat3072-fmlp3072-xattnrope1536-l5-h12-bs2048-ga8-16-16-adamw-fp32state-"
         "lr3e-4-wd1e-1-"
         "random-mask65-45-25-target50-30-10-intensityorder-fullctx-"

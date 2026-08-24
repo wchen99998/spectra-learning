@@ -464,6 +464,9 @@ def test_1b_grouped_jepa_config() -> None:
     assert config.group_jepa_ema_momentum == pytest.approx(0.9992)
     assert config.group_jepa_teacher_target_mode == "lookahead"
     assert config.group_jepa_init_checkpoint_path.endswith("/orbax/350000")
+    assert config.pairmixer_transition_type == "feedforward"
+    assert config.attention_mlp_multiple == 4
+    assert config.predictor_mlp_multiple == pytest.approx(8 / 3)
     assert config.optimizer == "muon"
     assert config.training_max_steps == 100_000
     assert config.warmup_steps == 5_000

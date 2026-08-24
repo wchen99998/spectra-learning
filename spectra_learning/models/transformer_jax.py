@@ -11,6 +11,7 @@ from spectra_learning.models.common_jax import (
     Array,
     LayerNorm,
     Linear,
+    RMSNorm,
     scaled_dot_product_attention,
     silu,
 )
@@ -101,6 +102,7 @@ class CrossAttention(nnx.Module):
         *,
         max_sequence_length: int,
         rope_base: float = 10_000.0,
+        norm_eps: float = 1e-5,
         compute_dtype: object = jnp.float32,
         rngs: nnx.Rngs | None = None,
     ) -> None:
@@ -130,6 +132,8 @@ class CrossAttention(nnx.Module):
             compute_dtype=compute_dtype,
             rngs=rngs,
         )
+        self.q_norm = RMSNorm(self.head_dim, eps=norm_eps, affine=False)
+        self.k_norm = RMSNorm(self.head_dim, eps=norm_eps, affine=False)
         inv_freq = 1.0 / (
             rope_base
             ** (
@@ -173,8 +177,10 @@ class CrossAttention(nnx.Module):
         k, v = jnp.split(self.wkv(memory), 2, axis=-1)
         k = k.reshape(batch_size, memory_len, self.n_heads, self.head_dim)
         v = v.reshape(batch_size, memory_len, self.n_heads, self.head_dim)
-        q = self._apply_rope(jnp.swapaxes(q, 1, 2), query_positions)
-        k = self._apply_rope(jnp.swapaxes(k, 1, 2), memory_positions)
+        q = self.q_norm(jnp.swapaxes(q, 1, 2))
+        k = self.k_norm(jnp.swapaxes(k, 1, 2))
+        q = self._apply_rope(q, query_positions)
+        k = self._apply_rope(k, memory_positions)
         v = jnp.swapaxes(v, 1, 2)
         attended = scaled_dot_product_attention(
             q,
@@ -307,18 +313,21 @@ class CrossAttentionBlock(nnx.Module):
             dim,
             n_heads,
             max_sequence_length=max_sequence_length,
+            norm_eps=norm_eps,
             compute_dtype=compute_dtype,
             rngs=rngs,
         )
-        self.feed_forward = FeedForward(
+        self.feed_forward = SwiGLUFeedForward(
             dim,
             hidden_dim=hidden_dim,
             compute_dtype=compute_dtype,
             rngs=rngs,
         )
-        self.query_norm = LayerNorm(dim, eps=norm_eps)
-        self.memory_norm = LayerNorm(dim, eps=norm_eps)
-        self.ffn_norm = LayerNorm(dim, eps=norm_eps)
+        self.query_norm = RMSNorm(dim, eps=norm_eps)
+        self.memory_norm = RMSNorm(dim, eps=norm_eps)
+        self.attention_post_norm = RMSNorm(dim, eps=norm_eps)
+        self.ffn_norm = RMSNorm(dim, eps=norm_eps)
+        self.ffn_post_norm = RMSNorm(dim, eps=norm_eps)
 
     def __call__(
         self,
@@ -329,14 +338,16 @@ class CrossAttentionBlock(nnx.Module):
         query_mask: Array,
         memory_mask: Array,
     ) -> Array:
-        query = query + self.attention(
+        attention_update = self.attention(
             self.query_norm(query),
             self.memory_norm(memory),
             query_positions,
             memory_positions,
             memory_mask,
         )
-        query = query + self.feed_forward(self.ffn_norm(query))
+        query = query + self.attention_post_norm(attention_update)
+        ffn_update = self.feed_forward(self.ffn_norm(query))
+        query = query + self.ffn_post_norm(ffn_update)
         return query * query_mask[..., None].astype(query.dtype)
 
     def load_torch_state_dict(
@@ -351,7 +362,15 @@ class CrossAttentionBlock(nnx.Module):
         )
         self.query_norm.load_torch_state_dict(state_dict, f"{prefix}.query_norm")
         self.memory_norm.load_torch_state_dict(state_dict, f"{prefix}.memory_norm")
+        self.attention_post_norm.load_torch_state_dict(
+            state_dict,
+            f"{prefix}.attention_post_norm",
+        )
         self.ffn_norm.load_torch_state_dict(state_dict, f"{prefix}.ffn_norm")
+        self.ffn_post_norm.load_torch_state_dict(
+            state_dict,
+            f"{prefix}.ffn_post_norm",
+        )
 
 
 class TransformerBlock(nnx.Module):

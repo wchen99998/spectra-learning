@@ -18,7 +18,10 @@ from spectra_learning.data.gems.hdf5 import (
     GEMS_SPLIT_CHUNK_ROWS,
     GEMS_SPLIT_MODULUS,
 )
-from spectra_learning.data.gems.sampling import ChunkedDistributedBatchSampler
+from spectra_learning.data.gems.sampling import (
+    ChunkedDistributedBatchSampler,
+    OffsetBatchSampler,
+)
 
 
 def _write_fake_hdf5_shards(
@@ -145,6 +148,92 @@ class GemsSamplingTests(unittest.TestCase):
         ]
         self.assertEqual(len(transitions), 3)
         self.assertEqual(set(transitions), {0, 1, 2})
+
+    def test_mixed_sampler_stripes_batches_across_active_shards(self):
+        segments = [(index * 4096, 4096, 256) for index in range(4)]
+        sampler = ChunkedDistributedBatchSampler(
+            segments,
+            batch_size=256,
+            rows_per_block=256,
+            shuffle=True,
+            seed=66,
+            drop_last=True,
+            world_size=1,
+            rank=0,
+            shuffle_segments=True,
+            active_segments=2,
+            mix_blocks_per_batch=8,
+        )
+        batches = list(sampler)
+        repeated = list(sampler)
+
+        rows = [row for batch in batches for row in batch]
+        self.assertEqual(len(batches), len(sampler))
+        self.assertEqual(sorted(rows), list(range(4 * 4096)))
+        self.assertEqual(len(rows), len(set(rows)))
+        self.assertEqual(batches, repeated)
+        for batch in batches:
+            self.assertEqual(len({row // 256 for row in batch}), 8)
+            self.assertEqual(len({row // 4096 for row in batch}), 2)
+
+    def test_mixed_sampler_simulates_disjoint_eight_host_optimizer_batch(self):
+        host_batches = []
+        host_stride = 1_048_576
+        for host in range(8):
+            base = host * host_stride
+            sampler = ChunkedDistributedBatchSampler(
+                [(base, 4096, 256), (base + 4096, 4096, 256)],
+                batch_size=256,
+                rows_per_block=256,
+                shuffle=True,
+                seed=66,
+                drop_last=True,
+                world_size=1,
+                rank=0,
+                shuffle_segments=True,
+                active_segments=2,
+                mix_blocks_per_batch=8,
+            )
+            host_batches.append(list(sampler))
+
+        optimizer_batch = [
+            row
+            for batches in host_batches
+            for batch in batches[:2]
+            for row in batch
+        ]
+        self.assertEqual(len(optimizer_batch), 4096)
+        self.assertEqual(len(set(optimizer_batch)), 4096)
+        self.assertEqual(
+            len({row // host_stride for row in optimizer_batch}),
+            8,
+        )
+        self.assertEqual(len({row // 256 for row in optimizer_batch}), 64)
+
+    def test_mixed_sampler_offset_matches_full_sequence_suffix(self):
+        kwargs = dict(
+            segments=[(0, 4096, 256), (4096, 4096, 256)],
+            batch_size=256,
+            rows_per_block=256,
+            shuffle=True,
+            seed=66,
+            drop_last=True,
+            world_size=1,
+            rank=0,
+            shuffle_segments=True,
+            active_segments=2,
+            mix_blocks_per_batch=8,
+        )
+        full = list(ChunkedDistributedBatchSampler(**kwargs))
+        offset = list(
+            OffsetBatchSampler(
+                ChunkedDistributedBatchSampler(**kwargs),
+                start_index=13 * 256,
+                batch_size=256,
+                drop_last=True,
+            )
+        )
+        self.assertEqual(offset, full[13:])
 
     def test_batch_partition_has_no_overlap_between_shard_peers(self):
         batch_size = 4

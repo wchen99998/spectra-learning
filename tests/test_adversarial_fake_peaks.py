@@ -100,7 +100,7 @@ def test_joint_models_have_requested_parameter_sizes() -> None:
     generator_params = sum(
         parameter.numel() for parameter in generator.parameters()
     )
-    assert generator_params == 50_735_716
+    assert generator_params == 50_747_644
     assert generator.backbone.jepa_mae_mz_head is not None
     assert generator.backbone.jepa_mae_intensity_head is not None
     assert generator.backbone.teacher_encoder is None
@@ -111,7 +111,7 @@ def test_joint_models_have_requested_parameter_sizes() -> None:
     discriminator_params = sum(
         parameter.numel() for parameter in discriminator.parameters()
     )
-    assert discriminator_params == 50_268_059
+    assert discriminator_params == 50_279_259
     assert abs(generator_params - discriminator_params) / discriminator_params < 0.01
 
 

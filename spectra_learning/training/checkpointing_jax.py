@@ -58,6 +58,9 @@ class EmergencyCheckpointMonitor:
         self._stopped.set()
         signal.signal(signal.SIGTERM, self._previous_sigterm_handler)
 
+    def reinstall_sigterm_handler(self) -> None:
+        signal.signal(signal.SIGTERM, self._handle_sigterm)
+
     @property
     def requested(self) -> bool:
         return self._requested.is_set()

@@ -29,7 +29,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.max_duration_hours = 47.0
     cfg.jax_mesh_devices = "16"
     cfg.run_name_suffix = (
-        "mae-massive3b-300m-v7x8-d2560-p768-l30-h20-nomassprior-"
+        "mae-massive3b-300m-v7x8-d2560-p768-l30-h20-swiglu-nomassprior-"
         "feat5120-fmlp5120-pred2560-l3-h20-bs2048-ga16-32-32-adamw-bf16state-"
         "lr6e-4-random-mask65-45-25-target50-30-10-intensityorder-fullctx-"
         "noac-noprobe-val500x10k"

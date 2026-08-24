@@ -52,7 +52,7 @@ class GroupedJEPACrossAttentionPredictor(nnx.Module):
                     n_heads=settings.masked_latent_predictor_num_heads,
                     norm_eps=settings.norm_eps,
                     hidden_dim=math.ceil(
-                        predictor_dim * settings.attention_mlp_multiple
+                        predictor_dim * settings.predictor_mlp_multiple
                     ),
                     max_sequence_length=(
                         settings.num_peaks + int(settings.encoder_use_cls_token)

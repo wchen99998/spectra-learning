@@ -65,6 +65,8 @@ def test_current_pretraining_config_records_model_and_data_defaults() -> None:
     }
     assert data_keys - set(config) == {
         "encoder_metadata_schema",
+        "gems_hdf5_active_shards",
+        "gems_hdf5_mix_blocks_per_batch",
         "jepa_intensity_aware_mask_config",
         "min_precursor_mz",
         "spectrum_metadata_dropout_probability",

@@ -23,6 +23,7 @@ def test_1b_mae_teacher_jepa_uses_target_only_loss_and_latest_teacher() -> None:
     assert config.frozen_teacher_checkpoint_path.endswith(
         "/checkpoints/orbax/300000"
     )
+    assert config.frozen_teacher_config_path.endswith("legacy_encoder.py")
     assert config.masked_token_loss_weight == 1.0
     assert config.contrastive_loss_weight == 0.0
     assert config.online_probe_loss_weight == 0.0

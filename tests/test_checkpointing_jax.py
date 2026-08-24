@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -195,6 +196,20 @@ def test_emergency_checkpoint_monitor_records_first_reason():
 
     assert monitor.requested is True
     assert monitor.reason == "preemption"
+
+
+def test_emergency_checkpoint_monitor_reinstalls_sigterm_handler(monkeypatch):
+    installed = []
+    monkeypatch.setattr(
+        signal,
+        "signal",
+        lambda signum, handler: installed.append((signum, handler)),
+    )
+    monitor = EmergencyCheckpointMonitor(watch_gce_metadata=False)
+
+    monitor.reinstall_sigterm_handler()
+
+    assert installed == [(signal.SIGTERM, monitor._handle_sigterm)]
 
 
 def test_jax_checkpoint_roundtrip_preserves_values_and_sharding(tmp_path):

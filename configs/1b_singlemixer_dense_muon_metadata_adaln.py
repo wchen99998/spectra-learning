@@ -41,10 +41,11 @@ def get_config() -> config_dict.ConfigDict:
     cfg.gems_hdf5_retention_time_dataset = "RT"
     cfg.gems_hdf5_ms_level_dataset = "MS level"
     cfg.gems_hdf5_rows_per_block = 0
+    cfg.gems_hdf5_active_shards = 2
+    cfg.gems_hdf5_mix_blocks_per_batch = 8
     cfg.nist_murcko_probe_num_repeats = 1
     cfg.batch_size = 4_096
     cfg.gradient_accumulation_steps = 2
-    cfg.shuffle_buffer = 1_000_000
     cfg.drop_remainder = True
     cfg.max_precursor_mz = 1_000
     cfg.min_peak_intensity = 0.0001
@@ -76,7 +77,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.encoder_fourier_x_min = 0.003
     cfg.feature_mlp_hidden_dim = 3_072
     cfg.pairmixer_block_type = "fastmixer-dense"
-    cfg.pairmixer_transition_type = "feedforward"
+    cfg.pairmixer_transition_type = "swiglu"
     cfg.pairmixer_pair_dim = 640
     cfg.pairmixer_pair_feature_hidden_dim = 1_280
     cfg.pairmixer_dropout = 0.0
@@ -88,12 +89,13 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pairmixer_fourier_x_min = 0.01
     cfg.pairmixer_relative_fourier_x_min = 0.001
     cfg.pairmixer_relative_fourier_x_max = 1.0
-    cfg.attention_mlp_multiple = 4
+    cfg.attention_mlp_multiple = 8 / 3
     cfg.norm_eps = 1e-5
 
     # Cross-attention predictor
     cfg.predictor_dim = 1_536
-    cfg.predictor_dropout = 0.1
+    cfg.predictor_mlp_multiple = 8 / 3
+    cfg.predictor_dropout = 0.0
     cfg.predictor_apply_final_norm = True
     cfg.masked_latent_predictor_num_layers = 5
     cfg.masked_latent_predictor_num_heads = 12
@@ -215,7 +217,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.optimizer_state_dtype = "fp32"
     cfg.learning_rate = 3e-4
     cfg.min_learning_rate = 6e-6
-    cfg.warmup_steps = 5_000
+    cfg.warmup_steps = 20_000
     cfg.weight_decay = 0.1
     cfg.b2 = 0.95
     cfg.grad_clip_norm = 1.0
@@ -231,9 +233,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.wandb_shared_primary = True
     cfg.wandb_shared_update_finish_state = False
     cfg.run_name_suffix = (
-        "jax-mae-massive-v2-10gb-1b-200m-v6e-singlemixer-metadata-adaln-n64-d1536-l25-h12-"
+        "jax-mae-massive-v2-10gb-1b-200m-v6e-singlemixer-metadata-adaln-n64-d1536-l25-h12-swiglu-"
         "nomassprior-feat3072-fmlp3072-xattnrope1536-l5-h12-bs4096-"
-        "ga2-mae1-muon-cls-fp32state-lr3e-4-wd1e-1-"
+        "ga2-mae1-muon-cls-fp32state-lr3e-4-wu20k-wd1e-1-"
         "random-ctx60-target25-mzorder-fullctx-"
         "noac-noprobe-val500x10k"
     )

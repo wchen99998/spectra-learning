@@ -520,8 +520,10 @@ class MassiveV2Hdf5ShardDataset:
         }
 
     def prefetch_first_shard(self) -> None:
-        if self.shard_order:
-            self._start_prefetch(self.shard_order[0])
+        self.prefetch_first_shards(1)
+
+    def prefetch_first_shards(self, count: int) -> None:
+        self._start_prefetch(self.shard_order[:count])
 
     def wait_for_prefetch(self) -> None:
         if self.prefetch_thread is not None:
@@ -529,28 +531,35 @@ class MassiveV2Hdf5ShardDataset:
         if self.prefetch_error is not None:
             raise RuntimeError("GeMS shard prefetch failed") from self.prefetch_error
 
-    def _start_prefetch(self, shard_id: int) -> None:
-        path = Path(self.states[shard_id].path)
-        if path.exists():
+    def _start_prefetch(self, shard_ids: int | tuple[int, ...]) -> None:
+        if isinstance(shard_ids, int):
+            shard_ids = (shard_ids,)
+        pending = tuple(
+            shard_id
+            for shard_id in shard_ids
+            if not Path(self.states[shard_id].path).exists()
+        )
+        if not pending:
             return
         if self.prefetch_thread is not None and self.prefetch_thread.is_alive():
             return
         self.prefetch_error = None
         self.prefetch_thread = threading.Thread(
-            target=self._prefetch_shard,
-            args=(shard_id,),
+            target=self._prefetch_shards,
+            args=(pending,),
             daemon=True,
         )
         self.prefetch_thread.start()
 
-    def _prefetch_shard(self, shard_id: int) -> None:
+    def _prefetch_shards(self, shard_ids: tuple[int, ...]) -> None:
         try:
-            prefetch_gems_hdf5_shard(
-                repo_id=self.repo_id,
-                revision=self.revision,
-                manifest_path=self.manifest_path,
-                shard_path=self.states[shard_id].spec.path,
-            )
+            for shard_id in shard_ids:
+                prefetch_gems_hdf5_shard(
+                    repo_id=self.repo_id,
+                    revision=self.revision,
+                    manifest_path=self.manifest_path,
+                    shard_path=self.states[shard_id].spec.path,
+                )
         except BaseException as error:
             self.prefetch_error = error
 
@@ -569,7 +578,7 @@ class MassiveV2Hdf5ShardDataset:
             manifest_path=self.manifest_path,
             shard_path=state.spec.path,
         )
-        file = h5py.File(path, "r")
+        file = h5py.File(path, "r", rdcc_nbytes=32 * 1024 * 1024)
         spectrum = file[self.spectrum_dataset]
         if tuple(spectrum.shape) != (
             state.spec.rows,

@@ -5,7 +5,10 @@ import torch
 
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pairmixer import PairMixerBlock, SingleMixerBlock
-from spectra_learning.models.transformer import CrossAttentionBlock
+from spectra_learning.models.transformer import (
+    CrossAttentionBlock,
+    SwiGLUFeedForward,
+)
 
 
 def _model(**overrides) -> PeakSetJEPA:
@@ -87,6 +90,17 @@ def test_predictor_is_cross_attention_only():
         isinstance(block, CrossAttentionBlock)
         for block in model.masked_latent_predictor
     )
+    block = model.masked_latent_predictor[0]
+    assert isinstance(block.feed_forward, SwiGLUFeedForward)
+    assert isinstance(block.query_norm, torch.nn.RMSNorm)
+    assert isinstance(block.memory_norm, torch.nn.RMSNorm)
+    assert isinstance(block.attention_post_norm, torch.nn.RMSNorm)
+    assert isinstance(block.ffn_norm, torch.nn.RMSNorm)
+    assert isinstance(block.ffn_post_norm, torch.nn.RMSNorm)
+    assert isinstance(block.attention.q_norm, torch.nn.RMSNorm)
+    assert isinstance(block.attention.k_norm, torch.nn.RMSNorm)
+    assert not block.attention.q_norm.elementwise_affine
+    assert not block.attention.k_norm.elementwise_affine
     assert not hasattr(model, "pair_mask_token")
     assert not hasattr(model, "predictor_position_embedding")
     assert not hasattr(model.masked_latent_predictor[0], "single_attention")

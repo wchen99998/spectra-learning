@@ -1,4 +1,5 @@
 import math
+from collections import deque
 from collections.abc import Iterator, Sized
 from typing import cast
 
@@ -20,6 +21,8 @@ class ChunkedDistributedBatchSampler(Sampler[list[int]]):
         rank: int,
         shuffle_segments: bool = False,
         partition_batches: bool = False,
+        active_segments: int = 1,
+        mix_blocks_per_batch: int = 1,
     ) -> None:
         self.batch_size = batch_size
         self.rows_per_block = rows_per_block
@@ -30,6 +33,11 @@ class ChunkedDistributedBatchSampler(Sampler[list[int]]):
         self.rank = rank
         self.shuffle_segments = shuffle_segments
         self.partition_batches = partition_batches
+        self.active_segments = active_segments
+        self.mix_blocks_per_batch = mix_blocks_per_batch
+        assert self.active_segments >= 1
+        assert self.mix_blocks_per_batch >= 1
+        assert self.batch_size % self.mix_blocks_per_batch == 0
         self.segment_blocks = [
             self._build_blocks([segment]) for segment in segments
         ]
@@ -38,7 +46,10 @@ class ChunkedDistributedBatchSampler(Sampler[list[int]]):
         ]
         self.epoch = 0
 
-    def _build_blocks(self, segments: list[tuple[int, int, int]]) -> list[tuple[int, int]]:
+    def _build_blocks(
+        self,
+        segments: list[tuple[int, int, int]],
+    ) -> list[tuple[int, int]]:
         blocks: list[tuple[int, int]] = []
         for start, length, chunk_rows in segments:
             block_rows = self.rows_per_block
@@ -64,6 +75,15 @@ class ChunkedDistributedBatchSampler(Sampler[list[int]]):
         return list(range(len(self.segment_blocks)))
 
     def __iter__(self) -> Iterator[list[int]]:
+        if self.shuffle and self.mix_blocks_per_batch > 1:
+            for batch_index, batch in enumerate(self._mixed_batches()):
+                if (
+                    not self.partition_batches
+                    or batch_index % self.world_size == self.rank
+                ):
+                    yield batch
+            return
+
         generator = torch.Generator()
         generator.manual_seed(self.seed + self.epoch)
         if self.shuffle and self.shuffle_segments:
@@ -114,6 +134,85 @@ class ChunkedDistributedBatchSampler(Sampler[list[int]]):
             ):
                 yield batch
             batch_index += 1
+
+    def _mixed_batches(self) -> Iterator[list[int]]:
+        generator = torch.Generator()
+        generator.manual_seed(self.seed + self.epoch)
+        segment_order = self.segment_order()
+        torch.randperm(len(self.segment_blocks), generator=generator)
+        partial_batches: list[list[int]] = []
+        for window_start in range(0, len(segment_order), self.active_segments):
+            window = segment_order[
+                window_start : window_start + self.active_segments
+            ]
+            queues = []
+            for segment_index in window:
+                blocks = self.segment_blocks[segment_index]
+                block_order = torch.randperm(
+                    len(blocks),
+                    generator=generator,
+                ).tolist()
+                units: list[tuple[int, int]] = []
+                for block_index in block_order:
+                    block_start, block_stop = blocks[block_index]
+                    full_stop = block_start + (
+                        (block_stop - block_start) // self.batch_size
+                    ) * self.batch_size
+                    units.extend(
+                        (start, start + self.batch_size)
+                        for start in range(block_start, full_stop, self.batch_size)
+                    )
+                    if not self.drop_last and full_stop < block_stop:
+                        partial_batches.append(list(range(full_stop, block_stop)))
+                queues.append(deque(units))
+
+            while any(queues):
+                group: list[tuple[int, int]] = []
+                queue_order = torch.randperm(
+                    len(queues),
+                    generator=generator,
+                ).tolist()
+                while len(group) < self.mix_blocks_per_batch and any(queues):
+                    for queue_index in queue_order:
+                        if queues[queue_index]:
+                            group.append(queues[queue_index].popleft())
+                            if len(group) == self.mix_blocks_per_batch:
+                                break
+                if len(group) == self.mix_blocks_per_batch:
+                    yield from self._striped_batches(group, generator)
+                else:
+                    for start, stop in group:
+                        rows = list(range(start, stop))
+                        order = torch.randperm(
+                            len(rows),
+                            generator=generator,
+                        ).tolist()
+                        yield [rows[index] for index in order]
+
+        for batch in partial_batches:
+            order = torch.randperm(len(batch), generator=generator).tolist()
+            yield [batch[index] for index in order]
+
+    def _striped_batches(
+        self,
+        group: list[tuple[int, int]],
+        generator: torch.Generator,
+    ) -> Iterator[list[int]]:
+        lane_rows = self.batch_size // self.mix_blocks_per_batch
+        lane_orders = [
+            torch.randperm(
+                self.mix_blocks_per_batch,
+                generator=generator,
+            ).tolist()
+            for _ in group
+        ]
+        for output_index in range(self.mix_blocks_per_batch):
+            batch = []
+            for (start, _stop), lanes in zip(group, lane_orders, strict=True):
+                lane_start = start + lanes[output_index] * lane_rows
+                batch.extend(range(lane_start, lane_start + lane_rows))
+            order = torch.randperm(len(batch), generator=generator).tolist()
+            yield [batch[index] for index in order]
 
     def _partitioned_batch_count(self, total: int) -> int:
         return max(

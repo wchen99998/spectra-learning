@@ -105,6 +105,7 @@ class CrossAttention(nn.Module):
         n_kv_heads: int | None = None,
         rope_max_sequence_length: int | None = None,
         rope_base: float = 10_000.0,
+        norm_eps: float = 1e-5,
     ):
         super().__init__()
         self.dim = dim
@@ -115,6 +116,16 @@ class CrossAttention(nn.Module):
         self.wq = nn.Linear(self.dim, self.n_heads * self.head_dim, bias=False)
         self.wkv = nn.Linear(self.dim, 2 * self.n_kv_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(self.dim, self.dim, bias=False)
+        self.q_norm = nn.RMSNorm(
+            self.head_dim,
+            eps=norm_eps,
+            elementwise_affine=False,
+        )
+        self.k_norm = nn.RMSNorm(
+            self.head_dim,
+            eps=norm_eps,
+            elementwise_affine=False,
+        )
         nn.init.xavier_normal_(self.wq.weight)
         nn.init.xavier_normal_(self.wkv.weight)
         nn.init.xavier_normal_(self.wo.weight)
@@ -172,6 +183,8 @@ class CrossAttention(nn.Module):
         q = xq.transpose(1, 2)
         k = xk.transpose(1, 2)
         v = xv.transpose(1, 2)
+        q = self.q_norm(q)
+        k = self.k_norm(k)
         if query_positions is not None:
             q = self._apply_rope(q, query_positions)
             k = self._apply_rope(k, memory_positions)
@@ -249,11 +262,14 @@ class CrossAttentionBlock(nn.Module):
             dim,
             n_heads,
             rope_max_sequence_length=max_sequence_length,
+            norm_eps=norm_eps,
         )
-        self.feed_forward = FeedForward(dim, hidden_dim=hidden_dim)
-        self.query_norm = _build_norm(dim, eps=norm_eps)
-        self.memory_norm = _build_norm(dim, eps=norm_eps)
-        self.ffn_norm = _build_norm(dim, eps=norm_eps)
+        self.feed_forward = SwiGLUFeedForward(dim, hidden_dim=hidden_dim)
+        self.query_norm = nn.RMSNorm(dim, eps=norm_eps)
+        self.memory_norm = nn.RMSNorm(dim, eps=norm_eps)
+        self.attention_post_norm = nn.RMSNorm(dim, eps=norm_eps)
+        self.ffn_norm = nn.RMSNorm(dim, eps=norm_eps)
+        self.ffn_post_norm = nn.RMSNorm(dim, eps=norm_eps)
         self.drop = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
 
     def forward(
@@ -265,16 +281,16 @@ class CrossAttentionBlock(nn.Module):
         query_mask: Bool[Tensor, "batch targets"],
         memory_mask: Bool[Tensor, "batch memory"],
     ) -> Float[Tensor, "batch targets dim"]:
-        query = query + self.drop(
-            self.attention(
-                self.query_norm(query),
-                self.memory_norm(memory),
-                memory_mask=memory_mask,
-                query_positions=query_positions,
-                memory_positions=memory_positions,
-            )
+        attention_update = self.attention(
+            self.query_norm(query),
+            self.memory_norm(memory),
+            memory_mask=memory_mask,
+            query_positions=query_positions,
+            memory_positions=memory_positions,
         )
-        query = query + self.drop(self.feed_forward(self.ffn_norm(query)))
+        query = query + self.drop(self.attention_post_norm(attention_update))
+        ffn_update = self.feed_forward(self.ffn_norm(query))
+        query = query + self.drop(self.ffn_post_norm(ffn_update))
         return query * query_mask.unsqueeze(-1).to(query.dtype)
 
 

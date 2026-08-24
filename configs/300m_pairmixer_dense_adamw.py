@@ -23,7 +23,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.masked_latent_predictor_num_heads = 7
 
     cfg.run_name_suffix = (
-        "mae-massive300m-44m-v6e-d896-p384-l18-h7-nomassprior-"
+        "mae-massive300m-44m-v6e-d896-p384-l18-h7-swiglu-nomassprior-"
         "feat1536-fmlp1792-pred896-l3-h7-bs2048-ga4-adamw-lr6e-4-random-"
         "intensityorder-fullctx-noac-noprobe-val500x10k"
     )

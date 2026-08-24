@@ -150,7 +150,9 @@ class GemsDataModule:
                 epoch=0,
                 split="train",
             )
-            self._datasets["train"].prefetch_first_shard()
+            self._datasets["train"].prefetch_first_shards(
+                self.gems_hdf5_active_shards
+            )
 
     def _set_public_config_attrs(self) -> None:
         for key, value in self.config.__dict__.items():
@@ -547,6 +549,16 @@ class GemsDataModule:
             rank=sampler_rank,
             shuffle_segments=is_massive_v2,
             partition_batches=partition_batches,
+            active_segments=(
+                self.gems_hdf5_active_shards
+                if is_massive_v2 and split == "train"
+                else 1
+            ),
+            mix_blocks_per_batch=(
+                self.gems_hdf5_mix_blocks_per_batch
+                if is_massive_v2 and split == "train"
+                else 1
+            ),
         )
         sampler.set_epoch(epoch)
         if is_massive_v2 and rank == self.distributed_rank:
@@ -598,7 +610,7 @@ class GemsDataModule:
         ):
             if resolved_num_workers > 0:
                 dataset.wait_for_prefetch()
-            dataset.prefetch_first_shard()
+            dataset.prefetch_first_shards(self.gems_hdf5_active_shards)
         if resolved_num_workers > 0:
             if (
                 split == "train"

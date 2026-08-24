@@ -69,7 +69,7 @@ class PeakSetJEPASettings:
     model_dim: int = 768
     encoder_num_layers: int = 20
     encoder_num_heads: int = 12
-    attention_mlp_multiple: float = 4.0
+    attention_mlp_multiple: float = 8 / 3
     feature_mlp_hidden_dim: int = 128
     encoder_fourier_mlp_hidden_dim: int | None = None
     encoder_fourier_mlp_num_layers: int = 2
@@ -125,6 +125,7 @@ class PeakSetJEPASettings:
     predictor_apply_final_norm: bool = True
     num_peaks: int = DEFAULT_NUM_PEAKS
     predictor_dim: int | None = None
+    predictor_mlp_multiple: float = 8 / 3
     predictor_target_max_tokens: int | None = None
     target_projector_dim: int | None = None
     predictor_dropout: float = 0.0

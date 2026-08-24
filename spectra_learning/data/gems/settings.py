@@ -42,6 +42,8 @@ class GemsDataConfig:
     gems_hdf5_retention_time_dataset: str
     gems_hdf5_ms_level_dataset: str
     gems_hdf5_rows_per_block: int
+    gems_hdf5_active_shards: int
+    gems_hdf5_mix_blocks_per_batch: int
     batch_size: int
     gradient_accumulation_steps: int
     drop_remainder: bool
@@ -121,6 +123,12 @@ class GemsDataConfig:
             ),
             gems_hdf5_rows_per_block=int(
                 config.get("gems_hdf5_rows_per_block", 0)
+            ),
+            gems_hdf5_active_shards=int(
+                config.get("gems_hdf5_active_shards", 1)
+            ),
+            gems_hdf5_mix_blocks_per_batch=int(
+                config.get("gems_hdf5_mix_blocks_per_batch", 1)
             ),
             batch_size=int(config.get("batch_size", DEFAULT_BATCH_SIZE)),
             gradient_accumulation_steps=int(

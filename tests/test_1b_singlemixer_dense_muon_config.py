@@ -23,6 +23,8 @@ def test_1b_singlemixer_muon_training_settings() -> None:
     assert config.optimizer == "muon"
     assert config.encoder_use_cls_token
     assert config.encoder_use_position_embedding
+    assert not config.encoder_apply_final_norm
+    assert config.peak_ordering == "mz"
     assert config.num_peaks == 63
     assert config.num_peaks + int(config.encoder_use_cls_token) == 64
     assert config.distogram_loss_weight == 0.0
@@ -30,10 +32,14 @@ def test_1b_singlemixer_muon_training_settings() -> None:
     assert settings.encoder_use_cls_token
     assert settings.encoder_use_position_embedding
     assert settings.distogram_loss_weight == 0.0
+    assert settings.pairmixer_transition_type == "swiglu"
+    assert settings.attention_mlp_multiple == 8 / 3
+    assert settings.predictor_mlp_multiple == 8 / 3
+    assert settings.predictor_dropout == 0.0
     assert config.training_max_steps == 300_000
     assert config.learning_rate == 3e-4
     assert config.min_learning_rate == 6e-6
-    assert config.warmup_steps == 5_000
+    assert config.warmup_steps == 20_000
     assert config.batch_size == 4_096
     assert config.jax_mesh_devices == "64"
     assert config.batch_size // int(config.jax_mesh_devices) == 64

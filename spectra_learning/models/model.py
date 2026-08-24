@@ -353,7 +353,7 @@ class PeakSetJEPA(nn.Module):
                 n_heads=cfg.masked_latent_predictor_num_heads,
                 norm_eps=self.norm_eps,
                 hidden_dim=math.ceil(
-                    self.predictor_dim * cfg.attention_mlp_multiple
+                    self.predictor_dim * cfg.predictor_mlp_multiple
                 ),
                 max_sequence_length=(
                     self.num_peak_tokens + int(self.encoder_use_cls_token)

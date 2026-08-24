@@ -61,12 +61,13 @@ def get_config() -> config_dict.ConfigDict:
     cfg.pairmixer_fourier_x_min = 0.01
     cfg.pairmixer_relative_fourier_x_min = 0.001
     cfg.pairmixer_relative_fourier_x_max = 1.0
-    cfg.attention_mlp_multiple = 4
+    cfg.attention_mlp_multiple = 8 / 3
     cfg.norm_eps = 1e-5
 
     # Masked latent predictor
     cfg.predictor_dim = 640
-    cfg.predictor_dropout = 0.1
+    cfg.predictor_mlp_multiple = 8 / 3
+    cfg.predictor_dropout = 0.0
     cfg.predictor_apply_final_norm = True
     cfg.masked_latent_predictor_num_layers = 3
     cfg.masked_latent_predictor_num_heads = 10

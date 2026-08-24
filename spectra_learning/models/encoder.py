@@ -23,7 +23,7 @@ class PeakSetEncoder(nn.Module):
         embedder: PeakFeatureEmbedder,
         num_layers: int,
         num_heads: int,
-        attention_mlp_multiple: float = 4.0,
+        attention_mlp_multiple: float = 8 / 3,
         norm_eps: float = 1e-5,
         apply_final_norm: bool = True,
         apply_final_pair_norm: bool = False,

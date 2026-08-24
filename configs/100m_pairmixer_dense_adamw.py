@@ -26,7 +26,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_target_fraction = 0.5
     cfg.peak_ordering = "intensity"
     cfg.pairmixer_block_type = "fastmixer-dense"
-    cfg.pairmixer_transition_type = "feedforward"
+    cfg.pairmixer_transition_type = "swiglu"
     cfg.num_peaks = 47
     cfg.num_epochs = 98
     cfg.dataloader_num_workers = 32
@@ -36,7 +36,7 @@ def get_config() -> config_dict.ConfigDict:
     cfg.val_every_n_steps = 10_000
     cfg.val_num_steps = 500
     cfg.run_name_suffix = (
-        "mae-massive100m-20m-beta-isoflops-1e19-bs2048-ga4-adamw-lr6e-4-"
+        "mae-massive100m-20m-beta-isoflops-1e19-swiglu-bs2048-ga4-adamw-lr6e-4-"
         "shouldermax-isoatomic-random-intensityorder-fullctx-noac-"
         "noprobe-val500x10k"
     )

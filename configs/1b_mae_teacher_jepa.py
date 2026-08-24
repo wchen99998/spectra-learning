@@ -12,7 +12,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataloader_persistent_workers = False
     cfg.training_mode = "mae_teacher_jepa"
     cfg.use_ema_teacher = False
-    cfg.frozen_teacher_config_path = "configs/1b_pairmixer_dense_adamw.py"
+    cfg.frozen_teacher_config_path = (
+        "configs/1b_pairmixer_dense_adamw_legacy_encoder.py"
+    )
     cfg.frozen_teacher_checkpoint_path = (
         "gs://metal-repeater-411410-spectra-checkpoints/skypilot/"
         "1b-pairmixer-dense-adamw-xla-noac-v6e4x8-east5-b2048-ga8-16-16-"

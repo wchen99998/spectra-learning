@@ -131,7 +131,7 @@ terminate_training_process_group() {
   fi
   kill -TERM -- "-${TRAIN_PID}" 2>/dev/null || true
   local attempt
-  for attempt in {1..10}; do
+  for attempt in {1..600}; do
     if ! kill -0 -- "-${TRAIN_PID}" 2>/dev/null; then
       return
     fi

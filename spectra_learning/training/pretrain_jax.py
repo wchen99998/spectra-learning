@@ -1026,6 +1026,7 @@ def _train_and_evaluate_jax_task(
         logger = (
             build_logger(config, local_workdir) if is_main_process else MetricLogger()
         )
+        emergency_checkpoint.reinstall_sigterm_handler()
         param_metrics = collect_jax_param_metrics(model) if is_main_process else {}
         if is_main_process:
             if task.log_start is not None:

@@ -22,6 +22,8 @@ def get_config() -> config_dict.ConfigDict:
         "1b-singlemixer-n64-muon-v6e64-b4096-ga2-ctx60-t25-use5a-"
         "datapart-20260811-045140/checkpoints/orbax/350000"
     )
+    cfg.pairmixer_transition_type = "feedforward"
+    cfg.attention_mlp_multiple = 4
 
     cfg.batch_size = cfg.group_jepa_groups_per_batch
     cfg.training_max_steps = 100_000
