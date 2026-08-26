@@ -23,6 +23,9 @@ from spectra_learning.models.spectrum_metadata import torch_spectrum_metadata_fr
 from spectra_learning.models.transformer import CrossAttentionBlock
 
 
+_GAP_SENTINEL_DA = 1.0e6
+
+
 def _zero_scalar_like(value: Tensor) -> Tensor:
     return value.reshape(-1)[0] * 0.0
 
@@ -32,9 +35,56 @@ def _cross_entropy_from_logits(
     targets: Int[Tensor, "..."],
 ) -> Float[Tensor, "..."]:
     logits = logits.float()
-    classes = torch.arange(logits.shape[-1], device=targets.device)
-    target_one_hot = (classes == targets.unsqueeze(-1)).to(dtype=logits.dtype)
-    return -(F.log_softmax(logits, dim=-1) * target_one_hot).sum(dim=-1)
+    target_logits = logits.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+    return torch.logsumexp(logits, dim=-1) - target_logits
+
+
+def _sparse_ordinal_cross_entropy_from_logits(
+    logits: Float[Tensor, "... classes"],
+    targets: Int[Tensor, "..."],
+    radius: int,
+    epsilon: float,
+) -> Float[Tensor, "..."]:
+    logits = logits.float()
+    offsets = torch.arange(-radius, radius + 1, device=targets.device)
+    indices = targets.unsqueeze(-1) + offsets
+    valid = (indices >= 0) & (indices < logits.shape[-1])
+    indices = indices.clamp(0, logits.shape[-1] - 1)
+
+    triangular = (radius + 1 - offsets.abs()).to(dtype=logits.dtype)
+    local_weights = triangular * valid.to(dtype=logits.dtype)
+    local_weights = local_weights / local_weights.sum(dim=-1, keepdim=True)
+    center = (offsets == 0).to(dtype=logits.dtype)
+    target_weights = epsilon * local_weights + (1.0 - epsilon) * center
+
+    indexed_logits = logits.gather(-1, indices)
+    expected_target_logit = (target_weights * indexed_logits).sum(dim=-1)
+    return torch.logsumexp(logits, dim=-1) - expected_target_logit
+
+
+def _nearest_context_gap_da(
+    target_mz: Tensor,
+    peak_mz: Tensor,
+    context_mask: Tensor,
+    mz_max: float,
+) -> Tensor:
+    distance = (target_mz[..., None] - peak_mz[..., None, :]).abs()
+    distance = torch.where(
+        context_mask[..., None, :],
+        distance,
+        distance.new_tensor(_GAP_SENTINEL_DA / max(mz_max, 1.0)),
+    )
+    return distance.min(dim=-1).values * mz_max
+
+
+def _gap_bucket_labels(edges: tuple[float, ...]) -> tuple[str, ...]:
+    labels = []
+    lower = 0.0
+    for edge in edges:
+        labels.append(f"{lower:g}_{edge:g}")
+        lower = edge
+    labels.append(f"{lower:g}_inf")
+    return tuple(labels)
 
 
 def _active_indices(
@@ -80,6 +130,9 @@ class PeakSetJEPA(nn.Module):
     jepa_mae_mz_bin_size: float
     jepa_mae_intensity_bin_size: float
     mae_intensity_loss_weight: float
+    mae_mz_objective: str
+    mae_mz_ordinal_radius_bins: int
+    mae_mz_ordinal_epsilon: float
     jepa_mae_mz_max: float
     jepa_mae_intensity_max: float
     jepa_mae_num_mz_bins: int
@@ -217,7 +270,30 @@ class PeakSetJEPA(nn.Module):
         self.jepa_mae_mz_bin_size = cfg.jepa_mae_mz_bin_size
         self.jepa_mae_intensity_bin_size = cfg.jepa_mae_intensity_bin_size
         self.mae_intensity_loss_weight = cfg.mae_intensity_loss_weight
+        self.mae_mz_objective = cfg.mae_mz_objective.lower()
+        if self.mae_mz_objective not in {
+            "exact_ce",
+            "multiscale_ce",
+            "sparse_ordinal_ce",
+        }:
+            raise ValueError(
+                "mae_mz_objective must be one of "
+                "('exact_ce', 'multiscale_ce', 'sparse_ordinal_ce')"
+            )
+        self.mae_mz_ordinal_radius_bins = int(cfg.mae_mz_ordinal_radius_bins)
+        self.mae_mz_ordinal_epsilon = float(cfg.mae_mz_ordinal_epsilon)
+        if self.mae_mz_ordinal_radius_bins < 0:
+            raise ValueError("mae_mz_ordinal_radius_bins must be >= 0")
+        if not 0.0 <= self.mae_mz_ordinal_epsilon <= 1.0:
+            raise ValueError("mae_mz_ordinal_epsilon must be between 0 and 1")
         self.jepa_mae_mz_max = cfg.jepa_mae_mz_max
+        self.mae_mz_multiscale_widths = tuple(
+            int(width) for width in cfg.mae_mz_multiscale_widths
+        )
+        self.mae_mz_multiscale_weight = float(cfg.mae_mz_multiscale_weight)
+        self.mae_gap_bucket_edges_da = tuple(
+            float(edge) for edge in cfg.mae_gap_bucket_edges_da
+        )
         self.jepa_mae_intensity_max = cfg.jepa_mae_intensity_max
         self.jepa_mae_num_mz_bins = math.ceil(
             self.jepa_mae_mz_max / self.jepa_mae_mz_bin_size
@@ -818,6 +894,49 @@ class PeakSetJEPA(nn.Module):
         weights = valid_mask.float()
         return (per_token * weights).sum() / weights.sum().clamp_min(1.0)
 
+    def _mz_multiscale_loss(
+        self,
+        mz_logits: Float[Tensor, "... classes"],
+        mz_target: Int[Tensor, "..."],
+        target_masks: Bool[Tensor, "..."],
+    ) -> tuple[Float[Tensor, ""], dict[str, Tensor]]:
+        """Cross entropy of the softmax marginalised onto coarser m/z bins.
+
+        The flat categorical loss scores a near miss and a wild miss identically;
+        these terms reward landing in the right neighbourhood as well.
+        """
+        widths = self.mae_mz_multiscale_widths
+        if (
+            self.mae_mz_objective != "multiscale_ce"
+            or not widths
+            or self.mae_mz_multiscale_weight <= 0.0
+        ):
+            return mz_logits.new_zeros(()), {}
+        log_probabilities = torch.log_softmax(mz_logits.float(), dim=-1)
+        num_bins = log_probabilities.shape[-1]
+        weights = target_masks.float()
+        denominator = weights.sum().clamp_min(1.0)
+        metrics: dict[str, Tensor] = {}
+        for width in widths:
+            padding = (-num_bins) % width
+            padded = (
+                log_probabilities
+                if padding == 0
+                else torch.nn.functional.pad(
+                    log_probabilities, (0, padding), value=float("-inf")
+                )
+            )
+            grouped = padded.reshape(*padded.shape[:-1], -1, width)
+            coarse = torch.logsumexp(grouped, dim=-1)
+            index = torch.div(mz_target, width, rounding_mode="floor").unsqueeze(-1)
+            per_token = -coarse.gather(-1, index).squeeze(-1)
+            metrics[f"mae_mz_ce_{width}bins"] = (
+                per_token * weights
+            ).sum() / denominator
+        mean_loss = sum(metrics.values()) / float(len(metrics))
+        metrics["mae_mz_multiscale_loss"] = mean_loss
+        return mean_loss, metrics
+
     def _jepa_mae_value_prediction_loss(
         self,
         predicted_latents: Float[Tensor, "batch views peaks dim"],
@@ -830,6 +949,8 @@ class PeakSetJEPA(nn.Module):
         Float[Tensor, ""],
         Float[Tensor, ""],
         Float[Tensor, ""],
+        Float[Tensor, "batch views peaks"],
+        dict[str, Tensor],
     ]:
         mz_logits = cast(nn.Linear, self.jepa_mae_mz_head)(predicted_latents)
         mz_target, intensity_target = self._jepa_mae_targets(peak_mz, peak_intensity)
@@ -837,17 +958,45 @@ class PeakSetJEPA(nn.Module):
         view_shape = (mz_logits.shape[0], mz_logits.shape[1], mz_logits.shape[2])
         mz_target = mz_target.unsqueeze(1).expand(view_shape)
         intensity_target = intensity_target.unsqueeze(1).expand(view_shape)
-        mz_loss = self._masked_ce_loss(mz_logits, mz_target, target_masks)
-        target_weights = target_masks
+        per_token_ce = (
+            _sparse_ordinal_cross_entropy_from_logits(
+                mz_logits,
+                mz_target,
+                self.mae_mz_ordinal_radius_bins,
+                self.mae_mz_ordinal_epsilon,
+            )
+            if self.mae_mz_objective == "sparse_ordinal_ce"
+            else _cross_entropy_from_logits(mz_logits, mz_target)
+        )
+        target_weights = target_masks.float()
+        mz_loss = (per_token_ce * target_weights).sum() / target_weights.sum().clamp_min(
+            1.0
+        )
+        multiscale_term, multiscale_metrics = self._mz_multiscale_loss(
+            mz_logits,
+            mz_target,
+            target_masks,
+        )
+        mz_objective = mz_loss
+        if multiscale_metrics:
+            mz_objective = mz_loss + self.mae_mz_multiscale_weight * multiscale_term
         mz_accuracy = (
-            (mz_logits.argmax(dim=-1) == mz_target).float() * target_weights.float()
-        ).sum() / target_weights.float().sum().clamp_min(1.0)
+            (mz_logits.argmax(dim=-1) == mz_target).float() * target_weights
+        ).sum() / target_weights.sum().clamp_min(1.0)
         zero = mz_loss * 0.0
         if (
             self.masked_token_input_mode == "mz_sentinel"
             or self.mae_intensity_loss_weight <= 0.0
         ):
-            return mz_loss, mz_loss, zero, mz_accuracy, zero
+            return (
+                mz_objective,
+                mz_loss,
+                zero,
+                mz_accuracy,
+                zero,
+                per_token_ce,
+                multiscale_metrics,
+            )
 
         intensity_logits = cast(nn.Linear, self.jepa_mae_intensity_head)(
             predicted_latents
@@ -857,12 +1006,45 @@ class PeakSetJEPA(nn.Module):
             intensity_target,
             target_masks,
         )
-        value_loss = mz_loss + intensity_loss * self.mae_intensity_loss_weight
+        value_loss = mz_objective + intensity_loss * self.mae_intensity_loss_weight
         intensity_accuracy = (
             (intensity_logits.argmax(dim=-1) == intensity_target).float()
             * target_weights.float()
         ).sum() / target_weights.float().sum().clamp_min(1.0)
-        return value_loss, mz_loss, intensity_loss, mz_accuracy, intensity_accuracy
+        return (
+            value_loss,
+            mz_loss,
+            intensity_loss,
+            mz_accuracy,
+            intensity_accuracy,
+            per_token_ce,
+            multiscale_metrics,
+        )
+
+    def _gap_bucket_metrics(
+        self,
+        per_token_ce: Tensor,
+        target_mask: Tensor,
+        gap_da: Tensor | None,
+    ) -> dict[str, Tensor]:
+        if gap_da is None or not self.mae_gap_bucket_edges_da:
+            return {}
+        edges = self.mae_gap_bucket_edges_da
+        labels = _gap_bucket_labels(edges)
+        bounds = (0.0, *edges, float("inf"))
+        total = target_mask.float().sum().clamp_min(1.0)
+        metrics: dict[str, Tensor] = {}
+        for index, label in enumerate(labels):
+            lower, upper = bounds[index], bounds[index + 1]
+            in_bucket = target_mask & (gap_da >= lower)
+            if upper != float("inf"):
+                in_bucket = in_bucket & (gap_da < upper)
+            weights = in_bucket.float()
+            metrics[f"mae_mz_loss_gap_{label}da"] = (
+                per_token_ce * weights
+            ).sum() / weights.sum().clamp_min(1.0)
+            metrics[f"mae_gap_fraction_{label}da"] = weights.sum() / total
+        return metrics
 
     def _predict_augmented_targets(
         self,
@@ -1112,6 +1294,8 @@ class PeakSetJEPA(nn.Module):
             _intensity_loss,
             _mz_accuracy,
             _intensity_accuracy,
+            _per_token_ce,
+            _multiscale_metrics,
         ) = self._jepa_mae_value_prediction_loss(
             predictor_output,
             peak_mz,
@@ -1131,6 +1315,7 @@ class PeakSetJEPA(nn.Module):
         peak_intensity: Float[Tensor, "batch peaks"],
         target_masks: Bool[Tensor, "batch views peaks"],
         reference: Float[Tensor, "*batch dim"],
+        target_gap_da: Tensor | None = None,
     ) -> tuple[Float[Tensor, ""], dict[str, Tensor]]:
         (
             value_loss,
@@ -1138,12 +1323,18 @@ class PeakSetJEPA(nn.Module):
             intensity_loss,
             mz_accuracy,
             intensity_accuracy,
+            per_token_ce,
+            multiscale_metrics,
         ) = self._jepa_mae_value_prediction_loss(
             predictor_output,
             peak_mz,
             peak_intensity,
             target_masks,
         )
+        extra_metrics = {
+            **multiscale_metrics,
+            **self._gap_bucket_metrics(per_token_ce, target_masks, target_gap_da),
+        }
         term = value_loss.to(dtype=reference.dtype) * self.mae_loss_weight
         return term, {
             "mae_loss": value_loss.to(dtype=reference.dtype),
@@ -1152,6 +1343,10 @@ class PeakSetJEPA(nn.Module):
             "mae_intensity_loss": intensity_loss.to(dtype=reference.dtype),
             "mae_mz_accuracy": mz_accuracy.to(dtype=reference.dtype),
             "mae_intensity_accuracy": intensity_accuracy.to(dtype=reference.dtype),
+            **{
+                key: value.to(dtype=reference.dtype)
+                for key, value in extra_metrics.items()
+            },
         }
 
     def pool(
@@ -1353,12 +1548,20 @@ class PeakSetJEPA(nn.Module):
                 peak_mz,
             )
         )
+        gap = _nearest_context_gap_da(
+            peak_mz,
+            peak_mz,
+            context_mask,
+            self.jepa_mae_mz_max,
+        )
+        target_gap_da = gap.unsqueeze(1).expand_as(target_masks)
         mae_term, mae_metrics = self._mae_metrics(
             predictor_output,
             peak_mz,
             peak_intensity,
             target_masks,
             context_encoded,
+            target_gap_da,
         )
         distogram_term, distogram_metrics = self._distogram_metrics(
             distogram_loss,

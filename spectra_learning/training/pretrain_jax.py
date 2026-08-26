@@ -958,7 +958,6 @@ def train_and_evaluate_jax(
         build_model=lambda task_config, _datamodule: build_model_from_config(task_config),
         checkpoint_contract=_pretrain_jax_checkpoint_contract,
         enable_msg_probe=True,
-        initialize_model=initialize_jax_pretrain_model,
         validate_model=_validate_pretrain_jax_model,
     )
     return train_and_evaluate_jax_task(config, workdir, task=task)
@@ -1182,15 +1181,6 @@ def initialize_jax_model_from_torch_seed(
         torch.manual_seed(int(config.seed))
         torch_model = build_torch_model_from_config(config)
     model.load_torch_state_dict(torch_model.state_dict())
-
-
-def initialize_jax_pretrain_model(
-    config: config_dict.ConfigDict,
-    model: PeakSetJEPAJax,
-) -> None:
-    if model.use_frozen_teacher:
-        return
-    initialize_jax_model_from_torch_seed(config, model)
 
 
 _JAX_PROFILE_TIMING_NAMES = (

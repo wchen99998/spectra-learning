@@ -154,12 +154,15 @@ class CrossAttention(nn.Module):
     ) -> Float[Tensor, "batch heads tokens head_dim"]:
         cos = self.rope_cos[positions].unsqueeze(1).to(dtype=tensor.dtype)
         sin = self.rope_sin[positions].unsqueeze(1).to(dtype=tensor.dtype)
-        even = tensor[..., 0::2]
-        odd = tensor[..., 1::2]
-        return torch.stack(
-            (even * cos - odd * sin, even * sin + odd * cos),
+        # Contiguous halves, matching the JAX path; see `_apply_rope` in
+        # pairmixer_jax.py for why the interleaved stride was removed.
+        half = tensor.shape[-1] // 2
+        first = tensor[..., :half]
+        second = tensor[..., half:]
+        return torch.cat(
+            (first * cos - second * sin, first * sin + second * cos),
             dim=-1,
-        ).flatten(-2)
+        )
 
     def forward(
         self,

@@ -5,6 +5,7 @@ from typing import cast
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import torch
 from flax import nnx
 
@@ -33,12 +34,58 @@ def _apply_rope(tensor: Array, positions: Array) -> Array:
     angles = positions[..., None] * inv_freq
     cos = jnp.cos(angles)[:, None].astype(tensor.dtype)
     sin = jnp.sin(angles)[:, None].astype(tensor.dtype)
-    even = tensor[..., 0::2]
-    odd = tensor[..., 1::2]
-    return jnp.stack(
-        (even * cos - odd * sin, even * sin + odd * cos),
+    # Contiguous "rotate-half" pairing. The interleaved form (`x[..., 0::2]` /
+    # `x[..., 1::2]` then `stack(..., -1)`) strides the minor-most axis, which
+    # TPU lowers to pad/slice chains over the 128-lane dimension; on v6e that
+    # cost 51% of the whole forward+backward pass. Rotating contiguous halves is
+    # exactly equivalent once the q/k projection rows are permuted by
+    # `rope_interleaved_to_half_permutation` (see that function).
+    half = head_dim // 2
+    first = tensor[..., :half]
+    second = tensor[..., half:]
+    return jnp.concatenate(
+        (first * cos - second * sin, first * sin + second * cos),
         axis=-1,
-    ).reshape(tensor.shape)
+    )
+
+
+def rope_interleaved_to_half_permutation(head_dim: int) -> np.ndarray:
+    """Row order that makes rotate-half RoPE equal the old interleaved RoPE.
+
+    The interleaved form rotated the pairs `(x[2j], x[2j+1])`; the contiguous
+    form rotates `(x[j], x[j + head_dim // 2])` with the same angles. Reordering
+    a head's channels by this permutation maps one onto the other exactly, so a
+    checkpoint trained under the interleaved form stays valid after the switch.
+    """
+    return np.concatenate(
+        [np.arange(0, head_dim, 2), np.arange(1, head_dim, 2)]
+    )
+
+
+def permute_fused_qkv_rows_for_rope_half(
+    weight: np.ndarray,
+    *,
+    num_heads: int,
+) -> np.ndarray:
+    """Convert a fused qkv weight from interleaved-RoPE to rotate-half layout.
+
+    `weight` is the `(3 * single_dim, single_dim)` matrix of `AttentionPairBias.qkv`,
+    whose output axis is laid out as `(component, head, head_dim)`. Only the q and
+    k components are rotated, so only those rows are permuted; v is untouched.
+    Attention scores are a dot product over `head_dim`, so permuting q and k
+    identically leaves them unchanged.
+    """
+    out_features, in_features = weight.shape
+    assert out_features == 3 * in_features, (
+        f"expected a fused qkv weight, got {weight.shape}"
+    )
+    single_dim = in_features
+    head_dim = single_dim // num_heads
+    permutation = rope_interleaved_to_half_permutation(head_dim)
+    reshaped = weight.reshape(3, num_heads, head_dim, single_dim).copy()
+    reshaped[0] = reshaped[0][:, permutation]
+    reshaped[1] = reshaped[1][:, permutation]
+    return reshaped.reshape(out_features, in_features)
 
 
 def _preferred_acc_dtype(dtype: object) -> object | None:
@@ -285,6 +332,7 @@ class PairFeatureEmbedder(nnx.Module):
                 mz_scale=mz_scale,
                 bin_size=token_bin_size,
                 embedding_dim=token_embedding_dim,
+                rngs=rngs,
             )
             raw_dim += self.mz_features.num_features()
         self.raw_proj = nnx.List(

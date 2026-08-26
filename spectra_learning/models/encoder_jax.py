@@ -46,12 +46,14 @@ class MetadataEmbedder(nnx.Module):
             MASSIVE_V2_CONDITION_DIM,
             condition_dim,
             compute_dtype=compute_dtype,
+            init="xavier_normal",
             rngs=rngs,
         )
         self.linear2 = Linear(
             condition_dim,
             condition_dim,
             compute_dtype=compute_dtype,
+            init="xavier_normal",
             rngs=rngs,
         )
 

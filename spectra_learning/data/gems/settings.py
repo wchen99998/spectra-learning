@@ -5,6 +5,10 @@ from typing import Any
 import torch
 from ml_collections import config_dict
 
+from spectra_learning.data.gems.gap_aware import (
+    DEFAULT_GAP_AWARE_BUCKET_EDGES_DA,
+    DEFAULT_GAP_AWARE_BUCKET_WEIGHTS,
+)
 from spectra_learning.data.gems.intensity_aware import AWARE_MIXED_MASK_CONFIG
 from spectra_learning.data.spectra import (
     DEFAULT_MAX_PRECURSOR_MZ,
@@ -44,6 +48,9 @@ class GemsDataConfig:
     gems_hdf5_rows_per_block: int
     gems_hdf5_active_shards: int
     gems_hdf5_mix_blocks_per_batch: int
+    gems_hdf5_mix_pool_blocks: int
+    gems_hdf5_mix_lanes_per_residency: int
+    gems_hdf5_shuffle_seed: int | None
     batch_size: int
     gradient_accumulation_steps: int
     drop_remainder: bool
@@ -61,6 +68,8 @@ class GemsDataConfig:
     jepa_mask_lengths: tuple[int, ...]
     jepa_mask_round_from: int
     jepa_intensity_aware_mask_config: dict[str, float]
+    jepa_gap_aware_bucket_edges_da: tuple[float, ...]
+    jepa_gap_aware_bucket_weights: tuple[float, ...]
     jepa_allow_target_overlap: bool
     num_peaks: int
     dataloader_pin_memory: bool
@@ -130,6 +139,17 @@ class GemsDataConfig:
             gems_hdf5_mix_blocks_per_batch=int(
                 config.get("gems_hdf5_mix_blocks_per_batch", 1)
             ),
+            gems_hdf5_mix_pool_blocks=int(
+                config.get("gems_hdf5_mix_pool_blocks", 0)
+            ),
+            gems_hdf5_mix_lanes_per_residency=int(
+                config.get("gems_hdf5_mix_lanes_per_residency", 0)
+            ),
+            gems_hdf5_shuffle_seed=(
+                None
+                if config.get("gems_hdf5_shuffle_seed", None) is None
+                else int(config.gems_hdf5_shuffle_seed)
+            ),
             batch_size=int(config.get("batch_size", DEFAULT_BATCH_SIZE)),
             gradient_accumulation_steps=int(
                 config.get("gradient_accumulation_steps", 1)
@@ -171,6 +191,20 @@ class GemsDataConfig:
                 key: float(config.get(f"jepa_intensity_aware_{key}", value))
                 for key, value in AWARE_MIXED_MASK_CONFIG.items()
             },
+            jepa_gap_aware_bucket_edges_da=tuple(
+                float(edge)
+                for edge in config.get(
+                    "jepa_gap_aware_bucket_edges_da",
+                    DEFAULT_GAP_AWARE_BUCKET_EDGES_DA,
+                )
+            ),
+            jepa_gap_aware_bucket_weights=tuple(
+                float(weight)
+                for weight in config.get(
+                    "jepa_gap_aware_bucket_weights",
+                    DEFAULT_GAP_AWARE_BUCKET_WEIGHTS,
+                )
+            ),
             jepa_allow_target_overlap=bool(
                 config.get("jepa_allow_target_overlap", False)
             ),

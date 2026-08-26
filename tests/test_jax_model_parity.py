@@ -446,6 +446,63 @@ def test_jax_mae_without_intensity_head_matches_pytorch():
     )
 
 
+def test_jax_sparse_ordinal_mae_matches_pytorch():
+    torch.manual_seed(29)
+    kwargs = {
+        **_small_mae_kwargs(),
+        "mae_intensity_loss_weight": 0.0,
+        "mae_mz_objective": "sparse_ordinal_ce",
+        "mae_mz_ordinal_radius_bins": 2,
+        "mae_mz_ordinal_epsilon": 0.2,
+    }
+    torch_model = PeakSetJEPA(**kwargs).eval()
+    jax_model = PeakSetJEPAJax(**kwargs)
+    jax_model.load_torch_state_dict(torch_model.state_dict())
+    batch = _real_pattern_batch("contiguous")
+
+    with torch.no_grad():
+        torch_metrics = torch_model(batch)
+    jax_metrics = jax_model(_jax_batch(batch))
+
+    _assert_metrics_close(torch_metrics, jax_metrics)
+    assert "mae_mz_multiscale_loss" not in torch_metrics
+    assert "mae_mz_multiscale_loss" not in jax_metrics
+
+
+def test_jax_sparse_ordinal_fastmixer_compact_matches_dense():
+    torch.manual_seed(29)
+    dense_kwargs = {
+        **_small_mae_kwargs(),
+        "pairmixer_block_type": "dense",
+        "mae_intensity_loss_weight": 0.0,
+        "mae_mz_objective": "sparse_ordinal_ce",
+        "mae_mz_ordinal_radius_bins": 2,
+        "mae_mz_ordinal_epsilon": 0.2,
+    }
+    fast_kwargs = {
+        **dense_kwargs,
+        "pairmixer_block_type": "FastMixer-Dense",
+        "pairmixer_fast_max_visible_tokens": 5,
+    }
+    torch_model = PeakSetJEPA(**dense_kwargs).eval()
+    dense_model = PeakSetJEPAJax(**dense_kwargs)
+    fast_model = PeakSetJEPAJax(**fast_kwargs)
+    state_dict = torch_model.state_dict()
+    dense_model.load_torch_state_dict(state_dict)
+    fast_model.load_torch_state_dict(state_dict)
+    batch = _jax_batch(_real_pattern_batch("random"))
+
+    dense_metrics = dense_model(batch)
+    fast_metrics = fast_model(batch)
+    _assert_jax_metrics_close(dense_metrics, fast_metrics)
+    np.testing.assert_allclose(
+        np.asarray(dense_model(batch, loss_only=True)["loss"]),
+        np.asarray(fast_model(batch, loss_only=True)["loss"]),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
 def test_jax_mae_without_pair_bias_matches_pytorch():
     torch.manual_seed(29)
     kwargs = {

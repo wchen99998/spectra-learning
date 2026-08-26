@@ -151,12 +151,15 @@ class CrossAttention(nnx.Module):
     def _apply_rope(self, tensor: Array, positions: Array) -> Array:
         cos = self.rope_cos[positions][:, None].astype(tensor.dtype)
         sin = self.rope_sin[positions][:, None].astype(tensor.dtype)
-        even = tensor[..., 0::2]
-        odd = tensor[..., 1::2]
-        return jnp.stack(
-            (even * cos - odd * sin, even * sin + odd * cos),
+        # Contiguous halves rather than an interleaved stride; see
+        # `_apply_rope` in pairmixer_jax.py for why.
+        half = tensor.shape[-1] // 2
+        first = tensor[..., :half]
+        second = tensor[..., half:]
+        return jnp.concatenate(
+            (first * cos - second * sin, first * sin + second * cos),
             axis=-1,
-        ).reshape(tensor.shape)
+        )
 
     def __call__(
         self,

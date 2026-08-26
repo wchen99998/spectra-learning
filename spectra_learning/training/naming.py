@@ -90,12 +90,14 @@ def _objective_parts(config: Any) -> list[str]:
     if str(config.get("training_mode", "jepa")).lower() == "mae":
         parts.append(f"maew{float(config.get('mae_loss_weight', 1.0)):.0e}")
         parts.append(f"mzbin{float(config.get('jepa_mae_mz_bin_size', 2.5)):g}")
+        parts.extend(_mz_objective_parts(config))
         has_mz_bin_part = True
         parts.extend(_intensity_objective_parts(config))
     elif (jepa_mae_loss_weight := float(config.get("jepa_mae_loss_weight", 0.0))) > 0:
         parts.append("jepamae")
         parts.append(f"maew{jepa_mae_loss_weight:.0e}")
         parts.append(f"mzbin{float(config.get('jepa_mae_mz_bin_size', 2.5)):g}")
+        parts.extend(_mz_objective_parts(config))
         has_mz_bin_part = True
         parts.extend(_intensity_objective_parts(config))
     if (distogram_loss_weight := float(config.get("distogram_loss_weight", 0.0))) > 0:
@@ -109,6 +111,27 @@ def _objective_parts(config: Any) -> list[str]:
         parts.append("latentpair")
         parts.append(f"pairw{latent_pair_loss_weight:.0e}")
     return parts
+
+
+def _mz_objective_parts(config: Any) -> list[str]:
+    objective = config.get("mae_mz_objective", None)
+    if objective is None:
+        widths = config.get("mae_mz_multiscale_widths", ())
+        weight = float(config.get("mae_mz_multiscale_weight", 0.0))
+        objective = "multiscale_ce" if widths and weight > 0.0 else "exact_ce"
+    objective = str(objective).lower()
+    if objective == "multiscale_ce":
+        return [
+            "multiscale",
+            f"multiw{float(config.get('mae_mz_multiscale_weight', 0.0)):.0e}",
+        ]
+    if objective == "sparse_ordinal_ce":
+        return [
+            "sparseord",
+            f"ordr{int(config.get('mae_mz_ordinal_radius_bins', 2))}",
+            f"ordeps{float(config.get('mae_mz_ordinal_epsilon', 0.2)):g}",
+        ]
+    return []
 
 
 def _intensity_objective_parts(config: Any) -> list[str]:

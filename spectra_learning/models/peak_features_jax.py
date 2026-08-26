@@ -61,13 +61,22 @@ class MzTokenEmbedding(nnx.Module):
         mz_scale: float,
         bin_size: float,
         embedding_dim: int,
+        rngs: nnx.Rngs | None = None,
     ) -> None:
+        rngs = nnx.Rngs(0) if rngs is None else rngs
         assert mz_scale > 0.0
         assert bin_size > 0.0
         self.mz_scale = mz_scale
         self.bin_size = bin_size
         self.num_tokens = ceil(mz_scale / bin_size)
         self.embedding = Embedding(self.num_tokens, embedding_dim)
+        self.embedding.weight[...] = (
+            rngs.params.normal(
+                (self.num_tokens, embedding_dim),
+                dtype=jnp.float32,
+            )
+            * 0.02
+        )
 
     def token_ids(self, peak_mz: Array) -> Array:
         token_ids = jnp.floor(
@@ -136,6 +145,7 @@ class PeakFeatureEmbedder(nnx.Module):
                 mz_scale=mz_scale,
                 bin_size=token_bin_size,
                 embedding_dim=token_embedding_dim,
+                rngs=rngs,
             )
             self.mz_ffn = Linear(
                 self.mz_features.num_features(),

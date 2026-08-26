@@ -85,6 +85,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_block_min_len = 1
     cfg.jepa_mask_lengths = (2, 4, 8, 12)
     cfg.jepa_mask_round_from = 3
+    cfg.jepa_gap_aware_bucket_edges_da = (2.0, 5.0)
+    cfg.jepa_gap_aware_bucket_weights = (0.2, 0.4, 0.4)
     cfg.jepa_target_normalization = "none"
     cfg.masked_token_loss_weight = 0.0
     cfg.jepa_mae_loss_weight = 0.0
@@ -96,6 +98,9 @@ def get_config() -> config_dict.ConfigDict:
     cfg.jepa_mae_intensity_bin_size = 0.1
     cfg.jepa_mae_intensity_max = 1.0
     cfg.mae_intensity_loss_weight = 1.0
+    cfg.mae_mz_multiscale_widths = ()
+    cfg.mae_mz_multiscale_weight = 0.0
+    cfg.mae_gap_bucket_edges_da = (2.0, 5.0)
     cfg.jepa_allow_target_overlap = False
     cfg.jepa_intensity_aware_tau = 0.5
     cfg.jepa_intensity_aware_alpha = 0.75

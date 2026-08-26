@@ -25,8 +25,11 @@ def test_metadata_adaln_config_preserves_training_settings() -> None:
     assert config.spectrum_metadata_dropout_probability == 0.10
     assert config.gems_hdf5_revision == "b098155fccb7335b752f2690bf16d2479d69bf5b"
     assert config.peak_ordering == "mz"
-    assert config.gems_hdf5_active_shards == 2
-    assert config.gems_hdf5_mix_blocks_per_batch == 8
+    assert config.gems_hdf5_active_shards == 8
+    assert config.gems_hdf5_mix_blocks_per_batch == 64
+    assert config.gems_hdf5_mix_pool_blocks == 2_048
+    assert config.gems_hdf5_mix_lanes_per_residency == 8
+    assert config.gems_hdf5_shuffle_seed == 67
     assert "shuffle_buffer" not in config
     assert "mzorder" in config.run_name_suffix
     assert config.warmup_steps == 20_000

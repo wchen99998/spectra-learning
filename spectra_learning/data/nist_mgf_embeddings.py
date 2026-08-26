@@ -33,7 +33,11 @@ from spectra_learning.data.spectra import (
 from spectra_learning.models.factory import build_model_from_config
 from spectra_learning.models.model import PeakSetJEPA
 from spectra_learning.models.pooling import CovariancePool
-from spectra_learning.models.spectrum_metadata import torch_spectrum_metadata_from_batch
+from spectra_learning.models.spectrum_metadata import (
+    instrument_family_id,
+    polarity_id,
+    torch_spectrum_metadata_from_batch,
+)
 from spectra_learning.data.massspec_probe import MassSpecProbeData
 from spectra_learning.probes.massspec.msg_probe import iter_massspec_probe
 from spectra_learning.training.checkpointing import load_torch_checkpoint
@@ -139,7 +143,10 @@ def _encode_peak_tokens(
             batch["peak_intensity"],
             valid_mask=batch["peak_valid_mask"],
             precursor_mz=batch.get("precursor_mz", None),
-            spectrum_metadata=torch_spectrum_metadata_from_batch(batch),
+            spectrum_metadata=torch_spectrum_metadata_from_batch(
+                batch,
+                getattr(model.encoder, "metadata_schema", None),
+            ),
         )
         return _peak_tokens_only(encoded, batch["peak_valid_mask"])
 
@@ -319,25 +326,51 @@ def _preprocess_mgf_batch(
         ),
         min_peak_intensity=min_peak_intensity,
     )
+    collision_energy = [
+        _metadata_number(record, "collisionenergy", "collision energy")
+        for record in records
+    ]
     batch["collision_energy"] = (
         torch.tensor(
-            [
-                _metadata_number(record, "collisionenergy", "collision energy") or 0.0
-                for record in records
-            ],
+            [value or 0.0 for value in collision_energy],
             dtype=torch.float32,
         ).clamp(0.0, COLLISION_ENERGY_MAX)
         / COLLISION_ENERGY_MAX
     )
+    batch["collision_energy_present"] = torch.tensor(
+        [value is not None for value in collision_energy],
+        dtype=torch.float32,
+    )
+    batch["polarity_id"] = torch.tensor(
+        [
+            polarity_id(
+                record.get("ionmode")
+                or record.get("precursortype")
+                or record.get("charge", "")
+            )
+            for record in records
+        ],
+        dtype=torch.int32,
+    )
+    batch["instrument_family_id"] = torch.tensor(
+        [
+            instrument_family_id(
+                record.get("instrumenttype") or record.get("instrument", "")
+            )
+            for record in records
+        ],
+        dtype=torch.int32,
+    )
+    charge = [_metadata_number(record, "charge") for record in records]
     batch["charge"] = canonicalize_precursor_charge_torch(
         torch.tensor(
-            [
-                _metadata_number(record, "charge")
-                or ASSUMED_PRECURSOR_CHARGE
-                for record in records
-            ],
+            [value or ASSUMED_PRECURSOR_CHARGE for value in charge],
             dtype=torch.float32,
         )
+    )
+    batch["charge_present"] = torch.tensor(
+        [value is not None for value in charge],
+        dtype=torch.float32,
     )
     return {key: value.to(device) for key, value in batch.items()}
 

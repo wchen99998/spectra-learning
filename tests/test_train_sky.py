@@ -284,6 +284,18 @@ def test_launcher_leaves_async_checkpointing_to_the_training_config():
     assert "jax_enable_async_checkpointing" not in overrides
 
 
+def test_launcher_limits_wandb_tags_to_wandb_maximum():
+    overrides = train_sky.build_train_overrides(
+        run_id="tag-length-test",
+        jax_mesh_devices="16",
+        jax_cache_dir="/tmp/jax-cache",
+        queue_tag="flex-start",
+        experiment_tag="x" * 65,
+    )
+
+    assert overrides["wandb_kwargs"]["tags"][-1] == "x" * 64
+
+
 def test_dense_adamw_config_uses_32_chips_and_disables_online_probe():
     cfg = load_config(DENSE_ADAMW_CONFIG)
 

@@ -91,6 +91,12 @@ class PeakSetJEPASettings:
     mae_intensity_loss_weight: float = 1.0
     jepa_mae_mz_max: float = PEAK_MZ_MAX
     jepa_mae_intensity_max: float = 1.0
+    mae_mz_objective: str = "exact_ce"
+    mae_mz_ordinal_radius_bins: int = 2
+    mae_mz_ordinal_epsilon: float = 0.2
+    mae_mz_multiscale_widths: tuple[int, ...] = ()
+    mae_mz_multiscale_weight: float = 0.0
+    mae_gap_bucket_edges_da: tuple[float, ...] = (2.0, 5.0)
     jepa_target_normalization: str = "none"
     latent_pair_target_normalization: str = "layernorm"
     masked_token_input_mode: str = "latent_token"
@@ -212,3 +218,9 @@ def _apply_derived_defaults(values: dict[str, Any], config: Any) -> None:
     values["pairmixer_mz_scale"] = PEAK_MZ_MAX
     values["pairmixer_precursor_mz_scale"] = precursor_mz_max
     values["pairmixer_fourier_x_max"] = PEAK_MZ_MAX
+    if "mae_mz_objective" not in config:
+        widths = config.get("mae_mz_multiscale_widths", ())
+        weight = float(config.get("mae_mz_multiscale_weight", 0.0))
+        values["mae_mz_objective"] = (
+            "multiscale_ce" if widths and weight > 0.0 else "exact_ce"
+        )

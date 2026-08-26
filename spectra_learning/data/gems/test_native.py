@@ -210,6 +210,87 @@ class GemsSamplingTests(unittest.TestCase):
         )
         self.assertEqual(len({row // 256 for row in optimizer_batch}), 64)
 
+    def test_rolling_mixer_uses_unique_rows_and_changes_chunk_partners(self):
+        sampler = ChunkedDistributedBatchSampler(
+            [(index * 1024, 1024, 16) for index in range(4)],
+            batch_size=16,
+            rows_per_block=16,
+            shuffle=True,
+            seed=66,
+            drop_last=True,
+            world_size=1,
+            rank=0,
+            shuffle_segments=True,
+            active_segments=4,
+            mix_blocks_per_batch=4,
+            mix_pool_blocks=16,
+            mix_lanes_per_residency=2,
+        )
+        batches = list(sampler)
+        repeated = list(sampler)
+
+        rows = [row for batch in batches for row in batch]
+        self.assertEqual(len(batches), len(sampler))
+        self.assertEqual(len(rows), len(set(rows)))
+        self.assertEqual(batches, repeated)
+        for batch in batches:
+            self.assertEqual(len(batch), 16)
+            self.assertEqual(len({row // 16 for row in batch}), 4)
+        for left, right in zip(batches[::2], batches[1::2], strict=True):
+            left_blocks = {row // 16 for row in left}
+            right_blocks = {row // 16 for row in right}
+            self.assertTrue(left_blocks.isdisjoint(right_blocks))
+
+        first_pair = {
+            row // 16 for batch in batches[:2] for row in batch
+        }
+        second_pair = {
+            row // 16 for batch in batches[2:4] for row in batch
+        }
+        self.assertNotEqual(first_pair, second_pair)
+
+    def test_rolling_mixer_simulates_eight_host_optimizer_batch(self):
+        host_batches = []
+        host_stride = 16_777_216
+        for host in range(8):
+            base = host * host_stride
+            sampler = ChunkedDistributedBatchSampler(
+                [
+                    (base + shard * 262_144, 262_144, 256)
+                    for shard in range(4)
+                ],
+                batch_size=256,
+                rows_per_block=256,
+                shuffle=True,
+                seed=67 + host,
+                drop_last=True,
+                world_size=1,
+                rank=0,
+                shuffle_segments=True,
+                active_segments=4,
+                mix_blocks_per_batch=64,
+                mix_pool_blocks=2_048,
+                mix_lanes_per_residency=8,
+            )
+            host_batches.append(list(islice(sampler, 2)))
+
+        optimizer_batch = [
+            row
+            for batches in host_batches
+            for batch in batches
+            for row in batch
+        ]
+        self.assertEqual(len(optimizer_batch), 4_096)
+        self.assertEqual(len(set(optimizer_batch)), 4_096)
+        self.assertEqual(
+            len({row // host_stride for row in optimizer_batch}),
+            8,
+        )
+        self.assertEqual(
+            len({row // 256 for row in optimizer_batch}),
+            1_024,
+        )
+
     def test_mixed_sampler_offset_matches_full_sequence_suffix(self):
         kwargs = dict(
             segments=[(0, 4096, 256), (4096, 4096, 256)],

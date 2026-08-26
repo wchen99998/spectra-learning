@@ -6,6 +6,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import torch
+from jax.scipy.special import logsumexp
 from flax import nnx
 
 from spectra_learning.models.common_jax import (
@@ -169,8 +170,31 @@ class PeakSetJEPAJax(nnx.Module):
         self.jepa_mae_mz_bin_size = cfg.jepa_mae_mz_bin_size
         self.jepa_mae_intensity_bin_size = cfg.jepa_mae_intensity_bin_size
         self.mae_intensity_loss_weight = cfg.mae_intensity_loss_weight
+        self.mae_mz_objective = cfg.mae_mz_objective.lower()
+        if self.mae_mz_objective not in {
+            "exact_ce",
+            "multiscale_ce",
+            "sparse_ordinal_ce",
+        }:
+            raise ValueError(
+                "mae_mz_objective must be one of "
+                "('exact_ce', 'multiscale_ce', 'sparse_ordinal_ce')"
+            )
+        self.mae_mz_ordinal_radius_bins = int(cfg.mae_mz_ordinal_radius_bins)
+        self.mae_mz_ordinal_epsilon = float(cfg.mae_mz_ordinal_epsilon)
+        if self.mae_mz_ordinal_radius_bins < 0:
+            raise ValueError("mae_mz_ordinal_radius_bins must be >= 0")
+        if not 0.0 <= self.mae_mz_ordinal_epsilon <= 1.0:
+            raise ValueError("mae_mz_ordinal_epsilon must be between 0 and 1")
         self.jepa_mae_mz_max = cfg.jepa_mae_mz_max
         self.jepa_mae_intensity_max = cfg.jepa_mae_intensity_max
+        self.mae_mz_multiscale_widths = tuple(
+            int(width) for width in cfg.mae_mz_multiscale_widths
+        )
+        self.mae_mz_multiscale_weight = float(cfg.mae_mz_multiscale_weight)
+        self.mae_gap_bucket_edges_da = tuple(
+            float(edge) for edge in cfg.mae_gap_bucket_edges_da
+        )
         self.jepa_mae_num_mz_bins = math.ceil(
             self.jepa_mae_mz_max / self.jepa_mae_mz_bin_size
         )
@@ -676,6 +700,15 @@ class PeakSetJEPAJax(nnx.Module):
                 peak_mz,
             )
         )
+        target_gap_da = None
+        if not loss_only and self.mae_gap_bucket_edges_da:
+            gap = _nearest_context_gap_da(
+                peak_mz,
+                peak_mz,
+                context_mask,
+                self.jepa_mae_mz_max,
+            )
+            target_gap_da = jnp.broadcast_to(gap[:, None, :], target_masks.shape)
         mae_term, mae_metrics = self._mae_metrics(
             predictor_output,
             peak_mz,
@@ -683,6 +716,7 @@ class PeakSetJEPAJax(nnx.Module):
             target_masks,
             context_encoded,
             compute_accuracy=not loss_only,
+            target_gap_da=target_gap_da,
         )
         distogram_term, distogram_metrics = self._distogram_metrics(
             distogram_loss,
@@ -763,6 +797,19 @@ class PeakSetJEPAJax(nnx.Module):
             peak_idx,
             axis=1,
         )
+        target_gap_da = None
+        if not loss_only and self.mae_gap_bucket_edges_da:
+            num_views = target_masks.shape[1]
+            flat_context_mask = jnp.broadcast_to(
+                context_mask[:, None, :],
+                (context_mask.shape[0], num_views, context_mask.shape[1]),
+            ).reshape(-1, context_mask.shape[1])
+            target_gap_da = _nearest_context_gap_da(
+                peak_mz_compact,
+                flat_peak_mz,
+                flat_context_mask,
+                self.jepa_mae_mz_max,
+            )
         mae_term, mae_metrics = self._mae_metrics_compact(
             predictor_output_compact,
             peak_mz_compact,
@@ -770,6 +817,7 @@ class PeakSetJEPAJax(nnx.Module):
             target_mask,
             reference=context_encoded_compact,
             compute_accuracy=not loss_only,
+            target_gap_da=target_gap_da,
         )
         distogram_term, distogram_metrics = self._distogram_metrics(
             distogram_loss,
@@ -1348,6 +1396,71 @@ class PeakSetJEPAJax(nnx.Module):
             "distogram_term": term,
         }
 
+    @property
+    def _use_mz_multiscale(self) -> bool:
+        return (
+            self.mae_mz_objective == "multiscale_ce"
+            and bool(self.mae_mz_multiscale_widths)
+            and self.mae_mz_multiscale_weight > 0.0
+        )
+
+    def _mz_cross_entropy_rows(self, mz_logits: Array, mz_target: Array) -> Array:
+        if self.mae_mz_objective == "sparse_ordinal_ce":
+            return _sparse_ordinal_cross_entropy_from_logits(
+                mz_logits,
+                mz_target,
+                self.mae_mz_ordinal_radius_bins,
+                self.mae_mz_ordinal_epsilon,
+            )
+        return _cross_entropy_from_logits(mz_logits, mz_target)
+
+    def _mz_multiscale_loss(
+        self,
+        mz_logits: Array,
+        mz_target: Array,
+        target_mask: Array,
+    ) -> tuple[Array, dict[str, Array]]:
+        if not self._use_mz_multiscale:
+            zero = mz_logits.reshape(-1)[0] * 0.0
+            return zero, {}
+        rows = _coarse_marginal_ce_rows(
+            mz_logits,
+            mz_target,
+            self.mae_mz_multiscale_widths,
+        )
+        metrics = {
+            f"mae_mz_ce_{width}bins": _masked_mean(value, target_mask)
+            for width, value in rows.items()
+        }
+        mean_loss = sum(metrics.values()) / float(len(metrics))
+        metrics["mae_mz_multiscale_loss"] = mean_loss
+        return mean_loss, metrics
+
+    def _gap_bucket_metrics(
+        self,
+        per_token_ce: Array,
+        target_mask: Array,
+        gap_da: Array | None,
+    ) -> dict[str, Array]:
+        if gap_da is None or not self.mae_gap_bucket_edges_da:
+            return {}
+        edges = self.mae_gap_bucket_edges_da
+        labels = _gap_bucket_labels(edges)
+        bounds = (0.0, *edges, float("inf"))
+        total = jnp.maximum(target_mask.astype(jnp.float32).sum(), 1.0)
+        metrics: dict[str, Array] = {}
+        for index, label in enumerate(labels):
+            lower, upper = bounds[index], bounds[index + 1]
+            in_bucket = target_mask & (gap_da >= lower)
+            if upper != float("inf"):
+                in_bucket = in_bucket & (gap_da < upper)
+            weights = in_bucket.astype(jnp.float32)
+            metrics[f"mae_mz_loss_gap_{label}da"] = (
+                per_token_ce * weights
+            ).sum() / jnp.maximum(weights.sum(), 1.0)
+            metrics[f"mae_gap_fraction_{label}da"] = weights.sum() / total
+        return metrics
+
     def _jepa_mae_targets(self, peak_mz: Array, peak_intensity: Array) -> tuple[Array, Array]:
         mz_target = jnp.floor(
             peak_mz.astype(jnp.float32) * self.jepa_mae_mz_max / self.jepa_mae_mz_bin_size
@@ -1368,14 +1481,23 @@ class PeakSetJEPAJax(nnx.Module):
         target_masks: Array,
         *,
         compute_accuracy: bool = True,
-    ) -> tuple[Array, Array, Array, Array, Array]:
+    ) -> tuple[Array, Array, Array, Array, Array, Array, dict[str, Array]]:
         assert self.jepa_mae_mz_head is not None
         mz_logits = self.jepa_mae_mz_head(predicted_latents)
         mz_target, intensity_target = self._jepa_mae_targets(peak_mz, peak_intensity)
         view_shape = mz_logits.shape[:3]
         mz_target = jnp.broadcast_to(mz_target[:, None, :], view_shape)
         intensity_target = jnp.broadcast_to(intensity_target[:, None, :], view_shape)
-        mz_loss = _masked_ce_loss_from_logits(mz_logits, mz_target, target_masks)
+        per_token_ce = self._mz_cross_entropy_rows(mz_logits, mz_target)
+        mz_loss = _masked_mean(per_token_ce, target_masks)
+        multiscale_term, multiscale_metrics = self._mz_multiscale_loss(
+            mz_logits,
+            mz_target,
+            target_masks,
+        )
+        mz_objective = mz_loss
+        if multiscale_metrics:
+            mz_objective = mz_loss + self.mae_mz_multiscale_weight * multiscale_term
         target_weights = target_masks.astype(jnp.float32)
         zero = mz_loss * 0.0
         mz_accuracy = zero
@@ -1391,7 +1513,15 @@ class PeakSetJEPAJax(nnx.Module):
             self.masked_token_input_mode == "mz_sentinel"
             or self.mae_intensity_loss_weight <= 0.0
         ):
-            return mz_loss, mz_loss, zero, mz_accuracy, zero
+            return (
+                mz_objective,
+                mz_loss,
+                zero,
+                mz_accuracy,
+                zero,
+                per_token_ce,
+                multiscale_metrics,
+            )
         assert self.jepa_mae_intensity_head is not None
         intensity_logits = self.jepa_mae_intensity_head(predicted_latents)
         intensity_loss = _masked_ce_loss_from_logits(
@@ -1399,7 +1529,7 @@ class PeakSetJEPAJax(nnx.Module):
             intensity_target,
             target_masks,
         )
-        value_loss = mz_loss + intensity_loss * self.mae_intensity_loss_weight
+        value_loss = mz_objective + intensity_loss * self.mae_intensity_loss_weight
         intensity_accuracy = zero
         if compute_accuracy:
             intensity_accuracy = (
@@ -1409,7 +1539,15 @@ class PeakSetJEPAJax(nnx.Module):
                 ).sum()
                 / jnp.maximum(target_weights.sum(), 1.0)
             )
-        return value_loss, mz_loss, intensity_loss, mz_accuracy, intensity_accuracy
+        return (
+            value_loss,
+            mz_loss,
+            intensity_loss,
+            mz_accuracy,
+            intensity_accuracy,
+            per_token_ce,
+            multiscale_metrics,
+        )
 
     def _mae_metrics(
         self,
@@ -1420,17 +1558,29 @@ class PeakSetJEPAJax(nnx.Module):
         reference: Array,
         *,
         compute_accuracy: bool = True,
+        target_gap_da: Array | None = None,
     ) -> tuple[Array, dict[str, Array]]:
         del reference
-        value_loss, mz_loss, intensity_loss, mz_accuracy, intensity_accuracy = (
-            self._jepa_mae_value_prediction_loss(
-                predictor_output,
-                peak_mz,
-                peak_intensity,
-                target_masks,
-                compute_accuracy=compute_accuracy,
-            )
+        (
+            value_loss,
+            mz_loss,
+            intensity_loss,
+            mz_accuracy,
+            intensity_accuracy,
+            per_token_ce,
+            multiscale_metrics,
+        ) = self._jepa_mae_value_prediction_loss(
+            predictor_output,
+            peak_mz,
+            peak_intensity,
+            target_masks,
+            compute_accuracy=compute_accuracy,
         )
+        extra_metrics = dict(multiscale_metrics)
+        if compute_accuracy:
+            extra_metrics.update(
+                self._gap_bucket_metrics(per_token_ce, target_masks, target_gap_da)
+            )
         term = value_loss * self.mae_loss_weight
         return term, {
             "mae_loss": value_loss,
@@ -1439,6 +1589,7 @@ class PeakSetJEPAJax(nnx.Module):
             "mae_intensity_loss": intensity_loss,
             "mae_mz_accuracy": mz_accuracy,
             "mae_intensity_accuracy": intensity_accuracy,
+            **extra_metrics,
         }
 
     def _mae_metrics_compact(
@@ -1450,6 +1601,7 @@ class PeakSetJEPAJax(nnx.Module):
         reference: Array,
         *,
         compute_accuracy: bool = True,
+        target_gap_da: Array | None = None,
     ) -> tuple[Array, dict[str, Array]]:
         del reference
         assert self.jepa_mae_mz_head is not None
@@ -1457,9 +1609,16 @@ class PeakSetJEPAJax(nnx.Module):
             peak_mz_compact,
             peak_intensity_compact,
         )
-        if compute_accuracy:
+        extra_metrics: dict[str, Array] = {}
+        multiscale_term = None
+        if (
+            compute_accuracy
+            or self._use_mz_multiscale
+            or self.mae_mz_objective == "sparse_ordinal_ce"
+        ):
             mz_logits = self.jepa_mae_mz_head(predictor_output_compact)
-            mz_loss = _masked_ce_loss_from_logits(mz_logits, mz_target, target_slot)
+            per_token_ce = self._mz_cross_entropy_rows(mz_logits, mz_target)
+            mz_loss = _masked_mean(per_token_ce, target_slot)
             target_weights = target_slot.astype(jnp.float32)
             mz_accuracy = (
                 (
@@ -1467,7 +1626,24 @@ class PeakSetJEPAJax(nnx.Module):
                     * target_weights
                 ).sum()
                 / jnp.maximum(target_weights.sum(), 1.0)
+                if compute_accuracy
+                else mz_loss * 0.0
             )
+            if self._use_mz_multiscale:
+                multiscale_term, multiscale_metrics = self._mz_multiscale_loss(
+                    mz_logits,
+                    mz_target,
+                    target_slot,
+                )
+                extra_metrics.update(multiscale_metrics)
+            if compute_accuracy:
+                extra_metrics.update(
+                    self._gap_bucket_metrics(
+                        per_token_ce,
+                        target_slot,
+                        target_gap_da,
+                    )
+                )
         else:
             mz_loss = _linear_head_masked_ce_loss(
                 self.jepa_mae_mz_head,
@@ -1478,11 +1654,14 @@ class PeakSetJEPAJax(nnx.Module):
             mz_accuracy = mz_loss * 0.0
 
         zero = mz_loss * 0.0
+        mz_objective = mz_loss
+        if multiscale_term is not None:
+            mz_objective = mz_loss + self.mae_mz_multiscale_weight * multiscale_term
         if (
             self.masked_token_input_mode == "mz_sentinel"
             or self.mae_intensity_loss_weight <= 0.0
         ):
-            value_loss = mz_loss
+            value_loss = mz_objective
             intensity_loss = zero
             intensity_accuracy = zero
         else:
@@ -1493,7 +1672,7 @@ class PeakSetJEPAJax(nnx.Module):
                 intensity_target,
                 target_slot,
             )
-            value_loss = mz_loss + intensity_loss * self.mae_intensity_loss_weight
+            value_loss = mz_objective + intensity_loss * self.mae_intensity_loss_weight
             if compute_accuracy:
                 target_weights = target_slot.astype(jnp.float32)
                 intensity_accuracy = (
@@ -1517,6 +1696,7 @@ class PeakSetJEPAJax(nnx.Module):
             "mae_intensity_loss": intensity_loss,
             "mae_mz_accuracy": mz_accuracy,
             "mae_intensity_accuracy": intensity_accuracy,
+            **extra_metrics,
         }
 
     def _jepa_mae_metrics(
@@ -1529,15 +1709,13 @@ class PeakSetJEPAJax(nnx.Module):
     ) -> tuple[Array, dict[str, Array]]:
         if self.jepa_mae_loss_weight <= 0:
             return reference.reshape(-1)[0] * 0.0, {}
-        value_loss, _mz_loss, _intensity_loss, _mz_accuracy, _intensity_accuracy = (
-            self._jepa_mae_value_prediction_loss(
-                predictor_output,
-                peak_mz,
-                peak_intensity,
-                target_masks,
-                compute_accuracy=False,
-            )
-        )
+        value_loss = self._jepa_mae_value_prediction_loss(
+            predictor_output,
+            peak_mz,
+            peak_intensity,
+            target_masks,
+            compute_accuracy=False,
+        )[0]
         term = value_loss * self.jepa_mae_loss_weight
         return term, {"jepa_mae_loss": value_loss, "jepa_mae_term": term}
 
@@ -1632,11 +1810,100 @@ class PeakSetJEPAJax(nnx.Module):
             )
 
 
+_GAP_SENTINEL_DA = 1.0e6
+
+
+def _coarse_marginal_ce_rows(
+    logits: Array,
+    targets: Array,
+    widths: tuple[int, ...],
+) -> dict[int, Array]:
+    """Per-token cross entropy of the softmax marginalised onto coarser bins.
+
+    A flat categorical loss over 0.5 Da bins scores a 3 Da miss and a 300 Da miss
+    identically. Summing the same softmax over groups of ``width`` adjacent bins
+    yields a proper scoring rule at that coarser resolution, so the model is also
+    rewarded for landing in the right neighbourhood.
+    """
+    log_probabilities = jax.nn.log_softmax(logits.astype(jnp.float32), axis=-1)
+    num_bins = log_probabilities.shape[-1]
+    rows: dict[int, Array] = {}
+    for width in widths:
+        padding = (-num_bins) % width
+        padded = (
+            log_probabilities
+            if padding == 0
+            else jnp.pad(
+                log_probabilities,
+                [(0, 0)] * (log_probabilities.ndim - 1) + [(0, padding)],
+                constant_values=-jnp.inf,
+            )
+        )
+        grouped = padded.reshape(*padded.shape[:-1], -1, width)
+        coarse = logsumexp(grouped, axis=-1)
+        index = jnp.floor_divide(targets, width)[..., None]
+        rows[width] = -jnp.take_along_axis(coarse, index, axis=-1)[..., 0]
+    return rows
+
+
+def _masked_mean(values: Array, valid_mask: Array) -> Array:
+    weights = valid_mask.astype(jnp.float32)
+    return (values * weights).sum() / jnp.maximum(weights.sum(), 1.0)
+
+
+def _nearest_context_gap_da(
+    target_mz: Array,
+    peak_mz: Array,
+    context_mask: Array,
+    mz_max: float,
+) -> Array:
+    """Distance in Da from each target peak to the nearest visible context peak."""
+    distance = jnp.abs(target_mz[..., None] - peak_mz[..., None, :])
+    distance = jnp.where(
+        context_mask[..., None, :],
+        distance,
+        jnp.asarray(_GAP_SENTINEL_DA / max(mz_max, 1.0), dtype=distance.dtype),
+    )
+    return distance.min(axis=-1) * mz_max
+
+
+def _gap_bucket_labels(edges: tuple[float, ...]) -> tuple[str, ...]:
+    labels = []
+    lower = 0.0
+    for edge in edges:
+        labels.append(f"{lower:g}_{edge:g}")
+        lower = edge
+    labels.append(f"{lower:g}_inf")
+    return tuple(labels)
+
+
 def _cross_entropy_from_logits(logits: Array, targets: Array) -> Array:
     logits = logits.astype(jnp.float32)
-    classes = jnp.arange(logits.shape[-1])
-    target_one_hot = (classes == targets[..., None]).astype(logits.dtype)
-    return -(jax.nn.log_softmax(logits, axis=-1) * target_one_hot).sum(axis=-1)
+    target_logits = jnp.take_along_axis(logits, targets[..., None], axis=-1)[..., 0]
+    return logsumexp(logits, axis=-1) - target_logits
+
+
+def _sparse_ordinal_cross_entropy_from_logits(
+    logits: Array,
+    targets: Array,
+    radius: int,
+    epsilon: float,
+) -> Array:
+    logits = logits.astype(jnp.float32)
+    offsets = jnp.arange(-radius, radius + 1)
+    indices = targets[..., None] + offsets
+    valid = (indices >= 0) & (indices < logits.shape[-1])
+    indices = jnp.clip(indices, 0, logits.shape[-1] - 1)
+
+    triangular = (radius + 1 - jnp.abs(offsets)).astype(logits.dtype)
+    local_weights = triangular * valid.astype(logits.dtype)
+    local_weights = local_weights / local_weights.sum(axis=-1, keepdims=True)
+    center = (offsets == 0).astype(logits.dtype)
+    target_weights = epsilon * local_weights + (1.0 - epsilon) * center
+
+    indexed_logits = jnp.take_along_axis(logits, indices, axis=-1)
+    expected_target_logit = (target_weights * indexed_logits).sum(axis=-1)
+    return logsumexp(logits, axis=-1) - expected_target_logit
 
 
 def _masked_ce_loss_from_logits(

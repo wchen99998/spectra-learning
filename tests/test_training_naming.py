@@ -58,6 +58,50 @@ def test_mae_mode_names_disabled_intensity_objective() -> None:
     assert parts == ["maew5e-01", "mzbin2.5", "nointensity"]
 
 
+def test_sparse_ordinal_objective_names_radius_and_epsilon() -> None:
+    parts = _objective_parts(
+        {
+            "training_mode": "mae",
+            "mae_loss_weight": 1.0,
+            "jepa_mae_mz_bin_size": 0.5,
+            "mae_mz_objective": "sparse_ordinal_ce",
+            "mae_mz_ordinal_radius_bins": 2,
+            "mae_mz_ordinal_epsilon": 0.2,
+            "mae_intensity_loss_weight": 0.0,
+        }
+    )
+
+    assert parts == [
+        "maew1e+00",
+        "mzbin0.5",
+        "sparseord",
+        "ordr2",
+        "ordeps0.2",
+        "nointensity",
+    ]
+
+
+def test_legacy_multiscale_objective_is_named() -> None:
+    parts = _objective_parts(
+        {
+            "training_mode": "mae",
+            "mae_loss_weight": 1.0,
+            "jepa_mae_mz_bin_size": 0.5,
+            "mae_mz_multiscale_widths": (2, 4),
+            "mae_mz_multiscale_weight": 0.5,
+            "mae_intensity_loss_weight": 0.0,
+        }
+    )
+
+    assert parts == [
+        "maew1e+00",
+        "mzbin0.5",
+        "multiscale",
+        "multiw5e-01",
+        "nointensity",
+    ]
+
+
 def test_distogram_objective_uses_shared_mz_bin_name() -> None:
     parts = _objective_parts(
         {

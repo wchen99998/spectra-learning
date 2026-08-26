@@ -68,6 +68,8 @@ class GemsDataModule:
     jepa_mask_lengths: tuple[int, ...]
     jepa_mask_round_from: int
     jepa_intensity_aware_mask_config: dict[str, float]
+    jepa_gap_aware_bucket_edges_da: tuple[float, ...]
+    jepa_gap_aware_bucket_weights: tuple[float, ...]
     jepa_allow_target_overlap: bool
     num_peaks_output: int
     dataloader_pin_memory: bool
@@ -444,15 +446,28 @@ class GemsDataModule:
                         self.config.gems_hdf5_rows_per_block or None
                     ),
                     shuffle=True,
-                    seed=self.seed,
+                    seed=(
+                        self.seed
+                        if self.gems_hdf5_shuffle_seed is None
+                        else self.gems_hdf5_shuffle_seed
+                    ),
                     drop_last=self.drop_remainder,
                     world_size=1,
                     rank=0,
+                    shuffle_segments=True,
+                    active_segments=self.gems_hdf5_active_shards,
+                    mix_blocks_per_batch=self.gems_hdf5_mix_blocks_per_batch,
+                    mix_pool_blocks=self.gems_hdf5_mix_pool_blocks,
+                    mix_lanes_per_residency=(
+                        self.gems_hdf5_mix_lanes_per_residency
+                    ),
                 )
                 for rank in range(self.distributed_world_size)
             ]
             micro_batches = min(
-                sampler.full_batch_count
+                len(sampler)
+                if self.gems_hdf5_mix_pool_blocks
+                else sampler.full_batch_count
                 if self.distributed_world_size > 1
                 else len(sampler)
                 for sampler in samplers
@@ -543,7 +558,13 @@ class GemsDataModule:
             batch_size=self.batch_size,
             rows_per_block=self.config.gems_hdf5_rows_per_block or None,
             shuffle=shuffle,
-            seed=seed,
+            seed=(
+                self.gems_hdf5_shuffle_seed
+                if is_massive_v2
+                and split == "train"
+                and self.gems_hdf5_shuffle_seed is not None
+                else seed
+            ),
             drop_last=drop_last,
             world_size=sampler_world_size,
             rank=sampler_rank,
@@ -558,6 +579,16 @@ class GemsDataModule:
                 self.gems_hdf5_mix_blocks_per_batch
                 if is_massive_v2 and split == "train"
                 else 1
+            ),
+            mix_pool_blocks=(
+                self.gems_hdf5_mix_pool_blocks
+                if is_massive_v2 and split == "train"
+                else 0
+            ),
+            mix_lanes_per_residency=(
+                self.gems_hdf5_mix_lanes_per_residency
+                if is_massive_v2 and split == "train"
+                else 0
             ),
         )
         sampler.set_epoch(epoch)
@@ -653,6 +684,8 @@ class GemsDataModule:
             mask_lengths=self.jepa_mask_lengths,
             mask_round_from=self.jepa_mask_round_from,
             intensity_aware_mask_config=self.jepa_intensity_aware_mask_config,
+            gap_aware_bucket_edges_da=self.jepa_gap_aware_bucket_edges_da,
+            gap_aware_bucket_weights=self.jepa_gap_aware_bucket_weights,
             allow_target_overlap=self.jepa_allow_target_overlap,
             num_peaks=self.num_peaks_output,
             max_precursor_mz=self.max_precursor_mz,

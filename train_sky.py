@@ -77,6 +77,7 @@ MIN_DWS_RUN_DURATION_SECONDS = 600
 MAX_DWS_RUN_DURATION_SECONDS = 604800
 DEFAULT_PROVISION_TIMEOUT_SECONDS = 2_147_483_647
 MAX_SKY_JOB_NAME_LENGTH = 63
+MAX_WANDB_TAG_LENGTH = 64
 TASK_SETUP = """\
 set -euo pipefail
 export PATH="${HOME}/.local/bin:${PATH}"
@@ -530,7 +531,7 @@ def build_train_overrides(
                 "dws",
                 queue_tag,
                 f"tpu-{tpu_generation}",
-                experiment_tag,
+                experiment_tag[:MAX_WANDB_TAG_LENGTH],
             ],
             "notes": (
                 f"SkyPilot GCP DWS TPU {tpu_generation} run launched by train_sky.py."

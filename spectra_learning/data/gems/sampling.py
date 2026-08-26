@@ -23,6 +23,8 @@ class ChunkedDistributedBatchSampler(Sampler[list[int]]):
         partition_batches: bool = False,
         active_segments: int = 1,
         mix_blocks_per_batch: int = 1,
+        mix_pool_blocks: int = 0,
+        mix_lanes_per_residency: int = 0,
     ) -> None:
         self.batch_size = batch_size
         self.rows_per_block = rows_per_block
@@ -35,9 +37,21 @@ class ChunkedDistributedBatchSampler(Sampler[list[int]]):
         self.partition_batches = partition_batches
         self.active_segments = active_segments
         self.mix_blocks_per_batch = mix_blocks_per_batch
+        self.mix_pool_blocks = mix_pool_blocks
+        self.mix_lanes_per_residency = mix_lanes_per_residency
         assert self.active_segments >= 1
         assert self.mix_blocks_per_batch >= 1
         assert self.batch_size % self.mix_blocks_per_batch == 0
+        assert (self.mix_pool_blocks == 0) == (
+            self.mix_lanes_per_residency == 0
+        )
+        if self.mix_pool_blocks:
+            assert self.drop_last
+            assert self.mix_pool_blocks >= 2 * self.mix_blocks_per_batch
+            assert self.mix_lanes_per_residency <= self.mix_blocks_per_batch
+            assert (
+                self.mix_blocks_per_batch % self.mix_lanes_per_residency == 0
+            )
         self.segment_blocks = [
             self._build_blocks([segment]) for segment in segments
         ]
@@ -75,6 +89,10 @@ class ChunkedDistributedBatchSampler(Sampler[list[int]]):
         return list(range(len(self.segment_blocks)))
 
     def __iter__(self) -> Iterator[list[int]]:
+        if self.shuffle and self.mix_pool_blocks:
+            yield from self._rolling_mixed_batches()
+            return
+
         if self.shuffle and self.mix_blocks_per_batch > 1:
             for batch_index, batch in enumerate(self._mixed_batches()):
                 if (
@@ -134,6 +152,96 @@ class ChunkedDistributedBatchSampler(Sampler[list[int]]):
             ):
                 yield batch
             batch_index += 1
+
+    def _rolling_mixed_batches(self) -> Iterator[list[int]]:
+        assert self.active_segments >= len(self.segment_blocks)
+        generator = torch.Generator()
+        generator.manual_seed(self.seed + self.epoch)
+        segment_order = self.segment_order()
+        units: list[tuple[int, int]] = []
+        for segment_index in segment_order:
+            blocks = self.segment_blocks[segment_index]
+            for block_start, block_stop in blocks:
+                full_stop = block_start + (
+                    (block_stop - block_start) // self.batch_size
+                ) * self.batch_size
+                units.extend(
+                    (start, start + self.batch_size)
+                    for start in range(
+                        block_start,
+                        full_stop,
+                        self.batch_size,
+                    )
+                )
+
+        unit_order = torch.randperm(
+            len(units),
+            generator=generator,
+        ).tolist()
+        ordered_units = [units[index] for index in unit_order]
+        lane_count = self.mix_blocks_per_batch
+        lane_rows = self.batch_size // lane_count
+        residency_lanes = self.mix_lanes_per_residency
+        activation_order = (
+            (unit_index, lane_start)
+            for lane_start in range(0, lane_count, residency_lanes)
+            for unit_index in range(len(ordered_units))
+        )
+
+        def lane_for(
+            block_start: int,
+            lane_position: int,
+        ) -> int:
+            value = block_start ^ self.seed ^ (self.epoch << 32)
+            offset = value % lane_count
+            stride = value // lane_count % lane_count
+            while math.gcd(stride, lane_count) != 1:
+                stride += 1
+            return (offset + stride * lane_position) % lane_count
+
+        active: list[list[int]] = []
+        for _ in range(self.mix_pool_blocks):
+            unit_index, lane_start = next(activation_order)
+            active.append([unit_index, lane_start, 0])
+
+        target_batches = self._rolling_batch_count()
+        batches = 0
+        while batches + 2 <= target_batches:
+            selected = torch.randperm(
+                len(active),
+                generator=generator,
+            )[: 2 * lane_count].tolist()
+            pair: list[list[int]] = []
+            for side in range(2):
+                batch = []
+                for slot in selected[
+                    side * lane_count : (side + 1) * lane_count
+                ]:
+                    unit_index, lane_start, used = active[slot]
+                    block_start, _ = ordered_units[unit_index]
+                    lane = lane_for(block_start, lane_start + used)
+                    row_start = block_start + lane * lane_rows
+                    batch.extend(range(row_start, row_start + lane_rows))
+                order = torch.randperm(
+                    len(batch),
+                    generator=generator,
+                ).tolist()
+                pair.append([batch[index] for index in order])
+
+            for slot in selected:
+                active[slot][2] += 1
+            yield pair[0]
+            yield pair[1]
+            batches += 2
+
+            for slot in selected:
+                if active[slot][2] == residency_lanes:
+                    unit_index, lane_start = next(activation_order)
+                    active[slot] = [unit_index, lane_start, 0]
+
+    def _rolling_batch_count(self) -> int:
+        batches = self.full_batch_count - self.mix_pool_blocks
+        return max(0, batches - batches % 2)
 
     def _mixed_batches(self) -> Iterator[list[int]]:
         generator = torch.Generator()
@@ -235,6 +343,8 @@ class ChunkedDistributedBatchSampler(Sampler[list[int]]):
         return total
 
     def __len__(self) -> int:
+        if self.shuffle and self.mix_pool_blocks:
+            return self._rolling_batch_count()
         blocks = (
             self.blocks
             if self.partition_batches

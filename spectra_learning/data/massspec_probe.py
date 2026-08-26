@@ -34,6 +34,10 @@ from spectra_learning.data.spectra import (
     spectra_from_peak_lists,
 )
 from spectra_learning.config.msg_probe import validate_msg_probe_config
+from spectra_learning.models.spectrum_metadata import (
+    instrument_family_id,
+    polarity_id,
+)
 
 _DEFAULT_BATCH_SIZE = 512
 _DEFAULT_SHUFFLE_BUFFER = 10_000
@@ -148,6 +152,14 @@ class _ProbeParquetDataset(Dataset):
             ),
             "instrument_type_id": np.asarray(
                 [self._instrument_type_vocab[value] for value in rows["instrument_type"]],
+                dtype=np.int32,
+            ),
+            "polarity_id": np.asarray(
+                [polarity_id(value) for value in rows["adduct"]],
+                dtype=np.int32,
+            ),
+            "instrument_family_id": np.asarray(
+                [instrument_family_id(value) for value in rows["instrument_type"]],
                 dtype=np.int32,
             ),
             "collision_energy": np.asarray(rows["collision_energy"], dtype=np.float32),
@@ -290,6 +302,14 @@ class _ProbeBatchCollator:
         )
         batch["instrument_type_id"] = torch.tensor(
             [int(sample["instrument_type_id"]) for sample in samples], dtype=torch.int32
+        )
+        batch["polarity_id"] = torch.tensor(
+            [int(sample.get("polarity_id", 0)) for sample in samples],
+            dtype=torch.int32,
+        )
+        batch["instrument_family_id"] = torch.tensor(
+            [int(sample.get("instrument_family_id", 0)) for sample in samples],
+            dtype=torch.int32,
         )
         batch["collision_energy"] = torch.tensor(
             [float(sample["collision_energy"]) for sample in samples],

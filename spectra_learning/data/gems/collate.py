@@ -13,6 +13,12 @@ from spectra_learning.data.gems.masking import (
     _sample_all_mask_strategies_torch,
     _sample_block_masks_torch,
 )
+from spectra_learning.data.gems.gap_aware import (
+    DEFAULT_GAP_AWARE_BUCKET_EDGES_DA,
+    DEFAULT_GAP_AWARE_BUCKET_WEIGHTS,
+    GAP_AWARE_MASK_STRATEGY,
+    sample_gap_aware_masks_torch,
+)
 from spectra_learning.data.gems.intensity_aware import (
     AWARE_MIXED_MASK_CONFIG,
     INTENSITY_AWARE_MASK_STRATEGY,
@@ -71,6 +77,12 @@ class GemsBatchCollator:
         mask_lengths: tuple[int, ...] = DEFAULT_JEPA_MASK_LENGTHS,
         mask_round_from: int = len(DEFAULT_JEPA_MASK_LENGTHS),
         intensity_aware_mask_config: dict[str, float] | None = None,
+        gap_aware_bucket_edges_da: tuple[float, ...] = (
+            DEFAULT_GAP_AWARE_BUCKET_EDGES_DA
+        ),
+        gap_aware_bucket_weights: tuple[float, ...] = (
+            DEFAULT_GAP_AWARE_BUCKET_WEIGHTS
+        ),
         allow_target_overlap: bool = False,
         output_format: str = "torch",
         spectrum_metadata_schema: str | None = None,
@@ -88,6 +100,12 @@ class GemsBatchCollator:
             AWARE_MIXED_MASK_CONFIG
             if intensity_aware_mask_config is None
             else intensity_aware_mask_config
+        )
+        self.gap_aware_bucket_edges_da = tuple(
+            float(edge) for edge in gap_aware_bucket_edges_da
+        )
+        self.gap_aware_bucket_weights = tuple(
+            float(weight) for weight in gap_aware_bucket_weights
         )
         self.allow_target_overlap = allow_target_overlap
         self.num_peaks = num_peaks
@@ -272,7 +290,10 @@ class GemsBatchCollator:
                 sampling_valid_mask,
                 strategies[0],
             )
-        elif INTENSITY_AWARE_MASK_STRATEGY in strategies:
+        elif (
+            INTENSITY_AWARE_MASK_STRATEGY in strategies
+            or GAP_AWARE_MASK_STRATEGY in strategies
+        ):
             context_mask, target_masks = self._sample_mixed_strategy_masks(
                 batch,
                 sampling_valid_mask,
@@ -308,7 +329,20 @@ class GemsBatchCollator:
         sampling_valid_mask: torch.Tensor,
         strategy: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if _normalize_mask_strategy_name(strategy) == INTENSITY_AWARE_MASK_STRATEGY:
+        normalized = _normalize_mask_strategy_name(strategy)
+        if normalized == GAP_AWARE_MASK_STRATEGY:
+            return sample_gap_aware_masks_torch(
+                sampling_valid_mask,
+                batch["peak_mz"] * PEAK_MZ_MAX,
+                num_target_blocks=self.num_target_blocks,
+                context_fraction=self.context_fraction,
+                target_fraction=self.target_fraction,
+                block_min_len=self.block_min_len,
+                allow_target_overlap=self.allow_target_overlap,
+                bucket_edges_da=self.gap_aware_bucket_edges_da,
+                bucket_weights=self.gap_aware_bucket_weights,
+            )
+        if normalized == INTENSITY_AWARE_MASK_STRATEGY:
             return sample_intensity_aware_masks_torch(
                 sampling_valid_mask,
                 batch["peak_intensity"],
