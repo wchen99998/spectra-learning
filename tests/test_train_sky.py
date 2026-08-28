@@ -464,6 +464,20 @@ def test_build_task_constructs_v6e_32_resources():
     ] == "4x8"
 
 
+def test_build_task_constructs_multiregion_v6e_resources():
+    task = train_sky.build_task(
+        topology=train_sky.resolve_topology(chips=64, generation="v6e"),
+        envs={"SPECTRA_CONFIG_JSON": "{}"},
+        infra="gcp",
+        task_name=train_sky.V6E_TASK_NAME,
+    )
+
+    assert task["resources"]["infra"] == "gcp"
+    assert task["resources"]["image_id"] == {
+        region: train_sky.V6E_VM_IMAGE_ID for region in train_sky.TPU_V6E_REGIONS
+    }
+
+
 def test_build_task_constructs_v6e_8_resources():
     task = train_sky.build_task(
         topology=train_sky.resolve_topology(chips=8, generation="v6e"),

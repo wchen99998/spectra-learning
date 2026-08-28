@@ -9,6 +9,11 @@ def test_1b_mae_teacher_jepa_uses_target_only_loss_and_latest_teacher() -> None:
     assert config.dataloader_output_format == "numpy"
     assert config.dataloader_pin_memory is False
     assert config.dataloader_persistent_workers is False
+    assert config.gems_hdf5_active_shards == 8
+    assert config.gems_hdf5_mix_blocks_per_batch == 16
+    assert config.gems_hdf5_mix_pool_blocks == 2_048
+    assert config.gems_hdf5_mix_lanes_per_residency == 8
+    assert config.gems_hdf5_shuffle_seed == 67
     assert config.training_mode == "mae_teacher_jepa"
     assert config.training_max_steps == 300_000
     assert config.batch_size == 1024

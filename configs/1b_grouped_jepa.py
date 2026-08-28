@@ -12,6 +12,8 @@ def get_config() -> config_dict.ConfigDict:
     cfg.group_jepa_spectra_per_group = 8
     cfg.group_jepa_teacher_spectra_per_group = 3
     cfg.group_jepa_groups_per_batch = 256
+    cfg.gems_hdf5_active_shards = 8
+    cfg.gems_hdf5_shuffle_seed = 67
     cfg.group_jepa_ema_momentum = 0.9992
     # Compute the next target before the EMA update in the current XLA step.
     # Targets are one EMA update old after step 1. On TPU v6e-1 this measured

@@ -62,7 +62,7 @@ from spectra_learning.training.logging import (
     build_logger,
     log_msg_probe_metrics,
 )
-from spectra_learning.training import muon
+from spectra_learning.training import muon, optimizer_sharding
 from spectra_learning.training.schedules import learning_rate_at_step
 from spectra_learning.training.storage import (
     local_scratch_dir,
@@ -311,16 +311,69 @@ def build_jax_optax_transform(
     config: Any,
     *,
     total_steps: int | None = None,
+    shard_axis: str | None = None,
+    shard_count: int = 1,
 ) -> optax.GradientTransformation:
     optimizer = str(config.get("optimizer", "adamw")).lower()
+    grad_clip_norm = float(config.get("grad_clip_norm", 0.0))
     if optimizer == "muon":
-        transform = _jax_muon_transform(config, total_steps=total_steps)
+        transform = _jax_muon_transform(
+            config,
+            total_steps=total_steps,
+            shard_axis=shard_axis,
+            shard_count=shard_count,
+        )
     else:
         transform = _jax_adamw_transform(config, total_steps=total_steps)
-    grad_clip_norm = float(config.get("grad_clip_norm", 0.0))
     if grad_clip_norm > 0.0:
         return optax.chain(optax.clip_by_global_norm(grad_clip_norm), transform)
     return transform
+
+
+def jax_shard_optimizer_axis(config: Any, *, sharded: bool) -> str | None:
+    """The data axis to shard the optimizer over, or None to keep it replicated.
+
+    The optimizer runs identically on every data-parallel rank by default, so
+    its cost is a fixed tax that does not fall as chips are added. Only Muon
+    acts on this: it distributes whole tensors for Newton-Schulz and sums the
+    updates back. Adam-family updates use the separate ZeRO-1 path when their
+    state should be sharded.
+    """
+    if not sharded or not bool(config.get("jax_shard_optimizer", False)):
+        return None
+    return JAX_DATA_AXIS
+
+
+def jax_zero1_shards(config: Any, *, sharded: bool, device_count: int) -> int:
+    """How many ranks to split the Adam state over, or 0 to keep it replicated.
+
+    ZeRO-1 only applies to the elementwise Adam family. Muon's Newton-Schulz
+    needs whole matrices, and is sharded a different way entirely - see
+    `jax_shard_optimizer_axis`.
+    """
+    if not sharded or not bool(config.get("jax_zero1_optimizer", False)):
+        return 0
+    assert str(config.get("optimizer", "adamw")).lower() != "muon", (
+        "jax_zero1_optimizer is an Adam-family path; Muon uses "
+        "jax_shard_optimizer instead"
+    )
+    return device_count
+
+
+def jax_zero1_mode(config: Any) -> str:
+    """"per_leaf" issues two collectives per tensor; "flat" issues two total."""
+    mode = str(config.get("jax_zero1_mode", "flat")).lower()
+    assert mode in {"per_leaf", "flat"}, mode
+    return mode
+
+
+def jax_zero1_settings(config: Any, *, total_steps: int | None) -> dict[str, Any]:
+    return {
+        **optimizer_sharding.zero1_adam_config(config),
+        "learning_rate": _jax_learning_rate_schedule(
+            config, total_steps=total_steps
+        ),
+    }
 
 
 def _jax_adamw_transform(
@@ -370,6 +423,8 @@ def _jax_muon_transform(
     config: Any,
     *,
     total_steps: int | None = None,
+    shard_axis: str | None = None,
+    shard_count: int = 1,
 ) -> optax.GradientTransformation:
     learning_rate = _jax_learning_rate_schedule(config, total_steps=total_steps)
     adam_learning_rate = _jax_muon_adam_learning_rate_schedule(
@@ -381,6 +436,8 @@ def _jax_muon_transform(
         learning_rate=learning_rate,
         adam_learning_rate=adam_learning_rate,
         weight_decay_mask=_jax_weight_decay_mask,
+        shard_axis=shard_axis,
+        shard_count=shard_count,
     )
 
 
@@ -554,6 +611,31 @@ def _numpy_array_to_jax(value: Any) -> Array:
     return jnp.asarray(value)
 
 
+def replicate_trainable_state_on_mesh(
+    model: Any,
+    params: Any,
+    static_state: Any,
+    data_mesh: Mesh,
+) -> tuple[Any, Any]:
+    """Replicate the split state across the mesh and rebind the model to it.
+
+    `nnx.split` hands back states that share their device buffers with the
+    model, so the pre-replication parameters stay resident on whichever single
+    device built them for as long as anything still references the model - 4 GB
+    per host at 1B parameters. That is enough to push micro-batches that
+    otherwise fit comfortably into an out-of-memory failure, because every
+    device has to run the same program and the busiest one sets the ceiling.
+
+    Rebinding the model to the replicated arrays drops the last reference to
+    the originals while leaving `model` usable for capacity scheduling and for
+    the MSG probe.
+    """
+    replicated_params = _replicate_tree_on_data_mesh(params, data_mesh)
+    replicated_static = _replicate_tree_on_data_mesh(static_state, data_mesh)
+    nnx.update(model, replicated_params, replicated_static)
+    return replicated_params, replicated_static
+
+
 def _replicate_tree_on_data_mesh(tree: Any, data_mesh: Mesh) -> Any:
     sharding = NamedSharding(data_mesh, P())
 
@@ -609,6 +691,9 @@ def init_pure_optax_train_state(
     model: Any,
     *,
     total_steps: int | None = None,
+    shard_axis: str | None = None,
+    shard_count: int = 1,
+    zero1_shards: int = 0,
 ) -> tuple[Any, nnx.State, nnx.State, Any, optax.GradientTransformation]:
     graphdef, trainable_params, static_state = nnx.split(
         model,
@@ -617,8 +702,20 @@ def init_pure_optax_train_state(
     )
     trainable_params = nnx.as_pure(trainable_params)
     static_state = nnx.as_pure(static_state)
-    optimizer = build_jax_optax_transform(config, total_steps=total_steps)
-    opt_state = optimizer.init(trainable_params)
+    optimizer = build_jax_optax_transform(
+        config,
+        total_steps=total_steps,
+        shard_axis=shard_axis,
+        shard_count=shard_count,
+    )
+    if zero1_shards > 0:
+        opt_state = optimizer_sharding.zero1_adam_init(
+            trainable_params,
+            shards=zero1_shards,
+            moment_dtype=optimizer_sharding.zero1_moment_dtype(config),
+        )
+    else:
+        opt_state = optimizer.init(trainable_params)
     return graphdef, trainable_params, static_state, opt_state, optimizer
 
 
@@ -632,7 +729,16 @@ def make_pure_accumulated_train_step(
     metric_reduction: JaxMetricReduction = "mean",
     group_jepa_ema_momentum: float | None = None,
     group_jepa_lookahead: bool = False,
+    grad_all_reduce_dtype: Any = jnp.float32,
+    zero1_shards: int = 0,
+    zero1_settings: dict[str, Any] | None = None,
+    zero1_mode: str = "flat",
 ):
+    if zero1_shards:
+        assert sharded and zero1_settings is not None
+        assert not group_jepa_lookahead and group_jepa_ema_momentum is None, (
+            "ZeRO-1 is wired for the plain MAE/JEPA update only"
+        )
     def accumulated_metrics_and_grads(
         trainable_params: nnx.State,
         static_state: nnx.State,
@@ -725,10 +831,13 @@ def make_pure_accumulated_train_step(
                 lambda value: jax.lax.psum(value, JAX_DATA_AXIS),
                 metric_totals,
             )
-            grads = jax.tree.map(
-                lambda value: jax.lax.psum(value, JAX_DATA_AXIS),
-                grads,
-            )
+            if not zero1_shards:
+                grads = jax.tree.map(
+                    lambda value: jax.lax.psum(
+                        value.astype(grad_all_reduce_dtype), JAX_DATA_AXIS
+                    ).astype(value.dtype),
+                    grads,
+                )
             grad_denominator = jax.lax.psum(
                 grad_denominator,
                 JAX_DATA_AXIS,
@@ -742,11 +851,27 @@ def make_pure_accumulated_train_step(
             metric_reduction=metric_reduction,
             mean_denominator=grad_denominator,
         )
-        updates, opt_state = optimizer.update(
-            grads,
-            opt_state,
-            trainable_params,
-        )
+        if zero1_shards:
+            zero1_update = (
+                optimizer_sharding.zero1_flat_update
+                if zero1_mode == "flat"
+                else optimizer_sharding.zero1_adam_update
+            )
+            updates, opt_state = zero1_update(
+                grads,
+                opt_state,
+                trainable_params,
+                shard_axis=JAX_DATA_AXIS,
+                shards=zero1_shards,
+                decay_mask=_jax_weight_decay_mask(trainable_params),
+                **zero1_settings,
+            )
+        else:
+            updates, opt_state = optimizer.update(
+                grads,
+                opt_state,
+                trainable_params,
+            )
         if log_update_stats:
             metrics = {
                 **metrics,
@@ -823,8 +948,13 @@ def make_pure_accumulated_train_step(
     else:
         train_step = train_update
         donate_argnums = (0, 2)
-        in_specs = (P(), P(), P(), P(None, JAX_DATA_AXIS))
-        out_specs = (P(), P(), P())
+        opt_spec = (
+            optimizer_sharding.zero1_state_specs(JAX_DATA_AXIS)
+            if zero1_shards
+            else P()
+        )
+        in_specs = (P(), P(), opt_spec, P(None, JAX_DATA_AXIS))
+        out_specs = (P(), opt_spec, P())
 
     if sharded:
         data_mesh = _jax_data_mesh() if data_mesh is None else data_mesh
@@ -1328,6 +1458,7 @@ class _JaxTrainingLoop:
         )
         self.mask_stage_index = -1 if self.use_mask_schedule else 0
         data_parallel_devices = _jax_data_parallel_devices(config)
+        self.data_parallel_devices = data_parallel_devices
         self.data_mesh = _jax_data_mesh_for_device_count(data_parallel_devices)
         self.use_sharded_step = data_parallel_devices > 1
         self.group_jepa_ema_momentum = (
@@ -1424,13 +1555,36 @@ class _JaxTrainingLoop:
         tuple[Callable[..., Any], ...],
         tuple[Callable[..., Any] | None, ...],
     ]:
+        zero1_shards = jax_zero1_shards(
+            self.config,
+            sharded=self.use_sharded_step,
+            device_count=self.data_parallel_devices,
+        )
         graphdef, params, static_state, opt_state, optimizer = (
             init_pure_optax_train_state(
                 self.config,
                 self.model,
                 total_steps=self.total_steps,
+                shard_axis=jax_shard_optimizer_axis(
+                    self.config, sharded=self.use_sharded_step
+                ),
+                shard_count=self.data_parallel_devices,
+                zero1_shards=zero1_shards,
             )
         )
+        if zero1_shards:
+            zero1_init = (
+                optimizer_sharding.zero1_flat_init
+                if jax_zero1_mode(self.config) == "flat"
+                else optimizer_sharding.zero1_adam_init_sharded
+            )
+            opt_state = zero1_init(
+                params,
+                shards=zero1_shards,
+                mesh=self.data_mesh,
+                shard_axis=JAX_DATA_AXIS,
+                moment_dtype=optimizer_sharding.zero1_moment_dtype(self.config),
+            )
 
         def make_steps(
             stage_graphdef: Any,
@@ -1451,6 +1605,18 @@ class _JaxTrainingLoop:
                     metric_reduction=self.metric_reduction,
                     group_jepa_ema_momentum=self.group_jepa_ema_momentum,
                     group_jepa_lookahead=self.group_jepa_lookahead,
+                    grad_all_reduce_dtype=jnp.dtype(
+                        self.config.get("jax_grad_all_reduce_dtype", "float32")
+                    ),
+                    zero1_shards=zero1_shards,
+                    zero1_mode=jax_zero1_mode(self.config),
+                    zero1_settings=(
+                        jax_zero1_settings(
+                            self.config, total_steps=self.total_steps
+                        )
+                        if zero1_shards
+                        else None
+                    ),
                 ),
                 make_pure_eval_step(
                     stage_graphdef,
@@ -1493,17 +1659,19 @@ class _JaxTrainingLoop:
             self.model.set_fastmixer_capacities(*self.mask_capacities[0])
         state = _JaxTrainState(params, static_state, opt_state)
         if self.use_sharded_step:
-            params = _replicate_tree_on_data_mesh(
+            params, static_state = replicate_trainable_state_on_mesh(
+                self.model,
                 state.trainable_params,
-                self.data_mesh,
-            )
-            opt_state = _replicate_tree_on_data_mesh(
-                state.opt_state,
-                self.data_mesh,
-            )
-            static_state = _replicate_tree_on_data_mesh(
                 state.static_state,
                 self.data_mesh,
+            )
+            opt_state = (
+                state.opt_state
+                if zero1_shards
+                else _replicate_tree_on_data_mesh(
+                    state.opt_state,
+                    self.data_mesh,
+                )
             )
             state = _JaxTrainState(
                 params,

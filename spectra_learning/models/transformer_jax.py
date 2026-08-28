@@ -12,6 +12,7 @@ from spectra_learning.models.common_jax import (
     LayerNorm,
     Linear,
     RMSNorm,
+    assign_param,
     scaled_dot_product_attention,
     silu,
 )
@@ -219,7 +220,10 @@ class FeedForward(nnx.Module):
     ) -> None:
         rngs = nnx.Rngs(0) if rngs is None else rngs
         hidden_dim = hidden_dim or int((4 * dim) * 2 / 3)
-        hidden_dim = 4 * math.ceil(hidden_dim / 4)
+        # Round to the v6e MXU width. The previous multiple-of-4 rounding could
+        # land on values that are not even a multiple of 8 (d=2560 gave 6828),
+        # which measured 44.8% MFU against 48.5% at 6912.
+        hidden_dim = 256 * math.ceil(hidden_dim / 256)
         self.w1 = Linear(
             dim,
             hidden_dim,
@@ -260,18 +264,20 @@ class SwiGLUFeedForward(nnx.Module):
     ) -> None:
         rngs = nnx.Rngs(0) if rngs is None else rngs
         hidden_dim = hidden_dim or 4 * dim
-        hidden_dim = 4 * math.ceil(hidden_dim / 4)
-        self.fc1 = Linear(
+        # Round to the v6e MXU width. The previous multiple-of-4 rounding could
+        # land on values that are not even a multiple of 8 (d=2560 gave 6828),
+        # which measured 44.8% MFU against 48.5% at 6912.
+        hidden_dim = 256 * math.ceil(hidden_dim / 256)
+        self.hidden_dim = hidden_dim
+        # `fc1` and `fc2` consume the same input, so they are stored as one
+        # `dim -> 2 * hidden_dim` projection and split after the matmul. On v6e a
+        # bare `[4096, 1536] x [1536, 8192]` runs at 45.4% of bf16 peak against
+        # 30.8% for the two `N=4096` halves separately; the MXU is starved by
+        # narrow N. Muon still orthogonalises the two halves independently — see
+        # `_FUSED_PROJECTION_PARTS` in training/muon.py.
+        self.fc12 = Linear(
             dim,
-            hidden_dim,
-            bias=False,
-            compute_dtype=compute_dtype,
-            init="trunc_normal_fan_in",
-            rngs=rngs,
-        )
-        self.fc2 = Linear(
-            dim,
-            hidden_dim,
+            2 * hidden_dim,
             bias=False,
             compute_dtype=compute_dtype,
             init="trunc_normal_fan_in",
@@ -287,15 +293,23 @@ class SwiGLUFeedForward(nnx.Module):
         )
 
     def __call__(self, x: Array) -> Array:
-        return self.fc3(silu(self.fc1(x)) * self.fc2(x))
+        gate, value = jnp.split(self.fc12(x), 2, axis=-1)
+        return self.fc3(silu(gate) * value)
 
     def load_torch_state_dict(
         self,
         state_dict: dict[str, torch.Tensor],
         prefix: str,
     ) -> None:
-        self.fc1.load_torch_state_dict(state_dict, f"{prefix}.fc1")
-        self.fc2.load_torch_state_dict(state_dict, f"{prefix}.fc2")
+        # torch keeps the two projections separate; concatenate on the output
+        # axis to match the fused layout.
+        assign_param(
+            self.fc12.weight,
+            torch.cat(
+                (state_dict[f"{prefix}.fc1.weight"], state_dict[f"{prefix}.fc2.weight"]),
+                dim=0,
+            ),
+        )
         self.fc3.load_torch_state_dict(state_dict, f"{prefix}.fc3")
 
 

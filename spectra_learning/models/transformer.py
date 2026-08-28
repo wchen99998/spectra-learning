@@ -213,7 +213,10 @@ class FeedForward(nn.Module):
         super().__init__()
 
         hidden_dim = hidden_dim or int((4 * dim) * 2 / 3)
-        hidden_dim = 4 * math.ceil(hidden_dim / 4)
+        # Round to the v6e MXU width. The previous multiple-of-4 rounding could
+        # land on values that are not even a multiple of 8 (d=2560 gave 6828),
+        # which measured 44.8% MFU against 48.5% at 6912.
+        hidden_dim = 256 * math.ceil(hidden_dim / 256)
 
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
@@ -235,7 +238,10 @@ class SwiGLUFeedForward(nn.Module):
         super().__init__()
 
         hidden_dim = hidden_dim or 4 * dim
-        hidden_dim = 4 * math.ceil(hidden_dim / 4)
+        # Round to the v6e MXU width. The previous multiple-of-4 rounding could
+        # land on values that are not even a multiple of 8 (d=2560 gave 6828),
+        # which measured 44.8% MFU against 48.5% at 6912.
+        hidden_dim = 256 * math.ceil(hidden_dim / 256)
 
         self.fc1 = nn.Linear(dim, hidden_dim, bias=False)
         self.fc2 = nn.Linear(dim, hidden_dim, bias=False)

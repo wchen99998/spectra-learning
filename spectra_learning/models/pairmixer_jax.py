@@ -125,11 +125,12 @@ def _linear_with_preferred_acc(linear: Linear, x: Array) -> Array:
 
 
 def _swiglu_with_preferred_acc(feed_forward: SwiGLUFeedForward, x: Array) -> Array:
-    return _linear_with_preferred_acc(
-        feed_forward.fc3,
-        silu(_linear_with_preferred_acc(feed_forward.fc1, x))
-        * _linear_with_preferred_acc(feed_forward.fc2, x),
+    gate, value = jnp.split(
+        _linear_with_preferred_acc(feed_forward.fc12, x),
+        2,
+        axis=-1,
     )
+    return _linear_with_preferred_acc(feed_forward.fc3, silu(gate) * value)
 
 
 def _feedforward_with_preferred_acc(feed_forward: FeedForward, x: Array) -> Array:

@@ -47,7 +47,10 @@ def test_3b_pairmixer_parameter_count_includes_cross_attention_predictor() -> No
     encoder_params = counts["encoder"]
     predictor_side_params = sum(counts.values()) - encoder_params
 
-    assert encoder_params == 2_629_465_664
-    assert predictor_side_params == 247_679_440
-    assert sum(counts.values()) == 2_877_145_104
-    assert predictor_side_params / encoder_params == pytest.approx(0.0941938)
+    # The SwiGLU hidden width rounds to the v6e MXU width rather than to a
+    # multiple of 4, so at model_dim 2560 it is 6912 instead of 6828. That adds
+    # 3 * 84 * 2560 parameters per layer, 19,353,600 over the 30 encoder layers.
+    assert encoder_params == 2_648_819_264
+    assert predictor_side_params == 249_614_800
+    assert sum(counts.values()) == 2_898_434_064
+    assert predictor_side_params / encoder_params == pytest.approx(0.0942363)

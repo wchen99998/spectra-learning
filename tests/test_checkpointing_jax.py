@@ -462,6 +462,52 @@ def test_restore_frozen_teacher_encoder_from_native_jax_checkpoint(tmp_path):
         assert actual[path].sharding == target_values[path].sharding
 
 
+def test_restore_frozen_teacher_encoder_fuses_split_swiglu_checkpoint(tmp_path):
+    source = PeakSetJEPAJax(**_tiny_mae_kwargs(), rngs=nnx.Rngs(7))
+    _, source_trainable, source_static = nnx.split(
+        source,
+        trainable_param_filter,
+        ...,
+    )
+    source_trainable = nnx.as_pure(source_trainable)
+    split_trainable = []
+    for path, value in nnx.to_flat_state(source_trainable):
+        if path[0] == "encoder" and path[-2:] == ("fc12", "weight"):
+            fc1, fc2 = jnp.split(value, 2, axis=0)
+            split_trainable.append(((*path[:-2], "fc1", "weight"), fc1))
+            split_trainable.append(((*path[:-2], "fc2", "weight"), fc2))
+        else:
+            split_trainable.append((path, value))
+
+    manager = build_jax_checkpoint_manager(
+        tmp_path / "source",
+        enable_async_checkpointing=False,
+    )
+    save_jax_training_state(
+        manager,
+        150_000,
+        {
+            "trainable_params": nnx.from_flat_state(split_trainable),
+            "static_state": nnx.as_pure(source_static),
+            "opt_state": {},
+        },
+        metadata=CHECKPOINT_METADATA,
+    )
+    manager.close()
+
+    target = PeakSetJEPAJax(**_tiny_mae_kwargs(), rngs=nnx.Rngs(19))
+    target_state = nnx.as_pure(nnx.state(target.encoder))
+    restored = restore_frozen_teacher_encoder(
+        tmp_path / "source" / "orbax" / "150000",
+        target_state,
+    )
+
+    expected = dict(nnx.to_flat_state(nnx.as_pure(nnx.state(source.encoder))))
+    actual = dict(nnx.to_flat_state(restored))
+    for path in expected:
+        np.testing.assert_array_equal(np.asarray(actual[path]), np.asarray(expected[path]))
+
+
 def test_jax_checkpoint_manager_keeps_all_steps_when_max_to_keep_is_none(tmp_path):
     manager = build_jax_checkpoint_manager(
         tmp_path / "checkpoints",

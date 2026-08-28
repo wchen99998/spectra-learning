@@ -31,6 +31,14 @@ V6E_VM_IMAGE_ID = (
     "projects/ubuntu-os-accelerator-images/global/images/"
     "ubuntu-accel-2204-amd64-tpu-v5e-v5p-v6e-v20260623"
 )
+TPU_V6E_REGIONS = (
+    "us-central1",
+    "us-east5",
+    "us-south1",
+    "europe-west4",
+    "asia-northeast1",
+    "southamerica-west1",
+)
 DEFAULT_PYTHON_VERSION = "3.14.7"
 DEFAULT_SKY_BIN = "/home/wuhao/skypilot/.venv/bin/sky"
 TPU_V6E_TOPOLOGY_BY_CHIPS = {
@@ -562,8 +570,9 @@ def build_task(
         },
     }
     if topology.generation == "v6e":
+        regions = TPU_V6E_REGIONS if infra == "gcp" else (gcp_region_from_infra(infra),)
         resources["image_id"] = {
-            gcp_region_from_infra(infra): V6E_VM_IMAGE_ID,
+            region: V6E_VM_IMAGE_ID for region in regions
         }
     if cpus:
         resources["cpus"] = cpus

@@ -10,6 +10,11 @@ def get_config() -> config_dict.ConfigDict:
     cfg.dataloader_output_format = "numpy"
     cfg.dataloader_pin_memory = False
     cfg.dataloader_persistent_workers = False
+    cfg.gems_hdf5_active_shards = 8
+    cfg.gems_hdf5_mix_blocks_per_batch = 16
+    cfg.gems_hdf5_mix_pool_blocks = 2_048
+    cfg.gems_hdf5_mix_lanes_per_residency = 8
+    cfg.gems_hdf5_shuffle_seed = 67
     cfg.training_mode = "mae_teacher_jepa"
     cfg.use_ema_teacher = False
     cfg.frozen_teacher_config_path = (

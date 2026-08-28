@@ -152,6 +152,38 @@ def test_grouped_sampler_samples_without_replacement_and_changes_by_epoch() -> N
     )
 
 
+def test_grouped_sampler_interleaves_groups_across_active_shards() -> None:
+    ranges = tuple(
+        (
+            np.arange(shard * 1_000, shard * 1_000 + 80, 10),
+            np.full(8, 10),
+        )
+        for shard in range(4)
+    )
+    sampler = GroupedBatchSampler(
+        ranges,
+        groups_per_batch=8,
+        spectra_per_group=8,
+        shuffle=True,
+        seed=67,
+        drop_last=True,
+        epoch=0,
+        active_shards=4,
+    )
+    batches = list(sampler)
+
+    assert batches == list(sampler)
+    assert len(batches) == 4
+    assert len({index for batch in batches for index in batch}) == 4 * 8 * 8
+    for batch in batches:
+        group_starts = batch[::8]
+        assert {start // 1_000 for start in group_starts} == {0, 1, 2, 3}
+        for offset in range(0, len(batch), 8):
+            spectra = batch[offset : offset + 8]
+            assert len(set(spectra)) == 8
+            assert spectra[0] // 10 == spectra[-1] // 10
+
+
 def test_grouped_jepa_uses_mean_teacher_cls_and_per_student_mse() -> None:
     model = GroupedSpectrumJEPAJax(
         _small_settings(),
@@ -461,6 +493,8 @@ def test_1b_grouped_jepa_config() -> None:
     assert config.group_jepa_spectra_per_group == 8
     assert config.group_jepa_teacher_spectra_per_group == 3
     assert config.group_jepa_groups_per_batch == 256
+    assert config.gems_hdf5_active_shards == 8
+    assert config.gems_hdf5_shuffle_seed == 67
     assert config.group_jepa_ema_momentum == pytest.approx(0.9992)
     assert config.group_jepa_teacher_target_mode == "lookahead"
     assert config.group_jepa_init_checkpoint_path.endswith("/orbax/350000")

@@ -50,8 +50,10 @@ def test_fourier_and_token_ablation_models_are_parameter_matched() -> None:
     token_count = sum(
         parameter.numel() for parameter in token.parameters() if parameter.requires_grad
     )
-    assert fourier_count == 36_808_794
-    assert token_count == 36_793_594
+    # Both counts moved together when the SwiGLU hidden width started rounding
+    # to the v6e MXU width; the 15_200 gap is the property under test.
+    assert fourier_count == 38_276_442
+    assert token_count == 38_261_242
     assert fourier_count - token_count == 15_200
 
     token_parameters = dict(token.named_parameters())

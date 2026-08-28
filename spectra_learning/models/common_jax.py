@@ -175,13 +175,17 @@ class RMSNorm(nnx.Module):
         )
 
     def __call__(self, x: Array) -> Array:
-        x_float = x.astype(jnp.float32)
-        y = x_float * jax.lax.rsqrt(
-            jnp.mean(jnp.square(x_float), axis=-1, keepdims=True) + self.eps
-        )
+        # Reduce in float32 for stability, but scale in the input dtype so a
+        # bf16 activation is never round-tripped through a float32 temporary.
+        # For float32 inputs this is identical to the old body.
+        scale = jax.lax.rsqrt(
+            jnp.mean(jnp.square(x.astype(jnp.float32)), axis=-1, keepdims=True)
+            + self.eps
+        ).astype(x.dtype)
+        y = x * scale
         if self.weight is not None:
-            y = y * self.weight[...]
-        return y.astype(x.dtype)
+            y = y * self.weight[...].astype(x.dtype)
+        return y
 
     def load_torch_state_dict(
         self,
@@ -323,5 +327,14 @@ def scaled_dot_product_attention(
             kwargs["mask"] = attn_mask
         else:
             kwargs["bias"] = attn_mask
-    out = jax.nn.dot_product_attention(query, key, value, **kwargs)
+    # `jax.nn.dot_product_attention` takes no `precision`, so it inherits the
+    # module-level `jax_default_matmul_precision="highest"` and runs its score
+    # and value matmuls as multi-pass fp32 emulation. That is wanted for the
+    # float32 parity path but pure overhead in bf16, where the surrounding
+    # Linear layers already run at DEFAULT.
+    if jnp.dtype(query.dtype) == jnp.bfloat16:
+        with jax.default_matmul_precision("default"):
+            out = jax.nn.dot_product_attention(query, key, value, **kwargs)
+    else:
+        out = jax.nn.dot_product_attention(query, key, value, **kwargs)
     return jnp.swapaxes(out, -3, -2)

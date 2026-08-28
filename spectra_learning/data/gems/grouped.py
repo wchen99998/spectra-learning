@@ -30,6 +30,7 @@ class GroupedBatchSampler(Sampler[list[int]]):
         max_batches: int | None = None,
         partition_count: int = 1,
         partition_index: int = 0,
+        active_shards: int = 1,
     ) -> None:
         self.group_ranges = group_ranges
         self.groups_per_batch = groups_per_batch
@@ -42,45 +43,75 @@ class GroupedBatchSampler(Sampler[list[int]]):
         self.max_batches = max_batches
         self.partition_count = partition_count
         self.partition_index = partition_index
+        self.active_shards = active_shards
 
-    def __iter__(self) -> Iterator[list[int]]:
-        generator = torch.Generator().manual_seed(self.seed + self.epoch)
+    def _group_order(
+        self,
+        generator: torch.Generator,
+    ) -> Iterator[tuple[int, int]]:
         shard_order = list(range(len(self.group_ranges)))
         if self.shuffle:
             shard_order = torch.randperm(
                 len(shard_order),
                 generator=generator,
             ).tolist()
+
+        for window_start in range(0, len(shard_order), self.active_shards):
+            window = shard_order[window_start : window_start + self.active_shards]
+            orders = {
+                shard_id: torch.randperm(
+                    len(self.group_ranges[shard_id][0]),
+                    generator=generator,
+                )
+                if self.shuffle
+                else torch.arange(len(self.group_ranges[shard_id][0]))
+                for shard_id in window
+            }
+            positions = {shard_id: self.partition_index for shard_id in window}
+            active = list(window)
+            while active:
+                cycle = (
+                    torch.randperm(len(active), generator=generator).tolist()
+                    if self.shuffle
+                    else list(range(len(active)))
+                )
+                for active_index in cycle:
+                    shard_id = active[active_index]
+                    position = positions[shard_id]
+                    if position < len(orders[shard_id]):
+                        yield shard_id, int(orders[shard_id][position])
+                        positions[shard_id] += self.partition_count
+                active = [
+                    shard_id
+                    for shard_id in active
+                    if positions[shard_id] < len(orders[shard_id])
+                ]
+
+    def __iter__(self) -> Iterator[list[int]]:
+        generator = torch.Generator().manual_seed(self.seed + self.epoch)
         pending: list[int] = []
         pending_groups = 0
         batch_index = 0
         yielded = 0
-        for shard_id in shard_order:
+        for shard_id, group_index in self._group_order(generator):
             starts, counts = self.group_ranges[shard_id]
-            group_order = torch.arange(len(starts))
-            if self.shuffle:
-                group_order = torch.randperm(len(starts), generator=generator)
-            group_order = group_order[
-                self.partition_index :: self.partition_count
+            count = int(counts[group_index])
+            offsets = torch.randperm(count, generator=generator)[
+                : self.spectra_per_group
             ].tolist()
-            for group_index in group_order:
-                count = int(counts[group_index])
-                offsets = torch.randperm(count, generator=generator)[
-                    : self.spectra_per_group
-                ].tolist()
-                start = int(starts[group_index])
-                pending.extend(start + offset for offset in offsets)
-                pending_groups += 1
-                if pending_groups != self.groups_per_batch:
-                    continue
-                if batch_index >= self.start_batch:
-                    yield pending
-                    yielded += 1
-                    if self.max_batches is not None and yielded >= self.max_batches:
-                        return
-                batch_index += 1
-                pending = []
-                pending_groups = 0
+            start = int(starts[group_index])
+            pending.extend(start + offset for offset in offsets)
+            pending_groups += 1
+            if pending_groups != self.groups_per_batch:
+                continue
+            if batch_index >= self.start_batch:
+                yield pending
+                yielded += 1
+                if self.max_batches is not None and yielded >= self.max_batches:
+                    return
+            batch_index += 1
+            pending = []
+            pending_groups = 0
         if pending and not self.drop_last and batch_index >= self.start_batch:
             yield pending
 
@@ -234,13 +265,20 @@ class GroupedGemsDataModule(GemsDataModule):
             groups_per_batch=self.batch_size,
             spectra_per_group=self.spectra_per_group,
             shuffle=shuffle,
-            seed=seed,
+            seed=(
+                self.gems_hdf5_shuffle_seed
+                if split == "train" and self.gems_hdf5_shuffle_seed is not None
+                else seed
+            ),
             drop_last=drop_last,
             epoch=epoch,
             start_batch=start_batch,
             max_batches=max_batches,
             partition_count=partition_count,
             partition_index=partition_index,
+            active_shards=(
+                self.gems_hdf5_active_shards if split == "train" else 1
+            ),
         )
         dataset = self._datasets[split]
         loader_kwargs: dict[str, Any] = {

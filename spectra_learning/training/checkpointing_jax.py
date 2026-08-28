@@ -9,6 +9,7 @@ from typing import Any
 from urllib import error, parse, request
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import orbax.checkpoint as ocp
 from flax import nnx
@@ -208,9 +209,21 @@ def restore_frozen_teacher_encoder(
         for root_metadata in source_metadata.values()
         for path in root_metadata
     }
-    if source_paths != teacher_values.keys():
-        missing = sorted(teacher_values.keys() - source_paths)
-        unexpected = sorted(source_paths - teacher_values.keys())
+    fused_swiglu_sources = {}
+    for path in teacher_values:
+        if path[-2:] != ("fc12", "weight"):
+            continue
+        fc1_path = (*path[:-2], "fc1", "weight")
+        fc2_path = (*path[:-2], "fc2", "weight")
+        if fc1_path in source_paths and fc2_path in source_paths:
+            fused_swiglu_sources[path] = (fc1_path, fc2_path)
+    effective_source_paths = source_paths.copy()
+    for fused_path, source_pair in fused_swiglu_sources.items():
+        effective_source_paths.difference_update(source_pair)
+        effective_source_paths.add(fused_path)
+    if effective_source_paths != teacher_values.keys():
+        missing = sorted(teacher_values.keys() - effective_source_paths)
+        unexpected = sorted(effective_source_paths - teacher_values.keys())
         raise ValueError(
             "Frozen teacher encoder checkpoint mismatch: "
             f"missing={missing} unexpected={unexpected}"
@@ -223,25 +236,35 @@ def restore_frozen_teacher_encoder(
         restore_arg_leaves = {}
         for source_path, leaf_metadata in root_metadata.items():
             serialized_path = target_path(source_path)
-            _, value = teacher_values[serialized_path]
-            if (
-                tuple(value.shape) != tuple(leaf_metadata.shape)
-                or np.dtype(value.dtype) != np.dtype(leaf_metadata.dtype)
-            ):
+            fused_path = next(
+                (
+                    path
+                    for path, source_pair in fused_swiglu_sources.items()
+                    if serialized_path in source_pair
+                ),
+                serialized_path,
+            )
+            _, value = teacher_values[fused_path]
+            expected_shape = tuple(value.shape)
+            if fused_path != serialized_path:
+                expected_shape = (expected_shape[0] // 2, *expected_shape[1:])
+            if expected_shape != tuple(leaf_metadata.shape) or np.dtype(
+                value.dtype
+            ) != np.dtype(leaf_metadata.dtype):
                 raise ValueError(
                     "Frozen teacher encoder leaf mismatch at "
                     f"{'.'.join(serialized_path)}: "
                     f"checkpoint=({tuple(leaf_metadata.shape)}, {leaf_metadata.dtype}) "
-                    f"model=({tuple(value.shape)}, {value.dtype})"
+                    f"model=({expected_shape}, {value.dtype})"
                 )
             target_leaves[source_path] = jax.ShapeDtypeStruct(
-                value.shape,
+                leaf_metadata.shape,
                 value.dtype,
                 sharding=value.sharding,
             )
             restore_arg_leaves[source_path] = ocp.ArrayRestoreArgs(
                 sharding=value.sharding,
-                global_shape=value.shape,
+                global_shape=leaf_metadata.shape,
                 dtype=value.dtype,
             )
         target[root] = {"encoder": unflatten_dict(target_leaves)}
@@ -257,10 +280,21 @@ def restore_frozen_teacher_encoder(
             ),
         )
 
-    restored_values = {}
+    restored_source_values = {}
     for root in ("trainable_params", "static_state"):
         for source_path, value in flatten_dict(restored[root]["encoder"]).items():
-            restored_values[target_path(source_path)] = value
+            restored_source_values[target_path(source_path)] = value
+    restored_values = {
+        path: (
+            jnp.concatenate(
+                [restored_source_values[source] for source in source_pair],
+                axis=0,
+            )
+            if (source_pair := fused_swiglu_sources.get(path)) is not None
+            else restored_source_values[path]
+        )
+        for path in teacher_values
+    }
     return nnx.from_flat_state(
         (native_path, restored_values[serialized_path])
         for serialized_path, (native_path, _value) in teacher_values.items()

@@ -11,6 +11,9 @@ import optax
 from spectra_learning.models.common_jax import Array
 
 
+_FUSED_PROJECTION_PARTS = {"qkv": 3, "wqkv": 3, "fc12": 2}
+
+
 _JAX_MUON_NS_COEFFICIENT_PRESETS = {
     "standard": (3.4445, -4.7750, 2.0315),
     "dion": (
@@ -39,6 +42,8 @@ def build_muon_transform(
     learning_rate: Any,
     adam_learning_rate: Any,
     weight_decay_mask: Any,
+    shard_axis: str | None = None,
+    shard_count: int = 1,
 ) -> optax.GradientTransformation:
     if adam_learning_rate is None:
         adam_learning_rate = learning_rate
@@ -77,8 +82,22 @@ def build_muon_transform(
                             == "polar_express"
                         ),
                         consistent_rms=_jax_muon_consistent_rms(config),
+                        ns_dtype=jnp.dtype(
+                            config.get("muon_ns_dtype", "bfloat16")
+                        ),
+                        shard_axis=shard_axis,
+                        shard_count=shard_count,
+                        shard_mode=str(config.get("muon_shard_mode", "switch")),
                     ),
-                    optax.identity(),
+                    _jax_sum_sharded_updates(
+                        shard_axis,
+                        dtype=jnp.dtype(
+                            config.get("muon_shard_reduce_dtype", "bfloat16")
+                        ),
+                        mode=str(
+                            config.get("muon_shard_reduce_mode", "per_leaf")
+                        ),
+                    ),
                     optax.add_decayed_weights(
                         float(config.get("weight_decay", 0.0)),
                         mask=weight_decay_mask,
@@ -134,6 +153,10 @@ def _jax_scale_by_gram_muon(
     gram_min_dimension: int,
     polar_express: bool,
     consistent_rms: float | None,
+    ns_dtype: Any = jnp.bfloat16,
+    shard_axis: str | None = None,
+    shard_count: int = 1,
+    shard_mode: str = "switch",
 ) -> optax.GradientTransformation:
     def init_fn(params):
         return optax.contrib.MuonState(
@@ -169,6 +192,7 @@ def _jax_scale_by_gram_muon(
                 gram_min_dimension=gram_min_dimension,
                 polar_express=polar_express,
                 dimension_numbers=dim_nums,
+                ns_dtype=ns_dtype,
             )
             if adaptive:
                 orthogonalized *= jnp.sum(
@@ -182,12 +206,34 @@ def _jax_scale_by_gram_muon(
             )
             return scale * orthogonalized
 
-        updates = jax.tree.map(
-            orthogonalize,
-            mu_hat,
-            dimension_numbers,
-            is_leaf=_jax_is_muon_dimension_numbers,
-        )
+        if shard_axis is None:
+            updates = jax.tree.map(
+                orthogonalize,
+                mu_hat,
+                dimension_numbers,
+                is_leaf=_jax_is_muon_dimension_numbers,
+            )
+        else:
+            # Newton-Schulz is the same work on every data-parallel rank, and it
+            # does not shrink as chips are added, so at 64 chips it was 78 ms of
+            # a 182 ms step. Each rank instead orthogonalises only the tensors it
+            # owns and returns zeros for the rest; the sum that follows in the
+            # chain puts the full update back on every rank.
+            owners = _jax_orthogonalization_owners(
+                mu_hat,
+                dimension_numbers,
+                ns_steps=len(ns_coeffs),
+                shards=shard_count,
+            )
+            updates = _jax_sharded_orthogonalize(
+                mu_hat,
+                dimension_numbers,
+                owners,
+                orthogonalize=orthogonalize,
+                shard_axis=shard_axis,
+                shard_count=shard_count,
+                mode=shard_mode,
+            )
         if mu_dtype is not None:
             mu = optax.tree.cast(mu, mu_dtype)
         return updates, optax.contrib.MuonState(
@@ -208,6 +254,7 @@ def _jax_gram_muon_orthogonalize(
     gram_min_dimension: int,
     polar_express: bool,
     dimension_numbers: optax.contrib.MuonDimensionNumbers,
+    ns_dtype: Any = jnp.bfloat16,
 ) -> Array:
     reduction_axes = _jax_muon_axes(dimension_numbers.reduction_axis, value.ndim)
     output_axes = _jax_muon_axes(dimension_numbers.output_axis, value.ndim)
@@ -243,24 +290,24 @@ def _jax_gram_muon_orthogonalize(
             matrices = _jax_standard_newton_schulz(
                 matrices,
                 ns_coeffs[:3],
-                ns_dtype=jnp.bfloat16,
+                ns_dtype=ns_dtype,
             )
             matrices = _jax_gram_newton_schulz(
                 matrices,
                 ns_coeffs[3:],
-                ns_dtype=jnp.bfloat16,
+                ns_dtype=ns_dtype,
             )
         else:
             matrices = _jax_gram_newton_schulz(
                 matrices,
                 ns_coeffs,
-                ns_dtype=jnp.bfloat16,
+                ns_dtype=ns_dtype,
             )
     else:
         matrices = _jax_standard_newton_schulz(
             matrices,
             ns_coeffs,
-            ns_dtype=jnp.bfloat16,
+            ns_dtype=ns_dtype,
         )
     if transposed:
         matrices = jnp.swapaxes(matrices, -1, -2)
@@ -402,6 +449,179 @@ def _jax_is_muon_dimension_numbers(value: Any) -> bool:
     return isinstance(value, optax.contrib.MuonDimensionNumbers)
 
 
+def _jax_sum_sharded_updates(
+    axis_name: str | None,
+    *,
+    dtype: Any,
+    mode: str = "concatenated",
+) -> optax.GradientTransformation:
+    """Put the full update back on every rank after sharded orthogonalisation.
+
+    A rank returns zeros for every tensor it does not own, so one sum over the
+    data axis reconstructs the whole tree. It has to happen here, before weight
+    decay and the learning-rate scale, or those terms would be applied once per
+    rank instead of once. The sum runs in `dtype` because the orthogonalised
+    update is unit-scaled, so bf16 halves the traffic of what is otherwise an
+    extra parameter-sized all-reduce.
+
+    The tree has 187 Muon-routed leaves, so this looks like it should be one
+    combined all-reduce rather than 187 small ones, but the two measured the
+    same (103.7 ms against 102.4 ms on four chips) because XLA already combines
+    them. `per_leaf` is the default since `concatenated` needs 5.5 GB more for
+    the flat buffer and buys nothing.
+    """
+    if axis_name is None:
+        return optax.identity()
+
+    def per_leaf(updates):
+        return jax.tree.map(
+            lambda value: jax.lax.psum(
+                value.astype(dtype), axis_name
+            ).astype(value.dtype),
+            updates,
+        )
+
+    def concatenated(updates):
+        leaves, treedef = jax.tree.flatten(updates)
+        if not leaves:
+            return updates
+        flat = jax.lax.psum(
+            jnp.concatenate(
+                [leaf.astype(dtype).reshape(-1) for leaf in leaves]
+            ),
+            axis_name,
+        )
+        reduced = []
+        offset = 0
+        for leaf in leaves:
+            reduced.append(
+                jax.lax.dynamic_slice(flat, (offset,), (leaf.size,))
+                .reshape(leaf.shape)
+                .astype(leaf.dtype)
+            )
+            offset += leaf.size
+        return jax.tree.unflatten(treedef, reduced)
+
+    reduce_fn = {
+        "per_leaf": per_leaf,
+        "concatenated": concatenated,
+        "none": lambda updates: updates,
+    }[mode]
+
+    def update_fn(updates, state, params=None):
+        del params
+        return reduce_fn(updates), state
+
+    return optax.GradientTransformation(lambda params: optax.EmptyState(), update_fn)
+
+
+def _jax_sharded_orthogonalize(
+    momenta: Any,
+    dimension_numbers: Any,
+    owners: Any,
+    *,
+    orthogonalize: Any,
+    shard_axis: str,
+    shard_count: int,
+    mode: str,
+) -> Any:
+    """Orthogonalise only the tensors this rank owns, zeros for the rest.
+
+    `switch` emits one straight-line branch per rank, each containing just that
+    rank's Newton-Schulz chains. `cond` wraps every tensor in its own two-way
+    branch, which is smaller to write but measured 1.58x against an ideal 2.7x
+    at four ranks: XLA reaches 77% of peak on Newton-Schulz by interleaving the
+    independent chains with each other, and a conditional per tensor is a
+    scheduling barrier that breaks exactly that.
+    """
+    if mode == "cond":
+        shard_index = jax.lax.axis_index(shard_axis)
+
+        def orthogonalize_if_owned(momentum, dim_nums, owner):
+            return jax.lax.cond(
+                shard_index == owner,
+                lambda value: orthogonalize(value, dim_nums),
+                jnp.zeros_like,
+                momentum,
+            )
+
+        return jax.tree.map(
+            orthogonalize_if_owned,
+            momenta,
+            dimension_numbers,
+            owners,
+            is_leaf=_jax_is_muon_dimension_numbers,
+        )
+
+    def branch_for(rank: int):
+        def branch(tree):
+            return jax.tree.map(
+                lambda momentum, dim_nums, owner: (
+                    orthogonalize(momentum, dim_nums)
+                    if owner == rank
+                    else jnp.zeros_like(momentum)
+                ),
+                tree,
+                dimension_numbers,
+                owners,
+                is_leaf=_jax_is_muon_dimension_numbers,
+            )
+
+        return branch
+
+    return jax.lax.switch(
+        jax.lax.axis_index(shard_axis),
+        [branch_for(rank) for rank in range(shard_count)],
+        momenta,
+    )
+
+
+def _jax_orthogonalization_owners(
+    momenta: Any,
+    dimension_numbers: Any,
+    *,
+    ns_steps: int,
+    shards: int,
+) -> Any:
+    """Assign each weight to one data-parallel rank, balanced by cost.
+
+    Newton-Schulz needs a whole matrix, so the finest split available is one
+    tensor per rank rather than slices of every tensor. Longest-processing-time
+    assignment over the estimated cost keeps the slowest rank near the mean; the
+    residual imbalance is what stops the saving from being exactly 1/shards.
+    """
+    leaves = jax.tree.leaves(
+        dimension_numbers,
+        is_leaf=_jax_is_muon_dimension_numbers,
+    )
+    costs = [
+        _jax_orthogonalization_cost(momentum, dim_nums, ns_steps)
+        for momentum, dim_nums in zip(jax.tree.leaves(momenta), leaves)
+    ]
+    loads = [0.0] * shards
+    owners = [0] * len(costs)
+    for index in sorted(range(len(costs)), key=lambda i: -costs[i]):
+        rank = min(range(shards), key=loads.__getitem__)
+        owners[index] = rank
+        loads[rank] += costs[index]
+    treedef = jax.tree.structure(
+        dimension_numbers,
+        is_leaf=_jax_is_muon_dimension_numbers,
+    )
+    return jax.tree.unflatten(treedef, owners)
+
+
+def _jax_orthogonalization_cost(
+    momentum: Array,
+    dimension_numbers: optax.contrib.MuonDimensionNumbers,
+    ns_steps: int,
+) -> float:
+    fan_in, fan_out = _jax_muon_fan_in_out(momentum, dimension_numbers)
+    batch = momentum.size / max(fan_in * fan_out, 1)
+    short, long_side = min(fan_in, fan_out), max(fan_in, fan_out)
+    return batch * ns_steps * short * short * long_side
+
+
 def _jax_muon_consistent_rms(config: Any) -> float | None:
     adjust_lr_fn = str(config.get("muon_adjust_lr_fn", "") or "").lower()
     if adjust_lr_fn == "match_rms_adamw":
@@ -435,7 +655,7 @@ def _jax_muon_weight_dimension_number(
     path: tuple[Any, ...],
     value: Any,
 ) -> optax.contrib.MuonDimensionNumbers:
-    if _jax_qkv_weight_path(path) and value.ndim == 3:
+    if value.ndim == 3 and _jax_fused_projection_parts(path) is not None:
         return optax.contrib.MuonDimensionNumbers(reduction_axis=2, output_axis=1)
     return optax.contrib.MuonDimensionNumbers(reduction_axis=1, output_axis=0)
 
@@ -467,28 +687,37 @@ def _jax_unsplit_qkv_tree(tree: Any, reference: Any) -> Any:
 
 
 def _jax_split_qkv_leaf(path: tuple[Any, ...], value: Any) -> Any:
-    if _jax_split_qkv_leaf_path(path, value):
-        return value.reshape(3, value.shape[0] // 3, value.shape[1])
+    parts = _jax_split_qkv_leaf_path(path, value)
+    if parts is not None:
+        return value.reshape(parts, value.shape[0] // parts, value.shape[1])
     return value
 
 
 def _jax_unsplit_qkv_leaf(path: tuple[Any, ...], value: Any, reference: Any) -> Any:
-    if _jax_split_qkv_leaf_path(path, _jax_tree_get_path(reference, path)):
+    if _jax_split_qkv_leaf_path(path, _jax_tree_get_path(reference, path)) is not None:
         return value.reshape(value.shape[0] * value.shape[1], value.shape[2])
     return value
 
 
-def _jax_split_qkv_leaf_path(path: tuple[Any, ...], value: Any) -> bool:
-    return (
-        _jax_qkv_weight_path(path)
-        and value.ndim == 2
-        and value.shape[0] % 3 == 0
-    )
+def _jax_split_qkv_leaf_path(path: tuple[Any, ...], value: Any) -> int | None:
+    parts = _jax_fused_projection_parts(path)
+    if parts is None or value.ndim != 2 or value.shape[0] % parts != 0:
+        return None
+    return parts
 
 
-def _jax_qkv_weight_path(path: tuple[Any, ...]) -> bool:
+def _jax_fused_projection_parts(path: tuple[Any, ...]) -> int | None:
+    """How many independent matrices a fused projection weight holds.
+
+    Weights that concatenate several projections sharing one input are stored
+    fused so the matmul is wide enough to fill the MXU, but Muon must still
+    orthogonalise each projection on its own, so they are reshaped apart for the
+    optimizer and folded back afterwards.
+    """
     parts = tuple(str(_tree_path_key(path_entry)) for path_entry in path)
-    return len(parts) >= 2 and parts[-1] == "weight" and parts[-2] in {"qkv", "wqkv"}
+    if len(parts) < 2 or parts[-1] != "weight":
+        return None
+    return _FUSED_PROJECTION_PARTS.get(parts[-2])
 
 
 def _jax_tree_get_path(tree: Any, path: tuple[Any, ...]) -> Any:
