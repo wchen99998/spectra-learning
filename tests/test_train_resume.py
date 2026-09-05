@@ -1467,6 +1467,8 @@ def test_remote_covariance_pooler_checkpoint_uses_sibling_uri():
 
 def test_async_checkpoint_writer_returns_before_torch_save_finishes(monkeypatch, tmp_path: Path):
     model = _small_model()
+    expected_state = {key: value.clone() for key, value in model.state_dict().items()}
+    metadata = {"labels": ["original"]}
     save_entered = threading.Event()
     release_save = threading.Event()
     original_save = checkpointing_module.torch.save
@@ -1477,7 +1479,7 @@ def test_async_checkpoint_writer_returns_before_torch_save_finishes(monkeypatch,
         original_save(obj, path)
 
     monkeypatch.setattr(checkpointing_module.torch, "save", slow_save)
-    writer = AsyncCheckpointWriter()
+    writer = AsyncCheckpointWriter(checkpoint_metadata=metadata)
     path = tmp_path / "step-00000012.pt"
 
     writer.save_checkpoint(
@@ -1490,13 +1492,20 @@ def test_async_checkpoint_writer_returns_before_torch_save_finishes(monkeypatch,
         loss=0.5,
     )
 
-    assert save_entered.wait(timeout=1.0)
-    assert not path.exists()
-
-    release_save.set()
-    writer.close()
+    try:
+        assert save_entered.wait(timeout=1.0)
+        assert not path.exists()
+        with torch.no_grad():
+            for param in model.parameters():
+                param.add_(1)
+        metadata["labels"].append("changed")
+    finally:
+        release_save.set()
+        writer.close()
     ckpt = torch.load(path, map_location="cpu", weights_only=True)
     assert ckpt["global_step"] == 12
+    torch.testing.assert_close(ckpt["model"], expected_state)
+    assert ckpt["metadata"] == {"labels": ["original"]}
 
 
 def test_async_checkpoint_writer_raises_background_failures(monkeypatch, tmp_path: Path):

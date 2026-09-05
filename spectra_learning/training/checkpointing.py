@@ -110,17 +110,18 @@ def _training_checkpoint_state(
 
 
 def _write_torch_checkpoint(state: dict[str, Any], path: StoragePath) -> None:
+    """Write a CPU snapshot captured by the caller."""
     local_path = local_cache_path(path) if is_remote_path(path) else Path(path).expanduser()
     local_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = local_path.with_name(f".{local_path.name}.tmp")
-    torch.save(_snapshot_value(state), tmp_path)
+    torch.save(state, tmp_path)
     tmp_path.replace(local_path)
     if is_remote_path(path):
         upload_local_file(local_path, path)
 
 
 def save_torch_checkpoint(state: dict[str, Any], path: StoragePath) -> None:
-    _write_torch_checkpoint(state, path)
+    _write_torch_checkpoint(_snapshot_value(state), path)
 
 
 def load_torch_checkpoint(
@@ -208,22 +209,19 @@ class AsyncCheckpointWriter:
         pending = []
         for future in self._futures:
             if future.done():
-                self._log_future_result(future)
+                future.result()
             else:
                 pending.append(future)
         self._futures = pending
 
     def wait(self) -> None:
         for future in self._futures:
-            self._log_future_result(future)
+            future.result()
         self._futures.clear()
 
     def close(self) -> None:
         self.wait()
         self._executor.shutdown(wait=True)
-
-    def _log_future_result(self, future: Future[None]) -> None:
-        future.result()
 
 
 def prune_checkpoints(checkpoint_dir: StoragePath, keep_top_k: int = 5) -> None:
@@ -347,16 +345,5 @@ def training_checkpoint_paths(checkpoint_dir: StoragePath) -> list[StoragePath]:
 
 def latest_ckpt_path(directory: StoragePath) -> str | None:
     checkpoint_dir = storage_join(directory, "checkpoints")
-    ckpts = _latest_checkpoint_entries(checkpoint_dir)
-    return str(ckpts[-1].path) if ckpts else None
-
-
-def _latest_checkpoint_entries(directory: StoragePath) -> list:
-    return sorted(
-        (
-            entry
-            for entry in list_storage_files(directory)
-            if entry.name.endswith(".pt") and is_training_checkpoint_path(entry.path)
-        ),
-        key=lambda entry: entry.mtime,
-    )
+    ckpts = training_checkpoint_paths(checkpoint_dir)
+    return str(ckpts[-1]) if ckpts else None
