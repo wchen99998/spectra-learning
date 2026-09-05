@@ -1,6 +1,7 @@
-Use PyTorch directly. Do not use training frameworks.
-Do not program defensively, do not have unecessary checks and try catch clause
-Prefer simple code over complicated code
-Use inline python to experiment code snippets if unsure
-Check pyproject.toml if unsure about library version we use
-Always use current venv under the .venv in this directory
+- Preserve the backend used by the affected training path (PyTorch or JAX). Use direct training loops; do not introduce training orchestration frameworks.
+- Prefer simple code. Avoid redundant checks, speculative fallbacks, and broad exception catches. Keep validation of external inputs and specific exception handling required by the algorithm or resource lifecycle.
+- Always use this repository's existing `.venv`: `.venv/bin/python` for scripts and inline experiments, and `.venv/bin/python -m pytest` for tests.
+- Use inline Python experiments when unsure about code behavior.
+- Check `pyproject.toml` for dependency constraints, `uv.lock` for resolved versions, and `.venv` for installed versions. Use modern Python type hints such as `list[str]` and `dict[str, int]`. The package manager is uv.
+- Prefer Context7 for library/API documentation when available; otherwise use official documentation or installed source. An unavailable documentation tool is not a blocker when another source can answer the question.
+- Run the smallest relevant checks. Broaden testing when the change crosses components or failures leave uncertainty. Do not repeat passing checks without a reason.

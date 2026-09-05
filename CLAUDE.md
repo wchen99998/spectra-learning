@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+Read and follow [AGENTS.md](AGENTS.md) for shared coding, environment, documentation, and verification instructions.
+
 ## Project Overview
 
 PyTorch/JAX codebase for pretraining JEPA-style models on continuous mass spectrometry peak sets. The pipeline streams HDF5 MassIVE shards and MassSpecGym datasets, preprocesses raw peaks in collators, and trains a masked latent prediction model with teacher targets. During training, a periodic MSG linear probe evaluates learned representations on molecular property regression and MACCS fingerprint prediction.
@@ -37,8 +39,8 @@ PyTorch/JAX codebase for pretraining JEPA-style models on continuous mass spectr
 ### Training Flow
 
 `train.py:_train` is the canonical training dispatcher. Pretraining supports
-PyTorch and JAX, contrastive training is PyTorch-only, and AR training is
-JAX-only. `train_sky.py` only provisions JAX TPU infrastructure and delegates
+PyTorch and JAX; contrastive and adversarial fake-peak training are PyTorch-only;
+AR, grouped JEPA, and SJEPA training are JAX-only. `train_sky.py` only provisions JAX TPU infrastructure and delegates
 the actual run to `train.py`.
 
 For PyTorch pretraining:
@@ -81,22 +83,11 @@ configs derive from it.
 
 HDF5-shard based with auto-download from HuggingFace. `GemsDataModule` uses h5py as the HDF5 dataset backend, then owns the PyTorch `DataLoader`, chunk-aware batch sampling, distributed rank partitioning, resume offset, and peak preprocessing policy.
 
-## Code Style
-
-- Use PyTorch directly. Do not use training frameworks.
-- Avoid defensive programming and try-catch clauses
-- Prefer simple code over complicated solutions
-- Always use Context7 MCP for library/API documentation
-- Check `pyproject.toml` for library versions
-- Use local `.venv` environment
-- Python 3.12+ type hints (e.g., `list[str]`, `dict[str, int]`)
-- Package manager: uv
-
 ## Notebook Notes
 
 - Legacy notebooks that reference `FourierFeatures` are historical analyses.
 
 ## Key Dependencies
 
-- PyTorch 2.12.0 (CUDA 13.0)
+- PyTorch, JAX, Flax, Optax, orbax-checkpoint
 - ml-collections, rdkit, wandb, huggingface_hub
